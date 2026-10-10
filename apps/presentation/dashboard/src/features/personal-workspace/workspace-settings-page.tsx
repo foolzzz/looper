@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { ArrowLeft, Bot, Check, Clock3, KeyRound, Languages, Palette, ServerCog, Settings2, SlidersHorizontal } from "lucide-react";
+import { ArrowLeft, Bot, Check, Clock3, Download, KeyRound, Languages, Palette, ServerCog, Settings2, SlidersHorizontal, Users } from "lucide-react";
 
 import type { WorkspaceLocale } from "./i18n";
 import { useWorkspaceI18n } from "./i18n";
@@ -8,12 +8,15 @@ import { GoalCapabilitySettings } from "./goal-capability-settings";
 import { AutomationCadenceSettings } from "./automation-cadence-settings";
 import { MachineConfigurationSettings } from "./machine-configuration-settings";
 import { OperatorCredentialSettings } from "./operator-credential-settings";
+import { AgentConfigSettings } from "./agent-config-settings";
+import { UpdateSettings } from "./update-settings";
 import type { PersonalWorkspaceCallbacks, WorkspaceGoal, WorkspaceGoalNotification } from "./personal-workspace-model";
 import type { WorkspaceTheme } from "./workspace-theme";
 
-type WorkspaceSettingsTab = "steward" | "provider" | "machine" | "capabilities" | "cadence" | "lark" | "appearance" | "language";
+type WorkspaceSettingsTab = "steward" | "provider" | "machine" | "capabilities" | "cadence" | "agents" | "lark" | "appearance" | "language" | "update";
 
 const tabIcons: Record<WorkspaceSettingsTab, typeof Settings2> = {
+  agents: Users,
   appearance: Palette,
   capabilities: SlidersHorizontal,
   cadence: Clock3,
@@ -22,6 +25,7 @@ const tabIcons: Record<WorkspaceSettingsTab, typeof Settings2> = {
   machine: ServerCog,
   provider: KeyRound,
   steward: Bot,
+  update: Download,
 };
 
 export function WorkspaceSettingsPage({
@@ -77,6 +81,7 @@ export function WorkspaceSettingsPage({
         // operator credential holds); the capability catalog is another (which
         // machine defaults every Goal inherits). They answer different questions
         // and are edited on different surfaces, so they are separate categories.
+        { key: "agents", label: t("settings.agents") },
         { key: "provider", label: t("settings.modelProvider") },
         { key: "machine", label: t("settings.globalCapabilities") },
         ...(initialGoalId ? [{ key: "capabilities" as const, label: t("capabilities.title") }] : []),
@@ -89,6 +94,7 @@ export function WorkspaceSettingsPage({
         { key: "lark", label: "Lark" },
         { key: "appearance", label: t("settings.appearance") },
         { key: "language", label: t("settings.language") },
+        { key: "update", label: t("settings.update") },
       ],
     },
   ];
@@ -103,6 +109,9 @@ export function WorkspaceSettingsPage({
     },
   ];
   const headings: Record<WorkspaceSettingsTab, { title: string }> = {
+    agents: {
+      title: t("settings.agents"),
+    },
     appearance: {
       title: t("settings.appearance"),
     },
@@ -126,6 +135,9 @@ export function WorkspaceSettingsPage({
     },
     steward: {
       title: t("settings.steward"),
+    },
+    update: {
+      title: t("settings.update"),
     },
   };
   const heading = headings[tab];
@@ -200,6 +212,8 @@ export function WorkspaceSettingsPage({
           />
         ) : null}
         {tab === "cadence" && selectedGoal ? <AutomationCadenceSettings goal={selectedGoal} /> : null}
+        {tab === "agents" ? <AgentConfigSettings /> : null}
+        {tab === "update" ? <UpdateSettings /> : null}
 
         {tab === "appearance" ? (
           <section className="personal-detail-card personal-appearance-settings">

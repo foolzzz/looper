@@ -2090,3 +2090,78 @@ export async function disconnectLarkGoalTopic(goalId: string, connectionId: stri
     }),
   );
 }
+
+// --- Agent Configuration API ---
+
+export interface AgentConfigEntry {
+  id: string;
+  role?: string;
+  runtime?: string;
+  provider?: string;
+  model?: string | null;
+  reasoning_effort?: string | null;
+  permission_mode?: string | null;
+  sandbox?: string | null;
+  max_concurrency?: number;
+  enabled?: boolean;
+  description?: string | null;
+  valid?: boolean;
+  issues?: string[];
+}
+
+export interface ProviderConfigEntry {
+  name: string;
+  kind: string;
+  auth?: { type?: string; env?: string };
+  base_url?: string | null;
+}
+
+export interface AgentConfigResponse {
+  ok: boolean;
+  agents: AgentConfigEntry[];
+  providers: ProviderConfigEntry[];
+  provider_issues?: string[];
+}
+
+export async function fetchAgentConfig(): Promise<AgentConfigResponse> {
+  return requestJson<AgentConfigResponse>("/api/chat/agent-config");
+}
+
+export async function writeAgentConfig(agentId: string, fields: Record<string, unknown>): Promise<AgentConfigResponse> {
+  return requestJson<AgentConfigResponse>("/api/chat/agent-config/apply", {
+    method: "POST",
+    body: JSON.stringify({ agent_id: agentId, fields }),
+  });
+}
+
+export async function fetchProviderConfig(): Promise<{ ok: boolean; providers: ProviderConfigEntry[] }> {
+  return requestJson<{ ok: boolean; providers: ProviderConfigEntry[] }>("/api/chat/provider-config");
+}
+
+export async function writeProviderConfig(providers: ProviderConfigEntry[]): Promise<{ ok: boolean; providers: ProviderConfigEntry[] }> {
+  return requestJson<{ ok: boolean; providers: ProviderConfigEntry[] }>("/api/chat/provider-config/apply", {
+    method: "POST",
+    body: JSON.stringify({ providers }),
+  });
+}
+
+// --- Update API ---
+
+export interface UpdateCheckResponse {
+  ok: boolean;
+  current_version: string;
+  latest_version: string | null;
+  update_available: boolean;
+  wheel_url: string | null;
+}
+
+export async function checkForUpdate(): Promise<UpdateCheckResponse> {
+  return requestJson<UpdateCheckResponse>("/api/chat/update-check");
+}
+
+export async function applyUpdate(): Promise<{ ok: boolean; returncode: number; detail: unknown; stderr: string }> {
+  return requestJson<{ ok: boolean; returncode: number; detail: unknown; stderr: string }>("/api/chat/update-apply", {
+    method: "POST",
+    body: "{}",
+  });
+}
