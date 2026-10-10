@@ -1,4 +1,4 @@
-import { Bot, Eye, Menu, RefreshCw, SlidersHorizontal } from "lucide-react";
+import { Bot, Eye, Menu, MessageSquare, RefreshCw, SlidersHorizontal } from "lucide-react";
 
 import { localizedGoalState, useWorkspaceI18n } from "./i18n";
 import type { ManagerChannelBinding, ManagerRuntimeSessionReadback } from "../../data/chat";
@@ -18,11 +18,13 @@ export function ChannelHeader({
   onSelectGoalTab,
   onSelectAgent,
   onReturnManagerHome,
+  onToggleSessions,
   refreshState,
   readOnlySourceLabel,
   selectedAgentId,
   selectedGoal,
   selectedGoalTab,
+  sessionPanelOpen,
 }: {
   agents: WorkspaceAgentOption[];
   managerChannelBinding?: ManagerChannelBinding | null;
@@ -36,11 +38,13 @@ export function ChannelHeader({
   onSelectGoalTab: (tab: WorkspaceGoalTab) => void;
   onSelectAgent: (agentId: string) => void;
   onReturnManagerHome?: () => void;
+  onToggleSessions?: () => void;
   refreshState?: "idle" | "loading" | "done" | "error";
   readOnlySourceLabel?: string;
   selectedAgentId: string;
   selectedGoal: WorkspaceGoal | null;
   selectedGoalTab: WorkspaceGoalTab;
+  sessionPanelOpen?: boolean;
 }) {
   const { locale, t } = useWorkspaceI18n();
   // The chip reports the selected executor, whose credential pays for it, and
@@ -198,6 +202,18 @@ export function ChannelHeader({
         </nav>
       )}
       <div className="personal-channel-actions">
+        {onToggleSessions ? (
+          <button
+            aria-label={t("session.manage")}
+            aria-pressed={sessionPanelOpen}
+            className={`personal-icon-button${sessionPanelOpen ? " is-active" : ""}`}
+            onClick={onToggleSessions}
+            title={t("session.manage")}
+            type="button"
+          >
+            <MessageSquare aria-hidden size={17} />
+          </button>
+        ) : null}
         {selectedGoal && onOpenGoalCapabilities ? (
           <button aria-label={t("header.goalSettings")} title={t("header.goalSettingsDescription")} className="personal-icon-button personal-goal-settings-action" onClick={onOpenGoalCapabilities} type="button"><SlidersHorizontal aria-hidden size={17} /></button>
         ) : null}

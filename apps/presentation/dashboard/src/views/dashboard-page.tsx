@@ -2921,6 +2921,17 @@ function PersonalGoalHome({
           onPrepareLoopX: (agentId, goalId) => prepareGoalConversation(goalId, agentId),
           onStartLoopX: (operation, agentId, goalId, settings) => { void sendManagerQuestion(operation === "start" ? "开启 LoopX 模式，持续推进当前 Goal。" : "恢复 LoopX 模式。", {agentId, goalId, loopxMode: {operation, settings}}); },
           onStartNewRunSession: startNewManagerSession,
+          onSwitchSession: (sessionId, isNew) => {
+            const key = `${contextId}:${selectedAgent.agentId}`;
+            sessionIds.current.set(key, sessionId);
+            if (isNew) newSessionRequired.current.delete(key);
+            recordRuntimeBinding(contextId, {
+              agentId: selectedAgent.agentId,
+              resumable: true,
+              sessionId,
+              status: "ready",
+            });
+          },
         }}
         goalArchiveLoadState={goalArchiveLoadState}
         initialManagerChatOpen={initialManagerChatOpen}

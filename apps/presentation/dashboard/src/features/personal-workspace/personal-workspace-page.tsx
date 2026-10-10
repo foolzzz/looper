@@ -30,6 +30,7 @@ import {
 } from "../../data/chat";
 
 import { ChannelHeader } from "./channel-header";
+import { SessionPanel } from "./session-panel";
 import { GoalLoopXMode } from "./goal-loopx-mode";
 import { GoalTeamResults } from "./goal-team-results";
 import { GoalManagedResults } from "./goal-managed-results";
@@ -849,6 +850,7 @@ export function PersonalWorkspacePage({
   const [proposals, setProposals] = useState<Record<string, WorkspaceActionPreview>>({});
   const [selectedGoalTab, setSelectedGoalTab] = useState<WorkspaceGoalTab>("chat");
   const [managerChatOpen, setManagerChatOpen] = useState(initialManagerChatOpen);
+  const [sessionPanelOpen, setSessionPanelOpen] = useState(false);
   const [managerConversationReceiptVisible, setManagerConversationReceiptVisible] = useState(false);
   const [goalConversationReceiptVisible, setGoalConversationReceiptVisible] = useState(false);
   const [drafts, setDrafts] = useState<Record<string, string>>(() => {
@@ -1936,12 +1938,27 @@ export function PersonalWorkspacePage({
               setManagerConversationReceiptVisible(false);
               window.requestAnimationFrame(() => channelScrollRef.current?.scrollTo({ behavior: "smooth", top: 0 }));
             }}
+            onToggleSessions={() => setSessionPanelOpen((v) => !v)}
             selectedAgentId={selectedAgentId}
             refreshState={refreshState}
             readOnlySourceLabel={readOnly ? statusSourceControl?.activeSource.label : undefined}
             selectedGoal={selectedGoal}
             selectedGoalTab={selectedGoalTab}
+            sessionPanelOpen={sessionPanelOpen}
           />
+          {sessionPanelOpen ? (
+            <SessionPanel
+              activeSessionId={conversationSessionId ?? null}
+              agentId={selectedAgentId}
+              channelId={selectedGoalId ? `goal.${selectedGoalId}` : "manager"}
+              goalId={selectedGoalId ?? null}
+              onClose={() => setSessionPanelOpen(false)}
+              onSwitchSession={(sessionId, isNew) => {
+                callbacks.onSwitchSession?.(sessionId, isNew);
+                setSessionPanelOpen(false);
+              }}
+            />
+          ) : null}
             {selectedGoalId && selectedGoalTab === "chat" && !readOnly && selectedAgentId === "codex" && callbacks.onStartLoopX ? <GoalLoopXMode
               onPrepare={() => callbacks.onPrepareLoopX!(selectedAgentId, selectedGoalId)}
               key={`${selectedGoalId}:${selectedAgentId}`} sessionId={conversationSessionId} onChange={setLoopxMode}

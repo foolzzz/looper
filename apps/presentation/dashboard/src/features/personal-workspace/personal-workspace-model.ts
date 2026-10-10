@@ -444,6 +444,7 @@ export type PersonalWorkspaceCallbacks = {
   onSelectAgent?: (agentId: string) => void;
   onSelectChannel?: (channel: WorkspaceChannel) => void;
   onSelectGoal?: (goalId: string | null) => void;
+  onSwitchSession?: (sessionId: string, isNew: boolean) => void;
   onOpenNotificationSettings?: (goalId?: string) => void;
   onFetchNotificationTargets?: () => Promise<Array<{ enabled: boolean; provider: string; target_name: string }>>;
   onSetupGoalChannel?: (options: { execute: boolean; goalId: string; target: string }) => Promise<{ ok: boolean; blocker?: string; public_summary?: string; status?: string }>;
