@@ -357,59 +357,6 @@ class TestWorkerProcess:
 
 
 class TestWorkerPool:
-    def test_parse_output_json(self) -> None:
-        pool = WorkerPool(
-            config=WorkerConfig(),
-            runtime_root=Path("/tmp"),
-        )
-        result = pool._parse_output(
-            '{"status": "completed", "changed_files": {"a.py": "modified"}, "summary": "done"}'
-        )
-        assert result["status"] == "completed"
-        assert "a.py" in result["changed_files"]
-
-    def test_parse_output_wrapped_json(self) -> None:
-        pool = WorkerPool(
-            config=WorkerConfig(),
-            runtime_root=Path("/tmp"),
-        )
-        output = 'Here is the result:\n```json\n{"status": "completed", "summary": "ok"}\n```\n'
-        result = pool._parse_output(output)
-        assert result["status"] == "completed"
-
-    def test_parse_output_plain_text(self) -> None:
-        pool = WorkerPool(
-            config=WorkerConfig(),
-            runtime_root=Path("/tmp"),
-        )
-        result = pool._parse_output("I made the changes successfully.")
-        assert result["status"] == "completed"
-        assert result["summary"].startswith("I made the changes")
-
-    def test_parse_verify_output(self) -> None:
-        pool = WorkerPool(
-            config=WorkerConfig(),
-            runtime_root=Path("/tmp"),
-        )
-        result = pool._parse_output(
-            '{"passed": true, "findings": [], "summary": "all good"}',
-            is_verify=True,
-        )
-        assert result["passed"] is True
-        assert result["findings"] == []
-
-    def test_parse_verify_output_failed(self) -> None:
-        pool = WorkerPool(
-            config=WorkerConfig(),
-            runtime_root=Path("/tmp"),
-        )
-        result = pool._parse_output(
-            '{"passed": false, "findings": ["missing null check"], "summary": "issues found"}',
-            is_verify=True,
-        )
-        assert result["passed"] is False
-        assert len(result["findings"]) == 1
-
     def test_build_work_prompt(self) -> None:
         pool = WorkerPool(
             config=WorkerConfig(),
@@ -425,6 +372,7 @@ class TestWorkerPool:
         assert "auth.py" in prompt
         assert "pytest tests/test_auth.py" in prompt
         assert "all tests pass" in prompt
+        assert '"deleted_files"' in prompt  # the report contract judge_result checks
 
     def test_build_verify_prompt(self) -> None:
         pool = WorkerPool(
@@ -507,12 +455,41 @@ class TestWorkerSubprocess:
             with tempfile.TemporaryDirectory() as tmp:
                 claude = _fake_claude(Path(tmp), (
                     "print(json.dumps({'type': 'system', 'tools': ['t' * 200_000]}))\n"
-                    "print(json.dumps({'type': 'result', 'result': json.dumps({'status': 'completed', 'summary': 'ok'})}))"
+                    "print(json.dumps({'type': 'result', 'subtype': 'success', 'is_error': False, "
+                    "'result': json.dumps({'status': 'completed', 'summary': 'ok'})}))"
                 ))
                 pool = WorkerPool(config=WorkerConfig(claude_bin=claude), runtime_root=Path(tmp))
                 return await pool._execute(_work_item(Path(tmp)))
 
         assert asyncio.run(_run())["status"] == "completed"
+
+    @pytest.mark.parametrize(("create", "expected"), [(True, "completed"), (False, "failed")])
+    def test_report_is_checked_against_the_project(self, create: bool, expected: str) -> None:
+        async def _run() -> dict[str, Any]:
+            with tempfile.TemporaryDirectory() as tmp:
+                claude = _fake_claude(Path(tmp), (
+                    ("open('out.txt', 'w').write('x')\n" if create else "")
+                    + "print(json.dumps({'type': 'result', 'subtype': 'success', 'is_error': False, "
+                    "'result': json.dumps({'status': 'completed', 'changed_files': {'out.txt': 'added'}})}))"
+                ))
+                pool = WorkerPool(config=WorkerConfig(claude_bin=claude), runtime_root=Path(tmp))
+                return await pool._execute(_work_item(Path(tmp)))
+
+        assert asyncio.run(_run())["status"] == expected
+
+    def test_max_turns_is_a_failure(self) -> None:
+        async def _run() -> dict[str, Any]:
+            with tempfile.TemporaryDirectory() as tmp:
+                claude = _fake_claude(Path(tmp), (
+                    "print(json.dumps({'type': 'assistant', 'message': {'content': [{'type': 'text', 'text': 'working on it'}]}}))\n"
+                    "print(json.dumps({'type': 'result', 'subtype': 'error_max_turns', 'is_error': True}))"
+                ))
+                pool = WorkerPool(config=WorkerConfig(claude_bin=claude), runtime_root=Path(tmp))
+                return await pool._execute(_work_item(Path(tmp)))
+
+        result = asyncio.run(_run())
+        assert result["status"] == "failed"
+        assert "error_max_turns" in result["error"]
 
     def test_subprocess_is_killed_when_reading_fails(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from loopx.agents.tiers import worker as worker_module
@@ -535,3 +512,99 @@ class TestWorkerSubprocess:
         pid = asyncio.run(_run())
         with pytest.raises(ProcessLookupError):
             os.kill(pid, 0)
+
+
+def _result(text: str | None = None, **overrides: Any) -> dict[str, Any]:
+    event: dict[str, Any] = {"type": "result", "subtype": "success", "is_error": False}
+    if text is not None:
+        event["result"] = text
+    event.update(overrides)
+    return event
+
+
+class TestJudgeResult:
+    """A step only counts as done when the run succeeded and its report matches the files."""
+
+    @pytest.mark.parametrize(
+        ("event", "error"),
+        [
+            (None, "without a result event"),
+            (_result(subtype="error_max_turns", is_error=True), "error_max_turns"),
+            (_result("x", subtype="error_during_execution"), "error_during_execution"),
+            (_result("x", is_error=True), "did not succeed"),
+            (_result("I made the changes successfully."), "JSON status report"),
+            (_result('{"summary": "no status"}'), "JSON status report"),
+            (_result('{"status": "partial"}'), "unknown status"),
+            (_result('{"status": "completed", "changed_files": ["a.py"]}'), "malformed"),
+            (_result('{"status": "completed", "changed_files": {"missing.py": "added"}}'), "missing.py"),
+            (_result('{"status": "completed", "deleted_files": ["a.py"]}'), "a.py"),
+        ],
+    )
+    def test_work_fails_closed(self, tmp_path: Path, event: dict[str, Any] | None, error: str) -> None:
+        from loopx.agents.tiers.worker import judge_result
+
+        (tmp_path / "a.py").write_text("x")
+        result = judge_result(event, project_root=tmp_path, is_verify=False)
+        assert result["status"] == "failed"
+        assert error in result["error"]
+
+    def test_missing_report_keeps_the_final_message(self, tmp_path: Path) -> None:
+        from loopx.agents.tiers.worker import judge_result
+
+        result = judge_result(_result("The sleep timed out, so I stopped."), project_root=tmp_path, is_verify=False)
+        assert result["status"] == "failed"
+        assert result["final_message"] == "The sleep timed out, so I stopped."
+
+    def test_reported_failure_with_nested_files_stays_failed(self, tmp_path: Path) -> None:
+        from loopx.agents.tiers.worker import judge_result
+
+        text = (
+            "Could not finish.\n```json\n"
+            '{"status": "failed", "changed_files": {"a.py": "partial"}, "summary": "tests still fail"}'
+            "\n```"
+        )
+        result = judge_result(_result(text), project_root=tmp_path, is_verify=False)
+        assert result["status"] == "failed"
+        assert result["error"] == "tests still fail"
+        assert result["changed_files"] == {"a.py": "partial"}
+
+    def test_completed_report_matching_the_files(self, tmp_path: Path) -> None:
+        from loopx.agents.tiers.worker import judge_result
+
+        (tmp_path / "a.py").write_text("x")
+        (tmp_path / "b.py").write_text("x")
+        report = {
+            "status": "completed",
+            "changed_files": {"a.py": "added", str(tmp_path / "b.py"): "edited"},
+            "deleted_files": ["gone.py"],
+            "summary": "done",
+        }
+        # An example object earlier in the text must not override the final report.
+        text = 'The format is {"status": "failed"}.\n' + json.dumps(report)
+        result = judge_result(_result(text), project_root=tmp_path, is_verify=False)
+        assert result["status"] == "completed"
+        assert result["changed_files"] == report["changed_files"]
+        assert result["deleted_files"] == ["gone.py"]
+        assert result["summary"] == "done"
+
+    @pytest.mark.parametrize(
+        ("text", "passed"),
+        [
+            ('{"passed": true, "findings": [], "summary": "ok"}', True),
+            ('```json\n{"passed": false, "findings": ["no test"], "summary": "x"}\n```', False),
+            ("Looks good to me.", False),
+            ('{"passed": "yes"}', False),
+        ],
+    )
+    def test_verdict(self, tmp_path: Path, text: str, passed: bool) -> None:
+        from loopx.agents.tiers.worker import judge_result
+
+        assert judge_result(_result(text), project_root=tmp_path, is_verify=True)["passed"] is passed
+
+    def test_failed_review_run_is_not_a_pass(self, tmp_path: Path) -> None:
+        from loopx.agents.tiers.worker import judge_result
+
+        event = _result(subtype="error_max_turns", is_error=True)
+        result = judge_result(event, project_root=tmp_path, is_verify=True)
+        assert result["passed"] is False
+        assert "error_max_turns" in result["findings"][0]
