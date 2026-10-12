@@ -9,12 +9,14 @@ import {
   Loader2,
   Play,
   Pause,
+  Plus,
+  Settings2,
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
-import { fetchTasks, cancelTask, deleteTask, stopTask, startTask, type TaskInfo } from "@/lib/api";
+import { fetchTasks, cancelTask, deleteTask, stopTask, startTask, createTask, type TaskInfo } from "@/lib/api";
 import { TaskDetailPage } from "./task-detail";
 
-const STATUS_FILTERS = ["all", "running", "pending", "completed", "failed", "cancelled", "stopped"] as const;
+const STATUS_FILTERS = ["all", "init", "running", "pending", "completed", "failed", "cancelled", "stopped"] as const;
 type StatusFilter = (typeof STATUS_FILTERS)[number];
 
 function statusBadge(status: string) {
@@ -31,6 +33,8 @@ function statusBadge(status: string) {
       return <Badge variant="outline">Cancelled</Badge>;
     case "stopped":
       return <Badge variant="warning">Stopped</Badge>;
+    case "init":
+      return <Badge variant="outline">Init</Badge>;
     case "executing":
       return <Badge variant="default">Executing</Badge>;
     default:
@@ -52,13 +56,15 @@ function statusIcon(status: string) {
       return <AlertCircle className="h-4 w-4 text-destructive" />;
     case "stopped":
       return <Pause className="h-4 w-4 text-warning" />;
+    case "init":
+      return <Settings2 className="h-4 w-4 text-muted-foreground" />;
     default:
       return <Clock className="h-4 w-4 text-muted-foreground" />;
   }
 }
 
 const ACTIVE_STATUSES = ["running", "pending", "executing", "assigned"];
-const RESTARTABLE_STATUSES = ["stopped", "failed", "cancelled"];
+const RESTARTABLE_STATUSES = ["stopped", "failed", "cancelled", "init"];
 
 function formatTime(iso: string | null | undefined): string {
   if (!iso) return "—";
@@ -96,6 +102,10 @@ export function TasksPage({ sub, onNavigate }: TasksPageProps) {
   const [error, setError] = useState("");
   const [filter, setFilter] = useState<StatusFilter>("all");
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
+  const [showCreate, setShowCreate] = useState(false);
+  const [newReq, setNewReq] = useState("");
+  const [newWorkDir, setNewWorkDir] = useState("");
+  const [creating, setCreating] = useState(false);
   const selectedTaskId = sub || null;
   const setSelectedTaskId = (id: string | null) => onNavigate?.(id || "");
 
@@ -157,6 +167,26 @@ export function TasksPage({ sub, onNavigate }: TasksPageProps) {
     }
   };
 
+  const handleCreate = async () => {
+    if (!newReq.trim()) return;
+    setCreating(true);
+    try {
+      const result = await createTask({
+        requirement: newReq.trim(),
+        work_dir: newWorkDir.trim(),
+      });
+      setShowCreate(false);
+      setNewReq("");
+      setNewWorkDir("");
+      load();
+      setSelectedTaskId(result.task_id);
+    } catch {
+      // ignore
+    } finally {
+      setCreating(false);
+    }
+  };
+
   const filtered = filter === "all" ? tasks : tasks.filter((t) => t.status === filter);
 
   const statusCounts = tasks.reduce<Record<string, number>>((acc, t) => {
@@ -180,14 +210,24 @@ export function TasksPage({ sub, onNavigate }: TasksPageProps) {
           <h1 className="text-2xl font-bold">Tasks</h1>
           <p className="text-sm text-muted-foreground mt-1">{tasks.length} total tasks</p>
         </div>
-        <button
-          type="button"
-          onClick={load}
-          className="flex items-center gap-2 rounded-lg border border-border px-3 py-2 text-sm text-muted-foreground hover:text-foreground transition-colors"
-        >
-          <RefreshCw className="h-4 w-4" />
-          Refresh
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => setShowCreate(true)}
+            className="flex items-center gap-2 rounded-lg bg-primary px-3 py-2 text-sm text-primary-foreground hover:bg-primary/90 transition-colors"
+          >
+            <Plus className="h-4 w-4" />
+            New Task
+          </button>
+          <button
+            type="button"
+            onClick={load}
+            className="flex items-center gap-2 rounded-lg border border-border px-3 py-2 text-sm text-muted-foreground hover:text-foreground transition-colors"
+          >
+            <RefreshCw className="h-4 w-4" />
+            Refresh
+          </button>
+        </div>
       </div>
 
       {/* Status filter tabs */}
@@ -319,6 +359,62 @@ export function TasksPage({ sub, onNavigate }: TasksPageProps) {
               </div>
             </div>
           ))}
+        </div>
+      )}
+
+      {/* Create task modal */}
+      {showCreate && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
+          <div className="w-full max-w-lg rounded-xl border border-border bg-card p-6 shadow-xl">
+            <h2 className="text-lg font-semibold mb-4">Create New Task</h2>
+            <div className="space-y-4">
+              <div>
+                <label className="text-sm font-medium text-muted-foreground">Requirement *</label>
+                <textarea
+                  value={newReq}
+                  onChange={(e) => setNewReq(e.target.value)}
+                  placeholder="Describe what this task should accomplish..."
+                  rows={3}
+                  className="mt-1 w-full rounded-lg border border-border bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary/50 resize-none"
+                />
+              </div>
+              <div>
+                <label className="text-sm font-medium text-muted-foreground">Work Directory</label>
+                <input
+                  type="text"
+                  value={newWorkDir}
+                  onChange={(e) => setNewWorkDir(e.target.value)}
+                  placeholder="/path/to/working/directory"
+                  className="mt-1 w-full rounded-lg border border-border bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary/50"
+                />
+              </div>
+              <p className="text-xs text-muted-foreground">
+                Task will be created in <strong>init</strong> status. You can review and edit the configuration before starting.
+              </p>
+              <div className="flex justify-end gap-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowCreate(false);
+                    setNewReq("");
+                    setNewWorkDir("");
+                  }}
+                  className="rounded-lg border border-border px-4 py-2 text-sm text-muted-foreground hover:text-foreground transition-colors"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={handleCreate}
+                  disabled={!newReq.trim() || creating}
+                  className="flex items-center gap-2 rounded-lg bg-primary px-4 py-2 text-sm text-primary-foreground hover:bg-primary/90 transition-colors disabled:opacity-50"
+                >
+                  {creating && <Loader2 className="h-4 w-4 animate-spin" />}
+                  Create
+                </button>
+              </div>
+            </div>
+          </div>
         </div>
       )}
     </div>

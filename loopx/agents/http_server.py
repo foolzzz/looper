@@ -190,6 +190,7 @@ class AgentHTTPServer:
     _RE_AGENT_SESSIONS = re.compile(r"^/api/agents/([a-zA-Z0-9_-]+)/sessions$")
     _RE_LLM_PROFILE = re.compile(r"^/api/llm-profiles/(\d+)$")
     _RE_CHANNEL_CONFIG = re.compile(r"^/api/channel-configs/([a-zA-Z0-9_-]+)$")
+    _RE_TASK_CONFIG = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)/config$")
 
     async def _route_api(
         self,
@@ -211,6 +212,8 @@ class AgentHTTPServer:
             await self._handle_chat_save_message(body, writer)
         elif path == "/api/chat/events" and method == "GET":
             await self._handle_sse_events(query, writer)
+        elif path == "/api/tasks/create" and method == "POST":
+            await self._handle_task_create(body, writer)
         elif path == "/api/tasks/cancel" and method == "POST":
             await self._handle_task_cancel(body, writer)
         elif path == "/api/tasks/stop" and method == "POST":
@@ -227,6 +230,8 @@ class AgentHTTPServer:
             await self._handle_task_activity(m.group(1), query, writer)
         elif (m := self._RE_TASK_CONVERSATION.match(path)) and method == "GET":
             await self._handle_task_conversation(m.group(1), writer)
+        elif (m := self._RE_TASK_CONFIG.match(path)) and method == "PUT":
+            await self._handle_task_config_update(m.group(1), body, writer)
         elif (m := self._RE_TASK_DETAIL.match(path)) and method == "GET":
             await self._handle_task_detail(m.group(1), writer)
         elif (m := self._RE_AGENT_SESSION_MSGS.match(path)) and method == "GET":
@@ -426,6 +431,92 @@ class AgentHTTPServer:
         except (ConnectionError, BrokenPipeError):
             self._web_adapter.close_sse_stream(cid)
 
+    async def _handle_task_create(
+        self, body: bytes, writer: asyncio.StreamWriter
+    ) -> None:
+        try:
+            data = json.loads(body.decode("utf-8"))
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            writer.write(_json_response(HTTP_400, {"error": "invalid JSON body"}))
+            await writer.drain()
+            return
+
+        requirement = (data.get("requirement") or "").strip()
+        if not requirement:
+            writer.write(_json_response(HTTP_400, {"error": "requirement is required"}))
+            await writer.drain()
+            return
+
+        import uuid
+        from ..db.tasks import create_task
+
+        task_id = f"task-{uuid.uuid4().hex[:12]}"
+        work_dir = data.get("work_dir", "")
+        config = data.get("config", {})
+        goal_id = data.get("goal_id", "")
+        project_root = data.get("project_root", "")
+
+        result = await create_task(
+            task_id=task_id,
+            requirement=requirement,
+            goal_id=goal_id,
+            project_root=project_root,
+            work_dir=work_dir,
+            config=config,
+            status="init",
+        )
+        writer.write(_json_response("201 Created", {
+            "task_id": task_id,
+            "status": "init",
+            "created_at": result["created_at"],
+        }))
+        await writer.drain()
+
+    async def _handle_task_config_update(
+        self, task_id: str, body: bytes, writer: asyncio.StreamWriter,
+    ) -> None:
+        try:
+            data = json.loads(body.decode("utf-8"))
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            writer.write(_json_response(HTTP_400, {"error": "invalid JSON body"}))
+            await writer.drain()
+            return
+
+        from ..db.tasks import update_task_config, get_task
+
+        task = await get_task(task_id)
+        if task is None:
+            writer.write(_json_response(HTTP_404, {"error": "task not found"}))
+            await writer.drain()
+            return
+
+        if task.get("status") != "init":
+            writer.write(_json_response(HTTP_400, {"error": "can only edit config when status is init"}))
+            await writer.drain()
+            return
+
+        ok = await update_task_config(
+            task_id,
+            requirement=data.get("requirement"),
+            work_dir=data.get("work_dir"),
+            config=data.get("config"),
+        )
+        if not ok:
+            writer.write(_json_response(HTTP_500, {"error": "update failed"}))
+            await writer.drain()
+            return
+
+        updated = await get_task(task_id)
+        result = _serialize({
+            "task_id": updated["id"],
+            "requirement": updated.get("requirement", ""),
+            "work_dir": updated.get("work_dir", ""),
+            "config": updated.get("config", {}),
+            "status": updated.get("status", ""),
+        })
+        writer.write(_json_response(HTTP_200, result))
+        await writer.drain()
+
     async def _handle_task_cancel(
         self, body: bytes, writer: asyncio.StreamWriter
     ) -> None:
@@ -583,6 +674,8 @@ class AgentHTTPServer:
             "planner_id": raw.get("planner_id"),
             "correlation_id": raw.get("correlation_id", ""),
             "project_root": raw.get("project_root", ""),
+            "work_dir": raw.get("work_dir", ""),
+            "config": raw.get("config", {}),
             "origin_channel_id": raw.get("origin_channel_id", ""),
             "result_summary": raw.get("result_summary"),
             "error": raw.get("error"),
