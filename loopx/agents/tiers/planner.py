@@ -185,6 +185,15 @@ class PlannerAgent:
         plan_id = f"plan-{uuid.uuid4().hex[:12]}"
 
         await update_task_phase(self._task_id, "planning")
+        try:
+            await db_activity.insert_activity(
+                task_id=self._task_id,
+                worker=f"planner-{self._task_id}",
+                kind="phase",
+                summary=f"Planner started: analyzing requirement",
+            )
+        except Exception:
+            pass
 
         plan = TaskPlan(
             plan_id=plan_id,
@@ -199,6 +208,16 @@ class PlannerAgent:
         plan.steps = steps
         plan.status = "executing"
         await update_task_phase(self._task_id, "executing")
+
+        try:
+            await db_activity.insert_activity(
+                task_id=self._task_id,
+                worker=f"planner-{self._task_id}",
+                kind="phase",
+                summary=f"Plan created: {len(steps)} step(s), dispatching workers",
+            )
+        except Exception:
+            pass
         self._plan = plan
         self._save_plan(plan)
 
@@ -411,6 +430,16 @@ class PlannerAgent:
         self._save_plan(plan)
         await update_task_phase(self._task_id, "completed")
 
+        try:
+            await db_activity.insert_activity(
+                task_id=self._task_id,
+                worker=f"planner-{self._task_id}",
+                kind="phase",
+                summary="All steps verified — task completed",
+            )
+        except Exception:
+            pass
+
         summary_parts = [f"任务完成: {plan.requirement[:80]}"]
         for step in plan.steps:
             changed = step.result.get("changed_files", {}) if step.result else {}
@@ -440,6 +469,16 @@ class PlannerAgent:
         plan.status = "failed"
         self._save_plan(plan)
         await update_task_phase(self._task_id, "failed")
+
+        try:
+            await db_activity.insert_activity(
+                task_id=self._task_id,
+                worker=f"planner-{self._task_id}",
+                kind="error",
+                summary="Task failed — see step details",
+            )
+        except Exception:
+            pass
 
         failed_steps = [s for s in plan.steps if s.status == "failed"]
         errors = [

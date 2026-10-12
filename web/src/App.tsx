@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { Sidebar, type Page } from "@/components/sidebar";
 import { DashboardPage } from "@/pages/dashboard";
 import { ChatPage } from "@/pages/chat";
@@ -7,52 +7,65 @@ import { AgentsPage } from "@/pages/agents";
 
 const PAGES = new Set<Page>(["dashboard", "chat", "tasks", "agents"]);
 
-function readHash(): Page {
-  const h = window.location.hash.replace("#", "") as Page;
-  return PAGES.has(h) ? h : "dashboard";
+interface Route {
+  page: Page;
+  sub: string;
+}
+
+function readHash(): Route {
+  const raw = window.location.hash.replace(/^#\/?/, "");
+  const slash = raw.indexOf("/");
+  const pagePart = (slash >= 0 ? raw.slice(0, slash) : raw) as Page;
+  const sub = slash >= 0 ? raw.slice(slash + 1) : "";
+  return { page: PAGES.has(pagePart) ? pagePart : "dashboard", sub };
 }
 
 function App() {
-  const [page, setPage] = useState<Page>(readHash);
+  const [route, setRoute] = useState<Route>(readHash);
 
   useEffect(() => {
-    const onHash = () => setPage(readHash());
+    const onHash = () => setRoute(readHash());
     window.addEventListener("hashchange", onHash);
     return () => window.removeEventListener("hashchange", onHash);
   }, []);
 
-  const navigate = (p: Page) => {
+  const navigate = useCallback((p: Page) => {
     window.location.hash = p;
-    setPage(p);
-  };
+  }, []);
+
+  const navigateSub = useCallback((p: Page, sub: string) => {
+    window.location.hash = sub ? `${p}/${sub}` : p;
+  }, []);
 
   return (
     <div className="flex h-screen w-screen overflow-hidden bg-background">
-      <Sidebar activePage={page} onNavigate={navigate} />
+      <Sidebar activePage={route.page} onNavigate={navigate} />
       <main className="flex-1 overflow-hidden">
-        {/* Chat stays mounted so state, SSE, and scroll position survive navigation */}
-        <div className={page === "chat" ? "h-full" : "hidden"}>
+        <div className={route.page === "chat" ? "h-full" : "hidden"}>
           <ChatPage />
         </div>
-        {page !== "chat" && (
-          <div className="h-full overflow-y-auto p-6">{renderPage(page)}</div>
+        {route.page === "dashboard" && (
+          <div className="h-full overflow-y-auto p-6"><DashboardPage /></div>
+        )}
+        {route.page === "tasks" && (
+          <div className="h-full overflow-y-auto">
+            <TasksPage
+              sub={route.sub}
+              onNavigate={(sub) => navigateSub("tasks", sub)}
+            />
+          </div>
+        )}
+        {route.page === "agents" && (
+          <div className="h-full overflow-y-auto">
+            <AgentsPage
+              sub={route.sub}
+              onNavigate={(sub) => navigateSub("agents", sub)}
+            />
+          </div>
         )}
       </main>
     </div>
   );
-}
-
-function renderPage(page: Page) {
-  switch (page) {
-    case "dashboard":
-      return <DashboardPage />;
-    case "tasks":
-      return <TasksPage />;
-    case "agents":
-      return <AgentsPage />;
-    default:
-      return null;
-  }
 }
 
 export default App;

@@ -144,8 +144,10 @@ class WorkerPool:
     async def _dispatch(self, envelope: MessageEnvelope) -> None:
         worker_id = envelope.target.agent_id
         if worker_id in self._active:
+            logger.debug("worker %s already active, skipping", worker_id)
             return
 
+        logger.info("dispatching worker %s (active=%d)", worker_id, len(self._active))
         await self._semaphore.acquire()
         task = asyncio.create_task(self._run_worker(envelope))
         self._tasks[worker_id] = task
@@ -174,6 +176,20 @@ class WorkerPool:
         is_verify = envelope.message_type == MessageType.VERIFY_REQUEST
         prompt = self._build_work_prompt(payload) if not is_verify else str(payload)
         t0 = __import__("time").monotonic()
+
+        parent_task_id = payload.get("parent_task_id", "")
+        if parent_task_id:
+            try:
+                label = "Reviewer" if is_verify else "Worker"
+                await db_activity.insert_activity(
+                    task_id=parent_task_id,
+                    worker=worker_id,
+                    kind="phase",
+                    summary=f"{label} started execution",
+                )
+            except Exception:
+                pass
+
         try:
             result = await self._execute(envelope, is_verify=is_verify)
             wp.status = "completed"
@@ -239,13 +255,27 @@ class WorkerPool:
         command = [
             self._config.claude_bin,
             "--print",
+            "--verbose",
             "--output-format", "stream-json",
-            "--permission-mode", "plan",
-            "--tools", "Read,Glob,Grep,Write,Edit,Bash",
-            "--disable-slash-commands",
+            "--dangerously-skip-permissions",
+            "--max-turns", "50",
             prompt,
         ]
 
+        if parent_task_id:
+            cmd_display = " ".join(command[:7]) + f" '<prompt {len(prompt)} chars>'"
+            try:
+                await db_activity.insert_activity(
+                    task_id=parent_task_id,
+                    worker=worker_id,
+                    kind="tool_use",
+                    summary=f"$ {cmd_display}",
+                    metadata={"cwd": project_root},
+                )
+            except Exception:
+                pass
+
+        logger.info("worker %s starting subprocess: %s (cwd=%s)", worker_id, command[0], project_root)
         try:
             process = await asyncio.create_subprocess_exec(
                 *command,
@@ -253,7 +283,9 @@ class WorkerPool:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
+            logger.info("worker %s subprocess started (pid=%s)", worker_id, process.pid)
         except OSError as exc:
+            logger.error("worker %s failed to start subprocess: %s", worker_id, exc)
             return {"status": "failed", "error": f"Cannot start Claude Code: {exc}"}
 
         final_result_text = ""
@@ -279,25 +311,39 @@ class WorkerPool:
 
                 if event_type == "assistant":
                     msg = event.get("message", {})
-                    msg_type = msg.get("type", "")
-                    if msg_type == "tool_use":
-                        tool_name = msg.get("name", "unknown")
-                        tool_input = msg.get("input", {})
-                        summary = self._format_tool_summary(tool_name, tool_input)
-                        if parent_task_id:
-                            try:
-                                await db_activity.insert_activity(
-                                    task_id=parent_task_id,
-                                    worker=worker_id,
-                                    kind="tool_use",
-                                    summary=summary,
-                                )
-                            except Exception:
-                                logger.debug("failed to insert tool_use activity", exc_info=True)
-                    elif msg_type == "text":
-                        text = msg.get("text", "")
-                        if text:
-                            collected_text.append(text)
+                    content_blocks = msg.get("content", [])
+                    if not isinstance(content_blocks, list):
+                        content_blocks = []
+                    for block in content_blocks:
+                        block_type = block.get("type", "")
+                        if block_type == "tool_use":
+                            tool_name = block.get("name", "unknown")
+                            tool_input = block.get("input", {})
+                            summary = self._format_tool_summary(tool_name, tool_input)
+                            if parent_task_id:
+                                try:
+                                    await db_activity.insert_activity(
+                                        task_id=parent_task_id,
+                                        worker=worker_id,
+                                        kind="tool_use",
+                                        summary=summary,
+                                    )
+                                except Exception:
+                                    logger.debug("failed to insert tool_use activity", exc_info=True)
+                        elif block_type == "text":
+                            text = block.get("text", "")
+                            if text:
+                                collected_text.append(text)
+                                if parent_task_id and len(text.strip()) > 5:
+                                    try:
+                                        await db_activity.insert_activity(
+                                            task_id=parent_task_id,
+                                            worker=worker_id,
+                                            kind="text",
+                                            summary=text[:300],
+                                        )
+                                    except Exception:
+                                        logger.debug("failed to insert text activity", exc_info=True)
 
                 elif event_type == "result":
                     final_result_text = event.get("result", "")

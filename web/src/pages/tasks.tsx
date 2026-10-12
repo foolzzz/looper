@@ -36,11 +36,17 @@ function statusIcon(status: string) {
   }
 }
 
-export function TasksPage() {
+interface TasksPageProps {
+  sub?: string;
+  onNavigate?: (sub: string) => void;
+}
+
+export function TasksPage({ sub, onNavigate }: TasksPageProps) {
   const [tasks, setTasks] = useState<TaskInfo[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
-  const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
+  const selectedTaskId = sub || null;
+  const setSelectedTaskId = (id: string | null) => onNavigate?.(id || "");
 
   const load = () => {
     fetchTasks()

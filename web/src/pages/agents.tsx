@@ -43,7 +43,7 @@ import {
   type ActivityEvent,
 } from "@/lib/api";
 
-type Tab = "config" | "prompt" | "sessions";
+type Tab = "config" | "sessions";
 
 const CLAUDE_CODE_PERMISSIONS = [
   { value: "", label: "Default" },
@@ -363,6 +363,7 @@ function ConfigTab({
     max_concurrency: config.max_concurrency,
     permission_mode: config.permission_mode ?? "",
     enabled: config.enabled,
+    system_prompt: config.system_prompt,
   });
   const [profileExpanded, setProfileExpanded] = useState(false);
   const [editingProfile, setEditingProfile] = useState<"new" | "edit" | null>(null);
@@ -378,6 +379,7 @@ function ConfigTab({
       max_concurrency: config.max_concurrency,
       permission_mode: config.permission_mode ?? "",
       enabled: config.enabled,
+      system_prompt: config.system_prompt,
     });
     setEditingProfile(null);
   }, [config]);
@@ -393,6 +395,7 @@ function ConfigTab({
       max_concurrency: form.max_concurrency,
       permission_mode: form.permission_mode || null,
       enabled: form.enabled,
+      system_prompt: form.system_prompt,
     } as Partial<AgentConfig>);
   };
 
@@ -623,46 +626,22 @@ function ConfigTab({
         </button>
       </div>
 
+      <div className="space-y-1.5">
+        <div className="flex items-center justify-between">
+          <label className="text-xs font-medium text-muted-foreground">System Prompt</label>
+          <span className="text-[10px] text-muted-foreground">{form.system_prompt.length} chars</span>
+        </div>
+        <textarea
+          value={form.system_prompt}
+          onChange={(e) => setForm({ ...form, system_prompt: e.target.value })}
+          className="w-full min-h-[160px] resize-y rounded-md border border-input bg-transparent p-3 text-sm text-foreground font-mono leading-relaxed placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+          placeholder="Enter system prompt..."
+        />
+      </div>
+
       <Button onClick={handleSave} disabled={saving} className="w-full">
         {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
         Save Config
-      </Button>
-    </div>
-  );
-}
-
-// --- Prompt Tab ---
-
-function PromptTab({
-  config,
-  onSave,
-  saving,
-}: {
-  config: AgentConfig;
-  onSave: (fields: Partial<AgentConfig>) => void;
-  saving: boolean;
-}) {
-  const [prompt, setPrompt] = useState(config.system_prompt);
-
-  useEffect(() => {
-    setPrompt(config.system_prompt);
-  }, [config]);
-
-  return (
-    <div className="flex h-full flex-col gap-3">
-      <div className="flex items-center justify-between">
-        <label className="text-xs font-medium text-muted-foreground">System Prompt</label>
-        <span className="text-xs text-muted-foreground">{prompt.length} chars</span>
-      </div>
-      <textarea
-        value={prompt}
-        onChange={(e) => setPrompt(e.target.value)}
-        className="flex-1 min-h-[300px] w-full resize-none rounded-md border border-input bg-transparent p-3 text-sm text-foreground font-mono leading-relaxed placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-        placeholder="Enter system prompt..."
-      />
-      <Button onClick={() => onSave({ system_prompt: prompt })} disabled={saving}>
-        {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
-        Save Prompt
       </Button>
     </div>
   );
@@ -904,26 +883,38 @@ function SessionDetail({
 
 // --- Page ---
 
-export function AgentsPage() {
+interface AgentsPageProps {
+  sub?: string;
+  onNavigate?: (sub: string) => void;
+}
+
+export function AgentsPage({ sub, onNavigate }: AgentsPageProps) {
   const [configs, setConfigs] = useState<AgentConfig[]>([]);
   const [profiles, setProfiles] = useState<LlmProfile[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
-  const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState<Tab>("config");
   const [saving, setSaving] = useState(false);
   const [toast, setToast] = useState("");
+
+  const subParts = (sub || "").split("/").filter(Boolean);
+  const selectedId = subParts[0] || null;
+  const activeTab: Tab = (subParts[1] === "sessions" ? "sessions" : "config");
+  const setSelectedId = (id: string | null) => onNavigate?.(id || "");
+  const setActiveTab = (tab: Tab) =>
+    onNavigate?.(selectedId ? (tab === "config" ? selectedId : `${selectedId}/${tab}`) : "");
 
   const loadConfigs = useCallback(() => {
     fetchAgentConfigs()
       .then((data) => {
         setConfigs(data);
         setError("");
-        setSelectedId((prev) => prev ?? (data.length > 0 ? data[0].agent_id : null));
+        if (!selectedId && data.length > 0) {
+          onNavigate?.(data[0].agent_id);
+        }
       })
       .catch((e) => setError(e.message))
       .finally(() => setLoading(false));
-  }, []);
+  }, [selectedId, onNavigate]);
 
   const loadProfiles = useCallback(() => {
     fetchLlmProfiles().then(setProfiles).catch(() => {});
@@ -1014,8 +1005,7 @@ export function AgentsPage() {
               config={cfg}
               selected={cfg.agent_id === selectedId}
               onSelect={() => {
-                setSelectedId(cfg.agent_id);
-                setActiveTab("config");
+                onNavigate?.(cfg.agent_id);
               }}
               profile={cfg.llm_profile_id ? profileMap.get(cfg.llm_profile_id) ?? null : null}
             />
@@ -1026,7 +1016,7 @@ export function AgentsPage() {
         {selected && (
           <div className="flex-1 rounded-lg border border-border bg-card">
             <div className="flex items-center gap-1 border-b border-border px-4">
-              {(["config", "prompt", "sessions"] as Tab[]).map((tab) => (
+              {(["config", "sessions"] as Tab[]).map((tab) => (
                 <button
                   key={tab}
                   type="button"
@@ -1038,7 +1028,7 @@ export function AgentsPage() {
                       : "border-transparent text-muted-foreground hover:text-foreground",
                   )}
                 >
-                  {tab === "config" ? "Config" : tab === "prompt" ? "Prompt" : "Sessions"}
+                  {tab === "config" ? "Config" : "Sessions"}
                 </button>
               ))}
               <div className="ml-auto flex items-center gap-2 text-xs text-muted-foreground">
@@ -1055,9 +1045,6 @@ export function AgentsPage() {
                   onProfilesChanged={loadProfiles}
                   saving={saving}
                 />
-              )}
-              {activeTab === "prompt" && (
-                <PromptTab config={selected} onSave={handleSave} saving={saving} />
               )}
               {activeTab === "sessions" && <SessionsTab agentId={selected.agent_id} />}
             </div>
