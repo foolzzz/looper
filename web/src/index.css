@@ -7,6 +7,8 @@
   --color-muted-foreground: #a1a1aa;
   --color-card: #111116;
   --color-card-foreground: #fafafa;
+  --color-popover: #111116;
+  --color-popover-foreground: #fafafa;
   --color-border: #27272a;
   --color-input: #27272a;
   --color-ring: #6366f1;
@@ -15,6 +17,7 @@
   --color-accent: #18181b;
   --color-accent-foreground: #fafafa;
   --color-destructive: #ef4444;
+  --color-destructive-foreground: #fafafa;
   --color-success: #22c55e;
   --color-warning: #f59e0b;
   --font-sans: "Inter", system-ui, -apple-system, sans-serif;
