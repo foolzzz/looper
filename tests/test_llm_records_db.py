@@ -51,6 +51,16 @@ def test_run_is_recorded_end_to_end() -> None:
             events = await llm_records.list_events(record_id, pool=pool)
             assert events[0]["event"]["message"]["content"][0]["text"] == "你好"
 
+            reviewer_id = await llm_records.start_record(agent_id="reviewer-test", task_id="task-test", pool=pool)
+            manager_id = await llm_records.start_record(agent_id="manager", pool=pool)
+            ours = {record_id, reviewer_id, manager_id}
+            by_role = {
+                role: {r["id"] for r in await llm_records.list_records(role=role, pool=pool)} & ours
+                for role in ("worker", "manager", "planner")
+            }
+            assert by_role == {"worker": {record_id, reviewer_id}, "manager": {manager_id}, "planner": set()}
+
+            await pool.execute("DELETE FROM llm_records WHERE id = ANY($1::bigint[])", [reviewer_id, manager_id])
             await pool.execute("DELETE FROM llm_records WHERE id = $1", record_id)
             assert await llm_records.list_events(record_id, pool=pool) == []  # cascade
         finally:

@@ -35,6 +35,13 @@ async def iter_lines(stream: asyncio.StreamReader) -> AsyncIterator[bytes]:
         yield bytes(pending)
 
 
+# How often a running record's heartbeat (last_output_at) is written.
+_HEARTBEAT_INTERVAL = 10.0
+
+
+def _clock() -> float:
+    return time.monotonic()
+
 # Fields of Claude's init event that list every tool, skill or server; kept as
 # counts so a transcript stays readable.
 _INIT_LIST_LIMIT = 2_000
@@ -81,7 +88,8 @@ class ClaudeRunRecorder:
         self._record_id: int | None = None
         self._seq = 0
         self._model: str | None = None
-        self._started = time.monotonic()
+        self._started = _clock()
+        self._last_heartbeat = float("-inf")
 
     async def start(self) -> None:
         from ..db import llm_records
@@ -98,6 +106,7 @@ class ClaudeRunRecorder:
             logger.warning("could not open llm record for %s", self._agent_id, exc_info=True)
 
     async def record(self, event: dict[str, Any]) -> None:
+        await self._heartbeat()
         if event.get("type") == "stream_event":
             return
         if event.get("type") == "system" and event.get("subtype") == "init":
@@ -112,6 +121,19 @@ class ClaudeRunRecorder:
             await llm_records.append_events(self._record_id, [(self._seq, _compact_event(event))])
         except Exception:
             logger.warning("could not record event for %s", self._agent_id, exc_info=True)
+
+    async def _heartbeat(self) -> None:
+        """Any output, partial deltas included, shows the run is not stuck."""
+        now = _clock()
+        if self._record_id is None or now - self._last_heartbeat < _HEARTBEAT_INTERVAL:
+            return
+        self._last_heartbeat = now
+        from ..db import llm_records
+
+        try:
+            await llm_records.touch_record(self._record_id)
+        except Exception:
+            logger.warning("could not record heartbeat for %s", self._agent_id, exc_info=True)
 
     async def finish(
         self,
@@ -136,7 +158,7 @@ class ClaudeRunRecorder:
                 input_tokens=usage.get("input_tokens"),
                 output_tokens=usage.get("output_tokens"),
                 cost_usd=result.get("total_cost_usd"),
-                duration_ms=int((time.monotonic() - self._started) * 1000),
+                duration_ms=int((_clock() - self._started) * 1000),
                 model=self._model,
                 error=error or (None if succeeded else f"Claude run ended: {result.get('subtype') or 'no result'}"),
             )
