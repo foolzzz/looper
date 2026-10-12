@@ -84,6 +84,7 @@ PostgreSQL is a hard startup dependency. All data paths:
 | `llm_records` | Full LLM traffic recording (input/output text) |
 | `agent_configs` | Agent configuration (system prompt, model, permissions) |
 | `llm_profiles` | LLM provider profiles (model, endpoint, API key env) |
+| `channel_configs` | Telegram/Lark settings (enabled flag, env var names, allowlist) |
 
 Connection: `LOOPX_DATABASE_URL` environment variable or `.env` file.
 
@@ -98,6 +99,7 @@ Single-page React app served from `web/dist/` via the built-in HTTP server
 - **Tasks**: Task list with status filter, time display, Start/Stop/Delete controls
 - **Task Detail**: Overview (steps, agent timeline, live activity feed), Pipeline DAG (React Flow), Sessions, Conversation
 - **Agents**: Agent configuration editor (system prompt replace/append, LLM profiles, permissions), session viewer with full LLM traffic
+- **Settings**: Enable and configure the Telegram and Lark channels
 
 ### Real-Time Updates
 
@@ -132,15 +134,34 @@ SPA uses `#page/sub` format for deep linking that survives browser refresh:
 | `/api/agents/:id/sessions` | GET | Agent sessions |
 | `/api/llm-profiles` | GET/POST | LLM profiles |
 | `/api/llm-records` | GET | LLM traffic records |
+| `/api/channel-configs` | GET | List channels |
+| `/api/channel-configs/:id` | GET/PUT | Channel config |
 
 ## Configuration
 
 Agent behavior is configured via the `agent_configs` table (editable in the dashboard):
 
 - **system_prompt**: Agent instruction prompt
-- **runtime**: `claude-code` or `codex-cli`
+- **runtime**: stored per agent; only `claude-code` is implemented, and the
+  Manager and Workers always run the Claude CLI
 - **model**: Model override (or use LLM profile)
 - **permission_mode**: `bypassPermissions` (default for workers)
 - **max_turns**: Maximum conversation turns (0 = unlimited)
 - **timeout_seconds**: Execution timeout
 - **max_concurrency**: Worker pool size
+
+## Channels
+
+The Web channel is always on. Telegram and Lark are built in; `loopx serve`
+takes no flags for them. At startup it reads `channel_configs`, which the
+Settings page edits, and starts each enabled channel. Changes apply after a
+restart.
+
+- **Telegram**: the token comes from the env var named by `bot_token_env`
+  (default `LOOPX_TELEGRAM_BOT_TOKEN`). `allowed_user_ids` limits who can talk
+  to the bot; if it is empty, `LOOPX_TELEGRAM_ALLOWED_USERS` applies, and when
+  both are empty everyone is allowed. A malformed list keeps Telegram off.
+- **Lark**: needs `lark-cli` on PATH and signed in. The app ID comes from the
+  env var named by `app_id_env` (default `LARK_APP_ID`).
+- A channel that fails to start is logged and skipped; the server keeps
+  running.

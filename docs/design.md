@@ -113,21 +113,29 @@ Planner 对每个 Step 的验证采用分级策略：
 
 ## 接入渠道
 
+Web 始终开启。Telegram 和 Lark 默认内置，不需要任何启动参数：在控制台 **Settings** 页启用并编辑配置，配置存进数据库 `channel_configs` 表。服务启动时读取一次，改完配置要重启 `loopx serve` 才生效。
+
+数据库里只存环境变量的**名字**，不存密钥本身；密钥放在对应的环境变量或仓库根目录的 `.env` 里。某个渠道启动失败只记日志，不影响 Web 控制台。
+
 ### Web
 
-- HTTP POST `/chat` 发送消息
-- SSE `/stream/{correlation_id}` 接收实时响应
-- 内置 PWA 聊天界面
+- 控制台 Chat 页
+- `POST /api/chat/send` 发送消息
+- SSE `GET /api/chat/events` 接收实时响应
 
 ### Telegram
 
 - Bot 长轮询接入
 - 支持 `/start`、`/status`、`/help` 命令
 - 消息自动分段（4000 字符限制）
-- 可选用户白名单
+- Settings 配置项：
+  - `bot_token_env`：存放 Bot token 的环境变量名，默认 `LOOPX_TELEGRAM_BOT_TOKEN`
+  - `allowed_user_ids`：逗号分隔的 Telegram 用户 ID 白名单。留空时使用 `LOOPX_TELEGRAM_ALLOWED_USERS`，两者都为空则允许所有人；格式不对时 Telegram 不启动
 
 ### Lark（飞书）
 
+- 需要 `lark-cli` 在 PATH 上且已登录，收发消息都通过它
+- Settings 配置项 `app_id_env`：存放 App ID 的环境变量名，默认 `LARK_APP_ID`。`app_secret_env` 目前不会被读取，凭据由 `lark-cli` 管理
 - 通过 `lark-cli event consume` 订阅事件
 - 支持 @mention 触发
 - 富文本回复
@@ -154,19 +162,15 @@ Planner 对每个 Step 的验证采用分级策略：
 ## 启动方式
 
 ```bash
-# 启动 Agent 系统
-loopx serve --agent-mode
+# 启动 Agent 系统（在源码目录下运行）
+uv run loopx serve
 
 # 或 Python 调用
 from loopx.agents.serve import serve_agent
 serve_agent(host="127.0.0.1", port=8767)
-
-# 启用 Telegram
-serve_agent(enable_telegram=True)
-
-# 启用飞书
-serve_agent(enable_lark=True, lark_app_id="cli_xxx")
 ```
+
+Telegram 和 Lark 不需要启动参数，见「接入渠道」。
 
 ---
 
