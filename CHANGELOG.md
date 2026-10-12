@@ -25,6 +25,13 @@ To learn how to use these features, read the [usage guide](docs/fork/usage.md).
   `python-telegram-bot` is now a default dependency. The Telegram allowlist
   edited in Settings now applies, and a malformed list keeps Telegram off. A
   channel that fails to start is logged and no longer stops the server.
+- Agent workers now fail closed. A step completes only when Claude's run
+  succeeds (a max-turns stop is a failure) and its final JSON report says
+  `completed`. The files listed in `changed_files` must exist, and those in the
+  new `deleted_files` must be gone. Prose without a report, an unknown status,
+  and a report that does not match the files all fail the step with a
+  reason. A reported failure is no longer counted as completed. Reviewers
+  must return a boolean `passed`.
 
 ### Fixed
 

@@ -40,6 +40,16 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
 - Each Worker runs Claude CLI as a subprocess with `stream-json` output
 - Real-time event streaming (tool_use, text) captured to activity table
 - Command: `claude --print --verbose --output-format stream-json --dangerously-skip-permissions --max-turns 50`
+- A step counts as completed only when all of these hold; anything else fails the
+  step with the reason in `error`:
+  - the run's `result` event has `subtype: success`, so hitting max turns fails;
+  - the final message ends with the JSON report
+    `{status, changed_files, deleted_files, summary}`, with `status` set to
+    `completed`;
+  - every file in `changed_files` exists, and every file in `deleted_files` is
+    gone.
+- A reviewer must return a boolean `passed`; prose without the verdict is not a
+  pass.
 
 ## Message Bus
 

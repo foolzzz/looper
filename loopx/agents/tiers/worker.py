@@ -36,6 +36,99 @@ WORKER_TIMEOUT_SEC = 600
 STREAM_LINE_LIMIT = 16 * 1024 * 1024
 
 
+def extract_report(text: str, key: str) -> dict[str, Any] | None:
+    """Return the last top-level JSON object in ``text`` that has ``key``.
+
+    Handles nested objects and markdown fences, which a flat regex cannot.
+    """
+    decoder = json.JSONDecoder()
+    found: dict[str, Any] | None = None
+    i = text.find("{")
+    while i != -1:
+        try:
+            obj, end = decoder.raw_decode(text, i)
+        except json.JSONDecodeError:
+            i = text.find("{", i + 1)
+            continue
+        if isinstance(obj, dict) and key in obj:
+            found = obj
+        i = text.find("{", end)
+    return found
+
+
+def _work_failed(error: str, **extra: Any) -> dict[str, Any]:
+    return {"status": "failed", "error": error, "summary": extra.pop("summary", error), **extra}
+
+
+def _verify_failed(finding: str) -> dict[str, Any]:
+    return {"passed": False, "findings": [finding], "summary": finding}
+
+
+def judge_result(
+    result_event: dict[str, Any] | None,
+    *,
+    project_root: Path,
+    is_verify: bool,
+) -> dict[str, Any]:
+    """Decide a step's outcome from Claude's stream-json ``result`` event.
+
+    Fails closed: the run must succeed, the final message must carry the JSON
+    report, and a "completed" work report must match the files on disk.
+    """
+    failed = _verify_failed if is_verify else _work_failed
+    if result_event is None:
+        return failed("Claude Code ended without a result event")
+    if result_event.get("is_error") or result_event.get("subtype") != "success":
+        subtype = result_event.get("subtype") or "error"
+        return failed(f"Claude Code run did not succeed ({subtype})")
+    text = str(result_event.get("result") or "")
+    if is_verify:
+        verdict = extract_report(text, "passed")
+        if verdict is None or not isinstance(verdict.get("passed"), bool):
+            return _verify_failed("Reviewer did not end with the JSON verdict")
+        findings = verdict.get("findings", [])
+        return {
+            "passed": verdict["passed"],
+            "findings": findings if isinstance(findings, list) else [str(findings)],
+            "summary": str(verdict.get("summary") or ""),
+        }
+
+    report = extract_report(text, "status")
+    if report is None:
+        # Keep the tail of what Claude said so the failure can be diagnosed.
+        return _work_failed("Worker did not end with the JSON status report", final_message=text[-500:])
+    status = report.get("status")
+    changed = report.get("changed_files", {})
+    deleted = report.get("deleted_files", [])
+    summary = str(report.get("summary") or "")
+    if status not in ("completed", "failed"):
+        return _work_failed(f"Worker reported an unknown status {status!r}")
+    if not isinstance(changed, dict) or not isinstance(deleted, list):
+        return _work_failed("Worker report has malformed changed_files or deleted_files")
+    if status == "failed":
+        return _work_failed(summary or "Worker reported failure", summary=summary, changed_files=changed)
+
+    def on_disk(path: Any) -> bool:
+        candidate = Path(str(path))
+        return (candidate if candidate.is_absolute() else project_root / candidate).exists()
+
+    missing = [str(path) for path in changed if not on_disk(path)]
+    still_present = [str(path) for path in deleted if on_disk(path)]
+    if missing or still_present:
+        problems = []
+        if missing:
+            problems.append(f"changed files not found: {', '.join(missing)}")
+        if still_present:
+            problems.append(f"deleted files still present: {', '.join(still_present)}")
+        return _work_failed("Worker report does not match the files: " + "; ".join(problems))
+    return {
+        "status": "completed",
+        "changed_files": changed,
+        "deleted_files": deleted,
+        "summary": summary,
+    }
+
+
 @dataclass
 class WorkerConfig:
     claude_bin: str = "claude"
@@ -292,11 +385,10 @@ class WorkerPool:
             logger.error("worker %s failed to start subprocess: %s", worker_id, exc)
             return {"status": "failed", "error": f"Cannot start Claude Code: {exc}"}
 
-        final_result_text = ""
-        collected_text: list[str] = []
+        result_event: dict[str, Any] | None = None
 
         async def _read_stream() -> None:
-            nonlocal final_result_text
+            nonlocal result_event
             assert process.stdout is not None
             while True:
                 raw_line = await process.stdout.readline()
@@ -308,7 +400,6 @@ class WorkerPool:
                 try:
                     event = json.loads(line)
                 except json.JSONDecodeError:
-                    collected_text.append(line)
                     continue
 
                 event_type = event.get("type", "")
@@ -337,7 +428,6 @@ class WorkerPool:
                         elif block_type == "text":
                             text = block.get("text", "")
                             if text:
-                                collected_text.append(text)
                                 if parent_task_id and len(text.strip()) > 5:
                                     try:
                                         await db_activity.insert_activity(
@@ -350,8 +440,8 @@ class WorkerPool:
                                         logger.debug("failed to insert text activity", exc_info=True)
 
                 elif event_type == "result":
-                    final_result_text = event.get("result", "")
-                    cost = event.get("cost_usd")
+                    result_event = event
+                    cost = event.get("total_cost_usd", event.get("cost_usd"))
                     duration_ms = event.get("duration_ms")
                     if parent_task_id:
                         try:
@@ -395,8 +485,7 @@ class WorkerPool:
                 "stderr": stderr[:500],
             }
 
-        output = final_result_text or "".join(collected_text)
-        return self._parse_output(output, is_verify=is_verify)
+        return judge_result(result_event, project_root=Path(project_root), is_verify=is_verify)
 
     def _build_work_prompt(self, payload: dict[str, Any]) -> str:
         instruction = payload.get("instruction", "")
@@ -420,8 +509,13 @@ class WorkerPool:
                 parts.append(f"  $ {cmd}")
         parts.extend([
             "",
-            "Execute the task. Report the result as JSON at the end:",
-            '{"status": "completed", "changed_files": {"path": "description"}, "summary": "..."}',
+            "Execute the task. End your final message with exactly one JSON object:",
+            '{"status": "completed", "changed_files": {"path": "description"}, '
+            '"deleted_files": ["path"], "summary": "..."}',
+            'Use "status": "failed" if any part of the task was not done. List every '
+            "file you created or modified in changed_files and every file you deleted "
+            "in deleted_files, with paths relative to the working directory. The "
+            "report is checked against the files on disk.",
         ])
         return "\n".join(parts)
 
@@ -440,7 +534,7 @@ class WorkerPool:
                 parts.append(f"  - {c}")
         parts.extend([
             "",
-            "Review the changes. Report as JSON:",
+            "Review the changes. End your final message with exactly one JSON object:",
             '{"passed": true/false, "findings": ["issue1", ...], "summary": "..."}',
         ])
         return "\n".join(parts)
@@ -460,53 +554,6 @@ class WorkerPool:
             pattern = tool_input.get("pattern", tool_input.get("query", ""))
             return f"{tool_name}: {pattern[:60]}"
         return f"Tool: {tool_name}"
-
-    def _parse_output(self, output: str, *, is_verify: bool = False) -> dict[str, Any]:
-        """Parse Claude Code JSON output into a structured result."""
-        output = output.strip()
-
-        # Try parsing as JSON directly
-        try:
-            data = json.loads(output)
-            if isinstance(data, dict):
-                if is_verify:
-                    return {
-                        "passed": data.get("passed", False),
-                        "findings": data.get("findings", []),
-                        "summary": data.get("summary", ""),
-                    }
-                return {
-                    "status": data.get("status", "completed"),
-                    "changed_files": data.get("changed_files", {}),
-                    "summary": data.get("summary", output[:200]),
-                }
-        except json.JSONDecodeError:
-            pass
-
-        # Try extracting JSON from the text (Claude often wraps in markdown)
-        import re
-        json_match = re.search(r'\{[^{}]*"(?:status|passed)"[^{}]*\}', output, re.DOTALL)
-        if json_match:
-            try:
-                data = json.loads(json_match.group())
-                if isinstance(data, dict):
-                    if is_verify:
-                        return {
-                            "passed": data.get("passed", False),
-                            "findings": data.get("findings", []),
-                            "summary": data.get("summary", ""),
-                        }
-                    return {
-                        "status": data.get("status", "completed"),
-                        "changed_files": data.get("changed_files", {}),
-                        "summary": data.get("summary", output[:200]),
-                    }
-            except json.JSONDecodeError:
-                pass
-
-        if is_verify:
-            return {"passed": True, "findings": [], "summary": output[:200]}
-        return {"status": "completed", "changed_files": {}, "summary": output[:200]}
 
     def active_count(self) -> int:
         return len(self._active)
