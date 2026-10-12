@@ -215,8 +215,9 @@ class WorkerPool:
         worker-targeted messages via topic subscription.
         """
         assert self._bus is not None
-        self._bus.subscribe_topic(MessageType.WORK_ITEM, self._on_work_item_topic)
-        self._bus.subscribe_topic(MessageType.VERIFY_REQUEST, self._on_verify_topic)
+        # The pool takes delivery of work sent to any worker-<id> address.
+        self._bus.subscribe_topic(MessageType.WORK_ITEM, self._on_work_item_topic, consumes=True)
+        self._bus.subscribe_topic(MessageType.VERIFY_REQUEST, self._on_verify_topic, consumes=True)
 
         try:
             async for envelope in self._bus.subscribe("worker-pool"):
@@ -226,13 +227,14 @@ class WorkerPool:
         except asyncio.CancelledError:
             pass
 
-    def _on_work_item_topic(self, envelope: MessageEnvelope) -> None:
+    def _on_work_item_topic(self, envelope: MessageEnvelope) -> bool:
         if self._running and envelope.target.agent_type == "worker":
             asyncio.get_event_loop().create_task(self._dispatch(envelope))
+            return True
+        return False
 
-    def _on_verify_topic(self, envelope: MessageEnvelope) -> None:
-        if self._running and envelope.target.agent_type == "worker":
-            asyncio.get_event_loop().create_task(self._dispatch(envelope))
+    def _on_verify_topic(self, envelope: MessageEnvelope) -> bool:
+        return self._on_work_item_topic(envelope)
 
     async def _dispatch(self, envelope: MessageEnvelope) -> None:
         worker_id = envelope.target.agent_id

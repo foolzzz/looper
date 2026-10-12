@@ -18,6 +18,10 @@ from .message import MessageEnvelope, MessageType
 
 logger = logging.getLogger(__name__)
 
+# Planners and Workers exist per task and never survive a restart; the server
+# stops their tasks at startup, so their journaled messages are not replayed.
+_PER_TASK_AGENT_TYPES = frozenset({"planner", "worker"})
+
 
 class MessageJournal:
     """Append-only JSONL journal for crash recovery.
@@ -102,6 +106,7 @@ class MessageBus:
     def __init__(self, runtime_root: Path) -> None:
         self._queues: dict[str, asyncio.Queue[MessageEnvelope]] = {}
         self._topic_subscribers: dict[str, list[Callable[[MessageEnvelope], Any]]] = {}
+        self._topic_consumers: dict[str, list[Callable[[MessageEnvelope], bool]]] = {}
         self._journal = MessageJournal(runtime_root / ".local" / "agent-bus")
         self._reply_futures: dict[str, asyncio.Future[MessageEnvelope]] = {}
         self._started = False
@@ -111,12 +116,26 @@ class MessageBus:
         return self._journal
 
     async def start(self) -> None:
-        """Replay undelivered messages from the journal."""
-        undelivered = self._journal.undelivered()
-        if undelivered:
-            logger.info("replaying %d undelivered messages from journal", len(undelivered))
-            for envelope in undelivered:
+        """Replay undelivered messages from the journal, then compact it.
+
+        Messages for per-task agents are dropped instead: replaying them would
+        re-run work for tasks that were stopped when the server restarted.
+        """
+        replay: list[MessageEnvelope] = []
+        dropped = 0
+        for envelope in self._journal.undelivered():
+            if envelope.target.agent_type in _PER_TASK_AGENT_TYPES:
+                self._journal.mark_delivered(envelope.message_id)
+                dropped += 1
+            else:
+                replay.append(envelope)
+        if dropped:
+            logger.info("dropped %d undelivered messages for per-task agents of a previous run", dropped)
+        if replay:
+            logger.info("replaying %d undelivered messages from journal", len(replay))
+            for envelope in replay:
                 await self._deliver(envelope, journaled=True)
+        self._journal.compact()
         self._started = True
 
     async def publish(self, envelope: MessageEnvelope) -> None:
@@ -125,9 +144,12 @@ class MessageBus:
         await self._deliver(envelope, journaled=True)
 
     async def _deliver(self, envelope: MessageEnvelope, *, journaled: bool = False) -> None:
-        target_id = envelope.target.agent_id
-        q = self.get_queue(target_id)
-        await q.put(envelope)
+        msg_type = envelope.message_type.value if isinstance(envelope.message_type, MessageType) else envelope.message_type
+        if self._hand_to_consumer(envelope, msg_type):
+            if journaled:
+                self._journal.mark_delivered(envelope.message_id)
+        else:
+            await self.get_queue(envelope.target.agent_id).put(envelope)
 
         # Resolve any pending request-reply futures
         if envelope.reply_to and envelope.reply_to in self._reply_futures:
@@ -136,12 +158,20 @@ class MessageBus:
                 future.set_result(envelope)
 
         # Notify topic subscribers
-        msg_type = envelope.message_type.value if isinstance(envelope.message_type, MessageType) else envelope.message_type
         for callback in self._topic_subscribers.get(msg_type, []):
             try:
                 callback(envelope)
             except Exception:
                 logger.exception("topic subscriber error for %s", msg_type)
+
+    def _hand_to_consumer(self, envelope: MessageEnvelope, msg_type: str) -> bool:
+        for callback in self._topic_consumers.get(msg_type, []):
+            try:
+                if callback(envelope):
+                    return True
+            except Exception:
+                logger.exception("topic consumer error for %s", msg_type)
+        return False
 
     def get_queue(self, agent_id: str) -> asyncio.Queue[MessageEnvelope]:
         """Get or create the message queue for an agent."""
@@ -178,10 +208,18 @@ class MessageBus:
         self,
         message_type: str | MessageType,
         callback: Callable[[MessageEnvelope], Any],
+        *,
+        consumes: bool = False,
     ) -> None:
-        """Register a topic subscriber for observing messages (dashboards, logging)."""
+        """Register a topic subscriber.
+
+        An observer (the default) sees each message while it is still queued
+        for its target. A consumer takes delivery: when its callback returns
+        True, the message is marked delivered and is not queued for its target.
+        """
         key = message_type.value if isinstance(message_type, MessageType) else message_type
-        self._topic_subscribers.setdefault(key, []).append(callback)
+        subscribers = self._topic_consumers if consumes else self._topic_subscribers
+        subscribers.setdefault(key, []).append(callback)
 
     def unsubscribe_topic(
         self,
@@ -189,9 +227,10 @@ class MessageBus:
         callback: Callable[[MessageEnvelope], Any],
     ) -> None:
         key = message_type.value if isinstance(message_type, MessageType) else message_type
-        subs = self._topic_subscribers.get(key, [])
-        if callback in subs:
-            subs.remove(callback)
+        for subscribers in (self._topic_subscribers, self._topic_consumers):
+            subs = subscribers.get(key, [])
+            if callback in subs:
+                subs.remove(callback)
 
     async def drain_queue(self, agent_id: str) -> list[MessageEnvelope]:
         """Non-blocking drain of all queued messages for an agent."""

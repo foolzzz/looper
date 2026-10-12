@@ -16,6 +16,7 @@ from loopx.agents.message import (
     MessageEnvelope,
     MessageType,
     channel_address,
+    planner_address,
     worker_address,
 )
 
@@ -328,3 +329,106 @@ class TestMessageBus:
             assert len(received) == 0
 
         asyncio.run(_run())
+
+
+class TestTopicConsumers:
+    def test_consumer_takes_delivery(self, tmp_path: Path) -> None:
+        async def _run() -> None:
+            bus = MessageBus(tmp_path)
+            await bus.start()
+            taken: list[MessageEnvelope] = []
+            observed: list[MessageEnvelope] = []
+            bus.subscribe_topic(MessageType.WORK_ITEM, lambda e: taken.append(e) or True, consumes=True)
+            bus.subscribe_topic(MessageType.WORK_ITEM, observed.append)
+            env = _make_envelope(target=worker_address("w1"), message_type=MessageType.WORK_ITEM)
+            await bus.publish(env)
+            assert [e.message_id for e in taken] == [env.message_id]
+            assert [e.message_id for e in observed] == [env.message_id]
+            assert bus.pending_count("w1") == 0  # not left in a queue nobody reads
+            assert bus.journal.undelivered() == []
+
+        asyncio.run(_run())
+
+    def test_declined_message_stays_queued(self, tmp_path: Path) -> None:
+        async def _run() -> None:
+            bus = MessageBus(tmp_path)
+            await bus.start()
+            bus.subscribe_topic(MessageType.WORK_ITEM, lambda e: False, consumes=True)
+            env = _make_envelope(target=worker_address("w1"), message_type=MessageType.WORK_ITEM)
+            await bus.publish(env)
+            assert bus.pending_count("w1") == 1
+            assert [e.message_id for e in bus.journal.undelivered()] == [env.message_id]
+
+        asyncio.run(_run())
+
+    def test_unsubscribe_consumer(self, tmp_path: Path) -> None:
+        async def _run() -> None:
+            bus = MessageBus(tmp_path)
+            await bus.start()
+            consumer = lambda e: True  # noqa: E731
+            bus.subscribe_topic(MessageType.WORK_ITEM, consumer, consumes=True)
+            bus.unsubscribe_topic(MessageType.WORK_ITEM, consumer)
+            await bus.publish(_make_envelope(target=worker_address("w1"), message_type=MessageType.WORK_ITEM))
+            assert bus.pending_count("w1") == 1
+
+        asyncio.run(_run())
+
+
+class TestReplay:
+    def test_messages_for_per_task_agents_are_dropped(self, tmp_path: Path) -> None:
+        """Planners and Workers do not survive a restart; their tasks are stopped."""
+        journal = MessageJournal(tmp_path / ".local" / "agent-bus")
+        for_manager = _make_envelope(target=MANAGER_ADDRESS)
+        stale = [
+            _make_envelope(target=worker_address("w1"), message_type=MessageType.WORK_ITEM),
+            _make_envelope(target=planner_address("t1"), message_type=MessageType.WORK_RESULT),
+            _make_envelope(target=PLANNER_ADDRESS, message_type=MessageType.WORK_RESULT),
+        ]
+        for env in [for_manager, *stale]:
+            journal.append(env)
+
+        async def _run() -> MessageBus:
+            bus = MessageBus(tmp_path)
+            await bus.start()
+            return bus
+
+        bus = asyncio.run(_run())
+        assert bus.pending_count("manager") == 1
+        assert bus.pending_count("w1") == 0
+        assert bus.pending_count("planner-t1") == 0
+        assert bus.pending_count("planner") == 0
+        # Only the replayed message remains in the journal; the stale ones are gone.
+        lines = (tmp_path / ".local" / "agent-bus" / "journal.jsonl").read_text().splitlines()
+        assert [json.loads(line)["message_id"] for line in lines] == [for_manager.message_id]
+        assert [e.message_id for e in MessageJournal(tmp_path / ".local" / "agent-bus").undelivered()] == [
+            for_manager.message_id
+        ]
+
+
+class TestWorkerPoolConsumesWork:
+    def test_dispatched_work_is_delivered_once(self, tmp_path: Path) -> None:
+        from unittest.mock import AsyncMock
+
+        from loopx.agents.tiers.worker import WorkerConfig, WorkerPool
+
+        async def _run() -> tuple[MessageBus, AsyncMock]:
+            bus = MessageBus(tmp_path)
+            await bus.start()
+            pool = WorkerPool(config=WorkerConfig(), runtime_root=tmp_path)
+            pool._run_worker = AsyncMock()  # type: ignore[method-assign]
+            await pool.start(bus)
+            await asyncio.sleep(0)  # let the listener register its topics
+            await bus.publish(_make_envelope(
+                source=planner_address("t1"),
+                target=worker_address("w1"),
+                message_type=MessageType.WORK_ITEM,
+                payload={"task_id": "s1"},
+            ))
+            await asyncio.sleep(0.05)
+            await pool.stop()
+            return bus, pool._run_worker  # type: ignore[return-value]
+
+        bus, run_worker = asyncio.run(_run())
+        run_worker.assert_awaited_once()
+        assert bus.pending_count("w1") == 0
+        assert bus.journal.undelivered() == []
