@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Send, Loader2, Bot, User } from "lucide-react";
+import { Send, Loader2, Bot, User, Plus } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import { sendChat, streamSSE, type SSEEvent } from "@/lib/api";
 import { cn } from "@/lib/utils";
@@ -12,19 +12,86 @@ interface ChatMessage {
   streaming?: boolean;
 }
 
+const STORAGE_SESSION_KEY = "loopx-chat-session-id";
+
+function getOrCreateSessionId(): string {
+  const existing = localStorage.getItem(STORAGE_SESSION_KEY);
+  if (existing) return existing;
+  const id = `session-${crypto.randomUUID().slice(0, 8)}`;
+  localStorage.setItem(STORAGE_SESSION_KEY, id);
+  return id;
+}
+
+function loadMessages(sessionId: string): ChatMessage[] {
+  try {
+    const raw = localStorage.getItem(`loopx-chat-messages-${sessionId}`);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.map((m: ChatMessage) => ({ ...m, streaming: false }));
+  } catch {
+    return [];
+  }
+}
+
+function saveMessages(sessionId: string, messages: ChatMessage[]) {
+  const toSave = messages.map(({ streaming, ...rest }) => rest);
+  localStorage.setItem(`loopx-chat-messages-${sessionId}`, JSON.stringify(toSave));
+}
+
 export function ChatPage() {
-  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [sessionId, setSessionId] = useState(getOrCreateSessionId);
+  const [messages, setMessages] = useState<ChatMessage[]>(() => loadMessages(getOrCreateSessionId()));
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
   const [phase, setPhase] = useState("");
   const scrollRef = useRef<HTMLDivElement>(null);
   const cleanupRef = useRef<(() => void) | null>(null);
+  const skipSaveRef = useRef(false);
+  const messagesRef = useRef(messages);
+  messagesRef.current = messages;
+  const sessionIdRef = useRef(sessionId);
+  sessionIdRef.current = sessionId;
 
   const scrollToBottom = useCallback(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
   }, []);
 
   useEffect(scrollToBottom, [messages, scrollToBottom]);
+
+  useEffect(() => {
+    if (skipSaveRef.current) {
+      skipSaveRef.current = false;
+      return;
+    }
+    if (messages.length > 0) {
+      saveMessages(sessionId, messages);
+    }
+  }, [messages, sessionId]);
+
+  // Save on page refresh / tab close
+  useEffect(() => {
+    const onBeforeUnload = () => {
+      if (messagesRef.current.length > 0) {
+        saveMessages(sessionIdRef.current, messagesRef.current);
+      }
+    };
+    window.addEventListener("beforeunload", onBeforeUnload);
+    return () => window.removeEventListener("beforeunload", onBeforeUnload);
+  }, []);
+
+  const handleNewChat = () => {
+    cleanupRef.current?.();
+    cleanupRef.current = null;
+    const newId = `session-${crypto.randomUUID().slice(0, 8)}`;
+    localStorage.setItem(STORAGE_SESSION_KEY, newId);
+    setSessionId(newId);
+    skipSaveRef.current = true;
+    setMessages([]);
+    setSending(false);
+    setPhase("");
+    setInput("");
+  };
 
   const handleSend = async () => {
     const text = input.trim();
@@ -53,7 +120,7 @@ export function ChatPage() {
     setMessages((prev) => [...prev, assistantMsg]);
 
     try {
-      const { events_url } = await sendChat(text);
+      const { events_url } = await sendChat(text, sessionId);
 
       cleanupRef.current = streamSSE(
         events_url,
@@ -127,12 +194,23 @@ export function ChatPage() {
             <h1 className="text-lg font-semibold leading-tight">Manager Agent</h1>
             <p className="text-[11px] text-muted-foreground leading-tight">管家 · Claude Code session</p>
           </div>
-          <div className="ml-auto flex items-center gap-1.5">
-            <span className="relative flex h-2 w-2">
-              <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-success opacity-75" />
-              <span className="relative inline-flex h-2 w-2 rounded-full bg-success" />
-            </span>
-            <span className="text-xs text-muted-foreground">Online</span>
+          <div className="ml-auto flex items-center gap-3">
+            <span className="font-mono text-[11px] text-muted-foreground">{sessionId}</span>
+            <button
+              type="button"
+              onClick={handleNewChat}
+              className="flex h-7 w-7 items-center justify-center rounded-md border border-border text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
+              title="New conversation"
+            >
+              <Plus className="h-3.5 w-3.5" />
+            </button>
+            <div className="flex items-center gap-1.5">
+              <span className="relative flex h-2 w-2">
+                <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-success opacity-75" />
+                <span className="relative inline-flex h-2 w-2 rounded-full bg-success" />
+              </span>
+              <span className="text-xs text-muted-foreground">Online</span>
+            </div>
           </div>
         </div>
         {phase && (

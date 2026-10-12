@@ -29,7 +29,15 @@ function App() {
   return (
     <div className="flex h-screen w-screen overflow-hidden bg-background">
       <Sidebar activePage={page} onNavigate={navigate} />
-      <main className="flex-1 overflow-y-auto p-6">{renderPage(page)}</main>
+      <main className="flex-1 overflow-hidden">
+        {/* Chat stays mounted so state, SSE, and scroll position survive navigation */}
+        <div className={page === "chat" ? "h-full" : "hidden"}>
+          <ChatPage />
+        </div>
+        {page !== "chat" && (
+          <div className="h-full overflow-y-auto p-6">{renderPage(page)}</div>
+        )}
+      </main>
     </div>
   );
 }
@@ -38,12 +46,12 @@ function renderPage(page: Page) {
   switch (page) {
     case "dashboard":
       return <DashboardPage />;
-    case "chat":
-      return <ChatPage />;
     case "tasks":
       return <TasksPage />;
     case "agents":
       return <AgentsPage />;
+    default:
+      return null;
   }
 }
 

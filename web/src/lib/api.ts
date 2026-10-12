@@ -38,11 +38,11 @@ export async function fetchTasks(): Promise<TaskInfo[]> {
   return res.json();
 }
 
-export async function sendChat(text: string): Promise<ChatSendResponse> {
+export async function sendChat(text: string, sessionId?: string): Promise<ChatSendResponse> {
   const res = await fetch(`${API_BASE}/chat/send`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ text }),
+    body: JSON.stringify({ text, session_id: sessionId }),
   });
   if (!res.ok) throw new Error(`chat send ${res.status}`);
   return res.json();

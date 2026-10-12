@@ -94,6 +94,16 @@ async def _run_agent_system(
                 "role": "planner",
                 "runtime": "claude-code",
                 "timeout_seconds": 1200,
+                "system_prompt": (
+                    "You are a Planner Agent. Your job is to:\n"
+                    "1. Receive a task requirement\n"
+                    "2. Decompose it into concrete, executable steps\n"
+                    "3. Dispatch steps to Worker agents\n"
+                    "4. Monitor progress and verify results\n"
+                    "5. Report task completion or failure\n\n"
+                    "Always decompose complex tasks into multiple focused steps. "
+                    "Each step should be independently executable and verifiable."
+                ),
             },
             {
                 "agent_id": "worker",
@@ -102,6 +112,14 @@ async def _run_agent_system(
                 "runtime": "claude-code",
                 "max_concurrency": 3,
                 "timeout_seconds": 600,
+                "system_prompt": (
+                    "You are a Worker Agent. Execute the assigned task precisely:\n"
+                    "1. Read and understand the instruction\n"
+                    "2. Make the required code changes\n"
+                    "3. Run validation commands if provided\n"
+                    "4. Report results as structured JSON\n\n"
+                    "Focus on the specific task. Do not make changes beyond what is requested."
+                ),
             },
         ])
         logger.info("database initialised")

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowLeft,
   CheckCircle2,
@@ -11,9 +11,18 @@ import {
   Terminal,
   Bot,
   User,
+  GitBranch,
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
+import {
+  ReactFlow,
+  Background,
+  type Node,
+  type Edge,
+  Position,
+} from "@xyflow/react";
+import "@xyflow/react/dist/style.css";
 import {
   fetchTaskDetail,
   fetchTaskActivity,
@@ -24,12 +33,14 @@ import {
   type ActivityEvent,
 } from "@/lib/api";
 
-type Tab = "overview" | "sessions" | "conversation";
+type Tab = "overview" | "pipeline" | "sessions" | "conversation";
 
 function stepStatusIcon(status: string) {
   switch (status) {
+    case "dispatched":
     case "running":
       return <Loader2 className="h-4 w-4 animate-spin text-primary" />;
+    case "verified":
     case "completed":
       return <CheckCircle2 className="h-4 w-4 text-success" />;
     case "failed":
@@ -41,8 +52,12 @@ function stepStatusIcon(status: string) {
 
 function stepStatusBadge(status: string) {
   switch (status) {
+    case "dispatched":
+      return <Badge variant="default">Dispatched</Badge>;
     case "running":
       return <Badge variant="default">Running</Badge>;
+    case "verified":
+      return <Badge variant="success">Verified</Badge>;
     case "completed":
       return <Badge variant="success">Completed</Badge>;
     case "failed":
@@ -367,6 +382,195 @@ function ConversationTab({ taskId }: { taskId: string }) {
   );
 }
 
+// --- Pipeline DAG Tab ---
+
+const STATUS_COLORS: Record<string, { bg: string; border: string; text: string }> = {
+  pending:   { bg: "#1a1a2e", border: "#3b3b5c", text: "#9ca3af" },
+  assigned:  { bg: "#1a1a2e", border: "#6366f1", text: "#a5b4fc" },
+  running:   { bg: "#0c1a3a", border: "#3b82f6", text: "#93c5fd" },
+  executing: { bg: "#0c1a3a", border: "#3b82f6", text: "#93c5fd" },
+  dispatched:{ bg: "#0c1a3a", border: "#3b82f6", text: "#93c5fd" },
+  completed: { bg: "#052e16", border: "#22c55e", text: "#86efac" },
+  verified:  { bg: "#052e16", border: "#22c55e", text: "#86efac" },
+  failed:    { bg: "#2a0a0a", border: "#ef4444", text: "#fca5a5" },
+  cancelled: { bg: "#1a1a2e", border: "#6b7280", text: "#9ca3af" },
+};
+
+function statusColor(status: string) {
+  return STATUS_COLORS[status] ?? STATUS_COLORS.pending;
+}
+
+function PipelineTab({ task }: { task: TaskDetail }) {
+  const steps = task.steps || [];
+
+  const { nodes, edges } = useMemo(() => {
+    const ns: Node[] = [];
+    const es: Edge[] = [];
+    const nodeW = 200;
+    const nodeH = 60;
+    const gapY = 90;
+    const centerX = 300;
+
+    const managerColor = statusColor("completed");
+    ns.push({
+      id: "manager",
+      position: { x: centerX - nodeW / 2, y: 0 },
+      data: { label: "Manager" },
+      style: {
+        width: nodeW, height: nodeH,
+        background: managerColor.bg, border: `2px solid ${managerColor.border}`,
+        color: managerColor.text, borderRadius: 12,
+        display: "flex", alignItems: "center", justifyContent: "center",
+        fontSize: 13, fontWeight: 600,
+      },
+      sourcePosition: Position.Bottom,
+      targetPosition: Position.Top,
+    });
+
+    const plannerStatus = task.status === "completed" || task.status === "failed" ? task.status : "running";
+    const plannerColor = statusColor(plannerStatus);
+    ns.push({
+      id: "planner",
+      position: { x: centerX - nodeW / 2, y: gapY },
+      data: { label: `Planner ${task.planner_id ? `(${task.planner_id.slice(0, 20)})` : ""}` },
+      style: {
+        width: nodeW, height: nodeH,
+        background: plannerColor.bg, border: `2px solid ${plannerColor.border}`,
+        color: plannerColor.text, borderRadius: 12,
+        display: "flex", alignItems: "center", justifyContent: "center",
+        fontSize: 13, fontWeight: 600,
+      },
+      sourcePosition: Position.Bottom,
+      targetPosition: Position.Top,
+    });
+    es.push({ id: "e-manager-planner", source: "manager", target: "planner", animated: plannerStatus === "running" });
+
+    if (steps.length === 0) {
+      const waitColor = statusColor("pending");
+      ns.push({
+        id: "waiting",
+        position: { x: centerX - nodeW / 2, y: gapY * 2 },
+        data: { label: "Waiting for steps..." },
+        style: {
+          width: nodeW, height: nodeH,
+          background: waitColor.bg, border: `2px dashed ${waitColor.border}`,
+          color: waitColor.text, borderRadius: 12,
+          display: "flex", alignItems: "center", justifyContent: "center",
+          fontSize: 12, fontStyle: "italic",
+        },
+        sourcePosition: Position.Bottom,
+        targetPosition: Position.Top,
+      });
+      es.push({ id: "e-planner-wait", source: "planner", target: "waiting", animated: true });
+    } else {
+      const totalWidth = steps.length * (nodeW + 40) - 40;
+      const startX = centerX - totalWidth / 2;
+
+      steps.forEach((step, i) => {
+        const stepId = `step-${i}`;
+        const sc = statusColor(step.status);
+        const x = startX + i * (nodeW + 40);
+        const y = gapY * 2;
+
+        ns.push({
+          id: stepId,
+          position: { x, y },
+          data: { label: `Step ${i + 1}: ${step.instruction.slice(0, 30)}${step.instruction.length > 30 ? "..." : ""}` },
+          style: {
+            width: nodeW, height: nodeH,
+            background: sc.bg, border: `2px solid ${sc.border}`,
+            color: sc.text, borderRadius: 12,
+            display: "flex", alignItems: "center", justifyContent: "center",
+            fontSize: 11, fontWeight: 500,
+            padding: "0 8px", textAlign: "center" as const,
+          },
+          sourcePosition: Position.Bottom,
+          targetPosition: Position.Top,
+        });
+        es.push({
+          id: `e-planner-${stepId}`,
+          source: "planner",
+          target: stepId,
+          animated: step.status === "dispatched" || step.status === "running",
+        });
+
+        if (step.worker_id) {
+          const workerId = `worker-${i}`;
+          const wc = statusColor(step.status === "verified" || step.status === "completed" ? "completed" : step.status);
+          ns.push({
+            id: workerId,
+            position: { x, y: gapY * 3 },
+            data: { label: step.worker_id.slice(0, 20) },
+            style: {
+              width: nodeW, height: 44,
+              background: wc.bg, border: `1px solid ${wc.border}`,
+              color: wc.text, borderRadius: 8,
+              display: "flex", alignItems: "center", justifyContent: "center",
+              fontSize: 10,
+            },
+            sourcePosition: Position.Bottom,
+            targetPosition: Position.Top,
+          });
+          es.push({
+            id: `e-${stepId}-${workerId}`,
+            source: stepId,
+            target: workerId,
+            animated: step.status === "dispatched",
+          });
+        }
+      });
+
+      const resultY = gapY * (steps.some(s => s.worker_id) ? 4 : 3);
+      const resultStatus = task.status === "completed" ? "completed" : task.status === "failed" ? "failed" : "pending";
+      const rc = statusColor(resultStatus);
+      ns.push({
+        id: "result",
+        position: { x: centerX - nodeW / 2, y: resultY },
+        data: { label: task.status === "completed" ? "Task Complete" : task.status === "failed" ? "Task Failed" : "In Progress..." },
+        style: {
+          width: nodeW, height: nodeH,
+          background: rc.bg, border: `2px solid ${rc.border}`,
+          color: rc.text, borderRadius: 12,
+          display: "flex", alignItems: "center", justifyContent: "center",
+          fontSize: 13, fontWeight: 600,
+        },
+        targetPosition: Position.Top,
+      });
+
+      steps.forEach((step, i) => {
+        const sourceId = step.worker_id ? `worker-${i}` : `step-${i}`;
+        es.push({
+          id: `e-${sourceId}-result`,
+          source: sourceId,
+          target: "result",
+        });
+      });
+    }
+
+    return { nodes: ns, edges: es };
+  }, [task, steps]);
+
+  return (
+    <div className="h-[500px] w-full">
+      <ReactFlow
+        nodes={nodes}
+        edges={edges}
+        fitView
+        proOptions={{ hideAttribution: true }}
+        nodesDraggable={false}
+        nodesConnectable={false}
+        elementsSelectable={false}
+        defaultEdgeOptions={{
+          type: "smoothstep",
+          style: { stroke: "#4b5563", strokeWidth: 2 },
+        }}
+      >
+        <Background color="#1f2937" gap={20} />
+      </ReactFlow>
+    </div>
+  );
+}
+
 // --- Main Page ---
 
 interface TaskDetailPageProps {
@@ -395,6 +599,7 @@ export function TaskDetailPage({ taskId, onBack }: TaskDetailPageProps) {
 
   const tabs: { id: Tab; label: string; icon: React.ElementType }[] = [
     { id: "overview", label: "Overview", icon: Activity },
+    { id: "pipeline", label: "Pipeline", icon: GitBranch },
     { id: "sessions", label: "Sessions", icon: Terminal },
     { id: "conversation", label: "Conversation", icon: MessageSquare },
   ];
@@ -458,6 +663,7 @@ export function TaskDetailPage({ taskId, onBack }: TaskDetailPageProps) {
         )}
 
         {task && tab === "overview" && <OverviewTab task={task} />}
+        {task && tab === "pipeline" && <PipelineTab task={task} />}
         {task && tab === "sessions" && <SessionsTab taskId={taskId} />}
         {task && tab === "conversation" && <ConversationTab taskId={taskId} />}
       </div>

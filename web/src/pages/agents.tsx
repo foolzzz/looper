@@ -1,6 +1,7 @@
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 import {
   Bot,
+  User,
   Loader2,
   RefreshCw,
   Save,
@@ -663,6 +664,7 @@ function PromptTab({
 function HistoryTab({ agentId }: { agentId: string }) {
   const [records, setRecords] = useState<LlmRecord[]>([]);
   const [loading, setLoading] = useState(true);
+  const scrollRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     setLoading(true);
@@ -671,6 +673,10 @@ function HistoryTab({ agentId }: { agentId: string }) {
       .catch(() => setRecords([]))
       .finally(() => setLoading(false));
   }, [agentId]);
+
+  useEffect(() => {
+    scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
+  }, [records]);
 
   if (loading) {
     return (
@@ -689,42 +695,45 @@ function HistoryTab({ agentId }: { agentId: string }) {
   }
 
   return (
-    <div className="space-y-2">
-      <div className="grid grid-cols-[1fr_2fr_2fr_80px_80px] gap-2 px-3 py-2 text-xs font-medium text-muted-foreground">
-        <span>Time</span>
-        <span>Input</span>
-        <span>Output</span>
-        <span>Duration</span>
-        <span>Status</span>
-      </div>
-      <div className="divide-y divide-border rounded-md border border-border">
-        {records.map((rec) => (
-          <div
-            key={rec.id}
-            className="grid grid-cols-[1fr_2fr_2fr_80px_80px] gap-2 px-3 py-2.5 text-xs"
-          >
-            <span className="text-muted-foreground truncate" title={rec.created_at}>
-              {formatTime(rec.created_at)}
-            </span>
-            <span className="truncate" title={rec.input_summary ?? ""}>
-              {rec.input_summary || "—"}
-            </span>
-            <span className="truncate" title={rec.output_summary ?? ""}>
-              {rec.output_summary || "—"}
-            </span>
-            <span className="text-muted-foreground">
-              {rec.duration_ms != null ? `${rec.duration_ms}ms` : "—"}
-            </span>
-            <span>
-              {rec.error ? (
-                <Badge variant="destructive">Error</Badge>
-              ) : (
-                <Badge variant="success">OK</Badge>
+    <div ref={scrollRef} className="max-h-[500px] overflow-y-auto space-y-4 pr-1">
+      {records.map((rec) => (
+        <div key={rec.id} className="space-y-2">
+          {rec.input_summary && (
+            <div className="flex gap-3 justify-end">
+              <div className="max-w-[70%] rounded-lg px-4 py-2.5 text-sm bg-primary text-primary-foreground">
+                <p className="whitespace-pre-wrap">{rec.input_summary}</p>
+              </div>
+              <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-accent">
+                <User className="h-3.5 w-3.5 text-muted-foreground" />
+              </div>
+            </div>
+          )}
+
+          <div className="flex gap-3 justify-start">
+            <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-primary/10">
+              <Bot className="h-3.5 w-3.5 text-primary" />
+            </div>
+            <div
+              className={cn(
+                "max-w-[70%] rounded-lg px-4 py-2.5 text-sm",
+                rec.error
+                  ? "bg-destructive/10 text-destructive border border-destructive/30"
+                  : "bg-muted text-foreground",
               )}
-            </span>
+            >
+              <p className="whitespace-pre-wrap">
+                {rec.error || rec.output_summary || "—"}
+              </p>
+            </div>
           </div>
-        ))}
-      </div>
+
+          <div className="flex items-center gap-3 pl-10 text-[10px] text-muted-foreground/60">
+            <span>{formatTime(rec.created_at)}</span>
+            {rec.duration_ms != null && <span>{rec.duration_ms}ms</span>}
+            {rec.model && <span>{rec.model}</span>}
+          </div>
+        </div>
+      ))}
     </div>
   );
 }

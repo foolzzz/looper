@@ -48,7 +48,7 @@ async def update_step_status(
 ) -> None:
     pool = pool or get_pool()
     now = datetime.now(timezone.utc)
-    completed_at = now if status in ("completed", "failed", "skipped") else None
+    completed_at = now if status in ("completed", "failed", "skipped", "verified") else None
     result_json = json.dumps(result) if result else None
 
     await pool.execute(

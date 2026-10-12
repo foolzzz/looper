@@ -224,15 +224,8 @@ class ManagerAgent:
         parsed = self._parse_response(response)
 
         if parsed.get("needs_clarification"):
-            await self._bus.publish(MessageEnvelope.create(
-                source=MANAGER_ADDRESS,
-                target=envelope.source,
-                message_type=MessageType.CLARIFICATION_REQUEST,
-                payload={"text": parsed.get("clarification_text", "")},
-                correlation_id=envelope.correlation_id,
-                reply_to=envelope.message_id,
-                metadata={"origin_channel_id": envelope.metadata.get("origin_channel_id")},
-            ))
+            clarification = parsed.get("clarification_text", "")
+            await self._send_reply(envelope, clarification)
         elif parsed.get("action") == "task_request":
             await self._bus.publish(MessageEnvelope.create(
                 source=MANAGER_ADDRESS,
@@ -444,23 +437,48 @@ class ManagerAgent:
     def _parse_response(self, response: str) -> dict[str, Any]:
         response = response.strip()
 
+        task_json: dict[str, Any] | None = None
+        json_start = -1
+
         if response.startswith("{"):
             try:
                 data = json.loads(response)
-                if isinstance(data, dict) and "action" in data:
-                    return data
+                if isinstance(data, dict) and data.get("action") == "task_request":
+                    task_json = data
+                    json_start = 0
             except json.JSONDecodeError:
                 pass
 
-        if "```json" in response:
-            start = response.index("```json") + 7
-            end = response.index("```", start)
+        if task_json is None and "```json" in response:
             try:
+                fence = response.index("```json")
+                start = fence + 7
+                end = response.index("```", start)
                 data = json.loads(response[start:end].strip())
-                if isinstance(data, dict) and "action" in data:
-                    return data
+                if isinstance(data, dict) and data.get("action") == "task_request":
+                    task_json = data
+                    json_start = fence
             except (json.JSONDecodeError, ValueError):
                 pass
+
+        if task_json is None and "{" in response:
+            idx = response.index("{")
+            candidate = response[idx:]
+            try:
+                data = json.loads(candidate)
+                if isinstance(data, dict) and data.get("action") == "task_request":
+                    task_json = data
+                    json_start = idx
+            except json.JSONDecodeError:
+                pass
+
+        if task_json is not None:
+            prose_before = response[:json_start].strip() if json_start > 0 else ""
+            if prose_before and len(prose_before) > 20:
+                task_json["needs_clarification"] = True
+                task_json["clarification_text"] = prose_before
+                return task_json
+            return task_json
 
         return {"response_text": response}
 

@@ -25,6 +25,8 @@ from ..message import (
     worker_address,
 )
 
+from ...db import activity as db_activity
+
 logger = logging.getLogger(__name__)
 
 MAX_POOL_SIZE = 4
@@ -202,9 +204,10 @@ class WorkerPool:
         *,
         is_verify: bool = False,
     ) -> dict[str, Any]:
-        """Run Claude Code as a subprocess to execute the work item."""
+        """Run Claude Code as a subprocess with streaming progress."""
         payload = envelope.payload
-        instruction = payload.get("instruction", "")
+        worker_id = envelope.target.agent_id
+        parent_task_id = payload.get("parent_task_id", "")
         context = payload.get("context", {})
         project_root = context.get("project_root", str(self._config.work_dir))
 
@@ -216,7 +219,7 @@ class WorkerPool:
         command = [
             self._config.claude_bin,
             "--print",
-            "--output-format", "json",
+            "--output-format", "stream-json",
             "--permission-mode", "plan",
             "--tools", "Read,Glob,Grep,Write,Edit,Bash",
             "--disable-slash-commands",
@@ -233,28 +236,94 @@ class WorkerPool:
         except OSError as exc:
             return {"status": "failed", "error": f"Cannot start Claude Code: {exc}"}
 
+        final_result_text = ""
+        collected_text: list[str] = []
+
+        async def _read_stream() -> None:
+            nonlocal final_result_text
+            assert process.stdout is not None
+            while True:
+                raw_line = await process.stdout.readline()
+                if not raw_line:
+                    break
+                line = raw_line.decode("utf-8", errors="replace").strip()
+                if not line:
+                    continue
+                try:
+                    event = json.loads(line)
+                except json.JSONDecodeError:
+                    collected_text.append(line)
+                    continue
+
+                event_type = event.get("type", "")
+
+                if event_type == "assistant":
+                    msg = event.get("message", {})
+                    msg_type = msg.get("type", "")
+                    if msg_type == "tool_use":
+                        tool_name = msg.get("name", "unknown")
+                        tool_input = msg.get("input", {})
+                        summary = self._format_tool_summary(tool_name, tool_input)
+                        if parent_task_id:
+                            try:
+                                await db_activity.insert_activity(
+                                    task_id=parent_task_id,
+                                    worker=worker_id,
+                                    kind="tool_use",
+                                    summary=summary,
+                                )
+                            except Exception:
+                                logger.debug("failed to insert tool_use activity", exc_info=True)
+                    elif msg_type == "text":
+                        text = msg.get("text", "")
+                        if text:
+                            collected_text.append(text)
+
+                elif event_type == "result":
+                    final_result_text = event.get("result", "")
+                    cost = event.get("cost_usd")
+                    duration_ms = event.get("duration_ms")
+                    if parent_task_id:
+                        try:
+                            parts = ["Worker finished"]
+                            if cost is not None:
+                                parts[0] = f"Worker finished (cost: ${cost:.4f})"
+                            meta: dict[str, Any] = {}
+                            if cost is not None:
+                                meta["cost_usd"] = cost
+                            if duration_ms is not None:
+                                meta["duration_ms"] = duration_ms
+                            await db_activity.insert_activity(
+                                task_id=parent_task_id,
+                                worker=worker_id,
+                                kind="phase",
+                                summary=parts[0],
+                                metadata=meta or None,
+                            )
+                        except Exception:
+                            logger.debug("failed to insert result activity", exc_info=True)
+
         try:
-            stdout_bytes, stderr_bytes = await asyncio.wait_for(
-                process.communicate(),
-                timeout=self._config.timeout_sec,
-            )
+            await asyncio.wait_for(_read_stream(), timeout=self._config.timeout_sec)
+            await process.wait()
         except asyncio.TimeoutError:
             process.kill()
             raise
 
-        stdout = stdout_bytes.decode("utf-8", errors="replace") if stdout_bytes else ""
         return_code = process.returncode or 0
-
         if return_code != 0:
-            stderr = stderr_bytes.decode("utf-8", errors="replace") if stderr_bytes else ""
+            stderr = ""
+            if process.stderr:
+                stderr_bytes = await process.stderr.read()
+                stderr = stderr_bytes.decode("utf-8", errors="replace") if stderr_bytes else ""
             return {
                 "status": "failed",
                 "error": f"Claude Code exited with code {return_code}",
                 "stderr": stderr[:500],
             }
 
-        result = self._parse_output(stdout, is_verify=is_verify)
-        return result
+        output = final_result_text or "".join(collected_text)
+        return self._parse_output(output, is_verify=is_verify)
 
     def _build_work_prompt(self, payload: dict[str, Any]) -> str:
         instruction = payload.get("instruction", "")
@@ -302,6 +371,22 @@ class WorkerPool:
             '{"passed": true/false, "findings": ["issue1", ...], "summary": "..."}',
         ])
         return "\n".join(parts)
+
+    @staticmethod
+    def _format_tool_summary(tool_name: str, tool_input: dict[str, Any]) -> str:
+        if tool_name == "Read":
+            return f"Reading: {tool_input.get('file_path', '?')}"
+        if tool_name == "Edit":
+            return f"Editing: {tool_input.get('file_path', '?')}"
+        if tool_name == "Write":
+            return f"Writing: {tool_input.get('file_path', '?')}"
+        if tool_name == "Bash":
+            cmd = tool_input.get("command", "")
+            return f"Running: {cmd[:80]}"
+        if tool_name in ("Glob", "Grep"):
+            pattern = tool_input.get("pattern", tool_input.get("query", ""))
+            return f"{tool_name}: {pattern[:60]}"
+        return f"Tool: {tool_name}"
 
     def _parse_output(self, output: str, *, is_verify: bool = False) -> dict[str, Any]:
         """Parse Claude Code JSON output into a structured result."""

@@ -30,6 +30,8 @@ from ..message import (
 
 logger = logging.getLogger(__name__)
 
+from ...db import steps as db_steps, activity as db_activity
+
 MAX_STEPS = 8
 MAX_CONCURRENT_WORKERS = 4
 
@@ -196,6 +198,20 @@ class PlannerAgent:
         self._plan = plan
         self._save_plan(plan)
 
+        try:
+            await db_steps.upsert_steps(self._task_id, [
+                {
+                    "id": s.step_id,
+                    "index": s.index,
+                    "instruction": s.instruction,
+                    "target_files": s.target_files,
+                    "status": s.status,
+                }
+                for s in steps
+            ])
+        except Exception:
+            logger.exception("failed to persist steps for task %s", self._task_id)
+
         # Notify TaskRouter + Manager: task accepted
         await self._bus.publish(MessageEnvelope.create(
             source=self.agent_address,
@@ -232,12 +248,26 @@ class PlannerAgent:
         step.status = "dispatched"
         step.worker_id = worker_id
 
+        try:
+            await db_steps.update_step_status(
+                step.step_id, "dispatched", worker_id=worker_id,
+            )
+            await db_activity.insert_activity(
+                task_id=self._task_id,
+                worker=worker_id,
+                kind="phase",
+                summary=f"Worker dispatched: {step.instruction[:80]}",
+            )
+        except Exception:
+            logger.exception("failed to persist dispatch for step %s", step.step_id)
+
         await self._bus.publish(MessageEnvelope.create(
             source=self.agent_address,
             target=worker_address(worker_id),
             message_type=MessageType.WORK_ITEM,
             payload={
                 "task_id": step.step_id,
+                "parent_task_id": self._task_id,
                 "plan_id": plan.plan_id,
                 "step_index": step.index,
                 "instruction": step.instruction,
@@ -275,6 +305,20 @@ class PlannerAgent:
             step.status = "failed"
 
         self._save_plan(plan)
+
+        try:
+            await db_steps.update_step_status(
+                step.step_id, step.status, result=result,
+            )
+            await db_activity.insert_activity(
+                task_id=self._task_id,
+                worker=step.worker_id or "worker",
+                kind="text" if step.status == "verified" else "error",
+                summary=result.get("summary", step.status)[:200],
+            )
+        except Exception:
+            logger.exception("failed to persist work result for step %s", step.step_id)
+
         await self._report_progress(plan)
 
         if plan.is_complete:
@@ -322,6 +366,20 @@ class PlannerAgent:
             step.result["verify_findings"] = result.get("findings", [])
 
         self._save_plan(plan)
+
+        try:
+            await db_steps.update_step_status(
+                step.step_id, step.status, result=step.result,
+            )
+            await db_activity.insert_activity(
+                task_id=self._task_id,
+                worker="reviewer",
+                kind="text" if step.status == "verified" else "error",
+                summary=f"Verify {'passed' if result.get('passed') else 'failed'}: {result.get('summary', '')[:150]}",
+            )
+        except Exception:
+            logger.exception("failed to persist verify result for step %s", step.step_id)
+
         await self._report_progress(plan)
 
         if plan.is_complete:
