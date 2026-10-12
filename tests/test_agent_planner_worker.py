@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import signal
 import sys
 import tempfile
 from pathlib import Path
@@ -496,27 +497,27 @@ class TestWorkerSubprocess:
         assert result["status"] == "failed"
         assert "error_max_turns" in result["error"]
 
-    def test_subprocess_is_killed_when_reading_fails(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        from loopx.agents.tiers import worker as worker_module
+    def test_subprocess_is_killed_when_the_worker_gives_up(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        started: list[asyncio.subprocess.Process] = []
+        real_exec = asyncio.create_subprocess_exec
 
-        monkeypatch.setattr(worker_module, "STREAM_LINE_LIMIT", 1024)
+        async def _record(*args: Any, **kwargs: Any) -> asyncio.subprocess.Process:
+            process = await real_exec(*args, **kwargs)
+            started.append(process)
+            return process
 
-        async def _run() -> int:
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", _record)
+
+        async def _run() -> None:
             with tempfile.TemporaryDirectory() as tmp:
-                pid_file = Path(tmp) / "pid"
-                claude = _fake_claude(Path(tmp), (
-                    f"open({str(pid_file)!r}, 'w').write(str(os.getpid()))\n"
-                    "print('x' * 4096, flush=True)\n"
-                    "time.sleep(30)"
-                ))
-                pool = WorkerPool(config=WorkerConfig(claude_bin=claude), runtime_root=Path(tmp))
-                with pytest.raises(ValueError):
+                claude = _fake_claude(Path(tmp), "time.sleep(30)")
+                pool = WorkerPool(config=WorkerConfig(claude_bin=claude, timeout_sec=0.5), runtime_root=Path(tmp))
+                with pytest.raises(asyncio.TimeoutError):
                     await pool._execute(_work_item(Path(tmp)))
-                return int(pid_file.read_text())
 
-        pid = asyncio.run(_run())
-        with pytest.raises(ProcessLookupError):
-            os.kill(pid, 0)
+        asyncio.run(_run())
+        (process,) = started
+        assert process.returncode == -signal.SIGKILL  # killed and reaped
 
 
 def _result(text: str | None = None, **overrides: Any) -> dict[str, Any]:
