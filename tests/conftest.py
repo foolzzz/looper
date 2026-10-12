@@ -3,6 +3,7 @@ from __future__ import annotations
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -138,6 +139,42 @@ _GIT_ENV_OVERRIDES = (
     "GIT_NAMESPACE",
     "GIT_PREFIX",
 )
+
+
+# PostgreSQL writes made by the agent tiers (Planner, TaskRouter, WorkerPool).
+_AGENT_DB_WRITES = (
+    ("tasks", "create_task"),
+    ("tasks", "update_task_status"),
+    ("tasks", "update_task_phase"),
+    ("steps", "upsert_steps"),
+    ("steps", "update_step_status"),
+    ("activity", "insert_activity"),
+    ("llm_records", "insert_record"),
+)
+
+
+@pytest.fixture
+def agent_db(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
+    """Record the agent tiers' database writes instead of needing PostgreSQL.
+
+    The agent system treats PostgreSQL as a hard dependency, so message-flow
+    tests would otherwise stop at the first unguarded write. Each write becomes
+    an ``AsyncMock`` returning ``None``; the returned namespace exposes them by
+    name so a test can assert what was persisted.
+    """
+    import importlib
+    from unittest.mock import AsyncMock
+
+    from loopx.agents.tiers import planner as planner_module
+
+    db = SimpleNamespace()
+    for module_name, function in _AGENT_DB_WRITES:
+        mock = AsyncMock(return_value=None)
+        monkeypatch.setattr(importlib.import_module(f"loopx.db.{module_name}"), function, mock)
+        setattr(db, function, mock)
+    # The Planner imports this one by name rather than through its module.
+    monkeypatch.setattr(planner_module, "update_task_phase", db.update_task_phase)
+    return db
 
 
 @pytest.fixture

@@ -47,6 +47,7 @@ class TestTask:
         assert task.status == "pending"
 
 
+@pytest.mark.usefixtures("agent_db")
 class TestTaskRouter:
     def test_agent_id_and_address(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -312,15 +313,8 @@ class TestTaskRouter:
 
 class TestPlannerOutcome:
     @pytest.mark.parametrize("outcome", ["completed", "failed"])
-    def test_final_status_is_kept(self, outcome: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_final_status_is_kept(self, outcome: str, agent_db: Any) -> None:
         """Teardown must persist the Planner's outcome, not overwrite failed with completed."""
-        from unittest.mock import AsyncMock
-
-        from loopx.agents.tiers import task as task_module
-
-        writes = AsyncMock()
-        monkeypatch.setattr(task_module.db_tasks, "update_task_status", writes)
-        monkeypatch.setattr(task_module.db_activity, "insert_activity", AsyncMock())
 
         async def _run() -> Task:
             with tempfile.TemporaryDirectory() as tmp:
@@ -340,4 +334,4 @@ class TestPlannerOutcome:
 
         task = asyncio.run(_run())
         assert task.status == outcome
-        assert writes.await_args_list[-1].args == ("t1", outcome)
+        assert agent_db.update_task_status.await_args_list[-1].args == ("t1", outcome)
