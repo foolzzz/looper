@@ -5,7 +5,6 @@ CREATE TABLE IF NOT EXISTS tasks (
     id                TEXT PRIMARY KEY,
     requirement       TEXT NOT NULL,
     goal_id           TEXT NOT NULL DEFAULT '',
-    project_root      TEXT NOT NULL DEFAULT '',
     status            TEXT NOT NULL DEFAULT 'pending',
     phase             TEXT NOT NULL DEFAULT 'pending',
     planner_id        TEXT,
@@ -20,6 +19,18 @@ CREATE TABLE IF NOT EXISTS tasks (
 
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS phase TEXT NOT NULL DEFAULT 'pending';
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS work_dir TEXT NOT NULL DEFAULT '';
+
+-- A task runs in the directory the user chose (work_dir). project_root was a
+-- second directory field the dashboard never set; fold it in and drop it.
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM information_schema.columns
+               WHERE table_schema = current_schema() AND table_name = 'tasks'
+                 AND column_name = 'project_root') THEN
+        UPDATE tasks SET work_dir = project_root WHERE work_dir = '' AND project_root <> '';
+        ALTER TABLE tasks DROP COLUMN project_root;
+    END IF;
+END $$;
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS config JSONB NOT NULL DEFAULT '{}';
 
 CREATE TABLE IF NOT EXISTS activity (

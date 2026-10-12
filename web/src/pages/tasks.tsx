@@ -106,6 +106,7 @@ export function TasksPage({ sub, onNavigate }: TasksPageProps) {
   const [newReq, setNewReq] = useState("");
   const [newWorkDir, setNewWorkDir] = useState("");
   const [creating, setCreating] = useState(false);
+  const [createError, setCreateError] = useState("");
   const selectedTaskId = sub || null;
   const setSelectedTaskId = (id: string | null) => onNavigate?.(id || "");
 
@@ -168,8 +169,9 @@ export function TasksPage({ sub, onNavigate }: TasksPageProps) {
   };
 
   const handleCreate = async () => {
-    if (!newReq.trim()) return;
+    if (!newReq.trim() || !newWorkDir.trim()) return;
     setCreating(true);
+    setCreateError("");
     try {
       const result = await createTask({
         requirement: newReq.trim(),
@@ -180,8 +182,8 @@ export function TasksPage({ sub, onNavigate }: TasksPageProps) {
       setNewWorkDir("");
       load();
       setSelectedTaskId(result.task_id);
-    } catch {
-      // ignore
+    } catch (err) {
+      setCreateError(err instanceof Error ? err.message : String(err));
     } finally {
       setCreating(false);
     }
@@ -379,23 +381,28 @@ export function TasksPage({ sub, onNavigate }: TasksPageProps) {
                 />
               </div>
               <div>
-                <label className="text-sm font-medium text-muted-foreground">Work Directory</label>
+                <label className="text-sm font-medium text-muted-foreground">Work Directory *</label>
                 <input
                   type="text"
                   value={newWorkDir}
                   onChange={(e) => setNewWorkDir(e.target.value)}
-                  placeholder="/path/to/working/directory"
-                  className="mt-1 w-full rounded-lg border border-border bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary/50"
+                  placeholder="~/projects/my-app"
+                  className="mt-1 w-full rounded-lg border border-border bg-background px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-primary/50"
                 />
+                <p className="mt-1 text-xs text-muted-foreground">
+                  Where the task's Workers run: an absolute path or one starting with ~/. Created if it does not exist.
+                </p>
               </div>
               <p className="text-xs text-muted-foreground">
                 Task will be created in <strong>init</strong> status. You can review and edit the configuration before starting.
               </p>
+              {createError && <p className="text-xs text-destructive">{createError}</p>}
               <div className="flex justify-end gap-2">
                 <button
                   type="button"
                   onClick={() => {
                     setShowCreate(false);
+                    setCreateError("");
                     setNewReq("");
                     setNewWorkDir("");
                   }}
@@ -406,7 +413,7 @@ export function TasksPage({ sub, onNavigate }: TasksPageProps) {
                 <button
                   type="button"
                   onClick={handleCreate}
-                  disabled={!newReq.trim() || creating}
+                  disabled={!newReq.trim() || !newWorkDir.trim() || creating}
                   className="flex items-center gap-2 rounded-lg bg-primary px-4 py-2 text-sm text-primary-foreground hover:bg-primary/90 transition-colors disabled:opacity-50"
                 >
                   {creating && <Loader2 className="h-4 w-4 animate-spin" />}

@@ -170,3 +170,65 @@ class TestManagerStreaming:
         )
         assert reply["deltas"] == ["答案"]
         assert reply["text"] == "答案"
+
+
+
+def _task_json(**fields: Any) -> str:
+    report = {"action": "task_request", "goal_id": "g", "structured_requirement": "build it",
+              "acknowledgment": "ok", **fields}
+    text = "```json\n" + json.dumps(report) + "\n```"
+    return (
+        f"print(json.dumps({{'type': 'assistant', 'message': {{'content': [{{'type': 'text', 'text': {text!r}}}]}}}}))\n"
+        f"print(json.dumps({{'type': 'result', 'subtype': 'success', 'is_error': False, 'result': {text!r}}}))"
+    )
+
+
+def _ask_for_task(body: str) -> tuple[str, list[MessageEnvelope], list[str]]:
+    """Run one Manager turn; return its reply, any TASK_REQUESTs and its argv."""
+
+    async def _run() -> tuple[str, list[MessageEnvelope], list[str]]:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bus = MessageBus(runtime_root=root)
+            manager = ManagerAgent(
+                config=ManagerConfig(claude_bin=_fake_claude(root, body), work_dir=root),
+                runtime_root=root,
+            )
+            manager._bus = bus
+            await manager._handle(MessageEnvelope.create(
+                source=WEB, target=MANAGER_ADDRESS, message_type=MessageType.USER_MESSAGE,
+                payload={"text": "确认"}, correlation_id="corr-1",
+            ))
+            reply = ""
+            queue = bus.get_queue(WEB.agent_id)
+            while not queue.empty():
+                envelope = queue.get_nowait()
+                if envelope.message_type == MessageType.AGENT_REPLY:
+                    reply = envelope.payload["text"]
+            router = bus.get_queue("task-router")
+            requests = []
+            while not router.empty():
+                requests.append(router.get_nowait())
+            argv = json.loads((root / "argv.json").read_text())
+            await bus.shutdown()
+            return reply, requests, argv
+
+    return asyncio.run(_run())
+
+
+@pytest.mark.usefixtures("agent_db")
+class TestManagerTaskDirectory:
+    def test_task_carries_the_chosen_directory(self) -> None:
+        reply, requests, argv = _ask_for_task(_task_json(work_dir="~/projects/tetris"))
+        (request,) = requests
+        assert request.payload["work_dir"] == os.path.join(os.path.expanduser("~"), "projects", "tetris")
+        assert reply == "ok"
+        # The directory rule is code-owned and appended to whatever prompt the DB holds.
+        prompt = argv[argv.index("--append-system-prompt") + 1]
+        assert "work_dir" in prompt
+
+    @pytest.mark.parametrize("fields", [{}, {"work_dir": ""}, {"work_dir": "relative/dir"}])
+    def test_task_without_a_directory_is_not_created(self, fields: dict[str, Any]) -> None:
+        reply, requests, _ = _ask_for_task(_task_json(**fields))
+        assert requests == []
+        assert "目录" in reply

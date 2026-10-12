@@ -15,7 +15,6 @@ async def create_task(
     task_id: str,
     requirement: str,
     goal_id: str = "",
-    project_root: str = "",
     work_dir: str = "",
     config: dict[str, Any] | None = None,
     status: str = "pending",
@@ -29,13 +28,13 @@ async def create_task(
     config_json = json.dumps(config or {})
     await pool.execute(
         """
-        INSERT INTO tasks (id, requirement, goal_id, project_root, work_dir,
+        INSERT INTO tasks (id, requirement, goal_id, work_dir,
                            config, status, correlation_id, origin_channel_id,
                            created_at, updated_at)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $10)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $9)
         ON CONFLICT (id) DO NOTHING
         """,
-        task_id, requirement, goal_id, project_root, work_dir,
+        task_id, requirement, goal_id, work_dir,
         config_json, status, correlation_id, origin_channel_id, now,
     )
     return {"task_id": task_id, "created_at": now.isoformat()}

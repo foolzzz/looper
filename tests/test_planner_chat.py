@@ -58,7 +58,7 @@ def _run_planner(plan: TaskPlan | None, *envelopes: MessageEnvelope) -> tuple[Pl
 
 
 def _executing_plan(*steps: PlanStep) -> TaskPlan:
-    plan = TaskPlan(plan_id="p1", goal_id="", requirement="build it", project_root="/tmp/proj")
+    plan = TaskPlan(plan_id="p1", goal_id="", requirement="build it", work_dir="/tmp/proj")
     plan.status = "executing"
     plan.steps = list(steps)
     return plan
@@ -103,6 +103,7 @@ class TestPlannerUserMessage:
 
         (item,) = _work_items(sent)
         assert item.payload["instruction"] == "also add tests"
+        assert item.payload["context"] == {"work_dir": "/tmp/proj"}
         assert planner._plan.steps[1].status == "dispatched"  # type: ignore[union-attr]
 
     def test_instruction_dispatches_at_once_when_nothing_is_running(self) -> None:
@@ -150,9 +151,9 @@ class TestChatTargets:
     def test_running_planners_lists_live_instances_only(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             router = TaskRouter(runtime_root=Path(tmp))
-            live = Task(task_id="t1", requirement="build it", goal_id="", project_root="",
+            live = Task(task_id="t1", requirement="build it", goal_id="", work_dir="",
                         status="running", planner_id="planner-t1")
-            queued = Task(task_id="t2", requirement="later", goal_id="", project_root="",
+            queued = Task(task_id="t2", requirement="later", goal_id="", work_dir="",
                           status="pending")
             router._tasks = {"t1": live, "t2": queued}
             router._planners = {"t1": PlannerAgent(task_id="t1", runtime_root=Path(tmp))}

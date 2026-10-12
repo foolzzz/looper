@@ -358,7 +358,7 @@ class TestEndToEndFlow:
                     payload={
                         "goal_id": "g1",
                         "requirement": "add tests",
-                        "project_root": "/tmp",
+                        "work_dir": "/tmp",
                     },
                     correlation_id=msg.correlation_id,
                     metadata={"origin_channel_id": "channel-web"},

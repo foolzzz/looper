@@ -58,7 +58,7 @@ class TaskPlan:
     plan_id: str
     goal_id: str
     requirement: str
-    project_root: str
+    work_dir: str
     steps: list[PlanStep] = field(default_factory=list)
     status: str = "planning"  # "planning" | "executing" | "verifying" | "completed" | "failed"
     correlation_id: str = ""
@@ -203,7 +203,7 @@ class PlannerAgent:
             plan_id=plan_id,
             goal_id=payload.get("goal_id", ""),
             requirement=payload.get("requirement", ""),
-            project_root=payload.get("project_root", ""),
+            work_dir=payload.get("work_dir", ""),
             correlation_id=envelope.correlation_id,
             origin_channel_id=envelope.metadata.get("origin_channel_id", ""),
         )
@@ -301,7 +301,7 @@ class PlannerAgent:
                 "target_files": step.target_files,
                 "validation_commands": step.validation_commands,
                 "acceptance_criteria": step.acceptance_criteria,
-                "context": {"project_root": plan.project_root},
+                "context": {"work_dir": plan.work_dir},
             },
             correlation_id=plan.correlation_id,
             metadata={"origin_channel_id": plan.origin_channel_id},
@@ -590,7 +590,7 @@ class PlannerAgent:
         data = plan.to_dict()
         data["correlation_id"] = plan.correlation_id
         data["origin_channel_id"] = plan.origin_channel_id
-        data["project_root"] = plan.project_root
+        data["work_dir"] = plan.work_dir
         path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
 
     def _load_plan(self) -> None:
@@ -604,7 +604,7 @@ class PlannerAgent:
                         plan_id=data["plan_id"],
                         goal_id=data.get("goal_id", ""),
                         requirement=data.get("requirement", ""),
-                        project_root=data.get("project_root", ""),
+                        work_dir=data.get("work_dir", ""),
                         status=data.get("status", "executing"),
                         correlation_id=data.get("correlation_id", ""),
                         origin_channel_id=data.get("origin_channel_id", ""),

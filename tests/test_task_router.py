@@ -27,7 +27,7 @@ class TestTask:
             task_id="t1",
             requirement="add login",
             goal_id="g1",
-            project_root="/tmp",
+            work_dir="/tmp",
             status="running",
             planner_id="planner-t1",
             correlation_id="c1",
@@ -42,7 +42,7 @@ class TestTask:
             task_id="t1",
             requirement="test",
             goal_id="g1",
-            project_root="/tmp",
+            work_dir="/tmp",
         )
         assert task.status == "pending"
 
@@ -69,7 +69,7 @@ class TestTaskRouter:
                     payload={
                         "goal_id": "g1",
                         "requirement": "add login page",
-                        "project_root": "/tmp",
+                        "work_dir": "/tmp",
                     },
                     metadata={"origin_channel_id": "channel-web"},
                 )
@@ -102,7 +102,7 @@ class TestTaskRouter:
                         payload={
                             "goal_id": f"g{i}",
                             "requirement": f"task {i}",
-                            "project_root": "/tmp",
+                            "work_dir": "/tmp",
                         },
                         metadata={"origin_channel_id": "channel-web"},
                     )
@@ -135,7 +135,7 @@ class TestTaskRouter:
                     payload={
                         "goal_id": "g1",
                         "requirement": "quick fix",
-                        "project_root": "/tmp",
+                        "work_dir": "/tmp",
                     },
                     metadata={"origin_channel_id": "channel-web"},
                 )
@@ -182,7 +182,7 @@ class TestTaskRouter:
                     payload={
                         "goal_id": "g1",
                         "requirement": "some work",
-                        "project_root": "/tmp",
+                        "work_dir": "/tmp",
                     },
                     metadata={"origin_channel_id": "channel-web"},
                 )
@@ -224,7 +224,7 @@ class TestTaskRouter:
                         payload={
                             "goal_id": f"g{i}",
                             "requirement": f"task {i}",
-                            "project_root": "/tmp",
+                            "work_dir": "/tmp",
                         },
                         metadata={"origin_channel_id": "channel-web"},
                     )
@@ -257,7 +257,7 @@ class TestTaskRouter:
                     payload={
                         "goal_id": "g1",
                         "requirement": "test list",
-                        "project_root": "/tmp",
+                        "work_dir": "/tmp",
                     },
                     metadata={"origin_channel_id": "channel-web"},
                 )
@@ -288,7 +288,7 @@ class TestTaskRouter:
                     payload={
                         "goal_id": "g1",
                         "requirement": "progress test",
-                        "project_root": "/tmp",
+                        "work_dir": "/tmp",
                     },
                     metadata={"origin_channel_id": "channel-web"},
                 )
@@ -321,7 +321,7 @@ class TestPlannerOutcome:
                 bus = MessageBus(runtime_root=Path(tmp))
                 router = TaskRouter(runtime_root=Path(tmp))
                 router._bus = bus
-                task = Task(task_id="t1", requirement="r", goal_id="", project_root="", status="running")
+                task = Task(task_id="t1", requirement="r", goal_id="", work_dir="", status="running")
                 router._tasks = {"t1": task}
                 await router._handle_planner_status(MessageEnvelope.create(
                     source=planner_address("t1"),

@@ -275,6 +275,7 @@ function TaskConfigSection({ task }: { task: TaskDetail }) {
   const [editConfig, setEditConfig] = useState(JSON.stringify(task.config || {}, null, 2));
   const [saving, setSaving] = useState(false);
   const [dirty, setDirty] = useState(false);
+  const [saveError, setSaveError] = useState("");
 
   useEffect(() => {
     setEditReq(task.requirement);
@@ -284,7 +285,12 @@ function TaskConfigSection({ task }: { task: TaskDetail }) {
   }, [task.requirement, task.work_dir, task.config]);
 
   const handleSave = async () => {
+    if (!editWorkDir.trim()) {
+      setSaveError("A work directory is required.");
+      return;
+    }
     setSaving(true);
+    setSaveError("");
     try {
       let parsedConfig: Record<string, unknown> = {};
       try { parsedConfig = JSON.parse(editConfig); } catch { /* keep empty */ }
@@ -294,8 +300,8 @@ function TaskConfigSection({ task }: { task: TaskDetail }) {
         config: parsedConfig,
       });
       setDirty(false);
-    } catch {
-      // ignore
+    } catch (err) {
+      setSaveError(err instanceof Error ? err.message : String(err));
     } finally {
       setSaving(false);
     }
@@ -344,12 +350,13 @@ function TaskConfigSection({ task }: { task: TaskDetail }) {
               type="text"
               value={editWorkDir}
               onChange={(e) => { setEditWorkDir(e.target.value); setDirty(true); }}
-              placeholder="/path/to/working/directory"
+              placeholder="~/projects/my-app (required)"
               className="mt-1 w-full rounded-lg border border-border bg-background px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-primary/50"
             />
           ) : (
             <p className="mt-1 text-sm font-mono">{task.work_dir || "—"}</p>
           )}
+          {saveError && <p className="mt-1 text-xs text-destructive">{saveError}</p>}
         </div>
         <div>
           <label className="text-xs font-medium text-muted-foreground">Config (JSON)</label>
@@ -998,6 +1005,7 @@ interface TaskDetailPageProps {
 export function TaskDetailPage({ taskId, onBack }: TaskDetailPageProps) {
   const [task, setTask] = useState<TaskDetail | null>(null);
   const [error, setError] = useState("");
+  const [startError, setStartError] = useState("");
   const [tab, setTab] = useState<Tab>("overview");
 
   useEffect(() => {
@@ -1061,7 +1069,7 @@ export function TaskDetailPage({ taskId, onBack }: TaskDetailPageProps) {
           {task && ["stopped", "failed", "cancelled", "init"].includes(task.status) && (
             <button
               type="button"
-              onClick={() => startTask(taskId).then(() => {})}
+              onClick={() => startTask(taskId).then(() => setStartError(""), (err) => setStartError(err instanceof Error ? err.message : String(err)))}
               className="flex items-center gap-1.5 rounded-md border border-success/50 px-3 py-1.5 text-xs font-medium text-success hover:bg-success/10 transition-colors"
             >
               <Play className="h-3.5 w-3.5" />
@@ -1069,6 +1077,7 @@ export function TaskDetailPage({ taskId, onBack }: TaskDetailPageProps) {
             </button>
           )}
         </div>
+        {startError && <p className="mt-1 text-xs text-destructive">{startError}</p>}
 
         {/* Tabs */}
         <div className="flex gap-1 mt-3">
