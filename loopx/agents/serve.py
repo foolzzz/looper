@@ -137,7 +137,7 @@ async def _run_agent_system(
             "role": "worker",
             "runtime": "claude-code",
             "max_concurrency": 3,
-            "timeout_seconds": 600,
+            "timeout_seconds": 86400,
             "system_prompt": (
                 "You are a Worker Agent. Execute the assigned task precisely:\n"
                 "1. Read and understand the instruction\n"

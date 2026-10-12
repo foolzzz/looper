@@ -26,11 +26,29 @@ from ..message import (
 )
 
 from ...db import activity as db_activity
+from ...db import agent_configs as db_agent_configs
 
 logger = logging.getLogger(__name__)
 
 MAX_POOL_SIZE = 4
-WORKER_TIMEOUT_SEC = 600
+DEFAULT_RUN_TIMEOUT_SEC = 86400
+
+
+async def _load_run_limits() -> tuple[int, int]:
+    """Return the ``worker`` agent config's time limit (seconds) and max turns.
+
+    Read for every run, so a dashboard edit applies to the next step. Both
+    are 0 for no limit. Without a readable row a run may take 86400 s and has
+    no turn limit.
+    """
+    try:
+        config = await db_agent_configs.get_config("worker")
+    except Exception:
+        logger.warning("cannot read the worker agent config; using defaults", exc_info=True)
+        config = None
+    if config is None:
+        return DEFAULT_RUN_TIMEOUT_SEC, 0
+    return int(config.get("timeout_seconds") or 0), int(config.get("max_turns") or 0)
 
 
 def extract_report(text: str, key: str) -> dict[str, Any] | None:
@@ -132,7 +150,6 @@ class WorkerConfig:
     work_dir: Path = field(default_factory=lambda: Path.cwd())
     sandbox: str = "workspace-write"
     max_workers: int = MAX_POOL_SIZE
-    timeout_sec: float = WORKER_TIMEOUT_SEC
 
 
 @dataclass
@@ -286,10 +303,10 @@ class WorkerPool:
             result = await self._execute(envelope, is_verify=is_verify)
             wp.status = "completed"
             wp.result = result
-        except asyncio.TimeoutError:
+        except asyncio.TimeoutError as exc:
             wp.status = "failed"
-            wp.result = {"status": "failed", "error": "worker timeout"}
-            logger.warning("worker %s timed out on task %s", worker_id, task_id)
+            wp.result = {"status": "failed", "error": str(exc) or "worker timeout"}
+            logger.warning("worker %s timed out on task %s: %s", worker_id, task_id, exc)
         except Exception as exc:
             wp.status = "failed"
             wp.result = {"status": "failed", "error": str(exc)}
@@ -328,18 +345,21 @@ class WorkerPool:
         else:
             prompt = self._build_work_prompt(payload)
 
+        run_timeout, max_turns = await _load_run_limits()
         command = [
             self._config.claude_bin,
             "--print",
             "--verbose",
             "--output-format", "stream-json",
+            # Partial deltas keep the run's heartbeat current while Claude thinks.
+            "--include-partial-messages",
             "--dangerously-skip-permissions",
-            "--max-turns", "50",
+            *(["--max-turns", str(max_turns)] if max_turns > 0 else []),
             prompt,
         ]
 
         if parent_task_id:
-            cmd_display = " ".join(command[:7]) + f" '<prompt {len(prompt)} chars>'"
+            cmd_display = " ".join(command[:-1]) + f" '<prompt {len(prompt)} chars>'"
             try:
                 await db_activity.insert_activity(
                     task_id=parent_task_id,
@@ -454,17 +474,21 @@ class WorkerPool:
                             logger.debug("failed to insert result activity", exc_info=True)
 
         try:
-            await asyncio.wait_for(_read_stream(), timeout=self._config.timeout_sec)
+            await asyncio.wait_for(_read_stream(), timeout=run_timeout if run_timeout > 0 else None)
             await process.wait()
         except BaseException as exc:
             # Never leave Claude running unsupervised once the worker gives up.
             if process.returncode is None:
                 process.kill()
                 await process.wait()
-            await recorder.finish(
-                output_text=None, result_event=result_event,
-                error=f"worker stopped reading Claude: {type(exc).__name__}",
+            timed_out = isinstance(exc, asyncio.TimeoutError)
+            error = (
+                f"Claude ran longer than the {run_timeout} s limit (timeout_seconds)" if timed_out
+                else f"worker stopped reading Claude: {type(exc).__name__}"
             )
+            await recorder.finish(output_text=None, result_event=result_event, error=error)
+            if timed_out:
+                raise asyncio.TimeoutError(error) from exc
             raise
 
         final_text = str((result_event or {}).get("result") or "") or None

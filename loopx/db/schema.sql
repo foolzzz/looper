@@ -94,6 +94,9 @@ CREATE TABLE IF NOT EXISTS agent_configs (
     updated_at       TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+-- Moves only the worker's old seeded limit (600 s) to the new default; any other value someone set stays.
+UPDATE agent_configs SET timeout_seconds = 86400 WHERE agent_id = 'worker' AND timeout_seconds = 600;
+
 CREATE TABLE IF NOT EXISTS llm_records (
     id               BIGSERIAL PRIMARY KEY,
     agent_id         TEXT NOT NULL,

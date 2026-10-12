@@ -6,6 +6,7 @@ import asyncio
 import json
 import os
 import signal
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -453,6 +454,55 @@ def _work_item(project_root: Path) -> MessageEnvelope:
     )
 
 
+def _worker_row(
+    monkeypatch: pytest.MonkeyPatch,
+    row: dict[str, Any] | None = None,
+    *,
+    error: Exception | None = None,
+) -> AsyncMock:
+    """Serve the ``worker`` row of agent_configs (or a failed read) to the pool."""
+    from loopx.db import agent_configs
+
+    get_config = AsyncMock(return_value=row, side_effect=error)
+    monkeypatch.setattr(agent_configs, "get_config", get_config)
+    return get_config
+
+
+def _start_warm(monkeypatch: pytest.MonkeyPatch, claude: str) -> list[asyncio.subprocess.Process]:
+    """Launch ``claude`` once untimed; the worker then starts it the same way.
+
+    Where new programs are checked at launch, a new script with new arguments
+    can take seconds to start. The worker's launch gets the same (empty)
+    arguments as this warm-up, so a timed test times only the run. The fake
+    must exit at once when WARM_UP is set (``_WARM_UP_EXIT``). Returns the
+    processes the worker starts.
+    """
+    subprocess.run([claude], check=True, env={**os.environ, "WARM_UP": "1"})
+    started: list[asyncio.subprocess.Process] = []
+    real_exec = asyncio.create_subprocess_exec
+
+    async def _start(program: str, *_args: Any, **kwargs: Any) -> asyncio.subprocess.Process:
+        process = await real_exec(program, **kwargs)
+        started.append(process)
+        return process
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _start)
+    return started
+
+
+_SUCCESS = (
+    "print(json.dumps({'type': 'result', 'subtype': 'success', 'is_error': False, "
+    "'result': json.dumps({'status': 'completed', 'summary': 'ok'})}))"
+)
+_SAVE_ARGV = "json.dump(sys.argv[1:], open('argv.json', 'w'))\n"
+_WARM_UP_EXIT = "if os.environ.get('WARM_UP'):\n    sys.exit()\n"
+# What Claude writes with --include-partial-messages while the model thinks.
+_THINKING_DELTA = {
+    "type": "stream_event",
+    "event": {"type": "content_block_delta", "delta": {"type": "thinking_delta", "thinking": "hmm"}},
+}
+
+
 class TestWorkerSubprocess:
     def test_long_stream_json_line_is_read(self) -> None:
         # Claude's stream-json init line lists every tool and skill and can
@@ -539,27 +589,87 @@ class TestWorkerSubprocess:
         assert result["status"] == "failed"
         assert "error_max_turns" in result["error"]
 
-    def test_subprocess_is_killed_when_the_worker_gives_up(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        started: list[asyncio.subprocess.Process] = []
-        real_exec = asyncio.create_subprocess_exec
+    def test_run_over_the_time_limit_is_killed(self, monkeypatch: pytest.MonkeyPatch, agent_db: Any) -> None:
+        # Claude keeps writing thinking deltas: output does not extend the limit.
+        _worker_row(monkeypatch, {"timeout_seconds": 1, "max_turns": 0})
 
-        async def _record(*args: Any, **kwargs: Any) -> asyncio.subprocess.Process:
-            process = await real_exec(*args, **kwargs)
-            started.append(process)
-            return process
+        async def _run() -> list[asyncio.subprocess.Process]:
+            with tempfile.TemporaryDirectory() as tmp:
+                claude = _fake_claude(Path(tmp), (
+                    _WARM_UP_EXIT
+                    + "for _ in range(25):\n"
+                    f"    print(json.dumps({_THINKING_DELTA!r}), flush=True)\n"
+                    "    time.sleep(0.2)\n"
+                    + _SUCCESS
+                ))
+                started = _start_warm(monkeypatch, claude)
+                pool = WorkerPool(config=WorkerConfig(claude_bin=claude), runtime_root=Path(tmp))
+                with pytest.raises(asyncio.TimeoutError, match=r"longer than the 1 s limit \(timeout_seconds\)"):
+                    await pool._execute(_work_item(Path(tmp)))
+                return started
 
-        monkeypatch.setattr(asyncio, "create_subprocess_exec", _record)
+        (process,) = asyncio.run(_run())
+        assert process.returncode == -signal.SIGKILL  # killed and reaped
+        agent_db.touch_record.assert_awaited()  # output arrived and fed the heartbeat
+        agent_db.append_events.assert_not_awaited()  # partial deltas are not stored
+        finish = agent_db.finish_record.await_args.kwargs
+        assert finish["status"] == "failed"
+        assert finish["error"] == "Claude ran longer than the 1 s limit (timeout_seconds)"
 
-        async def _run() -> None:
+    def test_time_limit_is_the_step_failure_reason(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _worker_row(monkeypatch, {"timeout_seconds": 1, "max_turns": 0})
+
+        async def _run() -> MessageBus:
             with tempfile.TemporaryDirectory() as tmp:
                 claude = _fake_claude(Path(tmp), "time.sleep(30)")
-                pool = WorkerPool(config=WorkerConfig(claude_bin=claude, timeout_sec=0.5), runtime_root=Path(tmp))
-                with pytest.raises(asyncio.TimeoutError):
-                    await pool._execute(_work_item(Path(tmp)))
+                bus = MessageBus(runtime_root=Path(tmp))
+                pool = WorkerPool(config=WorkerConfig(claude_bin=claude), runtime_root=Path(tmp))
+                pool._bus = bus
+                await pool._run_worker(_work_item(Path(tmp)))
+                return bus
 
-        asyncio.run(_run())
-        (process,) = started
-        assert process.returncode == -signal.SIGKILL  # killed and reaped
+        reply = asyncio.run(_run()).get_queue("planner-t1").get_nowait()
+        assert reply.payload["status"] == "failed"
+        assert reply.payload["error"] == "Claude ran longer than the 1 s limit (timeout_seconds)"
+
+    def test_zero_timeout_has_no_limit(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        get_config = _worker_row(monkeypatch, {"timeout_seconds": 0, "max_turns": 0})
+
+        async def _run() -> dict[str, Any]:
+            with tempfile.TemporaryDirectory() as tmp:
+                claude = _fake_claude(Path(tmp), "time.sleep(1.5)\n" + _SUCCESS)
+                pool = WorkerPool(config=WorkerConfig(claude_bin=claude), runtime_root=Path(tmp))
+                return await pool._execute(_work_item(Path(tmp)))
+
+        assert asyncio.run(_run())["status"] == "completed"
+        get_config.assert_awaited_with("worker")
+
+    @pytest.mark.parametrize(("max_turns", "expected"), [(7, ["--max-turns", "7"]), (0, [])])
+    def test_command_follows_the_worker_config(
+        self, monkeypatch: pytest.MonkeyPatch, max_turns: int, expected: list[str],
+    ) -> None:
+        _worker_row(monkeypatch, {"timeout_seconds": 86400, "max_turns": max_turns})
+
+        async def _run() -> list[str]:
+            with tempfile.TemporaryDirectory() as tmp:
+                claude = _fake_claude(Path(tmp), _SAVE_ARGV + _SUCCESS)
+                pool = WorkerPool(config=WorkerConfig(claude_bin=claude), runtime_root=Path(tmp))
+                assert (await pool._execute(_work_item(Path(tmp))))["status"] == "completed"
+                return json.loads((Path(tmp) / "argv.json").read_text())
+
+        argv = asyncio.run(_run())
+        assert "--include-partial-messages" in argv
+        turns = argv[argv.index("--max-turns"):][:2] if "--max-turns" in argv else []
+        assert turns == expected
+
+    @pytest.mark.parametrize("failure", [None, RuntimeError("database pool not initialised")])
+    def test_unreadable_config_falls_back_to_defaults(
+        self, monkeypatch: pytest.MonkeyPatch, failure: Exception | None,
+    ) -> None:
+        from loopx.agents.tiers.worker import _load_run_limits
+
+        _worker_row(monkeypatch, None, error=failure)
+        assert asyncio.run(_load_run_limits()) == (86400, 0)  # 86400 s, no turn limit
 
 
 def _result(text: str | None = None, **overrides: Any) -> dict[str, Any]:
