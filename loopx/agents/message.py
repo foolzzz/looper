@@ -32,6 +32,8 @@ class MessageType(str, Enum):
     WORK_ITEM = "work_item"
     WORK_RESULT = "work_result"
     WORK_PROGRESS = "work_progress"
+    WORKER_INPUT = "worker_input"  # a user turn for a running worker (reply: WORKER_INPUT_RESULT)
+    WORKER_INPUT_RESULT = "worker_input_result"
 
     # Task lifecycle
     TASK_CANCEL = "task_cancel"

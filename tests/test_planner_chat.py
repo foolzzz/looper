@@ -16,7 +16,9 @@ from loopx.agents.message import (
     MessageType,
     channel_address,
     planner_address,
+    worker_address,
 )
+from loopx.agents.tiers import planner as planner_module
 from loopx.agents.tiers.planner import PlanStep, PlannerAgent, TaskPlan
 from loopx.agents.tiers.task import Task, TaskRouter
 
@@ -46,6 +48,8 @@ def _run_planner(plan: TaskPlan | None, *envelopes: MessageEnvelope) -> tuple[Pl
                 sent.append(envelope)
 
             bus.publish = _record  # type: ignore[method-assign]
+            # Nothing answers WORKER_INPUT here, so forwarding gives up quickly.
+            planner_module.WORKER_INPUT_TIMEOUT = 0.05
             planner = PlannerAgent(task_id="t1", runtime_root=Path(tmp))
             planner._bus = bus
             planner._plan = plan
@@ -222,3 +226,55 @@ class TestResolveChatTarget:
             with pytest.raises(ChatTargetError) as excinfo:
                 resolve_chat_target(raw, self._router(tmp))
             assert excinfo.value.status == status
+
+
+
+class TestPlannerForwardsToRunningWorker:
+    def _run(self, delivered: bool) -> tuple[PlannerAgent, list[MessageEnvelope], list[MessageEnvelope]]:
+        forwarded: list[MessageEnvelope] = []
+
+        async def _run() -> tuple[PlannerAgent, list[MessageEnvelope]]:
+            with tempfile.TemporaryDirectory() as tmp:
+                bus = MessageBus(runtime_root=Path(tmp))
+
+                def worker_pool(envelope: MessageEnvelope) -> bool:
+                    forwarded.append(envelope)
+                    asyncio.get_event_loop().create_task(bus.publish(MessageEnvelope.create(
+                        source=envelope.target, target=envelope.source,
+                        message_type=MessageType.WORKER_INPUT_RESULT,
+                        payload={"delivered": delivered}, reply_to=envelope.message_id,
+                    )))
+                    return True
+
+                bus.subscribe_topic(MessageType.WORKER_INPUT, worker_pool, consumes=True)
+                planner = PlannerAgent(task_id="t1", runtime_root=Path(tmp))
+                planner._bus = bus
+                planner._plan = _executing_plan(
+                    PlanStep(step_id="s1", index=0, instruction="build it", status="dispatched", worker_id="worker-9"),
+                )
+                await planner._handle(_user_message("t1", "use a red background"))
+                replies = []
+                queue = bus.get_queue(WEB.agent_id)
+                while not queue.empty():
+                    replies.append(queue.get_nowait())
+                await bus.shutdown()
+                return planner, replies
+
+        planner, replies = asyncio.run(_run())
+        return planner, replies, forwarded
+
+    def test_message_goes_to_the_running_worker(self) -> None:
+        planner, replies, forwarded = self._run(delivered=True)
+        (sent,) = forwarded
+        assert sent.target == worker_address("worker-9")
+        assert "use a red background" in sent.payload["text"]
+        assert len(planner._plan.steps) == 1  # no new step  # type: ignore[union-attr]
+        (reply,) = [r for r in replies if r.message_type == MessageType.AGENT_REPLY]
+        assert "worker-9" in reply.payload["text"]
+
+    def test_undelivered_message_becomes_a_step(self) -> None:
+        planner, replies, _ = self._run(delivered=False)
+        steps = planner._plan.steps  # type: ignore[union-attr]
+        assert [s.instruction for s in steps] == ["build it", "use a red background"]
+        (reply,) = [r for r in replies if r.message_type == MessageType.AGENT_REPLY]
+        assert "第 2 步" in reply.payload["text"]
