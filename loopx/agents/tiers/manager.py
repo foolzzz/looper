@@ -14,7 +14,6 @@ import asyncio
 import json
 import logging
 import shutil
-import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -127,12 +126,11 @@ class ManagerAgent:
         self._bus = bus
         self._running = True
 
-        if not self._session_id:
-            self._session_id = str(uuid.uuid4())
-            self._save_session_state()
-
         self._task = asyncio.create_task(self._message_loop())
-        logger.info("manager agent started (session=%s)", self._session_id)
+        logger.info(
+            "manager agent started (session=%s)",
+            self._session_id or "new",
+        )
 
     async def stop(self) -> None:
         self._running = False
@@ -281,8 +279,8 @@ class ManagerAgent:
             "--verbose",
         ]
 
-        assert self._session_id is not None
-        command.extend(["--resume", self._session_id])
+        if self._session_id:
+            command.extend(["--resume", self._session_id])
 
         prompt = self._build_prompt(message)
         command.append(prompt)
@@ -320,32 +318,33 @@ class ManagerAgent:
 
             event_type = payload.get("type")
 
-            if event_type == "stream_event":
-                event = payload.get("event")
-                if not isinstance(event, dict):
-                    continue
+            if event_type == "system":
+                subtype = payload.get("subtype", "")
+                if subtype == "init":
+                    await self._send_status(context_envelope, "thinking", phase=True)
 
-                inner_type = event.get("type", "")
-
-                if inner_type == "content_block_start":
-                    block = event.get("content_block", {})
-                    if block.get("type") == "thinking":
-                        await self._send_status(context_envelope, "thinking", phase=True)
-                    elif block.get("type") == "tool_use":
-                        tool_name = block.get("name", "tool")
-                        await self._send_status(
-                            context_envelope,
-                            f"正在使用工具: {tool_name}",
-                            phase=True,
-                        )
-
-                elif inner_type == "content_block_delta":
-                    delta = event.get("delta", {})
-                    if delta.get("type") == "text_delta":
-                        chunk = str(delta.get("text") or "")
-                        text_parts.append(chunk)
-                        if chunk.strip():
-                            await self._send_status(context_envelope, chunk, delta=True)
+            elif event_type == "assistant":
+                msg = payload.get("message")
+                if isinstance(msg, dict):
+                    content_blocks = msg.get("content", [])
+                    for block in content_blocks:
+                        if not isinstance(block, dict):
+                            continue
+                        block_type = block.get("type", "")
+                        if block_type == "text":
+                            chunk = str(block.get("text") or "")
+                            if chunk:
+                                text_parts.append(chunk)
+                                await self._send_status(context_envelope, chunk, delta=True)
+                        elif block_type == "tool_use":
+                            tool_name = block.get("name", "tool")
+                            await self._send_status(
+                                context_envelope,
+                                f"正在使用工具: {tool_name}",
+                                phase=True,
+                            )
+                        elif block_type == "thinking":
+                            await self._send_status(context_envelope, "thinking", phase=True)
 
             elif event_type == "result":
                 result_text = str(payload.get("result") or "")
