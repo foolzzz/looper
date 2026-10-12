@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from ..bus import MessageBus
-from ..claude_cli import STREAM_LINE_LIMIT
+from ..claude_cli import iter_lines
 from ..message import (
     AgentAddress,
     MessageEnvelope,
@@ -376,7 +376,6 @@ class WorkerPool:
                 cwd=project_root,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
-                limit=STREAM_LINE_LIMIT,
             )
             logger.info("worker %s subprocess started (pid=%s)", worker_id, process.pid)
         except OSError as exc:
@@ -388,10 +387,7 @@ class WorkerPool:
         async def _read_stream() -> None:
             nonlocal result_event
             assert process.stdout is not None
-            while True:
-                raw_line = await process.stdout.readline()
-                if not raw_line:
-                    break
+            async for raw_line in iter_lines(process.stdout):
                 line = raw_line.decode("utf-8", errors="replace").strip()
                 if not line:
                     continue

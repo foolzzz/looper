@@ -79,12 +79,17 @@ class TestManagerReply:
     def test_read_failure_is_reported_and_claude_is_killed(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from loopx.agents.tiers import manager as manager_module
 
-        monkeypatch.setattr(manager_module, "STREAM_LINE_LIMIT", 1024)
+        async def _broken_lines(stream: Any) -> Any:
+            yield await stream.readline()
+            raise OSError("pipe broke")
+
+        monkeypatch.setattr(manager_module, "iter_lines", _broken_lines)
         text, pid = _ask(
             "open('pid', 'w').write(str(os.getpid()))\n"
-            "print('x' * 4096, flush=True)\n"
+            "print('{}', flush=True)\n"
             "time.sleep(30)"
         )
+        assert "pipe broke" in text
         assert "Manager" in text
         with pytest.raises(ProcessLookupError):
             os.kill(pid, 0)  # type: ignore[arg-type]

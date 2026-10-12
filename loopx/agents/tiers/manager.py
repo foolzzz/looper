@@ -21,7 +21,7 @@ from typing import Any
 
 from ..broadcast import Broadcaster
 from ..bus import MessageBus
-from ..claude_cli import STREAM_LINE_LIMIT
+from ..claude_cli import iter_lines
 from ..message import (
     MANAGER_ADDRESS,
     TASK_ROUTER_ADDRESS,
@@ -331,7 +331,6 @@ class ManagerAgent:
                 cwd=str(self._config.work_dir),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.DEVNULL,
-                limit=STREAM_LINE_LIMIT,
             )
         except OSError as exc:
             logger.error("failed to start Claude Code: %s", exc)
@@ -342,7 +341,7 @@ class ManagerAgent:
 
         assert process.stdout is not None
         try:
-            async for raw_line in process.stdout:
+            async for raw_line in iter_lines(process.stdout):
                 line = raw_line.decode("utf-8", errors="replace").strip()
                 if not line:
                     continue
