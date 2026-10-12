@@ -1,14 +1,8 @@
 """Web UI Channel Adapter.
 
-Bridges the existing HTTP+SSE chat server with the agent Bus. In agent-mode,
-the ChatRequestHandler delegates turn execution through the Bus instead of
-directly calling ChatRuntimeController.
-
-Inbound: HTTP POST /api/agent/message → MessageEnvelope → Bus
+Bridges the HTTP frontend with the agent Bus via async message queues.
+Inbound: HTTP POST → MessageEnvelope → Bus
 Outbound: Bus → SSE stream events
-
-During the migration period (--agent-mode flag), this adapter runs alongside
-the existing chat_server.py routes. It reuses ChatSessionStore for persistence.
 """
 
 from __future__ import annotations
@@ -16,12 +10,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import queue
-import threading
-import time
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import Any, AsyncIterator
 
 from ..bus import MessageBus
 from ..message import (
@@ -44,9 +35,7 @@ class WebChannelAdapter(ChannelAdapter):
         self._port = port
         self._bus: MessageBus | None = None
         self._address = channel_address("web", "channel-web")
-        # Active SSE streams keyed by correlation_id
-        self._sse_queues: dict[str, queue.Queue[dict[str, Any]]] = {}
-        self._sse_lock = threading.Lock()
+        self._sse_queues: dict[str, asyncio.Queue[dict[str, Any]]] = {}
         self._outbound_task: asyncio.Task[Any] | None = None
         self._running = False
 
@@ -61,7 +50,6 @@ class WebChannelAdapter(ChannelAdapter):
     async def start(self, bus: MessageBus) -> None:
         self._bus = bus
         self._running = True
-        # Subscribe to outbound messages for the web channel
         self._outbound_task = asyncio.create_task(self._outbound_loop())
         logger.info("web channel adapter started")
 
@@ -76,10 +64,8 @@ class WebChannelAdapter(ChannelAdapter):
         logger.info("web channel adapter stopped")
 
     async def deliver(self, envelope: MessageEnvelope) -> DeliveryReceipt:
-        """Push a message to the SSE stream for the matching correlation_id."""
         corr_id = envelope.correlation_id
-        with self._sse_lock:
-            sse_q = self._sse_queues.get(corr_id)
+        sse_q = self._sse_queues.get(corr_id)
 
         if sse_q is None:
             return DeliveryReceipt(
@@ -92,18 +78,16 @@ class WebChannelAdapter(ChannelAdapter):
         try:
             sse_q.put_nowait(event)
             return DeliveryReceipt(channel="web", success=True)
-        except queue.Full:
+        except asyncio.QueueFull:
             return DeliveryReceipt(
                 channel="web", success=False, error="SSE queue full"
             )
 
     def healthcheck(self) -> dict[str, Any]:
-        with self._sse_lock:
-            active_streams = len(self._sse_queues)
         return {
             "channel": "web",
             "healthy": self._running,
-            "active_sse_streams": active_streams,
+            "active_sse_streams": len(self._sse_queues),
         }
 
     # --- Inbound: HTTP → Bus ---
@@ -117,14 +101,11 @@ class WebChannelAdapter(ChannelAdapter):
         language: str = "zh",
         attachments: list[dict[str, Any]] | None = None,
     ) -> dict[str, str]:
-        """Called by HTTP handler when user sends a message. Returns correlation_id + events_url."""
         assert self._bus is not None
         correlation_id = str(uuid.uuid4())
 
-        # Register SSE queue for this conversation
-        sse_q: queue.Queue[dict[str, Any]] = queue.Queue(maxsize=1000)
-        with self._sse_lock:
-            self._sse_queues[correlation_id] = sse_q
+        sse_q: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=1000)
+        self._sse_queues[correlation_id] = sse_q
 
         envelope = MessageEnvelope.create(
             source=self._address,
@@ -146,48 +127,43 @@ class WebChannelAdapter(ChannelAdapter):
 
         return {
             "correlation_id": correlation_id,
-            "events_url": f"/api/agent/events?correlation_id={correlation_id}",
+            "events_url": f"/api/chat/events?cid={correlation_id}",
         }
 
-    def iter_sse_events(
+    async def iter_sse_events(
         self,
         correlation_id: str,
         timeout: float = 300.0,
-    ) -> Any:
-        """Generator yielding SSE events for the HTTP response. Blocks until done."""
-        with self._sse_lock:
-            sse_q = self._sse_queues.get(correlation_id)
+    ) -> AsyncIterator[dict[str, Any]]:
+        sse_q = self._sse_queues.get(correlation_id)
         if sse_q is None:
             return
 
-        deadline = time.monotonic() + timeout
+        deadline = asyncio.get_event_loop().time() + timeout
         heartbeat_interval = 15.0
-        last_heartbeat = time.monotonic()
+        last_heartbeat = asyncio.get_event_loop().time()
 
-        while time.monotonic() < deadline:
+        while asyncio.get_event_loop().time() < deadline:
+            remaining = deadline - asyncio.get_event_loop().time()
             try:
-                event = sse_q.get(timeout=min(1.0, heartbeat_interval))
+                event = await asyncio.wait_for(sse_q.get(), timeout=min(1.0, remaining))
                 yield event
                 if event.get("kind") in ("answer.final", "turn.completed", "turn.failed"):
                     break
-            except queue.Empty:
-                now = time.monotonic()
+            except asyncio.TimeoutError:
+                now = asyncio.get_event_loop().time()
                 if now - last_heartbeat >= heartbeat_interval:
                     yield {"kind": "heartbeat", "payload": {}}
                     last_heartbeat = now
 
-        # Cleanup
-        with self._sse_lock:
-            self._sse_queues.pop(correlation_id, None)
+        self._sse_queues.pop(correlation_id, None)
 
     def close_sse_stream(self, correlation_id: str) -> None:
-        with self._sse_lock:
-            self._sse_queues.pop(correlation_id, None)
+        self._sse_queues.pop(correlation_id, None)
 
     # --- Outbound: Bus → SSE ---
 
     async def _outbound_loop(self) -> None:
-        """Listen for outbound messages from the Bus and push to SSE queues."""
         assert self._bus is not None
         try:
             async for envelope in self._bus.subscribe(self.channel_id):

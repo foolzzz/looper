@@ -6,11 +6,12 @@ Wires up the full three-tier agent system:
     → TelegramChannelAdapter (optional)
     → LarkChannelAdapter (optional)
     → ManagerAgent
-    → PlannerAgent
+    → TaskRouter
     → WorkerPool
+  AgentHTTPServer (REST API + SSE + static files)
 
 Usage:
-    loopx serve --agent-mode
+    loopx serve
     # or directly:
     from loopx.agents.serve import serve_agent
     serve_agent(host="127.0.0.1", port=8767)
@@ -27,6 +28,7 @@ from typing import Any
 from .bus import MessageBus
 from .channels.registry import ChannelRegistry
 from .channels.web import WebChannelAdapter
+from .http_server import AgentHTTPServer
 from .supervisor import AgentSupervisor
 from .tiers.manager import ManagerAgent, ManagerConfig
 from .tiers.task import TaskRouter
@@ -94,8 +96,20 @@ async def _run_agent_system(
     # --- Start ---
 
     await supervisor.start_all()
+
+    # --- HTTP Server ---
+
+    http_server = AgentHTTPServer(
+        host=host,
+        port=port,
+        web_adapter=web_adapter,
+        task_router=task_router,
+        supervisor=supervisor,
+    )
+    await http_server.start()
+
     logger.info(
-        "agent system running on %s:%d (web=%s, telegram=%s, lark=%s)",
+        "agent system running on http://%s:%d (web=%s, telegram=%s, lark=%s)",
         host, port,
         True,
         enable_telegram,
@@ -118,6 +132,7 @@ async def _run_agent_system(
     # --- Shutdown ---
 
     logger.info("shutting down agent system...")
+    await http_server.stop()
     await supervisor.stop_all()
     await registry.stop_all()
     await bus.shutdown()
