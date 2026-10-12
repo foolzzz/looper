@@ -120,6 +120,11 @@ async def _run_agent_system(
             ),
         },
     ])
+    from ..db.tasks import mark_orphaned_tasks_stopped
+    orphan_count = await mark_orphaned_tasks_stopped(pool=pool)
+    if orphan_count:
+        logger.info("marked %d orphaned task(s) as stopped", orphan_count)
+
     logger.info("database initialised")
 
     broadcaster = Broadcaster()

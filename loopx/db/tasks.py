@@ -111,6 +111,43 @@ async def delete_task(
     return result == "DELETE 1"
 
 
+async def reset_task_for_restart(
+    task_id: str,
+    *,
+    pool: asyncpg.Pool | None = None,
+) -> bool:
+    pool = pool or get_pool()
+    await pool.execute("DELETE FROM task_steps WHERE task_id = $1", task_id)
+    result = await pool.execute(
+        """
+        UPDATE tasks
+        SET status = 'pending', phase = 'pending',
+            error = NULL, completed_at = NULL,
+            result_summary = NULL, updated_at = now()
+        WHERE id = $1
+        """,
+        task_id,
+    )
+    return result == "UPDATE 1"
+
+
+async def mark_orphaned_tasks_stopped(
+    *,
+    pool: asyncpg.Pool | None = None,
+) -> int:
+    pool = pool or get_pool()
+    result = await pool.execute(
+        """
+        UPDATE tasks
+        SET status = 'stopped', updated_at = now()
+        WHERE status IN ('running', 'executing', 'assigned', 'pending')
+          AND completed_at IS NULL
+        """
+    )
+    count = int(result.split()[-1]) if result else 0
+    return count
+
+
 async def list_tasks(
     *, limit: int = 50, offset: int = 0, pool: asyncpg.Pool | None = None,
 ) -> list[dict[str, Any]]:
