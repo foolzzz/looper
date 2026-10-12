@@ -19,6 +19,7 @@ from typing import Any
 
 from .broadcast import Broadcaster
 from .channels.web import WebChannelAdapter
+from .message import MANAGER_ADDRESS, AgentAddress, planner_address
 from .supervisor import AgentSupervisor
 from .tiers.task import TaskRouter
 
@@ -41,7 +42,28 @@ HTTP_200 = "200 OK"
 HTTP_400 = "400 Bad Request"
 HTTP_404 = "404 Not Found"
 HTTP_405 = "405 Method Not Allowed"
+HTTP_409 = "409 Conflict"
 HTTP_500 = "500 Internal Server Error"
+
+
+class ChatTargetError(Exception):
+    def __init__(self, status: str, message: str) -> None:
+        super().__init__(message)
+        self.status = status
+
+
+def resolve_chat_target(raw: Any, task_router: TaskRouter) -> AgentAddress:
+    """Map a ``/api/chat/send`` target to a bus address; the Manager is the default."""
+    target = raw or {"kind": "manager"}
+    kind = target.get("kind", "manager") if isinstance(target, dict) else None
+    if kind == "manager":
+        return MANAGER_ADDRESS
+    if kind == "planner":
+        task_id = str(target.get("task_id") or "")
+        if not task_router.has_planner(task_id):
+            raise ChatTargetError(HTTP_409, f"task '{task_id}' has no running planner")
+        return planner_address(task_id)
+    raise ChatTargetError(HTTP_400, "target.kind must be 'manager' or 'planner'")
 
 
 def _json_response(status: str, body: Any) -> bytes:
@@ -206,6 +228,8 @@ class AgentHTTPServer:
             await self._handle_list_tasks(writer)
         elif path == "/api/chat/send" and method == "POST":
             await self._handle_chat_send(body, writer)
+        elif path == "/api/chat/targets" and method == "GET":
+            await self._handle_chat_targets(writer)
         elif path == "/api/chat/messages" and method == "GET":
             await self._handle_chat_messages(query, writer)
         elif path == "/api/chat/messages" and method == "POST":
@@ -332,6 +356,13 @@ class AgentHTTPServer:
             await writer.drain()
             return
 
+        try:
+            target = resolve_chat_target(data.get("target"), self._task_router)
+        except ChatTargetError as exc:
+            writer.write(_json_response(exc.status, {"error": str(exc)}))
+            await writer.drain()
+            return
+
         session_id = data.get("session_id", "")
         message_id = data.get("message_id", "")
 
@@ -351,8 +382,25 @@ class AgentHTTPServer:
             goal_id=data.get("goal_id"),
             language=data.get("language", "zh"),
             attachments=data.get("attachments"),
+            target=target,
         )
         writer.write(_json_response(HTTP_200, result))
+        await writer.drain()
+
+    async def _handle_chat_targets(self, writer: asyncio.StreamWriter) -> None:
+        """The Manager (global) plus the Planner of every running task."""
+        targets: list[dict[str, Any]] = [{"kind": "manager", "id": MANAGER_ADDRESS.agent_id}]
+        targets.extend(
+            {
+                "kind": "planner",
+                "id": planner["planner_id"],
+                "task_id": planner["task_id"],
+                "requirement": planner["requirement"],
+                "status": planner["status"],
+            }
+            for planner in self._task_router.running_planners()
+        )
+        writer.write(_json_response(HTTP_200, {"targets": targets}))
         await writer.drain()
 
     async def _handle_chat_messages(

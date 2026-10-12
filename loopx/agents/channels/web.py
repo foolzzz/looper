@@ -100,6 +100,7 @@ class WebChannelAdapter(ChannelAdapter):
         goal_id: str | None = None,
         language: str = "zh",
         attachments: list[dict[str, Any]] | None = None,
+        target: AgentAddress = MANAGER_ADDRESS,
     ) -> dict[str, str]:
         assert self._bus is not None
         correlation_id = str(uuid.uuid4())
@@ -109,7 +110,7 @@ class WebChannelAdapter(ChannelAdapter):
 
         envelope = MessageEnvelope.create(
             source=self._address,
-            target=MANAGER_ADDRESS,
+            target=target,
             message_type=MessageType.USER_MESSAGE,
             payload={
                 "text": text,

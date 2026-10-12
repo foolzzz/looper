@@ -4,7 +4,8 @@ Each PlannerAgent instance handles a single task. It receives the initial
 TASK_REQUEST, decomposes it into PlanSteps, dispatches Workers, collects
 results, and applies verification strategy C (self-verify simple, spawn
 Reviewer for complex). When the task completes or fails, the Planner
-signals the TaskRouter to tear it down.
+signals the TaskRouter to tear it down. A user can chat with a running
+Planner: each message is queued as a new step after the steps in flight.
 """
 
 from __future__ import annotations
@@ -105,6 +106,7 @@ class TaskPlan:
                     "status": s.status,
                     "complexity": s.complexity,
                     "target_files": s.target_files,
+                    "depends_on": s.depends_on,
                 }
                 for s in self.steps
             ],
@@ -176,6 +178,8 @@ class PlannerAgent:
                 await self._handle_verify_result(envelope)
             case MessageType.TASK_CANCEL:
                 await self._handle_cancel(envelope)
+            case MessageType.USER_MESSAGE:
+                await self._handle_user_message(envelope)
             case MessageType.SYSTEM_EVENT:
                 await self._handle_system_event(envelope)
 
@@ -418,6 +422,65 @@ class PlannerAgent:
             self._save_plan(self._plan)
         self._running = False
 
+    async def _handle_user_message(self, envelope: MessageEnvelope) -> None:
+        """Queue a chat message as a new step; the planner itself has no LLM."""
+        assert self._bus is not None
+        plan = self._plan
+        if plan is None or plan.status == "planning":
+            reply = "任务还在规划中，请稍后再发。"
+        elif plan.status not in ("executing", "verifying"):
+            reply = f"任务已结束（{plan.status}），不能再追加步骤。"
+        else:
+            reply = await self._append_user_step(plan, str(envelope.payload.get("text", "")).strip())
+
+        await self._bus.publish(MessageEnvelope.create(
+            source=self.agent_address,
+            target=envelope.source,
+            message_type=MessageType.AGENT_REPLY,
+            payload={"text": reply},
+            correlation_id=envelope.correlation_id,
+            reply_to=envelope.message_id,
+            metadata={"origin_channel_id": envelope.metadata.get("origin_channel_id")},
+        ))
+
+    async def _append_user_step(self, plan: TaskPlan, text: str) -> str:
+        # Run after every unfinished step so a correction never races the work
+        # it corrects in the same project root.
+        unfinished = [s.step_id for s in plan.steps if s.status not in ("verified", "failed")]
+        step = PlanStep(
+            step_id=f"step-{uuid.uuid4().hex[:8]}",
+            index=len(plan.steps),
+            instruction=text,
+            depends_on=unfinished,
+        )
+        plan.steps.append(step)
+        self._save_plan(plan)
+
+        try:
+            await db_steps.upsert_steps(self._task_id, [{
+                "id": step.step_id,
+                "index": step.index,
+                "instruction": step.instruction,
+                "target_files": step.target_files,
+                "status": step.status,
+            }])
+            await db_activity.insert_activity(
+                task_id=self._task_id,
+                worker=self.agent_id,
+                kind="phase",
+                summary=f"User instruction queued as step {step.index + 1}: {text[:80]}",
+            )
+        except Exception:
+            logger.exception("failed to persist user step for task %s", self._task_id)
+
+        if step in plan.ready_steps():
+            await self._dispatch_step(plan, step)
+            return f"已追加为第 {step.index + 1} 步，已交给 Worker 执行。"
+        return (
+            f"已追加为第 {step.index + 1} 步，等前面 {len(unfinished)} 个步骤完成后"
+            "交给 Worker 执行。"
+        )
+
     async def _handle_system_event(self, envelope: MessageEnvelope) -> None:
         event_type = envelope.payload.get("type", "")
         if event_type == "pause":
@@ -554,6 +617,7 @@ class PlannerAgent:
                             status=sd.get("status", "pending"),
                             complexity=sd.get("complexity", "simple"),
                             target_files=sd.get("target_files", []),
+                            depends_on=sd.get("depends_on", []),
                         ))
                     break
             except (json.JSONDecodeError, KeyError):
