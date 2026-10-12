@@ -153,6 +153,17 @@ ALTER TABLE llm_records ADD COLUMN IF NOT EXISTS finished_at TIMESTAMPTZ;
 -- Heartbeat: last time the run wrote any output (partial deltas included).
 ALTER TABLE llm_records ADD COLUMN IF NOT EXISTS last_output_at TIMESTAMPTZ;
 
+-- Once: runs recorded before `status` existed all defaulted to 'completed';
+-- the ones that recorded an error had failed.
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM schema_migrations WHERE name = 'llm_records_status_backfill') THEN
+        UPDATE llm_records SET status = 'failed'
+        WHERE status = 'completed' AND error IS NOT NULL AND finished_at IS NULL;
+        INSERT INTO schema_migrations (name) VALUES ('llm_records_status_backfill');
+    END IF;
+END $$;
+
 -- The run's stream-json events, appended as they arrive.
 CREATE TABLE IF NOT EXISTS llm_record_events (
     record_id   BIGINT NOT NULL REFERENCES llm_records(id) ON DELETE CASCADE,

@@ -70,6 +70,9 @@ To learn how to use these features, read the [usage guide](docs/fork/usage.md).
 
 ### Fixed
 
+- Claude runs recorded before run status existed no longer all show as
+  `completed`; those that recorded an error are marked `failed` (one-time
+  migration).
 - Agent replies reach each channel once. The channel registry re-routed every
   reply and status update by its origin channel, while the channel adapter also
   delivered it from its own queue. Web chat events arrived twice, and Telegram
