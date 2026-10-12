@@ -61,6 +61,21 @@ async def append_events(
     )
 
 
+async def update_event(
+    record_id: int,
+    seq: int,
+    event: dict[str, Any],
+    *,
+    pool: asyncpg.Pool | None = None,
+) -> None:
+    """Replace a stored event in place (a progress counter that keeps growing)."""
+    pool = pool or get_pool()
+    await pool.execute(
+        "UPDATE llm_record_events SET event = $3::jsonb WHERE record_id = $1 AND seq = $2",
+        record_id, seq, json.dumps(event, ensure_ascii=False),
+    )
+
+
 async def touch_record(record_id: int, *, pool: asyncpg.Pool | None = None) -> None:
     """Mark that a running record just produced output (its heartbeat)."""
     pool = pool or get_pool()

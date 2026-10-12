@@ -18,6 +18,11 @@ To learn how to use these features, read the [usage guide](docs/fork/usage.md).
 
 ### Changed
 
+- The agent history page shows live thinking progress (`thinking · ~N tokens`),
+  hooks, background tasks, rate limits and any other stream event, instead of
+  hiding everything but text and tools. Claude's per-second `thinking_tokens`
+  events are stored as one row per thinking phase, updated in place, instead of
+  one row per second.
 - Agent workers apply the `worker` row of `agent_configs` that the dashboard
   Agents page edits, read for every run. `timeout_seconds` limits one worker
   run's total time (0 = no limit); output does not extend it. The default

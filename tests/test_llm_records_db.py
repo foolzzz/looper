@@ -39,6 +39,10 @@ def test_run_is_recorded_end_to_end() -> None:
             ], pool=pool)
             assert [e["seq"] for e in await llm_records.list_events(record_id, after_seq=1, pool=pool)] == [2]
 
+            await llm_records.update_event(record_id, 2, {"type": "result", "subtype": "success", "n": 2}, pool=pool)
+            (updated,) = await llm_records.list_events(record_id, after_seq=1, pool=pool)
+            assert updated["event"]["n"] == 2
+
             await llm_records.finish_record(
                 record_id, status="completed", output_text="done", session_id="s-1",
                 input_tokens=10, output_tokens=5, cost_usd=0.25, duration_ms=1200,
