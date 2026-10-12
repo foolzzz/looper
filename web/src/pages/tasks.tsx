@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { XCircle, RefreshCw, Clock, CheckCircle2, AlertCircle, Loader2 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { fetchTasks, cancelTask, type TaskInfo } from "@/lib/api";
+import { TaskDetailPage } from "./task-detail";
 
 function statusBadge(status: string) {
   switch (status) {
@@ -39,6 +40,7 @@ export function TasksPage() {
   const [tasks, setTasks] = useState<TaskInfo[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
 
   const load = () => {
     fetchTasks()
@@ -64,6 +66,15 @@ export function TasksPage() {
       // ignore
     }
   };
+
+  if (selectedTaskId) {
+    return (
+      <TaskDetailPage
+        taskId={selectedTaskId}
+        onBack={() => setSelectedTaskId(null)}
+      />
+    );
+  }
 
   return (
     <div className="space-y-6">
@@ -99,7 +110,11 @@ export function TasksPage() {
       ) : (
         <div className="rounded-lg border border-border bg-card divide-y divide-border">
           {tasks.map((task) => (
-            <div key={task.task_id} className="px-5 py-4">
+            <div
+              key={task.task_id}
+              className="px-5 py-4 cursor-pointer hover:bg-muted/50 transition-colors"
+              onClick={() => setSelectedTaskId(task.task_id)}
+            >
               <div className="flex items-start justify-between gap-4">
                 <div className="flex items-start gap-3 min-w-0">
                   {statusIcon(task.status)}
@@ -119,7 +134,7 @@ export function TasksPage() {
                 {(task.status === "running" || task.status === "pending") && (
                   <button
                     type="button"
-                    onClick={() => handleCancel(task.task_id)}
+                    onClick={(e) => { e.stopPropagation(); handleCancel(task.task_id); }}
                     className="shrink-0 flex items-center gap-1 rounded-md px-2 py-1 text-xs text-destructive hover:bg-destructive/10 transition-colors"
                   >
                     <XCircle className="h-3.5 w-3.5" />

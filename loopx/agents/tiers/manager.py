@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from ..broadcast import Broadcaster
 from ..bus import MessageBus
 from ..message import (
     MANAGER_ADDRESS,
@@ -28,6 +29,12 @@ from ..message import (
 )
 
 logger = logging.getLogger(__name__)
+
+try:
+    from ...db import activity as db_activity
+    _HAS_DB = True
+except Exception:
+    _HAS_DB = False
 
 SYSTEM_PROMPT = """\
 You are the Manager Agent (管家) for LoopX, an autonomous multi-agent programming system.
@@ -83,9 +90,11 @@ class ManagerAgent:
         *,
         config: ManagerConfig,
         runtime_root: Path,
+        broadcaster: Broadcaster | None = None,
     ) -> None:
         self._config = config
         self._runtime_root = runtime_root
+        self._broadcaster = broadcaster
         self._session_id: str | None = None
         self._bus: MessageBus | None = None
         self._task: asyncio.Task[Any] | None = None
@@ -351,7 +360,22 @@ class ManagerAgent:
 
         await process.wait()
         self._save_session_state()
-        return "".join(text_parts) or result_text
+
+        final_text = "".join(text_parts) or result_text
+        task_id = context_envelope.metadata.get("task_id")
+        if _HAS_DB and task_id:
+            try:
+                await db_activity.insert_activity(
+                    task_id=task_id,
+                    worker="manager",
+                    kind="text",
+                    summary=final_text[:500] if final_text else None,
+                    detail=final_text if len(final_text) > 500 else None,
+                )
+            except Exception:
+                logger.debug("failed to record manager activity", exc_info=True)
+
+        return final_text
 
     def _build_prompt(self, user_message: str) -> str:
         parts = [SYSTEM_PROMPT, ""]

@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from ..broadcast import Broadcaster
 from ..bus import MessageBus
 from ..message import (
     MANAGER_ADDRESS,
@@ -27,6 +28,12 @@ from ..message import (
 from .planner import PlannerAgent
 
 logger = logging.getLogger(__name__)
+
+try:
+    from ...db import activity as db_activity, tasks as db_tasks
+    _HAS_DB = True
+except Exception:
+    _HAS_DB = False
 
 MAX_CONCURRENT_TASKS = 3
 
@@ -61,7 +68,12 @@ class TaskRouter:
     Dynamically creates/destroys PlannerAgents as tasks arrive and complete.
     """
 
-    def __init__(self, *, runtime_root: Path) -> None:
+    def __init__(
+        self,
+        *,
+        runtime_root: Path,
+        broadcaster: Broadcaster | None = None,
+    ) -> None:
         self._runtime_root = runtime_root
         self._bus: MessageBus | None = None
         self._tasks: dict[str, Task] = {}
@@ -70,6 +82,7 @@ class TaskRouter:
         self._loop_task: asyncio.Task[Any] | None = None
         self._running = False
         self._pending_queue: asyncio.Queue[MessageEnvelope] = asyncio.Queue()
+        self._broadcaster = broadcaster
 
     @property
     def agent_id(self) -> str:
@@ -142,6 +155,19 @@ class TaskRouter:
         )
         self._tasks[task_id] = task
 
+        if _HAS_DB:
+            try:
+                await db_tasks.create_task(
+                    task_id=task_id,
+                    requirement=task.requirement,
+                    goal_id=task.goal_id,
+                    project_root=task.project_root,
+                    correlation_id=task.correlation_id,
+                    origin_channel_id=task.origin_channel_id,
+                )
+            except Exception:
+                logger.exception("failed to persist task %s", task_id)
+
         if self._semaphore.locked():
             task.status = "pending"
             self._pending_queue.put_nowait(envelope)
@@ -161,6 +187,14 @@ class TaskRouter:
 
         await planner.start(self._bus)
         task.status = "running"
+
+        if _HAS_DB:
+            try:
+                await db_tasks.update_task_status(
+                    task.task_id, "running", planner_id=planner.agent_id,
+                )
+            except Exception:
+                logger.exception("failed to persist assign for task %s", task.task_id)
 
         await self._bus.publish(MessageEnvelope.create(
             source=TASK_ROUTER_ADDRESS,
@@ -190,6 +224,25 @@ class TaskRouter:
         task = self._tasks.get(task_id)
         if not task:
             return
+
+        if _HAS_DB:
+            try:
+                await db_tasks.update_task_status(task_id, status)
+                await db_activity.insert_activity(
+                    task_id=task_id,
+                    worker="planner",
+                    kind="phase",
+                    summary=envelope.payload.get("summary", status),
+                )
+            except Exception:
+                logger.exception("failed to persist status for task %s", task_id)
+
+        if self._broadcaster:
+            self._broadcaster.publish(task_id, {
+                "kind": "phase",
+                "summary": envelope.payload.get("summary", status),
+                "worker": "planner",
+            })
 
         await self._bus.publish(MessageEnvelope.create(
             source=TASK_ROUTER_ADDRESS,
@@ -234,6 +287,15 @@ class TaskRouter:
         task = self._tasks.get(task_id)
         if task and task.status not in ("completed", "failed", "cancelled"):
             task.status = "completed"
+
+        if _HAS_DB and task:
+            try:
+                await db_tasks.update_task_status(task_id, task.status)
+            except Exception:
+                logger.exception("failed to persist teardown for task %s", task_id)
+
+        if self._broadcaster:
+            self._broadcaster.close_task(task_id)
 
     async def _try_dequeue(self) -> None:
         if self._pending_queue.empty():

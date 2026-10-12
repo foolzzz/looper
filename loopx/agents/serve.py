@@ -25,6 +25,7 @@ import signal
 from pathlib import Path
 from typing import Any
 
+from .broadcast import Broadcaster
 from .bus import MessageBus
 from .channels.registry import ChannelRegistry
 from .channels.web import WebChannelAdapter
@@ -49,6 +50,18 @@ async def _run_agent_system(
     lark_app_id: str = "",
 ) -> None:
     """Start the full agent system and run until interrupted."""
+
+    # --- Database ---
+    db_pool = None
+    try:
+        from ..db import init_pool, ensure_schema, close_pool
+        db_pool = await init_pool()
+        await ensure_schema(db_pool)
+        logger.info("database initialised")
+    except Exception:
+        logger.warning("database unavailable — running without persistence", exc_info=True)
+
+    broadcaster = Broadcaster()
 
     bus = MessageBus(runtime_root=runtime_root)
     supervisor = AgentSupervisor(bus=bus, runtime_root=runtime_root)
@@ -80,10 +93,12 @@ async def _run_agent_system(
         claude_bin=claude_bin,
         work_dir=work_dir,
     )
-    manager = ManagerAgent(config=manager_config, runtime_root=runtime_root)
+    manager = ManagerAgent(
+        config=manager_config, runtime_root=runtime_root, broadcaster=broadcaster,
+    )
     supervisor.register(manager)
 
-    task_router = TaskRouter(runtime_root=runtime_root)
+    task_router = TaskRouter(runtime_root=runtime_root, broadcaster=broadcaster)
     supervisor.register(task_router)
 
     worker_config = WorkerConfig(
@@ -105,6 +120,7 @@ async def _run_agent_system(
         web_adapter=web_adapter,
         task_router=task_router,
         supervisor=supervisor,
+        broadcaster=broadcaster,
     )
     await http_server.start()
 
@@ -136,6 +152,12 @@ async def _run_agent_system(
     await supervisor.stop_all()
     await registry.stop_all()
     await bus.shutdown()
+    if db_pool is not None:
+        try:
+            from ..db import close_pool
+            await close_pool()
+        except Exception:
+            pass
     logger.info("agent system stopped")
 
 

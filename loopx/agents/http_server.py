@@ -12,10 +12,12 @@ import asyncio
 import json
 import logging
 import mimetypes
+import re
 import urllib.parse
 from pathlib import Path
 from typing import Any
 
+from .broadcast import Broadcaster
 from .channels.web import WebChannelAdapter
 from .supervisor import AgentSupervisor
 from .tiers.task import TaskRouter
@@ -23,6 +25,17 @@ from .tiers.task import TaskRouter
 logger = logging.getLogger(__name__)
 
 _STATIC_DIR = Path(__file__).parent.parent.parent / "web" / "dist"
+
+def _serialize(obj: Any) -> Any:
+    """Recursively convert datetime and other non-JSON types for response."""
+    if isinstance(obj, dict):
+        return {k: _serialize(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_serialize(v) for v in obj]
+    if hasattr(obj, "isoformat"):
+        return obj.isoformat()
+    return obj
+
 
 HTTP_200 = "200 OK"
 HTTP_400 = "400 Bad Request"
@@ -67,6 +80,7 @@ class AgentHTTPServer:
         web_adapter: WebChannelAdapter,
         task_router: TaskRouter,
         supervisor: AgentSupervisor,
+        broadcaster: Broadcaster | None = None,
         static_dir: Path | None = None,
     ) -> None:
         self._host = host
@@ -74,6 +88,7 @@ class AgentHTTPServer:
         self._web_adapter = web_adapter
         self._task_router = task_router
         self._supervisor = supervisor
+        self._broadcaster = broadcaster or Broadcaster()
         self._static_dir = static_dir or _STATIC_DIR
         self._server: asyncio.Server | None = None
 
@@ -165,6 +180,12 @@ class AgentHTTPServer:
 
     # --- API routing ---
 
+    _RE_TASK_DETAIL = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)$")
+    _RE_TASK_ACTIVITY = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)/activity$")
+    _RE_TASK_ACTIVITY_STREAM = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)/activity/stream$")
+    _RE_TASK_ACTIVITY_SEQ = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)/activity/(\d+)$")
+    _RE_TASK_CONVERSATION = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)/conversation$")
+
     async def _route_api(
         self,
         method: str,
@@ -183,6 +204,16 @@ class AgentHTTPServer:
             await self._handle_sse_events(query, writer)
         elif path == "/api/tasks/cancel" and method == "POST":
             await self._handle_task_cancel(body, writer)
+        elif (m := self._RE_TASK_ACTIVITY_STREAM.match(path)) and method == "GET":
+            await self._handle_task_activity_stream(m.group(1), query, writer)
+        elif (m := self._RE_TASK_ACTIVITY_SEQ.match(path)) and method == "GET":
+            await self._handle_task_activity_detail(m.group(1), int(m.group(2)), writer)
+        elif (m := self._RE_TASK_ACTIVITY.match(path)) and method == "GET":
+            await self._handle_task_activity(m.group(1), query, writer)
+        elif (m := self._RE_TASK_CONVERSATION.match(path)) and method == "GET":
+            await self._handle_task_conversation(m.group(1), writer)
+        elif (m := self._RE_TASK_DETAIL.match(path)) and method == "GET":
+            await self._handle_task_detail(m.group(1), writer)
         else:
             writer.write(_json_response(HTTP_404, {"error": "not found"}))
             await writer.drain()
@@ -300,6 +331,131 @@ class AgentHTTPServer:
         )
         await bus.publish(envelope)
         writer.write(_json_response(HTTP_200, {"cancelled": task_id}))
+        await writer.drain()
+
+    # --- Task detail handlers ---
+
+    async def _handle_task_detail(
+        self, task_id: str, writer: asyncio.StreamWriter,
+    ) -> None:
+        try:
+            from ..db.tasks import get_task_with_steps
+            result = await get_task_with_steps(task_id)
+        except Exception:
+            result = None
+            for t in self._task_router.list_tasks():
+                if t.get("task_id") == task_id:
+                    result = t
+                    break
+
+        if result is None:
+            writer.write(_json_response(HTTP_404, {"error": "task not found"}))
+            await writer.drain()
+            return
+
+        writer.write(_json_response(HTTP_200, _serialize(result)))
+        await writer.drain()
+
+    async def _handle_task_activity(
+        self, task_id: str, query: dict[str, str], writer: asyncio.StreamWriter,
+    ) -> None:
+        since = int(query.get("since", "0"))
+        limit = min(int(query.get("limit", "100")), 500)
+        try:
+            from ..db.activity import list_activity
+            rows = await list_activity(task_id, since_seq=since, limit=limit)
+        except Exception:
+            rows = []
+        writer.write(_json_response(HTTP_200, {"activity": [_serialize(r) for r in rows]}))
+        await writer.drain()
+
+    async def _handle_task_activity_detail(
+        self, task_id: str, seq: int, writer: asyncio.StreamWriter,
+    ) -> None:
+        try:
+            from ..db.activity import get_activity_detail
+            row = await get_activity_detail(seq)
+        except Exception:
+            row = None
+        if row is None:
+            writer.write(_json_response(HTTP_404, {"error": "activity not found"}))
+            await writer.drain()
+            return
+        writer.write(_json_response(HTTP_200, _serialize(row)))
+        await writer.drain()
+
+    async def _handle_task_activity_stream(
+        self,
+        task_id: str,
+        query: dict[str, str],
+        writer: asyncio.StreamWriter,
+    ) -> None:
+        """SSE stream for task activity with cursor-based gap replay."""
+        since = int(query.get("since", "0"))
+
+        sse_headers = (
+            "HTTP/1.1 200 OK\r\n"
+            "Content-Type: text/event-stream\r\n"
+            "Cache-Control: no-cache\r\n"
+            "Connection: keep-alive\r\n"
+            "Access-Control-Allow-Origin: *\r\n"
+            "X-Accel-Buffering: no\r\n"
+            "\r\n"
+        )
+        writer.write(sse_headers.encode("utf-8"))
+        await writer.drain()
+
+        cursor = since
+        try:
+            from ..db.activity import list_activity
+            while True:
+                rows = await list_activity(task_id, since_seq=cursor, limit=500)
+                if not rows:
+                    break
+                for row in rows:
+                    data = json.dumps(_serialize(row), ensure_ascii=False)
+                    seq = row.get("seq", 0)
+                    writer.write(f"id: {seq}\nevent: activity\ndata: {data}\n\n".encode("utf-8"))
+                    await writer.drain()
+                    cursor = seq
+        except Exception:
+            pass
+
+        sub = self._broadcaster.subscribe(task_id)
+        try:
+            while True:
+                try:
+                    event = await asyncio.wait_for(sub.get(), timeout=20.0)
+                except asyncio.TimeoutError:
+                    writer.write(b": ping\n\n")
+                    await writer.drain()
+                    continue
+
+                if event is None:
+                    writer.write(b"event: done\ndata: {}\n\n")
+                    await writer.drain()
+                    break
+
+                data = json.dumps(event, ensure_ascii=False)
+                seq = event.get("seq", "")
+                line = f"id: {seq}\nevent: activity\ndata: {data}\n\n"
+                writer.write(line.encode("utf-8"))
+                await writer.drain()
+
+        except (ConnectionError, BrokenPipeError, asyncio.CancelledError):
+            pass
+        finally:
+            self._broadcaster.unsubscribe(task_id, sub)
+
+    async def _handle_task_conversation(
+        self, task_id: str, writer: asyncio.StreamWriter,
+    ) -> None:
+        try:
+            from ..db.activity import list_conversation
+            rows = await list_conversation(task_id)
+        except Exception:
+            rows = []
+        writer.write(_json_response(HTTP_200, {"conversation": [_serialize(r) for r in rows]}))
         await writer.drain()
 
     # --- Static file serving ---
