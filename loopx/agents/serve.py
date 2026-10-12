@@ -226,10 +226,7 @@ async def _run_agent_system(
     task_router = TaskRouter(runtime_root=runtime_root, broadcaster=broadcaster)
     supervisor.register(task_router)
 
-    worker_config = WorkerConfig(
-        claude_bin=claude_bin,
-        work_dir=work_dir,
-    )
+    worker_config = WorkerConfig(claude_bin=claude_bin)
     worker_pool = WorkerPool(config=worker_config, runtime_root=runtime_root)
     supervisor.register(worker_pool)
 

@@ -370,6 +370,7 @@ class PlannerAgent:
                 "plan_id": plan.plan_id,
                 "work_result": step.result or {},
                 "acceptance_criteria": step.acceptance_criteria,
+                "context": {"work_dir": plan.work_dir},
             },
             correlation_id=plan.correlation_id,
             metadata={"origin_channel_id": plan.origin_channel_id},

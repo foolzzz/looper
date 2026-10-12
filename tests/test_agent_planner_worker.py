@@ -35,7 +35,7 @@ from loopx.agents.tiers.worker import WorkerConfig, WorkerPool, WorkerProcess
 class TestTaskPlan:
     def test_ready_steps_no_deps(self) -> None:
         plan = TaskPlan(
-            plan_id="p1", goal_id="g1", requirement="test", project_root="/tmp"
+            plan_id="p1", goal_id="g1", requirement="test", work_dir="/tmp"
         )
         plan.steps = [
             PlanStep(step_id="s1", index=0, instruction="do A"),
@@ -46,7 +46,7 @@ class TestTaskPlan:
 
     def test_ready_steps_with_deps(self) -> None:
         plan = TaskPlan(
-            plan_id="p1", goal_id="g1", requirement="test", project_root="/tmp"
+            plan_id="p1", goal_id="g1", requirement="test", work_dir="/tmp"
         )
         plan.steps = [
             PlanStep(step_id="s1", index=0, instruction="do A"),
@@ -58,7 +58,7 @@ class TestTaskPlan:
 
     def test_ready_steps_dep_completed(self) -> None:
         plan = TaskPlan(
-            plan_id="p1", goal_id="g1", requirement="test", project_root="/tmp"
+            plan_id="p1", goal_id="g1", requirement="test", work_dir="/tmp"
         )
         plan.steps = [
             PlanStep(step_id="s1", index=0, instruction="do A", status="verified"),
@@ -70,7 +70,7 @@ class TestTaskPlan:
 
     def test_is_complete(self) -> None:
         plan = TaskPlan(
-            plan_id="p1", goal_id="g1", requirement="test", project_root="/tmp"
+            plan_id="p1", goal_id="g1", requirement="test", work_dir="/tmp"
         )
         plan.steps = [
             PlanStep(step_id="s1", index=0, instruction="A", status="verified"),
@@ -80,7 +80,7 @@ class TestTaskPlan:
 
     def test_completed_not_treated_as_done(self) -> None:
         plan = TaskPlan(
-            plan_id="p1", goal_id="g1", requirement="test", project_root="/tmp"
+            plan_id="p1", goal_id="g1", requirement="test", work_dir="/tmp"
         )
         plan.steps = [
             PlanStep(step_id="s1", index=0, instruction="A", status="verified"),
@@ -90,7 +90,7 @@ class TestTaskPlan:
 
     def test_is_not_complete(self) -> None:
         plan = TaskPlan(
-            plan_id="p1", goal_id="g1", requirement="test", project_root="/tmp"
+            plan_id="p1", goal_id="g1", requirement="test", work_dir="/tmp"
         )
         plan.steps = [
             PlanStep(step_id="s1", index=0, instruction="A", status="verified"),
@@ -100,7 +100,7 @@ class TestTaskPlan:
 
     def test_has_failed(self) -> None:
         plan = TaskPlan(
-            plan_id="p1", goal_id="g1", requirement="test", project_root="/tmp"
+            plan_id="p1", goal_id="g1", requirement="test", work_dir="/tmp"
         )
         plan.steps = [
             PlanStep(step_id="s1", index=0, instruction="A", status="verified"),
@@ -110,7 +110,7 @@ class TestTaskPlan:
 
     def test_progress_summary(self) -> None:
         plan = TaskPlan(
-            plan_id="p1", goal_id="g1", requirement="test", project_root="/tmp"
+            plan_id="p1", goal_id="g1", requirement="test", work_dir="/tmp"
         )
         plan.steps = [
             PlanStep(step_id="s1", index=0, instruction="A", status="verified"),
@@ -124,7 +124,7 @@ class TestTaskPlan:
 
     def test_to_dict(self) -> None:
         plan = TaskPlan(
-            plan_id="p1", goal_id="g1", requirement="test", project_root="/tmp"
+            plan_id="p1", goal_id="g1", requirement="test", work_dir="/tmp"
         )
         plan.steps = [PlanStep(step_id="s1", index=0, instruction="do A")]
         d = plan.to_dict()
@@ -170,7 +170,7 @@ class TestPlannerAgent:
                     payload={
                         "goal_id": "g1",
                         "requirement": "add logout button",
-                        "project_root": "/tmp",
+                        "work_dir": "/tmp",
                     },
                     metadata={"origin_channel_id": "channel-web"},
                 )
@@ -218,7 +218,7 @@ class TestPlannerAgent:
                     payload={
                         "goal_id": "g1",
                         "requirement": "simple fix",
-                        "project_root": "/tmp",
+                        "work_dir": "/tmp",
                     },
                     metadata={"origin_channel_id": "channel-web"},
                 )
@@ -270,7 +270,7 @@ class TestPlannerAgent:
                     payload={
                         "goal_id": "g1",
                         "requirement": "complex refactor",
-                        "project_root": "/tmp",
+                        "work_dir": "/tmp",
                     },
                     metadata={"origin_channel_id": "channel-web"},
                 )
@@ -306,7 +306,10 @@ class TestPlannerAgent:
                         while not q.empty():
                             collected.append(await q.get())
 
-                assert any(m.message_type == MessageType.VERIFY_REQUEST for m in collected)
+                verify = [m for m in collected if m.message_type == MessageType.VERIFY_REQUEST]
+                assert verify
+                # The reviewer runs in the task's directory too; there is no default.
+                assert verify[0].payload["context"] == {"work_dir": "/tmp"}
 
                 await planner.stop()
                 await bus.shutdown()
@@ -328,7 +331,7 @@ class TestPlannerAgent:
                     payload={
                         "goal_id": "g1",
                         "requirement": "persist test",
-                        "project_root": "/tmp",
+                        "work_dir": "/tmp",
                     },
                     metadata={"origin_channel_id": "channel-web"},
                 )
@@ -445,12 +448,12 @@ def _fake_claude(tmp: Path, body: str) -> str:
     return str(script)
 
 
-def _work_item(project_root: Path) -> MessageEnvelope:
+def _work_item(work_dir: Path) -> MessageEnvelope:
     return MessageEnvelope.create(
         source=planner_address("t1"),
         target=worker_address("w1"),
         message_type=MessageType.WORK_ITEM,
-        payload={"task_id": "s1", "instruction": "x", "context": {"project_root": str(project_root)}},
+        payload={"task_id": "s1", "instruction": "x", "context": {"work_dir": str(work_dir)}},
     )
 
 
@@ -560,6 +563,39 @@ class TestWorkerSubprocess:
         finish = agent_db.finish_record.await_args.kwargs
         assert finish["status"] == "failed"
         assert "missing.txt" in finish["error"]
+
+    def test_missing_work_directory_fails_without_running_claude(self) -> None:
+        async def _run() -> tuple[dict[str, Any], bool]:
+            with tempfile.TemporaryDirectory() as tmp:
+                marker = Path(tmp) / "ran"
+                claude = _fake_claude(Path(tmp), f"open({str(marker)!r}, 'w').write('1')")
+                pool = WorkerPool(config=WorkerConfig(claude_bin=claude), runtime_root=Path(tmp))
+                envelope = _work_item(Path(tmp))
+                envelope.payload["context"] = {}
+                result = await pool._execute(envelope)
+                return result, marker.exists()
+
+        result, ran = asyncio.run(_run())
+        assert result["status"] == "failed"
+        assert "work directory" in result["error"]
+        assert not ran
+
+    def test_missing_work_directory_is_created(self) -> None:
+        async def _run() -> tuple[dict[str, Any], bool]:
+            with tempfile.TemporaryDirectory() as tmp:
+                claude = _fake_claude(Path(tmp), (
+                    "open('out.txt', 'w').write('x')\n"
+                    "print(json.dumps({'type': 'result', 'subtype': 'success', 'is_error': False, "
+                    "'result': json.dumps({'status': 'completed', 'changed_files': {'out.txt': 'added'}})}))"
+                ))
+                target = Path(tmp) / "new" / "project"
+                pool = WorkerPool(config=WorkerConfig(claude_bin=claude), runtime_root=Path(tmp))
+                result = await pool._execute(_work_item(target))
+                return result, (target / "out.txt").exists()
+
+        result, written = asyncio.run(_run())
+        assert result["status"] == "completed"
+        assert written  # Claude ran inside the directory it created
 
     @pytest.mark.parametrize(("create", "expected"), [(True, "completed"), (False, "failed")])
     def test_report_is_checked_against_the_project(self, create: bool, expected: str) -> None:
@@ -702,14 +738,14 @@ class TestJudgeResult:
         from loopx.agents.tiers.worker import judge_result
 
         (tmp_path / "a.py").write_text("x")
-        result = judge_result(event, project_root=tmp_path, is_verify=False)
+        result = judge_result(event, work_dir=tmp_path, is_verify=False)
         assert result["status"] == "failed"
         assert error in result["error"]
 
     def test_missing_report_keeps_the_final_message(self, tmp_path: Path) -> None:
         from loopx.agents.tiers.worker import judge_result
 
-        result = judge_result(_result("The sleep timed out, so I stopped."), project_root=tmp_path, is_verify=False)
+        result = judge_result(_result("The sleep timed out, so I stopped."), work_dir=tmp_path, is_verify=False)
         assert result["status"] == "failed"
         assert result["final_message"] == "The sleep timed out, so I stopped."
 
@@ -721,7 +757,7 @@ class TestJudgeResult:
             '{"status": "failed", "changed_files": {"a.py": "partial"}, "summary": "tests still fail"}'
             "\n```"
         )
-        result = judge_result(_result(text), project_root=tmp_path, is_verify=False)
+        result = judge_result(_result(text), work_dir=tmp_path, is_verify=False)
         assert result["status"] == "failed"
         assert result["error"] == "tests still fail"
         assert result["changed_files"] == {"a.py": "partial"}
@@ -739,7 +775,7 @@ class TestJudgeResult:
         }
         # An example object earlier in the text must not override the final report.
         text = 'The format is {"status": "failed"}.\n' + json.dumps(report)
-        result = judge_result(_result(text), project_root=tmp_path, is_verify=False)
+        result = judge_result(_result(text), work_dir=tmp_path, is_verify=False)
         assert result["status"] == "completed"
         assert result["changed_files"] == report["changed_files"]
         assert result["deleted_files"] == ["gone.py"]
@@ -757,12 +793,12 @@ class TestJudgeResult:
     def test_verdict(self, tmp_path: Path, text: str, passed: bool) -> None:
         from loopx.agents.tiers.worker import judge_result
 
-        assert judge_result(_result(text), project_root=tmp_path, is_verify=True)["passed"] is passed
+        assert judge_result(_result(text), work_dir=tmp_path, is_verify=True)["passed"] is passed
 
     def test_failed_review_run_is_not_a_pass(self, tmp_path: Path) -> None:
         from loopx.agents.tiers.worker import judge_result
 
         event = _result(subtype="error_max_turns", is_error=True)
-        result = judge_result(event, project_root=tmp_path, is_verify=True)
+        result = judge_result(event, work_dir=tmp_path, is_verify=True)
         assert result["passed"] is False
         assert "error_max_turns" in result["findings"][0]
