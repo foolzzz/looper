@@ -54,6 +54,7 @@ def _ask(body: str) -> dict[str, Any]:
                 payload={"text": "hello"},
                 correlation_id="corr-1",
             ))
+            await manager.stop()
             replies = []
             deltas = []
             queue = bus.get_queue(WEB.agent_id)
@@ -172,6 +173,181 @@ class TestManagerStreaming:
         assert reply["text"] == "答案"
 
 
+def _resident(*, exit_after: int | None = None, die_on: int | None = None, ignore_eof: bool = False) -> str:
+    """A fake claude that reads user turns from stdin like the real one.
+
+    It appends its pid to ``pids`` on start and answers each turn with
+    ``turn N: <message>`` and a result. Like Claude, the result's
+    ``total_cost_usd`` is the process's running total (0.25 per turn). It
+    exits on EOF, after turn ``exit_after``, or without a result during turn
+    ``die_on``. With ``ignore_eof`` it keeps running after stdin closes.
+    """
+    return (
+        "open('pids', 'a').write(f'{os.getpid()}\\n')\n"
+        "turn = 0\n"
+        "for line in sys.stdin:\n"
+        "    turn += 1\n"
+        "    text = json.loads(line)['message']['content']\n"
+        "    print(json.dumps({'type': 'system', 'subtype': 'init', 'session_id': 'sess-1'}), flush=True)\n"
+        f"    if turn == {die_on!r}:\n"
+        "        sys.exit(3)\n"
+        "    print(json.dumps({'type': 'assistant', 'message': {'content': [{'type': 'text', 'text': f'turn {turn}: {text}'}]}}), flush=True)\n"
+        "    print(json.dumps({'type': 'result', 'subtype': 'success', 'is_error': False, 'session_id': 'sess-1',\n"
+        "                      'total_cost_usd': turn * 0.25}), flush=True)\n"
+        f"    if turn == {exit_after!r}:\n"
+        "        break\n"
+        + ("time.sleep(30)\n" if ignore_eof else "")
+    )
+
+
+def _converse(
+    monkeypatch: pytest.MonkeyPatch,
+    body: str,
+    messages: list[str],
+    *,
+    prompts: list[str] | None = None,
+    between: Any = None,
+) -> dict[str, Any]:
+    """Send ``messages`` one at a time to one Manager backed by a fake claude, then stop it.
+
+    ``prompts[i]`` is the system prompt the database holds for message ``i``;
+    ``between(spawned)`` runs before every message after the first. Returns the
+    final ``replies``, every started Claude as ``(argv, process)`` in
+    ``spawned``, whether each was ``running`` just before ``stop()``, and the
+    ``pids`` the fake logged.
+    """
+    from loopx.db import agent_configs
+
+    spawned: list[tuple[list[str], Any]] = []
+    real_exec = asyncio.create_subprocess_exec
+
+    async def _exec(*args: Any, **kwargs: Any) -> Any:
+        process = await real_exec(*args, **kwargs)
+        spawned.append(([str(a) for a in args[1:]], process))
+        return process
+
+    current: dict[str, int] = {"message": 0}
+
+    async def _get_config(agent_id: str) -> dict[str, Any] | None:
+        if not prompts:
+            return None
+        return {"system_prompt": prompts[current["message"]]}
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _exec)
+    monkeypatch.setattr(agent_configs, "get_config", _get_config)
+
+    async def _run() -> dict[str, Any]:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bus = MessageBus(runtime_root=root)
+            manager = ManagerAgent(
+                config=ManagerConfig(claude_bin=_fake_claude(root, body), work_dir=root),
+                runtime_root=root,
+            )
+            manager._bus = bus
+            queue = bus.get_queue(WEB.agent_id)
+            replies: list[str] = []
+            for index, text in enumerate(messages):
+                current["message"] = index
+                if index and between is not None:
+                    await between(spawned)
+                await manager._handle(MessageEnvelope.create(
+                    source=WEB, target=MANAGER_ADDRESS, message_type=MessageType.USER_MESSAGE,
+                    payload={"text": text}, correlation_id=f"corr-{index}",
+                ))
+                answers = []
+                while not queue.empty():
+                    envelope = queue.get_nowait()
+                    if envelope.message_type == MessageType.AGENT_REPLY:
+                        answers.append(envelope.payload["text"])
+                assert len(answers) == 1, "each message gets exactly one final reply"
+                replies.append(answers[0])
+            running = [process.returncode is None for _, process in spawned]
+            await manager.stop()
+            await bus.shutdown()
+            pid_file = root / "pids"
+            pids = pid_file.read_text().split() if pid_file.exists() else []
+            return {"replies": replies, "spawned": spawned, "running": running, "pids": pids}
+
+    return asyncio.run(_run())
+
+
+def _flag(argv: list[str], name: str) -> str | None:
+    return argv[argv.index(name) + 1] if name in argv else None
+
+
+async def _first_claude_exits(spawned: list[tuple[list[str], Any]]) -> None:
+    await spawned[0][1].wait()
+
+
+@pytest.mark.usefixtures("agent_db")
+class TestManagerResidentClaude:
+    def test_one_process_serves_every_message(self, monkeypatch: pytest.MonkeyPatch, agent_db: Any) -> None:
+        chat = _converse(monkeypatch, _resident(), ["hello", "again"])
+        assert chat["replies"] == ["turn 1: hello", "turn 2: again"]
+        assert len(chat["spawned"]) == 1 and len(chat["pids"]) == 1
+        # Each message is still one recorded run, with the resident process's command.
+        starts = [call.kwargs for call in agent_db.start_record.await_args_list]
+        assert [start["input_text"] for start in starts] == ["hello", "again"]
+        assert all(start["metadata"]["command"][1:] == chat["spawned"][0][0] for start in starts)
+        finishes = [call.kwargs for call in agent_db.finish_record.await_args_list]
+        assert [finish["status"] for finish in finishes] == ["completed", "completed"]
+        # Claude reports the process's running cost; each record holds its own turn's share.
+        assert [finish["cost_usd"] for finish in finishes] == [0.25, 0.25]
+
+    def test_messages_go_on_stdin_not_in_argv(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        chat = _converse(monkeypatch, _resident(), ["hello"])
+        ((argv, _),) = chat["spawned"]
+        assert _flag(argv, "--input-format") == "stream-json"
+        assert _flag(argv, "--output-format") == "stream-json"
+        assert {"--print", "--verbose", "--include-partial-messages"} <= set(argv)
+        takes_value = {"--input-format", "--output-format", "--append-system-prompt", "--resume"}
+        positional = [arg for i, arg in enumerate(argv) if not arg.startswith("--") and argv[i - 1] not in takes_value]
+        assert positional == []
+        assert _flag(argv, "--resume") is None  # no session yet
+
+    def test_claude_that_exited_is_restarted_with_its_session(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        chat = _converse(monkeypatch, _resident(exit_after=1), ["hello", "again"], between=_first_claude_exits)
+        assert chat["replies"] == ["turn 1: hello", "turn 1: again"]
+        (first, _), (second, _) = chat["spawned"]
+        assert _flag(first, "--resume") is None
+        assert _flag(second, "--resume") == "sess-1"
+        assert len(chat["pids"]) == 2
+
+    def test_claude_dying_mid_turn_is_reported_then_restarted(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        chat = _converse(monkeypatch, _resident(die_on=2), ["hello", "again", "third"])
+        first, failed, third = chat["replies"]
+        assert first == "turn 1: hello"
+        assert "Manager" in failed and "3" in failed  # the exit code
+        assert third == "turn 1: third"
+        assert [_flag(argv, "--resume") for argv, _ in chat["spawned"]] == [None, "sess-1"]
+
+    def test_new_system_prompt_restarts_claude(self, monkeypatch: pytest.MonkeyPatch, agent_db: Any) -> None:
+        chat = _converse(monkeypatch, _resident(), ["hello", "again", "third"],
+                         prompts=["prompt A", "prompt B", "prompt B"])
+        assert chat["replies"] == ["turn 1: hello", "turn 1: again", "turn 2: third"]
+        # A new process starts its running cost from zero.
+        assert [call.kwargs["cost_usd"] for call in agent_db.finish_record.await_args_list] == [0.25, 0.25, 0.25]
+        (first, _), (second, _) = chat["spawned"]
+        assert _flag(first, "--append-system-prompt").startswith("prompt A")
+        assert _flag(second, "--append-system-prompt").startswith("prompt B")
+        assert _flag(second, "--resume") == "sess-1"
+        assert chat["running"] == [False, True]  # the old process was stopped and reaped
+
+    @pytest.mark.parametrize(("ignore_eof", "returncode"), [(False, 0), (True, -9)])
+    def test_stop_ends_and_reaps_claude(
+        self, monkeypatch: pytest.MonkeyPatch, ignore_eof: bool, returncode: int,
+    ) -> None:
+        from loopx.agents.tiers import manager as manager_module
+
+        monkeypatch.setattr(manager_module, "_STOP_GRACE_SEC", 0.5)
+        chat = _converse(monkeypatch, _resident(ignore_eof=ignore_eof), ["hello"])
+        ((_, process),) = chat["spawned"]
+        assert chat["running"] == [True]
+        # Closing stdin ends Claude; one that keeps running is killed after the grace period.
+        assert process.returncode == returncode
+
+
 
 def _task_json(**fields: Any) -> str:
     report = {"action": "task_request", "goal_id": "g", "structured_requirement": "build it",
@@ -199,6 +375,7 @@ def _ask_for_task(body: str) -> tuple[str, list[MessageEnvelope], list[str]]:
                 source=WEB, target=MANAGER_ADDRESS, message_type=MessageType.USER_MESSAGE,
                 payload={"text": "确认"}, correlation_id="corr-1",
             ))
+            await manager.stop()
             reply = ""
             queue = bus.get_queue(WEB.agent_id)
             while not queue.empty():

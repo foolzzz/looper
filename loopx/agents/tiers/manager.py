@@ -1,7 +1,9 @@
-"""Manager Agent: user-facing steward backed by a persistent Claude Code session.
+"""Manager Agent: user-facing steward backed by a resident Claude Code process.
 
 The Manager is the only agent that communicates with users. It:
-- Maintains a long-running Claude Code session (pp mode + stream-json)
+- Keeps one Claude Code process running (stream-json input and output): each
+  chat message is one user turn on its stdin, and a restarted process resumes
+  the saved session
 - Receives user messages from all channels via the Bus
 - Classifies intent (direct answer, clarification, task request)
 - Forwards structured task requests to the TaskRouter
@@ -14,13 +16,14 @@ import asyncio
 import json
 import logging
 import shutil
+from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from ..broadcast import Broadcaster
 from ..bus import MessageBus
-from ..claude_cli import ClaudeRunRecorder, iter_lines
+from ..claude_cli import ClaudeRunRecorder, iter_lines, write_user_turn
 from .task import resolve_work_dir
 from ..message import (
     MANAGER_ADDRESS,
@@ -34,6 +37,9 @@ logger = logging.getLogger(__name__)
 
 from ...db import activity as db_activity
 from ...db import agent_configs as db_agent_configs
+
+# How long a stopping Claude may take to exit after its stdin closes before it is killed.
+_STOP_GRACE_SEC = 5.0
 
 # Appended to the (editable) system prompt on every call: the task JSON is
 # parsed by code, so its required fields are owned by code too.
@@ -107,7 +113,7 @@ class GoalSnapshot:
 
 
 class ManagerAgent:
-    """Long-running Manager Agent backed by a persistent Claude Code session."""
+    """Long-running Manager Agent backed by a resident Claude Code process."""
 
     def __init__(
         self,
@@ -125,6 +131,14 @@ class ManagerAgent:
         self._running = False
         self._system_prompt: str = DEFAULT_SYSTEM_PROMPT
         self._goal_snapshots: dict[str, GoalSnapshot] = {}
+        # The resident Claude: started on the first chat message, then fed one
+        # user turn per message. Its stdout line iterator lives across turns.
+        self._process: asyncio.subprocess.Process | None = None
+        self._process_command: list[str] = []
+        self._process_prompt: str | None = None  # the system prompt it was started with
+        self._process_cost_usd = 0.0  # its running total at the last result
+        self._lines: AsyncIterator[bytes] | None = None
+        self._turn_lock = asyncio.Lock()
         self._state_dir = runtime_root / ".local" / "manager"
         self._state_dir.mkdir(parents=True, exist_ok=True)
         self._load_session_state()
@@ -187,6 +201,8 @@ class ManagerAgent:
             except asyncio.CancelledError:
                 pass
             self._task = None
+        async with self._turn_lock:
+            await self._stop_process()
         self._save_session_state()
 
     def is_healthy(self) -> bool:
@@ -325,24 +341,23 @@ class ManagerAgent:
             logger.error("agent %s has exceeded max restarts", agent_id)
 
     async def _invoke_claude(self, message: str, context_envelope: MessageEnvelope) -> str:
-        """Invoke Claude Code in pp mode with stream-json, resuming the persistent session."""
+        """Send the message to the resident Claude as one user turn; return its reply.
 
+        Claude starts on the first message and is restarted, resuming the
+        saved session, after it exits or when the system prompt changes.
+        Turns run one at a time.
+        """
+        async with self._turn_lock:
+            return await self._run_turn(message, context_envelope)
+
+    async def _run_turn(self, message: str, context_envelope: MessageEnvelope) -> str:
         await self._load_db_config()
-
-        command = [
-            self._config.claude_bin,
-            "--print",
-            "--output-format", "stream-json",
-            "--verbose",
-            "--include-partial-messages",  # stream the reply as it is written
-            "--append-system-prompt", f"{self._system_prompt}\n\n{TASK_DIRECTORY_RULE}",
-        ]
-
-        if self._session_id:
-            command.extend(["--resume", self._session_id])
-
-        prompt = self._build_user_message(message)
-        command.append(prompt)
+        system_prompt = f"{self._system_prompt}\n\n{TASK_DIRECTORY_RULE}"
+        if self._process is not None and (
+            self._process.returncode is not None or self._process_prompt != system_prompt
+        ):
+            await self._stop_process()
+        command = self._process_command if self._process is not None else self._claude_command(system_prompt)
 
         task_id = context_envelope.metadata.get("task_id")
         recorder = ClaudeRunRecorder(
@@ -355,26 +370,33 @@ class ManagerAgent:
         )
         await recorder.start()
 
-        try:
-            process = await asyncio.create_subprocess_exec(
-                *command,
-                cwd=str(self._config.work_dir),
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.DEVNULL,
-            )
-        except OSError as exc:
-            logger.error("failed to start Claude Code: %s", exc)
-            await recorder.finish(output_text=None, result_event=None, error=f"Cannot start Claude Code: {exc}")
-            return "无法启动 Claude Code，请检查安装。"
+        if self._process is None:
+            try:
+                await self._start_process(command, system_prompt)
+            except OSError as exc:
+                logger.error("failed to start Claude Code: %s", exc)
+                await recorder.finish(output_text=None, result_event=None, error=f"Cannot start Claude Code: {exc}")
+                return "无法启动 Claude Code，请检查安装。"
+        process, lines = self._process, self._lines
+        assert process is not None and process.stdin is not None and lines is not None
 
         text_parts: list[str] = []
         result_text = ""
         result_event: dict[str, Any] | None = None
         streamed_partials = False
+        input_lost = False
 
-        assert process.stdout is not None
         try:
-            async for raw_line in iter_lines(process.stdout):
+            try:
+                await write_user_turn(process.stdin, self._build_user_message(message))
+            except (BrokenPipeError, ConnectionResetError):
+                # Claude closed its stdin, so it is exiting; what it already wrote decides the turn.
+                logger.warning("manager: Claude closed stdin before the message was sent")
+                input_lost = True
+                if process.returncode is None:
+                    process.kill()
+            # This turn's events end at its result; the iterator stays open for the next turn.
+            async for raw_line in lines:
                 line = raw_line.decode("utf-8", errors="replace").strip()
                 if not line:
                     continue
@@ -387,7 +409,7 @@ class ManagerAgent:
                 await recorder.record(payload)
 
                 session_id = payload.get("session_id")
-                if isinstance(session_id, str) and session_id:
+                if isinstance(session_id, str) and session_id and session_id != self._session_id:
                     self._session_id = session_id
                     self._save_session_state()
 
@@ -436,25 +458,32 @@ class ManagerAgent:
                 elif event_type == "result":
                     result_event = payload
                     result_text = str(payload.get("result") or "")
-
-            await process.wait()
+                    break
         except BaseException as exc:
             # Never leave Claude running once the Manager gives up on it.
-            if process.returncode is None:
-                process.kill()
-                await process.wait()
+            await self._stop_process(kill=True)
             await recorder.finish(
                 output_text="".join(text_parts) or None, result_event=result_event,
                 error=f"Manager stopped reading Claude: {type(exc).__name__}: {exc}",
             )
             raise
-        self._save_session_state()
+
+        if result_event is None or input_lost:
+            # Claude has exited (stdout ended or stdin was closed); the
+            # next message starts a new process that resumes the session.
+            await self._stop_process()
 
         final_text = "".join(text_parts) or result_text
+        # A turn cut off by Claude's exit is no reply, even after some text.
+        exited = result_event is None
+        replied = not exited and bool(final_text)
         await recorder.finish(
             output_text=final_text or None,
             result_event=result_event,
-            error=None if final_text else f"no reply (exit code {process.returncode})",
+            error=None if replied else (
+                f"no reply (exit code {process.returncode})" if exited else "no reply"
+            ),
+            cost_usd=self._turn_cost(result_event),
         )
 
         if task_id:
@@ -469,11 +498,73 @@ class ManagerAgent:
             except Exception:
                 logger.debug("failed to record manager activity", exc_info=True)
 
-        if not final_text:
+        if not replied:
             raise RuntimeError(
-                f"Claude Code 没有返回内容（退出码 {process.returncode}）"
+                f"Claude Code 没有返回内容（退出码 {process.returncode}）" if exited else "Claude Code 没有返回内容"
             )
         return final_text
+
+    def _claude_command(self, system_prompt: str) -> list[str]:
+        command = [
+            self._config.claude_bin,
+            "--print",
+            "--verbose",
+            "--output-format", "stream-json",
+            # Each chat message is one user turn on stdin; Claude idles between turns.
+            "--input-format", "stream-json",
+            "--include-partial-messages",  # stream the reply as it is written
+            "--append-system-prompt", system_prompt,
+        ]
+        if self._session_id:
+            command.extend(["--resume", self._session_id])
+        return command
+
+    async def _start_process(self, command: list[str], system_prompt: str) -> None:
+        process = await asyncio.create_subprocess_exec(
+            *command,
+            cwd=str(self._config.work_dir),
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        assert process.stdout is not None
+        self._process = process
+        self._process_command = command
+        self._process_prompt = system_prompt
+        self._process_cost_usd = 0.0
+        self._lines = iter_lines(process.stdout)
+        logger.info("manager started Claude Code (pid=%s, session=%s)", process.pid, self._session_id or "new")
+
+    def _turn_cost(self, result_event: dict[str, Any] | None) -> float | None:
+        """This turn's cost: Claude's ``total_cost_usd`` is its process's running total."""
+        total = (result_event or {}).get("total_cost_usd")
+        if not isinstance(total, (int, float)):
+            return None
+        cost, self._process_cost_usd = total - self._process_cost_usd, total
+        return cost
+
+    async def _stop_process(self, *, kill: bool = False) -> None:
+        """End the resident Claude, if any, and forget it.
+
+        Its stdin is closed, which ends a healthy Claude; one still running
+        after ``_STOP_GRACE_SEC`` (at once with ``kill``) is killed. The
+        process is always reaped.
+        """
+        process = self._process
+        self._process, self._lines, self._process_command, self._process_prompt = None, None, [], None
+        if process is None:
+            return
+        if process.stdin is not None and not process.stdin.is_closing():
+            process.stdin.close()
+        if process.returncode is None and not kill:
+            try:
+                await asyncio.wait_for(process.wait(), _STOP_GRACE_SEC)
+            except TimeoutError:
+                pass
+        if process.returncode is None:
+            process.kill()
+        await process.wait()
+        logger.info("manager stopped Claude Code (pid=%s, exit code %s)", process.pid, process.returncode)
 
     def _build_user_message(self, user_message: str) -> str:
         parts: list[str] = []
