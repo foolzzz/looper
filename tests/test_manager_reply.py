@@ -88,6 +88,19 @@ class TestManagerReply:
         )["text"]
         assert text == "hi there"
 
+    def test_reply_is_recorded(self, agent_db: Any) -> None:
+        _ask(
+            "print(json.dumps({'type': 'system', 'subtype': 'init', 'model': 'claude-x', 'session_id': 's-9'}))\n"
+            "print(json.dumps({'type': 'assistant', 'message': {'content': [{'type': 'text', 'text': 'hi'}]}}))\n"
+            "print(json.dumps({'type': 'result', 'subtype': 'success', 'is_error': False, 'result': 'hi'}))"
+        )
+        start = agent_db.start_record.await_args.kwargs
+        assert start["agent_id"] == "manager" and start["input_text"] == "hello"
+        assert "--append-system-prompt" in start["metadata"]["command"]
+        finish = agent_db.finish_record.await_args.kwargs
+        assert (finish["status"], finish["output_text"], finish["model"], finish["session_id"]) == (
+            "completed", "hi", "claude-x", "s-9")
+
     def test_empty_run_is_reported(self) -> None:
         text = _ask("sys.exit(1)")["text"]
         assert "Manager" in text and "1" in text

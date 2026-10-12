@@ -149,7 +149,9 @@ _AGENT_DB_WRITES = (
     ("steps", "upsert_steps"),
     ("steps", "update_step_status"),
     ("activity", "insert_activity"),
-    ("llm_records", "insert_record"),
+    ("llm_records", "start_record"),
+    ("llm_records", "append_events"),
+    ("llm_records", "finish_record"),
 )
 
 
@@ -169,7 +171,8 @@ def agent_db(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
 
     db = SimpleNamespace()
     for module_name, function in _AGENT_DB_WRITES:
-        mock = AsyncMock(return_value=None)
+        # start_record hands back the new record's id; the other writes return nothing.
+        mock = AsyncMock(return_value=1 if function == "start_record" else None)
         monkeypatch.setattr(importlib.import_module(f"loopx.db.{module_name}"), function, mock)
         setattr(db, function, mock)
     # The Planner imports this one by name rather than through its module.

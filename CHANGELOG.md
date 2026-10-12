@@ -18,6 +18,14 @@ To learn how to use these features, read the [usage guide](docs/fork/usage.md).
 
 ### Changed
 
+- Every Claude run of the agent system (Manager, Worker, reviewer) is recorded
+  the same way in `llm_records`. The record opens as `running` with the full
+  launch command and working directory. It receives each stream-json event as
+  it arrives in the new `llm_record_events` table, including assistant text,
+  thinking, tool calls with their input, tool results and the result; partial
+  text deltas are not stored. It closes with status, model, tokens, cost and
+  duration. `GET /api/llm-records/:id` and `GET /api/llm-records/:id/events?after=N`
+  read them back.
 - The agent Chat streams the Manager's reply as Claude writes it
   (`--include-partial-messages`) instead of showing it all at once. Output
   from Claude subagents is no longer mixed into the reply.

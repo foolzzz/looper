@@ -211,6 +211,8 @@ class AgentHTTPServer:
     _RE_AGENT_SESSION_MSGS = re.compile(r"^/api/agents/([a-zA-Z0-9_-]+)/sessions/([^/]+)/messages$")
     _RE_AGENT_SESSIONS = re.compile(r"^/api/agents/([a-zA-Z0-9_-]+)/sessions$")
     _RE_LLM_PROFILE = re.compile(r"^/api/llm-profiles/(\d+)$")
+    _RE_LLM_RECORD = re.compile(r"^/api/llm-records/(\d+)$")
+    _RE_LLM_RECORD_EVENTS = re.compile(r"^/api/llm-records/(\d+)/events$")
     _RE_CHANNEL_CONFIG = re.compile(r"^/api/channel-configs/([a-zA-Z0-9_-]+)$")
     _RE_TASK_CONFIG = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)/config$")
 
@@ -270,6 +272,10 @@ class AgentHTTPServer:
             await self._handle_update_agent_config(m.group(1), body, writer)
         elif path == "/api/llm-records" and method == "GET":
             await self._handle_list_llm_records(query, writer)
+        elif (m := self._RE_LLM_RECORD.match(path)) and method == "GET":
+            await self._handle_get_llm_record(int(m.group(1)), writer)
+        elif (m := self._RE_LLM_RECORD_EVENTS.match(path)) and method == "GET":
+            await self._handle_llm_record_events(int(m.group(1)), query, writer)
         elif path == "/api/llm-profiles" and method == "GET":
             await self._handle_list_llm_profiles(writer)
         elif path == "/api/llm-profiles" and method == "POST":
@@ -892,6 +898,41 @@ class AgentHTTPServer:
         await writer.drain()
 
     # --- LLM record handlers ---
+
+    async def _handle_get_llm_record(self, record_id: int, writer: asyncio.StreamWriter) -> None:
+        from ..db.llm_records import get_record
+        try:
+            record = await get_record(record_id)
+        except Exception:
+            writer.write(_json_response(HTTP_500, {"error": "database unavailable"}))
+            await writer.drain()
+            return
+        if record is None:
+            writer.write(_json_response(HTTP_404, {"error": f"llm record {record_id} not found"}))
+        else:
+            writer.write(_json_response(HTTP_200, {"record": record}))
+        await writer.drain()
+
+    async def _handle_llm_record_events(
+        self, record_id: int, query: dict[str, str], writer: asyncio.StreamWriter,
+    ) -> None:
+        """Transcript events after ``after`` (a seq), so a viewer can follow a running agent."""
+        from ..db.llm_records import list_events
+        try:
+            after = int(query.get("after", "0"))
+            limit = min(int(query.get("limit", "1000")), 5000)
+        except ValueError:
+            writer.write(_json_response(HTTP_400, {"error": "after and limit must be integers"}))
+            await writer.drain()
+            return
+        try:
+            events = await list_events(record_id, after_seq=after, limit=limit)
+        except Exception:
+            writer.write(_json_response(HTTP_500, {"error": "database unavailable"}))
+            await writer.drain()
+            return
+        writer.write(_json_response(HTTP_200, {"events": events}))
+        await writer.drain()
 
     async def _handle_list_llm_records(
         self, query: dict[str, str], writer: asyncio.StreamWriter,
