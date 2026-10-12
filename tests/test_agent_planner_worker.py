@@ -469,6 +469,48 @@ class TestWorkerSubprocess:
 
         assert asyncio.run(_run())["status"] == "completed"
 
+    def test_run_is_recorded(self, agent_db: Any) -> None:
+        async def _run() -> tuple[str, dict[str, Any]]:
+            with tempfile.TemporaryDirectory() as tmp:
+                claude = _fake_claude(Path(tmp), (
+                    "open('out.txt', 'w').write('x')\n"
+                    "print(json.dumps({'type': 'assistant', 'message': {'content': [{'type': 'text', 'text': 'done'}]}}))\n"
+                    "print(json.dumps({'type': 'result', 'subtype': 'success', 'is_error': False, "
+                    "'result': json.dumps({'status': 'completed', 'changed_files': {'out.txt': 'added'}})}))"
+                ))
+                pool = WorkerPool(config=WorkerConfig(claude_bin=claude), runtime_root=Path(tmp))
+                envelope = _work_item(Path(tmp))
+                envelope.payload["parent_task_id"] = "task-1"
+                await pool._execute(envelope)
+                return claude, {"cwd": tmp}
+
+        claude, where = asyncio.run(_run())
+        start = agent_db.start_record.await_args.kwargs
+        assert (start["agent_id"], start["task_id"]) == ("w1", "task-1")
+        assert start["metadata"]["command"][0] == claude
+        assert start["metadata"]["cwd"] == where["cwd"]
+        assert "--dangerously-skip-permissions" in start["metadata"]["command"]
+        recorded = [call.args[1][0][1]["type"] for call in agent_db.append_events.await_args_list]
+        assert recorded == ["assistant", "result"]
+        finish = agent_db.finish_record.await_args.kwargs
+        assert finish["status"] == "completed" and finish["error"] is None
+        assert '"status": "completed"' in finish["output_text"]
+
+    def test_mismatched_report_is_recorded_as_failed(self, agent_db: Any) -> None:
+        async def _run() -> None:
+            with tempfile.TemporaryDirectory() as tmp:
+                claude = _fake_claude(Path(tmp), (
+                    "print(json.dumps({'type': 'result', 'subtype': 'success', 'is_error': False, "
+                    "'result': json.dumps({'status': 'completed', 'changed_files': {'missing.txt': 'added'}})}))"
+                ))
+                pool = WorkerPool(config=WorkerConfig(claude_bin=claude), runtime_root=Path(tmp))
+                await pool._execute(_work_item(Path(tmp)))
+
+        asyncio.run(_run())
+        finish = agent_db.finish_record.await_args.kwargs
+        assert finish["status"] == "failed"
+        assert "missing.txt" in finish["error"]
+
     @pytest.mark.parametrize(("create", "expected"), [(True, "completed"), (False, "failed")])
     def test_report_is_checked_against_the_project(self, create: bool, expected: str) -> None:
         async def _run() -> dict[str, Any]:

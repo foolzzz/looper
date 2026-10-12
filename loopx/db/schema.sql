@@ -118,6 +118,20 @@ ALTER TABLE llm_records ADD COLUMN IF NOT EXISTS output_text TEXT;
 CREATE INDEX IF NOT EXISTS idx_llm_records_agent ON llm_records(agent_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_llm_records_task ON llm_records(task_id, created_at DESC);
 
+-- One row per Claude run: launch command in metadata, outcome when it ends.
+ALTER TABLE llm_records ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'completed';
+ALTER TABLE llm_records ADD COLUMN IF NOT EXISTS cost_usd DOUBLE PRECISION;
+ALTER TABLE llm_records ADD COLUMN IF NOT EXISTS finished_at TIMESTAMPTZ;
+
+-- The run's stream-json events, appended as they arrive.
+CREATE TABLE IF NOT EXISTS llm_record_events (
+    record_id   BIGINT NOT NULL REFERENCES llm_records(id) ON DELETE CASCADE,
+    seq         INTEGER NOT NULL,
+    event       JSONB NOT NULL,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (record_id, seq)
+);
+
 CREATE TABLE IF NOT EXISTS chat_messages (
     id          BIGSERIAL PRIMARY KEY,
     session_id  TEXT NOT NULL,

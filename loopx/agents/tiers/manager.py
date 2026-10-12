@@ -14,14 +14,13 @@ import asyncio
 import json
 import logging
 import shutil
-import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from ..broadcast import Broadcaster
 from ..bus import MessageBus
-from ..claude_cli import iter_lines
+from ..claude_cli import ClaudeRunRecorder, iter_lines
 from ..message import (
     MANAGER_ADDRESS,
     TASK_ROUTER_ADDRESS,
@@ -34,7 +33,6 @@ logger = logging.getLogger(__name__)
 
 from ...db import activity as db_activity
 from ...db import agent_configs as db_agent_configs
-from ...db import llm_records as db_llm_records
 
 DEFAULT_SYSTEM_PROMPT = """\
 You are the Manager Agent (管家) for LoopX, an autonomous multi-agent programming system.
@@ -324,7 +322,16 @@ class ManagerAgent:
         prompt = self._build_user_message(message)
         command.append(prompt)
 
-        t0 = time.monotonic()
+        task_id = context_envelope.metadata.get("task_id")
+        recorder = ClaudeRunRecorder(
+            agent_id="manager",
+            task_id=task_id,
+            command=command,
+            cwd=str(self._config.work_dir),
+            input_text=message,
+            session_id=self._session_id,
+        )
+        await recorder.start()
 
         try:
             process = await asyncio.create_subprocess_exec(
@@ -335,10 +342,12 @@ class ManagerAgent:
             )
         except OSError as exc:
             logger.error("failed to start Claude Code: %s", exc)
+            await recorder.finish(output_text=None, result_event=None, error=f"Cannot start Claude Code: {exc}")
             return "无法启动 Claude Code，请检查安装。"
 
         text_parts: list[str] = []
         result_text = ""
+        result_event: dict[str, Any] | None = None
         streamed_partials = False
 
         assert process.stdout is not None
@@ -353,6 +362,7 @@ class ManagerAgent:
                     continue
                 if not isinstance(payload, dict):
                     continue
+                await recorder.record(payload)
 
                 session_id = payload.get("session_id")
                 if isinstance(session_id, str) and session_id:
@@ -402,34 +412,28 @@ class ManagerAgent:
                                 await self._send_status(context_envelope, "thinking", phase=True)
 
                 elif event_type == "result":
+                    result_event = payload
                     result_text = str(payload.get("result") or "")
 
             await process.wait()
-        except BaseException:
+        except BaseException as exc:
             # Never leave Claude running once the Manager gives up on it.
             if process.returncode is None:
                 process.kill()
                 await process.wait()
+            await recorder.finish(
+                output_text="".join(text_parts) or None, result_event=result_event,
+                error=f"Manager stopped reading Claude: {type(exc).__name__}: {exc}",
+            )
             raise
         self._save_session_state()
-        duration_ms = int((time.monotonic() - t0) * 1000)
 
         final_text = "".join(text_parts) or result_text
-        task_id = context_envelope.metadata.get("task_id")
-
-        try:
-            await db_llm_records.insert_record(
-                agent_id="manager",
-                task_id=task_id,
-                session_id=self._session_id,
-                input_summary=message[:500],
-                output_summary=final_text[:500] if final_text else None,
-                input_text=message,
-                output_text=final_text or None,
-                duration_ms=duration_ms,
-            )
-        except Exception:
-            logger.debug("failed to record llm invocation", exc_info=True)
+        await recorder.finish(
+            output_text=final_text or None,
+            result_event=result_event,
+            error=None if final_text else f"no reply (exit code {process.returncode})",
+        )
 
         if task_id:
             try:

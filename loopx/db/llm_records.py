@@ -12,57 +12,114 @@ from .connection import get_pool
 
 def _row_to_dict(row: asyncpg.Record) -> dict[str, Any]:
     d = dict(row)
-    if "created_at" in d and d["created_at"] is not None:
-        d["created_at"] = d["created_at"].isoformat()
+    for key in ("created_at", "finished_at"):
+        if d.get(key) is not None:
+            d[key] = d[key].isoformat()
     if "metadata" in d and d["metadata"] is not None:
         d["metadata"] = json.loads(d["metadata"])
     return d
 
 
-async def insert_record(
+async def start_record(
     *,
     agent_id: str,
     task_id: str | None = None,
     session_id: str | None = None,
-    input_summary: str | None = None,
-    output_summary: str | None = None,
     input_text: str | None = None,
-    output_text: str | None = None,
-    input_tokens: int | None = None,
-    output_tokens: int | None = None,
-    duration_ms: int | None = None,
-    model: str | None = None,
-    error: str | None = None,
     metadata: dict[str, Any] | None = None,
     pool: asyncpg.Pool | None = None,
 ) -> int:
-    """Insert an LLM invocation record. Returns the record id."""
+    """Open a ``running`` record for one Claude invocation; returns its id."""
     pool = pool or get_pool()
-    meta_json = json.dumps(metadata) if metadata else None
     row = await pool.fetchrow(
         """
         INSERT INTO llm_records
-            (agent_id, task_id, session_id, input_summary, output_summary,
-             input_text, output_text,
-             input_tokens, output_tokens, duration_ms, model, error, metadata)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+            (agent_id, task_id, session_id, input_summary, input_text, metadata, status)
+        VALUES ($1, $2, $3, $4, $5, $6::jsonb, 'running')
         RETURNING id
         """,
-        agent_id,
-        task_id,
-        session_id,
-        input_summary,
-        output_summary,
-        input_text,
-        output_text,
-        input_tokens,
-        output_tokens,
-        duration_ms,
-        model,
-        error,
-        meta_json,
+        agent_id, task_id, session_id,
+        input_text[:500] if input_text else None, input_text,
+        json.dumps(metadata) if metadata else None,
     )
     return row["id"]
+
+
+async def append_events(
+    record_id: int,
+    events: list[tuple[int, dict[str, Any]]],
+    *,
+    pool: asyncpg.Pool | None = None,
+) -> None:
+    """Append ``(seq, event)`` stream events to a record's transcript."""
+    if not events:
+        return
+    pool = pool or get_pool()
+    await pool.executemany(
+        "INSERT INTO llm_record_events (record_id, seq, event) VALUES ($1, $2, $3::jsonb)",
+        [(record_id, seq, json.dumps(event, ensure_ascii=False)) for seq, event in events],
+    )
+
+
+async def finish_record(
+    record_id: int,
+    *,
+    status: str,
+    output_text: str | None = None,
+    session_id: str | None = None,
+    input_tokens: int | None = None,
+    output_tokens: int | None = None,
+    cost_usd: float | None = None,
+    duration_ms: int | None = None,
+    model: str | None = None,
+    error: str | None = None,
+    pool: asyncpg.Pool | None = None,
+) -> None:
+    """Close a record with the run's outcome, usage and cost."""
+    pool = pool or get_pool()
+    await pool.execute(
+        """
+        UPDATE llm_records SET
+            status = $2,
+            output_text = $3,
+            output_summary = $4,
+            session_id = COALESCE($5, session_id),
+            input_tokens = $6,
+            output_tokens = $7,
+            cost_usd = $8,
+            duration_ms = $9,
+            model = COALESCE($10, model),
+            error = $11,
+            finished_at = now()
+        WHERE id = $1
+        """,
+        record_id, status, output_text, output_text[:500] if output_text else None,
+        session_id, input_tokens, output_tokens, cost_usd, duration_ms, model, error,
+    )
+
+
+async def list_events(
+    record_id: int,
+    *,
+    after_seq: int = 0,
+    limit: int = 1000,
+    pool: asyncpg.Pool | None = None,
+) -> list[dict[str, Any]]:
+    """A record's stream events with ``seq`` greater than ``after_seq``, in order."""
+    pool = pool or get_pool()
+    rows = await pool.fetch(
+        """
+        SELECT seq, event, created_at FROM llm_record_events
+        WHERE record_id = $1 AND seq > $2
+        ORDER BY seq
+        LIMIT $3
+        """,
+        record_id, after_seq, limit,
+    )
+    return [
+        {"seq": r["seq"], "event": json.loads(r["event"]), "created_at": r["created_at"].isoformat()}
+        for r in rows
+    ]
 
 
 async def list_records(

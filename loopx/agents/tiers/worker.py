@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from ..bus import MessageBus
-from ..claude_cli import iter_lines
+from ..claude_cli import ClaudeRunRecorder, iter_lines
 from ..message import (
     AgentAddress,
     MessageEnvelope,
@@ -26,7 +26,6 @@ from ..message import (
 )
 
 from ...db import activity as db_activity
-from ...db import llm_records as db_llm_records
 
 logger = logging.getLogger(__name__)
 
@@ -269,8 +268,6 @@ class WorkerPool:
         self._active[worker_id] = wp
 
         is_verify = envelope.message_type == MessageType.VERIFY_REQUEST
-        prompt = self._build_work_prompt(payload) if not is_verify else str(payload)
-        t0 = __import__("time").monotonic()
 
         parent_task_id = payload.get("parent_task_id", "")
         if parent_task_id:
@@ -297,23 +294,6 @@ class WorkerPool:
             wp.status = "failed"
             wp.result = {"status": "failed", "error": str(exc)}
             logger.exception("worker %s failed on task %s", worker_id, task_id)
-
-        elapsed_ms = int((__import__("time").monotonic() - t0) * 1000)
-        output_text = (wp.result or {}).get("summary") or (wp.result or {}).get("error") or ""
-        try:
-            await db_llm_records.insert_record(
-                agent_id=worker_id,
-                task_id=payload.get("parent_task_id") or task_id,
-                session_id=worker_id,
-                input_summary=prompt[:500],
-                output_summary=output_text[:500] if output_text else None,
-                input_text=prompt,
-                output_text=output_text or None,
-                duration_ms=elapsed_ms,
-                error=wp.result.get("error") if wp.result else None,
-            )
-        except Exception:
-            logger.debug("failed to record worker llm invocation", exc_info=True)
 
         result_type = MessageType.VERIFY_RESULT if is_verify else MessageType.WORK_RESULT
         await self._bus.publish(MessageEnvelope.create(
@@ -371,6 +351,15 @@ class WorkerPool:
             except Exception:
                 pass
 
+        recorder = ClaudeRunRecorder(
+            agent_id=worker_id,
+            task_id=parent_task_id,
+            command=command,
+            cwd=project_root,
+            input_text=prompt,
+        )
+        await recorder.start()
+
         logger.info("worker %s starting subprocess: %s (cwd=%s)", worker_id, command[0], project_root)
         try:
             process = await asyncio.create_subprocess_exec(
@@ -382,7 +371,9 @@ class WorkerPool:
             logger.info("worker %s subprocess started (pid=%s)", worker_id, process.pid)
         except OSError as exc:
             logger.error("worker %s failed to start subprocess: %s", worker_id, exc)
-            return {"status": "failed", "error": f"Cannot start Claude Code: {exc}"}
+            error = f"Cannot start Claude Code: {exc}"
+            await recorder.finish(output_text=None, result_event=None, error=error)
+            return {"status": "failed", "error": error}
 
         result_event: dict[str, Any] | None = None
 
@@ -397,6 +388,9 @@ class WorkerPool:
                     event = json.loads(line)
                 except json.JSONDecodeError:
                     continue
+                if not isinstance(event, dict):
+                    continue
+                await recorder.record(event)
 
                 event_type = event.get("type", "")
 
@@ -462,26 +456,34 @@ class WorkerPool:
         try:
             await asyncio.wait_for(_read_stream(), timeout=self._config.timeout_sec)
             await process.wait()
-        except BaseException:
+        except BaseException as exc:
             # Never leave Claude running unsupervised once the worker gives up.
             if process.returncode is None:
                 process.kill()
                 await process.wait()
+            await recorder.finish(
+                output_text=None, result_event=result_event,
+                error=f"worker stopped reading Claude: {type(exc).__name__}",
+            )
             raise
 
+        final_text = str((result_event or {}).get("result") or "") or None
         return_code = process.returncode or 0
         if return_code != 0:
             stderr = ""
             if process.stderr:
                 stderr_bytes = await process.stderr.read()
                 stderr = stderr_bytes.decode("utf-8", errors="replace") if stderr_bytes else ""
-            return {
-                "status": "failed",
-                "error": f"Claude Code exited with code {return_code}",
-                "stderr": stderr[:500],
-            }
+            error = f"Claude Code exited with code {return_code}"
+            await recorder.finish(output_text=final_text, result_event=result_event, error=error)
+            return {"status": "failed", "error": error, "stderr": stderr[:500]}
 
-        return judge_result(result_event, project_root=Path(project_root), is_verify=is_verify)
+        outcome = judge_result(result_event, project_root=Path(project_root), is_verify=is_verify)
+        # A review that says "not passed" is still a successful run; only work
+        # failures are the run's error.
+        error = outcome.get("error") if not is_verify and outcome.get("status") == "failed" else None
+        await recorder.finish(output_text=final_text, result_event=result_event, error=error)
+        return outcome
 
     def _build_work_prompt(self, payload: dict[str, Any]) -> str:
         instruction = payload.get("instruction", "")
