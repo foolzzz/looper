@@ -1,7 +1,6 @@
 import { useEffect, useState, useCallback, useRef } from "react";
 import {
   Bot,
-  User,
   Loader2,
   RefreshCw,
   Save,
@@ -16,10 +15,6 @@ import {
   ChevronDown,
   ChevronUp,
   Database,
-  ArrowLeft,
-  MessageSquare,
-  Terminal,
-  AlertCircle,
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -33,15 +28,11 @@ import {
   createLlmProfile,
   updateLlmProfile,
   deleteLlmProfile,
-  fetchAgentSessions,
-  fetchSessionMessages,
   type AgentConfig,
   type LlmRecord,
   type LlmProfile,
-  type AgentSession,
-  type SessionMessage,
-  type ActivityEvent,
 } from "@/lib/api";
+import { historyHref } from "@/pages/agent-history";
 
 type Tab = "config" | "sessions";
 
@@ -729,236 +720,61 @@ function ConfigTab({
   );
 }
 
-// --- Sessions Tab ---
+// --- Runs Tab ---
 
-function SessionsTab({ agentId }: { agentId: string }) {
-  const [sessions, setSessions] = useState<AgentSession[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [activeSession, setActiveSession] = useState<string | null>(null);
+function RunsTab({ agentId }: { agentId: string }) {
+  const [runs, setRuns] = useState<LlmRecord[] | null>(null);
 
   useEffect(() => {
-    setLoading(true);
-    setActiveSession(null);
-    fetchAgentSessions(agentId)
-      .then(setSessions)
-      .catch(() => setSessions([]))
-      .finally(() => setLoading(false));
+    setRuns(null);
+    fetchLlmRecords({ role: agentId, limit: 100 })
+      .then(setRuns)
+      .catch(() => setRuns([]));
   }, [agentId]);
 
-  if (loading) {
+  if (agentId === "planner") {
+    return (
+      <p className="text-sm text-muted-foreground">
+        The Planner runs no LLM. Open a task's Agent Timeline and choose History on its Planner to see what it did.
+      </p>
+    );
+  }
+  if (runs === null) {
     return (
       <div className="flex h-40 items-center justify-center">
         <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
       </div>
     );
   }
-
-  if (activeSession) {
-    return (
-      <SessionDetail
-        agentId={agentId}
-        taskId={activeSession}
-        onBack={() => setActiveSession(null)}
-      />
-    );
-  }
-
-  if (!sessions.length) {
+  if (!runs.length) {
     return (
       <div className="flex h-40 items-center justify-center">
-        <p className="text-sm text-muted-foreground">No sessions yet</p>
+        <p className="text-sm text-muted-foreground">No runs yet</p>
       </div>
     );
   }
-
   return (
     <div className="space-y-2">
-      {sessions.map((s) => (
-        <button
-          key={s.task_id}
-          type="button"
-          onClick={() => setActiveSession(s.task_id)}
-          className="w-full text-left rounded-lg border border-border bg-card px-4 py-3 hover:bg-accent/50 transition-colors"
+      {runs.map((run) => (
+        <a
+          key={run.id}
+          href={historyHref(run.agent_id, run.task_id)}
+          className="block rounded-lg border border-border bg-card px-4 py-3 hover:bg-accent/50 transition-colors"
         >
-          <div className="flex items-start justify-between gap-3">
-            <div className="min-w-0 flex-1">
-              <p className="text-sm font-medium truncate">
-                {s.requirement || s.task_id}
-              </p>
-              <div className="mt-1 flex items-center gap-3 text-xs text-muted-foreground">
-                <span className="flex items-center gap-1">
-                  <MessageSquare className="h-3 w-3" />
-                  {s.turn_count} turns
-                </span>
-                {s.total_duration_ms != null && (
-                  <span className="flex items-center gap-1">
-                    <Clock className="h-3 w-3" />
-                    {Math.round(s.total_duration_ms / 1000)}s
-                  </span>
-                )}
-                <span>{formatTime(s.last_at)}</span>
-              </div>
-            </div>
-            <div className="flex flex-col items-end gap-1">
-              {s.task_phase && s.task_phase !== "pending" && (
-                <Badge
-                  variant={
-                    s.task_phase === "completed" ? "success" :
-                    s.task_phase === "failed" ? "destructive" : "default"
-                  }
-                  className="text-[10px]"
-                >
-                  {s.task_phase}
-                </Badge>
-              )}
-              {s.task_status && (
-                <Badge variant="outline" className="text-[10px]">{s.task_status}</Badge>
-              )}
-            </div>
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
+            <span className="font-mono tabular-nums">{formatTime(run.created_at)}</span>
+            <Badge variant={run.status === "completed" ? "success" : run.status === "failed" ? "destructive" : "warning"}>
+              {run.status}
+            </Badge>
+            <span className="font-mono text-foreground">{run.agent_id}</span>
+            {run.task_id && <span>{run.task_id}</span>}
+            {run.duration_ms != null && <span>{Math.round(run.duration_ms / 1000)}s</span>}
+            {run.cost_usd != null && <span>${run.cost_usd.toFixed(4)}</span>}
           </div>
-        </button>
+          {run.input_summary && <p className="mt-1 truncate text-sm">{run.input_summary}</p>}
+          {run.error && <p className="mt-1 truncate text-xs text-destructive">{run.error}</p>}
+        </a>
       ))}
-    </div>
-  );
-}
-
-function SessionDetail({
-  agentId,
-  taskId,
-  onBack,
-}: {
-  agentId: string;
-  taskId: string;
-  onBack: () => void;
-}) {
-  const [messages, setMessages] = useState<SessionMessage[]>([]);
-  const [activity, setActivity] = useState<ActivityEvent[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [showFull, setShowFull] = useState<Record<number, boolean>>({});
-  const scrollRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    setLoading(true);
-    fetchSessionMessages(agentId, taskId)
-      .then((data) => {
-        setMessages(data.messages || []);
-        setActivity(data.activity || []);
-      })
-      .catch(() => {})
-      .finally(() => setLoading(false));
-  }, [agentId, taskId]);
-
-  useEffect(() => {
-    scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
-  }, [messages]);
-
-  if (loading) {
-    return (
-      <div className="flex h-40 items-center justify-center">
-        <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
-      </div>
-    );
-  }
-
-  const toolEvents = activity.filter((a) => a.kind === "tool_use");
-
-  return (
-    <div className="space-y-3">
-      <button
-        type="button"
-        onClick={onBack}
-        className="flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground transition-colors"
-      >
-        <ArrowLeft className="h-3.5 w-3.5" />
-        Back to sessions
-      </button>
-
-      <div className="text-xs text-muted-foreground mb-2">
-        {messages.length} LLM calls · {toolEvents.length} tool uses
-      </div>
-
-      <div ref={scrollRef} className="max-h-[500px] overflow-y-auto space-y-4 pr-1">
-        {messages.map((msg) => {
-          const inputText = showFull[msg.id] ? (msg.input_text || msg.input_summary) : msg.input_summary;
-          const outputText = showFull[msg.id] ? (msg.output_text || msg.output_summary) : msg.output_summary;
-          const hasMore = (msg.input_text && msg.input_text.length > 500) ||
-                          (msg.output_text && msg.output_text.length > 500);
-
-          return (
-            <div key={msg.id} className="space-y-2">
-              {inputText && (
-                <div className="flex gap-3 justify-end">
-                  <div className="max-w-[75%] rounded-lg px-4 py-2.5 text-sm bg-primary text-primary-foreground">
-                    <p className="whitespace-pre-wrap break-words">{inputText}</p>
-                  </div>
-                  <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-accent">
-                    <User className="h-3.5 w-3.5 text-muted-foreground" />
-                  </div>
-                </div>
-              )}
-
-              <div className="flex gap-3 justify-start">
-                <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-primary/10">
-                  <Bot className="h-3.5 w-3.5 text-primary" />
-                </div>
-                <div
-                  className={cn(
-                    "max-w-[75%] rounded-lg px-4 py-2.5 text-sm",
-                    msg.error
-                      ? "bg-destructive/10 text-destructive border border-destructive/30"
-                      : "bg-muted text-foreground",
-                  )}
-                >
-                  <p className="whitespace-pre-wrap break-words">
-                    {msg.error || outputText || "—"}
-                  </p>
-                </div>
-              </div>
-
-              <div className="flex items-center gap-3 pl-10 text-[10px] text-muted-foreground/60">
-                <span>{formatTime(msg.created_at)}</span>
-                {msg.duration_ms != null && <span>{msg.duration_ms}ms</span>}
-                {msg.model && <span>{msg.model}</span>}
-                {msg.input_tokens != null && (
-                  <span>{msg.input_tokens}→{msg.output_tokens} tok</span>
-                )}
-                {hasMore && (
-                  <button
-                    type="button"
-                    onClick={() => setShowFull((prev) => ({ ...prev, [msg.id]: !prev[msg.id] }))}
-                    className="hover:text-foreground underline"
-                  >
-                    {showFull[msg.id] ? "show less" : "show full"}
-                  </button>
-                )}
-              </div>
-            </div>
-          );
-        })}
-
-        {toolEvents.length > 0 && (
-          <div className="border-t border-border pt-3 mt-3">
-            <p className="text-xs font-medium text-muted-foreground mb-2 flex items-center gap-1.5">
-              <Terminal className="h-3.5 w-3.5" />
-              Tool use trace ({toolEvents.length})
-            </p>
-            <div className="space-y-1">
-              {toolEvents.map((ev) => (
-                <div
-                  key={ev.seq}
-                  className="flex items-start gap-2 text-xs text-muted-foreground py-1"
-                >
-                  <Terminal className="h-3 w-3 mt-0.5 shrink-0 text-primary/60" />
-                  <span className="break-all">{ev.summary}</span>
-                  <span className="ml-auto shrink-0 text-[10px]">
-                    {formatTime(ev.created_at)}
-                  </span>
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
-      </div>
     </div>
   );
 }
@@ -1096,7 +912,7 @@ export function AgentsPage({ sub, onNavigate }: AgentsPageProps) {
 
         {/* Editor panel */}
         {selected && (
-          <div className="flex-1 rounded-lg border border-border bg-card">
+          <div className="min-w-0 flex-1 rounded-lg border border-border bg-card">
             <div className="flex items-center gap-1 border-b border-border px-4">
               {(["config", "sessions"] as Tab[]).map((tab) => (
                 <button
@@ -1110,7 +926,7 @@ export function AgentsPage({ sub, onNavigate }: AgentsPageProps) {
                       : "border-transparent text-muted-foreground hover:text-foreground",
                   )}
                 >
-                  {tab === "config" ? "Config" : "Sessions"}
+                  {tab === "config" ? "Config" : "Runs"}
                 </button>
               ))}
               <div className="ml-auto flex items-center gap-2 text-xs text-muted-foreground">
@@ -1128,7 +944,7 @@ export function AgentsPage({ sub, onNavigate }: AgentsPageProps) {
                   saving={saving}
                 />
               )}
-              {activeTab === "sessions" && <SessionsTab agentId={selected.agent_id} />}
+              {activeTab === "sessions" && <RunsTab agentId={selected.agent_id} />}
             </div>
           </div>
         )}

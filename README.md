@@ -128,8 +128,9 @@ Single-page React app served from `web/dist/` on port 8767.
 | **Dashboard** | System status overview |
 | **Chat** | Talk to the global Manager, or to a running task's Planner (each message becomes a new step of that task); SSE streaming |
 | **Tasks** | Task list, status filters, create/start/stop/delete controls |
-| **Task Detail** | Config editor (init status), overview, pipeline DAG, sessions, conversation |
-| **Agents** | Agent config editor, session viewer with LLM traffic |
+| **Task Detail** | Config editor (init status), overview, pipeline DAG, sessions, conversation; each Agent Timeline row has a **History** button |
+| **Agents** | Agent config editor; **Runs** lists every Claude run of a role and opens its history |
+| **Agent history** | One agent's launch command, full transcript (text, thinking, tool calls and results) and activity; follows a running agent and flags one with no output for 2 minutes |
 | **Settings** | Lark & Telegram channel configuration |
 
 ### HTTP API

@@ -1,0 +1,513 @@
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  AlertTriangle,
+  ArrowLeft,
+  Bot,
+  Brain,
+  ChevronDown,
+  ChevronRight,
+  Copy,
+  Check,
+  Loader2,
+  MessageSquare,
+  Terminal,
+  User,
+  Wrench,
+} from "lucide-react";
+import ReactMarkdown from "react-markdown";
+import { Badge } from "@/components/ui/badge";
+import { cn } from "@/lib/utils";
+import {
+  fetchChatMessages,
+  fetchLlmRecord,
+  fetchLlmRecordEvents,
+  fetchLlmRecords,
+  fetchTaskActivity,
+  type ActivityEvent,
+  type DbChatMessage,
+  type LlmRecord,
+  type LlmRecordEvent,
+} from "@/lib/api";
+
+// A run with no output for this long is flagged as possibly stuck.
+const STUCK_AFTER_MS = 2 * 60 * 1000;
+const POLL_MS = 2000;
+const LONG_ARG = 200;
+
+type Block = Record<string, unknown>;
+
+function formatClock(iso: string | null) {
+  if (!iso) return "--:--:--";
+  const date = new Date(iso);
+  return Number.isNaN(date.getTime()) ? iso : date.toLocaleTimeString([], { hour12: false });
+}
+
+function formatDateTime(iso: string | null) {
+  return iso ? new Date(iso).toLocaleString() : "-";
+}
+
+function formatMs(ms: number) {
+  const sec = Math.max(0, Math.round(ms / 1000));
+  if (sec < 60) return `${sec}s`;
+  const min = Math.floor(sec / 60);
+  return min < 60 ? `${min}m ${sec % 60}s` : `${Math.floor(min / 60)}h ${min % 60}m`;
+}
+
+function agentRole(agentId: string) {
+  if (agentId === "manager") return "Manager";
+  if (agentId.startsWith("planner")) return "Planner";
+  if (agentId.startsWith("reviewer")) return "Reviewer";
+  if (agentId.startsWith("worker")) return "Worker";
+  return "Agent";
+}
+
+function shellQuote(arg: string) {
+  return /^[A-Za-z0-9_\-./=:@%+,]+$/.test(arg) ? arg : `'${arg.replace(/'/g, `'\\''`)}'`;
+}
+
+/** Parse "<agentId>?task=<taskId>" from the #history/ route. */
+export function parseHistoryRoute(sub: string): { agentId: string; taskId: string | null } {
+  const [agentPart, query = ""] = sub.split("?");
+  return {
+    agentId: decodeURIComponent(agentPart || ""),
+    taskId: new URLSearchParams(query).get("task"),
+  };
+}
+
+/** The task router logs the Planner's progress reports as "planner". */
+export function activityBelongsTo(ev: ActivityEvent, agentId: string) {
+  const worker = ev.worker || "system";
+  return worker === agentId || (agentId.startsWith("planner") && worker === "planner");
+}
+
+export function historyHref(agentId: string, taskId?: string | null) {
+  return `#history/${encodeURIComponent(agentId)}${taskId ? `?task=${encodeURIComponent(taskId)}` : ""}`;
+}
+
+function CopyButton({ text, label }: { text: string; label: string }) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <button
+      type="button"
+      onClick={() => {
+        navigator.clipboard?.writeText(text).then(() => {
+          setCopied(true);
+          setTimeout(() => setCopied(false), 1500);
+        });
+      }}
+      className="flex items-center gap-1 rounded border border-border px-2 py-0.5 text-[11px] text-muted-foreground hover:text-foreground hover:bg-accent"
+    >
+      {copied ? <Check className="h-3 w-3" /> : <Copy className="h-3 w-3" />}
+      {copied ? "Copied" : label}
+    </button>
+  );
+}
+
+function Collapsible({
+  title,
+  icon,
+  children,
+  defaultOpen = false,
+  tone,
+}: {
+  title: React.ReactNode;
+  icon?: React.ReactNode;
+  children: React.ReactNode;
+  defaultOpen?: boolean;
+  tone?: "error";
+}) {
+  const [open, setOpen] = useState(defaultOpen);
+  return (
+    <div className={cn("rounded-md border", tone === "error" ? "border-destructive/40" : "border-border")}>
+      <button
+        type="button"
+        onClick={() => setOpen(!open)}
+        className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs hover:bg-accent/40"
+      >
+        {open ? <ChevronDown className="h-3 w-3 shrink-0" /> : <ChevronRight className="h-3 w-3 shrink-0" />}
+        {icon}
+        <span className={cn("min-w-0 truncate", tone === "error" && "text-destructive")}>{title}</span>
+      </button>
+      {open && <div className="border-t border-border px-3 py-2">{children}</div>}
+    </div>
+  );
+}
+
+function Pre({ text }: { text: string }) {
+  return (
+    <pre className="max-h-96 overflow-auto whitespace-pre-wrap break-all font-mono text-[11px] leading-relaxed text-muted-foreground">
+      {text}
+    </pre>
+  );
+}
+
+function LaunchCommand({ record }: { record: LlmRecord }) {
+  const command = record.metadata?.command ?? [];
+  const cwd = record.metadata?.cwd ?? "";
+  const [expanded, setExpanded] = useState<Set<number>>(new Set());
+  if (!command.length) {
+    return <p className="text-xs text-muted-foreground">Launch command was not recorded for this run.</p>;
+  }
+  const full = `${cwd ? `cd ${shellQuote(cwd)} && ` : ""}${command.map(shellQuote).join(" ")}`;
+  return (
+    <div className="rounded-md border border-border bg-muted/30 p-3">
+      <div className="mb-2 flex items-center justify-between gap-2">
+        <span className="flex items-center gap-1.5 text-xs font-medium">
+          <Terminal className="h-3.5 w-3.5" /> Launch command
+        </span>
+        <CopyButton text={full} label="Copy" />
+      </div>
+      {cwd && <p className="mb-1 font-mono text-[11px] text-muted-foreground">cwd: {cwd}</p>}
+      <p className="font-mono text-[11px] leading-relaxed break-all">
+        {command.map((arg, i) => {
+          const long = arg.length > LONG_ARG;
+          const shown = long && !expanded.has(i);
+          return (
+            <span key={i}>
+              {i > 0 && " "}
+              {shown ? (
+                <button
+                  type="button"
+                  onClick={() => setExpanded(new Set(expanded).add(i))}
+                  className="rounded bg-primary/10 px-1 text-primary hover:bg-primary/20"
+                  title="Show the full argument"
+                >
+                  {"<"}{arg.length} chars{">"}
+                </button>
+              ) : long ? (
+                <span className="whitespace-pre-wrap">{shellQuote(arg)}</span>
+              ) : (
+                shellQuote(arg)
+              )}
+            </span>
+          );
+        })}
+      </p>
+    </div>
+  );
+}
+
+function toolSummary(input: Block) {
+  for (const key of ["command", "file_path", "pattern", "url", "description", "prompt"]) {
+    const value = input[key];
+    if (typeof value === "string" && value) return value.replace(/\s+/g, " ").slice(0, 160);
+  }
+  return "";
+}
+
+function resultText(content: unknown): string {
+  if (typeof content === "string") return content;
+  if (Array.isArray(content)) {
+    return content
+      .map((part) => (part && typeof part === "object" && "text" in part ? String((part as Block).text) : JSON.stringify(part)))
+      .join("\n");
+  }
+  return JSON.stringify(content, null, 2);
+}
+
+function EventView({ item }: { item: LlmRecordEvent }) {
+  const event = item.event;
+  const type = event.type;
+  const time = <span className="shrink-0 font-mono text-[11px] tabular-nums text-muted-foreground">{formatClock(item.created_at)}</span>;
+
+  if (type === "system" && event.subtype === "init") {
+    return (
+      <div className="flex items-center gap-2 text-[11px] text-muted-foreground">
+        {time}
+        <span>Session started · {String(event.model ?? "model ?")} · {String(event.session_id ?? "")}</span>
+      </div>
+    );
+  }
+  if (type === "assistant") {
+    const content = ((event.message as Block | undefined)?.content as Block[] | undefined) ?? [];
+    return (
+      <div className="flex gap-2">
+        {time}
+        <div className="min-w-0 flex-1 space-y-1.5">
+          {content.map((block, i) => {
+            if (block.type === "text") {
+              return (
+                <div key={i} className="rounded-lg bg-muted px-3 py-2 text-sm">
+                  <div className="prose prose-invert prose-sm max-w-none [&>*:first-child]:mt-0 [&>*:last-child]:mb-0">
+                    <ReactMarkdown>{String(block.text ?? "")}</ReactMarkdown>
+                  </div>
+                </div>
+              );
+            }
+            if (block.type === "thinking") {
+              const text = String(block.thinking ?? "");
+              return (
+                <Collapsible key={i} icon={<Brain className="h-3 w-3" />} title={text ? `Thinking (${text.length} chars)` : "Thinking (content not exposed)"}>
+                  <Pre text={text || "Claude did not expose this thinking block."} />
+                </Collapsible>
+              );
+            }
+            if (block.type === "tool_use") {
+              const input = (block.input as Block | undefined) ?? {};
+              return (
+                <Collapsible
+                  key={i}
+                  icon={<Wrench className="h-3 w-3 text-primary" />}
+                  title={<><span className="font-medium">{String(block.name)}</span> <span className="text-muted-foreground">{toolSummary(input)}</span></>}
+                >
+                  <Pre text={JSON.stringify(input, null, 2)} />
+                </Collapsible>
+              );
+            }
+            return null;
+          })}
+        </div>
+      </div>
+    );
+  }
+  if (type === "user") {
+    const content = ((event.message as Block | undefined)?.content as Block[] | string | undefined) ?? [];
+    const blocks = Array.isArray(content) ? content : [{ type: "text", text: content }];
+    return (
+      <div className="flex gap-2">
+        {time}
+        <div className="min-w-0 flex-1 space-y-1.5">
+          {blocks.map((block, i) => {
+            if (block.type !== "tool_result") return null;
+            const text = resultText(block.content);
+            const firstLine = text.split("\n").find((line) => line.trim()) ?? "";
+            return (
+              <Collapsible
+                key={i}
+                tone={block.is_error ? "error" : undefined}
+                title={`${block.is_error ? "Tool error" : "Tool result"} · ${text.length} chars · ${firstLine.slice(0, 120)}`}
+              >
+                <Pre text={text} />
+              </Collapsible>
+            );
+          })}
+        </div>
+      </div>
+    );
+  }
+  if (type === "result") {
+    const ok = event.subtype === "success" && !event.is_error;
+    const cost = typeof event.total_cost_usd === "number" ? ` · $${event.total_cost_usd.toFixed(4)}` : "";
+    return (
+      <div className="flex gap-2">
+        {time}
+        <div className={cn("min-w-0 flex-1 rounded-md border px-3 py-2 text-xs", ok ? "border-success/40" : "border-destructive/40")}>
+          <p className={cn("font-medium", ok ? "text-success" : "text-destructive")}>
+            Run finished · {String(event.subtype)} · {String(event.num_turns ?? "?")} turns{cost}
+          </p>
+          {typeof event.result === "string" && event.result && <Pre text={event.result} />}
+        </div>
+      </div>
+    );
+  }
+  return null;
+}
+
+function RunCard({ initial, defaultOpen }: { initial: LlmRecord; defaultOpen: boolean }) {
+  const [record, setRecord] = useState(initial);
+  const [events, setEvents] = useState<LlmRecordEvent[]>([]);
+  const [open, setOpen] = useState(defaultOpen);
+  const [now, setNow] = useState(Date.now());
+  const lastSeq = useRef(0);
+
+  const load = useCallback(async () => {
+    const fresh = await fetchLlmRecordEvents(initial.id, lastSeq.current).catch(() => []);
+    if (fresh.length) {
+      lastSeq.current = fresh[fresh.length - 1].seq;
+      setEvents((prev) => [...prev, ...fresh]);
+    }
+  }, [initial.id]);
+
+  useEffect(() => {
+    if (open) load();
+  }, [open, load]);
+
+  // Follow a running agent: new events, status and heartbeat.
+  useEffect(() => {
+    if (record.status !== "running") return;
+    const timer = setInterval(async () => {
+      setNow(Date.now());
+      const latest = await fetchLlmRecord(initial.id).catch(() => null);
+      if (latest) setRecord(latest);
+      if (open) await load();
+    }, POLL_MS);
+    return () => clearInterval(timer);
+  }, [record.status, open, load, initial.id]);
+
+  const started = new Date(record.created_at).getTime();
+  const duration = record.duration_ms ?? now - started;
+  const lastOutput = new Date(record.last_output_at ?? record.created_at).getTime();
+  const idle = now - lastOutput;
+  const stuck = record.status === "running" && idle > STUCK_AFTER_MS;
+
+  return (
+    <div className="rounded-lg border border-border bg-card">
+      <button
+        type="button"
+        onClick={() => setOpen(!open)}
+        className="flex w-full flex-wrap items-center gap-x-3 gap-y-1 px-4 py-3 text-left text-xs hover:bg-accent/30"
+      >
+        {open ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
+        <span className="font-mono tabular-nums" title={formatDateTime(record.created_at)}>{formatClock(record.created_at)}</span>
+        <Badge variant={record.status === "completed" ? "success" : record.status === "failed" ? "destructive" : "warning"}>
+          {record.status === "running" && <Loader2 className="mr-1 h-3 w-3 animate-spin" />}
+          {record.status}
+        </Badge>
+        <span className="text-muted-foreground">{formatMs(duration)}</span>
+        {record.model && <span className="text-muted-foreground">{record.model}</span>}
+        {(record.input_tokens != null || record.output_tokens != null) && (
+          <span className="text-muted-foreground">{record.input_tokens ?? 0} in / {record.output_tokens ?? 0} out</span>
+        )}
+        {record.cost_usd != null && <span className="text-muted-foreground">${record.cost_usd.toFixed(4)}</span>}
+        {record.status === "running" && (
+          <span className={cn("flex items-center gap-1", stuck ? "text-warning" : "text-muted-foreground")}>
+            {stuck && <AlertTriangle className="h-3.5 w-3.5" />}
+            {stuck ? `no output for ${formatMs(idle)} — may be stuck` : `last output ${formatMs(idle)} ago`}
+          </span>
+        )}
+        <span className="ml-auto min-w-0 truncate text-muted-foreground">{record.input_summary}</span>
+      </button>
+      {open && (
+        <div className="space-y-3 border-t border-border px-4 py-3">
+          {record.error && <p className="text-xs text-destructive">Error: {record.error}</p>}
+          <LaunchCommand record={record} />
+          {record.input_text && (
+            <Collapsible icon={<User className="h-3 w-3" />} title={`Input · ${record.input_text.length} chars`} defaultOpen={record.input_text.length < 400}>
+              <Pre text={record.input_text} />
+            </Collapsible>
+          )}
+          {events.length > 0 ? (
+            <div className="space-y-2">
+              {events.map((item) => <EventView key={item.seq} item={item} />)}
+            </div>
+          ) : (
+            <div className="space-y-2 text-xs text-muted-foreground">
+              <p>
+                {record.status === "running"
+                  ? "Waiting for the first event…"
+                  : "No transcript for this run: it was recorded before full transcripts existed."}
+              </p>
+              {record.output_text && <Pre text={record.output_text} />}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ActivityList({ events }: { events: ActivityEvent[] }) {
+  if (!events.length) return <p className="text-xs text-muted-foreground">No activity recorded.</p>;
+  return (
+    <div className="space-y-1">
+      {events.map((ev) => (
+        <div key={ev.seq} className="flex items-start gap-2 text-xs">
+          <span className="shrink-0 font-mono tabular-nums text-muted-foreground" title={formatDateTime(ev.created_at)}>
+            {formatClock(ev.created_at)}
+          </span>
+          <Badge variant={ev.kind === "error" ? "destructive" : "outline"} className="shrink-0 text-[10px] py-0">{ev.kind}</Badge>
+          <span className={cn("min-w-0 whitespace-pre-wrap break-words", ev.kind === "error" && "text-destructive")}>{ev.summary || ev.kind}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+export function AgentHistoryPage({ sub }: { sub: string }) {
+  const { agentId, taskId: routeTaskId } = useMemo(() => parseHistoryRoute(sub), [sub]);
+  const role = agentRole(agentId);
+  const [runs, setRuns] = useState<LlmRecord[] | null>(null);
+  const [activity, setActivity] = useState<ActivityEvent[]>([]);
+  const [chat, setChat] = useState<DbChatMessage[]>([]);
+
+  const taskId = routeTaskId ?? runs?.find((r) => r.task_id)?.task_id ?? (agentId.startsWith("planner-") ? agentId.slice("planner-".length) : null);
+
+  useEffect(() => {
+    setRuns(null);
+    if (role === "Planner") {
+      setRuns([]);
+      return;
+    }
+    fetchLlmRecords({ agent_id: agentId, limit: 50 }).then(setRuns).catch(() => setRuns([]));
+  }, [agentId, role]);
+
+  useEffect(() => {
+    if (!taskId) return;
+    fetchTaskActivity(taskId, 0, 1000)
+      .then(({ activity: all }) => setActivity(all.filter((ev) => activityBelongsTo(ev, agentId))))
+      .catch(() => setActivity([]));
+    if (role === "Planner") {
+      fetchChatMessages(`planner-${taskId}`).then(setChat).catch(() => setChat([]));
+    }
+  }, [taskId, agentId, role]);
+
+  return (
+    <div className="mx-auto max-w-5xl space-y-5 p-6">
+      <div className="flex items-center gap-3">
+        <button
+          type="button"
+          onClick={() => window.history.back()}
+          className="flex h-8 w-8 items-center justify-center rounded-md border border-border text-muted-foreground hover:bg-accent hover:text-foreground"
+          title="Back"
+        >
+          <ArrowLeft className="h-4 w-4" />
+        </button>
+        <Bot className="h-5 w-5 text-primary" />
+        <h1 className="text-lg font-semibold">{agentId}</h1>
+        <Badge variant="outline">{role}</Badge>
+        {taskId && (
+          <a href={`#tasks/${taskId}`} className="text-xs text-muted-foreground hover:text-foreground">
+            task {taskId}
+          </a>
+        )}
+      </div>
+
+      {role !== "Planner" && (
+        <section className="space-y-2">
+          <h2 className="text-sm font-semibold">Runs</h2>
+          {runs === null ? (
+            <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
+          ) : runs.length === 0 ? (
+            <p className="text-xs text-muted-foreground">No Claude runs recorded for this agent.</p>
+          ) : (
+            runs.map((record, i) => <RunCard key={record.id} initial={record} defaultOpen={i === 0} />)
+          )}
+        </section>
+      )}
+
+      {role === "Planner" && (
+        <>
+          <p className="text-xs text-muted-foreground">
+            The Planner runs no LLM: it splits the task into steps, dispatches Workers and tracks their results.
+            Its activity and your chat with it are below.
+          </p>
+          <section className="space-y-2">
+            <h2 className="flex items-center gap-1.5 text-sm font-semibold">
+              <MessageSquare className="h-4 w-4" /> Chat with this Planner
+            </h2>
+            {chat.length === 0 ? (
+              <p className="text-xs text-muted-foreground">No messages. Select this Planner on the Chat page to add a step.</p>
+            ) : (
+              <div className="space-y-1">
+                {chat.map((msg) => (
+                  <div key={msg.message_id} className="flex items-start gap-2 text-xs">
+                    <span className="shrink-0 font-mono tabular-nums text-muted-foreground">{formatClock(msg.created_at)}</span>
+                    <Badge variant="outline" className="shrink-0 text-[10px] py-0">{msg.role}</Badge>
+                    <span className="whitespace-pre-wrap">{msg.content}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </section>
+        </>
+      )}
+
+      {taskId && (
+        <section className="space-y-2">
+          <h2 className="text-sm font-semibold">Activity in task</h2>
+          <ActivityList events={activity} />
+        </section>
+      )}
+    </div>
+  );
+}

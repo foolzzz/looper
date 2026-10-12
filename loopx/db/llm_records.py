@@ -12,7 +12,7 @@ from .connection import get_pool
 
 def _row_to_dict(row: asyncpg.Record) -> dict[str, Any]:
     d = dict(row)
-    for key in ("created_at", "finished_at"):
+    for key in ("created_at", "finished_at", "last_output_at"):
         if d.get(key) is not None:
             d[key] = d[key].isoformat()
     if "metadata" in d and d["metadata"] is not None:
@@ -61,6 +61,12 @@ async def append_events(
     )
 
 
+async def touch_record(record_id: int, *, pool: asyncpg.Pool | None = None) -> None:
+    """Mark that a running record just produced output (its heartbeat)."""
+    pool = pool or get_pool()
+    await pool.execute("UPDATE llm_records SET last_output_at = now() WHERE id = $1", record_id)
+
+
 async def finish_record(
     record_id: int,
     *,
@@ -90,7 +96,8 @@ async def finish_record(
             duration_ms = $9,
             model = COALESCE($10, model),
             error = $11,
-            finished_at = now()
+            finished_at = now(),
+            last_output_at = COALESCE(last_output_at, now())
         WHERE id = $1
         """,
         record_id, status, output_text, output_text[:500] if output_text else None,
@@ -122,19 +129,34 @@ async def list_events(
     ]
 
 
+# Which records belong to an agent role (the ids in agent_configs). Workers
+# and reviewers record under their per-run instance id; the Planner runs no LLM.
+_ROLE_FILTERS = {
+    "manager": "agent_id = 'manager'",
+    "worker": "(agent_id LIKE 'worker-%' OR agent_id LIKE 'reviewer-%')",
+}
+
+
 async def list_records(
     *,
     agent_id: str | None = None,
     task_id: str | None = None,
+    role: str | None = None,
     limit: int = 100,
     offset: int = 0,
     pool: asyncpg.Pool | None = None,
 ) -> list[dict[str, Any]]:
+    """Records newest first, filtered by agent instance, task and/or role."""
     pool = pool or get_pool()
 
     conditions = []
     params: list[Any] = []
     idx = 1
+
+    if role is not None:
+        if role not in _ROLE_FILTERS:
+            return []
+        conditions.append(_ROLE_FILTERS[role])
 
     if agent_id:
         conditions.append(f"agent_id = ${idx}")
@@ -165,62 +187,3 @@ async def get_record(
     if row is None:
         return None
     return _row_to_dict(row)
-
-
-async def list_sessions(
-    agent_id: str,
-    *,
-    limit: int = 50,
-    pool: asyncpg.Pool | None = None,
-) -> list[dict[str, Any]]:
-    """List distinct task sessions for an agent, with summary stats."""
-    pool = pool or get_pool()
-    rows = await pool.fetch(
-        """
-        SELECT
-            task_id,
-            COUNT(*) AS turn_count,
-            SUM(input_tokens) AS total_input_tokens,
-            SUM(output_tokens) AS total_output_tokens,
-            SUM(duration_ms) AS total_duration_ms,
-            MIN(created_at) AS first_at,
-            MAX(created_at) AS last_at
-        FROM llm_records
-        WHERE agent_id = $1 AND task_id IS NOT NULL
-        GROUP BY task_id
-        ORDER BY MAX(created_at) DESC
-        LIMIT $2
-        """,
-        agent_id, limit,
-    )
-    result = []
-    for r in rows:
-        d = dict(r)
-        for k in ("first_at", "last_at"):
-            if d.get(k) is not None:
-                d[k] = d[k].isoformat()
-        result.append(d)
-    return result
-
-
-async def list_session_messages(
-    agent_id: str,
-    task_id: str,
-    *,
-    limit: int = 200,
-    pool: asyncpg.Pool | None = None,
-) -> list[dict[str, Any]]:
-    """Get full conversation messages for a specific agent+task session."""
-    pool = pool or get_pool()
-    rows = await pool.fetch(
-        """
-        SELECT id, input_summary, output_summary, input_text, output_text,
-               input_tokens, output_tokens, duration_ms, model, error, created_at
-        FROM llm_records
-        WHERE agent_id = $1 AND task_id = $2
-        ORDER BY created_at ASC
-        LIMIT $3
-        """,
-        agent_id, task_id, limit,
-    )
-    return [_row_to_dict(r) for r in rows]

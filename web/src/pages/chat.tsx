@@ -6,13 +6,16 @@ import {
   saveChatMessage,
   fetchChatMessages,
   fetchChatTargets,
+  fetchTaskActivity,
   streamSSE,
   fetchAgentConfigs,
   type SSEEvent,
   type AgentConfig,
   type ChatTarget,
   type ChatTargetInfo,
+  type ActivityEvent,
 } from "@/lib/api";
+import { activityBelongsTo, historyHref } from "@/pages/agent-history";
 import { cn } from "@/lib/utils";
 
 interface ChatMessage {
@@ -77,6 +80,7 @@ export function ChatPage() {
   const [targets, setTargets] = useState<ChatTargetInfo[]>([MANAGER_TARGET]);
   const [target, setTarget] = useState<ChatTargetInfo>(MANAGER_TARGET);
   const [agentDropdown, setAgentDropdown] = useState(false);
+  const [plannerActivity, setPlannerActivity] = useState<ActivityEvent[]>([]);
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const cleanupRef = useRef<(() => void) | null>(null);
@@ -105,6 +109,20 @@ export function ChatPage() {
       ? `${t.task_id} · ${t.status || "running"}`
       : `global · ${managerConfig?.runtime || "claude-code"}`;
   const plannerTargets = targets.filter((t) => t.kind === "planner");
+
+  // A Planner's own record is its activity; show it above the chat with it.
+  useEffect(() => {
+    setPlannerActivity([]);
+    if (target.kind !== "planner" || !target.task_id) return;
+    const taskId = target.task_id;
+    const load = () =>
+      fetchTaskActivity(taskId, 0, 1000)
+        .then(({ activity }) => setPlannerActivity(activity.filter((ev) => activityBelongsTo(ev, `planner-${taskId}`))))
+        .catch(() => {});
+    load();
+    const timer = setInterval(load, 5000);
+    return () => clearInterval(timer);
+  }, [target]);
 
   const selectTarget = (next: ChatTargetInfo) => {
     setAgentDropdown(false);
@@ -373,7 +391,34 @@ export function ChatPage() {
         className="flex-1 overflow-y-auto px-5 py-4 space-y-4"
         onClick={() => agentDropdown && setAgentDropdown(false)}
       >
-        {messages.length === 0 && (
+        {target.kind === "planner" && target.task_id && (
+          <div className="rounded-lg border border-border bg-card/50 p-3">
+            <div className="mb-2 flex items-center justify-between text-xs">
+              <span className="font-medium">Planner activity ({plannerActivity.length})</span>
+              <a href={historyHref(`planner-${target.task_id}`, target.task_id)} className="text-primary hover:underline">
+                Open full history →
+              </a>
+            </div>
+            {plannerActivity.length === 0 ? (
+              <p className="text-xs text-muted-foreground">No activity yet.</p>
+            ) : (
+              <div className="max-h-48 space-y-1 overflow-y-auto">
+                {plannerActivity.slice(-15).map((ev) => (
+                  <div key={ev.seq} className="flex items-start gap-2 text-xs">
+                    <span className="shrink-0 font-mono tabular-nums text-muted-foreground">
+                      {new Date(ev.created_at).toLocaleTimeString([], { hour12: false })}
+                    </span>
+                    <span className={cn("min-w-0 break-words", ev.kind === "error" && "text-destructive")}>
+                      {ev.summary || ev.kind}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
+        {messages.length === 0 && target.kind === "manager" && (
           <div className="flex h-full items-center justify-center">
             <div className="text-center">
               <Bot className="mx-auto h-12 w-12 text-muted-foreground/50" />

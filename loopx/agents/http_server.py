@@ -208,8 +208,6 @@ class AgentHTTPServer:
     _RE_TASK_ACTIVITY_SEQ = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)/activity/(\d+)$")
     _RE_TASK_CONVERSATION = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)/conversation$")
     _RE_AGENT_CONFIG = re.compile(r"^/api/agent-configs/([a-zA-Z0-9_-]+)$")
-    _RE_AGENT_SESSION_MSGS = re.compile(r"^/api/agents/([a-zA-Z0-9_-]+)/sessions/([^/]+)/messages$")
-    _RE_AGENT_SESSIONS = re.compile(r"^/api/agents/([a-zA-Z0-9_-]+)/sessions$")
     _RE_LLM_PROFILE = re.compile(r"^/api/llm-profiles/(\d+)$")
     _RE_LLM_RECORD = re.compile(r"^/api/llm-records/(\d+)$")
     _RE_LLM_RECORD_EVENTS = re.compile(r"^/api/llm-records/(\d+)/events$")
@@ -260,10 +258,6 @@ class AgentHTTPServer:
             await self._handle_task_config_update(m.group(1), body, writer)
         elif (m := self._RE_TASK_DETAIL.match(path)) and method == "GET":
             await self._handle_task_detail(m.group(1), writer)
-        elif (m := self._RE_AGENT_SESSION_MSGS.match(path)) and method == "GET":
-            await self._handle_agent_session_messages(m.group(1), m.group(2), writer)
-        elif (m := self._RE_AGENT_SESSIONS.match(path)) and method == "GET":
-            await self._handle_agent_sessions(m.group(1), writer)
         elif path == "/api/agent-configs" and method == "GET":
             await self._handle_list_agent_configs(writer)
         elif (m := self._RE_AGENT_CONFIG.match(path)) and method == "GET":
@@ -939,12 +933,13 @@ class AgentHTTPServer:
     ) -> None:
         agent_id = query.get("agent_id")
         task_id = query.get("task_id")
+        role = query.get("role")
         limit = min(int(query.get("limit", "100")), 500)
         offset = int(query.get("offset", "0"))
         try:
             from ..db.llm_records import list_records
             records = await list_records(
-                agent_id=agent_id, task_id=task_id, limit=limit, offset=offset,
+                agent_id=agent_id, task_id=task_id, role=role, limit=limit, offset=offset,
             )
         except Exception:
             records = []
@@ -952,59 +947,6 @@ class AgentHTTPServer:
         await writer.drain()
 
     # --- Agent session handlers ---
-
-    async def _handle_agent_sessions(
-        self, agent_id: str, writer: asyncio.StreamWriter,
-    ) -> None:
-        try:
-            from ..db.llm_records import list_sessions
-            sessions = await list_sessions(agent_id)
-        except Exception:
-            logger.exception("failed to list sessions for agent %s", agent_id)
-            writer.write(_json_response(HTTP_500, {"error": "database error"}))
-            await writer.drain()
-            return
-
-        enriched = []
-        try:
-            from ..db.tasks import get_task
-            for s in sessions:
-                task = await get_task(s["task_id"]) if s.get("task_id") else None
-                enriched.append({
-                    **s,
-                    "requirement": task.get("requirement", "")[:200] if task else "",
-                    "task_status": task.get("status", "") if task else "",
-                    "task_phase": task.get("phase", "") if task else "",
-                })
-        except Exception:
-            enriched = sessions
-
-        writer.write(_json_response(HTTP_200, {"sessions": _serialize(enriched)}))
-        await writer.drain()
-
-    async def _handle_agent_session_messages(
-        self, agent_id: str, task_id: str, writer: asyncio.StreamWriter,
-    ) -> None:
-        try:
-            from ..db.llm_records import list_session_messages
-            messages = await list_session_messages(agent_id, task_id)
-        except Exception:
-            logger.exception("failed to list session messages for %s/%s", agent_id, task_id)
-            writer.write(_json_response(HTTP_500, {"error": "database error"}))
-            await writer.drain()
-            return
-
-        try:
-            from ..db.activity import list_activity
-            activity = await list_activity(task_id, limit=500)
-        except Exception:
-            activity = []
-
-        writer.write(_json_response(HTTP_200, {
-            "messages": _serialize(messages),
-            "activity": [_serialize(a) for a in activity],
-        }))
-        await writer.drain()
 
     # --- LLM profile handlers ---
 

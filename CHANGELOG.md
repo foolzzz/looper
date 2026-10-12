@@ -18,6 +18,14 @@ To learn how to use these features, read the [usage guide](docs/fork/usage.md).
 
 ### Changed
 
+- The dashboard has an agent history page (`#history/<agent>`). It is opened
+  from History on each Agent Timeline row, from the Agents page's new Runs tab
+  and from the Chat page. It shows each Claude run's launch command, full
+  transcript and activity, live while the run is going, and flags a run with
+  no output for 2 minutes. Selecting a Planner in Chat shows its activity. A
+  run's record now carries a heartbeat (`last_output_at`).
+  `/api/llm-records` takes a `role` filter. The empty `/api/agents/:id/sessions`
+  endpoints are removed.
 - Every Claude run of the agent system (Manager, Worker, reviewer) is recorded
   the same way in `llm_records`. The record opens as `running` with the full
   launch command and working directory. It receives each stream-json event as

@@ -1,7 +1,8 @@
 import { LayoutDashboard, MessageSquare, ListTodo, Bot, Sliders } from "lucide-react";
 import { cn } from "@/lib/utils";
 
-export type Page = "dashboard" | "chat" | "tasks" | "agents" | "settings";
+/** "history" is an agent's session history; it is reached from a task or agent, not the nav. */
+export type Page = "dashboard" | "chat" | "tasks" | "agents" | "settings" | "history";
 
 const NAV_ITEMS: { page: Page; label: string; icon: React.ElementType }[] = [
   { page: "dashboard", label: "Dashboard", icon: LayoutDashboard },

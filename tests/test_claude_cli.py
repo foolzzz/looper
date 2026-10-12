@@ -110,3 +110,24 @@ class TestClaudeRunRecorder:
         asyncio.run(_run())
         agent_db.append_events.assert_not_awaited()
         agent_db.finish_record.assert_not_awaited()
+
+
+def test_heartbeat_counts_partial_deltas_and_is_throttled(agent_db: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    from loopx.agents import claude_cli
+
+    clock = iter([0.0, 1.0, 2.0, 15.0, 16.0, 17.0])
+    monkeypatch.setattr(claude_cli, "_clock", lambda: next(clock))
+    recorder = claude_cli.ClaudeRunRecorder(
+        agent_id="worker-1", task_id=None, command=["claude"], cwd="/tmp", input_text="go",
+    )
+
+    async def _run() -> None:
+        await recorder.start()                                   # t=0 (constructor read 0.0)
+        delta = {"type": "stream_event", "event": {"type": "content_block_delta"}}
+        await recorder.record(delta)                             # t=1 → first heartbeat
+        await recorder.record(delta)                             # t=2 → throttled
+        await recorder.record(delta)                             # t=15 → heartbeat again
+
+    asyncio.run(_run())
+    assert agent_db.touch_record.await_count == 2
+    agent_db.append_events.assert_not_awaited()  # deltas keep the run alive but are not stored
