@@ -35,6 +35,10 @@ To learn how to use these features, read the [usage guide](docs/fork/usage.md).
 
 ### Fixed
 
+- The agent Chat's Manager answers every message again. Claude's stream-json
+  lines over 64 KiB (its init line lists every tool and skill) made it fail
+  silently and left the chat waiting. A failed or empty Claude run now
+  returns an error reply, and the Claude process is stopped.
 - The source path-literal regression guard now decodes JS/TS, shell ANSI-C and
   PowerShell escapes, folds Python/JS constant additions and joins shell word
   parts. PowerShell expressions remain unevaluated. Decoded

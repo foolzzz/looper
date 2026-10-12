@@ -21,6 +21,7 @@ from typing import Any
 
 from ..broadcast import Broadcaster
 from ..bus import MessageBus
+from ..claude_cli import STREAM_LINE_LIMIT
 from ..message import (
     MANAGER_ADDRESS,
     TASK_ROUTER_ADDRESS,
@@ -214,8 +215,14 @@ class ManagerAgent:
 
         await self._send_status(envelope, "thinking", phase=True)
 
-        response = await self._invoke_claude(text, envelope)
-        parsed = self._parse_response(response)
+        try:
+            response = await self._invoke_claude(text, envelope)
+            parsed = self._parse_response(response)
+        except Exception as exc:
+            # Always answer: the chat stream waits for a final reply.
+            logger.exception("manager failed to answer %s", envelope.message_id)
+            await self._send_reply(envelope, f"Manager 出错，没能完成这次回复：{exc}")
+            return
 
         if parsed.get("needs_clarification"):
             clarification = parsed.get("clarification_text", "")
@@ -324,6 +331,7 @@ class ManagerAgent:
                 cwd=str(self._config.work_dir),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.DEVNULL,
+                limit=STREAM_LINE_LIMIT,
             )
         except OSError as exc:
             logger.error("failed to start Claude Code: %s", exc)
@@ -333,56 +341,63 @@ class ManagerAgent:
         result_text = ""
 
         assert process.stdout is not None
-        async for raw_line in process.stdout:
-            line = raw_line.decode("utf-8", errors="replace").strip()
-            if not line:
-                continue
-            try:
-                payload = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if not isinstance(payload, dict):
-                continue
+        try:
+            async for raw_line in process.stdout:
+                line = raw_line.decode("utf-8", errors="replace").strip()
+                if not line:
+                    continue
+                try:
+                    payload = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(payload, dict):
+                    continue
 
-            session_id = payload.get("session_id")
-            if isinstance(session_id, str) and session_id:
-                self._session_id = session_id
-                self._save_session_state()
+                session_id = payload.get("session_id")
+                if isinstance(session_id, str) and session_id:
+                    self._session_id = session_id
+                    self._save_session_state()
 
-            event_type = payload.get("type")
+                event_type = payload.get("type")
 
-            if event_type == "system":
-                subtype = payload.get("subtype", "")
-                if subtype == "init":
-                    await self._send_status(context_envelope, "thinking", phase=True)
+                if event_type == "system":
+                    subtype = payload.get("subtype", "")
+                    if subtype == "init":
+                        await self._send_status(context_envelope, "thinking", phase=True)
 
-            elif event_type == "assistant":
-                msg = payload.get("message")
-                if isinstance(msg, dict):
-                    content_blocks = msg.get("content", [])
-                    for block in content_blocks:
-                        if not isinstance(block, dict):
-                            continue
-                        block_type = block.get("type", "")
-                        if block_type == "text":
-                            chunk = str(block.get("text") or "")
-                            if chunk:
-                                text_parts.append(chunk)
-                                await self._send_status(context_envelope, chunk, delta=True)
-                        elif block_type == "tool_use":
-                            tool_name = block.get("name", "tool")
-                            await self._send_status(
-                                context_envelope,
-                                f"正在使用工具: {tool_name}",
-                                phase=True,
-                            )
-                        elif block_type == "thinking":
-                            await self._send_status(context_envelope, "thinking", phase=True)
+                elif event_type == "assistant":
+                    msg = payload.get("message")
+                    if isinstance(msg, dict):
+                        content_blocks = msg.get("content", [])
+                        for block in content_blocks:
+                            if not isinstance(block, dict):
+                                continue
+                            block_type = block.get("type", "")
+                            if block_type == "text":
+                                chunk = str(block.get("text") or "")
+                                if chunk:
+                                    text_parts.append(chunk)
+                                    await self._send_status(context_envelope, chunk, delta=True)
+                            elif block_type == "tool_use":
+                                tool_name = block.get("name", "tool")
+                                await self._send_status(
+                                    context_envelope,
+                                    f"正在使用工具: {tool_name}",
+                                    phase=True,
+                                )
+                            elif block_type == "thinking":
+                                await self._send_status(context_envelope, "thinking", phase=True)
 
-            elif event_type == "result":
-                result_text = str(payload.get("result") or "")
+                elif event_type == "result":
+                    result_text = str(payload.get("result") or "")
 
-        await process.wait()
+            await process.wait()
+        except BaseException:
+            # Never leave Claude running once the Manager gives up on it.
+            if process.returncode is None:
+                process.kill()
+                await process.wait()
+            raise
         self._save_session_state()
         duration_ms = int((time.monotonic() - t0) * 1000)
 
@@ -415,6 +430,10 @@ class ManagerAgent:
             except Exception:
                 logger.debug("failed to record manager activity", exc_info=True)
 
+        if not final_text:
+            raise RuntimeError(
+                f"Claude Code 没有返回内容（退出码 {process.returncode}）"
+            )
         return final_text
 
     def _build_user_message(self, user_message: str) -> str:
