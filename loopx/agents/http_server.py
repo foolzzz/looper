@@ -18,8 +18,8 @@ from pathlib import Path
 from typing import Any
 
 from .broadcast import Broadcaster
+from .chat_targets import ChatTargetError, list_chat_targets, resolve_chat_target
 from .channels.web import WebChannelAdapter
-from .message import MANAGER_ADDRESS, AgentAddress, planner_address
 from .supervisor import AgentSupervisor
 from .tiers.task import TaskRouter
 
@@ -42,28 +42,7 @@ HTTP_200 = "200 OK"
 HTTP_400 = "400 Bad Request"
 HTTP_404 = "404 Not Found"
 HTTP_405 = "405 Method Not Allowed"
-HTTP_409 = "409 Conflict"
 HTTP_500 = "500 Internal Server Error"
-
-
-class ChatTargetError(Exception):
-    def __init__(self, status: str, message: str) -> None:
-        super().__init__(message)
-        self.status = status
-
-
-def resolve_chat_target(raw: Any, task_router: TaskRouter) -> AgentAddress:
-    """Map a ``/api/chat/send`` target to a bus address; the Manager is the default."""
-    target = raw or {"kind": "manager"}
-    kind = target.get("kind", "manager") if isinstance(target, dict) else None
-    if kind == "manager":
-        return MANAGER_ADDRESS
-    if kind == "planner":
-        task_id = str(target.get("task_id") or "")
-        if not task_router.has_planner(task_id):
-            raise ChatTargetError(HTTP_409, f"task '{task_id}' has no running planner")
-        return planner_address(task_id)
-    raise ChatTargetError(HTTP_400, "target.kind must be 'manager' or 'planner'")
 
 
 def _json_response(status: str, body: Any) -> bytes:
@@ -388,19 +367,9 @@ class AgentHTTPServer:
         await writer.drain()
 
     async def _handle_chat_targets(self, writer: asyncio.StreamWriter) -> None:
-        """The Manager (global) plus the Planner of every running task."""
-        targets: list[dict[str, Any]] = [{"kind": "manager", "id": MANAGER_ADDRESS.agent_id}]
-        targets.extend(
-            {
-                "kind": "planner",
-                "id": planner["planner_id"],
-                "task_id": planner["task_id"],
-                "requirement": planner["requirement"],
-                "status": planner["status"],
-            }
-            for planner in self._task_router.running_planners()
-        )
-        writer.write(_json_response(HTTP_200, {"targets": targets}))
+        """The Manager, then each recent task's Planner and step agents (finished ones too)."""
+        targets = await list_chat_targets(self._task_router)
+        writer.write(_json_response(HTTP_200, {"targets": _serialize(targets)}))
         await writer.drain()
 
     async def _handle_chat_messages(

@@ -83,6 +83,7 @@ class ClaudeRunRecorder:
         cwd: str,
         input_text: str,
         session_id: str | None = None,
+        step_id: str | None = None,
     ) -> None:
         self._agent_id = agent_id
         self._task_id = task_id or None
@@ -90,6 +91,7 @@ class ClaudeRunRecorder:
         self._cwd = cwd
         self._input_text = input_text
         self._session_id = session_id
+        self._step_id = step_id
         self._record_id: int | None = None
         self._seq = 0
         # seq of the row holding the current thinking phase's progress, if it is the latest row
@@ -107,7 +109,12 @@ class ClaudeRunRecorder:
                 task_id=self._task_id,
                 session_id=self._session_id,
                 input_text=self._input_text,
-                metadata={"command": self._command, "cwd": self._cwd},
+                metadata={
+                    "command": self._command,
+                    "cwd": self._cwd,
+                    # The task step a Worker or Reviewer ran, so its run stays tied to that step.
+                    **({"step_id": self._step_id} if self._step_id else {}),
+                },
             )
         except Exception:
             logger.warning("could not open llm record for %s", self._agent_id, exc_info=True)

@@ -310,6 +310,8 @@ class TestPlannerAgent:
                 assert verify
                 # The reviewer runs in the task's directory too; there is no default.
                 assert verify[0].payload["context"] == {"work_dir": "/tmp"}
+                # Its run is filed under the task, like the Worker's.
+                assert verify[0].payload["parent_task_id"] == "test-cr"
 
                 await planner.stop()
                 await bus.shutdown()
@@ -542,6 +544,7 @@ class TestWorkerSubprocess:
         assert (start["agent_id"], start["task_id"]) == ("w1", "task-1")
         assert start["metadata"]["command"][0] == claude
         assert start["metadata"]["cwd"] == where["cwd"]
+        assert start["metadata"]["step_id"] == "s1"
         assert "--dangerously-skip-permissions" in start["metadata"]["command"]
         recorded = [call.args[1][0][1]["type"] for call in agent_db.append_events.await_args_list]
         assert recorded == ["assistant", "result"]

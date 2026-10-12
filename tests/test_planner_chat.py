@@ -200,13 +200,13 @@ class TestResolveChatTarget:
 
     @pytest.mark.parametrize("raw", [None, {}, {"kind": "manager"}])
     def test_manager_is_the_default(self, raw: Any) -> None:
-        from loopx.agents.http_server import resolve_chat_target
+        from loopx.agents.chat_targets import resolve_chat_target
         from loopx.agents.message import MANAGER_ADDRESS
         with tempfile.TemporaryDirectory() as tmp:
             assert resolve_chat_target(raw, self._router(tmp)) == MANAGER_ADDRESS
 
     def test_running_planner(self) -> None:
-        from loopx.agents.http_server import resolve_chat_target
+        from loopx.agents.chat_targets import resolve_chat_target
         with tempfile.TemporaryDirectory() as tmp:
             target = {"kind": "planner", "task_id": "t1"}
             assert resolve_chat_target(target, self._router(tmp)) == planner_address("t1")
@@ -221,7 +221,7 @@ class TestResolveChatTarget:
         ],
     )
     def test_rejected_targets(self, raw: Any, status: str) -> None:
-        from loopx.agents.http_server import ChatTargetError, resolve_chat_target
+        from loopx.agents.chat_targets import ChatTargetError, resolve_chat_target
         with tempfile.TemporaryDirectory() as tmp:
             with pytest.raises(ChatTargetError) as excinfo:
                 resolve_chat_target(raw, self._router(tmp))

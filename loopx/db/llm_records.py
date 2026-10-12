@@ -152,6 +152,24 @@ _ROLE_FILTERS = {
 }
 
 
+async def list_task_runs(
+    task_ids: list[str],
+    *,
+    pool: asyncpg.Pool | None = None,
+) -> list[dict[str, Any]]:
+    """Worker and Reviewer runs of several tasks, oldest first, with the step each ran."""
+    if not task_ids:
+        return []
+    pool = pool or get_pool()
+    rows = await pool.fetch(
+        "SELECT agent_id, task_id, status, created_at, metadata->>'step_id' AS step_id "
+        f"FROM llm_records WHERE task_id = ANY($1::text[]) AND {_ROLE_FILTERS['worker']} "
+        "ORDER BY created_at, id",
+        task_ids,
+    )
+    return [dict(r) for r in rows]
+
+
 async def list_records(
     *,
     agent_id: str | None = None,

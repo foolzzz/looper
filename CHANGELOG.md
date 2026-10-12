@@ -18,6 +18,14 @@ To learn how to use these features, read the [usage guide](docs/fork/usage.md).
 
 ### Changed
 
+- The Chat page lists every agent, finished ones included: the Manager, then
+  for each of the 30 most recent tasks its Planner and the Worker (and
+  Reviewer) of each step. Selecting a Worker or Reviewer shows its Claude runs
+  read-only; an ended task's Planner shows its thread and activity read-only.
+  `GET /api/chat/targets` returns this list with `can_send`; only the Manager
+  and a running task's Planner take messages. Reviewer runs are now filed under
+  their task, and every Worker/Reviewer run records the step it served
+  (`metadata.step_id`).
 - Workers read Claude's input as stream-json: the prompt goes on stdin, which
   stays open until the result. A chat message to a task's Planner reaches the
   running Worker as its next user turn (`WORKER_INPUT` /

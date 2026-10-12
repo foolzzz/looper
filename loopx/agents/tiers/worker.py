@@ -439,6 +439,7 @@ class WorkerPool:
             command=command,
             cwd=work_dir,
             input_text=prompt,
+            step_id=payload.get("task_id") or None,
         )
         await recorder.start()
 
