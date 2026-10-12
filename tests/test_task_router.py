@@ -308,3 +308,36 @@ class TestTaskRouter:
                 await bus.shutdown()
 
         asyncio.run(_run())
+
+
+class TestPlannerOutcome:
+    @pytest.mark.parametrize("outcome", ["completed", "failed"])
+    def test_final_status_is_kept(self, outcome: str, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Teardown must persist the Planner's outcome, not overwrite failed with completed."""
+        from unittest.mock import AsyncMock
+
+        from loopx.agents.tiers import task as task_module
+
+        writes = AsyncMock()
+        monkeypatch.setattr(task_module.db_tasks, "update_task_status", writes)
+        monkeypatch.setattr(task_module.db_activity, "insert_activity", AsyncMock())
+
+        async def _run() -> Task:
+            with tempfile.TemporaryDirectory() as tmp:
+                bus = MessageBus(runtime_root=Path(tmp))
+                router = TaskRouter(runtime_root=Path(tmp))
+                router._bus = bus
+                task = Task(task_id="t1", requirement="r", goal_id="", project_root="", status="running")
+                router._tasks = {"t1": task}
+                await router._handle_planner_status(MessageEnvelope.create(
+                    source=planner_address("t1"),
+                    target=TASK_ROUTER_ADDRESS,
+                    message_type=MessageType.GOAL_STATUS,
+                    payload={"task_id": "t1", "status": outcome},
+                ))
+                await bus.shutdown()
+                return task
+
+        task = asyncio.run(_run())
+        assert task.status == outcome
+        assert writes.await_args_list[-1].args == ("t1", outcome)
