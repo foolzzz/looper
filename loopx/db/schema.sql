@@ -127,3 +127,13 @@ CREATE TABLE IF NOT EXISTS chat_messages (
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_chat_msg_unique ON chat_messages(session_id, message_id);
 CREATE INDEX IF NOT EXISTS idx_chat_session ON chat_messages(session_id, id);
+
+CREATE TABLE IF NOT EXISTS channel_configs (
+    channel_id   TEXT PRIMARY KEY,
+    channel_type TEXT NOT NULL,
+    display_name TEXT NOT NULL DEFAULT '',
+    enabled      BOOLEAN NOT NULL DEFAULT false,
+    config       JSONB NOT NULL DEFAULT '{}',
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+);

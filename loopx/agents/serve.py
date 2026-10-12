@@ -120,6 +120,32 @@ async def _run_agent_system(
             ),
         },
     ])
+    from ..db.channel_configs import seed_defaults as seed_channel_configs
+    await seed_channel_configs([
+        {
+            "channel_id": "channel-telegram",
+            "channel_type": "telegram",
+            "display_name": "Telegram Bot",
+            "enabled": False,
+            "config": {
+                "bot_token_env": "LOOPX_TELEGRAM_BOT_TOKEN",
+                "allowed_user_ids": "",
+                "description": "Telegram Bot integration via python-telegram-bot",
+            },
+        },
+        {
+            "channel_id": "channel-lark",
+            "channel_type": "lark",
+            "display_name": "Lark (飞书) Bot",
+            "enabled": False,
+            "config": {
+                "app_id_env": "LARK_APP_ID",
+                "app_secret_env": "LARK_APP_SECRET",
+                "description": "Lark/Feishu Bot integration via lark-cli",
+            },
+        },
+    ])
+
     from ..db.tasks import mark_orphaned_tasks_stopped
     orphan_count = await mark_orphaned_tasks_stopped(pool=pool)
     if orphan_count:
@@ -138,20 +164,33 @@ async def _run_agent_system(
     web_adapter = WebChannelAdapter(host=host, port=port)
     await registry.register(web_adapter)
 
-    if enable_telegram:
-        from .channels.telegram import TelegramChannelAdapter
-        telegram_adapter = TelegramChannelAdapter()
-        await registry.register(telegram_adapter)
-        logger.info("telegram channel enabled")
+    from ..db.channel_configs import get_config as get_channel_config
+    import os as _os
 
-    if enable_lark:
+    tg_cfg = await get_channel_config("channel-telegram")
+    if tg_cfg and tg_cfg.get("enabled"):
+        from .channels.telegram import TelegramChannelAdapter
+        tg_config = tg_cfg.get("config", {})
+        telegram_adapter = TelegramChannelAdapter(
+            bot_token=_os.environ.get(
+                tg_config.get("bot_token_env", "LOOPX_TELEGRAM_BOT_TOKEN"), ""
+            ),
+        )
+        await registry.register(telegram_adapter)
+        logger.info("telegram channel enabled (from DB config)")
+
+    lark_cfg = await get_channel_config("channel-lark")
+    if lark_cfg and lark_cfg.get("enabled"):
         from .channels.lark import LarkChannelAdapter
+        lark_config = lark_cfg.get("config", {})
         lark_adapter = LarkChannelAdapter(
-            app_id=lark_app_id,
+            app_id=_os.environ.get(
+                lark_config.get("app_id_env", "LARK_APP_ID"), ""
+            ),
             runtime_root=runtime_root,
         )
         await registry.register(lark_adapter)
-        logger.info("lark channel enabled")
+        logger.info("lark channel enabled (from DB config)")
 
     # --- Agent Tiers ---
 

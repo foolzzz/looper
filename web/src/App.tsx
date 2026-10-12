@@ -4,8 +4,9 @@ import { DashboardPage } from "@/pages/dashboard";
 import { ChatPage } from "@/pages/chat";
 import { TasksPage } from "@/pages/tasks";
 import { AgentsPage } from "@/pages/agents";
+import { SettingsPage } from "@/pages/settings";
 
-const PAGES = new Set<Page>(["dashboard", "chat", "tasks", "agents"]);
+const PAGES = new Set<Page>(["dashboard", "chat", "tasks", "agents", "settings"]);
 
 interface Route {
   page: Page;
@@ -61,6 +62,11 @@ function App() {
               sub={route.sub}
               onNavigate={(sub) => navigateSub("agents", sub)}
             />
+          </div>
+        )}
+        {route.page === "settings" && (
+          <div className="h-full overflow-y-auto">
+            <SettingsPage />
           </div>
         )}
       </main>

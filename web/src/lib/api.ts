@@ -420,6 +420,44 @@ export async function deleteLlmProfile(profileId: number): Promise<void> {
   if (!res.ok) throw new Error(`delete llm-profile ${res.status}`);
 }
 
+// --- Channel configs ---
+
+export interface ChannelConfig {
+  channel_id: string;
+  channel_type: string;
+  display_name: string;
+  enabled: boolean;
+  config: Record<string, string>;
+  created_at: string;
+  updated_at: string;
+}
+
+export async function fetchChannelConfigs(): Promise<ChannelConfig[]> {
+  const res = await fetch(`${API_BASE}/channel-configs`);
+  if (!res.ok) throw new Error(`channel-configs ${res.status}`);
+  const data = await res.json();
+  return data.configs ?? [];
+}
+
+export async function fetchChannelConfig(channelId: string): Promise<ChannelConfig> {
+  const res = await fetch(`${API_BASE}/channel-configs/${channelId}`);
+  if (!res.ok) throw new Error(`channel-config ${res.status}`);
+  return res.json();
+}
+
+export async function updateChannelConfig(
+  channelId: string,
+  fields: Partial<ChannelConfig>,
+): Promise<ChannelConfig> {
+  const res = await fetch(`${API_BASE}/channel-configs/${channelId}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(fields),
+  });
+  if (!res.ok) throw new Error(`update channel-config ${res.status}`);
+  return res.json();
+}
+
 export function streamSSE(
   eventsUrl: string,
   onEvent: (event: SSEEvent) => void,

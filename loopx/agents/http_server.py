@@ -189,6 +189,7 @@ class AgentHTTPServer:
     _RE_AGENT_SESSION_MSGS = re.compile(r"^/api/agents/([a-zA-Z0-9_-]+)/sessions/([^/]+)/messages$")
     _RE_AGENT_SESSIONS = re.compile(r"^/api/agents/([a-zA-Z0-9_-]+)/sessions$")
     _RE_LLM_PROFILE = re.compile(r"^/api/llm-profiles/(\d+)$")
+    _RE_CHANNEL_CONFIG = re.compile(r"^/api/channel-configs/([a-zA-Z0-9_-]+)$")
 
     async def _route_api(
         self,
@@ -250,6 +251,12 @@ class AgentHTTPServer:
             await self._handle_update_llm_profile(int(m.group(1)), body, writer)
         elif (m := self._RE_LLM_PROFILE.match(path)) and method == "DELETE":
             await self._handle_delete_llm_profile(int(m.group(1)), writer)
+        elif path == "/api/channel-configs" and method == "GET":
+            await self._handle_list_channel_configs(writer)
+        elif (m := self._RE_CHANNEL_CONFIG.match(path)) and method == "GET":
+            await self._handle_get_channel_config(m.group(1), writer)
+        elif (m := self._RE_CHANNEL_CONFIG.match(path)) and method == "PUT":
+            await self._handle_update_channel_config(m.group(1), body, writer)
         else:
             writer.write(_json_response(HTTP_404, {"error": "not found"}))
             await writer.drain()
@@ -907,6 +914,60 @@ class AgentHTTPServer:
             writer.write(_json_response(HTTP_404, {"error": "profile not found"}))
         else:
             writer.write(_json_response(HTTP_200, {"deleted": True}))
+        await writer.drain()
+
+    # --- Channel config handlers ---
+
+    async def _handle_list_channel_configs(self, writer: asyncio.StreamWriter) -> None:
+        try:
+            from ..db.channel_configs import list_configs
+            configs = await list_configs()
+        except Exception:
+            configs = []
+        writer.write(_json_response(HTTP_200, {"configs": configs}))
+        await writer.drain()
+
+    async def _handle_get_channel_config(
+        self, channel_id: str, writer: asyncio.StreamWriter,
+    ) -> None:
+        try:
+            from ..db.channel_configs import get_config
+            config = await get_config(channel_id)
+        except Exception:
+            config = None
+        if config is None:
+            writer.write(_json_response(HTTP_404, {"error": f"channel '{channel_id}' not found"}))
+        else:
+            writer.write(_json_response(HTTP_200, config))
+        await writer.drain()
+
+    async def _handle_update_channel_config(
+        self, channel_id: str, body: bytes, writer: asyncio.StreamWriter,
+    ) -> None:
+        try:
+            data = json.loads(body.decode("utf-8"))
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            writer.write(_json_response(HTTP_400, {"error": "invalid JSON body"}))
+            await writer.drain()
+            return
+
+        if not isinstance(data, dict):
+            writer.write(_json_response(HTTP_400, {"error": "body must be a JSON object"}))
+            await writer.drain()
+            return
+
+        try:
+            from ..db.channel_configs import set_config
+            updated = await set_config(channel_id, data)
+        except Exception as exc:
+            writer.write(_json_response(HTTP_500, {"error": str(exc)}))
+            await writer.drain()
+            return
+
+        if updated is None:
+            writer.write(_json_response(HTTP_404, {"error": f"channel '{channel_id}' not found"}))
+        else:
+            writer.write(_json_response(HTTP_200, updated))
         await writer.drain()
 
     # --- Static file serving ---

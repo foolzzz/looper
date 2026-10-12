@@ -1,13 +1,14 @@
-import { LayoutDashboard, MessageSquare, ListTodo, Bot, Settings2 } from "lucide-react";
+import { LayoutDashboard, MessageSquare, ListTodo, Bot, Sliders } from "lucide-react";
 import { cn } from "@/lib/utils";
 
-export type Page = "dashboard" | "chat" | "tasks" | "agents";
+export type Page = "dashboard" | "chat" | "tasks" | "agents" | "settings";
 
 const NAV_ITEMS: { page: Page; label: string; icon: React.ElementType }[] = [
   { page: "dashboard", label: "Dashboard", icon: LayoutDashboard },
   { page: "chat", label: "Chat", icon: MessageSquare },
   { page: "tasks", label: "Tasks", icon: ListTodo },
-  { page: "agents", label: "Agents", icon: Settings2 },
+  { page: "agents", label: "Agents", icon: Bot },
+  { page: "settings", label: "Settings", icon: Sliders },
 ];
 
 interface SidebarProps {
