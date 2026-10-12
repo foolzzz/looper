@@ -47,6 +47,11 @@ def _clock() -> float:
 _INIT_LIST_LIMIT = 2_000
 
 
+def _is_thinking_progress(event: dict[str, Any]) -> bool:
+    """Claude emits one of these about every second while it thinks."""
+    return event.get("type") == "system" and event.get("subtype") == "thinking_tokens"
+
+
 def _compact_event(event: dict[str, Any]) -> dict[str, Any]:
     if event.get("type") != "system" or event.get("subtype") != "init":
         return event
@@ -87,6 +92,8 @@ class ClaudeRunRecorder:
         self._session_id = session_id
         self._record_id: int | None = None
         self._seq = 0
+        # seq of the row holding the current thinking phase's progress, if it is the latest row
+        self._thinking_seq: int | None = None
         self._model: str | None = None
         self._started = _clock()
         self._last_heartbeat = float("-inf")
@@ -116,9 +123,16 @@ class ClaudeRunRecorder:
             return
         from ..db import llm_records
 
-        self._seq += 1
+        compact = _compact_event(event)
+        thinking = _is_thinking_progress(event)
         try:
-            await llm_records.append_events(self._record_id, [(self._seq, _compact_event(event))])
+            if thinking and self._thinking_seq is not None and self._thinking_seq == self._seq:
+                # One row per thinking phase: keep its latest token estimate.
+                await llm_records.update_event(self._record_id, self._seq, compact)
+                return
+            self._seq += 1
+            self._thinking_seq = self._seq if thinking else None
+            await llm_records.append_events(self._record_id, [(self._seq, compact)])
         except Exception:
             logger.warning("could not record event for %s", self._agent_id, exc_info=True)
 

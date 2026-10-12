@@ -153,6 +153,7 @@ _AGENT_DB_WRITES = (
     ("llm_records", "append_events"),
     ("llm_records", "finish_record"),
     ("llm_records", "touch_record"),
+    ("llm_records", "update_event"),
 )
 
 

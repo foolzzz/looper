@@ -10,6 +10,7 @@ import {
   Check,
   Loader2,
   MessageSquare,
+  Plug,
   Terminal,
   User,
   Wrench,
@@ -205,16 +206,145 @@ function resultText(content: unknown): string {
   return JSON.stringify(content, null, 2);
 }
 
-function EventView({ item }: { item: LlmRecordEvent }) {
+function isThinkingProgress(event: Block) {
+  return event.type === "system" && event.subtype === "thinking_tokens";
+}
+
+/** Events to show: consecutive thinking-progress rows collapse into one, keeping the latest count. */
+function displayEvents(events: LlmRecordEvent[]): { item: LlmRecordEvent; startedAt: string }[] {
+  const out: { item: LlmRecordEvent; startedAt: string }[] = [];
+  for (const item of events) {
+    const last = out[out.length - 1];
+    if (last && isThinkingProgress(item.event) && isThinkingProgress(last.item.event)) {
+      last.item = item;
+    } else {
+      out.push({ item, startedAt: item.created_at });
+    }
+  }
+  return out;
+}
+
+function thinkingTokens(event: Block) {
+  const n = event.estimated_tokens;
+  return typeof n === "number" ? n.toLocaleString() : "?";
+}
+
+/** One muted line, optionally expandable to show detail. */
+function EventLine({
+  icon,
+  text,
+  tone,
+  detail,
+}: {
+  icon: React.ReactNode;
+  text: React.ReactNode;
+  tone?: "error";
+  detail?: string;
+}) {
+  const body = (
+    <span className={cn("flex min-w-0 items-center gap-1.5 text-xs", tone === "error" ? "text-destructive" : "text-muted-foreground")}>
+      {icon}
+      <span className="min-w-0 truncate">{text}</span>
+    </span>
+  );
+  if (!detail) return <div className="min-w-0 flex-1 py-0.5">{body}</div>;
+  return (
+    <div className="min-w-0 flex-1">
+      <Collapsible title={body} tone={tone}>
+        <Pre text={detail} />
+      </Collapsible>
+    </div>
+  );
+}
+
+function EventView({ item, startedAt, live }: { item: LlmRecordEvent; startedAt?: string; live?: boolean }) {
   const event = item.event;
   const type = event.type;
-  const time = <span className="shrink-0 font-mono text-[11px] tabular-nums text-muted-foreground">{formatClock(item.created_at)}</span>;
+  const time = (
+    <span className="shrink-0 font-mono text-[11px] tabular-nums text-muted-foreground">
+      {formatClock(startedAt ?? item.created_at)}
+    </span>
+  );
 
   if (type === "system" && event.subtype === "init") {
     return (
       <div className="flex items-center gap-2 text-[11px] text-muted-foreground">
         {time}
         <span>Session started · {String(event.model ?? "model ?")} · {String(event.session_id ?? "")}</span>
+      </div>
+    );
+  }
+  if (isThinkingProgress(event)) {
+    return (
+      <div className="flex gap-2">
+        {time}
+        <EventLine
+          icon={live ? <Loader2 className="h-3 w-3 animate-spin" /> : <Brain className="h-3 w-3" />}
+          text={`${live ? "Thinking…" : "Thought"} · ~${thinkingTokens(event)} tokens`}
+        />
+      </div>
+    );
+  }
+  if (type === "system" && (event.subtype === "hook_started" || event.subtype === "status")) {
+    return null; // the hook's response line and the run itself say enough
+  }
+  if (type === "system" && event.subtype === "hook_response") {
+    const failed = event.outcome !== "success" || (typeof event.exit_code === "number" && event.exit_code !== 0);
+    const detail = ["output", "stdout", "stderr"]
+      .filter((key) => typeof event[key] === "string" && event[key])
+      .map((key) => `${key}:\n${String(event[key])}`)
+      .join("\n\n");
+    return (
+      <div className="flex gap-2">
+        {time}
+        <EventLine
+          icon={<Plug className="h-3 w-3" />}
+          text={`Hook ${String(event.hook_name ?? event.hook_event ?? "")} · ${String(event.outcome ?? "?")} (exit ${String(event.exit_code ?? "?")})`}
+          tone={failed ? "error" : undefined}
+          detail={detail || undefined}
+        />
+      </div>
+    );
+  }
+  if (type === "system" && event.subtype === "task_started") {
+    return (
+      <div className="flex gap-2">
+        {time}
+        <EventLine
+          icon={<Terminal className="h-3 w-3" />}
+          text={`Background task started · ${String(event.description ?? event.task_id ?? "")} · ${String(event.task_type ?? "")}`}
+        />
+      </div>
+    );
+  }
+  if (type === "system" && event.subtype === "task_notification") {
+    return (
+      <div className="flex gap-2">
+        {time}
+        <EventLine
+          icon={<Terminal className="h-3 w-3" />}
+          text={`Background task ${String(event.status ?? "")} · ${String(event.summary ?? event.task_id ?? "")}`}
+          tone={event.status === "failed" ? "error" : undefined}
+          detail={event.output_file ? `output file: ${String(event.output_file)}` : undefined}
+        />
+      </div>
+    );
+  }
+  if (type === "rate_limit_event") {
+    const info = (event.rate_limit_info as Block | undefined) ?? {};
+    const windows = (info.unifiedWindows as Record<string, Block> | undefined) ?? {};
+    const usage = Object.entries(windows)
+      .map(([name, w]) => `${name} ${Math.round(Number(w.utilization ?? 0) * 100)}%`)
+      .join(", ");
+    return (
+      <div className="flex gap-2">
+        {time}
+        <EventLine
+          icon={<AlertTriangle className="h-3 w-3" />}
+          text={`Rate limit · ${String(info.status ?? "?")}${usage ? ` · ${usage} used` : ""}`}
+          tone={info.status && info.status !== "allowed" ? "error" : undefined}
+          detail={JSON.stringify(info, null, 2)}
+        />
       </div>
     );
   }
@@ -236,9 +366,10 @@ function EventView({ item }: { item: LlmRecordEvent }) {
             }
             if (block.type === "thinking") {
               const text = String(block.thinking ?? "");
+              if (!text) return null; // not exposed; the thinking-progress line covers it
               return (
-                <Collapsible key={i} icon={<Brain className="h-3 w-3" />} title={text ? `Thinking (${text.length} chars)` : "Thinking (content not exposed)"}>
-                  <Pre text={text || "Claude did not expose this thinking block."} />
+                <Collapsible key={i} icon={<Brain className="h-3 w-3" />} title={`Thinking (${text.length} chars)`}>
+                  <Pre text={text} />
                 </Collapsible>
               );
             }
@@ -300,7 +431,16 @@ function EventView({ item }: { item: LlmRecordEvent }) {
       </div>
     );
   }
-  return null;
+  return (
+    <div className="flex gap-2">
+      {time}
+      <EventLine
+        icon={<Bot className="h-3 w-3" />}
+        text={`${String(type ?? "event")}${event.subtype ? ` · ${String(event.subtype)}` : ""}`}
+        detail={JSON.stringify(event, null, 2)}
+      />
+    </div>
+  );
 }
 
 function RunCard({ initial, defaultOpen }: { initial: LlmRecord; defaultOpen: boolean }) {
@@ -311,10 +451,15 @@ function RunCard({ initial, defaultOpen }: { initial: LlmRecord; defaultOpen: bo
   const lastSeq = useRef(0);
 
   const load = useCallback(async () => {
-    const fresh = await fetchLlmRecordEvents(initial.id, lastSeq.current).catch(() => []);
+    // Re-read the last row too: thinking progress is updated in place.
+    const fresh = await fetchLlmRecordEvents(initial.id, Math.max(0, lastSeq.current - 1)).catch(() => []);
     if (fresh.length) {
-      lastSeq.current = fresh[fresh.length - 1].seq;
-      setEvents((prev) => [...prev, ...fresh]);
+      lastSeq.current = Math.max(lastSeq.current, fresh[fresh.length - 1].seq);
+      setEvents((prev) => {
+        const bySeq = new Map(prev.map((e) => [e.seq, e]));
+        for (const e of fresh) bySeq.set(e.seq, e);
+        return [...bySeq.values()].sort((a, b) => a.seq - b.seq);
+      });
     }
   }, [initial.id]);
 
@@ -339,6 +484,9 @@ function RunCard({ initial, defaultOpen }: { initial: LlmRecord; defaultOpen: bo
   const lastOutput = new Date(record.last_output_at ?? record.created_at).getTime();
   const idle = now - lastOutput;
   const stuck = record.status === "running" && idle > STUCK_AFTER_MS;
+  const shown = displayEvents(events);
+  const lastShown = shown[shown.length - 1];
+  const thinkingNow = record.status === "running" && lastShown && isThinkingProgress(lastShown.item.event);
 
   return (
     <div className="rounded-lg border border-border bg-card">
@@ -365,6 +513,11 @@ function RunCard({ initial, defaultOpen }: { initial: LlmRecord; defaultOpen: bo
             {stuck ? `no output for ${formatMs(idle)} — may be stuck` : `last output ${formatMs(idle)} ago`}
           </span>
         )}
+        {thinkingNow && (
+          <span className="flex items-center gap-1 text-primary">
+            <Brain className="h-3.5 w-3.5" /> thinking · ~{thinkingTokens(lastShown.item.event)} tokens
+          </span>
+        )}
         <span className="ml-auto min-w-0 truncate text-muted-foreground">{record.input_summary}</span>
       </button>
       {open && (
@@ -378,7 +531,14 @@ function RunCard({ initial, defaultOpen }: { initial: LlmRecord; defaultOpen: bo
           )}
           {events.length > 0 ? (
             <div className="space-y-2">
-              {events.map((item) => <EventView key={item.seq} item={item} />)}
+              {shown.map(({ item, startedAt }, i) => (
+                <EventView
+                  key={item.seq}
+                  item={item}
+                  startedAt={startedAt}
+                  live={record.status === "running" && i === shown.length - 1}
+                />
+              ))}
             </div>
           ) : (
             <div className="space-y-2 text-xs text-muted-foreground">

@@ -131,3 +131,30 @@ def test_heartbeat_counts_partial_deltas_and_is_throttled(agent_db: Any, monkeyp
     asyncio.run(_run())
     assert agent_db.touch_record.await_count == 2
     agent_db.append_events.assert_not_awaited()  # deltas keep the run alive but are not stored
+
+
+
+def test_thinking_progress_is_one_row_per_thinking_phase(agent_db: Any) -> None:
+    from loopx.agents.claude_cli import ClaudeRunRecorder
+
+    def thinking(tokens: int) -> dict[str, Any]:
+        return {"type": "system", "subtype": "thinking_tokens", "estimated_tokens": tokens}
+
+    recorder = ClaudeRunRecorder(agent_id="worker-1", task_id=None, command=["claude"], cwd="/tmp", input_text="go")
+
+    async def _run() -> None:
+        await recorder.start()
+        for event in (
+            thinking(100), thinking(200), thinking(300),                     # phase 1 → row 1, updated twice
+            {"type": "assistant", "message": {"content": [{"type": "text", "text": "hi"}]}},  # row 2
+            thinking(50), thinking(80),                                       # phase 2 → row 3, updated once
+        ):
+            await recorder.record(event)
+
+    asyncio.run(_run())
+    appended = [call.args[1][0] for call in agent_db.append_events.await_args_list]
+    assert [(seq, e.get("subtype") or e["type"]) for seq, e in appended] == [
+        (1, "thinking_tokens"), (2, "assistant"), (3, "thinking_tokens"),
+    ]
+    updates = [(call.args[1], call.args[2]["estimated_tokens"]) for call in agent_db.update_event.await_args_list]
+    assert updates == [(1, 200), (1, 300), (3, 80)]
