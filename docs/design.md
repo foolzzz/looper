@@ -34,7 +34,7 @@ TaskRouter（任务路由器）
 | 层级 | 组件 | 职责 | 隔离方式 |
 |------|------|------|----------|
 | 接入层 | Channel Adapter | 协议转换，用户消息 → MessageEnvelope | 每渠道一个 Adapter |
-| 决策层 | Manager | 意图理解、任务创建、状态汇报 | 单例，Claude Code pp 模式 |
+| 决策层 | Manager | 意图理解、任务创建、状态汇报 | 单例，常驻 Claude Code 进程（stream-json 输入，每条消息一个 user turn；进程重启后用 `--resume` 续接会话） |
 | 编排层 | TaskRouter + Planner | 任务路由、计划分解、调度验证 | 每个 Task 独立 Planner 实例 |
 | 执行层 | WorkerPool | 子进程执行具体开发/验证任务 | 每个 Worker 独立子进程 |
 

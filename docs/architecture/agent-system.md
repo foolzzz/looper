@@ -15,6 +15,15 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
 - Classifies intent (chat vs task creation)
 - Routes task requests to the TaskRouter via `TASK_REQUEST` messages
 - Maintains chat conversation context per session
+- Runs one resident Claude process, started on the first chat message:
+  `claude --print --verbose --output-format stream-json --input-format stream-json --include-partial-messages --append-system-prompt <prompt> [--resume <session_id>]`.
+  Each chat message is one user turn on its stdin and ends at that turn's
+  `result`; messages are handled one at a time, and each turn is one Runs
+  record. Claude's `total_cost_usd` is its process's running total, so a
+  record's cost is the increase since the previous turn. When Claude exits (or dies mid-turn, which answers that message with
+  an error) or the Manager's system prompt changes, the next message starts a
+  new process that resumes the saved session with `--resume`. Stopping the
+  Manager closes Claude's stdin and kills it if it is still running after 5 s
 
 ### TaskRouter (`loopx/agents/tiers/task.py`)
 

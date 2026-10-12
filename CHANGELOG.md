@@ -18,6 +18,16 @@ To learn how to use these features, read the [usage guide](docs/fork/usage.md).
 
 ### Changed
 
+- The Manager keeps one Claude process running instead of starting `claude`
+  for every chat message. The process starts on the first message with
+  `--input-format stream-json` and no prompt argument; each message is one
+  user turn on its stdin and still one Runs record, whose cost is that turn's
+  share (Claude reports the process's running total). A later message no
+  longer pays Claude's start-up time. When Claude exits, or the Manager's
+  system prompt changes, the next message starts a new process with
+  `--resume` on the saved session. A message whose turn ends because Claude
+  exited is answered with an error, as before. Stopping the Manager closes
+  Claude's stdin and kills it after 5 s.
 - The Chat page lists every agent, finished ones included: the Manager, then
   for each of the 30 most recent tasks its Planner and the Worker (and
   Reviewer) of each step. Selecting a Worker or Reviewer shows its Claude runs
