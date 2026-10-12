@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from ..bus import MessageBus
-from ..claude_cli import ClaudeRunRecorder, iter_lines
+from ..claude_cli import ClaudeRunRecorder, iter_lines, write_user_turn
 from ..message import (
     AgentAddress,
     MessageEnvelope,
@@ -49,13 +49,6 @@ async def _load_run_limits() -> tuple[int, int]:
     if config is None:
         return DEFAULT_RUN_TIMEOUT_SEC, 0
     return int(config.get("timeout_seconds") or 0), int(config.get("max_turns") or 0)
-
-
-async def _write_user_turn(stdin: asyncio.StreamWriter, text: str) -> None:
-    """One user message in Claude's stream-json input format."""
-    line = json.dumps({"type": "user", "message": {"role": "user", "content": text}}, ensure_ascii=False)
-    stdin.write(line.encode("utf-8") + b"\n")
-    await stdin.drain()
 
 
 def extract_report(text: str, key: str) -> dict[str, Any] | None:
@@ -290,7 +283,7 @@ class WorkerPool:
         if stdin is None or not text.strip():
             return False
         try:
-            await _write_user_turn(stdin, text)
+            await write_user_turn(stdin, text)
         except (BrokenPipeError, ConnectionResetError, RuntimeError):
             self._inputs.pop(worker_id, None)
             return False
@@ -461,7 +454,7 @@ class WorkerPool:
 
         assert process.stdin is not None
         try:
-            await _write_user_turn(process.stdin, prompt)
+            await write_user_turn(process.stdin, prompt)
             self._inputs[worker_id] = process.stdin
         except (BrokenPipeError, ConnectionResetError):
             # Claude exited before reading; its output decides the outcome.

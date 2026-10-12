@@ -35,6 +35,13 @@ async def iter_lines(stream: asyncio.StreamReader) -> AsyncIterator[bytes]:
         yield bytes(pending)
 
 
+async def write_user_turn(stdin: asyncio.StreamWriter, text: str) -> None:
+    """One user message in Claude's stream-json input format."""
+    line = json.dumps({"type": "user", "message": {"role": "user", "content": text}}, ensure_ascii=False)
+    stdin.write(line.encode("utf-8") + b"\n")
+    await stdin.drain()
+
+
 # How often a running record's heartbeat (last_output_at) is written.
 _HEARTBEAT_INTERVAL = 10.0
 
@@ -162,7 +169,13 @@ class ClaudeRunRecorder:
         output_text: str | None,
         result_event: dict[str, Any] | None,
         error: str | None = None,
+        cost_usd: float | None = None,
     ) -> None:
+        """Close the record; ``cost_usd`` replaces the result's ``total_cost_usd``.
+
+        Claude reports the running total of its process, so a run that is one
+        turn of a longer-lived process passes its own share.
+        """
         if self._record_id is None:
             return
         from ..db import llm_records
@@ -178,7 +191,7 @@ class ClaudeRunRecorder:
                 session_id=result.get("session_id") or self._session_id,
                 input_tokens=usage.get("input_tokens"),
                 output_tokens=usage.get("output_tokens"),
-                cost_usd=result.get("total_cost_usd"),
+                cost_usd=result.get("total_cost_usd") if cost_usd is None else cost_usd,
                 duration_ms=int((_clock() - self._started) * 1000),
                 model=self._model,
                 error=error or (None if succeeded else f"Claude run ended: {result.get('subtype') or 'no result'}"),
