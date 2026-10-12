@@ -265,7 +265,7 @@ class ManagerAgent:
             if progress_text:
                 await self._bus.publish(MessageEnvelope.create(
                     source=MANAGER_ADDRESS,
-                    target=envelope.source,
+                    target=AgentAddress(agent_type="channel", agent_id=origin),
                     message_type=MessageType.STATUS_UPDATE,
                     payload={"text": progress_text},
                     correlation_id=envelope.correlation_id,

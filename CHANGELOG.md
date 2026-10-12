@@ -35,6 +35,11 @@ To learn how to use these features, read the [usage guide](docs/fork/usage.md).
 
 ### Fixed
 
+- Agent replies reach each channel once. The channel registry re-routed every
+  reply and status update by its origin channel, while the channel adapter also
+  delivered it from its own queue. Web chat events arrived twice, and Telegram
+  and Lark could post replies twice. Manager progress updates are now addressed
+  to the channel instead of the TaskRouter.
 - The agent message bus no longer replays a previous run's messages for Planners
   and Workers on restart. Their tasks are stopped at startup, and replaying could
   re-run their work. Work the WorkerPool takes is now marked delivered, so it no

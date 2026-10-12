@@ -455,3 +455,58 @@ class TestEndToEndFlow:
                 await bus.shutdown()
 
         asyncio.run(_run())
+
+
+class TestDeliverOnce:
+    """Channel-bound messages travel one path: the channel's own queue."""
+
+    def test_reply_reaches_the_sse_stream_once(self) -> None:
+        async def _run() -> int:
+            with tempfile.TemporaryDirectory() as tmp:
+                bus = MessageBus(runtime_root=Path(tmp))
+                registry = ChannelRegistry(bus=bus)
+                adapter = WebChannelAdapter()
+                await registry.register(adapter)
+                sent = await adapter.handle_user_message(text="hi", session_id="s1")
+                corr = sent["correlation_id"]
+                for message_type, payload in (
+                    (MessageType.STATUS_UPDATE, {"text": "A", "delta": True}),
+                    (MessageType.AGENT_REPLY, {"text": "done"}),
+                ):
+                    await bus.publish(MessageEnvelope.create(
+                        source=MANAGER_ADDRESS,
+                        target=channel_address("web"),
+                        message_type=message_type,
+                        payload=payload,
+                        correlation_id=corr,
+                        metadata={"origin_channel_id": "channel-web"},
+                    ))
+                await asyncio.sleep(0.05)
+                count = adapter._sse_queues[corr].qsize()
+                await registry.stop_all()
+                await bus.shutdown()
+                return count
+
+        assert asyncio.run(_run()) == 2  # one delta + one final, not four
+
+    def test_manager_progress_is_addressed_to_the_channel(self, agent_db: Any) -> None:
+        from loopx.agents.message import TASK_ROUTER_ADDRESS
+        from loopx.agents.tiers.manager import ManagerAgent, ManagerConfig
+
+        async def _run() -> tuple[int, int]:
+            with tempfile.TemporaryDirectory() as tmp:
+                bus = MessageBus(runtime_root=Path(tmp))
+                manager = ManagerAgent(config=ManagerConfig(work_dir=Path(tmp)), runtime_root=Path(tmp))
+                manager._bus = bus
+                await manager._handle(MessageEnvelope.create(
+                    source=TASK_ROUTER_ADDRESS,
+                    target=MANAGER_ADDRESS,
+                    message_type=MessageType.GOAL_STATUS,
+                    payload={"task_id": "t1", "status": "executing", "summary": "进度更新: 0/1 完成"},
+                    metadata={"origin_channel_id": "channel-web"},
+                ))
+                counts = (bus.pending_count("channel-web"), bus.pending_count("task-router"))
+                await bus.shutdown()
+                return counts
+
+        assert asyncio.run(_run()) == (1, 0)
