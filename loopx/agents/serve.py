@@ -3,8 +3,7 @@
 Wires up the full three-tier agent system:
   AgentSupervisor → MessageBus → ChannelRegistry
     → WebChannelAdapter
-    → TelegramChannelAdapter (optional)
-    → LarkChannelAdapter (optional)
+    → TelegramChannelAdapter / LarkChannelAdapter (enabled on the Settings page)
     → ManagerAgent
     → TaskRouter
     → WorkerPool
@@ -20,14 +19,18 @@ Usage:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
+import os
 import signal
 from pathlib import Path
 from typing import Any
 
 from .broadcast import Broadcaster
 from .bus import MessageBus
+from .channels.base import ChannelAdapter
 from .channels.registry import ChannelRegistry
+from .channels.telegram import TelegramChannelAdapter, parse_allowed_user_ids
 from .channels.web import WebChannelAdapter
 from .http_server import AgentHTTPServer
 from .supervisor import AgentSupervisor
@@ -38,6 +41,34 @@ from .tiers.worker import WorkerConfig, WorkerPool
 logger = logging.getLogger(__name__)
 
 
+def _telegram_adapter_from_config(config: dict[str, Any]) -> TelegramChannelAdapter | None:
+    """Build the Telegram adapter from its Settings-page config, or None if invalid."""
+    try:
+        allowed = parse_allowed_user_ids(str(config.get("allowed_user_ids") or ""))
+        return TelegramChannelAdapter(
+            bot_token=os.environ.get(
+                config.get("bot_token_env") or "LOOPX_TELEGRAM_BOT_TOKEN", ""
+            ),
+            allowed_user_ids=allowed or None,
+        )
+    except ValueError as exc:
+        # Fail closed: a malformed allowlist must not fall back to "allow all".
+        logger.error("telegram channel disabled: invalid allowed user IDs (%s)", exc)
+        return None
+
+
+async def _register_optional_channel(
+    registry: ChannelRegistry, adapter: ChannelAdapter
+) -> None:
+    """Start a Settings-enabled channel; a failure leaves the web dashboard up."""
+    try:
+        await registry.register(adapter)
+    except Exception:
+        logger.exception("%s failed to start; continuing without it", adapter.channel_id)
+        with contextlib.suppress(Exception):
+            await registry.unregister(adapter.channel_id)
+
+
 async def _run_agent_system(
     *,
     host: str = "127.0.0.1",
@@ -45,9 +76,6 @@ async def _run_agent_system(
     runtime_root: Path,
     work_dir: Path,
     claude_bin: str = "claude",
-    enable_telegram: bool = False,
-    enable_lark: bool = False,
-    lark_app_id: str = "",
 ) -> None:
     """Start the full agent system and run until interrupted."""
 
@@ -165,32 +193,24 @@ async def _run_agent_system(
     await registry.register(web_adapter)
 
     from ..db.channel_configs import get_config as get_channel_config
-    import os as _os
 
+    # Telegram and Lark are always available; the Settings page decides
+    # whether they run (channel_configs.enabled), read once at startup.
     tg_cfg = await get_channel_config("channel-telegram")
     if tg_cfg and tg_cfg.get("enabled"):
-        from .channels.telegram import TelegramChannelAdapter
-        tg_config = tg_cfg.get("config", {})
-        telegram_adapter = TelegramChannelAdapter(
-            bot_token=_os.environ.get(
-                tg_config.get("bot_token_env", "LOOPX_TELEGRAM_BOT_TOKEN"), ""
-            ),
-        )
-        await registry.register(telegram_adapter)
-        logger.info("telegram channel enabled (from DB config)")
+        telegram_adapter = _telegram_adapter_from_config(tg_cfg.get("config") or {})
+        if telegram_adapter is not None:
+            await _register_optional_channel(registry, telegram_adapter)
 
     lark_cfg = await get_channel_config("channel-lark")
     if lark_cfg and lark_cfg.get("enabled"):
         from .channels.lark import LarkChannelAdapter
-        lark_config = lark_cfg.get("config", {})
+        lark_config = lark_cfg.get("config") or {}
         lark_adapter = LarkChannelAdapter(
-            app_id=_os.environ.get(
-                lark_config.get("app_id_env", "LARK_APP_ID"), ""
-            ),
+            app_id=os.environ.get(lark_config.get("app_id_env") or "LARK_APP_ID", ""),
             runtime_root=runtime_root,
         )
-        await registry.register(lark_adapter)
-        logger.info("lark channel enabled (from DB config)")
+        await _register_optional_channel(registry, lark_adapter)
 
     # --- Agent Tiers ---
 
@@ -230,11 +250,9 @@ async def _run_agent_system(
     await http_server.start()
 
     logger.info(
-        "agent system running on http://%s:%d (web=%s, telegram=%s, lark=%s)",
+        "agent system running on http://%s:%d (channels=%s)",
         host, port,
-        True,
-        enable_telegram,
-        enable_lark,
+        ",".join(c["channel_id"] for c in registry.list_channels() if c.get("healthy")),
     )
 
     # Wait for shutdown signal
@@ -268,9 +286,6 @@ def serve_agent(
     runtime_root: Path | None = None,
     work_dir: Path | None = None,
     claude_bin: str = "claude",
-    enable_telegram: bool = False,
-    enable_lark: bool = False,
-    lark_app_id: str = "",
     verbose: bool = False,
 ) -> None:
     """Synchronous entry point for the agent system."""
@@ -289,8 +304,5 @@ def serve_agent(
             runtime_root=resolved_root,
             work_dir=resolved_work_dir,
             claude_bin=claude_bin,
-            enable_telegram=enable_telegram,
-            enable_lark=enable_lark,
-            lark_app_id=lark_app_id,
         )
     )

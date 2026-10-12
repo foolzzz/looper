@@ -215,6 +215,90 @@ class TestTelegramAdapter:
         assert len(chunks) >= 2
         assert "".join(chunks).replace("\n", "") == text.replace("\n", "")
 
+    @pytest.mark.parametrize(
+        ("raw", "expected"),
+        [
+            ("", set()),
+            ("  ", set()),
+            ("42", {42}),
+            (" 1, 2,,3 ", {1, 2, 3}),
+            ("7,7", {7}),
+        ],
+    )
+    def test_parse_allowed_user_ids(self, raw: str, expected: set[int]) -> None:
+        from loopx.agents.channels.telegram import parse_allowed_user_ids
+        assert parse_allowed_user_ids(raw) == expected
+
+    @pytest.mark.parametrize("raw", ["abc", "1,x", "1;2", "@user"])
+    def test_parse_allowed_user_ids_rejects_non_integer(self, raw: str) -> None:
+        from loopx.agents.channels.telegram import parse_allowed_user_ids
+        with pytest.raises(ValueError):
+            parse_allowed_user_ids(raw)
+
+
+class TestServeChannelWiring:
+    """Telegram and Lark are configured from the Settings page (channel_configs)."""
+
+    def test_telegram_adapter_reads_settings(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from loopx.agents.serve import _telegram_adapter_from_config
+        monkeypatch.setenv("MY_TG_TOKEN", "token-from-env")
+        monkeypatch.delenv("LOOPX_TELEGRAM_ALLOWED_USERS", raising=False)
+        adapter = _telegram_adapter_from_config(
+            {"bot_token_env": "MY_TG_TOKEN", "allowed_user_ids": "7, 8"}
+        )
+        assert adapter is not None
+        assert adapter._bot_token == "token-from-env"
+        assert adapter._allowed_user_ids == {7, 8}
+
+    def test_telegram_adapter_defaults(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from loopx.agents.serve import _telegram_adapter_from_config
+        monkeypatch.setenv("LOOPX_TELEGRAM_BOT_TOKEN", "default-token")
+        monkeypatch.delenv("LOOPX_TELEGRAM_ALLOWED_USERS", raising=False)
+        adapter = _telegram_adapter_from_config({})
+        assert adapter is not None
+        assert adapter._bot_token == "default-token"
+        assert adapter._allowed_user_ids == set()
+
+    def test_telegram_invalid_allowlist_disables_channel(self) -> None:
+        from loopx.agents.serve import _telegram_adapter_from_config
+        # Fail closed: a malformed allowlist must not fall back to "allow all".
+        assert _telegram_adapter_from_config({"allowed_user_ids": "12,abc"}) is None
+
+    def test_failed_optional_channel_does_not_stop_server(self) -> None:
+        from loopx.agents.channels.base import ChannelAdapter, DeliveryReceipt
+        from loopx.agents.serve import _register_optional_channel
+
+        class _FailingAdapter(ChannelAdapter):
+            stopped = False
+
+            @property
+            def channel_type(self) -> str:
+                return "failing"
+
+            @property
+            def channel_id(self) -> str:
+                return "channel-failing"
+
+            async def start(self, bus: MessageBus) -> None:
+                raise RuntimeError("invalid token")
+
+            async def stop(self) -> None:
+                type(self).stopped = True
+
+            async def deliver(self, envelope: MessageEnvelope) -> DeliveryReceipt:
+                raise AssertionError("not started")
+
+        async def _run() -> None:
+            with tempfile.TemporaryDirectory() as tmp:
+                bus = MessageBus(runtime_root=Path(tmp))
+                registry = ChannelRegistry(bus=bus)
+                await _register_optional_channel(registry, _FailingAdapter())
+                assert registry.list_channels() == []
+                assert _FailingAdapter.stopped
+                await bus.shutdown()
+
+        asyncio.run(_run())
+
 
 class TestLarkAdapter:
     def test_strip_mention(self) -> None:
