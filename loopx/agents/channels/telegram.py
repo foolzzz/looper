@@ -1,10 +1,10 @@
 """Telegram Bot Channel Adapter.
 
 Bridges Telegram Bot API with the agent Bus. Uses long-polling by default
-(webhook mode planned). Requires python-telegram-bot[asyncio] as an optional
-dependency.
+(webhook mode planned). ``loopx serve`` builds this adapter from the
+``channel-telegram`` row that the dashboard Settings page edits.
 
-Config:
+Fallbacks when the constructor arguments are empty:
   LOOPX_TELEGRAM_BOT_TOKEN — Bot token from @BotFather
   LOOPX_TELEGRAM_ALLOWED_USERS — Comma-separated Telegram user IDs (empty = allow all)
 """
@@ -29,6 +29,11 @@ from .base import ChannelAdapter, DeliveryReceipt
 logger = logging.getLogger(__name__)
 
 
+def parse_allowed_user_ids(raw: str) -> set[int]:
+    """Parse comma-separated Telegram user IDs; raise ValueError on a bad entry."""
+    return {int(part) for part in (p.strip() for p in raw.split(",")) if part}
+
+
 def _check_telegram_available() -> bool:
     try:
         import telegram  # noqa: F401
@@ -47,10 +52,8 @@ class TelegramChannelAdapter(ChannelAdapter):
         allowed_user_ids: set[int] | None = None,
     ) -> None:
         self._bot_token = bot_token or os.environ.get("LOOPX_TELEGRAM_BOT_TOKEN", "")
-        raw_users = os.environ.get("LOOPX_TELEGRAM_ALLOWED_USERS", "")
-        self._allowed_user_ids = allowed_user_ids or (
-            {int(uid.strip()) for uid in raw_users.split(",") if uid.strip()}
-            if raw_users else set()
+        self._allowed_user_ids = allowed_user_ids or parse_allowed_user_ids(
+            os.environ.get("LOOPX_TELEGRAM_ALLOWED_USERS", "")
         )
         self._bus: MessageBus | None = None
         self._address = channel_address("telegram", "channel-telegram")
@@ -71,8 +74,8 @@ class TelegramChannelAdapter(ChannelAdapter):
     async def start(self, bus: MessageBus) -> None:
         if not _check_telegram_available():
             logger.error(
-                "python-telegram-bot not installed. "
-                "Install with: pip install 'python-telegram-bot[asyncio]'"
+                "python-telegram-bot not installed; it is a default LoopX "
+                "dependency, so reinstall LoopX (for a checkout: uv sync)"
             )
             return
 

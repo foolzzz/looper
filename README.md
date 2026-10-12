@@ -51,7 +51,8 @@ User ─→ Chat / Lark / Telegram
 - Python 3.11+
 - PostgreSQL (container `agentbox-postgres` on port 54329, or any PG instance)
 - Node.js 22+ (for building the dashboard)
-- Claude CLI (`claude`) on PATH
+- Claude CLI (`claude`) on PATH and signed in
+- Optional, for the Lark channel: `lark-cli` on PATH and signed in
 
 ### 1. Database Setup
 
@@ -82,11 +83,12 @@ cd web && npm install && npx vite build && cd ..
 ### 3. Run
 
 ```bash
-loopx serve
+uv run loopx serve
 # Dashboard at http://127.0.0.1:8767
 ```
 
-The schema is applied automatically on first startup.
+The schema is applied automatically on first startup. Telegram and Lark need
+no flags; turn them on from the Settings page (see [Channels](#channels)).
 
 ## Architecture
 
@@ -158,13 +160,30 @@ Single-page React app served from `web/dist/` on port 8767.
 | Variable | Required | Description |
 |---|---|---|
 | `LOOPX_DATABASE_URL` | Yes | PostgreSQL connection string |
-| `ANTHROPIC_API_KEY` | Yes | For Claude CLI workers |
-| `TELEGRAM_BOT_TOKEN` | No | Telegram bot integration |
-| `LARK_APP_ID` | No | Lark bot app ID |
-| `LARK_APP_SECRET` | No | Lark bot app secret |
+| `ANTHROPIC_API_KEY` | No | Only if the Claude CLI is not signed in |
 
-Store secrets in `.env` (gitignored), never in source. The `channel_configs`
-table stores environment variable **names**, not actual secret values.
+Channel credentials are also environment variables; the Settings page decides
+which ones (see [Channels](#channels)). Store secrets in `.env` (gitignored,
+read from the repository root), never in source.
+
+### Channels
+
+The web chat is always on. Telegram and Lark are built in and need no
+command-line flags: enable and configure them on the dashboard **Settings**
+page. Settings are saved in the `channel_configs` table and read when the
+server starts, so restart `loopx serve` after changing them. The table stores
+environment variable **names**, not secret values.
+
+| Channel | Settings fields | Also needed |
+|---|---|---|
+| Telegram | `bot_token_env`: env var holding the bot token (default `LOOPX_TELEGRAM_BOT_TOKEN`). `allowed_user_ids`: comma-separated Telegram user IDs. | The token in that env var. |
+| Lark | `app_id_env`: env var holding the app ID (default `LARK_APP_ID`). | `lark-cli` on PATH and signed in; it receives and sends the messages. |
+
+- If `allowed_user_ids` is empty, `LOOPX_TELEGRAM_ALLOWED_USERS` applies;
+  when both are empty, everyone can talk to the bot. A malformed list keeps
+  Telegram off.
+- `app_secret_env` is not read yet; `lark-cli` holds the Lark credentials.
+- A channel that fails to start is logged, and the dashboard keeps running.
 
 ### Agent Configuration
 

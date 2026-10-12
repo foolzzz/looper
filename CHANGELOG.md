@@ -16,6 +16,16 @@ To learn how to use these features, read the [usage guide](docs/fork/usage.md).
 
 ## [Unreleased]
 
+### Changed
+
+- `loopx serve` no longer accepts `--enable-telegram`, `--enable-lark` or
+  `--lark-app-id`; the flags had no effect. Telegram and Lark are built in and
+  are enabled and configured on the dashboard Settings page, which saves them
+  in `channel_configs`; the server reads them at startup.
+  `python-telegram-bot` is now a default dependency. The Telegram allowlist
+  edited in Settings now applies, and a malformed list keeps Telegram off. A
+  channel that fails to start is logged and no longer stops the server.
+
 ### Fixed
 
 - The source path-literal regression guard now decodes JS/TS, shell ANSI-C and

@@ -14,6 +14,11 @@ def register_serve_command(
     parser = subparsers.add_parser(
         "serve",
         help="Start the LoopX agent system.",
+        description=(
+            "Start the LoopX agent system. Telegram and Lark need no flags: "
+            "enable and configure them on the dashboard Settings page, then "
+            "restart the server."
+        ),
     )
     add_subcommand_format(parser)
     parser.add_argument(
@@ -26,21 +31,6 @@ def register_serve_command(
     parser.add_argument(
         "--runtime-root",
         help="Override the default ~/.loopx state directory.",
-    )
-    parser.add_argument(
-        "--enable-telegram",
-        action="store_true",
-        help="Enable Telegram channel adapter (requires LOOPX_TELEGRAM_TOKEN).",
-    )
-    parser.add_argument(
-        "--enable-lark",
-        action="store_true",
-        help="Enable Lark channel adapter.",
-    )
-    parser.add_argument(
-        "--lark-app-id",
-        default="",
-        help="Lark app ID for the Lark channel adapter.",
     )
     return parser
 
@@ -64,8 +54,5 @@ def _run_serve(args) -> int:
         runtime_root=runtime_root,
         work_dir=Path.cwd(),
         verbose=getattr(args, "verbose", False),
-        enable_telegram=getattr(args, "enable_telegram", False),
-        enable_lark=getattr(args, "enable_lark", False),
-        lark_app_id=getattr(args, "lark_app_id", ""),
     )
     return 0
