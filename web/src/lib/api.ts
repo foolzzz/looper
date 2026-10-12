@@ -311,18 +311,34 @@ export interface AgentConfig {
   updated_at: string;
 }
 
+/** One Claude run of an agent (Manager, Worker or reviewer). */
 export interface LlmRecord {
   id: number;
   agent_id: string;
   task_id: string | null;
   session_id: string | null;
+  status: "running" | "completed" | "failed";
   input_summary: string | null;
   output_summary: string | null;
+  input_text: string | null;
+  output_text: string | null;
   input_tokens: number | null;
   output_tokens: number | null;
+  cost_usd: number | null;
   duration_ms: number | null;
   model: string | null;
   error: string | null;
+  metadata: { command?: string[]; cwd?: string } | null;
+  created_at: string;
+  finished_at: string | null;
+  /** Heartbeat: last time the run produced any output. */
+  last_output_at: string | null;
+}
+
+/** One stream-json event of a run, in order. */
+export interface LlmRecordEvent {
+  seq: number;
+  event: Record<string, unknown>;
   created_at: string;
 }
 
@@ -355,11 +371,14 @@ export async function updateAgentConfig(
 export async function fetchLlmRecords(params: {
   agent_id?: string;
   task_id?: string;
+  /** An agent_configs id: "manager" or "worker" (workers and reviewers). */
+  role?: string;
   limit?: number;
   offset?: number;
 }): Promise<LlmRecord[]> {
   const qs = new URLSearchParams();
   if (params.agent_id) qs.set("agent_id", params.agent_id);
+  if (params.role) qs.set("role", params.role);
   if (params.task_id) qs.set("task_id", params.task_id);
   if (params.limit) qs.set("limit", String(params.limit));
   if (params.offset) qs.set("offset", String(params.offset));
@@ -369,49 +388,17 @@ export async function fetchLlmRecords(params: {
   return data.records ?? [];
 }
 
-// --- Agent sessions ---
-
-export interface AgentSession {
-  task_id: string;
-  turn_count: number;
-  total_input_tokens: number | null;
-  total_output_tokens: number | null;
-  total_duration_ms: number | null;
-  first_at: string;
-  last_at: string;
-  requirement: string;
-  task_status: string;
-  task_phase: string;
+export async function fetchLlmRecord(recordId: number): Promise<LlmRecord> {
+  const res = await fetch(`${API_BASE}/llm-records/${recordId}`);
+  if (!res.ok) throw new Error(`llm-record ${res.status}`);
+  return (await res.json()).record;
 }
 
-export interface SessionMessage {
-  id: number;
-  input_summary: string | null;
-  output_summary: string | null;
-  input_text: string | null;
-  output_text: string | null;
-  input_tokens: number | null;
-  output_tokens: number | null;
-  duration_ms: number | null;
-  model: string | null;
-  error: string | null;
-  created_at: string;
-}
-
-export async function fetchAgentSessions(agentId: string): Promise<AgentSession[]> {
-  const res = await fetch(`${API_BASE}/agents/${agentId}/sessions`);
-  if (!res.ok) throw new Error(`agent sessions ${res.status}`);
-  const data = await res.json();
-  return data.sessions ?? [];
-}
-
-export async function fetchSessionMessages(
-  agentId: string,
-  taskId: string,
-): Promise<{ messages: SessionMessage[]; activity: ActivityEvent[] }> {
-  const res = await fetch(`${API_BASE}/agents/${agentId}/sessions/${taskId}/messages`);
-  if (!res.ok) throw new Error(`session messages ${res.status}`);
-  return res.json();
+/** Events with seq greater than `after`, so a viewer can follow a running agent. */
+export async function fetchLlmRecordEvents(recordId: number, after = 0): Promise<LlmRecordEvent[]> {
+  const res = await fetch(`${API_BASE}/llm-records/${recordId}/events?after=${after}`);
+  if (!res.ok) throw new Error(`llm-record events ${res.status}`);
+  return (await res.json()).events ?? [];
 }
 
 // --- LLM profiles ---

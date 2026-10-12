@@ -17,8 +17,10 @@ import {
   Settings2,
   Save,
   FolderOpen,
+  History,
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
+import { historyHref } from "@/pages/agent-history";
 import { cn } from "@/lib/utils";
 import {
   ReactFlow,
@@ -534,10 +536,11 @@ function AgentTimeline({ taskId }: { taskId: string }) {
 
           return (
             <div key={agent} className={cn("rounded-lg border overflow-hidden", colors)}>
+              <div className="flex items-start">
               <button
                 type="button"
                 onClick={() => toggle(agent)}
-                className="w-full text-left px-4 py-3 hover:brightness-110 transition-all"
+                className="min-w-0 flex-1 text-left px-4 py-3 hover:brightness-110 transition-all"
               >
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-2">
@@ -583,6 +586,15 @@ function AgentTimeline({ taskId }: { taskId: string }) {
                   </div>
                 )}
               </button>
+              <a
+                href={historyHref(agent, taskId)}
+                className="m-2.5 flex shrink-0 items-center gap-1 rounded-md border border-current/30 px-2 py-1 text-xs opacity-80 hover:opacity-100 hover:bg-white/5"
+                title={`Open ${agent}'s session history: launch command, full transcript and activity`}
+              >
+                <History className="h-3.5 w-3.5" />
+                History
+              </a>
+              </div>
               {isOpen && (
                 <div className="border-t border-inherit px-4 py-2 max-h-[400px] overflow-y-auto space-y-1">
                   {agentEvents.map((ev) => (
