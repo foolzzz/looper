@@ -55,8 +55,34 @@ async def _run_agent_system(
     db_pool = None
     try:
         from ..db import init_pool, ensure_schema, close_pool
+        from ..db.agent_configs import seed_defaults as seed_agent_configs
+        from .tiers.manager import DEFAULT_SYSTEM_PROMPT
+
         db_pool = await init_pool()
         await ensure_schema(db_pool)
+
+        await seed_agent_configs([
+            {
+                "agent_id": "manager",
+                "display_name": "Manager (管家)",
+                "role": "manager",
+                "system_prompt": DEFAULT_SYSTEM_PROMPT,
+                "timeout_seconds": 0,
+            },
+            {
+                "agent_id": "planner",
+                "display_name": "Planner",
+                "role": "planner",
+                "timeout_seconds": 1200,
+            },
+            {
+                "agent_id": "worker",
+                "display_name": "Worker",
+                "role": "worker",
+                "max_concurrency": 3,
+                "timeout_seconds": 600,
+            },
+        ])
         logger.info("database initialised")
     except Exception:
         logger.warning("database unavailable — running without persistence", exc_info=True)

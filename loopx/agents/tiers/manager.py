@@ -14,6 +14,7 @@ import asyncio
 import json
 import logging
 import shutil
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -32,36 +33,51 @@ logger = logging.getLogger(__name__)
 
 try:
     from ...db import activity as db_activity
+    from ...db import agent_configs as db_agent_configs
+    from ...db import llm_records as db_llm_records
     _HAS_DB = True
 except Exception:
     _HAS_DB = False
 
-SYSTEM_PROMPT = """\
+DEFAULT_SYSTEM_PROMPT = """\
 You are the Manager Agent (管家) for LoopX, an autonomous multi-agent programming system.
 
 ## Your Role
 1. Understand user intent and respond naturally in the user's language
 2. For simple questions or conversation, answer directly
-3. For task requests (development, testing, analysis, refactoring), output a structured JSON task
+3. For task requests (development, testing, analysis, refactoring), first clarify and confirm with the user before creating a task
 4. For status queries, report current progress from the goal portfolio
 
-## Task Output Format
-When you identify a task request, respond with ONLY this JSON (no other text):
+## Task Creation Flow (IMPORTANT)
+When a user describes something that sounds like a task, DO NOT immediately create it.
+Instead, follow this flow:
+
+1. **Clarify**: Summarize your understanding of the requirement back to the user. Include:
+   - What you will do (scope)
+   - What files or modules are likely involved
+   - Any assumptions you are making
+   - Estimated priority (P1-P3)
+2. **Wait for confirmation**: Ask the user to confirm, e.g. "确认开始吗？" / "Shall I proceed?"
+3. **Create task**: ONLY after the user explicitly confirms (says things like "确认", "开始", "go", "yes", "好", "可以", "proceed"), output the structured JSON:
+
 ```json
 {
   "action": "task_request",
   "goal_id": "<short-kebab-id>",
-  "structured_requirement": "<clear one-paragraph requirement>",
+  "structured_requirement": "<clear one-paragraph requirement incorporating clarifications>",
   "priority": "P2",
   "acknowledgment": "<brief acknowledgment in user's language>"
 }
 ```
 
+If the user says "不", "取消", "算了", "no", "cancel" or modifies the requirement, do NOT output the JSON. Instead continue the conversation.
+
 ## Rules
 - Be concise and direct
 - Default to Chinese unless the user speaks English
-- For ambiguous requests, ask one clarifying question
+- For ambiguous requests, ask clarifying questions before even proposing the task summary
 - Never refuse a reasonable development task
+- Never output task_request JSON without user's explicit confirmation
 """
 
 
@@ -99,6 +115,7 @@ class ManagerAgent:
         self._bus: MessageBus | None = None
         self._task: asyncio.Task[Any] | None = None
         self._running = False
+        self._system_prompt: str = DEFAULT_SYSTEM_PROMPT
         self._goal_snapshots: dict[str, GoalSnapshot] = {}
         self._state_dir = runtime_root / ".local" / "manager"
         self._state_dir.mkdir(parents=True, exist_ok=True)
@@ -135,11 +152,25 @@ class ManagerAgent:
         self._bus = bus
         self._running = True
 
+        await self._load_db_config()
+
         self._task = asyncio.create_task(self._message_loop())
         logger.info(
             "manager agent started (session=%s)",
             self._session_id or "new",
         )
+
+    async def _load_db_config(self) -> None:
+        """Load system prompt and config from DB, fall back to defaults."""
+        if not _HAS_DB:
+            return
+        try:
+            config = await db_agent_configs.get_config("manager")
+            if config and config.get("system_prompt"):
+                self._system_prompt = config["system_prompt"]
+                logger.debug("loaded manager system prompt from database")
+        except Exception:
+            logger.debug("could not load manager config from database", exc_info=True)
 
     async def stop(self) -> None:
         self._running = False
@@ -281,18 +312,24 @@ class ManagerAgent:
 
     async def _invoke_claude(self, message: str, context_envelope: MessageEnvelope) -> str:
         """Invoke Claude Code in pp mode with stream-json, resuming the persistent session."""
+
+        await self._load_db_config()
+
         command = [
             self._config.claude_bin,
             "--print",
             "--output-format", "stream-json",
             "--verbose",
+            "--append-system-prompt", self._system_prompt,
         ]
 
         if self._session_id:
             command.extend(["--resume", self._session_id])
 
-        prompt = self._build_prompt(message)
+        prompt = self._build_user_message(message)
         command.append(prompt)
+
+        t0 = time.monotonic()
 
         try:
             process = await asyncio.create_subprocess_exec(
@@ -360,25 +397,40 @@ class ManagerAgent:
 
         await process.wait()
         self._save_session_state()
+        duration_ms = int((time.monotonic() - t0) * 1000)
 
         final_text = "".join(text_parts) or result_text
         task_id = context_envelope.metadata.get("task_id")
-        if _HAS_DB and task_id:
+
+        if _HAS_DB:
             try:
-                await db_activity.insert_activity(
+                await db_llm_records.insert_record(
+                    agent_id="manager",
                     task_id=task_id,
-                    worker="manager",
-                    kind="text",
-                    summary=final_text[:500] if final_text else None,
-                    detail=final_text if len(final_text) > 500 else None,
+                    session_id=self._session_id,
+                    input_summary=message[:500],
+                    output_summary=final_text[:500] if final_text else None,
+                    duration_ms=duration_ms,
                 )
             except Exception:
-                logger.debug("failed to record manager activity", exc_info=True)
+                logger.debug("failed to record llm invocation", exc_info=True)
+
+            if task_id:
+                try:
+                    await db_activity.insert_activity(
+                        task_id=task_id,
+                        worker="manager",
+                        kind="text",
+                        summary=final_text[:500] if final_text else None,
+                        detail=final_text if len(final_text) > 500 else None,
+                    )
+                except Exception:
+                    logger.debug("failed to record manager activity", exc_info=True)
 
         return final_text
 
-    def _build_prompt(self, user_message: str) -> str:
-        parts = [SYSTEM_PROMPT, ""]
+    def _build_user_message(self, user_message: str) -> str:
+        parts: list[str] = []
 
         if self._goal_snapshots:
             parts.append("当前活跃目标:")
@@ -386,7 +438,7 @@ class ManagerAgent:
                 parts.append(f"  - [{snap.status}] {snap.title or gid}: {snap.progress}")
             parts.append("")
 
-        parts.append(f"用户: {user_message}")
+        parts.append(user_message)
         return "\n".join(parts)
 
     def _parse_response(self, response: str) -> dict[str, Any]:

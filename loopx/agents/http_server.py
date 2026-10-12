@@ -51,7 +51,7 @@ def _json_response(status: str, body: Any) -> bytes:
         f"Content-Type: application/json; charset=utf-8\r\n"
         f"Content-Length: {len(payload)}\r\n"
         f"Access-Control-Allow-Origin: *\r\n"
-        f"Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n"
+        f"Access-Control-Allow-Methods: GET, POST, PUT, OPTIONS\r\n"
         f"Access-Control-Allow-Headers: Content-Type\r\n"
         f"\r\n"
     )
@@ -62,7 +62,7 @@ def _cors_preflight() -> bytes:
     return (
         "HTTP/1.1 204 No Content\r\n"
         "Access-Control-Allow-Origin: *\r\n"
-        "Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n"
+        "Access-Control-Allow-Methods: GET, POST, PUT, OPTIONS\r\n"
         "Access-Control-Allow-Headers: Content-Type\r\n"
         "Access-Control-Max-Age: 86400\r\n"
         "\r\n"
@@ -185,6 +185,7 @@ class AgentHTTPServer:
     _RE_TASK_ACTIVITY_STREAM = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)/activity/stream$")
     _RE_TASK_ACTIVITY_SEQ = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)/activity/(\d+)$")
     _RE_TASK_CONVERSATION = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)/conversation$")
+    _RE_AGENT_CONFIG = re.compile(r"^/api/agent-configs/([a-zA-Z0-9_-]+)$")
 
     async def _route_api(
         self,
@@ -214,6 +215,14 @@ class AgentHTTPServer:
             await self._handle_task_conversation(m.group(1), writer)
         elif (m := self._RE_TASK_DETAIL.match(path)) and method == "GET":
             await self._handle_task_detail(m.group(1), writer)
+        elif path == "/api/agent-configs" and method == "GET":
+            await self._handle_list_agent_configs(writer)
+        elif (m := self._RE_AGENT_CONFIG.match(path)) and method == "GET":
+            await self._handle_get_agent_config(m.group(1), writer)
+        elif (m := self._RE_AGENT_CONFIG.match(path)) and method == "PUT":
+            await self._handle_update_agent_config(m.group(1), body, writer)
+        elif path == "/api/llm-records" and method == "GET":
+            await self._handle_list_llm_records(query, writer)
         else:
             writer.write(_json_response(HTTP_404, {"error": "not found"}))
             await writer.drain()
@@ -456,6 +465,79 @@ class AgentHTTPServer:
         except Exception:
             rows = []
         writer.write(_json_response(HTTP_200, {"conversation": [_serialize(r) for r in rows]}))
+        await writer.drain()
+
+    # --- Agent config handlers ---
+
+    async def _handle_list_agent_configs(self, writer: asyncio.StreamWriter) -> None:
+        try:
+            from ..db.agent_configs import list_configs
+            configs = await list_configs()
+        except Exception:
+            configs = []
+        writer.write(_json_response(HTTP_200, {"configs": configs}))
+        await writer.drain()
+
+    async def _handle_get_agent_config(
+        self, agent_id: str, writer: asyncio.StreamWriter,
+    ) -> None:
+        try:
+            from ..db.agent_configs import get_config
+            config = await get_config(agent_id)
+        except Exception:
+            config = None
+        if config is None:
+            writer.write(_json_response(HTTP_404, {"error": f"agent '{agent_id}' not found"}))
+        else:
+            writer.write(_json_response(HTTP_200, config))
+        await writer.drain()
+
+    async def _handle_update_agent_config(
+        self, agent_id: str, body: bytes, writer: asyncio.StreamWriter,
+    ) -> None:
+        try:
+            data = json.loads(body.decode("utf-8"))
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            writer.write(_json_response(HTTP_400, {"error": "invalid JSON body"}))
+            await writer.drain()
+            return
+
+        if not isinstance(data, dict):
+            writer.write(_json_response(HTTP_400, {"error": "body must be a JSON object"}))
+            await writer.drain()
+            return
+
+        try:
+            from ..db.agent_configs import set_config
+            updated = await set_config(agent_id, data)
+        except Exception as exc:
+            writer.write(_json_response(HTTP_500, {"error": str(exc)}))
+            await writer.drain()
+            return
+
+        if updated is None:
+            writer.write(_json_response(HTTP_404, {"error": f"agent '{agent_id}' not found"}))
+        else:
+            writer.write(_json_response(HTTP_200, updated))
+        await writer.drain()
+
+    # --- LLM record handlers ---
+
+    async def _handle_list_llm_records(
+        self, query: dict[str, str], writer: asyncio.StreamWriter,
+    ) -> None:
+        agent_id = query.get("agent_id")
+        task_id = query.get("task_id")
+        limit = min(int(query.get("limit", "100")), 500)
+        offset = int(query.get("offset", "0"))
+        try:
+            from ..db.llm_records import list_records
+            records = await list_records(
+                agent_id=agent_id, task_id=task_id, limit=limit, offset=offset,
+            )
+        except Exception:
+            records = []
+        writer.write(_json_response(HTTP_200, {"records": records}))
         await writer.drain()
 
     # --- Static file serving ---

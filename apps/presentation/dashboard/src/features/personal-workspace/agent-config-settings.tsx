@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { Check, RotateCcw, Save } from "lucide-react";
+import { Check, RotateCcw, Save, User } from "lucide-react";
 
 import {
   fetchAgentConfig,
@@ -32,6 +32,12 @@ function agentToDraft(agent: AgentConfigEntry): AgentDraft {
     enabled: agent.enabled !== false,
   };
 }
+
+const roleLabels: Record<string, string> = {
+  orchestrator: "Orchestrator",
+  developer: "Developer",
+  acceptor: "Acceptor",
+};
 
 export function AgentConfigSettings() {
   const { t } = useWorkspaceI18n();
@@ -99,105 +105,112 @@ export function AgentConfigSettings() {
   const providerNames = providers.map((p) => p.name);
 
   return (
-    <div className="personal-agent-config-settings">
+    <div className="agent-config-root">
       {error ? <div className="personal-machine-error" role="alert">{error}</div> : null}
       {notice ? <div className="personal-machine-notice"><Check size={14} /> {notice}</div> : null}
 
-      <div className="personal-agent-list">
+      <div className="agent-config-grid">
         {agents.map((agent, index) => (
-          <fieldset key={agent.id} className="personal-agent-card" disabled={busy !== ""}>
-            <legend>
-              <strong>{agent.id}</strong>
-              <span className="personal-agent-role-badge">{agent.role}</span>
-              {!agent.enabled ? <span className="personal-agent-disabled-badge">disabled</span> : null}
-            </legend>
-
-            <div className="personal-agent-fields">
-              <label>
-                <span>Role</span>
-                <select value={agent.role} onChange={(e) => updateAgent(index, "role", e.target.value)}>
-                  <option value="orchestrator">orchestrator</option>
-                  <option value="developer">developer</option>
-                  <option value="acceptor">acceptor</option>
-                </select>
-              </label>
-
-              <label>
-                <span>Runtime</span>
-                <select value={agent.runtime} onChange={(e) => updateAgent(index, "runtime", e.target.value)}>
-                  <option value="claude-code">claude-code</option>
-                  <option value="codex-cli">codex-cli</option>
-                </select>
-              </label>
-
-              <label>
-                <span>Provider</span>
-                <select value={agent.provider} onChange={(e) => updateAgent(index, "provider", e.target.value)}>
-                  {providerNames.map((name) => <option key={name} value={name}>{name}</option>)}
-                </select>
-              </label>
-
-              <label>
-                <span>Model</span>
-                <input
-                  type="text"
-                  value={agent.model}
-                  onChange={(e) => updateAgent(index, "model", e.target.value)}
-                  placeholder="default"
-                />
-              </label>
-
-              <label>
-                <span>Concurrency</span>
-                <input
-                  type="number"
-                  min={1}
-                  max={8}
-                  value={agent.max_concurrency}
-                  onChange={(e) => updateAgent(index, "max_concurrency", parseInt(e.target.value, 10) || 1)}
-                />
-              </label>
-
-              <label>
-                <span>Permission</span>
-                <select
-                  value={agent.permission_mode}
-                  onChange={(e) => updateAgent(index, "permission_mode", e.target.value)}
-                >
-                  <option value="">default</option>
-                  <option value="acceptEdits">acceptEdits</option>
-                  <option value="bypassPermissions">bypassPermissions</option>
-                  <option value="plan">plan</option>
-                </select>
-              </label>
-
-              <label className="personal-agent-toggle">
+          <div key={agent.id} className={`agent-card${!agent.enabled ? " is-disabled" : ""}`}>
+            <div className="agent-card-header">
+              <span className="agent-card-avatar">
+                <User size={18} />
+              </span>
+              <div className="agent-card-identity">
+                <h3>{agent.id}</h3>
+                <span className={`agent-card-role-tag is-${agent.role}`}>
+                  {roleLabels[agent.role] ?? agent.role}
+                </span>
+              </div>
+              <label className="agent-card-toggle">
                 <input
                   type="checkbox"
                   checked={agent.enabled}
                   onChange={(e) => updateAgent(index, "enabled", e.target.checked)}
+                  disabled={busy !== ""}
                 />
-                <span>Enabled</span>
+                <span>{agent.enabled ? "ON" : "OFF"}</span>
               </label>
             </div>
 
-            <div className="personal-agent-actions">
+            <dl className="agent-card-props">
+              <div>
+                <dt>Runtime</dt>
+                <dd>
+                  <select value={agent.runtime} onChange={(e) => updateAgent(index, "runtime", e.target.value)} disabled={busy !== ""}>
+                    <option value="claude-code">claude-code</option>
+                    <option value="codex-cli">codex-cli</option>
+                  </select>
+                </dd>
+              </div>
+              <div>
+                <dt>Provider</dt>
+                <dd>
+                  <select value={agent.provider} onChange={(e) => updateAgent(index, "provider", e.target.value)} disabled={busy !== ""}>
+                    {providerNames.map((name) => <option key={name} value={name}>{name}</option>)}
+                  </select>
+                </dd>
+              </div>
+              <div>
+                <dt>Model</dt>
+                <dd>
+                  <input
+                    type="text"
+                    value={agent.model}
+                    onChange={(e) => updateAgent(index, "model", e.target.value)}
+                    placeholder="default"
+                    disabled={busy !== ""}
+                  />
+                </dd>
+              </div>
+              <div>
+                <dt>Concurrency</dt>
+                <dd>
+                  <input
+                    type="number"
+                    min={1}
+                    max={8}
+                    value={agent.max_concurrency}
+                    onChange={(e) => updateAgent(index, "max_concurrency", parseInt(e.target.value, 10) || 1)}
+                    disabled={busy !== ""}
+                  />
+                </dd>
+              </div>
+              <div>
+                <dt>Permission</dt>
+                <dd>
+                  <select
+                    value={agent.permission_mode}
+                    onChange={(e) => updateAgent(index, "permission_mode", e.target.value)}
+                    disabled={busy !== ""}
+                  >
+                    <option value="">default</option>
+                    <option value="acceptEdits">acceptEdits</option>
+                    <option value="bypassPermissions">bypassPermissions</option>
+                    <option value="plan">plan</option>
+                  </select>
+                </dd>
+              </div>
+            </dl>
+
+            <div className="agent-card-footer">
               <button
                 type="button"
+                className="personal-primary-action"
                 onClick={() => saveAgent(index)}
                 disabled={busy !== ""}
               >
-                <Save size={14} />
+                <Save size={13} />
                 <span>Save</span>
               </button>
             </div>
-          </fieldset>
+          </div>
         ))}
       </div>
 
-      <div className="personal-agent-toolbar">
-        <button type="button" onClick={() => void reload()} disabled={busy !== ""}>
-          <RotateCcw size={14} />
+      <div className="agent-config-toolbar">
+        <button type="button" className="personal-secondary-action" onClick={() => void reload()} disabled={busy !== ""}>
+          <RotateCcw size={13} />
           <span>Reload</span>
         </button>
       </div>

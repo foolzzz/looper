@@ -9,7 +9,7 @@ import { useVisiblePolling } from "./use-visible-polling";
 const GATE_REPLY_LIMIT = 4000;
 // A reply from the CLI or the orchestrator shows up without reopening the drawer.
 const GATE_THREAD_POLL_MS = 5_000;
-const HIDDEN_ERROR_CODES = new Set(["not_a_user_gate", "gate_not_found", "goal_not_registered"]);
+const HIDDEN_ERROR_CODES = new Set(["not_a_user_gate", "gate_not_found", "goal_not_registered", "invalid_todo_id"]);
 
 /** Discussion thread of a user gate: read the messages and append an owner reply.
  * Replying never closes the gate; approve/reject/cancel stay on gate.resolve.

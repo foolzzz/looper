@@ -48,3 +48,39 @@ CREATE TABLE IF NOT EXISTS task_steps (
 );
 
 CREATE INDEX IF NOT EXISTS idx_steps_task ON task_steps(task_id, step_index);
+
+CREATE TABLE IF NOT EXISTS agent_configs (
+    agent_id         TEXT PRIMARY KEY,
+    display_name     TEXT NOT NULL DEFAULT '',
+    role             TEXT NOT NULL DEFAULT '',
+    enabled          BOOLEAN NOT NULL DEFAULT true,
+    system_prompt    TEXT NOT NULL DEFAULT '',
+    model            TEXT,
+    max_turns        INTEGER NOT NULL DEFAULT 0,
+    timeout_seconds  INTEGER NOT NULL DEFAULT 1200,
+    max_concurrency  INTEGER NOT NULL DEFAULT 1,
+    permission_mode  TEXT,
+    extra_args       JSONB,
+    metadata         JSONB,
+    created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at       TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS llm_records (
+    id               BIGSERIAL PRIMARY KEY,
+    agent_id         TEXT NOT NULL,
+    task_id          TEXT,
+    session_id       TEXT,
+    input_summary    TEXT,
+    output_summary   TEXT,
+    input_tokens     INTEGER,
+    output_tokens    INTEGER,
+    duration_ms      INTEGER,
+    model            TEXT,
+    error            TEXT,
+    metadata         JSONB,
+    created_at       TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_llm_records_agent ON llm_records(agent_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_llm_records_task ON llm_records(task_id, created_at DESC);

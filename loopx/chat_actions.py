@@ -250,8 +250,13 @@ class ChatActionService(
     def _registry_fingerprint(self) -> str:
         try:
             content = self.registry_path.read_bytes()
-        except OSError as exc:
-            raise ValueError("the active LoopX registry is unavailable") from exc
+        except OSError:
+            if not self.registry_path.exists():
+                self.registry_path.parent.mkdir(parents=True, exist_ok=True)
+                self.registry_path.write_text('{"goals": []}', encoding="utf-8")
+                content = self.registry_path.read_bytes()
+            else:
+                raise ValueError("the active LoopX registry is unavailable")
         return hashlib.sha256(content).hexdigest()
 
     def _team_plan_state_fingerprint(

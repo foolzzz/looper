@@ -1,5 +1,6 @@
 import { ArrowDown, ArrowUp, ArrowUpDown, Bot, ChevronDown, ChevronRight, LoaderCircle, Pause, Plus, RotateCcw, Settings2, Trash2 } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { checkForUpdate } from "../../data/chat";
 import { useGoalOrder } from "./use-goal-order";
 
 import { localizedGoalState, useWorkspaceI18n } from "./i18n";
@@ -44,6 +45,10 @@ export function GoalSidebar({
   statusSourceControl?: StatusSourceControl;
 }) {
   const { locale, t } = useWorkspaceI18n();
+  const [version, setVersion] = useState<string | null>(null);
+  useEffect(() => {
+    checkForUpdate().then((r) => setVersion(r.current_version)).catch(() => {});
+  }, []);
   const [sorting, setSorting] = useState(false);
   const ordering = useGoalOrder(goals.filter((goal) => goal.activationState !== "stopped"), statusSourceControl?.activeSource.statusUrl ?? "/status.json");
   const activeGoals = ordering.sorted;
@@ -107,7 +112,7 @@ export function GoalSidebar({
     <div className="personal-goal-directory">
       <div className="personal-sidebar-brand">
         <span className="personal-brand-mark"><Bot size={18} /></span>
-        <span><strong>LoopX</strong></span>
+        <span><strong>LoopX</strong>{version ? <small>v{version}</small> : null}</span>
       </div>
 
       {statusSourceControl ? <StatusSourceSwitcher {...statusSourceControl} /> : null}
