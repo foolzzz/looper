@@ -18,6 +18,11 @@ To learn how to use these features, read the [usage guide](docs/fork/usage.md).
 
 ### Changed
 
+- Workers read Claude's input as stream-json: the prompt goes on stdin, which
+  stays open until the result. A chat message to a task's Planner reaches the
+  running Worker as its next user turn (`WORKER_INPUT` /
+  `WORKER_INPUT_RESULT`) instead of waiting as a new step; it becomes a step only
+  when no Worker is running. The history page shows these user turns.
 - The agent history page shows live thinking progress (`thinking · ~N tokens`),
   hooks, background tasks, rate limits and any other stream event, instead of
   hiding everything but text and tools. Claude's per-second `thinking_tokens`

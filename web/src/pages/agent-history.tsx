@@ -399,6 +399,20 @@ function EventView({ item, startedAt, live }: { item: LlmRecordEvent; startedAt?
         {time}
         <div className="min-w-0 flex-1 space-y-1.5">
           {blocks.map((block, i) => {
+            if (block.type === "text" && typeof block.text === "string" && block.text) {
+              // A user turn on stdin: the prompt, or a message passed on mid-run.
+              const text = block.text;
+              return text.length > 400 ? (
+                <Collapsible key={i} icon={<User className="h-3 w-3" />} title={`User turn · ${text.length} chars · ${text.slice(0, 80)}`}>
+                  <Pre text={text} />
+                </Collapsible>
+              ) : (
+                <div key={i} className="flex items-start gap-2 rounded-lg border border-primary/30 bg-primary/5 px-3 py-2 text-sm">
+                  <User className="mt-0.5 h-3.5 w-3.5 shrink-0 text-primary" />
+                  <span className="whitespace-pre-wrap">{text}</span>
+                </div>
+              );
+            }
             if (block.type !== "tool_result") return null;
             const text = resultText(block.content);
             const firstLine = text.split("\n").find((line) => line.trim()) ?? "";
