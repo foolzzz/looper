@@ -126,7 +126,7 @@ Single-page React app served from `web/dist/` on port 8767.
 | Page | Features |
 |---|---|
 | **Dashboard** | System status overview |
-| **Chat** | Real-time conversation with Manager, SSE streaming |
+| **Chat** | Talk to the global Manager, or to a running task's Planner (each message becomes a new step of that task); SSE streaming |
 | **Tasks** | Task list, status filters, create/start/stop/delete controls |
 | **Task Detail** | Config editor (init status), overview, pipeline DAG, sessions, conversation |
 | **Agents** | Agent config editor, session viewer with LLM traffic |
@@ -146,7 +146,8 @@ Single-page React app served from `web/dist/` on port 8767.
 | `/api/tasks/cancel` | POST | Cancel permanently |
 | `/api/tasks/delete` | POST | Delete (must be stopped) |
 | `/api/tasks/:id/activity/stream` | GET | SSE activity stream |
-| `/api/chat/send` | POST | Send chat message |
+| `/api/chat/send` | POST | Send chat message; `target` is the Manager (default) or `{kind: planner, task_id}` |
+| `/api/chat/targets` | GET | Chat targets: the Manager and every running task's Planner |
 | `/api/agent-configs` | GET | List agents |
 | `/api/agent-configs/:id` | GET/PUT | Agent config |
 | `/api/llm-profiles` | GET/POST | LLM profiles |

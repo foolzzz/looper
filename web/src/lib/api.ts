@@ -42,13 +42,39 @@ export async function fetchTasks(): Promise<TaskInfo[]> {
   return data.tasks ?? data;
 }
 
-export async function sendChat(text: string, sessionId?: string, messageId?: string): Promise<ChatSendResponse> {
+/** Who a chat message goes to: the global Manager or a running task's Planner. */
+export type ChatTarget = { kind: "manager" } | { kind: "planner"; task_id: string };
+
+export interface ChatTargetInfo {
+  kind: "manager" | "planner";
+  id: string;
+  task_id?: string;
+  requirement?: string;
+  status?: string;
+}
+
+export async function fetchChatTargets(): Promise<ChatTargetInfo[]> {
+  const res = await fetch(`${API_BASE}/chat/targets`);
+  if (!res.ok) throw new Error(`chat targets ${res.status}`);
+  const data = await res.json();
+  return data.targets ?? [];
+}
+
+export async function sendChat(
+  text: string,
+  sessionId?: string,
+  messageId?: string,
+  target: ChatTarget = { kind: "manager" },
+): Promise<ChatSendResponse> {
   const res = await fetch(`${API_BASE}/chat/send`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ text, session_id: sessionId, message_id: messageId }),
+    body: JSON.stringify({ text, session_id: sessionId, message_id: messageId, target }),
   });
-  if (!res.ok) throw new Error(`chat send ${res.status}`);
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.error || `chat send ${res.status}`);
+  }
   return res.json();
 }
 

@@ -112,6 +112,22 @@ class TaskRouter:
     def list_tasks(self) -> list[dict[str, Any]]:
         return [t.to_dict() for t in self._tasks.values()]
 
+    def running_planners(self) -> list[dict[str, Any]]:
+        """Tasks with a live Planner: the Planners a user can chat with."""
+        planners = []
+        for task_id, planner in self._planners.items():
+            task = self._tasks.get(task_id)
+            planners.append({
+                "task_id": task_id,
+                "planner_id": planner.agent_id,
+                "requirement": task.requirement if task else "",
+                "status": task.status if task else "running",
+            })
+        return planners
+
+    def has_planner(self, task_id: str) -> bool:
+        return task_id in self._planners
+
     async def _message_loop(self) -> None:
         assert self._bus is not None
         try:

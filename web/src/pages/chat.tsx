@@ -1,7 +1,18 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Send, Loader2, Bot, User, Plus, ChevronDown } from "lucide-react";
 import ReactMarkdown from "react-markdown";
-import { sendChat, saveChatMessage, fetchChatMessages, streamSSE, fetchAgentConfigs, type SSEEvent, type AgentConfig } from "@/lib/api";
+import {
+  sendChat,
+  saveChatMessage,
+  fetchChatMessages,
+  fetchChatTargets,
+  streamSSE,
+  fetchAgentConfigs,
+  type SSEEvent,
+  type AgentConfig,
+  type ChatTarget,
+  type ChatTargetInfo,
+} from "@/lib/api";
 import { cn } from "@/lib/utils";
 
 interface ChatMessage {
@@ -13,6 +24,23 @@ interface ChatMessage {
 }
 
 const STORAGE_SESSION_KEY = "loopx-chat-session-id";
+
+const MANAGER_TARGET: ChatTargetInfo = { kind: "manager", id: "manager" };
+
+function sendTargetOf(target: ChatTargetInfo): ChatTarget {
+  return target.kind === "planner" && target.task_id
+    ? { kind: "planner", task_id: target.task_id }
+    : { kind: "manager" };
+}
+
+// The Manager keeps the switchable session; each task's Planner has one fixed thread.
+function sessionFor(target: ChatTargetInfo): string {
+  return target.kind === "planner" ? `planner-${target.task_id}` : getOrCreateSessionId();
+}
+
+function truncate(text: string, max: number): string {
+  return text.length > max ? `${text.slice(0, max)}…` : text;
+}
 
 function getOrCreateSessionId(): string {
   const existing = localStorage.getItem(STORAGE_SESSION_KEY);
@@ -46,7 +74,8 @@ export function ChatPage() {
   const [sending, setSending] = useState(false);
   const [phase, setPhase] = useState("");
   const [agents, setAgents] = useState<AgentConfig[]>([]);
-  const [selectedAgent, setSelectedAgent] = useState("manager");
+  const [targets, setTargets] = useState<ChatTargetInfo[]>([MANAGER_TARGET]);
+  const [target, setTarget] = useState<ChatTargetInfo>(MANAGER_TARGET);
   const [agentDropdown, setAgentDropdown] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -57,9 +86,37 @@ export function ChatPage() {
   sessionIdRef.current = sessionId;
   const dbLoadedRef = useRef(false);
 
+  const refreshTargets = useCallback(() => {
+    fetchChatTargets().then(setTargets).catch(() => {});
+  }, []);
+
   useEffect(() => {
     fetchAgentConfigs().then(setAgents).catch(() => {});
-  }, []);
+    refreshTargets();
+  }, [refreshTargets]);
+
+  const managerConfig = agents.find((a) => a.agent_id === "manager");
+  const targetTitle = (t: ChatTargetInfo) =>
+    t.kind === "planner"
+      ? `Planner · ${truncate(t.requirement || t.task_id || "", 40)}`
+      : managerConfig?.display_name || "Manager";
+  const targetSubtitle = (t: ChatTargetInfo) =>
+    t.kind === "planner"
+      ? `${t.task_id} · ${t.status || "running"}`
+      : `global · ${managerConfig?.runtime || "claude-code"}`;
+  const plannerTargets = targets.filter((t) => t.kind === "planner");
+
+  const selectTarget = (next: ChatTargetInfo) => {
+    setAgentDropdown(false);
+    if (next.id === target.id) return;
+    cleanupRef.current?.();
+    cleanupRef.current = null;
+    setSending(false);
+    setPhase("");
+    setMessages([]);
+    setTarget(next);
+    setSessionId(sessionFor(next));
+  };
 
   const scrollToBottom = useCallback(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
@@ -142,7 +199,7 @@ export function ChatPage() {
     setMessages((prev) => [...prev, assistantMsg]);
 
     try {
-      const { events_url } = await sendChat(text, sessionId, userMsg.id);
+      const { events_url } = await sendChat(text, sessionId, userMsg.id, sendTargetOf(target));
 
       cleanupRef.current = streamSSE(
         events_url,
@@ -206,15 +263,20 @@ export function ChatPage() {
           );
         }
       );
-    } catch {
+    } catch (err) {
+      // fetch() rejects with a TypeError when the server is unreachable; other
+      // errors carry the server's reason, e.g. the task's Planner has stopped.
+      const reason =
+        err instanceof TypeError || !(err instanceof Error)
+          ? "Failed to connect. Is the server running?"
+          : err.message;
       setMessages((prev) =>
         prev.map((m) =>
-          m.id === assistantId
-            ? { ...m, content: "Failed to connect. Is the server running?", streaming: false }
-            : m
+          m.id === assistantId ? { ...m, content: reason, streaming: false } : m
         )
       );
       setSending(false);
+      if (target.kind === "planner") refreshTargets();
     }
   };
 
@@ -226,51 +288,47 @@ export function ChatPage() {
           <div className="relative">
             <button
               type="button"
-              onClick={() => setAgentDropdown(!agentDropdown)}
+              onClick={() => {
+                if (!agentDropdown) refreshTargets();
+                setAgentDropdown(!agentDropdown);
+              }}
               className="flex items-center gap-2 rounded-lg px-2 py-1.5 hover:bg-accent transition-colors"
             >
               <div className="flex h-7 w-7 items-center justify-center rounded-full bg-primary/10">
                 <Bot className="h-3.5 w-3.5 text-primary" />
               </div>
               <div className="text-left">
-                <p className="text-sm font-semibold leading-tight">
-                  {agents.find((a) => a.agent_id === selectedAgent)?.display_name || selectedAgent}
-                </p>
-                <p className="text-[10px] text-muted-foreground leading-tight">
-                  {agents.find((a) => a.agent_id === selectedAgent)?.role || "agent"} · {
-                    agents.find((a) => a.agent_id === selectedAgent)?.runtime || "claude-code"
-                  }
-                </p>
+                <p className="text-sm font-semibold leading-tight">{targetTitle(target)}</p>
+                <p className="text-[10px] text-muted-foreground leading-tight">{targetSubtitle(target)}</p>
               </div>
               <ChevronDown className="h-3.5 w-3.5 text-muted-foreground" />
             </button>
             {agentDropdown && (
-              <div className="absolute left-0 top-full z-50 mt-1 w-56 rounded-lg border border-border bg-popover shadow-lg">
-                {agents.filter((a) => a.enabled).map((agent) => (
+              <div className="absolute left-0 top-full z-50 mt-1 w-80 rounded-lg border border-border bg-popover shadow-lg">
+                {[MANAGER_TARGET, ...plannerTargets].map((t) => (
                   <button
-                    key={agent.agent_id}
+                    key={t.id}
                     type="button"
-                    onClick={() => {
-                      setSelectedAgent(agent.agent_id);
-                      setAgentDropdown(false);
-                    }}
+                    onClick={() => selectTarget(t)}
                     className={cn(
                       "flex w-full items-center gap-2 px-3 py-2 text-left text-sm hover:bg-accent transition-colors first:rounded-t-lg last:rounded-b-lg",
-                      agent.agent_id === selectedAgent && "bg-accent/50",
+                      t.id === target.id && "bg-accent/50",
                     )}
                   >
                     <Bot className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
                     <div className="min-w-0">
-                      <p className="font-medium truncate">{agent.display_name || agent.agent_id}</p>
-                      <p className="text-[10px] text-muted-foreground">{agent.role} · {agent.runtime}</p>
+                      <p className="font-medium truncate">{targetTitle(t)}</p>
+                      <p className="text-[10px] text-muted-foreground truncate">{targetSubtitle(t)}</p>
                     </div>
-                    {agent.agent_id === selectedAgent && (
+                    {t.id === target.id && (
                       <span className="ml-auto text-primary text-xs">✓</span>
                     )}
                   </button>
                 ))}
-                {agents.length === 0 && (
-                  <p className="px-3 py-2 text-xs text-muted-foreground">No agents</p>
+                {plannerTargets.length === 0 && (
+                  <p className="px-3 py-2 text-xs text-muted-foreground">
+                    No running tasks. A task&apos;s Planner appears here while it runs.
+                  </p>
                 )}
               </div>
             )}
@@ -278,14 +336,16 @@ export function ChatPage() {
 
           <div className="ml-auto flex items-center gap-3">
             <span className="font-mono text-[11px] text-muted-foreground">{sessionId}</span>
-            <button
-              type="button"
-              onClick={handleNewChat}
-              className="flex h-7 w-7 items-center justify-center rounded-md border border-border text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
-              title="New conversation"
-            >
-              <Plus className="h-3.5 w-3.5" />
-            </button>
+            {target.kind === "manager" && (
+              <button
+                type="button"
+                onClick={handleNewChat}
+                className="flex h-7 w-7 items-center justify-center rounded-md border border-border text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
+                title="New conversation"
+              >
+                <Plus className="h-3.5 w-3.5" />
+              </button>
+            )}
             <div className="flex items-center gap-1.5">
               <span className="relative flex h-2 w-2">
                 <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-success opacity-75" />
@@ -295,6 +355,11 @@ export function ChatPage() {
             </div>
           </div>
         </div>
+        {target.kind === "planner" && (
+          <p className="text-xs text-muted-foreground mt-1.5">
+            Each message becomes a new step of this task and runs after the steps in progress.
+          </p>
+        )}
         {phase && (
           <p className="text-xs text-muted-foreground mt-1.5 flex items-center gap-1">
             <Loader2 className="h-3 w-3 animate-spin" />

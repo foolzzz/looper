@@ -95,7 +95,7 @@ Planner 对每个 Step 的验证采用分级策略：
 
 | 类型 | 方向 | 用途 |
 |------|------|------|
-| `USER_MESSAGE` | Channel → Manager | 用户输入 |
+| `USER_MESSAGE` | Channel → Manager / Planner | 用户输入；发给 Planner 的消息成为该任务的新步骤 |
 | `AGENT_REPLY` | Manager → Channel | 回复用户 |
 | `TASK_REQUEST` | Manager → TaskRouter | 创建任务 |
 | `TASK_ACCEPTED` | Planner → TaskRouter → Manager | 任务已接受 |
@@ -120,7 +120,8 @@ Web 始终开启。Telegram 和 Lark 默认内置，不需要任何启动参数�
 ### Web
 
 - 控制台 Chat 页
-- `POST /api/chat/send` 发送消息
+- 对话对象可以是全局唯一的 Manager，也可以是某个运行中任务的 Planner（`GET /api/chat/targets` 列出）。Planner 自身不调用 LLM，收到的消息会作为该任务的新步骤，排在进行中的步骤之后交给 Worker 执行
+- `POST /api/chat/send` 发送消息，`target` 指定对话对象
 - SSE `GET /api/chat/events` 接收实时响应
 
 ### Telegram
