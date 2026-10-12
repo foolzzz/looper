@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import sys
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -455,3 +457,81 @@ class TestWorkerPool:
                 await bus.shutdown()
 
         asyncio.run(_run())
+
+    @pytest.mark.parametrize("message_type", [MessageType.WORK_ITEM, MessageType.VERIFY_REQUEST])
+    def test_result_returns_to_the_dispatching_planner(self, message_type: MessageType) -> None:
+        """Per-task Planners subscribe to planner-<task_id>, not the bare "planner" address."""
+
+        async def _run() -> MessageBus:
+            with tempfile.TemporaryDirectory() as tmp:
+                bus = MessageBus(runtime_root=Path(tmp))
+                pool = WorkerPool(config=WorkerConfig(), runtime_root=Path(tmp))
+                pool._bus = bus
+                pool._execute = AsyncMock(return_value={"status": "completed", "passed": True})  # type: ignore[method-assign]
+                await pool._run_worker(MessageEnvelope.create(
+                    source=planner_address("t1"),
+                    target=worker_address("w1"),
+                    message_type=message_type,
+                    payload={"task_id": "s1", "plan_id": "p1"},
+                ))
+                return bus
+
+        bus = asyncio.run(_run())
+        reply = bus.get_queue("planner-t1").get_nowait()
+        assert reply.payload["task_id"] == "s1"
+        assert bus.get_queue("planner").empty()
+
+
+def _fake_claude(tmp: Path, body: str) -> str:
+    """A stand-in `claude` binary that ignores its arguments."""
+    script = tmp / "fake-claude"
+    script.write_text(f"#!{sys.executable}\nimport json, os, sys, time\n{body}\n")
+    script.chmod(0o755)
+    return str(script)
+
+
+def _work_item(project_root: Path) -> MessageEnvelope:
+    return MessageEnvelope.create(
+        source=planner_address("t1"),
+        target=worker_address("w1"),
+        message_type=MessageType.WORK_ITEM,
+        payload={"task_id": "s1", "instruction": "x", "context": {"project_root": str(project_root)}},
+    )
+
+
+class TestWorkerSubprocess:
+    def test_long_stream_json_line_is_read(self) -> None:
+        # Claude's stream-json init line lists every tool and skill and can
+        # exceed asyncio's default 64 KiB line limit.
+        async def _run() -> dict[str, Any]:
+            with tempfile.TemporaryDirectory() as tmp:
+                claude = _fake_claude(Path(tmp), (
+                    "print(json.dumps({'type': 'system', 'tools': ['t' * 200_000]}))\n"
+                    "print(json.dumps({'type': 'result', 'result': json.dumps({'status': 'completed', 'summary': 'ok'})}))"
+                ))
+                pool = WorkerPool(config=WorkerConfig(claude_bin=claude), runtime_root=Path(tmp))
+                return await pool._execute(_work_item(Path(tmp)))
+
+        assert asyncio.run(_run())["status"] == "completed"
+
+    def test_subprocess_is_killed_when_reading_fails(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from loopx.agents.tiers import worker as worker_module
+
+        monkeypatch.setattr(worker_module, "STREAM_LINE_LIMIT", 1024)
+
+        async def _run() -> int:
+            with tempfile.TemporaryDirectory() as tmp:
+                pid_file = Path(tmp) / "pid"
+                claude = _fake_claude(Path(tmp), (
+                    f"open({str(pid_file)!r}, 'w').write(str(os.getpid()))\n"
+                    "print('x' * 4096, flush=True)\n"
+                    "time.sleep(30)"
+                ))
+                pool = WorkerPool(config=WorkerConfig(claude_bin=claude), runtime_root=Path(tmp))
+                with pytest.raises(ValueError):
+                    await pool._execute(_work_item(Path(tmp)))
+                return int(pid_file.read_text())
+
+        pid = asyncio.run(_run())
+        with pytest.raises(ProcessLookupError):
+            os.kill(pid, 0)
