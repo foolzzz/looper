@@ -15,6 +15,8 @@ export interface TaskInfo {
   phase: string;
   planner_id: string | null;
   correlation_id: string;
+  created_at: string;
+  completed_at: string | null;
 }
 
 export interface ChatSendResponse {
@@ -84,6 +86,15 @@ export async function cancelTask(taskId: string): Promise<void> {
     body: JSON.stringify({ task_id: taskId }),
   });
   if (!res.ok) throw new Error(`cancel ${res.status}`);
+}
+
+export async function deleteTask(taskId: string): Promise<void> {
+  const res = await fetch(`${API_BASE}/tasks/delete`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ task_id: taskId }),
+  });
+  if (!res.ok) throw new Error(`delete ${res.status}`);
 }
 
 export interface TaskDetail extends TaskInfo {

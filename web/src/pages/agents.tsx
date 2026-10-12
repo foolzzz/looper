@@ -338,6 +338,96 @@ function ProfileEditor({
   );
 }
 
+// --- System Prompt Editor ---
+
+type PromptMode = "replace" | "append";
+
+function SystemPromptEditor({
+  value,
+  onChange,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+}) {
+  const [mode, setMode] = useState<PromptMode>("replace");
+  const [appendText, setAppendText] = useState("");
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+  const lineCount = value.split("\n").length;
+
+  const handleApply = () => {
+    if (mode === "append" && appendText.trim()) {
+      onChange(value ? value + "\n\n" + appendText : appendText);
+      setAppendText("");
+    }
+  };
+
+  return (
+    <div className="space-y-2">
+      <div className="flex items-center justify-between">
+        <label className="text-xs font-medium text-muted-foreground">System Prompt</label>
+        <div className="flex items-center gap-2">
+          <span className="text-[10px] text-muted-foreground">
+            {value.length} chars · {lineCount} lines
+          </span>
+          <div className="flex rounded-md border border-border overflow-hidden">
+            {(["replace", "append"] as PromptMode[]).map((m) => (
+              <button
+                key={m}
+                type="button"
+                onClick={() => setMode(m)}
+                className={cn(
+                  "px-2 py-0.5 text-[10px] font-medium transition-colors",
+                  mode === m
+                    ? "bg-primary text-primary-foreground"
+                    : "text-muted-foreground hover:text-foreground",
+                )}
+              >
+                {m === "replace" ? "Replace" : "Append"}
+              </button>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      {mode === "replace" ? (
+        <textarea
+          ref={textareaRef}
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          rows={Math.max(12, Math.min(lineCount + 2, 40))}
+          className="w-full resize-y rounded-md border border-input bg-transparent p-3 text-sm text-foreground font-mono leading-relaxed placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+          placeholder="Enter system prompt..."
+        />
+      ) : (
+        <div className="space-y-2">
+          <div className="rounded-md border border-border bg-muted/20 p-3 max-h-[300px] overflow-y-auto">
+            <pre className="text-xs text-muted-foreground font-mono whitespace-pre-wrap">
+              {value || "(empty)"}
+            </pre>
+          </div>
+          <textarea
+            value={appendText}
+            onChange={(e) => setAppendText(e.target.value)}
+            rows={6}
+            className="w-full resize-y rounded-md border border-input bg-transparent p-3 text-sm text-foreground font-mono leading-relaxed placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+            placeholder="Text to append..."
+          />
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={handleApply}
+            disabled={!appendText.trim()}
+            className="w-full"
+          >
+            Append to Prompt
+          </Button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // --- Config Tab ---
 
 function ConfigTab({
@@ -626,18 +716,10 @@ function ConfigTab({
         </button>
       </div>
 
-      <div className="space-y-1.5">
-        <div className="flex items-center justify-between">
-          <label className="text-xs font-medium text-muted-foreground">System Prompt</label>
-          <span className="text-[10px] text-muted-foreground">{form.system_prompt.length} chars</span>
-        </div>
-        <textarea
-          value={form.system_prompt}
-          onChange={(e) => setForm({ ...form, system_prompt: e.target.value })}
-          className="w-full min-h-[160px] resize-y rounded-md border border-input bg-transparent p-3 text-sm text-foreground font-mono leading-relaxed placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-          placeholder="Enter system prompt..."
-        />
-      </div>
+      <SystemPromptEditor
+        value={form.system_prompt}
+        onChange={(v) => setForm({ ...form, system_prompt: v })}
+      />
 
       <Button onClick={handleSave} disabled={saving} className="w-full">
         {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}

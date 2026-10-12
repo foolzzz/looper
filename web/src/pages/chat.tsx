@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Send, Loader2, Bot, User, Plus } from "lucide-react";
+import { Send, Loader2, Bot, User, Plus, ChevronDown } from "lucide-react";
 import ReactMarkdown from "react-markdown";
-import { sendChat, saveChatMessage, fetchChatMessages, streamSSE, type SSEEvent } from "@/lib/api";
+import { sendChat, saveChatMessage, fetchChatMessages, streamSSE, fetchAgentConfigs, type SSEEvent, type AgentConfig } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
 interface ChatMessage {
@@ -45,6 +45,9 @@ export function ChatPage() {
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
   const [phase, setPhase] = useState("");
+  const [agents, setAgents] = useState<AgentConfig[]>([]);
+  const [selectedAgent, setSelectedAgent] = useState("manager");
+  const [agentDropdown, setAgentDropdown] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const cleanupRef = useRef<(() => void) | null>(null);
@@ -53,6 +56,10 @@ export function ChatPage() {
   const sessionIdRef = useRef(sessionId);
   sessionIdRef.current = sessionId;
   const dbLoadedRef = useRef(false);
+
+  useEffect(() => {
+    fetchAgentConfigs().then(setAgents).catch(() => {});
+  }, []);
 
   const scrollToBottom = useCallback(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
@@ -215,13 +222,60 @@ export function ChatPage() {
     <div className="flex h-full flex-col">
       <div className="border-b border-border px-5 py-3">
         <div className="flex items-center gap-2">
-          <div className="flex h-7 w-7 items-center justify-center rounded-full bg-primary/10">
-            <Bot className="h-3.5 w-3.5 text-primary" />
+          {/* Agent selector */}
+          <div className="relative">
+            <button
+              type="button"
+              onClick={() => setAgentDropdown(!agentDropdown)}
+              className="flex items-center gap-2 rounded-lg px-2 py-1.5 hover:bg-accent transition-colors"
+            >
+              <div className="flex h-7 w-7 items-center justify-center rounded-full bg-primary/10">
+                <Bot className="h-3.5 w-3.5 text-primary" />
+              </div>
+              <div className="text-left">
+                <p className="text-sm font-semibold leading-tight">
+                  {agents.find((a) => a.agent_id === selectedAgent)?.display_name || selectedAgent}
+                </p>
+                <p className="text-[10px] text-muted-foreground leading-tight">
+                  {agents.find((a) => a.agent_id === selectedAgent)?.role || "agent"} · {
+                    agents.find((a) => a.agent_id === selectedAgent)?.runtime || "claude-code"
+                  }
+                </p>
+              </div>
+              <ChevronDown className="h-3.5 w-3.5 text-muted-foreground" />
+            </button>
+            {agentDropdown && (
+              <div className="absolute left-0 top-full z-50 mt-1 w-56 rounded-lg border border-border bg-popover shadow-lg">
+                {agents.filter((a) => a.enabled).map((agent) => (
+                  <button
+                    key={agent.agent_id}
+                    type="button"
+                    onClick={() => {
+                      setSelectedAgent(agent.agent_id);
+                      setAgentDropdown(false);
+                    }}
+                    className={cn(
+                      "flex w-full items-center gap-2 px-3 py-2 text-left text-sm hover:bg-accent transition-colors first:rounded-t-lg last:rounded-b-lg",
+                      agent.agent_id === selectedAgent && "bg-accent/50",
+                    )}
+                  >
+                    <Bot className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
+                    <div className="min-w-0">
+                      <p className="font-medium truncate">{agent.display_name || agent.agent_id}</p>
+                      <p className="text-[10px] text-muted-foreground">{agent.role} · {agent.runtime}</p>
+                    </div>
+                    {agent.agent_id === selectedAgent && (
+                      <span className="ml-auto text-primary text-xs">✓</span>
+                    )}
+                  </button>
+                ))}
+                {agents.length === 0 && (
+                  <p className="px-3 py-2 text-xs text-muted-foreground">No agents</p>
+                )}
+              </div>
+            )}
           </div>
-          <div>
-            <h1 className="text-lg font-semibold leading-tight">Manager Agent</h1>
-            <p className="text-[11px] text-muted-foreground leading-tight">管家 · Claude Code session</p>
-          </div>
+
           <div className="ml-auto flex items-center gap-3">
             <span className="font-mono text-[11px] text-muted-foreground">{sessionId}</span>
             <button
@@ -249,7 +303,11 @@ export function ChatPage() {
         )}
       </div>
 
-      <div ref={scrollRef} className="flex-1 overflow-y-auto px-5 py-4 space-y-4">
+      <div
+        ref={scrollRef}
+        className="flex-1 overflow-y-auto px-5 py-4 space-y-4"
+        onClick={() => agentDropdown && setAgentDropdown(false)}
+      >
         {messages.length === 0 && (
           <div className="flex h-full items-center justify-center">
             <div className="text-center">
