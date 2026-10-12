@@ -202,6 +202,10 @@ class AgentHTTPServer:
             await self._handle_list_tasks(writer)
         elif path == "/api/chat/send" and method == "POST":
             await self._handle_chat_send(body, writer)
+        elif path == "/api/chat/messages" and method == "GET":
+            await self._handle_chat_messages(query, writer)
+        elif path == "/api/chat/messages" and method == "POST":
+            await self._handle_chat_save_message(body, writer)
         elif path == "/api/chat/events" and method == "GET":
             await self._handle_sse_events(query, writer)
         elif path == "/api/tasks/cancel" and method == "POST":
@@ -242,16 +246,21 @@ class AgentHTTPServer:
 
     async def _handle_status(self, writer: asyncio.StreamWriter) -> None:
         agents = self._supervisor.agent_status()
-        tasks = self._task_router.list_tasks()
         web_health = self._web_adapter.healthcheck()
+        try:
+            from ..db.tasks import list_tasks as db_list_tasks
+            tasks = await db_list_tasks(limit=200)
+        except Exception:
+            logger.exception("DB unavailable for status task counts")
+            tasks = []
         status = {
             "status": "running",
             "agents": agents,
             "tasks": {
                 "total": len(tasks),
-                "running": sum(1 for t in tasks if t["status"] == "running"),
-                "pending": sum(1 for t in tasks if t["status"] == "pending"),
-                "completed": sum(1 for t in tasks if t["status"] == "completed"),
+                "running": sum(1 for t in tasks if t.get("status") == "running"),
+                "pending": sum(1 for t in tasks if t.get("status") == "pending"),
+                "completed": sum(1 for t in tasks if t.get("status") == "completed"),
             },
             "channels": {"web": web_health},
         }
@@ -259,8 +268,27 @@ class AgentHTTPServer:
         await writer.drain()
 
     async def _handle_list_tasks(self, writer: asyncio.StreamWriter) -> None:
-        tasks = self._task_router.list_tasks()
-        writer.write(_json_response(HTTP_200, {"tasks": tasks}))
+        try:
+            from ..db.tasks import list_tasks as db_list_tasks
+            tasks = await db_list_tasks(limit=50)
+            result = []
+            for t in tasks:
+                result.append({
+                    "task_id": t.get("id", ""),
+                    "requirement": t.get("requirement", ""),
+                    "goal_id": t.get("goal_id", ""),
+                    "status": t.get("status", "pending"),
+                    "planner_id": t.get("planner_id"),
+                    "correlation_id": t.get("correlation_id", ""),
+                    "created_at": t.get("created_at"),
+                    "completed_at": t.get("completed_at"),
+                })
+        except Exception:
+            logger.exception("DB unavailable for list_tasks")
+            writer.write(_json_response(HTTP_500, {"error": "database unavailable"}))
+            await writer.drain()
+            return
+        writer.write(_json_response(HTTP_200, {"tasks": _serialize(result)}))
         await writer.drain()
 
     async def _handle_chat_send(
@@ -279,14 +307,71 @@ class AgentHTTPServer:
             await writer.drain()
             return
 
+        session_id = data.get("session_id", "")
+        message_id = data.get("message_id", "")
+
+        if session_id and message_id:
+            try:
+                from ..db.chat import save_message
+                await save_message(
+                    session_id=session_id, message_id=message_id,
+                    role="user", content=text,
+                )
+            except Exception:
+                logger.debug("failed to persist user chat message", exc_info=True)
+
         result = await self._web_adapter.handle_user_message(
             text=text,
-            session_id=data.get("session_id"),
+            session_id=session_id or data.get("session_id"),
             goal_id=data.get("goal_id"),
             language=data.get("language", "zh"),
             attachments=data.get("attachments"),
         )
         writer.write(_json_response(HTTP_200, result))
+        await writer.drain()
+
+    async def _handle_chat_messages(
+        self, query: dict[str, str], writer: asyncio.StreamWriter,
+    ) -> None:
+        session_id = query.get("session_id", "")
+        if not session_id:
+            writer.write(_json_response(HTTP_400, {"error": "session_id is required"}))
+            await writer.drain()
+            return
+        try:
+            from ..db.chat import list_messages
+            messages = await list_messages(session_id)
+            writer.write(_json_response(HTTP_200, {"messages": _serialize(messages)}))
+        except Exception:
+            writer.write(_json_response(HTTP_200, {"messages": []}))
+        await writer.drain()
+
+    async def _handle_chat_save_message(
+        self, body: bytes, writer: asyncio.StreamWriter,
+    ) -> None:
+        try:
+            data = json.loads(body.decode("utf-8"))
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            writer.write(_json_response(HTTP_400, {"error": "invalid JSON"}))
+            await writer.drain()
+            return
+        session_id = data.get("session_id", "")
+        message_id = data.get("message_id", "")
+        role = data.get("role", "")
+        content = data.get("content", "")
+        if not all([session_id, message_id, role]):
+            writer.write(_json_response(HTTP_400, {"error": "session_id, message_id, role required"}))
+            await writer.drain()
+            return
+        try:
+            from ..db.chat import save_message
+            await save_message(
+                session_id=session_id, message_id=message_id,
+                role=role, content=content,
+            )
+        except Exception:
+            logger.debug("failed to save chat message", exc_info=True)
+        writer.write(_json_response(HTTP_200, {"ok": True}))
         await writer.drain()
 
     async def _handle_sse_events(
@@ -360,19 +445,34 @@ class AgentHTTPServer:
     ) -> None:
         try:
             from ..db.tasks import get_task_with_steps
-            result = await get_task_with_steps(task_id)
+            raw = await get_task_with_steps(task_id)
         except Exception:
-            result = None
-            for t in self._task_router.list_tasks():
-                if t.get("task_id") == task_id:
-                    result = t
-                    break
+            logger.exception("DB unavailable for task_detail %s", task_id)
+            writer.write(_json_response(HTTP_500, {"error": "database unavailable"}))
+            await writer.drain()
+            return
 
-        if result is None:
+        if not raw:
             writer.write(_json_response(HTTP_404, {"error": "task not found"}))
             await writer.drain()
             return
 
+        result = {
+            "task_id": raw.get("id", ""),
+            "requirement": raw.get("requirement", ""),
+            "goal_id": raw.get("goal_id", ""),
+            "status": raw.get("status", "pending"),
+            "planner_id": raw.get("planner_id"),
+            "correlation_id": raw.get("correlation_id", ""),
+            "project_root": raw.get("project_root", ""),
+            "origin_channel_id": raw.get("origin_channel_id", ""),
+            "result_summary": raw.get("result_summary"),
+            "error": raw.get("error"),
+            "created_at": raw.get("created_at"),
+            "updated_at": raw.get("updated_at"),
+            "completed_at": raw.get("completed_at"),
+            "steps": raw.get("steps", []),
+        }
         writer.write(_json_response(HTTP_200, _serialize(result)))
         await writer.drain()
 

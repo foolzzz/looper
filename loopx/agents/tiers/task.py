@@ -29,11 +29,7 @@ from .planner import PlannerAgent
 
 logger = logging.getLogger(__name__)
 
-try:
-    from ...db import activity as db_activity, tasks as db_tasks
-    _HAS_DB = True
-except Exception:
-    _HAS_DB = False
+from ...db import activity as db_activity, tasks as db_tasks
 
 MAX_CONCURRENT_TASKS = 3
 
@@ -155,18 +151,17 @@ class TaskRouter:
         )
         self._tasks[task_id] = task
 
-        if _HAS_DB:
-            try:
-                await db_tasks.create_task(
-                    task_id=task_id,
-                    requirement=task.requirement,
-                    goal_id=task.goal_id,
-                    project_root=task.project_root,
-                    correlation_id=task.correlation_id,
-                    origin_channel_id=task.origin_channel_id,
-                )
-            except Exception:
-                logger.exception("failed to persist task %s", task_id)
+        try:
+            await db_tasks.create_task(
+                task_id=task_id,
+                requirement=task.requirement,
+                goal_id=task.goal_id,
+                project_root=task.project_root,
+                correlation_id=task.correlation_id,
+                origin_channel_id=task.origin_channel_id,
+            )
+        except Exception:
+            logger.exception("failed to persist task %s", task_id)
 
         if self._semaphore.locked():
             task.status = "pending"
@@ -188,13 +183,12 @@ class TaskRouter:
         await planner.start(self._bus)
         task.status = "running"
 
-        if _HAS_DB:
-            try:
-                await db_tasks.update_task_status(
-                    task.task_id, "running", planner_id=planner.agent_id,
-                )
-            except Exception:
-                logger.exception("failed to persist assign for task %s", task.task_id)
+        try:
+            await db_tasks.update_task_status(
+                task.task_id, "running", planner_id=planner.agent_id,
+            )
+        except Exception:
+            logger.exception("failed to persist assign for task %s", task.task_id)
 
         await self._bus.publish(MessageEnvelope.create(
             source=TASK_ROUTER_ADDRESS,
@@ -225,17 +219,16 @@ class TaskRouter:
         if not task:
             return
 
-        if _HAS_DB:
-            try:
-                await db_tasks.update_task_status(task_id, status)
-                await db_activity.insert_activity(
-                    task_id=task_id,
-                    worker="planner",
-                    kind="phase",
-                    summary=envelope.payload.get("summary", status),
-                )
-            except Exception:
-                logger.exception("failed to persist status for task %s", task_id)
+        try:
+            await db_tasks.update_task_status(task_id, status)
+            await db_activity.insert_activity(
+                task_id=task_id,
+                worker="planner",
+                kind="phase",
+                summary=envelope.payload.get("summary", status),
+            )
+        except Exception:
+            logger.exception("failed to persist status for task %s", task_id)
 
         if self._broadcaster:
             self._broadcaster.publish(task_id, {
@@ -288,7 +281,7 @@ class TaskRouter:
         if task and task.status not in ("completed", "failed", "cancelled"):
             task.status = "completed"
 
-        if _HAS_DB and task:
+        if task:
             try:
                 await db_tasks.update_task_status(task_id, task.status)
             except Exception:

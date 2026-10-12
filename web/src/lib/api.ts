@@ -35,17 +35,45 @@ export async function fetchStatus(): Promise<SystemStatus> {
 export async function fetchTasks(): Promise<TaskInfo[]> {
   const res = await fetch(`${API_BASE}/tasks`);
   if (!res.ok) throw new Error(`tasks ${res.status}`);
-  return res.json();
+  const data = await res.json();
+  return data.tasks ?? data;
 }
 
-export async function sendChat(text: string, sessionId?: string): Promise<ChatSendResponse> {
+export async function sendChat(text: string, sessionId?: string, messageId?: string): Promise<ChatSendResponse> {
   const res = await fetch(`${API_BASE}/chat/send`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ text, session_id: sessionId }),
+    body: JSON.stringify({ text, session_id: sessionId, message_id: messageId }),
   });
   if (!res.ok) throw new Error(`chat send ${res.status}`);
   return res.json();
+}
+
+export interface DbChatMessage {
+  message_id: string;
+  role: string;
+  content: string;
+  created_at: string;
+}
+
+export async function fetchChatMessages(sessionId: string): Promise<DbChatMessage[]> {
+  const res = await fetch(`${API_BASE}/chat/messages?session_id=${encodeURIComponent(sessionId)}`);
+  if (!res.ok) return [];
+  const data = await res.json();
+  return data.messages || [];
+}
+
+export async function saveChatMessage(params: {
+  session_id: string;
+  message_id: string;
+  role: string;
+  content: string;
+}): Promise<void> {
+  await fetch(`${API_BASE}/chat/messages`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(params),
+  }).catch(() => {});
 }
 
 export async function cancelTask(taskId: string): Promise<void> {

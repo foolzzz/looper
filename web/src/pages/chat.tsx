@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Send, Loader2, Bot, User, Plus } from "lucide-react";
 import ReactMarkdown from "react-markdown";
-import { sendChat, streamSSE, type SSEEvent } from "@/lib/api";
+import { sendChat, saveChatMessage, fetchChatMessages, streamSSE, type SSEEvent } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
 interface ChatMessage {
@@ -41,17 +41,17 @@ function saveMessages(sessionId: string, messages: ChatMessage[]) {
 
 export function ChatPage() {
   const [sessionId, setSessionId] = useState(getOrCreateSessionId);
-  const [messages, setMessages] = useState<ChatMessage[]>(() => loadMessages(getOrCreateSessionId()));
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
   const [phase, setPhase] = useState("");
   const scrollRef = useRef<HTMLDivElement>(null);
   const cleanupRef = useRef<(() => void) | null>(null);
-  const skipSaveRef = useRef(false);
   const messagesRef = useRef(messages);
   messagesRef.current = messages;
   const sessionIdRef = useRef(sessionId);
   sessionIdRef.current = sessionId;
+  const dbLoadedRef = useRef(false);
 
   const scrollToBottom = useCallback(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
@@ -59,26 +59,37 @@ export function ChatPage() {
 
   useEffect(scrollToBottom, [messages, scrollToBottom]);
 
+  // Load messages from DB on mount (or session change)
   useEffect(() => {
-    if (skipSaveRef.current) {
-      skipSaveRef.current = false;
-      return;
-    }
+    dbLoadedRef.current = false;
+    fetchChatMessages(sessionId).then((dbMsgs) => {
+      if (dbMsgs.length > 0) {
+        const loaded: ChatMessage[] = dbMsgs.map((m) => ({
+          id: m.message_id,
+          role: m.role as "user" | "assistant" | "system",
+          content: m.content,
+          timestamp: new Date(m.created_at).getTime(),
+          streaming: false,
+        }));
+        setMessages(loaded);
+      } else {
+        const local = loadMessages(sessionId);
+        if (local.length > 0) setMessages(local);
+      }
+      dbLoadedRef.current = true;
+    }).catch(() => {
+      const local = loadMessages(sessionId);
+      if (local.length > 0) setMessages(local);
+      dbLoadedRef.current = true;
+    });
+  }, [sessionId]);
+
+  // Keep localStorage as cache
+  useEffect(() => {
     if (messages.length > 0) {
       saveMessages(sessionId, messages);
     }
   }, [messages, sessionId]);
-
-  // Save on page refresh / tab close
-  useEffect(() => {
-    const onBeforeUnload = () => {
-      if (messagesRef.current.length > 0) {
-        saveMessages(sessionIdRef.current, messagesRef.current);
-      }
-    };
-    window.addEventListener("beforeunload", onBeforeUnload);
-    return () => window.removeEventListener("beforeunload", onBeforeUnload);
-  }, []);
 
   const handleNewChat = () => {
     cleanupRef.current?.();
@@ -86,7 +97,6 @@ export function ChatPage() {
     const newId = `session-${crypto.randomUUID().slice(0, 8)}`;
     localStorage.setItem(STORAGE_SESSION_KEY, newId);
     setSessionId(newId);
-    skipSaveRef.current = true;
     setMessages([]);
     setSending(false);
     setPhase("");
@@ -120,7 +130,7 @@ export function ChatPage() {
     setMessages((prev) => [...prev, assistantMsg]);
 
     try {
-      const { events_url } = await sendChat(text, sessionId);
+      const { events_url } = await sendChat(text, sessionId, userMsg.id);
 
       cleanupRef.current = streamSSE(
         events_url,
@@ -135,29 +145,42 @@ export function ChatPage() {
                 )
               );
               break;
-            case "answer.final":
+            case "answer.final": {
+              const finalText = (event.payload as any).text || "";
               setMessages((prev) =>
                 prev.map((m) =>
                   m.id === assistantId
-                    ? {
-                        ...m,
-                        content: (event.payload as any).text || m.content || "Done.",
-                        streaming: false,
-                      }
+                    ? { ...m, content: finalText || m.content || "Done.", streaming: false }
                     : m
                 )
               );
+              saveChatMessage({
+                session_id: sessionIdRef.current,
+                message_id: assistantId,
+                role: "assistant",
+                content: finalText,
+              });
               setSending(false);
               setPhase("");
               break;
+            }
             case "agent.phase":
               setPhase((event.payload as any).label || "");
               break;
             case "turn.completed":
             case "turn.failed":
-              setMessages((prev) =>
-                prev.map((m) => (m.id === assistantId ? { ...m, streaming: false } : m))
-              );
+              setMessages((prev) => {
+                const msg = prev.find((m) => m.id === assistantId);
+                if (msg && msg.content) {
+                  saveChatMessage({
+                    session_id: sessionIdRef.current,
+                    message_id: assistantId,
+                    role: "assistant",
+                    content: msg.content,
+                  });
+                }
+                return prev.map((m) => (m.id === assistantId ? { ...m, streaming: false } : m));
+              });
               setSending(false);
               setPhase("");
               break;
