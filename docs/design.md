@@ -68,6 +68,11 @@ Task 是系统的一等实体，代表一个完整的用户需求。
 Planner 对每个 Step 的验证采用分级策略：
 
 - **简单任务**（`complexity: "simple"`）：Worker 完成后自动标记 verified
+- **Worker 怎样才算完成**：三个条件都满足才算，任何一条不满足，这一步都判失败：
+  - Claude 正常结束（`result` 事件的 `subtype` 为 `success`，达到最大轮数不算）；
+  - 最后一条消息以 JSON 报告结尾，且其中 `status` 为 `completed`；
+  - 报告里 `changed_files` 列出的文件都存在，`deleted_files` 列出的文件都已删除。
+- **Reviewer**：必须给出布尔类型的 `passed`，纯文本不算通过
 - **复杂任务**（`complexity: "complex"`）：Worker 完成后 Planner 另起 Reviewer Worker 交叉验证
 
 ---
