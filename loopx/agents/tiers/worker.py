@@ -18,7 +18,6 @@ from typing import Any
 
 from ..bus import MessageBus
 from ..message import (
-    PLANNER_ADDRESS,
     AgentAddress,
     MessageEnvelope,
     MessageType,
@@ -32,6 +31,9 @@ logger = logging.getLogger(__name__)
 
 MAX_POOL_SIZE = 4
 WORKER_TIMEOUT_SEC = 600
+# One stream-json line can carry the full tool/skill list or a large tool result;
+# asyncio's default 64 KiB line limit fails the worker on those.
+STREAM_LINE_LIMIT = 16 * 1024 * 1024
 
 
 @dataclass
@@ -223,7 +225,8 @@ class WorkerPool:
         result_type = MessageType.VERIFY_RESULT if is_verify else MessageType.WORK_RESULT
         await self._bus.publish(MessageEnvelope.create(
             source=worker_address(worker_id),
-            target=PLANNER_ADDRESS,
+            # Reply to the dispatching per-task Planner (planner-<task_id>).
+            target=envelope.source,
             message_type=result_type,
             payload={
                 "task_id": task_id,
@@ -282,6 +285,7 @@ class WorkerPool:
                 cwd=project_root,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                limit=STREAM_LINE_LIMIT,
             )
             logger.info("worker %s subprocess started (pid=%s)", worker_id, process.pid)
         except OSError as exc:
@@ -372,8 +376,11 @@ class WorkerPool:
         try:
             await asyncio.wait_for(_read_stream(), timeout=self._config.timeout_sec)
             await process.wait()
-        except asyncio.TimeoutError:
-            process.kill()
+        except BaseException:
+            # Never leave Claude running unsupervised once the worker gives up.
+            if process.returncode is None:
+                process.kill()
+                await process.wait()
             raise
 
         return_code = process.returncode or 0

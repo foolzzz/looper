@@ -251,6 +251,7 @@ class TaskRouter:
         ))
 
         if status in ("completed", "failed"):
+            task.status = status  # teardown persists this; it would default to "completed"
             await self._teardown_task(task_id)
             await self._try_dequeue()
 
