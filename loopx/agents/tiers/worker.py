@@ -51,6 +51,13 @@ async def _load_run_limits() -> tuple[int, int]:
     return int(config.get("timeout_seconds") or 0), int(config.get("max_turns") or 0)
 
 
+async def _write_user_turn(stdin: asyncio.StreamWriter, text: str) -> None:
+    """One user message in Claude's stream-json input format."""
+    line = json.dumps({"type": "user", "message": {"role": "user", "content": text}}, ensure_ascii=False)
+    stdin.write(line.encode("utf-8") + b"\n")
+    await stdin.drain()
+
+
 def extract_report(text: str, key: str) -> dict[str, Any] | None:
     """Return the last top-level JSON object in ``text`` that has ``key``.
 
@@ -181,6 +188,8 @@ class WorkerPool:
         self._running = False
         self._workers_dir = runtime_root / ".local" / "workers"
         self._workers_dir.mkdir(parents=True, exist_ok=True)
+        # stdin of each running Claude, open until its result: more user turns go here.
+        self._inputs: dict[str, asyncio.StreamWriter] = {}
 
     @property
     def agent_id(self) -> str:
@@ -233,6 +242,7 @@ class WorkerPool:
         # The pool takes delivery of work sent to any worker-<id> address.
         self._bus.subscribe_topic(MessageType.WORK_ITEM, self._on_work_item_topic, consumes=True)
         self._bus.subscribe_topic(MessageType.VERIFY_REQUEST, self._on_verify_topic, consumes=True)
+        self._bus.subscribe_topic(MessageType.WORKER_INPUT, self._on_worker_input_topic, consumes=True)
 
         try:
             async for envelope in self._bus.subscribe("worker-pool"):
@@ -250,6 +260,42 @@ class WorkerPool:
 
     def _on_verify_topic(self, envelope: MessageEnvelope) -> bool:
         return self._on_work_item_topic(envelope)
+
+    def _on_worker_input_topic(self, envelope: MessageEnvelope) -> bool:
+        if not self._running:
+            return False
+        asyncio.get_event_loop().create_task(self._deliver_input(envelope))
+        return True
+
+    async def _deliver_input(self, envelope: MessageEnvelope) -> None:
+        """Pass a user turn to a running worker and tell the sender whether it landed."""
+        assert self._bus is not None
+        delivered = await self.send_input(envelope.target.agent_id, str(envelope.payload.get("text", "")))
+        await self._bus.publish(MessageEnvelope.create(
+            source=envelope.target,
+            target=envelope.source,
+            message_type=MessageType.WORKER_INPUT_RESULT,
+            payload={"delivered": delivered},
+            correlation_id=envelope.correlation_id,
+            reply_to=envelope.message_id,
+        ))
+
+    def accepts_input(self, worker_id: str) -> bool:
+        """True while the worker's Claude run still reads user turns."""
+        return worker_id in self._inputs
+
+    async def send_input(self, worker_id: str, text: str) -> bool:
+        """Add a user turn to a running worker; Claude reads it at its next turn."""
+        stdin = self._inputs.get(worker_id)
+        if stdin is None or not text.strip():
+            return False
+        try:
+            await _write_user_turn(stdin, text)
+        except (BrokenPipeError, ConnectionResetError, RuntimeError):
+            self._inputs.pop(worker_id, None)
+            return False
+        logger.info("worker %s received a user turn (%d chars)", worker_id, len(text))
+        return True
 
     async def _dispatch(self, envelope: MessageEnvelope) -> None:
         worker_id = envelope.target.agent_id
@@ -366,13 +412,16 @@ class WorkerPool:
             "--output-format", "stream-json",
             # Partial deltas keep the run's heartbeat current while Claude thinks.
             "--include-partial-messages",
+            # The prompt and any later user turns arrive on stdin, so the
+            # Planner can step in while the run is going.
+            "--input-format", "stream-json",
+            "--replay-user-messages",
             "--dangerously-skip-permissions",
             *(["--max-turns", str(max_turns)] if max_turns > 0 else []),
-            prompt,
         ]
 
         if parent_task_id:
-            cmd_display = " ".join(command[:-1]) + f" '<prompt {len(prompt)} chars>'"
+            cmd_display = " ".join(command) + f"  (prompt on stdin, {len(prompt)} chars)"
             try:
                 await db_activity.insert_activity(
                     task_id=parent_task_id,
@@ -398,6 +447,7 @@ class WorkerPool:
             process = await asyncio.create_subprocess_exec(
                 *command,
                 cwd=work_dir,
+                stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
@@ -407,6 +457,19 @@ class WorkerPool:
             error = f"Cannot start Claude Code: {exc}"
             await recorder.finish(output_text=None, result_event=None, error=error)
             return {"status": "failed", "error": error}
+
+        assert process.stdin is not None
+        try:
+            await _write_user_turn(process.stdin, prompt)
+            self._inputs[worker_id] = process.stdin
+        except (BrokenPipeError, ConnectionResetError):
+            # Claude exited before reading; its output decides the outcome.
+            logger.warning("worker %s: Claude closed stdin before the prompt was sent", worker_id)
+
+        def _end_input() -> None:
+            # Without this Claude would wait on stdin for another user turn.
+            if self._inputs.pop(worker_id, None) is not None and not process.stdin.is_closing():
+                process.stdin.close()
 
         result_event: dict[str, Any] | None = None
 
@@ -464,6 +527,7 @@ class WorkerPool:
 
                 elif event_type == "result":
                     result_event = event
+                    _end_input()
                     cost = event.get("total_cost_usd", event.get("cost_usd"))
                     duration_ms = event.get("duration_ms")
                     if parent_task_id:
@@ -488,8 +552,10 @@ class WorkerPool:
 
         try:
             await asyncio.wait_for(_read_stream(), timeout=run_timeout if run_timeout > 0 else None)
+            _end_input()
             await process.wait()
         except BaseException as exc:
+            _end_input()
             # Never leave Claude running unsupervised once the worker gives up.
             if process.returncode is None:
                 process.kill()

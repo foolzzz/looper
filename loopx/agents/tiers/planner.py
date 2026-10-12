@@ -36,6 +36,8 @@ from ...db.tasks import update_task_phase
 
 MAX_STEPS = 8
 MAX_CONCURRENT_WORKERS = 4
+# How long to wait for the worker pool to confirm a forwarded user turn.
+WORKER_INPUT_TIMEOUT = 5.0
 
 
 @dataclass
@@ -424,15 +426,28 @@ class PlannerAgent:
         self._running = False
 
     async def _handle_user_message(self, envelope: MessageEnvelope) -> None:
-        """Queue a chat message as a new step; the planner itself has no LLM."""
+        """Pass a chat message to the running worker, or queue it as a new step.
+
+        The planner itself has no LLM. While a step's worker is running, the
+        message becomes the worker's next user turn; otherwise (or if the
+        worker has just finished) it becomes a step after the work in flight.
+        """
         assert self._bus is not None
         plan = self._plan
+        text = str(envelope.payload.get("text", "")).strip()
         if plan is None or plan.status == "planning":
             reply = "任务还在规划中，请稍后再发。"
         elif plan.status not in ("executing", "verifying"):
             reply = f"任务已结束（{plan.status}），不能再追加步骤。"
         else:
-            reply = await self._append_user_step(plan, str(envelope.payload.get("text", "")).strip())
+            running = next((s for s in plan.steps if s.status == "dispatched" and s.worker_id), None)
+            if running is not None and await self._forward_to_worker(running, text, envelope):
+                reply = (
+                    f"已转给正在执行第 {running.index + 1} 步的 {running.worker_id}，"
+                    "它会在下一个回合处理。"
+                )
+            else:
+                reply = await self._append_user_step(plan, text)
 
         await self._bus.publish(MessageEnvelope.create(
             source=self.agent_address,
@@ -443,6 +458,36 @@ class PlannerAgent:
             reply_to=envelope.message_id,
             metadata={"origin_channel_id": envelope.metadata.get("origin_channel_id")},
         ))
+
+    async def _forward_to_worker(self, step: PlanStep, text: str, envelope: MessageEnvelope) -> bool:
+        """Ask the worker pool to add ``text`` as the running worker's next user turn."""
+        assert self._bus is not None and step.worker_id is not None
+        message = (
+            "A message from the user, passed on by the Planner while you work on this step. "
+            "Take it into account, then continue:\n\n" + text
+        )
+        try:
+            ack = await self._bus.request(MessageEnvelope.create(
+                source=self.agent_address,
+                target=worker_address(step.worker_id),
+                message_type=MessageType.WORKER_INPUT,
+                payload={"text": message, "task_id": step.step_id},
+                correlation_id=envelope.correlation_id,
+            ), timeout=WORKER_INPUT_TIMEOUT)
+        except asyncio.TimeoutError:
+            return False
+        if not ack.payload.get("delivered"):
+            return False
+        try:
+            await db_activity.insert_activity(
+                task_id=self._task_id,
+                worker=self.agent_id,
+                kind="phase",
+                summary=f"User message passed to {step.worker_id} (step {step.index + 1}): {text[:80]}",
+            )
+        except Exception:
+            logger.exception("failed to record forwarded message for task %s", self._task_id)
+        return True
 
     async def _append_user_step(self, plan: TaskPlan, text: str) -> str:
         # Run after every unfinished step so a correction never races the work

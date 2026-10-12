@@ -375,7 +375,7 @@ export function ChatPage() {
         </div>
         {target.kind === "planner" && (
           <p className="text-xs text-muted-foreground mt-1.5">
-            Each message becomes a new step of this task and runs after the steps in progress.
+            Messages go to the Worker running this task's current step, which reads them at its next turn; with no Worker running, they become a new step.
           </p>
         )}
         {phase && (

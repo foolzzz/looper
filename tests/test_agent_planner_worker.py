@@ -802,3 +802,97 @@ class TestJudgeResult:
         result = judge_result(event, work_dir=tmp_path, is_verify=True)
         assert result["passed"] is False
         assert "error_max_turns" in result["findings"][0]
+
+
+
+_LISTENING_CLAUDE = (
+    "first = json.loads(sys.stdin.readline())\n"
+    "print(json.dumps({'type': 'system', 'subtype': 'init', 'session_id': 's'}), flush=True)\n"
+    "line = sys.stdin.readline()\n"
+    "if line:\n"
+    "    text = json.loads(line)['message']['content']\n"
+    "    print(json.dumps({'type': 'user', 'message': {'content': text}}), flush=True)\n"
+    "    answer = 'got: ' + text\n"
+    "else:\n"
+    "    answer = 'no input'\n"
+    "print(json.dumps({'type': 'assistant', 'message': {'content': [{'type': 'text', 'text': answer}]}}), flush=True)\n"
+    "print(json.dumps({'type': 'result', 'subtype': 'success', 'is_error': False, "
+    "'result': json.dumps({'status': 'completed', 'changed_files': {}, 'summary': answer})}), flush=True)\n"
+    "sys.stdin.read()\n"
+)
+
+
+class TestWorkerInput:
+    """A running worker reads further user turns on stdin (stream-json input)."""
+
+    def test_prompt_goes_through_stdin(self, agent_db: Any) -> None:
+        async def _run() -> list[str]:
+            with tempfile.TemporaryDirectory() as tmp:
+                claude = _fake_claude(Path(tmp), (
+                    "first = json.loads(sys.stdin.readline())\n"
+                    "assert first['type'] == 'user' and 'Task: x' in first['message']['content']\n"
+                    "print(json.dumps({'type': 'result', 'subtype': 'success', 'is_error': False, "
+                    "'result': json.dumps({'status': 'completed', 'changed_files': {}, 'summary': 'ok'})}), flush=True)\n"
+                    "sys.stdin.read()"
+                ))
+                pool = WorkerPool(config=WorkerConfig(claude_bin=claude), runtime_root=Path(tmp))
+                result = await pool._execute(_work_item(Path(tmp)))
+                assert result["status"] == "completed"
+                return agent_db.start_record.await_args.kwargs["metadata"]["command"]
+
+        command = asyncio.run(_run())
+        assert "--input-format" in command and command[command.index("--input-format") + 1] == "stream-json"
+        assert "--replay-user-messages" in command
+        assert not any("Task: x" in arg for arg in command)  # the prompt is not an argument
+
+    def test_message_reaches_a_running_worker(self, agent_db: Any) -> None:
+        async def _run() -> tuple[bool, dict[str, Any], bool]:
+            with tempfile.TemporaryDirectory() as tmp:
+                pool = WorkerPool(config=WorkerConfig(claude_bin=_fake_claude(Path(tmp), _LISTENING_CLAUDE)),
+                                  runtime_root=Path(tmp))
+                run = asyncio.create_task(pool._execute(_work_item(Path(tmp))))
+                for _ in range(200):
+                    if pool.accepts_input("w1"):
+                        break
+                    await asyncio.sleep(0.02)
+                delivered = await pool.send_input("w1", "also add tests")
+                result = await asyncio.wait_for(run, 20)
+                late = await pool.send_input("w1", "too late")
+                return delivered, result, late
+
+        delivered, result, late = asyncio.run(_run())
+        assert delivered
+        assert result["status"] == "completed"
+        assert "got: also add tests" in result["summary"]
+        assert not late  # the run has ended; nothing reads its stdin any more
+
+    def test_worker_input_over_the_bus(self, agent_db: Any) -> None:
+        async def _run() -> tuple[bool, bool]:
+            with tempfile.TemporaryDirectory() as tmp:
+                bus = MessageBus(runtime_root=Path(tmp))
+                pool = WorkerPool(config=WorkerConfig(claude_bin=_fake_claude(Path(tmp), _LISTENING_CLAUDE)),
+                                  runtime_root=Path(tmp))
+                await pool.start(bus)
+                await asyncio.sleep(0)
+                await bus.publish(_work_item(Path(tmp)))
+                for _ in range(200):
+                    if pool.accepts_input("w1"):
+                        break
+                    await asyncio.sleep(0.02)
+
+                def ask(text: str) -> MessageEnvelope:
+                    return MessageEnvelope.create(
+                        source=planner_address("t1"), target=worker_address("w1"),
+                        message_type=MessageType.WORKER_INPUT, payload={"text": text},
+                    )
+
+                first = await bus.request(ask("hello"), timeout=5)
+                unknown = await bus.request(MessageEnvelope.create(
+                    source=planner_address("t1"), target=worker_address("nobody"),
+                    message_type=MessageType.WORKER_INPUT, payload={"text": "x"},
+                ), timeout=5)
+                await pool.stop()
+                await bus.shutdown()
+                return first.payload["delivered"], unknown.payload["delivered"]
+
+        assert asyncio.run(_run()) == (True, False)

@@ -36,17 +36,21 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
 - Dispatches steps to Worker agents
 - Monitors step completion and runs verification
 - Reports task status back to TaskRouter
-- Takes chat messages from the Chat page. The Planner has no LLM of its own:
-  each message becomes a new step that runs after the steps in progress, and
-  the Planner replies with the step number
+- Takes chat messages from the Chat page. The Planner has no LLM of its own.
+  While a step's Worker is running, the message is passed to that Worker as its
+  next user turn (`WORKER_INPUT`, confirmed by `WORKER_INPUT_RESULT`). Otherwise,
+  or if the Worker has just finished, it becomes a new step after the steps in
+  progress.
 
 ### WorkerPool (`loopx/agents/tiers/worker.py`)
 
 - Manages a pool of Worker processes
 - Each Worker runs Claude CLI as a subprocess with `stream-json` output
 - Real-time event streaming (tool_use, text) captured to activity table
-- Command: `claude --print --verbose --output-format stream-json --include-partial-messages --dangerously-skip-permissions`,
-  plus `--max-turns N` when the `worker` config sets `max_turns` above 0
+- Command: `claude --print --verbose --output-format stream-json --include-partial-messages --input-format stream-json --replay-user-messages --dangerously-skip-permissions`,
+  plus `--max-turns N` when the `worker` config sets `max_turns` above 0. The
+  prompt is the first user turn on stdin; stdin stays open so the Planner can
+  add user turns mid-run, and closes when the result arrives
 - Claude is stopped when a run takes longer than the `worker` config's
   `timeout_seconds` in total (default 86400, 0 = no limit). The step fails
   with `Claude ran longer than the N s limit (timeout_seconds)`. Partial
