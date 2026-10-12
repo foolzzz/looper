@@ -94,6 +94,23 @@ CREATE TABLE IF NOT EXISTS agent_configs (
     updated_at       TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+-- One-time data migrations; schema.sql itself runs on every startup.
+CREATE TABLE IF NOT EXISTS schema_migrations (
+    name        TEXT PRIMARY KEY,
+    applied_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- Once: move the worker's old seeded limit (600 s) to the new default. A value
+-- set later, including 600, stays.
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM schema_migrations WHERE name = 'worker_timeout_default_86400') THEN
+        UPDATE agent_configs SET timeout_seconds = 86400
+        WHERE agent_id = 'worker' AND timeout_seconds = 600;
+        INSERT INTO schema_migrations (name) VALUES ('worker_timeout_default_86400');
+    END IF;
+END $$;
+
 CREATE TABLE IF NOT EXISTS llm_records (
     id               BIGSERIAL PRIMARY KEY,
     agent_id         TEXT NOT NULL,

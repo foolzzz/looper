@@ -39,7 +39,13 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
 - Manages a pool of Worker processes
 - Each Worker runs Claude CLI as a subprocess with `stream-json` output
 - Real-time event streaming (tool_use, text) captured to activity table
-- Command: `claude --print --verbose --output-format stream-json --dangerously-skip-permissions --max-turns 50`
+- Command: `claude --print --verbose --output-format stream-json --include-partial-messages --dangerously-skip-permissions`,
+  plus `--max-turns N` when the `worker` config sets `max_turns` above 0
+- Claude is stopped when a run takes longer than the `worker` config's
+  `timeout_seconds` in total (default 86400, 0 = no limit). The step fails
+  with `Claude ran longer than the N s limit (timeout_seconds)`. Partial
+  deltas only keep the run's heartbeat (`last_output_at`) current; they do
+  not extend the limit
 - A step counts as completed only when all of these hold; anything else fails the
   step with the reason in `error`:
   - the run's `result` event has `subtype: success`, so hitting max turns fails;
@@ -172,7 +178,10 @@ Agent behavior is configured via the `agent_configs` table (editable in the dash
 - **model**: Model override (or use LLM profile)
 - **permission_mode**: `bypassPermissions` (default for workers)
 - **max_turns**: Maximum conversation turns (0 = unlimited)
-- **timeout_seconds**: Execution timeout
+- **timeout_seconds**: Execution timeout. For workers it limits one Claude
+  run's total time (default 86400, 0 = no limit). Workers read
+  `timeout_seconds` and `max_turns` for every run, so an edit applies to the
+  next step
 - **max_concurrency**: Worker pool size
 
 ## Channels

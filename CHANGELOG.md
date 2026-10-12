@@ -18,6 +18,16 @@ To learn how to use these features, read the [usage guide](docs/fork/usage.md).
 
 ### Changed
 
+- Agent workers apply the `worker` row of `agent_configs` that the dashboard
+  Agents page edits, read for every run. `timeout_seconds` limits one worker
+  run's total time (0 = no limit); output does not extend it. The default
+  rises from 600 s to 86400 s, and on startup a worker row still at the old
+  seeded 600 moves to 86400; any other value stays. Before, the limit was a
+  hard-coded 600 s and the field had no effect. A run over the limit fails
+  with `Claude ran longer than the N s limit (timeout_seconds)` instead of
+  `worker timeout`. `max_turns` above 0 passes `--max-turns`; 0 sets no limit
+  (it was always 50). Workers run Claude with `--include-partial-messages`,
+  so thinking keeps the run's heartbeat current.
 - The dashboard has an agent history page (`#history/<agent>`). It is opened
   from History on each Agent Timeline row, from the Agents page's new Runs tab
   and from the Chat page. It shows each Claude run's launch command, full
