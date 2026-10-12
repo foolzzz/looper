@@ -28,6 +28,12 @@ To learn how to use these features, read the [usage guide](docs/fork/usage.md).
   `worker timeout`. `max_turns` above 0 passes `--max-turns`; 0 sets no limit
   (it was always 50). Workers run Claude with `--include-partial-messages`,
   so thinking keeps the run's heartbeat current.
+- Agent tasks run in an explicit work directory (`work_dir`). There is no default.
+  Creating a task requires one (absolute or `~/...`), and a task without one
+  cannot start. The Manager takes it from the conversation or asks for it, and
+  the Worker creates it if missing. The second `project_root` field, which the
+  dashboard never set (so its Work Directory had no effect and dashboard tasks
+  failed to start), is folded into `work_dir` and dropped.
 - The dashboard has an agent history page (`#history/<agent>`). It is opened
   from History on each Agent Timeline row, from the Agents page's new Runs tab
   and from the Chat page. It shows each Claude run's launch command, full

@@ -139,7 +139,7 @@ Single-page React app served from `web/dist/` on port 8767.
 |---|---|---|
 | `/api/status` | GET | System health |
 | `/api/tasks` | GET | List tasks |
-| `/api/tasks/create` | POST | Create task (init status) |
+| `/api/tasks/create` | POST | Create task (init status); `work_dir` is required |
 | `/api/tasks/:id` | GET | Task detail with steps |
 | `/api/tasks/:id/config` | PUT | Update task config (init only) |
 | `/api/tasks/start` | POST | Start/resume task |
@@ -217,6 +217,11 @@ cancelled ← running  (permanent termination)
 ```
 
 - **init**: Created from UI, user reviews and edits config before starting
+- **Work directory**: every task runs in a directory you choose (`work_dir`, an
+  absolute path or one starting with `~/`); there is no default. It is required
+  when creating a task, a task without one cannot start, and it is created if
+  missing. When the Manager creates a task from chat, it takes the directory from
+  the conversation and asks you if you have not said one.
 - **stopped**: Paused, state preserved, can resume
 - **cancelled**: Permanently terminated, cannot resume
 

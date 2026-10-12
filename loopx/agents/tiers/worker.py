@@ -82,7 +82,7 @@ def _verify_failed(finding: str) -> dict[str, Any]:
 def judge_result(
     result_event: dict[str, Any] | None,
     *,
-    project_root: Path,
+    work_dir: Path,
     is_verify: bool,
 ) -> dict[str, Any]:
     """Decide a step's outcome from Claude's stream-json ``result`` event.
@@ -125,7 +125,7 @@ def judge_result(
 
     def on_disk(path: Any) -> bool:
         candidate = Path(str(path))
-        return (candidate if candidate.is_absolute() else project_root / candidate).exists()
+        return (candidate if candidate.is_absolute() else work_dir / candidate).exists()
 
     missing = [str(path) for path in changed if not on_disk(path)]
     still_present = [str(path) for path in deleted if on_disk(path)]
@@ -147,7 +147,6 @@ def judge_result(
 @dataclass
 class WorkerConfig:
     claude_bin: str = "claude"
-    work_dir: Path = field(default_factory=lambda: Path.cwd())
     sandbox: str = "workspace-write"
     max_workers: int = MAX_POOL_SIZE
 
@@ -338,7 +337,21 @@ class WorkerPool:
         worker_id = envelope.target.agent_id
         parent_task_id = payload.get("parent_task_id", "")
         context = payload.get("context", {})
-        project_root = context.get("project_root", str(self._config.work_dir))
+        work_dir = str(context.get("work_dir") or "")
+        # A task runs only in the directory the user chose; there is no default.
+        problem = None
+        if not work_dir:
+            problem = "No work directory for this step; set the task's work directory"
+        else:
+            try:
+                Path(work_dir).mkdir(parents=True, exist_ok=True)
+            except OSError as exc:
+                problem = f"Cannot create work directory {work_dir}: {exc}"
+        if problem:
+            logger.error("worker %s: %s", worker_id, problem)
+            if is_verify:
+                return {"passed": False, "findings": [problem], "summary": problem}
+            return {"status": "failed", "error": problem}
 
         if is_verify:
             prompt = self._build_verify_prompt(payload)
@@ -366,7 +379,7 @@ class WorkerPool:
                     worker=worker_id,
                     kind="tool_use",
                     summary=f"$ {cmd_display}",
-                    metadata={"cwd": project_root},
+                    metadata={"cwd": work_dir},
                 )
             except Exception:
                 pass
@@ -375,16 +388,16 @@ class WorkerPool:
             agent_id=worker_id,
             task_id=parent_task_id,
             command=command,
-            cwd=project_root,
+            cwd=work_dir,
             input_text=prompt,
         )
         await recorder.start()
 
-        logger.info("worker %s starting subprocess: %s (cwd=%s)", worker_id, command[0], project_root)
+        logger.info("worker %s starting subprocess: %s (cwd=%s)", worker_id, command[0], work_dir)
         try:
             process = await asyncio.create_subprocess_exec(
                 *command,
-                cwd=project_root,
+                cwd=work_dir,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
@@ -502,7 +515,7 @@ class WorkerPool:
             await recorder.finish(output_text=final_text, result_event=result_event, error=error)
             return {"status": "failed", "error": error, "stderr": stderr[:500]}
 
-        outcome = judge_result(result_event, project_root=Path(project_root), is_verify=is_verify)
+        outcome = judge_result(result_event, work_dir=Path(work_dir), is_verify=is_verify)
         # A review that says "not passed" is still a successful run; only work
         # failures are the run's error.
         error = outcome.get("error") if not is_verify and outcome.get("status") == "failed" else None

@@ -162,7 +162,7 @@ class TaskRequestPayload(TypedDict, total=False):
     requirement: str
     original_user_text: str
     user_language: str
-    project_root: str
+    work_dir: str  # absolute directory the task runs in
     priority: str  # "P0" - "P3"
     constraints: list[str]
 

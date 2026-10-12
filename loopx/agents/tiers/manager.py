@@ -21,6 +21,7 @@ from typing import Any
 from ..broadcast import Broadcaster
 from ..bus import MessageBus
 from ..claude_cli import ClaudeRunRecorder, iter_lines
+from .task import resolve_work_dir
 from ..message import (
     MANAGER_ADDRESS,
     TASK_ROUTER_ADDRESS,
@@ -33,6 +34,17 @@ logger = logging.getLogger(__name__)
 
 from ...db import activity as db_activity
 from ...db import agent_configs as db_agent_configs
+
+# Appended to the (editable) system prompt on every call: the task JSON is
+# parsed by code, so its required fields are owned by code too.
+TASK_DIRECTORY_RULE = """\
+## Task working directory (required)
+Every task runs in a directory the user chooses; there is no default. Before
+asking the user to confirm a task, make sure you know that directory as an
+absolute path (or one starting with ~/). If the user has not said where the
+work should happen, ask them. Never pick a directory yourself. Put it in the
+task JSON as "work_dir".
+"""
 
 DEFAULT_SYSTEM_PROMPT = """\
 You are the Manager Agent (管家) for LoopX, an autonomous multi-agent programming system.
@@ -60,6 +72,7 @@ Instead, follow this flow:
   "action": "task_request",
   "goal_id": "<short-kebab-id>",
   "structured_requirement": "<clear one-paragraph requirement incorporating clarifications>",
+  "work_dir": "<absolute directory the task runs in, e.g. ~/projects/tetris>",
   "priority": "P2",
   "acknowledgment": "<brief acknowledgment in user's language>"
 }
@@ -226,6 +239,15 @@ class ManagerAgent:
             clarification = parsed.get("clarification_text", "")
             await self._send_reply(envelope, clarification)
         elif parsed.get("action") == "task_request":
+            try:
+                work_dir = resolve_work_dir(parsed.get("work_dir"))
+            except ValueError as exc:
+                # No default directory: ask instead of creating the task.
+                await self._send_reply(
+                    envelope,
+                    f"这个任务要在哪个目录里做？请告诉我完整路径（例如 ~/projects/xxx）。（{exc}）",
+                )
+                return
             await self._bus.publish(MessageEnvelope.create(
                 source=MANAGER_ADDRESS,
                 target=TASK_ROUTER_ADDRESS,
@@ -235,7 +257,7 @@ class ManagerAgent:
                     "requirement": parsed.get("structured_requirement", text),
                     "original_user_text": text,
                     "user_language": envelope.payload.get("language", "zh"),
-                    "project_root": str(self._config.work_dir),
+                    "work_dir": work_dir,
                     "priority": parsed.get("priority", "P2"),
                     "constraints": parsed.get("constraints", []),
                 },
@@ -313,7 +335,7 @@ class ManagerAgent:
             "--output-format", "stream-json",
             "--verbose",
             "--include-partial-messages",  # stream the reply as it is written
-            "--append-system-prompt", self._system_prompt,
+            "--append-system-prompt", f"{self._system_prompt}\n\n{TASK_DIRECTORY_RULE}",
         ]
 
         if self._session_id:

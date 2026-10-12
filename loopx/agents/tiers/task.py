@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -34,12 +35,27 @@ from ...db import activity as db_activity, tasks as db_tasks
 MAX_CONCURRENT_TASKS = 3
 
 
+def resolve_work_dir(raw: str | None) -> str:
+    """The absolute directory a task runs in; there is no default.
+
+    ``~`` is expanded and the path normalized. Raises ``ValueError`` when the
+    directory is missing or relative, so callers can ask for a real one.
+    """
+    text = (raw or "").strip()
+    if not text:
+        raise ValueError("a work directory is required")
+    path = os.path.expanduser(text)
+    if not os.path.isabs(path):
+        raise ValueError(f"work directory must be an absolute path, got {text!r}")
+    return os.path.normpath(path)
+
+
 @dataclass
 class Task:
     task_id: str
     requirement: str
     goal_id: str
-    project_root: str
+    work_dir: str
     status: str = "pending"  # "pending" | "assigned" | "running" | "completed" | "failed" | "cancelled"
     planner_id: str | None = None
     correlation_id: str = ""
@@ -165,7 +181,7 @@ class TaskRouter:
             task_id=task_id,
             requirement=payload.get("requirement", ""),
             goal_id=payload.get("goal_id", ""),
-            project_root=payload.get("project_root", ""),
+            work_dir=payload.get("work_dir", ""),
             correlation_id=envelope.correlation_id,
             origin_channel_id=envelope.metadata.get("origin_channel_id", ""),
         )
@@ -176,7 +192,7 @@ class TaskRouter:
                 task_id=task_id,
                 requirement=task.requirement,
                 goal_id=task.goal_id,
-                project_root=task.project_root,
+                work_dir=task.work_dir,
                 correlation_id=task.correlation_id,
                 origin_channel_id=task.origin_channel_id,
             )
@@ -363,7 +379,7 @@ class TaskRouter:
             task_id=task_id,
             requirement=db_row["requirement"],
             goal_id=db_row.get("goal_id", ""),
-            project_root=db_row.get("project_root", ""),
+            work_dir=db_row.get("work_dir", ""),
             correlation_id=db_row.get("correlation_id", ""),
             origin_channel_id=db_row.get("origin_channel_id", ""),
         )
@@ -376,7 +392,7 @@ class TaskRouter:
             payload={
                 "requirement": task.requirement,
                 "goal_id": task.goal_id,
-                "project_root": task.project_root,
+                "work_dir": task.work_dir,
             },
             correlation_id=task.correlation_id,
         )

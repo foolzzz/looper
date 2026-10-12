@@ -497,18 +497,23 @@ class AgentHTTPServer:
 
         import uuid
         from ..db.tasks import create_task
+        from .tiers.task import resolve_work_dir
+
+        try:
+            work_dir = resolve_work_dir(data.get("work_dir"))
+        except ValueError as exc:
+            writer.write(_json_response(HTTP_400, {"error": str(exc)}))
+            await writer.drain()
+            return
 
         task_id = f"task-{uuid.uuid4().hex[:12]}"
-        work_dir = data.get("work_dir", "")
         config = data.get("config", {})
         goal_id = data.get("goal_id", "")
-        project_root = data.get("project_root", "")
 
         result = await create_task(
             task_id=task_id,
             requirement=requirement,
             goal_id=goal_id,
-            project_root=project_root,
             work_dir=work_dir,
             config=config,
             status="init",
@@ -543,10 +548,20 @@ class AgentHTTPServer:
             await writer.drain()
             return
 
+        work_dir = None
+        if "work_dir" in data:
+            from .tiers.task import resolve_work_dir
+            try:
+                work_dir = resolve_work_dir(data.get("work_dir"))
+            except ValueError as exc:
+                writer.write(_json_response(HTTP_400, {"error": str(exc)}))
+                await writer.drain()
+                return
+
         ok = await update_task_config(
             task_id,
             requirement=data.get("requirement"),
-            work_dir=data.get("work_dir"),
+            work_dir=work_dir,
             config=data.get("config"),
         )
         if not ok:
@@ -643,8 +658,19 @@ class AgentHTTPServer:
             await writer.drain()
             return
 
-        from .bus import MessageBus
+        from ..db.tasks import get_task
         from .message import TASK_ROUTER_ADDRESS, MessageEnvelope, MessageType
+
+        task = await get_task(task_id)
+        if task is None:
+            writer.write(_json_response(HTTP_404, {"error": "task not found"}))
+            await writer.drain()
+            return
+        if not (task.get("work_dir") or "").strip():
+            # There is no default directory; a task without one cannot run.
+            writer.write(_json_response(HTTP_400, {"error": "set the task's work directory before starting it"}))
+            await writer.drain()
+            return
 
         bus = self._supervisor.bus
         envelope = MessageEnvelope.create(
@@ -721,7 +747,6 @@ class AgentHTTPServer:
             "phase": raw.get("phase", "pending"),
             "planner_id": raw.get("planner_id"),
             "correlation_id": raw.get("correlation_id", ""),
-            "project_root": raw.get("project_root", ""),
             "work_dir": raw.get("work_dir", ""),
             "config": raw.get("config", {}),
             "origin_channel_id": raw.get("origin_channel_id", ""),

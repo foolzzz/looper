@@ -132,28 +132,34 @@ export async function stopTask(taskId: string): Promise<void> {
   if (!res.ok) throw new Error(`stop ${res.status}`);
 }
 
+/** Throw with the server's reason when it gives one. */
+async function failed(res: Response, label: string): Promise<never> {
+  const data = await res.json().catch(() => ({}));
+  throw new Error(data.error || `${label} ${res.status}`);
+}
+
 export async function startTask(taskId: string): Promise<void> {
   const res = await fetch(`${API_BASE}/tasks/start`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ task_id: taskId }),
   });
-  if (!res.ok) throw new Error(`start ${res.status}`);
+  if (!res.ok) await failed(res, "start");
 }
 
 export async function createTask(params: {
   requirement: string;
-  work_dir?: string;
+  /** Required: the directory the task runs in (absolute or ~/...). */
+  work_dir: string;
   config?: Record<string, unknown>;
   goal_id?: string;
-  project_root?: string;
 }): Promise<{ task_id: string; status: string; created_at: string }> {
   const res = await fetch(`${API_BASE}/tasks/create`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(params),
   });
-  if (!res.ok) throw new Error(`create task ${res.status}`);
+  if (!res.ok) await failed(res, "create task");
   return res.json();
 }
 
@@ -166,11 +172,10 @@ export async function updateTaskConfig(
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(fields),
   });
-  if (!res.ok) throw new Error(`update task config ${res.status}`);
+  if (!res.ok) await failed(res, "update task config");
 }
 
 export interface TaskDetail extends TaskInfo {
-  project_root: string;
   work_dir: string;
   config: Record<string, unknown>;
   origin_channel_id: string;

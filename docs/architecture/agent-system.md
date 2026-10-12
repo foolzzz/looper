@@ -18,6 +18,12 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
 
 ### TaskRouter (`loopx/agents/tiers/task.py`)
 
+- Every task runs in its `work_dir`, the directory the user chose. There is no
+  default: `resolve_work_dir` requires an absolute path (or `~/...`), creating
+  or starting a task without one is refused, and the Manager asks for it when
+  the conversation has not named it. The Worker creates the directory if it is
+  missing and runs Claude there.
+
 - Per-task lifecycle management with concurrency control (`MAX_CONCURRENT_TASKS=3`)
 - Creates/destroys PlannerAgent instances per task
 - Handles task lifecycle: start, stop (pause), restart (resume), cancel
