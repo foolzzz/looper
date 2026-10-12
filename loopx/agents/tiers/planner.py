@@ -369,6 +369,7 @@ class PlannerAgent:
             message_type=MessageType.VERIFY_REQUEST,
             payload={
                 "task_id": step.step_id,
+                "parent_task_id": self._task_id,
                 "plan_id": plan.plan_id,
                 "work_result": step.result or {},
                 "acceptance_criteria": step.acceptance_criteria,
