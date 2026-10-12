@@ -18,6 +18,9 @@ To learn how to use these features, read the [usage guide](docs/fork/usage.md).
 
 ### Changed
 
+- The agent Chat streams the Manager's reply as Claude writes it
+  (`--include-partial-messages`) instead of showing it all at once. Output
+  from Claude subagents is no longer mixed into the reply.
 - `loopx serve` no longer accepts `--enable-telegram`, `--enable-lark` or
   `--lark-app-id`; the flags had no effect. Telegram and Lark are built in and
   are enabled and configured on the dashboard Settings page, which saves them
