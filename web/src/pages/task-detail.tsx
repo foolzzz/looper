@@ -144,6 +144,13 @@ function formatTime(iso: string | null) {
   }
 }
 
+/** Wall-clock time (24h, seconds) for rows within one task; the date is in the tooltip. */
+function formatClock(iso: string | null) {
+  if (!iso) return "--:--:--";
+  const date = new Date(iso);
+  return Number.isNaN(date.getTime()) ? iso : date.toLocaleTimeString([], { hour12: false });
+}
+
 function formatDuration(start: string | null, end: string | null) {
   if (!start) return "-";
   const s = new Date(start).getTime();
@@ -534,6 +541,12 @@ function AgentTimeline({ taskId }: { taskId: string }) {
               >
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-2">
+                    <span
+                      className="font-mono text-xs tabular-nums opacity-70"
+                      title={formatTime(first.created_at)}
+                    >
+                      {formatClock(first.created_at)}
+                    </span>
                     <Bot className="h-4 w-4" />
                     <span className="text-sm font-medium">{agent}</span>
                     <Badge variant="outline" className="text-[10px] py-0 h-4">
@@ -580,12 +593,15 @@ function AgentTimeline({ taskId }: { taskId: string }) {
                         ev.kind === "error" ? "bg-destructive/10" : "hover:bg-white/5",
                       )}
                     >
+                      <span
+                        className="shrink-0 font-mono text-[11px] leading-4 tabular-nums text-muted-foreground"
+                        title={formatTime(ev.created_at)}
+                      >
+                        {formatClock(ev.created_at)}
+                      </span>
                       {activityKindIcon(ev.kind)}
                       <div className="min-w-0 flex-1">
                         <div className="flex items-center gap-2">
-                          <span className="font-mono text-[10px] text-muted-foreground/60">
-                            {formatTime(ev.created_at)}
-                          </span>
                           <Badge variant="outline" className="text-[9px] py-0 h-3.5">
                             {ev.kind}
                           </Badge>
