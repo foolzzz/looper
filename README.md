@@ -195,7 +195,9 @@ Agent behavior is configurable from the dashboard:
 - **model**: Model override (or inherit from LLM profile)
 - **permission_mode**: `bypassPermissions` for autonomous workers
 - **max_turns**: Conversation turn limit (0 = unlimited)
-- **timeout_seconds**: Execution timeout per task
+- **timeout_seconds**: Execution timeout per task. For workers it limits one
+  Claude run's total time (default 86400, 0 = no limit); output does not
+  extend it. Workers apply both limits from the next step on
 - **max_concurrency**: Worker pool size
 
 ## Task Lifecycle
