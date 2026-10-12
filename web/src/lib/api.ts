@@ -97,6 +97,24 @@ export async function deleteTask(taskId: string): Promise<void> {
   if (!res.ok) throw new Error(`delete ${res.status}`);
 }
 
+export async function stopTask(taskId: string): Promise<void> {
+  const res = await fetch(`${API_BASE}/tasks/stop`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ task_id: taskId }),
+  });
+  if (!res.ok) throw new Error(`stop ${res.status}`);
+}
+
+export async function startTask(taskId: string): Promise<void> {
+  const res = await fetch(`${API_BASE}/tasks/start`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ task_id: taskId }),
+  });
+  if (!res.ok) throw new Error(`start ${res.status}`);
+}
+
 export interface TaskDetail extends TaskInfo {
   project_root: string;
   origin_channel_id: string;

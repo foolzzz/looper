@@ -35,6 +35,8 @@ class MessageType(str, Enum):
 
     # Task lifecycle
     TASK_CANCEL = "task_cancel"
+    TASK_STOP = "task_stop"
+    TASK_RESTART = "task_restart"
 
     # Verification (方案 C)
     VERIFY_REQUEST = "verify_request"

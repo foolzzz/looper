@@ -212,6 +212,10 @@ class AgentHTTPServer:
             await self._handle_sse_events(query, writer)
         elif path == "/api/tasks/cancel" and method == "POST":
             await self._handle_task_cancel(body, writer)
+        elif path == "/api/tasks/stop" and method == "POST":
+            await self._handle_task_stop(body, writer)
+        elif path == "/api/tasks/start" and method == "POST":
+            await self._handle_task_start(body, writer)
         elif path == "/api/tasks/delete" and method == "POST":
             await self._handle_task_delete(body, writer)
         elif (m := self._RE_TASK_ACTIVITY_STREAM.match(path)) and method == "GET":
@@ -447,6 +451,66 @@ class AgentHTTPServer:
         writer.write(_json_response(HTTP_200, {"cancelled": task_id}))
         await writer.drain()
 
+    async def _handle_task_stop(
+        self, body: bytes, writer: asyncio.StreamWriter
+    ) -> None:
+        try:
+            data = json.loads(body.decode("utf-8"))
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            writer.write(_json_response(HTTP_400, {"error": "invalid JSON body"}))
+            await writer.drain()
+            return
+
+        task_id = data.get("task_id", "").strip()
+        if not task_id:
+            writer.write(_json_response(HTTP_400, {"error": "task_id is required"}))
+            await writer.drain()
+            return
+
+        from .bus import MessageBus
+        from .message import TASK_ROUTER_ADDRESS, MessageEnvelope, MessageType
+
+        bus = self._supervisor.bus
+        envelope = MessageEnvelope.create(
+            source=self._web_adapter._address,
+            target=TASK_ROUTER_ADDRESS,
+            message_type=MessageType.TASK_STOP,
+            payload={"task_id": task_id},
+        )
+        await bus.publish(envelope)
+        writer.write(_json_response(HTTP_200, {"stopped": task_id}))
+        await writer.drain()
+
+    async def _handle_task_start(
+        self, body: bytes, writer: asyncio.StreamWriter
+    ) -> None:
+        try:
+            data = json.loads(body.decode("utf-8"))
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            writer.write(_json_response(HTTP_400, {"error": "invalid JSON body"}))
+            await writer.drain()
+            return
+
+        task_id = data.get("task_id", "").strip()
+        if not task_id:
+            writer.write(_json_response(HTTP_400, {"error": "task_id is required"}))
+            await writer.drain()
+            return
+
+        from .bus import MessageBus
+        from .message import TASK_ROUTER_ADDRESS, MessageEnvelope, MessageType
+
+        bus = self._supervisor.bus
+        envelope = MessageEnvelope.create(
+            source=self._web_adapter._address,
+            target=TASK_ROUTER_ADDRESS,
+            message_type=MessageType.TASK_RESTART,
+            payload={"task_id": task_id},
+        )
+        await bus.publish(envelope)
+        writer.write(_json_response(HTTP_200, {"started": task_id}))
+        await writer.drain()
+
     async def _handle_task_delete(
         self, body: bytes, writer: asyncio.StreamWriter
     ) -> None:
@@ -471,10 +535,11 @@ class AgentHTTPServer:
             await writer.drain()
             return
 
+        active_statuses = ("running", "pending", "executing", "assigned")
         status = task.get("status", "")
-        if status in ("running", "pending"):
+        if status in active_statuses:
             writer.write(
-                _json_response(HTTP_400, {"error": "cancel the task before deleting"})
+                _json_response(HTTP_400, {"error": "stop the task before deleting"})
             )
             await writer.drain()
             return

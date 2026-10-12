@@ -7,12 +7,14 @@ import {
   CheckCircle2,
   AlertCircle,
   Loader2,
+  Play,
+  Pause,
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
-import { fetchTasks, cancelTask, deleteTask, type TaskInfo } from "@/lib/api";
+import { fetchTasks, cancelTask, deleteTask, stopTask, startTask, type TaskInfo } from "@/lib/api";
 import { TaskDetailPage } from "./task-detail";
 
-const STATUS_FILTERS = ["all", "running", "pending", "completed", "failed", "cancelled"] as const;
+const STATUS_FILTERS = ["all", "running", "pending", "completed", "failed", "cancelled", "stopped"] as const;
 type StatusFilter = (typeof STATUS_FILTERS)[number];
 
 function statusBadge(status: string) {
@@ -27,6 +29,10 @@ function statusBadge(status: string) {
       return <Badge variant="destructive">Failed</Badge>;
     case "cancelled":
       return <Badge variant="outline">Cancelled</Badge>;
+    case "stopped":
+      return <Badge variant="warning">Stopped</Badge>;
+    case "executing":
+      return <Badge variant="default">Executing</Badge>;
     default:
       return <Badge variant="outline">{status}</Badge>;
   }
@@ -35,6 +41,8 @@ function statusBadge(status: string) {
 function statusIcon(status: string) {
   switch (status) {
     case "running":
+    case "executing":
+    case "assigned":
       return <Loader2 className="h-4 w-4 animate-spin text-primary" />;
     case "pending":
       return <Clock className="h-4 w-4 text-warning" />;
@@ -42,10 +50,15 @@ function statusIcon(status: string) {
       return <CheckCircle2 className="h-4 w-4 text-success" />;
     case "failed":
       return <AlertCircle className="h-4 w-4 text-destructive" />;
+    case "stopped":
+      return <Pause className="h-4 w-4 text-warning" />;
     default:
       return <Clock className="h-4 w-4 text-muted-foreground" />;
   }
 }
+
+const ACTIVE_STATUSES = ["running", "pending", "executing", "assigned"];
+const RESTARTABLE_STATUSES = ["stopped", "failed", "cancelled"];
 
 function formatTime(iso: string | null | undefined): string {
   if (!iso) return "—";
@@ -111,10 +124,28 @@ export function TasksPage({ sub, onNavigate }: TasksPageProps) {
     }
   };
 
+  const handleStop = async (taskId: string) => {
+    try {
+      await stopTask(taskId);
+      load();
+    } catch {
+      // ignore
+    }
+  };
+
+  const handleStart = async (taskId: string) => {
+    try {
+      await startTask(taskId);
+      load();
+    } catch {
+      // ignore
+    }
+  };
+
   const handleDelete = async (taskId: string) => {
     const task = tasks.find((t) => t.task_id === taskId);
-    if (task && (task.status === "running" || task.status === "pending")) {
-      await handleCancel(taskId);
+    if (task && ACTIVE_STATUSES.includes(task.status)) {
+      await handleStop(taskId);
       await new Promise((r) => setTimeout(r, 500));
     }
     try {
@@ -229,17 +260,30 @@ export function TasksPage({ sub, onNavigate }: TasksPageProps) {
                   </div>
                 </div>
                 <div className="shrink-0 flex items-center gap-1">
-                  {(task.status === "running" || task.status === "pending") && (
+                  {ACTIVE_STATUSES.includes(task.status) && (
                     <button
                       type="button"
                       onClick={(e) => {
                         e.stopPropagation();
-                        handleCancel(task.task_id);
+                        handleStop(task.task_id);
                       }}
-                      className="flex items-center gap-1 rounded-md px-2 py-1 text-xs text-destructive hover:bg-destructive/10 transition-colors"
+                      className="flex items-center gap-1 rounded-md px-2 py-1 text-xs text-warning hover:bg-warning/10 transition-colors"
                     >
-                      <XCircle className="h-3.5 w-3.5" />
-                      Cancel
+                      <Pause className="h-3.5 w-3.5" />
+                      Stop
+                    </button>
+                  )}
+                  {RESTARTABLE_STATUSES.includes(task.status) && (
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        handleStart(task.task_id);
+                      }}
+                      className="flex items-center gap-1 rounded-md px-2 py-1 text-xs text-success hover:bg-success/10 transition-colors"
+                    >
+                      <Play className="h-3.5 w-3.5" />
+                      Start
                     </button>
                   )}
                   {confirmDelete === task.task_id ? (

@@ -135,6 +135,10 @@ class TaskRouter:
                 await self._handle_task_accepted(envelope)
             case MessageType.TASK_CANCEL:
                 await self._handle_cancel(envelope)
+            case MessageType.TASK_STOP:
+                await self._handle_stop(envelope)
+            case MessageType.TASK_RESTART:
+                await self._handle_restart(envelope)
 
     async def _handle_task_request(self, envelope: MessageEnvelope) -> None:
         assert self._bus is not None
@@ -270,6 +274,105 @@ class TaskRouter:
             await self._teardown_task(task_id)
             await self._try_dequeue()
 
+    async def _handle_stop(self, envelope: MessageEnvelope) -> None:
+        assert self._bus is not None
+        task_id = envelope.payload.get("task_id", "")
+        task = self._tasks.get(task_id)
+        if not task:
+            try:
+                await db_tasks.update_task_status(task_id, "stopped")
+            except Exception:
+                logger.exception("failed to mark orphan task %s stopped", task_id)
+            return
+
+        task.status = "stopped"
+        planner = self._planners.get(task_id)
+        if planner:
+            await self._bus.publish(MessageEnvelope.create(
+                source=TASK_ROUTER_ADDRESS,
+                target=planner.agent_address,
+                message_type=MessageType.TASK_CANCEL,
+                payload={"task_id": task_id},
+                correlation_id=task.correlation_id,
+            ))
+
+        try:
+            await db_tasks.update_task_status(task_id, "stopped")
+        except Exception:
+            logger.exception("failed to persist stop for task %s", task_id)
+
+        if planner:
+            plnr = self._planners.pop(task_id, None)
+            if plnr:
+                await plnr.stop()
+                self._semaphore.release()
+        if self._broadcaster:
+            self._broadcaster.close_task(task_id)
+
+        logger.info("task %s stopped", task_id)
+        await self._try_dequeue()
+
+    async def _handle_restart(self, envelope: MessageEnvelope) -> None:
+        assert self._bus is not None
+        task_id = envelope.payload.get("task_id", "")
+
+        existing = self._tasks.get(task_id)
+        if existing and existing.status in ("running", "assigned"):
+            logger.warning("task %s already active, ignoring restart", task_id)
+            return
+
+        try:
+            db_row = await db_tasks.get_task(task_id)
+        except Exception:
+            logger.exception("failed to read task %s for restart", task_id)
+            return
+
+        if not db_row:
+            logger.warning("task %s not found in DB, ignoring restart", task_id)
+            return
+
+        restartable = ("stopped", "failed", "cancelled", "running", "executing", "assigned")
+        if db_row["status"] not in restartable:
+            logger.warning("task %s status=%s not restartable", task_id, db_row["status"])
+            return
+
+        try:
+            await db_tasks.reset_task_for_restart(task_id)
+        except Exception:
+            logger.exception("failed to reset task %s for restart", task_id)
+            return
+
+        task = Task(
+            task_id=task_id,
+            requirement=db_row["requirement"],
+            goal_id=db_row.get("goal_id", ""),
+            project_root=db_row.get("project_root", ""),
+            correlation_id=db_row.get("correlation_id", ""),
+            origin_channel_id=db_row.get("origin_channel_id", ""),
+        )
+        self._tasks[task_id] = task
+
+        restart_envelope = MessageEnvelope.create(
+            source=TASK_ROUTER_ADDRESS,
+            target=TASK_ROUTER_ADDRESS,
+            message_type=MessageType.TASK_REQUEST,
+            payload={
+                "requirement": task.requirement,
+                "goal_id": task.goal_id,
+                "project_root": task.project_root,
+            },
+            correlation_id=task.correlation_id,
+        )
+
+        if self._semaphore.locked():
+            task.status = "pending"
+            self._pending_queue.put_nowait(restart_envelope)
+            logger.info("task %s requeued (at capacity)", task_id)
+            return
+
+        await self._assign_task(task, restart_envelope)
+        logger.info("task %s restarted", task_id)
+
     async def _teardown_task(self, task_id: str) -> None:
         planner = self._planners.pop(task_id, None)
         if planner:
@@ -278,7 +381,7 @@ class TaskRouter:
             logger.info("task %s planner torn down", task_id)
 
         task = self._tasks.get(task_id)
-        if task and task.status not in ("completed", "failed", "cancelled"):
+        if task and task.status not in ("completed", "failed", "cancelled", "stopped"):
             task.status = "completed"
 
         if task:

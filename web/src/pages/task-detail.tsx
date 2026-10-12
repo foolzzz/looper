@@ -12,6 +12,8 @@ import {
   Bot,
   User,
   GitBranch,
+  Play,
+  Pause,
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
@@ -28,6 +30,8 @@ import {
   fetchTaskActivity,
   fetchTaskConversation,
   streamTaskActivity,
+  stopTask,
+  startTask,
   type TaskDetail,
   type TaskStep,
   type ActivityEvent,
@@ -817,7 +821,7 @@ export function TaskDetailPage({ taskId, onBack }: TaskDetailPageProps) {
           if (stopped) return;
           setTask(t);
           setError("");
-          if (t.status === "completed" || t.status === "failed" || t.status === "cancelled") {
+          if (["completed", "failed", "cancelled", "stopped"].includes(t.status)) {
             clearInterval(timer);
           }
         })
@@ -856,6 +860,26 @@ export function TaskDetailPage({ taskId, onBack }: TaskDetailPageProps) {
               {task && task.phase && task.phase !== task.status && phaseBadge(task.phase)}
             </div>
           </div>
+          {task && ["running", "pending", "executing", "assigned"].includes(task.status) && (
+            <button
+              type="button"
+              onClick={() => stopTask(taskId).then(() => {})}
+              className="flex items-center gap-1.5 rounded-md border border-warning/50 px-3 py-1.5 text-xs font-medium text-warning hover:bg-warning/10 transition-colors"
+            >
+              <Pause className="h-3.5 w-3.5" />
+              Stop
+            </button>
+          )}
+          {task && ["stopped", "failed", "cancelled"].includes(task.status) && (
+            <button
+              type="button"
+              onClick={() => startTask(taskId).then(() => {})}
+              className="flex items-center gap-1.5 rounded-md border border-success/50 px-3 py-1.5 text-xs font-medium text-success hover:bg-success/10 transition-colors"
+            >
+              <Play className="h-3.5 w-3.5" />
+              Start
+            </button>
+          )}
         </div>
 
         {/* Tabs */}
