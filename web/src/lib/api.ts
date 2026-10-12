@@ -12,6 +12,7 @@ export interface TaskInfo {
   requirement: string;
   goal_id: string;
   status: string;
+  phase: string;
   planner_id: string | null;
   correlation_id: string;
 }
@@ -281,6 +282,51 @@ export async function fetchLlmRecords(params: {
   if (!res.ok) throw new Error(`llm-records ${res.status}`);
   const data = await res.json();
   return data.records ?? [];
+}
+
+// --- Agent sessions ---
+
+export interface AgentSession {
+  task_id: string;
+  turn_count: number;
+  total_input_tokens: number | null;
+  total_output_tokens: number | null;
+  total_duration_ms: number | null;
+  first_at: string;
+  last_at: string;
+  requirement: string;
+  task_status: string;
+  task_phase: string;
+}
+
+export interface SessionMessage {
+  id: number;
+  input_summary: string | null;
+  output_summary: string | null;
+  input_text: string | null;
+  output_text: string | null;
+  input_tokens: number | null;
+  output_tokens: number | null;
+  duration_ms: number | null;
+  model: string | null;
+  error: string | null;
+  created_at: string;
+}
+
+export async function fetchAgentSessions(agentId: string): Promise<AgentSession[]> {
+  const res = await fetch(`${API_BASE}/agents/${agentId}/sessions`);
+  if (!res.ok) throw new Error(`agent sessions ${res.status}`);
+  const data = await res.json();
+  return data.sessions ?? [];
+}
+
+export async function fetchSessionMessages(
+  agentId: string,
+  taskId: string,
+): Promise<{ messages: SessionMessage[]; activity: ActivityEvent[] }> {
+  const res = await fetch(`${API_BASE}/agents/${agentId}/sessions/${taskId}/messages`);
+  if (!res.ok) throw new Error(`session messages ${res.status}`);
+  return res.json();
 }
 
 // --- LLM profiles ---

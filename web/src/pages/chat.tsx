@@ -46,6 +46,7 @@ export function ChatPage() {
   const [sending, setSending] = useState(false);
   const [phase, setPhase] = useState("");
   const scrollRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
   const cleanupRef = useRef<(() => void) | null>(null);
   const messagesRef = useRef(messages);
   messagesRef.current = messages;
@@ -58,6 +59,10 @@ export function ChatPage() {
   }, []);
 
   useEffect(scrollToBottom, [messages, scrollToBottom]);
+
+  useEffect(() => {
+    if (!sending) inputRef.current?.focus();
+  }, [sending]);
 
   // Load messages from DB on mount (or session change)
   useEffect(() => {
@@ -301,12 +306,13 @@ export function ChatPage() {
           className="flex items-center gap-2"
         >
           <input
+            ref={inputRef}
             type="text"
             value={input}
             onChange={(e) => setInput(e.target.value)}
             placeholder="Type a message..."
             className="flex-1 rounded-lg border border-input bg-background px-4 py-2.5 text-sm text-foreground placeholder:text-muted-foreground outline-none focus:ring-2 focus:ring-ring"
-            disabled={sending}
+            autoFocus
           />
           <button
             type="submit"

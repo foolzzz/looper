@@ -86,6 +86,30 @@ function taskStatusBadge(status: string) {
   }
 }
 
+const PHASE_CONFIG: Record<string, { label: string; icon: typeof Clock; color: string }> = {
+  pending: { label: "Pending", icon: Clock, color: "text-muted-foreground" },
+  planning: { label: "Planning", icon: Bot, color: "text-blue-500" },
+  executing: { label: "Worker Executing", icon: Terminal, color: "text-primary" },
+  verifying: { label: "Verifying", icon: CheckCircle2, color: "text-amber-500" },
+  completed: { label: "Completed", icon: CheckCircle2, color: "text-success" },
+  failed: { label: "Failed", icon: AlertCircle, color: "text-destructive" },
+};
+
+function phaseBadge(phase: string) {
+  const cfg = PHASE_CONFIG[phase] || PHASE_CONFIG.pending;
+  const Icon = cfg.icon;
+  return (
+    <div className="flex items-center gap-1.5">
+      {(phase === "planning" || phase === "executing") ? (
+        <Loader2 className={cn("h-4 w-4 animate-spin", cfg.color)} />
+      ) : (
+        <Icon className={cn("h-4 w-4", cfg.color)} />
+      )}
+      <span className={cn("text-sm font-medium", cfg.color)}>{cfg.label}</span>
+    </div>
+  );
+}
+
 function activityKindIcon(kind: string) {
   switch (kind) {
     case "tool_use":
@@ -129,10 +153,14 @@ function OverviewTab({ task }: { task: TaskDetail }) {
 
   return (
     <div className="space-y-6 p-5">
-      <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
+      <div className="grid grid-cols-2 gap-4 sm:grid-cols-5">
         <div className="rounded-lg border border-border bg-card p-4">
           <p className="text-xs text-muted-foreground">Status</p>
           <div className="mt-1">{taskStatusBadge(task.status)}</div>
+        </div>
+        <div className="rounded-lg border border-border bg-card p-4">
+          <p className="text-xs text-muted-foreground">Phase</p>
+          <div className="mt-1">{phaseBadge(task.phase || "pending")}</div>
         </div>
         <div className="rounded-lg border border-border bg-card p-4">
           <p className="text-xs text-muted-foreground">Created</p>

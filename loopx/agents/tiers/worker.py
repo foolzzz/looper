@@ -26,6 +26,7 @@ from ..message import (
 )
 
 from ...db import activity as db_activity
+from ...db import llm_records as db_llm_records
 
 logger = logging.getLogger(__name__)
 
@@ -171,6 +172,8 @@ class WorkerPool:
         self._active[worker_id] = wp
 
         is_verify = envelope.message_type == MessageType.VERIFY_REQUEST
+        prompt = self._build_work_prompt(payload) if not is_verify else str(payload)
+        t0 = __import__("time").monotonic()
         try:
             result = await self._execute(envelope, is_verify=is_verify)
             wp.status = "completed"
@@ -183,6 +186,23 @@ class WorkerPool:
             wp.status = "failed"
             wp.result = {"status": "failed", "error": str(exc)}
             logger.exception("worker %s failed on task %s", worker_id, task_id)
+
+        elapsed_ms = int((__import__("time").monotonic() - t0) * 1000)
+        output_text = (wp.result or {}).get("summary") or (wp.result or {}).get("error") or ""
+        try:
+            await db_llm_records.insert_record(
+                agent_id=worker_id,
+                task_id=payload.get("parent_task_id") or task_id,
+                session_id=worker_id,
+                input_summary=prompt[:500],
+                output_summary=output_text[:500] if output_text else None,
+                input_text=prompt,
+                output_text=output_text or None,
+                duration_ms=elapsed_ms,
+                error=wp.result.get("error") if wp.result else None,
+            )
+        except Exception:
+            logger.debug("failed to record worker llm invocation", exc_info=True)
 
         result_type = MessageType.VERIFY_RESULT if is_verify else MessageType.WORK_RESULT
         await self._bus.publish(MessageEnvelope.create(

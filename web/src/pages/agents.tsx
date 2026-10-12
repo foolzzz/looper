@@ -16,6 +16,10 @@ import {
   ChevronDown,
   ChevronUp,
   Database,
+  ArrowLeft,
+  MessageSquare,
+  Terminal,
+  AlertCircle,
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -29,12 +33,17 @@ import {
   createLlmProfile,
   updateLlmProfile,
   deleteLlmProfile,
+  fetchAgentSessions,
+  fetchSessionMessages,
   type AgentConfig,
   type LlmRecord,
   type LlmProfile,
+  type AgentSession,
+  type SessionMessage,
+  type ActivityEvent,
 } from "@/lib/api";
 
-type Tab = "config" | "prompt" | "history";
+type Tab = "config" | "prompt" | "sessions";
 
 const CLAUDE_CODE_PERMISSIONS = [
   { value: "", label: "Default" },
@@ -659,24 +668,21 @@ function PromptTab({
   );
 }
 
-// --- History Tab ---
+// --- Sessions Tab ---
 
-function HistoryTab({ agentId }: { agentId: string }) {
-  const [records, setRecords] = useState<LlmRecord[]>([]);
+function SessionsTab({ agentId }: { agentId: string }) {
+  const [sessions, setSessions] = useState<AgentSession[]>([]);
   const [loading, setLoading] = useState(true);
-  const scrollRef = useRef<HTMLDivElement>(null);
+  const [activeSession, setActiveSession] = useState<string | null>(null);
 
   useEffect(() => {
     setLoading(true);
-    fetchLlmRecords({ agent_id: agentId, limit: 50 })
-      .then(setRecords)
-      .catch(() => setRecords([]))
+    setActiveSession(null);
+    fetchAgentSessions(agentId)
+      .then(setSessions)
+      .catch(() => setSessions([]))
       .finally(() => setLoading(false));
   }, [agentId]);
-
-  useEffect(() => {
-    scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
-  }, [records]);
 
   if (loading) {
     return (
@@ -686,54 +692,212 @@ function HistoryTab({ agentId }: { agentId: string }) {
     );
   }
 
-  if (!records.length) {
+  if (activeSession) {
+    return (
+      <SessionDetail
+        agentId={agentId}
+        taskId={activeSession}
+        onBack={() => setActiveSession(null)}
+      />
+    );
+  }
+
+  if (!sessions.length) {
     return (
       <div className="flex h-40 items-center justify-center">
-        <p className="text-sm text-muted-foreground">No LLM invocation records yet</p>
+        <p className="text-sm text-muted-foreground">No sessions yet</p>
       </div>
     );
   }
 
   return (
-    <div ref={scrollRef} className="max-h-[500px] overflow-y-auto space-y-4 pr-1">
-      {records.map((rec) => (
-        <div key={rec.id} className="space-y-2">
-          {rec.input_summary && (
-            <div className="flex gap-3 justify-end">
-              <div className="max-w-[70%] rounded-lg px-4 py-2.5 text-sm bg-primary text-primary-foreground">
-                <p className="whitespace-pre-wrap">{rec.input_summary}</p>
-              </div>
-              <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-accent">
-                <User className="h-3.5 w-3.5 text-muted-foreground" />
-              </div>
-            </div>
-          )}
-
-          <div className="flex gap-3 justify-start">
-            <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-primary/10">
-              <Bot className="h-3.5 w-3.5 text-primary" />
-            </div>
-            <div
-              className={cn(
-                "max-w-[70%] rounded-lg px-4 py-2.5 text-sm",
-                rec.error
-                  ? "bg-destructive/10 text-destructive border border-destructive/30"
-                  : "bg-muted text-foreground",
-              )}
-            >
-              <p className="whitespace-pre-wrap">
-                {rec.error || rec.output_summary || "—"}
+    <div className="space-y-2">
+      {sessions.map((s) => (
+        <button
+          key={s.task_id}
+          type="button"
+          onClick={() => setActiveSession(s.task_id)}
+          className="w-full text-left rounded-lg border border-border bg-card px-4 py-3 hover:bg-accent/50 transition-colors"
+        >
+          <div className="flex items-start justify-between gap-3">
+            <div className="min-w-0 flex-1">
+              <p className="text-sm font-medium truncate">
+                {s.requirement || s.task_id}
               </p>
+              <div className="mt-1 flex items-center gap-3 text-xs text-muted-foreground">
+                <span className="flex items-center gap-1">
+                  <MessageSquare className="h-3 w-3" />
+                  {s.turn_count} turns
+                </span>
+                {s.total_duration_ms != null && (
+                  <span className="flex items-center gap-1">
+                    <Clock className="h-3 w-3" />
+                    {Math.round(s.total_duration_ms / 1000)}s
+                  </span>
+                )}
+                <span>{formatTime(s.last_at)}</span>
+              </div>
+            </div>
+            <div className="flex flex-col items-end gap-1">
+              {s.task_phase && s.task_phase !== "pending" && (
+                <Badge
+                  variant={
+                    s.task_phase === "completed" ? "success" :
+                    s.task_phase === "failed" ? "destructive" : "default"
+                  }
+                  className="text-[10px]"
+                >
+                  {s.task_phase}
+                </Badge>
+              )}
+              {s.task_status && (
+                <Badge variant="outline" className="text-[10px]">{s.task_status}</Badge>
+              )}
             </div>
           </div>
-
-          <div className="flex items-center gap-3 pl-10 text-[10px] text-muted-foreground/60">
-            <span>{formatTime(rec.created_at)}</span>
-            {rec.duration_ms != null && <span>{rec.duration_ms}ms</span>}
-            {rec.model && <span>{rec.model}</span>}
-          </div>
-        </div>
+        </button>
       ))}
+    </div>
+  );
+}
+
+function SessionDetail({
+  agentId,
+  taskId,
+  onBack,
+}: {
+  agentId: string;
+  taskId: string;
+  onBack: () => void;
+}) {
+  const [messages, setMessages] = useState<SessionMessage[]>([]);
+  const [activity, setActivity] = useState<ActivityEvent[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [showFull, setShowFull] = useState<Record<number, boolean>>({});
+  const scrollRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    setLoading(true);
+    fetchSessionMessages(agentId, taskId)
+      .then((data) => {
+        setMessages(data.messages || []);
+        setActivity(data.activity || []);
+      })
+      .catch(() => {})
+      .finally(() => setLoading(false));
+  }, [agentId, taskId]);
+
+  useEffect(() => {
+    scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
+  }, [messages]);
+
+  if (loading) {
+    return (
+      <div className="flex h-40 items-center justify-center">
+        <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
+      </div>
+    );
+  }
+
+  const toolEvents = activity.filter((a) => a.kind === "tool_use");
+
+  return (
+    <div className="space-y-3">
+      <button
+        type="button"
+        onClick={onBack}
+        className="flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground transition-colors"
+      >
+        <ArrowLeft className="h-3.5 w-3.5" />
+        Back to sessions
+      </button>
+
+      <div className="text-xs text-muted-foreground mb-2">
+        {messages.length} LLM calls · {toolEvents.length} tool uses
+      </div>
+
+      <div ref={scrollRef} className="max-h-[500px] overflow-y-auto space-y-4 pr-1">
+        {messages.map((msg) => {
+          const inputText = showFull[msg.id] ? (msg.input_text || msg.input_summary) : msg.input_summary;
+          const outputText = showFull[msg.id] ? (msg.output_text || msg.output_summary) : msg.output_summary;
+          const hasMore = (msg.input_text && msg.input_text.length > 500) ||
+                          (msg.output_text && msg.output_text.length > 500);
+
+          return (
+            <div key={msg.id} className="space-y-2">
+              {inputText && (
+                <div className="flex gap-3 justify-end">
+                  <div className="max-w-[75%] rounded-lg px-4 py-2.5 text-sm bg-primary text-primary-foreground">
+                    <p className="whitespace-pre-wrap break-words">{inputText}</p>
+                  </div>
+                  <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-accent">
+                    <User className="h-3.5 w-3.5 text-muted-foreground" />
+                  </div>
+                </div>
+              )}
+
+              <div className="flex gap-3 justify-start">
+                <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-primary/10">
+                  <Bot className="h-3.5 w-3.5 text-primary" />
+                </div>
+                <div
+                  className={cn(
+                    "max-w-[75%] rounded-lg px-4 py-2.5 text-sm",
+                    msg.error
+                      ? "bg-destructive/10 text-destructive border border-destructive/30"
+                      : "bg-muted text-foreground",
+                  )}
+                >
+                  <p className="whitespace-pre-wrap break-words">
+                    {msg.error || outputText || "—"}
+                  </p>
+                </div>
+              </div>
+
+              <div className="flex items-center gap-3 pl-10 text-[10px] text-muted-foreground/60">
+                <span>{formatTime(msg.created_at)}</span>
+                {msg.duration_ms != null && <span>{msg.duration_ms}ms</span>}
+                {msg.model && <span>{msg.model}</span>}
+                {msg.input_tokens != null && (
+                  <span>{msg.input_tokens}→{msg.output_tokens} tok</span>
+                )}
+                {hasMore && (
+                  <button
+                    type="button"
+                    onClick={() => setShowFull((prev) => ({ ...prev, [msg.id]: !prev[msg.id] }))}
+                    className="hover:text-foreground underline"
+                  >
+                    {showFull[msg.id] ? "show less" : "show full"}
+                  </button>
+                )}
+              </div>
+            </div>
+          );
+        })}
+
+        {toolEvents.length > 0 && (
+          <div className="border-t border-border pt-3 mt-3">
+            <p className="text-xs font-medium text-muted-foreground mb-2 flex items-center gap-1.5">
+              <Terminal className="h-3.5 w-3.5" />
+              Tool use trace ({toolEvents.length})
+            </p>
+            <div className="space-y-1">
+              {toolEvents.map((ev) => (
+                <div
+                  key={ev.seq}
+                  className="flex items-start gap-2 text-xs text-muted-foreground py-1"
+                >
+                  <Terminal className="h-3 w-3 mt-0.5 shrink-0 text-primary/60" />
+                  <span className="break-all">{ev.summary}</span>
+                  <span className="ml-auto shrink-0 text-[10px]">
+                    {formatTime(ev.created_at)}
+                  </span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
     </div>
   );
 }
@@ -862,7 +1026,7 @@ export function AgentsPage() {
         {selected && (
           <div className="flex-1 rounded-lg border border-border bg-card">
             <div className="flex items-center gap-1 border-b border-border px-4">
-              {(["config", "prompt", "history"] as Tab[]).map((tab) => (
+              {(["config", "prompt", "sessions"] as Tab[]).map((tab) => (
                 <button
                   key={tab}
                   type="button"
@@ -874,7 +1038,7 @@ export function AgentsPage() {
                       : "border-transparent text-muted-foreground hover:text-foreground",
                   )}
                 >
-                  {tab === "config" ? "Config" : tab === "prompt" ? "Prompt" : "History"}
+                  {tab === "config" ? "Config" : tab === "prompt" ? "Prompt" : "Sessions"}
                 </button>
               ))}
               <div className="ml-auto flex items-center gap-2 text-xs text-muted-foreground">
@@ -895,7 +1059,7 @@ export function AgentsPage() {
               {activeTab === "prompt" && (
                 <PromptTab config={selected} onSave={handleSave} saving={saving} />
               )}
-              {activeTab === "history" && <HistoryTab agentId={selected.agent_id} />}
+              {activeTab === "sessions" && <SessionsTab agentId={selected.agent_id} />}
             </div>
           </div>
         )}

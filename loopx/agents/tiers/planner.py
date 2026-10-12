@@ -31,6 +31,7 @@ from ..message import (
 logger = logging.getLogger(__name__)
 
 from ...db import steps as db_steps, activity as db_activity
+from ...db.tasks import update_task_phase
 
 MAX_STEPS = 8
 MAX_CONCURRENT_WORKERS = 4
@@ -183,6 +184,8 @@ class PlannerAgent:
         payload = envelope.payload
         plan_id = f"plan-{uuid.uuid4().hex[:12]}"
 
+        await update_task_phase(self._task_id, "planning")
+
         plan = TaskPlan(
             plan_id=plan_id,
             goal_id=payload.get("goal_id", ""),
@@ -195,6 +198,7 @@ class PlannerAgent:
         steps = self._decompose_task(payload)
         plan.steps = steps
         plan.status = "executing"
+        await update_task_phase(self._task_id, "executing")
         self._plan = plan
         self._save_plan(plan)
 
@@ -298,6 +302,7 @@ class PlannerAgent:
         if result.get("status") == "completed":
             if step.complexity == "complex":
                 step.status = "completed"
+                await update_task_phase(self._task_id, "verifying")
                 await self._spawn_reviewer(plan, step)
             else:
                 step.status = "verified"
@@ -404,6 +409,7 @@ class PlannerAgent:
         assert self._bus is not None
         plan.status = "completed"
         self._save_plan(plan)
+        await update_task_phase(self._task_id, "completed")
 
         summary_parts = [f"任务完成: {plan.requirement[:80]}"]
         for step in plan.steps:
@@ -433,6 +439,7 @@ class PlannerAgent:
         assert self._bus is not None
         plan.status = "failed"
         self._save_plan(plan)
+        await update_task_phase(self._task_id, "failed")
 
         failed_steps = [s for s in plan.steps if s.status == "failed"]
         errors = [

@@ -7,6 +7,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     goal_id           TEXT NOT NULL DEFAULT '',
     project_root      TEXT NOT NULL DEFAULT '',
     status            TEXT NOT NULL DEFAULT 'pending',
+    phase             TEXT NOT NULL DEFAULT 'pending',
     planner_id        TEXT,
     correlation_id    TEXT NOT NULL DEFAULT '',
     origin_channel_id TEXT NOT NULL DEFAULT '',
@@ -16,6 +17,8 @@ CREATE TABLE IF NOT EXISTS tasks (
     updated_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
     completed_at      TIMESTAMPTZ
 );
+
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS phase TEXT NOT NULL DEFAULT 'pending';
 
 CREATE TABLE IF NOT EXISTS activity (
     seq              BIGSERIAL PRIMARY KEY,
@@ -96,6 +99,8 @@ CREATE TABLE IF NOT EXISTS llm_records (
     session_id       TEXT,
     input_summary    TEXT,
     output_summary   TEXT,
+    input_text       TEXT,
+    output_text      TEXT,
     input_tokens     INTEGER,
     output_tokens    INTEGER,
     duration_ms      INTEGER,
@@ -104,6 +109,9 @@ CREATE TABLE IF NOT EXISTS llm_records (
     metadata         JSONB,
     created_at       TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+ALTER TABLE llm_records ADD COLUMN IF NOT EXISTS input_text TEXT;
+ALTER TABLE llm_records ADD COLUMN IF NOT EXISTS output_text TEXT;
 
 CREATE INDEX IF NOT EXISTS idx_llm_records_agent ON llm_records(agent_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_llm_records_task ON llm_records(task_id, created_at DESC);

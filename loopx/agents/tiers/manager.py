@@ -396,6 +396,8 @@ class ManagerAgent:
                 session_id=self._session_id,
                 input_summary=message[:500],
                 output_summary=final_text[:500] if final_text else None,
+                input_text=message,
+                output_text=final_text or None,
                 duration_ms=duration_ms,
             )
         except Exception:

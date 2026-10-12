@@ -63,6 +63,19 @@ async def update_task_status(
     )
 
 
+async def update_task_phase(
+    task_id: str,
+    phase: str,
+    *,
+    pool: asyncpg.Pool | None = None,
+) -> None:
+    pool = pool or get_pool()
+    await pool.execute(
+        "UPDATE tasks SET phase = $2, updated_at = now() WHERE id = $1",
+        task_id, phase,
+    )
+
+
 async def get_task(task_id: str, *, pool: asyncpg.Pool | None = None) -> dict[str, Any] | None:
     pool = pool or get_pool()
     row = await pool.fetchrow("SELECT * FROM tasks WHERE id = $1", task_id)
