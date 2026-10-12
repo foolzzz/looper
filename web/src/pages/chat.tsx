@@ -119,9 +119,24 @@ export function ChatPage() {
   return (
     <div className="flex h-full flex-col">
       <div className="border-b border-border px-5 py-3">
-        <h1 className="text-lg font-semibold">Chat</h1>
+        <div className="flex items-center gap-2">
+          <div className="flex h-7 w-7 items-center justify-center rounded-full bg-primary/10">
+            <Bot className="h-3.5 w-3.5 text-primary" />
+          </div>
+          <div>
+            <h1 className="text-lg font-semibold leading-tight">Manager Agent</h1>
+            <p className="text-[11px] text-muted-foreground leading-tight">管家 · Claude Code session</p>
+          </div>
+          <div className="ml-auto flex items-center gap-1.5">
+            <span className="relative flex h-2 w-2">
+              <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-success opacity-75" />
+              <span className="relative inline-flex h-2 w-2 rounded-full bg-success" />
+            </span>
+            <span className="text-xs text-muted-foreground">Online</span>
+          </div>
+        </div>
         {phase && (
-          <p className="text-xs text-muted-foreground mt-0.5 flex items-center gap-1">
+          <p className="text-xs text-muted-foreground mt-1.5 flex items-center gap-1">
             <Loader2 className="h-3 w-3 animate-spin" />
             {phase}
           </p>
