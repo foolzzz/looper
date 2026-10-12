@@ -364,6 +364,7 @@ function OverviewTab({ task }: { task: TaskDetail }) {
 
 function AgentTimeline({ taskId }: { taskId: string }) {
   const [events, setEvents] = useState<ActivityEvent[]>([]);
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
 
   useEffect(() => {
     fetchTaskActivity(taskId, 0, 500)
@@ -393,6 +394,15 @@ function AgentTimeline({ taskId }: { taskId: string }) {
     return "text-muted-foreground bg-muted border-border";
   };
 
+  const toggle = (agent: string) => {
+    setExpanded((prev) => {
+      const next = new Set(prev);
+      if (next.has(agent)) next.delete(agent);
+      else next.add(agent);
+      return next;
+    });
+  };
+
   return (
     <div>
       <h3 className="text-sm font-semibold mb-2">Agent Timeline</h3>
@@ -404,43 +414,84 @@ function AgentTimeline({ taskId }: { taskId: string }) {
           const toolUses = agentEvents.filter((e) => e.kind === "tool_use").length;
           const errors = agentEvents.filter((e) => e.kind === "error").length;
           const colors = agentColor(agent);
+          const isOpen = expanded.has(agent);
 
           return (
-            <div key={agent} className={cn("rounded-lg border px-4 py-3", colors)}>
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                  <Bot className="h-4 w-4" />
-                  <span className="text-sm font-medium">{agent}</span>
-                  <Badge variant="outline" className="text-[10px] py-0 h-4">
-                    {agentRole(agent)}
-                  </Badge>
+            <div key={agent} className={cn("rounded-lg border overflow-hidden", colors)}>
+              <button
+                type="button"
+                onClick={() => toggle(agent)}
+                className="w-full text-left px-4 py-3 hover:brightness-110 transition-all"
+              >
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <Bot className="h-4 w-4" />
+                    <span className="text-sm font-medium">{agent}</span>
+                    <Badge variant="outline" className="text-[10px] py-0 h-4">
+                      {agentRole(agent)}
+                    </Badge>
+                  </div>
+                  <div className="flex items-center gap-3 text-xs opacity-70">
+                    <span>{agentEvents.length} events</span>
+                    {toolUses > 0 && <span>{toolUses} tools</span>}
+                    {errors > 0 && <span className="text-destructive">{errors} errors</span>}
+                    <span>{duration}</span>
+                    <span className="text-[10px]">{isOpen ? "▲" : "▼"}</span>
+                  </div>
                 </div>
-                <div className="flex items-center gap-3 text-xs opacity-70">
-                  <span>{agentEvents.length} events</span>
-                  {toolUses > 0 && <span>{toolUses} tools</span>}
-                  {errors > 0 && <span className="text-destructive">{errors} errors</span>}
-                  <span>{duration}</span>
-                </div>
-              </div>
-              <div className="mt-2 flex items-center gap-0.5 overflow-x-auto">
-                {agentEvents.slice(0, 40).map((ev) => (
-                  <div
-                    key={ev.seq}
-                    title={`${ev.kind}: ${ev.summary || ""}\n${formatTime(ev.created_at)}`}
-                    className={cn(
-                      "h-2 w-2 rounded-full shrink-0",
-                      ev.kind === "tool_use" && "bg-primary",
-                      ev.kind === "text" && "bg-foreground/50",
-                      ev.kind === "error" && "bg-destructive",
-                      ev.kind === "phase" && "bg-amber-400",
-                      !["tool_use", "text", "error", "phase"].includes(ev.kind) && "bg-muted-foreground/40",
+                {!isOpen && (
+                  <div className="mt-2 flex items-center gap-0.5 overflow-x-auto">
+                    {agentEvents.slice(0, 40).map((ev) => (
+                      <div
+                        key={ev.seq}
+                        title={`${ev.kind}: ${ev.summary || ""}\n${formatTime(ev.created_at)}`}
+                        className={cn(
+                          "h-2 w-2 rounded-full shrink-0",
+                          ev.kind === "tool_use" && "bg-primary",
+                          ev.kind === "text" && "bg-foreground/50",
+                          ev.kind === "error" && "bg-destructive",
+                          ev.kind === "phase" && "bg-amber-400",
+                          !["tool_use", "text", "error", "phase"].includes(ev.kind) && "bg-muted-foreground/40",
+                        )}
+                      />
+                    ))}
+                    {agentEvents.length > 40 && (
+                      <span className="text-[10px] text-muted-foreground ml-1">+{agentEvents.length - 40}</span>
                     )}
-                  />
-                ))}
-                {agentEvents.length > 40 && (
-                  <span className="text-[10px] text-muted-foreground ml-1">+{agentEvents.length - 40}</span>
+                  </div>
                 )}
-              </div>
+              </button>
+              {isOpen && (
+                <div className="border-t border-inherit px-4 py-2 max-h-[400px] overflow-y-auto space-y-1">
+                  {agentEvents.map((ev) => (
+                    <div
+                      key={ev.seq}
+                      className={cn(
+                        "flex items-start gap-2 rounded px-2 py-1.5 text-xs",
+                        ev.kind === "error" ? "bg-destructive/10" : "hover:bg-white/5",
+                      )}
+                    >
+                      {activityKindIcon(ev.kind)}
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-center gap-2">
+                          <span className="font-mono text-[10px] text-muted-foreground/60">
+                            {formatTime(ev.created_at)}
+                          </span>
+                          <Badge variant="outline" className="text-[9px] py-0 h-3.5">
+                            {ev.kind}
+                          </Badge>
+                        </div>
+                        <p className={cn(
+                          "mt-0.5 whitespace-pre-wrap break-all",
+                          ev.kind === "error" && "text-destructive",
+                        )}>
+                          {ev.summary || ev.kind}
+                        </p>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
           );
         })}
