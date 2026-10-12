@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from ..bus import MessageBus
+from ..claude_cli import STREAM_LINE_LIMIT
 from ..message import (
     AgentAddress,
     MessageEnvelope,
@@ -31,9 +32,6 @@ logger = logging.getLogger(__name__)
 
 MAX_POOL_SIZE = 4
 WORKER_TIMEOUT_SEC = 600
-# One stream-json line can carry the full tool/skill list or a large tool result;
-# asyncio's default 64 KiB line limit fails the worker on those.
-STREAM_LINE_LIMIT = 16 * 1024 * 1024
 
 
 def extract_report(text: str, key: str) -> dict[str, Any] | None:
