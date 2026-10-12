@@ -457,7 +457,7 @@ function EventView({ item, startedAt, live }: { item: LlmRecordEvent; startedAt?
   );
 }
 
-function RunCard({ initial, defaultOpen }: { initial: LlmRecord; defaultOpen: boolean }) {
+export function RunCard({ initial, defaultOpen }: { initial: LlmRecord; defaultOpen: boolean }) {
   const [record, setRecord] = useState(initial);
   const [events, setEvents] = useState<LlmRecordEvent[]>([]);
   const [open, setOpen] = useState(defaultOpen);

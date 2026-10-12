@@ -125,7 +125,8 @@ Web 始终开启。Telegram 和 Lark 默认内置，不需要任何启动参数�
 ### Web
 
 - 控制台 Chat 页
-- 对话对象可以是全局唯一的 Manager，也可以是某个运行中任务的 Planner（`GET /api/chat/targets` 列出）。Planner 自身不调用 LLM，收到的消息会作为该任务的新步骤，排在进行中的步骤之后交给 Worker 执行
+- 左上角列出所有 agent（`GET /api/chat/targets`）：全局唯一的 Manager，以及最近 30 个任务。每个任务下有它固定的一个 Planner，和每个步骤各自独立的 Worker（做了验收的步骤还有 Reviewer）。已经结束的任务和 agent 也列出来，可以查看消息
+- 能发消息的只有 Manager 和运行中任务的 Planner。Planner 自身不调用 LLM：收到的消息先转给正在执行的 Worker，作为它的下一个 user turn；没有 Worker 在跑时，作为新步骤排队。Worker 和 Reviewer 只读，页面显示它的完整运行记录
 - `POST /api/chat/send` 发送消息，`target` 指定对话对象
 - SSE `GET /api/chat/events` 接收实时响应
 

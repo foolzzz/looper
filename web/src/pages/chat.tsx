@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useRef, useState } from "react";
-import { Send, Loader2, Bot, User, Plus, ChevronDown } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Send, Loader2, Bot, User, Plus, ChevronDown, ChevronRight } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import {
   sendChat,
@@ -9,13 +9,15 @@ import {
   fetchTaskActivity,
   streamSSE,
   fetchAgentConfigs,
+  fetchLlmRecords,
   type SSEEvent,
   type AgentConfig,
   type ChatTarget,
   type ChatTargetInfo,
   type ActivityEvent,
+  type LlmRecord,
 } from "@/lib/api";
-import { activityBelongsTo, historyHref } from "@/pages/agent-history";
+import { RunCard, activityBelongsTo, historyHref } from "@/pages/agent-history";
 import { cn } from "@/lib/utils";
 
 interface ChatMessage {
@@ -28,7 +30,77 @@ interface ChatMessage {
 
 const STORAGE_SESSION_KEY = "loopx-chat-session-id";
 
-const MANAGER_TARGET: ChatTargetInfo = { kind: "manager", id: "manager" };
+const MANAGER_TARGET: ChatTargetInfo = { kind: "manager", id: "manager", can_send: true };
+const TARGETS_POLL_MS = 10_000;
+
+// One task: its fixed Planner, then the Worker (and Reviewer) of each step.
+interface TaskGroup {
+  planner: ChatTargetInfo;
+  agents: ChatTargetInfo[];
+}
+
+function groupByTask(targets: ChatTargetInfo[]): TaskGroup[] {
+  const groups: TaskGroup[] = [];
+  for (const t of targets) {
+    if (t.kind === "planner") groups.push({ planner: t, agents: [] });
+    else if (t.kind !== "manager") groups.find((g) => g.planner.task_id === t.task_id)?.agents.push(t);
+  }
+  return groups;
+}
+
+function stepAgentTitle(t: ChatTargetInfo): string {
+  const role = t.kind === "reviewer" ? "Reviewer" : "Worker";
+  return t.step_index == null ? role : `Step ${t.step_index + 1} · ${role}`;
+}
+
+function statusTone(status?: string): string {
+  if (status === "running") return "text-primary";
+  if (status === "completed" || status === "verified") return "text-success";
+  if (status === "failed") return "text-destructive";
+  return "text-muted-foreground";
+}
+
+function StatusText({ status }: { status?: string }) {
+  if (!status) return null;
+  return (
+    <span className={cn("flex shrink-0 items-center gap-1 text-[10px]", statusTone(status))}>
+      {status === "running" ? <Loader2 className="h-2.5 w-2.5 animate-spin" /> : <span className="h-1.5 w-1.5 rounded-full bg-current" />}
+      {status}
+    </span>
+  );
+}
+
+// A Worker or Reviewer: its Claude runs, read-only; a running one updates live.
+function StepAgentView({ agent }: { agent: ChatTargetInfo }) {
+  const [runs, setRuns] = useState<LlmRecord[] | null>(null);
+
+  useEffect(() => {
+    setRuns(null);
+    fetchLlmRecords({ agent_id: agent.id, limit: 20 })
+      .then(setRuns)
+      .catch(() => setRuns([]));
+  }, [agent.id]);
+
+  return (
+    <div className="space-y-3">
+      <div className="flex items-start justify-between gap-3 text-xs">
+        <p className="min-w-0 line-clamp-3 whitespace-pre-wrap text-muted-foreground" title={agent.instruction}>
+          {agent.instruction || "The step this run served was not recorded."}
+        </p>
+        <a href={historyHref(agent.id, agent.task_id)} className="shrink-0 text-primary hover:underline">
+          Open full history →
+        </a>
+      </div>
+      {runs === null ? (
+        <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
+      ) : runs.length === 0 ? (
+        <p className="text-xs text-muted-foreground">No Claude runs recorded for this agent.</p>
+      ) : (
+        runs.map((record, i) => <RunCard key={record.id} initial={record} defaultOpen={i === 0} />)
+      )}
+    </div>
+  );
+}
 
 function sendTargetOf(target: ChatTargetInfo): ChatTarget {
   return target.kind === "planner" && target.task_id
@@ -36,9 +108,12 @@ function sendTargetOf(target: ChatTargetInfo): ChatTarget {
     : { kind: "manager" };
 }
 
-// The Manager keeps the switchable session; each task's Planner has one fixed thread.
+// The Manager keeps the switchable session; each task's Planner has one fixed
+// thread; a Worker or Reviewer has no chat, only its runs.
 function sessionFor(target: ChatTargetInfo): string {
-  return target.kind === "planner" ? `planner-${target.task_id}` : getOrCreateSessionId();
+  if (target.kind === "planner") return `planner-${target.task_id}`;
+  if (target.kind === "manager") return getOrCreateSessionId();
+  return "";
 }
 
 function truncate(text: string, max: number): string {
@@ -80,6 +155,8 @@ export function ChatPage() {
   const [targets, setTargets] = useState<ChatTargetInfo[]>([MANAGER_TARGET]);
   const [target, setTarget] = useState<ChatTargetInfo>(MANAGER_TARGET);
   const [agentDropdown, setAgentDropdown] = useState(false);
+  // Tasks the user opened or closed in the agent list; others follow the default.
+  const [taskOpen, setTaskOpen] = useState<Record<string, boolean>>({});
   const [plannerActivity, setPlannerActivity] = useState<ActivityEvent[]>([]);
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -97,18 +174,28 @@ export function ChatPage() {
   useEffect(() => {
     fetchAgentConfigs().then(setAgents).catch(() => {});
     refreshTargets();
+    // Keeps statuses current, and stops input once a viewed Planner ends.
+    const timer = setInterval(refreshTargets, TARGETS_POLL_MS);
+    return () => clearInterval(timer);
   }, [refreshTargets]);
 
+  const groups = useMemo(() => groupByTask(targets), [targets]);
+  // The selected agent as last listed: its status and whether it takes messages.
+  const current = targets.find((t) => t.id === target.id) ?? target;
+  const taskGroup = groups.find((g) => g.planner.task_id === current.task_id);
+  const isTaskOpen = (g: TaskGroup) =>
+    taskOpen[g.planner.task_id ?? ""] ?? (g.planner.can_send || g.planner.task_id === current.task_id);
+
   const managerConfig = agents.find((a) => a.agent_id === "manager");
-  const targetTitle = (t: ChatTargetInfo) =>
-    t.kind === "planner"
-      ? `Planner · ${truncate(t.requirement || t.task_id || "", 40)}`
-      : managerConfig?.display_name || "Manager";
+  const targetTitle = (t: ChatTargetInfo) => {
+    if (t.kind === "planner") return `Planner · ${truncate(t.requirement || t.task_id || "", 40)}`;
+    if (t.kind === "manager") return managerConfig?.display_name || "Manager";
+    return `${stepAgentTitle(t)} · ${truncate(taskGroup?.planner.requirement || t.task_id || "", 32)}`;
+  };
   const targetSubtitle = (t: ChatTargetInfo) =>
-    t.kind === "planner"
-      ? `${t.task_id} · ${t.status || "running"}`
-      : `global · ${managerConfig?.runtime || "claude-code"}`;
-  const plannerTargets = targets.filter((t) => t.kind === "planner");
+    t.kind === "manager"
+      ? `global · ${managerConfig?.runtime || "claude-code"}`
+      : `${t.kind === "planner" ? t.task_id : t.id} · ${t.status || "unknown"}`;
 
   // A Planner's own record is its activity; show it above the chat with it.
   useEffect(() => {
@@ -149,6 +236,11 @@ export function ChatPage() {
   // Load messages from DB on mount (or session change)
   useEffect(() => {
     dbLoadedRef.current = false;
+    if (!sessionId) {
+      setMessages([]);
+      dbLoadedRef.current = true;
+      return;
+    }
     fetchChatMessages(sessionId).then((dbMsgs) => {
       if (dbMsgs.length > 0) {
         const loaded: ChatMessage[] = dbMsgs.map((m) => ({
@@ -173,7 +265,7 @@ export function ChatPage() {
 
   // Keep localStorage as cache
   useEffect(() => {
-    if (messages.length > 0) {
+    if (sessionId && messages.length > 0) {
       saveMessages(sessionId, messages);
     }
   }, [messages, sessionId]);
@@ -192,7 +284,7 @@ export function ChatPage() {
 
   const handleSend = async () => {
     const text = input.trim();
-    if (!text || sending) return;
+    if (!text || sending || !current.can_send) return;
 
     setInput("");
     setSending(true);
@@ -316,44 +408,82 @@ export function ChatPage() {
                 <Bot className="h-3.5 w-3.5 text-primary" />
               </div>
               <div className="text-left">
-                <p className="text-sm font-semibold leading-tight">{targetTitle(target)}</p>
-                <p className="text-[10px] text-muted-foreground leading-tight">{targetSubtitle(target)}</p>
+                <p className="text-sm font-semibold leading-tight">{targetTitle(current)}</p>
+                <p className="text-[10px] text-muted-foreground leading-tight">{targetSubtitle(current)}</p>
               </div>
               <ChevronDown className="h-3.5 w-3.5 text-muted-foreground" />
             </button>
             {agentDropdown && (
-              <div className="absolute left-0 top-full z-50 mt-1 w-80 rounded-lg border border-border bg-popover shadow-lg">
-                {[MANAGER_TARGET, ...plannerTargets].map((t) => (
-                  <button
-                    key={t.id}
-                    type="button"
-                    onClick={() => selectTarget(t)}
-                    className={cn(
-                      "flex w-full items-center gap-2 px-3 py-2 text-left text-sm hover:bg-accent transition-colors first:rounded-t-lg last:rounded-b-lg",
-                      t.id === target.id && "bg-accent/50",
-                    )}
-                  >
-                    <Bot className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
-                    <div className="min-w-0">
-                      <p className="font-medium truncate">{targetTitle(t)}</p>
-                      <p className="text-[10px] text-muted-foreground truncate">{targetSubtitle(t)}</p>
-                    </div>
-                    {t.id === target.id && (
-                      <span className="ml-auto text-primary text-xs">✓</span>
-                    )}
-                  </button>
-                ))}
-                {plannerTargets.length === 0 && (
+              <div className="absolute left-0 top-full z-50 mt-1 max-h-[70vh] w-96 overflow-y-auto rounded-lg border border-border bg-popover py-1 shadow-lg">
+                <AgentRow
+                  title={targetTitle(MANAGER_TARGET)}
+                  subtitle={targetSubtitle(MANAGER_TARGET)}
+                  selected={target.id === MANAGER_TARGET.id}
+                  onSelect={() => selectTarget(MANAGER_TARGET)}
+                />
+                <p className="mt-1 border-t border-border px-3 pb-1 pt-2 font-mono text-[10px] uppercase tracking-wider text-muted-foreground">
+                  Tasks
+                </p>
+                {groups.length === 0 && (
                   <p className="px-3 py-2 text-xs text-muted-foreground">
-                    No running tasks. A task&apos;s Planner appears here while it runs.
+                    No tasks yet. Each task lists its Planner and the Worker of every step here.
                   </p>
                 )}
+                {groups.map((g) => {
+                  const taskId = g.planner.task_id ?? "";
+                  const open = isTaskOpen(g);
+                  return (
+                    <div key={taskId}>
+                      <button
+                        type="button"
+                        onClick={() => setTaskOpen((prev) => ({ ...prev, [taskId]: !open }))}
+                        aria-expanded={open}
+                        className="flex w-full items-center gap-1.5 px-3 py-1.5 text-left text-xs hover:bg-accent transition-colors"
+                        title={g.planner.requirement}
+                      >
+                        {open ? (
+                          <ChevronDown className="h-3 w-3 shrink-0 text-muted-foreground" />
+                        ) : (
+                          <ChevronRight className="h-3 w-3 shrink-0 text-muted-foreground" />
+                        )}
+                        <span className="min-w-0 flex-1 truncate font-medium">{g.planner.requirement || taskId}</span>
+                        <StatusText status={g.planner.status} />
+                      </button>
+                      {open && (
+                        <div className="pb-1">
+                          <AgentRow
+                            nested
+                            title="Planner"
+                            subtitle={g.planner.can_send ? "takes messages" : "task ended · read-only"}
+                            status={g.planner.can_send ? "running" : undefined}
+                            selected={target.id === g.planner.id}
+                            onSelect={() => selectTarget(g.planner)}
+                          />
+                          {g.agents.map((a) => (
+                            <AgentRow
+                              key={a.id}
+                              nested
+                              title={stepAgentTitle(a)}
+                              subtitle={a.instruction || a.id}
+                              status={a.status}
+                              selected={target.id === a.id}
+                              onSelect={() => selectTarget(a)}
+                            />
+                          ))}
+                          {g.agents.length === 0 && (
+                            <p className="py-1 pl-9 pr-3 text-[10px] text-muted-foreground">No step has started yet.</p>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
               </div>
             )}
           </div>
 
           <div className="ml-auto flex items-center gap-3">
-            <span className="font-mono text-[11px] text-muted-foreground">{sessionId}</span>
+            {sessionId && <span className="font-mono text-[11px] text-muted-foreground">{sessionId}</span>}
             {target.kind === "manager" && (
               <button
                 type="button"
@@ -373,7 +503,7 @@ export function ChatPage() {
             </div>
           </div>
         </div>
-        {target.kind === "planner" && (
+        {current.kind === "planner" && current.can_send && (
           <p className="text-xs text-muted-foreground mt-1.5">
             Messages go to the Worker running this task's current step, which reads them at its next turn; with no Worker running, they become a new step.
           </p>
@@ -417,6 +547,8 @@ export function ChatPage() {
             )}
           </div>
         )}
+
+        {(target.kind === "worker" || target.kind === "reviewer") && <StepAgentView agent={current} />}
 
         {messages.length === 0 && target.kind === "manager" && (
           <div className="flex h-full items-center justify-center">
@@ -466,6 +598,26 @@ export function ChatPage() {
       </div>
 
       <div className="border-t border-border p-4">
+        {!current.can_send ? (
+          <div className="flex items-center gap-3 text-xs text-muted-foreground">
+            <span className="flex-1">
+              {current.kind === "planner"
+                ? "This task has ended, so its Planner no longer takes messages."
+                : taskGroup?.planner.can_send
+                  ? "Workers take messages through their task's Planner, which hands them to the running step."
+                  : `This ${current.kind === "reviewer" ? "Reviewer" : "Worker"}'s task has ended; its runs are read-only.`}
+            </span>
+            {current.kind !== "planner" && taskGroup?.planner.can_send && (
+              <button
+                type="button"
+                onClick={() => selectTarget(taskGroup.planner)}
+                className="rounded-md border border-border px-3 py-1.5 text-foreground hover:bg-accent transition-colors"
+              >
+                Message the Planner
+              </button>
+            )}
+          </div>
+        ) : (
         <form
           onSubmit={(e) => {
             e.preventDefault();
@@ -494,7 +646,44 @@ export function ChatPage() {
             )}
           </button>
         </form>
+        )}
       </div>
     </div>
+  );
+}
+
+function AgentRow({
+  title,
+  subtitle,
+  status,
+  selected,
+  nested,
+  onSelect,
+}: {
+  title: string;
+  subtitle: string;
+  status?: string;
+  selected: boolean;
+  nested?: boolean;
+  onSelect: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onSelect}
+      className={cn(
+        "flex w-full items-center gap-2 py-1.5 pr-3 text-left text-sm hover:bg-accent transition-colors",
+        nested ? "pl-9" : "pl-3",
+        selected && "bg-accent/50",
+      )}
+    >
+      {!nested && <Bot className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />}
+      <div className="min-w-0 flex-1">
+        <p className={cn("truncate", nested ? "text-xs" : "font-medium")}>{title}</p>
+        <p className="truncate text-[10px] text-muted-foreground" title={subtitle}>{subtitle}</p>
+      </div>
+      <StatusText status={status} />
+      {selected && <span className="text-xs text-primary">✓</span>}
+    </button>
   );
 }

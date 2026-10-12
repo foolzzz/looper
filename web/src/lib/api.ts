@@ -45,12 +45,24 @@ export async function fetchTasks(): Promise<TaskInfo[]> {
 /** Who a chat message goes to: the global Manager or a running task's Planner. */
 export type ChatTarget = { kind: "manager" } | { kind: "planner"; task_id: string };
 
+/**
+ * An agent on the Chat page: the global Manager, each task's Planner and the
+ * Worker/Reviewer of each of its steps, finished ones included.
+ */
 export interface ChatTargetInfo {
-  kind: "manager" | "planner";
+  kind: "manager" | "planner" | "worker" | "reviewer";
   id: string;
+  /** Only the Manager and a running task's Planner take messages. */
+  can_send: boolean;
   task_id?: string;
+  /** Planner: the task's requirement. */
   requirement?: string;
+  /** Planner: the task's status; Worker/Reviewer: its latest run's status. */
   status?: string;
+  /** Worker/Reviewer: the step it ran (0-based), when known. */
+  step_index?: number | null;
+  instruction?: string;
+  started_at?: string;
 }
 
 export async function fetchChatTargets(): Promise<ChatTargetInfo[]> {
