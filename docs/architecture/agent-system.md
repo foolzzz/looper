@@ -30,6 +30,9 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
 - Dispatches steps to Worker agents
 - Monitors step completion and runs verification
 - Reports task status back to TaskRouter
+- Takes chat messages from the Chat page. The Planner has no LLM of its own:
+  each message becomes a new step that runs after the steps in progress, and
+  the Planner replies with the step number
 
 ### WorkerPool (`loopx/agents/tiers/worker.py`)
 
@@ -95,7 +98,7 @@ Single-page React app served from `web/dist/` via the built-in HTTP server
 
 ### Pages
 
-- **Chat**: Real-time conversation with Manager agent, agent session selector, SSE streaming
+- **Chat**: Conversation with the global Manager or with a running task's Planner; the selector lists the live Planner instances, and each Planner keeps one thread per task; SSE streaming
 - **Tasks**: Task list with status filter, time display, Start/Stop/Delete controls
 - **Task Detail**: Overview (steps, agent timeline, live activity feed), Pipeline DAG (React Flow), Sessions, Conversation
 - **Agents**: Agent configuration editor (system prompt replace/append, LLM profiles, permissions), session viewer with full LLM traffic
@@ -127,7 +130,8 @@ SPA uses `#page/sub` format for deep linking that survives browser refresh:
 | `/api/tasks/delete` | POST | Delete task (must be stopped first) |
 | `/api/tasks/:id/activity` | GET | Activity events |
 | `/api/tasks/:id/activity/stream` | GET | SSE activity stream |
-| `/api/chat/send` | POST | Send chat message |
+| `/api/chat/send` | POST | Send chat message; `target` is the Manager (default) or `{kind: planner, task_id}`, 409 when that task has no running Planner |
+| `/api/chat/targets` | GET | The Manager and every running task's Planner |
 | `/api/chat/messages` | GET/POST | Chat history |
 | `/api/agent-configs` | GET | List agents |
 | `/api/agent-configs/:id` | GET/PUT | Agent config CRUD |
