@@ -160,8 +160,8 @@ Web 始终开启。Telegram 和 Lark 默认内置，不需要任何启动参数�
 ### MessageBus
 
 - 基于 `asyncio.Queue` 的进程内消息总线
-- JSONL 日志持久化 + crash recovery
-- Topic 订阅支持广播消息
+- JSONL 日志持久化 + crash recovery。重启时，发给 Manager、TaskRouter 和渠道的未送达消息会重放；发给 Planner、Worker 的会丢弃，因为它们是按任务创建的实例，任务在服务启动时已被停掉，重放会重跑这些任务的活。之后压缩日志
+- Topic 订阅：默认只观察；WorkerPool 用认领式订阅（`consumes=True`）接收 `WORK_ITEM` 和 `VERIFY_REQUEST`，接收后即标记为已送达
 
 ---
 

@@ -54,7 +54,15 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
 ## Message Bus
 
 All inter-agent communication uses typed `MessageEnvelope` over an in-process
-async message bus (`loopx/agents/bus.py`). Key message types:
+async message bus (`loopx/agents/bus.py`). Every message is journaled before
+delivery and marked delivered once consumed. The WorkerPool consumes
+`WORK_ITEM` and `VERIFY_REQUEST` through topic consumers that take delivery.
+On restart the bus replays undelivered messages for the Manager, the TaskRouter
+and channels. It drops messages for Planners and Workers: those exist per task,
+the server stops their tasks at startup, and replaying would re-run their work.
+The journal is then compacted.
+
+Key message types:
 
 | Type | Direction | Purpose |
 |---|---|---|

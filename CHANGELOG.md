@@ -35,6 +35,10 @@ To learn how to use these features, read the [usage guide](docs/fork/usage.md).
 
 ### Fixed
 
+- The agent message bus no longer replays a previous run's messages for Planners
+  and Workers on restart. Their tasks are stopped at startup, and replaying could
+  re-run their work. Work the WorkerPool takes is now marked delivered, so it no
+  longer piles up in the journal, and the journal is compacted at startup.
 - The agent Chat's Manager answers every message again. Claude's stream-json
   lines over 64 KiB (its init line lists every tool and skill) made it fail
   silently and left the chat waiting. The Manager and workers now read
