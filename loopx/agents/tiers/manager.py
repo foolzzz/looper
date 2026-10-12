@@ -314,6 +314,7 @@ class ManagerAgent:
             "--print",
             "--output-format", "stream-json",
             "--verbose",
+            "--include-partial-messages",  # stream the reply as it is written
             "--append-system-prompt", self._system_prompt,
         ]
 
@@ -338,6 +339,7 @@ class ManagerAgent:
 
         text_parts: list[str] = []
         result_text = ""
+        streamed_partials = False
 
         assert process.stdout is not None
         try:
@@ -358,13 +360,24 @@ class ManagerAgent:
                     self._save_session_state()
 
                 event_type = payload.get("type")
+                # Only the Manager's own turn is the reply; subagent output is internal.
+                top_level = payload.get("parent_tool_use_id") is None
 
                 if event_type == "system":
                     subtype = payload.get("subtype", "")
                     if subtype == "init":
                         await self._send_status(context_envelope, "thinking", phase=True)
 
-                elif event_type == "assistant":
+                elif event_type == "stream_event":
+                    event = payload.get("event")
+                    delta = event.get("delta") if isinstance(event, dict) else None
+                    if top_level and isinstance(delta, dict) and delta.get("type") == "text_delta":
+                        chunk = str(delta.get("text") or "")
+                        if chunk:
+                            streamed_partials = True
+                            await self._send_status(context_envelope, chunk, delta=True)
+
+                elif event_type == "assistant" and top_level:
                     msg = payload.get("message")
                     if isinstance(msg, dict):
                         content_blocks = msg.get("content", [])
@@ -376,7 +389,8 @@ class ManagerAgent:
                                 chunk = str(block.get("text") or "")
                                 if chunk:
                                     text_parts.append(chunk)
-                                    await self._send_status(context_envelope, chunk, delta=True)
+                                    if not streamed_partials:  # else already sent chunk by chunk
+                                        await self._send_status(context_envelope, chunk, delta=True)
                             elif block_type == "tool_use":
                                 tool_name = block.get("name", "tool")
                                 await self._send_status(
