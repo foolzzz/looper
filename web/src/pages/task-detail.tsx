@@ -14,6 +14,9 @@ import {
   GitBranch,
   Play,
   Pause,
+  Settings2,
+  Save,
+  FolderOpen,
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
@@ -32,6 +35,7 @@ import {
   streamTaskActivity,
   stopTask,
   startTask,
+  updateTaskConfig,
   type TaskDetail,
   type TaskStep,
   type ActivityEvent,
@@ -85,6 +89,8 @@ function taskStatusBadge(status: string) {
       return <Badge variant="outline" className="text-sm">Cancelled</Badge>;
     case "pending":
       return <Badge variant="warning" className="text-sm">Pending</Badge>;
+    case "init":
+      return <Badge variant="outline" className="text-sm">Init</Badge>;
     default:
       return <Badge variant="outline" className="text-sm">{status}</Badge>;
   }
@@ -253,6 +259,114 @@ function LiveActivityFeed({ taskId, isActive }: { taskId: string; isActive: bool
   );
 }
 
+function TaskConfigSection({ task }: { task: TaskDetail }) {
+  const isInit = task.status === "init";
+  const [editReq, setEditReq] = useState(task.requirement);
+  const [editWorkDir, setEditWorkDir] = useState(task.work_dir || "");
+  const [editConfig, setEditConfig] = useState(JSON.stringify(task.config || {}, null, 2));
+  const [saving, setSaving] = useState(false);
+  const [dirty, setDirty] = useState(false);
+
+  useEffect(() => {
+    setEditReq(task.requirement);
+    setEditWorkDir(task.work_dir || "");
+    setEditConfig(JSON.stringify(task.config || {}, null, 2));
+    setDirty(false);
+  }, [task.requirement, task.work_dir, task.config]);
+
+  const handleSave = async () => {
+    setSaving(true);
+    try {
+      let parsedConfig: Record<string, unknown> = {};
+      try { parsedConfig = JSON.parse(editConfig); } catch { /* keep empty */ }
+      await updateTaskConfig(task.task_id, {
+        requirement: editReq !== task.requirement ? editReq : undefined,
+        work_dir: editWorkDir !== (task.work_dir || "") ? editWorkDir : undefined,
+        config: parsedConfig,
+      });
+      setDirty(false);
+    } catch {
+      // ignore
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-2">
+        <h3 className="text-sm font-semibold flex items-center gap-1.5">
+          <Settings2 className="h-4 w-4" />
+          Task Configuration
+        </h3>
+        {isInit && dirty && (
+          <button
+            type="button"
+            onClick={handleSave}
+            disabled={saving}
+            className="flex items-center gap-1.5 rounded-md bg-primary px-3 py-1 text-xs text-primary-foreground hover:bg-primary/90 transition-colors disabled:opacity-50"
+          >
+            {saving ? <Loader2 className="h-3 w-3 animate-spin" /> : <Save className="h-3 w-3" />}
+            Save
+          </button>
+        )}
+      </div>
+      <div className="rounded-lg border border-border bg-card p-4 space-y-4">
+        <div>
+          <label className="text-xs font-medium text-muted-foreground">Requirement</label>
+          {isInit ? (
+            <textarea
+              value={editReq}
+              onChange={(e) => { setEditReq(e.target.value); setDirty(true); }}
+              rows={3}
+              className="mt-1 w-full rounded-lg border border-border bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary/50 resize-none"
+            />
+          ) : (
+            <p className="mt-1 text-sm whitespace-pre-wrap">{task.requirement}</p>
+          )}
+        </div>
+        <div>
+          <label className="text-xs font-medium text-muted-foreground flex items-center gap-1">
+            <FolderOpen className="h-3 w-3" />
+            Work Directory
+          </label>
+          {isInit ? (
+            <input
+              type="text"
+              value={editWorkDir}
+              onChange={(e) => { setEditWorkDir(e.target.value); setDirty(true); }}
+              placeholder="/path/to/working/directory"
+              className="mt-1 w-full rounded-lg border border-border bg-background px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-primary/50"
+            />
+          ) : (
+            <p className="mt-1 text-sm font-mono">{task.work_dir || "—"}</p>
+          )}
+        </div>
+        <div>
+          <label className="text-xs font-medium text-muted-foreground">Config (JSON)</label>
+          {isInit ? (
+            <textarea
+              value={editConfig}
+              onChange={(e) => { setEditConfig(e.target.value); setDirty(true); }}
+              rows={4}
+              className="mt-1 w-full rounded-lg border border-border bg-background px-3 py-2 text-xs font-mono focus:outline-none focus:ring-2 focus:ring-primary/50 resize-none"
+            />
+          ) : (
+            <pre className="mt-1 text-xs font-mono whitespace-pre-wrap bg-muted rounded-lg px-3 py-2">
+              {JSON.stringify(task.config || {}, null, 2)}
+            </pre>
+          )}
+        </div>
+        {isInit && (
+          <p className="text-xs text-muted-foreground">
+            Edit the configuration above, then click <strong>Start</strong> to begin execution.
+          </p>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function OverviewTab({ task }: { task: TaskDetail }) {
   const steps = task.steps || [];
   const done = steps.filter((s) => s.status === "completed").length;
@@ -288,12 +402,7 @@ function OverviewTab({ task }: { task: TaskDetail }) {
         </div>
       </div>
 
-      <div>
-        <h3 className="text-sm font-semibold mb-2">Requirement</h3>
-        <div className="rounded-lg border border-border bg-card px-4 py-3">
-          <p className="text-sm whitespace-pre-wrap">{task.requirement}</p>
-        </div>
-      </div>
+      <TaskConfigSection task={task} />
 
       {task.result_summary && (
         <div>
@@ -872,7 +981,7 @@ export function TaskDetailPage({ taskId, onBack }: TaskDetailPageProps) {
           if (stopped) return;
           setTask(t);
           setError("");
-          if (["completed", "failed", "cancelled", "stopped"].includes(t.status)) {
+          if (["completed", "failed", "cancelled", "stopped", "init"].includes(t.status)) {
             clearInterval(timer);
           }
         })
@@ -921,7 +1030,7 @@ export function TaskDetailPage({ taskId, onBack }: TaskDetailPageProps) {
               Stop
             </button>
           )}
-          {task && ["stopped", "failed", "cancelled"].includes(task.status) && (
+          {task && ["stopped", "failed", "cancelled", "init"].includes(task.status) && (
             <button
               type="button"
               onClick={() => startTask(taskId).then(() => {})}

@@ -16,21 +16,27 @@ async def create_task(
     requirement: str,
     goal_id: str = "",
     project_root: str = "",
+    work_dir: str = "",
+    config: dict[str, Any] | None = None,
+    status: str = "pending",
     correlation_id: str = "",
     origin_channel_id: str = "",
     pool: asyncpg.Pool | None = None,
 ) -> dict[str, Any]:
+    import json
     pool = pool or get_pool()
     now = datetime.now(timezone.utc)
+    config_json = json.dumps(config or {})
     await pool.execute(
         """
-        INSERT INTO tasks (id, requirement, goal_id, project_root,
-                           correlation_id, origin_channel_id, created_at, updated_at)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $7)
+        INSERT INTO tasks (id, requirement, goal_id, project_root, work_dir,
+                           config, status, correlation_id, origin_channel_id,
+                           created_at, updated_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $10)
         ON CONFLICT (id) DO NOTHING
         """,
-        task_id, requirement, goal_id, project_root,
-        correlation_id, origin_channel_id, now,
+        task_id, requirement, goal_id, project_root, work_dir,
+        config_json, status, correlation_id, origin_channel_id, now,
     )
     return {"task_id": task_id, "created_at": now.isoformat()}
 
@@ -146,6 +152,39 @@ async def mark_orphaned_tasks_stopped(
     )
     count = int(result.split()[-1]) if result else 0
     return count
+
+
+async def update_task_config(
+    task_id: str,
+    *,
+    requirement: str | None = None,
+    work_dir: str | None = None,
+    config: dict[str, Any] | None = None,
+    pool: asyncpg.Pool | None = None,
+) -> bool:
+    import json
+    pool = pool or get_pool()
+    sets: list[str] = []
+    args: list[Any] = [task_id]
+    idx = 2
+    if requirement is not None:
+        sets.append(f"requirement = ${idx}")
+        args.append(requirement)
+        idx += 1
+    if work_dir is not None:
+        sets.append(f"work_dir = ${idx}")
+        args.append(work_dir)
+        idx += 1
+    if config is not None:
+        sets.append(f"config = ${idx}")
+        args.append(json.dumps(config))
+        idx += 1
+    if not sets:
+        return False
+    sets.append("updated_at = now()")
+    sql = f"UPDATE tasks SET {', '.join(sets)} WHERE id = $1 AND status = 'init'"
+    result = await pool.execute(sql, *args)
+    return result == "UPDATE 1"
 
 
 async def list_tasks(

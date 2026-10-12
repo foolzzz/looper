@@ -115,8 +115,38 @@ export async function startTask(taskId: string): Promise<void> {
   if (!res.ok) throw new Error(`start ${res.status}`);
 }
 
+export async function createTask(params: {
+  requirement: string;
+  work_dir?: string;
+  config?: Record<string, unknown>;
+  goal_id?: string;
+  project_root?: string;
+}): Promise<{ task_id: string; status: string; created_at: string }> {
+  const res = await fetch(`${API_BASE}/tasks/create`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(params),
+  });
+  if (!res.ok) throw new Error(`create task ${res.status}`);
+  return res.json();
+}
+
+export async function updateTaskConfig(
+  taskId: string,
+  fields: { requirement?: string; work_dir?: string; config?: Record<string, unknown> },
+): Promise<void> {
+  const res = await fetch(`${API_BASE}/tasks/${taskId}/config`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(fields),
+  });
+  if (!res.ok) throw new Error(`update task config ${res.status}`);
+}
+
 export interface TaskDetail extends TaskInfo {
   project_root: string;
+  work_dir: string;
+  config: Record<string, unknown>;
   origin_channel_id: string;
   result_summary: string | null;
   error: string | null;
