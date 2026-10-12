@@ -119,7 +119,8 @@ Single-page React app served from `web/dist/` via the built-in HTTP server
 - **Chat**: Conversation with the global Manager or with a running task's Planner; the selector lists the live Planner instances, and each Planner keeps one thread per task; SSE streaming
 - **Tasks**: Task list with status filter, time display, Start/Stop/Delete controls
 - **Task Detail**: Overview (steps, agent timeline, live activity feed), Pipeline DAG (React Flow), Sessions, Conversation
-- **Agents**: Agent configuration editor (system prompt replace/append, LLM profiles, permissions), session viewer with full LLM traffic
+- **Agents**: Agent configuration editor (system prompt replace/append, LLM profiles, permissions); a Runs tab lists every recorded Claude run of the role (Manager, or Workers and reviewers)
+- **Agent history** (`#history/<agent-id>?task=<task-id>`): opened from History on an Agent Timeline row, a Runs entry or the Chat page. For each Claude run it shows status, model, tokens, cost, the launch command (cwd and argv, copyable) and the full transcript, following a running run every 2 s. A running run shows its last output time from the record's heartbeat and is flagged after 2 minutes with no output. A Planner, which runs no LLM, shows its activity and your chat with it.
 - **Settings**: Enable and configure the Telegram and Lark channels
 
 ### Real-Time Updates
@@ -133,7 +134,8 @@ Single-page React app served from `web/dist/` via the built-in HTTP server
 SPA uses `#page/sub` format for deep linking that survives browser refresh:
 - `#tasks/task-id` → task detail
 - `#agents/agent-id` → agent config
-- `#agents/agent-id/sessions` → agent sessions
+- `#agents/agent-id/sessions` → the role's runs
+- `#history/agent-id?task=task-id` → one agent's history
 
 ## HTTP API
 
@@ -153,9 +155,10 @@ SPA uses `#page/sub` format for deep linking that survives browser refresh:
 | `/api/chat/messages` | GET/POST | Chat history |
 | `/api/agent-configs` | GET | List agents |
 | `/api/agent-configs/:id` | GET/PUT | Agent config CRUD |
-| `/api/agents/:id/sessions` | GET | Agent sessions |
 | `/api/llm-profiles` | GET/POST | LLM profiles |
-| `/api/llm-records` | GET | LLM traffic records |
+| `/api/llm-records` | GET | Claude runs; filter by `agent_id`, `task_id` or `role` (`manager`, `worker`) |
+| `/api/llm-records/:id` | GET | One run (status, usage, cost, launch command, heartbeat) |
+| `/api/llm-records/:id/events?after=N` | GET | The run's stream-json events after seq N |
 | `/api/channel-configs` | GET | List channels |
 | `/api/channel-configs/:id` | GET/PUT | Channel config |
 
