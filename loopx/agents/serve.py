@@ -51,80 +51,76 @@ async def _run_agent_system(
 ) -> None:
     """Start the full agent system and run until interrupted."""
 
-    # --- Database ---
-    db_pool = None
-    try:
-        from ..db import init_pool, ensure_schema, close_pool
-        from ..db.agent_configs import seed_defaults as seed_agent_configs
-        from ..db.llm_profiles import seed_defaults as seed_llm_profiles
-        from .tiers.manager import DEFAULT_SYSTEM_PROMPT
+    # --- Database (required) ---
+    from ..db import init_pool, ensure_schema, close_pool
+    from ..db.agent_configs import seed_defaults as seed_agent_configs
+    from ..db.llm_profiles import seed_defaults as seed_llm_profiles
+    from .tiers.manager import DEFAULT_SYSTEM_PROMPT
 
-        db_pool = await init_pool()
-        await ensure_schema(db_pool)
+    pool = await init_pool()
+    await ensure_schema(pool)
 
-        await seed_llm_profiles([
-            {
-                "name": "anthropic-default",
-                "display_name": "Anthropic (Claude)",
-                "provider_kind": "anthropic",
-                "model": "claude-sonnet-4-20250514",
-                "description": "Default Anthropic provider — used with Claude Code CLI",
-            },
-            {
-                "name": "openai-default",
-                "display_name": "OpenAI",
-                "provider_kind": "openai",
-                "model": "o3",
-                "description": "Default OpenAI provider — used with Codex CLI",
-            },
-        ])
+    await seed_llm_profiles([
+        {
+            "name": "anthropic-default",
+            "display_name": "Anthropic (Claude)",
+            "provider_kind": "anthropic",
+            "model": "claude-sonnet-4-20250514",
+            "description": "Default Anthropic provider — used with Claude Code CLI",
+        },
+        {
+            "name": "openai-default",
+            "display_name": "OpenAI",
+            "provider_kind": "openai",
+            "model": "o3",
+            "description": "Default OpenAI provider — used with Codex CLI",
+        },
+    ])
 
-        await seed_agent_configs([
-            {
-                "agent_id": "manager",
-                "display_name": "Manager (管家)",
-                "role": "manager",
-                "runtime": "claude-code",
-                "system_prompt": DEFAULT_SYSTEM_PROMPT,
-                "timeout_seconds": 0,
-            },
-            {
-                "agent_id": "planner",
-                "display_name": "Planner",
-                "role": "planner",
-                "runtime": "claude-code",
-                "timeout_seconds": 1200,
-                "system_prompt": (
-                    "You are a Planner Agent. Your job is to:\n"
-                    "1. Receive a task requirement\n"
-                    "2. Decompose it into concrete, executable steps\n"
-                    "3. Dispatch steps to Worker agents\n"
-                    "4. Monitor progress and verify results\n"
-                    "5. Report task completion or failure\n\n"
-                    "Always decompose complex tasks into multiple focused steps. "
-                    "Each step should be independently executable and verifiable."
-                ),
-            },
-            {
-                "agent_id": "worker",
-                "display_name": "Worker",
-                "role": "worker",
-                "runtime": "claude-code",
-                "max_concurrency": 3,
-                "timeout_seconds": 600,
-                "system_prompt": (
-                    "You are a Worker Agent. Execute the assigned task precisely:\n"
-                    "1. Read and understand the instruction\n"
-                    "2. Make the required code changes\n"
-                    "3. Run validation commands if provided\n"
-                    "4. Report results as structured JSON\n\n"
-                    "Focus on the specific task. Do not make changes beyond what is requested."
-                ),
-            },
-        ])
-        logger.info("database initialised")
-    except Exception:
-        logger.warning("database unavailable — running without persistence", exc_info=True)
+    await seed_agent_configs([
+        {
+            "agent_id": "manager",
+            "display_name": "Manager (管家)",
+            "role": "manager",
+            "runtime": "claude-code",
+            "system_prompt": DEFAULT_SYSTEM_PROMPT,
+            "timeout_seconds": 0,
+        },
+        {
+            "agent_id": "planner",
+            "display_name": "Planner",
+            "role": "planner",
+            "runtime": "claude-code",
+            "timeout_seconds": 1200,
+            "system_prompt": (
+                "You are a Planner Agent. Your job is to:\n"
+                "1. Receive a task requirement\n"
+                "2. Decompose it into concrete, executable steps\n"
+                "3. Dispatch steps to Worker agents\n"
+                "4. Monitor progress and verify results\n"
+                "5. Report task completion or failure\n\n"
+                "Always decompose complex tasks into multiple focused steps. "
+                "Each step should be independently executable and verifiable."
+            ),
+        },
+        {
+            "agent_id": "worker",
+            "display_name": "Worker",
+            "role": "worker",
+            "runtime": "claude-code",
+            "max_concurrency": 3,
+            "timeout_seconds": 600,
+            "system_prompt": (
+                "You are a Worker Agent. Execute the assigned task precisely:\n"
+                "1. Read and understand the instruction\n"
+                "2. Make the required code changes\n"
+                "3. Run validation commands if provided\n"
+                "4. Report results as structured JSON\n\n"
+                "Focus on the specific task. Do not make changes beyond what is requested."
+            ),
+        },
+    ])
+    logger.info("database initialised")
 
     broadcaster = Broadcaster()
 
@@ -217,12 +213,7 @@ async def _run_agent_system(
     await supervisor.stop_all()
     await registry.stop_all()
     await bus.shutdown()
-    if db_pool is not None:
-        try:
-            from ..db import close_pool
-            await close_pool()
-        except Exception:
-            pass
+    await close_pool()
     logger.info("agent system stopped")
 
 

@@ -31,13 +31,9 @@ from ..message import (
 
 logger = logging.getLogger(__name__)
 
-try:
-    from ...db import activity as db_activity
-    from ...db import agent_configs as db_agent_configs
-    from ...db import llm_records as db_llm_records
-    _HAS_DB = True
-except Exception:
-    _HAS_DB = False
+from ...db import activity as db_activity
+from ...db import agent_configs as db_agent_configs
+from ...db import llm_records as db_llm_records
 
 DEFAULT_SYSTEM_PROMPT = """\
 You are the Manager Agent (管家) for LoopX, an autonomous multi-agent programming system.
@@ -162,8 +158,6 @@ class ManagerAgent:
 
     async def _load_db_config(self) -> None:
         """Load system prompt and config from DB, fall back to defaults."""
-        if not _HAS_DB:
-            return
         try:
             config = await db_agent_configs.get_config("manager")
             if config and config.get("system_prompt"):
@@ -395,30 +389,29 @@ class ManagerAgent:
         final_text = "".join(text_parts) or result_text
         task_id = context_envelope.metadata.get("task_id")
 
-        if _HAS_DB:
+        try:
+            await db_llm_records.insert_record(
+                agent_id="manager",
+                task_id=task_id,
+                session_id=self._session_id,
+                input_summary=message[:500],
+                output_summary=final_text[:500] if final_text else None,
+                duration_ms=duration_ms,
+            )
+        except Exception:
+            logger.debug("failed to record llm invocation", exc_info=True)
+
+        if task_id:
             try:
-                await db_llm_records.insert_record(
-                    agent_id="manager",
+                await db_activity.insert_activity(
                     task_id=task_id,
-                    session_id=self._session_id,
-                    input_summary=message[:500],
-                    output_summary=final_text[:500] if final_text else None,
-                    duration_ms=duration_ms,
+                    worker="manager",
+                    kind="text",
+                    summary=final_text[:500] if final_text else None,
+                    detail=final_text if len(final_text) > 500 else None,
                 )
             except Exception:
-                logger.debug("failed to record llm invocation", exc_info=True)
-
-            if task_id:
-                try:
-                    await db_activity.insert_activity(
-                        task_id=task_id,
-                        worker="manager",
-                        kind="text",
-                        summary=final_text[:500] if final_text else None,
-                        detail=final_text if len(final_text) > 500 else None,
-                    )
-                except Exception:
-                    logger.debug("failed to record manager activity", exc_info=True)
+                logger.debug("failed to record manager activity", exc_info=True)
 
         return final_text
 
