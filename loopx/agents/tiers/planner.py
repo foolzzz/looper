@@ -1,8 +1,10 @@
 """Planner Agent: task decomposition, dispatch, and monitoring.
 
-Receives structured task requests from the Manager, decomposes them into
-work items using an LLM, dispatches Workers, collects results, and applies
-verification strategy C (self-verify simple, spawn Reviewer for complex).
+Each PlannerAgent instance handles a single task. It receives the initial
+TASK_REQUEST, decomposes it into PlanSteps, dispatches Workers, collects
+results, and applies verification strategy C (self-verify simple, spawn
+Reviewer for complex). When the task completes or fails, the Planner
+signals the TaskRouter to tear it down.
 """
 
 from __future__ import annotations
@@ -18,10 +20,11 @@ from typing import Any
 from ..bus import MessageBus
 from ..message import (
     MANAGER_ADDRESS,
-    PLANNER_ADDRESS,
+    TASK_ROUTER_ADDRESS,
     AgentAddress,
     MessageEnvelope,
     MessageType,
+    planner_address,
     worker_address,
 )
 
@@ -106,41 +109,43 @@ class TaskPlan:
 
 
 class PlannerAgent:
-    """Task decomposition, dispatch, and monitoring."""
+    """Per-task Planner: one instance per task, one plan per instance."""
 
-    def __init__(self, *, runtime_root: Path) -> None:
+    def __init__(self, *, task_id: str, runtime_root: Path) -> None:
+        self._task_id = task_id
         self._runtime_root = runtime_root
         self._bus: MessageBus | None = None
-        self._active_plans: dict[str, TaskPlan] = {}
-        self._task: asyncio.Task[Any] | None = None
+        self._plan: TaskPlan | None = None
+        self._loop_task: asyncio.Task[Any] | None = None
         self._running = False
-        self._plans_dir = runtime_root / ".local" / "planner" / "plans"
+        self._plans_dir = runtime_root / ".local" / "planner" / f"planner-{task_id}"
         self._plans_dir.mkdir(parents=True, exist_ok=True)
 
     @property
     def agent_id(self) -> str:
-        return "planner"
+        return f"planner-{self._task_id}"
 
     @property
     def agent_address(self) -> AgentAddress:
-        return PLANNER_ADDRESS
+        return planner_address(self._task_id)
 
     async def start(self, bus: MessageBus) -> None:
         self._bus = bus
         self._running = True
-        self._load_active_plans()
-        self._task = asyncio.create_task(self._message_loop())
-        logger.info("planner agent started with %d active plans", len(self._active_plans))
+        self._load_plan()
+        self._loop_task = asyncio.create_task(self._message_loop())
+        logger.info("planner %s started", self.agent_id)
 
     async def stop(self) -> None:
         self._running = False
-        if self._task:
-            self._task.cancel()
+        if self._loop_task:
+            self._loop_task.cancel()
             try:
-                await self._task
+                await self._loop_task
             except asyncio.CancelledError:
                 pass
-        self._save_all_plans()
+        if self._plan:
+            self._save_plan(self._plan)
 
     def is_healthy(self) -> bool:
         return self._running
@@ -148,13 +153,13 @@ class PlannerAgent:
     async def _message_loop(self) -> None:
         assert self._bus is not None
         try:
-            async for envelope in self._bus.subscribe("planner"):
+            async for envelope in self._bus.subscribe(self.agent_id):
                 if not self._running:
                     break
                 try:
                     await self._handle(envelope)
                 except Exception:
-                    logger.exception("planner error handling %s", envelope.message_id)
+                    logger.exception("planner %s error handling %s", self.agent_id, envelope.message_id)
         except asyncio.CancelledError:
             pass
 
@@ -166,6 +171,8 @@ class PlannerAgent:
                 await self._handle_work_result(envelope)
             case MessageType.VERIFY_RESULT:
                 await self._handle_verify_result(envelope)
+            case MessageType.TASK_CANCEL:
+                await self._handle_cancel(envelope)
             case MessageType.SYSTEM_EVENT:
                 await self._handle_system_event(envelope)
 
@@ -183,19 +190,19 @@ class PlannerAgent:
             origin_channel_id=envelope.metadata.get("origin_channel_id", ""),
         )
 
-        # Decompose into steps
         steps = self._decompose_task(payload)
         plan.steps = steps
         plan.status = "executing"
-        self._active_plans[plan_id] = plan
+        self._plan = plan
         self._save_plan(plan)
 
-        # Notify Manager: task accepted with plan
+        # Notify TaskRouter + Manager: task accepted
         await self._bus.publish(MessageEnvelope.create(
-            source=PLANNER_ADDRESS,
-            target=MANAGER_ADDRESS,
+            source=self.agent_address,
+            target=TASK_ROUTER_ADDRESS,
             message_type=MessageType.TASK_ACCEPTED,
             payload={
+                "task_id": self._task_id,
                 "plan_id": plan_id,
                 "step_count": len(steps),
                 "steps": [{"step_id": s.step_id, "instruction": s.instruction} for s in steps],
@@ -204,20 +211,12 @@ class PlannerAgent:
             metadata=envelope.metadata,
         ))
 
-        # Report progress
         await self._report_progress(plan)
 
-        # Dispatch ready steps
         for step in plan.ready_steps()[:MAX_CONCURRENT_WORKERS]:
             await self._dispatch_step(plan, step)
 
     def _decompose_task(self, payload: dict[str, Any]) -> list[PlanStep]:
-        """Decompose a task request into plan steps.
-
-        In production, this uses an LLM call. For now, creates a single step
-        matching the requirement. The LLM-driven decomposition will be added
-        when the Manager→Planner pipeline is validated end-to-end.
-        """
         requirement = payload.get("requirement", "")
         step = PlanStep(
             step_id=f"step-{uuid.uuid4().hex[:8]}",
@@ -234,7 +233,7 @@ class PlannerAgent:
         step.worker_id = worker_id
 
         await self._bus.publish(MessageEnvelope.create(
-            source=PLANNER_ADDRESS,
+            source=self.agent_address,
             target=worker_address(worker_id),
             message_type=MessageType.WORK_ITEM,
             payload={
@@ -255,14 +254,11 @@ class PlannerAgent:
     async def _handle_work_result(self, envelope: MessageEnvelope) -> None:
         assert self._bus is not None
         result = envelope.payload
-        plan_id = result.get("plan_id", "")
-        task_id = result.get("task_id", "")
-
-        plan = self._active_plans.get(plan_id)
+        plan = self._plan
         if not plan:
-            logger.warning("received work result for unknown plan %s", plan_id)
             return
 
+        task_id = result.get("task_id", "")
         step = next((s for s in plan.steps if s.step_id == task_id), None)
         if not step:
             return
@@ -270,7 +266,6 @@ class PlannerAgent:
         step.result = result
 
         if result.get("status") == "completed":
-            # Verification strategy C: simple → self-verify, complex → spawn Reviewer
             if step.complexity == "complex":
                 step.status = "completed"
                 await self._spawn_reviewer(plan, step)
@@ -287,7 +282,6 @@ class PlannerAgent:
         elif plan.has_failed:
             await self._fail_plan(plan)
         else:
-            # Dispatch next ready steps
             for next_step in plan.ready_steps()[:MAX_CONCURRENT_WORKERS]:
                 await self._dispatch_step(plan, next_step)
 
@@ -296,7 +290,7 @@ class PlannerAgent:
         reviewer_id = f"reviewer-{uuid.uuid4().hex[:12]}"
 
         await self._bus.publish(MessageEnvelope.create(
-            source=PLANNER_ADDRESS,
+            source=self.agent_address,
             target=worker_address(reviewer_id),
             message_type=MessageType.VERIFY_REQUEST,
             payload={
@@ -311,13 +305,11 @@ class PlannerAgent:
 
     async def _handle_verify_result(self, envelope: MessageEnvelope) -> None:
         result = envelope.payload
-        plan_id = result.get("plan_id", "")
-        task_id = result.get("task_id", "")
-
-        plan = self._active_plans.get(plan_id)
+        plan = self._plan
         if not plan:
             return
 
+        task_id = result.get("task_id", "")
         step = next((s for s in plan.steps if s.step_id == task_id), None)
         if not step:
             return
@@ -337,11 +329,18 @@ class PlannerAgent:
         elif plan.has_failed:
             await self._fail_plan(plan)
 
+    async def _handle_cancel(self, envelope: MessageEnvelope) -> None:
+        logger.info("planner %s received cancel", self.agent_id)
+        if self._plan:
+            self._plan.status = "failed"
+            self._save_plan(self._plan)
+        self._running = False
+
     async def _handle_system_event(self, envelope: MessageEnvelope) -> None:
         event_type = envelope.payload.get("type", "")
         if event_type == "pause":
             scope = envelope.payload.get("scope", "")
-            logger.info("pausing work related to %s", scope)
+            logger.info("planner %s pausing work related to %s", self.agent_id, scope)
 
     async def _complete_plan(self, plan: TaskPlan) -> None:
         assert self._bus is not None
@@ -357,10 +356,11 @@ class PlannerAgent:
                 summary_parts.append(f"  - {step.instruction[:50]}: 完成")
 
         await self._bus.publish(MessageEnvelope.create(
-            source=PLANNER_ADDRESS,
-            target=MANAGER_ADDRESS,
+            source=self.agent_address,
+            target=TASK_ROUTER_ADDRESS,
             message_type=MessageType.GOAL_STATUS,
             payload={
+                "task_id": self._task_id,
                 "goal_id": plan.goal_id,
                 "plan_id": plan.plan_id,
                 "status": "completed",
@@ -370,8 +370,6 @@ class PlannerAgent:
             correlation_id=plan.correlation_id,
             metadata={"origin_channel_id": plan.origin_channel_id},
         ))
-
-        self._active_plans.pop(plan.plan_id, None)
 
     async def _fail_plan(self, plan: TaskPlan) -> None:
         assert self._bus is not None
@@ -385,10 +383,11 @@ class PlannerAgent:
         ]
 
         await self._bus.publish(MessageEnvelope.create(
-            source=PLANNER_ADDRESS,
-            target=MANAGER_ADDRESS,
+            source=self.agent_address,
+            target=TASK_ROUTER_ADDRESS,
             message_type=MessageType.GOAL_STATUS,
             payload={
+                "task_id": self._task_id,
                 "goal_id": plan.goal_id,
                 "plan_id": plan.plan_id,
                 "status": "failed",
@@ -402,10 +401,11 @@ class PlannerAgent:
     async def _report_progress(self, plan: TaskPlan) -> None:
         assert self._bus is not None
         await self._bus.publish(MessageEnvelope.create(
-            source=PLANNER_ADDRESS,
-            target=MANAGER_ADDRESS,
+            source=self.agent_address,
+            target=TASK_ROUTER_ADDRESS,
             message_type=MessageType.GOAL_STATUS,
             payload={
+                "task_id": self._task_id,
                 "goal_id": plan.goal_id,
                 "plan_id": plan.plan_id,
                 "status": plan.status,
@@ -426,18 +426,14 @@ class PlannerAgent:
         data["project_root"] = plan.project_root
         path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
 
-    def _save_all_plans(self) -> None:
-        for plan in self._active_plans.values():
-            self._save_plan(plan)
-
-    def _load_active_plans(self) -> None:
+    def _load_plan(self) -> None:
         if not self._plans_dir.exists():
             return
         for path in self._plans_dir.glob("*.json"):
             try:
                 data = json.loads(path.read_text(encoding="utf-8"))
                 if data.get("status") in ("planning", "executing", "verifying"):
-                    plan = TaskPlan(
+                    self._plan = TaskPlan(
                         plan_id=data["plan_id"],
                         goal_id=data.get("goal_id", ""),
                         requirement=data.get("requirement", ""),
@@ -447,7 +443,7 @@ class PlannerAgent:
                         origin_channel_id=data.get("origin_channel_id", ""),
                     )
                     for sd in data.get("steps", []):
-                        plan.steps.append(PlanStep(
+                        self._plan.steps.append(PlanStep(
                             step_id=sd["step_id"],
                             index=sd.get("index", 0),
                             instruction=sd.get("instruction", ""),
@@ -455,6 +451,6 @@ class PlannerAgent:
                             complexity=sd.get("complexity", "simple"),
                             target_files=sd.get("target_files", []),
                         ))
-                    self._active_plans[plan.plan_id] = plan
+                    break
             except (json.JSONDecodeError, KeyError):
                 logger.warning("skipping corrupt plan file %s", path)

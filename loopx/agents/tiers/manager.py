@@ -23,7 +23,7 @@ from typing import Any
 from ..bus import MessageBus
 from ..message import (
     MANAGER_ADDRESS,
-    PLANNER_ADDRESS,
+    TASK_ROUTER_ADDRESS,
     AgentAddress,
     MessageEnvelope,
     MessageType,
@@ -171,10 +171,10 @@ class ManagerAgent:
                 metadata={"origin_channel_id": envelope.metadata.get("origin_channel_id")},
             ))
         elif parsed.get("is_task_request"):
-            # Forward to Planner
+            # Forward to TaskRouter
             await self._bus.publish(MessageEnvelope.create(
                 source=MANAGER_ADDRESS,
-                target=PLANNER_ADDRESS,
+                target=TASK_ROUTER_ADDRESS,
                 message_type=MessageType.TASK_REQUEST,
                 payload={
                     "goal_id": parsed.get("goal_id", ""),

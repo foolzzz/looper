@@ -14,10 +14,11 @@ import pytest
 from loopx.agents.bus import MessageBus
 from loopx.agents.message import (
     MANAGER_ADDRESS,
-    PLANNER_ADDRESS,
+    TASK_ROUTER_ADDRESS,
     AgentAddress,
     MessageEnvelope,
     MessageType,
+    planner_address,
     worker_address,
 )
 from loopx.agents.tiers.planner import PlanStep, PlannerAgent, TaskPlan
@@ -135,7 +136,7 @@ class TestPlannerAgent:
     def test_decompose_task(self) -> None:
         async def _run() -> None:
             with tempfile.TemporaryDirectory() as tmp:
-                planner = PlannerAgent(runtime_root=Path(tmp))
+                planner = PlannerAgent(task_id="test-1", runtime_root=Path(tmp))
                 payload = {"requirement": "add login page"}
                 steps = planner._decompose_task(payload)
                 assert len(steps) == 1
@@ -143,16 +144,23 @@ class TestPlannerAgent:
 
         asyncio.run(_run())
 
+    def test_agent_id_includes_task_id(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            planner = PlannerAgent(task_id="abc-123", runtime_root=Path(tmp))
+            assert planner.agent_id == "planner-abc-123"
+            assert planner.agent_address == planner_address("abc-123")
+
     def test_plan_and_dispatch(self) -> None:
         async def _run() -> None:
             with tempfile.TemporaryDirectory() as tmp:
                 bus = MessageBus(runtime_root=Path(tmp))
-                planner = PlannerAgent(runtime_root=Path(tmp))
+                planner = PlannerAgent(task_id="test-pd", runtime_root=Path(tmp))
                 await planner.start(bus)
 
+                addr = planner.agent_address
                 envelope = MessageEnvelope.create(
-                    source=MANAGER_ADDRESS,
-                    target=PLANNER_ADDRESS,
+                    source=TASK_ROUTER_ADDRESS,
+                    target=addr,
                     message_type=MessageType.TASK_REQUEST,
                     payload={
                         "goal_id": "g1",
@@ -162,22 +170,21 @@ class TestPlannerAgent:
                     metadata={"origin_channel_id": "channel-web"},
                 )
                 await bus.publish(envelope)
-
-                # Give planner time to process
                 await asyncio.sleep(0.1)
 
-                # Check: planner should have published TASK_ACCEPTED + GOAL_STATUS
-                manager_q = bus.get_queue("manager")
+                # Check: planner should have published TASK_ACCEPTED + GOAL_STATUS to task-router
+                router_q = bus.get_queue("task-router")
                 messages: list[MessageEnvelope] = []
-                while not manager_q.empty():
-                    messages.append(await manager_q.get())
+                while not router_q.empty():
+                    messages.append(await router_q.get())
 
                 types = [m.message_type for m in messages]
                 assert MessageType.TASK_ACCEPTED in types
                 assert MessageType.GOAL_STATUS in types
 
                 # Check plan was persisted
-                plan_files = list(Path(tmp).glob(".local/planner/plans/*.json"))
+                plan_dir = Path(tmp) / ".local" / "planner" / "planner-test-pd"
+                plan_files = list(plan_dir.glob("*.json"))
                 assert len(plan_files) >= 1
 
                 await planner.stop()
@@ -191,13 +198,13 @@ class TestPlannerAgent:
         async def _run() -> None:
             with tempfile.TemporaryDirectory() as tmp:
                 bus = MessageBus(runtime_root=Path(tmp))
-                planner = PlannerAgent(runtime_root=Path(tmp))
+                planner = PlannerAgent(task_id="test-av", runtime_root=Path(tmp))
                 await planner.start(bus)
 
-                # Create a plan manually
+                addr = planner.agent_address
                 envelope = MessageEnvelope.create(
-                    source=MANAGER_ADDRESS,
-                    target=PLANNER_ADDRESS,
+                    source=TASK_ROUTER_ADDRESS,
+                    target=addr,
                     message_type=MessageType.TASK_REQUEST,
                     payload={
                         "goal_id": "g1",
@@ -209,16 +216,14 @@ class TestPlannerAgent:
                 await bus.publish(envelope)
                 await asyncio.sleep(0.1)
 
-                # Find the plan
-                assert len(planner._active_plans) == 1
-                plan = list(planner._active_plans.values())[0]
+                plan = planner._plan
+                assert plan is not None
                 step = plan.steps[0]
                 assert step.complexity == "simple"
 
-                # Simulate work result
                 result_env = MessageEnvelope.create(
                     source=worker_address("w1"),
-                    target=PLANNER_ADDRESS,
+                    target=addr,
                     message_type=MessageType.WORK_RESULT,
                     payload={
                         "task_id": step.step_id,
@@ -231,9 +236,8 @@ class TestPlannerAgent:
                 await bus.publish(result_env)
                 await asyncio.sleep(0.1)
 
-                # Simple task: should be auto-verified and plan completed
                 assert step.status == "verified"
-                assert plan.plan_id not in planner._active_plans
+                assert plan.status == "completed"
 
                 await planner.stop()
                 await bus.shutdown()
@@ -246,12 +250,13 @@ class TestPlannerAgent:
         async def _run() -> None:
             with tempfile.TemporaryDirectory() as tmp:
                 bus = MessageBus(runtime_root=Path(tmp))
-                planner = PlannerAgent(runtime_root=Path(tmp))
+                planner = PlannerAgent(task_id="test-cr", runtime_root=Path(tmp))
                 await planner.start(bus)
 
+                addr = planner.agent_address
                 envelope = MessageEnvelope.create(
-                    source=MANAGER_ADDRESS,
-                    target=PLANNER_ADDRESS,
+                    source=TASK_ROUTER_ADDRESS,
+                    target=addr,
                     message_type=MessageType.TASK_REQUEST,
                     payload={
                         "goal_id": "g1",
@@ -263,14 +268,14 @@ class TestPlannerAgent:
                 await bus.publish(envelope)
                 await asyncio.sleep(0.1)
 
-                plan = list(planner._active_plans.values())[0]
+                plan = planner._plan
+                assert plan is not None
                 step = plan.steps[0]
-                # Override to complex
                 step.complexity = "complex"
 
                 result_env = MessageEnvelope.create(
                     source=worker_address("w1"),
-                    target=PLANNER_ADDRESS,
+                    target=addr,
                     message_type=MessageType.WORK_RESULT,
                     payload={
                         "task_id": step.step_id,
@@ -282,10 +287,8 @@ class TestPlannerAgent:
                 await bus.publish(result_env)
                 await asyncio.sleep(0.1)
 
-                # Complex: step should be completed (not verified), reviewer spawned
                 assert step.status == "completed"
-                # Plan should still be active (waiting for verify)
-                assert plan.plan_id in planner._active_plans
+                assert plan.status == "executing"
 
                 # Check that VERIFY_REQUEST was published
                 collected: list[MessageEnvelope] = []
@@ -305,12 +308,13 @@ class TestPlannerAgent:
         async def _run() -> None:
             with tempfile.TemporaryDirectory() as tmp:
                 bus = MessageBus(runtime_root=Path(tmp))
-                planner = PlannerAgent(runtime_root=Path(tmp))
+                planner = PlannerAgent(task_id="test-pr", runtime_root=Path(tmp))
                 await planner.start(bus)
 
+                addr = planner.agent_address
                 envelope = MessageEnvelope.create(
-                    source=MANAGER_ADDRESS,
-                    target=PLANNER_ADDRESS,
+                    source=TASK_ROUTER_ADDRESS,
+                    target=addr,
                     message_type=MessageType.TASK_REQUEST,
                     payload={
                         "goal_id": "g1",
@@ -322,17 +326,17 @@ class TestPlannerAgent:
                 await bus.publish(envelope)
                 await asyncio.sleep(0.1)
 
-                assert len(planner._active_plans) == 1
-                plan_id = list(planner._active_plans.keys())[0]
+                assert planner._plan is not None
+                plan_id = planner._plan.plan_id
 
                 await planner.stop()
 
-                # Create new planner, should recover the plan
-                planner2 = PlannerAgent(runtime_root=Path(tmp))
+                planner2 = PlannerAgent(task_id="test-pr", runtime_root=Path(tmp))
                 bus2 = MessageBus(runtime_root=Path(tmp))
                 await planner2.start(bus2)
 
-                assert plan_id in planner2._active_plans
+                assert planner2._plan is not None
+                assert planner2._plan.plan_id == plan_id
                 await planner2.stop()
                 await bus.shutdown()
                 await bus2.shutdown()

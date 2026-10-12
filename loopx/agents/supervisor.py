@@ -75,6 +75,23 @@ class AgentSupervisor:
             max_restarts=max_restarts,
         )
 
+    def register_dynamic(
+        self,
+        agent: ManagedAgent,
+    ) -> None:
+        """Register an agent that is managed externally (e.g. by TaskRouter).
+
+        Dynamic agents are tracked for status reporting but NOT restarted
+        by the health loop — their owner manages lifecycle.
+        """
+        self._agents[agent.agent_id] = AgentEntry(
+            agent=agent,
+            max_restarts=0,
+        )
+
+    def unregister(self, agent_id: str) -> None:
+        self._agents.pop(agent_id, None)
+
     async def start_all(self) -> None:
         """Start the agent hierarchy in order."""
         self._running = True
@@ -135,6 +152,8 @@ class AgentSupervisor:
             if not self._running:
                 break
             for agent_id, entry in list(self._agents.items()):
+                if entry.max_restarts == 0:
+                    continue
                 if not entry.agent.is_healthy():
                     logger.warning("agent %s unhealthy", agent_id)
                     entry.healthy = False

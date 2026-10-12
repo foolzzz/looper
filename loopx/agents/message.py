@@ -33,6 +33,9 @@ class MessageType(str, Enum):
     WORK_RESULT = "work_result"
     WORK_PROGRESS = "work_progress"
 
+    # Task lifecycle
+    TASK_CANCEL = "task_cancel"
+
     # Verification (方案 C)
     VERIFY_REQUEST = "verify_request"
     VERIFY_RESULT = "verify_result"
@@ -208,7 +211,14 @@ class AgentLifecyclePayload(TypedDict, total=False):
 # --- Address helpers ---
 
 MANAGER_ADDRESS = AgentAddress(agent_type="manager", agent_id="manager")
+TASK_ROUTER_ADDRESS = AgentAddress(agent_type="task_router", agent_id="task-router")
+
+# Kept for backwards compatibility in tests; prefer planner_address(task_id).
 PLANNER_ADDRESS = AgentAddress(agent_type="planner", agent_id="planner")
+
+
+def planner_address(task_id: str) -> AgentAddress:
+    return AgentAddress(agent_type="planner", agent_id=f"planner-{task_id}")
 
 
 def channel_address(channel: str, channel_id: str | None = None) -> AgentAddress:

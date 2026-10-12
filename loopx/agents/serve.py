@@ -29,7 +29,7 @@ from .channels.registry import ChannelRegistry
 from .channels.web import WebChannelAdapter
 from .supervisor import AgentSupervisor
 from .tiers.manager import ManagerAgent, ManagerConfig
-from .tiers.planner import PlannerAgent
+from .tiers.task import TaskRouter
 from .tiers.worker import WorkerConfig, WorkerPool
 
 logger = logging.getLogger(__name__)
@@ -49,7 +49,7 @@ async def _run_agent_system(
     """Start the full agent system and run until interrupted."""
 
     bus = MessageBus(runtime_root=runtime_root)
-    supervisor = AgentSupervisor(bus=bus)
+    supervisor = AgentSupervisor(bus=bus, runtime_root=runtime_root)
     registry = ChannelRegistry(bus=bus)
 
     # --- Channel Adapters ---
@@ -81,8 +81,8 @@ async def _run_agent_system(
     manager = ManagerAgent(config=manager_config, runtime_root=runtime_root)
     supervisor.register(manager)
 
-    planner = PlannerAgent(runtime_root=runtime_root)
-    supervisor.register(planner)
+    task_router = TaskRouter(runtime_root=runtime_root)
+    supervisor.register(task_router)
 
     worker_config = WorkerConfig(
         claude_bin=claude_bin,
