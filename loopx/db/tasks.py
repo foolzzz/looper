@@ -99,6 +99,18 @@ async def get_task_with_steps(task_id: str, *, pool: asyncpg.Pool | None = None)
     return result
 
 
+async def delete_task(
+    task_id: str,
+    *,
+    pool: asyncpg.Pool | None = None,
+) -> bool:
+    pool = pool or get_pool()
+    await pool.execute("DELETE FROM task_steps WHERE task_id = $1", task_id)
+    await pool.execute("DELETE FROM activity WHERE task_id = $1", task_id)
+    result = await pool.execute("DELETE FROM tasks WHERE id = $1", task_id)
+    return result == "DELETE 1"
+
+
 async def list_tasks(
     *, limit: int = 50, offset: int = 0, pool: asyncpg.Pool | None = None,
 ) -> list[dict[str, Any]]:

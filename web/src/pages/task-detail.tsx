@@ -349,7 +349,98 @@ function OverviewTab({ task }: { task: TaskDetail }) {
         </div>
       )}
 
+      <AgentTimeline taskId={task.task_id} />
+
       <LiveActivityFeed taskId={task.task_id} isActive={isActive} />
+    </div>
+  );
+}
+
+// --- Agent Timeline ---
+
+function AgentTimeline({ taskId }: { taskId: string }) {
+  const [events, setEvents] = useState<ActivityEvent[]>([]);
+
+  useEffect(() => {
+    fetchTaskActivity(taskId, 0, 500)
+      .then(({ activity }) => setEvents(activity))
+      .catch(() => {});
+  }, [taskId]);
+
+  if (events.length === 0) return null;
+
+  const grouped = new Map<string, ActivityEvent[]>();
+  for (const ev of events) {
+    const key = ev.worker || "system";
+    if (!grouped.has(key)) grouped.set(key, []);
+    grouped.get(key)!.push(ev);
+  }
+
+  const agentRole = (name: string) => {
+    if (name.startsWith("planner")) return "Planner";
+    if (name.startsWith("worker")) return "Worker";
+    if (name === "system") return "System";
+    return "Agent";
+  };
+
+  const agentColor = (name: string) => {
+    if (name.startsWith("planner")) return "text-blue-400 bg-blue-500/10 border-blue-500/30";
+    if (name.startsWith("worker")) return "text-emerald-400 bg-emerald-500/10 border-emerald-500/30";
+    return "text-muted-foreground bg-muted border-border";
+  };
+
+  return (
+    <div>
+      <h3 className="text-sm font-semibold mb-2">Agent Timeline</h3>
+      <div className="space-y-3">
+        {Array.from(grouped.entries()).map(([agent, agentEvents]) => {
+          const first = agentEvents[0];
+          const last = agentEvents[agentEvents.length - 1];
+          const duration = formatDuration(first.created_at, last.created_at);
+          const toolUses = agentEvents.filter((e) => e.kind === "tool_use").length;
+          const errors = agentEvents.filter((e) => e.kind === "error").length;
+          const colors = agentColor(agent);
+
+          return (
+            <div key={agent} className={cn("rounded-lg border px-4 py-3", colors)}>
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <Bot className="h-4 w-4" />
+                  <span className="text-sm font-medium">{agent}</span>
+                  <Badge variant="outline" className="text-[10px] py-0 h-4">
+                    {agentRole(agent)}
+                  </Badge>
+                </div>
+                <div className="flex items-center gap-3 text-xs opacity-70">
+                  <span>{agentEvents.length} events</span>
+                  {toolUses > 0 && <span>{toolUses} tools</span>}
+                  {errors > 0 && <span className="text-destructive">{errors} errors</span>}
+                  <span>{duration}</span>
+                </div>
+              </div>
+              <div className="mt-2 flex items-center gap-0.5 overflow-x-auto">
+                {agentEvents.slice(0, 40).map((ev) => (
+                  <div
+                    key={ev.seq}
+                    title={`${ev.kind}: ${ev.summary || ""}\n${formatTime(ev.created_at)}`}
+                    className={cn(
+                      "h-2 w-2 rounded-full shrink-0",
+                      ev.kind === "tool_use" && "bg-primary",
+                      ev.kind === "text" && "bg-foreground/50",
+                      ev.kind === "error" && "bg-destructive",
+                      ev.kind === "phase" && "bg-amber-400",
+                      !["tool_use", "text", "error", "phase"].includes(ev.kind) && "bg-muted-foreground/40",
+                    )}
+                  />
+                ))}
+                {agentEvents.length > 40 && (
+                  <span className="text-[10px] text-muted-foreground ml-1">+{agentEvents.length - 40}</span>
+                )}
+              </div>
+            </div>
+          );
+        })}
+      </div>
     </div>
   );
 }

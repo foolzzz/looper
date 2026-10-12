@@ -212,6 +212,8 @@ class AgentHTTPServer:
             await self._handle_sse_events(query, writer)
         elif path == "/api/tasks/cancel" and method == "POST":
             await self._handle_task_cancel(body, writer)
+        elif path == "/api/tasks/delete" and method == "POST":
+            await self._handle_task_delete(body, writer)
         elif (m := self._RE_TASK_ACTIVITY_STREAM.match(path)) and method == "GET":
             await self._handle_task_activity_stream(m.group(1), query, writer)
         elif (m := self._RE_TASK_ACTIVITY_SEQ.match(path)) and method == "GET":
@@ -443,6 +445,42 @@ class AgentHTTPServer:
         )
         await bus.publish(envelope)
         writer.write(_json_response(HTTP_200, {"cancelled": task_id}))
+        await writer.drain()
+
+    async def _handle_task_delete(
+        self, body: bytes, writer: asyncio.StreamWriter
+    ) -> None:
+        try:
+            data = json.loads(body.decode("utf-8"))
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            writer.write(_json_response(HTTP_400, {"error": "invalid JSON body"}))
+            await writer.drain()
+            return
+
+        task_id = data.get("task_id", "").strip()
+        if not task_id:
+            writer.write(_json_response(HTTP_400, {"error": "task_id is required"}))
+            await writer.drain()
+            return
+
+        from ..db.tasks import get_task, delete_task
+
+        task = await get_task(task_id)
+        if task is None:
+            writer.write(_json_response(HTTP_404, {"error": "task not found"}))
+            await writer.drain()
+            return
+
+        status = task.get("status", "")
+        if status in ("running", "pending"):
+            writer.write(
+                _json_response(HTTP_400, {"error": "cancel the task before deleting"})
+            )
+            await writer.drain()
+            return
+
+        await delete_task(task_id)
+        writer.write(_json_response(HTTP_200, {"deleted": task_id}))
         await writer.drain()
 
     # --- Task detail handlers ---
