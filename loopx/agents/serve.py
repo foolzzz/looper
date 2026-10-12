@@ -56,16 +56,35 @@ async def _run_agent_system(
     try:
         from ..db import init_pool, ensure_schema, close_pool
         from ..db.agent_configs import seed_defaults as seed_agent_configs
+        from ..db.llm_profiles import seed_defaults as seed_llm_profiles
         from .tiers.manager import DEFAULT_SYSTEM_PROMPT
 
         db_pool = await init_pool()
         await ensure_schema(db_pool)
+
+        await seed_llm_profiles([
+            {
+                "name": "anthropic-default",
+                "display_name": "Anthropic (Claude)",
+                "provider_kind": "anthropic",
+                "model": "claude-sonnet-4-20250514",
+                "description": "Default Anthropic provider — used with Claude Code CLI",
+            },
+            {
+                "name": "openai-default",
+                "display_name": "OpenAI",
+                "provider_kind": "openai",
+                "model": "o3",
+                "description": "Default OpenAI provider — used with Codex CLI",
+            },
+        ])
 
         await seed_agent_configs([
             {
                 "agent_id": "manager",
                 "display_name": "Manager (管家)",
                 "role": "manager",
+                "runtime": "claude-code",
                 "system_prompt": DEFAULT_SYSTEM_PROMPT,
                 "timeout_seconds": 0,
             },
@@ -73,12 +92,14 @@ async def _run_agent_system(
                 "agent_id": "planner",
                 "display_name": "Planner",
                 "role": "planner",
+                "runtime": "claude-code",
                 "timeout_seconds": 1200,
             },
             {
                 "agent_id": "worker",
                 "display_name": "Worker",
                 "role": "worker",
+                "runtime": "claude-code",
                 "max_concurrency": 3,
                 "timeout_seconds": 600,
             },

@@ -51,7 +51,7 @@ def _json_response(status: str, body: Any) -> bytes:
         f"Content-Type: application/json; charset=utf-8\r\n"
         f"Content-Length: {len(payload)}\r\n"
         f"Access-Control-Allow-Origin: *\r\n"
-        f"Access-Control-Allow-Methods: GET, POST, PUT, OPTIONS\r\n"
+        f"Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS\r\n"
         f"Access-Control-Allow-Headers: Content-Type\r\n"
         f"\r\n"
     )
@@ -62,7 +62,7 @@ def _cors_preflight() -> bytes:
     return (
         "HTTP/1.1 204 No Content\r\n"
         "Access-Control-Allow-Origin: *\r\n"
-        "Access-Control-Allow-Methods: GET, POST, PUT, OPTIONS\r\n"
+        "Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS\r\n"
         "Access-Control-Allow-Headers: Content-Type\r\n"
         "Access-Control-Max-Age: 86400\r\n"
         "\r\n"
@@ -186,6 +186,7 @@ class AgentHTTPServer:
     _RE_TASK_ACTIVITY_SEQ = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)/activity/(\d+)$")
     _RE_TASK_CONVERSATION = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)/conversation$")
     _RE_AGENT_CONFIG = re.compile(r"^/api/agent-configs/([a-zA-Z0-9_-]+)$")
+    _RE_LLM_PROFILE = re.compile(r"^/api/llm-profiles/(\d+)$")
 
     async def _route_api(
         self,
@@ -223,6 +224,16 @@ class AgentHTTPServer:
             await self._handle_update_agent_config(m.group(1), body, writer)
         elif path == "/api/llm-records" and method == "GET":
             await self._handle_list_llm_records(query, writer)
+        elif path == "/api/llm-profiles" and method == "GET":
+            await self._handle_list_llm_profiles(writer)
+        elif path == "/api/llm-profiles" and method == "POST":
+            await self._handle_create_llm_profile(body, writer)
+        elif (m := self._RE_LLM_PROFILE.match(path)) and method == "GET":
+            await self._handle_get_llm_profile(int(m.group(1)), writer)
+        elif (m := self._RE_LLM_PROFILE.match(path)) and method == "PUT":
+            await self._handle_update_llm_profile(int(m.group(1)), body, writer)
+        elif (m := self._RE_LLM_PROFILE.match(path)) and method == "DELETE":
+            await self._handle_delete_llm_profile(int(m.group(1)), writer)
         else:
             writer.write(_json_response(HTTP_404, {"error": "not found"}))
             await writer.drain()
@@ -538,6 +549,98 @@ class AgentHTTPServer:
         except Exception:
             records = []
         writer.write(_json_response(HTTP_200, {"records": records}))
+        await writer.drain()
+
+    # --- LLM profile handlers ---
+
+    async def _handle_list_llm_profiles(self, writer: asyncio.StreamWriter) -> None:
+        try:
+            from ..db.llm_profiles import list_profiles
+            profiles = await list_profiles()
+        except Exception:
+            profiles = []
+        writer.write(_json_response(HTTP_200, {"profiles": profiles}))
+        await writer.drain()
+
+    async def _handle_get_llm_profile(
+        self, profile_id: int, writer: asyncio.StreamWriter,
+    ) -> None:
+        try:
+            from ..db.llm_profiles import get_profile
+            profile = await get_profile(profile_id)
+        except Exception:
+            profile = None
+        if profile is None:
+            writer.write(_json_response(HTTP_404, {"error": "profile not found"}))
+        else:
+            writer.write(_json_response(HTTP_200, profile))
+        await writer.drain()
+
+    async def _handle_create_llm_profile(
+        self, body: bytes, writer: asyncio.StreamWriter,
+    ) -> None:
+        try:
+            data = json.loads(body.decode("utf-8"))
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            writer.write(_json_response(HTTP_400, {"error": "invalid JSON body"}))
+            await writer.drain()
+            return
+
+        if not isinstance(data, dict) or not data.get("name"):
+            writer.write(_json_response(HTTP_400, {"error": "name is required"}))
+            await writer.drain()
+            return
+
+        try:
+            from ..db.llm_profiles import create_profile
+            created = await create_profile(data)
+        except Exception as exc:
+            writer.write(_json_response(HTTP_500, {"error": str(exc)}))
+            await writer.drain()
+            return
+
+        writer.write(_json_response("201 Created", created))
+        await writer.drain()
+
+    async def _handle_update_llm_profile(
+        self, profile_id: int, body: bytes, writer: asyncio.StreamWriter,
+    ) -> None:
+        try:
+            data = json.loads(body.decode("utf-8"))
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            writer.write(_json_response(HTTP_400, {"error": "invalid JSON body"}))
+            await writer.drain()
+            return
+
+        try:
+            from ..db.llm_profiles import update_profile
+            updated = await update_profile(profile_id, data)
+        except Exception as exc:
+            writer.write(_json_response(HTTP_500, {"error": str(exc)}))
+            await writer.drain()
+            return
+
+        if updated is None:
+            writer.write(_json_response(HTTP_404, {"error": "profile not found"}))
+        else:
+            writer.write(_json_response(HTTP_200, updated))
+        await writer.drain()
+
+    async def _handle_delete_llm_profile(
+        self, profile_id: int, writer: asyncio.StreamWriter,
+    ) -> None:
+        try:
+            from ..db.llm_profiles import delete_profile
+            deleted = await delete_profile(profile_id)
+        except Exception as exc:
+            writer.write(_json_response(HTTP_500, {"error": str(exc)}))
+            await writer.drain()
+            return
+
+        if not deleted:
+            writer.write(_json_response(HTTP_404, {"error": "profile not found"}))
+        else:
+            writer.write(_json_response(HTTP_200, {"deleted": True}))
         await writer.drain()
 
     # --- Static file serving ---

@@ -49,10 +49,33 @@ CREATE TABLE IF NOT EXISTS task_steps (
 
 CREATE INDEX IF NOT EXISTS idx_steps_task ON task_steps(task_id, step_index);
 
+CREATE TABLE IF NOT EXISTS llm_profiles (
+    id               BIGSERIAL PRIMARY KEY,
+    name             TEXT NOT NULL UNIQUE,
+    display_name     TEXT NOT NULL DEFAULT '',
+    provider_kind    TEXT NOT NULL DEFAULT 'anthropic',
+    model            TEXT NOT NULL DEFAULT '',
+    base_url         TEXT,
+    api_key_env      TEXT,
+    reasoning_effort TEXT,
+    max_tokens       INTEGER,
+    context_window_k INTEGER,
+    rate_per_minute  INTEGER,
+    streaming        BOOLEAN NOT NULL DEFAULT true,
+    is_default       BOOLEAN NOT NULL DEFAULT false,
+    priority         INTEGER NOT NULL DEFAULT 0,
+    description      TEXT NOT NULL DEFAULT '',
+    metadata         JSONB,
+    created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at       TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 CREATE TABLE IF NOT EXISTS agent_configs (
     agent_id         TEXT PRIMARY KEY,
     display_name     TEXT NOT NULL DEFAULT '',
     role             TEXT NOT NULL DEFAULT '',
+    runtime          TEXT NOT NULL DEFAULT 'claude-code',
+    llm_profile_id   BIGINT REFERENCES llm_profiles(id),
     enabled          BOOLEAN NOT NULL DEFAULT true,
     system_prompt    TEXT NOT NULL DEFAULT '',
     model            TEXT,

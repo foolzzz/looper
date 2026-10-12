@@ -176,6 +176,147 @@ export function streamTaskActivity(
   return () => abortController.abort();
 }
 
+// --- Agent configs ---
+
+export interface AgentConfig {
+  agent_id: string;
+  display_name: string;
+  role: string;
+  runtime: string;
+  llm_profile_id: number | null;
+  enabled: boolean;
+  system_prompt: string;
+  model: string | null;
+  max_turns: number;
+  timeout_seconds: number;
+  max_concurrency: number;
+  permission_mode: string | null;
+  extra_args: Record<string, unknown> | null;
+  metadata: Record<string, unknown> | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface LlmRecord {
+  id: number;
+  agent_id: string;
+  task_id: string | null;
+  session_id: string | null;
+  input_summary: string | null;
+  output_summary: string | null;
+  input_tokens: number | null;
+  output_tokens: number | null;
+  duration_ms: number | null;
+  model: string | null;
+  error: string | null;
+  created_at: string;
+}
+
+export async function fetchAgentConfigs(): Promise<AgentConfig[]> {
+  const res = await fetch(`${API_BASE}/agent-configs`);
+  if (!res.ok) throw new Error(`agent-configs ${res.status}`);
+  const data = await res.json();
+  return data.configs ?? [];
+}
+
+export async function fetchAgentConfig(agentId: string): Promise<AgentConfig> {
+  const res = await fetch(`${API_BASE}/agent-configs/${agentId}`);
+  if (!res.ok) throw new Error(`agent-config ${res.status}`);
+  return res.json();
+}
+
+export async function updateAgentConfig(
+  agentId: string,
+  fields: Partial<AgentConfig>,
+): Promise<AgentConfig> {
+  const res = await fetch(`${API_BASE}/agent-configs/${agentId}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(fields),
+  });
+  if (!res.ok) throw new Error(`update agent-config ${res.status}`);
+  return res.json();
+}
+
+export async function fetchLlmRecords(params: {
+  agent_id?: string;
+  task_id?: string;
+  limit?: number;
+  offset?: number;
+}): Promise<LlmRecord[]> {
+  const qs = new URLSearchParams();
+  if (params.agent_id) qs.set("agent_id", params.agent_id);
+  if (params.task_id) qs.set("task_id", params.task_id);
+  if (params.limit) qs.set("limit", String(params.limit));
+  if (params.offset) qs.set("offset", String(params.offset));
+  const res = await fetch(`${API_BASE}/llm-records?${qs}`);
+  if (!res.ok) throw new Error(`llm-records ${res.status}`);
+  const data = await res.json();
+  return data.records ?? [];
+}
+
+// --- LLM profiles ---
+
+export interface LlmProfile {
+  id: number;
+  name: string;
+  display_name: string;
+  provider_kind: string;
+  model: string;
+  base_url: string | null;
+  api_key_env: string | null;
+  reasoning_effort: string | null;
+  max_tokens: number | null;
+  context_window_k: number | null;
+  rate_per_minute: number | null;
+  streaming: boolean;
+  is_default: boolean;
+  priority: number;
+  description: string;
+  metadata: Record<string, unknown> | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export async function fetchLlmProfiles(): Promise<LlmProfile[]> {
+  const res = await fetch(`${API_BASE}/llm-profiles`);
+  if (!res.ok) throw new Error(`llm-profiles ${res.status}`);
+  const data = await res.json();
+  return data.profiles ?? [];
+}
+
+export async function createLlmProfile(
+  fields: Partial<LlmProfile>,
+): Promise<LlmProfile> {
+  const res = await fetch(`${API_BASE}/llm-profiles`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(fields),
+  });
+  if (!res.ok) throw new Error(`create llm-profile ${res.status}`);
+  return res.json();
+}
+
+export async function updateLlmProfile(
+  profileId: number,
+  fields: Partial<LlmProfile>,
+): Promise<LlmProfile> {
+  const res = await fetch(`${API_BASE}/llm-profiles/${profileId}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(fields),
+  });
+  if (!res.ok) throw new Error(`update llm-profile ${res.status}`);
+  return res.json();
+}
+
+export async function deleteLlmProfile(profileId: number): Promise<void> {
+  const res = await fetch(`${API_BASE}/llm-profiles/${profileId}`, {
+    method: "DELETE",
+  });
+  if (!res.ok) throw new Error(`delete llm-profile ${res.status}`);
+}
+
 export function streamSSE(
   eventsUrl: string,
   onEvent: (event: SSEEvent) => void,

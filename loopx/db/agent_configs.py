@@ -12,6 +12,8 @@ from .connection import get_pool
 _UPDATABLE_FIELDS = (
     "display_name",
     "role",
+    "runtime",
+    "llm_profile_id",
     "enabled",
     "system_prompt",
     "model",
@@ -101,6 +103,7 @@ async def seed_defaults(
         agent_id = cfg["agent_id"]
         display_name = cfg.get("display_name", "")
         role = cfg.get("role", "")
+        runtime = cfg.get("runtime", "claude-code")
         system_prompt = cfg.get("system_prompt", "")
         model = cfg.get("model")
         max_turns = cfg.get("max_turns", 0)
@@ -111,14 +114,15 @@ async def seed_defaults(
         await pool.execute(
             """
             INSERT INTO agent_configs
-                (agent_id, display_name, role, system_prompt, model,
+                (agent_id, display_name, role, runtime, system_prompt, model,
                  max_turns, timeout_seconds, max_concurrency, permission_mode)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
             ON CONFLICT (agent_id) DO NOTHING
             """,
             agent_id,
             display_name,
             role,
+            runtime,
             system_prompt,
             model,
             max_turns,
