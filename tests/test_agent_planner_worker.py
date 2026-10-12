@@ -134,6 +134,7 @@ class TestTaskPlan:
 # --- PlannerAgent tests ---
 
 
+@pytest.mark.usefixtures("agent_db")
 class TestPlannerAgent:
     def test_decompose_task(self) -> None:
         async def _run() -> None:
@@ -152,7 +153,7 @@ class TestPlannerAgent:
             assert planner.agent_id == "planner-abc-123"
             assert planner.agent_address == planner_address("abc-123")
 
-    def test_plan_and_dispatch(self) -> None:
+    def test_plan_and_dispatch(self, agent_db: Any) -> None:
         async def _run() -> None:
             with tempfile.TemporaryDirectory() as tmp:
                 bus = MessageBus(runtime_root=Path(tmp))
@@ -188,6 +189,10 @@ class TestPlannerAgent:
                 plan_dir = Path(tmp) / ".local" / "planner" / "planner-test-pd"
                 plan_files = list(plan_dir.glob("*.json"))
                 assert len(plan_files) >= 1
+
+                phases = [c.args for c in agent_db.update_task_phase.await_args_list]
+                assert phases == [("test-pd", "planning"), ("test-pd", "executing")]
+                agent_db.upsert_steps.assert_awaited_once()
 
                 await planner.stop()
                 await bus.shutdown()
