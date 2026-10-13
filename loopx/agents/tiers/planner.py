@@ -2,8 +2,9 @@
 
 Each task has one PlannerAgent for its whole life, and the Planner keeps one
 Claude Code process running for as long as the task runs: stream-json in and
-out, in the task's directory, with read-only tools (it reads the project to
-plan; Workers make the changes). Each event is one user turn on it:
+out, in the task's directory, with every tool and no permission prompts like
+every agent; its role prompt keeps it to planning and deciding, and Workers
+make the changes. Each event is one user turn on it:
 
 - the TASK_REQUEST: Claude splits the requirement into steps, each with an
   instruction, acceptance criteria, dependencies and whether an independent
@@ -86,21 +87,20 @@ DEFAULT_TURN_TIMEOUT_SEC = 1200
 # arrived (a SUPERVISE turn), to steer or stop one that drifts or stalls.
 # 0 turns the periodic check off. Any Planner turn re-arms the interval.
 DEFAULT_SUPERVISE_INTERVAL_SEC = 300
-# The only tools the Planner's Claude has: it reads the project, Workers change it.
-PLANNER_TOOLS = "Read,Grep,Glob"
-# With a library loaded the Planner also gets Skill, which reads a skill's
-# instructions (without it Claude Code lists no skills); a skill cannot add a
-# tool --tools leaves out. Without a library its tools stay as they were.
-PLANNER_LIBRARY_TOOLS = f"{PLANNER_TOOLS},Skill"
 
+# The Planner has every tool, like every agent; this recommended role prompt
+# is what keeps it to planning and deciding.
 DEFAULT_SYSTEM_PROMPT = """\
 You are the Planner of one LoopX task. You live as long as the task: you plan
 its steps, decide what happens after each step's result, and answer the
 user's messages about it.
 
-- Workers do the work: each step runs in a fresh Claude Code session that sees
-  only its step. You can read the project (Read, Grep, Glob) to plan well, but
-  you cannot change files or run commands.
+- You plan and decide; Workers do the work. Each step runs in a fresh Claude
+  Code session that sees only its step. Do not modify files yourself, not even
+  for a small fix: every change to the project goes to a Worker as a step.
+- You have every tool. Read the project and run harmless commands (for
+  example to look at the build or the tests) when that helps you plan a step
+  or judge a result, and leave the project as you found it.
 - Split the work into steps that each deliver one result that can be checked
   on its own (for example the code, then its tests, then its docs), and make
   a step depend on the steps whose results it needs. Keep a small piece of
@@ -999,8 +999,7 @@ class PlannerAgent:
                 self._last_turn_at = time.monotonic()
 
     def _claude_command(self, prompt_file: Path, settings: PlannerSettings, launch: Launch, work_dir: str) -> list[str]:
-        """The Planner's Claude, without ``--resume``: read-only tools, nothing else approved."""
-        tools = PLANNER_LIBRARY_TOOLS if launch.library.plugin_dirs else PLANNER_TOOLS
+        """The Planner's Claude, without ``--resume``."""
         return [
             self._claude_bin,
             "--print",
@@ -1010,13 +1009,8 @@ class PlannerAgent:
             "--input-format", "stream-json",
             # Partial deltas keep the turn's heartbeat current while Claude writes.
             "--include-partial-messages",
-            # Only the read-only tools exist, they are the only approved ones,
-            # and anything else is denied without asking.
-            "--tools", tools,
-            "--allowedTools", tools,
-            "--permission-mode", "dontAsk",
-            # None of the operator's personal settings, memory, hooks, plugins or MCP servers;
-            # the library's plugins and skills come with the launch args.
+            # None of the operator's personal settings, memory, hooks, plugins or MCP servers; the
+            # permissions every agent shares and the library's plugins and skills come with the launch args.
             *isolation_args(work_dir),
             *system_prompt_args(prompt_file),
             *launch.args(),
@@ -1170,7 +1164,7 @@ class PlannerAgent:
         return "\n".join([
             "[PLAN] Plan the task in the Task section of your instructions.",
             "",
-            f"You may read the project first. Reply with the PLAN JSON: 1 to {MAX_STEPS} steps.",
+            f"You may look at the project first, without changing it. Reply with the PLAN JSON: 1 to {MAX_STEPS} steps.",
         ])
 
     def _work_report(self, step: PlanStep, result: dict[str, Any]) -> list[str]:

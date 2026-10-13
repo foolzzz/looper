@@ -7,6 +7,10 @@ loopx.extensions.lark.
 This adapter is intentionally thin — it translates between Bus
 MessageEnvelopes and the existing Lark extension primitives rather
 than reimplementing the Lark API surface.
+
+Only the senders on its allowlist (their ``open_id``) reach the Manager:
+anyone else is dropped with one log line and gets no reply, and an empty
+list keeps the adapter from starting.
 """
 
 from __future__ import annotations
@@ -25,6 +29,7 @@ from ..message import (
     MessageType,
     channel_address,
 )
+from .allowlist import SenderAllowlist
 from .base import ChannelAdapter, DeliveryReceipt
 
 logger = logging.getLogger(__name__)
@@ -47,9 +52,11 @@ class LarkChannelAdapter(ChannelAdapter):
     def __init__(
         self,
         *,
+        allowlist: SenderAllowlist,
         app_id: str | None = None,
         runtime_root: Path | None = None,
     ) -> None:
+        self._allowlist = allowlist  # open_ids
         self._app_id = app_id or os.environ.get("LARK_APP_ID", "")
         self._runtime_root = runtime_root or Path.cwd()
         self._bus: MessageBus | None = None
@@ -69,6 +76,11 @@ class LarkChannelAdapter(ChannelAdapter):
         return "channel-lark"
 
     async def start(self, bus: MessageBus) -> None:
+        if not self._allowlist.ids:
+            # The Manager runs any command it is asked to: nobody may reach it unlisted.
+            logger.error("channel-lark not started: its sender allowlist is empty")
+            return
+
         if not _check_lark_cli_available():
             logger.warning(
                 "lark-cli not found, lark channel adapter disabled. "
@@ -184,6 +196,10 @@ class LarkChannelAdapter(ChannelAdapter):
         chat_id = msg.get("chat_id", "")
         msg_type = msg.get("message_type", "")
         sender = event.get("event", {}).get("sender", {}).get("sender_id", {})
+
+        # Before anything else: an unlisted sender is logged and never answered.
+        if not self._allowlist.admits(sender.get("open_id")):
+            return
 
         if msg_type != "text":
             return

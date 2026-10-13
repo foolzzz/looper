@@ -566,11 +566,11 @@ class WorkerPool:
             # Planner can step in while the run is going.
             "--input-format", "stream-json",
             "--replay-user-messages",
-            "--dangerously-skip-permissions",
             # None of the operator's personal settings, memory, hooks, plugins
             # or MCP servers (whose teardown could also make the CLI exit
-            # non-zero). Built-in tools are unaffected; the library's plugins
-            # and skills come with the launch args.
+            # non-zero). Built-in tools are unaffected; the permissions every
+            # agent shares and the library's plugins and skills come with the
+            # launch args.
             *isolation_args(work_dir),
             *system_prompt_args(prompt_file),
             *launch.args(),

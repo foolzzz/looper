@@ -28,10 +28,10 @@ To learn how to use these features, read the [usage guide](docs/fork/usage.md).
   reply ends with one JSON block that code validates strictly; an invalid
   reply gets one repair turn. Planning that still fails fails the task, with
   no single-step fallback; a decision that still fails falls back to the
-  step's own verdict without a Reviewer and logs a warning. The Planner's
-  Claude only has Read, Grep and Glob (`--tools`, `--allowedTools`,
-  `--permission-mode dontAsk`, `--strict-mcp-config`) and never gets
-  `--dangerously-skip-permissions`. The `complexity` heuristic is gone: a
+  step's own verdict without a Reviewer and logs a warning. Like every agent,
+  the Planner's Claude has every tool and no permission prompts (see the
+  permissions entry below), and loads no MCP server
+  (`--strict-mcp-config`). The `complexity` heuristic is gone: a
   Reviewer runs only when the plan or a decision asks for one, and its prompt
   now includes the step's instruction. A chat message to a Planner now goes
   through its Claude, which replies and may pass the text to the running
@@ -188,9 +188,8 @@ To learn how to use these features, read the [usage guide](docs/fork/usage.md).
   Manager and a running Planner restart with `--resume`. Files over 2 MiB,
   binary files and links out of an item are left out and reported; an item
   over 32 MiB or 5,000 files is left out whole; a library over 128 MiB is
-  refused. To use the skills, a run with a library gives the Planner the
-  tools `Read,Grep,Glob,Skill` and the Manager `--allowedTools Skill` (this
-  approves skills only, not the tools a skill names). Plugins' own
+  refused. Every agent runs without permission prompts (see the
+  permissions entry below), so the skills need no approval of their own. Plugins' own
   `SessionStart` hooks run in every agent. Nothing is imported until someone
   imports, and without a library every command is as before. **Context and cost:** with 3 plugins and 104
   skills, the first request of a minimal run on Opus grows from 15,674 to
@@ -200,6 +199,37 @@ To learn how to use these features, read the [usage guide](docs/fork/usage.md).
 - Every run's metadata gains `library` (the items it loaded, each with its
   sha256, and the hash of the set), and the history page lists them in a
   "Plugins & skills" section.
+- **Behaviour change: every agent runs without permission prompts, and the
+  Planner can now edit.** The Manager, Planners, Workers and Reviewers all
+  get every tool and `--dangerously-skip-permissions`, from one place
+  (`claude_cli.permission_args`, carried by every launch). The Planner no
+  longer has `--tools`/`--allowedTools Read,Grep,Glob[,Skill]` and
+  `--permission-mode dontAsk`, and the Manager no longer has
+  `--allowedTools Skill`: both can run commands and edit files, and skills
+  that declare `allowed-tools` run in every agent. What keeps the Planner to
+  planning is now its recommended role prompt, which says it plans and
+  decides, does not modify files and gives every change to a Worker. An
+  unedited `planner` row gets the new prompt at startup; an edited one is
+  kept and may still describe the Planner as read-only, so review it. The
+  Agents page shows these shared permissions in place of the Claude Code
+  "Permission Mode" select, which no LoopX agent read.
+- **Behaviour change: Telegram and Lark refuse to start without a sender
+  allowlist.** Because the Manager can now run any command on this machine,
+  each chat channel passes on only the senders its Settings configuration
+  lists: Telegram numeric user IDs (`allowed_user_ids`) and Lark open_ids
+  (`allowed_open_ids`, the `ou_...` id of each message's sender). A message
+  from anyone else never reaches the Manager: the adapter logs one line with
+  the channel and the sender id, never the text, and sends no reply
+  (Telegram's `/start`, `/status` and `/help` included). An enabled channel
+  whose list is empty or invalid does not start; the startup log and the
+  Settings page say why. An empty Telegram list no longer means everyone, and
+  `LOOPX_TELEGRAM_ALLOWED_USERS` no longer applies: add your IDs in Settings
+  before you restart a channel you use. Settings edits the list with
+  format checks; `PUT /api/channel-configs/<id>` validates it (400 naming the
+  first bad id) and stores it as a JSON array, still reading a
+  comma-separated Telegram list from before, and both channel endpoints
+  return `start_problem`. The web dashboard is unchanged: it answers only
+  local requests.
 
 ### Fixed
 

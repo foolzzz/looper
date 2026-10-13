@@ -158,10 +158,17 @@ class TestStoredDefaults:
 # --- Model, effort and environment of a run ---
 
 
+def _permission_flags() -> list[str]:
+    """The permission flags every launch starts with (``claude_cli.permission_args``)."""
+    from loopx.agents.claude_cli import permission_args
+
+    return permission_args()
+
+
 class TestLaunch:
     def test_the_default_model_reaches_the_flags(self) -> None:
         launch = resolve_launch(BUILTIN_DEFAULTS)
-        assert launch.args() == ["--model", "opus"]
+        assert launch.args() == [*_permission_flags(), "--model", "opus"]
         assert launch.record() == {"model_choice": {"model": "opus", "source": "builtin_default", "effort": None}}
         assert launch.environment() is None and launch.env_sha256 is None
 
@@ -173,12 +180,12 @@ class TestLaunch:
     def test_an_agent_override_beats_the_settings_default(self) -> None:
         launch = resolve_launch(SYSTEM, " claude-haiku-4-5 ")
         assert (launch.model, launch.model_source) == ("claude-haiku-4-5", ModelSource.AGENT_OVERRIDE)
-        assert launch.args() == ["--model", "claude-haiku-4-5"]
+        assert launch.args() == [*_permission_flags(), "--model", "claude-haiku-4-5"]
 
     def test_the_effort_follows_the_model(self) -> None:
         defaults = AgentDefaults("H", HarnessSource.SYSTEM_DEFAULT, "opus", ModelSource.SYSTEM_DEFAULT, "high")
         launch = resolve_launch(defaults, "sonnet")
-        assert launch.args() == ["--model", "sonnet", "--effort", "high"]
+        assert launch.args() == [*_permission_flags(), "--model", "sonnet", "--effort", "high"]
         assert launch.record()["model_choice"] == {"model": "sonnet", "source": "agent_override", "effort": "high"}
 
     def test_the_environment_goes_on_top_of_the_servers(self, monkeypatch: pytest.MonkeyPatch) -> None:

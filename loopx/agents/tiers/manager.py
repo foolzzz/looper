@@ -577,13 +577,8 @@ class ManagerAgent:
             # Each chat message is one user turn on stdin; Claude idles between turns.
             "--input-format", "stream-json",
             "--include-partial-messages",  # stream the reply as it is written
-            # With a library loaded, its skills may be used without asking (unapproved, a skill that
-            # names its own allowed-tools is denied). Verified with Claude Code 2.1.285: this approves
-            # the Skill tool only, not the tools a skill names; the Manager's other tools still need
-            # approval, which --print denies.
-            *(["--allowedTools", "Skill"] if launch.library.plugin_dirs else []),
-            # None of the operator's personal settings, memory, hooks, plugins or MCP servers;
-            # the library's plugins and skills come with the launch args.
+            # None of the operator's personal settings, memory, hooks, plugins or MCP servers; the
+            # permissions every agent shares and the library's plugins and skills come with the launch args.
             *isolation_args(self._config.work_dir),
             *system_prompt_args(prompt_file),
             *launch.args(),

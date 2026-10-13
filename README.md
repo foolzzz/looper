@@ -182,12 +182,15 @@ environment variable **names**, not secret values.
 
 | Channel | Settings fields | Also needed |
 |---|---|---|
-| Telegram | `bot_token_env`: env var holding the bot token (default `LOOPX_TELEGRAM_BOT_TOKEN`). `allowed_user_ids`: comma-separated Telegram user IDs. | The token in that env var. |
-| Lark | `app_id_env`: env var holding the app ID (default `LARK_APP_ID`). | `lark-cli` on PATH and signed in; it receives and sends the messages. |
+| Telegram | `bot_token_env`: env var holding the bot token (default `LOOPX_TELEGRAM_BOT_TOKEN`). `allowed_user_ids`: the numeric Telegram user IDs that may talk to the bot. | The token in that env var. |
+| Lark | `app_id_env`: env var holding the app ID (default `LARK_APP_ID`). `allowed_open_ids`: the senders' Lark `open_id` (`ou_...`). | `lark-cli` on PATH and signed in; it receives and sends the messages. |
 
-- If `allowed_user_ids` is empty, `LOOPX_TELEGRAM_ALLOWED_USERS` applies;
-  when both are empty, everyone can talk to the bot. A malformed list keeps
-  Telegram off.
+- Every agent runs Claude Code without permission prompts, so the Manager
+  can run any command on this machine. Each channel therefore passes on only
+  the senders it lists: anyone else's message is dropped and logged (sender
+  id only) with no reply. A channel with an empty or malformed list does not
+  start, and the Settings page says why. `LOOPX_TELEGRAM_ALLOWED_USERS` no
+  longer applies.
 - `app_secret_env` is not read yet; `lark-cli` holds the Lark credentials.
 - A channel that fails to start is logged, and the dashboard keeps running.
 

@@ -40,13 +40,6 @@ import { historyHref } from "@/pages/agent-history";
 
 type Tab = "config" | "sessions";
 
-const CLAUDE_CODE_PERMISSIONS = [
-  { value: "", label: "Default" },
-  { value: "plan", label: "Plan" },
-  { value: "acceptEdits", label: "Accept Edits" },
-  { value: "bypassPermissions", label: "Bypass Permissions" },
-];
-
 const CODEX_SANDBOXES = [
   { value: "", label: "Default" },
   { value: "full-auto", label: "Full Auto" },
@@ -530,9 +523,6 @@ function ConfigTab({
     }
   };
 
-  const permOptions =
-    form.runtime === "codex-cli" ? CODEX_SANDBOXES : CLAUDE_CODE_PERMISSIONS;
-  const permLabel = form.runtime === "codex-cli" ? "Sandbox" : "Permission Mode";
 
   return (
     <div className="space-y-5">
@@ -699,20 +689,34 @@ function ConfigTab({
         </div>
       </div>
 
-      <div className="space-y-1.5">
-        <label className="text-xs font-medium text-muted-foreground">{permLabel}</label>
-        <select
-          value={form.permission_mode}
-          onChange={(e) => setForm({ ...form, permission_mode: e.target.value })}
-          className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm text-foreground"
-        >
-          {permOptions.map((o) => (
-            <option key={o.value} value={o.value}>
-              {o.label}
-            </option>
-          ))}
-        </select>
-      </div>
+      {form.runtime === "codex-cli" ? (
+        <div className="space-y-1.5">
+          <label className="text-xs font-medium text-muted-foreground">Sandbox</label>
+          <select
+            value={form.permission_mode}
+            onChange={(e) => setForm({ ...form, permission_mode: e.target.value })}
+            className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm text-foreground"
+          >
+            {CODEX_SANDBOXES.map((o) => (
+              <option key={o.value} value={o.value}>
+                {o.label}
+              </option>
+            ))}
+          </select>
+        </div>
+      ) : (
+        <div className="space-y-1">
+          <span className="text-xs font-medium text-muted-foreground">Permissions</span>
+          <p className="text-sm">
+            Every tool, no permission prompts{" "}
+            <code className="rounded bg-muted px-1 py-0.5 font-mono text-xs">--dangerously-skip-permissions</code>
+          </p>
+          <p className="text-[11px] text-muted-foreground">
+            The same for every LoopX agent; the role prompt says what this agent is for. Lark and Telegram pass on
+            only the senders listed in Settings.
+          </p>
+        </div>
+      )}
 
       <div className="flex items-center justify-between rounded-md border border-border px-4 py-3">
         <div className="flex items-center gap-2">

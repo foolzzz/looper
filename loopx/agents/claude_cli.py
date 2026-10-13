@@ -113,6 +113,28 @@ def library_args(library: AgentLibrary) -> list[str]:
     return [arg for directory in library.plugin_dirs for arg in ("--plugin-dir", directory)]
 
 
+# --- What an agent may do ---
+#
+# Every agent (Manager, Planner, Worker, Reviewer) has every tool and runs
+# without permission prompts (RFC decision 8). What an agent is for is the
+# job of its role prompt and its code-owned contract, not of a tool list. The
+# flags reach every command through agent_settings.Launch.args, beside the
+# library's, so the four agents cannot diverge. Verified against Claude Code
+# 2.1.285 in --print mode with the isolation flags above and a --plugin-dir:
+# the init event reports permissionMode "bypassPermissions", and Bash, Write
+# and a plugin skill that declares allowed-tools all run without a denial,
+# where the default mode denies the Write and the skill. The isolation
+# --settings (claudeMdExcludes, autoMemoryEnabled) leave permissions alone.
+# Since the Manager can now run any command on this machine, the chat
+# channels that reach it pass on only the senders they list
+# (channels/allowlist.py).
+
+
+def permission_args() -> list[str]:
+    """The flags that let an agent use every tool without asking; every agent's launch carries them."""
+    return ["--dangerously-skip-permissions"]
+
+
 def system_prompt_args(prompt_file: Path) -> list[str]:
     """Append the system prompt in ``prompt_file`` (``SystemPrompt.write_file``).
 

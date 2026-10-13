@@ -179,3 +179,66 @@ def test_worker_rows_move_to_the_new_recommended_prompt() -> None:
             await pool.close()
 
     asyncio.run(_run())
+
+
+# The Planner's recommended role prompt while it had only Read, Grep and Glob (M1.5 and M1.6).
+_PLANNER_PROMPT_READ_ONLY = """\
+You are the Planner of one LoopX task. You live as long as the task: you plan
+its steps, decide what happens after each step's result, and answer the
+user's messages about it.
+
+- Workers do the work: each step runs in a fresh Claude Code session that sees
+  only its step. You can read the project (Read, Grep, Glob) to plan well, but
+  you cannot change files or run commands.
+- Split the work into steps that each deliver one result that can be checked
+  on its own (for example the code, then its tests, then its docs), and make
+  a step depend on the steps whose results it needs. Keep a small piece of
+  work whole when splitting it would only add hand-offs.
+- Give each step an instruction a Worker can follow on its own and acceptance
+  criteria that say how to tell it is done.
+- Ask for an independent Reviewer when a step is risky or its result is hard
+  to judge from the Worker's own report.
+- Accept a step only when its result meets the acceptance criteria. Retry with
+  specific feedback when a Worker can fix what is wrong; replan when the
+  approach must change; fail when the task cannot be done.
+"""
+
+
+def test_the_planner_row_moves_to_the_delegating_prompt_unless_edited() -> None:
+    """What startup does to the planner row now that the Planner has every
+    tool: an unedited row gets the new recommended prompt, which hands every
+    change to a Worker; an edited row keeps its prompt and records the new
+    recommendation."""
+    import asyncpg
+
+    from loopx.agents.serve import seed_agent_configs
+    from loopx.agents.tiers.planner import DEFAULT_SYSTEM_PROMPT
+    from loopx.db import agent_configs
+    from loopx.db.connection import ensure_schema
+
+    async def _row_after_startup(system_prompt: str) -> dict:
+        schema = f"loopx_test_{uuid.uuid4().hex[:12]}"
+        admin = await asyncpg.connect(DSN)
+        await admin.execute(f'CREATE SCHEMA "{schema}"')
+        pool = await asyncpg.create_pool(DSN, min_size=1, max_size=2, server_settings={"search_path": schema})
+        try:
+            await ensure_schema(pool)
+            # The row as the previous release left it.
+            await pool.execute(
+                "INSERT INTO agent_configs (agent_id, display_name, role, runtime, system_prompt, default_prompt) "
+                "VALUES ('planner', 'Planner', 'planner', 'claude-code', $1, $2)",
+                system_prompt, _PLANNER_PROMPT_READ_ONLY,
+            )
+            await seed_agent_configs(pool)
+            return await agent_configs.get_config("planner", pool=pool)
+        finally:
+            await pool.close()
+            await admin.execute(f'DROP SCHEMA "{schema}" CASCADE')
+            await admin.close()
+
+    unedited = asyncio.run(_row_after_startup(_PLANNER_PROMPT_READ_ONLY))
+    assert (unedited["system_prompt"], unedited["default_prompt"]) == (DEFAULT_SYSTEM_PROMPT, DEFAULT_SYSTEM_PROMPT)
+    assert "You plan and decide; Workers do the work." in " ".join(unedited["system_prompt"].split())
+
+    edited = asyncio.run(_row_after_startup("My own planner prompt."))
+    assert (edited["system_prompt"], edited["default_prompt"]) == ("My own planner prompt.", DEFAULT_SYSTEM_PROMPT)

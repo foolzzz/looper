@@ -2,7 +2,8 @@
 
 Covers reading stream-json output line by line with no line-length limit, the
 flags that keep the operator's personal Claude Code configuration out of an
-agent's run, the system prompt file flags, and the run record.
+agent's run, the permission flags every agent shares, the system prompt file
+flags, and the run record.
 """
 
 from __future__ import annotations
@@ -260,6 +261,33 @@ class TestIsolationArgs:
         assert isolation_args(tmp_path) == isolation_args(str(tmp_path))
         assert isinstance(ISOLATION_ID, str) and ISOLATION_ID
 
+
+# --- What every agent may do ---
+
+# Flags that would narrow an agent's tools or permissions again.
+RESTRICTING_FLAGS = {"--tools", "--allowedTools", "--allowed-tools", "--disallowedTools", "--disallowed-tools",
+                     "--permission-mode"}
+
+
+class TestPermissionArgs:
+    def test_every_agent_skips_permission_prompts(self) -> None:
+        from loopx.agents.claude_cli import permission_args
+
+        assert permission_args() == ["--dangerously-skip-permissions"]
+        assert not RESTRICTING_FLAGS & set(permission_args())
+
+    def test_every_launch_carries_them_with_and_without_a_library(self, tmp_path: Path) -> None:
+        # The four agents build their commands from a Launch, so the flags cannot diverge.
+        from loopx.agents.agent_settings import BUILTIN_DEFAULTS, resolve_launch
+        from loopx.agents.claude_cli import permission_args
+        from loopx.agents.library import AgentLibrary
+
+        library = AgentLibrary(plugin_dirs=(str(tmp_path / "plugin"),))
+        for launch in (resolve_launch(BUILTIN_DEFAULTS), resolve_launch(BUILTIN_DEFAULTS, library=library)):
+            args = launch.args()
+            assert args[:len(permission_args())] == permission_args()
+            assert args.count("--dangerously-skip-permissions") == 1
+            assert not RESTRICTING_FLAGS & set(args)
 
 def test_the_system_prompt_comes_from_its_file_and_is_read_again_on_resume(tmp_path: Path) -> None:
     path = tmp_path / "abc.md"

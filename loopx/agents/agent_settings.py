@@ -312,7 +312,8 @@ def resolve_harness(
 
 @dataclass(frozen=True)
 class Launch:
-    """The model, effort, environment and library one agent run starts with."""
+    """The model, effort, environment and library one agent run starts with (and, for every agent alike, its
+    permissions)."""
 
     model: str
     model_source: ModelSource
@@ -321,10 +322,16 @@ class Launch:
     library: AgentLibrary = EMPTY_LIBRARY
 
     def args(self) -> list[str]:
-        """The Claude Code flags for the model, the effort and the library's plugin directories."""
-        from .claude_cli import library_args
+        """The Claude Code flags every agent starts with: the permissions, the model, the effort and the
+        library's plugin directories."""
+        from .claude_cli import library_args, permission_args
 
-        return ["--model", self.model, *(["--effort", self.effort] if self.effort else []), *library_args(self.library)]
+        return [
+            *permission_args(),
+            "--model", self.model,
+            *(["--effort", self.effort] if self.effort else []),
+            *library_args(self.library),
+        ]
 
     def environment(self) -> dict[str, str] | None:
         """The subprocess environment: the server's, then the Settings variables; None without any."""
