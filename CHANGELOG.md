@@ -28,14 +28,15 @@ for that work link its pull requests.
 
 - **`loopx serve` starts a three-tier agent system.** A Manager talks to the
   user and turns requests into tasks. A TaskRouter runs at most three tasks
-  at a time and queues the rest. Each task gets its own Planner, which splits
-  it into steps and checks the results, and a WorkerPool runs each step as a
-  `claude` subprocess, at most four at a time. They exchange typed messages
-  over an async bus with a JSONL journal under the runtime root. `loopx serve`
-  also serves the HTTP API and the web dashboard, on `127.0.0.1:8767` by
-  default (`--host`, `--port`). Every agent run uses the Claude Code CLI,
-  which must be on `PATH` and signed in; workers run it with
-  `--dangerously-skip-permissions` in the task's work directory.
+  at a time and queues the rest. Each task gets its own Planner, which calls
+  no model: it runs the task as one step, and a chat message to it while the
+  task runs reaches the running worker or becomes a further step. A
+  WorkerPool runs each step as a `claude` subprocess, at most four at a time.
+  They exchange typed messages over an async bus with a JSONL journal under
+  the runtime root. `loopx serve` also serves the HTTP API and the web
+  dashboard, on `127.0.0.1:8767` by default (`--host`, `--port`). Every agent
+  run uses the Claude Code CLI, which must be on `PATH` and signed in; workers
+  run it with `--dangerously-skip-permissions` in the task's work directory.
   ([#38](https://github.com/michaelx1993/loopx/pull/38),
   [#39](https://github.com/michaelx1993/loopx/pull/39),
   [#40](https://github.com/michaelx1993/loopx/pull/40),
