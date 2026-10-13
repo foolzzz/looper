@@ -46,7 +46,12 @@ function App() {
 
   return (
     <div className="flex h-screen w-screen overflow-hidden bg-background">
-      <Sidebar activePage={route.page} onNavigate={navigate} />
+      <Sidebar
+        activePage={route.page}
+        activeProjectId={route.page === "tasks" && !route.sub ? new URLSearchParams(route.query).get("project") : null}
+        onNavigate={navigate}
+        onOpenProject={(id) => navigateSub("tasks", "", `project=${encodeURIComponent(id)}`)}
+      />
       <main className="flex-1 overflow-hidden">
         <div className={route.page === "chat" ? "h-full" : "hidden"}>
           <ChatPage />
