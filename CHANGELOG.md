@@ -18,6 +18,27 @@ To learn how to use these features, read the [usage guide](docs/fork/usage.md).
 
 ### Changed
 
+- Every agent task belongs to exactly one project. A project has a name
+  (unique ignoring case), a description and an optional default directory.
+  `GET`/`POST /api/projects` and `PUT`/`DELETE /api/projects/<id>` manage
+  projects and report each one's task and active counts; a taken name is 409,
+  and so is deleting a project that still has tasks. `POST /api/tasks/create`
+  now requires exactly one of `project_id` and `project` (a new project,
+  created in the same transaction as the task); a request with neither is
+  refused. A task runs in the `work_dir` it is given, else its project's
+  default directory, and is refused when neither exists; there is still no
+  global default. `PUT /api/tasks/<id>/project` moves a task whatever its
+  status, `GET /api/tasks?project_id=<id>` lists one project's tasks, and task
+  rows and detail carry `project_id` and `project_name`. In chat, each message
+  the Manager sends to Claude starts with the project list, and the task JSON
+  gains `"project"`. The Manager matches it to an existing project ignoring
+  case, creates the project (with the task's directory as its default) when
+  the name is new, and asks when it is missing. The rule appended to the
+  Manager's system prompt changes, so a running Manager restarts its Claude
+  once, resuming the session. On first start, existing tasks get one project
+  per directory, named after its last path component (`default` for none; a
+  later clash gets `-2`, `-3`, ...). A queued task request from before this
+  change, replayed from the bus journal, is dropped with an error log.
 - The Manager keeps one Claude process running instead of starting `claude`
   for every chat message. The process starts on the first message with
   `--input-format stream-json` and no prompt argument; each message is one

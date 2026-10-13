@@ -13,7 +13,17 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
 
 - Entry point for all user messages
 - Classifies intent (chat vs task creation)
-- Routes task requests to the TaskRouter via `TASK_REQUEST` messages
+- Routes task requests to the TaskRouter via `TASK_REQUEST` messages, each
+  with its project's `project_id`
+- Places each confirmed task in a project. Every user turn starts with a
+  `Projects` section listing the existing projects (name, default directory or
+  "no default directory", description cut to 80 characters). The code-owned
+  rule appended to the editable system prompt asks for `"project"` and
+  `"work_dir"` in the task JSON. The project is matched by name ignoring case;
+  an unknown name becomes a new project whose default directory is the task's,
+  and the reply says so. The directory is the task's own, else the project's
+  default. Without a project name, or without any directory, the Manager asks
+  instead of creating the task
 - Maintains chat conversation context per session
 - Runs one resident Claude process, started on the first chat message:
   `claude --print --verbose --output-format stream-json --input-format stream-json --include-partial-messages --append-system-prompt <prompt> [--resume <session_id>]`.
@@ -27,11 +37,17 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
 
 ### TaskRouter (`loopx/agents/tiers/task.py`)
 
-- Every task runs in its `work_dir`, the directory the user chose. There is no
-  default: `resolve_work_dir` requires an absolute path (or `~/...`), creating
-  or starting a task without one is refused, and the Manager asks for it when
-  the conversation has not named it. The Worker creates the directory if it is
+- Every task belongs to exactly one project (`project_id`) and runs in its
+  `work_dir`. There is no global default: the directory is the one given
+  (`resolve_work_dir` requires an absolute path or `~/...`), else the
+  project's default directory. Creating a task with neither, or starting a
+  task without one, is refused, and the Manager asks for it when the
+  conversation has not named it. The Worker creates the directory if it is
   missing and runs Claude there.
+- A task keeps its project across restarts. Moving it to another project
+  (any status) also updates the TaskRouter's live entry. A `TASK_REQUEST`
+  without `project_id`, such as one from before projects replayed from the
+  bus journal, is logged and dropped.
 
 - Per-task lifecycle management with concurrency control (`MAX_CONCURRENT_TASKS=3`)
 - Creates/destroys PlannerAgent instances per task
@@ -123,7 +139,8 @@ PostgreSQL is a hard startup dependency. All data paths:
 
 | Table | Purpose |
 |---|---|
-| `tasks` | Task metadata, status, phase, timestamps |
+| `projects` | Projects: name (unique ignoring case), description, default `work_dir` (`''` = none) |
+| `tasks` | Task metadata, status, phase, timestamps, `work_dir`, `project_id` (required) |
 | `task_steps` | Planner decomposition steps per task |
 | `activity` | Execution trace events (SSE streaming to frontend) |
 | `chat_messages` | Chat conversation history |
@@ -131,6 +148,14 @@ PostgreSQL is a hard startup dependency. All data paths:
 | `agent_configs` | Agent configuration (system prompt, model, permissions) |
 | `llm_profiles` | LLM provider profiles (model, endpoint, API key env) |
 | `channel_configs` | Telegram/Lark settings (enabled flag, env var names, allowlist) |
+
+Every task belongs to one project. On the first start after projects were
+added, the one-time migration `tasks_project_backfill` creates one project per
+distinct task directory and assigns those tasks to it. The project is named
+after the directory's last path component (`''` and `/` become `default`);
+the oldest directory keeps the plain name and a later clash, ignoring case,
+gets `-2`, `-3`, .... A task's "active" statuses are `pending`, `assigned`,
+`running` and `executing`.
 
 Connection: `LOOPX_DATABASE_URL` environment variable or `.env` file.
 
@@ -167,8 +192,14 @@ SPA uses `#page/sub` format for deep linking that survives browser refresh:
 | Endpoint | Method | Purpose |
 |---|---|---|
 | `/api/status` | GET | System health |
-| `/api/tasks` | GET | List all tasks |
-| `/api/tasks/:id` | GET | Task detail with steps |
+| `/api/projects` | GET | Projects ordered by name ignoring case, each with `task_count` and `active_count` |
+| `/api/projects` | POST | Create a project from `name` (trimmed, 1–80 characters), optional `description` and `work_dir` (absolute); 409 when the name exists ignoring case |
+| `/api/projects/:id` | PUT | Update any of `name`, `description`, `work_dir` (`""` clears the default directory); 404, 409 |
+| `/api/projects/:id` | DELETE | Delete a project; 409 while it still has tasks |
+| `/api/tasks` | GET | List the newest tasks; `?project_id=` lists one project's. Each has `project_id`, `project_name` and `work_dir` |
+| `/api/tasks/create` | POST | Create a task in `init` with exactly one of `project_id` (existing) and `project` (`{name, description?, work_dir?}`, created in the same transaction). Its `work_dir` is the one given, else the project's; 400 with neither, 404 for an unknown project, 409 for a taken new name |
+| `/api/tasks/:id/project` | PUT | Move a task to `{project_id}`, whatever its status |
+| `/api/tasks/:id` | GET | Task detail with steps, `project_id` and `project_name` |
 | `/api/tasks/cancel` | POST | Cancel task (permanent) |
 | `/api/tasks/stop` | POST | Stop/pause task |
 | `/api/tasks/start` | POST | Start/resume task |
