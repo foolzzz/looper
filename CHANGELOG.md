@@ -18,6 +18,13 @@ To learn how to use these features, read the [usage guide](docs/fork/usage.md).
 
 ### Changed
 
+- Security: the agent HTTP API no longer accepts requests from other web
+  pages. It sent `Access-Control-Allow-Origin: *` and approved every preflight,
+  so any page open in the browser could create and start a task, whose Workers
+  run Claude with every permission, or read chat and run history. A request
+  whose `Origin` is not the server's own now gets 403, no response carries CORS
+  headers, and on a loopback address the `Host` must be a loopback name
+  (against DNS rebinding). curl, the CLI and the Vite dev proxy are unaffected.
 - Every agent task belongs to exactly one project. A project has a name
   (unique ignoring case), a description and an optional default directory.
   `GET`/`POST /api/projects` and `PUT`/`DELETE /api/projects/<id>` manage

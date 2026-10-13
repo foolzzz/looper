@@ -190,6 +190,14 @@ SPA uses `#page/sub` format for deep linking that survives browser refresh:
 
 ## HTTP API
 
+The API answers only the dashboard and local clients: Workers run Claude with
+every permission, so a web page in your browser must not be able to drive it.
+A request whose `Origin` is not the server's own is refused with 403 and no
+response carries CORS headers. While the server listens on a loopback address,
+the `Host` must name a loopback address too, which defeats DNS rebinding.
+Clients without an `Origin` (curl, the CLI) are unaffected, and so is the Vite
+dev proxy, which keeps `Host` and `Origin` on its own port.
+
 | Endpoint | Method | Purpose |
 |---|---|---|
 | `/api/status` | GET | System health |
