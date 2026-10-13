@@ -23,13 +23,14 @@
 |---|---|---|---|
 | M0 | 项目背景；四类 agent 的 prompt 分层；记录并展示 system prompt | ✅ 已交付（looper #13） | — |
 | M1 | 上下文隔离与可复现 | 🔄 进行中 | M0 |
+| M1.5 | harness 与 role 分层；harness 继承链 | 待开始 | M1 |
 | M2 | 上下文与花费观测 | 待开始 | M0 |
 | M3 | 项目知识 | 待开始 | M0 |
 | M4 | 项目 skill | 待开始 | M3 |
 | M5 | 项目执行配置 | 待开始 | M2 |
 | M6 | prompt 回归评测 | 待开始 | M1 |
 
-执行顺序：M1 → M2 → M3 → M4 → M5 → M6。
+执行顺序：M1 → M1.5 → M2 → M3 → M4 → M5 → M6。
 
 ## 3. 各阶段
 
@@ -53,6 +54,30 @@
   - 启动命令里不再有几千字的 prompt；
   - 真实 Claude 下，Planner 仍能产出有效计划，Worker 的报告判为 completed，Reviewer 给出 `passed`；
     记录里的 system prompt 能看到四层，Worker 和 Reviewer 的 stdin 里不再有步骤指令和验收标准。
+
+### M1.5 harness 与 role 分层
+
+- **目标：** 把 agent 的"性格与稳定性"（harness）和"职责"（role）分开管理。harness 有统一的系统默认，并可按 agent、按项目覆盖；最终 system prompt 为五层：harness → role → 项目档案 → 任务描述 → 代码契约（RFC 决策 6）。
+- **范围：**
+  - **系统默认 harness**：
+    - 存在 Settings，在 Settings 页编辑；
+    - 仓库内置一份公开通用的默认值，可以一键恢复；
+    - 操作者自己的版本只存数据库。
+  - **Manager 的 harness 覆盖**：在 Agents 页编辑，为空则继承系统默认。
+  - **项目级覆盖**：项目上新增 Planner harness 和 Worker harness 两个字段，在项目信息里编辑，为空则继承系统默认；Reviewer 使用 Worker 的 harness。
+  - **role prompt**：
+    - 现有的 `agent_configs.<role>.system_prompt` 只承担职责说明，推荐版本照旧跟踪；
+    - 新增 Reviewer 的 role prompt；
+    - 现有推荐 prompt 里属于"性格与稳定性"的内容移入系统默认 harness。
+  - **记录与展示**：每次运行的 `prompt_layers` 增加 `harness` 层，写明来源（系统默认、Manager 覆盖、项目覆盖）和哈希；历史页展示来源。
+  - **本机初始化**：把本机的 CLAUDE.md 与 AGENTS.md 整理合并为操作者的系统默认 harness，写入本机 Settings。合并稿先经维护者审阅，不提交到仓库。
+- **不做：** 不在 Agents 页编辑 Planner、Worker 的 harness；不改代码契约的内容。
+- **验收：**
+  - 四类 agent 的 system prompt 按五层顺序拼装，各层来源可在记录中读回；
+  - 修改系统默认后，没有覆盖的 agent 下一次运行就生效；
+  - 给某个项目设置 Worker harness 后，该项目的 Worker 和 Reviewer 使用它，其他项目不受影响；
+  - Manager 的覆盖只影响 Manager；
+  - 真实 Claude 下，Planner、Worker、Reviewer 的产出仍通过判定。
 
 ### M2 上下文与花费观测
 
@@ -128,6 +153,7 @@
 | 2026-10-13 | M0 交付（looper #13，`c600594ea`）：项目背景；Worker 和 Reviewer 的 prompt 分层，契约移出 stdin；四类 agent 记录 `metadata.system_prompt`。真实 Claude 下 Worker 和 Reviewer 的判定都通过 |
 | 2026-10-13 | M1 开工 |
 | 2026-10-13 | RFC 决策 5：任务描述进 system prompt，分层改为四层，并入 M1 |
+| 2026-10-13 | RFC 决策 6：harness 与 role 分层，新增 M1.5（M1 之后、M2 之前） |
 
 ## 5. 不属于本 RFC 的待办
 
