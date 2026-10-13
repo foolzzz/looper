@@ -19,7 +19,7 @@ To learn how to use these features, read the [usage guide](docs/fork/usage.md).
 ## [2.5.0] - 2026-10-13
 
 Covers `v2.1.0` to `v2.5.0`: this fork's merged pull requests from #106 to
-#179 and [michaelx1993/loopx](https://github.com/michaelx1993/loopx/pulls)
+#180 and [michaelx1993/loopx](https://github.com/michaelx1993/loopx/pulls)
 pull requests #30 to #58. Versions 2.1.1 through 2.4.0 were tagged and
 released only in michaelx1993/loopx; their changes are listed here. Entries
 for that work link its pull requests.
@@ -105,6 +105,14 @@ for that work link its pull requests.
 
 ### Changed
 
+- Releases are published by GitHub Actions when a `vX.Y.Z` tag is pushed
+  (`.github/workflows/release.yml`); nothing is built or uploaded locally. The
+  release pull request commits the exact body as `docs/releases/vX.Y.Z.md` and
+  its optional-capability surfaces as `docs/releases/vX.Y.Z.surfaces`. The
+  workflow checks the tag against `main` and the package version, validates
+  the body, builds the Chat bundle and the dashboard, runs the wheel smoke
+  against a PostgreSQL service, builds the wheel and publishes the release
+  through a draft, so the latest release always carries its wheel.
 - A release wheel runs `loopx serve`. It now carries `loopx/db/schema.sql`
   and the agent dashboard, staged into `loopx/web/dashboard` by
   `scripts/stage-dashboard.sh`; before, an installed wheel failed at startup
