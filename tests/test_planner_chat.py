@@ -16,11 +16,11 @@ from loopx.agents.message import (
     MessageType,
     channel_address,
     planner_address,
-    worker_address,
 )
 from loopx.agents.tiers import planner as planner_module
 from loopx.agents.tiers.planner import PlanStep, PlannerAgent, TaskPlan
 from loopx.agents.tiers.task import Task, TaskRouter
+from tests.test_planner_agent import WORK_OK, Harness, activity, chat, decide, drive, hold_first, plan, step
 
 WEB = channel_address("web")
 
@@ -77,48 +77,6 @@ def _work_items(sent: list[MessageEnvelope]) -> list[MessageEnvelope]:
 
 
 class TestPlannerUserMessage:
-    def test_instruction_queues_after_running_steps(self) -> None:
-        running = PlanStep(step_id="s1", index=0, instruction="build it", status="dispatched")
-        planner, sent = _run_planner(_executing_plan(running), _user_message("t1", "also add tests"))
-
-        steps = planner._plan.steps  # type: ignore[union-attr]
-        assert [s.instruction for s in steps] == ["build it", "also add tests"]
-        added = steps[1]
-        assert added.depends_on == ["s1"]
-        assert added.status == "pending"
-        assert _work_items(sent) == []
-
-        (reply,) = _replies(sent)
-        assert reply.target == WEB
-        assert reply.correlation_id == "corr-chat"
-        assert "2" in reply.payload["text"]
-
-    def test_queued_instruction_runs_when_previous_step_finishes(self) -> None:
-        running = PlanStep(step_id="s1", index=0, instruction="build it", status="dispatched")
-        result = MessageEnvelope.create(
-            source=WEB,  # source is irrelevant to the planner
-            target=planner_address("t1"),
-            message_type=MessageType.WORK_RESULT,
-            payload={"task_id": "s1", "status": "completed"},
-        )
-        planner, sent = _run_planner(
-            _executing_plan(running), _user_message("t1", "also add tests"), result,
-        )
-
-        (item,) = _work_items(sent)
-        assert item.payload["instruction"] == "also add tests"
-        assert item.payload["context"] == {"work_dir": "/tmp/proj"}
-        assert planner._plan.steps[1].status == "dispatched"  # type: ignore[union-attr]
-
-    def test_instruction_dispatches_at_once_when_nothing_is_running(self) -> None:
-        done = PlanStep(step_id="s1", index=0, instruction="build it", status="verified")
-        planner, sent = _run_planner(_executing_plan(done), _user_message("t1", "tidy up"))
-
-        (item,) = _work_items(sent)
-        assert item.payload["instruction"] == "tidy up"
-        assert planner._plan.steps[1].depends_on == []  # type: ignore[union-attr]
-        assert len(_replies(sent)) == 1
-
     def test_finished_plan_rejects_instruction(self) -> None:
         plan = _executing_plan(PlanStep(step_id="s1", index=0, instruction="x", status="verified"))
         plan.status = "completed"
@@ -229,52 +187,130 @@ class TestResolveChatTarget:
 
 
 
-class TestPlannerForwardsToRunningWorker:
-    def _run(self, delivered: bool) -> tuple[PlannerAgent, list[MessageEnvelope], list[MessageEnvelope]]:
-        forwarded: list[MessageEnvelope] = []
+@pytest.mark.usefixtures("agent_db")
+class TestPlannerChatThroughClaude:
+    """A chat message goes to the Planner's Claude, which replies and takes at most one action."""
 
-        async def _run() -> tuple[PlannerAgent, list[MessageEnvelope]]:
-            with tempfile.TemporaryDirectory() as tmp:
-                bus = MessageBus(runtime_root=Path(tmp))
+    def test_reply_and_forward_to_the_running_worker(self, planner_claude: Any, agent_db: Any) -> None:
+        claude = planner_claude(
+            plan(step("s1")),
+            chat("好的，我让 Worker 改成红色背景。", "forward", step="s1", text="use a red background"),
+            decide("accept"),
+        )
 
-                def worker_pool(envelope: MessageEnvelope) -> bool:
-                    forwarded.append(envelope)
-                    asyncio.get_event_loop().create_task(bus.publish(MessageEnvelope.create(
-                        source=envelope.target, target=envelope.source,
-                        message_type=MessageType.WORKER_INPUT_RESULT,
-                        payload={"delivered": delivered}, reply_to=envelope.message_id,
-                    )))
-                    return True
+        async def scenario(h: Harness) -> str:
+            await h.start()
+            await h.until(lambda: h.held)  # s1's Worker is running
+            answer = await h.say("背景改成红色")
+            await h.release(WORK_OK)
+            await h.finished()
+            return answer
 
-                bus.subscribe_topic(MessageType.WORKER_INPUT, worker_pool, consumes=True)
-                planner = PlannerAgent(task_id="t1", runtime_root=Path(tmp))
-                planner._bus = bus
-                planner._plan = _executing_plan(
-                    PlanStep(step_id="s1", index=0, instruction="build it", status="dispatched", worker_id="worker-9"),
-                )
-                await planner._handle(_user_message("t1", "use a red background"))
-                replies = []
-                queue = bus.get_queue(WEB.agent_id)
-                while not queue.empty():
-                    replies.append(queue.get_nowait())
-                await bus.shutdown()
-                return planner, replies
+        h = drive(claude, lambda envelope: None, scenario)
+        (forwarded,) = h.forwarded
+        assert forwarded.target == h.work_items[0].target
+        assert forwarded.payload["text"].endswith("use a red background")
+        (answer,) = [r for r in h.replies if r.target == WEB]
+        assert answer.payload["text"] == "好的，我让 Worker 改成红色背景。"
+        assert answer.correlation_id == "corr-chat"
+        assert len(h.work_items) == 1  # no step was added
+        turn = claude.turns()[1]["text"]
+        assert turn.startswith("[CHAT]") and "背景改成红色" in turn
+        assert f"Running now: s1 ({h.work_items[0].target.agent_id})" in turn
+        assert any("User message passed to" in line for line in activity(agent_db))
 
-        planner, replies = asyncio.run(_run())
-        return planner, replies, forwarded
+    def test_reply_and_added_steps(self, planner_claude: Any) -> None:
+        claude = planner_claude(
+            plan(step("s1")),
+            chat("会在第 1 步之后加上测试。", "add_steps", steps=[step("t1", "s1")]),
+            decide("accept"),
+            decide("accept"),
+        )
 
-    def test_message_goes_to_the_running_worker(self) -> None:
-        planner, replies, forwarded = self._run(delivered=True)
-        (sent,) = forwarded
-        assert sent.target == worker_address("worker-9")
-        assert "use a red background" in sent.payload["text"]
-        assert len(planner._plan.steps) == 1  # no new step  # type: ignore[union-attr]
-        (reply,) = [r for r in replies if r.message_type == MessageType.AGENT_REPLY]
-        assert "worker-9" in reply.payload["text"]
+        async def scenario(h: Harness) -> None:
+            await h.start()
+            await h.until(lambda: h.held)
+            assert await h.say("也加上测试") == "会在第 1 步之后加上测试。"
+            assert len(h.work_items) == 1  # the new step waits for s1
+            await h.release(WORK_OK)
+            await h.finished()
 
-    def test_undelivered_message_becomes_a_step(self) -> None:
-        planner, replies, _ = self._run(delivered=False)
-        steps = planner._plan.steps  # type: ignore[union-attr]
-        assert [s.instruction for s in steps] == ["build it", "use a red background"]
-        (reply,) = [r for r in replies if r.message_type == MessageType.AGENT_REPLY]
-        assert "第 2 步" in reply.payload["text"]
+        h = drive(claude, hold_first(), scenario)
+        assert [item.payload["instruction"] for item in h.work_items] == ["do s1", "do t1"]
+        assert h.final().payload["status"] == "completed"  # type: ignore[union-attr]
+
+    def test_forward_that_arrives_too_late_reaches_the_decision(self, planner_claude: Any) -> None:
+        claude = planner_claude(
+            plan(step("s1")),
+            chat("我转给它。", "forward", step="s1", text="also log errors"),
+            decide("retry", feedback="also log errors"),
+            decide("accept"),
+        )
+
+        async def scenario(h: Harness) -> str:
+            await h.start()
+            await h.until(lambda: h.held)
+            running = h.held.pop(0)  # its Worker has finished but the result is not in yet
+            answer = await h.say("记得打日志")
+            await h.answer(running, WORK_OK)
+            await h.finished()
+            return answer
+
+        h = drive(claude, hold_first(), scenario)
+        reply_text = [r.payload["text"] for r in h.replies if r.target == WEB][0]
+        assert reply_text.startswith("我转给它。") and "已经结束" in reply_text
+        decision = claude.turns()[2]["text"]
+        assert "arrived after the Worker finished" in decision and "also log errors" in decision
+        assert "also log errors" in h.work_items[1].payload["instruction"]
+
+    def test_plain_reply_takes_no_action(self, planner_claude: Any) -> None:
+        claude = planner_claude(plan(step("s1")), chat("第 1 步正在执行。"), decide("accept"))
+
+        async def scenario(h: Harness) -> str:
+            await h.start()
+            await h.until(lambda: h.held)
+            answer = await h.say("现在到哪一步了？")
+            await h.release(WORK_OK)
+            await h.finished()
+            return answer
+
+        h = drive(claude, lambda envelope: None, scenario)
+        assert [r.payload["text"] for r in h.replies if r.target == WEB] == ["第 1 步正在执行。"]
+        assert h.forwarded == [] and len(h.work_items) == 1
+
+    def test_invalid_action_gets_a_repair_turn(self, planner_claude: Any) -> None:
+        claude = planner_claude(
+            plan(step("s1")),
+            chat("转给 s2。", "forward", step="s2", text="x"),  # s2 does not exist
+            chat("好的。"),
+            decide("accept"),
+        )
+
+        async def scenario(h: Harness) -> str:
+            await h.start()
+            await h.until(lambda: h.held)
+            answer = await h.say("hi")
+            await h.release(WORK_OK)
+            await h.finished()
+            return answer
+
+        h = drive(claude, lambda envelope: None, scenario)
+        assert [r.payload["text"] for r in h.replies if r.target == WEB] == ["好的。"]
+        repair = claude.turns()[2]["text"]
+        assert repair.startswith("[CHAT] Your last reply broke the reply contract: step 's2' has no running Worker")
+
+    def test_failed_chat_turn_is_answered(self, planner_claude: Any) -> None:
+        claude = planner_claude(plan(step("s1")), "<error>", decide("accept"))
+
+        async def scenario(h: Harness) -> str:
+            await h.start()
+            await h.until(lambda: h.held)
+            answer = await h.say("hi")
+            await h.release(WORK_OK)
+            await h.finished()
+            return answer
+
+        h = drive(claude, lambda envelope: None, scenario)
+        (answer,) = [r.payload["text"] for r in h.replies if r.target == WEB]
+        assert answer.startswith("Planner 出错") and "error_during_execution" in answer
+        assert h.final().payload["status"] == "completed"  # type: ignore[union-attr]

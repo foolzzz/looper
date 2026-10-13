@@ -619,10 +619,10 @@ class WorkerPool:
         acceptance = payload.get("acceptance_criteria", [])
         changed = work_result.get("changed_files", {})
 
-        parts = [
-            "You are a Reviewer Worker verifying completed work.",
-            f"Files changed: {json.dumps(changed, ensure_ascii=False)}",
-        ]
+        parts = ["You are a Reviewer Worker verifying completed work."]
+        if payload.get("instruction"):
+            parts.append(f"The step's instruction: {payload['instruction']}")
+        parts.append(f"Files changed: {json.dumps(changed, ensure_ascii=False)}")
         if acceptance:
             parts.append("Acceptance criteria to verify:")
             for c in acceptance:

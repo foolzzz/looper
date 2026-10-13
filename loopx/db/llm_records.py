@@ -144,10 +144,12 @@ async def list_events(
     ]
 
 
-# Which records belong to an agent role (the ids in agent_configs). Workers
-# and reviewers record under their per-run instance id; the Planner runs no LLM.
+# Which records belong to an agent role (the ids in agent_configs). Each
+# task's Planner records its turns as planner-<task_id>; Workers and Reviewers
+# record under their per-run instance id.
 _ROLE_FILTERS = {
     "manager": "agent_id = 'manager'",
+    "planner": "agent_id LIKE 'planner-%'",
     "worker": "(agent_id LIKE 'worker-%' OR agent_id LIKE 'reviewer-%')",
 }
 
