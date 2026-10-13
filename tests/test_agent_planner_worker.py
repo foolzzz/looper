@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import signal
@@ -16,6 +17,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from loopx.agents.bus import MessageBus
+from loopx.agents.claude_cli import ISOLATION_ID, isolation_args
 from loopx.agents.message import (
     MANAGER_ADDRESS,
     TASK_ROUTER_ADDRESS,
@@ -248,16 +250,22 @@ class TestWorkerPool:
             config=WorkerConfig(),
             runtime_root=Path("/tmp"),
         )
-        prompt = pool._build_work_prompt({
+        step = {
             "instruction": "add tests for login",
             "target_files": ["auth.py"],
             "validation_commands": ["pytest tests/test_auth.py"],
             "acceptance_criteria": ["all tests pass"],
+        }
+        prompt = pool._build_work_prompt({
+            **step, "dependencies": [{"step": "s1", "summary": "added login()", "changed_files": ["login.py"]}],
         })
-        assert "add tests for login" in prompt
-        assert "auth.py" in prompt
-        assert "pytest tests/test_auth.py" in prompt
-        assert "all tests pass" in prompt
+        # The step is the system prompt's task section; the user turn has the dependencies' reports.
+        for part in ("add tests for login", "auth.py", "pytest tests/test_auth.py", "all tests pass"):
+            assert part not in prompt
+        assert "s1: added login() (changed: login.py)" in prompt
+        task = pool._task_section(step, "/w", is_verify=False)
+        for part in ("add tests for login", "auth.py", "$ pytest tests/test_auth.py", "- all tests pass"):
+            assert part in task
         # The report contract judge_result checks is in the system prompt, not the step's user turn.
         assert '"deleted_files"' not in prompt and '"deleted_files"' in WORK_CONTRACT
 
@@ -266,13 +274,18 @@ class TestWorkerPool:
             config=WorkerConfig(),
             runtime_root=Path("/tmp"),
         )
-        prompt = pool._build_verify_prompt({
+        payload = {
+            "instruction": "harden the login check",
             "work_result": {"changed_files": {"auth.py": "modified"}, "summary": "hardened the login check"},
             "acceptance_criteria": ["code is clean"],
-        })
+        }
+        prompt = pool._build_verify_prompt(payload)
         assert "auth.py" in prompt
-        assert "code is clean" in prompt
         assert "hardened the login check" in prompt  # the Worker's report is data under review
+        assert "code is clean" not in prompt and "harden the login check" not in prompt
+        task = pool._task_section(payload, "/w", is_verify=True)
+        assert "code is clean" in task and "harden the login check" in task
+        assert "hardened the login check" not in task
         assert '"passed"' not in prompt and '"passed"' in REVIEW_CONTRACT
 
     def test_pool_start_stop(self) -> None:
@@ -332,7 +345,7 @@ def _work_item(work_dir: Path) -> MessageEnvelope:
         source=planner_address("t1"),
         target=worker_address("w1"),
         message_type=MessageType.WORK_ITEM,
-        payload={"task_id": "s1", "instruction": "x", "context": {"work_dir": str(work_dir)}},
+        payload={"task_id": "s1", "instruction": "add the parser", "context": {"work_dir": str(work_dir)}},
     )
 
 
@@ -370,6 +383,10 @@ def _start_warm(monkeypatch: pytest.MonkeyPatch, claude: str) -> list[asyncio.su
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", _start)
     return started
+
+
+def _flag(argv: list[str], name: str) -> str | None:
+    return argv[argv.index(name) + 1] if name in argv else None
 
 
 _SUCCESS = (
@@ -575,9 +592,12 @@ class TestWorkerSubprocess:
 
         argv = asyncio.run(_run())
         assert "--include-partial-messages" in argv
+        assert "--dangerously-skip-permissions" in argv
         # The Worker loads none of the operator's settings, memory, hooks, plugins or MCP servers.
-        assert argv[argv.index("--setting-sources") + 1] == "project"
+        assert _flag(argv, "--setting-sources") == "project"
         assert "--strict-mcp-config" in argv and "--settings" in argv
+        # The system prompt is a file, not an argument.
+        assert "--append-system-prompt" not in argv and "--append-system-prompt-file" in argv
         turns = argv[argv.index("--max-turns"):][:2] if "--max-turns" in argv else []
         assert turns == expected
 
@@ -632,10 +652,12 @@ class TestWorkerSubprocess:
         assert settings.system_prompt == DEFAULT_SYSTEM_PROMPT.strip()
 
 
-# What the stand-in Claude saw: its argv and its first user turn (the step's prompt).
+# What the stand-in Claude saw: its argv, the system prompt its file held and its first user turn.
 _RECORD_RUN = (
     "first = json.loads(sys.stdin.readline())['message']['content']\n"
-    "json.dump({'argv': sys.argv[1:], 'stdin': first}, open('run.json', 'w'))\n"
+    "prompt_file = sys.argv[sys.argv.index('--append-system-prompt-file') + 1]\n"
+    "prompt = open(prompt_file, encoding='utf-8').read()\n"
+    "json.dump({'argv': sys.argv[1:], 'stdin': first, 'prompt': prompt}, open('run.json', 'w'))\n"
 )
 _VERDICT = (
     "print(json.dumps({'type': 'result', 'subtype': 'success', 'is_error': False, "
@@ -644,10 +666,14 @@ _VERDICT = (
 ROLE = "You are a careful Worker."
 
 
-def _step_envelope(work_dir: Path, *, verify: bool) -> MessageEnvelope:
+REQUIREMENT = "Build a small calculator package."
+
+
+def _step_envelope(work_dir: Path, *, verify: bool, **extra: Any) -> MessageEnvelope:
     payload: dict[str, Any] = {
         "task_id": "s1", "parent_task_id": "task-1", "plan_id": "p1", "instruction": "add calc.py",
         "acceptance_criteria": ["calc.add(1, 2) == 3"], "context": {"work_dir": str(work_dir)},
+        "requirement": REQUIREMENT, "step_key": "calc-module", **extra,
     }
     if verify:
         payload["work_result"] = {"status": "completed", "changed_files": {"calc.py": "added"},
@@ -660,71 +686,128 @@ def _step_envelope(work_dir: Path, *, verify: bool) -> MessageEnvelope:
     )
 
 
-def _run_step(*, verify: bool = False) -> tuple[dict[str, Any], dict[str, Any]]:
+def _run_step(*, verify: bool = False, **extra: Any) -> tuple[dict[str, Any], dict[str, Any]]:
     """Run one Worker (or Reviewer) step; return its outcome and what its Claude saw."""
 
     async def _run() -> tuple[dict[str, Any], dict[str, Any]]:
         with tempfile.TemporaryDirectory() as tmp:
             claude = _fake_claude(Path(tmp), _RECORD_RUN + (_VERDICT if verify else _SUCCESS))
             pool = WorkerPool(config=WorkerConfig(claude_bin=claude), runtime_root=Path(tmp))
-            result = await pool._execute(_step_envelope(Path(tmp), verify=verify), is_verify=verify)
-            return result, json.loads((Path(tmp) / "run.json").read_text())
+            result = await pool._execute(_step_envelope(Path(tmp), verify=verify, **extra), is_verify=verify)
+            return result, {**json.loads((Path(tmp) / "run.json").read_text()), "work_dir": tmp}
 
     return asyncio.run(_run())
 
 
-def _system_prompt(argv: list[str]) -> str:
-    return argv[argv.index("--append-system-prompt") + 1]
+def _system_prompt(seen: dict[str, Any]) -> str:
+    return seen["prompt"]
+
+
+def _sha(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _in_order(text: str, *parts: str) -> None:
+    at = [text.index(part) for part in parts]
+    assert at == sorted(at), f"out of order: {parts}"
+
+
+def _task_section(prompt: str, contract: str) -> str:
+    return prompt[prompt.index("## Task"):prompt.index(contract)].rstrip("\n")
 
 
 class TestWorkerSystemPrompt:
     """A Worker's or Reviewer's system prompt: the worker role prompt, the
-    project's background (read when the run starts) and the code-owned report
-    contract, last. The step itself arrives on stdin."""
+    project's background (read when the run starts), the task section (the
+    step, with the task it belongs to) and the code-owned report contract,
+    last. The first user turn on stdin carries only other agents' output."""
 
     @pytest.fixture(autouse=True)
     def _role(self, monkeypatch: pytest.MonkeyPatch, agent_db: Any) -> None:
         _worker_row(monkeypatch, {"system_prompt": ROLE + "\n", "timeout_seconds": 0, "max_turns": 0})
-        agent_db.get_task_project.return_value = {"id": "proj-1", "name": "calc", "background": "Use uv.\nPython 3.12."}
+        agent_db.get_task_project.return_value = {"id": "proj-1", "name": "calc", "background": "Use uv.\nPython 3.12.",
+                                                  "updated_at": "2026-10-13T12:00:00+00:00"}
 
-    def test_worker_gets_the_role_the_project_and_the_work_contract(self, agent_db: Any) -> None:
+    def test_worker_gets_the_role_the_project_the_task_and_the_work_contract(self, agent_db: Any) -> None:
         result, seen = _run_step()
 
         assert result["status"] == "completed"
-        prompt = _system_prompt(seen["argv"])
-        assert prompt == f"{ROLE}\n\n## Project: calc\nUse uv.\nPython 3.12.\n\n{WORK_CONTRACT}"
+        prompt = _system_prompt(seen)
+        _in_order(prompt, f"{ROLE}\n\n", "## Project: calc\nUse uv.\nPython 3.12.\n\n", "## Task\n",
+                  REQUIREMENT, "calc-module", "add calc.py", "calc.add(1, 2) == 3", WORK_CONTRACT)
+        assert prompt.startswith(f"{ROLE}\n\n") and prompt.endswith(WORK_CONTRACT)
         agent_db.get_task_project.assert_awaited_once_with("task-1")
-        # The step is the user turn; the contract is not repeated there.
-        assert "Task: add calc.py" in seen["stdin"] and "calc.add(1, 2) == 3" in seen["stdin"]
-        assert '"deleted_files"' not in seen["stdin"] and "End your final message" not in seen["stdin"]
-        # The run's record keeps the exact argv and the appended system prompt.
+        # The step is the system prompt's task section; stdin only starts the work.
+        for part in ("add calc.py", "calc.add(1, 2) == 3", REQUIREMENT, '"deleted_files"', "End your final message"):
+            assert part not in seen["stdin"]
+        assert seen["stdin"].strip()
+        # The shared isolation flags, for the step's directory, and the prompt file named by its hash.
+        isolation = isolation_args(seen["work_dir"])
+        at = seen["argv"].index(isolation[0])
+        assert seen["argv"][at:at + len(isolation)] == isolation
+        assert "--append-system-prompt" not in seen["argv"]
+        assert Path(_flag(seen["argv"], "--append-system-prompt-file") or "").name == f"{_sha(prompt)}.md"
+        assert _flag(seen["argv"], "--system-prompt-snapshot") == "off"
+        # The run's record keeps the exact argv, the system prompt, its hash and its layers.
         metadata = agent_db.start_record.await_args.kwargs["metadata"]
-        assert metadata["system_prompt"] == prompt
         assert metadata["command"][1:] == seen["argv"]
+        assert metadata["system_prompt"] == prompt
+        assert metadata["system_prompt_sha256"] == _sha(prompt)
+        layers = metadata["prompt_layers"]
+        assert layers["role"] == {"config_id": "worker", "sha256": _sha(ROLE), "recommended": False}
+        assert layers["project"] == {"id": "proj-1", "background_sha256": _sha("Use uv.\nPython 3.12."),
+                                     "updated_at": "2026-10-13T12:00:00+00:00"}
+        assert layers["task"] == {"kind": "work", "task_id": "task-1", "step_id": "s1",
+                                  "sha256": _sha(_task_section(prompt, WORK_CONTRACT))}
+        assert layers["contract"] == {"name": "WORK_CONTRACT", "sha256": _sha(WORK_CONTRACT)}
+        assert layers["isolation"] == ISOLATION_ID
         summaries = activity(agent_db)
         assert "Project background applied (20 chars)" in summaries
-        # The timeline's launch line names the prompt's size instead of repeating it.
+        # The timeline's launch line names the prompt file and keeps the isolation settings short.
         (launch,) = [line for line in summaries if line.startswith("$ ")]
-        assert "--append-system-prompt <" in launch and "Use uv." not in launch
+        assert "--append-system-prompt-file " in launch and "Use uv." not in launch
+        assert "claudeMdExcludes" not in launch
 
-    def test_reviewer_gets_the_review_contract_and_the_work_as_data(self, agent_db: Any) -> None:
+    def test_reviewer_gets_the_step_in_its_task_and_the_work_as_data(self, agent_db: Any) -> None:
         result, seen = _run_step(verify=True)
 
         assert result["passed"] is True
-        prompt = _system_prompt(seen["argv"])
-        assert prompt == f"{ROLE}\n\n## Project: calc\nUse uv.\nPython 3.12.\n\n{REVIEW_CONTRACT}"
-        assert agent_db.start_record.await_args.kwargs["metadata"]["system_prompt"] == prompt
+        prompt = _system_prompt(seen)
+        _in_order(prompt, f"{ROLE}\n\n", "## Project: calc\n", "## Task\n", "add calc.py",
+                  "calc.add(1, 2) == 3", REVIEW_CONTRACT)
+        assert REQUIREMENT in prompt and prompt.endswith(REVIEW_CONTRACT)
+        metadata = agent_db.start_record.await_args.kwargs["metadata"]
+        assert metadata["system_prompt"] == prompt
+        assert metadata["prompt_layers"]["task"]["kind"] == "review"
+        assert metadata["prompt_layers"]["contract"]["name"] == "REVIEW_CONTRACT"
         # The work under review, the Worker's own words included, stays in the user turn.
-        for data in ("add calc.py", "calc.add(1, 2) == 3", "calc.py", "added calc.py with add()"):
+        for data in ("calc.py", "added calc.py with add()"):
             assert data in seen["stdin"]
-            assert data not in prompt
-        assert '"passed"' not in seen["stdin"]
+        assert "added calc.py with add()" not in prompt
+        for part in ("add calc.py\n", "calc.add(1, 2) == 3", REQUIREMENT, '"passed"'):
+            assert part not in seen["stdin"]
 
-    def test_without_a_background_it_is_the_role_and_the_contract(self, agent_db: Any) -> None:
+    def test_a_retried_step_has_its_feedback_in_the_task(self, agent_db: Any) -> None:
+        _, seen = _run_step(feedback=["import calc from the package", "add sub()"], attempt=3)
+
+        task = _task_section(_system_prompt(seen), WORK_CONTRACT)
+        assert "attempt 3" in task and "- import calc from the package\n- add sub()" in task
+        assert "import calc from the package" not in seen["stdin"]
+
+    def test_the_dependencies_reports_are_the_user_turn(self, agent_db: Any) -> None:
+        deps = [{"step": "core", "summary": "added the core module", "changed_files": ["core.py"]}]
+        _, seen = _run_step(dependencies=deps)
+
+        assert "core" in seen["stdin"] and "added the core module" in seen["stdin"] and "core.py" in seen["stdin"]
+        assert "added the core module" not in _system_prompt(seen)
+
+    def test_without_a_background_it_is_the_role_the_task_and_the_contract(self, agent_db: Any) -> None:
         agent_db.get_task_project.return_value = {"id": "proj-1", "name": "calc", "background": ""}
         _, seen = _run_step()
 
-        assert _system_prompt(seen["argv"]) == f"{ROLE}\n\n{WORK_CONTRACT}"
+        prompt = _system_prompt(seen)
+        assert prompt.startswith(f"{ROLE}\n\n## Task\n") and prompt.endswith(WORK_CONTRACT)
+        assert "## Project" not in prompt
         assert not [line for line in activity(agent_db) if "background" in line]
 
     @pytest.mark.parametrize("lookup", [ConnectionError("database is down"), None])
@@ -738,7 +821,8 @@ class TestWorkerSystemPrompt:
         result, seen = _run_step()
 
         assert result["status"] == "completed"
-        assert _system_prompt(seen["argv"]) == f"{ROLE}\n\n{WORK_CONTRACT}"
+        assert _system_prompt(seen).startswith(f"{ROLE}\n\n## Task\n")
+        assert agent_db.start_record.await_args.kwargs["metadata"]["prompt_layers"]["project"] is None
         warnings = [call.kwargs for call in agent_db.insert_activity.await_args_list
                     if "background" in str(call.kwargs.get("summary"))]
         assert len(warnings) == 1
@@ -750,8 +834,8 @@ class TestWorkerSystemPrompt:
         agent_db.get_task_project.return_value = {"id": "proj-1", "name": "calc", "background": "Now use pnpm."}
         _, second = _run_step(verify=True)
 
-        assert "## Project: calc\nUse uv.\nPython 3.12.\n\n" in _system_prompt(first["argv"])
-        assert "## Project: calc\nNow use pnpm.\n\n" in _system_prompt(second["argv"])
+        assert "## Project: calc\nUse uv.\nPython 3.12.\n\n" in _system_prompt(first)
+        assert "## Project: calc\nNow use pnpm.\n\n" in _system_prompt(second)
 
     def test_the_default_role_prompt_applies_without_a_config_row(
         self, monkeypatch: pytest.MonkeyPatch, agent_db: Any,
@@ -759,9 +843,19 @@ class TestWorkerSystemPrompt:
         _worker_row(monkeypatch, None, error=RuntimeError("database pool not initialised"))
         _, seen = _run_step()
 
-        prompt = _system_prompt(seen["argv"])
+        prompt = _system_prompt(seen)
         assert prompt.startswith(DEFAULT_SYSTEM_PROMPT.strip() + "\n\n## Project: calc\n")
         assert prompt.endswith(WORK_CONTRACT)
+        role = agent_db.start_record.await_args.kwargs["metadata"]["prompt_layers"]["role"]
+        assert role == {"config_id": "worker", "sha256": _sha(DEFAULT_SYSTEM_PROMPT.strip()), "recommended": True}
+
+    def test_an_unedited_row_is_the_recommended_role_prompt(
+        self, monkeypatch: pytest.MonkeyPatch, agent_db: Any,
+    ) -> None:
+        _worker_row(monkeypatch, {"system_prompt": ROLE, "default_prompt": ROLE + "\n", "timeout_seconds": 0,
+                                  "max_turns": 0})
+        _run_step()
+        assert agent_db.start_record.await_args.kwargs["metadata"]["prompt_layers"]["role"]["recommended"] is True
 
 
 def activity(agent_db: Any) -> list[str]:
@@ -885,12 +979,12 @@ _LISTENING_CLAUDE = (
 class TestWorkerInput:
     """A running worker reads further user turns on stdin (stream-json input)."""
 
-    def test_prompt_goes_through_stdin(self, agent_db: Any) -> None:
+    def test_the_run_starts_with_a_user_turn_on_stdin(self, agent_db: Any) -> None:
         async def _run() -> list[str]:
             with tempfile.TemporaryDirectory() as tmp:
                 claude = _fake_claude(Path(tmp), (
                     "first = json.loads(sys.stdin.readline())\n"
-                    "assert first['type'] == 'user' and 'Task: x' in first['message']['content']\n"
+                    "assert first['type'] == 'user' and first['message']['content'].strip()\n"
                     "print(json.dumps({'type': 'result', 'subtype': 'success', 'is_error': False, "
                     "'result': json.dumps({'status': 'completed', 'changed_files': {}, 'summary': 'ok'})}), flush=True)\n"
                     "sys.stdin.read()"
@@ -903,7 +997,7 @@ class TestWorkerInput:
         command = asyncio.run(_run())
         assert "--input-format" in command and command[command.index("--input-format") + 1] == "stream-json"
         assert "--replay-user-messages" in command
-        assert not any("Task: x" in arg for arg in command)  # the prompt is not an argument
+        assert not any("add the parser" in arg for arg in command)  # the step is not an argument
 
     def test_message_reaches_a_running_worker(self, agent_db: Any) -> None:
         async def _run() -> tuple[bool, dict[str, Any], bool]:

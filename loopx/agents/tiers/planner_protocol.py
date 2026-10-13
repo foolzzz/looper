@@ -446,9 +446,10 @@ after it. Use only the keys shown. Text before the block is kept in the run's
 history only.
 
 [PLAN]: split the task into steps. Each step runs in its own Worker, a fresh
-Claude Code session with full tools in the working directory that sees only
-its step's instruction and acceptance criteria, plus the project background
-you see when the project has one.
+Claude Code session with full tools in the working directory that sees the
+task's requirement, its own step's instruction and acceptance criteria, what
+the steps it depends on reported, and the project background you see when
+the project has one.
 ```json
 {{"steps": [{{"id": "s1", "instruction": "...", "acceptance_criteria": ["..."], "depends_on": [], "review": false}}]}}
 ```

@@ -10,7 +10,10 @@ import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from .system_prompt import SystemPrompt
 
 logger = logging.getLogger(__name__)
 
@@ -89,6 +92,17 @@ def isolation_args(cwd: str | os.PathLike[str]) -> list[str]:
         "--strict-mcp-config",
         "--settings", json.dumps(settings, ensure_ascii=False, separators=(",", ":")),
     ]
+
+
+def system_prompt_args(prompt_file: Path) -> list[str]:
+    """Append the system prompt in ``prompt_file`` (``SystemPrompt.write_file``).
+
+    By default Claude Code keeps the system prompt of a session's first
+    request and sends it again on every resume, ignoring a changed file; the
+    snapshot is turned off so that a restarted resident agent runs with the
+    prompt its record names.
+    """
+    return ["--append-system-prompt-file", str(prompt_file), "--system-prompt-snapshot", "off"]
 
 _READ_CHUNK = 64 * 1024
 
@@ -303,12 +317,11 @@ class ClaudeRunRecorder:
     """Record one Claude CLI run in ``llm_records``.
 
     The record opens as ``running`` with the launch command, the system
-    prompt LoopX appended (also inside the command, kept on its own for
-    display) and the working directory, gets every stream-json event as it
-    arrives (partial text
-    deltas excepted: the full message follows), and closes with the outcome,
-    usage and cost. Recording is observability: a database error is logged
-    and never fails the run.
+    prompt LoopX appended (its text, its sha256 and its layers' sources) and
+    the working directory, gets every stream-json event as it arrives
+    (partial text deltas excepted: the full message follows), and closes with
+    the outcome, usage and cost. Recording is observability: a database error
+    is logged and never fails the run.
     """
 
     def __init__(
@@ -322,7 +335,7 @@ class ClaudeRunRecorder:
         session_id: str | None = None,
         step_id: str | None = None,
         pid: int | None = None,
-        system_prompt: str | None = None,
+        system_prompt: SystemPrompt | None = None,
     ) -> None:
         self._agent_id = agent_id
         self._task_id = task_id or None
@@ -352,8 +365,8 @@ class ClaudeRunRecorder:
                 input_text=self._input_text,
                 metadata={
                     "command": self._command,
-                    # What LoopX passed with --append-system-prompt; Claude Code's own prompt is not included.
-                    **({"system_prompt": self._system_prompt} if self._system_prompt is not None else {}),
+                    # What LoopX appended (its file holds the same text); Claude Code's own prompt is not included.
+                    **(self._system_prompt.record() if self._system_prompt is not None else {}),
                     "cwd": self._cwd,
                     # The task step a Worker or Reviewer ran, so its run stays tied to that step.
                     **({"step_id": self._step_id} if self._step_id else {}),

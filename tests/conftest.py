@@ -204,6 +204,9 @@ def log(name, value):
         f.write(json.dumps(value) + '\\n')
 log('argv.jsonl', sys.argv[1:])
 log('pids.jsonl', os.getpid())
+# Like Claude, read the appended system prompt's file when the process starts.
+if '--append-system-prompt-file' in sys.argv:
+    log('prompts.jsonl', open(sys.argv[sys.argv.index('--append-system-prompt-file') + 1], encoding='utf-8').read())
 counter = os.path.join(STATE, 'turns')
 cost = 0.0
 for line in sys.stdin:
@@ -238,7 +241,8 @@ class FakePlannerClaude:
     total (0.25 per answered turn). A reply of ``<exit>`` exits mid-turn
     without a result, ``<hang>`` never answers, and ``<error>`` ends the turn
     with an error result. With ``linger`` it keeps running after its stdin
-    closes. It logs its argv, pid and every turn it reads.
+    closes. It logs its argv, pid, the system prompt its file held at start
+    and every turn it reads.
     """
 
     def __init__(self, state: Path, replies: tuple[str, ...], *, linger: bool = False) -> None:
@@ -262,6 +266,10 @@ class FakePlannerClaude:
 
     def turns(self) -> list[dict[str, Any]]:
         return self._log("turns.jsonl")
+
+    def prompts(self) -> list[str]:
+        """The appended system prompt each started process read from its file."""
+        return self._log("prompts.jsonl")
 
 
 @pytest.fixture

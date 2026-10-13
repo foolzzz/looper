@@ -64,7 +64,7 @@ def test_kill_then_retry_redispatches_the_step(planner_claude: Any) -> None:
         await h.until(lambda: len(h.work_items) == 2)
         assert len(h.killed) == 1
         assert h.work_items[1].target != first_worker
-        assert "edit calc.py instead" in h.work_items[1].payload["instruction"]
+        assert h.work_items[1].payload["feedback"] == ["edit calc.py instead"]
 
     drive(claude, always(None), scenario)
 

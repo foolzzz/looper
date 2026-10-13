@@ -2,19 +2,20 @@
 
 Covers reading stream-json output line by line with no line-length limit, the
 flags that keep the operator's personal Claude Code configuration out of an
-agent's run, and the run record.
+agent's run, the system prompt file flags, and the run record.
 """
 
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from loopx.agents.claude_cli import ISOLATION_ID, isolation_args, iter_lines
+from loopx.agents.claude_cli import ISOLATION_ID, isolation_args, iter_lines, system_prompt_args
 
 
 def _lines(*chunks: bytes) -> list[bytes]:
@@ -105,19 +106,24 @@ class TestClaudeRunRecorder:
         assert finish["status"] == "failed"
         assert expected in finish["error"]
 
-    def test_records_the_appended_system_prompt(self, agent_db: Any) -> None:
+    def test_records_the_system_prompt_its_hash_and_its_layers(self, agent_db: Any) -> None:
         from loopx.agents.claude_cli import ClaudeRunRecorder
+        from loopx.agents.system_prompt import SystemPrompt
 
+        text = "Be brief.\n\n## Project: calc\nUse uv."
+        layers = {"role": {"config_id": "worker"}, "isolation": ISOLATION_ID}
+        command = ["claude", "--append-system-prompt-file", "/rt/.local/prompts/abc.md"]
         recorder = ClaudeRunRecorder(
             agent_id="worker-1", task_id="task-1", cwd="/tmp/proj", input_text="go",
-            command=["claude", "--append-system-prompt", "Be brief.\n\n## Project: calc\nUse uv."],
-            system_prompt="Be brief.\n\n## Project: calc\nUse uv.",
+            command=command, system_prompt=SystemPrompt(text, layers),
         )
         asyncio.run(recorder.start())
         metadata = agent_db.start_record.await_args.kwargs["metadata"]
-        # The exact argv stays as it was; the prompt is also kept on its own for display.
-        assert metadata["command"] == ["claude", "--append-system-prompt", "Be brief.\n\n## Project: calc\nUse uv."]
-        assert metadata["system_prompt"] == "Be brief.\n\n## Project: calc\nUse uv."
+        # The argv stays as it was; the prompt itself, its hash and its layers are kept beside it.
+        assert metadata["command"] == command
+        assert metadata["system_prompt"] == text
+        assert metadata["system_prompt_sha256"] == hashlib.sha256(text.encode()).hexdigest()
+        assert metadata["prompt_layers"] == layers
 
     def test_database_errors_never_fail_the_run(self, agent_db: Any) -> None:
         agent_db.start_record.side_effect = RuntimeError("database pool not initialised")
@@ -253,3 +259,12 @@ class TestIsolationArgs:
         # A resident agent compares its command between turns; it must not change by itself.
         assert isolation_args(tmp_path) == isolation_args(str(tmp_path))
         assert isinstance(ISOLATION_ID, str) and ISOLATION_ID
+
+
+def test_the_system_prompt_comes_from_its_file_and_is_read_again_on_resume(tmp_path: Path) -> None:
+    path = tmp_path / "abc.md"
+    # Without "--system-prompt-snapshot off", a resumed session keeps the
+    # prompt of its first request and ignores a changed file.
+    assert system_prompt_args(path) == [
+        "--append-system-prompt-file", str(path), "--system-prompt-snapshot", "off",
+    ]

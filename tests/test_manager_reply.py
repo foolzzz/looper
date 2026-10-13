@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import sys
@@ -14,6 +15,7 @@ from typing import Any
 import pytest
 
 from loopx.agents.bus import MessageBus
+from loopx.agents.claude_cli import ISOLATION_ID, isolation_args
 from loopx.agents.message import MANAGER_ADDRESS, MessageEnvelope, MessageType, channel_address
 from loopx.agents.tiers.manager import TASK_PLACEMENT_RULE, ManagerAgent, ManagerConfig
 
@@ -21,11 +23,14 @@ WEB = channel_address("web")
 
 
 def _fake_claude(tmp: Path, body: str) -> str:
-    """A stand-in `claude` binary that ignores its arguments."""
+    """A stand-in `claude` binary that saves its argv and the system prompt its file holds."""
     script = tmp / "fake-claude"
     script.write_text(
         f"#!{sys.executable}\nimport json, os, sys, time\n"
         "open('argv.json', 'w').write(json.dumps(sys.argv[1:]))\n"
+        "if '--append-system-prompt-file' in sys.argv:\n"
+        "    prompt = open(sys.argv[sys.argv.index('--append-system-prompt-file') + 1], encoding='utf-8').read()\n"
+        "    open('prompts.jsonl', 'a').write(json.dumps(prompt) + '\\n')\n"
         f"{body}\n"
     )
     script.chmod(0o755)
@@ -73,10 +78,22 @@ def _ask(body: str) -> dict[str, Any]:
                 "text": replies[0].payload["text"],
                 "deltas": deltas,
                 "argv": json.loads((root / "argv.json").read_text()),
+                "prompts": _prompts(root),
                 "pid": int(pid_file.read_text()) if pid_file.exists() else None,
+                "root": root,
             }
 
     return asyncio.run(_run())
+
+
+def _prompts(root: Path) -> list[str]:
+    """The system prompt each started fake read from its file."""
+    path = root / "prompts.jsonl"
+    return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+
+
+def _sha(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
 @pytest.mark.usefixtures("agent_db")
@@ -91,7 +108,7 @@ class TestManagerReply:
         assert text == "hi there"
 
     def test_reply_is_recorded(self, agent_db: Any) -> None:
-        _ask(
+        asked = _ask(
             "print(json.dumps({'type': 'system', 'subtype': 'init', 'model': 'claude-x', 'session_id': 's-9'}))\n"
             "print(json.dumps({'type': 'assistant', 'message': {'content': [{'type': 'text', 'text': 'hi'}]}}))\n"
             "print(json.dumps({'type': 'result', 'subtype': 'success', 'is_error': False, 'result': 'hi'}))"
@@ -99,11 +116,19 @@ class TestManagerReply:
         start = agent_db.start_record.await_args.kwargs
         assert start["agent_id"] == "manager" and start["input_text"] == "hello"
         command = start["metadata"]["command"]
-        assert "--append-system-prompt" in command
-        # The Manager keeps its own composition (no project background), and records it.
-        system_prompt = start["metadata"]["system_prompt"]
-        assert system_prompt == command[command.index("--append-system-prompt") + 1]
+        # The system prompt is a file named by its hash, not an argument.
+        assert "--append-system-prompt" not in command
+        (system_prompt,) = asked["prompts"]
+        assert Path(command[command.index("--append-system-prompt-file") + 1]).name == f"{_sha(system_prompt)}.md"
+        # The Manager keeps its own composition (no project, no task), and records it with its layers.
+        assert start["metadata"]["system_prompt"] == system_prompt
         assert system_prompt.endswith(TASK_PLACEMENT_RULE)
+        assert start["metadata"]["system_prompt_sha256"] == _sha(system_prompt)
+        layers = start["metadata"]["prompt_layers"]
+        assert layers["role"]["config_id"] == "manager" and layers["role"]["recommended"] is True
+        assert (layers["project"], layers["task"]) == (None, None)
+        assert layers["contract"] == {"name": "TASK_PLACEMENT_RULE", "sha256": _sha(TASK_PLACEMENT_RULE)}
+        assert layers["isolation"] == ISOLATION_ID
         finish = agent_db.finish_record.await_args.kwargs
         assert (finish["status"], finish["output_text"], finish["model"], finish["session_id"]) == (
             "completed", "hi", "claude-x", "s-9")
@@ -155,6 +180,16 @@ _RESULT = "print(json.dumps({'type': 'result', 'subtype': 'success', 'is_error':
 
 @pytest.mark.usefixtures("agent_db")
 class TestManagerStreaming:
+    def test_claude_runs_isolated_from_the_operators_configuration(self) -> None:
+        asked = _ask(
+            "print(json.dumps({'type': 'result', 'subtype': 'success', 'is_error': False, 'result': 'hi'}))"
+        )
+        argv = asked["argv"]
+        isolation = isolation_args(asked["root"])
+        at = argv.index(isolation[0])
+        assert argv[at:at + len(isolation)] == isolation
+        assert argv[argv.index("--system-prompt-snapshot") + 1] == "off"
+
     def test_reply_streams_token_by_token(self) -> None:
         reply = _ask(_delta("杭州") + _delta("是浙江") + _delta("的省会。") + _message("杭州是浙江的省会。") + _RESULT)
         assert "--include-partial-messages" in reply["argv"]
@@ -274,7 +309,8 @@ def _converse(
             await bus.shutdown()
             pid_file = root / "pids"
             pids = pid_file.read_text().split() if pid_file.exists() else []
-            return {"replies": replies, "spawned": spawned, "running": running, "pids": pids}
+            return {"replies": replies, "spawned": spawned, "running": running, "pids": pids,
+                    "prompts": _prompts(root)}
 
     return asyncio.run(_run())
 
@@ -308,8 +344,8 @@ class TestManagerResidentClaude:
         assert _flag(argv, "--input-format") == "stream-json"
         assert _flag(argv, "--output-format") == "stream-json"
         assert {"--print", "--verbose", "--include-partial-messages"} <= set(argv)
-        takes_value = {"--input-format", "--output-format", "--setting-sources", "--settings",
-                       "--append-system-prompt", "--resume"}
+        takes_value = {"--input-format", "--output-format", "--append-system-prompt-file", "--system-prompt-snapshot",
+                       "--setting-sources", "--settings", "--resume"}
         positional = [arg for i, arg in enumerate(argv) if not arg.startswith("--") and argv[i - 1] not in takes_value]
         assert positional == []
         assert _flag(argv, "--resume") is None  # no session yet
@@ -337,8 +373,15 @@ class TestManagerResidentClaude:
         # A new process starts its running cost from zero.
         assert [call.kwargs["cost_usd"] for call in agent_db.finish_record.await_args_list] == [0.25, 0.25, 0.25]
         (first, _), (second, _) = chat["spawned"]
-        assert _flag(first, "--append-system-prompt").startswith("prompt A")
-        assert _flag(second, "--append-system-prompt").startswith("prompt B")
+        first_prompt, second_prompt = chat["prompts"]
+        assert first_prompt.startswith("prompt A") and second_prompt.startswith("prompt B")
+        # A new prompt is a new file named by its hash; each turn records the hash it ran with.
+        assert Path(_flag(first, "--append-system-prompt-file") or "").name == f"{_sha(first_prompt)}.md"
+        assert Path(_flag(second, "--append-system-prompt-file") or "").name == f"{_sha(second_prompt)}.md"
+        starts = [call.kwargs["metadata"] for call in agent_db.start_record.await_args_list]
+        assert [m["system_prompt_sha256"] for m in starts] == [_sha(first_prompt), _sha(second_prompt),
+                                                              _sha(second_prompt)]
+        assert [m["prompt_layers"]["role"]["recommended"] for m in starts] == [False, False, False]
         assert _flag(second, "--resume") == "sess-1"
         assert chat["running"] == [False, True]  # the old process was stopped and reaped
 
@@ -399,7 +442,7 @@ def _ask_for_task(body: str) -> SimpleNamespace:
             argv = json.loads((root / "argv.json").read_text())
             turn = (root / "turn.txt").read_text()
             await bus.shutdown()
-            return SimpleNamespace(reply=reply, requests=requests, argv=argv, turn=turn)
+            return SimpleNamespace(reply=reply, requests=requests, argv=argv, turn=turn, prompts=_prompts(root))
 
     return asyncio.run(_run())
 
@@ -419,7 +462,7 @@ class TestManagerTaskPlacement:
         assert request.payload["work_dir"] == TETRIS_DIR
         assert result.reply.startswith("ok")
         # The project and directory rule is code-owned and appended to whatever prompt the DB holds.
-        prompt = result.argv[result.argv.index("--append-system-prompt") + 1]
+        (prompt,) = result.prompts
         assert '"work_dir"' in prompt and '"project"' in prompt
 
     def test_projects_section_starts_each_user_turn(self, agent_db: Any) -> None:
