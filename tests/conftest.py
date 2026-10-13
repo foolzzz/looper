@@ -166,12 +166,16 @@ _AGENT_DB_READS = (
     ("projects", "list_projects", []),
     ("projects", "find_project_by_name", None),
     ("projects", "get_project", None),
+    ("projects", "get_task_project", None),
     ("activity", "list_activity", []),
 )
 
 
-async def _created_project(*, name: str, description: str = "", work_dir: str = "", **_: object) -> dict:
-    return {"id": "proj-000000000000", "name": name, "description": description, "work_dir": work_dir}
+async def _created_project(
+    *, name: str, description: str = "", work_dir: str = "", background: str = "", **_: object,
+) -> dict:
+    return {"id": "proj-000000000000", "name": name, "description": description, "work_dir": work_dir,
+            "background": background}
 
 
 @pytest.fixture
