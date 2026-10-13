@@ -1,28 +1,7 @@
 name: Python Tests
 
 on:
-  pull_request:
-    types: [opened, synchronize, reopened, ready_for_review, labeled, unlabeled]
   workflow_dispatch:
-  push:
-    branches:
-      - main
-    paths:
-      - ".github/workflows/python-tests.yml"
-      - ".github/workflows/sonarcloud.yml"
-      - "sonar-project.properties"
-      - "apps/**"
-      - "loopx/**"
-      - "scripts/**"
-      - "tests/**"
-      - "examples/**"
-      - "package.json"
-      - "package-lock.json"
-      - "pyproject.toml"
-      - "setup.py"
-      - "MANIFEST.in"
-      - "tsconfig.control-plane.json"
-
 permissions:
   contents: read
 
