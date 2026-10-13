@@ -108,13 +108,13 @@ class TestManagerReply:
         assert "Manager" in text and "1" in text
 
     def test_read_failure_is_reported_and_claude_is_killed(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        from loopx.agents.tiers import manager as manager_module
+        from loopx.agents import claude_cli
 
         async def _broken_lines(stream: Any) -> Any:
             yield await stream.readline()
             raise OSError("pipe broke")
 
-        monkeypatch.setattr(manager_module, "iter_lines", _broken_lines)
+        monkeypatch.setattr(claude_cli, "iter_lines", _broken_lines)
         reply = _ask(
             "open('pid', 'w').write(str(os.getpid()))\n"
             "print('{}', flush=True)\n"
@@ -340,9 +340,9 @@ class TestManagerResidentClaude:
     def test_stop_ends_and_reaps_claude(
         self, monkeypatch: pytest.MonkeyPatch, ignore_eof: bool, returncode: int,
     ) -> None:
-        from loopx.agents.tiers import manager as manager_module
+        from loopx.agents import claude_cli
 
-        monkeypatch.setattr(manager_module, "_STOP_GRACE_SEC", 0.5)
+        monkeypatch.setattr(claude_cli, "STOP_GRACE_SEC", 0.5)
         chat = _converse(monkeypatch, _resident(ignore_eof=ignore_eof), ["hello"])
         ((_, process),) = chat["spawned"]
         assert chat["running"] == [True]

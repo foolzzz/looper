@@ -17,14 +17,13 @@ import asyncio
 import json
 import logging
 import shutil
-from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from ..broadcast import Broadcaster
 from ..bus import MessageBus
-from ..claude_cli import ClaudeRunRecorder, iter_lines, write_user_turn
+from ..claude_cli import ClaudeRunRecorder, ResidentClaude
 from ..projects import project_name
 from .task import resolve_work_dir
 from ..message import (
@@ -40,9 +39,6 @@ logger = logging.getLogger(__name__)
 from ...db import activity as db_activity
 from ...db import agent_configs as db_agent_configs
 from ...db import projects as db_projects
-
-# How long a stopping Claude may take to exit after its stdin closes before it is killed.
-_STOP_GRACE_SEC = 5.0
 
 # Appended to the (editable) system prompt on every call: the task JSON is
 # parsed by code, so its required fields are owned by code too.
@@ -149,12 +145,8 @@ class ManagerAgent:
         self._system_prompt: str = DEFAULT_SYSTEM_PROMPT
         self._goal_snapshots: dict[str, GoalSnapshot] = {}
         # The resident Claude: started on the first chat message, then fed one
-        # user turn per message. Its stdout line iterator lives across turns.
-        self._process: asyncio.subprocess.Process | None = None
-        self._process_command: list[str] = []
-        self._process_prompt: str | None = None  # the system prompt it was started with
-        self._process_cost_usd = 0.0  # its running total at the last result
-        self._lines: AsyncIterator[bytes] | None = None
+        # user turn per message; restarted when its system prompt changes.
+        self._claude = ResidentClaude(label="manager")
         self._turn_lock = asyncio.Lock()
         self._state_dir = runtime_root / ".local" / "manager"
         self._state_dir.mkdir(parents=True, exist_ok=True)
@@ -219,7 +211,7 @@ class ManagerAgent:
                 pass
             self._task = None
         async with self._turn_lock:
-            await self._stop_process()
+            await self._claude.stop()
         self._save_session_state()
 
     def is_healthy(self) -> bool:
@@ -398,11 +390,9 @@ class ManagerAgent:
     async def _run_turn(self, message: str, context_envelope: MessageEnvelope) -> str:
         await self._load_db_config()
         system_prompt = f"{self._system_prompt}\n\n{TASK_PLACEMENT_RULE}"
-        if self._process is not None and (
-            self._process.returncode is not None or self._process_prompt != system_prompt
-        ):
-            await self._stop_process()
-        command = self._process_command if self._process is not None else self._claude_command(system_prompt)
+        if self._claude.stale(system_prompt):
+            await self._claude.stop()
+        command = self._claude.command if self._claude.started else self._claude_command(system_prompt)
 
         task_id = context_envelope.metadata.get("task_id")
         recorder = ClaudeRunRecorder(
@@ -415,110 +405,84 @@ class ManagerAgent:
         )
         await recorder.start()
 
-        if self._process is None:
+        if not self._claude.started:
             try:
-                await self._start_process(command, system_prompt)
+                await self._claude.start(command, cwd=str(self._config.work_dir), signature=system_prompt)
             except OSError as exc:
                 logger.error("failed to start Claude Code: %s", exc)
                 await recorder.finish(output_text=None, result_event=None, error=f"Cannot start Claude Code: {exc}")
                 return "无法启动 Claude Code，请检查安装。"
-        process, lines = self._process, self._lines
-        assert process is not None and process.stdin is not None and lines is not None
 
         text_parts: list[str] = []
-        result_text = ""
-        result_event: dict[str, Any] | None = None
         streamed_partials = False
-        input_lost = False
+
+        async def on_event(payload: dict[str, Any]) -> None:
+            nonlocal streamed_partials
+            await recorder.record(payload)
+
+            session_id = payload.get("session_id")
+            if isinstance(session_id, str) and session_id and session_id != self._session_id:
+                self._session_id = session_id
+                self._save_session_state()
+
+            event_type = payload.get("type")
+            # Only the Manager's own turn is the reply; subagent output is internal.
+            top_level = payload.get("parent_tool_use_id") is None
+
+            if event_type == "system":
+                subtype = payload.get("subtype", "")
+                if subtype == "init":
+                    await self._send_status(context_envelope, "thinking", phase=True)
+
+            elif event_type == "stream_event":
+                event = payload.get("event")
+                delta = event.get("delta") if isinstance(event, dict) else None
+                if top_level and isinstance(delta, dict) and delta.get("type") == "text_delta":
+                    chunk = str(delta.get("text") or "")
+                    if chunk:
+                        streamed_partials = True
+                        await self._send_status(context_envelope, chunk, delta=True)
+
+            elif event_type == "assistant" and top_level:
+                msg = payload.get("message")
+                if isinstance(msg, dict):
+                    content_blocks = msg.get("content", [])
+                    for block in content_blocks:
+                        if not isinstance(block, dict):
+                            continue
+                        block_type = block.get("type", "")
+                        if block_type == "text":
+                            chunk = str(block.get("text") or "")
+                            if chunk:
+                                text_parts.append(chunk)
+                                if not streamed_partials:  # else already sent chunk by chunk
+                                    await self._send_status(context_envelope, chunk, delta=True)
+                        elif block_type == "tool_use":
+                            tool_name = block.get("name", "tool")
+                            await self._send_status(
+                                context_envelope,
+                                f"正在使用工具: {tool_name}",
+                                phase=True,
+                            )
+                        elif block_type == "thinking":
+                            await self._send_status(context_envelope, "thinking", phase=True)
 
         try:
             turn_text = await self._build_user_message(message)
-            try:
-                await write_user_turn(process.stdin, turn_text)
-            except (BrokenPipeError, ConnectionResetError):
-                # Claude closed its stdin, so it is exiting; what it already wrote decides the turn.
-                logger.warning("manager: Claude closed stdin before the message was sent")
-                input_lost = True
-                if process.returncode is None:
-                    process.kill()
-            # This turn's events end at its result; the iterator stays open for the next turn.
-            async for raw_line in lines:
-                line = raw_line.decode("utf-8", errors="replace").strip()
-                if not line:
-                    continue
-                try:
-                    payload = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if not isinstance(payload, dict):
-                    continue
-                await recorder.record(payload)
-
-                session_id = payload.get("session_id")
-                if isinstance(session_id, str) and session_id and session_id != self._session_id:
-                    self._session_id = session_id
-                    self._save_session_state()
-
-                event_type = payload.get("type")
-                # Only the Manager's own turn is the reply; subagent output is internal.
-                top_level = payload.get("parent_tool_use_id") is None
-
-                if event_type == "system":
-                    subtype = payload.get("subtype", "")
-                    if subtype == "init":
-                        await self._send_status(context_envelope, "thinking", phase=True)
-
-                elif event_type == "stream_event":
-                    event = payload.get("event")
-                    delta = event.get("delta") if isinstance(event, dict) else None
-                    if top_level and isinstance(delta, dict) and delta.get("type") == "text_delta":
-                        chunk = str(delta.get("text") or "")
-                        if chunk:
-                            streamed_partials = True
-                            await self._send_status(context_envelope, chunk, delta=True)
-
-                elif event_type == "assistant" and top_level:
-                    msg = payload.get("message")
-                    if isinstance(msg, dict):
-                        content_blocks = msg.get("content", [])
-                        for block in content_blocks:
-                            if not isinstance(block, dict):
-                                continue
-                            block_type = block.get("type", "")
-                            if block_type == "text":
-                                chunk = str(block.get("text") or "")
-                                if chunk:
-                                    text_parts.append(chunk)
-                                    if not streamed_partials:  # else already sent chunk by chunk
-                                        await self._send_status(context_envelope, chunk, delta=True)
-                            elif block_type == "tool_use":
-                                tool_name = block.get("name", "tool")
-                                await self._send_status(
-                                    context_envelope,
-                                    f"正在使用工具: {tool_name}",
-                                    phase=True,
-                                )
-                            elif block_type == "thinking":
-                                await self._send_status(context_envelope, "thinking", phase=True)
-
-                elif event_type == "result":
-                    result_event = payload
-                    result_text = str(payload.get("result") or "")
-                    break
+            # A turn cut off by Claude's exit ends without a result; that Claude
+            # is reaped and the next message starts a new process that resumes the session.
+            turn = await self._claude.run_turn(turn_text, on_event)
         except BaseException as exc:
             # Never leave Claude running once the Manager gives up on it.
-            await self._stop_process(kill=True)
+            await self._claude.stop(kill=True)
             await recorder.finish(
-                output_text="".join(text_parts) or None, result_event=result_event,
+                output_text="".join(text_parts) or None, result_event=None,
                 error=f"Manager stopped reading Claude: {type(exc).__name__}: {exc}",
             )
             raise
 
-        if result_event is None or input_lost:
-            # Claude has exited (stdout ended or stdin was closed); the
-            # next message starts a new process that resumes the session.
-            await self._stop_process()
-
+        result_event = turn.result_event
+        result_text = str((result_event or {}).get("result") or "")
         final_text = "".join(text_parts) or result_text
         # A turn cut off by Claude's exit is no reply, even after some text.
         exited = result_event is None
@@ -527,9 +491,9 @@ class ManagerAgent:
             output_text=final_text or None,
             result_event=result_event,
             error=None if replied else (
-                f"no reply (exit code {process.returncode})" if exited else "no reply"
+                f"no reply (exit code {turn.exit_code})" if exited else "no reply"
             ),
-            cost_usd=self._turn_cost(result_event),
+            cost_usd=self._claude.turn_cost(result_event),
         )
 
         if task_id:
@@ -546,7 +510,7 @@ class ManagerAgent:
 
         if not replied:
             raise RuntimeError(
-                f"Claude Code 没有返回内容（退出码 {process.returncode}）" if exited else "Claude Code 没有返回内容"
+                f"Claude Code 没有返回内容（退出码 {turn.exit_code}）" if exited else "Claude Code 没有返回内容"
             )
         return final_text
 
@@ -564,53 +528,6 @@ class ManagerAgent:
         if self._session_id:
             command.extend(["--resume", self._session_id])
         return command
-
-    async def _start_process(self, command: list[str], system_prompt: str) -> None:
-        process = await asyncio.create_subprocess_exec(
-            *command,
-            cwd=str(self._config.work_dir),
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.DEVNULL,
-        )
-        assert process.stdout is not None
-        self._process = process
-        self._process_command = command
-        self._process_prompt = system_prompt
-        self._process_cost_usd = 0.0
-        self._lines = iter_lines(process.stdout)
-        logger.info("manager started Claude Code (pid=%s, session=%s)", process.pid, self._session_id or "new")
-
-    def _turn_cost(self, result_event: dict[str, Any] | None) -> float | None:
-        """This turn's cost: Claude's ``total_cost_usd`` is its process's running total."""
-        total = (result_event or {}).get("total_cost_usd")
-        if not isinstance(total, (int, float)):
-            return None
-        cost, self._process_cost_usd = total - self._process_cost_usd, total
-        return cost
-
-    async def _stop_process(self, *, kill: bool = False) -> None:
-        """End the resident Claude, if any, and forget it.
-
-        Its stdin is closed, which ends a healthy Claude; one still running
-        after ``_STOP_GRACE_SEC`` (at once with ``kill``) is killed. The
-        process is always reaped.
-        """
-        process = self._process
-        self._process, self._lines, self._process_command, self._process_prompt = None, None, [], None
-        if process is None:
-            return
-        if process.stdin is not None and not process.stdin.is_closing():
-            process.stdin.close()
-        if process.returncode is None and not kill:
-            try:
-                await asyncio.wait_for(process.wait(), _STOP_GRACE_SEC)
-            except TimeoutError:
-                pass
-        if process.returncode is None:
-            process.kill()
-        await process.wait()
-        logger.info("manager stopped Claude Code (pid=%s, exit code %s)", process.pid, process.returncode)
 
     async def _build_user_message(self, user_message: str) -> str:
         parts = await self._projects_section()

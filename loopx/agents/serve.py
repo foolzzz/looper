@@ -41,6 +41,20 @@ from .tiers.worker import WorkerConfig, WorkerPool
 logger = logging.getLogger(__name__)
 
 
+# The Planner's default prompt before it became a Claude Code agent; a
+# database still holding it gets the current default at startup.
+_PLANNER_PROMPT_BEFORE_CLAUDE = (
+    "You are a Planner Agent. Your job is to:\n"
+    "1. Receive a task requirement\n"
+    "2. Decompose it into concrete, executable steps\n"
+    "3. Dispatch steps to Worker agents\n"
+    "4. Monitor progress and verify results\n"
+    "5. Report task completion or failure\n\n"
+    "Always decompose complex tasks into multiple focused steps. "
+    "Each step should be independently executable and verifiable."
+)
+
+
 def _telegram_adapter_from_config(config: dict[str, Any]) -> TelegramChannelAdapter | None:
     """Build the Telegram adapter from its Settings-page config, or None if invalid."""
     try:
@@ -81,9 +95,10 @@ async def _run_agent_system(
 
     # --- Database (required) ---
     from ..db import init_pool, ensure_schema, close_pool
-    from ..db.agent_configs import seed_defaults as seed_agent_configs
+    from ..db.agent_configs import replace_default_prompt, seed_defaults as seed_agent_configs
     from ..db.llm_profiles import seed_defaults as seed_llm_profiles
     from .tiers.manager import DEFAULT_SYSTEM_PROMPT
+    from .tiers.planner import DEFAULT_SYSTEM_PROMPT as PLANNER_SYSTEM_PROMPT
 
     pool = await init_pool()
     await ensure_schema(pool)
@@ -119,17 +134,8 @@ async def _run_agent_system(
             "display_name": "Planner",
             "role": "planner",
             "runtime": "claude-code",
-            "timeout_seconds": 1200,
-            "system_prompt": (
-                "You are a Planner Agent. Your job is to:\n"
-                "1. Receive a task requirement\n"
-                "2. Decompose it into concrete, executable steps\n"
-                "3. Dispatch steps to Worker agents\n"
-                "4. Monitor progress and verify results\n"
-                "5. Report task completion or failure\n\n"
-                "Always decompose complex tasks into multiple focused steps. "
-                "Each step should be independently executable and verifiable."
-            ),
+            "timeout_seconds": 1200,  # per Planner turn
+            "system_prompt": PLANNER_SYSTEM_PROMPT,
         },
         {
             "agent_id": "worker",
@@ -148,6 +154,8 @@ async def _run_agent_system(
             ),
         },
     ])
+    if await replace_default_prompt("planner", old=_PLANNER_PROMPT_BEFORE_CLAUDE, new=PLANNER_SYSTEM_PROMPT):
+        logger.info("planner agent config: replaced the old default system prompt")
     from ..db.channel_configs import seed_defaults as seed_channel_configs
     await seed_channel_configs([
         {
@@ -223,7 +231,7 @@ async def _run_agent_system(
     )
     supervisor.register(manager)
 
-    task_router = TaskRouter(runtime_root=runtime_root, broadcaster=broadcaster)
+    task_router = TaskRouter(runtime_root=runtime_root, broadcaster=broadcaster, claude_bin=claude_bin)
     supervisor.register(task_router)
 
     worker_config = WorkerConfig(claude_bin=claude_bin)

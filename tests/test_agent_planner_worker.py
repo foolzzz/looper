@@ -138,47 +138,40 @@ class TestTaskPlan:
 
 @pytest.mark.usefixtures("agent_db")
 class TestPlannerAgent:
-    def test_decompose_task(self) -> None:
-        async def _run() -> None:
-            with tempfile.TemporaryDirectory() as tmp:
-                planner = PlannerAgent(task_id="test-1", runtime_root=Path(tmp))
-                payload = {"requirement": "add login page"}
-                steps = planner._decompose_task(payload)
-                assert len(steps) == 1
-                assert steps[0].instruction == "add login page"
-
-        asyncio.run(_run())
-
     def test_agent_id_includes_task_id(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             planner = PlannerAgent(task_id="abc-123", runtime_root=Path(tmp))
             assert planner.agent_id == "planner-abc-123"
             assert planner.agent_address == planner_address("abc-123")
 
-    def test_plan_and_dispatch(self, agent_db: Any) -> None:
+    @staticmethod
+    def _request(planner: PlannerAgent, work_dir: str) -> MessageEnvelope:
+        return MessageEnvelope.create(
+            source=TASK_ROUTER_ADDRESS,
+            target=planner.agent_address,
+            message_type=MessageType.TASK_REQUEST,
+            payload={"goal_id": "g1", "requirement": "add logout button", "work_dir": work_dir},
+            metadata={"origin_channel_id": "channel-web"},
+        )
+
+    def test_plan_and_dispatch(self, agent_db: Any, planner_claude: Any) -> None:
+        from tests.test_planner_agent import plan, step
+
+        claude = planner_claude(plan(step("s1")))
+
         async def _run() -> None:
             with tempfile.TemporaryDirectory() as tmp:
                 bus = MessageBus(runtime_root=Path(tmp))
-                planner = PlannerAgent(task_id="test-pd", runtime_root=Path(tmp))
+                planner = PlannerAgent(task_id="test-pd", runtime_root=Path(tmp), claude_bin=claude.bin)
                 await planner.start(bus)
+                await bus.publish(self._request(planner, tmp))
 
-                addr = planner.agent_address
-                envelope = MessageEnvelope.create(
-                    source=TASK_ROUTER_ADDRESS,
-                    target=addr,
-                    message_type=MessageType.TASK_REQUEST,
-                    payload={
-                        "goal_id": "g1",
-                        "requirement": "add logout button",
-                        "work_dir": "/tmp",
-                    },
-                    metadata={"origin_channel_id": "channel-web"},
-                )
-                await bus.publish(envelope)
-                await asyncio.sleep(0.1)
-
-                # Check: planner should have published TASK_ACCEPTED + GOAL_STATUS to task-router
+                # The planner publishes TASK_ACCEPTED + GOAL_STATUS to task-router once Claude has planned.
                 router_q = bus.get_queue("task-router")
+                for _ in range(500):
+                    if router_q.qsize() >= 2:
+                        break
+                    await asyncio.sleep(0.01)
                 messages: list[MessageEnvelope] = []
                 while not router_q.empty():
                     messages.append(await router_q.get())
@@ -201,156 +194,36 @@ class TestPlannerAgent:
 
         asyncio.run(_run())
 
-    def test_handle_work_result_simple_auto_verify(self) -> None:
-        """Simple tasks should auto-verify (strategy C)."""
+    def test_plan_persistence_and_recovery(self, planner_claude: Any) -> None:
+        from tests.test_planner_agent import plan, step
+
+        claude = planner_claude(plan(step("s1"), step("s2", "s1")))
 
         async def _run() -> None:
             with tempfile.TemporaryDirectory() as tmp:
                 bus = MessageBus(runtime_root=Path(tmp))
-                planner = PlannerAgent(task_id="test-av", runtime_root=Path(tmp))
+                planner = PlannerAgent(task_id="test-pr", runtime_root=Path(tmp), claude_bin=claude.bin)
                 await planner.start(bus)
-
-                addr = planner.agent_address
-                envelope = MessageEnvelope.create(
-                    source=TASK_ROUTER_ADDRESS,
-                    target=addr,
-                    message_type=MessageType.TASK_REQUEST,
-                    payload={
-                        "goal_id": "g1",
-                        "requirement": "simple fix",
-                        "work_dir": "/tmp",
-                    },
-                    metadata={"origin_channel_id": "channel-web"},
-                )
-                await bus.publish(envelope)
-                await asyncio.sleep(0.1)
-
-                plan = planner._plan
-                assert plan is not None
-                step = plan.steps[0]
-                assert step.complexity == "simple"
-
-                result_env = MessageEnvelope.create(
-                    source=worker_address("w1"),
-                    target=addr,
-                    message_type=MessageType.WORK_RESULT,
-                    payload={
-                        "task_id": step.step_id,
-                        "plan_id": plan.plan_id,
-                        "status": "completed",
-                        "changed_files": {"test.py": "added"},
-                    },
-                    correlation_id=plan.correlation_id,
-                )
-                await bus.publish(result_env)
-                await asyncio.sleep(0.1)
-
-                assert step.status == "verified"
-                assert plan.status == "completed"
-
-                await planner.stop()
-                await bus.shutdown()
-
-        asyncio.run(_run())
-
-    def test_handle_work_result_complex_spawns_reviewer(self) -> None:
-        """Complex tasks should spawn a reviewer (strategy C)."""
-
-        async def _run() -> None:
-            with tempfile.TemporaryDirectory() as tmp:
-                bus = MessageBus(runtime_root=Path(tmp))
-                planner = PlannerAgent(task_id="test-cr", runtime_root=Path(tmp))
-                await planner.start(bus)
-
-                addr = planner.agent_address
-                envelope = MessageEnvelope.create(
-                    source=TASK_ROUTER_ADDRESS,
-                    target=addr,
-                    message_type=MessageType.TASK_REQUEST,
-                    payload={
-                        "goal_id": "g1",
-                        "requirement": "complex refactor",
-                        "work_dir": "/tmp",
-                    },
-                    metadata={"origin_channel_id": "channel-web"},
-                )
-                await bus.publish(envelope)
-                await asyncio.sleep(0.1)
-
-                plan = planner._plan
-                assert plan is not None
-                step = plan.steps[0]
-                step.complexity = "complex"
-
-                result_env = MessageEnvelope.create(
-                    source=worker_address("w1"),
-                    target=addr,
-                    message_type=MessageType.WORK_RESULT,
-                    payload={
-                        "task_id": step.step_id,
-                        "plan_id": plan.plan_id,
-                        "status": "completed",
-                    },
-                    correlation_id=plan.correlation_id,
-                )
-                await bus.publish(result_env)
-                await asyncio.sleep(0.1)
-
-                assert step.status == "completed"
-                assert plan.status == "executing"
-
-                # Check that VERIFY_REQUEST was published
-                collected: list[MessageEnvelope] = []
-                for qname, q in bus._queues.items():
-                    if qname.startswith("reviewer-"):
-                        while not q.empty():
-                            collected.append(await q.get())
-
-                verify = [m for m in collected if m.message_type == MessageType.VERIFY_REQUEST]
-                assert verify
-                # The reviewer runs in the task's directory too; there is no default.
-                assert verify[0].payload["context"] == {"work_dir": "/tmp"}
-                # Its run is filed under the task, like the Worker's.
-                assert verify[0].payload["parent_task_id"] == "test-cr"
-
-                await planner.stop()
-                await bus.shutdown()
-
-        asyncio.run(_run())
-
-    def test_plan_persistence_and_recovery(self) -> None:
-        async def _run() -> None:
-            with tempfile.TemporaryDirectory() as tmp:
-                bus = MessageBus(runtime_root=Path(tmp))
-                planner = PlannerAgent(task_id="test-pr", runtime_root=Path(tmp))
-                await planner.start(bus)
-
-                addr = planner.agent_address
-                envelope = MessageEnvelope.create(
-                    source=TASK_ROUTER_ADDRESS,
-                    target=addr,
-                    message_type=MessageType.TASK_REQUEST,
-                    payload={
-                        "goal_id": "g1",
-                        "requirement": "persist test",
-                        "work_dir": "/tmp",
-                    },
-                    metadata={"origin_channel_id": "channel-web"},
-                )
-                await bus.publish(envelope)
-                await asyncio.sleep(0.1)
-
+                await bus.publish(self._request(planner, tmp))
+                for _ in range(500):
+                    if planner._plan is not None and planner._plan.steps:
+                        break
+                    await asyncio.sleep(0.01)
                 assert planner._plan is not None
                 plan_id = planner._plan.plan_id
-
                 await planner.stop()
 
                 planner2 = PlannerAgent(task_id="test-pr", runtime_root=Path(tmp))
                 bus2 = MessageBus(runtime_root=Path(tmp))
                 await planner2.start(bus2)
 
-                assert planner2._plan is not None
-                assert planner2._plan.plan_id == plan_id
+                restored = planner2._plan
+                assert restored is not None
+                assert restored.plan_id == plan_id
+                # The Claude session resumes after a restart, and the steps keep their labels and order.
+                assert restored.session_id == "sess-p"
+                assert [(s.label, s.status) for s in restored.steps] == [("s1", "dispatched"), ("s2", "pending")]
+                assert restored.steps[1].depends_on == [restored.steps[0].step_id]
                 await planner2.stop()
                 await bus.shutdown()
                 await bus2.shutdown()

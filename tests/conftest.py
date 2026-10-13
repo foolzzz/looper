@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import json
+import os
 import subprocess
 import sys
+from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -157,10 +161,11 @@ _AGENT_DB_WRITES = (
     ("llm_records", "update_event"),
 )
 
-# Reads the Manager makes, answered as a database that holds no projects yet.
+# Reads the Manager and the Planner make, answered as a database that holds no projects yet.
 _AGENT_DB_READS = (
     ("projects", "list_projects", []),
     ("projects", "find_project_by_name", None),
+    ("projects", "get_project", None),
 )
 
 
@@ -169,7 +174,103 @@ async def _created_project(*, name: str, description: str = "", work_dir: str = 
 
 
 @pytest.fixture
-def agent_db(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
+def stub_claude_on_path(tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Make a bare ``claude`` resolve to a stub that answers nothing.
+
+    Each task's Planner starts ``claude`` as soon as it gets its task, so a
+    message-flow test that routes a task without a stand-in binary would
+    otherwise reach the real CLI (and spend money). The stub waits for its
+    stdin to close and exits without output.
+    """
+    bin_dir = tmp_path_factory.mktemp("stub-claude")
+    stub = bin_dir / "claude"
+    stub.write_text(f"#!{sys.executable}\nimport sys\nsys.stdin.read()\n")
+    stub.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}")
+    return stub
+
+
+_PLANNER_CLAUDE = """\
+import json, os, sys, time
+STATE = {state!r}
+REPLIES = json.loads({replies!r})
+def log(name, value):
+    with open(os.path.join(STATE, name), 'a') as f:
+        f.write(json.dumps(value) + '\\n')
+log('argv.jsonl', sys.argv[1:])
+log('pids.jsonl', os.getpid())
+counter = os.path.join(STATE, 'turns')
+cost = 0.0
+for line in sys.stdin:
+    n = int(open(counter).read()) + 1 if os.path.exists(counter) else 1
+    open(counter, 'w').write(str(n))
+    log('turns.jsonl', {{'pid': os.getpid(), 'text': json.loads(line)['message']['content']}})
+    reply = REPLIES[n - 1] if n <= len(REPLIES) else REPLIES[-1]
+    print(json.dumps({{'type': 'system', 'subtype': 'init', 'session_id': 'sess-p', 'model': 'fake'}}), flush=True)
+    if reply == '<exit>':
+        sys.exit(3)
+    if reply == '<hang>':
+        time.sleep(60)
+    if reply == '<error>':
+        print(json.dumps({{'type': 'result', 'subtype': 'error_during_execution', 'is_error': True,
+                          'session_id': 'sess-p', 'total_cost_usd': cost}}), flush=True)
+        continue
+    cost += 0.25
+    print(json.dumps({{'type': 'assistant', 'message': {{'content': [{{'type': 'text', 'text': reply}}]}}}}), flush=True)
+    print(json.dumps({{'type': 'result', 'subtype': 'success', 'is_error': False, 'result': reply,
+                      'session_id': 'sess-p', 'total_cost_usd': cost}}), flush=True)
+if {linger!r}:
+    time.sleep(60)
+"""
+
+
+class FakePlannerClaude:
+    """A stand-in resident ``claude`` for a task's Planner.
+
+    It reads stream-json user turns like the real CLI and answers turn N with
+    ``replies[N-1]`` (the last reply repeats), counting turns across restarts.
+    Like Claude, each result's ``total_cost_usd`` is its process's running
+    total (0.25 per answered turn). A reply of ``<exit>`` exits mid-turn
+    without a result, ``<hang>`` never answers, and ``<error>`` ends the turn
+    with an error result. With ``linger`` it keeps running after its stdin
+    closes. It logs its argv, pid and every turn it reads.
+    """
+
+    def __init__(self, state: Path, replies: tuple[str, ...], *, linger: bool = False) -> None:
+        self.state = state
+        self.bin = str(state / "fake-claude")
+        script = Path(self.bin)
+        script.write_text(f"#!{sys.executable}\n" + _PLANNER_CLAUDE.format(
+            state=str(state), replies=json.dumps(replies), linger=linger,
+        ))
+        script.chmod(0o755)
+
+    def _log(self, name: str) -> list[Any]:
+        path = self.state / name
+        return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+
+    def argvs(self) -> list[list[str]]:
+        return self._log("argv.jsonl")
+
+    def pids(self) -> list[int]:
+        return self._log("pids.jsonl")
+
+    def turns(self) -> list[dict[str, Any]]:
+        return self._log("turns.jsonl")
+
+
+@pytest.fixture
+def planner_claude(tmp_path_factory: pytest.TempPathFactory) -> Callable[..., FakePlannerClaude]:
+    """Build a ``FakePlannerClaude`` answering with the given replies."""
+
+    def make(*replies: str, linger: bool = False) -> FakePlannerClaude:
+        return FakePlannerClaude(tmp_path_factory.mktemp("planner-claude"), replies, linger=linger)
+
+    return make
+
+
+@pytest.fixture
+def agent_db(monkeypatch: pytest.MonkeyPatch, stub_claude_on_path: Path) -> SimpleNamespace:
     """Record the agent tiers' database writes instead of needing PostgreSQL.
 
     The agent system treats PostgreSQL as a hard dependency, so message-flow
@@ -177,6 +278,7 @@ def agent_db(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
     an ``AsyncMock`` returning ``None`` (``create_project`` returns the new
     project's row), and each read answers as an empty database. The returned
     namespace exposes them by name so a test can assert what was persisted.
+    A bare ``claude`` is a stub that never answers (``stub_claude_on_path``).
     """
     import importlib
     from unittest.mock import AsyncMock

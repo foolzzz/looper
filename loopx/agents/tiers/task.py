@@ -87,8 +87,10 @@ class TaskRouter:
         *,
         runtime_root: Path,
         broadcaster: Broadcaster | None = None,
+        claude_bin: str = "claude",
     ) -> None:
         self._runtime_root = runtime_root
+        self._claude_bin = claude_bin  # each task's Planner runs it
         self._bus: MessageBus | None = None
         self._tasks: dict[str, Task] = {}
         self._planners: dict[str, PlannerAgent] = {}
@@ -228,7 +230,7 @@ class TaskRouter:
         await self._semaphore.acquire()
 
         task.status = "assigned"
-        planner = PlannerAgent(task_id=task.task_id, runtime_root=self._runtime_root)
+        planner = PlannerAgent(task_id=task.task_id, runtime_root=self._runtime_root, claude_bin=self._claude_bin)
         task.planner_id = planner.agent_id
         self._planners[task.task_id] = planner
 
@@ -271,8 +273,14 @@ class TaskRouter:
         if not task:
             return
 
+        summary = envelope.payload.get("summary") or None
         try:
-            await db_tasks.update_task_status(task_id, status)
+            # The Planner's final summary is the task's result, or its error.
+            await db_tasks.update_task_status(
+                task_id, status,
+                result_summary=summary if status == "completed" else None,
+                error=summary if status == "failed" else None,
+            )
             await db_activity.insert_activity(
                 task_id=task_id,
                 worker="planner",

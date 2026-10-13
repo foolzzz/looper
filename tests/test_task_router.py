@@ -283,11 +283,15 @@ class TestTaskRouter:
 
         asyncio.run(_run())
 
-    def test_forwards_status_to_manager(self) -> None:
+    def test_forwards_status_to_manager(self, planner_claude: Any) -> None:
+        from tests.test_planner_agent import plan, step
+
+        claude = planner_claude(plan(step("s1")))  # the Planner's Claude plans one step
+
         async def _run() -> None:
             with tempfile.TemporaryDirectory() as tmp:
                 bus = MessageBus(runtime_root=Path(tmp))
-                router = TaskRouter(runtime_root=Path(tmp))
+                router = TaskRouter(runtime_root=Path(tmp), claude_bin=claude.bin)
                 await router.start(bus)
 
                 envelope = MessageEnvelope.create(
@@ -303,17 +307,20 @@ class TestTaskRouter:
                     metadata={"origin_channel_id": "channel-web"},
                 )
                 await bus.publish(envelope)
-                await asyncio.sleep(0.2)
+                manager_q = bus.get_queue("manager")
+                for _ in range(500):
+                    if manager_q.qsize() >= 2:
+                        break
+                    await asyncio.sleep(0.01)
 
                 # Collect messages forwarded to manager
-                manager_q = bus.get_queue("manager")
                 messages: list[MessageEnvelope] = []
                 while not manager_q.empty():
                     messages.append(await manager_q.get())
 
                 # TaskRouter should have forwarded TASK_ACCEPTED + GOAL_STATUS
                 types = [m.message_type for m in messages]
-                assert MessageType.TASK_ACCEPTED in types or MessageType.GOAL_STATUS in types
+                assert MessageType.TASK_ACCEPTED in types and MessageType.GOAL_STATUS in types
 
                 await router.stop()
                 await bus.shutdown()
@@ -345,6 +352,36 @@ class TestPlannerOutcome:
         task = asyncio.run(_run())
         assert task.status == outcome
         assert agent_db.update_task_status.await_args_list[-1].args == ("t1", outcome)
+
+    @pytest.mark.parametrize(
+        ("outcome", "fields"),
+        [
+            ("completed", {"result_summary": "calc is built", "error": None}),
+            ("failed", {"result_summary": None, "error": "calc is built"}),
+            ("executing", {"result_summary": None, "error": None}),
+        ],
+    )
+    def test_final_summary_is_the_tasks_result_or_error(
+        self, outcome: str, fields: dict[str, Any], agent_db: Any,
+    ) -> None:
+        async def _run() -> None:
+            with tempfile.TemporaryDirectory() as tmp:
+                bus = MessageBus(runtime_root=Path(tmp))
+                router = TaskRouter(runtime_root=Path(tmp))
+                router._bus = bus
+                router._tasks = {"t1": Task(task_id="t1", requirement="r", goal_id="", work_dir="",
+                                            project_id="proj-1", status="running")}
+                await router._handle_planner_status(MessageEnvelope.create(
+                    source=planner_address("t1"), target=TASK_ROUTER_ADDRESS,
+                    message_type=MessageType.GOAL_STATUS,
+                    payload={"task_id": "t1", "status": outcome, "summary": "calc is built"},
+                ))
+                await bus.shutdown()
+
+        asyncio.run(_run())
+        first = agent_db.update_task_status.await_args_list[0]
+        assert first.args == ("t1", outcome)
+        assert {key: first.kwargs.get(key) for key in fields} == fields
 
 
 @pytest.mark.usefixtures("agent_db")

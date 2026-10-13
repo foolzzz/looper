@@ -92,6 +92,26 @@ async def list_configs(*, pool: asyncpg.Pool | None = None) -> list[dict[str, An
     return [_row_to_dict(r) for r in rows]
 
 
+async def replace_default_prompt(
+    agent_id: str,
+    *,
+    old: str,
+    new: str,
+    pool: asyncpg.Pool | None = None,
+) -> bool:
+    """Give a row the ``new`` default system prompt if it still holds the ``old`` one.
+
+    A prompt someone edited is kept. Returns whether the row changed.
+    """
+    pool = pool or get_pool()
+    result = await pool.execute(
+        "UPDATE agent_configs SET system_prompt = $3, updated_at = now() "
+        "WHERE agent_id = $1 AND system_prompt = $2",
+        agent_id, old, new,
+    )
+    return result == "UPDATE 1"
+
+
 async def seed_defaults(
     defaults: list[dict[str, Any]],
     *,

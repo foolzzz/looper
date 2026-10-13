@@ -16,6 +16,37 @@ To learn how to use these features, read the [usage guide](docs/fork/usage.md).
 
 ## [Unreleased]
 
+### Changed
+
+- Each task's Planner is now a Claude Code agent. It keeps one Claude process
+  for the task's life, started on its first turn in the task's directory and
+  ended when the task ends or the server stops. Claude splits the requirement
+  into 1–8 steps, each with acceptance criteria, dependencies and whether a
+  Reviewer must pass it. After every Worker and Reviewer result it accepts the
+  step, sends it to review, retries it in a new Worker with feedback (at most
+  2 per step), replans the steps not started yet, or fails the task. Every
+  reply ends with one JSON block that code validates strictly; an invalid
+  reply gets one repair turn. Planning that still fails fails the task, with
+  no single-step fallback; a decision that still fails falls back to the
+  step's own verdict without a Reviewer and logs a warning. The Planner's
+  Claude only has Read, Grep and Glob (`--tools`, `--allowedTools`,
+  `--permission-mode dontAsk`, `--strict-mcp-config`) and never gets
+  `--dangerously-skip-permissions`. The `complexity` heuristic is gone: a
+  Reviewer runs only when the plan or a decision asks for one, and its prompt
+  now includes the step's instruction. A chat message to a Planner now goes
+  through its Claude, which replies and may pass the text to the running
+  Worker or add steps; a message no longer becomes a step by itself. The
+  `planner` row of `agent_configs`, unused before, now applies on every turn:
+  `system_prompt` (the code appends the reply contract), `timeout_seconds` per
+  turn (default 1200, 0 = no limit), `model` and `max_turns`. At startup a row
+  still holding the old default prompt gets the new one; an edited prompt is
+  kept. Every Planner turn is a paid Claude run, recorded in `llm_records` as
+  `planner-<task_id>` with its own cost and shown beside a selected Planner on
+  the Chat page, on its history page and in the Agents page's Runs tab
+  (`role=planner`). A completed task's `tasks.result_summary` is now the last
+  accepted step's summary, and a failed task's `tasks.error` is the Planner's
+  failure summary.
+
 ## [2.5.0] - 2026-10-13
 
 Covers `v2.1.0` to `v2.5.0`: this fork's merged pull requests from #106 to
