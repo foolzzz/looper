@@ -41,8 +41,10 @@ M0 交付后，Worker 和 Reviewer 已按第 5 节的目标形态拼装 system p
 
 ## 3. 设计原则（规范性）
 
-- **P1 稳定进 system，变化进 user。** 整个会话不变的内容（角色、规则、契约、项目背景）放 system prompt；
-  每轮变化的内容（任务、状态、事件）放 user 消息。动态内容不得进 system prompt：常驻进程的 system prompt
+- **P1 稳定进 system，变化进 user。** 整个会话不变的内容（角色、规则、契约、项目背景、本会话的任务描述）
+  放 system prompt；每轮变化的内容（进度状态、事件、其他 agent 的产出）放 user 消息。任务描述在会话期间
+  固定（Planner 与任务同生命周期，Worker 与步骤同生命周期），而且长程运行中早期 user 消息可能被自动压缩
+  摘要掉，system prompt 则始终完整保留，所以任务描述放 system prompt。动态内容不得进 system prompt：常驻进程的 system prompt
   一变就要重启并续接会话，也会让提示词缓存失效。
 - **P2 契约放最后，由代码校验。** 输出格式等硬性契约是 system prompt 的最后一段，由代码拥有、不可在
   Agents 页编辑；遵守与否由代码严格校验（失败给一次修复，仍失败按 fail-closed 处理），不依赖模型自觉。
@@ -64,26 +66,33 @@ system prompt（由 LoopX 追加，按顺序拼装）
   L0  Claude Code 内置 system prompt        —— 不受控，不记录原文
   L1  角色 prompt                            —— agent_configs.<role>.system_prompt，可编辑，跟踪推荐版本
   L2  项目档案                              —— projects.background（M0）；知识索引、skill 清单（M3/M4）
-  L3  代码契约                              —— REPLY_CONTRACT / WORK_CONTRACT / REVIEW_CONTRACT / TASK_PLACEMENT_RULE
+  L3  任务描述                              —— 本会话要完成的任务：Planner 的任务需求，Worker、Reviewer 的步骤定义（M1）
+  L4  代码契约                              —— REPLY_CONTRACT / WORK_CONTRACT / REVIEW_CONTRACT / TASK_PLACEMENT_RULE
 
 user 消息（每轮）
-  G   接地状态（代码生成）                  —— 计划与步骤状态、项目列表、目标进度、工作目录
-  E   事件与数据                            —— 步骤指令、Worker/Reviewer 结果、用户聊天、监督观察（不可信内容只在这里）
+  G   接地状态（代码生成）                  —— 计划与步骤进度、项目列表、目标进度
+  E   事件与数据                            —— Worker/Reviewer 的结果与报告、依赖步骤的产出、用户聊天、运行中的纠偏、监督观察
+                                               （不可信内容只在这里）
 ```
 
 拼装由一个共享模块完成（M0 中引入），四类 agent 共用同一套拼装与记录逻辑。L2 为空时省略整段。
+
+**排列顺序的理由：** L1 到 L3 由稳定到多变排列，同一项目的各个步骤共享前缀，便于提示词缓存；
+L4 代码契约始终最后，因为 L3 来自用户或 Planner，放在契约之后就可能覆盖输出格式。
+
+**任务描述的上限：** 任务需求过长时截断到上限（建议 8,000 字）并标明已截断，避免挤占其他层。
 
 **生效时机：** L1、L2 修改后立即生效。一次性进程（Worker、Reviewer）在下次启动时读取最新值；常驻进程
 （Manager、Planner）在下一轮比较拼装结果，变化则重启并 `--resume`，已在运行的 Worker 不受影响。
 
 ## 5. 各 Agent 的目标形态
 
-| Agent | L1 角色 | L2 项目档案 | L3 契约 | G 接地状态 | E 事件与数据 |
-|---|---|---|---|---|---|
-| Manager | 管家角色 | 不注入（跨项目） | `TASK_PLACEMENT_RULE` | 项目列表、目标快照 | 用户消息 |
-| Planner | 规划与决策角色 | 所属项目 | `REPLY_CONTRACT` | 需求、计划、步骤状态、重试计数 | Worker/Reviewer 结果、用户聊天、运行中 Worker 的近况 |
-| Worker | 执行角色 | 所属项目 | `WORK_CONTRACT`（报告 JSON） | 工作目录、依赖步骤的结果摘要 | 步骤指令、验收标准、重试反馈、运行中纠偏 |
-| Reviewer | 验收角色 | 所属项目 | `REVIEW_CONTRACT`（`passed` 结论） | 工作目录 | 待验收步骤的指令、标准、Worker 报告 |
+| Agent | L1 角色 | L2 项目档案 | L3 任务描述 | L4 契约 | G 接地状态 | E 事件与数据 |
+|---|---|---|---|---|---|---|
+| Manager | 管家角色 | 不注入（跨项目） | 无（不对应单一任务） | `TASK_PLACEMENT_RULE` | 项目列表、目标快照 | 用户消息 |
+| Planner | 规划与决策角色 | 所属项目 | 任务需求、任务 id、项目名、工作目录 | `REPLY_CONTRACT` | 计划、步骤状态、重试计数 | Worker/Reviewer 结果、用户聊天、运行中 Worker 的近况 |
+| Worker | 执行角色 | 所属项目 | 整体任务需求、本步指令、验收标准、校验命令、重做反馈 | `WORK_CONTRACT`（报告 JSON） | — | 依赖步骤的产出、运行中纠偏 |
+| Reviewer | 验收角色 | 所属项目 | 被验收步骤的指令与验收标准、整体任务需求 | `REVIEW_CONTRACT`（`passed` 结论） | — | Worker 的报告与改动文件清单（待核实的说法） |
 
 ## 6. 项目档案（Project Profile）
 
@@ -170,3 +179,5 @@ user 消息（每轮）
 3. **项目知识的来源**：手动录入、上传文件、引用项目目录内的路径；不支持 URL。
 4. **完全隔离操作者个人配置**：agent 只看到 LoopX 拼装的内容和项目仓库自己的 CLAUDE.md；需要所有项目都遵守的
    全局规则写进角色 prompt。
+5. **任务描述进 system prompt。** 分层改为四层：角色 prompt → 项目档案 → 任务描述 → 代码契约（第 4、5 节），
+   并入 M1 交付。

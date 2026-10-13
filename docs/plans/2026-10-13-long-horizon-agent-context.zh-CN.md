@@ -41,12 +41,18 @@
   - 隔离参数集中在一处，Manager、Planner、Worker、Reviewer 共用；
   - system prompt 改用 `--append-system-prompt-file` 传入，文件按内容哈希存放在 runtime root 下，只写一次；
   - 每次运行记录 `system_prompt_sha256` 和各层来源（角色 prompt 是否为推荐版、项目背景版本、契约名称、隔离参数版本）；
-  - 历史页展示哈希、各层摘要和"已隔离"标记。
+  - 历史页展示哈希、各层摘要和"已隔离"标记；
+  - **任务描述层**（RFC 决策 5）：system prompt 改为四层，即角色 prompt → 项目档案 → 任务描述 → 代码契约。
+    - Planner 的任务需求、Worker 与 Reviewer 的步骤定义移入 system prompt；
+    - stdin 和每轮消息只保留动态内容：依赖步骤的产出、Worker 报告、进度、纠偏；
+    - 记录里增加 `task` 层。
 - **不做：** 不改 Claude Code 内置的 system prompt 和内置工具；不修改操作者 `~/.claude` 下的任何文件。
 - **验收：**
   - 真实 Claude 下，Manager、Planner、Worker 都能看到项目 `CLAUDE.md` 里的标记，看不到操作者个人 `CLAUDE.md` 里的内容；
   - 同样的输入两次运行得到同一个 prompt 哈希，改了项目背景后哈希变化；
-  - 启动命令里不再有几千字的 prompt。
+  - 启动命令里不再有几千字的 prompt；
+  - 真实 Claude 下，Planner 仍能产出有效计划，Worker 的报告判为 completed，Reviewer 给出 `passed`；
+    记录里的 system prompt 能看到四层，Worker 和 Reviewer 的 stdin 里不再有步骤指令和验收标准。
 
 ### M2 上下文与花费观测
 
@@ -121,6 +127,7 @@
 | 2026-10-13 | RFC v0 合入（looper #12），4 个待决问题已决定 |
 | 2026-10-13 | M0 交付（looper #13，`c600594ea`）：项目背景；Worker 和 Reviewer 的 prompt 分层，契约移出 stdin；四类 agent 记录 `metadata.system_prompt`。真实 Claude 下 Worker 和 Reviewer 的判定都通过 |
 | 2026-10-13 | M1 开工 |
+| 2026-10-13 | RFC 决策 5：任务描述进 system prompt，分层改为四层，并入 M1 |
 
 ## 5. 不属于本 RFC 的待办
 
