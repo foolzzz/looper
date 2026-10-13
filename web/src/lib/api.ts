@@ -496,7 +496,7 @@ export async function updateAgentConfig(
 export async function fetchLlmRecords(params: {
   agent_id?: string;
   task_id?: string;
-  /** An agent_configs id: "manager" or "worker" (workers and reviewers). */
+  /** An agent_configs id: "manager", "planner" (each task's Planner) or "worker" (workers and reviewers). */
   role?: string;
   limit?: number;
   offset?: number;

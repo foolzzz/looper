@@ -598,12 +598,8 @@ export function AgentHistoryPage({ sub }: { sub: string }) {
 
   useEffect(() => {
     setRuns(null);
-    if (role === "Planner") {
-      setRuns([]);
-      return;
-    }
     fetchLlmRecords({ agent_id: agentId, limit: 50 }).then(setRuns).catch(() => setRuns([]));
-  }, [agentId, role]);
+  }, [agentId]);
 
   useEffect(() => {
     if (!taskId) return;
@@ -636,44 +632,46 @@ export function AgentHistoryPage({ sub }: { sub: string }) {
         )}
       </div>
 
-      {role !== "Planner" && (
-        <section className="space-y-2">
-          <h2 className="text-sm font-semibold">Runs</h2>
-          {runs === null ? (
-            <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
-          ) : runs.length === 0 ? (
-            <p className="text-xs text-muted-foreground">No Claude runs recorded for this agent.</p>
-          ) : (
-            runs.map((record, i) => <RunCard key={record.id} initial={record} defaultOpen={i === 0} />)
-          )}
-        </section>
+      {role === "Planner" && (
+        <p className="text-xs text-muted-foreground">
+          The Planner is this task's Claude Code agent. It plans the steps, decides what happens after each Worker or
+          Reviewer result, and answers your messages. Each run below is one of its turns.
+        </p>
       )}
 
+      <section className="space-y-2">
+        <h2 className="text-sm font-semibold">Runs</h2>
+        {runs === null ? (
+          <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
+        ) : runs.length === 0 ? (
+          <p className="text-xs text-muted-foreground">No Claude runs recorded for this agent.</p>
+        ) : (
+          runs.map((record, i) => <RunCard key={record.id} initial={record} defaultOpen={i === 0} />)
+        )}
+      </section>
+
       {role === "Planner" && (
-        <>
-          <p className="text-xs text-muted-foreground">
-            The Planner runs no LLM: it splits the task into steps, dispatches Workers and tracks their results.
-            Its activity and your chat with it are below.
-          </p>
-          <section className="space-y-2">
-            <h2 className="flex items-center gap-1.5 text-sm font-semibold">
-              <MessageSquare className="h-4 w-4" /> Chat with this Planner
-            </h2>
-            {chat.length === 0 ? (
-              <p className="text-xs text-muted-foreground">No messages. Select this Planner on the Chat page to add a step.</p>
-            ) : (
-              <div className="space-y-1">
-                {chat.map((msg) => (
-                  <div key={msg.message_id} className="flex items-start gap-2 text-xs">
-                    <span className="shrink-0 font-mono tabular-nums text-muted-foreground">{formatClock(msg.created_at)}</span>
-                    <Badge variant="outline" className="shrink-0 text-[10px] py-0">{msg.role}</Badge>
-                    <span className="whitespace-pre-wrap">{msg.content}</span>
-                  </div>
-                ))}
-              </div>
-            )}
-          </section>
-        </>
+        <section className="space-y-2">
+          <h2 className="flex items-center gap-1.5 text-sm font-semibold">
+            <MessageSquare className="h-4 w-4" /> Chat with this Planner
+          </h2>
+          {chat.length === 0 ? (
+            <p className="text-xs text-muted-foreground">
+              No messages. Select this Planner on the Chat page to message it; it replies, and may pass your message
+              to the running Worker or add steps to the plan.
+            </p>
+          ) : (
+            <div className="space-y-1">
+              {chat.map((msg) => (
+                <div key={msg.message_id} className="flex items-start gap-2 text-xs">
+                  <span className="shrink-0 font-mono tabular-nums text-muted-foreground">{formatClock(msg.created_at)}</span>
+                  <Badge variant="outline" className="shrink-0 text-[10px] py-0">{msg.role}</Badge>
+                  <span className="whitespace-pre-wrap">{msg.content}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </section>
       )}
 
       {taskId && (

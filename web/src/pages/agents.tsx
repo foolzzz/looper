@@ -732,13 +732,6 @@ function RunsTab({ agentId }: { agentId: string }) {
       .catch(() => setRuns([]));
   }, [agentId]);
 
-  if (agentId === "planner") {
-    return (
-      <p className="text-sm text-muted-foreground">
-        The Planner runs no LLM. Open a task's Agent Timeline and choose History on its Planner to see what it did.
-      </p>
-    );
-  }
   if (runs === null) {
     return (
       <div className="flex h-40 items-center justify-center">

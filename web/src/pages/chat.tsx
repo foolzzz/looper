@@ -32,6 +32,8 @@ const STORAGE_SESSION_KEY = "loopx-chat-session-id";
 
 const MANAGER_TARGET: ChatTargetInfo = { kind: "manager", id: "manager", can_send: true };
 const TARGETS_POLL_MS = 10_000;
+// The Planner's latest turns shown beside its chat; its history page has more.
+const PLANNER_RUNS_SHOWN = 10;
 
 // One task: its fixed Planner, then the Worker (and Reviewer) of each step.
 interface TaskGroup {
@@ -70,17 +72,82 @@ function StatusText({ status }: { status?: string }) {
   );
 }
 
-// A Worker or Reviewer: its Claude runs, read-only; a running one updates live.
-function StepAgentView({ agent }: { agent: ChatTargetInfo }) {
+// An agent's Claude runs, newest first and read-only: the newest starts open
+// and a running one follows itself live. `pollMs` re-reads the list while the
+// agent can take new turns; a changed `reloadKey` re-reads it at once. With a
+// `title`, the list folds under one header line, closed at first. Mount with a
+// `key` per agent so a switch starts from a clean list.
+function AgentRunsView({
+  agentId,
+  limit,
+  title,
+  pollMs,
+  reloadKey,
+}: {
+  agentId: string;
+  limit: number;
+  title?: string;
+  pollMs?: number;
+  reloadKey?: unknown;
+}) {
   const [runs, setRuns] = useState<LlmRecord[] | null>(null);
+  const [open, setOpen] = useState(!title);
 
   useEffect(() => {
-    setRuns(null);
-    fetchLlmRecords({ agent_id: agent.id, limit: 20 })
-      .then(setRuns)
-      .catch(() => setRuns([]));
-  }, [agent.id]);
+    let active = true;
+    const load = () =>
+      fetchLlmRecords({ agent_id: agentId, limit })
+        .then((next) => {
+          if (active) setRuns(next);
+        })
+        .catch(() => {
+          if (active) setRuns((prev) => prev ?? []);
+        });
+    load();
+    const timer = pollMs ? setInterval(load, pollMs) : undefined;
+    return () => {
+      active = false;
+      clearInterval(timer);
+    };
+  }, [agentId, limit, pollMs, reloadKey]);
 
+  const list =
+    runs === null ? (
+      <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
+    ) : runs.length === 0 ? (
+      <p className="text-xs text-muted-foreground">No Claude runs recorded for this agent.</p>
+    ) : (
+      runs.map((record, i) => <RunCard key={record.id} initial={record} defaultOpen={i === 0} />)
+    );
+  if (!title) return <div className="space-y-3">{list}</div>;
+
+  const latest = runs?.[0];
+  return (
+    <div className="overflow-hidden rounded-lg border border-border bg-card/50">
+      <button
+        type="button"
+        onClick={() => setOpen(!open)}
+        aria-expanded={open}
+        className="flex w-full items-center gap-1.5 p-3 text-left text-xs hover:bg-accent/40 transition-colors"
+      >
+        {open ? (
+          <ChevronDown className="h-3 w-3 shrink-0 text-muted-foreground" />
+        ) : (
+          <ChevronRight className="h-3 w-3 shrink-0 text-muted-foreground" />
+        )}
+        <span className="font-medium">
+          {title}
+          {runs && ` (${runs.length < limit ? runs.length : `latest ${limit}`})`}
+        </span>
+        {latest && latest.status !== "completed" && <StatusText status={latest.status} />}
+      </button>
+      {open && <div className="space-y-3 border-t border-border p-3">{list}</div>}
+    </div>
+  );
+}
+
+// A Worker or Reviewer: the step it served and its runs.
+function StepAgentView({ agent }: { agent: ChatTargetInfo }) {
   return (
     <div className="space-y-3">
       <div className="flex items-start justify-between gap-3 text-xs">
@@ -91,13 +158,7 @@ function StepAgentView({ agent }: { agent: ChatTargetInfo }) {
           Open full history →
         </a>
       </div>
-      {runs === null ? (
-        <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
-      ) : runs.length === 0 ? (
-        <p className="text-xs text-muted-foreground">No Claude runs recorded for this agent.</p>
-      ) : (
-        runs.map((record, i) => <RunCard key={record.id} initial={record} defaultOpen={i === 0} />)
-      )}
+      <AgentRunsView key={agent.id} agentId={agent.id} limit={20} />
     </div>
   );
 }
@@ -505,7 +566,7 @@ export function ChatPage() {
         </div>
         {current.kind === "planner" && current.can_send && (
           <p className="text-xs text-muted-foreground mt-1.5">
-            Messages go to the Worker running this task's current step, which reads them at its next turn; with no Worker running, they become a new step.
+            Messages go to this task's Planner (Claude). It replies, and can pass your message to the Worker running the current step or add steps to the plan.
           </p>
         )}
         {phase && (
@@ -546,6 +607,19 @@ export function ChatPage() {
               </div>
             )}
           </div>
+        )}
+
+        {/* The Planner's turns: re-read as a reply starts and ends, and on the
+            targets cadence while it runs (it also takes turns on step results). */}
+        {target.kind === "planner" && target.task_id && (
+          <AgentRunsView
+            key={target.id}
+            agentId={`planner-${target.task_id}`}
+            limit={PLANNER_RUNS_SHOWN}
+            title="Claude runs"
+            pollMs={current.can_send ? TARGETS_POLL_MS : undefined}
+            reloadKey={sending}
+          />
         )}
 
         {(target.kind === "worker" || target.kind === "reviewer") && <StepAgentView agent={current} />}
@@ -604,7 +678,7 @@ export function ChatPage() {
               {current.kind === "planner"
                 ? "This task has ended, so its Planner no longer takes messages."
                 : taskGroup?.planner.can_send
-                  ? "Workers take messages through their task's Planner, which hands them to the running step."
+                  ? "Workers take messages through their task's Planner, which decides whether to pass them to the running step."
                   : `This ${current.kind === "reviewer" ? "Reviewer" : "Worker"}'s task has ended; its runs are read-only.`}
             </span>
             {current.kind !== "planner" && taskGroup?.planner.can_send && (
