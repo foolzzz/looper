@@ -454,9 +454,13 @@ function OverviewTab({ task }: { task: TaskDetail }) {
                       <span className="text-xs text-muted-foreground">#{step.step_index + 1}</span>
                       {stepStatusBadge(step.status)}
                       {step.worker_id && (
-                        <span className="text-xs text-muted-foreground">
+                        <a
+                          href={historyHref(step.worker_id, task.task_id)}
+                          className="text-xs text-muted-foreground underline decoration-dotted underline-offset-2 hover:text-foreground"
+                          title="打开该 Worker 的运行详情（启动命令、输入 prompt、stream-json 事件）"
+                        >
                           {step.worker_id}
-                        </span>
+                        </a>
                       )}
                     </div>
                     <p className="mt-1 text-sm">{step.instruction}</p>
@@ -550,6 +554,8 @@ function AgentTimeline({ taskId }: { taskId: string }) {
               <button
                 type="button"
                 onClick={() => toggle(agent)}
+                onDoubleClick={() => { window.location.hash = historyHref(agent, taskId); }}
+                title="单击展开/折叠，双击打开该 agent 的运行详情（启动命令、输入 prompt、stream-json 事件）"
                 className="min-w-0 flex-1 text-left px-4 py-3 hover:brightness-110 transition-all"
               >
                 <div className="flex items-center justify-between">
@@ -859,7 +865,7 @@ function PipelineTab({ task }: { task: TaskDetail }) {
     ns.push({
       id: "planner",
       position: { x: centerX - nodeW / 2, y: gapY },
-      data: { label: `Planner ${task.planner_id ? `(${task.planner_id.slice(0, 20)})` : ""}` },
+      data: { label: <span title={task.planner_id || "Planner"}>{`Planner ${task.planner_id ? `(${task.planner_id.slice(0, 20)})` : ""}`}</span> },
       style: {
         width: nodeW, height: nodeH,
         background: plannerColor.bg, border: `2px solid ${plannerColor.border}`,
@@ -902,7 +908,13 @@ function PipelineTab({ task }: { task: TaskDetail }) {
         ns.push({
           id: stepId,
           position: { x, y },
-          data: { label: `Step ${i + 1}: ${step.instruction.slice(0, 30)}${step.instruction.length > 30 ? "..." : ""}` },
+          data: {
+            label: (
+              <span title={step.instruction} className="block h-full w-full overflow-hidden">
+                {`Step ${i + 1}: ${step.instruction.slice(0, 30)}${step.instruction.length > 30 ? "…" : ""}`}
+              </span>
+            ),
+          },
           style: {
             width: nodeW, height: nodeH,
             background: sc.bg, border: `2px solid ${sc.border}`,
@@ -927,7 +939,7 @@ function PipelineTab({ task }: { task: TaskDetail }) {
           ns.push({
             id: workerId,
             position: { x, y: gapY * 3 },
-            data: { label: step.worker_id.slice(0, 20) },
+            data: { label: <span title={step.worker_id}>{step.worker_id.slice(0, 20)}</span> },
             style: {
               width: nodeW, height: 44,
               background: wc.bg, border: `1px solid ${wc.border}`,
