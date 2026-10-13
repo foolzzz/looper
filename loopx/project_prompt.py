@@ -156,15 +156,12 @@ def render_codex_cli_install_preflight(
     )
     return f"""export PATH="$HOME/.local/bin:$PATH"
 if ! command -v {cli_bin_arg} >/dev/null 2>&1; then
-  if command -v python3 >/dev/null 2>&1 && python3 -m pip --version >/dev/null 2>&1; then
-    python3 -m pip install --upgrade loopx
+  if command -v curl >/dev/null 2>&1; then
+    curl -fsSL {NO_CLONE_INSTALL_URL} | bash
+    export PATH="$HOME/.local/bin:$PATH"
     if command -v {cli_bin_arg} >/dev/null 2>&1; then
       {cli_bin_arg} workflow-skills --install --cli-bin {cli_bin_arg}
     fi
-  fi
-  if ! command -v {cli_bin_arg} >/dev/null 2>&1 && command -v curl >/dev/null 2>&1; then
-    curl -fsSL {NO_CLONE_INSTALL_URL} | bash
-    export PATH="$HOME/.local/bin:$PATH"
   fi
   if ! command -v {cli_bin_arg} >/dev/null 2>&1; then
     echo "loopx is not on PATH; use a Python 3.11+ environment, the archive fallback, or a contributor checkout" >&2

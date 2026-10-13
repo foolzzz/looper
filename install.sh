@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REPO="michaelx1993/loopx"
+REPO="foolzzz/loopx"
 MIN_PYTHON_MAJOR=3
 MIN_PYTHON_MINOR=11
 
@@ -69,6 +69,9 @@ fi
 
 info "Fetching latest release..."
 
+# Exit status 3 means the release exists but carries no wheel; any other
+# failure means the release could not be read.
+WHEEL_STATUS=0
 WHEEL_URL="$("$PYTHON_BIN" -c "
 import json, sys, urllib.request
 url = 'https://api.github.com/repos/$REPO/releases/latest'
@@ -78,13 +81,21 @@ for asset in data.get('assets', []):
     if asset['name'].endswith('.whl'):
         print(asset['browser_download_url'])
         sys.exit(0)
-print('ERROR:no-wheel', file=sys.stderr)
-sys.exit(1)
-" 2>/dev/null)" || fail "Could not fetch release from github.com/$REPO. Check your network."
+sys.exit(3)
+" 2>/dev/null)" || WHEEL_STATUS=$?
 
-if [ -z "$WHEEL_URL" ]; then
-  fail "No .whl asset found in the latest release."
+if [ "$WHEEL_STATUS" -eq 3 ] || { [ "$WHEEL_STATUS" -eq 0 ] && [ -z "$WHEEL_URL" ]; }; then
+  red "  ✗ The latest github.com/$REPO release has no wheel asset, so nothing was installed."
+  echo ""
+  info "Install from a release tag instead:"
+  echo ""
+  dim "  git clone https://github.com/$REPO.git && cd ${REPO#*/} && git checkout vX.Y.Z"
+  dim "  uv sync"
+  echo ""
+  info "Or wait for a $REPO release that carries a wheel."
+  exit 1
 fi
+[ "$WHEEL_STATUS" -eq 0 ] || fail "Could not fetch release from github.com/$REPO. Check your network."
 
 RELEASE_VER="$(echo "$WHEEL_URL" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
 ok "Latest release: v${RELEASE_VER}"

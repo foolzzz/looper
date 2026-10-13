@@ -14,6 +14,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from loopx.install_contract import NO_CLONE_INSTALL_URL  # noqa: E402
 from loopx.project_prompt import build_codex_cli_bootstrap_message  # noqa: E402
 
 
@@ -49,9 +50,8 @@ MUST_HAVE = (
     "refresh-state",
     "quota spend-slot",
     "Do not spend quota for a setup-only turn",
-    "python3 -m pip install --upgrade loopx",
     "workflow-skills --install",
-    "loopx-project.github.io/loopx/install.sh",
+    NO_CLONE_INSTALL_URL,
 )
 
 
@@ -61,9 +61,10 @@ def assert_message_contract(payload: dict[str, object]) -> None:
     assert payload["invocation_mode"] == "codex_cli_setup_then_goal_mode", payload
     assert payload["goal_id"] == GOAL_ID, payload
     assert payload["agent_id"] == AGENT_ID, payload
-    assert "python3 -m pip install --upgrade loopx" in str(payload["install_repair_command"]), payload
+    # PyPI's `loopx` is another distribution; only the no-clone installer may run.
+    assert "pip install" not in str(payload["install_repair_command"]), payload
     assert "workflow-skills --install" in str(payload["install_repair_command"]), payload
-    assert "loopx-project.github.io/loopx/install.sh" in str(payload["install_repair_command"]), payload
+    assert NO_CLONE_INSTALL_URL in str(payload["install_repair_command"]), payload
     assert payload["existing_goal_probe_command"] == payload["quota_guard_command"], payload
     assert "heartbeat-prompt --thin" in str(payload["heartbeat_prompt_command"]), payload
     assert "heartbeat-prompt --thin" in str(payload["heartbeat_prompt_json_command"]), payload
@@ -275,8 +276,8 @@ def main() -> int:
     assert "Fresh Repo Install Repair" in cli_markdown, cli_markdown
     assert "Post-Bootstrap Thin Loop Prompt" in cli_markdown, cli_markdown
     assert "Transcript-Free Validation Checklist" in cli_markdown, cli_markdown
-    assert "loopx-project.github.io/loopx/install.sh" in cli_markdown, cli_markdown
-    assert "python3 -m pip install --upgrade loopx" in cli_markdown, cli_markdown
+    assert NO_CLONE_INSTALL_URL in cli_markdown, cli_markdown
+    assert "pip install" not in cli_markdown, cli_markdown
 
     cli_message_only = run_cli(
         "codex-cli-bootstrap-message",

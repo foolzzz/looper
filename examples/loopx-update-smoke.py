@@ -16,9 +16,11 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
 from loopx import __version__  # noqa: E402
+from loopx.install_contract import NO_CLONE_INSTALL_URL  # noqa: E402
 from loopx.release_manifest import release_version_tag  # noqa: E402
 from loopx.self_update import (  # noqa: E402
     DEFAULT_UPDATE_REF,
+    DEFAULT_UPDATE_REPO,
     _installer_env_for_source,
     build_rollback_plan,
     build_update_plan,
@@ -192,13 +194,17 @@ def test_module_plan() -> None:
     assert f"Manifest package version tag: `{release_version_tag()}`" in rendered, rendered
 
 
-def test_default_source_uses_stable_ref() -> None:
+def test_default_source_uses_default_repo_and_ref() -> None:
     with mock.patch.dict(os.environ, {}, clear=True):
         payload = build_update_plan(doctor_payload=fake_doctor_payload())
-    assert payload["source"]["ref"] == DEFAULT_UPDATE_REF == "stable", payload
+    assert payload["source"]["repo"] == DEFAULT_UPDATE_REPO, payload
+    assert payload["source"]["ref"] == DEFAULT_UPDATE_REF == "main", payload
     assert payload["source"]["channel"] == "github_archive_stable", payload
     assert payload["source"]["ref_source"] == "default_stable", payload
-    assert "/tar.gz/stable" in payload["source"]["archive_url"], payload
+    assert payload["source"]["archive_url"].endswith(
+        f"/{DEFAULT_UPDATE_REPO}/tar.gz/{DEFAULT_UPDATE_REF}"
+    ), payload
+    assert payload["source"]["installer_url"] == NO_CLONE_INSTALL_URL, payload
     assert payload["plan"]["install_command"] == "loopx update apply", payload
     assert "--archive-url" not in payload["plan"]["install_command"], payload
     default_env = _installer_env_for_source(
@@ -582,7 +588,7 @@ def test_cli_rollback_previous_with_temp_home() -> None:
 
 def main() -> int:
     test_module_plan()
-    test_default_source_uses_stable_ref()
+    test_default_source_uses_default_repo_and_ref()
     test_explicit_archive_url_reaches_installer()
     test_update_preview_uses_managed_download_path()
     test_execute_update_propagates_installer_download_failure()

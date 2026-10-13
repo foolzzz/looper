@@ -15,7 +15,7 @@ from .host_loop_activation import (
     scheduler_command_binding_for_agent_type,
 )
 from .history import load_registry
-from .install_contract import NO_CLONE_INSTALL_URL
+from .install_contract import LOOPX_SOURCE_REPOSITORY, NO_CLONE_INSTALL_URL
 from .project_prompt import (
     render_available_capability_args,
     render_cli_command_prefix,
@@ -234,7 +234,7 @@ def _skill_delivery_contract(
                 else {}
             )
         ),
-        "source_repository": "https://github.com/loopx-project/loopx",
+        "source_repository": f"https://github.com/{LOOPX_SOURCE_REPOSITORY}",
         "source_directories": [
             f"skills/{skill_id}"
             for skill_id in required_skill_ids
