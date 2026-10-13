@@ -3,7 +3,8 @@
 Wires up the full three-tier agent system:
   AgentSupervisor → MessageBus → ChannelRegistry
     → WebChannelAdapter
-    → TelegramChannelAdapter / LarkChannelAdapter (enabled on the Settings page)
+    → TelegramChannelAdapter / LarkChannelAdapter (enabled on the Settings page,
+      each passing on only the senders on its allowlist)
     → ManagerAgent
     → TaskRouter
     → WorkerPool
@@ -28,9 +29,11 @@ from typing import Any
 
 from .broadcast import Broadcaster
 from .bus import MessageBus
+from .channels.allowlist import SenderAllowlist, allowlist_from_config, start_problem
 from .channels.base import ChannelAdapter
+from .channels.lark import LarkChannelAdapter
 from .channels.registry import ChannelRegistry
-from .channels.telegram import TelegramChannelAdapter, parse_allowed_user_ids
+from .channels.telegram import TelegramChannelAdapter
 from .channels.web import WebChannelAdapter
 from .http_server import AgentHTTPServer
 from .supervisor import AgentSupervisor
@@ -114,20 +117,66 @@ _WORKER_PROMPT_BEFORE_CONTRACTS = (
 )
 
 
-def _telegram_adapter_from_config(config: dict[str, Any]) -> TelegramChannelAdapter | None:
-    """Build the Telegram adapter from its Settings-page config, or None if invalid."""
-    try:
-        allowed = parse_allowed_user_ids(str(config.get("allowed_user_ids") or ""))
-        return TelegramChannelAdapter(
-            bot_token=os.environ.get(
-                config.get("bot_token_env") or "LOOPX_TELEGRAM_BOT_TOKEN", ""
-            ),
-            allowed_user_ids=allowed or None,
-        )
-    except ValueError as exc:
-        # Fail closed: a malformed allowlist must not fall back to "allow all".
-        logger.error("telegram channel disabled: invalid allowed user IDs (%s)", exc)
+def _sender_allowlist(channel_id: str, channel_type: str, config: dict[str, Any]) -> SenderAllowlist | None:
+    """The channel's sender allowlist; None (logged) when an empty or invalid list keeps it from starting."""
+    if problem := start_problem(channel_type, config):
+        logger.error("%s not started: %s", channel_id, problem)
         return None
+    return allowlist_from_config(channel_id, channel_type, config)
+
+
+def _telegram_adapter_from_config(config: dict[str, Any]) -> TelegramChannelAdapter | None:
+    """Build the Telegram adapter from its Settings-page config; None when its allowlist keeps it from starting."""
+    allowlist = _sender_allowlist("channel-telegram", "telegram", config)
+    if allowlist is None:
+        return None
+    return TelegramChannelAdapter(
+        bot_token=os.environ.get(config.get("bot_token_env") or "LOOPX_TELEGRAM_BOT_TOKEN", ""),
+        allowlist=allowlist,
+    )
+
+
+def _lark_adapter_from_config(config: dict[str, Any], runtime_root: Path) -> LarkChannelAdapter | None:
+    """Build the Lark adapter from its Settings-page config; None when its allowlist keeps it from starting."""
+    allowlist = _sender_allowlist("channel-lark", "lark", config)
+    if allowlist is None:
+        return None
+    return LarkChannelAdapter(
+        app_id=os.environ.get(config.get("app_id_env") or "LARK_APP_ID", ""),
+        runtime_root=runtime_root,
+        allowlist=allowlist,
+    )
+
+
+async def seed_channel_configs(pool: Any = None) -> None:
+    """Give Telegram and Lark their config rows, disabled and with empty sender allowlists; existing rows are kept."""
+    from ..db.channel_configs import seed_defaults
+
+    await seed_defaults([
+        {
+            "channel_id": "channel-telegram",
+            "channel_type": "telegram",
+            "display_name": "Telegram Bot",
+            "enabled": False,
+            "config": {
+                "bot_token_env": "LOOPX_TELEGRAM_BOT_TOKEN",
+                "allowed_user_ids": [],
+                "description": "Telegram Bot integration via python-telegram-bot",
+            },
+        },
+        {
+            "channel_id": "channel-lark",
+            "channel_type": "lark",
+            "display_name": "Lark (飞书) Bot",
+            "enabled": False,
+            "config": {
+                "app_id_env": "LARK_APP_ID",
+                "app_secret_env": "LARK_APP_SECRET",
+                "allowed_open_ids": [],
+                "description": "Lark/Feishu Bot integration via lark-cli",
+            },
+        },
+    ], pool=pool)
 
 
 async def seed_agent_configs(pool: Any = None) -> None:
@@ -233,31 +282,7 @@ async def _run_agent_system(
     ])
 
     await seed_agent_configs(pool)
-    from ..db.channel_configs import seed_defaults as seed_channel_configs
-    await seed_channel_configs([
-        {
-            "channel_id": "channel-telegram",
-            "channel_type": "telegram",
-            "display_name": "Telegram Bot",
-            "enabled": False,
-            "config": {
-                "bot_token_env": "LOOPX_TELEGRAM_BOT_TOKEN",
-                "allowed_user_ids": "",
-                "description": "Telegram Bot integration via python-telegram-bot",
-            },
-        },
-        {
-            "channel_id": "channel-lark",
-            "channel_type": "lark",
-            "display_name": "Lark (飞书) Bot",
-            "enabled": False,
-            "config": {
-                "app_id_env": "LARK_APP_ID",
-                "app_secret_env": "LARK_APP_SECRET",
-                "description": "Lark/Feishu Bot integration via lark-cli",
-            },
-        },
-    ])
+    await seed_channel_configs(pool)
 
     from ..db.tasks import mark_orphaned_tasks_stopped
     orphan_count = await mark_orphaned_tasks_stopped(pool=pool)
@@ -280,7 +305,8 @@ async def _run_agent_system(
     from ..db.channel_configs import get_config as get_channel_config
 
     # Telegram and Lark are always available; the Settings page decides
-    # whether they run (channel_configs.enabled), read once at startup.
+    # whether they run (channel_configs.enabled), read once at startup. An
+    # enabled channel without a valid sender allowlist does not start.
     tg_cfg = await get_channel_config("channel-telegram")
     if tg_cfg and tg_cfg.get("enabled"):
         telegram_adapter = _telegram_adapter_from_config(tg_cfg.get("config") or {})
@@ -289,13 +315,9 @@ async def _run_agent_system(
 
     lark_cfg = await get_channel_config("channel-lark")
     if lark_cfg and lark_cfg.get("enabled"):
-        from .channels.lark import LarkChannelAdapter
-        lark_config = lark_cfg.get("config") or {}
-        lark_adapter = LarkChannelAdapter(
-            app_id=os.environ.get(lark_config.get("app_id_env") or "LARK_APP_ID", ""),
-            runtime_root=runtime_root,
-        )
-        await _register_optional_channel(registry, lark_adapter)
+        lark_adapter = _lark_adapter_from_config(lark_cfg.get("config") or {}, runtime_root)
+        if lark_adapter is not None:
+            await _register_optional_channel(registry, lark_adapter)
 
     # --- Agent Tiers ---
 

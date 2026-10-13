@@ -1125,12 +1125,14 @@ class AgentHTTPServer:
     # --- Channel config handlers ---
 
     async def _handle_list_channel_configs(self, writer: asyncio.StreamWriter) -> None:
+        from .channels.allowlist import channel_view
+
         try:
             from ..db.channel_configs import list_configs
             configs = await list_configs()
         except Exception:
             configs = []
-        writer.write(_json_response(HTTP_200, {"configs": configs}))
+        writer.write(_json_response(HTTP_200, {"configs": [channel_view(c) for c in configs]}))
         await writer.drain()
 
     async def _handle_get_channel_config(
@@ -1144,7 +1146,8 @@ class AgentHTTPServer:
         if config is None:
             writer.write(_json_response(HTTP_404, {"error": f"channel '{channel_id}' not found"}))
         else:
-            writer.write(_json_response(HTTP_200, config))
+            from .channels.allowlist import channel_view
+            writer.write(_json_response(HTTP_200, channel_view(config)))
         await writer.drain()
 
     async def _handle_update_channel_config(
@@ -1162,9 +1165,23 @@ class AgentHTTPServer:
             await writer.drain()
             return
 
+        from .channels.allowlist import AllowlistError, channel_view, normalized_config
+
         try:
-            from ..db.channel_configs import set_config
+            from ..db.channel_configs import get_config, set_config
+            current = await get_config(channel_id)
+            if current is None:
+                writer.write(_json_response(HTTP_404, {"error": f"channel '{channel_id}' not found"}))
+                await writer.drain()
+                return
+            if "config" in data:
+                # The sender allowlist is validated before anything is written.
+                data = {**data, "config": normalized_config(str(current.get("channel_type") or ""), data["config"])}
             updated = await set_config(channel_id, data)
+        except AllowlistError as exc:
+            writer.write(_json_response(HTTP_400, {"error": str(exc)}))
+            await writer.drain()
+            return
         except Exception as exc:
             writer.write(_json_response(HTTP_500, {"error": str(exc)}))
             await writer.drain()
@@ -1173,7 +1190,7 @@ class AgentHTTPServer:
         if updated is None:
             writer.write(_json_response(HTTP_404, {"error": f"channel '{channel_id}' not found"}))
         else:
-            writer.write(_json_response(HTTP_200, updated))
+            writer.write(_json_response(HTTP_200, channel_view(updated)))
         await writer.drain()
 
     # --- Static file serving ---

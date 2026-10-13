@@ -4,9 +4,12 @@ Bridges Telegram Bot API with the agent Bus. Uses long-polling by default
 (webhook mode planned). ``loopx serve`` builds this adapter from the
 ``channel-telegram`` row that the dashboard Settings page edits.
 
-Fallbacks when the constructor arguments are empty:
+Only the senders on its allowlist reach the Manager (``allowlist``): anyone
+else is dropped with one log line and gets no reply, and an empty list keeps
+the adapter from starting.
+
+Fallback when the constructor's token is empty:
   LOOPX_TELEGRAM_BOT_TOKEN — Bot token from @BotFather
-  LOOPX_TELEGRAM_ALLOWED_USERS — Comma-separated Telegram user IDs (empty = allow all)
 """
 
 from __future__ import annotations
@@ -24,14 +27,10 @@ from ..message import (
     MessageType,
     channel_address,
 )
+from .allowlist import SenderAllowlist
 from .base import ChannelAdapter, DeliveryReceipt
 
 logger = logging.getLogger(__name__)
-
-
-def parse_allowed_user_ids(raw: str) -> set[int]:
-    """Parse comma-separated Telegram user IDs; raise ValueError on a bad entry."""
-    return {int(part) for part in (p.strip() for p in raw.split(",")) if part}
 
 
 def _check_telegram_available() -> bool:
@@ -48,13 +47,11 @@ class TelegramChannelAdapter(ChannelAdapter):
     def __init__(
         self,
         *,
+        allowlist: SenderAllowlist,
         bot_token: str | None = None,
-        allowed_user_ids: set[int] | None = None,
     ) -> None:
         self._bot_token = bot_token or os.environ.get("LOOPX_TELEGRAM_BOT_TOKEN", "")
-        self._allowed_user_ids = allowed_user_ids or parse_allowed_user_ids(
-            os.environ.get("LOOPX_TELEGRAM_ALLOWED_USERS", "")
-        )
+        self._allowlist = allowlist  # Telegram user ids, as strings
         self._bus: MessageBus | None = None
         self._address = channel_address("telegram", "channel-telegram")
         self._app: Any = None
@@ -72,6 +69,11 @@ class TelegramChannelAdapter(ChannelAdapter):
         return "channel-telegram"
 
     async def start(self, bus: MessageBus) -> None:
+        if not self._allowlist.ids:
+            # The Manager runs any command it is asked to: nobody may reach it unlisted.
+            logger.error("channel-telegram not started: its sender allowlist is empty")
+            return
+
         if not _check_telegram_available():
             logger.error(
                 "python-telegram-bot not installed; it is a default LoopX "
@@ -181,16 +183,15 @@ class TelegramChannelAdapter(ChannelAdapter):
             "active_conversations": len(self._correlation_chat),
         }
 
-    def _is_allowed(self, user_id: int) -> bool:
-        if not self._allowed_user_ids:
-            return True
-        return user_id in self._allowed_user_ids
+    def _admits(self, update: Any) -> bool:
+        """Whether the update's sender is on the allowlist; anyone else is logged and gets no reply."""
+        user = getattr(update, "effective_user", None)
+        return self._allowlist.admits(getattr(user, "id", None))
 
     # --- Telegram handlers ---
 
     async def _cmd_start(self, update: Any, context: Any) -> None:
-        if not self._is_allowed(update.effective_user.id):
-            await update.message.reply_text("未授权的用户。")
+        if not self._admits(update):
             return
         await update.message.reply_text(
             "LoopX Agent 已就绪。直接发消息给我，或使用:\n"
@@ -199,7 +200,7 @@ class TelegramChannelAdapter(ChannelAdapter):
         )
 
     async def _cmd_status(self, update: Any, context: Any) -> None:
-        if not self._is_allowed(update.effective_user.id):
+        if not self._admits(update):
             return
         assert self._bus is not None
         import uuid as _uuid
@@ -223,6 +224,8 @@ class TelegramChannelAdapter(ChannelAdapter):
         await self._bus.publish(envelope)
 
     async def _cmd_help(self, update: Any, context: Any) -> None:
+        if not self._admits(update):
+            return
         await update.message.reply_text(
             "LoopX Agent 命令:\n"
             "直接发消息 — 提需求或问问题\n"
@@ -231,7 +234,7 @@ class TelegramChannelAdapter(ChannelAdapter):
         )
 
     async def _on_message(self, update: Any, context: Any) -> None:
-        if not self._is_allowed(update.effective_user.id):
+        if not self._admits(update):
             return
         if not update.message or not update.message.text:
             return
