@@ -1,5 +1,5 @@
 # The GitHub repository whose releases and installer LoopX installs from.
-LOOPX_SOURCE_REPOSITORY = "foolzzz/loopx"
+LOOPX_SOURCE_REPOSITORY = "foolzzz/looper"
 LOOPX_SOURCE_CLONE_URL = f"https://github.com/{LOOPX_SOURCE_REPOSITORY}.git"
 
 NO_CLONE_INSTALL_URL = (
