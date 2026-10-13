@@ -29,6 +29,7 @@ import {
   type DbChatMessage,
   type LlmRecord,
   type LlmRecordEvent,
+  type PromptLayers,
 } from "@/lib/api";
 
 // A run with no output for this long is flagged as possibly stuck.
@@ -164,8 +165,13 @@ function LaunchCommand({ record }: { record: LlmRecord }) {
         {command.map((arg, i) => {
           const long = arg.length > LONG_ARG;
           const shown = long && !expanded.has(i);
-          // The appended system prompt also has its own section below.
-          const systemPrompt = command[i - 1] === "--append-system-prompt";
+          // The appended system prompt (inline in older runs) also has its own section below.
+          const note =
+            command[i - 1] === "--append-system-prompt"
+              ? ", see System prompt"
+              : command[i - 1] === "--settings"
+                ? ", isolation settings"
+                : "";
           return (
             <span key={i}>
               {i > 0 && " "}
@@ -176,7 +182,7 @@ function LaunchCommand({ record }: { record: LlmRecord }) {
                   className="rounded bg-primary/10 px-1 text-primary hover:bg-primary/20"
                   title="Show the full argument"
                 >
-                  {"<"}{arg.length} chars{systemPrompt ? ", see System prompt" : ""}{">"}
+                  {"<"}{arg.length} chars{note}{">"}
                 </button>
               ) : long ? (
                 <span className="whitespace-pre-wrap">{shellQuote(arg)}</span>
@@ -197,15 +203,83 @@ function argAfter(command: string[], flag: string) {
   return at >= 0 && at + 1 < command.length ? command[at + 1] : undefined;
 }
 
+function shortSha(sha: string | null | undefined) {
+  return sha ? sha.slice(0, 12) : "";
+}
+
+/** One line per layer, in prompt order: where the role, project, task and contract came from. */
+function PromptLayerSummary({ layers }: { layers: PromptLayers }) {
+  const { role, project, task, contract } = layers;
+  const rows: [string, string][] = [];
+  if (role) rows.push(["Role", `${role.config_id} · ${role.recommended ? "recommended" : "edited"} · ${shortSha(role.sha256)}`]);
+  rows.push([
+    "Project",
+    project
+      ? [
+          project.id,
+          project.background_sha256 ? `background ${shortSha(project.background_sha256)}` : "no background",
+          project.updated_at ? `updated ${formatDateTime(project.updated_at)}` : "",
+        ]
+          .filter(Boolean)
+          .join(" · ")
+      : "none",
+  ]);
+  rows.push([
+    "Task",
+    task
+      ? [task.kind, [task.task_id, task.step_id].filter(Boolean).join(" / "), shortSha(task.sha256)].filter(Boolean).join(" · ")
+      : "none",
+  ]);
+  if (contract) rows.push(["Contract", `${contract.name} · ${shortSha(contract.sha256)}`]);
+  return (
+    <dl className="mb-2 grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 font-mono text-[11px]">
+      {rows.map(([name, value]) => (
+        <div key={name} className="contents">
+          <dt className="text-muted-foreground">{name}</dt>
+          <dd className="min-w-0 break-all">{value}</dd>
+        </div>
+      ))}
+    </dl>
+  );
+}
+
 /** What LoopX appended to Claude Code's system prompt for this run. */
 function SystemPrompt({ record }: { record: LlmRecord }) {
+  const metadata = record.metadata;
   // Runs recorded before metadata.system_prompt existed may still carry it in their command.
-  const text = record.metadata?.system_prompt ?? argAfter(record.metadata?.command ?? [], "--append-system-prompt");
+  const text = metadata?.system_prompt ?? argAfter(metadata?.command ?? [], "--append-system-prompt");
   if (text == null) return null;
+  const sha = metadata?.system_prompt_sha256;
+  const layers = metadata?.prompt_layers;
   return (
-    <Collapsible icon={<ScrollText className="h-3 w-3" />} title={`System prompt · ${text.length} chars · appended by LoopX`}>
+    <Collapsible
+      icon={<ScrollText className="h-3 w-3" />}
+      title={
+        <span className="flex items-center gap-1.5">
+          <span className="truncate">
+            System prompt · {text.length} chars{sha ? ` · ${shortSha(sha)}` : " · appended by LoopX"}
+          </span>
+          {layers?.isolation && (
+            <Badge
+              variant="outline"
+              className="shrink-0 py-0 text-[10px]"
+              title={`Ran without the operator's personal Claude Code settings, memory, hooks, plugins or MCP servers (${layers.isolation})`}
+            >
+              isolated
+            </Badge>
+          )}
+        </span>
+      }
+    >
+      {layers && <PromptLayerSummary layers={layers} />}
+      {sha && (
+        <div className="mb-2 flex items-center gap-2">
+          <span className="min-w-0 break-all font-mono text-[11px] text-muted-foreground">sha256 {sha}</span>
+          <CopyButton text={sha} label="Copy" />
+        </div>
+      )}
       <p className="mb-2 text-[11px] text-muted-foreground">
-        The part LoopX appends with --append-system-prompt. Claude Code&apos;s built-in system prompt is not included.
+        The part LoopX appends to Claude Code&apos;s system prompt; its built-in system prompt is not included.
       </p>
       <Pre text={text} />
     </Collapsible>

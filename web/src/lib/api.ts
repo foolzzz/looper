@@ -446,6 +446,16 @@ export interface AgentConfig {
 }
 
 /** One Claude run of an agent (Manager, Worker or reviewer). */
+/** Where each layer of a run's system prompt came from (absent on runs recorded before it existed). */
+export interface PromptLayers {
+  role?: { config_id: string; sha256: string; recommended: boolean };
+  project?: { id: string; background_sha256: string | null; updated_at: string | null } | null;
+  task?: { kind: "plan" | "work" | "review"; task_id: string | null; step_id: string | null; sha256: string } | null;
+  contract?: { name: string; sha256: string };
+  /** The flag set that kept the operator's personal Claude Code configuration out of the run. */
+  isolation?: string;
+}
+
 export interface LlmRecord {
   id: number;
   agent_id: string;
@@ -465,8 +475,10 @@ export interface LlmRecord {
   metadata: {
     command?: string[];
     cwd?: string;
-    /** What LoopX appended with --append-system-prompt (Claude Code's built-in prompt is not included). */
+    /** What LoopX appended to Claude Code's system prompt (its built-in prompt is not included). */
     system_prompt?: string;
+    system_prompt_sha256?: string;
+    prompt_layers?: PromptLayers;
   } | null;
   created_at: string;
   finished_at: string | null;
