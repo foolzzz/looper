@@ -72,7 +72,7 @@ no-clone path is:
 
 ```bash
 curl -fsSL \
-  https://loopx-project.github.io/loopx/install.sh \
+  https://raw.githubusercontent.com/foolzzz/loopx/main/install.sh \
   | env LOOPX_SKILLS_DIR=<PROJECT_WORKSPACE>/.agents/skills \
       LOOPX_ENTRY_HOST_SURFACE=ark-managed-agent \
       LOOPX_INSTALL_SLASH_COMMANDS=0 bash

@@ -84,7 +84,7 @@ trusted checkout can install the native PowerShell launcher without Bash,
 POSIX symlinks, or WSL:
 
 ```powershell
-git clone https://github.com/loopx-project/loopx.git "$HOME/loopx"
+git clone https://github.com/foolzzz/loopx.git "$HOME/loopx"
 Set-Location "$HOME/loopx"
 pwsh -NoLogo -NoProfile -File .\scripts\install-windows.ps1 `
   -Python (Get-Command python).Source `
@@ -336,18 +336,26 @@ loopx doctor
 
 ## Archive Fallback
 
-The GitHub Pages installer remains a fallback for machines where an appropriate
+The no-clone installer remains a fallback for machines where an appropriate
 Python package environment is unavailable or the CLI is too damaged to run its
 own repair path:
 
 ```bash
-curl -fsSL https://loopx-project.github.io/loopx/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/foolzzz/loopx/main/install.sh | bash
 export PATH="$HOME/.local/bin:$PATH"
 loopx doctor
 ```
 
-This fallback installs an archive snapshot, wrapper, man page, and host
-materials together. LoopX owns that snapshot lifecycle, so its update path is:
+It installs the wheel attached to the latest `foolzzz/loopx` GitHub release,
+with uv, pipx or pip. When that release has no wheel it installs nothing;
+install from a release tag instead:
+
+```bash
+git clone https://github.com/foolzzz/loopx.git && cd loopx && git checkout vX.Y.Z
+uv sync
+```
+
+Review an installation's update path before applying it:
 
 ```bash
 loopx update check
