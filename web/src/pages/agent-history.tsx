@@ -8,6 +8,7 @@ import {
   ChevronRight,
   Copy,
   Check,
+  Library,
   Loader2,
   MessageSquare,
   Plug,
@@ -316,6 +317,45 @@ function SystemPrompt({ record }: { record: LlmRecord }) {
         The part LoopX appends to Claude Code&apos;s system prompt; its built-in system prompt is not included.
       </p>
       <Pre text={text} />
+    </Collapsible>
+  );
+}
+
+/** The plugins and skills this run loaded from the library (Settings), with their versions. */
+function LoadedLibrary({ record }: { record: LlmRecord }) {
+  const library = record.metadata?.library;
+  if (!library) return null;
+  const { items, error, sha256 } = library;
+  const plugins = items.filter((item) => item.kind === "plugin");
+  const skills = items.filter((item) => item.kind === "skill");
+  const title = error
+    ? `Plugins & skills · not loaded: ${error}`
+    : `Plugins & skills · ${plugins.length} plugin${plugins.length === 1 ? "" : "s"}, ${skills.length} skill${
+        skills.length === 1 ? "" : "s"
+      } · ${shortSha(sha256)}`;
+  return (
+    <Collapsible icon={<Library className="h-3 w-3" />} title={title} tone={error ? "error" : undefined}>
+      {sha256 && (
+        <div className="mb-2 flex items-center gap-2">
+          <span className="min-w-0 break-all font-mono text-[11px] text-muted-foreground">library sha256 {sha256}</span>
+          <CopyButton text={sha256} label="Copy" />
+        </div>
+      )}
+      {[["Plugins", plugins] as const, ["Skills", skills] as const].map(([name, group]) =>
+        group.length ? (
+          <div key={name} className="mb-2">
+            <p className="mb-0.5 text-[11px] font-medium text-muted-foreground">{name}</p>
+            <ul className="grid gap-x-4 gap-y-0.5 font-mono text-[11px] sm:grid-cols-2">
+              {group.map((item) => (
+                <li key={item.name} className="flex min-w-0 justify-between gap-2">
+                  <span className="truncate" title={item.name}>{item.name}</span>
+                  <span className="shrink-0 text-muted-foreground">{shortSha(item.sha256)}</span>
+                </li>
+              ))}
+            </ul>
+          </div>
+        ) : null,
+      )}
     </Collapsible>
   );
 }
@@ -671,6 +711,7 @@ export function RunCard({ initial, defaultOpen }: { initial: LlmRecord; defaultO
           {record.error && <p className="text-xs text-destructive">Error: {record.error}</p>}
           <LaunchCommand record={record} />
           <SystemPrompt record={record} />
+          <LoadedLibrary record={record} />
           {record.input_text && (
             <Collapsible icon={<User className="h-3 w-3" />} title={`Input · ${record.input_text.length} chars`} defaultOpen={record.input_text.length < 400}>
               <Pre text={record.input_text} />
