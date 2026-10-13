@@ -24,13 +24,14 @@
 | M0 | 项目背景；四类 agent 的 prompt 分层；记录并展示 system prompt | ✅ 已交付（looper #13） | — |
 | M1 | 上下文隔离与可复现 | ✅ 已交付（looper #17） | M0 |
 | M1.5 | harness 与 role 分层；harness 继承链 | 待开始 | M1 |
+| M1.6 | 导入本机插件与 skill 作为全局默认 | 待开始 | M1.5 |
 | M2 | 上下文与花费观测 | 待开始 | M0 |
 | M3 | 项目知识 | 待开始 | M0 |
 | M4 | 项目 skill | 待开始 | M3 |
 | M5 | 项目执行配置 | 待开始 | M2 |
 | M6 | prompt 回归评测 | 待开始 | M1 |
 
-执行顺序：M1 → M1.5 → M2 → M3 → M4 → M5 → M6。
+执行顺序：M1 → M1.5 → M1.6 → M2 → M3 → M4 → M5 → M6。
 
 ## 3. 各阶段
 
@@ -75,7 +76,8 @@
     - 新增 Reviewer 的 role prompt；
     - 现有推荐 prompt 里属于"性格与稳定性"的内容移入系统默认 harness。
   - **记录与展示**：每次运行的 `prompt_layers` 增加 `harness` 层，写明来源（系统默认、Manager 覆盖、项目覆盖）和哈希；历史页展示来源。
-  - **本机初始化**：把本机的 CLAUDE.md 与 AGENTS.md 整理合并为操作者的系统默认 harness，写入本机 Settings。合并稿先经维护者审阅，不提交到仓库。
+  - **默认模型、推理强度与环境变量**：存在 Settings；模型初始为 `opus`，Agents 页可以按 agent 覆盖，四类 agent 都生效；环境变量只允许非敏感的键值，记录里只保存键名和哈希。
+  - **本机初始化**（合入后由集成方执行，不提交到仓库）：把本机 CLAUDE.md 与 AGENTS.md 整理出的默认 harness，以及 `~/.claude/settings.json` 里的模型 `opus`、推理强度 `xhigh`、环境变量写入本机 Settings。
 - **不做：** 不在 Agents 页编辑 Planner、Worker 的 harness；不改代码契约的内容。
 - **验收：**
   - 四类 agent 的 system prompt 按五层顺序拼装，各层来源可在记录中读回；
@@ -83,6 +85,22 @@
   - 给某个项目设置 Worker harness 后，该项目的 Worker 和 Reviewer 使用它，其他项目不受影响；
   - Manager 的覆盖只影响 Manager；
   - 真实 Claude 下，Planner、Worker、Reviewer 的产出仍通过判定。
+
+### M1.6 导入本机插件与 skill 作为全局默认
+
+- **目标：** 让所有 agent 具备操作者平时在 Claude Code 里使用的插件和 skill，同时保持可见、可复现（RFC 决策 7）。
+- **范围：**
+  - 从本机 Claude 配置导入已启用的插件和全部个人 skill，存为系统管理的快照（内容进数据库或 runtime root 下的受管目录，不引用 `~/.claude` 原路径）；
+  - 物化为本地插件目录，以 `--plugin-dir` 挂载给 Manager、Planner、Worker、Reviewer；
+  - Settings 显示已导入的插件和 skill 列表，提供"从本机重新导入"和单项停用；
+  - 每次运行记录实际加载的插件和 skill（名称与版本哈希），历史页可见。
+- **不做：** 不导入个人 hook、MCP 工具权限和界面类设置；不恢复对 `~/.claude` 的隐式加载。
+- **验收：**
+  - 真实 Claude 的 init 事件里出现导入的插件和 skill，且 agent 能实际调用其中一个 skill；
+  - 操作者的提问日志 hook 不会被触发，个人 `CLAUDE.md` 仍然不可见；
+  - 停用某个 skill 后，下一次运行不再加载它；
+  - 记录里能读回加载清单。
+- **风险：** 先核实 `--plugin-dir` 在 `--print` 模式下的加载行为，以及它和 M1 隔离参数的配合。所有 agent 都加载 105 个 skill 会增加上下文和花费，M2 上线后评估。
 
 ### M2 上下文与花费观测
 
@@ -160,6 +178,7 @@
 | 2026-10-13 | RFC 决策 5：任务描述进 system prompt，分层改为四层，并入 M1 |
 | 2026-10-13 | RFC 决策 6：harness 与 role 分层，新增 M1.5（M1 之后、M2 之前） |
 | 2026-10-13 | M1 交付（looper #17）：四类 agent 共用一组隔离参数（`--setting-sources project`、`--strict-mcp-config`、`--settings` 的 `claudeMdExcludes` 与 `autoMemoryEnabled: false`），不再加载操作者的 `~/.claude/CLAUDE.md`、个人设置、hook、skill、插件、自定义 agent、输出风格、MCP 和自动记忆，项目 `CLAUDE.md` 与登录不受影响；system prompt 按哈希写成文件以 `--append-system-prompt-file` 传入，并加 `--system-prompt-snapshot off`；每次运行记录 `system_prompt_sha256` 和 `prompt_layers`，历史页展示；system prompt 改为角色 → 项目 → 任务 → 契约四层。验收：真实 Claude 下 Manager、Planner、Worker、Reviewer 都看到项目 `CLAUDE.md` 和背景里的标记，个人 `CLAUDE.md` 及其导入文件里的内容都答不出；Planner 产出有效计划，Worker 判为 completed，Reviewer 给出 `passed`；Manager 两轮哈希相同，改背景后 Planner 续接重启、哈希变化并答出新背景；单测与真实 PG 619 通过 |
+| 2026-10-13 | RFC 决策 7：导入本机 Claude 全局配置作为系统默认；M1.5 加入默认模型、推理强度、环境变量；新增 M1.6（插件与 skill） |
 
 ## 5. 不属于本 RFC 的待办
 

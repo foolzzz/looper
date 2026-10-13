@@ -212,3 +212,10 @@ L5 代码契约始终最后，因为 L4 来自用户或 Planner，放在契约�
    稳定性）和 role prompt（职责说明），最终为五层：harness → role → 项目档案 → 任务描述 → 代码契约。harness
    的继承链见第 4 节：系统默认在 Settings，Manager 可在 Agents 页覆盖，Planner、Worker 只能在项目里覆盖，
    Reviewer 跟随 Worker。决策 4 里"需要所有项目都遵守的全局规则"由此写进系统默认 harness。
+7. **导入本机 Claude 全局配置作为系统默认（修订决策 4 的范围）。** 决策 4 的"隔离"指不隐式加载操作者的个人
+   配置；操作者希望 agent 具备的能力改为**显式导入**，成为系统管理的默认配置，可见、可复现、可刷新：
+   - 模型 `opus`、推理强度 `xhigh`、非敏感的默认环境变量：存入 Settings（M1.5）；
+   - `~/.claude/CLAUDE.md` 与 AGENTS.md：整理为系统默认 harness（M1.5）；
+   - 已启用的插件和全部个人 skill：导入为系统管理的快照，以 `--plugin-dir` 挂载给四类 agent，每次运行记录加载了哪些
+     插件和 skill，Settings 提供"从本机重新导入"（M1.6）；
+   - 不导入：个人 hook（例如提问日志）、MCP 工具权限，以及状态栏、主题、语音等只对交互界面有用的设置。
