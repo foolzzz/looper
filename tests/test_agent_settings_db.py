@@ -139,3 +139,46 @@ def test_the_managers_harness_and_the_projects_harnesses_persist() -> None:
 
     _run(_test)
 
+
+def test_seeding_moves_unedited_role_prompts_keeps_edited_ones_and_adds_the_reviewer() -> None:
+    from loopx.agents.serve import seed_agent_configs
+    from loopx.agents.tiers.manager import DEFAULT_SYSTEM_PROMPT as MANAGER
+    from loopx.agents.tiers.planner import DEFAULT_SYSTEM_PROMPT as PLANNER
+    from loopx.agents.tiers.worker import DEFAULT_SYSTEM_PROMPT as WORKER, REVIEWER_SYSTEM_PROMPT as REVIEWER
+    from loopx.db import agent_configs
+
+    async def _test(pool: Any) -> None:
+        # Rows as the previous release left them: manager and worker unedited, planner edited.
+        for agent_id, prompt, recommended in [
+            ("manager", "previous manager recommendation", "previous manager recommendation"),
+            ("planner", "My own planner prompt.", "previous planner recommendation"),
+            ("worker", "previous worker recommendation", "previous worker recommendation"),
+        ]:
+            await pool.execute(
+                "INSERT INTO agent_configs (agent_id, role, system_prompt, default_prompt, model) "
+                "VALUES ($1, $1, $2, $3, $4)", agent_id, prompt, recommended, "sonnet" if agent_id == "worker" else None,
+            )
+        await seed_agent_configs(pool)
+
+        rows = {agent_id: await agent_configs.get_config(agent_id, pool=pool)
+                for agent_id in ("manager", "planner", "worker", "reviewer")}
+        assert (rows["manager"]["system_prompt"], rows["manager"]["default_prompt"]) == (MANAGER, MANAGER)
+        assert (rows["worker"]["system_prompt"], rows["worker"]["default_prompt"]) == (WORKER, WORKER)
+        assert rows["worker"]["model"] == "sonnet"  # other fields stay
+        assert (rows["planner"]["system_prompt"], rows["planner"]["default_prompt"]) == (
+            "My own planner prompt.", PLANNER)
+        reviewer = rows["reviewer"]
+        assert (reviewer["system_prompt"], reviewer["default_prompt"], reviewer["role"]) == (
+            REVIEWER, REVIEWER, "reviewer")
+        assert (reviewer["timeout_seconds"], reviewer["max_turns"], reviewer["harness_prompt"]) == (86400, 0, "")
+        # The new recommendations hold responsibilities only: character and stability moved to the harness.
+        assert "Default to Chinese" not in MANAGER and "Be concise" not in MANAGER
+        assert "Answer the user in their language" not in PLANNER
+        assert "Check by running things" not in WORKER
+
+        # A second startup changes nothing.
+        before = await pool.fetch("SELECT agent_id, system_prompt, default_prompt FROM agent_configs ORDER BY 1")
+        await seed_agent_configs(pool)
+        assert await pool.fetch("SELECT agent_id, system_prompt, default_prompt FROM agent_configs ORDER BY 1") == before
+
+    _run(_test)

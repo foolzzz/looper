@@ -130,6 +130,62 @@ def _telegram_adapter_from_config(config: dict[str, Any]) -> TelegramChannelAdap
         return None
 
 
+async def seed_agent_configs(pool: Any = None) -> None:
+    """Give every agent its config row and current recommended role prompt.
+
+    A row whose role prompt is still the recommended one follows a new
+    recommendation; an edited one is kept (``agent_configs.seed_defaults``).
+    """
+    from ..db.agent_configs import replace_default_prompt, seed_defaults
+    from .tiers.manager import DEFAULT_SYSTEM_PROMPT
+    from .tiers.planner import DEFAULT_SYSTEM_PROMPT as PLANNER_SYSTEM_PROMPT
+    from .tiers.worker import DEFAULT_SYSTEM_PROMPT as WORKER_SYSTEM_PROMPT, REVIEWER_SYSTEM_PROMPT
+
+    await seed_defaults([
+        {
+            "agent_id": "manager",
+            "display_name": "Manager (管家)",
+            "role": "manager",
+            "runtime": "claude-code",
+            "system_prompt": DEFAULT_SYSTEM_PROMPT,
+            "timeout_seconds": 0,
+        },
+        {
+            "agent_id": "planner",
+            "display_name": "Planner",
+            "role": "planner",
+            "runtime": "claude-code",
+            "timeout_seconds": 1200,  # per Planner turn
+            "system_prompt": PLANNER_SYSTEM_PROMPT,
+        },
+        {
+            "agent_id": "worker",
+            "display_name": "Worker",
+            "role": "worker",
+            "runtime": "claude-code",
+            "max_concurrency": 3,
+            "timeout_seconds": 86400,
+            # The role prompt of every Worker (the report contract follows it).
+            "system_prompt": WORKER_SYSTEM_PROMPT,
+        },
+        {
+            "agent_id": "reviewer",
+            "display_name": "Reviewer",
+            "role": "reviewer",
+            "runtime": "claude-code",
+            "timeout_seconds": 86400,
+            # The role prompt of every Reviewer (the verdict contract follows it).
+            "system_prompt": REVIEWER_SYSTEM_PROMPT,
+        },
+    ], pool=pool)
+    if await replace_default_prompt("planner", old=_PLANNER_PROMPT_BEFORE_CLAUDE, new=PLANNER_SYSTEM_PROMPT, pool=pool):
+        logger.info("planner agent config: replaced the old default system prompt")
+    if await replace_default_prompt("manager", old=_MANAGER_PROMPT_BEFORE_PROJECTS, new=DEFAULT_SYSTEM_PROMPT, pool=pool):
+        logger.info("manager agent config: replaced the old default system prompt")
+    if await replace_default_prompt("worker", old=_WORKER_PROMPT_BEFORE_CONTRACTS, new=WORKER_SYSTEM_PROMPT, pool=pool):
+        logger.info("worker agent config: replaced the old default system prompt")
+
+
 async def _register_optional_channel(
     registry: ChannelRegistry, adapter: ChannelAdapter
 ) -> None:
@@ -154,11 +210,7 @@ async def _run_agent_system(
 
     # --- Database (required) ---
     from ..db import init_pool, ensure_schema, close_pool
-    from ..db.agent_configs import replace_default_prompt, seed_defaults as seed_agent_configs
     from ..db.llm_profiles import seed_defaults as seed_llm_profiles
-    from .tiers.manager import DEFAULT_SYSTEM_PROMPT
-    from .tiers.planner import DEFAULT_SYSTEM_PROMPT as PLANNER_SYSTEM_PROMPT
-    from .tiers.worker import DEFAULT_SYSTEM_PROMPT as WORKER_SYSTEM_PROMPT
 
     pool = await init_pool()
     await ensure_schema(pool)
@@ -180,40 +232,7 @@ async def _run_agent_system(
         },
     ])
 
-    await seed_agent_configs([
-        {
-            "agent_id": "manager",
-            "display_name": "Manager (管家)",
-            "role": "manager",
-            "runtime": "claude-code",
-            "system_prompt": DEFAULT_SYSTEM_PROMPT,
-            "timeout_seconds": 0,
-        },
-        {
-            "agent_id": "planner",
-            "display_name": "Planner",
-            "role": "planner",
-            "runtime": "claude-code",
-            "timeout_seconds": 1200,  # per Planner turn
-            "system_prompt": PLANNER_SYSTEM_PROMPT,
-        },
-        {
-            "agent_id": "worker",
-            "display_name": "Worker",
-            "role": "worker",
-            "runtime": "claude-code",
-            "max_concurrency": 3,
-            "timeout_seconds": 86400,
-            # The role prompt of every Worker and Reviewer (their report contracts follow it).
-            "system_prompt": WORKER_SYSTEM_PROMPT,
-        },
-    ])
-    if await replace_default_prompt("planner", old=_PLANNER_PROMPT_BEFORE_CLAUDE, new=PLANNER_SYSTEM_PROMPT):
-        logger.info("planner agent config: replaced the old default system prompt")
-    if await replace_default_prompt("manager", old=_MANAGER_PROMPT_BEFORE_PROJECTS, new=DEFAULT_SYSTEM_PROMPT):
-        logger.info("manager agent config: replaced the old default system prompt")
-    if await replace_default_prompt("worker", old=_WORKER_PROMPT_BEFORE_CONTRACTS, new=WORKER_SYSTEM_PROMPT):
-        logger.info("worker agent config: replaced the old default system prompt")
+    await seed_agent_configs(pool)
     from ..db.channel_configs import seed_defaults as seed_channel_configs
     await seed_channel_configs([
         {

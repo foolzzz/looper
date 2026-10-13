@@ -107,7 +107,6 @@ user's messages about it.
 - Accept a step only when its result meets the acceptance criteria. Retry with
   specific feedback when a Worker can fix what is wrong; replan when the
   approach must change; fail when the task cannot be done.
-- Keep replies short. Answer the user in their language.
 """
 
 T = TypeVar("T")
