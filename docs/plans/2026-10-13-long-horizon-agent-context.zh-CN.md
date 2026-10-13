@@ -24,14 +24,15 @@
 | M0 | 项目背景；四类 agent 的 prompt 分层；记录并展示 system prompt | ✅ 已交付（looper #13） | — |
 | M1 | 上下文隔离与可复现 | ✅ 已交付（looper #17） | M0 |
 | M1.5 | harness 与 role 分层；harness 继承链 | ✅ 已交付（looper #19） | M1 |
-| M1.6 | 导入本机插件与 skill 作为全局默认 | 待开始 | M1.5 |
+| M1.6 | 导入本机插件与 skill 作为全局默认 | 🔄 进行中 | M1.5 |
+| M1.7 | agent 不限权限；渠道发送者白名单 | 待开始 | M1.6 |
 | M2 | 上下文与花费观测 | 待开始 | M0 |
 | M3 | 项目知识 | 待开始 | M0 |
 | M4 | 项目 skill | 待开始 | M3 |
 | M5 | 项目执行配置 | 待开始 | M2 |
 | M6 | prompt 回归评测 | 待开始 | M1 |
 
-执行顺序：M1 → M1.5 → M1.6 → M2 → M3 → M4 → M5 → M6。
+执行顺序：M1 → M1.5 → M1.6 → M1.7 → M2 → M3 → M4 → M5 → M6。
 
 ## 3. 各阶段
 
@@ -101,6 +102,23 @@
   - 停用某个 skill 后，下一次运行不再加载它；
   - 记录里能读回加载清单。
 - **风险：** 先核实 `--plugin-dir` 在 `--print` 模式下的加载行为，以及它和 M1 隔离参数的配合。所有 agent 都加载 105 个 skill 会增加上下文和花费，M2 上线后评估。
+
+### M1.7 agent 不限权限；渠道发送者白名单
+
+- **目标：** 四类 agent 不再因为权限确认或工具限制而做不了事；同时保证只有操作者本人能通过渠道驱动它们（RFC 决策 8）。
+- **范围：**
+  - **权限**：Manager、Planner、Worker、Reviewer 统一跳过权限确认（`--dangerously-skip-permissions`），去掉 Planner 的只读工具限制和 Manager 单独放行 Skill 的写法。启动参数集中在一处，和隔离参数放在一起。
+  - **Planner 的职责边界**：推荐的 Planner role prompt 写明"负责规划和决策，具体工作交给 Worker"，不亲自修改文件。
+  - **渠道白名单**：飞书、Telegram 的渠道配置各加一个发送者白名单（飞书用户 ID、Telegram 用户 ID），在 Settings 里编辑。
+    - 不在名单里的消息不交给 Manager，只记一条日志，不回复内容；
+    - 没有配置白名单的渠道不启动，Settings 页说明原因。
+  - **网页入口**：仍然只接受本机访问（M0 前已有的跨站和 Host 校验），不受白名单影响。
+- **不做：** 不做多用户权限体系，也不做网页登录。
+- **验收：**
+  - 真实 Claude 下，Manager 能直接调用工具和 skill，Planner 能运行命令，都不再被拒绝；
+  - Planner 仍按契约产出计划，并把工作派给 Worker；
+  - 白名单之外的飞书、Telegram 消息不会到达 Manager；
+  - 没有配置白名单的渠道不会启动。
 
 ### M2 上下文与花费观测
 
@@ -180,6 +198,8 @@
 | 2026-10-13 | M1 交付（looper #17）：四类 agent 共用一组隔离参数（`--setting-sources project`、`--strict-mcp-config`、`--settings` 的 `claudeMdExcludes` 与 `autoMemoryEnabled: false`），不再加载操作者的 `~/.claude/CLAUDE.md`、个人设置、hook、skill、插件、自定义 agent、输出风格、MCP 和自动记忆，项目 `CLAUDE.md` 与登录不受影响；system prompt 按哈希写成文件以 `--append-system-prompt-file` 传入，并加 `--system-prompt-snapshot off`；每次运行记录 `system_prompt_sha256` 和 `prompt_layers`，历史页展示；system prompt 改为角色 → 项目 → 任务 → 契约四层。验收：真实 Claude 下 Manager、Planner、Worker、Reviewer 都看到项目 `CLAUDE.md` 和背景里的标记，个人 `CLAUDE.md` 及其导入文件里的内容都答不出；Planner 产出有效计划，Worker 判为 completed，Reviewer 给出 `passed`；Manager 两轮哈希相同，改背景后 Planner 续接重启、哈希变化并答出新背景；单测与真实 PG 619 通过 |
 | 2026-10-13 | RFC 决策 7：导入本机 Claude 全局配置作为系统默认；M1.5 加入默认模型、推理强度、环境变量；新增 M1.6（插件与 skill） |
 | 2026-10-13 | M1.5 交付（looper #19）：system prompt 改为 harness → role → 项目 → 任务 → 契约五层，Manager 为 harness → role → `TASK_PLACEMENT_RULE` 三层；harness 由 `loopx/agents/agent_settings.py` 统一解析：Settings 默认（`system_settings` 表，未设置时用内置的 `DEFAULT_HARNESS_PROMPT`）、Manager 覆盖、项目的 Planner 和 Worker 覆盖，Reviewer 跟随 Worker；推荐 role prompt 只保留职责，未改过的行随推荐升级，新增 `reviewer` 行；Settings 新增默认模型（内置 `opus`）、effort 和至多 50 个非敏感环境变量，四类 agent 都传 `--model`，环境变量哈希进入常驻进程的重启签名；记录新增 `prompt_layers.harness`、`model_choice` 和 `env`（只存键名和值的哈希），历史页展示。验收：真实 Claude（opus，effort low）下，Settings 默认、项目 A 的 Worker 覆盖、Manager 覆盖各放一个暗号：A 的 Planner 答出默认暗号，A 的 Worker 写入、Reviewer 核对的都是 A 的 Worker 暗号，B 的 Worker 写出默认暗号并读到 Settings 里的环境变量，Manager 答出自己的暗号；Planner 产出有效计划，Worker 判为 completed，Reviewer 给出 `passed`，记录里五层齐全；四类 agent 的模型都是 opus，Manager 改为 sonnet 后下一轮以 `--resume` 重启并换成 sonnet；真实运行 18 次共 $0.68；单测与真实 PG 760 通过（main 上 637） |
+| 2026-10-13 | 修复：Manager、Planner 保存的会话丢失后自动换新会话（looper #20） |
+| 2026-10-13 | RFC 决策 8：agent 不限权限，渠道必须有发送者白名单；新增 M1.7 |
 
 ## 5. 不属于本 RFC 的待办
 
