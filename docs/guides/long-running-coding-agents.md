@@ -21,7 +21,7 @@ Run the [no-clone installer](installing-loopx.md), then open the project you
 want your agent to work on:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/foolzzz/loopx/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/foolzzz/looper/main/install.sh | bash
 export PATH="$HOME/.local/bin:$PATH"
 cd /path/to/your-project
 loopx doctor
@@ -73,7 +73,7 @@ it another agent's identity or the user's merge authority.
 ## DeepSeek Harness: choose the native plugin or SDK connector
 
 For a DSH Web session, the
-[native LoopX plugin](https://github.com/foolzzz/loopx/tree/main/packages/dsh-loopx-plugin#install)
+[native LoopX plugin](https://github.com/foolzzz/looper/tree/main/packages/dsh-loopx-plugin#install)
 provides bootstrap, workflow skills, a session-bound Driver and GoalBar. Follow
 its install instructions and version compatibility notes: the published
 prebuilt artifact and the latest source checkout can target different DSH

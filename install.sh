@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REPO="foolzzz/loopx"
+REPO="foolzzz/looper"
 MIN_PYTHON_MAJOR=3
 MIN_PYTHON_MINOR=11
 
