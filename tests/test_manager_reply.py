@@ -8,6 +8,7 @@ import os
 import sys
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -177,7 +178,8 @@ def _resident(*, exit_after: int | None = None, die_on: int | None = None, ignor
     """A fake claude that reads user turns from stdin like the real one.
 
     It appends its pid to ``pids`` on start and answers each turn with
-    ``turn N: <message>`` and a result. Like Claude, the result's
+    ``turn N: <message>`` (the user's message, after the context sections)
+    and a result. Like Claude, the result's
     ``total_cost_usd`` is the process's running total (0.25 per turn). It
     exits on EOF, after turn ``exit_after``, or without a result during turn
     ``die_on``. With ``ignore_eof`` it keeps running after stdin closes.
@@ -187,7 +189,7 @@ def _resident(*, exit_after: int | None = None, die_on: int | None = None, ignor
         "turn = 0\n"
         "for line in sys.stdin:\n"
         "    turn += 1\n"
-        "    text = json.loads(line)['message']['content']\n"
+        "    text = json.loads(line)['message']['content'].rpartition('\\n\\n')[2]\n"
         "    print(json.dumps({'type': 'system', 'subtype': 'init', 'session_id': 'sess-1'}), flush=True)\n"
         f"    if turn == {die_on!r}:\n"
         "        sys.exit(3)\n"
@@ -350,19 +352,21 @@ class TestManagerResidentClaude:
 
 
 def _task_json(**fields: Any) -> str:
+    """A fake claude that saves the user turn it gets to ``turn.txt`` and answers with this task JSON."""
     report = {"action": "task_request", "goal_id": "g", "structured_requirement": "build it",
               "acknowledgment": "ok", **fields}
     text = "```json\n" + json.dumps(report) + "\n```"
     return (
+        "open('turn.txt', 'w').write(json.loads(sys.stdin.readline())['message']['content'])\n"
         f"print(json.dumps({{'type': 'assistant', 'message': {{'content': [{{'type': 'text', 'text': {text!r}}}]}}}}))\n"
         f"print(json.dumps({{'type': 'result', 'subtype': 'success', 'is_error': False, 'result': {text!r}}}))"
     )
 
 
-def _ask_for_task(body: str) -> tuple[str, list[MessageEnvelope], list[str]]:
-    """Run one Manager turn; return its reply, any TASK_REQUESTs and its argv."""
+def _ask_for_task(body: str) -> SimpleNamespace:
+    """Run one Manager turn; return its ``reply``, any TASK_REQUEST ``requests``, its ``argv`` and the user ``turn``."""
 
-    async def _run() -> tuple[str, list[MessageEnvelope], list[str]]:
+    async def _run() -> SimpleNamespace:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             bus = MessageBus(runtime_root=root)
@@ -387,25 +391,88 @@ def _ask_for_task(body: str) -> tuple[str, list[MessageEnvelope], list[str]]:
             while not router.empty():
                 requests.append(router.get_nowait())
             argv = json.loads((root / "argv.json").read_text())
+            turn = (root / "turn.txt").read_text()
             await bus.shutdown()
-            return reply, requests, argv
+            return SimpleNamespace(reply=reply, requests=requests, argv=argv, turn=turn)
 
     return asyncio.run(_run())
 
 
+def _project(name: str, work_dir: str = "", description: str = "", project_id: str = "proj-111111111111") -> dict[str, Any]:
+    return {"id": project_id, "name": name, "description": description, "work_dir": work_dir}
+
+
+TETRIS_DIR = os.path.join(os.path.expanduser("~"), "projects", "tetris")
+
+
 @pytest.mark.usefixtures("agent_db")
-class TestManagerTaskDirectory:
-    def test_task_carries_the_chosen_directory(self) -> None:
-        reply, requests, argv = _ask_for_task(_task_json(work_dir="~/projects/tetris"))
-        (request,) = requests
-        assert request.payload["work_dir"] == os.path.join(os.path.expanduser("~"), "projects", "tetris")
-        assert reply == "ok"
-        # The directory rule is code-owned and appended to whatever prompt the DB holds.
-        prompt = argv[argv.index("--append-system-prompt") + 1]
-        assert "work_dir" in prompt
+class TestManagerTaskPlacement:
+    def test_task_carries_the_chosen_directory(self, agent_db: Any) -> None:
+        result = _ask_for_task(_task_json(project="tetris", work_dir="~/projects/tetris"))
+        (request,) = result.requests
+        assert request.payload["work_dir"] == TETRIS_DIR
+        assert result.reply.startswith("ok")
+        # The project and directory rule is code-owned and appended to whatever prompt the DB holds.
+        prompt = result.argv[result.argv.index("--append-system-prompt") + 1]
+        assert '"work_dir"' in prompt and '"project"' in prompt
+
+    def test_projects_section_starts_each_user_turn(self, agent_db: Any) -> None:
+        agent_db.list_projects.return_value = [
+            _project("tetris", "/srv/tetris", "falling\nblocks " + "x" * 100),
+            _project("notes", project_id="proj-222222222222"),
+        ]
+        turn = _ask_for_task(_task_json(project="tetris")).turn
+        lines = turn.splitlines()
+        assert lines[0] == "Projects:"
+        assert lines[1].startswith("  - tetris (default directory /srv/tetris): falling blocks xxx")
+        assert len(lines[1].partition("): ")[2]) == 80  # the description, cut to 80 characters
+        assert lines[2] == "  - notes (no default directory)"
+        assert lines[-1] == "确认"
+
+    def test_projects_section_says_when_there_are_none(self) -> None:
+        turn = _ask_for_task(_task_json(project="tetris")).turn
+        assert turn.splitlines()[:2] == ["Projects:", "  (none yet)"]
+
+    def test_existing_project_is_matched_by_name(self, agent_db: Any) -> None:
+        agent_db.find_project_by_name.return_value = _project("Tetris", "/srv/tetris")
+        result = _ask_for_task(_task_json(project="tetris", work_dir="~/projects/tetris"))
+        agent_db.find_project_by_name.assert_awaited_once_with("tetris")
+        agent_db.create_project.assert_not_awaited()
+        (request,) = result.requests
+        assert (request.payload["project_id"], request.payload["work_dir"]) == ("proj-111111111111", TETRIS_DIR)
+        assert result.reply == "ok"
+
+    def test_work_dir_defaults_to_the_projects_directory(self, agent_db: Any) -> None:
+        agent_db.find_project_by_name.return_value = _project("Tetris", "/srv/tetris")
+        (request,) = _ask_for_task(_task_json(project="TETRIS", work_dir="")).requests
+        assert (request.payload["project_id"], request.payload["work_dir"]) == ("proj-111111111111", "/srv/tetris")
+
+    def test_unknown_project_is_created_with_the_task_directory(self, agent_db: Any) -> None:
+        result = _ask_for_task(_task_json(project=" Tetris ", work_dir="~/projects/tetris"))
+        agent_db.create_project.assert_awaited_once_with(name="Tetris", work_dir=TETRIS_DIR)
+        (request,) = result.requests
+        assert request.payload["project_id"] == "proj-000000000000"
+        assert result.reply.startswith("ok") and "Tetris" in result.reply
+
+    @pytest.mark.parametrize("fields", [{}, {"project": ""}, {"project": "  "}, {"project": "x" * 81}])
+    def test_task_without_a_project_asks_and_creates_nothing(self, agent_db: Any, fields: dict[str, Any]) -> None:
+        result = _ask_for_task(_task_json(work_dir="~/projects/tetris", **fields))
+        assert result.requests == []
+        assert "项目" in result.reply
+        agent_db.create_project.assert_not_awaited()
 
     @pytest.mark.parametrize("fields", [{}, {"work_dir": ""}, {"work_dir": "relative/dir"}])
-    def test_task_without_a_directory_is_not_created(self, fields: dict[str, Any]) -> None:
-        reply, requests, _ = _ask_for_task(_task_json(**fields))
-        assert requests == []
-        assert "目录" in reply
+    @pytest.mark.parametrize("known", [False, True])
+    def test_task_without_a_directory_is_not_created(self, agent_db: Any, fields: dict[str, Any], known: bool) -> None:
+        if known:  # an existing project without a default directory
+            agent_db.find_project_by_name.return_value = _project("tetris")
+        result = _ask_for_task(_task_json(project="tetris", **fields))
+        assert result.requests == []
+        assert "目录" in result.reply
+        agent_db.create_project.assert_not_awaited()
+
+    def test_database_failure_is_answered(self, agent_db: Any) -> None:
+        agent_db.find_project_by_name.side_effect = ConnectionError("database is down")
+        result = _ask_for_task(_task_json(project="tetris", work_dir="/tmp/t"))
+        assert result.requests == []
+        assert "database is down" in result.reply

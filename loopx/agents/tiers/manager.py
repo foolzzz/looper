@@ -6,7 +6,8 @@ The Manager is the only agent that communicates with users. It:
   the saved session
 - Receives user messages from all channels via the Bus
 - Classifies intent (direct answer, clarification, task request)
-- Forwards structured task requests to the TaskRouter
+- Places each confirmed task in a project (creating a new one on request) and
+  forwards it to the TaskRouter
 - Streams Claude Code responses in real-time to the originating channel
 """
 
@@ -24,6 +25,7 @@ from typing import Any
 from ..broadcast import Broadcaster
 from ..bus import MessageBus
 from ..claude_cli import ClaudeRunRecorder, iter_lines, write_user_turn
+from ..projects import project_name
 from .task import resolve_work_dir
 from ..message import (
     MANAGER_ADDRESS,
@@ -37,19 +39,29 @@ logger = logging.getLogger(__name__)
 
 from ...db import activity as db_activity
 from ...db import agent_configs as db_agent_configs
+from ...db import projects as db_projects
 
 # How long a stopping Claude may take to exit after its stdin closes before it is killed.
 _STOP_GRACE_SEC = 5.0
 
 # Appended to the (editable) system prompt on every call: the task JSON is
 # parsed by code, so its required fields are owned by code too.
-TASK_DIRECTORY_RULE = """\
-## Task working directory (required)
-Every task runs in a directory the user chooses; there is no default. Before
-asking the user to confirm a task, make sure you know that directory as an
-absolute path (or one starting with ~/). If the user has not said where the
-work should happen, ask them. Never pick a directory yourself. Put it in the
-task JSON as "work_dir".
+TASK_PLACEMENT_RULE = """\
+## Task project and working directory (required)
+Every task belongs to a project and runs in a directory. Each user message
+starts with a "Projects" section listing the existing projects and their
+default directories.
+
+- Project: before asking the user to confirm a task, know its project. Use the
+  existing project the user names or clearly means. If the task fits none of
+  them, propose a short name for a new project and get the user's agreement;
+  if unsure, ask. Put the project's name in the task JSON as "project".
+- Directory: there is no global default. Use the directory the user names, as
+  an absolute path (or one starting with ~/), in the task JSON as "work_dir".
+  If they name none and the project has a default directory, leave "work_dir"
+  empty and the project's default is used. A new project, or one without a
+  default directory, needs the user to name one: ask them. Never pick a
+  directory yourself.
 """
 
 DEFAULT_SYSTEM_PROMPT = """\
@@ -78,7 +90,8 @@ Instead, follow this flow:
   "action": "task_request",
   "goal_id": "<short-kebab-id>",
   "structured_requirement": "<clear one-paragraph requirement incorporating clarifications>",
-  "work_dir": "<absolute directory the task runs in, e.g. ~/projects/tetris>",
+  "project": "<name of the task's project: an existing one, or a new one the user agreed to>",
+  "work_dir": "<absolute directory the task runs in, e.g. ~/projects/tetris; empty for the project's default>",
   "priority": "P2",
   "acknowledgment": "<brief acknowledgment in user's language>"
 }
@@ -93,6 +106,10 @@ If the user says "不", "取消", "算了", "no", "cancel" or modifies the requi
 - Never refuse a reasonable development task
 - Never output task_request JSON without user's explicit confirmation
 """
+
+
+class _AskUser(Exception):
+    """A confirmed task lacks something only the user can give; the message asks for it."""
 
 
 @dataclass
@@ -256,13 +273,13 @@ class ManagerAgent:
             await self._send_reply(envelope, clarification)
         elif parsed.get("action") == "task_request":
             try:
-                work_dir = resolve_work_dir(parsed.get("work_dir"))
-            except ValueError as exc:
-                # No default directory: ask instead of creating the task.
-                await self._send_reply(
-                    envelope,
-                    f"这个任务要在哪个目录里做？请告诉我完整路径（例如 ~/projects/xxx）。（{exc}）",
-                )
+                project, work_dir, created = await self._place_task(parsed)
+            except _AskUser as ask:
+                await self._send_reply(envelope, str(ask))
+                return
+            except Exception as exc:
+                logger.exception("manager failed to place task from %s", envelope.message_id)
+                await self._send_reply(envelope, f"Manager 出错，没能创建任务：{exc}")
                 return
             await self._bus.publish(MessageEnvelope.create(
                 source=MANAGER_ADDRESS,
@@ -274,6 +291,7 @@ class ManagerAgent:
                     "original_user_text": text,
                     "user_language": envelope.payload.get("language", "zh"),
                     "work_dir": work_dir,
+                    "project_id": project["id"],
                     "priority": parsed.get("priority", "P2"),
                     "constraints": parsed.get("constraints", []),
                 },
@@ -281,10 +299,37 @@ class ManagerAgent:
                 metadata={"origin_channel_id": envelope.metadata.get("origin_channel_id")},
             ))
             ack_text = parsed.get("acknowledgment", f"收到，已安排处理: {text[:100]}")
+            if created:
+                ack_text += f"\n\n已新建项目「{project['name']}」，默认目录 {work_dir}。"
             await self._send_reply(envelope, ack_text)
         else:
             reply_text = parsed.get("response_text", response)
             await self._send_reply(envelope, reply_text)
+
+    async def _place_task(self, parsed: dict[str, Any]) -> tuple[dict[str, Any], str, bool]:
+        """The confirmed task's project, its work directory, and whether the project is new.
+
+        The project is matched by name ignoring case; an unknown name becomes a
+        new project whose default directory is the task's. The directory is the
+        task's own, else the project's default. Raises ``_AskUser`` when the
+        project or the directory is missing.
+        """
+        try:
+            name = project_name(parsed.get("project"))
+        except ValueError as exc:
+            raise _AskUser(f"这个任务属于哪个项目？请告诉我项目名，可以是已有项目，也可以新建一个。（{exc}）") from None
+        project = await db_projects.find_project_by_name(name)
+        explicit = parsed.get("work_dir")
+        if project and project["work_dir"] and not (isinstance(explicit, str) and explicit.strip()):
+            return project, project["work_dir"], False
+        try:
+            work_dir = resolve_work_dir(explicit)
+        except ValueError as exc:
+            # No default directory: ask instead of creating the task.
+            raise _AskUser(f"这个任务要在哪个目录里做？请告诉我完整路径（例如 ~/projects/xxx）。（{exc}）") from None
+        if project:
+            return project, work_dir, False
+        return await db_projects.create_project(name=name, work_dir=work_dir), work_dir, True
 
     async def _handle_goal_status(self, envelope: MessageEnvelope) -> None:
         goal_id = envelope.payload.get("goal_id", "")
@@ -352,7 +397,7 @@ class ManagerAgent:
 
     async def _run_turn(self, message: str, context_envelope: MessageEnvelope) -> str:
         await self._load_db_config()
-        system_prompt = f"{self._system_prompt}\n\n{TASK_DIRECTORY_RULE}"
+        system_prompt = f"{self._system_prompt}\n\n{TASK_PLACEMENT_RULE}"
         if self._process is not None and (
             self._process.returncode is not None or self._process_prompt != system_prompt
         ):
@@ -387,8 +432,9 @@ class ManagerAgent:
         input_lost = False
 
         try:
+            turn_text = await self._build_user_message(message)
             try:
-                await write_user_turn(process.stdin, self._build_user_message(message))
+                await write_user_turn(process.stdin, turn_text)
             except (BrokenPipeError, ConnectionResetError):
                 # Claude closed its stdin, so it is exiting; what it already wrote decides the turn.
                 logger.warning("manager: Claude closed stdin before the message was sent")
@@ -566,8 +612,8 @@ class ManagerAgent:
         await process.wait()
         logger.info("manager stopped Claude Code (pid=%s, exit code %s)", process.pid, process.returncode)
 
-    def _build_user_message(self, user_message: str) -> str:
-        parts: list[str] = []
+    async def _build_user_message(self, user_message: str) -> str:
+        parts = await self._projects_section()
 
         if self._goal_snapshots:
             parts.append("当前活跃目标:")
@@ -577,6 +623,26 @@ class ManagerAgent:
 
         parts.append(user_message)
         return "\n".join(parts)
+
+    async def _projects_section(self) -> list[str]:
+        """The existing projects, so Claude can name a task's project."""
+        try:
+            projects = await db_projects.list_projects()
+        except Exception:
+            logger.warning("manager could not list projects", exc_info=True)
+            return ["Projects: (could not be read)", ""]
+        lines = ["Projects:"]
+        for project in projects:
+            directory = f"default directory {project['work_dir']}" if project["work_dir"] else "no default directory"
+            line = f"  - {project['name']} ({directory})"
+            description = " ".join(project["description"].split())
+            if description:
+                line += f": {description if len(description) <= 80 else description[:79] + '…'}"
+            lines.append(line)
+        if not projects:
+            lines.append("  (none yet)")
+        lines.append("")
+        return lines
 
     def _parse_response(self, response: str) -> dict[str, Any]:
         response = response.strip()
