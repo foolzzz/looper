@@ -186,3 +186,29 @@ def test_project_crud_and_counts() -> None:
 
     _run(_test)
 
+
+def test_task_with_a_new_project_is_one_transaction(monkeypatch: pytest.MonkeyPatch) -> None:
+    from loopx.agents import projects as api
+    from loopx.db import connection, tasks
+
+    async def _test(pool: Any) -> None:
+        monkeypatch.setattr(connection, "_pool", pool)
+
+        created = await api.create_task({"requirement": "r", "project": {"name": "Notes", "work_dir": "/srv/notes"}})
+        row = await tasks.get_task(created["task_id"], pool=pool)
+        assert (row["project_id"], row["work_dir"], row["status"]) == (created["project_id"], "/srv/notes", "init")
+
+        with pytest.raises(api.RequestError) as taken:
+            await api.create_task({"requirement": "r", "project": {"name": "notes"}, "work_dir": "/tmp"})
+        assert taken.value.status.startswith("409")
+
+        async def failing_insert(**_: Any) -> None:
+            raise RuntimeError("task insert failed")
+
+        monkeypatch.setattr(tasks, "create_task", failing_insert)
+        with pytest.raises(RuntimeError):
+            await api.create_task({"requirement": "r", "project": {"name": "orphan"}, "work_dir": "/tmp"})
+        assert await pool.fetchval("SELECT array_agg(name) FROM projects") == ["Notes"]
+        assert await pool.fetchval("SELECT count(*) FROM tasks") == 1
+
+    _run(_test)
