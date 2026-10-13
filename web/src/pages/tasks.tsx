@@ -25,11 +25,13 @@ import {
   updateProject,
   deleteProject,
   type Project,
+  type ProjectUpdate,
   type TaskInfo,
 } from "@/lib/api";
 import { useProjects } from "@/lib/use-projects";
 import { cn } from "@/lib/utils";
 import { ProjectBackgroundField, backgroundTooLong } from "@/components/project-background-field";
+import { ProjectHarnessOverrides, harnessTooLong } from "@/components/harness-field";
 import { TaskDetailPage } from "./task-detail";
 
 const STATUS_FILTERS = ["all", "init", "running", "pending", "completed", "failed", "cancelled", "stopped"] as const;
@@ -145,13 +147,15 @@ function ClampedText({ text, className }: { text: string; className?: string }) 
   );
 }
 
-/** The selected project's name, description, default directory, count and background, editable in place. */
+/** The selected project's name, description, default directory, count, background and harness overrides, editable in place. */
 function ProjectBar({ project, onDeleted }: { project: Project; onDeleted: () => void }) {
   const [editing, setEditing] = useState(false);
   const [name, setName] = useState("");
   const [workDir, setWorkDir] = useState("");
   const [description, setDescription] = useState("");
   const [background, setBackground] = useState("");
+  const [plannerHarness, setPlannerHarness] = useState("");
+  const [workerHarness, setWorkerHarness] = useState("");
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -161,6 +165,8 @@ function ProjectBar({ project, onDeleted }: { project: Project; onDeleted: () =>
     setWorkDir(project.work_dir);
     setDescription(project.description);
     setBackground(project.background);
+    setPlannerHarness(project.planner_harness_prompt ?? "");
+    setWorkerHarness(project.worker_harness_prompt ?? "");
     setError("");
     setConfirmDelete(false);
     setEditing(true);
@@ -171,13 +177,15 @@ function ProjectBar({ project, onDeleted }: { project: Project; onDeleted: () =>
       setError("A project name is required.");
       return;
     }
-    if (backgroundTooLong(background)) return;
-    // Send only what changed; an empty directory or background clears it.
-    const fields: { name?: string; description?: string; work_dir?: string; background?: string } = {};
+    if (backgroundTooLong(background) || harnessTooLong(plannerHarness) || harnessTooLong(workerHarness)) return;
+    // Send only what changed; an empty directory, background or harness clears it.
+    const fields: ProjectUpdate = {};
     if (name.trim() !== project.name) fields.name = name.trim();
     if (description.trim() !== project.description) fields.description = description.trim();
     if (workDir.trim() !== project.work_dir) fields.work_dir = workDir.trim();
     if (background !== project.background) fields.background = background;
+    if (plannerHarness !== (project.planner_harness_prompt ?? "")) fields.planner_harness_prompt = plannerHarness;
+    if (workerHarness !== (project.worker_harness_prompt ?? "")) fields.worker_harness_prompt = workerHarness;
     if (Object.keys(fields).length === 0) {
       setEditing(false);
       return;
@@ -236,10 +244,22 @@ function ProjectBar({ project, onDeleted }: { project: Project; onDeleted: () =>
           />
         </div>
         <ProjectBackgroundField id="project-edit-background" value={background} onChange={setBackground} />
+        <ProjectHarnessOverrides
+          idPrefix="project-edit"
+          planner={plannerHarness}
+          worker={workerHarness}
+          onPlannerChange={setPlannerHarness}
+          onWorkerChange={setWorkerHarness}
+        />
         {error && <p role="alert" className="text-xs text-destructive">{error}</p>}
         <div className="flex justify-end gap-2">
           <Button type="button" variant="outline" size="sm" onClick={() => setEditing(false)}>Cancel</Button>
-          <Button type="button" size="sm" onClick={save} disabled={busy || backgroundTooLong(background)}>
+          <Button
+            type="button"
+            size="sm"
+            onClick={save}
+            disabled={busy || backgroundTooLong(background) || harnessTooLong(plannerHarness) || harnessTooLong(workerHarness)}
+          >
             {busy && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
             Save
           </Button>
@@ -311,6 +331,17 @@ function ProjectBar({ project, onDeleted }: { project: Project; onDeleted: () =>
           <ClampedText key={project.background} text={project.background} className="font-mono text-xs leading-relaxed text-foreground/80" />
         ) : (
           <p className="text-xs text-muted-foreground">No background</p>
+        )}
+        {(project.planner_harness_prompt || project.worker_harness_prompt) && (
+          <p className="pt-1 text-xs text-muted-foreground">
+            Harness overrides:{" "}
+            <span className="text-foreground/80">
+              {[project.planner_harness_prompt && "Planner", project.worker_harness_prompt && "Worker and Reviewer"]
+                .filter(Boolean)
+                .join(" · ")}
+            </span>{" "}
+            (others use the default)
+          </p>
         )}
       </div>
       {error && <p role="alert" className="mt-2 text-xs text-destructive">{error}</p>}

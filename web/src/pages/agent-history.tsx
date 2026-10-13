@@ -207,10 +207,34 @@ function shortSha(sha: string | null | undefined) {
   return sha ? sha.slice(0, 12) : "";
 }
 
-/** One line per layer, in prompt order: where the role, project, task and contract came from. */
-function PromptLayerSummary({ layers }: { layers: PromptLayers }) {
-  const { role, project, task, contract } = layers;
+const HARNESS_SOURCES: Record<string, string> = {
+  builtin_default: "built-in default",
+  system_default: "Settings default",
+  manager_override: "Manager override",
+  project_override: "project override",
+};
+
+const MODEL_SOURCES: Record<string, string> = {
+  builtin_default: "built-in default",
+  system_default: "Settings default",
+  agent_override: "agent override",
+};
+
+/**
+ * One line per layer, in prompt order: where the harness, role, project, task and contract came from;
+ * then the model the run asked for and the Settings environment variables it got.
+ */
+function PromptLayerSummary({ layers, metadata }: { layers: PromptLayers; metadata: LlmRecord["metadata"] }) {
+  const { harness, role, project, task, contract } = layers;
   const rows: [string, string][] = [];
+  if (harness) {
+    rows.push([
+      "Harness",
+      [HARNESS_SOURCES[harness.source] ?? harness.source, harness.project_id, shortSha(harness.sha256)]
+        .filter(Boolean)
+        .join(" · "),
+    ]);
+  }
   if (role) rows.push(["Role", `${role.config_id} · ${role.recommended ? "recommended" : "edited"} · ${shortSha(role.sha256)}`]);
   rows.push([
     "Project",
@@ -231,6 +255,16 @@ function PromptLayerSummary({ layers }: { layers: PromptLayers }) {
       : "none",
   ]);
   if (contract) rows.push(["Contract", `${contract.name} · ${shortSha(contract.sha256)}`]);
+  const choice = metadata?.model_choice;
+  if (choice) {
+    rows.push([
+      "Model",
+      [choice.model, MODEL_SOURCES[choice.source] ?? choice.source, choice.effort && `effort ${choice.effort}`]
+        .filter(Boolean)
+        .join(" · "),
+    ]);
+  }
+  if (metadata?.env) rows.push(["Env", `${Object.keys(metadata.env.keys).join(", ")} · ${shortSha(metadata.env.sha256)}`]);
   return (
     <dl className="mb-2 grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 font-mono text-[11px]">
       {rows.map(([name, value]) => (
@@ -271,7 +305,7 @@ function SystemPrompt({ record }: { record: LlmRecord }) {
         </span>
       }
     >
-      {layers && <PromptLayerSummary layers={layers} />}
+      {layers && <PromptLayerSummary layers={layers} metadata={metadata} />}
       {sha && (
         <div className="mb-2 flex items-center gap-2">
           <span className="min-w-0 break-all font-mono text-[11px] text-muted-foreground">sha256 {sha}</span>

@@ -1,8 +1,229 @@
-import { useEffect, useState } from "react";
-import { Save, Loader2, MessageCircle, Send, CheckCircle2, XCircle } from "lucide-react";
+import { useEffect, useId, useState } from "react";
+import { Save, Loader2, MessageCircle, Send, CheckCircle2, XCircle, Plus, RotateCcw, Trash2 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
-import { fetchChannelConfigs, updateChannelConfig, type ChannelConfig } from "@/lib/api";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { HarnessField, harnessTooLong } from "@/components/harness-field";
+import {
+  fetchAgentSettings,
+  fetchChannelConfigs,
+  resetDefaultHarness,
+  updateAgentSettings,
+  updateChannelConfig,
+  type AgentSettings,
+  type AgentSettingsUpdate,
+  type ChannelConfig,
+  type EnvEntry,
+} from "@/lib/api";
 import { cn } from "@/lib/utils";
+
+const ENV_NAME = /^[A-Z_][A-Z0-9_]*$/;
+const CREDENTIAL_WORDS = ["KEY", "TOKEN", "SECRET", "PASSWORD", "CREDENTIAL"];
+
+/** Why an environment variable name would be refused, or "" when it is fine (the server checks again). */
+function envNameProblem(key: string) {
+  if (!ENV_NAME.test(key)) return "Use capitals, digits and _ (not starting with a digit).";
+  if (CREDENTIAL_WORDS.some((word) => key.includes(word))) return "Looks like a credential: secrets do not belong here.";
+  return "";
+}
+
+/** The defaults every agent inherits: harness prompt, model, effort and environment variables. */
+function AgentDefaultsCard() {
+  const id = useId();
+  const [settings, setSettings] = useState<AgentSettings | null>(null);
+  const [harness, setHarness] = useState("");
+  const [model, setModel] = useState("");
+  const [effort, setEffort] = useState("");
+  const [env, setEnv] = useState<EnvEntry[]>([]);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [saved, setSaved] = useState(false);
+
+  const show = (next: AgentSettings) => {
+    setSettings(next);
+    setHarness(next.default_harness_prompt);
+    setModel(next.model_source === "system_default" ? next.default_model : "");
+    setEffort(next.default_effort);
+    setEnv(next.default_env);
+  };
+
+  useEffect(() => {
+    fetchAgentSettings().then(show).catch((e) => setError(e.message));
+  }, []);
+
+  if (!settings) {
+    return error ? (
+      <div className="rounded-lg border border-destructive/50 bg-destructive/10 px-5 py-4 text-sm text-destructive">{error}</div>
+    ) : (
+      <div className="flex h-32 items-center justify-center">
+        <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
+      </div>
+    );
+  }
+
+  const savedModel = settings.model_source === "system_default" ? settings.default_model : "";
+  const envChanged = JSON.stringify(env) !== JSON.stringify(settings.default_env);
+  const changes: AgentSettingsUpdate = {};
+  if (harness !== settings.default_harness_prompt) changes.default_harness_prompt = harness;
+  if (model.trim() !== savedModel) changes.default_model = model.trim();
+  if (effort !== settings.default_effort) changes.default_effort = effort;
+  if (envChanged) changes.default_env = env;
+  const dirty = Object.keys(changes).length > 0;
+  const envProblems = env.map((entry) => (entry.key ? envNameProblem(entry.key) : "A name is required."));
+  const invalid = harnessTooLong(harness) || envProblems.some(Boolean);
+  const customized = settings.harness_source === "system_default";
+
+  const run = async (request: () => Promise<AgentSettings>) => {
+    setBusy(true);
+    setError("");
+    try {
+      show(await request());
+      setSaved(true);
+      setTimeout(() => setSaved(false), 2000);
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const setEntry = (index: number, entry: Partial<EnvEntry>) =>
+    setEnv(env.map((current, i) => (i === index ? { ...current, ...entry } : current)));
+
+  return (
+    <div className="rounded-lg border border-border bg-card">
+      <div className="space-y-5 px-5 py-4">
+        <div className="space-y-2">
+          <HarnessField
+            id={`${id}-harness`}
+            label="Default harness prompt"
+            value={harness}
+            onChange={setHarness}
+            rows={12}
+            hint={
+              <>
+                Every agent&apos;s working principles, boundaries and tone, placed before its role prompt. The Manager
+                (Agents page) and each project&apos;s Planner and Workers (project editor) can override it; Reviewers
+                follow their project&apos;s Workers. Changes apply to each agent&apos;s next run.
+              </>
+            }
+          />
+          <div className="flex items-center justify-between gap-2">
+            <Badge variant={customized ? "default" : "outline"}>{customized ? "Customized" : "Built-in"}</Badge>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={() => run(resetDefaultHarness)}
+              disabled={busy || !customized}
+            >
+              <RotateCcw className="h-3.5 w-3.5" />
+              Reset to built-in
+            </Button>
+          </div>
+        </div>
+
+        <div className="grid gap-4 sm:grid-cols-2">
+          <div className="space-y-1">
+            <label htmlFor={`${id}-model`} className="text-xs font-medium text-muted-foreground">Default model</label>
+            <Input
+              id={`${id}-model`}
+              value={model}
+              onChange={(e) => setModel(e.target.value)}
+              placeholder={`${settings.builtin_model} (built-in)`}
+              className="font-mono"
+            />
+            <p className="text-xs text-muted-foreground">
+              An alias (opus, sonnet) or a full model name. An agent&apos;s own model on the Agents page wins.
+            </p>
+          </div>
+          <div className="space-y-1">
+            <label htmlFor={`${id}-effort`} className="text-xs font-medium text-muted-foreground">Effort</label>
+            <select
+              id={`${id}-effort`}
+              value={effort}
+              onChange={(e) => setEffort(e.target.value)}
+              className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm text-foreground"
+            >
+              <option value="">Claude Code default</option>
+              {settings.effort_levels.map((level) => (
+                <option key={level} value={level}>{level}</option>
+              ))}
+            </select>
+          </div>
+        </div>
+
+        <div className="space-y-2">
+          <div className="flex items-baseline justify-between gap-2">
+            <span className="text-xs font-medium text-muted-foreground">Environment variables</span>
+            <span className="text-[11px] tabular-nums text-muted-foreground">
+              {env.length} / {settings.env_max_entries}
+            </span>
+          </div>
+          {env.map((entry, index) => (
+            <div key={index} className="space-y-1">
+              <div className="flex items-center gap-2">
+                <Input
+                  aria-label={`Variable ${index + 1} name`}
+                  value={entry.key}
+                  onChange={(e) => setEntry(index, { key: e.target.value.toUpperCase() })}
+                  placeholder="NAME"
+                  aria-invalid={!!envProblems[index]}
+                  className="w-2/5 font-mono"
+                />
+                <Input
+                  aria-label={`Variable ${index + 1} value`}
+                  value={entry.value}
+                  onChange={(e) => setEntry(index, { value: e.target.value })}
+                  placeholder="value"
+                  className="flex-1 font-mono"
+                />
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => setEnv(env.filter((_, i) => i !== index))}
+                  aria-label={`Remove ${entry.key || `variable ${index + 1}`}`}
+                >
+                  <Trash2 className="h-3.5 w-3.5" />
+                </Button>
+              </div>
+              {envProblems[index] && <p className="text-xs text-destructive">{envProblems[index]}</p>}
+            </div>
+          ))}
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={() => setEnv([...env, { key: "", value: "" }])}
+            disabled={env.length >= settings.env_max_entries}
+          >
+            <Plus className="h-3.5 w-3.5" />
+            Add variable
+          </Button>
+          <p className="text-xs text-muted-foreground">
+            Set for every agent&apos;s Claude Code, on top of the server&apos;s environment. Not for secrets: values are
+            shown here, and run records keep the names with a hash of each value.
+          </p>
+        </div>
+      </div>
+
+      <div className="flex items-center justify-end gap-2 border-t border-border px-5 py-3">
+        {error && <p role="alert" className="mr-auto text-xs text-destructive">{error}</p>}
+        {saved && (
+          <span className="flex items-center gap-1 text-xs text-success">
+            <CheckCircle2 className="h-3.5 w-3.5" />
+            Saved
+          </span>
+        )}
+        <Button type="button" size="sm" onClick={() => run(() => updateAgentSettings(changes))} disabled={busy || !dirty || invalid}>
+          {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Save className="h-3.5 w-3.5" />}
+          Save
+        </Button>
+      </div>
+    </div>
+  );
+}
 
 function channelIcon(type: string) {
   if (type === "telegram") return Send;
@@ -157,8 +378,13 @@ export function SettingsPage() {
       <div>
         <h1 className="text-2xl font-bold">Settings</h1>
         <p className="text-sm text-muted-foreground mt-1">
-          Channel integrations and system configuration
+          Agent defaults, channel integrations and system configuration
         </p>
+      </div>
+
+      <div>
+        <h2 className="text-sm font-semibold mb-3">Agent Defaults</h2>
+        <AgentDefaultsCard />
       </div>
 
       <div>
