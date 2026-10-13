@@ -448,6 +448,10 @@ class WorkerPool:
             "--input-format", "stream-json",
             "--replay-user-messages",
             "--dangerously-skip-permissions",
+            # Load no MCP servers: the Worker must not inherit the operator's
+            # global MCP toolbox or hooks (which can error on teardown and make
+            # the CLI exit non-zero). Built-in tools are unaffected.
+            "--strict-mcp-config",
             *(["--max-turns", str(max_turns)] if max_turns > 0 else []),
         ]
 
@@ -607,7 +611,16 @@ class WorkerPool:
 
         final_text = str((result_event or {}).get("result") or "") or None
         return_code = process.returncode or 0
-        if return_code != 0:
+        # A successful result decides the outcome even when the process then
+        # exits non-zero: Claude Code can exit 1 for reasons unrelated to the
+        # work (an MCP server or hook erroring on teardown, for example). Only
+        # when there is no usable result does the exit code become the failure.
+        result_ok = (
+            result_event is not None
+            and not result_event.get("is_error")
+            and result_event.get("subtype") == "success"
+        )
+        if return_code != 0 and not result_ok:
             stderr = ""
             if process.stderr:
                 stderr_bytes = await process.stderr.read()
@@ -615,6 +628,11 @@ class WorkerPool:
             error = f"Claude Code exited with code {return_code}"
             await recorder.finish(output_text=final_text, result_event=result_event, error=error)
             return {"status": "failed", "error": error, "stderr": stderr[:500]}
+        if return_code != 0:
+            logger.warning(
+                "worker %s: Claude exited %d but produced a successful result; judging the result",
+                worker_id, return_code,
+            )
 
         outcome = judge_result(result_event, work_dir=Path(work_dir), is_verify=is_verify)
         # A review that says "not passed" is still a successful run; only work
