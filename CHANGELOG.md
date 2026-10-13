@@ -16,6 +16,8 @@ To learn how to use these features, read the [usage guide](docs/fork/usage.md).
 
 ## [Unreleased]
 
+## [2.5.0] - 2026-10-13
+
 ### Changed
 
 - Every agent task belongs to exactly one project. A project has a name

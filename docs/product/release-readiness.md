@@ -619,12 +619,20 @@ Keep historical host lists tied to versioned evidence; use the
   optional budgets, and a dashboard role board. The fork's releases are
   recorded in [CHANGELOG.md](../../CHANGELOG.md).
 
-- `v2.1.0` prepared on 2026-10-07: fork release metadata and Developer Book
-  anchors advance to `2.1.0`. This release includes breaking state-path, host,
-  CLI and wire removals despite its minor version number; see
-  [CHANGELOG.md](../../CHANGELOG.md). Tag and GitHub release publication remain
-  pending the release owner's confirmation. This preparation entry does not
-  claim a published tag, updated stable ref, PyPI upload or hosted Pages deploy.
+- `v2.1.0` on 2026-10-07 15:27 -07:00: fork release at the matching `v2.1.0`
+  tag (`254aaafa6`). It includes breaking state-path, host, CLI and wire
+  removals despite its minor version number; see
+  [CHANGELOG.md](../../CHANGELOG.md). It claims no stable ref move, PyPI
+  upload or hosted Pages deploy.
+- `v2.5.0` prepared on 2026-10-13: fork release metadata and Developer Book
+  anchors advance to `2.5.0`. Versions 2.1.1 through 2.4.0 were tagged and
+  released only in `michaelx1993/loopx`, on commits that this release
+  includes, so the fork moves from `v2.1.0` to `v2.5.0`. `loopx serve` now
+  starts the three-tier agent system, which requires PostgreSQL; this and the
+  other breaking changes are listed in [CHANGELOG.md](../../CHANGELOG.md). Tag
+  and GitHub release publication remain pending the release owner's
+  confirmation. This preparation entry does not claim a published tag, updated
+  stable ref, PyPI upload or hosted Pages deploy.
 
 When a new public release is promoted, add it here only after the matching tag,
 release note, stable ref, update path, and focused release canary agree.
