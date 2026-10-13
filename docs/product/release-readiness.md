@@ -143,9 +143,10 @@ option is read-only and accepted only by `update check`.
 ## Named Version Contract
 
 LoopX releases are tagged in GitHub. Release publication is an explicit
-maintainer action; this fork does not publish to PyPI. `install.sh` and
-`loopx update apply` install the wheel attached to the latest GitHub release,
-so every release carries one, built from its tag:
+maintainer action; this fork does not automatically upload Python wheel/sdist artifacts or
+publish to PyPI. `install.sh` and `loopx update apply` install the wheel
+attached to the latest GitHub release, so the maintainer builds one from each
+tag and uploads it by hand:
 
 ```bash
 git worktree add ../loopx-vX.Y.Z vX.Y.Z && cd ../loopx-vX.Y.Z
