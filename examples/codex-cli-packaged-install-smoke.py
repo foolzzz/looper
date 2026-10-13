@@ -11,6 +11,10 @@ from pathlib import Path
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from loopx.install_contract import LOOPX_SOURCE_REPOSITORY, NO_CLONE_INSTALL_URL  # noqa: E402
 
 
 def add_tree(tar: tarfile.TarFile, root: Path, name: str) -> None:
@@ -94,7 +98,7 @@ def main() -> None:
         assert "ok: `True`" in doctor.stdout, doctor.stdout
         assert "## Install Freshness" in doctor.stdout, doctor.stdout
         assert "release_manifest_available: `True`" in doctor.stdout, doctor.stdout
-        assert "loopx-project.github.io/loopx/install.sh" in doctor.stdout, doctor.stdout
+        assert NO_CLONE_INSTALL_URL in doctor.stdout, doctor.stdout
         doctor_json = subprocess.run(
             [str(installed), "--format", "json", "doctor"],
             check=True,
@@ -110,7 +114,7 @@ def main() -> None:
         assert manifest["source"]["promotion_mode"] == "trusted_github_archive", manifest
         assert manifest["schema_version"] == "loopx_release_manifest_v0", manifest
         assert manifest["source"]["kind"] == "github_archive", manifest
-        assert manifest["source"]["repo"] == "loopx-project/loopx", manifest
+        assert manifest["source"]["repo"] == LOOPX_SOURCE_REPOSITORY, manifest
         assert manifest["source"]["ref"] == "stable", manifest
         assert manifest["source"]["archive_url"] == f"file://{archive}", manifest
         assert manifest["source"]["archive_sha256"], manifest
