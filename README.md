@@ -163,7 +163,10 @@ release wheel serves the copy packaged with it.
 | Variable | Required | Description |
 |---|---|---|
 | `LOOPX_DATABASE_URL` | Yes | PostgreSQL connection string |
-| `ANTHROPIC_API_KEY` | No | Only if the Claude CLI is not signed in |
+
+The `claude` processes inherit the server's environment, so the Claude CLI
+authenticates as it does in your shell: signed in, or with an API key as its
+own documentation describes.
 
 Channel credentials are also environment variables; the Settings page decides
 which ones (see [Channels](#channels)). Store secrets in `.env` (gitignored,
@@ -238,6 +241,12 @@ npx vite build
 # Run server (auto-applies schema)
 uv run loopx serve
 ```
+
+## Releases
+
+Each release's changes are in [CHANGELOG.md](CHANGELOG.md). Maintainers
+prepare a release with the checklist in
+[docs/product/release-readiness.md](docs/product/release-readiness.md).
 
 ## License
 
