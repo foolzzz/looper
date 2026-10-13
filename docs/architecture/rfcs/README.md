@@ -284,6 +284,17 @@ changes.
     the Goal Channel RFC, local service lifecycle with the daemon RFC, and
     continuation with the manager RFC. Optional preview hosts, session
     rotation, and host promotion remain unapproved.
+- [Long-Horizon Agent Context v0](long-horizon-agent-context-v0.zh-CN.md)
+  (中文 draft; English mirror after review)
+  - **RFC status:** Draft, under maintainer review.
+  - **Delivery on `main`:** Partial; the Manager and Planner already append a
+    role prompt plus a code-owned contract, while project background, the
+    Worker/Reviewer layering and system-prompt recording are in progress.
+  - **Current boundary:** Defines which layer (role prompt, project profile,
+    code contract, grounding state, event data) each piece of agent context
+    belongs to, the trust and isolation rules, and a phased plan for session
+    isolation, budgets, project knowledge and skills, and prompt regression
+    evaluation.
 - [Goal Channel Collaboration v0](goal-channel-collaboration-v0.md)
   ([中文版](goal-channel-collaboration-v0.zh-CN.md))
   - **RFC status:** Draft.
