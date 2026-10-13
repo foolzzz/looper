@@ -18,10 +18,10 @@ To learn how to use these features, read the [usage guide](docs/fork/usage.md).
 
 ## [2.5.0] - 2026-10-13
 
-Covers `v2.1.0` to `v2.5.0`: this fork's pull requests #106 to #179 and
-[michaelx1993/loopx](https://github.com/michaelx1993/loopx/pulls) pull
-requests #30 to #58. Versions 2.1.1 through 2.4.0 were tagged and released
-only in michaelx1993/loopx; their changes are listed here. Entries
+Covers `v2.1.0` to `v2.5.0`: this fork's merged pull requests from #106 to
+#179 and [michaelx1993/loopx](https://github.com/michaelx1993/loopx/pulls)
+pull requests #30 to #58. Versions 2.1.1 through 2.4.0 were tagged and
+released only in michaelx1993/loopx; their changes are listed here. Entries
 for that work link its pull requests.
 
 ### Added
