@@ -447,7 +447,8 @@ history only.
 
 [PLAN]: split the task into steps. Each step runs in its own Worker, a fresh
 Claude Code session with full tools in the working directory that sees only
-its step's instruction and acceptance criteria.
+its step's instruction and acceptance criteria, plus the project background
+you see when the project has one.
 ```json
 {{"steps": [{{"id": "s1", "instruction": "...", "acceptance_criteria": ["..."], "depends_on": [], "review": false}}]}}
 ```

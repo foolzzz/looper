@@ -267,8 +267,8 @@ def _flag(argv: list[str], name: str) -> str | None:
 @pytest.mark.usefixtures("agent_db")
 class TestPlanning:
     def test_steps_run_in_dependency_order(self, planner_claude: Any, agent_db: Any) -> None:
-        agent_db.get_project.return_value = {"id": "proj-1", "name": "calc", "description": "a tiny calculator",
-                                             "work_dir": "/srv/calc"}
+        agent_db.get_task_project.return_value = {"id": "proj-1", "name": "calc", "description": "a tiny calculator",
+                                                  "work_dir": "/srv/calc", "background": ""}
         claude = planner_claude(
             plan(step("s1"), step("s2"), step("s3", "s1", "s2")),
             decide("accept"), decide("accept"), decide("accept", summary="calc is built and tested"),
@@ -586,6 +586,133 @@ class TestResidentClaude:
         # Claude reports its process's running total; each turn records its own share.
         assert [f["cost_usd"] for f in finishes] == [0.25, 0.25]
         assert finishes[1]["output_text"].endswith("```")
+
+
+# --- The project background in the system prompt ---
+
+
+def _project(name: str = "calc", *, background: str = "", description: str = "") -> dict[str, Any]:
+    return {"id": "proj-1", "name": name, "description": description, "work_dir": "/srv/calc",
+            "background": background}
+
+
+@pytest.fixture
+def planner_row(monkeypatch: pytest.MonkeyPatch) -> str:
+    """The ``planner`` agent config row, with the role prompt it returns."""
+    from loopx.db import agent_configs
+
+    async def _config(agent_id: str) -> dict[str, Any]:
+        assert agent_id == "planner"
+        return {"system_prompt": "You plan carefully.", "timeout_seconds": 60, "model": None, "max_turns": 0}
+
+    monkeypatch.setattr(agent_configs, "get_config", _config)
+    return "You plan carefully."
+
+
+def _prompt(argv: list[str]) -> str:
+    prompt = _flag(argv, "--append-system-prompt")
+    assert prompt is not None
+    return prompt
+
+
+@pytest.mark.usefixtures("agent_db", "planner_row")
+class TestProjectBackground:
+    def test_system_prompt_has_the_background_before_the_reply_contract(
+        self, planner_claude: Any, agent_db: Any,
+    ) -> None:
+        agent_db.get_task_project.return_value = _project(background="Use uv.\nPython 3.12.")
+        claude = planner_claude(plan(step("s1")), decide("accept"))
+        drive(claude, always(WORK_OK))
+
+        (argv,) = claude.argvs()
+        prompt = _prompt(argv)
+        assert prompt == f"You plan carefully.\n\n## Project: calc\nUse uv.\nPython 3.12.\n\n{REPLY_CONTRACT}"
+        agent_db.get_task_project.assert_awaited_with("t1")  # the task's project as it is now
+        # Every turn records the system prompt it ran with.
+        starts = [call.kwargs for call in agent_db.start_record.await_args_list]
+        assert [s["metadata"]["system_prompt"] for s in starts] == [prompt, prompt]
+        assert [line for line in activity(agent_db) if "background" in line] == [
+            "Project background applied (20 chars)"]
+
+    def test_without_a_background_the_prompt_is_the_role_and_the_contract(
+        self, planner_claude: Any, agent_db: Any,
+    ) -> None:
+        agent_db.get_task_project.return_value = _project(background="")
+        claude = planner_claude(plan(step("s1")), decide("accept"))
+        drive(claude, always(WORK_OK))
+
+        (argv,) = claude.argvs()
+        assert _prompt(argv) == f"You plan carefully.\n\n{REPLY_CONTRACT}"
+        assert not [line for line in activity(agent_db) if "background" in line]
+
+    @pytest.mark.parametrize(("new_background", "note"), [
+        ("v2: use pnpm", "Project background changed (12 chars)"),
+        ("", "Project background removed"),
+    ])
+    def test_a_changed_background_restarts_claude_resuming_its_session(
+        self, planner_claude: Any, agent_db: Any, new_background: str, note: str,
+    ) -> None:
+        agent_db.get_task_project.return_value = _project(background="v1")
+        claude = planner_claude(plan(step("s1"), step("s2", "s1")), decide("accept"), decide("accept"))
+
+        async def scenario(h: Harness) -> None:
+            await h.start()
+            await h.until(lambda: h.held)  # s1's Worker runs; the plan turn used v1
+            agent_db.get_task_project.return_value = _project(background=new_background)
+            await h.release(WORK_OK)
+            await h.finished()
+
+        h = drive(claude, hold_first(), scenario)
+
+        assert h.final().payload["status"] == "completed"  # type: ignore[union-attr]
+        first, second = claude.argvs()
+        assert _prompt(first) == f"You plan carefully.\n\n## Project: calc\nv1\n\n{REPLY_CONTRACT}"
+        expected = f"## Project: calc\n{new_background}\n\n" if new_background else ""
+        assert _prompt(second) == f"You plan carefully.\n\n{expected}{REPLY_CONTRACT}"
+        assert _flag(first, "--resume") is None
+        assert _flag(second, "--resume") == "sess-p"
+        # The plan turn ran in the first process; both decisions in the restarted one.
+        first_pid, second_pid = claude.pids()
+        assert [turn["pid"] for turn in claude.turns()] == [first_pid, second_pid, second_pid]
+        notes = [line for line in activity(agent_db) if line.startswith("Project background")]
+        assert notes == ["Project background applied (2 chars)", note]
+
+    def test_each_turn_reads_the_project_as_it_is_now(self, planner_claude: Any, agent_db: Any) -> None:
+        agent_db.get_task_project.return_value = _project("calc", description="a calculator")
+        claude = planner_claude(plan(step("s1")), decide("accept"))
+
+        async def scenario(h: Harness) -> None:
+            await h.start()
+            await h.until(lambda: h.held)
+            # The task moved to another project while its Worker ran.
+            agent_db.get_task_project.return_value = _project("tools", description="handy tools")
+            await h.release(WORK_OK)
+            await h.finished()
+
+        drive(claude, hold_first(), scenario)
+
+        plan_turn, decision_turn = (turn["text"] for turn in claude.turns())
+        assert "Project: calc: a calculator" in plan_turn
+        assert "Project: tools: handy tools" in decision_turn
+        assert "a calculator" not in decision_turn
+
+    def test_a_failed_read_keeps_the_last_project_and_its_claude(self, planner_claude: Any, agent_db: Any) -> None:
+        agent_db.get_task_project.return_value = _project(background="v1", description="a calculator")
+        claude = planner_claude(plan(step("s1")), decide("accept"))
+
+        async def scenario(h: Harness) -> None:
+            await h.start()
+            await h.until(lambda: h.held)
+            agent_db.get_task_project.side_effect = ConnectionError("database is down")
+            await h.release(WORK_OK)
+            await h.finished()
+
+        h = drive(claude, hold_first(), scenario)
+
+        assert h.final().payload["status"] == "completed"  # type: ignore[union-attr]
+        (argv,) = claude.argvs()  # the system prompt did not change, so Claude was not restarted
+        assert "## Project: calc\nv1\n\n" in _prompt(argv)
+        assert "Project: calc: a calculator" in claude.turns()[1]["text"]
 
 
 # --- Ending the task through the TaskRouter ---

@@ -15,7 +15,7 @@ import pytest
 
 from loopx.agents.bus import MessageBus
 from loopx.agents.message import MANAGER_ADDRESS, MessageEnvelope, MessageType, channel_address
-from loopx.agents.tiers.manager import ManagerAgent, ManagerConfig
+from loopx.agents.tiers.manager import TASK_PLACEMENT_RULE, ManagerAgent, ManagerConfig
 
 WEB = channel_address("web")
 
@@ -98,7 +98,12 @@ class TestManagerReply:
         )
         start = agent_db.start_record.await_args.kwargs
         assert start["agent_id"] == "manager" and start["input_text"] == "hello"
-        assert "--append-system-prompt" in start["metadata"]["command"]
+        command = start["metadata"]["command"]
+        assert "--append-system-prompt" in command
+        # The Manager keeps its own composition (no project background), and records it.
+        system_prompt = start["metadata"]["system_prompt"]
+        assert system_prompt == command[command.index("--append-system-prompt") + 1]
+        assert system_prompt.endswith(TASK_PLACEMENT_RULE)
         finish = agent_db.finish_record.await_args.kwargs
         assert (finish["status"], finish["output_text"], finish["model"], finish["session_id"]) == (
             "completed", "hi", "claude-x", "s-9")

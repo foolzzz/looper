@@ -3,6 +3,10 @@
 Each Worker runs as a subprocess (Claude Code or Codex) with limited
 permissions. The WorkerPool manages lifecycle, concurrency, and result
 collection, reporting back to the Planner via the Bus.
+
+A Worker's or Reviewer's system prompt is the ``worker`` role prompt, the
+task's project background and the code-owned report contract, last
+(``system_prompt``); the step itself is the first user turn on stdin.
 """
 
 from __future__ import annotations
@@ -24,31 +28,70 @@ from ..message import (
     MessageType,
     worker_address,
 )
+from ..system_prompt import REVIEW_CONTRACT, WORK_CONTRACT, compose_system_prompt
 
 from ...db import activity as db_activity
 from ...db import agent_configs as db_agent_configs
+from ...db import projects as db_projects
 
 logger = logging.getLogger(__name__)
 
 MAX_POOL_SIZE = 4
 DEFAULT_RUN_TIMEOUT_SEC = 86400
 
+# The worker role prompt, for Workers and Reviewers alike, when the ``worker``
+# config row has none; serve seeds it as the row's recommended prompt. It
+# describes the role only: the report formats are the code-owned contracts
+# that follow it in the system prompt.
+DEFAULT_SYSTEM_PROMPT = """\
+You are a Worker in LoopX, a system of Claude Code agents that carries out a
+user's task. A Planner splits the task into steps and decides what happens
+after each result. Each step runs in a fresh Claude Code session like this
+one: you either carry out one step or review one.
 
-async def _load_run_limits() -> tuple[int, int]:
-    """Return the ``worker`` agent config's time limit (seconds) and max turns.
+- Stay within what you are asked; do not change things beyond it.
+- Check by running things where you can, rather than assuming they work.
+- Say plainly what you could not do or could not check.
+"""
 
-    Read for every run, so a dashboard edit applies to the next step. Both
-    are 0 for no limit. Without a readable row a run may take 86400 s and has
-    no turn limit.
+
+@dataclass(frozen=True)
+class WorkerSettings:
+    """The ``worker`` agent config, read for every run."""
+
+    timeout_seconds: int  # 0 for no limit
+    max_turns: int  # 0 for no limit
+    system_prompt: str  # the worker role prompt
+
+
+async def _load_settings() -> WorkerSettings:
+    """Read the ``worker`` agent config for one run, so a dashboard edit applies to the next step.
+
+    Without a readable row a run may take 86400 s, has no turn limit and uses
+    the default role prompt; an empty role prompt also falls back to it.
     """
     try:
         config = await db_agent_configs.get_config("worker")
     except Exception:
         logger.warning("cannot read the worker agent config; using defaults", exc_info=True)
         config = None
+    default_prompt = DEFAULT_SYSTEM_PROMPT.strip()
     if config is None:
-        return DEFAULT_RUN_TIMEOUT_SEC, 0
-    return int(config.get("timeout_seconds") or 0), int(config.get("max_turns") or 0)
+        return WorkerSettings(DEFAULT_RUN_TIMEOUT_SEC, 0, default_prompt)
+    return WorkerSettings(
+        timeout_seconds=int(config.get("timeout_seconds") or 0),
+        max_turns=int(config.get("max_turns") or 0),
+        system_prompt=str(config.get("system_prompt") or "").strip() or default_prompt,
+    )
+
+
+def _display_command(command: list[str]) -> str:
+    """The command for the activity timeline, with the appended system prompt shown by its size."""
+    shown = list(command)
+    if "--append-system-prompt" in shown:
+        at = shown.index("--append-system-prompt") + 1
+        shown[at] = f"<{len(shown[at])} chars>"
+    return " ".join(shown)
 
 
 def extract_report(text: str, key: str) -> dict[str, Any] | None:
@@ -435,7 +478,19 @@ class WorkerPool:
         else:
             prompt = self._build_work_prompt(payload)
 
-        run_timeout, max_turns = await _load_run_limits()
+        settings = await _load_settings()
+        run_timeout, max_turns = settings.timeout_seconds, settings.max_turns
+        # Read as the run starts: a later change reaches the next run, not this one.
+        project_name, background = await self._task_project(parent_task_id, worker_id)
+        system_prompt = compose_system_prompt(
+            settings.system_prompt,
+            project_name=project_name,
+            background=background,
+            contract=REVIEW_CONTRACT if is_verify else WORK_CONTRACT,
+        )
+        if background.strip() and parent_task_id:
+            await self._activity(parent_task_id, worker_id, "phase",
+                                 f"Project background applied ({len(background)} chars)")
         command = [
             self._config.claude_bin,
             "--print",
@@ -452,11 +507,12 @@ class WorkerPool:
             # global MCP toolbox or hooks (which can error on teardown and make
             # the CLI exit non-zero). Built-in tools are unaffected.
             "--strict-mcp-config",
+            "--append-system-prompt", system_prompt,
             *(["--max-turns", str(max_turns)] if max_turns > 0 else []),
         ]
 
         if parent_task_id:
-            cmd_display = " ".join(command) + f"  (prompt on stdin, {len(prompt)} chars)"
+            cmd_display = _display_command(command) + f"  (prompt on stdin, {len(prompt)} chars)"
             try:
                 await db_activity.insert_activity(
                     task_id=parent_task_id,
@@ -475,6 +531,7 @@ class WorkerPool:
             cwd=work_dir,
             input_text=prompt,
             step_id=payload.get("task_id") or None,
+            system_prompt=system_prompt,
         )
         await recorder.start()
 
@@ -642,15 +699,15 @@ class WorkerPool:
         return outcome
 
     def _build_work_prompt(self, payload: dict[str, Any]) -> str:
-        instruction = payload.get("instruction", "")
+        """The step, the run's first user turn; the role and the report contract are the system prompt."""
         target_files = payload.get("target_files", [])
         validation_cmds = payload.get("validation_commands", [])
         acceptance = payload.get("acceptance_criteria", [])
+        work_dir = (payload.get("context") or {}).get("work_dir")
 
-        parts = [
-            "You are a Worker Agent executing a specific task.",
-            f"Task: {instruction}",
-        ]
+        parts = [f"Task: {payload.get('instruction', '')}"]
+        if work_dir:
+            parts.append(f"Working directory: {work_dir}")
         if target_files:
             parts.append(f"Target files: {', '.join(target_files)}")
         if acceptance:
@@ -658,40 +715,67 @@ class WorkerPool:
             for c in acceptance:
                 parts.append(f"  - {c}")
         if validation_cmds:
-            parts.append("After making changes, run these validation commands:")
+            parts.append("Validation commands, to run after making changes:")
             for cmd in validation_cmds:
                 parts.append(f"  $ {cmd}")
-        parts.extend([
-            "",
-            "Execute the task. End your final message with exactly one JSON object:",
-            '{"status": "completed", "changed_files": {"path": "description"}, '
-            '"deleted_files": ["path"], "summary": "..."}',
-            'Use "status": "failed" if any part of the task was not done. List every '
-            "file you created or modified in changed_files and every file you deleted "
-            "in deleted_files, with paths relative to the working directory. The "
-            "report is checked against the files on disk.",
-        ])
         return "\n".join(parts)
 
     def _build_verify_prompt(self, payload: dict[str, Any]) -> str:
-        work_result = payload.get("work_result", {})
-        acceptance = payload.get("acceptance_criteria", [])
-        changed = work_result.get("changed_files", {})
+        """The step and the Worker's report under review, the run's first user turn.
 
-        parts = ["You are a Reviewer Worker verifying completed work."]
+        The report is the Worker's own output, so it stays here as data to
+        check; the review contract is the system prompt.
+        """
+        work_result = payload.get("work_result") or {}
+        acceptance = payload.get("acceptance_criteria", [])
+        work_dir = (payload.get("context") or {}).get("work_dir")
+
+        parts = []
         if payload.get("instruction"):
             parts.append(f"The step's instruction: {payload['instruction']}")
-        parts.append(f"Files changed: {json.dumps(changed, ensure_ascii=False)}")
+        if work_dir:
+            parts.append(f"Working directory: {work_dir}")
         if acceptance:
             parts.append("Acceptance criteria to verify:")
             for c in acceptance:
                 parts.append(f"  - {c}")
-        parts.extend([
-            "",
-            "Review the changes. End your final message with exactly one JSON object:",
-            '{"passed": true/false, "findings": ["issue1", ...], "summary": "..."}',
-        ])
+        parts += ["", "The Worker's report, to check:"]
+        if work_result.get("summary"):
+            parts.append(f"Summary: {work_result['summary']}")
+        parts.append(f"Files changed: {json.dumps(work_result.get('changed_files', {}), ensure_ascii=False)}")
+        if work_result.get("deleted_files"):
+            parts.append(f"Files deleted: {json.dumps(work_result['deleted_files'], ensure_ascii=False)}")
         return "\n".join(parts)
+
+    async def _task_project(self, task_id: str, worker_id: str) -> tuple[str, str]:
+        """The task's project name and background, read now; ``("", "")`` without one.
+
+        The background is guidance, so a run whose project cannot be read
+        goes on without it, and the task's activity says so.
+        """
+        if not task_id:
+            return "", ""
+        try:
+            project = await db_projects.get_task_project(task_id)
+        except Exception as exc:
+            logger.warning("worker %s cannot read the project of task %s", worker_id, task_id, exc_info=True)
+            problem = f"{type(exc).__name__}: {exc}"
+        else:
+            if project is not None:
+                return str(project.get("name") or ""), str(project.get("background") or "")
+            problem = "the task's project was not found"
+        await self._activity(
+            task_id, worker_id, "error",
+            f"Warning: the project background was unavailable ({problem}); this run goes on without it"[:500],
+        )
+        return "", ""
+
+    @staticmethod
+    async def _activity(task_id: str, worker_id: str, kind: str, summary: str) -> None:
+        try:
+            await db_activity.insert_activity(task_id=task_id, worker=worker_id, kind=kind, summary=summary)
+        except Exception:
+            logger.debug("failed to insert %s activity", kind, exc_info=True)
 
     @staticmethod
     def _format_tool_summary(tool_name: str, tool_input: dict[str, Any]) -> str:

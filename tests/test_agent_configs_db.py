@@ -131,3 +131,51 @@ def test_default_prompt_tracks_recommendation_and_reset() -> None:
             await pool.close()
 
     asyncio.run(_run())
+
+
+def test_worker_rows_move_to_the_new_recommended_prompt() -> None:
+    """The worker prompt now applies, so its old default moves to the new one:
+    a tracked row through seed, a row from before tracking through the
+    startup replacement; an edited row is kept."""
+    import asyncpg
+
+    from loopx.agents.serve import _WORKER_PROMPT_BEFORE_CONTRACTS
+    from loopx.agents.tiers.worker import DEFAULT_SYSTEM_PROMPT
+    from loopx.db import agent_configs
+    from loopx.db.connection import ensure_schema
+
+    tracked, untracked, edited = (f"test-worker-{uuid.uuid4().hex[:8]}" for _ in range(3))
+    old, new = _WORKER_PROMPT_BEFORE_CONTRACTS, DEFAULT_SYSTEM_PROMPT
+
+    async def _run() -> None:
+        pool = await asyncpg.create_pool(DSN, min_size=1, max_size=2)
+        try:
+            await ensure_schema(pool)
+            await agent_configs.seed_defaults([
+                {"agent_id": tracked, "role": "worker", "system_prompt": old},
+                {"agent_id": edited, "role": "worker", "system_prompt": old},
+            ], pool=pool)
+            await agent_configs.set_config(edited, {"system_prompt": "My own worker prompt."}, pool=pool)
+            # A row seeded before the recommended prompt was tracked.
+            await pool.execute(
+                "INSERT INTO agent_configs (agent_id, role, system_prompt) VALUES ($1, 'worker', $2)", untracked, old,
+            )
+
+            # What startup does: seed the new recommendation, then replace the old default.
+            await agent_configs.seed_defaults(
+                [{"agent_id": a, "role": "worker", "system_prompt": new} for a in (tracked, untracked, edited)],
+                pool=pool,
+            )
+            for agent_id in (tracked, untracked, edited):
+                await agent_configs.replace_default_prompt(agent_id, old=old, new=new, pool=pool)
+
+            for agent_id, expected in ((tracked, new), (untracked, new), (edited, "My own worker prompt.")):
+                row = await agent_configs.get_config(agent_id, pool=pool)
+                assert (row["system_prompt"], row["default_prompt"]) == (expected, new)
+        finally:
+            await pool.execute(
+                "DELETE FROM agent_configs WHERE agent_id = ANY($1::text[])", [tracked, untracked, edited],
+            )
+            await pool.close()
+
+    asyncio.run(_run())

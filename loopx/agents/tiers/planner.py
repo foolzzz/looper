@@ -15,7 +15,9 @@ plan; Workers make the changes). Each event is one user turn on it:
   running Worker or add steps.
 
 Every reply ends with JSON that ``planner_protocol`` validates; code then
-does the dispatching. An invalid reply gets one repair turn. Planning that
+does the dispatching. The system prompt is rebuilt for every turn from the
+``planner`` config and the task's project as it is now (its background
+included); when it changes, Claude restarts and resumes its session. An invalid reply gets one repair turn. Planning that
 still fails fails the task; a decision that still fails falls back to the
 step's own verdict. When the task completes or fails, the Planner signals the
 TaskRouter, which tears it down and ends its Claude.
@@ -35,6 +37,7 @@ from typing import Any, TypeVar
 
 from ..bus import MessageBus
 from ..claude_cli import ClaudeRunRecorder, ResidentClaude
+from ..system_prompt import compose_system_prompt
 from ..message import (
     TASK_ROUTER_ADDRESS,
     AgentAddress,
@@ -185,8 +188,10 @@ class TaskPlan:
     correlation_id: str = ""
     origin_channel_id: str = ""
     project_id: str = ""
+    # The task's project as last read; refreshed before every event's turns.
     project_name: str = ""
     project_description: str = ""
+    project_background: str = ""
     session_id: str | None = None  # the Planner's Claude session, resumed after a restart
     final_summary: str = ""  # the last accepted step's summary
     fail_reason: str = ""
@@ -252,6 +257,7 @@ class TaskPlan:
             "project_id": self.project_id,
             "project_name": self.project_name,
             "project_description": self.project_description,
+            "project_background": self.project_background,
             "session_id": self.session_id,
             "final_summary": self.final_summary,
             "fail_reason": self.fail_reason,
@@ -311,6 +317,8 @@ class PlannerAgent:
         # When the last turn ended, so a periodic SUPERVISE is skipped right
         # after a result/chat/plan turn already looked at the plan.
         self._last_turn_at = 0.0
+        # The project background the last turn's system prompt carried (None before the first turn).
+        self._prompt_background: str | None = None
 
     @property
     def agent_id(self) -> str:
@@ -374,6 +382,10 @@ class PlannerAgent:
             pass
 
     async def _handle(self, envelope: MessageEnvelope) -> None:
+        if self._plan is not None and envelope.message_type is not MessageType.TASK_REQUEST:
+            # Turns this event runs see the project as it is now, in their
+            # message and in the system prompt (a new plan reads it itself).
+            await self._refresh_project(self._plan)
         match envelope.message_type:
             case MessageType.TASK_REQUEST:
                 await self._plan_and_dispatch(envelope)
@@ -405,7 +417,7 @@ class PlannerAgent:
             origin_channel_id=envelope.metadata.get("origin_channel_id", ""),
             project_id=payload.get("project_id", "") or "",
         )
-        await self._load_project(plan)
+        await self._refresh_project(plan)
         self._plan = plan
         # A new plan is a new conversation.
         async with self._turn_lock:
@@ -976,10 +988,18 @@ class PlannerAgent:
         plan = self._plan
         assert plan is not None
         settings = await load_settings()
-        base = self._claude_command(f"{settings.system_prompt}\n\n{REPLY_CONTRACT}", settings)
+        system_prompt = compose_system_prompt(
+            settings.system_prompt,
+            project_name=plan.project_name,
+            background=plan.project_background,
+            contract=REPLY_CONTRACT,
+        )
+        await self._note_background(plan.project_background)
+        base = self._claude_command(system_prompt, settings)
         signature = tuple(base)
         if self._claude.stale(signature):
-            # Claude exited, or the config changed: the next process resumes the session.
+            # Claude exited, or the config or the project background changed:
+            # the next process resumes the session.
             await self._claude.stop()
         start_error: str | None = None
         if self._claude.started:
@@ -1002,6 +1022,7 @@ class PlannerAgent:
             input_text=message,
             session_id=plan.session_id,
             pid=self._claude.pid,
+            system_prompt=system_prompt,
         )
         await recorder.start()
         if start_error:
@@ -1297,17 +1318,38 @@ class PlannerAgent:
         except Exception:
             logger.exception("failed to record planner activity for task %s", self._task_id)
 
-    async def _load_project(self, plan: TaskPlan) -> None:
-        if not plan.project_id:
-            return
+    async def _refresh_project(self, plan: TaskPlan) -> None:
+        """Read the task's project as it is now (the task may have moved).
+
+        A failed read keeps what the plan last saw: the background is
+        guidance, so the task goes on without the newest one.
+        """
         try:
-            project = await db_projects.get_project(plan.project_id)
+            project = await db_projects.get_task_project(self._task_id)
         except Exception:
-            logger.warning("planner %s cannot read project %s", self.agent_id, plan.project_id, exc_info=True)
+            logger.warning("planner %s cannot read its task's project; keeping the last one read",
+                           self.agent_id, exc_info=True)
             return
-        if project:
-            plan.project_name = str(project.get("name") or "")
-            plan.project_description = str(project.get("description") or "")
+        if project is None:
+            logger.warning("planner %s: task %s has no project to read; keeping the last one read",
+                           self.agent_id, self._task_id)
+            return
+        plan.project_id = str(project.get("id") or plan.project_id)
+        plan.project_name = str(project.get("name") or "")
+        plan.project_description = str(project.get("description") or "")
+        plan.project_background = str(project.get("background") or "")
+
+    async def _note_background(self, background: str) -> None:
+        """Note in the task's activity when the system prompt starts carrying, changes or drops the background."""
+        previous, self._prompt_background = self._prompt_background, background
+        if background == (previous or ""):
+            return
+        if not background:
+            await self._activity("phase", "Project background removed")
+        elif previous:
+            await self._activity("phase", f"Project background changed ({len(background)} chars)")
+        else:
+            await self._activity("phase", f"Project background applied ({len(background)} chars)")
 
     async def _persist_steps(self, steps: list[PlanStep]) -> None:
         if not steps:
@@ -1358,6 +1400,7 @@ class PlannerAgent:
                         project_id=data.get("project_id", ""),
                         project_name=data.get("project_name", ""),
                         project_description=data.get("project_description", ""),
+                        project_background=data.get("project_background", ""),
                         session_id=data.get("session_id"),
                         final_summary=data.get("final_summary", ""),
                         fail_reason=data.get("fail_reason", ""),
