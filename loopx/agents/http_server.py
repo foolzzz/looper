@@ -18,7 +18,7 @@ from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
-from . import projects
+from . import projects, request_guard
 from .broadcast import Broadcaster
 from .chat_targets import ChatTargetError, list_chat_targets, resolve_chat_target
 from .channels.web import WebChannelAdapter
@@ -43,6 +43,7 @@ def _serialize(obj: Any) -> Any:
 HTTP_200 = "200 OK"
 HTTP_201 = "201 Created"
 HTTP_400 = "400 Bad Request"
+HTTP_403 = "403 Forbidden"
 HTTP_404 = "404 Not Found"
 HTTP_405 = "405 Method Not Allowed"
 HTTP_500 = "500 Internal Server Error"
@@ -54,23 +55,14 @@ def _json_response(status: str, body: Any) -> bytes:
         f"HTTP/1.1 {status}\r\n"
         f"Content-Type: application/json; charset=utf-8\r\n"
         f"Content-Length: {len(payload)}\r\n"
-        f"Access-Control-Allow-Origin: *\r\n"
-        f"Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS\r\n"
-        f"Access-Control-Allow-Headers: Content-Type\r\n"
         f"\r\n"
     )
     return headers.encode("utf-8") + payload
 
 
-def _cors_preflight() -> bytes:
-    return (
-        "HTTP/1.1 204 No Content\r\n"
-        "Access-Control-Allow-Origin: *\r\n"
-        "Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS\r\n"
-        "Access-Control-Allow-Headers: Content-Type\r\n"
-        "Access-Control-Max-Age: 86400\r\n"
-        "\r\n"
-    ).encode("utf-8")
+def _no_content() -> bytes:
+    # Same-origin requests never preflight, so an allowed OPTIONS gets no CORS headers.
+    return b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n"
 
 
 class AgentHTTPServer:
@@ -142,8 +134,16 @@ class AgentHTTPServer:
             path = parsed.path
             query = dict(urllib.parse.parse_qsl(parsed.query))
 
+            refused = request_guard.refusal(headers, bind_host=self._host)
+            if refused:
+                logger.warning("refused %s %s: %s", method, path, refused)
+                writer.write(_json_response(HTTP_403, {"error": refused}))
+                await writer.drain()
+                writer.close()
+                return
+
             if method == "OPTIONS":
-                writer.write(_cors_preflight())
+                writer.write(_no_content())
                 await writer.drain()
                 writer.close()
                 return
@@ -477,7 +477,6 @@ class AgentHTTPServer:
             "Content-Type: text/event-stream\r\n"
             "Cache-Control: no-cache\r\n"
             "Connection: keep-alive\r\n"
-            "Access-Control-Allow-Origin: *\r\n"
             "\r\n"
         )
         writer.write(sse_headers.encode("utf-8"))
@@ -770,7 +769,6 @@ class AgentHTTPServer:
             "Content-Type: text/event-stream\r\n"
             "Cache-Control: no-cache\r\n"
             "Connection: keep-alive\r\n"
-            "Access-Control-Allow-Origin: *\r\n"
             "X-Accel-Buffering: no\r\n"
             "\r\n"
         )
@@ -1128,7 +1126,6 @@ class AgentHTTPServer:
             f"Content-Type: {content_type}\r\n"
             f"Content-Length: {len(data)}\r\n"
             f"Cache-Control: public, max-age=3600\r\n"
-            f"Access-Control-Allow-Origin: *\r\n"
             f"\r\n"
         )
         writer.write(headers.encode("utf-8") + data)
