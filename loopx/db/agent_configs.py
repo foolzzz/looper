@@ -112,6 +112,27 @@ async def replace_default_prompt(
     return result == "UPDATE 1"
 
 
+async def reset_prompt(
+    agent_id: str,
+    *,
+    pool: asyncpg.Pool | None = None,
+) -> dict[str, Any] | None:
+    """Reset an agent's system prompt to the system-recommended ``default_prompt``.
+
+    Returns the updated config, or ``None`` when there is no such agent (or it
+    has no recommended prompt to reset to).
+    """
+    pool = pool or get_pool()
+    result = await pool.execute(
+        "UPDATE agent_configs SET system_prompt = default_prompt, updated_at = now() "
+        "WHERE agent_id = $1 AND default_prompt <> ''",
+        agent_id,
+    )
+    if result != "UPDATE 1":
+        return None
+    return await get_config(agent_id, pool=pool)
+
+
 async def seed_defaults(
     defaults: list[dict[str, Any]],
     *,
@@ -134,12 +155,19 @@ async def seed_defaults(
         await pool.execute(
             """
             INSERT INTO agent_configs
-                (agent_id, display_name, role, runtime, system_prompt, model,
+                (agent_id, display_name, role, runtime, system_prompt, default_prompt, model,
                  max_turns, timeout_seconds, max_concurrency, permission_mode)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+            VALUES ($1, $2, $3, $4, $5, $5, $6, $7, $8, $9, $10)
             ON CONFLICT (agent_id) DO UPDATE SET
                 display_name = CASE WHEN agent_configs.display_name = '' THEN EXCLUDED.display_name ELSE agent_configs.display_name END,
-                system_prompt = CASE WHEN agent_configs.system_prompt = '' THEN EXCLUDED.system_prompt ELSE agent_configs.system_prompt END,
+                -- An unedited row (its prompt still equals the recommended one) follows
+                -- the new recommendation; an edited row keeps the user's prompt. An empty
+                -- prompt is always (re)seeded.
+                system_prompt = CASE
+                    WHEN agent_configs.system_prompt = '' THEN EXCLUDED.system_prompt
+                    WHEN agent_configs.system_prompt = agent_configs.default_prompt THEN EXCLUDED.system_prompt
+                    ELSE agent_configs.system_prompt END,
+                default_prompt = EXCLUDED.default_prompt,
                 runtime = CASE WHEN agent_configs.runtime = 'claude-code' AND EXCLUDED.runtime != 'claude-code' THEN EXCLUDED.runtime ELSE agent_configs.runtime END
             """,
             agent_id,

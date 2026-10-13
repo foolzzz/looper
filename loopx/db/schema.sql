@@ -104,6 +104,10 @@ CREATE TABLE IF NOT EXISTS agent_configs (
     created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at       TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+-- The system-recommended prompt for this agent. seed keeps it current; an
+-- unedited row (system_prompt = default_prompt) follows it, an edited row does
+-- not, and "reset to recommended" copies it back into system_prompt.
+ALTER TABLE agent_configs ADD COLUMN IF NOT EXISTS default_prompt TEXT NOT NULL DEFAULT '';
 
 -- One-time data migrations; schema.sql itself runs on every startup.
 CREATE TABLE IF NOT EXISTS schema_migrations (

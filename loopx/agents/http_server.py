@@ -199,6 +199,7 @@ class AgentHTTPServer:
     _RE_TASK_ACTIVITY_SEQ = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)/activity/(\d+)$")
     _RE_TASK_CONVERSATION = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)/conversation$")
     _RE_AGENT_CONFIG = re.compile(r"^/api/agent-configs/([a-zA-Z0-9_-]+)$")
+    _RE_AGENT_CONFIG_RESET = re.compile(r"^/api/agent-configs/([a-zA-Z0-9_-]+)/reset-prompt$")
     _RE_LLM_PROFILE = re.compile(r"^/api/llm-profiles/(\d+)$")
     _RE_LLM_RECORD = re.compile(r"^/api/llm-records/(\d+)$")
     _RE_LLM_RECORD_EVENTS = re.compile(r"^/api/llm-records/(\d+)/events$")
@@ -267,6 +268,8 @@ class AgentHTTPServer:
             await self._handle_list_agent_configs(writer)
         elif (m := self._RE_AGENT_CONFIG.match(path)) and method == "GET":
             await self._handle_get_agent_config(m.group(1), writer)
+        elif (m := self._RE_AGENT_CONFIG_RESET.match(path)) and method == "POST":
+            await self._handle_reset_agent_prompt(m.group(1), writer)
         elif (m := self._RE_AGENT_CONFIG.match(path)) and method == "PUT":
             await self._handle_update_agent_config(m.group(1), body, writer)
         elif path == "/api/llm-records" and method == "GET":
@@ -887,6 +890,26 @@ class AgentHTTPServer:
 
         if updated is None:
             writer.write(_json_response(HTTP_404, {"error": f"agent '{agent_id}' not found"}))
+        else:
+            writer.write(_json_response(HTTP_200, updated))
+        await writer.drain()
+
+    async def _handle_reset_agent_prompt(
+        self, agent_id: str, writer: asyncio.StreamWriter,
+    ) -> None:
+        """Reset an agent's system prompt to the system-recommended default."""
+        try:
+            from ..db.agent_configs import reset_prompt
+            updated = await reset_prompt(agent_id)
+        except Exception as exc:
+            writer.write(_json_response(HTTP_500, {"error": str(exc)}))
+            await writer.drain()
+            return
+
+        if updated is None:
+            writer.write(_json_response(
+                HTTP_404, {"error": f"agent '{agent_id}' has no recommended prompt to reset to"},
+            ))
         else:
             writer.write(_json_response(HTTP_200, updated))
         await writer.drain()
