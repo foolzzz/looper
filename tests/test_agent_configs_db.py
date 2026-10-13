@@ -50,3 +50,38 @@ def test_only_the_old_default_prompt_is_replaced() -> None:
             await pool.close()
 
     asyncio.run(_run())
+
+
+def test_only_the_old_default_manager_prompt_is_replaced() -> None:
+    import asyncpg
+
+    from loopx.agents.serve import _MANAGER_PROMPT_BEFORE_PROJECTS
+    from loopx.agents.tiers.manager import DEFAULT_SYSTEM_PROMPT
+    from loopx.db import agent_configs
+    from loopx.db.connection import ensure_schema
+
+    stale, edited = f"test-manager-{uuid.uuid4().hex[:8]}", f"test-manager-{uuid.uuid4().hex[:8]}"
+
+    async def _run() -> None:
+        pool = await asyncpg.create_pool(DSN, min_size=1, max_size=2)
+        try:
+            await ensure_schema(pool)
+            await agent_configs.seed_defaults([
+                {"agent_id": stale, "role": "manager", "system_prompt": _MANAGER_PROMPT_BEFORE_PROJECTS},
+                {"agent_id": edited, "role": "manager", "system_prompt": "My own manager prompt."},
+            ], pool=pool)
+
+            for agent_id in (stale, edited):
+                await agent_configs.replace_default_prompt(
+                    agent_id, old=_MANAGER_PROMPT_BEFORE_PROJECTS, new=DEFAULT_SYSTEM_PROMPT, pool=pool,
+                )
+            assert (await agent_configs.get_config(stale, pool=pool))["system_prompt"] == DEFAULT_SYSTEM_PROMPT
+            assert (await agent_configs.get_config(edited, pool=pool))["system_prompt"] == "My own manager prompt."
+            assert not await agent_configs.replace_default_prompt(
+                stale, old=_MANAGER_PROMPT_BEFORE_PROJECTS, new=DEFAULT_SYSTEM_PROMPT, pool=pool,
+            )
+        finally:
+            await pool.execute("DELETE FROM agent_configs WHERE agent_id = ANY($1::text[])", [stale, edited])
+            await pool.close()
+
+    asyncio.run(_run())
