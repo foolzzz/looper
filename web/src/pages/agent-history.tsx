@@ -11,6 +11,7 @@ import {
   Loader2,
   MessageSquare,
   Plug,
+  ScrollText,
   Terminal,
   User,
   Wrench,
@@ -163,6 +164,8 @@ function LaunchCommand({ record }: { record: LlmRecord }) {
         {command.map((arg, i) => {
           const long = arg.length > LONG_ARG;
           const shown = long && !expanded.has(i);
+          // The appended system prompt also has its own section below.
+          const systemPrompt = command[i - 1] === "--append-system-prompt";
           return (
             <span key={i}>
               {i > 0 && " "}
@@ -173,7 +176,7 @@ function LaunchCommand({ record }: { record: LlmRecord }) {
                   className="rounded bg-primary/10 px-1 text-primary hover:bg-primary/20"
                   title="Show the full argument"
                 >
-                  {"<"}{arg.length} chars{">"}
+                  {"<"}{arg.length} chars{systemPrompt ? ", see System prompt" : ""}{">"}
                 </button>
               ) : long ? (
                 <span className="whitespace-pre-wrap">{shellQuote(arg)}</span>
@@ -185,6 +188,27 @@ function LaunchCommand({ record }: { record: LlmRecord }) {
         })}
       </p>
     </div>
+  );
+}
+
+/** The value after ``flag`` in an argv, if any. */
+function argAfter(command: string[], flag: string) {
+  const at = command.indexOf(flag);
+  return at >= 0 && at + 1 < command.length ? command[at + 1] : undefined;
+}
+
+/** What LoopX appended to Claude Code's system prompt for this run. */
+function SystemPrompt({ record }: { record: LlmRecord }) {
+  // Runs recorded before metadata.system_prompt existed may still carry it in their command.
+  const text = record.metadata?.system_prompt ?? argAfter(record.metadata?.command ?? [], "--append-system-prompt");
+  if (text == null) return null;
+  return (
+    <Collapsible icon={<ScrollText className="h-3 w-3" />} title={`System prompt · ${text.length} chars · appended by LoopX`}>
+      <p className="mb-2 text-[11px] text-muted-foreground">
+        The part LoopX appends with --append-system-prompt. Claude Code&apos;s built-in system prompt is not included.
+      </p>
+      <Pre text={text} />
+    </Collapsible>
   );
 }
 
@@ -538,6 +562,7 @@ export function RunCard({ initial, defaultOpen }: { initial: LlmRecord; defaultO
         <div className="space-y-3 border-t border-border px-4 py-3">
           {record.error && <p className="text-xs text-destructive">Error: {record.error}</p>}
           <LaunchCommand record={record} />
+          <SystemPrompt record={record} />
           {record.input_text && (
             <Collapsible icon={<User className="h-3 w-3" />} title={`Input · ${record.input_text.length} chars`} defaultOpen={record.input_text.length < 400}>
               <Pre text={record.input_text} />

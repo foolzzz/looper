@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
   Trash2,
   RefreshCw,
@@ -28,6 +28,8 @@ import {
   type TaskInfo,
 } from "@/lib/api";
 import { useProjects } from "@/lib/use-projects";
+import { cn } from "@/lib/utils";
+import { ProjectBackgroundField, backgroundTooLong } from "@/components/project-background-field";
 import { TaskDetailPage } from "./task-detail";
 
 const STATUS_FILTERS = ["all", "init", "running", "pending", "completed", "failed", "cancelled", "stopped"] as const;
@@ -108,12 +110,48 @@ function durationLabel(created: string | null | undefined, completed: string | n
 /** The create form's project choice that reveals the new-project fields. */
 const NEW_PROJECT = "__new__";
 
-/** The selected project's name, description, default directory and count, editable in place. */
+/** Text cut to three lines, with a toggle when it is longer. */
+function ClampedText({ text, className }: { text: string; className?: string }) {
+  const ref = useRef<HTMLParagraphElement>(null);
+  const [expanded, setExpanded] = useState(false);
+  const [overflows, setOverflows] = useState(false);
+
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el || expanded) return;
+    const measure = () => setOverflows(el.scrollHeight > el.clientHeight + 1);
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [text, expanded]);
+
+  return (
+    <div>
+      <p ref={ref} className={cn("whitespace-pre-wrap break-words", !expanded && "line-clamp-3", className)}>
+        {text}
+      </p>
+      {(overflows || expanded) && (
+        <button
+          type="button"
+          onClick={() => setExpanded(!expanded)}
+          aria-expanded={expanded}
+          className="mt-1 text-xs font-medium text-muted-foreground underline-offset-2 hover:text-foreground hover:underline"
+        >
+          {expanded ? "Show less" : "Show more"}
+        </button>
+      )}
+    </div>
+  );
+}
+
+/** The selected project's name, description, default directory, count and background, editable in place. */
 function ProjectBar({ project, onDeleted }: { project: Project; onDeleted: () => void }) {
   const [editing, setEditing] = useState(false);
   const [name, setName] = useState("");
   const [workDir, setWorkDir] = useState("");
   const [description, setDescription] = useState("");
+  const [background, setBackground] = useState("");
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -122,6 +160,7 @@ function ProjectBar({ project, onDeleted }: { project: Project; onDeleted: () =>
     setName(project.name);
     setWorkDir(project.work_dir);
     setDescription(project.description);
+    setBackground(project.background);
     setError("");
     setConfirmDelete(false);
     setEditing(true);
@@ -132,11 +171,13 @@ function ProjectBar({ project, onDeleted }: { project: Project; onDeleted: () =>
       setError("A project name is required.");
       return;
     }
-    // Send only what changed; an empty directory clears the default.
-    const fields: { name?: string; description?: string; work_dir?: string } = {};
+    if (backgroundTooLong(background)) return;
+    // Send only what changed; an empty directory or background clears it.
+    const fields: { name?: string; description?: string; work_dir?: string; background?: string } = {};
     if (name.trim() !== project.name) fields.name = name.trim();
     if (description.trim() !== project.description) fields.description = description.trim();
     if (workDir.trim() !== project.work_dir) fields.work_dir = workDir.trim();
+    if (background !== project.background) fields.background = background;
     if (Object.keys(fields).length === 0) {
       setEditing(false);
       return;
@@ -194,10 +235,11 @@ function ProjectBar({ project, onDeleted }: { project: Project; onDeleted: () =>
             className="w-full resize-none rounded-md border border-input bg-transparent px-3 py-2 text-sm text-foreground shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
           />
         </div>
+        <ProjectBackgroundField id="project-edit-background" value={background} onChange={setBackground} />
         {error && <p role="alert" className="text-xs text-destructive">{error}</p>}
         <div className="flex justify-end gap-2">
           <Button type="button" variant="outline" size="sm" onClick={() => setEditing(false)}>Cancel</Button>
-          <Button type="button" size="sm" onClick={save} disabled={busy}>
+          <Button type="button" size="sm" onClick={save} disabled={busy || backgroundTooLong(background)}>
             {busy && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
             Save
           </Button>
@@ -262,6 +304,14 @@ function ProjectBar({ project, onDeleted }: { project: Project; onDeleted: () =>
             </>
           )}
         </div>
+      </div>
+      <div className="mt-3 space-y-1 border-t border-border pt-3">
+        <h3 className="text-xs font-medium text-muted-foreground">Background</h3>
+        {project.background ? (
+          <ClampedText key={project.background} text={project.background} className="font-mono text-xs leading-relaxed text-foreground/80" />
+        ) : (
+          <p className="text-xs text-muted-foreground">No background</p>
+        )}
       </div>
       {error && <p role="alert" className="mt-2 text-xs text-destructive">{error}</p>}
     </div>
