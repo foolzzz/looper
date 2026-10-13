@@ -18,7 +18,7 @@ from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
-from . import agent_settings, projects, request_guard
+from . import agent_settings, library, projects, request_guard
 from .broadcast import Broadcaster
 from .chat_targets import ChatTargetError, list_chat_targets, resolve_chat_target
 from .channels.web import WebChannelAdapter
@@ -194,6 +194,7 @@ class AgentHTTPServer:
     # --- API routing ---
 
     _RE_TASK_DETAIL = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)$")
+    _RE_LIBRARY_ITEM = re.compile(r"^/api/settings/library/(lib-[a-zA-Z0-9]+)$")
     _RE_TASK_ACTIVITY = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)/activity$")
     _RE_TASK_ACTIVITY_STREAM = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)/activity/stream$")
     _RE_TASK_ACTIVITY_SEQ = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)/activity/(\d+)$")
@@ -294,6 +295,12 @@ class AgentHTTPServer:
             await self._handle_agent_settings(writer, lambda: agent_settings.update_settings(projects.json_object(body)))
         elif path == "/api/settings/agents/reset-harness" and method == "POST":
             await self._handle_agent_settings(writer, agent_settings.reset_harness)
+        elif path == "/api/settings/library" and method == "GET":
+            await self._handle_library(writer, library.library_view)
+        elif path == "/api/settings/library/import" and method == "POST":
+            await self._handle_library(writer, library.import_from_machine)
+        elif (m := self._RE_LIBRARY_ITEM.match(path)) and method == "PUT":
+            await self._handle_library(writer, lambda: library.set_item_enabled(m.group(1), projects.json_object(body)))
         elif path == "/api/channel-configs" and method == "GET":
             await self._handle_list_channel_configs(writer)
         elif (m := self._RE_CHANNEL_CONFIG.match(path)) and method == "GET":
@@ -939,6 +946,27 @@ class AgentHTTPServer:
             status, result = HTTP_400, {"error": str(exc)}
         except Exception as exc:
             logger.exception("agent settings request failed")
+            status, result = HTTP_500, {"error": str(exc)}
+        else:
+            status = HTTP_200
+        writer.write(_json_response(status, _serialize(result)))
+        await writer.drain()
+
+    # --- The library (the imported plugins and skills every agent loads) ---
+
+    async def _handle_library(
+        self, writer: asyncio.StreamWriter, request: Callable[[], Awaitable[dict[str, Any]]],
+    ) -> None:
+        """Answer with the library view ``request()`` returns; a refused request is 400, an unknown item 404."""
+        try:
+            result = await request()
+        except (library.LibraryError, projects.RequestError) as exc:
+            status = getattr(exc, "status", HTTP_400)
+            result = {"error": str(exc)}
+        except library.LibraryItemNotFound as exc:
+            status, result = HTTP_404, {"error": str(exc)}
+        except Exception as exc:
+            logger.exception("library request failed")
             status, result = HTTP_500, {"error": str(exc)}
         else:
             status = HTTP_200

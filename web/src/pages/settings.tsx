@@ -4,6 +4,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { HarnessField, harnessTooLong } from "@/components/harness-field";
+import { LibraryCard } from "@/components/library-card";
 import {
   fetchAgentSettings,
   fetchChannelConfigs,
@@ -378,13 +379,18 @@ export function SettingsPage() {
       <div>
         <h1 className="text-2xl font-bold">Settings</h1>
         <p className="text-sm text-muted-foreground mt-1">
-          Agent defaults, channel integrations and system configuration
+          Agent defaults, plugins and skills, channel integrations and system configuration
         </p>
       </div>
 
       <div>
         <h2 className="text-sm font-semibold mb-3">Agent Defaults</h2>
         <AgentDefaultsCard />
+      </div>
+
+      <div>
+        <h2 className="text-sm font-semibold mb-3">Plugins &amp; skills</h2>
+        <LibraryCard />
       </div>
 
       <div>

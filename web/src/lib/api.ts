@@ -501,6 +501,8 @@ export interface LlmRecord {
     model_choice?: { model: string; source: ModelSource; effort: string | null };
     /** The environment variables from Settings: their names, with each value's sha256. */
     env?: { sha256: string; keys: Record<string, string> };
+    /** The library items the run loaded (plugins and skills) and their hash; error when it went without them. */
+    library?: RunLibrary;
   } | null;
   created_at: string;
   finished_at: string | null;
@@ -693,6 +695,86 @@ export async function updateAgentSettings(fields: AgentSettingsUpdate): Promise<
 export async function resetDefaultHarness(): Promise<AgentSettings> {
   const res = await fetch(`${API_BASE}/settings/agents/reset-harness`, { method: "POST" });
   if (!res.ok) await failed(res, "reset harness");
+  return res.json();
+}
+
+// --- The library: imported plugins and skills every agent loads ---
+
+export type LibraryKind = "plugin" | "skill";
+
+export interface LibraryItem {
+  id: string;
+  kind: LibraryKind;
+  /** A plugin's name@marketplace, or a skill's directory name. */
+  name: string;
+  source: string;
+  /** A plugin's declared version; "" for a skill. */
+  version: string;
+  sha256: string;
+  enabled: boolean;
+  size_bytes: number;
+  file_count: number;
+  imported_at: string;
+}
+
+export interface LibrarySkipped {
+  item: string;
+  /** "" when the whole item was left out. */
+  path: string;
+  reason: string;
+  size_bytes: number | null;
+}
+
+export interface LibraryImport {
+  imported_at: string;
+  source: string;
+  plugins: number;
+  skills: number;
+  added: string[];
+  updated: string[];
+  removed: string[];
+  unchanged: number;
+  skipped: LibrarySkipped[];
+  skipped_count: number;
+}
+
+export interface Library {
+  items: LibraryItem[];
+  last_import: LibraryImport | null;
+  enabled_count: number;
+  /** The hash of the enabled set, as each run records it; null when nothing is enabled. */
+  library_sha256: string | null;
+  total_bytes: number;
+  /** The plugin the skills are loaded from: Claude Code names them <skills_plugin>:<skill>. */
+  skills_plugin: string;
+}
+
+export interface RunLibrary {
+  sha256: string | null;
+  items: { kind: LibraryKind; name: string; sha256: string }[];
+  error?: string;
+}
+
+export async function fetchLibrary(): Promise<Library> {
+  const res = await fetch(`${API_BASE}/settings/library`);
+  if (!res.ok) await failed(res, "library");
+  return res.json();
+}
+
+/** Import (or re-import) this machine's enabled Claude Code plugins and personal skills. */
+export async function importLibrary(): Promise<Library> {
+  const res = await fetch(`${API_BASE}/settings/library/import`, { method: "POST" });
+  if (!res.ok) await failed(res, "import");
+  return res.json();
+}
+
+export async function setLibraryItemEnabled(id: string, enabled: boolean): Promise<Library> {
+  const res = await fetch(`${API_BASE}/settings/library/${id}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ enabled }),
+  });
+  if (!res.ok) await failed(res, "update library item");
   return res.json();
 }
 

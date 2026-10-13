@@ -28,8 +28,12 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
 - Runs one resident Claude process through `ResidentClaude`
   (`loopx/agents/claude_cli.py`), which each task's Planner uses too, started
   on the first chat message:
-  `claude --print --verbose --output-format stream-json --input-format stream-json --include-partial-messages <isolation flags> --append-system-prompt-file <file> --system-prompt-snapshot off --model M [--effort E] [--resume <session_id>]`
-  (see [What an agent's Claude Code loads](#what-an-agents-claude-code-loads)).
+  `claude --print --verbose --output-format stream-json --input-format stream-json --include-partial-messages [--allowedTools Skill] <isolation flags> --append-system-prompt-file <file> --system-prompt-snapshot off --model M [--effort E] [--plugin-dir <dir> ...] [--resume <session_id>]`
+  (see [What an agent's Claude Code loads](#what-an-agents-claude-code-loads)
+  and [The library](#the-library-imported-plugins-and-skills)). With a
+  library loaded, `--allowedTools Skill` approves its skills: a skill's own
+  `allowed-tools` are not approved with it, and every other tool still needs
+  an approval that `--print` denies. Without one the command is as before.
   Its system prompt is its harness (its own `harness_prompt`, else the default
   in Settings), the `manager` role prompt and `TASK_PLACEMENT_RULE`; it has no
   project and no task section.
@@ -38,8 +42,8 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
   record. Claude's `total_cost_usd` is its process's running total, so a
   record's cost is the increase since the previous turn. When Claude exits
   (or dies mid-turn, which answers that message with an error) or the
-  Manager's system prompt, model, effort or Settings environment changes, the
-  next message starts a new process that
+  Manager's system prompt, model, effort, Settings environment or library
+  changes, the next message starts a new process that
   resumes the saved session with `--resume`. Stopping the Manager closes
   Claude's stdin and kills it if it is still running after 5 s
 
@@ -115,7 +119,7 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
   process per step attempt.
 - Keeps one resident Claude process through `ResidentClaude`, like the
   Manager, started on the task's first turn in the task's `work_dir`:
-  `claude --print --verbose --output-format stream-json --input-format stream-json --include-partial-messages --tools Read,Grep,Glob --allowedTools Read,Grep,Glob --permission-mode dontAsk <isolation flags> --append-system-prompt-file <file> --system-prompt-snapshot off --model M [--effort E] [--max-turns N] [--resume <session_id>]`.
+  `claude --print --verbose --output-format stream-json --input-format stream-json --include-partial-messages --tools Read,Grep,Glob[,Skill] --allowedTools Read,Grep,Glob[,Skill] --permission-mode dontAsk <isolation flags> --append-system-prompt-file <file> --system-prompt-snapshot off --model M [--effort E] [--plugin-dir <dir> ...] [--max-turns N] [--resume <session_id>]`.
   The system prompt is rebuilt for every turn from the harness (the project's
   Planner override, else the default in Settings), the `planner` role prompt,
   the task's project, the task section (task id, project name and
@@ -124,13 +128,15 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
   only what changed: the plan's progress, results, chat and supervision
   observations. When the prompt changes (a config edit, a new background or
   harness, a task moved to another project) its file and hash change, or the
-  model, effort or Settings environment changes, the Planner stops
+  model, effort, Settings environment or library changes, the Planner stops
   its Claude, and the next process resumes the session with `--resume` and
-  the new prompt. Only Read, Grep and Glob exist and are approved, `dontAsk`
-  denies anything else without asking, and no MCP server loads; it never gets
-  `--dangerously-skip-permissions`. Checked with Claude Code 2.1.285: the init
-  event lists only Glob, Grep and Read and no MCP servers, and a Write made
-  available is still denied in don't-ask mode.
+  the new prompt. Only Read, Grep and Glob exist and are approved, plus
+  Skill when a library is loaded (it reads the library's skills; without it
+  Claude Code lists no skills at all), `dontAsk` denies anything else without asking, and no MCP server
+  loads; it never gets `--dangerously-skip-permissions`. Checked with Claude
+  Code 2.1.285: the init event lists only Glob, Grep and Read (and Skill
+  with a library) and no MCP servers, and a Write made available is still denied in
+  don't-ask mode.
 - Each event is one user turn; turns run one at a time:
   - `[PLAN]` on `TASK_REQUEST`: Claude may read the project, then splits the
     requirement into 1–8 steps (`MAX_STEPS`), each with `id`, `instruction`,
@@ -181,7 +187,7 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
 - Manages a pool of Worker processes
 - Each Worker runs Claude CLI as a subprocess with `stream-json` output
 - Real-time event streaming (tool_use, text) captured to activity table
-- Command: `claude --print --verbose --output-format stream-json --include-partial-messages --input-format stream-json --replay-user-messages --dangerously-skip-permissions <isolation flags> --append-system-prompt-file <file> --system-prompt-snapshot off --model M [--effort E]`,
+- Command: `claude --print --verbose --output-format stream-json --include-partial-messages --input-format stream-json --replay-user-messages --dangerously-skip-permissions <isolation flags> --append-system-prompt-file <file> --system-prompt-snapshot off --model M [--effort E] [--plugin-dir <dir> ...]`,
   plus `--max-turns N` when the config sets `max_turns` above 0. A Worker
   reads the `worker` row and a Reviewer the `reviewer` row, for every run. The
   first user turn goes on stdin; stdin stays open so the Planner can add user
@@ -273,7 +279,8 @@ also drops built-in skills. Not covered: managed (admin policy) settings,
 built-in plugins, and the environment variables of the process that runs
 `loopx serve`. With user settings gone, the model, the effort and any
 environment variables come from LoopX (next section), not from the operator's
-Claude Code settings.
+Claude Code settings, and the plugins and skills come from the LoopX library
+(below), never from `~/.claude` itself.
 
 ### Harness, model and environment
 
@@ -302,9 +309,9 @@ refused because the values are shown on the dashboard. That word check guards
 against pasting a secret by habit; it is not a security boundary. An
 unreadable table falls back to the built-in values, and the run's record says
 so. Changes apply to the next Worker or Reviewer run; a resident agent's
-restart signature is its command (which carries the model and effort), the
-prompt's sha256 and the environment's sha256, so the next turn restarts it
-with `--resume`.
+restart signature is its command (which carries the model, the effort and the
+library's plugin directories), the prompt's sha256, the environment's sha256
+and the library's sha256, so the next turn restarts it with `--resume`.
 
 The composed system prompt goes to Claude Code as a file:
 `SystemPrompt.write_file` writes it once to
@@ -316,7 +323,7 @@ the resident agents: by default Claude Code 2.1.285 keeps the system prompt of
 a session's first request and sends it again on every `--resume`, so a
 restarted Planner or Manager would keep running with its old prompt. A
 resident agent's restart signature is its command, the prompt's sha256 and the
-sha256 of the Settings environment.
+sha256s of the Settings environment and of the library.
 
 Every run records the prompt in `llm_records.metadata`:
 
@@ -341,10 +348,70 @@ Every run records the prompt in `llm_records.metadata`:
   `builtin_default`, `system_default` or `agent_override`); the record's
   `model` column keeps the model Claude reports;
 - `env`: `{sha256, keys: {NAME: sha256 of the value}}`, only when Settings
-  holds variables; values are never recorded.
+  holds variables; values are never recorded;
+- `library`: `{sha256, items: [{kind, name, sha256}], error?}`, the library
+  items the run loaded and the hash of that set, only when something was to be
+  loaded; `error` says why a run went without its library.
 
 The same inputs give the same prompt and hash; changing the harness, the role
 prompt, the background, the task or a contract changes it.
+
+### The library: imported plugins and skills
+
+The capabilities the operator wants every agent to have are imported
+explicitly instead of being loaded from `~/.claude`
+(`loopx/agents/library.py`, RFC decision 7):
+
+- **Import** (`POST /api/settings/library/import`, Settings → "Import from this
+  machine" / "Re-import") only reads the operator's Claude Code configuration
+  (`$CLAUDE_CONFIG_DIR`, else `~/.claude`): every plugin `settings.json`
+  enables (`enabledPlugins`), from its user-scope install in
+  `plugins/installed_plugins.json`, taken whole (its skills, agents,
+  commands and hooks); and every personal skill, `skills/<name>/` with a
+  `SKILL.md` (a linked directory is followed). Personal settings and hooks,
+  MCP servers, permissions and memory are not read. `.git`, `.in_use`
+  (Claude Code's plugin-cache bookkeeping), `.DS_Store` and `__pycache__` are
+  left out; a link inside an item is read as its target when it stays in the
+  item.
+- **Storage.** The database is the source of truth: `library_items` (kind
+  `plugin` or `skill`, name, source label, declared version, `sha256`,
+  `enabled`, size, file count, `imported_at`) and `library_files` (relative
+  path, UTF-8 content, sha256, executable bit). An item's `sha256` is the hash
+  of its files' paths, hashes and executable bits. A re-import replaces the
+  files of an item whose hash changed and keeps its id and `enabled` flag,
+  leaves an unchanged one as it is, adds new items enabled and removes the
+  items that are gone. The last import's report (counts, changes, what was
+  left out) is the `library.last_import` row of `system_settings`.
+- **Caps.** A file over 2 MiB, a binary (not UTF-8) file, and a link out of
+  its item are left out; an item over 32 MiB or 5,000 files is left out
+  whole; all are reported. A library over 128 MiB is refused with a 400 and
+  nothing changes. Measured on a real configuration (3 plugins, 104 skills):
+  about 21 MB of text in 2,200 files, the largest item 9 MB, the largest file
+  0.7 MB; 4 image files were left out.
+- **Launch.** `load_library(runtime_root)` reads the enabled items for every
+  run and gets each a read-only copy under
+  `<runtime_root>/.local/library/<sha256>/<name>/`, written once from the
+  database (checked against the hashes) and renamed into place, so runs never
+  read `~/.claude`. Each enabled plugin is one `--plugin-dir`; the enabled
+  skills are linked into one generated plugin, `personal`
+  (`<runtime_root>/.local/library/<hash of the set>/personal/`), so Claude Code
+  names them `personal:<skill>`. `claude_cli.library_args` builds the flags
+  and `agent_settings.Launch` carries them, so all four commands get the
+  same set. When the library cannot be read or written, the run goes without
+  it and its record's `library.error` says why.
+
+Verified with Claude Code 2.1.285 under the isolation flags: in `--print`
+mode `--plugin-dir` loads a plugin's skills (as `<plugin>:<skill>`), agents,
+commands and hooks; a directory needs no manifest (its name names it) and a
+"folder of plugins" loads each child. The plugins' own `SessionStart` hooks run
+and add their context; the operator's `UserPromptSubmit` hook in
+`~/.claude/settings.json` does not. Claude Code keeps a `--plugin-dir`
+plugin's data in `~/.claude/plugins/data/<plugin>-inline/`, apart from the
+operator's own sessions, and a plugin's hook may still read files of its own
+choosing (one checks a flag file in `~/.claude`). Every agent's context grows:
+with 3 plugins and 104 skills, the first request of a minimal `--print` run
+on Opus went from 15,674 to 29,114 tokens (`/context`: skills 2.1k → 10k
+tokens, plugin hook context 3.8k).
 
 ## Message Bus
 
@@ -453,9 +520,11 @@ PostgreSQL is a hard startup dependency. All data paths:
 | `task_steps` | Planner decomposition steps per task |
 | `activity` | Execution trace events (SSE streaming to frontend) |
 | `chat_messages` | Chat conversation history |
-| `llm_records` | One row per Claude run: input and output text, status, cost; `metadata` holds the exact argv (`command`), `cwd`, the appended `system_prompt`, its `system_prompt_sha256`, its `prompt_layers`, the `model_choice` and the Settings `env` names |
+| `llm_records` | One row per Claude run: input and output text, status, cost; `metadata` holds the exact argv (`command`), `cwd`, the appended `system_prompt`, its `system_prompt_sha256`, its `prompt_layers`, the `model_choice`, the Settings `env` names and the `library` items loaded |
 | `agent_configs` | Agent configuration (role prompt, model, permissions) for `manager`, `planner`, `worker` and `reviewer`; `harness_prompt` is used for the Manager only |
-| `system_settings` | Settings shared by the whole system, one value per key: the default harness, model, effort and environment variables (no row = the built-in default) |
+| `system_settings` | Settings shared by the whole system, one value per key: the default harness, model, effort and environment variables (no row = the built-in default), and the last library import's report |
+| `library_items` | The imported plugins and skills: kind, name, source label, declared version, `sha256` of the files, `enabled`, size, file count, `imported_at` |
+| `library_files` | Each library item's files: relative path, UTF-8 content, sha256, executable bit |
 | `llm_profiles` | LLM provider profiles (model, endpoint, API key env) |
 | `channel_configs` | Telegram/Lark settings (enabled flag, env var names, allowlist) |
 
@@ -484,8 +553,8 @@ built by `scripts/stage-dashboard.sh` at release time), and it carries
 - **Projects (sidebar)**: Below the navigation, every project with its task count (or a spinner with its active count); clicking one opens the Tasks page filtered by it, and `+` creates a project (name, default directory, description, optional background and harness overrides).
 - **Task Detail**: Overview (steps, agent timeline, live activity feed), Pipeline DAG (React Flow), Sessions, Conversation
 - **Agents**: The Manager, Planner, Worker and Reviewer configuration editor (role prompt replace/append, model, LLM profiles, permissions). The model field's placeholder is the default it inherits. The Manager also has a "Harness prompt (override)" field; the others say where their harness comes from. A Runs tab lists every recorded Claude run of the role (the Manager, every task's Planner, Workers or Reviewers)
-- **Agent history** (`#history/<agent-id>?task=<task-id>`): opened from History on an Agent Timeline row, a Runs entry or the Chat page. For each Claude run it shows status, model, tokens, cost, the launch command (cwd and argv; a long argument such as the system prompt is shown by its length, and Copy copies the exact command), a collapsible System prompt section with what LoopX appended (Claude Code's built-in system prompt is not included): its title shows the prompt's size, its short sha256 and an `isolated` badge, and inside one line per layer (harness source and version, role recommended or edited, project and background version, task, contract), the model with its source and effort, and the Settings environment variable names, above the full text; runs recorded before the layers existed show the text only. Then the full transcript, following a running run every 2 s. A running run shows its last output time from the record's heartbeat and is flagged after 2 minutes with no output. While Claude thinks it shows `thinking · ~N tokens` from Claude's `thinking_tokens` events. Those arrive about once a second, so the recorder keeps one row per thinking phase and updates its count in place. Hooks, background tasks and rate limits are shown as one line each, and any other event type as an expandable line. For a Planner each run is one of its turns, listed above your chat with it and its activity.
-- **Settings**: Agent defaults (the default harness prompt with an `n / 20000` counter and Reset to built-in, the default model, the effort and the environment variables), then the Telegram and Lark channels
+- **Agent history** (`#history/<agent-id>?task=<task-id>`): opened from History on an Agent Timeline row, a Runs entry or the Chat page. For each Claude run it shows status, model, tokens, cost, the launch command (cwd and argv; a long argument such as the system prompt is shown by its length, and Copy copies the exact command), a collapsible System prompt section with what LoopX appended (Claude Code's built-in system prompt is not included): its title shows the prompt's size, its short sha256 and an `isolated` badge, and inside one line per layer (harness source and version, role recommended or edited, project and background version, task, contract), the model with its source and effort, and the Settings environment variable names, above the full text; runs recorded before the layers existed show the text only. A collapsible Plugins & skills section shows how many plugins and skills the run loaded and the library hash, and lists each with its short version hash. Then the full transcript, following a running run every 2 s. A running run shows its last output time from the record's heartbeat and is flagged after 2 minutes with no output. While Claude thinks it shows `thinking · ~N tokens` from Claude's `thinking_tokens` events. Those arrive about once a second, so the recorder keeps one row per thinking phase and updates its count in place. Hooks, background tasks and rate limits are shown as one line each, and any other event type as an expandable line. For a Planner each run is one of its turns, listed above your chat with it and its activity.
+- **Settings**: Agent defaults (the default harness prompt with an `n / 20000` counter and Reset to built-in, the default model, the effort and the environment variables), then Plugins & skills (how many of the imported items are loaded and their size, "Import from this machine" or "Re-import", the last import with what it changed and what it left out, a name filter, and the plugins and skills with their version, size and a switch each; a change applies to each agent's next run), then the Telegram and Lark channels
 
 ### Real-Time Updates
 
@@ -536,6 +605,9 @@ dev proxy, which keeps `Host` and `Origin` on its own port.
 | `/api/agent-configs/:id/reset-prompt` | POST | Reset the role prompt to the recommended one |
 | `/api/settings/agents` | GET/PUT | The defaults every agent inherits: `default_harness_prompt`, `default_model`, `default_effort`, `default_env` (`[{key, value}]`). PUT changes the fields given; an empty value goes back to the built-in default. 400 for an unknown field, a harness over 20000 characters, a bad model name or effort, or a bad, credential-like or 51st variable; nothing is stored then |
 | `/api/settings/agents/reset-harness` | POST | Go back to the built-in default harness |
+| `/api/settings/library` | GET | The library: `items` (`id`, `kind`, `name`, `source`, `version`, `sha256`, `enabled`, `size_bytes`, `file_count`, `imported_at`), `last_import` (counts, `added`, `updated`, `removed`, `unchanged`, `skipped`), `enabled_count`, `library_sha256` (what runs record), `total_bytes`, `skills_plugin` and `caps` |
+| `/api/settings/library/import` | POST | Import or re-import this machine's enabled plugins and personal skills (read-only towards `~/.claude`); answers with the library. 400 without a Claude Code configuration, with an unreadable `settings.json` or over the 128 MiB cap (nothing changes then) |
+| `/api/settings/library/:id` | PUT | `{"enabled": true\|false}`; answers with the library. 400 for any other body, 404 for an unknown item |
 | `/api/llm-profiles` | GET/POST | LLM profiles |
 | `/api/llm-records` | GET | Claude runs; filter by `agent_id`, `task_id` or `role` (`manager`, `planner`, `worker`, `reviewer`) |
 | `/api/llm-records/:id` | GET | One run (status, usage, cost, launch command, heartbeat) |

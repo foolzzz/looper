@@ -173,6 +173,33 @@ To learn how to use these features, read the [usage guide](docs/fork/usage.md).
   names with a sha256 of each value; values are never recorded). The history
   page's layer summary shows the harness source, the model and the variable
   names.
+- **Behaviour change: every agent loads the imported plugins and skills.**
+  Settings gains "Plugins & skills": "Import from this machine" reads, and
+  only reads, the operator's Claude Code configuration (`$CLAUDE_CONFIG_DIR`,
+  else `~/.claude`) and stores a snapshot in the database (`library_items`,
+  `library_files`): every enabled plugin, whole (its skills, agents, commands
+  and hooks), and every personal skill. Personal hooks, MCP servers,
+  permissions and memory are still not loaded. Every Manager, Planner, Worker
+  and Reviewer run then gets a read-only copy under
+  `<runtime_root>/.local/library/` and one `--plugin-dir` per enabled plugin
+  plus one for the enabled skills, which Claude Code names
+  `personal:<skill>`. "Re-import" replaces the items that changed and keeps
+  each item's switch; a switch applies to each agent's next run, and the
+  Manager and a running Planner restart with `--resume`. Files over 2 MiB,
+  binary files and links out of an item are left out and reported; an item
+  over 32 MiB or 5,000 files is left out whole; a library over 128 MiB is
+  refused. To use the skills, a run with a library gives the Planner the
+  tools `Read,Grep,Glob,Skill` and the Manager `--allowedTools Skill` (this
+  approves skills only, not the tools a skill names). Plugins' own
+  `SessionStart` hooks run in every agent. Nothing is imported until someone
+  imports, and without a library every command is as before. **Context and cost:** with 3 plugins and 104
+  skills, the first request of a minimal run on Opus grows from 15,674 to
+  29,114 tokens; uncached, that first request cost $0.136 instead of $0.043.
+  Disable what an agent does not need. New API: `GET /api/settings/library`,
+  `POST /api/settings/library/import` and `PUT /api/settings/library/<id>`.
+- Every run's metadata gains `library` (the items it loaded, each with its
+  sha256, and the hash of the set), and the history page lists them in a
+  "Plugins & skills" section.
 
 ### Fixed
 

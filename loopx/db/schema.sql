@@ -121,6 +121,35 @@ CREATE TABLE IF NOT EXISTS system_settings (
     updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+-- The plugins and skills imported from the operator's Claude Code (the
+-- library), loaded by every agent when enabled. The tables are the source of
+-- truth: agents get a read-only copy materialized under the runtime root
+-- (loopx/agents/library.py), never the operator's ~/.claude. An item's
+-- sha256 is the hash of its files; a re-import replaces a changed item's files
+-- and keeps its id and its enabled flag.
+CREATE TABLE IF NOT EXISTS library_items (
+    id           TEXT PRIMARY KEY,
+    kind         TEXT NOT NULL CHECK (kind IN ('plugin', 'skill')),
+    name         TEXT NOT NULL,
+    source       TEXT NOT NULL DEFAULT '',
+    version      TEXT NOT NULL DEFAULT '',
+    sha256       TEXT NOT NULL,
+    enabled      BOOLEAN NOT NULL DEFAULT true,
+    size_bytes   BIGINT NOT NULL,
+    file_count   INTEGER NOT NULL,
+    imported_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (kind, name)
+);
+CREATE TABLE IF NOT EXISTS library_files (
+    item_id     TEXT NOT NULL REFERENCES library_items(id) ON DELETE CASCADE,
+    path        TEXT NOT NULL,
+    content     TEXT NOT NULL,
+    sha256      TEXT NOT NULL,
+    executable  BOOLEAN NOT NULL DEFAULT false,
+    PRIMARY KEY (item_id, path)
+);
+
 -- One-time data migrations; schema.sql itself runs on every startup.
 CREATE TABLE IF NOT EXISTS schema_migrations (
     name        TEXT PRIMARY KEY,

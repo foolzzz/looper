@@ -14,6 +14,7 @@ from typing import Any
 
 import pytest
 
+from library_fixtures import ALPHA_SKILL, DEMO_PLUGIN, plugin_dirs
 from loopx.agents.agent_settings import DEFAULT_HARNESS_PROMPT
 from loopx.agents.bus import MessageBus
 from loopx.agents.claude_cli import ISOLATION_ID, isolation_args
@@ -366,7 +367,8 @@ class TestManagerResidentClaude:
         assert _flag(argv, "--output-format") == "stream-json"
         assert {"--print", "--verbose", "--include-partial-messages"} <= set(argv)
         takes_value = {"--input-format", "--output-format", "--append-system-prompt-file", "--system-prompt-snapshot",
-                       "--setting-sources", "--settings", "--resume", "--model", "--effort"}
+                       "--setting-sources", "--settings", "--resume", "--model", "--effort", "--allowedTools",
+                       "--plugin-dir"}
         positional = [arg for i, arg in enumerate(argv) if not arg.startswith("--") and argv[i - 1] not in takes_value]
         assert positional == []
         assert _flag(argv, "--resume") is None  # no session yet
@@ -646,3 +648,50 @@ class TestManagerHarnessAndLaunch:
     ) -> None:
         chat = _converse(monkeypatch, _resident(), ["hello"])
         assert chat["launched"][0]["env"] is None
+
+
+@pytest.mark.usefixtures("agent_db")
+class TestManagerLibrary:
+    """The Manager loads the enabled plugins and the skills plugin from the
+    library; a change to the enabled set restarts its Claude, which resumes
+    the session."""
+
+    def test_the_command_carries_the_enabled_plugins_and_the_skills_plugin(
+        self, monkeypatch: pytest.MonkeyPatch, agent_db: Any, enabled_library: Any,
+    ) -> None:
+        demo, alpha = enabled_library(DEMO_PLUGIN, ALPHA_SKILL)
+        chat = _converse(monkeypatch, _resident(), ["hello"])
+        ((argv, _),) = chat["spawned"]
+        plugin, skills = plugin_dirs(argv)
+        assert plugin.endswith(f"/.local/library/{demo['sha256']}/demo") and skills.endswith("/personal")
+        # Skills are approved; nothing else is.
+        assert _flag(argv, "--allowedTools") == "Skill" and argv.count("--allowedTools") == 1
+        assert "--dangerously-skip-permissions" not in argv and "--permission-mode" not in argv
+        library = agent_db.start_record.await_args.kwargs["metadata"]["library"]
+        assert library["items"] == [{"kind": "plugin", "name": "demo@market", "sha256": demo["sha256"]},
+                                    {"kind": "skill", "name": "alpha", "sha256": alpha["sha256"]}]
+        assert len(library["sha256"]) == 64
+
+    def test_without_a_library_nothing_is_added(self, monkeypatch: pytest.MonkeyPatch, agent_db: Any) -> None:
+        chat = _converse(monkeypatch, _resident(), ["hello"])
+        ((argv, _),) = chat["spawned"]
+        assert "--plugin-dir" not in argv and "--allowedTools" not in argv  # the command as before
+        assert "library" not in agent_db.start_record.await_args.kwargs["metadata"]
+
+    def test_a_changed_library_restarts_claude_resuming_its_session(
+        self, monkeypatch: pytest.MonkeyPatch, agent_db: Any, enabled_library: Any,
+    ) -> None:
+        enabled_library(DEMO_PLUGIN, ALPHA_SKILL)
+
+        async def _disable_alpha(spawned: Any) -> None:
+            enabled_library(DEMO_PLUGIN)
+
+        chat = _converse(monkeypatch, _resident(), ["hello", "again", "third"], between=_disable_alpha)
+        assert chat["replies"] == ["turn 1: hello", "turn 1: again", "turn 2: third"]
+        (first, _), (second, _) = chat["spawned"]
+        assert (_flag(first, "--resume"), _flag(second, "--resume")) == (None, "sess-1")
+        assert len(plugin_dirs(first)) == 2 and len(plugin_dirs(second)) == 1
+        recorded = [call.kwargs["metadata"]["library"] for call in agent_db.start_record.await_args_list]
+        assert [[i["name"] for i in r["items"]] for r in recorded] == [
+            ["demo@market", "alpha"], ["demo@market"], ["demo@market"]]
+        assert recorded[0]["sha256"] != recorded[1]["sha256"] == recorded[2]["sha256"]
