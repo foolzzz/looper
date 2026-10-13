@@ -40,7 +40,7 @@ from typing import Any, TypeVar
 from ..bus import MessageBus
 from .. import agent_settings
 from ..agent_settings import BUILTIN_DEFAULTS, AgentDefaults, AgentType, Launch, resolve_harness, resolve_launch
-from ..claude_cli import ClaudeRunRecorder, ResidentClaude, isolation_args, system_prompt_args
+from ..claude_cli import ClaudeRunRecorder, ResidentClaude, exit_note, isolation_args, system_prompt_args
 from ..system_prompt import SystemPrompt, build_system_prompt, is_recommended, plan_task_section
 from ..message import (
     TASK_ROUTER_ADDRESS,
@@ -1016,7 +1016,7 @@ class PlannerAgent:
             *(["--max-turns", str(settings.max_turns)] if settings.max_turns > 0 else []),
         ]
 
-    async def _run_turn(self, message: str) -> str:
+    async def _run_turn(self, message: str, *, retried: bool = False) -> str:
         """Send ``message`` as one turn and return Claude's final message; raises ``PlannerTurnError``."""
         plan = self._plan
         assert plan is not None
@@ -1037,9 +1037,11 @@ class PlannerAgent:
             # changed: the next process resumes the session with the new prompt.
             await self._claude.stop()
         start_error: str | None = None
+        resuming: str | None = None  # the session this turn's new process resumes, if any
         if self._claude.started:
             command = self._claude.command
         else:
+            resuming = plan.session_id
             command = base + (["--resume", plan.session_id] if plan.session_id else [])
             try:
                 await self._claude.start(command, cwd=plan.work_dir, signature=signature, env=launch.environment())
@@ -1088,6 +1090,18 @@ class PlannerAgent:
             await recorder.finish(output_text=None, result_event=None,
                                   error=f"Planner stopped reading Claude: {type(exc).__name__}")
             raise
+
+        if resuming and not turn.session_started and not retried:
+            # Claude never started the saved session: it no longer exists, and
+            # resuming it again would fail every turn. Each turn carries the plan
+            # state, so the Planner continues in a new session.
+            error = f"session {resuming} could not be resumed{exit_note(turn.exit_code)}; retried in a new session"
+            await recorder.finish(output_text=None, result_event=None, error=error)
+            await self._activity("error", f"Warning: Planner {error}")
+            await self._claude.stop()
+            plan.session_id = None
+            self._save_plan(plan)
+            return await self._run_turn(message, retried=True)
 
         result_event = turn.result_event
         final_text = str((result_event or {}).get("result") or "")

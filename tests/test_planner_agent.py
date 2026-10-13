@@ -528,6 +528,20 @@ class TestResidentClaude:
         assert any("exited before finishing the turn (exit code 3)" in line for line in activity(agent_db))
         assert h.planner._plan.session_id == "sess-p"  # type: ignore[union-attr]
 
+    def test_a_session_that_no_longer_exists_is_dropped_and_the_turn_retried(
+        self, planner_claude: Any, agent_db: Any,
+    ) -> None:
+        # Claude dies after the plan; its session is then gone, so resuming it fails at once.
+        claude = planner_claude(plan(step("s1"), step("s2", "s1")), "<exit>", decide("accept"), forget_sessions=True)
+        h = drive(claude, always(WORK_OK))
+
+        assert h.final().payload["status"] == "completed"  # type: ignore[union-attr]
+        first, resumed, fresh = claude.argvs()
+        assert _flag(first, "--resume") is None
+        assert _flag(resumed, "--resume") == "sess-p"
+        assert _flag(fresh, "--resume") is None  # the same turn, in a new session
+        assert any("session sess-p could not be resumed" in line for line in activity(agent_db))
+
     @pytest.mark.parametrize("first_reply", ["<hang>", "plan"])
     def test_stop_ends_and_reaps_claude(self, planner_claude: Any, first_reply: str) -> None:
         """stop() ends Claude whether it is in the middle of a turn or idle between turns."""

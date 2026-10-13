@@ -205,6 +205,13 @@ def log(name, value):
         f.write(json.dumps(value) + '\\n')
 log('argv.jsonl', sys.argv[1:])
 log('pids.jsonl', os.getpid())
+# Like Claude resuming a session it no longer has: an error result without an init event.
+if {forget_sessions!r} and '--resume' in sys.argv:
+    sys.stdin.readline()
+    print(json.dumps({{'type': 'result', 'subtype': 'error_during_execution', 'is_error': True, 'num_turns': 0,
+                      'total_cost_usd': 0, 'errors': ['No conversation found with session ID: '
+                                                      + sys.argv[sys.argv.index('--resume') + 1]]}}), flush=True)
+    sys.exit(0)
 # Like Claude, read the appended system prompt's file when the process starts.
 if '--append-system-prompt-file' in sys.argv:
     log('prompts.jsonl', open(sys.argv[sys.argv.index('--append-system-prompt-file') + 1], encoding='utf-8').read())
@@ -242,16 +249,19 @@ class FakePlannerClaude:
     total (0.25 per answered turn). A reply of ``<exit>`` exits mid-turn
     without a result, ``<hang>`` never answers, and ``<error>`` ends the turn
     with an error result. With ``linger`` it keeps running after its stdin
-    closes. It logs its argv, pid, the system prompt its file held at start
+    closes; with ``forget_sessions`` it answers any ``--resume`` the way Claude
+    answers one for a session it no longer has: an error result, no init. It logs its argv, pid, the system prompt its file held at start
     and every turn it reads.
     """
 
-    def __init__(self, state: Path, replies: tuple[str, ...], *, linger: bool = False) -> None:
+    def __init__(
+        self, state: Path, replies: tuple[str, ...], *, linger: bool = False, forget_sessions: bool = False,
+    ) -> None:
         self.state = state
         self.bin = str(state / "fake-claude")
         script = Path(self.bin)
         script.write_text(f"#!{sys.executable}\n" + _PLANNER_CLAUDE.format(
-            state=str(state), replies=json.dumps(replies), linger=linger,
+            state=str(state), replies=json.dumps(replies), linger=linger, forget_sessions=forget_sessions,
         ))
         script.chmod(0o755)
 
@@ -277,8 +287,10 @@ class FakePlannerClaude:
 def planner_claude(tmp_path_factory: pytest.TempPathFactory) -> Callable[..., FakePlannerClaude]:
     """Build a ``FakePlannerClaude`` answering with the given replies."""
 
-    def make(*replies: str, linger: bool = False) -> FakePlannerClaude:
-        return FakePlannerClaude(tmp_path_factory.mktemp("planner-claude"), replies, linger=linger)
+    def make(*replies: str, linger: bool = False, forget_sessions: bool = False) -> FakePlannerClaude:
+        return FakePlannerClaude(
+            tmp_path_factory.mktemp("planner-claude"), replies, linger=linger, forget_sessions=forget_sessions,
+        )
 
     return make
 

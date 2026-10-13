@@ -174,6 +174,17 @@ To learn how to use these features, read the [usage guide](docs/fork/usage.md).
   page's layer summary shows the harness source, the model and the variable
   names.
 
+### Fixed
+
+- A resident Manager or Planner whose saved Claude session no longer exists
+  answered nothing, forever: every turn resumed the same unknown id, Claude
+  replied with only an error result ("No conversation found", no init event),
+  and the id was kept. A process started with `--resume` that ends its turn
+  without Claude's `system/init` event now drops the saved session and runs
+  the turn once more in a new session; the run record names the dropped id.
+  The context each turn carries is rebuilt by code, so nothing of the task's
+  state is lost.
+
 ## [2.5.0] - 2026-10-13
 
 Covers `v2.1.0` to `v2.5.0`: this fork's merged pull requests from #106 to
