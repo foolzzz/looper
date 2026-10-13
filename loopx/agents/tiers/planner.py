@@ -36,8 +36,8 @@ from pathlib import Path
 from typing import Any, TypeVar
 
 from ..bus import MessageBus
-from ..claude_cli import ClaudeRunRecorder, ResidentClaude
-from ..system_prompt import compose_system_prompt
+from ..claude_cli import ClaudeRunRecorder, ResidentClaude, isolation_args, system_prompt_args
+from ..system_prompt import SystemPrompt, build_system_prompt, is_recommended, plan_task_section
 from ..message import (
     TASK_ROUTER_ADDRESS,
     AgentAddress,
@@ -118,6 +118,7 @@ class PlannerSettings:
     model: str | None
     max_turns: int  # 0 for no limit
     supervise_interval_seconds: int  # periodic SUPERVISE turn; 0 to turn off
+    recommended: bool = True  # whether system_prompt is the recommended one (default_prompt)
 
 
 async def load_settings() -> PlannerSettings:
@@ -132,8 +133,10 @@ async def load_settings() -> PlannerSettings:
             DEFAULT_SYSTEM_PROMPT, DEFAULT_TURN_TIMEOUT_SEC, None, 0, DEFAULT_SUPERVISE_INTERVAL_SEC,
         )
     interval = config.get("supervise_interval_seconds")
+    system_prompt = str(config.get("system_prompt") or "").strip() or DEFAULT_SYSTEM_PROMPT
     return PlannerSettings(
-        system_prompt=str(config.get("system_prompt") or "").strip() or DEFAULT_SYSTEM_PROMPT,
+        system_prompt=system_prompt,
+        recommended=is_recommended(system_prompt, str(config.get("default_prompt") or "") or DEFAULT_SYSTEM_PROMPT),
         timeout_seconds=int(config.get("timeout_seconds") or 0),
         model=str(config.get("model") or "").strip() or None,
         max_turns=int(config.get("max_turns") or 0),
@@ -192,6 +195,7 @@ class TaskPlan:
     project_name: str = ""
     project_description: str = ""
     project_background: str = ""
+    project_updated_at: str = ""  # the project's version, for the system prompt's record
     session_id: str | None = None  # the Planner's Claude session, resumed after a restart
     final_summary: str = ""  # the last accepted step's summary
     fail_reason: str = ""
@@ -258,6 +262,7 @@ class TaskPlan:
             "project_name": self.project_name,
             "project_description": self.project_description,
             "project_background": self.project_background,
+            "project_updated_at": self.project_updated_at,
             "session_id": self.session_id,
             "final_summary": self.final_summary,
             "fail_reason": self.fail_reason,
@@ -507,12 +512,6 @@ class PlannerAgent:
         worker_id = f"worker-{uuid.uuid4().hex[:12]}"
         step.status = "dispatched"
         step.worker_id = worker_id
-        instruction = step.instruction
-        if step.feedback:
-            instruction += (
-                f"\n\nThis step is being retried (attempt {step.retries + 1}). "
-                "Feedback on the previous attempt:\n" + "\n".join(f"- {f}" for f in step.feedback)
-            )
 
         try:
             await db_steps.update_step_status(
@@ -536,16 +535,38 @@ class PlannerAgent:
                 "parent_task_id": self._task_id,
                 "plan_id": plan.plan_id,
                 "step_index": step.index,
-                "instruction": instruction,
+                # The Worker's task section: the task, then this step and its retry feedback.
+                "requirement": plan.requirement,
+                "step_key": step.label,
+                "instruction": step.instruction,
                 "target_files": step.target_files,
                 "validation_commands": step.validation_commands,
                 "acceptance_criteria": step.acceptance_criteria,
+                "feedback": list(step.feedback),
+                "attempt": step.retries + 1,
+                # Its first user turn: what the steps it depends on reported.
+                "dependencies": self._dependency_reports(plan, step),
                 "context": {"work_dir": plan.work_dir},
             },
             correlation_id=plan.correlation_id,
             metadata={"origin_channel_id": plan.origin_channel_id},
         ))
         self._save_plan(plan)
+
+    @staticmethod
+    def _dependency_reports(plan: TaskPlan, step: PlanStep) -> list[dict[str, Any]]:
+        """What the steps ``step`` depends on reported, for its Worker."""
+        reports = []
+        for dependency in (plan.step(step_id) for step_id in step.depends_on):
+            if dependency is None or not dependency.result:
+                continue
+            changed = dependency.result.get("changed_files")
+            reports.append({
+                "step": dependency.label,
+                "summary": _clip(dependency.result.get("summary"), 1000),
+                "changed_files": [str(path) for path in changed][:50] if isinstance(changed, dict) else [],
+            })
+        return reports
 
     # --- Results and decisions ---
 
@@ -586,6 +607,8 @@ class PlannerAgent:
                 "task_id": step.step_id,
                 "parent_task_id": self._task_id,
                 "plan_id": plan.plan_id,
+                "requirement": plan.requirement,
+                "step_key": step.label,
                 "instruction": step.instruction,
                 "work_result": step.result or {},
                 "acceptance_criteria": step.acceptance_criteria,
@@ -961,7 +984,7 @@ class PlannerAgent:
             finally:
                 self._last_turn_at = time.monotonic()
 
-    def _claude_command(self, system_prompt: str, settings: PlannerSettings) -> list[str]:
+    def _claude_command(self, prompt_file: Path, settings: PlannerSettings, work_dir: str) -> list[str]:
         """The Planner's Claude, without ``--resume``: read-only tools, nothing else approved."""
         return [
             self._claude_bin,
@@ -973,12 +996,13 @@ class PlannerAgent:
             # Partial deltas keep the turn's heartbeat current while Claude writes.
             "--include-partial-messages",
             # Only the read-only tools exist, they are the only approved ones,
-            # anything else is denied without asking, and no MCP server loads.
+            # and anything else is denied without asking.
             "--tools", PLANNER_TOOLS,
             "--allowedTools", PLANNER_TOOLS,
             "--permission-mode", "dontAsk",
-            "--strict-mcp-config",
-            "--append-system-prompt", system_prompt,
+            # None of the operator's personal settings, memory, hooks, plugins or MCP servers.
+            *isolation_args(work_dir),
+            *system_prompt_args(prompt_file),
             *(["--model", settings.model] if settings.model else []),
             *(["--max-turns", str(settings.max_turns)] if settings.max_turns > 0 else []),
         ]
@@ -988,18 +1012,18 @@ class PlannerAgent:
         plan = self._plan
         assert plan is not None
         settings = await load_settings()
-        system_prompt = compose_system_prompt(
-            settings.system_prompt,
-            project_name=plan.project_name,
-            background=plan.project_background,
-            contract=REPLY_CONTRACT,
-        )
+        system_prompt = self._system_prompt(plan, settings)
         await self._note_background(plan.project_background)
-        base = self._claude_command(system_prompt, settings)
-        signature = tuple(base)
+        try:
+            prompt_file = system_prompt.write_file(self._runtime_root)
+        except OSError as exc:
+            raise PlannerTurnError(f"cannot write the system prompt file: {exc}") from None
+        base = self._claude_command(prompt_file, settings, plan.work_dir)
+        # The file is named by its content's hash; the hash is kept beside it all the same.
+        signature = (tuple(base), system_prompt.sha256)
         if self._claude.stale(signature):
-            # Claude exited, or the config or the project background changed:
-            # the next process resumes the session.
+            # Claude exited, or the config, the project or the task changed:
+            # the next process resumes the session with the new prompt.
             await self._claude.stop()
         start_error: str | None = None
         if self._claude.started:
@@ -1072,17 +1096,28 @@ class PlannerAgent:
             raise PlannerTurnError(error)
         return final_text
 
-    # --- Turn messages ---
+    def _system_prompt(self, plan: TaskPlan, settings: PlannerSettings) -> SystemPrompt:
+        """The role prompt, the project background, the task, then the reply contract."""
+        project = None
+        if plan.project_id or plan.project_name or plan.project_background:
+            project = {"id": plan.project_id, "name": plan.project_name, "background": plan.project_background,
+                       "updated_at": plan.project_updated_at}
+        return build_system_prompt(
+            role_id="planner",
+            role=settings.system_prompt,
+            recommended=settings.recommended,
+            project=project,
+            task_kind="plan",
+            task_id=self._task_id,
+            task=plan_task_section(
+                task_id=self._task_id, requirement=plan.requirement, project_name=plan.project_name,
+                project_description=_clip(plan.project_description, 300), work_dir=plan.work_dir,
+            ),
+            contract_name="REPLY_CONTRACT",
+            contract=REPLY_CONTRACT,
+        )
 
-    def _context_lines(self, plan: TaskPlan) -> list[str]:
-        project = plan.project_name or "(unknown)"
-        if plan.project_description:
-            project += f": {_clip(plan.project_description, 300)}"
-        return [
-            f"Task: {_clip(plan.requirement, 1500)}",
-            f"Project: {project}",
-            f"Working directory: {plan.work_dir}",
-        ]
+    # --- Turn messages: only what changed (the task is the system prompt's task section) ---
 
     def _plan_lines(self, plan: TaskPlan) -> list[str]:
         labels = plan.labels()
@@ -1097,8 +1132,7 @@ class PlannerAgent:
 
     def _plan_message(self, plan: TaskPlan) -> str:
         return "\n".join([
-            "[PLAN] Plan this task.",
-            *self._context_lines(plan),
+            "[PLAN] Plan the task in the Task section of your instructions.",
             "",
             f"You may read the project first. Reply with the PLAN JSON: 1 to {MAX_STEPS} steps.",
         ])
@@ -1154,7 +1188,6 @@ class PlannerAgent:
     def _supervise_message(self, plan: TaskPlan, running: list[PlanStep], reports: list[list[str]]) -> str:
         lines = [
             "[SUPERVISE] A periodic check on the Workers running now — no result has arrived.",
-            *self._context_lines(plan),
             "",
             *self._plan_lines(plan),
             "",
@@ -1182,7 +1215,6 @@ class PlannerAgent:
                 allowed.append(decision.value)
         lines = [
             f"[DECISION] Step {step.label} (step {step.index + 1}) has its {who}'s result.",
-            *self._context_lines(plan),
             "",
             *self._plan_lines(plan),
             "",
@@ -1202,7 +1234,6 @@ class PlannerAgent:
         actions = ["none", "add_steps"] + (["forward (to a running step)"] if running else [])
         return "\n".join([
             "[CHAT] A message from the user.",
-            *self._context_lines(plan),
             "",
             *self._plan_lines(plan),
             f"Running now: {running_text}",
@@ -1338,6 +1369,8 @@ class PlannerAgent:
         plan.project_name = str(project.get("name") or "")
         plan.project_description = str(project.get("description") or "")
         plan.project_background = str(project.get("background") or "")
+        updated_at = project.get("updated_at")
+        plan.project_updated_at = updated_at.isoformat() if hasattr(updated_at, "isoformat") else str(updated_at or "")
 
     async def _note_background(self, background: str) -> None:
         """Note in the task's activity when the system prompt starts carrying, changes or drops the background."""
@@ -1401,6 +1434,7 @@ class PlannerAgent:
                         project_name=data.get("project_name", ""),
                         project_description=data.get("project_description", ""),
                         project_background=data.get("project_background", ""),
+                        project_updated_at=data.get("project_updated_at", ""),
                         session_id=data.get("session_id"),
                         final_summary=data.get("final_summary", ""),
                         fail_reason=data.get("fail_reason", ""),

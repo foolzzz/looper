@@ -153,9 +153,24 @@ L5 代码契约始终最后，因为 L4 来自用户或 Planner，放在契约�
    飞书、Telegram 共用同一个 Claude 会话。决定保留：Manager 是用户唯一的管家，跨渠道连续的上下文是特性
    而不是缺陷。风险由两点兜住：项目列表、目标进度等状态每轮由代码重新注入（P3），会话增长由自动压缩
    承担并在 M2 中可观测。网页上的"新对话"只是页面视图的分隔，界面文案应如实说明。
-2. **agent 可能加载操作者个人的设置和记忆文件（需要验证）。** Claude Code 默认会读用户级设置和
-   `~/.claude/CLAUDE.md`。如果操作者在里面写了个人规则（语言、工作流、私有知识库路径），会进入每个 Worker
-   和 Planner 的上下文。需要先验证当前 CLI 的加载行为，再决定用 `--setting-sources`、`--bare` 等方式隔离。
+2. **agent 加载操作者个人的设置和记忆文件（已核实，M1 已隔离）。** 用 Claude Code 2.1.285 核实（`/context`、
+   stream-json 的 init 与 hook 事件、真实模型的探针问答）：M1 之前四类 agent 都会加载 `~/.claude/CLAUDE.md`
+   及其 `@import`、`CLAUDE.local.md`、用户与本地设置（模型、effort、env、hook）、个人 skill 和 claude.ai 同步的
+   skill、已装插件（连同其 skill、agent、SessionStart hook）、自定义 agent、输出风格、自动记忆，Manager 还会
+   加载全部 MCP。现在四类 agent 共用一组隔离参数：
+   - `--setting-sources project` 去掉用户级和本地设置，以及随之而来的用户、本地记忆、hook、skill、插件、
+     自定义 agent、输出风格和用户 MCP；项目自己的 `.claude/settings.json` 和 `CLAUDE.md` 照常加载，登录不受影响；
+   - `--strict-mcp-config` 去掉其余 MCP（项目 `.mcp.json`、claude.ai 连接器）；
+   - 只靠前两项不够：Claude Code 会从工作目录一直往上到 `/`，把每级目录的 `CLAUDE.md`、`.claude/CLAUDE.md`、
+     `.claude/rules/` 当作项目记忆读入，工作目录在 `$HOME` 下时 `~/.claude/CLAUDE.md` 仍会以"项目记忆"的身份
+     进来。所以再用 `--settings` 传 `claudeMdExcludes`，排除工作目录所在仓库以上的这些文件和 `~/.claude` 下的
+     用户记忆，并用 `autoMemoryEnabled: false` 关掉 `~/.claude/projects/` 下的自动记忆；
+   - `--bare` 和另设 `CLAUDE_CONFIG_DIR` 会丢掉操作者的登录，`--safe-mode` 会连项目 `CLAUDE.md` 一起去掉，
+     `--disable-slash-commands` 会连内置 skill 一起去掉，都不采用。
+
+   另外发现：Claude Code 2.1.285 默认开启 system prompt 快照，`--resume` 续接时沿用会话第一次请求的 system
+   prompt，忽略新传入的内容；M1 起四类 agent 都带 `--system-prompt-snapshot off`，常驻进程改了 prompt 重启后
+   确实用上新 prompt。仍未隔离的：管理员下发的托管设置、Claude Code 内置插件、运行 `loopx serve` 的进程环境变量。
 3. **常驻进程的上下文增长不可见。** Planner、Manager 会话越来越长，自动压缩何时发生、压掉了什么，目前无从
    得知。P2、P3 保证契约和状态不丢，但仍需观测。
 4. **花费不可见。** 默认不设上限（已决定），但单次运行和任务的累计花费、上下文用量目前都看不到；失败循环的

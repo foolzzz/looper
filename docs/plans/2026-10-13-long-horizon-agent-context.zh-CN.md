@@ -1,6 +1,6 @@
 # 开发计划：长程 Agent 上下文体系（M0–M6）
 
-- **状态：** 执行中（M0 已交付，M1 进行中）
+- **状态：** 执行中（M0、M1 已交付）
 - **依据：** [RFC：长程 Agent 的上下文体系 v0](../architecture/rfcs/long-horizon-agent-context-v0.zh-CN.md)。
   设计原则、分层模型和已作出的决定以 RFC 为准；本文只管"怎么分阶段做、做到什么算完成、现在做到哪了"。
 - **仓库：** `foolzzz/looper`，基线 `main`
@@ -22,7 +22,7 @@
 | 阶段 | 主题 | 状态 | 依赖 |
 |---|---|---|---|
 | M0 | 项目背景；四类 agent 的 prompt 分层；记录并展示 system prompt | ✅ 已交付（looper #13） | — |
-| M1 | 上下文隔离与可复现 | 🔄 进行中 | M0 |
+| M1 | 上下文隔离与可复现 | ✅ 已交付（looper #17） | M0 |
 | M1.5 | harness 与 role 分层；harness 继承链 | 待开始 | M1 |
 | M2 | 上下文与花费观测 | 待开始 | M0 |
 | M3 | 项目知识 | 待开始 | M0 |
@@ -47,6 +47,11 @@
     - Planner 的任务需求、Worker 与 Reviewer 的步骤定义移入 system prompt；
     - stdin 和每轮消息只保留动态内容：依赖步骤的产出、Worker 报告、进度、纠偏；
     - 记录里增加 `task` 层。
+  - **核实后补充的范围**：
+    - `--setting-sources project` 之外还要用 `--settings` 传 `claudeMdExcludes`：Claude Code 会从工作目录一直往上到 `/` 读每级目录的 `CLAUDE.md`、`.claude/CLAUDE.md`、`.claude/rules/`，工作目录在 `$HOME` 下时 `~/.claude/CLAUDE.md` 仍会以项目记忆进来；排除工作目录所在仓库以上的这些文件；
+    - 用 `autoMemoryEnabled: false` 关掉 `~/.claude/projects/` 下的自动记忆；
+    - 四类 agent 都带 `--system-prompt-snapshot off`：Claude Code 2.1.285 默认在 `--resume` 时沿用会话第一次的 system prompt，常驻进程改了 prompt 重启后其实还在用旧的；
+    - Manager 也不再加载 MCP；Worker 的 stdin 带上所依赖步骤的报告（`WORK_ITEM.dependencies`）。
 - **不做：** 不改 Claude Code 内置的 system prompt 和内置工具；不修改操作者 `~/.claude` 下的任何文件。
 - **验收：**
   - 真实 Claude 下，Manager、Planner、Worker 都能看到项目 `CLAUDE.md` 里的标记，看不到操作者个人 `CLAUDE.md` 里的内容；
@@ -154,6 +159,7 @@
 | 2026-10-13 | M1 开工 |
 | 2026-10-13 | RFC 决策 5：任务描述进 system prompt，分层改为四层，并入 M1 |
 | 2026-10-13 | RFC 决策 6：harness 与 role 分层，新增 M1.5（M1 之后、M2 之前） |
+| 2026-10-13 | M1 交付（looper #17）：四类 agent 共用一组隔离参数（`--setting-sources project`、`--strict-mcp-config`、`--settings` 的 `claudeMdExcludes` 与 `autoMemoryEnabled: false`），不再加载操作者的 `~/.claude/CLAUDE.md`、个人设置、hook、skill、插件、自定义 agent、输出风格、MCP 和自动记忆，项目 `CLAUDE.md` 与登录不受影响；system prompt 按哈希写成文件以 `--append-system-prompt-file` 传入，并加 `--system-prompt-snapshot off`；每次运行记录 `system_prompt_sha256` 和 `prompt_layers`，历史页展示；system prompt 改为角色 → 项目 → 任务 → 契约四层。验收：真实 Claude 下 Manager、Planner、Worker、Reviewer 都看到项目 `CLAUDE.md` 和背景里的标记，个人 `CLAUDE.md` 及其导入文件里的内容都答不出；Planner 产出有效计划，Worker 判为 completed，Reviewer 给出 `passed`；Manager 两轮哈希相同，改背景后 Planner 续接重启、哈希变化并答出新背景；单测与真实 PG 619 通过 |
 
 ## 5. 不属于本 RFC 的待办
 

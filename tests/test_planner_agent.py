@@ -8,6 +8,7 @@ pool on the bus that answers each dispatch with a scripted result.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import tempfile
@@ -18,6 +19,7 @@ from typing import Any
 import pytest
 
 from loopx.agents.bus import MessageBus
+from loopx.agents.claude_cli import ISOLATION_ID, isolation_args
 from loopx.agents.message import (
     MANAGER_ADDRESS,
     TASK_ROUTER_ADDRESS,
@@ -261,6 +263,16 @@ def _flag(argv: list[str], name: str) -> str | None:
     return argv[argv.index(name) + 1] if name in argv else None
 
 
+def _sha(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _in_order(text: str, *parts: str) -> None:
+    """Every part is in ``text``, in this order."""
+    at = [text.index(part) for part in parts]
+    assert at == sorted(at), f"out of order: {parts}"
+
+
 # --- Planning ---
 
 
@@ -283,6 +295,12 @@ class TestPlanning:
         assert h.dispatched_at_turn == [1, 1, 3]
         assert h.work_items[2].payload["acceptance_criteria"] == ["s3 works"]
         assert h.work_items[0].payload["context"] == {"work_dir": str(h.work_dir)}
+        # A step gets what the steps it depends on reported (their Workers' words, as data).
+        assert h.work_items[0].payload["dependencies"] == []
+        assert h.work_items[2].payload["dependencies"] == [
+            {"step": "s1", "summary": "did it", "changed_files": ["calc.py"]},
+            {"step": "s2", "summary": "did it", "changed_files": ["calc.py"]},
+        ]
 
         accepted = next(e for e in h.statuses if e.message_type == MessageType.TASK_ACCEPTED)
         assert accepted.payload["step_count"] == 3
@@ -293,10 +311,14 @@ class TestPlanning:
 
         first, *decisions = [turn["text"] for turn in claude.turns()]
         assert first.startswith("[PLAN]")
-        assert "Task: build the calc package" in first
-        assert "Project: calc: a tiny calculator" in first
-        assert f"Working directory: {h.work_dir}" in first
         assert all(text.startswith("[DECISION]") for text in decisions)
+        # The task is the system prompt's task section; the turns carry only what changes.
+        (prompt,) = claude.prompts()
+        task = prompt[prompt.index("## Task"):]
+        for part in ("t1", "build the calc package", "calc", "a tiny calculator", str(h.work_dir)):
+            assert part in task
+        for text in (first, *decisions):
+            assert "build the calc package" not in text and str(h.work_dir) not in text
         assert "- s3 [pending] do s3 (depends on: s1, s2; review: no; retries: 0)" in decisions[0]
         assert any("Plan created: 3 step(s): s1, s2, s3 (after s1+s2)" in line for line in activity(agent_db))
 
@@ -368,6 +390,7 @@ class TestDecisions:
         assert review.payload["context"] == {"work_dir": str(h.work_dir)}
         assert review.payload["acceptance_criteria"] == ["s1 works"]
         assert review.payload["work_result"]["changed_files"] == {"calc.py": "added"}
+        assert (review.payload["requirement"], review.payload["step_key"]) == ("build the calc package", "s1")
         texts = [turn["text"] for turn in claude.turns()]
         assert "Allowed decisions now: review, retry (2 left), replan, fail." in texts[1]
         assert "needs a passing review before it can be accepted" in texts[2]
@@ -399,10 +422,13 @@ class TestDecisions:
 
         workers = [item.target.agent_id for item in h.work_items]
         assert len(workers) == 3 and len(set(workers)) == 3
-        first, second, third = (item.payload["instruction"] for item in h.work_items)
-        assert first == "do s1"
-        assert "attempt 2" in second and "- fix the import" in second
-        assert "attempt 3" in third and "- fix the import\n- add the sub function" in third
+        assert [item.payload["instruction"] for item in h.work_items] == ["do s1"] * 3
+        assert [item.payload["attempt"] for item in h.work_items] == [1, 2, 3]
+        assert [item.payload["feedback"] for item in h.work_items] == [
+            [], ["fix the import"], ["fix the import", "add the sub function"]]
+        # Each Worker also gets the task and its step's label.
+        assert {item.payload["requirement"] for item in h.work_items} == {"build the calc package"}
+        assert {item.payload["step_key"] for item in h.work_items} == {"s1"}
         repair = claude.turns()[4]["text"]
         assert "retry is not allowed: step s1 has used its 2 retries; allowed now: replan, fail" in repair
         final = h.final()
@@ -553,22 +579,31 @@ class TestResidentClaude:
 
         monkeypatch.setattr(agent_configs, "get_config", _config)
         claude = planner_claude(plan(step("s1")), decide("accept"))
-        drive(claude, always(WORK_OK))
+        h = drive(claude, always(WORK_OK))
 
         (argv,) = claude.argvs()
         assert "--dangerously-skip-permissions" not in argv
         assert _flag(argv, "--tools") == "Read,Grep,Glob"
         assert _flag(argv, "--allowedTools") == "Read,Grep,Glob"
         assert _flag(argv, "--permission-mode") == "dontAsk"
-        assert "--strict-mcp-config" in argv
         assert _flag(argv, "--input-format") == "stream-json"
         assert _flag(argv, "--output-format") == "stream-json"
         assert (_flag(argv, "--model"), _flag(argv, "--max-turns")) == ("claude-test", "9")
-        prompt = _flag(argv, "--append-system-prompt")
-        assert prompt == f"You plan carefully.\n\n{REPLY_CONTRACT}"
+        # The shared isolation flags: no personal settings, memory, hooks, plugins or MCP servers.
+        isolation = isolation_args(h.work_dir)
+        at = argv.index(isolation[0])
+        assert argv[at:at + len(isolation)] == isolation
+        # The system prompt is a file named by its hash, read again on every launch.
+        assert "--append-system-prompt" not in argv
+        assert _flag(argv, "--system-prompt-snapshot") == "off"
+        (prompt,) = claude.prompts()
+        assert Path(_flag(argv, "--append-system-prompt-file") or "").name == f"{_sha(prompt)}.md"
+        _in_order(prompt, "You plan carefully.\n\n## Task\n", "build the calc package", REPLY_CONTRACT)
+        assert prompt.endswith(REPLY_CONTRACT)
         # Every turn arrives on stdin; the command line carries no prompt.
         takes_value = {"--input-format", "--output-format", "--tools", "--allowedTools", "--permission-mode",
-                       "--append-system-prompt", "--model", "--max-turns"}
+                       "--append-system-prompt-file", "--system-prompt-snapshot", "--setting-sources",
+                       "--settings", "--model", "--max-turns"}
         assert [a for i, a in enumerate(argv) if not a.startswith("--") and argv[i - 1] not in takes_value] == []
 
     def test_each_turn_is_recorded_with_its_own_cost(self, planner_claude: Any, agent_db: Any) -> None:
@@ -588,61 +623,80 @@ class TestResidentClaude:
         assert finishes[1]["output_text"].endswith("```")
 
 
-# --- The project background in the system prompt ---
+# --- The system prompt: role, project background, task, reply contract ---
 
 
 def _project(name: str = "calc", *, background: str = "", description: str = "") -> dict[str, Any]:
     return {"id": "proj-1", "name": name, "description": description, "work_dir": "/srv/calc",
-            "background": background}
+            "background": background, "updated_at": "2026-10-13T12:00:00+00:00"}
 
 
 @pytest.fixture
-def planner_row(monkeypatch: pytest.MonkeyPatch) -> str:
-    """The ``planner`` agent config row, with the role prompt it returns."""
+def planner_row(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+    """The ``planner`` agent config row; a test may change its prompt between turns."""
     from loopx.db import agent_configs
+
+    row = {"system_prompt": "You plan carefully.", "default_prompt": "You plan.", "timeout_seconds": 60,
+           "model": None, "max_turns": 0}
 
     async def _config(agent_id: str) -> dict[str, Any]:
         assert agent_id == "planner"
-        return {"system_prompt": "You plan carefully.", "timeout_seconds": 60, "model": None, "max_turns": 0}
+        return dict(row)
 
     monkeypatch.setattr(agent_configs, "get_config", _config)
-    return "You plan carefully."
+    return row
 
 
-def _prompt(argv: list[str]) -> str:
-    prompt = _flag(argv, "--append-system-prompt")
-    assert prompt is not None
-    return prompt
+def _starts(agent_db: Any) -> list[dict[str, Any]]:
+    return [call.kwargs for call in agent_db.start_record.await_args_list]
 
 
 @pytest.mark.usefixtures("agent_db", "planner_row")
-class TestProjectBackground:
-    def test_system_prompt_has_the_background_before_the_reply_contract(
+class TestSystemPrompt:
+    def test_the_layers_are_role_project_task_then_the_reply_contract(
         self, planner_claude: Any, agent_db: Any,
     ) -> None:
         agent_db.get_task_project.return_value = _project(background="Use uv.\nPython 3.12.")
         claude = planner_claude(plan(step("s1")), decide("accept"))
-        drive(claude, always(WORK_OK))
+        h = drive(claude, always(WORK_OK))
 
-        (argv,) = claude.argvs()
-        prompt = _prompt(argv)
-        assert prompt == f"You plan carefully.\n\n## Project: calc\nUse uv.\nPython 3.12.\n\n{REPLY_CONTRACT}"
+        (prompt,) = claude.prompts()
+        _in_order(prompt, "You plan carefully.\n\n", "## Project: calc\nUse uv.\nPython 3.12.\n\n",
+                  "## Task\n", "build the calc package", REPLY_CONTRACT)
+        assert prompt.startswith("You plan carefully.\n\n") and prompt.endswith(REPLY_CONTRACT)
         agent_db.get_task_project.assert_awaited_with("t1")  # the task's project as it is now
-        # Every turn records the system prompt it ran with.
-        starts = [call.kwargs for call in agent_db.start_record.await_args_list]
+        # Every turn records the system prompt it ran with, its hash and its layers.
+        starts = _starts(agent_db)
         assert [s["metadata"]["system_prompt"] for s in starts] == [prompt, prompt]
+        assert {s["metadata"]["system_prompt_sha256"] for s in starts} == {_sha(prompt)}
+        layers = starts[0]["metadata"]["prompt_layers"]
+        assert layers["role"] == {"config_id": "planner", "sha256": _sha("You plan carefully."), "recommended": False}
+        assert layers["project"] == {"id": "proj-1", "background_sha256": _sha("Use uv.\nPython 3.12."),
+                                     "updated_at": "2026-10-13T12:00:00+00:00"}
+        task = prompt[prompt.index("## Task"):prompt.index(REPLY_CONTRACT)].rstrip("\n")
+        assert layers["task"] == {"kind": "plan", "task_id": "t1", "step_id": None, "sha256": _sha(task)}
+        assert layers["contract"] == {"name": "REPLY_CONTRACT", "sha256": _sha(REPLY_CONTRACT)}
+        assert layers["isolation"] == ISOLATION_ID
+        assert str(h.work_dir) in task
         assert [line for line in activity(agent_db) if "background" in line] == [
             "Project background applied (20 chars)"]
 
-    def test_without_a_background_the_prompt_is_the_role_and_the_contract(
-        self, planner_claude: Any, agent_db: Any,
+    def test_the_recommended_role_prompt_is_recorded_as_such(
+        self, planner_claude: Any, agent_db: Any, planner_row: dict[str, Any],
     ) -> None:
+        planner_row["system_prompt"] = planner_row["default_prompt"]
+        claude = planner_claude(plan(step("s1")), decide("accept"))
+        drive(claude, always(WORK_OK))
+        assert _starts(agent_db)[0]["metadata"]["prompt_layers"]["role"]["recommended"] is True
+
+    def test_without_a_background_there_is_no_project_section(self, planner_claude: Any, agent_db: Any) -> None:
         agent_db.get_task_project.return_value = _project(background="")
         claude = planner_claude(plan(step("s1")), decide("accept"))
         drive(claude, always(WORK_OK))
 
-        (argv,) = claude.argvs()
-        assert _prompt(argv) == f"You plan carefully.\n\n{REPLY_CONTRACT}"
+        (prompt,) = claude.prompts()
+        assert prompt.startswith("You plan carefully.\n\n## Task\n") and "## Project" not in prompt
+        assert _starts(agent_db)[0]["metadata"]["prompt_layers"]["project"]["background_sha256"] is None
         assert not [line for line in activity(agent_db) if "background" in line]
 
     @pytest.mark.parametrize(("new_background", "note"), [
@@ -666,18 +720,49 @@ class TestProjectBackground:
 
         assert h.final().payload["status"] == "completed"  # type: ignore[union-attr]
         first, second = claude.argvs()
-        assert _prompt(first) == f"You plan carefully.\n\n## Project: calc\nv1\n\n{REPLY_CONTRACT}"
-        expected = f"## Project: calc\n{new_background}\n\n" if new_background else ""
-        assert _prompt(second) == f"You plan carefully.\n\n{expected}{REPLY_CONTRACT}"
+        first_prompt, second_prompt = claude.prompts()
+        assert "## Project: calc\nv1\n\n## Task" in first_prompt
+        expected = f"## Project: calc\n{new_background}\n\n## Task" if new_background else "carefully.\n\n## Task"
+        assert expected in second_prompt
+        assert second_prompt.endswith(REPLY_CONTRACT)
+        # A changed prompt is a new file with a new hash; the restarted process resumes the session.
+        assert _flag(first, "--append-system-prompt-file") != _flag(second, "--append-system-prompt-file")
+        assert Path(_flag(second, "--append-system-prompt-file") or "").name == f"{_sha(second_prompt)}.md"
         assert _flag(first, "--resume") is None
         assert _flag(second, "--resume") == "sess-p"
+        assert [s["metadata"]["system_prompt_sha256"] for s in _starts(agent_db)] == [
+            _sha(first_prompt), _sha(second_prompt), _sha(second_prompt)]
         # The plan turn ran in the first process; both decisions in the restarted one.
         first_pid, second_pid = claude.pids()
         assert [turn["pid"] for turn in claude.turns()] == [first_pid, second_pid, second_pid]
         notes = [line for line in activity(agent_db) if line.startswith("Project background")]
         assert notes == ["Project background applied (2 chars)", note]
 
-    def test_each_turn_reads_the_project_as_it_is_now(self, planner_claude: Any, agent_db: Any) -> None:
+    def test_a_changed_role_prompt_restarts_claude_resuming_its_session(
+        self, planner_claude: Any, agent_db: Any, planner_row: dict[str, Any],
+    ) -> None:
+        claude = planner_claude(plan(step("s1")), decide("accept"))
+
+        async def scenario(h: Harness) -> None:
+            await h.start()
+            await h.until(lambda: h.held)
+            planner_row["system_prompt"] = "You plan very carefully."
+            await h.release(WORK_OK)
+            await h.finished()
+
+        drive(claude, hold_first(), scenario)
+
+        first, second = claude.argvs()
+        first_prompt, second_prompt = claude.prompts()
+        assert first_prompt.startswith("You plan carefully.\n\n")
+        assert second_prompt.startswith("You plan very carefully.\n\n")
+        assert _flag(second, "--resume") == "sess-p"
+        roles = [s["metadata"]["prompt_layers"]["role"]["sha256"] for s in _starts(agent_db)]
+        assert roles == [_sha("You plan carefully."), _sha("You plan very carefully.")]
+
+    def test_a_task_moved_to_another_project_gets_its_task_section_updated(
+        self, planner_claude: Any, agent_db: Any,
+    ) -> None:
         agent_db.get_task_project.return_value = _project("calc", description="a calculator")
         claude = planner_claude(plan(step("s1")), decide("accept"))
 
@@ -691,10 +776,11 @@ class TestProjectBackground:
 
         drive(claude, hold_first(), scenario)
 
-        plan_turn, decision_turn = (turn["text"] for turn in claude.turns())
-        assert "Project: calc: a calculator" in plan_turn
-        assert "Project: tools: handy tools" in decision_turn
-        assert "a calculator" not in decision_turn
+        first_prompt, second_prompt = claude.prompts()
+        assert "calc" in first_prompt and "a calculator" in first_prompt
+        assert "tools" in second_prompt and "handy tools" in second_prompt and "a calculator" not in second_prompt
+        for turn in claude.turns():
+            assert "a calculator" not in turn["text"] and "handy tools" not in turn["text"]
 
     def test_a_failed_read_keeps_the_last_project_and_its_claude(self, planner_claude: Any, agent_db: Any) -> None:
         agent_db.get_task_project.return_value = _project(background="v1", description="a calculator")
@@ -711,8 +797,8 @@ class TestProjectBackground:
 
         assert h.final().payload["status"] == "completed"  # type: ignore[union-attr]
         (argv,) = claude.argvs()  # the system prompt did not change, so Claude was not restarted
-        assert "## Project: calc\nv1\n\n" in _prompt(argv)
-        assert "Project: calc: a calculator" in claude.turns()[1]["text"]
+        (prompt,) = claude.prompts()
+        assert "## Project: calc\nv1\n\n" in prompt and "a calculator" in prompt
 
 
 # --- Ending the task through the TaskRouter ---

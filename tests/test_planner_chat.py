@@ -261,7 +261,7 @@ class TestPlannerChatThroughClaude:
         assert reply_text.startswith("我转给它。") and "已经结束" in reply_text
         decision = claude.turns()[2]["text"]
         assert "arrived after the Worker finished" in decision and "also log errors" in decision
-        assert "also log errors" in h.work_items[1].payload["instruction"]
+        assert h.work_items[1].payload["feedback"] == ["also log errors"]
 
     def test_plain_reply_takes_no_action(self, planner_claude: Any) -> None:
         claude = planner_claude(plan(step("s1")), chat("第 1 步正在执行。"), decide("accept"))

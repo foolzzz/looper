@@ -1,13 +1,21 @@
-"""Reading Claude's stream-json output line by line, with no line-length limit."""
+"""Launching the Claude Code CLI for an agent and recording its runs.
+
+Covers reading stream-json output line by line with no line-length limit, the
+flags that keep the operator's personal Claude Code configuration out of an
+agent's run, the system prompt file flags, and the run record.
+"""
 
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
+from pathlib import Path
 from typing import Any
 
 import pytest
 
-from loopx.agents.claude_cli import iter_lines
+from loopx.agents.claude_cli import ISOLATION_ID, isolation_args, iter_lines, system_prompt_args
 
 
 def _lines(*chunks: bytes) -> list[bytes]:
@@ -98,19 +106,24 @@ class TestClaudeRunRecorder:
         assert finish["status"] == "failed"
         assert expected in finish["error"]
 
-    def test_records_the_appended_system_prompt(self, agent_db: Any) -> None:
+    def test_records_the_system_prompt_its_hash_and_its_layers(self, agent_db: Any) -> None:
         from loopx.agents.claude_cli import ClaudeRunRecorder
+        from loopx.agents.system_prompt import SystemPrompt
 
+        text = "Be brief.\n\n## Project: calc\nUse uv."
+        layers = {"role": {"config_id": "worker"}, "isolation": ISOLATION_ID}
+        command = ["claude", "--append-system-prompt-file", "/rt/.local/prompts/abc.md"]
         recorder = ClaudeRunRecorder(
             agent_id="worker-1", task_id="task-1", cwd="/tmp/proj", input_text="go",
-            command=["claude", "--append-system-prompt", "Be brief.\n\n## Project: calc\nUse uv."],
-            system_prompt="Be brief.\n\n## Project: calc\nUse uv.",
+            command=command, system_prompt=SystemPrompt(text, layers),
         )
         asyncio.run(recorder.start())
         metadata = agent_db.start_record.await_args.kwargs["metadata"]
-        # The exact argv stays as it was; the prompt is also kept on its own for display.
-        assert metadata["command"] == ["claude", "--append-system-prompt", "Be brief.\n\n## Project: calc\nUse uv."]
-        assert metadata["system_prompt"] == "Be brief.\n\n## Project: calc\nUse uv."
+        # The argv stays as it was; the prompt itself, its hash and its layers are kept beside it.
+        assert metadata["command"] == command
+        assert metadata["system_prompt"] == text
+        assert metadata["system_prompt_sha256"] == hashlib.sha256(text.encode()).hexdigest()
+        assert metadata["prompt_layers"] == layers
 
     def test_database_errors_never_fail_the_run(self, agent_db: Any) -> None:
         agent_db.start_record.side_effect = RuntimeError("database pool not initialised")
@@ -172,3 +185,86 @@ def test_thinking_progress_is_one_row_per_thinking_phase(agent_db: Any) -> None:
     ]
     updates = [(call.args[1], call.args[2]["estimated_tokens"]) for call in agent_db.update_event.await_args_list]
     assert updates == [(1, 200), (1, 300), (3, 80)]
+
+
+# --- The flags that keep the operator's personal Claude Code configuration out ---
+
+
+def _settings(args: list[str]) -> dict[str, Any]:
+    return json.loads(args[args.index("--settings") + 1])
+
+
+def _memory_patterns(directory: Path) -> list[str]:
+    return [f"{directory}/CLAUDE.md", f"{directory}/.claude/CLAUDE.md", f"{directory}/.claude/rules/**"]
+
+
+class TestIsolationArgs:
+    def test_only_the_project_settings_load_and_no_mcp_server(self, tmp_path: Path) -> None:
+        args = isolation_args(tmp_path)
+        # User and local settings (with their hooks, plugins, skills, agents and
+        # output style) stay out; the project's own settings and CLAUDE.md load.
+        assert args[args.index("--setting-sources") + 1] == "project"
+        assert "--strict-mcp-config" in args
+        assert _settings(args)["autoMemoryEnabled"] is False
+
+    def test_memory_files_above_the_repository_are_excluded(self, tmp_path: Path) -> None:
+        home = tmp_path / "home"
+        repo = home / "repo"
+        (repo / ".git").mkdir(parents=True)
+        work = repo / "pkg" / "app"
+        work.mkdir(parents=True)
+
+        excludes = _settings(isolation_args(work))["claudeMdExcludes"]
+
+        # Claude Code reads CLAUDE.md, .claude/CLAUDE.md and .claude/rules/ in
+        # every directory up to the root; above the repository they are not the
+        # project's (the home directory's .claude/ is the operator's own).
+        for directory in (home, tmp_path, *tmp_path.parents):
+            for pattern in _memory_patterns(directory):
+                assert pattern.replace("//", "/") in excludes
+        # The repository's own memory files load, at its root and below.
+        for directory in (repo, repo / "pkg", work):
+            for pattern in _memory_patterns(directory):
+                assert pattern not in excludes
+
+    def test_without_a_repository_the_work_directory_is_the_project(self, tmp_path: Path) -> None:
+        work = tmp_path / "a" / "b"
+        work.mkdir(parents=True)
+        excludes = _settings(isolation_args(work))["claudeMdExcludes"]
+        assert f"{tmp_path / 'a'}/CLAUDE.md" in excludes
+        assert f"{work}/CLAUDE.md" not in excludes
+
+    def test_the_operators_claude_directory_is_excluded_even_as_the_repository(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        home = tmp_path / "home"
+        (home / ".git").mkdir(parents=True)  # a home directory kept in git
+        monkeypatch.setenv("HOME", str(home))
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "config"))
+        excludes = _settings(isolation_args(home))["claudeMdExcludes"]
+        for directory in (home / ".claude", tmp_path / "config"):
+            assert f"{directory}/CLAUDE.md" in excludes
+            assert f"{directory}/rules/**" in excludes
+        assert f"{home}/CLAUDE.md" not in excludes
+
+    def test_a_symlinked_work_directory_is_covered_by_both_paths(self, tmp_path: Path) -> None:
+        real = tmp_path / "real" / "work"
+        real.mkdir(parents=True)
+        (tmp_path / "link").symlink_to(tmp_path / "real")
+        excludes = _settings(isolation_args(tmp_path / "link" / "work"))["claudeMdExcludes"]
+        assert f"{tmp_path / 'link'}/CLAUDE.md" in excludes
+        assert f"{(tmp_path / 'real').resolve()}/CLAUDE.md" in excludes
+
+    def test_the_same_directory_gives_the_same_flags(self, tmp_path: Path) -> None:
+        # A resident agent compares its command between turns; it must not change by itself.
+        assert isolation_args(tmp_path) == isolation_args(str(tmp_path))
+        assert isinstance(ISOLATION_ID, str) and ISOLATION_ID
+
+
+def test_the_system_prompt_comes_from_its_file_and_is_read_again_on_resume(tmp_path: Path) -> None:
+    path = tmp_path / "abc.md"
+    # Without "--system-prompt-snapshot off", a resumed session keeps the
+    # prompt of its first request and ignores a changed file.
+    assert system_prompt_args(path) == [
+        "--append-system-prompt-file", str(path), "--system-prompt-snapshot", "off",
+    ]

@@ -97,7 +97,7 @@ Task 是系统的一等实体，代表一个完整的用户需求。
   - 最后一条消息以 JSON 报告结尾，且其中 `status` 为 `completed`；
   - 报告里 `changed_files` 列出的文件都存在，`deleted_files` 列出的文件都已删除。
 - **Reviewer**：必须给出布尔类型的 `passed`，纯文本不算通过
-- **Worker 和 Reviewer 的提示怎么分**：稳定的规则放系统提示（`--append-system-prompt`），每一步的数据放 stdin 上的第一个 user turn。系统提示是 `worker` 行的角色提示（Worker 和 Reviewer 共用，为空或读不到时用默认值）、项目段，最后是 `WORK_CONTRACT`（这一步的规则和上面的 JSON 报告格式）或 `REVIEW_CONTRACT`（验收的规则和 `passed` 结论格式）。user turn 只有这一步的 instruction（含重试反馈）、工作目录、目标文件、验收标准和验证命令；Reviewer 的 user turn 还有被验收的 Worker 报告（summary、改动和删除的文件），作为待核对的数据，不进系统提示。运行中转来的消息（用户聊天、Planner 纠偏）仍是 user turn，不重复契约。`worker` 行的 `system_prompt` 以前只存不用，现在生效；启动时还是旧默认提示的会换成新默认（只描述角色，格式交给契约），改过的保留
+- **Worker 和 Reviewer 的提示怎么分**：会话期间不变的内容放系统提示（以 `--append-system-prompt-file` 传入），其他 agent 的产出放 stdin 上的第一个 user turn。系统提示依次是 `worker` 行的角色提示（Worker 和 Reviewer 共用，为空或读不到时用默认值）、项目段、任务段（`## Task`），最后是 `WORK_CONTRACT`（这一步的规则和上面的 JSON 报告格式）或 `REVIEW_CONTRACT`（验收的规则和 `passed` 结论格式）。Worker 的任务段先给整体任务需求作背景，再给这一步的标签、instruction、工作目录、目标文件、验收标准、验证命令，重做时加上第几次和之前的反馈；Reviewer 的任务段是整体需求加上被验收步骤的 instruction 和验收标准。Worker 的 user turn 只有一句开始提示和所依赖步骤的报告（summary、改动的文件）；Reviewer 的 user turn 是被验收的 Worker 报告（summary、改动和删除的文件），作为待核对的数据，不进系统提示。运行中转来的消息（用户聊天、Planner 纠偏）仍是 user turn，不重复契约。`worker` 行的 `system_prompt` 以前只存不用，现在生效；启动时还是旧默认提示的会换成新默认（只描述角色，格式交给契约），改过的保留
 - **回复契约**：每次回复以且只以一个 ```` ```json ```` 代码块结尾，由 `planner_protocol.py` 用类型化的 dataclass 和枚举严格校验：不允许未知字段，step id 唯一，`depends_on` 只能指向已知步骤且无环，最多 8 步（`MAX_STEPS`），决定必须在当前允许的范围内，重试不超限，replan 不能动已开始的步骤。不合规的回复有一次修复 turn，提示里写明错在哪里
 - **兜底**：
   - 规划仍然失败（修复后仍不合规、Claude 出错、超时、无法启动）：任务失败（fail-closed），原因写进 `tasks.error` 和 activity，不会退回成单步执行
@@ -105,8 +105,9 @@ Task 是系统的一等实体，代表一个完整的用户需求。
   - 聊天 turn 失败：把错误回给用户，不做任何动作
   - Claude 进程中途退出：这个 turn 失败，下一个 turn 用 `--resume <session_id>` 起新进程，session id 存在 Planner 的计划文件里
 - **结果**：任务完成时 `tasks.result_summary` 是最后一个 accept 的步骤给出的 summary（没有时用自动生成的逐步摘要）；任务失败时 `tasks.error` 是 Planner 的失败摘要
-- **配置**：`agent_configs` 的 `planner` 行每个 turn 读一次。`system_prompt` 是可编辑的角色提示，代码在后面接上项目段和回复契约；`timeout_seconds` 限制每个 turn（默认 1200 秒，0 表示不限），超时的 turn 失败并杀掉 Claude；`max_turns` 大于 0 时传 `--max-turns`，`model` 有值时传 `--model`；`permission_mode` 不适用。命令变了（包括项目背景变了），下一个 turn 用 `--resume` 重启 Claude。数据库里还是旧默认提示的会在启动时换成新默认，改过的保留
-- **记录**：每个 turn 都会产生 Claude 费用，各记一条 `llm_records`（agent_id 为 `planner-<task_id>`，带这个 turn 自己的花费和进程 `pid`）；决定以简短摘要写进 activity。Manager、Planner、Worker、Reviewer 的每次运行都在 `llm_records.metadata.system_prompt` 记下 LoopX 追加的系统提示，`metadata.command` 仍是完整 argv。会话历史页的每条运行有可折叠的「System prompt」段，标明这是 LoopX 追加的部分，不含 Claude Code 内置的系统提示；Chat 页的 Planner 和 Worker/Reviewer 视图复用同一个组件
+- **配置**：`agent_configs` 的 `planner` 行每个 turn 读一次。`system_prompt` 是可编辑的角色提示，代码在后面接上项目段、任务段（任务 id、项目名和简介、工作目录、任务需求）和回复契约；每个 turn 的消息只带变化的内容（计划进度、结果、聊天、监督观察），不再重复任务需求；`timeout_seconds` 限制每个 turn（默认 1200 秒，0 表示不限），超时的 turn 失败并杀掉 Claude；`max_turns` 大于 0 时传 `--max-turns`，`model` 有值时传 `--model`；`permission_mode` 不适用。命令或系统提示的哈希变了（包括项目背景变了），下一个 turn 用 `--resume` 重启 Claude，并用新的系统提示（`--system-prompt-snapshot off`，否则 Claude Code 续接时沿用会话第一次请求的旧提示）。数据库里还是旧默认提示的会在启动时换成新默认，改过的保留
+- **记录**：每个 turn 都会产生 Claude 费用，各记一条 `llm_records`（agent_id 为 `planner-<task_id>`，带这个 turn 自己的花费和进程 `pid`）；决定以简短摘要写进 activity。Manager、Planner、Worker、Reviewer 的每次运行都在 `llm_records.metadata` 记下 LoopX 追加的系统提示（`system_prompt`）、它的 `system_prompt_sha256` 和各层来源 `prompt_layers`（角色、项目、任务、契约、隔离参数版本），`metadata.command` 仍是完整 argv；系统提示文件按哈希存在 runtime root 的 `.local/prompts/` 下，只写一次。会话历史页的每条运行有可折叠的「System prompt」段，标题显示长度、短哈希和 `isolated` 标记，展开后先逐层列出来源（角色是推荐版还是改过的、项目和背景版本、任务、契约），再是原文；不含 Claude Code 内置的系统提示。Chat 页的 Planner 和 Worker/Reviewer 视图复用同一个组件
+- **不加载操作者的个人配置**：四类 agent 的启动命令都带同一组隔离参数（`claude_cli.isolation_args`）：`--setting-sources project`、`--strict-mcp-config`，以及 `--settings` 里的 `autoMemoryEnabled: false` 和 `claudeMdExcludes`（排除工作目录所在仓库以上各级目录的 `CLAUDE.md`、`.claude/CLAUDE.md`、`.claude/rules/`，以及 `~/.claude` 下的用户记忆）。agent 只看到 LoopX 拼装的内容和项目仓库自己的 `CLAUDE.md`；操作者的 `~/.claude/CLAUDE.md`、用户设置、hook、个人 skill、插件、自定义 agent、输出风格、MCP 和自动记忆都不加载，登录不受影响。核实过程见 [Agent 系统架构](architecture/agent-system.md#what-an-agents-claude-code-loads)
 
 ---
 

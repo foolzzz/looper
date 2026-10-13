@@ -5,12 +5,104 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
-from typing import Any
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from .system_prompt import SystemPrompt
 
 logger = logging.getLogger(__name__)
+
+
+# --- What an agent's Claude Code loads ---
+#
+# An agent sees what LoopX composes and the project's own CLAUDE.md, not the
+# personal Claude Code configuration of whoever runs LoopX. Verified against
+# Claude Code 2.1.285:
+# - "--setting-sources project" leaves out the user and local settings and,
+#   with them, user and local memory (~/.claude/CLAUDE.md and its @imports,
+#   CLAUDE.local.md), user hooks, skills, custom agents, output styles,
+#   plugins (their skills, agents and hooks too) and user MCP servers. The
+#   project's .claude/settings.json and its CLAUDE.md still load.
+# - "--strict-mcp-config" also drops MCP servers from other sources, such as
+#   claude.ai connectors.
+# - Claude Code reads CLAUDE.md, .claude/CLAUDE.md and .claude/rules/ in every
+#   directory from the working directory up to "/" as project memory, so a
+#   directory under $HOME still loads ~/.claude/CLAUDE.md; "claudeMdExcludes"
+#   leaves out everything above the repository.
+# - "autoMemoryEnabled": false turns off the per-directory auto memory under
+#   ~/.claude/projects/.
+# Authentication is unaffected. "--bare" and a separate CLAUDE_CONFIG_DIR were
+# rejected: both lose the operator's login.
+
+# Names this flag set in every run's record (prompt_layers.isolation); change
+# it whenever the flags change.
+ISOLATION_ID = "personal-config-off/v1"
+
+
+def _repository_root(directory: Path) -> Path:
+    """The nearest directory at or above ``directory`` holding ``.git``; ``directory`` without one."""
+    for candidate in (directory, *directory.parents):
+        if (candidate / ".git").exists():
+            return candidate
+    return directory
+
+
+def _outside_memory(cwd: Path) -> list[str]:
+    """The memory files Claude Code would read from outside the project.
+
+    That is, from every directory above the repository root (the work
+    directory itself when it is not in a repository), and the operator's
+    user memory wherever the repository is.
+    """
+    patterns: list[str] = []
+
+    def add(directory: Path, *names: str) -> None:
+        base = str(directory).rstrip("/")
+        for name in names:
+            if (pattern := f"{base}/{name}") not in patterns:
+                patterns.append(pattern)
+
+    # Both spellings of a path through a symbolic link.
+    for directory in dict.fromkeys((cwd.absolute(), cwd.resolve())):
+        for parent in _repository_root(directory).parents:
+            add(parent, "CLAUDE.md", ".claude/CLAUDE.md", ".claude/rules/**")
+    config_dirs = [Path.home() / ".claude"]
+    if os.environ.get("CLAUDE_CONFIG_DIR"):
+        config_dirs.append(Path(os.environ["CLAUDE_CONFIG_DIR"]).expanduser())
+    for config_dir in config_dirs:
+        add(config_dir.absolute(), "CLAUDE.md", "rules/**")
+    return patterns
+
+
+def isolation_args(cwd: str | os.PathLike[str]) -> list[str]:
+    """The flags that keep the operator's personal Claude Code configuration out of an agent run in ``cwd``.
+
+    Every agent's command carries them, so the agents cannot diverge. The
+    result depends only on ``cwd`` (and where the operator's configuration
+    lives), so a resident agent's command stays the same between turns.
+    """
+    settings = {"autoMemoryEnabled": False, "claudeMdExcludes": _outside_memory(Path(cwd))}
+    return [
+        "--setting-sources", "project",
+        "--strict-mcp-config",
+        "--settings", json.dumps(settings, ensure_ascii=False, separators=(",", ":")),
+    ]
+
+
+def system_prompt_args(prompt_file: Path) -> list[str]:
+    """Append the system prompt in ``prompt_file`` (``SystemPrompt.write_file``).
+
+    By default Claude Code keeps the system prompt of a session's first
+    request and sends it again on every resume, ignoring a changed file; the
+    snapshot is turned off so that a restarted resident agent runs with the
+    prompt its record names.
+    """
+    return ["--append-system-prompt-file", str(prompt_file), "--system-prompt-snapshot", "off"]
 
 _READ_CHUNK = 64 * 1024
 
@@ -225,12 +317,11 @@ class ClaudeRunRecorder:
     """Record one Claude CLI run in ``llm_records``.
 
     The record opens as ``running`` with the launch command, the system
-    prompt LoopX appended (also inside the command, kept on its own for
-    display) and the working directory, gets every stream-json event as it
-    arrives (partial text
-    deltas excepted: the full message follows), and closes with the outcome,
-    usage and cost. Recording is observability: a database error is logged
-    and never fails the run.
+    prompt LoopX appended (its text, its sha256 and its layers' sources) and
+    the working directory, gets every stream-json event as it arrives
+    (partial text deltas excepted: the full message follows), and closes with
+    the outcome, usage and cost. Recording is observability: a database error
+    is logged and never fails the run.
     """
 
     def __init__(
@@ -244,7 +335,7 @@ class ClaudeRunRecorder:
         session_id: str | None = None,
         step_id: str | None = None,
         pid: int | None = None,
-        system_prompt: str | None = None,
+        system_prompt: SystemPrompt | None = None,
     ) -> None:
         self._agent_id = agent_id
         self._task_id = task_id or None
@@ -274,8 +365,8 @@ class ClaudeRunRecorder:
                 input_text=self._input_text,
                 metadata={
                     "command": self._command,
-                    # What LoopX passed with --append-system-prompt; Claude Code's own prompt is not included.
-                    **({"system_prompt": self._system_prompt} if self._system_prompt is not None else {}),
+                    # What LoopX appended (its file holds the same text); Claude Code's own prompt is not included.
+                    **(self._system_prompt.record() if self._system_prompt is not None else {}),
                     "cwd": self._cwd,
                     # The task step a Worker or Reviewer ran, so its run stays tied to that step.
                     **({"step_id": self._step_id} if self._step_id else {}),

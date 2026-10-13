@@ -78,6 +78,50 @@ To learn how to use these features, read the [usage guide](docs/fork/usage.md).
   `metadata.command` still holds the exact argv. Each run on the history page,
   and in the Chat page's Planner and step views, has a collapsible System
   prompt section; Claude Code's built-in system prompt is not included.
+- **Behaviour change: agents no longer load the operator's personal Claude
+  Code configuration.** The Manager, the Planner, the Workers and the
+  Reviewers all start Claude Code with one flag set
+  (`loopx/agents/claude_cli.py` `isolation_args`, recorded as
+  `personal-config-off/v1`): `--setting-sources project`,
+  `--strict-mcp-config`, and `--settings` with `autoMemoryEnabled: false` and
+  `claudeMdExcludes` for every `CLAUDE.md`, `.claude/CLAUDE.md` and
+  `.claude/rules/` above the work directory's repository and in `~/.claude`.
+  They no longer see `~/.claude/CLAUDE.md` and its imports, `CLAUDE.local.md`,
+  user and local settings (including the operator's model and effort choice,
+  env and permissions), hooks, personal and claude.ai-synced skills,
+  installed plugins and their skills, agents and hooks, custom agents, output
+  styles, MCP servers (the Manager loaded them until now) or auto memory. The
+  project's own `CLAUDE.md` and `.claude/settings.json` still load, and the
+  login is unaffected. An agent now runs on Claude Code's default model and
+  effort unless its config sets a model. Rules that every project must follow
+  go into the agents' role prompts (a shared harness layer is planned).
+- **Behaviour change: the task description is part of the system prompt.**
+  The system prompt of the Planner, the Workers and the Reviewers is now four
+  layers: role prompt, project background, a `## Task` section, then the
+  code-owned contract, still last. The Planner's task section has the task
+  id, project, working directory and requirement, which its turns no longer
+  repeat; a Worker's has the task's requirement, then its step's label,
+  instruction, acceptance criteria, validation commands and, on a retry, the
+  feedback; a Reviewer's has the requirement and the reviewed step. The
+  requirement is clipped at 8,000 characters with a visible marker. A
+  Worker's first user turn now carries only what the steps it depends on
+  reported (new `dependencies` in `WORK_ITEM`, which also carries
+  `requirement`, `step_key`, `feedback` and `attempt`; `instruction` no longer
+  includes the retry feedback); a Reviewer's carries the Worker's report. The
+  contracts' wording and the Planner's reply contract say so; the formats
+  code accepts are unchanged.
+- The system prompt goes to Claude Code as a file,
+  `<runtime_root>/.local/prompts/<sha256>.md`, written once
+  (`--append-system-prompt-file`), so `metadata.command` stays short. With it
+  goes `--system-prompt-snapshot off`: Claude Code 2.1.285 otherwise keeps a
+  session's first system prompt on every `--resume`, so a Planner or Manager
+  restarted after a background or role prompt edit kept running with the old
+  prompt. Every run also records `metadata.system_prompt_sha256` and
+  `metadata.prompt_layers` (role prompt and whether it is the recommended
+  one, project and background version, task, contract, isolation flag set).
+  The history page's System prompt section shows the short hash, an
+  `isolated` badge and one line per layer; older runs keep showing their
+  prompt.
 
 ## [2.5.0] - 2026-10-13
 

@@ -23,8 +23,9 @@ from typing import Any
 
 from ..broadcast import Broadcaster
 from ..bus import MessageBus
-from ..claude_cli import ClaudeRunRecorder, ResidentClaude
+from ..claude_cli import ClaudeRunRecorder, ResidentClaude, isolation_args, system_prompt_args
 from ..projects import project_name
+from ..system_prompt import SystemPrompt, is_recommended, prompt_layers
 from .task import resolve_work_dir
 from ..message import (
     MANAGER_ADDRESS,
@@ -143,6 +144,7 @@ class ManagerAgent:
         self._task: asyncio.Task[Any] | None = None
         self._running = False
         self._system_prompt: str = DEFAULT_SYSTEM_PROMPT
+        self._prompt_recommended = True  # whether _system_prompt is the recommended one (default_prompt)
         self._goal_snapshots: dict[str, GoalSnapshot] = {}
         # The resident Claude: started on the first chat message, then fed one
         # user turn per message; restarted when its system prompt changes.
@@ -197,6 +199,9 @@ class ManagerAgent:
             config = await db_agent_configs.get_config("manager")
             if config and config.get("system_prompt"):
                 self._system_prompt = config["system_prompt"]
+                self._prompt_recommended = is_recommended(
+                    self._system_prompt, str(config.get("default_prompt") or "") or DEFAULT_SYSTEM_PROMPT,
+                )
                 logger.debug("loaded manager system prompt from database")
         except Exception:
             logger.debug("could not load manager config from database", exc_info=True)
@@ -387,12 +392,28 @@ class ManagerAgent:
         async with self._turn_lock:
             return await self._run_turn(message, context_envelope)
 
+    def _composed_prompt(self) -> SystemPrompt:
+        """The Manager's own composition: its role prompt, then the task placement rule (no project, no task)."""
+        return SystemPrompt(
+            f"{self._system_prompt}\n\n{TASK_PLACEMENT_RULE}",
+            prompt_layers(
+                role_id="manager", role=self._system_prompt, recommended=self._prompt_recommended,
+                contract_name="TASK_PLACEMENT_RULE", contract=TASK_PLACEMENT_RULE,
+            ),
+        )
+
     async def _run_turn(self, message: str, context_envelope: MessageEnvelope) -> str:
         await self._load_db_config()
-        system_prompt = f"{self._system_prompt}\n\n{TASK_PLACEMENT_RULE}"
-        if self._claude.stale(system_prompt):
+        system_prompt = self._composed_prompt()
+        try:
+            prompt_file = system_prompt.write_file(self._runtime_root)
+        except OSError as exc:
+            raise RuntimeError(f"无法写入 system prompt 文件：{exc}") from None
+        # The file is named by its content's hash; the hash is kept beside it all the same.
+        signature = (tuple(self._claude_command(prompt_file, resume=False)), system_prompt.sha256)
+        if self._claude.stale(signature):
             await self._claude.stop()
-        command = self._claude.command if self._claude.started else self._claude_command(system_prompt)
+        command = self._claude.command if self._claude.started else self._claude_command(prompt_file)
 
         task_id = context_envelope.metadata.get("task_id")
         recorder = ClaudeRunRecorder(
@@ -408,7 +429,7 @@ class ManagerAgent:
 
         if not self._claude.started:
             try:
-                await self._claude.start(command, cwd=str(self._config.work_dir), signature=system_prompt)
+                await self._claude.start(command, cwd=str(self._config.work_dir), signature=signature)
             except OSError as exc:
                 logger.error("failed to start Claude Code: %s", exc)
                 await recorder.finish(output_text=None, result_event=None, error=f"Cannot start Claude Code: {exc}")
@@ -515,7 +536,7 @@ class ManagerAgent:
             )
         return final_text
 
-    def _claude_command(self, system_prompt: str) -> list[str]:
+    def _claude_command(self, prompt_file: Path, *, resume: bool = True) -> list[str]:
         command = [
             self._config.claude_bin,
             "--print",
@@ -524,9 +545,11 @@ class ManagerAgent:
             # Each chat message is one user turn on stdin; Claude idles between turns.
             "--input-format", "stream-json",
             "--include-partial-messages",  # stream the reply as it is written
-            "--append-system-prompt", system_prompt,
+            # None of the operator's personal settings, memory, hooks, plugins or MCP servers.
+            *isolation_args(self._config.work_dir),
+            *system_prompt_args(prompt_file),
         ]
-        if self._session_id:
+        if resume and self._session_id:
             command.extend(["--resume", self._session_id])
         return command
 
