@@ -268,3 +268,34 @@ def test_the_system_prompt_comes_from_its_file_and_is_read_again_on_resume(tmp_p
     assert system_prompt_args(path) == [
         "--append-system-prompt-file", str(path), "--system-prompt-snapshot", "off",
     ]
+
+
+@pytest.mark.parametrize(("script", "started"), [
+    # What Claude 2.1.285 does when told to --resume a session it no longer has.
+    ("import json, sys; print(json.dumps({'type': 'result', 'subtype': 'error_during_execution', 'is_error': True, "
+     "'num_turns': 0, 'errors': ['No conversation found with session ID: x']}), flush=True)", False),
+    ("import sys; sys.stderr.write('No conversation found with session ID: x\\n'); sys.exit(1)", False),
+    ("import json, sys; print(json.dumps({'type': 'system', 'subtype': 'init'}), flush=True); sys.exit(3)", True),
+])
+def test_a_turn_that_never_started_a_session_is_told_apart(tmp_path: Path, script: str, started: bool) -> None:
+    """A turn without Claude's init event never got a session going (an unknown --resume id)."""
+    import sys
+
+    from loopx.agents.claude_cli import ResidentClaude
+
+    fake = tmp_path / "claude"
+    fake.write_text(f"#!{sys.executable}\n{script}\n")
+    fake.chmod(0o755)
+
+    async def _run() -> Any:
+        claude = ResidentClaude(label="test")
+        await claude.start([str(fake)], cwd=str(tmp_path), signature=("s",))
+
+        async def on_event(event: dict[str, Any]) -> None:
+            return None
+
+        turn = await claude.run_turn("hello", on_event)
+        await claude.stop()
+        return turn
+
+    assert asyncio.run(_run()).session_started is started

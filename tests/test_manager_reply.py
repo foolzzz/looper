@@ -254,6 +254,7 @@ def _converse(
     rows: list[dict[str, Any]] | None = None,
     settings: list[dict[str, str]] | None = None,
     between: Any = None,
+    saved_session: str | None = None,
 ) -> dict[str, Any]:
     """Send ``messages`` one at a time to one Manager backed by a fake claude, then stop it.
 
@@ -296,6 +297,9 @@ def _converse(
     async def _run() -> dict[str, Any]:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
+            if saved_session is not None:  # a session saved by an earlier run of the server
+                (root / ".local" / "manager").mkdir(parents=True)
+                (root / ".local" / "manager" / "session.json").write_text(json.dumps({"session_id": saved_session}))
             bus = MessageBus(runtime_root=root)
             manager = ManagerAgent(
                 config=ManagerConfig(claude_bin=_fake_claude(root, body), work_dir=root),
@@ -324,8 +328,10 @@ def _converse(
             await bus.shutdown()
             pid_file = root / "pids"
             pids = pid_file.read_text().split() if pid_file.exists() else []
+            state = root / ".local" / "manager" / "session.json"
             return {"replies": replies, "spawned": spawned, "launched": launched, "running": running, "pids": pids,
-                    "prompts": _prompts(root)}
+                    "prompts": _prompts(root),
+                    "saved_session": json.loads(state.read_text())["session_id"] if state.exists() else None}
 
     return asyncio.run(_run())
 
@@ -400,6 +406,32 @@ class TestManagerResidentClaude:
         assert [m["prompt_layers"]["role"]["recommended"] for m in starts] == [False, False, False]
         assert _flag(second, "--resume") == "sess-1"
         assert chat["running"] == [False, True]  # the old process was stopped and reaped
+
+    def test_a_session_that_no_longer_exists_is_dropped_and_the_message_still_answered(
+        self, monkeypatch: pytest.MonkeyPatch, agent_db: Any,
+    ) -> None:
+        # Like Claude given an unknown --resume id: an error result without an init event.
+        forgetting = (
+            "if '--resume' in sys.argv:\n"
+            "    sys.stdin.readline()\n"
+            "    print(json.dumps({'type': 'result', 'subtype': 'error_during_execution', 'is_error': True, 'num_turns': 0, 'total_cost_usd': 0, 'errors': ['No conversation found with session ID: gone']}), flush=True)\n"
+            "    sys.exit(0)\n"
+        ) + _resident()
+        chat = _converse(monkeypatch, forgetting, ["hello", "again"], saved_session="gone")
+        assert chat["replies"] == ["turn 1: hello", "turn 2: again"]
+        (first, _), (second, _) = chat["spawned"]
+        assert _flag(first, "--resume") == "gone"
+        assert _flag(second, "--resume") is None  # a new session, which the next message keeps
+        assert chat["saved_session"] == "sess-1"
+        errors = [call.kwargs["error"] for call in agent_db.finish_record.await_args_list]
+        assert "session gone could not be resumed" in (errors[0] or "")
+        assert errors[1:] == [None, None]
+
+    def test_a_new_session_that_also_says_nothing_is_not_retried_again(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        chat = _converse(monkeypatch, "sys.exit(1)", ["hello"], saved_session="gone")
+        (reply,) = chat["replies"]
+        assert "Manager" in reply  # the usual error reply, not a loop
+        assert [_flag(argv, "--resume") for argv, _ in chat["spawned"]] == ["gone", None]
 
     @pytest.mark.parametrize(("ignore_eof", "returncode"), [(False, 0), (True, -9)])
     def test_stop_ends_and_reaps_claude(

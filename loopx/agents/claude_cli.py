@@ -146,10 +146,21 @@ class ResidentTurn:
 
     ``result_event`` is the turn's ``result``, or None when Claude exited
     before writing it; then ``exit_code`` is the reaped process's exit code.
+    ``session_started`` says whether Claude began the turn with its
+    ``system/init`` event, as every turn it actually runs does. Without one,
+    Claude never got a session going: told to ``--resume`` a session it no
+    longer has, it answers only with an error result (``num_turns`` 0,
+    "No conversation found" in ``errors``) or exits without a word.
     """
 
     result_event: dict[str, Any] | None
     exit_code: int | None = None
+    session_started: bool = True
+
+
+def exit_note(exit_code: int | None) -> str:
+    """`` (exit code N)`` when Claude exited with one, else nothing."""
+    return f" (exit code {exit_code})" if exit_code is not None else ""
 
 
 class ResidentClaude:
@@ -222,6 +233,7 @@ class ResidentClaude:
         assert process is not None and process.stdin is not None and lines is not None
         input_lost = False
         result_event: dict[str, Any] | None = None
+        session_started = False
         try:
             try:
                 await write_user_turn(process.stdin, text)
@@ -242,6 +254,8 @@ class ResidentClaude:
                     continue
                 if not isinstance(event, dict):
                     continue
+                if event.get("type") == "system" and event.get("subtype") == "init":
+                    session_started = True
                 await on_event(event)
                 if event.get("type") == "result":
                     result_event = event
@@ -251,7 +265,11 @@ class ResidentClaude:
             raise
         if result_event is None or input_lost:
             await self.stop()
-        return ResidentTurn(result_event, None if result_event is not None else process.returncode)
+        return ResidentTurn(
+            result_event,
+            None if result_event is not None else process.returncode,
+            session_started=session_started,
+        )
 
     def turn_cost(self, result_event: dict[str, Any] | None) -> float | None:
         """This turn's cost: Claude's ``total_cost_usd`` is its process's running total."""

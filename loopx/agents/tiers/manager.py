@@ -25,7 +25,7 @@ from ..broadcast import Broadcaster
 from ..bus import MessageBus
 from .. import agent_settings
 from ..agent_settings import AgentDefaults, AgentType, Launch, resolve_harness, resolve_launch
-from ..claude_cli import ClaudeRunRecorder, ResidentClaude, isolation_args, system_prompt_args
+from ..claude_cli import ClaudeRunRecorder, ResidentClaude, exit_note, isolation_args, system_prompt_args
 from ..projects import project_name
 from ..system_prompt import SystemPrompt, build_system_prompt, is_recommended
 from .task import resolve_work_dir
@@ -406,7 +406,7 @@ class ManagerAgent:
             contract_name="TASK_PLACEMENT_RULE", contract=TASK_PLACEMENT_RULE,
         )
 
-    async def _run_turn(self, message: str, context_envelope: MessageEnvelope) -> str:
+    async def _run_turn(self, message: str, context_envelope: MessageEnvelope, *, retried: bool = False) -> str:
         await self._load_db_config()
         defaults = await agent_settings.load_defaults()
         system_prompt = self._composed_prompt(defaults)
@@ -437,6 +437,8 @@ class ManagerAgent:
         )
         await recorder.start()
 
+        # The session this turn's new process resumes, if it starts one.
+        resuming = self._session_id if not self._claude.started and "--resume" in command else None
         if not self._claude.started:
             try:
                 await self._claude.start(
@@ -514,6 +516,21 @@ class ManagerAgent:
                 error=f"Manager stopped reading Claude: {type(exc).__name__}: {exc}",
             )
             raise
+
+        if resuming and not turn.session_started and not retried:
+            # Claude never started the saved session: it no longer exists. Every
+            # turn would resume it again and never answer, so drop it and run
+            # this message in a new session; the context each turn carries does
+            # not depend on the old conversation.
+            logger.warning("manager: session %s could not be resumed; starting a new session", resuming)
+            await recorder.finish(
+                output_text=None, result_event=None,
+                error=f"session {resuming} could not be resumed{exit_note(turn.exit_code)}; retried in a new session",
+            )
+            await self._claude.stop()
+            self._session_id = None
+            self._save_session_state()
+            return await self._run_turn(message, context_envelope, retried=True)
 
         result_event = turn.result_event
         result_text = str((result_event or {}).get("result") or "")
