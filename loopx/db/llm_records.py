@@ -150,8 +150,11 @@ async def list_events(
 _ROLE_FILTERS = {
     "manager": "agent_id = 'manager'",
     "planner": "agent_id LIKE 'planner-%'",
-    "worker": "(agent_id LIKE 'worker-%' OR agent_id LIKE 'reviewer-%')",
+    "worker": "agent_id LIKE 'worker-%'",
+    "reviewer": "agent_id LIKE 'reviewer-%'",
 }
+# A task's step runs: its Workers' and its Reviewers'.
+_STEP_RUNS = f"({_ROLE_FILTERS['worker']} OR {_ROLE_FILTERS['reviewer']})"
 
 
 async def list_task_runs(
@@ -165,7 +168,7 @@ async def list_task_runs(
     pool = pool or get_pool()
     rows = await pool.fetch(
         "SELECT agent_id, task_id, status, created_at, metadata->>'step_id' AS step_id "
-        f"FROM llm_records WHERE task_id = ANY($1::text[]) AND {_ROLE_FILTERS['worker']} "
+        f"FROM llm_records WHERE task_id = ANY($1::text[]) AND {_STEP_RUNS} "
         "ORDER BY created_at, id",
         task_ids,
     )

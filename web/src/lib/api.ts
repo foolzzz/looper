@@ -26,6 +26,9 @@ export interface TaskInfo {
 /** The most characters a project background may have. */
 export const BACKGROUND_MAX_CHARS = 10000;
 
+/** The most characters a harness prompt (the default, the Manager's or a project's) may have. */
+export const HARNESS_MAX_CHARS = 20000;
+
 /** A group of tasks with an optional default work directory and background. */
 export interface Project {
   project_id: string;
@@ -35,6 +38,10 @@ export interface Project {
   work_dir: string;
   /** Added to the system prompt of the project's Planner, Workers and Reviewers; "" = none. */
   background: string;
+  /** The harness prompt of the project's Planner; "" = the default one in Settings. */
+  planner_harness_prompt: string;
+  /** The harness prompt of the project's Workers and Reviewers; "" = the default one in Settings. */
+  worker_harness_prompt: string;
   created_at: string;
   updated_at: string;
   task_count: number;
@@ -191,6 +198,9 @@ export interface NewProjectFields {
   work_dir?: string;
   /** At most BACKGROUND_MAX_CHARS characters; omit or "" for none. */
   background?: string;
+  /** At most HARNESS_MAX_CHARS characters each; omit or "" to inherit the default harness. */
+  planner_harness_prompt?: string;
+  worker_harness_prompt?: string;
 }
 
 /** A new task names exactly one project: an existing one or one created with it. */
@@ -265,11 +275,11 @@ export async function createProject(fields: NewProjectFields): Promise<Project> 
   return project;
 }
 
-/** Send only the fields to change; `work_dir: ""` and `background: ""` clear them. */
-export async function updateProject(
-  projectId: string,
-  fields: { name?: string; description?: string; work_dir?: string; background?: string },
-): Promise<Project> {
+/** The project fields an update can change. */
+export type ProjectUpdate = Partial<Omit<NewProjectFields, "name">> & { name?: string };
+
+/** Send only the fields to change; `work_dir: ""`, `background: ""` and an empty harness clear them. */
+export async function updateProject(projectId: string, fields: ProjectUpdate): Promise<Project> {
   const res = await fetch(`${API_BASE}/projects/${encodeURIComponent(projectId)}`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
@@ -431,9 +441,13 @@ export interface AgentConfig {
   runtime: string;
   llm_profile_id: number | null;
   enabled: boolean;
+  /** The role prompt: what this kind of agent is responsible for. */
   system_prompt: string;
   /** The system-recommended prompt; "Reset to recommended" copies it into system_prompt. */
   default_prompt: string;
+  /** The Manager's own harness prompt; "" inherits the default. Other agents refuse it (their harness is per project). */
+  harness_prompt: string;
+  /** This agent's model; null or "" uses the default model in Settings. */
   model: string | null;
   max_turns: number;
   timeout_seconds: number;
@@ -446,8 +460,12 @@ export interface AgentConfig {
 }
 
 /** One Claude run of an agent (Manager, Worker or reviewer). */
+export type HarnessSource = "builtin_default" | "system_default" | "manager_override" | "project_override";
+export type ModelSource = "builtin_default" | "system_default" | "agent_override";
+
 /** Where each layer of a run's system prompt came from (absent on runs recorded before it existed). */
 export interface PromptLayers {
+  harness?: { source: HarnessSource; sha256: string; project_id?: string } | null;
   role?: { config_id: string; sha256: string; recommended: boolean };
   project?: { id: string; background_sha256: string | null; updated_at: string | null } | null;
   task?: { kind: "plan" | "work" | "review"; task_id: string | null; step_id: string | null; sha256: string } | null;
@@ -479,6 +497,10 @@ export interface LlmRecord {
     system_prompt?: string;
     system_prompt_sha256?: string;
     prompt_layers?: PromptLayers;
+    /** The model asked for (an alias or full name) and where it came from. */
+    model_choice?: { model: string; source: ModelSource; effort: string | null };
+    /** The environment variables from Settings: their names, with each value's sha256. */
+    env?: { sha256: string; keys: Record<string, string> };
   } | null;
   created_at: string;
   finished_at: string | null;
@@ -515,7 +537,7 @@ export async function updateAgentConfig(
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(fields),
   });
-  if (!res.ok) throw new Error(`update agent-config ${res.status}`);
+  if (!res.ok) await failed(res, "update agent-config");
   return res.json();
 }
 
@@ -531,7 +553,7 @@ export async function resetAgentPrompt(agentId: string): Promise<AgentConfig> {
 export async function fetchLlmRecords(params: {
   agent_id?: string;
   task_id?: string;
-  /** An agent_configs id: "manager", "planner" (each task's Planner) or "worker" (workers and reviewers). */
+  /** An agent_configs id: "manager", "planner" (each task's Planner), "worker" or "reviewer". */
   role?: string;
   limit?: number;
   offset?: number;
@@ -621,6 +643,57 @@ export async function deleteLlmProfile(profileId: number): Promise<void> {
     method: "DELETE",
   });
   if (!res.ok) throw new Error(`delete llm-profile ${res.status}`);
+}
+
+// --- Agent settings: what every agent inherits ---
+
+export interface EnvEntry {
+  key: string;
+  value: string;
+}
+
+export interface AgentSettings {
+  /** The default harness every agent inherits unless the Manager or a project overrides it. */
+  default_harness_prompt: string;
+  harness_source: "builtin_default" | "system_default";
+  builtin_harness_prompt: string;
+  harness_max_chars: number;
+  default_model: string;
+  model_source: "builtin_default" | "system_default";
+  builtin_model: string;
+  /** "" = Claude Code's default effort. */
+  default_effort: string;
+  effort_levels: string[];
+  /** Non-secret variables added to every agent's environment. */
+  default_env: EnvEntry[];
+  env_max_entries: number;
+}
+
+export type AgentSettingsUpdate = Partial<
+  Pick<AgentSettings, "default_harness_prompt" | "default_model" | "default_effort" | "default_env">
+>;
+
+export async function fetchAgentSettings(): Promise<AgentSettings> {
+  const res = await fetch(`${API_BASE}/settings/agents`);
+  if (!res.ok) await failed(res, "agent settings");
+  return res.json();
+}
+
+/** Send only the fields to change; an empty value goes back to the built-in default. */
+export async function updateAgentSettings(fields: AgentSettingsUpdate): Promise<AgentSettings> {
+  const res = await fetch(`${API_BASE}/settings/agents`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(fields),
+  });
+  if (!res.ok) await failed(res, "update agent settings");
+  return res.json();
+}
+
+export async function resetDefaultHarness(): Promise<AgentSettings> {
+  const res = await fetch(`${API_BASE}/settings/agents/reset-harness`, { method: "POST" });
+  if (!res.ok) await failed(res, "reset harness");
+  return res.json();
 }
 
 // --- Channel configs ---

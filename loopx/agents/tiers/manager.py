@@ -23,9 +23,11 @@ from typing import Any
 
 from ..broadcast import Broadcaster
 from ..bus import MessageBus
+from .. import agent_settings
+from ..agent_settings import AgentDefaults, AgentType, Launch, resolve_harness, resolve_launch
 from ..claude_cli import ClaudeRunRecorder, ResidentClaude, isolation_args, system_prompt_args
 from ..projects import project_name
-from ..system_prompt import SystemPrompt, is_recommended, prompt_layers
+from ..system_prompt import SystemPrompt, build_system_prompt, is_recommended
 from .task import resolve_work_dir
 from ..message import (
     MANAGER_ADDRESS,
@@ -65,7 +67,7 @@ DEFAULT_SYSTEM_PROMPT = """\
 You are the Manager Agent (管家) for LoopX, an autonomous multi-agent programming system.
 
 ## Your Role
-1. Understand user intent and respond naturally in the user's language
+1. Understand user intent and respond naturally
 2. For simple questions or conversation, answer directly
 3. For task requests (development, testing, analysis, refactoring), first clarify and confirm with the user before creating a task
 4. For status queries, report current progress from the goal portfolio
@@ -97,8 +99,6 @@ Instead, follow this flow:
 If the user says "不", "取消", "算了", "no", "cancel" or modifies the requirement, do NOT output the JSON. Instead continue the conversation.
 
 ## Rules
-- Be concise and direct
-- Default to Chinese unless the user speaks English
 - For ambiguous requests, ask clarifying questions before even proposing the task summary
 - Never refuse a reasonable development task
 - Never output task_request JSON without user's explicit confirmation
@@ -145,6 +145,9 @@ class ManagerAgent:
         self._running = False
         self._system_prompt: str = DEFAULT_SYSTEM_PROMPT
         self._prompt_recommended = True  # whether _system_prompt is the recommended one (default_prompt)
+        # The Manager's own harness ('' = the default in Settings) and model ('' = the default).
+        self._harness_override = ""
+        self._model_override = ""
         self._goal_snapshots: dict[str, GoalSnapshot] = {}
         # The resident Claude: started on the first chat message, then fed one
         # user turn per message; restarted when its system prompt changes.
@@ -194,7 +197,7 @@ class ManagerAgent:
         )
 
     async def _load_db_config(self) -> None:
-        """Load system prompt and config from DB, fall back to defaults."""
+        """Load the role prompt, the harness override and the model from DB; keep the last ones read on failure."""
         try:
             config = await db_agent_configs.get_config("manager")
             if config and config.get("system_prompt"):
@@ -203,6 +206,9 @@ class ManagerAgent:
                     self._system_prompt, str(config.get("default_prompt") or "") or DEFAULT_SYSTEM_PROMPT,
                 )
                 logger.debug("loaded manager system prompt from database")
+            if config is not None:
+                self._harness_override = str(config.get("harness_prompt") or "")
+                self._model_override = str(config.get("model") or "")
         except Exception:
             logger.debug("could not load manager config from database", exc_info=True)
 
@@ -392,28 +398,31 @@ class ManagerAgent:
         async with self._turn_lock:
             return await self._run_turn(message, context_envelope)
 
-    def _composed_prompt(self) -> SystemPrompt:
-        """The Manager's own composition: its role prompt, then the task placement rule (no project, no task)."""
-        return SystemPrompt(
-            f"{self._system_prompt}\n\n{TASK_PLACEMENT_RULE}",
-            prompt_layers(
-                role_id="manager", role=self._system_prompt, recommended=self._prompt_recommended,
-                contract_name="TASK_PLACEMENT_RULE", contract=TASK_PLACEMENT_RULE,
-            ),
+    def _composed_prompt(self, defaults: AgentDefaults) -> SystemPrompt:
+        """The Manager's harness, its role prompt, then the task placement rule (no project, no task)."""
+        return build_system_prompt(
+            harness=resolve_harness(AgentType.MANAGER, defaults, manager_override=self._harness_override),
+            role_id="manager", role=self._system_prompt, recommended=self._prompt_recommended,
+            contract_name="TASK_PLACEMENT_RULE", contract=TASK_PLACEMENT_RULE,
         )
 
     async def _run_turn(self, message: str, context_envelope: MessageEnvelope) -> str:
         await self._load_db_config()
-        system_prompt = self._composed_prompt()
+        defaults = await agent_settings.load_defaults()
+        system_prompt = self._composed_prompt(defaults)
+        launch = resolve_launch(defaults, self._model_override)
         try:
             prompt_file = system_prompt.write_file(self._runtime_root)
         except OSError as exc:
             raise RuntimeError(f"无法写入 system prompt 文件：{exc}") from None
-        # The file is named by its content's hash; the hash is kept beside it all the same.
-        signature = (tuple(self._claude_command(prompt_file, resume=False)), system_prompt.sha256)
+        # The command carries the model and effort; the file is named by its content's hash, kept
+        # beside it all the same; the environment is compared by its hash.
+        signature = (
+            tuple(self._claude_command(prompt_file, launch, resume=False)), system_prompt.sha256, launch.env_sha256,
+        )
         if self._claude.stale(signature):
             await self._claude.stop()
-        command = self._claude.command if self._claude.started else self._claude_command(prompt_file)
+        command = self._claude.command if self._claude.started else self._claude_command(prompt_file, launch)
 
         task_id = context_envelope.metadata.get("task_id")
         recorder = ClaudeRunRecorder(
@@ -424,12 +433,15 @@ class ManagerAgent:
             input_text=message,
             session_id=self._session_id,
             system_prompt=system_prompt,
+            launch=launch,
         )
         await recorder.start()
 
         if not self._claude.started:
             try:
-                await self._claude.start(command, cwd=str(self._config.work_dir), signature=signature)
+                await self._claude.start(
+                    command, cwd=str(self._config.work_dir), signature=signature, env=launch.environment(),
+                )
             except OSError as exc:
                 logger.error("failed to start Claude Code: %s", exc)
                 await recorder.finish(output_text=None, result_event=None, error=f"Cannot start Claude Code: {exc}")
@@ -536,7 +548,7 @@ class ManagerAgent:
             )
         return final_text
 
-    def _claude_command(self, prompt_file: Path, *, resume: bool = True) -> list[str]:
+    def _claude_command(self, prompt_file: Path, launch: Launch, *, resume: bool = True) -> list[str]:
         command = [
             self._config.claude_bin,
             "--print",
@@ -548,6 +560,7 @@ class ManagerAgent:
             # None of the operator's personal settings, memory, hooks, plugins or MCP servers.
             *isolation_args(self._config.work_dir),
             *system_prompt_args(prompt_file),
+            *launch.args(),
         ]
         if resume and self._session_id:
             command.extend(["--resume", self._session_id])

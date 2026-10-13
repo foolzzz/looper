@@ -4,11 +4,14 @@ Each Worker runs as a subprocess (Claude Code or Codex) with limited
 permissions. The WorkerPool manages lifecycle, concurrency, and result
 collection, reporting back to the Planner via the Bus.
 
-A Worker's or Reviewer's system prompt is the ``worker`` role prompt, the
-task's project background, the task section (the step, with the task it
-belongs to) and the code-owned report contract, last (``system_prompt``). The
-first user turn on stdin carries only what other agents produced: the reports
-of the steps this one depends on, or the Worker's report under review.
+A Worker's or Reviewer's system prompt is the harness (its project's Worker
+harness, else the default in Settings), its role prompt (the ``worker`` or
+``reviewer`` row), the task's project background, the task section (the
+step, with the task it belongs to) and the code-owned report contract, last
+(``system_prompt``). The first user turn on stdin carries only what other
+agents produced: the reports of the steps this one depends on, or the
+Worker's report under review. Each run reads its row and the Settings
+defaults (model, effort, environment) as it starts.
 """
 
 from __future__ import annotations
@@ -22,6 +25,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .. import agent_settings
+from ..agent_settings import BUILTIN_DEFAULTS, AgentDefaults, AgentType, resolve_harness, resolve_launch
 from ..bus import MessageBus
 from ..claude_cli import ClaudeRunRecorder, isolation_args, iter_lines, system_prompt_args, write_user_turn
 from ..message import (
@@ -48,52 +53,80 @@ logger = logging.getLogger(__name__)
 MAX_POOL_SIZE = 4
 DEFAULT_RUN_TIMEOUT_SEC = 86400
 
-# The worker role prompt, for Workers and Reviewers alike, when the ``worker``
-# config row has none; serve seeds it as the row's recommended prompt. It
-# describes the role only: the report formats are the code-owned contracts
-# that follow it in the system prompt.
+# The Worker's role prompt when the ``worker`` config row has none; serve
+# seeds it as the row's recommended prompt. It describes the role only: the
+# working principles are the harness before it, and the report format is the
+# code-owned contract after it.
 DEFAULT_SYSTEM_PROMPT = """\
 You are a Worker in LoopX, a system of Claude Code agents that carries out a
 user's task. A Planner splits the task into steps and decides what happens
 after each result. Each step runs in a fresh Claude Code session like this
-one: you either carry out one step or review one.
+one, and this one carries out one step.
 
-- Stay within what you are asked; do not change things beyond it.
-- Check by running things where you can, rather than assuming they work.
-- Say plainly what you could not do or could not check.
+- You own the step's result: make the changes it asks for, in its working
+  directory, until it meets its acceptance criteria.
+- Build on what the steps before it produced, and leave the parts of the
+  task that belong to other steps to them.
+- When the step cannot be done as written, do what can be done and report
+  what is missing, rather than working around the step.
 """
+
+# The Reviewer's role prompt when the ``reviewer`` config row has none; serve
+# seeds it as the row's recommended prompt. The verdict format is the
+# code-owned contract after it.
+REVIEWER_SYSTEM_PROMPT = """\
+You are a Reviewer in LoopX, a system of Claude Code agents that carries out a
+user's task. A Planner splits the task into steps; a Worker has carried out
+one of them, and this fresh Claude Code session checks it independently
+before the Planner accepts it.
+
+- Judge the result, not the report: the Worker's report says what it believes
+  it did; check the files and the behaviour in the working directory yourself.
+- Hold the work to every acceptance criterion and to what the step asked;
+  report what is missing or wrong, not matters of taste.
+- Make each finding specific enough to fix on a retry: what is wrong, where,
+  and what the criterion expects.
+"""
+
+# Each run's role prompt when its config row has none.
+_DEFAULT_ROLE_PROMPTS = {AgentType.WORKER: DEFAULT_SYSTEM_PROMPT, AgentType.REVIEWER: REVIEWER_SYSTEM_PROMPT}
 
 
 @dataclass(frozen=True)
 class WorkerSettings:
-    """The ``worker`` agent config, read for every run."""
+    """A ``worker`` or ``reviewer`` agent config and the Settings defaults, read for every run."""
 
     timeout_seconds: int  # 0 for no limit
     max_turns: int  # 0 for no limit
-    system_prompt: str  # the worker role prompt
+    system_prompt: str  # the role prompt
     recommended: bool = True  # whether it is the recommended one (default_prompt)
+    model: str | None = None  # the agent's own model; None for the default in Settings
+    defaults: AgentDefaults = BUILTIN_DEFAULTS  # the harness, model, effort and environment in Settings
 
 
-async def _load_settings() -> WorkerSettings:
-    """Read the ``worker`` agent config for one run, so a dashboard edit applies to the next step.
+async def _load_settings(agent: AgentType = AgentType.WORKER) -> WorkerSettings:
+    """Read ``agent``'s config row for one run, so a dashboard edit applies to the next step.
 
     Without a readable row a run may take 86400 s, has no turn limit and uses
     the default role prompt; an empty role prompt also falls back to it.
     """
+    defaults = await agent_settings.load_defaults()
     try:
-        config = await db_agent_configs.get_config("worker")
+        config = await db_agent_configs.get_config(agent.value)
     except Exception:
-        logger.warning("cannot read the worker agent config; using defaults", exc_info=True)
+        logger.warning("cannot read the %s agent config; using defaults", agent.value, exc_info=True)
         config = None
-    default_prompt = DEFAULT_SYSTEM_PROMPT.strip()
+    default_prompt = _DEFAULT_ROLE_PROMPTS[agent].strip()
     if config is None:
-        return WorkerSettings(DEFAULT_RUN_TIMEOUT_SEC, 0, default_prompt)
+        return WorkerSettings(DEFAULT_RUN_TIMEOUT_SEC, 0, default_prompt, defaults=defaults)
     system_prompt = str(config.get("system_prompt") or "").strip() or default_prompt
     return WorkerSettings(
         timeout_seconds=int(config.get("timeout_seconds") or 0),
         max_turns=int(config.get("max_turns") or 0),
         system_prompt=system_prompt,
         recommended=is_recommended(system_prompt, str(config.get("default_prompt") or "") or default_prompt),
+        model=str(config.get("model") or "").strip() or None,
+        defaults=defaults,
     )
 
 
@@ -490,13 +523,16 @@ class WorkerPool:
         else:
             prompt = self._build_work_prompt(payload)
 
-        settings = await _load_settings()
+        agent = AgentType.REVIEWER if is_verify else AgentType.WORKER
+        settings = await _load_settings(agent)
         run_timeout, max_turns = settings.timeout_seconds, settings.max_turns
+        launch = resolve_launch(settings.defaults, settings.model)
         # Read as the run starts: a later change reaches the next run, not this one.
         project = await self._task_project(parent_task_id, worker_id)
         background = str((project or {}).get("background") or "")
         system_prompt = build_system_prompt(
-            role_id="worker",
+            harness=resolve_harness(agent, settings.defaults, project=project),
+            role_id=agent.value,
             role=settings.system_prompt,
             recommended=settings.recommended,
             project=project,
@@ -535,6 +571,7 @@ class WorkerPool:
             # non-zero). Built-in tools are unaffected.
             *isolation_args(work_dir),
             *system_prompt_args(prompt_file),
+            *launch.args(),
             *(["--max-turns", str(max_turns)] if max_turns > 0 else []),
         ]
 
@@ -559,6 +596,7 @@ class WorkerPool:
             input_text=prompt,
             step_id=payload.get("task_id") or None,
             system_prompt=system_prompt,
+            launch=launch,
         )
         await recorder.start()
 
@@ -567,6 +605,7 @@ class WorkerPool:
             process = await asyncio.create_subprocess_exec(
                 *command,
                 cwd=work_dir,
+                env=launch.environment(),
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,

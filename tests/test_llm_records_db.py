@@ -61,9 +61,10 @@ def test_run_is_recorded_end_to_end() -> None:
             ours = {record_id, reviewer_id, manager_id, planner_id}
             by_role = {
                 role: {r["id"] for r in await llm_records.list_records(role=role, pool=pool)} & ours
-                for role in ("worker", "manager", "planner")
+                for role in ("worker", "reviewer", "manager", "planner")
             }
-            assert by_role == {"worker": {record_id, reviewer_id}, "manager": {manager_id}, "planner": {planner_id}}
+            assert by_role == {"worker": {record_id}, "reviewer": {reviewer_id}, "manager": {manager_id},
+                               "planner": {planner_id}}
             # The Chat page's step agents are Workers and Reviewers only.
             runs = await llm_records.list_task_runs(["task-test"], pool=pool)
             assert {r["agent_id"] for r in runs} == {"worker-test", "reviewer-test"}

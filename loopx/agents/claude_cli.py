@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
+    from .agent_settings import Launch
     from .system_prompt import SystemPrompt
 
 logger = logging.getLogger(__name__)
@@ -187,11 +188,14 @@ class ResidentClaude:
         process = self._process
         return process is not None and (process.returncode is not None or self._signature != signature)
 
-    async def start(self, command: list[str], *, cwd: str, signature: Any) -> None:
-        """Start the process; raises ``OSError`` when it cannot run."""
+    async def start(
+        self, command: list[str], *, cwd: str, signature: Any, env: dict[str, str] | None = None,
+    ) -> None:
+        """Start the process (with ``env``, else the server's environment); raises ``OSError`` when it cannot run."""
         process = await asyncio.create_subprocess_exec(
             *command,
             cwd=cwd,
+            env=env,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL,
@@ -317,8 +321,9 @@ class ClaudeRunRecorder:
     """Record one Claude CLI run in ``llm_records``.
 
     The record opens as ``running`` with the launch command, the system
-    prompt LoopX appended (its text, its sha256 and its layers' sources) and
-    the working directory, gets every stream-json event as it arrives
+    prompt LoopX appended (its text, its sha256 and its layers' sources), the
+    model and its source, the names of the environment variables LoopX set
+    (their values hashed) and the working directory, gets every stream-json event as it arrives
     (partial text deltas excepted: the full message follows), and closes with
     the outcome, usage and cost. Recording is observability: a database error
     is logged and never fails the run.
@@ -336,8 +341,10 @@ class ClaudeRunRecorder:
         step_id: str | None = None,
         pid: int | None = None,
         system_prompt: SystemPrompt | None = None,
+        launch: Launch | None = None,
     ) -> None:
         self._agent_id = agent_id
+        self._launch = launch
         self._task_id = task_id or None
         self._command = command
         self._cwd = cwd
@@ -367,6 +374,8 @@ class ClaudeRunRecorder:
                     "command": self._command,
                     # What LoopX appended (its file holds the same text); Claude Code's own prompt is not included.
                     **(self._system_prompt.record() if self._system_prompt is not None else {}),
+                    # The model asked for and where it came from; the variables' names, not their values.
+                    **(self._launch.record() if self._launch is not None else {}),
                     "cwd": self._cwd,
                     # The task step a Worker or Reviewer ran, so its run stays tied to that step.
                     **({"step_id": self._step_id} if self._step_id else {}),

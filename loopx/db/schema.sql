@@ -108,6 +108,18 @@ CREATE TABLE IF NOT EXISTS agent_configs (
 -- unedited row (system_prompt = default_prompt) follows it, an edited row does
 -- not, and "reset to recommended" copies it back into system_prompt.
 ALTER TABLE agent_configs ADD COLUMN IF NOT EXISTS default_prompt TEXT NOT NULL DEFAULT '';
+-- The Manager's own harness prompt ('' = the default one in Settings). The
+-- task agents' harness overrides belong to their project.
+ALTER TABLE agent_configs ADD COLUMN IF NOT EXISTS harness_prompt TEXT NOT NULL DEFAULT '';
+
+-- Settings the whole system shares, one value per key. Code owns each key's
+-- type and validation (loopx/agents/agent_settings.py); a key without a row
+-- has its built-in default.
+CREATE TABLE IF NOT EXISTS system_settings (
+    key         TEXT PRIMARY KEY,
+    value       TEXT NOT NULL,
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
 
 -- One-time data migrations; schema.sql itself runs on every startup.
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -140,6 +152,10 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_projects_name ON projects (lower(name));
 -- What every task agent of the project (Planner, Workers, Reviewers) should
 -- know about it: added to their system prompt; '' = none.
 ALTER TABLE projects ADD COLUMN IF NOT EXISTS background TEXT NOT NULL DEFAULT '';
+-- The harness prompt of the project's Planner, and of its Workers and
+-- Reviewers; '' = the default one in Settings.
+ALTER TABLE projects ADD COLUMN IF NOT EXISTS planner_harness_prompt TEXT NOT NULL DEFAULT '';
+ALTER TABLE projects ADD COLUMN IF NOT EXISTS worker_harness_prompt TEXT NOT NULL DEFAULT '';
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS project_id TEXT REFERENCES projects(id);
 CREATE INDEX IF NOT EXISTS idx_tasks_project ON tasks (project_id, created_at DESC);
 

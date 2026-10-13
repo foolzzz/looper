@@ -4,20 +4,24 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { createProject, type Project } from "@/lib/api";
 import { ProjectBackgroundField, backgroundTooLong } from "@/components/project-background-field";
+import { ProjectHarnessOverrides, harnessTooLong } from "@/components/harness-field";
 
 interface ProjectDialogProps {
   onClose: () => void;
   onCreated: (project: Project) => void;
 }
 
-/** Create a project: a name, an optional default directory, description and background. */
+/** Create a project: a name, an optional default directory, description, background and harness overrides. */
 export function ProjectDialog({ onClose, onCreated }: ProjectDialogProps) {
   const id = useId();
   const [name, setName] = useState("");
   const [workDir, setWorkDir] = useState("");
   const [description, setDescription] = useState("");
   const [background, setBackground] = useState("");
+  const [plannerHarness, setPlannerHarness] = useState("");
+  const [workerHarness, setWorkerHarness] = useState("");
   const [saving, setSaving] = useState(false);
+  const tooLong = backgroundTooLong(background) || harnessTooLong(plannerHarness) || harnessTooLong(workerHarness);
   const [error, setError] = useState("");
 
   useEffect(() => {
@@ -30,7 +34,7 @@ export function ProjectDialog({ onClose, onCreated }: ProjectDialogProps) {
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!name.trim() || saving || backgroundTooLong(background)) return;
+    if (!name.trim() || saving || tooLong) return;
     setSaving(true);
     setError("");
     try {
@@ -39,6 +43,8 @@ export function ProjectDialog({ onClose, onCreated }: ProjectDialogProps) {
         description: description.trim() || undefined,
         work_dir: workDir.trim() || undefined,
         background: background.trim() ? background : undefined,
+        planner_harness_prompt: plannerHarness.trim() ? plannerHarness : undefined,
+        worker_harness_prompt: workerHarness.trim() ? workerHarness : undefined,
       });
       onCreated(project);
     } catch (err) {
@@ -99,10 +105,17 @@ export function ProjectDialog({ onClose, onCreated }: ProjectDialogProps) {
           rows={4}
           labelClassName="text-sm"
         />
+        <ProjectHarnessOverrides
+          idPrefix={id}
+          planner={plannerHarness}
+          worker={workerHarness}
+          onPlannerChange={setPlannerHarness}
+          onWorkerChange={setWorkerHarness}
+        />
         {error && <p role="alert" className="text-xs text-destructive">{error}</p>}
         <div className="flex justify-end gap-2">
           <Button type="button" variant="outline" onClick={onClose}>Cancel</Button>
-          <Button type="submit" disabled={!name.trim() || saving || backgroundTooLong(background)}>
+          <Button type="submit" disabled={!name.trim() || saving || tooLong}>
             {saving && <Loader2 className="h-4 w-4 animate-spin" />}
             Create
           </Button>

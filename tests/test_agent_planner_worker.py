@@ -27,9 +27,16 @@ from loopx.agents.message import (
     planner_address,
     worker_address,
 )
+from loopx.agents.agent_settings import DEFAULT_HARNESS_PROMPT
 from loopx.agents.system_prompt import REVIEW_CONTRACT, WORK_CONTRACT
 from loopx.agents.tiers.planner import PlanStep, PlannerAgent, TaskPlan
-from loopx.agents.tiers.worker import DEFAULT_SYSTEM_PROMPT, WorkerConfig, WorkerPool, WorkerProcess
+from loopx.agents.tiers.worker import (
+    DEFAULT_SYSTEM_PROMPT,
+    REVIEWER_SYSTEM_PROMPT,
+    WorkerConfig,
+    WorkerPool,
+    WorkerProcess,
+)
 
 
 # --- TaskPlan unit tests ---
@@ -717,8 +724,8 @@ def _task_section(prompt: str, contract: str) -> str:
 
 
 class TestWorkerSystemPrompt:
-    """A Worker's or Reviewer's system prompt: the worker role prompt, the
-    project's background (read when the run starts), the task section (the
+    """A Worker's or Reviewer's system prompt: the harness, its role prompt,
+    the project's background (read when the run starts), the task section (the
     step, with the task it belongs to) and the code-owned report contract,
     last. The first user turn on stdin carries only other agents' output."""
 
@@ -728,14 +735,14 @@ class TestWorkerSystemPrompt:
         agent_db.get_task_project.return_value = {"id": "proj-1", "name": "calc", "background": "Use uv.\nPython 3.12.",
                                                   "updated_at": "2026-10-13T12:00:00+00:00"}
 
-    def test_worker_gets_the_role_the_project_the_task_and_the_work_contract(self, agent_db: Any) -> None:
+    def test_worker_gets_the_harness_role_project_task_and_work_contract(self, agent_db: Any) -> None:
         result, seen = _run_step()
 
         assert result["status"] == "completed"
         prompt = _system_prompt(seen)
-        _in_order(prompt, f"{ROLE}\n\n", "## Project: calc\nUse uv.\nPython 3.12.\n\n", "## Task\n",
-                  REQUIREMENT, "calc-module", "add calc.py", "calc.add(1, 2) == 3", WORK_CONTRACT)
-        assert prompt.startswith(f"{ROLE}\n\n") and prompt.endswith(WORK_CONTRACT)
+        _in_order(prompt, f"{DEFAULT_HARNESS_PROMPT}\n\n{ROLE}\n\n", "## Project: calc\nUse uv.\nPython 3.12.\n\n",
+                  "## Task\n", REQUIREMENT, "calc-module", "add calc.py", "calc.add(1, 2) == 3", WORK_CONTRACT)
+        assert prompt.startswith(f"{DEFAULT_HARNESS_PROMPT}\n\n{ROLE}\n\n") and prompt.endswith(WORK_CONTRACT)
         agent_db.get_task_project.assert_awaited_once_with("task-1")
         # The step is the system prompt's task section; stdin only starts the work.
         for part in ("add calc.py", "calc.add(1, 2) == 3", REQUIREMENT, '"deleted_files"', "End your final message"):
@@ -754,6 +761,7 @@ class TestWorkerSystemPrompt:
         assert metadata["system_prompt"] == prompt
         assert metadata["system_prompt_sha256"] == _sha(prompt)
         layers = metadata["prompt_layers"]
+        assert layers["harness"] == {"source": "builtin_default", "sha256": _sha(DEFAULT_HARNESS_PROMPT)}
         assert layers["role"] == {"config_id": "worker", "sha256": _sha(ROLE), "recommended": False}
         assert layers["project"] == {"id": "proj-1", "background_sha256": _sha("Use uv.\nPython 3.12."),
                                      "updated_at": "2026-10-13T12:00:00+00:00"}
@@ -773,11 +781,12 @@ class TestWorkerSystemPrompt:
 
         assert result["passed"] is True
         prompt = _system_prompt(seen)
-        _in_order(prompt, f"{ROLE}\n\n", "## Project: calc\n", "## Task\n", "add calc.py",
-                  "calc.add(1, 2) == 3", REVIEW_CONTRACT)
+        _in_order(prompt, f"{DEFAULT_HARNESS_PROMPT}\n\n{ROLE}\n\n", "## Project: calc\n", "## Task\n",
+                  "add calc.py", "calc.add(1, 2) == 3", REVIEW_CONTRACT)
         assert REQUIREMENT in prompt and prompt.endswith(REVIEW_CONTRACT)
         metadata = agent_db.start_record.await_args.kwargs["metadata"]
         assert metadata["system_prompt"] == prompt
+        assert metadata["prompt_layers"]["role"]["config_id"] == "reviewer"
         assert metadata["prompt_layers"]["task"]["kind"] == "review"
         assert metadata["prompt_layers"]["contract"]["name"] == "REVIEW_CONTRACT"
         # The work under review, the Worker's own words included, stays in the user turn.
@@ -806,7 +815,7 @@ class TestWorkerSystemPrompt:
         _, seen = _run_step()
 
         prompt = _system_prompt(seen)
-        assert prompt.startswith(f"{ROLE}\n\n## Task\n") and prompt.endswith(WORK_CONTRACT)
+        assert prompt.startswith(f"{DEFAULT_HARNESS_PROMPT}\n\n{ROLE}\n\n## Task\n") and prompt.endswith(WORK_CONTRACT)
         assert "## Project" not in prompt
         assert not [line for line in activity(agent_db) if "background" in line]
 
@@ -821,7 +830,7 @@ class TestWorkerSystemPrompt:
         result, seen = _run_step()
 
         assert result["status"] == "completed"
-        assert _system_prompt(seen).startswith(f"{ROLE}\n\n## Task\n")
+        assert _system_prompt(seen).startswith(f"{DEFAULT_HARNESS_PROMPT}\n\n{ROLE}\n\n## Task\n")
         assert agent_db.start_record.await_args.kwargs["metadata"]["prompt_layers"]["project"] is None
         warnings = [call.kwargs for call in agent_db.insert_activity.await_args_list
                     if "background" in str(call.kwargs.get("summary"))]
@@ -844,10 +853,23 @@ class TestWorkerSystemPrompt:
         _, seen = _run_step()
 
         prompt = _system_prompt(seen)
-        assert prompt.startswith(DEFAULT_SYSTEM_PROMPT.strip() + "\n\n## Project: calc\n")
+        assert prompt.startswith(f"{DEFAULT_HARNESS_PROMPT}\n\n{DEFAULT_SYSTEM_PROMPT.strip()}\n\n## Project: calc\n")
         assert prompt.endswith(WORK_CONTRACT)
         role = agent_db.start_record.await_args.kwargs["metadata"]["prompt_layers"]["role"]
         assert role == {"config_id": "worker", "sha256": _sha(DEFAULT_SYSTEM_PROMPT.strip()), "recommended": True}
+
+    def test_a_reviewer_without_a_config_row_gets_the_reviewer_role_prompt(
+        self, monkeypatch: pytest.MonkeyPatch, agent_db: Any,
+    ) -> None:
+        get_config = _worker_row(monkeypatch, None)
+        _, seen = _run_step(verify=True)
+
+        get_config.assert_awaited_with("reviewer")
+        prompt = _system_prompt(seen)
+        assert prompt.startswith(f"{DEFAULT_HARNESS_PROMPT}\n\n{REVIEWER_SYSTEM_PROMPT.strip()}\n\n## Project")
+        assert DEFAULT_SYSTEM_PROMPT.strip() not in prompt  # not the Worker's role
+        role = agent_db.start_record.await_args.kwargs["metadata"]["prompt_layers"]["role"]
+        assert role == {"config_id": "reviewer", "sha256": _sha(REVIEWER_SYSTEM_PROMPT.strip()), "recommended": True}
 
     def test_an_unedited_row_is_the_recommended_role_prompt(
         self, monkeypatch: pytest.MonkeyPatch, agent_db: Any,
@@ -856,6 +878,133 @@ class TestWorkerSystemPrompt:
                                   "max_turns": 0})
         _run_step()
         assert agent_db.start_record.await_args.kwargs["metadata"]["prompt_layers"]["role"]["recommended"] is True
+
+
+def _project_row(project_id: str = "proj-1", *, worker: str = "", planner: str = "") -> dict[str, Any]:
+    return {"id": project_id, "name": project_id, "background": "", "worker_harness_prompt": worker,
+            "planner_harness_prompt": planner}
+
+
+class TestWorkerHarnessAndLaunch:
+    """Each Worker and Reviewer run reads the harness, the model, the effort
+    and the environment as it starts: its project's Worker harness else the
+    Settings default, its own row's model else the Settings default."""
+
+    @pytest.fixture
+    def rows(self, monkeypatch: pytest.MonkeyPatch) -> dict[str, dict[str, Any]]:
+        """The ``worker`` and ``reviewer`` config rows, by agent id."""
+        from loopx.db import agent_configs
+
+        rows = {"worker": {"system_prompt": "WORKER ROLE", "timeout_seconds": 0, "max_turns": 0, "model": None},
+                "reviewer": {"system_prompt": "REVIEWER ROLE", "timeout_seconds": 0, "max_turns": 0, "model": None}}
+
+        async def _config(agent_id: str) -> dict[str, Any] | None:
+            return dict(rows[agent_id]) if agent_id in rows else None
+
+        monkeypatch.setattr(agent_configs, "get_config", _config)
+        return rows
+
+    @staticmethod
+    def _settings(agent_db: Any, **stored: str) -> None:
+        keys = {"harness": "agent.harness_prompt", "model": "agent.model", "effort": "agent.effort", "env": "agent.env"}
+        agent_db.get_settings.return_value = {keys[name]: value for name, value in stored.items()}
+
+    def test_the_settings_default_harness_comes_first_for_both(
+        self, agent_db: Any, rows: dict[str, Any],
+    ) -> None:
+        self._settings(agent_db, harness="DEFAULT HARNESS")
+        agent_db.get_task_project.return_value = _project_row()
+        for verify, role, contract in ((False, "WORKER ROLE", WORK_CONTRACT), (True, "REVIEWER ROLE", REVIEW_CONTRACT)):
+            _, seen = _run_step(verify=verify)
+            prompt = _system_prompt(seen)
+            assert prompt.startswith(f"DEFAULT HARNESS\n\n{role}\n\n## Task\n") and prompt.endswith(contract)
+            layers = agent_db.start_record.await_args.kwargs["metadata"]["prompt_layers"]
+            assert layers["harness"] == {"source": "system_default", "sha256": _sha("DEFAULT HARNESS")}
+
+    def test_the_projects_worker_harness_reaches_its_worker_and_reviewer_only(
+        self, agent_db: Any, rows: dict[str, Any],
+    ) -> None:
+        self._settings(agent_db, harness="DEFAULT HARNESS")
+        agent_db.get_task_project.return_value = _project_row("proj-a", worker="A WORKERS", planner="A PLANNER")
+        prompts = [_system_prompt(_run_step(verify=verify)[1]) for verify in (False, True)]
+        layers = [call.kwargs["metadata"]["prompt_layers"]["harness"]
+                  for call in agent_db.start_record.await_args_list]
+        assert [p.split("\n\n")[0] for p in prompts] == ["A WORKERS", "A WORKERS"]
+        assert all("DEFAULT HARNESS" not in p and "A PLANNER" not in p for p in prompts)
+        assert layers == [{"source": "project_override", "sha256": _sha("A WORKERS"), "project_id": "proj-a"}] * 2
+        # A task in another project gets the default.
+        agent_db.get_task_project.return_value = _project_row("proj-b")
+        for verify in (False, True):
+            assert _system_prompt(_run_step(verify=verify)[1]).startswith("DEFAULT HARNESS\n\n")
+
+    def test_a_changed_default_applies_to_the_next_run(self, agent_db: Any, rows: dict[str, Any]) -> None:
+        self._settings(agent_db, harness="V1")
+        _, first = _run_step()
+        self._settings(agent_db, harness="V2")
+        rows["worker"]["system_prompt"] = "WORKER ROLE v2"
+        _, second = _run_step()
+        assert _system_prompt(first).startswith("V1\n\nWORKER ROLE\n\n")
+        assert _system_prompt(second).startswith("V2\n\nWORKER ROLE v2\n\n")
+
+    def test_the_default_model_reaches_both_commands_and_is_recorded(
+        self, agent_db: Any, rows: dict[str, Any],
+    ) -> None:
+        for verify in (False, True):
+            _, seen = _run_step(verify=verify)
+            assert _flag(seen["argv"], "--model") == "opus" and "--effort" not in seen["argv"]
+            metadata = agent_db.start_record.await_args.kwargs["metadata"]
+            assert metadata["model_choice"] == {"model": "opus", "source": "builtin_default", "effort": None}
+            assert "env" not in metadata
+
+    def test_an_agent_model_beats_the_settings_default(self, agent_db: Any, rows: dict[str, Any]) -> None:
+        self._settings(agent_db, model="sonnet", effort="high")
+        rows["reviewer"]["model"] = "claude-haiku-4-5"
+        _, work = _run_step()
+        work_metadata = agent_db.start_record.await_args.kwargs["metadata"]
+        _, review = _run_step(verify=True)
+        review_metadata = agent_db.start_record.await_args.kwargs["metadata"]
+        assert (_flag(work["argv"], "--model"), _flag(work["argv"], "--effort")) == ("sonnet", "high")
+        assert (_flag(review["argv"], "--model"), _flag(review["argv"], "--effort")) == ("claude-haiku-4-5", "high")
+        assert work_metadata["model_choice"] == {"model": "sonnet", "source": "system_default", "effort": "high"}
+        assert review_metadata["model_choice"] == {"model": "claude-haiku-4-5", "source": "agent_override",
+                                                   "effort": "high"}
+
+    def test_the_settings_environment_reaches_the_subprocess_and_its_names_are_recorded(
+        self, monkeypatch: pytest.MonkeyPatch, agent_db: Any, rows: dict[str, Any],
+    ) -> None:
+        self._settings(agent_db, env=json.dumps([{"key": "LOOPX_TEST_FLAVOUR", "value": "mint"}]))
+        monkeypatch.setenv("LOOPX_SERVER_SIDE", "kept")
+        launched: list[dict[str, Any]] = []
+        real_exec = asyncio.create_subprocess_exec
+
+        async def _exec(*args: Any, **kwargs: Any) -> Any:
+            launched.append(kwargs)
+            return await real_exec(*args, **kwargs)
+
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", _exec)
+        for verify in (False, True):
+            _run_step(verify=verify)
+        assert len(launched) == 2
+        for kwargs in launched:
+            assert kwargs["env"]["LOOPX_TEST_FLAVOUR"] == "mint"
+            assert kwargs["env"]["LOOPX_SERVER_SIDE"] == "kept"  # on top of the server's environment
+        recorded = [call.kwargs["metadata"]["env"] for call in agent_db.start_record.await_args_list]
+        assert [r["keys"] for r in recorded] == [{"LOOPX_TEST_FLAVOUR": _sha("mint")}] * 2
+        assert "mint" not in json.dumps(recorded)
+
+    def test_without_settings_variables_the_subprocess_inherits_the_servers_environment(
+        self, monkeypatch: pytest.MonkeyPatch, agent_db: Any, rows: dict[str, Any],
+    ) -> None:
+        launched: list[dict[str, Any]] = []
+        real_exec = asyncio.create_subprocess_exec
+
+        async def _exec(*args: Any, **kwargs: Any) -> Any:
+            launched.append(kwargs)
+            return await real_exec(*args, **kwargs)
+
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", _exec)
+        _run_step()
+        assert launched[0]["env"] is None
 
 
 def activity(agent_db: Any) -> list[str]:

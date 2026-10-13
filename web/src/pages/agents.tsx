@@ -21,8 +21,10 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
+import { HarnessField, harnessTooLong } from "@/components/harness-field";
 import {
   fetchAgentConfigs,
+  fetchAgentSettings,
   updateAgentConfig,
   resetAgentPrompt,
   fetchLlmRecords,
@@ -84,6 +86,7 @@ function roleBadge(role: string) {
     case "planner":
       return <Badge variant="default">{role}</Badge>;
     case "worker":
+    case "reviewer":
       return <Badge variant="outline">{role}</Badge>;
     default:
       return <Badge variant="outline">{role || "—"}</Badge>;
@@ -101,18 +104,27 @@ function formatTime(iso: string | null) {
 
 // --- Agent Card ---
 
+/** The agents in the order a task meets them. */
+const AGENT_ORDER = ["manager", "planner", "worker", "reviewer"];
+
+function agentRank(agentId: string) {
+  const at = AGENT_ORDER.indexOf(agentId);
+  return at < 0 ? AGENT_ORDER.length : at;
+}
+
 function AgentCard({
   config,
   selected,
   onSelect,
-  profile,
+  defaultModel,
 }: {
   config: AgentConfig;
   selected: boolean;
   onSelect: () => void;
-  profile: LlmProfile | null;
+  /** The default model in Settings, which an agent without its own model runs with. */
+  defaultModel: string | null;
 }) {
-  const displayModel = config.model || profile?.model;
+  const displayModel = config.model || defaultModel;
   return (
     <button
       type="button"
@@ -358,7 +370,7 @@ function SystemPromptEditor({
   return (
     <div className="space-y-2">
       <div className="flex items-center justify-between">
-        <label className="text-xs font-medium text-muted-foreground">System Prompt</label>
+        <label className="text-xs font-medium text-muted-foreground">Role prompt</label>
         <div className="flex items-center gap-2">
           <span className="text-[10px] text-muted-foreground">
             {value.length} chars · {lineCount} lines
@@ -390,7 +402,7 @@ function SystemPromptEditor({
           onChange={(e) => onChange(e.target.value)}
           rows={Math.max(12, Math.min(lineCount + 2, 40))}
           className="w-full resize-y rounded-md border border-input bg-transparent p-3 text-sm text-foreground font-mono leading-relaxed placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-          placeholder="Enter system prompt..."
+          placeholder="What this kind of agent is responsible for..."
         />
       ) : (
         <div className="space-y-2">
@@ -423,9 +435,17 @@ function SystemPromptEditor({
 
 // --- Config Tab ---
 
+/** Where an agent's harness comes from, for the agents whose harness is not edited here. */
+const HARNESS_NOTE: Record<string, string> = {
+  planner: "Harness: each project's Planner override, else the default in Settings.",
+  worker: "Harness: each project's Worker override, else the default in Settings.",
+  reviewer: "Harness: the same as the Workers of its project (their override, else the default in Settings).",
+};
+
 function ConfigTab({
   config,
   profiles,
+  defaultModel,
   onSave,
   onResetPrompt,
   onProfilesChanged,
@@ -433,11 +453,15 @@ function ConfigTab({
 }: {
   config: AgentConfig;
   profiles: LlmProfile[];
+  /** The default model in Settings; null while it loads. */
+  defaultModel: string | null;
   onSave: (fields: Partial<AgentConfig>) => void;
   onResetPrompt: () => void;
   onProfilesChanged: () => void;
   saving: boolean;
 }) {
+  const isManager = config.agent_id === "manager";
+  const [harness, setHarness] = useState(config.harness_prompt ?? "");
   const [form, setForm] = useState({
     display_name: config.display_name,
     runtime: config.runtime,
@@ -466,11 +490,14 @@ function ConfigTab({
       enabled: config.enabled,
       system_prompt: config.system_prompt,
     });
+    setHarness(config.harness_prompt ?? "");
     setEditingProfile(null);
   }, [config]);
 
   const handleSave = () => {
     onSave({
+      // Only the Manager has a harness of its own; the server refuses it for the others.
+      ...(isManager ? { harness_prompt: harness } : {}),
       display_name: form.display_name,
       runtime: form.runtime,
       llm_profile_id: form.llm_profile_id,
@@ -530,13 +557,15 @@ function ConfigTab({
           </select>
         </div>
         <div className="space-y-1.5">
-          <label className="text-xs font-medium text-muted-foreground">Model Override</label>
+          <label htmlFor="agent-model" className="text-xs font-medium text-muted-foreground">Model</label>
           <Input
+            id="agent-model"
             value={form.model}
             onChange={(e) => setForm({ ...form, model: e.target.value })}
-            placeholder={selectedProfile?.model || "from profile"}
+            placeholder={defaultModel ? `${defaultModel} (default)` : "the default model"}
+            className="font-mono"
           />
-          <p className="text-[11px] text-muted-foreground">Overrides profile model if set</p>
+          <p className="text-[11px] text-muted-foreground">Empty: the default model in Settings</p>
         </div>
       </div>
 
@@ -711,6 +740,29 @@ function ConfigTab({
         </button>
       </div>
 
+      {isManager ? (
+        <HarnessField
+          id="manager-harness"
+          label="Harness prompt (override)"
+          value={harness}
+          onChange={setHarness}
+          inherits="the default"
+          rows={harness.trim() ? 10 : 3}
+          hint={
+            <>
+              The Manager&apos;s working principles, boundaries and tone, before its role prompt. Empty: the default
+              harness from <a href="#settings" className="underline underline-offset-2 hover:text-foreground">Settings</a>.
+            </>
+          }
+        />
+      ) : (
+        HARNESS_NOTE[config.agent_id] && (
+          <p className="rounded-md border border-border bg-muted/20 px-3 py-2 text-[11px] text-muted-foreground">
+            {HARNESS_NOTE[config.agent_id]}
+          </p>
+        )
+      )}
+
       <SystemPromptEditor
         value={form.system_prompt}
         onChange={(v) => setForm({ ...form, system_prompt: v })}
@@ -728,7 +780,7 @@ function ConfigTab({
         </div>
       )}
 
-      <Button onClick={handleSave} disabled={saving} className="w-full">
+      <Button onClick={handleSave} disabled={saving || (isManager && harnessTooLong(harness))} className="w-full">
         {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
         Save Config
       </Button>
@@ -798,6 +850,7 @@ interface AgentsPageProps {
 export function AgentsPage({ sub, onNavigate }: AgentsPageProps) {
   const [configs, setConfigs] = useState<AgentConfig[]>([]);
   const [profiles, setProfiles] = useState<LlmProfile[]>([]);
+  const [defaultModel, setDefaultModel] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
@@ -812,7 +865,8 @@ export function AgentsPage({ sub, onNavigate }: AgentsPageProps) {
 
   const loadConfigs = useCallback(() => {
     fetchAgentConfigs()
-      .then((data) => {
+      .then((rows) => {
+        const data = [...rows].sort((a, b) => agentRank(a.agent_id) - agentRank(b.agent_id));
         setConfigs(data);
         setError("");
         if (!selectedId && data.length > 0) {
@@ -827,13 +881,17 @@ export function AgentsPage({ sub, onNavigate }: AgentsPageProps) {
     fetchLlmProfiles().then(setProfiles).catch(() => {});
   }, []);
 
+  const loadDefaults = useCallback(() => {
+    fetchAgentSettings().then((s) => setDefaultModel(s.default_model)).catch(() => {});
+  }, []);
+
   useEffect(() => {
     loadConfigs();
     loadProfiles();
-  }, [loadConfigs, loadProfiles]);
+    loadDefaults();
+  }, [loadConfigs, loadProfiles, loadDefaults]);
 
   const selected = configs.find((c) => c.agent_id === selectedId) ?? null;
-  const profileMap = new Map(profiles.map((p) => [p.id, p]));
 
   const handleSave = async (fields: Partial<AgentConfig>) => {
     if (!selectedId) return;
@@ -886,7 +944,7 @@ export function AgentsPage({ sub, onNavigate }: AgentsPageProps) {
         </div>
         <button
           type="button"
-          onClick={() => { loadConfigs(); loadProfiles(); }}
+          onClick={() => { loadConfigs(); loadProfiles(); loadDefaults(); }}
           className="flex items-center gap-2 rounded-lg border border-border px-3 py-2 text-sm text-muted-foreground hover:text-foreground transition-colors"
         >
           <RefreshCw className="h-4 w-4" />
@@ -930,7 +988,7 @@ export function AgentsPage({ sub, onNavigate }: AgentsPageProps) {
               onSelect={() => {
                 onNavigate?.(cfg.agent_id);
               }}
-              profile={cfg.llm_profile_id ? profileMap.get(cfg.llm_profile_id) ?? null : null}
+              defaultModel={defaultModel}
             />
           ))}
         </div>
@@ -964,6 +1022,7 @@ export function AgentsPage({ sub, onNavigate }: AgentsPageProps) {
                 <ConfigTab
                   config={selected}
                   profiles={profiles}
+                  defaultModel={defaultModel}
                   onSave={handleSave}
                   onResetPrompt={handleResetPrompt}
                   onProfilesChanged={loadProfiles}

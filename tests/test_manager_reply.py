@@ -14,6 +14,7 @@ from typing import Any
 
 import pytest
 
+from loopx.agents.agent_settings import DEFAULT_HARNESS_PROMPT
 from loopx.agents.bus import MessageBus
 from loopx.agents.claude_cli import ISOLATION_ID, isolation_args
 from loopx.agents.message import MANAGER_ADDRESS, MessageEnvelope, MessageType, channel_address
@@ -120,11 +121,13 @@ class TestManagerReply:
         assert "--append-system-prompt" not in command
         (system_prompt,) = asked["prompts"]
         assert Path(command[command.index("--append-system-prompt-file") + 1]).name == f"{_sha(system_prompt)}.md"
-        # The Manager keeps its own composition (no project, no task), and records it with its layers.
+        # The Manager has three layers (no project, no task): its harness, its role, then the placement rule.
         assert start["metadata"]["system_prompt"] == system_prompt
+        assert system_prompt.startswith(f"{DEFAULT_HARNESS_PROMPT}\n\nYou are the Manager Agent")
         assert system_prompt.endswith(TASK_PLACEMENT_RULE)
         assert start["metadata"]["system_prompt_sha256"] == _sha(system_prompt)
         layers = start["metadata"]["prompt_layers"]
+        assert layers["harness"] == {"source": "builtin_default", "sha256": _sha(DEFAULT_HARNESS_PROMPT)}
         assert layers["role"]["config_id"] == "manager" and layers["role"]["recommended"] is True
         assert (layers["project"], layers["task"]) == (None, None)
         assert layers["contract"] == {"name": "TASK_PLACEMENT_RULE", "sha256": _sha(TASK_PLACEMENT_RULE)}
@@ -248,35 +251,47 @@ def _converse(
     messages: list[str],
     *,
     prompts: list[str] | None = None,
+    rows: list[dict[str, Any]] | None = None,
+    settings: list[dict[str, str]] | None = None,
     between: Any = None,
 ) -> dict[str, Any]:
     """Send ``messages`` one at a time to one Manager backed by a fake claude, then stop it.
 
-    ``prompts[i]`` is the system prompt the database holds for message ``i``;
-    ``between(spawned)`` runs before every message after the first. Returns the
-    final ``replies``, every started Claude as ``(argv, process)`` in
-    ``spawned``, whether each was ``running`` just before ``stop()``, and the
+    ``prompts[i]`` is the system prompt the database holds for message ``i``
+    (``rows[i]`` the whole manager row, instead) and ``settings[i]`` what the
+    Settings table holds; ``between(spawned)`` runs before every message after
+    the first. Returns the final ``replies``, every started Claude as
+    ``(argv, process)`` in ``spawned`` with its launch keywords in
+    ``launched``, whether each was ``running`` just before ``stop()``, and the
     ``pids`` the fake logged.
     """
-    from loopx.db import agent_configs
+    from loopx.db import agent_configs, system_settings
 
     spawned: list[tuple[list[str], Any]] = []
+    launched: list[dict[str, Any]] = []
     real_exec = asyncio.create_subprocess_exec
 
     async def _exec(*args: Any, **kwargs: Any) -> Any:
         process = await real_exec(*args, **kwargs)
         spawned.append(([str(a) for a in args[1:]], process))
+        launched.append(kwargs)
         return process
 
     current: dict[str, int] = {"message": 0}
 
     async def _get_config(agent_id: str) -> dict[str, Any] | None:
+        if rows:
+            return dict(rows[current["message"]])
         if not prompts:
             return None
         return {"system_prompt": prompts[current["message"]]}
 
+    async def _get_settings(keys: Any) -> dict[str, str]:
+        return dict(settings[current["message"]]) if settings else {}
+
     monkeypatch.setattr(asyncio, "create_subprocess_exec", _exec)
     monkeypatch.setattr(agent_configs, "get_config", _get_config)
+    monkeypatch.setattr(system_settings, "get_settings", _get_settings)
 
     async def _run() -> dict[str, Any]:
         with tempfile.TemporaryDirectory() as tmp:
@@ -309,7 +324,7 @@ def _converse(
             await bus.shutdown()
             pid_file = root / "pids"
             pids = pid_file.read_text().split() if pid_file.exists() else []
-            return {"replies": replies, "spawned": spawned, "running": running, "pids": pids,
+            return {"replies": replies, "spawned": spawned, "launched": launched, "running": running, "pids": pids,
                     "prompts": _prompts(root)}
 
     return asyncio.run(_run())
@@ -345,7 +360,7 @@ class TestManagerResidentClaude:
         assert _flag(argv, "--output-format") == "stream-json"
         assert {"--print", "--verbose", "--include-partial-messages"} <= set(argv)
         takes_value = {"--input-format", "--output-format", "--append-system-prompt-file", "--system-prompt-snapshot",
-                       "--setting-sources", "--settings", "--resume"}
+                       "--setting-sources", "--settings", "--resume", "--model", "--effort"}
         positional = [arg for i, arg in enumerate(argv) if not arg.startswith("--") and argv[i - 1] not in takes_value]
         assert positional == []
         assert _flag(argv, "--resume") is None  # no session yet
@@ -374,7 +389,8 @@ class TestManagerResidentClaude:
         assert [call.kwargs["cost_usd"] for call in agent_db.finish_record.await_args_list] == [0.25, 0.25, 0.25]
         (first, _), (second, _) = chat["spawned"]
         first_prompt, second_prompt = chat["prompts"]
-        assert first_prompt.startswith("prompt A") and second_prompt.startswith("prompt B")
+        assert first_prompt.startswith(f"{DEFAULT_HARNESS_PROMPT}\n\nprompt A")
+        assert second_prompt.startswith(f"{DEFAULT_HARNESS_PROMPT}\n\nprompt B")
         # A new prompt is a new file named by its hash; each turn records the hash it ran with.
         assert Path(_flag(first, "--append-system-prompt-file") or "").name == f"{_sha(first_prompt)}.md"
         assert Path(_flag(second, "--append-system-prompt-file") or "").name == f"{_sha(second_prompt)}.md"
@@ -525,3 +541,76 @@ class TestManagerTaskPlacement:
         result = _ask_for_task(_task_json(project="tetris", work_dir="/tmp/t"))
         assert result.requests == []
         assert "database is down" in result.reply
+
+
+_HARNESS, _MODEL, _EFFORT, _ENV = "agent.harness_prompt", "agent.model", "agent.effort", "agent.env"
+
+
+@pytest.mark.usefixtures("agent_db")
+class TestManagerHarnessAndLaunch:
+    """The Manager's harness is its own override, else the Settings default; its
+    model is its own row's, else the Settings default (opus). Changing the
+    harness, the model or the Settings environment restarts its Claude, which
+    resumes the session."""
+
+    def test_three_layers_with_the_managers_own_harness(self, monkeypatch: pytest.MonkeyPatch, agent_db: Any) -> None:
+        row = {"system_prompt": "You manage.", "harness_prompt": "MANAGER HARNESS"}
+        chat = _converse(monkeypatch, _resident(), ["hello"], rows=[row], settings=[{_HARNESS: "DEFAULT"}])
+        (prompt,) = chat["prompts"]
+        assert prompt == f"MANAGER HARNESS\n\nYou manage.\n\n{TASK_PLACEMENT_RULE}"
+        layers = agent_db.start_record.await_args.kwargs["metadata"]["prompt_layers"]
+        assert layers["harness"] == {"source": "manager_override", "sha256": _sha("MANAGER HARNESS")}
+
+    def test_without_an_override_the_settings_default_comes_first(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        chat = _converse(monkeypatch, _resident(), ["hello"], rows=[{"system_prompt": "You manage."}],
+                         settings=[{_HARNESS: "DEFAULT HARNESS"}])
+        assert chat["prompts"] == [f"DEFAULT HARNESS\n\nYou manage.\n\n{TASK_PLACEMENT_RULE}"]
+
+    def test_the_model_is_opus_by_default_and_the_managers_own_wins(
+        self, monkeypatch: pytest.MonkeyPatch, agent_db: Any,
+    ) -> None:
+        chat = _converse(monkeypatch, _resident(), ["hello"])
+        ((argv, _),) = chat["spawned"]
+        assert _flag(argv, "--model") == "opus" and "--effort" not in argv
+        assert agent_db.start_record.await_args.kwargs["metadata"]["model_choice"] == {
+            "model": "opus", "source": "builtin_default", "effort": None}
+
+        chat = _converse(monkeypatch, _resident(), ["hello"], rows=[{"system_prompt": "M.", "model": "sonnet"}],
+                         settings=[{_MODEL: "claude-opus-4-5", _EFFORT: "low"}])
+        ((argv, _),) = chat["spawned"]
+        assert (_flag(argv, "--model"), _flag(argv, "--effort")) == ("sonnet", "low")
+        assert agent_db.start_record.await_args.kwargs["metadata"]["model_choice"] == {
+            "model": "sonnet", "source": "agent_override", "effort": "low"}
+
+    @pytest.mark.parametrize("change", ["harness", "override", "model"])
+    def test_a_changed_harness_or_model_restarts_claude_resuming_its_session(
+        self, monkeypatch: pytest.MonkeyPatch, change: str,
+    ) -> None:
+        before = {"system_prompt": "M.", "harness_prompt": "", "model": None}
+        after = {**before, **({"harness_prompt": "OWN"} if change == "override" else {}),
+                 **({"model": "sonnet"} if change == "model" else {})}
+        settings = [{_HARNESS: "V1"}, {_HARNESS: "V2" if change == "harness" else "V1"}]
+        chat = _converse(monkeypatch, _resident(), ["hello", "again"], rows=[before, after], settings=settings)
+        assert chat["replies"] == ["turn 1: hello", "turn 1: again"]  # a new process for the second message
+        (first, _), (second, _) = chat["spawned"]
+        assert (_flag(first, "--resume"), _flag(second, "--resume")) == (None, "sess-1")
+        assert chat["running"] == [False, True]
+
+    def test_a_changed_environment_restarts_claude_with_it(self, monkeypatch: pytest.MonkeyPatch, agent_db: Any) -> None:
+        monkeypatch.setenv("LOOPX_SERVER_SIDE", "kept")
+        env = [{_ENV: json.dumps([{"key": "LOOPX_TEST_FLAVOUR", "value": flavour}])} for flavour in ("mint", "mint",
+                                                                                                    "lime")]
+        chat = _converse(monkeypatch, _resident(), ["hello", "again", "third"], settings=env)
+        assert chat["replies"] == ["turn 1: hello", "turn 2: again", "turn 1: third"]
+        assert [(k["env"]["LOOPX_TEST_FLAVOUR"], k["env"]["LOOPX_SERVER_SIDE"]) for k in chat["launched"]] == [
+            ("mint", "kept"), ("lime", "kept")]
+        (first, _), (second, _) = chat["spawned"]
+        assert first == [arg for arg in second if arg not in ("--resume", "sess-1")]  # only the env changed
+        recorded = [call.kwargs["metadata"]["env"]["keys"] for call in agent_db.start_record.await_args_list]
+        assert recorded == [{"LOOPX_TEST_FLAVOUR": _sha(f)} for f in ("mint", "mint", "lime")]
+
+    def test_without_settings_variables_claude_inherits_the_servers_environment(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        chat = _converse(monkeypatch, _resident(), ["hello"])
+        assert chat["launched"][0]["env"] is None

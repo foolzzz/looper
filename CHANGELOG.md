@@ -92,9 +92,9 @@ To learn how to use these features, read the [usage guide](docs/fork/usage.md).
   installed plugins and their skills, agents and hooks, custom agents, output
   styles, MCP servers (the Manager loaded them until now) or auto memory. The
   project's own `CLAUDE.md` and `.claude/settings.json` still load, and the
-  login is unaffected. An agent now runs on Claude Code's default model and
-  effort unless its config sets a model. Rules that every project must follow
-  go into the agents' role prompts (a shared harness layer is planned).
+  login is unaffected. The model and effort now come from LoopX's settings
+  instead of the operator's (below), and rules that every project must follow
+  go into the default harness (below).
 - **Behaviour change: the task description is part of the system prompt.**
   The system prompt of the Planner, the Workers and the Reviewers is now four
   layers: role prompt, project background, a `## Task` section, then the
@@ -122,6 +122,57 @@ To learn how to use these features, read the [usage guide](docs/fork/usage.md).
   The history page's System prompt section shows the short hash, an
   `isolated` badge and one line per layer; older runs keep showing their
   prompt.
+- **Behaviour change: a harness layer comes first in every agent's system
+  prompt, and the role prompts hold responsibilities only.** The system prompt
+  is now five layers for the Planner, the Workers and the Reviewers (harness,
+  role prompt, project background, task, contract) and three for the Manager
+  (harness, role prompt, `TASK_PLACEMENT_RULE`). The harness is an agent's
+  working principles, boundaries and tone. Its default lives in Settings (a
+  new `system_settings` table, edited on the Settings page, with Reset to
+  built-in); until it is edited, the public built-in `DEFAULT_HARNESS_PROMPT`
+  applies. The Manager can override it on the Agents page
+  (`agent_configs.harness_prompt`, Manager only; 400 for the other agents),
+  and a project can override it for its Planner (`planner_harness_prompt`)
+  and its Workers (`worker_harness_prompt`), in the project editor's
+  "Harness overrides". Reviewers follow their project's Workers. Each harness
+  is at most 20,000 characters. The recommended role prompts of the Manager,
+  the Planner and the Workers lost their principles and tone ("be concise",
+  "default to Chinese", "answer in the user's language", "check by running
+  things", "say what you could not do"), which the default harness now
+  carries; an unedited role prompt follows at startup, and an edited one is
+  kept. The Manager now answers in the language the user writes in rather
+  than defaulting to Chinese, unless a harness says otherwise.
+- **New `reviewer` agent row.** Reviewers no longer reuse the `worker` row and
+  its role prompt: they have their own recommended role prompt (judge the
+  result, not the report; hold the work to every acceptance criterion; make
+  findings fixable), seeded at startup, and read their own row's
+  `timeout_seconds` (86400 by default), `max_turns` and `model`. A `worker`
+  row's custom timeout no longer applies to Reviewers. The Agents page lists
+  it, and the Runs tab and `role=worker` in `/api/llm-records` now list
+  Workers only, with `role=reviewer` for Reviewers.
+- **Behaviour change: every agent passes `--model`, `opus` by default, which
+  can change cost.** Settings has a default model (built in: `opus`), an
+  optional effort (`--effort low|medium|high|xhigh|max`; none passes no flag)
+  and up to 50 non-secret environment variables. All four agents now pass
+  `--model` (before, only the Planner did, and only when its row set one);
+  an agent's own `model` on the Agents page wins. On an account whose Claude
+  Code default is a cheaper model, agents now run on Opus and cost more; set
+  the default model in Settings to keep the old one. The environment
+  variables are added to every agent's `claude` process on top of the
+  server's environment; a name must match `[A-Z_][A-Z0-9_]*`, and a name
+  containing `KEY`, `TOKEN`, `SECRET`, `PASSWORD` or `CREDENTIAL` is refused
+  because secrets do not belong there. A changed harness, role prompt, model,
+  effort or variable applies to the next Worker or Reviewer run; the Manager
+  and a running Planner restart with `--resume` on their next turn. New API:
+  `GET/PUT /api/settings/agents` and `POST /api/settings/agents/reset-harness`;
+  the project API and inline project creation take the two harness fields.
+- Every run's `prompt_layers` gains `harness` (`source`: `builtin_default`,
+  `system_default`, `manager_override` or `project_override`, its sha256 and
+  the project), and its metadata gains `model_choice` (the model asked for,
+  its source and the effort) and, when Settings holds variables, `env` (their
+  names with a sha256 of each value; values are never recorded). The history
+  page's layer summary shows the harness source, the model and the variable
+  names.
 
 ## [2.5.0] - 2026-10-13
 

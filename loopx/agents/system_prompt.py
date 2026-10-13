@@ -2,21 +2,25 @@
 
 The Planner, the Workers and the Reviewers get the same layout::
 
-    <role prompt>            L1: the agent's row in agent_configs (editable)
+    <harness prompt>         L1: character and stability, resolved by
+                                 agent_settings.resolve_harness (Settings
+                                 default, or the project's override)
 
-    ## Project: <name>       L2: only when the project has a background
+    <role prompt>            L2: the agent's row in agent_configs (editable)
+
+    ## Project: <name>       L3: only when the project has a background
     <background>
 
-    ## Task                  L3: what this session is for (the Planner's task,
+    ## Task                  L4: what this session is for (the Planner's task,
     ...                          a Worker's or Reviewer's step)
 
-    <contract>               L4: code-owned, the reply or report format code parses
+    <contract>               L5: code-owned, the reply or report format code parses
 
 Everything here is fixed for the session; what changes from turn to turn
 (progress, results, other agents' output, chat) is the user turn. The
 contract comes last, so nothing a user or the Planner wrote can follow it.
-The Manager, which spans every project and has no single task, keeps its own
-composition but records its layers the same way.
+The Manager, which spans every project and has no single task, gets its
+harness, its role and its contract.
 
 A composed prompt goes to Claude Code as a file named by its sha256 under the
 runtime root (``SystemPrompt.write_file``), and every run records the hash
@@ -35,6 +39,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from .agent_settings import Harness
 from .claude_cli import ISOLATION_ID
 
 logger = logging.getLogger(__name__)
@@ -170,10 +175,16 @@ def review_task_section(
 
 
 def compose_system_prompt(
-    role: str, *, project_name: str = "", background: str = "", task: str = "", contract: str = "",
+    role: str,
+    *,
+    harness: str = "",
+    project_name: str = "",
+    background: str = "",
+    task: str = "",
+    contract: str = "",
 ) -> str:
-    """The role prompt, the project section (when there is a background), the task, then the contract."""
-    parts = (role.rstrip(), project_section(project_name, background), task.strip(), contract)
+    """The harness, the role prompt, the project section (when there is a background), the task, then the contract."""
+    parts = (harness.rstrip(), role.rstrip(), project_section(project_name, background), task.strip(), contract)
     return "\n\n".join(part for part in parts if part)
 
 
@@ -200,6 +211,7 @@ def prompt_layers(
     task_id: str | None = None,
     step_id: str | None = None,
     task: str = "",
+    harness: Harness | None = None,
 ) -> dict[str, Any]:
     """Where each layer of a system prompt came from, for the run's record.
 
@@ -209,6 +221,7 @@ def prompt_layers(
     """
     background = str((project or {}).get("background") or "")
     return {
+        "harness": None if harness is None else harness.record(),
         "role": {"config_id": role_id, "sha256": sha256_text(role.strip()), "recommended": recommended},
         "project": None if project is None else {
             "id": str(project.get("id") or ""),
@@ -267,6 +280,7 @@ class SystemPrompt:
 
 def build_system_prompt(
     *,
+    harness: Harness,
     role_id: str,
     role: str,
     recommended: bool,
@@ -278,9 +292,13 @@ def build_system_prompt(
     step_id: str | None = None,
     task: str = "",
 ) -> SystemPrompt:
-    """A task agent's system prompt (role, project, task, contract) with its layers."""
+    """An agent's system prompt (harness, role, project, task, contract) with its layers.
+
+    The Manager passes neither a project nor a task.
+    """
     text = compose_system_prompt(
         role,
+        harness=harness.text,
         project_name=str((project or {}).get("name") or ""),
         background=str((project or {}).get("background") or ""),
         task=task,
@@ -288,5 +306,5 @@ def build_system_prompt(
     )
     return SystemPrompt(text, prompt_layers(
         role_id=role_id, role=role, recommended=recommended, contract_name=contract_name, contract=contract,
-        project=project, task_kind=task_kind, task_id=task_id, step_id=step_id, task=task,
+        project=project, task_kind=task_kind, task_id=task_id, step_id=step_id, task=task, harness=harness,
     ))

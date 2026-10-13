@@ -1,8 +1,9 @@
 """Project CRUD: every task belongs to one project.
 
 A project may give its tasks a default directory (``work_dir``, ``''`` for
-none) and a ``background`` its task agents get in their system prompt
-(``''`` for none). Names are unique ignoring case; a taken name raises
+none), a ``background`` its task agents get in their system prompt and
+harness prompts for its Planner (``planner_harness_prompt``) and for its
+Workers and Reviewers (``worker_harness_prompt``); ``''`` is none. Names are unique ignoring case; a taken name raises
 ``asyncpg.UniqueViolationError``.
 """
 
@@ -59,16 +60,20 @@ async def create_project(
     description: str = "",
     work_dir: str = "",
     background: str = "",
+    planner_harness_prompt: str = "",
+    worker_harness_prompt: str = "",
     pool: asyncpg.Pool | asyncpg.Connection | None = None,
 ) -> dict[str, Any]:
     pool = pool or get_pool()
     row = await pool.fetchrow(
         """
-        INSERT INTO projects (id, name, description, work_dir, background)
-        VALUES ($1, $2, $3, $4, $5)
+        INSERT INTO projects (id, name, description, work_dir, background,
+                              planner_harness_prompt, worker_harness_prompt)
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
         RETURNING *
         """,
         f"proj-{uuid.uuid4().hex[:12]}", name, description, work_dir, background,
+        planner_harness_prompt, worker_harness_prompt,
     )
     return dict(row)
 
@@ -80,6 +85,8 @@ async def update_project(
     description: str | None = None,
     work_dir: str | None = None,
     background: str | None = None,
+    planner_harness_prompt: str | None = None,
+    worker_harness_prompt: str | None = None,
     pool: asyncpg.Pool | None = None,
 ) -> bool:
     """Set the fields given (not ``None``); False when there is no such project."""
@@ -91,10 +98,12 @@ async def update_project(
             description = COALESCE($3, description),
             work_dir = COALESCE($4, work_dir),
             background = COALESCE($5, background),
+            planner_harness_prompt = COALESCE($6, planner_harness_prompt),
+            worker_harness_prompt = COALESCE($7, worker_harness_prompt),
             updated_at = now()
         WHERE id = $1
         """,
-        project_id, name, description, work_dir, background,
+        project_id, name, description, work_dir, background, planner_harness_prompt, worker_harness_prompt,
     )
     return result == "UPDATE 1"
 
