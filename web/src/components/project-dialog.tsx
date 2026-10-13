@@ -3,18 +3,20 @@ import { Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { createProject, type Project } from "@/lib/api";
+import { ProjectBackgroundField, backgroundTooLong } from "@/components/project-background-field";
 
 interface ProjectDialogProps {
   onClose: () => void;
   onCreated: (project: Project) => void;
 }
 
-/** Create a project: a name, an optional default directory and description. */
+/** Create a project: a name, an optional default directory, description and background. */
 export function ProjectDialog({ onClose, onCreated }: ProjectDialogProps) {
   const id = useId();
   const [name, setName] = useState("");
   const [workDir, setWorkDir] = useState("");
   const [description, setDescription] = useState("");
+  const [background, setBackground] = useState("");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
 
@@ -28,7 +30,7 @@ export function ProjectDialog({ onClose, onCreated }: ProjectDialogProps) {
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!name.trim() || saving) return;
+    if (!name.trim() || saving || backgroundTooLong(background)) return;
     setSaving(true);
     setError("");
     try {
@@ -36,6 +38,7 @@ export function ProjectDialog({ onClose, onCreated }: ProjectDialogProps) {
         name: name.trim(),
         description: description.trim() || undefined,
         work_dir: workDir.trim() || undefined,
+        background: background.trim() ? background : undefined,
       });
       onCreated(project);
     } catch (err) {
@@ -52,7 +55,7 @@ export function ProjectDialog({ onClose, onCreated }: ProjectDialogProps) {
         aria-modal="true"
         aria-labelledby={`${id}-title`}
         onSubmit={submit}
-        className="w-full max-w-md space-y-4 rounded-xl border border-border bg-popover p-6 text-popover-foreground shadow-xl"
+        className="max-h-full w-full max-w-md space-y-4 overflow-y-auto rounded-xl border border-border bg-popover p-6 text-popover-foreground shadow-xl"
       >
         <h2 id={`${id}-title`} className="text-lg font-semibold">New project</h2>
         <div className="space-y-1">
@@ -89,10 +92,17 @@ export function ProjectDialog({ onClose, onCreated }: ProjectDialogProps) {
             className="w-full resize-none rounded-md border border-input bg-transparent px-3 py-2 text-sm text-foreground shadow-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
           />
         </div>
+        <ProjectBackgroundField
+          id={`${id}-background`}
+          value={background}
+          onChange={setBackground}
+          rows={4}
+          labelClassName="text-sm"
+        />
         {error && <p role="alert" className="text-xs text-destructive">{error}</p>}
         <div className="flex justify-end gap-2">
           <Button type="button" variant="outline" onClick={onClose}>Cancel</Button>
-          <Button type="submit" disabled={!name.trim() || saving}>
+          <Button type="submit" disabled={!name.trim() || saving || backgroundTooLong(background)}>
             {saving && <Loader2 className="h-4 w-4 animate-spin" />}
             Create
           </Button>

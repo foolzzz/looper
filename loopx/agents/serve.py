@@ -99,6 +99,21 @@ If the user says "不", "取消", "算了", "no", "cancel" or modifies the requi
 """
 
 
+# The worker's seeded prompt from when it was stored but never applied. It
+# applies now, to Reviewers too, and its "make the code changes" and
+# "report as JSON" duplicated the code-owned contracts; a database still
+# holding it gets the current default at startup, even one seeded before the
+# recommended prompt was tracked.
+_WORKER_PROMPT_BEFORE_CONTRACTS = (
+    "You are a Worker Agent. Execute the assigned task precisely:\n"
+    "1. Read and understand the instruction\n"
+    "2. Make the required code changes\n"
+    "3. Run validation commands if provided\n"
+    "4. Report results as structured JSON\n\n"
+    "Focus on the specific task. Do not make changes beyond what is requested."
+)
+
+
 def _telegram_adapter_from_config(config: dict[str, Any]) -> TelegramChannelAdapter | None:
     """Build the Telegram adapter from its Settings-page config, or None if invalid."""
     try:
@@ -143,6 +158,7 @@ async def _run_agent_system(
     from ..db.llm_profiles import seed_defaults as seed_llm_profiles
     from .tiers.manager import DEFAULT_SYSTEM_PROMPT
     from .tiers.planner import DEFAULT_SYSTEM_PROMPT as PLANNER_SYSTEM_PROMPT
+    from .tiers.worker import DEFAULT_SYSTEM_PROMPT as WORKER_SYSTEM_PROMPT
 
     pool = await init_pool()
     await ensure_schema(pool)
@@ -188,20 +204,16 @@ async def _run_agent_system(
             "runtime": "claude-code",
             "max_concurrency": 3,
             "timeout_seconds": 86400,
-            "system_prompt": (
-                "You are a Worker Agent. Execute the assigned task precisely:\n"
-                "1. Read and understand the instruction\n"
-                "2. Make the required code changes\n"
-                "3. Run validation commands if provided\n"
-                "4. Report results as structured JSON\n\n"
-                "Focus on the specific task. Do not make changes beyond what is requested."
-            ),
+            # The role prompt of every Worker and Reviewer (their report contracts follow it).
+            "system_prompt": WORKER_SYSTEM_PROMPT,
         },
     ])
     if await replace_default_prompt("planner", old=_PLANNER_PROMPT_BEFORE_CLAUDE, new=PLANNER_SYSTEM_PROMPT):
         logger.info("planner agent config: replaced the old default system prompt")
     if await replace_default_prompt("manager", old=_MANAGER_PROMPT_BEFORE_PROJECTS, new=DEFAULT_SYSTEM_PROMPT):
         logger.info("manager agent config: replaced the old default system prompt")
+    if await replace_default_prompt("worker", old=_WORKER_PROMPT_BEFORE_CONTRACTS, new=WORKER_SYSTEM_PROMPT):
+        logger.info("worker agent config: replaced the old default system prompt")
     from ..db.channel_configs import seed_defaults as seed_channel_configs
     await seed_channel_configs([
         {

@@ -36,9 +36,9 @@ class _Store:
         self.list_calls: list[dict[str, Any]] = []
         self.transactions = 0
 
-    def add_project(self, project_id: str, name: str, work_dir: str = "") -> None:
+    def add_project(self, project_id: str, name: str, work_dir: str = "", background: str = "") -> None:
         self.projects[project_id] = {
-            "id": project_id, "name": name, "description": "", "work_dir": work_dir,
+            "id": project_id, "name": name, "description": "", "work_dir": work_dir, "background": background,
             "created_at": NOW, "updated_at": NOW,
         }
 
@@ -64,22 +64,24 @@ class _Store:
         row = self.projects.get(project_id)
         return self._with_counts(row) if row else None
 
-    async def create_project(self, *, name: str, description: str = "", work_dir: str = "", pool: Any = None) -> dict[str, Any]:
+    async def create_project(self, *, name: str, description: str = "", work_dir: str = "", background: str = "",
+                             pool: Any = None) -> dict[str, Any]:
         if self._name_taken(name):
             raise asyncpg.UniqueViolationError("duplicate key value violates unique constraint")
         project_id = f"proj-{len(self.projects):012d}"
-        self.add_project(project_id, name, work_dir)
+        self.add_project(project_id, name, work_dir, background)
         self.projects[project_id]["description"] = description
         return dict(self.projects[project_id])
 
     async def update_project(self, project_id: str, *, name: str | None = None, description: str | None = None,
-                             work_dir: str | None = None, pool: Any = None) -> bool:
+                             work_dir: str | None = None, background: str | None = None, pool: Any = None) -> bool:
         row = self.projects.get(project_id)
         if row is None:
             return False
         if name is not None and self._name_taken(name, other_than=project_id):
             raise asyncpg.UniqueViolationError("duplicate key value violates unique constraint")
-        for key, value in (("name", name), ("description", description), ("work_dir", work_dir)):
+        for key, value in (("name", name), ("description", description), ("work_dir", work_dir),
+                           ("background", background)):
             if value is not None:
                 row[key] = value
         return True
@@ -164,8 +166,8 @@ class TestProjectEndpoints:
         assert (body["name"], body["description"]) == ("tetris", "game")
         assert body["work_dir"] == os.path.join(os.path.expanduser("~"), "tetris")
         assert (body["task_count"], body["active_count"]) == (0, 0)
-        assert set(body) == {"project_id", "name", "description", "work_dir", "created_at", "updated_at",
-                             "task_count", "active_count"}
+        assert set(body) == {"project_id", "name", "description", "work_dir", "background", "created_at",
+                             "updated_at", "task_count", "active_count"}
 
     def test_work_dir_is_optional(self, store: _Store) -> None:
         status, body = _call("POST", "/api/projects", {"name": "notes"})
@@ -243,6 +245,84 @@ class TestProjectEndpoints:
 
     def test_delete_of_an_unknown_project_is_404(self, store: _Store) -> None:
         assert _call("DELETE", "/api/projects/proj-nope")[0] == 404
+
+
+class TestProjectBackground:
+    """A project's background goes into its task agents' system prompt; up to 10000 characters."""
+
+    def test_create_stores_it_without_the_blank_lines_around_it(self, store: _Store) -> None:
+        status, body = _call("POST", "/api/projects", {
+            "name": "calc", "background": "\n \n  - use uv\n\n  - Python 3.12\n\n\t\n",
+        })
+        assert status == 201
+        # Blank lines around it go; the first line keeps its indentation and inner blank lines stay.
+        assert body["background"] == "  - use uv\n\n  - Python 3.12"
+        assert store.projects[body["project_id"]]["background"] == "  - use uv\n\n  - Python 3.12"
+
+    def test_it_is_optional(self, store: _Store) -> None:
+        status, body = _call("POST", "/api/projects", {"name": "calc"})
+        assert status == 201 and body["background"] == ""
+
+    @pytest.mark.parametrize(("raw", "stored"), [
+        ("", ""),
+        ("\n \n\t\n", ""),
+        ("x", "x"),
+        ("\r\n\r\n  x\r\n\r\ny\r\n", "  x\r\n\r\ny"),
+    ])
+    def test_only_the_blank_lines_around_it_are_trimmed(self, raw: str, stored: str) -> None:
+        from loopx.agents.projects import project_background
+
+        assert project_background(raw) == stored
+
+    def test_the_limit_is_10000_characters(self, store: _Store) -> None:
+        assert _call("POST", "/api/projects", {"name": "a", "background": "x" * 10000})[0] == 201
+        status, body = _call("POST", "/api/projects", {"name": "b", "background": "x" * 10001})
+        assert status == 400 and "10000" in body["error"]
+        assert [p["name"] for p in store.projects.values()] == ["a"]
+
+    def test_surrounding_blank_lines_do_not_count(self, store: _Store) -> None:
+        assert _call("POST", "/api/projects", {"name": "a", "background": "\n\n" + "x" * 10000 + "\n\n"})[0] == 201
+
+    @pytest.mark.parametrize("background", [None, 5, ["x"]])
+    def test_it_must_be_a_string(self, store: _Store, background: Any) -> None:
+        status, body = _call("POST", "/api/projects", {"name": "a", "background": background})
+        assert status == 400 and "background" in body["error"]
+
+    def test_put_sets_it_and_an_empty_string_clears_it(self, store: _Store) -> None:
+        store.add_project("proj-a", "calc", "/srv/calc", background="old")
+        status, body = _call("PUT", "/api/projects/proj-a", {"background": "Use uv.\n"})
+        assert status == 200 and body["background"] == "Use uv."
+        assert (body["name"], body["work_dir"]) == ("calc", "/srv/calc")  # the rest is kept
+        status, body = _call("PUT", "/api/projects/proj-a", {"background": ""})
+        assert status == 200 and body["background"] == ""
+
+    def test_put_of_other_fields_keeps_it(self, store: _Store) -> None:
+        store.add_project("proj-a", "calc", background="Use uv.")
+        assert _call("PUT", "/api/projects/proj-a", {"name": "Calc"})[1]["background"] == "Use uv."
+
+    def test_put_over_the_limit_is_400_and_changes_nothing(self, store: _Store) -> None:
+        store.add_project("proj-a", "calc", background="old")
+        status, body = _call("PUT", "/api/projects/proj-a", {"name": "new", "background": "x" * 10001})
+        assert status == 400 and "10000" in body["error"]
+        assert (store.projects["proj-a"]["name"], store.projects["proj-a"]["background"]) == ("calc", "old")
+
+    def test_listed_projects_show_it(self, store: _Store) -> None:
+        store.add_project("proj-a", "calc", background="Use uv.")
+        assert _call("GET", "/api/projects")[1]["projects"][0]["background"] == "Use uv."
+
+    def test_a_new_project_made_with_a_task_takes_it(self, store: _Store) -> None:
+        status, body = _call("POST", "/api/tasks/create", {
+            "requirement": "r", "project": {"name": "calc", "background": " Use uv.\n"}, "work_dir": "/tmp/calc",
+        })
+        assert status == 201
+        assert store.projects[body["project_id"]]["background"] == " Use uv."
+
+    def test_a_new_project_made_with_a_task_is_refused_over_the_limit(self, store: _Store) -> None:
+        status, body = _call("POST", "/api/tasks/create", {
+            "requirement": "r", "project": {"name": "calc", "background": "x" * 10001}, "work_dir": "/tmp/calc",
+        })
+        assert status == 400 and "10000" in body["error"]
+        assert store.projects == {} and store.tasks == {}
 
 
 class TestTaskCreate:

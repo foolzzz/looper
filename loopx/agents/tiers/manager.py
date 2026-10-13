@@ -402,6 +402,7 @@ class ManagerAgent:
             cwd=str(self._config.work_dir),
             input_text=message,
             session_id=self._session_id,
+            system_prompt=system_prompt,
         )
         await recorder.start()
 

@@ -46,6 +46,38 @@ To learn how to use these features, read the [usage guide](docs/fork/usage.md).
   (`role=planner`). A completed task's `tasks.result_summary` is now the last
   accepted step's summary, and a failed task's `tasks.error` is the Planner's
   failure summary.
+- Projects have a **background** (`projects.background`, at most 10000
+  characters; `""` clears it): what every task agent of the project should
+  know. It is added to the system prompt of the project's Planner, Workers
+  and Reviewers, not the Manager's, as `## Project: <name>` between the role
+  prompt and the code-owned contract, which always comes last. Changes apply
+  at once: the Planner rebuilds its system prompt every turn and restarts its
+  Claude with `--resume` when it changed, and every Worker or Reviewer that
+  starts afterwards reads the current background; a running Worker keeps its
+  own. A run whose project cannot be read goes on without the background and
+  logs a warning. The API (`POST`/`PUT /api/projects`, and the inline
+  `project` of `POST /api/tasks/create`) takes `background`; the Tasks page's
+  project bar shows it and edits it with a `n / 10000` counter, and the
+  new-project dialog has an optional Background field.
+- **Behaviour change: Workers and Reviewers now get a system prompt.** They
+  used to start with none, and the `worker` row's `system_prompt` was stored
+  but never applied. Their `--append-system-prompt` is now that worker role
+  prompt, the project section and the code-owned contract. The stable rules
+  moved out of the stdin prompt: `WORK_CONTRACT` (the step's rules and the
+  `{status, changed_files, deleted_files, summary}` report) and
+  `REVIEW_CONTRACT` (the review's rules and the `passed` verdict) are the end
+  of the system prompt, and the first user turn carries only the step's data
+  (instruction, working directory, acceptance criteria, validation commands;
+  for a Reviewer also the Worker's report, as data to check). The formats
+  code accepts are unchanged. The worker role prompt's recommended default is
+  new and describes the role only; an unedited `worker` row moves to it at
+  startup, including one seeded before the recommended prompt was tracked,
+  and an edited one is kept.
+- Every agent run (Manager, Planner, Worker, Reviewer) records the system
+  prompt LoopX appended in `llm_records.metadata.system_prompt`;
+  `metadata.command` still holds the exact argv. Each run on the history page,
+  and in the Chat page's Planner and step views, has a collapsible System
+  prompt section; Claude Code's built-in system prompt is not included.
 
 ## [2.5.0] - 2026-10-13
 

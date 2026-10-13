@@ -25,8 +25,9 @@ from loopx.agents.message import (
     planner_address,
     worker_address,
 )
+from loopx.agents.system_prompt import REVIEW_CONTRACT, WORK_CONTRACT
 from loopx.agents.tiers.planner import PlanStep, PlannerAgent, TaskPlan
-from loopx.agents.tiers.worker import WorkerConfig, WorkerPool, WorkerProcess
+from loopx.agents.tiers.worker import DEFAULT_SYSTEM_PROMPT, WorkerConfig, WorkerPool, WorkerProcess
 
 
 # --- TaskPlan unit tests ---
@@ -257,7 +258,8 @@ class TestWorkerPool:
         assert "auth.py" in prompt
         assert "pytest tests/test_auth.py" in prompt
         assert "all tests pass" in prompt
-        assert '"deleted_files"' in prompt  # the report contract judge_result checks
+        # The report contract judge_result checks is in the system prompt, not the step's user turn.
+        assert '"deleted_files"' not in prompt and '"deleted_files"' in WORK_CONTRACT
 
     def test_build_verify_prompt(self) -> None:
         pool = WorkerPool(
@@ -265,11 +267,13 @@ class TestWorkerPool:
             runtime_root=Path("/tmp"),
         )
         prompt = pool._build_verify_prompt({
-            "work_result": {"changed_files": {"auth.py": "modified"}},
+            "work_result": {"changed_files": {"auth.py": "modified"}, "summary": "hardened the login check"},
             "acceptance_criteria": ["code is clean"],
         })
         assert "auth.py" in prompt
         assert "code is clean" in prompt
+        assert "hardened the login check" in prompt  # the Worker's report is data under review
+        assert '"passed"' not in prompt and '"passed"' in REVIEW_CONTRACT
 
     def test_pool_start_stop(self) -> None:
         async def _run() -> None:
@@ -608,10 +612,159 @@ class TestWorkerSubprocess:
     def test_unreadable_config_falls_back_to_defaults(
         self, monkeypatch: pytest.MonkeyPatch, failure: Exception | None,
     ) -> None:
-        from loopx.agents.tiers.worker import _load_run_limits
+        from loopx.agents.tiers.worker import _load_settings
 
         _worker_row(monkeypatch, None, error=failure)
-        assert asyncio.run(_load_run_limits()) == (86400, 0)  # 86400 s, no turn limit
+        settings = asyncio.run(_load_settings())
+        assert (settings.timeout_seconds, settings.max_turns) == (86400, 0)  # 86400 s, no turn limit
+        assert settings.system_prompt == DEFAULT_SYSTEM_PROMPT.strip()
+
+    @pytest.mark.parametrize("prompt", ["", "   \n"])
+    def test_an_empty_role_prompt_falls_back_to_the_default(
+        self, monkeypatch: pytest.MonkeyPatch, prompt: str,
+    ) -> None:
+        from loopx.agents.tiers.worker import _load_settings
+
+        _worker_row(monkeypatch, {"system_prompt": prompt, "timeout_seconds": 5, "max_turns": 3})
+        settings = asyncio.run(_load_settings())
+        assert (settings.timeout_seconds, settings.max_turns) == (5, 3)
+        assert settings.system_prompt == DEFAULT_SYSTEM_PROMPT.strip()
+
+
+# What the stand-in Claude saw: its argv and its first user turn (the step's prompt).
+_RECORD_RUN = (
+    "first = json.loads(sys.stdin.readline())['message']['content']\n"
+    "json.dump({'argv': sys.argv[1:], 'stdin': first}, open('run.json', 'w'))\n"
+)
+_VERDICT = (
+    "print(json.dumps({'type': 'result', 'subtype': 'success', 'is_error': False, "
+    "'result': json.dumps({'passed': True, 'findings': [], 'summary': 'ok'})}), flush=True)"
+)
+ROLE = "You are a careful Worker."
+
+
+def _step_envelope(work_dir: Path, *, verify: bool) -> MessageEnvelope:
+    payload: dict[str, Any] = {
+        "task_id": "s1", "parent_task_id": "task-1", "plan_id": "p1", "instruction": "add calc.py",
+        "acceptance_criteria": ["calc.add(1, 2) == 3"], "context": {"work_dir": str(work_dir)},
+    }
+    if verify:
+        payload["work_result"] = {"status": "completed", "changed_files": {"calc.py": "added"},
+                                  "summary": "added calc.py with add()"}
+    return MessageEnvelope.create(
+        source=planner_address("task-1"),
+        target=worker_address("reviewer-1" if verify else "worker-1"),
+        message_type=MessageType.VERIFY_REQUEST if verify else MessageType.WORK_ITEM,
+        payload=payload,
+    )
+
+
+def _run_step(*, verify: bool = False) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Run one Worker (or Reviewer) step; return its outcome and what its Claude saw."""
+
+    async def _run() -> tuple[dict[str, Any], dict[str, Any]]:
+        with tempfile.TemporaryDirectory() as tmp:
+            claude = _fake_claude(Path(tmp), _RECORD_RUN + (_VERDICT if verify else _SUCCESS))
+            pool = WorkerPool(config=WorkerConfig(claude_bin=claude), runtime_root=Path(tmp))
+            result = await pool._execute(_step_envelope(Path(tmp), verify=verify), is_verify=verify)
+            return result, json.loads((Path(tmp) / "run.json").read_text())
+
+    return asyncio.run(_run())
+
+
+def _system_prompt(argv: list[str]) -> str:
+    return argv[argv.index("--append-system-prompt") + 1]
+
+
+class TestWorkerSystemPrompt:
+    """A Worker's or Reviewer's system prompt: the worker role prompt, the
+    project's background (read when the run starts) and the code-owned report
+    contract, last. The step itself arrives on stdin."""
+
+    @pytest.fixture(autouse=True)
+    def _role(self, monkeypatch: pytest.MonkeyPatch, agent_db: Any) -> None:
+        _worker_row(monkeypatch, {"system_prompt": ROLE + "\n", "timeout_seconds": 0, "max_turns": 0})
+        agent_db.get_task_project.return_value = {"id": "proj-1", "name": "calc", "background": "Use uv.\nPython 3.12."}
+
+    def test_worker_gets_the_role_the_project_and_the_work_contract(self, agent_db: Any) -> None:
+        result, seen = _run_step()
+
+        assert result["status"] == "completed"
+        prompt = _system_prompt(seen["argv"])
+        assert prompt == f"{ROLE}\n\n## Project: calc\nUse uv.\nPython 3.12.\n\n{WORK_CONTRACT}"
+        agent_db.get_task_project.assert_awaited_once_with("task-1")
+        # The step is the user turn; the contract is not repeated there.
+        assert "Task: add calc.py" in seen["stdin"] and "calc.add(1, 2) == 3" in seen["stdin"]
+        assert '"deleted_files"' not in seen["stdin"] and "End your final message" not in seen["stdin"]
+        # The run's record keeps the exact argv and the appended system prompt.
+        metadata = agent_db.start_record.await_args.kwargs["metadata"]
+        assert metadata["system_prompt"] == prompt
+        assert metadata["command"][1:] == seen["argv"]
+        summaries = activity(agent_db)
+        assert "Project background applied (20 chars)" in summaries
+        # The timeline's launch line names the prompt's size instead of repeating it.
+        (launch,) = [line for line in summaries if line.startswith("$ ")]
+        assert "--append-system-prompt <" in launch and "Use uv." not in launch
+
+    def test_reviewer_gets_the_review_contract_and_the_work_as_data(self, agent_db: Any) -> None:
+        result, seen = _run_step(verify=True)
+
+        assert result["passed"] is True
+        prompt = _system_prompt(seen["argv"])
+        assert prompt == f"{ROLE}\n\n## Project: calc\nUse uv.\nPython 3.12.\n\n{REVIEW_CONTRACT}"
+        assert agent_db.start_record.await_args.kwargs["metadata"]["system_prompt"] == prompt
+        # The work under review, the Worker's own words included, stays in the user turn.
+        for data in ("add calc.py", "calc.add(1, 2) == 3", "calc.py", "added calc.py with add()"):
+            assert data in seen["stdin"]
+            assert data not in prompt
+        assert '"passed"' not in seen["stdin"]
+
+    def test_without_a_background_it_is_the_role_and_the_contract(self, agent_db: Any) -> None:
+        agent_db.get_task_project.return_value = {"id": "proj-1", "name": "calc", "background": ""}
+        _, seen = _run_step()
+
+        assert _system_prompt(seen["argv"]) == f"{ROLE}\n\n{WORK_CONTRACT}"
+        assert not [line for line in activity(agent_db) if "background" in line]
+
+    @pytest.mark.parametrize("lookup", [ConnectionError("database is down"), None])
+    def test_an_unreadable_project_runs_the_step_without_it_and_warns(
+        self, agent_db: Any, lookup: Exception | None,
+    ) -> None:
+        if lookup is None:
+            agent_db.get_task_project.return_value = None  # the task's project is gone
+        else:
+            agent_db.get_task_project.side_effect = lookup
+        result, seen = _run_step()
+
+        assert result["status"] == "completed"
+        assert _system_prompt(seen["argv"]) == f"{ROLE}\n\n{WORK_CONTRACT}"
+        warnings = [call.kwargs for call in agent_db.insert_activity.await_args_list
+                    if "background" in str(call.kwargs.get("summary"))]
+        assert len(warnings) == 1
+        assert warnings[0]["kind"] == "error" and warnings[0]["worker"] == "worker-1"
+        assert warnings[0]["summary"].startswith("Warning: the project background was unavailable")
+
+    def test_each_run_reads_the_background_when_it_starts(self, agent_db: Any) -> None:
+        _, first = _run_step()
+        agent_db.get_task_project.return_value = {"id": "proj-1", "name": "calc", "background": "Now use pnpm."}
+        _, second = _run_step(verify=True)
+
+        assert "## Project: calc\nUse uv.\nPython 3.12.\n\n" in _system_prompt(first["argv"])
+        assert "## Project: calc\nNow use pnpm.\n\n" in _system_prompt(second["argv"])
+
+    def test_the_default_role_prompt_applies_without_a_config_row(
+        self, monkeypatch: pytest.MonkeyPatch, agent_db: Any,
+    ) -> None:
+        _worker_row(monkeypatch, None, error=RuntimeError("database pool not initialised"))
+        _, seen = _run_step()
+
+        prompt = _system_prompt(seen["argv"])
+        assert prompt.startswith(DEFAULT_SYSTEM_PROMPT.strip() + "\n\n## Project: calc\n")
+        assert prompt.endswith(WORK_CONTRACT)
+
+
+def activity(agent_db: Any) -> list[str]:
+    return [str(call.kwargs.get("summary")) for call in agent_db.insert_activity.await_args_list]
 
 
 def _result(text: str | None = None, **overrides: Any) -> dict[str, Any]:

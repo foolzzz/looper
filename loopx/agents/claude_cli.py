@@ -224,8 +224,10 @@ def _compact_event(event: dict[str, Any]) -> dict[str, Any]:
 class ClaudeRunRecorder:
     """Record one Claude CLI run in ``llm_records``.
 
-    The record opens as ``running`` with the launch command and working
-    directory, gets every stream-json event as it arrives (partial text
+    The record opens as ``running`` with the launch command, the system
+    prompt LoopX appended (also inside the command, kept on its own for
+    display) and the working directory, gets every stream-json event as it
+    arrives (partial text
     deltas excepted: the full message follows), and closes with the outcome,
     usage and cost. Recording is observability: a database error is logged
     and never fails the run.
@@ -242,6 +244,7 @@ class ClaudeRunRecorder:
         session_id: str | None = None,
         step_id: str | None = None,
         pid: int | None = None,
+        system_prompt: str | None = None,
     ) -> None:
         self._agent_id = agent_id
         self._task_id = task_id or None
@@ -251,6 +254,7 @@ class ClaudeRunRecorder:
         self._session_id = session_id
         self._step_id = step_id
         self._pid = pid
+        self._system_prompt = system_prompt
         self._record_id: int | None = None
         self._seq = 0
         # seq of the row holding the current thinking phase's progress, if it is the latest row
@@ -270,6 +274,8 @@ class ClaudeRunRecorder:
                 input_text=self._input_text,
                 metadata={
                     "command": self._command,
+                    # What LoopX passed with --append-system-prompt; Claude Code's own prompt is not included.
+                    **({"system_prompt": self._system_prompt} if self._system_prompt is not None else {}),
                     "cwd": self._cwd,
                     # The task step a Worker or Reviewer ran, so its run stays tied to that step.
                     **({"step_id": self._step_id} if self._step_id else {}),

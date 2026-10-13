@@ -51,6 +51,32 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
   (any status) also updates the TaskRouter's live entry. A `TASK_REQUEST`
   without `project_id`, such as one from before projects replayed from the
   bus journal, is logged and dropped.
+- A project may have a `background` (at most 10000 characters, `''` = none):
+  what every task agent of the project should know. It goes into the system
+  prompt of the project's Planner, Workers and Reviewers, never the
+  Manager's, which spans all projects. `loopx/agents/system_prompt.py` builds
+  that prompt for all three:
+
+  ```
+  <role prompt from agent_configs>
+
+  ## Project: <name>
+  <background>          (left out when the background is empty)
+
+  <code-owned contract> (REPLY_CONTRACT, WORK_CONTRACT or REVIEW_CONTRACT; always last)
+  ```
+
+  The project is read through the task (`get_task_project`), so a task moved
+  to another project gets the new one. Every prompt reads it when it is
+  built: an edit reaches the Planner's next turn and every Worker or Reviewer
+  that starts afterwards, while a running Worker keeps the prompt it started
+  with. The task's activity notes `Project background applied (N chars)`
+  the first time a run uses one, then `Project background changed (N chars)`
+  or `Project background removed` for the Planner. The background is
+  guidance, so an unreadable project does not stop a run: a Worker or
+  Reviewer runs without the section and logs `Warning: the project background
+  was unavailable (...)` as an `error` activity, and the Planner keeps the
+  project it last read and logs a warning.
 
 - Per-task lifecycle management with concurrency control (`MAX_CONCURRENT_TASKS=3`)
 - Creates/destroys PlannerAgent instances per task
@@ -68,6 +94,11 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
 - Keeps one resident Claude process through `ResidentClaude`, like the
   Manager, started on the task's first turn in the task's `work_dir`:
   `claude --print --verbose --output-format stream-json --input-format stream-json --include-partial-messages --tools Read,Grep,Glob --allowedTools Read,Grep,Glob --permission-mode dontAsk --strict-mcp-config --append-system-prompt <prompt> [--model M] [--max-turns N] [--resume <session_id>]`.
+  The system prompt is rebuilt for every turn from the `planner` role prompt,
+  the task's project and `REPLY_CONTRACT`; the project is read before each
+  event's turns, so the turn's `Project:` line is current too. When the
+  prompt changes (a config edit, a new background) the Planner stops its
+  Claude, and the next process resumes the session with `--resume`.
   Only Read, Grep and Glob exist and are approved, `dontAsk` denies anything
   else without asking, and no MCP server loads; it never gets
   `--dangerously-skip-permissions`. Checked with Claude Code 2.1.285: the init
@@ -86,8 +117,9 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
     Events are handled in arrival order, so a message sent during another
     turn waits for it; one that arrives before the task has a plan, or after
     it ended, is answered without a turn.
-- Reply contract (`loopx/agents/tiers/planner_protocol.py`): code appends
-  `REPLY_CONTRACT` to the editable role prompt. Every reply ends with exactly
+- Reply contract (`loopx/agents/tiers/planner_protocol.py`): `REPLY_CONTRACT`
+  comes last in the system prompt, after the editable role prompt and the
+  project section. Every reply ends with exactly
   one ```` ```json ```` fenced object, parsed into typed dataclasses and enums
   and validated against the current plan: no unknown keys, unique step ids,
   `depends_on` naming known steps without cycles, at most 8 steps (dropped
@@ -109,7 +141,7 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
     with `--resume <session_id>`; the session id is kept in the Planner's plan
     file under `.local/planner/`.
 - Each turn is one `llm_records` row with agent_id `planner-<task_id>`, the
-  `task_id`, its own cost and `metadata.pid`. The activity gets short
+  `task_id`, its own cost, `metadata.pid` and `metadata.system_prompt`. The activity gets short
   summaries: `Planner Claude Code started (pid N...)`, `Plan created: ...`,
   `Planner decision on step N (s2): accept: ...`, `Plan changed: ...`.
 - The TaskRouter calls `PlannerAgent.stop()`, which ends its Claude, when the
@@ -121,10 +153,25 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
 - Manages a pool of Worker processes
 - Each Worker runs Claude CLI as a subprocess with `stream-json` output
 - Real-time event streaming (tool_use, text) captured to activity table
-- Command: `claude --print --verbose --output-format stream-json --include-partial-messages --input-format stream-json --replay-user-messages --dangerously-skip-permissions`,
+- Command: `claude --print --verbose --output-format stream-json --include-partial-messages --input-format stream-json --replay-user-messages --dangerously-skip-permissions --strict-mcp-config --append-system-prompt <prompt>`,
   plus `--max-turns N` when the `worker` config sets `max_turns` above 0. The
-  prompt is the first user turn on stdin; stdin stays open so the Planner can
+  step is the first user turn on stdin; stdin stays open so the Planner can
   add user turns mid-run, and closes when the result arrives
+- Stable rules are the system prompt and each step's data is the user turn:
+  - system prompt: the `worker` row's role prompt (Workers and Reviewers
+    alike; the default when the row's prompt is empty or unreadable), the
+    project section, then the code-owned contract, last: `WORK_CONTRACT` (the
+    step's rules and the report format below) or `REVIEW_CONTRACT` (the
+    review's rules and the verdict format);
+  - user turn: the step's instruction (with retry feedback), working
+    directory, target files, acceptance criteria and validation commands;
+    for a Reviewer, the step and the Worker's report (summary, changed and
+    deleted files) as data to check, never in the system prompt;
+  - messages sent mid-run (forwarded chat, Planner steering) stay user turns
+    and do not restate the contract.
+- Each run is one `llm_records` row with `metadata.command` (the exact
+  argv), `metadata.system_prompt` and `metadata.step_id`; the activity's
+  launch line shows the system prompt by its size
 - Claude is stopped when a run takes longer than the `worker` config's
   `timeout_seconds` in total (default 86400, 0 = no limit). The step fails
   with `Claude ran longer than the N s limit (timeout_seconds)`. Partial
@@ -243,12 +290,12 @@ PostgreSQL is a hard startup dependency. All data paths:
 
 | Table | Purpose |
 |---|---|
-| `projects` | Projects: name (unique ignoring case), description, default `work_dir` (`''` = none) |
+| `projects` | Projects: name (unique ignoring case), description, default `work_dir` (`''` = none), `background` for the task agents' system prompt (`''` = none) |
 | `tasks` | Task metadata, status, phase, timestamps, `work_dir`, `project_id` (required) |
 | `task_steps` | Planner decomposition steps per task |
 | `activity` | Execution trace events (SSE streaming to frontend) |
 | `chat_messages` | Chat conversation history |
-| `llm_records` | Full LLM traffic recording (input/output text) |
+| `llm_records` | One row per Claude run: input and output text, status, cost; `metadata` holds the exact argv (`command`), `cwd` and the appended `system_prompt` |
 | `agent_configs` | Agent configuration (system prompt, model, permissions) |
 | `llm_profiles` | LLM provider profiles (model, endpoint, API key env) |
 | `channel_configs` | Telegram/Lark settings (enabled flag, env var names, allowlist) |
@@ -274,11 +321,11 @@ built by `scripts/stage-dashboard.sh` at release time), and it carries
 ### Pages
 
 - **Chat**: Every agent and its messages, finished ones included. The selector lists the global Manager and the 30 most recent tasks; each task shows its one Planner and the Worker (and Reviewer, when reviewed) of each step. You can send to the Manager and to a running task's Planner, which keeps one thread per task; SSE streaming. A selected Planner also shows its Claude runs, one per turn, in a folded list of the latest 10 beside its activity and chat thread, re-read as a reply starts and ends and every 10 s while the task runs. A Worker or Reviewer shows its Claude runs read-only, following a running one live, and points to its task's Planner for sending.
-- **Tasks**: Task list with project and status filters, time display, Start/Stop/Delete controls. `#tasks?project=<id>` filters by a project and shows its name, description and default directory, with Edit, and Delete while it has no tasks. A new task picks an existing project or creates one in the same form; its work directory may stay empty when the project has a default. A task's detail view can move it to another project in any status.
-- **Projects (sidebar)**: Below the navigation, every project with its task count (or a spinner with its active count); clicking one opens the Tasks page filtered by it, and `+` creates a project.
+- **Tasks**: Task list with project and status filters, time display, Start/Stop/Delete controls. `#tasks?project=<id>` filters by a project and shows its name, description, default directory and background (three lines, then Show more; "No background" when empty), with Edit, and Delete while it has no tasks. Edit has a monospace background field with a live `n / 10000` counter; Save is disabled over the limit. A new task picks an existing project or creates one in the same form; its work directory may stay empty when the project has a default. A task's detail view can move it to another project in any status.
+- **Projects (sidebar)**: Below the navigation, every project with its task count (or a spinner with its active count); clicking one opens the Tasks page filtered by it, and `+` creates a project (name, default directory, description, optional background).
 - **Task Detail**: Overview (steps, agent timeline, live activity feed), Pipeline DAG (React Flow), Sessions, Conversation
 - **Agents**: Agent configuration editor (system prompt replace/append, LLM profiles, permissions); a Runs tab lists every recorded Claude run of the role (the Manager, every task's Planner, or Workers and reviewers)
-- **Agent history** (`#history/<agent-id>?task=<task-id>`): opened from History on an Agent Timeline row, a Runs entry or the Chat page. For each Claude run it shows status, model, tokens, cost, the launch command (cwd and argv, copyable) and the full transcript, following a running run every 2 s. A running run shows its last output time from the record's heartbeat and is flagged after 2 minutes with no output. While Claude thinks it shows `thinking · ~N tokens` from Claude's `thinking_tokens` events. Those arrive about once a second, so the recorder keeps one row per thinking phase and updates its count in place. Hooks, background tasks and rate limits are shown as one line each, and any other event type as an expandable line. For a Planner each run is one of its turns, listed above your chat with it and its activity.
+- **Agent history** (`#history/<agent-id>?task=<task-id>`): opened from History on an Agent Timeline row, a Runs entry or the Chat page. For each Claude run it shows status, model, tokens, cost, the launch command (cwd and argv; a long argument such as the system prompt is shown by its length, and Copy copies the exact command), a collapsible System prompt section with what LoopX appended (Claude Code's built-in system prompt is not included) and the full transcript, following a running run every 2 s. A running run shows its last output time from the record's heartbeat and is flagged after 2 minutes with no output. While Claude thinks it shows `thinking · ~N tokens` from Claude's `thinking_tokens` events. Those arrive about once a second, so the recorder keeps one row per thinking phase and updates its count in place. Hooks, background tasks and rate limits are shown as one line each, and any other event type as an expandable line. For a Planner each run is one of its turns, listed above your chat with it and its activity.
 - **Settings**: Enable and configure the Telegram and Lark channels
 
 ### Real-Time Updates
@@ -309,11 +356,11 @@ dev proxy, which keeps `Host` and `Origin` on its own port.
 |---|---|---|
 | `/api/status` | GET | System health |
 | `/api/projects` | GET | Projects ordered by name ignoring case, each with `task_count` and `active_count` |
-| `/api/projects` | POST | Create a project from `name` (trimmed, 1–80 characters), optional `description` and `work_dir` (absolute); 409 when the name exists ignoring case |
-| `/api/projects/:id` | PUT | Update any of `name`, `description`, `work_dir` (`""` clears the default directory); 404, 409 |
+| `/api/projects` | POST | Create a project from `name` (trimmed, 1–80 characters), optional `description`, `work_dir` (absolute) and `background` (stored without the blank lines around it; 400 over 10000 characters); 409 when the name exists ignoring case |
+| `/api/projects/:id` | PUT | Update any of `name`, `description`, `work_dir`, `background` (`""` clears the default directory or the background); 400, 404, 409 |
 | `/api/projects/:id` | DELETE | Delete a project; 409 while it still has tasks |
 | `/api/tasks` | GET | List the newest tasks; `?project_id=` lists one project's. Each has `project_id`, `project_name` and `work_dir` |
-| `/api/tasks/create` | POST | Create a task in `init` with exactly one of `project_id` (existing) and `project` (`{name, description?, work_dir?}`, created in the same transaction). Its `work_dir` is the one given, else the project's; 400 with neither, 404 for an unknown project, 409 for a taken new name |
+| `/api/tasks/create` | POST | Create a task in `init` with exactly one of `project_id` (existing) and `project` (`{name, description?, work_dir?, background?}`, created in the same transaction). Its `work_dir` is the one given, else the project's; 400 with neither, 404 for an unknown project, 409 for a taken new name |
 | `/api/tasks/:id/project` | PUT | Move a task to `{project_id}`, whatever its status |
 | `/api/tasks/:id` | GET | Task detail with steps, `project_id` and `project_name` |
 | `/api/tasks/cancel` | POST | Cancel task (permanent) |
@@ -360,6 +407,13 @@ the next turn with `--resume`. `permission_mode` does not apply: the Planner's
 tools are fixed to Read, Grep and Glob. At startup a `planner` row still
 holding the previous seeded default prompt gets the new default; an edited
 prompt is kept.
+
+The `worker` row configures every Worker and Reviewer and is read for every
+run. `system_prompt` is their role prompt; code adds the project section and
+the contract after it. The prompt used to be stored but never applied; at
+startup a `worker` row still holding that old seeded default gets the new
+one, which describes the role only (the contracts carry the report formats),
+and an edited prompt is kept.
 
 ## Channels
 

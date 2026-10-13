@@ -58,7 +58,10 @@ Task 是系统的一等实体，代表一个完整的用户需求。
 
 每个 Task 属于且只属于一个 Project。项目是任务的一个属性，任务在任何状态下都可以移到另一个项目。
 
-- 项目有名称、描述和可选的默认目录。名称去掉首尾空白后是 1–80 个字符，忽略大小写不能重名
+- 项目有名称、描述、可选的默认目录和可选的背景（`background`）。名称去掉首尾空白后是 1–80 个字符，忽略大小写不能重名
+- 项目背景是这个项目的所有任务 agent 都该知道的内容，最多 10000 个字符，保存时去掉前后空行，`""` 表示清空。它加进这个项目的 Planner、Worker 和 Reviewer 的系统提示，不加给 Manager（Manager 面向所有项目）。三者的系统提示由 `loopx/agents/system_prompt.py` 统一拼装：先是 `agent_configs` 里可编辑的角色提示；背景不为空时接一段 `## Project: <名称>` 加背景；最后是代码维护的契约（Planner 是 `REPLY_CONTRACT`，Worker 是 `WORK_CONTRACT`，Reviewer 是 `REVIEW_CONTRACT`），契约总在最后
+- 背景改了立即生效：系统提示每次构建时都通过任务读当前项目（任务移到别的项目后读新项目）。Planner 每个 turn 重建系统提示，变了就用 `--resume` 重启它的 Claude；之后启动的 Worker 和 Reviewer 用新背景；已经在跑的 Worker 不受影响。第一次用上背景时 activity 记一条 `Project background applied (N chars)`，Planner 的背景变化或被清空时再记 `changed` 或 `removed`，不写入原文
+- 背景只是参考信息，读不到不影响执行：Worker 和 Reviewer 读项目失败（数据库出错、找不到项目）时照常执行，只是不带项目段，并记一条 `Warning: the project background was unavailable ...` 的 error activity；Planner 读失败时沿用上次读到的项目，并写一条警告日志
 - 新建任务时，要么选一个已有项目（`project_id`），要么在同一个请求里新建项目（`project`），两者必须且只能给一个。新建项目和任务在同一个数据库事务里完成
 - 任务的工作目录：显式给了就用它（展开 `~`，必须是绝对路径）；没给就用项目的默认目录；两者都没有就拒绝创建。系统仍然没有全局默认目录
 - 还有任务的项目不能删除，要先把任务移走或删掉
@@ -94,6 +97,7 @@ Task 是系统的一等实体，代表一个完整的用户需求。
   - 最后一条消息以 JSON 报告结尾，且其中 `status` 为 `completed`；
   - 报告里 `changed_files` 列出的文件都存在，`deleted_files` 列出的文件都已删除。
 - **Reviewer**：必须给出布尔类型的 `passed`，纯文本不算通过
+- **Worker 和 Reviewer 的提示怎么分**：稳定的规则放系统提示（`--append-system-prompt`），每一步的数据放 stdin 上的第一个 user turn。系统提示是 `worker` 行的角色提示（Worker 和 Reviewer 共用，为空或读不到时用默认值）、项目段，最后是 `WORK_CONTRACT`（这一步的规则和上面的 JSON 报告格式）或 `REVIEW_CONTRACT`（验收的规则和 `passed` 结论格式）。user turn 只有这一步的 instruction（含重试反馈）、工作目录、目标文件、验收标准和验证命令；Reviewer 的 user turn 还有被验收的 Worker 报告（summary、改动和删除的文件），作为待核对的数据，不进系统提示。运行中转来的消息（用户聊天、Planner 纠偏）仍是 user turn，不重复契约。`worker` 行的 `system_prompt` 以前只存不用，现在生效；启动时还是旧默认提示的会换成新默认（只描述角色，格式交给契约），改过的保留
 - **回复契约**：每次回复以且只以一个 ```` ```json ```` 代码块结尾，由 `planner_protocol.py` 用类型化的 dataclass 和枚举严格校验：不允许未知字段，step id 唯一，`depends_on` 只能指向已知步骤且无环，最多 8 步（`MAX_STEPS`），决定必须在当前允许的范围内，重试不超限，replan 不能动已开始的步骤。不合规的回复有一次修复 turn，提示里写明错在哪里
 - **兜底**：
   - 规划仍然失败（修复后仍不合规、Claude 出错、超时、无法启动）：任务失败（fail-closed），原因写进 `tasks.error` 和 activity，不会退回成单步执行
@@ -101,8 +105,8 @@ Task 是系统的一等实体，代表一个完整的用户需求。
   - 聊天 turn 失败：把错误回给用户，不做任何动作
   - Claude 进程中途退出：这个 turn 失败，下一个 turn 用 `--resume <session_id>` 起新进程，session id 存在 Planner 的计划文件里
 - **结果**：任务完成时 `tasks.result_summary` 是最后一个 accept 的步骤给出的 summary（没有时用自动生成的逐步摘要）；任务失败时 `tasks.error` 是 Planner 的失败摘要
-- **配置**：`agent_configs` 的 `planner` 行每个 turn 读一次。`system_prompt` 是可编辑的角色提示，代码在后面追加回复契约；`timeout_seconds` 限制每个 turn（默认 1200 秒，0 表示不限），超时的 turn 失败并杀掉 Claude；`max_turns` 大于 0 时传 `--max-turns`，`model` 有值时传 `--model`；`permission_mode` 不适用。命令变了，下一个 turn 用 `--resume` 重启 Claude。数据库里还是旧默认提示的会在启动时换成新默认，改过的保留
-- **记录**：每个 turn 都会产生 Claude 费用，各记一条 `llm_records`（agent_id 为 `planner-<task_id>`，带这个 turn 自己的花费和进程 `pid`）；决定以简短摘要写进 activity
+- **配置**：`agent_configs` 的 `planner` 行每个 turn 读一次。`system_prompt` 是可编辑的角色提示，代码在后面接上项目段和回复契约；`timeout_seconds` 限制每个 turn（默认 1200 秒，0 表示不限），超时的 turn 失败并杀掉 Claude；`max_turns` 大于 0 时传 `--max-turns`，`model` 有值时传 `--model`；`permission_mode` 不适用。命令变了（包括项目背景变了），下一个 turn 用 `--resume` 重启 Claude。数据库里还是旧默认提示的会在启动时换成新默认，改过的保留
+- **记录**：每个 turn 都会产生 Claude 费用，各记一条 `llm_records`（agent_id 为 `planner-<task_id>`，带这个 turn 自己的花费和进程 `pid`）；决定以简短摘要写进 activity。Manager、Planner、Worker、Reviewer 的每次运行都在 `llm_records.metadata.system_prompt` 记下 LoopX 追加的系统提示，`metadata.command` 仍是完整 argv。会话历史页的每条运行有可折叠的「System prompt」段，标明这是 LoopX 追加的部分，不含 Claude Code 内置的系统提示；Chat 页的 Planner 和 Worker/Reviewer 视图复用同一个组件
 
 ---
 
@@ -162,8 +166,8 @@ Web 始终开启。Telegram 和 Lark 默认内置，不需要任何启动参数�
 - 能发消息的只有 Manager 和运行中任务的 Planner。发给 Planner 的消息由它的 Claude 回复（一个 `[CHAT]` turn），Claude 可以把消息转给正在执行某一步的 Worker，作为它的下一个 user turn，也可以给计划追加步骤；Worker 已经结束的，这条消息留到这一步的决策 turn 给 Claude 看。事件按到达顺序处理，正在跑别的 turn 时发来的消息会排在它后面；任务还没有计划或已经结束时，消息不经过 Claude，直接回复。选中 Planner 时，旁边折叠显示它最近 10 次 Claude 运行。Worker 和 Reviewer 只读，页面显示它的完整运行记录
 - `POST /api/chat/send` 发送消息，`target` 指定对话对象
 - SSE `GET /api/chat/events` 接收实时响应
-- 左侧栏导航下面列出所有项目（任务数，有进行中任务时显示进行中的数量），点击打开按该项目筛选的 Tasks 页，`+` 新建项目。Tasks 页可以按项目筛选；选中项目时显示项目信息，可以编辑，没有任务时可以删除。新建任务时先选项目或当场新建一个，项目有默认目录时工作目录可以不填。任务详情里可以把任务移到其他项目，任何状态都可以
-- 项目接口：`GET/POST /api/projects` 列出（带任务数和进行中任务数）和新建项目，`PUT/DELETE /api/projects/<id>` 修改和删除；`POST /api/tasks/create` 在已有项目或新项目里建任务；`PUT /api/tasks/<id>/project` 把任务移到另一个项目；`GET /api/tasks?project_id=<id>` 按项目列出任务
+- 左侧栏导航下面列出所有项目（任务数，有进行中任务时显示进行中的数量），点击打开按该项目筛选的 Tasks 页，`+` 新建项目。Tasks 页可以按项目筛选；选中项目时显示项目信息和背景（默认显示 3 行，可展开；为空时显示 No background），可以编辑（背景用等宽文本框，实时显示 `n / 10000`，超限不能保存），没有任务时可以删除。新建项目的对话框也可以填背景。新建任务时先选项目或当场新建一个，项目有默认目录时工作目录可以不填。任务详情里可以把任务移到其他项目，任何状态都可以
+- 项目接口：`GET/POST /api/projects` 列出（带任务数和进行中任务数）和新建项目，`PUT/DELETE /api/projects/<id>` 修改和删除，`background` 超过 10000 个字符返回 400；`POST /api/tasks/create` 在已有项目或新项目里建任务；`PUT /api/tasks/<id>/project` 把任务移到另一个项目；`GET /api/tasks?project_id=<id>` 按项目列出任务
 
 ### Telegram
 
