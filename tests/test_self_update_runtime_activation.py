@@ -42,13 +42,13 @@ class FakeVersionResponse:
 
 
 RELEASE_WHEEL_URL = (
-    "https://github.com/foolzzz/loopx/releases/download/v9.9.9/"
+    "https://github.com/foolzzz/looper/releases/download/v9.9.9/"
     "loopx-9.9.9-py3-none-any.whl"
 )
 RELEASE_WHEEL_ASSET = {"name": "loopx-9.9.9-py3-none-any.whl", "browser_download_url": RELEASE_WHEEL_URL}
 RELEASE_SDIST_ASSET = {
     "name": "loopx-9.9.9.tar.gz",
-    "browser_download_url": "https://github.com/foolzzz/loopx/releases/download/v9.9.9/loopx-9.9.9.tar.gz",
+    "browser_download_url": "https://github.com/foolzzz/looper/releases/download/v9.9.9/loopx-9.9.9.tar.gz",
 }
 
 
@@ -598,15 +598,15 @@ def test_python_distribution_apply_without_release_wheel_installs_nothing(
     run.assert_not_called()
     restart.assert_not_called()
     assert lookup.call_args.args[0].full_url == (
-        "https://api.github.com/repos/foolzzz/loopx/releases/latest"
+        "https://api.github.com/repos/foolzzz/looper/releases/latest"
     )
     assert result["ok"] is False
     assert result["changes_applied"] is False
     assert result["execution"]["status"] == "no_release_wheel"
     message = result["recommended_action"]
-    assert "latest foolzzz/loopx release has no wheel" in message
+    assert "latest foolzzz/looper release has no wheel" in message
     assert "nothing was installed" in message
-    assert "git clone https://github.com/foolzzz/loopx.git" in message
+    assert "git clone https://github.com/foolzzz/looper.git" in message
     assert "git checkout vX.Y.Z" in message
     assert "uv sync" in message
     assert result["error"] == message
@@ -629,9 +629,9 @@ def test_python_distribution_apply_without_release_metadata_installs_nothing() -
     assert result["changes_applied"] is False
     assert result["execution"]["status"] == "release_lookup_failed"
     message = result["recommended_action"]
-    assert "could not read the latest foolzzz/loopx release (OSError)" in message
+    assert "could not read the latest foolzzz/looper release (OSError)" in message
     assert "nothing was installed" in message
-    assert "git clone https://github.com/foolzzz/loopx.git" in message
+    assert "git clone https://github.com/foolzzz/looper.git" in message
 
 
 @pytest.mark.skipif(

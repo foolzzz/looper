@@ -17,11 +17,11 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://loopx-project.github.io/loopx/"
-Documentation = "https://loopx-project.github.io/loopx/docs/"
-Repository = "https://github.com/loopx-project/loopx"
-Issues = "https://github.com/loopx-project/loopx/issues"
-Changelog = "https://github.com/loopx-project/loopx/releases"
+Homepage = "https://github.com/foolzzz/looper"
+Documentation = "https://github.com/foolzzz/looper/tree/main/docs"
+Repository = "https://github.com/foolzzz/looper"
+Issues = "https://github.com/foolzzz/looper/issues"
+Changelog = "https://github.com/foolzzz/looper/blob/main/CHANGELOG.md"
 
 [project.optional-dependencies]
 deepseek-harness = [

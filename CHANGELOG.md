@@ -18,6 +18,12 @@ To learn how to use these features, read the [usage guide](docs/fork/usage.md).
 
 ### Changed
 
+- Development moves to `foolzzz/looper`, after GitHub disabled Actions on
+  `foolzzz/loopx`. Install and update (`install.sh`, `loopx update apply`,
+  the doctor hint and the onboarding source) now come from `foolzzz/looper`
+  releases, the project URLs and the first-run issue link point there, and the
+  install docs clone `foolzzz/looper`. Links to earlier pull requests and
+  issues keep pointing at `foolzzz/loopx`, where they live.
 - Releases are published by GitHub Actions when a `vX.Y.Z` tag is pushed
   (`.github/workflows/release.yml`); nothing is built or uploaded locally. The
   release pull request commits the exact body as `docs/releases/vX.Y.Z.md` and

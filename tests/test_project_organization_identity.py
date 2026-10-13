@@ -14,10 +14,10 @@ LOOPX_INSTALLER_URL = re.compile(r"https://[^\s`'\")]*loopx[^\s`'\")]*/install\.
 
 
 def test_default_recovery_and_package_identity():
-    assert LOOPX_SOURCE_REPOSITORY == "foolzzz/loopx"
+    assert LOOPX_SOURCE_REPOSITORY == "foolzzz/looper"
     assert DEFAULT_UPDATE_REPO == LOOPX_SOURCE_REPOSITORY
     assert NO_CLONE_INSTALL_URL == (
-        "https://raw.githubusercontent.com/foolzzz/loopx/main/install.sh"
+        "https://raw.githubusercontent.com/foolzzz/looper/main/install.sh"
     )
     assert f'REPO="{LOOPX_SOURCE_REPOSITORY}"' in (ROOT / "install.sh").read_text()
     installer = (ROOT / "scripts/install-from-github.sh").read_text()
