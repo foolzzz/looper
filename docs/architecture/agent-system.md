@@ -28,7 +28,10 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
 - Runs one resident Claude process through `ResidentClaude`
   (`loopx/agents/claude_cli.py`), which each task's Planner uses too, started
   on the first chat message:
-  `claude --print --verbose --output-format stream-json --input-format stream-json --include-partial-messages --append-system-prompt <prompt> [--resume <session_id>]`.
+  `claude --print --verbose --output-format stream-json --input-format stream-json --include-partial-messages <isolation flags> --append-system-prompt-file <file> --system-prompt-snapshot off [--resume <session_id>]`
+  (see [What an agent's Claude Code loads](#what-an-agents-claude-code-loads)).
+  Its system prompt is the `manager` role prompt and `TASK_PLACEMENT_RULE`;
+  it has no project and no task section.
   Each chat message is one user turn on its stdin and ends at that turn's
   `result`; messages are handled one at a time, and each turn is one Runs
   record. Claude's `total_cost_usd` is its process's running total, so a
@@ -55,16 +58,27 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
   what every task agent of the project should know. It goes into the system
   prompt of the project's Planner, Workers and Reviewers, never the
   Manager's, which spans all projects. `loopx/agents/system_prompt.py` builds
-  that prompt for all three:
+  that prompt for all three, in four layers:
 
   ```
-  <role prompt from agent_configs>
+  <role prompt from agent_configs>                L1
 
-  ## Project: <name>
-  <background>          (left out when the background is empty)
+  ## Project: <name>                              L2 (left out when the background is empty)
+  <background>
 
-  <code-owned contract> (REPLY_CONTRACT, WORK_CONTRACT or REVIEW_CONTRACT; always last)
+  ## Task                                         L3: what this session is for
+  ...                                                 (Planner: the task; Worker, Reviewer: the step)
+
+  <code-owned contract>                           L4: REPLY_CONTRACT, WORK_CONTRACT or REVIEW_CONTRACT; always last
   ```
+
+  The task section is fixed for the session: the Planner lives as long as its
+  task, a Worker or Reviewer as long as its step. It is in the system prompt
+  so it survives auto-compaction, and it comes before the contract so nothing
+  a user or the Planner wrote can override the output format. The task
+  requirement in it is clipped at 8,000 characters (`TASK_REQUIREMENT_LIMIT`)
+  with a visible `[clipped: N more characters]` marker. What changes from turn
+  to turn stays in user turns.
 
   The project is read through the task (`get_task_project`), so a task moved
   to another project gets the new one. Every prompt reads it when it is
@@ -93,14 +107,17 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
   process per step attempt.
 - Keeps one resident Claude process through `ResidentClaude`, like the
   Manager, started on the task's first turn in the task's `work_dir`:
-  `claude --print --verbose --output-format stream-json --input-format stream-json --include-partial-messages --tools Read,Grep,Glob --allowedTools Read,Grep,Glob --permission-mode dontAsk --strict-mcp-config --append-system-prompt <prompt> [--model M] [--max-turns N] [--resume <session_id>]`.
+  `claude --print --verbose --output-format stream-json --input-format stream-json --include-partial-messages --tools Read,Grep,Glob --allowedTools Read,Grep,Glob --permission-mode dontAsk <isolation flags> --append-system-prompt-file <file> --system-prompt-snapshot off [--model M] [--max-turns N] [--resume <session_id>]`.
   The system prompt is rebuilt for every turn from the `planner` role prompt,
-  the task's project and `REPLY_CONTRACT`; the project is read before each
-  event's turns, so the turn's `Project:` line is current too. When the
-  prompt changes (a config edit, a new background) the Planner stops its
-  Claude, and the next process resumes the session with `--resume`.
-  Only Read, Grep and Glob exist and are approved, `dontAsk` denies anything
-  else without asking, and no MCP server loads; it never gets
+  the task's project, the task section (task id, project name and
+  description, working directory and the requirement) and `REPLY_CONTRACT`;
+  the project is read before each event's turns. The turns themselves carry
+  only what changed: the plan's progress, results, chat and supervision
+  observations. When the prompt changes (a config edit, a new background, a
+  task moved to another project) its file and hash change, the Planner stops
+  its Claude, and the next process resumes the session with `--resume` and
+  the new prompt. Only Read, Grep and Glob exist and are approved, `dontAsk`
+  denies anything else without asking, and no MCP server loads; it never gets
   `--dangerously-skip-permissions`. Checked with Claude Code 2.1.285: the init
   event lists only Glob, Grep and Read and no MCP servers, and a Write made
   available is still denied in don't-ask mode.
@@ -141,7 +158,8 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
     with `--resume <session_id>`; the session id is kept in the Planner's plan
     file under `.local/planner/`.
 - Each turn is one `llm_records` row with agent_id `planner-<task_id>`, the
-  `task_id`, its own cost, `metadata.pid` and `metadata.system_prompt`. The activity gets short
+  `task_id`, its own cost, `metadata.pid` and the system prompt's record
+  (`system_prompt`, `system_prompt_sha256`, `prompt_layers`). The activity gets short
   summaries: `Planner Claude Code started (pid N...)`, `Plan created: ...`,
   `Planner decision on step N (s2): accept: ...`, `Plan changed: ...`.
 - The TaskRouter calls `PlannerAgent.stop()`, which ends its Claude, when the
@@ -153,25 +171,35 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
 - Manages a pool of Worker processes
 - Each Worker runs Claude CLI as a subprocess with `stream-json` output
 - Real-time event streaming (tool_use, text) captured to activity table
-- Command: `claude --print --verbose --output-format stream-json --include-partial-messages --input-format stream-json --replay-user-messages --dangerously-skip-permissions --strict-mcp-config --append-system-prompt <prompt>`,
+- Command: `claude --print --verbose --output-format stream-json --include-partial-messages --input-format stream-json --replay-user-messages --dangerously-skip-permissions <isolation flags> --append-system-prompt-file <file> --system-prompt-snapshot off`,
   plus `--max-turns N` when the `worker` config sets `max_turns` above 0. The
-  step is the first user turn on stdin; stdin stays open so the Planner can
-  add user turns mid-run, and closes when the result arrives
-- Stable rules are the system prompt and each step's data is the user turn:
+  first user turn goes on stdin; stdin stays open so the Planner can add user
+  turns mid-run, and closes when the result arrives
+- The step is the system prompt; only other agents' output is the user turn:
   - system prompt: the `worker` row's role prompt (Workers and Reviewers
     alike; the default when the row's prompt is empty or unreadable), the
-    project section, then the code-owned contract, last: `WORK_CONTRACT` (the
-    step's rules and the report format below) or `REVIEW_CONTRACT` (the
-    review's rules and the verdict format);
-  - user turn: the step's instruction (with retry feedback), working
-    directory, target files, acceptance criteria and validation commands;
-    for a Reviewer, the step and the Worker's report (summary, changed and
-    deleted files) as data to check, never in the system prompt;
+    project section, the task section, then the code-owned contract, last:
+    `WORK_CONTRACT` (the step's rules and the report format below) or
+    `REVIEW_CONTRACT` (the review's rules and the verdict format). A Worker's
+    task section has the whole task's requirement as context, then the
+    step's label, instruction, working directory, target files, acceptance
+    criteria, validation commands and, on a retry, the attempt number and the
+    feedback on the previous attempts. A Reviewer's has the requirement, then
+    the reviewed step's instruction and acceptance criteria;
+  - first user turn: for a Worker, a short start cue and what the steps it
+    depends on reported (summary and changed files, from `WORK_ITEM`
+    `dependencies`); for a Reviewer, the Worker's report (summary, changed
+    and deleted files) as data to check, never in the system prompt;
   - messages sent mid-run (forwarded chat, Planner steering) stay user turns
     and do not restate the contract.
+- `WORK_ITEM` carries the step's fields apart: `requirement`, `step_key`,
+  `instruction` (the step's own, without feedback), `feedback` (a list) and
+  `attempt`, `dependencies`; `VERIFY_REQUEST` adds `requirement` and
+  `step_key`.
 - Each run is one `llm_records` row with `metadata.command` (the exact
-  argv), `metadata.system_prompt` and `metadata.step_id`; the activity's
-  launch line shows the system prompt by its size
+  argv), the system prompt's record (`system_prompt`, `system_prompt_sha256`,
+  `prompt_layers`) and `metadata.step_id`; the activity's launch line shows
+  the isolation settings by their size
 - Claude is stopped when a run takes longer than the `worker` config's
   `timeout_seconds` in total (default 86400, 0 = no limit). The step fails
   with `Claude ran longer than the N s limit (timeout_seconds)`. Partial
@@ -187,6 +215,82 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
     gone.
 - A reviewer must return a boolean `passed`; prose without the verdict is not a
   pass.
+
+### What an agent's Claude Code loads
+
+Every agent (Manager, Planner, Worker, Reviewer) sees what LoopX composes and
+the project's own `CLAUDE.md`, not the personal Claude Code configuration of
+whoever runs LoopX. `isolation_args(cwd)` in `loopx/agents/claude_cli.py` is
+the one flag set all four commands carry; `ISOLATION_ID`
+(`personal-config-off/v1`) names it in each run's record:
+
+```
+--setting-sources project --strict-mcp-config
+--settings {"autoMemoryEnabled":false,"claudeMdExcludes":[...]}
+```
+
+Verified with Claude Code 2.1.285 (`/context`, the stream-json `init` and hook
+events, and real-model probes):
+
+| What | Default | With the flag set |
+| --- | --- | --- |
+| `~/.claude/CLAUDE.md` and its `@imports` | loaded as user memory | not loaded |
+| `CLAUDE.local.md`, `.claude/settings.local.json` | loaded | not loaded |
+| User settings (model and hooks checked; env, effort, permissions and the rest come from the same file) | applied | not applied |
+| Hooks from user settings and plugins | run | none run |
+| Skills in `~/.claude/skills`, claude.ai-synced skills | loaded | only built-in skills |
+| Installed plugins with their skills, agents and hooks | loaded | only built-in plugins |
+| Custom agents in `~/.claude/agents`, output styles | loaded | not loaded |
+| MCP servers: user (dropped by `--setting-sources`), project `.mcp.json` and claude.ai connectors (dropped by `--strict-mcp-config`) | loaded | none |
+| Auto memory under `~/.claude/projects/<dir>/memory/` | loaded | off |
+| Project `.claude/settings.json` and `CLAUDE.md` | loaded | loaded |
+| Login (OAuth in the Keychain) | works | works |
+
+`--setting-sources project` alone is not enough: Claude Code also reads
+`CLAUDE.md`, `.claude/CLAUDE.md` and `.claude/rules/` in every directory from
+the working directory up to `/` as project memory, so any work directory under
+`$HOME` would still load `~/.claude/CLAUDE.md`. `claudeMdExcludes` lists those
+files for every directory above the work directory's repository (the nearest
+directory with `.git`, or the work directory itself), plus the operator's
+`~/.claude/` (and `$CLAUDE_CONFIG_DIR`) memory, so a repository's own
+`CLAUDE.md` files load and nothing above it does. `--bare` and a separate
+`CLAUDE_CONFIG_DIR` were rejected because both lose the operator's login;
+`--safe-mode` also drops the project's `CLAUDE.md`; `--disable-slash-commands`
+also drops built-in skills. Not covered: managed (admin policy) settings,
+built-in plugins, and the environment variables of the process that runs
+`loopx serve`. With user settings gone, an agent runs on Claude Code's
+default model and effort unless its config sets a model (the Planner's
+`model`).
+
+The composed system prompt goes to Claude Code as a file:
+`SystemPrompt.write_file` writes it once to
+`<runtime_root>/.local/prompts/<sha256>.md` (through a temporary file; an
+existing file is reused, one whose content no longer matches its name is
+replaced), and `system_prompt_args` passes it with
+`--append-system-prompt-file`. `--system-prompt-snapshot off` is needed for
+the resident agents: by default Claude Code 2.1.285 keeps the system prompt of
+a session's first request and sends it again on every `--resume`, so a
+restarted Planner or Manager would keep running with its old prompt. A
+resident agent's restart signature is its command and the prompt's sha256.
+
+Every run records the prompt in `llm_records.metadata`:
+
+- `system_prompt`: the text, as before;
+- `system_prompt_sha256`: the hash of that text, which is also the file name;
+- `prompt_layers`: where each layer came from, built in
+  `loopx/agents/system_prompt.py`:
+  - `role`: `{config_id, sha256, recommended}`, the agent_configs row and
+    whether its prompt equals the recommended `default_prompt`;
+  - `project`: `{id, background_sha256, updated_at}` or `null`
+    (`background_sha256` is `null` without a background);
+  - `task`: `{kind: plan|work|review, task_id, step_id, sha256}` or `null`
+    (the Manager);
+  - `contract`: `{name, sha256}` (`REPLY_CONTRACT`, `WORK_CONTRACT`,
+    `REVIEW_CONTRACT` or `TASK_PLACEMENT_RULE`);
+  - `isolation`: `ISOLATION_ID`.
+
+The same inputs give the same prompt and hash; changing the role prompt, the
+background, the task or a contract changes it.
 
 ## Message Bus
 
@@ -295,7 +399,7 @@ PostgreSQL is a hard startup dependency. All data paths:
 | `task_steps` | Planner decomposition steps per task |
 | `activity` | Execution trace events (SSE streaming to frontend) |
 | `chat_messages` | Chat conversation history |
-| `llm_records` | One row per Claude run: input and output text, status, cost; `metadata` holds the exact argv (`command`), `cwd` and the appended `system_prompt` |
+| `llm_records` | One row per Claude run: input and output text, status, cost; `metadata` holds the exact argv (`command`), `cwd`, the appended `system_prompt`, its `system_prompt_sha256` and its `prompt_layers` |
 | `agent_configs` | Agent configuration (system prompt, model, permissions) |
 | `llm_profiles` | LLM provider profiles (model, endpoint, API key env) |
 | `channel_configs` | Telegram/Lark settings (enabled flag, env var names, allowlist) |
@@ -325,7 +429,7 @@ built by `scripts/stage-dashboard.sh` at release time), and it carries
 - **Projects (sidebar)**: Below the navigation, every project with its task count (or a spinner with its active count); clicking one opens the Tasks page filtered by it, and `+` creates a project (name, default directory, description, optional background).
 - **Task Detail**: Overview (steps, agent timeline, live activity feed), Pipeline DAG (React Flow), Sessions, Conversation
 - **Agents**: Agent configuration editor (system prompt replace/append, LLM profiles, permissions); a Runs tab lists every recorded Claude run of the role (the Manager, every task's Planner, or Workers and reviewers)
-- **Agent history** (`#history/<agent-id>?task=<task-id>`): opened from History on an Agent Timeline row, a Runs entry or the Chat page. For each Claude run it shows status, model, tokens, cost, the launch command (cwd and argv; a long argument such as the system prompt is shown by its length, and Copy copies the exact command), a collapsible System prompt section with what LoopX appended (Claude Code's built-in system prompt is not included) and the full transcript, following a running run every 2 s. A running run shows its last output time from the record's heartbeat and is flagged after 2 minutes with no output. While Claude thinks it shows `thinking · ~N tokens` from Claude's `thinking_tokens` events. Those arrive about once a second, so the recorder keeps one row per thinking phase and updates its count in place. Hooks, background tasks and rate limits are shown as one line each, and any other event type as an expandable line. For a Planner each run is one of its turns, listed above your chat with it and its activity.
+- **Agent history** (`#history/<agent-id>?task=<task-id>`): opened from History on an Agent Timeline row, a Runs entry or the Chat page. For each Claude run it shows status, model, tokens, cost, the launch command (cwd and argv; a long argument such as the system prompt is shown by its length, and Copy copies the exact command), a collapsible System prompt section with what LoopX appended (Claude Code's built-in system prompt is not included): its title shows the prompt's size, its short sha256 and an `isolated` badge, and inside one line per layer (role recommended or edited, project and background version, task, contract) above the full text; runs recorded before the layers existed show the text only. Then the full transcript, following a running run every 2 s. A running run shows its last output time from the record's heartbeat and is flagged after 2 minutes with no output. While Claude thinks it shows `thinking · ~N tokens` from Claude's `thinking_tokens` events. Those arrive about once a second, so the recorder keeps one row per thinking phase and updates its count in place. Hooks, background tasks and rate limits are shown as one line each, and any other event type as an expandable line. For a Planner each run is one of its turns, listed above your chat with it and its activity.
 - **Settings**: Enable and configure the Telegram and Lark channels
 
 ### Real-Time Updates
