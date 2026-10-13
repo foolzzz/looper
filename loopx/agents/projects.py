@@ -5,7 +5,9 @@ time. A task is created in an existing project (``project_id``) or in a new
 one made by the same request (``project``). Its work directory is the one
 given, else its project's default; there is no global default. A project's
 ``background`` goes into the system prompt of its task agents (Planner,
-Workers, Reviewers), read afresh when each prompt is built.
+Workers, Reviewers), read afresh when each prompt is built, and so do its
+harness overrides: ``planner_harness_prompt`` for its Planner and
+``worker_harness_prompt`` for its Workers and Reviewers (``agent_settings``).
 """
 
 from __future__ import annotations
@@ -18,6 +20,7 @@ from typing import Any
 import asyncpg
 
 from ..db import connection as db_connection, projects as db_projects, tasks as db_tasks
+from . import agent_settings
 from .tiers.task import TaskRouter, resolve_work_dir
 
 HTTP_400 = "400 Bad Request"
@@ -27,6 +30,8 @@ HTTP_409 = "409 Conflict"
 NAME_MAX_CHARS = 80
 BACKGROUND_MAX_CHARS = 10000
 NO_WORK_DIR = "a work directory is required: set one on the task or on its project"
+# The project's harness overrides: its Planner's, and its Workers' and Reviewers'.
+HARNESS_FIELDS = ("planner_harness_prompt", "worker_harness_prompt")
 
 _LEADING_BLANK_LINES = re.compile(r"\A(?:[ \t\r\f\v]*\n)+")
 
@@ -87,6 +92,8 @@ def project_view(row: dict[str, Any]) -> dict[str, Any]:
         "description": row["description"],
         "work_dir": row["work_dir"],
         "background": row["background"],
+        "planner_harness_prompt": row.get("planner_harness_prompt", ""),
+        "worker_harness_prompt": row.get("worker_harness_prompt", ""),
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
         "task_count": row.get("task_count", 0),
@@ -108,6 +115,9 @@ def _project_fields(data: dict[str, Any], *, update: bool) -> dict[str, str]:
             fields["work_dir"] = project_work_dir(data["work_dir"])
         if "background" in data:
             fields["background"] = project_background(data["background"])
+        for field in HARNESS_FIELDS:
+            if field in data:
+                fields[field] = agent_settings.harness_prompt(data[field], field=field)
     except ValueError as exc:
         raise RequestError(HTTP_400, str(exc)) from None
     return fields
@@ -140,7 +150,9 @@ async def create_project(data: dict[str, Any]) -> dict[str, Any]:
 async def update_project(project_id: str, data: dict[str, Any]) -> dict[str, Any]:
     fields = _project_fields(data, update=True)
     if not fields:
-        raise RequestError(HTTP_400, "give at least one of name, description, work_dir and background")
+        raise RequestError(
+            HTTP_400, "give at least one of name, description, work_dir, background, " + " and ".join(HARNESS_FIELDS),
+        )
     try:
         updated = await db_projects.update_project(project_id, **fields)
     except asyncpg.UniqueViolationError:

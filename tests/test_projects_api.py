@@ -39,7 +39,7 @@ class _Store:
     def add_project(self, project_id: str, name: str, work_dir: str = "", background: str = "") -> None:
         self.projects[project_id] = {
             "id": project_id, "name": name, "description": "", "work_dir": work_dir, "background": background,
-            "created_at": NOW, "updated_at": NOW,
+            "planner_harness_prompt": "", "worker_harness_prompt": "", "created_at": NOW, "updated_at": NOW,
         }
 
     def add_task(self, task_id: str, project_id: str, status: str = "init") -> None:
@@ -65,23 +65,28 @@ class _Store:
         return self._with_counts(row) if row else None
 
     async def create_project(self, *, name: str, description: str = "", work_dir: str = "", background: str = "",
+                             planner_harness_prompt: str = "", worker_harness_prompt: str = "",
                              pool: Any = None) -> dict[str, Any]:
         if self._name_taken(name):
             raise asyncpg.UniqueViolationError("duplicate key value violates unique constraint")
         project_id = f"proj-{len(self.projects):012d}"
         self.add_project(project_id, name, work_dir, background)
-        self.projects[project_id]["description"] = description
+        self.projects[project_id].update(description=description, planner_harness_prompt=planner_harness_prompt,
+                                         worker_harness_prompt=worker_harness_prompt)
         return dict(self.projects[project_id])
 
     async def update_project(self, project_id: str, *, name: str | None = None, description: str | None = None,
-                             work_dir: str | None = None, background: str | None = None, pool: Any = None) -> bool:
+                             work_dir: str | None = None, background: str | None = None,
+                             planner_harness_prompt: str | None = None, worker_harness_prompt: str | None = None,
+                             pool: Any = None) -> bool:
         row = self.projects.get(project_id)
         if row is None:
             return False
         if name is not None and self._name_taken(name, other_than=project_id):
             raise asyncpg.UniqueViolationError("duplicate key value violates unique constraint")
         for key, value in (("name", name), ("description", description), ("work_dir", work_dir),
-                           ("background", background)):
+                           ("background", background), ("planner_harness_prompt", planner_harness_prompt),
+                           ("worker_harness_prompt", worker_harness_prompt)):
             if value is not None:
                 row[key] = value
         return True
@@ -166,8 +171,9 @@ class TestProjectEndpoints:
         assert (body["name"], body["description"]) == ("tetris", "game")
         assert body["work_dir"] == os.path.join(os.path.expanduser("~"), "tetris")
         assert (body["task_count"], body["active_count"]) == (0, 0)
-        assert set(body) == {"project_id", "name", "description", "work_dir", "background", "created_at",
-                             "updated_at", "task_count", "active_count"}
+        assert set(body) == {"project_id", "name", "description", "work_dir", "background", "planner_harness_prompt",
+                             "worker_harness_prompt", "created_at", "updated_at", "task_count", "active_count"}
+        assert (body["planner_harness_prompt"], body["worker_harness_prompt"]) == ("", "")
 
     def test_work_dir_is_optional(self, store: _Store) -> None:
         status, body = _call("POST", "/api/projects", {"name": "notes"})
@@ -322,6 +328,57 @@ class TestProjectBackground:
             "requirement": "r", "project": {"name": "calc", "background": "x" * 10001}, "work_dir": "/tmp/calc",
         })
         assert status == 400 and "10000" in body["error"]
+        assert store.projects == {} and store.tasks == {}
+
+
+class TestProjectHarness:
+    """A project's Planner harness and Worker harness (its Reviewers follow the
+    Workers) override the default one; '' inherits it. Up to 20000 characters each."""
+
+    @pytest.mark.parametrize("field", ["planner_harness_prompt", "worker_harness_prompt"])
+    def test_create_put_and_clear(self, store: _Store, field: str) -> None:
+        status, body = _call("POST", "/api/projects", {"name": "calc", field: "\n\nBe thorough.\n"})
+        assert status == 201 and body[field] == "Be thorough."
+        other = "worker_harness_prompt" if field == "planner_harness_prompt" else "planner_harness_prompt"
+        assert body[other] == ""
+        project_id = body["project_id"]
+        status, body = _call("PUT", f"/api/projects/{project_id}", {field: "Be brief."})
+        assert (status, body[field], body["name"]) == (200, "Be brief.", "calc")
+        assert _call("PUT", f"/api/projects/{project_id}", {"description": "d"})[1][field] == "Be brief."  # kept
+        status, body = _call("PUT", f"/api/projects/{project_id}", {field: ""})
+        assert (status, body[field]) == (200, "")
+        assert _call("GET", "/api/projects")[1]["projects"][0][field] == ""
+
+    @pytest.mark.parametrize("field", ["planner_harness_prompt", "worker_harness_prompt"])
+    def test_the_limit_is_20000_characters(self, store: _Store, field: str) -> None:
+        assert _call("POST", "/api/projects", {"name": "a", field: "x" * 20_000})[0] == 201
+        status, body = _call("POST", "/api/projects", {"name": "b", field: "x" * 20_001})
+        assert status == 400 and "20000" in body["error"] and field in body["error"]
+        store.add_project("proj-c", "c")
+        status, body = _call("PUT", "/api/projects/proj-c", {"name": "renamed", field: "x" * 20_001})
+        assert status == 400
+        assert store.projects["proj-c"]["name"] == "c" and store.projects["proj-c"][field] == ""
+
+    @pytest.mark.parametrize("value", [None, 5, ["x"]])
+    def test_it_must_be_a_string(self, store: _Store, value: Any) -> None:
+        status, body = _call("POST", "/api/projects", {"name": "a", "worker_harness_prompt": value})
+        assert status == 400 and "worker_harness_prompt" in body["error"]
+
+    def test_a_new_project_made_with_a_task_takes_them(self, store: _Store) -> None:
+        status, body = _call("POST", "/api/tasks/create", {
+            "requirement": "r", "work_dir": "/tmp/calc",
+            "project": {"name": "calc", "planner_harness_prompt": "Plan.", "worker_harness_prompt": "Work."},
+        })
+        assert status == 201
+        project = store.projects[body["project_id"]]
+        assert (project["planner_harness_prompt"], project["worker_harness_prompt"]) == ("Plan.", "Work.")
+
+    def test_a_new_project_made_with_a_task_is_refused_over_the_limit(self, store: _Store) -> None:
+        status, body = _call("POST", "/api/tasks/create", {
+            "requirement": "r", "work_dir": "/tmp/calc",
+            "project": {"name": "calc", "planner_harness_prompt": "x" * 20_001},
+        })
+        assert status == 400 and "20000" in body["error"]
         assert store.projects == {} and store.tasks == {}
 
 

@@ -16,6 +16,7 @@ _UPDATABLE_FIELDS = (
     "llm_profile_id",
     "enabled",
     "system_prompt",
+    "harness_prompt",
     "model",
     "max_turns",
     "timeout_seconds",

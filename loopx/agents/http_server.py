@@ -18,7 +18,7 @@ from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
-from . import projects, request_guard
+from . import agent_settings, projects, request_guard
 from .broadcast import Broadcaster
 from .chat_targets import ChatTargetError, list_chat_targets, resolve_chat_target
 from .channels.web import WebChannelAdapter
@@ -288,6 +288,12 @@ class AgentHTTPServer:
             await self._handle_update_llm_profile(int(m.group(1)), body, writer)
         elif (m := self._RE_LLM_PROFILE.match(path)) and method == "DELETE":
             await self._handle_delete_llm_profile(int(m.group(1)), writer)
+        elif path == "/api/settings/agents" and method == "GET":
+            await self._handle_agent_settings(writer, agent_settings.get_settings)
+        elif path == "/api/settings/agents" and method == "PUT":
+            await self._handle_agent_settings(writer, lambda: agent_settings.update_settings(projects.json_object(body)))
+        elif path == "/api/settings/agents/reset-harness" and method == "POST":
+            await self._handle_agent_settings(writer, agent_settings.reset_harness)
         elif path == "/api/channel-configs" and method == "GET":
             await self._handle_list_channel_configs(writer)
         elif (m := self._RE_CHANNEL_CONFIG.match(path)) and method == "GET":
@@ -881,6 +887,13 @@ class AgentHTTPServer:
             return
 
         try:
+            data = agent_settings.agent_config_fields(agent_id, data)
+        except agent_settings.SettingsError as exc:
+            writer.write(_json_response(HTTP_400, {"error": str(exc)}))
+            await writer.drain()
+            return
+
+        try:
             from ..db.agent_configs import set_config
             updated = await set_config(agent_id, data)
         except Exception as exc:
@@ -912,6 +925,24 @@ class AgentHTTPServer:
             ))
         else:
             writer.write(_json_response(HTTP_200, updated))
+        await writer.drain()
+
+    # --- Agent settings (the defaults every agent inherits) ---
+
+    async def _handle_agent_settings(
+        self, writer: asyncio.StreamWriter, request: Callable[[], Awaitable[dict[str, Any]]],
+    ) -> None:
+        """Answer with the agent settings ``request()`` returns; a refused value is 400."""
+        try:
+            result = await request()
+        except (agent_settings.SettingsError, projects.RequestError) as exc:
+            status, result = HTTP_400, {"error": str(exc)}
+        except Exception as exc:
+            logger.exception("agent settings request failed")
+            status, result = HTTP_500, {"error": str(exc)}
+        else:
+            status = HTTP_200
+        writer.write(_json_response(status, _serialize(result)))
         await writer.drain()
 
     # --- LLM record handlers ---
