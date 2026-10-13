@@ -46,4 +46,5 @@ logs/
 
 # Frontend delivery artifacts are built and qualified from source.
 /loopx/web/chat/
+/loopx/web/dashboard/
 /loopx/web/.chat-build-*/

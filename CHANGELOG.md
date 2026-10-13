@@ -18,6 +18,13 @@ To learn how to use these features, read the [usage guide](docs/fork/usage.md).
 
 ### Changed
 
+- A release wheel runs `loopx serve`. It now carries `loopx/db/schema.sql`
+  and the agent dashboard, staged into `loopx/web/dashboard` by
+  `scripts/stage-dashboard.sh`; before, an installed wheel failed at startup
+  with no schema and had no dashboard. A checkout still serves its own
+  `web/dist`. `examples/release/agent-serve-wheel-smoke.py` builds the wheel
+  from a clean copy, installs it and runs the installed `loopx serve`, and
+  the release steps attach that wheel to every GitHub release.
 - Install and update use this fork, `foolzzz/loopx`, instead of
   `michaelx1993/loopx` or upstream: `install.sh`, the no-clone installer URL
   (`https://raw.githubusercontent.com/foolzzz/loopx/main/install.sh`), the
