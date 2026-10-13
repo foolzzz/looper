@@ -28,16 +28,18 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
 - Runs one resident Claude process through `ResidentClaude`
   (`loopx/agents/claude_cli.py`), which each task's Planner uses too, started
   on the first chat message:
-  `claude --print --verbose --output-format stream-json --input-format stream-json --include-partial-messages <isolation flags> --append-system-prompt-file <file> --system-prompt-snapshot off [--resume <session_id>]`
+  `claude --print --verbose --output-format stream-json --input-format stream-json --include-partial-messages <isolation flags> --append-system-prompt-file <file> --system-prompt-snapshot off --model M [--effort E] [--resume <session_id>]`
   (see [What an agent's Claude Code loads](#what-an-agents-claude-code-loads)).
-  Its system prompt is the `manager` role prompt and `TASK_PLACEMENT_RULE`;
-  it has no project and no task section.
+  Its system prompt is its harness (its own `harness_prompt`, else the default
+  in Settings), the `manager` role prompt and `TASK_PLACEMENT_RULE`; it has no
+  project and no task section.
   Each chat message is one user turn on its stdin and ends at that turn's
   `result`; messages are handled one at a time, and each turn is one Runs
   record. Claude's `total_cost_usd` is its process's running total, so a
   record's cost is the increase since the previous turn. When Claude exits
   (or dies mid-turn, which answers that message with an error) or the
-  Manager's system prompt changes, the next message starts a new process that
+  Manager's system prompt, model, effort or Settings environment changes, the
+  next message starts a new process that
   resumes the saved session with `--resume`. Stopping the Manager closes
   Claude's stdin and kills it if it is still running after 5 s
 
@@ -58,19 +60,25 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
   what every task agent of the project should know. It goes into the system
   prompt of the project's Planner, Workers and Reviewers, never the
   Manager's, which spans all projects. `loopx/agents/system_prompt.py` builds
-  that prompt for all three, in four layers:
+  that prompt for all three, in five layers:
 
   ```
-  <role prompt from agent_configs>                L1
+  <harness prompt>                                L1: see Harness, model and environment
+  <role prompt from agent_configs>                L2: planner, worker or reviewer row
 
-  ## Project: <name>                              L2 (left out when the background is empty)
+  ## Project: <name>                              L3 (left out when the background is empty)
   <background>
 
-  ## Task                                         L3: what this session is for
+  ## Task                                         L4: what this session is for
   ...                                                 (Planner: the task; Worker, Reviewer: the step)
 
-  <code-owned contract>                           L4: REPLY_CONTRACT, WORK_CONTRACT or REVIEW_CONTRACT; always last
+  <code-owned contract>                           L5: REPLY_CONTRACT, WORK_CONTRACT or REVIEW_CONTRACT; always last
   ```
+
+  A project can also override the harness of its Planner
+  (`planner_harness_prompt`) and of its Workers (`worker_harness_prompt`,
+  which its Reviewers use too); `''` inherits the default in Settings. They
+  are read through the task the same way as the background.
 
   The task section is fixed for the session: the Planner lives as long as its
   task, a Worker or Reviewer as long as its step. It is in the system prompt
@@ -107,14 +115,16 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
   process per step attempt.
 - Keeps one resident Claude process through `ResidentClaude`, like the
   Manager, started on the task's first turn in the task's `work_dir`:
-  `claude --print --verbose --output-format stream-json --input-format stream-json --include-partial-messages --tools Read,Grep,Glob --allowedTools Read,Grep,Glob --permission-mode dontAsk <isolation flags> --append-system-prompt-file <file> --system-prompt-snapshot off [--model M] [--max-turns N] [--resume <session_id>]`.
-  The system prompt is rebuilt for every turn from the `planner` role prompt,
+  `claude --print --verbose --output-format stream-json --input-format stream-json --include-partial-messages --tools Read,Grep,Glob --allowedTools Read,Grep,Glob --permission-mode dontAsk <isolation flags> --append-system-prompt-file <file> --system-prompt-snapshot off --model M [--effort E] [--max-turns N] [--resume <session_id>]`.
+  The system prompt is rebuilt for every turn from the harness (the project's
+  Planner override, else the default in Settings), the `planner` role prompt,
   the task's project, the task section (task id, project name and
   description, working directory and the requirement) and `REPLY_CONTRACT`;
   the project is read before each event's turns. The turns themselves carry
   only what changed: the plan's progress, results, chat and supervision
-  observations. When the prompt changes (a config edit, a new background, a
-  task moved to another project) its file and hash change, the Planner stops
+  observations. When the prompt changes (a config edit, a new background or
+  harness, a task moved to another project) its file and hash change, or the
+  model, effort or Settings environment changes, the Planner stops
   its Claude, and the next process resumes the session with `--resume` and
   the new prompt. Only Read, Grep and Glob exist and are approved, `dontAsk`
   denies anything else without asking, and no MCP server loads; it never gets
@@ -171,14 +181,17 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
 - Manages a pool of Worker processes
 - Each Worker runs Claude CLI as a subprocess with `stream-json` output
 - Real-time event streaming (tool_use, text) captured to activity table
-- Command: `claude --print --verbose --output-format stream-json --include-partial-messages --input-format stream-json --replay-user-messages --dangerously-skip-permissions <isolation flags> --append-system-prompt-file <file> --system-prompt-snapshot off`,
-  plus `--max-turns N` when the `worker` config sets `max_turns` above 0. The
+- Command: `claude --print --verbose --output-format stream-json --include-partial-messages --input-format stream-json --replay-user-messages --dangerously-skip-permissions <isolation flags> --append-system-prompt-file <file> --system-prompt-snapshot off --model M [--effort E]`,
+  plus `--max-turns N` when the config sets `max_turns` above 0. A Worker
+  reads the `worker` row and a Reviewer the `reviewer` row, for every run. The
   first user turn goes on stdin; stdin stays open so the Planner can add user
   turns mid-run, and closes when the result arrives
 - The step is the system prompt; only other agents' output is the user turn:
-  - system prompt: the `worker` row's role prompt (Workers and Reviewers
-    alike; the default when the row's prompt is empty or unreadable), the
-    project section, the task section, then the code-owned contract, last:
+  - system prompt: the harness (the project's Worker override, else the
+    default in Settings; Reviewers follow the Workers of their project), the
+    role prompt of the `worker` or `reviewer` row (the default when the
+    row's prompt is empty or unreadable), the project section, the task
+    section, then the code-owned contract, last:
     `WORK_CONTRACT` (the step's rules and the report format below) or
     `REVIEW_CONTRACT` (the review's rules and the verdict format). A Worker's
     task section has the whole task's requirement as context, then the
@@ -200,8 +213,8 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
   argv), the system prompt's record (`system_prompt`, `system_prompt_sha256`,
   `prompt_layers`) and `metadata.step_id`; the activity's launch line shows
   the isolation settings by their size
-- Claude is stopped when a run takes longer than the `worker` config's
-  `timeout_seconds` in total (default 86400, 0 = no limit). The step fails
+- Claude is stopped when a run takes longer than its row's (`worker` or
+  `reviewer`) `timeout_seconds` in total (default 86400, 0 = no limit). The step fails
   with `Claude ran longer than the N s limit (timeout_seconds)`. Partial
   deltas only keep the run's heartbeat (`last_output_at`) current; they do
   not extend the limit
@@ -258,9 +271,40 @@ directory with `.git`, or the work directory itself), plus the operator's
 `--safe-mode` also drops the project's `CLAUDE.md`; `--disable-slash-commands`
 also drops built-in skills. Not covered: managed (admin policy) settings,
 built-in plugins, and the environment variables of the process that runs
-`loopx serve`. With user settings gone, an agent runs on Claude Code's
-default model and effort unless its config sets a model (the Planner's
-`model`).
+`loopx serve`. With user settings gone, the model, the effort and any
+environment variables come from LoopX (next section), not from the operator's
+Claude Code settings.
+
+### Harness, model and environment
+
+`loopx/agents/agent_settings.py` is the one place that resolves what an agent
+inherits. The harness prompt is an agent's character and stability: working
+principles, boundaries and communication. The role prompt says what that kind
+of agent is responsible for. Keeping them apart means no harness edit can
+drop an agent's responsibilities.
+
+| Agent | Harness (first match) | Model (first match) |
+| --- | --- | --- |
+| Manager | `agent_configs.manager.harness_prompt` → default | its row's `model` → default |
+| Planner | the project's `planner_harness_prompt` → default | `planner` row's `model` → default |
+| Worker | the project's `worker_harness_prompt` → default | `worker` row's `model` → default |
+| Reviewer | the project's `worker_harness_prompt` → default | `reviewer` row's `model` → default |
+
+The defaults live in `system_settings` (one row per key; no row means the
+built-in value): the default harness (`DEFAULT_HARNESS_PROMPT`, public and
+generic), the default model (`opus`), an optional effort (`--effort`: `low`,
+`medium`, `high`, `xhigh` or `max`; none passes no flag) and up to 50
+environment variables. Every launch passes `--model` and, when set,
+`--effort`. The variables are added on top of the server's environment for
+every agent's `claude` process; names must match `[A-Z_][A-Z0-9_]*`, and a
+name containing `KEY`, `TOKEN`, `SECRET`, `PASSWORD` or `CREDENTIAL` is
+refused because the values are shown on the dashboard. That word check guards
+against pasting a secret by habit; it is not a security boundary. An
+unreadable table falls back to the built-in values, and the run's record says
+so. Changes apply to the next Worker or Reviewer run; a resident agent's
+restart signature is its command (which carries the model and effort), the
+prompt's sha256 and the environment's sha256, so the next turn restarts it
+with `--resume`.
 
 The composed system prompt goes to Claude Code as a file:
 `SystemPrompt.write_file` writes it once to
@@ -271,7 +315,8 @@ replaced), and `system_prompt_args` passes it with
 the resident agents: by default Claude Code 2.1.285 keeps the system prompt of
 a session's first request and sends it again on every `--resume`, so a
 restarted Planner or Manager would keep running with its old prompt. A
-resident agent's restart signature is its command and the prompt's sha256.
+resident agent's restart signature is its command, the prompt's sha256 and the
+sha256 of the Settings environment.
 
 Every run records the prompt in `llm_records.metadata`:
 
@@ -279,8 +324,12 @@ Every run records the prompt in `llm_records.metadata`:
 - `system_prompt_sha256`: the hash of that text, which is also the file name;
 - `prompt_layers`: where each layer came from, built in
   `loopx/agents/system_prompt.py`:
-  - `role`: `{config_id, sha256, recommended}`, the agent_configs row and
-    whether its prompt equals the recommended `default_prompt`;
+  - `harness`: `{source, sha256, project_id?}`; `source` is
+    `builtin_default`, `system_default`, `manager_override` or
+    `project_override` (which names the project);
+  - `role`: `{config_id, sha256, recommended}`, the agent_configs row
+    (`manager`, `planner`, `worker` or `reviewer`) and whether its prompt
+    equals the recommended `default_prompt`;
   - `project`: `{id, background_sha256, updated_at}` or `null`
     (`background_sha256` is `null` without a background);
   - `task`: `{kind: plan|work|review, task_id, step_id, sha256}` or `null`
@@ -288,9 +337,14 @@ Every run records the prompt in `llm_records.metadata`:
   - `contract`: `{name, sha256}` (`REPLY_CONTRACT`, `WORK_CONTRACT`,
     `REVIEW_CONTRACT` or `TASK_PLACEMENT_RULE`);
   - `isolation`: `ISOLATION_ID`.
+- `model_choice`: `{model, source, effort}`, the model asked for (`source` is
+  `builtin_default`, `system_default` or `agent_override`); the record's
+  `model` column keeps the model Claude reports;
+- `env`: `{sha256, keys: {NAME: sha256 of the value}}`, only when Settings
+  holds variables; values are never recorded.
 
-The same inputs give the same prompt and hash; changing the role prompt, the
-background, the task or a contract changes it.
+The same inputs give the same prompt and hash; changing the harness, the role
+prompt, the background, the task or a contract changes it.
 
 ## Message Bus
 
@@ -394,13 +448,14 @@ PostgreSQL is a hard startup dependency. All data paths:
 
 | Table | Purpose |
 |---|---|
-| `projects` | Projects: name (unique ignoring case), description, default `work_dir` (`''` = none), `background` for the task agents' system prompt (`''` = none) |
+| `projects` | Projects: name (unique ignoring case), description, default `work_dir` (`''` = none), `background` for the task agents' system prompt (`''` = none), `planner_harness_prompt` and `worker_harness_prompt` (`''` = the default harness) |
 | `tasks` | Task metadata, status, phase, timestamps, `work_dir`, `project_id` (required) |
 | `task_steps` | Planner decomposition steps per task |
 | `activity` | Execution trace events (SSE streaming to frontend) |
 | `chat_messages` | Chat conversation history |
-| `llm_records` | One row per Claude run: input and output text, status, cost; `metadata` holds the exact argv (`command`), `cwd`, the appended `system_prompt`, its `system_prompt_sha256` and its `prompt_layers` |
-| `agent_configs` | Agent configuration (system prompt, model, permissions) |
+| `llm_records` | One row per Claude run: input and output text, status, cost; `metadata` holds the exact argv (`command`), `cwd`, the appended `system_prompt`, its `system_prompt_sha256`, its `prompt_layers`, the `model_choice` and the Settings `env` names |
+| `agent_configs` | Agent configuration (role prompt, model, permissions) for `manager`, `planner`, `worker` and `reviewer`; `harness_prompt` is used for the Manager only |
+| `system_settings` | Settings shared by the whole system, one value per key: the default harness, model, effort and environment variables (no row = the built-in default) |
 | `llm_profiles` | LLM provider profiles (model, endpoint, API key env) |
 | `channel_configs` | Telegram/Lark settings (enabled flag, env var names, allowlist) |
 
@@ -425,12 +480,12 @@ built by `scripts/stage-dashboard.sh` at release time), and it carries
 ### Pages
 
 - **Chat**: Every agent and its messages, finished ones included. The selector lists the global Manager and the 30 most recent tasks; each task shows its one Planner and the Worker (and Reviewer, when reviewed) of each step. You can send to the Manager and to a running task's Planner, which keeps one thread per task; SSE streaming. A selected Planner also shows its Claude runs, one per turn, in a folded list of the latest 10 beside its activity and chat thread, re-read as a reply starts and ends and every 10 s while the task runs. A Worker or Reviewer shows its Claude runs read-only, following a running one live, and points to its task's Planner for sending.
-- **Tasks**: Task list with project and status filters, time display, Start/Stop/Delete controls. `#tasks?project=<id>` filters by a project and shows its name, description, default directory and background (three lines, then Show more; "No background" when empty), with Edit, and Delete while it has no tasks. Edit has a monospace background field with a live `n / 10000` counter; Save is disabled over the limit. A new task picks an existing project or creates one in the same form; its work directory may stay empty when the project has a default. A task's detail view can move it to another project in any status.
-- **Projects (sidebar)**: Below the navigation, every project with its task count (or a spinner with its active count); clicking one opens the Tasks page filtered by it, and `+` creates a project (name, default directory, description, optional background).
+- **Tasks**: Task list with project and status filters, time display, Start/Stop/Delete controls. `#tasks?project=<id>` filters by a project and shows its name, description, default directory and background (three lines, then Show more; "No background" when empty), with Edit, and Delete while it has no tasks. Edit has a monospace background field with a live `n / 10000` counter and a collapsible "Harness overrides" section with the Planner and Worker harness (each `n / 20000`, or "Inherits the default" when empty); Save is disabled over a limit. The bar lists the harness overrides a project has. A new task picks an existing project or creates one in the same form; its work directory may stay empty when the project has a default. A task's detail view can move it to another project in any status.
+- **Projects (sidebar)**: Below the navigation, every project with its task count (or a spinner with its active count); clicking one opens the Tasks page filtered by it, and `+` creates a project (name, default directory, description, optional background and harness overrides).
 - **Task Detail**: Overview (steps, agent timeline, live activity feed), Pipeline DAG (React Flow), Sessions, Conversation
-- **Agents**: Agent configuration editor (system prompt replace/append, LLM profiles, permissions); a Runs tab lists every recorded Claude run of the role (the Manager, every task's Planner, or Workers and reviewers)
-- **Agent history** (`#history/<agent-id>?task=<task-id>`): opened from History on an Agent Timeline row, a Runs entry or the Chat page. For each Claude run it shows status, model, tokens, cost, the launch command (cwd and argv; a long argument such as the system prompt is shown by its length, and Copy copies the exact command), a collapsible System prompt section with what LoopX appended (Claude Code's built-in system prompt is not included): its title shows the prompt's size, its short sha256 and an `isolated` badge, and inside one line per layer (role recommended or edited, project and background version, task, contract) above the full text; runs recorded before the layers existed show the text only. Then the full transcript, following a running run every 2 s. A running run shows its last output time from the record's heartbeat and is flagged after 2 minutes with no output. While Claude thinks it shows `thinking · ~N tokens` from Claude's `thinking_tokens` events. Those arrive about once a second, so the recorder keeps one row per thinking phase and updates its count in place. Hooks, background tasks and rate limits are shown as one line each, and any other event type as an expandable line. For a Planner each run is one of its turns, listed above your chat with it and its activity.
-- **Settings**: Enable and configure the Telegram and Lark channels
+- **Agents**: The Manager, Planner, Worker and Reviewer configuration editor (role prompt replace/append, model, LLM profiles, permissions). The model field's placeholder is the default it inherits. The Manager also has a "Harness prompt (override)" field; the others say where their harness comes from. A Runs tab lists every recorded Claude run of the role (the Manager, every task's Planner, Workers or Reviewers)
+- **Agent history** (`#history/<agent-id>?task=<task-id>`): opened from History on an Agent Timeline row, a Runs entry or the Chat page. For each Claude run it shows status, model, tokens, cost, the launch command (cwd and argv; a long argument such as the system prompt is shown by its length, and Copy copies the exact command), a collapsible System prompt section with what LoopX appended (Claude Code's built-in system prompt is not included): its title shows the prompt's size, its short sha256 and an `isolated` badge, and inside one line per layer (harness source and version, role recommended or edited, project and background version, task, contract), the model with its source and effort, and the Settings environment variable names, above the full text; runs recorded before the layers existed show the text only. Then the full transcript, following a running run every 2 s. A running run shows its last output time from the record's heartbeat and is flagged after 2 minutes with no output. While Claude thinks it shows `thinking · ~N tokens` from Claude's `thinking_tokens` events. Those arrive about once a second, so the recorder keeps one row per thinking phase and updates its count in place. Hooks, background tasks and rate limits are shown as one line each, and any other event type as an expandable line. For a Planner each run is one of its turns, listed above your chat with it and its activity.
+- **Settings**: Agent defaults (the default harness prompt with an `n / 20000` counter and Reset to built-in, the default model, the effort and the environment variables), then the Telegram and Lark channels
 
 ### Real-Time Updates
 
@@ -460,11 +515,11 @@ dev proxy, which keeps `Host` and `Origin` on its own port.
 |---|---|---|
 | `/api/status` | GET | System health |
 | `/api/projects` | GET | Projects ordered by name ignoring case, each with `task_count` and `active_count` |
-| `/api/projects` | POST | Create a project from `name` (trimmed, 1–80 characters), optional `description`, `work_dir` (absolute) and `background` (stored without the blank lines around it; 400 over 10000 characters); 409 when the name exists ignoring case |
-| `/api/projects/:id` | PUT | Update any of `name`, `description`, `work_dir`, `background` (`""` clears the default directory or the background); 400, 404, 409 |
+| `/api/projects` | POST | Create a project from `name` (trimmed, 1–80 characters), optional `description`, `work_dir` (absolute), `background` (stored without the blank lines around it; 400 over 10000 characters), `planner_harness_prompt` and `worker_harness_prompt` (400 over 20000 characters); 409 when the name exists ignoring case |
+| `/api/projects/:id` | PUT | Update any of `name`, `description`, `work_dir`, `background`, `planner_harness_prompt`, `worker_harness_prompt` (`""` clears it); 400, 404, 409 |
 | `/api/projects/:id` | DELETE | Delete a project; 409 while it still has tasks |
 | `/api/tasks` | GET | List the newest tasks; `?project_id=` lists one project's. Each has `project_id`, `project_name` and `work_dir` |
-| `/api/tasks/create` | POST | Create a task in `init` with exactly one of `project_id` (existing) and `project` (`{name, description?, work_dir?, background?}`, created in the same transaction). Its `work_dir` is the one given, else the project's; 400 with neither, 404 for an unknown project, 409 for a taken new name |
+| `/api/tasks/create` | POST | Create a task in `init` with exactly one of `project_id` (existing) and `project` (`{name, description?, work_dir?, background?, planner_harness_prompt?, worker_harness_prompt?}`, created in the same transaction). Its `work_dir` is the one given, else the project's; 400 with neither, 404 for an unknown project, 409 for a taken new name |
 | `/api/tasks/:id/project` | PUT | Move a task to `{project_id}`, whatever its status |
 | `/api/tasks/:id` | GET | Task detail with steps, `project_id` and `project_name` |
 | `/api/tasks/cancel` | POST | Cancel task (permanent) |
@@ -477,9 +532,12 @@ dev proxy, which keeps `Host` and `Origin` on its own port.
 | `/api/chat/targets` | GET | The Manager, then per recent task its Planner and step Workers/Reviewers, with `can_send` |
 | `/api/chat/messages` | GET/POST | Chat history |
 | `/api/agent-configs` | GET | List agents |
-| `/api/agent-configs/:id` | GET/PUT | Agent config CRUD |
+| `/api/agent-configs/:id` | GET/PUT | Agent config CRUD; `harness_prompt` only for `manager` (400 for the others, and over 20000 characters); `model` must be a model name (`""` or null clears it) |
+| `/api/agent-configs/:id/reset-prompt` | POST | Reset the role prompt to the recommended one |
+| `/api/settings/agents` | GET/PUT | The defaults every agent inherits: `default_harness_prompt`, `default_model`, `default_effort`, `default_env` (`[{key, value}]`). PUT changes the fields given; an empty value goes back to the built-in default. 400 for an unknown field, a harness over 20000 characters, a bad model name or effort, or a bad, credential-like or 51st variable; nothing is stored then |
+| `/api/settings/agents/reset-harness` | POST | Go back to the built-in default harness |
 | `/api/llm-profiles` | GET/POST | LLM profiles |
-| `/api/llm-records` | GET | Claude runs; filter by `agent_id`, `task_id` or `role` (`manager`, `planner`, `worker`) |
+| `/api/llm-records` | GET | Claude runs; filter by `agent_id`, `task_id` or `role` (`manager`, `planner`, `worker`, `reviewer`) |
 | `/api/llm-records/:id` | GET | One run (status, usage, cost, launch command, heartbeat) |
 | `/api/llm-records/:id/events?after=N` | GET | The run's stream-json events after seq N |
 | `/api/channel-configs` | GET | List channels |
@@ -489,10 +547,11 @@ dev proxy, which keeps `Host` and `Origin` on its own port.
 
 Agent behavior is configured via the `agent_configs` table (editable in the dashboard):
 
-- **system_prompt**: Agent instruction prompt
+- **system_prompt**: The role prompt: what this kind of agent is responsible for
+- **harness_prompt**: The Manager's own harness (`''` = the default in Settings)
 - **runtime**: stored per agent; only `claude-code` is implemented, and the
   Manager, Planners and Workers always run the Claude CLI
-- **model**: Model override (or use LLM profile)
+- **model**: This agent's model (`--model`); empty uses the default model in Settings (`opus` built in)
 - **permission_mode**: `bypassPermissions` (default for workers)
 - **max_turns**: Maximum conversation turns (0 = unlimited)
 - **timeout_seconds**: Execution timeout. For workers it limits one Claude
@@ -508,16 +567,19 @@ limit): a turn over it fails and its Claude is killed. `max_turns` above 0
 passes `--max-turns`, as for Workers, and `model`, when set, passes
 `--model`. A change that alters the Planner's command restarts its Claude at
 the next turn with `--resume`. `permission_mode` does not apply: the Planner's
-tools are fixed to Read, Grep and Glob. At startup a `planner` row still
-holding the previous seeded default prompt gets the new default; an edited
-prompt is kept.
+tools are fixed to Read, Grep and Glob.
 
-The `worker` row configures every Worker and Reviewer and is read for every
-run. `system_prompt` is their role prompt; code adds the project section and
-the contract after it. The prompt used to be stored but never applied; at
-startup a `worker` row still holding that old seeded default gets the new
-one, which describes the role only (the contracts carry the report formats),
-and an edited prompt is kept.
+The `worker` row configures every Worker and the `reviewer` row every
+Reviewer; each is read for every run. `system_prompt` is the role prompt; code
+puts the harness before it and the project section, the task and the contract
+after it.
+
+The recommended role prompts hold responsibilities only; the working
+principles, boundaries and tone they used to repeat are in the default
+harness. At startup every row whose role prompt still equals its recommended
+one (`default_prompt`) gets the new recommendation, an edited prompt is kept,
+and a missing row (such as `reviewer`) is created. Rows still holding an older
+seeded default from before the recommendation was tracked get the current one.
 
 ## Channels
 
