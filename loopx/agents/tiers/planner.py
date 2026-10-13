@@ -36,7 +36,7 @@ from pathlib import Path
 from typing import Any, TypeVar
 
 from ..bus import MessageBus
-from ..claude_cli import ClaudeRunRecorder, ResidentClaude
+from ..claude_cli import ClaudeRunRecorder, ResidentClaude, isolation_args
 from ..system_prompt import compose_system_prompt
 from ..message import (
     TASK_ROUTER_ADDRESS,
@@ -961,7 +961,7 @@ class PlannerAgent:
             finally:
                 self._last_turn_at = time.monotonic()
 
-    def _claude_command(self, system_prompt: str, settings: PlannerSettings) -> list[str]:
+    def _claude_command(self, system_prompt: str, settings: PlannerSettings, work_dir: str) -> list[str]:
         """The Planner's Claude, without ``--resume``: read-only tools, nothing else approved."""
         return [
             self._claude_bin,
@@ -973,11 +973,12 @@ class PlannerAgent:
             # Partial deltas keep the turn's heartbeat current while Claude writes.
             "--include-partial-messages",
             # Only the read-only tools exist, they are the only approved ones,
-            # anything else is denied without asking, and no MCP server loads.
+            # and anything else is denied without asking.
             "--tools", PLANNER_TOOLS,
             "--allowedTools", PLANNER_TOOLS,
             "--permission-mode", "dontAsk",
-            "--strict-mcp-config",
+            # None of the operator's personal settings, memory, hooks, plugins or MCP servers.
+            *isolation_args(work_dir),
             "--append-system-prompt", system_prompt,
             *(["--model", settings.model] if settings.model else []),
             *(["--max-turns", str(settings.max_turns)] if settings.max_turns > 0 else []),
@@ -995,7 +996,7 @@ class PlannerAgent:
             contract=REPLY_CONTRACT,
         )
         await self._note_background(plan.project_background)
-        base = self._claude_command(system_prompt, settings)
+        base = self._claude_command(system_prompt, settings, plan.work_dir)
         signature = tuple(base)
         if self._claude.stale(signature):
             # Claude exited, or the config or the project background changed:

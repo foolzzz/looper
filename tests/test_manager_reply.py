@@ -308,7 +308,8 @@ class TestManagerResidentClaude:
         assert _flag(argv, "--input-format") == "stream-json"
         assert _flag(argv, "--output-format") == "stream-json"
         assert {"--print", "--verbose", "--include-partial-messages"} <= set(argv)
-        takes_value = {"--input-format", "--output-format", "--append-system-prompt", "--resume"}
+        takes_value = {"--input-format", "--output-format", "--setting-sources", "--settings",
+                       "--append-system-prompt", "--resume"}
         positional = [arg for i, arg in enumerate(argv) if not arg.startswith("--") and argv[i - 1] not in takes_value]
         assert positional == []
         assert _flag(argv, "--resume") is None  # no session yet

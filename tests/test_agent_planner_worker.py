@@ -575,8 +575,9 @@ class TestWorkerSubprocess:
 
         argv = asyncio.run(_run())
         assert "--include-partial-messages" in argv
-        # The Worker loads no MCP servers (no inherited global toolbox/hooks).
-        assert "--strict-mcp-config" in argv
+        # The Worker loads none of the operator's settings, memory, hooks, plugins or MCP servers.
+        assert argv[argv.index("--setting-sources") + 1] == "project"
+        assert "--strict-mcp-config" in argv and "--settings" in argv
         turns = argv[argv.index("--max-turns"):][:2] if "--max-turns" in argv else []
         assert turns == expected
 

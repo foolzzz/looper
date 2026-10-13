@@ -23,7 +23,7 @@ from typing import Any
 
 from ..broadcast import Broadcaster
 from ..bus import MessageBus
-from ..claude_cli import ClaudeRunRecorder, ResidentClaude
+from ..claude_cli import ClaudeRunRecorder, ResidentClaude, isolation_args
 from ..projects import project_name
 from .task import resolve_work_dir
 from ..message import (
@@ -524,6 +524,8 @@ class ManagerAgent:
             # Each chat message is one user turn on stdin; Claude idles between turns.
             "--input-format", "stream-json",
             "--include-partial-messages",  # stream the reply as it is written
+            # None of the operator's personal settings, memory, hooks, plugins or MCP servers.
+            *isolation_args(self._config.work_dir),
             "--append-system-prompt", system_prompt,
         ]
         if self._session_id:

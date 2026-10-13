@@ -18,6 +18,7 @@ from typing import Any
 import pytest
 
 from loopx.agents.bus import MessageBus
+from loopx.agents.claude_cli import isolation_args
 from loopx.agents.message import (
     MANAGER_ADDRESS,
     TASK_ROUTER_ADDRESS,
@@ -553,14 +554,17 @@ class TestResidentClaude:
 
         monkeypatch.setattr(agent_configs, "get_config", _config)
         claude = planner_claude(plan(step("s1")), decide("accept"))
-        drive(claude, always(WORK_OK))
+        h = drive(claude, always(WORK_OK))
 
         (argv,) = claude.argvs()
         assert "--dangerously-skip-permissions" not in argv
         assert _flag(argv, "--tools") == "Read,Grep,Glob"
         assert _flag(argv, "--allowedTools") == "Read,Grep,Glob"
         assert _flag(argv, "--permission-mode") == "dontAsk"
-        assert "--strict-mcp-config" in argv
+        # The shared isolation flags: no personal settings, memory, hooks, plugins or MCP servers.
+        isolation = isolation_args(h.work_dir)
+        at = argv.index(isolation[0])
+        assert argv[at:at + len(isolation)] == isolation
         assert _flag(argv, "--input-format") == "stream-json"
         assert _flag(argv, "--output-format") == "stream-json"
         assert (_flag(argv, "--model"), _flag(argv, "--max-turns")) == ("claude-test", "9")
@@ -568,7 +572,7 @@ class TestResidentClaude:
         assert prompt == f"You plan carefully.\n\n{REPLY_CONTRACT}"
         # Every turn arrives on stdin; the command line carries no prompt.
         takes_value = {"--input-format", "--output-format", "--tools", "--allowedTools", "--permission-mode",
-                       "--append-system-prompt", "--model", "--max-turns"}
+                       "--setting-sources", "--settings", "--append-system-prompt", "--model", "--max-turns"}
         assert [a for i, a in enumerate(argv) if not a.startswith("--") and argv[i - 1] not in takes_value] == []
 
     def test_each_turn_is_recorded_with_its_own_cost(self, planner_claude: Any, agent_db: Any) -> None:

@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any
 
 from ..bus import MessageBus
-from ..claude_cli import ClaudeRunRecorder, iter_lines, write_user_turn
+from ..claude_cli import ClaudeRunRecorder, isolation_args, iter_lines, write_user_turn
 from ..message import (
     AgentAddress,
     MessageEnvelope,
@@ -86,11 +86,12 @@ async def _load_settings() -> WorkerSettings:
 
 
 def _display_command(command: list[str]) -> str:
-    """The command for the activity timeline, with the appended system prompt shown by its size."""
+    """The command for the activity timeline, with the system prompt and the isolation settings shown by size."""
     shown = list(command)
-    if "--append-system-prompt" in shown:
-        at = shown.index("--append-system-prompt") + 1
-        shown[at] = f"<{len(shown[at])} chars>"
+    for flag in ("--append-system-prompt", "--settings"):
+        if flag in shown:
+            at = shown.index(flag) + 1
+            shown[at] = f"<{len(shown[at])} chars>"
     return " ".join(shown)
 
 
@@ -503,10 +504,10 @@ class WorkerPool:
             "--input-format", "stream-json",
             "--replay-user-messages",
             "--dangerously-skip-permissions",
-            # Load no MCP servers: the Worker must not inherit the operator's
-            # global MCP toolbox or hooks (which can error on teardown and make
-            # the CLI exit non-zero). Built-in tools are unaffected.
-            "--strict-mcp-config",
+            # None of the operator's personal settings, memory, hooks, plugins
+            # or MCP servers (whose teardown could also make the CLI exit
+            # non-zero). Built-in tools are unaffected.
+            *isolation_args(work_dir),
             "--append-system-prompt", system_prompt,
             *(["--max-turns", str(max_turns)] if max_turns > 0 else []),
         ]
