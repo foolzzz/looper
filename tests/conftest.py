@@ -166,6 +166,7 @@ _AGENT_DB_READS = (
     ("projects", "list_projects", []),
     ("projects", "find_project_by_name", None),
     ("projects", "get_project", None),
+    ("activity", "list_activity", []),
 )
 
 
