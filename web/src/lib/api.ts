@@ -186,20 +186,29 @@ export interface NewProjectFields {
   work_dir?: string;
 }
 
-export async function createTask(params: {
-  requirement: string;
-  /** Required: the directory the task runs in (absolute or ~/...). */
-  work_dir: string;
-  config?: Record<string, unknown>;
-  goal_id?: string;
-}): Promise<{ task_id: string; status: string; created_at: string }> {
+/** A new task names exactly one project: an existing one or one created with it. */
+type TaskProjectChoice =
+  | { project_id: string; project?: never }
+  | { project: NewProjectFields; project_id?: never };
+
+export async function createTask(
+  params: {
+    requirement: string;
+    /** The directory the task runs in (absolute or ~/...); omit to use the project's default. */
+    work_dir?: string;
+    config?: Record<string, unknown>;
+    goal_id?: string;
+  } & TaskProjectChoice,
+): Promise<{ task_id: string; status: string; created_at: string; project_id: string }> {
   const res = await fetch(`${API_BASE}/tasks/create`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(params),
   });
   if (!res.ok) await failed(res, "create task");
-  return res.json();
+  const data = await res.json();
+  notifyProjectsChanged();
+  return data;
 }
 
 /** Move a task to another project; allowed in any task status. */

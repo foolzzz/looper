@@ -63,7 +63,8 @@ function App() {
           <div className="h-full overflow-y-auto">
             <TasksPage
               sub={route.sub}
-              onNavigate={(sub) => navigateSub("tasks", sub)}
+              query={route.query}
+              onNavigate={(sub, query) => navigateSub("tasks", sub, query)}
             />
           </div>
         )}
