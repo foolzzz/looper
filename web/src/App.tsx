@@ -11,15 +11,20 @@ const PAGES = new Set<Page>(["dashboard", "chat", "tasks", "agents", "settings",
 
 interface Route {
   page: Page;
+  /** Everything after "page/", including any "?query" of its own (#history/<agent>?task=…). */
   sub: string;
+  /** The query right after the page name: "project=…" for #tasks?project=…. */
+  query: string;
 }
 
 function readHash(): Route {
   const raw = window.location.hash.replace(/^#\/?/, "");
-  const slash = raw.indexOf("/");
-  const pagePart = (slash >= 0 ? raw.slice(0, slash) : raw) as Page;
-  const sub = slash >= 0 ? raw.slice(slash + 1) : "";
-  return { page: PAGES.has(pagePart) ? pagePart : "dashboard", sub };
+  const cut = raw.search(/[/?]/);
+  const pagePart = (cut >= 0 ? raw.slice(0, cut) : raw) as Page;
+  const rest = cut >= 0 ? raw.slice(cut) : "";
+  const sub = rest.startsWith("/") ? rest.slice(1) : "";
+  const query = rest.startsWith("?") ? rest.slice(1) : "";
+  return { page: PAGES.has(pagePart) ? pagePart : "dashboard", sub, query };
 }
 
 function App() {
@@ -35,8 +40,8 @@ function App() {
     window.location.hash = p;
   }, []);
 
-  const navigateSub = useCallback((p: Page, sub: string) => {
-    window.location.hash = sub ? `${p}/${sub}` : p;
+  const navigateSub = useCallback((p: Page, sub: string, query = "") => {
+    window.location.hash = (sub ? `${p}/${sub}` : p) + (query ? `?${query}` : "");
   }, []);
 
   return (

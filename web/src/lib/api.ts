@@ -17,6 +17,24 @@ export interface TaskInfo {
   correlation_id: string;
   created_at: string;
   completed_at: string | null;
+  /** Every task belongs to exactly one project. */
+  project_id: string;
+  project_name: string;
+  work_dir: string;
+}
+
+/** A group of tasks with an optional default work directory. */
+export interface Project {
+  project_id: string;
+  name: string;
+  description: string;
+  /** Default work directory for new tasks; "" = none. */
+  work_dir: string;
+  created_at: string;
+  updated_at: string;
+  task_count: number;
+  /** Tasks pending, assigned, running or executing. */
+  active_count: number;
 }
 
 export interface ChatSendResponse {
@@ -35,8 +53,9 @@ export async function fetchStatus(): Promise<SystemStatus> {
   return res.json();
 }
 
-export async function fetchTasks(): Promise<TaskInfo[]> {
-  const res = await fetch(`${API_BASE}/tasks`);
+export async function fetchTasks(projectId?: string): Promise<TaskInfo[]> {
+  const qs = projectId ? `?project_id=${encodeURIComponent(projectId)}` : "";
+  const res = await fetch(`${API_BASE}/tasks${qs}`);
   if (!res.ok) throw new Error(`tasks ${res.status}`);
   const data = await res.json();
   return data.tasks ?? data;
@@ -133,6 +152,7 @@ export async function deleteTask(taskId: string): Promise<void> {
     body: JSON.stringify({ task_id: taskId }),
   });
   if (!res.ok) throw new Error(`delete ${res.status}`);
+  notifyProjectsChanged();
 }
 
 export async function stopTask(taskId: string): Promise<void> {
@@ -159,6 +179,13 @@ export async function startTask(taskId: string): Promise<void> {
   if (!res.ok) await failed(res, "start");
 }
 
+export interface NewProjectFields {
+  name: string;
+  description?: string;
+  /** Absolute default work directory; omit or "" for none. */
+  work_dir?: string;
+}
+
 export async function createTask(params: {
   requirement: string;
   /** Required: the directory the task runs in (absolute or ~/...). */
@@ -173,6 +200,78 @@ export async function createTask(params: {
   });
   if (!res.ok) await failed(res, "create task");
   return res.json();
+}
+
+/** Move a task to another project; allowed in any task status. */
+export async function setTaskProject(
+  taskId: string,
+  projectId: string,
+): Promise<{ task_id: string; project_id: string; project_name: string }> {
+  const res = await fetch(`${API_BASE}/tasks/${encodeURIComponent(taskId)}/project`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ project_id: projectId }),
+  });
+  if (!res.ok) await failed(res, "move task");
+  const data = await res.json();
+  notifyProjectsChanged();
+  return data;
+}
+
+// --- Projects ---
+
+/**
+ * Window event fired after this dashboard creates, edits or deletes a project,
+ * or creates, moves or deletes a task, so project lists and counts reload at once.
+ */
+export const PROJECTS_CHANGED_EVENT = "loopx:projects-changed";
+
+function notifyProjectsChanged() {
+  window.dispatchEvent(new Event(PROJECTS_CHANGED_EVENT));
+}
+
+export async function fetchProjects(): Promise<Project[]> {
+  const res = await fetch(`${API_BASE}/projects`);
+  if (!res.ok) await failed(res, "projects");
+  const data = await res.json();
+  return data.projects ?? [];
+}
+
+export async function createProject(fields: NewProjectFields): Promise<Project> {
+  const res = await fetch(`${API_BASE}/projects`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(fields),
+  });
+  if (!res.ok) await failed(res, "create project");
+  const project: Project = await res.json();
+  notifyProjectsChanged();
+  return project;
+}
+
+/** Send only the fields to change; `work_dir: ""` clears the default directory. */
+export async function updateProject(
+  projectId: string,
+  fields: { name?: string; description?: string; work_dir?: string },
+): Promise<Project> {
+  const res = await fetch(`${API_BASE}/projects/${encodeURIComponent(projectId)}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(fields),
+  });
+  if (!res.ok) await failed(res, "update project");
+  const project: Project = await res.json();
+  notifyProjectsChanged();
+  return project;
+}
+
+/** Only an empty project can be deleted; the server answers 409 otherwise. */
+export async function deleteProject(projectId: string): Promise<void> {
+  const res = await fetch(`${API_BASE}/projects/${encodeURIComponent(projectId)}`, {
+    method: "DELETE",
+  });
+  if (!res.ok) await failed(res, "delete project");
+  notifyProjectsChanged();
 }
 
 export async function updateTaskConfig(
