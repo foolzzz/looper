@@ -140,6 +140,7 @@ Web 始终开启。Telegram 和 Lark 默认内置，不需要任何启动参数�
 - 能发消息的只有 Manager 和运行中任务的 Planner。Planner 自身不调用 LLM：收到的消息先转给正在执行的 Worker，作为它的下一个 user turn；没有 Worker 在跑时，作为新步骤排队。Worker 和 Reviewer 只读，页面显示它的完整运行记录
 - `POST /api/chat/send` 发送消息，`target` 指定对话对象
 - SSE `GET /api/chat/events` 接收实时响应
+- 左侧栏导航下面列出所有项目（任务数，有进行中任务时显示进行中的数量），点击打开按该项目筛选的 Tasks 页，`+` 新建项目。Tasks 页可以按项目筛选；选中项目时显示项目信息，可以编辑，没有任务时可以删除。新建任务时先选项目或当场新建一个，项目有默认目录时工作目录可以不填。任务详情里可以把任务移到其他项目，任何状态都可以
 - 项目接口：`GET/POST /api/projects` 列出（带任务数和进行中任务数）和新建项目，`PUT/DELETE /api/projects/<id>` 修改和删除；`POST /api/tasks/create` 在已有项目或新项目里建任务；`PUT /api/tasks/<id>/project` 把任务移到另一个项目；`GET /api/tasks?project_id=<id>` 按项目列出任务
 
 ### Telegram

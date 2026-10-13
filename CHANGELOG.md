@@ -39,6 +39,10 @@ To learn how to use these features, read the [usage guide](docs/fork/usage.md).
   per directory, named after its last path component (`default` for none; a
   later clash gets `-2`, `-3`, ...). A queued task request from before this
   change, replayed from the bus journal, is dropped with an error log.
+  The dashboard lists projects in the sidebar (click one to filter the Tasks
+  page), filters, edits and deletes projects on the Tasks page, picks or
+  creates a task's project in the new-task form, and moves a task between
+  projects from its detail view.
 - The Manager keeps one Claude process running instead of starting `claude`
   for every chat message. The process starts on the first message with
   `--input-format stream-json` and no prompt argument; each message is one
