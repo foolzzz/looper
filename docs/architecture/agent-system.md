@@ -28,12 +28,13 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
 - Runs one resident Claude process through `ResidentClaude`
   (`loopx/agents/claude_cli.py`), which each task's Planner uses too, started
   on the first chat message:
-  `claude --print --verbose --output-format stream-json --input-format stream-json --include-partial-messages [--allowedTools Skill] <isolation flags> --append-system-prompt-file <file> --system-prompt-snapshot off --model M [--effort E] [--plugin-dir <dir> ...] [--resume <session_id>]`
-  (see [What an agent's Claude Code loads](#what-an-agents-claude-code-loads)
-  and [The library](#the-library-imported-plugins-and-skills)). With a
-  library loaded, `--allowedTools Skill` approves its skills: a skill's own
-  `allowed-tools` are not approved with it, and every other tool still needs
-  an approval that `--print` denies. Without one the command is as before.
+  `claude --print --verbose --output-format stream-json --input-format stream-json --include-partial-messages <isolation flags> --append-system-prompt-file <file> --system-prompt-snapshot off --dangerously-skip-permissions --model M [--effort E] [--plugin-dir <dir> ...] [--resume <session_id>]`
+  (see [What an agent's Claude Code loads](#what-an-agents-claude-code-loads),
+  [What an agent may do](#what-an-agent-may-do) and
+  [The library](#the-library-imported-plugins-and-skills)). Like every agent
+  it has every tool and no permission prompts, skills included, so it can run
+  any command on this machine; that is why Telegram and Lark pass on only the
+  senders they list ([Channels](#channels)).
   Its system prompt is its harness (its own `harness_prompt`, else the default
   in Settings), the `manager` role prompt and `TASK_PLACEMENT_RULE`; it has no
   project and no task section.
@@ -119,7 +120,7 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
   process per step attempt.
 - Keeps one resident Claude process through `ResidentClaude`, like the
   Manager, started on the task's first turn in the task's `work_dir`:
-  `claude --print --verbose --output-format stream-json --input-format stream-json --include-partial-messages --tools Read,Grep,Glob[,Skill] --allowedTools Read,Grep,Glob[,Skill] --permission-mode dontAsk <isolation flags> --append-system-prompt-file <file> --system-prompt-snapshot off --model M [--effort E] [--plugin-dir <dir> ...] [--max-turns N] [--resume <session_id>]`.
+  `claude --print --verbose --output-format stream-json --input-format stream-json --include-partial-messages <isolation flags> --append-system-prompt-file <file> --system-prompt-snapshot off --dangerously-skip-permissions --model M [--effort E] [--plugin-dir <dir> ...] [--max-turns N] [--resume <session_id>]`.
   The system prompt is rebuilt for every turn from the harness (the project's
   Planner override, else the default in Settings), the `planner` role prompt,
   the task's project, the task section (task id, project name and
@@ -130,15 +131,13 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
   harness, a task moved to another project) its file and hash change, or the
   model, effort, Settings environment or library changes, the Planner stops
   its Claude, and the next process resumes the session with `--resume` and
-  the new prompt. Only Read, Grep and Glob exist and are approved, plus
-  Skill when a library is loaded (it reads the library's skills; without it
-  Claude Code lists no skills at all), `dontAsk` denies anything else without asking, and no MCP server
-  loads; it never gets `--dangerously-skip-permissions`. Checked with Claude
-  Code 2.1.285: the init event lists only Glob, Grep and Read (and Skill
-  with a library) and no MCP servers, and a Write made available is still denied in
-  don't-ask mode.
+  the new prompt. Like every agent it has every tool and no permission
+  prompts ([What an agent may do](#what-an-agent-may-do)), and no MCP server
+  loads. Its recommended role prompt keeps it to planning and deciding: it
+  may read the project and run harmless commands, but does not modify files;
+  every change goes to a Worker as a step.
 - Each event is one user turn; turns run one at a time:
-  - `[PLAN]` on `TASK_REQUEST`: Claude may read the project, then splits the
+  - `[PLAN]` on `TASK_REQUEST`: Claude may look at the project without changing it, then splits the
     requirement into 1–8 steps (`MAX_STEPS`), each with `id`, `instruction`,
     `acceptance_criteria`, `depends_on` and `review` (whether an independent
     Reviewer must pass it).
@@ -187,7 +186,7 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
 - Manages a pool of Worker processes
 - Each Worker runs Claude CLI as a subprocess with `stream-json` output
 - Real-time event streaming (tool_use, text) captured to activity table
-- Command: `claude --print --verbose --output-format stream-json --include-partial-messages --input-format stream-json --replay-user-messages --dangerously-skip-permissions <isolation flags> --append-system-prompt-file <file> --system-prompt-snapshot off --model M [--effort E] [--plugin-dir <dir> ...]`,
+- Command: `claude --print --verbose --output-format stream-json --include-partial-messages --input-format stream-json --replay-user-messages <isolation flags> --append-system-prompt-file <file> --system-prompt-snapshot off --dangerously-skip-permissions --model M [--effort E] [--plugin-dir <dir> ...]`,
   plus `--max-turns N` when the config sets `max_turns` above 0. A Worker
   reads the `worker` row and a Reviewer the `reviewer` row, for every run. The
   first user turn goes on stdin; stdin stays open so the Planner can add user
@@ -281,6 +280,33 @@ built-in plugins, and the environment variables of the process that runs
 environment variables come from LoopX (next section), not from the operator's
 Claude Code settings, and the plugins and skills come from the LoopX library
 (below), never from `~/.claude` itself.
+
+### What an agent may do
+
+Every agent (Manager, Planner, Worker, Reviewer) has every tool and runs
+without permission prompts (RFC decision 8). `permission_args()` in
+`loopx/agents/claude_cli.py` is `--dangerously-skip-permissions`, and
+`agent_settings.Launch.args` puts it in front of every agent's launch flags,
+beside the library's, so the four commands cannot diverge. No command
+carries `--tools`, `--allowedTools` or `--permission-mode`. What an agent is
+for is the job of its role prompt and its code-owned contract: the
+Planner's recommended role prompt says it plans and decides, does not modify
+files and gives every change to a Worker.
+
+Verified with Claude Code 2.1.285 in `--print` mode with the isolation flags
+and a `--plugin-dir`: the init event reports `permissionMode:
+bypassPermissions`, and Bash, Write and a plugin skill that declares
+`allowed-tools: Bash` all ran without a permission denial. Without the flag
+the same run had the Write and the skill denied (`date` alone is allowed
+either way, as a read-only command). The isolation `--settings`
+(`claudeMdExcludes`, `autoMemoryEnabled`) leave permissions alone. Not
+checked: a project's own `.claude/settings.json` (which still loads) or
+managed settings that deny tools or turn bypass mode off.
+
+Because the Manager can now run any command on this machine, Telegram and
+Lark pass on only the senders they list, and a channel without such a list
+does not start ([Channels](#channels)). The web dashboard stays local-only
+([HTTP API](#http-api)).
 
 ### Harness, model and environment
 
@@ -521,12 +547,12 @@ PostgreSQL is a hard startup dependency. All data paths:
 | `activity` | Execution trace events (SSE streaming to frontend) |
 | `chat_messages` | Chat conversation history |
 | `llm_records` | One row per Claude run: input and output text, status, cost; `metadata` holds the exact argv (`command`), `cwd`, the appended `system_prompt`, its `system_prompt_sha256`, its `prompt_layers`, the `model_choice`, the Settings `env` names and the `library` items loaded |
-| `agent_configs` | Agent configuration (role prompt, model, permissions) for `manager`, `planner`, `worker` and `reviewer`; `harness_prompt` is used for the Manager only |
+| `agent_configs` | Agent configuration (role prompt, model) for `manager`, `planner`, `worker` and `reviewer`; `harness_prompt` is used for the Manager only; `permission_mode` is stored but not applied |
 | `system_settings` | Settings shared by the whole system, one value per key: the default harness, model, effort and environment variables (no row = the built-in default), and the last library import's report |
 | `library_items` | The imported plugins and skills: kind, name, source label, declared version, `sha256` of the files, `enabled`, size, file count, `imported_at` |
 | `library_files` | Each library item's files: relative path, UTF-8 content, sha256, executable bit |
 | `llm_profiles` | LLM provider profiles (model, endpoint, API key env) |
-| `channel_configs` | Telegram/Lark settings (enabled flag, env var names, allowlist) |
+| `channel_configs` | Telegram/Lark settings (enabled flag, env var names, sender allowlist) |
 
 Every task belongs to one project. On the first start after projects were
 added, the one-time migration `tasks_project_backfill` creates one project per
@@ -552,9 +578,9 @@ built by `scripts/stage-dashboard.sh` at release time), and it carries
 - **Tasks**: Task list with project and status filters, time display, Start/Stop/Delete controls. `#tasks?project=<id>` filters by a project and shows its name, description, default directory and background (three lines, then Show more; "No background" when empty), with Edit, and Delete while it has no tasks. Edit has a monospace background field with a live `n / 10000` counter and a collapsible "Harness overrides" section with the Planner and Worker harness (each `n / 20000`, or "Inherits the default" when empty); Save is disabled over a limit. The bar lists the harness overrides a project has. A new task picks an existing project or creates one in the same form; its work directory may stay empty when the project has a default. A task's detail view can move it to another project in any status.
 - **Projects (sidebar)**: Below the navigation, every project with its task count (or a spinner with its active count); clicking one opens the Tasks page filtered by it, and `+` creates a project (name, default directory, description, optional background and harness overrides).
 - **Task Detail**: Overview (steps, agent timeline, live activity feed), Pipeline DAG (React Flow), Sessions, Conversation
-- **Agents**: The Manager, Planner, Worker and Reviewer configuration editor (role prompt replace/append, model, LLM profiles, permissions). The model field's placeholder is the default it inherits. The Manager also has a "Harness prompt (override)" field; the others say where their harness comes from. A Runs tab lists every recorded Claude run of the role (the Manager, every task's Planner, Workers or Reviewers)
+- **Agents**: The Manager, Planner, Worker and Reviewer configuration editor (role prompt replace/append, model, LLM profiles). Instead of a permission setting it states the permissions every agent shares: every tool, `--dangerously-skip-permissions`. The model field's placeholder is the default it inherits. The Manager also has a "Harness prompt (override)" field; the others say where their harness comes from. A Runs tab lists every recorded Claude run of the role (the Manager, every task's Planner, Workers or Reviewers)
 - **Agent history** (`#history/<agent-id>?task=<task-id>`): opened from History on an Agent Timeline row, a Runs entry or the Chat page. For each Claude run it shows status, model, tokens, cost, the launch command (cwd and argv; a long argument such as the system prompt is shown by its length, and Copy copies the exact command), a collapsible System prompt section with what LoopX appended (Claude Code's built-in system prompt is not included): its title shows the prompt's size, its short sha256 and an `isolated` badge, and inside one line per layer (harness source and version, role recommended or edited, project and background version, task, contract), the model with its source and effort, and the Settings environment variable names, above the full text; runs recorded before the layers existed show the text only. A collapsible Plugins & skills section shows how many plugins and skills the run loaded and the library hash, and lists each with its short version hash. Then the full transcript, following a running run every 2 s. A running run shows its last output time from the record's heartbeat and is flagged after 2 minutes with no output. While Claude thinks it shows `thinking · ~N tokens` from Claude's `thinking_tokens` events. Those arrive about once a second, so the recorder keeps one row per thinking phase and updates its count in place. Hooks, background tasks and rate limits are shown as one line each, and any other event type as an expandable line. For a Planner each run is one of its turns, listed above your chat with it and its activity.
-- **Settings**: Agent defaults (the default harness prompt with an `n / 20000` counter and Reset to built-in, the default model, the effort and the environment variables), then Plugins & skills (how many of the imported items are loaded and their size, "Import from this machine" or "Re-import", the last import with what it changed and what it left out, a name filter, and the plugins and skills with their version, size and a switch each; a change applies to each agent's next run), then the Telegram and Lark channels
+- **Settings**: Agent defaults (the default harness prompt with an `n / 20000` counter and Reset to built-in, the default model, the effort and the environment variables), then Plugins & skills (how many of the imported items are loaded and their size, "Import from this machine" or "Re-import", the last import with what it changed and what it left out, a name filter, and the plugins and skills with their version, size and a switch each; a change applies to each agent's next run), then the Telegram and Lark channels, each with its sender allowlist (an add and remove list of Telegram user IDs or Lark open_ids, checked as you type, with blanks and repeats flagged) and, for an enabled channel that does not start, the reason
 
 ### Real-Time Updates
 
@@ -572,8 +598,8 @@ SPA uses `#page/sub` format for deep linking that survives browser refresh:
 
 ## HTTP API
 
-The API answers only the dashboard and local clients: Workers run Claude with
-every permission, so a web page in your browser must not be able to drive it.
+The API answers only the dashboard and local clients: every agent runs Claude
+with every permission, so a web page in your browser must not be able to drive it.
 A request whose `Origin` is not the server's own is refused with 403 and no
 response carries CORS headers. While the server listens on a loopback address,
 the `Host` must name a loopback address too, which defeats DNS rebinding.
@@ -612,8 +638,8 @@ dev proxy, which keeps `Host` and `Origin` on its own port.
 | `/api/llm-records` | GET | Claude runs; filter by `agent_id`, `task_id` or `role` (`manager`, `planner`, `worker`, `reviewer`) |
 | `/api/llm-records/:id` | GET | One run (status, usage, cost, launch command, heartbeat) |
 | `/api/llm-records/:id/events?after=N` | GET | The run's stream-json events after seq N |
-| `/api/channel-configs` | GET | List channels |
-| `/api/channel-configs/:id` | GET/PUT | Channel config |
+| `/api/channel-configs` | GET | List channels, each with `start_problem`: why it does not start as configured (an empty or invalid sender allowlist), else null |
+| `/api/channel-configs/:id` | GET/PUT | Channel config. PUT validates the sender allowlist (`allowed_user_ids` for Telegram, `allowed_open_ids` for Lark) and stores it as a list; 400 naming the first bad id, and nothing is stored then; 404 for an unknown channel |
 
 ## Configuration
 
@@ -624,7 +650,7 @@ Agent behavior is configured via the `agent_configs` table (editable in the dash
 - **runtime**: stored per agent; only `claude-code` is implemented, and the
   Manager, Planners and Workers always run the Claude CLI
 - **model**: This agent's model (`--model`); empty uses the default model in Settings (`opus` built in)
-- **permission_mode**: `bypassPermissions` (default for workers)
+- **permission_mode**: stored but not applied: every agent runs with `--dangerously-skip-permissions`
 - **max_turns**: Maximum conversation turns (0 = unlimited)
 - **timeout_seconds**: Execution timeout. For workers it limits one Claude
   run's total time (default 86400, 0 = no limit). Workers read
@@ -638,8 +664,8 @@ The `planner` row configures every task's Planner and is read for every turn.
 limit): a turn over it fails and its Claude is killed. `max_turns` above 0
 passes `--max-turns`, as for Workers, and `model`, when set, passes
 `--model`. A change that alters the Planner's command restarts its Claude at
-the next turn with `--resume`. `permission_mode` does not apply: the Planner's
-tools are fixed to Read, Grep and Glob.
+the next turn with `--resume`. `permission_mode` does not apply: like every
+agent, the Planner has every tool and no permission prompts.
 
 The `worker` row configures every Worker and the `reviewer` row every
 Reviewer; each is read for every run. `system_prompt` is the role prompt; code
@@ -660,11 +686,25 @@ takes no flags for them. At startup it reads `channel_configs`, which the
 Settings page edits, and starts each enabled channel. Changes apply after a
 restart.
 
+- **Sender allowlist** (`loopx/agents/channels/allowlist.py`, RFC decision 8):
+  the Manager runs any command it is asked to, so Telegram and Lark pass on
+  only the messages of the senders their configuration lists. A message from
+  anyone else never reaches the Manager: the adapter logs one line with the
+  channel and the sender id (never the text) and sends no reply. An enabled
+  channel whose list is empty or invalid does not start; the startup log and
+  the Settings page (`start_problem`) say why. The list holds at most 100
+  ids; the API checks each one and stores the list as a JSON array.
 - **Telegram**: the token comes from the env var named by `bot_token_env`
-  (default `LOOPX_TELEGRAM_BOT_TOKEN`). `allowed_user_ids` limits who can talk
-  to the bot; if it is empty, `LOOPX_TELEGRAM_ALLOWED_USERS` applies, and when
-  both are empty everyone is allowed. A malformed list keeps Telegram off.
+  (default `LOOPX_TELEGRAM_BOT_TOKEN`). `allowed_user_ids` lists numeric
+  Telegram user IDs (a negative id is a group or channel, not a sender); a
+  comma-separated string from before is still read.
+  `LOOPX_TELEGRAM_ALLOWED_USERS` no longer applies. `/start`, `/status` and
+  `/help` from an unlisted sender get no answer either.
 - **Lark**: needs `lark-cli` on PATH and signed in. The app ID comes from the
-  env var named by `app_id_env` (default `LARK_APP_ID`).
+  env var named by `app_id_env` (default `LARK_APP_ID`). `allowed_open_ids`
+  lists the senders' `open_id` (`ou_...`), the id each message event carries
+  in `event.sender.sender_id.open_id`; a `union_id` or `user_id` is refused.
+- **Web**: unaffected, it has no list: the HTTP API answers only local
+  requests ([HTTP API](#http-api)).
 - A channel that fails to start is logged and skipped; the server keeps
   running.

@@ -1,6 +1,6 @@
 # 开发计划：长程 Agent 上下文体系（M0–M6）
 
-- **状态：** 执行中（M0、M1、M1.5、M1.6 已交付）
+- **状态：** 执行中（M0、M1、M1.5、M1.6、M1.7 已交付）
 - **依据：** [RFC：长程 Agent 的上下文体系 v0](../architecture/rfcs/long-horizon-agent-context-v0.zh-CN.md)。
   设计原则、分层模型和已作出的决定以 RFC 为准；本文只管"怎么分阶段做、做到什么算完成、现在做到哪了"。
 - **仓库：** `foolzzz/looper`，基线 `main`
@@ -25,7 +25,7 @@
 | M1 | 上下文隔离与可复现 | ✅ 已交付（looper #17） | M0 |
 | M1.5 | harness 与 role 分层；harness 继承链 | ✅ 已交付（looper #19） | M1 |
 | M1.6 | 导入本机插件与 skill 作为全局默认 | ✅ 已交付（looper #22） | M1.5 |
-| M1.7 | agent 不限权限；渠道发送者白名单 | 待开始 | M1.6 |
+| M1.7 | agent 不限权限；渠道发送者白名单 | ✅ 已交付（looper #23） | M1.6 |
 | M2 | 上下文与花费观测 | 待开始 | M0 |
 | M3 | 项目知识 | 待开始 | M0 |
 | M4 | 项目 skill | 待开始 | M3 |
@@ -120,6 +120,12 @@
     - 不在名单里的消息不交给 Manager，只记一条日志，不回复内容；
     - 没有配置白名单的渠道不启动，Settings 页说明原因。
   - **网页入口**：仍然只接受本机访问（M0 前已有的跨站和 Host 校验），不受白名单影响。
+  - **核实后确定的做法**：
+    - 权限参数只在 `claude_cli.permission_args` 定义（`--dangerously-skip-permissions`），由 `agent_settings.Launch.args` 和插件库参数一起下发，四类 agent 的启动命令里不再有 `--tools`、`--allowedTools`、`--permission-mode`；M1 的隔离参数和 M1.6 的 `--plugin-dir` 不变；
+    - 推荐的 Planner role prompt 写明"你负责规划和决策，具体工作交给 Worker；不亲自修改文件，哪怕是很小的修改，每个改动都作为步骤交给 Worker"，并说明它可以读项目、运行无害的命令；PLAN turn 的提示从"可以先读项目"改为"可以先查看项目，但不改动"；`REPLY_CONTRACT` 本来就没有说 Planner 只读，不用改；
+    - 飞书白名单用适配器原本就读取的 `open_id`（`event.sender.sender_id.open_id`，同一用户在同一应用下不变），存在 `allowed_open_ids`；Telegram 用发送者的数字用户 ID，沿用 `allowed_user_ids`；两者都按 JSON 数组保存，以前 Telegram 存的逗号分隔字符串仍然能读，`LOOPX_TELEGRAM_ALLOWED_USERS` 不再生效；
+    - 允许保存"已启用但白名单为空"的渠道（方便先启用再填），Settings 页写明它不会启动；服务启动时不启动它，适配器自己也拒绝在空名单下启动；
+    - Agents 页原来的 Claude Code「Permission Mode」下拉框，这四类 agent 从来不读，改为一行说明它们共用的权限。
 - **不做：** 不做多用户权限体系，也不做网页登录。
 - **验收：**
   - 真实 Claude 下，Manager 能直接调用工具和 skill，Planner 能运行命令，都不再被拒绝；
@@ -208,6 +214,7 @@
 | 2026-10-13 | 修复：Manager、Planner 保存的会话丢失后自动换新会话（looper #20） |
 | 2026-10-13 | RFC 决策 8：agent 不限权限，渠道必须有发送者白名单；新增 M1.7 |
 | 2026-10-13 | M1.6 交付（looper #22）：插件库。从本机 Claude Code 配置只读导入已启用的插件（整个导入，连同其 skill、agent、命令和 hook）和全部个人 skill，存进数据库（`library_items`、`library_files`），条目的版本是其文件的哈希；每次运行在 runtime root 下取只读副本，每个插件一个 `--plugin-dir`，个人 skill 合成一个 `personal` 插件；加载了插件库的运行里，Planner 多一个 `Skill` 工具，Manager 多一个 `--allowedTools Skill`；库的哈希进入常驻进程的重启签名；记录新增 `metadata.library`；Settings 新增「Plugins & skills」，历史页列出每次运行的加载清单。核实（Claude Code 2.1.285）：在 `--print` 和隔离参数下，`--plugin-dir` 加载插件的 skill（名为 `<插件>:<skill>`）、agent、命令和 hook，插件自带的 `SessionStart` hook 会运行，操作者的 `UserPromptSubmit` hook 不会；没有 `Skill` 工具时 Claude Code 不列出任何 skill；`--print` 默认权限下，声明了 `allowed-tools` 的 skill 会被拒绝，放行 `Skill` 不会连带放行它声明的工具。验收：真实 Claude（opus，effort low）下，导入 3 个插件、104 个个人 skill（约 21 MB、2,200 个文件；未导入 5 项：4 个图片文件、1 个没有 `SKILL.md` 的目录）；四类 agent 的 init 事件都列出 4 个库插件和 142 个 skill；Manager 调用一个个人 skill 并答出其中的样例值，Worker 和 Reviewer 调用同一个 skill、运行它自带的脚本（来自只读副本），结果与独立计算一致，Planner 产出有效计划，Worker 判为 completed，Reviewer 给出 `passed`；Manager 答出项目 `CLAUDE.md` 的暗号，答不出个人 `CLAUDE.md` 的内容；提问日志里没有任何 LoopX 会话的记录；停用这个 skill 后，Manager 下一轮以 `--resume` 重启，记录和 init 里都少了它（个人 skill 104 → 103）；上下文：Opus 上一次最小运行的首个请求从 15,674 token 增至 29,114 token；真实 Claude 花费约 $1.2；单测与真实 PG 929 通过（main 上 898） |
+| 2026-10-13 | M1.7 交付（looper #23）：agent 不限权限，渠道必须有发送者白名单。权限参数只在 `claude_cli.permission_args`（`--dangerously-skip-permissions`）定义，由 `agent_settings.Launch.args` 和插件库参数一起下发给四类 agent；去掉 Planner 的 `--tools`/`--allowedTools Read,Grep,Glob[,Skill]`/`--permission-mode dontAsk` 和 Manager 的 `--allowedTools Skill`，隔离参数和 `--plugin-dir` 不变。推荐的 Planner role prompt 写明负责规划和决策、不亲自修改文件、改动都作为步骤交给 Worker，未改过的 `planner` 行启动时随推荐升级，改过的保留。飞书（`allowed_open_ids`，消息事件里的 `open_id`）和 Telegram（`allowed_user_ids`，数字用户 ID）各有发送者白名单：名单外的消息不交给 Manager，只记一条日志（渠道和发送者 ID，不含内容），不回复，Telegram 的 `/start`、`/status`、`/help` 也一样；名单为空或格式不对的渠道不启动，启动日志和 Settings 页（`start_problem`）写明原因；`LOOPX_TELEGRAM_ALLOWED_USERS` 不再生效。Settings 页可增删白名单并即时校验格式；Agents 页用一行说明代替不起作用的「Permission Mode」下拉框。核实（Claude Code 2.1.285）：`--print` 加隔离参数和 `--plugin-dir` 时，加上 `--dangerously-skip-permissions` 后 init 的 `permissionMode` 为 `bypassPermissions`，Bash、Write 和声明了 `allowed-tools: Bash` 的插件 skill 都不再被拒绝；不加时 Write 和这个 skill 被拒绝（`date` 这类只读命令两种情况都放行）；隔离用的 `--settings` 不影响权限。验收：真实 Claude（opus，effort low）下，Manager 用 Bash 运行 `date … | tee` 写文件并如实回报输出，没有被拒绝；Planner 规划时运行了 `python3 -c …`，产出有效计划并把改动派给 Worker，Planner 的工具调用里没有任何编辑，工作目录的改动全部来自 Worker；Worker 判为 completed，Reviewer 给出 `passed`。在真实服务上用本地替身（`PATH` 上的伪 `lark-cli`；只在验收环境里把 python-telegram-bot 指向本地伪 Bot API；不连真实飞书和 Telegram，不用真实 token）发合成消息：已启用但白名单为空的两个渠道都没有启动，替身一次也没被调用；在 Settings 页填好白名单并重启后，名单内的飞书和 Telegram 发送者都到达 Manager 并收到回复，名单外的 4 条消息（含 Telegram `/start`、`/help`）都被丢弃，各记一行日志，日志里没有消息内容，Manager 没有新增运行，也没有任何回复。无头 Chrome 里完成白名单的增删、校验、保存和刷新读回，并截图查看了 Settings（1280、768 px）、Planner 运行的启动命令和 Agents 页。真实 Claude 花费约 $0.52；单测与真实 PG 990 通过（main 上 933），另有 5 个 `test_dashboard_command` 安装模式用例在 main 上同样失败 |
 
 ## 5. 不属于本 RFC 的待办
 
