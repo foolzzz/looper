@@ -785,7 +785,10 @@ export interface ChannelConfig {
   channel_type: string;
   display_name: string;
   enabled: boolean;
-  config: Record<string, string>;
+  /** Mostly environment variable names; a chat channel's sender allowlist is a list of ids. */
+  config: Record<string, unknown>;
+  /** Why this channel does not start as configured (its sender allowlist); null when nothing stops it. */
+  start_problem?: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -812,7 +815,7 @@ export async function updateChannelConfig(
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(fields),
   });
-  if (!res.ok) throw new Error(`update channel-config ${res.status}`);
+  if (!res.ok) await failed(res, "update channel-config");
   return res.json();
 }
 

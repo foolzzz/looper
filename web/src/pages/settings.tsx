@@ -1,8 +1,9 @@
 import { useEffect, useId, useState } from "react";
-import { Save, Loader2, MessageCircle, Send, CheckCircle2, XCircle, Plus, RotateCcw, Trash2 } from "lucide-react";
+import { AlertTriangle, Save, Loader2, MessageCircle, Send, CheckCircle2, XCircle, Plus, RotateCcw, Trash2 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Switch } from "@/components/ui/switch";
 import { HarnessField, harnessTooLong } from "@/components/harness-field";
 import { LibraryCard } from "@/components/library-card";
 import {
@@ -231,33 +232,93 @@ function channelIcon(type: string) {
   return MessageCircle;
 }
 
+/** Each chat channel's sender allowlist, as the server checks it (loopx/agents/channels/allowlist.py). */
+const SENDER_ALLOWLISTS: Record<string, { field: string; label: string; pattern: RegExp; placeholder: string; hint: string }> = {
+  telegram: {
+    field: "allowed_user_ids",
+    label: "Telegram user IDs",
+    pattern: /^[1-9][0-9]{0,19}$/,
+    placeholder: "123456789",
+    hint: "Each sender's numeric Telegram user ID (a negative number is a group or channel, not a sender).",
+  },
+  lark: {
+    field: "allowed_open_ids",
+    label: "Lark open_ids",
+    pattern: /^ou_[0-9A-Za-z]{8,64}$/,
+    placeholder: "ou_…",
+    hint: "Each sender's open_id for this app, starting with ou_ (not a union_id or a user_id).",
+  },
+};
+const MAX_SENDERS = 100;
+
+/** The ids stored in an allowlist field: a list, or one comma-separated string as older Telegram settings hold it. */
+function storedIds(raw: unknown): string[] {
+  if (Array.isArray(raw)) return raw.map(String);
+  if (typeof raw === "string") return raw.split(",").map((id) => id.trim()).filter(Boolean);
+  return [];
+}
+
+function stringFields(config: Record<string, unknown>, skip: string[]) {
+  const fields: Record<string, string> = {};
+  for (const [key, value] of Object.entries(config)) {
+    if (!skip.includes(key) && typeof value === "string") fields[key] = value;
+  }
+  return fields;
+}
+
 function ChannelCard({ channel, onSaved }: { channel: ChannelConfig; onSaved: () => void }) {
+  const id = useId();
+  const allowlist = SENDER_ALLOWLISTS[channel.channel_type];
+  const saved = channel.config || {};
+  const skip = ["description", ...(allowlist ? [allowlist.field] : [])];
   const [enabled, setEnabled] = useState(channel.enabled);
-  const [config, setConfig] = useState<Record<string, string>>(channel.config || {});
+  const [fields, setFields] = useState<Record<string, string>>(stringFields(saved, skip));
+  const [ids, setIds] = useState<string[]>(allowlist ? storedIds(saved[allowlist.field]) : []);
   const [saving, setSaving] = useState(false);
-  const [saved, setSaved] = useState(false);
+  const [error, setError] = useState("");
+  const [justSaved, setJustSaved] = useState(false);
   const Icon = channelIcon(channel.channel_type);
 
+  const savedIds = allowlist ? storedIds(saved[allowlist.field]) : [];
   const dirty =
     enabled !== channel.enabled ||
-    JSON.stringify(config) !== JSON.stringify(channel.config || {});
+    JSON.stringify(fields) !== JSON.stringify(stringFields(saved, skip)) ||
+    JSON.stringify(ids) !== JSON.stringify(savedIds);
+  const idProblems = ids.map((value, index) => {
+    const text = value.trim();
+    if (!text) return "Enter an ID or remove this row.";
+    if (allowlist && !allowlist.pattern.test(text)) return `Not a valid ${allowlist.label.replace(/s$/, "")}.`;
+    if (ids.findIndex((other) => other.trim() === text) !== index) return "Listed twice.";
+    return "";
+  });
+  const invalid = idProblems.some(Boolean);
+  // Why the channel does not start: the saved state from the server, or the same rule for unsaved edits.
+  const startProblem = !allowlist
+    ? null
+    : dirty
+      ? ids.length === 0
+        ? "its sender allowlist is empty; nobody could reach the Manager through it"
+        : null
+      : channel.start_problem ?? null;
 
   const handleSave = async () => {
     setSaving(true);
+    setError("");
     try {
+      const config: Record<string, unknown> = { ...saved, ...fields };
+      if (allowlist) config[allowlist.field] = ids.map((value) => value.trim());
       await updateChannelConfig(channel.channel_id, { enabled, config });
-      setSaved(true);
-      setTimeout(() => setSaved(false), 2000);
+      setJustSaved(true);
+      setTimeout(() => setJustSaved(false), 2000);
       onSaved();
-    } catch {
-      // ignore
+    } catch (e) {
+      setError((e as Error).message);
     } finally {
       setSaving(false);
     }
   };
 
-  const configKeys = Object.keys(config).filter((k) => k !== "description");
-  const description = config.description || "";
+  const description = typeof saved.description === "string" ? saved.description : "";
 
   return (
     <div className={cn(
@@ -281,34 +342,28 @@ function ChannelCard({ channel, onSaved }: { channel: ChannelConfig; onSaved: ()
           <Badge variant={enabled ? "success" : "outline"}>
             {enabled ? "Enabled" : "Disabled"}
           </Badge>
-          <button
-            type="button"
-            onClick={() => setEnabled(!enabled)}
-            className={cn(
-              "relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors",
-              enabled ? "bg-primary" : "bg-muted",
-            )}
-          >
-            <span
-              className={cn(
-                "pointer-events-none inline-block h-5 w-5 rounded-full bg-background shadow-lg transition-transform",
-                enabled ? "translate-x-5" : "translate-x-0",
-              )}
-            />
-          </button>
+          <Switch checked={enabled} onChange={setEnabled} label={`Enable ${channel.display_name}`} />
         </div>
       </div>
 
       <div className="px-5 py-4 space-y-4">
-        {configKeys.map((key) => (
+        {enabled && startProblem && (
+          <div role="status" className="flex items-start gap-2 rounded-md border border-warning/50 bg-warning/10 px-3 py-2 text-xs text-foreground">
+            <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-warning" />
+            <span>Does not start: {startProblem}.</span>
+          </div>
+        )}
+
+        {Object.keys(fields).map((key) => (
           <div key={key}>
-            <label className="block text-xs font-medium text-muted-foreground mb-1.5">
+            <label htmlFor={`${id}-${key}`} className="block text-xs font-medium text-muted-foreground mb-1.5">
               {key.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase())}
             </label>
             <input
+              id={`${id}-${key}`}
               type="text"
-              value={config[key] || ""}
-              onChange={(e) => setConfig({ ...config, [key]: e.target.value })}
+              value={fields[key] || ""}
+              onChange={(e) => setFields({ ...fields, [key]: e.target.value })}
               placeholder={key.endsWith("_env") ? "Environment variable name" : ""}
               className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground outline-none focus:ring-2 focus:ring-ring"
             />
@@ -320,36 +375,71 @@ function ChannelCard({ channel, onSaved }: { channel: ChannelConfig; onSaved: ()
           </div>
         ))}
 
-        <div className="flex items-center justify-between pt-2">
+        {allowlist && (
+          <div className="space-y-2">
+            <div className="flex items-baseline justify-between gap-2">
+              <span className="text-xs font-medium text-muted-foreground">Allowed senders ({allowlist.label})</span>
+              <span className="text-[11px] tabular-nums text-muted-foreground">{ids.length} / {MAX_SENDERS}</span>
+            </div>
+            {ids.map((value, index) => (
+              <div key={index} className="space-y-1">
+                <div className="flex items-center gap-2">
+                  <Input
+                    aria-label={`Allowed sender ${index + 1}`}
+                    value={value}
+                    onChange={(e) => setIds(ids.map((current, i) => (i === index ? e.target.value : current)))}
+                    placeholder={allowlist.placeholder}
+                    aria-invalid={!!idProblems[index]}
+                    className="flex-1 font-mono"
+                  />
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => setIds(ids.filter((_, i) => i !== index))}
+                    aria-label={`Remove ${value.trim() || `sender ${index + 1}`}`}
+                  >
+                    <Trash2 className="h-3.5 w-3.5" />
+                  </Button>
+                </div>
+                {idProblems[index] && <p className="text-xs text-destructive">{idProblems[index]}</p>}
+              </div>
+            ))}
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={() => setIds([...ids, ""])}
+              disabled={ids.length >= MAX_SENDERS}
+            >
+              <Plus className="h-3.5 w-3.5" />
+              Add sender
+            </Button>
+            <p className="text-xs text-muted-foreground">
+              {allowlist.hint} Only these senders reach the Manager, which runs any command on this machine without
+              asking; messages from anyone else are dropped and logged, with no reply. With an empty list the channel
+              does not start.
+            </p>
+          </div>
+        )}
+
+        <div className="flex items-center justify-between gap-2 pt-2">
           <p className="text-[10px] text-muted-foreground">
             Channel ID: <code className="text-foreground">{channel.channel_id}</code>
             {" · "}Updated: {new Date(channel.updated_at).toLocaleString()}
           </p>
           <div className="flex items-center gap-2">
-            {saved && (
+            {error && <p role="alert" className="text-xs text-destructive">{error}</p>}
+            {justSaved && (
               <span className="flex items-center gap-1 text-xs text-success">
                 <CheckCircle2 className="h-3.5 w-3.5" />
                 Saved
               </span>
             )}
-            <button
-              type="button"
-              onClick={handleSave}
-              disabled={saving || !dirty}
-              className={cn(
-                "flex items-center gap-1.5 rounded-md px-3 py-1.5 text-sm font-medium transition-colors",
-                dirty
-                  ? "bg-primary text-primary-foreground hover:bg-primary/90"
-                  : "bg-muted text-muted-foreground cursor-not-allowed",
-              )}
-            >
-              {saving ? (
-                <Loader2 className="h-3.5 w-3.5 animate-spin" />
-              ) : (
-                <Save className="h-3.5 w-3.5" />
-              )}
+            <Button type="button" size="sm" onClick={handleSave} disabled={saving || !dirty || invalid}>
+              {saving ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Save className="h-3.5 w-3.5" />}
               Save
-            </button>
+            </Button>
           </div>
         </div>
       </div>
@@ -396,7 +486,7 @@ export function SettingsPage() {
       <div>
         <h2 className="text-sm font-semibold mb-3">Channel Integrations</h2>
         <p className="text-xs text-muted-foreground mb-4">
-          Connect external messaging platforms. Channels read credentials from environment variables at server startup — restart the server after enabling a channel.
+          Connect external messaging platforms. Channels read credentials from environment variables at server startup — restart the server after enabling a channel. Each one passes on only the senders it lists.
         </p>
 
         {error && !channels.length && (
