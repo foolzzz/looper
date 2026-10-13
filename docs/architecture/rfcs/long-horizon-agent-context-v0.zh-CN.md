@@ -5,6 +5,7 @@
 - **创建日期：** 2026-10-13
 - **实现基线：** `c600594ea`（foolzzz/looper `main`，含 M0）
 - **相关文档：** [Agent 系统架构](../agent-system.md)、[产品设计](../../design.md)
+- **开发计划与进度：** [长程 Agent 上下文体系开发计划](../../plans/2026-10-13-long-horizon-agent-context.zh-CN.md)（分阶段范围、验收和进度台账以该文为准）
 - **语言：** 本 RFC 先以中文评审，定稿后补英文镜像。
 
 ## 1. 背景与目标
