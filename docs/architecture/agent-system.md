@@ -266,7 +266,10 @@ Connection: `LOOPX_DATABASE_URL` environment variable or `.env` file.
 ## Web Dashboard
 
 Single-page React app served from `web/dist/` via the built-in HTTP server
-(`loopx/agents/http_server.py`). Default port: 8767.
+(`loopx/agents/http_server.py`). Default port: 8767. An installed wheel has no
+`web/`; it serves the copy staged into the package (`loopx/web/dashboard`,
+built by `scripts/stage-dashboard.sh` at release time), and it carries
+`loopx/db/schema.sql` the same way.
 
 ### Pages
 

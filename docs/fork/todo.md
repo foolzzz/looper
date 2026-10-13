@@ -26,7 +26,7 @@ workflow.
 - Closing a goal does not remove the developer worktrees. Use
   `loopx workspace cleanup` for each Todo.
 - ~~`loopx update apply` defaults to upstream~~ — fixed, now points to
-  this fork, `foolzzz/loopx`.
+  this fork, `foolzzz/looper`.
 
 ## Deferred (not blocking current use)
 

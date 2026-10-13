@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "loopx"
-version = "2.2.0"
+version = "2.5.0"
 description = "A lightweight Loop Engineering control plane for long-running agent goals."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -17,11 +17,11 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://loopx-project.github.io/loopx/"
-Documentation = "https://loopx-project.github.io/loopx/docs/"
-Repository = "https://github.com/loopx-project/loopx"
-Issues = "https://github.com/loopx-project/loopx/issues"
-Changelog = "https://github.com/loopx-project/loopx/releases"
+Homepage = "https://github.com/foolzzz/looper"
+Documentation = "https://github.com/foolzzz/looper/tree/main/docs"
+Repository = "https://github.com/foolzzz/looper"
+Issues = "https://github.com/foolzzz/looper/issues"
+Changelog = "https://github.com/foolzzz/looper/blob/main/CHANGELOG.md"
 
 [project.optional-dependencies]
 deepseek-harness = [
@@ -50,7 +50,8 @@ loopx-openviking-semantic-preference = "loopx.extensions.openviking_semantic_pre
 include = ["loopx*"]
 
 [tool.setuptools.package-data]
-"loopx" = ["web/chat/*.html", "web/chat/*.json", "web/chat/assets/*", "web/chat/manifest.webmanifest", "web/chat/pwa/*"]
+"loopx" = ["web/chat/*.html", "web/chat/*.json", "web/chat/assets/*", "web/chat/manifest.webmanifest", "web/chat/pwa/*", "web/dashboard/*", "web/dashboard/assets/*"]
+"loopx.db" = ["*.sql"]
 "loopx.control_plane" = ["*.json", "*.ts", "presentation/*.ts"]
 "loopx.semantics" = ["*.json"]
 "loopx.control_plane.agents" = ["*.ts"]

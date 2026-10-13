@@ -84,7 +84,7 @@ trusted checkout can install the native PowerShell launcher without Bash,
 POSIX symlinks, or WSL:
 
 ```powershell
-git clone https://github.com/foolzzz/loopx.git "$HOME/loopx"
+git clone https://github.com/foolzzz/looper.git "$HOME/loopx"
 Set-Location "$HOME/loopx"
 pwsh -NoLogo -NoProfile -File .\scripts\install-windows.ps1 `
   -Python (Get-Command python).Source `
@@ -341,17 +341,17 @@ Python package environment is unavailable or the CLI is too damaged to run its
 own repair path:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/foolzzz/loopx/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/foolzzz/looper/main/install.sh | bash
 export PATH="$HOME/.local/bin:$PATH"
 loopx doctor
 ```
 
-It installs the wheel attached to the latest `foolzzz/loopx` GitHub release,
+It installs the wheel attached to the latest `foolzzz/looper` GitHub release,
 with uv, pipx or pip. When that release has no wheel it installs nothing;
 install from a release tag instead:
 
 ```bash
-git clone https://github.com/foolzzz/loopx.git && cd loopx && git checkout vX.Y.Z
+git clone https://github.com/foolzzz/looper.git && cd looper && git checkout vX.Y.Z
 uv sync
 ```
 

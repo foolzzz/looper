@@ -18,6 +18,148 @@ To learn how to use these features, read the [usage guide](docs/fork/usage.md).
 
 ### Changed
 
+- Each task's Planner is now a Claude Code agent. It keeps one Claude process
+  for the task's life, started on its first turn in the task's directory and
+  ended when the task ends or the server stops. Claude splits the requirement
+  into 1–8 steps, each with acceptance criteria, dependencies and whether a
+  Reviewer must pass it. After every Worker and Reviewer result it accepts the
+  step, sends it to review, retries it in a new Worker with feedback (at most
+  2 per step), replans the steps not started yet, or fails the task. Every
+  reply ends with one JSON block that code validates strictly; an invalid
+  reply gets one repair turn. Planning that still fails fails the task, with
+  no single-step fallback; a decision that still fails falls back to the
+  step's own verdict without a Reviewer and logs a warning. The Planner's
+  Claude only has Read, Grep and Glob (`--tools`, `--allowedTools`,
+  `--permission-mode dontAsk`, `--strict-mcp-config`) and never gets
+  `--dangerously-skip-permissions`. The `complexity` heuristic is gone: a
+  Reviewer runs only when the plan or a decision asks for one, and its prompt
+  now includes the step's instruction. A chat message to a Planner now goes
+  through its Claude, which replies and may pass the text to the running
+  Worker or add steps; a message no longer becomes a step by itself. The
+  `planner` row of `agent_configs`, unused before, now applies on every turn:
+  `system_prompt` (the code appends the reply contract), `timeout_seconds` per
+  turn (default 1200, 0 = no limit), `model` and `max_turns`. At startup a row
+  still holding the old default prompt gets the new one; an edited prompt is
+  kept. Every Planner turn is a paid Claude run, recorded in `llm_records` as
+  `planner-<task_id>` with its own cost and shown beside a selected Planner on
+  the Chat page, on its history page and in the Agents page's Runs tab
+  (`role=planner`). A completed task's `tasks.result_summary` is now the last
+  accepted step's summary, and a failed task's `tasks.error` is the Planner's
+  failure summary.
+
+## [2.5.0] - 2026-10-13
+
+Covers `v2.1.0` to `v2.5.0`: this fork's merged pull requests from #106 to
+#180 in [foolzzz/loopx](https://github.com/foolzzz/loopx/pulls), pull request
+#1 in [foolzzz/looper](https://github.com/foolzzz/looper/pulls), where
+development continues, and
+[michaelx1993/loopx](https://github.com/michaelx1993/loopx/pulls) pull
+requests #30 to #58. Versions 2.1.1 through 2.4.0 were tagged and released
+only in michaelx1993/loopx; their changes are listed here. Entries for that
+work link its pull requests.
+
+### Added
+
+- **`loopx serve` starts a three-tier agent system.** A Manager talks to the
+  user and turns requests into tasks. A TaskRouter runs at most three tasks
+  at a time and queues the rest. Each task gets its own Planner, which calls
+  no model: it runs the task as one step, and a chat message to it while the
+  task runs reaches the running worker or becomes a further step. A
+  WorkerPool runs each step as a `claude` subprocess, at most four at a time.
+  They exchange typed messages over an async bus with a JSONL journal under
+  the runtime root. `loopx serve` also serves the HTTP API and the web
+  dashboard, on `127.0.0.1:8767` by default (`--host`, `--port`). Every agent
+  run uses the Claude Code CLI, which must be on `PATH` and signed in; workers
+  run it with `--dangerously-skip-permissions` in the task's work directory.
+  ([#38](https://github.com/michaelx1993/loopx/pull/38),
+  [#39](https://github.com/michaelx1993/loopx/pull/39),
+  [#40](https://github.com/michaelx1993/loopx/pull/40),
+  [#41](https://github.com/michaelx1993/loopx/pull/41),
+  [#42](https://github.com/michaelx1993/loopx/pull/42),
+  [#51](https://github.com/michaelx1993/loopx/pull/51))
+- **`loopx serve` requires PostgreSQL.** It connects to `LOOPX_DATABASE_URL`
+  (default `postgresql://localhost:5432/loopx`; a `.env` file in the
+  repository root fills in variables that are not set) and does not start
+  without the database. Each start applies the idempotent schema in
+  `loopx/db/schema.sql`: tasks, steps, activity, chat messages, agent
+  configs, LLM profiles, LLM run records and channel configs.
+  ([#44](https://github.com/michaelx1993/loopx/pull/44),
+  [#45](https://github.com/michaelx1993/loopx/pull/45),
+  [#48](https://github.com/michaelx1993/loopx/pull/48),
+  [#49](https://github.com/michaelx1993/loopx/pull/49))
+- **Web dashboard for the agent system** in `web/`. Build it with
+  `npm install` and `npx vite build`, which writes the `web/dist` that
+  `loopx serve` serves. Pages: Chat, Tasks, task detail (overview with a live
+  activity feed, pipeline graph, expandable Agent Timeline, conversation),
+  Agents and Settings. The URL hash keeps the page across a reload.
+  ([#41](https://github.com/michaelx1993/loopx/pull/41),
+  [#43](https://github.com/michaelx1993/loopx/pull/43),
+  [#46](https://github.com/michaelx1993/loopx/pull/46),
+  [#47](https://github.com/michaelx1993/loopx/pull/47),
+  [#50](https://github.com/michaelx1993/loopx/pull/50),
+  [#52](https://github.com/michaelx1993/loopx/pull/52),
+  [#55](https://github.com/michaelx1993/loopx/pull/55),
+  [#56](https://github.com/michaelx1993/loopx/pull/56))
+- **Task lifecycle controls.** A task moves through `init`, `pending`,
+  `assigned`, `running` and `completed` or `failed`. `stopped` pauses it so
+  it can be started again; `cancelled` ends it for good. A task created on
+  the dashboard starts in `init` and can be edited before it starts. A task
+  that is still active cannot be deleted. On startup, tasks a previous server
+  left running are marked `stopped`.
+  ([#39](https://github.com/michaelx1993/loopx/pull/39),
+  [#52](https://github.com/michaelx1993/loopx/pull/52),
+  [#53](https://github.com/michaelx1993/loopx/pull/53),
+  [#57](https://github.com/michaelx1993/loopx/pull/57))
+- **Agent configuration and LLM profiles in the database**, edited on the
+  Agents page and through `/api/agent-configs` and `/api/llm-profiles`. Only
+  the Manager's system prompt and the worker's `timeout_seconds` and
+  `max_turns` take effect; the other fields are stored but not applied.
+  ([#45](https://github.com/michaelx1993/loopx/pull/45),
+  [#46](https://github.com/michaelx1993/loopx/pull/46),
+  [#47](https://github.com/michaelx1993/loopx/pull/47))
+- **Telegram and Lark channels** for the Manager, off by default and
+  configured on the Settings page (see Changed).
+  ([#38](https://github.com/michaelx1993/loopx/pull/38),
+  [#56](https://github.com/michaelx1993/loopx/pull/56))
+- **`loopx init`** detects the `claude` and `codex` CLIs and API keys, then
+  writes `providers.yaml` and the `orch`, `dev` and `acc` agent files under the
+  runtime root for the role dispatcher. `--non-interactive` takes the detected
+  defaults; `--force` overwrites existing files. `loopx serve` does not read
+  these files. ([#32](https://github.com/michaelx1993/loopx/pull/32))
+- **`loopx dashboard`** Settings gains an Agent config tab, which edits the
+  role dispatcher's agent and provider files, and an Update tab. Chat gains a
+  session panel, and creating a Goal starts from a one-line prompt.
+  ([#36](https://github.com/michaelx1993/loopx/pull/36),
+  [#37](https://github.com/michaelx1993/loopx/pull/37))
+- `install.sh`, a curl-pipeable installer for the wheel of the latest
+  GitHub release; see Changed for its source and what it does when that
+  release has no wheel.
+  ([#32](https://github.com/michaelx1993/loopx/pull/32),
+  [#34](https://github.com/michaelx1993/loopx/pull/34))
+
+### Changed
+
+- Development moves to `foolzzz/looper`, after GitHub disabled Actions on
+  `foolzzz/loopx`. Install and update (`install.sh`, `loopx update apply`,
+  the doctor hint and the onboarding source) now come from `foolzzz/looper`
+  releases, the project URLs and the first-run issue link point there, and the
+  install docs clone `foolzzz/looper`. Links to earlier pull requests and
+  issues keep pointing at `foolzzz/loopx`, where they live.
+- Releases are published by GitHub Actions when a `vX.Y.Z` tag is pushed
+  (`.github/workflows/release.yml`); nothing is built or uploaded locally. The
+  release pull request commits the exact body as `docs/releases/vX.Y.Z.md` and
+  its optional-capability surfaces as `docs/releases/vX.Y.Z.surfaces`. The
+  workflow checks the tag against `main` and the package version, validates
+  the body, builds the Chat bundle and the dashboard, runs the wheel smoke
+  against a PostgreSQL service, builds the wheel and publishes the release
+  through a draft, so the latest release always carries its wheel.
+- A release wheel runs `loopx serve`. It now carries `loopx/db/schema.sql`
+  and the agent dashboard, staged into `loopx/web/dashboard` by
+  `scripts/stage-dashboard.sh`; before, an installed wheel failed at startup
+  with no schema and had no dashboard. A checkout still serves its own
+  `web/dist`. `examples/release/agent-serve-wheel-smoke.py` builds the wheel
+  from a clean copy, installs it and runs the installed `loopx serve`, and
+  the release steps attach that wheel to every GitHub release.
 - Install and update use this fork, `foolzzz/loopx`, instead of
   `michaelx1993/loopx` or upstream: `install.sh`, the no-clone installer URL
   (`https://raw.githubusercontent.com/foolzzz/loopx/main/install.sh`), the
@@ -42,6 +184,12 @@ To learn how to use these features, read the [usage guide](docs/fork/usage.md).
   whose `Origin` is not the server's own now gets 403, no response carries CORS
   headers, and on a loopback address the `Host` must be a loopback name
   (against DNS rebinding). curl, the CLI and the Vite dev proxy are unaffected.
+- The README describes the agent system: architecture, quick start with
+  PostgreSQL, HTTP API, configuration and task lifecycle.
+  `docs/architecture/agent-system.md` covers the tiers, message bus,
+  persistence, dashboard and API.
+  ([#54](https://github.com/michaelx1993/loopx/pull/54),
+  [#58](https://github.com/michaelx1993/loopx/pull/58))
 - Every agent task belongs to exactly one project. A project has a name
   (unique ignoring case), a description and an optional default directory.
   `GET`/`POST /api/projects` and `PUT`/`DELETE /api/projects/<id>` manage
@@ -86,9 +234,10 @@ To learn how to use these features, read the [usage guide](docs/fork/usage.md).
   their task, and every Worker/Reviewer run records the step it served
   (`metadata.step_id`).
 - Workers read Claude's input as stream-json: the prompt goes on stdin, which
-  stays open until the result. A task's Planner can pass a chat message to the
+  stays open until the result. A chat message to a task's Planner reaches the
   running Worker as its next user turn (`WORKER_INPUT` /
-  `WORKER_INPUT_RESULT`). The history page shows these user turns.
+  `WORKER_INPUT_RESULT`) instead of waiting as a new step; it becomes a step only
+  when no Worker is running. The history page shows these user turns.
 - The agent history page shows live thinking progress (`thinking · ~N tokens`),
   hooks, background tasks, rate limits and any other stream event, instead of
   hiding everything but text and tools. Claude's per-second `thinking_tokens`
@@ -143,34 +292,6 @@ To learn how to use these features, read the [usage guide](docs/fork/usage.md).
   and a report that does not match the files all fail the step with a
   reason. A reported failure is no longer counted as completed. Reviewers
   must return a boolean `passed`.
-- Each task's Planner is now a Claude Code agent. It keeps one Claude process
-  for the task's life, started on its first turn in the task's directory and
-  ended when the task ends or the server stops. Claude splits the requirement
-  into 1–8 steps, each with acceptance criteria, dependencies and whether a
-  Reviewer must pass it. After every Worker and Reviewer result it accepts the
-  step, sends it to review, retries it in a new Worker with feedback (at most
-  2 per step), replans the steps not started yet, or fails the task. Every
-  reply ends with one JSON block that code validates strictly; an invalid
-  reply gets one repair turn. Planning that still fails fails the task, with
-  no single-step fallback; a decision that still fails falls back to the
-  step's own verdict without a Reviewer and logs a warning. The Planner's
-  Claude only has Read, Grep and Glob (`--tools`, `--allowedTools`,
-  `--permission-mode dontAsk`, `--strict-mcp-config`) and never gets
-  `--dangerously-skip-permissions`. The `complexity` heuristic is gone: a
-  Reviewer runs only when the plan or a decision asks for one, and its prompt
-  now includes the step's instruction. A chat message to a Planner now goes
-  through its Claude, which replies and may pass the text to the running
-  Worker or add steps; a message no longer becomes a step by itself. The
-  `planner` row of `agent_configs`, unused before, now applies on every turn:
-  `system_prompt` (the code appends the reply contract), `timeout_seconds` per
-  turn (default 1200, 0 = no limit), `model` and `max_turns`. At startup a row
-  still holding the old default prompt gets the new one; an edited prompt is
-  kept. Every Planner turn is a paid Claude run, recorded in `llm_records` as
-  `planner-<task_id>` with its own cost and shown beside a selected Planner on
-  the Chat page, on its history page and in the Agents page's Runs tab
-  (`role=planner`). A completed task's `tasks.result_summary` is now the last
-  accepted step's summary, and a failed task's `tasks.error` is the Planner's
-  failure summary.
 
 ### Fixed
 
@@ -199,6 +320,19 @@ To learn how to use these features, read the [usage guide](docs/fork/usage.md).
 
 ### Removed
 
+- Removed about 49,000 lines in 150 test, smoke and example files outside
+  the agent control-plane pipeline: the semantic vocabulary, benchmark,
+  showcase, content-ops, Reward Memory, finance and OpenViking extension,
+  Developer Book, documentation governance, experiment and canary meta-check
+  suites, including `examples/repository-hygiene-smoke.py`,
+  `examples/docs-governance-smoke.py` and
+  `examples/dev-book-publication-smoke.py`. The product code they covered
+  remains. The removal also took out guards added earlier in this range:
+  `tests/architecture/test_cli_command_module_ownership.py`, the
+  path-literal budget in `tests/architecture/test_path_literal_regression.py`
+  and the per-module checks in `tests/canary/test_maintainability_ratchet.py`.
+  2.5.0 ships without them, although entries in this release describe the
+  first two. ([#31](https://github.com/michaelx1993/loopx/pull/31))
 - Retired the Release Artifacts workflow, its package identity/checksum script,
   and workflow-only validation. Automatic wheel/sdist asset upload, package
   attestations, and optional PyPI publication are no longer provided. Installed

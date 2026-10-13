@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-repo="${LOOPX_REPO:-foolzzz/loopx}"
+repo="${LOOPX_REPO:-foolzzz/looper}"
 ref="${LOOPX_REF:-stable}"
 archive_url_override="${LOOPX_ARCHIVE_URL:-}"
 archive_url="$archive_url_override"
