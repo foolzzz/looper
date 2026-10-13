@@ -571,8 +571,38 @@ class TestWorkerSubprocess:
 
         argv = asyncio.run(_run())
         assert "--include-partial-messages" in argv
+        # The Worker loads no MCP servers (no inherited global toolbox/hooks).
+        assert "--strict-mcp-config" in argv
         turns = argv[argv.index("--max-turns"):][:2] if "--max-turns" in argv else []
         assert turns == expected
+
+    def test_successful_result_survives_a_nonzero_exit(self) -> None:
+        """Claude can exit non-zero after a successful result (e.g. an MCP/hook
+        teardown error); the judged result decides, not the exit code."""
+
+        async def _run() -> dict[str, Any]:
+            with tempfile.TemporaryDirectory() as tmp:
+                claude = _fake_claude(Path(tmp), (
+                    "open('out.txt', 'w').write('x')\n"
+                    "print(json.dumps({'type': 'result', 'subtype': 'success', 'is_error': False, "
+                    "'result': json.dumps({'status': 'completed', 'changed_files': {'out.txt': 'added'}})}))\n"
+                    "sys.exit(1)"
+                ))
+                pool = WorkerPool(config=WorkerConfig(claude_bin=claude), runtime_root=Path(tmp))
+                return await pool._execute(_work_item(Path(tmp)))
+
+        assert asyncio.run(_run())["status"] == "completed"
+
+    def test_nonzero_exit_without_a_result_still_fails(self) -> None:
+        async def _run() -> dict[str, Any]:
+            with tempfile.TemporaryDirectory() as tmp:
+                # Prints no result event, then exits non-zero.
+                claude = _fake_claude(Path(tmp), "sys.exit(1)")
+                pool = WorkerPool(config=WorkerConfig(claude_bin=claude), runtime_root=Path(tmp))
+                return await pool._execute(_work_item(Path(tmp)))
+
+        result = asyncio.run(_run())
+        assert result["status"] == "failed" and "exited with code 1" in result["error"]
 
     @pytest.mark.parametrize("failure", [None, RuntimeError("database pool not initialised")])
     def test_unreadable_config_falls_back_to_defaults(
