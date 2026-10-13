@@ -1,0 +1,93 @@
+"""Project CRUD: every task belongs to one project.
+
+A project may give its tasks a default directory (``work_dir``, ``''`` for
+none). Names are unique ignoring case; a taken name raises
+``asyncpg.UniqueViolationError``.
+"""
+
+from __future__ import annotations
+
+import uuid
+from typing import Any
+
+import asyncpg
+
+from .connection import get_pool
+from .tasks import ACTIVE_STATUSES
+
+_WITH_COUNTS = """
+    SELECT p.*,
+           count(t.id) AS task_count,
+           count(t.id) FILTER (WHERE t.status = ANY($1::text[])) AS active_count
+    FROM projects p LEFT JOIN tasks t ON t.project_id = p.id
+"""
+
+
+async def list_projects(*, pool: asyncpg.Pool | None = None) -> list[dict[str, Any]]:
+    """Every project with its ``task_count`` and ``active_count``, ordered by name ignoring case."""
+    pool = pool or get_pool()
+    rows = await pool.fetch(_WITH_COUNTS + "GROUP BY p.id ORDER BY lower(p.name)", list(ACTIVE_STATUSES))
+    return [dict(r) for r in rows]
+
+
+async def get_project(project_id: str, *, pool: asyncpg.Pool | None = None) -> dict[str, Any] | None:
+    """One project with its ``task_count`` and ``active_count``."""
+    pool = pool or get_pool()
+    row = await pool.fetchrow(_WITH_COUNTS + "WHERE p.id = $2 GROUP BY p.id", list(ACTIVE_STATUSES), project_id)
+    return dict(row) if row else None
+
+
+async def find_project_by_name(name: str, *, pool: asyncpg.Pool | None = None) -> dict[str, Any] | None:
+    pool = pool or get_pool()
+    row = await pool.fetchrow("SELECT * FROM projects WHERE lower(name) = lower($1)", name)
+    return dict(row) if row else None
+
+
+async def create_project(
+    *,
+    name: str,
+    description: str = "",
+    work_dir: str = "",
+    pool: asyncpg.Pool | asyncpg.Connection | None = None,
+) -> dict[str, Any]:
+    pool = pool or get_pool()
+    row = await pool.fetchrow(
+        """
+        INSERT INTO projects (id, name, description, work_dir)
+        VALUES ($1, $2, $3, $4)
+        RETURNING *
+        """,
+        f"proj-{uuid.uuid4().hex[:12]}", name, description, work_dir,
+    )
+    return dict(row)
+
+
+async def update_project(
+    project_id: str,
+    *,
+    name: str | None = None,
+    description: str | None = None,
+    work_dir: str | None = None,
+    pool: asyncpg.Pool | None = None,
+) -> bool:
+    """Set the fields given (not ``None``); False when there is no such project."""
+    pool = pool or get_pool()
+    result = await pool.execute(
+        """
+        UPDATE projects
+        SET name = COALESCE($2, name),
+            description = COALESCE($3, description),
+            work_dir = COALESCE($4, work_dir),
+            updated_at = now()
+        WHERE id = $1
+        """,
+        project_id, name, description, work_dir,
+    )
+    return result == "UPDATE 1"
+
+
+async def delete_project(project_id: str, *, pool: asyncpg.Pool | None = None) -> bool:
+    """Delete a project; one that still has tasks raises ``asyncpg.ForeignKeyViolationError``."""
+    pool = pool or get_pool()
+    result = await pool.execute("DELETE FROM projects WHERE id = $1", project_id)
+    return result == "DELETE 1"

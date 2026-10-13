@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import logging
 import os
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 import asyncpg
@@ -55,6 +57,13 @@ def get_pool() -> asyncpg.Pool:
     if _pool is None:
         raise RuntimeError("database pool not initialised — call init_pool() first")
     return _pool
+
+
+@asynccontextmanager
+async def transaction() -> AsyncIterator[asyncpg.Connection]:
+    """A pooled connection in a transaction: committed on exit, rolled back on error."""
+    async with get_pool().acquire() as conn, conn.transaction():
+        yield conn
 
 
 async def ensure_schema(pool: asyncpg.Pool | None = None) -> None:

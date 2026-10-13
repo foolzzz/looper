@@ -122,6 +122,52 @@ BEGIN
     END IF;
 END $$;
 
+-- Every task belongs to one project; a project may give its tasks a default
+-- directory (work_dir, '' = none).
+CREATE TABLE IF NOT EXISTS projects (
+    id          TEXT PRIMARY KEY,
+    name        TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
+    work_dir    TEXT NOT NULL DEFAULT '',
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_projects_name ON projects (lower(name));
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS project_id TEXT REFERENCES projects(id);
+CREATE INDEX IF NOT EXISTS idx_tasks_project ON tasks (project_id, created_at DESC);
+
+-- Once: tasks from before projects get one project per directory, named after
+-- its last path component ('' and '/' -> 'default'). The oldest directory
+-- keeps the plain name; a later clash, ignoring case, gets -2, -3, ...
+DO $$
+DECLARE
+    dir        TEXT;
+    base       TEXT;
+    candidate  TEXT;
+    suffix     INTEGER;
+    new_id     TEXT;
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM schema_migrations WHERE name = 'tasks_project_backfill') THEN
+        FOR dir IN
+            SELECT work_dir FROM tasks WHERE project_id IS NULL
+            GROUP BY work_dir ORDER BY min(created_at), work_dir
+        LOOP
+            base := left(COALESCE(NULLIF(btrim(substring(rtrim(dir, '/') FROM '[^/]*$')), ''), 'default'), 80);
+            candidate := base;
+            suffix := 1;
+            WHILE EXISTS (SELECT 1 FROM projects WHERE lower(name) = lower(candidate)) LOOP
+                suffix := suffix + 1;
+                candidate := left(base, 80 - length('-' || suffix)) || '-' || suffix;
+            END LOOP;
+            new_id := 'proj-' || left(replace(gen_random_uuid()::text, '-', ''), 12);
+            INSERT INTO projects (id, name, work_dir) VALUES (new_id, candidate, dir);
+            UPDATE tasks SET project_id = new_id WHERE project_id IS NULL AND work_dir = dir;
+        END LOOP;
+        ALTER TABLE tasks ALTER COLUMN project_id SET NOT NULL;
+        INSERT INTO schema_migrations (name) VALUES ('tasks_project_backfill');
+    END IF;
+END $$;
+
 CREATE TABLE IF NOT EXISTS llm_records (
     id               BIGSERIAL PRIMARY KEY,
     agent_id         TEXT NOT NULL,

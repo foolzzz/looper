@@ -141,8 +141,9 @@ _GIT_ENV_OVERRIDES = (
 )
 
 
-# PostgreSQL writes made by the agent tiers (Planner, TaskRouter, WorkerPool).
+# PostgreSQL writes made by the agent tiers (Manager, Planner, TaskRouter, WorkerPool).
 _AGENT_DB_WRITES = (
+    ("projects", "create_project"),
     ("tasks", "create_task"),
     ("tasks", "update_task_status"),
     ("tasks", "update_task_phase"),
@@ -156,6 +157,16 @@ _AGENT_DB_WRITES = (
     ("llm_records", "update_event"),
 )
 
+# Reads the Manager makes, answered as a database that holds no projects yet.
+_AGENT_DB_READS = (
+    ("projects", "list_projects", []),
+    ("projects", "find_project_by_name", None),
+)
+
+
+async def _created_project(*, name: str, description: str = "", work_dir: str = "", **_: object) -> dict:
+    return {"id": "proj-000000000000", "name": name, "description": description, "work_dir": work_dir}
+
 
 @pytest.fixture
 def agent_db(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
@@ -163,8 +174,9 @@ def agent_db(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
 
     The agent system treats PostgreSQL as a hard dependency, so message-flow
     tests would otherwise stop at the first unguarded write. Each write becomes
-    an ``AsyncMock`` returning ``None``; the returned namespace exposes them by
-    name so a test can assert what was persisted.
+    an ``AsyncMock`` returning ``None`` (``create_project`` returns the new
+    project's row), and each read answers as an empty database. The returned
+    namespace exposes them by name so a test can assert what was persisted.
     """
     import importlib
     from unittest.mock import AsyncMock
@@ -173,8 +185,15 @@ def agent_db(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
 
     db = SimpleNamespace()
     for module_name, function in _AGENT_DB_WRITES:
-        # start_record hands back the new record's id; the other writes return nothing.
-        mock = AsyncMock(return_value=1 if function == "start_record" else None)
+        if function == "create_project":
+            mock = AsyncMock(side_effect=_created_project)
+        else:
+            # start_record hands back the new record's id; the other writes return nothing.
+            mock = AsyncMock(return_value=1 if function == "start_record" else None)
+        monkeypatch.setattr(importlib.import_module(f"loopx.db.{module_name}"), function, mock)
+        setattr(db, function, mock)
+    for module_name, function, value in _AGENT_DB_READS:
+        mock = AsyncMock(return_value=value)
         monkeypatch.setattr(importlib.import_module(f"loopx.db.{module_name}"), function, mock)
         setattr(db, function, mock)
     # The Planner imports this one by name rather than through its module.
