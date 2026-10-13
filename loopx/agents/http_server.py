@@ -14,9 +14,11 @@ import logging
 import mimetypes
 import re
 import urllib.parse
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
+from . import projects
 from .broadcast import Broadcaster
 from .chat_targets import ChatTargetError, list_chat_targets, resolve_chat_target
 from .channels.web import WebChannelAdapter
@@ -39,6 +41,7 @@ def _serialize(obj: Any) -> Any:
 
 
 HTTP_200 = "200 OK"
+HTTP_201 = "201 Created"
 HTTP_400 = "400 Bad Request"
 HTTP_404 = "404 Not Found"
 HTTP_405 = "405 Method Not Allowed"
@@ -192,6 +195,8 @@ class AgentHTTPServer:
     _RE_LLM_RECORD_EVENTS = re.compile(r"^/api/llm-records/(\d+)/events$")
     _RE_CHANNEL_CONFIG = re.compile(r"^/api/channel-configs/([a-zA-Z0-9_-]+)$")
     _RE_TASK_CONFIG = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)/config$")
+    _RE_TASK_PROJECT = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)/project$")
+    _RE_PROJECT = re.compile(r"^/api/projects/(proj-[a-zA-Z0-9]+)$")
 
     async def _route_api(
         self,
@@ -204,7 +209,7 @@ class AgentHTTPServer:
         if path == "/api/status" and method == "GET":
             await self._handle_status(writer)
         elif path == "/api/tasks" and method == "GET":
-            await self._handle_list_tasks(writer)
+            await self._handle_list_tasks(query, writer)
         elif path == "/api/chat/send" and method == "POST":
             await self._handle_chat_send(body, writer)
         elif path == "/api/chat/targets" and method == "GET":
@@ -216,7 +221,7 @@ class AgentHTTPServer:
         elif path == "/api/chat/events" and method == "GET":
             await self._handle_sse_events(query, writer)
         elif path == "/api/tasks/create" and method == "POST":
-            await self._handle_task_create(body, writer)
+            await self._answer(writer, HTTP_201, lambda: projects.create_task(projects.json_object(body)))
         elif path == "/api/tasks/cancel" and method == "POST":
             await self._handle_task_cancel(body, writer)
         elif path == "/api/tasks/stop" and method == "POST":
@@ -235,8 +240,20 @@ class AgentHTTPServer:
             await self._handle_task_conversation(m.group(1), writer)
         elif (m := self._RE_TASK_CONFIG.match(path)) and method == "PUT":
             await self._handle_task_config_update(m.group(1), body, writer)
+        elif (m := self._RE_TASK_PROJECT.match(path)) and method == "PUT":
+            await self._answer(writer, HTTP_200, lambda: projects.move_task(
+                m.group(1), projects.json_object(body), self._task_router))
         elif (m := self._RE_TASK_DETAIL.match(path)) and method == "GET":
             await self._handle_task_detail(m.group(1), writer)
+        elif path == "/api/projects" and method == "GET":
+            await self._handle_list_projects(writer)
+        elif path == "/api/projects" and method == "POST":
+            await self._answer(writer, HTTP_201, lambda: projects.create_project(projects.json_object(body)))
+        elif (m := self._RE_PROJECT.match(path)) and method == "PUT":
+            await self._answer(writer, HTTP_200, lambda: projects.update_project(
+                m.group(1), projects.json_object(body)))
+        elif (m := self._RE_PROJECT.match(path)) and method == "DELETE":
+            await self._answer(writer, HTTP_200, lambda: projects.delete_project(m.group(1)))
         elif path == "/api/agent-configs" and method == "GET":
             await self._handle_list_agent_configs(writer)
         elif (m := self._RE_AGENT_CONFIG.match(path)) and method == "GET":
@@ -271,6 +288,31 @@ class AgentHTTPServer:
 
     # --- API handlers ---
 
+    async def _answer(
+        self,
+        writer: asyncio.StreamWriter,
+        status: str,
+        request: Callable[[], Awaitable[Any]],
+    ) -> None:
+        """Answer with ``request()``'s result, or with the ``RequestError`` it raised."""
+        try:
+            result = await request()
+        except projects.RequestError as exc:
+            status, result = exc.status, {"error": str(exc)}
+        writer.write(_json_response(status, _serialize(result)))
+        await writer.drain()
+
+    async def _handle_list_projects(self, writer: asyncio.StreamWriter) -> None:
+        try:
+            result = await projects.list_projects()
+        except Exception:
+            logger.exception("DB unavailable for list_projects")
+            writer.write(_json_response(HTTP_500, {"error": "database unavailable"}))
+            await writer.drain()
+            return
+        writer.write(_json_response(HTTP_200, _serialize(result)))
+        await writer.drain()
+
     async def _handle_status(self, writer: asyncio.StreamWriter) -> None:
         agents = self._supervisor.agent_status()
         web_health = self._web_adapter.healthcheck()
@@ -294,16 +336,19 @@ class AgentHTTPServer:
         writer.write(_json_response(HTTP_200, status))
         await writer.drain()
 
-    async def _handle_list_tasks(self, writer: asyncio.StreamWriter) -> None:
+    async def _handle_list_tasks(self, query: dict[str, str], writer: asyncio.StreamWriter) -> None:
         try:
             from ..db.tasks import list_tasks as db_list_tasks
-            tasks = await db_list_tasks(limit=50)
+            tasks = await db_list_tasks(limit=50, project_id=query.get("project_id") or None)
             result = []
             for t in tasks:
                 result.append({
                     "task_id": t.get("id", ""),
                     "requirement": t.get("requirement", ""),
                     "goal_id": t.get("goal_id", ""),
+                    "project_id": t.get("project_id", ""),
+                    "project_name": t.get("project_name", ""),
+                    "work_dir": t.get("work_dir", ""),
                     "status": t.get("status", "pending"),
                     "phase": t.get("phase", "pending"),
                     "planner_id": t.get("planner_id"),
@@ -447,52 +492,6 @@ class AgentHTTPServer:
                 await writer.drain()
         except (ConnectionError, BrokenPipeError):
             self._web_adapter.close_sse_stream(cid)
-
-    async def _handle_task_create(
-        self, body: bytes, writer: asyncio.StreamWriter
-    ) -> None:
-        try:
-            data = json.loads(body.decode("utf-8"))
-        except (json.JSONDecodeError, UnicodeDecodeError):
-            writer.write(_json_response(HTTP_400, {"error": "invalid JSON body"}))
-            await writer.drain()
-            return
-
-        requirement = (data.get("requirement") or "").strip()
-        if not requirement:
-            writer.write(_json_response(HTTP_400, {"error": "requirement is required"}))
-            await writer.drain()
-            return
-
-        import uuid
-        from ..db.tasks import create_task
-        from .tiers.task import resolve_work_dir
-
-        try:
-            work_dir = resolve_work_dir(data.get("work_dir"))
-        except ValueError as exc:
-            writer.write(_json_response(HTTP_400, {"error": str(exc)}))
-            await writer.drain()
-            return
-
-        task_id = f"task-{uuid.uuid4().hex[:12]}"
-        config = data.get("config", {})
-        goal_id = data.get("goal_id", "")
-
-        result = await create_task(
-            task_id=task_id,
-            requirement=requirement,
-            goal_id=goal_id,
-            work_dir=work_dir,
-            config=config,
-            status="init",
-        )
-        writer.write(_json_response("201 Created", {
-            "task_id": task_id,
-            "status": "init",
-            "created_at": result["created_at"],
-        }))
-        await writer.drain()
 
     async def _handle_task_config_update(
         self, task_id: str, body: bytes, writer: asyncio.StreamWriter,
@@ -668,7 +667,7 @@ class AgentHTTPServer:
             await writer.drain()
             return
 
-        from ..db.tasks import get_task, delete_task
+        from ..db.tasks import ACTIVE_STATUSES, delete_task, get_task
 
         task = await get_task(task_id)
         if task is None:
@@ -676,9 +675,7 @@ class AgentHTTPServer:
             await writer.drain()
             return
 
-        active_statuses = ("running", "pending", "executing", "assigned")
-        status = task.get("status", "")
-        if status in active_statuses:
+        if task.get("status", "") in ACTIVE_STATUSES:
             writer.write(
                 _json_response(HTTP_400, {"error": "stop the task before deleting"})
             )
@@ -712,6 +709,8 @@ class AgentHTTPServer:
             "task_id": raw.get("id", ""),
             "requirement": raw.get("requirement", ""),
             "goal_id": raw.get("goal_id", ""),
+            "project_id": raw.get("project_id", ""),
+            "project_name": raw.get("project_name", ""),
             "status": raw.get("status", "pending"),
             "phase": raw.get("phase", "pending"),
             "planner_id": raw.get("planner_id"),

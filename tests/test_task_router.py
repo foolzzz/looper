@@ -6,6 +6,7 @@ import asyncio
 import tempfile
 from pathlib import Path
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -28,6 +29,7 @@ class TestTask:
             requirement="add login",
             goal_id="g1",
             work_dir="/tmp",
+            project_id="proj-1",
             status="running",
             planner_id="planner-t1",
             correlation_id="c1",
@@ -43,6 +45,7 @@ class TestTask:
             requirement="test",
             goal_id="g1",
             work_dir="/tmp",
+            project_id="proj-1",
         )
         assert task.status == "pending"
 
@@ -70,6 +73,7 @@ class TestTaskRouter:
                         "goal_id": "g1",
                         "requirement": "add login page",
                         "work_dir": "/tmp",
+                        "project_id": "proj-1",
                     },
                     metadata={"origin_channel_id": "channel-web"},
                 )
@@ -103,6 +107,7 @@ class TestTaskRouter:
                             "goal_id": f"g{i}",
                             "requirement": f"task {i}",
                             "work_dir": "/tmp",
+                            "project_id": "proj-1",
                         },
                         metadata={"origin_channel_id": "channel-web"},
                     )
@@ -136,6 +141,7 @@ class TestTaskRouter:
                         "goal_id": "g1",
                         "requirement": "quick fix",
                         "work_dir": "/tmp",
+                        "project_id": "proj-1",
                     },
                     metadata={"origin_channel_id": "channel-web"},
                 )
@@ -183,6 +189,7 @@ class TestTaskRouter:
                         "goal_id": "g1",
                         "requirement": "some work",
                         "work_dir": "/tmp",
+                        "project_id": "proj-1",
                     },
                     metadata={"origin_channel_id": "channel-web"},
                 )
@@ -225,6 +232,7 @@ class TestTaskRouter:
                             "goal_id": f"g{i}",
                             "requirement": f"task {i}",
                             "work_dir": "/tmp",
+                            "project_id": "proj-1",
                         },
                         metadata={"origin_channel_id": "channel-web"},
                     )
@@ -258,6 +266,7 @@ class TestTaskRouter:
                         "goal_id": "g1",
                         "requirement": "test list",
                         "work_dir": "/tmp",
+                        "project_id": "proj-1",
                     },
                     metadata={"origin_channel_id": "channel-web"},
                 )
@@ -289,6 +298,7 @@ class TestTaskRouter:
                         "goal_id": "g1",
                         "requirement": "progress test",
                         "work_dir": "/tmp",
+                        "project_id": "proj-1",
                     },
                     metadata={"origin_channel_id": "channel-web"},
                 )
@@ -321,7 +331,7 @@ class TestPlannerOutcome:
                 bus = MessageBus(runtime_root=Path(tmp))
                 router = TaskRouter(runtime_root=Path(tmp))
                 router._bus = bus
-                task = Task(task_id="t1", requirement="r", goal_id="", work_dir="", status="running")
+                task = Task(task_id="t1", requirement="r", goal_id="", work_dir="", project_id="proj-1", status="running")
                 router._tasks = {"t1": task}
                 await router._handle_planner_status(MessageEnvelope.create(
                     source=planner_address("t1"),
@@ -335,3 +345,90 @@ class TestPlannerOutcome:
         task = asyncio.run(_run())
         assert task.status == outcome
         assert agent_db.update_task_status.await_args_list[-1].args == ("t1", outcome)
+
+
+@pytest.mark.usefixtures("agent_db")
+class TestTaskProject:
+    def _request(self, **payload: Any) -> MessageEnvelope:
+        return MessageEnvelope.create(
+            source=MANAGER_ADDRESS,
+            target=TASK_ROUTER_ADDRESS,
+            message_type=MessageType.TASK_REQUEST,
+            payload={"goal_id": "g1", "requirement": "build it", "work_dir": "/tmp", **payload},
+            metadata={"origin_channel_id": "channel-web"},
+        )
+
+    def test_task_keeps_its_project(self, agent_db: Any) -> None:
+        async def _run() -> Task:
+            with tempfile.TemporaryDirectory() as tmp:
+                bus = MessageBus(runtime_root=Path(tmp))
+                router = TaskRouter(runtime_root=Path(tmp))
+                router._bus = bus
+                router._assign_task = AsyncMock()  # type: ignore[method-assign]
+                await router._handle_task_request(self._request(project_id="proj-1"))
+                await bus.shutdown()
+                (task,) = router._tasks.values()
+                return task
+
+        task = asyncio.run(_run())
+        assert task.project_id == "proj-1"
+        assert agent_db.create_task.await_args.kwargs["project_id"] == "proj-1"
+
+    def test_request_without_a_project_is_dropped(
+        self, agent_db: Any, caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """A request from before projects existed, replayed from the bus journal, creates nothing."""
+
+        async def _run() -> TaskRouter:
+            with tempfile.TemporaryDirectory() as tmp:
+                bus = MessageBus(runtime_root=Path(tmp))
+                router = TaskRouter(runtime_root=Path(tmp))
+                router._bus = bus
+                router._assign_task = AsyncMock()  # type: ignore[method-assign]
+                await router._handle_task_request(self._request())
+                await bus.shutdown()
+                return router
+
+        with caplog.at_level("ERROR", logger="loopx.agents.tiers.task"):
+            router = asyncio.run(_run())
+        assert router._tasks == {}
+        router._assign_task.assert_not_awaited()  # type: ignore[attr-defined]
+        agent_db.create_task.assert_not_awaited()
+        assert any("project" in record.getMessage() for record in caplog.records)
+
+    def test_restart_keeps_the_project(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from loopx.db import tasks as db_tasks
+
+        row = {"id": "t1", "requirement": "build it", "goal_id": "g1", "work_dir": "/tmp/p",
+               "project_id": "proj-7", "status": "stopped", "correlation_id": "c1", "origin_channel_id": ""}
+        monkeypatch.setattr(db_tasks, "get_task", AsyncMock(return_value=row))
+        monkeypatch.setattr(db_tasks, "reset_task_for_restart", AsyncMock(return_value=True))
+
+        async def _run() -> tuple[Task, MessageEnvelope]:
+            with tempfile.TemporaryDirectory() as tmp:
+                bus = MessageBus(runtime_root=Path(tmp))
+                router = TaskRouter(runtime_root=Path(tmp))
+                router._bus = bus
+                assign = AsyncMock()
+                router._assign_task = assign  # type: ignore[method-assign]
+                await router._handle_restart(MessageEnvelope.create(
+                    source=MANAGER_ADDRESS, target=TASK_ROUTER_ADDRESS,
+                    message_type=MessageType.TASK_RESTART, payload={"task_id": "t1"},
+                ))
+                await bus.shutdown()
+                task, envelope = assign.await_args.args
+                return task, envelope
+
+        task, envelope = asyncio.run(_run())
+        assert task.project_id == "proj-7"
+        assert envelope.payload["project_id"] == "proj-7"
+
+    def test_moving_a_task_updates_its_live_entry(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            router = TaskRouter(runtime_root=Path(tmp))
+            live = Task(task_id="t1", requirement="r", goal_id="", work_dir="/w", project_id="proj-1", status="running")
+            router._tasks = {"t1": live}
+            router.set_task_project("t1", "proj-2")
+            router.set_task_project("t-unknown", "proj-2")  # not held: nothing to update
+            assert live.project_id == "proj-2"
+            assert list(router._tasks) == ["t1"]

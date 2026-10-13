@@ -11,15 +11,20 @@ const PAGES = new Set<Page>(["dashboard", "chat", "tasks", "agents", "settings",
 
 interface Route {
   page: Page;
+  /** Everything after "page/", including any "?query" of its own (#history/<agent>?task=…). */
   sub: string;
+  /** The query right after the page name: "project=…" for #tasks?project=…. */
+  query: string;
 }
 
 function readHash(): Route {
   const raw = window.location.hash.replace(/^#\/?/, "");
-  const slash = raw.indexOf("/");
-  const pagePart = (slash >= 0 ? raw.slice(0, slash) : raw) as Page;
-  const sub = slash >= 0 ? raw.slice(slash + 1) : "";
-  return { page: PAGES.has(pagePart) ? pagePart : "dashboard", sub };
+  const cut = raw.search(/[/?]/);
+  const pagePart = (cut >= 0 ? raw.slice(0, cut) : raw) as Page;
+  const rest = cut >= 0 ? raw.slice(cut) : "";
+  const sub = rest.startsWith("/") ? rest.slice(1) : "";
+  const query = rest.startsWith("?") ? rest.slice(1) : "";
+  return { page: PAGES.has(pagePart) ? pagePart : "dashboard", sub, query };
 }
 
 function App() {
@@ -35,13 +40,18 @@ function App() {
     window.location.hash = p;
   }, []);
 
-  const navigateSub = useCallback((p: Page, sub: string) => {
-    window.location.hash = sub ? `${p}/${sub}` : p;
+  const navigateSub = useCallback((p: Page, sub: string, query = "") => {
+    window.location.hash = (sub ? `${p}/${sub}` : p) + (query ? `?${query}` : "");
   }, []);
 
   return (
     <div className="flex h-screen w-screen overflow-hidden bg-background">
-      <Sidebar activePage={route.page} onNavigate={navigate} />
+      <Sidebar
+        activePage={route.page}
+        activeProjectId={route.page === "tasks" && !route.sub ? new URLSearchParams(route.query).get("project") : null}
+        onNavigate={navigate}
+        onOpenProject={(id) => navigateSub("tasks", "", `project=${encodeURIComponent(id)}`)}
+      />
       <main className="flex-1 overflow-hidden">
         <div className={route.page === "chat" ? "h-full" : "hidden"}>
           <ChatPage />
@@ -53,7 +63,8 @@ function App() {
           <div className="h-full overflow-y-auto">
             <TasksPage
               sub={route.sub}
-              onNavigate={(sub) => navigateSub("tasks", sub)}
+              query={route.query}
+              onNavigate={(sub, query) => navigateSub("tasks", sub, query)}
             />
           </div>
         )}

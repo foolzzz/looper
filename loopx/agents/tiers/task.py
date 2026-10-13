@@ -3,7 +3,8 @@
 The TaskRouter receives TASK_REQUESTs from the Manager, creates a dedicated
 PlannerAgent for each task, and manages the Planner lifecycle. When a task
 completes or fails, the TaskRouter tears down the corresponding Planner and
-forwards results to the Manager.
+forwards results to the Manager. Every task belongs to a project
+(``project_id``), which can change while the task runs.
 """
 
 from __future__ import annotations
@@ -56,6 +57,7 @@ class Task:
     requirement: str
     goal_id: str
     work_dir: str
+    project_id: str
     status: str = "pending"  # "pending" | "assigned" | "running" | "completed" | "failed" | "cancelled"
     planner_id: str | None = None
     correlation_id: str = ""
@@ -144,6 +146,12 @@ class TaskRouter:
     def has_planner(self, task_id: str) -> bool:
         return task_id in self._planners
 
+    def set_task_project(self, task_id: str, project_id: str) -> None:
+        """Record a moved task's new project on its live entry, if the router holds one."""
+        task = self._tasks.get(task_id)
+        if task is not None:
+            task.project_id = project_id
+
     async def _message_loop(self) -> None:
         assert self._bus is not None
         try:
@@ -175,6 +183,12 @@ class TaskRouter:
     async def _handle_task_request(self, envelope: MessageEnvelope) -> None:
         assert self._bus is not None
         payload = envelope.payload
+        project_id = payload.get("project_id") or ""
+        if not project_id:
+            # Every task belongs to a project. A request without one predates
+            # projects (replayed from the bus journal); creating it would fail.
+            logger.error("dropping task request %s: it names no project", envelope.message_id)
+            return
         task_id = f"task-{uuid.uuid4().hex[:12]}"
 
         task = Task(
@@ -182,6 +196,7 @@ class TaskRouter:
             requirement=payload.get("requirement", ""),
             goal_id=payload.get("goal_id", ""),
             work_dir=payload.get("work_dir", ""),
+            project_id=project_id,
             correlation_id=envelope.correlation_id,
             origin_channel_id=envelope.metadata.get("origin_channel_id", ""),
         )
@@ -193,6 +208,7 @@ class TaskRouter:
                 requirement=task.requirement,
                 goal_id=task.goal_id,
                 work_dir=task.work_dir,
+                project_id=task.project_id,
                 correlation_id=task.correlation_id,
                 origin_channel_id=task.origin_channel_id,
             )
@@ -380,6 +396,7 @@ class TaskRouter:
             requirement=db_row["requirement"],
             goal_id=db_row.get("goal_id", ""),
             work_dir=db_row.get("work_dir", ""),
+            project_id=db_row["project_id"],
             correlation_id=db_row.get("correlation_id", ""),
             origin_channel_id=db_row.get("origin_channel_id", ""),
         )
@@ -393,6 +410,7 @@ class TaskRouter:
                 "requirement": task.requirement,
                 "goal_id": task.goal_id,
                 "work_dir": task.work_dir,
+                "project_id": task.project_id,
             },
             correlation_id=task.correlation_id,
         )

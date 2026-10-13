@@ -155,9 +155,9 @@ class TestChatTargets:
     def test_running_planners_lists_live_instances_only(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             router = TaskRouter(runtime_root=Path(tmp))
-            live = Task(task_id="t1", requirement="build it", goal_id="", work_dir="",
+            live = Task(task_id="t1", requirement="build it", goal_id="", work_dir="", project_id="proj-1",
                         status="running", planner_id="planner-t1")
-            queued = Task(task_id="t2", requirement="later", goal_id="", work_dir="",
+            queued = Task(task_id="t2", requirement="later", goal_id="", work_dir="", project_id="proj-1",
                           status="pending")
             router._tasks = {"t1": live, "t2": queued}
             router._planners = {"t1": PlannerAgent(task_id="t1", runtime_root=Path(tmp))}
