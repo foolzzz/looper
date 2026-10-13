@@ -126,7 +126,7 @@ Pick one of three ways:
 |---|---|---|
 | **A. Local release install** (recommended) | `scripts/install-local.sh` run from a clean `main` checkout. It installs a frozen release snapshot, `loopx` and `loopx-canary` on your `PATH`, the man page and the dashboard chat bundle. | Daily use and the dispatcher. It also lets the tests that call `loopx` pass. |
 | **B. Source checkout only** | `uv sync --extra test`, then `uv run loopx` or `.venv/bin/python -m loopx.cli`. | Developing LoopX itself. |
-| **C. Upstream installer or `loopx update apply`** | `curl .../install.sh \| bash`, or `loopx update apply` with its defaults. Both target **upstream** `loopx-project/loopx` (`--ref stable`), not this fork. `update apply` would replace a way-A snapshot with upstream. It refuses to touch a source checkout, which you update with Git. | Never for this fork. |
+| **C. `install.sh` or `loopx update apply`** | `curl -fsSL https://raw.githubusercontent.com/foolzzz/loopx/main/install.sh \| bash`, or `loopx update apply` with its defaults, which the `loopx dashboard` Update tab also runs. Both install the wheel of the latest `foolzzz/loopx` GitHub Release, and install nothing when that release has none; then install from a release tag (`git clone https://github.com/foolzzz/loopx.git && cd loopx && git checkout vX.Y.Z`, then `uv sync`). On a way-A snapshot, `update apply` runs that same `install.sh`. It refuses to touch a source checkout, which you update with Git. | A machine without a checkout, once a release carries a wheel (from v2.5.0). |
 
 Every way needs:
 

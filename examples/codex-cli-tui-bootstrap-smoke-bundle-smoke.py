@@ -13,6 +13,11 @@ from pathlib import Path
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from loopx.install_contract import NO_CLONE_INSTALL_URL  # noqa: E402
+
 GOAL_ID = "public-fresh-codex-cli-goal"
 AGENT_ID = "codex-side-bypass"
 
@@ -137,8 +142,8 @@ def main() -> None:
         assert bundle["agent_id"] == AGENT_ID, bundle
         assert "--message-only" in bundle["message_only_command"], bundle
         assert str(fresh_repo) in bundle["message_only_command"], bundle
-        assert "loopx-project.github.io/loopx/install.sh" in bundle["install_repair_command"], bundle
-        assert "python3 -m pip install --upgrade loopx" in bundle["install_repair_command"], bundle
+        assert NO_CLONE_INSTALL_URL in bundle["install_repair_command"], bundle
+        assert "pip install" not in bundle["install_repair_command"], bundle
         assert "workflow-skills --install" in bundle["install_repair_command"], bundle
         assert "quota should-run" in bundle["quota_guard_command"], bundle
         assert "--agent-id codex-side-bypass" in bundle["quota_guard_command"], bundle
@@ -183,8 +188,8 @@ def main() -> None:
         assert not message_only.startswith("/goal "), message_only
         assert "# Codex CLI LoopX Bootstrap Message" not in message_only, message_only
         assert "Fresh Repo Install Repair" not in message_only, message_only
-        assert "loopx-project.github.io/loopx/install.sh" in message_only, message_only
-        assert "python3 -m pip install --upgrade loopx" in message_only, message_only
+        assert NO_CLONE_INSTALL_URL in message_only, message_only
+        assert "pip install" not in message_only, message_only
         assert "/goal <thin task_body>" in message_only, message_only
         assert "quota should-run" in message_only, message_only
         assert "refresh-state --goal-id public-fresh-codex-cli-goal" in message_only, message_only

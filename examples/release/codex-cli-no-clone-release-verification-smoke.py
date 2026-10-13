@@ -161,7 +161,7 @@ def assert_installed_release(
     assert not message.startswith("/goal "), message
     assert "setup/bootstrap instruction" in normalized_message, message
     assert "/goal <thin task_body>" in normalized_message, message
-    assert "python3 -m pip install --upgrade loopx" in normalized_message, message
+    assert "pip install" not in normalized_message, message
     assert "workflow-skills --install" in normalized_message, message
     assert "Codex CLI TUI" in normalized_message, message
     assert "quota should-run" in normalized_message, message

@@ -18,6 +18,23 @@ To learn how to use these features, read the [usage guide](docs/fork/usage.md).
 
 ### Changed
 
+- Install and update use this fork, `foolzzz/loopx`, instead of
+  `michaelx1993/loopx` or upstream: `install.sh`, the no-clone installer URL
+  (`https://raw.githubusercontent.com/foolzzz/loopx/main/install.sh`), the
+  default repository of `loopx update` and of the archive installer, and the
+  repair commands that doctor and bootstrap print. Behavior change: when the
+  latest `foolzzz/loopx` release has no wheel asset, a pip or pipx
+  `loopx update apply` no longer falls back to the PyPI `loopx` package, which
+  is a different (upstream) distribution. It installs nothing, fails, and says
+  to install from a release tag (`git clone https://github.com/foolzzz/loopx.git
+  && cd loopx && git checkout vX.Y.Z`, then `uv sync`) or to wait for a release
+  with a wheel; it fails the same way when the release cannot be read.
+  `install.sh` gives the same guidance (it used to report a network error).
+  Doctor now names `loopx update apply`, not `pip install --upgrade loopx`, as
+  a pip installation's upgrade command, and the Codex CLI install preflight
+  runs the no-clone installer without trying PyPI first. `foolzzz/loopx`
+  releases carry a wheel from v2.5.0 on. `loopx commands` and `man loopx` now
+  list `loopx init` and `loopx serve`.
 - Security: the agent HTTP API no longer accepts requests from other web
   pages. It sent `Access-Control-Allow-Origin: *` and approved every preflight,
   so any page open in the browser could create and start a task, whose Workers

@@ -152,6 +152,14 @@ COMMAND_GROUPS: list[dict[str, object]] = [
     {
         "title": "Setup and automation commands",
         "commands": [
+            {
+                "command": "loopx init",
+                "purpose": "Set up providers and agents for first use.",
+            },
+            {
+                "command": "loopx serve",
+                "purpose": "Start the LoopX agent system.",
+            },
             {"command": "loopx bootstrap / loopx connect", "purpose": "Create or connect project-local state."},
             {
                 "command": "loopx project --help",

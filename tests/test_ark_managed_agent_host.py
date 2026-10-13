@@ -15,6 +15,7 @@ from loopx.control_plane.testing.canary_harness import (
     write_fixture_registry,
 )
 from loopx.doctor import collect_doctor
+from loopx.install_contract import NO_CLONE_INSTALL_URL
 from loopx.heartbeat_prompt import build_heartbeat_prompt
 from loopx.host_loop_activation import (
     agent_type_uses_host_managed_skills,
@@ -168,8 +169,7 @@ def test_host_requires_host_managed_loopx_skill_delivery(monkeypatch) -> None:
     assert contract["onboarding_required_for_install"] is False
     assert contract["install_script"] == "scripts/install-local.sh"
     assert (
-        contract["no_clone_install_command"] == "curl -fsSL "
-        "https://loopx-project.github.io/loopx/install.sh"
+        contract["no_clone_install_command"] == f"curl -fsSL {NO_CLONE_INSTALL_URL}"
         " | env LOOPX_SKILLS_DIR=./.agents/skills "
         "LOOPX_ENTRY_HOST_SURFACE=ark-managed-agent "
         "LOOPX_INSTALL_SLASH_COMMANDS=0 bash"

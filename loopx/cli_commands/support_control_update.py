@@ -22,6 +22,8 @@ from collections.abc import Callable
 from pathlib import Path
 
 from ..self_update import (
+    DEFAULT_UPDATE_REF,
+    DEFAULT_UPDATE_REPO,
     UpdateAction,
     build_rollback_plan,
     build_update_plan,
@@ -84,11 +86,17 @@ def register_update_command(
     )
     update_parser.add_argument(
         "--repo",
-        help="GitHub repo owner/name used by the installer archive. Defaults to LOOPX_REPO or loopx-project/loopx.",
+        help=(
+            "GitHub repo owner/name used by the installer archive. "
+            f"Defaults to LOOPX_REPO or {DEFAULT_UPDATE_REPO}."
+        ),
     )
     update_parser.add_argument(
         "--ref",
-        help="Git ref used by the installer archive. Defaults to LOOPX_REF or stable.",
+        help=(
+            "Git ref used by the installer archive. "
+            f"Defaults to LOOPX_REF or {DEFAULT_UPDATE_REF}."
+        ),
     )
     update_parser.add_argument(
         "--archive-url",

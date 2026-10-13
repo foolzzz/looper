@@ -1,4 +1,4 @@
-.TH LOOPX 1 "" "LoopX 2.1.0" "User Commands"
+.TH LOOPX 1 "" "LoopX 2.2.0" "User Commands"
 .SH NAME
 loopx \- control-plane helper for long-running agent work
 .SH SYNOPSIS
@@ -127,6 +127,12 @@ Plan one governed external\-host turn from live LoopX state without launching an
 \fBloopx host\-mode\-plan \-\-goal\-id <goal\-id> \-\-intent <intent> \-\-host\-capability <capability>\fR
 Select a safe host mode (visible, isolated headless Turn, gateway, timer, hybrid) and show the matching Turn/quota preview commands.
 .SH SETUP AND AUTOMATION COMMANDS
+.TP
+\fBloopx init\fR
+Set up providers and agents for first use.
+.TP
+\fBloopx serve\fR
+Start the LoopX agent system.
 .TP
 \fBloopx bootstrap / loopx connect\fR
 Create or connect project\-local state.
