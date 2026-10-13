@@ -91,7 +91,8 @@ def test_release_without_wheel_installs_nothing(tmp_path: Path) -> None:
         f"The latest github.com/{LOOPX_SOURCE_REPOSITORY} release has no wheel asset, "
         "so nothing was installed."
     ) in output, result.stdout
-    assert f"git clone {LOOPX_SOURCE_CLONE_URL} && cd loopx && git checkout vX.Y.Z" in output
+    checkout = LOOPX_SOURCE_REPOSITORY.rsplit("/", 1)[-1]
+    assert f"git clone {LOOPX_SOURCE_CLONE_URL} && cd {checkout} && git checkout vX.Y.Z" in output
     assert "uv sync" in output
     assert "Check your network" not in output
 

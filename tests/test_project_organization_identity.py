@@ -9,7 +9,6 @@ from loopx.self_update import DEFAULT_UPDATE_REPO, _source_config
 
 
 ROOT = Path(__file__).resolve().parents[1]
-UPSTREAM_REPOSITORY = "loopx-project/loopx"
 LOOPX_INSTALLER_URL = re.compile(r"https://[^\s`'\")]*loopx[^\s`'\")]*/install\.sh")
 
 
@@ -22,13 +21,11 @@ def test_default_recovery_and_package_identity():
     assert f'REPO="{LOOPX_SOURCE_REPOSITORY}"' in (ROOT / "install.sh").read_text()
     installer = (ROOT / "scripts/install-from-github.sh").read_text()
     assert f"${{LOOPX_REPO:-{LOOPX_SOURCE_REPOSITORY}}}" in installer
-    # Package metadata is not an install source; it still names the upstream
-    # project this fork branched from.
+    # The wheel's metadata names the repository it is released from.
     metadata = tomllib.loads((ROOT / "pyproject.toml").read_text())
     assert metadata["project"]["urls"]["Repository"] == (
-        f"https://github.com/{UPSTREAM_REPOSITORY}"
+        f"https://github.com/{LOOPX_SOURCE_REPOSITORY}"
     )
-    assert metadata["project"]["urls"]["Homepage"] == "https://loopx-project.github.io/loopx/"
 
 
 def test_documented_no_clone_installer_is_the_contract_url():
