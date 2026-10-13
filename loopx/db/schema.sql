@@ -137,6 +137,9 @@ CREATE TABLE IF NOT EXISTS projects (
     updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_projects_name ON projects (lower(name));
+-- What every task agent of the project (Planner, Workers, Reviewers) should
+-- know about it: added to their system prompt; '' = none.
+ALTER TABLE projects ADD COLUMN IF NOT EXISTS background TEXT NOT NULL DEFAULT '';
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS project_id TEXT REFERENCES projects(id);
 CREATE INDEX IF NOT EXISTS idx_tasks_project ON tasks (project_id, created_at DESC);
 

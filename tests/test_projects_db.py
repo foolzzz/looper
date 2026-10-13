@@ -212,3 +212,58 @@ def test_task_with_a_new_project_is_one_transaction(monkeypatch: pytest.MonkeyPa
         assert await pool.fetchval("SELECT count(*) FROM tasks") == 1
 
     _run(_test)
+
+
+def test_background_column_is_added_to_an_existing_projects_table() -> None:
+    from loopx.db.connection import ensure_schema
+
+    async def _main() -> None:
+        async with _fresh_schema() as pool:
+            # A database from before backgrounds, holding a project.
+            await ensure_schema(pool)
+            await pool.execute("ALTER TABLE projects DROP COLUMN background")
+            await pool.execute("INSERT INTO projects (id, name) VALUES ('proj-old', 'old')")
+
+            await ensure_schema(pool)
+
+            column = await pool.fetchrow(
+                "SELECT data_type, is_nullable, column_default FROM information_schema.columns "
+                "WHERE table_schema = current_schema() AND table_name = 'projects' AND column_name = 'background'"
+            )
+            assert column is not None
+            assert (column["data_type"], column["is_nullable"], column["column_default"]) == ("text", "NO", "''::text")
+            assert await pool.fetchval("SELECT background FROM projects WHERE id = 'proj-old'") == ""
+            await ensure_schema(pool)  # applying the schema again changes nothing
+            assert await pool.fetchval("SELECT count(*) FROM projects") == 1
+
+    asyncio.run(_main())
+
+
+def test_background_round_trips_and_is_read_through_the_task() -> None:
+    from loopx.db import projects, tasks
+
+    async def _test(pool: Any) -> None:
+        text = "  - use uv\n\n  - Python 3.12 · 中文"
+        calc = await projects.create_project(name="calc", background=text, pool=pool)
+        assert calc["background"] == text
+        assert (await projects.get_project(calc["id"], pool=pool))["background"] == text
+        plain = await projects.create_project(name="plain", pool=pool)
+        assert plain["background"] == ""
+        assert [p["background"] for p in await projects.list_projects(pool=pool)] == [text, ""]
+
+        # Changing another field keeps it; "" clears it.
+        assert await projects.update_project(calc["id"], name="Calc", pool=pool)
+        assert (await projects.get_project(calc["id"], pool=pool))["background"] == text
+        assert await projects.update_project(calc["id"], background="", pool=pool)
+        assert (await projects.get_project(calc["id"], pool=pool))["background"] == ""
+        assert await projects.update_project(calc["id"], background="v2", pool=pool)
+
+        # The project a task's agents read is the task's current one.
+        await tasks.create_task(task_id="task-1", requirement="r", work_dir="/w", project_id=calc["id"], pool=pool)
+        got = await projects.get_task_project("task-1", pool=pool)
+        assert (got["id"], got["name"], got["description"], got["background"]) == (calc["id"], "Calc", "", "v2")
+        assert await tasks.set_task_project("task-1", plain["id"], pool=pool)
+        assert (await projects.get_task_project("task-1", pool=pool))["id"] == plain["id"]
+        assert await projects.get_task_project("task-nope", pool=pool) is None
+
+    _run(_test)

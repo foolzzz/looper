@@ -3,12 +3,15 @@
 Every task belongs to exactly one project and can move to another at any
 time. A task is created in an existing project (``project_id``) or in a new
 one made by the same request (``project``). Its work directory is the one
-given, else its project's default; there is no global default.
+given, else its project's default; there is no global default. A project's
+``background`` goes into the system prompt of its task agents (Planner,
+Workers, Reviewers), read afresh when each prompt is built.
 """
 
 from __future__ import annotations
 
 import json
+import re
 import uuid
 from typing import Any
 
@@ -22,7 +25,10 @@ HTTP_404 = "404 Not Found"
 HTTP_409 = "409 Conflict"
 
 NAME_MAX_CHARS = 80
+BACKGROUND_MAX_CHARS = 10000
 NO_WORK_DIR = "a work directory is required: set one on the task or on its project"
+
+_LEADING_BLANK_LINES = re.compile(r"\A(?:[ \t\r\f\v]*\n)+")
 
 
 class RequestError(Exception):
@@ -50,6 +56,20 @@ def project_work_dir(raw: Any) -> str:
     return resolve_work_dir(raw) if raw.strip() else ""
 
 
+def project_background(raw: Any) -> str:
+    """A project's background as stored: the text without the blank lines around it.
+
+    The first line keeps its indentation. ``''`` means none. Raises
+    ``ValueError`` for a non-string or more than 10000 characters.
+    """
+    if not isinstance(raw, str):
+        raise ValueError("background must be a string")
+    text = _LEADING_BLANK_LINES.sub("", raw).rstrip()
+    if len(text) > BACKGROUND_MAX_CHARS:
+        raise ValueError(f"a project background has at most {BACKGROUND_MAX_CHARS} characters, got {len(text)}")
+    return text
+
+
 def json_object(body: bytes) -> dict[str, Any]:
     try:
         data = json.loads(body.decode("utf-8"))
@@ -66,6 +86,7 @@ def project_view(row: dict[str, Any]) -> dict[str, Any]:
         "name": row["name"],
         "description": row["description"],
         "work_dir": row["work_dir"],
+        "background": row["background"],
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
         "task_count": row.get("task_count", 0),
@@ -85,6 +106,8 @@ def _project_fields(data: dict[str, Any], *, update: bool) -> dict[str, str]:
             fields["description"] = data["description"].strip()
         if "work_dir" in data:
             fields["work_dir"] = project_work_dir(data["work_dir"])
+        if "background" in data:
+            fields["background"] = project_background(data["background"])
     except ValueError as exc:
         raise RequestError(HTTP_400, str(exc)) from None
     return fields
@@ -117,7 +140,7 @@ async def create_project(data: dict[str, Any]) -> dict[str, Any]:
 async def update_project(project_id: str, data: dict[str, Any]) -> dict[str, Any]:
     fields = _project_fields(data, update=True)
     if not fields:
-        raise RequestError(HTTP_400, "give at least one of name, description and work_dir")
+        raise RequestError(HTTP_400, "give at least one of name, description, work_dir and background")
     try:
         updated = await db_projects.update_project(project_id, **fields)
     except asyncpg.UniqueViolationError:

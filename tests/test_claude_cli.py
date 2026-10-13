@@ -98,6 +98,20 @@ class TestClaudeRunRecorder:
         assert finish["status"] == "failed"
         assert expected in finish["error"]
 
+    def test_records_the_appended_system_prompt(self, agent_db: Any) -> None:
+        from loopx.agents.claude_cli import ClaudeRunRecorder
+
+        recorder = ClaudeRunRecorder(
+            agent_id="worker-1", task_id="task-1", cwd="/tmp/proj", input_text="go",
+            command=["claude", "--append-system-prompt", "Be brief.\n\n## Project: calc\nUse uv."],
+            system_prompt="Be brief.\n\n## Project: calc\nUse uv.",
+        )
+        asyncio.run(recorder.start())
+        metadata = agent_db.start_record.await_args.kwargs["metadata"]
+        # The exact argv stays as it was; the prompt is also kept on its own for display.
+        assert metadata["command"] == ["claude", "--append-system-prompt", "Be brief.\n\n## Project: calc\nUse uv."]
+        assert metadata["system_prompt"] == "Be brief.\n\n## Project: calc\nUse uv."
+
     def test_database_errors_never_fail_the_run(self, agent_db: Any) -> None:
         agent_db.start_record.side_effect = RuntimeError("database pool not initialised")
         recorder = self._recorder()

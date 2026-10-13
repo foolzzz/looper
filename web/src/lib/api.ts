@@ -23,13 +23,18 @@ export interface TaskInfo {
   work_dir: string;
 }
 
-/** A group of tasks with an optional default work directory. */
+/** The most characters a project background may have. */
+export const BACKGROUND_MAX_CHARS = 10000;
+
+/** A group of tasks with an optional default work directory and background. */
 export interface Project {
   project_id: string;
   name: string;
   description: string;
   /** Default work directory for new tasks; "" = none. */
   work_dir: string;
+  /** Added to the system prompt of the project's Planner, Workers and Reviewers; "" = none. */
+  background: string;
   created_at: string;
   updated_at: string;
   task_count: number;
@@ -184,6 +189,8 @@ export interface NewProjectFields {
   description?: string;
   /** Absolute default work directory; omit or "" for none. */
   work_dir?: string;
+  /** At most BACKGROUND_MAX_CHARS characters; omit or "" for none. */
+  background?: string;
 }
 
 /** A new task names exactly one project: an existing one or one created with it. */
@@ -258,10 +265,10 @@ export async function createProject(fields: NewProjectFields): Promise<Project> 
   return project;
 }
 
-/** Send only the fields to change; `work_dir: ""` clears the default directory. */
+/** Send only the fields to change; `work_dir: ""` and `background: ""` clear them. */
 export async function updateProject(
   projectId: string,
-  fields: { name?: string; description?: string; work_dir?: string },
+  fields: { name?: string; description?: string; work_dir?: string; background?: string },
 ): Promise<Project> {
   const res = await fetch(`${API_BASE}/projects/${encodeURIComponent(projectId)}`, {
     method: "PUT",
@@ -455,7 +462,12 @@ export interface LlmRecord {
   duration_ms: number | null;
   model: string | null;
   error: string | null;
-  metadata: { command?: string[]; cwd?: string } | null;
+  metadata: {
+    command?: string[];
+    cwd?: string;
+    /** What LoopX appended with --append-system-prompt (Claude Code's built-in prompt is not included). */
+    system_prompt?: string;
+  } | null;
   created_at: string;
   finished_at: string | null;
   /** Heartbeat: last time the run produced any output. */

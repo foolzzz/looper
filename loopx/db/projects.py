@@ -1,7 +1,8 @@
 """Project CRUD: every task belongs to one project.
 
 A project may give its tasks a default directory (``work_dir``, ``''`` for
-none). Names are unique ignoring case; a taken name raises
+none) and a ``background`` its task agents get in their system prompt
+(``''`` for none). Names are unique ignoring case; a taken name raises
 ``asyncpg.UniqueViolationError``.
 """
 
@@ -37,6 +38,15 @@ async def get_project(project_id: str, *, pool: asyncpg.Pool | None = None) -> d
     return dict(row) if row else None
 
 
+async def get_task_project(task_id: str, *, pool: asyncpg.Pool | None = None) -> dict[str, Any] | None:
+    """The project task ``task_id`` belongs to now (it can move); None when there is no such task."""
+    pool = pool or get_pool()
+    row = await pool.fetchrow(
+        "SELECT p.* FROM tasks t JOIN projects p ON p.id = t.project_id WHERE t.id = $1", task_id,
+    )
+    return dict(row) if row else None
+
+
 async def find_project_by_name(name: str, *, pool: asyncpg.Pool | None = None) -> dict[str, Any] | None:
     pool = pool or get_pool()
     row = await pool.fetchrow("SELECT * FROM projects WHERE lower(name) = lower($1)", name)
@@ -48,16 +58,17 @@ async def create_project(
     name: str,
     description: str = "",
     work_dir: str = "",
+    background: str = "",
     pool: asyncpg.Pool | asyncpg.Connection | None = None,
 ) -> dict[str, Any]:
     pool = pool or get_pool()
     row = await pool.fetchrow(
         """
-        INSERT INTO projects (id, name, description, work_dir)
-        VALUES ($1, $2, $3, $4)
+        INSERT INTO projects (id, name, description, work_dir, background)
+        VALUES ($1, $2, $3, $4, $5)
         RETURNING *
         """,
-        f"proj-{uuid.uuid4().hex[:12]}", name, description, work_dir,
+        f"proj-{uuid.uuid4().hex[:12]}", name, description, work_dir, background,
     )
     return dict(row)
 
@@ -68,6 +79,7 @@ async def update_project(
     name: str | None = None,
     description: str | None = None,
     work_dir: str | None = None,
+    background: str | None = None,
     pool: asyncpg.Pool | None = None,
 ) -> bool:
     """Set the fields given (not ``None``); False when there is no such project."""
@@ -78,10 +90,11 @@ async def update_project(
         SET name = COALESCE($2, name),
             description = COALESCE($3, description),
             work_dir = COALESCE($4, work_dir),
+            background = COALESCE($5, background),
             updated_at = now()
         WHERE id = $1
         """,
-        project_id, name, description, work_dir,
+        project_id, name, description, work_dir, background,
     )
     return result == "UPDATE 1"
 
