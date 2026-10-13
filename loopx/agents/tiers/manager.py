@@ -26,6 +26,7 @@ from ..bus import MessageBus
 from .. import agent_settings
 from ..agent_settings import AgentDefaults, AgentType, Launch, resolve_harness, resolve_launch
 from ..claude_cli import ClaudeRunRecorder, ResidentClaude, exit_note, isolation_args, system_prompt_args
+from ..library import load_library
 from ..projects import project_name
 from ..system_prompt import SystemPrompt, build_system_prompt, is_recommended
 from .task import resolve_work_dir
@@ -410,15 +411,17 @@ class ManagerAgent:
         await self._load_db_config()
         defaults = await agent_settings.load_defaults()
         system_prompt = self._composed_prompt(defaults)
-        launch = resolve_launch(defaults, self._model_override)
+        launch = resolve_launch(defaults, self._model_override, await load_library(self._runtime_root))
         try:
             prompt_file = system_prompt.write_file(self._runtime_root)
         except OSError as exc:
             raise RuntimeError(f"无法写入 system prompt 文件：{exc}") from None
-        # The command carries the model and effort; the file is named by its content's hash, kept
-        # beside it all the same; the environment is compared by its hash.
+        # The command carries the model, the effort and the library's directories; the file is named by
+        # its content's hash, kept beside it all the same; the environment and the library are compared
+        # by their hashes.
         signature = (
             tuple(self._claude_command(prompt_file, launch, resume=False)), system_prompt.sha256, launch.env_sha256,
+            launch.library.sha256,
         )
         if self._claude.stale(signature):
             await self._claude.stop()
@@ -574,7 +577,13 @@ class ManagerAgent:
             # Each chat message is one user turn on stdin; Claude idles between turns.
             "--input-format", "stream-json",
             "--include-partial-messages",  # stream the reply as it is written
-            # None of the operator's personal settings, memory, hooks, plugins or MCP servers.
+            # With a library loaded, its skills may be used without asking (unapproved, a skill that
+            # names its own allowed-tools is denied). Verified with Claude Code 2.1.285: this approves
+            # the Skill tool only, not the tools a skill names; the Manager's other tools still need
+            # approval, which --print denies.
+            *(["--allowedTools", "Skill"] if launch.library.plugin_dirs else []),
+            # None of the operator's personal settings, memory, hooks, plugins or MCP servers;
+            # the library's plugins and skills come with the launch args.
             *isolation_args(self._config.work_dir),
             *system_prompt_args(prompt_file),
             *launch.args(),

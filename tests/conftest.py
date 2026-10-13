@@ -169,6 +169,8 @@ _AGENT_DB_READS = (
     ("projects", "get_task_project", None),
     ("activity", "list_activity", []),
     ("system_settings", "get_settings", {}),
+    ("library", "list_enabled_items", []),
+    ("library", "get_item_files", []),
 )
 
 
@@ -327,6 +329,38 @@ def agent_db(monkeypatch: pytest.MonkeyPatch, stub_claude_on_path: Path) -> Simp
     # The Planner imports this one by name rather than through its module.
     monkeypatch.setattr(planner_module, "update_task_phase", db.update_task_phase)
     return db
+
+
+@pytest.fixture
+def enabled_library(agent_db: SimpleNamespace) -> Callable[..., list[dict[str, Any]]]:
+    """Set the library items the agents load: ``enabled_library((kind, name, {path: content}), ...)``.
+
+    The stubbed database then lists those items as the enabled ones (each
+    with the version hash of its files) and hands out their files; it
+    returns the item rows. Calling it again replaces the enabled set.
+    """
+    import hashlib
+
+    from loopx.agents.library import item_sha256
+
+    files_by_id: dict[str, list[dict[str, Any]]] = {}
+
+    def _sha(text: str) -> str:
+        return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+    def set_items(*items: tuple[str, str, dict[str, str]]) -> list[dict[str, Any]]:
+        rows = []
+        for kind, name, contents in items:
+            files = [{"path": path, "content": text, "sha256": _sha(text), "executable": False}
+                     for path, text in sorted(contents.items())]
+            item_id = "lib-" + _sha(f"{kind}:{name}")[:12]
+            files_by_id[item_id] = files
+            rows.append({"id": item_id, "kind": kind, "name": name, "sha256": item_sha256(files)})
+        agent_db.list_enabled_items.return_value = rows
+        return [dict(row) for row in rows]
+
+    agent_db.get_item_files.side_effect = lambda item_id, **_: [dict(f) for f in files_by_id[item_id]]
+    return set_items
 
 
 @pytest.fixture

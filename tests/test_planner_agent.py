@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from library_fixtures import ALPHA_SKILL, DEMO_PLUGIN, plugin_dirs
 
 from loopx.agents.agent_settings import DEFAULT_HARNESS_PROMPT
 from loopx.agents.bus import MessageBus
@@ -943,6 +944,44 @@ class TestHarnessAndLaunch:
         claude = planner_claude(plan(step("s1")), decide("accept"))
         drive(claude, always(WORK_OK))
         assert len(claude.argvs()) == 1 and len(claude.turns()) == 2
+
+
+@pytest.mark.usefixtures("agent_db", "planner_row")
+class TestLibrary:
+    """The Planner loads the enabled plugins and the skills plugin from the
+    library; a change to the enabled set restarts its Claude, which resumes
+    the session."""
+
+    def test_the_command_carries_the_library_and_records_it(
+        self, planner_claude: Any, agent_db: Any, enabled_library: Any,
+    ) -> None:
+        demo, alpha = enabled_library(DEMO_PLUGIN, ALPHA_SKILL)
+        claude = planner_claude(plan(step("s1")), decide("accept"))
+        drive(claude, always(WORK_OK))
+
+        (argv,) = claude.argvs()
+        plugin, skills = plugin_dirs(argv)
+        assert plugin.endswith(f"/.local/library/{demo['sha256']}/demo") and skills.endswith("/personal")
+        # Read-only tools, and Skill so that the library's skills reach the Planner too.
+        assert _flag(argv, "--tools") == _flag(argv, "--allowedTools") == "Read,Grep,Glob,Skill"
+        assert all(s["metadata"]["library"]["items"] == [
+            {"kind": "plugin", "name": "demo@market", "sha256": demo["sha256"]},
+            {"kind": "skill", "name": "alpha", "sha256": alpha["sha256"]}] for s in _starts(agent_db))
+
+    def test_a_changed_library_restarts_claude_resuming_its_session(
+        self, planner_claude: Any, agent_db: Any, enabled_library: Any,
+    ) -> None:
+        enabled_library(DEMO_PLUGIN, ALPHA_SKILL)
+        claude = planner_claude(plan(step("s1")), decide("accept"))
+        drive(claude, hold_first(), _between_turns(agent_db, lambda: enabled_library(DEMO_PLUGIN)))
+
+        first, second = claude.argvs()
+        assert (len(plugin_dirs(first)), len(plugin_dirs(second))) == (2, 1)
+        assert _flag(second, "--resume") == "sess-p"
+        first_prompt, second_prompt = claude.prompts()
+        assert first_prompt == second_prompt  # the library alone restarted it
+        hashes = [s["metadata"]["library"]["sha256"] for s in _starts(agent_db)]
+        assert hashes[0] != hashes[1]
 
 
 # --- Ending the task through the TaskRouter ---

@@ -16,6 +16,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from library_fixtures import ALPHA_SKILL, DEMO_PLUGIN, plugin_dirs
 from loopx.agents.bus import MessageBus
 from loopx.agents.claude_cli import ISOLATION_ID, isolation_args
 from loopx.agents.message import (
@@ -1005,6 +1006,33 @@ class TestWorkerHarnessAndLaunch:
         monkeypatch.setattr(asyncio, "create_subprocess_exec", _exec)
         _run_step()
         assert launched[0]["env"] is None
+
+
+class TestWorkerLibrary:
+    """Each Worker and Reviewer run loads the library's enabled items as it starts."""
+
+    def test_both_commands_carry_the_library_and_record_it(self, agent_db: Any, enabled_library: Any) -> None:
+        demo, alpha = enabled_library(DEMO_PLUGIN, ALPHA_SKILL)
+        for verify in (False, True):
+            _, seen = _run_step(verify=verify)
+            plugin, skills = plugin_dirs(seen["argv"])
+            assert plugin == f"{seen['work_dir']}/.local/library/{demo['sha256']}/demo"
+            assert (Path(skills) / "skills" / "alpha" / "SKILL.md").name == "SKILL.md"
+            assert skills.endswith("/personal")
+            library = agent_db.start_record.await_args.kwargs["metadata"]["library"]
+            assert [(i["name"], i["sha256"]) for i in library["items"]] == [
+                ("demo@market", demo["sha256"]), ("alpha", alpha["sha256"])]
+
+    def test_a_disabled_item_is_not_loaded_by_the_next_run(self, agent_db: Any, enabled_library: Any) -> None:
+        enabled_library(DEMO_PLUGIN, ALPHA_SKILL)
+        _, first = _run_step()
+        enabled_library(DEMO_PLUGIN)
+        _, second = _run_step()
+        assert len(plugin_dirs(first["argv"])) == 2
+        (only,) = plugin_dirs(second["argv"])
+        assert only.endswith("/demo")
+        recorded = [call.kwargs["metadata"]["library"] for call in agent_db.start_record.await_args_list]
+        assert [[i["name"] for i in r["items"]] for r in recorded] == [["demo@market", "alpha"], ["demo@market"]]
 
 
 def activity(agent_db: Any) -> list[str]:

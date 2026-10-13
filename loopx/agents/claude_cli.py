@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from .agent_settings import Launch
+    from .library import AgentLibrary
     from .system_prompt import SystemPrompt
 
 logger = logging.getLogger(__name__)
@@ -39,6 +40,14 @@ logger = logging.getLogger(__name__)
 #   ~/.claude/projects/.
 # Authentication is unaffected. "--bare" and a separate CLAUDE_CONFIG_DIR were
 # rejected: both lose the operator's login.
+#
+# What the operator wants every agent to have comes from the library instead
+# (loopx/agents/library.py): the imported plugins and skills, each a
+# "--plugin-dir" (library_args). Verified against Claude Code 2.1.285: with
+# the flags above, "--plugin-dir" in --print mode loads a plugin's skills
+# (named <plugin>:<skill>), agents, commands and hooks; a plugin needs no more
+# than a directory (a manifest names it). The operator's own hooks, such as a
+# UserPromptSubmit hook in ~/.claude/settings.json, still do not run.
 
 # Names this flag set in every run's record (prompt_layers.isolation); change
 # it whenever the flags change.
@@ -93,6 +102,15 @@ def isolation_args(cwd: str | os.PathLike[str]) -> list[str]:
         "--strict-mcp-config",
         "--settings", json.dumps(settings, ensure_ascii=False, separators=(",", ":")),
     ]
+
+
+def library_args(library: AgentLibrary) -> list[str]:
+    """The flags that load an agent run's library: one ``--plugin-dir`` per plugin directory.
+
+    Every agent's launch carries them (``agent_settings.Launch.args``), so the
+    agents cannot diverge.
+    """
+    return [arg for directory in library.plugin_dirs for arg in ("--plugin-dir", directory)]
 
 
 def system_prompt_args(prompt_file: Path) -> list[str]:

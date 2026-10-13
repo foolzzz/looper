@@ -19,6 +19,8 @@ import pytest
 from library_fixtures import PLUGIN_FILES, fake_claude_home, write
 
 from loopx.agents import library
+from loopx.agents.agent_settings import BUILTIN_DEFAULTS, resolve_launch
+from loopx.agents.claude_cli import library_args
 from loopx.agents.library import (
     SKILLS_PLUGIN,
     AgentLibrary,
@@ -266,3 +268,18 @@ class TestLoadLibrary:
         loaded = asyncio.run(load_library(tmp_path))
         assert loaded.plugin_dirs == () and "do not match" in loaded.record()["error"]
 
+
+class TestLaunch:
+    def test_library_args_name_each_plugin_directory(self) -> None:
+        assert library_args(AgentLibrary()) == []
+        loaded = AgentLibrary(items=(LoadedItem(ItemKind.SKILL, "alpha", "a" * 64),), plugin_dirs=("/l/a", "/l/b"))
+        assert library_args(loaded) == ["--plugin-dir", "/l/a", "--plugin-dir", "/l/b"]
+
+    def test_a_launch_carries_and_records_its_library(self) -> None:
+        assert "--plugin-dir" not in resolve_launch(BUILTIN_DEFAULTS).args()
+        assert "library" not in resolve_launch(BUILTIN_DEFAULTS).record()
+        loaded = AgentLibrary(items=(LoadedItem(ItemKind.PLUGIN, "demo@market", "b" * 64),), plugin_dirs=("/l/demo",))
+        launch = resolve_launch(BUILTIN_DEFAULTS, None, loaded)
+        assert launch.args() == ["--model", "opus", "--plugin-dir", "/l/demo"]
+        assert launch.record()["library"] == loaded.record()
+        assert launch.library.sha256 == loaded.sha256 != AgentLibrary().sha256

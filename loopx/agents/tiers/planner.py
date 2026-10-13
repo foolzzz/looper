@@ -41,6 +41,7 @@ from ..bus import MessageBus
 from .. import agent_settings
 from ..agent_settings import BUILTIN_DEFAULTS, AgentDefaults, AgentType, Launch, resolve_harness, resolve_launch
 from ..claude_cli import ClaudeRunRecorder, ResidentClaude, exit_note, isolation_args, system_prompt_args
+from ..library import load_library
 from ..system_prompt import SystemPrompt, build_system_prompt, is_recommended, plan_task_section
 from ..message import (
     TASK_ROUTER_ADDRESS,
@@ -87,6 +88,10 @@ DEFAULT_TURN_TIMEOUT_SEC = 1200
 DEFAULT_SUPERVISE_INTERVAL_SEC = 300
 # The only tools the Planner's Claude has: it reads the project, Workers change it.
 PLANNER_TOOLS = "Read,Grep,Glob"
+# With a library loaded the Planner also gets Skill, which reads a skill's
+# instructions (without it Claude Code lists no skills); a skill cannot add a
+# tool --tools leaves out. Without a library its tools stay as they were.
+PLANNER_LIBRARY_TOOLS = f"{PLANNER_TOOLS},Skill"
 
 DEFAULT_SYSTEM_PROMPT = """\
 You are the Planner of one LoopX task. You live as long as the task: you plan
@@ -995,6 +1000,7 @@ class PlannerAgent:
 
     def _claude_command(self, prompt_file: Path, settings: PlannerSettings, launch: Launch, work_dir: str) -> list[str]:
         """The Planner's Claude, without ``--resume``: read-only tools, nothing else approved."""
+        tools = PLANNER_LIBRARY_TOOLS if launch.library.plugin_dirs else PLANNER_TOOLS
         return [
             self._claude_bin,
             "--print",
@@ -1006,10 +1012,11 @@ class PlannerAgent:
             "--include-partial-messages",
             # Only the read-only tools exist, they are the only approved ones,
             # and anything else is denied without asking.
-            "--tools", PLANNER_TOOLS,
-            "--allowedTools", PLANNER_TOOLS,
+            "--tools", tools,
+            "--allowedTools", tools,
             "--permission-mode", "dontAsk",
-            # None of the operator's personal settings, memory, hooks, plugins or MCP servers.
+            # None of the operator's personal settings, memory, hooks, plugins or MCP servers;
+            # the library's plugins and skills come with the launch args.
             *isolation_args(work_dir),
             *system_prompt_args(prompt_file),
             *launch.args(),
@@ -1022,16 +1029,17 @@ class PlannerAgent:
         assert plan is not None
         settings = await load_settings()
         system_prompt = self._system_prompt(plan, settings)
-        launch = resolve_launch(settings.defaults, settings.model)
+        launch = resolve_launch(settings.defaults, settings.model, await load_library(self._runtime_root))
         await self._note_background(plan.project_background)
         try:
             prompt_file = system_prompt.write_file(self._runtime_root)
         except OSError as exc:
             raise PlannerTurnError(f"cannot write the system prompt file: {exc}") from None
         base = self._claude_command(prompt_file, settings, launch, plan.work_dir)
-        # The command carries the model and effort; the file is named by its content's hash, kept
-        # beside it all the same; the environment is compared by its hash.
-        signature = (tuple(base), system_prompt.sha256, launch.env_sha256)
+        # The command carries the model, the effort and the library's directories; the file is named by
+        # its content's hash, kept beside it all the same; the environment and the library are compared
+        # by their hashes.
+        signature = (tuple(base), system_prompt.sha256, launch.env_sha256, launch.library.sha256)
         if self._claude.stale(signature):
             # Claude exited, or the config, the settings, the project or the task
             # changed: the next process resumes the session with the new prompt.

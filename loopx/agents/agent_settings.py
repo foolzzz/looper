@@ -16,8 +16,9 @@ only here, for an agent type and a project:
 A run's model is its agent's ``agent_configs.model`` when set
 (``agent_override``), else the Settings default, else ``DEFAULT_MODEL``. The
 effort, when set, and the environment variables come from Settings for every
-agent. Settings live in ``system_settings``, one row per key; a missing row
-means the built-in default. An unreadable table falls back to the built-in
+agent, and so does the library (``library.load_library``): the imported
+plugins and skills every run loads. Settings live in ``system_settings``, one
+row per key; a missing row means the built-in default. An unreadable table falls back to the built-in
 defaults, so an agent still runs (and its record says where its harness came
 from).
 """
@@ -33,6 +34,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any
+
+from .library import EMPTY_LIBRARY, AgentLibrary
 
 logger = logging.getLogger(__name__)
 
@@ -309,16 +312,19 @@ def resolve_harness(
 
 @dataclass(frozen=True)
 class Launch:
-    """The model, effort and environment one agent run starts with."""
+    """The model, effort, environment and library one agent run starts with."""
 
     model: str
     model_source: ModelSource
     effort: str = ""
     env: tuple[tuple[str, str], ...] = ()
+    library: AgentLibrary = EMPTY_LIBRARY
 
     def args(self) -> list[str]:
-        """The Claude Code flags for the model and the effort."""
-        return ["--model", self.model, *(["--effort", self.effort] if self.effort else [])]
+        """The Claude Code flags for the model, the effort and the library's plugin directories."""
+        from .claude_cli import library_args
+
+        return ["--model", self.model, *(["--effort", self.effort] if self.effort else []), *library_args(self.library)]
 
     def environment(self) -> dict[str, str] | None:
         """The subprocess environment: the server's, then the Settings variables; None without any."""
@@ -332,7 +338,8 @@ class Launch:
         return sha256_text(json.dumps(list(self.env), ensure_ascii=False, separators=(",", ":")))
 
     def record(self) -> dict[str, Any]:
-        """Its fields in a run's metadata: the model and its source, and the variables' names (values hashed)."""
+        """Its fields in a run's metadata: the model and its source, the variables' names (values hashed) and
+        the library's items and hash."""
         record: dict[str, Any] = {
             "model_choice": {"model": self.model, "source": self.model_source.value, "effort": self.effort or None},
         }
@@ -341,15 +348,18 @@ class Launch:
                 "sha256": self.env_sha256,
                 "keys": {key: sha256_text(value) for key, value in self.env},
             }
+        if (library := self.library.record()) is not None:
+            record["library"] = library
         return record
 
 
-def resolve_launch(defaults: AgentDefaults, model_override: Any = None) -> Launch:
-    """An agent's launch settings: its own model when set, else the default; the default effort and environment."""
+def resolve_launch(defaults: AgentDefaults, model_override: Any = None, library: AgentLibrary = EMPTY_LIBRARY) -> Launch:
+    """An agent's launch settings: its own model when set, else the default; the default effort and
+    environment; and the library loaded for the run."""
     override = model_override.strip() if isinstance(model_override, str) else ""
     if override:
-        return Launch(override, ModelSource.AGENT_OVERRIDE, defaults.effort, defaults.env)
-    return Launch(defaults.model, defaults.model_source, defaults.effort, defaults.env)
+        return Launch(override, ModelSource.AGENT_OVERRIDE, defaults.effort, defaults.env, library)
+    return Launch(defaults.model, defaults.model_source, defaults.effort, defaults.env, library)
 
 
 # --- The settings API (GET, PUT and reset of /api/settings/agents) ---

@@ -29,6 +29,7 @@ from .. import agent_settings
 from ..agent_settings import BUILTIN_DEFAULTS, AgentDefaults, AgentType, resolve_harness, resolve_launch
 from ..bus import MessageBus
 from ..claude_cli import ClaudeRunRecorder, isolation_args, iter_lines, system_prompt_args, write_user_turn
+from ..library import load_library
 from ..message import (
     AgentAddress,
     MessageEnvelope,
@@ -526,7 +527,7 @@ class WorkerPool:
         agent = AgentType.REVIEWER if is_verify else AgentType.WORKER
         settings = await _load_settings(agent)
         run_timeout, max_turns = settings.timeout_seconds, settings.max_turns
-        launch = resolve_launch(settings.defaults, settings.model)
+        launch = resolve_launch(settings.defaults, settings.model, await load_library(self._runtime_root))
         # Read as the run starts: a later change reaches the next run, not this one.
         project = await self._task_project(parent_task_id, worker_id)
         background = str((project or {}).get("background") or "")
@@ -568,7 +569,8 @@ class WorkerPool:
             "--dangerously-skip-permissions",
             # None of the operator's personal settings, memory, hooks, plugins
             # or MCP servers (whose teardown could also make the CLI exit
-            # non-zero). Built-in tools are unaffected.
+            # non-zero). Built-in tools are unaffected; the library's plugins
+            # and skills come with the launch args.
             *isolation_args(work_dir),
             *system_prompt_args(prompt_file),
             *launch.args(),
