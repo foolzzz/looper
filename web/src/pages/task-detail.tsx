@@ -17,6 +17,7 @@ import {
   Settings2,
   Save,
   FolderOpen,
+  Folder,
   History,
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
@@ -30,6 +31,7 @@ import {
   Position,
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
+import { useProjects } from "@/lib/use-projects";
 import {
   fetchTaskDetail,
   fetchTaskActivity,
@@ -38,6 +40,7 @@ import {
   stopTask,
   startTask,
   updateTaskConfig,
+  setTaskProject,
   type TaskDetail,
   type TaskStep,
   type ActivityEvent,
@@ -995,6 +998,100 @@ function PipelineTab({ task }: { task: TaskDetail }) {
   );
 }
 
+// --- Project ---
+
+/** The task's project, with a select to move it to another one (any status). */
+function TaskProjectControl({
+  task,
+  onMoved,
+}: {
+  task: TaskDetail;
+  onMoved: (projectId: string, projectName: string) => void;
+}) {
+  const { projects } = useProjects();
+  // The project picked but not saved yet; null shows the task's own.
+  const [picked, setPicked] = useState<string | null>(null);
+  const target = picked ?? task.project_id;
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  const [moved, setMoved] = useState(false);
+
+  useEffect(() => {
+    if (!moved) return;
+    const timer = setTimeout(() => setMoved(false), 3000);
+    return () => clearTimeout(timer);
+  }, [moved]);
+
+  const move = async () => {
+    setSaving(true);
+    setError("");
+    try {
+      const result = await setTaskProject(task.task_id, target);
+      onMoved(result.project_id, result.project_name);
+      setPicked(null);
+      setMoved(true);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const options = projects ?? [];
+  const listed = options.some((p) => p.project_id === task.project_id);
+
+  return (
+    <span className="flex items-center gap-1.5">
+      <Folder className="h-3.5 w-3.5 text-muted-foreground" />
+      <select
+        aria-label="Project"
+        value={target}
+        onChange={(e) => {
+          setPicked(e.target.value === task.project_id ? null : e.target.value);
+          setError("");
+          setMoved(false);
+        }}
+        className="h-6 max-w-[14rem] rounded-md border border-input bg-transparent px-1.5 text-xs text-foreground"
+      >
+        {!listed && <option value={task.project_id}>{task.project_name || task.project_id}</option>}
+        {options.map((p) => (
+          <option key={p.project_id} value={p.project_id}>{p.name}</option>
+        ))}
+      </select>
+      {target !== task.project_id && (
+        <>
+          <button
+            type="button"
+            onClick={move}
+            disabled={saving}
+            className="flex items-center gap-1 rounded-md bg-primary px-2 py-0.5 text-xs text-primary-foreground hover:bg-primary/90 transition-colors disabled:opacity-50"
+          >
+            {saving && <Loader2 className="h-3 w-3 animate-spin" />}
+            Move
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              setPicked(null);
+              setError("");
+            }}
+            className="rounded-md px-1.5 py-0.5 text-xs text-muted-foreground hover:text-foreground transition-colors"
+          >
+            Cancel
+          </button>
+        </>
+      )}
+      {moved && (
+        <span role="status" className="flex items-center gap-1 text-xs text-success">
+          <CheckCircle2 className="h-3 w-3" />
+          Moved to {task.project_name}
+        </span>
+      )}
+      {error && <span role="alert" className="text-xs text-destructive">{error}</span>}
+    </span>
+  );
+}
+
 // --- Main Page ---
 
 interface TaskDetailPageProps {
@@ -1050,10 +1147,18 @@ export function TaskDetailPage({ taskId, onBack }: TaskDetailPageProps) {
             <h1 className="text-lg font-semibold leading-tight truncate">
               {task?.requirement || taskId}
             </h1>
-            <div className="flex items-center gap-2 mt-0.5">
+            <div className="flex items-center gap-2 mt-0.5 flex-wrap">
               <span className="text-xs text-muted-foreground">{taskId}</span>
               {task && taskStatusBadge(task.status)}
               {task && task.phase && task.phase !== task.status && phaseBadge(task.phase)}
+              {task && (
+                <TaskProjectControl
+                  task={task}
+                  onMoved={(projectId, projectName) =>
+                    setTask((t) => (t ? { ...t, project_id: projectId, project_name: projectName } : t))
+                  }
+                />
+              )}
             </div>
           </div>
           {task && ["running", "pending", "executing", "assigned"].includes(task.status) && (
