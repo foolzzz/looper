@@ -425,6 +425,8 @@ export interface AgentConfig {
   llm_profile_id: number | null;
   enabled: boolean;
   system_prompt: string;
+  /** The system-recommended prompt; "Reset to recommended" copies it into system_prompt. */
+  default_prompt: string;
   model: string | null;
   max_turns: number;
   timeout_seconds: number;
@@ -490,6 +492,15 @@ export async function updateAgentConfig(
     body: JSON.stringify(fields),
   });
   if (!res.ok) throw new Error(`update agent-config ${res.status}`);
+  return res.json();
+}
+
+/** Reset an agent's system prompt to the system-recommended default. */
+export async function resetAgentPrompt(agentId: string): Promise<AgentConfig> {
+  const res = await fetch(`${API_BASE}/agent-configs/${agentId}/reset-prompt`, {
+    method: "POST",
+  });
+  if (!res.ok) throw new Error(`reset agent-config ${res.status}`);
   return res.json();
 }
 

@@ -85,3 +85,49 @@ def test_only_the_old_default_manager_prompt_is_replaced() -> None:
             await pool.close()
 
     asyncio.run(_run())
+
+
+def test_default_prompt_tracks_recommendation_and_reset() -> None:
+    """seed upgrades an unedited row to the new recommendation, keeps an edited
+    one, and reset restores the recommended prompt."""
+    import asyncpg
+
+    from loopx.db import agent_configs
+    from loopx.db.connection import ensure_schema
+
+    unedited = f"test-agent-{uuid.uuid4().hex[:8]}"
+    edited = f"test-agent-{uuid.uuid4().hex[:8]}"
+
+    async def _run() -> None:
+        pool = await asyncpg.create_pool(DSN, min_size=1, max_size=2)
+        try:
+            await ensure_schema(pool)
+            # First seed: both rows get the v1 recommended prompt.
+            await agent_configs.seed_defaults([
+                {"agent_id": unedited, "role": "worker", "system_prompt": "recommended v1"},
+                {"agent_id": edited, "role": "worker", "system_prompt": "recommended v1"},
+            ], pool=pool)
+            # The user edits one of them.
+            await agent_configs.set_config(edited, {"system_prompt": "my own prompt"}, pool=pool)
+
+            # Second seed with a new recommendation.
+            await agent_configs.seed_defaults([
+                {"agent_id": unedited, "role": "worker", "system_prompt": "recommended v2"},
+                {"agent_id": edited, "role": "worker", "system_prompt": "recommended v2"},
+            ], pool=pool)
+
+            u = await agent_configs.get_config(unedited, pool=pool)
+            e = await agent_configs.get_config(edited, pool=pool)
+            # Unedited row followed the new recommendation; edited row kept the user's prompt.
+            assert u["system_prompt"] == "recommended v2" and u["default_prompt"] == "recommended v2"
+            assert e["system_prompt"] == "my own prompt" and e["default_prompt"] == "recommended v2"
+
+            # Reset the edited row back to the recommended prompt.
+            reset = await agent_configs.reset_prompt(edited, pool=pool)
+            assert reset["system_prompt"] == "recommended v2"
+            assert (await agent_configs.get_config(edited, pool=pool))["system_prompt"] == "recommended v2"
+        finally:
+            await pool.execute("DELETE FROM agent_configs WHERE agent_id = ANY($1::text[])", [unedited, edited])
+            await pool.close()
+
+    asyncio.run(_run())

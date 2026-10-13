@@ -3,6 +3,7 @@ import {
   Bot,
   Loader2,
   RefreshCw,
+  RotateCcw,
   Save,
   Power,
   PowerOff,
@@ -23,6 +24,7 @@ import { cn } from "@/lib/utils";
 import {
   fetchAgentConfigs,
   updateAgentConfig,
+  resetAgentPrompt,
   fetchLlmRecords,
   fetchLlmProfiles,
   createLlmProfile,
@@ -425,12 +427,14 @@ function ConfigTab({
   config,
   profiles,
   onSave,
+  onResetPrompt,
   onProfilesChanged,
   saving,
 }: {
   config: AgentConfig;
   profiles: LlmProfile[];
   onSave: (fields: Partial<AgentConfig>) => void;
+  onResetPrompt: () => void;
   onProfilesChanged: () => void;
   saving: boolean;
 }) {
@@ -712,6 +716,18 @@ function ConfigTab({
         onChange={(v) => setForm({ ...form, system_prompt: v })}
       />
 
+      {config.default_prompt && config.system_prompt !== config.default_prompt && (
+        <div className="flex items-center justify-between rounded-md border border-border bg-muted/20 px-3 py-2">
+          <span className="text-[11px] text-muted-foreground">
+            This prompt differs from the system-recommended one.
+          </span>
+          <Button variant="outline" size="sm" onClick={onResetPrompt} disabled={saving}>
+            <RotateCcw className="h-3.5 w-3.5" />
+            Reset to recommended
+          </Button>
+        </div>
+      )}
+
       <Button onClick={handleSave} disabled={saving} className="w-full">
         {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
         Save Config
@@ -835,6 +851,22 @@ export function AgentsPage({ sub, onNavigate }: AgentsPageProps) {
     }
   };
 
+  const handleResetPrompt = async () => {
+    if (!selectedId) return;
+    setSaving(true);
+    try {
+      const updated = await resetAgentPrompt(selectedId);
+      setConfigs((prev) => prev.map((c) => (c.agent_id === selectedId ? updated : c)));
+      setToast("Reset to recommended prompt");
+      setTimeout(() => setToast(""), 2000);
+    } catch (e) {
+      setToast(`Error: ${(e as Error).message}`);
+      setTimeout(() => setToast(""), 3000);
+    } finally {
+      setSaving(false);
+    }
+  };
+
   if (loading) {
     return (
       <div className="flex h-64 items-center justify-center">
@@ -933,6 +965,7 @@ export function AgentsPage({ sub, onNavigate }: AgentsPageProps) {
                   config={selected}
                   profiles={profiles}
                   onSave={handleSave}
+                  onResetPrompt={handleResetPrompt}
                   onProfilesChanged={loadProfiles}
                   saving={saving}
                 />
