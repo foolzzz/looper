@@ -28,6 +28,7 @@ from ..agent_settings import AgentDefaults, AgentType, Launch, resolve_harness, 
 from ..claude_cli import ClaudeRunRecorder, ResidentClaude, exit_note, isolation_args, system_prompt_args
 from ..library import load_library
 from ..projects import project_name
+from ..run_usage import Usage
 from ..system_prompt import SystemPrompt, build_system_prompt, is_recommended
 from .task import resolve_work_dir
 from ..message import (
@@ -141,6 +142,9 @@ class ManagerAgent:
         self._runtime_root = runtime_root
         self._broadcaster = broadcaster
         self._session_id: str | None = None
+        # The session's running totals (cost and tokens) at its last result. A process that resumes the
+        # session starts from them, so its first turn records only its own share.
+        self._session_totals = Usage()
         self._bus: MessageBus | None = None
         self._task: asyncio.Task[Any] | None = None
         self._running = False
@@ -175,13 +179,14 @@ class ManagerAgent:
             try:
                 data = json.loads(path.read_text(encoding="utf-8"))
                 self._session_id = data.get("session_id")
-            except (json.JSONDecodeError, OSError):
+                self._session_totals = Usage.from_dict(data.get("session_totals"))
+            except (json.JSONDecodeError, OSError, AttributeError):
                 pass
 
     def _save_session_state(self) -> None:
         path = self._state_path()
         path.write_text(
-            json.dumps({"session_id": self._session_id}, indent=2),
+            json.dumps({"session_id": self._session_id, "session_totals": self._session_totals.to_dict()}, indent=2),
             encoding="utf-8",
         )
 
@@ -446,6 +451,7 @@ class ManagerAgent:
             try:
                 await self._claude.start(
                     command, cwd=str(self._config.work_dir), signature=signature, env=launch.environment(),
+                    totals=self._session_totals if resuming else None,
                 )
             except OSError as exc:
                 logger.error("failed to start Claude Code: %s", exc)
@@ -531,7 +537,7 @@ class ManagerAgent:
                 error=f"session {resuming} could not be resumed{exit_note(turn.exit_code)}; retried in a new session",
             )
             await self._claude.stop()
-            self._session_id = None
+            self._session_id, self._session_totals = None, Usage()  # its totals went with it
             self._save_session_state()
             return await self._run_turn(message, context_envelope, retried=True)
 
@@ -541,13 +547,17 @@ class ManagerAgent:
         # A turn cut off by Claude's exit is no reply, even after some text.
         exited = result_event is None
         replied = not exited and bool(final_text)
+        usage = self._claude.turn_usage(result_event)
+        if not exited:
+            self._session_totals = self._claude.totals
+            self._save_session_state()
         await recorder.finish(
             output_text=final_text or None,
             result_event=result_event,
             error=None if replied else (
                 f"no reply (exit code {turn.exit_code})" if exited else "no reply"
             ),
-            cost_usd=self._claude.turn_cost(result_event),
+            usage=usage,
         )
 
         if task_id:

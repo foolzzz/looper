@@ -250,6 +250,15 @@ ALTER TABLE llm_records ADD COLUMN IF NOT EXISTS cost_usd DOUBLE PRECISION;
 ALTER TABLE llm_records ADD COLUMN IF NOT EXISTS finished_at TIMESTAMPTZ;
 -- Heartbeat: last time the run wrote any output (partial deltas included).
 ALTER TABLE llm_records ADD COLUMN IF NOT EXISTS last_output_at TIMESTAMPTZ;
+-- The run's own usage beside input_tokens and output_tokens: prompt tokens read from and written to
+-- the cache. For one turn of a resident agent these are that turn's share of its session's totals.
+ALTER TABLE llm_records ADD COLUMN IF NOT EXISTS cache_read_tokens BIGINT;
+ALTER TABLE llm_records ADD COLUMN IF NOT EXISTS cache_creation_tokens BIGINT;
+-- The context at the run's end: the prompt of its last main-loop model request.
+ALTER TABLE llm_records ADD COLUMN IF NOT EXISTS context_tokens INTEGER;
+-- The context compactions during the run, each {trigger, pre_tokens, post_tokens, duration_ms};
+-- NULL for runs recorded before compactions were.
+ALTER TABLE llm_records ADD COLUMN IF NOT EXISTS compactions JSONB;
 
 -- Once: runs recorded before `status` existed all defaulted to 'completed';
 -- the ones that recorded an error had failed.

@@ -15,8 +15,9 @@ def _row_to_dict(row: asyncpg.Record) -> dict[str, Any]:
     for key in ("created_at", "finished_at", "last_output_at"):
         if d.get(key) is not None:
             d[key] = d[key].isoformat()
-    if "metadata" in d and d["metadata"] is not None:
-        d["metadata"] = json.loads(d["metadata"])
+    for key in ("metadata", "compactions"):
+        if d.get(key) is not None:
+            d[key] = json.loads(d[key])
     return d
 
 
@@ -90,13 +91,17 @@ async def finish_record(
     session_id: str | None = None,
     input_tokens: int | None = None,
     output_tokens: int | None = None,
+    cache_read_tokens: int | None = None,
+    cache_creation_tokens: int | None = None,
     cost_usd: float | None = None,
+    context_tokens: int | None = None,
+    compactions: list[dict[str, Any]] | None = None,
     duration_ms: int | None = None,
     model: str | None = None,
     error: str | None = None,
     pool: asyncpg.Pool | None = None,
 ) -> None:
-    """Close a record with the run's outcome, usage and cost."""
+    """Close a record with the run's outcome, its own usage and cost, its final context and its compactions."""
     pool = pool or get_pool()
     await pool.execute(
         """
@@ -111,12 +116,18 @@ async def finish_record(
             duration_ms = $9,
             model = COALESCE($10, model),
             error = $11,
+            cache_read_tokens = $12,
+            cache_creation_tokens = $13,
+            context_tokens = $14,
+            compactions = $15::jsonb,
             finished_at = now(),
             last_output_at = COALESCE(last_output_at, now())
         WHERE id = $1
         """,
         record_id, status, output_text, output_text[:500] if output_text else None,
         session_id, input_tokens, output_tokens, cost_usd, duration_ms, model, error,
+        cache_read_tokens, cache_creation_tokens, context_tokens,
+        json.dumps(compactions) if compactions is not None else None,
     )
 
 
@@ -225,3 +236,4 @@ async def get_record(
     if row is None:
         return None
     return _row_to_dict(row)
+

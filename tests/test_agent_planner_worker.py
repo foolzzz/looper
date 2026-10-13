@@ -454,6 +454,44 @@ class TestWorkerSubprocess:
         assert finish["status"] == "completed" and finish["error"] is None
         assert '"status": "completed"' in finish["output_text"]
 
+    def test_run_records_its_tokens_context_and_compactions(self, agent_db: Any) -> None:
+        # Two model requests, an automatic compaction between them, and Claude's totals in the result.
+        def request(input_tokens: int, cache_read: int, cache_creation: int) -> str:
+            usage = {"input_tokens": input_tokens, "cache_read_input_tokens": cache_read,
+                     "cache_creation_input_tokens": cache_creation, "output_tokens": 1}
+            return ("print(json.dumps({'type': 'assistant', 'parent_tool_use_id': None, 'message': "
+                    f"{{'content': [{{'type': 'text', 'text': 'step'}}], 'usage': {usage!r}}}}}))\n")
+
+        async def _run() -> None:
+            with tempfile.TemporaryDirectory() as tmp:
+                claude = _fake_claude(Path(tmp), (
+                    request(10, 15000, 3000)
+                    + "print(json.dumps({'type': 'system', 'subtype': 'compact_boundary', 'compact_metadata': "
+                      "{'trigger': 'auto', 'pre_tokens': 90000, 'post_tokens': 2000, 'duration_ms': 900, "
+                      "'cumulative_dropped_tokens': 88000}}))\n"
+                    + request(8, 15100, 2400)
+                    + "print(json.dumps({'type': 'result', 'subtype': 'success', 'is_error': False, "
+                      "'result': json.dumps({'status': 'completed', 'summary': 'ok'}), 'total_cost_usd': 0.4, "
+                      "'usage': {'input_tokens': 18, 'output_tokens': 2}, 'modelUsage': {"
+                      "'claude-a': {'inputTokens': 5018, 'outputTokens': 902, 'cacheReadInputTokens': 30100, "
+                      "'cacheCreationInputTokens': 5400, 'costUSD': 0.3}, "
+                      "'claude-b': {'inputTokens': 2, 'outputTokens': 3, 'cacheReadInputTokens': 4, "
+                      "'cacheCreationInputTokens': 5, 'costUSD': 0.1}}}))"
+                ))
+                pool = WorkerPool(config=WorkerConfig(claude_bin=claude), runtime_root=Path(tmp))
+                await pool._execute(_work_item(Path(tmp)))
+
+        asyncio.run(_run())
+        finish = agent_db.finish_record.await_args.kwargs
+        # The run is the whole process: its totals over every model, compaction request included.
+        assert finish["cost_usd"] == 0.4
+        assert (finish["input_tokens"], finish["output_tokens"], finish["cache_read_tokens"],
+                finish["cache_creation_tokens"]) == (5020, 905, 30104, 5405)
+        assert finish["context_tokens"] == 8 + 15100 + 2400  # the last request's prompt
+        assert finish["compactions"] == [
+            {"trigger": "auto", "pre_tokens": 90000, "post_tokens": 2000, "duration_ms": 900},
+        ]
+
     def test_mismatched_report_is_recorded_as_failed(self, agent_db: Any) -> None:
         async def _run() -> None:
             with tempfile.TemporaryDirectory() as tmp:

@@ -22,6 +22,7 @@ from library_fixtures import ALPHA_SKILL, DEMO_PLUGIN, plugin_dirs
 from loopx.agents.agent_settings import DEFAULT_HARNESS_PROMPT
 from loopx.agents.bus import MessageBus
 from loopx.agents.claude_cli import ISOLATION_ID, isolation_args
+from loopx.agents.run_usage import Usage
 from loopx.agents.message import (
     MANAGER_ADDRESS,
     TASK_ROUTER_ADDRESS,
@@ -538,6 +539,9 @@ class TestResidentClaude:
         # The turn that Claude died in fell back to the Worker's verdict.
         assert any("exited before finishing the turn (exit code 3)" in line for line in activity(agent_db))
         assert h.planner._plan.session_id == "sess-p"  # type: ignore[union-attr]
+        # The resumed process reports the session's total (0.5); its turn spent 0.25 of it.
+        assert [call.kwargs["cost_usd"] for call in agent_db.finish_record.await_args_list] == [0.25, None, 0.25]
+        assert h.planner._plan.session_totals == Usage(cost_usd=0.5)  # type: ignore[union-attr]
 
     def test_a_session_that_no_longer_exists_is_dropped_and_the_turn_retried(
         self, planner_claude: Any, agent_db: Any,
@@ -552,6 +556,31 @@ class TestResidentClaude:
         assert _flag(resumed, "--resume") == "sess-p"
         assert _flag(fresh, "--resume") is None  # the same turn, in a new session
         assert any("session sess-p could not be resumed" in line for line in activity(agent_db))
+        # The new session starts from zero: its turn spent all of the 0.25 it reports.
+        costs = [call.kwargs["cost_usd"] for call in agent_db.finish_record.await_args_list]
+        assert costs == [0.25, None, None, 0.25]
+        assert h.planner._plan.session_totals == Usage(cost_usd=0.25)  # type: ignore[union-attr]
+
+    def test_after_a_server_restart_the_first_turn_records_only_its_own_cost(
+        self, planner_claude: Any, agent_db: Any,
+    ) -> None:
+        claude = planner_claude(plan(step("s1")), chat("still here"))
+
+        async def scenario(h: Harness) -> None:
+            await h.start()
+            await h.until(lambda: h.held)  # planned (0.25); the Worker keeps running
+            # The server stops; the plan file keeps the session and its running total.
+            await h.planner.stop()
+            h.planner = PlannerAgent(task_id="t1", runtime_root=h.work_dir.parent, claude_bin=claude.bin)
+            await h.planner.start(h.bus)
+            assert await h.say("are you there?") == "still here"
+
+        h = drive(claude, hold_first(), scenario)
+        first, resumed = claude.argvs()
+        assert (_flag(first, "--resume"), _flag(resumed, "--resume")) == (None, "sess-p")
+        # The resumed Claude reports 0.5, the session's total; the chat turn spent 0.25.
+        assert [call.kwargs["cost_usd"] for call in agent_db.finish_record.await_args_list] == [0.25, 0.25]
+        assert h.planner._plan.session_totals == Usage(cost_usd=0.5)  # type: ignore[union-attr]
 
     @pytest.mark.parametrize("first_reply", ["<hang>", "plan"])
     def test_stop_ends_and_reaps_claude(self, planner_claude: Any, first_reply: str) -> None:

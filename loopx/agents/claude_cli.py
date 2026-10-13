@@ -12,6 +12,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from .run_usage import Usage, compaction, reported_totals, request_context, run_usage
+
 if TYPE_CHECKING:
     from .agent_settings import Launch
     from .library import AgentLibrary
@@ -211,6 +213,12 @@ class ResidentClaude:
     stdout line iterator stays open for the next turn. A process that exited,
     or whose ``signature`` (what it was started with) no longer matches, is
     stale: the owner stops it and starts a new one, which resumes the session.
+
+    Claude reports the session's running totals (cost and tokens) on every
+    result, and a resumed session's totals carry on from what it spent
+    before. The process keeps the totals of its last result, starting from
+    the totals the owner saved for the session it resumes, so each turn's own
+    share is the difference (``turn_usage``).
     """
 
     def __init__(self, *, label: str) -> None:
@@ -219,7 +227,7 @@ class ResidentClaude:
         self._lines: AsyncIterator[bytes] | None = None
         self._command: list[str] = []
         self._signature: Any = None
-        self._cost_usd = 0.0  # the process's running total at its last result
+        self._totals = Usage()  # the session's running totals at its last result
 
     @property
     def started(self) -> bool:
@@ -234,6 +242,11 @@ class ResidentClaude:
     def pid(self) -> int | None:
         return self._process.pid if self._process is not None else None
 
+    @property
+    def totals(self) -> Usage:
+        """The session's running totals as of its last result; the owner saves them beside the session id."""
+        return self._totals
+
     def stale(self, signature: Any) -> bool:
         """True when a process was started but has exited or was started with another ``signature``."""
         process = self._process
@@ -241,8 +254,13 @@ class ResidentClaude:
 
     async def start(
         self, command: list[str], *, cwd: str, signature: Any, env: dict[str, str] | None = None,
+        totals: Usage | None = None,
     ) -> None:
-        """Start the process (with ``env``, else the server's environment); raises ``OSError`` when it cannot run."""
+        """Start the process (with ``env``, else the server's environment); raises ``OSError`` when it cannot run.
+
+        ``totals`` are the saved running totals of the session the command
+        resumes; a new session starts from none.
+        """
         process = await asyncio.create_subprocess_exec(
             *command,
             cwd=cwd,
@@ -253,7 +271,7 @@ class ResidentClaude:
         )
         assert process.stdout is not None
         self._process, self._command, self._signature = process, command, signature
-        self._cost_usd = 0.0
+        self._totals = totals or Usage()
         self._lines = iter_lines(process.stdout)
         logger.info("%s started Claude Code (pid=%s)", self._label, process.pid)
 
@@ -311,13 +329,12 @@ class ResidentClaude:
             session_started=session_started,
         )
 
-    def turn_cost(self, result_event: dict[str, Any] | None) -> float | None:
-        """This turn's cost: Claude's ``total_cost_usd`` is its process's running total."""
-        total = (result_event or {}).get("total_cost_usd")
-        if not isinstance(total, (int, float)):
-            return None
-        cost, self._cost_usd = total - self._cost_usd, total
-        return cost
+    def turn_usage(self, result_event: dict[str, Any] | None) -> Usage:
+        """This turn's own cost and tokens: its result's running totals less the previous ones."""
+        own = run_usage(result_event, before=self._totals)
+        if result_event is not None:
+            self._totals = self._totals.updated(reported_totals(result_event))
+        return own
 
     async def stop(self, *, kill: bool = False) -> None:
         """End the process, if any, and forget it.
@@ -383,8 +400,10 @@ class ClaudeRunRecorder:
     model and its source, the names of the environment variables LoopX set
     (their values hashed) and the working directory, gets every stream-json event as it arrives
     (partial text deltas excepted: the full message follows), and closes with
-    the outcome, usage and cost. Recording is observability: a database error
-    is logged and never fails the run.
+    the outcome, the run's own cost and tokens, its context size at the end
+    (the prompt of its last main-loop request) and the compactions it went
+    through. Recording is observability: a database error is logged and never
+    fails the run.
     """
 
     def __init__(
@@ -416,6 +435,8 @@ class ClaudeRunRecorder:
         # seq of the row holding the current thinking phase's progress, if it is the latest row
         self._thinking_seq: int | None = None
         self._model: str | None = None
+        self._context_tokens: int | None = None  # the prompt of the run's latest main-loop request
+        self._compactions: list[dict[str, Any]] = []
         self._started = _clock()
         self._last_heartbeat = float("-inf")
 
@@ -451,6 +472,10 @@ class ClaudeRunRecorder:
         if event.get("type") == "system" and event.get("subtype") == "init":
             self._model = event.get("model") or self._model
             self._session_id = event.get("session_id") or self._session_id
+        if (context := request_context(event)) is not None:
+            self._context_tokens = context
+        if (compacted := compaction(event)) is not None:
+            self._compactions.append(compacted)
         if self._record_id is None:
             return
         from ..db import llm_records
@@ -487,12 +512,13 @@ class ClaudeRunRecorder:
         output_text: str | None,
         result_event: dict[str, Any] | None,
         error: str | None = None,
-        cost_usd: float | None = None,
+        usage: Usage | None = None,
     ) -> None:
-        """Close the record; ``cost_usd`` replaces the result's ``total_cost_usd``.
+        """Close the record with the run's own ``usage``; without one, all the result reports is the run's.
 
-        Claude reports the running total of its process, so a run that is one
-        turn of a longer-lived process passes its own share.
+        Claude reports the running totals of its session, so a run that is
+        one turn of a longer-lived session passes its own share
+        (``ResidentClaude.turn_usage``).
         """
         if self._record_id is None:
             return
@@ -500,16 +526,21 @@ class ClaudeRunRecorder:
 
         result = result_event or {}
         succeeded = error is None and result.get("subtype") == "success" and not result.get("is_error")
-        usage = result.get("usage") if isinstance(result.get("usage"), dict) else {}
+        if usage is None:
+            usage = run_usage(result_event)
         try:
             await llm_records.finish_record(
                 self._record_id,
                 status="completed" if succeeded else "failed",
                 output_text=output_text,
                 session_id=result.get("session_id") or self._session_id,
-                input_tokens=usage.get("input_tokens"),
-                output_tokens=usage.get("output_tokens"),
-                cost_usd=result.get("total_cost_usd") if cost_usd is None else cost_usd,
+                input_tokens=usage.input_tokens,
+                output_tokens=usage.output_tokens,
+                cache_read_tokens=usage.cache_read_tokens,
+                cache_creation_tokens=usage.cache_creation_tokens,
+                cost_usd=usage.cost_usd,
+                context_tokens=self._context_tokens,
+                compactions=self._compactions,
                 duration_ms=int((_clock() - self._started) * 1000),
                 model=self._model,
                 error=error or (None if succeeded else f"Claude run ended: {result.get('subtype') or 'no result'}"),
