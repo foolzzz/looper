@@ -27,7 +27,16 @@ from .tiers.task import TaskRouter
 
 logger = logging.getLogger(__name__)
 
-_STATIC_DIR = Path(__file__).parent.parent.parent / "web" / "dist"
+# A source checkout serves the dashboard it builds (web/dist); an installed
+# wheel serves the copy staged into the package (loopx/web/dashboard).
+_CHECKOUT_DASHBOARD = Path(__file__).resolve().parents[2] / "web" / "dist"
+_PACKAGED_DASHBOARD = Path(__file__).resolve().parents[1] / "web" / "dashboard"
+
+
+def default_static_dir() -> Path:
+    if (_CHECKOUT_DASHBOARD / "index.html").is_file():
+        return _CHECKOUT_DASHBOARD
+    return _PACKAGED_DASHBOARD
 
 def _serialize(obj: Any) -> Any:
     """Recursively convert datetime and other non-JSON types for response."""
@@ -85,7 +94,7 @@ class AgentHTTPServer:
         self._task_router = task_router
         self._supervisor = supervisor
         self._broadcaster = broadcaster or Broadcaster()
-        self._static_dir = static_dir or _STATIC_DIR
+        self._static_dir = static_dir or default_static_dir()
         self._server: asyncio.Server | None = None
 
     async def start(self) -> None:
