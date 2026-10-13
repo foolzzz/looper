@@ -1,0 +1,113 @@
+name: Release
+
+# Pushing a vX.Y.Z tag publishes that release: the wheel is built and checked
+# here, never on a maintainer's machine. The release body is the committed
+# docs/releases/vX.Y.Z.md; vX.Y.Z.surfaces lists its optional-capability
+# surfaces, one per line (empty: the release declares none). A run can be
+# repeated for an existing tag from the Actions tab.
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag to build and publish, for example v2.5.0
+        required: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Build, verify and publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      TAG: ${{ inputs.tag || github.ref_name }}
+      GH_TOKEN: ${{ github.token }}
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ env.TAG }}
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+
+      - name: Install uv
+        run: python -m pip install uv
+
+      - name: Check the tag
+        run: |
+          set -euo pipefail
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::$TAG is not vX.Y.Z"; exit 1; }
+          git merge-base --is-ancestor "$TAG" origin/main || { echo "::error::$TAG is not on main"; exit 1; }
+          version="$(python -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')"
+          package="$(python -c 'import loopx; print(loopx.__version__)')"
+          [ "v$version" = "$TAG" ] && [ "$package" = "$version" ] \
+            || { echo "::error::$TAG does not match pyproject $version / loopx $package"; exit 1; }
+          for f in "docs/releases/$TAG.md" "docs/releases/$TAG.surfaces"; do
+            [ -f "$f" ] || { echo "::error::$f is missing"; exit 1; }
+          done
+
+      - name: Check the release body
+        run: |
+          set -euo pipefail
+          surfaces=()
+          while IFS= read -r arg; do surfaces+=("$arg"); done < <(scripts/release-surface-args.sh "docs/releases/$TAG.surfaces")
+          uv run --extra test python examples/release/release-readiness-doc-smoke.py --release-notes "docs/releases/$TAG.md" "${surfaces[@]}"
+
+      - name: Build the Chat bundle and the dashboard
+        run: |
+          python scripts/chat_bundle.py build --install
+          scripts/stage-dashboard.sh
+
+      - name: Check that the installed wheel runs loopx serve
+        env:
+          LOOPX_TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
+        run: uv run python examples/release/agent-serve-wheel-smoke.py
+
+      - name: Build the wheel
+        run: uv build --wheel --out-dir dist
+
+      - name: Publish the release
+        run: |
+          set -euo pipefail
+          wheel="dist/loopx-${TAG#v}-py3-none-any.whl"
+          [ -f "$wheel" ] || { echo "::error::$wheel was not built"; exit 1; }
+          # A draft first: install.sh reads the latest published release, so it
+          # never sees this one before its wheel and body are in place.
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release edit "$TAG" --draft --title "LoopX $TAG" --notes-file "docs/releases/$TAG.md"
+            gh release upload "$TAG" "$wheel" --clobber
+          else
+            gh release create "$TAG" "$wheel" --draft --verify-tag --title "LoopX $TAG" --notes-file "docs/releases/$TAG.md"
+          fi
+          gh release view "$TAG" --json body --jq .body > readback.md
+          surfaces=()
+          while IFS= read -r arg; do surfaces+=("$arg"); done < <(scripts/release-surface-args.sh "docs/releases/$TAG.surfaces")
+          uv run --extra test python examples/release/release-readiness-doc-smoke.py --release-notes readback.md "${surfaces[@]}"
+          gh release view "$TAG" --json assets --jq '.assets[].name' | grep -qx "$(basename "$wheel")"
+          gh release edit "$TAG" --draft=false --latest

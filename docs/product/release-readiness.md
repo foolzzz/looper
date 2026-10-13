@@ -142,23 +142,38 @@ option is read-only and accepted only by `update check`.
 
 ## Named Version Contract
 
-LoopX releases are tagged in GitHub. Release publication is an explicit
-maintainer action; this fork does not publish to PyPI. `install.sh` and
-`loopx update apply` install the wheel attached to the latest GitHub release,
-so every release carries one, built from its tag:
+LoopX releases are tagged in GitHub, and a tag publishes its release through
+the [Release workflow](../../.github/workflows/release.yml); nothing is built
+or uploaded from a maintainer's machine, and this fork does not publish to
+PyPI. `install.sh` and `loopx update apply` install the wheel attached to the
+latest GitHub release, so every release carries one, built from its tag.
+
+The release pull request commits the exact GitHub release body as
+`docs/releases/vX.Y.Z.md` and its optional-capability surfaces as
+`docs/releases/vX.Y.Z.surfaces`, one per line (an empty file declares none).
+After it merges, the maintainer tags the merge commit and pushes the tag:
 
 ```bash
-git worktree add ../loopx-vX.Y.Z vX.Y.Z && cd ../loopx-vX.Y.Z
-python3 scripts/chat_bundle.py ensure      # the Chat bundle the build checks
-scripts/stage-dashboard.sh                 # the agent dashboard, into loopx/web/dashboard
-LOOPX_TEST_DATABASE_URL=<disposable database> uv run python examples/release/agent-serve-wheel-smoke.py
-uv build --wheel --out-dir dist
-gh release upload vX.Y.Z dist/loopx-X.Y.Z-py3-none-any.whl
+git tag -a vX.Y.Z -m "LoopX vX.Y.Z" <merge commit> && git push origin vX.Y.Z
 ```
 
-The smoke builds the wheel from a clean copy, installs it into a fresh
-virtualenv and runs the installed `loopx serve`: the wheel must carry the
-database schema and the dashboard. Each stable promotion still needs one package version name. The
+The workflow then:
+
+1. checks that the tag is on `main` and matches `pyproject.toml` and
+   `loopx.__version__`;
+2. runs `release-readiness-doc-smoke` on the committed body with its surfaces;
+3. builds the Chat bundle and stages the dashboard into `loopx/web/dashboard`;
+4. runs `examples/release/agent-serve-wheel-smoke.py` against a PostgreSQL
+   service: it builds the wheel from a clean copy, installs it into a fresh
+   virtualenv and runs the installed `loopx serve`;
+5. builds the wheel and creates the release as a draft with the body and the
+   wheel, reads the body back, checks it again and only then publishes it, so
+   the latest release never lacks its wheel.
+
+A failed run can be repeated for the same tag from the Actions tab
+(`workflow_dispatch` with the tag).
+
+Each stable promotion still needs one package version name. The
 version source is `loopx.__version__`, mirrored by `pyproject.toml`; the
 expected public tag is `vX.Y.Z` for that version.
 

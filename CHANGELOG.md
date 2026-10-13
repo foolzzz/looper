@@ -18,6 +18,14 @@ To learn how to use these features, read the [usage guide](docs/fork/usage.md).
 
 ### Changed
 
+- Releases are published by GitHub Actions when a `vX.Y.Z` tag is pushed
+  (`.github/workflows/release.yml`); nothing is built or uploaded locally. The
+  release pull request commits the exact body as `docs/releases/vX.Y.Z.md` and
+  its optional-capability surfaces as `docs/releases/vX.Y.Z.surfaces`. The
+  workflow checks the tag against `main` and the package version, validates
+  the body, builds the Chat bundle and the dashboard, runs the wheel smoke
+  against a PostgreSQL service, builds the wheel and publishes the release
+  through a draft, so the latest release always carries its wheel.
 - A release wheel runs `loopx serve`. It now carries `loopx/db/schema.sql`
   and the agent dashboard, staged into `loopx/web/dashboard` by
   `scripts/stage-dashboard.sh`; before, an installed wheel failed at startup
