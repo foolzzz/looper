@@ -6,7 +6,8 @@ import asyncio
 import json
 import logging
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
+from dataclasses import dataclass
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -40,6 +41,155 @@ async def write_user_turn(stdin: asyncio.StreamWriter, text: str) -> None:
     line = json.dumps({"type": "user", "message": {"role": "user", "content": text}}, ensure_ascii=False)
     stdin.write(line.encode("utf-8") + b"\n")
     await stdin.drain()
+
+
+# How long a stopping resident Claude may take to exit after its stdin closes before it is killed.
+STOP_GRACE_SEC = 5.0
+
+
+@dataclass(frozen=True)
+class ResidentTurn:
+    """How one turn on a resident Claude ended.
+
+    ``result_event`` is the turn's ``result``, or None when Claude exited
+    before writing it; then ``exit_code`` is the reaped process's exit code.
+    """
+
+    result_event: dict[str, Any] | None
+    exit_code: int | None = None
+
+
+class ResidentClaude:
+    """One long-lived ``claude --input-format stream-json`` process, fed one user turn at a time.
+
+    The owner builds the command (flags, system prompt, ``--resume``) and
+    serializes turns. Each turn's events are read up to its ``result``; the
+    stdout line iterator stays open for the next turn. A process that exited,
+    or whose ``signature`` (what it was started with) no longer matches, is
+    stale: the owner stops it and starts a new one, which resumes the session.
+    """
+
+    def __init__(self, *, label: str) -> None:
+        self._label = label  # names the owner in logs
+        self._process: asyncio.subprocess.Process | None = None
+        self._lines: AsyncIterator[bytes] | None = None
+        self._command: list[str] = []
+        self._signature: Any = None
+        self._cost_usd = 0.0  # the process's running total at its last result
+
+    @property
+    def started(self) -> bool:
+        return self._process is not None
+
+    @property
+    def command(self) -> list[str]:
+        """The running process's command; empty when none runs."""
+        return self._command
+
+    @property
+    def pid(self) -> int | None:
+        return self._process.pid if self._process is not None else None
+
+    def stale(self, signature: Any) -> bool:
+        """True when a process was started but has exited or was started with another ``signature``."""
+        process = self._process
+        return process is not None and (process.returncode is not None or self._signature != signature)
+
+    async def start(self, command: list[str], *, cwd: str, signature: Any) -> None:
+        """Start the process; raises ``OSError`` when it cannot run."""
+        process = await asyncio.create_subprocess_exec(
+            *command,
+            cwd=cwd,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        assert process.stdout is not None
+        self._process, self._command, self._signature = process, command, signature
+        self._cost_usd = 0.0
+        self._lines = iter_lines(process.stdout)
+        logger.info("%s started Claude Code (pid=%s)", self._label, process.pid)
+
+    async def run_turn(
+        self,
+        text: str,
+        on_event: Callable[[dict[str, Any]], Awaitable[None]],
+    ) -> ResidentTurn:
+        """Write ``text`` as one user turn and hand each event to ``on_event`` up to the turn's result.
+
+        A Claude that exits before its result (its stdout ends, or it closed
+        stdin) is reaped, so the next turn starts a new process. Any exception,
+        cancellation included, kills and reaps the process before it
+        propagates: a turn that was given up must not leave Claude running.
+        """
+        process, lines = self._process, self._lines
+        assert process is not None and process.stdin is not None and lines is not None
+        input_lost = False
+        result_event: dict[str, Any] | None = None
+        try:
+            try:
+                await write_user_turn(process.stdin, text)
+            except (BrokenPipeError, ConnectionResetError):
+                # Claude closed its stdin, so it is exiting; what it already wrote decides the turn.
+                logger.warning("%s: Claude closed stdin before the turn was sent", self._label)
+                input_lost = True
+                if process.returncode is None:
+                    process.kill()
+            # This turn's events end at its result; the iterator stays open for the next turn.
+            async for raw_line in lines:
+                line = raw_line.decode("utf-8", errors="replace").strip()
+                if not line:
+                    continue
+                try:
+                    event = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(event, dict):
+                    continue
+                await on_event(event)
+                if event.get("type") == "result":
+                    result_event = event
+                    break
+        except BaseException:
+            await self.stop(kill=True)
+            raise
+        if result_event is None or input_lost:
+            await self.stop()
+        return ResidentTurn(result_event, None if result_event is not None else process.returncode)
+
+    def turn_cost(self, result_event: dict[str, Any] | None) -> float | None:
+        """This turn's cost: Claude's ``total_cost_usd`` is its process's running total."""
+        total = (result_event or {}).get("total_cost_usd")
+        if not isinstance(total, (int, float)):
+            return None
+        cost, self._cost_usd = total - self._cost_usd, total
+        return cost
+
+    async def stop(self, *, kill: bool = False) -> None:
+        """End the process, if any, and forget it.
+
+        Its stdin is closed, which ends a healthy Claude; one still running
+        after ``STOP_GRACE_SEC`` (at once with ``kill``) is killed. The
+        process is always reaped.
+        """
+        process = self._process
+        self._process, self._lines, self._command, self._signature = None, None, [], None
+        if process is None:
+            return
+        if process.stdin is not None and not process.stdin.is_closing():
+            process.stdin.close()
+        try:
+            if process.returncode is None and not kill:
+                try:
+                    await asyncio.wait_for(process.wait(), STOP_GRACE_SEC)
+                except TimeoutError:
+                    pass
+        finally:
+            # Also when the wait is cancelled: the process is forgotten already.
+            if process.returncode is None:
+                process.kill()
+            await process.wait()
+        logger.info("%s stopped Claude Code (pid=%s, exit code %s)", self._label, process.pid, process.returncode)
 
 
 # How often a running record's heartbeat (last_output_at) is written.
@@ -91,6 +241,7 @@ class ClaudeRunRecorder:
         input_text: str,
         session_id: str | None = None,
         step_id: str | None = None,
+        pid: int | None = None,
     ) -> None:
         self._agent_id = agent_id
         self._task_id = task_id or None
@@ -99,6 +250,7 @@ class ClaudeRunRecorder:
         self._input_text = input_text
         self._session_id = session_id
         self._step_id = step_id
+        self._pid = pid
         self._record_id: int | None = None
         self._seq = 0
         # seq of the row holding the current thinking phase's progress, if it is the latest row
@@ -121,6 +273,8 @@ class ClaudeRunRecorder:
                     "cwd": self._cwd,
                     # The task step a Worker or Reviewer ran, so its run stays tied to that step.
                     **({"step_id": self._step_id} if self._step_id else {}),
+                    # The resident process that served this turn, for a long-lived agent.
+                    **({"pid": self._pid} if self._pid is not None else {}),
                 },
             )
         except Exception:
