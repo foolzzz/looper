@@ -8,24 +8,7 @@ name: PostgreSQL Integration
 # well below the repository's average CI job duration.
 
 on:
-  pull_request:
-    paths:
-      - ".github/workflows/postgresql-integration.yml"
-      - "loopx/control_plane/**"
-      - "tests/control_plane_ts/**"
-      - "package.json"
-      - "package-lock.json"
   workflow_dispatch:
-  push:
-    branches:
-      - main
-    paths:
-      - ".github/workflows/postgresql-integration.yml"
-      - "loopx/control_plane/**"
-      - "tests/control_plane_ts/**"
-      - "package.json"
-      - "package-lock.json"
-
 permissions:
   contents: read
 

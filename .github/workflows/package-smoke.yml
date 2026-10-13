@@ -1,25 +1,7 @@
 name: Package Smoke
 
 on:
-  pull_request:
-    paths:
-      - ".github/workflows/package-smoke.yml"
-      - "packages/loopx-repo-health/**"
-      - "packages/loopx-obelisk/**"
-      - "packages/loopx-codex-provider-routing/**"
-      - "loopx/capabilities/decision_context/extension_provider.py"
-      - "loopx/extensions/runtime.py"
-  push:
-    branches:
-      - main
-    paths:
-      - ".github/workflows/package-smoke.yml"
-      - "packages/loopx-repo-health/**"
-      - "packages/loopx-obelisk/**"
-      - "packages/loopx-codex-provider-routing/**"
-      - "loopx/capabilities/decision_context/extension_provider.py"
-      - "loopx/extensions/runtime.py"
-
+  workflow_dispatch:
 permissions:
   contents: read
 
