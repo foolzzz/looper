@@ -341,6 +341,16 @@ def _flag(argv: list[str], name: str) -> str | None:
     return argv[argv.index(name) + 1] if name in argv else None
 
 
+def _assert_unrestricted(argv: list[str]) -> None:
+    """The shared permission flags, once, and nothing that narrows the tools or the permissions again."""
+    from loopx.agents.claude_cli import permission_args
+
+    flags = permission_args()
+    assert any(argv[i:i + len(flags)] == flags for i in range(len(argv)))
+    assert argv.count("--dangerously-skip-permissions") == 1
+    assert not {"--tools", "--allowedTools", "--disallowedTools", "--permission-mode"} & set(argv)
+
+
 async def _first_claude_exits(spawned: list[tuple[list[str], Any]]) -> None:
     await spawned[0][1].wait()
 
@@ -359,6 +369,14 @@ class TestManagerResidentClaude:
         assert [finish["status"] for finish in finishes] == ["completed", "completed"]
         # Claude reports the process's running cost; each record holds its own turn's share.
         assert [finish["cost_usd"] for finish in finishes] == [0.25, 0.25]
+
+    def test_claude_runs_without_permission_prompts_and_with_every_tool(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # Its tools and skills run without asking; nothing approves a single tool any more.
+        chat = _converse(monkeypatch, _resident(), ["hello"])
+        ((argv, _),) = chat["spawned"]
+        _assert_unrestricted(argv)
 
     def test_messages_go_on_stdin_not_in_argv(self, monkeypatch: pytest.MonkeyPatch) -> None:
         chat = _converse(monkeypatch, _resident(), ["hello"])
@@ -664,9 +682,8 @@ class TestManagerLibrary:
         ((argv, _),) = chat["spawned"]
         plugin, skills = plugin_dirs(argv)
         assert plugin.endswith(f"/.local/library/{demo['sha256']}/demo") and skills.endswith("/personal")
-        # Skills are approved; nothing else is.
-        assert _flag(argv, "--allowedTools") == "Skill" and argv.count("--allowedTools") == 1
-        assert "--dangerously-skip-permissions" not in argv and "--permission-mode" not in argv
+        # Skills need no approval of their own: the Manager runs without permission prompts.
+        _assert_unrestricted(argv)
         library = agent_db.start_record.await_args.kwargs["metadata"]["library"]
         assert library["items"] == [{"kind": "plugin", "name": "demo@market", "sha256": demo["sha256"]},
                                     {"kind": "skill", "name": "alpha", "sha256": alpha["sha256"]}]
@@ -675,7 +692,8 @@ class TestManagerLibrary:
     def test_without_a_library_nothing_is_added(self, monkeypatch: pytest.MonkeyPatch, agent_db: Any) -> None:
         chat = _converse(monkeypatch, _resident(), ["hello"])
         ((argv, _),) = chat["spawned"]
-        assert "--plugin-dir" not in argv and "--allowedTools" not in argv  # the command as before
+        assert "--plugin-dir" not in argv
+        _assert_unrestricted(argv)
         assert "library" not in agent_db.start_record.await_args.kwargs["metadata"]
 
     def test_a_changed_library_restarts_claude_resuming_its_session(

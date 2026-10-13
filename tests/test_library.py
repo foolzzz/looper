@@ -20,7 +20,7 @@ from library_fixtures import PLUGIN_FILES, fake_claude_home, write
 
 from loopx.agents import library
 from loopx.agents.agent_settings import BUILTIN_DEFAULTS, resolve_launch
-from loopx.agents.claude_cli import library_args
+from loopx.agents.claude_cli import library_args, permission_args
 from loopx.agents.library import (
     SKILLS_PLUGIN,
     AgentLibrary,
@@ -280,6 +280,6 @@ class TestLaunch:
         assert "library" not in resolve_launch(BUILTIN_DEFAULTS).record()
         loaded = AgentLibrary(items=(LoadedItem(ItemKind.PLUGIN, "demo@market", "b" * 64),), plugin_dirs=("/l/demo",))
         launch = resolve_launch(BUILTIN_DEFAULTS, None, loaded)
-        assert launch.args() == ["--model", "opus", "--plugin-dir", "/l/demo"]
+        assert launch.args() == [*permission_args(), "--model", "opus", "--plugin-dir", "/l/demo"]
         assert launch.record()["library"] == loaded.record()
         assert launch.library.sha256 == loaded.sha256 != AgentLibrary().sha256

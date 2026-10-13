@@ -265,6 +265,16 @@ def _flag(argv: list[str], name: str) -> str | None:
     return argv[argv.index(name) + 1] if name in argv else None
 
 
+def _assert_unrestricted(argv: list[str]) -> None:
+    """The shared permission flags, once, and nothing that narrows the tools or the permissions again."""
+    from loopx.agents.claude_cli import permission_args
+
+    flags = permission_args()
+    assert any(argv[i:i + len(flags)] == flags for i in range(len(argv)))
+    assert argv.count("--dangerously-skip-permissions") == 1
+    assert not {"--tools", "--allowedTools", "--disallowedTools", "--permission-mode"} & set(argv)
+
+
 def _sha(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
@@ -584,7 +594,7 @@ class TestResidentClaude:
 
         assert asyncio.run(_run()).cancelled()
 
-    def test_claude_runs_read_only_in_the_task_directory(
+    def test_claude_runs_unrestricted_in_the_task_directory(
         self, planner_claude: Any, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         from loopx.db import agent_configs
@@ -598,10 +608,8 @@ class TestResidentClaude:
         h = drive(claude, always(WORK_OK))
 
         (argv,) = claude.argvs()
-        assert "--dangerously-skip-permissions" not in argv
-        assert _flag(argv, "--tools") == "Read,Grep,Glob"
-        assert _flag(argv, "--allowedTools") == "Read,Grep,Glob"
-        assert _flag(argv, "--permission-mode") == "dontAsk"
+        # Every tool, no permission prompts: the role prompt, not the command, keeps it to planning.
+        _assert_unrestricted(argv)
         assert _flag(argv, "--input-format") == "stream-json"
         assert _flag(argv, "--output-format") == "stream-json"
         assert (_flag(argv, "--model"), _flag(argv, "--max-turns")) == ("claude-test", "9")
@@ -617,7 +625,7 @@ class TestResidentClaude:
         _in_order(prompt, "You plan carefully.\n\n## Task\n", "build the calc package", REPLY_CONTRACT)
         assert prompt.endswith(REPLY_CONTRACT)
         # Every turn arrives on stdin; the command line carries no prompt.
-        takes_value = {"--input-format", "--output-format", "--tools", "--allowedTools", "--permission-mode",
+        takes_value = {"--input-format", "--output-format",
                        "--append-system-prompt-file", "--system-prompt-snapshot", "--setting-sources",
                        "--settings", "--model", "--max-turns"}
         assert [a for i, a in enumerate(argv) if not a.startswith("--") and argv[i - 1] not in takes_value] == []
@@ -669,6 +677,35 @@ def planner_row(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
 
 def _starts(agent_db: Any) -> list[dict[str, Any]]:
     return [call.kwargs for call in agent_db.start_record.await_args_list]
+
+
+class TestRecommendedRole:
+    """The Planner has every tool, so its recommended role prompt is what keeps
+    it to planning: it decides and hands every change to a Worker."""
+
+    def test_it_says_the_planner_plans_and_workers_do_the_work(self) -> None:
+        from loopx.agents.tiers.planner import DEFAULT_SYSTEM_PROMPT
+
+        text = " ".join(DEFAULT_SYSTEM_PROMPT.split())
+        assert "You plan and decide; Workers do the work." in text
+        assert "Do not modify files yourself" in text
+        assert "every change to the project goes to a Worker as a step" in text
+
+    def test_it_no_longer_calls_the_planner_read_only(self) -> None:
+        from loopx.agents.tiers.planner import DEFAULT_SYSTEM_PROMPT
+
+        text = " ".join(DEFAULT_SYSTEM_PROMPT.split())
+        for stale in ("Read, Grep, Glob", "cannot change files", "or run commands"):
+            assert stale not in text
+
+    def test_the_plan_turn_asks_it_to_leave_the_project_unchanged(
+        self, planner_claude: Any, agent_db: Any,
+    ) -> None:
+        claude = planner_claude(plan(step("s1")), decide("accept"))
+        drive(claude, always(WORK_OK))
+        first = claude.turns()[0]["text"]
+        assert first.startswith("[PLAN] ")
+        assert "without changing it" in first and "You may read the project first" not in first
 
 
 @pytest.mark.usefixtures("agent_db", "planner_row")
@@ -962,8 +999,8 @@ class TestLibrary:
         (argv,) = claude.argvs()
         plugin, skills = plugin_dirs(argv)
         assert plugin.endswith(f"/.local/library/{demo['sha256']}/demo") and skills.endswith("/personal")
-        # Read-only tools, and Skill so that the library's skills reach the Planner too.
-        assert _flag(argv, "--tools") == _flag(argv, "--allowedTools") == "Read,Grep,Glob,Skill"
+        # Every tool, Skill included, so that the library's skills reach the Planner too.
+        _assert_unrestricted(argv)
         assert all(s["metadata"]["library"]["items"] == [
             {"kind": "plugin", "name": "demo@market", "sha256": demo["sha256"]},
             {"kind": "skill", "name": "alpha", "sha256": alpha["sha256"]}] for s in _starts(agent_db))

@@ -1035,6 +1035,32 @@ class TestWorkerLibrary:
         assert [[i["name"] for i in r["items"]] for r in recorded] == [["demo@market", "alpha"], ["demo@market"]]
 
 
+
+def _assert_unrestricted(argv: list[str]) -> None:
+    """The shared permission flags, once, and nothing that narrows the tools or the permissions again."""
+    from loopx.agents.claude_cli import permission_args
+
+    flags = permission_args()
+    assert any(argv[i:i + len(flags)] == flags for i in range(len(argv)))
+    assert argv.count("--dangerously-skip-permissions") == 1
+    assert not {"--tools", "--allowedTools", "--disallowedTools", "--permission-mode"} & set(argv)
+
+
+class TestWorkerPermissions:
+    """A Worker and a Reviewer run like every agent: the shared permission flags and every tool."""
+
+    @pytest.mark.parametrize("verify", [False, True], ids=["worker", "reviewer"])
+    def test_the_command_carries_the_shared_permission_flags(self, agent_db: Any, verify: bool) -> None:
+        _, seen = _run_step(verify=verify)
+        _assert_unrestricted(seen["argv"])
+
+    def test_a_library_adds_no_tool_or_permission_flag(self, agent_db: Any, enabled_library: Any) -> None:
+        enabled_library(DEMO_PLUGIN, ALPHA_SKILL)
+        for verify in (False, True):
+            _, seen = _run_step(verify=verify)
+            assert len(plugin_dirs(seen["argv"])) == 2
+            _assert_unrestricted(seen["argv"])
+
 def activity(agent_db: Any) -> list[str]:
     return [str(call.kwargs.get("summary")) for call in agent_db.insert_activity.await_args_list]
 
