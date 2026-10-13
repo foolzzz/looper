@@ -18,6 +18,7 @@ from typing import Any
 
 import pytest
 
+from loopx.agents.agent_settings import DEFAULT_HARNESS_PROMPT
 from loopx.agents.bus import MessageBus
 from loopx.agents.claude_cli import ISOLATION_ID, isolation_args
 from loopx.agents.message import (
@@ -623,12 +624,16 @@ class TestResidentClaude:
         assert finishes[1]["output_text"].endswith("```")
 
 
-# --- The system prompt: role, project background, task, reply contract ---
+# --- The system prompt: harness, role, project background, task, reply contract ---
 
 
-def _project(name: str = "calc", *, background: str = "", description: str = "") -> dict[str, Any]:
+def _project(
+    name: str = "calc", *, background: str = "", description: str = "", planner_harness: str = "",
+    worker_harness: str = "",
+) -> dict[str, Any]:
     return {"id": "proj-1", "name": name, "description": description, "work_dir": "/srv/calc",
-            "background": background, "updated_at": "2026-10-13T12:00:00+00:00"}
+            "background": background, "planner_harness_prompt": planner_harness,
+            "worker_harness_prompt": worker_harness, "updated_at": "2026-10-13T12:00:00+00:00"}
 
 
 @pytest.fixture
@@ -636,8 +641,8 @@ def planner_row(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     """The ``planner`` agent config row; a test may change its prompt between turns."""
     from loopx.db import agent_configs
 
-    row = {"system_prompt": "You plan carefully.", "default_prompt": "You plan.", "timeout_seconds": 60,
-           "model": None, "max_turns": 0}
+    row: dict[str, Any] = {"system_prompt": "You plan carefully.", "default_prompt": "You plan.", "timeout_seconds": 60,
+                           "model": None, "max_turns": 0}
 
     async def _config(agent_id: str) -> dict[str, Any]:
         assert agent_id == "planner"
@@ -653,7 +658,7 @@ def _starts(agent_db: Any) -> list[dict[str, Any]]:
 
 @pytest.mark.usefixtures("agent_db", "planner_row")
 class TestSystemPrompt:
-    def test_the_layers_are_role_project_task_then_the_reply_contract(
+    def test_the_layers_are_harness_role_project_task_then_the_reply_contract(
         self, planner_claude: Any, agent_db: Any,
     ) -> None:
         agent_db.get_task_project.return_value = _project(background="Use uv.\nPython 3.12.")
@@ -661,15 +666,17 @@ class TestSystemPrompt:
         h = drive(claude, always(WORK_OK))
 
         (prompt,) = claude.prompts()
-        _in_order(prompt, "You plan carefully.\n\n", "## Project: calc\nUse uv.\nPython 3.12.\n\n",
-                  "## Task\n", "build the calc package", REPLY_CONTRACT)
-        assert prompt.startswith("You plan carefully.\n\n") and prompt.endswith(REPLY_CONTRACT)
+        _in_order(prompt, f"{DEFAULT_HARNESS_PROMPT}\n\n", "You plan carefully.\n\n",
+                  "## Project: calc\nUse uv.\nPython 3.12.\n\n", "## Task\n", "build the calc package", REPLY_CONTRACT)
+        assert prompt.startswith(f"{DEFAULT_HARNESS_PROMPT}\n\nYou plan carefully.\n\n")
+        assert prompt.endswith(REPLY_CONTRACT)
         agent_db.get_task_project.assert_awaited_with("t1")  # the task's project as it is now
         # Every turn records the system prompt it ran with, its hash and its layers.
         starts = _starts(agent_db)
         assert [s["metadata"]["system_prompt"] for s in starts] == [prompt, prompt]
         assert {s["metadata"]["system_prompt_sha256"] for s in starts} == {_sha(prompt)}
         layers = starts[0]["metadata"]["prompt_layers"]
+        assert layers["harness"] == {"source": "builtin_default", "sha256": _sha(DEFAULT_HARNESS_PROMPT)}
         assert layers["role"] == {"config_id": "planner", "sha256": _sha("You plan carefully."), "recommended": False}
         assert layers["project"] == {"id": "proj-1", "background_sha256": _sha("Use uv.\nPython 3.12."),
                                      "updated_at": "2026-10-13T12:00:00+00:00"}
@@ -695,7 +702,8 @@ class TestSystemPrompt:
         drive(claude, always(WORK_OK))
 
         (prompt,) = claude.prompts()
-        assert prompt.startswith("You plan carefully.\n\n## Task\n") and "## Project" not in prompt
+        assert prompt.startswith(f"{DEFAULT_HARNESS_PROMPT}\n\nYou plan carefully.\n\n## Task\n")
+        assert "## Project" not in prompt
         assert _starts(agent_db)[0]["metadata"]["prompt_layers"]["project"]["background_sha256"] is None
         assert not [line for line in activity(agent_db) if "background" in line]
 
@@ -754,8 +762,8 @@ class TestSystemPrompt:
 
         first, second = claude.argvs()
         first_prompt, second_prompt = claude.prompts()
-        assert first_prompt.startswith("You plan carefully.\n\n")
-        assert second_prompt.startswith("You plan very carefully.\n\n")
+        assert first_prompt.startswith(f"{DEFAULT_HARNESS_PROMPT}\n\nYou plan carefully.\n\n")
+        assert second_prompt.startswith(f"{DEFAULT_HARNESS_PROMPT}\n\nYou plan very carefully.\n\n")
         assert _flag(second, "--resume") == "sess-p"
         roles = [s["metadata"]["prompt_layers"]["role"]["sha256"] for s in _starts(agent_db)]
         assert roles == [_sha("You plan carefully."), _sha("You plan very carefully.")]
@@ -799,6 +807,128 @@ class TestSystemPrompt:
         (argv,) = claude.argvs()  # the system prompt did not change, so Claude was not restarted
         (prompt,) = claude.prompts()
         assert "## Project: calc\nv1\n\n" in prompt and "a calculator" in prompt
+
+
+def _settings(agent_db: Any, **stored: str) -> None:
+    """What the Settings table holds: harness, model, effort and env (a JSON list)."""
+    keys = {"harness": "agent.harness_prompt", "model": "agent.model", "effort": "agent.effort", "env": "agent.env"}
+    agent_db.get_settings.return_value = {keys[name]: value for name, value in stored.items()}
+
+
+def _between_turns(agent_db: Any, change: Callable[[], None]) -> Callable[[Harness], Awaitable[None]]:
+    """A scenario that makes ``change`` while the first step's Worker runs (after the plan turn)."""
+
+    async def scenario(h: Harness) -> None:
+        await h.start()
+        await h.until(lambda: h.held)
+        change()
+        await h.release(WORK_OK)
+        await h.finished()
+
+    return scenario
+
+
+@pytest.mark.usefixtures("agent_db", "planner_row")
+class TestHarnessAndLaunch:
+    """The Planner's harness is its project's Planner override, else the Settings
+    default; its model is its own row's, else the Settings default (opus). A
+    change to either, or to the Settings environment, restarts its Claude,
+    which resumes the session."""
+
+    def test_the_projects_planner_harness_comes_first(self, planner_claude: Any, agent_db: Any) -> None:
+        _settings(agent_db, harness="DEFAULT HARNESS")
+        agent_db.get_task_project.return_value = _project(planner_harness="PLAN LIKE AN ARCHITECT",
+                                                          worker_harness="WORK LIKE A CRAFTSMAN")
+        claude = planner_claude(plan(step("s1")), decide("accept"))
+        drive(claude, always(WORK_OK))
+
+        (prompt,) = claude.prompts()
+        assert prompt.startswith("PLAN LIKE AN ARCHITECT\n\nYou plan carefully.\n\n")
+        assert "DEFAULT HARNESS" not in prompt and "WORK LIKE A CRAFTSMAN" not in prompt
+        assert _starts(agent_db)[0]["metadata"]["prompt_layers"]["harness"] == {
+            "source": "project_override", "sha256": _sha("PLAN LIKE AN ARCHITECT"), "project_id": "proj-1"}
+
+    def test_without_an_override_the_settings_default_comes_first(self, planner_claude: Any, agent_db: Any) -> None:
+        _settings(agent_db, harness="DEFAULT HARNESS")
+        agent_db.get_task_project.return_value = _project(worker_harness="WORK LIKE A CRAFTSMAN")
+        claude = planner_claude(plan(step("s1")), decide("accept"))
+        drive(claude, always(WORK_OK))
+
+        (prompt,) = claude.prompts()
+        assert prompt.startswith("DEFAULT HARNESS\n\nYou plan carefully.\n\n")
+        assert _starts(agent_db)[0]["metadata"]["prompt_layers"]["harness"]["source"] == "system_default"
+
+    def test_a_changed_harness_restarts_claude_resuming_its_session(self, planner_claude: Any, agent_db: Any) -> None:
+        _settings(agent_db, harness="HARNESS V1")
+        claude = planner_claude(plan(step("s1")), decide("accept"))
+        drive(claude, hold_first(), _between_turns(agent_db, lambda: _settings(agent_db, harness="HARNESS V2")))
+
+        first, second = claude.argvs()
+        first_prompt, second_prompt = claude.prompts()
+        assert first_prompt.startswith("HARNESS V1\n\n") and second_prompt.startswith("HARNESS V2\n\n")
+        assert (_flag(first, "--resume"), _flag(second, "--resume")) == (None, "sess-p")
+
+    def test_the_model_is_opus_by_default_and_recorded(self, planner_claude: Any, agent_db: Any) -> None:
+        claude = planner_claude(plan(step("s1")), decide("accept"))
+        drive(claude, always(WORK_OK))
+
+        (argv,) = claude.argvs()
+        assert _flag(argv, "--model") == "opus" and "--effort" not in argv
+        assert {s["metadata"]["model_choice"]["source"] for s in _starts(agent_db)} == {"builtin_default"}
+
+    def test_the_planners_model_beats_the_settings_default(
+        self, planner_claude: Any, agent_db: Any, planner_row: dict[str, Any],
+    ) -> None:
+        _settings(agent_db, model="sonnet", effort="max")
+        planner_row["model"] = "claude-haiku-4-5"
+        claude = planner_claude(plan(step("s1")), decide("accept"))
+        drive(claude, always(WORK_OK))
+
+        (argv,) = claude.argvs()
+        assert (_flag(argv, "--model"), _flag(argv, "--effort")) == ("claude-haiku-4-5", "max")
+        assert _starts(agent_db)[0]["metadata"]["model_choice"] == {
+            "model": "claude-haiku-4-5", "source": "agent_override", "effort": "max"}
+
+    def test_a_changed_model_restarts_claude_resuming_its_session(self, planner_claude: Any, agent_db: Any) -> None:
+        _settings(agent_db, model="sonnet")
+        claude = planner_claude(plan(step("s1")), decide("accept"))
+        drive(claude, hold_first(), _between_turns(agent_db, lambda: _settings(agent_db, model="opus")))
+
+        first, second = claude.argvs()
+        assert (_flag(first, "--model"), _flag(second, "--model")) == ("sonnet", "opus")
+        assert _flag(second, "--resume") == "sess-p"
+        first_prompt, second_prompt = claude.prompts()
+        assert first_prompt == second_prompt  # the model alone restarted it
+        assert [s["metadata"]["model_choice"]["model"] for s in _starts(agent_db)] == ["sonnet", "opus"]
+
+    def test_a_changed_environment_restarts_claude_with_it(
+        self, planner_claude: Any, agent_db: Any, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        launched: list[dict[str, Any]] = []
+        real_exec = asyncio.create_subprocess_exec
+
+        async def _exec(*args: Any, **kwargs: Any) -> Any:
+            launched.append(kwargs)
+            return await real_exec(*args, **kwargs)
+
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", _exec)
+        _settings(agent_db, env=json.dumps([{"key": "LOOPX_TEST_FLAVOUR", "value": "mint"}]))
+        claude = planner_claude(plan(step("s1")), decide("accept"))
+        change = lambda: _settings(agent_db, env=json.dumps([{"key": "LOOPX_TEST_FLAVOUR", "value": "lime"}]))
+        drive(claude, hold_first(), _between_turns(agent_db, change))
+
+        assert [kwargs["env"]["LOOPX_TEST_FLAVOUR"] for kwargs in launched] == ["mint", "lime"]
+        first, second = claude.argvs()
+        assert first == [arg for arg in second if arg not in ("--resume", "sess-p")]  # same command, new env
+        assert _flag(second, "--resume") == "sess-p"
+        recorded = [s["metadata"]["env"]["keys"] for s in _starts(agent_db)]
+        assert recorded == [{"LOOPX_TEST_FLAVOUR": _sha("mint")}, {"LOOPX_TEST_FLAVOUR": _sha("lime")}]
+
+    def test_unchanged_settings_keep_one_process(self, planner_claude: Any, agent_db: Any) -> None:
+        _settings(agent_db, harness="H", model="sonnet", env=json.dumps([{"key": "LOOPX_TEST_FLAVOUR", "value": "x"}]))
+        claude = planner_claude(plan(step("s1")), decide("accept"))
+        drive(claude, always(WORK_OK))
+        assert len(claude.argvs()) == 1 and len(claude.turns()) == 2
 
 
 # --- Ending the task through the TaskRouter ---

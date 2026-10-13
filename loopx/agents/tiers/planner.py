@@ -16,8 +16,10 @@ plan; Workers make the changes). Each event is one user turn on it:
 
 Every reply ends with JSON that ``planner_protocol`` validates; code then
 does the dispatching. The system prompt is rebuilt for every turn from the
+harness (the project's Planner override, else the default in Settings), the
 ``planner`` config and the task's project as it is now (its background
-included); when it changes, Claude restarts and resumes its session. An invalid reply gets one repair turn. Planning that
+included); when it, the model or the Settings environment changes, Claude
+restarts and resumes its session. An invalid reply gets one repair turn. Planning that
 still fails fails the task; a decision that still fails falls back to the
 step's own verdict. When the task completes or fails, the Planner signals the
 TaskRouter, which tears it down and ends its Claude.
@@ -36,6 +38,8 @@ from pathlib import Path
 from typing import Any, TypeVar
 
 from ..bus import MessageBus
+from .. import agent_settings
+from ..agent_settings import BUILTIN_DEFAULTS, AgentDefaults, AgentType, Launch, resolve_harness, resolve_launch
 from ..claude_cli import ClaudeRunRecorder, ResidentClaude, isolation_args, system_prompt_args
 from ..system_prompt import SystemPrompt, build_system_prompt, is_recommended, plan_task_section
 from ..message import (
@@ -115,14 +119,16 @@ class PlannerSettings:
 
     system_prompt: str
     timeout_seconds: int  # per turn; 0 for no limit
-    model: str | None
+    model: str | None  # the planner's own model; None for the default in Settings
     max_turns: int  # 0 for no limit
     supervise_interval_seconds: int  # periodic SUPERVISE turn; 0 to turn off
     recommended: bool = True  # whether system_prompt is the recommended one (default_prompt)
+    defaults: AgentDefaults = BUILTIN_DEFAULTS  # the harness, model, effort and environment in Settings
 
 
 async def load_settings() -> PlannerSettings:
-    """Read the ``planner`` agent config; without a readable row use the defaults."""
+    """Read the ``planner`` agent config and the Settings defaults; without a readable row use the defaults."""
+    defaults = await agent_settings.load_defaults()
     try:
         config = await db_agent_configs.get_config("planner")
     except Exception:
@@ -131,6 +137,7 @@ async def load_settings() -> PlannerSettings:
     if config is None:
         return PlannerSettings(
             DEFAULT_SYSTEM_PROMPT, DEFAULT_TURN_TIMEOUT_SEC, None, 0, DEFAULT_SUPERVISE_INTERVAL_SEC,
+            defaults=defaults,
         )
     interval = config.get("supervise_interval_seconds")
     system_prompt = str(config.get("system_prompt") or "").strip() or DEFAULT_SYSTEM_PROMPT
@@ -143,6 +150,7 @@ async def load_settings() -> PlannerSettings:
         supervise_interval_seconds=(
             DEFAULT_SUPERVISE_INTERVAL_SEC if interval is None else max(0, int(interval))
         ),
+        defaults=defaults,
     )
 
 
@@ -195,6 +203,7 @@ class TaskPlan:
     project_name: str = ""
     project_description: str = ""
     project_background: str = ""
+    project_planner_harness: str = ""  # the project's harness for its Planner; '' for the default
     project_updated_at: str = ""  # the project's version, for the system prompt's record
     session_id: str | None = None  # the Planner's Claude session, resumed after a restart
     final_summary: str = ""  # the last accepted step's summary
@@ -262,6 +271,7 @@ class TaskPlan:
             "project_name": self.project_name,
             "project_description": self.project_description,
             "project_background": self.project_background,
+            "project_planner_harness": self.project_planner_harness,
             "project_updated_at": self.project_updated_at,
             "session_id": self.session_id,
             "final_summary": self.final_summary,
@@ -984,7 +994,7 @@ class PlannerAgent:
             finally:
                 self._last_turn_at = time.monotonic()
 
-    def _claude_command(self, prompt_file: Path, settings: PlannerSettings, work_dir: str) -> list[str]:
+    def _claude_command(self, prompt_file: Path, settings: PlannerSettings, launch: Launch, work_dir: str) -> list[str]:
         """The Planner's Claude, without ``--resume``: read-only tools, nothing else approved."""
         return [
             self._claude_bin,
@@ -1003,7 +1013,7 @@ class PlannerAgent:
             # None of the operator's personal settings, memory, hooks, plugins or MCP servers.
             *isolation_args(work_dir),
             *system_prompt_args(prompt_file),
-            *(["--model", settings.model] if settings.model else []),
+            *launch.args(),
             *(["--max-turns", str(settings.max_turns)] if settings.max_turns > 0 else []),
         ]
 
@@ -1013,17 +1023,19 @@ class PlannerAgent:
         assert plan is not None
         settings = await load_settings()
         system_prompt = self._system_prompt(plan, settings)
+        launch = resolve_launch(settings.defaults, settings.model)
         await self._note_background(plan.project_background)
         try:
             prompt_file = system_prompt.write_file(self._runtime_root)
         except OSError as exc:
             raise PlannerTurnError(f"cannot write the system prompt file: {exc}") from None
-        base = self._claude_command(prompt_file, settings, plan.work_dir)
-        # The file is named by its content's hash; the hash is kept beside it all the same.
-        signature = (tuple(base), system_prompt.sha256)
+        base = self._claude_command(prompt_file, settings, launch, plan.work_dir)
+        # The command carries the model and effort; the file is named by its content's hash, kept
+        # beside it all the same; the environment is compared by its hash.
+        signature = (tuple(base), system_prompt.sha256, launch.env_sha256)
         if self._claude.stale(signature):
-            # Claude exited, or the config, the project or the task changed:
-            # the next process resumes the session with the new prompt.
+            # Claude exited, or the config, the settings, the project or the task
+            # changed: the next process resumes the session with the new prompt.
             await self._claude.stop()
         start_error: str | None = None
         if self._claude.started:
@@ -1031,7 +1043,7 @@ class PlannerAgent:
         else:
             command = base + (["--resume", plan.session_id] if plan.session_id else [])
             try:
-                await self._claude.start(command, cwd=plan.work_dir, signature=signature)
+                await self._claude.start(command, cwd=plan.work_dir, signature=signature, env=launch.environment())
             except OSError as exc:
                 start_error = f"cannot start Claude Code: {exc}"
             else:
@@ -1047,6 +1059,7 @@ class PlannerAgent:
             session_id=plan.session_id,
             pid=self._claude.pid,
             system_prompt=system_prompt,
+            launch=launch,
         )
         await recorder.start()
         if start_error:
@@ -1097,12 +1110,14 @@ class PlannerAgent:
         return final_text
 
     def _system_prompt(self, plan: TaskPlan, settings: PlannerSettings) -> SystemPrompt:
-        """The role prompt, the project background, the task, then the reply contract."""
+        """The harness, the role prompt, the project background, the task, then the reply contract."""
         project = None
-        if plan.project_id or plan.project_name or plan.project_background:
+        if plan.project_id or plan.project_name or plan.project_background or plan.project_planner_harness:
             project = {"id": plan.project_id, "name": plan.project_name, "background": plan.project_background,
+                       "planner_harness_prompt": plan.project_planner_harness,
                        "updated_at": plan.project_updated_at}
         return build_system_prompt(
+            harness=resolve_harness(AgentType.PLANNER, settings.defaults, project=project),
             role_id="planner",
             role=settings.system_prompt,
             recommended=settings.recommended,
@@ -1369,6 +1384,7 @@ class PlannerAgent:
         plan.project_name = str(project.get("name") or "")
         plan.project_description = str(project.get("description") or "")
         plan.project_background = str(project.get("background") or "")
+        plan.project_planner_harness = str(project.get("planner_harness_prompt") or "")
         updated_at = project.get("updated_at")
         plan.project_updated_at = updated_at.isoformat() if hasattr(updated_at, "isoformat") else str(updated_at or "")
 
@@ -1434,6 +1450,7 @@ class PlannerAgent:
                         project_name=data.get("project_name", ""),
                         project_description=data.get("project_description", ""),
                         project_background=data.get("project_background", ""),
+                        project_planner_harness=data.get("project_planner_harness", ""),
                         project_updated_at=data.get("project_updated_at", ""),
                         session_id=data.get("session_id"),
                         final_summary=data.get("final_summary", ""),

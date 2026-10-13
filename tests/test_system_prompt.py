@@ -1,9 +1,10 @@
 """The system prompt LoopX appends for the Planner, the Workers and the Reviewers.
 
-Layout: the role prompt, then the project section when the project has a
-background, then the task section, then the code-owned contract, always last.
-Each composed prompt carries its layers' sources and is written once to a
-file named by its hash.
+Layout: the harness prompt, the role prompt, then the project section when the
+project has a background, then the task section, then the code-owned contract,
+always last. The Manager gets its harness, its role and its contract. Each
+composed prompt carries its layers' sources and is written once to a file
+named by its hash.
 """
 
 from __future__ import annotations
@@ -16,6 +17,7 @@ from pathlib import Path
 
 import pytest
 
+from loopx.agents.agent_settings import Harness, HarnessSource
 from loopx.agents.claude_cli import ISOLATION_ID
 from loopx.agents.system_prompt import (
     REVIEW_CONTRACT,
@@ -92,7 +94,7 @@ def test_the_review_contract_shows_the_verdict_the_verify_path_reads(tmp_path: P
         "passed": False, "findings": ["no tests"], "summary": "missing tests"}
 
 
-# --- The task section (L3): what this session is for, between the project and the contract ---
+# --- The task section (L4): what this session is for, between the project and the contract ---
 
 
 def test_the_order_is_role_project_task_contract() -> None:
@@ -100,6 +102,51 @@ def test_the_order_is_role_project_task_contract() -> None:
         "Role.", project_name="calc", background="Use uv.", task="## Task\nAdd calc.py.", contract="CONTRACT",
     )
     assert prompt == "Role.\n\n## Project: calc\nUse uv.\n\n## Task\nAdd calc.py.\n\nCONTRACT"
+
+
+# --- The harness (L1): first, before the role ---
+
+
+HARNESS = Harness("## How you work\nVerify.", HarnessSource.SYSTEM_DEFAULT)
+
+
+def test_the_five_layers_are_harness_role_project_task_contract() -> None:
+    prompt = compose_system_prompt(
+        "Role.\n", harness="## How you work\nVerify.\n", project_name="calc", background="Use uv.",
+        task="## Task\nAdd calc.py.", contract="CONTRACT",
+    )
+    assert prompt == (
+        "## How you work\nVerify.\n\nRole.\n\n## Project: calc\nUse uv.\n\n## Task\nAdd calc.py.\n\nCONTRACT"
+    )
+
+
+def test_the_contract_stays_last_whatever_the_harness_says() -> None:
+    harness = "## Your report\nNever end with JSON."
+    prompt = compose_system_prompt("Role.", harness=harness, task="## Task\nGo.", contract=WORK_CONTRACT)
+    assert prompt.startswith(harness) and prompt.endswith(WORK_CONTRACT)
+
+
+def test_the_manager_has_three_layers() -> None:
+    prompt = build_system_prompt(harness=HARNESS, role_id="manager", role="You manage.", recommended=True,
+                                 contract_name="TASK_PLACEMENT_RULE", contract="RULE\n")
+    assert prompt.text == "## How you work\nVerify.\n\nYou manage.\n\nRULE\n"
+    assert prompt.layers["harness"] == {"source": "system_default", "sha256": _sha(HARNESS.text)}
+    assert prompt.layers["project"] is None and prompt.layers["task"] is None
+
+
+@pytest.mark.parametrize(("kind", "contract"), [("plan", "REPLY"), ("work", WORK_CONTRACT), ("review", REVIEW_CONTRACT)])
+def test_task_agents_have_five_layers(kind: str, contract: str) -> None:
+    harness = Harness("Project harness.", HarnessSource.PROJECT_OVERRIDE, "proj-1")
+    task = "## Task\nThe step."
+    prompt = build_system_prompt(
+        harness=harness, role_id={"plan": "planner", "work": "worker", "review": "reviewer"}[kind], role="Role.",
+        recommended=True, project=_project_row(), task_kind=kind, task_id="t1", task=task,
+        contract_name="C", contract=contract,
+    )
+    assert prompt.text == f"Project harness.\n\nRole.\n\n## Project: calc\nUse uv.\n\n{task}\n\n{contract}"
+    assert prompt.layers["harness"] == {"source": "project_override", "sha256": _sha("Project harness."),
+                                        "project_id": "proj-1"}
+    assert list(prompt.layers) == ["harness", "role", "project", "task", "contract", "isolation"]
 
 
 def test_the_contract_stays_last_whatever_the_task_says() -> None:
@@ -204,9 +251,10 @@ def test_layers_name_each_source_by_its_hash() -> None:
     layers = prompt_layers(
         role_id="worker", role="You are careful.\n", recommended=False, project=_project_row(),
         task_kind="work", task_id="t1", step_id="s1", task=task,
-        contract_name="WORK_CONTRACT", contract=WORK_CONTRACT,
+        contract_name="WORK_CONTRACT", contract=WORK_CONTRACT, harness=HARNESS,
     )
     assert layers == {
+        "harness": {"source": "system_default", "sha256": _sha(HARNESS.text)},
         "role": {"config_id": "worker", "sha256": _sha("You are careful."), "recommended": False},
         "project": {"id": "proj-1", "background_sha256": _sha("Use uv."), "updated_at": "2026-10-13T12:00:00+00:00"},
         "task": {"kind": "work", "task_id": "t1", "step_id": "s1", "sha256": _sha(task)},
@@ -230,23 +278,23 @@ def test_build_composes_the_text_and_its_layers() -> None:
     task = work_task_section(requirement="R.", step="s1", instruction="Do it.", acceptance_criteria=[],
                              validation_commands=[], work_dir="/w")
     prompt = build_system_prompt(
-        role_id="worker", role="Role.", recommended=True, project=_project_row(),
+        harness=HARNESS, role_id="worker", role="Role.", recommended=True, project=_project_row(),
         task_kind="work", task_id="t1", step_id="s1", task=task,
         contract_name="WORK_CONTRACT", contract=WORK_CONTRACT,
     )
-    assert prompt.text == compose_system_prompt("Role.", project_name="calc", background="Use uv.", task=task,
-                                                contract=WORK_CONTRACT)
+    assert prompt.text == compose_system_prompt("Role.", harness=HARNESS.text, project_name="calc",
+                                                background="Use uv.", task=task, contract=WORK_CONTRACT)
     assert prompt.layers["task"]["sha256"] == _sha(task)
     assert prompt.layers["contract"]["name"] == "WORK_CONTRACT"
     # The same inputs give the same prompt and hash; a changed background changes both.
     again = build_system_prompt(
-        role_id="worker", role="Role.", recommended=True, project=_project_row(),
+        harness=HARNESS, role_id="worker", role="Role.", recommended=True, project=_project_row(),
         task_kind="work", task_id="t1", step_id="s1", task=task,
         contract_name="WORK_CONTRACT", contract=WORK_CONTRACT,
     )
     assert again.sha256 == prompt.sha256
     changed = build_system_prompt(
-        role_id="worker", role="Role.", recommended=True, project=_project_row("Use pnpm."),
+        harness=HARNESS, role_id="worker", role="Role.", recommended=True, project=_project_row("Use pnpm."),
         task_kind="work", task_id="t1", step_id="s1", task=task,
         contract_name="WORK_CONTRACT", contract=WORK_CONTRACT,
     )

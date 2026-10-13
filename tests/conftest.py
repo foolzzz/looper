@@ -161,13 +161,14 @@ _AGENT_DB_WRITES = (
     ("llm_records", "update_event"),
 )
 
-# Reads the Manager and the Planner make, answered as a database that holds no projects yet.
+# Reads the agents make, answered as a database that holds no projects and no settings yet.
 _AGENT_DB_READS = (
     ("projects", "list_projects", []),
     ("projects", "find_project_by_name", None),
     ("projects", "get_project", None),
     ("projects", "get_task_project", None),
     ("activity", "list_activity", []),
+    ("system_settings", "get_settings", {}),
 )
 
 
