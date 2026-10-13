@@ -16,6 +16,7 @@ from loopx.doctor import (
     python_distribution_install,
 )
 from loopx.doctor_git import git_revision_relation, trusted_release_ref_for_root
+from loopx.install_contract import NO_CLONE_INSTALL_URL
 
 
 class _FakeDistributionFile:
@@ -208,10 +209,7 @@ def test_main_channel_upgrade_command_preserves_source_ref(tmp_path: Path) -> No
         assert "pwsh -NoLogo -NoProfile -File" in command
         assert "install-windows.ps1" in command
     else:
-        assert (
-            "curl -fsSL https://loopx-project.github.io/loopx/install.sh "
-            "| env LOOPX_REF=main bash"
-        ) in command
+        assert f"curl -fsSL {NO_CLONE_INSTALL_URL} | env LOOPX_REF=main bash" in command
     assert freshness["upgrade_command"] == command
 
 
@@ -232,7 +230,7 @@ def test_stable_channel_upgrade_command_keeps_public_default(tmp_path: Path) -> 
     if os.name == "nt":
         assert "install-windows.ps1" in command
     else:
-        assert "loopx-project.github.io/loopx/install.sh | bash" in command
+        assert f"curl -fsSL {NO_CLONE_INSTALL_URL} | bash" in command
     assert freshness["upgrade_command"] == command
 
 
@@ -352,12 +350,15 @@ def test_python_distribution_uses_pip_native_upgrade_path(tmp_path: Path) -> Non
     assert freshness["requires_upgrade"] is False
     assert freshness["install_kind"] == "python_distribution"
     assert freshness["python_distribution_version"] == "0.4.8"
-    assert "-m pip install --upgrade loopx" in str(freshness["upgrade_command"])
+    # PyPI's `loopx` is another distribution, so pip upgrades go through
+    # `loopx update apply`, which installs this project's release wheel.
+    assert str(freshness["upgrade_command"]).startswith("loopx update apply\n")
+    assert "pip install" not in str(freshness["upgrade_command"])
     assert "loopx workflow-skills --install" in str(freshness["upgrade_command"])
     if os.name == "nt":
         assert "install-windows.ps1" in str(freshness["no_clone_upgrade_command"])
     else:
-        assert "loopx-project.github.io" in str(freshness["no_clone_upgrade_command"])
+        assert NO_CLONE_INSTALL_URL in str(freshness["no_clone_upgrade_command"])
 
 
 def test_pipx_distribution_preserves_the_pipx_owner(tmp_path: Path) -> None:

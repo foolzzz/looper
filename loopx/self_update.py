@@ -8,7 +8,7 @@ import re
 import shlex
 import subprocess
 import sys
-from typing import Any
+from typing import Any, NamedTuple
 from urllib.parse import quote
 from urllib.request import Request, urlopen
 
@@ -17,13 +17,13 @@ from .activation_qualification import (
     runtime_activation_qualification,
 )
 from .doctor import collect_doctor
-from .install_contract import NO_CLONE_INSTALL_URL
+from .install_contract import LOOPX_SOURCE_REPOSITORY, NO_CLONE_INSTALL_URL
 from .runtime_activation import restart_services_for_runtime_activation
 from .self_update_download import run_archive_installer
 
 
 UPDATE_PLAN_SCHEMA_VERSION = "loopx_update_plan_v0"
-DEFAULT_UPDATE_REPO = "michaelx1993/loopx"
+DEFAULT_UPDATE_REPO = LOOPX_SOURCE_REPOSITORY
 DEFAULT_UPDATE_REF = "main"
 ROLLBACK_PREVIOUS_ALIAS = "previous"
 SOURCE_VERSION_CHECK_SCHEMA_VERSION = "loopx_source_version_check_v0"
@@ -876,8 +876,22 @@ def build_update_plan(
     }
 
 
-def _latest_wheel_url(repo: str = DEFAULT_UPDATE_REPO) -> str | None:
-    """Fetch the latest .whl asset URL from a GitHub Release."""
+class ReleaseWheelStatus(StrEnum):
+    """Outcome of looking up the wheel asset of the latest GitHub release."""
+
+    FOUND = "found"
+    NO_RELEASE_WHEEL = "no_release_wheel"
+    RELEASE_LOOKUP_FAILED = "release_lookup_failed"
+
+
+class ReleaseWheelLookup(NamedTuple):
+    status: ReleaseWheelStatus
+    url: str | None = None
+    failure: str | None = None
+
+
+def _lookup_latest_wheel(repo: str = DEFAULT_UPDATE_REPO) -> ReleaseWheelLookup:
+    """Find the .whl asset of the latest GitHub release of ``repo``."""
     api_url = f"https://api.github.com/repos/{repo}/releases/latest"
     req = Request(api_url, headers={"Accept": "application/vnd.github+json"})
     try:
@@ -885,10 +899,72 @@ def _latest_wheel_url(repo: str = DEFAULT_UPDATE_REPO) -> str | None:
             data = json.loads(resp.read())
         for asset in data.get("assets", []):
             if asset["name"].endswith(".whl"):
-                return asset["browser_download_url"]
-    except Exception:
-        pass
-    return None
+                return ReleaseWheelLookup(
+                    ReleaseWheelStatus.FOUND, url=asset["browser_download_url"]
+                )
+    except Exception as exc:  # Unreachable API and malformed bodies alike.
+        return ReleaseWheelLookup(
+            ReleaseWheelStatus.RELEASE_LOOKUP_FAILED, failure=type(exc).__name__
+        )
+    return ReleaseWheelLookup(ReleaseWheelStatus.NO_RELEASE_WHEEL)
+
+
+def _latest_wheel_url(repo: str = DEFAULT_UPDATE_REPO) -> str | None:
+    """Fetch the latest .whl asset URL from a GitHub Release."""
+    return _lookup_latest_wheel(repo).url
+
+
+def _release_tag_install_steps(repo: str) -> tuple[str, str]:
+    checkout = repo.rsplit("/", 1)[-1]
+    return (
+        f"git clone https://github.com/{repo}.git && cd {checkout} "
+        "&& git checkout vX.Y.Z",
+        "uv sync",
+    )
+
+
+def _python_distribution_update_without_wheel(
+    payload: dict[str, Any],
+    *,
+    driver: object,
+    repo: str,
+    lookup: ReleaseWheelLookup,
+) -> dict[str, Any]:
+    """Fail closed: the package index's `loopx` is not this distribution."""
+
+    clone, sync = _release_tag_install_steps(repo)
+    if lookup.status is ReleaseWheelStatus.NO_RELEASE_WHEEL:
+        cause = f"The latest {repo} release has no wheel asset"
+        alternative = f"or wait for a {repo} release that carries a wheel"
+    else:
+        cause = (
+            f"The update could not read the latest {repo} release ({lookup.failure})"
+        )
+        alternative = "or retry when GitHub is reachable"
+    message = (
+        f"{cause}, so nothing was installed. Install from a release tag instead "
+        f"(`{clone}`, then `{sync}`), {alternative}."
+    )
+    updated = dict(payload)
+    updated["ok"] = False
+    updated["changes_applied"] = False
+    updated["execution"] = {
+        "driver": driver,
+        "status": lookup.status.value,
+        "release_repo": repo,
+        "python_executable": sys.executable,
+        "install_returncode": None,
+    }
+    updated["error"] = message
+    updated["recommended_action"] = message
+    updated["next_action"] = {
+        "kind": "install_from_release_tag",
+        "command": f"{clone}\n{sync}",
+        "mutating": True,
+        "requires_explicit_approval": True,
+        "reason": message,
+    }
+    return updated
 
 
 def _execute_python_distribution_update(
@@ -902,22 +978,17 @@ def _execute_python_distribution_update(
         else {}
     )
     driver = lifecycle.get("execution_driver")
-    package_manager_environment = lifecycle.get("package_manager_environment")
-    wheel_url = _latest_wheel_url()
-    if wheel_url:
-        install_target = f"loopx @ {wheel_url}"
-        install_command = (
-            ["pipx", "install", "--force", install_target]
-            if driver == "python_pipx"
-            else [sys.executable, "-m", "pip", "install", "--upgrade", install_target]
+    lookup = _lookup_latest_wheel(DEFAULT_UPDATE_REPO)
+    if lookup.url is None:
+        return _python_distribution_update_without_wheel(
+            payload, driver=driver, repo=DEFAULT_UPDATE_REPO, lookup=lookup
         )
-    else:
-        pkg = str(package_manager_environment or "loopx")
-        install_command = (
-            ["pipx", "upgrade", pkg]
-            if driver == "python_pipx"
-            else [sys.executable, "-m", "pip", "install", "--upgrade", "loopx"]
-        )
+    install_target = f"loopx @ {lookup.url}"
+    install_command = (
+        ["pipx", "install", "--force", install_target]
+        if driver == "python_pipx"
+        else [sys.executable, "-m", "pip", "install", "--upgrade", install_target]
+    )
     commands = {
         "install": install_command,
         "workflow_skills": [
@@ -1525,6 +1596,8 @@ def render_update_plan_markdown(payload: dict[str, Any]) -> str:
                 f"- Doctor return code: `{execution.get('doctor_returncode')}`",
             ]
         )
+        if execution.get("status"):
+            lines.append(f"- Status: `{execution.get('status')}`")
         download = execution.get("installer_download")
         if isinstance(download, dict):
             lines.append(f"- Installer stage: `{download.get('stage')}`")

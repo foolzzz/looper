@@ -38,13 +38,14 @@ def resolve_python_install_owner(
 def python_distribution_upgrade_command(
     *,
     owner: PythonInstallOwner,
-    python_executable: str,
     doctor_command: str,
 ) -> str | None:
     if owner.manager == "pipx":
         package_command = f"pipx upgrade {shlex.quote(owner.environment or 'loopx')}"
     elif owner.manager == "pip":
-        package_command = f"{shlex.quote(python_executable)} -m pip install --upgrade loopx"
+        # PyPI's `loopx` is a different distribution; `loopx update apply`
+        # installs this project's release wheel with the same interpreter's pip.
+        package_command = "loopx update apply"
     else:
         return None
     return (

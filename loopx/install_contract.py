@@ -1,6 +1,12 @@
-NO_CLONE_INSTALL_URL = "https://raw.githubusercontent.com/michaelx1993/loopx/main/install.sh"
+# The GitHub repository whose releases and installer LoopX installs from.
+LOOPX_SOURCE_REPOSITORY = "foolzzz/loopx"
+LOOPX_SOURCE_CLONE_URL = f"https://github.com/{LOOPX_SOURCE_REPOSITORY}.git"
 
-DEFAULT_INSTALL_COMMAND = "curl -fsSL https://raw.githubusercontent.com/michaelx1993/loopx/main/install.sh | bash"
+NO_CLONE_INSTALL_URL = (
+    f"https://raw.githubusercontent.com/{LOOPX_SOURCE_REPOSITORY}/main/install.sh"
+)
+
+DEFAULT_INSTALL_COMMAND = f"curl -fsSL {NO_CLONE_INSTALL_URL} | bash"
 DEFAULT_WORKFLOW_SKILL_INSTALL_COMMAND = "loopx workflow-skills --install"
 DEFAULT_INSTALL_REPAIR_COMMAND = (
     f"{DEFAULT_INSTALL_COMMAND}\n"

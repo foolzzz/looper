@@ -353,7 +353,6 @@ def build_install_freshness(
     ) if distribution_install else None
     upgrade_command = python_distribution_upgrade_command(
         owner=distribution_owner,
-        python_executable=sys.executable,
         doctor_command=f"loopx doctor{doctor_agent_arg}",
     ) if distribution_owner else no_clone_command
     manifest_source_git_commit = manifest_source.get("git_commit")
@@ -1133,8 +1132,8 @@ def collect_doctor(
             and agent_type_uses_host_managed_skills(canonical_agent_type)
             else (
                 "Run `loopx workflow-skills --install`, then "
-                "`loopx slash-commands --install`, and rerun doctor. Upgrade this "
-                f"installation with `{shlex.quote(sys.executable)} -m pip install --upgrade loopx`."
+                "`loopx slash-commands --install`, and rerun doctor. Review this "
+                "installation's upgrade path with `loopx update plan`."
                 if python_distribution.get("available")
                 else (
                     f"Run `{local_install_command(repo_root, skip_skills=externally_managed_skills)}` "

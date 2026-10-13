@@ -41,6 +41,33 @@ class FakeVersionResponse:
         return self.body[:limit]
 
 
+RELEASE_WHEEL_URL = (
+    "https://github.com/foolzzz/loopx/releases/download/v9.9.9/"
+    "loopx-9.9.9-py3-none-any.whl"
+)
+RELEASE_WHEEL_ASSET = {"name": "loopx-9.9.9-py3-none-any.whl", "browser_download_url": RELEASE_WHEEL_URL}
+RELEASE_SDIST_ASSET = {
+    "name": "loopx-9.9.9.tar.gz",
+    "browser_download_url": "https://github.com/foolzzz/loopx/releases/download/v9.9.9/loopx-9.9.9.tar.gz",
+}
+
+
+class FakeReleaseResponse:
+    """The `releases/latest` body of the GitHub REST API."""
+
+    def __init__(self, assets: list[dict[str, str]]) -> None:
+        self.body = json.dumps({"tag_name": "v9.9.9", "assets": assets}).encode()
+
+    def __enter__(self) -> FakeReleaseResponse:
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        return None
+
+    def read(self, *_args: object) -> bytes:
+        return self.body
+
+
 def doctor_payload(
     *,
     installed_commit: str | None = INSTALLED_COMMIT,
@@ -420,7 +447,7 @@ def test_python_distribution_apply_uses_the_owning_interpreter_pip() -> None:
     doctor["install_freshness"]["install_kind"] = "python_distribution"
     doctor["install_freshness"]["python_distribution_installer"] = "pip"
     doctor["install_freshness"]["upgrade_command"] = (
-        "/managed/python -m pip install --upgrade loopx\n"
+        "loopx update apply\n"
         "loopx workflow-skills --install\n"
         "loopx slash-commands --install\n"
         "loopx doctor"
@@ -444,7 +471,7 @@ def test_python_distribution_apply_uses_the_owning_interpreter_pip() -> None:
         "owner_upgrade_command": doctor["install_freshness"]["upgrade_command"],
     }
     assert payload["commands"]["apply"] == "loopx update apply"
-    assert payload["commands"]["owner_upgrade"].startswith("/managed/python -m pip")
+    assert payload["commands"]["owner_upgrade"].startswith("loopx update apply\n")
     assert payload["plan"]["install_command"] == payload["commands"]["owner_upgrade"]
     assert payload["plan"]["mutates_release_install"] is True
     assert payload["plan"]["backup"]["rollback_version"] == __version__
@@ -458,6 +485,10 @@ def test_python_distribution_apply_uses_the_owning_interpreter_pip() -> None:
         stderr="",
     )
     with (
+        mock.patch(
+            "loopx.self_update.urlopen",
+            return_value=FakeReleaseResponse([RELEASE_SDIST_ASSET, RELEASE_WHEEL_ASSET]),
+        ),
         mock.patch(
             "loopx.self_update.subprocess.run",
             side_effect=[passed, passed, passed, passed, passed],
@@ -479,13 +510,13 @@ def test_python_distribution_apply_uses_the_owning_interpreter_pip() -> None:
         "pip",
         "install",
         "--upgrade",
-        "loopx",
+        f"loopx @ {RELEASE_WHEEL_URL}",
     ]
     assert run.call_args_list[1].args[0][3:5] == ["workflow-skills", "--install"]
     assert run.call_args_list[2].args[0][3:5] == ["slash-commands", "--install"]
 
 
-def test_pipx_distribution_apply_preserves_the_pipx_environment() -> None:
+def test_pipx_distribution_apply_installs_the_release_wheel() -> None:
     doctor = doctor_payload()
     doctor["package"] = {"install_kind": "python_distribution"}
     doctor["install_freshness"].update(
@@ -507,6 +538,10 @@ def test_pipx_distribution_apply_preserves_the_pipx_environment() -> None:
     passed = subprocess.CompletedProcess([], 0, '{"ok": true}', "")
     with (
         mock.patch(
+            "loopx.self_update.urlopen",
+            return_value=FakeReleaseResponse([RELEASE_WHEEL_ASSET]),
+        ),
+        mock.patch(
             "loopx.self_update.subprocess.run",
             side_effect=[passed, passed, passed, passed, passed],
         ) as run,
@@ -518,7 +553,85 @@ def test_pipx_distribution_apply_preserves_the_pipx_environment() -> None:
         result = execute_update_plan(payload)
 
     assert result["ok"] is True
-    assert run.call_args_list[0].args[0] == ["pipx", "upgrade", "loopx-preview"]
+    assert run.call_args_list[0].args[0] == [
+        "pipx",
+        "install",
+        "--force",
+        f"loopx @ {RELEASE_WHEEL_URL}",
+    ]
+
+
+def python_distribution_apply_plan(installer: str) -> dict[str, object]:
+    doctor = doctor_payload()
+    doctor["package"] = {"install_kind": "python_distribution", "release_root": None}
+    doctor["install_freshness"].update(
+        {
+            "install_kind": "python_distribution",
+            "python_distribution_installer": installer,
+            "upgrade_command": "loopx update apply\nloopx doctor",
+        }
+    )
+    return build_update_plan(action="apply", doctor_payload=doctor)
+
+
+@pytest.mark.parametrize("installer", ["pip", "pipx"])
+def test_python_distribution_apply_without_release_wheel_installs_nothing(
+    installer: str,
+) -> None:
+    payload = python_distribution_apply_plan(installer)
+    assert payload["ok"] is True
+
+    run = mock.Mock(return_value=subprocess.CompletedProcess([], 0, '{"ok": true}', ""))
+    restart = mock.Mock(return_value=[])
+    with (
+        mock.patch(
+            "loopx.self_update.urlopen",
+            return_value=FakeReleaseResponse([RELEASE_SDIST_ASSET]),
+        ) as lookup,
+        mock.patch("loopx.self_update.subprocess.run", run),
+        mock.patch("loopx.runtime_activation.restart_managed_loopx_services", restart),
+    ):
+        result = execute_update_plan(payload)
+
+    # Without a release wheel no package-manager command may run: the old
+    # fallback installed the unrelated upstream `loopx` package from PyPI.
+    run.assert_not_called()
+    restart.assert_not_called()
+    assert lookup.call_args.args[0].full_url == (
+        "https://api.github.com/repos/foolzzz/loopx/releases/latest"
+    )
+    assert result["ok"] is False
+    assert result["changes_applied"] is False
+    assert result["execution"]["status"] == "no_release_wheel"
+    message = result["recommended_action"]
+    assert "latest foolzzz/loopx release has no wheel" in message
+    assert "nothing was installed" in message
+    assert "git clone https://github.com/foolzzz/loopx.git" in message
+    assert "git checkout vX.Y.Z" in message
+    assert "uv sync" in message
+    assert result["error"] == message
+    assert result["next_action"]["kind"] == "install_from_release_tag"
+    assert result["next_action"]["requires_explicit_approval"] is True
+
+
+def test_python_distribution_apply_without_release_metadata_installs_nothing() -> None:
+    payload = python_distribution_apply_plan("pip")
+
+    run = mock.Mock(return_value=subprocess.CompletedProcess([], 0, "", ""))
+    with (
+        mock.patch("loopx.self_update.urlopen", side_effect=OSError("offline")),
+        mock.patch("loopx.self_update.subprocess.run", run),
+    ):
+        result = execute_update_plan(payload)
+
+    run.assert_not_called()
+    assert result["ok"] is False
+    assert result["changes_applied"] is False
+    assert result["execution"]["status"] == "release_lookup_failed"
+    message = result["recommended_action"]
+    assert "could not read the latest foolzzz/loopx release (OSError)" in message
+    assert "nothing was installed" in message
+    assert "git clone https://github.com/foolzzz/loopx.git" in message
 
 
 @pytest.mark.skipif(
