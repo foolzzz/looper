@@ -135,4 +135,3 @@ than attaching private fixtures, snapshot identifiers, raw output or infrastruct
 - [ ] I did not duplicate maintainer-owned benchmark work unless a maintainer split out a public issue for it.
 - [ ] I kept the change scoped to the linked issue/task.
 - [ ] I completed the visual evidence section for UI changes, or marked UI impact `none`.
-- [ ] Every commit includes a DCO `Signed-off-by` trailer (`git commit -s`).
