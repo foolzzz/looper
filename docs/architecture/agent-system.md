@@ -25,15 +25,18 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
   default. Without a project name, or without any directory, the Manager asks
   instead of creating the task
 - Maintains chat conversation context per session
-- Runs one resident Claude process, started on the first chat message:
+- Runs one resident Claude process through `ResidentClaude`
+  (`loopx/agents/claude_cli.py`), which each task's Planner uses too, started
+  on the first chat message:
   `claude --print --verbose --output-format stream-json --input-format stream-json --include-partial-messages --append-system-prompt <prompt> [--resume <session_id>]`.
   Each chat message is one user turn on its stdin and ends at that turn's
   `result`; messages are handled one at a time, and each turn is one Runs
   record. Claude's `total_cost_usd` is its process's running total, so a
-  record's cost is the increase since the previous turn. When Claude exits (or dies mid-turn, which answers that message with
-  an error) or the Manager's system prompt changes, the next message starts a
-  new process that resumes the saved session with `--resume`. Stopping the
-  Manager closes Claude's stdin and kills it if it is still running after 5 s
+  record's cost is the increase since the previous turn. When Claude exits
+  (or dies mid-turn, which answers that message with an error) or the
+  Manager's system prompt changes, the next message starts a new process that
+  resumes the saved session with `--resume`. Stopping the Manager closes
+  Claude's stdin and kills it if it is still running after 5 s
 
 ### TaskRouter (`loopx/agents/tiers/task.py`)
 
@@ -57,15 +60,61 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
 
 ### Planner (`loopx/agents/tiers/planner.py`)
 
-- Decomposes task requirements into executable steps (`PlanStep`)
-- Dispatches steps to Worker agents
-- Monitors step completion and runs verification
-- Reports task status back to TaskRouter
-- Takes chat messages from the Chat page. The Planner has no LLM of its own.
-  While a step's Worker is running, the message is passed to that Worker as its
-  next user turn (`WORKER_INPUT`, confirmed by `WORKER_INPUT_RESULT`). Otherwise,
-  or if the Worker has just finished, it becomes a new step after the steps in
-  progress.
+- One Planner per task for the task's whole run. It is a Claude Code agent: it
+  plans the steps, decides what happens after every Worker and Reviewer
+  result, and answers chat messages about the task. Code validates its
+  replies and does the dispatching; Workers make the changes, one Claude
+  process per step attempt.
+- Keeps one resident Claude process through `ResidentClaude`, like the
+  Manager, started on the task's first turn in the task's `work_dir`:
+  `claude --print --verbose --output-format stream-json --input-format stream-json --include-partial-messages --tools Read,Grep,Glob --allowedTools Read,Grep,Glob --permission-mode dontAsk --strict-mcp-config --append-system-prompt <prompt> [--model M] [--max-turns N] [--resume <session_id>]`.
+  Only Read, Grep and Glob exist and are approved, `dontAsk` denies anything
+  else without asking, and no MCP server loads; it never gets
+  `--dangerously-skip-permissions`. Checked with Claude Code 2.1.285: the init
+  event lists only Glob, Grep and Read and no MCP servers, and a Write made
+  available is still denied in don't-ask mode.
+- Each event is one user turn; turns run one at a time:
+  - `[PLAN]` on `TASK_REQUEST`: Claude may read the project, then splits the
+    requirement into 1–8 steps (`MAX_STEPS`), each with `id`, `instruction`,
+    `acceptance_criteria`, `depends_on` and `review` (whether an independent
+    Reviewer must pass it).
+  - `[DECISION]` after every Worker result and every Reviewer result:
+    `accept`, `review`, `retry`, `replan` or `fail` (see
+    [How a task runs](#how-a-task-runs)).
+  - `[CHAT]` on a user chat message: a reply and at most one action: `none`,
+    `forward` (pass text to the Worker of a running step) or `add_steps`.
+    Events are handled in arrival order, so a message sent during another
+    turn waits for it; one that arrives before the task has a plan, or after
+    it ended, is answered without a turn.
+- Reply contract (`loopx/agents/tiers/planner_protocol.py`): code appends
+  `REPLY_CONTRACT` to the editable role prompt. Every reply ends with exactly
+  one ```` ```json ```` fenced object, parsed into typed dataclasses and enums
+  and validated against the current plan: no unknown keys, unique step ids,
+  `depends_on` naming known steps without cycles, at most 8 steps (dropped
+  steps that ran count too), only the decisions allowed for that result, at
+  most 2 retries per step, and started steps never changed. An invalid reply
+  gets one repair turn that names the error.
+- Failures:
+  - Planning that still fails (an invalid reply after the repair turn, a
+    Claude error, a turn timeout, Claude that cannot start, an unusable work
+    directory) fails the task, with the reason in `tasks.error` and the
+    activity. There is no single-step fallback.
+  - A decision turn that still fails falls back to the step's own verdict
+    (the Worker's fail-closed verdict, or the Reviewer's), spawns no Reviewer,
+    and logs `Warning: the Planner could not decide ...` as an `error`
+    activity.
+  - A chat turn that fails answers the user with the error and takes no
+    action.
+  - When Claude dies, its turn fails and the next turn starts a new process
+    with `--resume <session_id>`; the session id is kept in the Planner's plan
+    file under `.local/planner/`.
+- Each turn is one `llm_records` row with agent_id `planner-<task_id>`, the
+  `task_id`, its own cost and `metadata.pid`. The activity gets short
+  summaries: `Planner Claude Code started (pid N...)`, `Plan created: ...`,
+  `Planner decision on step N (s2): accept: ...`, `Plan changed: ...`.
+- The TaskRouter calls `PlannerAgent.stop()`, which ends its Claude, when the
+  task ends (completed, failed, stopped or cancelled) and when the server
+  stops.
 
 ### WorkerPool (`loopx/agents/tiers/worker.py`)
 
@@ -107,13 +156,68 @@ Key message types:
 
 | Type | Direction | Purpose |
 |---|---|---|
+| `USER_MESSAGE` | Channel → Manager, or Web Chat → a task's Planner | User chat message |
+| `AGENT_REPLY` | Manager or Planner → Channel | Reply to the user |
 | `TASK_REQUEST` | Manager → TaskRouter → Planner | Create/dispatch task |
+| `TASK_ACCEPTED` | Planner → TaskRouter → Manager | Plan made, with its step count |
 | `TASK_CANCEL` | HTTP → TaskRouter → Planner | Terminate task permanently |
 | `TASK_STOP` | HTTP → TaskRouter | Pause task (preserves state) |
 | `TASK_RESTART` | HTTP → TaskRouter | Resume stopped/failed task |
 | `GOAL_STATUS` | Planner → TaskRouter → Manager | Report progress/completion |
 | `WORK_ITEM` | Planner → Worker | Dispatch step |
 | `WORK_RESULT` | Worker → Planner | Step result |
+| `VERIFY_REQUEST` | Planner → Reviewer | Review a step's result |
+| `VERIFY_RESULT` | Reviewer → Planner | Review verdict (`passed`, findings) |
+| `WORKER_INPUT` | Planner → running Worker | Forwarded user text as the Worker's next user turn |
+| `WORKER_INPUT_RESULT` | WorkerPool → Planner | Whether that text was delivered |
+
+## How a task runs
+
+1. The Manager sends `TASK_REQUEST` to the TaskRouter, which records the task,
+   creates its Planner (or queues the task at `MAX_CONCURRENT_TASKS`) and
+   forwards the request.
+2. Plan turn: the Planner creates the task's directory if needed, starts its
+   Claude and asks `[PLAN]`. The steps go to `task_steps`, the activity gets
+   `Plan created: ...`, and `TASK_ACCEPTED` reports the step count to the
+   Manager.
+3. Dispatch: every step whose `depends_on` steps are all verified goes as
+   `WORK_ITEM` to a new Worker, up to 4 running at once per task. Steps
+   without a dependency between them may run at the same time in the same
+   directory.
+4. Decision turn: every `WORK_RESULT` and `VERIFY_RESULT` gets a `[DECISION]`
+   turn whose message lists the decisions allowed now:
+   - `accept` only when the result can be accepted: the Worker completed and
+     the step needs no review, or the Reviewer passed. The step is verified,
+     and its `summary` becomes the task's result unless a later accept
+     replaces it.
+   - `review` only after a successful Worker result. A new Reviewer gets
+     `VERIFY_REQUEST` with the step's instruction, the Worker's result and the
+     acceptance criteria. A step with `review` set in the plan, or sent to
+     review once, needs a passing review before it can be accepted, also after
+     a retry.
+   - `retry` sends the same step to a new Worker with the feedback appended to
+     its instruction; at most 2 retries per step.
+   - `replan` replaces every step that has not started; started steps cannot
+     change. The current step counts as verified if its result can be
+     accepted, and is dropped (`skipped`) otherwise.
+   - `fail` fails the task with the given reason.
+5. Chat: a message to the Planner gets a `[CHAT]` turn. Claude replies, and
+   may `forward` text to a running step's Worker (`WORKER_INPUT`, confirmed by
+   `WORKER_INPUT_RESULT` within 5 s) or `add_steps`, which are dispatched once
+   ready. Text that arrives after its Worker finished is kept and shown to
+   Claude in that step's decision turn.
+6. Completion: when every step is verified or dropped, the Planner sends
+   `GOAL_STATUS` `completed` with the last accepted step's summary (or a
+   generated per-step summary). The TaskRouter writes it to
+   `tasks.result_summary` and forwards it to the Manager, which tells the
+   origin channel; it then stops the Planner, which ends its Claude, and
+   starts a queued task.
+7. Failure: a `fail` decision, a step that fails by its own verdict after a
+   decision turn failed, or planning that cannot finish (see the Planner's
+   failures above) sends `GOAL_STATUS` `failed` with the Planner's failure
+   summary, which the TaskRouter writes to `tasks.error`; the Planner is
+   stopped the same way. Starting a stopped or failed task again plans it
+   anew in a new Planner session.
 
 ## Task Lifecycle
 
@@ -166,12 +270,12 @@ Single-page React app served from `web/dist/` via the built-in HTTP server
 
 ### Pages
 
-- **Chat**: Every agent and its messages, finished ones included. The selector lists the global Manager and the 30 most recent tasks; each task shows its one Planner and the Worker (and Reviewer, when verified) of each step. You can send to the Manager and to a running task's Planner, which keeps one thread per task; SSE streaming. A Worker or Reviewer shows its Claude runs read-only, following a running one live, and points to its task's Planner for sending.
+- **Chat**: Every agent and its messages, finished ones included. The selector lists the global Manager and the 30 most recent tasks; each task shows its one Planner and the Worker (and Reviewer, when reviewed) of each step. You can send to the Manager and to a running task's Planner, which keeps one thread per task; SSE streaming. A selected Planner also shows its Claude runs, one per turn, in a folded list of the latest 10 beside its activity and chat thread, re-read as a reply starts and ends and every 10 s while the task runs. A Worker or Reviewer shows its Claude runs read-only, following a running one live, and points to its task's Planner for sending.
 - **Tasks**: Task list with project and status filters, time display, Start/Stop/Delete controls. `#tasks?project=<id>` filters by a project and shows its name, description and default directory, with Edit, and Delete while it has no tasks. A new task picks an existing project or creates one in the same form; its work directory may stay empty when the project has a default. A task's detail view can move it to another project in any status.
 - **Projects (sidebar)**: Below the navigation, every project with its task count (or a spinner with its active count); clicking one opens the Tasks page filtered by it, and `+` creates a project.
 - **Task Detail**: Overview (steps, agent timeline, live activity feed), Pipeline DAG (React Flow), Sessions, Conversation
-- **Agents**: Agent configuration editor (system prompt replace/append, LLM profiles, permissions); a Runs tab lists every recorded Claude run of the role (Manager, or Workers and reviewers)
-- **Agent history** (`#history/<agent-id>?task=<task-id>`): opened from History on an Agent Timeline row, a Runs entry or the Chat page. For each Claude run it shows status, model, tokens, cost, the launch command (cwd and argv, copyable) and the full transcript, following a running run every 2 s. A running run shows its last output time from the record's heartbeat and is flagged after 2 minutes with no output. While Claude thinks it shows `thinking · ~N tokens` from Claude's `thinking_tokens` events. Those arrive about once a second, so the recorder keeps one row per thinking phase and updates its count in place. Hooks, background tasks and rate limits are shown as one line each, and any other event type as an expandable line. A Planner, which runs no LLM, shows its activity and your chat with it.
+- **Agents**: Agent configuration editor (system prompt replace/append, LLM profiles, permissions); a Runs tab lists every recorded Claude run of the role (the Manager, every task's Planner, or Workers and reviewers)
+- **Agent history** (`#history/<agent-id>?task=<task-id>`): opened from History on an Agent Timeline row, a Runs entry or the Chat page. For each Claude run it shows status, model, tokens, cost, the launch command (cwd and argv, copyable) and the full transcript, following a running run every 2 s. A running run shows its last output time from the record's heartbeat and is flagged after 2 minutes with no output. While Claude thinks it shows `thinking · ~N tokens` from Claude's `thinking_tokens` events. Those arrive about once a second, so the recorder keeps one row per thinking phase and updates its count in place. Hooks, background tasks and rate limits are shown as one line each, and any other event type as an expandable line. For a Planner each run is one of its turns, listed above your chat with it and its activity.
 - **Settings**: Enable and configure the Telegram and Lark channels
 
 ### Real-Time Updates
@@ -221,7 +325,7 @@ dev proxy, which keeps `Host` and `Origin` on its own port.
 | `/api/agent-configs` | GET | List agents |
 | `/api/agent-configs/:id` | GET/PUT | Agent config CRUD |
 | `/api/llm-profiles` | GET/POST | LLM profiles |
-| `/api/llm-records` | GET | Claude runs; filter by `agent_id`, `task_id` or `role` (`manager`, `worker`) |
+| `/api/llm-records` | GET | Claude runs; filter by `agent_id`, `task_id` or `role` (`manager`, `planner`, `worker`) |
 | `/api/llm-records/:id` | GET | One run (status, usage, cost, launch command, heartbeat) |
 | `/api/llm-records/:id/events?after=N` | GET | The run's stream-json events after seq N |
 | `/api/channel-configs` | GET | List channels |
@@ -233,7 +337,7 @@ Agent behavior is configured via the `agent_configs` table (editable in the dash
 
 - **system_prompt**: Agent instruction prompt
 - **runtime**: stored per agent; only `claude-code` is implemented, and the
-  Manager and Workers always run the Claude CLI
+  Manager, Planners and Workers always run the Claude CLI
 - **model**: Model override (or use LLM profile)
 - **permission_mode**: `bypassPermissions` (default for workers)
 - **max_turns**: Maximum conversation turns (0 = unlimited)
@@ -242,6 +346,17 @@ Agent behavior is configured via the `agent_configs` table (editable in the dash
   `timeout_seconds` and `max_turns` for every run, so an edit applies to the
   next step
 - **max_concurrency**: Worker pool size
+
+The `planner` row configures every task's Planner and is read for every turn.
+`system_prompt` is the editable role prompt; code appends the reply contract
+(`REPLY_CONTRACT`). `timeout_seconds` bounds each turn (default 1200, 0 = no
+limit): a turn over it fails and its Claude is killed. `max_turns` above 0
+passes `--max-turns`, as for Workers, and `model`, when set, passes
+`--model`. A change that alters the Planner's command restarts its Claude at
+the next turn with `--resume`. `permission_mode` does not apply: the Planner's
+tools are fixed to Read, Grep and Glob. At startup a `planner` row still
+holding the previous seeded default prompt gets the new default; an edited
+prompt is kept.
 
 ## Channels
 

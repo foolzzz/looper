@@ -35,7 +35,7 @@ TaskRouter（任务路由器）
 |------|------|------|----------|
 | 接入层 | Channel Adapter | 协议转换，用户消息 → MessageEnvelope | 每渠道一个 Adapter |
 | 决策层 | Manager | 意图理解、任务创建、状态汇报 | 单例，常驻 Claude Code 进程（stream-json 输入，每条消息一个 user turn；进程重启后用 `--resume` 续接会话） |
-| 编排层 | TaskRouter + Planner | 任务路由、计划分解、调度验证 | 每个 Task 独立 Planner 实例 |
+| 编排层 | TaskRouter + Planner | 任务路由；Planner 拆分步骤、按每个结果做决定、调度 Worker 和 Reviewer | 每个 Task 独立 Planner 实例，各自一个常驻 Claude Code 进程（只读工具；进程重启后用 `--resume` 续接会话） |
 | 执行层 | WorkerPool | 子进程执行具体开发/验证任务 | 每个 Worker 独立子进程 |
 
 ---
@@ -51,7 +51,7 @@ Task 是系统的一等实体，代表一个完整的用户需求。
 ```
 
 - 每个 Task 自动分配独立的 Planner 实例
-- Task 完成/失败时 Planner 自动销毁
+- Task 结束（完成、失败、停止、取消）时 TaskRouter 停掉 Planner，连同它的 Claude 进程
 - 最多 3 个 Task 并发执行，超出排队
 
 ### Project（项目）
@@ -74,17 +74,35 @@ Task 是系统的一等实体，代表一个完整的用户需求。
 - `source` / `target`：AgentAddress 标识发送/接收方
 - 全量 JSONL 日志保证崩溃恢复
 
-### 验证策略 C
+### Planner 与 Reviewer 策略
 
-Planner 对每个 Step 的验证采用分级策略：
+每个 Task 只有一个 Planner，它是一个常驻的 Claude Code 进程（和 Manager 共用 `ResidentClaude`）：第一个 turn 时在任务目录里启动，每个事件喂一个 stream-json user turn，任务结束或服务停止时退出。Planner 只有 Read、Grep、Glob 三个只读工具（`--tools`、`--allowedTools`、`--permission-mode dontAsk`、`--strict-mcp-config`，不带 `--dangerously-skip-permissions`），读代码做规划；改动都由 Worker 完成，每次执行仍是一个独立进程。
 
-- **简单任务**（`complexity: "simple"`）：Worker 完成后自动标记 verified
+- **谁来决定**：Planner 的 Claude 做判断，代码校验后执行。每个事件一个 turn，依次处理：
+  - `[PLAN]`：收到 `TASK_REQUEST` 时把需求拆成 1–8 个步骤，每步有 `id`、`instruction`、`acceptance_criteria`、`depends_on` 和 `review`（是否必须由独立 Reviewer 通过）
+  - `[DECISION]`：每个 Worker 结果、每个 Reviewer 结果之后各一次
+  - `[CHAT]`：用户发来消息时回复，并最多做一个动作：`none`、`forward`（把文本转给正在执行某一步的 Worker）、`add_steps`
+- **五种决定**：
+  - `accept`：只有结果可以接受时才允许，即 Worker 完成且这一步不需要验收，或 Reviewer 通过
+  - `review`：只能在 Worker 成功之后；另起 Reviewer，它拿到这一步的 instruction、Worker 结果和验收标准
+  - `retry`：同一步派给一个新的 Worker，反馈附在 instruction 后面；每步最多重试 2 次
+  - `replan`：替换所有还没开始的步骤，已开始的不能改；当前步骤结果可以接受就算 verified，否则作为 skipped 丢弃（跑过的丢弃步骤仍计入 8 步上限）
+  - `fail`：任务失败，附上原因
+- **什么时候必须验收**：计划里标了 `review` 的步骤，或者被决定送审过一次的步骤，必须有一次通过的 Review 才能 accept，重试之后也一样
 - **Worker 怎样才算完成**：三个条件都满足才算，任何一条不满足，这一步都判失败：
   - Claude 正常结束（`result` 事件的 `subtype` 为 `success`，达到最大轮数不算）；
   - 最后一条消息以 JSON 报告结尾，且其中 `status` 为 `completed`；
   - 报告里 `changed_files` 列出的文件都存在，`deleted_files` 列出的文件都已删除。
 - **Reviewer**：必须给出布尔类型的 `passed`，纯文本不算通过
-- **复杂任务**（`complexity: "complex"`）：Worker 完成后 Planner 另起 Reviewer Worker 交叉验证
+- **回复契约**：每次回复以且只以一个 ```` ```json ```` 代码块结尾，由 `planner_protocol.py` 用类型化的 dataclass 和枚举严格校验：不允许未知字段，step id 唯一，`depends_on` 只能指向已知步骤且无环，最多 8 步（`MAX_STEPS`），决定必须在当前允许的范围内，重试不超限，replan 不能动已开始的步骤。不合规的回复有一次修复 turn，提示里写明错在哪里
+- **兜底**：
+  - 规划仍然失败（修复后仍不合规、Claude 出错、超时、无法启动）：任务失败（fail-closed），原因写进 `tasks.error` 和 activity，不会退回成单步执行
+  - 决策仍然失败：按这一步自己的结论处理（Worker 的 fail-closed 结论，或 Reviewer 的结论），不另起 Reviewer，并记一条 `Warning: the Planner could not decide ...` 的 error activity
+  - 聊天 turn 失败：把错误回给用户，不做任何动作
+  - Claude 进程中途退出：这个 turn 失败，下一个 turn 用 `--resume <session_id>` 起新进程，session id 存在 Planner 的计划文件里
+- **结果**：任务完成时 `tasks.result_summary` 是最后一个 accept 的步骤给出的 summary（没有时用自动生成的逐步摘要）；任务失败时 `tasks.error` 是 Planner 的失败摘要
+- **配置**：`agent_configs` 的 `planner` 行每个 turn 读一次。`system_prompt` 是可编辑的角色提示，代码在后面追加回复契约；`timeout_seconds` 限制每个 turn（默认 1200 秒，0 表示不限），超时的 turn 失败并杀掉 Claude；`max_turns` 大于 0 时传 `--max-turns`，`model` 有值时传 `--model`；`permission_mode` 不适用。命令变了，下一个 turn 用 `--resume` 重启 Claude。数据库里还是旧默认提示的会在启动时换成新默认，改过的保留
+- **记录**：每个 turn 都会产生 Claude 费用，各记一条 `llm_records`（agent_id 为 `planner-<task_id>`，带这个 turn 自己的花费和进程 `pid`）；决定以简短摘要写进 activity
 
 ---
 
@@ -98,21 +116,23 @@ Planner 对每个 Step 的验证采用分级策略：
 3. Manager 调用 Claude Code 理解意图
 4. Manager 发 TASK_REQUEST → Bus → TaskRouter
 5. TaskRouter 创建 Task + Planner 实例
-6. Planner 分解为 PlanSteps
-7. Planner 发 WORK_ITEM → Bus → WorkerPool
+6. Planner 启动常驻 Claude，[PLAN] turn 拆出步骤，发 TASK_ACCEPTED
+7. Planner 按依赖顺序发 WORK_ITEM → Bus → WorkerPool（每个任务最多 4 个并行）
 8. Worker 子进程执行，返回 WORK_RESULT
-9. Planner 验证结果（自动 or Reviewer）
-10. 所有 Step 完成 → Planner 发 GOAL_STATUS(completed) → TaskRouter
+9. Planner 的 [DECISION] turn 决定 accept / review / retry / replan / fail；
+   review 时另起 Reviewer（VERIFY_REQUEST → VERIFY_RESULT），之后再决定一次
+10. 所有 Step 完成 → Planner 发 GOAL_STATUS(completed) → TaskRouter，写入 tasks.result_summary
+    （任务失败时发 GOAL_STATUS(failed)，写入 tasks.error）
 11. TaskRouter 转发给 Manager → Channel → 用户
-12. TaskRouter 销毁 Planner
+12. TaskRouter 停掉 Planner 和它的 Claude 进程
 ```
 
 ### 消息类型一览
 
 | 类型 | 方向 | 用途 |
 |------|------|------|
-| `USER_MESSAGE` | Channel → Manager / Planner | 用户输入；发给 Planner 的消息成为该任务的新步骤 |
-| `AGENT_REPLY` | Manager → Channel | 回复用户 |
+| `USER_MESSAGE` | Channel → Manager / Planner | 用户输入；发给 Planner 的消息由它的 Claude 回复，可以转给正在执行的 Worker 或追加步骤 |
+| `AGENT_REPLY` | Manager / Planner → Channel | 回复用户 |
 | `TASK_REQUEST` | Manager → TaskRouter | 创建任务 |
 | `TASK_ACCEPTED` | Planner → TaskRouter → Manager | 任务已接受 |
 | `TASK_CANCEL` | Manager → TaskRouter → Planner | 取消任务 |
@@ -121,6 +141,8 @@ Planner 对每个 Step 的验证采用分级策略：
 | `WORK_RESULT` | Worker → Planner | 执行结果 |
 | `VERIFY_REQUEST` | Planner → Reviewer Worker | 验证请求 |
 | `VERIFY_RESULT` | Reviewer → Planner | 验证结论 |
+| `WORKER_INPUT` | Planner → 运行中的 Worker | 转给 Worker 的用户消息，作为它的下一个 user turn |
+| `WORKER_INPUT_RESULT` | WorkerPool → Planner | 是否送达 |
 | `STATUS_UPDATE` | Manager → Channel | 流式状态 |
 | `HEARTBEAT` | System | 健康检查 |
 | `AGENT_LIFECYCLE` | Supervisor ↔ Manager | 生命周期事件 |
@@ -137,7 +159,7 @@ Web 始终开启。Telegram 和 Lark 默认内置，不需要任何启动参数�
 
 - 控制台 Chat 页
 - 左上角列出所有 agent（`GET /api/chat/targets`）：全局唯一的 Manager，以及最近 30 个任务。每个任务下有它固定的一个 Planner，和每个步骤各自独立的 Worker（做了验收的步骤还有 Reviewer）。已经结束的任务和 agent 也列出来，可以查看消息
-- 能发消息的只有 Manager 和运行中任务的 Planner。Planner 自身不调用 LLM：收到的消息先转给正在执行的 Worker，作为它的下一个 user turn；没有 Worker 在跑时，作为新步骤排队。Worker 和 Reviewer 只读，页面显示它的完整运行记录
+- 能发消息的只有 Manager 和运行中任务的 Planner。发给 Planner 的消息由它的 Claude 回复（一个 `[CHAT]` turn），Claude 可以把消息转给正在执行某一步的 Worker，作为它的下一个 user turn，也可以给计划追加步骤；Worker 已经结束的，这条消息留到这一步的决策 turn 给 Claude 看。事件按到达顺序处理，正在跑别的 turn 时发来的消息会排在它后面；任务还没有计划或已经结束时，消息不经过 Claude，直接回复。选中 Planner 时，旁边折叠显示它最近 10 次 Claude 运行。Worker 和 Reviewer 只读，页面显示它的完整运行记录
 - `POST /api/chat/send` 发送消息，`target` 指定对话对象
 - SSE `GET /api/chat/events` 接收实时响应
 - 左侧栏导航下面列出所有项目（任务数，有进行中任务时显示进行中的数量），点击打开按该项目筛选的 Tasks 页，`+` 新建项目。Tasks 页可以按项目筛选；选中项目时显示项目信息，可以编辑，没有任务时可以删除。新建任务时先选项目或当场新建一个，项目有默认目录时工作目录可以不填。任务详情里可以把任务移到其他项目，任何状态都可以
@@ -198,7 +220,7 @@ Telegram 和 Lark 不需要启动参数，见「接入渠道」。
 
 - **Task 级并发**：TaskRouter 通过 Semaphore 控制最多 3 个 Task 并行
 - **Worker 级并发**：WorkerPool 通过 Semaphore 控制最多 4 个 Worker 子进程并行
-- **Task 隔离**：每个 Task 有独立的 Planner、Plan、状态持久化目录
+- **Task 隔离**：每个 Task 有独立的 Planner、Plan、状态持久化目录和 Planner 的 Claude 会话
 - **Worker 隔离**：每个 Worker 在独立子进程中运行 `claude --print`
 
 ---
@@ -211,6 +233,7 @@ loopx/agents/
 ├── message.py       # MessageEnvelope 协议 + 地址常量
 ├── supervisor.py    # AgentSupervisor 生命周期管理
 ├── serve.py         # 启动入口
+├── claude_cli.py    # ResidentClaude（常驻 Claude 进程）+ Claude 运行记录
 ├── channels/
 │   ├── registry.py  # Channel 注册表
 │   ├── web.py       # Web HTTP+SSE 适配器
@@ -219,6 +242,7 @@ loopx/agents/
 └── tiers/
     ├── manager.py   # Manager Agent（管家）
     ├── task.py       # Task 实体 + TaskRouter
-    ├── planner.py   # Planner Agent（编排器，per-task）
+    ├── planner.py   # Planner Agent（编排器，per-task，常驻 Claude Code）
+    ├── planner_protocol.py  # Planner 回复契约：类型和校验
     └── worker.py    # WorkerPool + WorkerProcess
 ```
