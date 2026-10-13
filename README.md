@@ -121,7 +121,8 @@ PostgreSQL is a hard startup dependency. Tables:
 
 ### Web Dashboard
 
-Single-page React app served from `web/dist/` on port 8767.
+Single-page React app served from `web/dist/` on port 8767; an installed
+release wheel serves the copy packaged with it.
 
 | Page | Features |
 |---|---|

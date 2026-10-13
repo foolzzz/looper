@@ -143,8 +143,22 @@ option is read-only and accepted only by `update check`.
 ## Named Version Contract
 
 LoopX releases are tagged in GitHub. Release publication is an explicit
-maintainer action; this fork does not automatically upload Python wheel/sdist artifacts or
-publish to PyPI. Each stable promotion still needs one package version name. The
+maintainer action; this fork does not publish to PyPI. `install.sh` and
+`loopx update apply` install the wheel attached to the latest GitHub release,
+so every release carries one, built from its tag:
+
+```bash
+git worktree add ../loopx-vX.Y.Z vX.Y.Z && cd ../loopx-vX.Y.Z
+python3 scripts/chat_bundle.py ensure      # the Chat bundle the build checks
+scripts/stage-dashboard.sh                 # the agent dashboard, into loopx/web/dashboard
+LOOPX_TEST_DATABASE_URL=<disposable database> uv run python examples/release/agent-serve-wheel-smoke.py
+uv build --wheel --out-dir dist
+gh release upload vX.Y.Z dist/loopx-X.Y.Z-py3-none-any.whl
+```
+
+The smoke builds the wheel from a clean copy, installs it into a fresh
+virtualenv and runs the installed `loopx serve`: the wheel must carry the
+database schema and the dashboard. Each stable promotion still needs one package version name. The
 version source is `loopx.__version__`, mirrored by `pyproject.toml`; the
 expected public tag is `vX.Y.Z` for that version.
 
