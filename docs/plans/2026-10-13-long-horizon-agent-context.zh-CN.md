@@ -1,6 +1,6 @@
 # 开发计划：长程 Agent 上下文体系（M0–M6）
 
-- **状态：** 执行中（M0、M1、M1.5 已交付）
+- **状态：** 执行中（M0、M1、M1.5、M1.6 已交付）
 - **依据：** [RFC：长程 Agent 的上下文体系 v0](../architecture/rfcs/long-horizon-agent-context-v0.zh-CN.md)。
   设计原则、分层模型和已作出的决定以 RFC 为准；本文只管"怎么分阶段做、做到什么算完成、现在做到哪了"。
 - **仓库：** `foolzzz/looper`，基线 `main`
@@ -24,7 +24,7 @@
 | M0 | 项目背景；四类 agent 的 prompt 分层；记录并展示 system prompt | ✅ 已交付（looper #13） | — |
 | M1 | 上下文隔离与可复现 | ✅ 已交付（looper #17） | M0 |
 | M1.5 | harness 与 role 分层；harness 继承链 | ✅ 已交付（looper #19） | M1 |
-| M1.6 | 导入本机插件与 skill 作为全局默认 | 待开始 | M1.5 |
+| M1.6 | 导入本机插件与 skill 作为全局默认 | ✅ 已交付（looper #22） | M1.5 |
 | M2 | 上下文与花费观测 | 待开始 | M0 |
 | M3 | 项目知识 | 待开始 | M0 |
 | M4 | 项目 skill | 待开始 | M3 |
@@ -94,13 +94,20 @@
   - 物化为本地插件目录，以 `--plugin-dir` 挂载给 Manager、Planner、Worker、Reviewer；
   - Settings 显示已导入的插件和 skill 列表，提供"从本机重新导入"和单项停用；
   - 每次运行记录实际加载的插件和 skill（名称与版本哈希），历史页可见。
+  - **核实后确定的做法**：
+    - 数据库是事实来源（`library_items`、`library_files`），条目的版本是其文件的哈希；每次运行按启用的条目在 runtime root 的 `.local/library/<sha256>/` 下取只读副本，第一次用到时从数据库写出；
+    - 插件整个导入（连同 skill、agent、命令和 hook），每个启用的插件一个 `--plugin-dir`；个人 skill 链接进一个生成的 `personal` 插件，在 Claude Code 里叫 `personal:<skill>`；
+    - 重新导入只替换内容变了的条目，保留启用开关，删除本机已没有的条目；
+    - 上限：单个文件 2 MiB（二进制文件和指向条目外的链接也不导入），单个条目 32 MiB 或 5000 个文件，整个库 128 MiB，超限的都在导入结果里列出，整库超限时拒绝导入；
+    - 为了真正用上 skill，加载了插件库的运行里：Planner 的工具加上 `Skill`（没有它 Claude Code 根本不列出 skill）；Manager 加上 `--allowedTools Skill`（`--print` 默认会拒绝声明了 `allowed-tools` 的 skill；放行 skill 不会连带放行它声明的工具）。没有导入时，四类 agent 的启动命令与以前相同；
+    - 库的哈希进入常驻进程的重启签名。
 - **不做：** 不导入个人 hook、MCP 工具权限和界面类设置；不恢复对 `~/.claude` 的隐式加载。
 - **验收：**
   - 真实 Claude 的 init 事件里出现导入的插件和 skill，且 agent 能实际调用其中一个 skill；
   - 操作者的提问日志 hook 不会被触发，个人 `CLAUDE.md` 仍然不可见；
   - 停用某个 skill 后，下一次运行不再加载它；
   - 记录里能读回加载清单。
-- **风险：** 先核实 `--plugin-dir` 在 `--print` 模式下的加载行为，以及它和 M1 隔离参数的配合。所有 agent 都加载 105 个 skill 会增加上下文和花费，M2 上线后评估。
+- **风险：** 已核实 `--plugin-dir` 在 `--print` 模式下与 M1 隔离参数配合正常（见进度台账）。代价是上下文：3 个插件加 104 个个人 skill 时，Opus 上一次最小运行的首个请求从 15,674 token 增至 29,114 token，插件自带的 `SessionStart` hook 也会运行；花费的完整观测留给 M2。
 
 ### M2 上下文与花费观测
 
@@ -180,6 +187,7 @@
 | 2026-10-13 | M1 交付（looper #17）：四类 agent 共用一组隔离参数（`--setting-sources project`、`--strict-mcp-config`、`--settings` 的 `claudeMdExcludes` 与 `autoMemoryEnabled: false`），不再加载操作者的 `~/.claude/CLAUDE.md`、个人设置、hook、skill、插件、自定义 agent、输出风格、MCP 和自动记忆，项目 `CLAUDE.md` 与登录不受影响；system prompt 按哈希写成文件以 `--append-system-prompt-file` 传入，并加 `--system-prompt-snapshot off`；每次运行记录 `system_prompt_sha256` 和 `prompt_layers`，历史页展示；system prompt 改为角色 → 项目 → 任务 → 契约四层。验收：真实 Claude 下 Manager、Planner、Worker、Reviewer 都看到项目 `CLAUDE.md` 和背景里的标记，个人 `CLAUDE.md` 及其导入文件里的内容都答不出；Planner 产出有效计划，Worker 判为 completed，Reviewer 给出 `passed`；Manager 两轮哈希相同，改背景后 Planner 续接重启、哈希变化并答出新背景；单测与真实 PG 619 通过 |
 | 2026-10-13 | RFC 决策 7：导入本机 Claude 全局配置作为系统默认；M1.5 加入默认模型、推理强度、环境变量；新增 M1.6（插件与 skill） |
 | 2026-10-13 | M1.5 交付（looper #19）：system prompt 改为 harness → role → 项目 → 任务 → 契约五层，Manager 为 harness → role → `TASK_PLACEMENT_RULE` 三层；harness 由 `loopx/agents/agent_settings.py` 统一解析：Settings 默认（`system_settings` 表，未设置时用内置的 `DEFAULT_HARNESS_PROMPT`）、Manager 覆盖、项目的 Planner 和 Worker 覆盖，Reviewer 跟随 Worker；推荐 role prompt 只保留职责，未改过的行随推荐升级，新增 `reviewer` 行；Settings 新增默认模型（内置 `opus`）、effort 和至多 50 个非敏感环境变量，四类 agent 都传 `--model`，环境变量哈希进入常驻进程的重启签名；记录新增 `prompt_layers.harness`、`model_choice` 和 `env`（只存键名和值的哈希），历史页展示。验收：真实 Claude（opus，effort low）下，Settings 默认、项目 A 的 Worker 覆盖、Manager 覆盖各放一个暗号：A 的 Planner 答出默认暗号，A 的 Worker 写入、Reviewer 核对的都是 A 的 Worker 暗号，B 的 Worker 写出默认暗号并读到 Settings 里的环境变量，Manager 答出自己的暗号；Planner 产出有效计划，Worker 判为 completed，Reviewer 给出 `passed`，记录里五层齐全；四类 agent 的模型都是 opus，Manager 改为 sonnet 后下一轮以 `--resume` 重启并换成 sonnet；真实运行 18 次共 $0.68；单测与真实 PG 760 通过（main 上 637） |
+| 2026-10-13 | M1.6 交付（looper #22）：插件库。从本机 Claude Code 配置只读导入已启用的插件（整个导入，连同其 skill、agent、命令和 hook）和全部个人 skill，存进数据库（`library_items`、`library_files`），条目的版本是其文件的哈希；每次运行在 runtime root 下取只读副本，每个插件一个 `--plugin-dir`，个人 skill 合成一个 `personal` 插件；加载了插件库的运行里，Planner 多一个 `Skill` 工具，Manager 多一个 `--allowedTools Skill`；库的哈希进入常驻进程的重启签名；记录新增 `metadata.library`；Settings 新增「Plugins & skills」，历史页列出每次运行的加载清单。核实（Claude Code 2.1.285）：在 `--print` 和隔离参数下，`--plugin-dir` 加载插件的 skill（名为 `<插件>:<skill>`）、agent、命令和 hook，插件自带的 `SessionStart` hook 会运行，操作者的 `UserPromptSubmit` hook 不会；没有 `Skill` 工具时 Claude Code 不列出任何 skill；`--print` 默认权限下，声明了 `allowed-tools` 的 skill 会被拒绝，放行 `Skill` 不会连带放行它声明的工具。验收：真实 Claude（opus，effort low）下，导入 3 个插件、104 个个人 skill（约 21 MB、2,200 个文件；未导入 5 项：4 个图片文件、1 个没有 `SKILL.md` 的目录）；四类 agent 的 init 事件都列出 4 个库插件和 142 个 skill；Manager 调用一个个人 skill 并答出其中的样例值，Worker 和 Reviewer 调用同一个 skill、运行它自带的脚本（来自只读副本），结果与独立计算一致，Planner 产出有效计划，Worker 判为 completed，Reviewer 给出 `passed`；Manager 答出项目 `CLAUDE.md` 的暗号，答不出个人 `CLAUDE.md` 的内容；提问日志里没有任何 LoopX 会话的记录；停用这个 skill 后，Manager 下一轮以 `--resume` 重启，记录和 init 里都少了它（个人 skill 104 → 103）；上下文：Opus 上一次最小运行的首个请求从 15,674 token 增至 29,114 token；真实 Claude 花费约 $1.2；单测与真实 PG 929 通过（main 上 898） |
 
 ## 5. 不属于本 RFC 的待办
 
