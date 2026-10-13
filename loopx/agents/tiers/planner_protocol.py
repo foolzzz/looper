@@ -31,6 +31,13 @@ class TurnKind(str, Enum):
     PLAN = "PLAN"
     DECISION = "DECISION"
     CHAT = "CHAT"
+    SUPERVISE = "SUPERVISE"
+
+
+class SuperviseAction(str, Enum):
+    LEAVE = "leave"
+    NUDGE = "nudge"
+    KILL = "kill"
 
 
 class Decision(str, Enum):
@@ -90,6 +97,21 @@ class ChatReply:
     step: str  # forward only: the running step whose Worker gets ``text``
     text: str  # forward only
     steps: tuple[StepSpec, ...]  # add_steps only
+
+
+@dataclass(frozen=True)
+class SuperviseReview:
+    """What to do with one running step, as the Planner's Claude decides."""
+
+    step: str
+    action: SuperviseAction
+    text: str  # nudge only: passed to the running Worker as its next turn
+    reason: str  # kill only: why the Worker is being stopped
+
+
+@dataclass(frozen=True)
+class SuperviseReply:
+    reviews: tuple[SuperviseReview, ...]
 
 
 @dataclass(frozen=True)
@@ -242,6 +264,52 @@ def parse_chat(text: str, plan: PlanView) -> ChatReply:
             raise ProtocolError("add_steps must list at least one step")
         _check_new_steps(steps, plan, replace_pending=False)
     return ChatReply(reply, action, step, text_out, steps)
+
+
+def parse_supervise(text: str, running: frozenset[str]) -> SuperviseReply:
+    """A SUPERVISE reply: a review for each running step the Planner names.
+
+    ``running`` is the set of step labels a Worker runs now; a review may name
+    any subset of them, each at most once. An empty list is allowed (leave
+    everything running).
+    """
+    data = extract_reply(text)
+    _only_keys(data, {"reviews"}, "the SUPERVISE reply")
+    raw = data.get("reviews")
+    if not isinstance(raw, list):
+        raise ProtocolError("reviews must be a list")
+    reviews: list[SuperviseReview] = []
+    seen: set[str] = set()
+    for i, item in enumerate(raw):
+        where = f"reviews[{i}]"
+        if not isinstance(item, dict):
+            raise ProtocolError(f"{where} must be an object")
+        _only_keys(item, {"step", "action", "text", "reason"}, where)
+        step = item.get("step")
+        if not isinstance(step, str) or not step:
+            raise ProtocolError(f"{where}.step must be a step label")
+        if step not in running:
+            allowed = ", ".join(sorted(running)) or "none"
+            raise ProtocolError(f"{where}.step {step!r} has no running Worker (running: {allowed})")
+        if step in seen:
+            raise ProtocolError(f"{where}.step {step!r} is reviewed twice")
+        seen.add(step)
+        try:
+            action = SuperviseAction(item.get("action"))
+        except ValueError:
+            choices = ", ".join(a.value for a in SuperviseAction)
+            raise ProtocolError(f"{where}.action must be one of {choices}; got {item.get('action')!r}") from None
+        if action is not SuperviseAction.NUDGE and "text" in item:
+            raise ProtocolError(f"{where}.text is only for action nudge")
+        if action is not SuperviseAction.KILL and "reason" in item:
+            raise ProtocolError(f"{where}.reason is only for action kill")
+        text_out = reason = ""
+        if action is SuperviseAction.NUDGE:
+            text_out = _required_text(item, "text")
+        elif action is SuperviseAction.KILL:
+            reason = _required_text(item, "reason")
+        reviews.append(SuperviseReview(step, action, text_out, reason))
+    return SuperviseReply(tuple(reviews))
 
 
 def _refusal(decision: Decision, context: DecisionContext) -> str:
@@ -419,4 +487,18 @@ result. The message lists the decisions allowed now.
   the message lists as running); it reads the text at its next turn.
 - action "add_steps": add "steps" (the PLAN step shape, with new ids) to the
   plan.
+
+[SUPERVISE]: a periodic check on the Workers running now (no result arrived).
+The message lists each running step and its recent activity. Review only the
+ones that need it; leaving a step out is the same as "leave".
+```json
+{{"reviews": [{{"step": "s1", "action": "leave"}}]}}
+```
+- leave: let the step keep running (the default; omit the step instead).
+- nudge: pass "text" (required) to the step's Worker as its next turn, to
+  steer it without interrupting its progress. Use it for a step that drifts or
+  stalls but is still on a workable path.
+- kill: stop the step's Worker now; "reason" (required) says why. Use it when
+  the direction is wrong. You then get a DECISION turn for the stopped step
+  (retry it with feedback, replan, or fail the task).
 """

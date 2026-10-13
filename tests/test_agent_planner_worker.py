@@ -772,3 +772,48 @@ class TestWorkerInput:
                 return first.payload["delivered"], unknown.payload["delivered"]
 
         assert asyncio.run(_run()) == (True, False)
+
+
+class TestWorkerKill:
+    """The Planner can stop a running worker mid-run; a killed worker publishes
+    no result and frees its pool slot."""
+
+    def test_kill_stops_a_running_worker(self, agent_db: Any) -> None:
+        async def _run() -> dict[str, Any]:
+            with tempfile.TemporaryDirectory() as tmp:
+                bus = MessageBus(runtime_root=Path(tmp))
+                pool = WorkerPool(config=WorkerConfig(claude_bin=_fake_claude(Path(tmp), _LISTENING_CLAUDE)),
+                                  runtime_root=Path(tmp))
+                await pool.start(bus)
+                await asyncio.sleep(0)
+                await bus.publish(_work_item(Path(tmp)))
+                for _ in range(200):
+                    if pool.accepts_input("w1"):
+                        break
+                    await asyncio.sleep(0.02)
+                wp = pool._active["w1"]
+                assert wp.process is not None and wp.process.returncode is None  # the dead-code fix
+                proc = wp.process
+
+                killed = await pool.kill("w1")
+                missing = await pool.kill("w1")  # already gone
+                await proc.wait()
+                result = {
+                    "killed": killed,
+                    "missing": missing,
+                    "returncode": proc.returncode,
+                    "active": pool.active_count(),
+                    "accepts_input": pool.accepts_input("w1"),
+                    "published": not bus.get_queue("planner-t1").empty(),
+                }
+                await pool.stop()
+                await bus.shutdown()
+                return result
+
+        result = asyncio.run(_run())
+        assert result["killed"] is True
+        assert result["missing"] is False  # a finished/unknown worker is not "killed"
+        assert result["returncode"] is not None  # the subprocess was actually stopped
+        assert result["active"] == 0  # the slot is freed
+        assert result["accepts_input"] is False
+        assert result["published"] is False  # a killed worker publishes no WORK_RESULT

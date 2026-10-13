@@ -236,6 +236,7 @@ class WorkerPool:
         self._bus.subscribe_topic(MessageType.WORK_ITEM, self._on_work_item_topic, consumes=True)
         self._bus.subscribe_topic(MessageType.VERIFY_REQUEST, self._on_verify_topic, consumes=True)
         self._bus.subscribe_topic(MessageType.WORKER_INPUT, self._on_worker_input_topic, consumes=True)
+        self._bus.subscribe_topic(MessageType.KILL_WORK, self._on_kill_work_topic, consumes=True)
 
         try:
             async for envelope in self._bus.subscribe("worker-pool"):
@@ -258,6 +259,43 @@ class WorkerPool:
         if not self._running:
             return False
         asyncio.get_event_loop().create_task(self._deliver_input(envelope))
+        return True
+
+    def _on_kill_work_topic(self, envelope: MessageEnvelope) -> bool:
+        if not self._running or envelope.target.agent_type != "worker":
+            return False
+        asyncio.get_event_loop().create_task(self._deliver_kill(envelope))
+        return True
+
+    async def _deliver_kill(self, envelope: MessageEnvelope) -> None:
+        """Stop one running worker and tell the sender whether it was running."""
+        assert self._bus is not None
+        killed = await self.kill(envelope.target.agent_id)
+        await self._bus.publish(MessageEnvelope.create(
+            source=envelope.target,
+            target=envelope.source,
+            message_type=MessageType.KILL_WORK_RESULT,
+            payload={"killed": killed},
+            correlation_id=envelope.correlation_id,
+            reply_to=envelope.message_id,
+        ))
+
+    async def kill(self, worker_id: str) -> bool:
+        """Stop a running worker mid-run. Cancelling its task kills its Claude
+        subprocess (``_execute`` kills the process when the read is cancelled)
+        and runs the done-callback that frees the slot. Returns whether a
+        worker was running; a finished or unknown worker returns False and
+        publishes no result for it."""
+        task = self._tasks.get(worker_id)
+        if task is None or task.done():
+            return False
+        self._inputs.pop(worker_id, None)
+        task.cancel()
+        try:
+            await task
+        except (asyncio.CancelledError, Exception):
+            pass
+        logger.info("worker %s killed", worker_id)
         return True
 
     async def _deliver_input(self, envelope: MessageEnvelope) -> None:
@@ -446,6 +484,9 @@ class WorkerPool:
                 stderr=asyncio.subprocess.PIPE,
             )
             logger.info("worker %s subprocess started (pid=%s)", worker_id, process.pid)
+            wp = self._active.get(worker_id)
+            if wp is not None:
+                wp.process = process
         except OSError as exc:
             logger.error("worker %s failed to start subprocess: %s", worker_id, exc)
             error = f"Cannot start Claude Code: {exc}"

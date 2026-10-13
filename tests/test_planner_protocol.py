@@ -15,10 +15,12 @@ from loopx.agents.tiers.planner_protocol import (
     PlanView,
     ProtocolError,
     ResultKind,
+    SuperviseAction,
     extract_reply,
     parse_chat,
     parse_decision,
     parse_plan,
+    parse_supervise,
 )
 from tests.test_planner_agent import chat, decide, plan, reply, step
 
@@ -232,13 +234,64 @@ class TestChat:
         assert error in _error(parse_chat, text, RUNNING)
 
 
+def supervise(*reviews: dict[str, Any]) -> str:
+    return reply({"reviews": list(reviews)})
+
+
+RUNNING2 = PlanView(
+    started={"s1": (), "s2": ()}, pending={}, running=frozenset({"s1", "s2"}),
+)
+
+
+class TestSupervise:
+    def test_leave_nudge_kill(self) -> None:
+        parsed = parse_supervise(
+            supervise(
+                {"step": "s1", "action": "nudge", "text": "focus on the API"},
+                {"step": "s2", "action": "kill", "reason": "wrong file"},
+            ),
+            RUNNING2.running,
+        )
+        assert [(r.step, r.action.value, r.text, r.reason) for r in parsed.reviews] == [
+            ("s1", "nudge", "focus on the API", ""),
+            ("s2", "kill", "", "wrong file"),
+        ]
+
+    def test_empty_is_leave_all(self) -> None:
+        assert parse_supervise(supervise(), RUNNING2.running).reviews == ()
+
+    def test_leave_action(self) -> None:
+        parsed = parse_supervise(supervise({"step": "s1", "action": "leave"}), RUNNING2.running)
+        assert parsed.reviews[0].action is SuperviseAction.LEAVE
+
+    @pytest.mark.parametrize(
+        ("text", "error"),
+        [
+            (supervise({"step": "s9", "action": "leave"}), "has no running Worker (running: s1, s2)"),
+            (supervise({"step": "s1", "action": "nudge"}), "text is required"),
+            (supervise({"step": "s1", "action": "kill"}), "reason is required"),
+            (supervise({"step": "s1", "action": "leave", "text": "x"}), "text is only for action nudge"),
+            (supervise({"step": "s1", "action": "nudge", "text": "x", "reason": "y"}),
+             "reason is only for action kill"),
+            (supervise({"step": "s1", "action": "stop"}), "action must be one of leave, nudge, kill"),
+            (supervise({"step": "s1", "action": "leave"}, {"step": "s1", "action": "leave"}),
+             "is reviewed twice"),
+            (reply({"reviews": {}}), "reviews must be a list"),
+            (reply({"steps": []}), "unknown keys"),
+        ],
+    )
+    def test_invalid_supervise_replies(self, text: str, error: str) -> None:
+        assert error in _error(parse_supervise, text, RUNNING2.running)
+
+
 def test_contract_examples_parse() -> None:
     """The JSON examples the contract shows Claude are valid replies themselves."""
     from loopx.agents.tiers.planner_protocol import REPLY_CONTRACT
 
     examples = [json.loads(line) for line in REPLY_CONTRACT.splitlines() if line.startswith("{")]
-    assert len(examples) == 3
-    plan_example, decision_example, chat_example = examples
+    assert len(examples) == 4
+    plan_example, decision_example, chat_example, supervise_example = examples
     parse_plan(reply(plan_example))
     parse_decision(reply(decision_example), _context(), VIEW)
     parse_chat(reply(chat_example), RUNNING)
+    parse_supervise(reply(supervise_example), RUNNING.running)

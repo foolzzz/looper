@@ -26,6 +26,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -54,10 +55,12 @@ from .planner_protocol import (
     ProtocolError,
     ResultKind,
     StepSpec,
+    SuperviseAction,
     TurnKind,
     parse_chat,
     parse_decision,
     parse_plan,
+    parse_supervise,
 )
 
 logger = logging.getLogger(__name__)
@@ -71,6 +74,10 @@ MAX_CONCURRENT_WORKERS = 4
 WORKER_INPUT_TIMEOUT = 5.0
 # A Planner turn's time limit without a readable ``planner`` config row.
 DEFAULT_TURN_TIMEOUT_SEC = 1200
+# How often the Planner looks at the Workers running now when no result has
+# arrived (a SUPERVISE turn), to steer or stop one that drifts or stalls.
+# 0 turns the periodic check off. Any Planner turn re-arms the interval.
+DEFAULT_SUPERVISE_INTERVAL_SEC = 300
 # The only tools the Planner's Claude has: it reads the project, Workers change it.
 PLANNER_TOOLS = "Read,Grep,Glob"
 
@@ -107,6 +114,7 @@ class PlannerSettings:
     timeout_seconds: int  # per turn; 0 for no limit
     model: str | None
     max_turns: int  # 0 for no limit
+    supervise_interval_seconds: int  # periodic SUPERVISE turn; 0 to turn off
 
 
 async def load_settings() -> PlannerSettings:
@@ -117,12 +125,18 @@ async def load_settings() -> PlannerSettings:
         logger.warning("cannot read the planner agent config; using defaults", exc_info=True)
         config = None
     if config is None:
-        return PlannerSettings(DEFAULT_SYSTEM_PROMPT, DEFAULT_TURN_TIMEOUT_SEC, None, 0)
+        return PlannerSettings(
+            DEFAULT_SYSTEM_PROMPT, DEFAULT_TURN_TIMEOUT_SEC, None, 0, DEFAULT_SUPERVISE_INTERVAL_SEC,
+        )
+    interval = config.get("supervise_interval_seconds")
     return PlannerSettings(
         system_prompt=str(config.get("system_prompt") or "").strip() or DEFAULT_SYSTEM_PROMPT,
         timeout_seconds=int(config.get("timeout_seconds") or 0),
         model=str(config.get("model") or "").strip() or None,
         max_turns=int(config.get("max_turns") or 0),
+        supervise_interval_seconds=(
+            DEFAULT_SUPERVISE_INTERVAL_SEC if interval is None else max(0, int(interval))
+        ),
     )
 
 
@@ -293,6 +307,10 @@ class PlannerAgent:
         self._plans_dir.mkdir(parents=True, exist_ok=True)
         self._claude = ResidentClaude(label=self.agent_id)
         self._turn_lock = asyncio.Lock()
+        self._supervise_task: asyncio.Task[Any] | None = None
+        # When the last turn ended, so a periodic SUPERVISE is skipped right
+        # after a result/chat/plan turn already looked at the plan.
+        self._last_turn_at = 0.0
 
     @property
     def agent_id(self) -> str:
@@ -307,14 +325,23 @@ class PlannerAgent:
         self._running = True
         self._load_plan()
         self._loop_task = asyncio.create_task(self._message_loop())
+        self._supervise_task = asyncio.create_task(self._supervise_loop())
         logger.info("planner %s started", self.agent_id)
 
     async def stop(self) -> None:
         """Stop handling messages and end the Planner's Claude."""
         self._running = False
+        supervise_task, self._supervise_task = self._supervise_task, None
+        if supervise_task:
+            supervise_task.cancel()
         loop_task, self._loop_task = self._loop_task, None
         cancelled = False
         try:
+            if supervise_task:
+                await asyncio.wait([supervise_task])
+            # Stop the Workers this task still runs; otherwise they keep
+            # changing files after the task is gone.
+            await self._kill_running_workers()
             if loop_task:
                 loop_task.cancel()
                 # Unlike awaiting the task, this does not mistake its
@@ -733,34 +760,165 @@ class PlannerAgent:
         return reply.reply
 
     async def _forward_to_worker(self, step: PlanStep, text: str, envelope: MessageEnvelope) -> bool:
-        """Ask the worker pool to add ``text`` as the running worker's next user turn."""
-        assert self._bus is not None and step.worker_id is not None
+        """Ask the worker pool to add a user message as the running worker's next turn."""
         message = (
             "A message from the user, passed on by the Planner while you work on this step. "
             "Take it into account, then continue:\n\n" + text
         )
-        try:
-            ack = await self._bus.request(MessageEnvelope.create(
-                source=self.agent_address,
-                target=worker_address(step.worker_id),
-                message_type=MessageType.WORKER_INPUT,
-                payload={"text": message, "task_id": step.step_id},
-                correlation_id=envelope.correlation_id,
-            ), timeout=WORKER_INPUT_TIMEOUT)
-        except asyncio.TimeoutError:
-            return False
-        if not ack.payload.get("delivered"):
+        if not await self._send_worker_input(step, message, envelope.correlation_id):
             return False
         await self._activity(
             "phase", f"User message passed to {step.worker_id} (step {step.index + 1}): {text[:80]}",
         )
         return True
 
+    async def _send_worker_input(self, step: PlanStep, text: str, correlation_id: str) -> bool:
+        """Add ``text`` as the running worker's next user turn; True if it landed."""
+        assert self._bus is not None and step.worker_id is not None
+        try:
+            ack = await self._bus.request(MessageEnvelope.create(
+                source=self.agent_address,
+                target=worker_address(step.worker_id),
+                message_type=MessageType.WORKER_INPUT,
+                payload={"text": text, "task_id": step.step_id},
+                correlation_id=correlation_id,
+            ), timeout=WORKER_INPUT_TIMEOUT)
+        except asyncio.TimeoutError:
+            return False
+        return bool(ack.payload.get("delivered"))
+
     async def _handle_system_event(self, envelope: MessageEnvelope) -> None:
         event_type = envelope.payload.get("type", "")
         if event_type == "pause":
             scope = envelope.payload.get("scope", "")
             logger.info("planner %s pausing work related to %s", self.agent_id, scope)
+        elif event_type == "supervise":
+            await self._supervise()
+
+    # --- Supervising the Workers running now ---
+
+    async def _supervise_loop(self) -> None:
+        """Wake on a timer and, when Workers are running, post a supervise tick
+        onto the Planner's own mailbox so the check runs in the message loop,
+        serialized with results and chat (never concurrently with them)."""
+        assert self._bus is not None
+        while self._running:
+            interval = (await load_settings()).supervise_interval_seconds
+            if interval <= 0:
+                return  # the periodic check is off
+            try:
+                await asyncio.sleep(interval)
+            except asyncio.CancelledError:
+                return
+            if not self._running:
+                return
+            plan = self._plan
+            if plan is None or plan.status != "executing":
+                continue
+            if not any(s.status == "dispatched" for s in plan.steps):
+                continue
+            # A result/chat/plan turn within the last interval already looked
+            # at the plan; skip this tick rather than spend a turn on nothing new.
+            if self._last_turn_at and time.monotonic() - self._last_turn_at < interval:
+                continue
+            try:
+                await self._bus.publish(MessageEnvelope.create(
+                    source=self.agent_address,
+                    target=self.agent_address,
+                    message_type=MessageType.SYSTEM_EVENT,
+                    payload={"type": "supervise"},
+                ))
+            except Exception:
+                logger.debug("planner %s could not post a supervise tick", self.agent_id, exc_info=True)
+
+    async def _supervise(self) -> None:
+        """Look at the Workers running now and steer or stop the ones that need it."""
+        plan = self._plan
+        if plan is None or plan.status != "executing":
+            return
+        running = [s for s in plan.steps if s.status == "dispatched"]
+        if not running:
+            return
+        reports = [await self._running_report(plan, s) for s in running]
+        view = plan.view()
+        try:
+            reply = await self._ask(
+                TurnKind.SUPERVISE,
+                self._supervise_message(plan, running, reports),
+                lambda text: parse_supervise(text, view.running),
+            )
+        except PlannerTurnError as exc:
+            await self._activity("error", f"Planner could not supervise the running steps: {exc}"[:500])
+            return
+        for review in reply.reviews:
+            step = next((s for s in plan.steps if s.label == review.step and s.status == "dispatched"), None)
+            if step is None:
+                continue  # the step finished between the turn and now
+            if review.action is SuperviseAction.NUDGE:
+                await self._nudge_worker(plan, step, review.text)
+            elif review.action is SuperviseAction.KILL:
+                await self._kill_and_decide(plan, step, review.reason)
+
+    async def _nudge_worker(self, plan: TaskPlan, step: PlanStep, text: str) -> None:
+        message = (
+            "A course correction from the Planner while you work on this step. "
+            "Take it into account, then continue:\n\n" + text
+        )
+        if await self._send_worker_input(step, message, plan.correlation_id):
+            await self._activity(
+                "phase", f"Planner steered step {step.index + 1} ({step.label}): {text[:80]}", worker=step.worker_id,
+            )
+        else:
+            step.missed_messages.append(text)
+            await self._activity(
+                "phase", f"Planner steer for step {step.index + 1} ({step.label}) arrived after "
+                         f"{step.worker_id} finished; kept for its decision",
+            )
+
+    async def _kill_and_decide(self, plan: TaskPlan, step: PlanStep, reason: str) -> None:
+        """Stop a drifting step's Worker, then decide what happens to the step.
+
+        A killed Worker publishes no result, so the stopped outcome is fed
+        through the normal decision path (the Planner picks retry/replan/fail).
+        """
+        if not await self._kill_worker(step):
+            return  # the Worker already finished; its real result will decide
+        await self._activity("error", f"Planner stopped step {step.index + 1} ({step.label}): {reason}"[:300],
+                             worker=step.worker_id)
+        result = {"status": "stopped", "summary": f"The Planner stopped this Worker: {reason}"}
+        step.result = result
+        context = DecisionContext(
+            step=step.label, result=ResultKind.WORK, succeeded=False,
+            review_required=step.review, retries=step.retries,
+        )
+        await self._decide(plan, step, context, self._work_report(step, result))
+
+    async def _kill_worker(self, step: PlanStep) -> bool:
+        """Ask the worker pool to stop ``step``'s running Worker; True if it was running."""
+        assert self._bus is not None and step.worker_id is not None
+        try:
+            ack = await self._bus.request(MessageEnvelope.create(
+                source=self.agent_address,
+                target=worker_address(step.worker_id),
+                message_type=MessageType.KILL_WORK,
+                payload={"task_id": step.step_id},
+                correlation_id=self._plan.correlation_id if self._plan else "",
+            ), timeout=WORKER_INPUT_TIMEOUT)
+        except asyncio.TimeoutError:
+            return False
+        return bool(ack.payload.get("killed"))
+
+    async def _kill_running_workers(self) -> None:
+        """Stop every Worker this task still runs (on task stop/cancel)."""
+        plan = self._plan
+        if plan is None or self._bus is None:
+            return
+        for step in plan.steps:
+            if step.status == "dispatched" and step.worker_id:
+                try:
+                    await self._kill_worker(step)
+                except Exception:
+                    logger.debug("planner %s could not stop worker %s", self.agent_id, step.worker_id, exc_info=True)
 
     # --- Turns on the Planner's Claude ---
 
@@ -786,7 +944,10 @@ class PlannerAgent:
 
     async def _turn(self, message: str) -> str:
         async with self._turn_lock:
-            return await self._run_turn(message)
+            try:
+                return await self._run_turn(message)
+            finally:
+                self._last_turn_at = time.monotonic()
 
     def _claude_command(self, system_prompt: str, settings: PlannerSettings) -> list[str]:
         """The Planner's Claude, without ``--resume``: read-only tools, nothing else approved."""
@@ -953,6 +1114,40 @@ class PlannerAgent:
         if isinstance(findings, list):
             lines.extend(f"- finding: {_clip(f, 300)}" for f in findings[:10])
         return lines
+
+    async def _running_report(self, plan: TaskPlan, step: PlanStep) -> list[str]:
+        """What step ``step``'s Worker has done lately, for a SUPERVISE turn."""
+        lines = [f"Step {step.label} ({step.worker_id}): {_clip(step.instruction, 200)}"]
+        try:
+            rows = await db_activity.list_activity(self._task_id, since_seq=0, limit=400)
+        except Exception:
+            lines.append("  - (recent activity is unavailable)")
+            return lines
+        recent = [r for r in rows if r.get("worker") == step.worker_id][-6:]
+        if not recent:
+            lines.append("  - (no activity yet)")
+        for row in recent:
+            lines.append(f"  - [{row.get('kind')}] {_clip(row.get('summary'), 160)}")
+        return lines
+
+    def _supervise_message(self, plan: TaskPlan, running: list[PlanStep], reports: list[list[str]]) -> str:
+        lines = [
+            "[SUPERVISE] A periodic check on the Workers running now — no result has arrived.",
+            *self._context_lines(plan),
+            "",
+            *self._plan_lines(plan),
+            "",
+            "Workers running now and what they have done lately:",
+        ]
+        for report in reports:
+            lines += report
+        lines += [
+            "",
+            "Review only the steps that need it (a drifting or stalled Worker): nudge one that "
+            "is on a workable path, kill one whose direction is wrong. Leave the rest alone.",
+            "Reply with the SUPERVISE JSON.",
+        ]
+        return "\n".join(lines)
 
     def _decision_message(
         self, plan: TaskPlan, step: PlanStep, context: DecisionContext, report: list[str],

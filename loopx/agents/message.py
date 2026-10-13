@@ -34,6 +34,8 @@ class MessageType(str, Enum):
     WORK_PROGRESS = "work_progress"
     WORKER_INPUT = "worker_input"  # a user turn for a running worker (reply: WORKER_INPUT_RESULT)
     WORKER_INPUT_RESULT = "worker_input_result"
+    KILL_WORK = "kill_work"  # stop a running worker mid-run (reply: KILL_WORK_RESULT)
+    KILL_WORK_RESULT = "kill_work_result"
 
     # Task lifecycle
     TASK_CANCEL = "task_cancel"

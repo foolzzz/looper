@@ -89,11 +89,13 @@ class Harness:
         self.dispatched_at_turn: list[int] = []  # the Planner turns run when each was dispatched
         self.held: list[MessageEnvelope] = []
         self.forwarded: list[MessageEnvelope] = []
+        self.killed: list[MessageEnvelope] = []
         self.statuses: list[MessageEnvelope] = []
         self.replies: list[MessageEnvelope] = []
         self.bus.subscribe_topic(MessageType.WORK_ITEM, self._pool, consumes=True)
         self.bus.subscribe_topic(MessageType.VERIFY_REQUEST, self._pool, consumes=True)
         self.bus.subscribe_topic(MessageType.WORKER_INPUT, self._worker_input, consumes=True)
+        self.bus.subscribe_topic(MessageType.KILL_WORK, self._kill, consumes=True)
         self.bus.subscribe_topic(MessageType.GOAL_STATUS, self.statuses.append)
         self.bus.subscribe_topic(MessageType.TASK_ACCEPTED, self.statuses.append)
         self.bus.subscribe_topic(MessageType.AGENT_REPLY, self.replies.append)
@@ -130,6 +132,19 @@ class Harness:
             source=envelope.target, target=envelope.source,
             message_type=MessageType.WORKER_INPUT_RESULT,
             payload={"delivered": delivered}, reply_to=envelope.message_id,
+        )))
+        return True
+
+    def _kill(self, envelope: MessageEnvelope) -> bool:
+        """Stop a held Worker: a killed Worker publishes no result (like the real pool)."""
+        self.killed.append(envelope)
+        held = next((h for h in self.held if h.target == envelope.target), None)
+        if held is not None:
+            self.held.remove(held)
+        asyncio.get_event_loop().create_task(self.bus.publish(MessageEnvelope.create(
+            source=envelope.target, target=envelope.source,
+            message_type=MessageType.KILL_WORK_RESULT,
+            payload={"killed": held is not None}, reply_to=envelope.message_id,
         )))
         return True
 
