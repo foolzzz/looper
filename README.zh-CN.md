@@ -92,6 +92,7 @@ uv run loopx serve
 
 换到新机器：`uv run loopx config export loopx-config.json` 把 agent 配置导出成一个文件（密钥留作占位符，
 `--include-projects` 连同项目），在新机器上 `uv run loopx config import loopx-config.json` 先预览，加 `--apply` 才写入。
+Settings 页的「Move to another machine」也能导出和导入。
 
 ### 4. 作为服务常驻
 
