@@ -19,7 +19,7 @@ from typing import Any
 
 import pytest
 
-from loopx.agents import library, read_only_copies
+from loopx.agents import library, mcp, read_only_copies
 from loopx.agents.knowledge import load_knowledge
 from loopx.agents.project_skills import skill_file
 from loopx.agents.read_only_copies import hashed_directories, reclaim_unused
@@ -39,6 +39,7 @@ class _Content:
         self.projects: list[dict[str, Any]] = []
         self.documents: dict[str, list[tuple[str, str]]] = {}  # project id -> (title, content)
         self.skills: dict[str, list[tuple[str, str]]] = {}  # project id -> (name, body)
+        self.servers: dict[str, mcp.Server] = {}  # MCP servers installed globally for Workers, by name
         self.fail = False
 
         async def list_projects(**_: Any) -> list[dict[str, Any]]:
@@ -62,11 +63,18 @@ class _Content:
             return [{"path": "SKILL.md", "content": text, "sha256": _sha(text), "executable": False}]
 
         async def list_installed(role: str, project_id: str | None, **_: Any) -> list[dict[str, Any]]:
+            servers = [{"id": f"mcp-{name}", "kind": "mcp", "name": name, "origin": "ui", "owner_project_id": None,
+                        "sha256": server.sha256, "scope": "global"}
+                       for name, server in self.servers.items()] if role == "worker" else []
             if role == "manager" or project_id is None:
-                return []
-            return [{"id": f"skill-{project_id}-{n}", "kind": "skill", "name": name, "origin": "project",
-                     "owner_project_id": project_id, "sha256": library.item_sha256(files(project_id, n)),
-                     "scope": "project"} for n, (name, _) in enumerate(self.skills.get(project_id, []))]
+                return servers
+            return [*servers, *({"id": f"skill-{project_id}-{n}", "kind": "skill", "name": name, "origin": "project",
+                                 "owner_project_id": project_id, "sha256": library.item_sha256(files(project_id, n)),
+                                 "scope": "project"} for n, (name, _) in enumerate(self.skills.get(project_id, [])))]
+
+        async def get_mcp_servers(item_ids: list[str], **_: Any) -> dict[str, dict[str, Any]]:
+            return {f"mcp-{name}": server.row() for name, server in self.servers.items()
+                    if f"mcp-{name}" in item_ids}
 
         async def get_item_files(item_id: str, **_: Any) -> list[dict[str, Any]]:
             project_id, n = item_id.removeprefix("skill-").rsplit("-", 1)
@@ -77,6 +85,7 @@ class _Content:
         monkeypatch.setattr(db_documents, "get_content", get_content)
         monkeypatch.setattr(db_library, "list_installed", list_installed)
         monkeypatch.setattr(db_library, "get_item_files", get_item_files)
+        monkeypatch.setattr(db_library, "get_mcp_servers", get_mcp_servers)
 
     def project(self, project_id: str, *, documents: list[tuple[str, str]], skills: list[tuple[str, str]]) -> dict:
         project = {"id": project_id, "name": project_id, "work_dir": ""}
@@ -168,6 +177,37 @@ def test_a_copy_a_running_process_mounts_or_links_into_is_kept_until_it_exits(
         agent.wait()
     assert set(asyncio.run(reclaim_unused(tmp_path))) == mounted
     assert hashed_directories(tmp_path) == []
+
+
+def test_an_mcp_config_a_running_process_mounts_or_the_next_run_uses_is_kept(
+    tmp_path: Path, content: _Content,
+) -> None:
+    def server(marker: str) -> mcp.Server:
+        return mcp.Server(mcp.Transport.STDIO, command="python3", args=("server.py",), env=(("MARKER", marker),))
+
+    content.servers = {"marker": server("v1")}
+    mounted = Path(asyncio.run(library.load_installed(tmp_path, "worker")).mcp_config or "")
+    content.servers = {"marker": server("v2")}  # a new value: the next run's file is another one
+    current = Path(asyncio.run(library.load_installed(tmp_path, "worker")).mcp_config or "")
+    unused = mcp.write_config(tmp_path, [("old", server("v0").config())])
+    assert mounted.parent == current.parent == unused.parent == tmp_path.absolute() / ".local" / "mcp"
+    assert len({mounted, current, unused}) == 3
+
+    agent = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)", "--mcp-config", str(mounted),
+                              "--strict-mcp-config"])
+    try:
+        deadline = time.monotonic() + 10
+        while not any(str(mounted) in line for line in read_only_copies.command_lines()):
+            assert time.monotonic() < deadline, "the process did not show up"
+            time.sleep(0.05)
+        assert asyncio.run(reclaim_unused(tmp_path)) == [unused]
+        assert set(hashed_directories(tmp_path)) == {mounted, current}
+        assert '"MARKER": "v1"' in mounted.read_text()
+    finally:
+        agent.kill()
+        agent.wait()
+    assert asyncio.run(reclaim_unused(tmp_path)) == [mounted]
+    assert hashed_directories(tmp_path) == [current]
 
 
 def test_a_process_that_mounts_a_whole_knowledge_directory_keeps_every_set_in_it(

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useId, useRef, useState } from "react";
 import { ChevronRight, FileUp, Loader2, Pencil, Plus, Trash2 } from "lucide-react";
 import { OriginTag, RoleChecks } from "@/components/install-controls";
+import { McpSummary } from "@/components/mcp-servers";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -118,6 +119,7 @@ function ItemHeading({ item, projectId }: { item: CatalogItem; projectId: string
         <span className="text-[11px] tabular-nums text-muted-foreground">{formatBytes(item.size_bytes)}</span>
       </span>
       {item.description && <span className="block break-words text-xs text-muted-foreground">{item.description}</span>}
+      <McpSummary item={item} />
     </span>
   );
 }
@@ -408,13 +410,13 @@ function InstallFromCatalog({
         <p className="text-xs text-muted-foreground">Everything in the catalog is installed here.</p>
       ) : (
         <form onSubmit={submit} className="space-y-2">
-          <label htmlFor={`${id}-item`} className="sr-only">Plugin or skill to install</label>
+          <label htmlFor={`${id}-item`} className="sr-only">Plugin, skill or MCP server to install</label>
           <select id={`${id}-item`} value={picked ? itemId : ""} onChange={(e) => setItemId(e.target.value)} className={SELECT}>
             <option value="">Choose one of {candidates.length}…</option>
-            {(["plugin", "skill"] as const).map((kind) => {
+            {(["plugin", "skill", "mcp"] as const).map((kind) => {
               const group = candidates.filter((item) => item.kind === kind);
               return group.length ? (
-                <optgroup key={kind} label={kind === "plugin" ? "Plugins" : "Skills"}>
+                <optgroup key={kind} label={kind === "plugin" ? "Plugins" : kind === "skill" ? "Skills" : "MCP servers"}>
                   {group.map((item) => (
                     <option key={item.item_id} value={item.item_id}>{optionLabel(item)}</option>
                   ))}
@@ -563,7 +565,8 @@ export function ProjectSkillsSection({ projectId }: { projectId: string }) {
         )}
       </div>
       <p className="text-xs text-muted-foreground">
-        Plugins and skills this project&apos;s Planner, Workers and Reviewers load. Skills written here load as{" "}
+        Plugins, skills and MCP servers this project&apos;s Planner, Workers and Reviewers load. Skills written here
+        load as{" "}
         <span className="font-mono">project:&lt;name&gt;</span>. Nothing is written to the project&apos;s directory.
         Changes apply to their next run.
       </p>

@@ -341,6 +341,7 @@ function LoadedLibrary({ record }: { record: LlmRecord }) {
   });
   const plugins = items.filter((item) => item.kind === "plugin").map(named);
   const skills = items.filter((item) => item.kind === "skill");
+  const servers = items.filter((item) => item.kind === "mcp").map(named);
   const globalSkills = skills.filter((item) => item.scope !== "project").map(named);
   const projectSkills = [
     ...skills.filter((item) => item.scope === "project").map(named),
@@ -351,7 +352,9 @@ function LoadedLibrary({ record }: { record: LlmRecord }) {
     library &&
       (library.error
         ? `not loaded: ${library.error}`
-        : `${plural(plugins.length, "plugin")}, ${plural(skills.length, "skill")} · ${shortSha(library.sha256)}`),
+        : `${plural(plugins.length, "plugin")}, ${plural(skills.length, "skill")}${
+            servers.length ? `, ${plural(servers.length, "MCP server")}` : ""
+          } · ${shortSha(library.sha256)}`),
     project &&
       (project.error ? `project skills not loaded: ${project.error}` : plural(project.skills.length, "project skill")),
   ].filter(Boolean);
@@ -359,6 +362,7 @@ function LoadedLibrary({ record }: { record: LlmRecord }) {
     ["Plugins", plugins],
     ["Skills (global)", globalSkills],
     ["Skills (project)", projectSkills],
+    ["MCP servers", servers],
   ] as const;
   return (
     <Collapsible

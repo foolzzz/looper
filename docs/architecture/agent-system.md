@@ -28,7 +28,7 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
 - Runs one resident Claude process through `ResidentClaude`
   (`loopx/agents/claude_cli.py`), which each task's Planner uses too, started
   on the first chat message:
-  `claude --print --verbose --output-format stream-json --input-format stream-json --include-partial-messages --replay-user-messages <isolation flags> --append-system-prompt-file <file> --system-prompt-snapshot off --dangerously-skip-permissions --model M [--effort E] [--plugin-dir <dir> ...] [--resume <session_id>]`
+  `claude --print --verbose --output-format stream-json --input-format stream-json --include-partial-messages --replay-user-messages <isolation flags> --append-system-prompt-file <file> --system-prompt-snapshot off --dangerously-skip-permissions --model M [--effort E] [--plugin-dir <dir> ...] [--mcp-config <file>] [--resume <session_id>]`
   (see [What an agent's Claude Code loads](#what-an-agents-claude-code-loads),
   [What an agent may do](#what-an-agent-may-do) and
   [The capability catalog](#the-capability-catalog-items-and-where-they-are-installed)). Like every agent
@@ -146,7 +146,7 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
   process per step attempt.
 - Keeps one resident Claude process through `ResidentClaude`, like the
   Manager, started on the task's first turn in the task's `work_dir`:
-  `claude --print --verbose --output-format stream-json --input-format stream-json --include-partial-messages --replay-user-messages <isolation flags> --append-system-prompt-file <file> --system-prompt-snapshot off --dangerously-skip-permissions --model M [--effort E] [--plugin-dir <dir> ...] [--add-dir <dir> ...] [--max-turns N] [--resume <session_id>]`.
+  `claude --print --verbose --output-format stream-json --input-format stream-json --include-partial-messages --replay-user-messages <isolation flags> --append-system-prompt-file <file> --system-prompt-snapshot off --dangerously-skip-permissions --model M [--effort E] [--plugin-dir <dir> ...] [--mcp-config <file>] [--add-dir <dir> ...] [--max-turns N] [--resume <session_id>]`.
   The system prompt is rebuilt for every turn from the harness (the project's
   Planner override, else the default in Settings), the `planner` role prompt,
   the task's project, the task section (task id, project name and
@@ -250,7 +250,7 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
 - Manages a pool of Worker processes
 - Each Worker runs Claude CLI as a subprocess with `stream-json` output
 - Real-time event streaming (tool_use, text) captured to activity table
-- Command: `claude --print --verbose --output-format stream-json --include-partial-messages --input-format stream-json --replay-user-messages <isolation flags> --append-system-prompt-file <file> --system-prompt-snapshot off --dangerously-skip-permissions --model M [--effort E] [--plugin-dir <dir> ...] [--add-dir <dir> ...]`,
+- Command: `claude --print --verbose --output-format stream-json --include-partial-messages --input-format stream-json --replay-user-messages <isolation flags> --append-system-prompt-file <file> --system-prompt-snapshot off --dangerously-skip-permissions --model M [--effort E] [--plugin-dir <dir> ...] [--mcp-config <file>] [--add-dir <dir> ...]`,
   plus `--max-turns N` when the config sets `max_turns` above 0. A Worker
   reads the `worker` row and a Reviewer the `reviewer` row, for every run. The
   first user turn goes on stdin; stdin stays open so the Planner can add user
@@ -453,7 +453,8 @@ Every run records the prompt in `llm_records.metadata`:
 - `env`: `{sha256, keys: {NAME: sha256 of the value}}`, only when Settings
   holds variables; values are never recorded;
 - `library`: `{sha256, role, project_id, items: [{kind, name, sha256, plugin,
-  scope}], error?}`, the catalog items installed for the run: its role and
+  scope}], mcp_servers?, error?}`, the catalog items installed for the run
+  (an MCP server has no `plugin`; `mcp_servers` lists their names): its role and
   project, each item with the plugin it loads in (a plugin's own name,
   `personal` or `project`) and `scope` (`project` when its project has it,
   else `global`), and the hash of that set, only when something was to be
@@ -615,9 +616,9 @@ catalog first, and each loads only where it is installed
 (`loopx/agents/library.py`, `loopx/agents/catalog.py`; RFC decisions 7 and 9):
 
 - **Catalog.** `library_items` and `library_files` hold each item: kind
-  `plugin` or `skill`, name, `origin` (how it was acquired: `machine`, imported
-  from this machine, or `project`, written in a project; `upload`, `git` and
-  `ui` are reserved), the owning project of a project-authored item, a
+  `plugin`, `skill` or `mcp`, name, `origin` (how it was acquired: `machine`,
+  imported from this machine, `ui`, an MCP server added here, or `project`,
+  written in a project; `upload` and `git` are reserved), the owning project of a project-authored item, a
   description, source label, declared version, `sha256`, size, file count, and
   its files (relative path, UTF-8 content, sha256, executable bit). An item's
   `sha256` is the hash of its files' paths, hashes and executable bits. A name
@@ -672,12 +673,29 @@ catalog first, and each loads only where it is installed
   read. The task's activity notes `Project installs applied (...)` for a
   Worker or Reviewer run that has project installs, and `Installed plugins and
   skills applied`, `changed` or `removed` for the Planner.
+- **MCP servers** (`loopx/agents/mcp.py`) are items of kind `mcp`, installed
+  the same way. `library_mcp_servers` holds how Claude Code starts one
+  (`stdio`: command, args, env) or reaches it (`http`/`sse`: URL, headers); the
+  env and header values are secrets, so catalog rows carry only their names and
+  the API shows each value as `***` (a `PUT` that sends `***` back keeps it).
+  Added and edited with `POST /api/catalog/mcp` and `PUT /api/catalog/<id>`
+  (origin `ui`), deleted with `DELETE /api/catalog/<id>`, or imported read-only
+  from the user-level `mcpServers` of `~/.claude.json`
+  (`$CLAUDE_CONFIG_DIR/.claude.json` when set) with
+  `POST /api/catalog/mcp/import`, which mirrors the plugin import (origin
+  `machine`). An item's `sha256` hashes its whole configuration. At launch the
+  run's servers go into one file, `<runtime_root>/.local/mcp/<sha256>.json`
+  (0400, named by its content), passed as `--mcp-config` after the
+  `--plugin-dir`s; `--strict-mcp-config` stays, so it is the only MCP source
+  and a plugin's own `.mcp.json` servers do not load. The record's
+  `library.mcp_servers` names them; their values are never recorded.
 - **Reclaiming copies.** `loopx serve` reclaims replaced copies when it
   starts, before any agent launches: `read_only_copies.reclaim_unused` removes
   every content-hashed directory of the catalog, project knowledge and the
-  project skills plugins of versions before the catalog that the current
-  content (what every role in every project loads) does not use and no
-  running process's command line mounts (or links into through a mounted one).
+  project skills plugins of versions before the catalog, and every
+  `.local/mcp/<sha256>.json`, that the current content (what every role in
+  every project loads) does not use and no running process's command line
+  mounts (or links into through a mounted one).
 
 Verified with Claude Code 2.1.285 under the isolation flags: in `--print`
 mode `--plugin-dir` loads a plugin's skills (as `<plugin>:<skill>`), agents,

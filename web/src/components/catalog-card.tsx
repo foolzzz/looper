@@ -1,6 +1,7 @@
 import { useEffect, useId, useState } from "react";
 import { ChevronDown, ChevronRight, Download, Loader2, RefreshCw } from "lucide-react";
 import { OriginTag, RoleChecks } from "@/components/install-controls";
+import { McpItemActions, McpSummary, McpToolbar } from "@/components/mcp-servers";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -21,6 +22,7 @@ import { formatBytes } from "@/lib/utils";
 const GROUPS: { kind: LibraryKind; title: string }[] = [
   { kind: "plugin", title: "Plugins" },
   { kind: "skill", title: "Skills" },
+  { kind: "mcp", title: "MCP servers" },
 ];
 
 const errorText = (err: unknown) => (err instanceof Error ? err.message : String(err));
@@ -46,12 +48,18 @@ function ItemRow({
   busy,
   error,
   onChange,
+  mask,
+  onReplace,
+  onRemove,
 }: {
   item: CatalogItem;
   roles: AgentRole[];
   busy: boolean;
   error: string | undefined;
   onChange: (request: () => Promise<{ item: CatalogItem }>) => void;
+  mask: string;
+  onReplace: (item: CatalogItem) => void;
+  onRemove: () => void;
 }) {
   const global = item.installs.find((install) => install.scope === "global");
   const where = installSummary(item.installs);
@@ -65,6 +73,7 @@ function ItemRow({
         <OriginTag item={item} />
         <span className="ml-auto text-[11px] tabular-nums text-muted-foreground">{formatBytes(item.size_bytes)}</span>
       </div>
+      <McpSummary item={item} />
       <p className="break-words text-[11px] text-muted-foreground">
         {where.length ? where.join(" · ") : "Installed nowhere"}
       </p>
@@ -106,6 +115,7 @@ function ItemRow({
           Install globally
         </Button>
       )}
+      {item.kind === "mcp" && <McpItemActions item={item} mask={mask} onSaved={onReplace} onDeleted={onRemove} />}
       {error && <p role="alert" className="text-xs text-destructive">{error}</p>}
     </li>
   );
@@ -187,6 +197,19 @@ export function CatalogCard() {
     }
   };
 
+  /** Put an added or changed item in the list, or take a deleted one (`item` null) out of it. */
+  const replace = (itemId: string, item: CatalogItem | null) =>
+    setCatalog((c) => {
+      if (!c) return c;
+      const kept = c.items.filter((other) => other.item_id !== itemId);
+      const items = item
+        ? c.items.some((other) => other.item_id === itemId)
+          ? c.items.map((other) => (other.item_id === itemId ? item : other))
+          : [...kept, item].sort((a, b) => a.kind.localeCompare(b.kind) || a.name.localeCompare(b.name))
+        : kept;
+      return { ...c, items, installed_count: items.filter((other) => other.installs.length).length };
+    });
+
   /** Run one install change; the item it answers with replaces the row, and a refusal shows the server's reason. */
   const change = async (itemId: string, request: () => Promise<{ item: CatalogItem }>) => {
     setPending((p) => new Set(p).add(itemId));
@@ -226,7 +249,8 @@ export function CatalogCard() {
   }
 
   const empty = catalog.items.length === 0;
-  const imported = catalog.last_import != null || catalog.items.some((item) => item.origin === "machine");
+  const imported =
+    catalog.last_import != null || catalog.items.some((item) => item.origin === "machine" && item.kind !== "mcp");
   const needle = filter.trim().toLowerCase();
   const shown = needle
     ? catalog.items.filter((item) => item.qualified_name.toLowerCase().includes(needle))
@@ -260,12 +284,13 @@ export function CatalogCard() {
       </div>
       {error && <p role="alert" className="border-t border-border px-5 py-2 text-xs text-destructive">{error}</p>}
       {catalog.last_import && <ImportReport report={catalog.last_import} />}
+      <McpToolbar catalog={catalog} onCatalog={setCatalog} onAdded={(item) => replace(item.item_id, item)} />
       {!empty && (
         <>
           <div className="border-t border-border px-5 py-2">
             <Input
               id={`${id}-filter`}
-              aria-label="Filter plugins and skills"
+              aria-label="Filter plugins, skills and MCP servers"
               placeholder="Filter by name"
               value={filter}
               onChange={(e) => setFilter(e.target.value)}
@@ -290,6 +315,9 @@ export function CatalogCard() {
                         busy={pending.has(item.item_id)}
                         error={rowErrors[item.item_id]}
                         onChange={(request) => void change(item.item_id, request)}
+                        mask={catalog.mcp_caps.mask}
+                        onReplace={(next) => replace(item.item_id, next)}
+                        onRemove={() => replace(item.item_id, null)}
                       />
                     ))}
                   </ul>
