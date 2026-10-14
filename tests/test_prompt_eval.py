@@ -275,8 +275,10 @@ _MISBEHAVING = EvalTask(
 
 @pytest.mark.skipif(not DSN, reason="LOOPX_TEST_DATABASE_URL is not set")
 def test_fake_mode_runs_every_task_and_sees_misbehaviour(tmp_path: Path) -> None:
-    result, path = runner.run(mode="fake", tasks=(*TASKS, _MISBEHAVING), admin_url=str(DSN), out_dir=tmp_path)
+    result, path = runner.run(mode="fake", tasks=(*TASKS, _MISBEHAVING), admin_url=str(DSN), out_dir=tmp_path,
+                              agent="claude-code/opus")
     by_id = {task["id"]: task for task in result["tasks"]}
+    assert result["agent"] == "claude-code/opus"  # every role ran the agent named
 
     for task in TASKS:
         assert by_id[task.id]["success"], (task.id, by_id[task.id]["problems"])

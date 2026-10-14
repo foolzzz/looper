@@ -60,18 +60,15 @@ from ..claude_cli import (
     AutonomousHandler,
     AutonomousRun,
     ClaudeRunRecorder,
-    ResidentClaude,
     ResidentTurn,
-    budget_error,
     exit_note,
-    isolation_args,
-    system_prompt_args,
 )
 from .. import knowledge as project_knowledge
 from ..knowledge import AgentKnowledge, documents_label, load_knowledge
 from ..library import AgentLibrary, items_label, load_installed
 from ..project_execution import LessonsMode, ProjectExecution, TaskBudgetAction, format_usd
 from ..run_usage import Usage
+from ..runtimes import CLAUDE_CODE, can_resume
 from ..system_prompt import SystemPrompt, build_system_prompt, is_recommended, plan_task_section
 from ..message import (
     TASK_ROUTER_ADDRESS,
@@ -240,6 +237,9 @@ class TaskPlan:
     session_id: str | None = None  # the Planner's Claude session (agent_sessions), resumed after a restart
     # The session's running totals at its last result; a process that resumes the session starts from them.
     session_totals: Usage = field(default_factory=Usage)
+    # The runtime type the session belongs to and the agent that ran it last (None: before agents).
+    session_runtime: str | None = None
+    session_agent: str | None = None
     final_summary: str = ""  # the last accepted step's summary
     fail_reason: str = ""
     # The task journal (task_journal), oldest first: an entry per accepted step, written as it is accepted.
@@ -358,7 +358,7 @@ class PlannerAgent:
         self._plan: TaskPlan | None = None
         self._loop_task: asyncio.Task[Any] | None = None
         self._running = False
-        self._claude = ResidentClaude(label=self.agent_id)
+        self._claude = CLAUDE_CODE.resident_session(self.agent_id)
         self._turn_lock = asyncio.Lock()
         self._supervise_task: asyncio.Task[Any] | None = None
         # When the last turn ended, so a periodic SUPERVISE is skipped right
@@ -1151,27 +1151,9 @@ class PlannerAgent:
                 self._last_turn_at = time.monotonic()
 
     def _claude_command(self, prompt_file: Path, settings: PlannerSettings, launch: Launch, work_dir: str) -> list[str]:
-        """The Planner's Claude, without ``--resume``."""
-        return [
-            self._claude_bin,
-            "--print",
-            "--verbose",
-            "--output-format", "stream-json",
-            # Each event is one user turn on stdin; Claude idles between turns.
-            "--input-format", "stream-json",
-            # Partial deltas keep the turn's heartbeat current while Claude writes.
-            "--include-partial-messages",
-            # Claude echoes each message, marked with the uuid it was sent with, when it starts the message's
-            # turn; a turn Claude runs on its own has no such echo.
-            "--replay-user-messages",
-            # None of the operator's personal settings, memory, hooks, plugins or MCP servers; the
-            # permissions every agent shares and the plugins and skills installed for the Planner come
-            # with the launch args.
-            *isolation_args(work_dir),
-            *system_prompt_args(prompt_file),
-            *launch.args(),
-            *(["--max-turns", str(settings.max_turns)] if settings.max_turns > 0 else []),
-        ]
+        """The Planner's resident process (``RuntimeAdapter.resident_command``), without resuming a session."""
+        return launch.runtime.resident_command(launch.executable(self._claude_bin), cwd=work_dir,
+                                               prompt_file=prompt_file, launch=launch, max_turns=settings.max_turns)
 
     async def _run_turn(self, message: str, *, retried: bool = False) -> str:
         """Send ``message`` as one turn and return Claude's final message; raises ``PlannerTurnError``."""
@@ -1181,6 +1163,9 @@ class PlannerAgent:
         knowledge = await self._load_knowledge(plan)
         library = await self._load_installed(plan)
         agent_settings = await self._load_agent_settings(plan)
+        if agent_settings.agent_error:
+            # The task fails with the reason rather than run another agent.
+            raise PlannerTurnError(agent_settings.agent_error)
         system_prompt = self._system_prompt(plan, settings, knowledge, agent_settings.harness)
         launch = Launch(agent_settings, library, knowledge)
         await self._note_background(plan.project_background)
@@ -1201,11 +1186,19 @@ class PlannerAgent:
             await self._claude.stop()
         start_error: str | None = None
         resuming: str | None = None  # the session this turn's new process resumes, if any
+        if not self._claude.started and plan.session_id and not can_resume(plan.session_runtime, launch.runtime):
+            # Another runtime cannot resume this session: a new one starts. Every turn carries the plan, its
+            # steps and the task journal, so the Planner goes on from where the task is.
+            await self._activity("phase", f"The Planner's agent now runs on {launch.runtime.type}, which cannot "
+                                          f"resume its {plan.session_runtime} session: starting a new session")
+            plan.session_id, plan.session_totals = None, Usage()
+            await self._save_session(plan)
         if self._claude.started:
             command = self._claude.command
         else:
+            plan.session_runtime, plan.session_agent = launch.runtime.type, launch.agent.id
             resuming = plan.session_id
-            command = base + (["--resume", plan.session_id] if plan.session_id else [])
+            command = base + (launch.runtime.resume_args(plan.session_id) if plan.session_id else [])
             try:
                 await self._claude.start(command, cwd=plan.work_dir, signature=signature, env=launch.environment(),
                                          totals=plan.session_totals if plan.session_id else None,
@@ -1273,10 +1266,10 @@ class PlannerAgent:
         error: str | None = None
         if result_event is None:
             error = f"Claude Code exited before finishing the turn (exit code {turn.exit_code})"
-        elif budget_error(result_event):
+        elif launch.runtime.budget_error(result_event):
             # The process answers every later turn the same way at once: the next turn starts a new one,
             # with a new cap, that resumes the session.
-            error = budget_error(result_event)
+            error = launch.runtime.budget_error(result_event)
             await self._claude.stop()
         elif result_event.get("is_error") or result_event.get("subtype") != "success":
             error = f"Claude Code turn did not succeed ({result_event.get('subtype') or 'error'})"
@@ -1829,9 +1822,9 @@ class PlannerAgent:
         return knowledge
 
     async def _load_agent_settings(self, plan: TaskPlan) -> AgentSettings:
-        """The Planner's agent settings in the task's project, read now; the last ones read when they cannot
-        be read (the built-in defaults before any)."""
-        agent_settings = await load_agent_settings(AgentType.PLANNER, plan.project_id or None)
+        """The Planner's agent settings in the task's project, with the agent the task chose for its Planner,
+        read now; the last ones read when they cannot be read (the built-in defaults before any)."""
+        agent_settings = await load_agent_settings(AgentType.PLANNER, plan.project_id or None, self._task_id)
         if agent_settings.error is not None:
             await self._activity("error", f"Warning: {agent_settings.error}"[:500])
             if self._agent_settings is not None:
@@ -1894,7 +1887,8 @@ class PlannerAgent:
     async def _save_session(self, plan: TaskPlan) -> None:
         """Save the Planner's Claude session and its running totals."""
         try:
-            await db_agent_sessions.save_session(self.agent_id, plan.session_id, plan.session_totals.to_dict())
+            await db_agent_sessions.save_session(self.agent_id, plan.session_id, plan.session_totals.to_dict(),
+                                                 runtime_type=plan.session_runtime, session_agent_id=plan.session_agent)
         except Exception:
             logger.exception("failed to save the session of %s", self.agent_id)
 
@@ -1920,6 +1914,8 @@ class PlannerAgent:
             project_id=row.get("project_id") or "",
             session_id=session.get("session_id"),
             session_totals=Usage.from_dict(session.get("session_totals")),
+            session_runtime=session.get("runtime_type"),
+            session_agent=session.get("session_agent_id"),
             final_summary=row.get("final_summary") or "",
             fail_reason=row.get("fail_reason") or "",
         )

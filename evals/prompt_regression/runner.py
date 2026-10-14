@@ -386,12 +386,17 @@ def run(
     admin_url: str,
     out_dir: Path,
     model: str | None = None,
+    agent: str | None = None,
     max_budget_usd: float | None = None,
     total_cap_usd: float | None = None,
     task_timeout: float | None = None,
     keep_work_dirs: bool = False,
 ) -> tuple[dict[str, Any], Path]:
-    """Run ``tasks`` in ``mode`` (``fake`` or ``real``); returns the run and the JSON file written to ``out_dir``."""
+    """Run ``tasks`` in ``mode`` (``fake`` or ``real``); returns the run and the JSON file written to ``out_dir``.
+
+    Every role runs ``agent`` (by name), else the Claude Code agent of ``model`` (``claude-code/<model>``,
+    registered for the run), else the built-in agent.
+    """
     if mode not in ("fake", "real"):
         raise EvalError(f"mode must be fake or real, not {mode!r}")
     real_claude = shutil.which("claude") if mode == "real" else None
@@ -417,8 +422,7 @@ def run(
             database_url=database_url, runtime_root=root / "runtime", bin_dir=root / "bin", log_path=log_path,
             home=home,
         ) as api:
-            if model:
-                api.put("/api/agent-settings/system", {"model": model})
+            chosen = select_agent(api, agent=agent, model=model)
             results, stopped = run_suite(
                 tasks,
                 lambda task, cap_left: run_task(api, task, work_dirs[task.id], timeout=timeout, poll=poll,
@@ -432,7 +436,8 @@ def run(
     run_result = {
         "schema": SCHEMA,
         "mode": mode,
-        "model": model if mode == "real" else None,
+        "model": chosen["model"] if mode == "real" else None,
+        "agent": chosen["name"],
         "started_at": stamp,
         "git": git,
         "caps": {"max_budget_usd": max_budget_usd, "total_cap_usd": total_cap_usd},
@@ -444,6 +449,26 @@ def run(
     path = out_dir / f"{stamp}-{mode}.json"
     path.write_text(json.dumps(run_result, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     return run_result, path
+
+
+def select_agent(api: Api, *, agent: str | None, model: str | None) -> dict[str, Any]:
+    """Make ``agent`` (a registered agent's name), else Claude Code with ``model``, every role's agent (the
+    system layer); returns it. Without either, every role keeps the built-in agent."""
+    registry = api.get("/api/registry")
+    agents = {a["name"]: a for a in registry["agents"]}
+    if agent is not None:
+        if agent not in agents:
+            raise EvalError(f"no agent {agent!r} in the eval's database; it has {', '.join(sorted(agents))}")
+        chosen = agents[agent]
+    elif model:
+        name = f"claude-code/{model}"
+        chosen = agents.get(name) or api.post("/api/agents", {
+            "name": name, "runtime_id": "rt-claude-code", "provider_id": "prov-claude-subscription",
+            "model": model})["agent"]
+    else:
+        return next(a for a in registry["agents"] if a["builtin"])
+    api.put("/api/agent-settings/system", {"agent": chosen["agent_id"]})
+    return chosen
 
 
 def previous_run(out_dir: Path, current: Path, *, mode: str, model: str | None) -> dict[str, Any] | None:

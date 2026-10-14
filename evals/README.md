@@ -65,9 +65,12 @@ uv run --extra test python -m evals.prompt_regression run --mode real \
   --pg-url postgresql://postgres:postgres@127.0.0.1:5432/postgres
 ```
 
-Options: `--model`, `--tasks single_step,chat_correction`, `--max-budget-usd`,
-`--total-cap-usd`, `--baseline <run.json>` (compare with this run instead),
-`--keep-work-dirs`. To print a comparison again:
+Options: `--model` (every role runs Claude Code with its own login and this
+model, the agent `claude-code/<model>`), `--agent <name>` (every role runs
+this agent instead: a registered agent of the eval's new database, such as the
+built-in `claude-code/opus`; the run records it as `agent`), `--tasks
+single_step,chat_correction`, `--max-budget-usd`, `--total-cap-usd`,
+`--baseline <run.json>` (compare with this run instead), `--keep-work-dirs`. To print a comparison again:
 
 ```bash
 uv run python -m evals.prompt_regression compare evals/runs/<new>.json [evals/runs/<base>.json]

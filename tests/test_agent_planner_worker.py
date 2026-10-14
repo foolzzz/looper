@@ -14,6 +14,8 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from agent_fixtures import agent_json
+
 from fake_claude import fake_claude
 from library_fixtures import ALPHA_SKILL, DEMO_PLUGIN, plugin_dirs
 from loopx.agents.bus import MessageBus
@@ -625,8 +627,8 @@ class TestWorkerHarnessAndLaunch:
 
     def test_a_role_model_beats_the_system_default(self, agent_db: Any, rows: dict[str, Any]) -> None:
         agent_db.list_layers.return_value = [
-            {"scope": "system", "model": "sonnet", "effort": "high"},
-            {"scope": "role", "role": "reviewer", "model": "claude-haiku-4-5"},
+            {"scope": "system", "agent": agent_json("sonnet"), "effort": "high"},
+            {"scope": "role", "role": "reviewer", "agent": agent_json("claude-haiku-4-5")},
         ]
         _, work = _run_step()
         work_metadata = agent_db.start_record.await_args.kwargs["metadata"]
@@ -636,7 +638,7 @@ class TestWorkerHarnessAndLaunch:
         assert (_flag(review["argv"], "--model"), _flag(review["argv"], "--effort")) == ("claude-haiku-4-5", "high")
         assert work_metadata["model_choice"] == {"model": "sonnet", "source": "system", "effort": "high"}
         assert review_metadata["model_choice"] == {"model": "claude-haiku-4-5", "source": "role", "effort": "high"}
-        assert review_metadata["settings_sources"]["model"] == "role"
+        assert review_metadata["settings_sources"]["agent"] == "role"
 
     def test_the_settings_environment_reaches_the_subprocess_and_its_names_are_recorded(
         self, monkeypatch: pytest.MonkeyPatch, agent_db: Any, rows: dict[str, Any],

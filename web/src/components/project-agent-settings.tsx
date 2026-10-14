@@ -118,7 +118,7 @@ export function ProjectAgentSettingsSection({ projectId }: { projectId: string }
       <div>
         <h2 id={`${id}-title`} className="text-sm font-semibold">Agent settings</h2>
         <p className="mt-1 text-xs text-muted-foreground">
-          Harness, model, effort, environment and spend cap per run. Each resolves Settings → Agents page → this
+          Harness, agent, effort, environment and spend cap per run. Each resolves Settings → Agents page → this
           project → the role in this project; the most specific one set wins, and empty fields inherit.
         </p>
       </div>

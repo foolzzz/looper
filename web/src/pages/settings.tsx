@@ -4,6 +4,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
+import { AgentRegistrySection } from "@/components/agent-registry";
 import { CatalogCard } from "@/components/catalog-card";
 import { ConfigTransferCard } from "@/components/config-transfer";
 import { LayerSettingsForm } from "@/components/layer-settings";
@@ -303,7 +304,7 @@ export function SettingsPage() {
       <div>
         <h1 className="text-2xl font-bold">Settings</h1>
         <p className="text-sm text-muted-foreground mt-1">
-          Agent defaults, plugins and skills, channel integrations and system configuration
+          Agent defaults, agents and their runtimes, plugins and skills, channel integrations and system configuration
         </p>
       </div>
 
@@ -314,6 +315,15 @@ export function SettingsPage() {
           agents and for each role in it; the most specific one wins.
         </p>
         <AgentDefaultsCard />
+      </div>
+
+      <div>
+        <h2 className="text-sm font-semibold mb-1">Agents, providers &amp; runtimes</h2>
+        <p className="text-xs text-muted-foreground mb-3">
+          An agent is a runtime (an agent CLI on this machine), an LLM provider and a model. A selection is checked
+          against the roles it is for: the Manager and Planner need a resident session, Workers and Reviewers a run.
+        </p>
+        <AgentRegistrySection />
       </div>
 
       <div>

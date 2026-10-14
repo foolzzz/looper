@@ -92,12 +92,18 @@ def schema_fingerprint(sql: str) -> str:
     return hashlib.sha256(sql.encode("utf-8")).hexdigest()
 
 
-async def ensure_schema(pool: asyncpg.Pool | None = None) -> None:
+# Serializes schema runs on one database (any schema in it): the script runs as one transaction, which takes
+# this lock first, so two processes starting together cannot both create a table or migrate.
+_SCHEMA_LOCK = 0x6C6F6F70  # "loop"
+
+
+async def ensure_schema(pool: asyncpg.Pool | asyncpg.Connection | None = None) -> None:
     pool = pool or get_pool()
     sql = SCHEMA_PATH.read_text(encoding="utf-8")
-    # One simple query runs as one transaction: the fingerprint is recorded
+    # One simple query runs as one transaction: the lock is held throughout, and the fingerprint is recorded
     # only together with the schema it names.
-    await pool.execute(sql + _RECORD_FINGERPRINT.format(sha256=schema_fingerprint(sql)))
+    await pool.execute(f"SELECT pg_advisory_xact_lock({_SCHEMA_LOCK});\n{sql}"
+                       + _RECORD_FINGERPRINT.format(sha256=schema_fingerprint(sql)))
     logger.info("schema ensured")
 
 

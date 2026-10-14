@@ -200,7 +200,6 @@ async def seed_agent_configs(pool: Any = None) -> None:
             "agent_id": "manager",
             "display_name": "Manager (管家)",
             "role": "manager",
-            "runtime": "claude-code",
             "system_prompt": DEFAULT_SYSTEM_PROMPT,
             "timeout_seconds": 0,
         },
@@ -208,7 +207,6 @@ async def seed_agent_configs(pool: Any = None) -> None:
             "agent_id": "planner",
             "display_name": "Planner",
             "role": "planner",
-            "runtime": "claude-code",
             "timeout_seconds": 1200,  # per Planner turn
             "system_prompt": PLANNER_SYSTEM_PROMPT,
         },
@@ -216,7 +214,6 @@ async def seed_agent_configs(pool: Any = None) -> None:
             "agent_id": "worker",
             "display_name": "Worker",
             "role": "worker",
-            "runtime": "claude-code",
             "max_concurrency": 3,
             "timeout_seconds": 86400,
             # The role prompt of every Worker (the report contract follows it).
@@ -226,7 +223,6 @@ async def seed_agent_configs(pool: Any = None) -> None:
             "agent_id": "reviewer",
             "display_name": "Reviewer",
             "role": "reviewer",
-            "runtime": "claude-code",
             "timeout_seconds": 86400,
             # The role prompt of every Reviewer (the verdict contract follows it).
             "system_prompt": REVIEWER_SYSTEM_PROMPT,
@@ -301,7 +297,6 @@ async def _run_agent_system(
     # --- Database (required) ---
     from ..db import init_pool, ensure_schema, close_pool
     from ..db.connection import configured_dsn
-    from ..db.llm_profiles import seed_defaults as seed_llm_profiles
 
     dsn = configured_dsn()
     database_check = await self_check.check_database(dsn)
@@ -310,23 +305,6 @@ async def _run_agent_system(
     pool = await init_pool(dsn)
     await _back_up_before_schema_change(pool, dsn, runtime_root, skip_backup=skip_backup)
     await ensure_schema(pool)
-
-    await seed_llm_profiles([
-        {
-            "name": "anthropic-default",
-            "display_name": "Anthropic (Claude)",
-            "provider_kind": "anthropic",
-            "model": "claude-sonnet-4-20250514",
-            "description": "Default Anthropic provider — used with Claude Code CLI",
-        },
-        {
-            "name": "openai-default",
-            "display_name": "OpenAI",
-            "provider_kind": "openai",
-            "model": "o3",
-            "description": "Default OpenAI provider — used with Codex CLI",
-        },
-    ])
 
     await seed_agent_configs(pool)
     await seed_channel_configs(pool)
@@ -429,6 +407,7 @@ async def _run_agent_system(
         broadcaster=broadcaster,
         runtime_root=runtime_root,
         self_checks=[check.to_dict() for check in checks],
+        claude_bin=claude_bin,
     )
     await http_server.start()
 

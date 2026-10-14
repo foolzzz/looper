@@ -32,15 +32,13 @@ from ..claude_cli import (
     AutonomousHandler,
     AutonomousRun,
     ClaudeRunRecorder,
-    ResidentClaude,
     ResidentTurn,
     exit_note,
-    isolation_args,
-    system_prompt_args,
 )
 from ..library import load_installed
 from ..projects import project_name
 from ..run_usage import Usage
+from ..runtimes import CLAUDE_CODE, can_resume
 from ..system_prompt import SystemPrompt, build_system_prompt, is_recommended
 from .task import resolve_work_dir
 from ..message import (
@@ -158,6 +156,9 @@ class ManagerAgent:
         # The session's running totals (cost and tokens) at its last result. A process that resumes the
         # session starts from them, so its first turn records only its own share.
         self._session_totals = Usage()
+        # The runtime type the session belongs to and the agent that ran it last (None: before agents).
+        self._session_runtime: str | None = None
+        self._session_agent: str | None = None
         self._bus: MessageBus | None = None
         self._task: asyncio.Task[Any] | None = None
         self._running = False
@@ -168,7 +169,7 @@ class ManagerAgent:
         self._goal_snapshots: dict[str, GoalSnapshot] = {}
         # The resident Claude: started on the first chat message, then fed one
         # user turn per message; restarted when its system prompt changes.
-        self._claude = ResidentClaude(label="manager")
+        self._claude = CLAUDE_CODE.resident_session("manager")
         self._turn_lock = asyncio.Lock()
         self._session_loaded = False  # whether the saved session was read (at start, else before the first turn)
 
@@ -191,10 +192,14 @@ class ManagerAgent:
         if saved:
             self._session_id = saved.get("session_id")
             self._session_totals = Usage.from_dict(saved.get("session_totals"))
+            self._session_runtime = saved.get("runtime_type")
+            self._session_agent = saved.get("session_agent_id")
 
     async def _save_session_state(self) -> None:
         try:
-            await db_agent_sessions.save_session(self.agent_id, self._session_id, self._session_totals.to_dict())
+            await db_agent_sessions.save_session(self.agent_id, self._session_id, self._session_totals.to_dict(),
+                                                 runtime_type=self._session_runtime,
+                                                 session_agent_id=self._session_agent)
         except Exception:
             logger.exception("manager: failed to save its session")
 
@@ -432,6 +437,8 @@ class ManagerAgent:
         if not self._session_loaded:
             await self._load_session_state()
         agent_settings = await self._load_agent_settings()
+        if agent_settings.agent_error:
+            raise RuntimeError(agent_settings.agent_error)  # answered as an error; never another agent
         system_prompt = self._composed_prompt(agent_settings)
         launch = Launch(agent_settings, await load_installed(self._runtime_root, AgentType.MANAGER.value))
         try:
@@ -447,6 +454,13 @@ class ManagerAgent:
         )
         if self._claude.stale(signature):
             await self._claude.stop()
+        if not self._claude.started and self._session_id and not can_resume(self._session_runtime, launch.runtime):
+            # Another runtime cannot resume this session: a new one starts. Each turn carries the projects and
+            # the goals again, so only the conversation is left behind.
+            logger.warning("manager: its agent now runs on %s, which cannot resume the %s session %s; starting a "
+                           "new session", launch.runtime.type, self._session_runtime, self._session_id)
+            self._session_id, self._session_totals = None, Usage()
+            await self._save_session_state()
         command = self._claude.command if self._claude.started else self._claude_command(prompt_file, launch)
 
         task_id = context_envelope.metadata.get("task_id")
@@ -462,9 +476,10 @@ class ManagerAgent:
         )
         await recorder.start()
 
-        # The session this turn's new process resumes, if it starts one.
-        resuming = self._session_id if not self._claude.started and "--resume" in command else None
+        # The session this turn's new process resumes, if it starts one (its command resumes the saved session).
+        resuming = self._session_id if not self._claude.started else None
         if not self._claude.started:
+            self._session_runtime, self._session_agent = launch.runtime.type, launch.agent.id
             try:
                 await self._claude.start(
                     command, cwd=str(self._config.work_dir), signature=signature, env=launch.environment(),
@@ -652,25 +667,12 @@ class ManagerAgent:
         ))
 
     def _claude_command(self, prompt_file: Path, launch: Launch, *, resume: bool = True) -> list[str]:
-        command = [
-            self._config.claude_bin,
-            "--print",
-            "--verbose",
-            "--output-format", "stream-json",
-            # Each chat message is one user turn on stdin; Claude idles between turns.
-            "--input-format", "stream-json",
-            "--include-partial-messages",  # stream the reply as it is written
-            # Claude echoes each message, marked with the uuid it was sent with, when it starts the message's
-            # turn; a turn Claude runs on its own has no such echo.
-            "--replay-user-messages",
-            # None of the operator's personal settings, memory, hooks, plugins or MCP servers; the
-            # permissions every agent shares and the plugins and skills installed for it come with the launch args.
-            *isolation_args(self._config.work_dir),
-            *system_prompt_args(prompt_file),
-            *launch.args(),
-        ]
+        """The resident process's command (``RuntimeAdapter.resident_command``), resuming the saved session."""
+        runtime = launch.runtime
+        command = runtime.resident_command(launch.executable(self._config.claude_bin), cwd=self._config.work_dir,
+                                           prompt_file=prompt_file, launch=launch)
         if resume and self._session_id:
-            command.extend(["--resume", self._session_id])
+            command.extend(runtime.resume_args(self._session_id))
         return command
 
     async def _build_user_message(self, user_message: str) -> str:

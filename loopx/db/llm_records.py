@@ -99,9 +99,11 @@ async def finish_record(
     duration_ms: int | None = None,
     model: str | None = None,
     error: str | None = None,
+    cost_source: str | None = None,
     pool: asyncpg.Pool | None = None,
 ) -> None:
-    """Close a record with the run's outcome, its own usage and cost, its final context and its compactions."""
+    """Close a record with the run's outcome, its own usage and cost (and where the cost comes from), its final
+    context and its compactions."""
     pool = pool or get_pool()
     await pool.execute(
         """
@@ -120,6 +122,7 @@ async def finish_record(
             cache_creation_tokens = $13,
             context_tokens = $14,
             compactions = $15::jsonb,
+            cost_source = $16,
             finished_at = now(),
             last_output_at = COALESCE(last_output_at, now())
         WHERE id = $1
@@ -127,7 +130,7 @@ async def finish_record(
         record_id, status, output_text, output_text[:500] if output_text else None,
         session_id, input_tokens, output_tokens, cost_usd, duration_ms, model, error,
         cache_read_tokens, cache_creation_tokens, context_tokens,
-        json.dumps(compactions) if compactions is not None else None,
+        json.dumps(compactions) if compactions is not None else None, cost_source,
     )
 
 

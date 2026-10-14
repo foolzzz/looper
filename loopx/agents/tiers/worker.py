@@ -31,16 +31,10 @@ from typing import Any
 
 from ..agent_settings import AgentType, Launch, load_agent_settings
 from ..bus import MessageBus
-from ..claude_cli import (
-    ClaudeRunRecorder,
-    budget_error,
-    isolation_args,
-    iter_lines,
-    system_prompt_args,
-    write_user_turn,
-)
+from ..claude_cli import ClaudeRunRecorder, budget_error
 from ..knowledge import documents_label, load_knowledge
 from ..library import items_label, load_installed
+from ..runtimes import RuntimeAdapter
 from ..message import (
     AgentAddress,
     MessageEnvelope,
@@ -282,8 +276,8 @@ class WorkerPool:
         self._running = False
         self._workers_dir = runtime_root / ".local" / "workers"
         self._workers_dir.mkdir(parents=True, exist_ok=True)
-        # stdin of each running Claude, open until its result: more user turns go here.
-        self._inputs: dict[str, asyncio.StreamWriter] = {}
+        # stdin of each running Claude, open until its result, and its runtime: more user turns go here.
+        self._inputs: dict[str, tuple[asyncio.StreamWriter, RuntimeAdapter]] = {}
 
     @property
     def agent_id(self) -> str:
@@ -418,11 +412,12 @@ class WorkerPool:
 
     async def send_input(self, worker_id: str, text: str) -> bool:
         """Add a user turn to a running worker; Claude reads it at its next turn."""
-        stdin = self._inputs.get(worker_id)
-        if stdin is None or not text.strip():
+        running = self._inputs.get(worker_id)
+        if running is None or not text.strip():
             return False
+        stdin, runtime = running
         try:
-            await write_user_turn(stdin, text)
+            await runtime.write_turn(stdin, text)
         except (BrokenPipeError, ConnectionResetError, RuntimeError):
             self._inputs.pop(worker_id, None)
             return False
@@ -544,7 +539,17 @@ class WorkerPool:
         knowledge = await load_knowledge(self._runtime_root, project, work_dir)
         project_id = str((project or {}).get("id") or "") or None
         library = await load_installed(self._runtime_root, agent.value, project_id)
-        agent_settings = await load_agent_settings(agent, project_id)
+        # The task's own choice of agent for this role wins over the layers.
+        agent_settings = await load_agent_settings(agent, project_id, parent_task_id or None)
+        if agent_settings.agent_error:
+            # The step fails with the reason rather than run another agent.
+            logger.error("worker %s: %s", worker_id, agent_settings.agent_error)
+            if parent_task_id:
+                await self._activity(parent_task_id, worker_id, "error", agent_settings.agent_error[:500])
+            if is_verify:
+                return {"passed": False, "findings": [agent_settings.agent_error],
+                        "summary": agent_settings.agent_error}
+            return {"status": "failed", "error": agent_settings.agent_error}
         launch = Launch(agent_settings, library, knowledge)
         background = str((project or {}).get("background") or "")
         system_prompt = build_system_prompt(
@@ -587,27 +592,9 @@ class WorkerPool:
             if is_verify:
                 return {"passed": False, "findings": [problem], "summary": problem}
             return {"status": "failed", "error": problem}
-        command = [
-            self._config.claude_bin,
-            "--print",
-            "--verbose",
-            "--output-format", "stream-json",
-            # Partial deltas keep the run's heartbeat current while Claude thinks.
-            "--include-partial-messages",
-            # The prompt and any later user turns arrive on stdin, so the
-            # Planner can step in while the run is going.
-            "--input-format", "stream-json",
-            "--replay-user-messages",
-            # None of the operator's personal settings, memory, hooks, plugins
-            # or MCP servers (whose teardown could also make the CLI exit
-            # non-zero). Built-in tools are unaffected; the permissions every
-            # agent shares and the plugins and skills installed for this run
-            # come with the launch args.
-            *isolation_args(work_dir),
-            *system_prompt_args(prompt_file),
-            *launch.args(),
-            *(["--max-turns", str(max_turns)] if max_turns > 0 else []),
-        ]
+        runtime = launch.runtime
+        command = runtime.run_command(launch.executable(self._config.claude_bin), cwd=work_dir,
+                                      prompt_file=prompt_file, launch=launch, max_turns=max_turns)
 
         if parent_task_id:
             cmd_display = _display_command(command) + f"  (prompt on stdin, {len(prompt)} chars)"
@@ -656,8 +643,8 @@ class WorkerPool:
 
         assert process.stdin is not None
         try:
-            await write_user_turn(process.stdin, prompt)
-            self._inputs[worker_id] = process.stdin
+            await runtime.write_turn(process.stdin, prompt)
+            self._inputs[worker_id] = (process.stdin, runtime)
         except (BrokenPipeError, ConnectionResetError):
             # Claude exited before reading; its output decides the outcome.
             logger.warning("worker %s: Claude closed stdin before the prompt was sent", worker_id)
@@ -672,16 +659,7 @@ class WorkerPool:
         async def _read_stream() -> None:
             nonlocal result_event
             assert process.stdout is not None
-            async for raw_line in iter_lines(process.stdout):
-                line = raw_line.decode("utf-8", errors="replace").strip()
-                if not line:
-                    continue
-                try:
-                    event = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if not isinstance(event, dict):
-                    continue
+            async for event in runtime.parse(process.stdout):
                 await recorder.record(event)
 
                 event_type = event.get("type", "")
@@ -696,7 +674,7 @@ class WorkerPool:
                         if block_type == "tool_use":
                             tool_name = block.get("name", "unknown")
                             tool_input = block.get("input", {})
-                            summary = self._format_tool_summary(tool_name, tool_input)
+                            summary = runtime.tool_summary(tool_name, tool_input)
                             if parent_task_id:
                                 try:
                                     await db_activity.insert_activity(
@@ -778,7 +756,7 @@ class WorkerPool:
             and result_event.get("subtype") == "success"
         )
         # A run stopped at its spend cap exits non-zero too; its result says why.
-        if return_code != 0 and not result_ok and budget_error(result_event) is None:
+        if return_code != 0 and not result_ok and runtime.budget_error(result_event) is None:
             stderr = ""
             if process.stderr:
                 stderr_bytes = await process.stderr.read()
@@ -884,22 +862,6 @@ class WorkerPool:
             await db_activity.insert_activity(task_id=task_id, worker=worker_id, kind=kind, summary=summary)
         except Exception:
             logger.debug("failed to insert %s activity", kind, exc_info=True)
-
-    @staticmethod
-    def _format_tool_summary(tool_name: str, tool_input: dict[str, Any]) -> str:
-        if tool_name == "Read":
-            return f"Reading: {tool_input.get('file_path', '?')}"
-        if tool_name == "Edit":
-            return f"Editing: {tool_input.get('file_path', '?')}"
-        if tool_name == "Write":
-            return f"Writing: {tool_input.get('file_path', '?')}"
-        if tool_name == "Bash":
-            cmd = tool_input.get("command", "")
-            return f"Running: {cmd[:80]}"
-        if tool_name in ("Glob", "Grep"):
-            pattern = tool_input.get("pattern", tool_input.get("query", ""))
-            return f"{tool_name}: {pattern[:60]}"
-        return f"Tool: {tool_name}"
 
     def active_count(self) -> int:
         return len(self._active)

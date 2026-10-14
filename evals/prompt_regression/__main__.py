@@ -18,7 +18,10 @@ def _parser() -> argparse.ArgumentParser:
     run = sub.add_parser("run", help="Run the task set and compare it with the previous run or the baseline.")
     run.add_argument("--mode", choices=("fake", "real"), default="fake",
                      help="fake: the scripted stand-in Claude (free); real: Claude Code (costs money)")
-    run.add_argument("--model", default="haiku", help="real mode: the model every agent runs (default haiku)")
+    run.add_argument("--model", default="haiku",
+                     help="real mode: every role runs Claude Code with this model (default haiku)")
+    run.add_argument("--agent", help="every role runs this agent, by name, instead (a registered agent of the "
+                                     "eval's new database, such as the built-in claude-code/opus)")
     run.add_argument("--tasks", help="comma-separated task ids (default: all)")
     run.add_argument("--max-budget-usd", type=float, default=0.25,
                      help="real mode: --max-budget-usd for every Claude Code run (default 0.25)")
@@ -60,7 +63,8 @@ def main(argv: list[str] | None = None) -> int:
             tasks=selected,
             admin_url=args.pg_url,
             out_dir=args.out_dir,
-            model=args.model if real else None,
+            model=args.model if real and not args.agent else None,
+            agent=args.agent,
             max_budget_usd=args.max_budget_usd if real else None,
             total_cap_usd=args.total_cap_usd if real else None,
             task_timeout=args.task_timeout,

@@ -85,9 +85,25 @@ async def _populate(monkeypatch: pytest.MonkeyPatch, pool: Any, work_dir: Path) 
     _serve(monkeypatch, pool)
     await seed_agent_configs(pool)
     await seed_channel_configs(pool)
-    await _ok("PUT", "/api/agent-settings/system", {"harness_prompt": "Be careful.", "model": "sonnet",
+    # Runtimes, providers and agents: a runtime on a command (portable) and one on a path (left out), a provider
+    # with an API key and a model catalog, and agents on the built-in and the registered pieces.
+    beta = (await _ok("POST", "/api/runtimes", {"name": "claude-beta", "type": "claude-code",
+                                                "executable": "claude-beta"}))["runtime"]["runtime_id"]
+    await _ok("POST", "/api/runtimes", {"name": "claude-local", "type": "claude-code",
+                                        "executable": "/opt/claude-local/bin/claude"})
+    await _ok("POST", "/api/providers", {"name": "anthropic-key", "protocols": ["anthropic-messages"],
+                                         "auth": "api_key", "api_key": SECRET, "base_url": "https://api.example.test",
+                                         "models": [{"name": "claude-sonnet-4-5", "input_usd_per_mtok": 3,
+                                                     "output_usd_per_mtok": 15}]})
+    sonnet = (await _ok("POST", "/api/agents", {"name": "claude-code/sonnet", "runtime_id": "rt-claude-code",
+                                                "provider_id": "prov-claude-subscription",
+                                                "model": "sonnet"}))["agent"]["agent_id"]
+    beta_haiku = (await _ok("POST", "/api/agents", {"name": "beta-haiku", "runtime_id": beta,
+                                                    "provider_id": "prov-claude-subscription", "model": "haiku",
+                                                    "effort": "low"}))["agent"]["agent_id"]
+    await _ok("PUT", "/api/agent-settings/system", {"harness_prompt": "Be careful.", "agent": sonnet,
                                                     "effort": "high", "env": [{"key": "LOOPX_MODE", "value": "a"}]})
-    await _ok("PUT", "/api/agent-settings/roles/worker", {"model": "opus", "run_budget_usd": 2.5,
+    await _ok("PUT", "/api/agent-settings/roles/worker", {"agent": "agent-claude-code-opus", "run_budget_usd": 2.5,
                                                           "env": [{"key": "LOOPX_MODE", "value": None}]})
     await _ok("PUT", "/api/agent-configs/planner", {"system_prompt": "Plan in small steps.", "timeout_seconds": 900})
     await _ok("PUT", "/api/channel-configs/channel-telegram", {"enabled": True, "config": {
@@ -118,7 +134,7 @@ async def _populate(monkeypatch: pytest.MonkeyPatch, pool: Any, work_dir: Path) 
                                                 "background": "Python 3.12.", "review_policy": "all",
                                                 "distill_lessons": True}))["project_id"]
     docs = (await _ok("POST", "/api/projects", {"name": "docs"}))["project_id"]
-    await _ok("PUT", f"/api/projects/{calc}/agent-settings", {"model": "haiku"})
+    await _ok("PUT", f"/api/projects/{calc}/agent-settings", {"agent": beta_haiku})
     await _ok("PUT", f"/api/projects/{calc}/agent-settings/roles/worker", {"harness_prompt": "Test first."})
     from loopx.agents.knowledge import add_document
 
@@ -151,14 +167,21 @@ def _sha(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+def _without_ids(view: dict[str, Any]) -> dict[str, Any]:
+    """An effective settings view with its agent by name."""
+    agent = view["agent"]
+    return {**view, "agent": {**agent, "value": {k: v for k, v in agent["value"].items() if k != "agent_id"}}}
+
+
 async def _state(pool: Any) -> dict[str, Any]:
     """An installation's configuration as agents and the dashboard see it, without ids or times."""
     from loopx.agents.agent_settings import TASK_ROLES, index_layers, resolve
     from loopx.agents.config_transfer import role_entry
+    from loopx.db import agent_setting_layers
     from loopx.db import config_transfer as db
 
     async with pool.acquire() as conn:
-        layers = await db.read_layers(conn)
+        layers = await agent_setting_layers.list_layers(None, pool=pool)
         projects = [dict(r) for r in await conn.fetch("SELECT * FROM projects ORDER BY name")]
         names = {p["id"]: p["name"] for p in projects}
         items = await db.read_items(conn)
@@ -170,10 +193,16 @@ async def _state(pool: Any) -> dict[str, Any]:
                 **{k: row[k] for k in ("origin", "description", "version", "modified", "sha256", "size_bytes")},
                 "files": files, "server": server}
         documents = await db.read_documents(conn, content=True)
+        in_projects = {p: await agent_setting_layers.list_layers(p, pool=pool) for p in names}
         return {
-            "settings": {role: resolve(role, index_layers(layers, None)).view() for role in ROLES},
-            "project_settings": {(names[p], role.value): resolve(role, index_layers(layers, p), p).view()
+            "settings": {role: _without_ids(resolve(role, index_layers(layers, None)).view()) for role in ROLES},
+            "project_settings": {(names[p], role.value): _without_ids(resolve(role, index_layers(in_projects[p], p),
+                                                                              p).view())
                                  for p in names for role in TASK_ROLES},
+            "runtimes": [{k: r[k] for k in ("name", "type", "executable", "capabilities")}
+                         for r in await db.read_runtimes(conn)],
+            "providers": [{k: v for k, v in r.items() if k != "id"} for r in await db.read_providers(conn)],
+            "agents": [{k: v for k, v in r.items() if k != "id"} for r in await db.read_agents(conn)],
             "roles": [role_entry(r) for r in await db.read_roles(conn)],
             "channels": {c["channel_type"]: (c["display_name"], c["enabled"], c["config"])
                          for c in await db.read_channels(conn)},
@@ -190,7 +219,8 @@ async def _state(pool: Any) -> dict[str, Any]:
 async def _rows(pool: Any) -> dict[str, list[Any]]:
     """Every row of the tables an import writes, to tell that nothing changed."""
     tables = ("agent_setting_layers", "agent_configs", "channel_configs", "library_items", "library_files",
-              "library_mcp_servers", "library_installs", "projects", "project_documents")
+              "library_mcp_servers", "library_installs", "projects", "project_documents", "agent_runtimes",
+              "llm_providers", "llm_provider_secrets", "agents")
     async with pool.acquire() as conn:
         if not await conn.fetchval("SELECT to_regclass('library_installs') IS NOT NULL"):
             return {}
@@ -227,17 +257,23 @@ def test_a_round_trip_into_a_new_database_reproduces_the_configuration(
                                                                 "names": ["environment MY_TG_TOKEN"]}]
             assert not [c for c in plan["changes"] if c["action"] == "skipped"], plan
 
-            # Agents resolve the same settings and load the same items; only the projects' directories stay behind.
+            # Agents resolve the same settings and load the same items; only the projects' directories and a
+            # runtime's executable path stay behind.
             before, after = await _state(source), await _state(target)
             before["projects"]["calc"]["work_dir"] = ""
+            next(r for r in before["runtimes"] if r["name"] == "claude-local")["executable"] = ""
             assert after == before
-            assert "set its directory on this machine" in plan["notes"][0]
+            assert [n.split(":")[0] for n in plan["notes"]] == ["runtime claude-local", "project calc"]
 
-            # Exporting the new installation gives the same file.
+            # Exporting the new installation gives the same file, but for the executable path left behind.
             again = tmp_path / "again.json"
             assert (await _loopx(monkeypatch, target_url, "config", "export", str(again), "--include-projects",
                                  "--include-secrets"))[0] == 0
-            assert _without_time(again) == _without_time(exported)
+            first = _without_time(exported)
+            local = next(r for r in first["runtimes"] if r["name"] == "claude-local")
+            assert local["executable"] is None
+            local["executable"] = ""  # the type's default here
+            assert _without_time(again) == first
 
     asyncio.run(_test())
 
@@ -276,7 +312,7 @@ def test_a_preview_writes_nothing(monkeypatch: pytest.MonkeyPatch, tmp_path: Pat
             await _populate(monkeypatch, source, tmp_path / "calc")
             if target_has_schema:
                 _serve(monkeypatch, target)
-                await _ok("PUT", "/api/agent-settings/system", {"model": "haiku"})
+                await _ok("PUT", "/api/agent-settings/system", {"agent": "agent-claude-code-opus"})
             exported = tmp_path / "config.json"
             assert (await _loopx(monkeypatch, source_url, "config", "export", str(exported),
                                  "--include-projects"))[0] == 0
@@ -323,7 +359,9 @@ def test_secrets_are_placeholders_by_default_and_never_replace_stored_ones(
             assert code == 0 and not err
             text = exported.read_text()
             assert SECRET not in text and str(tmp_path) not in text and "/opt/claude" not in text
-            assert "3 secret values left out as placeholders" in out
+            assert "4 secret values left out as placeholders" in out
+            assert next(p for p in json.loads(text)["providers"] if p["name"] == "anthropic-key")["api_key"] == {
+                "secret": "omitted"}
             data = json.loads(text)
             search = next(i for i in data["catalog"] if i["name"] == "search")
             assert search["server"]["env"] == {"API_KEY": {"secret": "omitted"}}
@@ -349,7 +387,10 @@ def test_secrets_are_placeholders_by_default_and_never_replace_stored_ones(
             assert {(n["section"], n["key"]): n["names"] for n in plan["need_secret"]} == {
                 ("channels", "telegram"): ["config webhook_secret", "environment MY_TG_TOKEN"],
                 ("catalog", "mcp:web"): ["header Authorization"],
+                ("providers", "anthropic-key"): ["api_key"],
             }
+            # A placeholder leaves the provider without a key here; it is never shown either way.
+            assert await target.fetchval("SELECT count(*) FROM llm_provider_secrets") == 0
             assert not [c for c in plan["changes"] if (c["section"], c["key"]) == ("catalog", "mcp:search")]
             assert ids  # the source's own values stay where they were
             source_servers = await db_library.get_mcp_servers([ids["mcp"]], pool=source)
@@ -396,7 +437,8 @@ def test_an_entry_with_the_same_key_is_updated_in_place_and_nothing_else_is_remo
             state = await _state(target)
             assert state["projects"]["CALC"]["background"] == "Python 3.12."
             assert state["projects"]["CALC"]["work_dir"] == str(tmp_path)  # a directory is never imported
-            assert project["project"]["values"]["model"] == "haiku"
+            assert project["project"]["values"]["agent"] == next(
+                a["agent_id"] for a in (await _call("GET", "/api/registry"))[1]["agents"] if a["name"] == "beta-haiku")
 
     asyncio.run(_test())
 
@@ -457,5 +499,33 @@ def test_the_settings_download_streams_the_same_file(monkeypatch: pytest.MonkeyP
             downloaded.pop("exported_at")
             assert downloaded == _without_time(exported)
             assert SECRET.encode() not in payload
+
+    asyncio.run(_test())
+
+
+def test_a_file_from_before_agents_selects_the_agent_of_each_model(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    async def _test() -> None:
+        async with _installation(schema=False) as (target, target_url):
+            old = tmp_path / "old.json"
+            old.write_text(json.dumps({"format": "loopx-config/v1", "settings": {"layers": [
+                {"scope": "system", "harness_prompt": None, "model": "haiku", "effort": "low", "env": [],
+                 "run_budget_usd": None},
+                {"scope": "role", "role": "manager", "harness_prompt": None, "model": "opus", "effort": None,
+                 "env": [], "run_budget_usd": None}]}}))
+
+            code, out, err = await _loopx(monkeypatch, target_url, "config", "import", str(old), "--apply", "--json")
+
+            assert code == 0, err
+            plan = _plan(out)
+            assert [(c["section"], c["key"], c["action"]) for c in plan["changes"]] == [
+                ("agents", "claude-code/haiku", "added"), ("settings.layers", "system", "added"),
+                ("settings.layers", "role:manager", "added")]
+            from loopx.db import config_transfer as db
+
+            async with target.acquire() as conn:
+                layers = {r["scope"]: r["agent"] for r in await db.read_layers(conn)}
+            assert layers == {"system": "claude-code/haiku", "role": "claude-code/opus"}  # opus: the built-in one
 
     asyncio.run(_test())
