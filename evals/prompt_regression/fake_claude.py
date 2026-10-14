@@ -6,8 +6,8 @@ Usage (through the shim the runner puts on PATH as ``claude``):
 It speaks Claude Code's stream-json like the real CLI and plays the role the
 agent system started it in:
 
-- the Planner (a resident process: no ``--replay-user-messages``) answers each
-  user turn by its kind: [PLAN] with the task's scripted plan; [DECISION] with
+- the Planner (a resident process; its task section has neither of the
+  markers below) answers each user turn by its kind: [PLAN] with the task's scripted plan; [DECISION] with
   what a careful Planner decides from the allowed decisions (accept, else
   review a completed step that needs one, else retry a failed one, else fail);
   [CHAT] by forwarding the message to the running step, if any; [SUPERVISE]
@@ -188,12 +188,13 @@ def main(argv: list[str]) -> int:
         with open(args[args.index("--append-system-prompt-file") + 1], encoding="utf-8") as handle:
             system_prompt = handle.read()
     stdin = _Stdin()
-    if "--replay-user-messages" not in args:
-        _planner(script, stdin)
-    elif "The step under review:" in system_prompt:
+    # The role is in the task section: a Reviewer's names the step under review, a Worker's its step.
+    if re.search(r"^The step under review:", system_prompt, re.MULTILINE):
         _reviewer(stdin)
-    else:
+    elif re.search(r"^Your step:", system_prompt, re.MULTILINE):
         _worker(script, system_prompt, stdin)
+    else:
+        _planner(script, stdin)
     return 0
 
 
