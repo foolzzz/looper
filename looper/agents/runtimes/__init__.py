@@ -223,8 +223,9 @@ class RuntimeAdapter(ABC):
         """Write one user turn to a running process."""
 
     @abstractmethod
-    def parse(self, stdout: asyncio.StreamReader) -> AsyncIterator[dict[str, Any]]:
-        """The process's output as internal events, in order."""
+    def parse(self, stdout: asyncio.StreamReader, *, model: str | None = None) -> AsyncIterator[dict[str, Any]]:
+        """The process's output as internal events, in order; ``model`` is the one the run was started with, for a
+        runtime whose output does not name it."""
 
     @abstractmethod
     def tool_summary(self, tool_name: str, tool_input: dict[str, Any]) -> str:

@@ -57,7 +57,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from ..run_usage import Usage, reported_totals, run_usage
 from . import (
@@ -100,6 +100,8 @@ class CodexRuntime(RuntimeAdapter):
     # API keys only (RFC P1): Codex's own login is not used.
     auth_kinds = frozenset({AuthKind.API_KEY})
     isolation_id = HOME_LAYOUT_ID
+    # Set by the binding and the run's home: a provider's own variables cannot set them.
+    provider_env_owned: ClassVar[frozenset[str]] = frozenset({KEY_ENV, "CODEX_HOME"})
 
     def probe(self, executable: str) -> Probe:
         """``<executable> --version``, with an empty ``CODEX_HOME`` of its own so nothing of the operator's is read."""
@@ -150,9 +152,10 @@ class CodexRuntime(RuntimeAdapter):
         ]
 
     def environment(self, launch: Launch) -> dict[str, str]:
-        """The server's environment, the settings' variables and the provider's key."""
-        binding = self.bind_provider(launch.agent.provider, launch.model, launch.effort)
-        return {**os.environ, **dict(launch.env), **dict(binding.env)}
+        """The server's environment, the settings' variables, the provider's own variables and its key."""
+        provider = launch.agent.provider
+        binding = self.bind_provider(provider, launch.model, launch.effort)
+        return {**os.environ, **dict(launch.env), **dict(getattr(provider, "env", ())), **dict(binding.env)}
 
     def _command(self, executable: str, prompt_file: Path, launch: Launch) -> list[str]:
         home = write_home(_local_dir(prompt_file), config_toml(launch), agents_md(prompt_file, launch))
@@ -184,8 +187,9 @@ class CodexRuntime(RuntimeAdapter):
         await stdin.drain()
         stdin.close()
 
-    def parse(self, stdout: asyncio.StreamReader) -> AsyncIterator[dict[str, Any]]:
-        return CodexStream().events(stdout)
+    def parse(self, stdout: asyncio.StreamReader, *, model: str | None = None) -> AsyncIterator[dict[str, Any]]:
+        """A run's events; Codex does not name the model, so the run's (``model``) names its tokens."""
+        return CodexStream(model=model).events(stdout)
 
     def tool_summary(self, tool_name: str, tool_input: dict[str, Any]) -> str:
         if tool_name == SHELL_TOOL:
@@ -216,6 +220,12 @@ class CodexRuntime(RuntimeAdapter):
         return {"runtime_catalog": {"runtime": self.type,
                                     "skills_as_documents": [skill.name for skill in catalog.skills],
                                     "skipped": skipped}}
+
+
+def usage_event(model: str | None, usage: Usage, **extra: Any) -> dict[str, Any]:
+    """The internal event for the tokens of one turn (never running totals), which the per-run spend cap counts."""
+    tokens = {name: value for name, value in usage.to_dict().items() if name != "cost_usd"}
+    return {"type": "usage", "model": model, "usage": tokens, **extra}
 
 
 def provider_price_cost(usage: Usage, provider: ProviderSpec) -> RunCost:
@@ -511,14 +521,17 @@ class CodexStream:
     - an ``agent_message`` → an ``assistant`` text block; a ``reasoning`` item → a ``thinking`` block;
     - a command, a patch, an MCP call, a web search or a plan update → an ``assistant`` ``tool_use`` when it
       starts and a ``user`` ``tool_result`` when it completes (both at once when only its completion comes);
-    - ``turn.completed`` → a successful ``result`` whose ``result`` is the turn's last message and whose
-      ``modelUsage`` holds the session's running totals; ``turn.failed`` → a failed ``result``;
+    - ``turn.completed`` → a ``usage`` event with the turn's own tokens (the running totals Codex reports, less
+      ``before``, the session's totals when the turn started), then a successful ``result`` whose ``result`` is
+      the turn's last message and whose ``modelUsage`` holds the running totals; ``turn.failed`` → a failed
+      ``result``;
     - an ``error`` item or event (a warning, a retry) and anything unknown → ``system`` events the record keeps.
 
     A process that ends without ``turn.completed`` or ``turn.failed`` gives no ``result``.
     """
 
-    model: str = "codex"  # the key of the result's modelUsage
+    model: str | None = None  # the run's model: Codex does not name it
+    before: Usage = field(default_factory=Usage)  # the session's running totals when the turn started
     session_id: str | None = None
     _last_text: str = ""
     _open: set[str] = field(default_factory=set)
@@ -546,8 +559,9 @@ class CodexStream:
             return self._item(item, completed=kind == "item.completed") if isinstance(item, Mapping) else []
         if kind == "turn.completed":
             usage = raw.get("usage") if isinstance(raw.get("usage"), Mapping) else {}
-            return [{"type": "result", "subtype": "success", "is_error": False, "result": self._last_text,
-                     **self._base(), "modelUsage": {self.model: _codex_usage(usage)}}]
+            result = {"type": "result", "subtype": "success", "is_error": False, "result": self._last_text,
+                      **self._base(), "modelUsage": {self.model or "codex": _codex_usage(usage)}}
+            return [usage_event(self.model, reported_totals(result).since(self.before), **self._base()), result]
         if kind in ("turn.failed", "thread.failed"):
             error = raw.get("error")
             message = str(error.get("message") if isinstance(error, Mapping) else error or "the turn failed")
@@ -747,7 +761,8 @@ class ResidentCodex:
         logger.info("%s started a Codex turn (pid=%s, %s)", self._label, process.pid,
                     f"resuming {self._thread}" if self._thread else "new session")
         stderr = asyncio.create_task(_tail(process.stderr))
-        stream = CodexStream()
+        base = self._base
+        stream = CodexStream(model=base[base.index("-m") + 1] if "-m" in base else None, before=self._totals)
         result: dict[str, Any] | None = None
         session_started = False
         try:

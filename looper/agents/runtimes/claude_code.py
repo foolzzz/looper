@@ -145,8 +145,8 @@ class ClaudeCodeRuntime(RuntimeAdapter):
     async def write_turn(self, stdin: asyncio.StreamWriter, text: str, *, uuid: str | None = None) -> None:
         await claude_cli.write_user_turn(stdin, text, uuid=uuid)
 
-    def parse(self, stdout: asyncio.StreamReader) -> AsyncIterator[dict[str, Any]]:
-        return claude_cli.stream_events(stdout)
+    def parse(self, stdout: asyncio.StreamReader, *, model: str | None = None) -> AsyncIterator[dict[str, Any]]:
+        return claude_cli.stream_events(stdout)  # Claude Code names its models itself
 
     def tool_summary(self, tool_name: str, tool_input: dict[str, Any]) -> str:
         if tool_name == "Read":

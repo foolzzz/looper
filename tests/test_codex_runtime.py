@@ -64,15 +64,15 @@ def _launch(*, executable: str = "codex", library: AgentLibrary | None = None,
 # --- Events ---
 
 
-async def _parse_async(lines: bytes) -> list[dict[str, Any]]:
+async def _parse_async(lines: bytes, model: str | None) -> list[dict[str, Any]]:
     reader = asyncio.StreamReader()
     reader.feed_data(lines)
     reader.feed_eof()
-    return [event async for event in CODEX.parse(reader)]
+    return [event async for event in CODEX.parse(reader, model=model)]
 
 
-def _events(name: str) -> list[dict[str, Any]]:
-    return asyncio.run(_parse_async((FIXTURES / f"{name}.jsonl").read_bytes()))
+def _events(name: str, model: str | None = "gpt-5.5") -> list[dict[str, Any]]:
+    return asyncio.run(_parse_async((FIXTURES / f"{name}.jsonl").read_bytes(), model))
 
 
 def _blocks(events: list[dict[str, Any]], kind: str) -> list[dict[str, Any]]:
@@ -102,8 +102,11 @@ def test_a_run_becomes_init_text_tool_calls_and_a_result_with_its_tokens() -> No
     assert result is not None and result["subtype"] == "success" and not result["is_error"]
     assert result["result"] == "Done. The code word is HERON-4471.\n\nEND-OF-REPLY."
     # Codex counts the cached input inside input_tokens; Looper counts it apart, as Claude Code does. No cost.
-    assert run_usage(result) == Usage(cost_usd=None, input_tokens=49403 - 33920, output_tokens=208,
-                                      cache_read_tokens=33920, cache_creation_tokens=0)
+    tokens = Usage(input_tokens=49403 - 33920, output_tokens=208, cache_read_tokens=33920, cache_creation_tokens=0)
+    assert run_usage(result) == tokens and list(result["modelUsage"]) == ["gpt-5.5"]
+    # The turn's own tokens come first as a usage event, for the per-run spend cap.
+    assert events[-2] == {"type": "usage", "model": "gpt-5.5", "usage": tokens.to_dict(),
+                          "session_id": init["session_id"]}
 
 
 def test_an_mcp_call_is_named_like_claude_codes_and_carries_its_text() -> None:
@@ -397,9 +400,10 @@ def test_a_resident_session_runs_each_turn_in_a_new_process_that_resumes_it(tmp_
     assert [a[a.index("resume") + 1] if "resume" in a else None for a in argv] == [None, "thread-1", "thread-1"]
     assert all("--ephemeral" not in a for a in argv)
     assert (session_home / "AGENTS.md").read_text().endswith("prompt B")
-    # Each turn's own tokens, from the session's running totals.
-    assert [t.usage for t in chat["turns"]] == [
-        Usage(input_tokens=60, output_tokens=10, cache_read_tokens=40, cache_creation_tokens=0)] * 3
+    # Each turn's own tokens, from the session's running totals, in the record and in its usage event.
+    own = Usage(input_tokens=60, output_tokens=10, cache_read_tokens=40, cache_creation_tokens=0)
+    assert [t.usage for t in chat["turns"]] == [own] * 3
+    assert [(e["model"], e["usage"]) for e in chat["events"] if e["type"] == "usage"] == [("gpt-5.5", own.to_dict())] * 3
     # Nothing ran in the run home the command names, which holds only what the turns copy.
     run_home = Path(chat["first"][1].removeprefix("CODEX_HOME="))
     assert sorted(p.name for p in run_home.iterdir()) == ["AGENTS.md", "config.toml"]
