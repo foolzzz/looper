@@ -305,6 +305,22 @@ To learn how to use these features, read the [usage guide](docs/fork/usage.md).
   resumed process starts from them. They reset when the session is dropped.
   Records written before this fix keep their inflated cost.
 
+### Removed
+
+- **`loopx update` and `loopx init`.** To upgrade, re-run `install.sh`: it
+  installs the latest release wheel over the current one. `loopx init` wrote
+  `providers.yaml` and `agents/*.yaml`, which nothing in the agent system
+  reads.
+- **The upstream LoopX command line.** `loopx` now has only `serve`,
+  `version` and `--version`, and starting the server no longer loads any
+  upstream module. The other upstream subcommands (`status`, `todo`,
+  `dashboard`, `chat`, ...) and the global `--registry`, `--runtime-root`
+  and `--format` options are gone; `loopx serve --runtime-root` is
+  unchanged. `loopx --runtime-root DIR serve` used to ignore `DIR`; it is
+  now an error.
+- The release wheel no longer requires or builds the upstream Chat bundle
+  (`loopx/web/chat`). It still carries the dashboard built from `web/`.
+
 ## [2.5.0] - 2026-10-13
 
 Covers `v2.1.0` to `v2.5.0`: this fork's merged pull requests from #106 to
