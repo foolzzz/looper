@@ -40,7 +40,7 @@
 | M8c | 进库来源：上传、git、界面新建与编辑 | ✅ 已交付（looper #51） | M8a |
 | M8d | 配置层级统一：系统默认 → 角色 → 项目 → 项目里的角色 | ✅ 已交付（looper #50） | M8a |
 | M8e | 导出与导入：一个文件，应用前预览，密钥默认留空 | ✅ 已交付（looper #53） | M8b、M8c、M8d |
-| M9a | 运行时、provider 与 agent 的注册和选择；现有 Claude Code 路径抽成第一个运行时适配器 | ✅ 已交付（looper #PRNUM） | M8d |
+| M9a | 运行时、provider 与 agent 的注册和选择；现有 Claude Code 路径抽成第一个运行时适配器 | ✅ 已交付（looper #62） | M8d |
 | M9b | Claude Code 接多种 provider：订阅 OAuth、Anthropic key、兼容 anthropic 协议的接口；按 provider 价格计算花费 | 待开工 | M9a |
 | M9c | Codex 运行时：四类角色都支持（含常驻会话），事件统一、MCP 翻译、OpenAI 登录与 key | 待开工 | M9a |
 | M9d | SDK 运行时与 norma SDK | 待定（norma 就绪后） | M9a |
@@ -491,7 +491,7 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
 | 2026-10-14 | 服务常驻（looper #59）：`loopx service install / uninstall / status / restart` 把 `loopx serve` 装成 macOS 的 launchd LaunchAgent 或 Linux 的 systemd 用户服务（登录自启、失败退出后拉起、日志在 `<runtime root>/logs/serve.log`），服务运行执行 install 的那个 `loopx`、工作目录为当前目录，并把 `PATH`、`LOOPX_*` 等变量复制进权限为 0600 的服务文件。重装就地更新，launchd 用 bootout、等它消失后再 bootstrap（失败重试），端口被别的进程占用时不启动，`doctor` 多一行 Service。验证：单元测试覆盖 plist 与 unit 内容、文件权限、重装和命令顺序；本机用测试 label、空闲端口和新库走完 install、status、`kill -9` 后约 1 秒被拉起、restart、端口占用时拒绝启动和 uninstall，真实 PG 934 通过。 |
 | 2026-10-14 | 迁移前自动备份（looper #60）：`ensure_schema` 把所应用 `schema.sql` 的 sha256 与 DDL 在同一事务里记入 `schema_fingerprint`；库里已有 LoopX 表而指纹缺失或不同时，`serve` 先用 `pg_dump`（`LOOPX_PG_DUMP` 或 PATH 上、主版本不低于服务器，或 `LOOPX_BACKUP_CMD` 指定的命令）把库备份到 runtime root 下的 `backups/`（0600、校验后每库保留最近 5 份）再迁移，没有可用的 `pg_dump` 或备份失败时在任何 DDL 之前退出并给出安装方法（`--skip-backup` 跳过并告警），`doctor` 多一行 pg_dump，`config import --apply` 遇到待迁移的库拒绝。验证：真实 PG 测试用替身 `pg_dump` 走 `loopx serve` 的各条规则；本机没有 `pg_dump`，对套用 v2.5.0 `schema.sql` 的新库先确认拒绝且库未变，再经 `LOOPX_BACKUP_CMD` 调容器里的 `pg_dump` 备份并迁移，`pg_restore --list` 读出 64 项、备份保有迁移删掉的 `permission_mode` 与 `model` 列，再次启动不再备份；真实 PG 952 通过。 |
 | 2026-10-14 | 第 5.3 节经验文档先作为草稿（looper #61）：`distill_lessons` 改为 `off`、`draft`、`write` 三档（一次性迁移：`true` 为 `write`，`false` 和 NULL 为 `off`），`draft` 时任务完成后的经验存进 `project_document_drafts`，不进任何运行的知识索引和挂载，用户在项目页 Knowledge 标签查看、修改后确认（成为受知识上限约束的文本文档）或丢弃，任务页链接到草稿。验证：真实 PG 加替身 Claude 跑完三档、确认与丢弃、被拒的确认保留草稿和迁移，一次性 `loopx serve` 上无头 Chrome 完成修改后确认、丢弃和切换档位并截图。 |
-| 2026-10-14 | M9a 交付（looper #PRNUM）：新增运行时、provider（密钥另表存放、接口打码，模型目录与并发上限只存储）和 agent 的注册与校验，分层配置以 `agent` 取代模型（迁移把各层模型变成 `claude-code/<模型>`），新建任务可按角色覆盖 agent，四类 agent 都经运行时适配器启动，`llm_profiles` 删除。验证：以 main（`73eed752d`）的代码生成基准，未配置和迁移过模型层两组数据下四类角色的完整 argv、环境变量、system prompt 和首条输入与基准逐字节相同（prompt 不变，未跑真实 Claude）；校验正反例、任务级覆盖只到该任务的角色、启动时校验失败不换 agent、导出导入往返都有真实 PG 测试，替身模式评测（带 `--agent`）通过，真实 PG PYTEST_COUNT 通过。 |
+| 2026-10-14 | M9a 交付（looper #62）：新增运行时、provider（密钥另表存放、接口打码，模型目录与并发上限只存储）和 agent 的注册与校验，分层配置以 `agent` 取代模型（迁移把各层模型变成 `claude-code/<模型>`），新建任务可按角色覆盖 agent，四类 agent 都经运行时适配器启动，`llm_profiles` 删除。验证：以 main（`73eed752d`）的代码生成基准，未配置和迁移过模型层两组数据下四类角色的完整 argv、环境变量、system prompt 和首条输入与基准逐字节相同（prompt 不变，未跑真实 Claude）；校验正反例、任务级覆盖只到该任务的角色、启动时校验失败不换 agent、导出导入往返都有真实 PG 测试，替身模式评测（带 `--agent`）通过，真实 PG 1005 通过。 |
 
 ## 5. 不属于本 RFC 的待办
 
