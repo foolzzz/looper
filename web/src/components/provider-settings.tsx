@@ -1,5 +1,5 @@
 import { useId, useState } from "react";
-import { Loader2, Plus, X } from "lucide-react";
+import { AlertTriangle, Loader2, Plus, X } from "lucide-react";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import {
@@ -14,6 +14,7 @@ import {
   SMALL_LABEL,
 } from "@/components/registry-ui";
 import {
+  clearLoginProblem,
   createProvider,
   deleteProvider,
   updateProvider,
@@ -409,6 +410,42 @@ function ProviderForm({ provider, registry, onDone }: { provider: Provider | nul
   );
 }
 
+/** An OAuth provider's login as the server reads it; after a run found it forked, what to check and the way to
+ * let runs use it again. */
+function LoginLine({ provider }: { provider: Provider }) {
+  const action = useAction();
+  const login = provider.login;
+  if (!login) return null;
+  if (login.state === "chatgpt") return <p className="text-xs text-muted-foreground">Login: {login.detail}</p>;
+  const reuse = () => {
+    if (confirm("Use the Codex login again? Check `codex login status` on the server's machine first.")) {
+      action.run(() => clearLoginProblem(provider.provider_id));
+    }
+  };
+  return (
+    <div role="status" className="space-y-1 text-xs text-warning">
+      <p className="flex items-start gap-1">
+        <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+        <span>
+          Login {login.state === "unavailable" ? "unavailable" : "not usable"}: {login.detail}.{" "}
+          {login.state === "unavailable" ? (
+            <>Runs with it do not start. Check <code className="font-mono">codex login status</code> on the server&apos;s
+              machine (<code className="font-mono">codex login</code> if it is not logged in), then use it again.</>
+          ) : (
+            <>Run <code className="font-mono">codex login</code> with ChatGPT on the server&apos;s machine.</>
+          )}
+        </span>
+      </p>
+      {login.state === "unavailable" && (
+        <Button type="button" size="sm" variant="outline" disabled={action.busy} onClick={reuse}>
+          Use the login again
+        </Button>
+      )}
+      {action.error && <p role="alert" className="text-destructive">{action.error}</p>}
+    </div>
+  );
+}
+
 function ProviderRow({ provider, registry }: { provider: Provider; registry: Registry }) {
   const [editing, setEditing] = useState(false);
   // An import's "secrets to fill in" links here (#settings/providers/<id>) to open the form.
@@ -447,6 +484,7 @@ function ProviderRow({ provider, registry }: { provider: Provider; registry: Reg
       }
     >
       <p className="break-words text-xs text-muted-foreground">{details.join(" · ")}</p>
+      {provider.login && <LoginLine provider={provider} />}
       <ModelTable models={provider.models} registry={registry} />
     </Row>
   );
