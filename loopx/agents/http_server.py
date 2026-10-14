@@ -19,8 +19,8 @@ from pathlib import Path
 from typing import Any
 
 from . import (
-    agent_registry, agent_settings, catalog, catalog_sources, knowledge, library, mcp, project_skills, projects,
-    request_guard,
+    agent_registry, agent_settings, catalog, catalog_sources, config_imports, config_transfer, knowledge, library, mcp,
+    project_skills, projects, request_guard,
 )
 from .broadcast import Broadcaster
 from .chat_targets import ChatTargetError, list_chat_targets, resolve_chat_target
@@ -67,8 +67,11 @@ HTTP_500 = "500 Internal Server Error"
 # The largest request body the server reads. The largest legitimate one is a
 # knowledge upload: a document of at most knowledge.DOCUMENT_MAX_BYTES (2 MiB)
 # as base64 in JSON is about 2.7 MiB, and as JSON-escaped text up to twice its
-# size; 8 MiB leaves room for both. A larger body is refused unread.
+# size; 8 MiB leaves room for both. A larger body is refused unread. The one
+# exception is a configuration import (CONFIG_IMPORTS_PATH), which streams its
+# body to a file and takes up to config_imports.UPLOAD_MAX_BYTES.
 REQUEST_BODY_MAX_BYTES = 4 * knowledge.DOCUMENT_MAX_BYTES
+CONFIG_IMPORTS_PATH = "/api/config/imports"
 
 
 def _json_response(status: str, body: Any) -> bytes:
@@ -117,9 +120,13 @@ class AgentHTTPServer:
         self._self_checks = self_checks or []
         # The Claude Code the server runs: what a Claude Code runtime without an executable of its own probes.
         self._claude_bin = claude_bin
+        # Configuration files uploaded for import, waiting to be applied (under the runtime root).
+        self._config_imports = config_imports.ConfigImports(runtime_root) if runtime_root else None
         self._server: asyncio.Server | None = None
 
     async def start(self) -> None:
+        if self._config_imports:
+            self._config_imports.clear()  # what a previous server left pending
         self._server = await asyncio.start_server(
             self._handle_connection, self._host, self._port
         )
@@ -130,6 +137,8 @@ class AgentHTTPServer:
             self._server.close()
             await self._server.wait_closed()
             logger.info("HTTP server stopped")
+        if self._config_imports:
+            self._config_imports.clear()
 
     async def _handle_connection(
         self,
@@ -154,6 +163,21 @@ class AgentHTTPServer:
             raw_path = parts[1]
 
             headers = await self._read_headers(reader)
+            parsed = urllib.parse.urlparse(raw_path)
+            path = parsed.path
+            query = dict(urllib.parse.parse_qsl(parsed.query))
+
+            # Refused before its body is read: another site's page cannot even upload.
+            refused = request_guard.refusal(headers, bind_host=self._host)
+            if refused:
+                logger.warning("refused %s %s: %s", method, path, refused)
+                writer.write(_json_response(HTTP_403, {"error": refused}))
+                await writer.drain()
+                writer.close()
+                return
+
+            streamed = method == "POST" and path == CONFIG_IMPORTS_PATH
+            cap = config_imports.UPLOAD_MAX_BYTES if streamed else REQUEST_BODY_MAX_BYTES
             body = b""
             try:
                 content_length = int(headers.get("content-length", "0"))
@@ -163,29 +187,25 @@ class AgentHTTPServer:
                 writer.write(_json_response(HTTP_400, {"error": "bad Content-Length"}))
                 await writer.drain()
                 return
-            if content_length > REQUEST_BODY_MAX_BYTES:
+            if content_length > cap:
                 writer.write(_json_response(HTTP_413, {
-                    "error": f"the request body has {content_length} bytes; the server takes at most "
-                             f"{REQUEST_BODY_MAX_BYTES // (1024 * 1024)} MiB ({REQUEST_BODY_MAX_BYTES} bytes)",
+                    "error": f"the request body has {content_length} bytes; "
+                             f"{'a configuration import' if streamed else 'the server'} takes at most "
+                             f"{cap // (1024 * 1024)} MiB ({cap} bytes)",
                 }))
                 await writer.drain()
+                return
+            if streamed:
+                if headers.get("expect", "").lower() == "100-continue":
+                    writer.write(b"HTTP/1.1 100 Continue\r\n\r\n")
+                    await writer.drain()
+                await self._handle_config_import(
+                    writer, HTTP_201, lambda imports: imports.receive(reader, content_length))
                 return
             if content_length > 0:
                 body = await asyncio.wait_for(
                     reader.readexactly(content_length), timeout=30.0
                 )
-
-            parsed = urllib.parse.urlparse(raw_path)
-            path = parsed.path
-            query = dict(urllib.parse.parse_qsl(parsed.query))
-
-            refused = request_guard.refusal(headers, bind_host=self._host)
-            if refused:
-                logger.warning("refused %s %s: %s", method, path, refused)
-                writer.write(_json_response(HTTP_403, {"error": refused}))
-                await writer.drain()
-                writer.close()
-                return
 
             if method == "OPTIONS":
                 writer.write(_no_content())
@@ -262,6 +282,8 @@ class AgentHTTPServer:
     _RE_AGENT = re.compile(r"^/api/agents/(agent-[a-zA-Z0-9-]+)$")
     _RE_PROJECT_SKILLS = re.compile(r"^/api/projects/(proj-[a-zA-Z0-9]+)/skills$")
     _RE_PROJECT_SKILL = re.compile(r"^/api/projects/(proj-[a-zA-Z0-9]+)/skills/(skill-[a-zA-Z0-9]+)$")
+    _RE_CONFIG_IMPORT = re.compile(r"^/api/config/imports/(cfgimp-[0-9a-f]{16})$")
+    _RE_CONFIG_IMPORT_APPLY = re.compile(r"^/api/config/imports/(cfgimp-[0-9a-f]{16})/apply$")
 
     async def _route_api(
         self,
@@ -420,6 +442,10 @@ class AgentHTTPServer:
                 m.group(1), projects.json_object(body), role=m.group(2)))
         elif path == "/api/config/export" and method == "GET":
             await self._handle_config_export(query, writer)
+        elif (m := self._RE_CONFIG_IMPORT_APPLY.match(path)) and method == "POST":
+            await self._handle_config_import(writer, HTTP_200, lambda imports: imports.apply(m.group(1)))
+        elif (m := self._RE_CONFIG_IMPORT.match(path)) and method == "DELETE":
+            await self._handle_config_import(writer, HTTP_200, lambda imports: imports.cancel(m.group(1)))
         elif path == "/api/catalog" and method == "GET":
             await self._handle_catalog(writer, HTTP_200, catalog.catalog_view)
         elif path == "/api/catalog/import" and method == "POST":
@@ -1339,6 +1365,31 @@ class AgentHTTPServer:
             async for chunk in chunks:
                 writer.write(chunk.encode("utf-8"))
                 await writer.drain()
+        await writer.drain()
+
+    async def _handle_config_import(
+        self, writer: asyncio.StreamWriter, status: str,
+        request: Callable[[config_imports.ConfigImports], Awaitable[Any]],
+    ) -> None:
+        """Answer with ``request(imports)``'s result: a file that is not a usable configuration file is 400, an
+        unknown or expired import 404, and too many pending, one being applied or a schema awaiting
+        ``loopx serve``'s migration 409."""
+        try:
+            if self._config_imports is None:
+                raise RuntimeError("the server was started without a runtime root")
+            result = await request(self._config_imports)
+        except config_transfer.ConfigFileError as exc:
+            status, result = HTTP_400, {"error": str(exc)}
+        except config_imports.ImportNotFound as exc:
+            status, result = HTTP_404, {"error": str(exc)}
+        except (config_imports.ImportConflict, config_transfer.SchemaChangePending) as exc:
+            status, result = HTTP_409, {"error": str(exc)}
+        except (asyncio.TimeoutError, ConnectionError, asyncio.IncompleteReadError):
+            raise  # the client stopped sending; there is no one to answer
+        except Exception:
+            logger.exception("config import request failed")
+            status, result = HTTP_500, {"error": "the import failed; see the server log"}
+        writer.write(_json_response(status, _serialize(result)))
         await writer.drain()
 
     # --- Channel config handlers ---
