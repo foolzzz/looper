@@ -30,14 +30,16 @@ M0 交付后，Worker 和 Reviewer 已按第 5 节的目标形态拼装 system p
 
 | Agent | 进程模型 | system prompt（`--append-system-prompt`） | user 消息 | 会话 |
 |---|---|---|---|---|
-| Manager | 全局常驻 1 个 | 角色 prompt（`agent_configs.manager`）+ `TASK_PLACEMENT_RULE` | 项目列表 + 目标快照 + 用户消息 | **全局一个 session**，所有网页对话、飞书、Telegram 共用，重启后 `--resume` |
-| Planner | 每任务常驻 1 个 | 角色 prompt（`agent_configs.planner`）+ `REPLY_CONTRACT` | PLAN / DECISION / CHAT / SUPERVISE 四种 turn，每轮带需求、项目名与简介、计划状态、事件 | 每任务一个，存于计划文件，`--resume` 续接 |
+| Manager | 全局常驻 1 个 | 角色 prompt（`role_configs.manager`）+ `TASK_PLACEMENT_RULE` | 项目列表 + 目标快照 + 用户消息 | **全局一个 session**，所有网页对话、飞书、Telegram 共用，重启后 `--resume` |
+| Planner | 每任务常驻 1 个 | 角色 prompt（`role_configs.planner`）+ `REPLY_CONTRACT` | PLAN / DECISION / CHAT / SUPERVISE 四种 turn，每轮带需求、项目名与简介、计划状态、事件 | 每任务一个，存于计划文件，`--resume` 续接 |
 | Worker | 每步骤 1 个 | **无**（M0 中改造） | 首条 stdin：角色、规则、报告 JSON 契约、步骤指令全部混在一起；运行中可追加 `WORKER_INPUT` | 一次性 |
 | Reviewer | 每次验收 1 个 | **无**（M0 中改造） | 首条 stdin：验收契约 + 待验收结果 | 一次性 |
 
 已有的防跑偏机制：Planner 回复的 JSON 由 `planner_protocol` 严格校验并允许一次修复；Worker 完成判定 fail-closed
 （`judge_result`）；步骤上限 8、每步重试上限 2；Planner 周期性 SUPERVISE turn 可纠偏或终止运行中的 Worker；
-推荐 prompt 跟踪（`agent_configs.default_prompt`，未改过的行随推荐升级，改过的保留）。
+推荐 prompt 跟踪（`role_configs.default_prompt`，未改过的行随推荐升级，改过的保留）。
+
+注：角色配置表当时叫 `agent_configs`（主键 `agent_id`），后来改用控制台的叫法 `role_configs`（主键 `role`），本文按新名字写。
 
 ## 3. 设计原则（规范性）
 
@@ -65,7 +67,7 @@ M0 交付后，Worker 和 Reviewer 已按第 5 节的目标形态拼装 system p
 system prompt（由 Looper 追加，按顺序拼装）
   L0  Claude Code 内置 system prompt        —— 不受控，不记录原文
   L1  harness prompt                         —— agent 的性格与稳定性（工作原则、边界、沟通方式），按继承链解析（M1.5）
-  L2  role prompt                            —— 该类 agent 的职责说明；agent_configs.<role>.system_prompt，可编辑，跟踪推荐版本
+  L2  role prompt                            —— 该类 agent 的职责说明；role_configs.<role>.system_prompt，可编辑，跟踪推荐版本
   L3  项目档案                              —— projects.background（M0）；知识索引、skill 清单（M3/M4）
   L4  任务描述                              —— 本会话要完成的任务：Planner 的任务需求，Worker、Reviewer 的步骤定义（M1）
   L5  代码契约                              —— REPLY_CONTRACT / WORK_CONTRACT / REVIEW_CONTRACT / TASK_PLACEMENT_RULE
@@ -260,6 +262,6 @@ L5 代码契约始终最后，因为 L4 来自用户或 Planner，放在契约�
    - 运行时之间的差异由适配器吸收：system prompt 的注入方式、隔离方式（如 Codex 用独立的 `CODEX_HOME`）、
      把事件流统一成内部事件、MCP 配置格式的翻译、目录条目按运行时标注兼容性（Claude 插件只挂给 Claude 系
      运行时），以及花费（运行时不报告花费或接第三方接口时，按 provider 登记的模型价格计算）。
-   - 现有的 `llm_profiles` 表和 `agent_configs.runtime`、`llm_profile_id` 两列从未接入启动路径，由新模型取代。
+   - 现有的 `llm_profiles` 表和 `role_configs.runtime`、`llm_profile_id` 两列从未接入启动路径，由新模型取代。
    - 每个新 agent 先用 M6 回归评测验收，评测可以指定 agent。
    - 详细设计和待决问题见 [多运行时 agent 架构 RFC](multi-runtime-agents-v0.zh-CN.md)。

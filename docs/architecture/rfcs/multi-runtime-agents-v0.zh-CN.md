@@ -47,14 +47,17 @@
 |---|---|
 | `agent_runtimes` | 名称、类型、位置（二进制路径或模块）、探测到的版本、能力（探测结果加类型声明）、默认选项、启用 |
 | `llm_providers` | 名称、协议列表、认证方式（`oauth`，以及它绑定的运行时类型；或 `api_key`）、`base_url`、密钥（单独存放，接口打码，同 M8b）、模型目录（每个模型的上下文窗口、输入/输出/缓存读写价格、支持的 effort 档位）、并发上限、启用 |
-| `agents` | 名称、运行时实例、provider、模型、默认 effort、运行时选项、启用 |
-| `agent_setting_layers.agent` | 取代原来的 `model`。其他分层字段（harness、effort、环境变量、单次上限）不变 |
-| `tasks.agent_overrides` | 任务按角色覆盖用哪个 agent，形如 `{planner: …, worker: …, reviewer: …}`；这是唯一的任务级配置 |
-| `agent_sessions` | 记录运行时类型和 provider；二者任一变化都不能续接（第 13 节 P5） |
-| 运行记录（`llm_records`） | 增加 agent、运行时、provider、模型，以及花费来源（`runtime` 或 `provider_price`） |
+| `agent_profiles` | 名称、运行时实例、provider、模型、默认 effort、运行时选项、启用 |
+| `agent_setting_layers.profile_id` | 取代原来的 `model`。其他分层字段（harness、effort、环境变量、单次上限）不变 |
+| `task_profile_overrides` | 任务按角色覆盖用哪个 Agent Profile（`task_id`、`role`、`profile_id`，接口字段 `profile_overrides`，形如 `{planner: …, worker: …, reviewer: …}`）；这是唯一的任务级配置 |
+| `agent_sessions` | 记录运行时类型、provider 和跑它的 Agent Profile（`profile_id`）；运行时类型和 provider 任一变化都不能续接（第 13 节 P5） |
+| 运行记录（`llm_records`） | 增加 Agent Profile（`metadata.profile`）、运行时、provider、模型，以及花费来源（`runtime` 或 `provider_price`） |
+
+注：本文起草时把 Agent Profile 叫作 agent（表 `agents`、`task_agent_overrides`，字段 `agent`、`agent_overrides`）；表名、
+接口和代码后来改用控制台的叫法，"agent" 只指运行中的实例，上表与下文的表名、字段名已按新名字写。
 
 内置并自动注册：运行时 `claude-code`、provider `claude-subscription`，以及与现有分层配置里各个模型对应的 agent。
-迁移后各角色解析出的模型保持不变。原来的 `llm_profiles` 表和 `agent_configs.runtime`、`llm_profile_id` 两列从未接入
+迁移后各角色解析出的模型保持不变。原来的 `llm_profiles` 表和角色配置（`role_configs`）的 `runtime`、`llm_profile_id` 两列从未接入
 启动路径，由新模型取代后删除。M8e 的导出文件同步加入这三张表，provider 的密钥照例留占位符。
 
 ## 4. 选用哪个 agent

@@ -41,10 +41,10 @@ How the agent system works today is described in
   the bottom of the sidebar, each at `#settings/<page>`: **LLM Providers**,
   **Agent Runtimes**, **Agent Profiles**, **Roles**, **Skills & MCP**,
   **Channels** and **Import / Export**. An **Agent Profile** is what the
-  dashboard now calls a registered agent (a row of `agents`, still
-  `/api/agents`): its list shows each profile's runtime, provider, model and
-  default effort, the roles it can run and where it is used, and a profile in
-  use cannot be deleted. Its form picks a runtime, then a provider grouped as
+  dashboard now calls a registered agent (a row of `agent_profiles`, served
+  at `/api/agent-profiles`): its list shows each profile's runtime, provider,
+  model and default effort, the roles it can run and where it is used, and a
+  profile in use cannot be deleted. Its form picks a runtime, then a provider grouped as
   the runtime's own login (Claude Code's with its login state; Codex's shown
   as coming soon) or an API-key provider that speaks its protocols, then a
   model from the provider's catalog. **Roles** holds the defaults every role
@@ -62,8 +62,37 @@ How the agent system works today is described in
   PATH, its path, version, capabilities and the roles it can run, and
   Re-detect, which now also finds a type that was not on PATH when the server
   started. The registry adds each runtime's `path` and `roles` and each
-  agent's `roles` and `used_by`, and refusing to delete an agent in use names
-  where it is selected.
+  Agent Profile's `roles` and `used_by`, and refusing to delete a profile in
+  use names where it is selected.
+- **Storage, API and code use the dashboard's names.** "Agent" now names only
+  a running agent (the Manager, a Planner, a step's Worker or Reviewer). The
+  schema renames, once and in place (`schema_migrations`
+  `profiles_roles_renamed`), `agent_configs` to `role_configs` (keyed by
+  `role`; its old `role` column only repeated the key and is dropped),
+  `agents` to `agent_profiles`, `task_agent_overrides` to
+  `task_profile_overrides`, and the `agent_id` of a settings layer and of a
+  task's choice, and a saved session's `session_agent_id`, to `profile_id`;
+  foreign keys follow and constraints take a new database's names. A v2.6.0
+  database keeps every row, and every role starts as before; as for any
+  schema change, `looper serve` backs the database up first. The API follows
+  with **no old routes or field names kept** (the dashboard is the only
+  client, so anything that calls the API directly must change):
+  `/api/agent-configs` is `/api/roles` (`/api/roles/:role`,
+  `/api/roles/:role/reset-prompt`); `POST /api/agents` and
+  `PUT`/`DELETE /api/agents/:id` are `/api/agent-profiles`, answering with
+  `profile` (its `profile_id`); the registry lists `profiles` and counts
+  `profile_count`; a settings layer's `agent` is `profile_id`, its effective
+  `agent` is `profile`, `limits.builtin_agent` is `builtin_profile` and the
+  source of a profile's own default effort is `profile`; a task's
+  `agent_overrides` is `profile_overrides`. `/api/agents/:id/usage` and
+  `/api/agent-settings` keep their names: they are about running agents and
+  their settings. A run's record names its profile in `metadata.profile` and
+  `settings_sources.profile`; runs recorded before keep `metadata.agent`,
+  which the dashboard still reads. `looper config export` writes
+  `looper-config/v2` (`profiles`, and a layer's `profile`); `looper-config/v1`
+  and `loopx-config/v1` files still import. In code, `AgentSpec` is
+  `AgentProfile`, and `looper.agents.agent_registry`, `looper.db.agent_registry`
+  and `looper.db.agent_configs` are `profile_registry` and `role_configs`.
 
 ### Removed
 
