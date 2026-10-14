@@ -207,9 +207,10 @@ def log_problems(checks: list[Check]) -> None:
 
 
 def doctor(claude_bin: str = "claude") -> int:
-    """``loopx doctor``: print every check; 1 when one failed."""
+    """``loopx doctor``: print every check, and whether the background service runs; 1 when one failed."""
     from ..db.connection import configured_dsn
+    from .service import doctor_check
 
-    checks = asyncio.run(run_checks(dsn=configured_dsn(), claude_bin=claude_bin))
+    checks = [*asyncio.run(run_checks(dsn=configured_dsn(), claude_bin=claude_bin)), doctor_check()]
     print(format_checks(checks))
     return 1 if any(check.status == FAIL for check in checks) else 0

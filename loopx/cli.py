@@ -1,4 +1,5 @@
-"""The ``loopx`` command: ``serve`` starts the agent system, ``doctor`` checks what it needs, ``version`` prints the version."""
+"""The ``loopx`` command: ``serve`` starts the agent system, ``service`` runs it in the background, ``doctor``
+checks what it needs, ``version`` prints the version."""
 
 from __future__ import annotations
 
@@ -66,11 +67,53 @@ def build_parser() -> argparse.ArgumentParser:
     import_.add_argument("file", help="The configuration file.")
     import_.add_argument("--apply", action="store_true", help="Write the changes the preview shows.")
     import_.add_argument("--json", action="store_true", help="Print the plan as JSON.")
+    _add_service_parser(commands)
     version = commands.add_parser("version", allow_abbrev=False, help="Print the installed LoopX version.")
     version.add_argument("--format", choices=["markdown", "json"], default="markdown", help="Output format.")
     # serve prints no payload; --format stays accepted so existing invocations keep working.
     serve.add_argument("--format", choices=["markdown", "json"], help=argparse.SUPPRESS)
     return parser
+
+
+def _add_service_parser(commands: argparse._SubParsersAction) -> None:
+    service = commands.add_parser(
+        "service",
+        allow_abbrev=False,
+        help="Run `loopx serve` as a background service: started at login and again after a crash.",
+        description=(
+            "Run `loopx serve` as a background service: a launchd LaunchAgent on macOS, a systemd user unit on "
+            "Linux. It starts at login, starts again after a crash, and logs to <runtime root>/logs/serve.log."
+        ),
+    )
+    service_commands = service.add_subparsers(dest="service_command", required=True)
+    install = service_commands.add_parser(
+        "install", allow_abbrev=False, help="Install (or update) the service and start it.",
+        description=(
+            "Write the unit and (re)start the service, then wait until it serves. The unit runs this loopx in the "
+            "current directory, with the variables it needs copied from this environment: PATH, locale and proxy "
+            "settings, CLAUDE_CONFIG_DIR, every LOOPX_*, ANTHROPIC_* and LARK_* variable, and each --env NAME. "
+            "The unit file is private (mode 0600) because LOOPX_DATABASE_URL can hold a password. Running it "
+            "again updates the unit and restarts the service."
+        ),
+    )
+    install.add_argument("--port", type=int, default=8767, help="Port for `loopx serve` (default 8767).")
+    install.add_argument("--runtime-root",
+                         help="State directory for `loopx serve` (default LOOPX_RUNTIME_ROOT, else ~/.loopx).")
+    install.add_argument("--env", action="append", default=[], metavar="NAME",
+                         help="Also copy this environment variable into the unit (repeatable).")
+    restart = service_commands.add_parser(
+        "restart", allow_abbrev=False, help="Stop and start the service; wait until it serves.")
+    for command in (install, restart):
+        command.add_argument("--timeout", type=float, default=120.0,
+                             help="Seconds to wait for the service to answer (default 120).")
+    status = service_commands.add_parser(
+        "status", allow_abbrev=False,
+        help="Show whether the service is installed and running, its PID, last exit and log, and GET /api/status.",
+        description="Exits 0 when the service runs and answers on its port, else 1.")
+    uninstall = service_commands.add_parser("uninstall", allow_abbrev=False, help="Stop the service and remove its unit.")
+    for command in (install, restart, status, uninstall):
+        command.add_argument("--label", default="com.loopx.serve",
+                             help="Service name: the launchd label or systemd unit name (default com.loopx.serve).")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -85,6 +128,8 @@ def main(argv: list[str] | None = None) -> int:
         return doctor()
     if args.command == "config":
         return _config(args)
+    if args.command == "service":
+        return _service(args)
     # Imported here so that `loopx version` and `--version` stay instant.
     from .agents.serve import serve_agent
     from .paths import default_runtime_root
@@ -127,6 +172,32 @@ def _config(args: argparse.Namespace) -> int:
         return 1
     print(json.dumps(plan.view(), indent=2, ensure_ascii=False) if args.json
           else config_transfer.format_plan(plan, path))
+    return 0
+
+
+def _service(args: argparse.Namespace) -> int:
+    import sys
+
+    from .agents import service
+    from .paths import default_runtime_root
+
+    host = service.Host.current()
+    try:
+        if args.service_command == "install":
+            root = Path(args.runtime_root) if args.runtime_root else default_runtime_root()
+            print(service.install(host, label=args.label, port=args.port, runtime_root=root,
+                                  extra_env=args.env, timeout=args.timeout))
+        elif args.service_command == "restart":
+            print(service.restart(host, label=args.label, timeout=args.timeout))
+        elif args.service_command == "uninstall":
+            print(service.uninstall(host, label=args.label))
+        else:
+            code, report = service.status(host, label=args.label)
+            print(report)
+            return code
+    except (service.ServiceError, OSError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
     return 0
 
 
