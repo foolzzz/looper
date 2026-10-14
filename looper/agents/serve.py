@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import Any
 
 from .. import env
+from ..paths import settle_runtime_root
 from .broadcast import Broadcaster
 from .bus import MessageBus
 from .channels.allowlist import SenderAllowlist, allowlist_from_config, start_problem
@@ -459,6 +460,10 @@ def serve_agent(
     )
 
     resolved_root = runtime_root or Path.cwd()
+    settled = settle_runtime_root(resolved_root)  # ~/.loopx from before the rename becomes ~/.looper
+    if settled.note:
+        logger.log(logging.WARNING if settled.warning else logging.INFO, "%s", settled.note)
+    resolved_root = settled.root
     resolved_work_dir = work_dir or Path.cwd()
 
     try:

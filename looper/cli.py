@@ -104,7 +104,9 @@ def _add_service_parser(commands: argparse._SubParsersAction) -> None:
             "current directory, with the variables it needs copied from this environment: PATH, locale and proxy "
             "settings, CLAUDE_CONFIG_DIR, every LOOPER_*, ANTHROPIC_* and LARK_* variable (and, for one release, "
             "LOOPX_*), and each --env NAME. The unit file is private (mode 0600) because LOOPER_DATABASE_URL can "
-            "hold a password. Running it again updates the unit and restarts the service."
+            "hold a password. Running it again updates the unit and restarts the service. With the default "
+            "--label it first stops and removes com.loopx.serve, the unit from before the rename, and moves "
+            "~/.loopx to ~/.looper when the service uses the default runtime root."
         ),
     )
     install.add_argument("--port", type=int, default=8767, help="Port for `looper serve` (default 8767).")
@@ -124,8 +126,8 @@ def _add_service_parser(commands: argparse._SubParsersAction) -> None:
     uninstall = service_commands.add_parser(
         "uninstall", allow_abbrev=False, help="Stop the service and remove its unit.")
     for command in (install, restart, status, uninstall):
-        command.add_argument("--label", default="com.loopx.serve",
-                             help="Service name: the launchd label or systemd unit name (default com.loopx.serve).")
+        command.add_argument("--label", default="com.looper.serve",
+                             help="Service name: the launchd label or systemd unit name (default com.looper.serve).")
 
 
 def main(argv: list[str] | None = None) -> int:

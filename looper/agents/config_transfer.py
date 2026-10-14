@@ -1,6 +1,7 @@
 """Configuration export and import: one file that recreates an installation's agent configuration (M8e).
 
-**The file** is one JSON document, ``format: loopx-config/v1``. Every catalog
+**The file** is one JSON document, ``format: looper-config/v1`` (a file exported
+before the rename says ``loopx-config/v1``, and is read the same). Every catalog
 file is UTF-8 text (acquiring an item refuses binary files), so JSON holds it
 as it is, and one readable file can be checked before it is shared. Its
 sections:
@@ -53,7 +54,9 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
-FORMAT = "loopx-config/v1"
+FORMAT = "looper-config/v1"
+# The same format under its name from before the rename (LoopX); such files are read, never written.
+LEGACY_FORMATS = ("loopx-config/v1",)
 # What the file holds in place of a secret value it leaves out.
 PLACEHOLDER = {"secret": "omitted"}
 
@@ -306,7 +309,7 @@ async def export_chunks(
     providers = [provider_entry(r, include_secrets) for r in await db.read_providers(conn) if not r["builtin"]]
     head = {
         "format": FORMAT,
-        "loopx_version": __version__,
+        "looper_version": __version__,
         "exported_at": datetime.now(UTC).isoformat(timespec="seconds"),
         "secrets": "included" if include_secrets else "omitted",
         "runtimes": [runtime_entry(r) for r in await db.read_runtimes(conn) if not r["builtin"]],
@@ -408,8 +411,8 @@ def read_file(path: Path, *, label: str | None = None) -> dict[str, Any]:
     except OSError as exc:
         raise ConfigFileError(f"cannot read {label}: {exc.strerror or exc}") from None
     except (json.JSONDecodeError, UnicodeDecodeError) as exc:
-        raise ConfigFileError(f"{label} is not a LoopX configuration file: {exc}") from None
-    if not isinstance(data, dict) or data.get("format") != FORMAT:
+        raise ConfigFileError(f"{label} is not a Looper configuration file: {exc}") from None
+    if not isinstance(data, dict) or data.get("format") not in (FORMAT, *LEGACY_FORMATS):
         found = data.get("format") if isinstance(data, dict) else None
         raise ConfigFileError(f"{label} is not a {FORMAT} file (format: {found!r})")
     for section, kind in (("settings", dict), ("channels", list), ("installs", list), ("catalog", list),

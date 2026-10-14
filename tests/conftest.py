@@ -25,7 +25,7 @@ sys.path.insert(0, str(_RUNTIME_ROOT_GUARD_DIR))
 # Importing the plugin starts the real-runtime-root guard before any test runs;
 # re-exporting its fixture and hooks registers them for this suite.
 from real_runtime_root_guard_plugin import (  # noqa: E402,F401
-    _refuse_real_loopx_runtime_root,
+    _refuse_real_looper_runtime_root,
     pytest_sessionfinish,
     pytest_terminal_summary,
     pytest_testnodedown,

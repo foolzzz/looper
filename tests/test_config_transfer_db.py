@@ -50,8 +50,8 @@ async def _installation(*, schema: bool = True) -> AsyncIterator[tuple[Any, str]
         await admin.close()
 
 
-async def _loopx(monkeypatch: pytest.MonkeyPatch, url: str, *argv: str) -> tuple[int, str, str]:
-    """Run the ``loopx`` command on the installation at ``url``: its exit code, stdout and stderr."""
+async def _looper(monkeypatch: pytest.MonkeyPatch, url: str, *argv: str) -> tuple[int, str, str]:
+    """Run the ``looper`` command on the installation at ``url``: its exit code, stdout and stderr."""
     from looper import cli
 
     def run() -> tuple[int, str, str]:
@@ -244,12 +244,12 @@ def test_a_round_trip_into_a_new_database_reproduces_the_configuration(
         async with _installation() as (source, source_url), _installation(schema=False) as (target, target_url):
             await _populate(monkeypatch, source, tmp_path / "calc")
             exported = tmp_path / "config.json"
-            code, out, err = await _loopx(monkeypatch, source_url, "config", "export", str(exported),
+            code, out, err = await _looper(monkeypatch, source_url, "config", "export", str(exported),
                                           "--include-projects", "--include-secrets")
             assert code == 0, err
             assert "warning:" in err and "secret" in err
 
-            code, out, err = await _loopx(monkeypatch, target_url, "config", "import", str(exported), "--apply",
+            code, out, err = await _looper(monkeypatch, target_url, "config", "import", str(exported), "--apply",
                                           "--json")
             assert code == 0, err
             plan = _plan(out)
@@ -267,7 +267,7 @@ def test_a_round_trip_into_a_new_database_reproduces_the_configuration(
 
             # Exporting the new installation gives the same file, but for the executable path left behind.
             again = tmp_path / "again.json"
-            assert (await _loopx(monkeypatch, target_url, "config", "export", str(again), "--include-projects",
+            assert (await _looper(monkeypatch, target_url, "config", "export", str(again), "--include-projects",
                                  "--include-secrets"))[0] == 0
             first = _without_time(exported)
             local = next(r for r in first["runtimes"] if r["name"] == "claude-local")
@@ -283,7 +283,7 @@ def test_importing_the_same_file_again_changes_nothing(monkeypatch: pytest.Monke
         async with _installation() as (source, source_url), _installation() as (target, target_url):
             await _populate(monkeypatch, source, tmp_path / "calc")
             exported = tmp_path / "config.json"
-            assert (await _loopx(monkeypatch, source_url, "config", "export", str(exported),
+            assert (await _looper(monkeypatch, source_url, "config", "export", str(exported),
                                  "--include-projects"))[0] == 0
             # Here the Planner's recommended prompt is the prompt the file gives it, which it then follows.
             from looper.agents.serve import seed_agent_configs
@@ -291,10 +291,10 @@ def test_importing_the_same_file_again_changes_nothing(monkeypatch: pytest.Monke
             await seed_agent_configs(target)
             await target.execute("UPDATE agent_configs SET default_prompt = 'Plan in small steps.' "
                                  "WHERE agent_id = 'planner'")
-            assert (await _loopx(monkeypatch, target_url, "config", "import", str(exported), "--apply"))[0] == 0
+            assert (await _looper(monkeypatch, target_url, "config", "import", str(exported), "--apply"))[0] == 0
             first = await _rows(target)
 
-            code, out, _ = await _loopx(monkeypatch, target_url, "config", "import", str(exported), "--apply",
+            code, out, _ = await _looper(monkeypatch, target_url, "config", "import", str(exported), "--apply",
                                         "--json")
 
             assert code == 0
@@ -314,11 +314,11 @@ def test_a_preview_writes_nothing(monkeypatch: pytest.MonkeyPatch, tmp_path: Pat
                 _serve(monkeypatch, target)
                 await _ok("PUT", "/api/agent-settings/system", {"agent": "agent-claude-code-opus"})
             exported = tmp_path / "config.json"
-            assert (await _loopx(monkeypatch, source_url, "config", "export", str(exported),
+            assert (await _looper(monkeypatch, source_url, "config", "export", str(exported),
                                  "--include-projects"))[0] == 0
             before = await _rows(target)
 
-            code, out, err = await _loopx(monkeypatch, target_url, "config", "import", str(exported))
+            code, out, err = await _looper(monkeypatch, target_url, "config", "import", str(exported))
 
             assert code == 0, err
             assert "Nothing was written. Run again with --apply" in out
@@ -333,12 +333,12 @@ def test_an_import_leaves_a_schema_about_to_change_to_serve(monkeypatch: pytest.
     async def _test() -> None:
         async with _installation() as (_, source_url), _installation() as (target, target_url):
             exported = tmp_path / "config.json"
-            assert (await _loopx(monkeypatch, source_url, "config", "export", str(exported)))[0] == 0
+            assert (await _looper(monkeypatch, source_url, "config", "export", str(exported)))[0] == 0
             await target.execute("UPDATE schema_fingerprint SET sha256 = 'an older schema.sql'")
             await target.execute("ALTER TABLE agent_configs ADD COLUMN permission_mode TEXT")
             before = await _rows(target)
 
-            code, _, err = await _loopx(monkeypatch, target_url, "config", "import", str(exported), "--apply")
+            code, _, err = await _looper(monkeypatch, target_url, "config", "import", str(exported), "--apply")
 
             assert code == 1 and "start `looper serve` once" in err, err
             assert await _rows(target) == before
@@ -354,7 +354,7 @@ def test_secrets_are_placeholders_by_default_and_never_replace_stored_ones(
         async with _installation() as (source, source_url), _installation() as (target, target_url):
             ids = await _populate(monkeypatch, source, tmp_path / "calc")
             exported = tmp_path / "config.json"
-            code, out, err = await _loopx(monkeypatch, source_url, "config", "export", str(exported),
+            code, out, err = await _looper(monkeypatch, source_url, "config", "export", str(exported),
                                           "--include-projects")
             assert code == 0 and not err
             text = exported.read_text()
@@ -373,7 +373,7 @@ def test_secrets_are_placeholders_by_default_and_never_replace_stored_ones(
             _serve(monkeypatch, target)
             await _ok("POST", "/api/catalog/mcp", {"name": "search", "transport": "stdio", "command": "python3",
                                                    "args": ["server.py"], "env": {"API_KEY": "target-own"}})
-            code, out, _ = await _loopx(monkeypatch, target_url, "config", "import", str(exported), "--apply",
+            code, out, _ = await _looper(monkeypatch, target_url, "config", "import", str(exported), "--apply",
                                         "--json")
             assert code == 0
             plan = _plan(out)
@@ -406,7 +406,7 @@ def test_an_entry_with_the_same_key_is_updated_in_place_and_nothing_else_is_remo
         async with _installation() as (source, source_url), _installation() as (target, target_url):
             await _populate(monkeypatch, source, tmp_path / "calc")
             exported = tmp_path / "config.json"
-            assert (await _loopx(monkeypatch, source_url, "config", "export", str(exported),
+            assert (await _looper(monkeypatch, source_url, "config", "export", str(exported),
                                  "--include-projects"))[0] == 0
 
             # The target already has a skill of the same name (other content, installed for the planner), a
@@ -420,13 +420,13 @@ def test_an_entry_with_the_same_key_is_updated_in_place_and_nothing_else_is_remo
             calc = (await _ok("POST", "/api/projects", {"name": "CALC", "work_dir": str(tmp_path),
                                                         "background": "Old."}))["project_id"]
 
-            code, out, _ = await _loopx(monkeypatch, target_url, "config", "import", str(exported))
+            code, out, _ = await _looper(monkeypatch, target_url, "config", "import", str(exported))
             assert code == 0
             assert "~ skill:release-notes (description, files)" in out
             assert "~ calc (description, background, review_policy, distill_lessons)" in out
             assert "~ skill:release-notes (roles)" in out
 
-            assert (await _loopx(monkeypatch, target_url, "config", "import", str(exported), "--apply"))[0] == 0
+            assert (await _looper(monkeypatch, target_url, "config", "import", str(exported), "--apply"))[0] == 0
             items = {(r["kind"], r["name"]): r for r in await _items(target)}
             assert items[("skill", "release-notes")]["id"] == mine["item_id"]
             assert items[("skill", "release-notes")]["description"] == "Drafts notes."
@@ -464,10 +464,10 @@ def test_an_export_over_the_request_cap_goes_through_the_cli(monkeypatch: pytest
                         {"path": "SKILL.md", "content": f"---\nname: big-{n}\n---\n"},
                         {"path": "reference.md", "content": body}]), origin="upload")
             exported = tmp_path / "big.json"
-            assert (await _loopx(monkeypatch, source_url, "config", "export", str(exported)))[0] == 0
+            assert (await _looper(monkeypatch, source_url, "config", "export", str(exported)))[0] == 0
             assert exported.stat().st_size > REQUEST_BODY_MAX_BYTES
 
-            code, out, err = await _loopx(monkeypatch, target_url, "config", "import", str(exported), "--apply")
+            code, out, err = await _looper(monkeypatch, target_url, "config", "import", str(exported), "--apply")
 
             assert code == 0, err
             assert "catalog            added 5" in out
@@ -485,7 +485,7 @@ def test_the_settings_download_streams_the_same_file(monkeypatch: pytest.MonkeyP
         async with _installation() as (source, source_url):
             await _populate(monkeypatch, source, tmp_path / "calc")
             exported = tmp_path / "config.json"
-            assert (await _loopx(monkeypatch, source_url, "config", "export", str(exported),
+            assert (await _looper(monkeypatch, source_url, "config", "export", str(exported),
                                  "--include-projects"))[0] == 0
             server = AgentHTTPServer(web_adapter=SimpleNamespace(), supervisor=SimpleNamespace(),
                                      task_router=TaskRouter(runtime_root=tmp_path / "runtime"))
@@ -494,7 +494,7 @@ def test_the_settings_download_streams_the_same_file(monkeypatch: pytest.MonkeyP
 
             head, _, payload = writer.data.partition(b"\r\n\r\n")
             assert head.startswith(b"HTTP/1.1 200") and b"Content-Length" not in head
-            assert b'Content-Disposition: attachment; filename="loopx-config-' in head
+            assert b'Content-Disposition: attachment; filename="looper-config-' in head
             downloaded = json.loads(payload)
             downloaded.pop("exported_at")
             assert downloaded == _without_time(exported)
@@ -506,6 +506,7 @@ def test_the_settings_download_streams_the_same_file(monkeypatch: pytest.MonkeyP
 def test_a_file_from_before_agents_selects_the_agent_of_each_model(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
+    """A file exported before agents, and before the rename (``loopx-config/v1``), still imports."""
     async def _test() -> None:
         async with _installation(schema=False) as (target, target_url):
             old = tmp_path / "old.json"
@@ -515,7 +516,7 @@ def test_a_file_from_before_agents_selects_the_agent_of_each_model(
                 {"scope": "role", "role": "manager", "harness_prompt": None, "model": "opus", "effort": None,
                  "env": [], "run_budget_usd": None}]}}))
 
-            code, out, err = await _loopx(monkeypatch, target_url, "config", "import", str(old), "--apply", "--json")
+            code, out, err = await _looper(monkeypatch, target_url, "config", "import", str(old), "--apply", "--json")
 
             assert code == 0, err
             plan = _plan(out)

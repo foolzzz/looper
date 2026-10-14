@@ -43,7 +43,7 @@ _CHUNK_BYTES = 1024 * 1024
 _READ_TIMEOUT_SECONDS = 30.0
 _LABEL = "the uploaded file"
 # The file's own description, shown with the preview: a short string each, from the file's head.
-_ABOUT_FIELDS = ("format", "loopx_version", "exported_at", "secrets")
+_ABOUT_FIELDS = ("format", "looper_version", "exported_at", "secrets")
 
 
 class ImportNotFound(LookupError):
@@ -65,6 +65,7 @@ class _Pending:
 
 
 def _about(data: dict[str, Any]) -> dict[str, str]:
+    data = {"looper_version": data.get("loopx_version"), **data}  # a file exported before the rename
     return {name: data[name][:100] for name in _ABOUT_FIELDS if isinstance(data.get(name), str)}
 
 

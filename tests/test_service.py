@@ -20,7 +20,7 @@ from looper import cli
 from looper.agents import service
 
 UID = 501
-LABEL = "com.loopx.serve.test"
+LABEL = "com.looper.serve.test"
 
 # The shell `install` runs in: a Claude Code session's markers and unrelated
 # secrets must stay out of the unit.
@@ -46,8 +46,10 @@ CAPTURED = {name: SHELL_ENV[name] for name in (
 class FakeLaunchd:
     """launchd as `launchctl` shows it. A booted-out job stays visible for ``bootout_lag`` prints."""
 
-    def __init__(self, *, loaded: bool = False, bootout_lag: int = 2, bootstrap_failures: int = 0) -> None:
+    def __init__(self, *, loaded: bool = False, bootout_lag: int = 2, bootstrap_failures: int = 0,
+                 label: str = LABEL) -> None:
         self.loaded, self.bootout_lag, self.bootstrap_failures = loaded, bootout_lag, bootstrap_failures
+        self.label = label
         self.unloading = 0
         self.pid = 4000 if loaded else 0
         self.calls: list[list[str]] = []
@@ -63,20 +65,20 @@ class FakeLaunchd:
         assert argv[0] == "launchctl", argv
         command = argv[1]
         if command == "print":
-            assert argv[2] == f"gui/{UID}/{LABEL}"
+            assert argv[2] == f"gui/{UID}/{self.label}"
             if self.unloading:
                 self.unloading -= 1
                 return self._done(argv, 0, f"{argv[2]} = {{\n\tstate = exited\n}}\n")
             if self.loaded:
                 return self._done(argv, 0, f"{argv[2]} = {{\n\tstate = running\n\truns = 1\n\tpid = {self.pid}\n"
                                            "\tlast exit code = (never exited)\n\t\tstate = active\n}\n")
-            return self._done(argv, 113, "", f'Could not find service "{LABEL}" in domain for user gui: {UID}\n')
+            return self._done(argv, 113, "", f'Could not find service "{self.label}" in domain for user gui: {UID}\n')
         if command == "bootout":
             assert self.loaded, "bootout of a job that is not loaded"
             self.loaded, self.unloading = False, self.bootout_lag
             return self._done(argv, 0)
         if command == "bootstrap":
-            assert argv[2:] == [f"gui/{UID}", argv[3]] and argv[3].endswith(f"/{LABEL}.plist")
+            assert argv[2:] == [f"gui/{UID}", argv[3]] and argv[3].endswith(f"/{self.label}.plist")
             if self.unloading or self.loaded:
                 self.early_bootstraps += 1
                 return self._done(argv, 5, "", "Bootstrap failed: 5: Input/output error\n")
@@ -93,6 +95,19 @@ class FakeLaunchd:
 
     def commands(self) -> list[str]:
         return [argv[1] for argv in self.calls]
+
+
+class LaunchdJobs:
+    """launchd with several jobs, each a ``FakeLaunchd``, chosen by the label a call names."""
+
+    def __init__(self, *jobs: FakeLaunchd) -> None:
+        self.jobs = {job.label: job for job in jobs}
+        self.calls: list[list[str]] = []
+
+    def __call__(self, argv: Sequence[str]) -> subprocess.CompletedProcess[str]:
+        self.calls.append(list(argv))
+        label = Path(argv[3]).stem if argv[1] == "bootstrap" else argv[2].rsplit("/", 1)[1]
+        return self.jobs[label](argv)
 
 
 class FakeSystemd:
@@ -138,10 +153,10 @@ class Clock:
 
 @pytest.fixture
 def checkout(tmp_path: Path) -> Path:
-    """A checkout whose venv has the `loopx` console script next to its interpreter."""
+    """A checkout whose venv has the `looper` console script next to its interpreter."""
     bin_dir = tmp_path / "check out" / ".venv" / "bin"
     bin_dir.mkdir(parents=True)
-    for name in ("python3", "loopx"):
+    for name in ("python3", "looper"):
         (bin_dir / name).write_text("#!/bin/sh\n")
         (bin_dir / name).chmod(0o755)
     return tmp_path / "check out"
@@ -160,20 +175,20 @@ def _host(tmp_path: Path, checkout: Path, fake, *, system: str, port_busy: bool 
     )
 
 
-def _loopx(monkeypatch: pytest.MonkeyPatch, host: service.Host, *argv: str) -> int:
+def _looper(monkeypatch: pytest.MonkeyPatch, host: service.Host, *argv: str) -> int:
     monkeypatch.setattr(service.Host, "current", classmethod(lambda cls: host))
     return cli.main(["service", *argv])
 
 
 def _install(monkeypatch, host: service.Host, root: Path, *more: str, port: str = "9876") -> int:
-    return _loopx(monkeypatch, host, "install", "--label", LABEL, "--port", port, "--runtime-root", str(root), *more)
+    return _looper(monkeypatch, host, "install", "--label", LABEL, "--port", port, "--runtime-root", str(root), *more)
 
 
 def _mode(path: Path) -> int:
     return stat.S_IMODE(path.stat().st_mode)
 
 
-def test_launchd_unit_runs_this_loopx_privately_with_the_captured_environment(
+def test_launchd_unit_runs_this_looper_privately_with_the_captured_environment(
     tmp_path: Path, checkout: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     fake = FakeLaunchd()
@@ -187,7 +202,7 @@ def test_launchd_unit_runs_this_loopx_privately_with_the_captured_environment(
     log = str(root / "logs" / "serve.log")
     assert plistlib.loads(plist_path.read_bytes()) == {
         "Label": LABEL,
-        "ProgramArguments": [str(checkout / ".venv" / "bin" / "loopx"), "serve", "--port", "9876",
+        "ProgramArguments": [str(checkout / ".venv" / "bin" / "looper"), "serve", "--port", "9876",
                              "--runtime-root", str(root)],
         "WorkingDirectory": str(checkout),
         "EnvironmentVariables": {**CAPTURED, "MY_BOT_TOKEN": "custom"},
@@ -201,7 +216,7 @@ def test_launchd_unit_runs_this_loopx_privately_with_the_captured_environment(
     assert "0600" in output and "s3cret" not in output
 
 
-def test_systemd_unit_runs_this_loopx_privately_with_the_captured_environment(
+def test_systemd_unit_runs_this_looper_privately_with_the_captured_environment(
     tmp_path: Path, checkout: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     fake = FakeSystemd()
@@ -216,7 +231,7 @@ def test_systemd_unit_runs_this_loopx_privately_with_the_captured_environment(
     lines = unit_path.read_text().splitlines()
     values = dict(line.split("=", 1) for line in lines if "=" in line and not line.startswith("Environment="))
     assert service._systemd_words(values["ExecStart"]) == [
-        str(checkout / ".venv" / "bin" / "loopx"), "serve", "--port", "9876", "--runtime-root", str(root)]
+        str(checkout / ".venv" / "bin" / "looper"), "serve", "--port", "9876", "--runtime-root", str(root)]
     assert values["WorkingDirectory"] == str(checkout)
     assert values["Restart"] == "on-failure" and values["WantedBy"] == "default.target"
     log = str(root / "logs" / "serve.log").replace("%", "%%")
@@ -283,7 +298,7 @@ def test_restart_stops_then_starts_and_waits_until_the_port_serves(
 ) -> None:
     fake = FakeLaunchd() if system == "Darwin" else FakeSystemd()
     host = _host(tmp_path, checkout, fake, system=system)
-    assert _loopx(monkeypatch, host, "restart", "--label", LABEL) == 1
+    assert _looper(monkeypatch, host, "restart", "--label", LABEL) == 1
     assert "not installed" in capsys.readouterr().err
 
     assert _install(monkeypatch, host, tmp_path / "runtime") == 0
@@ -291,7 +306,7 @@ def test_restart_stops_then_starts_and_waits_until_the_port_serves(
     fake.calls.clear()
     capsys.readouterr()
 
-    assert _loopx(monkeypatch, host, "restart", "--label", LABEL) == 0
+    assert _looper(monkeypatch, host, "restart", "--label", LABEL) == 0
 
     assert fake.serving and fake.pid == before + 1
     assert f"pid {before} -> {before + 1}" in capsys.readouterr().out
@@ -328,14 +343,14 @@ def test_uninstall_stops_the_service_and_removes_the_unit(
     assert _install(monkeypatch, host, tmp_path / "runtime") == 0
     unit_path = service.manager(host, LABEL).unit_path
 
-    assert _loopx(monkeypatch, host, "uninstall", "--label", LABEL) == 0
+    assert _looper(monkeypatch, host, "uninstall", "--label", LABEL) == 0
 
     assert not unit_path.exists() and not fake.serving
     if system == "Linux":
         assert fake.commands()[-2:] == [f"disable --now {LABEL}.service", "daemon-reload"]
     assert (tmp_path / "runtime" / "logs").is_dir()
     capsys.readouterr()
-    assert _loopx(monkeypatch, host, "uninstall", "--label", LABEL) == 0
+    assert _looper(monkeypatch, host, "uninstall", "--label", LABEL) == 0
     assert "not installed" in capsys.readouterr().out
 
 
@@ -346,12 +361,12 @@ def test_status_shows_state_pid_last_exit_log_and_the_api(
     status = {"status": "running", "tasks": {"total": 3, "running": 1},
               "checks": [{"label": "Claude login", "status": "fail"}]}
     host = _host(tmp_path, checkout, fake, system="Darwin", status=status)
-    assert _loopx(monkeypatch, host, "status", "--label", LABEL) == 1
+    assert _looper(monkeypatch, host, "status", "--label", LABEL) == 1
     assert "not installed" in capsys.readouterr().out
 
     assert _install(monkeypatch, host, tmp_path / "runtime") == 0
     capsys.readouterr()
-    assert _loopx(monkeypatch, host, "status", "--label", LABEL) == 0
+    assert _looper(monkeypatch, host, "status", "--label", LABEL) == 0
     out = capsys.readouterr().out
     assert f"running, pid {fake.pid}" in out
     assert str(tmp_path / "runtime" / "logs" / "serve.log") in out
@@ -369,7 +384,7 @@ def test_status_shows_state_pid_last_exit_log_and_the_api(
         return original(argv)
 
     host.run = killed
-    assert _loopx(monkeypatch, host, "status", "--label", LABEL) == 1
+    assert _looper(monkeypatch, host, "status", "--label", LABEL) == 1
     out = capsys.readouterr().out
     assert "loaded, not running, last exit Killed: 9" in out and "no answer" in out
 
@@ -400,7 +415,7 @@ def test_a_label_that_is_not_a_plain_name_is_rejected(
     fake = FakeLaunchd()
     host = _host(tmp_path, checkout, fake, system="Darwin")
 
-    assert _loopx(monkeypatch, host, "install", f"--label={label}", "--runtime-root", str(tmp_path / "r")) == 1
+    assert _looper(monkeypatch, host, "install", f"--label={label}", "--runtime-root", str(tmp_path / "r")) == 1
 
     assert "--label" in capsys.readouterr().err and fake.calls == []
     assert not (tmp_path / "home").exists()
@@ -411,4 +426,55 @@ def test_without_a_console_script_the_unit_runs_the_module(tmp_path: Path) -> No
     python.parent.mkdir()
     python.write_text("")
 
-    assert service.loopx_command(str(python)) == [str(python), "-m", "looper.cli"]
+    assert service.looper_command(str(python)) == [str(python), "-m", "looper.cli"]
+
+
+@pytest.mark.parametrize("system", ["Darwin", "Linux"])
+def test_install_replaces_the_unit_from_before_the_rename_and_moves_its_runtime_root(
+    tmp_path: Path, checkout: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], system: str
+) -> None:
+    """``com.loopx.serve`` holds the port and runs on ``~/.loopx``: install stops and removes it first, then moves
+    ``~/.loopx`` to ``~/.looper`` before the new unit writes there."""
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    for name in ("LOOPER_RUNTIME_ROOT", "LOOPX_RUNTIME_ROOT"):
+        monkeypatch.delenv(name, raising=False)
+    (home / ".loopx" / "logs").mkdir(parents=True)
+    (home / ".loopx" / "logs" / "serve.log").write_text("from before the rename\n")
+    if system == "Darwin":
+        legacy, new = FakeLaunchd(loaded=True, label="com.loopx.serve"), FakeLaunchd(label="com.looper.serve")
+        fake = LaunchdJobs(legacy, new)
+    else:
+        fake = legacy = new = FakeSystemd()
+        legacy.active = True
+    host = _host(tmp_path, checkout, fake, system=system)
+    host.get_status = lambda port: {"status": "running"} if new.serving else None
+    old_unit = service.manager(host, "com.loopx.serve").unit_path
+    old_unit.parent.mkdir(parents=True)
+    old_unit.write_text("the old unit")
+    held = []
+    host.port_in_use = lambda port: held.append(port) or (legacy.serving and legacy is not new)
+    assert service.doctor_check(host).status == service.WARN
+
+    assert _looper(monkeypatch, host, "install", "--port", "9876") == 0
+
+    assert not old_unit.exists() and held == [9876]
+    new_unit = service.manager(host, "com.looper.serve").unit_path
+    argv = (plistlib.loads(new_unit.read_bytes())["ProgramArguments"] if system == "Darwin" else
+            service._systemd_words(dict(line.split("=", 1) for line in new_unit.read_text().splitlines()
+                                        if line.startswith("ExecStart="))["ExecStart"]))
+    assert argv == [str(checkout / ".venv" / "bin" / "looper"), "serve", "--port", "9876",
+                    "--runtime-root", str(home / ".looper")]
+    assert (home / ".looper" / "logs" / "serve.log").read_text() == "from before the rename\n"
+    assert (home / ".loopx").is_symlink() and (home / ".loopx" / "logs" / "serve.log").is_file()
+    if system == "Darwin":
+        calls = [(argv[1], argv[-1]) for argv in fake.calls]
+        assert calls.index(("bootout", f"gui/{UID}/com.loopx.serve")) < calls.index(("bootstrap", str(new_unit)))
+        assert not legacy.loaded and new.loaded
+    else:
+        commands = [command for command in fake.commands() if not command.startswith("show ")]
+        assert commands == ["disable --now com.loopx.serve.service", "daemon-reload", "daemon-reload",
+                            "stop com.looper.serve.service", "enable --now com.looper.serve.service"]
+    out = capsys.readouterr().out
+    assert "replaced   com.loopx.serve" in out and f"runtime    moved the runtime root {home / '.loopx'}" in out
+    assert service.doctor_check(host).status == service.OK

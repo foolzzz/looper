@@ -5,8 +5,8 @@ Linux a systemd user unit (``~/.config/systemd/user/<label>.service``). Either
 way the service starts at login, is started again when it exits with a failure
 (a crash or a kill), and writes its output to ``<runtime_root>/logs/serve.log``.
 
-The unit runs the ``loopx`` of the interpreter that ran ``install`` (a
-checkout's ``.venv/bin/loopx``) in the directory ``install`` ran in, so a
+The unit runs the ``looper`` of the interpreter that ran ``install`` (a
+checkout's ``.venv/bin/looper``) in the directory ``install`` ran in, so a
 checkout's ``.env`` keeps working. launchd and systemd start services with an
 almost empty environment, so ``install`` copies the variables the service
 needs from its own environment into the unit, which is why the unit file is
@@ -17,6 +17,11 @@ launchd: a job is reloaded with ``launchctl bootout`` then ``bootstrap``, never
 started before. ``bootout`` returns before the job is gone, and a ``bootstrap``
 issued meanwhile fails, so ``stop`` waits until ``launchctl print`` no longer
 finds the job and ``bootstrap`` is retried a few times.
+
+Before the rename the service was ``com.loopx.serve``. ``install`` with the
+default label first stops and removes that unit, so the two never compete
+for the port, and moves ``~/.loopx`` to ``~/.looper`` when the new unit uses
+the default runtime root (``looper.paths.settle_runtime_root``).
 """
 
 from __future__ import annotations
@@ -37,9 +42,11 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
+from ..paths import settle_runtime_root
 from .self_check import OK, SKIP, WARN, Check
 
-DEFAULT_LABEL = "com.loopx.serve"
+DEFAULT_LABEL = "com.looper.serve"
+LEGACY_LABEL = "com.loopx.serve"  # before the rename; `install` replaces it
 DEFAULT_PORT = 8767
 DEFAULT_TIMEOUT_SECONDS = 120.0
 LOG_RELATIVE_PATH = Path("logs") / "serve.log"
@@ -100,7 +107,7 @@ class Host:
     home: Path
     uid: int
     environ: Mapping[str, str]
-    executable: str  # the interpreter running loopx
+    executable: str  # the interpreter running looper
     cwd: Path
     run: Callable[[Sequence[str]], subprocess.CompletedProcess[str]]
     sleep: Callable[[float], None] = time.sleep
@@ -126,9 +133,9 @@ class ServiceSpec:
     log_path: Path
 
 
-def loopx_command(executable: str) -> list[str]:
-    """The current ``loopx``: the console script next to the interpreter, else ``python -m looper.cli``."""
-    script = Path(os.path.abspath(executable)).parent / "loopx"
+def looper_command(executable: str) -> list[str]:
+    """The current ``looper``: the console script next to the interpreter, else ``python -m looper.cli``."""
+    script = Path(os.path.abspath(executable)).parent / "looper"
     if script.is_file() and os.access(script, os.X_OK):
         return [str(script)]
     return [os.path.abspath(executable), "-m", "looper.cli"]
@@ -148,10 +155,14 @@ def build_spec(host: Host, *, label: str, port: int, runtime_root: Path, extra_e
     missing = [name for name in extra_env if name not in host.environ]
     if missing:
         raise ServiceError(f"--env {', '.join(missing)}: not set in this environment")
-    root = Path(os.path.abspath(os.path.join(host.cwd, os.path.expanduser(str(runtime_root)))))
-    argv = (*loopx_command(host.executable), "serve", "--port", str(port), "--runtime-root", str(root))
+    root = _absolute_root(host, runtime_root)
+    argv = (*looper_command(host.executable), "serve", "--port", str(port), "--runtime-root", str(root))
     return ServiceSpec(label=label, argv=argv, working_dir=host.cwd,
                        env=tuple(captured_env(host.environ, extra_env).items()), log_path=root / LOG_RELATIVE_PATH)
+
+
+def _absolute_root(host: Host, runtime_root: Path) -> Path:
+    return Path(os.path.abspath(os.path.join(host.cwd, os.path.expanduser(str(runtime_root)))))
 
 
 def check_label(label: str) -> None:
@@ -185,7 +196,7 @@ def render_systemd_unit(spec: ServiceSpec) -> str:
     log = str(spec.log_path).replace("%", "%%")
     lines = [
         "[Unit]",
-        f"Description=LoopX agent system (looper serve, {spec.label})",
+        f"Description=Looper agent system (looper serve, {spec.label})",
         "",
         "[Service]",
         "Type=simple",
@@ -477,9 +488,18 @@ def _describe(state: State) -> str:
 
 def install(host: Host, *, label: str = DEFAULT_LABEL, port: int = DEFAULT_PORT, runtime_root: Path,
             extra_env: Sequence[str] = (), timeout: float = DEFAULT_TIMEOUT_SECONDS) -> str:
-    """Write the unit (again), reload the service and wait until it serves; the report to print."""
+    """Write the unit (again), reload the service and wait until it serves; the report to print.
+
+    With the default label, the unit from before the rename (``LEGACY_LABEL``)
+    is stopped and removed first, then the runtime root is settled (``~/.loopx``
+    moved to ``~/.looper``) before anything is written under it.
+    """
     mgr = manager(host, label)
     spec = build_spec(host, label=label, port=port, runtime_root=runtime_root, extra_env=extra_env)
+    retired = _retire_legacy_unit(host) if label == DEFAULT_LABEL else ""
+    settled = settle_runtime_root(_absolute_root(host, runtime_root), home=host.home)
+    if settled.root != _absolute_root(host, runtime_root):
+        spec = build_spec(host, label=label, port=port, runtime_root=settled.root, extra_env=extra_env)
     spec.log_path.parent.mkdir(parents=True, exist_ok=True)
     write_private(mgr.unit_path, mgr.render(spec))
     mgr.stop()
@@ -495,12 +515,34 @@ def install(host: Host, *, label: str = DEFAULT_LABEL, port: int = DEFAULT_PORT,
         f"  log        {spec.log_path}",
         f"  serving    http://127.0.0.1:{port} (pid {serving.pid or 'unknown'})",
     ]
+    lines += [f"  replaced   {retired}"] if retired else []
+    lines += [f"  {'warning' if settled.warning else 'runtime':<10} {settled.note}"] if settled.note else []
     if "LOOPER_DATABASE_URL" not in names and "LOOPX_DATABASE_URL" not in names:
         lines.append("  note       LOOPER_DATABASE_URL is not set here; the service reads it from the checkout's .env, "
                      "else uses the default")
     if host.system == "Linux":
         lines.append("  note       to run it without a login session too: loginctl enable-linger $USER")
     return "\n".join(lines)
+
+
+def _retire_legacy_unit(host: Host) -> str:
+    """Stop and remove the ``LEGACY_LABEL`` unit when it is there; what was removed, or ""."""
+    legacy = manager(host, LEGACY_LABEL)
+    state = legacy.state()
+    if not state.installed and not state.loaded:
+        return ""
+    legacy.remove()
+    return f"{LEGACY_LABEL}, the unit from before the rename: stopped it and removed {legacy.unit_path}"
+
+
+def _legacy_hint(host: Host, label: str) -> str:
+    """For the default label: a note when the unit from before the rename is still there, else ""."""
+    if label != DEFAULT_LABEL:
+        return ""
+    state = manager(host, LEGACY_LABEL).state()
+    if not state.installed and not state.loaded:
+        return ""
+    return f"{LEGACY_LABEL} from before the rename is installed; `looper service install` replaces it"
 
 
 def restart(host: Host, *, label: str = DEFAULT_LABEL, timeout: float = DEFAULT_TIMEOUT_SECONDS) -> str:
@@ -532,7 +574,9 @@ def status(host: Host, *, label: str = DEFAULT_LABEL) -> tuple[int, str]:
     mgr = manager(host, label)
     state = mgr.state()
     if not state.installed and not state.loaded:
-        return 1, f"{label}: not installed (`looper service install` runs looper serve in the background)"
+        hint = _legacy_hint(host, label)
+        return 1, (f"{label}: not installed (`looper service install` runs looper serve in the background)"
+                   + (f"\n{hint}" if hint else ""))
     lines = [
         f"service    {label} ({mgr.kind})",
         f"unit       {mgr.unit_path}" + ("" if state.installed else " (missing; the service is still loaded)"),
@@ -562,6 +606,8 @@ def doctor_check(host: Host | None = None, label: str = DEFAULT_LABEL) -> Check:
     except ServiceError as exc:
         return Check("service", "Service", SKIP, f"not checked: {exc}")
     if not state.installed and not state.loaded:
+        if hint := _legacy_hint(host, label):
+            return Check("service", "Service", WARN, f"{label} not installed; {hint}", "run `looper service install`")
         return Check("service", "Service", SKIP, f"{label} not installed (optional: `looper service install`)")
     if state.running:
         return Check("service", "Service", OK, f"{label} running (pid {state.pid})")

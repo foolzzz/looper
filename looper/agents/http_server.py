@@ -1350,7 +1350,7 @@ class AgentHTTPServer:
         from .config_transfer import export_chunks
 
         include_projects, include_secrets = query.get("projects") == "1", query.get("secrets") == "1"
-        name = f"loopx-config-{datetime.date.today().isoformat()}.json"
+        name = f"looper-config-{datetime.date.today().isoformat()}.json"
         async with get_pool().acquire() as conn, conn.transaction(isolation="repeatable_read", readonly=True):
             chunks = export_chunks(conn, include_projects=include_projects, include_secrets=include_secrets)
             first = await anext(chunks)
