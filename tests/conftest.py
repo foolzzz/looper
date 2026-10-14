@@ -292,7 +292,7 @@ def agent_db(monkeypatch: pytest.MonkeyPatch, stub_claude_on_path: Path) -> Simp
     import importlib
     from unittest.mock import AsyncMock
 
-    from loopx.agents.tiers import planner as planner_module
+    from looper.agents.tiers import planner as planner_module
 
     db = SimpleNamespace()
     for module_name, function in _AGENT_DB_WRITES:
@@ -301,13 +301,13 @@ def agent_db(monkeypatch: pytest.MonkeyPatch, stub_claude_on_path: Path) -> Simp
         else:
             # start_record hands back the new record's id; the other writes return nothing.
             mock = AsyncMock(return_value=1 if function == "start_record" else None)
-        monkeypatch.setattr(importlib.import_module(f"loopx.db.{module_name}"), function, mock)
+        monkeypatch.setattr(importlib.import_module(f"looper.db.{module_name}"), function, mock)
         setattr(db, function, mock)
     for module_name, function, value in _AGENT_DB_READS:
         mock = AsyncMock(return_value=value)
-        monkeypatch.setattr(importlib.import_module(f"loopx.db.{module_name}"), function, mock)
+        monkeypatch.setattr(importlib.import_module(f"looper.db.{module_name}"), function, mock)
         setattr(db, function, mock)
-    from loopx.db import agent_sessions, plans
+    from looper.db import agent_sessions, plans
 
     db.store = store = _PlanStore()
     for module, name, function, method in (
@@ -344,7 +344,7 @@ class _Installed:
              contents: dict[str, str]) -> dict[str, Any]:
         import hashlib
 
-        from loopx.agents.library import item_sha256
+        from looper.agents.library import item_sha256
 
         files = [{"path": path, "content": text, "sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
                   "executable": False} for path, text in sorted(contents.items())]
@@ -394,7 +394,7 @@ def project_skills(_installed: _Installed) -> Callable[..., list[dict[str, Any]]
     ``SKILL.md`` the API writes (``project_skills.skill_file``); it returns
     every row. Calling it again replaces the skills.
     """
-    from loopx.agents.project_skills import skill_file
+    from looper.agents.project_skills import skill_file
 
     def set_skills(*skills: tuple[str, str, str, str]) -> list[dict[str, Any]]:
         _installed.project_rows = {}
@@ -422,7 +422,7 @@ def project_documents(agent_db: SimpleNamespace) -> Callable[..., list[dict[str,
     import hashlib
     from datetime import datetime, timezone
 
-    from loopx.agents.knowledge import safe_filename, text_filename
+    from looper.agents.knowledge import safe_filename, text_filename
 
     contents: dict[str, str] = {}
 

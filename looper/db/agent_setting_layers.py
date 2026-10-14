@@ -5,7 +5,7 @@ or ``role_project`` (with both). A NULL field is not set at its layer;
 ``env`` is a JSON list of ``{"key", "value"}`` (a null value unsets a key);
 ``agent_id`` is the agent its roles run. A task may choose the agent of some
 of its roles (``task_agent_overrides``). Code owns the fields' types, validation and
-resolution (``loopx.agents.agent_settings``); this module only stores rows.
+resolution (``looper.agents.agent_settings``); this module only stores rows.
 """
 
 from __future__ import annotations

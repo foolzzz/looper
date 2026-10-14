@@ -1,8 +1,8 @@
 """The capability catalog: ``library_items`` and ``library_files`` (what was acquired) and ``library_installs``
 (where it loads).
 
-``loopx.agents.library`` owns what an item is (scanning, validation, caps,
-version hashes) and how a run loads it, ``loopx.agents.catalog`` what an
+``looper.agents.library`` owns what an item is (scanning, validation, caps,
+version hashes) and how a run loads it, ``looper.agents.catalog`` what an
 install may be; this module stores and reads them.
 """
 
@@ -171,7 +171,7 @@ async def replace_snapshot(
     }
 
 
-# --- Items uploaded, taken from git or written in the UI (loopx.agents.catalog_sources) ---
+# --- Items uploaded, taken from git or written in the UI (looper.agents.catalog_sources) ---
 
 
 async def _write_files(conn: asyncpg.Connection, item_id: str, files: Sequence[Mapping[str, Any]]) -> None:

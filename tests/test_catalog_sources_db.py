@@ -125,7 +125,7 @@ def _clones(scratch: Path) -> list[str]:
 def scratch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Temporary directories (the clones) go here, so a test can see that none is left behind; file:// URLs
     are allowed."""
-    from loopx.agents import catalog_sources
+    from looper.agents import catalog_sources
 
     directory = tmp_path / "scratch"
     directory.mkdir()
@@ -149,8 +149,8 @@ def repo(tmp_path: Path) -> Path:
 def test_an_uploaded_skill_enters_the_catalog_installed_nowhere_and_loads_where_installed(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
-    from loopx.agents.claude_cli import library_args
-    from loopx.agents.library import load_installed
+    from looper.agents.claude_cli import library_args
+    from looper.agents.library import load_installed
 
     async def _test(pool: Any) -> None:
         status, body = await _upload("SKILL.md", _skill())
@@ -256,7 +256,7 @@ def test_a_name_taken_outside_projects_is_refused_with_409_and_an_upload_can_be_
 def test_an_unsafe_or_invalid_zip_is_refused_whole_with_its_reason(
     monkeypatch: pytest.MonkeyPatch, entries: dict[str, str | bytes], links: dict[str, str] | None, reason: str,
 ) -> None:
-    from loopx.agents import catalog_sources
+    from looper.agents import catalog_sources
 
     monkeypatch.setattr(catalog_sources, "FILE_MAX_BYTES", 1024)
     monkeypatch.setattr(catalog_sources, "ITEM_MAX_FILES", 4)
@@ -271,8 +271,8 @@ def test_an_unsafe_or_invalid_zip_is_refused_whole_with_its_reason(
 
 
 def test_an_upload_that_is_not_a_skill_md_or_zip_or_over_its_cap_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
-    from loopx.agents import catalog_sources
-    from loopx.agents.http_server import REQUEST_BODY_MAX_BYTES
+    from looper.agents import catalog_sources
+    from looper.agents.http_server import REQUEST_BODY_MAX_BYTES
 
     # The largest upload, as base64 in its JSON body, stays under the server's request cap.
     assert 4 * -(-catalog_sources.UPLOAD_MAX_BYTES // 3) + 1024 < REQUEST_BODY_MAX_BYTES
@@ -418,7 +418,7 @@ def test_a_git_import_refuses_a_clash_a_moved_ref_and_an_unknown_path(
 def test_a_repository_that_is_not_plain_https_is_refused_before_anything_is_cloned(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, fields: dict[str, Any], reason: str,
 ) -> None:
-    from loopx.agents import catalog_sources
+    from looper.agents import catalog_sources
 
     async def _never(*args: Any, **kwargs: Any) -> None:
         raise AssertionError("nothing is cloned")
@@ -471,7 +471,7 @@ def test_a_clone_runs_no_hooks_fetches_no_submodules_and_reads_only_the_tree(
 def test_a_clone_over_its_size_or_time_is_stopped_and_removed(
     monkeypatch: pytest.MonkeyPatch, scratch: Path, repo: Path, tmp_path: Path,
 ) -> None:
-    from loopx.agents import catalog_sources
+    from looper.agents import catalog_sources
 
     async def _test(pool: Any) -> None:
         monkeypatch.setattr(catalog_sources, "GIT_CLONE_MAX_BYTES", 1024)
@@ -570,7 +570,7 @@ def test_a_machine_import_leaves_out_a_name_another_source_holds(
 ) -> None:
     from library_fixtures import fake_claude_home
 
-    from loopx.agents.library import import_from_machine
+    from looper.agents.library import import_from_machine
 
     async def _test(pool: Any) -> None:
         assert (await _upload("SKILL.md", _skill("alpha")))[0] == 201

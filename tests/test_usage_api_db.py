@@ -25,7 +25,7 @@ def _run(test: Any, monkeypatch: pytest.MonkeyPatch) -> None:
     """Run ``test(pool)`` on a new schema that is also the server's pool."""
     import asyncpg
 
-    from loopx.db import connection
+    from looper.db import connection
 
     async def _main() -> None:
         schema = f"loopx_test_{uuid.uuid4().hex[:12]}"
@@ -56,8 +56,8 @@ class _Writer:
 
 
 async def _get(path: str, query: dict[str, str] | None = None) -> tuple[int, Any]:
-    from loopx.agents.http_server import AgentHTTPServer
-    from loopx.agents.tiers.task import TaskRouter
+    from looper.agents.http_server import AgentHTTPServer
+    from looper.agents.tiers.task import TaskRouter
 
     server = AgentHTTPServer(web_adapter=SimpleNamespace(), supervisor=SimpleNamespace(),
                              task_router=TaskRouter(runtime_root=Path(tempfile.mkdtemp())))
@@ -70,7 +70,7 @@ async def _get(path: str, query: dict[str, str] | None = None) -> tuple[int, Any
 async def _run_record(pool: Any, agent_id: str, *, task_id: str | None = None, cost: float | None = None,
                       session_id: str | None = None, context: int | None = None,
                       compactions: list[dict[str, Any]] | None = None) -> int:
-    from loopx.db import llm_records
+    from looper.db import llm_records
 
     record_id = await llm_records.start_record(agent_id=agent_id, task_id=task_id, session_id=session_id, pool=pool)
     await llm_records.finish_record(record_id, status="completed", cost_usd=cost, input_tokens=10, output_tokens=20,
@@ -80,13 +80,13 @@ async def _run_record(pool: Any, agent_id: str, *, task_id: str | None = None, c
 
 
 async def _task(pool: Any, task_id: str, project_id: str) -> None:
-    from loopx.db import tasks
+    from looper.db import tasks
 
     await tasks.create_task(task_id=task_id, requirement=f"do {task_id}", project_id=project_id, pool=pool)
 
 
 def test_the_task_detail_and_list_carry_the_tasks_cost(monkeypatch: pytest.MonkeyPatch) -> None:
-    from loopx.db import llm_records, projects
+    from looper.db import llm_records, projects
 
     async def test(pool: Any) -> None:
         project = await projects.create_project(name="calc", pool=pool)

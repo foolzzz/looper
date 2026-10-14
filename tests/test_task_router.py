@@ -10,15 +10,15 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from loopx.agents.bus import MessageBus
-from loopx.agents.message import (
+from looper.agents.bus import MessageBus
+from looper.agents.message import (
     MANAGER_ADDRESS,
     TASK_ROUTER_ADDRESS,
     MessageEnvelope,
     MessageType,
     planner_address,
 )
-from loopx.agents.tiers.task import Task, TaskRouter
+from looper.agents.tiers.task import Task, TaskRouter
 
 
 async def _until(condition: Any, timeout: float = 5.0) -> None:
@@ -231,7 +231,7 @@ class TestTaskProject:
                 await bus.shutdown()
                 return router
 
-        with caplog.at_level("ERROR", logger="loopx.agents.tiers.task"):
+        with caplog.at_level("ERROR", logger="looper.agents.tiers.task"):
             router = asyncio.run(_run())
         assert router._tasks == {}
         router._assign_task.assert_not_awaited()  # type: ignore[attr-defined]
@@ -239,7 +239,7 @@ class TestTaskProject:
         assert any("project" in record.getMessage() for record in caplog.records)
 
     def test_restart_keeps_the_project(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        from loopx.db import tasks as db_tasks
+        from looper.db import tasks as db_tasks
 
         row = {"id": "t1", "requirement": "build it", "goal_id": "g1", "work_dir": "/tmp/p",
                "project_id": "proj-7", "status": "stopped", "correlation_id": "c1", "origin_channel_id": ""}

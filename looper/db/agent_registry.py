@@ -1,6 +1,6 @@
 """The ``agent_runtimes``, ``llm_providers`` (with ``llm_provider_secrets``) and ``agents`` tables.
 
-Code owns the validation (``loopx.agents.agent_registry``); this module only
+Code owns the validation (``looper.agents.agent_registry``); this module only
 reads and writes rows. A provider's API key is read here only by
 ``get_api_key``; every other read says whether one is set.
 """

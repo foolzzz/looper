@@ -32,7 +32,7 @@ async def _installation(*, schema: bool = True) -> AsyncIterator[tuple[Any, str]
     """A new schema (with LoopX's tables unless ``schema`` is False): its pool and a URL that reaches it."""
     import asyncpg
 
-    from loopx.db.connection import ensure_schema
+    from looper.db.connection import ensure_schema
 
     name = f"loopx_test_{uuid.uuid4().hex[:12]}"
     admin = await asyncpg.connect(DSN)
@@ -52,7 +52,7 @@ async def _installation(*, schema: bool = True) -> AsyncIterator[tuple[Any, str]
 
 async def _loopx(monkeypatch: pytest.MonkeyPatch, url: str, *argv: str) -> tuple[int, str, str]:
     """Run the ``loopx`` command on the installation at ``url``: its exit code, stdout and stderr."""
-    from loopx import cli
+    from looper import cli
 
     def run() -> tuple[int, str, str]:
         out, err = io.StringIO(), io.StringIO()
@@ -66,7 +66,7 @@ async def _loopx(monkeypatch: pytest.MonkeyPatch, url: str, *argv: str) -> tuple
 
 def _serve(monkeypatch: pytest.MonkeyPatch, pool: Any) -> None:
     """Make ``pool`` the server's, for the API calls that set an installation up."""
-    from loopx.db import connection
+    from looper.db import connection
 
     monkeypatch.setattr(connection, "_pool", pool)
 
@@ -79,8 +79,8 @@ async def _ok(method: str, path: str, body: Any = None) -> Any:
 
 async def _populate(monkeypatch: pytest.MonkeyPatch, pool: Any, work_dir: Path) -> dict[str, str]:
     """An installation using every section of the file, set up through the API as a user would."""
-    from loopx.agents.serve import seed_agent_configs, seed_channel_configs
-    from loopx.db import library as db_library
+    from looper.agents.serve import seed_agent_configs, seed_channel_configs
+    from looper.db import library as db_library
 
     _serve(monkeypatch, pool)
     await seed_agent_configs(pool)
@@ -136,7 +136,7 @@ async def _populate(monkeypatch: pytest.MonkeyPatch, pool: Any, work_dir: Path) 
     docs = (await _ok("POST", "/api/projects", {"name": "docs"}))["project_id"]
     await _ok("PUT", f"/api/projects/{calc}/agent-settings", {"agent": beta_haiku})
     await _ok("PUT", f"/api/projects/{calc}/agent-settings/roles/worker", {"harness_prompt": "Test first."})
-    from loopx.agents.knowledge import add_document
+    from looper.agents.knowledge import add_document
 
     runtime_root = work_dir.parent / "runtime"
     await add_document(calc, {"source_kind": "text", "title": "Style", "summary": "How we write.",
@@ -153,7 +153,7 @@ async def _populate(monkeypatch: pytest.MonkeyPatch, pool: Any, work_dir: Path) 
 
 
 def _item(kind: str, name: str, files: list[dict[str, Any]], **fields: Any) -> dict[str, Any]:
-    from loopx.agents.library import item_sha256
+    from looper.agents.library import item_sha256
 
     full = [{"executable": False, **f, "sha256": _sha(f["content"])} for f in files]
     return {"kind": kind, "name": name, "source": "", "version": "", "description": "", "files": full,
@@ -175,10 +175,10 @@ def _without_ids(view: dict[str, Any]) -> dict[str, Any]:
 
 async def _state(pool: Any) -> dict[str, Any]:
     """An installation's configuration as agents and the dashboard see it, without ids or times."""
-    from loopx.agents.agent_settings import TASK_ROLES, index_layers, resolve
-    from loopx.agents.config_transfer import role_entry
-    from loopx.db import agent_setting_layers
-    from loopx.db import config_transfer as db
+    from looper.agents.agent_settings import TASK_ROLES, index_layers, resolve
+    from looper.agents.config_transfer import role_entry
+    from looper.db import agent_setting_layers
+    from looper.db import config_transfer as db
 
     async with pool.acquire() as conn:
         layers = await agent_setting_layers.list_layers(None, pool=pool)
@@ -286,7 +286,7 @@ def test_importing_the_same_file_again_changes_nothing(monkeypatch: pytest.Monke
             assert (await _loopx(monkeypatch, source_url, "config", "export", str(exported),
                                  "--include-projects"))[0] == 0
             # Here the Planner's recommended prompt is the prompt the file gives it, which it then follows.
-            from loopx.agents.serve import seed_agent_configs
+            from looper.agents.serve import seed_agent_configs
 
             await seed_agent_configs(target)
             await target.execute("UPDATE agent_configs SET default_prompt = 'Plan in small steps.' "
@@ -377,7 +377,7 @@ def test_secrets_are_placeholders_by_default_and_never_replace_stored_ones(
                                         "--json")
             assert code == 0
             plan = _plan(out)
-            from loopx.db import library as db_library
+            from looper.db import library as db_library
 
             servers = {row["name"]: row for row in (await db_library.get_mcp_servers(
                 [r["id"] for r in await db_library.list_items(pool=target) if r["kind"] == "mcp"],
@@ -444,16 +444,16 @@ def test_an_entry_with_the_same_key_is_updated_in_place_and_nothing_else_is_remo
 
 
 async def _items(pool: Any) -> list[dict[str, Any]]:
-    from loopx.db import library as db_library
+    from looper.db import library as db_library
 
     return await db_library.list_items(pool=pool)
 
 
 def test_an_export_over_the_request_cap_goes_through_the_cli(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    from loopx.agents.http_server import REQUEST_BODY_MAX_BYTES
+    from looper.agents.http_server import REQUEST_BODY_MAX_BYTES
 
     async def _test() -> None:
-        from loopx.db import library as db_library
+        from looper.db import library as db_library
 
         async with _installation() as (source, source_url), _installation(schema=False) as (target, target_url):
             # Five skills of 1.9 MiB each, like a real catalog's larger ones.
@@ -478,8 +478,8 @@ def test_an_export_over_the_request_cap_goes_through_the_cli(monkeypatch: pytest
 
 def test_the_settings_download_streams_the_same_file(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     async def _test() -> None:
-        from loopx.agents.http_server import AgentHTTPServer
-        from loopx.agents.tiers.task import TaskRouter
+        from looper.agents.http_server import AgentHTTPServer
+        from looper.agents.tiers.task import TaskRouter
         from types import SimpleNamespace
 
         async with _installation() as (source, source_url):
@@ -522,7 +522,7 @@ def test_a_file_from_before_agents_selects_the_agent_of_each_model(
             assert [(c["section"], c["key"], c["action"]) for c in plan["changes"]] == [
                 ("agents", "claude-code/haiku", "added"), ("settings.layers", "system", "added"),
                 ("settings.layers", "role:manager", "added")]
-            from loopx.db import config_transfer as db
+            from looper.db import config_transfer as db
 
             async with target.acquire() as conn:
                 layers = {r["scope"]: r["agent"] for r in await db.read_layers(conn)}

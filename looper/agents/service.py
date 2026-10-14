@@ -126,11 +126,11 @@ class ServiceSpec:
 
 
 def loopx_command(executable: str) -> list[str]:
-    """The current ``loopx``: the console script next to the interpreter, else ``python -m loopx.cli``."""
+    """The current ``loopx``: the console script next to the interpreter, else ``python -m looper.cli``."""
     script = Path(os.path.abspath(executable)).parent / "loopx"
     if script.is_file() and os.access(script, os.X_OK):
         return [str(script)]
-    return [os.path.abspath(executable), "-m", "loopx.cli"]
+    return [os.path.abspath(executable), "-m", "looper.cli"]
 
 
 def captured_env(environ: Mapping[str, str], extra: Sequence[str] = ()) -> dict[str, str]:

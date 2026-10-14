@@ -19,9 +19,9 @@ from typing import Any
 import asyncpg
 import pytest
 
-from loopx.agents.http_server import AgentHTTPServer
-from loopx.agents.tiers.task import Task, TaskRouter
-from loopx.db import connection as db_connection, llm_records as db_llm_records, projects as db_projects, tasks as db_tasks
+from looper.agents.http_server import AgentHTTPServer
+from looper.agents.tiers.task import Task, TaskRouter
+from looper.db import connection as db_connection, llm_records as db_llm_records, projects as db_projects, tasks as db_tasks
 
 ACTIVE = ("pending", "assigned", "running", "executing")
 NOW = datetime(2026, 10, 1, tzinfo=timezone.utc)
@@ -139,7 +139,7 @@ def store(monkeypatch: pytest.MonkeyPatch) -> _Store:
         monkeypatch.setattr(db_tasks, name, getattr(fake, name))
     monkeypatch.setattr(db_connection, "transaction", fake.transaction)
     monkeypatch.setattr(db_llm_records, "task_costs", fake.task_costs)
-    from loopx.db import agent_setting_layers
+    from looper.db import agent_setting_layers
 
     monkeypatch.setattr(agent_setting_layers, "agent_overrides", fake.agent_overrides)
     return fake
@@ -265,7 +265,7 @@ class TestProjectBackground:
         ("\n \n  - use uv\n\n  - Python 3.12\n\n\t\n", "  - use uv\n\n  - Python 3.12"),
     ])
     def test_only_the_blank_lines_around_it_are_trimmed(self, raw: str, stored: str) -> None:
-        from loopx.agents.projects import project_background
+        from looper.agents.projects import project_background
 
         assert project_background(raw) == stored
 

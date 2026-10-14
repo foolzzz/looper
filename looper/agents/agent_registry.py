@@ -2,7 +2,7 @@
 
 An **agent** is a runtime, an LLM provider and a model, with a default
 effort. A **runtime** is a registered instance of a runtime type (an adapter
-in ``loopx.agents.runtimes``): the executable it runs and what its probe found
+in ``looper.agents.runtimes``): the executable it runs and what its probe found
 (``<executable> --version``, never a model call). A **provider** is where an
 agent's requests go: the protocols it serves (``anthropic-messages``,
 ``openai-responses``, ``openai-chat``), its ``base_url``, its model catalog

@@ -51,7 +51,7 @@ def _run(test: Callable[[Any], Awaitable[None]], monkeypatch: pytest.MonkeyPatch
          before: Callable[[Any], Awaitable[None]] | None = None) -> None:
     """Run ``test(pool)`` on a new schema (``before(pool)`` runs ahead of it); with ``monkeypatch`` the pool
     is also the server's pool."""
-    from loopx.db import connection
+    from looper.db import connection
 
     async def _main() -> None:
         async with _fresh_schema() as pool:
@@ -139,9 +139,9 @@ async def _layers(pool: Any) -> list[tuple[Any, ...]]:
 def test_the_upgrade_moves_every_value_into_its_layer_and_each_role_launches_as_before(
     monkeypatch: pytest.MonkeyPatch, name: str,
 ) -> None:
-    from loopx.agents.agent_settings import Launch, load_agent_settings
-    from loopx.agents.system_prompt import build_system_prompt
-    from loopx.db import connection
+    from looper.agents.agent_settings import Launch, load_agent_settings
+    from looper.agents.system_prompt import build_system_prompt
+    from looper.db import connection
 
     scenario, golden = PARITY["scenarios"][name], PARITY["cases"][name]
 
@@ -178,7 +178,7 @@ def test_the_upgrade_moves_every_value_into_its_layer_and_each_role_launches_as_
 def test_a_fresh_database_has_no_layers_and_every_role_runs_with_the_builtin_settings(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from loopx.agents.agent_settings import BUILTIN_SETTINGS, load_agent_settings
+    from looper.agents.agent_settings import BUILTIN_SETTINGS, load_agent_settings
 
     async def _test(pool: Any) -> None:
         assert await _layers(pool) == []
@@ -195,8 +195,8 @@ def test_a_fresh_database_has_no_layers_and_every_role_runs_with_the_builtin_set
 def test_each_layer_round_trips_and_a_deleted_project_takes_its_layers(monkeypatch: pytest.MonkeyPatch) -> None:
     import asyncpg
 
-    from loopx.agents import agent_settings
-    from loopx.db import agent_setting_layers, projects
+    from looper.agents import agent_settings
+    from looper.db import agent_setting_layers, projects
 
     async def _test(pool: Any) -> None:
         calc = await projects.create_project(name="calc", pool=pool)
@@ -232,11 +232,11 @@ def test_each_layer_round_trips_and_a_deleted_project_takes_its_layers(monkeypat
 
 
 def test_seeding_moves_unedited_role_prompts_keeps_edited_ones_and_adds_the_reviewer() -> None:
-    from loopx.agents.serve import seed_agent_configs
-    from loopx.agents.tiers.manager import DEFAULT_SYSTEM_PROMPT as MANAGER
-    from loopx.agents.tiers.planner import DEFAULT_SYSTEM_PROMPT as PLANNER
-    from loopx.agents.tiers.worker import DEFAULT_SYSTEM_PROMPT as WORKER, REVIEWER_SYSTEM_PROMPT as REVIEWER
-    from loopx.db import agent_configs
+    from looper.agents.serve import seed_agent_configs
+    from looper.agents.tiers.manager import DEFAULT_SYSTEM_PROMPT as MANAGER
+    from looper.agents.tiers.planner import DEFAULT_SYSTEM_PROMPT as PLANNER
+    from looper.agents.tiers.worker import DEFAULT_SYSTEM_PROMPT as WORKER, REVIEWER_SYSTEM_PROMPT as REVIEWER
+    from looper.db import agent_configs
 
     async def _test(pool: Any) -> None:
         # Rows as the previous release left them: manager and worker unedited, planner edited.

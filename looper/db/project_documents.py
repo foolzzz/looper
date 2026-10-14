@@ -1,6 +1,6 @@
 """The ``project_documents`` table: a project's knowledge, and ``project_document_drafts``: drafts of it.
 
-``loopx.agents.knowledge`` owns what a document is (validation, caps, the
+``looper.agents.knowledge`` owns what a document is (validation, caps, the
 index, materialization); this module stores and reads it. A text or upload
 document holds its ``content``; a path document holds its ``path``, relative
 to its project's default directory. A draft holds a text document's title,

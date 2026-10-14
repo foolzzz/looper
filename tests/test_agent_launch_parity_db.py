@@ -57,7 +57,7 @@ CREATE UNIQUE INDEX idx_agent_setting_layers_place
 def test_each_role_starts_its_runtime_as_main_did(monkeypatch: pytest.MonkeyPatch, scenario: str) -> None:
     import asyncpg
 
-    from loopx.db import connection
+    from looper.db import connection
 
     async def _main() -> dict[str, Any]:
         schema = f"loopx_test_{uuid.uuid4().hex[:12]}"

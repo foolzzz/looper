@@ -22,7 +22,7 @@ import zipfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-REQUIRED = ("loopx/db/schema.sql", "loopx/web/dashboard/index.html")
+REQUIRED = ("looper/db/schema.sql", "looper/web/dashboard/index.html")
 
 
 def run(*cmd: str, cwd: Path, env: dict[str, str] | None = None) -> str:
@@ -65,8 +65,8 @@ def serve_check(venv: Path, work: Path, dsn: str) -> None:
 
 
 def main() -> int:
-    if not (ROOT / "loopx/web/dashboard/index.html").is_file():
-        print("loopx/web/dashboard is not staged; run scripts/stage-dashboard.sh first", file=sys.stderr)
+    if not (ROOT / "looper/web/dashboard/index.html").is_file():
+        print("looper/web/dashboard is not staged; run scripts/stage-dashboard.sh first", file=sys.stderr)
         return 2
     with tempfile.TemporaryDirectory() as tmp:
         work = Path(tmp)
@@ -77,13 +77,13 @@ def main() -> int:
             if name and (ROOT / name).is_file():
                 (src / name).parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(ROOT / name, src / name)
-        shutil.copytree(ROOT / "loopx/web/dashboard", src / "loopx/web/dashboard")
+        shutil.copytree(ROOT / "looper/web/dashboard", src / "looper/web/dashboard")
         run("uv", "build", "--wheel", "--out-dir", str(work / "dist"), cwd=src)
         (wheel,) = (work / "dist").glob("loopx-*.whl")
         names = set(zipfile.ZipFile(wheel).namelist())
         missing = [n for n in REQUIRED if n not in names]
         assert not missing, f"wheel lacks {missing}"
-        assert any(n.startswith("loopx/web/dashboard/assets/") for n in names), "wheel lacks dashboard assets"
+        assert any(n.startswith("looper/web/dashboard/assets/") for n in names), "wheel lacks dashboard assets"
         print(f"PASS {wheel.name} carries the schema and the dashboard")
 
         venv = work / "venv"
@@ -91,8 +91,8 @@ def main() -> int:
         run("uv", "pip", "install", "--python", str(venv / "bin" / "python"), str(wheel), cwd=work)
         located = run(
             str(venv / "bin" / "python"), "-c",
-            "from loopx.agents.http_server import default_static_dir;"
-            "from loopx.db.connection import SCHEMA_PATH;"
+            "from looper.agents.http_server import default_static_dir;"
+            "from looper.db.connection import SCHEMA_PATH;"
             "print(default_static_dir()); print(SCHEMA_PATH)",
             cwd=work,
         ).split()

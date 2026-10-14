@@ -3,7 +3,7 @@
 Agents never load the operator's personal Claude Code configuration
 (``claude_cli.isolation_args``). What they load comes from the catalog
 (``library_items`` and ``library_files``) instead, and only where an item is
-installed (``library_installs``, ``loopx.agents.catalog``):
+installed (``library_installs``, ``looper.agents.catalog``):
 
 - **Import** (``import_from_machine``, ``POST /api/catalog/import``) acquires
   items from this machine. It reads, and only reads, the operator's Claude
@@ -13,7 +13,7 @@ installed (``library_installs``, ``loopx.agents.catalog``):
   and hooks); and every personal skill, ``skills/<name>/`` with a
   ``SKILL.md`` (a linked directory is followed). Personal settings, hooks,
   MCP servers and memory are not read. Each item and its files go into the
-  database (``loopx.db.library``), which is the source of truth; an item's
+  database (``looper.db.library``), which is the source of truth; an item's
   version is the hash of its files. A re-import replaces the items that
   changed, keeps every item's installs and removes the items that are gone.
   A new item is installed nowhere. Items of other origins (a project's own
@@ -29,7 +29,7 @@ installed (``library_installs``, ``loopx.agents.catalog``):
   generated plugins: a project's own skills into ``project`` (Claude Code
   names them ``project:<skill>``), every other skill into ``personal``
   (``personal:<skill>``). The MCP servers installed for the run go into one
-  read-only ``--mcp-config`` file (``loopx.agents.mcp``). The flags come from
+  read-only ``--mcp-config`` file (``looper.agents.mcp``). The flags come from
   ``claude_cli.library_args`` and the run records the items (an MCP server by
   its name, never its values) and their hash.
 """
@@ -154,7 +154,7 @@ class ScannedItem:
         return sum(len(f.content.encode("utf-8")) for f in self.files)
 
     def row(self) -> dict[str, Any]:
-        """The item as ``loopx.db.library.replace_snapshot`` stores it."""
+        """The item as ``looper.db.library.replace_snapshot`` stores it."""
         return {
             "kind": self.kind.value, "name": self.name, "source": self.source, "version": self.version,
             "sha256": self.sha256, "size_bytes": self.size_bytes, "file_count": len(self.files),

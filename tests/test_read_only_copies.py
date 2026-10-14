@@ -19,13 +19,13 @@ from typing import Any
 
 import pytest
 
-from loopx.agents import library, mcp, read_only_copies
-from loopx.agents.knowledge import load_knowledge
-from loopx.agents.project_skills import skill_file
-from loopx.agents.read_only_copies import hashed_directories, reclaim_unused
-from loopx.db import library as db_library
-from loopx.db import project_documents as db_documents
-from loopx.db import projects as db_projects
+from looper.agents import library, mcp, read_only_copies
+from looper.agents.knowledge import load_knowledge
+from looper.agents.project_skills import skill_file
+from looper.agents.read_only_copies import hashed_directories, reclaim_unused
+from looper.db import library as db_library
+from looper.db import project_documents as db_documents
+from looper.db import projects as db_projects
 
 
 def _sha(text: str) -> str:

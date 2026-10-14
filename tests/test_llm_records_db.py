@@ -19,8 +19,8 @@ pytestmark = pytest.mark.skipif(not DSN, reason="LOOPX_TEST_DATABASE_URL is not 
 def test_run_is_recorded_end_to_end() -> None:
     import asyncpg
 
-    from loopx.db import llm_records
-    from loopx.db.connection import ensure_schema
+    from looper.db import llm_records
+    from looper.db.connection import ensure_schema
 
     async def _run() -> None:
         pool = await asyncpg.create_pool(DSN, min_size=1, max_size=2)
@@ -90,7 +90,7 @@ def _in_fresh_schema(test: Any) -> None:
 
     import asyncpg
 
-    from loopx.db.connection import ensure_schema
+    from looper.db.connection import ensure_schema
 
     async def _run() -> None:
         schema = f"loopx_test_{uuid.uuid4().hex[:12]}"
@@ -111,7 +111,7 @@ def _in_fresh_schema(test: Any) -> None:
 async def _run_record(pool: Any, agent_id: str, *, task_id: str | None = None, cost: float | None = None,
                       status: str = "completed", session_id: str | None = None, context: int | None = None,
                       compactions: list[dict[str, Any]] | None = None, at: str | None = None) -> int:
-    from loopx.db import llm_records
+    from looper.db import llm_records
 
     record_id = await llm_records.start_record(agent_id=agent_id, task_id=task_id, session_id=session_id, pool=pool)
     if status != "running":
@@ -123,7 +123,7 @@ async def _run_record(pool: Any, agent_id: str, *, task_id: str | None = None, c
 
 
 def test_a_runs_tokens_context_and_compactions_are_read_back() -> None:
-    from loopx.db import llm_records
+    from looper.db import llm_records
 
     async def test(pool: Any) -> None:
         record_id = await llm_records.start_record(agent_id="manager", pool=pool)
@@ -152,7 +152,7 @@ def test_a_runs_tokens_context_and_compactions_are_read_back() -> None:
 
 
 def test_a_tasks_cost_is_the_sum_of_its_planner_worker_and_reviewer_runs() -> None:
-    from loopx.db import llm_records
+    from looper.db import llm_records
 
     async def test(pool: Any) -> None:
         await _run_record(pool, "planner-t1", task_id="t1", cost=0.1)
@@ -184,7 +184,7 @@ def test_a_tasks_cost_is_the_sum_of_its_planner_worker_and_reviewer_runs() -> No
 
 
 def test_a_resident_agents_usage_by_session_day_and_turn() -> None:
-    from loopx.db import llm_records
+    from looper.db import llm_records
 
     async def test(pool: Any) -> None:
         compacted = [{"trigger": "auto", "pre_tokens": 2100, "post_tokens": 300, "duration_ms": 900}]

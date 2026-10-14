@@ -9,18 +9,18 @@ from typing import Any
 
 import pytest
 
-from loopx.agents.bus import MessageBus
-from loopx.agents.channels.web import WebChannelAdapter
-from loopx.agents.message import (
+from looper.agents.bus import MessageBus
+from looper.agents.channels.web import WebChannelAdapter
+from looper.agents.message import (
     MANAGER_ADDRESS,
     MessageEnvelope,
     MessageType,
     channel_address,
     planner_address,
 )
-from loopx.agents.tiers import planner as planner_module
-from loopx.agents.tiers.planner import PlanStep, PlannerAgent, TaskPlan
-from loopx.agents.tiers.task import TaskRouter
+from looper.agents.tiers import planner as planner_module
+from looper.agents.tiers.planner import PlanStep, PlannerAgent, TaskPlan
+from looper.agents.tiers.task import TaskRouter
 from tests.test_planner_agent import WORK_OK, Harness, activity, chat, decide, drive, hold_first, plan, step
 
 WEB = channel_address("web")
@@ -128,7 +128,7 @@ class TestResolveChatTarget:
         ({"kind": "planner", "task_id": "t1"}, planner_address("t1")),  # a running Planner
     ])
     def test_manager_is_the_default(self, raw: Any, expected: Any) -> None:
-        from loopx.agents.chat_targets import resolve_chat_target
+        from looper.agents.chat_targets import resolve_chat_target
         with tempfile.TemporaryDirectory() as tmp:
             assert resolve_chat_target(raw, self._router(tmp)) == expected
 
@@ -142,7 +142,7 @@ class TestResolveChatTarget:
         ],
     )
     def test_rejected_targets(self, raw: Any, status: str) -> None:
-        from loopx.agents.chat_targets import ChatTargetError, resolve_chat_target
+        from looper.agents.chat_targets import ChatTargetError, resolve_chat_target
         with tempfile.TemporaryDirectory() as tmp:
             with pytest.raises(ChatTargetError) as excinfo:
                 resolve_chat_target(raw, self._router(tmp))

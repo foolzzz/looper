@@ -32,18 +32,18 @@ test = [
 ]
 
 [project.scripts]
-loopx = "loopx.cli:main"
+loopx = "looper.cli:main"
 
 [tool.setuptools.packages.find]
-include = ["loopx*"]
+include = ["looper*"]
 
 [tool.setuptools.package-data]
-"loopx" = ["web/dashboard/*", "web/dashboard/assets/*"]
-"loopx.db" = ["*.sql"]
+"looper" = ["web/dashboard/*", "web/dashboard/assets/*"]
+"looper.db" = ["*.sql"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 
 [tool.coverage.run]
-source = ["loopx"]
+source = ["looper"]
 relative_files = true

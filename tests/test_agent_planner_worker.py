@@ -18,18 +18,18 @@ from agent_fixtures import agent_json
 
 from fake_claude import fake_claude
 from library_fixtures import ALPHA_SKILL, DEMO_PLUGIN, plugin_dirs
-from loopx.agents.bus import MessageBus
-from loopx.agents.claude_cli import ISOLATION_ID, isolation_args
-from loopx.agents.message import (
+from looper.agents.bus import MessageBus
+from looper.agents.claude_cli import ISOLATION_ID, isolation_args
+from looper.agents.message import (
     MessageEnvelope,
     MessageType,
     planner_address,
     worker_address,
 )
-from loopx.agents.agent_settings import DEFAULT_HARNESS_PROMPT
-from loopx.agents.system_prompt import REVIEW_CONTRACT, WORK_CONTRACT
-from loopx.agents.tiers.planner import PlanStep, TaskPlan
-from loopx.agents.tiers.worker import (
+from looper.agents.agent_settings import DEFAULT_HARNESS_PROMPT
+from looper.agents.system_prompt import REVIEW_CONTRACT, WORK_CONTRACT
+from looper.agents.tiers.planner import PlanStep, TaskPlan
+from looper.agents.tiers.worker import (
     DEFAULT_SYSTEM_PROMPT,
     REVIEWER_SYSTEM_PROMPT,
     WorkerConfig,
@@ -137,7 +137,7 @@ def _worker_row(
     error: Exception | None = None,
 ) -> AsyncMock:
     """Serve the ``worker`` row of agent_configs (or a failed read) to the pool."""
-    from loopx.db import agent_configs
+    from looper.db import agent_configs
 
     get_config = AsyncMock(return_value=row, side_effect=error)
     monkeypatch.setattr(agent_configs, "get_config", get_config)
@@ -371,7 +371,7 @@ class TestWorkerSubprocess:
         self, monkeypatch: pytest.MonkeyPatch, row: dict[str, Any] | None, failure: Exception | None,
         limits: tuple[int, int],
     ) -> None:
-        from loopx.agents.tiers.worker import _load_settings
+        from looper.agents.tiers.worker import _load_settings
 
         _worker_row(monkeypatch, row, error=failure)
         settings = asyncio.run(_load_settings())
@@ -576,7 +576,7 @@ class TestWorkerHarnessAndLaunch:
     @pytest.fixture
     def rows(self, monkeypatch: pytest.MonkeyPatch) -> dict[str, dict[str, Any]]:
         """The ``worker`` and ``reviewer`` config rows, by agent id."""
-        from loopx.db import agent_configs
+        from looper.db import agent_configs
 
         rows = {"worker": {"system_prompt": "WORKER ROLE", "timeout_seconds": 0, "max_turns": 0},
                 "reviewer": {"system_prompt": "REVIEWER ROLE", "timeout_seconds": 0, "max_turns": 0}}
@@ -883,7 +883,7 @@ class TestJudgeResult:
         ],
     )
     def test_work_fails_closed(self, tmp_path: Path, event: dict[str, Any] | None, error: str) -> None:
-        from loopx.agents.tiers.worker import judge_result
+        from looper.agents.tiers.worker import judge_result
 
         (tmp_path / "a.py").write_text("x")
         result = judge_result(event, work_dir=tmp_path, is_verify=False)
@@ -891,14 +891,14 @@ class TestJudgeResult:
         assert error in result["error"]
 
     def test_missing_report_keeps_the_final_message(self, tmp_path: Path) -> None:
-        from loopx.agents.tiers.worker import judge_result
+        from looper.agents.tiers.worker import judge_result
 
         result = judge_result(_result("The sleep timed out, so I stopped."), work_dir=tmp_path, is_verify=False)
         assert result["status"] == "failed"
         assert result["final_message"] == "The sleep timed out, so I stopped."
 
     def test_reported_failure_with_nested_files_stays_failed(self, tmp_path: Path) -> None:
-        from loopx.agents.tiers.worker import judge_result
+        from looper.agents.tiers.worker import judge_result
 
         text = (
             "Could not finish.\n```json\n"
@@ -911,7 +911,7 @@ class TestJudgeResult:
         assert result["changed_files"] == {"a.py": "partial"}
 
     def test_completed_report_matching_the_files(self, tmp_path: Path) -> None:
-        from loopx.agents.tiers.worker import judge_result
+        from looper.agents.tiers.worker import judge_result
 
         (tmp_path / "a.py").write_text("x")
         (tmp_path / "b.py").write_text("x")
@@ -940,7 +940,7 @@ class TestJudgeResult:
         ],
     )
     def test_verdict(self, tmp_path: Path, event: dict[str, Any], passed: bool, finding: str | None) -> None:
-        from loopx.agents.tiers.worker import judge_result
+        from looper.agents.tiers.worker import judge_result
 
         result = judge_result(event, work_dir=tmp_path, is_verify=True)
         assert result["passed"] is passed

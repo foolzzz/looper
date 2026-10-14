@@ -24,10 +24,10 @@ from typing import Any
 
 import pytest
 
-from loopx.agents import knowledge
-from loopx.agents.agent_settings import Launch
-from loopx.agents.http_server import AgentHTTPServer
-from loopx.agents.knowledge import (
+from looper.agents import knowledge
+from looper.agents.agent_settings import Launch
+from looper.agents.http_server import AgentHTTPServer
+from looper.agents.knowledge import (
     EMPTY_KNOWLEDGE,
     INDEX_HEADING,
     INDEX_INTRO,
@@ -39,8 +39,8 @@ from loopx.agents.knowledge import (
     load_knowledge,
     safe_filename,
 )
-from loopx.agents.tiers.task import TaskRouter
-from loopx.db import project_documents as db_documents, projects as db_projects
+from looper.agents.tiers.task import TaskRouter
+from looper.db import project_documents as db_documents, projects as db_projects
 
 NOW = datetime(2026, 10, 13, 12, 0, tzinfo=timezone.utc)
 

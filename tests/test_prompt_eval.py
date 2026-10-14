@@ -16,9 +16,9 @@ import pytest
 
 from evals.prompt_regression import compare, metrics, runner
 from evals.prompt_regression.tasks import TASKS, EvalTask
-from loopx.agents.tiers.planner import PlannerAgent, PlannerTurnError
-from loopx.agents.tiers.planner_protocol import TurnKind, parse_plan
-from loopx.agents.tiers.worker import judge_result
+from looper.agents.tiers.planner import PlannerAgent, PlannerTurnError
+from looper.agents.tiers.planner_protocol import TurnKind, parse_plan
+from looper.agents.tiers.worker import judge_result
 
 DSN = os.environ.get("LOOPX_TEST_DATABASE_URL")
 

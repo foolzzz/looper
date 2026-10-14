@@ -49,14 +49,14 @@ logger = logging.getLogger(__name__)
 # rejected: both lose the operator's login.
 #
 # What an agent has comes from the capability catalog instead
-# (loopx/agents/library.py): the plugins and skills installed for its role,
+# (looper/agents/library.py): the plugins and skills installed for its role,
 # globally or in its project, each a "--plugin-dir" (library_args). Verified against Claude Code 2.1.285: with
 # the flags above, "--plugin-dir" in --print mode loads a plugin's skills
 # (named <plugin>:<skill>), agents, commands and hooks; a plugin needs no more
 # than a directory (a manifest names it). The operator's own hooks, such as a
 # UserPromptSubmit hook in ~/.claude/settings.json, still do not run.
 # The MCP servers installed for the run come in one "--mcp-config" file
-# (loopx/agents/mcp.py). Verified against Claude Code 2.1.285 in --print
+# (looper/agents/mcp.py). Verified against Claude Code 2.1.285 in --print
 # stream-json mode with the flags above: a file {"mcpServers": {<name>:
 # {"type": "stdio", "command", "args", "env"} or {"type": "http" | "sse",
 # "url", "headers"}}} loads each server beside --strict-mcp-config (init lists

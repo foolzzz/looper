@@ -116,7 +116,7 @@ ALTER TABLE agent_sessions ADD COLUMN IF NOT EXISTS session_agent_id TEXT;
 -- never the model: 'step_accepted' in the transaction that settles an
 -- accepted step, with the step's summary and the learnings its Worker and
 -- Reviewer reported. The Planner's turns and a Worker's first turn get the
--- entries back in bounded sections (loopx/agents/tiers/journal.py).
+-- entries back in bounded sections (looper/agents/tiers/journal.py).
 CREATE TABLE IF NOT EXISTS task_journal (
     id          BIGSERIAL PRIMARY KEY,
     task_id     TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
@@ -155,14 +155,14 @@ ALTER TABLE agent_configs DROP COLUMN IF EXISTS permission_mode;
 
 -- Agents (RFC decision 10): an agent is a runtime, an LLM provider and a
 -- model. A runtime is a registered instance of a runtime type, which code
--- provides (an adapter, loopx/agents/runtimes): the executable it runs ('' =
+-- provides (an adapter, looper/agents/runtimes): the executable it runs ('' =
 -- the type's default, for Claude Code the server's configured one) and what
 -- its last probe found (version, capabilities). A provider is where an agent's
 -- requests go: the protocols it serves, its models and their prices, and how
 -- it authenticates: a runtime type's own login (oauth, bound to that type) or
 -- an API key, kept in llm_provider_secrets and never shown by the API. Code
 -- owns the types, the protocols, the capabilities and the validation
--- (loopx/agents/agent_registry.py). The built-in rows (builtin) are
+-- (looper/agents/agent_registry.py). The built-in rows (builtin) are
 -- read-only; a runtime, provider or agent still referred to cannot be deleted.
 CREATE TABLE IF NOT EXISTS agent_runtimes (
     id            TEXT PRIMARY KEY,
@@ -225,7 +225,7 @@ CREATE TABLE IF NOT EXISTS task_agent_overrides (
 );
 -- The built-ins, on every start: the Claude Code runtime (the server's claude),
 -- its own login as a provider, and the agent every role runs when nothing
--- selects another (loopx/agents/agent_registry.py BUILTIN_*). A missing one comes back.
+-- selects another (looper/agents/agent_registry.py BUILTIN_*). A missing one comes back.
 INSERT INTO agent_runtimes (id, name, type, executable, capabilities, builtin)
 VALUES ('rt-claude-code', 'claude-code', 'claude-code', '',
         ARRAY['add_dirs', 'autonomous_turns', 'claude_plugins', 'compaction_events', 'cost_report', 'mcp',
@@ -250,7 +250,7 @@ CREATE TABLE IF NOT EXISTS system_settings (
 -- The capability catalog (the library): plugins and skills acquired into LoopX.
 -- An item does nothing by itself; it loads only where it is installed
 -- (library_installs). The tables are the source of truth: agents get a
--- read-only copy materialized under the runtime root (loopx/agents/library.py),
+-- read-only copy materialized under the runtime root (looper/agents/library.py),
 -- never the operator's ~/.claude. An item's sha256 is the hash of its files; a
 -- re-import replaces a changed item's files and keeps its id and its installs.
 -- origin, owner_project_id and description are added below, after projects.
@@ -320,7 +320,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_projects_name ON projects (lower(name));
 -- know about it: added to their system prompt; '' = none.
 ALTER TABLE projects ADD COLUMN IF NOT EXISTS background TEXT NOT NULL DEFAULT '';
 -- How the project's task agents run; NULL inherits today's behavior. Code owns
--- the types and validation (loopx/agents/project_execution.py).
+-- the types and validation (looper/agents/project_execution.py).
 ALTER TABLE projects ADD COLUMN IF NOT EXISTS task_budget_usd DOUBLE PRECISION CHECK (task_budget_usd > 0);
 ALTER TABLE projects ADD COLUMN IF NOT EXISTS task_budget_action TEXT
     CHECK (task_budget_action IN ('wrap_up', 'fail'));
@@ -346,7 +346,7 @@ BEGIN
     END IF;
 END $$;
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS project_id TEXT REFERENCES projects(id);
--- Why a failed task failed, when code can tell (loopx/db/tasks.py FailKind); NULL
+-- Why a failed task failed, when code can tell (looper/db/tasks.py FailKind); NULL
 -- otherwise. 'task_budget': it reached its project's task_budget_usd.
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS fail_kind TEXT CHECK (fail_kind IN ('task_budget'));
 CREATE INDEX IF NOT EXISTS idx_tasks_project ON tasks (project_id, created_at DESC);
@@ -356,7 +356,7 @@ CREATE INDEX IF NOT EXISTS idx_tasks_project ON tasks (project_id, created_at DE
 -- is stored here and materialized read-only under the runtime root; a path
 -- document is a file in the project's default directory (path is relative to
 -- it), read live. size_bytes and sha256 are the content's (a path document's
--- as of its last save). Code owns validation and caps (loopx/agents/knowledge.py).
+-- as of its last save). Code owns validation and caps (looper/agents/knowledge.py).
 CREATE TABLE IF NOT EXISTS project_documents (
     id           TEXT PRIMARY KEY,
     project_id   TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
@@ -396,7 +396,7 @@ CREATE INDEX IF NOT EXISTS idx_project_document_drafts_project
 -- ('machine'), uploaded, taken from git, written in the UI, or written in a
 -- project ('project'). A project-authored item belongs to that project
 -- (owner_project_id) and goes with it. Code owns the kinds of origin and what
--- each may do (loopx/agents/catalog.py).
+-- each may do (looper/agents/catalog.py).
 ALTER TABLE library_items ADD COLUMN IF NOT EXISTS origin TEXT NOT NULL DEFAULT 'machine'
     CHECK (origin IN ('machine', 'upload', 'git', 'ui', 'project'));
 ALTER TABLE library_items ADD COLUMN IF NOT EXISTS owner_project_id TEXT REFERENCES projects(id) ON DELETE CASCADE;
@@ -437,7 +437,7 @@ CREATE INDEX IF NOT EXISTS idx_library_installs_project ON library_installs (pro
 -- (the retired project_skills table) becomes a catalog item owned by its
 -- project, keeping its id, name and description, its SKILL.md written the way
 -- runs wrote it (frontmatter from the fields, then the body;
--- loopx/agents/project_skills.py skill_file), and is installed in its project
+-- looper/agents/project_skills.py skill_file), and is installed in its project
 -- for the Planner, Workers and Reviewers, enabled as it was.
 DO $$
 BEGIN
@@ -480,7 +480,7 @@ END $$;
 -- ordered list of {"key", "value"}, where a null value unsets a key an earlier
 -- layer set (never at the system layer). agent_id is the agent the layer's
 -- roles run (its model with it). Code owns the validation and the resolution
--- (loopx/agents/agent_settings.py). One row per layer and place.
+-- (looper/agents/agent_settings.py). One row per layer and place.
 CREATE TABLE IF NOT EXISTS agent_setting_layers (
     scope           TEXT NOT NULL CHECK (scope IN ('system', 'role', 'project', 'role_project')),
     role            TEXT CHECK (role IN ('manager', 'planner', 'worker', 'reviewer')),
@@ -596,7 +596,7 @@ END $$;
 -- item: a command with its arguments and environment (stdio), or a URL with
 -- its headers (http, sse). The environment's and the headers' values are
 -- secrets: only their names leave the database through the API
--- (loopx/agents/mcp.py), and each run that loads the server gets them in a
+-- (looper/agents/mcp.py), and each run that loads the server gets them in a
 -- read-only file under the runtime root. The item's sha256 is the hash of
 -- the whole configuration, so changing a value is a new version.
 CREATE TABLE IF NOT EXISTS library_mcp_servers (

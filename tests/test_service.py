@@ -1,6 +1,6 @@
 """``loopx service``: the generated launchd and systemd units and how the commands drive the service manager.
 
-The commands run through ``loopx.cli.main`` against a stand-in launchd or
+The commands run through ``looper.cli.main`` against a stand-in launchd or
 systemd that keeps the state a real one would: a ``launchctl bootout`` returns
 before the job is gone, and a ``bootstrap`` issued meanwhile fails. Nothing
 runs the real ``launchctl`` or ``systemctl``.
@@ -16,8 +16,8 @@ from pathlib import Path
 
 import pytest
 
-from loopx import cli
-from loopx.agents import service
+from looper import cli
+from looper.agents import service
 
 UID = 501
 LABEL = "com.loopx.serve.test"
@@ -411,4 +411,4 @@ def test_without_a_console_script_the_unit_runs_the_module(tmp_path: Path) -> No
     python.parent.mkdir()
     python.write_text("")
 
-    assert service.loopx_command(str(python)) == [str(python), "-m", "loopx.cli"]
+    assert service.loopx_command(str(python)) == [str(python), "-m", "looper.cli"]

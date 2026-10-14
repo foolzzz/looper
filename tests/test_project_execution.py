@@ -19,10 +19,10 @@ import pytest
 
 from agent_fixtures import agent_json
 
-from loopx.agents.message import TASK_ROUTER_ADDRESS, MessageEnvelope, MessageType
-from loopx.agents.tiers.planner import PlannerAgent
-from loopx.agents.tiers.worker import WorkerConfig, WorkerPool
-from loopx.db import llm_records as db_llm_records
+from looper.agents.message import TASK_ROUTER_ADDRESS, MessageEnvelope, MessageType
+from looper.agents.tiers.planner import PlannerAgent
+from looper.agents.tiers.worker import WorkerConfig, WorkerPool
+from looper.db import llm_records as db_llm_records
 from tests.test_agent_planner_worker import _fake_claude, _flag, _run_step, _step_envelope, _worker_row
 from tests.test_planner_agent import (
     REVIEW_PASS,

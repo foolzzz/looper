@@ -90,14 +90,14 @@ async def seed_layers(pool: Any, scenario: str) -> None:
 
 async def seed_rest(scenario: str, root: Path) -> None:
     """The tasks; with the scenario's extras, a knowledge document in project A and a skill for every Worker."""
-    from loopx.db import tasks
+    from looper.db import tasks
 
     for project_id, task_id in TASKS.items():
         await tasks.create_task(task_id=task_id, requirement=REQUIREMENT, project_id=project_id,
                                 work_dir=str(_work_dir(root, project_id)), status="running")
     if not SCENARIOS[scenario]["extras"]:
         return
-    from loopx.agents import catalog, catalog_sources, knowledge
+    from looper.agents import catalog, catalog_sources, knowledge
 
     await knowledge.add_document(PROJECT_A, {"source_kind": "text", "title": "Style", "summary": "How calc is written",
                                              "content": "Use type hints.\n"}, root / "runtime")
@@ -191,8 +191,8 @@ def _normalized(seen: dict[str, Any], root: str, executable: str, environ: dict[
 
 
 async def _manager(claude: str, root: Path) -> None:
-    from loopx.agents.message import MANAGER_ADDRESS, AgentAddress, MessageEnvelope, MessageType
-    from loopx.agents.tiers.manager import ManagerAgent, ManagerConfig
+    from looper.agents.message import MANAGER_ADDRESS, AgentAddress, MessageEnvelope, MessageType
+    from looper.agents.tiers.manager import ManagerAgent, ManagerConfig
 
     work_dir = root / "manager"
     work_dir.mkdir(exist_ok=True)
@@ -212,7 +212,7 @@ async def _manager(claude: str, root: Path) -> None:
 
 
 async def _planner(claude: str, root: Path, project_id: str) -> None:
-    from loopx.agents.tiers.planner import PlannerAgent, TaskPlan
+    from looper.agents.tiers.planner import PlannerAgent, TaskPlan
 
     task_id = TASKS[project_id]
     planner = PlannerAgent(task_id=task_id, runtime_root=root / "runtime", claude_bin=claude)
@@ -227,8 +227,8 @@ async def _planner(claude: str, root: Path, project_id: str) -> None:
 
 
 async def _worker(claude: str, root: Path, project_id: str, *, verify: bool) -> None:
-    from loopx.agents.message import MessageEnvelope, MessageType, planner_address, worker_address
-    from loopx.agents.tiers.worker import WorkerConfig, WorkerPool
+    from looper.agents.message import MessageEnvelope, MessageType, planner_address, worker_address
+    from looper.agents.tiers.worker import WorkerConfig, WorkerPool
 
     task_id = TASKS[project_id]
     payload: dict[str, Any] = {
@@ -282,7 +282,7 @@ async def _generate(dsn: str) -> dict[str, Any]:
 
     import asyncpg
 
-    from loopx.db import connection
+    from looper.db import connection
 
     result: dict[str, Any] = {}
     for scenario in SCENARIOS:

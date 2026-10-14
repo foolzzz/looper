@@ -1,6 +1,6 @@
 """``loopx serve`` backs the database up with pg_dump before it changes the schema.
 
-The serve cases run the real ``loopx serve`` (``python -m loopx.cli serve``)
+The serve cases run the real ``loopx serve`` (``python -m looper.cli serve``)
 with PATH holding only a stand-in ``pg_dump`` (and ``pg_restore``), against a
 database created beside LOOPX_TEST_DATABASE_URL. The stand-in writes a
 custom-format header followed by what it read from the database: whether the
@@ -25,8 +25,8 @@ from pathlib import Path
 import pytest
 
 from evals.prompt_regression.runner import fresh_database, free_port
-from loopx.agents import db_backup
-from loopx.agents.self_check import mask_dsn
+from looper.agents import db_backup
+from looper.agents.self_check import mask_dsn
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DSN = os.environ.get("LOOPX_TEST_DATABASE_URL")
@@ -100,7 +100,7 @@ def _serve(tmp_path: Path, database_url: str, *flags: str) -> tuple[int | None, 
                PYTHONPATH=str(REPO_ROOT))
     with log_path.open("w") as log:
         process = subprocess.Popen(
-            [sys.executable, "-m", "loopx.cli", "serve", "--port", str(port),
+            [sys.executable, "-m", "looper.cli", "serve", "--port", str(port),
              "--runtime-root", str(tmp_path / "runtime"), *flags],
             cwd=tmp_path / "work", env=env, stdout=log, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
         )
@@ -129,7 +129,7 @@ def _db(url: str, *statements: str) -> None:
     async def run() -> None:
         import asyncpg
 
-        from loopx.db.connection import ensure_schema
+        from looper.db.connection import ensure_schema
 
         conn = await asyncpg.connect(url)
         try:
@@ -151,7 +151,7 @@ def _state(url: str) -> dict[str, object]:
     async def read() -> dict[str, object]:
         import asyncpg
 
-        from loopx.db.connection import SCHEMA_PATH, schema_fingerprint
+        from looper.db.connection import SCHEMA_PATH, schema_fingerprint
 
         conn = await asyncpg.connect(url)
         try:

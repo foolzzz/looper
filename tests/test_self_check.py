@@ -17,7 +17,7 @@ from pathlib import Path
 import pytest
 
 from evals.prompt_regression.runner import fresh_database, running_server
-from loopx.agents.self_check import mask_dsn
+from looper.agents.self_check import mask_dsn
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DSN = os.environ.get("LOOPX_TEST_DATABASE_URL")
@@ -42,7 +42,7 @@ def test_serve_without_postgresql_stops_with_the_fix(tmp_path: Path) -> None:
         port = sock.getsockname()[1]
     env = {**os.environ, "LOOPX_DATABASE_URL": f"postgresql://loopx:s3cret-pw@127.0.0.1:{port}/loopx",
            "PYTHONPATH": str(REPO_ROOT)}
-    serve = ("from pathlib import Path; from loopx.agents.serve import serve_agent; "
+    serve = ("from pathlib import Path; from looper.agents.serve import serve_agent; "
              "serve_agent(port=1, runtime_root=Path.cwd(), work_dir=Path.cwd())")
 
     proc = subprocess.run([sys.executable, "-c", serve], cwd=tmp_path, env=env, capture_output=True, text=True,

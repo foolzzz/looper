@@ -60,7 +60,7 @@ async def _fresh_schema() -> AsyncIterator[Any]:
 
 
 def _run(test: Callable[[Any], Awaitable[None]], *, old_tasks: bool = False) -> None:
-    from loopx.db.connection import ensure_schema
+    from looper.db.connection import ensure_schema
 
     async def _main() -> None:
         async with _fresh_schema() as pool:
@@ -81,7 +81,7 @@ async def _projects_by_task(pool: Any) -> dict[str, tuple[str, str, str]]:
 
 
 def test_backfill_gives_every_old_task_a_project() -> None:
-    from loopx.db.connection import ensure_schema
+    from looper.db.connection import ensure_schema
 
     async def _test(pool: Any) -> None:
         # Older directories keep the plain name; a clash, ignoring case, gets -2, -3, ...
@@ -134,7 +134,7 @@ def test_a_new_database_starts_with_no_projects() -> None:
 def test_project_crud_and_counts() -> None:
     import asyncpg
 
-    from loopx.db import projects, tasks
+    from looper.db import projects, tasks
 
     async def _test(pool: Any) -> None:
         tetris = await projects.create_project(name="Tetris", work_dir="/srv/tetris", pool=pool)
@@ -188,8 +188,8 @@ def test_project_crud_and_counts() -> None:
 
 
 def test_task_with_a_new_project_is_one_transaction(monkeypatch: pytest.MonkeyPatch) -> None:
-    from loopx.agents import projects as api
-    from loopx.db import connection, tasks
+    from looper.agents import projects as api
+    from looper.db import connection, tasks
 
     async def _test(pool: Any) -> None:
         monkeypatch.setattr(connection, "_pool", pool)
@@ -215,7 +215,7 @@ def test_task_with_a_new_project_is_one_transaction(monkeypatch: pytest.MonkeyPa
 
 
 def test_background_column_is_added_to_an_existing_projects_table() -> None:
-    from loopx.db.connection import ensure_schema
+    from looper.db.connection import ensure_schema
 
     async def _main() -> None:
         async with _fresh_schema() as pool:
@@ -240,7 +240,7 @@ def test_background_column_is_added_to_an_existing_projects_table() -> None:
 
 
 def test_background_round_trips_and_is_read_through_the_task() -> None:
-    from loopx.db import projects, tasks
+    from looper.db import projects, tasks
 
     async def _test(pool: Any) -> None:
         text = "  - use uv\n\n  - Python 3.12 · 中文"
@@ -273,8 +273,8 @@ def test_execution_settings_are_stored_through_the_task_and_cleared() -> None:
     """The execution columns as the API stores them: given ones set, None back to NULL, the rest kept."""
     import asyncpg
 
-    from loopx.agents.project_execution import ProjectExecution, execution_fields
-    from loopx.db import projects, tasks
+    from looper.agents.project_execution import ProjectExecution, execution_fields
+    from looper.db import projects, tasks
 
     async def _test(pool: Any) -> None:
         settings = execution_fields({"task_budget_usd": 2, "task_budget_action": "wrap_up", "supervise_interval_seconds": 0,
@@ -301,7 +301,7 @@ def test_distill_lessons_from_before_the_modes_becomes_write_or_off() -> None:
     """The boolean from before the three modes: true becomes write, false and NULL off; new projects are off."""
     import asyncpg
 
-    from loopx.db.connection import ensure_schema
+    from looper.db.connection import ensure_schema
 
     async def _modes(pool: Any) -> dict[str, str]:
         return {r["id"]: r["distill_lessons"] for r in await pool.fetch("SELECT id, distill_lessons FROM projects")}
@@ -335,7 +335,7 @@ def test_task_config_is_written_as_an_object_and_a_string_wrapped_one_reads_back
     """Saves from the task page used to wrap the object in one more JSON string each time."""
     import json
 
-    from loopx.db import projects, tasks
+    from looper.db import projects, tasks
 
     async def _test(pool: Any) -> None:
         project = await projects.create_project(name="p", pool=pool)

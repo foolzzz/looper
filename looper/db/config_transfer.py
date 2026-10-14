@@ -1,4 +1,4 @@
-"""Reads and writes for the configuration file (``loopx.agents.config_transfer``).
+"""Reads and writes for the configuration file (``looper.agents.config_transfer``).
 
 Every function takes a connection, so an export reads one snapshot and an
 import applies in one transaction. Secrets (an MCP server's environment and

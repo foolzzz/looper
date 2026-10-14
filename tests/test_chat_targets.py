@@ -10,10 +10,10 @@ from typing import Any
 
 import pytest
 
-from loopx.agents import chat_targets
-from loopx.agents.chat_targets import build_chat_targets, list_chat_targets
-from loopx.agents.tiers.planner import PlannerAgent
-from loopx.agents.tiers.task import Task, TaskRouter
+from looper.agents import chat_targets
+from looper.agents.chat_targets import build_chat_targets, list_chat_targets
+from looper.agents.tiers.planner import PlannerAgent
+from looper.agents.tiers.task import Task, TaskRouter
 
 T0 = datetime(2026, 10, 12, 8, 0, tzinfo=timezone.utc)
 

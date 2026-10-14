@@ -118,7 +118,7 @@ _reporting = False
 def legacy_home_roots(home: str | os.PathLike[str]) -> tuple[str, ...]:
     """Return the retired LoopX runtime roots under ``home``: ``~/.codex/loopx``.
 
-    The current roots come from ``loopx.paths``; this module must not import it.
+    The current roots come from ``looper.paths``; this module must not import it.
     """
 
     return (os.path.join(os.path.abspath(os.fspath(home)), ".codex", "loopx"),)

@@ -44,7 +44,7 @@ async def _fresh_schema() -> AsyncIterator[Any]:
 
 def _run(test: Callable[[Any], Awaitable[None]], monkeypatch: pytest.MonkeyPatch, *, before: str = "") -> None:
     """Run ``test(pool)`` on a new schema that is also the server's pool; ``before`` runs ahead of the schema."""
-    from loopx.db import connection
+    from looper.db import connection
 
     async def _main() -> None:
         async with _fresh_schema() as pool:
@@ -69,8 +69,8 @@ class _Writer:
 
 
 async def _call(method: str, path: str, body: Any = None) -> tuple[int, Any]:
-    from loopx.agents.http_server import AgentHTTPServer
-    from loopx.agents.tiers.task import TaskRouter
+    from looper.agents.http_server import AgentHTTPServer
+    from looper.agents.tiers.task import TaskRouter
 
     server = AgentHTTPServer(web_adapter=SimpleNamespace(), supervisor=SimpleNamespace(),
                              task_router=TaskRouter(runtime_root=Path(tempfile.mkdtemp())))
@@ -135,9 +135,9 @@ def _old_skills_sql() -> str:
 def test_the_upgrade_keeps_imported_items_uninstalled_and_moves_project_skills_with_parity(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
-    from loopx.agents.library import item_sha256, load_installed
-    from loopx.agents.project_skills import skill_file
-    from loopx.db import connection
+    from looper.agents.library import item_sha256, load_installed
+    from looper.agents.project_skills import skill_file
+    from looper.db import connection
 
     async def _test(pool: Any) -> None:
         assert await pool.fetchval("SELECT to_regclass('project_skills')") is None
@@ -198,8 +198,8 @@ def test_the_upgrade_keeps_imported_items_uninstalled_and_moves_project_skills_w
 
 async def _import(pool: Any, *names: str) -> dict[str, str]:
     """Machine items ``kind:name`` with one file each, through the import's own storage; their ids by name."""
-    from loopx.agents.library import item_sha256
-    from loopx.db import library as db_library
+    from looper.agents.library import item_sha256
+    from looper.db import library as db_library
 
     items = []
     for label in names:
@@ -223,7 +223,7 @@ async def _projects(*names: str) -> list[str]:
 
 
 async def _loaded(root: Path, role: str, project_id: str | None = None) -> list[str]:
-    from loopx.agents.library import load_installed
+    from looper.agents.library import load_installed
 
     library = await load_installed(root, role, project_id)
     assert library.error is None

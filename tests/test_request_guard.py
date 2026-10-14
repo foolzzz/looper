@@ -10,8 +10,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from loopx.agents.http_server import REQUEST_BODY_MAX_BYTES, AgentHTTPServer
-from loopx.agents.request_guard import refusal
+from looper.agents.http_server import REQUEST_BODY_MAX_BYTES, AgentHTTPServer
+from looper.agents.request_guard import refusal
 
 ATTACKER = "https://attacker.example"
 

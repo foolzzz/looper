@@ -19,12 +19,12 @@ from pathlib import Path
 
 import pytest
 
-from loopx import __version__
+from looper import __version__
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 # The agent system's own packages and the one helper it borrows.
-ALLOWED_MODULE = re.compile(r"loopx(\.cli|\.paths|\.agents(\.\w+)*|\.db(\.\w+)*)?")
+ALLOWED_MODULE = re.compile(r"looper(\.cli|\.paths|\.agents(\.\w+)*|\.db(\.\w+)*)?")
 
 _DRIVER = r"""
 import json, sys, tomllib
@@ -36,14 +36,14 @@ target = tomllib.loads(Path(pyproject).read_text())["project"]["scripts"]["loopx
 module_name, _, function = target.partition(":")
 calls = []
 if argv[:1] == ["serve"]:
-    import loopx.agents.serve as agents_serve
+    import looper.agents.serve as agents_serve
     agents_serve.serve_agent = lambda **kwargs: calls.append({k: str(v) for k, v in kwargs.items()})
 try:
     code = getattr(import_module(module_name), function)(argv)
 except SystemExit as exit_:
     code = exit_.code
 sys.stdout.flush()
-modules = sorted(name for name in sys.modules if name == "loopx" or name.startswith("loopx."))
+modules = sorted(name for name in sys.modules if name == "looper" or name.startswith("looper."))
 print("\n" + json.dumps({"code": code, "calls": calls, "modules": modules}))
 """
 
@@ -111,7 +111,7 @@ def test_version_loads_only_the_cli(tmp_path: Path, argv: list[str]) -> None:
         }
     else:
         assert output == f"loopx {__version__}"
-    assert result["modules"] == ["loopx", "loopx.cli"]
+    assert result["modules"] == ["looper", "looper.cli"]
 
 
 @pytest.mark.parametrize(
@@ -250,7 +250,7 @@ def test_doctor_passes_unless_a_check_failed(tmp_path: Path, lark: str, lark_lin
     import asyncpg
 
     from evals.prompt_regression.runner import fresh_database
-    from loopx.db.connection import ensure_schema
+    from looper.db.connection import ensure_schema
 
     async def set_up(url: str) -> None:
         conn = await asyncpg.connect(url)
@@ -318,7 +318,7 @@ def test_doctor_fails_without_a_usable_pg_dump_when_the_schema_is_about_to_chang
     import asyncpg
 
     from evals.prompt_regression.runner import fresh_database
-    from loopx.db.connection import ensure_schema
+    from looper.db.connection import ensure_schema
 
     async def set_up(url: str) -> None:
         conn = await asyncpg.connect(url)

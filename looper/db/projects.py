@@ -4,7 +4,7 @@ A project may give its tasks a default directory (``work_dir``, ``''`` for
 none) and a ``background`` its task agents get in their system prompt; ``''``
 is none. Names are unique ignoring case; a taken name raises
 ``asyncpg.UniqueViolationError``. Its execution settings (``EXECUTION_COLUMNS``,
-typed and validated by ``loopx.agents.project_execution``) are NULL to inherit.
+typed and validated by ``looper.agents.project_execution``) are NULL to inherit.
 Its agent settings are layers of their own (``agent_setting_layers``).
 """
 
@@ -19,7 +19,7 @@ import asyncpg
 from .connection import get_pool
 from .tasks import ACTIVE_STATUSES
 
-# How the project's task agents run; NULL inherits (loopx/agents/project_execution.py).
+# How the project's task agents run; NULL inherits (looper/agents/project_execution.py).
 EXECUTION_COLUMNS = (
     "task_budget_usd", "task_budget_action", "supervise_interval_seconds", "review_policy",
     "distill_lessons",

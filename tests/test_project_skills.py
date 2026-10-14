@@ -16,10 +16,10 @@ from typing import Any
 
 import pytest
 
-from loopx.agents import project_skills
-from loopx.agents.http_server import AgentHTTPServer
-from loopx.agents.project_skills import skill_body, skill_content, skill_description, skill_file, skill_name
-from loopx.agents.tiers.task import TaskRouter
+from looper.agents import project_skills
+from looper.agents.http_server import AgentHTTPServer
+from looper.agents.project_skills import skill_body, skill_content, skill_description, skill_file, skill_name
+from looper.agents.tiers.task import TaskRouter
 
 
 class _Writer:
@@ -147,7 +147,7 @@ class TestSkillFile:
         assert skill_body(text, "deploy-check", 'Says "OK": yes') == content
 
     def test_one_skill_is_one_file_and_its_version_is_the_items(self) -> None:
-        from loopx.agents.library import item_sha256
+        from looper.agents.library import item_sha256
 
         file, sha = project_skills.skill_md("deploy-check", "Use before a deploy.", "Reply OK.")
         assert (file["path"], file["executable"]) == ("SKILL.md", False)

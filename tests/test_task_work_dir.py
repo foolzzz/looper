@@ -6,7 +6,7 @@ import os
 
 import pytest
 
-from loopx.agents.tiers.task import resolve_work_dir
+from looper.agents.tiers.task import resolve_work_dir
 
 
 @pytest.mark.parametrize(

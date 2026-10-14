@@ -13,7 +13,7 @@ Wires up the full three-tier agent system:
 Usage:
     loopx serve
     # or directly:
-    from loopx.agents.serve import serve_agent
+    from looper.agents.serve import serve_agent
     serve_agent(host="127.0.0.1", port=8767)
 """
 

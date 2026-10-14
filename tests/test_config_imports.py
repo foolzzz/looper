@@ -19,8 +19,8 @@ from typing import Any
 
 import pytest
 
-from loopx.agents import config_imports
-from loopx.agents.http_server import CONFIG_IMPORTS_PATH, REQUEST_BODY_MAX_BYTES, AgentHTTPServer
+from looper.agents import config_imports
+from looper.agents.http_server import CONFIG_IMPORTS_PATH, REQUEST_BODY_MAX_BYTES, AgentHTTPServer
 from tests.test_catalog_db import DSN
 
 needs_db = pytest.mark.skipif(not DSN, reason="LOOPX_TEST_DATABASE_URL is not set")
@@ -153,7 +153,7 @@ async def _serving(monkeypatch: pytest.MonkeyPatch, pool: Any, runtime_root: Pat
 
 async def _export(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, *, big: bool) -> Path:
     """A configuration file of an installation using every section (``big``: over the request cap, too)."""
-    from loopx.db import library as db_library
+    from looper.db import library as db_library
     from tests.test_config_transfer_db import _installation, _item, _loopx, _populate
 
     exported = tmp_path / "config.json"

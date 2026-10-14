@@ -32,7 +32,7 @@ from .tiers.task import TaskRouter
 logger = logging.getLogger(__name__)
 
 # A source checkout serves the dashboard it builds (web/dist); an installed
-# wheel serves the copy staged into the package (loopx/web/dashboard).
+# wheel serves the copy staged into the package (looper/web/dashboard).
 _CHECKOUT_DASHBOARD = Path(__file__).resolve().parents[2] / "web" / "dist"
 _PACKAGED_DASHBOARD = Path(__file__).resolve().parents[1] / "web" / "dashboard"
 

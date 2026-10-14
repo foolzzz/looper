@@ -6,11 +6,11 @@ from pathlib import Path
 
 import pytest
 
-from loopx.agents import http_server
+from looper.agents import http_server
 
 
 def _dirs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, checkout_built: bool) -> tuple[Path, Path]:
-    checkout, packaged = tmp_path / "web" / "dist", tmp_path / "loopx" / "web" / "dashboard"
+    checkout, packaged = tmp_path / "web" / "dist", tmp_path / "looper" / "web" / "dashboard"
     for d in (checkout, packaged):
         d.mkdir(parents=True)
     (packaged / "index.html").write_text("packaged")

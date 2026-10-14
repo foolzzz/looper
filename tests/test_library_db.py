@@ -44,7 +44,7 @@ async def _fresh_schema() -> AsyncIterator[Any]:
 
 def _run(test: Callable[[Any], Awaitable[None]], monkeypatch: pytest.MonkeyPatch) -> None:
     """Run ``test(pool)`` on a new schema that is also the server's pool."""
-    from loopx.db import connection
+    from looper.db import connection
 
     async def _main() -> None:
         async with _fresh_schema() as pool:
@@ -83,8 +83,8 @@ class _Writer:
 
 
 async def _call(method: str, path: str, body: Any = None) -> tuple[int, Any]:
-    from loopx.agents.http_server import AgentHTTPServer
-    from loopx.agents.tiers.task import TaskRouter
+    from looper.agents.http_server import AgentHTTPServer
+    from looper.agents.tiers.task import TaskRouter
 
     server = AgentHTTPServer(web_adapter=SimpleNamespace(), supervisor=SimpleNamespace(),
                              task_router=TaskRouter(runtime_root=Path(tempfile.mkdtemp())))
@@ -96,7 +96,7 @@ async def _call(method: str, path: str, body: Any = None) -> tuple[int, Any]:
 
 
 def test_an_import_stores_the_snapshot(home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    from loopx.agents import library
+    from looper.agents import library
 
     async def _test(pool: Any) -> None:
         status, view = await _call("POST", "/api/catalog/import")
@@ -181,7 +181,7 @@ def test_a_reimport_replaces_changed_items_keeps_their_installs_and_leaves_proje
 
 
 def test_an_import_over_the_cap_changes_nothing(home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    from loopx.agents import library
+    from looper.agents import library
 
     async def _test(pool: Any) -> None:
         await _call("POST", "/api/catalog/import")
@@ -198,7 +198,7 @@ def test_an_import_over_the_cap_changes_nothing(home: Path, monkeypatch: pytest.
 def test_agents_load_the_installed_items_from_the_database(
     home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from loopx.agents.library import SKILLS_PLUGIN, load_installed
+    from looper.agents.library import SKILLS_PLUGIN, load_installed
 
     async def _test(pool: Any) -> None:
         _, view = await _call("POST", "/api/catalog/import")

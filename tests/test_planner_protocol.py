@@ -7,7 +7,7 @@ from typing import Any
 
 import pytest
 
-from loopx.agents.tiers.planner_protocol import (
+from looper.agents.tiers.planner_protocol import (
     MAX_STEPS,
     Decision,
     DecisionContext,
@@ -240,7 +240,7 @@ class TestSupervise:
 
 def test_contract_examples_parse() -> None:
     """The JSON examples the contract shows Claude are valid replies themselves."""
-    from loopx.agents.tiers.planner_protocol import REPLY_CONTRACT
+    from looper.agents.tiers.planner_protocol import REPLY_CONTRACT
 
     examples = [json.loads(line) for line in REPLY_CONTRACT.splitlines() if line.startswith("{")]
     assert len(examples) == 4

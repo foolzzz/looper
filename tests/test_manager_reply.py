@@ -17,11 +17,11 @@ from agent_fixtures import agent_json
 
 from fake_claude import fake_claude
 from library_fixtures import ALPHA_SKILL, DEMO_PLUGIN, plugin_dirs
-from loopx.agents.agent_settings import DEFAULT_HARNESS_PROMPT
-from loopx.agents.bus import MessageBus
-from loopx.agents.claude_cli import ISOLATION_ID, isolation_args
-from loopx.agents.message import MANAGER_ADDRESS, MessageEnvelope, MessageType, channel_address
-from loopx.agents.tiers.manager import TASK_PLACEMENT_RULE, ManagerAgent, ManagerConfig
+from looper.agents.agent_settings import DEFAULT_HARNESS_PROMPT
+from looper.agents.bus import MessageBus
+from looper.agents.claude_cli import ISOLATION_ID, isolation_args
+from looper.agents.message import MANAGER_ADDRESS, MessageEnvelope, MessageType, channel_address
+from looper.agents.tiers.manager import TASK_PLACEMENT_RULE, ManagerAgent, ManagerConfig
 
 WEB = channel_address("web")
 
@@ -130,7 +130,7 @@ class TestManagerReply:
         assert asked["text"] == "hi"
 
     def test_read_failure_is_reported_and_claude_is_killed(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        from loopx.agents import claude_cli
+        from looper.agents import claude_cli
 
         async def _broken_lines(stream: Any) -> Any:
             yield await stream.readline()
@@ -259,7 +259,7 @@ def _converse(
     it belongs to. The saved session is kept in memory in place of ``agent_sessions``; the returned
     ``saved_session``, ``saved_totals`` and ``saved_runtime`` are what the Manager saved last.
     """
-    from loopx.db import agent_configs, agent_sessions, agent_setting_layers
+    from looper.db import agent_configs, agent_sessions, agent_setting_layers
 
     sessions: dict[str, dict[str, Any]] = {}
     if saved_session is not None:  # a session saved by an earlier run of the server
@@ -350,7 +350,7 @@ def _flag(argv: list[str], name: str) -> str | None:
 
 def _assert_unrestricted(argv: list[str]) -> None:
     """The shared permission flags, once, and nothing that narrows the tools or the permissions again."""
-    from loopx.agents.claude_cli import permission_args
+    from looper.agents.claude_cli import permission_args
 
     flags = permission_args()
     assert any(argv[i:i + len(flags)] == flags for i in range(len(argv)))
@@ -495,7 +495,7 @@ class TestManagerResidentClaude:
     def test_stop_ends_and_reaps_claude(
         self, monkeypatch: pytest.MonkeyPatch, ignore_eof: bool, returncode: int,
     ) -> None:
-        from loopx.agents import claude_cli
+        from looper.agents import claude_cli
 
         if ignore_eof:  # it is killed only once the grace period is over: keep that short
             monkeypatch.setattr(claude_cli, "STOP_GRACE_SEC", 0.05)
@@ -783,7 +783,7 @@ class TestManagerAutonomousTurns:
         assert (own.target, own.correlation_id, own.metadata["origin_channel_id"]) == (WEB, "corr-0", WEB.agent_id)
         assert chat["replies"].index(own) < [r.reply_to for r in chat["replies"]].index(second.message_id)
         # Three runs, each with its own input, output and cost.
-        from loopx.agents.claude_cli import AUTONOMOUS_INPUT
+        from looper.agents.claude_cli import AUTONOMOUS_INPUT
 
         runs = {run["input_text"]: run for run in chat["runs"]}
         assert set(runs) == {"start a background agent", "7*6?", AUTONOMOUS_INPUT}

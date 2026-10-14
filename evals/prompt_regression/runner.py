@@ -3,7 +3,7 @@
 Each run gets a new PostgreSQL database (created on the given server and
 dropped afterwards), a free port, and a temporary runtime root and working
 directories. The server is the same entry point ``loopx serve`` runs
-(``loopx.agents.serve.serve_agent``); ``claude`` on its PATH is either the
+(``looper.agents.serve.serve_agent``); ``claude`` on its PATH is either the
 scripted stand-in (fake mode) or a wrapper that adds ``--max-budget-usd`` to
 every real Claude Code run (real mode). Tasks go through the HTTP API one at
 a time; the run stops at the total spending cap.
@@ -48,7 +48,7 @@ SCHEMA = "loopx-prompt-eval/v1"
 _SERVE = (
     "import sys\n"
     "from pathlib import Path\n"
-    "from loopx.agents.serve import serve_agent\n"
+    "from looper.agents.serve import serve_agent\n"
     "serve_agent(host='127.0.0.1', port=int(sys.argv[1]), runtime_root=Path(sys.argv[2]), work_dir=Path(sys.argv[3]))\n"
 )
 

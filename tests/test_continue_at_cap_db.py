@@ -18,9 +18,9 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from loopx.agents.http_server import AgentHTTPServer
-from loopx.agents.message import TASK_ROUTER_ADDRESS, MessageEnvelope, MessageType, channel_address, planner_address
-from loopx.agents.tiers.task import Task, TaskRouter
+from looper.agents.http_server import AgentHTTPServer
+from looper.agents.message import TASK_ROUTER_ADDRESS, MessageEnvelope, MessageType, channel_address, planner_address
+from looper.agents.tiers.task import Task, TaskRouter
 from tests.test_usage_api_db import DSN, _run, _run_record, _Writer
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPX_TEST_DATABASE_URL is not set")
@@ -30,7 +30,7 @@ CAP_REASON = "任务失败:\nTask spend cap reached: $0.5 spent of the $0.4 cap 
 
 async def _failed_task(pool: Any, router: TaskRouter, fail_kind: str | None) -> str:
     """A task of a project capped at $0.4 that spent $0.5 over two steps, failed as its Planner reports."""
-    from loopx.db import plans, projects, tasks
+    from looper.db import plans, projects, tasks
 
     project = await projects.create_project(name="calc", execution={"task_budget_usd": 0.4}, pool=pool)
     await tasks.create_task(task_id="task-a", requirement="build calc", project_id=project["id"],
@@ -69,7 +69,7 @@ def _setup() -> tuple[AgentHTTPServer, TaskRouter, list[MessageEnvelope]]:
 def test_a_task_that_failed_at_its_cap_continues_from_its_plan_with_a_higher_cap(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from loopx.db import projects, steps, tasks
+    from looper.db import projects, steps, tasks
 
     async def test(pool: Any) -> None:
         server, router, published = _setup()
@@ -112,7 +112,7 @@ def test_a_task_that_failed_at_its_cap_continues_from_its_plan_with_a_higher_cap
 def test_continuing_is_refused_unless_the_task_failed_at_its_cap_and_the_cap_is_above_its_spend(
     monkeypatch: pytest.MonkeyPatch, fail_kind: str | None, body: dict[str, Any], error: str,
 ) -> None:
-    from loopx.db import projects
+    from looper.db import projects
 
     async def test(pool: Any) -> None:
         server, router, published = _setup()

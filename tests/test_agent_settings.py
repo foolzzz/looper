@@ -18,9 +18,9 @@ from typing import Any
 
 import pytest
 
-from loopx.agents import agent_settings
-from loopx.agents.agent_registry import BUILTIN_AGENT, BUILTIN_PROVIDER, BUILTIN_RUNTIME, AgentSpec
-from loopx.agents.agent_settings import (
+from looper.agents import agent_settings
+from looper.agents.agent_registry import BUILTIN_AGENT, BUILTIN_PROVIDER, BUILTIN_RUNTIME, AgentSpec
+from looper.agents.agent_settings import (
     BUILTIN_SETTINGS,
     DEFAULT_HARNESS_PROMPT,
     AgentType,
@@ -31,8 +31,8 @@ from loopx.agents.agent_settings import (
     index_layers,
     resolve,
 )
-from loopx.agents.http_server import AgentHTTPServer
-from loopx.agents.tiers.task import TaskRouter
+from looper.agents.http_server import AgentHTTPServer
+from looper.agents.tiers.task import TaskRouter
 
 ORDER = (Layer.SYSTEM, Layer.ROLE, Layer.PROJECT, Layer.ROLE_PROJECT)
 TASK_ROLES = ("planner", "worker", "reviewer")
@@ -231,12 +231,12 @@ class TestRecord:
                                               "run_budget_usd": "project"}
         assert record["max_budget_usd"] == 0.5
         assert settings.harness.record() == {"source": "role_project", "sha256": _sha("H"), "project_id": "proj-a"}
-        from loopx.agents.claude_cli import permission_args
+        from looper.agents.claude_cli import permission_args
         assert launch.args() == [*permission_args(), "--model", "sonnet", "--effort", "high",
                                  "--max-budget-usd", "0.5"]
 
     def test_the_builtin_launch(self) -> None:
-        from loopx.agents.claude_cli import permission_args
+        from looper.agents.claude_cli import permission_args
 
         assert Launch().args() == [*permission_args(), "--model", "opus"]
         assert Launch().record() == {
@@ -261,7 +261,7 @@ class TestStoredRows:
         assert LayerValues.from_row({**row, "scope": "system"}).env == ()
 
     def test_unreadable_layers_give_the_builtin_settings_with_the_reason(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        from loopx.db import agent_setting_layers
+        from looper.db import agent_setting_layers
 
         async def _down(*_: Any, **__: Any) -> list[dict[str, Any]]:
             raise ConnectionError("database is down")
@@ -331,7 +331,7 @@ class _Layers:
 
 @pytest.fixture
 def layers(monkeypatch: pytest.MonkeyPatch) -> _Layers:
-    from loopx.db import agent_registry, agent_setting_layers, projects
+    from looper.db import agent_registry, agent_setting_layers, projects
 
     table = _Layers()
     monkeypatch.setattr(agent_setting_layers, "list_layers", table.list_layers)
@@ -461,7 +461,7 @@ class TestSettingsApi:
 class TestMovedFields:
     @pytest.mark.parametrize("field", ["harness_prompt", "model"])
     def test_an_agent_config_refuses_its_old_settings(self, monkeypatch: pytest.MonkeyPatch, field: str) -> None:
-        from loopx.db import agent_configs
+        from looper.db import agent_configs
 
         updates: list[Any] = []
 

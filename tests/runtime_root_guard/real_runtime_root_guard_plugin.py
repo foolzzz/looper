@@ -48,7 +48,7 @@ def session_roots() -> list[str]:
 
     if str(SOURCE_ROOT) not in sys.path:
         sys.path.insert(0, str(SOURCE_ROOT))
-    from loopx.paths import configured_runtime_root, home_runtime_root
+    from looper.paths import configured_runtime_root, home_runtime_root
 
     homes = [Path.home()]
     try:
