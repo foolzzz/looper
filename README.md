@@ -248,8 +248,8 @@ uv run loopx serve
 ## Releases
 
 Each release's changes are in [CHANGELOG.md](CHANGELOG.md). Maintainers
-prepare a release with the checklist in
-[docs/product/release-readiness.md](docs/product/release-readiness.md).
+publish a release with the procedure in
+[docs/releases/README.md](docs/releases/README.md).
 
 ## License
 
