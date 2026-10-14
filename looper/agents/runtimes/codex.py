@@ -61,14 +61,16 @@ from typing import TYPE_CHECKING, Any, ClassVar
 
 from ..run_usage import Usage, reported_totals, run_usage
 from . import (
-    ApiProtocol, AuthKind, Capability, CostSource, Probe, ProviderBinding, RunCost, RuntimeAdapter, RuntimeUnsupported,
+    ApiProtocol, AuthKind, Capability, Probe, ProviderBinding, RunCost, RuntimeAdapter, RuntimeUnsupported,
 )
+from .pricing import usage_event
 
 if TYPE_CHECKING:
     from ..agent_registry import ProviderSpec
     from ..agent_settings import Launch
-    from ..claude_cli import ResidentTurn
+    from ..claude_cli import CapStop, ResidentTurn
     from ..library import AgentLibrary
+    from ..run_usage import Price
 
 logger = logging.getLogger(__name__)
 
@@ -126,18 +128,17 @@ class CodexRuntime(RuntimeAdapter):
         return []
 
     def bind_provider(self, provider: ProviderSpec, model: str, effort: str) -> ProviderBinding:
-        """The model and the effort as flags, and the provider's key in ``KEY_ENV``; the provider's endpoint is
-        in the generated config (``config_toml``)."""
+        """The model and the effort as flags; the provider's own variables, then its key in ``KEY_ENV`` (Codex
+        sends it as a bearer token). The provider's endpoint is in the generated config (``config_toml``)."""
         if provider.auth is not AuthKind.API_KEY:
             raise RuntimeUnsupported(f"Codex runs with an API key provider only; provider {provider.name!r} is not one")
         if ApiProtocol.OPENAI_RESPONSES not in provider.protocols:
             raise RuntimeUnsupported(f"Codex speaks openai-responses; provider {provider.name!r} does not serve it")
-        key = getattr(provider, "api_key", None)
-        if not key:
+        if not provider.api_key:
             raise RuntimeUnsupported(f"provider {provider.name!r} has no API key: set one in Settings")
         return ProviderBinding(
             args=("-m", model, *(("-c", f"model_reasoning_effort={_toml_value(effort)}") if effort else ())),
-            env=((KEY_ENV, key),),
+            env=(*provider.env, (KEY_ENV, provider.api_key)),
         )
 
     def launch_args(self, launch: Launch) -> list[str]:
@@ -152,10 +153,11 @@ class CodexRuntime(RuntimeAdapter):
         ]
 
     def environment(self, launch: Launch) -> dict[str, str]:
-        """The server's environment, the settings' variables, the provider's own variables and its key."""
-        provider = launch.agent.provider
-        binding = self.bind_provider(provider, launch.model, launch.effort)
-        return {**os.environ, **dict(launch.env), **dict(getattr(provider, "env", ())), **dict(binding.env)}
+        """The server's environment, then the settings' variables and the provider's binding (its own variables
+        and its key)."""
+        binding = self.bind_provider(launch.agent.provider, launch.model, launch.effort)
+        return {**{k: v for k, v in os.environ.items() if k not in binding.unset}, **dict(launch.env),
+                **dict(binding.env)}
 
     def _command(self, executable: str, prompt_file: Path, launch: Launch) -> list[str]:
         home = write_home(_local_dir(prompt_file), config_toml(launch), agents_md(prompt_file, launch))
@@ -204,12 +206,15 @@ class CodexRuntime(RuntimeAdapter):
         return f"Tool: {tool_name}"
 
     def cost(self, usage: Usage, provider: ProviderSpec) -> RunCost:
-        """Codex reports tokens only: the cost is theirs at the provider's prices, when it has any."""
-        return provider_price_cost(usage, provider)
+        """Codex reports tokens only: the run's ``usage`` as priced from its ``modelUsage`` at the provider's prices
+        (``cost_source``, ``Launch.price``)."""
+        return RunCost(usage, self.cost_source(provider))
 
     def budget_error(self, result_event: dict[str, Any] | None) -> str | None:
-        """Codex has no spend cap of its own."""
-        return None
+        """Why Looper stopped the run at its per-run soft cap; Codex has no spend cap of its own."""
+        from .. import claude_cli
+
+        return claude_cli.budget_error(result_event) if (result_event or {}).get(claude_cli.SOFT_CAP) else None
 
     def launch_record(self, launch: Launch) -> dict[str, Any]:
         """The skills given as documents and what Codex could not load, when there are any (RFC P9)."""
@@ -220,20 +225,6 @@ class CodexRuntime(RuntimeAdapter):
         return {"runtime_catalog": {"runtime": self.type,
                                     "skills_as_documents": [skill.name for skill in catalog.skills],
                                     "skipped": skipped}}
-
-
-def usage_event(model: str | None, usage: Usage, **extra: Any) -> dict[str, Any]:
-    """The internal event for the tokens of one turn (never running totals), which the per-run spend cap counts."""
-    tokens = {name: value for name, value in usage.to_dict().items() if name != "cost_usd"}
-    return {"type": "usage", "model": model, "usage": tokens, **extra}
-
-
-def provider_price_cost(usage: Usage, provider: ProviderSpec) -> RunCost:
-    """``usage`` at ``provider``'s prices; the tokens alone while no price is known.
-
-    The provider's model catalog holds the prices; until the launch carries them, a Codex run records its tokens
-    and no cost."""
-    return RunCost(usage, CostSource.PROVIDER_PRICE)
 
 
 # --- What a run's home holds ---
@@ -695,6 +686,7 @@ class ResidentCodex:
         self._process: asyncio.subprocess.Process | None = None  # the turn running now, if any
         self._ended = False  # the last turn ended without a result: the owner starts over
         self._totals = Usage()
+        self._price: Price | None = None  # prices the totals at the provider's prices
 
     @property
     def label(self) -> str:
@@ -723,8 +715,10 @@ class ResidentCodex:
     async def start(
         self, command: list[str], *, cwd: str, signature: Any, env: dict[str, str] | None = None,
         totals: Usage | None = None, autonomous: Callable[[Any], Awaitable[Any]] | None = None,
+        price: Price | None = None,
     ) -> None:
-        """Keep the command for the turns; raises ``OSError`` when its executable cannot be found."""
+        """Keep the command for the turns; raises ``OSError`` when its executable cannot be found. ``price``
+        prices the session's totals at the provider's prices (``Launch.price``)."""
         if len(command) < 4 or command[0] != "env" or not command[1].startswith("CODEX_HOME="):
             raise ValueError("a resident Codex command starts with env CODEX_HOME=<home> <codex> exec")
         executable = command[2]
@@ -735,7 +729,7 @@ class ResidentCodex:
             base, thread = base[:-2], base[-1]
         self._command, self._signature, self._cwd, self._env = list(command), signature, cwd, env
         self._base, self._thread, self._ended = base, thread, False
-        self._totals = totals or Usage()
+        self._totals, self._price = totals or Usage(), price
 
     def _turn_command(self) -> tuple[list[str], Path]:
         source = Path(self._base[1].partition("=")[2])
@@ -746,9 +740,16 @@ class ResidentCodex:
 
     async def run_turn(
         self, text: str, on_event: Callable[[dict[str, Any]], Awaitable[None]], *, tag: Any = None,
+        stop: Callable[[], CapStop | None] | None = None,
     ) -> ResidentTurn:
         """Run ``text`` as one turn and hand each of its events to ``on_event``. A turn given up (an exception,
-        cancellation included) kills its process before it propagates."""
+        cancellation included) kills its process before it propagates.
+
+        ``stop`` is asked after each event whether the turn went over its soft
+        cap (``ClaudeRunRecorder.cap_stop``). Codex reports a turn's tokens
+        only as it ends, so that is where a turn stops: with the cap's result,
+        its process killed, the session's totals moved on by what it spent.
+        """
         from ..claude_cli import ResidentTurn
 
         assert self.started
@@ -765,6 +766,7 @@ class ResidentCodex:
         stream = CodexStream(model=base[base.index("-m") + 1] if "-m" in base else None, before=self._totals)
         result: dict[str, Any] | None = None
         session_started = False
+        capped: CapStop | None = None
         try:
             assert process.stdin is not None and process.stdout is not None
             try:
@@ -778,6 +780,9 @@ class ResidentCodex:
                     session_started = True
                     self._thread = stream.session_id or self._thread
                 await on_event(event)
+                if stop is not None and (capped := stop()) is not None:
+                    process.kill()
+                    break
                 if event.get("type") == "result":
                     result = event
             await process.wait()
@@ -790,6 +795,9 @@ class ResidentCodex:
             raise
         self._process = None
         errors = await stderr
+        if capped is not None:
+            self._totals = self._totals.plus(capped.usage)
+            return ResidentTurn(capped.result_event, session_started=session_started, usage=capped.usage)
         if result is None:
             self._ended = True
             logger.warning("%s: the Codex turn ended without a result (exit code %s): %s", self._label,
@@ -799,9 +807,9 @@ class ResidentCodex:
 
     def turn_usage(self, result_event: dict[str, Any] | None) -> Usage:
         """A turn's own tokens: its result's running totals less the previous ones."""
-        own = run_usage(result_event, before=self._totals)
+        own = run_usage(result_event, before=self._totals, price=self._price)
         if result_event is not None:
-            self._totals = self._totals.updated(reported_totals(result_event))
+            self._totals = self._totals.updated(reported_totals(result_event, self._price))
         return own
 
     async def stop(self, *, kill: bool = False) -> None:

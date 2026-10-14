@@ -824,3 +824,50 @@ class TestManagerProjectSkills:
         assert "Project knowledge" not in chat["prompts"][0]
         agent_db.list_documents.assert_not_awaited()
         assert agent_db.start_record.await_args.kwargs["metadata"]["prompt_layers"]["project"] is None
+
+
+def _codex_agent(executable: str) -> dict[str, Any]:
+    """An agent on Codex with an API key provider, as the database gives it."""
+    return {
+        **agent_json("gpt-5.5"), "id": "agent-codex", "name": "codex/gpt-5.5",
+        "runtime_id": "rt-codex", "runtime_name": "codex", "runtime_type": "codex", "runtime_executable": executable,
+        "runtime_capabilities": ["add_dirs", "mcp", "resident_session", "resume", "run", "structured_output"],
+        "provider_id": "prov-cpa", "provider_name": "cpa", "provider_auth": "api_key",
+        "provider_protocols": ["openai-responses"], "provider_oauth_runtime_type": None,
+        "provider_base_url": "http://127.0.0.1:8317/v1", "provider_models": [],
+    }
+
+
+# A stand-in codex: one turn per process, a new thread unless resumed, answering "codex <thread>: <message>".
+_CODEX = (
+    "import json, os, sys\n"
+    "args = sys.argv[1:]\n"
+    "message = sys.stdin.read().rpartition('\\n\\n')[2]\n"
+    "thread = args[args.index('resume') + 1] if 'resume' in args else 'thread-1'\n"
+    "for event in ({'type': 'thread.started', 'thread_id': thread}, {'type': 'turn.started'},\n"
+    "              {'type': 'item.completed', 'item': {'id': 'i0', 'type': 'agent_message', 'text': f'codex {thread}: {message}'}},\n"
+    "              {'type': 'turn.completed', 'usage': {'input_tokens': 10, 'cached_input_tokens': 0, 'output_tokens': 1}}):\n"
+    "    print(json.dumps(event), flush=True)\n"
+)
+
+
+@pytest.mark.usefixtures("agent_db")
+def test_the_manager_moves_to_codex_after_a_handoff_and_resumes_it_turn_by_turn(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    from unittest.mock import AsyncMock
+
+    from looper.db import agent_registry as db_registry
+
+    monkeypatch.setattr(db_registry, "get_api_key", AsyncMock(return_value="sk-test-manager-codex"))
+    codex = fake_claude(tmp_path / "codex", _CODEX)
+    on_codex = [_manager(agent=_codex_agent(codex))]
+    chat = _converse(monkeypatch, _resident(), ["hello", "again", "third"], layers=[[], on_codex, on_codex])
+    # Claude Code answers first; it writes the handoff before the Manager moves to Codex, which then resumes its
+    # own session on the next message, one process per turn.
+    assert chat["replies"][0] == "turn 1: hello"
+    assert chat["replies"][1:] == ["codex thread-1: again", "codex thread-1: third"]
+    claude, *codex_turns = [argv for argv, _ in chat["spawned"]]
+    assert [a[a.index("resume") + 1] if "resume" in a else None for a in codex_turns] == [None, "thread-1"]
+    assert all(a[0].startswith("CODEX_HOME=") and a[1] == codex and a[2] == "exec" for a in codex_turns)
+    assert (chat["saved_session"], chat["saved_runtime"]) == ("thread-1", "codex")

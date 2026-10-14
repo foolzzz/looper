@@ -15,7 +15,6 @@ import os
 import stat
 import time
 import tomllib
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -37,18 +36,11 @@ CODEX: CodexRuntime = adapter("codex")  # type: ignore[assignment]
 KEY = "sk-test-codex-0123456789"
 
 
-@dataclass(frozen=True)
-class _KeyedProvider(ProviderSpec):
-    """A provider with its key, as a launch reads it."""
-
-    api_key: str | None = None
-
-
 def _provider(**fields: Any) -> ProviderSpec:
     values: dict[str, Any] = {"id": "prov-cpa", "name": "cpa", "auth": AuthKind.API_KEY,
                               "protocols": frozenset({ApiProtocol.OPENAI_RESPONSES}),
                               "base_url": "http://127.0.0.1:8317/v1", "api_key": KEY}
-    return _KeyedProvider(**{**values, **fields})
+    return ProviderSpec(**{**values, **fields})
 
 
 def _launch(*, executable: str = "codex", library: AgentLibrary | None = None,
@@ -457,3 +449,44 @@ def test_its_capabilities_cover_every_role() -> None:
 
     assert all(needs <= CODEX.capabilities for needs in ROLE_CAPABILITIES.values())
     assert os.environ.get(KEY_ENV) is None
+
+
+def test_a_resident_turn_is_priced_and_stops_at_the_soft_cap_once_it_ends(tmp_path: Path) -> None:
+    from looper.agents.claude_cli import CapStop, soft_cap_result
+    from looper.agents.runtimes.pricing import RunSpend, pricer
+
+    root = tmp_path / "runtime"
+    codex = fake_claude(tmp_path / "codex", _FAKE_CODEX)
+    provider = _provider()
+    # gpt-5.5 at the built-in prices: each turn's 60 uncached, 40 cached input and 10 output tokens.
+    turn_cost = (60 * 5.00 + 40 * 0.50 + 10 * 30.00) / 1_000_000
+
+    async def _run() -> tuple[Any, Any, Usage, list[str]]:
+        session = CODEX.resident_session("planner-task-2")
+        await session.start(_resident_command(root, codex, "prompt"), cwd=str(tmp_path), signature="s",
+                            env=_launch().environment(), price=pricer(provider))
+        kinds: list[str] = []
+        spend = RunSpend(provider, "gpt-5.5", cap=turn_cost / 2)  # the second turn's record, capped below a turn
+
+        async def on_event(event: dict[str, Any]) -> None:
+            kinds.append(event["type"])
+            spend.add(event)
+
+        def stop() -> CapStop | None:
+            if not spend.exceeded:
+                return None
+            return CapStop(soft_cap_result(spend.usage.cost_usd or 0.0, spend.cap or 0.0), spend.usage)
+
+        first = await session.run_turn("one", lambda event: asyncio.sleep(0))
+        second = await session.run_turn("two", on_event, stop=stop)
+        return first, second, session.totals, kinds
+
+    first, second, totals, kinds = asyncio.run(_run())
+    assert first.result_event["subtype"] == "success" and first.usage.cost_usd == pytest.approx(turn_cost)
+    # A turn's tokens arrive as its usage event, right before its result: over the cap there, the turn ends there.
+    assert kinds == ["system", "assistant", "usage"]
+    assert CODEX.budget_error(second.result_event) == (
+        f"Looper stopped the run at its per-run spend cap: {second.result_event['errors'][0]}")
+    assert second.usage.cost_usd == pytest.approx(turn_cost) and CODEX.budget_error(first.result_event) is None
+    # The session's totals carry the capped turn too, so the next one counts only its own.
+    assert (totals.output_tokens, totals.cost_usd) == (20, pytest.approx(2 * turn_cost))

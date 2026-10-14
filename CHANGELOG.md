@@ -83,8 +83,8 @@ How the agent system works today is described in
   byte-identical to before.
 - **The Codex runtime.** Agents can run on Codex (`codex`, verified against
   Codex CLI 0.162.0) with an API key provider that serves
-  `openai-responses`, such as a local CLIProxyAPI; Codex's own login is not
-  used. Every role can run on it: a Worker or Reviewer is one
+  `openai-responses`, such as the `cpa` preset (a local CLIProxyAPI); Codex's
+  own login is not used. Every role can run on it: a Worker or Reviewer is one
   `codex exec --json` run, and the Manager and a Planner run one process
   per turn that resumes their session. Each run gets a `CODEX_HOME` of its
   own under `<runtime root>/.local/codex` holding only the `config.toml` and
@@ -95,11 +95,12 @@ How the agent system works today is described in
   servers are left out), skills are mounted read-only and listed for the
   agent to read, and a plugin's hooks, commands and agents are left out;
   what was left out is in the run's record. Codex reports tokens only, at
-  the end of a turn. A Codex Worker cannot be steered while it runs: the
+  the end of a turn: Looper prices them at the provider's prices, so the
+  per-run soft cap can stop a Codex run only once a turn ends. A Codex Worker cannot be steered while it runs: the
   Planner's message goes to the step's next decision instead. `looper
   serve` registers the built-in `codex` runtime when `codex` is on its
   PATH. The prompt eval takes `--register-agent SPEC.json` to run every
-  role on an agent it registers.
+  role on an agent it registers, and reports each task's tokens.
 - **Choosing the agent per layer and per task.** The layered settings select
   an agent in place of a model, in Settings, on the Agents page and in a
   project's Settings tab, and a new task can override the agent of its
