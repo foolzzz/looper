@@ -208,6 +208,21 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
   (a new plan, a replan, added steps, a settled step with the plan's summary)
   is one transaction. The project is not saved with it: it is read again
   before every event's turns.
+- Task memory (`loopx/agents/tiers/journal.py`): when a step is accepted,
+  code writes a `task_journal` entry (`step_accepted`) in the transaction that
+  settles it, with the Worker's summary and the `learnings` its Worker and
+  Reviewer reported; the model never writes one. Every `[DECISION]`,
+  `[SUPERVISE]` and `[CHAT]` turn carries "Progress and findings", the
+  entries newest first in at most 4,000 characters (the oldest left out and
+  counted), and the plan lines carry each accepted step's summary (200
+  characters). No entry, no section.
+- With the project's `distill_lessons` on, a task that completes gets one
+  more turn, `[LESSONS]`, before its final status: the Planner turns the
+  journal into a Markdown document of at most 4,000 characters (the shape is
+  in that turn's message, not in `REPLY_CONTRACT`), and code saves it as a
+  `text` knowledge document titled `Lessons: <requirement>`. A failed turn or
+  a refused document is a warning in the activity; the task stays completed.
+  Off (the default), nothing is written.
 - After a server restart (`TASK_RESUME`), a new Planner reads its plan and
   session back and carries on without planning again: a step whose Worker was
   running runs again as the same attempt with its feedback, a step in review
@@ -253,15 +268,17 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
     criteria, validation commands and, on a retry, the attempt number and the
     feedback on the previous attempts. A Reviewer's has the requirement, then
     the reviewed step's instruction and acceptance criteria;
-  - first user turn: for a Worker, a short start cue and what the steps it
+  - first user turn: for a Worker, a short start cue, what the steps it
     depends on reported (summary and changed files, from `WORK_ITEM`
-    `dependencies`); for a Reviewer, the Worker's report (summary, changed
+    `dependencies`) and "Findings so far in this task" (`WORK_ITEM`
+    `findings`: the task journal, its dependencies' entries first and then
+    the rest newest first, in at most 2,000 characters); for a Reviewer, the Worker's report (summary, changed
     and deleted files) as data to check, never in the system prompt;
   - messages sent mid-run (forwarded chat, Planner steering) stay user turns
     and do not restate the contract.
 - `WORK_ITEM` carries the step's fields apart: `requirement`, `step_key`,
   `instruction` (the step's own, without feedback), `feedback` (a list) and
-  `attempt`, `dependencies`; `VERIFY_REQUEST` adds `requirement` and
+  `attempt`, `dependencies`, `findings`; `VERIFY_REQUEST` adds `requirement` and
   `step_key`.
 - Each run is one `llm_records` row with `metadata.command` (the exact
   argv), the system prompt's record (`system_prompt`, `system_prompt_sha256`,
@@ -277,12 +294,16 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
   step with the reason in `error`:
   - the run's `result` event has `subtype: success`, so hitting max turns fails;
   - the final message ends with the JSON report
-    `{status, changed_files, deleted_files, summary}`, with `status` set to
-    `completed`;
+    `{status, changed_files, deleted_files, summary, learnings}`, with `status`
+    set to `completed`;
   - every file in `changed_files` exists, and every file in `deleted_files` is
     gone.
 - A reviewer must return a boolean `passed`; prose without the verdict is not a
   pass.
+- `learnings` is optional in both the report and the verdict: up to 5 short
+  findings or pitfalls for later steps. Code keeps the first 5 non-empty
+  strings, each clipped to 300 characters, and drops anything else; a bad
+  value never fails a step or a review.
 
 ### What an agent's Claude Code loads
 
@@ -603,7 +624,9 @@ and every new Worker or Reviewer: at the cap the running ones are stopped and
 the task fails, at once (`task_budget_action` `fail`, the default) or after one
 more Planner turn that sums up (`wrap_up`), with the cap and the amount in its
 error; `supervise_interval_seconds` over the `planner` config; and
-`review_policy` `all`, under which no step is accepted without a passing review.
+`review_policy` `all`, under which no step is accepted without a passing review;
+and `distill_lessons` `true`, which saves a lessons document to the project's
+knowledge when a task completes (see the Planner).
 
 ### The library: imported plugins and skills
 
@@ -883,6 +906,7 @@ PostgreSQL is a hard startup dependency. All data paths:
 | `task_steps` | A task's steps, each with everything its Planner decides with: `step_key` (label), `depends_on` (step ids), `review`, `acceptance_criteria`, `validation_commands`, `status`, `result`, `worker_id`, `reviewer_id`, `retries`, `feedback`, `missed_messages` |
 | `task_plans` | A task's plan, one row per task: `plan_id`, `status` (`planning`, `executing`, `verifying`, `stopping`, `completed`, `failed`), `correlation_id`, `origin_channel_id`, `final_summary`, `fail_reason`; replaced when the task is planned again |
 | `agent_sessions` | The Claude session each resident agent resumes: `manager` or `planner-<task_id>`, its `session_id` and `session_totals` |
+| `task_journal` | A task's journal, written by code: one `step_accepted` entry per accepted step with its `summary` and `learnings`; `GET /api/tasks/<id>` returns it as `journal` and the task page lists it as Findings |
 | `activity` | Execution trace events (SSE streaming to frontend) |
 | `chat_messages` | Chat conversation history |
 | `llm_records` | One row per Claude run: input and output text, status, the run's own `cost_usd`, `input_tokens`, `output_tokens`, `cache_read_tokens` and `cache_creation_tokens`, its final `context_tokens` and its `compactions`; `metadata` holds the exact argv (`command`), `cwd`, the appended `system_prompt`, its `system_prompt_sha256`, its `prompt_layers`, the `model_choice`, the Settings `env` names, the `library` items loaded and a task agent's `project_skills` |
