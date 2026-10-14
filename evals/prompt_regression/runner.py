@@ -29,6 +29,7 @@ import urllib.request
 import uuid
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -387,6 +388,7 @@ def run(
     out_dir: Path,
     model: str | None = None,
     agent: str | None = None,
+    provider: ProviderChoice | None = None,
     max_budget_usd: float | None = None,
     total_cap_usd: float | None = None,
     task_timeout: float | None = None,
@@ -394,11 +396,15 @@ def run(
 ) -> tuple[dict[str, Any], Path]:
     """Run ``tasks`` in ``mode`` (``fake`` or ``real``); returns the run and the JSON file written to ``out_dir``.
 
-    Every role runs ``agent`` (by name), else the Claude Code agent of ``model`` (``claude-code/<model>``,
-    registered for the run), else the built-in agent.
+    Every role runs ``agent`` (by name), else Claude Code with ``provider`` (registered for the run from a preset),
+    else the Claude Code agent of ``model`` (``claude-code/<model>``, registered for the run), else the built-in
+    agent. With a provider, Looper prices the runs at its prices, so ``max_budget_usd`` is the per-run cap
+    Looper keeps (the system layer's ``run_budget_usd``) instead of Claude Code's ``--max-budget-usd``.
     """
     if mode not in ("fake", "real"):
         raise EvalError(f"mode must be fake or real, not {mode!r}")
+    if provider is not None and not provider.api_key:
+        raise EvalError(f"a provider needs its API key in ${API_KEY_ENV}")
     real_claude = shutil.which("claude") if mode == "real" else None
     git = _git()  # what is being evaluated, before anything runs
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -412,8 +418,8 @@ def run(
         scenarios = root / "scenarios.json"
         work_dirs = {task.id: root / "work" / task.id for task in tasks}
         scenarios.write_text(json.dumps({os.path.realpath(work_dirs[t.id]): t.fake for t in tasks}), encoding="utf-8")
-        install_claude(root / "bin", mode=mode, scenarios=scenarios, max_budget_usd=max_budget_usd,
-                       real_claude=real_claude)
+        install_claude(root / "bin", mode=mode, scenarios=scenarios,
+                       max_budget_usd=None if provider is not None else max_budget_usd, real_claude=real_claude)
         (root / "runtime").mkdir()
         home = root / "home" if mode == "fake" else None
         if home is not None:
@@ -422,7 +428,7 @@ def run(
             database_url=database_url, runtime_root=root / "runtime", bin_dir=root / "bin", log_path=log_path,
             home=home,
         ) as api:
-            chosen = select_agent(api, agent=agent, model=model)
+            chosen = select_agent(api, agent=agent, model=model, provider=provider, run_budget_usd=max_budget_usd)
             results, stopped = run_suite(
                 tasks,
                 lambda task, cap_left: run_task(api, task, work_dirs[task.id], timeout=timeout, poll=poll,
@@ -438,6 +444,7 @@ def run(
         "mode": mode,
         "model": chosen["model"] if mode == "real" else None,
         "agent": chosen["name"],
+        "provider_preset": provider.preset if provider is not None else None,
         "started_at": stamp,
         "git": git,
         "caps": {"max_budget_usd": max_budget_usd, "total_cap_usd": total_cap_usd},
@@ -451,15 +458,57 @@ def run(
     return run_result, path
 
 
-def select_agent(api: Api, *, agent: str | None, model: str | None) -> dict[str, Any]:
-    """Make ``agent`` (a registered agent's name), else Claude Code with ``model``, every role's agent (the
-    system layer); returns it. Without either, every role keeps the built-in agent."""
+# The API key of a provider an eval registers (``--provider-preset``): read from the environment, never a file.
+API_KEY_ENV = "LOOPER_EVAL_API_KEY"
+
+
+@dataclass(frozen=True)
+class ProviderChoice:
+    """A provider an eval registers from a preset's Anthropic-format API, and the model its agent runs."""
+
+    preset: str
+    model: str | None = None  # None: the preset's first model
+    base_url: str | None = None  # None: the preset's (another, such as a logging proxy in front of it)
+    api_key: str | None = field(default=None, repr=False)
+
+
+def register_provider_agent(api: Api, choice: ProviderChoice) -> dict[str, Any]:
+    """Register ``choice``'s provider and a Claude Code agent of it; returns the agent."""
+    registry = api.get("/api/registry")
+    preset = next((p for p in registry["provider_presets"] if p["preset_id"] == choice.preset), None)
+    if preset is None:
+        raise EvalError(f"no provider preset {choice.preset!r}; the presets are "
+                        + ", ".join(p["preset_id"] for p in registry["provider_presets"]))
+    api_entry = next((a for a in preset["apis"] if "anthropic-messages" in a["protocols"]), None)
+    if api_entry is None:
+        raise EvalError(f"preset {choice.preset!r} has no Anthropic-format API for Claude Code")
+    provider = api.post("/api/providers", {
+        "name": preset["name"], "protocols": ["anthropic-messages"], "auth": "api_key", "api_key": choice.api_key,
+        "base_url": choice.base_url or api_entry["base_url"], "models": preset["models"], "env": preset["env"],
+    })["provider"]
+    model = choice.model or preset["models"][0]["name"]
+    answer = api.post("/api/agents", {"name": f"claude-code/{preset['name']}/{model}", "runtime_id": "rt-claude-code",
+                                      "provider_id": provider["provider_id"], "model": model})
+    for warning in answer.get("warnings") or []:
+        print(f"warning: {warning}", file=sys.stderr)
+    return answer["agent"]
+
+
+def select_agent(api: Api, *, agent: str | None, model: str | None, provider: ProviderChoice | None = None,
+                 run_budget_usd: float | None = None) -> dict[str, Any]:
+    """Make ``agent`` (a registered agent's name), else Claude Code with ``provider``, else Claude Code with
+    ``model``, every role's agent (the system layer); returns it. Without any, every role keeps the built-in
+    agent. With ``provider``, the system layer also caps each run at ``run_budget_usd``."""
     registry = api.get("/api/registry")
     agents = {a["name"]: a for a in registry["agents"]}
     if agent is not None:
         if agent not in agents:
             raise EvalError(f"no agent {agent!r} in the eval's database; it has {', '.join(sorted(agents))}")
         chosen = agents[agent]
+    elif provider is not None:
+        chosen = register_provider_agent(api, provider)
+        api.put("/api/agent-settings/system", {"agent": chosen["agent_id"], "run_budget_usd": run_budget_usd})
+        return chosen
     elif model:
         name = f"claude-code/{model}"
         chosen = agents.get(name) or api.post("/api/agents", {

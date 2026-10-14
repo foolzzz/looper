@@ -249,6 +249,10 @@ def task_metrics(
         "cost_by_role": {name: round(float((value or {}).get("cost_usd") or 0.0), 6)
                          for name, value in (cost.get("by_role") or {}).items()},
         "runs": int(cost.get("runs") or len(records)),
+        # How the runs were priced: by Claude Code for its own login (an equivalent), by Looper at the provider's
+        # prices, or not at all (tokens only).
+        "cost_basis": {name: int(cost.get(f"{name}_runs") or 0) for name in ("equivalent", "provider_price",
+                                                                            "unpriced")},
         "contract_violations": {**violations, "total": sum(violations.values())},
         "planner_edit_tool_paths": planner_edits,
         "planner_changed_files": changed_by_planner,
