@@ -81,7 +81,7 @@ class ConfigFileError(ValueError):
 
 
 class SchemaChangePending(RuntimeError):
-    """The database's schema is older than this LoopX; ``loopx serve`` backs it up, then changes it."""
+    """The database's schema is older than this LoopX; ``looper serve`` backs it up, then changes it."""
 
 
 class Action(str, Enum):
@@ -1166,7 +1166,7 @@ async def import_config(conn: Any, data: Mapping[str, Any], *, apply: bool) -> P
 
         if await schema_change_pending(conn):
             raise SchemaChangePending(
-                "the database schema is older than this LoopX; start `loopx serve` once (it backs the database up "
+                "the database schema is older than this LoopX; start `looper serve` once (it backs the database up "
                 "before changing the schema), then import again")
         await ensure_schema(conn)
     importer = _Importer(conn, await _Target.read(conn), apply)
@@ -1209,7 +1209,7 @@ async def import_config(conn: Any, data: Mapping[str, Any], *, apply: bool) -> P
 
 async def run_import(conn: Any, data: Mapping[str, Any], *, apply: bool) -> Plan:
     """Preview ``data`` in a read-only transaction, or apply it in one transaction, on ``conn``: what both
-    ``loopx config import`` and the dashboard's import run."""
+    ``looper config import`` and the dashboard's import run."""
     async with conn.transaction(readonly=not apply):
         return await import_config(conn, data, apply=apply)
 
@@ -1260,5 +1260,5 @@ def format_export(summary: ExportSummary, path: Path, *, include_secrets: bool) 
     lines = [f"Wrote {path} ({summary.bytes} bytes, {FORMAT}): {counts}; {secrets}."]
     if summary.repoint:
         lines.append(f"{summary.repoint} path document(s) are references to re-point on the new machine.")
-    lines.append(f"On the new machine: loopx config import {path.name} (preview), then add --apply.")
+    lines.append(f"On the new machine: looper config import {path.name} (preview), then add --apply.")
     return "\n".join(lines)

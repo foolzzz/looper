@@ -1,6 +1,6 @@
 """Every role starts its runtime exactly as before agents: the argv, the environment, the system prompt bytes.
 
-Runs only when LOOPX_TEST_DATABASE_URL points at a disposable database. Each
+Runs only when LOOPER_TEST_DATABASE_URL points at a disposable database. Each
 scenario works in a new schema of its own, dropped afterwards.
 
 ``fixtures/agent_launch_parity_main.json`` is what the code before agents
@@ -27,8 +27,8 @@ import pytest
 
 import agent_launch_parity as parity
 
-DSN = os.environ.get("LOOPX_TEST_DATABASE_URL")
-pytestmark = pytest.mark.skipif(not DSN, reason="LOOPX_TEST_DATABASE_URL is not set")
+DSN = os.environ.get("LOOPER_TEST_DATABASE_URL")
+pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
 MAIN = json.loads((Path(__file__).parent / "fixtures" / "agent_launch_parity_main.json").read_text("utf-8"))
 

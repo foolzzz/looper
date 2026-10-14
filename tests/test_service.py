@@ -1,4 +1,4 @@
-"""``loopx service``: the generated launchd and systemd units and how the commands drive the service manager.
+"""``looper service``: the generated launchd and systemd units and how the commands drive the service manager.
 
 The commands run through ``looper.cli.main`` against a stand-in launchd or
 systemd that keeps the state a real one would: a ``launchctl bootout`` returns
@@ -28,8 +28,8 @@ SHELL_ENV = {
     "PATH": "/opt/tools/bin:/usr/bin:/bin",
     "HOME": "/home/someone",
     "LANG": "en_US.UTF-8",
-    "LOOPX_DATABASE_URL": "postgresql://postgres:s3cret@127.0.0.1:54329/loopx",
-    "LOOPX_TELEGRAM_BOT_TOKEN": "123:abc",
+    "LOOPER_DATABASE_URL": "postgresql://postgres:s3cret@127.0.0.1:54329/loopx",
+    "LOOPER_TELEGRAM_BOT_TOKEN": "123:abc",
     "ANTHROPIC_API_KEY": "sk-test",
     "LARK_APP_ID": "cli_test",
     "HTTPS_PROXY": "http://proxy.example:3128",
@@ -39,7 +39,7 @@ SHELL_ENV = {
     "GITHUB_TOKEN": "ghp_unrelated",
 }
 CAPTURED = {name: SHELL_ENV[name] for name in (
-    "ANTHROPIC_API_KEY", "HTTPS_PROXY", "LANG", "LARK_APP_ID", "LOOPX_DATABASE_URL", "LOOPX_TELEGRAM_BOT_TOKEN", "PATH",
+    "ANTHROPIC_API_KEY", "HTTPS_PROXY", "LANG", "LARK_APP_ID", "LOOPER_DATABASE_URL", "LOOPER_TELEGRAM_BOT_TOKEN", "PATH",
 )}
 
 
@@ -206,7 +206,7 @@ def test_systemd_unit_runs_this_loopx_privately_with_the_captured_environment(
 ) -> None:
     fake = FakeSystemd()
     host = _host(tmp_path, checkout, fake, system="Linux")
-    host.environ = {**SHELL_ENV, "LOOPX_ODD": 'a "quoted" 100% $HOME\\path\nline2'}
+    host.environ = {**SHELL_ENV, "LOOPER_ODD": 'a "quoted" 100% $HOME\\path\nline2'}
     root = tmp_path / "run%time $root"
 
     assert _install(monkeypatch, host, root) == 0
@@ -224,7 +224,7 @@ def test_systemd_unit_runs_this_loopx_privately_with_the_captured_environment(
     environment = [service._systemd_words(line.removeprefix("Environment="))[0]
                    for line in lines if line.startswith("Environment=")]
     assert dict(item.split("=", 1) for item in environment) == {
-        **CAPTURED, "LOOPX_ODD": 'a "quoted" 100% $HOME\\path\nline2'}
+        **CAPTURED, "LOOPER_ODD": 'a "quoted" 100% $HOME\\path\nline2'}
     assert fake.commands()[:3] == ["daemon-reload", f"stop {LABEL}.service", f"enable --now {LABEL}.service"]
 
 

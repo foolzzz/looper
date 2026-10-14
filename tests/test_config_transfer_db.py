@@ -1,6 +1,6 @@
-"""Configuration export and import (``loopx config``) against a real PostgreSQL.
+"""Configuration export and import (``looper config``) against a real PostgreSQL.
 
-Runs only when LOOPX_TEST_DATABASE_URL points at a disposable database. Each
+Runs only when LOOPER_TEST_DATABASE_URL points at a disposable database. Each
 test works in new schemas of its own (one per installation), dropped
 afterwards; the CLI reaches a schema through the URL's ``search_path``.
 """
@@ -21,7 +21,7 @@ import pytest
 
 from tests.test_catalog_db import DSN, _call, _Writer
 
-pytestmark = pytest.mark.skipif(not DSN, reason="LOOPX_TEST_DATABASE_URL is not set")
+pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
 SECRET = "sk-test-secret-0123456789"
 ROLES = ("manager", "planner", "worker", "reviewer")
@@ -60,7 +60,7 @@ async def _loopx(monkeypatch: pytest.MonkeyPatch, url: str, *argv: str) -> tuple
             code = cli.main(list(argv))
         return code, out.getvalue(), err.getvalue()
 
-    monkeypatch.setenv("LOOPX_DATABASE_URL", url)
+    monkeypatch.setenv("LOOPER_DATABASE_URL", url)
     return await asyncio.to_thread(run)
 
 
@@ -102,9 +102,9 @@ async def _populate(monkeypatch: pytest.MonkeyPatch, pool: Any, work_dir: Path) 
                                                     "provider_id": "prov-claude-subscription", "model": "haiku",
                                                     "effort": "low"}))["agent"]["agent_id"]
     await _ok("PUT", "/api/agent-settings/system", {"harness_prompt": "Be careful.", "agent": sonnet,
-                                                    "effort": "high", "env": [{"key": "LOOPX_MODE", "value": "a"}]})
+                                                    "effort": "high", "env": [{"key": "LOOPER_MODE", "value": "a"}]})
     await _ok("PUT", "/api/agent-settings/roles/worker", {"agent": "agent-claude-code-opus", "run_budget_usd": 2.5,
-                                                          "env": [{"key": "LOOPX_MODE", "value": None}]})
+                                                          "env": [{"key": "LOOPER_MODE", "value": None}]})
     await _ok("PUT", "/api/agent-configs/planner", {"system_prompt": "Plan in small steps.", "timeout_seconds": 900})
     await _ok("PUT", "/api/channel-configs/channel-telegram", {"enabled": True, "config": {
         "bot_token_env": "MY_TG_TOKEN", "allowed_user_ids": ["123456789"], "webhook_secret": SECRET}})
@@ -329,7 +329,7 @@ def test_a_preview_writes_nothing(monkeypatch: pytest.MonkeyPatch, tmp_path: Pat
 
 
 def test_an_import_leaves_a_schema_about_to_change_to_serve(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """Applying the newer schema drops columns; ``loopx serve`` backs the database up before it does."""
+    """Applying the newer schema drops columns; ``looper serve`` backs the database up before it does."""
     async def _test() -> None:
         async with _installation() as (_, source_url), _installation() as (target, target_url):
             exported = tmp_path / "config.json"
@@ -340,7 +340,7 @@ def test_an_import_leaves_a_schema_about_to_change_to_serve(monkeypatch: pytest.
 
             code, _, err = await _loopx(monkeypatch, target_url, "config", "import", str(exported), "--apply")
 
-            assert code == 1 and "start `loopx serve` once" in err, err
+            assert code == 1 and "start `looper serve` once" in err, err
             assert await _rows(target) == before
             assert await target.fetchval("SELECT sha256 FROM schema_fingerprint") == "an older schema.sql"
 

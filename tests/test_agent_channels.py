@@ -168,7 +168,7 @@ class TestServeChannelWiring:
     def test_telegram_keeps_reading_a_comma_separated_list(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # How the setting was stored before it became a list.
         from looper.agents.serve import _telegram_adapter_from_config
-        monkeypatch.setenv("LOOPX_TELEGRAM_BOT_TOKEN", "default-token")
+        monkeypatch.setenv("LOOPER_TELEGRAM_BOT_TOKEN", "default-token")
         adapter = _telegram_adapter_from_config({"allowed_user_ids": "7, 8"})
         assert adapter is not None
         assert adapter._bot_token == "default-token"
@@ -187,7 +187,7 @@ class TestServeChannelWiring:
     ) -> None:
         from looper.agents.serve import _telegram_adapter_from_config
         # The environment fallback no longer opens the channel either.
-        monkeypatch.setenv("LOOPX_TELEGRAM_ALLOWED_USERS", "7")
+        monkeypatch.setenv("LOOPER_TELEGRAM_ALLOWED_USERS", "7")
         with caplog.at_level("ERROR"):
             assert _telegram_adapter_from_config(config) is None
         assert "channel-telegram not started" in caplog.text and problem in caplog.text

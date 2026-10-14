@@ -4,7 +4,7 @@ The Planner saves its plan row by row and a Planner started later reads it
 back; the Manager's and the Planner's sessions live in ``agent_sessions``;
 the server resumes the tasks it left running with a live plan; and the plan
 and session files kept before are imported once. Runs only when
-LOOPX_TEST_DATABASE_URL points at a disposable database.
+LOOPER_TEST_DATABASE_URL points at a disposable database.
 """
 
 from __future__ import annotations
@@ -19,7 +19,7 @@ from looper.agents.run_usage import Usage
 from looper.agents.tiers.planner import PlannerAgent, PlanStep, TaskPlan
 from tests.test_usage_api_db import DSN, _run
 
-pytestmark = pytest.mark.skipif(not DSN, reason="LOOPX_TEST_DATABASE_URL is not set")
+pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
 
 async def _task(pool: Any, task_id: str = "task-a", *, status: str = "running") -> str:

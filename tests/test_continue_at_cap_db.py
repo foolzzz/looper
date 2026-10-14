@@ -3,7 +3,7 @@
 ``POST /api/tasks/<id>/continue`` takes the new cap per task. It is taken
 only for a task that failed at its cap and only above what the task has
 spent; then the project's cap is raised and the task restarts from its saved
-plan, its steps kept. Runs only when LOOPX_TEST_DATABASE_URL points at a
+plan, its steps kept. Runs only when LOOPER_TEST_DATABASE_URL points at a
 disposable database.
 """
 
@@ -23,7 +23,7 @@ from looper.agents.message import TASK_ROUTER_ADDRESS, MessageEnvelope, MessageT
 from looper.agents.tiers.task import Task, TaskRouter
 from tests.test_usage_api_db import DSN, _run, _run_record, _Writer
 
-pytestmark = pytest.mark.skipif(not DSN, reason="LOOPX_TEST_DATABASE_URL is not set")
+pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
 CAP_REASON = "任务失败:\nTask spend cap reached: $0.5 spent of the $0.4 cap (task_budget_usd)"
 

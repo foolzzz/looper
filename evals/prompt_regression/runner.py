@@ -1,8 +1,8 @@
-"""Run the task set through a disposable ``loopx serve`` and read the results back.
+"""Run the task set through a disposable ``looper serve`` and read the results back.
 
 Each run gets a new PostgreSQL database (created on the given server and
 dropped afterwards), a free port, and a temporary runtime root and working
-directories. The server is the same entry point ``loopx serve`` runs
+directories. The server is the same entry point ``looper serve`` runs
 (``looper.agents.serve.serve_agent``); ``claude`` on its PATH is either the
 scripted stand-in (fake mode) or a wrapper that adds ``--max-budget-usd`` to
 every real Claude Code run (real mode). Tasks go through the HTTP API one at
@@ -44,7 +44,7 @@ RESERVED_PORT = 8767  # the operator's own server
 RESERVED_DATABASE = "loopx"  # the operator's own database
 SCHEMA = "loopx-prompt-eval/v1"
 
-# The server, started the way ``loopx serve`` starts it, without depending on the CLI module.
+# The server, started the way ``looper serve`` starts it, without depending on the CLI module.
 _SERVE = (
     "import sys\n"
     "from pathlib import Path\n"
@@ -166,11 +166,11 @@ def install_claude(bin_dir: Path, *, mode: str, scenarios: Path | None = None,
 @contextmanager
 def running_server(*, database_url: str, runtime_root: Path, bin_dir: Path, log_path: Path,
                    home: Path | None = None, startup_timeout: float = 90.0) -> Iterator[Api]:
-    """``loopx serve`` on a free port; stopped with SIGINT, as the operator would."""
+    """``looper serve`` on a free port; stopped with SIGINT, as the operator would."""
     port = free_port()
     manager_dir = runtime_root / "manager"
     manager_dir.mkdir(parents=True, exist_ok=True)
-    env = {**os.environ, "LOOPX_DATABASE_URL": database_url, "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+    env = {**os.environ, "LOOPER_DATABASE_URL": database_url, "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
            "PYTHONPATH": os.pathsep.join(filter(None, [str(REPO_ROOT), os.environ.get("PYTHONPATH")]))}
     if home is not None:
         env["HOME"] = str(home)

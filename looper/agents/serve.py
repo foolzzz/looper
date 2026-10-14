@@ -11,7 +11,7 @@ Wires up the full three-tier agent system:
   AgentHTTPServer (REST API + SSE + static files)
 
 Usage:
-    loopx serve
+    looper serve
     # or directly:
     from looper.agents.serve import serve_agent
     serve_agent(host="127.0.0.1", port=8767)
@@ -27,6 +27,7 @@ import signal
 from pathlib import Path
 from typing import Any
 
+from .. import env
 from .broadcast import Broadcaster
 from .bus import MessageBus
 from .channels.allowlist import SenderAllowlist, allowlist_from_config, start_problem
@@ -136,7 +137,7 @@ def _telegram_adapter_from_config(config: dict[str, Any]) -> TelegramChannelAdap
     if allowlist is None:
         return None
     return TelegramChannelAdapter(
-        bot_token=os.environ.get(config.get("bot_token_env") or "LOOPX_TELEGRAM_BOT_TOKEN", ""),
+        bot_token=env.get(config.get("bot_token_env") or "LOOPER_TELEGRAM_BOT_TOKEN", ""),
         allowlist=allowlist,
     )
 
@@ -164,7 +165,7 @@ async def seed_channel_configs(pool: Any = None) -> None:
             "display_name": "Telegram Bot",
             "enabled": False,
             "config": {
-                "bot_token_env": "LOOPX_TELEGRAM_BOT_TOKEN",
+                "bot_token_env": "LOOPER_TELEGRAM_BOT_TOKEN",
                 "allowed_user_ids": [],
                 "description": "Telegram Bot integration via python-telegram-bot",
             },
@@ -276,7 +277,7 @@ async def _back_up_before_schema_change(pool: Any, dsn: str, runtime_root: Path,
     except db_backup.BackupFailed as exc:
         raise StartupCheckFailed(self_check.format_checks([self_check.Check(
             "pg_dump", "pg_dump backup", self_check.FAIL, f"{exc}; the schema was not changed",
-            "fix the problem above and start again, or migrate once without a backup: loopx serve --skip-backup",
+            "fix the problem above and start again, or migrate once without a backup: looper serve --skip-backup",
         )])) from None
     logger.info("backed up the database to %s (%d bytes, %s); to restore it, stop LoopX, recreate the database "
                 "empty, then run: pg_restore --no-owner --dbname '%s' '%s'",
@@ -472,5 +473,5 @@ def serve_agent(
             )
         )
     except StartupCheckFailed as exc:
-        logger.error("loopx serve cannot start:\n%s", exc)
+        logger.error("looper serve cannot start:\n%s", exc)
         raise SystemExit(1) from None

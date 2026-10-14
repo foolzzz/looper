@@ -12,10 +12,13 @@ from pathlib import Path
 
 import asyncpg
 
+from .. import env
+
 logger = logging.getLogger(__name__)
 
 _pool: asyncpg.Pool | None = None
 
+# The database keeps its name from before the rename (LoopX): it holds the user's data.
 DEFAULT_DSN = "postgresql://localhost:5432/loopx"
 SCHEMA_PATH = Path(__file__).with_name("schema.sql")
 
@@ -39,9 +42,10 @@ def _load_env() -> None:
 
 
 def configured_dsn() -> str:
-    """The database LoopX uses: ``LOOPX_DATABASE_URL`` (from the environment or .env), else the default."""
+    """The database Looper uses: ``LOOPER_DATABASE_URL`` (from the environment or .env; ``LOOPX_DATABASE_URL`` for
+    one release), else the default."""
     _load_env()
-    return os.environ.get("LOOPX_DATABASE_URL", DEFAULT_DSN)
+    return env.get("LOOPER_DATABASE_URL", DEFAULT_DSN)
 
 
 async def init_pool(dsn: str | None = None, *, min_size: int = 2, max_size: int = 10) -> asyncpg.Pool:
@@ -74,7 +78,7 @@ async def transaction() -> AsyncIterator[asyncpg.Connection]:
 
 
 # The fingerprint of the schema.sql last applied: ``schema_change_pending``
-# compares it with the current file, so ``loopx serve`` can back the database
+# compares it with the current file, so ``looper serve`` can back the database
 # up before the file's migrations (some drop columns and tables) change it.
 _RECORD_FINGERPRINT = """
 CREATE TABLE IF NOT EXISTS schema_fingerprint (

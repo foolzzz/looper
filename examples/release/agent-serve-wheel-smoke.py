@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""A release wheel runs `loopx serve`: it carries the schema and the dashboard.
+"""A release wheel runs `looper serve`: it carries the schema and the dashboard.
 
 Builds the wheel from this checkout, checks its contents, installs it into a
 fresh virtualenv and resolves both files from the installed package (not the
-checkout). With LOOPX_TEST_DATABASE_URL pointing at a disposable database it
-also starts the installed `loopx serve` and fetches the dashboard and the API.
+checkout). With LOOPER_TEST_DATABASE_URL pointing at a disposable database it
+also starts the installed `looper serve` and fetches the dashboard and the API.
 Run `scripts/stage-dashboard.sh` first; the staged dashboard is not in Git.
 """
 
@@ -37,7 +37,7 @@ def free_port() -> int:
 
 def serve_check(venv: Path, work: Path, dsn: str) -> None:
     port = free_port()
-    env = {**os.environ, "LOOPX_DATABASE_URL": dsn}
+    env = {**os.environ, "LOOPER_DATABASE_URL": dsn}
     for name in ("LARK_APP_ID", "TELEGRAM_BOT_TOKEN"):
         env.pop(name, None)
     proc = subprocess.Popen(
@@ -53,12 +53,12 @@ def serve_check(venv: Path, work: Path, dsn: str) -> None:
             except OSError:
                 time.sleep(0.5)
         else:
-            raise SystemExit("installed loopx serve did not come up")
+            raise SystemExit("installed looper serve did not come up")
         page = urllib.request.urlopen(f"{base}/", timeout=5).read().decode()
         assert "<div id=\"root\">" in page, page[:200]
         projects = urllib.request.urlopen(f"{base}/api/projects", timeout=5).read().decode()
         assert projects.startswith('{"projects"'), projects[:200]
-        print("PASS installed loopx serve answers the dashboard and the API")
+        print("PASS installed looper serve answers the dashboard and the API")
     finally:
         proc.terminate()
         proc.wait(timeout=30)
@@ -101,11 +101,11 @@ def main() -> int:
         assert str(work) in str(schema) and schema.is_file(), schema
         print("PASS the installed package resolves its own schema and dashboard")
 
-        dsn = os.environ.get("LOOPX_TEST_DATABASE_URL")
+        dsn = os.environ.get("LOOPER_TEST_DATABASE_URL")
         if dsn:
             serve_check(venv, work, dsn)
         else:
-            print("SKIP serve check: LOOPX_TEST_DATABASE_URL is not set")
+            print("SKIP serve check: LOOPER_TEST_DATABASE_URL is not set")
     return 0
 
 

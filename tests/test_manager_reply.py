@@ -663,16 +663,16 @@ class TestManagerHarnessAndLaunch:
             assert (_flag(first, "--model"), _flag(second, "--model")) == ("opus", "sonnet")
 
     def test_a_changed_environment_restarts_claude_with_it(self, monkeypatch: pytest.MonkeyPatch, agent_db: Any) -> None:
-        monkeypatch.setenv("LOOPX_SERVER_SIDE", "kept")
-        env = [[_system(env=[{"key": "LOOPX_TEST_FLAVOUR", "value": flavour}])] for flavour in ("mint", "mint", "lime")]
+        monkeypatch.setenv("LOOPER_SERVER_SIDE", "kept")
+        env = [[_system(env=[{"key": "LOOPER_TEST_FLAVOUR", "value": flavour}])] for flavour in ("mint", "mint", "lime")]
         chat = _converse(monkeypatch, _resident(), ["hello", "again", "third"], layers=env)
         assert chat["replies"] == ["turn 1: hello", "turn 2: again", "turn 1: third"]
-        assert [(k["env"]["LOOPX_TEST_FLAVOUR"], k["env"]["LOOPX_SERVER_SIDE"]) for k in chat["launched"]] == [
+        assert [(k["env"]["LOOPER_TEST_FLAVOUR"], k["env"]["LOOPER_SERVER_SIDE"]) for k in chat["launched"]] == [
             ("mint", "kept"), ("lime", "kept")]
         (first, _), (second, _) = chat["spawned"]
         assert first == [arg for arg in second if arg not in ("--resume", "sess-1")]  # only the env changed
         recorded = [call.kwargs["metadata"]["env"]["keys"] for call in agent_db.start_record.await_args_list]
-        assert recorded == [{"LOOPX_TEST_FLAVOUR": _sha(f)} for f in ("mint", "mint", "lime")]
+        assert recorded == [{"LOOPER_TEST_FLAVOUR": _sha(f)} for f in ("mint", "mint", "lime")]
 
 
 @pytest.mark.usefixtures("agent_db")

@@ -1,6 +1,6 @@
 """More ways into the catalog against a real PostgreSQL: upload, git and Settings, each through the HTTP API.
 
-Runs only when LOOPX_TEST_DATABASE_URL points at a disposable database. Each
+Runs only when LOOPER_TEST_DATABASE_URL points at a disposable database. Each
 test works in a new schema of its own. Git tests clone local file:// fixture
 repositories (the server itself accepts https:// only); nothing reads or
 writes the operator's ~/.claude.
@@ -24,7 +24,7 @@ import pytest
 from tests.test_catalog_db import DSN, _call, _import, _projects, _run
 
 pytestmark = [
-    pytest.mark.skipif(not DSN, reason="LOOPX_TEST_DATABASE_URL is not set"),
+    pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set"),
     pytest.mark.skipif(shutil.which("git") is None, reason="git is not installed"),
 ]
 

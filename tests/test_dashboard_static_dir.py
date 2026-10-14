@@ -1,4 +1,4 @@
-"""`loopx serve` serves the checkout's dashboard, else the copy packaged in the wheel."""
+"""`looper serve` serves the checkout's dashboard, else the copy packaged in the wheel."""
 
 from __future__ import annotations
 

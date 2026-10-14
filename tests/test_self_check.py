@@ -1,8 +1,8 @@
-"""``loopx serve`` runs the startup self-check: PostgreSQL is required, Claude is reported.
+"""``looper serve`` runs the startup self-check: PostgreSQL is required, Claude is reported.
 
-The server is the M6 eval's disposable ``loopx serve``; the case that needs a
-database runs only when LOOPX_TEST_DATABASE_URL points at a disposable one
-(it creates and drops a database beside it). ``loopx doctor`` is covered in
+The server is the M6 eval's disposable ``looper serve``; the case that needs a
+database runs only when LOOPER_TEST_DATABASE_URL points at a disposable one
+(it creates and drops a database beside it). ``looper doctor`` is covered in
 test_cli_entry.py.
 """
 
@@ -20,7 +20,7 @@ from evals.prompt_regression.runner import fresh_database, running_server
 from looper.agents.self_check import mask_dsn
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-DSN = os.environ.get("LOOPX_TEST_DATABASE_URL")
+DSN = os.environ.get("LOOPER_TEST_DATABASE_URL")
 
 
 @pytest.mark.parametrize(
@@ -40,7 +40,7 @@ def test_serve_without_postgresql_stops_with_the_fix(tmp_path: Path) -> None:
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
         port = sock.getsockname()[1]
-    env = {**os.environ, "LOOPX_DATABASE_URL": f"postgresql://loopx:s3cret-pw@127.0.0.1:{port}/loopx",
+    env = {**os.environ, "LOOPER_DATABASE_URL": f"postgresql://loopx:s3cret-pw@127.0.0.1:{port}/loopx",
            "PYTHONPATH": str(REPO_ROOT)}
     serve = ("from pathlib import Path; from looper.agents.serve import serve_agent; "
              "serve_agent(port=1, runtime_root=Path.cwd(), work_dir=Path.cwd())")
@@ -54,7 +54,7 @@ def test_serve_without_postgresql_stops_with_the_fix(tmp_path: Path) -> None:
     assert "s3cret-pw" not in proc.stdout + proc.stderr
 
 
-@pytest.mark.skipif(not DSN, reason="LOOPX_TEST_DATABASE_URL is not set")
+@pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 def test_serve_without_claude_starts_and_reports_it(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("PATH", f"/usr/bin{os.pathsep}/bin")  # no claude, no lark-cli
     (tmp_path / "bin").mkdir()

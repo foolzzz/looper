@@ -980,20 +980,20 @@ class TestHarnessAndLaunch:
             return await real_exec(*args, **kwargs)
 
         monkeypatch.setattr(asyncio, "create_subprocess_exec", _exec)
-        _settings(agent_db, env=json.dumps([{"key": "LOOPX_TEST_FLAVOUR", "value": "mint"}]))
+        _settings(agent_db, env=json.dumps([{"key": "LOOPER_TEST_FLAVOUR", "value": "mint"}]))
         claude = planner_claude(plan(step("s1")), decide("accept"))
-        change = lambda: _settings(agent_db, env=json.dumps([{"key": "LOOPX_TEST_FLAVOUR", "value": "lime"}]))
+        change = lambda: _settings(agent_db, env=json.dumps([{"key": "LOOPER_TEST_FLAVOUR", "value": "lime"}]))
         drive(claude, hold_first(), _between_turns(agent_db, change))
 
-        assert [kwargs["env"]["LOOPX_TEST_FLAVOUR"] for kwargs in launched] == ["mint", "lime"]
+        assert [kwargs["env"]["LOOPER_TEST_FLAVOUR"] for kwargs in launched] == ["mint", "lime"]
         first, second = claude.argvs()
         assert first == [arg for arg in second if arg not in ("--resume", "sess-p")]  # same command, new env
         assert _flag(second, "--resume") == "sess-p"
         recorded = [s["metadata"]["env"]["keys"] for s in _starts(agent_db)]
-        assert recorded == [{"LOOPX_TEST_FLAVOUR": _sha("mint")}, {"LOOPX_TEST_FLAVOUR": _sha("lime")}]
+        assert recorded == [{"LOOPER_TEST_FLAVOUR": _sha("mint")}, {"LOOPER_TEST_FLAVOUR": _sha("lime")}]
 
     def test_unchanged_settings_keep_one_process(self, planner_claude: Any, agent_db: Any) -> None:
-        _settings(agent_db, harness="H", model="sonnet", env=json.dumps([{"key": "LOOPX_TEST_FLAVOUR", "value": "x"}]))
+        _settings(agent_db, harness="H", model="sonnet", env=json.dumps([{"key": "LOOPER_TEST_FLAVOUR", "value": "x"}]))
         claude = planner_claude(plan(step("s1")), decide("accept"))
         drive(claude, always(WORK_OK))
         assert len(claude.argvs()) == 1 and len(claude.turns()) == 2

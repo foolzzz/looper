@@ -15,6 +15,10 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+# The tests read LOOPER_TEST_DATABASE_URL; its name from before the rename still works for one release.
+if "LOOPER_TEST_DATABASE_URL" not in os.environ and "LOOPX_TEST_DATABASE_URL" in os.environ:
+    os.environ["LOOPER_TEST_DATABASE_URL"] = os.environ["LOOPX_TEST_DATABASE_URL"]
+
 _RUNTIME_ROOT_GUARD_DIR = Path(__file__).resolve().parent / "runtime_root_guard"
 sys.path.insert(0, str(_RUNTIME_ROOT_GUARD_DIR))
 

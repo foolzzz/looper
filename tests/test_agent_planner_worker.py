@@ -643,8 +643,8 @@ class TestWorkerHarnessAndLaunch:
     def test_the_settings_environment_reaches_the_subprocess_and_its_names_are_recorded(
         self, monkeypatch: pytest.MonkeyPatch, agent_db: Any, rows: dict[str, Any],
     ) -> None:
-        self._settings(agent_db, env=[{"key": "LOOPX_TEST_FLAVOUR", "value": "mint"}])
-        monkeypatch.setenv("LOOPX_SERVER_SIDE", "kept")
+        self._settings(agent_db, env=[{"key": "LOOPER_TEST_FLAVOUR", "value": "mint"}])
+        monkeypatch.setenv("LOOPER_SERVER_SIDE", "kept")
         launched: list[dict[str, Any]] = []
         real_exec = asyncio.create_subprocess_exec
 
@@ -657,10 +657,10 @@ class TestWorkerHarnessAndLaunch:
             _run_step(verify=verify)
         assert len(launched) == 2
         for kwargs in launched:
-            assert kwargs["env"]["LOOPX_TEST_FLAVOUR"] == "mint"
-            assert kwargs["env"]["LOOPX_SERVER_SIDE"] == "kept"  # on top of the server's environment
+            assert kwargs["env"]["LOOPER_TEST_FLAVOUR"] == "mint"
+            assert kwargs["env"]["LOOPER_SERVER_SIDE"] == "kept"  # on top of the server's environment
         recorded = [call.kwargs["metadata"]["env"] for call in agent_db.start_record.await_args_list]
-        assert [r["keys"] for r in recorded] == [{"LOOPX_TEST_FLAVOUR": _sha("mint")}] * 2
+        assert [r["keys"] for r in recorded] == [{"LOOPER_TEST_FLAVOUR": _sha("mint")}] * 2
         assert "mint" not in json.dumps(recorded)
 
 

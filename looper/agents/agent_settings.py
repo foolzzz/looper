@@ -211,7 +211,7 @@ def environment(raw: Any, *, unset: bool = False) -> dict[str, str | None]:
         if any(word in key for word in _CREDENTIAL_WORDS):
             raise SettingsError(
                 f"{key} looks like a credential: secrets do not belong in agent settings, which are shown on the "
-                "dashboard and recorded; set it in the environment of the process that runs loopx serve"
+                "dashboard and recorded; set it in the environment of the process that runs looper serve"
             )
         if value is None and unset:
             pass

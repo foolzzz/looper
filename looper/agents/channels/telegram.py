@@ -1,7 +1,7 @@
 """Telegram Bot Channel Adapter.
 
 Bridges Telegram Bot API with the agent Bus. Uses long-polling by default
-(webhook mode planned). ``loopx serve`` builds this adapter from the
+(webhook mode planned). ``looper serve`` builds this adapter from the
 ``channel-telegram`` row that the dashboard Settings page edits.
 
 Only the senders on its allowlist reach the Manager (``allowlist``): anyone
@@ -9,16 +9,16 @@ else is dropped with one log line and gets no reply, and an empty list keeps
 the adapter from starting.
 
 Fallback when the constructor's token is empty:
-  LOOPX_TELEGRAM_BOT_TOKEN — Bot token from @BotFather
+  LOOPER_TELEGRAM_BOT_TOKEN — Bot token from @BotFather
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
-import os
 from typing import Any
 
+from ... import env
 from ..bus import MessageBus
 from ..message import (
     MANAGER_ADDRESS,
@@ -50,7 +50,7 @@ class TelegramChannelAdapter(ChannelAdapter):
         allowlist: SenderAllowlist,
         bot_token: str | None = None,
     ) -> None:
-        self._bot_token = bot_token or os.environ.get("LOOPX_TELEGRAM_BOT_TOKEN", "")
+        self._bot_token = bot_token or env.get("LOOPER_TELEGRAM_BOT_TOKEN", "")
         self._allowlist = allowlist  # Telegram user ids, as strings
         self._bus: MessageBus | None = None
         self._address = channel_address("telegram", "channel-telegram")
@@ -82,7 +82,7 @@ class TelegramChannelAdapter(ChannelAdapter):
             return
 
         if not self._bot_token:
-            logger.error("LOOPX_TELEGRAM_BOT_TOKEN not set, telegram adapter disabled")
+            logger.error("LOOPER_TELEGRAM_BOT_TOKEN not set, telegram adapter disabled")
             return
 
         from telegram.ext import (

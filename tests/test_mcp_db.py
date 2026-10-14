@@ -1,6 +1,6 @@
 """MCP servers in the catalog against a real PostgreSQL: what each run mounts, the secrets, and the import.
 
-Runs only when LOOPX_TEST_DATABASE_URL points at a disposable database. Each
+Runs only when LOOPER_TEST_DATABASE_URL points at a disposable database. Each
 test works in a new schema of its own, dropped afterwards.
 """
 
@@ -14,7 +14,7 @@ import pytest
 
 from tests.test_catalog_db import DSN, _call, _projects, _run
 
-pytestmark = pytest.mark.skipif(not DSN, reason="LOOPX_TEST_DATABASE_URL is not set")
+pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
 SECRET = "sk-test-0123456789"
 

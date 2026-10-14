@@ -1,6 +1,6 @@
 """The prompt regression eval (``evals/prompt_regression``): its own contract, and the task set in fake mode.
 
-The fake-mode run needs PostgreSQL: it runs only when LOOPX_TEST_DATABASE_URL
+The fake-mode run needs PostgreSQL: it runs only when LOOPER_TEST_DATABASE_URL
 points at a server where it may create (and then drop) a database of its own.
 """
 
@@ -20,7 +20,7 @@ from looper.agents.tiers.planner import PlannerAgent, PlannerTurnError
 from looper.agents.tiers.planner_protocol import TurnKind, parse_plan
 from looper.agents.tiers.worker import judge_result
 
-DSN = os.environ.get("LOOPX_TEST_DATABASE_URL")
+DSN = os.environ.get("LOOPER_TEST_DATABASE_URL")
 
 
 # --- Contract violations, read where the agent system rejects a reply ------------------------------------
@@ -273,7 +273,7 @@ _MISBEHAVING = EvalTask(
 )
 
 
-@pytest.mark.skipif(not DSN, reason="LOOPX_TEST_DATABASE_URL is not set")
+@pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 def test_fake_mode_runs_every_task_and_sees_misbehaviour(tmp_path: Path) -> None:
     result, path = runner.run(mode="fake", tasks=(*TASKS, _MISBEHAVING), admin_url=str(DSN), out_dir=tmp_path,
                               agent="claude-code/opus")

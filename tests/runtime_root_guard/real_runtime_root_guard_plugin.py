@@ -43,7 +43,7 @@ def session_roots() -> list[str]:
     They are computed with the resolver of the tree under test, before any test
     can monkeypatch HOME: the default runtime root of the starting HOME and of
     the account's home directory, the retired ``~/.codex/loopx`` of both, and an
-    ambient LOOPX_RUNTIME_ROOT.
+    ambient LOOPER_RUNTIME_ROOT.
     """
 
     if str(SOURCE_ROOT) not in sys.path:

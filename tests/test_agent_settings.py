@@ -175,11 +175,11 @@ class TestEnvironment:
     def test_the_variables_go_on_top_of_the_servers_and_the_record_holds_no_value(
         self, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        monkeypatch.setenv("LOOPX_SERVER_ONLY", "kept")
+        monkeypatch.setenv("LOOPER_SERVER_ONLY", "kept")
         monkeypatch.setenv("TZ", "Asia/Shanghai")
         launch = Launch(resolve("worker", {(Layer.SYSTEM, None): LayerValues(env=(("TZ", "UTC"), ("LANG", "C.UTF-8")))}))
         env = launch.environment()
-        assert env is not None and (env["LOOPX_SERVER_ONLY"], env["TZ"], env["LANG"]) == ("kept", "UTC", "C.UTF-8")
+        assert env is not None and (env["LOOPER_SERVER_ONLY"], env["TZ"], env["LANG"]) == ("kept", "UTC", "C.UTF-8")
         assert os.environ["TZ"] == "Asia/Shanghai"
         record = launch.record()
         assert record["env"] == {"sha256": launch.env_sha256, "keys": {"TZ": _sha("UTC"), "LANG": _sha("C.UTF-8")}}

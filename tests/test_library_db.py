@@ -1,6 +1,6 @@
 """The catalog's import from this machine, and its items' installs across a re-import, against a real PostgreSQL.
 
-Runs only when LOOPX_TEST_DATABASE_URL points at a disposable database. Each
+Runs only when LOOPER_TEST_DATABASE_URL points at a disposable database. Each
 test works in a new schema of its own, dropped afterwards. The operator home
 is synthetic (``library_fixtures``).
 """
@@ -22,8 +22,8 @@ from typing import Any
 import pytest
 from library_fixtures import fake_claude_home, write
 
-DSN = os.environ.get("LOOPX_TEST_DATABASE_URL")
-pytestmark = pytest.mark.skipif(not DSN, reason="LOOPX_TEST_DATABASE_URL is not set")
+DSN = os.environ.get("LOOPER_TEST_DATABASE_URL")
+pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
 
 @asynccontextmanager

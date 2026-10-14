@@ -1339,7 +1339,7 @@ class AgentHTTPServer:
     async def _handle_config_export(self, query: dict[str, str], writer: asyncio.StreamWriter) -> None:
         """Stream the configuration file as a download, piece by piece from one read-only snapshot.
 
-        ``projects=1`` and ``secrets=1`` are ``loopx config export``'s
+        ``projects=1`` and ``secrets=1`` are ``looper config export``'s
         ``--include-projects`` and ``--include-secrets``. The status line is
         sent before the first piece, so a failure after it ends the download
         early, which leaves a file that is not valid JSON.
@@ -1373,7 +1373,7 @@ class AgentHTTPServer:
     ) -> None:
         """Answer with ``request(imports)``'s result: a file that is not a usable configuration file is 400, an
         unknown or expired import 404, and too many pending, one being applied or a schema awaiting
-        ``loopx serve``'s migration 409."""
+        ``looper serve``'s migration 409."""
         try:
             if self._config_imports is None:
                 raise RuntimeError("the server was started without a runtime root")

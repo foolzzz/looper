@@ -1,6 +1,6 @@
 """llm_records run recording against a real PostgreSQL.
 
-Runs only when LOOPX_TEST_DATABASE_URL points at a disposable database; the
+Runs only when LOOPER_TEST_DATABASE_URL points at a disposable database; the
 schema is applied to it and the test's rows are removed afterwards.
 """
 
@@ -12,8 +12,8 @@ from typing import Any
 
 import pytest
 
-DSN = os.environ.get("LOOPX_TEST_DATABASE_URL")
-pytestmark = pytest.mark.skipif(not DSN, reason="LOOPX_TEST_DATABASE_URL is not set")
+DSN = os.environ.get("LOOPER_TEST_DATABASE_URL")
+pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
 
 def test_run_is_recorded_end_to_end() -> None:

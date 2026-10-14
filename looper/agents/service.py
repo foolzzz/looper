@@ -1,4 +1,4 @@
-"""``loopx service``: run ``loopx serve`` as a managed background service.
+"""``looper service``: run ``looper serve`` as a managed background service.
 
 macOS gets a launchd LaunchAgent (``~/Library/LaunchAgents/<label>.plist``),
 Linux a systemd user unit (``~/.config/systemd/user/<label>.service``). Either
@@ -10,7 +10,7 @@ checkout's ``.venv/bin/loopx``) in the directory ``install`` ran in, so a
 checkout's ``.env`` keeps working. launchd and systemd start services with an
 almost empty environment, so ``install`` copies the variables the service
 needs from its own environment into the unit, which is why the unit file is
-written with mode 0600: ``LOOPX_DATABASE_URL`` can hold a password.
+written with mode 0600: ``LOOPER_DATABASE_URL`` can hold a password.
 
 launchd: a job is reloaded with ``launchctl bootout`` then ``bootstrap``, never
 ``kickstart -k``, which can reuse the code-signing state of the binary it
@@ -51,7 +51,8 @@ CAPTURED_NAMES = (
     "PATH", "LANG", "LC_ALL", "LC_CTYPE", "CLAUDE_CONFIG_DIR",
     "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "no_proxy", "all_proxy",
 )
-CAPTURED_PREFIXES = ("LOOPX_", "ANTHROPIC_", "LARK_")
+# LOOPX_*: the names from before the rename, still read as a fallback for one release (looper.env).
+CAPTURED_PREFIXES = ("LOOPER_", "LOOPX_", "ANTHROPIC_", "LARK_")
 
 _LABEL = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 _STOP_WAIT_SECONDS = 30.0  # launchd sends SIGKILL 20 s after SIGTERM by default
@@ -184,7 +185,7 @@ def render_systemd_unit(spec: ServiceSpec) -> str:
     log = str(spec.log_path).replace("%", "%%")
     lines = [
         "[Unit]",
-        f"Description=LoopX agent system (loopx serve, {spec.label})",
+        f"Description=LoopX agent system (looper serve, {spec.label})",
         "",
         "[Service]",
         "Type=simple",
@@ -423,7 +424,7 @@ def manager(host: Host, label: str) -> _Manager:
         return Launchd(host, label)
     if host.system == "Linux":
         return Systemd(host, label)
-    raise ServiceError(f"`loopx service` supports macOS (launchd) and Linux (systemd), "
+    raise ServiceError(f"`looper service` supports macOS (launchd) and Linux (systemd), "
                        f"not {host.system or 'this system'}")
 
 
@@ -442,7 +443,7 @@ def _start_and_wait(mgr: _Manager, port: int, log_path: Path | None, timeout: fl
     if host.port_in_use(port):
         raise ServiceError(f"port {port} is in use by another process, so the service is installed but not "
                            "started; stop that process (or install again with another --port), then run "
-                           "`loopx service restart`")
+                           "`looper service restart`")
     mgr.start()
     deadline = host.clock() + timeout
     while True:
@@ -487,15 +488,15 @@ def install(host: Host, *, label: str = DEFAULT_LABEL, port: int = DEFAULT_PORT,
     lines = [
         f"installed {label} ({mgr.kind}); it starts at login and again after a crash",
         f"  unit       {mgr.unit_path}",
-        "             mode 0600: it holds the captured environment, and LOOPX_DATABASE_URL can hold a password",
+        "             mode 0600: it holds the captured environment, and LOOPER_DATABASE_URL can hold a password",
         f"  command    {shlex.join(spec.argv)}",
         f"  directory  {spec.working_dir}",
         f"  env        {', '.join(names) if names else '(none)'}",
         f"  log        {spec.log_path}",
         f"  serving    http://127.0.0.1:{port} (pid {serving.pid or 'unknown'})",
     ]
-    if "LOOPX_DATABASE_URL" not in names:
-        lines.append("  note       LOOPX_DATABASE_URL is not set here; the service reads it from the checkout's .env, "
+    if "LOOPER_DATABASE_URL" not in names and "LOOPX_DATABASE_URL" not in names:
+        lines.append("  note       LOOPER_DATABASE_URL is not set here; the service reads it from the checkout's .env, "
                      "else uses the default")
     if host.system == "Linux":
         lines.append("  note       to run it without a login session too: loginctl enable-linger $USER")
@@ -505,10 +506,10 @@ def install(host: Host, *, label: str = DEFAULT_LABEL, port: int = DEFAULT_PORT,
 def restart(host: Host, *, label: str = DEFAULT_LABEL, timeout: float = DEFAULT_TIMEOUT_SECONDS) -> str:
     mgr = manager(host, label)
     if not mgr.unit_path.is_file():
-        raise ServiceError(f"{label} is not installed; run `loopx service install`")
+        raise ServiceError(f"{label} is not installed; run `looper service install`")
     port, log_path = mgr.unit_settings()
     if port is None:
-        raise ServiceError(f"{mgr.unit_path} names no --port; run `loopx service install` again")
+        raise ServiceError(f"{mgr.unit_path} names no --port; run `looper service install` again")
     before = mgr.state().pid
     mgr.stop()
     serving = _start_and_wait(mgr, port, log_path, timeout)
@@ -531,7 +532,7 @@ def status(host: Host, *, label: str = DEFAULT_LABEL) -> tuple[int, str]:
     mgr = manager(host, label)
     state = mgr.state()
     if not state.installed and not state.loaded:
-        return 1, f"{label}: not installed (`loopx service install` runs loopx serve in the background)"
+        return 1, f"{label}: not installed (`looper service install` runs looper serve in the background)"
     lines = [
         f"service    {label} ({mgr.kind})",
         f"unit       {mgr.unit_path}" + ("" if state.installed else " (missing; the service is still loaded)"),
@@ -554,15 +555,15 @@ def status(host: Host, *, label: str = DEFAULT_LABEL) -> tuple[int, str]:
 
 
 def doctor_check(host: Host | None = None, label: str = DEFAULT_LABEL) -> Check:
-    """The ``loopx doctor`` line: is the background service installed and running? Never a failure."""
+    """The ``looper doctor`` line: is the background service installed and running? Never a failure."""
     host = host or Host.current()
     try:
         state = manager(host, label).state()
     except ServiceError as exc:
         return Check("service", "Service", SKIP, f"not checked: {exc}")
     if not state.installed and not state.loaded:
-        return Check("service", "Service", SKIP, f"{label} not installed (optional: `loopx service install`)")
+        return Check("service", "Service", SKIP, f"{label} not installed (optional: `looper service install`)")
     if state.running:
         return Check("service", "Service", OK, f"{label} running (pid {state.pid})")
     return Check("service", "Service", WARN, f"{label} installed but not running ({_describe(state)})",
-                 f"run `loopx service restart`; the log is {state.log_path or 'under the runtime root'}")
+                 f"run `looper service restart`; the log is {state.log_path or 'under the runtime root'}")

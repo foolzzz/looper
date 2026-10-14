@@ -1,9 +1,10 @@
-"""The ``loopx`` console script starts the agent system without upstream LoopX code.
+"""The ``looper`` console script starts the agent system without upstream LoopX code.
 
 Each case runs in a fresh interpreter and calls the function that
-``[project.scripts]`` in pyproject.toml names for ``loopx``, as the installed
-script does. ``serve_agent`` is replaced by a recorder, so nothing listens;
-the case then lists every ``loopx`` module the interpreter loaded.
+``[project.scripts]`` in pyproject.toml names for ``looper`` (or for ``loopx``,
+the alias kept for one release), as the installed script does. ``serve_agent``
+is replaced by a recorder, so nothing listens; the case then lists every
+``looper`` module the interpreter loaded.
 ``doctor`` runs its checks against a stand-in ``claude`` on a minimal PATH.
 """
 
@@ -24,15 +25,15 @@ from looper import __version__
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 # The agent system's own packages and the one helper it borrows.
-ALLOWED_MODULE = re.compile(r"looper(\.cli|\.paths|\.agents(\.\w+)*|\.db(\.\w+)*)?")
+ALLOWED_MODULE = re.compile(r"looper(\.cli|\.env|\.paths|\.agents(\.\w+)*|\.db(\.\w+)*)?")
 
 _DRIVER = r"""
 import json, sys, tomllib
 from importlib import import_module
 from pathlib import Path
 
-pyproject, *argv = sys.argv[1:]
-target = tomllib.loads(Path(pyproject).read_text())["project"]["scripts"]["loopx"]
+pyproject, script, *argv = sys.argv[1:]
+target = tomllib.loads(Path(pyproject).read_text())["project"]["scripts"][script]
 module_name, _, function = target.partition(":")
 calls = []
 if argv[:1] == ["serve"]:
@@ -48,9 +49,10 @@ print("\n" + json.dumps({"code": code, "calls": calls, "modules": modules}))
 """
 
 
-def _run_loopx(*argv: str, cwd: Path, env: dict[str, str] | None = None) -> tuple[dict, str, str]:
+def _run_looper(*argv: str, cwd: Path, env: dict[str, str] | None = None, script: str = "looper",
+                ) -> tuple[dict, str, str]:
     proc = subprocess.run(
-        [sys.executable, "-c", _DRIVER, str(REPO_ROOT / "pyproject.toml"), *argv],
+        [sys.executable, "-c", _DRIVER, str(REPO_ROOT / "pyproject.toml"), script, *argv],
         cwd=cwd,
         env=env,
         capture_output=True,
@@ -70,13 +72,13 @@ def _upstream(modules: list[str]) -> list[str]:
 def test_serve_starts_the_agent_system_without_upstream_modules(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, flags: bool
 ) -> None:
-    monkeypatch.setenv("LOOPX_RUNTIME_ROOT", str(tmp_path / "env-root"))
+    monkeypatch.setenv("LOOPER_RUNTIME_ROOT", str(tmp_path / "env-root"))
     argv = ["serve"]
     if flags:
         argv += ["--host", "0.0.0.0", "--port", "9999", "--verbose", "--runtime-root", str(tmp_path / "flag-root"),
                  "--skip-backup"]
 
-    result, _, stderr = _run_loopx(*argv, cwd=tmp_path)
+    result, _, stderr = _run_looper(*argv, cwd=tmp_path)
 
     assert result["code"] == 0, stderr
     assert result["calls"] == [
@@ -93,24 +95,28 @@ def test_serve_starts_the_agent_system_without_upstream_modules(
     assert not upstream, f"{len(upstream)} upstream modules loaded, e.g. {upstream[:10]}"
 
 
+@pytest.mark.parametrize("script", ["looper", "loopx"])
 @pytest.mark.parametrize(
     "argv",
     [["version"], ["--version"], ["version", "--format", "json"]],
     ids=["version", "--version", "version-json"],
 )
-def test_version_loads_only_the_cli(tmp_path: Path, argv: list[str]) -> None:
-    result, output, stderr = _run_loopx(*argv, cwd=tmp_path)
+def test_version_loads_only_the_cli(tmp_path: Path, argv: list[str], script: str) -> None:
+    """``loopx``, the name before the rename, is the same command after a one-line deprecation note on stderr."""
+    result, output, stderr = _run_looper(*argv, cwd=tmp_path, script=script)
 
     assert result["code"] == 0, stderr
     if "json" in argv:
         assert json.loads(output) == {
             "ok": True,
-            "schema_version": "loopx_version_v0",
-            "name": "loopx",
+            "schema_version": "looper_version_v0",
+            "name": "looper",
             "version": __version__,
         }
     else:
-        assert output == f"loopx {__version__}"
+        assert output == f"looper {__version__}"
+    assert stderr == ("loopx is now called looper; the loopx alias goes away in the next release\n"
+                      if script == "loopx" else "")
     assert result["modules"] == ["looper", "looper.cli"]
 
 
@@ -120,10 +126,10 @@ def test_version_loads_only_the_cli(tmp_path: Path, argv: list[str]) -> None:
     ids=["config-import", "config-export"],
 )
 def test_config_loads_no_upstream_modules(tmp_path: Path, argv: list[str]) -> None:
-    """``loopx config`` reports a missing file or an unreachable database as an error line and exits 1."""
-    env = {**os.environ, "LOOPX_DATABASE_URL": f"postgresql://127.0.0.1:{_closed_port()}/loopx"}
+    """``looper config`` reports a missing file or an unreachable database as an error line and exits 1."""
+    env = {**os.environ, "LOOPER_DATABASE_URL": f"postgresql://127.0.0.1:{_closed_port()}/loopx"}
 
-    result, _, stderr = _run_loopx(*argv, cwd=tmp_path, env=env)
+    result, _, stderr = _run_looper(*argv, cwd=tmp_path, env=env)
 
     assert result["code"] == 1 and stderr.startswith("error: "), stderr
     assert not (tmp_path / "out.json").exists()
@@ -131,8 +137,8 @@ def test_config_loads_no_upstream_modules(tmp_path: Path, argv: list[str]) -> No
 
 
 def test_service_status_loads_no_upstream_modules(tmp_path: Path) -> None:
-    """``loopx service status`` asks the real service manager (read-only) about a label never installed."""
-    result, output, stderr = _run_loopx("service", "status", "--label", "com.loopx.serve.never-installed", cwd=tmp_path)
+    """``looper service status`` asks the real service manager (read-only) about a label never installed."""
+    result, output, stderr = _run_looper("service", "status", "--label", "com.loopx.serve.never-installed", cwd=tmp_path)
 
     assert result["code"] == 1, stderr
     assert "not installed" in output
@@ -141,7 +147,7 @@ def test_service_status_loads_no_upstream_modules(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize("command", ["update", "init"])
 def test_removed_commands_are_rejected(tmp_path: Path, command: str) -> None:
-    result, _, stderr = _run_loopx(command, "--help", cwd=tmp_path)
+    result, _, stderr = _run_looper(command, "--help", cwd=tmp_path)
 
     assert result["code"] == 2
     assert f"invalid choice: '{command}'" in stderr
@@ -172,8 +178,9 @@ def _doctor_env(tmp_path: Path, *, claude: str | None, database_url: str) -> dic
         stub = bin_dir / "claude"
         stub.write_text(_STUB_CLAUDE.format(calls=tmp_path / "calls", state=claude))
         stub.chmod(0o755)
-    env = {key: value for key, value in os.environ.items() if key not in ("LOOPX_PG_DUMP", "LOOPX_BACKUP_CMD")}
-    return {**env, "PATH": f"{bin_dir}{os.pathsep}/usr/bin{os.pathsep}/bin", "LOOPX_DATABASE_URL": database_url}
+    env = {key: value for key, value in os.environ.items()
+           if key.removeprefix("LOOPER_").removeprefix("LOOPX_") not in ("PG_DUMP", "BACKUP_CMD", "DATABASE_URL")}
+    return {**env, "PATH": f"{bin_dir}{os.pathsep}/usr/bin{os.pathsep}/bin", "LOOPER_DATABASE_URL": database_url}
 
 
 def _closed_port() -> int:
@@ -188,18 +195,32 @@ def _check_lines(output: str) -> dict[str, str]:
     return {label: line for line in output.splitlines() for label in labels if line[6:].startswith(label)}
 
 
+def test_the_database_url_from_before_the_rename_still_works_with_a_warning(tmp_path: Path) -> None:
+    """Only ``LOOPX_DATABASE_URL`` set: it is the database used, and the deprecation is said once."""
+    port = _closed_port()
+    env = _doctor_env(tmp_path, claude="logged_in", database_url="")
+    del env["LOOPER_DATABASE_URL"]
+    env["LOOPX_DATABASE_URL"] = f"postgresql://127.0.0.1:{port}/loopx"
+
+    result, output, stderr = _run_looper("doctor", cwd=tmp_path, env=env)
+
+    assert result["code"] == 1, stderr
+    assert f"cannot connect to postgresql://127.0.0.1:{port}/loopx" in _check_lines(output)["PostgreSQL"]
+    assert stderr.count("LOOPX_DATABASE_URL is deprecated: rename it to LOOPER_DATABASE_URL") == 1, stderr
+
+
 def test_doctor_shows_an_unreachable_database_masked_with_its_fix(tmp_path: Path) -> None:
     port = _closed_port()
     env = _doctor_env(tmp_path, claude="logged_in", database_url=f"postgresql://loopx:s3cret-pw@127.0.0.1:{port}/loopx")
 
-    result, output, stderr = _run_loopx("doctor", cwd=tmp_path, env=env)
+    result, output, stderr = _run_looper("doctor", cwd=tmp_path, env=env)
 
     assert result["code"] == 1, stderr
     lines = _check_lines(output)
     assert lines["PostgreSQL"].startswith("fail")
     assert f"postgresql://loopx:***@127.0.0.1:{port}/loopx" in lines["PostgreSQL"]
     assert "s3cret-pw" not in output + stderr
-    assert "docker run" in output and "export LOOPX_DATABASE_URL=" in output
+    assert "docker run" in output and "export LOOPER_DATABASE_URL=" in output
     assert lines["Claude Code CLI"].startswith("ok") and lines["Claude login"].startswith("ok")
     # Whether Lark is enabled is in the database, so it is not checked.
     assert lines["Lark channel"].startswith("skip")
@@ -219,7 +240,7 @@ def test_doctor_fails_the_claude_check_with_its_fix(
 ) -> None:
     env = _doctor_env(tmp_path, claude=claude, database_url=f"postgresql://127.0.0.1:{_closed_port()}/loopx")
 
-    result, output, stderr = _run_loopx("doctor", cwd=tmp_path, env=env)
+    result, output, stderr = _run_looper("doctor", cwd=tmp_path, env=env)
 
     assert result["code"] == 1, stderr
     assert _check_lines(output)[failing].startswith("fail")
@@ -231,13 +252,13 @@ def test_doctor_never_runs_a_claude_without_auth_status(tmp_path: Path) -> None:
     """An older CLI would take `auth status` as a prompt, a paid model call; the login is then not checked."""
     env = _doctor_env(tmp_path, claude="old", database_url=f"postgresql://127.0.0.1:{_closed_port()}/loopx")
 
-    result, output, stderr = _run_loopx("doctor", cwd=tmp_path, env=env)
+    result, output, stderr = _run_looper("doctor", cwd=tmp_path, env=env)
 
     assert _check_lines(output)["Claude login"].startswith("skip  Claude login     not checked:"), output
     assert (tmp_path / "calls").read_text().splitlines() == ["--version", "auth --help"]
 
 
-@pytest.mark.skipif(not os.environ.get("LOOPX_TEST_DATABASE_URL"), reason="LOOPX_TEST_DATABASE_URL is not set")
+@pytest.mark.skipif(not os.environ.get("LOOPER_TEST_DATABASE_URL"), reason="LOOPER_TEST_DATABASE_URL is not set")
 @pytest.mark.parametrize(
     ("lark", "lark_line", "code"),
     [("off", "skip", 0), ("on", "ok", 0), ("on-without-cli", "warn", 0)],
@@ -261,13 +282,13 @@ def test_doctor_passes_unless_a_check_failed(tmp_path: Path, lark: str, lark_lin
         finally:
             await conn.close()
 
-    with fresh_database(os.environ["LOOPX_TEST_DATABASE_URL"]) as (database_url, _):
+    with fresh_database(os.environ["LOOPER_TEST_DATABASE_URL"]) as (database_url, _):
         asyncio.run(set_up(database_url))
         env = _doctor_env(tmp_path, claude="logged_in", database_url=database_url)
         if lark == "on":
             (tmp_path / "bin" / "lark-cli").write_text("#!/bin/sh\n")
             (tmp_path / "bin" / "lark-cli").chmod(0o755)
-        result, output, stderr = _run_loopx("doctor", cwd=tmp_path, env=env)
+        result, output, stderr = _run_looper("doctor", cwd=tmp_path, env=env)
 
     assert result["code"] == code, output + stderr
     assert [line[:5].strip() for line in _check_lines(output).values()] == ["ok", "ok", "ok", lark_line], output
@@ -297,7 +318,7 @@ def test_doctor_reports_the_pg_dump_that_backs_up_before_a_schema_change(
     if pg_dump:
         _stub_pg_dump(tmp_path / "bin", pg_dump)
 
-    _, output, _ = _run_loopx("doctor", cwd=tmp_path, env=env)
+    _, output, _ = _run_looper("doctor", cwd=tmp_path, env=env)
 
     line, fix = _pg_dump_line(output)
     assert line.startswith(status), output
@@ -307,7 +328,7 @@ def test_doctor_reports_the_pg_dump_that_backs_up_before_a_schema_change(
         assert fix.lstrip().startswith("fix: install pg_dump"), output
 
 
-@pytest.mark.skipif(not os.environ.get("LOOPX_TEST_DATABASE_URL"), reason="LOOPX_TEST_DATABASE_URL is not set")
+@pytest.mark.skipif(not os.environ.get("LOOPER_TEST_DATABASE_URL"), reason="LOOPER_TEST_DATABASE_URL is not set")
 @pytest.mark.parametrize(("pg_dump", "status", "code"), [(None, "fail", 1), ("9.6.24", "fail", 1), ("99.0", "ok", 0)],
                          ids=["missing", "older-than-the-server", "usable"])
 def test_doctor_fails_without_a_usable_pg_dump_when_the_schema_is_about_to_change(
@@ -328,13 +349,13 @@ def test_doctor_fails_without_a_usable_pg_dump_when_the_schema_is_about_to_chang
         finally:
             await conn.close()
 
-    with fresh_database(os.environ["LOOPX_TEST_DATABASE_URL"]) as (database_url, _):
+    with fresh_database(os.environ["LOOPER_TEST_DATABASE_URL"]) as (database_url, _):
         asyncio.run(set_up(database_url))
         env = _doctor_env(tmp_path, claude="logged_in", database_url=database_url)
         env["PATH"] = str(tmp_path / "bin")
         if pg_dump:
             _stub_pg_dump(tmp_path / "bin", pg_dump)
-        result, output, stderr = _run_loopx("doctor", cwd=tmp_path, env=env)
+        result, output, stderr = _run_looper("doctor", cwd=tmp_path, env=env)
 
     assert result["code"] == code, output + stderr
     line, _ = _pg_dump_line(output)

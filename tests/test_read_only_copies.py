@@ -1,4 +1,4 @@
-"""Reclaiming the read-only copies under the runtime root when ``loopx serve`` starts.
+"""Reclaiming the read-only copies under the runtime root when ``looper serve`` starts.
 
 The catalog's items and generated skill plugins and a project's stored
 knowledge are written once under a content hash; a change writes a new

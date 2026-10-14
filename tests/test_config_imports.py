@@ -1,6 +1,6 @@
 """Configuration imports through the dashboard's API: a streamed upload with its own cap, a preview, then apply.
 
-The tests that preview or apply need PostgreSQL (LOOPX_TEST_DATABASE_URL); each
+The tests that preview or apply need PostgreSQL (LOOPER_TEST_DATABASE_URL); each
 works in new schemas of its own, dropped afterwards. The server is a real
 ``AgentHTTPServer`` on a free port, spoken to over a socket.
 """
@@ -23,7 +23,7 @@ from looper.agents import config_imports
 from looper.agents.http_server import CONFIG_IMPORTS_PATH, REQUEST_BODY_MAX_BYTES, AgentHTTPServer
 from tests.test_catalog_db import DSN
 
-needs_db = pytest.mark.skipif(not DSN, reason="LOOPX_TEST_DATABASE_URL is not set")
+needs_db = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 UNKNOWN = "cfgimp-0123456789abcdef"
 
 

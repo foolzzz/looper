@@ -1,8 +1,8 @@
 """The channel configuration API and its sender allowlists against a real PostgreSQL.
 
-Runs only when LOOPX_TEST_DATABASE_URL points at a disposable database. Each
+Runs only when LOOPER_TEST_DATABASE_URL points at a disposable database. Each
 test works in a new schema of its own, dropped afterwards, seeded the way
-``loopx serve`` seeds it.
+``looper serve`` seeds it.
 """
 
 from __future__ import annotations
@@ -20,8 +20,8 @@ from typing import Any
 
 import pytest
 
-DSN = os.environ.get("LOOPX_TEST_DATABASE_URL")
-pytestmark = pytest.mark.skipif(not DSN, reason="LOOPX_TEST_DATABASE_URL is not set")
+DSN = os.environ.get("LOOPER_TEST_DATABASE_URL")
+pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
 OPEN_ID = "ou_7dab8a3d3cdcc9da365777c7ad535d62"
 
@@ -109,7 +109,7 @@ def test_an_allowlist_round_trips_validated(monkeypatch: pytest.MonkeyPatch) -> 
         assert lark["start_problem"] is None
         # A Telegram list written the way it was stored before comes back as a list.
         status, telegram = await _call("PUT", "/api/channel-configs/channel-telegram", {
-            "config": {"bot_token_env": "LOOPX_TELEGRAM_BOT_TOKEN", "allowed_user_ids": "7, 8"},
+            "config": {"bot_token_env": "LOOPER_TELEGRAM_BOT_TOKEN", "allowed_user_ids": "7, 8"},
         })
         assert status == 200 and telegram["config"]["allowed_user_ids"] == ["7", "8"]
 

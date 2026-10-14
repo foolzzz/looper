@@ -1,32 +1,36 @@
-"""The ``loopx`` command: ``serve`` starts the agent system, ``service`` runs it in the background, ``doctor``
-checks what it needs, ``version`` prints the version."""
+"""The ``looper`` command: ``serve`` starts the agent system, ``service`` runs it in the background, ``doctor``
+checks what it needs, ``version`` prints the version. ``loopx``, its name before the rename, is kept as an
+alias for one release."""
 
 from __future__ import annotations
 
 import argparse
 import json
+import sys
 from pathlib import Path
 
 from . import __version__
 
+LEGACY_COMMAND_NOTE = "loopx is now called looper; the loopx alias goes away in the next release"
+
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="loopx", description="LoopX agent system.", allow_abbrev=False)
-    parser.add_argument("--version", action="version", version=f"loopx {__version__}")
+    parser = argparse.ArgumentParser(prog="looper", description="Looper agent system.", allow_abbrev=False)
+    parser.add_argument("--version", action="version", version=f"looper {__version__}")
     commands = parser.add_subparsers(dest="command", required=True)
     serve = commands.add_parser(
         "serve",
         allow_abbrev=False,
-        help="Start the LoopX agent system.",
+        help="Start the Looper agent system.",
         description=(
-            "Start the LoopX agent system. Telegram and Lark need no flags: enable and configure "
+            "Start the Looper agent system. Telegram and Lark need no flags: enable and configure "
             "them on the dashboard Settings page, then restart the server."
         ),
     )
     serve.add_argument("--host", help="Bind host (default 127.0.0.1).")
     serve.add_argument("--port", type=int, help="Port (default 8767).")
     serve.add_argument("--verbose", action="store_true", help="Enable debug logging.")
-    serve.add_argument("--runtime-root", help="Override the default ~/.loopx state directory.")
+    serve.add_argument("--runtime-root", help="Override the default ~/.looper state directory.")
     serve.add_argument(
         "--skip-backup", action="store_true",
         help="Change the database schema without the pg_dump backup otherwise taken first into "
@@ -35,10 +39,10 @@ def build_parser() -> argparse.ArgumentParser:
     commands.add_parser(
         "doctor",
         allow_abbrev=False,
-        help="Check what LoopX needs: PostgreSQL, the Claude Code CLI and its login, the enabled channels "
+        help="Check what Looper needs: PostgreSQL, the Claude Code CLI and its login, the enabled channels "
              "and pg_dump.",
         description=(
-            "Check PostgreSQL (LOOPX_DATABASE_URL), the Claude Code CLI and its login, the enabled channels, and "
+            "Check PostgreSQL (LOOPER_DATABASE_URL), the Claude Code CLI and its login, the enabled channels, and "
             "the pg_dump that backs the database up before a schema change; print each result with its fix. "
             "Exits 1 when a check failed. Makes no model call."
         ),
@@ -50,7 +54,7 @@ def build_parser() -> argparse.ArgumentParser:
         description=(
             "Move an installation's agent configuration to another machine: settings layers and role prompts, "
             "the catalog with its files and MCP servers, global installs, channels and, optionally, projects. "
-            "Both commands use the database directly (LOOPX_DATABASE_URL); the server need not run."
+            "Both commands use the database directly (LOOPER_DATABASE_URL); the server need not run."
         ),
     )
     config_commands = config.add_subparsers(dest="config_command", required=True)
@@ -75,7 +79,7 @@ def build_parser() -> argparse.ArgumentParser:
     import_.add_argument("--apply", action="store_true", help="Write the changes the preview shows.")
     import_.add_argument("--json", action="store_true", help="Print the plan as JSON.")
     _add_service_parser(commands)
-    version = commands.add_parser("version", allow_abbrev=False, help="Print the installed LoopX version.")
+    version = commands.add_parser("version", allow_abbrev=False, help="Print the installed Looper version.")
     version.add_argument("--format", choices=["markdown", "json"], default="markdown", help="Output format.")
     # serve prints no payload; --format stays accepted so existing invocations keep working.
     serve.add_argument("--format", choices=["markdown", "json"], help=argparse.SUPPRESS)
@@ -86,9 +90,9 @@ def _add_service_parser(commands: argparse._SubParsersAction) -> None:
     service = commands.add_parser(
         "service",
         allow_abbrev=False,
-        help="Run `loopx serve` as a background service: started at login and again after a crash.",
+        help="Run `looper serve` as a background service: started at login and again after a crash.",
         description=(
-            "Run `loopx serve` as a background service: a launchd LaunchAgent on macOS, a systemd user unit on "
+            "Run `looper serve` as a background service: a launchd LaunchAgent on macOS, a systemd user unit on "
             "Linux. It starts at login, starts again after a crash, and logs to <runtime root>/logs/serve.log."
         ),
     )
@@ -96,16 +100,16 @@ def _add_service_parser(commands: argparse._SubParsersAction) -> None:
     install = service_commands.add_parser(
         "install", allow_abbrev=False, help="Install (or update) the service and start it.",
         description=(
-            "Write the unit and (re)start the service, then wait until it serves. The unit runs this loopx in the "
+            "Write the unit and (re)start the service, then wait until it serves. The unit runs this looper in the "
             "current directory, with the variables it needs copied from this environment: PATH, locale and proxy "
-            "settings, CLAUDE_CONFIG_DIR, every LOOPX_*, ANTHROPIC_* and LARK_* variable, and each --env NAME. "
-            "The unit file is private (mode 0600) because LOOPX_DATABASE_URL can hold a password. Running it "
-            "again updates the unit and restarts the service."
+            "settings, CLAUDE_CONFIG_DIR, every LOOPER_*, ANTHROPIC_* and LARK_* variable (and, for one release, "
+            "LOOPX_*), and each --env NAME. The unit file is private (mode 0600) because LOOPER_DATABASE_URL can "
+            "hold a password. Running it again updates the unit and restarts the service."
         ),
     )
-    install.add_argument("--port", type=int, default=8767, help="Port for `loopx serve` (default 8767).")
+    install.add_argument("--port", type=int, default=8767, help="Port for `looper serve` (default 8767).")
     install.add_argument("--runtime-root",
-                         help="State directory for `loopx serve` (default LOOPX_RUNTIME_ROOT, else ~/.loopx).")
+                         help="State directory for `looper serve` (default LOOPER_RUNTIME_ROOT, else ~/.looper).")
     install.add_argument("--env", action="append", default=[], metavar="NAME",
                          help="Also copy this environment variable into the unit (repeatable).")
     restart = service_commands.add_parser(
@@ -127,8 +131,8 @@ def _add_service_parser(commands: argparse._SubParsersAction) -> None:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.command == "version":
-        payload = {"ok": True, "schema_version": "loopx_version_v0", "name": "loopx", "version": __version__}
-        print(json.dumps(payload, indent=2) if args.format == "json" else f"loopx {__version__}")
+        payload = {"ok": True, "schema_version": "looper_version_v0", "name": "looper", "version": __version__}
+        print(json.dumps(payload, indent=2) if args.format == "json" else f"looper {__version__}")
         return 0
     if args.command == "doctor":
         from .agents.self_check import doctor
@@ -138,7 +142,7 @@ def main(argv: list[str] | None = None) -> int:
         return _config(args)
     if args.command == "service":
         return _service(args)
-    # Imported here so that `loopx version` and `--version` stay instant.
+    # Imported here so that `looper version` and `--version` stay instant.
     from .agents.serve import serve_agent
     from .paths import default_runtime_root
 
@@ -153,9 +157,14 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
+def legacy_main(argv: list[str] | None = None) -> int:
+    """``loopx``, kept for one release: a deprecation note on stderr, then the same command as ``looper``."""
+    print(LEGACY_COMMAND_NOTE, file=sys.stderr)
+    return main(argv)
+
+
 def _config(args: argparse.Namespace) -> int:
     import asyncio
-    import sys
 
     import asyncpg
 
@@ -185,8 +194,6 @@ def _config(args: argparse.Namespace) -> int:
 
 
 def _service(args: argparse.Namespace) -> int:
-    import sys
-
     from .agents import service
     from .paths import default_runtime_root
 

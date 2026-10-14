@@ -1,6 +1,6 @@
-"""A ``pg_dump`` of LoopX's database before ``loopx serve`` changes its schema.
+"""A ``pg_dump`` of LoopX's database before ``looper serve`` changes its schema.
 
-``loopx serve`` applies ``schema.sql`` at every start, and the file holds
+``looper serve`` applies ``schema.sql`` at every start, and the file holds
 migrations that drop columns and tables. When the schema is about to change
 (``schema_change_pending``), serve first writes a custom-format dump into
 ``<runtime root>/backups/`` and keeps the newest ``KEEP`` of that database's;
@@ -8,12 +8,12 @@ without a way to make one it does not start (``--skip-backup`` overrides).
 
 The dump is made by, in order of precedence:
 
-- ``LOOPX_BACKUP_CMD``: a command run as given whose stdout is the dump, for a
-  ``pg_dump`` that cannot reach ``LOOPX_DATABASE_URL`` as written, such as the
+- ``LOOPER_BACKUP_CMD``: a command run as given whose stdout is the dump, for a
+  ``pg_dump`` that cannot reach ``LOOPER_DATABASE_URL`` as written, such as the
   one inside a PostgreSQL container; ``{dbname}`` and ``{user}`` are filled in
   from the database URL. Its version is not checked, and the dump is checked
   by its header only;
-- the ``pg_dump`` that ``LOOPX_PG_DUMP`` names, else ``pg_dump`` on PATH. Its
+- the ``pg_dump`` that ``LOOPER_PG_DUMP`` names, else ``pg_dump`` on PATH. Its
   major version must be at least the server's; the dump is then listed with
   the ``pg_restore`` beside it (else the one on PATH) to prove it is readable.
 """
@@ -31,8 +31,10 @@ import urllib.parse
 from dataclasses import dataclass
 from pathlib import Path
 
-PG_DUMP_ENV = "LOOPX_PG_DUMP"
-BACKUP_CMD_ENV = "LOOPX_BACKUP_CMD"
+from .. import env as looper_env
+
+PG_DUMP_ENV = "LOOPER_PG_DUMP"
+BACKUP_CMD_ENV = "LOOPER_BACKUP_CMD"
 BACKUP_DIRNAME = "backups"
 KEEP = 5
 
@@ -58,8 +60,8 @@ class BackupFailed(Exception):
 class Dumper:
     """How a backup is made."""
 
-    argv: tuple[str, ...]  # the pg_dump program, or the whole LOOPX_BACKUP_CMD
-    command: bool  # LOOPX_BACKUP_CMD: run as given (placeholders filled in)
+    argv: tuple[str, ...]  # the pg_dump program, or the whole LOOPER_BACKUP_CMD
+    command: bool  # LOOPER_BACKUP_CMD: run as given (placeholders filled in)
     detail: str  # what doctor and the log show
 
     @property
@@ -79,14 +81,14 @@ def _first_line(text: str) -> str:
 
 def find_dumper(server_major: int | None) -> Dumper:
     """The way backups are made here; ``NoDumper`` when there is none or ``pg_dump`` is older than the server."""
-    template = os.environ.get(BACKUP_CMD_ENV, "").strip()
+    template = (looper_env.get(BACKUP_CMD_ENV) or "").strip()
     if template:
         try:
             argv = shlex.split(template)
         except ValueError as exc:
             raise NoDumper(f"{BACKUP_CMD_ENV} cannot be parsed: {exc}") from None
         return Dumper(tuple(argv), True, f"{BACKUP_CMD_ENV}: {template} (version not checked)")
-    configured = os.environ.get(PG_DUMP_ENV, "").strip()
+    configured = (looper_env.get(PG_DUMP_ENV) or "").strip()
     program = shutil.which(configured or "pg_dump")
     if program is None:
         raise NoDumper(f"{PG_DUMP_ENV}={configured} is not an executable" if configured
@@ -124,7 +126,7 @@ def _connection(dsn: str) -> tuple[str, str | None, str, str]:
 
 
 def _file_stem(dbname: str) -> str:
-    return "loopx-" + re.sub(r"[^A-Za-z0-9_.-]", "_", dbname)
+    return "looper-" + re.sub(r"[^A-Za-z0-9_.-]", "_", dbname)
 
 
 def prune(backup_dir: Path, dbname: str, keep: int = KEEP) -> list[Path]:

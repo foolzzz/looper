@@ -1,6 +1,6 @@
 """Project knowledge against a real PostgreSQL: the table, the API and what a run loads.
 
-Runs only when LOOPX_TEST_DATABASE_URL points at a disposable database. Each
+Runs only when LOOPER_TEST_DATABASE_URL points at a disposable database. Each
 test works in a new schema of its own, dropped afterwards.
 """
 
@@ -20,8 +20,8 @@ from typing import Any
 
 import pytest
 
-DSN = os.environ.get("LOOPX_TEST_DATABASE_URL")
-pytestmark = pytest.mark.skipif(not DSN, reason="LOOPX_TEST_DATABASE_URL is not set")
+DSN = os.environ.get("LOOPER_TEST_DATABASE_URL")
+pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
 
 @asynccontextmanager

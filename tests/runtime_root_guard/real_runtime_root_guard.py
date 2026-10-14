@@ -23,7 +23,7 @@ Not covered:
 
 - other LoopX state locations, such as a project's own ``.loopx`` directory or
   a runtime root passed by path, unless it is the ambient
-  ``LOOPX_RUNTIME_ROOT``;
+  ``LOOPER_RUNTIME_ROOT``;
 - metadata checks that raise no audit event: ``os.stat``, ``os.lstat``,
   ``os.access`` and ``os.readlink``, hence ``Path.exists()`` and
   ``Path.stat()``;
@@ -52,8 +52,8 @@ import sys
 from collections.abc import Iterator
 from pathlib import Path
 
-PROTECTED_ROOTS_ENV = "PYTEST_LOOPX_PROTECTED_RUNTIME_ROOTS"
-REPORT_PATH_ENV = "PYTEST_LOOPX_RUNTIME_ROOT_GUARD_REPORT"
+PROTECTED_ROOTS_ENV = "PYTEST_LOOPER_PROTECTED_RUNTIME_ROOTS"
+REPORT_PATH_ENV = "PYTEST_LOOPER_RUNTIME_ROOT_GUARD_REPORT"
 
 # Audited event -> positions of the path arguments to check. Reads count too: a
 # test that reads the owner's live state is not hermetic either. os.symlink is

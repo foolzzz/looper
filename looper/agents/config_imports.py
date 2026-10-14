@@ -1,11 +1,11 @@
-"""Configuration imports through the dashboard: upload, preview, then apply or cancel (``loopx config import``).
+"""Configuration imports through the dashboard: upload, preview, then apply or cancel (``looper config import``).
 
 A configuration file with the catalog's files is usually far over the 8 MiB
 the server reads into memory for a request (``REQUEST_BODY_MAX_BYTES``), so
 ``POST /api/config/imports`` alone takes up to ``UPLOAD_MAX_BYTES`` and
 streams the body to a file under ``<runtime root>/config-imports/`` (mode
 0600: the file may hold secrets) instead. The file is then checked and
-previewed exactly like ``loopx config import``, and waits under an import id:
+previewed exactly like ``looper config import``, and waits under an import id:
 ``apply`` writes it in one transaction like ``--apply`` and deletes it,
 ``cancel`` deletes it, and an import neither applied nor cancelled expires
 after ``TTL_SECONDS``. Pending imports live in this process only: the server

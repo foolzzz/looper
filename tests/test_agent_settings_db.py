@@ -1,6 +1,6 @@
 """Agent setting layers, their one-time migration and role-prompt seeding against a real PostgreSQL.
 
-Runs only when LOOPX_TEST_DATABASE_URL points at a disposable database. Each
+Runs only when LOOPER_TEST_DATABASE_URL points at a disposable database. Each
 test works in a new schema of its own, dropped afterwards.
 
 The migration's parity is checked against ``fixtures/agent_settings_parity_main.json``:
@@ -25,8 +25,8 @@ from typing import Any
 
 import pytest
 
-DSN = os.environ.get("LOOPX_TEST_DATABASE_URL")
-pytestmark = pytest.mark.skipif(not DSN, reason="LOOPX_TEST_DATABASE_URL is not set")
+DSN = os.environ.get("LOOPER_TEST_DATABASE_URL")
+pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
 PARITY = json.loads((Path(__file__).parent / "fixtures" / "agent_settings_parity_main.json").read_text("utf-8"))
 

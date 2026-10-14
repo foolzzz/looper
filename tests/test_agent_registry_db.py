@@ -1,6 +1,6 @@
 """Runtimes, LLM providers and agents against a real PostgreSQL, through the HTTP API.
 
-Runs only when LOOPX_TEST_DATABASE_URL points at a disposable database. Each
+Runs only when LOOPER_TEST_DATABASE_URL points at a disposable database. Each
 test works in a new schema of its own, dropped afterwards. A stand-in runtime
 type (``StandIn``) plays a second adapter: one that cannot keep a resident
 session, and has a login of its own.
@@ -21,7 +21,7 @@ import pytest
 from fake_claude import fake_claude
 from tests.test_catalog_db import DSN, _fresh_schema, _Writer
 
-pytestmark = pytest.mark.skipif(not DSN, reason="LOOPX_TEST_DATABASE_URL is not set")
+pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
 SECRET = "sk-test-registry-0123456789"
 

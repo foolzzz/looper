@@ -3,14 +3,14 @@ requires = ["setuptools==83.0.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "loopx"
+name = "looper"
 version = "2.5.0"
 description = "A self-hosted three-tier multi-agent system that runs Claude Code on your tasks, with a real-time web dashboard."
 readme = "README.md"
 requires-python = ">=3.11"
 license = "Apache-2.0"
 license-files = ["LICENSE", "NOTICE", "LICENSE-MIT"]
-authors = [{ name = "LoopX contributors" }]
+authors = [{ name = "Looper contributors" }, { name = "LoopX contributors" }]
 dependencies = [
   "asyncpg>=0.29,<1",
   "python-telegram-bot>=22,<23",
@@ -32,7 +32,9 @@ test = [
 ]
 
 [project.scripts]
-loopx = "looper.cli:main"
+looper = "looper.cli:main"
+# The command's name before the rename, kept for one release: a deprecation note, then looper.
+loopx = "looper.cli:legacy_main"
 
 [tool.setuptools.packages.find]
 include = ["looper*"]

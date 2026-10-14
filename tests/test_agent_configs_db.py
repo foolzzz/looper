@@ -1,6 +1,6 @@
 """Agent config rows against a real PostgreSQL: replacing a stale default prompt.
 
-Runs only when LOOPX_TEST_DATABASE_URL points at a disposable database; the
+Runs only when LOOPER_TEST_DATABASE_URL points at a disposable database; the
 schema is applied to it and the test's rows are removed afterwards.
 """
 
@@ -12,8 +12,8 @@ import uuid
 
 import pytest
 
-DSN = os.environ.get("LOOPX_TEST_DATABASE_URL")
-pytestmark = pytest.mark.skipif(not DSN, reason="LOOPX_TEST_DATABASE_URL is not set")
+DSN = os.environ.get("LOOPER_TEST_DATABASE_URL")
+pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
 
 def test_default_prompt_tracks_recommendation_and_reset() -> None:

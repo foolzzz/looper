@@ -12,7 +12,7 @@ writes a new one and leaves the old one:
   ``projects/<id>/skills/<sha256>/``; nothing writes these any more;
 - the MCP servers installed for a run: ``mcp/<sha256>.json`` (``mcp.py``).
 
-``reclaim_unused`` removes the ones nothing uses. ``loopx serve`` runs it at
+``reclaim_unused`` removes the ones nothing uses. ``looper serve`` runs it at
 start, before any agent launches. It keeps a directory that the database's
 current content uses (what the next runs of every role in every project mount,
 and those of a task agent without a project; loading it also writes it) or

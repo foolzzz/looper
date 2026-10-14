@@ -1,8 +1,8 @@
-"""``loopx serve`` backs the database up with pg_dump before it changes the schema.
+"""``looper serve`` backs the database up with pg_dump before it changes the schema.
 
-The serve cases run the real ``loopx serve`` (``python -m looper.cli serve``)
+The serve cases run the real ``looper serve`` (``python -m looper.cli serve``)
 with PATH holding only a stand-in ``pg_dump`` (and ``pg_restore``), against a
-database created beside LOOPX_TEST_DATABASE_URL. The stand-in writes a
+database created beside LOOPER_TEST_DATABASE_URL. The stand-in writes a
 custom-format header followed by what it read from the database: whether the
 column that a migration in schema.sql drops was still there.
 
@@ -27,10 +27,11 @@ import pytest
 from evals.prompt_regression.runner import fresh_database, free_port
 from looper.agents import db_backup
 from looper.agents.self_check import mask_dsn
+from looper.env import counterpart
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-DSN = os.environ.get("LOOPX_TEST_DATABASE_URL")
-needs_database = pytest.mark.skipif(not DSN, reason="LOOPX_TEST_DATABASE_URL is not set")
+DSN = os.environ.get("LOOPER_TEST_DATABASE_URL")
+needs_database = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
 _PG_DUMP = r'''#!@PYTHON@
 import asyncio, json, os, sys
@@ -85,18 +86,18 @@ def _install(bin_dir: Path, *, version: str | None = "99.1", mode: str = "dump",
 
 
 def _env(**extra: str) -> dict[str, str]:
-    env = {key: value for key, value in os.environ.items()
-           if key not in (db_backup.PG_DUMP_ENV, db_backup.BACKUP_CMD_ENV, "LOOPX_RUNTIME_ROOT")}
+    dropped = {db_backup.PG_DUMP_ENV, db_backup.BACKUP_CMD_ENV, "LOOPER_RUNTIME_ROOT"}
+    env = {key: value for key, value in os.environ.items() if key not in dropped and counterpart(key) not in dropped}
     return {**env, **extra}
 
 
 def _serve(tmp_path: Path, database_url: str, *flags: str) -> tuple[int | None, str]:
-    """Start ``loopx serve`` with PATH = tmp_path/bin: its exit code, or None when it came up (then stopped); its log."""
+    """Start ``looper serve`` with PATH = tmp_path/bin: its exit code, or None when it came up (then stopped); its log."""
     port = free_port()
     for name in ("runtime", "work", "home"):
         (tmp_path / name).mkdir(exist_ok=True)
     log_path = tmp_path / "serve.log"
-    env = _env(LOOPX_DATABASE_URL=database_url, PATH=str(tmp_path / "bin"), HOME=str(tmp_path / "home"),
+    env = _env(LOOPER_DATABASE_URL=database_url, PATH=str(tmp_path / "bin"), HOME=str(tmp_path / "home"),
                PYTHONPATH=str(REPO_ROOT))
     with log_path.open("w") as log:
         process = subprocess.Popen(
@@ -111,7 +112,7 @@ def _serve(tmp_path: Path, database_url: str, *flags: str) -> tuple[int | None, 
                     urllib.request.urlopen(f"http://127.0.0.1:{port}/api/status", timeout=2).read()
                     break
                 except OSError:
-                    assert time.monotonic() < deadline, "loopx serve did not answer within 90 s"
+                    assert time.monotonic() < deadline, "looper serve did not answer within 90 s"
                     time.sleep(0.25)
             code = process.poll()
         finally:
@@ -230,7 +231,7 @@ def test_without_a_usable_pg_dump_serve_refuses(tmp_path: Path, version: str | N
     fail = next(line for line in log.splitlines() if line.startswith("fail  pg_dump"))
     assert reason in fail
     install = "brew install libpq" if sys.platform == "darwin" else "apt install postgresql-client-"
-    assert install in log and "LOOPX_BACKUP_CMD='docker exec" in log and "loopx serve --skip-backup" in log
+    assert install in log and "LOOPER_BACKUP_CMD='docker exec" in log and "looper serve --skip-backup" in log
     assert _backups(tmp_path) == []
 
 
@@ -277,8 +278,10 @@ def test_the_newest_five_backups_of_the_database_are_kept(tmp_path: Path, monkey
     _install(tmp_path / "bin", mode="offline", restore_ok=None)
     backups = tmp_path / "backups"
     backups.mkdir()
-    old = [backups / f"loopx-loopx-2026100{day}T120000.000000Z.dump" for day in range(1, 7)]
-    others = [backups / "loopx-loopx_other-20261001T120000.000000Z.dump", backups / "notes.txt"]
+    old = [backups / f"looper-loopx-2026100{day}T120000.000000Z.dump" for day in range(1, 7)]
+    # Another database's backups, and those named before the rename (loopx-<database>-...), are left alone.
+    others = [backups / "looper-loopx_other-20261001T120000.000000Z.dump",
+              backups / "loopx-loopx-20261001T120000.000000Z.dump", backups / "notes.txt"]
     for path in old + others:
         path.write_bytes(b"PGDMP")
     monkeypatch.setenv("PATH", str(tmp_path / "bin"))
@@ -308,7 +311,7 @@ def test_the_password_reaches_pg_dump_only_through_its_environment(
 def test_a_backup_command_runs_as_given_with_the_database_filled_in(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """``LOOPX_BACKUP_CMD`` wins over any pg_dump: its version is not asked, its stdout is the backup."""
+    """``LOOPER_BACKUP_CMD`` wins over any pg_dump: its version is not asked, its stdout is the backup."""
     calls = _install(tmp_path / "bin", version="9.6.24", mode="offline", restore_ok=False)
     monkeypatch.setenv("PATH", str(tmp_path / "bin"))
     monkeypatch.setenv(db_backup.BACKUP_CMD_ENV, f"{tmp_path / 'bin' / 'pg_dump'} --format=custom -U {{user}} {{dbname}}")

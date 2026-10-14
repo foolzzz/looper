@@ -1,6 +1,6 @@
 """What a machine still needs before LoopX can run, and how to fix it.
 
-``loopx doctor`` prints these checks and exits 1 when one failed. ``loopx
+``looper doctor`` prints these checks and exits 1 when one failed. ``loopx
 serve`` runs the same checks first: an unreachable PostgreSQL stops it; a
 missing Claude Code CLI or login is logged as a warning, the dashboard still
 starts, and ``GET /api/status`` reports every result under ``checks``. The
@@ -36,13 +36,13 @@ CLAUDE_INSTALL_FIX = (
     "install Claude Code: npm install -g @anthropic-ai/claude-code "
     "(docs: https://code.claude.com/docs/en/overview)"
 )
-CLAUDE_LOGIN_FIX = "run `claude auth login`, or export ANTHROPIC_API_KEY for loopx"
+CLAUDE_LOGIN_FIX = "run `claude auth login`, or export ANTHROPIC_API_KEY for looper"
 DATABASE_FIX = (
     "start PostgreSQL if it is not running, for example with Docker:\n"
     "  docker run -d --name agentbox-postgres -e POSTGRES_DB=loopx -e POSTGRES_USER=postgres "
     "-e POSTGRES_PASSWORD=postgres -p 54329:5432 postgres:16\n"
-    "then point LoopX at it with LOOPX_DATABASE_URL (in the environment or .env):\n"
-    '  export LOOPX_DATABASE_URL="postgresql://postgres:postgres@localhost:54329/loopx"'
+    "then point Looper at it with LOOPER_DATABASE_URL (in the environment or .env):\n"
+    '  export LOOPER_DATABASE_URL="postgresql://postgres:postgres@localhost:54329/loopx"'
 )
 LARK_CLI_FIX = "install lark-cli and sign in, or turn the Lark channel off on the Settings page"
 
@@ -177,7 +177,7 @@ def pg_dump_fix(server_major: int | None) -> str:
         f"install pg_dump {version}. {install}\n"
         f"or set {db_backup.PG_DUMP_ENV} to a pg_dump; with PostgreSQL in Docker, dump inside its container:\n"
         f"  export {db_backup.BACKUP_CMD_ENV}='docker exec <container> pg_dump --format=custom -U {{user}} {{dbname}}'\n"
-        "or migrate once without a backup: loopx serve --skip-backup"
+        "or migrate once without a backup: looper serve --skip-backup"
     )
 
 
@@ -185,7 +185,7 @@ def check_pg_dump(server_version_num: int | None, pending: bool | None) -> tuple
     """Can LoopX back the database up before it changes the schema? With the way it would, when it can.
 
     ``pending``: whether the schema is about to change (``None``: unknown).
-    Without a way to back up, ``loopx serve`` refuses only then, so only then
+    Without a way to back up, ``looper serve`` refuses only then, so only then
     is this a failure.
     """
     server_major = server_version_num // 10000 if server_version_num else None
@@ -197,7 +197,7 @@ def check_pg_dump(server_version_num: int | None, pending: bool | None) -> tuple
                          f"{exc}; the database schema is about to change, and LoopX backs it up first",
                          pg_dump_fix(server_major)), None
         return Check("pg_dump", "pg_dump", WARN,
-                     f"{exc}; after an upgrade that changes the database schema, `loopx serve` backs the database "
+                     f"{exc}; after an upgrade that changes the database schema, `looper serve` backs the database "
                      "up first and will not start without it",
                      pg_dump_fix(server_major)), None
     unchecked = "" if server_major or dumper.command else "; not compared with the server, which is unreachable"
@@ -224,7 +224,7 @@ async def _database_facts(dsn: str) -> _DatabaseFacts:
     try:
         try:
             row = await get_config("channel-lark", pool=conn)  # a connection answers like a pool here
-        except asyncpg.UndefinedTableError:  # a database `loopx serve` has not set up yet
+        except asyncpg.UndefinedTableError:  # a database `looper serve` has not set up yet
             row = None
         return _DatabaseFacts(
             lark_enabled=bool(row and row.get("enabled")),
@@ -266,7 +266,7 @@ def log_problems(checks: list[Check]) -> None:
 
 
 def doctor(claude_bin: str = "claude") -> int:
-    """``loopx doctor``: print every check, and whether the background service runs; 1 when one failed."""
+    """``looper doctor``: print every check, and whether the background service runs; 1 when one failed."""
     from ..db.connection import configured_dsn
     from .service import doctor_check
 
