@@ -29,8 +29,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from .. import agent_settings
-from ..agent_settings import BUILTIN_DEFAULTS, AgentDefaults, AgentType, resolve_harness, resolve_launch
+from ..agent_settings import AgentType, Launch, load_agent_settings
 from ..bus import MessageBus
 from ..claude_cli import (
     ClaudeRunRecorder,
@@ -42,7 +41,6 @@ from ..claude_cli import (
 )
 from ..knowledge import documents_label, load_knowledge
 from ..library import items_label, load_installed
-from ..project_execution import ProjectExecution
 from ..message import (
     AgentAddress,
     MessageEnvelope,
@@ -109,14 +107,13 @@ _DEFAULT_ROLE_PROMPTS = {AgentType.WORKER: DEFAULT_SYSTEM_PROMPT, AgentType.REVI
 
 @dataclass(frozen=True)
 class WorkerSettings:
-    """A ``worker`` or ``reviewer`` agent config and the Settings defaults, read for every run."""
+    """A ``worker`` or ``reviewer`` agent config, read for every run (its agent settings are read with its
+    project, ``load_agent_settings``)."""
 
     timeout_seconds: int  # 0 for no limit
     max_turns: int  # 0 for no limit
     system_prompt: str  # the role prompt
     recommended: bool = True  # whether it is the recommended one (default_prompt)
-    model: str | None = None  # the agent's own model; None for the default in Settings
-    defaults: AgentDefaults = BUILTIN_DEFAULTS  # the harness, model, effort and environment in Settings
 
 
 async def _load_settings(agent: AgentType = AgentType.WORKER) -> WorkerSettings:
@@ -125,7 +122,6 @@ async def _load_settings(agent: AgentType = AgentType.WORKER) -> WorkerSettings:
     Without a readable row a run may take 86400 s, has no turn limit and uses
     the default role prompt; an empty role prompt also falls back to it.
     """
-    defaults = await agent_settings.load_defaults()
     try:
         config = await db_agent_configs.get_config(agent.value)
     except Exception:
@@ -133,15 +129,13 @@ async def _load_settings(agent: AgentType = AgentType.WORKER) -> WorkerSettings:
         config = None
     default_prompt = _DEFAULT_ROLE_PROMPTS[agent].strip()
     if config is None:
-        return WorkerSettings(DEFAULT_RUN_TIMEOUT_SEC, 0, default_prompt, defaults=defaults)
+        return WorkerSettings(DEFAULT_RUN_TIMEOUT_SEC, 0, default_prompt)
     system_prompt = str(config.get("system_prompt") or "").strip() or default_prompt
     return WorkerSettings(
         timeout_seconds=int(config.get("timeout_seconds") or 0),
         max_turns=int(config.get("max_turns") or 0),
         system_prompt=system_prompt,
         recommended=is_recommended(system_prompt, str(config.get("default_prompt") or "") or default_prompt),
-        model=str(config.get("model") or "").strip() or None,
-        defaults=defaults,
     )
 
 
@@ -548,13 +542,13 @@ class WorkerPool:
         # Read as the run starts: a later change reaches the next run, not this one.
         project = await self._task_project(parent_task_id, worker_id)
         knowledge = await load_knowledge(self._runtime_root, project, work_dir)
-        library = await load_installed(self._runtime_root, agent.value, str((project or {}).get("id") or "") or None)
-        execution = ProjectExecution.from_row(project)
-        launch = resolve_launch(settings.defaults, settings.model, library, knowledge,
-                                project_model=execution.model, max_budget_usd=execution.run_budget_usd)
+        project_id = str((project or {}).get("id") or "") or None
+        library = await load_installed(self._runtime_root, agent.value, project_id)
+        agent_settings = await load_agent_settings(agent, project_id)
+        launch = Launch(agent_settings, library, knowledge)
         background = str((project or {}).get("background") or "")
         system_prompt = build_system_prompt(
-            harness=resolve_harness(agent, settings.defaults, project=project),
+            harness=agent_settings.harness,
             role_id=agent.value,
             role=settings.system_prompt,
             recommended=settings.recommended,
@@ -582,6 +576,9 @@ class WorkerPool:
         if library.error and parent_task_id:
             await self._activity(parent_task_id, worker_id, "error",
                                  f"Warning: {library.error}; this run goes without them"[:500])
+        if agent_settings.error and parent_task_id:
+            await self._activity(parent_task_id, worker_id, "error",
+                                 f"Warning: {agent_settings.error}; this run uses the built-in defaults"[:500])
         try:
             prompt_file = system_prompt.write_file(self._runtime_root)
         except OSError as exc:

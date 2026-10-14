@@ -481,7 +481,7 @@ class TestWorkerSystemPrompt:
         assert metadata["system_prompt"] == prompt
         assert metadata["system_prompt_sha256"] == _sha(prompt)
         layers = metadata["prompt_layers"]
-        assert layers["harness"] == {"source": "builtin_default", "sha256": _sha(DEFAULT_HARNESS_PROMPT)}
+        assert layers["harness"] == {"source": "builtin", "sha256": _sha(DEFAULT_HARNESS_PROMPT)}
         assert layers["role"] == {"config_id": "worker", "sha256": _sha(ROLE), "recommended": False}
         assert layers["project"] == {"id": "proj-1", "background_sha256": _sha("Use uv.\nPython 3.12."),
                                      "updated_at": "2026-10-13T12:00:00+00:00", "knowledge_sha256": None,
@@ -563,23 +563,21 @@ class TestWorkerSystemPrompt:
         assert agent_db.start_record.await_args.kwargs["metadata"]["prompt_layers"]["role"]["recommended"] is True
 
 
-def _project_row(project_id: str = "proj-1", *, worker: str = "", planner: str = "") -> dict[str, Any]:
-    return {"id": project_id, "name": project_id, "background": "", "worker_harness_prompt": worker,
-            "planner_harness_prompt": planner}
+def _project_row(project_id: str = "proj-1") -> dict[str, Any]:
+    return {"id": project_id, "name": project_id, "background": ""}
 
 
 class TestWorkerHarnessAndLaunch:
-    """Each Worker and Reviewer run reads the harness, the model, the effort
-    and the environment as it starts: its project's Worker harness else the
-    Settings default, its own row's model else the Settings default."""
+    """Each Worker and Reviewer run reads its agent settings in its task's
+    project as it starts (``agent_settings.load_agent_settings``)."""
 
     @pytest.fixture
     def rows(self, monkeypatch: pytest.MonkeyPatch) -> dict[str, dict[str, Any]]:
         """The ``worker`` and ``reviewer`` config rows, by agent id."""
         from loopx.db import agent_configs
 
-        rows = {"worker": {"system_prompt": "WORKER ROLE", "timeout_seconds": 0, "max_turns": 0, "model": None},
-                "reviewer": {"system_prompt": "REVIEWER ROLE", "timeout_seconds": 0, "max_turns": 0, "model": None}}
+        rows = {"worker": {"system_prompt": "WORKER ROLE", "timeout_seconds": 0, "max_turns": 0},
+                "reviewer": {"system_prompt": "REVIEWER ROLE", "timeout_seconds": 0, "max_turns": 0}}
 
         async def _config(agent_id: str) -> dict[str, Any] | None:
             return dict(rows[agent_id]) if agent_id in rows else None
@@ -588,54 +586,62 @@ class TestWorkerHarnessAndLaunch:
         return rows
 
     @staticmethod
-    def _settings(agent_db: Any, **stored: str) -> None:
-        keys = {"harness": "agent.harness_prompt", "model": "agent.model", "effort": "agent.effort", "env": "agent.env"}
-        agent_db.get_settings.return_value = {keys[name]: value for name, value in stored.items()}
+    def _settings(agent_db: Any, **stored: Any) -> None:
+        """The system layer, with these fields set."""
+        agent_db.list_layers.return_value = [{"scope": "system", **stored}]
 
     def test_the_projects_worker_harness_reaches_its_worker_and_reviewer_only(
         self, agent_db: Any, rows: dict[str, Any],
     ) -> None:
-        self._settings(agent_db, harness="DEFAULT HARNESS")
-        agent_db.get_task_project.return_value = _project_row("proj-a", worker="A WORKERS", planner="A PLANNER")
+        agent_db.list_layers.return_value = [
+            {"scope": "system", "harness_prompt": "DEFAULT HARNESS"},
+            {"scope": "role_project", "role": "worker", "project_id": "proj-a", "harness_prompt": "A WORKERS"},
+            {"scope": "role_project", "role": "planner", "project_id": "proj-a", "harness_prompt": "A PLANNER"},
+        ]
+        agent_db.get_task_project.return_value = _project_row("proj-a")
         prompts = [_system_prompt(_run_step(verify=verify)[1]) for verify in (False, True)]
         layers = [call.kwargs["metadata"]["prompt_layers"]["harness"]
                   for call in agent_db.start_record.await_args_list]
         assert [p.split("\n\n")[0] for p in prompts] == ["A WORKERS", "A WORKERS"]
         assert all("DEFAULT HARNESS" not in p and "A PLANNER" not in p for p in prompts)
-        assert layers == [{"source": "project_override", "sha256": _sha("A WORKERS"), "project_id": "proj-a"}] * 2
+        worker = {"source": "role_project", "sha256": _sha("A WORKERS"), "project_id": "proj-a"}
+        assert layers == [worker, {**worker, "from_role": "worker"}]
+        assert [call.args for call in agent_db.list_layers.await_args_list] == [("proj-a",)] * 2
         # A task in another project gets the default.
         agent_db.get_task_project.return_value = _project_row("proj-b")
         for verify in (False, True):
             assert _system_prompt(_run_step(verify=verify)[1]).startswith("DEFAULT HARNESS\n\n")
 
     def test_a_changed_default_applies_to_the_next_run(self, agent_db: Any, rows: dict[str, Any]) -> None:
-        self._settings(agent_db, harness="V1")
+        self._settings(agent_db, harness_prompt="V1")
         agent_db.get_task_project.return_value = {**_project_row(), "background": "Use uv."}
         _, first = _run_step()
-        self._settings(agent_db, harness="V2")
+        self._settings(agent_db, harness_prompt="V2")
         rows["worker"]["system_prompt"] = "WORKER ROLE v2"
         agent_db.get_task_project.return_value = {**_project_row(), "background": "Now use pnpm."}
         _, second = _run_step()
         assert _system_prompt(first).startswith("V1\n\nWORKER ROLE\n\n## Project: proj-1\nUse uv.\n\n")
         assert _system_prompt(second).startswith("V2\n\nWORKER ROLE v2\n\n## Project: proj-1\nNow use pnpm.\n\n")
 
-    def test_an_agent_model_beats_the_settings_default(self, agent_db: Any, rows: dict[str, Any]) -> None:
-        self._settings(agent_db, model="sonnet", effort="high")
-        rows["reviewer"]["model"] = "claude-haiku-4-5"
+    def test_a_role_model_beats_the_system_default(self, agent_db: Any, rows: dict[str, Any]) -> None:
+        agent_db.list_layers.return_value = [
+            {"scope": "system", "model": "sonnet", "effort": "high"},
+            {"scope": "role", "role": "reviewer", "model": "claude-haiku-4-5"},
+        ]
         _, work = _run_step()
         work_metadata = agent_db.start_record.await_args.kwargs["metadata"]
         _, review = _run_step(verify=True)
         review_metadata = agent_db.start_record.await_args.kwargs["metadata"]
         assert (_flag(work["argv"], "--model"), _flag(work["argv"], "--effort")) == ("sonnet", "high")
         assert (_flag(review["argv"], "--model"), _flag(review["argv"], "--effort")) == ("claude-haiku-4-5", "high")
-        assert work_metadata["model_choice"] == {"model": "sonnet", "source": "system_default", "effort": "high"}
-        assert review_metadata["model_choice"] == {"model": "claude-haiku-4-5", "source": "agent_override",
-                                                   "effort": "high"}
+        assert work_metadata["model_choice"] == {"model": "sonnet", "source": "system", "effort": "high"}
+        assert review_metadata["model_choice"] == {"model": "claude-haiku-4-5", "source": "role", "effort": "high"}
+        assert review_metadata["settings_sources"]["model"] == "role"
 
     def test_the_settings_environment_reaches_the_subprocess_and_its_names_are_recorded(
         self, monkeypatch: pytest.MonkeyPatch, agent_db: Any, rows: dict[str, Any],
     ) -> None:
-        self._settings(agent_db, env=json.dumps([{"key": "LOOPX_TEST_FLAVOUR", "value": "mint"}]))
+        self._settings(agent_db, env=[{"key": "LOOPX_TEST_FLAVOUR", "value": "mint"}])
         monkeypatch.setenv("LOOPX_SERVER_SIDE", "kept")
         launched: list[dict[str, Any]] = []
         real_exec = asyncio.create_subprocess_exec

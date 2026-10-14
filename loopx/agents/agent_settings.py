@@ -1,31 +1,38 @@
-"""What every agent inherits: the harness prompt, the model, the effort and the environment.
+"""What every agent inherits: the harness prompt, the model, the effort, the environment and the per-run cap.
 
 The harness prompt is an agent's character and stability (working principles,
 boundaries, how it communicates); the role prompt (``agent_configs``) says
-what that kind of agent is responsible for. A harness is resolved here, and
-only here, for an agent type and a project:
+what that kind of agent is responsible for. These five settings are resolved
+here, and only here, for a role and a project, through four layers, a later
+one winning (``agent_setting_layers``, one row per layer and place):
 
-- the **system default** is the Settings value, else the built-in
-  ``DEFAULT_HARNESS_PROMPT`` (``builtin_default``);
-- the **Manager** uses its own override (``agent_configs.manager.harness_prompt``)
-  when it has one (``manager_override``);
-- a **Planner** uses its project's ``planner_harness_prompt`` and a **Worker**
-  its project's ``worker_harness_prompt`` when set (``project_override``);
-- a **Reviewer** uses the same harness as the Workers of its project.
+1. **system** (Settings): every agent;
+2. **role** (Agents page): one role, everywhere: the Manager, the Planner,
+   the Workers or the Reviewers;
+3. **project** (the project's Settings tab): the Planner, Workers and
+   Reviewers of one project;
+4. **role in a project** (the same tab): one of those roles in one project.
 
-A run's model is its project's ``model`` for a task agent when set
-(``project_override``), else its agent's ``agent_configs.model`` when set
-(``agent_override``), else the Settings default, else ``DEFAULT_MODEL``. A task
-agent's project may also cap each Claude Code process (``--max-budget-usd``). The
-effort, when set, and the environment variables come from Settings for every
-agent. Every run also loads the catalog items installed for its role, globally
-or in its project (``library.load_installed``), and a task agent's launch
-carries its project's knowledge (``knowledge.load_knowledge``): the
-directories to mount.
-Settings live in ``system_settings``, one row per key; a missing row means
-the built-in default. An unreadable table falls back to the built-in
-defaults, so an agent still runs (and its record says where its harness came
-from).
+The Manager spans every project, so it has only the first two. Workers and
+Reviewers are never configured one by one. A field a layer leaves unset
+(NULL) inherits; with no layer setting it, the built-in default applies
+(``Layer.BUILTIN``): ``DEFAULT_HARNESS_PROMPT``, ``DEFAULT_MODEL``, Claude
+Code's own effort, no extra environment and no cap. The environment merges
+key by key: a later layer adds or overrides a variable, or unsets one an
+earlier layer set (a null value; the system layer has nothing to unset).
+A Reviewer with no harness of its own at the role or the role-in-project
+layer uses the Workers' harness at that same layer (``Harness.from_role``).
+A stored value that no longer validates is ignored with a warning, as if
+unset.
+
+Every run records each setting's value and the layer it came from (the
+harness in ``prompt_layers.harness``, the model in ``model_choice`` and all of
+them in ``settings_sources``). Every run also loads the catalog items
+installed for its role, globally or in its project (``library.load_installed``),
+and a task agent's launch carries its project's knowledge
+(``knowledge.load_knowledge``): the directories to mount. When the layers
+cannot be read, the Manager and a Planner keep the settings they last read;
+a Worker or Reviewer run, or a first read, uses the built-in defaults.
 """
 
 from __future__ import annotations
@@ -33,10 +40,11 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import math
 import os
 import re
-from collections.abc import Mapping
-from dataclasses import dataclass
+from collections.abc import Iterable, Mapping
+from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
@@ -86,13 +94,9 @@ HARNESS_MAX_CHARS = 20_000
 ENV_MAX_ENTRIES = 50
 ENV_VALUE_MAX_CHARS = 4_000
 MODEL_MAX_CHARS = 200
+BUDGET_MAX_USD = 100_000
 
-# system_settings keys.
-HARNESS_KEY = "agent.harness_prompt"
-MODEL_KEY = "agent.model"
-EFFORT_KEY = "agent.effort"
-ENV_KEY = "agent.env"
-_KEYS = (HARNESS_KEY, MODEL_KEY, EFFORT_KEY, ENV_KEY)
+FIELDS = ("harness_prompt", "model", "effort", "env", "run_budget_usd")
 
 
 class AgentType(str, Enum):
@@ -102,30 +106,25 @@ class AgentType(str, Enum):
     REVIEWER = "reviewer"
 
 
-class HarnessSource(str, Enum):
-    BUILTIN_DEFAULT = "builtin_default"
-    SYSTEM_DEFAULT = "system_default"
-    MANAGER_OVERRIDE = "manager_override"
-    PROJECT_OVERRIDE = "project_override"
+TASK_ROLES = (AgentType.PLANNER, AgentType.WORKER, AgentType.REVIEWER)
 
 
-class ModelSource(str, Enum):
-    BUILTIN_DEFAULT = "builtin_default"
-    SYSTEM_DEFAULT = "system_default"
-    AGENT_OVERRIDE = "agent_override"
-    PROJECT_OVERRIDE = "project_override"
+class Layer(str, Enum):
+    """Where a setting came from, in resolution order (``BUILTIN`` when no layer sets it)."""
 
-
-# The project field that overrides each task agent's harness; a Reviewer follows its project's Workers.
-_PROJECT_HARNESS_FIELD = {
-    AgentType.PLANNER: "planner_harness_prompt",
-    AgentType.WORKER: "worker_harness_prompt",
-    AgentType.REVIEWER: "worker_harness_prompt",
-}
+    BUILTIN = "builtin"
+    SYSTEM = "system"
+    ROLE = "role"
+    PROJECT = "project"
+    ROLE_PROJECT = "role_project"
 
 
 class SettingsError(ValueError):
     """A settings value the API refuses (answered with 400)."""
+
+
+class SettingsNotFound(LookupError):
+    """No such role or project (answered with 404)."""
 
 
 def sha256_text(text: str) -> str:
@@ -171,21 +170,22 @@ def model_name(raw: Any, *, field: str = "model") -> str:
 
 
 def effort_level(raw: Any) -> str:
-    """One of ``EFFORT_LEVELS``, or ``''`` (or None) for Claude Code's default."""
+    """One of ``EFFORT_LEVELS``, or ``''`` (or None) for none."""
     if raw is None or raw == "":
         return ""
     if raw not in EFFORT_LEVELS:
-        raise SettingsError(f"effort must be one of {', '.join(EFFORT_LEVELS)}, or empty for Claude Code's default")
+        raise SettingsError(f"effort must be one of {', '.join(EFFORT_LEVELS)}, or empty to inherit")
     return str(raw)
 
 
-def environment(raw: Any) -> dict[str, str]:
-    """Environment variables from ``[{"key": ..., "value": ...}]``, in order."""
+def environment(raw: Any, *, unset: bool = False) -> dict[str, str | None]:
+    """Environment variables from ``[{"key": ..., "value": ...}]``, in order; with ``unset`` a null value
+    (unset the variable) is allowed too."""
     if not isinstance(raw, list):
         raise SettingsError('environment must be a list of {"key": ..., "value": ...} entries')
     if len(raw) > ENV_MAX_ENTRIES:
         raise SettingsError(f"environment has at most {ENV_MAX_ENTRIES} entries, got {len(raw)}")
-    env: dict[str, str] = {}
+    env: dict[str, str | None] = {}
     for entry in raw:
         if not isinstance(entry, dict) or set(entry) != {"key", "value"}:
             raise SettingsError('each environment entry is {"key": ..., "value": ...}')
@@ -199,79 +199,112 @@ def environment(raw: Any) -> dict[str, str]:
                 f"{key} looks like a credential: secrets do not belong in agent settings, which are shown on the "
                 "dashboard and recorded; set it in the environment of the process that runs loopx serve"
             )
-        if not isinstance(value, str) or "\x00" in value or len(value) > ENV_VALUE_MAX_CHARS:
-            raise SettingsError(f"{key}: the value must be a string of at most {ENV_VALUE_MAX_CHARS} characters")
+        if value is None and unset:
+            pass
+        elif not isinstance(value, str) or "\x00" in value or len(value) > ENV_VALUE_MAX_CHARS:
+            unset_hint = ", or null to unset it" if unset else ""
+            raise SettingsError(
+                f"{key}: the value must be a string of at most {ENV_VALUE_MAX_CHARS} characters{unset_hint}")
         if key in env:
             raise SettingsError(f"environment variable {key} is given twice")
         env[key] = value
     return env
 
 
-# --- The defaults in Settings ---
-
-
-@dataclass(frozen=True)
-class AgentDefaults:
-    """The Settings values every agent inherits, with where each came from."""
-
-    harness: str
-    harness_source: HarnessSource  # BUILTIN_DEFAULT or SYSTEM_DEFAULT
-    model: str
-    model_source: ModelSource  # BUILTIN_DEFAULT or SYSTEM_DEFAULT
-    effort: str = ""  # '' = Claude Code's default
-    env: tuple[tuple[str, str], ...] = ()
-
-
-BUILTIN_DEFAULTS = AgentDefaults(
-    DEFAULT_HARNESS_PROMPT, HarnessSource.BUILTIN_DEFAULT, DEFAULT_MODEL, ModelSource.BUILTIN_DEFAULT,
-)
+def budget_usd(raw: Any, *, field: str = "run_budget_usd") -> float:
+    """A spend cap in US dollars: more than 0, at most ``BUDGET_MAX_USD``, at most 4 decimals."""
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)) or not math.isfinite(raw):
+        raise SettingsError(f"{field} must be a number of US dollars, or null for no cap")
+    amount = float(raw)
+    if not 0 < amount <= BUDGET_MAX_USD or round(amount, 4) != amount:
+        raise SettingsError(f"{field} must be more than 0 and at most {BUDGET_MAX_USD} US dollars, with at most "
+                            f"4 decimals; got {raw}")
+    return amount
 
 
 def _is_builtin_harness(text: str) -> bool:
     return text.strip() == DEFAULT_HARNESS_PROMPT.strip()
 
 
-def defaults_from(stored: Mapping[str, str]) -> AgentDefaults:
-    """The defaults from the stored rows; a missing, empty or unusable row is its built-in default."""
-    harness, harness_source = DEFAULT_HARNESS_PROMPT, HarnessSource.BUILTIN_DEFAULT
-    model, model_source = DEFAULT_MODEL, ModelSource.BUILTIN_DEFAULT
-    effort, env = "", ()
-    try:
-        text = harness_prompt(stored.get(HARNESS_KEY, ""))
-        if text and not _is_builtin_harness(text):
-            harness, harness_source = text, HarnessSource.SYSTEM_DEFAULT
-    except SettingsError as exc:
-        logger.warning("ignoring the stored default harness prompt: %s", exc)
-    try:
-        if name := model_name(stored.get(MODEL_KEY)):
-            model, model_source = name, ModelSource.SYSTEM_DEFAULT
-    except SettingsError as exc:
-        logger.warning("ignoring the stored default model: %s", exc)
-    try:
-        effort = effort_level(stored.get(EFFORT_KEY))
-    except SettingsError as exc:
-        logger.warning("ignoring the stored default effort: %s", exc)
-    try:
-        if ENV_KEY in stored:
-            env = tuple(environment(json.loads(stored[ENV_KEY])).items())
-    except (SettingsError, ValueError) as exc:
-        logger.warning("ignoring the stored default environment: %s", exc)
-    return AgentDefaults(harness, harness_source, model, model_source, effort, env)
+# --- One layer's values ---
 
 
-async def load_defaults() -> AgentDefaults:
-    """The Settings defaults, read now; the built-in ones when they cannot be read."""
-    from ..db import system_settings
+@dataclass(frozen=True)
+class LayerValues:
+    """What one layer sets; ``None`` (and an empty ``env``) is not set here."""
 
-    try:
-        stored = await system_settings.get_settings(_KEYS)
-    except Exception:
-        logger.warning("cannot read the agent settings; using the built-in defaults", exc_info=True)
-        return BUILTIN_DEFAULTS
-    return defaults_from(stored)
+    harness_prompt: str | None = None
+    model: str | None = None
+    effort: str | None = None
+    env: tuple[tuple[str, str | None], ...] = ()
+    run_budget_usd: float | None = None
+
+    @classmethod
+    def from_row(cls, row: Mapping[str, Any] | None) -> LayerValues:
+        """A stored row's values; one that no longer validates is ignored (unset), with a warning."""
+        if not row:
+            return EMPTY_LAYER
+        place = "/".join(str(row.get(k)) for k in ("scope", "role", "project_id") if row.get(k))
+        values: dict[str, Any] = {}
+        for name, parse in (
+            ("harness_prompt", lambda raw: harness_prompt(raw) or None),
+            ("model", lambda raw: model_name(raw) or None),
+            ("effort", lambda raw: effort_level(raw) or None),
+            ("env", lambda raw: tuple(environment(raw, unset=row.get("scope") != Layer.SYSTEM.value).items())),
+            ("run_budget_usd", budget_usd),
+        ):
+            raw = row.get(name)
+            if raw is None:
+                continue
+            try:
+                values[name] = parse(raw)
+            except SettingsError as exc:
+                logger.warning("ignoring the stored %s of agent settings %s: %s", name, place, exc)
+        return cls(**values)
+
+    def view(self) -> dict[str, Any]:
+        return {
+            "harness_prompt": self.harness_prompt,
+            "model": self.model,
+            "effort": self.effort,
+            "env": [{"key": key, "value": value} for key, value in self.env],
+            "run_budget_usd": self.run_budget_usd,
+        }
 
 
-# --- Resolution for one agent ---
+EMPTY_LAYER = LayerValues()
+
+
+def layer_update(data: Any, scope: Layer) -> dict[str, Any]:
+    """The fields of a layer update, validated, as stored: ``None`` (or ``""``) unsets one. Raises
+    ``SettingsError``; every field is checked before anything is written."""
+    if not isinstance(data, dict):
+        raise SettingsError("body must be a JSON object")
+    unknown = sorted(set(data) - set(FIELDS))
+    if unknown:
+        raise SettingsError(f"unknown field {unknown[0]!r}; the fields are {', '.join(FIELDS)}")
+    if not data:
+        raise SettingsError(f"give at least one of {', '.join(FIELDS)}")
+    values: dict[str, Any] = {}
+    for name, raw in data.items():
+        if name == "env":
+            env = environment([] if raw is None else raw, unset=scope is not Layer.SYSTEM)
+            values[name] = [{"key": key, "value": value} for key, value in env.items()]
+        elif raw is None or raw == "":
+            values[name] = None
+        elif name == "harness_prompt":
+            text = harness_prompt(raw)
+            values[name] = None if not text or (scope is Layer.SYSTEM and _is_builtin_harness(text)) else text
+        elif name == "model":
+            values[name] = model_name(raw) or None
+        elif name == "effort":
+            values[name] = effort_level(raw) or None
+        else:
+            values[name] = budget_usd(raw)
+    return values
+
+
+# --- Resolution ---
 
 
 @dataclass(frozen=True)
@@ -279,8 +312,9 @@ class Harness:
     """The harness an agent runs with and where it came from."""
 
     text: str
-    source: HarnessSource
+    source: Layer
     project_id: str | None = None
+    from_role: AgentType | None = None  # the role whose harness a Reviewer took, at the same layer
 
     def record(self) -> dict[str, Any]:
         """Its entry in a run's ``prompt_layers``."""
@@ -288,52 +322,168 @@ class Harness:
             "source": self.source.value,
             "sha256": sha256_text(self.text),
             **({"project_id": self.project_id} if self.project_id else {}),
+            **({"from_role": self.from_role.value} if self.from_role else {}),
         }
 
 
-def resolve_harness(
-    agent_type: AgentType | str,
-    defaults: AgentDefaults,
-    *,
-    manager_override: str = "",
-    project: Mapping[str, Any] | None = None,
-) -> Harness:
-    """The harness for ``agent_type``: its override when set, else the system default.
+@dataclass(frozen=True)
+class AgentSettings:
+    """The settings one agent runs with, each with the layer it came from."""
 
-    ``manager_override`` counts for the Manager only and ``project`` (the
-    project row) for the task agents only, so neither can reach another
-    agent type.
-    """
-    agent = AgentType(agent_type)
-    override, source, project_id = "", HarnessSource.PROJECT_OVERRIDE, None
-    if agent is AgentType.MANAGER:
-        override, source = manager_override, HarnessSource.MANAGER_OVERRIDE
-    elif project is not None:
-        override = str(project.get(_PROJECT_HARNESS_FIELD[agent]) or "")
-        project_id = str(project.get("id") or "") or None
-    text = _LEADING_BLANK_LINES.sub("", override).rstrip()
-    if text:
-        return Harness(text, source, project_id)
-    return Harness(defaults.harness, defaults.harness_source)
+    harness: Harness = Harness(DEFAULT_HARNESS_PROMPT, Layer.BUILTIN)
+    model: str = DEFAULT_MODEL
+    model_source: Layer = Layer.BUILTIN
+    effort: str = ""  # '' = Claude Code's default
+    effort_source: Layer = Layer.BUILTIN
+    env: tuple[tuple[str, str], ...] = ()
+    env_sources: tuple[tuple[str, Layer], ...] = ()
+    max_budget_usd: float | None = None  # --max-budget-usd on each Claude Code process; None for none
+    max_budget_source: Layer = Layer.BUILTIN
+    error: str | None = field(default=None, compare=False)  # why the layers could not be read
+
+    def sources(self) -> dict[str, Any]:
+        """Each setting's layer, for a run's record."""
+        return {
+            "harness": self.harness.source.value,
+            "model": self.model_source.value,
+            "effort": self.effort_source.value,
+            "env": {key: layer.value for key, layer in self.env_sources},
+            "run_budget_usd": self.max_budget_source.value,
+        }
+
+    def view(self) -> dict[str, Any]:
+        """What applies and where it came from, for the API."""
+        harness = {"value": self.harness.text, "source": self.harness.source.value}
+        if self.harness.from_role:
+            harness["from_role"] = self.harness.from_role.value
+        sources = dict(self.env_sources)
+        return {
+            "harness_prompt": harness,
+            "model": {"value": self.model, "source": self.model_source.value},
+            "effort": {"value": self.effort or None, "source": self.effort_source.value},
+            "env": [{"key": key, "value": value, "source": sources[key].value} for key, value in self.env],
+            "run_budget_usd": {"value": self.max_budget_usd, "source": self.max_budget_source.value},
+        }
+
+
+BUILTIN_SETTINGS = AgentSettings()
+
+Place = tuple[Layer, AgentType | None]  # a layer and its role, within one project at most
+
+
+def _chain(role: AgentType | None, project_id: str | None) -> list[Place]:
+    """The layers that apply to ``role`` (None: the system layer alone), first to last."""
+    if role is None:
+        return [(Layer.SYSTEM, None)]
+    chain: list[Place] = [(Layer.SYSTEM, None), (Layer.ROLE, role)]
+    if project_id and role is not AgentType.MANAGER:
+        chain += [(Layer.PROJECT, None), (Layer.ROLE_PROJECT, role)]
+    return chain
+
+
+def index_layers(rows: Iterable[Mapping[str, Any]], project_id: str | None) -> dict[Place, LayerValues]:
+    """The stored rows of one place (the system, the roles and ``project_id``) by layer and role."""
+    index: dict[Place, LayerValues] = {}
+    for row in rows:
+        if row.get("project_id") not in (None, project_id):
+            continue
+        try:
+            place = (Layer(row["scope"]), AgentType(row["role"]) if row.get("role") else None)
+        except ValueError:
+            continue
+        index[place] = LayerValues.from_row(row)
+    return index
+
+
+def resolve(role: AgentType | str | None, layers: Mapping[Place, LayerValues],
+            project_id: str | None = None) -> AgentSettings:
+    """The settings of ``role`` (in ``project_id``, if any) from the layers' values; ``role`` None resolves
+    the system layer alone."""
+    agent = AgentType(role) if role is not None else None
+    harness = BUILTIN_SETTINGS.harness
+    model, model_source = DEFAULT_MODEL, Layer.BUILTIN
+    effort, effort_source = "", Layer.BUILTIN
+    budget, budget_source = None, Layer.BUILTIN
+    env: dict[str, tuple[str, Layer]] = {}
+    for layer, layer_role in _chain(agent, project_id):
+        values = layers.get((layer, layer_role), EMPTY_LAYER)
+        text, from_role = values.harness_prompt, None
+        if text is None and agent is AgentType.REVIEWER and layer in (Layer.ROLE, Layer.ROLE_PROJECT):
+            # The Reviewers follow the Workers' harness where they have none of their own.
+            text = layers.get((layer, AgentType.WORKER), EMPTY_LAYER).harness_prompt
+            from_role = AgentType.WORKER if text is not None else None
+        if text is not None and not (layer is Layer.SYSTEM and _is_builtin_harness(text)):
+            in_project = project_id if layer in (Layer.PROJECT, Layer.ROLE_PROJECT) else None
+            harness = Harness(text, layer, in_project, from_role)
+        if values.model is not None:
+            model, model_source = values.model, layer
+        if values.effort is not None:
+            effort, effort_source = values.effort, layer
+        if values.run_budget_usd is not None:
+            budget, budget_source = values.run_budget_usd, layer
+        for key, value in values.env:
+            if value is None:
+                env.pop(key, None)
+            else:
+                env[key] = (value, layer)
+    return AgentSettings(
+        harness, model, model_source, effort, effort_source,
+        tuple((key, value) for key, (value, _) in env.items()),
+        tuple((key, layer) for key, (_, layer) in env.items()),
+        budget, budget_source,
+    )
+
+
+async def load_agent_settings(role: AgentType | str, project_id: str | None = None) -> AgentSettings:
+    """``role``'s settings in ``project_id`` (or outside any project), read now; the built-in defaults, with
+    ``error`` set, when the layers cannot be read."""
+    from ..db import agent_setting_layers
+
+    try:
+        rows = await agent_setting_layers.list_layers(project_id)
+    except Exception as exc:
+        logger.warning("cannot read the agent settings; using the built-in defaults", exc_info=True)
+        return AgentSettings(error=f"cannot read the agent settings ({type(exc).__name__})")
+    return resolve(role, index_layers(rows, project_id), project_id)
+
+
+# --- The launch ---
 
 
 @dataclass(frozen=True)
 class Launch:
-    """The model, effort, environment, installed items and project knowledge one agent run starts with
-    (and, for every agent alike, its permissions). Only a task agent's launch has knowledge."""
+    """What one agent run starts with besides its prompt: its settings (the model, effort, environment
+    and per-run cap), the installed items and, for a task agent, the project knowledge; and, for every
+    agent alike, its permissions."""
 
-    model: str
-    model_source: ModelSource
-    effort: str = ""
-    env: tuple[tuple[str, str], ...] = ()
+    settings: AgentSettings = BUILTIN_SETTINGS
     library: AgentLibrary = EMPTY_LIBRARY
     knowledge: AgentKnowledge = EMPTY_KNOWLEDGE
-    max_budget_usd: float | None = None  # the project's cap on each Claude Code process; None for none
+
+    @property
+    def model(self) -> str:
+        return self.settings.model
+
+    @property
+    def model_source(self) -> Layer:
+        return self.settings.model_source
+
+    @property
+    def effort(self) -> str:
+        return self.settings.effort
+
+    @property
+    def env(self) -> tuple[tuple[str, str], ...]:
+        return self.settings.env
+
+    @property
+    def max_budget_usd(self) -> float | None:
+        return self.settings.max_budget_usd
 
     def args(self) -> list[str]:
         """The Claude Code flags every agent starts with: the permissions, the model, the effort, the
         plugin directories of the installed items, the directories of the project knowledge and the
-        project's spend cap."""
+        per-run spend cap."""
         from .claude_cli import budget_args, knowledge_args, library_args, permission_args
 
         return [
@@ -346,7 +496,7 @@ class Launch:
         ]
 
     def environment(self) -> dict[str, str] | None:
-        """The subprocess environment: the server's, then the Settings variables; None without any."""
+        """The subprocess environment: the server's, then the settings' variables; None without any."""
         return {**os.environ, **dict(self.env)} if self.env else None
 
     @property
@@ -358,9 +508,10 @@ class Launch:
 
     def record(self) -> dict[str, Any]:
         """Its fields in a run's metadata: the model and its source, the variables' names (values hashed),
-        and the installed items and their hash."""
+        the installed items and their hash, the cap, and the layer each setting came from."""
         record: dict[str, Any] = {
             "model_choice": {"model": self.model, "source": self.model_source.value, "effort": self.effort or None},
+            "settings_sources": self.settings.sources(),
         }
         if self.env:
             record["env"] = {
@@ -374,104 +525,113 @@ class Launch:
         return record
 
 
-def resolve_launch(
-    defaults: AgentDefaults,
-    model_override: Any = None,
-    library: AgentLibrary = EMPTY_LIBRARY,
-    knowledge: AgentKnowledge = EMPTY_KNOWLEDGE,
-    *,
-    project_model: str | None = None,
-    max_budget_usd: float | None = None,
-) -> Launch:
-    """An agent's launch settings: for a task agent its project's model when set, else its own model when
-    set, else the default; the default effort and environment; the items installed for the run; and, for a
-    task agent, its project's knowledge and spend cap on each process."""
-    override = model_override.strip() if isinstance(model_override, str) else ""
-    model, source = defaults.model, defaults.model_source
-    if project_model:
-        model, source = project_model, ModelSource.PROJECT_OVERRIDE
-    elif override:
-        model, source = override, ModelSource.AGENT_OVERRIDE
-    return Launch(model, source, defaults.effort, defaults.env, library, knowledge, max_budget_usd)
+# --- The settings API ---
 
 
-# --- The settings API (GET, PUT and reset of /api/settings/agents) ---
-
-
-def settings_view(defaults: AgentDefaults) -> dict[str, Any]:
+def _limits() -> dict[str, Any]:
     return {
-        "default_harness_prompt": defaults.harness,
-        "harness_source": defaults.harness_source.value,
-        "builtin_harness_prompt": DEFAULT_HARNESS_PROMPT,
         "harness_max_chars": HARNESS_MAX_CHARS,
-        "default_model": defaults.model,
-        "model_source": defaults.model_source.value,
-        "builtin_model": DEFAULT_MODEL,
-        "default_effort": defaults.effort,
-        "effort_levels": list(EFFORT_LEVELS),
-        "default_env": [{"key": key, "value": value} for key, value in defaults.env],
         "env_max_entries": ENV_MAX_ENTRIES,
+        "effort_levels": list(EFFORT_LEVELS),
+        "builtin_harness_prompt": DEFAULT_HARNESS_PROMPT,
+        "builtin_model": DEFAULT_MODEL,
+        "budget_max_usd": BUDGET_MAX_USD,
     }
 
 
-async def get_settings() -> dict[str, Any]:
-    from ..db import system_settings
-
-    return settings_view(defaults_from(await system_settings.get_settings(_KEYS)))
-
-
-async def update_settings(data: Any) -> dict[str, Any]:
-    """Store the fields given; an empty value (or the built-in text) goes back to the built-in default.
-
-    Every field is validated before anything is written; raises ``SettingsError``.
-    """
-    from ..db import system_settings
-
-    if not isinstance(data, dict):
-        raise SettingsError("body must be a JSON object")
-    fields = {"default_harness_prompt", "default_model", "default_effort", "default_env"}
-    unknown = sorted(set(data) - fields)
-    if unknown:
-        raise SettingsError(f"unknown field {unknown[0]!r}; the fields are {', '.join(sorted(fields))}")
-    if not data:
-        raise SettingsError(f"give at least one of {', '.join(sorted(fields))}")
-    values: dict[str, str | None] = {}
-    if "default_harness_prompt" in data:
-        text = harness_prompt(data["default_harness_prompt"], field="default harness prompt")
-        values[HARNESS_KEY] = None if not text or _is_builtin_harness(text) else text
-    if "default_model" in data:
-        values[MODEL_KEY] = model_name(data["default_model"], field="default model") or None
-    if "default_effort" in data:
-        values[EFFORT_KEY] = effort_level(data["default_effort"]) or None
-    if "default_env" in data:
-        env = environment(data["default_env"])
-        values[ENV_KEY] = json.dumps([{"key": k, "value": v} for k, v in env.items()], ensure_ascii=False) if env else None
-    await system_settings.put_settings(values)
-    return await get_settings()
+def _role(raw: str, roles: Iterable[AgentType] = tuple(AgentType)) -> AgentType:
+    try:
+        role = AgentType(raw)
+    except ValueError:
+        raise SettingsNotFound(f"no role {raw!r}; the roles are {', '.join(r.value for r in roles)}") from None
+    if role not in roles:
+        raise SettingsError(f"the {role.value} spans every project: set it on the Agents page (its role layer)")
+    return role
 
 
-async def reset_harness() -> dict[str, Any]:
-    """Go back to the built-in default harness."""
-    from ..db import system_settings
+async def settings_view() -> dict[str, Any]:
+    """The system and role layers, and what applies to each role outside any project."""
+    from ..db import agent_setting_layers
 
-    await system_settings.put_settings({HARNESS_KEY: None})
-    return await get_settings()
+    layers = index_layers(await agent_setting_layers.list_layers(None), None)
+    return {
+        "limits": _limits(),
+        "system": {"values": layers.get((Layer.SYSTEM, None), EMPTY_LAYER).view(),
+                   "effective": resolve(None, layers).view()},
+        "roles": {
+            role.value: {"values": layers.get((Layer.ROLE, role), EMPTY_LAYER).view(),
+                         "effective": resolve(role, layers).view()}
+            for role in AgentType
+        },
+    }
+
+
+async def _existing_project(project_id: str) -> None:
+    from ..db import projects
+
+    if await projects.get_project(project_id) is None:
+        raise SettingsNotFound(f"project {project_id!r} not found")
+
+
+async def project_settings_view(project_id: str) -> dict[str, Any]:
+    """A project's layer, its roles' layers, and what applies to each of its task roles."""
+    from ..db import agent_setting_layers
+
+    await _existing_project(project_id)
+    layers = index_layers(await agent_setting_layers.list_layers(project_id), project_id)
+    return {
+        "project_id": project_id,
+        "limits": _limits(),
+        "project": {"values": layers.get((Layer.PROJECT, None), EMPTY_LAYER).view()},
+        "roles": {
+            role.value: {"values": layers.get((Layer.ROLE_PROJECT, role), EMPTY_LAYER).view(),
+                         "effective": resolve(role, layers, project_id).view()}
+            for role in TASK_ROLES
+        },
+    }
+
+
+async def update_system(data: Any) -> dict[str, Any]:
+    from ..db import agent_setting_layers
+
+    await agent_setting_layers.put_layer(Layer.SYSTEM.value, None, None, layer_update(data, Layer.SYSTEM))
+    return await settings_view()
+
+
+async def update_role(role: str, data: Any) -> dict[str, Any]:
+    from ..db import agent_setting_layers
+
+    agent = _role(role)
+    await agent_setting_layers.put_layer(Layer.ROLE.value, agent.value, None, layer_update(data, Layer.ROLE))
+    return await settings_view()
+
+
+async def update_project(project_id: str, data: Any, role: str | None = None) -> dict[str, Any]:
+    """Set the project's layer, or with ``role`` that role's layer in the project."""
+    import asyncpg
+
+    from ..db import agent_setting_layers
+
+    agent = _role(role, TASK_ROLES) if role is not None else None
+    scope = Layer.ROLE_PROJECT if agent else Layer.PROJECT
+    values = layer_update(data, scope)
+    await _existing_project(project_id)
+    try:
+        await agent_setting_layers.put_layer(scope.value, agent.value if agent else None, project_id, values)
+    except asyncpg.ForeignKeyViolationError:  # deleted meanwhile
+        raise SettingsNotFound(f"project {project_id!r} not found") from None
+    return await project_settings_view(project_id)
+
+
+_MOVED_AGENT_FIELDS = ("harness_prompt", "model")
 
 
 def agent_config_fields(agent_id: str, data: dict[str, Any]) -> dict[str, Any]:
-    """Validate the harness and model fields of an agent config update; returns ``data`` with them normalized.
-
-    Only the Manager has a harness override here: the task agents' harness
-    belongs to their project.
-    """
-    fields = dict(data)
-    if "harness_prompt" in fields:
-        if agent_id != AgentType.MANAGER.value:
+    """Refuse the settings an agent config no longer holds: they are the role layer's."""
+    for name in _MOVED_AGENT_FIELDS:
+        if name in data:
             raise SettingsError(
-                f"harness_prompt can be set on the manager only; the {agent_id} harness is the default one "
-                "(Settings) or its project's override"
+                f"{name} is an agent setting: set it on the {agent_id}'s role layer "
+                f"(PUT /api/agent-settings/roles/{agent_id})"
             )
-        fields["harness_prompt"] = harness_prompt(fields["harness_prompt"], field="harness_prompt")
-    if "model" in fields:
-        fields["model"] = model_name(fields["model"]) or None
-    return fields
+    return dict(data)

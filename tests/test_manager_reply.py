@@ -117,7 +117,7 @@ class TestManagerReply:
         assert system_prompt.endswith(TASK_PLACEMENT_RULE)
         assert start["metadata"]["system_prompt_sha256"] == _sha(system_prompt)
         layers = start["metadata"]["prompt_layers"]
-        assert layers["harness"] == {"source": "builtin_default", "sha256": _sha(DEFAULT_HARNESS_PROMPT)}
+        assert layers["harness"] == {"source": "builtin", "sha256": _sha(DEFAULT_HARNESS_PROMPT)}
         assert layers["role"]["config_id"] == "manager" and layers["role"]["recommended"] is True
         assert (layers["project"], layers["task"]) == (None, None)
         assert layers["contract"] == {"name": "TASK_PLACEMENT_RULE", "sha256": _sha(TASK_PLACEMENT_RULE)}
@@ -237,7 +237,7 @@ def _converse(
     *,
     prompts: list[str] | None = None,
     rows: list[dict[str, Any]] | None = None,
-    settings: list[dict[str, str]] | None = None,
+    layers: list[list[dict[str, Any]]] | None = None,
     between: Any = None,
     saved_session: str | None = None,
     saved_totals: dict[str, Any] | None = None,
@@ -245,8 +245,8 @@ def _converse(
     """Send ``messages`` one at a time to one Manager backed by a fake claude, then stop it.
 
     ``prompts[i]`` is the system prompt the database holds for message ``i``
-    (``rows[i]`` the whole manager row, instead) and ``settings[i]`` what the
-    Settings table holds; ``between(spawned)`` runs before every message after
+    (``rows[i]`` the whole manager row, instead) and ``layers[i]`` the agent
+    setting layers' rows; ``between(spawned)`` runs before every message after
     the first. Returns the final ``replies``, every started Claude as
     ``(argv, process)`` in ``spawned`` with its launch keywords in
     ``launched``, whether each was ``running`` just before ``stop()``, the
@@ -256,7 +256,7 @@ def _converse(
     memory in place of ``agent_sessions``; the returned ``saved_session`` and ``saved_totals`` are what
     the Manager saved last.
     """
-    from loopx.db import agent_configs, agent_sessions, system_settings
+    from loopx.db import agent_configs, agent_sessions, agent_setting_layers
 
     sessions: dict[str, dict[str, Any]] = {}
     if saved_session is not None:  # a session saved by an earlier run of the server
@@ -290,12 +290,12 @@ def _converse(
             return None
         return {"system_prompt": prompts[current["message"]]}
 
-    async def _get_settings(keys: Any) -> dict[str, str]:
-        return dict(settings[current["message"]]) if settings else {}
+    async def _list_layers(*_: Any, **__: Any) -> list[dict[str, Any]]:
+        return [dict(row) for row in layers[current["message"]]] if layers else []
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", _exec)
     monkeypatch.setattr(agent_configs, "get_config", _get_config)
-    monkeypatch.setattr(system_settings, "get_settings", _get_settings)
+    monkeypatch.setattr(agent_setting_layers, "list_layers", _list_layers)
 
     async def _run() -> dict[str, Any]:
         with tempfile.TemporaryDirectory() as tmp:
@@ -598,45 +598,55 @@ class TestManagerTaskPlacement:
         assert "database is down" in result.reply
 
 
-_HARNESS, _ENV = "agent.harness_prompt", "agent.env"
+def _system(**values: Any) -> dict[str, Any]:
+    return {"scope": "system", **values}
+
+
+def _manager(**values: Any) -> dict[str, Any]:
+    return {"scope": "role", "role": "manager", **values}
 
 
 @pytest.mark.usefixtures("agent_db")
 class TestManagerHarnessAndLaunch:
-    """The Manager's harness is its own override, else the Settings default; its
-    model is its own row's, else the Settings default (opus). Changing the
-    harness, the model or the Settings environment restarts its Claude, which
-    resumes the session."""
+    """The Manager's settings are the system layer's and its role layer's (it
+    spans every project). Changing its harness, model or environment restarts
+    its Claude, which resumes the session."""
 
     def test_three_layers_with_the_managers_own_harness(self, monkeypatch: pytest.MonkeyPatch, agent_db: Any) -> None:
-        row = {"system_prompt": "You manage.", "harness_prompt": "MANAGER HARNESS"}
-        chat = _converse(monkeypatch, _resident(), ["hello"], rows=[row], settings=[{_HARNESS: "DEFAULT"}])
+        row = {"system_prompt": "You manage."}
+        # A project's layer never reaches the Manager.
+        layers = [_system(harness_prompt="DEFAULT"), _manager(harness_prompt="MANAGER HARNESS"),
+                  {"scope": "project", "project_id": "proj-1", "harness_prompt": "PROJECT", "model": "haiku"}]
+        chat = _converse(monkeypatch, _resident(), ["hello"], rows=[row], layers=[layers])
         (prompt,) = chat["prompts"]
         assert prompt == f"MANAGER HARNESS\n\nYou manage.\n\n{TASK_PLACEMENT_RULE}"
-        layers = agent_db.start_record.await_args.kwargs["metadata"]["prompt_layers"]
-        assert layers["harness"] == {"source": "manager_override", "sha256": _sha("MANAGER HARNESS")}
+        metadata = agent_db.start_record.await_args.kwargs["metadata"]
+        assert metadata["prompt_layers"]["harness"] == {"source": "role", "sha256": _sha("MANAGER HARNESS")}
+        assert metadata["model_choice"]["model"] == "opus"
+        (spawned, _), = chat["spawned"]
+        assert _flag(spawned, "--model") == "opus"
 
     @pytest.mark.parametrize("change", ["harness", "override", "model"])
     def test_a_changed_harness_or_model_restarts_claude_resuming_its_session(
         self, monkeypatch: pytest.MonkeyPatch, change: str,
     ) -> None:
-        before = {"system_prompt": "M.", "harness_prompt": "", "model": None}
-        after = {**before, **({"harness_prompt": "OWN"} if change == "override" else {}),
-                 **({"model": "sonnet"} if change == "model" else {})}
-        settings = [{_HARNESS: "V1"}, {_HARNESS: "V2" if change == "harness" else "V1"}]
-        chat = _converse(monkeypatch, _resident(), ["hello", "again"], rows=[before, after], settings=settings)
+        before = [_system(harness_prompt="V1")]
+        after = [_system(harness_prompt="V2" if change == "harness" else "V1"),
+                 *([_manager(harness_prompt="OWN")] if change == "override" else []),
+                 *([_manager(model="sonnet")] if change == "model" else [])]
+        row = {"system_prompt": "M."}
+        chat = _converse(monkeypatch, _resident(), ["hello", "again"], rows=[row, row], layers=[before, after])
         assert chat["replies"] == ["turn 1: hello", "turn 1: again"]  # a new process for the second message
         (first, _), (second, _) = chat["spawned"]
         assert (_flag(first, "--resume"), _flag(second, "--resume")) == (None, "sess-1")
         assert chat["running"] == [False, True]
-        if change == "model":  # the built-in default, then the Manager's own row
+        if change == "model":  # the built-in default, then the Manager's role layer
             assert (_flag(first, "--model"), _flag(second, "--model")) == ("opus", "sonnet")
 
     def test_a_changed_environment_restarts_claude_with_it(self, monkeypatch: pytest.MonkeyPatch, agent_db: Any) -> None:
         monkeypatch.setenv("LOOPX_SERVER_SIDE", "kept")
-        env = [{_ENV: json.dumps([{"key": "LOOPX_TEST_FLAVOUR", "value": flavour}])} for flavour in ("mint", "mint",
-                                                                                                    "lime")]
-        chat = _converse(monkeypatch, _resident(), ["hello", "again", "third"], settings=env)
+        env = [[_system(env=[{"key": "LOOPX_TEST_FLAVOUR", "value": flavour}])] for flavour in ("mint", "mint", "lime")]
+        chat = _converse(monkeypatch, _resident(), ["hello", "again", "third"], layers=env)
         assert chat["replies"] == ["turn 1: hello", "turn 2: again", "turn 1: third"]
         assert [(k["env"]["LOOPX_TEST_FLAVOUR"], k["env"]["LOOPX_SERVER_SIDE"]) for k in chat["launched"]] == [
             ("mint", "kept"), ("lime", "kept")]

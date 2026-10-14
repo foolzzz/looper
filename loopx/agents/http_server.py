@@ -244,6 +244,9 @@ class AgentHTTPServer:
     _RE_PROJECT_KNOWLEDGE = re.compile(r"^/api/projects/(proj-[a-zA-Z0-9]+)/knowledge$")
     _RE_PROJECT_DOCUMENT = re.compile(r"^/api/projects/(proj-[a-zA-Z0-9]+)/knowledge/(doc-[a-zA-Z0-9]+)$")
     _RE_PROJECT_INSTALLS = re.compile(r"^/api/projects/(proj-[a-zA-Z0-9]+)/installs$")
+    _RE_PROJECT_AGENT_SETTINGS = re.compile(r"^/api/projects/(proj-[a-zA-Z0-9]+)/agent-settings$")
+    _RE_PROJECT_ROLE_SETTINGS = re.compile(r"^/api/projects/(proj-[a-zA-Z0-9]+)/agent-settings/roles/([a-zA-Z0-9_-]+)$")
+    _RE_ROLE_SETTINGS = re.compile(r"^/api/agent-settings/roles/([a-zA-Z0-9_-]+)$")
     _RE_PROJECT_SKILLS = re.compile(r"^/api/projects/(proj-[a-zA-Z0-9]+)/skills$")
     _RE_PROJECT_SKILL = re.compile(r"^/api/projects/(proj-[a-zA-Z0-9]+)/skills/(skill-[a-zA-Z0-9]+)$")
 
@@ -359,12 +362,21 @@ class AgentHTTPServer:
             await self._handle_update_llm_profile(int(m.group(1)), body, writer)
         elif (m := self._RE_LLM_PROFILE.match(path)) and method == "DELETE":
             await self._handle_delete_llm_profile(int(m.group(1)), writer)
-        elif path == "/api/settings/agents" and method == "GET":
-            await self._handle_agent_settings(writer, agent_settings.get_settings)
-        elif path == "/api/settings/agents" and method == "PUT":
-            await self._handle_agent_settings(writer, lambda: agent_settings.update_settings(projects.json_object(body)))
-        elif path == "/api/settings/agents/reset-harness" and method == "POST":
-            await self._handle_agent_settings(writer, agent_settings.reset_harness)
+        elif path == "/api/agent-settings" and method == "GET":
+            await self._handle_agent_settings(writer, agent_settings.settings_view)
+        elif path == "/api/agent-settings/system" and method == "PUT":
+            await self._handle_agent_settings(writer, lambda: agent_settings.update_system(projects.json_object(body)))
+        elif (m := self._RE_ROLE_SETTINGS.match(path)) and method == "PUT":
+            await self._handle_agent_settings(writer, lambda: agent_settings.update_role(
+                m.group(1), projects.json_object(body)))
+        elif (m := self._RE_PROJECT_AGENT_SETTINGS.match(path)) and method == "GET":
+            await self._handle_agent_settings(writer, lambda: agent_settings.project_settings_view(m.group(1)))
+        elif (m := self._RE_PROJECT_AGENT_SETTINGS.match(path)) and method == "PUT":
+            await self._handle_agent_settings(writer, lambda: agent_settings.update_project(
+                m.group(1), projects.json_object(body)))
+        elif (m := self._RE_PROJECT_ROLE_SETTINGS.match(path)) and method == "PUT":
+            await self._handle_agent_settings(writer, lambda: agent_settings.update_project(
+                m.group(1), projects.json_object(body), role=m.group(2)))
         elif path == "/api/catalog" and method == "GET":
             await self._handle_catalog(writer, HTTP_200, catalog.catalog_view)
         elif path == "/api/catalog/import" and method == "POST":
@@ -1075,11 +1087,14 @@ class AgentHTTPServer:
     async def _handle_agent_settings(
         self, writer: asyncio.StreamWriter, request: Callable[[], Awaitable[dict[str, Any]]],
     ) -> None:
-        """Answer with the agent settings ``request()`` returns; a refused value is 400."""
+        """Answer with the agent settings ``request()`` returns; a refused value is 400, an unknown role or
+        project 404."""
         try:
             result = await request()
         except (agent_settings.SettingsError, projects.RequestError) as exc:
-            status, result = HTTP_400, {"error": str(exc)}
+            status, result = getattr(exc, "status", HTTP_400), {"error": str(exc)}
+        except agent_settings.SettingsNotFound as exc:
+            status, result = HTTP_404, {"error": str(exc)}
         except Exception as exc:
             logger.exception("agent settings request failed")
             status, result = HTTP_500, {"error": str(exc)}
