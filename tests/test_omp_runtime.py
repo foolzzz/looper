@@ -29,7 +29,7 @@ from looper.agents.mcp import write_config
 from looper.agents.run_usage import Usage, request_context, run_usage
 from looper.agents.runtimes import ROLE_CAPABILITIES, ApiProtocol, AuthKind, RuntimeUnsupported, adapter
 from looper.agents.runtimes.omp import (
-    KEY_ENV, OVERLAY, SHELL_PREFIX_VAR, OmpRuntime, ResidentOmp, edited_paths, write_prompt,
+    KEY_ENV, OVERLAY, RESTORED_VARS, SHELL_PREFIX_VAR, OmpRuntime, ResidentOmp, edited_paths, write_prompt,
 )
 from looper.agents.system_prompt import SystemPrompt
 
@@ -223,6 +223,10 @@ def _operator(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     (home / ".omp" / "agent" / "models.yml").write_text("providers: {}\n")
     (home / ".agents" / "skills" / "mine").mkdir(parents=True)
     (home / ".env").write_text("OPERATOR_SECRET=1\n")
+    # The machine's own values of the other restored variables (CI images set XDG_CONFIG_HOME, for one) would
+    # otherwise come back too and make the expected environment depend on where the test runs.
+    for name in RESTORED_VARS:
+        monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("XDG_CACHE_HOME", str(home / ".cache"))
     monkeypatch.setenv("PI_CODING_AGENT_DIR", str(home / ".omp" / "agent"))
