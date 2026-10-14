@@ -60,18 +60,15 @@ from ..claude_cli import (
     AutonomousHandler,
     AutonomousRun,
     ClaudeRunRecorder,
-    ResidentClaude,
     ResidentTurn,
-    budget_error,
     exit_note,
-    isolation_args,
-    system_prompt_args,
 )
 from .. import knowledge as project_knowledge
 from ..knowledge import AgentKnowledge, documents_label, load_knowledge
 from ..library import AgentLibrary, items_label, load_installed
 from ..project_execution import ProjectExecution, TaskBudgetAction, format_usd
 from ..run_usage import Usage
+from ..runtimes import CLAUDE_CODE
 from ..system_prompt import SystemPrompt, build_system_prompt, is_recommended, plan_task_section
 from ..message import (
     TASK_ROUTER_ADDRESS,
@@ -358,7 +355,7 @@ class PlannerAgent:
         self._plan: TaskPlan | None = None
         self._loop_task: asyncio.Task[Any] | None = None
         self._running = False
-        self._claude = ResidentClaude(label=self.agent_id)
+        self._claude = CLAUDE_CODE.resident_session(self.agent_id)
         self._turn_lock = asyncio.Lock()
         self._supervise_task: asyncio.Task[Any] | None = None
         # When the last turn ended, so a periodic SUPERVISE is skipped right
@@ -1151,27 +1148,9 @@ class PlannerAgent:
                 self._last_turn_at = time.monotonic()
 
     def _claude_command(self, prompt_file: Path, settings: PlannerSettings, launch: Launch, work_dir: str) -> list[str]:
-        """The Planner's Claude, without ``--resume``."""
-        return [
-            self._claude_bin,
-            "--print",
-            "--verbose",
-            "--output-format", "stream-json",
-            # Each event is one user turn on stdin; Claude idles between turns.
-            "--input-format", "stream-json",
-            # Partial deltas keep the turn's heartbeat current while Claude writes.
-            "--include-partial-messages",
-            # Claude echoes each message, marked with the uuid it was sent with, when it starts the message's
-            # turn; a turn Claude runs on its own has no such echo.
-            "--replay-user-messages",
-            # None of the operator's personal settings, memory, hooks, plugins or MCP servers; the
-            # permissions every agent shares and the plugins and skills installed for the Planner come
-            # with the launch args.
-            *isolation_args(work_dir),
-            *system_prompt_args(prompt_file),
-            *launch.args(),
-            *(["--max-turns", str(settings.max_turns)] if settings.max_turns > 0 else []),
-        ]
+        """The Planner's resident process (``RuntimeAdapter.resident_command``), without resuming a session."""
+        return launch.runtime.resident_command(self._claude_bin, cwd=work_dir, prompt_file=prompt_file,
+                                               launch=launch, max_turns=settings.max_turns)
 
     async def _run_turn(self, message: str, *, retried: bool = False) -> str:
         """Send ``message`` as one turn and return Claude's final message; raises ``PlannerTurnError``."""
@@ -1205,7 +1184,7 @@ class PlannerAgent:
             command = self._claude.command
         else:
             resuming = plan.session_id
-            command = base + (["--resume", plan.session_id] if plan.session_id else [])
+            command = base + (launch.runtime.resume_args(plan.session_id) if plan.session_id else [])
             try:
                 await self._claude.start(command, cwd=plan.work_dir, signature=signature, env=launch.environment(),
                                          totals=plan.session_totals if plan.session_id else None,
@@ -1273,10 +1252,10 @@ class PlannerAgent:
         error: str | None = None
         if result_event is None:
             error = f"Claude Code exited before finishing the turn (exit code {turn.exit_code})"
-        elif budget_error(result_event):
+        elif launch.runtime.budget_error(result_event):
             # The process answers every later turn the same way at once: the next turn starts a new one,
             # with a new cap, that resumes the session.
-            error = budget_error(result_event)
+            error = launch.runtime.budget_error(result_event)
             await self._claude.stop()
         elif result_event.get("is_error") or result_event.get("subtype") != "success":
             error = f"Claude Code turn did not succeed ({result_event.get('subtype') or 'error'})"

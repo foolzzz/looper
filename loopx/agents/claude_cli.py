@@ -20,6 +20,7 @@ if TYPE_CHECKING:
     from .agent_settings import Launch
     from .knowledge import AgentKnowledge
     from .library import AgentLibrary
+    from .runtimes import RuntimeAdapter
     from .system_prompt import SystemPrompt
 
 logger = logging.getLogger(__name__)
@@ -230,6 +231,20 @@ async def iter_lines(stream: asyncio.StreamReader) -> AsyncIterator[bytes]:
         yield bytes(pending)
 
 
+async def stream_events(stream: asyncio.StreamReader) -> AsyncIterator[dict[str, Any]]:
+    """Claude's stream-json events on ``stream``, in order; a line that is not a JSON object is skipped."""
+    async for raw_line in iter_lines(stream):
+        line = raw_line.decode("utf-8", errors="replace").strip()
+        if not line:
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(event, dict):
+            yield event
+
+
 async def write_user_turn(stdin: asyncio.StreamWriter, text: str, *, uuid: str | None = None) -> None:
     """One user message in Claude's stream-json input format; Claude keeps the ``uuid`` given."""
     message: dict[str, Any] = {"type": "user", "message": {"role": "user", "content": text}}
@@ -378,16 +393,8 @@ class _Output:
 
     async def _read(self) -> None:
         try:
-            async for raw_line in iter_lines(self._stdout):
-                line = raw_line.decode("utf-8", errors="replace").strip()
-                if not line:
-                    continue
-                try:
-                    event = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if isinstance(event, dict):
-                    await self._dispatch(event)
+            async for event in stream_events(self._stdout):
+                await self._dispatch(event)
         except Exception as exc:
             # Reading failed, or the owner's handling of a user turn's event did: that turn fails with it.
             turn, self.turn = self.turn, None
@@ -835,6 +842,12 @@ class ClaudeRunRecorder:
         except Exception:
             logger.warning("could not record event for %s", self._agent_id, exc_info=True)
 
+    def _runtime(self) -> RuntimeAdapter:
+        """The runtime the recorded run went through (Claude Code for a record without a launch)."""
+        from .runtimes import CLAUDE_CODE
+
+        return self._launch.runtime if self._launch is not None else CLAUDE_CODE
+
     async def _heartbeat(self) -> None:
         """Any output, partial deltas included, shows the run is not stuck."""
         now = _clock()
@@ -869,7 +882,7 @@ class ClaudeRunRecorder:
         result = result_event or {}
         succeeded = error is None and result.get("subtype") == "success" and not result.get("is_error")
         if usage is None:
-            usage = run_usage(result_event)
+            usage = self._runtime().usage(result_event)
         try:
             await llm_records.finish_record(
                 self._record_id,

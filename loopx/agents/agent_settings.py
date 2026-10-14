@@ -41,15 +41,17 @@ import hashlib
 import json
 import logging
 import math
-import os
 import re
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from .knowledge import EMPTY_KNOWLEDGE, AgentKnowledge
 from .library import EMPTY_LIBRARY, AgentLibrary
+
+if TYPE_CHECKING:
+    from .runtimes import RuntimeAdapter
 
 logger = logging.getLogger(__name__)
 
@@ -480,24 +482,20 @@ class Launch:
     def max_budget_usd(self) -> float | None:
         return self.settings.max_budget_usd
 
-    def args(self) -> list[str]:
-        """The Claude Code flags every agent starts with: the permissions, the model, the effort, the
-        plugin directories of the installed items, the directories of the project knowledge and the
-        per-run spend cap."""
-        from .claude_cli import budget_args, knowledge_args, library_args, permission_args
+    @property
+    def runtime(self) -> RuntimeAdapter:
+        """The runtime the agent runs on, which lays out its command."""
+        from .runtimes import CLAUDE_CODE
 
-        return [
-            *permission_args(),
-            "--model", self.model,
-            *(["--effort", self.effort] if self.effort else []),
-            *library_args(self.library),
-            *knowledge_args(self.knowledge),
-            *budget_args(self.max_budget_usd),
-        ]
+        return CLAUDE_CODE
+
+    def args(self) -> list[str]:
+        """The runtime's flags for these settings, installed items and knowledge (``RuntimeAdapter.launch_args``)."""
+        return self.runtime.launch_args(self)
 
     def environment(self) -> dict[str, str] | None:
-        """The subprocess environment: the server's, then the settings' variables; None without any."""
-        return {**os.environ, **dict(self.env)} if self.env else None
+        """The subprocess environment (``RuntimeAdapter.environment``); None to inherit the server's."""
+        return self.runtime.environment(self)
 
     @property
     def env_sha256(self) -> str | None:

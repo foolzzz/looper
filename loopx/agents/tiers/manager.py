@@ -32,15 +32,13 @@ from ..claude_cli import (
     AutonomousHandler,
     AutonomousRun,
     ClaudeRunRecorder,
-    ResidentClaude,
     ResidentTurn,
     exit_note,
-    isolation_args,
-    system_prompt_args,
 )
 from ..library import load_installed
 from ..projects import project_name
 from ..run_usage import Usage
+from ..runtimes import CLAUDE_CODE
 from ..system_prompt import SystemPrompt, build_system_prompt, is_recommended
 from .task import resolve_work_dir
 from ..message import (
@@ -168,7 +166,7 @@ class ManagerAgent:
         self._goal_snapshots: dict[str, GoalSnapshot] = {}
         # The resident Claude: started on the first chat message, then fed one
         # user turn per message; restarted when its system prompt changes.
-        self._claude = ResidentClaude(label="manager")
+        self._claude = CLAUDE_CODE.resident_session("manager")
         self._turn_lock = asyncio.Lock()
         self._session_loaded = False  # whether the saved session was read (at start, else before the first turn)
 
@@ -462,8 +460,8 @@ class ManagerAgent:
         )
         await recorder.start()
 
-        # The session this turn's new process resumes, if it starts one.
-        resuming = self._session_id if not self._claude.started and "--resume" in command else None
+        # The session this turn's new process resumes, if it starts one (its command resumes the saved session).
+        resuming = self._session_id if not self._claude.started else None
         if not self._claude.started:
             try:
                 await self._claude.start(
@@ -652,25 +650,12 @@ class ManagerAgent:
         ))
 
     def _claude_command(self, prompt_file: Path, launch: Launch, *, resume: bool = True) -> list[str]:
-        command = [
-            self._config.claude_bin,
-            "--print",
-            "--verbose",
-            "--output-format", "stream-json",
-            # Each chat message is one user turn on stdin; Claude idles between turns.
-            "--input-format", "stream-json",
-            "--include-partial-messages",  # stream the reply as it is written
-            # Claude echoes each message, marked with the uuid it was sent with, when it starts the message's
-            # turn; a turn Claude runs on its own has no such echo.
-            "--replay-user-messages",
-            # None of the operator's personal settings, memory, hooks, plugins or MCP servers; the
-            # permissions every agent shares and the plugins and skills installed for it come with the launch args.
-            *isolation_args(self._config.work_dir),
-            *system_prompt_args(prompt_file),
-            *launch.args(),
-        ]
+        """The resident process's command (``RuntimeAdapter.resident_command``), resuming the saved session."""
+        runtime = launch.runtime
+        command = runtime.resident_command(self._config.claude_bin, cwd=self._config.work_dir,
+                                           prompt_file=prompt_file, launch=launch)
         if resume and self._session_id:
-            command.extend(["--resume", self._session_id])
+            command.extend(runtime.resume_args(self._session_id))
         return command
 
     async def _build_user_message(self, user_message: str) -> str:

@@ -31,16 +31,10 @@ from typing import Any
 
 from ..agent_settings import AgentType, Launch, load_agent_settings
 from ..bus import MessageBus
-from ..claude_cli import (
-    ClaudeRunRecorder,
-    budget_error,
-    isolation_args,
-    iter_lines,
-    system_prompt_args,
-    write_user_turn,
-)
+from ..claude_cli import ClaudeRunRecorder, budget_error
 from ..knowledge import documents_label, load_knowledge
 from ..library import items_label, load_installed
+from ..runtimes import RuntimeAdapter
 from ..message import (
     AgentAddress,
     MessageEnvelope,
@@ -282,8 +276,8 @@ class WorkerPool:
         self._running = False
         self._workers_dir = runtime_root / ".local" / "workers"
         self._workers_dir.mkdir(parents=True, exist_ok=True)
-        # stdin of each running Claude, open until its result: more user turns go here.
-        self._inputs: dict[str, asyncio.StreamWriter] = {}
+        # stdin of each running Claude, open until its result, and its runtime: more user turns go here.
+        self._inputs: dict[str, tuple[asyncio.StreamWriter, RuntimeAdapter]] = {}
 
     @property
     def agent_id(self) -> str:
@@ -418,11 +412,12 @@ class WorkerPool:
 
     async def send_input(self, worker_id: str, text: str) -> bool:
         """Add a user turn to a running worker; Claude reads it at its next turn."""
-        stdin = self._inputs.get(worker_id)
-        if stdin is None or not text.strip():
+        running = self._inputs.get(worker_id)
+        if running is None or not text.strip():
             return False
+        stdin, runtime = running
         try:
-            await write_user_turn(stdin, text)
+            await runtime.write_turn(stdin, text)
         except (BrokenPipeError, ConnectionResetError, RuntimeError):
             self._inputs.pop(worker_id, None)
             return False
@@ -587,27 +582,9 @@ class WorkerPool:
             if is_verify:
                 return {"passed": False, "findings": [problem], "summary": problem}
             return {"status": "failed", "error": problem}
-        command = [
-            self._config.claude_bin,
-            "--print",
-            "--verbose",
-            "--output-format", "stream-json",
-            # Partial deltas keep the run's heartbeat current while Claude thinks.
-            "--include-partial-messages",
-            # The prompt and any later user turns arrive on stdin, so the
-            # Planner can step in while the run is going.
-            "--input-format", "stream-json",
-            "--replay-user-messages",
-            # None of the operator's personal settings, memory, hooks, plugins
-            # or MCP servers (whose teardown could also make the CLI exit
-            # non-zero). Built-in tools are unaffected; the permissions every
-            # agent shares and the plugins and skills installed for this run
-            # come with the launch args.
-            *isolation_args(work_dir),
-            *system_prompt_args(prompt_file),
-            *launch.args(),
-            *(["--max-turns", str(max_turns)] if max_turns > 0 else []),
-        ]
+        runtime = launch.runtime
+        command = runtime.run_command(self._config.claude_bin, cwd=work_dir, prompt_file=prompt_file, launch=launch,
+                                      max_turns=max_turns)
 
         if parent_task_id:
             cmd_display = _display_command(command) + f"  (prompt on stdin, {len(prompt)} chars)"
@@ -656,8 +633,8 @@ class WorkerPool:
 
         assert process.stdin is not None
         try:
-            await write_user_turn(process.stdin, prompt)
-            self._inputs[worker_id] = process.stdin
+            await runtime.write_turn(process.stdin, prompt)
+            self._inputs[worker_id] = (process.stdin, runtime)
         except (BrokenPipeError, ConnectionResetError):
             # Claude exited before reading; its output decides the outcome.
             logger.warning("worker %s: Claude closed stdin before the prompt was sent", worker_id)
@@ -672,16 +649,7 @@ class WorkerPool:
         async def _read_stream() -> None:
             nonlocal result_event
             assert process.stdout is not None
-            async for raw_line in iter_lines(process.stdout):
-                line = raw_line.decode("utf-8", errors="replace").strip()
-                if not line:
-                    continue
-                try:
-                    event = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if not isinstance(event, dict):
-                    continue
+            async for event in runtime.events(process.stdout):
                 await recorder.record(event)
 
                 event_type = event.get("type", "")
@@ -778,7 +746,7 @@ class WorkerPool:
             and result_event.get("subtype") == "success"
         )
         # A run stopped at its spend cap exits non-zero too; its result says why.
-        if return_code != 0 and not result_ok and budget_error(result_event) is None:
+        if return_code != 0 and not result_ok and runtime.budget_error(result_event) is None:
             stderr = ""
             if process.stderr:
                 stderr_bytes = await process.stderr.read()
