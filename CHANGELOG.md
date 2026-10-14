@@ -92,7 +92,21 @@ How the agent system works today is described in
   stored secret, and importing the same file again changes nothing. Both
   use the database directly, so a catalog over the server's 8 MiB request cap
   moves too. Settings has an Export download (streamed,
-  `GET /api/config/export?projects=1&secrets=1`); importing is CLI-only.
+  `GET /api/config/export?projects=1&secrets=1`) and an Import (below).
+- **Importing a configuration file from Settings.** "Move to another machine"
+  takes a chosen or dropped file, shows the import's preview per section
+  (added, changed with the fields, unchanged, skipped) with the secrets to
+  fill in, and applies it after a confirmation; the result links to the
+  provider, MCP server or channel form that takes each secret
+  (`#settings/provider|mcp|channel/<id>`). `POST /api/config/imports` is the
+  only route that takes more than the 8 MiB request cap: it streams up to
+  256 MiB to a 0600 file under `<runtime root>/config-imports/` and answers
+  with an import id and the preview; `POST /api/config/imports/<id>/apply`
+  writes it in one transaction like `loopx config import --apply` and deletes
+  the file, `DELETE /api/config/imports/<id>` cancels, and an import not
+  applied expires after an hour (404 afterwards, as after a restart). At most
+  4 imports wait at once. `loopx config import` remains the way for larger
+  files.
 - **MCP servers in the capability catalog.** An MCP server is a catalog item
   of kind `mcp` (stdio: command, arguments, environment; or http/sse: URL,
   headers), installed like a plugin or a skill: globally or in one project,

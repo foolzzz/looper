@@ -25,6 +25,7 @@ import {
 } from "@/lib/api";
 import { formatUsd } from "@/lib/usage";
 import { useRegistry } from "@/lib/use-registry";
+import { useSettingsTarget } from "@/lib/settings-target";
 
 const SELECT = "flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm text-foreground";
 const LABEL = "text-xs font-medium text-muted-foreground";
@@ -90,14 +91,16 @@ function Row({
   actions,
   children,
   below,
+  ref,
 }: {
   title: React.ReactNode;
   actions: React.ReactNode;
   children: React.ReactNode;
   below: React.ReactNode;
+  ref?: React.Ref<HTMLLIElement>;
 }) {
   return (
-    <li className="space-y-1 px-5 py-3">
+    <li ref={ref} className="space-y-1 px-5 py-3">
       <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
         {title}
         <div className="ml-auto flex flex-wrap gap-1">{actions}</div>
@@ -549,6 +552,8 @@ function ProviderForm({ provider, registry, onDone }: { provider: Provider | nul
 
 function ProviderRow({ provider, registry }: { provider: Provider; registry: Registry }) {
   const [editing, setEditing] = useState(false);
+  // An import's "secrets to fill in" links here (#settings/provider/<id>) to open the form.
+  const ref = useSettingsTarget<HTMLLIElement>("provider", provider.provider_id, () => setEditing(!provider.builtin));
   const action = useAction();
   const remove = () => {
     if (confirm(`Delete provider "${provider.name}"?`)) action.run(() => deleteProvider(provider.provider_id));
@@ -563,6 +568,7 @@ function ProviderRow({ provider, registry }: { provider: Provider; registry: Reg
   ].filter(Boolean);
   return (
     <Row
+      ref={ref}
       title={<RowName name={provider.name} builtin={provider.builtin} />}
       actions={
         !provider.builtin && (

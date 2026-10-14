@@ -16,6 +16,7 @@ import {
   type AgentSettings,
   type ChannelConfig,
 } from "@/lib/api";
+import { useSettingsTarget } from "@/lib/settings-target";
 import { cn } from "@/lib/utils";
 
 /** The system layer: what every agent inherits unless the Agents page or a project sets it. */
@@ -113,6 +114,8 @@ function ChannelCard({ channel, onSaved }: { channel: ChannelConfig; onSaved: ()
   const [error, setError] = useState("");
   const [justSaved, setJustSaved] = useState(false);
   const Icon = channelIcon(channel.channel_type);
+  // An import's "secrets to fill in" links here (#settings/channel/<id>).
+  const ref = useSettingsTarget<HTMLDivElement>("channel", channel.channel_id);
 
   const savedIds = allowlist ? storedIds(saved[allowlist.field]) : [];
   const dirty =
@@ -156,7 +159,7 @@ function ChannelCard({ channel, onSaved }: { channel: ChannelConfig; onSaved: ()
   const description = typeof saved.description === "string" ? saved.description : "";
 
   return (
-    <div className={cn(
+    <div ref={ref} className={cn(
       "rounded-lg border bg-card overflow-hidden",
       enabled ? "border-primary/40" : "border-border",
     )}>
@@ -286,6 +289,8 @@ export function SettingsPage() {
   const [channels, setChannels] = useState<ChannelConfig[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  // Bumped when an import is applied: the sections it may have changed load again.
+  const [generation, setGeneration] = useState(0);
 
   const load = () => {
     fetchChannelConfigs()
@@ -314,7 +319,7 @@ export function SettingsPage() {
           What every agent inherits. The Agents page sets them per role, and a project&apos;s Settings tab for its
           agents and for each role in it; the most specific one wins.
         </p>
-        <AgentDefaultsCard />
+        <AgentDefaultsCard key={generation} />
       </div>
 
       <div>
@@ -323,12 +328,12 @@ export function SettingsPage() {
           An agent is a runtime (an agent CLI on this machine), an LLM provider and a model. A selection is checked
           against the roles it is for: the Manager and Planner need a resident session, Workers and Reviewers a run.
         </p>
-        <AgentRegistrySection />
+        <AgentRegistrySection key={generation} />
       </div>
 
       <div>
         <h2 className="text-sm font-semibold mb-3">Plugins &amp; skills catalog</h2>
-        <CatalogCard />
+        <CatalogCard key={generation} />
       </div>
 
       <div>
@@ -358,7 +363,7 @@ export function SettingsPage() {
         ) : (
           <div className="space-y-4">
             {channels.map((ch) => (
-              <ChannelCard key={ch.channel_id} channel={ch} onSaved={load} />
+              <ChannelCard key={`${ch.channel_id}-${generation}`} channel={ch} onSaved={load} />
             ))}
           </div>
         )}
@@ -370,7 +375,12 @@ export function SettingsPage() {
           One file with the agent defaults and role settings, the catalog with its files and MCP servers, global
           installs and channels.
         </p>
-        <ConfigTransferCard />
+        <ConfigTransferCard
+          onImported={() => {
+            setGeneration((g) => g + 1);
+            load();
+          }}
+        />
       </div>
     </div>
   );

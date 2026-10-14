@@ -397,7 +397,7 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
   - 文件是一个 JSON（`loopx-config/v1`）：目录文件都是 UTF-8 文本，JSON 原样容纳，一个可读的文件便于分享前检查；
     按条目分段读写，CLI 直连数据库（真实目录约 22 MB，超过服务端 8 MiB 的请求上限），Settings 的下载按段流式返回；
   - 项目的目录和本机路径来源不导出，路径文档只作引用并标 `repoint`；导入的条目保留原来的 origin；
-  - 界面不做导入：服务端在路由前整读请求体并限 8 MiB，流式上传要另开按路由的上限和分步预览，记入第 5.3 节。
+  - 界面导入当时没做（服务端在路由前整读请求体并限 8 MiB），后来按路由放宽上限、流式落盘、预览与应用分两步补上（见第 4 节）。
 
 ### M9 agent 多样性：运行时与 LLM provider
 
@@ -492,6 +492,7 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
 | 2026-10-14 | 迁移前自动备份（looper #60）：`ensure_schema` 把所应用 `schema.sql` 的 sha256 与 DDL 在同一事务里记入 `schema_fingerprint`；库里已有 LoopX 表而指纹缺失或不同时，`serve` 先用 `pg_dump`（`LOOPX_PG_DUMP` 或 PATH 上、主版本不低于服务器，或 `LOOPX_BACKUP_CMD` 指定的命令）把库备份到 runtime root 下的 `backups/`（0600、校验后每库保留最近 5 份）再迁移，没有可用的 `pg_dump` 或备份失败时在任何 DDL 之前退出并给出安装方法（`--skip-backup` 跳过并告警），`doctor` 多一行 pg_dump，`config import --apply` 遇到待迁移的库拒绝。验证：真实 PG 测试用替身 `pg_dump` 走 `loopx serve` 的各条规则；本机没有 `pg_dump`，对套用 v2.5.0 `schema.sql` 的新库先确认拒绝且库未变，再经 `LOOPX_BACKUP_CMD` 调容器里的 `pg_dump` 备份并迁移，`pg_restore --list` 读出 64 项、备份保有迁移删掉的 `permission_mode` 与 `model` 列，再次启动不再备份；真实 PG 952 通过。 |
 | 2026-10-14 | 第 5.3 节经验文档先作为草稿（looper #61）：`distill_lessons` 改为 `off`、`draft`、`write` 三档（一次性迁移：`true` 为 `write`，`false` 和 NULL 为 `off`），`draft` 时任务完成后的经验存进 `project_document_drafts`，不进任何运行的知识索引和挂载，用户在项目页 Knowledge 标签查看、修改后确认（成为受知识上限约束的文本文档）或丢弃，任务页链接到草稿。验证：真实 PG 加替身 Claude 跑完三档、确认与丢弃、被拒的确认保留草稿和迁移，一次性 `loopx serve` 上无头 Chrome 完成修改后确认、丢弃和切换档位并截图。 |
 | 2026-10-14 | M9a 交付（looper #62）：新增运行时、provider（密钥另表存放、接口打码，模型目录与并发上限只存储）和 agent 的注册与校验，分层配置以 `agent` 取代模型（迁移把各层模型变成 `claude-code/<模型>`），新建任务可按角色覆盖 agent，四类 agent 都经运行时适配器启动，`llm_profiles` 删除。验证：以 main（`73eed752d`）的代码生成基准，未配置和迁移过模型层两组数据下四类角色的完整 argv、环境变量、system prompt 和首条输入与基准逐字节相同（prompt 不变，未跑真实 Claude）；校验正反例、任务级覆盖只到该任务的角色、启动时校验失败不换 agent、导出导入往返都有真实 PG 测试，替身模式评测（带 `--agent`）通过，真实 PG 1005 通过。 |
+| 2026-10-14 | 第 5.3 节界面导入配置文件（looper #63）：`POST /api/config/imports` 只在这一个路由把请求体上限放宽到 256 MiB（目录上限的两倍），流式写入 runtime root 下权限 0600 的临时文件，校验格式后返回与 `loopx config import` 相同的预览，`POST .../<id>/apply` 在一个事务里应用并删除文件，`DELETE` 取消，未应用的一小时后过期删除，其余路由仍是 8 MiB。Settings 的「Move to another machine」可选择或拖入文件，按段显示新增、变化（含字段）、不变和跳过，以及待补的密钥，确认后应用，结果里的链接直接打开对应 provider、MCP 服务器或渠道的表单。验证：真实 PG 测试覆盖超过 8 MiB 的上传、其他路由 413、预览不写、应用与 CLI 结果一致、过期和未知 id 404、坏文件 400 与临时文件清理；两个一次性 `loopx serve` 之间经界面路由导出 12.4 MB、在新库的 Settings 里预览并应用 24 项，再导出除未导出的 API key 外与原文件相同；真实 PG 1020 通过。 |
 
 ## 5. 不属于本 RFC 的待办
 
@@ -511,7 +512,7 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
 
 ### 5.3 非核心待办（M6 之后统一做）
 
-- **界面导入配置文件**（M8e 只做了 CLI 导入；2026-10-14 定为现在做，进行中）：按路由放宽请求体上限、流式落盘，并把预览和应用分成两步。
+（暂无。已完成的见第 4 节进度台账。）
 
 ### 5.4 验证缺口
 

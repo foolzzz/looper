@@ -104,12 +104,27 @@ class Change:
     reason: str = ""
 
 
+@dataclass(frozen=True)
+class NeededSecret:
+    """Secrets an entry still needs on this machine. ``target`` is what holds them here, for a link to its form:
+    ``("provider" | "mcp" | "channel", id)``; ``None`` while the entry is not stored (a preview's new one)."""
+
+    section: str
+    key: str
+    names: tuple[str, ...]
+    target: tuple[str, str] | None = None
+
+
+def _stored(kind: str, row_id: str | None) -> tuple[str, str] | None:
+    return None if row_id is None or row_id.startswith("new:") else (kind, row_id)
+
+
 @dataclass
 class Plan:
     """What an import does (or did): each entry's change, the secrets left to fill in, and notes."""
 
     changes: list[Change] = field(default_factory=list)
-    need_secret: list[tuple[str, str, tuple[str, ...]]] = field(default_factory=list)  # section, key, names
+    need_secret: list[NeededSecret] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
     applied: bool = False
 
@@ -124,7 +139,8 @@ class Plan:
     def writes(self) -> int:
         return sum(1 for c in self.changes if c.action in (Action.ADDED, Action.CHANGED))
 
-    def view(self) -> dict[str, Any]:
+    def view(self, *, targets: bool = False) -> dict[str, Any]:
+        """The plan as JSON; ``targets`` adds each needed secret's ``target`` (``{"kind", "id"}``) where known."""
         return {
             "applied": self.applied,
             "counts": self.counts(),
@@ -132,7 +148,9 @@ class Plan:
                          **({"fields": list(c.fields)} if c.fields else {}),
                          **({"reason": c.reason} if c.reason else {})}
                         for c in self.changes if c.action is not Action.UNCHANGED],
-            "need_secret": [{"section": s, "key": k, "names": list(n)} for s, k, n in self.need_secret],
+            "need_secret": [{"section": n.section, "key": n.key, "names": list(n.names),
+                             **({"target": {"kind": n.target[0], "id": n.target[1]}} if targets and n.target else {})}
+                            for n in self.need_secret],
             "notes": list(self.notes),
         }
 
@@ -380,18 +398,20 @@ def _umask() -> int:
     return mask
 
 
-def read_file(path: Path) -> dict[str, Any]:
-    """The configuration file at ``path``; raises ``ConfigFileError`` when it is not one."""
+def read_file(path: Path, *, label: str | None = None) -> dict[str, Any]:
+    """The configuration file at ``path``; raises ``ConfigFileError`` when it is not one. Errors name the file
+    ``label`` (default: its path)."""
+    label = label or str(path)
     try:
         with path.expanduser().open(encoding="utf-8") as handle:
             data = json.load(handle)
     except OSError as exc:
-        raise ConfigFileError(f"cannot read {path}: {exc.strerror or exc}") from None
+        raise ConfigFileError(f"cannot read {label}: {exc.strerror or exc}") from None
     except (json.JSONDecodeError, UnicodeDecodeError) as exc:
-        raise ConfigFileError(f"{path} is not a LoopX configuration file: {exc}") from None
+        raise ConfigFileError(f"{label} is not a LoopX configuration file: {exc}") from None
     if not isinstance(data, dict) or data.get("format") != FORMAT:
         found = data.get("format") if isinstance(data, dict) else None
-        raise ConfigFileError(f"{path} is not a {FORMAT} file (format: {found!r})")
+        raise ConfigFileError(f"{label} is not a {FORMAT} file (format: {found!r})")
     for section, kind in (("settings", dict), ("channels", list), ("installs", list), ("catalog", list),
                           ("projects", list), ("runtimes", list), ("providers", list), ("agents", list)):
         if section in data and not isinstance(data[section], kind):
@@ -803,13 +823,14 @@ class _Importer:
         current = {**{k: row[k] for k in _PROVIDER_FIELDS}, "protocols": list(row["protocols"]),
                    "api_key": row["api_key"]} if row is not None else None
         action = self.outcome("providers", name, current, _differs(new, current, (*_PROVIDER_FIELDS, "api_key")))
-        if missing:
-            self.plan.need_secret.append(("providers", name, ("api_key",)))
         provider_id = row["id"] if row is not None else f"new:{name}"
         if self.apply and action in (Action.ADDED, Action.CHANGED):
             from ..db import config_transfer as db
 
             provider_id = await db.write_provider(self.conn, row["id"] if row is not None else None, fields, key)
+        if missing:
+            self.plan.need_secret.append(NeededSecret("providers", name, ("api_key",),
+                                                      _stored("provider", provider_id)))
         self.providers[name] = (provider_id, provider_spec({**fields, "id": provider_id}))
 
     async def agent(self, entry: Any) -> None:
@@ -972,12 +993,13 @@ class _Importer:
         if values["enabled"]:
             needed += [f"environment {value}" for name, value in sorted(config.items())
                        if name.endswith("_env") and isinstance(value, str) and value]
-        if needed:
-            self.plan.need_secret.append(("channels", kind, tuple(needed)))
         if self.apply and action in (Action.ADDED, Action.CHANGED):
             from ..db import config_transfer as db
 
             await db.write_channel(self.conn, channel_id, kind, values, exists=row is not None)
+        if needed:
+            self.plan.need_secret.append(NeededSecret("channels", kind, tuple(needed),
+                                                      ("channel", channel_id) if row or self.apply else None))
 
     # --- catalog ---
 
@@ -997,8 +1019,6 @@ class _Importer:
         current = self.target.items.get(item.key)
         changed = _item_changes(item, current)
         action = self.outcome(section, label, current, changed)
-        if item.missing:
-            self.plan.need_secret.append((section, label, tuple(item.missing)))
         self.item_sizes[item.key] = item.values["size_bytes"]
         self.item_ids[item.key] = current["id"] if current else f"new:{label}"
         if self.apply and action in (Action.ADDED, Action.CHANGED):
@@ -1009,6 +1029,9 @@ class _Importer:
             self.item_ids[item.key] = await db.write_item(
                 self.conn, current["id"] if current else None, item.values, owner_project_id=owner,
                 files=files, server=item.server)
+        if item.missing:  # an MCP server's (a project writes skills only)
+            self.plan.need_secret.append(NeededSecret(section, label, tuple(item.missing),
+                                                      _stored("mcp", self.item_ids[item.key])))
 
     def check_caps(self) -> None:
         from .library import LIBRARY_MAX_BYTES
@@ -1184,6 +1207,13 @@ async def import_config(conn: Any, data: Mapping[str, Any], *, apply: bool) -> P
     return importer.plan
 
 
+async def run_import(conn: Any, data: Mapping[str, Any], *, apply: bool) -> Plan:
+    """Preview ``data`` in a read-only transaction, or apply it in one transaction, on ``conn``: what both
+    ``loopx config import`` and the dashboard's import run."""
+    async with conn.transaction(readonly=not apply):
+        return await import_config(conn, data, apply=apply)
+
+
 async def import_file(dsn: str, path: Path, *, apply: bool) -> Plan:
     """Preview (read-only) or apply (one transaction) the file at ``path`` on the database at ``dsn``."""
     import asyncpg
@@ -1191,8 +1221,7 @@ async def import_file(dsn: str, path: Path, *, apply: bool) -> Plan:
     data = read_file(path)
     conn = await (asyncpg.connect(dsn) if apply else _read_only(dsn))
     try:
-        async with conn.transaction(readonly=not apply):
-            return await import_config(conn, data, apply=apply)
+        return await run_import(conn, data, apply=apply)
     finally:
         await conn.close()
 
@@ -1214,7 +1243,7 @@ def format_plan(plan: Plan, path: Path) -> str:
         lines.append("  the file holds nothing to import")
     if plan.need_secret:
         lines.append("Secrets to fill in on this machine:")
-        lines += [f"  {section} {key}: {', '.join(names)}" for section, key, names in plan.need_secret]
+        lines += [f"  {n.section} {n.key}: {', '.join(n.names)}" for n in plan.need_secret]
     lines += [f"Note: {note}" for note in plan.notes]
     if plan.applied:
         lines.append(f"{plan.writes} entries written. Restart the server for channel changes to take effect.")

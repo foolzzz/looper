@@ -335,6 +335,60 @@ export function configExportUrl({ projects, secrets }: { projects: boolean; secr
   return `${API_BASE}/config/export?projects=${projects ? 1 : 0}&secrets=${secrets ? 1 : 0}`;
 }
 
+/** The largest configuration file the dashboard can import (the server's config_imports.UPLOAD_MAX_BYTES). */
+export const CONFIG_IMPORT_MAX_BYTES = 256 * 1024 * 1024;
+
+export type ConfigImportAction = "added" | "changed" | "unchanged" | "skipped";
+
+/** What an import does or did, as `loopx config import --json` prints it. */
+export interface ConfigImportPlan {
+  applied: boolean;
+  /** Each section the file holds: how many of its entries are added, changed, unchanged and skipped. */
+  counts: Record<string, Record<ConfigImportAction, number>>;
+  /** Every entry but the unchanged ones: the fields that change, or why it is skipped. */
+  changes: { section: string; key: string; action: Exclude<ConfigImportAction, "unchanged">; fields?: string[]; reason?: string }[];
+  /** Secrets this machine still needs; after applying, `target` is the stored row whose form takes them. */
+  need_secret: { section: string; key: string; names: string[]; target?: { kind: "provider" | "mcp" | "channel"; id: string } }[];
+  notes: string[];
+}
+
+/** An uploaded file waiting to be applied (or cancelled) until `expires_at`, with its preview. */
+export interface ConfigImportUpload {
+  import_id: string;
+  bytes: number;
+  expires_at: string;
+  /** The file's own head: format, loopx_version, exported_at and secrets ("omitted" or "included"). */
+  file: Partial<Record<"format" | "loopx_version" | "exported_at" | "secrets", string>>;
+  plan: ConfigImportPlan;
+}
+
+/** Upload a configuration file (streamed to the server) and preview importing it; nothing is written. */
+export async function uploadConfigImport(file: File): Promise<ConfigImportUpload> {
+  const res = await fetch(`${API_BASE}/config/imports`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: file,
+  });
+  if (!res.ok) await failed(res, "upload");
+  return res.json();
+}
+
+/** Write an uploaded file in one transaction, like `loopx config import --apply`; the server deletes the file. */
+export async function applyConfigImport(importId: string): Promise<{ import_id: string; plan: ConfigImportPlan }> {
+  const res = await fetch(`${API_BASE}/config/imports/${encodeURIComponent(importId)}/apply`, { method: "POST" });
+  if (!res.ok) await failed(res, "apply");
+  const data = await res.json();
+  notifyProjectsChanged();
+  window.dispatchEvent(new Event(REGISTRY_CHANGED_EVENT));
+  return data;
+}
+
+/** Drop an uploaded file without applying it. */
+export async function cancelConfigImport(importId: string): Promise<void> {
+  const res = await fetch(`${API_BASE}/config/imports/${encodeURIComponent(importId)}`, { method: "DELETE" });
+  if (!res.ok && res.status !== 404) await failed(res, "cancel");
+}
+
 export const PROJECTS_CHANGED_EVENT = "loopx:projects-changed";
 
 function notifyProjectsChanged() {

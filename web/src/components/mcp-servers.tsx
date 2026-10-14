@@ -12,6 +12,7 @@ import {
   type McpImport,
   type McpTransport,
 } from "@/lib/api";
+import { useSettingsTarget } from "@/lib/settings-target";
 
 const SELECT = "flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm text-foreground";
 const TEXTAREA =
@@ -236,6 +237,8 @@ export function McpItemActions({
   onDeleted: () => void;
 }) {
   const [editing, setEditing] = useState(false);
+  // An import's "secrets to fill in" links here (#settings/mcp/<id>) to open the form.
+  const ref = useSettingsTarget<HTMLDivElement>("mcp", item.item_id, () => setEditing(true));
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const remove = async () => {
@@ -252,7 +255,7 @@ export function McpItemActions({
   };
   return (
     <>
-      <div className="flex gap-1">
+      <div ref={ref} className="flex gap-1">
         <Button type="button" variant="ghost" size="sm" onClick={() => setEditing(!editing)} aria-expanded={editing} aria-label={`Edit MCP server ${item.name}`}>
           <Pencil className="h-3.5 w-3.5" /> Edit
         </Button>

@@ -877,8 +877,18 @@ one transaction: an existing entry is updated in place (an item keeps its id
 and installs), nothing missing from the file is removed, and a placeholder
 keeps a stored secret, or leaves the value empty when there is none. Imported
 items keep their origin. Importing the same file again changes nothing, and
-exporting the new installation gives the same file. Settings offers no
-import: its file would usually be over the request cap.
+exporting the new installation gives the same file.
+
+Settings imports too (`loopx/agents/config_imports.py`). `POST
+/api/config/imports` is the one route that reads past the 8 MiB request cap:
+it streams up to 256 MiB (twice the catalog's cap) to a 0600 file under
+`<runtime root>/config-imports/`, after the Origin and Host checks, and
+answers with an import id and the same preview. `POST
+/api/config/imports/<id>/apply` runs `--apply`'s transaction and deletes the
+file; `DELETE` cancels; an import left alone expires after an hour, and the
+server clears the directory when it starts and stops. After applying, each
+secret to fill in names the provider, MCP server or channel that takes it, and
+Settings links to its form (`#settings/<kind>/<id>`).
 
 ### What a run spent and how large its context grew
 
