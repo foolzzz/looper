@@ -68,7 +68,13 @@ uv run --extra test python -m evals.prompt_regression run --mode real \
 Options: `--model` (every role runs Claude Code with its own login and this
 model, the agent `claude-code/<model>`), `--agent <name>` (every role runs
 this agent instead: a registered agent of the eval's new database, such as the
-built-in `claude-code/opus`; the run records it as `agent`), `--tasks
+built-in `claude-code/opus`; the run records it as `agent`), `--register-agent
+SPEC.json` (register an agent in the eval's database first and run every role
+on it: `{"runtime": {"name", "type", "executable"?}, "provider": {"name",
+"protocols", "auth", "base_url"?, "api_key_env"?}, "agent": {"name", "model",
+"effort"?}}`; a runtime of that name, such as the built-in `codex`, is reused,
+and the provider's key is read from the variable `api_key_env` names, never
+from the file), `--tasks
 single_step,chat_correction`, `--max-budget-usd`, `--total-cap-usd`,
 `--baseline <run.json>` (compare with this run instead), `--keep-work-dirs`. To print a comparison again:
 
