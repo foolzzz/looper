@@ -102,6 +102,15 @@ To learn how to use these features, read the [usage guide](docs/fork/usage.md).
     compaction markers, the latest context size and the compaction count.
     Every run card shows its own tokens (cache included), its final context,
     whether it compacted, and its own cost.
+- **Prompt regression eval (M6).** `python -m evals.prompt_regression run`
+  drives five small tasks (one step, dependent steps, a reviewed step, a
+  retry, a mid-task chat correction) through a disposable `loopx serve` and
+  reports success, steps, retries, reviews, cost, contract violations and
+  whether the Planner modified files, compared with the previous run or the
+  committed baseline as a Markdown table. Fake mode (a scripted stand-in
+  Claude) runs in the test suite; real mode (haiku by default) runs on demand
+  under a per-run `--max-budget-usd` and a total spending cap
+  ([`evals/README.md`](evals/README.md)).
 
 ### Changed
 
