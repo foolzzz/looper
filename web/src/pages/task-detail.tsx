@@ -25,6 +25,7 @@ import { ClampedText } from "@/components/clamped-text";
 import { historyHref } from "@/pages/agent-history";
 import { TaskCostBreakdown } from "@/components/task-cost";
 import { ContinueAtCap, TaskSpendMeter } from "@/components/task-budget";
+import { AGENT_PROFILE } from "@/lib/settings-pages";
 import { costBasis, costCaveats, formatUsd } from "@/lib/usage";
 import { cn } from "@/lib/utils";
 import {
@@ -1306,7 +1307,7 @@ export function TaskDetailPage({ taskId, onBack }: TaskDetailPageProps) {
               )}
               {task && Object.keys(task.profile_overrides ?? {}).length > 0 && (
                 <span className="text-xs text-muted-foreground">
-                  Agents:{" "}
+                  {AGENT_PROFILE.plural}:{" "}
                   {(["planner", "worker", "reviewer"] as const)
                     .filter((role) => task.profile_overrides?.[role])
                     .map((role) => `${role} → ${task.profile_overrides?.[role]?.name}`)

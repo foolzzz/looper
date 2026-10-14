@@ -22,6 +22,7 @@ import {
 import ReactMarkdown from "react-markdown";
 import { Badge } from "@/components/ui/badge";
 import { ContextUsagePanel } from "@/components/context-usage";
+import { AGENT_PROFILE } from "@/lib/settings-pages";
 import { cn } from "@/lib/utils";
 import { compactionChange, formatTokens, formatUsd, runCostLabel } from "@/lib/usage";
 import {
@@ -217,9 +218,9 @@ function shortSha(sha: string | null | undefined) {
 /** Where a run's settings came from: the settings layers, then the names runs recorded before the layers used. */
 const SETTING_SOURCES: Record<string, string> = {
   builtin: "built-in default",
-  profile: "the agent's default",
+  profile: `the ${AGENT_PROFILE.name}'s default`,
   // Runs recorded before Agent Profiles were named.
-  agent: "the agent's default",
+  agent: `the ${AGENT_PROFILE.name}'s default`,
   system: "every role (Settings → Roles)",
   role: "role (Settings → Roles)",
   project: "project",
@@ -235,7 +236,7 @@ const sourceName = (source: string) => SETTING_SOURCES[source] ?? source;
 
 /**
  * One line per layer, in prompt order: where the harness, role, project, task and contract came from;
- * then the agent and model the run asked for and the Settings environment variables it got.
+ * then the Agent Profile and model the run asked for and the Settings environment variables it got.
  */
 function PromptLayerSummary({ layers, metadata }: { layers: PromptLayers; metadata: LlmRecord["metadata"] }) {
   const { harness, role, project, task, contract } = layers;
@@ -275,7 +276,7 @@ function PromptLayerSummary({ layers, metadata }: { layers: PromptLayers; metada
   const profile = runProfile({ metadata });
   if (profile) {
     rows.push([
-      "Agent",
+      AGENT_PROFILE.name,
       `${profile.name} · ${profile.runtime.name} (${profile.runtime.type}) · ${profile.provider.name} · ${sourceName(profile.source)}`,
     ]);
   }
@@ -299,7 +300,7 @@ function PromptLayerSummary({ layers, metadata }: { layers: PromptLayers; metada
     // Runs recorded before Agent Profiles were named call the profile's source `agent`; runs before Agent Profiles
     // name the model's source.
     const profileSource = sources.profile ?? sources.agent;
-    const selected = profileSource ? `agent ${sourceName(profileSource)}` : sources.model ? `model ${sourceName(sources.model)}` : "";
+    const selected = profileSource ? `${AGENT_PROFILE.name} ${sourceName(profileSource)}` : sources.model ? `model ${sourceName(sources.model)}` : "";
     rows.push([
       "Sources",
       [selected, `effort ${sourceName(sources.effort)}`, `run cap ${sourceName(sources.run_budget_usd)}`]
