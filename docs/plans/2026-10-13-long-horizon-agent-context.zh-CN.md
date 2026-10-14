@@ -1,6 +1,6 @@
 # 开发计划：长程 Agent 上下文体系（M0–M9）
 
-- **状态：** M0–M7 全部交付（M7a 计划状态入库、M7b 任务记忆、M7c 及时沉淀）；M8 全部交付（M8a 能力目录与安装、M8b MCP 服务器、M8c 进库来源、M8d 配置层级统一、M8e 导出与导入）；M9a 运行时、provider 与 agent 的注册和选择已交付，M9b Claude Code 接 API key 与兼容接口、M9c Codex 运行时、M9e OMP 运行时已交付；上游 LoopX 清理 B1–B4 已交付；全面改名为 Looper 已交付；其余见第 5 节待办
+- **状态：** M0–M7 全部交付（M7a 计划状态入库、M7b 任务记忆、M7c 及时沉淀）；M8 全部交付（M8a 能力目录与安装、M8b MCP 服务器、M8c 进库来源、M8d 配置层级统一、M8e 导出与导入）；M9a 运行时、provider 与 agent 的注册和选择已交付，M9b Claude Code 接 API key 与兼容接口、M9c Codex 运行时、M9e OMP 运行时已交付；上游 LoopX 清理 B1–B4 已交付；全面改名为 Looper 已交付；其余见第 5 节待办；**v2.6.0 已发布（2026-10-14）**。
 - **依据：** [RFC：长程 Agent 的上下文体系 v0](../architecture/rfcs/long-horizon-agent-context-v0.zh-CN.md)。
   设计原则、分层模型和已作出的决定以 RFC 为准；本文只管"怎么分阶段做、做到什么算完成、现在做到哪了"。
 - **仓库：** `foolzzz/looper`，基线 `main`
@@ -554,6 +554,7 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
 | 2026-10-14 | M9b 交付（looper #68）：Claude Code 可用 API key 接 Anthropic 官方或兼容 Anthropic 格式的接口（第三方接口用 `ANTHROPIC_AUTH_TOKEN`，opus、sonnet 和子 agent 映射到 agent 的模型，haiku 和 small/fast 映射到模型目录新增的 `background_model`），provider 可带 `env`，内置 GLM、DeepSeek、Kimi、CPA 预设和 2026-10-14 的价格表；非订阅、非官方的运行按 provider 价格计算花费并由 Looper 执行单次软上限，常驻会话只在运行时类型和 provider 都不变时续接（并入 `agent_switch`）。验证：经只记录模型名和认证头的转发代理，用真实 Claude Code 2.1.285 跑 CPA（`gpt-6.1-sol`）和 GLM BigModel（`glm-5.3[1m]`）各一个单步任务和一次 M6 真实评测，都是 5/5、契约违约 0、Planner 改文件 0，请求只带 provider 的 key、没有 Claude 模型名，44 次运行都是 `provider_price` 且与价格表手算一致（CPA 等价 $0.80，GLM $0.48）；真实 PG 1093 通过。DeepSeek、Kimi 的真实 key 验证留给维护者（第 5.4 节）。 |
 | 2026-10-14 | M9c 交付（looper #67）：Codex 运行时，四类角色都能跑：Worker、Reviewer 一次 `codex exec --json`，Manager、Planner 每轮起一个进程续接会话；每次运行一个 Looper 自己的 `CODEX_HOME`（只有生成的 `config.toml` 和 `AGENTS.md`，不读 `~/.codex`），MCP 翻译进 `config.toml`，skill 降为可读文档，跳过的插件部分记进运行记录，技术验证结果见多运行时 RFC 第 6 节。验证：codex + CPA + gpt-5.5 的 M6 真实模式评测 5/5、契约违约 0、Planner 改文件 0（haiku 基线 5/5），聊天纠偏任务因运行中的 Codex Worker 不能被引导而多一次重试，token 约 52 万提示、6.7 千输出，按 gpt-5.5 价目折合约 $0.73，Manager 两轮续接同一会话，评测时 M9b 未合入、密钥经未提交的本地垫片注入；合入 M9b 后经 `looper serve` 用 `cpa` 预设和 gpt-6.1-sol 冒烟（Planner 规划和续接的决策轮、Worker 一步，按 provider 价格计 $0.045）；真实 PG 1117 通过。 |
 | 2026-10-14 | M9e 交付（looper #70）：OMP 运行时，四类角色都能跑：Worker、Reviewer 一次 `omp -p --mode json`，Manager、Planner 每轮起一个进程续接会话（与 Codex 共用 `per_turn.PerTurnSession`），每个 omp 进程的 `HOME` 指向 Looper 的家目录（生成的 `models.yml` 和 `--config` 覆盖文件），不读 `~/.omp`、`~/.agents`、`~/.claude`、`~/.env`，插件原生加载、hook 和插件自带的 MCP 不加载，服务启动时回收没人用的 OMP 家目录和 Codex、OMP 的过期会话目录。验证：omp + `cpa` 预设的 OpenAI 接口 + gpt-5.5（effort medium）的 M6 真实模式评测 5/5、契约违约 0、Planner 改文件 0、重试 2（与 Codex 相同：Worker 不能被引导，聊天纠偏多一次），提示 386k（未缓存 101k）、输出 4.2k，按 gpt-5.5 价目 $0.78（Codex 约 $0.73 等价，haiku 基线 $0.33），Manager 两轮聊天续接同一会话并答出第一轮的词；真实 PG 1147 通过。 |
+| 2026-10-14 | 发布 v2.6.0（looper #71，tag 打在 `591054c56`）：Release workflow 构建并发布 `looper-2.6.0` wheel；发布后在空白 HOME 里实测了全新安装和从 v2.5.0 升级（旧包卸载、数据目录搬迁、先备份再迁移）。 |
 
 ## 5. 不属于本 RFC 的待办
 
@@ -566,7 +567,7 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
 ### 5.2 工程待办
 
 - **插件与 skill 库的上下文开销**：全部导入后，opus 首个请求的 token 约增加 86%（M1.6 实测）。M8a 起导入的条目默认不加载，结合 M2 的花费数据按角色安装常用的。
-- **下一次发布：v2.6.0，在 M9 完成后发（2026-10-14 定）。** "M9 完成"指 M9a、M9b、M9c、M9e；M9d 等 norma 就绪，不卡发布。自 v2.5.0 起的全部改动（M0–M9、上游清理、改名）一起发，按 Release workflow 推 tag；发布说明要覆盖全部行为变化（个人配置隔离、默认 harness、免权限确认、渠道白名单、导入的 skill 默认不加载、删除 `update`/`init`、重启后任务续跑、分层配置、改名等），推 tag 前先请维护者确认。
+- **v2.6.0 已发布（2026-10-14）**：[release](https://github.com/foolzzz/looper/releases/tag/v2.6.0)，由 Release workflow 按 tag 构建发布，附 `looper-2.6.0-py3-none-any.whl`。发布后实测：在空白 HOME 里用 `install.sh` 全新安装（`looper 2.6.0`、`loopx` 别名、serve 与 doctor 正常）；从 v2.5.0 升级（`install.sh` 卸掉旧 `loopx` 包；首次启动把 `~/.loopx` 搬到 `~/.looper` 并留链接，按 v2.5.0 表结构先备份再迁移）。下一个版本待定。
 - **升级时迁移前自动备份（2026-10-14 定，✅ 已交付 looper #60）**：`serve` 发现有未执行的迁移时，先用 `pg_dump` 备份到 runtime root 下的 `backups/`（保留最近几份）再迁移；没有可用的 `pg_dump` 时拒绝执行破坏性迁移并提示安装方法；`doctor` 检查 `pg_dump`。自 v2.5.0 起已有 11 处删列、删表的迁移。
 - **服务常驻（2026-10-14 定，✅ 已交付 looper #59）**：`service install / uninstall / status / restart`，macOS 生成 launchd LaunchAgent，Linux 生成 systemd 用户服务，开机自启、崩溃拉起；本机也改用它运行主 checkout 的代码。
 - **全面改名为 looper（2026-10-14 定，✅ 已交付 looper #64）**：命令、Python 包、数据目录（`~/.loopx` → `~/.looper`，自动迁移）、环境变量（`LOOPX_*` → `LOOPER_*`，旧名作为回退）、界面与文档统一改名；`loopx` 命令保留为别名过渡一个版本。改名是机械改动且触及几乎所有文件，**排在当前这批 PR 合入之后、M9b/M9c 开工之前**，单独一个 PR，期间不开其他分支；README 与控制台首屏的改动先请维护者预览（本次改名维护者已免除预览）。默认库名 `loopx`、发布 tag 与历史、NOTICE 对上游 LoopX 的署名不改。
