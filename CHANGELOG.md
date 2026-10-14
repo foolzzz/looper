@@ -27,7 +27,7 @@ How the agent system works today is described in
   never names the Manager). Every run loads the enabled installs that name its
   role, globally or in its project. **The plugins and skills imported before
   this version stay in the catalog, installed nowhere, so after the upgrade no
-  agent loads them until you install them** (Settings → "Plugins & skills").
+  agent loads them until you install them** (Settings → "Plugins & skills catalog").
   The item-level enabled switch is gone; an install has its own.
 - **Project skills are catalog items.** A skill written in a project is a
   catalog item owned by that project (origin `project`), installed in it for
