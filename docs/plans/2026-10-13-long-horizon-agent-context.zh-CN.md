@@ -1,6 +1,6 @@
 # 开发计划：长程 Agent 上下文体系（M0–M6）
 
-- **状态：** 执行中（M0、M1、M1.5、M1.6、M1.7、M2 已交付）
+- **状态：** 执行中（M0、M1、M1.5、M1.6、M1.7、M2、M3 已交付）
 - **依据：** [RFC：长程 Agent 的上下文体系 v0](../architecture/rfcs/long-horizon-agent-context-v0.zh-CN.md)。
   设计原则、分层模型和已作出的决定以 RFC 为准；本文只管"怎么分阶段做、做到什么算完成、现在做到哪了"。
 - **仓库：** `foolzzz/looper`，基线 `main`
@@ -29,7 +29,7 @@
 | M1.6 | 导入本机插件与 skill 作为全局默认 | ✅ 已交付（looper #22） | M1.5 |
 | M1.7 | agent 不限权限；渠道发送者白名单 | ✅ 已交付（looper #23） | M1.6 |
 | M2 | 上下文与花费观测 | ✅ 已交付（looper #24） | M0 |
-| M3 | 项目知识 | 待开始 | M0 |
+| M3 | 项目知识 | ✅ 已交付（looper #27） | M0 |
 | M4 | 项目 skill | 待开始 | M3 |
 | M5 | 项目执行配置 | 待开始 | M2 |
 | M6 | prompt 回归评测 | 待开始 | M1 |
@@ -177,6 +177,14 @@
   - 真实 Claude 下，Worker 能按索引读到文档，并在报告里引用；
   - 引用的仓库路径内容改动后，agent 读到的是新内容；
   - 超出大小或索引上限时拒绝保存，并说明原因。
+- **核实后确定的做法：**
+  - `project_documents` 表：标题、必填的一句话摘要、来源类型 `text`/`upload`/`path`、`filename` 和 `content`（录入、上传）或 `path`（相对项目默认目录）、大小、`sha256`、更新时间；CHECK 约束保证每种来源的列一致，删项目时连带删除；
+  - 上限：单篇 2 MiB，每个项目 100 篇、存储内容 50 MiB（引用路径不计入），索引 4,000 个字符，超限返回 400 并写明上限；增删改在持有项目行锁的事务里做；
+  - 上传走 JSON 里的 base64；不是 UTF-8 或含 NUL 字节的按二进制拒绝；引用路径必须是默认目录里的普通文本文件，跟随链接后仍在目录内；
+  - 索引在 L3 背景之后（`## Project knowledge`，每篇一行 `- <标题>: <摘要> (read: <绝对路径>)`，已不存在的引用文件标为 `missing`）；`--add-dir` 由 `claude_cli.knowledge_args` 生成、随 `Launch` 下发：录入和上传的文档挂载知识目录，有引用路径且任务目录不是项目目录时再挂载项目目录；Manager 都没有；
+  - Planner 的重启签名加上挂载的目录（索引本身已在 prompt 哈希里）；`prompt_layers.project` 记 `knowledge_sha256`、`knowledge_documents`，读不到时记 `knowledge_error`；
+  - 已核实（Claude Code 2.1.285，隔离参数下）：agent 能读 `--add-dir` 目录里的文件，该目录及其上级的 `CLAUDE.md` 不会被加载，不存在的目录不会让运行失败；
+  - 索引每行带绝对路径（在 `~/.loopx` 下约 150 个字符），索引上限实际在 15 到 25 篇左右先到，100 篇的上限很难达到。
 
 ### M4 项目 skill
 
@@ -237,6 +245,7 @@
 | 2026-10-13 | M1.7 交付（looper #23）：agent 不限权限，渠道必须有发送者白名单。权限参数只在 `claude_cli.permission_args`（`--dangerously-skip-permissions`）定义，由 `agent_settings.Launch.args` 和插件库参数一起下发给四类 agent；去掉 Planner 的 `--tools`/`--allowedTools Read,Grep,Glob[,Skill]`/`--permission-mode dontAsk` 和 Manager 的 `--allowedTools Skill`，隔离参数和 `--plugin-dir` 不变。推荐的 Planner role prompt 写明负责规划和决策、不亲自修改文件、改动都作为步骤交给 Worker，未改过的 `planner` 行启动时随推荐升级，改过的保留。飞书（`allowed_open_ids`，消息事件里的 `open_id`）和 Telegram（`allowed_user_ids`，数字用户 ID）各有发送者白名单：名单外的消息不交给 Manager，只记一条日志（渠道和发送者 ID，不含内容），不回复，Telegram 的 `/start`、`/status`、`/help` 也一样；名单为空或格式不对的渠道不启动，启动日志和 Settings 页（`start_problem`）写明原因；`LOOPX_TELEGRAM_ALLOWED_USERS` 不再生效。Settings 页可增删白名单并即时校验格式；Agents 页用一行说明代替不起作用的「Permission Mode」下拉框。核实（Claude Code 2.1.285）：`--print` 加隔离参数和 `--plugin-dir` 时，加上 `--dangerously-skip-permissions` 后 init 的 `permissionMode` 为 `bypassPermissions`，Bash、Write 和声明了 `allowed-tools: Bash` 的插件 skill 都不再被拒绝；不加时 Write 和这个 skill 被拒绝（`date` 这类只读命令两种情况都放行）；隔离用的 `--settings` 不影响权限。验收：真实 Claude（opus，effort low）下，Manager 用 Bash 运行 `date … | tee` 写文件并如实回报输出，没有被拒绝；Planner 规划时运行了 `python3 -c …`，产出有效计划并把改动派给 Worker，Planner 的工具调用里没有任何编辑，工作目录的改动全部来自 Worker；Worker 判为 completed，Reviewer 给出 `passed`。在真实服务上用本地替身（`PATH` 上的伪 `lark-cli`；只在验收环境里把 python-telegram-bot 指向本地伪 Bot API；不连真实飞书和 Telegram，不用真实 token）发合成消息：已启用但白名单为空的两个渠道都没有启动，替身一次也没被调用；在 Settings 页填好白名单并重启后，名单内的飞书和 Telegram 发送者都到达 Manager 并收到回复，名单外的 4 条消息（含 Telegram `/start`、`/help`）都被丢弃，各记一行日志，日志里没有消息内容，Manager 没有新增运行，也没有任何回复。无头 Chrome 里完成白名单的增删、校验、保存和刷新读回，并截图查看了 Settings（1280、768 px）、Planner 运行的启动命令和 Agents 页。真实 Claude 花费约 $0.52；单测与真实 PG 990 通过（main 上 933），另有 5 个 `test_dashboard_command` 安装模式用例在 main 上同样失败 |
 
 | 2026-10-13 | M2 交付（looper #24）：上下文与花费观测，不设花费上限。核实结论见第 3 节 M2 的「核实后确定的做法」。记录：`llm_records` 新增 `cache_read_tokens`、`cache_creation_tokens`、`context_tokens`、`compactions`。每次运行的花费和 token 取会话累计值（`total_cost_usd`、`modelUsage`）的增量，上下文取最后一个主循环请求的 prompt，每次压缩记下触发方式和压缩前后的规模。修复 `--resume` 重复计费：会话累计值和会话 id 存在一起（Manager 的 `session.json`，Planner 的计划文件），续接从存下的值算起，会话被丢弃时清零。API：`GET /api/tasks/<id>` 和 `GET /api/tasks` 带 `cost`（总额、按角色、运行数、还在跑的和没报出花费的）；新增 `GET /api/agents/<id>/usage`（总额、按会话、按 UTC 日、最近各 turn 的上下文和压缩）。界面：任务列表显示花费；任务页显示「Cost」卡片和「Cost by agent」；Manager、Planner 的历史页显示「Context & cost」（上下文折线、压缩标记和清单、最新上下文规模）；运行卡片显示自身 token（含缓存）、`ctx`、压缩标记和自身花费。验收（真实 Claude，haiku）：2 步任务（第 2 步送审）完成，任务总额 $0.0985664 等于 7 次运行之和（Planner 4 次 $0.033885、Worker 2 次 $0.0450697、Reviewer 1 次 $0.0196117），任务列表和详情给出的值相同；Manager 的上下文 26,871 → 28,295 → 29,806 token，经 API 读回，历史页可见；通过 Settings 环境变量设 `CLAUDE_CODE_AUTO_COMPACT_WINDOW=100000`、`CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=31` 后，Manager 一轮里自动压缩 2 次（29,916 → 1,577、27,015 → 2,561），记录和历史页都可见；这一轮由改设置后续接的新进程执行，Claude 报会话累计 $0.13230075，记录为本轮 $0.08451635；重启服务后 Manager 第一轮，Claude 报 $0.13930815（修复前会记下的数），记录为 $0.0070074，差额正好是存下的会话累计值 $0.13230075；token 与该轮 `result.usage` 一致；Planner 的计划文件存下会话累计 $0.033885，等于它 4 个 turn 之和。无头 Chrome 截图查看了任务页（1280、768 px）、任务列表、Manager 和 Planner 的历史页、展开后带压缩事件的运行卡片。真实 Claude 花费约 $0.41（核实约 $0.18，验收约 $0.24）。测试：单测与真实 PG 915 通过（main 上 886），另有 5 个 `test_dashboard_command` 安装模式用例在 main 上同样失败。新增和改动的测试在 main 上有 12 个失败，另有 2 个文件因缺少 `run_usage` 模块无法导入 |
+| 2026-10-13 | M3 交付（looper #27）：项目知识，只做核心。`project_documents` 表与 `GET/POST /api/projects/<id>/knowledge`、`PUT/DELETE .../knowledge/<doc_id>`；来源为手动录入、上传文本文件（JSON 里 base64）、引用项目默认目录里的文件（实时读取），不支持 URL；上限为单篇 2 MiB、每个项目 100 篇和 50 MiB、索引 4,000 个字符，超限返回 400 并写明上限，同一项目的修改持有项目行锁。Planner、Worker、Reviewer 每次运行读取项目知识：录入和上传的文档按内容哈希物化为只读文件，L3 在背景之后加 `## Project knowledge` 索引，`--add-dir` 由 `claude_cli.knowledge_args` 随 `Launch` 下发（知识目录；有引用路径且任务目录不是项目目录时加项目目录），Manager 没有；`prompt_layers.project` 记 `knowledge_sha256` 和 `knowledge_documents`；Planner 的重启签名加上挂载目录。界面：项目编辑里的 Knowledge 列表（新增文本、上传、引用路径、删除，篇数、存储量和索引字数读数）。核实（Claude Code 2.1.285，隔离参数下）：`--add-dir` 目录里的文件可读，该目录及其上级的 `CLAUDE.md` 不加载，不存在的目录不会让运行失败。验收（真实 Claude，haiku）：项目带一篇 3 KB 的录入文档（暗号在第 44 行）和一篇引用路径 `docs/deploy.md`（端口）；Worker 读了两篇并在报告里引用（行号和原文）；改了端口后在另一个目录跑的任务挂载了知识目录和项目目录，读到新端口 59322（这次是 Planner 读后写进步骤），再改一次并要求由 Worker 读，Worker 自己读到并引用了新的一行（60433）；索引增到 3,819 字符后再加一篇被拒（"this would make it 4270"），`../` 路径和 PNG 上传也被拒并说明原因；Worker 运行中新增一篇文档，Planner 下一轮换了新进程（pid 5178 → 6478）以 `--resume` 续接，记录的文档数 6 → 7；无头 Chrome 里完成新增文本、上传、被拒的路径、引用路径、删除，并截图查看了 1280 和 768 px。真实 Claude 花费约 $0.36。测试：单测与真实 PG 1175 通过（main 上 1094），另有 `test_dashboard_command` 的 5 个安装模式用例在 main 上同样失败，`-n 6` 下另一个用例两边都因 5 秒超时失败、单独跑通过。新增和改动的测试在 main 上 8 个失败、11 个出错，另有 2 个文件因缺少 `knowledge` 模块无法导入 |
 
 ## 5. 不属于本 RFC 的待办
 
@@ -256,6 +265,7 @@
 ### 5.3 非核心待办（M6 之后统一做）
 
 - **完整的项目页** `#projects/<id>`：概览、知识、Skills、Settings 标签（M3–M5 先用项目信息编辑里的最小界面）。
+- **项目知识的辅助功能**（M3 只做了核心）：在界面里修改已有文档（API 已支持 `PUT`）、查看正文、拖拽上传、项目视图里显示知识摘要；清理已删除或已替换文档在 runtime root 下留下的只读副本；缩短索引里的路径，让索引上限能容纳更多文档。
 - **界面小问题**：
   - Tasks 列表页内容贴边，没有内边距；
   - 任务详情里 Config 显示成 `"{}"`（JSONB 被当成字符串写入）；
