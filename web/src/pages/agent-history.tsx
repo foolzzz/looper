@@ -215,10 +215,12 @@ function shortSha(sha: string | null | undefined) {
 /** Where a run's settings came from: the settings layers, then the names runs recorded before the layers used. */
 const SETTING_SOURCES: Record<string, string> = {
   builtin: "built-in default",
+  agent: "the agent's default",
   system: "Settings",
   role: "role (Agents page)",
   project: "project",
   role_project: "role in project",
+  task: "task override",
   builtin_default: "built-in default",
   system_default: "Settings default",
   manager_override: "Manager override",
@@ -229,7 +231,7 @@ const sourceName = (source: string) => SETTING_SOURCES[source] ?? source;
 
 /**
  * One line per layer, in prompt order: where the harness, role, project, task and contract came from;
- * then the model the run asked for and the Settings environment variables it got.
+ * then the agent and model the run asked for and the Settings environment variables it got.
  */
 function PromptLayerSummary({ layers, metadata }: { layers: PromptLayers; metadata: LlmRecord["metadata"] }) {
   const { harness, role, project, task, contract } = layers;
@@ -266,6 +268,13 @@ function PromptLayerSummary({ layers, metadata }: { layers: PromptLayers; metada
       : "none",
   ]);
   if (contract) rows.push(["Contract", `${contract.name} · ${shortSha(contract.sha256)}`]);
+  const agent = metadata?.agent;
+  if (agent) {
+    rows.push([
+      "Agent",
+      `${agent.name} · ${agent.runtime.name} (${agent.runtime.type}) · ${agent.provider.name} · ${sourceName(agent.source)}`,
+    ]);
+  }
   const choice = metadata?.model_choice;
   if (choice) {
     rows.push([
@@ -283,9 +292,13 @@ function PromptLayerSummary({ layers, metadata }: { layers: PromptLayers; metada
     rows.push(["Env", `${keys.join(", ")} · ${shortSha(metadata.env.sha256)}`]);
   }
   if (sources) {
+    // Runs recorded before agents name the model's source.
+    const selected = sources.agent ? `agent ${sourceName(sources.agent)}` : sources.model ? `model ${sourceName(sources.model)}` : "";
     rows.push([
       "Sources",
-      `effort ${sourceName(sources.effort)} · run cap ${sourceName(sources.run_budget_usd)}`,
+      [selected, `effort ${sourceName(sources.effort)}`, `run cap ${sourceName(sources.run_budget_usd)}`]
+        .filter(Boolean)
+        .join(" · "),
     ]);
   }
   return (
@@ -816,6 +829,7 @@ export function RunCard({ initial, defaultOpen }: { initial: LlmRecord; defaultO
           {record.status}
         </Badge>
         <span className="text-muted-foreground">{formatMs(duration)}</span>
+        {record.metadata?.agent && <span className="font-mono text-muted-foreground">{record.metadata.agent.name}</span>}
         {record.model && <span className="text-muted-foreground">{record.model}</span>}
         <RunUsage record={record} />
         {record.status === "running" && (

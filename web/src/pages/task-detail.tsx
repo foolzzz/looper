@@ -1249,6 +1249,15 @@ export function TaskDetailPage({ taskId, onBack }: TaskDetailPageProps) {
                   }
                 />
               )}
+              {task && Object.keys(task.agent_overrides ?? {}).length > 0 && (
+                <span className="text-xs text-muted-foreground">
+                  Agents:{" "}
+                  {(["planner", "worker", "reviewer"] as const)
+                    .filter((role) => task.agent_overrides?.[role])
+                    .map((role) => `${role} → ${task.agent_overrides?.[role]?.name}`)
+                    .join(", ")}
+                </span>
+              )}
             </div>
           </div>
           {task && ["running", "pending", "executing", "assigned"].includes(task.status) && (

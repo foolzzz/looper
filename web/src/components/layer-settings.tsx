@@ -4,23 +4,28 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { HarnessField } from "@/components/harness-field";
 import type {
+  EffectiveAgent,
   EffectiveSettings,
   LayerUpdate,
   LayerValues,
   SettingLayer,
   SettingLimits,
+  SettingSource,
   Sourced,
 } from "@/lib/api";
 import { formatUsd } from "@/lib/usage";
+import { agentLabel, useRegistry } from "@/lib/use-registry";
 import { cn } from "@/lib/utils";
 
 /** Where a value came from, in words. */
-const LAYER_LABELS: Record<SettingLayer, string> = {
+const LAYER_LABELS: Record<SettingSource, string> = {
   builtin: "built-in default",
+  agent: "the agent",
   system: "Settings",
   role: "Agents page",
   project: "this project",
   role_project: "this role in the project",
+  task: "this task",
 };
 
 const ENV_NAME = /^[A-Z_][A-Z0-9_]*$/;
@@ -44,7 +49,8 @@ interface EnvRow {
 /** A layer's values as the editor holds them: text, "" = not set here. */
 interface Draft {
   harness: string;
-  model: string;
+  /** A registered agent's agent_id. */
+  agent: string;
   effort: string;
   env: EnvRow[];
   budget: string;
@@ -53,7 +59,7 @@ interface Draft {
 function draftOf(values: LayerValues): Draft {
   return {
     harness: values.harness_prompt ?? "",
-    model: values.model ?? "",
+    agent: values.agent ?? "",
     effort: values.effort ?? "",
     env: values.env.map((e) => ({ key: e.key, value: e.value ?? "", unset: e.value === null })),
     budget: values.run_budget_usd == null ? "" : String(values.run_budget_usd),
@@ -65,7 +71,7 @@ function changesOf(draft: Draft, values: LayerValues): LayerUpdate {
   const before = draftOf(values);
   const changes: LayerUpdate = {};
   if (draft.harness !== before.harness) changes.harness_prompt = draft.harness.trim() ? draft.harness : null;
-  if (draft.model.trim() !== before.model) changes.model = draft.model.trim() || null;
+  if (draft.agent !== before.agent) changes.agent = draft.agent || null;
   if (draft.effort !== before.effort) changes.effort = draft.effort || null;
   if (JSON.stringify(draft.env) !== JSON.stringify(before.env))
     changes.env = draft.env.map((e) => ({ key: e.key, value: e.unset ? null : e.value }));
@@ -78,7 +84,7 @@ function changesOf(draft: Draft, values: LayerValues): LayerUpdate {
 }
 
 /** "set here", "from Settings", "the Worker's in this project"… */
-function sourceText(source: SettingLayer, layer: SettingLayer, fromRole?: string) {
+function sourceText(source: SettingSource, layer: SettingLayer, fromRole?: string) {
   if (fromRole) {
     const whose = `the ${fromRole[0].toUpperCase()}${fromRole.slice(1)}'s`;
     return source === "role_project" ? `${whose} in this project` : `${whose} on the Agents page`;
@@ -124,7 +130,7 @@ function NowValue<T>({
 const SELECT = "flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm text-foreground";
 
 /**
- * One settings layer's harness, model, effort, environment and per-run cap. An empty field is not set here and
+ * One settings layer's harness, agent, effort, environment and per-run cap. An empty field is not set here and
  * inherits; with `effective`, each field also says what applies now and where it comes from.
  */
 export function LayerSettingsForm({
@@ -147,6 +153,8 @@ export function LayerSettingsForm({
   harnessHint?: React.ReactNode;
 }) {
   const [draft, setDraft] = useState<Draft>(() => draftOf(values));
+  const { registry, error: registryError } = useRegistry();
+  const agents = registry?.agents ?? [];
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [saved, setSaved] = useState(false);
@@ -180,7 +188,15 @@ export function LayerSettingsForm({
   };
 
   const harness = effective?.harness_prompt;
-  const effortText = (value: string | null) => value || "Claude Code default";
+  const effortText = (value: string | null) => value || "runtime default";
+  const agentText = (value: EffectiveAgent) => `${value.name} · ${value.model}`;
+  // The selected agent before the registry loads (or when it is gone): its name when it is the one in effect.
+  const unlisted =
+    draft.agent && !agents.some((a) => a.agent_id === draft.agent)
+      ? effective?.agent.value.agent_id === draft.agent
+        ? effective.agent.value.name
+        : draft.agent
+      : "";
   const budgetText = (value: number | null) => (value == null ? "no cap" : formatUsd(value));
 
   return (
@@ -222,18 +238,24 @@ export function LayerSettingsForm({
         )}
       </div>
 
-      <div className="grid gap-4 sm:grid-cols-3">
-        <div className="space-y-1">
-          <label htmlFor={`${idPrefix}-model`} className="text-xs font-medium text-muted-foreground">Model</label>
-          <Input
-            id={`${idPrefix}-model`}
-            value={draft.model}
-            onChange={(e) => set({ model: e.target.value })}
-            placeholder={isSystem ? `${limits.builtin_model} (built-in)` : "Inherit"}
-            aria-describedby={`${idPrefix}-model-now`}
-            className="font-mono"
-          />
-          <NowValue id={`${idPrefix}-model-now`} setting={effective?.model} layer={layer} show={(v) => v} />
+      <div className="grid gap-4 sm:grid-cols-2">
+        <div className="space-y-1 sm:col-span-2">
+          <label htmlFor={`${idPrefix}-agent`} className="text-xs font-medium text-muted-foreground">Agent</label>
+          <select
+            id={`${idPrefix}-agent`}
+            value={draft.agent}
+            onChange={(e) => set({ agent: e.target.value })}
+            aria-describedby={`${idPrefix}-agent-now`}
+            className={SELECT}
+          >
+            <option value="">{isSystem ? `Built-in: ${limits.builtin_agent.name}` : "Inherit"}</option>
+            {agents.map((agent) => (
+              <option key={agent.agent_id} value={agent.agent_id}>{agentLabel(agent)}</option>
+            ))}
+            {unlisted && <option value={draft.agent}>{unlisted}</option>}
+          </select>
+          <NowValue id={`${idPrefix}-agent-now`} setting={effective?.agent} layer={layer} show={agentText} />
+          {registryError && <p className="text-xs text-destructive">Could not load the agents: {registryError}</p>}
         </div>
         <div className="space-y-1">
           <label htmlFor={`${idPrefix}-effort`} className="text-xs font-medium text-muted-foreground">Effort</label>
@@ -244,7 +266,7 @@ export function LayerSettingsForm({
             aria-describedby={`${idPrefix}-effort-now`}
             className={SELECT}
           >
-            <option value="">{isSystem ? "Claude Code default" : "Inherit"}</option>
+            <option value="">{isSystem ? "The agent's or the runtime's default" : "Inherit"}</option>
             {limits.effort_levels.map((level) => (
               <option key={level} value={level}>{level}</option>
             ))}

@@ -292,6 +292,8 @@ export async function createTask(
     work_dir?: string;
     config?: Record<string, unknown>;
     goal_id?: string;
+    /** The registered agent (agent_id) of some of the task's roles, over every settings layer. */
+    agent_overrides?: Partial<Record<TaskRole, string>>;
   } & TaskProjectChoice,
 ): Promise<{ task_id: string; status: string; created_at: string; project_id: string }> {
   const res = await fetch(`${API_BASE}/tasks/create`, {
@@ -619,6 +621,8 @@ export interface TaskDetail extends TaskInfo {
   steps: TaskStep[];
   /** The task journal, oldest first: an entry per accepted step. */
   journal?: JournalEntry[];
+  /** The agent the task chose for some of its roles, over every settings layer; {} when none. */
+  agent_overrides?: Partial<Record<TaskRole, RegistryAgent>>;
 }
 
 /** What an accepted step delivered and what its Worker and Reviewer found. */
@@ -747,8 +751,6 @@ export interface AgentConfig {
   agent_id: string;
   display_name: string;
   role: string;
-  runtime: string;
-  llm_profile_id: number | null;
   enabled: boolean;
   /** The role prompt: what this kind of agent is responsible for. */
   system_prompt: string;
@@ -771,7 +773,7 @@ export type HarnessSource =
   | "manager_override"
   | "project_override";
 /** Where a run's model came from: a settings layer, or (older runs) the old source names. */
-export type ModelSource = SettingLayer | "builtin_default" | "system_default" | "agent_override" | "project_override";
+export type ModelSource = SettingSource | "builtin_default" | "system_default" | "agent_override" | "project_override";
 
 /** Where each layer of a run's system prompt came from (absent on runs recorded before it existed). */
 export interface PromptLayers {
@@ -803,6 +805,8 @@ export interface LlmRecord {
   cache_creation_tokens?: number | null;
   /** The run's own cost; for a resident agent's turn, that turn's share of its session. */
   cost_usd: number | null;
+  /** Who priced the run: the runtime reported it, or LoopX from the provider's prices; null when unpriced. */
+  cost_source?: "runtime" | "provider_price" | null;
   /** The context at the run's end: the prompt of its last main-loop model request. */
   context_tokens?: number | null;
   /** The context compactions during the run; null for runs recorded before they were. */
@@ -817,6 +821,15 @@ export interface LlmRecord {
     system_prompt?: string;
     system_prompt_sha256?: string;
     prompt_layers?: PromptLayers;
+    /** The registered agent the run used and where it was selected (runs recorded before agents lack it). */
+    agent?: {
+      id: string;
+      name: string;
+      model: string;
+      runtime: { id: string; name: string; type: string };
+      provider: { id: string; name: string; auth: ProviderAuth };
+      source: SettingSource;
+    };
     /** The model asked for (an alias or full name) and where it came from. */
     model_choice?: { model: string; source: ModelSource; effort: string | null };
     /** The environment variables from the agent settings: their names, with each value's sha256. */
@@ -824,8 +837,10 @@ export interface LlmRecord {
     /** The settings layer each setting of the run came from (runs recorded before the layers lack it). */
     settings_sources?: {
       harness: SettingLayer;
-      model: SettingLayer;
-      effort: SettingLayer;
+      /** Runs recorded before agents name the model's layer instead. */
+      agent?: SettingSource;
+      model?: SettingSource;
+      effort: SettingSource;
       run_budget_usd: SettingLayer;
       env: Record<string, SettingLayer>;
     };
@@ -951,74 +966,203 @@ export async function fetchLlmRecordEvents(recordId: number, after = 0): Promise
   return (await res.json()).events ?? [];
 }
 
-// --- LLM profiles ---
+// --- The agent registry: runtimes, LLM providers and the agents made of them ---
 
-export interface LlmProfile {
-  id: number;
+/** What a runtime of one type can do; `capabilities` decide which roles its agents can run. */
+export interface RuntimeType {
+  type: string;
+  label: string;
+  /** The command a runtime of this type runs when its executable is empty. */
+  default_executable: string;
+  protocols: string[];
+  capabilities: string[];
+  auth_kinds: ProviderAuth[];
+}
+
+/** A registered runtime: an agent CLI on this machine. */
+export interface Runtime {
+  runtime_id: string;
   name: string;
-  display_name: string;
-  provider_kind: string;
+  type: string;
+  type_label: string;
+  /** "" = the type's default (for the built-in Claude Code runtime, the server's claude). */
+  executable: string;
+  default_executable: string | null;
+  protocols: string[];
+  /** What `<executable> --version` printed at the last probe; null when not probed or it failed. */
+  version: string | null;
+  capabilities: string[];
+  probed_at: string | null;
+  probe_error: string | null;
+  builtin: boolean;
+  agent_count: number;
+}
+
+/** "oauth": the runtime's own login; "api_key": a key stored in LoopX. */
+export type ProviderAuth = "oauth" | "api_key";
+
+/** One model a provider serves; every field but the name may be null (unknown). Prices are USD per million tokens. */
+export interface ProviderModel {
+  name: string;
+  context_window: number | null;
+  input_usd_per_mtok: number | null;
+  output_usd_per_mtok: number | null;
+  cache_read_usd_per_mtok: number | null;
+  cache_write_usd_per_mtok: number | null;
+  efforts: string[] | null;
+}
+
+export type PriceField = Exclude<keyof ProviderModel, "name" | "context_window" | "efforts">;
+
+/** A registered LLM provider. The key itself is never sent: `api_key` is the mask when one is stored. */
+export interface Provider {
+  provider_id: string;
+  name: string;
+  protocols: string[];
+  auth: ProviderAuth;
+  /** The runtime type whose login an OAuth provider is; null for an API-key provider. */
+  oauth_runtime_type: string | null;
+  /** "" = the protocol's own endpoint. */
+  base_url: string;
+  /** Empty: any model. */
+  models: ProviderModel[];
+  /** null = no limit. */
+  max_concurrency: number | null;
+  api_key: string | null;
+  builtin: boolean;
+  agent_count: number;
+}
+
+/** A registered agent: a runtime, a provider and a model, with an optional default effort. */
+export interface RegistryAgent {
+  agent_id: string;
+  name: string;
   model: string;
-  base_url: string | null;
-  api_key_env: string | null;
-  reasoning_effort: string | null;
-  max_tokens: number | null;
-  context_window_k: number | null;
-  rate_per_minute: number | null;
-  streaming: boolean;
-  is_default: boolean;
-  priority: number;
-  description: string;
-  metadata: Record<string, unknown> | null;
-  created_at: string;
-  updated_at: string;
+  /** null = the runtime's default. */
+  effort: string | null;
+  runtime_id: string;
+  runtime_name: string;
+  runtime_type: string;
+  provider_id: string;
+  provider_name: string;
+  builtin: boolean;
 }
 
-export async function fetchLlmProfiles(): Promise<LlmProfile[]> {
-  const res = await fetch(`${API_BASE}/llm-profiles`);
-  if (!res.ok) throw new Error(`llm-profiles ${res.status}`);
+export interface RegistryLimits {
+  name_max_chars: number;
+  models_max: number;
+  price_fields: PriceField[];
+  protocols: string[];
+  auth_kinds: ProviderAuth[];
+  effort_levels: string[];
+  /** The runtime capabilities each role needs. */
+  role_capabilities: Record<AgentRole, string[]>;
+  /** What a stored secret reads as; sent back, it keeps the secret. */
+  secret_mask: string;
+}
+
+export interface Registry {
+  runtime_types: RuntimeType[];
+  runtimes: Runtime[];
+  providers: Provider[];
+  agents: RegistryAgent[];
+  limits: RegistryLimits;
+}
+
+/** The provider fields a create or update sends; `api_key` the mask keeps the stored key, null removes it. */
+export interface ProviderFields {
+  name?: string;
+  protocols?: string[];
+  auth?: ProviderAuth;
+  oauth_runtime_type?: string | null;
+  base_url?: string;
+  /** A number field may go as typed, so the server's 400 explains it. */
+  models?: Record<string, unknown>[];
+  max_concurrency?: number | string | null;
+  api_key?: string | null;
+}
+
+export interface AgentFields {
+  name?: string;
+  runtime_id?: string;
+  provider_id?: string;
+  model?: string;
+  effort?: string | null;
+}
+
+/** Window event fired after this dashboard changes the registry, so agent selectors reload at once. */
+export const REGISTRY_CHANGED_EVENT = "loopx:registry-changed";
+
+async function registryCall<T>(method: string, path: string, body: unknown, label: string): Promise<T> {
+  const res = await fetch(`${API_BASE}${path}`, {
+    method,
+    headers: body === undefined ? undefined : { "Content-Type": "application/json" },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  if (!res.ok) await failed(res, label);
   const data = await res.json();
-  return data.profiles ?? [];
+  window.dispatchEvent(new Event(REGISTRY_CHANGED_EVENT));
+  return data;
 }
 
-export async function createLlmProfile(
-  fields: Partial<LlmProfile>,
-): Promise<LlmProfile> {
-  const res = await fetch(`${API_BASE}/llm-profiles`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(fields),
-  });
-  if (!res.ok) throw new Error(`create llm-profile ${res.status}`);
+export async function fetchRegistry(): Promise<Registry> {
+  const res = await fetch(`${API_BASE}/registry`);
+  if (!res.ok) await failed(res, "registry");
   return res.json();
 }
 
-export async function updateLlmProfile(
-  profileId: number,
-  fields: Partial<LlmProfile>,
-): Promise<LlmProfile> {
-  const res = await fetch(`${API_BASE}/llm-profiles/${profileId}`, {
-    method: "PUT",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(fields),
-  });
-  if (!res.ok) throw new Error(`update llm-profile ${res.status}`);
-  return res.json();
+/** Register a runtime; the server probes `--version` at once. */
+export function createRuntime(fields: { name: string; type: string; executable?: string }): Promise<{ runtime: Runtime }> {
+  return registryCall("POST", "/runtimes", fields, "add runtime");
 }
 
-export async function deleteLlmProfile(profileId: number): Promise<void> {
-  const res = await fetch(`${API_BASE}/llm-profiles/${profileId}`, {
-    method: "DELETE",
-  });
-  if (!res.ok) throw new Error(`delete llm-profile ${res.status}`);
+/** Rename a runtime or change its executable (probed again); not the built-in one. */
+export function updateRuntime(runtimeId: string, fields: { name?: string; executable?: string }): Promise<{ runtime: Runtime }> {
+  return registryCall("PUT", `/runtimes/${encodeURIComponent(runtimeId)}`, fields, "update runtime");
 }
 
-// --- Agent settings: harness, model, effort, environment and per-run cap, by layer ---
+export function deleteRuntime(runtimeId: string): Promise<{ deleted: string }> {
+  return registryCall("DELETE", `/runtimes/${encodeURIComponent(runtimeId)}`, undefined, "delete runtime");
+}
+
+/** Run `<executable> --version` again and record its version or error. */
+export function probeRuntime(runtimeId: string): Promise<{ runtime: Runtime }> {
+  return registryCall("POST", `/runtimes/${encodeURIComponent(runtimeId)}/probe`, undefined, "probe runtime");
+}
+
+export function createProvider(fields: ProviderFields): Promise<{ provider: Provider }> {
+  return registryCall("POST", "/providers", fields, "add provider");
+}
+
+export function updateProvider(providerId: string, fields: ProviderFields): Promise<{ provider: Provider }> {
+  return registryCall("PUT", `/providers/${encodeURIComponent(providerId)}`, fields, "update provider");
+}
+
+export function deleteProvider(providerId: string): Promise<{ deleted: string }> {
+  return registryCall("DELETE", `/providers/${encodeURIComponent(providerId)}`, undefined, "delete provider");
+}
+
+/** Register an agent; refused (400) when its runtime, provider and model could not run together. */
+export function createRegistryAgent(fields: AgentFields): Promise<{ agent: RegistryAgent }> {
+  return registryCall("POST", "/agents", fields, "add agent");
+}
+
+export function updateRegistryAgent(agentId: string, fields: AgentFields): Promise<{ agent: RegistryAgent }> {
+  return registryCall("PUT", `/agents/${encodeURIComponent(agentId)}`, fields, "update agent");
+}
+
+export function deleteRegistryAgent(agentId: string): Promise<{ deleted: string }> {
+  return registryCall("DELETE", `/agents/${encodeURIComponent(agentId)}`, undefined, "delete agent");
+}
+
+// --- Agent settings: harness, agent, effort, environment and per-run cap, by layer ---
 
 /** Where a setting comes from, from least to most specific: the built-in default, Settings (every agent), a role
  * (Agents page), a project (all its agents), a role in a project. A later layer wins; the Manager has only the
  * first three. */
 export type SettingLayer = "builtin" | "system" | "role" | "project" | "role_project";
+/** Where a value came from: a layer, the selected agent's own default (its effort), or a task's choice of agent. */
+export type SettingSource = SettingLayer | "agent" | "task";
 /** The roles a project's agents have: the Manager spans every project. */
 export type ProjectRole = Exclude<AgentRole, "manager">;
 
@@ -1031,7 +1175,8 @@ export interface LayerEnvEntry {
 /** One layer's own values; null is not set here (inherits). */
 export interface LayerValues {
   harness_prompt: string | null;
-  model: string | null;
+  /** A registered agent's agent_id. */
+  agent: string | null;
   /** One of `SettingLimits.effort_levels`. */
   effort: string | null;
   env: LayerEnvEntry[];
@@ -1041,15 +1186,25 @@ export interface LayerValues {
 
 export interface Sourced<T> {
   value: T;
-  source: SettingLayer;
+  source: SettingSource;
+}
+
+/** The agent that applies, as the layered settings show it. */
+export interface EffectiveAgent {
+  agent_id: string;
+  name: string;
+  model: string;
+  /** The runtime's and the provider's names. */
+  runtime: string;
+  provider: string;
 }
 
 /** What applies to an agent, and the layer each value came from. */
 export interface EffectiveSettings {
   /** from_role "worker": a Reviewer without its own harness at that layer uses the Worker's. */
   harness_prompt: Sourced<string> & { from_role?: "worker" };
-  model: Sourced<string>;
-  /** null = Claude Code's default effort. */
+  agent: Sourced<EffectiveAgent>;
+  /** null = the runtime's default effort; source "agent": the agent's own default. */
   effort: Sourced<string | null>;
   env: ({ key: string } & Sourced<string>)[];
   /** null = no cap. */
@@ -1062,6 +1217,8 @@ export interface SettingLimits {
   effort_levels: string[];
   builtin_harness_prompt: string;
   builtin_model: string;
+  /** The agent every role runs with when no layer selects one. */
+  builtin_agent: { agent_id: string; name: string };
   budget_max_usd: number;
 }
 

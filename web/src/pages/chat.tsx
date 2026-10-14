@@ -256,7 +256,7 @@ export function ChatPage() {
   };
   const targetSubtitle = (t: ChatTargetInfo) =>
     t.kind === "manager"
-      ? `global · ${managerConfig?.runtime || "claude-code"}`
+      ? "global"
       : `${t.kind === "planner" ? t.task_id : t.id} · ${t.status || "unknown"}`;
 
   // A Planner's own record is its activity; show it above the chat with it.

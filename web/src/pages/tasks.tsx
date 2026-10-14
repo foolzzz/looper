@@ -22,8 +22,10 @@ import {
   startTask,
   createTask,
   type TaskInfo,
+  type TaskRole,
 } from "@/lib/api";
 import { useProjects } from "@/lib/use-projects";
+import { agentLabel, useRegistry } from "@/lib/use-registry";
 import { formatUsd } from "@/lib/usage";
 import { ProjectBackgroundField, backgroundTooLong } from "@/components/project-background-field";
 import { TaskDetailPage } from "./task-detail";
@@ -106,6 +108,47 @@ function durationLabel(created: string | null | undefined, completed: string | n
 /** The create form's project choice that reveals the new-project fields. */
 const NEW_PROJECT = "__new__";
 
+const TASK_ROLES: { id: TaskRole; label: string }[] = [
+  { id: "planner", label: "Planner" },
+  { id: "worker", label: "Worker" },
+  { id: "reviewer", label: "Reviewer" },
+];
+
+type AgentChoice = Partial<Record<TaskRole, string>>;
+
+/** The agent of each of the task's roles: from the settings (nothing chosen), or a registered agent for this task. */
+function TaskAgentsField({ value, onChange }: { value: AgentChoice; onChange: (value: AgentChoice) => void }) {
+  const { registry, error } = useRegistry();
+  return (
+    <fieldset className="space-y-2">
+      <legend className="text-sm font-medium text-muted-foreground">Agents</legend>
+      <div className="grid grid-cols-[auto_minmax(0,1fr)] items-center gap-x-3 gap-y-2">
+        {TASK_ROLES.map((role) => (
+          <div key={role.id} className="contents">
+            <label htmlFor={`new-task-agent-${role.id}`} className="text-xs text-muted-foreground">{role.label}</label>
+            <select
+              id={`new-task-agent-${role.id}`}
+              value={value[role.id] ?? ""}
+              onChange={(e) => onChange({ ...value, [role.id]: e.target.value })}
+              className="w-full rounded-lg border border-border bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary/50"
+            >
+              <option value="">From settings</option>
+              {registry?.agents.map((agent) => (
+                <option key={agent.agent_id} value={agent.agent_id}>{agentLabel(agent)}</option>
+              ))}
+            </select>
+          </div>
+        ))}
+      </div>
+      {error && <p className="text-xs text-destructive">Could not load the agents: {error}</p>}
+      <p className="text-xs text-muted-foreground">
+        Optional. A chosen agent runs that role for this task only, over the project&apos;s and the Agents page&apos;s
+        settings.
+      </p>
+    </fieldset>
+  );
+}
+
 interface TasksPageProps {
   sub?: string;
   /** "project=<id>" filters the list by project. */
@@ -146,6 +189,7 @@ export function TasksPage({ sub, query, onNavigate }: TasksPageProps) {
   const [newProjectDir, setNewProjectDir] = useState("");
   const [newProjectDesc, setNewProjectDesc] = useState("");
   const [newProjectBackground, setNewProjectBackground] = useState("");
+  const [newAgents, setNewAgents] = useState<AgentChoice>({});
   const [creating, setCreating] = useState(false);
   const [createError, setCreateError] = useState("");
   const selectedTaskId = sub || null;
@@ -240,6 +284,7 @@ export function TasksPage({ sub, query, onNavigate }: TasksPageProps) {
     setNewProjectDir("");
     setNewProjectDesc("");
     setNewProjectBackground("");
+    setNewAgents({});
   };
 
   const openCreate = () => {
@@ -251,8 +296,13 @@ export function TasksPage({ sub, query, onNavigate }: TasksPageProps) {
     if (!canCreate) return;
     setCreating(true);
     setCreateError("");
-    // An empty directory is left out so the project's default applies.
-    const base = { requirement: newReq.trim(), work_dir: newWorkDir.trim() || undefined };
+    // An empty directory is left out so the project's default applies; so is a role without a chosen agent.
+    const overrides = Object.fromEntries(Object.entries(newAgents).filter(([, agentId]) => agentId));
+    const base = {
+      requirement: newReq.trim(),
+      work_dir: newWorkDir.trim() || undefined,
+      agent_overrides: Object.keys(overrides).length ? overrides : undefined,
+    };
     try {
       const result = await createTask(
         isNewProject
@@ -611,6 +661,7 @@ export function TasksPage({ sub, query, onNavigate }: TasksPageProps) {
                   Where the task's Workers run: an absolute path or one starting with ~/. Created if it does not exist.
                 </p>
               </div>
+              <TaskAgentsField value={newAgents} onChange={setNewAgents} />
               <p className="text-xs text-muted-foreground">
                 Task will be created in <strong>init</strong> status. You can review and edit the configuration before starting.
               </p>
