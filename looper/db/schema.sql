@@ -307,6 +307,9 @@ CREATE TABLE IF NOT EXISTS agent_profiles (
     created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at   TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+-- Claude Code's agent teams for the profile's runs (only on a Claude Code runtime, checked in code): off for every
+-- profile until the user turns it on.
+ALTER TABLE agent_profiles ADD COLUMN IF NOT EXISTS agent_teams BOOLEAN NOT NULL DEFAULT false;
 -- A task's profile overrides: its own choice of Agent Profile for some of its
 -- roles (the Planner, Workers or Reviewers), the only agent setting a task has.
 -- Each wins over every layer, for that task only; a profile a task chose cannot

@@ -39,6 +39,23 @@ Anthropic-format endpoint, with the operator's subscription signed in:
   Code does not know), so a run on another endpoint is priced by Looper at
   its provider's prices (``cost_source``), and ``--max-budget-usd`` is not
   passed: Looper enforces the per-run cap itself (``claude_cli``).
+
+**Agent teams** (an Agent Profile's ``agent_teams``). Claude Code 2.1.285
+enables them only when ``CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS`` is set. A
+teammate it spawns runs where ``--teammate-mode`` says; under its default
+(``auto``) a process inside tmux starts each one as a tmux process of its own,
+whose cost the run's result never counts, so a run with teams has
+``--teammate-mode in-process``. Then a teammate runs in the run's process as a
+background task (``system/task_started``). One that outlives the turn that
+spawned it starts a turn of the lead's own with its message and another when it
+ends, also after stdin closed, and the process exits after them: every
+``result`` carries the session's totals, the teammate's models included in
+``modelUsage``, and the last one comes once the teammate is done. A teammate does not get the lead's ``--append-system-prompt-file``. Its
+assistant messages are in the stream (with a ``parent_tool_use_id``) but its
+model requests are not (no ``message_start``), so the per-run soft cap misses
+their tokens. The profile owns the variable: a run without teams has it
+removed, whatever the server's environment, the settings' or the provider's
+variables say.
 """
 
 from __future__ import annotations
@@ -71,6 +88,9 @@ AUTH_TOKEN = "ANTHROPIC_AUTH_TOKEN"  # sent as Authorization: Bearer
 # may ask for, and the subagents' own model.
 MAIN_MODEL_VARS = ("ANTHROPIC_DEFAULT_OPUS_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL", "CLAUDE_CODE_SUBAGENT_MODEL")
 BACKGROUND_MODEL_VARS = ("ANTHROPIC_DEFAULT_HAIKU_MODEL", "ANTHROPIC_SMALL_FAST_MODEL")
+# Agent teams (the module's notes): the variable that enables them, and where their teammates run.
+AGENT_TEAMS = "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS"
+TEAMMATE_MODE_ARGS = ("--teammate-mode", "in-process")
 # Anthropic's own API: the endpoint Claude Code uses without a base URL.
 ANTHROPIC_HOSTS = frozenset({"api.anthropic.com"})
 
@@ -146,7 +166,8 @@ class ClaudeCodeRuntime(RuntimeAdapter):
     def launch_args(self, launch: Launch) -> list[str]:
         """The Claude Code flags every agent starts with: the permissions, the model, the effort, the
         plugin directories of the installed items, the directories of the project knowledge, the
-        per-run spend cap (when Claude Code's own figure is the run's cost) and the provider's binding."""
+        per-run spend cap (when Claude Code's own figure is the run's cost), the provider's binding and, with
+        the profile's agent teams, where teammates run."""
         from ..claude_cli import budget_args, knowledge_args, library_args, permission_args
 
         provider = launch.profile.provider
@@ -158,16 +179,20 @@ class ClaudeCodeRuntime(RuntimeAdapter):
             *knowledge_args(launch.knowledge),
             *(budget_args(launch.max_budget_usd) if self.cost_source(provider) is CostSource.RUNTIME else []),
             *self.bind_provider(provider, launch.model, launch.effort).args,
+            *(TEAMMATE_MODE_ARGS if launch.profile.agent_teams else ()),
         ]
 
     def environment(self, launch: Launch) -> dict[str, str] | None:
         """The subprocess environment: the server's, then the settings' variables and the provider's binding,
-        less what the binding removes; None without any."""
+        less what the binding removes, with the agent teams variable set by the profile alone; None without any
+        of these."""
         binding = self.bind_provider(launch.profile.provider, launch.model, launch.effort)
-        added = {**dict(launch.env), **dict(binding.env)}
-        if not added and not binding.unset:
+        added = {k: v for k, v in (*launch.env, *binding.env) if k != AGENT_TEAMS}
+        if launch.profile.agent_teams:
+            added[AGENT_TEAMS] = "1"
+        if not added and not binding.unset and AGENT_TEAMS not in os.environ:
             return None
-        return {**{k: v for k, v in os.environ.items() if k not in binding.unset}, **added}
+        return {**{k: v for k, v in os.environ.items() if k not in binding.unset and k != AGENT_TEAMS}, **added}
 
     def resident_command(self, executable: str, *, cwd: str | Path, prompt_file: Path, launch: Launch,
                          max_turns: int = 0) -> list[str]:

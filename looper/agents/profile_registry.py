@@ -1,7 +1,8 @@
 """Runtimes, LLM providers and Agent Profiles: what they are, how they are checked, and their API (RFC decision 10).
 
 An **Agent Profile** is a runtime, an LLM provider and a model, with a default
-effort; a running agent (the Manager, a Planner, a step's Worker) runs the
+effort and, on Claude Code, whether its runs have agent teams (off by default);
+a running agent (the Manager, a Planner, a step's Worker) runs the
 profile its role selects. A **runtime** is a runtime type
 (an adapter in ``looper.agents.runtimes``) found on this machine: the
 executable it runs and what its probe found (``<executable> --version``, never
@@ -41,7 +42,8 @@ it uses changes (``check_pairing``):
 - an OAuth provider pairs only with runtimes of the type whose login it is;
 - the runtime can be started with that kind of provider now
   (``RuntimeAdapter.auth_kinds``);
-- the model is one the provider lists, when it lists any.
+- the model is one the provider lists, when it lists any;
+- agent teams are on only with a Claude Code runtime (``check_agent_teams``).
 
 Where a profile is selected (a layer, or a task's choice for one of its roles),
 its runtime must have what each of those roles needs (``check_roles``,
@@ -157,6 +159,7 @@ class AgentProfile:
     provider: ProviderSpec
     model: str
     effort: str | None = None  # its default effort; a layer's effort wins
+    agent_teams: bool = False  # Claude Code's agent teams in its runs (runtimes.claude_code)
 
     @classmethod
     def from_row(cls, row: Mapping[str, Any]) -> AgentProfile:
@@ -164,6 +167,7 @@ class AgentProfile:
         known = {c.value for c in Capability}
         return cls(
             id=row["id"], name=row["name"], model=row["model"], effort=row.get("effort"),
+            agent_teams=bool(row.get("agent_teams")),
             runtime=RuntimeSpec(row["runtime_id"], row["runtime_name"], row["runtime_type"],
                                 row.get("runtime_executable") or "",
                                 frozenset(Capability(c) for c in row.get("runtime_capabilities") or () if c in known)),
@@ -403,6 +407,19 @@ def check_pairing(runtime: RuntimeSpec, provider: ProviderSpec, model: str) -> N
                             f"{model!r} is not one of them")
 
 
+def check_agent_teams(runtime: RuntimeSpec, agent_teams: bool) -> None:
+    """Refuse agent teams on a runtime other than Claude Code's, whose feature they are."""
+    if agent_teams and runtime.type != runtimes.CLAUDE_CODE.type:
+        raise RegistryError(f"agent teams are a Claude Code feature: runtime {runtime.name!r} is of type "
+                            f"{runtime.type!r}; turn agent_teams off or choose a Claude Code runtime")
+
+
+def _agent_teams(raw: Any) -> bool:
+    if not isinstance(raw, bool):
+        raise RegistryError("agent_teams must be true or false")
+    return raw
+
+
 def check_roles(profile: AgentProfile, roles: Iterable[str]) -> None:
     """Refuse ``profile`` for a role its runtime lacks a capability for."""
     adapter = runtimes.ADAPTERS.get(profile.runtime.type)
@@ -580,6 +597,7 @@ def profile_view(row: Mapping[str, Any], used_by: Mapping[str, Any] = NOT_USED) 
         "profile_id": row["id"], "name": row["name"], "model": row["model"], "effort": row.get("effort"),
         "runtime_id": row["runtime_id"], "runtime_name": row["runtime_name"], "runtime_type": row["runtime_type"],
         "provider_id": row["provider_id"], "provider_name": row["provider_name"], "builtin": row["builtin"],
+        "agent_teams": spec.agent_teams,
         "roles": servable_roles(spec.runtime.capabilities), "used_by": dict(used_by),
         "cost": cost_basis(spec),
     }
@@ -862,7 +880,7 @@ async def delete_provider(provider_id: str) -> dict[str, Any]:
 
 # --- Agent Profiles ---
 
-_PROFILE_FIELDS = ("name", "runtime_id", "provider_id", "model", "effort")
+_PROFILE_FIELDS = ("name", "runtime_id", "provider_id", "model", "effort", "agent_teams")
 
 
 async def _existing_profile(profile_id: str) -> dict[str, Any]:
@@ -887,7 +905,7 @@ async def _parts(runtime_id: Any, provider_id: Any) -> tuple[RuntimeSpec, Provid
 
 
 async def create_profile(data: Any) -> dict[str, Any]:
-    """Register ``{name, runtime_id, provider_id, model, effort?}``; refused when it could not run."""
+    """Register ``{name, runtime_id, provider_id, model, effort?, agent_teams?}``; refused when it could not run."""
     import asyncpg
 
     from ..db import profile_registry as db
@@ -895,9 +913,10 @@ async def create_profile(data: Any) -> dict[str, Any]:
     data = _fields(data, _PROFILE_FIELDS)
     fields = {"name": entry_name(data.get("name"), "profile"), "runtime_id": data.get("runtime_id"),
               "provider_id": data.get("provider_id"), "model": _model(data.get("model")),
-              "effort": _effort(data.get("effort"))}
+              "effort": _effort(data.get("effort")), "agent_teams": _agent_teams(data.get("agent_teams", False))}
     runtime, provider = await _parts(fields["runtime_id"], fields["provider_id"])
     check_pairing(runtime, provider, fields["model"])
+    check_agent_teams(runtime, fields["agent_teams"])
     try:
         profile_id = await db.insert_profile(fields)
     except asyncpg.UniqueViolationError:
@@ -933,6 +952,8 @@ async def update_profile(profile_id: str, data: Any) -> dict[str, Any]:
         fields["model"] = _model(data["model"])
     if "effort" in data:
         fields["effort"] = _effort(data["effort"])
+    if "agent_teams" in data:
+        fields["agent_teams"] = _agent_teams(data["agent_teams"])
     for name in ("runtime_id", "provider_id"):
         if name in data:
             fields[name] = data[name]
@@ -940,6 +961,7 @@ async def update_profile(profile_id: str, data: Any) -> dict[str, Any]:
                                      fields.get("provider_id", row["provider_id"]))
     model = fields.get("model", row["model"])
     check_pairing(runtime, provider, model)
+    check_agent_teams(runtime, fields.get("agent_teams", bool(row.get("agent_teams"))))
     check_roles(AgentProfile(profile_id, fields.get("name", row["name"]), runtime, provider, model),
                 await _selected_roles(profile_id))
     try:

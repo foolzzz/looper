@@ -204,7 +204,7 @@ def provider_entry(row: Mapping[str, Any], include_secrets: bool) -> dict[str, A
 
 
 def profile_entry(row: Mapping[str, Any]) -> dict[str, Any]:
-    return {name: row[name] for name in ("name", "runtime", "provider", "model", "effort")}
+    return {name: row[name] for name in ("name", "runtime", "provider", "model", "effort", "agent_teams")}
 
 
 def layer_entry(row: Mapping[str, Any]) -> dict[str, Any]:
@@ -766,13 +766,15 @@ class _Importer:
         for name, row in target.profiles.items():
             if row["runtime"] in self.runtimes and row["provider"] in self.providers:
                 self.profiles[name] = (row["id"], self._profile_spec(row["id"], name, row["runtime"],
-                                                                     row["provider"], row["model"], row["effort"]))
+                                                                     row["provider"], row["model"], row["effort"],
+                                                                     row["agent_teams"]))
 
     def _profile_spec(self, profile_id: str, name: str, runtime: str, provider: str, model: str,
-                      effort: str | None) -> Any:
+                      effort: str | None, agent_teams: bool) -> Any:
         from .profile_registry import AgentProfile
 
-        return AgentProfile(profile_id, name, self.runtimes[runtime][1], self.providers[provider][1], model, effort)
+        return AgentProfile(profile_id, name, self.runtimes[runtime][1], self.providers[provider][1], model, effort,
+                            agent_teams)
 
     def record(self, section: str, key: str, action: Action, fields: Sequence[str] = (), reason: str = "") -> None:
         self.plan.changes.append(Change(section, key, action, tuple(fields), reason))
@@ -865,19 +867,22 @@ class _Importer:
         self.providers[name] = (provider_id, provider_spec({**fields, "id": provider_id}))
 
     async def profile(self, entry: Any) -> None:
-        from .profile_registry import RegistryError, _effort, _model, check_pairing, entry_name
+        from .profile_registry import RegistryError, _agent_teams, _effort, _model, check_agent_teams, check_pairing, \
+            entry_name
 
         raw = entry if isinstance(entry, Mapping) else {}
         label = str(raw.get("name"))
         try:
             entry = _mapping(entry, "an Agent Profile")
-            unknown = sorted(set(entry) - {"name", "runtime", "provider", "model", "effort"})
+            unknown = sorted(set(entry) - {"name", "runtime", "provider", "model", "effort", "agent_teams"})
             if unknown:
                 raise _Skip(f"unknown field {unknown[0]!r}")
             try:
                 name = label = entry_name(entry.get("name"), "agent")
+                # A file from before agent teams has none: they are off.
                 values = {"runtime": entry.get("runtime"), "provider": entry.get("provider"),
-                          "model": _model(entry.get("model")), "effort": _effort(entry.get("effort"))}
+                          "model": _model(entry.get("model")), "effort": _effort(entry.get("effort")),
+                          "agent_teams": _agent_teams(entry.get("agent_teams", False))}
             except RegistryError as exc:
                 raise _Skip(str(exc)) from None
             if values["runtime"] not in self.runtimes:
@@ -889,9 +894,10 @@ class _Importer:
             if row is not None and row["builtin"]:
                 raise _Skip("a built-in Agent Profile has this name here")
             spec = self._profile_spec(row["id"] if row else f"new:{name}", name, values["runtime"],
-                                      values["provider"], values["model"], values["effort"])
+                                      values["provider"], values["model"], values["effort"], values["agent_teams"])
             try:
                 check_pairing(spec.runtime, spec.provider, spec.model)
+                check_agent_teams(spec.runtime, spec.agent_teams)
             except RegistryError as exc:
                 raise _Skip(str(exc)) from None
         except _Skip as exc:
@@ -909,7 +915,7 @@ class _Importer:
 
         return await db.write_profile(self.conn, profile_id, {
             "name": name, "runtime_id": spec.runtime.id, "provider_id": spec.provider.id, "model": spec.model,
-            "effort": spec.effort})
+            "effort": spec.effort, "agent_teams": spec.agent_teams})
 
     async def _layer_profile(self, name: str | None, scope: str, role: str | None) -> str | None:
         """The id of the layer's Agent Profile (``new:...`` in a preview); a model's profile from a file before
