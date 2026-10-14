@@ -173,6 +173,7 @@ _AGENT_DB_READS = (
     ("library", "get_item_files", []),
     ("project_documents", "list_documents", []),
     ("project_documents", "get_content", None),
+    ("project_skills", "list_enabled_skills", []),
 )
 
 
@@ -409,6 +410,28 @@ def project_documents(agent_db: SimpleNamespace) -> Callable[..., list[dict[str,
 
     agent_db.get_content.side_effect = lambda document_id, **_: contents.get(document_id)
     return set_documents
+
+
+@pytest.fixture
+def project_skills(agent_db: SimpleNamespace) -> Callable[..., list[dict[str, Any]]]:
+    """Set the enabled skills of each project: ``project_skills((project_id, name, description, content), ...)``.
+
+    The stubbed database then lists, for a project, the rows given for it (the
+    enabled ones, as ``list_enabled_skills`` reads them, by name); it returns
+    every row. Calling it again replaces the skills.
+    """
+    rows: list[dict[str, Any]] = []
+
+    def set_skills(*skills: tuple[str, str, str, str]) -> list[dict[str, Any]]:
+        rows.clear()
+        for number, (project_id, name, description, content) in enumerate(skills, start=1):
+            rows.append({"id": f"skill-{number:012d}", "project_id": project_id, "name": name,
+                         "description": description, "content": content})
+        return [dict(row) for row in rows]
+
+    agent_db.list_enabled_skills.side_effect = lambda project_id, **_: sorted(
+        (dict(row) for row in rows if row["project_id"] == project_id), key=lambda row: row["name"])
+    return set_skills
 
 
 @pytest.fixture

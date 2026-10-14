@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import stat
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -21,8 +22,19 @@ from typing import Any
 
 import pytest
 
+from library_fixtures import plugin_dirs
 from loopx.agents import project_skills
+from loopx.agents.agent_settings import BUILTIN_DEFAULTS, resolve_launch
 from loopx.agents.http_server import AgentHTTPServer
+from loopx.agents.knowledge import AgentKnowledge
+from loopx.agents.library import AgentLibrary
+from loopx.agents.project_skills import (
+    EMPTY_PROJECT_SKILLS,
+    AgentProjectSkills,
+    LoadedSkill,
+    load_project_skills,
+    skill_file,
+)
 from loopx.agents.tiers.task import TaskRouter
 from loopx.db import project_skills as db_skills, projects as db_projects
 
@@ -335,6 +347,162 @@ class TestChangeAndDelete:
         assert _call(tmp_path, "DELETE", f"/api/projects/proj-2/skills/{skill_id}")[0] == 404
         assert _call(tmp_path, "PUT", f"/api/projects/proj-nope/skills/{skill_id}", {"enabled": False})[0] == 404
         assert store.skills[skill_id]["enabled"] is True
+
+
+# --- The SKILL.md agents load ---
+
+
+class TestSkillFile:
+    def test_the_frontmatter_comes_from_the_fields_and_the_body_follows(self) -> None:
+        text = skill_file("deploy-check", "Use before a deploy.", "Run `make check`.\n\nThen reply OK.")
+        assert text == ("---\nname: deploy-check\ndescription: \"Use before a deploy.\"\n---\n\n"
+                        "Run `make check`.\n\nThen reply OK.\n")
+
+    def test_a_description_with_yaml_syntax_stays_one_quoted_string(self) -> None:
+        text = skill_file("q", 'Checks: "deploy" steps # not a comment \\ [x] {y} 中文', "Body\n")
+        line = text.splitlines()[2]
+        assert line == 'description: "Checks: \\"deploy\\" steps # not a comment \\\\ [x] {y} 中文"'
+        assert json.loads(line.removeprefix("description: ")) == 'Checks: "deploy" steps # not a comment \\ [x] {y} 中文'
+
+
+# --- Materializing the enabled skills for a run ---
+
+
+def _load(root: Path, project: dict[str, Any] | None) -> AgentProjectSkills:
+    return asyncio.run(load_project_skills(root, project))
+
+
+def _files(directory: Path) -> dict[str, str]:
+    return {p.relative_to(directory).as_posix(): p.read_text(encoding="utf-8")
+            for p in sorted(directory.rglob("*")) if p.is_file()}
+
+
+class TestLoad:
+    @pytest.fixture
+    def two_skills(self, store: _Store, tmp_path: Path) -> None:
+        store.add_project()
+        store.add_project("proj-2")
+        _call(tmp_path, "POST", BASE, _skill(name="release-notes", description="Drafts notes.", content="Reply NOTES."))
+        _call(tmp_path, "POST", BASE, _skill())
+        _call(tmp_path, "POST", BASE, _skill(name="off", enabled=False))
+        _call(tmp_path, "POST", "/api/projects/proj-2/skills", _skill(name="elsewhere"))
+
+    def test_the_enabled_skills_are_one_read_only_plugin_under_the_runtime_root(
+        self, tmp_path: Path, two_skills: None,
+    ) -> None:
+        runtime, work = tmp_path / "runtime", tmp_path / "work"
+        work.mkdir()
+        loaded = _load(runtime, {"id": "proj-1", "work_dir": str(work)})
+
+        plugin = Path(loaded.plugin_dir or "")
+        assert plugin.name == "project" and plugin.parent.name == loaded.sha256
+        assert plugin.parent.parent == runtime / ".local" / "projects" / "proj-1" / "skills"
+        files = _files(plugin)
+        assert sorted(files) == [".claude-plugin/plugin.json", "skills/deploy-check/SKILL.md",
+                                 "skills/release-notes/SKILL.md"]  # the disabled one and proj-2's are not there
+        assert json.loads(files[".claude-plugin/plugin.json"])["name"] == "project"
+        assert files["skills/release-notes/SKILL.md"] == skill_file("release-notes", "Drafts notes.", "Reply NOTES.")
+        assert files["skills/deploy-check/SKILL.md"].startswith(
+            "---\nname: deploy-check\ndescription: \"Use before a deploy: checks the release steps.\"\n---\n")
+        # Each recorded hash is the hash of the file Claude Code reads.
+        assert loaded.skills == (
+            LoadedSkill("deploy-check", _sha(files["skills/deploy-check/SKILL.md"])),
+            LoadedSkill("release-notes", _sha(files["skills/release-notes/SKILL.md"])),
+        )
+        assert (loaded.project_id, loaded.error) == ("proj-1", None)
+        # Read-only: every file 0444, every directory 0555, the hash directory included.
+        for path in [plugin.parent, *plugin.parent.rglob("*")]:
+            assert stat.S_IMODE(path.stat().st_mode) == (0o555 if path.is_dir() else 0o444), path
+        # Nothing in the task's directory; under the runtime root, only the project's skills.
+        assert list(work.iterdir()) == []
+        assert [p.relative_to(runtime).as_posix() for p in sorted(runtime.rglob("*")) if p.is_dir()][:4] == [
+            ".local", ".local/projects", ".local/projects/proj-1", ".local/projects/proj-1/skills"]
+
+    def test_the_same_skills_reuse_the_directory_and_a_change_makes_a_new_one(
+        self, store: _Store, tmp_path: Path, two_skills: None,
+    ) -> None:
+        first = _load(tmp_path, {"id": "proj-1"})
+        written = Path(first.plugin_dir or "") / "skills" / "deploy-check" / "SKILL.md"
+        mtime = written.stat().st_mtime_ns
+        again = _load(tmp_path, {"id": "proj-1"})
+        assert again == first and written.stat().st_mtime_ns == mtime  # written once
+
+        seen = {first.sha256}
+        for change in ({"content": "Reply DEPLOY-OK-2."}, {"description": "Checks a deploy."},
+                       {"name": "deploy-gate"}, {"enabled": False}):
+            skill_id = next(i for i, r in store.skills.items() if r["name"] in ("deploy-check", "deploy-gate"))
+            assert _call(tmp_path, "PUT", f"{BASE}/{skill_id}", change)[0] == 200
+            changed = _load(tmp_path, {"id": "proj-1"})
+            assert changed.sha256 not in seen and Path(changed.plugin_dir or "").is_dir()
+            seen.add(changed.sha256)
+        assert Path(first.plugin_dir or "").is_dir()  # an older copy stays for a run that may still use it
+        assert [s.name for s in changed.skills] == ["release-notes"]
+
+    def test_without_enabled_skills_or_a_project_there_is_nothing(self, store: _Store, tmp_path: Path) -> None:
+        store.add_project()
+        _call(tmp_path, "POST", BASE, _skill(enabled=False))
+        assert _load(tmp_path, {"id": "proj-1"}) == EMPTY_PROJECT_SKILLS
+        assert _load(tmp_path, None) == EMPTY_PROJECT_SKILLS
+        assert _load(tmp_path, {"id": ""}) == EMPTY_PROJECT_SKILLS
+        assert not (tmp_path / ".local").exists()
+        assert EMPTY_PROJECT_SKILLS.record() is None and EMPTY_PROJECT_SKILLS.plugin_dir is None
+
+    def test_an_unreadable_database_leaves_the_run_without_skills_and_says_why(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        async def _broken(*_: Any, **__: Any) -> list[dict[str, Any]]:
+            raise ConnectionError("database is down")
+
+        monkeypatch.setattr(db_skills, "list_enabled_skills", _broken)
+        loaded = _load(tmp_path, {"id": "proj-1"})
+        assert (loaded.plugin_dir, loaded.skills) == (None, ())
+        assert loaded.error == "the project's skills could not be read"
+        assert loaded.record() == {"project_id": "proj-1", "sha256": None, "plugin": "project", "skills": [],
+                                   "error": "the project's skills could not be read"}
+
+    def test_a_stored_name_that_is_not_a_slug_is_never_written(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        async def _rows(*_: Any, **__: Any) -> list[dict[str, Any]]:
+            return [{"id": "skill-1", "name": "../../escape", "description": "d", "content": "c"}]
+
+        monkeypatch.setattr(db_skills, "list_enabled_skills", _rows)
+        loaded = _load(tmp_path / "runtime", {"id": "proj-1"})
+        assert loaded.plugin_dir is None and "could not be prepared" in (loaded.error or "")
+        assert not (tmp_path / "escape").exists()
+
+
+# --- The launch: one --plugin-dir, beside the library's ---
+
+
+SKILLS = AgentProjectSkills(project_id="proj-1", skills=(LoadedSkill("deploy-check", "a" * 64),),
+                            plugin_dir="/runtime/.local/projects/proj-1/skills/abc/project")
+
+
+class TestLaunch:
+    def test_the_project_plugin_is_one_plugin_dir_after_the_librarys(self) -> None:
+        library = AgentLibrary(plugin_dirs=("/lib/demo", "/lib/personal"))
+        knowledge = AgentKnowledge(index="## Project knowledge", documents=1, add_dirs=("/k",))
+        args = resolve_launch(BUILTIN_DEFAULTS, None, library, knowledge, SKILLS).args()
+        assert plugin_dirs(args) == ["/lib/demo", "/lib/personal", SKILLS.plugin_dir]
+        assert args[-2:] == ["--add-dir", "/k"]
+
+    def test_the_run_records_the_skills_and_their_hash(self) -> None:
+        record = resolve_launch(BUILTIN_DEFAULTS, None, project_skills=SKILLS).record()
+        assert record["project_skills"] == {"project_id": "proj-1", "sha256": SKILLS.sha256, "plugin": "project",
+                                            "skills": [{"name": "deploy-check", "sha256": "a" * 64}]}
+        assert len(SKILLS.sha256 or "") == 64
+
+    def test_a_launch_without_project_skills_adds_nothing(self) -> None:
+        launch = resolve_launch(BUILTIN_DEFAULTS, "sonnet")
+        assert "--plugin-dir" not in launch.args() and "project_skills" not in launch.record()
+
+    def test_the_set_hash_ignores_order_and_follows_every_skill(self) -> None:
+        a, b = LoadedSkill("a", "1" * 64), LoadedSkill("b", "2" * 64)
+        assert AgentProjectSkills(skills=(a, b)).sha256 == AgentProjectSkills(skills=(b, a)).sha256
+        assert AgentProjectSkills(skills=(a,)).sha256 != AgentProjectSkills(skills=(a, b)).sha256
+        assert AgentProjectSkills(skills=(a,)).sha256 != AgentProjectSkills(skills=(LoadedSkill("a", "3" * 64),)).sha256
+        assert AgentProjectSkills().sha256 is None
 
 
 def test_the_caps_are_the_documented_ones() -> None:

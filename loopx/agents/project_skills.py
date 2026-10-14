@@ -35,10 +35,19 @@ cannot both pass a cap or take one name.
 
 from __future__ import annotations
 
+import asyncio
+import hashlib
+import json
 import logging
+import os
 import re
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
+
+from .knowledge import knowledge_dir
+from .library import write_once
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +58,13 @@ PROJECT_MAX_SKILLS = 20
 
 # The plugin a project's skills are loaded from: Claude Code names them project:<name>.
 PLUGIN_NAME = "project"
+_PLUGIN_MANIFEST = json.dumps({
+    "name": PLUGIN_NAME,
+    "description": "This project's own skills, managed by LoopX.",
+}, indent=2) + "\n"
+# Names the directory layout in every set's hash; change it whenever the files written change.
+_LAYOUT_ID = "project-skills/v1"
+
 _NAME = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
 _CONTROL = re.compile(r"[\x00-\x1f\x7f]")
 _FIELDS = frozenset({"name", "description", "content", "enabled"})
@@ -64,6 +80,10 @@ class ProjectSkillNotFound(LookupError):
 
 class ProjectSkillConflict(Exception):
     """The project already has a skill of that name (answered with 409)."""
+
+
+def _sha256(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
 
 
 # --- Validation: each raises ProjectSkillError ---
@@ -126,6 +146,128 @@ def _enabled(raw: Any) -> bool:
 def skills_label(count: int) -> str:
     """``1 skill``, ``2 skills``."""
     return f"{count} skill{'' if count == 1 else 's'}"
+
+
+# --- What one agent run gets ---
+
+
+def skill_file(name: str, description: str, content: str) -> str:
+    """The ``SKILL.md`` a skill is written as: frontmatter from its fields, then its body.
+
+    The description is a double-quoted string (JSON, which YAML reads the
+    same), so a colon, a quote or a ``#`` in it stays text.
+    """
+    body = content if content.endswith("\n") else content + "\n"
+    return (f"---\nname: {name}\ndescription: {json.dumps(description, ensure_ascii=False)}\n---\n\n"
+            f"{body}")
+
+
+@dataclass(frozen=True)
+class LoadedSkill:
+    name: str
+    sha256: str  # of its SKILL.md as written
+
+
+def skills_sha256(skills: Sequence[LoadedSkill]) -> str | None:
+    """One hash of a set of skills (and the layout they are written in); None for none."""
+    if not skills:
+        return None
+    listing = sorted([skill.name, skill.sha256] for skill in skills)
+    return _sha256(json.dumps([_LAYOUT_ID, listing], separators=(",", ":")).encode("utf-8"))
+
+
+@dataclass(frozen=True)
+class AgentProjectSkills:
+    """What one task agent run loads of its project's skills: the skills and the plugin directory holding them."""
+
+    project_id: str | None = None
+    skills: tuple[LoadedSkill, ...] = ()
+    plugin_dir: str | None = None  # one --plugin-dir, absolute
+    error: str | None = None  # why the run goes without its project's skills
+
+    @property
+    def sha256(self) -> str | None:
+        """The set's hash, which also names its directory."""
+        return skills_sha256(self.skills)
+
+    def record(self) -> dict[str, Any] | None:
+        """Its entry in a run's metadata (``project_skills``); None when nothing was to be loaded."""
+        if not self.skills and self.error is None:
+            return None
+        return {
+            "project_id": self.project_id,
+            "sha256": self.sha256,
+            "plugin": PLUGIN_NAME,
+            "skills": [{"name": skill.name, "sha256": skill.sha256} for skill in self.skills],
+            **({"error": self.error} if self.error is not None else {}),
+        }
+
+
+EMPTY_PROJECT_SKILLS = AgentProjectSkills()
+
+
+def skills_dir(runtime_root: Path, project_id: str) -> Path:
+    """``<runtime_root>/.local/projects/<project_id>/skills``, beside the project's knowledge."""
+    return knowledge_dir(runtime_root, project_id).with_name("skills")
+
+
+def materialize(runtime_root: Path, project_id: str, rows: Sequence[Mapping[str, Any]]) -> AgentProjectSkills:
+    """Write the skills in ``rows`` (``name``, ``description``, ``content``) as the project plugin, once.
+
+    Raises ``ProjectSkillError`` for a row the API would not have stored.
+    """
+    files: dict[str, str] = {}
+    for row in rows:
+        name = skill_name(row["name"])
+        files[name] = skill_file(name, skill_description(row["description"]), skill_content(row["content"]))
+    if len(files) != len(rows):
+        raise ProjectSkillError("two skills have the same name")
+    skills = tuple(LoadedSkill(name, _sha256(text.encode("utf-8"))) for name, text in sorted(files.items()))
+    key = skills_sha256(skills)
+    assert key is not None
+
+    def build(directory: Path) -> None:
+        base = directory / PLUGIN_NAME
+        (base / ".claude-plugin").mkdir(parents=True)
+        _write_read_only(base / ".claude-plugin" / "plugin.json", _PLUGIN_MANIFEST)
+        for name, text in files.items():
+            (base / "skills" / name).mkdir(parents=True)
+            _write_read_only(base / "skills" / name / "SKILL.md", text)
+
+    target = skills_dir(runtime_root, project_id) / key
+    write_once(target, build)
+    return AgentProjectSkills(project_id, skills, str(target / PLUGIN_NAME))
+
+
+def _write_read_only(path: Path, text: str) -> None:
+    path.write_text(text, encoding="utf-8")
+    os.chmod(path, 0o444)
+
+
+async def load_project_skills(runtime_root: Path, project: Mapping[str, Any] | None) -> AgentProjectSkills:
+    """The enabled skills of ``project`` (its row; only ``id`` is read), materialized for one run.
+
+    When the skills cannot be read or written, the run goes without them and
+    ``error`` says why.
+    """
+    from ..db import project_skills as db_skills
+
+    project_id = str((project or {}).get("id") or "")
+    if not project_id:
+        return EMPTY_PROJECT_SKILLS
+    try:
+        rows = await db_skills.list_enabled_skills(project_id)
+    except Exception:
+        logger.warning("cannot read the skills of project %s; the run goes without them", project_id, exc_info=True)
+        return AgentProjectSkills(project_id, error="the project's skills could not be read")
+    if not rows:
+        return EMPTY_PROJECT_SKILLS
+    try:
+        return await asyncio.to_thread(materialize, runtime_root, project_id, rows)
+    except Exception as exc:
+        logger.warning("cannot prepare the skills of project %s; the run goes without them", project_id,
+                       exc_info=True)
+        return AgentProjectSkills(project_id, error=f"the project's skills could not be prepared: {exc}")
 
 
 # --- The API: list, add, change and delete a project's skills ---

@@ -18,6 +18,7 @@ if TYPE_CHECKING:
     from .agent_settings import Launch
     from .knowledge import AgentKnowledge
     from .library import AgentLibrary
+    from .project_skills import AgentProjectSkills
     from .system_prompt import SystemPrompt
 
 logger = logging.getLogger(__name__)
@@ -114,6 +115,18 @@ def library_args(library: AgentLibrary) -> list[str]:
     agents cannot diverge.
     """
     return [arg for directory in library.plugin_dirs for arg in ("--plugin-dir", directory)]
+
+
+def project_skill_args(skills: AgentProjectSkills) -> list[str]:
+    """The flag that loads a task agent run's project skills: one ``--plugin-dir``, the ``project`` plugin.
+
+    Every agent's launch carries it after the library's (``agent_settings.Launch.args``); only a task
+    agent's launch has project skills, so the Manager's adds nothing. Verified against Claude Code 2.1.285
+    with the isolation flags above: the init event lists the plugin's skills as ``project:<name>``, the
+    model invokes one with the Skill tool from a read-only directory, and two plugins of the same name both
+    load, their skills listed under the one prefix.
+    """
+    return ["--plugin-dir", skills.plugin_dir] if skills.plugin_dir else []
 
 
 def knowledge_args(knowledge: AgentKnowledge) -> list[str]:

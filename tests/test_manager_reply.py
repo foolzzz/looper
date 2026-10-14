@@ -769,3 +769,20 @@ class TestManagerKnowledge:
         assert "Project knowledge" not in chat["prompts"][0]
         agent_db.list_documents.assert_not_awaited()
         assert agent_db.start_record.await_args.kwargs["metadata"]["prompt_layers"]["project"] is None
+
+
+@pytest.mark.usefixtures("agent_db")
+class TestManagerProjectSkills:
+    """The Manager spans every project, so it mounts no project's skills, only the library."""
+
+    def test_the_manager_gets_no_project_skills_while_projects_have_some(
+        self, monkeypatch: pytest.MonkeyPatch, agent_db: Any, enabled_library: Any, project_skills: Any,
+    ) -> None:
+        enabled_library(DEMO_PLUGIN)
+        project_skills(("proj-1", "deploy-check", "Use before a deploy.", "Reply DEPLOY-OK."))
+        chat = _converse(monkeypatch, _resident(), ["hello"])
+        ((argv, _),) = chat["spawned"]
+        (only,) = plugin_dirs(argv)  # the library's plugin, nothing more
+        assert only.endswith("/demo") and "/.local/projects/" not in " ".join(argv)
+        agent_db.list_enabled_skills.assert_not_awaited()
+        assert "project_skills" not in agent_db.start_record.await_args.kwargs["metadata"]

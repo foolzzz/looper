@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import stat
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
@@ -162,5 +163,41 @@ def test_concurrent_adds_cannot_both_pass_the_count_cap_or_take_one_name(
         refused = [r for r in results if isinstance(r, project_skills.ProjectSkillError)]
         assert len(refused) == 1 and "at most 2 skills" in str(refused[0])
         assert await pool.fetchval("SELECT count(*) FROM project_skills") == 2
+
+    _run(_test, monkeypatch)
+
+
+def test_a_run_loads_only_its_projects_enabled_skills_from_the_database(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    from loopx.agents import project_skills
+    from loopx.db import projects
+
+    async def _test(pool: Any) -> None:
+        calc = await projects.create_project(name="calc", pool=pool)
+        other = await projects.create_project(name="other", pool=pool)
+        await project_skills.add_skill(calc["id"], _skill("deploy-check"))
+        await project_skills.add_skill(calc["id"], _skill("disabled-one", enabled=False))
+        await project_skills.add_skill(other["id"], _skill("elsewhere"))
+        runtime, work = tmp_path / "runtime", tmp_path / "work"
+        work.mkdir()
+
+        loaded = await project_skills.load_project_skills(runtime, calc)
+
+        plugin = Path(loaded.plugin_dir or "")
+        assert plugin == runtime / ".local" / "projects" / calc["id"] / "skills" / str(loaded.sha256) / "project"
+        assert sorted(p.name for p in (plugin / "skills").iterdir()) == ["deploy-check"]
+        skill_md = plugin / "skills" / "deploy-check" / "SKILL.md"
+        assert skill_md.read_text() == ("---\nname: deploy-check\ndescription: \"Use for deploy-check.\"\n---\n\n"
+                                        "Reply DEPLOY-CHECK-OK.\n")
+        assert stat.S_IMODE(skill_md.stat().st_mode) == 0o444
+        assert [s.name for s in loaded.skills] == ["deploy-check"] and loaded.error is None
+        assert list(work.iterdir()) == []
+        # The other project's run gets its own plugin, never this one.
+        theirs = await project_skills.load_project_skills(runtime, other)
+        assert [s.name for s in theirs.skills] == ["elsewhere"] and theirs.plugin_dir != loaded.plugin_dir
+        # The view the API gives counts the same enabled skills.
+        view = await project_skills.skills_view(calc["id"])
+        assert (view["count"], view["enabled_count"]) == (2, 1)
 
     _run(_test, monkeypatch)
