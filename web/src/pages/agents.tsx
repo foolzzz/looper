@@ -40,13 +40,6 @@ import { historyHref } from "@/pages/agent-history";
 
 type Tab = "config" | "sessions";
 
-const CODEX_SANDBOXES = [
-  { value: "", label: "Default" },
-  { value: "full-auto", label: "Full Auto" },
-  { value: "suggest", label: "Suggest" },
-  { value: "ask", label: "Ask" },
-];
-
 const PROVIDER_KINDS = [
   { value: "anthropic", label: "Anthropic", runtimes: ["claude-code"] },
   { value: "openai", label: "OpenAI", runtimes: ["codex-cli"] },
@@ -463,7 +456,6 @@ function ConfigTab({
     max_turns: config.max_turns,
     timeout_seconds: config.timeout_seconds,
     max_concurrency: config.max_concurrency,
-    permission_mode: config.permission_mode ?? "",
     enabled: config.enabled,
     system_prompt: config.system_prompt,
   });
@@ -479,7 +471,6 @@ function ConfigTab({
       max_turns: config.max_turns,
       timeout_seconds: config.timeout_seconds,
       max_concurrency: config.max_concurrency,
-      permission_mode: config.permission_mode ?? "",
       enabled: config.enabled,
       system_prompt: config.system_prompt,
     });
@@ -498,7 +489,6 @@ function ConfigTab({
       max_turns: form.max_turns,
       timeout_seconds: form.timeout_seconds,
       max_concurrency: form.max_concurrency,
-      permission_mode: form.permission_mode || null,
       enabled: form.enabled,
       system_prompt: form.system_prompt,
     } as Partial<AgentConfig>);
@@ -539,7 +529,7 @@ function ConfigTab({
           <label className="text-xs font-medium text-muted-foreground">Runtime</label>
           <select
             value={form.runtime}
-            onChange={(e) => setForm({ ...form, runtime: e.target.value, permission_mode: "", llm_profile_id: null })}
+            onChange={(e) => setForm({ ...form, runtime: e.target.value, llm_profile_id: null })}
             className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm text-foreground"
           >
             <option value="claude-code">Claude Code</option>
@@ -689,22 +679,7 @@ function ConfigTab({
         </div>
       </div>
 
-      {form.runtime === "codex-cli" ? (
-        <div className="space-y-1.5">
-          <label className="text-xs font-medium text-muted-foreground">Sandbox</label>
-          <select
-            value={form.permission_mode}
-            onChange={(e) => setForm({ ...form, permission_mode: e.target.value })}
-            className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm text-foreground"
-          >
-            {CODEX_SANDBOXES.map((o) => (
-              <option key={o.value} value={o.value}>
-                {o.label}
-              </option>
-            ))}
-          </select>
-        </div>
-      ) : (
+      {form.runtime !== "codex-cli" && (
         <div className="space-y-1">
           <span className="text-xs font-medium text-muted-foreground">Permissions</span>
           <p className="text-sm">

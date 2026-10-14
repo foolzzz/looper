@@ -446,6 +446,45 @@ export async function addKnowledgeDocument(projectId: string, document: NewKnowl
   return res.json();
 }
 
+/** One document and its body: stored for text and upload, the file as it is now for a path document. */
+export interface KnowledgeDocumentBody {
+  document: KnowledgeDocument;
+  /** null when a path document's file is missing or not text; content_error says why. */
+  content: string | null;
+  content_error?: string;
+}
+
+export async function fetchKnowledgeDocument(projectId: string, documentId: string): Promise<KnowledgeDocumentBody> {
+  const res = await fetch(knowledgeUrl(projectId, documentId));
+  if (!res.ok) await failed(res, "document");
+  return res.json();
+}
+
+/** A document's changes: title, summary and its source's fields (its kind stays). */
+export type KnowledgeDocumentUpdate = {
+  title?: string;
+  summary?: string;
+  content?: string;
+  filename?: string;
+  content_base64?: string;
+  path?: string;
+};
+
+/** Change a document; the server refuses one over a cap with the reason (400). */
+export async function updateKnowledgeDocument(
+  projectId: string,
+  documentId: string,
+  fields: KnowledgeDocumentUpdate,
+): Promise<ProjectKnowledge> {
+  const res = await fetch(knowledgeUrl(projectId, documentId), {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(fields),
+  });
+  if (!res.ok) await failed(res, "update document");
+  return res.json();
+}
+
 export async function deleteKnowledgeDocument(projectId: string, documentId: string): Promise<ProjectKnowledge> {
   const res = await fetch(knowledgeUrl(projectId, documentId), { method: "DELETE" });
   if (!res.ok) await failed(res, "delete document");
@@ -514,11 +553,28 @@ export async function addProjectSkill(projectId: string, skill: NewProjectSkill)
   return res.json();
 }
 
-export async function setProjectSkillEnabled(projectId: string, skillId: string, enabled: boolean): Promise<ProjectSkills> {
+/** One skill and its SKILL.md body. */
+export interface ProjectSkillBody {
+  skill: ProjectSkill;
+  content: string;
+}
+
+export async function fetchProjectSkill(projectId: string, skillId: string): Promise<ProjectSkillBody> {
+  const res = await fetch(skillsUrl(projectId, skillId));
+  if (!res.ok) await failed(res, "skill");
+  return res.json();
+}
+
+/** Change a skill's name, description, body or switch; a bad field is 400, a taken name 409. */
+export async function updateProjectSkill(
+  projectId: string,
+  skillId: string,
+  fields: Partial<NewProjectSkill> & { enabled?: boolean },
+): Promise<ProjectSkills> {
   const res = await fetch(skillsUrl(projectId, skillId), {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ enabled }),
+    body: JSON.stringify(fields),
   });
   if (!res.ok) await failed(res, "update skill");
   return res.json();
@@ -686,7 +742,6 @@ export interface AgentConfig {
   max_turns: number;
   timeout_seconds: number;
   max_concurrency: number;
-  permission_mode: string | null;
   extra_args: Record<string, unknown> | null;
   metadata: Record<string, unknown> | null;
   created_at: string;
@@ -746,6 +801,8 @@ export interface LlmRecord {
     env?: { sha256: string; keys: Record<string, string> };
     /** The library items the run loaded (plugins and skills) and their hash; error when it went without them. */
     library?: RunLibrary;
+    /** The project skills the run loaded (Planner, Worker and Reviewer runs); error when it went without them. */
+    project_skills?: RunProjectSkills;
   } | null;
   created_at: string;
   finished_at: string | null;
@@ -1030,6 +1087,16 @@ export interface Library {
 export interface RunLibrary {
   sha256: string | null;
   items: { kind: LibraryKind; name: string; sha256: string }[];
+  error?: string;
+}
+
+export interface RunProjectSkills {
+  project_id: string | null;
+  /** The set's hash, which names its plugin directory; null when none was loaded. */
+  sha256: string | null;
+  /** The plugin they load from: agents see each as <plugin>:<name>. */
+  plugin: string;
+  skills: { name: string; sha256: string }[];
   error?: string;
 }
 

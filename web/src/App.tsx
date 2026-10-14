@@ -7,8 +7,9 @@ import { TasksPage } from "@/pages/tasks";
 import { AgentsPage } from "@/pages/agents";
 import { SettingsPage } from "@/pages/settings";
 import { AgentHistoryPage } from "@/pages/agent-history";
+import { ProjectPage } from "@/pages/project";
 
-const PAGES = new Set<Page>(["dashboard", "chat", "tasks", "agents", "settings", "history"]);
+const PAGES = new Set<Page>(["dashboard", "chat", "tasks", "projects", "agents", "settings", "history"]);
 
 interface Route {
   page: Page;
@@ -60,14 +61,20 @@ function App() {
     <div className="flex h-screen w-screen overflow-hidden bg-background">
       <Sidebar
         activePage={route.page}
-        activeProjectId={route.page === "tasks" && !route.sub ? new URLSearchParams(route.query).get("project") : null}
+        activeProjectId={
+          route.page === "projects"
+            ? route.sub.split("/")[0] || null
+            : route.page === "tasks" && !route.sub
+              ? new URLSearchParams(route.query).get("project")
+              : null
+        }
         onNavigate={(p) => {
           setNavOpen(false);
           navigate(p);
         }}
         onOpenProject={(id) => {
           setNavOpen(false);
-          navigateSub("tasks", "", `project=${encodeURIComponent(id)}`);
+          navigateSub("projects", id);
         }}
         open={navOpen}
         onClose={() => setNavOpen(false)}
@@ -102,6 +109,15 @@ function App() {
                 sub={route.sub}
                 query={route.query}
                 onNavigate={(sub, query) => navigateSub("tasks", sub, query)}
+              />
+            </div>
+          )}
+          {route.page === "projects" && (
+            <div className="h-full overflow-y-auto">
+              <ProjectPage
+                key={route.sub.split("/")[0]}
+                sub={route.sub}
+                onNavigate={(sub) => navigateSub("projects", sub)}
               />
             </div>
           )}

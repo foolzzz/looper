@@ -1,5 +1,6 @@
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
+  ArrowRight,
   Trash2,
   RefreshCw,
   Clock,
@@ -14,32 +15,17 @@ import {
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import {
   fetchTasks,
   deleteTask,
   stopTask,
   startTask,
   createTask,
-  updateProject,
-  deleteProject,
-  type Project,
-  type ProjectUpdate,
   type TaskInfo,
 } from "@/lib/api";
 import { useProjects } from "@/lib/use-projects";
-import { cn } from "@/lib/utils";
 import { formatUsd } from "@/lib/usage";
 import { ProjectBackgroundField, backgroundTooLong } from "@/components/project-background-field";
-import { ProjectHarnessOverrides, harnessTooLong } from "@/components/harness-field";
-import { ProjectKnowledgeSection } from "@/components/project-knowledge";
-import { ProjectSkillsSection } from "@/components/project-skills";
-import {
-  ProjectExecutionFields,
-  executionChanges,
-  executionDraft,
-  type ExecutionDraft,
-} from "@/components/project-execution";
 import { TaskDetailPage } from "./task-detail";
 
 const STATUS_FILTERS = ["all", "init", "running", "pending", "completed", "failed", "cancelled", "stopped"] as const;
@@ -119,249 +105,6 @@ function durationLabel(created: string | null | undefined, completed: string | n
 
 /** The create form's project choice that reveals the new-project fields. */
 const NEW_PROJECT = "__new__";
-
-/** Text cut to three lines, with a toggle when it is longer. */
-function ClampedText({ text, className }: { text: string; className?: string }) {
-  const ref = useRef<HTMLParagraphElement>(null);
-  const [expanded, setExpanded] = useState(false);
-  const [overflows, setOverflows] = useState(false);
-
-  useLayoutEffect(() => {
-    const el = ref.current;
-    if (!el || expanded) return;
-    const measure = () => setOverflows(el.scrollHeight > el.clientHeight + 1);
-    measure();
-    const observer = new ResizeObserver(measure);
-    observer.observe(el);
-    return () => observer.disconnect();
-  }, [text, expanded]);
-
-  return (
-    <div>
-      <p ref={ref} className={cn("whitespace-pre-wrap break-words", !expanded && "line-clamp-3", className)}>
-        {text}
-      </p>
-      {(overflows || expanded) && (
-        <button
-          type="button"
-          onClick={() => setExpanded(!expanded)}
-          aria-expanded={expanded}
-          className="mt-1 text-xs font-medium text-muted-foreground underline-offset-2 hover:text-foreground hover:underline"
-        >
-          {expanded ? "Show less" : "Show more"}
-        </button>
-      )}
-    </div>
-  );
-}
-
-/** The selected project's name, description, default directory, count, background and harness overrides, editable in
- * place; the editor also manages its knowledge and its skills. */
-function ProjectBar({ project, onDeleted }: { project: Project; onDeleted: () => void }) {
-  const [editing, setEditing] = useState(false);
-  const [name, setName] = useState("");
-  const [workDir, setWorkDir] = useState("");
-  const [description, setDescription] = useState("");
-  const [background, setBackground] = useState("");
-  const [plannerHarness, setPlannerHarness] = useState("");
-  const [workerHarness, setWorkerHarness] = useState("");
-  const [execution, setExecution] = useState<ExecutionDraft>(() => executionDraft(project));
-  const [confirmDelete, setConfirmDelete] = useState(false);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState("");
-
-  const startEdit = () => {
-    setName(project.name);
-    setWorkDir(project.work_dir);
-    setDescription(project.description);
-    setBackground(project.background);
-    setPlannerHarness(project.planner_harness_prompt ?? "");
-    setWorkerHarness(project.worker_harness_prompt ?? "");
-    setExecution(executionDraft(project));
-    setError("");
-    setConfirmDelete(false);
-    setEditing(true);
-  };
-
-  const save = async () => {
-    if (!name.trim()) {
-      setError("A project name is required.");
-      return;
-    }
-    if (backgroundTooLong(background) || harnessTooLong(plannerHarness) || harnessTooLong(workerHarness)) return;
-    // Send only what changed; an empty directory, background or harness clears it.
-    const fields: ProjectUpdate = executionChanges(execution, project);
-    if (name.trim() !== project.name) fields.name = name.trim();
-    if (description.trim() !== project.description) fields.description = description.trim();
-    if (workDir.trim() !== project.work_dir) fields.work_dir = workDir.trim();
-    if (background !== project.background) fields.background = background;
-    if (plannerHarness !== (project.planner_harness_prompt ?? "")) fields.planner_harness_prompt = plannerHarness;
-    if (workerHarness !== (project.worker_harness_prompt ?? "")) fields.worker_harness_prompt = workerHarness;
-    if (Object.keys(fields).length === 0) {
-      setEditing(false);
-      return;
-    }
-    setBusy(true);
-    setError("");
-    try {
-      await updateProject(project.project_id, fields);
-      setEditing(false);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const remove = async () => {
-    setBusy(true);
-    setError("");
-    try {
-      await deleteProject(project.project_id);
-      onDeleted();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-      setBusy(false);
-    }
-  };
-
-  if (editing) {
-    return (
-      <div className="rounded-lg border border-border bg-card px-5 py-4 space-y-3">
-        <div className="grid gap-3 sm:grid-cols-2">
-          <div className="space-y-1">
-            <label htmlFor="project-edit-name" className="text-xs font-medium text-muted-foreground">Name *</label>
-            <Input id="project-edit-name" value={name} maxLength={80} onChange={(e) => setName(e.target.value)} autoFocus />
-          </div>
-          <div className="space-y-1">
-            <label htmlFor="project-edit-dir" className="text-xs font-medium text-muted-foreground">Default directory</label>
-            <Input
-              id="project-edit-dir"
-              value={workDir}
-              onChange={(e) => setWorkDir(e.target.value)}
-              placeholder="No default directory"
-              className="font-mono"
-            />
-          </div>
-        </div>
-        <div className="space-y-1">
-          <label htmlFor="project-edit-desc" className="text-xs font-medium text-muted-foreground">Description</label>
-          <textarea
-            id="project-edit-desc"
-            value={description}
-            onChange={(e) => setDescription(e.target.value)}
-            rows={2}
-            className="w-full resize-none rounded-md border border-input bg-transparent px-3 py-2 text-sm text-foreground shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-          />
-        </div>
-        <ProjectBackgroundField id="project-edit-background" value={background} onChange={setBackground} />
-        <ProjectHarnessOverrides
-          idPrefix="project-edit"
-          planner={plannerHarness}
-          worker={workerHarness}
-          onPlannerChange={setPlannerHarness}
-          onWorkerChange={setWorkerHarness}
-        />
-        <ProjectExecutionFields idPrefix="project-edit" draft={execution} onChange={setExecution} />
-        {error && <p role="alert" className="text-xs text-destructive">{error}</p>}
-        <div className="flex justify-end gap-2">
-          <Button type="button" variant="outline" size="sm" onClick={() => setEditing(false)}>Cancel</Button>
-          <Button
-            type="button"
-            size="sm"
-            onClick={save}
-            disabled={busy || backgroundTooLong(background) || harnessTooLong(plannerHarness) || harnessTooLong(workerHarness)}
-          >
-            {busy && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
-            Save
-          </Button>
-        </div>
-        <ProjectKnowledgeSection projectId={project.project_id} />
-        <ProjectSkillsSection projectId={project.project_id} />
-      </div>
-    );
-  }
-
-  return (
-    <div className="rounded-lg border border-border bg-card px-5 py-4">
-      <div className="flex items-start justify-between gap-4">
-        <div className="min-w-0 space-y-1">
-          <h2 className="flex items-center gap-2 text-base font-semibold">
-            <Folder className="h-4 w-4 shrink-0 text-muted-foreground" />
-            <span className="truncate">{project.name}</span>
-          </h2>
-          {project.description && (
-            <p className="text-sm text-muted-foreground whitespace-pre-wrap">{project.description}</p>
-          )}
-          <p className="flex flex-wrap items-center gap-x-2 text-xs text-muted-foreground">
-            {project.work_dir ? (
-              <span className="font-mono text-foreground/80 break-all">{project.work_dir}</span>
-            ) : (
-              <span>No default directory</span>
-            )}
-            <span aria-hidden="true">·</span>
-            <span>
-              {project.task_count} {project.task_count === 1 ? "task" : "tasks"}
-            </span>
-          </p>
-        </div>
-        <div className="shrink-0 flex items-center gap-1">
-          {confirmDelete ? (
-            <>
-              <span className="text-xs text-muted-foreground mr-1">Delete this project?</span>
-              <Button type="button" variant="destructive" size="sm" onClick={remove} disabled={busy}>
-                {busy && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
-                Delete
-              </Button>
-              <Button type="button" variant="ghost" size="sm" onClick={() => setConfirmDelete(false)}>
-                Cancel
-              </Button>
-            </>
-          ) : (
-            <>
-              <Button type="button" variant="ghost" size="sm" onClick={startEdit}>Edit</Button>
-              {project.task_count === 0 && (
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="sm"
-                  onClick={() => {
-                    setError("");
-                    setConfirmDelete(true);
-                  }}
-                  className="text-muted-foreground hover:text-destructive hover:bg-destructive/10"
-                >
-                  <Trash2 className="h-3.5 w-3.5" />
-                  Delete project
-                </Button>
-              )}
-            </>
-          )}
-        </div>
-      </div>
-      <div className="mt-3 space-y-1 border-t border-border pt-3">
-        <h3 className="text-xs font-medium text-muted-foreground">Background</h3>
-        {project.background ? (
-          <ClampedText key={project.background} text={project.background} className="font-mono text-xs leading-relaxed text-foreground/80" />
-        ) : (
-          <p className="text-xs text-muted-foreground">No background</p>
-        )}
-        {(project.planner_harness_prompt || project.worker_harness_prompt) && (
-          <p className="pt-1 text-xs text-muted-foreground">
-            Harness overrides:{" "}
-            <span className="text-foreground/80">
-              {[project.planner_harness_prompt && "Planner", project.worker_harness_prompt && "Worker and Reviewer"]
-                .filter(Boolean)
-                .join(" · ")}
-            </span>{" "}
-            (others use the default)
-          </p>
-        )}
-      </div>
-      {error && <p role="alert" className="mt-2 text-xs text-destructive">{error}</p>}
-    </div>
-  );
-}
 
 interface TasksPageProps {
   sub?: string;
@@ -616,11 +359,24 @@ export function TasksPage({ sub, query, onNavigate }: TasksPageProps) {
       </div>
 
       {selectedProject ? (
-        <ProjectBar
-          key={selectedProject.project_id}
-          project={selectedProject}
-          onDeleted={() => setProjectFilter("")}
-        />
+        <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-border bg-card px-5 py-3">
+          <p className="flex min-w-0 items-center gap-2 text-sm">
+            <Folder className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden="true" />
+            <span className="truncate font-medium">{selectedProject.name}</span>
+            {selectedProject.work_dir && (
+              <span className="hidden truncate font-mono text-xs text-muted-foreground sm:inline">
+                {selectedProject.work_dir}
+              </span>
+            )}
+          </p>
+          <a
+            href={`#projects/${selectedProject.project_id}`}
+            className="inline-flex items-center gap-1 rounded-sm text-xs font-medium text-primary underline-offset-2 hover:underline focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+          >
+            Project page
+            <ArrowRight className="h-3 w-3" aria-hidden="true" />
+          </a>
+        </div>
       ) : (
         projectMissing &&
         confirmedMissing === projectFilter && (

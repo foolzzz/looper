@@ -305,6 +305,9 @@ class AgentHTTPServer:
         elif (m := self._RE_PROJECT_KNOWLEDGE.match(path)) and method == "POST":
             await self._handle_knowledge(writer, HTTP_201, lambda root: knowledge.add_document(
                 m.group(1), projects.json_object(body), root))
+        elif (m := self._RE_PROJECT_DOCUMENT.match(path)) and method == "GET":
+            await self._handle_knowledge(writer, HTTP_200, lambda root: knowledge.get_document(
+                m.group(1), m.group(2), root))
         elif (m := self._RE_PROJECT_DOCUMENT.match(path)) and method == "PUT":
             await self._handle_knowledge(writer, HTTP_200, lambda root: knowledge.update_document(
                 m.group(1), m.group(2), projects.json_object(body), root))
@@ -316,6 +319,9 @@ class AgentHTTPServer:
         elif (m := self._RE_PROJECT_SKILLS.match(path)) and method == "POST":
             await self._handle_project_skills(writer, HTTP_201, lambda: project_skills.add_skill(
                 m.group(1), projects.json_object(body)))
+        elif (m := self._RE_PROJECT_SKILL.match(path)) and method == "GET":
+            await self._handle_project_skills(writer, HTTP_200, lambda: project_skills.get_skill(
+                m.group(1), m.group(2)))
         elif (m := self._RE_PROJECT_SKILL.match(path)) and method == "PUT":
             await self._handle_project_skills(writer, HTTP_200, lambda: project_skills.update_skill(
                 m.group(1), m.group(2), projects.json_object(body)))
