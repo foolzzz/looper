@@ -60,6 +60,8 @@ export interface ProjectExecution {
   supervise_interval_seconds: number | null;
   /** "planner": the Planner decides which steps are reviewed; "all": every step is. */
   review_policy: "planner" | "all" | null;
+  /** true: a task that completes leaves a lessons document in the project's knowledge; null or false: off. */
+  distill_lessons: boolean | null;
 }
 
 /** A group of tasks with an optional default work directory and background. */
@@ -612,6 +614,20 @@ export interface TaskDetail extends TaskInfo {
   updated_at: string;
   completed_at: string | null;
   steps: TaskStep[];
+  /** The task journal, oldest first: an entry per accepted step. */
+  journal?: JournalEntry[];
+}
+
+/** What an accepted step delivered and what its Worker and Reviewer found. */
+export interface JournalEntry {
+  id: number;
+  step_id: string;
+  /** The Planner's label for the step; "" when the step is gone. */
+  step_key: string;
+  kind: "step_accepted";
+  summary: string;
+  learnings: string[];
+  created_at: string;
 }
 
 export interface TaskStep {

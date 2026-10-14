@@ -46,6 +46,7 @@ import {
   setTaskProject,
   type TaskDetail,
   type TaskStep,
+  type JournalEntry,
   type ActivityEvent,
 } from "@/lib/api";
 
@@ -526,9 +527,41 @@ function OverviewTab({ task, onContinued }: { task: TaskDetail; onContinued: () 
         </div>
       )}
 
+      <TaskFindings entries={task.journal || []} />
+
       <AgentTimeline taskId={task.task_id} />
 
       <LiveActivityFeed taskId={task.task_id} isActive={isActive} />
+    </div>
+  );
+}
+
+// --- Findings: the task journal ---
+
+/** Each accepted step's summary and the learnings its Worker and Reviewer reported, newest first. */
+function TaskFindings({ entries }: { entries: JournalEntry[] }) {
+  if (entries.length === 0) return null;
+  return (
+    <div>
+      <h3 className="text-sm font-semibold mb-2">Findings</h3>
+      <ol className="rounded-lg border border-border bg-card divide-y divide-border">
+        {[...entries].reverse().map((entry) => (
+          <li key={entry.id} className="px-4 py-3">
+            <div className="flex items-baseline gap-2">
+              <span className="font-mono text-xs text-muted-foreground">{entry.step_key || entry.step_id}</span>
+              <span className="text-xs text-muted-foreground">{formatTime(entry.created_at)}</span>
+            </div>
+            <p className="mt-1 text-sm">{entry.summary || "(no summary)"}</p>
+            {entry.learnings.length > 0 && (
+              <ul className="mt-1.5 list-disc space-y-0.5 pl-5 text-sm text-muted-foreground">
+                {entry.learnings.map((learning, i) => (
+                  <li key={i}>{learning}</li>
+                ))}
+              </ul>
+            )}
+          </li>
+        ))}
+      </ol>
     </div>
   );
 }

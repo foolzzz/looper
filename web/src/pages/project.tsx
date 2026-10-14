@@ -238,6 +238,7 @@ function executionRows(project: Project): [string, string][] {
       "Planner supervision",
       project.supervise_interval_seconds === 0 ? "Off" : `Every ${project.supervise_interval_seconds} s`,
     ]);
+  if (project.distill_lessons) rows.push(["Lessons", "Distilled into knowledge when a task completes"]);
   return rows;
 }
 
