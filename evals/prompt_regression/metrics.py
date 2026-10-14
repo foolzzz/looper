@@ -230,8 +230,8 @@ def task_metrics(
     status = str(detail.get("status") or "")
     problems = []
     if status != "completed":
-        problems.append(f"task {status or 'unknown'}" + (f": {str(detail['error'])[:200]}" if detail.get("error")
-                                                       else ""))
+        error = " ".join(str(detail.get("error") or "").split())[:200]
+        problems.append(f"task {status or 'unknown'}" + (f": {error}" if error else ""))
     if check_problem:
         problems.append(check_problem)
     problems += flow_problems(expect, observed)

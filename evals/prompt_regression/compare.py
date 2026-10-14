@@ -90,7 +90,7 @@ def markdown(new: Mapping[str, Any], base: Mapping[str, Any] | None = None) -> s
         old = None if base_totals is None else (base_totals[key] if key == "success" else _text(base_totals[key], key))
         cells.append(str(shown) if old is None or old == shown else f"{old} → **{shown}**")
     lines.append("| **total** | " + " | ".join(cells) + " |")
-    problems = [f"- {t['id']}: {'; '.join(t.get('problems') or [])}" for t in new.get("tasks", [])
+    problems = [f"- {t['id']}: {' '.join('; '.join(t.get('problems') or []).split())}" for t in new.get("tasks", [])
                 if t.get("problems")]
     if new.get("stopped_by_cap"):
         problems.append(f"- stopped at the spending cap ({new.get('caps', {}).get('total_cap_usd')} USD)")
