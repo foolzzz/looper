@@ -225,9 +225,9 @@ release wheel serves the copy packaged with it.
 | **Tasks** | Task list, project and status filters, create/start/stop/delete controls |
 | **Project** | One project's overview, knowledge documents, its own skills and installs, and its settings, including its agent settings layers |
 | **Task Detail** | Config editor (init status), overview, pipeline DAG, sessions, conversation; each Agent Timeline row has a **History** button |
-| **Agents** | Each role's prompt and limits and its role layer of the agent settings; **Runs** lists every run of a role and opens its history |
+| **Runs** | Each role's sessions and run history (a Manager `/new` shows as a new session), each run opening its history; no configuration, a link to the role in Settings → Roles |
 | **Agent history** | One agent's launch command, full transcript (text, thinking, tool calls and results) and activity; follows a running agent and flags one with no output for 2 minutes |
-| **Settings** | Agent defaults (the system layer); agents, providers and runtimes; the plugins, skills and MCP catalog; Lark & Telegram channels; moving the configuration to another machine |
+| **Settings** | A folding group at the bottom of the sidebar, one page each: **LLM Providers**; **Agent Runtimes** (read-only: each runtime type, found on the server's PATH or not, with Re-detect, and the planned ones); **Agent Profiles** (runtime, provider and model, the roles each can run and where it is used); **Roles** (every role's defaults, then each role's Agent Profile, layer, prompt and limits); **Skills & MCP**; **Channels**; **Import / Export** |
 
 ### HTTP API
 
@@ -241,7 +241,7 @@ site's page (its `Origin`) is refused. The main route groups:
 | Tasks | `/api/tasks`, `/api/tasks/create`, `/api/tasks/:id/...`, `/api/tasks/{start,stop,cancel,delete}` | List and create tasks (in a project, with optional `agent_overrides`), read one, start, stop, cancel, delete; activity and its SSE stream |
 | Catalog and installs | `/api/catalog/...`, `/api/installs/...`, `/api/projects/:id/installs`, `/api/projects/:id/skills/...` | Plugins, skills and MCP servers: import, upload, git, write, edit, delete; install them globally or in a project |
 | Agent settings | `/api/agent-settings/...`, `/api/projects/:id/agent-settings/...`, `/api/agent-configs/...` | The settings layers, each field with its effective value and source; each role's prompt and limits |
-| Registry | `GET /api/registry`, `/api/runtimes/...`, `/api/providers/...`, `/api/agents/...` | Runtime types; register, edit, probe and delete runtimes, providers (API keys masked) and agents |
+| Registry | `GET /api/registry`, `/api/runtimes/:id/probe`, `/api/providers/...`, `/api/agents/...` | Runtime types and the built-in runtimes (Re-detect probes one); register, edit and delete providers (API keys masked) and agents (Agent Profiles), each with where it is used |
 | Configuration transfer | `GET /api/config/export`, `/api/config/imports/...` | Download the configuration file; upload one, preview it, then apply or cancel |
 | Chat | `/api/chat/send`, `/api/chat/targets`, `/api/chat/messages`, `/api/chat/events` | Talk to the Manager or a running task's Planner; history and SSE stream |
 | Runs | `/api/llm-records/...`, `/api/agents/:id/usage` | Every agent run with its launch command, usage, cost and events; one agent's spending and context |
@@ -295,12 +295,14 @@ environment variable **names**, not secret values.
 ### Agent Configuration
 
 Every role (Manager, Planner, Workers, Reviewers) runs an **agent**: a
-runtime, an LLM provider and a model, registered on the Settings page under
-"Agents, providers & runtimes".
+runtime, an LLM provider and a model, kept as an **Agent Profile** in
+Settings → Agent Profiles and selected in Settings → Roles.
 
-- A **runtime** is an agent CLI of a type Looper has an adapter for (such as
-  Claude Code or Codex) and the executable to run; Looper probes its version
-  and capabilities.
+- A **runtime** is an agent CLI of a type Looper has an adapter for (Claude
+  Code, Codex or OMP). Runtimes are built in: Looper finds each one on the
+  server's PATH and probes its version and capabilities; Settings → Agent
+  Runtimes shows them and can Re-detect one. A different binary comes from
+  the server's PATH.
 - A **provider** is where the agent's requests go: the protocols it serves,
   its models and their prices, and how it authenticates, with the runtime's
   own login or with an API key, which the API never returns.
@@ -313,8 +315,8 @@ layers, a later layer winning:
 
 | Layer | Edited in | Applies to |
 |---|---|---|
-| System | Settings, "Agent Defaults" | Every agent |
-| Role | Agents page | One role everywhere: the Manager, the Planner, Workers or Reviewers |
+| System | Settings → Roles, every role | Every agent |
+| Role | Settings → Roles, per role | One role everywhere: the Manager, the Planner, Workers or Reviewers |
 | Project | The project's Settings tab | The project's Planner, Workers and Reviewers |
 | Role in project | The same tab, per role | One of those roles in one project |
 
@@ -328,7 +330,7 @@ from each agent's next run or turn. See
 [Harness, agent and environment](docs/architecture/agent-system.md#harness-agent-and-environment)
 for the details.
 
-**Role configuration.** The Agents page also edits each role's own fields
+**Role configuration.** Settings → Roles also edits each role's own fields
 (`agent_configs`):
 
 - **system_prompt**: The role prompt, what this kind of agent is responsible

@@ -440,8 +440,10 @@ does not start ([Channels](#channels)). The web dashboard stays local-only
 ### Runtimes, LLM providers and agents
 
 An agent is a runtime, an LLM provider and a model (RFC decision 10, the
-[multi-runtime RFC](rfcs/multi-runtime-agents-v0.zh-CN.md)), registered in
-Settings and selected per role ([next section](#harness-agent-and-environment)).
+[multi-runtime RFC](rfcs/multi-runtime-agents-v0.zh-CN.md)), selected per role
+([next section](#harness-agent-and-environment)). The dashboard calls a
+registered agent an **Agent Profile**: an Agent Profile is a row of `agents`,
+edited in Settings → Agent Profiles; the API keeps the name `agents`.
 
 - **Runtime types** are code: one adapter per type in `looper/agents/runtimes`
   (`RuntimeAdapter`). Every tier starts its runtime through it, so no tier
@@ -543,11 +545,20 @@ Settings and selected per role ([next section](#harness-agent-and-environment)).
   `read_only_copies` removes the OMP homes no running process names and the
   session directories (`codex/sessions/<agent>`, `omp/sessions/<agent>`) of
   agents whose saved session (`agent_sessions`) is not of that runtime.
-- **Runtimes** (`agent_runtimes`) are registered instances of a type: a name,
-  an `executable` (`''` = the type's default; for Claude Code the server's
-  configured `claude`) and what its last probe found (`version`,
-  `capabilities`, `probe_error`). Registering one probes it; Settings can
-  probe again.
+- **Runtimes** (`agent_runtimes`) are built in, never registered by hand: one
+  per type found on the server's PATH (`rt-<type>`, named after its type;
+  Claude Code's `rt-claude-code` comes with the schema and runs the server's
+  `claude`), with an `executable` (`''` = the type's default) and what its
+  last probe found (`version`, `capabilities`, `probe_error`). A different
+  binary comes from the server's PATH. Settings → Agent Runtimes shows one
+  card per type, found or not, with its path, version, capabilities and the
+  roles it can run, and Re-detect (`POST /api/runtimes/<id>/probe`) probes it
+  again, or looks for a type not found yet and adds its runtime when it is on
+  PATH now. Runtimes registered by hand before (`builtin` false) are dropped
+  once by the schema when no agent uses them (`schema_migrations`
+  `agent_runtimes_unused_custom_removed`); one an agent uses stays, read-only,
+  shown as "custom (legacy)", so the agent keeps running the executable it
+  ran.
 - **Providers** (`llm_providers`) are where requests go: `protocols`
   (`anthropic-messages`, `openai-responses`, `openai-chat`), `base_url`,
   `max_concurrency` (`null` = no limit, stored and checked only), a model
@@ -569,8 +580,11 @@ Settings and selected per role ([next section](#harness-agent-and-environment)).
   provider from one of a vendor's APIs (Anthropic-format for Claude Code, or
   OpenAI-format), its common models with their background model, and the
   extra environment its Claude Code guide sets; the user adds the key.
-- **Agents** (`agents`): a name, a runtime, a provider, a model and a default
-  effort.
+- **Agents** (`agents`, Agent Profiles on the dashboard): a name, a runtime,
+  a provider, a model and a default effort. The registry shows each one with
+  the roles its runtime can run (`roles`) and where it is selected
+  (`used_by`: the layers, a project's with its name, and how many tasks chose
+  it); one in use cannot be deleted (409, naming where).
 
 The built-ins exist on every database and are read-only: the runtime
 `claude-code`, the provider `claude-subscription` (Claude Code's login) and the
@@ -691,8 +705,8 @@ only task-level setting, and it wins over every layer for that task only
 
 | Layer | Edited in | Applies to |
 | --- | --- | --- |
-| `system` | Settings | every agent |
-| `role` | Agents page | one role everywhere: Manager, Planner, Workers or Reviewers |
+| `system` | Settings → Roles, every role | every agent |
+| `role` | Settings → Roles, per role | one role everywhere: Manager, Planner, Workers or Reviewers |
 | `project` | the project's Settings tab | the Planner, Workers and Reviewers of one project |
 | `role_project` | the same tab, per role | one of those roles in one project |
 
@@ -1107,7 +1121,8 @@ answers with an import id and the same preview. `POST
 file; `DELETE` cancels; an import left alone expires after an hour, and the
 server clears the directory when it starts and stops. After applying, each
 secret to fill in names the provider, MCP server or channel that takes it, and
-Settings links to its form (`#settings/<kind>/<id>`).
+Settings links to its form (`#settings/providers/<id>`,
+`#settings/catalog/mcp/<id>`, `#settings/channels/<id>`).
 
 ### What a run spent and how large its context grew
 
@@ -1331,10 +1346,10 @@ PostgreSQL is a hard startup dependency. All data paths:
 | `llm_records` | One row per agent run: input and output text, status, the run's own `cost_usd` and its `cost_source` (`runtime` or `provider_price`), `input_tokens`, `output_tokens`, `cache_read_tokens` and `cache_creation_tokens`, its final `context_tokens` and its `compactions`; `metadata` holds the exact argv (`command`), `cwd`, the appended `system_prompt`, its `system_prompt_sha256`, its `prompt_layers`, the `agent`, the `model_choice`, the Settings `env` names, the `library` items loaded and a task agent's `project_skills` |
 | `agent_configs` | Agent configuration (role prompt, turns, timeout, concurrency) for `manager`, `planner`, `worker` and `reviewer` |
 | `agent_setting_layers` | Agent settings by layer: `scope` (`system`, `role`, `project`, `role_project`), `role`, `project_id` (goes with its project), and the nullable `harness_prompt`, `agent_id`, `effort`, `env` (ordered `[{key, value}]`, `null` value = unset) and `run_budget_usd`; one row per layer and place |
-| `agent_runtimes` | Registered runtimes: `name`, `type` (an adapter), `executable` (`''` = the type's default), the probe's `version`, `capabilities`, `probed_at`, `probe_error`, `builtin` |
+| `agent_runtimes` | Runtimes, built in (one per type found on PATH) or registered by hand before and kept while an agent uses them (`builtin` false): `name`, `type` (an adapter), `executable` (`''` = the type's default), the probe's `version`, `capabilities`, `probed_at`, `probe_error`, `builtin` |
 | `llm_providers` | LLM providers: `name`, `protocols`, `auth` (`oauth` with `oauth_runtime_type`, or `api_key`), `base_url`, `models` (the catalog, with each model's prices and `background_model`), `env` (its own variables), `max_concurrency` (`NULL` = no limit), `builtin` |
 | `llm_provider_secrets` | A provider's API key, apart from the provider; read only by the launch that will use it |
-| `agents` | Agents: `name`, `runtime_id`, `provider_id`, `model`, default `effort`, `builtin`; a runtime or provider still used by one is not deleted |
+| `agents` | Agents (Agent Profiles on the dashboard): `name`, `runtime_id`, `provider_id`, `model`, default `effort`, `builtin`; a provider still used by one is not deleted |
 | `task_agent_overrides` | A task's agent per role (`planner`, `worker`, `reviewer`), going with its task; an agent a task chose is not deleted |
 | `system_settings` | Settings shared by the whole system, one value per key (no row = the built-in default), such as the last library import's report |
 | `library_items` | The capability catalog: kind, name, `origin` (`machine`, `upload`, `git`, `ui` or `project`), `modified`, `owner_project_id` (a project-authored item; goes with its project), `description`, source label, declared version, `sha256` of the files, size, file count, `imported_at` |
@@ -1392,9 +1407,9 @@ built by `scripts/stage-dashboard.sh` at release time), and it carries
 - **Projects (sidebar)**: Below the navigation, every project with its task count (or a spinner with its active count); clicking one opens its project page, and `+` creates a project (name, default directory, description, optional background).
 - **Project** (`#projects/<id>`, `#projects/<id>/knowledge|skills|settings`): a header with the name, description, default directory and task count (a link to the filtered Tasks page), then four tabs, arrow keys moving between them. **Overview**: the 5 latest tasks with status and cost and a link to all of them; the background (three lines, then Show more); the knowledge (document count, stored size, the first 5 titles and summaries, how many referenced files are missing); the skills (count, how many are on, the first 5 names and descriptions); and the execution settings that are set, in words, with each role's model, per-run cap and harness from this project. **Knowledge**: the documents (title, summary, source, file name or path, size, a Missing badge for a path document whose file is gone) with a readout of documents, stored bytes and index characters against their caps. Opening a row shows its body (a path document's file as it is now); Edit changes the title, summary and content (a text or upload document) or path (a path document); a document is added as Text, Upload or Project file, or by dropping a file on the section; delete asks first. **Skills**: the skills (`project:<name>`, the body's size, `Off` for a disabled one, the description) with a count against the cap. Opening a row shows its `SKILL.md` body; Edit changes the name, description and body; a skill is added by hand or from a `SKILL.md` (Upload SKILL.md, or a drop on the section), whose frontmatter fills the name and description and whose body below it fills the instructions, for review before Add; a switch turns one on or off; delete asks first. Knowledge and skill changes apply at once and a refusal shows the server's reason. **Settings**: the name, default directory, description, background (`n / 10000`) and execution settings, saved together (Save is disabled over a limit or without a change; Discard changes resets them); then Agent settings: a form for the project's layer ("All agents in this project") and one for each role in the project (Planner, Worker, Reviewer), where every field also says what applies now and from which layer; then Delete project, offered only while the project has no tasks.
 - **Task Detail**: Overview (status, phase, times, steps and the task's cost with its run count, then "Cost by agent": the Planner's, the Workers' and the Reviewers' runs and cost with each one's share, noting runs still running or without a reported cost; steps, agent timeline, live activity feed), Pipeline DAG (React Flow), Sessions, Conversation
-- **Agents**: The Manager, Planner, Worker and Reviewer configuration editor (role prompt replace/append, LLM profiles). Instead of a permission setting it states the permissions every agent shares: every tool, `--dangerously-skip-permissions`. Each role also has its role layer of the agent settings (harness, model, effort, environment, per-run cap), each field saying what applies now and from which layer. A Runs tab lists every recorded Claude run of the role (the Manager, every task's Planner, Workers or Reviewers)
+- **Runs** (`#runs/<role>`): each role's sessions and run history, and no configuration. A Runs list shows every recorded Claude run of the role (the Manager, every task's Planner, Workers or Reviewers), a Manager `/new` as a `new session` row, and links each to its agent's history; each role links to its section in Settings → Roles.
 - **Agent history** (`#history/<agent-id>?task=<task-id>`): opened from History on an Agent Timeline row, a Runs entry or the Chat page. The Manager's and a Planner's page starts with "Context & cost": the latest context size, the number of compactions, the total cost and the number of turns. Below them is a sparkline of the context at the end of each of the latest 100 turns, scaled between their lowest and highest value, with a dashed marker on each turn that compacted. A list of the compactions follows (turn, time, trigger, context before → after), then a folded table of the turns. The section is re-read every 10 s. For each Claude run it shows status, model, the run's own tokens (uncached input, cache read, cache write, output), its context at the end (`ctx`), a `compacted` badge, its own cost, the launch command (cwd and argv; a long argument such as the system prompt is shown by its length, and Copy copies the exact command), a collapsible System prompt section with what Looper appended (Claude Code's built-in system prompt is not included): its title shows the prompt's size, its short sha256 and an `isolated` badge, and inside one line per layer (harness source and version, role recommended or edited, project and background version, task, contract), the model with its source and effort, and the Settings environment variable names, above the full text; runs recorded before the layers existed show the text only. A collapsible Plugins & skills section shows how many plugins and skills the run loaded from the library, with its hash, and how many project skills (from `metadata.project_skills`), and lists each with its short version hash. Then the full transcript, following a running run every 2 s. A running run shows its last output time from the record's heartbeat and is flagged after 2 minutes with no output. While Claude thinks it shows `thinking · ~N tokens` from Claude's `thinking_tokens` events. Those arrive about once a second, so the recorder keeps one row per thinking phase and updates its count in place. Hooks, background tasks and rate limits are shown as one line each, as are a compaction (`Context compacted (auto) · 25.1k → 1.36k tokens`) and a failed compaction attempt. The result line labels Claude's figure as the `session total`. Any other event type is an expandable line. A `/new` is one line, `new session`, with its channel, sender, chat and the session it ended. For a Planner each run is one of its turns, listed above your chat with it and its activity.
-- **Settings**: Agent defaults, the system layer of the agent settings (the harness prompt with an `n / 20000` counter, empty for the built-in one, the model, the effort, the environment variables and the per-run cap, each saying what applies now), then Plugins & skills (how many of the imported items are loaded and their size, "Import from this machine" or "Re-import", the last import with what it changed and what it left out, a name filter, and the plugins and skills with their version, size and a switch each; a change applies to each agent's next run), then the Telegram and Lark channels, each with its sender allowlist (an add and remove list of Telegram user IDs or Lark open_ids, checked as you type, with blanks and repeats flagged) and, for an enabled channel that does not start, the reason
+- **Settings**: a folding group at the bottom of the sidebar, one page each (`#settings/<page>`): **LLM Providers** (`providers`); **Agent Runtimes** (`runtimes`, read-only, as above); **Agent Profiles** (`profiles`: each profile's runtime, provider, model and effort, the roles it can run and where it is used, with a form that picks the runtime, then a provider grouped as the runtime's own login (OAuth; Claude Code's with its `claude auth status` result, Codex's shown as coming soon, none for OMP) or an API-key provider that speaks its protocols, then a model from the provider's catalog or any); **Roles** (`roles`: the system layer, then per role (`#settings/roles/<role>`) its layer, each field saying what applies now and from which layer, and its own fields: the role prompt (replace or append, reset to the recommended one), timeout, concurrency, and the note that every agent has every tool with `--dangerously-skip-permissions`); **Skills & MCP** (`catalog`: how many of the imported items are loaded and their size, "Import from this machine" or "Re-import", the last import with what it changed and what it left out, a name filter, and the plugins and skills with their version, size and installs; a change applies to each agent's next run); **Channels** (`channels`: the Telegram and Lark channels, each with its sender allowlist, an add and remove list of Telegram user IDs or Lark open_ids, checked as you type, with blanks and repeats flagged, and, for an enabled channel that does not start, the reason); **Import / Export** (`transfer`). Wherever an Agent Profile is chosen (Roles, a project's settings, a new task's roles) it is the same dropdown, whose last entry, "+ New Agent Profile", opens the form in place and selects what it saves.
 
 ### Real-Time Updates
 
@@ -1407,8 +1422,8 @@ built by `scripts/stage-dashboard.sh` at release time), and it carries
 SPA uses `#page/sub` format for deep linking that survives browser refresh:
 - `#tasks/task-id` → task detail
 - `#projects/project-id/tab` → one project (`overview` when the tab is left out)
-- `#agents/agent-id` → agent config
-- `#agents/agent-id/sessions` → the role's runs
+- `#runs/agent-id` → the role's runs (`#agents/...`, the page's name before, redirects here)
+- `#settings/page[/sub]` → one Settings page (`#settings` and `#settings/defaults` redirect to `#settings/roles`)
 - `#history/agent-id?task=task-id` → one agent's history
 
 ## HTTP API
@@ -1458,14 +1473,12 @@ dev proxy, which keeps `Host` and `Origin` on its own port.
 | `/api/agent-configs/:id/reset-prompt` | POST | Reset the role prompt to the recommended one |
 | `/api/agent-settings` | GET | The agent settings outside projects: `system` and `roles` (all four), each with `values` (that layer's own: `harness_prompt`, `agent` (an agent id), `effort`, `env` as `[{key, value}]`, `run_budget_usd`; `null` = not set) and `effective` (what applies, each field with its `source` layer; `agent` as `{agent_id, name, model, runtime, provider}`, `effort` may come from the agent), and `limits` |
 | `/api/agent-settings/system` | PUT | Set the system layer. Each layer's PUT changes the fields given (`null` or `""` unsets one; `env` replaces the layer's list, a `null` value unsetting a variable outside the system layer; the built-in harness text unsets the system harness) and answers with the GET view. 400 for an unknown field, `model` (part of the agent now), an unknown agent or one that cannot run the layer's roles, a harness over 20000 characters, a bad effort or cap, or a bad, credential-like or 51st variable; nothing is stored then |
-| `/api/registry` | GET | The runtime types this version has (`type`, `label`, `default_executable`, `protocols`, `capabilities`, `auth_kinds`), and every `runtime`, `provider` (API key as `***` or `null`) and `agent` (with its `cost`: `source`, `equivalent`, `unpriced` models), the `provider_presets`, the built-in `prices` (`as_of`, `sources`, `models`), with `limits` |
-| `/api/runtimes` | POST | Register `{name, type, executable?}` and probe it at once (`--version`); 201 with `runtime`; 400 for an unknown type, 409 for a taken name |
-| `/api/runtimes/:id` | PUT/DELETE | Rename or change the executable (probed again); delete (409 while agents use it). 400 for the built-in one |
-| `/api/runtimes/:id/probe` | POST | Probe again and record the version, capabilities or error; the built-in one too |
+| `/api/registry` | GET | The runtime types this version has (`type`, `label`, `default_executable`, `runtime_id` of its built-in runtime, `protocols`, `capabilities`, `roles`, `auth_kinds`), and every `runtime` (with its `path` on the server's PATH or `null`, and `roles`), `provider` (API key as `***` or `null`) and `agent` (with its `roles`, `used_by`: `layers` (`scope`, `role`, `project_id`, `project_name`) and `task_count`, and its `cost`: `source`, `equivalent`, `unpriced` models), the `provider_presets`, the built-in `prices` (`as_of`, `sources`, `models`), with `limits` |
+| `/api/runtimes/:id/probe` | POST | Re-detect: probe again and record the version, capabilities or error; for `rt-<type>` of a type not found yet, look for it on the server's PATH and add its built-in runtime (404 when it is not there). Runtimes are built in: there is no route to register, change or delete one |
 | `/api/providers` | POST | Register `{name, protocols, auth, oauth_runtime_type?, base_url?, models?, env?, max_concurrency?, api_key?}`; 201 with `provider`; 400 with the reason (an `env` name the binding sets, or that reads like a credential, too), 409 for a taken name |
 | `/api/providers/:id` | PUT/DELETE | Change a provider (`api_key` `***` keeps the key, `null` removes it; 400 when one of its agents could no longer run); delete (409 while agents use it). 400 for the built-in one |
 | `/api/agents` | POST | Register `{name, runtime_id, provider_id, model, effort?}`; 201 with `agent` and `warnings` (a model without a price); 400 when the runtime and provider cannot run together or the provider does not list the model |
-| `/api/agents/:id` | PUT/DELETE | Change an agent (checked like a new one, and for every role it is selected for); delete (409 while a layer or a task selects it). 400 for the built-in one |
+| `/api/agents/:id` | PUT/DELETE | Change an agent (checked like a new one, and for every role it is selected for); delete (409 while a layer or a task selects it, naming where). 400 for the built-in one |
 | `/api/agent-settings/roles/:role` | PUT | Set one role's layer (`manager`, `planner`, `worker`, `reviewer`; 404 for another) |
 | `/api/catalog` | GET | The catalog: `items` (`item_id`, `kind`, `name`, `qualified_name` (how agents name it), `origin`, `owner_project_id`, `owner_project_name`, `description`, `source`, `version`, `sha256`, `size_bytes`, `file_count`, timestamps and `installs`), `installed_count`, `total_bytes`, `last_import` (counts, `added`, `updated`, `removed`, `unchanged`, `skipped`), `roles`, `task_roles` and `caps` |
 | `/api/catalog/:id` | GET | One item: `item` (as in the list), `files` (`path`, `size_bytes`, `executable`; no content) and, for a skill, `skill_md`; 404 for an unknown item |
@@ -1522,8 +1535,8 @@ seeded default from before the recommendation was tracked get the current one.
 ## Channels
 
 The Web channel is always on. Telegram and Lark are built in; `looper serve`
-takes no flags for them. At startup it reads `channel_configs`, which the
-Settings page edits, and starts each enabled channel. Changes apply after a
+takes no flags for them. At startup it reads `channel_configs`, which
+Settings → Channels edits, and starts each enabled channel. Changes apply after a
 restart.
 
 - **Sender allowlist** (`looper/agents/channels/allowlist.py`, RFC decision 8):
@@ -1532,7 +1545,7 @@ restart.
   anyone else never reaches the Manager: the adapter logs one line with the
   channel and the sender id (never the text) and sends no reply. An enabled
   channel whose list is empty or invalid does not start; the startup log and
-  the Settings page (`start_problem`) say why. The list holds at most 100
+  Settings → Channels (`start_problem`) say why. The list holds at most 100
   ids; the API checks each one and stores the list as a JSON array.
 - **Telegram**: the token comes from the env var named by `bot_token_env`
   (default `LOOPER_TELEGRAM_BOT_TOKEN`). `allowed_user_ids` lists numeric

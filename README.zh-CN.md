@@ -189,9 +189,9 @@ PostgreSQL 是启动的硬性依赖；`looper serve` 每次启动都会应用 `l
 | **Tasks** | 任务列表、项目和状态筛选，以及创建、开始、停止、删除操作 |
 | **Project** | 单个项目的概览、知识文档、项目自己的 skill 和安装，以及项目设置（含该项目的 agent 设置层） |
 | **Task Detail** | 配置编辑（init 状态）、概览、流水线 DAG、会话、对话；Agent Timeline 每行都有 **History** 按钮 |
-| **Agents** | 每个角色的 prompt、限制和它的角色层 agent 设置；**Runs** 列出一个角色的每次运行，并能打开其历史 |
+| **Runs** | 每个角色的会话和运行记录（Manager 的 `/new` 显示为新会话），每次运行都能打开其历史；不含配置，并链接到 Settings → Roles 里的该角色 |
 | **Agent history** | 单个 agent 的启动命令、完整记录（文本、思考、工具调用及结果）和活动；跟随运行中的 agent，2 分钟没有输出会标出 |
-| **Settings** | Agent 默认值（系统层）；agent、提供方和运行时；插件、skill 和 MCP 目录；飞书和 Telegram 渠道；迁到另一台机器 |
+| **Settings** | 侧栏底部可折叠的分组，每项一页：**LLM Providers**；**Agent Runtimes**（只读：每种运行时类型，在服务的 PATH 上找到与否，可 Re-detect，以及规划中的类型）；**Agent Profiles**（运行时、提供方和模型，各自能跑的角色和被谁使用）；**Roles**（所有角色的默认值，再是每个角色的 Agent Profile、设置层、prompt 和限制）；**Skills & MCP**；**Channels**；**Import / Export** |
 
 ### HTTP API
 
@@ -204,7 +204,7 @@ API 只响应控制台和本机客户端：来自其他网站页面的请求（�
 | 任务 | `/api/tasks`、`/api/tasks/create`、`/api/tasks/:id/...`、`/api/tasks/{start,stop,cancel,delete}` | 列出和创建任务（属于某个项目，可带 `agent_overrides`）、查看、开始、停止、取消、删除；活动及其 SSE 流 |
 | 能力目录与安装 | `/api/catalog/...`、`/api/installs/...`、`/api/projects/:id/installs`、`/api/projects/:id/skills/...` | 插件、skill 和 MCP 服务器：导入、上传、git、编写、修改、删除；全局安装或装到项目 |
 | Agent 设置 | `/api/agent-settings/...`、`/api/projects/:id/agent-settings/...`、`/api/agent-configs/...` | 各设置层，每个字段的生效值及其来源；每个角色的 prompt 和限制 |
-| 注册表 | `GET /api/registry`、`/api/runtimes/...`、`/api/providers/...`、`/api/agents/...` | 运行时类型；注册、修改、探测和删除运行时、提供方（API key 打码）和 agent |
+| 注册表 | `GET /api/registry`、`/api/runtimes/:id/probe`、`/api/providers/...`、`/api/agents/...` | 运行时类型和内置运行时（Re-detect 重新探测）；注册、修改和删除提供方（API key 打码）和 agent（Agent Profile），并写明各自被谁使用 |
 | 配置迁移 | `GET /api/config/export`、`/api/config/imports/...` | 下载配置文件；上传配置文件、预览，再应用或取消 |
 | 对话 | `/api/chat/send`、`/api/chat/targets`、`/api/chat/messages`、`/api/chat/events` | 与 Manager 或运行中任务的 Planner 对话；历史和 SSE 流 |
 | 运行记录 | `/api/llm-records/...`、`/api/agents/:id/usage` | 每次 agent 运行的启动命令、用量、花费和事件；单个 agent 的花费和上下文 |
@@ -241,9 +241,9 @@ API 只响应控制台和本机客户端：来自其他网站页面的请求（�
 ### Agent 配置
 
 每个角色（Manager、Planner、Worker、Reviewer）运行一个 **agent**：由运行时、LLM 提供方和模型组成，
-在 Settings 页的「Agents, providers & runtimes」里注册。
+保存为 Settings → Agent Profiles 里的一个 **Agent Profile**，在 Settings → Roles 里选用。
 
-- **运行时**是 Looper 有适配器的某类 agent CLI（如 Claude Code、Codex）及要运行的可执行文件；Looper 会探测它的版本和能力。
+- **运行时**是 Looper 有适配器的某类 agent CLI（Claude Code、Codex 或 OMP）。运行时是内置的：Looper 在服务的 PATH 上找到它们并探测版本和能力，Settings → Agent Runtimes 列出它们并可 Re-detect；要换一个可执行文件，就改服务的 PATH。
 - **提供方**是 agent 请求发往的地方：它支持的协议、模型及价格，以及认证方式：运行时自己的登录，或 API key（API 从不返回它）。
 - 内置 agent `claude-code/opus`（Claude Code、它自己的登录、`opus`）运行所有没有另选 agent 的角色。
 
@@ -251,8 +251,8 @@ API 只响应控制台和本机客户端：来自其他网站页面的请求（�
 
 | 层 | 在哪里编辑 | 作用范围 |
 |---|---|---|
-| 系统 | Settings 的「Agent Defaults」 | 所有 agent |
-| 角色 | Agents 页 | 一个角色，不分项目：Manager、Planner、Worker 或 Reviewer |
+| 系统 | Settings → Roles 的所有角色部分 | 所有 agent |
+| 角色 | Settings → Roles，按角色 | 一个角色，不分项目：Manager、Planner、Worker 或 Reviewer |
 | 项目 | 项目的 Settings 标签页 | 该项目的 Planner、Worker 和 Reviewer |
 | 项目内角色 | 同一标签页，按角色 | 某个项目里的其中一个角色 |
 
@@ -261,7 +261,7 @@ Manager 横跨所有项目，所以只有前两层。任务创建时还可以给
 环境变量不用来放密钥：看起来像凭据的变量名会被拒绝。改动从每个 agent 的下一次运行或下一轮起生效。详见
 [Harness, agent and environment](docs/architecture/agent-system.md#harness-agent-and-environment)。
 
-**角色配置**：Agents 页还编辑每个角色自己的字段（`agent_configs`）：
+**角色配置**：Settings → Roles 还编辑每个角色自己的字段（`agent_configs`）：
 
 - **system_prompt**：角色 prompt，说明这类 agent 负责什么；harness 放在它前面，可以重置为推荐的 prompt
 - **max_turns**：对话轮数上限（0 表示不限）
