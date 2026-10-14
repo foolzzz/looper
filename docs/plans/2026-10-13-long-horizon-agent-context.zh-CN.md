@@ -401,6 +401,7 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
 ### M9 agent 多样性：运行时与 LLM provider
 
 依据 RFC 决策 10：agent = 运行时 + LLM provider + 模型。M9a 先打地基，之后 M9b 与 M9c 并行。
+详细设计、能力矩阵和待决问题见 [多运行时 agent 架构 RFC](../architecture/rfcs/multi-runtime-agents-v0.zh-CN.md)。
 
 #### M9a 注册与选择
 

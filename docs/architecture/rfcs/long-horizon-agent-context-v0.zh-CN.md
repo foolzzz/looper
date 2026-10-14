@@ -262,3 +262,4 @@ L5 代码契约始终最后，因为 L4 来自用户或 Planner，放在契约�
      运行时），以及花费（运行时不报告花费或接第三方接口时，按 provider 登记的模型价格计算）。
    - 现有的 `llm_profiles` 表和 `agent_configs.runtime`、`llm_profile_id` 两列从未接入启动路径，由新模型取代。
    - 每个新 agent 先用 M6 回归评测验收，评测可以指定 agent。
+   - 详细设计和待决问题见 [多运行时 agent 架构 RFC](multi-runtime-agents-v0.zh-CN.md)。
