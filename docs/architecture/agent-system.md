@@ -31,7 +31,7 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
   `claude --print --verbose --output-format stream-json --input-format stream-json --include-partial-messages --replay-user-messages <isolation flags> --append-system-prompt-file <file> --system-prompt-snapshot off --dangerously-skip-permissions --model M [--effort E] [--plugin-dir <dir> ...] [--resume <session_id>]`
   (see [What an agent's Claude Code loads](#what-an-agents-claude-code-loads),
   [What an agent may do](#what-an-agent-may-do) and
-  [The library](#the-library-imported-plugins-and-skills)). Like every agent
+  [The capability catalog](#the-capability-catalog-items-and-where-they-are-installed)). Like every agent
   it has every tool and no permission prompts, skills included, so it can run
   any command on this machine; that is why Telegram and Lark pass on only the
   senders they list ([Channels](#channels)).
@@ -47,8 +47,8 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
   session's running totals are saved beside its id in the `agent_sessions`
   row `manager` (`session_totals`). When Claude exits
   (or dies mid-turn, which answers that message with an error) or the
-  Manager's system prompt, model, effort, Settings environment or library
-  changes, the next message starts a new process that
+  Manager's system prompt, model, effort, Settings environment or installed
+  plugins and skills change, the next message starts a new process that
   resumes the saved session with `--resume`. Stopping the Manager closes
   Claude's stdin and kills it if it is still running after 5 s
 - A turn its Claude runs on its own, after background work it started ends,
@@ -100,9 +100,9 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
   A project can also carry knowledge: documents its task agents read on
   demand instead of getting them in the prompt ([Project
   knowledge](#project-knowledge-documents-read-on-demand)). Only their index
-  is in L3. It can carry its own Claude Code skills too ([Project
-  skills](#project-skills-claude-code-skills-of-one-project)); they are not
-  in the prompt: Claude Code lists them itself.
+  is in L3. Plugins and skills can be installed in it, and it can write its
+  own skills ([Project skills](#project-skills-skills-a-project-writes)); they
+  are not in the prompt: Claude Code lists them itself.
 
   A project can also override the harness of its Planner
   (`planner_harness_prompt`) and of its Workers (`worker_harness_prompt`,
@@ -155,7 +155,7 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
   only what changed: the plan's progress, results, chat and supervision
   observations. When the prompt changes (a config edit, a new background,
   knowledge or harness, a task moved to another project) its file and hash
-  change, or the model, effort, Settings environment, library, project
+  change, or the model, effort, Settings environment, installed plugins and
   skills or mounted knowledge directories change, the Planner stops
   its Claude, and the next process resumes the session with `--resume` and
   the new prompt. Like every agent it has every tool and no permission
@@ -349,8 +349,8 @@ also drops built-in skills. Not covered: managed (admin policy) settings,
 built-in plugins, and the environment variables of the process that runs
 `loopx serve`. With user settings gone, the model, the effort and any
 environment variables come from LoopX (next section), not from the operator's
-Claude Code settings, and the plugins and skills come from the LoopX library
-(below), never from `~/.claude` itself.
+Claude Code settings, and the plugins and skills come from the LoopX catalog,
+where they are installed (below), never from `~/.claude` itself.
 
 ### What an agent may do
 
@@ -358,7 +358,7 @@ Every agent (Manager, Planner, Worker, Reviewer) has every tool and runs
 without permission prompts (RFC decision 8). `permission_args()` in
 `loopx/agents/claude_cli.py` is `--dangerously-skip-permissions`, and
 `agent_settings.Launch.args` puts it in front of every agent's launch flags,
-beside the library's, so the four commands cannot diverge. No command
+beside the installed plugins', so the four commands cannot diverge. No command
 carries `--tools`, `--allowedTools` or `--permission-mode`. What an agent is
 for is the job of its role prompt and its code-owned contract: the
 Planner's recommended role prompt says it plans and decides, does not modify
@@ -407,9 +407,9 @@ against pasting a secret by habit; it is not a security boundary. An
 unreadable table falls back to the built-in values, and the run's record says
 so. Changes apply to the next Worker or Reviewer run; a resident agent's
 restart signature is its command (which carries the model, the effort, the
-library's plugin directories, the project skills' plugin directory, named by
-their hash, and the knowledge's `--add-dir` directories),
-the prompt's sha256, the environment's sha256, the library's sha256 and, for
+plugin directories of its installed items, each named by its content's hash,
+and the knowledge's `--add-dir` directories),
+the prompt's sha256, the environment's sha256, the installed items' sha256 and, for
 the Planner, the mounted knowledge directories, so the next turn restarts it
 with `--resume`.
 
@@ -423,7 +423,7 @@ the resident agents: by default Claude Code 2.1.285 keeps the system prompt of
 a session's first request and sends it again on every `--resume`, so a
 restarted Planner or Manager would keep running with its old prompt. A
 resident agent's restart signature is its command, the prompt's sha256 and the
-sha256s of the Settings environment and of the library.
+sha256s of the Settings environment and of the installed items.
 
 Every run records the prompt in `llm_records.metadata`:
 
@@ -452,14 +452,15 @@ Every run records the prompt in `llm_records.metadata`:
   `model` column keeps the model Claude reports;
 - `env`: `{sha256, keys: {NAME: sha256 of the value}}`, only when Settings
   holds variables; values are never recorded;
-- `library`: `{sha256, items: [{kind, name, sha256}], error?}`, the library
-  items the run loaded and the hash of that set, only when something was to be
-  loaded; `error` says why a run went without its library.
-- `project_skills`: `{project_id, sha256, plugin, skills: [{name, sha256}],
-  error?}`, a task agent's project skills: the set's hash (which names its
-  directory), the plugin (`project`) and each skill's name and the hash of its
-  `SKILL.md`, only when the project has enabled skills; `error` says why a run
-  went without them. The Manager's runs never have it.
+- `library`: `{sha256, role, project_id, items: [{kind, name, sha256, plugin,
+  scope}], error?}`, the catalog items installed for the run: its role and
+  project, each item with the plugin it loads in (a plugin's own name,
+  `personal` or `project`) and `scope` (`project` when its project has it,
+  else `global`), and the hash of that set, only when something was to be
+  loaded; `error` says why a run went without them. Runs recorded before the
+  catalog have items without `plugin` and `scope`, and a task agent's run may
+  have `project_skills` (`{project_id, sha256, plugin, skills}`), which is no
+  longer written.
 
 The same inputs give the same prompt and hash; changing the harness, the role
 prompt, the background, the knowledge index, the task or a contract changes
@@ -516,7 +517,7 @@ Worker and Reviewer run and every Planner turn, never for the Manager:
   has a text or upload document, and the project's default directory when it
   has a path document and the task runs in another directory.
   `claude_cli.knowledge_args` builds the flags and `agent_settings.Launch`
-  carries them beside the library's, so the three task agents cannot diverge
+  carries them beside the installed plugins', so the three task agents cannot diverge
   and the Manager's launch has none.
 
 Edits apply at once: the next Worker or Reviewer reads them as it starts, and
@@ -528,29 +529,36 @@ applied (N documents)` for each run that has some, and, for the Planner,
 run goes without them, its record's `prompt_layers.project.knowledge_error`
 says why and the activity logs a warning; the Planner keeps the knowledge it
 last read. A replaced or deleted document's copy stays on disk until the
-server next starts (see the library's **Reclaiming copies**).
+server next starts (see the catalog's **Reclaiming copies**).
 
 Verified with Claude Code 2.1.285 under the isolation flags: the agent reads
 files in an `--add-dir` directory, a `CLAUDE.md` in that directory or above it
 is not loaded, and a directory that does not exist does not fail the run.
 
-### Project skills: Claude Code skills of one project
+### Project skills: skills a project writes
 
-A project can carry its own Claude Code skills (`loopx/agents/project_skills.py`,
-RFC section 6). Only its Planner, Workers and Reviewers load them, and nothing
-is written into the project's directory. Each skill is a row of
-`project_skills`:
+A project can write its own Claude Code skills (`loopx/agents/project_skills.py`,
+RFC section 6 and decision 9). Each is a catalog item of origin `project`,
+owned by the project (`owner_project_id`; it goes with its project) with one
+file, its `SKILL.md`, and nothing is written into the project's directory:
 
-- `name`: a lowercase slug (`deploy-check`), unique in the project. It is the
-  skill's directory and its frontmatter `name`; a CHECK holds the database to
-  the same pattern;
+- `name`: a lowercase slug (`deploy-check`), unique among the project's
+  skills. It is the skill's directory and its frontmatter `name`;
 - `description`: one line, which Claude Code shows the model to decide when to
   use the skill;
-- `content`: the body of its `SKILL.md`, given without frontmatter (content
-  starting with a `---` line is refused, since the fields make it);
-- `enabled`: only enabled skills are loaded.
+- the body of its `SKILL.md`, given without frontmatter (content starting with
+  a `---` line is refused, since the fields make it). The file is the
+  frontmatter, with the description as a double-quoted string so a colon, a
+  quote or a `#` stays text, then the body.
 
-Rows go with their project.
+Writing one (`POST /api/projects/:id/skills`) also installs it in its project
+for the Planner, Workers and Reviewers, enabled unless `enabled: false` is
+given. It can be installed in other projects too (`POST /api/installs`), never
+globally. Editing changes the item for every project it is installed in;
+deleting removes it from the catalog and from all of them. Every project
+skill loads in the generated plugin `project`, so Claude Code names it
+`project:<name>`; a project cannot hold two of one name, so installing,
+writing or renaming one onto a name that would clash there is a 409.
 
 **Caps.** Each is refused with a 400 that states it:
 
@@ -560,46 +568,18 @@ Rows go with their project.
 - a body: at most 64 KiB. It enters the context whenever the skill is used.
   The largest of those 104 is 61 KB, and long reference material belongs in
   the project's knowledge;
-- a project: at most 20 skills. Every enabled skill's name and description is
-  listed in every run's context.
+- a project: at most 20 skills written in it. Every installed skill's name and
+  description is listed in every run's context.
 
 A name the project already has is a 409. Changes to one project's skills run
 in a transaction that holds the project's row lock, as its knowledge does, so
 two concurrent adds cannot both pass the count cap or take one name.
 
-**Delivery.** `load_project_skills(runtime_root, project)` runs for every
-Worker and Reviewer run and every Planner turn, never for the Manager. It reads
-the project's enabled skills and writes them as one plugin:
-
-```
-<runtime_root>/.local/projects/<project_id>/skills/<sha256>/project/
-  .claude-plugin/plugin.json      {"name": "project", ...}
-  skills/<name>/SKILL.md          frontmatter (name, description) from the fields, then the body
-```
-
-- `<sha256>` names the set of skills and the layout. The directory is written
-  once through the library's `write_once`: built beside its place, renamed in,
-  then read-only (files 0444, directories 0555). The same set reuses it, and a
-  change makes a new one.
-- The description is written as a double-quoted string, so a colon, a quote
-  or a `#` stays text.
-- `claude_cli.project_skill_args` gives the run one `--plugin-dir`, after the
-  library's plugins and before the knowledge's `--add-dir`.
-  `agent_settings.Launch` carries it, so the three task agents cannot diverge
-  and the Manager's launch has none.
-- Claude Code names each skill `project:<name>`. It lists them to the model
-  itself (the Skill tool), so the system prompt does not repeat them.
-
-Edits apply at once. The next Worker or Reviewer reads them as it starts. The
-Planner's next turn sees a new plugin directory in its command and restarts
-with `--resume`, and a task moved to another project gets that project's
-skills the same way. The task's activity notes `Project skills applied (N
-skills)` for each run that has some, and, for the Planner, `changed` or
-`removed`. When the skills cannot be read or written, a run goes without them,
-its record's `project_skills.error` says why and the activity logs a warning.
-The Planner keeps the skills it last read. A replaced or deleted set's
-directory stays on disk until the server next starts (see the library's
-**Reclaiming copies**).
+The `project_skills` table of M4 was moved into the catalog once, at the first
+start of this version (`library_catalog_installs` in `schema_migrations`): each
+row became an item with the same id, project, name and description, its
+`SKILL.md` as runs wrote it, installed in its project for the three task roles
+and enabled as it was; then the table was dropped.
 
 Verified with Claude Code 2.1.285 under the isolation flags and
 `--dangerously-skip-permissions`, with haiku:
@@ -608,7 +588,7 @@ Verified with Claude Code 2.1.285 under the isolation flags and
   `plugins` as `{name: "project", source: "project@inline"}`;
 - the model invokes such a skill with the Skill tool from the read-only copy;
 - two `--plugin-dir` plugins of the same name both load, their skills listed
-  under one prefix, so a library plugin named `project` would share it;
+  under one prefix;
 - no `~/.claude/plugins/data/project-inline/` directory was created for a
   plugin with only skills.
 
@@ -628,13 +608,28 @@ error; `supervise_interval_seconds` over the `planner` config; and
 and `distill_lessons` `true`, which saves a lessons document to the project's
 knowledge when a task completes (see the Planner).
 
-### The library: imported plugins and skills
+### The capability catalog: items and where they are installed
 
-The capabilities the operator wants every agent to have are imported
-explicitly instead of being loaded from `~/.claude`
-(`loopx/agents/library.py`, RFC decision 7):
+What agents load is not read from `~/.claude`. Items are acquired into a
+catalog first, and each loads only where it is installed
+(`loopx/agents/library.py`, `loopx/agents/catalog.py`; RFC decisions 7 and 9):
 
-- **Import** (`POST /api/settings/library/import`, Settings → "Import from this
+- **Catalog.** `library_items` and `library_files` hold each item: kind
+  `plugin` or `skill`, name, `origin` (how it was acquired: `machine`, imported
+  from this machine, or `project`, written in a project; `upload`, `git` and
+  `ui` are reserved), the owning project of a project-authored item, a
+  description, source label, declared version, `sha256`, size, file count, and
+  its files (relative path, UTF-8 content, sha256, executable bit). An item's
+  `sha256` is the hash of its files' paths, hashes and executable bits. A name
+  is unique among the items outside projects, and within the project that
+  owns an item. An item does nothing by itself.
+- **Installs.** `library_installs` puts an item on a scope: `global`, or one
+  project, for a non-empty set of roles (`manager`, `planner`, `worker`,
+  `reviewer`), with its own `enabled` switch; one install per item and place.
+  A project install never names the Manager, which spans every project, and a
+  project-authored item is installed in projects only. CHECK constraints hold
+  the scope, the roles and the project together.
+- **Import** (`POST /api/catalog/import`, Settings → "Import from this
   machine" / "Re-import") only reads the operator's Claude Code configuration
   (`$CLAUDE_CONFIG_DIR`, else `~/.claude`): every plugin `settings.json`
   enables (`enabledPlugins`), from its user-scope install in
@@ -644,38 +639,45 @@ explicitly instead of being loaded from `~/.claude`
   MCP servers, permissions and memory are not read. `.git`, `.in_use`
   (Claude Code's plugin-cache bookkeeping), `.DS_Store` and `__pycache__` are
   left out; a link inside an item is read as its target when it stays in the
-  item.
-- **Storage.** The database is the source of truth: `library_items` (kind
-  `plugin` or `skill`, name, source label, declared version, `sha256`,
-  `enabled`, size, file count, `imported_at`) and `library_files` (relative
-  path, UTF-8 content, sha256, executable bit). An item's `sha256` is the hash
-  of its files' paths, hashes and executable bits. A re-import replaces the
-  files of an item whose hash changed and keeps its id and `enabled` flag,
-  leaves an unchanged one as it is, adds new items enabled and removes the
-  items that are gone. The last import's report (counts, changes, what was
-  left out) is the `library.last_import` row of `system_settings`.
+  item. A re-import touches the `machine` items only: it replaces the files of
+  an item whose hash changed and keeps its id and installs, leaves an
+  unchanged one as it is, adds new items installed nowhere and removes the
+  items that are gone with their installs. The last import's report (counts,
+  changes, what was left out) is the `library.last_import` row of
+  `system_settings`. Items imported before the catalog were left installed
+  nowhere at the upgrade, so they load nowhere until installed.
 - **Caps.** A file over 2 MiB, a binary (not UTF-8) file, and a link out of
   its item are left out; an item over 32 MiB or 5,000 files is left out
   whole; all are reported. A library over 128 MiB is refused with a 400 and
   nothing changes. Measured on a real configuration (3 plugins, 104 skills):
   about 21 MB of text in 2,200 files, the largest item 9 MB, the largest file
   0.7 MB; 4 image files were left out.
-- **Launch.** `load_library(runtime_root)` reads the enabled items for every
-  run and gets each a read-only copy under
-  `<runtime_root>/.local/library/<sha256>/<name>/`, written once from the
-  database (checked against the hashes) and renamed into place, so runs never
-  read `~/.claude`. Each enabled plugin is one `--plugin-dir`; the enabled
-  skills are linked into one generated plugin, `personal`
-  (`<runtime_root>/.local/library/<hash of the set>/personal/`), so Claude Code
-  names them `personal:<skill>`. `claude_cli.library_args` builds the flags
-  and `agent_settings.Launch` carries them, so all four commands get the
-  same set. When the library cannot be read or written, the run goes without
-  it and its record's `library.error` says why.
+- **Launch.** `load_installed(runtime_root, role, project_id)` runs for every
+  Worker and Reviewer run and every Planner and Manager turn. It reads the
+  enabled installs that name the run's role, global or in its project
+  (`db.library.list_installed`; the Manager has no project), loads an item
+  installed in both places once, as the project's, and gets each item a
+  read-only copy under `<runtime_root>/.local/library/<sha256>/<name>/`,
+  written once from the database (checked against the hashes) and renamed
+  into place, so runs never read `~/.claude`. Each plugin is one
+  `--plugin-dir`; the skills are linked into generated plugins under
+  `<runtime_root>/.local/library/<hash of the plugin and its set>/`: a
+  project's own skills into `project` (`project:<skill>`), every other skill
+  into `personal` (`personal:<skill>`). The plugins come first, then
+  `personal`, then `project`. `claude_cli.library_args` builds the flags and
+  `agent_settings.Launch` carries them, so all four commands get them the
+  same way. When the installs cannot be read or written, a run goes without
+  them and its record's `library.error` says why; Workers and Reviewers note
+  a warning in the task's activity, and the Planner keeps the items it last
+  read. The task's activity notes `Project installs applied (...)` for a
+  Worker or Reviewer run that has project installs, and `Installed plugins and
+  skills applied`, `changed` or `removed` for the Planner.
 - **Reclaiming copies.** `loopx serve` reclaims replaced copies when it
   starts, before any agent launches: `read_only_copies.reclaim_unused` removes
-  every content-hashed directory of the library, project knowledge and project
-  skills that the current content does not use and no running process's
-  command line mounts (or links into through a mounted one).
+  every content-hashed directory of the catalog, project knowledge and the
+  project skills plugins of versions before the catalog that the current
+  content (what every role in every project loads) does not use and no
+  running process's command line mounts (or links into through a mounted one).
 
 Verified with Claude Code 2.1.285 under the isolation flags: in `--print`
 mode `--plugin-dir` loads a plugin's skills (as `<plugin>:<skill>`), agents,
@@ -912,9 +914,9 @@ PostgreSQL is a hard startup dependency. All data paths:
 | `llm_records` | One row per Claude run: input and output text, status, the run's own `cost_usd`, `input_tokens`, `output_tokens`, `cache_read_tokens` and `cache_creation_tokens`, its final `context_tokens` and its `compactions`; `metadata` holds the exact argv (`command`), `cwd`, the appended `system_prompt`, its `system_prompt_sha256`, its `prompt_layers`, the `model_choice`, the Settings `env` names, the `library` items loaded and a task agent's `project_skills` |
 | `agent_configs` | Agent configuration (role prompt, model) for `manager`, `planner`, `worker` and `reviewer`; `harness_prompt` is used for the Manager only |
 | `system_settings` | Settings shared by the whole system, one value per key: the default harness, model, effort and environment variables (no row = the built-in default), and the last library import's report |
-| `library_items` | The imported plugins and skills: kind, name, source label, declared version, `sha256` of the files, `enabled`, size, file count, `imported_at` |
-| `library_files` | Each library item's files: relative path, UTF-8 content, sha256, executable bit |
-| `project_skills` | A project's own Claude Code skills: `name` (a lowercase slug, unique in the project; a CHECK holds the pattern), one-line `description`, `content` (the `SKILL.md` body), `enabled`, timestamps; the rows go with their project |
+| `library_items` | The capability catalog: kind, name, `origin` (`machine` or `project`), `owner_project_id` (a project-authored item; goes with its project), `description`, source label, declared version, `sha256` of the files, size, file count, `imported_at` |
+| `library_files` | Each catalog item's files: relative path, UTF-8 content, sha256, executable bit |
+| `library_installs` | Where an item loads: `scope` (`global` or `project`), `project_id`, `roles` (a non-empty subset of `manager`, `planner`, `worker`, `reviewer`; never `manager` in a project), `enabled`; one per item and place, going with its item and its project |
 | `project_documents` | A project's knowledge: title, one-line summary, `source_kind` (`text`, `upload` or `path`), `filename` and `content` (text and upload) or `path` (relative to the project's default directory), `size_bytes`, `sha256`; a CHECK keeps each kind's columns consistent and the rows go with their project |
 | `llm_profiles` | LLM provider profiles (model, endpoint, API key env) |
 | `channel_configs` | Telegram/Lark settings (enabled flag, env var names, sender allowlist) |
@@ -992,11 +994,11 @@ dev proxy, which keeps `Host` and `Origin` on its own port.
 | `/api/projects/:id/knowledge/:doc_id` | GET | One document: `document` (as in the list) and its `content`: stored for text and upload, the file as it is now for a path document; `content` is `null` with a `content_error` when that file is missing or not text; 404 for an unknown project or a document of another project |
 | `/api/projects/:id/knowledge/:doc_id` | PUT | Change `title`, `summary` or the source's own fields; the kind cannot change. Answers with the `document` and the view; 400 as above, 404 |
 | `/api/projects/:id/knowledge/:doc_id` | DELETE | Delete a document; answers with `deleted` and the view; 404 |
-| `/api/projects/:id/skills` | GET | The project's skills: `skills` (`skill_id`, `name`, `qualified_name` (`project:<name>`), `description`, `enabled`, `size_bytes` of the body, timestamps; no content), `count`, `enabled_count`, `plugin` and `caps`; 404 for an unknown project |
-| `/api/projects/:id/skills` | POST | Add a skill: `name`, `description`, `content`, optionally `enabled` (default true). Answers 201 with the new `skill` and the view; 400 with the reason for a bad field or the count cap, 409 for a name the project already has, 404 for an unknown project |
-| `/api/projects/:id/skills/:skill_id` | GET | One skill: `skill` (as in the list) and its `content`, the `SKILL.md` body; 404 for an unknown project or a skill of another project |
-| `/api/projects/:id/skills/:skill_id` | PUT | Change any of `name`, `description`, `content` and `enabled` (the switch); answers with the `skill` and the view; 400 and 409 as above, 404 for an unknown project or a skill of another project |
-| `/api/projects/:id/skills/:skill_id` | DELETE | Delete a skill; answers with `deleted` and the view; 404 |
+| `/api/projects/:id/installs` | GET | What applies to the project: `installs`, its own installs then the global ones that reach its task roles, each an install (`install_id`, `scope`, `project_id`, `project_name`, `roles`, `enabled`) with `inherited` and its `item` (as in the catalog); `owned_count` (skills written in it), `task_roles` and `skill_caps`; 404 for an unknown project |
+| `/api/projects/:id/skills` | POST | Write a skill: `name`, `description`, `content`, optionally `enabled` (default true): a catalog item installed in the project for the Planner, Workers and Reviewers. Answers 201 with the new `skill` (`skill_id`, `name`, `qualified_name` (`project:<name>`), `description`, `size_bytes`, timestamps) and the project's installs view; 400 with the reason for a bad field or the count cap, 409 for a name the project already has or that another project skill installed there has, 404 for an unknown project |
+| `/api/projects/:id/skills/:skill_id` | GET | One skill the project wrote: `skill` and its `content`, the `SKILL.md` body; 404 for an unknown project or a skill another project wrote |
+| `/api/projects/:id/skills/:skill_id` | PUT | Change any of `name`, `description` and `content` (its switch is on the install: `PUT /api/installs/:id`); answers with the `skill` and the installs view; 400 and 409 as above (a new name must be free in every project the skill is installed in), 404 for an unknown project or a skill another project wrote |
+| `/api/projects/:id/skills/:skill_id` | DELETE | Delete a skill the project wrote, from the catalog and every project it is installed in; answers with `deleted` and the installs view; 404 |
 | `/api/projects/:id` | DELETE | Delete a project; 409 while it still has tasks |
 | `/api/tasks` | GET | List the newest tasks; `?project_id=` lists one project's. Each has `project_id`, `project_name`, `work_dir` and `cost` (as in the task detail) |
 | `/api/tasks/create` | POST | Create a task in `init` with exactly one of `project_id` (existing) and `project` (`{name, description?, work_dir?, background?, planner_harness_prompt?, worker_harness_prompt?}`, created in the same transaction). Its `work_dir` is the one given, else the project's; 400 with neither, 404 for an unknown project, 409 for a taken new name |
@@ -1016,9 +1018,12 @@ dev proxy, which keeps `Host` and `Origin` on its own port.
 | `/api/agent-configs/:id/reset-prompt` | POST | Reset the role prompt to the recommended one |
 | `/api/settings/agents` | GET/PUT | The defaults every agent inherits: `default_harness_prompt`, `default_model`, `default_effort`, `default_env` (`[{key, value}]`). PUT changes the fields given; an empty value goes back to the built-in default. 400 for an unknown field, a harness over 20000 characters, a bad model name or effort, or a bad, credential-like or 51st variable; nothing is stored then |
 | `/api/settings/agents/reset-harness` | POST | Go back to the built-in default harness |
-| `/api/settings/library` | GET | The library: `items` (`id`, `kind`, `name`, `source`, `version`, `sha256`, `enabled`, `size_bytes`, `file_count`, `imported_at`), `last_import` (counts, `added`, `updated`, `removed`, `unchanged`, `skipped`), `enabled_count`, `library_sha256` (what runs record), `total_bytes`, `skills_plugin` and `caps` |
-| `/api/settings/library/import` | POST | Import or re-import this machine's enabled plugins and personal skills (read-only towards `~/.claude`); answers with the library. 400 without a Claude Code configuration, with an unreadable `settings.json` or over the 128 MiB cap (nothing changes then) |
-| `/api/settings/library/:id` | PUT | `{"enabled": true\|false}`; answers with the library. 400 for any other body, 404 for an unknown item |
+| `/api/catalog` | GET | The catalog: `items` (`item_id`, `kind`, `name`, `qualified_name` (how agents name it), `origin`, `owner_project_id`, `owner_project_name`, `description`, `source`, `version`, `sha256`, `size_bytes`, `file_count`, timestamps and `installs`), `installed_count`, `total_bytes`, `last_import` (counts, `added`, `updated`, `removed`, `unchanged`, `skipped`), `roles`, `task_roles` and `caps` |
+| `/api/catalog/:id` | GET | One item: `item` (as in the list), `files` (`path`, `size_bytes`, `executable`; no content) and, for a skill, `skill_md`; 404 for an unknown item |
+| `/api/catalog/import` | POST | Import or re-import this machine's enabled plugins and personal skills (read-only towards `~/.claude`); new items are installed nowhere. Answers with the catalog. 400 without a Claude Code configuration, with an unreadable `settings.json` or over the 128 MiB cap (nothing changes then) |
+| `/api/installs` | POST | Install an item: `{item_id, scope: "global"\|"project", project_id (a project scope), roles?, enabled?}`; `roles` defaults to every role the scope allows. Answers 201 with `install` and `item`. 400 for a bad field, `manager` in a project install or a project-authored item installed globally; 404 for an unknown item or project; 409 when the item is installed there already or a project skill of its name is |
+| `/api/installs/:id` | PUT | Change an install's `roles` or `enabled`; answers with `install` and `item`; 400 as above, 404 for an unknown install |
+| `/api/installs/:id` | DELETE | Uninstall; the item stays in the catalog. Answers with `deleted` and `item`; 404 |
 | `/api/llm-profiles` | GET/POST | LLM profiles |
 | `/api/llm-records` | GET | Claude runs; filter by `agent_id`, `task_id` or `role` (`manager`, `planner`, `worker`, `reviewer`) |
 | `/api/llm-records/:id` | GET | One run (status, usage, cost, launch command, heartbeat) |
