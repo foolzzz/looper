@@ -19,6 +19,12 @@ How the agent system works today is described in
 
 ### Added
 
+- **Request body cap.** The HTTP server reads a request body of at most 8 MiB,
+  room for the largest legitimate one (a 2 MiB knowledge document uploaded as
+  base64 in JSON). A larger `Content-Length` gets a 413 with
+  `{"error": ...}` naming the cap, before any of the body is read; a
+  malformed one gets a 400 instead of a 500.
+
 - **Project execution settings (M5).** A project can set how its Planner,
   Workers and Reviewers run; every field is optional and `null` inherits, so
   a project with none set runs as before (`loopx/agents/project_execution.py`).
