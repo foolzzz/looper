@@ -66,7 +66,8 @@ def build_parser() -> argparse.ArgumentParser:
     export.add_argument("--include-projects", action="store_true",
                         help="Also export projects with their settings, knowledge, own skills and installs.")
     export.add_argument("--include-secrets", action="store_true",
-                        help="Write MCP environment and header values and channel secrets in plain text.")
+                        help="Write LLM provider API keys, MCP environment and header values and channel secrets in "
+                             "plain text.")
     import_ = config_commands.add_parser(
         "import", allow_abbrev=False, help="Preview importing a configuration file; --apply writes it.",
         description=(
@@ -177,8 +178,8 @@ def _config(args: argparse.Namespace) -> int:
     try:
         if args.config_command == "export":
             if args.include_secrets:
-                print(f"warning: {path} will hold secrets (MCP environment and header values, channel secrets) in "
-                      "plain text; keep it private and delete it once imported", file=sys.stderr)
+                print(f"warning: {path} will hold secrets (LLM provider API keys, MCP environment and header values, "
+                      "channel secrets) in plain text; keep it private and delete it once imported", file=sys.stderr)
             summary = asyncio.run(config_transfer.export_to_file(
                 configured_dsn(), path, include_projects=args.include_projects, include_secrets=args.include_secrets))
             print(config_transfer.format_export(summary, path, include_secrets=args.include_secrets))

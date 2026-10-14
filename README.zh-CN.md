@@ -38,9 +38,16 @@ Looper 是一个自托管的多 Agent 系统，把一段任务描述变成协同
 - **直接创建任务**：在控制台里创建任务，开始前先配置
 - **暂停与恢复**：停止运行中的任务，从 stopped 或 failed 状态重新开始
 - **实时活动流**：基于 SSE，实时显示 worker 进程的事件
-- **Agent 配置**：在控制台里修改 system prompt、模型和权限
+- **多种 agent 运行时和 LLM 提供方**：一个 agent 由运行时（如 Claude Code、Codex）、LLM 提供方（运行时自己的登录，
+  或 Anthropic、OpenAI 兼容接口的 API key，常见厂商有预设）和模型组成；每次运行都记录 token，模型有价格时也记录花费
+- **分层设置**：harness prompt、agent、effort、环境变量和单次运行的花费上限可以按全系统、角色、项目或项目内的角色设置，
+  任务还能自选 agent；控制台标出每个值来自哪一层
+- **能力目录**：插件、skill 和 MCP 服务器，可以从本机导入、上传、从 git 获取或在 Looper 里编写，再全局安装或装到某个项目，
+  并指定给哪些角色
+- **项目与任务记忆**：项目有默认目录、背景和 agent 按需读取的知识文档；每个任务都有一份日志，记录通过和失败的步骤、决策、
+  你的指示和经验，Planner 每一轮都会读，重启和换新会话后依然保留
+- **配置导出与导入**：从命令行或 Settings 页把 agent 配置作为一个文件迁到另一台机器
 - **多渠道输入**：网页对话、飞书机器人、Telegram 机器人
-- **LLM 配置管理**：配置多个模型提供方和接口地址
 - **流水线可视化**：用 React Flow 画出任务拆解和 worker 分配的 DAG
 
 ## 快速开始
@@ -138,8 +145,8 @@ Looper 在 v2.5.0 及以前叫 LoopX。升级不需要手动操作：
   `~/.looper` 并记一条警告。
 - **环境变量：**`LOOPER_*`。`LOOPER_*` 没设时仍读对应的 `LOOPX_*`，并给出警告；请在 shell 和 `.env` 里改名。
 - **服务：**`com.looper.serve`。`looper service install` 会先停掉并删除旧的 `com.loopx.serve`。
-- **配置文件：**导出写 `looper-config/v1`；以前导出的 `loopx-config/v1` 文件仍然能导入。
-- **不变的：**默认数据库仍叫 `loopx`（`postgresql://localhost:5432/loopx`），里面的数据（比如你自己写的
+- **配置文件**：导出写 `looper-config/v1`；以前导出的 `loopx-config/v1` 文件仍然能导入。
+- **不变的**：默认数据库仍叫 `loopx`（`postgresql://localhost:5432/loopx`），里面的数据（比如你自己写的
   harness）不会被改写；发布 tag 和历史保留原名；[NOTICE](NOTICE) 保留对上游 LoopX 的署名。因为 `schema.sql`
   有变化，升级后第一次启动会照常先备份。
 
@@ -158,18 +165,18 @@ Looper 在 v2.5.0 及以前叫 LoopX。升级不需要手动操作：
 
 ### 数据库
 
-PostgreSQL 是启动的硬性依赖。数据表：
+PostgreSQL 是启动的硬性依赖；`looper serve` 每次启动都会应用 `looper/db/schema.sql`。数据表按领域分组：
 
-| 表 | 用途 |
-|---|---|
-| `tasks` | 任务元数据、状态、阶段、work_dir、配置、时间戳 |
-| `task_steps` | Planner 拆出的步骤 |
-| `activity` | 执行轨迹事件（通过 SSE 推给前端） |
-| `chat_messages` | 对话历史 |
-| `llm_records` | LLM 输入输出的完整记录 |
-| `agent_configs` | Agent 配置（prompt、模型、权限） |
-| `llm_profiles` | LLM 提供方配置 |
-| `channel_configs` | 飞书和 Telegram 渠道设置 |
+| 领域 | 表 | 内容 |
+|---|---|---|
+| 项目与任务 | `projects`、`tasks`、`task_steps`、`task_plans`、`task_agent_overrides` | 项目及其默认目录、背景和执行设置；任务、Planner 的计划和步骤，以及任务给某个角色选的 agent |
+| 任务记忆与知识 | `task_journal`、`project_documents`、`project_document_drafts` | 任务运行时由代码写入的日志；项目的知识文档和等你审阅的草稿 |
+| Agent 与设置 | `agent_runtimes`、`llm_providers`、`llm_provider_secrets`、`agents`、`agent_setting_layers`、`agent_configs`、`agent_sessions` | 运行时、提供方（API key 单独存放）和 agent；各设置层；每个角色的 prompt 和限制；Manager 和 Planner 恢复的会话 |
+| 能力目录 | `library_items`、`library_files`、`library_mcp_servers`、`library_installs` | 插件、skill 和 MCP 服务器及其文件或服务器配置，以及各自装在哪里 |
+| 运行与对话 | `llm_records`、`llm_record_events`、`activity`、`chat_messages` | 每次 agent 运行的用量、花费和流事件；每个任务的活动流；对话历史 |
+| 系统 | `system_settings`、`channel_configs`、`schema_migrations`、`schema_fingerprint` | 全局设置、Telegram 和飞书渠道、已执行的一次性迁移，以及上次应用的 schema 的哈希（serve 据此判断改动前是否要备份） |
+
+主要数据表逐列的说明见 [Data Persistence](docs/architecture/agent-system.md#data-persistence)。
 
 ### Web 控制台
 
@@ -179,33 +186,31 @@ PostgreSQL 是启动的硬性依赖。数据表：
 |---|---|
 | **Dashboard** | 系统状态总览 |
 | **Chat** | 与全局 Manager 对话，或与运行中任务的 Planner 对话（每条消息成为该任务的一个新步骤）；SSE 流式输出 |
-| **Tasks** | 任务列表、状态筛选，以及创建、开始、停止、删除操作 |
+| **Tasks** | 任务列表、项目和状态筛选，以及创建、开始、停止、删除操作 |
+| **Project** | 单个项目的概览、知识文档、项目自己的 skill 和安装，以及项目设置（含该项目的 agent 设置层） |
 | **Task Detail** | 配置编辑（init 状态）、概览、流水线 DAG、会话、对话；Agent Timeline 每行都有 **History** 按钮 |
-| **Agents** | Agent 配置编辑；**Runs** 列出一个角色的每次 Claude 运行，并能打开其历史 |
+| **Agents** | 每个角色的 prompt、限制和它的角色层 agent 设置；**Runs** 列出一个角色的每次运行，并能打开其历史 |
 | **Agent history** | 单个 agent 的启动命令、完整记录（文本、思考、工具调用及结果）和活动；跟随运行中的 agent，2 分钟没有输出会标出 |
-| **Settings** | 飞书和 Telegram 渠道配置 |
+| **Settings** | Agent 默认值（系统层）；agent、提供方和运行时；插件、skill 和 MCP 目录；飞书和 Telegram 渠道；迁到另一台机器 |
 
 ### HTTP API
 
-| 接口 | 方法 | 用途 |
+API 只响应控制台和本机客户端：来自其他网站页面的请求（按 `Origin` 判断）会被拒绝。主要的路由分组：
+
+| 分组 | 接口 | 用途 |
 |---|---|---|
-| `/api/status` | GET | 系统健康状态和启动自检（`checks`） |
-| `/api/tasks` | GET | 任务列表 |
-| `/api/tasks/create` | POST | 创建任务（init 状态）；必须提供 `work_dir` |
-| `/api/tasks/:id` | GET | 任务详情及步骤 |
-| `/api/tasks/:id/config` | PUT | 修改任务配置（仅 init 状态） |
-| `/api/tasks/start` | POST | 开始或恢复任务 |
-| `/api/tasks/stop` | POST | 暂停任务 |
-| `/api/tasks/cancel` | POST | 永久取消 |
-| `/api/tasks/delete` | POST | 删除（须先停止） |
-| `/api/tasks/:id/activity/stream` | GET | SSE 活动流 |
-| `/api/chat/send` | POST | 发送对话消息；`target` 为 Manager（默认）或 `{kind: planner, task_id}` |
-| `/api/chat/targets` | GET | 对话对象：Manager 和每个运行中任务的 Planner |
-| `/api/agent-configs` | GET | Agent 列表 |
-| `/api/agent-configs/:id` | GET/PUT | Agent 配置 |
-| `/api/llm-profiles` | GET/POST | LLM 配置 |
-| `/api/channel-configs` | GET | 渠道列表 |
-| `/api/channel-configs/:id` | GET/PUT | 渠道配置 |
+| 状态 | `GET /api/status` | 系统健康状态和启动自检（`checks`） |
+| 项目 | `/api/projects`、`/api/projects/:id`、`/api/projects/:id/knowledge/...` | 创建、修改和删除项目；项目的知识文档和草稿 |
+| 任务 | `/api/tasks`、`/api/tasks/create`、`/api/tasks/:id/...`、`/api/tasks/{start,stop,cancel,delete}` | 列出和创建任务（属于某个项目，可带 `agent_overrides`）、查看、开始、停止、取消、删除；活动及其 SSE 流 |
+| 能力目录与安装 | `/api/catalog/...`、`/api/installs/...`、`/api/projects/:id/installs`、`/api/projects/:id/skills/...` | 插件、skill 和 MCP 服务器：导入、上传、git、编写、修改、删除；全局安装或装到项目 |
+| Agent 设置 | `/api/agent-settings/...`、`/api/projects/:id/agent-settings/...`、`/api/agent-configs/...` | 各设置层，每个字段的生效值及其来源；每个角色的 prompt 和限制 |
+| 注册表 | `GET /api/registry`、`/api/runtimes/...`、`/api/providers/...`、`/api/agents/...` | 运行时类型；注册、修改、探测和删除运行时、提供方（API key 打码）和 agent |
+| 配置迁移 | `GET /api/config/export`、`/api/config/imports/...` | 下载配置文件；上传配置文件、预览，再应用或取消 |
+| 对话 | `/api/chat/send`、`/api/chat/targets`、`/api/chat/messages`、`/api/chat/events` | 与 Manager 或运行中任务的 Planner 对话；历史和 SSE 流 |
+| 运行记录 | `/api/llm-records/...`、`/api/agents/:id/usage` | 每次 agent 运行的启动命令、用量、花费和事件；单个 agent 的花费和上下文 |
+| 渠道 | `/api/channel-configs/...` | Telegram 和飞书的设置及发送者名单 |
+
+各接口的字段和错误说明见 [HTTP API 参考](docs/architecture/agent-system.md#http-api)。
 
 ## 配置
 
@@ -234,13 +239,32 @@ PostgreSQL 是启动的硬性依赖。数据表：
 
 ### Agent 配置
 
-Agent 的行为可以在控制台里配置：
+每个角色（Manager、Planner、Worker、Reviewer）运行一个 **agent**：由运行时、LLM 提供方和模型组成，
+在 Settings 页的「Agents, providers & runtimes」里注册。
 
-- **system_prompt**：agent 的指令 prompt
-- **model**：覆盖模型（或沿用 LLM 配置）
-- **permission_mode**：自主运行的 worker 用 `bypassPermissions`
+- **运行时**是 Looper 有适配器的某类 agent CLI（如 Claude Code、Codex）及要运行的可执行文件；Looper 会探测它的版本和能力。
+- **提供方**是 agent 请求发往的地方：它支持的协议、模型及价格，以及认证方式：运行时自己的登录，或 API key（API 从不返回它）。
+- 内置 agent `claude-code/opus`（Claude Code、它自己的登录、`opus`）运行所有没有另选 agent 的角色。
+
+**分层设置**：harness prompt、agent、effort、环境变量和单次运行的花费上限这五项设置，经过四层解析，后面的层优先：
+
+| 层 | 在哪里编辑 | 作用范围 |
+|---|---|---|
+| 系统 | Settings 的「Agent Defaults」 | 所有 agent |
+| 角色 | Agents 页 | 一个角色，不分项目：Manager、Planner、Worker 或 Reviewer |
+| 项目 | 项目的 Settings 标签页 | 该项目的 Planner、Worker 和 Reviewer |
+| 项目内角色 | 同一标签页，按角色 | 某个项目里的其中一个角色 |
+
+Manager 横跨所有项目，所以只有前两层。任务创建时还可以给它的 Planner、Worker 或 Reviewer 选 agent（`agent_overrides`），
+这一选择优先于所有层，只对该任务生效。没有任何一层设置的字段用内置默认值，控制台会显示每个字段的值及其来源层。
+环境变量不用来放密钥：看起来像凭据的变量名会被拒绝。改动从每个 agent 的下一次运行或下一轮起生效。详见
+[Harness, agent and environment](docs/architecture/agent-system.md#harness-agent-and-environment)。
+
+**角色配置**：Agents 页还编辑每个角色自己的字段（`agent_configs`）：
+
+- **system_prompt**：角色 prompt，说明这类 agent 负责什么；harness 放在它前面，可以重置为推荐的 prompt
 - **max_turns**：对话轮数上限（0 表示不限）
-- **timeout_seconds**：每个任务的执行超时。对 worker 来说，它限制一次 Claude 运行的总时长（默认 86400，0 表示不限），有输出也不会延长；worker 从下一个步骤起应用这两个限制
+- **timeout_seconds**：一次运行或一轮的时长上限（0 表示不限）。对 worker 来说，它是一次运行的总时长（默认 86400），有输出也不会延长；worker 从下一个步骤起应用这两个限制
 - **max_concurrency**：Worker 池大小
 
 ## 任务生命周期

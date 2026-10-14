@@ -810,6 +810,7 @@ How the agent system works today is described in
     a reply to that chat's history (shown when the chat is opened) rather than
     to a message's stream. The Planner only logs it: it decides nothing about
     the plan.
+- `looper config export --include-secrets` names LLM provider API keys in its warning and `--help`; it wrote them without saying so.
 
 ### Removed
 
