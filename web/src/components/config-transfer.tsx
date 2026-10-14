@@ -385,8 +385,8 @@ export function ConfigTransferCard({ onImported }: { onImported: () => void }) {
           <div className="text-sm">
             <div className="font-medium">Include secrets</div>
             <p className="text-xs text-muted-foreground">
-              Off: MCP environment and header values and channel secrets are placeholders, and the file is safe to
-              share.
+              Off: LLM provider API keys, MCP environment and header values and channel secrets are placeholders,
+              and the file is safe to share.
             </p>
           </div>
         </div>
