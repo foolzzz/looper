@@ -136,6 +136,26 @@ def test_config_loads_no_upstream_modules(tmp_path: Path, argv: list[str]) -> No
     assert not _upstream(result["modules"])
 
 
+def test_config_export_with_secrets_names_every_kind_of_secret_it_writes(tmp_path: Path) -> None:
+    """``--include-secrets`` writes provider API keys too, so its help and its warning name them.
+
+    The warning comes before the database is read, so an unreachable one still shows it.
+    """
+    env = {**os.environ, "LOOPER_DATABASE_URL": f"postgresql://127.0.0.1:{_closed_port()}/loopx"}
+    kinds = ("LLM provider API keys", "MCP environment and header values", "channel secrets")
+
+    result, _, stderr = _run_looper("config", "export", "out.json", "--include-secrets", cwd=tmp_path, env=env)
+    warning, _, rest = stderr.partition("\n")
+    assert result["code"] == 1 and rest.startswith("error: "), stderr
+    assert warning.startswith("warning: out.json will hold secrets") and all(k in warning for k in kinds), warning
+
+    result, output, stderr = _run_looper("config", "export", "--help", cwd=tmp_path)
+    assert result["code"] == 0, stderr
+    help_text = " ".join(output.split())  # argparse wraps the help
+    option_help = help_text.partition("--include-secrets")[2]
+    assert all(k in option_help for k in kinds), help_text
+
+
 def test_service_status_loads_no_upstream_modules(tmp_path: Path) -> None:
     """``looper service status`` asks the real service manager (read-only) about a label never installed."""
     result, output, stderr = _run_looper("service", "status", "--label", "com.looper.serve.never-installed", cwd=tmp_path)

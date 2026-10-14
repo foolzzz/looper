@@ -39,9 +39,26 @@ User ─→ Chat / Lark / Telegram
 - **Direct task creation**: Create tasks from the dashboard, configure before starting
 - **Pause & resume**: Stop running tasks, restart from stopped/failed state
 - **Real-time activity streaming**: SSE-based live event feed from worker processes
-- **Agent configuration**: Edit system prompts, models, permissions from the dashboard
+- **Multiple agent runtimes and LLM providers**: An agent is a runtime (such as
+  Claude Code or Codex), an LLM provider (the runtime's own login, or an API
+  key for an Anthropic- or OpenAI-compatible endpoint, with presets for common
+  vendors) and a model; every run records its tokens and, when its model has
+  a price, its cost
+- **Layered settings**: Set the harness prompt, agent, effort, environment and
+  per-run spend cap for the whole system, a role, a project or a role in a
+  project, and let a task choose its own agents; the dashboard shows which
+  layer each value comes from
+- **Capability catalog**: Plugins, skills and MCP servers, imported from this
+  machine, uploaded, taken from git or written in Looper, then installed
+  globally or in one project for the roles you choose
+- **Projects and task memory**: A project holds a default directory, a
+  background and knowledge documents that agents read on demand; each task
+  keeps a journal of accepted and failed steps, decisions, your instructions
+  and learnings, which its Planner reads every turn, across restarts and new
+  sessions
+- **Configuration export and import**: Move the agent configuration to another
+  machine as one file, from the CLI or the Settings page
 - **Multi-channel input**: Web chat, Lark bot, Telegram bot
-- **LLM profile management**: Configure multiple model providers and endpoints
 - **Pipeline visualization**: React Flow DAG showing task decomposition and worker assignment
 
 ## Quick Start
@@ -181,18 +198,20 @@ All inter-agent communication flows through a typed async **MessageBus** with
 
 ### Database
 
-PostgreSQL is a hard startup dependency. Tables:
+PostgreSQL is a hard startup dependency; `looper serve` applies
+`looper/db/schema.sql` at every start. Tables by area:
 
-| Table | Purpose |
-|---|---|
-| `tasks` | Task metadata, status, phase, work_dir, config, timestamps |
-| `task_steps` | Planner decomposition steps |
-| `activity` | Execution trace events (SSE-streamed to frontend) |
-| `chat_messages` | Chat conversation history |
-| `llm_records` | Full LLM I/O recording |
-| `agent_configs` | Agent configuration (prompt, model, permissions) |
-| `llm_profiles` | LLM provider profiles |
-| `channel_configs` | Lark/Telegram channel settings |
+| Area | Tables | What they hold |
+|---|---|---|
+| Projects and tasks | `projects`, `tasks`, `task_steps`, `task_plans`, `task_agent_overrides` | Projects with their default directory, background and execution settings; tasks, their Planner's plan and steps, and the agent a task chose for a role |
+| Task memory and knowledge | `task_journal`, `project_documents`, `project_document_drafts` | The journal code writes as a task runs; a project's knowledge documents and the drafts waiting for your review |
+| Agents and settings | `agent_runtimes`, `llm_providers`, `llm_provider_secrets`, `agents`, `agent_setting_layers`, `agent_configs`, `agent_sessions` | Runtimes, providers (their API keys kept apart) and agents; the settings layers; each role's prompt and limits; the sessions the Manager and Planners resume |
+| Capability catalog | `library_items`, `library_files`, `library_mcp_servers`, `library_installs` | Plugins, skills and MCP servers with their files or server configuration, and where each is installed |
+| Runs and conversations | `llm_records`, `llm_record_events`, `activity`, `chat_messages` | Every agent run with its usage, cost and stream events; each task's activity feed; chat history |
+| System | `system_settings`, `channel_configs`, `schema_migrations`, `schema_fingerprint` | Shared settings, the Telegram and Lark channels, the one-time migrations already applied, and the hash of the schema last applied (which tells serve to back up before a change) |
+
+The main tables are described column by column in
+[Data Persistence](docs/architecture/agent-system.md#data-persistence).
 
 ### Web Dashboard
 
@@ -203,33 +222,33 @@ release wheel serves the copy packaged with it.
 |---|---|
 | **Dashboard** | System status overview |
 | **Chat** | Talk to the global Manager, or to a running task's Planner (each message becomes a new step of that task); SSE streaming |
-| **Tasks** | Task list, status filters, create/start/stop/delete controls |
+| **Tasks** | Task list, project and status filters, create/start/stop/delete controls |
+| **Project** | One project's overview, knowledge documents, its own skills and installs, and its settings, including its agent settings layers |
 | **Task Detail** | Config editor (init status), overview, pipeline DAG, sessions, conversation; each Agent Timeline row has a **History** button |
-| **Agents** | Agent config editor; **Runs** lists every Claude run of a role and opens its history |
+| **Agents** | Each role's prompt and limits and its role layer of the agent settings; **Runs** lists every run of a role and opens its history |
 | **Agent history** | One agent's launch command, full transcript (text, thinking, tool calls and results) and activity; follows a running agent and flags one with no output for 2 minutes |
-| **Settings** | Lark & Telegram channel configuration |
+| **Settings** | Agent defaults (the system layer); agents, providers and runtimes; the plugins, skills and MCP catalog; Lark & Telegram channels; moving the configuration to another machine |
 
 ### HTTP API
 
-| Endpoint | Method | Purpose |
+The API answers only the dashboard and local clients: a request from another
+site's page (its `Origin`) is refused. The main route groups:
+
+| Group | Endpoints | Purpose |
 |---|---|---|
-| `/api/status` | GET | System health and the startup self-check (`checks`) |
-| `/api/tasks` | GET | List tasks |
-| `/api/tasks/create` | POST | Create task (init status); `work_dir` is required |
-| `/api/tasks/:id` | GET | Task detail with steps |
-| `/api/tasks/:id/config` | PUT | Update task config (init only) |
-| `/api/tasks/start` | POST | Start/resume task |
-| `/api/tasks/stop` | POST | Pause task |
-| `/api/tasks/cancel` | POST | Cancel permanently |
-| `/api/tasks/delete` | POST | Delete (must be stopped) |
-| `/api/tasks/:id/activity/stream` | GET | SSE activity stream |
-| `/api/chat/send` | POST | Send chat message; `target` is the Manager (default) or `{kind: planner, task_id}` |
-| `/api/chat/targets` | GET | Chat targets: the Manager and every running task's Planner |
-| `/api/agent-configs` | GET | List agents |
-| `/api/agent-configs/:id` | GET/PUT | Agent config |
-| `/api/llm-profiles` | GET/POST | LLM profiles |
-| `/api/channel-configs` | GET | List channels |
-| `/api/channel-configs/:id` | GET/PUT | Channel config |
+| Status | `GET /api/status` | System health and the startup self-check (`checks`) |
+| Projects | `/api/projects`, `/api/projects/:id`, `/api/projects/:id/knowledge/...` | Create, edit and delete projects; their knowledge documents and drafts |
+| Tasks | `/api/tasks`, `/api/tasks/create`, `/api/tasks/:id/...`, `/api/tasks/{start,stop,cancel,delete}` | List and create tasks (in a project, with optional `agent_overrides`), read one, start, stop, cancel, delete; activity and its SSE stream |
+| Catalog and installs | `/api/catalog/...`, `/api/installs/...`, `/api/projects/:id/installs`, `/api/projects/:id/skills/...` | Plugins, skills and MCP servers: import, upload, git, write, edit, delete; install them globally or in a project |
+| Agent settings | `/api/agent-settings/...`, `/api/projects/:id/agent-settings/...`, `/api/agent-configs/...` | The settings layers, each field with its effective value and source; each role's prompt and limits |
+| Registry | `GET /api/registry`, `/api/runtimes/...`, `/api/providers/...`, `/api/agents/...` | Runtime types; register, edit, probe and delete runtimes, providers (API keys masked) and agents |
+| Configuration transfer | `GET /api/config/export`, `/api/config/imports/...` | Download the configuration file; upload one, preview it, then apply or cancel |
+| Chat | `/api/chat/send`, `/api/chat/targets`, `/api/chat/messages`, `/api/chat/events` | Talk to the Manager or a running task's Planner; history and SSE stream |
+| Runs | `/api/llm-records/...`, `/api/agents/:id/usage` | Every agent run with its launch command, usage, cost and events; one agent's spending and context |
+| Channels | `/api/channel-configs/...` | Telegram and Lark settings and sender allowlists |
+
+The [HTTP API reference](docs/architecture/agent-system.md#http-api) describes
+the endpoints with their fields and errors.
 
 ## Configuration
 
@@ -271,15 +290,50 @@ environment variable **names**, not secret values.
 
 ### Agent Configuration
 
-Agent behavior is configurable from the dashboard:
+Every role (Manager, Planner, Workers, Reviewers) runs an **agent**: a
+runtime, an LLM provider and a model, registered on the Settings page under
+"Agents, providers & runtimes".
 
-- **system_prompt**: Instruction prompt for the agent
-- **model**: Model override (or inherit from LLM profile)
-- **permission_mode**: `bypassPermissions` for autonomous workers
+- A **runtime** is an agent CLI of a type Looper has an adapter for (such as
+  Claude Code or Codex) and the executable to run; Looper probes its version
+  and capabilities.
+- A **provider** is where the agent's requests go: the protocols it serves,
+  its models and their prices, and how it authenticates, with the runtime's
+  own login or with an API key, which the API never returns.
+- The built-in agent `claude-code/opus` (Claude Code, its own login, `opus`)
+  runs every role that nothing else selects an agent for.
+
+**Layered settings.** Five settings, the harness prompt, the agent, the
+effort, environment variables and a per-run spend cap, resolve through four
+layers, a later layer winning:
+
+| Layer | Edited in | Applies to |
+|---|---|---|
+| System | Settings, "Agent Defaults" | Every agent |
+| Role | Agents page | One role everywhere: the Manager, the Planner, Workers or Reviewers |
+| Project | The project's Settings tab | The project's Planner, Workers and Reviewers |
+| Role in project | The same tab, per role | One of those roles in one project |
+
+The Manager spans every project, so only the first two layers apply to it. A
+task can also choose the agent of its Planner, Workers or Reviewers when it is
+created (`agent_overrides`); that choice wins over every layer, for that task
+only. A field no layer sets keeps its built-in default, and the dashboard shows
+each field's value with the layer it came from. Environment variables are not
+for secrets: a name that looks like a credential is refused. A change applies
+from each agent's next run or turn. See
+[Harness, agent and environment](docs/architecture/agent-system.md#harness-agent-and-environment)
+for the details.
+
+**Role configuration.** The Agents page also edits each role's own fields
+(`agent_configs`):
+
+- **system_prompt**: The role prompt, what this kind of agent is responsible
+  for; the harness goes before it, and the prompt can be reset to the
+  recommended one
 - **max_turns**: Conversation turn limit (0 = unlimited)
-- **timeout_seconds**: Execution timeout per task. For workers it limits one
-  Claude run's total time (default 86400, 0 = no limit); output does not
-  extend it. Workers apply both limits from the next step on
+- **timeout_seconds**: The limit on one run or turn (0 = no limit). For
+  Workers it is one run's total time (default 86400); output does not extend
+  it. Workers apply both limits from the next step on
 - **max_concurrency**: Worker pool size
 
 ## Task Lifecycle
