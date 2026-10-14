@@ -65,6 +65,48 @@ CREATE TABLE IF NOT EXISTS task_steps (
 
 CREATE INDEX IF NOT EXISTS idx_steps_task ON task_steps(task_id, step_index);
 
+-- The rest of a Planner's step, so the table is the step's only record:
+-- step_key is the Planner's label for it (unique within the task), depends_on
+-- the step ids it waits for, review whether a Reviewer must pass it; retries,
+-- feedback (one entry per retry) and missed_messages (user text forwarded too
+-- late for its Worker) feed the Planner's next decision on it.
+ALTER TABLE task_steps ADD COLUMN IF NOT EXISTS step_key TEXT NOT NULL DEFAULT '';
+ALTER TABLE task_steps ADD COLUMN IF NOT EXISTS depends_on TEXT[] NOT NULL DEFAULT '{}';
+ALTER TABLE task_steps ADD COLUMN IF NOT EXISTS review BOOLEAN NOT NULL DEFAULT false;
+ALTER TABLE task_steps ADD COLUMN IF NOT EXISTS validation_commands TEXT[] NOT NULL DEFAULT '{}';
+ALTER TABLE task_steps ADD COLUMN IF NOT EXISTS acceptance_criteria TEXT[] NOT NULL DEFAULT '{}';
+ALTER TABLE task_steps ADD COLUMN IF NOT EXISTS retries INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE task_steps ADD COLUMN IF NOT EXISTS feedback TEXT[] NOT NULL DEFAULT '{}';
+ALTER TABLE task_steps ADD COLUMN IF NOT EXISTS reviewer_id TEXT;
+ALTER TABLE task_steps ADD COLUMN IF NOT EXISTS missed_messages TEXT[] NOT NULL DEFAULT '{}';
+
+-- A task's plan beside its steps: one row per task, replaced when the task
+-- is planned again. The task's requirement, directory and project stay on
+-- tasks; the project itself is read again before every Planner turn.
+CREATE TABLE IF NOT EXISTS task_plans (
+    task_id           TEXT PRIMARY KEY REFERENCES tasks(id) ON DELETE CASCADE,
+    plan_id           TEXT NOT NULL,
+    status            TEXT NOT NULL
+        CHECK (status IN ('planning', 'executing', 'verifying', 'stopping', 'completed', 'failed')),
+    correlation_id    TEXT NOT NULL DEFAULT '',
+    origin_channel_id TEXT NOT NULL DEFAULT '',
+    final_summary     TEXT NOT NULL DEFAULT '',
+    fail_reason       TEXT NOT NULL DEFAULT '',
+    created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at        TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- The Claude session a resident agent resumes after a restart: 'manager', or
+-- 'planner-<task_id>'. session_totals is the session's running cost and
+-- tokens at its last result (run_usage.Usage), the baseline a resumed process
+-- counts from; session_id NULL means the next turn starts a new session.
+CREATE TABLE IF NOT EXISTS agent_sessions (
+    agent_id        TEXT PRIMARY KEY,
+    session_id      TEXT,
+    session_totals  JSONB NOT NULL DEFAULT '{}',
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 CREATE TABLE IF NOT EXISTS llm_profiles (
     id               BIGSERIAL PRIMARY KEY,
     name             TEXT NOT NULL UNIQUE,

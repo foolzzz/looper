@@ -35,8 +35,6 @@ _AGENT_DB_WRITES = (
     ("tasks", "create_task"),
     ("tasks", "update_task_status"),
     ("tasks", "update_task_phase"),
-    ("steps", "upsert_steps"),
-    ("steps", "update_step_status"),
     ("activity", "insert_activity"),
     ("llm_records", "start_record"),
     ("llm_records", "append_events"),
@@ -52,7 +50,6 @@ _AGENT_DB_READS = (
     ("projects", "get_project", None),
     ("projects", "get_task_project", None),
     ("activity", "list_activity", []),
-    ("steps", "list_steps", []),
     ("system_settings", "get_settings", {}),
     ("library", "list_enabled_items", []),
     ("library", "get_item_files", []),
@@ -60,6 +57,46 @@ _AGENT_DB_READS = (
     ("project_documents", "get_content", None),
     ("project_skills", "list_enabled_skills", []),
 )
+
+
+class _PlanStore:
+    """The Planner's and Manager's saved state, kept in memory the way ``plans`` and ``agent_sessions`` keep it.
+
+    ``tasks`` holds the task rows a plan is read back with (``requirement``,
+    ``goal_id``, ``work_dir``, ``project_id``); a test that restarts a Planner
+    sets its task there.
+    """
+
+    def __init__(self) -> None:
+        self.plans: dict[str, dict[str, Any]] = {}
+        self.steps: dict[str, dict[str, dict[str, Any]]] = {}
+        self.sessions: dict[str, dict[str, Any]] = {}
+        self.tasks: dict[str, dict[str, Any]] = {}
+
+    async def save(self, task_id: str, *, plan: Any = None, steps: Any = (), **_: object) -> None:
+        if plan is not None:
+            self.plans[task_id] = json.loads(json.dumps(dict(plan)))
+        for step in steps:
+            self.steps.setdefault(task_id, {})[step["id"]] = json.loads(json.dumps(dict(step)))
+
+    async def load(self, task_id: str, **_: object) -> dict[str, Any] | None:
+        if task_id not in self.plans:
+            return None
+        task = self.tasks.get(task_id, {})
+        rows = []
+        for step in sorted(self.steps.get(task_id, {}).values(), key=lambda s: s["index"]):
+            row = {k: v for k, v in step.items() if k not in ("index", "key")}
+            rows.append({**row, "step_index": step["index"], "step_key": step["key"]})
+        plan = {"task_id": task_id, **self.plans[task_id],
+                **{k: task.get(k, "") for k in ("requirement", "goal_id", "work_dir", "project_id")}}
+        return {"plan": plan, "steps": rows}
+
+    async def save_session(self, agent_id: str, session_id: str | None, totals: Any, **_: object) -> None:
+        self.sessions[agent_id] = {"session_id": session_id, "session_totals": dict(totals)}
+
+    async def get_session(self, agent_id: str, **_: object) -> dict[str, Any] | None:
+        saved = self.sessions.get(agent_id)
+        return None if saved is None else {**saved, "session_totals": dict(saved["session_totals"])}
 
 
 async def _created_project(
@@ -238,9 +275,12 @@ def agent_db(monkeypatch: pytest.MonkeyPatch, stub_claude_on_path: Path) -> Simp
     The agent system treats PostgreSQL as a hard dependency, so message-flow
     tests would otherwise stop at the first unguarded write. Each write becomes
     an ``AsyncMock`` returning ``None`` (``create_project`` returns the new
-    project's row), and each read answers as an empty database. The returned
-    namespace exposes them by name so a test can assert what was persisted.
-    A bare ``claude`` is a stub that never answers (``stub_claude_on_path``).
+    project's row), and each read answers as an empty database. The plans and
+    sessions the agents save are kept in memory (``store``, a ``_PlanStore``)
+    and read back from there: ``save_plan``, ``load_plan``, ``save_session`` and
+    ``get_session`` are mocks around it. The returned namespace exposes them by
+    name so a test can assert what was persisted. A bare ``claude`` is a stub
+    that never answers (``stub_claude_on_path``).
     """
     import importlib
     from unittest.mock import AsyncMock
@@ -260,6 +300,17 @@ def agent_db(monkeypatch: pytest.MonkeyPatch, stub_claude_on_path: Path) -> Simp
         mock = AsyncMock(return_value=value)
         monkeypatch.setattr(importlib.import_module(f"loopx.db.{module_name}"), function, mock)
         setattr(db, function, mock)
+    from loopx.db import agent_sessions, plans
+
+    db.store = store = _PlanStore()
+    for module, name, function, method in (
+        (plans, "save_plan", "save", store.save), (plans, "load_plan", "load", store.load),
+        (agent_sessions, "save_session", "save_session", store.save_session),
+        (agent_sessions, "get_session", "get_session", store.get_session),
+    ):
+        mock = AsyncMock(side_effect=method)
+        monkeypatch.setattr(module, function, mock)
+        setattr(db, name, mock)
     # The Planner imports this one by name rather than through its module.
     monkeypatch.setattr(planner_module, "update_task_phase", db.update_task_phase)
     return db

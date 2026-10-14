@@ -30,13 +30,13 @@ CAP_REASON = "任务失败:\nTask spend cap reached: $0.5 spent of the $0.4 cap 
 
 async def _failed_task(pool: Any, router: TaskRouter, fail_kind: str | None) -> str:
     """A task of a project capped at $0.4 that spent $0.5 over two steps, failed as its Planner reports."""
-    from loopx.db import projects, steps, tasks
+    from loopx.db import plans, projects, tasks
 
     project = await projects.create_project(name="calc", execution={"task_budget_usd": 0.4}, pool=pool)
     await tasks.create_task(task_id="task-a", requirement="build calc", project_id=project["id"],
                             work_dir="/w", pool=pool)
-    await steps.upsert_steps("task-a", [{"id": "step-1", "index": 0, "instruction": "do s1", "status": "verified"},
-                                        {"id": "step-2", "index": 1, "instruction": "do s2"}], pool=pool)
+    await plans.save("task-a", steps=[{"id": "step-1", "index": 0, "instruction": "do s1", "status": "verified"},
+                                      {"id": "step-2", "index": 1, "instruction": "do s2"}], pool=pool)
     for agent_id, cost in (("planner-task-a", 0.25), ("worker-1", 0.25)):
         await _run_record(pool, agent_id, task_id="task-a", cost=cost)
     router._tasks["task-a"] = Task(task_id="task-a", requirement="build calc", goal_id="", work_dir="/w",

@@ -235,6 +235,7 @@ class TestPlanner:
             await h.planner.stop()
 
             agent_db.get_task_project.return_value = _project(task_budget_usd=2)
+            agent_db.store.tasks["t1"] = {"requirement": "build the calc package", "work_dir": str(h.work_dir)}
             h.statuses.clear()
             h.planner = PlannerAgent(task_id="t1", runtime_root=h.work_dir.parent, claude_bin=claude.bin)
             await h.planner.start(h.bus)
@@ -270,8 +271,7 @@ class TestPlanner:
             assert h.reviews == []
 
             agent_db.get_task_project.return_value = _project(task_budget_usd=2)
-            agent_db.list_steps.return_value = [
-                {"id": h.work_items[0].payload["task_id"], "result": '{"status": "completed", "summary": "saved"}'}]
+            agent_db.store.tasks["t1"] = {"requirement": "build the calc package", "work_dir": str(h.work_dir)}
             h.statuses.clear()
             h.planner = PlannerAgent(task_id="t1", runtime_root=h.work_dir.parent, claude_bin=claude.bin)
             await h.planner.start(h.bus)
@@ -285,7 +285,7 @@ class TestPlanner:
         h = drive(claude, always(WORK_OK, REVIEW_PASS), scenario)
         assert len(h.work_items) == 1
         (review,) = h.reviews
-        assert review.payload["work_result"]["summary"] == "saved"
+        assert review.payload["work_result"]["summary"] == "did it"  # the Worker's result, saved with its step
         assert len(claude.turns()) == 3
 
 

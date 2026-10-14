@@ -20,6 +20,10 @@ _WITH_PROJECT = ("SELECT t.*, p.name AS project_name, p.task_budget_usd "
                  "FROM tasks t JOIN projects p ON p.id = t.project_id")
 
 
+def planner_agent_id(task_id: str) -> str:
+    """The agent id of ``task_id``'s Planner, which keys its saved session."""
+    return f"planner-{task_id}"
+
 
 class FailKind(str, Enum):
     """Why a failed task failed, when code can tell (``tasks.fail_kind``)."""
@@ -173,6 +177,8 @@ async def delete_task(
     pool = pool or get_pool()
     await pool.execute("DELETE FROM task_steps WHERE task_id = $1", task_id)
     await pool.execute("DELETE FROM activity WHERE task_id = $1", task_id)
+    await pool.execute("DELETE FROM task_plans WHERE task_id = $1", task_id)
+    await pool.execute("DELETE FROM agent_sessions WHERE agent_id = $1", planner_agent_id(task_id))
     result = await pool.execute("DELETE FROM tasks WHERE id = $1", task_id)
     return result == "DELETE 1"
 
@@ -183,10 +189,16 @@ async def reset_task_for_restart(
     keep_steps: bool = False,
     pool: asyncpg.Pool | None = None,
 ) -> bool:
-    """Clear the task's outcome before it runs again; its steps go too unless it continues its plan."""
+    """Clear the task's outcome before it runs again.
+
+    Planned anew, its steps, its plan and its Planner's session go; continuing
+    its plan (``keep_steps``), they stay.
+    """
     pool = pool or get_pool()
     if not keep_steps:
         await pool.execute("DELETE FROM task_steps WHERE task_id = $1", task_id)
+        await pool.execute("DELETE FROM task_plans WHERE task_id = $1", task_id)
+        await pool.execute("DELETE FROM agent_sessions WHERE agent_id = $1", planner_agent_id(task_id))
     result = await pool.execute(
         """
         UPDATE tasks
@@ -202,16 +214,18 @@ async def reset_task_for_restart(
 
 async def mark_orphaned_tasks_stopped(
     *,
+    keep: list[str] | None = None,
     pool: asyncpg.Pool | None = None,
 ) -> int:
+    """Mark the tasks a previous server left running as stopped, except ``keep`` (resumed instead)."""
     pool = pool or get_pool()
     result = await pool.execute(
         """
         UPDATE tasks
         SET status = 'stopped', updated_at = now()
-        WHERE status = ANY($1::text[]) AND completed_at IS NULL
+        WHERE status = ANY($1::text[]) AND completed_at IS NULL AND NOT (id = ANY($2::text[]))
         """,
-        list(ACTIVE_STATUSES),
+        list(ACTIVE_STATUSES), list(keep or []),
     )
     count = int(result.split()[-1]) if result else 0
     return count

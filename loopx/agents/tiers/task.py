@@ -4,7 +4,9 @@ The TaskRouter receives TASK_REQUESTs from the Manager, creates a dedicated
 PlannerAgent for each task, and manages the Planner lifecycle. When a task
 completes or fails, the TaskRouter tears down the corresponding Planner and
 forwards results to the Manager. Every task belongs to a project
-(``project_id``), which can change while the task runs.
+(``project_id``), which can change while the task runs. At server start it
+resumes the tasks the previous server was running, from their plans in the
+database (``resume_tasks``).
 """
 
 from __future__ import annotations
@@ -182,6 +184,44 @@ class TaskRouter:
             case MessageType.TASK_RESTART:
                 await self._handle_restart(envelope)
 
+    async def resume_tasks(self, task_ids: list[str]) -> None:
+        """Give each task the previous server was running a new Planner that carries on with its saved plan.
+
+        Like a new task, one waits while ``MAX_CONCURRENT_TASKS`` run.
+        """
+        for task_id in task_ids:
+            try:
+                row = await db_tasks.get_task(task_id)
+            except Exception:
+                logger.exception("cannot read task %s to resume it", task_id)
+                continue
+            if row is None:
+                continue
+            task = Task(
+                task_id=task_id,
+                requirement=row["requirement"],
+                goal_id=row.get("goal_id") or "",
+                work_dir=row.get("work_dir") or "",
+                project_id=row["project_id"],
+                correlation_id=row.get("correlation_id") or "",
+                origin_channel_id=row.get("origin_channel_id") or "",
+            )
+            self._tasks[task_id] = task
+            envelope = MessageEnvelope.create(
+                source=TASK_ROUTER_ADDRESS,
+                target=TASK_ROUTER_ADDRESS,
+                message_type=MessageType.TASK_RESUME,
+                payload={"task_id": task_id},
+                correlation_id=task.correlation_id,
+                metadata={"origin_channel_id": task.origin_channel_id},
+            )
+            if self._semaphore.locked():
+                self._pending_queue.put_nowait(envelope)
+                logger.info("task %s waits to resume (at capacity)", task_id)
+                continue
+            await self._assign_task(task, envelope)
+            logger.info("task %s resumed", task_id)
+
     async def _handle_task_request(self, envelope: MessageEnvelope) -> None:
         assert self._bus is not None
         payload = envelope.payload
@@ -247,7 +287,9 @@ class TaskRouter:
         await self._bus.publish(MessageEnvelope.create(
             source=TASK_ROUTER_ADDRESS,
             target=planner.agent_address,
-            message_type=MessageType.TASK_REQUEST,
+            # A resumed task's Planner carries on with the plan it read at start; any other plans the task.
+            message_type=(MessageType.TASK_RESUME if envelope.message_type is MessageType.TASK_RESUME
+                          else MessageType.TASK_REQUEST),
             payload=envelope.payload,
             correlation_id=envelope.correlation_id,
             metadata=envelope.metadata,
@@ -461,10 +503,10 @@ class TaskRouter:
         if self._pending_queue.empty():
             return
         envelope = self._pending_queue.get_nowait()
-        task_id = None
-        for tid, t in self._tasks.items():
-            if t.status == "pending" and t.correlation_id == envelope.correlation_id:
-                task_id = tid
-                break
-        if task_id:
+        if envelope.message_type is MessageType.TASK_RESUME:
+            task_id = envelope.payload.get("task_id")
+        else:
+            task_id = next((tid for tid, t in self._tasks.items()
+                            if t.status == "pending" and t.correlation_id == envelope.correlation_id), None)
+        if task_id in self._tasks:
             await self._assign_task(self._tasks[task_id], envelope)

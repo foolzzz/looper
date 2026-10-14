@@ -3,7 +3,7 @@
 The Manager is the only agent that communicates with users. It:
 - Keeps one Claude Code process running (stream-json input and output): each
   chat message is one user turn on its stdin, and a restarted process resumes
-  the saved session
+  the session saved in PostgreSQL (``agent_sessions``)
 - Receives user messages from all channels via the Bus
 - Classifies intent (direct answer, clarification, task request)
 - Places each confirmed task in a project (creating a new one on request) and
@@ -56,6 +56,7 @@ logger = logging.getLogger(__name__)
 
 from ...db import activity as db_activity
 from ...db import agent_configs as db_agent_configs
+from ...db import agent_sessions as db_agent_sessions
 from ...db import projects as db_projects
 
 # Appended to the (editable) system prompt on every call: the task JSON is
@@ -171,9 +172,7 @@ class ManagerAgent:
         # user turn per message; restarted when its system prompt changes.
         self._claude = ResidentClaude(label="manager")
         self._turn_lock = asyncio.Lock()
-        self._state_dir = runtime_root / ".local" / "manager"
-        self._state_dir.mkdir(parents=True, exist_ok=True)
-        self._load_session_state()
+        self._session_loaded = False  # whether the saved session was read (at start, else before the first turn)
 
     @property
     def agent_id(self) -> str:
@@ -183,31 +182,31 @@ class ManagerAgent:
     def agent_address(self) -> AgentAddress:
         return MANAGER_ADDRESS
 
-    def _state_path(self) -> Path:
-        return self._state_dir / "session.json"
+    async def _load_session_state(self) -> None:
+        """Read the session a previous run saved, once; without a readable one the next turn starts a new one."""
+        self._session_loaded = True
+        try:
+            saved = await db_agent_sessions.get_session(self.agent_id)
+        except Exception:
+            logger.warning("manager: cannot read its saved session; starting a new one", exc_info=True)
+            return
+        if saved:
+            self._session_id = saved.get("session_id")
+            self._session_totals = Usage.from_dict(saved.get("session_totals"))
 
-    def _load_session_state(self) -> None:
-        path = self._state_path()
-        if path.exists():
-            try:
-                data = json.loads(path.read_text(encoding="utf-8"))
-                self._session_id = data.get("session_id")
-                self._session_totals = Usage.from_dict(data.get("session_totals"))
-            except (json.JSONDecodeError, OSError, AttributeError):
-                pass
-
-    def _save_session_state(self) -> None:
-        path = self._state_path()
-        path.write_text(
-            json.dumps({"session_id": self._session_id, "session_totals": self._session_totals.to_dict()}, indent=2),
-            encoding="utf-8",
-        )
+    async def _save_session_state(self) -> None:
+        try:
+            await db_agent_sessions.save_session(self.agent_id, self._session_id, self._session_totals.to_dict())
+        except Exception:
+            logger.exception("manager: failed to save its session")
 
     async def start(self, bus: MessageBus) -> None:
         self._bus = bus
         self._running = True
 
         await self._load_db_config()
+        if not self._session_loaded:
+            await self._load_session_state()
 
         self._task = asyncio.create_task(self._message_loop())
         logger.info(
@@ -242,7 +241,6 @@ class ManagerAgent:
             self._task = None
         async with self._turn_lock:
             await self._claude.stop()
-        self._save_session_state()
 
     def is_healthy(self) -> bool:
         return self._running and bool(shutil.which(self._config.claude_bin))
@@ -427,6 +425,8 @@ class ManagerAgent:
 
     async def _run_turn(self, message: str, context_envelope: MessageEnvelope, *, retried: bool = False) -> str:
         await self._load_db_config()
+        if not self._session_loaded:
+            await self._load_session_state()
         defaults = await agent_settings.load_defaults()
         system_prompt = self._composed_prompt(defaults)
         launch = resolve_launch(defaults, self._model_override, await load_library(self._runtime_root))
@@ -482,7 +482,7 @@ class ManagerAgent:
             session_id = payload.get("session_id")
             if isinstance(session_id, str) and session_id and session_id != self._session_id:
                 self._session_id = session_id
-                self._save_session_state()
+                await self._save_session_state()
 
             event_type = payload.get("type")
             # Only the Manager's own turn is the reply; subagent output is internal.
@@ -552,7 +552,7 @@ class ManagerAgent:
             )
             await self._claude.stop()
             self._session_id, self._session_totals = None, Usage()  # its totals went with it
-            self._save_session_state()
+            await self._save_session_state()
             return await self._run_turn(message, context_envelope, retried=True)
 
         result_event = turn.result_event
@@ -564,7 +564,7 @@ class ManagerAgent:
         usage = turn.usage
         if not exited:
             self._session_totals = self._claude.totals
-            self._save_session_state()
+            await self._save_session_state()
         await recorder.finish(
             output_text=final_text or None,
             result_event=result_event,
@@ -617,7 +617,7 @@ class ManagerAgent:
             async def on_end(text: str, turn: ResidentTurn) -> None:
                 if turn.result_event is not None:
                     self._session_totals = self._claude.totals  # it spent too: a restart resumes from here
-                    self._save_session_state()
+                    await self._save_session_state()
                 if text:
                     await self._send_own_reply(after if isinstance(after, MessageEnvelope) else None, text)
 

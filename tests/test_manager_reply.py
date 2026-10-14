@@ -252,9 +252,24 @@ def _converse(
     ``launched``, whether each was ``running`` just before ``stop()``, the
     ``pids`` the fake logged and the work directory ``root``. ``saved_session`` (with ``saved_totals``, the
     running totals saved beside it) is what an earlier run of the server
-    left; the fake's session then has spent ``saved_totals``' cost.
+    left; the fake's session then has spent ``saved_totals``' cost. The saved session is kept in
+    memory in place of ``agent_sessions``; the returned ``saved_session`` and ``saved_totals`` are what
+    the Manager saved last.
     """
-    from loopx.db import agent_configs, system_settings
+    from loopx.db import agent_configs, agent_sessions, system_settings
+
+    sessions: dict[str, dict[str, Any]] = {}
+    if saved_session is not None:  # a session saved by an earlier run of the server
+        sessions["manager"] = {"session_id": saved_session, "session_totals": dict(saved_totals or {})}
+
+    async def _get_session(agent_id: str, **_: Any) -> dict[str, Any] | None:
+        return sessions.get(agent_id)
+
+    async def _save_session(agent_id: str, session_id: str | None, totals: Any, **_: Any) -> None:
+        sessions[agent_id] = {"session_id": session_id, "session_totals": dict(totals)}
+
+    monkeypatch.setattr(agent_sessions, "get_session", _get_session)
+    monkeypatch.setattr(agent_sessions, "save_session", _save_session)
 
     spawned: list[tuple[list[str], Any]] = []
     launched: list[dict[str, Any]] = []
@@ -285,13 +300,8 @@ def _converse(
     async def _run() -> dict[str, Any]:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            if saved_session is not None:  # a session saved by an earlier run of the server
-                (root / ".local" / "manager").mkdir(parents=True)
-                state = {"session_id": saved_session}
-                if saved_totals is not None:
-                    state["session_totals"] = saved_totals
-                    (root / "session_cost").write_text(str(saved_totals.get("cost_usd", 0.0)))
-                (root / ".local" / "manager" / "session.json").write_text(json.dumps(state))
+            if saved_totals is not None:  # the fake's session has spent them
+                (root / "session_cost").write_text(str(saved_totals.get("cost_usd", 0.0)))
             bus = MessageBus(runtime_root=root)
             manager = ManagerAgent(
                 config=ManagerConfig(claude_bin=_fake_claude(root, body), work_dir=root),
@@ -320,11 +330,10 @@ def _converse(
             await bus.shutdown()
             pid_file = root / "pids"
             pids = pid_file.read_text().split() if pid_file.exists() else []
-            state = root / ".local" / "manager" / "session.json"
+            saved = sessions.get("manager") or {}
             return {"replies": replies, "spawned": spawned, "launched": launched, "running": running, "pids": pids,
-                    "prompts": _prompts(root), "root": root,
-                    "saved_session": json.loads(state.read_text())["session_id"] if state.exists() else None,
-                    "saved_totals": json.loads(state.read_text()).get("session_totals") if state.exists() else None}
+                    "prompts": _prompts(root), "root": root, "files": sorted(p.name for p in root.rglob("*.json")),
+                    "saved_session": saved.get("session_id"), "saved_totals": saved.get("session_totals")}
 
     return asyncio.run(_run())
 
@@ -459,8 +468,9 @@ class TestManagerResidentClaude:
         assert _flag(argv, "--resume") == "sess-1"
         # The resumed Claude reports 0.75 and then 1.0: the session's running total.
         assert [call.kwargs["cost_usd"] for call in agent_db.finish_record.await_args_list] == [0.25, 0.25]
-        # The total is saved again for the next restart.
+        # The total is saved again for the next restart, in the database: no session file is written.
         assert (chat["saved_session"], chat["saved_totals"]) == ("sess-1", {"cost_usd": 1.0})
+        assert "session.json" not in chat["files"]
 
     @pytest.mark.parametrize(("ignore_eof", "returncode"), [(False, 0), (True, -9)])
     def test_stop_ends_and_reaps_claude(
@@ -711,8 +721,7 @@ def _session_with(agent_db: Any, body: str, messages: list[str]) -> dict[str, An
                 if envelope.message_type == MessageType.AGENT_REPLY:
                     replies.append(envelope)
             await bus.shutdown()
-            return {"sent": sent, "replies": replies,
-                    "state": json.loads((root / ".local" / "manager" / "session.json").read_text())}
+            return {"sent": sent, "replies": replies, "state": agent_db.store.sessions["manager"]}
 
     chat = asyncio.run(_run())
     starts = [(call.kwargs, record_id) for call, record_id in

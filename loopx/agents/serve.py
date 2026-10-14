@@ -284,8 +284,19 @@ async def _run_agent_system(
     await seed_agent_configs(pool)
     await seed_channel_configs(pool)
 
-    from ..db.tasks import mark_orphaned_tasks_stopped
-    orphan_count = await mark_orphaned_tasks_stopped(pool=pool)
+    # Once per database: the plan and session files kept before the database held them.
+    from .state_import import import_file_state
+    try:
+        await import_file_state(runtime_root, pool=pool)
+    except Exception:
+        logger.exception("the one-time import of plan and session files failed; it runs again at the next start")
+
+    # The tasks the previous server was running: those with a live plan carry
+    # on once the agents are up; the others are stopped.
+    from ..db.plans import resumable_task_ids
+    from ..db.tasks import ACTIVE_STATUSES, mark_orphaned_tasks_stopped
+    resumable = await resumable_task_ids(ACTIVE_STATUSES, pool=pool)
+    orphan_count = await mark_orphaned_tasks_stopped(keep=resumable, pool=pool)
     if orphan_count:
         logger.info("marked %d orphaned task(s) as stopped", orphan_count)
 
@@ -345,6 +356,9 @@ async def _run_agent_system(
     # --- Start ---
 
     await supervisor.start_all()
+    if resumable:
+        logger.info("resuming %d task(s) from their saved plans", len(resumable))
+        await task_router.resume_tasks(resumable)
 
     # --- HTTP Server ---
 
