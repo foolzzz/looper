@@ -1,6 +1,6 @@
 # 开发计划：长程 Agent 上下文体系（M0–M9）
 
-- **状态：** M0–M7 全部交付（M7a 计划状态入库、M7b 任务记忆、M7c 及时沉淀）；M8 全部交付（M8a 能力目录与安装、M8b MCP 服务器、M8c 进库来源、M8d 配置层级统一、M8e 导出与导入）；M9a 运行时、provider 与 agent 的注册和选择已交付，M9b Claude Code 接 API key 与兼容接口、M9c Codex 运行时已交付；上游 LoopX 清理 B1–B4 已交付；全面改名为 Looper 已交付；其余见第 5 节待办
+- **状态：** M0–M7 全部交付（M7a 计划状态入库、M7b 任务记忆、M7c 及时沉淀）；M8 全部交付（M8a 能力目录与安装、M8b MCP 服务器、M8c 进库来源、M8d 配置层级统一、M8e 导出与导入）；M9a 运行时、provider 与 agent 的注册和选择已交付，M9b Claude Code 接 API key 与兼容接口、M9c Codex 运行时、M9e OMP 运行时已交付；上游 LoopX 清理 B1–B4 已交付；全面改名为 Looper 已交付；其余见第 5 节待办
 - **依据：** [RFC：长程 Agent 的上下文体系 v0](../architecture/rfcs/long-horizon-agent-context-v0.zh-CN.md)。
   设计原则、分层模型和已作出的决定以 RFC 为准；本文只管"怎么分阶段做、做到什么算完成、现在做到哪了"。
 - **仓库：** `foolzzz/looper`，基线 `main`
@@ -45,7 +45,7 @@
 | M9b | Claude Code 接多种 provider：订阅 OAuth、Anthropic key、兼容 anthropic 协议的接口；按 provider 价格计算花费 | ✅ 已交付（looper #68；DeepSeek、Kimi 真实 key 待维护者验证） | M9a |
 | M9c | Codex 运行时：四类角色都支持（含常驻会话），事件统一、MCP 翻译、API key（Codex 登录不做） | ✅ 已交付（looper #67） | M9a |
 | M9d | SDK 运行时与 norma SDK | 待定（norma 就绪后） | M9a |
-| M9e | OMP 运行时：先只读核实能力、填能力矩阵，再写适配器 | 待开工 | M9c |
+| M9e | OMP 运行时：先只读核实能力、填能力矩阵，再写适配器 | ✅ 已交付 | M9c |
 
 执行顺序：M1 → M1.5 → M1.6 → M1.7 → M2 → M3 → M4 → M5 → M6 → M7a → M7b → M8a → M8b、M8c、M8d（可并行）→ M8e。
 
@@ -486,6 +486,23 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
 
 - **范围：** 在 M9c 验证过适配器接口之后，先只读核实 OMP 的能力（一次性运行、常驻会话、MCP、skill、隔离），写回能力矩阵，再实现适配器；开发用本机 CPA。
 - **验收：** 用 OMP agent 跑 M6 真实模式评测。
+- **核实后确定的做法**（omp 18.4.3 的核实结果写在多运行时 RFC 第 6 节）：
+  - 只用 API key provider；`models.yml` 的 `api` 按 provider 的协议依次选 `openai-responses`、`openai-completions`、
+    `anthropic-messages`，密钥只在 `apiKey` 指名的环境变量里；
+  - 隔离：每个 omp 进程的 `HOME` 指向 `<runtime_root>/.local/omp/homes/<sha256>`（同一套生成设置的运行共用），里面只有
+    生成的 `models.yml`、`--config` 覆盖文件、prompt 文件、有 MCP 时的 `looper` 插件和共用原生库的链接；会把 omp 指回
+    操作者目录的变量不传；shell 命令经 `PI_SHELL_PREFIX` 拿回操作者的 `HOME` 等变量、去掉密钥；工作目录不在 git 仓库
+    里时关掉向上查找的发现来源；
+  - Worker、Reviewer 是一次 `omp -p --mode json --no-session`，提示从 stdin 读完即关；Manager、Planner 每轮起一个进程
+    （`--session-dir omp/sessions/<agent> --resume <id>`，`ResidentOmp`），与 `ResidentCodex` 共用
+    `per_turn.PerTurnSession`；开新会话的那一轮删掉这个 agent 之前的会话；
+  - system prompt 用 `--append-system-prompt`，前面是适配器加的"运行时说明"；
+  - P9：插件原生加载（skill、命令、agent），hook 和输出样式不加载、插件自带的 MCP 服务器关掉，都记在
+    `runtime_catalog`；Looper 的 MCP 服务器放进家目录的 `looper` 插件；知识不挂目录，按索引里的路径读；
+  - 每个请求报一次用量，所以有上下文规模、单次上限能在请求之间停；子 agent 的用量随 `task` 工具结果报；压缩记为
+    `compact_boundary`；
+  - `looper serve` 发现 PATH 上有 `omp` 时注册内置运行时 `omp`；启动时回收没有进程在用的 OMP 家目录，以及已保存
+    会话不再属于该运行时的 Codex、OMP 会话目录。
 
 #### M9d SDK 运行时与 norma
 
@@ -552,7 +569,7 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
 - **升级时迁移前自动备份（2026-10-14 定，✅ 已交付 looper #60）**：`serve` 发现有未执行的迁移时，先用 `pg_dump` 备份到 runtime root 下的 `backups/`（保留最近几份）再迁移；没有可用的 `pg_dump` 时拒绝执行破坏性迁移并提示安装方法；`doctor` 检查 `pg_dump`。自 v2.5.0 起已有 11 处删列、删表的迁移。
 - **服务常驻（2026-10-14 定，✅ 已交付 looper #59）**：`service install / uninstall / status / restart`，macOS 生成 launchd LaunchAgent，Linux 生成 systemd 用户服务，开机自启、崩溃拉起；本机也改用它运行主 checkout 的代码。
 - **全面改名为 looper（2026-10-14 定，✅ 已交付 looper #64）**：命令、Python 包、数据目录（`~/.loopx` → `~/.looper`，自动迁移）、环境变量（`LOOPX_*` → `LOOPER_*`，旧名作为回退）、界面与文档统一改名；`loopx` 命令保留为别名过渡一个版本。改名是机械改动且触及几乎所有文件，**排在当前这批 PR 合入之后、M9b/M9c 开工之前**，单独一个 PR，期间不开其他分支；README 与控制台首屏的改动先请维护者预览（本次改名维护者已免除预览）。默认库名 `loopx`、发布 tag 与历史、NOTICE 对上游 LoopX 的署名不改。
-- **Codex 运行时的已知差距（M9c）**：运行中的 Codex Worker 不能被引导，Planner 的消息只能留给这一步的决策轮（评测里聊天纠偏任务因此多一次重试），要引导得改走实验性的 `app-server`；Codex 不报压缩和单次请求的用量，记录里没有上下文规模，单次上限只能在一轮结束时判断；杀掉 Codex 进程时它正在跑的 shell 命令不会结束（Codex 给每条命令单开进程组）；常驻会话的目录（`codex/sessions/<owner>`）随任务累积，还没有回收。
+- **Codex 运行时的已知差距（M9c）**：运行中的 Codex Worker 不能被引导，Planner 的消息只能留给这一步的决策轮（评测里聊天纠偏任务因此多一次重试），要引导得改走实验性的 `app-server`；Codex 不报压缩和单次请求的用量，记录里没有上下文规模，单次上限只能在一轮结束时判断；杀掉 Codex 进程时它正在跑的 shell 命令不会结束（Codex 给每条命令单开进程组）。常驻会话的目录（`codex/sessions/<owner>`）已在 M9e 回收：服务启动时删掉已保存会话不再是 Codex 的。
 
 ### 5.3 非核心待办（M6 之后统一做）
 

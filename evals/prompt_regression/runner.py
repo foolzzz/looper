@@ -468,7 +468,7 @@ def run(
 def register_agent(api: Api, spec: dict[str, Any]) -> dict[str, Any]:
     """Register the agent of ``spec`` in the eval's database and return it: ``{"runtime": {name, type,
     executable?}, "provider": {name, protocols, auth, base_url?, models?, api_key_env?}, "agent": {name, model,
-    effort?}}``. A runtime of that name (such as the built-in ``codex``, when ``codex`` is on PATH) is reused;
+    effort?}}``. A runtime of that name (such as the built-in ``codex`` or ``omp``, when on PATH) is reused;
     the provider's API key is read from the environment variable ``api_key_env`` names, so no key is in the
     file or in the run's result."""
     registry = api.get("/api/registry")

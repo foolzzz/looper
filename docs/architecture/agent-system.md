@@ -455,12 +455,16 @@ Settings and selected per role ([next section](#harness-agent-and-environment)).
   process mechanics stay in `claude_cli.py`, and the catalog and knowledge
   are materialized in Claude Code's plugin format by
   `library.load_installed` and `knowledge.load_knowledge`. `CodexRuntime`
-  (`codex`, below) translates them at launch. Capabilities:
+  and `OmpRuntime` (`codex`, `omp`, below) translate them at launch; both
+  keep the Manager's and a Planner's session with one process per turn
+  (`runtimes/per_turn.py`). Capabilities:
   `run`, `resident_session`, `resume`, `structured_output`,
   `claude_plugins`, `mcp`, `add_dirs`, `compaction_events`,
   `autonomous_turns`, `cost_report` (Claude Code has all but
   `structured_output`; Codex has `run`, `resident_session`, `resume`,
-  `structured_output`, `mcp` and `add_dirs`).
+  `structured_output`, `mcp` and `add_dirs`; OMP has `run`,
+  `resident_session`, `resume`, `claude_plugins`, `mcp`, `add_dirs` and
+  `compaction_events`).
 - **Codex** (`looper/agents/runtimes/codex.py`, verified against Codex CLI
   0.162.0 in the RFC's section 6) runs `codex exec --json` with API key
   providers that serve `openai-responses`. Each process gets a `CODEX_HOME`
@@ -488,6 +492,46 @@ Settings and selected per role ([next section](#harness-agent-and-environment)).
   that nothing has written to for a day are removed when a new one is
   written. `looper serve` registers the read-only runtime `codex`
   (`rt-codex`) when `codex` is on its PATH.
+- **OMP** (`looper/agents/runtimes/omp.py`, oh-my-pi's `omp`, verified against
+  omp 18.4.3 in the RFC's section 6) runs `omp -p --mode json` with API key
+  providers that serve `openai-responses`, `openai-chat` or
+  `anthropic-messages`. Each process runs with `HOME` set to a home of
+  Looper's own, `omp/homes/<sha256>` (one per set of generated settings,
+  shared by its runs), named on its command line (`env HOME=... omp ...
+  --config <home>/looper.yml`): `.omp/agent/models.yml` (the provider
+  `looper`: endpoint, API, the agent's model at no price; its `apiKey` names
+  the `LOOPER_PROVIDER_API_KEY` variable), the `--config` overlay (only the
+  agent's model for every model role, no fallback, no approvals, MCP tools as
+  ordinary tools, no background jobs, no update check or issue reports), a
+  link to the native library every home shares (`omp/natives`), the prompt
+  files and, with MCP servers, a plugin `looper` holding them. omp keeps a
+  user's whole configuration under `HOME`, so the operator's `~/.omp`, the
+  other tools' directories it imports (`~/.claude`, `~/.codex`, `~/.agents`)
+  and `~/.env` are never read; the variables that would point it back
+  (`PI_CODING_AGENT_DIR`, `XDG_*_HOME`, `CLAUDE_CONFIG_DIR`, ...) are not
+  passed, and omp's shell prefix (`PI_SHELL_PREFIX`) gives the agent's shell
+  commands the operator's `HOME` and those variables back, without the key.
+  Outside a git repository omp's search for a project's content would climb
+  past the operator's home, so there the sources that climb (`native`,
+  `claude`, `agents`, `agents-md`, `claude-md`) are off. The system prompt is
+  `--append-system-prompt` (OMP runtime notes, then the prompt), which a
+  resumed session takes up. A Worker or Reviewer is one `--no-session`
+  process with its prompt on stdin, which then closes. The Manager and a
+  Planner run one process per turn with `--session-dir omp/sessions/<agent>`
+  and `--resume <id>` (`ResidentOmp`); the turn that starts a new session
+  removes the agent's earlier ones. The installed plugins load natively
+  (`--plugin-dir`: skills, commands, agents); their hooks and output styles
+  do not, their own MCP servers are turned off (`disabledExtensions`), and
+  both are named in `metadata.runtime_catalog`; knowledge is read by the
+  index's paths (`--add-dir` would load the `AGENTS.md` files above each
+  directory). Each model request's tokens become a `usage` event, so runs
+  record their context size and the soft cap can stop one between requests;
+  a subagent's (the `task` tool) come with its result, and a compaction that
+  ran becomes `compact_boundary`. `looper serve` registers the read-only
+  runtime `omp` (`rt-omp`) when `omp` is on its PATH. When it starts,
+  `read_only_copies` removes the OMP homes no running process names and the
+  session directories (`codex/sessions/<agent>`, `omp/sessions/<agent>`) of
+  agents whose saved session (`agent_sessions`) is not of that runtime.
 - **Runtimes** (`agent_runtimes`) are registered instances of a type: a name,
   an `executable` (`''` = the type's default; for Claude Code the server's
   configured `claude`) and what its last probe found (`version`,
@@ -523,7 +567,7 @@ agent `claude-code/opus` (`BUILTIN_AGENT`), which a role runs when nothing
 selects another. An agent is refused when it is created or changed if its
 runtime and provider share no protocol, an OAuth provider is paired with
 another runtime type, the runtime cannot take that kind of provider yet
-(Claude Code takes its own login and API keys, Codex API keys only), or the
+(Claude Code takes its own login and API keys, Codex and OMP API keys only), or the
 provider lists models and not this one; an agent whose model or background
 model has no full price is registered with a warning (its runs record tokens
 only and no spend cap applies to them), and every agent shows how its runs are

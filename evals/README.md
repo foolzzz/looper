@@ -80,7 +80,7 @@ SPEC.json` (register an agent in the eval's database first and run every role
 on it, with Looper's per-run cap: `{"runtime": {"name", "type",
 "executable"?}, "provider": {"name", "protocols", "auth", "base_url"?,
 "api_key_env"?}, "agent": {"name", "model", "effort"?}}`; a runtime of that
-name, such as the built-in `codex`, is reused, and the provider's key is read
+name, such as the built-in `codex` or `omp`, is reused, and the provider's key is read
 from the variable `api_key_env` names, never from the file), `--tasks
 single_step,chat_correction`, `--max-budget-usd`, `--total-cap-usd`,
 `--baseline <run.json>` (compare with this run instead), `--keep-work-dirs`. To print a comparison again:

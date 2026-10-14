@@ -1,7 +1,8 @@
 # RFC：多运行时 agent 架构（v0）
 
 - **状态：** 设计已定（[长程 Agent 上下文 RFC](long-horizon-agent-context-v0.zh-CN.md) 决策 10），M9a 已交付
-  （looper #62），M9b 已交付（第 7、8 节写明核实结果），M9c 已交付（looper #67，第 6 节写明核实结果）；与本文的出入记在
+  （looper #62），M9b 已交付（第 7、8 节写明核实结果），M9c 已交付（looper #67，第 6 节写明核实结果），M9e 已交付
+  （第 6 节写明核实结果）；与本文的出入记在
   开发计划各阶段的"核实后确定的做法"；本文是 M9 的设计依据和待决问题清单。
 - **开发计划：** [长程 Agent 上下文体系开发计划](../../plans/2026-10-13-long-horizon-agent-context.zh-CN.md) 的 M9 一节。
 - **最近更新：** 2026-10-14
@@ -106,7 +107,7 @@ dashboard、M2 的观测、M6 的评测和 M7 的任务日志都只认内部事�
 | 强制结构化输出 | 靠 prompt 契约 | ✅ `--output-schema`，续接轮次也生效（Looper 未启用） | 靠 prompt 契约 | ❓ | ❓ | 待定 |
 | skill 与插件 | ✅ Claude 插件，`--plugin-dir` | 原生读 `SKILL.md`（开发者消息里列名称、描述和路径），但列表总带着 `$HOME/.agents/skills`，只有改 `HOME` 才去得掉，所以关掉原生列表（`skills.include_instructions = false`），skill 按 P9 降为可读文档；Claude 插件不加载 | ✅ `--plugin-dir` 原生加载 Claude 插件的 `skills/<名称>/SKILL.md`（按 frontmatter 的 name 命名，没有插件前缀）、`commands/`、`agents/`；Claude 格式的 `hooks/hooks.json` 不加载；插件自带的 MCP 服务器会加载，Looper 用 `disabledExtensions` 关掉 | ❓ | — | 待定 |
 | MCP | ✅ `--mcp-config` + `--strict-mcp-config`（M8b） | ✅ `config.toml` 的 `[mcp_servers.<名称>]`：stdio（`command`、`args`、`env`）和 streamable HTTP（`url`、`http_headers`）；没有 SSE | ✅ 与 Claude Code 相同的 `mcpServers` 格式（stdio、HTTP、SSE），Looper 放进家目录里生成的插件 `looper`，工具名 `mcp__looper_<服务器>_<工具>`；默认挂在 `xd://` 下经 read/write 调用，`tools.xdev: false` 改成顶层工具 | ❓ | ❓ | 待定 |
-| 额外目录（知识） | ✅ `--add-dir` | ✅ `--add-dir`，放在 `resume` 之前也有效；目录里的 `AGENTS.md` 不加载 | ✅ `--add-dir`；目录里的 `AGENTS.md` 会作为上下文加载 | ❓ | — | 待定 |
+| 额外目录（知识） | ✅ `--add-dir` | ✅ `--add-dir`，放在 `resume` 之前也有效；目录里的 `AGENTS.md` 不加载 | ✅ `--add-dir`，但目录里和它往上的 `AGENTS.md` 等会作为上下文加载，Looper 不用（第 9 节） | ❓ | — | 待定 |
 | 不限权限 | ✅ `--dangerously-skip-permissions` | ✅ `--dangerously-bypass-approvals-and-sandbox` | ✅ `tools.approvalMode: yolo`（默认值，Looper 在覆盖配置里写明） | ❓ | — | 待定 |
 | 隔离 | ✅ `--setting-sources project` 等（M1） | ✅ 独立 `CODEX_HOME`，只放生成的 `config.toml` 和 `AGENTS.md`，不读 `~/.codex`；另需关掉原生 skill 列表（见上）和插件同步（`features.plugins = false`，否则每个新目录克隆约 25 MB 的插件市场） | ✅ `HOME` 指向 Looper 的家目录（见下），不读 `~/.omp`、`~/.claude`、`~/.codex`、`~/.agents`、`~/.env`；工作目录不在 git 仓库里时另关掉向上查找的发现来源 | ❓ | — | 待定 |
 | 非 git 目录 | ✅ | ✅ 需要 `--skip-git-repo-check` | ✅ | — | — | 待定 |
@@ -188,6 +189,11 @@ OMP 的其他核实结果：
 - **Codex + 登录**：见第 13 节 P1。
 - **Codex + API key（含 CPA）**：隔离目录里生成的 `config.toml` 写 `model_provider` 和 `[model_providers.<id>]`
   （`base_url`、`env_key`、`wire_api = "responses"`），密钥只放进 `env_key` 指名的环境变量（M9c 已核实）。
+- **OMP + API key（含 CPA）**：家目录里生成的 `models.yml` 写 provider `looper`（`baseUrl`、`api`、只含 agent 模型的
+  `models`，价格写 0），`apiKey` 写环境变量名 `LOOPER_PROVIDER_API_KEY`，密钥只在这个变量里；`api` 按 provider 的协议
+  依次选 `openai-responses`、`openai-completions`（`openai-chat`）、`anthropic-messages`，没有 `base_url` 时用厂商官方
+  地址。模型用 `--model looper/<模型>`，effort 用 `--thinking`；模型目录里 `efforts` 为空列表的模型按不推理处理
+  （M9e 已核实，三种 `api` 都经 CPA 跑通）。
 - **SDK**：直接传入 key 和 base_url。
 - **开发测试**：用本机 CPA（`127.0.0.1:8317`）。它同时提供 `/v1/responses`、`/v1/chat/completions` 和 Anthropic 格式的
   `/v1/messages`。key 在运行时从 CPA 的配置文件读取，不进仓库、不进日志。
@@ -201,7 +207,7 @@ OMP 的其他核实结果：
 | Claude Code + DeepSeek | claude-code | DeepSeek API key | anthropic-messages | 已支持（M9b；真实 key 待维护者验证） |
 | Claude Code + Kimi 等兼容接口 | claude-code | 对应 API key | anthropic-messages | 已支持（M9b；真实 key 待维护者验证） |
 | Codex + CPA | codex | CPA（OpenAI 类 provider，预设 `cpa`） | openai-responses | 已支持（M9c） |
-| OMP + CPA | omp | CPA | openai-responses | M9e |
+| OMP + CPA | omp | CPA（预设 `cpa`） | openai-responses（也支持 `openai-chat`、`anthropic-messages`） | 已支持（M9e） |
 
 GLM、DeepSeek 等同时提供 anthropic 和 openai 两种协议，一般配 Claude Code；M9b 内置它们的 provider 预设（两种协议的接口地址按官方文档核实），用户只填 key。
 
@@ -228,7 +234,8 @@ GLM、DeepSeek 等同时提供 anthropic 和 openai 两种协议，一般配 Cla
 
 - **目录条目**（M8）标注兼容的运行时类型：Claude 插件只挂给 Claude 系运行时，MCP 由适配器翻译。装给某个角色、
   但它当前运行时不兼容的条目会跳过，并记在运行记录里，不会让运行失败。
-- **知识**：Claude Code 和 Codex 都有 `--add-dir`。没有这个能力的运行时，方案待定。
+- **知识**：Claude Code 和 Codex 都有 `--add-dir`。OMP 也有，但它会把每个额外目录当成工作区，读它往上直到 `/` 的
+  `AGENTS.md` 等上下文文件，所以 OMP 不挂目录，按 prompt 里知识索引给出的路径读（索引写明了每个文档所在的目录）。
 - **prompt**：
   - harness 和角色 prompt 保持与运行时无关。核查过，现有 prompt 没有写死工具名；
   - 运行时之间的差异（工具名、怎么输出结构化结果）由适配器在代码契约层前追加一小段"运行时说明"；
@@ -254,6 +261,7 @@ GLM、DeepSeek 等同时提供 anthropic 和 openai 两种协议，一般配 Cla
 | M9b | Claude Code 接 API key 和兼容接口：provider 注入、后台模型映射、按 provider 价格计算花费、自己执行的单次上限 | M9a |
 | M9c | Codex 运行时：先做常驻会话的技术验证，再实现四类角色；隔离与登录（P1）、MCP 翻译、目录兼容 | M9a |
 | M9d | SDK 运行时与 norma | M9a，norma 就绪 |
+| M9e | OMP 运行时：先只读核实能力、填能力矩阵，再实现四类角色（P10） | M9c |
 
 M9b 与 M9c 并行。
 
@@ -262,14 +270,14 @@ M9b 与 M9c 并行。
 | # | 问题 | 影响 | 建议 |
 |---|---|---|---|
 | **P1** | **Codex 登录在隔离下会互相刷掉 token。** Codex 的 refresh_token 会轮换（CPA 运维中实测过）。每次运行复制一份 `CODEX_HOME` 的话，一个实例刷新 token 后，其他实例手里的就失效了 | Codex + 登录不可用，或者时好时坏 | **已定（2026-10-14）：** Codex 默认走 API key，开发阶段用 CPA。之后如果需要 Codex 登录，所有实例共用同一个 `auth.json`（符号链接）并加文件锁，只隔离配置 |
-| **P2** | **其他运行时的常驻会话怎么实现还不知道。** 可能是 `exec resume`（每轮起一个进程、重新加载上下文）、`app-server`（实验性）或 `queue`。自主轮和压缩事件也可能没有对应物 | "所有运行时都支持所有角色"的工期和稳定性 | **已定（2026-10-14）：** 先用"每轮起进程 + 续接会话"（逐轮续接）；连续接都不支持的运行时，每轮开新会话，由 Looper 注入完整状态（计划、任务日志、最近对话的摘要）。M9c 第一步做技术验证，结果写回能力矩阵。**M9c 核实：** Codex 走逐轮续接（每轮一个 `exec resume` 进程），续接不了的会话照旧换新会话；没有压缩事件和自主轮，也不能在 Worker 运行中追加用户轮（第 6 节） |
+| **P2** | **其他运行时的常驻会话怎么实现还不知道。** 可能是 `exec resume`（每轮起一个进程、重新加载上下文）、`app-server`（实验性）或 `queue`。自主轮和压缩事件也可能没有对应物 | "所有运行时都支持所有角色"的工期和稳定性 | **已定（2026-10-14）：** 先用"每轮起进程 + 续接会话"（逐轮续接）；连续接都不支持的运行时，每轮开新会话，由 Looper 注入完整状态（计划、任务日志、最近对话的摘要）。M9c 第一步做技术验证，结果写回能力矩阵。**M9c 核实：** Codex 走逐轮续接（每轮一个 `exec resume` 进程），续接不了的会话照旧换新会话；没有压缩事件和自主轮，也不能在 Worker 运行中追加用户轮（第 6 节）。**M9e 核实：** OMP 同样走逐轮续接（每轮一个 `omp -p --session-dir … --resume <id>` 进程，与 Codex 共用 `per_turn.PerTurnSession`）；有压缩事件和逐请求的用量，没有自主轮，`-p` 下不能在 Worker 运行中追加用户轮（`--mode rpc` 可以，未采用） |
 | **P3** | **provider 的密钥对 agent 可见。** 不限权限的 agent 能读自己的环境变量 | 密钥可能被模型写进输出或带出去 | **已定（2026-10-14）：** 近期接受，在本文写明。之后再做一个本地代理持有密钥，agent 只拿到本地地址（做法类似 CPA） |
 | **P4** | **第三方模型遵守契约、使用工具的质量参差不齐**，可能需要按模型调整 prompt | Planner、Manager 不稳定 | **已定（2026-10-14）：** 先不做按模型的 prompt 变体，所有 agent 用同一套 prompt，运行时差异放在适配器追加的"运行时说明"里；靠 M6 评测把关，评测不过的 agent 不配给 Planner 和 Manager |
 | P5 | **运行中换 agent。** 常驻会话绑定在运行时和 provider 上 | 层级或任务覆盖改了以后，Planner、Manager 可能要新开会话 | **已定（2026-10-14）：** 改配置立即生效：Worker、Reviewer 下一步就用新 agent。Planner、Manager **只有运行时类型和 provider 都不变时才续接**（例如同一订阅下换模型）；**换 provider（任意方向：订阅→API key、API key→订阅、两家 API key 之间）或换运行时，一律新开会话**，因为各 provider 协议里的字段（思考签名、tool_use id、reasoning item 等）互不兼容。新会话靠 M7 的计划状态、任务日志和 M7c 的交接摘要补回进度，任务页记一条"已更换 agent"。M9b 已实现：会话记下 `provider_id`，判断只在 `session_switch.agent_switch`（`runtimes.can_resume`）一处 |
 | P6 | **花费口径不一致**（见第 8 节） | 观测和上限失真 | **已定（2026-10-14）：** 随版本内置常见模型的价格表，provider 的模型目录里可以覆盖；查不到价格的模型只显示 token 数，注册 agent 时提示花费上限对它无效。订阅类 provider 一律按 API 价格折算，界面标"等价"，花费上限同样生效（防止把订阅额度耗光）。M9b 已实现：价格表在 `runtimes/pricing.py`（Claude、GPT、GLM、DeepSeek、Kimi，官方美元标价，2026-10-14） |
 | P7 | **effort 档位不对应。** Claude 是 low/medium/high/xhigh，OpenAI 是 minimal/low/medium/high | 分层配置里的 effort 含义不清 | 适配器里维护映射表；provider 的模型目录声明支持哪些档位，不支持的给出提示 |
 | P8 | **并发与限流** | 某个 provider 被打满（比如 CPA 自身的并发限制） | **已定（2026-10-14）：** 默认不设上限，与现在一致；需要时在 provider 上设置，超出的排队等待，不会失败 |
-| P9 | **目录跨运行时**：Claude 插件和 Codex 插件格式不同；`SKILL.md` 是否通用还要核实 | 装了的 skill 在某些运行时上加载不了 | **已定（2026-10-14）：** 能转换就转换（MCP 翻译成对应格式，运行时原生支持的 skill 按它的格式挂载）；转换不了的 skill 降为可读文档：像项目知识一样只读挂载，并在 prompt 里给出"可用 skill：名称、描述、路径"的索引，由模型按需读取；插件里的 hook、命令等无法转换的部分跳过，并记在运行记录里。目录界面显示每个条目兼容哪些运行时 |
-| P10 | **OMP 的能力还不清楚** | — | **已定（2026-10-14）：** 在 M9c 之后单列 M9e：等 Codex 把适配器接口验证过，先只读核实 OMP 的能力、填好能力矩阵，再写适配器；开发用 CPA |
+| P9 | **目录跨运行时**：Claude 插件和 Codex 插件格式不同；`SKILL.md` 是否通用还要核实 | 装了的 skill 在某些运行时上加载不了 | **已定（2026-10-14）：** 能转换就转换（MCP 翻译成对应格式，运行时原生支持的 skill 按它的格式挂载）；转换不了的 skill 降为可读文档：像项目知识一样只读挂载，并在 prompt 里给出"可用 skill：名称、描述、路径"的索引，由模型按需读取；插件里的 hook、命令等无法转换的部分跳过，并记在运行记录里。目录界面显示每个条目兼容哪些运行时。**M9e：** OMP 原生加载 Claude 插件（`--plugin-dir`：skill、命令、agent），插件的 hook 和输出样式不加载、插件自带的 MCP 服务器用 `disabledExtensions` 关掉，都记在运行记录里；Looper 的 MCP 服务器放进家目录里生成的插件 |
+| P10 | **OMP 的能力还不清楚** | — | **已定（2026-10-14）：** 在 M9c 之后单列 M9e：等 Codex 把适配器接口验证过，先只读核实 OMP 的能力、填好能力矩阵，再写适配器；开发用 CPA。**M9e 已核实**（第 6 节 OMP 一列）：隔离靠换 `HOME`，仓库外的工作目录另关掉向上查找的发现来源；`task` 子 agent 定义向上查找到 `/` 关不掉，记为差距 |
 | P11 | **norma SDK 的接入形态** | — | 建议放在独立的子进程里，便于隔离，崩溃也不会拖垮服务；双协议意味着它能配任意一种 provider |
 | P12 | **后续方向**（本阶段不做） | — | 按成本和质量路由模型、失败自动换 agent、同一步骤让多个 agent 交叉审查 |
