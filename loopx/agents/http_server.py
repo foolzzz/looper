@@ -98,6 +98,7 @@ class AgentHTTPServer:
         broadcaster: Broadcaster | None = None,
         static_dir: Path | None = None,
         runtime_root: Path | None = None,
+        self_checks: list[dict[str, str]] | None = None,
     ) -> None:
         self._host = host
         self._port = port
@@ -108,6 +109,8 @@ class AgentHTTPServer:
         self._static_dir = static_dir or default_static_dir()
         # Where the agents' files live: project knowledge is materialized under it.
         self._runtime_root = runtime_root
+        # The startup self-check (self_check.Check.to_dict), reported on /api/status.
+        self._self_checks = self_checks or []
         self._server: asyncio.Server | None = None
 
     async def start(self) -> None:
@@ -431,6 +434,7 @@ class AgentHTTPServer:
                 "completed": sum(1 for t in tasks if t.get("status") == "completed"),
             },
             "channels": {"web": web_health},
+            "checks": self._self_checks,
         }
         writer.write(_json_response(HTTP_200, status))
         await writer.drain()

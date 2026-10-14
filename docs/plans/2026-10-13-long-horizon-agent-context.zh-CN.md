@@ -410,6 +410,7 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
 | 2026-10-13 | 第 5.3 节项目页与知识、skill 辅助功能（looper #44）：侧栏点项目打开 `#projects/<id>`，有 Overview、Knowledge、Skills、Settings 四个标签，取代 Tasks 页里的项目编辑；知识文档和项目 skill 可展开看正文、就地修改，拖入文件新增文档，上传或拖入 `SKILL.md` 按 frontmatter 填好名称、描述和正文，新增 `GET .../knowledge/<doc_id>`、`GET .../skills/<skill_id>` 返回正文；历史页列出运行加载的项目 skill，Agents 页去掉 `permission_mode` 和 Sandbox 下拉框。验证：真实 PG 测试，无头 Chrome 在一次性服务上完成各标签的读写与拖放并截图。 |
 | 2026-10-13 | M7a 交付（looper #45）：计划存进 `task_plans` 和补齐字段的 `task_steps`，Manager 与 Planner 的会话存进 `agent_sessions`，每次变化只写改动的行，多行变化一个事务，不再写计划和会话文件；启动时续跑计划仍在进行的任务（不重新规划、续接会话），并一次性导入旧文件。验证：真实 `loopx serve` 加替身 Claude 在 SIGINT 重启后续跑完成、因上限失败的任务重启后"提高上限并继续"完成；本机 11 个计划文件都是旧格式、全部跳过，导入 Manager 会话 1 个，第二次运行无操作。 |
 | 2026-10-13 | M7b 交付（looper #46）：步骤被接受时由代码在定案事务里写一条 `task_journal`（Worker 的总结加 Worker、Reviewer 回复里新增的可选 `learnings`，至多 5 条、每条 300 字符），Planner 的 DECISION、SUPERVISE、CHAT 轮注入新的在前、至多 4,000 字符的「进度与发现」，计划行带已接受步骤的总结，Worker 首轮注入依赖在前、至多 2,000 字符的发现；项目开关 `distill_lessons`（默认关）打开时任务完成后多一轮 LESSONS，把日志整理成项目知识文档。验证：真实 PG 加替身 Claude 走完各条规则，真实 haiku 回归评测 5/5、违约 0（$0.34，基线 $0.33），一次最小任务里 Worker 报出 learnings、下一轮 Planner 与依赖步骤的 Worker 都看到、经验文档入库（$0.10）。 |
+| 2026-10-13 | 启动自检（looper #47）：新增 `loopx doctor`，逐项检查 PostgreSQL（连接串的密码打码）、Claude Code CLI、它的登录（`claude auth status`，只读本机凭据、不调用模型；没有这个子命令的旧版本记为未检查）和飞书渠道开启时的 `lark-cli`，每项给出修复方法，有失败时退出码为 1。`loopx serve` 启动时先跑同一组检查：PostgreSQL 不可达仍然退出，但给出修复方法而不是堆栈；缺 `claude` 或未登录只记警告、照常启动，`GET /api/status` 返回 `checks`，控制台每页顶部显示横幅。验证：真实 PG 测试，本机实跑 `loopx doctor`，以及 `PATH` 里没有 `claude` 的一次性服务的横幅截图。 |
 
 ## 5. 不属于本 RFC 的待办
 

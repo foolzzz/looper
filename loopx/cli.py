@@ -1,4 +1,4 @@
-"""The ``loopx`` command: ``serve`` starts the agent system, ``version`` prints the version."""
+"""The ``loopx`` command: ``serve`` starts the agent system, ``doctor`` checks what it needs, ``version`` prints the version."""
 
 from __future__ import annotations
 
@@ -26,6 +26,15 @@ def build_parser() -> argparse.ArgumentParser:
     serve.add_argument("--port", type=int, help="Port (default 8767).")
     serve.add_argument("--verbose", action="store_true", help="Enable debug logging.")
     serve.add_argument("--runtime-root", help="Override the default ~/.loopx state directory.")
+    commands.add_parser(
+        "doctor",
+        allow_abbrev=False,
+        help="Check what LoopX needs: PostgreSQL, the Claude Code CLI and its login, and the enabled channels.",
+        description=(
+            "Check PostgreSQL (LOOPX_DATABASE_URL), the Claude Code CLI and its login, and the enabled channels; "
+            "print each result with its fix. Exits 1 when a check failed. Makes no model call."
+        ),
+    )
     version = commands.add_parser("version", allow_abbrev=False, help="Print the installed LoopX version.")
     version.add_argument("--format", choices=["markdown", "json"], default="markdown", help="Output format.")
     # serve prints no payload; --format stays accepted so existing invocations keep working.
@@ -39,6 +48,10 @@ def main(argv: list[str] | None = None) -> int:
         payload = {"ok": True, "schema_version": "loopx_version_v0", "name": "loopx", "version": __version__}
         print(json.dumps(payload, indent=2) if args.format == "json" else f"loopx {__version__}")
         return 0
+    if args.command == "doctor":
+        from .agents.self_check import doctor
+
+        return doctor()
     # Imported here so that `loopx version` and `--version` stay instant.
     from .agents.serve import serve_agent
     from .paths import default_runtime_root

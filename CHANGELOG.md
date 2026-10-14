@@ -75,6 +75,18 @@ How the agent system works today is described in
   `metadata.library` now records its role, project and each item's plugin and
   scope, and `metadata.project_skills` is no longer written.
 
+- **`loopx doctor` and the startup self-check.** `loopx doctor` checks
+  PostgreSQL (`LOOPX_DATABASE_URL`, shown with its password masked), the
+  Claude Code CLI (`claude --version`), its login (`claude auth status`,
+  which reads local credentials and makes no model call; a CLI without it
+  is reported as not checked) and, when the Lark channel is enabled,
+  `lark-cli`. It prints one line per check with its fix and exits 1 when a
+  check failed. `loopx serve` runs the same checks first: an unreachable
+  PostgreSQL stops it with the fix instead of a traceback; a missing
+  `claude` or login is logged as a warning, the server still starts,
+  `GET /api/status` reports every check under `checks`, and the dashboard
+  shows a banner on every page.
+
 - **Task memory.** Code writes a `task_journal` entry when a step is
   accepted: the Worker's summary and the new optional `learnings` (up to 5
   short findings or pitfalls) of the step's Worker report and Reviewer

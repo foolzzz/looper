@@ -35,6 +35,7 @@ from .channels.lark import LarkChannelAdapter
 from .channels.registry import ChannelRegistry
 from .channels.telegram import TelegramChannelAdapter
 from .channels.web import WebChannelAdapter
+from . import self_check
 from .http_server import AgentHTTPServer
 from .supervisor import AgentSupervisor
 from .tiers.manager import ManagerAgent, ManagerConfig
@@ -42,6 +43,10 @@ from .tiers.task import TaskRouter
 from .tiers.worker import WorkerConfig, WorkerPool
 
 logger = logging.getLogger(__name__)
+
+
+class StartupCheckFailed(RuntimeError):
+    """A check LoopX cannot start without failed; the message says what to fix."""
 
 
 # The Planner's default prompt before it became a Claude Code agent; a
@@ -259,9 +264,14 @@ async def _run_agent_system(
 
     # --- Database (required) ---
     from ..db import init_pool, ensure_schema, close_pool
+    from ..db.connection import configured_dsn
     from ..db.llm_profiles import seed_defaults as seed_llm_profiles
 
-    pool = await init_pool()
+    dsn = configured_dsn()
+    database_check = await self_check.check_database(dsn)
+    if database_check.status != self_check.OK:
+        raise StartupCheckFailed(self_check.format_checks([database_check]))
+    pool = await init_pool(dsn)
     await ensure_schema(pool)
 
     await seed_llm_profiles([
@@ -330,7 +340,18 @@ async def _run_agent_system(
             await _register_optional_channel(registry, telegram_adapter)
 
     lark_cfg = await get_channel_config("channel-lark")
-    if lark_cfg and lark_cfg.get("enabled"):
+    lark_enabled = bool(lark_cfg and lark_cfg.get("enabled"))
+
+    # Without Claude or its login the agents cannot run, but the dashboard can
+    # still show and change everything: a warning here and on /api/status.
+    checks = [
+        database_check,
+        *await asyncio.to_thread(self_check.check_claude, claude_bin),
+        self_check.check_lark_cli(lark_enabled),
+    ]
+    self_check.log_problems(checks)
+
+    if lark_enabled:
         lark_adapter = _lark_adapter_from_config(lark_cfg.get("config") or {}, runtime_root)
         if lark_adapter is not None:
             await _register_optional_channel(registry, lark_adapter)
@@ -370,6 +391,7 @@ async def _run_agent_system(
         supervisor=supervisor,
         broadcaster=broadcaster,
         runtime_root=runtime_root,
+        self_checks=[check.to_dict() for check in checks],
     )
     await http_server.start()
 
@@ -421,12 +443,16 @@ def serve_agent(
     resolved_root = runtime_root or Path.cwd()
     resolved_work_dir = work_dir or Path.cwd()
 
-    asyncio.run(
-        _run_agent_system(
-            host=host,
-            port=port,
-            runtime_root=resolved_root,
-            work_dir=resolved_work_dir,
-            claude_bin=claude_bin,
+    try:
+        asyncio.run(
+            _run_agent_system(
+                host=host,
+                port=port,
+                runtime_root=resolved_root,
+                work_dir=resolved_work_dir,
+                claude_bin=claude_bin,
+            )
         )
-    )
+    except StartupCheckFailed as exc:
+        logger.error("loopx serve cannot start:\n%s", exc)
+        raise SystemExit(1) from None
