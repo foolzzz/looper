@@ -52,6 +52,16 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
   plugins and skills change, the next message starts a new process that
   resumes the saved session with `--resume`. Stopping the Manager closes
   Claude's stdin and kills it if it is still running after 5 s
+- A new session ([New sessions: handoff and resume brief](#new-sessions-handoff-and-resume-brief)):
+  when its agent can no longer resume the saved session, the old session, while
+  its Claude runs, first writes a handoff in a `[HANDOFF]` turn (a Runs record,
+  sent to no chat; at most 300 s). The first turn of any new session (agent
+  changed, session lost, or none saved) starts with a `[RESUME]` brief: why it
+  is new, the handoff, and the recent conversations from `chat_messages`: the
+  3 most recently active chats that are not a task's Planner thread
+  (`planner-<task_id>`), each its last 8 messages oldest first, 300 characters
+  each, at most 4,000 characters in all, without the message being answered.
+  Nothing new to say, no brief. The Runs record's input holds the brief
 - A turn its Claude runs on its own, after background work it started ends,
   is a Runs record of its own (input "(no user message: ...)", metadata
   `autonomous: true`). What Claude said in it goes as a reply of its own
@@ -209,14 +219,45 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
   (a new plan, a replan, added steps, a settled step with the plan's summary)
   is one transaction. The project is not saved with it: it is read again
   before every event's turns.
-- Task memory (`looper/agents/tiers/journal.py`): when a step is accepted,
-  code writes a `task_journal` entry (`step_accepted`) in the transaction that
-  settles it, with the Worker's summary and the `learnings` its Worker and
-  Reviewer reported; the model never writes one. Every `[DECISION]`,
-  `[SUPERVISE]` and `[CHAT]` turn carries "Progress and findings", the
-  entries newest first in at most 4,000 characters (the oldest left out and
-  counted), and the plan lines carry each accepted step's summary (200
-  characters). No entry, no section.
+- Task memory (`looper/agents/tiers/journal.py`): code writes a
+  `task_journal` entry when its event happens, in the transaction of the
+  change it records; the model never writes one. The kinds:
+  - `step_accepted`: a step is accepted (in the transaction that settles it):
+    its Worker's summary and the `learnings` its Worker and Reviewer reported;
+  - `step_failed`: a step fails, because the Planner fails the task on it or
+    its own failing verdict decides when the Planner cannot: what went wrong,
+    the reason, the learnings;
+  - `step_retry`: the Planner retries a step: what went wrong with the
+    attempt, the Planner's feedback, the learnings (a retry is this one entry,
+    not also a `decision`);
+  - `decision`: a replan (reason, steps added and dropped, and the decided
+    step's outcome and learnings when its attempt is dropped), steps added
+    from a chat message, the task stopped at its spend cap (with the
+    wrap-up);
+  - `user_instruction`: a user's chat message to the Planner while the task
+    runs, written before the `[CHAT]` turn, whole (up to 8,000 characters);
+  - `session_switch` and `handoff`: a new Planner session and what the old one
+    handed over ([New sessions](#new-sessions-handoff-and-resume-brief)).
+
+  An entry of the whole task has the step id `''`. Every `[DECISION]`,
+  `[SUPERVISE]` and `[CHAT]` turn (and the spend-cap wrap-up) carries the
+  user's instructions, every one whole and oldest first, in a budget of their
+  own (8,000 characters, which no other entry uses; only past it are the
+  oldest left out and counted), then "Progress and findings": the newest entry
+  of each kind first, then the other failures and retries, then the rest
+  newest first, in at most 4,000 characters (what does not fit is left out and
+  counted), under one heading per kind (failed steps, retried attempts,
+  Planner decisions, accepted steps, session changes; a handoff goes in the
+  resume brief instead). The plan lines carry each accepted step's summary
+  (200 characters). No entry, no section.
+- A learning may hold for the whole project: a Worker or Reviewer writes it as
+  `{"text": ..., "scope": "project"}` (a plain string is the task's). When it
+  arrives, with the project's `distill_lessons` `draft` or `write`, the Planner
+  saves the report's project learnings as one draft in
+  `project_document_drafts` (`Learnings from step <label>: ...`); `write`
+  drafts them too, because a single learning is unreviewed. With `off` they
+  stay the task's. Either way the journal keeps every learning, and the
+  decision turn marks a project one `(holds for the whole project)`.
 - With the project's `distill_lessons` `draft` or `write`, a task that
   completes gets one more turn, `[LESSONS]`, before its final status: the
   Planner turns the journal into a Markdown document of at most 4,000
@@ -273,9 +314,10 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
     the reviewed step's instruction and acceptance criteria;
   - first user turn: for a Worker, a short start cue, what the steps it
     depends on reported (summary and changed files, from `WORK_ITEM`
-    `dependencies`) and "Findings so far in this task" (`WORK_ITEM`
-    `findings`: the task journal, its dependencies' entries first and then
-    the rest newest first, in at most 2,000 characters); for a Reviewer, the Worker's report (summary, changed
+    `dependencies`), the user's instructions (whole, oldest first, in their own
+    budget) and "Findings so far in this task" (`WORK_ITEM` `findings`: the
+    accepted steps it depends on first, then the failures and retries, then
+    the other accepted steps newest first, in at most 2,000 characters); for a Reviewer, the Worker's report (summary, changed
     and deleted files) as data to check, never in the system prompt;
   - messages sent mid-run (forwarded chat, Planner steering) stay user turns
     and do not restate the contract.
@@ -304,9 +346,11 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
 - A reviewer must return a boolean `passed`; prose without the verdict is not a
   pass.
 - `learnings` is optional in both the report and the verdict: up to 5 short
-  findings or pitfalls for later steps. Code keeps the first 5 non-empty
-  strings, each clipped to 300 characters, and drops anything else; a bad
-  value never fails a step or a review.
+  findings or pitfalls for later steps, each a string (the task's) or
+  `{"text": ..., "scope": "project"}` (one that holds for any task of the
+  project; another scope, or none, is the task's). Code keeps the first 5
+  with non-empty text, each clipped to 300 characters, and drops anything
+  else; a bad value never fails a step or a review.
 
 ### What an agent's Claude Code loads
 
@@ -445,8 +489,8 @@ turn fails, a Worker or Reviewer step fails) and never runs another agent.
 
 A resident session belongs to a runtime type (`agent_sessions.runtime_type`,
 with the agent that ran it last): another type cannot resume it, so the next
-turn starts a new session; the Planner notes it in the task's activity, and
-every Planner turn carries the plan and the task journal. A session from
+turn starts a new session, after a handoff from the old one
+([New sessions](#new-sessions-handoff-and-resume-brief)). A session from
 before agents counts as Claude Code's. Changing the model within a runtime
 resumes as before. Each run records `cost_source` (`runtime`: what the
 runtime reported, as Claude Code with its own login does; `provider_price`:
@@ -456,6 +500,38 @@ The `llm_profiles` table and `agent_configs.runtime` and `llm_profile_id` were
 never on a launch path; the one-time migration `llm_profiles_removed` drops
 them (with `/api/llm-profiles`), and an agent config update naming them is a
 400.
+
+### New sessions: handoff and resume brief
+
+The Manager and a task's Planner resume their session for as long as they can
+(RFC multi-runtime P5). `looper/agents/session_switch.py` says when they
+cannot: `agent_switch`, called before every turn with what the session was
+saved with and the agent the turn resolved, is the one place the rule lives
+(today another runtime type; the provider rule belongs there too), and
+`session_lost` names a session the runtime could not resume (or none saved
+for work under way).
+
+- Agent changed: while the old session's Claude still runs, it takes one
+  `[HANDOFF]` turn: the Planner's asks for its understanding of the codebase,
+  unfinished reasoning, open risks and what it would check next, as
+  `{"handoff": ...}` (at most 3,000 characters, one repair turn); the
+  Manager's for what each chat is about, promises, the user's decisions and
+  open questions, as plain text. Then the old Claude stops and the saved
+  session is dropped. A handoff turn that fails (the old provider is down),
+  or an old Claude that is gone, leaves no handoff.
+- Session lost: the saved session could not be resumed; the Planner and
+  the Manager drop it and run the turn again in a new session, as before.
+- The Planner journals `session_switch` (why, from which runtime and agent to
+  which), after the `handoff` when there is one, in one transaction, and
+  notes `The Planner starts a new session (...)` in the activity.
+- The first turn of a new session for a plan under way (and of any new
+  Manager session with something to say) starts with a `[RESUME]` brief: why
+  the session is new, where the task is (steps accepted, under way, failed)
+  and the handoff, or that there is none and the journal is what remains.
+  The Planner's request after it carries the plan, the user's instructions
+  and the journal as every turn does; `REPLY_CONTRACT` says a brief may come
+  first. The Manager's brief adds the recent conversations. The brief is
+  given once: until the new session reports its id.
 
 ### Harness, agent and environment
 
@@ -1107,9 +1183,9 @@ PostgreSQL is a hard startup dependency. All data paths:
 | `task_steps` | A task's steps, each with everything its Planner decides with: `step_key` (label), `depends_on` (step ids), `review`, `acceptance_criteria`, `validation_commands`, `status`, `result`, `worker_id`, `reviewer_id`, `retries`, `feedback`, `missed_messages` |
 | `task_plans` | A task's plan, one row per task: `plan_id`, `status` (`planning`, `executing`, `verifying`, `stopping`, `completed`, `failed`), `correlation_id`, `origin_channel_id`, `final_summary`, `fail_reason`; replaced when the task is planned again |
 | `agent_sessions` | The session each resident agent resumes: `manager` or `planner-<task_id>`, its `session_id`, `session_totals`, the `runtime_type` it belongs to and the `session_agent_id` that ran it last (`NULL`: before agents, Claude Code) |
-| `task_journal` | A task's journal, written by code: one `step_accepted` entry per accepted step with its `summary` and `learnings`; `GET /api/tasks/<id>` returns it as `journal` and the task page lists it as Findings |
+| `task_journal` | A task's journal, written by code as things happen: `step_accepted`, `step_failed`, `step_retry`, `decision`, `user_instruction`, `session_switch` and `handoff` entries, each with its `step_id` (`''` for the whole task), `summary` and `learnings`; `GET /api/tasks/<id>` returns it as `journal` and the task page lists it as Findings, each entry with its kind |
 | `activity` | Execution trace events (SSE streaming to frontend) |
-| `chat_messages` | Chat conversation history |
+| `chat_messages` | Chat conversation history; a new Manager session's resume brief reads the recent chats that are not a task's Planner thread (`planner-<task_id>`) |
 | `llm_records` | One row per agent run: input and output text, status, the run's own `cost_usd` and its `cost_source` (`runtime` or `provider_price`), `input_tokens`, `output_tokens`, `cache_read_tokens` and `cache_creation_tokens`, its final `context_tokens` and its `compactions`; `metadata` holds the exact argv (`command`), `cwd`, the appended `system_prompt`, its `system_prompt_sha256`, its `prompt_layers`, the `agent`, the `model_choice`, the Settings `env` names, the `library` items loaded and a task agent's `project_skills` |
 | `agent_configs` | Agent configuration (role prompt, turns, timeout, concurrency) for `manager`, `planner`, `worker` and `reviewer` |
 | `agent_setting_layers` | Agent settings by layer: `scope` (`system`, `role`, `project`, `role_project`), `role`, `project_id` (goes with its project), and the nullable `harness_prompt`, `agent_id`, `effort`, `env` (ordered `[{key, value}]`, `null` value = unset) and `run_budget_usd`; one row per layer and place |
