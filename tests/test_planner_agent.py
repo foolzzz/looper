@@ -1324,7 +1324,7 @@ class TestTaskJournal:
         assert decision_on_s4.startswith("[DECISION] Step s4")
         section = decision_on_s4[decision_on_s4.index("Progress and findings"):decision_on_s4.index("Result of step")]
         assert len(section) <= 4_000
-        assert "(1 older entries omitted)" in section.splitlines()[0]
+        assert "(1 entry left out)" in section.splitlines()[0]
         # Newest first: s3, then s2; s1, the oldest, is the one left out.
         assert section.index("- s3: s3 done") < section.index("- s2: s2 done")
         assert "s1-tip" not in section and "s3-tip4" in section

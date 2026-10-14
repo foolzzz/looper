@@ -112,16 +112,21 @@ CREATE TABLE IF NOT EXISTS agent_sessions (
 ALTER TABLE agent_sessions ADD COLUMN IF NOT EXISTS runtime_type TEXT;
 ALTER TABLE agent_sessions ADD COLUMN IF NOT EXISTS session_agent_id TEXT;
 
--- A task's journal: what its steps delivered and found. Code writes an entry,
--- never the model: 'step_accepted' in the transaction that settles an
--- accepted step, with the step's summary and the learnings its Worker and
--- Reviewer reported. The Planner's turns and a Worker's first turn get the
--- entries back in bounded sections (looper/agents/tiers/journal.py).
+-- A task's journal: what happened in it that a later agent or session needs.
+-- Code writes an entry, never the model, when its event happens: a step
+-- accepted ('step_accepted', in the transaction that settles it), failed or
+-- retried, a Planner decision that changes the plan, a user's chat message to
+-- the Planner, a new Planner session and the handoff its old session wrote.
+-- step_id is '' for an entry of the whole task. The Planner's turns and a
+-- Worker's first turn get the entries back in bounded sections; code owns the
+-- kinds (looper/agents/tiers/journal.py).
 CREATE TABLE IF NOT EXISTS task_journal (
     id          BIGSERIAL PRIMARY KEY,
     task_id     TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
     step_id     TEXT NOT NULL,
-    kind        TEXT NOT NULL CHECK (kind IN ('step_accepted')),
+    kind        TEXT NOT NULL CONSTRAINT task_journal_kind_check CHECK (kind IN (
+                    'step_accepted', 'step_failed', 'step_retry', 'decision', 'user_instruction',
+                    'session_switch', 'handoff')),
     summary     TEXT NOT NULL DEFAULT '',
     learnings   TEXT[] NOT NULL DEFAULT '{}',
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -289,6 +294,19 @@ BEGIN
         UPDATE agent_configs SET timeout_seconds = 86400
         WHERE agent_id = 'worker' AND timeout_seconds = 600;
         INSERT INTO schema_migrations (name) VALUES ('worker_timeout_default_86400');
+    END IF;
+END $$;
+
+-- Once: a journal from before M7c, which held 'step_accepted' entries only,
+-- accepts the other kinds.
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM schema_migrations WHERE name = 'task_journal_kinds_m7c') THEN
+        ALTER TABLE task_journal DROP CONSTRAINT IF EXISTS task_journal_kind_check;
+        ALTER TABLE task_journal ADD CONSTRAINT task_journal_kind_check CHECK (kind IN (
+            'step_accepted', 'step_failed', 'step_retry', 'decision', 'user_instruction', 'session_switch',
+            'handoff'));
+        INSERT INTO schema_migrations (name) VALUES ('task_journal_kinds_m7c');
     END IF;
 END $$;
 

@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any
 
-from .journal import LESSONS_MAX_CHARS
+from .journal import HANDOFF_MAX_CHARS, LESSONS_MAX_CHARS, kept_text
 
 MAX_STEPS = 8
 MAX_RETRIES = 2  # per step
@@ -36,6 +36,8 @@ class TurnKind(str, Enum):
     SUPERVISE = "SUPERVISE"
     # The extra turn of a completed task whose project distills lessons; its message gives its own shape.
     LESSONS = "LESSONS"
+    # The last turn of a session the next agent cannot resume: what it hands over; its message gives its shape.
+    HANDOFF = "HANDOFF"
 
 
 class SuperviseAction(str, Enum):
@@ -256,6 +258,14 @@ def parse_lessons(text: str) -> str:
     return lessons if len(lessons) <= LESSONS_MAX_CHARS else lessons[: LESSONS_MAX_CHARS - 1].rstrip() + "…"
 
 
+def parse_handoff(text: str) -> str:
+    """The working context a HANDOFF reply hands the next session, its lines kept, clipped to
+    ``HANDOFF_MAX_CHARS``."""
+    data = extract_reply(text)
+    _only_keys(data, {"handoff"}, "the HANDOFF reply")
+    return kept_text(_required_text(data, "handoff"), HANDOFF_MAX_CHARS)
+
+
 def parse_chat(text: str, plan: PlanView) -> ChatReply:
     data = extract_reply(text)
     _only_keys(data, {"reply", "action", "step", "text", "steps"}, "the CHAT reply")
@@ -464,7 +474,9 @@ REPLY_CONTRACT = f"""\
 Each message you get starts with [PLAN], [DECISION] or [CHAT]. End every reply
 with exactly one ```json fenced block in that message's shape, and nothing
 after it. Use only the keys shown. Text before the block is kept in the run's
-history only.
+history only. The first message of a new session for a task under way starts
+with a [RESUME] brief on what your earlier session left; the request follows
+it, and you answer the request.
 
 [PLAN]: split the task into steps. Each step runs in its own Worker, a fresh
 Claude Code session with full tools in the working directory that sees the

@@ -21,6 +21,7 @@ import {
   History,
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
+import { ClampedText } from "@/components/clamped-text";
 import { historyHref } from "@/pages/agent-history";
 import { TaskCostBreakdown } from "@/components/task-cost";
 import { ContinueAtCap, TaskSpendMeter } from "@/components/task-budget";
@@ -572,29 +573,48 @@ function LessonsDraftNote({ taskId, projectId }: { taskId: string; projectId: st
 
 // --- Findings: the task journal ---
 
-/** Each accepted step's summary and the learnings its Worker and Reviewer reported, newest first. */
+type BadgeVariant = "default" | "success" | "warning" | "destructive" | "outline";
+
+const JOURNAL_KINDS: Record<JournalEntry["kind"], { label: string; variant: BadgeVariant }> = {
+  step_accepted: { label: "Accepted", variant: "success" },
+  step_failed: { label: "Failed", variant: "destructive" },
+  step_retry: { label: "Retry", variant: "warning" },
+  decision: { label: "Decision", variant: "default" },
+  user_instruction: { label: "User", variant: "default" },
+  session_switch: { label: "New session", variant: "outline" },
+  handoff: { label: "Handoff", variant: "outline" },
+};
+
+/** The task journal, newest first: steps accepted, failed or retried with what their Worker and Reviewer
+ * learned, the Planner's decisions, the user's instructions, and new Planner sessions with their handoffs. */
 function TaskFindings({ entries }: { entries: JournalEntry[] }) {
   if (entries.length === 0) return null;
   return (
     <div>
       <h3 className="text-sm font-semibold mb-2">Findings</h3>
       <ol className="rounded-lg border border-border bg-card divide-y divide-border">
-        {[...entries].reverse().map((entry) => (
-          <li key={entry.id} className="px-4 py-3">
-            <div className="flex items-baseline gap-2">
-              <span className="font-mono text-xs text-muted-foreground">{entry.step_key || entry.step_id}</span>
-              <span className="text-xs text-muted-foreground">{formatTime(entry.created_at)}</span>
-            </div>
-            <p className="mt-1 text-sm">{entry.summary || "(no summary)"}</p>
-            {entry.learnings.length > 0 && (
-              <ul className="mt-1.5 list-disc space-y-0.5 pl-5 text-sm text-muted-foreground">
-                {entry.learnings.map((learning, i) => (
-                  <li key={i}>{learning}</li>
-                ))}
-              </ul>
-            )}
-          </li>
-        ))}
+        {[...entries].reverse().map((entry) => {
+          const kind = JOURNAL_KINDS[entry.kind] ?? { label: entry.kind, variant: "outline" as const };
+          return (
+            <li key={entry.id} className="px-4 py-3">
+              <div className="flex flex-wrap items-baseline gap-2">
+                <Badge variant={kind.variant}>{kind.label}</Badge>
+                {(entry.step_key || entry.step_id) && (
+                  <span className="font-mono text-xs text-muted-foreground">{entry.step_key || entry.step_id}</span>
+                )}
+                <span className="text-xs text-muted-foreground">{formatTime(entry.created_at)}</span>
+              </div>
+              <ClampedText text={entry.summary || "(no summary)"} className="mt-1 text-sm" />
+              {entry.learnings.length > 0 && (
+                <ul className="mt-1.5 list-disc space-y-0.5 pl-5 text-sm text-muted-foreground">
+                  {entry.learnings.map((learning, i) => (
+                    <li key={i}>{learning}</li>
+                  ))}
+                </ul>
+              )}
+            </li>
+          );
+        })}
       </ol>
     </div>
   );
