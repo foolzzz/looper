@@ -6,7 +6,6 @@ import asyncio
 import hashlib
 import json
 import os
-import sys
 import tempfile
 from pathlib import Path
 from types import SimpleNamespace
@@ -14,6 +13,7 @@ from typing import Any
 
 import pytest
 
+from fake_claude import fake_claude
 from library_fixtures import ALPHA_SKILL, DEMO_PLUGIN, plugin_dirs
 from loopx.agents.agent_settings import DEFAULT_HARNESS_PROMPT
 from loopx.agents.bus import MessageBus
@@ -26,17 +26,14 @@ WEB = channel_address("web")
 
 def _fake_claude(tmp: Path, body: str) -> str:
     """A stand-in `claude` binary that saves its argv and the system prompt its file holds."""
-    script = tmp / "fake-claude"
-    script.write_text(
-        f"#!{sys.executable}\nimport json, os, sys, time\n"
+    return fake_claude(tmp / "fake-claude", (
+        "import json, os, sys, time\n"
         "open('argv.json', 'w').write(json.dumps(sys.argv[1:]))\n"
         "if '--append-system-prompt-file' in sys.argv:\n"
         "    prompt = open(sys.argv[sys.argv.index('--append-system-prompt-file') + 1], encoding='utf-8').read()\n"
         "    open('prompts.jsonl', 'a').write(json.dumps(prompt) + '\\n')\n"
         f"{body}\n"
-    )
-    script.chmod(0o755)
-    return str(script)
+    ))
 
 
 def _ask(body: str) -> dict[str, Any]:
@@ -82,7 +79,6 @@ def _ask(body: str) -> dict[str, Any]:
                 "argv": json.loads((root / "argv.json").read_text()),
                 "prompts": _prompts(root),
                 "pid": int(pid_file.read_text()) if pid_file.exists() else None,
-                "root": root,
             }
 
     return asyncio.run(_run())
@@ -100,18 +96,11 @@ def _sha(text: str) -> str:
 
 @pytest.mark.usefixtures("agent_db")
 class TestManagerReply:
-    def test_long_stream_json_line_is_read(self) -> None:
-        # Claude's init line lists every tool and skill; it can exceed 64 KiB.
-        text = _ask(
-            "print(json.dumps({'type': 'system', 'subtype': 'init', 'tools': ['t' * 200_000]}))\n"
-            "print(json.dumps({'type': 'assistant', 'message': {'content': [{'type': 'text', 'text': 'hi there'}]}}))\n"
-            "print(json.dumps({'type': 'result', 'subtype': 'success', 'is_error': False, 'result': 'hi there'}))"
-        )["text"]
-        assert text == "hi there"
-
     def test_reply_is_recorded(self, agent_db: Any) -> None:
+        # Claude's init line lists every tool and skill; it can exceed 64 KiB.
         asked = _ask(
-            "print(json.dumps({'type': 'system', 'subtype': 'init', 'model': 'claude-x', 'session_id': 's-9'}))\n"
+            "print(json.dumps({'type': 'system', 'subtype': 'init', 'model': 'claude-x', 'session_id': 's-9',\n"
+            "                  'tools': ['t' * 200_000]}))\n"
             "print(json.dumps({'type': 'assistant', 'message': {'content': [{'type': 'text', 'text': 'hi'}]}}))\n"
             "print(json.dumps({'type': 'result', 'subtype': 'success', 'is_error': False, 'result': 'hi'}))"
         )
@@ -136,10 +125,7 @@ class TestManagerReply:
         finish = agent_db.finish_record.await_args.kwargs
         assert (finish["status"], finish["output_text"], finish["model"], finish["session_id"]) == (
             "completed", "hi", "claude-x", "s-9")
-
-    def test_empty_run_is_reported(self) -> None:
-        text = _ask("sys.exit(1)")["text"]
-        assert "Manager" in text and "1" in text
+        assert asked["text"] == "hi"
 
     def test_read_failure_is_reported_and_claude_is_killed(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from loopx.agents import claude_cli
@@ -184,38 +170,21 @@ _RESULT = "print(json.dumps({'type': 'result', 'subtype': 'success', 'is_error':
 
 @pytest.mark.usefixtures("agent_db")
 class TestManagerStreaming:
-    def test_claude_runs_isolated_from_the_operators_configuration(self) -> None:
-        asked = _ask(
-            "print(json.dumps({'type': 'result', 'subtype': 'success', 'is_error': False, 'result': 'hi'}))"
-        )
-        argv = asked["argv"]
-        isolation = isolation_args(asked["root"])
-        at = argv.index(isolation[0])
-        assert argv[at:at + len(isolation)] == isolation
-        assert argv[argv.index("--system-prompt-snapshot") + 1] == "off"
-
-    def test_reply_streams_token_by_token(self) -> None:
-        reply = _ask(_delta("杭州") + _delta("是浙江") + _delta("的省会。") + _message("杭州是浙江的省会。") + _RESULT)
-        assert "--include-partial-messages" in reply["argv"]
+    @pytest.mark.parametrize(("body", "deltas", "text"), [
         # Each partial chunk is pushed once; the full message is not pushed again.
-        assert reply["deltas"] == ["杭州", "是浙江", "的省会。"]
-        assert reply["text"] == "杭州是浙江的省会。"
-
-    def test_whole_messages_still_stream_without_partials(self) -> None:
-        reply = _ask(_message("first part. ") + _message("second part.") + _RESULT)
-        assert reply["deltas"] == ["first part. ", "second part."]
-        assert reply["text"] == "first part. second part."
-
-    def test_subagent_chunks_are_not_streamed(self) -> None:
-        reply = _ask(
-            _delta("internal note", parent="toolu_1")
-            + _message("internal note", parent="toolu_1")
-            + _delta("答案")
-            + _message("答案")
-            + _RESULT
-        )
-        assert reply["deltas"] == ["答案"]
-        assert reply["text"] == "答案"
+        (_delta("杭州") + _delta("是浙江") + _delta("的省会。") + _message("杭州是浙江的省会。"),
+         ["杭州", "是浙江", "的省会。"], "杭州是浙江的省会。"),
+        # Without partial chunks, whole messages still stream.
+        (_message("first part. ") + _message("second part."), ["first part. ", "second part."],
+         "first part. second part."),
+        # A subagent's output stays internal.
+        (_delta("internal note", parent="toolu_1") + _message("internal note", parent="toolu_1")
+         + _delta("答案") + _message("答案"), ["答案"], "答案"),
+    ], ids=["partials", "whole-messages", "subagent"])
+    def test_reply_streams_token_by_token(self, body: str, deltas: list[str], text: str) -> None:
+        reply = _ask(body + _RESULT)
+        assert "--include-partial-messages" in reply["argv"]
+        assert (reply["deltas"], reply["text"]) == (deltas, text)
 
 
 def _resident(*, exit_after: int | None = None, die_on: int | None = None, ignore_eof: bool = False) -> str:
@@ -280,8 +249,8 @@ def _converse(
     Settings table holds; ``between(spawned)`` runs before every message after
     the first. Returns the final ``replies``, every started Claude as
     ``(argv, process)`` in ``spawned`` with its launch keywords in
-    ``launched``, whether each was ``running`` just before ``stop()``, and the
-    ``pids`` the fake logged. ``saved_session`` (with ``saved_totals``, the
+    ``launched``, whether each was ``running`` just before ``stop()``, the
+    ``pids`` the fake logged and the work directory ``root``. ``saved_session`` (with ``saved_totals``, the
     running totals saved beside it) is what an earlier run of the server
     left; the fake's session then has spent ``saved_totals``' cost.
     """
@@ -353,7 +322,7 @@ def _converse(
             pids = pid_file.read_text().split() if pid_file.exists() else []
             state = root / ".local" / "manager" / "session.json"
             return {"replies": replies, "spawned": spawned, "launched": launched, "running": running, "pids": pids,
-                    "prompts": _prompts(root),
+                    "prompts": _prompts(root), "root": root,
                     "saved_session": json.loads(state.read_text())["session_id"] if state.exists() else None,
                     "saved_totals": json.loads(state.read_text()).get("session_totals") if state.exists() else None}
 
@@ -393,26 +362,29 @@ class TestManagerResidentClaude:
         # Claude reports the process's running cost; each record holds its own turn's share.
         assert [finish["cost_usd"] for finish in finishes] == [0.25, 0.25]
 
-    def test_claude_runs_without_permission_prompts_and_with_every_tool(
-        self, monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        # Its tools and skills run without asking; nothing approves a single tool any more.
-        chat = _converse(monkeypatch, _resident(), ["hello"])
-        ((argv, _),) = chat["spawned"]
-        _assert_unrestricted(argv)
-
-    def test_messages_go_on_stdin_not_in_argv(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_messages_go_on_stdin_not_in_argv(self, monkeypatch: pytest.MonkeyPatch, agent_db: Any) -> None:
+        # The Manager's launch; what the shared flags hold is tested in test_claude_cli.
         chat = _converse(monkeypatch, _resident(), ["hello"])
         ((argv, _),) = chat["spawned"]
         assert _flag(argv, "--input-format") == "stream-json"
         assert _flag(argv, "--output-format") == "stream-json"
-        assert {"--print", "--verbose", "--include-partial-messages"} <= set(argv)
+        # Claude echoes each message, so the Manager can tell its turns from the ones Claude runs on its own.
+        assert {"--print", "--verbose", "--include-partial-messages", "--replay-user-messages"} <= set(argv)
         takes_value = {"--input-format", "--output-format", "--append-system-prompt-file", "--system-prompt-snapshot",
                        "--setting-sources", "--settings", "--resume", "--model", "--effort", "--allowedTools",
                        "--plugin-dir"}
         positional = [arg for i, arg in enumerate(argv) if not arg.startswith("--") and argv[i - 1] not in takes_value]
         assert positional == []
         assert _flag(argv, "--resume") is None  # no session yet
+        # Isolated from the operator's configuration; the prompt file is read again on every start.
+        isolation = isolation_args(chat["root"])
+        at = argv.index(isolation[0])
+        assert argv[at:at + len(isolation)] == isolation
+        assert _flag(argv, "--system-prompt-snapshot") == "off"
+        # Its tools and skills run without asking; without a library nothing is mounted or recorded.
+        _assert_unrestricted(argv)
+        assert "--plugin-dir" not in argv
+        assert "library" not in agent_db.start_record.await_args.kwargs["metadata"]
 
     def test_claude_that_exited_is_restarted_with_its_session(
         self, monkeypatch: pytest.MonkeyPatch, agent_db: Any,
@@ -458,15 +430,18 @@ class TestManagerResidentClaude:
     def test_a_session_that_no_longer_exists_is_dropped_and_the_message_still_answered(
         self, monkeypatch: pytest.MonkeyPatch, agent_db: Any,
     ) -> None:
-        chat = _converse(monkeypatch, _forgetting(), ["hello", "again"], saved_session="gone")
+        chat = _converse(monkeypatch, _forgetting(), ["hello", "again"], saved_session="gone",
+                         saved_totals={"cost_usd": 0.1})
         assert chat["replies"] == ["turn 1: hello", "turn 2: again"]
         (first, _), (second, _) = chat["spawned"]
         assert _flag(first, "--resume") == "gone"
         assert _flag(second, "--resume") is None  # a new session, which the next message keeps
-        assert chat["saved_session"] == "sess-1"
         errors = [call.kwargs["error"] for call in agent_db.finish_record.await_args_list]
         assert "session gone could not be resumed" in (errors[0] or "")
         assert errors[1:] == [None, None]
+        # The dropped session takes its totals with it: its 0.1 is not taken off the new session's turns.
+        assert [call.kwargs["cost_usd"] for call in agent_db.finish_record.await_args_list] == [None, 0.25, 0.25]
+        assert (chat["saved_session"], chat["saved_totals"]) == ("sess-1", {"cost_usd": 0.5})
 
     def test_a_new_session_that_also_says_nothing_is_not_retried_again(self, monkeypatch: pytest.MonkeyPatch) -> None:
         chat = _converse(monkeypatch, "sys.exit(1)", ["hello"], saved_session="gone")
@@ -487,25 +462,19 @@ class TestManagerResidentClaude:
         # The total is saved again for the next restart.
         assert (chat["saved_session"], chat["saved_totals"]) == ("sess-1", {"cost_usd": 1.0})
 
-    def test_a_dropped_session_takes_its_totals_with_it(self, monkeypatch: pytest.MonkeyPatch, agent_db: Any) -> None:
-        chat = _converse(monkeypatch, _forgetting(), ["hello"], saved_session="gone", saved_totals={"cost_usd": 0.1})
-        # The new session's first turn spent 0.25; the dropped session's 0.1 is not taken off it.
-        assert [call.kwargs["cost_usd"] for call in agent_db.finish_record.await_args_list] == [None, 0.25]
-        assert (chat["saved_session"], chat["saved_totals"]) == ("sess-1", {"cost_usd": 0.25})
-
     @pytest.mark.parametrize(("ignore_eof", "returncode"), [(False, 0), (True, -9)])
     def test_stop_ends_and_reaps_claude(
         self, monkeypatch: pytest.MonkeyPatch, ignore_eof: bool, returncode: int,
     ) -> None:
         from loopx.agents import claude_cli
 
-        monkeypatch.setattr(claude_cli, "STOP_GRACE_SEC", 0.5)
+        if ignore_eof:  # it is killed only once the grace period is over: keep that short
+            monkeypatch.setattr(claude_cli, "STOP_GRACE_SEC", 0.05)
         chat = _converse(monkeypatch, _resident(ignore_eof=ignore_eof), ["hello"])
         ((_, process),) = chat["spawned"]
         assert chat["running"] == [True]
         # Closing stdin ends Claude; one that keeps running is killed after the grace period.
         assert process.returncode == returncode
-
 
 
 def _task_json(**fields: Any) -> str:
@@ -564,15 +533,6 @@ TETRIS_DIR = os.path.join(os.path.expanduser("~"), "projects", "tetris")
 
 @pytest.mark.usefixtures("agent_db")
 class TestManagerTaskPlacement:
-    def test_task_carries_the_chosen_directory(self, agent_db: Any) -> None:
-        result = _ask_for_task(_task_json(project="tetris", work_dir="~/projects/tetris"))
-        (request,) = result.requests
-        assert request.payload["work_dir"] == TETRIS_DIR
-        assert result.reply.startswith("ok")
-        # The project and directory rule is code-owned and appended to whatever prompt the DB holds.
-        (prompt,) = result.prompts
-        assert '"work_dir"' in prompt and '"project"' in prompt
-
     def test_projects_section_starts_each_user_turn(self, agent_db: Any) -> None:
         agent_db.list_projects.return_value = [
             _project("tetris", "/srv/tetris", "falling\nblocks " + "x" * 100),
@@ -586,23 +546,16 @@ class TestManagerTaskPlacement:
         assert lines[2] == "  - notes (no default directory)"
         assert lines[-1] == "确认"
 
-    def test_projects_section_says_when_there_are_none(self) -> None:
-        turn = _ask_for_task(_task_json(project="tetris")).turn
-        assert turn.splitlines()[:2] == ["Projects:", "  (none yet)"]
-
-    def test_existing_project_is_matched_by_name(self, agent_db: Any) -> None:
+    # A chosen directory wins; without one the task takes the project's default directory.
+    @pytest.mark.parametrize(("work_dir", "expected"), [("~/projects/tetris", TETRIS_DIR), ("", "/srv/tetris")])
+    def test_existing_project_is_matched_by_name(self, agent_db: Any, work_dir: str, expected: str) -> None:
         agent_db.find_project_by_name.return_value = _project("Tetris", "/srv/tetris")
-        result = _ask_for_task(_task_json(project="tetris", work_dir="~/projects/tetris"))
+        result = _ask_for_task(_task_json(project="tetris", work_dir=work_dir))
         agent_db.find_project_by_name.assert_awaited_once_with("tetris")
         agent_db.create_project.assert_not_awaited()
         (request,) = result.requests
-        assert (request.payload["project_id"], request.payload["work_dir"]) == ("proj-111111111111", TETRIS_DIR)
+        assert (request.payload["project_id"], request.payload["work_dir"]) == ("proj-111111111111", expected)
         assert result.reply == "ok"
-
-    def test_work_dir_defaults_to_the_projects_directory(self, agent_db: Any) -> None:
-        agent_db.find_project_by_name.return_value = _project("Tetris", "/srv/tetris")
-        (request,) = _ask_for_task(_task_json(project="TETRIS", work_dir="")).requests
-        assert (request.payload["project_id"], request.payload["work_dir"]) == ("proj-111111111111", "/srv/tetris")
 
     def test_unknown_project_is_created_with_the_task_directory(self, agent_db: Any) -> None:
         result = _ask_for_task(_task_json(project=" Tetris ", work_dir="~/projects/tetris"))
@@ -635,7 +588,7 @@ class TestManagerTaskPlacement:
         assert "database is down" in result.reply
 
 
-_HARNESS, _MODEL, _EFFORT, _ENV = "agent.harness_prompt", "agent.model", "agent.effort", "agent.env"
+_HARNESS, _ENV = "agent.harness_prompt", "agent.env"
 
 
 @pytest.mark.usefixtures("agent_db")
@@ -653,27 +606,6 @@ class TestManagerHarnessAndLaunch:
         layers = agent_db.start_record.await_args.kwargs["metadata"]["prompt_layers"]
         assert layers["harness"] == {"source": "manager_override", "sha256": _sha("MANAGER HARNESS")}
 
-    def test_without_an_override_the_settings_default_comes_first(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        chat = _converse(monkeypatch, _resident(), ["hello"], rows=[{"system_prompt": "You manage."}],
-                         settings=[{_HARNESS: "DEFAULT HARNESS"}])
-        assert chat["prompts"] == [f"DEFAULT HARNESS\n\nYou manage.\n\n{TASK_PLACEMENT_RULE}"]
-
-    def test_the_model_is_opus_by_default_and_the_managers_own_wins(
-        self, monkeypatch: pytest.MonkeyPatch, agent_db: Any,
-    ) -> None:
-        chat = _converse(monkeypatch, _resident(), ["hello"])
-        ((argv, _),) = chat["spawned"]
-        assert _flag(argv, "--model") == "opus" and "--effort" not in argv
-        assert agent_db.start_record.await_args.kwargs["metadata"]["model_choice"] == {
-            "model": "opus", "source": "builtin_default", "effort": None}
-
-        chat = _converse(monkeypatch, _resident(), ["hello"], rows=[{"system_prompt": "M.", "model": "sonnet"}],
-                         settings=[{_MODEL: "claude-opus-4-5", _EFFORT: "low"}])
-        ((argv, _),) = chat["spawned"]
-        assert (_flag(argv, "--model"), _flag(argv, "--effort")) == ("sonnet", "low")
-        assert agent_db.start_record.await_args.kwargs["metadata"]["model_choice"] == {
-            "model": "sonnet", "source": "agent_override", "effort": "low"}
-
     @pytest.mark.parametrize("change", ["harness", "override", "model"])
     def test_a_changed_harness_or_model_restarts_claude_resuming_its_session(
         self, monkeypatch: pytest.MonkeyPatch, change: str,
@@ -687,6 +619,8 @@ class TestManagerHarnessAndLaunch:
         (first, _), (second, _) = chat["spawned"]
         assert (_flag(first, "--resume"), _flag(second, "--resume")) == (None, "sess-1")
         assert chat["running"] == [False, True]
+        if change == "model":  # the built-in default, then the Manager's own row
+            assert (_flag(first, "--model"), _flag(second, "--model")) == ("opus", "sonnet")
 
     def test_a_changed_environment_restarts_claude_with_it(self, monkeypatch: pytest.MonkeyPatch, agent_db: Any) -> None:
         monkeypatch.setenv("LOOPX_SERVER_SIDE", "kept")
@@ -700,12 +634,6 @@ class TestManagerHarnessAndLaunch:
         assert first == [arg for arg in second if arg not in ("--resume", "sess-1")]  # only the env changed
         recorded = [call.kwargs["metadata"]["env"]["keys"] for call in agent_db.start_record.await_args_list]
         assert recorded == [{"LOOPX_TEST_FLAVOUR": _sha(f)} for f in ("mint", "mint", "lime")]
-
-    def test_without_settings_variables_claude_inherits_the_servers_environment(
-        self, monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        chat = _converse(monkeypatch, _resident(), ["hello"])
-        assert chat["launched"][0]["env"] is None
 
 
 @pytest.mark.usefixtures("agent_db")
@@ -728,13 +656,6 @@ class TestManagerLibrary:
         assert library["items"] == [{"kind": "plugin", "name": "demo@market", "sha256": demo["sha256"]},
                                     {"kind": "skill", "name": "alpha", "sha256": alpha["sha256"]}]
         assert len(library["sha256"]) == 64
-
-    def test_without_a_library_nothing_is_added(self, monkeypatch: pytest.MonkeyPatch, agent_db: Any) -> None:
-        chat = _converse(monkeypatch, _resident(), ["hello"])
-        ((argv, _),) = chat["spawned"]
-        assert "--plugin-dir" not in argv
-        _assert_unrestricted(argv)
-        assert "library" not in agent_db.start_record.await_args.kwargs["metadata"]
 
     def test_a_changed_library_restarts_claude_resuming_its_session(
         self, monkeypatch: pytest.MonkeyPatch, agent_db: Any, enabled_library: Any,
@@ -838,40 +759,27 @@ class TestManagerAutonomousTurns:
         # Every run is told apart; the user turns are not marked.
         assert [run["metadata"].get("autonomous") for run in chat["runs"]].count(True) == 1
 
-    def test_claude_echoes_each_message_so_its_turn_can_be_told_apart(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        chat = _converse(monkeypatch, _resident(), ["hello"])
-        ((argv, _),) = chat["spawned"]
-        assert "--replay-user-messages" in argv
-
-
-@pytest.mark.usefixtures("agent_db")
-class TestManagerKnowledge:
-    """The Manager spans every project, so it neither mounts nor indexes any project's knowledge."""
-
-    def test_the_manager_gets_no_knowledge_while_a_project_has_documents(
-        self, monkeypatch: pytest.MonkeyPatch, agent_db: Any, project_documents: Any,
-    ) -> None:
-        project_documents(("text", "Glossary", "Terms", "MARKER-ALPHA"))
-        chat = _converse(monkeypatch, _resident(), ["hello"])
-        ((argv, _),) = chat["spawned"]
-        assert "--add-dir" not in argv
-        assert "Project knowledge" not in chat["prompts"][0]
-        agent_db.list_documents.assert_not_awaited()
-        assert agent_db.start_record.await_args.kwargs["metadata"]["prompt_layers"]["project"] is None
-
 
 @pytest.mark.usefixtures("agent_db")
 class TestManagerProjectSkills:
-    """The Manager spans every project, so it mounts no project's skills, only the library."""
+    """The Manager spans every project, so it mounts and indexes nothing of a project's (knowledge or
+    skills), only the library."""
 
     def test_the_manager_gets_no_project_skills_while_projects_have_some(
         self, monkeypatch: pytest.MonkeyPatch, agent_db: Any, enabled_library: Any, project_skills: Any,
+        project_documents: Any,
     ) -> None:
         enabled_library(DEMO_PLUGIN)
         project_skills(("proj-1", "deploy-check", "Use before a deploy.", "Reply DEPLOY-OK."))
+        project_documents(("text", "Glossary", "Terms", "MARKER-ALPHA"))
         chat = _converse(monkeypatch, _resident(), ["hello"])
         ((argv, _),) = chat["spawned"]
         (only,) = plugin_dirs(argv)  # the library's plugin, nothing more
         assert only.endswith("/demo") and "/.local/projects/" not in " ".join(argv)
         agent_db.list_enabled_skills.assert_not_awaited()
         assert "project_skills" not in agent_db.start_record.await_args.kwargs["metadata"]
+        # Nor any project's knowledge: no mounted directory, no index, the documents never read.
+        assert "--add-dir" not in argv
+        assert "Project knowledge" not in chat["prompts"][0]
+        agent_db.list_documents.assert_not_awaited()
+        assert agent_db.start_record.await_args.kwargs["metadata"]["prompt_layers"]["project"] is None

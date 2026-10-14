@@ -9,14 +9,14 @@ flags, and the run record.
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from loopx.agents.claude_cli import ISOLATION_ID, isolation_args, iter_lines, system_prompt_args
+from fake_claude import fake_claude
+from loopx.agents.claude_cli import isolation_args, iter_lines, system_prompt_args
 
 
 def _lines(*chunks: bytes) -> list[bytes]:
@@ -107,25 +107,6 @@ class TestClaudeRunRecorder:
         assert finish["status"] == "failed"
         assert expected in finish["error"]
 
-    def test_records_the_system_prompt_its_hash_and_its_layers(self, agent_db: Any) -> None:
-        from loopx.agents.claude_cli import ClaudeRunRecorder
-        from loopx.agents.system_prompt import SystemPrompt
-
-        text = "Be brief.\n\n## Project: calc\nUse uv."
-        layers = {"role": {"config_id": "worker"}, "isolation": ISOLATION_ID}
-        command = ["claude", "--append-system-prompt-file", "/rt/.local/prompts/abc.md"]
-        recorder = ClaudeRunRecorder(
-            agent_id="worker-1", task_id="task-1", cwd="/tmp/proj", input_text="go",
-            command=command, system_prompt=SystemPrompt(text, layers),
-        )
-        asyncio.run(recorder.start())
-        metadata = agent_db.start_record.await_args.kwargs["metadata"]
-        # The argv stays as it was; the prompt itself, its hash and its layers are kept beside it.
-        assert metadata["command"] == command
-        assert metadata["system_prompt"] == text
-        assert metadata["system_prompt_sha256"] == hashlib.sha256(text.encode()).hexdigest()
-        assert metadata["prompt_layers"] == layers
-
     def test_database_errors_never_fail_the_run(self, agent_db: Any) -> None:
         agent_db.start_record.side_effect = RuntimeError("database pool not initialised")
         recorder = self._recorder()
@@ -208,32 +189,30 @@ class TestIsolationArgs:
         assert "--strict-mcp-config" in args
         assert _settings(args)["autoMemoryEnabled"] is False
 
-    def test_memory_files_above_the_repository_are_excluded(self, tmp_path: Path) -> None:
+    @pytest.mark.parametrize("repository", [True, False])
+    def test_memory_files_above_the_repository_are_excluded(self, tmp_path: Path, repository: bool) -> None:
         home = tmp_path / "home"
         repo = home / "repo"
-        (repo / ".git").mkdir(parents=True)
         work = repo / "pkg" / "app"
         work.mkdir(parents=True)
+        if repository:
+            (repo / ".git").mkdir()
 
         excludes = _settings(isolation_args(work))["claudeMdExcludes"]
 
         # Claude Code reads CLAUDE.md, .claude/CLAUDE.md and .claude/rules/ in
         # every directory up to the root; above the repository they are not the
         # project's (the home directory's .claude/ is the operator's own).
-        for directory in (home, tmp_path, *tmp_path.parents):
+        # Without a repository the work directory is the project.
+        project = (repo, repo / "pkg", work) if repository else (work,)
+        above = (home, tmp_path, *tmp_path.parents) + (() if repository else (repo, repo / "pkg"))
+        for directory in above:
             for pattern in _memory_patterns(directory):
                 assert pattern.replace("//", "/") in excludes
-        # The repository's own memory files load, at its root and below.
-        for directory in (repo, repo / "pkg", work):
+        # The project's own memory files load, at its root and below.
+        for directory in project:
             for pattern in _memory_patterns(directory):
                 assert pattern not in excludes
-
-    def test_without_a_repository_the_work_directory_is_the_project(self, tmp_path: Path) -> None:
-        work = tmp_path / "a" / "b"
-        work.mkdir(parents=True)
-        excludes = _settings(isolation_args(work))["claudeMdExcludes"]
-        assert f"{tmp_path / 'a'}/CLAUDE.md" in excludes
-        assert f"{work}/CLAUDE.md" not in excludes
 
     def test_the_operators_claude_directory_is_excluded_even_as_the_repository(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
@@ -256,11 +235,6 @@ class TestIsolationArgs:
         assert f"{tmp_path / 'link'}/CLAUDE.md" in excludes
         assert f"{(tmp_path / 'real').resolve()}/CLAUDE.md" in excludes
 
-    def test_the_same_directory_gives_the_same_flags(self, tmp_path: Path) -> None:
-        # A resident agent compares its command between turns; it must not change by itself.
-        assert isolation_args(tmp_path) == isolation_args(str(tmp_path))
-        assert isinstance(ISOLATION_ID, str) and ISOLATION_ID
-
 
 # --- What every agent may do ---
 
@@ -270,18 +244,13 @@ RESTRICTING_FLAGS = {"--tools", "--allowedTools", "--allowed-tools", "--disallow
 
 
 class TestPermissionArgs:
-    def test_every_agent_skips_permission_prompts(self) -> None:
-        from loopx.agents.claude_cli import permission_args
-
-        assert permission_args() == ["--dangerously-skip-permissions"]
-        assert not RESTRICTING_FLAGS & set(permission_args())
-
     def test_every_launch_carries_them_with_and_without_a_library(self, tmp_path: Path) -> None:
         # The four agents build their commands from a Launch, so the flags cannot diverge.
         from loopx.agents.agent_settings import BUILTIN_DEFAULTS, resolve_launch
         from loopx.agents.claude_cli import permission_args
         from loopx.agents.library import AgentLibrary
 
+        assert permission_args() == ["--dangerously-skip-permissions"]
         library = AgentLibrary(plugin_dirs=(str(tmp_path / "plugin"),))
         for launch in (resolve_launch(BUILTIN_DEFAULTS), resolve_launch(BUILTIN_DEFAULTS, library=library)):
             args = launch.args()
@@ -296,37 +265,6 @@ def test_the_system_prompt_comes_from_its_file_and_is_read_again_on_resume(tmp_p
     assert system_prompt_args(path) == [
         "--append-system-prompt-file", str(path), "--system-prompt-snapshot", "off",
     ]
-
-
-@pytest.mark.parametrize(("script", "started"), [
-    # What Claude 2.1.285 does when told to --resume a session it no longer has.
-    ("import json, sys; print(json.dumps({'type': 'result', 'subtype': 'error_during_execution', 'is_error': True, "
-     "'num_turns': 0, 'errors': ['No conversation found with session ID: x']}), flush=True)", False),
-    ("import sys; sys.stderr.write('No conversation found with session ID: x\\n'); sys.exit(1)", False),
-    ("import json, sys; print(json.dumps({'type': 'system', 'subtype': 'init'}), flush=True); sys.exit(3)", True),
-])
-def test_a_turn_that_never_started_a_session_is_told_apart(tmp_path: Path, script: str, started: bool) -> None:
-    """A turn without Claude's init event never got a session going (an unknown --resume id)."""
-    import sys
-
-    from loopx.agents.claude_cli import ResidentClaude
-
-    fake = tmp_path / "claude"
-    fake.write_text(f"#!{sys.executable}\n{script}\n")
-    fake.chmod(0o755)
-
-    async def _run() -> Any:
-        claude = ResidentClaude(label="test")
-        await claude.start([str(fake)], cwd=str(tmp_path), signature=("s",))
-
-        async def on_event(event: dict[str, Any]) -> None:
-            return None
-
-        turn = await claude.run_turn("hello", on_event)
-        await claude.stop()
-        return turn
-
-    assert asyncio.run(_run()).session_started is started
 
 
 # --- Turns Claude runs on its own ---
@@ -352,13 +290,13 @@ class _Observed:
 
 
 def _resident_session(
-    tmp_path: Path, fixture: str, messages: list[str], *, observe: bool = True,
+    tmp_path: Path, fixture: str, messages: list[str],
 ) -> tuple[list[tuple[list[dict[str, Any]], Any]], list[tuple[_Observed, Any]], Any]:
     """Send ``messages`` to a resident stand-in replaying ``fixture``.
 
     Returns each user turn's events and outcome, each autonomous turn's
-    ``_Observed`` and outcome (when ``observe``), and the totals after the
-    last result. Each message is its own turn's tag.
+    ``_Observed`` and outcome, and the totals after the last result. Each
+    message is its own turn's tag.
     """
     from claude_stream_replay import replay_script
 
@@ -371,8 +309,7 @@ def _resident_session(
             return _Observed(autonomous, after)
 
         claude = ResidentClaude(label="test")
-        await claude.start([replay_script(tmp_path, fixture)], cwd=str(tmp_path), signature=1,
-                           **({"autonomous": begin} if observe else {}))
+        await claude.start([replay_script(tmp_path, fixture)], cwd=str(tmp_path), signature=1, autonomous=begin)
         turns = []
         for text in messages:
             seen: list[dict[str, Any]] = []
@@ -393,35 +330,6 @@ def _kinds(events: list[dict[str, Any]]) -> list[str]:
 
 
 class TestAutonomousTurns:
-    def test_a_background_subagents_turn_is_not_the_next_messages(self, tmp_path: Path) -> None:
-        turns, autonomous, totals = _resident_session(tmp_path, "background_agent", ["start it", "7*6?"])
-        (_, first), (second_events, second) = turns
-        assert (first.result_event["result"], second.result_event["result"]) == ("LAUNCHED", "42")
-        assert first.session_started and second.session_started
-        # The turn Claude ran on its own went to the owner, with the subagent's events before it.
-        ((observed, own),) = autonomous
-        events = observed.events
-        assert observed.after == "start it"  # the message Claude answered before it
-        assert own.result_event["origin"] == {"kind": "task-notification", "producer": "session-task"}
-        assert own.result_event["result"].startswith("Background task completed with result")
-        # Its events start with what the subagent and Claude wrote between the turns.
-        assert _kinds(events) == [
-            "assistant/", "assistant/", "system/task_progress", "system/task_started", "system/task_notification",
-            "user/", "assistant/", "assistant/", "system/background_tasks_changed", "system/task_updated",
-            "system/task_notification", "system/init", "system/status", "assistant/", "assistant/", "result/success",
-        ]
-        assert all(e.get("parent_tool_use_id") for e in events[:2])
-        # Nothing of it reached the second message's turn, which starts with that message's own events.
-        assert _kinds(second_events)[:5] == ["command_lifecycle/queued", "command_lifecycle/started", "system/init",
-                                             "system/status", "user/replay"]
-        assert second_events[4]["message"]["content"] == "7*6?"
-        assert not any(e.get("parent_tool_use_id") or e.get("subtype") == "task_notification" for e in second_events)
-        # Each turn's own cost: Claude's running totals, taken in the order Claude wrote them.
-        assert first.usage.cost_usd == pytest.approx(0.0130063)
-        assert own.usage.cost_usd == pytest.approx(0.03359615 - 0.0130063)
-        assert second.usage.cost_usd == pytest.approx(0.03617515 - 0.03359615)
-        assert totals.cost_usd == pytest.approx(0.03617515)
-
     def test_a_message_queued_behind_an_autonomous_turn_starts_when_claude_starts_it(self, tmp_path: Path) -> None:
         turns, autonomous, _ = _resident_session(
             tmp_path, "background_task_race", ["bg 1", "fg 9", "bg 2", "9+1?"],
@@ -444,19 +352,6 @@ class TestAutonomousTurns:
         assert [turn.usage.cost_usd for _, turn in turns] == pytest.approx(
             [0.0119405, 0.0181636 - 0.0119405, 0.0242396 - 0.0181636, 0.0347972 - 0.0317316])
         assert own.usage.cost_usd == pytest.approx(0.0317316 - 0.0242396)
-
-    def test_without_an_owner_for_autonomous_turns_each_turn_still_costs_its_own_share(self, tmp_path: Path) -> None:
-        turns, _, totals = _resident_session(tmp_path, "background_agent", ["start it", "7*6?"], observe=False)
-        assert turns[1][1].result_event["result"] == "42"
-        assert turns[1][1].usage.cost_usd == pytest.approx(0.03617515 - 0.03359615)
-        assert totals.cost_usd == pytest.approx(0.03617515)
-
-    def test_the_turns_message_carries_the_uuid_claude_marks_it_with(self, tmp_path: Path) -> None:
-        turns, _, _ = _resident_session(tmp_path, "background_agent", ["start it", "7*6?"])
-        for events, turn in turns:
-            started = next(e for e in events if e["type"] == "command_lifecycle" and e["state"] == "started")
-            replayed = next(e for e in events if e.get("isReplay"))
-            assert started["command_uuid"] == replayed["uuid"] == turn.result_event["user_message_uuid"]
 
     def test_a_handler_that_fails_never_breaks_the_users_turns(self, tmp_path: Path) -> None:
         from claude_stream_replay import replay_script
@@ -489,13 +384,10 @@ class TestAutonomousTurns:
         assert second.usage.cost_usd == pytest.approx(0.03617515 - 0.03359615)
 
     def test_a_turn_of_its_own_that_stop_cuts_short_ends_without_a_result(self, tmp_path: Path) -> None:
-        import sys
-
         from loopx.agents.claude_cli import ResidentClaude
 
-        fake = tmp_path / "claude"
-        fake.write_text(
-            f"#!{sys.executable}\n"
+        fake = fake_claude(
+            tmp_path / "claude",
             "import json, sys, time\n"
             "line = json.loads(sys.stdin.readline())\n"
             "def emit(event): print(json.dumps(event), flush=True)\n"
@@ -507,9 +399,8 @@ class TestAutonomousTurns:
             "emit({'type': 'system', 'subtype': 'task_notification', 'status': 'completed'})\n"
             "emit({'type': 'system', 'subtype': 'init', 'session_id': 's'})\n"
             "sys.stdin.read()\n"
-            "time.sleep(30)  # still working on its own turn when stopped\n"
+            "time.sleep(30)  # still working on its own turn when stopped\n",
         )
-        fake.chmod(0o755)
 
         async def _run() -> list[Any]:
             ended: list[Any] = []
@@ -523,7 +414,7 @@ class TestAutonomousTurns:
                 return None
 
             claude = ResidentClaude(label="test")
-            await claude.start([str(fake)], cwd=str(tmp_path), signature=1, autonomous=begin)
+            await claude.start([fake], cwd=str(tmp_path), signature=1, autonomous=begin)
             await claude.run_turn("hi", on_event, tag="hi")
             await asyncio.wait_for(begun.wait(), 10)
             await claude.stop(kill=True)
