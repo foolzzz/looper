@@ -184,7 +184,7 @@ def test_the_state_files_are_imported_once(tmp_path: Path, monkeypatch: pytest.M
         assert (two["step_key"], two["depends_on"], two["review"], two["retries"], two["feedback"]) == (
             "s2", ["step-1"], True, 1, ["fix it"])
         # Sessions from files predate agents: Claude Code ran them (no runtime type recorded).
-        before_agents = {"runtime_type": None, "session_agent_id": None}
+        before_agents = {"runtime_type": None, "provider_id": None, "session_agent_id": None}
         assert await agent_sessions.get_session("planner-task-new", pool=pool) == {
             "session_id": "sess-file", "session_totals": {"cost_usd": 0.42, "input_tokens": 10}, **before_agents}
         assert await agent_sessions.get_session("manager", pool=pool) == {

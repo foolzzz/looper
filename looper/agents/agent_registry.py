@@ -6,12 +6,17 @@ in ``looper.agents.runtimes``): the executable it runs and what its probe found
 (``<executable> --version``, never a model call). A **provider** is where an
 agent's requests go: the protocols it serves (``anthropic-messages``,
 ``openai-responses``, ``openai-chat``), its ``base_url``, its model catalog
-(each model's context window, prices and effort levels, each unknown until
-given), how many runs it takes at once (``max_concurrency``, none for no
-limit) and how it authenticates: a runtime type's own login (``oauth``, bound
-to that type) or an API key, which is stored apart (``llm_provider_secrets``)
-and shown as ``***``. The catalog's prices and the concurrency limit are
-stored and checked here; the runs do not use them yet.
+(each model's context window, prices, effort levels and the background model
+its runtime's side requests use, each unknown until given), environment
+variables of its own for the runs that use it (``env``), how many runs it takes
+at once (``max_concurrency``, none for no limit) and how it authenticates: a
+runtime type's own login (``oauth``, bound to that type) or an API key, which
+is stored apart (``llm_provider_secrets``), shown as ``***`` and read only
+when a run starts (``agent_settings.load_agent_settings``). A run is priced at
+its provider's prices, the catalog's or else the built-in table's
+(``runtimes.pricing``), unless its runtime reports the right figure itself;
+the concurrency limit is stored and checked only. Presets
+(``provider_presets``) fill a new provider for a known vendor.
 
 The built-ins exist on every installation and are read-only: the
 ``claude-code`` runtime (the server's configured ``claude``), the
@@ -44,7 +49,7 @@ import asyncio
 import math
 import re
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field, fields
 from typing import Any
 
 from . import runtimes
@@ -57,7 +62,7 @@ API_KEY_MAX_CHARS = 4_000
 MODELS_MAX = 100
 PRICE_MAX_USD = 10_000
 PRICE_FIELDS = ("input_usd_per_mtok", "output_usd_per_mtok", "cache_read_usd_per_mtok", "cache_write_usd_per_mtok")
-MODEL_FIELDS = ("name", "context_window", *PRICE_FIELDS, "efforts")
+MODEL_FIELDS = ("name", "context_window", *PRICE_FIELDS, "efforts", "background_model")
 CONTEXT_WINDOW_MAX = 100_000_000
 EFFORTS_MAX = 10
 CONCURRENCY_MAX = 1_000
@@ -90,6 +95,31 @@ class RuntimeSpec:
 
 
 @dataclass(frozen=True)
+class CatalogModel:
+    """One model of a provider's catalog; every field but the name None when unknown. The background model is
+    the one a runtime's side requests (titles, summaries, quick subagents) use with this model; None: the model
+    itself."""
+
+    name: str
+    context_window: int | None = None
+    input_usd_per_mtok: float | None = None
+    output_usd_per_mtok: float | None = None
+    cache_read_usd_per_mtok: float | None = None
+    cache_write_usd_per_mtok: float | None = None
+    efforts: tuple[str, ...] | None = None
+    background_model: str | None = None
+
+    @classmethod
+    def from_entry(cls, entry: Mapping[str, Any]) -> CatalogModel:
+        """A stored catalog entry (``_models``), as read back."""
+        known = {item.name for item in fields(cls)}
+        values = {name: entry.get(name) for name in known if entry.get(name) is not None}
+        if values.get("efforts") is not None:
+            values["efforts"] = tuple(values["efforts"])
+        return cls(**{"name": str(entry.get("name")), **{k: v for k, v in values.items() if k != "name"}})
+
+
+@dataclass(frozen=True)
 class ProviderSpec:
     id: str
     name: str
@@ -97,7 +127,19 @@ class ProviderSpec:
     protocols: frozenset[ApiProtocol]
     oauth_runtime_type: str | None = None
     base_url: str = ""
-    models: tuple[str, ...] = ()  # the models it lists; () = any
+    catalog: tuple[CatalogModel, ...] = ()  # the models it lists; () = any
+    env: tuple[tuple[str, str], ...] = ()  # its own environment variables, for the runs that use it
+    # Its API key: set only on the launch path (agent_settings.load_agent_settings), for the runtime's binding.
+    # Never shown: not in the repr, not compared, never in a record, a view or an export.
+    api_key: str | None = field(default=None, repr=False, compare=False)
+
+    @property
+    def models(self) -> tuple[str, ...]:
+        """The names of the models it lists; () = any."""
+        return tuple(model.name for model in self.catalog)
+
+    def catalog_model(self, name: str) -> CatalogModel | None:
+        return next((model for model in self.catalog if model.name == name), None)
 
 
 @dataclass(frozen=True)
@@ -122,7 +164,7 @@ class AgentSpec:
                 row["provider_id"], row["provider_name"], AuthKind(row["provider_auth"]),
                 frozenset(ApiProtocol(p) for p in row.get("provider_protocols") or ()),
                 row.get("provider_oauth_runtime_type"), row.get("provider_base_url") or "",
-                tuple(str(m.get("name")) for m in row.get("provider_models") or () if isinstance(m, Mapping)),
+                _catalog(row.get("provider_models")), _env(row.get("provider_env")),
             ),
         )
 
@@ -133,6 +175,14 @@ class AgentSpec:
             "runtime": {"id": self.runtime.id, "name": self.runtime.name, "type": self.runtime.type},
             "provider": {"id": self.provider.id, "name": self.provider.name, "auth": self.provider.auth.value},
         }
+
+
+def _catalog(raw: Any) -> tuple[CatalogModel, ...]:
+    return tuple(CatalogModel.from_entry(m) for m in raw or () if isinstance(m, Mapping))
+
+
+def _env(raw: Any) -> tuple[tuple[str, str], ...]:
+    return tuple((str(e["key"]), str(e["value"])) for e in raw or () if isinstance(e, Mapping))
 
 
 BUILTIN_RUNTIME = RuntimeSpec("rt-claude-code", "claude-code", "claude-code", "", runtimes.CLAUDE_CODE.capabilities)
@@ -261,9 +311,33 @@ def _models(raw: Any) -> list[dict[str, Any]]:
             raise RegistryError("each model needs a name")
         if any(m["name"] == name for m in models):
             raise RegistryError(f"model {name!r} is listed twice")
+        try:
+            background = model_name(entry.get("background_model"), field="background_model") or None
+        except SettingsError as exc:
+            raise RegistryError(str(exc)) from None
         models.append({"name": name, "context_window": _context_window(entry.get("context_window")),
-                       **{f: _price(entry.get(f), f) for f in PRICE_FIELDS}, "efforts": _efforts(entry.get("efforts"))})
+                       **{f: _price(entry.get(f), f) for f in PRICE_FIELDS}, "efforts": _efforts(entry.get("efforts")),
+                       "background_model": background})
     return models
+
+
+def _provider_env(raw: Any) -> list[dict[str, str]]:
+    """A provider's own environment variables, ``[{"key", "value"}]``: like the settings' (no credentials, which
+    belong in ``api_key``), and none that a runtime's provider binding owns (``provider_env_owned``)."""
+    from .agent_settings import SettingsError, environment
+
+    if raw is None:
+        return []
+    try:
+        env = environment(raw)
+    except SettingsError as exc:
+        raise RegistryError(f"env: {exc}") from None
+    for adapter in runtimes.ADAPTERS.values():
+        if owned := sorted(set(env) & adapter.provider_env_owned):
+            raise RegistryError(
+                f"env: {owned[0]} is set by the {adapter.label} binding from the provider's base_url, api_key and "
+                "model catalog (a model and its background_model); set it there")
+    return [{"key": key, "value": str(value)} for key, value in env.items()]
 
 
 def _model(raw: Any) -> str:
@@ -376,7 +450,7 @@ def provider_spec(row: Mapping[str, Any]) -> ProviderSpec:
     """A provider row (``llm_providers``, or the fields of one) as what an agent is checked with."""
     return ProviderSpec(row["id"], row["name"], AuthKind(row["auth"]),
                         frozenset(ApiProtocol(p) for p in row["protocols"]), row["oauth_runtime_type"],
-                        row["base_url"], tuple(m["name"] for m in row["models"]))
+                        row["base_url"], _catalog(row["models"]), _env(row.get("env")))
 
 
 def type_view(adapter: runtimes.RuntimeAdapter) -> dict[str, Any]:
@@ -399,14 +473,48 @@ def runtime_view(row: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def catalog_entries(models: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """Stored catalog entries with every field (one stored before a field existed lacks it: null, unknown)."""
+    return [{**dict.fromkeys(MODEL_FIELDS), **m} for m in models]
+
+
 def provider_view(row: Mapping[str, Any]) -> dict[str, Any]:
     return {
         "provider_id": row["id"], "name": row["name"], "protocols": list(row["protocols"]), "auth": row["auth"],
-        "oauth_runtime_type": row["oauth_runtime_type"], "base_url": row["base_url"], "models": row["models"],
-        "max_concurrency": row["max_concurrency"],
+        "oauth_runtime_type": row["oauth_runtime_type"], "base_url": row["base_url"],
+        "models": catalog_entries(row["models"]),
+        "env": list(row.get("env") or []), "max_concurrency": row["max_concurrency"],
         "api_key": SECRET_MASK if row.get("api_key_set") else None, "builtin": row["builtin"],
         "agent_count": row.get("agent_count", 0), "created_at": row["created_at"], "updated_at": row["updated_at"],
     }
+
+
+def cost_basis(agent: AgentSpec) -> dict[str, Any]:
+    """How an agent's runs are priced: by its runtime (``runtime``), or by Looper at its provider's prices
+    (``provider_price``), with the models of its runs that have no full price (``unpriced``: those runs record
+    tokens only and no spend cap applies to them); ``equivalent`` when the figure is what a subscription's usage
+    would cost at API prices, not money spent."""
+    from .runtimes.pricing import model_price
+
+    adapter = runtimes.ADAPTERS.get(agent.runtime.type)
+    if adapter is None:
+        return {"source": None, "equivalent": False, "unpriced": []}
+    source = adapter.cost_source(agent.provider)
+    unpriced: list[str] = []
+    if source is runtimes.CostSource.PROVIDER_PRICE:
+        entry = agent.provider.catalog_model(agent.model)
+        for model in dict.fromkeys([agent.model, *([entry.background_model] if entry and entry.background_model
+                                                   else [])]):
+            if not model_price(agent.provider, model).complete:
+                unpriced.append(model)
+    return {"source": source.value, "equivalent": agent.provider.auth is AuthKind.OAUTH, "unpriced": unpriced}
+
+
+def cost_warnings(agent: AgentSpec) -> list[str]:
+    """What registering ``agent`` should warn about: models it would run without a full price."""
+    return [f"model {model!r} has no full price with provider {agent.provider.name!r} (input, output, cache read "
+            "and cache write): its runs record tokens only and spend caps do not apply to them; add its prices to "
+            "the provider's model catalog" for model in cost_basis(agent)["unpriced"]]
 
 
 def agent_view(row: Mapping[str, Any]) -> dict[str, Any]:
@@ -414,6 +522,7 @@ def agent_view(row: Mapping[str, Any]) -> dict[str, Any]:
         "agent_id": row["id"], "name": row["name"], "model": row["model"], "effort": row.get("effort"),
         "runtime_id": row["runtime_id"], "runtime_name": row["runtime_name"], "runtime_type": row["runtime_type"],
         "provider_id": row["provider_id"], "provider_name": row["provider_name"], "builtin": row["builtin"],
+        "cost": cost_basis(AgentSpec.from_row(row)),
     }
 
 
@@ -423,6 +532,7 @@ def _limits() -> dict[str, Any]:
     return {
         "name_max_chars": NAME_MAX_CHARS, "models_max": MODELS_MAX, "price_fields": list(PRICE_FIELDS),
         "model_fields": list(MODEL_FIELDS),
+        "provider_env_owned": sorted(set().union(*(a.provider_env_owned for a in runtimes.ADAPTERS.values()))),
         "protocols": [p.value for p in ApiProtocol], "auth_kinds": [a.value for a in AuthKind],
         "effort_levels": list(EFFORT_LEVELS),
         "role_capabilities": {role: sorted(c.value for c in needs) for role, needs in runtimes.ROLE_CAPABILITIES.items()},
@@ -434,11 +544,17 @@ async def registry_view() -> dict[str, Any]:
     """The runtime types this version has, and every registered runtime, provider and agent."""
     from ..db import agent_registry as db
 
+    from .provider_presets import presets_view
+    from .runtimes.pricing import BUILTIN_PRICES, PRICE_SOURCES, PRICES_AS_OF
+
     return {
         "runtime_types": [type_view(a) for a in runtimes.ADAPTERS.values()],
         "runtimes": [runtime_view(r) for r in await db.list_runtimes()],
         "providers": [provider_view(r) for r in await db.list_providers()],
         "agents": [agent_view(r) for r in await db.list_agents()],
+        "provider_presets": presets_view(),
+        "prices": {"as_of": PRICES_AS_OF, "sources": list(PRICE_SOURCES),
+                   "models": {name: price.view() for name, price in BUILTIN_PRICES.items()}},
         "limits": _limits(),
     }
 
@@ -575,8 +691,8 @@ async def delete_runtime(runtime_id: str) -> dict[str, Any]:
 
 # --- Providers ---
 
-_PROVIDER_FIELDS = ("name", "protocols", "auth", "oauth_runtime_type", "base_url", "models", "max_concurrency",
-                    "api_key")
+_PROVIDER_FIELDS = ("name", "protocols", "auth", "oauth_runtime_type", "base_url", "models", "env",
+                    "max_concurrency", "api_key")
 
 
 async def _existing_provider(provider_id: str, conn: Any = None) -> dict[str, Any]:
@@ -602,6 +718,7 @@ def _provider_fields(data: Mapping[str, Any], current: Mapping[str, Any] | None)
         "auth": auth.value,
         "base_url": _base_url(merged["base_url"]),
         "models": _models(merged["models"]),
+        "env": _provider_env(merged["env"]),
         "max_concurrency": _max_concurrency(merged["max_concurrency"]),
     }
     key: Any = ...
@@ -645,7 +762,8 @@ async def _provider_answer(provider_id: str) -> dict[str, Any]:
 
 
 async def create_provider(data: Any) -> dict[str, Any]:
-    """Register ``{name, protocols, auth, oauth_runtime_type?, base_url?, models?, max_concurrency?, api_key?}``."""
+    """Register ``{name, protocols, auth, oauth_runtime_type?, base_url?, models?, env?, max_concurrency?,
+    api_key?}``."""
     import asyncpg
 
     from ..db import agent_registry as db
@@ -741,7 +859,13 @@ async def create_agent(data: Any) -> dict[str, Any]:
         agent_id = await db.insert_agent(fields)
     except asyncpg.UniqueViolationError:
         raise RegistryConflict(f"an agent named {fields['name']!r} already exists") from None
-    return {"agent": agent_view(await _existing_agent(agent_id))}
+    return await _agent_answer(agent_id)
+
+
+async def _agent_answer(agent_id: str) -> dict[str, Any]:
+    """The agent, and what registering it as it is should warn about (``cost_warnings``)."""
+    row = await _existing_agent(agent_id)
+    return {"agent": agent_view(row), "warnings": cost_warnings(AgentSpec.from_row(row))}
 
 
 async def update_agent(agent_id: str, data: Any) -> dict[str, Any]:
@@ -775,7 +899,7 @@ async def update_agent(agent_id: str, data: Any) -> dict[str, Any]:
         await db.update_agent(agent_id, fields)
     except asyncpg.UniqueViolationError:
         raise RegistryConflict(f"an agent named {fields['name']!r} already exists") from None
-    return {"agent": agent_view(await _existing_agent(agent_id))}
+    return await _agent_answer(agent_id)
 
 
 async def delete_agent(agent_id: str) -> dict[str, Any]:

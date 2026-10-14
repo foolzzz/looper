@@ -49,11 +49,11 @@ async def read_runtimes(conn: asyncpg.Connection) -> list[dict[str, Any]]:
 async def read_providers(conn: asyncpg.Connection) -> list[dict[str, Any]]:
     """Every provider with its API key (``api_key``, None without one)."""
     rows = await conn.fetch(
-        "SELECT p.id, p.name, p.protocols, p.auth, p.oauth_runtime_type, p.base_url, p.models, p.max_concurrency, "
-        "p.builtin, s.api_key "
+        "SELECT p.id, p.name, p.protocols, p.auth, p.oauth_runtime_type, p.base_url, p.models, p.env, "
+        "p.max_concurrency, p.builtin, s.api_key "
         "FROM llm_providers p LEFT JOIN llm_provider_secrets s ON s.provider_id = p.id ORDER BY p.name COLLATE \"C\""
     )
-    return [{**dict(row), "models": _json(row["models"])} for row in rows]
+    return [{**dict(row), "models": _json(row["models"]), "env": _json(row["env"])} for row in rows]
 
 
 async def read_agents(conn: asyncpg.Connection) -> list[dict[str, Any]]:
@@ -239,7 +239,7 @@ async def write_provider(conn: asyncpg.Connection, provider_id: str | None, valu
     """Add a provider (``provider_id`` None) or replace one's fields; ``api_key`` (None: none) replaces its key."""
     from .agent_registry import insert_provider, update_provider
 
-    fields = {k: values[k] for k in ("name", "protocols", "auth", "oauth_runtime_type", "base_url", "models",
+    fields = {k: values[k] for k in ("name", "protocols", "auth", "oauth_runtime_type", "base_url", "models", "env",
                                      "max_concurrency")}
     if provider_id is None:
         return await insert_provider(conn, fields, api_key)

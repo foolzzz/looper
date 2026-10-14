@@ -111,6 +111,10 @@ CREATE TABLE IF NOT EXISTS agent_sessions (
 -- starts a new session. NULL: a session from before agents, which Claude Code ran.
 ALTER TABLE agent_sessions ADD COLUMN IF NOT EXISTS runtime_type TEXT;
 ALTER TABLE agent_sessions ADD COLUMN IF NOT EXISTS session_agent_id TEXT;
+-- The provider (llm_providers.id) the session ran with: a session resumes only with the same runtime type and
+-- the same provider (runtimes.can_resume). NULL: a session from before this column, run with Claude Code's own
+-- login.
+ALTER TABLE agent_sessions ADD COLUMN IF NOT EXISTS provider_id TEXT;
 
 -- A task's journal: what happened in it that a later agent or session needs.
 -- Code writes an entry, never the model, when its event happens: a step
@@ -193,8 +197,8 @@ CREATE TABLE IF NOT EXISTS llm_providers (
     oauth_runtime_type  TEXT,
     base_url            TEXT NOT NULL DEFAULT '',
     -- The model catalog: [{"name", "context_window", "input_usd_per_mtok", "output_usd_per_mtok",
-    -- "cache_read_usd_per_mtok", "cache_write_usd_per_mtok", "efforts"}], each but the name null when unknown;
-    -- [] = any model the provider takes.
+    -- "cache_read_usd_per_mtok", "cache_write_usd_per_mtok", "efforts", "background_model"}], each but the name
+    -- null when unknown; [] = any model the provider takes. A null price falls back to the built-in price table.
     models              JSONB NOT NULL DEFAULT '[]'::jsonb CHECK (jsonb_typeof(models) = 'array'),
     -- At most this many runs at once on the provider; NULL = no limit.
     max_concurrency     INTEGER CHECK (max_concurrency > 0),
@@ -203,6 +207,10 @@ CREATE TABLE IF NOT EXISTS llm_providers (
     updated_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
     CHECK ((auth = 'oauth') = (oauth_runtime_type IS NOT NULL))
 );
+-- The provider's own environment variables for the runs that use it, [{"key", "value"}]: not secrets (its key is
+-- in llm_provider_secrets), and none a runtime's provider binding sets itself.
+ALTER TABLE llm_providers ADD COLUMN IF NOT EXISTS env JSONB NOT NULL DEFAULT '[]'::jsonb
+    CHECK (jsonb_typeof(env) = 'array');
 CREATE TABLE IF NOT EXISTS llm_provider_secrets (
     provider_id  TEXT PRIMARY KEY REFERENCES llm_providers(id) ON DELETE CASCADE,
     api_key      TEXT NOT NULL

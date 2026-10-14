@@ -32,6 +32,7 @@ from typing import Any
 from ..agent_settings import AgentType, Launch, load_agent_settings
 from ..bus import MessageBus
 from ..claude_cli import ClaudeRunRecorder, budget_error
+from ..run_usage import run_usage
 from ..knowledge import documents_label, load_knowledge
 from ..library import items_label, load_installed
 from ..runtimes import RuntimeAdapter
@@ -661,6 +662,13 @@ class WorkerPool:
             assert process.stdout is not None
             async for event in runtime.parse(process.stdout, model=launch.model):
                 await recorder.record(event)
+                if (capped := recorder.cap_stop) is not None:
+                    # Over its per-run cap at the provider's prices: stopped now, ending with the cap's result.
+                    result_event = capped.result_event
+                    _end_input()
+                    if process.returncode is None:
+                        process.kill()
+                    return
 
                 event_type = event.get("type", "")
 
@@ -702,7 +710,9 @@ class WorkerPool:
                 elif event_type == "result":
                     result_event = event
                     _end_input()
-                    cost = event.get("total_cost_usd", event.get("cost_usd"))
+                    # The run's cost as recorded: Claude Code's figure, or its tokens at the provider's prices.
+                    cost = run_usage(event, price=launch.price).cost_usd if launch.price is not None \
+                        else event.get("total_cost_usd", event.get("cost_usd"))
                     duration_ms = event.get("duration_ms")
                     if parent_task_id:
                         try:

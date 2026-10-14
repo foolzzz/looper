@@ -24,10 +24,16 @@ Verified against Claude Code 2.1.285; the recorded examples are in
 
 So a run's own usage is the change in the reported totals, and its context is
 the prompt of its last main-loop request.
+
+``total_cost_usd`` is priced at Claude's prices whatever served the requests.
+With a provider of its own prices (``runtimes.pricing``), the totals' cost is
+each model's ``modelUsage`` tokens at that provider's prices instead
+(``price``), so the change in the totals is still the run's own spend.
 """
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, fields, replace
 from typing import Any
 
@@ -89,6 +95,15 @@ class Usage:
         """These totals with every field ``reported`` has replaced."""
         return replace(self, **{f.name: v for f in fields(self) if (v := getattr(reported, f.name)) is not None})
 
+    def plus(self, other: Usage) -> Usage:
+        """Both usages added up; a field neither reports stays unreported."""
+        sums: dict[str, Any] = {}
+        for item in fields(self):
+            mine, theirs = getattr(self, item.name), getattr(other, item.name)
+            total = None if mine is None and theirs is None else (mine or 0) + (theirs or 0)
+            sums[item.name] = round(total, 10) if item.name == "cost_usd" and total is not None else total
+        return Usage(**sums)
+
     def filled_from(self, other: Usage) -> Usage:
         """This usage with its unreported fields taken from ``other``."""
         return replace(self, **{f.name: getattr(other, f.name) for f in fields(self) if getattr(self, f.name) is None})
@@ -108,40 +123,61 @@ class Usage:
         )
 
 
-def reported_totals(result_event: dict[str, Any] | None) -> Usage:
+# Prices one model's tokens (``runtimes.pricing.pricer``); None when it cannot.
+Price = Callable[[str, Usage], "float | None"]
+
+
+def _model_tokens(usage: dict[str, Any]) -> Usage:
+    return Usage(**{name: _count(usage.get(model_key)) for name, (model_key, _) in _TOKEN_FIELDS.items()})
+
+
+def reported_totals(result_event: dict[str, Any] | None, price: Price | None = None) -> Usage:
     """The session's running totals a result reports: its cost, and its tokens over every model.
 
-    The tokens are None when the result has no ``modelUsage`` (an older Claude Code).
+    The tokens are None when the result has no ``modelUsage`` (an older Claude Code). With ``price``, the cost
+    is each model's tokens at that price, None when one of them cannot be priced, instead of
+    ``total_cost_usd``.
     """
     result = result_event or {}
-    totals = Usage(cost_usd=_dollars(result.get("total_cost_usd")))
+    totals = Usage(cost_usd=_dollars(result.get("total_cost_usd")) if price is None else None)
     models = result.get("modelUsage")
     if not isinstance(models, dict) or not models:
         return totals
-    sums: dict[str, int] = {}
+    per_model = {str(name): _model_tokens(usage) for name, usage in models.items() if isinstance(usage, dict)}
+    sums: dict[str, Any] = {}
     for name, (model_key, _) in _TOKEN_FIELDS.items():
-        counts = [_count(usage.get(model_key)) for usage in models.values() if isinstance(usage, dict)]
+        counts = [getattr(usage, name) for usage in per_model.values()]
         if counts and all(count is not None for count in counts):
-            sums[name] = sum(counts)  # type: ignore[arg-type]
+            sums[name] = sum(counts)
+    if price is not None and per_model:
+        costs = [price(name, usage) for name, usage in per_model.items()]
+        sums["cost_usd"] = None if any(c is None for c in costs) else round(sum(costs), 10)  # type: ignore[arg-type]
     return replace(totals, **sums)
 
 
-def turn_tokens(result_event: dict[str, Any] | None) -> Usage:
-    """The tokens of the turn's own main-loop requests (``result.usage``): no compaction, no subagents."""
-    usage = (result_event or {}).get("usage")
+def request_tokens(usage: Any) -> Usage:
+    """The tokens of one model request from its API ``usage`` (``input_tokens``, ``output_tokens``,
+    ``cache_read_input_tokens``, ``cache_creation_input_tokens``)."""
     if not isinstance(usage, dict):
         return Usage()
     return Usage(**{name: _count(usage.get(key)) for name, (_, key) in _TOKEN_FIELDS.items()})
 
 
-def run_usage(result_event: dict[str, Any] | None, *, before: Usage | None = None) -> Usage:
-    """A run's own usage: its result's totals less ``before``, the session's totals when it started.
+def turn_tokens(result_event: dict[str, Any] | None) -> Usage:
+    """The tokens of the turn's own main-loop requests (``result.usage``): no compaction, no subagents."""
+    return request_tokens((result_event or {}).get("usage"))
+
+
+def run_usage(result_event: dict[str, Any] | None, *, before: Usage | None = None, price: Price | None = None,
+              ) -> Usage:
+    """A run's own usage: its result's totals (priced with ``price``, if given) less ``before``, the session's
+    totals when it started.
 
     Tokens without a ``modelUsage`` to count them come from the turn's own ``usage``.
     """
     if result_event is None:
         return Usage()
-    return reported_totals(result_event).since(before or Usage()).filled_from(turn_tokens(result_event))
+    return reported_totals(result_event, price).since(before or Usage()).filled_from(turn_tokens(result_event))
 
 
 def request_context(event: dict[str, Any]) -> int | None:

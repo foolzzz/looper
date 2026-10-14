@@ -1,5 +1,5 @@
 import type { TaskCost, TaskRole } from "@/lib/api";
-import { costCaveats, formatUsd } from "@/lib/usage";
+import { costBasis, costCaveats, formatUsd } from "@/lib/usage";
 
 const ROLES: [TaskRole, string][] = [
   ["planner", "Planner"],
@@ -13,7 +13,7 @@ function runs(n: number) {
 
 /** A task's cost by the agents that ran: each role's share of the total, its runs and its cost. */
 export function TaskCostBreakdown({ cost }: { cost: TaskCost }) {
-  const caveats = costCaveats(cost);
+  const caveats = [costBasis(cost), ...costCaveats(cost)].filter(Boolean);
   return (
     <div className="rounded-lg border border-border bg-card px-4 py-3">
       <div className="flex flex-wrap items-baseline justify-between gap-2">

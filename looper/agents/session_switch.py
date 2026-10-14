@@ -6,9 +6,11 @@ restart. Their next turn starts a new session instead when:
 - ``AGENT_CHANGED``: the agent the turn runs cannot resume the saved session.
   ``agent_switch`` decides it before every turn, from what the session was
   saved with and the agent the turn resolved. It is the one place the rule
-  lives: today another runtime type cannot resume a session
-  (``runtimes.can_resume``); the provider rule (any change of provider starts
-  a new session) belongs here too, with the provider saved beside the session.
+  lives (``runtimes.can_resume``): a session resumes only when both its
+  runtime type and its provider are unchanged, so another runtime type, or any
+  change of provider (subscription to API key, API key to subscription, one API
+  key provider to another), starts a new session; a change of model alone does
+  not.
 - ``SESSION_LOST``: the runtime could not resume the saved session (it no
   longer exists), or there is none to resume for work under way.
 
@@ -27,7 +29,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import TYPE_CHECKING
 
-from .runtimes import CLAUDE_CODE, can_resume
+from .runtimes import CLAUDE_CODE, LEGACY_SESSION_PROVIDER_ID, can_resume
 
 if TYPE_CHECKING:
     from .agent_settings import Launch
@@ -48,6 +50,8 @@ class SessionSwitch:
     old_agent: str | None = None
     new_runtime: str | None = None
     new_agent: str | None = None
+    old_provider: str | None = None
+    new_provider: str | None = None
 
     def describe(self) -> str:
         """One line for the task journal and the activity."""
@@ -61,18 +65,23 @@ class SessionSwitch:
 
 
 def agent_switch(
-    session_id: str | None, session_runtime: str | None, session_agent: str | None, launch: Launch,
+    session_id: str | None, session_runtime: str | None, session_agent: str | None, launch: Launch, *,
+    session_provider: str | None,
 ) -> SessionSwitch | None:
-    """The switch a turn about to run with ``launch`` makes from the session saved with ``session_runtime`` and
-    ``session_agent`` (None: from before agents, which Claude Code ran); None when there is no saved session
+    """The switch a turn about to run with ``launch`` makes from the session saved with ``session_runtime``,
+    ``session_provider`` and ``session_agent`` (None runtime: from before agents, which Claude Code ran; None
+    provider: from before sessions recorded it, Claude Code's own login); None when there is no saved session
     or the turn's agent resumes it."""
-    if not session_id or can_resume(session_runtime, launch.runtime):
+    provider = launch.agent.provider.id
+    if not session_id or can_resume(session_runtime, session_provider, launch.runtime, provider):
         return None
-    old = session_runtime or CLAUDE_CODE.type
+    old, old_provider = session_runtime or CLAUDE_CODE.type, session_provider or LEGACY_SESSION_PROVIDER_ID
+    detail = (f"a {launch.runtime.type} process cannot resume a {old} session" if old != launch.runtime.type
+              else f"a session of provider {old_provider} cannot go on with provider {provider}")
     return SessionSwitch(
-        SwitchReason.AGENT_CHANGED,
-        f"a {launch.runtime.type} process cannot resume a {old} session",
+        SwitchReason.AGENT_CHANGED, detail,
         old_runtime=old, old_agent=session_agent, new_runtime=launch.runtime.type, new_agent=launch.agent.id,
+        old_provider=old_provider, new_provider=provider,
     )
 
 

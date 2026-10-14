@@ -25,9 +25,12 @@ command themselves. An adapter says:
 - **resident sessions** (``resident_session``, ``resume_args``): a process
   that stays up and takes one user turn at a time, and the arguments that make
   a new process resume a saved session;
-- **cost** (``cost``, ``budget_error``): a run's spend for its provider and
-  where the figure comes from (``CostSource``), and why a run stopped at its
-  spend cap.
+- **cost** (``cost_source``, ``cost``, ``budget_error``): where a run's
+  spend figure comes from with a provider (``CostSource``), the run's spend,
+  and why a run stopped at its spend cap. Tokens priced at a provider's prices
+  (``pricing.price_cost``) and the per-run soft cap Looper enforces itself
+  (``pricing.cap_exceeded``, fed by internal ``usage`` events) are shared by
+  every adapter.
 
 What the catalog and the project knowledge put in a run (plugin directories,
 the MCP configuration, knowledge directories) is materialized by
@@ -45,7 +48,7 @@ from __future__ import annotations
 import asyncio
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, Protocol
@@ -53,8 +56,8 @@ from typing import TYPE_CHECKING, Any, ClassVar, Protocol
 if TYPE_CHECKING:
     from ..agent_registry import ProviderSpec
     from ..agent_settings import Launch
-    from ..claude_cli import ResidentTurn
-    from ..run_usage import Usage
+    from ..claude_cli import CapStop, ResidentTurn
+    from ..run_usage import Price, Usage
 
 
 class ApiProtocol(str, Enum):
@@ -114,10 +117,13 @@ class RunCost:
 
 @dataclass(frozen=True)
 class ProviderBinding:
-    """What points a run at its agent's provider and model, beside the runtime's own flags."""
+    """What points a run at its agent's provider and model, beside the runtime's own flags: arguments, variables
+    set in its environment and variables removed from the environment it inherits (``unset``). ``env`` may hold
+    the provider's API key: it goes into the subprocess environment only, never into a record or a log."""
 
     args: tuple[str, ...] = ()
-    env: tuple[tuple[str, str], ...] = ()
+    env: tuple[tuple[str, str], ...] = field(default=(), repr=False)
+    unset: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -147,9 +153,10 @@ class ResidentSession(Protocol):
     def totals(self) -> Usage: ...
     def stale(self, signature: Any) -> bool: ...
     async def start(self, command: list[str], *, cwd: str, signature: Any, env: dict[str, str] | None = None,
-                    totals: Usage | None = None, autonomous: Callable[[Any], Awaitable[Any]] | None = None) -> None: ...
+                    totals: Usage | None = None, autonomous: Callable[[Any], Awaitable[Any]] | None = None,
+                    price: Price | None = None) -> None: ...
     async def run_turn(self, text: str, on_event: Callable[[dict[str, Any]], Awaitable[None]], *,
-                       tag: Any = None) -> ResidentTurn: ...
+                       tag: Any = None, stop: Callable[[], CapStop | None] | None = None) -> ResidentTurn: ...
     async def stop(self, *, kill: bool = False) -> None: ...
 
 
@@ -168,6 +175,9 @@ class RuntimeAdapter(ABC):
     # The provider auth kinds it can be started with now; OAUTH is the type's own login.
     auth_kinds: ClassVar[frozenset[AuthKind]]
     isolation_id: ClassVar[str]  # names its isolation flags in each run's record
+    # The environment variables its provider binding owns: a provider's own variables (``ProviderSpec.env``)
+    # cannot set them.
+    provider_env_owned: ClassVar[frozenset[str]] = frozenset()
 
     # --- Registration ---
 
@@ -233,6 +243,11 @@ class RuntimeAdapter(ABC):
 
     # --- Cost ---
 
+    def cost_source(self, provider: ProviderSpec) -> CostSource:
+        """Where a run's spend figure comes from with ``provider``: Looper prices its tokens at the provider's
+        prices unless the adapter says the runtime's own report is right for it."""
+        return CostSource.PROVIDER_PRICE
+
     @abstractmethod
     def cost(self, usage: Usage, provider: ProviderSpec) -> RunCost:
         """A run's cost with ``provider``, from its ``usage`` (its tokens and what the runtime reported)."""
@@ -261,10 +276,22 @@ ADAPTERS: dict[str, RuntimeAdapter] = _adapters()
 CLAUDE_CODE: RuntimeAdapter = ADAPTERS["claude-code"]
 
 
-def can_resume(session_runtime_type: str | None, runtime: RuntimeAdapter) -> bool:
-    """Whether a process of ``runtime`` can resume a session saved by one of ``session_runtime_type`` (None: a
-    session from before agents, which Claude Code ran): only one of the same type can."""
-    return (session_runtime_type or CLAUDE_CODE.type) == runtime.type
+# The provider of a session saved before sessions recorded one: Claude Code's own login, the only provider a
+# Claude Code agent could run with then (agent_registry.BUILTIN_PROVIDER).
+LEGACY_SESSION_PROVIDER_ID = "prov-claude-subscription"
+
+
+def can_resume(session_runtime_type: str | None, session_provider_id: str | None, runtime: RuntimeAdapter,
+               provider_id: str) -> bool:
+    """Whether a process of ``runtime`` with provider ``provider_id`` can resume a session saved by
+    ``session_runtime_type`` with ``session_provider_id``: only when both are unchanged (RFC P5). A provider's
+    protocol fields (thinking signatures, tool_use ids, reasoning items) mean nothing to another provider, so
+    every change of provider, in any direction, starts a new session; a change of model alone does not.
+
+    None for the runtime type is a session from before agents (Claude Code ran it); None for the provider is a
+    session from before sessions recorded it (``LEGACY_SESSION_PROVIDER_ID``)."""
+    return ((session_runtime_type or CLAUDE_CODE.type) == runtime.type
+            and (session_provider_id or LEGACY_SESSION_PROVIDER_ID) == provider_id)
 
 
 def adapter(runtime_type: str) -> RuntimeAdapter:
@@ -274,3 +301,8 @@ def adapter(runtime_type: str) -> RuntimeAdapter:
     except KeyError:
         raise RuntimeUnsupported(f"no runtime type {runtime_type!r}; the types are {', '.join(sorted(ADAPTERS))}") \
             from None
+
+
+
+# The shared pricing helpers every adapter uses, here beside the adapters (``pricing``).
+from .pricing import cap_exceeded, price_cost  # noqa: E402, F401

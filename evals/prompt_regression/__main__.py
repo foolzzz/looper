@@ -26,9 +26,15 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("--register-agent", type=Path, metavar="SPEC.json",
                      help="register this agent (runtime, provider, agent; the provider's key from the variable "
                           "its api_key_env names) and run every role on it; see evals/README.md")
+    run.add_argument("--provider-preset",
+                     help="every role runs Claude Code with a provider registered from this preset's "
+                          f"Anthropic-format API (such as glm-bigmodel), its API key from ${runner.API_KEY_ENV}")
+    run.add_argument("--provider-base-url", help="with --provider-preset: this base URL instead of the preset's")
+    run.add_argument("--agent-model", help="with --provider-preset: the agent's model (default: the preset's first)")
     run.add_argument("--tasks", help="comma-separated task ids (default: all)")
     run.add_argument("--max-budget-usd", type=float, default=0.25,
-                     help="real mode: --max-budget-usd for every Claude Code run (default 0.25)")
+                     help="real mode: the cap of every Claude Code run (default 0.25): --max-budget-usd, or the cap "
+                          "Looper keeps at the provider's prices with --provider-preset")
     run.add_argument("--total-cap-usd", type=float, default=0.80,
                      help="real mode: stop the run once its tasks have spent this much (default 0.80)")
     run.add_argument("--pg-url", default=env.get("LOOPER_EVAL_DATABASE_URL") or env.get("LOOPER_TEST_DATABASE_URL"),
@@ -61,13 +67,16 @@ def main(argv: list[str] | None = None) -> int:
     try:
         selected = tasks.select(args.tasks.split(",") if args.tasks else None)
         real = args.mode == "real"
+        provider = runner.ProviderChoice(args.provider_preset, args.agent_model, args.provider_base_url,
+                                         env.get(runner.API_KEY_ENV)) if args.provider_preset else None
         result, path = runner.run(
             mode=args.mode,
             tasks=selected,
             admin_url=args.pg_url,
             out_dir=args.out_dir,
-            model=args.model if real and not args.agent and not args.register_agent else None,
+            model=args.model if real and not args.agent and provider is None and not args.register_agent else None,
             agent=args.agent,
+            provider=provider,
             register=json.loads(args.register_agent.read_text(encoding="utf-8")) if args.register_agent else None,
             max_budget_usd=args.max_budget_usd if real else None,
             total_cap_usd=args.total_cap_usd if real else None,
