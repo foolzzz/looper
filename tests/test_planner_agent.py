@@ -317,8 +317,11 @@ class TestPlanning:
 
         accepted = next(e for e in h.statuses if e.message_type == MessageType.TASK_ACCEPTED)
         assert accepted.payload["step_count"] == 3
-        (persisted,) = [call.args[1] for call in agent_db.upsert_steps.await_args_list]
-        assert [row["instruction"] for row in persisted] == ["do s1", "do s2", "do s3"]
+        # The plan is saved with all its steps at once; each step is saved again as it changes.
+        created = next(call.kwargs for call in agent_db.save_plan.await_args_list if call.kwargs["steps"])
+        assert created["plan"]["status"] == "executing"
+        assert [row["instruction"] for row in created["steps"]] == ["do s1", "do s2", "do s3"]
+        assert [s["status"] for s in agent_db.store.steps["t1"].values()] == ["verified"] * 3
         phases = [call.args[1] for call in agent_db.update_task_phase.await_args_list]
         assert phases == ["planning", "executing", "completed"]
 
@@ -457,9 +460,13 @@ class TestDecisions:
             ("s1", "skipped"), ("s2", "verified"), ("s1b", "verified"),
         ]
         assert h.final().payload["status"] == "completed"  # type: ignore[union-attr]
-        # Only the replan's steps (the new s1b and the replaced, not yet started s2) are written again.
-        replanned = agent_db.upsert_steps.await_args_list[-1].args[1]
-        assert [row["instruction"] for row in replanned] == ["do s1b", "do s2"]
+        # The decided step and the replan's steps (the new s1b and the replaced, not yet started s2) are
+        # saved together.
+        replanned = [call.kwargs["steps"] for call in agent_db.save_plan.await_args_list
+                     if len(call.kwargs["steps"]) > 1][-1]
+        assert [(row["key"], row["status"]) for row in replanned] == [
+            ("s1", "skipped"), ("s1b", "pending"), ("s2", "pending"),
+        ]
         assert any("Plan changed: s1b, s2 (after s1b)" in line for line in activity(agent_db))
 
     def test_fail_decision_fails_the_task_with_its_reason(self, planner_claude: Any) -> None:
@@ -542,7 +549,8 @@ class TestResidentClaude:
         async def scenario(h: Harness) -> None:
             await h.start()
             await h.until(lambda: h.held)  # planned (0.25); the Worker keeps running
-            # The server stops; the plan file keeps the session and its running total.
+            # The server stops; the database keeps the plan, the session and its running total.
+            agent_db.store.tasks["t1"] = {"requirement": "build the calc package", "work_dir": str(h.work_dir)}
             await h.planner.stop()
             h.planner = PlannerAgent(task_id="t1", runtime_root=h.work_dir.parent, claude_bin=claude.bin)
             await h.planner.start(h.bus)
@@ -673,6 +681,71 @@ class TestResidentClaude:
         assert [f["cost_usd"] for f in finishes] == [0.25, 0.25, 0.25]
         assert h.planner._plan.session_totals == Usage(cost_usd=0.75)  # type: ignore[union-attr]
         assert any("ran a turn on its own" in r.getMessage() for r in caplog.records)
+
+
+# --- Resuming after a server restart ---
+
+
+@pytest.mark.usefixtures("agent_db")
+class TestResume:
+    def test_a_restarted_planner_carries_on_from_the_saved_plan(self, planner_claude: Any, agent_db: Any) -> None:
+        """Each step goes on from where the stop left it, in the same session, without planning again."""
+        claude = planner_claude(
+            plan(step("a"), step("b"), step("c", review=True), step("d", "a")),
+            decide("accept"),  # a
+            decide("retry", reason="b failed", feedback="fix the parser"),  # b
+            decide("review", reason="c needs a look"),  # c
+            "<hang>",  # d: the server stops in the middle of this decision
+            decide("accept"),  # every decision after the restart
+        )
+        resumed = False
+
+        def outcome(envelope: MessageEnvelope) -> dict[str, Any] | None:
+            key = envelope.payload["step_key"]
+            if envelope.message_type == MessageType.VERIFY_REQUEST:
+                return REVIEW_PASS if resumed else None  # c's first Reviewer is still running at the stop
+            if key == "b" and envelope.payload["attempt"] == 1:
+                return WORK_FAILED
+            if key == "b" and not resumed:
+                return None  # b's retry is still running at the stop
+            return WORK_OK
+
+        async def scenario(h: Harness) -> None:
+            nonlocal resumed
+            await h.start()
+            await h.until(lambda: len(h.held) == 2 and len(claude.turns()) == 5)
+            await h.planner.stop()  # the server stops
+            saved = {s["key"]: s for s in agent_db.store.steps["t1"].values()}
+            assert {key: s["status"] for key, s in saved.items()} == {
+                "a": "verified", "b": "dispatched", "c": "completed", "d": "deciding"}
+            assert (saved["b"]["retries"], saved["b"]["feedback"]) == (1, ["fix the parser"])
+            assert saved["d"]["result"]["summary"] == "did it"  # the cut-off decision's input
+
+            resumed = True
+            agent_db.store.tasks["t1"] = {"requirement": "build the calc package", "work_dir": str(h.work_dir)}
+            h.planner = PlannerAgent(task_id="t1", runtime_root=h.work_dir.parent, claude_bin=claude.bin)
+            await h.planner.start(h.bus)
+            await h.bus.publish(MessageEnvelope.create(
+                source=TASK_ROUTER_ADDRESS, target=h.planner.agent_address, message_type=MessageType.TASK_RESUME,
+                payload={"task_id": "t1"}, correlation_id="corr-1",
+            ))
+            await h.finished()
+
+        h = drive(claude, outcome, scenario)
+        assert h.final().payload["status"] == "completed"  # type: ignore[union-attr]
+        texts = [turn["text"] for turn in claude.turns()]
+        assert texts[0].startswith("[PLAN]") and all(t.startswith("[DECISION]") for t in texts[1:])
+        assert texts[5].startswith("[DECISION] Step d")  # the cut-off decision, taken again first
+        # The restarted Claude resumes the session.
+        assert [_flag(argv, "--resume") for argv in claude.argvs()] == [None, "sess-p"]
+        # b runs again as the same attempt with its feedback; d's result is not run again; c gets a new Reviewer.
+        b_runs = [w.payload for w in h.work_items if w.payload["step_key"] == "b"]
+        assert [(p["attempt"], p["feedback"]) for p in b_runs] == [
+            (1, []), (2, ["fix the parser"]), (2, ["fix the parser"])]
+        assert [w.payload["step_key"] for w in h.work_items].count("d") == 1
+        assert len(h.reviews) == 2
+        assert agent_db.store.plans["t1"]["status"] == "completed"
+        assert not (h.work_dir.parent / ".local" / "planner").exists()  # no plan file is written
 
 
 # --- The system prompt: harness, role, project background, task, reply contract ---

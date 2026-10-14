@@ -92,27 +92,6 @@ class TestPlannerUserMessage:
         (reply,) = _replies(sent)
         assert expected in reply.payload["text"]
 
-    def test_depends_on_survives_plan_persistence(self) -> None:
-        """A restarted Planner restores its plan: its id, its session, and each step's label, state and dependencies."""
-
-        async def _run() -> TaskPlan | None:
-            with tempfile.TemporaryDirectory() as tmp:
-                saved = _executing_plan(
-                    PlanStep(step_id="step-1", index=0, instruction="a", key="s1", status="dispatched"),
-                    PlanStep(step_id="step-2", index=1, instruction="b", key="s2", depends_on=["step-1"]),
-                )
-                saved.session_id = "sess-p"
-                PlannerAgent(task_id="t1", runtime_root=Path(tmp))._save_plan(saved)
-                second = PlannerAgent(task_id="t1", runtime_root=Path(tmp))
-                second._load_plan()
-                return second._plan
-
-        restored = asyncio.run(_run())
-        assert restored is not None
-        assert (restored.plan_id, restored.session_id) == ("p1", "sess-p")
-        assert [(s.label, s.status) for s in restored.steps] == [("s1", "dispatched"), ("s2", "pending")]
-        assert restored.steps[1].depends_on == [restored.steps[0].step_id]
-
 
 class TestChatTargets:
     def test_web_message_can_target_a_planner(self) -> None:

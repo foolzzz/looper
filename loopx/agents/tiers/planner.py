@@ -1720,7 +1720,7 @@ class PlannerAgent:
         """
         try:
             await db_plans.save(self._task_id, plan=plan.row() if plan_row else None,
-                                steps=[_step_row(step) for step in dict.fromkeys(steps)])
+                                steps=[_step_row(step) for step in {id(step): step for step in steps}.values()])
         except Exception:
             logger.exception("failed to save the plan of task %s", self._task_id)
 
