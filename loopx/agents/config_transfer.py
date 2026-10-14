@@ -171,9 +171,15 @@ def _secret(value: Any, include_secrets: bool) -> Any:
 
 
 def channel_entry(row: Mapping[str, Any], include_secrets: bool) -> dict[str, Any]:
+    from .channels.allowlist import AllowlistError, normalized_config
+
     public = _CHANNEL_PUBLIC_KEYS.get(row["channel_type"], frozenset())
-    config = {key: value if key in public else _secret(value, include_secrets)
-              for key, value in dict(row["config"] or {}).items()}
+    config = dict(row["config"] or {})
+    try:  # the allowlist as the API stores it (an older row may hold a comma-separated string)
+        config = normalized_config(row["channel_type"], config)
+    except AllowlistError:
+        pass
+    config = {key: value if key in public else _secret(value, include_secrets) for key, value in config.items()}
     return {"channel_type": row["channel_type"], "channel_id": row["channel_id"],
             "display_name": row["display_name"], "enabled": row["enabled"], "config": config}
 
@@ -219,31 +225,17 @@ def document_entry(row: Mapping[str, Any]) -> dict[str, Any]:
 @dataclass
 class ExportSummary:
     counts: dict[str, int] = field(default_factory=dict)
-    placeholders: int = 0
-    secrets: int = 0
+    secrets: int = 0  # the secret values written, or left out as placeholders
     repoint: int = 0
     bytes: int = 0
 
 
-def _count_secrets(entry: Any, summary: ExportSummary, include_secrets: bool) -> None:
-    """Count the secret values an entry holds (``include_secrets``) or stands in for."""
-    if isinstance(entry, Mapping):
-        if is_placeholder(entry):
-            summary.placeholders += 1
-            return
-        for value in entry.values():
-            _count_secrets(value, summary, include_secrets)
-    elif isinstance(entry, list):
-        for value in entry:
-            _count_secrets(value, summary, include_secrets)
-
-
-def _secret_values(entry: Mapping[str, Any]) -> int:
-    """How many secret values a channel or MCP entry carries in full."""
+def _secret_count(entry: Mapping[str, Any]) -> int:
+    """How many secret values a channel or MCP entry holds, or stands in for."""
     if "server" in entry:
         return len(entry["server"]["env"]) + len(entry["server"]["headers"])
-    public = _CHANNEL_PUBLIC_KEYS.get(entry.get("channel_type", ""), frozenset())
-    return sum(1 for key in entry.get("config", {}) if key not in public)
+    public = _CHANNEL_PUBLIC_KEYS.get(entry["channel_type"], frozenset())
+    return sum(1 for key in entry["config"] if key not in public)
 
 
 def _dump(value: Any) -> str:
@@ -260,6 +252,7 @@ async def export_chunks(
     """
     from .. import __version__
     from ..db import config_transfer as db
+    from ..db.projects import EXECUTION_COLUMNS
 
     summary = summary if summary is not None else ExportSummary()
     layers = await db.read_layers(conn)
@@ -279,9 +272,7 @@ async def export_chunks(
     summary.counts.update({"settings.layers": len(head["settings"]["layers"]),
                            "settings.roles": len(head["settings"]["roles"]), "channels": len(channels),
                            "installs": len(head["installs"])})
-    for entry in channels:
-        _count_secrets(entry, summary, include_secrets)
-        summary.secrets += _secret_values(entry) if include_secrets else 0
+    summary.secrets += sum(_secret_count(entry) for entry in channels)
     yield "{" + ",\n".join(f"{_dump(k)}:{_dump(v)}" for k, v in head.items())
 
     if include_projects:
@@ -292,8 +283,6 @@ async def export_chunks(
         summary.counts["projects"] = len(projects)
         yield ',\n"projects":['
         for index, project in enumerate(projects):
-            from ..db.projects import EXECUTION_COLUMNS
-
             owned = []
             for row in items:
                 if row["owner_project_id"] == project["id"]:
@@ -317,8 +306,7 @@ async def export_chunks(
         files = None if row["kind"] == "mcp" else await db.read_item_files(conn, row["id"])
         entry = item_entry(row, files, include_secrets)
         if row["kind"] == "mcp":
-            _count_secrets(entry, summary, include_secrets)
-            summary.secrets += _secret_values(entry) if include_secrets else 0
+            summary.secrets += _secret_count(entry)
         yield ("\n" if index == 0 else ",\n") + _dump(entry)
     yield "]}\n"
 
@@ -992,7 +980,7 @@ def format_plan(plan: Plan, path: Path) -> str:
 def format_export(summary: ExportSummary, path: Path, *, include_secrets: bool) -> str:
     counts = ", ".join(f"{section} {count}" for section, count in summary.counts.items())
     secrets = (f"{summary.secrets} secret values included" if include_secrets
-               else f"{summary.placeholders} secret values left out as placeholders")
+               else f"{summary.secrets} secret values left out as placeholders")
     lines = [f"Wrote {path} ({summary.bytes} bytes, {FORMAT}): {counts}; {secrets}."]
     if summary.repoint:
         lines.append(f"{summary.repoint} path document(s) are references to re-point on the new machine.")

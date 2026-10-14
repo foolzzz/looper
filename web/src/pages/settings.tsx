@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { CatalogCard } from "@/components/catalog-card";
+import { ConfigTransferCard } from "@/components/config-transfer";
 import { LayerSettingsForm } from "@/components/layer-settings";
 import {
   fetchAgentSettings,
@@ -351,6 +352,15 @@ export function SettingsPage() {
             ))}
           </div>
         )}
+      </div>
+
+      <div>
+        <h2 className="text-sm font-semibold mb-1">Move to another machine</h2>
+        <p className="text-xs text-muted-foreground mb-3">
+          One file with the agent defaults and role settings, the catalog with its files and MCP servers, global
+          installs and channels.
+        </p>
+        <ConfigTransferCard />
       </div>
     </div>
   );
