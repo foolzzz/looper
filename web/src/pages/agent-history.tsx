@@ -22,7 +22,7 @@ import ReactMarkdown from "react-markdown";
 import { Badge } from "@/components/ui/badge";
 import { ContextUsagePanel } from "@/components/context-usage";
 import { cn } from "@/lib/utils";
-import { compactionChange, formatTokens, formatUsd } from "@/lib/usage";
+import { compactionChange, formatTokens, formatUsd, runCostLabel } from "@/lib/usage";
 import {
   fetchChatMessages,
   fetchLlmRecord,
@@ -762,8 +762,23 @@ function RunUsage({ record }: { record: LlmRecord }) {
         </Badge>
       )}
       {record.cost_usd != null && (
-        <span className="font-mono text-muted-foreground" title="This run's own cost">
+        <span
+          className="font-mono text-muted-foreground"
+          title={
+            runCostLabel(record) === "equivalent"
+              ? "This run's own cost: what the subscription's usage would cost at API prices, not money spent"
+              : runCostLabel(record)
+                ? "This run's own cost, from its tokens at the provider's prices"
+                : "This run's own cost"
+          }
+        >
           {formatUsd(record.cost_usd)}
+          {runCostLabel(record) && <span className="ml-1 text-[10px]">{runCostLabel(record)}</span>}
+        </span>
+      )}
+      {record.cost_usd == null && record.cost_source === "provider_price" && record.status !== "running" && (
+        <span className="font-mono text-[10px] text-muted-foreground" title="Its model has no price: tokens only">
+          tokens only
         </span>
       )}
     </>

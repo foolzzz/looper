@@ -20,6 +20,34 @@ How the agent system works today is described in
 
 ### Added
 
+- **Claude Code with API keys and Anthropic-compatible providers.** A Claude
+  Code agent can now run with an API-key provider: Anthropic's own API (the
+  key as `ANTHROPIC_API_KEY`) or any Anthropic-format endpoint such as GLM,
+  DeepSeek, Kimi or a local CLIProxyAPI (`ANTHROPIC_BASE_URL` and
+  `ANTHROPIC_AUTH_TOKEN`, with every Claude model alias Claude Code uses on
+  its own mapped to the provider's models: the opus and sonnet aliases and
+  subagents to the agent's model, the haiku and small/fast model to the
+  catalog's new `background_model`). A provider can carry its own environment
+  variables (`env`). Presets for GLM (BigModel, Z.ai), DeepSeek, Kimi
+  (Moonshot China, international) and CLIProxyAPI fill a new provider from the
+  vendor's documented endpoints, models and Claude Code variables, so the user
+  only adds the key. A built-in price table (Claude, GPT, GLM, DeepSeek, Kimi;
+  USD list prices of 2026-10-14) prices every model the catalog leaves
+  unpriced. Runs on such a provider are priced by Looper from each model's
+  tokens, cache reads and writes included (`cost_source: provider_price`),
+  and their per-run cap is Looper's own soft cap at those prices instead of
+  `--max-budget-usd`; an agent whose model has no price is registered with a
+  warning that its runs record tokens only and no spend cap applies. The
+  dashboard has a preset picker, the background model and extra environment
+  in the provider form, built-in prices beside the catalog's, each agent's
+  cost basis, and marks subscription costs as "equivalent". The prompt eval
+  can run with a provider preset (`--provider-preset`, its key from
+  `LOOPER_EVAL_API_KEY`).
+- **A resident session resumes only with the same runtime type and provider.**
+  `agent_sessions` records the session's `provider_id`; any change of provider
+  (subscription to API key, back, or between API-key providers) starts a new
+  session through the handoff and resume brief, while a change of model alone
+  still resumes.
 - **Progress and experience captured as they happen.** The task journal gains
   `step_failed` and `step_retry` (what went wrong, why, and the Worker's and
   Reviewer's learnings), `decision` (a replan, steps added from chat, a stop
@@ -155,6 +183,12 @@ How the agent system works today is described in
 
 ### Changed
 
+- **A Manager message that reaches its per-run spend cap is answered with the
+  cap's error**, and the next message starts a new process that resumes the
+  session (as a Planner turn already did). Before, the text written before the
+  cap went out as the reply and the process kept answering every later
+  message with the cap. Registering or changing an agent now also answers with
+  `warnings`, and each agent in `GET /api/registry` carries its `cost` basis.
 - **Renamed to Looper.** The command is `looper`, the Python package and
   distribution are `looper` (`looper-<version>-py3-none-any.whl`), the
   dashboard, prompts and docs say Looper, and `looper version --format json`

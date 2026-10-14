@@ -68,7 +68,7 @@ _CHANNEL_PUBLIC_KEYS = {
 }
 _ROLE_FIELDS = ("prompt", "timeout_seconds", "max_concurrency", "enabled")
 _LAYER_FIELDS = ("harness_prompt", "agent", "effort", "env", "run_budget_usd")
-_PROVIDER_FIELDS = ("protocols", "auth", "oauth_runtime_type", "base_url", "models", "max_concurrency")
+_PROVIDER_FIELDS = ("protocols", "auth", "oauth_runtime_type", "base_url", "models", "env", "max_concurrency")
 _ITEM_FIELDS = ("origin", "source", "version", "description", "modified")
 _DOCUMENT_FIELDS = ("summary", "source_kind", "filename", "path", "sha256", "size_bytes")
 _CHANNEL_ID = re.compile(r"[a-zA-Z0-9_-]{1,64}")
@@ -187,8 +187,10 @@ def runtime_entry(row: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def provider_entry(row: Mapping[str, Any], include_secrets: bool) -> dict[str, Any]:
+    from .agent_registry import catalog_entries
+
     return {"name": row["name"], **{name: row[name] for name in _PROVIDER_FIELDS},
-            "protocols": list(row["protocols"]),
+            "protocols": list(row["protocols"]), "models": catalog_entries(row["models"]),
             "api_key": None if row["api_key"] is None else _secret(row["api_key"], include_secrets)}
 
 
@@ -793,7 +795,7 @@ class _Importer:
                                                         if row is None else row))
 
     async def provider(self, entry: Any) -> None:
-        from .agent_registry import RegistryError, _provider_fields, provider_spec
+        from .agent_registry import RegistryError, _provider_fields, catalog_entries, provider_spec
 
         raw = entry if isinstance(entry, Mapping) else {}
         label = str(raw.get("name"))
@@ -824,7 +826,7 @@ class _Importer:
             return
         new = {**{k: fields[k] for k in _PROVIDER_FIELDS}, "api_key": key}
         current = {**{k: row[k] for k in _PROVIDER_FIELDS}, "protocols": list(row["protocols"]),
-                   "api_key": row["api_key"]} if row is not None else None
+                   "models": catalog_entries(row["models"]), "api_key": row["api_key"]} if row is not None else None
         action = self.outcome("providers", name, current, _differs(new, current, (*_PROVIDER_FIELDS, "api_key")))
         provider_id = row["id"] if row is not None else f"new:{name}"
         if self.apply and action in (Action.ADDED, Action.CHANGED):

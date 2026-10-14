@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
 from uuid import uuid4
 
-from .run_usage import Usage, compaction, reported_totals, request_context, run_usage
+from .run_usage import Price, Usage, compaction, reported_totals, request_context, request_tokens, run_usage
 
 if TYPE_CHECKING:
     from .agent_registry import ProviderSpec
@@ -22,6 +22,7 @@ if TYPE_CHECKING:
     from .knowledge import AgentKnowledge
     from .library import AgentLibrary
     from .runtimes import RuntimeAdapter
+    from .runtimes.pricing import RunSpend
     from .system_prompt import SystemPrompt
 
 logger = logging.getLogger(__name__)
@@ -182,15 +183,74 @@ def budget_args(max_budget_usd: float | None) -> list[str]:
 
 
 BUDGET_SUBTYPE = "error_max_budget_usd"
+# Marks the result Looper ends a run with when it stops the run at its soft cap (``soft_cap_result``).
+SOFT_CAP = "looper_soft_cap"
 
 
 def budget_error(result_event: dict[str, Any] | None) -> str | None:
-    """Why a run stopped at its spend cap (``--max-budget-usd``); None when it did not."""
+    """Why a run stopped at its spend cap (``--max-budget-usd``, or Looper's soft cap); None when it did not."""
     if not result_event or result_event.get("subtype") != BUDGET_SUBTYPE:
         return None
     errors = result_event.get("errors")
     detail = "; ".join(str(e) for e in errors) if isinstance(errors, list) and errors else "budget reached"
+    if result_event.get(SOFT_CAP):
+        return f"Looper stopped the run at its per-run spend cap: {detail}"
     return f"Claude Code stopped at its per-run spend cap (--max-budget-usd): {detail}"
+
+
+# --- Looper's own per-run spend cap ---
+#
+# With a provider that Looper prices itself (runtimes.pricing), --max-budget-usd would count Claude's prices,
+# so Looper adds up the run's usage events as they stream and stops the run once it is over its cap: a soft cap,
+# since the request that crosses it is already made. A run stopped this way ends with ``soft_cap_result``, which
+# ``budget_error`` reads like Claude Code's own. The stream carries the main loop's requests; a subagent's
+# requests and Claude Code's side requests appear only in the result's totals, so they count toward the run's
+# recorded cost but not toward stopping it.
+
+
+@dataclass(frozen=True)
+class CapStop:
+    """A run that went over its soft cap: the result it ends with, and what it spent until then."""
+
+    result_event: dict[str, Any]
+    usage: Usage
+
+
+def soft_cap_result(spent: float, cap: float) -> dict[str, Any]:
+    """The result a run stopped at its soft cap ends with."""
+    from .project_execution import format_usd
+
+    return {"type": "result", "subtype": BUDGET_SUBTYPE, "is_error": True, "result": "", SOFT_CAP: True,
+            "errors": [f"${format_usd(spent)} at the provider's prices is over the ${format_usd(cap)} cap"]}
+
+
+def _request_usage(event: dict[str, Any], requests: dict[Any, dict[str, Any]]) -> dict[str, Any] | None:
+    """The internal usage event of the model request ``event`` ends, if it ends one.
+
+    Verified against Claude Code 2.1.285 with ``--include-partial-messages``:
+    each request streams a ``message_start`` (its model and its usage so far),
+    a ``message_delta`` with the final usage and a ``message_stop``; an
+    assistant event's usage is a snapshot with its output still at 0. The
+    requests of the main loop and of each subagent (``parent_tool_use_id``)
+    are told apart.
+    """
+    if event.get("type") != "stream_event" or not isinstance(event.get("event"), dict):
+        return None
+    inner, key = event["event"], event.get("parent_tool_use_id")
+    kind = inner.get("type")
+    if kind == "message_start":
+        message = inner.get("message") if isinstance(inner.get("message"), dict) else {}
+        usage = message.get("usage") if isinstance(message.get("usage"), dict) else {}
+        requests[key] = {"model": message.get("model"), "usage": dict(usage)}
+    elif kind == "message_delta" and key in requests and isinstance(inner.get("usage"), dict):
+        requests[key]["usage"].update({k: v for k, v in inner["usage"].items() if v is not None})
+    elif kind == "message_stop" and key in requests:
+        from .runtimes.pricing import usage_event
+
+        request = requests.pop(key)
+        model = request["model"] if isinstance(request["model"], str) else None
+        return usage_event(model, request_tokens(request["usage"]), parent_tool_use_id=key)
+    return None
 
 
 def permission_args() -> list[str]:
@@ -233,7 +293,9 @@ async def iter_lines(stream: asyncio.StreamReader) -> AsyncIterator[bytes]:
 
 
 async def stream_events(stream: asyncio.StreamReader) -> AsyncIterator[dict[str, Any]]:
-    """Claude's stream-json events on ``stream``, in order; a line that is not a JSON object is skipped."""
+    """Claude's stream-json events on ``stream``, in order, each model request followed by its internal usage
+    event (``_request_usage``); a line that is not a JSON object is skipped."""
+    requests: dict[Any, dict[str, Any]] = {}
     async for raw_line in iter_lines(stream):
         line = raw_line.decode("utf-8", errors="replace").strip()
         if not line:
@@ -244,6 +306,8 @@ async def stream_events(stream: asyncio.StreamReader) -> AsyncIterator[dict[str,
             continue
         if isinstance(event, dict):
             yield event
+            if (usage := _request_usage(event, requests)) is not None:
+                yield usage
 
 
 async def write_user_turn(stdin: asyncio.StreamWriter, text: str, *, uuid: str | None = None) -> None:
@@ -354,6 +418,8 @@ class _UserTurn:
     started: bool = False
     session_started: bool = False
     usage: Usage = field(default_factory=Usage)
+    stop: Callable[[], CapStop | None] | None = None  # asked after each event: end the turn at its soft cap?
+    capped: CapStop | None = None  # the turn was ended at its soft cap
 
     def starts_with(self, event: dict[str, Any]) -> bool:
         """Claude began this message's turn: its "started" lifecycle event, or its replay."""
@@ -386,6 +452,7 @@ class _Output:
         self._between: deque[dict[str, Any]] = deque(maxlen=_BETWEEN_LIMIT)  # events outside any turn
         self._own_open = False  # a turn of Claude's own is running
         self._own: AutonomousTurn | None = None  # its owner's handler, if any
+        self._capped = False  # a user turn was ended at its soft cap: the rest of the output belongs to no turn
 
     def read(self) -> None:
         """Start reading, once."""
@@ -411,6 +478,8 @@ class _Output:
         await self.close_own("Claude Code's output ended")
 
     async def _dispatch(self, event: dict[str, Any]) -> None:
+        if self._capped:
+            return  # what Claude writes before it is killed: the turn has ended
         if event.get("type") == "command_lifecycle" or _is_replay(event):
             self._marks_turns = True
         turn = self.turn
@@ -435,6 +504,10 @@ class _Output:
                 self.turn = None
                 if not turn.done.done():  # else the turn was given up (cancelled) meanwhile
                     turn.done.set_result(event)
+            elif turn.stop is not None and (capped := turn.stop()) is not None:
+                turn.capped, self.turn, self._capped = capped, None, True
+                if not turn.done.done():
+                    turn.done.set_result(capped.result_event)
             return
         if event.get("type") == "command_lifecycle":
             return  # the "completed" of a message whose turn has ended
@@ -530,6 +603,7 @@ class ResidentClaude:
         self._command: list[str] = []
         self._signature: Any = None
         self._totals = Usage()  # the session's running totals at its last result
+        self._price: Price | None = None  # prices the totals at the provider's prices, if Looper prices them
 
     @property
     def label(self) -> str:
@@ -564,14 +638,16 @@ class ResidentClaude:
 
     async def start(
         self, command: list[str], *, cwd: str, signature: Any, env: dict[str, str] | None = None,
-        totals: Usage | None = None, autonomous: AutonomousHandler | None = None,
+        totals: Usage | None = None, autonomous: AutonomousHandler | None = None, price: Price | None = None,
     ) -> None:
         """Start the process (with ``env``, else the server's environment); raises ``OSError`` when it cannot run.
 
         ``totals`` are the saved running totals of the session the command
         resumes; a new session starts from none. ``autonomous`` takes each
         turn Claude runs on its own; without it, such a turn only counts
-        toward the totals.
+        toward the totals. ``price`` prices the totals' tokens at the
+        provider's prices (``Launch.price``); without it, their cost is
+        Claude Code's ``total_cost_usd``.
         """
         process = await asyncio.create_subprocess_exec(
             *command,
@@ -583,7 +659,7 @@ class ResidentClaude:
         )
         assert process.stdout is not None
         self._process, self._command, self._signature = process, command, signature
-        self._totals = totals or Usage()
+        self._totals, self._price = totals or Usage(), price
         self._output = _Output(self, process.stdout, autonomous)
         logger.info("%s started Claude Code (pid=%s)", self._label, process.pid)
 
@@ -593,8 +669,15 @@ class ResidentClaude:
         on_event: Callable[[dict[str, Any]], Awaitable[None]],
         *,
         tag: Any = None,
+        stop: Callable[[], CapStop | None] | None = None,
     ) -> ResidentTurn:
         """Write ``text`` as one user turn and hand each of its events to ``on_event``, up to its result.
+
+        ``stop`` is asked after each event whether the turn went over its soft
+        cap (``ClaudeRunRecorder.cap_stop``): then the turn ends with the
+        cap's result and what it spent, Claude is killed at once and the
+        session's totals move on by that spend, so the next process, which
+        resumes the session, counts only its own.
 
         The message carries a uuid of its own, so Claude's start of its turn
         is told apart from a turn Claude runs on its own meanwhile. ``tag`` is
@@ -608,7 +691,7 @@ class ResidentClaude:
         process, output = self._process, self._output
         assert process is not None and process.stdin is not None and output is not None
         turn = _UserTurn(uuid=str(uuid4()), text=text, tag=tag, on_event=on_event,
-                         done=asyncio.get_running_loop().create_future())
+                         done=asyncio.get_running_loop().create_future(), stop=stop)
         input_lost = False
         try:
             output.turn = turn
@@ -627,6 +710,11 @@ class ResidentClaude:
         except BaseException:
             await self.stop(kill=True)
             raise
+        if turn.capped is not None:
+            await self.stop(kill=True)
+            self._totals = self._totals.plus(turn.capped.usage)
+            return ResidentTurn(turn.capped.result_event, session_started=turn.session_started,
+                                usage=turn.capped.usage)
         if result_event is None or input_lost:
             await self.stop()
         return ResidentTurn(
@@ -638,9 +726,9 @@ class ResidentClaude:
 
     def turn_usage(self, result_event: dict[str, Any] | None) -> Usage:
         """A turn's own cost and tokens: its result's running totals less the previous ones."""
-        own = run_usage(result_event, before=self._totals)
+        own = run_usage(result_event, before=self._totals, price=self._price)
         if result_event is not None:
-            self._totals = self._totals.updated(reported_totals(result_event))
+            self._totals = self._totals.updated(reported_totals(result_event, self._price))
         return own
 
     async def stop(self, *, kill: bool = False) -> None:
@@ -787,6 +875,13 @@ class ClaudeRunRecorder:
         self._compactions: list[dict[str, Any]] = []
         self._started = _clock()
         self._last_heartbeat = float("-inf")
+        # What the run spent so far at its provider's prices, from its usage events, against its per-run cap;
+        # None when its runtime's own figure is its cost.
+        self._spend: RunSpend | None = None
+        if launch is not None and launch.price is not None:
+            from .runtimes.pricing import RunSpend
+
+            self._spend = RunSpend(launch.agent.provider, launch.model, launch.max_budget_usd)
 
     async def start(self) -> None:
         from ..db import llm_records
@@ -817,6 +912,10 @@ class ClaudeRunRecorder:
 
     async def record(self, event: dict[str, Any]) -> None:
         await self._heartbeat()
+        if event.get("type") == "usage":  # internal: counted, not part of the transcript
+            if self._spend is not None:
+                self._spend.add(event)
+            return
         if event.get("type") == "stream_event":
             return
         if event.get("type") == "system" and event.get("subtype") == "init":
@@ -842,6 +941,16 @@ class ClaudeRunRecorder:
             await llm_records.append_events(self._record_id, [(self._seq, compact)])
         except Exception:
             logger.warning("could not record event for %s", self._agent_id, exc_info=True)
+
+    @property
+    def cap_stop(self) -> CapStop | None:
+        """Once the run is over its per-run cap at its provider's prices (Looper's soft cap): the result it ends
+        with and what it spent. The owner stops the run then; None until then, and always for a run without a
+        cap or priced by its runtime."""
+        spend = self._spend
+        if spend is None or not spend.exceeded or spend.cap is None or spend.usage.cost_usd is None:
+            return None
+        return CapStop(soft_cap_result(spend.usage.cost_usd, spend.cap), spend.usage)
 
     def _runtime(self) -> RuntimeAdapter:
         """The runtime the recorded run went through (Claude Code for a record without a launch)."""
@@ -889,7 +998,10 @@ class ClaudeRunRecorder:
         result = result_event or {}
         succeeded = error is None and result.get("subtype") == "success" and not result.get("is_error")
         if usage is None:
-            usage = run_usage(result_event)
+            usage = run_usage(result_event, price=self._launch.price if self._launch is not None else None)
+        if self._spend is not None and (result_event is None or result.get(SOFT_CAP)):
+            # No result reported the run's spend: what its usage events add up to is what is known.
+            usage = usage.filled_from(self._spend.usage)
         cost = self._runtime().cost(usage, self._provider())
         usage = cost.usage
         try:

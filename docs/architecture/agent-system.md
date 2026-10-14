@@ -443,9 +443,14 @@ Settings and selected per role ([next section](#harness-agent-and-environment)).
   session (`resident_session`), writes a user turn, parses the output into
   internal events (`parse`; the internal event is Claude Code's stream-json
   event, which another adapter translates into), summarizes a tool call for
-  the task's activity, prices a run (`cost`, with its `CostSource`) and says
-  why a run stopped at its cap. `ClaudeCodeRuntime` (`claude-code`) is the
-  only type: the command layouts moved out of the tiers unchanged, the
+  the task's activity, says where a run's cost comes from with a provider
+  (`cost_source`) and prices it (`cost`), and says why a run stopped at its
+  cap. Its binding (`ProviderBinding`) sets arguments and environment
+  variables and removes inherited ones (`unset`); the variables it sets are
+  ones a provider's own `env` may not (`provider_env_owned`). It reports a
+  run's tokens as internal `usage` events (one model request or turn each,
+  `runtimes.pricing.usage_event`), which the run's recorder adds up for the
+  soft cap. `ClaudeCodeRuntime` (`claude-code`) is the only type: the command layouts moved out of the tiers unchanged, the
   process mechanics stay in `claude_cli.py`, and the catalog and knowledge
   are still materialized in Claude Code's plugin format by
   `library.load_installed` and `knowledge.load_knowledge`. Capabilities:
@@ -460,13 +465,25 @@ Settings and selected per role ([next section](#harness-agent-and-environment)).
   probe again.
 - **Providers** (`llm_providers`) are where requests go: `protocols`
   (`anthropic-messages`, `openai-responses`, `openai-chat`), `base_url`,
-  `max_concurrency` (`null` = no limit), a model catalog (each model's
-  `context_window`, input, output, cache read and cache write prices per
-  million tokens and `efforts`, each `null` when unknown; `[]` = any model)
-  and the auth: `oauth`, a runtime type's own login (`oauth_runtime_type`),
-  or `api_key`. A key lives in `llm_provider_secrets` and the API shows it as
-  `***` (sending `***` back keeps it, `null` removes it). The catalog's prices
-  and the concurrency limit are stored and checked, not used by runs yet.
+  `max_concurrency` (`null` = no limit, stored and checked only), a model
+  catalog (each model's `context_window`, input, output, cache read and cache
+  write prices per million tokens, `efforts` and `background_model`, each
+  `null` when unknown; `[]` = any model), its own `env` (`[{key, value}]`,
+  added to the runs that use it; no credentials, and none the runtime's
+  binding sets) and the auth: `oauth`, a runtime type's own login
+  (`oauth_runtime_type`), or `api_key`. A key lives in `llm_provider_secrets`
+  and the API shows it as `***` (sending `***` back keeps it, `null` removes
+  it); it is read only when a run starts (`load_agent_settings` puts it on
+  the run's `ProviderSpec.api_key`, which is never shown, recorded or
+  exported), and a run whose API-key provider has none fails with the reason.
+  A catalog price left `null` comes from the built-in price table
+  (`runtimes.pricing.BUILTIN_PRICES`: Claude, GPT, GLM, DeepSeek and Kimi
+  models at the vendors' USD list prices, with the date and sources).
+  Presets (`provider_presets.py`: GLM on BigModel and on Z.ai, DeepSeek, Kimi
+  on Moonshot China and international, and the local CLIProxyAPI) fill a new
+  provider from one of a vendor's APIs (Anthropic-format for Claude Code, or
+  OpenAI-format), its common models with their background model, and the
+  extra environment its Claude Code guide sets; the user adds the key.
 - **Agents** (`agents`): a name, a runtime, a provider, a model and a default
   effort.
 
@@ -476,8 +493,10 @@ agent `claude-code/opus` (`BUILTIN_AGENT`), which a role runs when nothing
 selects another. An agent is refused when it is created or changed if its
 runtime and provider share no protocol, an OAuth provider is paired with
 another runtime type, the runtime cannot take that kind of provider yet
-(Claude Code takes its own login only), or the provider lists models and not
-this one; a provider change that would break one of its agents is refused
+(Claude Code takes its own login and API keys), or the provider lists models
+and not this one; an agent whose model or background model has no full price
+is registered with a warning (its runs record tokens only and no spend cap
+applies to them), and every agent shows how its runs are priced (`cost`); a provider change that would break one of its agents is refused
 too. Wherever it is selected (a layer, a task override), its runtime must
 have what each role reached needs (`ROLE_CAPABILITIES`): `resident_session`
 and `resume` for the Manager and Planner, `run` for Workers and Reviewers; a
@@ -487,14 +506,49 @@ when each run starts (`agent_settings.agent_problem`): a run whose agent
 cannot run fails with the reason (the Manager answers with it, the Planner's
 turn fails, a Worker or Reviewer step fails) and never runs another agent.
 
-A resident session belongs to a runtime type (`agent_sessions.runtime_type`,
-with the agent that ran it last): another type cannot resume it, so the next
-turn starts a new session, after a handoff from the old one
+A resident session belongs to a runtime type and a provider
+(`agent_sessions.runtime_type` and `provider_id`, with the agent that ran it
+last): it resumes only while both are unchanged, so another runtime type or
+any change of provider (subscription to API key, back, or one API key provider
+to another) starts a new session, after a handoff from the old one
 ([New sessions](#new-sessions-handoff-and-resume-brief)). A session from
-before agents counts as Claude Code's. Changing the model within a runtime
-resumes as before. Each run records `cost_source` (`runtime`: what the
-runtime reported, as Claude Code with its own login does; `provider_price`:
-tokens at the provider's prices).
+before agents counts as Claude Code's, one from before `provider_id` as Claude
+Code's own login's. Changing the model alone resumes as before.
+
+**Claude Code with an API key.** The binding sets `ANTHROPIC_BASE_URL` and
+the key: in `ANTHROPIC_AUTH_TOKEN` (sent as `Authorization: Bearer`, what GLM,
+DeepSeek and Kimi document) with a `base_url`, removing an inherited
+`ANTHROPIC_API_KEY`; in `ANTHROPIC_API_KEY` (`x-api-key`) for Anthropic's own
+API (no `base_url`, or `api.anthropic.com`), removing an inherited
+`ANTHROPIC_AUTH_TOKEN`. With a `base_url` it also maps every model Claude Code
+may use behind the agent: `ANTHROPIC_DEFAULT_OPUS_MODEL`,
+`ANTHROPIC_DEFAULT_SONNET_MODEL` and `CLAUDE_CODE_SUBAGENT_MODEL` to the
+agent's model, `ANTHROPIC_DEFAULT_HAIKU_MODEL` and `ANTHROPIC_SMALL_FAST_MODEL`
+to the catalog's background model (the model itself without one). Then come
+the provider's own variables. The verified Claude Code behaviour is in the
+[multi-runtime RFC](rfcs/multi-runtime-agents-v0.zh-CN.md) section 7. A
+resident process whose binding changed (provider, key, endpoint) is started
+again.
+
+**Cost and caps.** Each run records `cost_source`. `runtime`: Claude Code's
+own figure (`total_cost_usd`), used with its own login (shown as
+"equivalent": what the subscription's usage would cost at API prices, not
+money spent) and with Anthropic's API. `provider_price` for every other
+provider: each model's tokens in the result's `modelUsage` (input, output,
+cache read, cache write) at the provider's prices, summed (`run_usage`
+`price`), so a resumed session still counts each turn's own share; a model
+without a price leaves the cost `null` and the tokens recorded. With
+`provider_price` the per-run cap (`run_budget_usd`) is not `--max-budget-usd`
+(it would count Claude's prices): the run's recorder adds up its `usage`
+events (each request's final `message_delta` usage) at the provider's prices,
+and once the run is over the cap the Worker's process is killed, or a resident
+turn ends and its process is killed, with a result read like Claude Code's own
+cap (`Looper stopped the run at its per-run spend cap: ...`). It is a soft cap:
+the request that crossed it is made, and requests the stream does not show (a
+subagent's, Claude Code's side requests) count only in the run's recorded
+cost. The task cap and "raise the cap and continue" sum the recorded costs, so
+they use the same basis. `GET /api/tasks/:id` counts the runs of each basis
+(`equivalent_runs`, `provider_price_runs`).
 
 The `llm_profiles` table and `agent_configs.runtime` and `llm_profile_id` were
 never on a launch path; the one-time migration `llm_profiles_removed` drops
@@ -507,7 +561,7 @@ The Manager and a task's Planner resume their session for as long as they can
 (RFC multi-runtime P5). `looper/agents/session_switch.py` says when they
 cannot: `agent_switch`, called before every turn with what the session was
 saved with and the agent the turn resolved, is the one place the rule lives
-(today another runtime type; the provider rule belongs there too), and
+(another runtime type, or another provider), and
 `session_lost` names a session the runtime could not resume (or none saved
 for work under way).
 
@@ -564,15 +618,17 @@ environment and no cap. The fields are the harness, the agent (its model comes
 with it; an agent's default effort applies unless a layer sets one, source
 `agent`), the effort (`--effort`: `low`, `medium`, `high`, `xhigh` or `max`), up
 to 50 environment variables per layer, and the per-run cap
-(`--max-budget-usd`, on each Claude Code process; a Planner turn that hits it
-fails, and the next turn starts a new process). The environment merges key by
+(`--max-budget-usd`, on each Claude Code process, when Claude Code's own
+figure is the run's cost; otherwise Looper's soft cap at the provider's
+prices, per run: a Worker run or a resident turn. A Planner turn or a Manager
+message that hits either fails, and the next turn starts a new process). The environment merges key by
 key: a later layer adds or overrides a variable or unsets one an earlier layer
 set (a `null` value; the system layer has nothing to unset). A Reviewer
 without a harness of its own at the role or role-in-project layer takes the
 Workers' at that same layer. `load_agent_settings(role, project, task)` returns
 every field with the layer it came from; all four roles launch from it.
-Every launch passes `--model` and, when set, `--effort` and
-`--max-budget-usd`. The variables are added on top of the server's environment for
+Every launch passes `--model` and, when set, `--effort` and (Claude Code's own
+cost only) `--max-budget-usd`. The variables are added on top of the server's environment for
 every agent's `claude` process; names must match `[A-Z_][A-Z0-9_]*`, and a
 name containing `KEY`, `TOKEN`, `SECRET`, `PASSWORD` or `CREDENTIAL` is
 refused because the values are shown on the dashboard. That word check guards
@@ -1182,7 +1238,7 @@ PostgreSQL is a hard startup dependency. All data paths:
 | `tasks` | Task metadata, status, phase, timestamps, `work_dir`, `project_id` (required) |
 | `task_steps` | A task's steps, each with everything its Planner decides with: `step_key` (label), `depends_on` (step ids), `review`, `acceptance_criteria`, `validation_commands`, `status`, `result`, `worker_id`, `reviewer_id`, `retries`, `feedback`, `missed_messages` |
 | `task_plans` | A task's plan, one row per task: `plan_id`, `status` (`planning`, `executing`, `verifying`, `stopping`, `completed`, `failed`), `correlation_id`, `origin_channel_id`, `final_summary`, `fail_reason`; replaced when the task is planned again |
-| `agent_sessions` | The session each resident agent resumes: `manager` or `planner-<task_id>`, its `session_id`, `session_totals`, the `runtime_type` it belongs to and the `session_agent_id` that ran it last (`NULL`: before agents, Claude Code) |
+| `agent_sessions` | The session each resident agent resumes: `manager` or `planner-<task_id>`, its `session_id`, `session_totals`, the `runtime_type` and `provider_id` it belongs to and the `session_agent_id` that ran it last (`NULL` runtime: before agents, Claude Code; `NULL` provider: before providers were recorded, Claude Code's own login) |
 | `task_journal` | A task's journal, written by code as things happen: `step_accepted`, `step_failed`, `step_retry`, `decision`, `user_instruction`, `session_switch` and `handoff` entries, each with its `step_id` (`''` for the whole task), `summary` and `learnings`; `GET /api/tasks/<id>` returns it as `journal` and the task page lists it as Findings, each entry with its kind |
 | `activity` | Execution trace events (SSE streaming to frontend) |
 | `chat_messages` | Chat conversation history; a new Manager session's resume brief reads the recent chats that are not a task's Planner thread (`planner-<task_id>`) |
@@ -1190,7 +1246,7 @@ PostgreSQL is a hard startup dependency. All data paths:
 | `agent_configs` | Agent configuration (role prompt, turns, timeout, concurrency) for `manager`, `planner`, `worker` and `reviewer` |
 | `agent_setting_layers` | Agent settings by layer: `scope` (`system`, `role`, `project`, `role_project`), `role`, `project_id` (goes with its project), and the nullable `harness_prompt`, `agent_id`, `effort`, `env` (ordered `[{key, value}]`, `null` value = unset) and `run_budget_usd`; one row per layer and place |
 | `agent_runtimes` | Registered runtimes: `name`, `type` (an adapter), `executable` (`''` = the type's default), the probe's `version`, `capabilities`, `probed_at`, `probe_error`, `builtin` |
-| `llm_providers` | LLM providers: `name`, `protocols`, `auth` (`oauth` with `oauth_runtime_type`, or `api_key`), `base_url`, `models` (the catalog), `max_concurrency` (`NULL` = no limit), `builtin` |
+| `llm_providers` | LLM providers: `name`, `protocols`, `auth` (`oauth` with `oauth_runtime_type`, or `api_key`), `base_url`, `models` (the catalog, with each model's prices and `background_model`), `env` (its own variables), `max_concurrency` (`NULL` = no limit), `builtin` |
 | `llm_provider_secrets` | A provider's API key, apart from the provider; read only by the launch that will use it |
 | `agents` | Agents: `name`, `runtime_id`, `provider_id`, `model`, default `effort`, `builtin`; a runtime or provider still used by one is not deleted |
 | `task_agent_overrides` | A task's agent per role (`planner`, `worker`, `reviewer`), going with its task; an agent a task chose is not deleted |
@@ -1316,13 +1372,13 @@ dev proxy, which keeps `Host` and `Origin` on its own port.
 | `/api/agent-configs/:id/reset-prompt` | POST | Reset the role prompt to the recommended one |
 | `/api/agent-settings` | GET | The agent settings outside projects: `system` and `roles` (all four), each with `values` (that layer's own: `harness_prompt`, `agent` (an agent id), `effort`, `env` as `[{key, value}]`, `run_budget_usd`; `null` = not set) and `effective` (what applies, each field with its `source` layer; `agent` as `{agent_id, name, model, runtime, provider}`, `effort` may come from the agent), and `limits` |
 | `/api/agent-settings/system` | PUT | Set the system layer. Each layer's PUT changes the fields given (`null` or `""` unsets one; `env` replaces the layer's list, a `null` value unsetting a variable outside the system layer; the built-in harness text unsets the system harness) and answers with the GET view. 400 for an unknown field, `model` (part of the agent now), an unknown agent or one that cannot run the layer's roles, a harness over 20000 characters, a bad effort or cap, or a bad, credential-like or 51st variable; nothing is stored then |
-| `/api/registry` | GET | The runtime types this version has (`type`, `label`, `default_executable`, `protocols`, `capabilities`, `auth_kinds`), and every `runtime`, `provider` (API key as `***` or `null`) and `agent`, with `limits` |
+| `/api/registry` | GET | The runtime types this version has (`type`, `label`, `default_executable`, `protocols`, `capabilities`, `auth_kinds`), and every `runtime`, `provider` (API key as `***` or `null`) and `agent` (with its `cost`: `source`, `equivalent`, `unpriced` models), the `provider_presets`, the built-in `prices` (`as_of`, `sources`, `models`), with `limits` |
 | `/api/runtimes` | POST | Register `{name, type, executable?}` and probe it at once (`--version`); 201 with `runtime`; 400 for an unknown type, 409 for a taken name |
 | `/api/runtimes/:id` | PUT/DELETE | Rename or change the executable (probed again); delete (409 while agents use it). 400 for the built-in one |
 | `/api/runtimes/:id/probe` | POST | Probe again and record the version, capabilities or error; the built-in one too |
-| `/api/providers` | POST | Register `{name, protocols, auth, oauth_runtime_type?, base_url?, models?, max_concurrency?, api_key?}`; 201 with `provider`; 400 with the reason, 409 for a taken name |
+| `/api/providers` | POST | Register `{name, protocols, auth, oauth_runtime_type?, base_url?, models?, env?, max_concurrency?, api_key?}`; 201 with `provider`; 400 with the reason (an `env` name the binding sets, or that reads like a credential, too), 409 for a taken name |
 | `/api/providers/:id` | PUT/DELETE | Change a provider (`api_key` `***` keeps the key, `null` removes it; 400 when one of its agents could no longer run); delete (409 while agents use it). 400 for the built-in one |
-| `/api/agents` | POST | Register `{name, runtime_id, provider_id, model, effort?}`; 201 with `agent`; 400 when the runtime and provider cannot run together or the provider does not list the model |
+| `/api/agents` | POST | Register `{name, runtime_id, provider_id, model, effort?}`; 201 with `agent` and `warnings` (a model without a price); 400 when the runtime and provider cannot run together or the provider does not list the model |
 | `/api/agents/:id` | PUT/DELETE | Change an agent (checked like a new one, and for every role it is selected for); delete (409 while a layer or a task selects it). 400 for the built-in one |
 | `/api/agent-settings/roles/:role` | PUT | Set one role's layer (`manager`, `planner`, `worker`, `reviewer`; 404 for another) |
 | `/api/catalog` | GET | The catalog: `items` (`item_id`, `kind`, `name`, `qualified_name` (how agents name it), `origin`, `owner_project_id`, `owner_project_name`, `description`, `source`, `version`, `sha256`, `size_bytes`, `file_count`, timestamps and `installs`), `installed_count`, `total_bytes`, `last_import` (counts, `added`, `updated`, `removed`, `unchanged`, `skipped`), `roles`, `task_roles` and `caps` |

@@ -68,7 +68,13 @@ uv run --extra test python -m evals.prompt_regression run --mode real \
 Options: `--model` (every role runs Claude Code with its own login and this
 model, the agent `claude-code/<model>`), `--agent <name>` (every role runs
 this agent instead: a registered agent of the eval's new database, such as the
-built-in `claude-code/opus`; the run records it as `agent`), `--tasks
+built-in `claude-code/opus`; the run records it as `agent`), `--provider-preset
+<id>` (every role runs Claude Code with a provider registered from this
+preset's Anthropic-format API, such as `glm-bigmodel` or `deepseek`, its key
+read from `LOOPER_EVAL_API_KEY`; `--agent-model` picks the model, default the
+preset's first, and `--provider-base-url` replaces the preset's endpoint, for
+example with a logging proxy; the per-run cap is then Looper's own at the
+provider's prices, and each task reports its `cost_basis`), `--tasks
 single_step,chat_correction`, `--max-budget-usd`, `--total-cap-usd`,
 `--baseline <run.json>` (compare with this run instead), `--keep-work-dirs`. To print a comparison again:
 

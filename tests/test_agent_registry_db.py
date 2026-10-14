@@ -253,12 +253,18 @@ def test_an_agent_pairs_a_runtime_and_a_provider_that_can_run_together(
         assert status == 400 and "login of claude-code runtimes" in payload["error"]
         status, payload = await agent("rt-claude-code", login)
         assert status == 400 and "login of stand-in runtimes" in payload["error"]
-        # Claude Code runs only with its own login for now.
-        status, payload = await agent("rt-claude-code", key)
-        assert status == 400 and "cannot be started with an api_key provider" in payload["error"]
+        # Claude Code runs with its own login and with an API key.
+        assert (await agent("rt-claude-code", key))[0] == 201
         # A provider that lists its models takes no other.
         status, payload = await agent(standin, key, "claude-opus-4-5")
         assert status == 400 and "not one of them" in payload["error"]
+        # A runtime that takes only its own login refuses an API key.
+        from looper.agents import runtimes
+        from looper.agents.runtimes import AuthKind
+
+        monkeypatch.setattr(type(runtimes.ADAPTERS[stand_in]), "auth_kinds", frozenset({AuthKind.OAUTH}))
+        status, payload = await agent(standin, key, "claude-sonnet-4-5")
+        assert status == 400 and "cannot be started with an api_key provider" in payload["error"]
 
     _run(_test, monkeypatch)
 
@@ -550,9 +556,11 @@ def test_a_provider_keeps_its_model_catalog_and_concurrency_with_unknowns_as_nul
         assert provider["max_concurrency"] == 4
         assert provider["models"] == [
             {"name": "glm-4.6", "context_window": 200_000, "input_usd_per_mtok": 0.6, "output_usd_per_mtok": None,
-             "cache_read_usd_per_mtok": None, "cache_write_usd_per_mtok": None, "efforts": ["low", "high"]},
+             "cache_read_usd_per_mtok": None, "cache_write_usd_per_mtok": None, "efforts": ["low", "high"],
+             "background_model": None},
             {"name": "glm-4.5", "context_window": None, "input_usd_per_mtok": None, "output_usd_per_mtok": None,
-             "cache_read_usd_per_mtok": None, "cache_write_usd_per_mtok": None, "efforts": None}]
+             "cache_read_usd_per_mtok": None, "cache_write_usd_per_mtok": None, "efforts": None,
+             "background_model": None}]
         unlimited = (await _ok("PUT", f"/api/providers/{provider['provider_id']}", {"max_concurrency": None}))
         assert unlimited["provider"]["max_concurrency"] is None
         (builtin,) = [p for p in (await _registry())["providers"] if p["builtin"]]

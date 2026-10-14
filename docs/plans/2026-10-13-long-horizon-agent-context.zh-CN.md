@@ -1,6 +1,6 @@
 # 开发计划：长程 Agent 上下文体系（M0–M9）
 
-- **状态：** M0–M7 全部交付（M7a 计划状态入库、M7b 任务记忆、M7c 及时沉淀）；M8 全部交付（M8a 能力目录与安装、M8b MCP 服务器、M8c 进库来源、M8d 配置层级统一、M8e 导出与导入）；M9a 运行时、provider 与 agent 的注册和选择已交付；上游 LoopX 清理 B1–B4 已交付；全面改名为 Looper 已交付；其余见第 5 节待办
+- **状态：** M0–M7 全部交付（M7a 计划状态入库、M7b 任务记忆、M7c 及时沉淀）；M8 全部交付（M8a 能力目录与安装、M8b MCP 服务器、M8c 进库来源、M8d 配置层级统一、M8e 导出与导入）；M9a 运行时、provider 与 agent 的注册和选择已交付，M9b Claude Code 接 API key 与兼容接口已交付；上游 LoopX 清理 B1–B4 已交付；全面改名为 Looper 已交付；其余见第 5 节待办
 - **依据：** [RFC：长程 Agent 的上下文体系 v0](../architecture/rfcs/long-horizon-agent-context-v0.zh-CN.md)。
   设计原则、分层模型和已作出的决定以 RFC 为准；本文只管"怎么分阶段做、做到什么算完成、现在做到哪了"。
 - **仓库：** `foolzzz/looper`，基线 `main`
@@ -42,7 +42,7 @@
 | M8d | 配置层级统一：系统默认 → 角色 → 项目 → 项目里的角色 | ✅ 已交付（looper #50） | M8a |
 | M8e | 导出与导入：一个文件，应用前预览，密钥默认留空 | ✅ 已交付（looper #53） | M8b、M8c、M8d |
 | M9a | 运行时、provider 与 agent 的注册和选择；现有 Claude Code 路径抽成第一个运行时适配器 | ✅ 已交付（looper #62） | M8d |
-| M9b | Claude Code 接多种 provider：订阅 OAuth、Anthropic key、兼容 anthropic 协议的接口；按 provider 价格计算花费 | 待开工 | M9a |
+| M9b | Claude Code 接多种 provider：订阅 OAuth、Anthropic key、兼容 anthropic 协议的接口；按 provider 价格计算花费 | ✅ 已交付（looper #68；DeepSeek、Kimi 真实 key 待维护者验证） | M9a |
 | M9c | Codex 运行时：四类角色都支持（含常驻会话），事件统一、MCP 翻译、OpenAI 登录与 key | 待开工 | M9a |
 | M9d | SDK 运行时与 norma SDK | 待定（norma 就绪后） | M9a |
 | M9e | OMP 运行时：先只读核实能力、填能力矩阵，再写适配器 | 待开工 | M9c |
@@ -318,7 +318,7 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
 - **确定的做法：**
   - 一次重试只记一条 `step_retry`（理由即 Planner 的反馈），放弃记为该步骤的 `step_failed`（带 Planner 的理由）；`decision` 记 replan、聊天加步骤和到达花费上限；
   - 用户指令有自己的 8,000 字符预算，整条注入、不与其他条目争预算，只有超出这个预算时才省略最旧的并计数；交接摘要只进续接简报，不进每轮的"进度与发现"；
-  - "能否续接"由 `looper/agents/session_switch.py` 的 `agent_switch` 一处决定（M7c 交付时 M9b 尚未合入，provider 规则由 M9b 加在这里）；旧会话"可用"指它的进程还在运行，交接轮失败（如 provider 不可用）或进程已不在时只用日志；
+  - "能否续接"由 `looper/agents/session_switch.py` 的 `agent_switch` 一处决定（provider 规则由 M9b 加在这里：运行时类型和 provider 都不变才续接）；旧会话"可用"指它的进程还在运行，交接轮失败（如 provider 不可用）或进程已不在时只用日志；
   - 项目级经验在 `distill_lessons` 为 `draft` 或 `write` 时到达即进草稿（`write` 也进草稿，因为单条经验未经审阅），为 `off` 时只留在任务里；
   - Manager 续接只读网页聊天存下的消息（飞书、Telegram 的对话不入 `chat_messages`），不含任务的 Planner 线程（`planner-<task_id>`）。
 - **待办：** M9b 合入后，在 M6 加"中途换 provider"的真实评测任务并跑一次（M7c 交付时 M9b 尚未合入）。
@@ -453,6 +453,13 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
 - **范围：** 订阅 OAuth（现状）、Anthropic API key、兼容 anthropic 协议的接口（GLM、Kimi 等，经 base_url 与 key 接入）；
   用 API key 时确认不会退回订阅登录（先核实环境变量的优先级）；接第三方接口时按 provider 登记的价格计算花费。
 - **验收：** 每种 provider 各跑一次 M6 真实模式评测（需要维护者提供对应的 key），花费与 provider 价格核对一致。
+- **核实后确定的做法**（Claude Code 2.1.285 的核实结果写在多运行时 RFC 第 7、8 节）：
+  - 第三方接口的 key 放 `ANTHROPIC_AUTH_TOKEN`（GLM、DeepSeek、Kimi 文档都这样写），并去掉继承的 `ANTHROPIC_API_KEY`；
+    Anthropic 官方接口放 `ANTHROPIC_API_KEY`；`apiKeySource` 在 token 和订阅下都是 `none`，用转发代理核对请求头；
+  - 模型目录新增 `background_model`，provider 新增 `env`；内置价格表在 `runtimes/pricing.py`，预设在
+    `provider_presets.py`；一个 provider 只有一个 `base_url`，所以预设按接口（Anthropic 格式、OpenAI 格式）各建一个；
+  - 单次软上限按"一次运行"（Worker 一次、常驻会话一轮）计算，由运行记录器累加内部 `usage` 事件，供 M9c 复用；
+  - 续接规则并入 M7c 的 `session_switch.agent_switch`；M6 评测加 `--provider-preset`（key 从 `LOOPER_EVAL_API_KEY` 读）。
 
 #### M9c Codex 运行时
 
@@ -513,6 +520,7 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
 | 2026-10-14 | 第 5.3 节界面导入配置文件（looper #63）：`POST /api/config/imports` 只在这一个路由把请求体上限放宽到 256 MiB（目录上限的两倍），流式写入 runtime root 下权限 0600 的临时文件，校验格式后返回与 `loopx config import` 相同的预览，`POST .../<id>/apply` 在一个事务里应用并删除文件，`DELETE` 取消，未应用的一小时后过期删除，其余路由仍是 8 MiB。Settings 的「Move to another machine」可选择或拖入文件，按段显示新增、变化（含字段）、不变和跳过，以及待补的密钥，确认后应用，结果里的链接直接打开对应 provider、MCP 服务器或渠道的表单。验证：真实 PG 测试覆盖超过 8 MiB 的上传、其他路由 413、预览不写、应用与 CLI 结果一致、过期和未知 id 404、坏文件 400 与临时文件清理；两个一次性 `loopx serve` 之间经界面路由导出 12.4 MB、在新库的 Settings 里预览并应用 24 项，再导出除未导出的 API key 外与原文件相同；真实 PG 1020 通过。 |
 | 2026-10-14 | 全面改名为 Looper（looper #64）：命令、Python 包与 wheel、数据目录、环境变量、服务 label、导出格式、界面、prompt 与文档改为 looper/Looper；`loopx` 别名打印弃用提示后执行 `looper`，`LOOPX_*` 作为回退并警告一次，`~/.loopx` 在首次 `serve` 或 `service install` 时改名为 `~/.looper` 并留下链接，`service install` 先卸掉 `com.loopx.serve`，`loopx-config/v1` 仍可导入，默认库名 `loopx`、tag 与 NOTICE 不变。验证：真实 PG 1043 通过；临时 HOME 下 `looper serve` 移动目录并留链接、`loopx version`、只设 `LOOPX_DATABASE_URL` 的 serve 与 doctor、从 `git archive` 构建的 `looper-2.5.0` wheel 装出 `looper` 和 `loopx`，沙箱里 `install.sh` 先卸旧 `loopx` 工具；真实 haiku 评测 5/5、契约违约 0、Planner 改文件 0，送审任务多出的一步单独重跑后消失，花费 $0.44。 |
 | 2026-10-14 | M7c 交付（looper #66）：任务日志新增 `step_failed`、`step_retry`、`decision`、`user_instruction`、`session_switch` 和 `handoff`，由代码在事件发生时写入；Planner 每轮先整条注入用户指令（独立预算），再按类型分标题注入各类最新条目，Worker 首轮也拿到用户指令和失败经验；Planner、Manager 换 agent 时旧会话（进程还在时）先写交接摘要，新会话首轮带续接简报（Manager 另带各聊天最近的对话），项目级经验在 `distill_lessons` 为 `draft`、`write` 时到达即进草稿。验证：替身 Claude 下各类条目的触发、注入顺序与上限、强制换 agent 的交接与简报、三种旧会话不可用、Manager 续接和草稿规则都有测试，一次性 `looper serve` 跑通重试、聊天加步骤、会话丢失后续接和经验草稿并截图任务页；真实 haiku 评测 5/5、契约违约 0、Planner 改文件 0，$0.35（基线 $0.33）；真实 PG 1070 通过。M9b 尚未合入，续接规则留在 `session_switch.agent_switch` 一处，"中途换 provider"评测记为 M7c 的待办。 |
+| 2026-10-14 | M9b 交付（looper #68）：Claude Code 可用 API key 接 Anthropic 官方或兼容 Anthropic 格式的接口（第三方接口用 `ANTHROPIC_AUTH_TOKEN`，opus、sonnet 和子 agent 映射到 agent 的模型，haiku 和 small/fast 映射到模型目录新增的 `background_model`），provider 可带 `env`，内置 GLM、DeepSeek、Kimi、CPA 预设和 2026-10-14 的价格表；非订阅、非官方的运行按 provider 价格计算花费并由 Looper 执行单次软上限，常驻会话只在运行时类型和 provider 都不变时续接（并入 `agent_switch`）。验证：经只记录模型名和认证头的转发代理，用真实 Claude Code 2.1.285 跑 CPA（`gpt-6.1-sol`）和 GLM BigModel（`glm-5.3[1m]`）各一个单步任务和一次 M6 真实评测，都是 5/5、契约违约 0、Planner 改文件 0，请求只带 provider 的 key、没有 Claude 模型名，44 次运行都是 `provider_price` 且与价格表手算一致（CPA 等价 $0.80，GLM $0.48）；真实 PG 1093 通过。DeepSeek、Kimi 的真实 key 验证留给维护者（第 5.4 节）。 |
 
 ## 5. 不属于本 RFC 的待办
 
@@ -541,6 +549,10 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
 - **飞书、Telegram 的真实流量**：白名单与投递（M1.7、#26）只用本地替身验证过。
 - **agent teams**：`CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` 已作为默认环境变量下发，但没有实际拉起队友验证过。
 - **多个后台任务同时结束**的自主轮切分（#26）。
+- **DeepSeek、Kimi 和 GLM 国际站的真实 key**（M9b）：预设按官方文档填写，真实运行只覆盖了本机 CPA 和 GLM（BigModel）。
+  维护者用自己的 key 各跑一次 M6 真实评测核对：`LOOPER_EVAL_API_KEY=… python -m evals.prompt_regression run --mode real
+  --provider-preset deepseek`（或 `kimi-moonshot-cn`、`kimi-moonshot`、`glm-zai`），看任务都通过、`cost_basis` 全是
+  `provider_price`、花费与平台账单大致一致。
 - ~~**非 haiku 模型**~~（已覆盖，looper #58）：M6 真实模式评测用 sonnet（`claude-sonnet-5-5`）和 opus（`claude-opus-5-5`）各跑一次，都是 5/5、契约违约 0、Planner 改文件 0，花费 $0.62 和 $1.30（haiku 基线 $0.33）；唯一差异是 opus 在聊天纠偏任务里多加了一步（7 步对 6 步），结果与契约都正常。其余验证缺口暂不安排。
 - **项目自带的权限设置**：项目的 `.claude/settings.json` 或托管设置禁止某些工具、关闭 bypass 模式时，agent 的表现（M1.7）。
 - **插件里的 agent 和命令**：M1.6 只验证了 skill 的加载和调用。
