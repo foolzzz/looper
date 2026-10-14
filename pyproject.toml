@@ -41,7 +41,7 @@ test = [
 ]
 
 [project.scripts]
-loopx = "loopx.entrypoint:main"
+loopx = "loopx.cli:main"
 loopx-lark-provider = "loopx.extensions.lark.provider:main"
 loopx-openviking-history-export = "loopx.extensions.openviking_semantic_preference.history_export:main"
 loopx-openviking-semantic-preference = "loopx.extensions.openviking_semantic_preference.provider:main"
@@ -50,7 +50,7 @@ loopx-openviking-semantic-preference = "loopx.extensions.openviking_semantic_pre
 include = ["loopx*"]
 
 [tool.setuptools.package-data]
-"loopx" = ["web/chat/*.html", "web/chat/*.json", "web/chat/assets/*", "web/chat/manifest.webmanifest", "web/chat/pwa/*", "web/dashboard/*", "web/dashboard/assets/*"]
+"loopx" = ["web/dashboard/*", "web/dashboard/assets/*"]
 "loopx.db" = ["*.sql"]
 "loopx.control_plane" = ["*.json", "*.ts", "presentation/*.ts"]
 "loopx.semantics" = ["*.json"]
@@ -129,9 +129,7 @@ include = ["loopx*"]
 ]
 
 [tool.pytest.ini_options]
-markers = ["stage2c_e2e: real process Stage 2C correctness and recovery acceptance"]
-# Optional provider tests run explicitly in ark-turn.yml with their own SDK.
-norecursedirs = ["deprecate", "packages/loopx-ark-turn"]
+testpaths = ["tests"]
 
 [tool.coverage.run]
 source = ["loopx"]

@@ -214,6 +214,23 @@ CREATE TABLE IF NOT EXISTS project_documents (
 );
 CREATE INDEX IF NOT EXISTS idx_project_documents_project ON project_documents (project_id, created_at, id);
 
+-- A project's own Claude Code skills: only its task agents (Planner, Workers,
+-- Reviewers) load them. The enabled ones are materialized read-only under the
+-- runtime root as one plugin, never in the project's directory; name is the
+-- skill's directory and frontmatter name (a lowercase slug), content the body
+-- of its SKILL.md. Code owns validation and caps (loopx/agents/project_skills.py).
+CREATE TABLE IF NOT EXISTS project_skills (
+    id           TEXT PRIMARY KEY,
+    project_id   TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    name         TEXT NOT NULL CHECK (length(name) <= 64 AND name ~ '^[a-z0-9]+(-[a-z0-9]+)*$'),
+    description  TEXT NOT NULL,
+    content      TEXT NOT NULL,
+    enabled      BOOLEAN NOT NULL DEFAULT true,
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (project_id, name)
+);
+
 -- Once: tasks from before projects get one project per directory, named after
 -- its last path component ('' and '/' -> 'default'). The oldest directory
 -- keeps the plain name; a later clash, ignoring case, gets -2, -3, ...

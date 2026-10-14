@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import os
-import subprocess
 import sys
 from collections.abc import Callable
 from pathlib import Path
@@ -26,122 +25,6 @@ from real_runtime_root_guard_plugin import (  # noqa: E402,F401
     pytest_sessionfinish,
     pytest_terminal_summary,
     pytest_testnodedown,
-)
-from loopx.canary.runner import SMOKE_SUITE_CHOICES  # noqa: E402
-
-
-def pytest_addoption(parser) -> None:
-    group = parser.getgroup("loopx-smoke-suite")
-    group.addoption(
-        "--loopx-smoke-suite",
-        "--smoke-suite",
-        dest="loopx_smoke_suite",
-        choices=sorted(SMOKE_SUITE_CHOICES),
-        default=None,
-        help=(
-            "Opt in to the canary smoke-suite facade and pass this selector "
-            "through to the LoopX runner."
-        ),
-    )
-    group.addoption(
-        "--loopx-smoke-module",
-        "--smoke-module",
-        action="append",
-        default=[],
-        dest="loopx_smoke_modules",
-        help="Module token filter passed through to the LoopX runner. Repeat or comma-separate.",
-    )
-    group.addoption(
-        "--loopx-smoke-exclude-module",
-        "--smoke-exclude-module",
-        action="append",
-        default=[],
-        dest="loopx_smoke_exclude_modules",
-        help="Module token exclusion passed through to the LoopX runner. Repeat or comma-separate.",
-    )
-    group.addoption(
-        "--loopx-smoke-script",
-        "--smoke-script",
-        action="append",
-        default=[],
-        dest="loopx_smoke_scripts",
-        help="examples/**/*-smoke.py selector passed through to the LoopX runner. Repeat or comma-separate.",
-    )
-    group.addoption(
-        "--loopx-smoke-profile",
-        "--smoke-profile",
-        action="append",
-        default=[],
-        dest="loopx_smoke_profiles",
-        help=(
-            "Smoke-suite or catalog profile selector passed through to the LoopX "
-            "runner. Repeat or comma-separate."
-        ),
-    )
-    group.addoption(
-        "--loopx-smoke-family",
-        "--smoke-family",
-        action="append",
-        default=[],
-        dest="loopx_smoke_families",
-        help="Catalog family selector passed through to the LoopX runner. Repeat or comma-separate.",
-    )
-    group.addoption(
-        "--loopx-smoke-include-deep-checks",
-        "--smoke-include-deep-checks",
-        action="store_true",
-        default=False,
-        dest="loopx_smoke_include_deep_checks",
-        help="Include deep catalog checks when profile or family selectors are used.",
-    )
-    group.addoption(
-        "--loopx-smoke-limit",
-        "--smoke-limit",
-        type=int,
-        default=0,
-        dest="loopx_smoke_limit",
-        help="Maximum selected checks to run. Defaults to all selected checks.",
-    )
-    group.addoption(
-        "--loopx-smoke-offset",
-        "--smoke-offset",
-        type=int,
-        default=0,
-        dest="loopx_smoke_offset",
-        help="Skip this many matched checks before applying the smoke-suite limit.",
-    )
-    group.addoption(
-        "--loopx-smoke-timeout",
-        "--smoke-timeout",
-        type=float,
-        default=120.0,
-        dest="loopx_smoke_timeout",
-        help="Per-check timeout in seconds for each subprocess smoke.",
-    )
-
-
-@pytest.fixture(autouse=True)
-def _outside_agent_turns(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Run tests as the owner even when the suite itself runs inside an agent Turn.
-
-    A LoopX Turn host marks its model process with ``LOOPX_AGENT_TURN``, and
-    user-gate decisions refuse it. Tests that exercise that guard set it.
-    """
-
-    monkeypatch.delenv("LOOPX_AGENT_TURN", raising=False)
-
-
-_GIT_ENV_OVERRIDES = (
-    "GIT_DIR",
-    "GIT_WORK_TREE",
-    "GIT_COMMON_DIR",
-    "GIT_INDEX_FILE",
-    "GIT_OBJECT_DIRECTORY",
-    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
-    "GIT_CEILING_DIRECTORIES",
-    "GIT_DISCOVERY_ACROSS_FILESYSTEM",
-    "GIT_NAMESPACE",
-    "GIT_PREFIX",
 )
 
 
@@ -173,6 +56,7 @@ _AGENT_DB_READS = (
     ("library", "get_item_files", []),
     ("project_documents", "list_documents", []),
     ("project_documents", "get_content", None),
+    ("project_skills", "list_enabled_skills", []),
 )
 
 
@@ -204,6 +88,7 @@ _PLANNER_CLAUDE = """\
 import json, os, sys, time
 STATE = {state!r}
 REPLIES = json.loads({replies!r})
+AUTONOMOUS = json.loads({autonomous!r})
 def log(name, value):
     with open(os.path.join(STATE, name), 'a') as f:
         f.write(json.dumps(value) + '\\n')
@@ -223,25 +108,50 @@ counter = os.path.join(STATE, 'turns')
 # Like Claude, a process that resumes a session carries on from the session's running total.
 session_cost = os.path.join(STATE, 'session_cost')
 cost = float(open(session_cost).read()) if '--resume' in sys.argv and os.path.exists(session_cost) else 0.0
+def emit(event):
+    print(json.dumps(event), flush=True)
 for line in sys.stdin:
     n = int(open(counter).read()) + 1 if os.path.exists(counter) else 1
     open(counter, 'w').write(str(n))
-    log('turns.jsonl', {{'pid': os.getpid(), 'text': json.loads(line)['message']['content']}})
+    message = json.loads(line)
+    log('turns.jsonl', {{'pid': os.getpid(), 'text': message['message']['content']}})
     reply = REPLIES[n - 1] if n <= len(REPLIES) else REPLIES[-1]
-    print(json.dumps({{'type': 'system', 'subtype': 'init', 'session_id': 'sess-p', 'model': 'fake'}}), flush=True)
+    # Like Claude Code 2.1.285 run with --replay-user-messages: the message's lifecycle and its replay
+    # carry its uuid, and so does the result that answers it.
+    mid = message.get('uuid') or 'claude-named-%d' % n
+    for state in ('queued', 'started'):
+        emit({{'type': 'command_lifecycle', 'command_uuid': mid, 'state': state, 'session_id': 'sess-p'}})
+    emit({{'type': 'system', 'subtype': 'init', 'session_id': 'sess-p', 'model': 'fake'}})
+    emit({{'type': 'user', 'message': {{'role': 'user', 'content': message['message']['content']}},
+          'session_id': 'sess-p', 'parent_tool_use_id': None, 'uuid': mid, 'isReplay': True}})
     if reply == '<exit>':
         sys.exit(3)
     if reply == '<hang>':
         time.sleep(60)
+    answers = {{'session_id': 'sess-p', 'user_message_uuid': mid, 'user_message_uuids': [mid]}}
     if reply == '<error>':
-        print(json.dumps({{'type': 'result', 'subtype': 'error_during_execution', 'is_error': True,
-                          'session_id': 'sess-p', 'total_cost_usd': cost}}), flush=True)
-        continue
-    cost += 0.25
-    open(session_cost, 'w').write(str(cost))
-    print(json.dumps({{'type': 'assistant', 'message': {{'content': [{{'type': 'text', 'text': reply}}]}}}}), flush=True)
-    print(json.dumps({{'type': 'result', 'subtype': 'success', 'is_error': False, 'result': reply,
-                      'session_id': 'sess-p', 'total_cost_usd': cost}}), flush=True)
+        emit({{'type': 'result', 'subtype': 'error_during_execution', 'is_error': True, 'total_cost_usd': cost,
+              **answers}})
+    else:
+        cost += 0.25
+        open(session_cost, 'w').write(str(cost))
+        emit({{'type': 'assistant', 'message': {{'content': [{{'type': 'text', 'text': reply}}]}},
+              'parent_tool_use_id': None}})
+        emit({{'type': 'result', 'subtype': 'success', 'is_error': False, 'result': reply, 'total_cost_usd': cost,
+              **answers}})
+    emit({{'type': 'command_lifecycle', 'command_uuid': mid, 'state': 'completed', 'session_id': 'sess-p'}})
+    if str(n) in AUTONOMOUS:
+        # Like Claude once background work started in this turn ends: a turn of its own, answering no message.
+        cost += 0.25
+        open(session_cost, 'w').write(str(cost))
+        emit({{'type': 'system', 'subtype': 'task_notification', 'task_id': 'bg-%d' % n, 'status': 'completed',
+              'session_id': 'sess-p'}})
+        emit({{'type': 'system', 'subtype': 'init', 'session_id': 'sess-p', 'model': 'fake'}})
+        emit({{'type': 'assistant', 'message': {{'content': [{{'type': 'text', 'text': AUTONOMOUS[str(n)]}}]}},
+              'parent_tool_use_id': None}})
+        emit({{'type': 'result', 'subtype': 'success', 'is_error': False, 'result': AUTONOMOUS[str(n)],
+              'session_id': 'sess-p', 'total_cost_usd': cost,
+              'origin': {{'kind': 'task-notification', 'producer': 'session-task'}}}})
 if {linger!r}:
     time.sleep(60)
 """
@@ -259,17 +169,22 @@ class FakePlannerClaude:
     with an error result. With ``linger`` it keeps running after its stdin
     closes; with ``forget_sessions`` it answers any ``--resume`` the way Claude
     answers one for a session it no longer has: an error result, no init. It logs its argv, pid, the system prompt its file held at start
-    and every turn it reads.
+    and every turn it reads. Like Claude Code 2.1.285, each turn's lifecycle
+    events, the replay of its message and its result carry the message's uuid.
+    After turn N, ``autonomous[N]`` is the reply of a turn it runs on its own, as
+    Claude does once background work ends (0.25 more).
     """
 
     def __init__(
         self, state: Path, replies: tuple[str, ...], *, linger: bool = False, forget_sessions: bool = False,
+        autonomous: dict[int, str] | None = None,
     ) -> None:
         self.state = state
         self.bin = str(state / "fake-claude")
         script = Path(self.bin)
         script.write_text(f"#!{sys.executable}\n" + _PLANNER_CLAUDE.format(
             state=str(state), replies=json.dumps(replies), linger=linger, forget_sessions=forget_sessions,
+            autonomous=json.dumps({str(turn): text for turn, text in (autonomous or {}).items()}),
         ))
         script.chmod(0o755)
 
@@ -295,9 +210,12 @@ class FakePlannerClaude:
 def planner_claude(tmp_path_factory: pytest.TempPathFactory) -> Callable[..., FakePlannerClaude]:
     """Build a ``FakePlannerClaude`` answering with the given replies."""
 
-    def make(*replies: str, linger: bool = False, forget_sessions: bool = False) -> FakePlannerClaude:
+    def make(
+        *replies: str, linger: bool = False, forget_sessions: bool = False, autonomous: dict[int, str] | None = None,
+    ) -> FakePlannerClaude:
         return FakePlannerClaude(
             tmp_path_factory.mktemp("planner-claude"), replies, linger=linger, forget_sessions=forget_sessions,
+            autonomous=autonomous,
         )
 
     return make
@@ -412,38 +330,23 @@ def project_documents(agent_db: SimpleNamespace) -> Callable[..., list[dict[str,
 
 
 @pytest.fixture
-def independent_worktree(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """A linked git worktree of a private temporary repository.
+def project_skills(agent_db: SimpleNamespace) -> Callable[..., list[dict[str, Any]]]:
+    """Set the enabled skills of each project: ``project_skills((project_id, name, description, content), ...)``.
 
-    A multi-agent goal only settles accountable delivery that was refreshed
-    from an independent git worktree. Without an explicit delivery workspace,
-    refresh-state and ``turn run-once`` capture the process cwd, so a test that
-    relies on the default would pass from a linked worktree of the LoopX
-    checkout and fail from the primary checkout. Tests use this worktree as
-    their delivery workspace instead: pass it with --delivery-workspace-path,
-    or ``monkeypatch.chdir`` into it the way the dispatcher starts a Turn in
-    its workspace. Inherited ``GIT_*`` repository overrides (for example from
-    a git hook) are cleared so git discovery only sees the temporary paths.
+    The stubbed database then lists, for a project, the rows given for it (the
+    enabled ones, as ``list_enabled_skills`` reads them, by name); it returns
+    every row. Calling it again replaces the skills.
     """
+    rows: list[dict[str, Any]] = []
 
-    for name in _GIT_ENV_OVERRIDES:
-        monkeypatch.delenv(name, raising=False)
-    origin = tmp_path / "delivery-origin"
-    worktree = tmp_path / "delivery-worktree"
-    git = [
-        "git",
-        "-c", "user.name=LoopX Test",
-        "-c", "user.email=loopx-test@example.invalid",
-        "-c", "commit.gpgsign=false",
-        "-c", "init.defaultBranch=main",
-    ]
-    subprocess.run([*git, "init", "--quiet", str(origin)], check=True)
-    subprocess.run(
-        [*git, "-C", str(origin), "commit", "--quiet", "--allow-empty", "-m", "init"],
-        check=True,
-    )
-    subprocess.run(
-        [*git, "-C", str(origin), "worktree", "add", "--quiet", "--detach", str(worktree)],
-        check=True,
-    )
-    return worktree
+    def set_skills(*skills: tuple[str, str, str, str]) -> list[dict[str, Any]]:
+        rows.clear()
+        for number, (project_id, name, description, content) in enumerate(skills, start=1):
+            rows.append({"id": f"skill-{number:012d}", "project_id": project_id, "name": name,
+                         "description": description, "content": content})
+        return [dict(row) for row in rows]
+
+    agent_db.list_enabled_skills.side_effect = lambda project_id, **_: sorted(
+        (dict(row) for row in rows if row["project_id"] == project_id), key=lambda row: row["name"])
+    return set_skills
+

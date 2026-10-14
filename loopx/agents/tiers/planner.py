@@ -20,8 +20,9 @@ does the dispatching. The system prompt is rebuilt for every turn from the
 harness (the project's Planner override, else the default in Settings), the
 ``planner`` config and the task's project as it is now (its background and
 the index of its knowledge included, the knowledge's directories mounted with
-``--add-dir``); when it, the model or the Settings environment changes,
-Claude restarts and resumes its session. An invalid reply gets one repair turn. Planning that
+``--add-dir`` and its enabled skills with one more ``--plugin-dir``); when it,
+the model or the Settings environment changes, Claude restarts and resumes its
+session. An invalid reply gets one repair turn. Planning that
 still fails fails the task; a decision that still fails falls back to the
 step's own verdict. When the task completes or fails, the Planner signals the
 TaskRouter, which tears it down and ends its Claude.
@@ -42,9 +43,20 @@ from typing import Any, TypeVar
 from ..bus import MessageBus
 from .. import agent_settings
 from ..agent_settings import BUILTIN_DEFAULTS, AgentDefaults, AgentType, Launch, resolve_harness, resolve_launch
-from ..claude_cli import ClaudeRunRecorder, ResidentClaude, exit_note, isolation_args, system_prompt_args
+from ..claude_cli import (
+    AUTONOMOUS_INPUT,
+    AutonomousHandler,
+    AutonomousRun,
+    ClaudeRunRecorder,
+    ResidentClaude,
+    ResidentTurn,
+    exit_note,
+    isolation_args,
+    system_prompt_args,
+)
 from ..knowledge import AgentKnowledge, documents_label, load_knowledge
 from ..library import load_library
+from ..project_skills import AgentProjectSkills, load_project_skills, skills_label
 from ..run_usage import Usage
 from ..system_prompt import SystemPrompt, build_system_prompt, is_recommended, plan_task_section
 from ..message import (
@@ -349,6 +361,8 @@ class PlannerAgent:
         # The project knowledge the last turn ran with (None before the first turn); a turn that cannot
         # read the knowledge keeps it, as a failed project read keeps the last project.
         self._knowledge: AgentKnowledge | None = None
+        # The project skills the last turn ran with, kept the same way when a turn cannot read them.
+        self._project_skills: AgentProjectSkills | None = None
 
     @property
     def agent_id(self) -> str:
@@ -1020,8 +1034,12 @@ class PlannerAgent:
             "--input-format", "stream-json",
             # Partial deltas keep the turn's heartbeat current while Claude writes.
             "--include-partial-messages",
+            # Claude echoes each message, marked with the uuid it was sent with, when it starts the message's
+            # turn; a turn Claude runs on its own has no such echo.
+            "--replay-user-messages",
             # None of the operator's personal settings, memory, hooks, plugins or MCP servers; the
-            # permissions every agent shares and the library's plugins and skills come with the launch args.
+            # permissions every agent shares, the library's plugins and skills and the project's skills
+            # come with the launch args.
             *isolation_args(work_dir),
             *system_prompt_args(prompt_file),
             *launch.args(),
@@ -1034,17 +1052,20 @@ class PlannerAgent:
         assert plan is not None
         settings = await load_settings()
         knowledge = await self._load_knowledge(plan)
+        skills = await self._load_project_skills(plan)
         system_prompt = self._system_prompt(plan, settings, knowledge)
-        launch = resolve_launch(settings.defaults, settings.model, await load_library(self._runtime_root), knowledge)
+        launch = resolve_launch(settings.defaults, settings.model, await load_library(self._runtime_root), knowledge,
+                                skills)
         await self._note_background(plan.project_background)
         try:
             prompt_file = system_prompt.write_file(self._runtime_root)
         except OSError as exc:
             raise PlannerTurnError(f"cannot write the system prompt file: {exc}") from None
         base = self._claude_command(prompt_file, settings, launch, plan.work_dir)
-        # The command carries the model, the effort, the library's directories and the knowledge's; the
-        # file is named by its content's hash (the knowledge index included), kept beside it all the same;
-        # the environment and the library are compared by their hashes, the mounted directories as such.
+        # The command carries the model, the effort, the library's directories, the project skills' plugin
+        # (named by their hash) and the knowledge's; the file is named by its content's hash (the knowledge
+        # index included), kept beside it all the same; the environment and the library are compared by
+        # their hashes, the mounted directories as such.
         signature = (tuple(base), system_prompt.sha256, launch.env_sha256, launch.library.sha256,
                      launch.knowledge.add_dirs)
         if self._claude.stale(signature):
@@ -1060,7 +1081,8 @@ class PlannerAgent:
             command = base + (["--resume", plan.session_id] if plan.session_id else [])
             try:
                 await self._claude.start(command, cwd=plan.work_dir, signature=signature, env=launch.environment(),
-                                         totals=plan.session_totals if plan.session_id else None)
+                                         totals=plan.session_totals if plan.session_id else None,
+                                         autonomous=self._autonomous_turns(plan, command, system_prompt, launch))
             except OSError as exc:
                 start_error = f"cannot start Claude Code: {exc}"
             else:
@@ -1128,7 +1150,7 @@ class PlannerAgent:
             error = f"Claude Code turn did not succeed ({result_event.get('subtype') or 'error'})"
         elif not final_text.strip():
             error = "Claude Code returned an empty reply"
-        usage = self._claude.turn_usage(result_event)
+        usage = turn.usage
         if result_event is not None:
             plan.session_totals = self._claude.totals
             self._save_plan(plan)
@@ -1141,6 +1163,42 @@ class PlannerAgent:
         if error:
             raise PlannerTurnError(error)
         return final_text
+
+    def _autonomous_turns(
+        self, plan: TaskPlan, command: list[str], system_prompt: SystemPrompt, launch: Launch,
+    ) -> AutonomousHandler:
+        """How the Planner takes a turn its Claude (started with these) runs on its own.
+
+        The turn is a run of its own. What Claude said in it answers none of
+        the Planner's requests, so it decides nothing about the plan and is
+        only logged.
+        """
+
+        async def begin(_after: Any) -> AutonomousRun:
+            recorder = ClaudeRunRecorder(
+                agent_id=self.agent_id,
+                task_id=self._task_id,
+                command=command,
+                cwd=plan.work_dir,
+                input_text=AUTONOMOUS_INPUT,
+                session_id=plan.session_id,
+                pid=self._claude.pid,
+                system_prompt=system_prompt,
+                launch=launch,
+                autonomous=True,
+            )
+            await recorder.start()
+
+            async def on_end(text: str, turn: ResidentTurn) -> None:
+                if turn.result_event is not None:
+                    plan.session_totals = self._claude.totals  # it spent too: a restart resumes from here
+                    self._save_plan(plan)
+                logger.info("%s: Claude ran a turn on its own after background work ended; its reply decides "
+                            "nothing: %s", self.agent_id, _clip(text, 300) or "(nothing)")
+
+            return AutonomousRun(recorder, on_end)
+
+        return begin
 
     def _system_prompt(self, plan: TaskPlan, settings: PlannerSettings, knowledge: AgentKnowledge) -> SystemPrompt:
         """The harness, the role prompt, the project background and knowledge index, the task, then the reply
@@ -1446,6 +1504,28 @@ class PlannerAgent:
                 verb = "changed" if before else "applied"
                 await self._activity("phase", f"Project knowledge {verb} ({documents_label(knowledge.documents)})")
         return knowledge
+
+    async def _load_project_skills(self, plan: TaskPlan) -> AgentProjectSkills:
+        """The project's enabled skills for this turn, read now; the last ones read when they cannot be read.
+
+        Notes in the task's activity when the skills the turn runs with start,
+        change or end.
+        """
+        skills = await load_project_skills(self._runtime_root, {"id": plan.project_id} if plan.project_id else None)
+        previous = self._project_skills
+        if skills.error is not None:
+            await self._activity("error", f"Warning: {skills.error}"[:500])
+            if previous is not None:
+                return previous
+        self._project_skills = skills
+        before = previous.sha256 if previous is not None else None
+        if skills.sha256 != before:
+            if skills.sha256 is None:
+                await self._activity("phase", "Project skills removed")
+            else:
+                verb = "changed" if before else "applied"
+                await self._activity("phase", f"Project skills {verb} ({skills_label(len(skills.skills))})")
+        return skills
 
     async def _note_background(self, background: str) -> None:
         """Note in the task's activity when the system prompt starts carrying, changes or drops the background."""

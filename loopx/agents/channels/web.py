@@ -64,6 +64,10 @@ class WebChannelAdapter(ChannelAdapter):
         logger.info("web channel adapter stopped")
 
     async def deliver(self, envelope: MessageEnvelope) -> DeliveryReceipt:
+        chat_session = envelope.payload.get("chat_session_id")
+        if envelope.message_type == MessageType.AGENT_REPLY and isinstance(chat_session, str) and chat_session:
+            return await self._add_to_chat(chat_session, envelope)
+
         corr_id = envelope.correlation_id
         sse_q = self._sse_queues.get(corr_id)
 
@@ -82,6 +86,23 @@ class WebChannelAdapter(ChannelAdapter):
             return DeliveryReceipt(
                 channel="web", success=False, error="SSE queue full"
             )
+
+    @staticmethod
+    async def _add_to_chat(session_id: str, envelope: MessageEnvelope) -> DeliveryReceipt:
+        """Add a reply that answers no message (what the Manager's Claude said on its own) to its chat.
+
+        A message's stream ends at its answer, so such a reply never goes to
+        one; the chat page shows it with the chat's other messages.
+        """
+        from ...db.chat import save_message
+
+        try:
+            await save_message(session_id=session_id, message_id=envelope.message_id, role="assistant",
+                               content=str(envelope.payload.get("text") or ""))
+        except Exception as exc:
+            logger.warning("web: could not add a reply to chat %s", session_id, exc_info=True)
+            return DeliveryReceipt(channel="web", success=False, error=f"could not save to chat: {exc}")
+        return DeliveryReceipt(channel="web", success=True)
 
     def healthcheck(self) -> dict[str, Any]:
         return {

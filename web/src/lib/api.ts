@@ -393,6 +393,84 @@ export async function deleteKnowledgeDocument(projectId: string, documentId: str
   return res.json();
 }
 
+// --- A project's skills: Claude Code skills only its Planner, Workers and Reviewers load ---
+
+export interface ProjectSkill {
+  skill_id: string;
+  /** A lowercase slug; the skill's directory and frontmatter name. */
+  name: string;
+  /** How agents see it: `project:<name>`. */
+  qualified_name: string;
+  /** One line; Claude Code shows it to the model to decide when to use the skill. */
+  description: string;
+  /** Only enabled skills are loaded, from the next run on. */
+  enabled: boolean;
+  /** The size of its SKILL.md body. */
+  size_bytes: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ProjectSkills {
+  project_id: string;
+  skills: ProjectSkill[];
+  count: number;
+  enabled_count: number;
+  /** The plugin agents load the skills from. */
+  plugin: string;
+  caps: {
+    name_max_chars: number;
+    description_max_chars: number;
+    content_max_bytes: number;
+    project_max_skills: number;
+  };
+}
+
+export interface NewProjectSkill {
+  name: string;
+  description: string;
+  /** The SKILL.md body, without frontmatter. */
+  content: string;
+}
+
+function skillsUrl(projectId: string, skillId?: string) {
+  const base = `${API_BASE}/projects/${encodeURIComponent(projectId)}/skills`;
+  return skillId ? `${base}/${encodeURIComponent(skillId)}` : base;
+}
+
+export async function fetchProjectSkills(projectId: string): Promise<ProjectSkills> {
+  const res = await fetch(skillsUrl(projectId));
+  if (!res.ok) await failed(res, "skills");
+  return res.json();
+}
+
+/** Add a skill; the server refuses a bad field or a cap with the reason (400) and a taken name (409). */
+export async function addProjectSkill(projectId: string, skill: NewProjectSkill): Promise<ProjectSkills> {
+  const res = await fetch(skillsUrl(projectId), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(skill),
+  });
+  if (!res.ok) await failed(res, "add skill");
+  return res.json();
+}
+
+export async function setProjectSkillEnabled(projectId: string, skillId: string, enabled: boolean): Promise<ProjectSkills> {
+  const res = await fetch(skillsUrl(projectId, skillId), {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ enabled }),
+  });
+  if (!res.ok) await failed(res, "update skill");
+  return res.json();
+}
+
+export async function deleteProjectSkill(projectId: string, skillId: string): Promise<ProjectSkills> {
+  const res = await fetch(skillsUrl(projectId, skillId), { method: "DELETE" });
+  if (!res.ok) await failed(res, "delete skill");
+  return res.json();
+}
+
 export async function updateTaskConfig(
   taskId: string,
   fields: { requirement?: string; work_dir?: string; config?: Record<string, unknown> },

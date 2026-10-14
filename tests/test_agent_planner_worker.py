@@ -296,7 +296,8 @@ class TestWorkerPool:
         assert "hardened the login check" not in task
         assert '"passed"' not in prompt and '"passed"' in REVIEW_CONTRACT
 
-    def test_pool_start_stop(self) -> None:
+    def test_pool_start_stop(self, stub_claude_on_path: Path) -> None:
+        # is_healthy() needs a `claude` on PATH; the stub keeps this off the machine's own install.
         async def _run() -> None:
             with tempfile.TemporaryDirectory() as tmp:
                 bus = MessageBus(runtime_root=Path(tmp))
@@ -1195,6 +1196,123 @@ class TestWorkerKnowledge:
         project = agent_db.start_record.await_args.kwargs["metadata"]["prompt_layers"]["project"]
         assert project["knowledge_error"] == "the project's knowledge could not be read"
         assert "Warning: the project's knowledge could not be read; this run goes without it" in activity(agent_db)
+
+
+# What the fake Claude does with its plugins, like Claude Code: reads each one's skills. It keeps what it
+# saw beside its own script, so the step's directory holds only what the mechanism itself wrote there.
+_READ_PLUGINS = (
+    "first = sys.stdin.readline()\n"
+    "state = os.path.dirname(os.path.abspath(__file__))\n"
+    "dirs = [sys.argv[i + 1] for i, arg in enumerate(sys.argv) if arg == '--plugin-dir']\n"
+    "skills = {d: {name: open(os.path.join(d, 'skills', name, 'SKILL.md'), encoding='utf-8').read()\n"
+    "              for name in sorted(os.listdir(os.path.join(d, 'skills')))}\n"
+    "          for d in dirs if os.path.isdir(os.path.join(d, 'skills'))}\n"
+    "json.dump({'argv': sys.argv[1:], 'skills': skills}, open(os.path.join(state, 'seen.json'), 'w'))\n"
+)
+
+
+def _project_plugin_dirs(argv: list[str], root: str) -> list[str]:
+    """The ``--plugin-dir`` values that are a project's skills (under the runtime root's projects)."""
+    return [d for d in plugin_dirs(argv) if d.startswith(f"{root}/.local/projects/")]
+
+
+class TestWorkerProjectSkills:
+    """Each Worker and Reviewer run mounts its own project's enabled skills as one plugin under the runtime
+    root: one --plugin-dir beside the library's, recorded with the run, and nothing in the step's directory."""
+
+    @pytest.fixture(autouse=True)
+    def _role(self, monkeypatch: pytest.MonkeyPatch, agent_db: Any) -> None:
+        _worker_row(monkeypatch, {"system_prompt": ROLE, "timeout_seconds": 0, "max_turns": 0})
+        agent_db.get_task_project.return_value = {"id": "proj-a", "name": "calc", "work_dir": ""}
+
+    @staticmethod
+    def _run(*, verify: bool = False) -> tuple[dict[str, Any], dict[str, Any]]:
+        """Run one step in a fresh directory, apart from the runtime root; return its outcome and what its
+        Claude saw, with the files the step's directory holds afterwards."""
+
+        async def _go() -> tuple[dict[str, Any], dict[str, Any]]:
+            with tempfile.TemporaryDirectory() as tmp:
+                root, work, state = Path(tmp) / "runtime", Path(tmp) / "work", Path(tmp) / "state"
+                work.mkdir()
+                state.mkdir()
+                claude = _fake_claude(state, _READ_PLUGINS + (_VERDICT if verify else _SUCCESS))
+                pool = WorkerPool(config=WorkerConfig(claude_bin=claude), runtime_root=root)
+                result = await pool._execute(_step_envelope(work, verify=verify), is_verify=verify)
+                seen = json.loads((state / "seen.json").read_text())
+                return result, {**seen, "root": str(root),
+                                "work_files": sorted(p.relative_to(work).as_posix() for p in work.rglob("*"))}
+
+        return asyncio.run(_go())
+
+    def test_both_mount_their_projects_enabled_skills_as_one_plugin_and_record_them(
+        self, agent_db: Any, project_skills: Any,
+    ) -> None:
+        project_skills(("proj-a", "release-notes", "Drafts release notes.", "Reply NOTES-OK."),
+                       ("proj-a", "deploy-check", "Use before a deploy.", "Reply DEPLOY-OK."),
+                       ("proj-b", "elsewhere", "Another project's.", "Reply ELSEWHERE."))
+        for verify in (False, True):
+            result, seen = self._run(verify=verify)
+            assert result.get("status") == "completed" or result.get("passed") is True
+            (plugin,) = _project_plugin_dirs(seen["argv"], seen["root"])
+            assert plugin.startswith(f"{seen['root']}/.local/projects/proj-a/skills/") and plugin.endswith("/project")
+            files = seen["skills"][plugin]
+            assert sorted(files) == ["deploy-check", "release-notes"]
+            assert files["deploy-check"] == (
+                "---\nname: deploy-check\ndescription: \"Use before a deploy.\"\n---\n\nReply DEPLOY-OK.\n")
+            metadata = agent_db.start_record.await_args.kwargs["metadata"]
+            assert metadata["project_skills"] == {
+                "project_id": "proj-a", "sha256": Path(plugin).parent.name, "plugin": "project",
+                "skills": [{"name": "deploy-check", "sha256": _sha(files["deploy-check"])},
+                           {"name": "release-notes", "sha256": _sha(files["release-notes"])}]}
+            assert metadata["command"][1:] == seen["argv"]
+            assert seen["work_files"] == []  # nothing in the step's directory
+        assert activity(agent_db).count("Project skills applied (2 skills)") == 2
+
+    def test_a_step_of_another_project_mounts_none_of_them(self, agent_db: Any, project_skills: Any) -> None:
+        project_skills(("proj-a", "deploy-check", "Use before a deploy.", "Reply DEPLOY-OK."))
+        agent_db.get_task_project.return_value = {"id": "proj-b", "name": "other", "work_dir": ""}
+        for verify in (False, True):
+            _, seen = self._run(verify=verify)
+            assert "--plugin-dir" not in seen["argv"]
+            assert "project_skills" not in agent_db.start_record.await_args.kwargs["metadata"]
+        agent_db.list_enabled_skills.assert_awaited_with("proj-b")
+        assert not [line for line in activity(agent_db) if "skills" in line]
+
+    def test_the_librarys_plugins_and_the_projects_load_together(
+        self, agent_db: Any, enabled_library: Any, project_skills: Any,
+    ) -> None:
+        demo, _ = enabled_library(DEMO_PLUGIN, ALPHA_SKILL)
+        project_skills(("proj-a", "deploy-check", "Use before a deploy.", "Reply DEPLOY-OK."))
+        _, seen = self._run()
+        library, personal, project = plugin_dirs(seen["argv"])
+        assert library.endswith(f"/.local/library/{demo['sha256']}/demo") and personal.endswith("/personal")
+        assert _project_plugin_dirs(seen["argv"], seen["root"]) == [project]
+        metadata = agent_db.start_record.await_args.kwargs["metadata"]
+        assert [i["name"] for i in metadata["library"]["items"]] == ["demo@market", "alpha"]
+        assert [s["name"] for s in metadata["project_skills"]["skills"]] == ["deploy-check"]
+
+    def test_a_skill_disabled_or_deleted_is_not_loaded_by_the_next_run(self, agent_db: Any, project_skills: Any) -> None:
+        project_skills(("proj-a", "deploy-check", "Use before a deploy.", "Reply DEPLOY-OK."),
+                       ("proj-a", "release-notes", "Drafts release notes.", "Reply NOTES-OK."))
+        _, first = self._run()
+        project_skills(("proj-a", "release-notes", "Drafts release notes.", "Reply NOTES-OK."))  # the database lists enabled ones
+        _, second = self._run(verify=True)
+        (before,) = _project_plugin_dirs(first["argv"], first["root"])
+        (after,) = _project_plugin_dirs(second["argv"], second["root"])
+        assert Path(before).parent.name != Path(after).parent.name
+        assert sorted(second["skills"][after]) == ["release-notes"]
+        recorded = [call.kwargs["metadata"]["project_skills"] for call in agent_db.start_record.await_args_list]
+        assert [[s["name"] for s in r["skills"]] for r in recorded] == [["deploy-check", "release-notes"],
+                                                                         ["release-notes"]]
+
+    def test_unreadable_skills_run_the_step_without_them_and_warn(self, agent_db: Any) -> None:
+        agent_db.list_enabled_skills.side_effect = ConnectionError("database is down")
+        result, seen = self._run()
+        assert result["status"] == "completed" and "--plugin-dir" not in seen["argv"]
+        assert agent_db.start_record.await_args.kwargs["metadata"]["project_skills"] == {
+            "project_id": "proj-a", "sha256": None, "plugin": "project", "skills": [],
+            "error": "the project's skills could not be read"}
+        assert "Warning: the project's skills could not be read; this run goes without them" in activity(agent_db)
 
 
 def _assert_unrestricted(argv: list[str]) -> None:

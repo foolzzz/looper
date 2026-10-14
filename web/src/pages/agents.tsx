@@ -863,7 +863,6 @@ export function AgentsPage({ sub, onNavigate }: AgentsPageProps) {
   const subParts = (sub || "").split("/").filter(Boolean);
   const selectedId = subParts[0] || null;
   const activeTab: Tab = (subParts[1] === "sessions" ? "sessions" : "config");
-  const setSelectedId = (id: string | null) => onNavigate?.(id || "");
   const setActiveTab = (tab: Tab) =>
     onNavigate?.(selectedId ? (tab === "config" ? selectedId : `${selectedId}/${tab}`) : "");
 

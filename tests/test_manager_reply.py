@@ -755,6 +755,95 @@ class TestManagerLibrary:
         assert recorded[0]["sha256"] != recorded[1]["sha256"] == recorded[2]["sha256"]
 
 
+def _session_with(agent_db: Any, body: str, messages: list[str]) -> dict[str, Any]:
+    """Send ``messages`` from one web chat session to a Manager backed by a fake claude.
+
+    Returns the ``sent`` envelopes, every reply envelope in the order the
+    channel got them, and each recorded run (its start and finish keywords,
+    paired by record id).
+    """
+    ids = iter(range(1, 100))
+    agent_db.start_record.side_effect = lambda **_: next(ids)
+
+    async def _run() -> dict[str, Any]:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bus = MessageBus(runtime_root=root)
+            manager = ManagerAgent(
+                config=ManagerConfig(claude_bin=_fake_claude(root, body), work_dir=root), runtime_root=root,
+            )
+            manager._bus = bus
+            sent = []
+            for index, text in enumerate(messages):
+                envelope = MessageEnvelope.create(
+                    source=WEB, target=MANAGER_ADDRESS, message_type=MessageType.USER_MESSAGE,
+                    payload={"text": text, "channel_context": {"session_id": "chat-1"}},
+                    correlation_id=f"corr-{index}", metadata={"origin_channel_id": WEB.agent_id},
+                )
+                sent.append(envelope)
+                await manager._handle(envelope)
+            await manager.stop()
+            queue = bus.get_queue(WEB.agent_id)
+            replies = []
+            while not queue.empty():
+                envelope = queue.get_nowait()
+                if envelope.message_type == MessageType.AGENT_REPLY:
+                    replies.append(envelope)
+            await bus.shutdown()
+            return {"sent": sent, "replies": replies,
+                    "state": json.loads((root / ".local" / "manager" / "session.json").read_text())}
+
+    chat = asyncio.run(_run())
+    starts = [(call.kwargs, record_id) for call, record_id in
+              zip(agent_db.start_record.await_args_list, range(1, 100))]
+    finishes = {call.args[0]: call.kwargs for call in agent_db.finish_record.await_args_list}
+    chat["runs"] = [{**start, **finishes[record_id]} for start, record_id in starts]
+    return chat
+
+
+@pytest.mark.usefixtures("agent_db")
+class TestManagerAutonomousTurns:
+    """Claude Code runs a turn of its own once background work ends (recorded, tests/claude_stream_replay.py)."""
+
+    def test_the_next_message_gets_its_own_answer_and_the_autonomous_turn_its_own_reply_and_run(
+        self, agent_db: Any,
+    ) -> None:
+        from claude_stream_replay import replay_body
+
+        chat = _session_with(agent_db, replay_body("background_agent"), ["start a background agent", "7*6?"])
+        first, second = chat["sent"]
+        answers = {m.message_id: [r.payload["text"] for r in chat["replies"] if r.reply_to == m.message_id]
+                   for m in chat["sent"]}
+        assert answers == {first.message_id: ["LAUNCHED"], second.message_id: ["42"]}
+        # What Claude said on its own is a reply of its own, to the chat of the message it last answered.
+        (own,) = [r for r in chat["replies"] if r.reply_to is None]
+        assert own.payload["text"] == "Background task completed with result: **SUB-DONE-4417**"
+        assert own.payload["autonomous"] is True and own.payload["chat_session_id"] == "chat-1"
+        assert (own.target, own.correlation_id, own.metadata["origin_channel_id"]) == (WEB, "corr-0", WEB.agent_id)
+        assert chat["replies"].index(own) < [r.reply_to for r in chat["replies"]].index(second.message_id)
+        # Three runs, each with its own input, output and cost.
+        from loopx.agents.claude_cli import AUTONOMOUS_INPUT
+
+        runs = {run["input_text"]: run for run in chat["runs"]}
+        assert set(runs) == {"start a background agent", "7*6?", AUTONOMOUS_INPUT}
+        autonomous = runs[AUTONOMOUS_INPUT]
+        assert autonomous["metadata"]["autonomous"] is True and autonomous["agent_id"] == "manager"
+        assert autonomous["output_text"] == own.payload["text"] and autonomous["status"] == "completed"
+        assert runs["7*6?"]["output_text"] == "42"
+        assert runs["start a background agent"]["cost_usd"] == pytest.approx(0.0130063)
+        assert autonomous["cost_usd"] == pytest.approx(0.03359615 - 0.0130063)
+        assert runs["7*6?"]["cost_usd"] == pytest.approx(0.03617515 - 0.03359615)
+        # The saved running total covers all three, so a restart resumes from the right baseline.
+        assert chat["state"]["session_totals"]["cost_usd"] == pytest.approx(0.03617515)
+        # Every run is told apart; the user turns are not marked.
+        assert [run["metadata"].get("autonomous") for run in chat["runs"]].count(True) == 1
+
+    def test_claude_echoes_each_message_so_its_turn_can_be_told_apart(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        chat = _converse(monkeypatch, _resident(), ["hello"])
+        ((argv, _),) = chat["spawned"]
+        assert "--replay-user-messages" in argv
+
+
 @pytest.mark.usefixtures("agent_db")
 class TestManagerKnowledge:
     """The Manager spans every project, so it neither mounts nor indexes any project's knowledge."""
@@ -769,3 +858,20 @@ class TestManagerKnowledge:
         assert "Project knowledge" not in chat["prompts"][0]
         agent_db.list_documents.assert_not_awaited()
         assert agent_db.start_record.await_args.kwargs["metadata"]["prompt_layers"]["project"] is None
+
+
+@pytest.mark.usefixtures("agent_db")
+class TestManagerProjectSkills:
+    """The Manager spans every project, so it mounts no project's skills, only the library."""
+
+    def test_the_manager_gets_no_project_skills_while_projects_have_some(
+        self, monkeypatch: pytest.MonkeyPatch, agent_db: Any, enabled_library: Any, project_skills: Any,
+    ) -> None:
+        enabled_library(DEMO_PLUGIN)
+        project_skills(("proj-1", "deploy-check", "Use before a deploy.", "Reply DEPLOY-OK."))
+        chat = _converse(monkeypatch, _resident(), ["hello"])
+        ((argv, _),) = chat["spawned"]
+        (only,) = plugin_dirs(argv)  # the library's plugin, nothing more
+        assert only.endswith("/demo") and "/.local/projects/" not in " ".join(argv)
+        agent_db.list_enabled_skills.assert_not_awaited()
+        assert "project_skills" not in agent_db.start_record.await_args.kwargs["metadata"]
