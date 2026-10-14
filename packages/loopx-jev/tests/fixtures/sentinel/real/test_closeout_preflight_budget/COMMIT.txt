@@ -1,6 +1,0 @@
-d852586b56e6618a82c131fbf92c8057e45a8c08
-test(control-plane): pin the closeout preflight budget and typed timeout
-
-Focused cases: the preflight passes its declared budget (and it exceeds the single-record default), the identity-conflict diagnostic keeps its typed error, a runtime timeout names the method and the budget with its own diagnostic code, and the quota failure payload publishes that reason.
-
-Signed-off-by: huangruiteng <14976749+huangruiteng@users.noreply.github.com>

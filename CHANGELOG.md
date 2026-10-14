@@ -375,6 +375,32 @@ To learn how to use these features, read the [usage guide](docs/fork/usage.md).
     to a message's stream. The Planner only logs it: it decides nothing about
     the plan.
 
+### Removed
+
+- **`loopx update` and `loopx init`.** To upgrade, re-run `install.sh`: it
+  installs the latest release wheel over the current one. `loopx init` wrote
+  `providers.yaml` and `agents/*.yaml`, which nothing in the agent system
+  reads.
+- **The upstream LoopX command line.** `loopx` now has only `serve`,
+  `version` and `--version`, and starting the server no longer loads any
+  upstream module. The other upstream subcommands (`status`, `todo`,
+  `dashboard`, `chat`, ...) and the global `--registry`, `--runtime-root`
+  and `--format` options are gone; `loopx serve --runtime-root` is
+  unchanged. `loopx --runtime-root DIR serve` used to ignore `DIR`; it is
+  now an error.
+- The release wheel no longer requires or builds the upstream Chat bundle
+  (`loopx/web/chat`). It still carries the dashboard built from `web/`.
+- **The upstream LoopX code.** The package is now the agent system alone
+  (`loopx.agents`, `loopx.db`, `loopx.cli`, `loopx.paths`): the upstream
+  control plane, capabilities, extensions, Chat server and the other upstream
+  modules are gone, and with them the `loopx-lark-provider`,
+  `loopx-openviking-history-export` and `loopx-openviking-semantic-preference`
+  commands, the `deepseek-harness` extra and the workflow skills the wheel
+  installed under `share/loopx/skills`. The repository no longer has the
+  upstream `apps/` frontends, `packages/` plugins, `skills/`, the man page,
+  or the source-snapshot installers `scripts/install-from-github.sh` and
+  `scripts/install-local.sh`; `install.sh` is the way to install and upgrade.
+
 ## [2.5.0] - 2026-10-13
 
 Covers `v2.1.0` to `v2.5.0`: this fork's merged pull requests from #106 to

@@ -1,9 +1,0 @@
-{
-  "schema_version": "loopx_jev_drift_config_v0",
-  "mode": "shadow",
-  "scenarios": ["progress_review"],
-  "model": "jev-1.13.0",
-  "allow_egress": false,
-  "limits": {"deadline_ms": 5000, "max_requests_per_run": 20},
-  "minimum_label_probability": 0.6
-}

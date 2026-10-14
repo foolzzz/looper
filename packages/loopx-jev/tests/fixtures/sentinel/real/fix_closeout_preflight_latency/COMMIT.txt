@@ -1,8 +1,0 @@
-3c358694180418801da2885bbdd9002affb59c11
-fix(control-plane): give the closeout preflight the latency its query needs
-
-quota should-run asks quota.prior_host_turn_closeout.preflight which prior Turn still owes a closeout. The typed owner validates every recorded Turn of the Goal before it can answer, so its cost grows with that Goal history: on 2026-09-21 it needed ~6s for 216 Turns while the Effect runtime default budget is 5s. Both attempts timed out, the failure surfaced as an unavailable quota entry, and every heartbeat wake of that Goal was skipped without accounting.
-
-The preflight now declares its own budget (30s) instead of inheriting the single-record default, a runtime timeout is reported as its own typed diagnostic naming the method and the budget, and the quota failure payload publishes that bounded reason instead of the unactionable generic line.
-
-Signed-off-by: huangruiteng <14976749+huangruiteng@users.noreply.github.com>
