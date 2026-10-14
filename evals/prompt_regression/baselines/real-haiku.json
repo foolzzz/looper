@@ -1,0 +1,185 @@
+{
+  "schema": "loopx-prompt-eval/v1",
+  "mode": "real",
+  "model": "haiku",
+  "started_at": "20261014T033917Z",
+  "git": {
+    "commit": "3dc253394c3876570f5b1baf2b561ced63a206d0",
+    "dirty": false
+  },
+  "caps": {
+    "max_budget_usd": 0.25,
+    "total_cap_usd": 0.8
+  },
+  "stopped_by_cap": false,
+  "total_cost_usd": 0.322404,
+  "tasks": [
+    {
+      "id": "single_step",
+      "status": "completed",
+      "success": true,
+      "problems": [],
+      "steps": 1,
+      "reviews": 0,
+      "retries": 0,
+      "chat_turns": 0,
+      "planner_turns": {
+        "plan": 1,
+        "decision": 1
+      },
+      "cost_usd": 0.045604,
+      "cost_by_role": {
+        "planner": 0.023848,
+        "worker": 0.021756,
+        "reviewer": 0.0
+      },
+      "runs": 3,
+      "contract_violations": {
+        "planner": 0,
+        "worker": 0,
+        "reviewer": 0,
+        "total": 0
+      },
+      "planner_edit_tool_paths": [],
+      "planner_changed_files": [],
+      "planner_modified_files": 0,
+      "duration_s": 28.2,
+      "stopped_by_cap": false,
+      "timed_out": false
+    },
+    {
+      "id": "dependent_steps",
+      "status": "completed",
+      "success": true,
+      "problems": [],
+      "steps": 2,
+      "reviews": 0,
+      "retries": 0,
+      "chat_turns": 0,
+      "planner_turns": {
+        "plan": 1,
+        "decision": 2
+      },
+      "cost_usd": 0.07037,
+      "cost_by_role": {
+        "planner": 0.026657,
+        "worker": 0.043713,
+        "reviewer": 0.0
+      },
+      "runs": 5,
+      "contract_violations": {
+        "planner": 0,
+        "worker": 0,
+        "reviewer": 0,
+        "total": 0
+      },
+      "planner_edit_tool_paths": [],
+      "planner_changed_files": [],
+      "planner_modified_files": 0,
+      "duration_s": 38.4,
+      "stopped_by_cap": false,
+      "timed_out": false
+    },
+    {
+      "id": "reviewed_step",
+      "status": "completed",
+      "success": true,
+      "problems": [],
+      "steps": 1,
+      "reviews": 1,
+      "retries": 0,
+      "chat_turns": 0,
+      "planner_turns": {
+        "plan": 1,
+        "decision": 2
+      },
+      "cost_usd": 0.070551,
+      "cost_by_role": {
+        "planner": 0.029549,
+        "worker": 0.023023,
+        "reviewer": 0.017979
+      },
+      "runs": 5,
+      "contract_violations": {
+        "planner": 0,
+        "worker": 0,
+        "reviewer": 0,
+        "total": 0
+      },
+      "planner_edit_tool_paths": [],
+      "planner_changed_files": [],
+      "planner_modified_files": 0,
+      "duration_s": 44.4,
+      "stopped_by_cap": false,
+      "timed_out": false
+    },
+    {
+      "id": "retry_after_failure",
+      "status": "completed",
+      "success": true,
+      "problems": [],
+      "steps": 1,
+      "reviews": 0,
+      "retries": 1,
+      "chat_turns": 0,
+      "planner_turns": {
+        "plan": 1,
+        "decision": 2,
+        "repair": 1
+      },
+      "cost_usd": 0.084665,
+      "cost_by_role": {
+        "planner": 0.041487,
+        "worker": 0.043178,
+        "reviewer": 0.0
+      },
+      "runs": 6,
+      "contract_violations": {
+        "planner": 1,
+        "worker": 0,
+        "reviewer": 0,
+        "total": 1
+      },
+      "planner_edit_tool_paths": [],
+      "planner_changed_files": [],
+      "planner_modified_files": 0,
+      "duration_s": 62.5,
+      "stopped_by_cap": false,
+      "timed_out": false
+    },
+    {
+      "id": "chat_correction",
+      "status": "completed",
+      "success": true,
+      "problems": [],
+      "steps": 1,
+      "reviews": 0,
+      "retries": 0,
+      "chat_turns": 1,
+      "planner_turns": {
+        "plan": 1,
+        "chat": 1,
+        "decision": 1
+      },
+      "cost_usd": 0.051214,
+      "cost_by_role": {
+        "planner": 0.024945,
+        "worker": 0.026269,
+        "reviewer": 0.0
+      },
+      "runs": 4,
+      "contract_violations": {
+        "planner": 0,
+        "worker": 0,
+        "reviewer": 0,
+        "total": 0
+      },
+      "planner_edit_tool_paths": [],
+      "planner_changed_files": [],
+      "planner_modified_files": 0,
+      "duration_s": 26.2,
+      "stopped_by_cap": false,
+      "timed_out": false
+    }
+  ]
+}

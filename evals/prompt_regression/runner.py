@@ -395,6 +395,7 @@ def run(
     if mode not in ("fake", "real"):
         raise EvalError(f"mode must be fake or real, not {mode!r}")
     real_claude = shutil.which("claude") if mode == "real" else None
+    git = _git()  # what is being evaluated, before anything runs
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     out_dir.mkdir(parents=True, exist_ok=True)
     log_path = out_dir / f"{stamp}-{mode}.server.log"
@@ -433,7 +434,7 @@ def run(
         "mode": mode,
         "model": model if mode == "real" else None,
         "started_at": stamp,
-        "git": _git(),
+        "git": git,
         "caps": {"max_budget_usd": max_budget_usd, "total_cap_usd": total_cap_usd},
         "stopped_by_cap": stopped,
         "total_cost_usd": round(sum(float(r.get("cost_usd") or 0.0) for r in results), 6),
@@ -452,5 +453,5 @@ def previous_run(out_dir: Path, current: Path, *, mode: str, model: str | None) 
         data = json.loads(path.read_text(encoding="utf-8"))
         if data.get("model") == model:
             return data
-    baseline = BASELINES_DIR / f"{mode}-{model or 'fake'}.json"
+    baseline = BASELINES_DIR / (f"real-{model}.json" if mode == "real" else "fake.json")
     return json.loads(baseline.read_text(encoding="utf-8")) if baseline.is_file() else None
