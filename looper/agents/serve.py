@@ -311,7 +311,7 @@ async def _run_agent_system(
     await seed_agent_configs(pool)
     await seed_channel_configs(pool)
 
-    # A built-in runtime for each other runtime type this machine has (Codex, when codex is on PATH).
+    # A built-in runtime for each other runtime type this machine has (Codex or OMP, when on PATH).
     from .agent_registry import register_found_runtimes
     try:
         if found := await register_found_runtimes():
