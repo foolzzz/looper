@@ -18,7 +18,7 @@ from .connection import get_pool
 
 _ITEM_COLUMNS = (
     "i.id, i.kind, i.name, i.origin, i.owner_project_id, p.name AS owner_project_name, i.description, i.source, "
-    "i.version, i.sha256, i.size_bytes, i.file_count, i.imported_at, i.updated_at"
+    "i.version, i.sha256, i.size_bytes, i.file_count, i.modified, i.imported_at, i.updated_at"
 )
 _ITEMS = "library_items i LEFT JOIN projects p ON p.id = i.owner_project_id"
 _INSTALL_COLUMNS = (
@@ -160,6 +160,63 @@ async def replace_snapshot(
         "removed": [f"{kind}:{name}" for kind, name in removed],
         "unchanged": unchanged,
     }
+
+
+# --- Items uploaded, taken from git or written in the UI (loopx.agents.catalog_sources) ---
+
+
+async def _write_files(conn: asyncpg.Connection, item_id: str, files: Sequence[Mapping[str, Any]]) -> None:
+    await conn.execute("DELETE FROM library_files WHERE item_id = $1", item_id)
+    await conn.copy_records_to_table(
+        "library_files",
+        records=[(item_id, f["path"], f["content"], f["sha256"], f["executable"]) for f in files],
+        columns=["item_id", "path", "content", "sha256", "executable"],
+    )
+
+
+async def insert_item(conn: asyncpg.Connection, item: Mapping[str, Any], *, origin: str) -> dict[str, Any]:
+    """Add an item outside any project, installed nowhere; returns it.
+
+    ``item`` gives ``kind``, ``name``, ``source``, ``version``,
+    ``description``, ``sha256``, ``size_bytes``, ``file_count`` and ``files``.
+    Raises ``asyncpg.UniqueViolationError`` when an item outside projects has its kind and name.
+    """
+    item_id = f"lib-{uuid.uuid4().hex[:12]}"
+    await conn.execute(
+        "INSERT INTO library_items (id, kind, name, source, version, sha256, size_bytes, file_count, origin, "
+        "description) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+        item_id, item["kind"], item["name"], item["source"], item["version"], item["sha256"], item["size_bytes"],
+        item["file_count"], origin, item["description"],
+    )
+    await _write_files(conn, item_id, item["files"])
+    row = await get_item(item_id, pool=conn)
+    assert row is not None
+    return row
+
+
+async def replace_item(
+    conn: asyncpg.Connection, item_id: str, item: Mapping[str, Any], *, modified: bool,
+) -> dict[str, Any]:
+    """Replace an item's name, labels, description and files, keeping its id, origin and installs; returns it.
+
+    ``item`` is as ``insert_item`` takes it. Raises ``asyncpg.UniqueViolationError`` when the new name is taken.
+    """
+    await conn.execute(
+        "UPDATE library_items SET name = $2, source = $3, version = $4, description = $5, sha256 = $6, "
+        "size_bytes = $7, file_count = $8, modified = $9, updated_at = now() WHERE id = $1",
+        item_id, item["name"], item["source"], item["version"], item["description"], item["sha256"],
+        item["size_bytes"], item["file_count"], modified,
+    )
+    await _write_files(conn, item_id, item["files"])
+    row = await get_item(item_id, pool=conn)
+    assert row is not None
+    return row
+
+
+async def catalog_bytes(*, pool: Executor | None = None) -> int:
+    """The size of every item in the catalog."""
+    pool = pool or get_pool()
+    return int(await pool.fetchval("SELECT COALESCE(sum(size_bytes), 0) FROM library_items"))
 
 
 # --- Project-authored skills: an item owned by a project, with one file, SKILL.md ---

@@ -2,7 +2,8 @@
 
 Acquiring and installing are separate. **Acquiring** puts an item into the
 catalog (``library_items``): imported from this machine
-(``library.import_from_machine``) or written in a project
+(``library.import_from_machine``), uploaded, taken from a git repository or
+written in Settings (``catalog_sources``), or written in a project
 (``project_skills``); its ``origin`` says which (``Origin``). An item does
 nothing by itself. **Installing** puts it on a scope (``library_installs``):
 ``global``, or one project, for some roles (``ROLES``). A project install never
@@ -32,7 +33,7 @@ class Scope(str, Enum):
 
 
 class Origin(str, Enum):
-    """How an item was acquired. Only ``machine`` and ``project`` are acquired so far."""
+    """How an item was acquired (``library``, ``catalog_sources``, ``project_skills``)."""
 
     MACHINE = "machine"
     UPLOAD = "upload"
@@ -123,6 +124,7 @@ def item_view(row: Mapping[str, Any], installs: Sequence[Mapping[str, Any]] = ()
         "sha256": row["sha256"],
         "size_bytes": int(row["size_bytes"]),
         "file_count": int(row["file_count"]),
+        "modified": bool(row["modified"]),
         "imported_at": row["imported_at"],
         "updated_at": row["updated_at"],
         "installs": [install_view(install) for install in installs],
@@ -171,8 +173,10 @@ async def catalog_view() -> dict[str, Any]:
 
 
 async def item_detail(item_id: str) -> dict[str, Any]:
-    """One item with its installs, its files (no content) and, for a skill, its ``SKILL.md``."""
+    """One item with its installs, its files (no content) and, for a skill, its ``SKILL.md`` and the body below
+    its frontmatter (``content``)."""
     from ..db import library as db_library
+    from .catalog_sources import split_skill_md
 
     item = await _item(item_id)
     files = await db_library.get_file_listing(item_id)
@@ -182,6 +186,7 @@ async def item_detail(item_id: str) -> dict[str, Any]:
         "files": [{"path": f["path"], "size_bytes": int(f["size_bytes"]), "executable": bool(f["executable"])}
                   for f in files],
         "skill_md": skill_md,
+        "content": split_skill_md(skill_md)[1] if skill_md is not None else None,
     }
 
 
