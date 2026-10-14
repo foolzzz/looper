@@ -19,6 +19,19 @@ How the agent system works today is described in
 
 ### Added
 
+- **Run as a service.** `loopx service install` runs `loopx serve` in the
+  background as a launchd LaunchAgent (macOS) or a systemd user unit (Linux):
+  started at login, started again after a crash, logging to
+  `<runtime root>/logs/serve.log`. The unit runs the `loopx` that ran
+  `install`, in the current directory, with `PATH`, locale and proxy settings,
+  `CLAUDE_CONFIG_DIR` and the `LOOPX_*`, `ANTHROPIC_*` and `LARK_*` variables
+  copied from the shell (more with `--env NAME`), so it is written with mode
+  0600. Running `install` again updates the unit and restarts the service; it
+  is not started when another process holds the port. `status` shows whether
+  it is installed and running, its PID, last exit, log and `GET /api/status`;
+  `restart` stops and starts it and waits until the port serves (on macOS with
+  `launchctl bootout` and `bootstrap`, not `kickstart -k`); `uninstall` stops
+  it and removes the unit. `loopx doctor` adds a Service line.
 - **Backup before a schema change.** `loopx serve` records the sha256 of the
   `schema.sql` it applied (`schema_fingerprint`, in the same transaction).
   When a database that already holds LoopX tables has a different or no
