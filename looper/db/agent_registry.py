@@ -1,5 +1,8 @@
 """The ``agent_runtimes``, ``llm_providers`` (with ``llm_provider_secrets``) and ``agents`` tables.
 
+Runtimes are built in (``looper.agents.agent_registry``): the schema adds Claude Code's, ``looper serve`` and
+Re-detect add another type's when its executable is on PATH, and a probe records what it found.
+
 Code owns the validation (``looper.agents.agent_registry``); this module only
 reads and writes rows. A provider's API key is read here only by
 ``get_api_key``; every other read says whether one is set.
@@ -58,26 +61,10 @@ async def get_runtime(runtime_id: str, *, pool: asyncpg.Pool | asyncpg.Connectio
     return dict(row) if row else None
 
 
-async def insert_runtime(fields: Mapping[str, Any], *, pool: asyncpg.Pool | None = None) -> str:
-    """Add a runtime (``name``, ``type``, ``executable``, ``version``, ``capabilities``, ``probe_error``); its id.
-
-    Raises ``asyncpg.UniqueViolationError`` for a name in use.
-    """
-    pool = pool or get_pool()
-    runtime_id = new_id("rt")
-    await pool.execute(
-        "INSERT INTO agent_runtimes (id, name, type, executable, version, capabilities, probed_at, probe_error) "
-        "VALUES ($1, $2, $3, $4, $5, $6, now(), $7)",
-        runtime_id, fields["name"], fields["type"], fields["executable"], fields["version"],
-        list(fields["capabilities"]), fields["probe_error"],
-    )
-    return runtime_id
-
-
 async def insert_builtin_runtime(runtime_id: str, fields: Mapping[str, Any], *, pool: asyncpg.Pool | None = None,
                                  ) -> bool:
-    """Add the built-in runtime ``runtime_id`` (fields as ``insert_runtime``) unless it, or a runtime of its name,
-    exists; whether it was added."""
+    """Add the built-in runtime ``runtime_id`` (``name``, ``type``, ``executable``, ``version``, ``capabilities``,
+    ``probe_error``) unless it, or a runtime of its name, exists; whether it was added."""
     pool = pool or get_pool()
     result = await pool.execute(
         "INSERT INTO agent_runtimes (id, name, type, executable, version, capabilities, probed_at, probe_error, builtin) "
@@ -88,25 +75,15 @@ async def insert_builtin_runtime(runtime_id: str, fields: Mapping[str, Any], *, 
     return result == "INSERT 0 1"
 
 
-async def update_runtime(runtime_id: str, fields: Mapping[str, Any], *, pool: asyncpg.Pool | None = None) -> bool:
-    """Set ``name``, ``executable`` and the probe's ``version``, ``capabilities`` and ``probe_error`` (each
-    optional); False when there is no such runtime."""
+async def update_runtime(runtime_id: str, probe: Mapping[str, Any], *, pool: asyncpg.Pool | None = None) -> bool:
+    """Record a probe's ``version``, ``capabilities`` and ``probe_error``; False when there is no such runtime."""
     pool = pool or get_pool()
-    columns = [c for c in ("name", "executable", "version", "capabilities", "probe_error") if c in fields]
-    sets = [f"{c} = ${i}" for i, c in enumerate(columns, start=2)]
-    if "version" in fields:
-        sets.append("probed_at = now()")
-    values = [list(fields[c]) if c == "capabilities" else fields[c] for c in columns]
     result = await pool.execute(
-        f"UPDATE agent_runtimes SET {', '.join([*sets, 'updated_at = now()'])} WHERE id = $1", runtime_id, *values,
+        "UPDATE agent_runtimes SET version = $2, capabilities = $3, probe_error = $4, probed_at = now(), "
+        "updated_at = now() WHERE id = $1",
+        runtime_id, probe["version"], list(probe["capabilities"]), probe["probe_error"],
     )
     return result == "UPDATE 1"
-
-
-async def delete_runtime(runtime_id: str, *, pool: asyncpg.Pool | None = None) -> bool:
-    """Raises ``asyncpg.ForeignKeyViolationError`` while an agent uses it."""
-    pool = pool or get_pool()
-    return await pool.execute("DELETE FROM agent_runtimes WHERE id = $1", runtime_id) == "DELETE 1"
 
 
 # --- Providers ---
@@ -235,6 +212,32 @@ async def update_agent(agent_id: str, fields: Mapping[str, Any], *, pool: asyncp
     sets = [f"{c} = ${i}" for i, c in enumerate(columns, start=2)]
     await pool.execute(f"UPDATE agents SET {', '.join([*sets, 'updated_at = now()'])} WHERE id = $1",
                        agent_id, *[fields[c] for c in columns])
+
+
+async def profile_usage(agent_id: str | None = None, *, pool: asyncpg.Pool | asyncpg.Connection | None = None,
+                     ) -> dict[str, dict[str, Any]]:
+    """Where each agent (or ``agent_id``) is selected, by agent id: ``layers``, each ``{scope, role, project_id,
+    project_name}`` (system, then roles, then projects by name), and ``task_count``, how many tasks chose it for
+    one of their roles. An agent nothing selects is not in the result."""
+    pool = pool or get_pool()
+    layers = await pool.fetch(
+        "SELECT l.agent_id, l.scope, l.role, l.project_id, p.name AS project_name FROM agent_setting_layers l "
+        "LEFT JOIN projects p ON p.id = l.project_id WHERE l.agent_id IS NOT NULL "
+        "AND ($1::text IS NULL OR l.agent_id = $1) "
+        "ORDER BY array_position(ARRAY['system', 'role', 'project', 'role_project'], l.scope), p.name, "
+        "array_position(ARRAY['manager', 'planner', 'worker', 'reviewer'], l.role)", agent_id,
+    )
+    tasks = await pool.fetch(
+        "SELECT agent_id, count(DISTINCT task_id) AS n FROM task_agent_overrides "
+        "WHERE $1::text IS NULL OR agent_id = $1 GROUP BY agent_id", agent_id,
+    )
+    uses: dict[str, dict[str, Any]] = {}
+    for row in layers:
+        entry = uses.setdefault(row["agent_id"], {"layers": [], "task_count": 0})
+        entry["layers"].append({k: row[k] for k in ("scope", "role", "project_id", "project_name")})
+    for row in tasks:
+        uses.setdefault(row["agent_id"], {"layers": [], "task_count": 0})["task_count"] = row["n"]
+    return uses
 
 
 async def delete_agent(agent_id: str, *, pool: asyncpg.Pool | None = None) -> bool:

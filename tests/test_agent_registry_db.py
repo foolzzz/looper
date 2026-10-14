@@ -3,7 +3,8 @@
 Runs only when LOOPER_TEST_DATABASE_URL points at a disposable database. Each
 test works in a new schema of its own, dropped afterwards. A stand-in runtime
 type (``StandIn``) plays a second adapter: one that cannot keep a resident
-session, and has a login of its own.
+session, and has a login of its own. Runtimes are built in, so a test adds the
+row ``looper serve`` would add for one it finds (``_runtime``).
 """
 
 from __future__ import annotations
@@ -92,6 +93,21 @@ async def _registry() -> dict[str, Any]:
     return await _ok("GET", "/api/registry")
 
 
+async def _runtime(runtime_type: str, *, name: str | None = None, builtin: bool = True, executable: str = "",
+                   ) -> str:
+    """The runtime row of ``runtime_type`` that ``looper serve`` adds when it finds one (``rt-<type>``), or with
+    ``builtin=False`` one registered by hand before runtimes were built in; its id."""
+    from looper.agents import runtimes
+    from looper.db.connection import get_pool
+
+    runtime_id = f"rt-{runtime_type}" if builtin else f"rt-custom-{name}"
+    await get_pool().execute(
+        "INSERT INTO agent_runtimes (id, name, type, executable, capabilities, builtin) VALUES ($1, $2, $3, $4, $5, $6)",
+        runtime_id, name or runtime_type, runtime_type, executable,
+        sorted(c.value for c in runtimes.ADAPTERS[runtime_type].capabilities), builtin)
+    return runtime_id
+
+
 def _by_name(entries: list[dict[str, Any]], name: str) -> dict[str, Any]:
     return next(e for e in entries if e["name"] == name)
 
@@ -122,8 +138,6 @@ def test_every_database_has_the_builtin_runtime_provider_and_agent(monkeypatch: 
 
 
 @pytest.mark.parametrize(("method", "path", "body"), [
-    ("PUT", "/api/runtimes/rt-claude-code", {"executable": "/opt/claude"}),
-    ("DELETE", "/api/runtimes/rt-claude-code", None),
     ("PUT", "/api/providers/prov-claude-subscription", {"models": [{"name": "opus"}]}),
     ("DELETE", "/api/providers/prov-claude-subscription", None),
     ("PUT", "/api/agents/agent-claude-code-opus", {"model": "sonnet"}),
@@ -137,34 +151,97 @@ def test_the_builtins_are_read_only(monkeypatch: pytest.MonkeyPatch, method: str
     _run(_test, monkeypatch)
 
 
-# --- Runtimes: registered and probed ---
+# --- Runtimes: built in, detected and probed ---
 
 
-def test_a_runtime_is_probed_with_version_only_when_registered_and_on_request(
+@pytest.mark.parametrize(("method", "path", "body"), [
+    ("POST", "/api/runtimes", {"name": "claude-next", "type": "claude-code", "executable": "/opt/claude"}),
+    ("PUT", "/api/runtimes/rt-claude-code", {"executable": "/opt/claude"}),
+    ("DELETE", "/api/runtimes/rt-claude-code", None),
+])
+def test_runtimes_cannot_be_registered_changed_or_removed(
+    monkeypatch: pytest.MonkeyPatch, method: str, path: str, body: Any,
+) -> None:
+    async def _test(_pool: Any) -> None:
+        assert (await _call(method, path, body))[0] == 404
+        (runtime,) = (await _registry())["runtimes"]
+        assert (runtime["runtime_id"], runtime["executable"]) == ("rt-claude-code", "")
+
+    _run(_test, monkeypatch)
+
+
+def test_re_detect_probes_a_runtime_and_adds_a_type_found_on_path_since(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
     from looper.agents.runtimes import CLAUDE_CODE
 
     claude = _version_claude(tmp_path)
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
 
     async def _test(_pool: Any) -> None:
-        added = (await _ok("POST", "/api/runtimes", {"name": "claude-next", "type": "claude-code",
-                                                     "executable": claude}))["runtime"]
-        assert (added["version"], added["probe_error"]) == ("2.1.285 (Claude Code)", None)
-        assert set(added["capabilities"]) == {c.value for c in CLAUDE_CODE.capabilities}
-
-        missing = (await _ok("POST", "/api/runtimes", {"name": "nowhere", "type": "claude-code",
-                                                       "executable": str(tmp_path / "absent")}))["runtime"]
-        assert missing["version"] is None and "was not found" in missing["probe_error"]
-
-        # The built-in one probes the server's claude.
+        # The built-in Claude Code runtime probes the server's claude, and says where it is.
         builtin = (await _ok("POST", "/api/runtimes/rt-claude-code/probe", claude=claude))["runtime"]
-        assert builtin["version"] == "2.1.285 (Claude Code)" and builtin["probed_at"]
+        assert (builtin["version"], builtin["probe_error"]) == ("2.1.285 (Claude Code)", None)
+        assert builtin["probed_at"] and set(builtin["capabilities"]) == {c.value for c in CLAUDE_CODE.capabilities}
+        assert builtin["roles"] == ["manager", "planner", "worker", "reviewer"]
+        assert (await _call("GET", "/api/registry", claude=claude))[1]["runtimes"][0]["path"] == claude
 
-        status, payload = await _call("POST", "/api/runtimes", {"name": "claude-next", "type": "claude-code"})
-        assert status == 409
-        status, payload = await _call("POST", "/api/runtimes", {"name": "x", "type": "emacs"})
-        assert status == 400 and "no runtime type 'emacs'" in payload["error"]
+        # A type not on PATH has no runtime, and Re-detect says why; once it is on PATH, Re-detect adds it.
+        monkeypatch.setenv("PATH", str(bin_dir))
+        status, payload = await _call("POST", "/api/runtimes/rt-codex/probe")
+        assert status == 404 and "Codex (codex) is not on the server's PATH" in payload["error"]
+        assert [r["runtime_id"] for r in (await _registry())["runtimes"]] == ["rt-claude-code"]
+        _version_codex(bin_dir / "codex")
+        codex = (await _ok("POST", "/api/runtimes/rt-codex/probe"))["runtime"]
+        assert (codex["builtin"], codex["executable"], codex["version"], codex["path"]) == (
+            True, "", "codex-cli 0.162.0", str(bin_dir / "codex"))
+        types = {t["type"]: t for t in (await _registry())["runtime_types"]}
+        assert (types["codex"]["runtime_id"], types["codex"]["roles"]) == (
+            "rt-codex", ["manager", "planner", "worker", "reviewer"])
+
+        # One registered by hand before runtimes were built in probes its own executable.
+        legacy = await _runtime("claude-code", name="claude-beta", builtin=False,
+                                executable=str(tmp_path / "absent"))
+        missing = (await _ok("POST", f"/api/runtimes/{legacy}/probe"))["runtime"]
+        assert (missing["builtin"], missing["version"], missing["path"]) == (False, None, None)
+        assert "was not found" in missing["probe_error"]
+        assert (await _call("POST", "/api/runtimes/rt-nowhere/probe"))[0] == 404
+
+    _run(_test, monkeypatch)
+
+
+# Runtimes registered by hand before runtimes were built in: "claude-beta" runs an agent, "claude-old" none.
+_CUSTOM_RUNTIMES = """
+INSERT INTO agent_runtimes (id, name, type, executable, capabilities)
+VALUES ('rt-custom-beta', 'claude-beta', 'claude-code', '/opt/claude-beta/bin/claude', ARRAY['run']),
+       ('rt-custom-old', 'claude-old', 'claude-code', 'claude-old', ARRAY['run']);
+INSERT INTO agents (id, name, runtime_id, provider_id, model)
+VALUES ('agent-beta', 'beta/haiku', 'rt-custom-beta', 'prov-claude-subscription', 'haiku');
+"""
+
+
+def test_the_upgrade_drops_custom_runtimes_no_agent_uses_once_and_keeps_the_others(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from looper.db.connection import ensure_schema
+
+    async def _test(pool: Any) -> None:
+        # A database from before: the custom rows, and the migration not run yet.
+        await pool.execute(_CUSTOM_RUNTIMES)
+        await pool.execute("DELETE FROM schema_migrations WHERE name = 'agent_runtimes_unused_custom_removed'")
+        await ensure_schema(pool)
+
+        runtimes = {r["name"]: r for r in (await _registry())["runtimes"]}
+        assert set(runtimes) == {"claude-code", "claude-beta"}
+        assert (runtimes["claude-beta"]["builtin"], runtimes["claude-beta"]["executable"],
+                runtimes["claude-beta"]["agent_count"]) == (False, "/opt/claude-beta/bin/claude", 1)
+        assert _by_name((await _registry())["agents"], "beta/haiku")["runtime_id"] == "rt-custom-beta"
+
+        # Once: a later run of the schema leaves the rows as they are.
+        await pool.execute("INSERT INTO agent_runtimes (id, name, type) VALUES ('rt-custom-new', 'x', 'claude-code')")
+        await ensure_schema(pool)
+        assert {r["name"] for r in (await _registry())["runtimes"]} == {"claude-code", "claude-beta", "x"}
 
     _run(_test, monkeypatch)
 
@@ -228,7 +305,7 @@ def test_an_agent_pairs_a_runtime_and_a_provider_that_can_run_together(
     monkeypatch: pytest.MonkeyPatch, stand_in: str,
 ) -> None:
     async def _test(_pool: Any) -> None:
-        standin = (await _ok("POST", "/api/runtimes", {"name": "si", "type": stand_in}))["runtime"]["runtime_id"]
+        standin = await _runtime(stand_in, name="si")
         chat = await _provider({"name": "openai-chat", "protocols": ["openai-chat"], "auth": "api_key"})
         key = await _provider({"name": "anthropic-key", "protocols": ["anthropic-messages"], "auth": "api_key",
                                "models": [{"name": "claude-sonnet-4-5"}]})
@@ -281,10 +358,11 @@ def _version_codex(path: Path) -> str:
 def test_codex_pairs_only_with_an_api_key_provider_of_openai_responses_and_runs_every_role(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
-    codex = _version_codex(tmp_path / "codex")
+    _version_codex(tmp_path / "codex")
+    monkeypatch.setenv("PATH", str(tmp_path))
 
     async def _test(_pool: Any) -> None:
-        runtime = (await _ok("POST", "/api/runtimes", {"name": "codex", "type": "codex", "executable": codex}))["runtime"]
+        runtime = (await _ok("POST", "/api/runtimes/rt-codex/probe"))["runtime"]
         assert (runtime["version"], runtime["type_label"], runtime["protocols"]) == (
             "codex-cli 0.162.0", "Codex", ["openai-responses"])
         cpa = await _provider({"name": "cpa", "protocols": ["openai-responses"], "auth": "api_key",
@@ -327,8 +405,6 @@ def test_codex_on_path_becomes_a_builtin_runtime_once(monkeypatch: pytest.Monkey
         assert (runtime["runtime_id"], runtime["builtin"], runtime["executable"], runtime["version"]) == (
             "rt-codex", True, "", "codex-cli 0.162.0")
         assert await register_found_runtimes() == []  # once
-        status, payload = await _call("DELETE", "/api/runtimes/rt-codex")
-        assert status == 400 and "built-in" in payload["error"]
 
     _run(_test, monkeypatch)
 
@@ -345,10 +421,11 @@ def _version_omp(path: Path) -> str:
 def test_omp_pairs_with_an_api_key_provider_of_any_of_its_apis_and_runs_every_role(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
-    omp = _version_omp(tmp_path / "omp")
+    _version_omp(tmp_path / "omp")
+    monkeypatch.setenv("PATH", str(tmp_path))
 
     async def _test(_pool: Any) -> None:
-        runtime = (await _ok("POST", "/api/runtimes", {"name": "omp", "type": "omp", "executable": omp}))["runtime"]
+        runtime = (await _ok("POST", "/api/runtimes/rt-omp/probe"))["runtime"]
         assert (runtime["version"], runtime["type_label"], runtime["protocols"]) == (
             "omp/18.4.3", "OMP", ["anthropic-messages", "openai-chat", "openai-responses"])
         providers = [
@@ -401,7 +478,7 @@ def test_a_change_that_would_break_an_agent_is_refused_and_one_in_use_is_kept(
     monkeypatch: pytest.MonkeyPatch, stand_in: str,
 ) -> None:
     async def _test(_pool: Any) -> None:
-        runtime_id = (await _ok("POST", "/api/runtimes", {"name": "si", "type": stand_in}))["runtime"]["runtime_id"]
+        runtime_id = await _runtime(stand_in, name="si")
         provider_id = await _provider({"name": "key", "protocols": ["anthropic-messages"], "auth": "api_key"})
         agent = (await _ok("POST", "/api/agents", {"name": "si-sonnet", "runtime_id": runtime_id,
                                                    "provider_id": provider_id, "model": "sonnet",
@@ -415,12 +492,11 @@ def test_a_change_that_would_break_an_agent_is_refused_and_one_in_use_is_kept(
         renamed = (await _ok("PUT", f"/api/agents/{agent['agent_id']}", {"name": "si-fast", "effort": None}))["agent"]
         assert (renamed["name"], renamed["effort"]) == ("si-fast", None)
 
-        for path in (f"/api/runtimes/{runtime_id}", f"/api/providers/{provider_id}"):
-            status, payload = await _call("DELETE", path)
-            assert status == 409 and "first" in payload["error"]
+        status, payload = await _call("DELETE", f"/api/providers/{provider_id}")
+        assert status == 409 and "first" in payload["error"]
         await _ok("DELETE", f"/api/agents/{agent['agent_id']}")
         await _ok("DELETE", f"/api/providers/{provider_id}")
-        await _ok("DELETE", f"/api/runtimes/{runtime_id}")
+        assert runtime_id in {r["runtime_id"] for r in (await _registry())["runtimes"]}
 
     _run(_test, monkeypatch)
 
@@ -474,7 +550,7 @@ async def _agent(name: str, runtime_id: str = "rt-claude-code", provider_id: str
 
 
 async def _stand_in_agent(stand_in: str) -> str:
-    runtime_id = (await _ok("POST", "/api/runtimes", {"name": "si", "type": stand_in}))["runtime"]["runtime_id"]
+    runtime_id = await _runtime(stand_in, name="si")
     provider_id = (await _ok("POST", "/api/providers", {"name": "si-key", "protocols": ["anthropic-messages"],
                                                         "auth": "api_key"}))["provider"]["provider_id"]
     return await _agent("si/sonnet", runtime_id, provider_id, "sonnet")
@@ -505,6 +581,48 @@ def test_a_layer_selects_an_agent_only_for_roles_its_runtime_can_run(
         assert status == 400 and "cannot run the planner" in payload["error"]
         # A selected agent stays until nothing selects it.
         assert (await _call("DELETE", f"/api/agents/{planner}"))[0] == 409
+
+    _run(_test, monkeypatch)
+
+
+def test_where_an_agent_is_selected_is_read_back_and_keeps_it_from_being_deleted(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, stand_in: str,
+) -> None:
+    async def _test(_pool: Any) -> None:
+        sonnet, haiku = await _agent("claude-code/sonnet"), await _agent("claude-code/haiku")
+        one_off = await _stand_in_agent(stand_in)
+        calc = (await _ok("POST", "/api/projects", {"name": "calc", "work_dir": str(tmp_path)}))["project_id"]
+        await _ok("PUT", "/api/agent-settings/system", {"agent": sonnet})
+        await _ok("PUT", "/api/agent-settings/roles/worker", {"agent": sonnet})
+        await _ok("PUT", f"/api/projects/{calc}/agent-settings", {"agent": sonnet})
+        await _ok("PUT", f"/api/projects/{calc}/agent-settings/roles/reviewer", {"agent": one_off})
+        for _ in range(2):
+            await _ok("POST", "/api/tasks/create", {"requirement": "r", "project_id": calc,
+                                                    "agent_overrides": {"worker": sonnet, "reviewer": sonnet}})
+
+        agents = {a["name"]: a for a in (await _registry())["agents"]}
+        assert agents["claude-code/sonnet"]["used_by"] == {"layers": [
+            {"scope": "system", "role": None, "project_id": None, "project_name": None},
+            {"scope": "role", "role": "worker", "project_id": None, "project_name": None},
+            {"scope": "project", "role": None, "project_id": calc, "project_name": "calc"},
+        ], "task_count": 2}
+        assert agents["si/sonnet"]["used_by"]["layers"] == [
+            {"scope": "role_project", "role": "reviewer", "project_id": calc, "project_name": "calc"}]
+        assert agents["claude-code/haiku"]["used_by"] == {"layers": [], "task_count": 0}
+        # What its runtime can run: the stand-in keeps no resident session.
+        assert (agents["claude-code/sonnet"]["roles"], agents["si/sonnet"]["roles"]) == (
+            ["manager", "planner", "worker", "reviewer"], ["worker", "reviewer"])
+        # An agent's own answer has it too.
+        changed = (await _ok("PUT", f"/api/agents/{one_off}", {"effort": "high"}))["agent"]
+        assert changed["used_by"] == agents["si/sonnet"]["used_by"]
+
+        status, payload = await _call("DELETE", f"/api/agents/{sonnet}")
+        assert status == 409 and payload["error"] == (
+            "agent 'claude-code/sonnet' is selected by the defaults of every role, the worker role, project 'calc', "
+            "2 tasks: select another agent there first")
+        status, payload = await _call("DELETE", f"/api/agents/{one_off}")
+        assert status == 409 and "the reviewer in project 'calc'" in payload["error"]
+        await _ok("DELETE", f"/api/agents/{haiku}")  # nothing selects it
 
     _run(_test, monkeypatch)
 

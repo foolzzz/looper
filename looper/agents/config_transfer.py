@@ -7,7 +7,9 @@ as it is, and one readable file can be checked before it is shared. Its
 sections:
 
 - ``runtimes``, ``providers`` and ``agents``: the registered ones (the
-  built-ins exist everywhere), each naming the others by name;
+  built-ins exist everywhere), each naming the others by name. The runtimes
+  are the ones registered by hand before runtimes were built in, which agents
+  still use; an import never adds or changes a runtime (see below);
 - ``settings``: the system and role layers of the agent settings (a layer
   names its agent), and each role's prompt (``null`` while it follows the
   recommended one), timeout, concurrency and enabled flag;
@@ -37,6 +39,11 @@ transaction: an entry with the same key is updated in place (an item keeps
 its id and installs), nothing missing from the file is removed, and a
 placeholder never replaces a stored secret (without one, the value is left
 empty). Importing the same file again changes nothing.
+
+**Runtimes** are built in, so a file's runtime only says what its agents run
+on here: the runtime of its name when one of its type is here, else the
+built-in runtime of its type (a note says so), else none (the entry and its
+agents are skipped, with the reason).
 """
 
 from __future__ import annotations
@@ -726,6 +733,11 @@ class _Importer:
 
         # The built-ins are on every installation, a new database too once the import applies its schema.
         self.runtimes.setdefault(BUILTIN_AGENT.runtime.name, (BUILTIN_AGENT.runtime.id, BUILTIN_AGENT.runtime))
+        # The built-in runtime of each type here, which a runtime of the file that is not here maps to.
+        self.builtin_runtimes = {BUILTIN_AGENT.runtime.type: (BUILTIN_AGENT.runtime.id, BUILTIN_AGENT.runtime)}
+        for name, row in target.runtimes.items():
+            if row["builtin"]:
+                self.builtin_runtimes[row["type"]] = self.runtimes[name]
         self.providers.setdefault(BUILTIN_AGENT.provider.name, (BUILTIN_AGENT.provider.id, BUILTIN_AGENT.provider))
         self.agents[BUILTIN_AGENT.name] = (BUILTIN_AGENT.id, BUILTIN_AGENT)
         for name, row in target.agents.items():
@@ -750,7 +762,9 @@ class _Importer:
     # --- runtimes, providers and agents ---
 
     async def runtime(self, entry: Any) -> None:
-        from .agent_registry import RegistryError, _executable, entry_name, runtime_spec
+        """Map a runtime of the file to the one its agents run on here; runtimes are built in, so nothing is
+        written (the module's **Runtimes**)."""
+        from .agent_registry import RegistryError, _executable, entry_name
         from .runtimes import RuntimeUnsupported, adapter
 
         raw = entry if isinstance(entry, Mapping) else {}
@@ -763,36 +777,25 @@ class _Importer:
             try:
                 name = label = entry_name(entry.get("name"), "runtime")
                 runtime = adapter(entry.get("type") if isinstance(entry.get("type"), str) else "")
-                executable = None if entry.get("executable") is None else _executable(entry["executable"])
+                if entry.get("executable") is not None:
+                    _executable(entry["executable"])
             except (RegistryError, RuntimeUnsupported) as exc:
                 raise _Skip(str(exc)) from None
             row = self.target.runtimes.get(name)
-            if row is not None and row["builtin"]:
-                raise _Skip("a built-in runtime has this name here")
             if row is not None and row["type"] != runtime.type:
                 raise _Skip(f"a {row['type']} runtime has this name here")
+            if row is None and runtime.type not in self.builtin_runtimes:
+                raise _Skip(f"runtimes are built in, and {runtime.label} ({runtime.default_executable}) is not on "
+                            "this machine: install it, then Re-detect it in Settings, Agent Runtimes")
         except _Skip as exc:
             self.record("runtimes", label, Action.SKIPPED, reason=str(exc))
             return
-        if executable is None:  # a path on the exporting machine
-            executable = row["executable"] if row is not None else ""
-            if row is None:
-                self.plan.notes.append(f"runtime {name}: its executable is a path on the exporting machine; set "
-                                       "it here (until then it runs the type's default)")
-        current = {"executable": row["executable"]} if row is not None else None
-        action = self.outcome("runtimes", name, current, _differs({"executable": executable}, current,
-                                                                  ("executable",)))
-        runtime_id = row["id"] if row is not None else f"new:{name}"
-        if self.apply and action in (Action.ADDED, Action.CHANGED):
-            from ..db import config_transfer as db
-
-            runtime_id = await db.write_runtime(self.conn, row["id"] if row is not None else None, {
-                "name": name, "type": runtime.type, "executable": executable,
-                "capabilities": sorted(c.value for c in runtime.capabilities)})
-        self.runtimes[name] = (runtime_id, runtime_spec({"id": runtime_id, "name": name, "type": runtime.type,
-                                                         "executable": executable,
-                                                         "capabilities": sorted(c.value for c in runtime.capabilities)}
-                                                        if row is None else row))
+        if row is not None:
+            self.record("runtimes", name, Action.UNCHANGED)
+            return  # self.runtimes has it already
+        self.runtimes[name] = self.builtin_runtimes[runtime.type]
+        self.plan.notes.append(f"runtime {name}: runtimes are built in; its agents run on the built-in "
+                               f"{self.runtimes[name][1].name} runtime here")
 
     async def provider(self, entry: Any) -> None:
         from .agent_registry import RegistryError, _provider_fields, catalog_entries, provider_spec
@@ -856,6 +859,7 @@ class _Importer:
                 raise _Skip(str(exc)) from None
             if values["runtime"] not in self.runtimes:
                 raise _Skip(f"no runtime {values['runtime']!r} here or in the file")
+            values["runtime"] = self.runtimes[values["runtime"]][1].name  # the one it runs on here
             if values["provider"] not in self.providers:
                 raise _Skip(f"no provider {values['provider']!r} here or in the file")
             row = self.target.agents.get(name)

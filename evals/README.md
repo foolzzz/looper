@@ -77,10 +77,11 @@ preset's first, and `--provider-base-url` replaces the preset's endpoint, for
 example with a logging proxy; the per-run cap is then Looper's own at the
 provider's prices, and each task reports its `cost_basis`), `--register-agent
 SPEC.json` (register an agent in the eval's database first and run every role
-on it, with Looper's per-run cap: `{"runtime": {"name", "type",
-"executable"?}, "provider": {"name", "protocols", "auth", "base_url"?,
-"api_key_env"?}, "agent": {"name", "model", "effort"?}}`; a runtime of that
-name, such as the built-in `codex` or `omp`, is reused, and the provider's key is read
+on it, with Looper's per-run cap: `{"runtime": {"name"?, "type"},
+"provider": {"name", "protocols", "auth", "base_url"?, "api_key_env"?},
+"agent": {"name", "model", "effort"?}}`; runtimes are built in, so the agent
+runs on the runtime of that name or the built-in one of that type, such as
+`codex` or `omp` when on PATH, and the provider's key is read
 from the variable `api_key_env` names, never from the file), `--tasks
 single_step,chat_correction`, `--max-budget-usd`, `--total-cap-usd`,
 `--baseline <run.json>` (compare with this run instead), `--keep-work-dirs`. To print a comparison again:

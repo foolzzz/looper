@@ -1,9 +1,13 @@
 """Runtimes, LLM providers and agents: what they are, how they are checked, and their API (RFC decision 10).
 
-An **agent** is a runtime, an LLM provider and a model, with a default
-effort. A **runtime** is a registered instance of a runtime type (an adapter
-in ``looper.agents.runtimes``): the executable it runs and what its probe found
-(``<executable> --version``, never a model call). A **provider** is where an
+An **agent** (an "Agent Profile" on the dashboard) is a runtime, an LLM
+provider and a model, with a default effort. A **runtime** is a runtime type
+(an adapter in ``looper.agents.runtimes``) found on this machine: the
+executable it runs and what its probe found (``<executable> --version``, never
+a model call). Runtimes are built in, never registered by hand: one per type
+whose executable is on the server's PATH (``detect_runtime``). A runtime row
+of another kind, registered by hand before, stays read-only while an agent
+uses it (the schema drops the unused ones once). A **provider** is where an
 agent's requests go: the protocols it serves (``anthropic-messages``,
 ``openai-responses``, ``openai-chat``), its ``base_url``, its model catalog
 (each model's context window, prices, effort levels and the background model
@@ -23,8 +27,8 @@ The built-ins exist on every installation and are read-only: the
 ``claude-subscription`` provider (Claude Code's own login) and the
 ``claude-code/opus`` agent, which every role runs when no layer selects
 another (``BUILTIN_AGENT``). A runtime of another type is built in too once
-``looper serve`` finds its executable on PATH (``register_found_runtimes``):
-``codex`` for Codex, ``omp`` for OMP.
+``looper serve`` finds its executable on PATH (``register_found_runtimes``),
+or Re-detect does (``probe_runtime``): ``codex`` for Codex, ``omp`` for OMP.
 
 An agent is checked when it is created or changed, and again when a provider
 it uses changes (``check_pairing``):
@@ -453,21 +457,48 @@ def provider_spec(row: Mapping[str, Any]) -> ProviderSpec:
                         row["base_url"], _catalog(row["models"]), _env(row.get("env")))
 
 
+def servable_roles(capabilities: Iterable[Any]) -> list[str]:
+    """The roles a runtime with ``capabilities`` (``Capability`` members or their values) can run, in order."""
+    have = {getattr(c, "value", c) for c in capabilities}
+    return [role for role, needs in runtimes.ROLE_CAPABILITIES.items() if {c.value for c in needs} <= have]
+
+
 def type_view(adapter: runtimes.RuntimeAdapter) -> dict[str, Any]:
     return {"type": adapter.type, "label": adapter.label, "default_executable": adapter.default_executable,
+            "runtime_id": builtin_runtime_id(adapter),
             "protocols": sorted(p.value for p in adapter.protocols),
             "capabilities": sorted(c.value for c in adapter.capabilities),
+            "roles": servable_roles(adapter.capabilities),
             "auth_kinds": sorted(a.value for a in adapter.auth_kinds)}
 
 
-def runtime_view(row: Mapping[str, Any]) -> dict[str, Any]:
+def builtin_runtime_id(adapter: runtimes.RuntimeAdapter) -> str:
+    """The id of the built-in runtime of ``adapter``'s type: ``rt-<type>``."""
+    return f"rt-{adapter.type}"
+
+
+def runtime_path(runtime_type: str, executable: str, server_claude: str) -> str | None:
+    """Where the runtime's executable is on the server's PATH (or the absolute path it names); None when it is
+    not found."""
+    import shutil
+
+    try:
+        command = _probe_executable(runtime_type, executable, server_claude)
+    except RuntimeUnsupported:
+        command = executable
+    return shutil.which(command) if command else None
+
+
+def runtime_view(row: Mapping[str, Any], *, server_claude: str = "claude") -> dict[str, Any]:
     adapter = runtimes.ADAPTERS.get(row["type"])
     return {
         "runtime_id": row["id"], "name": row["name"], "type": row["type"],
         "type_label": adapter.label if adapter else row["type"], "executable": row["executable"],
         "default_executable": adapter.default_executable if adapter else None,
+        "path": runtime_path(row["type"], row["executable"], server_claude),
         "protocols": sorted(p.value for p in adapter.protocols) if adapter else [],
-        "version": row["version"], "capabilities": list(row["capabilities"] or ()), "probed_at": row["probed_at"],
+        "version": row["version"], "capabilities": list(row["capabilities"] or ()),
+        "roles": servable_roles(row["capabilities"] or ()), "probed_at": row["probed_at"],
         "probe_error": row["probe_error"], "builtin": row["builtin"], "agent_count": row.get("agent_count", 0),
         "created_at": row["created_at"], "updated_at": row["updated_at"],
     }
@@ -517,13 +548,32 @@ def cost_warnings(agent: AgentSpec) -> list[str]:
             "the provider's model catalog" for model in cost_basis(agent)["unpriced"]]
 
 
-def agent_view(row: Mapping[str, Any]) -> dict[str, Any]:
+# Where nothing selects an agent.
+NOT_USED: Mapping[str, Any] = {"layers": [], "task_count": 0}
+
+
+def agent_view(row: Mapping[str, Any], used_by: Mapping[str, Any] = NOT_USED) -> dict[str, Any]:
+    """An agent, the roles its runtime can run and where it is selected (``used_by``: the layers, each
+    ``{scope, role, project_id, project_name}``, and how many tasks chose it; ``db.profile_usage``)."""
+    spec = AgentSpec.from_row(row)
     return {
         "agent_id": row["id"], "name": row["name"], "model": row["model"], "effort": row.get("effort"),
         "runtime_id": row["runtime_id"], "runtime_name": row["runtime_name"], "runtime_type": row["runtime_type"],
         "provider_id": row["provider_id"], "provider_name": row["provider_name"], "builtin": row["builtin"],
-        "cost": cost_basis(AgentSpec.from_row(row)),
+        "roles": servable_roles(spec.runtime.capabilities), "used_by": dict(used_by),
+        "cost": cost_basis(spec),
     }
+
+
+def usage_text(used_by: Mapping[str, Any]) -> str:
+    """Where an agent is selected, in words: "the defaults of every role, the worker role, 2 tasks"."""
+    scopes = {"system": lambda u: "the defaults of every role", "role": lambda u: f"the {u['role']} role",
+              "project": lambda u: f"project {u['project_name']!r}",
+              "role_project": lambda u: f"the {u['role']} in project {u['project_name']!r}"}
+    parts = [scopes[u["scope"]](u) for u in used_by["layers"]]
+    if count := used_by["task_count"]:
+        parts.append(f"{count} {'task' if count == 1 else 'tasks'}")
+    return ", ".join(parts)
 
 
 def _limits() -> dict[str, Any]:
@@ -540,18 +590,19 @@ def _limits() -> dict[str, Any]:
     }
 
 
-async def registry_view() -> dict[str, Any]:
-    """The runtime types this version has, and every registered runtime, provider and agent."""
+async def registry_view(*, server_claude: str = "claude") -> dict[str, Any]:
+    """The runtime types this version has, and every runtime, provider and agent (with where it is used)."""
     from ..db import agent_registry as db
 
     from .provider_presets import presets_view
     from .runtimes.pricing import BUILTIN_PRICES, PRICE_SOURCES, PRICES_AS_OF
 
+    uses = await db.profile_usage()
     return {
         "runtime_types": [type_view(a) for a in runtimes.ADAPTERS.values()],
-        "runtimes": [runtime_view(r) for r in await db.list_runtimes()],
+        "runtimes": [runtime_view(r, server_claude=server_claude) for r in await db.list_runtimes()],
         "providers": [provider_view(r) for r in await db.list_providers()],
-        "agents": [agent_view(r) for r in await db.list_agents()],
+        "agents": [agent_view(r, uses.get(r["id"], NOT_USED)) for r in await db.list_agents()],
         "provider_presets": presets_view(),
         "prices": {"as_of": PRICES_AS_OF, "sources": list(PRICE_SOURCES),
                    "models": {name: price.view() for name, price in BUILTIN_PRICES.items()}},
@@ -577,25 +628,28 @@ async def _probe(runtime_type: str, executable: str, server_claude: str) -> dict
             "probe_error": probe.error}
 
 
-async def register_found_runtimes() -> list[str]:
-    """Register a built-in runtime (``rt-<type>``, named after its type) for each runtime type other than Claude
-    Code whose default executable is on PATH, probed once; one that exists already, or whose name is taken, is
-    left alone. Claude Code's built-in runtime comes with the schema. Returns the names registered."""
+async def _detect(adapter: runtimes.RuntimeAdapter) -> bool:
+    """Register the built-in runtime of ``adapter``'s type (``rt-<type>``, named after its type), probed once,
+    when its default executable is on PATH and neither it nor a runtime of its name exists; whether it did."""
     import shutil
 
     from ..db import agent_registry as db
 
-    registered = []
-    for adapter in runtimes.ADAPTERS.values():
-        if adapter is runtimes.CLAUDE_CODE or shutil.which(adapter.default_executable) is None:
-            continue
-        if await db.get_runtime(f"rt-{adapter.type}") is not None:
-            continue
-        probe = await _probe(adapter.type, "", adapter.default_executable)
-        if await db.insert_builtin_runtime(f"rt-{adapter.type}", {"name": adapter.type, "type": adapter.type,
-                                                                   "executable": "", **probe}):
-            registered.append(adapter.type)
-    return registered
+    if shutil.which(adapter.default_executable) is None:
+        return False
+    if await db.get_runtime(builtin_runtime_id(adapter)) is not None:
+        return False
+    probe = await _probe(adapter.type, "", adapter.default_executable)
+    return await db.insert_builtin_runtime(builtin_runtime_id(adapter), {
+        "name": adapter.type, "type": adapter.type, "executable": "", **probe})
+
+
+async def register_found_runtimes() -> list[str]:
+    """Register a built-in runtime for each runtime type other than Claude Code whose default executable is on
+    PATH (``_detect``); one that exists already, or whose name is taken, is left alone. Claude Code's built-in
+    runtime comes with the schema. Returns the names registered."""
+    return [adapter.type for adapter in runtimes.ADAPTERS.values()
+            if adapter is not runtimes.CLAUDE_CODE and await _detect(adapter)]
 
 
 async def _existing_runtime(runtime_id: str) -> dict[str, Any]:
@@ -612,81 +666,35 @@ def _not_builtin(row: Mapping[str, Any], what: str) -> None:
         raise RegistryError(f"the built-in {what} {row['name']!r} cannot be changed or removed; register another one")
 
 
-async def _runtime_answer(runtime_id: str) -> dict[str, Any]:
+async def _runtime_answer(runtime_id: str, server_claude: str) -> dict[str, Any]:
     from ..db import agent_registry as db
 
     rows = {r["id"]: r for r in await db.list_runtimes()}
-    return {"runtime": runtime_view(rows[runtime_id])}
-
-
-async def create_runtime(data: Any, *, server_claude: str = "claude") -> dict[str, Any]:
-    """Register a runtime ``{name, type, executable?}`` and probe it at once."""
-    import asyncpg
-
-    from ..db import agent_registry as db
-
-    data = _fields(data, ("name", "type", "executable"))
-    name = entry_name(data.get("name"), "runtime")
-    adapter = _runtime_type(data.get("type"))
-    executable = _executable(data.get("executable"))
-    probe = await _probe(adapter.type, executable, server_claude)
-    try:
-        runtime_id = await db.insert_runtime({"name": name, "type": adapter.type, "executable": executable, **probe})
-    except asyncpg.UniqueViolationError:
-        raise RegistryConflict(f"a runtime named {name!r} already exists") from None
-    return await _runtime_answer(runtime_id)
-
-
-async def update_runtime(runtime_id: str, data: Any, *, server_claude: str = "claude") -> dict[str, Any]:
-    """Rename a runtime or change its executable (which probes it again); its type stays."""
-    import asyncpg
-
-    from ..db import agent_registry as db
-
-    data = _fields(data, ("name", "executable"))
-    if not data:
-        raise RegistryError("give at least one of name, executable")
-    row = await _existing_runtime(runtime_id)
-    _not_builtin(row, "runtime")
-    fields: dict[str, Any] = {}
-    if "name" in data:
-        fields["name"] = entry_name(data["name"], "runtime")
-    if "executable" in data:
-        fields["executable"] = _executable(data["executable"])
-        if fields["executable"] != row["executable"]:
-            fields.update(await _probe(row["type"], fields["executable"], server_claude))
-    try:
-        await db.update_runtime(runtime_id, fields)
-    except asyncpg.UniqueViolationError:
-        raise RegistryConflict(f"a runtime named {fields['name']!r} already exists") from None
-    return await _runtime_answer(runtime_id)
+    return {"runtime": runtime_view(rows[runtime_id], server_claude=server_claude)}
 
 
 async def probe_runtime(runtime_id: str, *, server_claude: str = "claude") -> dict[str, Any]:
-    """Run ``<executable> --version`` again and record what it found; the built-in runtime too."""
+    """Re-detect a runtime: run ``<executable> --version`` again and record what it found. The built-in runtime
+    of a type not found yet (``rt-<type>``) is registered when its executable is on PATH now (``_detect``)."""
     from ..db import agent_registry as db
 
+    adapter = next((a for a in runtimes.ADAPTERS.values() if builtin_runtime_id(a) == runtime_id), None)
+    if await db.get_runtime(runtime_id) is None and adapter is not None:
+        if not await _detect(adapter):
+            import shutil
+
+            if shutil.which(adapter.default_executable) is None:
+                raise RegistryNotFound(f"{adapter.label} ({adapter.default_executable}) is not on the server's PATH")
+            raise RegistryConflict(f"a runtime named {adapter.type!r} exists already, so the built-in "
+                                   f"{adapter.label} runtime cannot be added")
+        return await _runtime_answer(runtime_id, server_claude)
     row = await _existing_runtime(runtime_id)
     try:
         probe = await _probe(row["type"], row["executable"], server_claude)
     except RuntimeUnsupported as exc:
         raise RegistryError(str(exc)) from None
     await db.update_runtime(runtime_id, probe)
-    return await _runtime_answer(runtime_id)
-
-
-async def delete_runtime(runtime_id: str) -> dict[str, Any]:
-    import asyncpg
-
-    from ..db import agent_registry as db
-
-    row = await _existing_runtime(runtime_id)
-    _not_builtin(row, "runtime")
-    try:
-        await db.delete_runtime(runtime_id)
-    except asyncpg.ForeignKeyViolationError:
-        raise RegistryConflict(f"runtime {row['name']!r} still runs agents: change or remove them first") from None
-    return {"deleted": runtime_id}
+    return await _runtime_answer(runtime_id, server_claude)
 
 
 # --- Providers ---
@@ -864,8 +872,11 @@ async def create_agent(data: Any) -> dict[str, Any]:
 
 async def _agent_answer(agent_id: str) -> dict[str, Any]:
     """The agent, and what registering it as it is should warn about (``cost_warnings``)."""
+    from ..db import agent_registry as db
+
     row = await _existing_agent(agent_id)
-    return {"agent": agent_view(row), "warnings": cost_warnings(AgentSpec.from_row(row))}
+    uses = await db.profile_usage(agent_id)
+    return {"agent": agent_view(row, uses.get(agent_id, NOT_USED)), "warnings": cost_warnings(AgentSpec.from_row(row))}
 
 
 async def update_agent(agent_id: str, data: Any) -> dict[str, Any]:
@@ -909,9 +920,13 @@ async def delete_agent(agent_id: str) -> dict[str, Any]:
 
     row = await _existing_agent(agent_id)
     _not_builtin(row, "agent")
+    used_by = (await db.profile_usage(agent_id)).get(agent_id)
     try:
+        if used_by:
+            raise RegistryConflict(f"agent {row['name']!r} is selected by {usage_text(used_by)}: select another "
+                                   "agent there first")
         await db.delete_agent(agent_id)
-    except asyncpg.ForeignKeyViolationError:
+    except asyncpg.ForeignKeyViolationError:  # selected since it was checked
         raise RegistryConflict(f"agent {row['name']!r} is still selected: select another agent there first") \
             from None
     return {"deleted": agent_id}

@@ -276,7 +276,6 @@ class AgentHTTPServer:
     _RE_PROJECT_AGENT_SETTINGS = re.compile(r"^/api/projects/(proj-[a-zA-Z0-9]+)/agent-settings$")
     _RE_PROJECT_ROLE_SETTINGS = re.compile(r"^/api/projects/(proj-[a-zA-Z0-9]+)/agent-settings/roles/([a-zA-Z0-9_-]+)$")
     _RE_ROLE_SETTINGS = re.compile(r"^/api/agent-settings/roles/([a-zA-Z0-9_-]+)$")
-    _RE_RUNTIME = re.compile(r"^/api/runtimes/(rt-[a-zA-Z0-9-]+)$")
     _RE_RUNTIME_PROBE = re.compile(r"^/api/runtimes/(rt-[a-zA-Z0-9-]+)/probe$")
     _RE_PROVIDER = re.compile(r"^/api/providers/(prov-[a-zA-Z0-9-]+)$")
     _RE_AGENT = re.compile(r"^/api/agents/(agent-[a-zA-Z0-9-]+)$")
@@ -397,18 +396,11 @@ class AgentHTTPServer:
         elif (m := self._RE_AGENT_USAGE.match(path)) and method == "GET":
             await self._handle_agent_usage(m.group(1), query, writer)
         elif path == "/api/registry" and method == "GET":
-            await self._handle_registry(writer, HTTP_200, agent_registry.registry_view)
-        elif path == "/api/runtimes" and method == "POST":
-            await self._handle_registry(writer, HTTP_201, lambda: agent_registry.create_runtime(
-                projects.json_object(body), server_claude=self._claude_bin))
+            await self._handle_registry(writer, HTTP_200, lambda: agent_registry.registry_view(
+                server_claude=self._claude_bin))
         elif (m := self._RE_RUNTIME_PROBE.match(path)) and method == "POST":
             await self._handle_registry(writer, HTTP_200, lambda: agent_registry.probe_runtime(
                 m.group(1), server_claude=self._claude_bin))
-        elif (m := self._RE_RUNTIME.match(path)) and method == "PUT":
-            await self._handle_registry(writer, HTTP_200, lambda: agent_registry.update_runtime(
-                m.group(1), projects.json_object(body), server_claude=self._claude_bin))
-        elif (m := self._RE_RUNTIME.match(path)) and method == "DELETE":
-            await self._handle_registry(writer, HTTP_200, lambda: agent_registry.delete_runtime(m.group(1)))
         elif path == "/api/providers" and method == "POST":
             await self._handle_registry(writer, HTTP_201, lambda: agent_registry.create_provider(
                 projects.json_object(body)))

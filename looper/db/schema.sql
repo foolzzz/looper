@@ -166,10 +166,12 @@ ALTER TABLE agent_configs ADD COLUMN IF NOT EXISTS default_prompt TEXT NOT NULL 
 ALTER TABLE agent_configs DROP COLUMN IF EXISTS permission_mode;
 
 -- Agents (RFC decision 10): an agent is a runtime, an LLM provider and a
--- model. A runtime is a registered instance of a runtime type, which code
--- provides (an adapter, looper/agents/runtimes): the executable it runs ('' =
--- the type's default, for Claude Code the server's configured one) and what
--- its last probe found (version, capabilities). A provider is where an agent's
+-- model. A runtime is a runtime type, which code provides (an adapter,
+-- looper/agents/runtimes), found on this machine: built in, one per type on
+-- the server's PATH, with the executable it runs ('' = the type's default, for
+-- Claude Code the server's configured one) and what its last probe found
+-- (version, capabilities). A runtime registered by hand before (builtin
+-- false) stays read-only while an agent uses it. A provider is where an agent's
 -- requests go: the protocols it serves, its models and their prices, and how
 -- it authenticates: a runtime type's own login (oauth, bound to that type) or
 -- an API key, kept in llm_provider_secrets and never shown by the API. Code
@@ -331,6 +333,18 @@ BEGIN
         ALTER TABLE agent_configs DROP COLUMN IF EXISTS runtime;
         DROP TABLE IF EXISTS llm_profiles;
         INSERT INTO schema_migrations (name) VALUES ('llm_profiles_removed');
+    END IF;
+END $$;
+
+-- Once (runtimes are built in): a runtime registered by hand, which no agent
+-- uses, is dropped; one an agent uses stays (read-only), so the agent keeps
+-- running the executable it ran.
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM schema_migrations WHERE name = 'agent_runtimes_unused_custom_removed') THEN
+        DELETE FROM agent_runtimes r
+        WHERE NOT r.builtin AND NOT EXISTS (SELECT 1 FROM agents a WHERE a.runtime_id = r.id);
+        INSERT INTO schema_migrations (name) VALUES ('agent_runtimes_unused_custom_removed');
     END IF;
 END $$;
 
