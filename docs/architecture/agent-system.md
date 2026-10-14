@@ -192,6 +192,8 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
 - The TaskRouter calls `PlannerAgent.stop()`, which ends its Claude, when the
   task ends (completed, failed, stopped or cancelled) and when the server
   stops.
+- Before changing a recommended prompt, a contract or the prompt's layers, run
+  the prompt regression eval ([`evals/README.md`](../../evals/README.md)).
 
 ### WorkerPool (`loopx/agents/tiers/worker.py`)
 

@@ -248,6 +248,13 @@ def test_a_task_is_cancelled_when_it_reaches_the_cap_left(tmp_path: Path) -> Non
     assert result["cost_usd"] == pytest.approx(0.3)
 
 
+def test_real_claude_gets_the_per_run_budget(tmp_path: Path) -> None:
+    script = runner.install_claude(tmp_path, mode="real", max_budget_usd=0.25, real_claude="/opt/claude dir/claude")
+    assert script.read_text().splitlines()[-1] == "exec '/opt/claude dir/claude' \"$@\" --max-budget-usd 0.25"
+    with pytest.raises(runner.EvalError):
+        runner.install_claude(tmp_path, mode="real", max_budget_usd=0.25, real_claude=None)
+
+
 # --- Fake mode: the task set through a real server -----------------------------------------------------
 
 
