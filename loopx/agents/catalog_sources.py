@@ -40,8 +40,9 @@ part, a symbolic link, an encrypted entry, a file over the cap, or too many
 or too large files in all; an upload is at most ``UPLOAD_MAX_BYTES``, which
 as base64 JSON fits the server's request body cap. A repository URL is
 ``https://`` without credentials; the clone is ``--depth 1`` of one branch,
-without tags, submodules, hooks, templates, fsmonitor, credential helpers,
-prompts or LFS downloads, stopped after ``GIT_CLONE_TIMEOUT_SECONDS`` or when
+without tags, submodules, hooks, templates, fsmonitor, prompts, LFS
+downloads or the operator's git configuration (its credential helpers, URL
+rewrites and filters), stopped after ``GIT_CLONE_TIMEOUT_SECONDS`` or when
 it grows over ``GIT_CLONE_MAX_BYTES``; nothing in it is run, only read, and
 its temporary directory is removed afterwards.
 """
@@ -89,8 +90,8 @@ from .library import (
 
 logger = logging.getLogger(__name__)
 
-# The largest upload: its base64 in a JSON body (4 bytes for 3) stays under the server's 8 MiB request cap.
-UPLOAD_MAX_BYTES = 6 * 1024 * 1024
+# The largest upload: its base64 in a JSON body (4 bytes for 3, 8 MB) stays under the server's 8 MiB request cap.
+UPLOAD_MAX_BYTES = 6_000_000
 # A clone is stopped when it takes longer or its directory grows larger (anthropics/skills is about 17 MiB).
 GIT_CLONE_TIMEOUT_SECONDS = 120
 GIT_CLONE_MAX_BYTES = 64 * 1024 * 1024
@@ -558,8 +559,7 @@ async def upload(data: Any) -> dict[str, Any]:
     except (binascii.Error, ValueError):
         raise CatalogError(f"content_base64 of {filename} is not valid base64") from None
     if len(raw) > UPLOAD_MAX_BYTES:
-        raise _reject(f"{filename} has {len(raw)} bytes; an upload has at most {UPLOAD_MAX_BYTES // (1024 * 1024)} "
-                      f"MiB ({UPLOAD_MAX_BYTES} bytes)")
+        raise _reject(f"{filename} has {len(raw)} bytes; an upload has at most {UPLOAD_MAX_BYTES} bytes")
     rename = _rename(fields.get("name"))
     lower = filename.lower()
     if lower.endswith(".zip"):
@@ -653,8 +653,10 @@ def _git_args(git: str, scheme: str) -> list[str]:
 
 
 def _git_env() -> dict[str, str]:
-    return {**os.environ, "GIT_TERMINAL_PROMPT": "0", "GIT_LFS_SKIP_SMUDGE": "1", "GIT_CONFIG_NOSYSTEM": "1",
-            "GCM_INTERACTIVE": "never"}
+    """No prompts, and none of the operator's git configuration: its credential helpers (a private repository
+    is not reached with the operator's token), URL rewrites, hooks and filters."""
+    return {**os.environ, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1", "GIT_TERMINAL_PROMPT": "0",
+            "GIT_LFS_SKIP_SMUDGE": "1", "GCM_INTERACTIVE": "never"}
 
 
 def _kill(process: asyncio.subprocess.Process) -> None:
