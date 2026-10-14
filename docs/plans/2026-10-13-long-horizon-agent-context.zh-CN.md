@@ -561,6 +561,12 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
 
 这些问题在开发过程中发现，独立排期，不阻塞 M1–M6。
 
+### 5.0 当前队列（按顺序执行，2026-10-14 定）
+
+1. **Settings 拆页**（进行中）：侧栏底部 SETTINGS 分组，子页依次为 LLM Providers、Agent Runtimes（只读、自动检测，删除手动注册运行时的界面和 API）、Agent Profiles（可复用的运行时 + provider + 模型 + 默认 effort；provider 可选 API key，也可选运行时自己的 OAuth 登录）、Roles（各角色选 Profile，加 harness、角色 prompt、上限、超时、并发）、Skills & MCP、Channels、Import / Export；顶部 Agents 页改名 Runs，只看运行记录。
+2. **表名与界面统一**：单独一个机械改名 PR。`agents` → `agent_profiles`，`agent_configs` → `role_configs`（列 `agent_id` → `role`），`/api/agents` → `/api/agent-profiles`，`/api/agent-configs` → `/api/roles`，分层配置 `agent` → `profile_id`，`task_agent_overrides` → `task_profile_overrides`，代码类名与模块对应改名；"agent" 只指运行中的实例。不保留旧 API 别名，旧导出文件仍可导入；迁移前自动备份。
+3. **Codex 与 OMP 的 OAuth 登录**：Agent Profile 里两者自己的登录可以选用。要解决隔离目录读不到本机登录的问题，以及 Codex refresh_token 轮换（多个实例共用同一份登录文件并加锁，不复制副本）；OMP 的登录方式先核实。
+
 ### 5.1 核心缺陷（优先修，穿插在阶段之间）
 
 （暂无。已修复的见第 4 节进度台账。）
