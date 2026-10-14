@@ -393,6 +393,11 @@ How the agent system works today is described in
 
 ### Removed
 
+- **`agent_configs.permission_mode`.** No agent applied it since every agent
+  runs with `--dangerously-skip-permissions`; the startup schema drops the
+  column (`DROP COLUMN IF EXISTS`), and agent configs no longer return it. An
+  update that still sends it, as the current dashboard does, is applied
+  without it.
 - **`loopx update` and `loopx init`.** To upgrade, re-run `install.sh`: it
   installs the latest release wheel over the current one. `loopx init` wrote
   `providers.yaml` and `agents/*.yaml`, which nothing in the agent system

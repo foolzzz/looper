@@ -853,7 +853,7 @@ PostgreSQL is a hard startup dependency. All data paths:
 | `activity` | Execution trace events (SSE streaming to frontend) |
 | `chat_messages` | Chat conversation history |
 | `llm_records` | One row per Claude run: input and output text, status, the run's own `cost_usd`, `input_tokens`, `output_tokens`, `cache_read_tokens` and `cache_creation_tokens`, its final `context_tokens` and its `compactions`; `metadata` holds the exact argv (`command`), `cwd`, the appended `system_prompt`, its `system_prompt_sha256`, its `prompt_layers`, the `model_choice`, the Settings `env` names, the `library` items loaded and a task agent's `project_skills` |
-| `agent_configs` | Agent configuration (role prompt, model) for `manager`, `planner`, `worker` and `reviewer`; `harness_prompt` is used for the Manager only; `permission_mode` is stored but not applied |
+| `agent_configs` | Agent configuration (role prompt, model) for `manager`, `planner`, `worker` and `reviewer`; `harness_prompt` is used for the Manager only |
 | `system_settings` | Settings shared by the whole system, one value per key: the default harness, model, effort and environment variables (no row = the built-in default), and the last library import's report |
 | `library_items` | The imported plugins and skills: kind, name, source label, declared version, `sha256` of the files, `enabled`, size, file count, `imported_at` |
 | `library_files` | Each library item's files: relative path, UTF-8 content, sha256, executable bit |
@@ -967,7 +967,6 @@ Agent behavior is configured via the `agent_configs` table (editable in the dash
 - **runtime**: stored per agent; only `claude-code` is implemented, and the
   Manager, Planners and Workers always run the Claude CLI
 - **model**: This agent's model (`--model`); empty uses the default model in Settings (`opus` built in)
-- **permission_mode**: stored but not applied: every agent runs with `--dangerously-skip-permissions`
 - **max_turns**: Maximum conversation turns (0 = unlimited)
 - **timeout_seconds**: Execution timeout. For workers it limits one Claude
   run's total time (default 86400, 0 = no limit). Workers read
@@ -981,8 +980,8 @@ The `planner` row configures every task's Planner and is read for every turn.
 limit): a turn over it fails and its Claude is killed. `max_turns` above 0
 passes `--max-turns`, as for Workers, and `model`, when set, passes
 `--model`. A change that alters the Planner's command restarts its Claude at
-the next turn with `--resume`. `permission_mode` does not apply: like every
-agent, the Planner has every tool and no permission prompts.
+the next turn with `--resume`. Like every agent, the Planner has every tool
+and no permission prompts (`--dangerously-skip-permissions`).
 
 The `worker` row configures every Worker and the `reviewer` row every
 Reviewer; each is read for every run. `system_prompt` is the role prompt; code

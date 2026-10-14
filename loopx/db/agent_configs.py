@@ -21,7 +21,6 @@ _UPDATABLE_FIELDS = (
     "max_turns",
     "timeout_seconds",
     "max_concurrency",
-    "permission_mode",
     "extra_args",
     "metadata",
 )
@@ -151,14 +150,13 @@ async def seed_defaults(
         max_turns = cfg.get("max_turns", 0)
         timeout_seconds = cfg.get("timeout_seconds", 1200)
         max_concurrency = cfg.get("max_concurrency", 1)
-        permission_mode = cfg.get("permission_mode")
 
         await pool.execute(
             """
             INSERT INTO agent_configs
                 (agent_id, display_name, role, runtime, system_prompt, default_prompt, model,
-                 max_turns, timeout_seconds, max_concurrency, permission_mode)
-            VALUES ($1, $2, $3, $4, $5, $5, $6, $7, $8, $9, $10)
+                 max_turns, timeout_seconds, max_concurrency)
+            VALUES ($1, $2, $3, $4, $5, $5, $6, $7, $8, $9)
             ON CONFLICT (agent_id) DO UPDATE SET
                 display_name = CASE WHEN agent_configs.display_name = '' THEN EXCLUDED.display_name ELSE agent_configs.display_name END,
                 -- An unedited row (its prompt still equals the recommended one) follows
@@ -180,5 +178,4 @@ async def seed_defaults(
             max_turns,
             timeout_seconds,
             max_concurrency,
-            permission_mode,
         )
