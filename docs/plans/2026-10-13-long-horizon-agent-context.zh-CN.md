@@ -1,6 +1,6 @@
 # 开发计划：长程 Agent 上下文体系（M0–M6）
 
-- **状态：** M0–M6 全部交付；剩余上游 LoopX 清理 B4 和第 5 节待办
+- **状态：** M0–M6 全部交付；上游 LoopX 清理 B1–B4 已交付，只剩 `README.zh-CN.md` 等首屏预览后提交；其余见第 5 节待办
 - **依据：** [RFC：长程 Agent 的上下文体系 v0](../architecture/rfcs/long-horizon-agent-context-v0.zh-CN.md)。
   设计原则、分层模型和已作出的决定以 RFC 为准；本文只管"怎么分阶段做、做到什么算完成、现在做到哪了"。
 - **仓库：** `foolzzz/looper`，基线 `main`
@@ -332,7 +332,7 @@
 - [x] **B1 解耦**（looper #31）：`loopx` 命令只剩 `serve`、`version` 和 `--version`，`[project.scripts]` 指向新的 `loopx/cli.py`，启动时不再加载上游模块（`tests/test_cli_entry.py` 守护）；删除 `setup.py`、`MANIFEST.in`，wheel 不再依赖上游 Chat 包，仍带 `web/` 构建的 dashboard；Python Tests 换成只跑 agent 系统测试的 job。上游代码仍留在磁盘上。
 - [x] **B2 删除上游测试、smoke 和 CI**（looper #34）：删除 1,462 个文件、475,527 行。`tests/**` 只留 agent 系统的 31 个测试文件和它们的 helper（`conftest.py`、`library_fixtures.py`、`claude_stream_replay.py`、`runtime_root_guard/`、`fixtures/claude_stream/`），`examples/**` 只留两个发布 smoke，删除 `regression/`、6 个上游 workflow、`scripts/ci/` 和 `sonar-project.properties`；`tests/conftest.py` 去掉 `loopx.canary` 导入、smoke-suite 选项和上游 fixture；`pyproject.toml` 设 `testpaths = ["tests"]`，CI 直接跑 `pytest`。不带参数的 `pytest` 收集 899 个测试，没有收集错误（之前 11,849 个，8 个文件收集失败）。第 5.2 节因此关闭 4 项：CI 基线（Python Tests 在每个 PR 上跑 agent 系统测试并通过）、Optional Ark Turn workflow、`test_dashboard_command` 的 5 个失败用例和它的偶发超时。
 - [x] **B3 删除上游代码**（looper #35）：删除 2,040 个文件、638,943 行。`loopx/**` 只留 `agents`、`db`、`__init__.py`、`cli.py`、`paths.py`（`paths.py` 只留 runtime root 的三个函数）；删除 `apps/`、`packages/`、`skills/`、`man/`、除 `stage-dashboard.sh` 和 `release-surface-args.sh` 以外的 `scripts/**`（包括 `install-from-github.sh` 和 `install-local.sh`），以及根目录的 `package.json`、`package-lock.json`、`tsconfig.control-plane.json`。`pyproject.toml` 只留 `loopx` 一个命令，去掉 `deepseek-harness` extra、上游的测试依赖、package-data、data-files 和 mypy 配置；dependabot、CODEOWNERS 和 `.gitignore` 里指向已删路径的条目一并去掉。第 5.2 节因此关闭 `scripts/install-from-github.sh` 默认 `stable` 分支一项。
-- [ ] **B4 文档与根目录文件**：`docs/**` 只留本计划、两份架构文档、`docs/releases/` 和 `docs/design.md`；按下面的决定改写和删除其余文档。
+- [ ] **B4 文档与根目录文件**（looper #38，除 `README.zh-CN.md` 外已交付）：删除 587 个文件、146,883 行。`docs/**` 只留本计划、两份架构文档、`docs/design.md` 和 `docs/releases/`；删除 `docs/fork/**`、`ADOPTERS.md`、`mkdocs.yaml`、`.github/GOVERNANCE.md` 和 4 个上游 issue 模板。`AGENTS.md`、`CONTRIBUTING.md` 改写成精简的 fork 版本；`docs/development/design.md` 的通用界面规则并入 `docs/design.md` 的「界面设计」一节；发布流程移到 `docs/releases/README.md`，发布正文检查只保留中英双语部分；CODEOWNERS、SECURITY、SUPPORT、CODE_OF_CONDUCT 和 PR、issue 模板指向 `foolzzz/looper` 和 `@foolzzz`；CHANGELOG 里指向已删文档的链接改为指向删除前最后一个提交的固定链接（使用说明改指 `docs/architecture/agent-system.md`）。`README.zh-CN.md` 改写为英文 README 的中文版，首屏经维护者预览后单独提交，届时勾选本项。
 
 维护者的决定：
 
