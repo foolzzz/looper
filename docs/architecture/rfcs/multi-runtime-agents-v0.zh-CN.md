@@ -95,24 +95,24 @@ dashboard、M2 的观测、M6 的评测和 M7 的任务日志都只认内部事�
 ## 6. 能力矩阵
 
 ✅ 已核实，❓ 待核实，❌ 不支持，— 不适用。CLI 的核实依据是本机版本的 `--help`，2026-10-14；Codex 一列另经本机 CPA
-（`gpt-5.5`）实跑核实（M9c）。
+（`gpt-5.5`）实跑核实（M9c）；OMP 一列另经本机 CPA（`gpt-5.5`）实跑、请求记录代理和上游 v18.4.3 的源码与文档核实（M9e）。
 
 | 能力 | Claude Code 2.1.285 | Codex 0.162.0 | OMP 18.4.3 | Claude Agent SDK | OpenAI Agents SDK | norma |
 |---|---|---|---|---|---|---|
-| 一次性运行 | ✅ `--print` stream-json | ✅ `exec --json`，提示用 `-` 从 stdin 读完为止，一个进程一轮 | ❓ | ❓ | ❓ | 待定 |
-| 常驻会话与续接 | ✅ stream-json 输入 + `--resume` | ✅ 逐轮续接：每轮起一个 `exec … resume <id> -` 进程；`thread.started` 的 `thread_id` 就是会话 id，续接时不变；会话不存在时退出码 1、没有任何事件。`app-server` 是实验性的 JSON-RPC，未采用；`queue` 只投给 app-server 守护进程上的会话，到不了 `exec` | ❓ | ❓ | ❓ | 待定 |
-| 运行中追加用户轮（引导 Worker） | ✅ stream-json 输入 | ❌ `exec` 只读一次提示；`queue` 也送不进正在跑的 `exec` | ❓ | ❓ | ❓ | 待定 |
-| system prompt 注入 | ✅ `--append-system-prompt-file`，快照关闭 | ✅ `CODEX_HOME/AGENTS.md`：作为用户消息进会话，排在项目 `AGENTS.md` 之前，不截断；续接时内容变了会补发"取代此前的 AGENTS.md"。`developer_instructions`（`-c` 或配置）只在会话开始时生效，续接时改了不生效；`model_instructions_file` 会替换 Codex 自带的基础指令 | ❓ | ❓ | ❓ | 待定 |
-| 强制结构化输出 | 靠 prompt 契约 | ✅ `--output-schema`，续接轮次也生效（Looper 未启用） | ❓ | ❓ | ❓ | 待定 |
-| skill 与插件 | ✅ Claude 插件，`--plugin-dir` | 原生读 `SKILL.md`（开发者消息里列名称、描述和路径），但列表总带着 `$HOME/.agents/skills`，只有改 `HOME` 才去得掉，所以关掉原生列表（`skills.include_instructions = false`），skill 按 P9 降为可读文档；Claude 插件不加载 | ❓ | ❓ | — | 待定 |
-| MCP | ✅ `--mcp-config` + `--strict-mcp-config`（M8b） | ✅ `config.toml` 的 `[mcp_servers.<名称>]`：stdio（`command`、`args`、`env`）和 streamable HTTP（`url`、`http_headers`）；没有 SSE | ❓ | ❓ | ❓ | 待定 |
-| 额外目录（知识） | ✅ `--add-dir` | ✅ `--add-dir`，放在 `resume` 之前也有效；目录里的 `AGENTS.md` 不加载 | ❓ | ❓ | — | 待定 |
-| 不限权限 | ✅ `--dangerously-skip-permissions` | ✅ `--dangerously-bypass-approvals-and-sandbox` | ❓ | ❓ | — | 待定 |
-| 隔离 | ✅ `--setting-sources project` 等（M1） | ✅ 独立 `CODEX_HOME`，只放生成的 `config.toml` 和 `AGENTS.md`，不读 `~/.codex`；另需关掉原生 skill 列表（见上）和插件同步（`features.plugins = false`，否则每个新目录克隆约 25 MB 的插件市场） | ❓ | ❓ | — | 待定 |
-| 非 git 目录 | ✅ | ✅ 需要 `--skip-git-repo-check` | ❓ | — | — | 待定 |
-| 花费报告 | ✅ `total_cost_usd` 和 `modelUsage[*].costUSD` 一律按 Claude 价格计算（不认识的模型标 `costBasis: "unknown"`）；`modelUsage` 按模型给出四种 token，接其他 provider 时由 Looper 按 provider 价格计算 | 只有 token：`turn.completed.usage`，是会话累计值，由 Looper 按 provider 价格计算 | ❓ | ❓ | 只有 token 数 | 待定 |
-| 压缩事件 | ✅ `compact_boundary` | ❌ `--json` 不报，只出一条提示性的 `error` 条目 | ❓ | ❓ | — | 待定 |
-| 自主轮（#26） | ✅ | — 一个进程只跑一轮 | ❓ | ❓ | — | 待定 |
+| 一次性运行 | ✅ `--print` stream-json | ✅ `exec --json`，提示用 `-` 从 stdin 读完为止，一个进程一轮 | ✅ `-p --mode json`，提示从 stdin 读（非终端的 stdin 自动作为首条消息），一个进程一轮；首行是会话头（`type: "session"`、`id`），之后是 `agent_start`、`turn_start`、`message_start`/`message_update`/`message_end`、`tool_execution_*`、`turn_end`、`agent_end` | ❓ | ❓ | 待定 |
+| 常驻会话与续接 | ✅ stream-json 输入 + `--resume` | ✅ 逐轮续接：每轮起一个 `exec … resume <id> -` 进程；`thread.started` 的 `thread_id` 就是会话 id，续接时不变；会话不存在时退出码 1、没有任何事件。`app-server` 是实验性的 JSON-RPC，未采用；`queue` 只投给 app-server 守护进程上的会话，到不了 `exec` | ✅ 逐轮续接：每轮起一个 `-p … --session-dir <目录> --resume <id>` 进程；会话头的 `id` 就是会话 id，续接时不变；会话不存在时退出码 1、没有任何事件。`--mode rpc` 是常驻进程的 JSON 命令协议，未采用 | ❓ | ❓ | 待定 |
+| 运行中追加用户轮（引导 Worker） | ✅ stream-json 输入 | ❌ `exec` 只读一次提示；`queue` 也送不进正在跑的 `exec` | ❌ `-p` 只读一次 stdin；`--mode rpc` 能在运行中插话（未采用） | ❓ | ❓ | 待定 |
+| system prompt 注入 | ✅ `--append-system-prompt-file`，快照关闭 | ✅ `CODEX_HOME/AGENTS.md`：作为用户消息进会话，排在项目 `AGENTS.md` 之前，不截断；续接时内容变了会补发"取代此前的 AGENTS.md"。`developer_instructions`（`-c` 或配置）只在会话开始时生效，续接时改了不生效；`model_instructions_file` 会替换 Codex 自带的基础指令 | ✅ `--append-system-prompt <文件>`：追加在 omp 自带 prompt 和项目上下文之后，是真正的 system prompt；每个进程重新构建，续接时内容变了就用新的 | ❓ | ❓ | 待定 |
+| 强制结构化输出 | 靠 prompt 契约 | ✅ `--output-schema`，续接轮次也生效（Looper 未启用） | 靠 prompt 契约 | ❓ | ❓ | 待定 |
+| skill 与插件 | ✅ Claude 插件，`--plugin-dir` | 原生读 `SKILL.md`（开发者消息里列名称、描述和路径），但列表总带着 `$HOME/.agents/skills`，只有改 `HOME` 才去得掉，所以关掉原生列表（`skills.include_instructions = false`），skill 按 P9 降为可读文档；Claude 插件不加载 | ✅ `--plugin-dir` 原生加载 Claude 插件的 `skills/<名称>/SKILL.md`（按 frontmatter 的 name 命名，没有插件前缀）、`commands/`、`agents/`；Claude 格式的 `hooks/hooks.json` 不加载；插件自带的 MCP 服务器会加载，Looper 用 `disabledExtensions` 关掉 | ❓ | — | 待定 |
+| MCP | ✅ `--mcp-config` + `--strict-mcp-config`（M8b） | ✅ `config.toml` 的 `[mcp_servers.<名称>]`：stdio（`command`、`args`、`env`）和 streamable HTTP（`url`、`http_headers`）；没有 SSE | ✅ 与 Claude Code 相同的 `mcpServers` 格式（stdio、HTTP、SSE），Looper 放进家目录里生成的插件 `looper`，工具名 `mcp__looper_<服务器>_<工具>`；默认挂在 `xd://` 下经 read/write 调用，`tools.xdev: false` 改成顶层工具 | ❓ | ❓ | 待定 |
+| 额外目录（知识） | ✅ `--add-dir` | ✅ `--add-dir`，放在 `resume` 之前也有效；目录里的 `AGENTS.md` 不加载 | ✅ `--add-dir`；目录里的 `AGENTS.md` 会作为上下文加载 | ❓ | — | 待定 |
+| 不限权限 | ✅ `--dangerously-skip-permissions` | ✅ `--dangerously-bypass-approvals-and-sandbox` | ✅ `tools.approvalMode: yolo`（默认值，Looper 在覆盖配置里写明） | ❓ | — | 待定 |
+| 隔离 | ✅ `--setting-sources project` 等（M1） | ✅ 独立 `CODEX_HOME`，只放生成的 `config.toml` 和 `AGENTS.md`，不读 `~/.codex`；另需关掉原生 skill 列表（见上）和插件同步（`features.plugins = false`，否则每个新目录克隆约 25 MB 的插件市场） | ✅ `HOME` 指向 Looper 的家目录（见下），不读 `~/.omp`、`~/.claude`、`~/.codex`、`~/.agents`、`~/.env`；工作目录不在 git 仓库里时另关掉向上查找的发现来源 | ❓ | — | 待定 |
+| 非 git 目录 | ✅ | ✅ 需要 `--skip-git-repo-check` | ✅ | — | — | 待定 |
+| 花费报告 | ✅ `total_cost_usd` 和 `modelUsage[*].costUSD` 一律按 Claude 价格计算（不认识的模型标 `costBasis: "unknown"`）；`modelUsage` 按模型给出四种 token，接其他 provider 时由 Looper 按 provider 价格计算 | 只有 token：`turn.completed.usage`，是会话累计值，由 Looper 按 provider 价格计算 | 只有 token：每个请求一条（助手消息的 `usage`），由 Looper 按 provider 价格计算；子 agent 的用量在 `task` 工具结果里汇总 | ❓ | 只有 token 数 | 待定 |
+| 压缩事件 | ✅ `compact_boundary` | ❌ `--json` 不报，只出一条提示性的 `error` 条目 | ✅ `auto_compaction_start`/`auto_compaction_end`（`result.tokensBefore`） | ❓ | — | 待定 |
+| 自主轮（#26） | ✅ | — 一个进程只跑一轮 | — 一个进程只跑一轮 | ❓ | — | 待定 |
 
 Codex 的其他核实结果：
 
@@ -124,6 +124,32 @@ Codex 的其他核实结果：
   没有单次请求的用量，所以记不到上下文规模。
 - **结束**：被 SIGTERM 时退出码是 0、没有 `turn.completed`；它正在跑的 shell 命令不会随之结束。
 - **环境变量**：shell 命令默认继承 Codex 进程的全部环境变量，provider 的密钥要用 `shell_environment_policy.exclude` 排除。
+
+OMP 的其他核实结果：
+
+- **家目录**：omp 的所有用户级路径都在 `HOME` 下：`~/.omp`（设置、`models.yml`、会话、日志、已装插件、原生库）、
+  外部工具的用户目录（`~/.claude`、`~/.codex`、`~/.gemini`、`~/.agents`，其中 `~/.agents/skills` 默认加载），还有
+  `~/.env`（启动时读进 omp 自己的环境）。`PI_CODING_AGENT_DIR` 只搬走 `~/.omp/agent`，`~/.omp` 下的日志和插件仍然
+  读写，所以 Looper 改的是 `HOME`。另有几个变量会把这些路径指回操作者的目录（`OMP_PROFILE`、`PI_CODING_AGENT_DIR`、
+  `PI_CONFIG_DIR`、`PI_CONFIG_FILES`、`XDG_*_HOME`、`CLAUDE_CONFIG_DIR`、`COPILOT_HOME`），启动时去掉。原生库每个家
+  目录要解压一份（约 167 MB），各家目录用符号链接共用一份。
+- **向上查找**：项目级的 skill、`AGENTS.md`/`CLAUDE.md` 和 `.omp` 目录从工作目录往上找，到 git 仓库根为止；不在
+  仓库里时以 `HOME` 为界。`HOME` 换掉以后，仓库外的工作目录会一直找到 `/`，把操作者家目录里的 `.agents/skills`、
+  `.claude/skills`、`.omp/skills` 和 `AGENTS.md` 当成项目内容加载（用替身家目录实测到）。所以工作目录不在仓库里时
+  关掉 `native`、`claude`、`agents`、`agents-md`、`claude-md` 这几个发现来源，代价是工作目录自己的这几类文件也不读。
+  `task` 工具的子 agent 定义（`.omp/agents`）无论在不在仓库都一直找到 `/`，关不掉，记为差距。
+- **设置**：项目的 `.omp/config.yml` 会覆盖全局设置，所以 Looper 的设置放在 `--config` 覆盖文件里（优先级更高）：
+  只启用 agent 的模型（`enabledModels`，各角色 `modelRoles` 都指向它），`retry.modelFallback`、
+  `startup.checkUpdate`、`dev.autoqa` 关掉，`tools.xdev` 关掉（MCP 工具成为顶层工具）。
+- **provider**：`models.yml` 的自定义 provider（`baseUrl`、`api`、`models`）；`apiKey` 写环境变量名，omp 先当变量名
+  读，所以密钥只在环境里。`api` 实测 `openai-responses`、`openai-completions`（即 `openai-chat`）和
+  `anthropic-messages` 三种都能经 CPA 跑通；模型的 `cost` 写 0，花费由 Looper 计算。effort 对应 `--thinking`。
+- **shell**：agent 的 shell 命令继承 omp 的环境。Looper 用 `PI_SHELL_PREFIX`（omp 给每条 shell 命令加的前缀）把
+  `HOME` 等变量恢复成操作者的，并去掉 provider 的密钥，所以 shell 里的 git、gh 等工具照常使用操作者的配置。
+- **事件与用量**：助手消息的 `message_end` 带这次请求的 `usage`：`input` 不含缓存读，另有 `cacheRead`、
+  `cacheWrite`、`output`，所以能记上下文规模，单次上限也能在请求之间判断。失败时助手消息的 `stopReason` 是
+  `error`（带 `errorMessage`），退出码 1。被 SIGTERM 时正在跑的 shell 命令一并结束，没有 `agent_end`。
+  skill 描述压缩成路由提示（用 smol 角色的模型，结果缓存在家目录）、压缩摘要等后台请求不在事件流里。
 
 决策 10 要求所有运行时都支持所有角色。矩阵里 ❓ 的项，在对应阶段开工时第一件事就是实测，结果写回本表。
 
