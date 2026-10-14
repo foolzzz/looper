@@ -61,3 +61,10 @@ async def save_session(
         """,
         agent_id, session_id, json.dumps(dict(session_totals)), runtime_type, provider_id, session_agent_id,
     )
+
+
+async def saved_sessions(*, pool: asyncpg.Pool | asyncpg.Connection | None = None) -> list[tuple[str, str | None]]:
+    """``(agent_id, runtime_type)`` of every agent with a saved session to resume."""
+    pool = pool or get_pool()
+    rows = await pool.fetch("SELECT agent_id, runtime_type FROM agent_sessions WHERE session_id IS NOT NULL")
+    return [(row["agent_id"], row["runtime_type"]) for row in rows]

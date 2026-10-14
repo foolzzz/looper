@@ -3,8 +3,9 @@
 The catalog's items and generated skill plugins and a project's stored
 knowledge are written once under a content hash; a change writes a new
 directory. At server start the ones neither the current content (what every
-role in every project loads) nor a running process uses are removed. The
-database is stubbed; the running processes are real.
+role in every project loads) nor a running process uses are removed, and so
+are the session directories of resident agents whose saved session is not of
+that runtime. The database is stubbed; the running processes are real.
 """
 
 from __future__ import annotations
@@ -23,6 +24,7 @@ from looper.agents import library, mcp, read_only_copies
 from looper.agents.knowledge import load_knowledge
 from looper.agents.project_skills import skill_file
 from looper.agents.read_only_copies import hashed_directories, reclaim_unused
+from looper.db import agent_sessions as db_agent_sessions
 from looper.db import library as db_library
 from looper.db import project_documents as db_documents
 from looper.db import projects as db_projects
@@ -40,6 +42,7 @@ class _Content:
         self.documents: dict[str, list[tuple[str, str]]] = {}  # project id -> (title, content)
         self.skills: dict[str, list[tuple[str, str]]] = {}  # project id -> (name, body)
         self.servers: dict[str, mcp.Server] = {}  # MCP servers installed globally for Workers, by name
+        self.sessions: list[tuple[str, str | None]] = []  # each agent with a saved session, and its runtime type
         self.fail = False
 
         async def list_projects(**_: Any) -> list[dict[str, Any]]:
@@ -86,6 +89,11 @@ class _Content:
         monkeypatch.setattr(db_library, "list_installed", list_installed)
         monkeypatch.setattr(db_library, "get_item_files", get_item_files)
         monkeypatch.setattr(db_library, "get_mcp_servers", get_mcp_servers)
+
+        async def saved_sessions(**_: Any) -> list[tuple[str, str | None]]:
+            return list(self.sessions)
+
+        monkeypatch.setattr(db_agent_sessions, "saved_sessions", saved_sessions)
 
     def project(self, project_id: str, *, documents: list[tuple[str, str]], skills: list[tuple[str, str]]) -> dict:
         project = {"id": project_id, "name": project_id, "work_dir": ""}
@@ -244,3 +252,55 @@ def test_nothing_is_reclaimed_when_the_processes_or_the_content_cannot_be_read(
         content.fail = True
     assert asyncio.run(reclaim_unused(tmp_path)) == []
     assert len(hashed_directories(tmp_path)) == 1
+
+
+def test_an_omp_home_is_kept_while_a_running_process_names_it(tmp_path: Path, content: _Content) -> None:
+    from looper.agents.runtimes.omp import write_home
+
+    local = tmp_path.absolute() / ".local"
+    used, idle = write_home(local, {"providers": {}}, {"a": 1}, None), write_home(local, {"providers": {}}, {"b": 2}, None)
+    assert set(hashed_directories(tmp_path)) == {used, idle}
+    natives = local / "omp" / "natives"
+    (natives / "18.4.3").mkdir(parents=True)
+    agent = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)", "-p", "--config",
+                              str(used / "looper.yml")])
+    try:
+        deadline = time.monotonic() + 10
+        while not any(str(used) in line for line in read_only_copies.command_lines()):
+            assert time.monotonic() < deadline, "the process did not show up"
+            time.sleep(0.05)
+        assert asyncio.run(reclaim_unused(tmp_path)) == [idle]
+    finally:
+        agent.kill()
+        agent.wait()
+    assert asyncio.run(reclaim_unused(tmp_path)) == [used]
+    assert (natives / "18.4.3").is_dir()  # the native library the homes share stays
+
+
+def test_a_session_directory_stays_while_its_agent_saved_a_session_of_that_runtime(
+    tmp_path: Path, content: _Content,
+) -> None:
+    local = tmp_path.absolute() / ".local"
+    directories = {name: local / runtime / "sessions" / owner for name, (runtime, owner) in {
+        "omp-manager": ("omp", "manager"), "omp-planner": ("omp", "planner-task-1"),
+        "omp-gone": ("omp", "planner-task-9"), "codex-planner": ("codex", "planner-task-2"),
+        "switched": ("codex", "planner-task-1"), "running": ("omp", "planner-task-3"),
+    }.items()}
+    for directory in directories.values():
+        (directory / "state").mkdir(parents=True)
+    # The Manager and task-1's Planner resume OMP sessions, task-2's Planner a Codex one; task-9 is gone, and
+    # task-1's Planner moved from Codex to OMP. Task-3's Planner has no saved session, but a turn is running.
+    content.sessions = [("manager", "omp"), ("planner-task-1", "omp"), ("planner-task-2", "codex")]
+    agent = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)", "--session-dir",
+                              str(directories["running"])])
+    try:
+        deadline = time.monotonic() + 10
+        while not any(str(directories["running"]) in line for line in read_only_copies.command_lines()):
+            assert time.monotonic() < deadline, "the process did not show up"
+            time.sleep(0.05)
+        removed = asyncio.run(reclaim_unused(tmp_path))
+    finally:
+        agent.kill()
+        agent.wait()
+    assert sorted(removed) == sorted([directories["omp-gone"], directories["switched"]])
+    assert all(directories[name].is_dir() for name in ("omp-manager", "omp-planner", "codex-planner", "running"))

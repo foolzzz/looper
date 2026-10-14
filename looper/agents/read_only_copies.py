@@ -10,17 +10,26 @@ writes a new one and leaves the old one:
   (``knowledge.py``);
 - a project's skills plugin as versions before the catalog wrote it:
   ``projects/<id>/skills/<sha256>/``; nothing writes these any more;
-- the MCP servers installed for a run: ``mcp/<sha256>.json`` (``mcp.py``).
+- the MCP servers installed for a run: ``mcp/<sha256>.json`` (``mcp.py``);
+- the homes OMP runs with, one per set of generated settings:
+  ``omp/homes/<sha256>/`` (``runtimes.omp``).
 
 ``reclaim_unused`` removes the ones nothing uses. ``looper serve`` runs it at
 start, before any agent launches. It keeps a directory that the database's
 current content uses (what the next runs of every role in every project mount,
 and those of a task agent without a project; loading it also writes it) or
 that the command line of a running process names, as every run's
-``--plugin-dir``, ``--add-dir`` and ``--mcp-config`` do, which covers agents an earlier server
+``--plugin-dir``, ``--add-dir`` and ``--mcp-config`` do (and an OMP run's
+``--config`` its home), which covers agents an earlier server
 left running and those of another server on the same runtime root; a
 directory that a kept one links into stays too. When the current content or the running
 processes cannot be read, nothing is removed.
+
+The Manager and every Planner on a runtime that runs a process per turn (Codex,
+OMP) keep their sessions in a directory of their own,
+``<runtime_type>/sessions/<agent>``. ``reclaim_sessions`` removes the one of an
+agent whose saved session (``agent_sessions``) is not of that runtime type, or
+which has none, unless a running process names it.
 """
 
 from __future__ import annotations
@@ -44,7 +53,7 @@ def hashed_directories(runtime_root: Path) -> list[Path]:
     every content-hashed MCP configuration file."""
     local = runtime_root.absolute() / ".local"
     parents = [local / "library", *sorted((local / "projects").glob("proj-*/knowledge")),
-               *sorted((local / "projects").glob("proj-*/skills"))]
+               *sorted((local / "projects").glob("proj-*/skills")), local / "omp" / "homes"]
     directories = [child for parent in parents if parent.is_dir() for child in sorted(parent.iterdir())
                    if _HASHED.fullmatch(child.name) and child.is_dir() and not child.is_symlink()]
     mcp = local / "mcp"
@@ -164,14 +173,50 @@ async def current_copies(runtime_root: Path) -> list[str] | None:
     return paths
 
 
+# The runtime types whose resident agents keep their sessions in a directory of their own (``per_turn``).
+SESSION_RUNTIMES = ("codex", "omp")
+
+
+def reclaim_sessions(runtime_root: Path, *, saved: Iterable[tuple[str, str | None]],
+                     command_lines: list[str]) -> list[Path]:
+    """Remove the session directories under ``runtime_root`` whose agent has no saved session of that runtime
+    type (``saved``: each agent with a saved session and its runtime type) and that no running process names;
+    returns them."""
+    from .runtimes.per_turn import session_dir_name
+
+    keep = {(runtime_type, session_dir_name(agent_id)) for agent_id, runtime_type in saved}
+    lines = "\n".join(command_lines)
+    removed = []
+    for runtime_type in SESSION_RUNTIMES:
+        sessions = runtime_root.absolute() / ".local" / runtime_type / "sessions"
+        for directory in sorted(sessions.iterdir()) if sessions.is_dir() else []:
+            if (runtime_type, directory.name) in keep or not directory.is_dir() or directory.is_symlink():
+                continue
+            if any(_named(lines, form, inside=True) for form in _forms(directory)):
+                continue
+            try:
+                _remove(directory)
+            except OSError:
+                logger.warning("cannot remove the unused session directory %s", directory, exc_info=True)
+                continue
+            removed.append(directory)
+    return removed
+
+
 async def reclaim_unused(runtime_root: Path) -> list[Path]:
-    """Remove the copies under ``runtime_root`` that neither the current content nor a running process uses."""
+    """Remove the copies under ``runtime_root`` that neither the current content nor a running process uses, and
+    the session directories of agents whose saved session is not of their runtime type."""
+    from ..db import agent_sessions
+
     try:
         keep = await current_copies(runtime_root)
         if keep is None:
             logger.warning("not reclaiming unused copies: the installed items or project content cannot be read")
             return []
-        removed = reclaim(runtime_root, keep=keep, command_lines=command_lines())
+        saved = await agent_sessions.saved_sessions()
+        lines = command_lines()
+        removed = reclaim(runtime_root, keep=keep, command_lines=lines)
+        removed += reclaim_sessions(runtime_root, saved=saved, command_lines=lines)
     except Exception:
         logger.warning("not reclaiming unused copies", exc_info=True)
         return []
