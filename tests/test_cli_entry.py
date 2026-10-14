@@ -210,10 +210,37 @@ def test_doctor_never_runs_a_claude_without_auth_status(tmp_path: Path) -> None:
 
 
 @pytest.mark.skipif(not os.environ.get("LOOPX_TEST_DATABASE_URL"), reason="LOOPX_TEST_DATABASE_URL is not set")
-def test_doctor_passes_when_nothing_is_missing(tmp_path: Path) -> None:
-    env = _doctor_env(tmp_path, claude="logged_in", database_url=os.environ["LOOPX_TEST_DATABASE_URL"])
+@pytest.mark.parametrize(
+    ("lark", "lark_line", "code"),
+    [("off", "skip", 0), ("on", "ok", 0), ("on-without-cli", "warn", 0)],
+    ids=["lark-off", "lark-on", "lark-on-without-cli"],
+)
+def test_doctor_passes_unless_a_check_failed(tmp_path: Path, lark: str, lark_line: str, code: int) -> None:
+    """An enabled Lark channel needs lark-cli; without it the channel will not start, but LoopX runs."""
+    import asyncio
 
-    result, output, stderr = _run_loopx("doctor", cwd=tmp_path, env=env)
+    import asyncpg
 
-    assert result["code"] == 0, output + stderr
-    assert [line[:5].strip() for line in _check_lines(output).values()] == ["ok", "ok", "ok", "skip"], output
+    from evals.prompt_regression.runner import fresh_database
+
+    async def set_up(url: str) -> None:
+        conn = await asyncpg.connect(url)
+        try:
+            await conn.execute((REPO_ROOT / "loopx" / "db" / "schema.sql").read_text())
+            await conn.execute("INSERT INTO channel_configs (channel_id, channel_type, enabled) "
+                               "VALUES ('channel-lark', 'lark', $1)", lark != "off")
+        finally:
+            await conn.close()
+
+    with fresh_database(os.environ["LOOPX_TEST_DATABASE_URL"]) as (database_url, _):
+        asyncio.run(set_up(database_url))
+        env = _doctor_env(tmp_path, claude="logged_in", database_url=database_url)
+        if lark == "on":
+            (tmp_path / "bin" / "lark-cli").write_text("#!/bin/sh\n")
+            (tmp_path / "bin" / "lark-cli").chmod(0o755)
+        result, output, stderr = _run_loopx("doctor", cwd=tmp_path, env=env)
+
+    assert result["code"] == code, output + stderr
+    assert [line[:5].strip() for line in _check_lines(output).values()] == ["ok", "ok", "ok", lark_line], output
+    if lark_line == "warn":
+        assert "install lark-cli" in output
