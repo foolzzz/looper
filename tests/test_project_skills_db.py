@@ -143,6 +143,25 @@ def test_the_api_adds_lists_toggles_renames_and_deletes_skills(monkeypatch: pyte
     _run(_test, monkeypatch)
 
 
+def test_the_api_shows_one_skill_with_its_body(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    from loopx.db import projects
+
+    async def _test(pool: Any) -> None:
+        project = await projects.create_project(name="calc", pool=pool)
+        other = await projects.create_project(name="other", pool=pool)
+        base = f"/api/projects/{project['id']}/skills"
+        _, added = await _call(tmp_path, "POST", base, _skill("release-notes", content="Notes · 中文\n"))
+        skill_id = added["skill"]["skill_id"]
+
+        status, shown = await _call(tmp_path, "GET", f"{base}/{skill_id}")
+        assert status == 200
+        assert (shown["skill"]["qualified_name"], shown["content"]) == ("project:release-notes", "Notes · 中文\n")
+        assert (await _call(tmp_path, "GET", f"{base}/skill-nope"))[0] == 404
+        assert (await _call(tmp_path, "GET", f"/api/projects/{other['id']}/skills/{skill_id}"))[0] == 404
+
+    _run(_test, monkeypatch)
+
+
 def test_concurrent_adds_cannot_both_pass_the_count_cap_or_take_one_name(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

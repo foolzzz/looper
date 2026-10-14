@@ -16,7 +16,7 @@ import asyncpg
 from .connection import get_pool
 from .project_documents import locked_project
 
-__all__ = ["delete_skill", "insert_skill", "list_enabled_skills", "list_skills", "locked_project", "update_skill"]
+__all__ = ["delete_skill", "get_skill", "insert_skill", "list_enabled_skills", "list_skills", "locked_project", "update_skill"]
 
 # Every column but the content, which can be 64 KiB: the API shows its size instead.
 _COLUMNS = (
@@ -34,6 +34,15 @@ async def list_skills(
     pool = pool or get_pool()
     rows = await pool.fetch(f"SELECT {_COLUMNS} FROM project_skills WHERE project_id = $1 {_BY_NAME}", project_id)
     return [dict(row) for row in rows]
+
+
+async def get_skill(project_id: str, skill_id: str, *, pool: asyncpg.Pool | None = None) -> dict[str, Any] | None:
+    """One of the project's skills with its ``content``; None when the project has no such skill."""
+    pool = pool or get_pool()
+    row = await pool.fetchrow(
+        f"SELECT {_COLUMNS}, content FROM project_skills WHERE project_id = $1 AND id = $2", project_id, skill_id,
+    )
+    return dict(row) if row is not None else None
 
 
 async def list_enabled_skills(project_id: str, *, pool: asyncpg.Pool | None = None) -> list[dict[str, Any]]:
