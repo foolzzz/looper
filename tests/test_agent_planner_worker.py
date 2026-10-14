@@ -296,7 +296,8 @@ class TestWorkerPool:
         assert "hardened the login check" not in task
         assert '"passed"' not in prompt and '"passed"' in REVIEW_CONTRACT
 
-    def test_pool_start_stop(self) -> None:
+    def test_pool_start_stop(self, stub_claude_on_path: Path) -> None:
+        # is_healthy() needs a `claude` on PATH; the stub keeps this off the machine's own install.
         async def _run() -> None:
             with tempfile.TemporaryDirectory() as tmp:
                 bus = MessageBus(runtime_root=Path(tmp))
