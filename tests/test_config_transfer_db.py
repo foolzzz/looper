@@ -287,7 +287,7 @@ def test_a_round_trip_into_a_new_database_reproduces_the_configuration(
             first = _without_time(exported)
             assert first["runtimes"] == [{"name": "claude-beta", "type": "claude-code", "executable": "claude-beta"}]
             first["runtimes"] = []
-            _by_name(first["agents"], "beta-haiku")["runtime"] = "claude-code"
+            _by_name(first["profiles"], "beta-haiku")["runtime"] = "claude-code"
             assert _without_time(again) == first
 
     asyncio.run(_test())
@@ -519,10 +519,10 @@ def test_the_settings_download_streams_the_same_file(monkeypatch: pytest.MonkeyP
     asyncio.run(_test())
 
 
-def test_a_file_from_before_agents_selects_the_agent_of_each_model(
+def test_a_file_from_before_profiles_selects_the_profile_of_each_model(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
-    """A file exported before agents, and before the rename (``loopx-config/v1``), still imports."""
+    """A file exported before Agent Profiles, and before the rename to Looper (``loopx-config/v1``), still imports."""
     async def _test() -> None:
         async with _installation(schema=False) as (target, target_url):
             old = tmp_path / "old.json"
@@ -537,7 +537,7 @@ def test_a_file_from_before_agents_selects_the_agent_of_each_model(
             assert code == 0, err
             plan = _plan(out)
             assert [(c["section"], c["key"], c["action"]) for c in plan["changes"]] == [
-                ("agents", "claude-code/haiku", "added"), ("settings.layers", "system", "added"),
+                ("profiles", "claude-code/haiku", "added"), ("settings.layers", "system", "added"),
                 ("settings.layers", "role:manager", "added")]
             from looper.db import config_transfer as db
 
@@ -551,20 +551,21 @@ def test_a_file_from_before_agents_selects_the_agent_of_each_model(
 def test_a_runtime_of_the_file_maps_to_the_built_in_runtime_of_its_type_or_is_skipped(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
-    """Runtimes are built in: an import adds none, and an agent on a runtime of a type not on this machine waits."""
+    """Runtimes are built in: an import adds none, and a profile on a runtime of a type not on this machine
+    waits."""
     async def _test() -> None:
         async with _installation() as (target, target_url):
             old = tmp_path / "old.json"
-            old.write_text(json.dumps({"format": "looper-config/v1", "runtimes": [
+            old.write_text(json.dumps({"format": "looper-config/v2", "runtimes": [
                 {"name": "claude-beta", "type": "claude-code", "executable": "/opt/claude-beta/bin/claude"},
                 {"name": "codex-local", "type": "codex", "executable": ""}],
                 "providers": [{"name": "cpa", "protocols": ["openai-responses"], "auth": "api_key",
                                "oauth_runtime_type": None, "base_url": "http://127.0.0.1:8317/v1", "models": [],
                                "env": [], "max_concurrency": None, "api_key": None}],
-                "agents": [{"name": "beta/haiku", "runtime": "claude-beta", "provider": "claude-subscription",
-                            "model": "haiku", "effort": None},
-                           {"name": "codex/gpt", "runtime": "codex-local", "provider": "cpa", "model": "gpt-5.5",
-                            "effort": None}]}))
+                "profiles": [{"name": "beta/haiku", "runtime": "claude-beta", "provider": "claude-subscription",
+                              "model": "haiku", "effort": None},
+                             {"name": "codex/gpt", "runtime": "codex-local", "provider": "cpa", "model": "gpt-5.5",
+                              "effort": None}]}))
             before = await target.fetch("SELECT id FROM agent_runtimes")
 
             code, out, err = await _looper(monkeypatch, target_url, "config", "import", str(old), "--apply", "--json")
@@ -574,12 +575,64 @@ def test_a_runtime_of_the_file_maps_to_the_built_in_runtime_of_its_type_or_is_sk
             changes = {(c["section"], c["key"]): (c["action"], c.get("reason", "")) for c in plan["changes"]}
             assert changes[("runtimes", "codex-local")][0] == "skipped"
             assert "Codex (codex) is not on this machine" in changes[("runtimes", "codex-local")][1]
-            assert changes[("agents", "codex/gpt")] == ("skipped", "no runtime 'codex-local' here or in the file")
-            assert changes[("agents", "beta/haiku")][0] == "added"
+            assert changes[("profiles", "codex/gpt")] == ("skipped", "no runtime 'codex-local' here or in the file")
+            assert changes[("profiles", "beta/haiku")][0] == "added"
             assert ("runtimes", "claude-beta") not in changes
             assert "runtime claude-beta: runtimes are built in" in plan["notes"][0]
             assert await target.fetch("SELECT id FROM agent_runtimes") == before
             assert await target.fetchval("SELECT runtime_id FROM agent_profiles WHERE name = 'beta/haiku'") \
                 == "rt-claude-code"
+
+    asyncio.run(_test())
+
+
+def test_a_file_exported_by_v2_6_0_imports_and_exports_again_under_the_new_names(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    """``fixtures/config_v2_6_0.json`` is what ``looper config export --include-projects`` of the v2.6.0 release
+    wrote for ``profile_rename_parity.V2_6_0_ROWS`` plus a global skill: its agents and each layer's agent are
+    this version's profiles and each layer's profile."""
+    old = json.loads((Path(__file__).parent / "fixtures" / "config_v2_6_0.json").read_text("utf-8"))
+    assert (old["format"], old["looper_version"]) == ("looper-config/v1", "2.6.0") and "profiles" not in old
+
+    async def _test() -> None:
+        async with _installation(schema=False) as (target, target_url):
+            path = tmp_path / "v2.6.0.json"
+            path.write_text(json.dumps(old))
+            code, out, err = await _looper(monkeypatch, target_url, "config", "import", str(path), "--apply", "--json")
+            assert code == 0, err
+            plan = _plan(out)
+            assert plan["counts"]["profiles"] == {"added": 3, "changed": 0, "unchanged": 0, "skipped": 0}
+            assert not [c for c in plan["changes"] if c["action"] == "skipped"], plan
+            assert plan["need_secret"] == [{"section": "providers", "key": "glm", "names": ["api_key"]}]
+
+            from looper.db import config_transfer as db
+
+            async with target.acquire() as conn:
+                layers = {(r["scope"], r["role"]): r["profile"] for r in await db.read_layers(conn)
+                          if r["project_id"] is None}
+            assert layers == {("system", None): "claude-code/glm/glm-5.3[1m]",
+                              ("role", "planner"): "claude-code/sonnet", ("role", "worker"): None,
+                              ("role", "reviewer"): "beta/haiku"}
+
+            again = tmp_path / "again.json"
+            assert (await _looper(monkeypatch, target_url, "config", "export", str(again),
+                                 "--include-projects"))[0] == 0
+            new = _without_time(again)
+            assert new["format"] == "looper-config/v2" and "agents" not in new
+
+            def renamed(layer: dict[str, Any]) -> dict[str, Any]:
+                return {("profile" if k == "agent" else k): v for k, v in layer.items()}
+
+            expected = {k: v for k, v in old.items() if k not in ("exported_at", "agents")}
+            expected.update(format="looper-config/v2", looper_version=new["looper_version"], runtimes=[],
+                            profiles=old["agents"])
+            # The runtime registered by hand stays behind: its profile runs on the built-in runtime of its type.
+            _by_name(expected["profiles"], "beta/haiku")["runtime"] = "claude-code"
+            # The file left the provider's key out, so none is stored here to export.
+            expected["providers"] = [{**_by_name(old["providers"], "glm"), "api_key": None}]
+            expected["settings"] = {**old["settings"], "layers": [renamed(x) for x in old["settings"]["layers"]]}
+            expected["projects"] = [{**p, "layers": [renamed(x) for x in p["layers"]]} for p in old["projects"]]
+            assert new == expected
 
     asyncio.run(_test())

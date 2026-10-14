@@ -1,18 +1,20 @@
 """Configuration export and import: one file that recreates an installation's agent configuration (M8e).
 
-**The file** is one JSON document, ``format: looper-config/v1`` (a file exported
-before the rename says ``loopx-config/v1``, and is read the same). Every catalog
+**The file** is one JSON document, ``format: looper-config/v2``. A v1 file
+(``looper-config/v1``, or ``loopx-config/v1`` from before the rename to Looper)
+is read too, as the same file under its older names (``_from_v1``): its Agent
+Profiles were ``agents``, and a layer named its profile ``agent``. Every catalog
 file is UTF-8 text (acquiring an item refuses binary files), so JSON holds it
 as it is, and one readable file can be checked before it is shared. Its
 sections:
 
-- ``runtimes``, ``providers`` and ``agents``: the registered ones (the
+- ``runtimes``, ``providers`` and ``profiles``: the registered ones (the
   built-ins exist everywhere), each naming the others by name. The runtimes
-  are the ones registered by hand before runtimes were built in, which agents
-  still use; an import never adds or changes a runtime (see below);
+  are the ones registered by hand before runtimes were built in, which
+  profiles still use; an import never adds or changes a runtime (see below);
 - ``settings``: the system and role layers of the agent settings (a layer
-  names its agent), and each role's prompt (``null`` while it follows the
-  recommended one), timeout, concurrency and enabled flag;
+  names its Agent Profile, ``profile``), and each role's prompt (``null`` while
+  it follows the recommended one), timeout, concurrency and enabled flag;
 - ``channels``: each chat channel's configuration;
 - ``installs``: the global installs, naming their item by kind and name;
 - ``projects`` (``--include-projects``): each project's fields, execution
@@ -31,7 +33,7 @@ directory) flagged ``repoint``.
 
 **Import** matches entries by natural key (an item by kind and name, a
 project-written one within its project; a project, runtime, provider or
-agent by name; a layer by scope, role and project; a role by name; a channel
+profile by name; a layer by scope, role and project; a role by name; a channel
 by type), and reports each as
 added, changed (with the fields), unchanged or skipped (with the reason),
 plus the secrets still to fill in. Applying writes the same plan in one
@@ -40,10 +42,10 @@ its id and installs), nothing missing from the file is removed, and a
 placeholder never replaces a stored secret (without one, the value is left
 empty). Importing the same file again changes nothing.
 
-**Runtimes** are built in, so a file's runtime only says what its agents run
+**Runtimes** are built in, so a file's runtime only says what its profiles run
 on here: the runtime of its name when one of its type is here, else the
 built-in runtime of its type (a note says so), else none (the entry and its
-agents are skipped, with the reason).
+profiles are skipped, with the reason).
 """
 
 from __future__ import annotations
@@ -61,9 +63,9 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
-FORMAT = "looper-config/v1"
-# The same format under its name from before the rename (LoopX); such files are read, never written.
-LEGACY_FORMATS = ("loopx-config/v1",)
+FORMAT = "looper-config/v2"
+# v1, and v1 under its name from before the rename to Looper (LoopX): read as v2 (``_from_v1``), never written.
+V1_FORMATS = ("looper-config/v1", "loopx-config/v1")
 # What the file holds in place of a secret value it leaves out.
 PLACEHOLDER = {"secret": "omitted"}
 
@@ -74,11 +76,7 @@ _CHANNEL_PUBLIC_KEYS = {
     "lark": frozenset({"allowed_open_ids", "app_id_env", "app_secret_env", "description"}),
 }
 _ROLE_FIELDS = ("prompt", "timeout_seconds", "max_concurrency", "enabled")
-_LAYER_FIELDS = ("harness_prompt", "agent", "effort", "env", "run_budget_usd")
-# Where each of a layer's fields is read from (``db.config_transfer.read_layers``): the file's agent is the layer's
-# Agent Profile, by name.
-_LAYER_COLUMNS = {"harness_prompt": "harness_prompt", "agent": "profile", "effort": "effort", "env": "env",
-                  "run_budget_usd": "run_budget_usd"}
+_LAYER_FIELDS = ("harness_prompt", "profile", "effort", "env", "run_budget_usd")
 _PROVIDER_FIELDS = ("protocols", "auth", "oauth_runtime_type", "base_url", "models", "env", "max_concurrency")
 _ITEM_FIELDS = ("origin", "source", "version", "description", "modified")
 _DOCUMENT_FIELDS = ("summary", "source_kind", "filename", "path", "sha256", "size_bytes")
@@ -105,7 +103,7 @@ class Action(str, Enum):
     SKIPPED = "skipped"
 
 
-SECTIONS = ("runtimes", "providers", "agents", "settings.layers", "settings.roles", "channels", "catalog", "installs",
+SECTIONS = ("runtimes", "providers", "profiles", "settings.layers", "settings.roles", "channels", "catalog", "installs",
             "projects", "project.layers", "project.items", "project.knowledge", "project.installs")
 
 
@@ -213,8 +211,7 @@ def layer_entry(row: Mapping[str, Any]) -> dict[str, Any]:
     entry = {"scope": row["scope"]}
     if row.get("role"):
         entry["role"] = row["role"]
-    return {**entry, **{name: row.get(column) for name, column in _LAYER_COLUMNS.items()},
-            "env": list(row.get("env") or [])}
+    return {**entry, **{name: row.get(name) for name in _LAYER_FIELDS}, "env": list(row.get("env") or [])}
 
 
 def role_entry(row: Mapping[str, Any]) -> dict[str, Any]:
@@ -328,14 +325,14 @@ async def export_chunks(
         "secrets": "included" if include_secrets else "omitted",
         "runtimes": [runtime_entry(r) for r in await db.read_runtimes(conn) if not r["builtin"]],
         "providers": providers,
-        "agents": [profile_entry(r) for r in await db.read_profiles(conn) if not r["builtin"]],
+        "profiles": [profile_entry(r) for r in await db.read_profiles(conn) if not r["builtin"]],
         "settings": {"layers": [layer_entry(r) for r in layers if r["project_id"] is None],
                      "roles": [role_entry(r) for r in await db.read_roles(conn)]},
         "channels": channels,
         "installs": [install_entry(r) for r in installs if r["scope"] == "global"],
     }
     summary.counts.update({"runtimes": len(head["runtimes"]), "providers": len(providers),
-                           "agents": len(head["agents"]), "settings.layers": len(head["settings"]["layers"]),
+                           "profiles": len(head["profiles"]), "settings.layers": len(head["settings"]["layers"]),
                            "settings.roles": len(head["settings"]["roles"]), "channels": len(channels),
                            "installs": len(head["installs"])})
     summary.secrets += sum(_secret_count(entry) for entry in [*channels, *providers])
@@ -426,17 +423,37 @@ def read_file(path: Path, *, label: str | None = None) -> dict[str, Any]:
         raise ConfigFileError(f"cannot read {label}: {exc.strerror or exc}") from None
     except (json.JSONDecodeError, UnicodeDecodeError) as exc:
         raise ConfigFileError(f"{label} is not a Looper configuration file: {exc}") from None
-    if not isinstance(data, dict) or data.get("format") not in (FORMAT, *LEGACY_FORMATS):
+    if not isinstance(data, dict) or data.get("format") not in (FORMAT, *V1_FORMATS):
         found = data.get("format") if isinstance(data, dict) else None
-        raise ConfigFileError(f"{label} is not a {FORMAT} file (format: {found!r})")
+        raise ConfigFileError(f"{label} is not a {FORMAT} or {V1_FORMATS[0]} file (format: {found!r})")
+    profiles = "agents" if data["format"] in V1_FORMATS else "profiles"
     for section, kind in (("settings", dict), ("channels", list), ("installs", list), ("catalog", list),
-                          ("projects", list), ("runtimes", list), ("providers", list), ("agents", list)):
+                          ("projects", list), ("runtimes", list), ("providers", list), (profiles, list)):
         if section in data and not isinstance(data[section], kind):
             raise ConfigFileError(f"{section} must be a JSON {'object' if kind is dict else 'list'}")
     for section in ("layers", "roles"):
         if not isinstance(data.get("settings", {}).get(section, []), list):
             raise ConfigFileError(f"settings.{section} must be a JSON list")
-    return data
+    return _from_v1(data) if data["format"] in V1_FORMATS else data
+
+
+def _from_v1(data: Mapping[str, Any]) -> dict[str, Any]:
+    """A v1 file under v2's names (its ``format`` stays the file's): its ``agents`` are ``profiles``, and each
+    layer's ``agent`` (the system's and roles', and each project's) its ``profile``. Nothing else differs."""
+    def layers(entries: Any) -> Any:
+        if not isinstance(entries, list):
+            return entries
+        return [{("profile" if key == "agent" else key): value for key, value in entry.items()}
+                if isinstance(entry, Mapping) else entry for entry in entries]
+
+    upgraded = {("profiles" if key == "agents" else key): value for key, value in data.items()}
+    if "layers" in upgraded.get("settings", {}):
+        upgraded["settings"] = {**upgraded["settings"], "layers": layers(upgraded["settings"]["layers"])}
+    if isinstance(upgraded.get("projects"), list):
+        upgraded["projects"] = [{**project, "layers": layers(project["layers"])}
+                                if isinstance(project, Mapping) and "layers" in project else project
+                                for project in upgraded["projects"]]
+    return upgraded
 
 
 # --- Import: validating one entry (each raises _Skip) ---
@@ -493,24 +510,25 @@ def _item_name(kind: str, raw: Any) -> str:
 
 
 def _layer_values(entry: Mapping[str, Any], scope: str) -> dict[str, Any]:
-    """A layer's values, its agent by name (``None`` for none). A file from before agents gives a ``model``:
-    that is the agent ``claude-code/<model>``, as the upgrade made it."""
+    """A layer's values, its Agent Profile by name (``None`` for none). A file from before Agent Profiles gives a
+    ``model``: that is the profile ``claude-code/<model>``, as the upgrade made it."""
     from .agent_settings import Layer, SettingsError, layer_update, model_name
 
     unknown = sorted(set(entry) - {"scope", "role", "model", *_LAYER_FIELDS})
     if unknown:
         raise _Skip(f"unknown field {unknown[0]!r}")
-    agent = entry.get("agent")
+    profile = entry.get("profile")
     try:
-        values = layer_update({name: entry.get(name) for name in _LAYER_FIELDS if name != "agent"}, Layer(scope))
-        if "model" in entry and "agent" not in entry:
+        values = layer_update({name: entry.get(name) for name in _LAYER_FIELDS if name != "profile"},
+                              Layer(scope))
+        if "model" in entry and "profile" not in entry:
             model = model_name(entry["model"])
-            agent = f"{_MODEL_PROFILE_PREFIX}{model}" if model else None
+            profile = f"{_MODEL_PROFILE_PREFIX}{model}" if model else None
     except SettingsError as exc:
         raise _Skip(str(exc)) from None
-    if agent is not None and not isinstance(agent, str):
-        raise _Skip("agent must be an agent's name, or null")
-    return {**values, "agent": agent or None}
+    if profile is not None and not isinstance(profile, str):
+        raise _Skip("profile must be an Agent Profile's name, or null")
+    return {**values, "profile": profile or None}
 
 
 # The name the upgrade gave the Agent Profile of each model layers used (Claude Code, its own login, the model).
@@ -520,7 +538,7 @@ _MODEL_PROFILE_PREFIX = "claude-code/"
 def _stored_layer(row: Mapping[str, Any] | None) -> dict[str, Any] | None:
     if row is None:
         return None
-    return {name: row.get(column) for name, column in _LAYER_COLUMNS.items()} | {"env": list(row.get("env") or [])}
+    return {name: row.get(name) for name in _LAYER_FIELDS} | {"env": list(row.get("env") or [])}
 
 
 def _differs(new: Mapping[str, Any], old: Mapping[str, Any] | None, names: Iterable[str]) -> tuple[str, ...]:
@@ -853,7 +871,7 @@ class _Importer:
         raw = entry if isinstance(entry, Mapping) else {}
         label = str(raw.get("name"))
         try:
-            entry = _mapping(entry, "an agent")
+            entry = _mapping(entry, "an Agent Profile")
             unknown = sorted(set(entry) - {"name", "runtime", "provider", "model", "effort"})
             if unknown:
                 raise _Skip(f"unknown field {unknown[0]!r}")
@@ -878,10 +896,10 @@ class _Importer:
             except RegistryError as exc:
                 raise _Skip(str(exc)) from None
         except _Skip as exc:
-            self.record("agents", label, Action.SKIPPED, reason=str(exc))
+            self.record("profiles", label, Action.SKIPPED, reason=str(exc))
             return
         current = {k: row[k] for k in values} if row is not None else None
-        action = self.outcome("agents", name, current, _differs(values, current, values))
+        action = self.outcome("profiles", name, current, _differs(values, current, values))
         profile_id = spec.id
         if self.apply and action in (Action.ADDED, Action.CHANGED):
             profile_id = await self._write_profile(row["id"] if row else None, name, spec)
@@ -905,7 +923,7 @@ class _Importer:
                 and BUILTIN_RUNTIME.name in self.runtimes and BUILTIN_PROVIDER.name in self.providers:
             runtime, provider = self.runtimes[BUILTIN_RUNTIME.name], self.providers[BUILTIN_PROVIDER.name]
             spec = AgentProfile(f"new:{name}", name, runtime[1], provider[1], name[len(_MODEL_PROFILE_PREFIX):])
-            self.record("agents", name, Action.ADDED)
+            self.record("profiles", name, Action.ADDED)
             profile_id = await self._write_profile(None, name, spec) if self.apply else spec.id
             self.profiles[name] = (profile_id, spec)
         if name not in self.profiles:
@@ -938,7 +956,7 @@ class _Importer:
             if scope in ("system", "project") and role is not None:
                 raise _Skip(f"a {scope} layer has no role")
             values = _layer_values(raw, scope)
-            profile_id = await self._layer_profile(values["agent"], scope, role)
+            profile_id = await self._layer_profile(values["profile"], scope, role)
         except _Skip as exc:
             self.record(section, label, Action.SKIPPED, reason=str(exc))
             return
@@ -1189,7 +1207,7 @@ async def import_config(conn: Any, data: Mapping[str, Any], *, apply: bool) -> P
         await importer.runtime(entry)
     for entry in data.get("providers", []):
         await importer.provider(entry)
-    for entry in data.get("agents", []):
+    for entry in data.get("profiles", []):
         await importer.profile(entry)
     settings = data.get("settings", {})
     for entry in settings.get("layers", []):
