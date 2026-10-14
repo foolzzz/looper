@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""Validate the public release-readiness doc wiring."""
+"""Validate a GitHub release body: its bilingual release decision and capability usage.
+
+The release procedure and the rules this enforces are in docs/releases/README.md.
+"""
 
 from __future__ import annotations
 
@@ -10,12 +13,6 @@ import tempfile
 
 
 ROOT = Path(__file__).resolve().parents[2]
-DOC = ROOT / "docs" / "product" / "release-readiness.md"
-TEMPLATE = ROOT / "docs" / "product" / "release-note-template.md"
-README = ROOT / "README.md"
-DOCS_INDEX = ROOT / "docs" / "README.md"
-PRODUCT_INDEX = ROOT / "docs" / "product" / "README.md"
-INSTALL_GUIDE = ROOT / "docs" / "guides" / "installing-loopx.md"
 
 FORBIDDEN_PUBLIC_STRINGS = [
     "/Users/",
@@ -365,146 +362,6 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    for path in [DOC, TEMPLATE, README, DOCS_INDEX, PRODUCT_INDEX, INSTALL_GUIDE]:
-        validate_boundary(path)
-
-    doc = compact(read(DOC))
-    for required in [
-        "Status: stable maintainer contract.",
-        "## Supported Install And Update Paths",
-        "loopx update check",
-        "loopx update plan",
-        "loopx update apply",
-        "package acquisition, host-material delivery, core runtime activation",
-        "installation guide's active-layer checklist",
-        "## Atomic Local Promotion Failure Matrix",
-        "examples/release/release-promotion-concurrency-smoke.py",
-        "examples/release/local-install-promotion-boundary-smoke.py",
-        "Before default symlink swap?",
-        "canary_only_untrusted_checkout",
-        "explicit_override",
-        "## Named Version Contract",
-        "LoopX releases are tagged in GitHub",
-        ".github/workflows/release.yml",
-        "this fork does not publish to PyPI",
-        "docs/releases/vX.Y.Z.md",
-        "examples/release/agent-serve-wheel-smoke.py",
-        "The version source is `loopx.__version__`, mirrored by `pyproject.toml`",
-        "examples/release/release-version-contract-smoke.py",
-        "## Compatibility Gate",
-        "examples/release/codex-cli-no-clone-release-verification-smoke.py",
-        "examples/release/release-readiness-doc-smoke.py",
-        "loopx canary release-qualification",
-        "exact_release_commit_qualification_manifest_v0",
-        "same Git commit, Git tree id, package version, and version tag",
-        "## Canary Model",
-        "catalog-informed readiness slice",
-        "near-E2E",
-        "do not add new IPs solely to describe a validation bundle",
-        "examples/canary/canary-promotion-readiness-smoke.py --no-write-evidence",
-        "python3 -m loopx.cli canary smoke-suite --profile public-smoke-watch --jobs 4 --timeout-seconds 60",
-        "python3 examples/run-smokes.py --suite full-public --jobs 4 --timeout-seconds 60",
-        "## What Is Safe To Depend On",
-        "loopx doctor",
-        "quota should-run",
-        "/loopx-global-summary",
-        "benchmark runner behavior, scoring, upload",
-        "## Release Note Checklist",
-        "[release note template](release-note-template.md)",
-        "`## Release Decision`",
-        "`**Who should upgrade:**`",
-        "`**What this release solves:**`",
-        "`**Breaking changes:**`",
-        "`**How to verify:**`",
-        "`**Contributors:**`",
-        "`### 升级决策`",
-        "`**谁需要升级：**`",
-        "`**解决了什么：**`",
-        "`**是否有破坏性变更：**`",
-        "`**如何验证：**`",
-        "`**贡献者：**`",
-        "prominent `## Community Contributors` section",
-        "after the English product groups",
-        "tag-to-tag Git range and merged pull-request metadata",
-        "external or first-time contributors",
-        "Do not list or thank `@huangruiteng`",
-        "founder stewardship is implicit",
-        "Omit the section when the tag range contains no eligible community contribution",
-        "`### 社区贡献者` after the Chinese product groups",
-        "Omit both language sections together",
-        "same people, pull-request links, and concrete contribution scope",
-        "Optional capability activation",
-        "If no persistent switch exists",
-        "final GitHub release body",
-        "--release-notes <final-release-body.md>",
-        "--expect-no-optional-capability-changes",
-        "**Activation:**",
-        "**Validation:**",
-        "**Disable / rollback:**",
-        "**Authority boundary:**",
-        "**Docs:**",
-        "**启用：**",
-        "**验证：**",
-        "**停用 / 回退：**",
-        "**权限边界：**",
-        "**文档：**",
-        "### Capability Narrative Gate",
-        "**User outcome**",
-        "**Shipped layer**",
-        "**Last-mile boundary**",
-        "A built-in capability is not an optional extension",
-        "Do not overclaim a complete workflow",
-        "public/private scan",
-        "## 中文摘要",
-        "Bilingual releases must preserve these same group boundaries",
-        "mirrors the English group structure and material claims",
-    ]:
-        assert_contains(doc, required, "release-readiness doc")
-
-    install_guide = compact(read(INSTALL_GUIDE))
-    for required in [
-        "### Verify The Active Layers",
-        "loopx update check",
-        "skill_delivery.status",
-        "loopx doctor --deep",
-        "loopx extension doctor --all-enabled --execute --format json",
-        "runtime_activation_qualification",
-        "ordinary pip and pipx users should stay on the tagged package channel",
-    ]:
-        assert_contains(install_guide, required, "installation guide")
-
-    root_readme = read(README)
-    docs_index = read(DOCS_INDEX)
-    product_index = read(PRODUCT_INDEX)
-    assert_contains(root_readme, "docs/product/release-readiness.md", "root README")
-    assert_contains(docs_index, "product/release-readiness.md", "docs index")
-    assert_contains(product_index, "release-readiness.md", "product index")
-    assert_contains(product_index, "release-note-template.md", "product index")
-
-    template = read(TEMPLATE)
-    for required in [
-        ENGLISH_DECISION_HEADING,
-        *ENGLISH_DECISION_FIELDS,
-        "## State Kernel & Control Plane",
-        "## Capabilities & Workflows",
-        "## Quality & Testing",
-        "## Benchmarks & Integrations",
-        "## Documentation & Compatibility",
-        "## Community Contributors",
-        ENGLISH_USAGE_HEADING,
-        *ENGLISH_USAGE_FIELDS,
-        ENGLISH_NO_CHANGES,
-        "## Install / Update",
-        "## 中文摘要",
-        CHINESE_DECISION_HEADING,
-        *CHINESE_DECISION_FIELDS,
-        CHINESE_USAGE_HEADING,
-        *CHINESE_USAGE_FIELDS,
-        CHINESE_NO_CHANGES,
-        "### 发布验证",
-    ]:
-        assert_contains(template, required, "release-note template")
-
     validate_release_notes_gate_self_test()
     if args.release_notes is not None:
         validate_release_notes(

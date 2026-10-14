@@ -3,8 +3,8 @@
 This file records the changes of this LoopX fork. The fork branched from
 upstream [`loopx-project/loopx`](https://github.com/loopx-project/loopx) at
 `71dbfd5e6` (2026-09-26) and no longer tracks upstream
-([design-v0](docs/fork/design-v0.md)). For upstream history before that
-point, see the upstream releases and [docs/update-notes](docs/update-notes/README.md).
+([design-v0](https://github.com/foolzzz/looper/blob/a93a851d61530f9feb7e8c262d6a16e07ebe547d/docs/fork/design-v0.md)). For upstream history before that
+point, see the upstream releases and [docs/update-notes](https://github.com/foolzzz/looper/blob/a93a851d61530f9feb7e8c262d6a16e07ebe547d/docs/update-notes/README.md).
 
 The fork's first release is `2.0.0` (tag `v2.0.0`). It moves past the upstream
 `1.2.0` it branched from, because the role-based orchestration model changes
@@ -12,7 +12,8 @@ how a goal runs. Changes after a release are listed under **Unreleased** until
 the next tag. Pull request numbers in the 2.0.0 entry refer to
 [michaelx1993/loopx](https://github.com/michaelx1993/loopx/pulls).
 
-To learn how to use these features, read the [usage guide](docs/fork/usage.md).
+How the agent system works today is described in
+[docs/architecture/agent-system.md](docs/architecture/agent-system.md).
 
 ## [Unreleased]
 
@@ -409,6 +410,15 @@ To learn how to use these features, read the [usage guide](docs/fork/usage.md).
   upstream `apps/` frontends, `packages/` plugins, `skills/`, the man page,
   or the source-snapshot installers `scripts/install-from-github.sh` and
   `scripts/install-local.sh`; `install.sh` is the way to install and upgrade.
+- **The upstream LoopX documentation.** `docs/` keeps the agent system's
+  architecture, design and development plan and the release procedure
+  ([docs/releases/README.md](docs/releases/README.md)). The upstream guides,
+  references, RFCs and book, the fork's role_v1 design notes under
+  `docs/fork/`, `ADOPTERS.md`, `mkdocs.yaml` and the upstream governance file
+  are gone, and links to them in this changelog point at the last commit that
+  had them. `AGENTS.md`, `CONTRIBUTING.md`, the issue and pull request
+  templates and the security, support and conduct contacts now describe this
+  fork and point at `foolzzz/looper`.
 
 ## [2.5.0] - 2026-10-13
 
@@ -897,7 +907,7 @@ work link its pull requests.
     gate uses the same classification, so it lists the directory as local
     only.
 
-  See [Goals without a code repository](docs/fork/usage.md#goals-without-a-code-repository)
+  See [Goals without a code repository](https://github.com/foolzzz/looper/blob/a93a851d61530f9feb7e8c262d6a16e07ebe547d/docs/fork/usage.md#goals-without-a-code-repository)
   for what works and the limits: no isolation, no delivery snapshot, no
   merge, no rollback and no push gate. Known limitation: the one-Turn slot
   follows the `turn run-once` process, not its host, and two goals that
@@ -1099,8 +1109,8 @@ Covers the fork's first round, 2026-09-25 to 2026-09-28 (PRs #1 to #29,
   gate, per-Turn cost accounting with optional budgets, and a role board in
   the dashboard.
 - Two end-to-end pilots on real models validated the full loop
-  ([pilot v0](docs/fork/e2e-pilot-report-v0.md),
-  [pilot v1](docs/fork/e2e-pilot-report-v1.md)).
+  ([pilot v0](https://github.com/foolzzz/looper/blob/a93a851d61530f9feb7e8c262d6a16e07ebe547d/docs/fork/e2e-pilot-report-v0.md),
+  [pilot v1](https://github.com/foolzzz/looper/blob/a93a851d61530f9feb7e8c262d6a16e07ebe547d/docs/fork/e2e-pilot-report-v1.md)).
 
 ### Added
 
@@ -1588,16 +1598,16 @@ These behaviors differ from upstream.
 
 ### Documentation
 
-- [docs/fork/usage.md](docs/fork/usage.md): a new usage guide for the product
+- [docs/fork/usage.md](https://github.com/foolzzz/looper/blob/a93a851d61530f9feb7e8c262d6a16e07ebe547d/docs/fork/usage.md): a new usage guide for the product
   workflow and the CLI.
 - Fork design and protocol docs:
-  - [design-v0](docs/fork/design-v0.md), which records decisions 1 to 43;
-  - [role-v1-protocol](docs/fork/role-v1-protocol.md);
-  - [dispatcher-v0](docs/fork/dispatcher-v0.md);
-  - [gates-plans-intake-v0](docs/fork/gates-plans-intake-v0.md);
-  - [workspaces-v0](docs/fork/workspaces-v0.md);
-  - [agent-and-provider-config](docs/fork/agent-and-provider-config.md);
-  - [usage-accounting-v0](docs/fork/usage-accounting-v0.md);
-  - [role-board-v0](docs/fork/role-board-v0.md).
-- End-to-end pilot reports: [v0](docs/fork/e2e-pilot-report-v0.md) and
-  [v1](docs/fork/e2e-pilot-report-v1.md).
+  - [design-v0](https://github.com/foolzzz/looper/blob/a93a851d61530f9feb7e8c262d6a16e07ebe547d/docs/fork/design-v0.md), which records decisions 1 to 43;
+  - [role-v1-protocol](https://github.com/foolzzz/looper/blob/a93a851d61530f9feb7e8c262d6a16e07ebe547d/docs/fork/role-v1-protocol.md);
+  - [dispatcher-v0](https://github.com/foolzzz/looper/blob/a93a851d61530f9feb7e8c262d6a16e07ebe547d/docs/fork/dispatcher-v0.md);
+  - [gates-plans-intake-v0](https://github.com/foolzzz/looper/blob/a93a851d61530f9feb7e8c262d6a16e07ebe547d/docs/fork/gates-plans-intake-v0.md);
+  - [workspaces-v0](https://github.com/foolzzz/looper/blob/a93a851d61530f9feb7e8c262d6a16e07ebe547d/docs/fork/workspaces-v0.md);
+  - [agent-and-provider-config](https://github.com/foolzzz/looper/blob/a93a851d61530f9feb7e8c262d6a16e07ebe547d/docs/fork/agent-and-provider-config.md);
+  - [usage-accounting-v0](https://github.com/foolzzz/looper/blob/a93a851d61530f9feb7e8c262d6a16e07ebe547d/docs/fork/usage-accounting-v0.md);
+  - [role-board-v0](https://github.com/foolzzz/looper/blob/a93a851d61530f9feb7e8c262d6a16e07ebe547d/docs/fork/role-board-v0.md).
+- End-to-end pilot reports: [v0](https://github.com/foolzzz/looper/blob/a93a851d61530f9feb7e8c262d6a16e07ebe547d/docs/fork/e2e-pilot-report-v0.md) and
+  [v1](https://github.com/foolzzz/looper/blob/a93a851d61530f9feb7e8c262d6a16e07ebe547d/docs/fork/e2e-pilot-report-v1.md).

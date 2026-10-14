@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "loopx"
 version = "2.5.0"
-description = "A lightweight Loop Engineering control plane for long-running agent goals."
+description = "A self-hosted three-tier multi-agent system that runs Claude Code on your tasks, with a real-time web dashboard."
 readme = "README.md"
 requires-python = ">=3.11"
 license = "Apache-2.0"

@@ -1,49 +1,23 @@
 name: Feature Request
-description: Propose a concrete LoopX product or documentation improvement.
+description: Propose a concrete LoopX improvement.
 title: "[Feature]: "
-labels: ["enhancement", "triage"]
+labels: ["enhancement"]
 body:
-  - type: markdown
-    attributes:
-      value: |
-        Describe the problem and smallest useful outcome before prescribing a large implementation. Keep examples public-safe and free of credentials, private state, and internal material.
-
   - type: checkboxes
     id: preflight
     attributes:
       label: Preflight
       options:
-        - label: I searched existing issues, discussions, and contributor tasks for this request.
+        - label: I searched the existing issues and the open todos in the development plan for this request.
           required: true
-        - label: This request and its attachments contain no credentials or private/internal material.
+        - label: This request and its attachments contain no credentials or private material.
           required: true
-
-  - type: dropdown
-    id: request-origin
-    attributes:
-      label: Request origin
-      description: What evidence motivates this request?
-      options:
-        - Observed need in a real workflow
-        - Feedback from an assisted pilot or user
-        - Inferred by an AI agent and not yet observed
-        - Design or maintenance improvement
-    validations:
-      required: true
 
   - type: textarea
     id: problem
     attributes:
       label: Problem or unmet outcome
-      description: What is difficult today, for whom, and what is the failure cost?
-    validations:
-      required: true
-
-  - type: textarea
-    id: use-case
-    attributes:
-      label: Use case
-      description: Show the workflow in which this capability would be used.
+      description: What you are trying to do, and what gets in the way today.
     validations:
       required: true
 
@@ -51,23 +25,7 @@ body:
     id: proposed-outcome
     attributes:
       label: Proposed outcome
-      description: Describe the observable behavior you want, without requiring one implementation.
-    validations:
-      required: true
-
-  - type: dropdown
-    id: area
-    attributes:
-      label: LoopX area
-      description: Which public product area does this request target? Maintainers use this to apply the matching area label.
-      options:
-        - Control plane (goals, todos, quota, scheduler, registry, runtime)
-        - Benchmark boundary (adapters, runners, verifiers, scoring, evidence)
-        - Capability or extension (providers, adapters, skills)
-        - Public docs or presentation surface (README, protocols, dashboard)
-        - Build, packaging, installer, or CI
-        - Host or runtime integration
-        - Not sure
+      description: The smallest change that would solve it, and how you would know it works.
     validations:
       required: true
 
@@ -75,22 +33,8 @@ body:
     id: alternatives
     attributes:
       label: Alternatives considered
-      description: What existing command, extension, workflow, or smaller change did you consider?
 
   - type: textarea
     id: scope
     attributes:
       label: Scope and non-goals
-      placeholder: |
-        In scope:
-        - ...
-
-        Out of scope:
-        - ...
-
-  - type: checkboxes
-    id: contribution
-    attributes:
-      label: Contribution
-      options:
-        - label: I may be able to help design, implement, document, or validate this request.
