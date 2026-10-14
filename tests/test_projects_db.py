@@ -278,7 +278,7 @@ def test_execution_settings_are_stored_through_the_task_and_cleared() -> None:
 
     async def _test(pool: Any) -> None:
         settings = execution_fields({"task_budget_usd": 2, "task_budget_action": "wrap_up", "supervise_interval_seconds": 0,
-                                     "review_policy": "all", "distill_lessons": True})
+                                     "review_policy": "all", "distill_lessons": "draft"})
         calc = await projects.create_project(name="calc", execution=settings, pool=pool)
         await tasks.create_task(task_id="task-1", requirement="r", work_dir="/w", project_id=calc["id"], pool=pool)
         assert ProjectExecution.from_row(await projects.get_task_project("task-1", pool=pool)).view() == {
@@ -289,9 +289,43 @@ def test_execution_settings_are_stored_through_the_task_and_cleared() -> None:
         row = await projects.get_project(calc["id"], pool=pool)
         assert (row["task_budget_usd"], row["supervise_interval_seconds"], row["review_policy"]) == (None, 60, "all")
         plain = await projects.create_project(name="plain", pool=pool)
-        assert all(plain[column] is None for column in projects.EXECUTION_COLUMNS)
+        assert all(plain[column] is None for column in projects.EXECUTION_COLUMNS if column != "distill_lessons")
+        assert plain["distill_lessons"] == "off"  # never unset
         with pytest.raises(asyncpg.CheckViolationError):  # the table refuses what validation would
             await projects.update_project(plain["id"], execution={"review_policy": "some"}, pool=pool)
+
+    _run(_test)
+
+
+def test_distill_lessons_from_before_the_modes_becomes_write_or_off() -> None:
+    """The boolean from before the three modes: true becomes write, false and NULL off; new projects are off."""
+    import asyncpg
+
+    from loopx.db.connection import ensure_schema
+
+    async def _modes(pool: Any) -> dict[str, str]:
+        return {r["id"]: r["distill_lessons"] for r in await pool.fetch("SELECT id, distill_lessons FROM projects")}
+
+    async def _test(pool: Any) -> None:
+        # The column as it was before the modes.
+        await pool.execute("DELETE FROM schema_migrations WHERE name = 'distill_lessons_modes'")
+        await pool.execute("ALTER TABLE projects DROP COLUMN distill_lessons")
+        await pool.execute("ALTER TABLE projects ADD COLUMN distill_lessons BOOLEAN")
+        for project_id, value in [("proj-on", True), ("proj-off", False), ("proj-unset", None)]:
+            await pool.execute("INSERT INTO projects (id, name, distill_lessons) VALUES ($1, $1, $2)", project_id, value)
+
+        await ensure_schema(pool)
+
+        assert await _modes(pool) == {"proj-on": "write", "proj-off": "off", "proj-unset": "off"}
+        await pool.execute("INSERT INTO projects (id, name) VALUES ('proj-new', 'new')")
+        await pool.execute("UPDATE projects SET distill_lessons = 'draft' WHERE id = 'proj-off'")
+        for value, refused in [("on", asyncpg.CheckViolationError), (None, asyncpg.NotNullViolationError)]:
+            with pytest.raises(refused):
+                await pool.execute("UPDATE projects SET distill_lessons = $1 WHERE id = 'proj-new'", value)
+
+        # Applying the schema again changes nothing.
+        await ensure_schema(pool)
+        assert await _modes(pool) == {"proj-on": "write", "proj-off": "draft", "proj-unset": "off", "proj-new": "off"}
 
     _run(_test)
 

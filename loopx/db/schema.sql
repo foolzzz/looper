@@ -247,9 +247,24 @@ ALTER TABLE projects ADD COLUMN IF NOT EXISTS task_budget_action TEXT
 ALTER TABLE projects ADD COLUMN IF NOT EXISTS supervise_interval_seconds INTEGER
     CHECK (supervise_interval_seconds >= 0);
 ALTER TABLE projects ADD COLUMN IF NOT EXISTS review_policy TEXT CHECK (review_policy IN ('planner', 'all'));
--- true: when a task completes, its Planner turns the task journal into a
--- lessons document in the project's knowledge; NULL or false: off.
-ALTER TABLE projects ADD COLUMN IF NOT EXISTS distill_lessons BOOLEAN;
+-- What a task that completes leaves in the project's knowledge, from one more
+-- Planner turn over the task journal: nothing ('off'), a draft the user
+-- confirms or discards on the project page ('draft'), or a document ('write').
+-- Once: the boolean from before the three modes; true becomes 'write', false
+-- and NULL 'off'.
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM schema_migrations WHERE name = 'distill_lessons_modes') THEN
+        ALTER TABLE projects ADD COLUMN IF NOT EXISTS distill_lessons BOOLEAN;
+        ALTER TABLE projects ALTER COLUMN distill_lessons TYPE TEXT
+            USING CASE WHEN distill_lessons THEN 'write' ELSE 'off' END;
+        ALTER TABLE projects ALTER COLUMN distill_lessons SET DEFAULT 'off';
+        ALTER TABLE projects ALTER COLUMN distill_lessons SET NOT NULL;
+        ALTER TABLE projects ADD CONSTRAINT projects_distill_lessons_check
+            CHECK (distill_lessons IN ('off', 'draft', 'write'));
+        INSERT INTO schema_migrations (name) VALUES ('distill_lessons_modes');
+    END IF;
+END $$;
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS project_id TEXT REFERENCES projects(id);
 -- Why a failed task failed, when code can tell (loopx/db/tasks.py FailKind); NULL
 -- otherwise. 'task_budget': it reached its project's task_budget_usd.
@@ -281,6 +296,21 @@ CREATE TABLE IF NOT EXISTS project_documents (
            END)
 );
 CREATE INDEX IF NOT EXISTS idx_project_documents_project ON project_documents (project_id, created_at, id);
+-- Drafts of knowledge documents (distill_lessons 'draft'): the lessons a task's
+-- Planner wrote, waiting for the user to confirm one into project_documents as a
+-- text document or discard it. No run reads this table, so agents never see a
+-- draft. task_id is the task that wrote it (NULL once that task is deleted).
+CREATE TABLE IF NOT EXISTS project_document_drafts (
+    id          TEXT PRIMARY KEY,
+    project_id  TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    task_id     TEXT REFERENCES tasks(id) ON DELETE SET NULL,
+    title       TEXT NOT NULL,
+    summary     TEXT NOT NULL,
+    content     TEXT NOT NULL,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_project_document_drafts_project
+    ON project_document_drafts (project_id, created_at, id);
 
 -- How a catalog item was acquired: imported from this machine's Claude Code
 -- ('machine'), uploaded, taken from git, written in the UI, or written in a

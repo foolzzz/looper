@@ -1,9 +1,10 @@
-"""The ``project_documents`` table: a project's knowledge.
+"""The ``project_documents`` table: a project's knowledge, and ``project_document_drafts``: drafts of it.
 
 ``loopx.agents.knowledge`` owns what a document is (validation, caps, the
 index, materialization); this module stores and reads it. A text or upload
 document holds its ``content``; a path document holds its ``path``, relative
-to its project's default directory.
+to its project's default directory. A draft holds a text document's title,
+summary and content until the user confirms or discards it; no run reads it.
 """
 
 from __future__ import annotations
@@ -109,3 +110,44 @@ async def delete_document(project_id: str, document_id: str, *, pool: asyncpg.Po
     result = await pool.execute("DELETE FROM project_documents WHERE project_id = $1 AND id = $2", project_id,
                                 document_id)
     return result == "DELETE 1"
+
+
+# --- Drafts: documents waiting for the user, which no run reads ---
+
+_DRAFT_COLUMNS = "id, project_id, task_id, title, summary, content, created_at"
+
+
+async def list_drafts(
+    project_id: str, *, pool: asyncpg.Pool | asyncpg.Connection | None = None,
+) -> list[dict[str, Any]]:
+    """The project's drafts with their content (a lessons draft is a few KiB), oldest first."""
+    pool = pool or get_pool()
+    rows = await pool.fetch(
+        f"SELECT {_DRAFT_COLUMNS} FROM project_document_drafts WHERE project_id = $1 ORDER BY created_at, id",
+        project_id,
+    )
+    return [dict(row) for row in rows]
+
+
+async def insert_draft(
+    conn: asyncpg.Connection, *, project_id: str, task_id: str | None, title: str, summary: str, content: str,
+) -> dict[str, Any]:
+    """Add a draft; returns its row."""
+    row = await conn.fetchrow(
+        f"INSERT INTO project_document_drafts (id, project_id, task_id, title, summary, content) "
+        f"VALUES ($1, $2, $3, $4, $5, $6) RETURNING {_DRAFT_COLUMNS}",
+        f"draft-{uuid.uuid4().hex[:12]}", project_id, task_id, title, summary, content,
+    )
+    return dict(row)
+
+
+async def delete_draft(
+    project_id: str, draft_id: str, *, pool: asyncpg.Pool | asyncpg.Connection | None = None,
+) -> dict[str, Any] | None:
+    """Remove a draft; returns its row, None when the project has no such draft."""
+    pool = pool or get_pool()
+    row = await pool.fetchrow(
+        f"DELETE FROM project_document_drafts WHERE project_id = $1 AND id = $2 RETURNING {_DRAFT_COLUMNS}",
+        project_id, draft_id,
+    )
+    return dict(row) if row is not None else None

@@ -12,8 +12,6 @@ const FIELDS: (keyof ProjectExecution)[] = [
   "distill_lessons",
 ];
 const NUMBERS = new Set<keyof ProjectExecution>(["task_budget_usd", "supervise_interval_seconds"]);
-// A switch: "true" is on; "" (null) and "false" are off.
-const SWITCHES = new Set<keyof ProjectExecution>(["distill_lessons"]);
 
 export function executionDraft(project: Project): ExecutionDraft {
   return Object.fromEntries(FIELDS.map((f) => [f, project[f] == null ? "" : String(project[f])])) as ExecutionDraft;
@@ -28,13 +26,8 @@ export function executionChanges(draft: ExecutionDraft, project: Project): Proje
     const value = draft[field].trim();
     if (value === before[field]) continue;
     const number = Number(value);
-    (changes as Record<string, unknown>)[field] = SWITCHES.has(field)
-      ? value === "true" || null
-      : value === ""
-        ? null
-        : NUMBERS.has(field) && Number.isFinite(number)
-          ? number
-          : value;
+    (changes as Record<string, unknown>)[field] =
+      value === "" ? null : NUMBERS.has(field) && Number.isFinite(number) ? number : value;
   }
   return changes;
 }
@@ -107,23 +100,25 @@ export function ProjectExecutionFields({
             placeholder="Inherit (0 = off)"
           />
         </div>
+        <div className="space-y-1">
+          {label("distill_lessons", "Lessons when a task completes")}
+          <select
+            id={`${idPrefix}-distill_lessons`}
+            value={draft.distill_lessons}
+            onChange={set("distill_lessons")}
+            aria-describedby={`${idPrefix}-distill_lessons-help`}
+            className={SELECT}
+          >
+            <option value="off">Off</option>
+            <option value="draft">Save a draft to review in Knowledge</option>
+            <option value="write">Write into knowledge</option>
+          </select>
+          <p id={`${idPrefix}-distill_lessons-help`} className="text-xs text-muted-foreground">
+            The Planner turns the task&apos;s findings into a lessons document. Agents see a draft only after you
+            confirm it on the Knowledge tab.
+          </p>
+        </div>
       </div>
-      <label htmlFor={`${idPrefix}-distill_lessons`} className="flex items-start gap-2 text-sm">
-        <input
-          id={`${idPrefix}-distill_lessons`}
-          type="checkbox"
-          className="mt-0.5 h-4 w-4 accent-primary"
-          checked={draft.distill_lessons === "true"}
-          onChange={(e) => onChange({ ...draft, distill_lessons: e.target.checked ? "true" : "" })}
-        />
-        <span>
-          Distill lessons into knowledge
-          <span className="block text-xs text-muted-foreground">
-            When a task completes, its Planner turns the task&apos;s findings into a lessons document in this
-            project&apos;s knowledge. Off by default.
-          </span>
-        </span>
-      </label>
     </fieldset>
   );
 }

@@ -92,7 +92,7 @@ def project_dir(tmp_path: Path) -> Path:
 def test_the_table_keeps_each_kind_consistent_and_goes_with_its_project(monkeypatch: pytest.MonkeyPatch) -> None:
     import asyncpg
 
-    from loopx.db import connection, projects
+    from loopx.db import connection, projects, tasks
 
     async def _test(pool: Any) -> None:
         await connection.ensure_schema(pool)  # applying the schema again changes nothing
@@ -112,8 +112,15 @@ def test_the_table_keeps_each_kind_consistent_and_goes_with_its_project(monkeypa
                 await pool.execute(insert, f"doc-{uuid.uuid4().hex[:8]}", project["id"], kind, filename, content, path)
         with pytest.raises(asyncpg.ForeignKeyViolationError):
             await pool.execute(insert, "doc-orphan", "proj-nope", "text", "t.md", "body", None)
+        # A draft outlives the task that wrote it, and goes with its project.
+        await tasks.create_task(task_id="task-1", requirement="r", work_dir="/w", project_id=project["id"], pool=pool)
+        await pool.execute("INSERT INTO project_document_drafts (id, project_id, task_id, title, summary, content) "
+                           "VALUES ('draft-1', $1, 'task-1', 't', 's', 'c')", project["id"])
+        assert await tasks.delete_task("task-1", pool=pool)
+        assert await pool.fetchval("SELECT task_id FROM project_document_drafts") is None
         assert await projects.delete_project(project["id"], pool=pool)
         assert await pool.fetchval("SELECT count(*) FROM project_documents") == 0
+        assert await pool.fetchval("SELECT count(*) FROM project_document_drafts") == 0
 
     _run(_test, monkeypatch)
 
@@ -251,5 +258,76 @@ def test_a_run_loads_the_documents_from_the_database(
             f"In {project_dir}:", "- Runbook: Deploys (docs/runbook.md)"]
         # The view the API gives shows the same index the run got.
         assert (await knowledge.knowledge_view(project["id"], tmp_path))["index"] == loaded.index
+
+    _run(_test, monkeypatch)
+
+
+def test_a_draft_stays_out_of_runs_until_it_is_confirmed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, project_dir: Path,
+) -> None:
+    """A draft is in no run's index or mounts; confirmed, it is a text document every run gets; discarded, gone."""
+    from loopx.agents import knowledge
+    from loopx.db import projects, tasks
+
+    async def _test(pool: Any) -> None:
+        project = await projects.create_project(name="calc", work_dir=str(project_dir), pool=pool)
+        await tasks.create_task(task_id="task-1", requirement="r", work_dir="/w", project_id=project["id"], pool=pool)
+        base = f"/api/projects/{project['id']}/knowledge/drafts"
+        lessons = await knowledge.add_draft(project["id"], task_id="task-1", title="Lessons: calc",
+                                            summary="What task-1 learned", content="- MARKER-LESSON")
+        other = await knowledge.add_draft(project["id"], task_id=None, title="Lessons: other", summary="s",
+                                          content="- other")
+
+        assert await knowledge.load_knowledge(tmp_path, project, str(project_dir)) == knowledge.EMPTY_KNOWLEDGE
+        status, listed = await _call(tmp_path, "GET", base)
+        assert status == 200 and [(d["title"], d["task_id"], d["content"]) for d in listed["drafts"]] == [
+            ("Lessons: calc", "task-1", "- MARKER-LESSON"), ("Lessons: other", None, "- other")]
+
+        # Confirmed with an edited title and content.
+        status, confirmed = await _call(tmp_path, "POST", f"{base}/{lessons['draft_id']}/confirm",
+                                        {"title": "Lessons: build", "content": "- MARKER-EDITED"})
+        assert status == 200 and confirmed["document"]["source_kind"] == "text"
+        loaded = await knowledge.load_knowledge(tmp_path, project, str(project_dir))
+        assert "- Lessons: build: What task-1 learned (Lessons-build.md)" in loaded.index.splitlines()
+        assert (Path(loaded.add_dirs[0]) / "Lessons-build.md").read_text() == "- MARKER-EDITED"
+
+        status, discarded = await _call(tmp_path, "DELETE", f"{base}/{other['draft_id']}")
+        assert status == 200 and discarded["drafts"] == []
+        view = await knowledge.knowledge_view(project["id"], tmp_path)
+        assert [d["title"] for d in view["documents"]] == ["Lessons: build"]
+
+    _run(_test, monkeypatch)
+
+
+def test_a_refused_confirm_or_discard_leaves_the_draft(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    from loopx.agents import knowledge
+    from loopx.db import projects
+
+    async def _test(pool: Any) -> None:
+        project = await projects.create_project(name="calc", pool=pool)
+        other = await projects.create_project(name="other", pool=pool)
+        draft = (await knowledge.add_draft(project["id"], task_id=None, title="Lessons: calc", summary="s",
+                                           content="- c"))["draft_id"]
+        base, elsewhere = (f"/api/projects/{p['id']}/knowledge/drafts" for p in (project, other))
+        for method, path, body, status, says in [
+            ("POST", f"{base}/{draft}/confirm", {"title": "two\nlines"}, 400, "one line"),
+            ("POST", f"{base}/{draft}/confirm", {"content": "  "}, 400, "needs its content"),
+            ("POST", f"{base}/{draft}/confirm", {"path": "a.md"}, 400, "unknown field 'path'"),
+            ("POST", f"{base}/{draft}/confirm", [], 400, "JSON object"),
+            ("POST", f"{base}/draft-nope/confirm", {}, 404, "no draft"),
+            ("DELETE", f"{base}/draft-nope", None, 404, "no draft"),
+            ("POST", f"{elsewhere}/{draft}/confirm", {}, 404, "no draft"),
+            ("DELETE", f"{elsewhere}/{draft}", None, 404, "no draft"),
+            ("GET", "/api/projects/proj-nope/knowledge/drafts", None, 404, "not found"),
+        ]:
+            answer = await _call(tmp_path, method, path, body)
+            assert answer[0] == status and says in answer[1]["error"], (method, path, answer)
+        # A confirm over a project cap is refused too.
+        monkeypatch.setattr(knowledge, "PROJECT_MAX_DOCUMENTS", 0)
+        status, refused = await _call(tmp_path, "POST", f"{base}/{draft}/confirm", {})
+        assert status == 400 and "at most 0 documents" in refused["error"]
+
+        assert [d["draft_id"] for d in (await knowledge.drafts_view(project["id"]))["drafts"]] == [draft]
+        assert await pool.fetchval("SELECT count(*) FROM project_documents") == 0
 
     _run(_test, monkeypatch)

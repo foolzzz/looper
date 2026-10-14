@@ -480,6 +480,7 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
 | 2026-10-14 | 第 5.4 节「非 haiku 模型」验证缺口（looper #58）：M6 真实模式评测用 `--model sonnet` 和 `--model opus`（写进一次性数据库的系统配置层，Claude Code 2.1.285 解析为 `claude-sonnet-5-5`、`claude-opus-5-5`）各跑一次，与 haiku 基线相比都是 5/5、契约违约 0、Planner 改文件 0，步骤、重试、送审相同，只有 opus 在聊天纠偏任务里多加了一步（7 步对 6 步）。花费 sonnet $0.62、opus $1.30（haiku $0.33）；按 sonnet 的 token 用量和 Opus 5.5 价目预估 opus 为 $1.13，实际多 15%，一半是多出的那一步（$0.09），其余来自约多 50% 的输出 token 和略多的缓存写入。两份结果作为 `baselines/real-sonnet.json`、`real-opus.json` 提交，评测按模型自动与各自的基线对比；本次真实花费共 $1.92。 |
 | 2026-10-14 | 服务常驻（looper #59）：`loopx service install / uninstall / status / restart` 把 `loopx serve` 装成 macOS 的 launchd LaunchAgent 或 Linux 的 systemd 用户服务（登录自启、失败退出后拉起、日志在 `<runtime root>/logs/serve.log`），服务运行执行 install 的那个 `loopx`、工作目录为当前目录，并把 `PATH`、`LOOPX_*` 等变量复制进权限为 0600 的服务文件。重装就地更新，launchd 用 bootout、等它消失后再 bootstrap（失败重试），端口被别的进程占用时不启动，`doctor` 多一行 Service。验证：单元测试覆盖 plist 与 unit 内容、文件权限、重装和命令顺序；本机用测试 label、空闲端口和新库走完 install、status、`kill -9` 后约 1 秒被拉起、restart、端口占用时拒绝启动和 uninstall，真实 PG 934 通过。 |
 | 2026-10-14 | 迁移前自动备份（looper #60）：`ensure_schema` 把所应用 `schema.sql` 的 sha256 与 DDL 在同一事务里记入 `schema_fingerprint`；库里已有 LoopX 表而指纹缺失或不同时，`serve` 先用 `pg_dump`（`LOOPX_PG_DUMP` 或 PATH 上、主版本不低于服务器，或 `LOOPX_BACKUP_CMD` 指定的命令）把库备份到 runtime root 下的 `backups/`（0600、校验后每库保留最近 5 份）再迁移，没有可用的 `pg_dump` 或备份失败时在任何 DDL 之前退出并给出安装方法（`--skip-backup` 跳过并告警），`doctor` 多一行 pg_dump，`config import --apply` 遇到待迁移的库拒绝。验证：真实 PG 测试用替身 `pg_dump` 走 `loopx serve` 的各条规则；本机没有 `pg_dump`，对套用 v2.5.0 `schema.sql` 的新库先确认拒绝且库未变，再经 `LOOPX_BACKUP_CMD` 调容器里的 `pg_dump` 备份并迁移，`pg_restore --list` 读出 64 项、备份保有迁移删掉的 `permission_mode` 与 `model` 列，再次启动不再备份；真实 PG 952 通过。 |
+| 2026-10-14 | 第 5.3 节经验文档先作为草稿（looper #61）：`distill_lessons` 改为 `off`、`draft`、`write` 三档（一次性迁移：`true` 为 `write`，`false` 和 NULL 为 `off`），`draft` 时任务完成后的经验存进 `project_document_drafts`，不进任何运行的知识索引和挂载，用户在项目页 Knowledge 标签查看、修改后确认（成为受知识上限约束的文本文档）或丢弃，任务页链接到草稿。验证：真实 PG 加替身 Claude 跑完三档、确认与丢弃、被拒的确认保留草稿和迁移，一次性 `loopx serve` 上无头 Chrome 完成修改后确认、丢弃和切换档位并截图。 |
 
 ## 5. 不属于本 RFC 的待办
 
@@ -500,7 +501,6 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
 ### 5.3 非核心待办（M6 之后统一做）
 
 - **界面导入配置文件**（M8e 只做了 CLI 导入；2026-10-14 定为现在做，进行中）：按路由放宽请求体上限、流式落盘，并把预览和应用分成两步。
-- **经验文档先作为草稿**（M7b 只做了开关直接入库；2026-10-14 定为现在做，进行中）：`distill_lessons` 改为三档（关闭、存草稿、直接写入）；草稿在项目页确认、修改或丢弃后才进入项目知识。
 
 ### 5.4 验证缺口
 

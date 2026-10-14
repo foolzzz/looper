@@ -68,8 +68,9 @@ export interface ProjectExecution {
   supervise_interval_seconds: number | null;
   /** "planner": the Planner decides which steps are reviewed; "all": every step is. */
   review_policy: "planner" | "all" | null;
-  /** true: a task that completes leaves a lessons document in the project's knowledge; null or false: off. */
-  distill_lessons: boolean | null;
+  /** What a task that completes leaves in the project's knowledge: nothing ("off"), a lessons draft to confirm
+   * or discard ("draft"), or a lessons document ("write"). Never null. */
+  distill_lessons: "off" | "draft" | "write";
 }
 
 /** A group of tasks with an optional default work directory and background. */
@@ -496,6 +497,56 @@ export async function updateKnowledgeDocument(
 export async function deleteKnowledgeDocument(projectId: string, documentId: string): Promise<ProjectKnowledge> {
   const res = await fetch(knowledgeUrl(projectId, documentId), { method: "DELETE" });
   if (!res.ok) await failed(res, "delete document");
+  return res.json();
+}
+
+/** A text document waiting for the user: the lessons a task's Planner wrote ("draft" mode). Agents do not see it. */
+export interface KnowledgeDraft {
+  draft_id: string;
+  /** The task that wrote it; null once that task is deleted. */
+  task_id: string | null;
+  title: string;
+  summary: string;
+  content: string;
+  size_bytes: number;
+  created_at: string;
+}
+
+export interface KnowledgeDrafts {
+  project_id: string;
+  drafts: KnowledgeDraft[];
+  count: number;
+}
+
+function draftsUrl(projectId: string, draftId?: string) {
+  return `${knowledgeUrl(projectId)}/drafts${draftId ? `/${encodeURIComponent(draftId)}` : ""}`;
+}
+
+export async function fetchKnowledgeDrafts(projectId: string): Promise<KnowledgeDrafts> {
+  const res = await fetch(draftsUrl(projectId));
+  if (!res.ok) await failed(res, "drafts");
+  return res.json();
+}
+
+/** Make a draft a text document, with any changed title, summary or content; answers with the knowledge. */
+export async function confirmKnowledgeDraft(
+  projectId: string,
+  draftId: string,
+  fields: { title?: string; summary?: string; content?: string } = {},
+): Promise<ProjectKnowledge> {
+  const res = await fetch(`${draftsUrl(projectId, draftId)}/confirm`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(fields),
+  });
+  if (!res.ok) await failed(res, "confirm draft");
+  return res.json();
+}
+
+/** Remove a draft; answers with the remaining drafts. */
+export async function discardKnowledgeDraft(projectId: string, draftId: string): Promise<KnowledgeDrafts> {
+  const res = await fetch(draftsUrl(projectId, draftId), { method: "DELETE" });
+  if (!res.ok) await failed(res, "discard draft");
   return res.json();
 }
 

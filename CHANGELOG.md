@@ -199,10 +199,17 @@ How the agent system works today is described in
   and the summaries of accepted steps; a Worker's first turn carries
   "Findings so far in this task" (its dependencies first, at most 2,000
   characters). The task page lists the entries under Findings.
-- **Lessons in project knowledge.** A project's `distill_lessons` switch (off
-  by default; Settings tab, or `PUT /api/projects/<id>`) gives the Planner of
-  a task that completes one more turn, whose Markdown summary of the journal
-  is saved as the knowledge document `Lessons: <requirement>`.
+- **Lessons in project knowledge, as drafts or written.** A project's
+  `distill_lessons` (`off` by default, `draft` or `write`; Settings tab, or
+  `PUT /api/projects/<id>`) gives the Planner of a task that completes one
+  more turn, whose Markdown summary of the journal becomes the text document
+  `Lessons: <requirement>`. `write` saves it to the project's knowledge;
+  `draft` keeps it as a draft that no agent sees until the user confirms it,
+  optionally edited, or discards it on the project's Knowledge tab
+  (`GET /api/projects/<id>/knowledge/drafts`,
+  `POST .../drafts/<draft_id>/confirm`, `DELETE .../drafts/<draft_id>`); the
+  task page links to its draft. A project that had the earlier boolean
+  switch on is migrated to `write`, off to `off`.
 - **Task spend against its cap, and continuing at a higher cap.** When the
   task's project sets a spend cap per task (`task_budget_usd`), the task page
   shows the task's spend as a share of it and warns from 80% on. A task that

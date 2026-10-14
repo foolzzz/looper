@@ -29,6 +29,13 @@ run starts, so a change reaches the next Worker or Reviewer, and the resident
 Planner restarts on its next turn. A set no current run uses is removed when
 the server starts (``read_only_copies``).
 
+A draft (``project_document_drafts``) is a text document waiting for the
+user: the lessons a task's Planner writes when its project's
+``distill_lessons`` is ``draft``. No run reads drafts, so they are in no index
+and no mount. Confirming one makes it a text document like any other (with the
+title, summary or content the user changed), under the same caps; a refused
+one stays a draft. Discarding one removes it.
+
 Caps, each refused with a message that states it: a document has at most
 ``DOCUMENT_MAX_BYTES``; a project at most ``PROJECT_MAX_DOCUMENTS`` documents
 and ``PROJECT_MAX_BYTES`` of stored content (a path document is not stored);
@@ -648,10 +655,20 @@ async def add_document(project_id: str, data: Mapping[str, Any], runtime_root: P
             raise KnowledgeNotFound(f"project {project_id!r} not found")
         fields = {"title": title, "summary": summary, "source_kind": kind.value,
                   **_source(kind, data, project, title=title)}
-        rows = await db_documents.list_documents(project_id, pool=conn)
-        _check_caps(runtime_root, project, [*rows, _pending_row(project_id, fields)])
-        row = await db_documents.insert_document(conn, project_id=project_id, **fields)
+        row = await _insert_document(conn, runtime_root, project, fields)
     return await _with_document(project_id, str(row["id"]), runtime_root)
+
+
+async def _insert_document(
+    conn: Any, runtime_root: Path, project: Mapping[str, Any], fields: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Add a document with ``fields`` to the locked ``project`` when the project's caps allow it."""
+    from ..db import project_documents as db_documents
+
+    project_id = str(project["id"])
+    rows = await db_documents.list_documents(project_id, pool=conn)
+    _check_caps(runtime_root, project, [*rows, _pending_row(project_id, fields)])
+    return await db_documents.insert_document(conn, project_id=project_id, **fields)
 
 
 async def update_document(
@@ -702,3 +719,88 @@ async def delete_document(project_id: str, document_id: str, runtime_root: Path)
         if not await db_documents.delete_document(project_id, document_id, pool=conn):
             raise KnowledgeNotFound(f"project {project_id!r} has no document {document_id!r}")
     return {"deleted": document_id, **await knowledge_view(project_id, runtime_root)}
+
+
+# --- Drafts: text documents waiting for the user, which no run reads ---
+
+_DRAFT_FIELDS = ("content", "summary", "title")
+
+
+def draft_view(row: Mapping[str, Any]) -> dict[str, Any]:
+    """A draft as the API shows it, with its content; ``task_id`` is the task that wrote it (None once deleted)."""
+    return {
+        "draft_id": row["id"],
+        "task_id": row["task_id"],
+        "title": row["title"],
+        "summary": row["summary"],
+        "content": row["content"],
+        "size_bytes": len(str(row["content"]).encode("utf-8")),
+        "created_at": row["created_at"],
+    }
+
+
+async def drafts_view(project_id: str) -> dict[str, Any]:
+    """The project's drafts, oldest first."""
+    from ..db import project_documents as db_documents
+    from ..db import projects as db_projects
+
+    if await db_projects.get_project(project_id) is None:
+        raise KnowledgeNotFound(f"project {project_id!r} not found")
+    drafts = [draft_view(row) for row in await db_documents.list_drafts(project_id)]
+    return {"project_id": project_id, "drafts": drafts, "count": len(drafts)}
+
+
+async def add_draft(project_id: str, *, task_id: str | None, title: str, summary: str, content: str) -> dict[str, Any]:
+    """Save a draft of a text document, validated like one; returns its view."""
+    from ..db import project_documents as db_documents
+
+    title, summary, content = document_title(title), document_summary(summary), text_content(content)
+    async with db_documents.locked_project(project_id) as (conn, project):
+        if project is None:
+            raise KnowledgeNotFound(f"project {project_id!r} not found")
+        row = await db_documents.insert_draft(conn, project_id=project_id, task_id=task_id, title=title,
+                                              summary=summary, content=content)
+    return draft_view(row)
+
+
+async def confirm_draft(
+    project_id: str, draft_id: str, data: Mapping[str, Any], runtime_root: Path,
+) -> dict[str, Any]:
+    """Make a draft a text document, with the ``title``, ``summary`` or ``content`` in ``data`` in place of its own.
+
+    Returns the knowledge view with the new document as ``document``. A
+    document the checks or caps refuse leaves the draft as it was.
+    """
+    from ..db import project_documents as db_documents
+
+    if not isinstance(data, Mapping):
+        raise KnowledgeError("body must be a JSON object")
+    unknown = sorted(set(data) - set(_DRAFT_FIELDS))
+    if unknown:
+        raise KnowledgeError(f"unknown field {unknown[0]!r} to confirm a draft with; the fields are "
+                             f"{', '.join(_DRAFT_FIELDS)}")
+    async with db_documents.locked_project(project_id) as (conn, project):
+        if project is None:
+            raise KnowledgeNotFound(f"project {project_id!r} not found")
+        # Removed in the transaction that adds the document: a refusal below rolls both back.
+        draft = await db_documents.delete_draft(project_id, draft_id, pool=conn)
+        if draft is None:
+            raise KnowledgeNotFound(f"project {project_id!r} has no draft {draft_id!r}")
+        title = document_title(data.get("title", draft["title"]))
+        fields = {"title": title, "summary": document_summary(data.get("summary", draft["summary"])),
+                  "source_kind": SourceKind.TEXT.value,
+                  **_source(SourceKind.TEXT, {"content": data.get("content", draft["content"])}, project, title=title)}
+        row = await _insert_document(conn, runtime_root, project, fields)
+    return {"confirmed": draft_id, **await _with_document(project_id, str(row["id"]), runtime_root)}
+
+
+async def discard_draft(project_id: str, draft_id: str) -> dict[str, Any]:
+    """Remove a draft; returns the remaining drafts."""
+    from ..db import project_documents as db_documents
+
+    async with db_documents.locked_project(project_id) as (conn, project):
+        if project is None:
+            raise KnowledgeNotFound(f"project {project_id!r} not found")
+        if await db_documents.delete_draft(project_id, draft_id, pool=conn) is None:
+            raise KnowledgeNotFound(f"project {project_id!r} has no draft {draft_id!r}")
+    return {"discarded": draft_id, **await drafts_view(project_id)}

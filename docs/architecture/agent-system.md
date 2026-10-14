@@ -217,13 +217,15 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
   entries newest first in at most 4,000 characters (the oldest left out and
   counted), and the plan lines carry each accepted step's summary (200
   characters). No entry, no section.
-- With the project's `distill_lessons` on, a task that completes gets one
-  more turn, `[LESSONS]`, before its final status: the Planner turns the
-  journal into a Markdown document of at most 4,000 characters (the shape is
-  in that turn's message, not in `REPLY_CONTRACT`), and code saves it as a
-  `text` knowledge document titled `Lessons: <requirement>`. A failed turn or
-  a refused document is a warning in the activity; the task stays completed.
-  Off (the default), nothing is written.
+- With the project's `distill_lessons` `draft` or `write`, a task that
+  completes gets one more turn, `[LESSONS]`, before its final status: the
+  Planner turns the journal into a Markdown document of at most 4,000
+  characters (the shape is in that turn's message, not in `REPLY_CONTRACT`),
+  titled `Lessons: <requirement>`. `write` saves it as a `text` knowledge
+  document; `draft` saves it to `project_document_drafts`, which no run reads,
+  until the user confirms it (as a `text` document, under the knowledge caps)
+  or discards it. A failed turn or a refused document is a warning in the
+  activity; the task stays completed. `off` (the default) writes nothing.
 - After a server restart (`TASK_RESUME`), a new Planner reads its plan and
   session back and carries on without planning again: a step whose Worker was
   running runs again as the same attempt with its feedback, a step in review
@@ -632,8 +634,9 @@ the task fails, at once (`task_budget_action` `fail`, the default) or after one
 more Planner turn that sums up (`wrap_up`), with the cap and the amount in its
 error; `supervise_interval_seconds` over the `planner` config; and
 `review_policy` `all`, under which no step is accepted without a passing review;
-and `distill_lessons` `true`, which saves a lessons document to the project's
-knowledge when a task completes (see the Planner).
+and `distill_lessons` (`off`, `draft` or `write`, never null), whether a task
+that completes leaves a lessons draft or document in the project's knowledge
+(see the Planner).
 
 ### The capability catalog: items and where they are installed
 
