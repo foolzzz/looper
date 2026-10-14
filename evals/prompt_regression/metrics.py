@@ -27,12 +27,14 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from looper.agents.runtimes.omp import EDIT_TOOLS as OMP_EDIT_TOOLS
+from looper.agents.runtimes.omp import edited_paths as omp_edited_paths
 from looper.agents.tiers.worker import extract_report
 
 TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled", "stopped"})
-# Claude Code's file-editing tools, each naming one file, and Codex's patches (``runtimes.codex``), naming each
-# file they change.
-FILE_EDIT_TOOLS = frozenset({"Write", "Edit", "MultiEdit", "NotebookEdit", "apply_patch"})
+# Claude Code's file-editing tools, each naming one file; Codex's patches (``runtimes.codex``), naming each file
+# they change; and OMP's (``runtimes.omp.edited_paths``).
+FILE_EDIT_TOOLS = frozenset({"Write", "Edit", "MultiEdit", "NotebookEdit", "apply_patch", *OMP_EDIT_TOOLS})
 
 _BROKE_CONTRACT = re.compile(r"^Planner reply broke the (PLAN|DECISION|CHAT|SUPERVISE) contract \(")
 _REPAIR_REJECTED = "invalid reply after a repair turn"
@@ -130,7 +132,8 @@ def edit_tool_paths(events: Iterable[Mapping[str, Any]], work_dir: Path) -> list
             if isinstance(block, Mapping) and block.get("type") == "tool_use" and block.get("name") in FILE_EDIT_TOOLS:
                 tool_input = block.get("input") or {}
                 named = [tool_input.get("file_path") or tool_input.get("notebook_path"),
-                         *(c.get("path") for c in tool_input.get("changes") or [] if isinstance(c, Mapping))]
+                         *(c.get("path") for c in tool_input.get("changes") or [] if isinstance(c, Mapping)),
+                         *omp_edited_paths(str(block.get("name")), tool_input)]
                 paths += [_relative(str(path), work_dir) for path in named if path]
     return paths
 

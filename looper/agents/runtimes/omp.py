@@ -541,19 +541,18 @@ EDIT_TOOLS = frozenset({"write", "edit", "ast_edit"})
 
 def edited_paths(tool_name: str, tool_input: Mapping[str, Any]) -> list[str]:
     """The files one of omp's file-editing tool calls names: ``write``'s ``path``, ``ast_edit``'s ``paths``, and
-    each ``[path#TAG]`` header of an ``edit`` patch."""
+    each ``[path#TAG]`` header of an ``edit`` patch. omp's internal URLs (``agent://``, a message to a subagent)
+    are no files."""
     if tool_name == "write":
-        return [str(tool_input["path"])] if tool_input.get("path") else []
-    if tool_name == "ast_edit":
-        return [str(path) for path in tool_input.get("paths") or [] if path]
-    if tool_name == "edit":
-        paths = []
-        for line in str(tool_input.get("input") or "").splitlines():
-            line = line.strip()
-            if line.startswith("[") and line.endswith("]") and "#" in line:
-                paths.append(line[1:-1].rpartition("#")[0])
-        return list(dict.fromkeys(paths))
-    return []
+        paths = [str(tool_input.get("path") or "")]
+    elif tool_name == "ast_edit":
+        paths = [str(path) for path in tool_input.get("paths") or []]
+    elif tool_name == "edit":
+        paths = [line.strip()[1:-1].rpartition("#")[0] for line in str(tool_input.get("input") or "").splitlines()
+                 if line.strip().startswith("[") and line.strip().endswith("]") and "#" in line]
+    else:
+        return []
+    return [path for path in dict.fromkeys(paths) if path and "://" not in path]
 
 
 def _count(value: Any) -> int:
