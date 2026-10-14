@@ -12,8 +12,9 @@ its stdin closes.
 
 from __future__ import annotations
 
-import sys
 from pathlib import Path
+
+from fake_claude import fake_claude
 
 FIXTURES = Path(__file__).parent / "fixtures" / "claude_stream"
 
@@ -55,7 +56,4 @@ def replay_body(fixture: str) -> str:
 
 def replay_script(directory: Path, fixture: str) -> str:
     """An executable stand-in in ``directory`` that replays ``fixture``; returns its path."""
-    script = directory / f"replay-{fixture}"
-    script.write_text(f"#!{sys.executable}\n{replay_body(fixture)}")
-    script.chmod(0o755)
-    return str(script)
+    return fake_claude(directory / f"replay-{fixture}", replay_body(fixture))

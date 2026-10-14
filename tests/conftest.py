@@ -26,6 +26,7 @@ from real_runtime_root_guard_plugin import (  # noqa: E402,F401
     pytest_terminal_summary,
     pytest_testnodedown,
 )
+from fake_claude import fake_claude  # noqa: E402
 
 
 # PostgreSQL writes made by the agent tiers (Manager, Planner, TaskRouter, WorkerPool).
@@ -67,8 +68,15 @@ async def _created_project(
             "background": background}
 
 
+@pytest.fixture(scope="session")
+def _stub_claude(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    stub = tmp_path_factory.mktemp("stub-claude") / "claude"
+    fake_claude(stub, "import sys\nsys.stdin.read()\n")
+    return stub
+
+
 @pytest.fixture
-def stub_claude_on_path(tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch) -> Path:
+def stub_claude_on_path(_stub_claude: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Make a bare ``claude`` resolve to a stub that answers nothing.
 
     Each task's Planner starts ``claude`` as soon as it gets its task, so a
@@ -76,12 +84,8 @@ def stub_claude_on_path(tmp_path_factory: pytest.TempPathFactory, monkeypatch: p
     otherwise reach the real CLI (and spend money). The stub waits for its
     stdin to close and exits without output.
     """
-    bin_dir = tmp_path_factory.mktemp("stub-claude")
-    stub = bin_dir / "claude"
-    stub.write_text(f"#!{sys.executable}\nimport sys\nsys.stdin.read()\n")
-    stub.chmod(0o755)
-    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}")
-    return stub
+    monkeypatch.setenv("PATH", f"{_stub_claude.parent}{os.pathsep}{os.environ.get('PATH', '')}")
+    return _stub_claude
 
 
 _PLANNER_CLAUDE = """\
@@ -180,13 +184,10 @@ class FakePlannerClaude:
         autonomous: dict[int, str] | None = None,
     ) -> None:
         self.state = state
-        self.bin = str(state / "fake-claude")
-        script = Path(self.bin)
-        script.write_text(f"#!{sys.executable}\n" + _PLANNER_CLAUDE.format(
+        self.bin = fake_claude(state / "fake-claude", _PLANNER_CLAUDE.format(
             state=str(state), replies=json.dumps(replies), linger=linger, forget_sessions=forget_sessions,
             autonomous=json.dumps({str(turn): text for turn, text in (autonomous or {}).items()}),
         ))
-        script.chmod(0o755)
 
     def _log(self, name: str) -> list[Any]:
         path = self.state / name
