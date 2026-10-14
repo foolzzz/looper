@@ -285,7 +285,6 @@
 
 ### 5.2 工程待办
 
-- **`scripts/install-from-github.sh`** 默认使用 `stable` 分支，但 looper 没有这个分支。随上游清理消失：这个脚本和 `scripts/install-local.sh` 在 B3 删除，安装只走 `install.sh`。
 - **`test_planner_agent.py::TestPlanning::test_turn_over_the_time_limit_fails_planning` 偶发失败**：`-n 6` 下失败过一次，重跑通过（上游清理盘点时发现）。它给 Planner 的时限只有 3 秒（`timeout_seconds: 3`），机器繁忙时替身进程可能来不及启动。
 - **知识索引容量**：索引每行都带一个绝对路径（在 `~/.loopx` 下约 150 字），4,000 字的索引上限实际只能放 15–25 篇，比 100 篇的数量上限先用完。改用短的挂载别名或相对路径（M3 发现）。
 - **runtime root 下的只读副本不清理**：插件与 skill 库（M1.6）、项目知识（M3）和项目 skill（M4）按内容哈希写出的只读副本，在内容替换或删除后仍留在磁盘上。需要在没有运行引用时回收。
@@ -325,7 +324,7 @@
 
 - [x] **B1 解耦**（looper #31）：`loopx` 命令只剩 `serve`、`version` 和 `--version`，`[project.scripts]` 指向新的 `loopx/cli.py`，启动时不再加载上游模块（`tests/test_cli_entry.py` 守护）；删除 `setup.py`、`MANIFEST.in`，wheel 不再依赖上游 Chat 包，仍带 `web/` 构建的 dashboard；Python Tests 换成只跑 agent 系统测试的 job。上游代码仍留在磁盘上。
 - [x] **B2 删除上游测试、smoke 和 CI**（looper #34）：删除 1,462 个文件、475,527 行。`tests/**` 只留 agent 系统的 31 个测试文件和它们的 helper（`conftest.py`、`library_fixtures.py`、`claude_stream_replay.py`、`runtime_root_guard/`、`fixtures/claude_stream/`），`examples/**` 只留两个发布 smoke，删除 `regression/`、6 个上游 workflow、`scripts/ci/` 和 `sonar-project.properties`；`tests/conftest.py` 去掉 `loopx.canary` 导入、smoke-suite 选项和上游 fixture；`pyproject.toml` 设 `testpaths = ["tests"]`，CI 直接跑 `pytest`。不带参数的 `pytest` 收集 899 个测试，没有收集错误（之前 11,849 个，8 个文件收集失败）。第 5.2 节因此关闭 4 项：CI 基线（Python Tests 在每个 PR 上跑 agent 系统测试并通过）、Optional Ark Turn workflow、`test_dashboard_command` 的 5 个失败用例和它的偶发超时。
-- [ ] **B3 删除上游代码**：`loopx/**` 只留 `agents`、`db`、`__init__.py`、`cli.py`、`paths.py`；删除 `apps/`、`packages/`、`skills/`、`man/`、除 `stage-dashboard.sh` 和 `release-surface-args.sh` 以外的 `scripts/**`，以及根目录的 npm 和 TypeScript 配置；精简 `pyproject.toml`。
+- [x] **B3 删除上游代码**（looper #35）：删除 2,040 个文件、638,943 行。`loopx/**` 只留 `agents`、`db`、`__init__.py`、`cli.py`、`paths.py`（`paths.py` 只留 runtime root 的三个函数）；删除 `apps/`、`packages/`、`skills/`、`man/`、除 `stage-dashboard.sh` 和 `release-surface-args.sh` 以外的 `scripts/**`（包括 `install-from-github.sh` 和 `install-local.sh`），以及根目录的 `package.json`、`package-lock.json`、`tsconfig.control-plane.json`。`pyproject.toml` 只留 `loopx` 一个命令，去掉 `deepseek-harness` extra、上游的测试依赖、package-data、data-files 和 mypy 配置；dependabot、CODEOWNERS 和 `.gitignore` 里指向已删路径的条目一并去掉。第 5.2 节因此关闭 `scripts/install-from-github.sh` 默认 `stable` 分支一项。
 - [ ] **B4 文档与根目录文件**：`docs/**` 只留本计划、两份架构文档、`docs/releases/` 和 `docs/design.md`；按下面的决定改写和删除其余文档。
 
 维护者的决定：
