@@ -12,6 +12,7 @@ import {
   Loader2,
   MessageSquare,
   Plug,
+  RotateCcw,
   ScrollText,
   Shrink,
   Terminal,
@@ -786,6 +787,37 @@ function RunUsage({ record }: { record: LlmRecord }) {
 }
 
 export function RunCard({ initial, defaultOpen }: { initial: LlmRecord; defaultOpen: boolean }) {
+  return initial.metadata?.session_reset ? (
+    <SessionResetCard record={initial} />
+  ) : (
+    <ClaudeRunCard initial={initial} defaultOpen={defaultOpen} />
+  );
+}
+
+/** A /new: the Manager dropped its session here, so its next turn started a new one; no Claude ran. */
+function SessionResetCard({ record }: { record: LlmRecord }) {
+  const reset = record.metadata?.session_reset;
+  const origin = [
+    reset?.channel,
+    reset?.sender && `sender ${reset.sender}`,
+    reset?.chat && `chat ${reset.chat}`,
+  ].filter(Boolean).join(" · ");
+  return (
+    <div className="flex flex-wrap items-center gap-x-3 gap-y-1 rounded-lg border border-border bg-card px-4 py-3 text-xs">
+      <RotateCcw className="h-3.5 w-3.5 text-muted-foreground" />
+      <span className="font-mono tabular-nums" title={formatDateTime(record.created_at)}>{formatClock(record.created_at)}</span>
+      <Badge variant="outline">new session</Badge>
+      <span className="min-w-0">
+        {record.input_summary || "/new"} from {origin || "an unknown channel"}
+      </span>
+      <span className="ml-auto min-w-0 truncate font-mono text-muted-foreground">
+        {reset?.previous_session_id ? `ended ${reset.previous_session_id}` : "no session to end"}
+      </span>
+    </div>
+  );
+}
+
+function ClaudeRunCard({ initial, defaultOpen }: { initial: LlmRecord; defaultOpen: boolean }) {
   const [record, setRecord] = useState(initial);
   const [events, setEvents] = useState<LlmRecordEvent[]>([]);
   const [open, setOpen] = useState(defaultOpen);

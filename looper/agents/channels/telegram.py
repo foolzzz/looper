@@ -104,6 +104,8 @@ class TelegramChannelAdapter(ChannelAdapter):
         self._app.add_handler(CommandHandler("start", self._cmd_start))
         self._app.add_handler(CommandHandler("status", self._cmd_status))
         self._app.add_handler(CommandHandler("help", self._cmd_help))
+        # Only /new itself (also /new@<this bot>): "/new foo" stays an unknown command, as before.
+        self._app.add_handler(CommandHandler("new", self._cmd_new, has_args=False))
         self._app.add_handler(
             MessageHandler(filters.TEXT & ~filters.COMMAND, self._on_message)
         )
@@ -196,6 +198,7 @@ class TelegramChannelAdapter(ChannelAdapter):
         await update.message.reply_text(
             "Looper Agent 已就绪。直接发消息给我，或使用:\n"
             "/status — 查看当前任务进度\n"
+            "/new — 开始新的 Manager 会话\n"
             "/help — 帮助信息"
         )
 
@@ -230,18 +233,28 @@ class TelegramChannelAdapter(ChannelAdapter):
             "Looper Agent 命令:\n"
             "直接发消息 — 提需求或问问题\n"
             "/status — 查看当前任务进度\n"
+            "/new — 开始新的 Manager 会话\n"
             "/help — 显示此帮助"
         )
+
+    async def _cmd_new(self, update: Any, context: Any) -> None:
+        """/new goes to the Manager as the text ``/new``, which it answers itself by starting a new session."""
+        if not self._admits(update):
+            return
+        await self._forward(update, "/new")
 
     async def _on_message(self, update: Any, context: Any) -> None:
         if not self._admits(update):
             return
         if not update.message or not update.message.text:
             return
+        await self._forward(update, update.message.text)
+
+    async def _forward(self, update: Any, text: str) -> None:
+        """Send ``text`` from the update's sender to the Manager; its replies go back to the update's chat."""
         assert self._bus is not None
         import uuid as _uuid
 
-        text = update.message.text
         chat_id = update.effective_chat.id
         correlation_id = str(_uuid.uuid4())
         self._correlation_chat[correlation_id] = chat_id

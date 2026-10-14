@@ -102,9 +102,11 @@ class _PlanStore:
         return {"plan": plan, "steps": rows, "journal": journal}
 
     async def save_session(self, agent_id: str, session_id: str | None, totals: Any, *,
-                           runtime_type: str | None = None, session_agent_id: str | None = None, **_: object) -> None:
+                           runtime_type: str | None = None, session_agent_id: str | None = None,
+                           clean_start: bool = False, **_: object) -> None:
         self.sessions[agent_id] = {"session_id": session_id, "session_totals": dict(totals),
-                                   "runtime_type": runtime_type, "session_agent_id": session_agent_id}
+                                   "runtime_type": runtime_type, "session_agent_id": session_agent_id,
+                                   "clean_start": clean_start}
 
     async def get_session(self, agent_id: str, **_: object) -> dict[str, Any] | None:
         saved = self.sessions.get(agent_id)

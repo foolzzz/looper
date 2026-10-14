@@ -970,6 +970,9 @@ export interface LlmRecord {
     library?: RunLibrary;
     /** Runs recorded before the catalog: the project skills a task agent loaded. */
     project_skills?: RunProjectSkills;
+    /** Not a Claude run: the user sent /new and the Manager dropped this session (sender: Lark open_id or
+     * Telegram user id; none from the web chat). */
+    session_reset?: { channel: string; sender: string | null; chat: string | null; previous_session_id: string | null };
   } | null;
   created_at: string;
   finished_at: string | null;

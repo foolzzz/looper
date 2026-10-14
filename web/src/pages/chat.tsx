@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Send, Loader2, Bot, User, Plus, ChevronDown, ChevronRight } from "lucide-react";
+import { Send, Loader2, Bot, User, Plus, ChevronDown, ChevronRight, RotateCcw } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import {
   sendChat,
@@ -36,6 +36,8 @@ const LEGACY_SESSION_KEY = "loopx-chat-session-id";
 const legacyMessagesKey = (sessionId: string) => `loopx-chat-messages-${sessionId}`;
 
 const MANAGER_TARGET: ChatTargetInfo = { kind: "manager", id: "manager", can_send: true };
+// Answered by Looper, not Claude: the Manager drops its session, so the next message, from any channel, starts clean.
+const NEW_SESSION_COMMAND = "/new";
 const TARGETS_POLL_MS = 10_000;
 // The Planner's latest turns shown beside its chat; its history page has more.
 const PLANNER_RUNS_SHOWN = 10;
@@ -374,11 +376,11 @@ export function ChatPage() {
     setInput("");
   };
 
-  const handleSend = async () => {
-    const text = input.trim();
+  const handleSend = async (command?: string) => {
+    const text = command ?? input.trim();
     if (!text || sending || !current.can_send) return;
 
-    setInput("");
+    if (command === undefined) setInput("");
     setSending(true);
     setPhase("");
 
@@ -579,9 +581,21 @@ export function ChatPage() {
             {target.kind === "manager" && (
               <button
                 type="button"
+                onClick={() => handleSend(NEW_SESSION_COMMAND)}
+                disabled={sending}
+                className="flex h-7 items-center gap-1.5 rounded-md border border-border px-2 text-xs text-muted-foreground hover:text-foreground hover:bg-accent transition-colors disabled:opacity-50"
+                title="Send /new: the Manager starts a new session, and its next message, from any channel, starts with a clean context"
+              >
+                <RotateCcw className="h-3.5 w-3.5" />
+                New session
+              </button>
+            )}
+            {target.kind === "manager" && (
+              <button
+                type="button"
                 onClick={handleNewChat}
                 className="flex h-7 w-7 items-center justify-center rounded-md border border-border text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
-                title="New conversation"
+                title="New conversation: a new chat thread; the Manager's session goes on"
               >
                 <Plus className="h-3.5 w-3.5" />
               </button>

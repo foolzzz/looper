@@ -17,6 +17,9 @@ The Manager is the only agent that communicates with users. It:
   writes a handoff in one HANDOFF turn. The first turn of any new session
   starts with a resume brief: why it is new, the handoff, and the recent
   conversation of each chat, from the stored chat messages
+- Answers ``/new`` itself, from any channel, without Claude: it stops Claude
+  and drops the saved session, so the next message starts a new session with
+  a clean context (no resume brief), and records the reset as a run
 """
 
 from __future__ import annotations
@@ -63,6 +66,7 @@ from ...db import activity as db_activity
 from ...db import agent_configs as db_agent_configs
 from ...db import chat as db_chat
 from ...db import agent_sessions as db_agent_sessions
+from ...db import llm_records as db_llm_records
 from ...db import projects as db_projects
 
 # Appended to the (editable) system prompt on every call: the task JSON is
@@ -135,6 +139,26 @@ CONVERSATION_MESSAGE_CHARS = 300
 CONVERSATION_MAX_CHARS = 4_000
 # How long the old session may take to write its handoff before the new one starts without it.
 HANDOFF_TIMEOUT_SEC = 300
+
+# The one command Looper answers itself in a chat with the Manager: a message that is exactly this (trimmed, any
+# case) starts a new session. Anything else, "/new foo" or "/news" too, is a message for Claude.
+NEW_SESSION_COMMAND = "/new"
+NEW_SESSION_REPLY = "已开始新的 Manager 会话，下一条消息从全新的上下文开始。"
+
+
+def is_new_session_command(text: str) -> bool:
+    return text.strip().lower() == NEW_SESSION_COMMAND
+
+
+def _message_origin(envelope: MessageEnvelope) -> dict[str, str | None]:
+    """The channel a message came from, its sender (Lark's open_id, Telegram's user id; the web chat names none)
+    and its chat (the Lark or Telegram chat, the web chat session)."""
+    context = envelope.payload.get("channel_context")
+    context = context if isinstance(context, dict) else {}
+    sender = context.get("sender_id") or context.get("user_id")
+    chat = context.get("chat_id") or context.get("session_id")
+    return {"channel": envelope.source.channel or envelope.source.agent_id,
+            "sender": str(sender) if sender else None, "chat": str(chat) if chat else None}
 
 
 class _AskUser(Exception):
@@ -209,6 +233,9 @@ class ManagerAgent:
         # turn has its resume brief.
         self._pending_switch: SessionSwitch | None = None
         self._pending_handoff: str | None = None
+        # The user dropped the session (/new): the next one starts without a resume brief. Saved with the session,
+        # so a restart before the next message keeps it; cleared once the new session has started.
+        self._clean_start = False
 
     @property
     def agent_id(self) -> str:
@@ -232,15 +259,18 @@ class ManagerAgent:
             self._session_runtime = saved.get("runtime_type")
             self._session_agent = saved.get("session_agent_id")
             self._session_provider = saved.get("provider_id")
+            self._clean_start = bool(saved.get("clean_start"))
 
     async def _save_session_state(self) -> None:
         try:
-            await db_agent_sessions.save_session(self.agent_id, self._session_id, self._session_totals.to_dict(),
-                                                 runtime_type=self._session_runtime,
-                                                 provider_id=self._session_provider,
-                                                 session_agent_id=self._session_agent)
+            await self._write_session_state()
         except Exception:
             logger.exception("manager: failed to save its session")
+
+    async def _write_session_state(self) -> None:
+        await db_agent_sessions.save_session(self.agent_id, self._session_id, self._session_totals.to_dict(),
+                                             runtime_type=self._session_runtime, provider_id=self._session_provider,
+                                             session_agent_id=self._session_agent, clean_start=self._clean_start)
 
     async def start(self, bus: MessageBus) -> None:
         self._bus = bus
@@ -314,6 +344,9 @@ class ManagerAgent:
         assert self._bus is not None
         text = envelope.payload.get("text", "")
         if not text.strip():
+            return
+        if is_new_session_command(text):
+            await self._start_new_session(envelope)
             return
 
         await self._send_status(envelope, "thinking", phase=True)
@@ -503,8 +536,10 @@ class ManagerAgent:
         if self._claude.stale(signature):
             await self._claude.stop()
         command = self._claude.command if self._claude.started else self._claude_command(prompt_file, launch)
-        # A new session's first turn starts with the resume brief; '' when it has nothing to say.
-        brief = "" if self._claude.started or self._session_id else await self._resume_brief(context_envelope, message)
+        # A new session's first turn starts with the resume brief ('' when it has nothing to say), unless the user
+        # asked for a clean one.
+        brief = "" if self._claude.started or self._session_id or self._clean_start \
+            else await self._resume_brief(context_envelope, message)
 
         task_id = context_envelope.metadata.get("task_id")
         recorder = ClaudeRunRecorder(
@@ -545,7 +580,7 @@ class ManagerAgent:
 
             session_id = payload.get("session_id")
             if isinstance(session_id, str) and session_id and session_id != self._session_id:
-                self._session_id = session_id
+                self._session_id, self._clean_start = session_id, False
                 await self._save_session_state()
                 self._pending_switch = self._pending_handoff = None  # the new session has its resume brief
 
@@ -669,6 +704,48 @@ class ManagerAgent:
                 f"Claude Code 没有返回内容（退出码 {turn.exit_code}）" if exited else "Claude Code 没有返回内容"
             )
         return final_text
+
+    # --- A new session the user asks for (/new) ---
+
+    async def _start_new_session(self, envelope: MessageEnvelope) -> None:
+        """``/new``: stop Claude and drop the saved session, so the next message starts a new session without a
+        resume brief; record the reset as a run and confirm it in the chat it came from. A turn under way finishes
+        first. Tasks and their Planners are not touched."""
+        origin = _message_origin(envelope)
+        async with self._turn_lock:
+            if not self._session_loaded:
+                await self._load_session_state()
+            # First: what a stopping Claude still writes (a turn of its own ending) saves the old session again.
+            await self._claude.stop()
+            previous = self._session_id, self._session_totals, self._clean_start
+            self._session_id, self._session_totals, self._clean_start = None, Usage(), True
+            try:
+                await self._write_session_state()
+            except Exception as exc:
+                # Nothing is dropped: the next message resumes the saved session in a new process.
+                self._session_id, self._session_totals, self._clean_start = previous
+                logger.exception("manager: could not drop its session for /new")
+                await self._send_reply(envelope, f"Manager 出错，没能开始新会话：{exc}")
+                return
+            self._pending_switch = self._pending_handoff = None
+            await self._record_new_session(envelope, origin, previous[0])
+        logger.info("manager: a new session on /new from %s (sender %s); the previous one was %s",
+                    origin["channel"], origin["sender"] or "-", previous[0] or "none")
+        await self._send_reply(envelope, NEW_SESSION_REPLY)
+
+    async def _record_new_session(self, envelope: MessageEnvelope, origin: dict[str, str | None],
+                                  previous: str | None) -> None:
+        """The reset as one of the Manager's runs, under the session it ended (``metadata.session_reset``: who
+        asked, from which channel and chat); a database error is logged, as for any run."""
+        try:
+            record_id = await db_llm_records.start_record(
+                agent_id=self.agent_id, session_id=previous, input_text=str(envelope.payload.get("text", "")),
+                metadata={"session_reset": {**origin, "previous_session_id": previous}},
+            )
+            await db_llm_records.finish_record(record_id, status="completed", output_text=NEW_SESSION_REPLY,
+                                               cost_usd=0.0, duration_ms=0)
+        except Exception:
+            logger.warning("manager: could not record the new session", exc_info=True)
 
     # --- A new session: the handoff before it and the resume brief that starts it ---
 

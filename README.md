@@ -286,6 +286,10 @@ environment variable **names**, not secret values.
   start, and the Settings page says why. `LOOPX_TELEGRAM_ALLOWED_USERS` no
   longer applies.
 - `app_secret_env` is not read yet; `lark-cli` holds the Lark credentials.
+- Send `/new` (the whole message) in the web chat, Lark or Telegram to start a
+  new Manager session: the next message, from any channel, starts with a clean
+  context. The web chat's **New session** button sends it. Running tasks are
+  not affected.
 - A channel that fails to start is logged, and the dashboard keeps running.
 
 ### Agent Configuration
