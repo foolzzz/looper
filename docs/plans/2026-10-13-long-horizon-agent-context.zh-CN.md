@@ -35,7 +35,7 @@
 | M6 | prompt 回归评测 | ✅ 已交付（looper #36） | M1 |
 | M7a | 计划状态入库：计划、步骤和 agent 会话以 PostgreSQL 为唯一来源 | ✅ 已交付（looper #45） | M2、M5 |
 | M7b | 任务记忆：任务日志、进度与发现注入、经验沉淀为项目知识 | ✅ 已交付（looper #46） | M7a |
-| M7c | 及时沉淀：日志记失败与重试、决策理由、用户指令、会话切换；换 agent 前的交接摘要和新会话的续接简报；Manager 续接；项目经验随时进草稿 | ✅ 已交付（looper #PRNUM） | M7b、M9a |
+| M7c | 及时沉淀：日志记失败与重试、决策理由、用户指令、会话切换；换 agent 前的交接摘要和新会话的续接简报；Manager 续接；项目经验随时进草稿 | ✅ 已交付（looper #66） | M7b、M9a |
 | M8a | 能力目录与安装：插件和 skill 先进目录，再按范围（全局或项目）和角色安装；项目 skill 并入目录 | ✅ 已交付（looper #48） | M1.6、M4 |
 | M8b | MCP 服务器进目录，安装方式相同；密钥存库、接口打码 | ✅ 已交付（looper #49） | M8a |
 | M8c | 进库来源：上传、git、界面新建与编辑 | ✅ 已交付（looper #51） | M8a |
@@ -512,7 +512,7 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
 | 2026-10-14 | M9a 交付（looper #62）：新增运行时、provider（密钥另表存放、接口打码，模型目录与并发上限只存储）和 agent 的注册与校验，分层配置以 `agent` 取代模型（迁移把各层模型变成 `claude-code/<模型>`），新建任务可按角色覆盖 agent，四类 agent 都经运行时适配器启动，`llm_profiles` 删除。验证：以 main（`73eed752d`）的代码生成基准，未配置和迁移过模型层两组数据下四类角色的完整 argv、环境变量、system prompt 和首条输入与基准逐字节相同（prompt 不变，未跑真实 Claude）；校验正反例、任务级覆盖只到该任务的角色、启动时校验失败不换 agent、导出导入往返都有真实 PG 测试，替身模式评测（带 `--agent`）通过，真实 PG 1005 通过。 |
 | 2026-10-14 | 第 5.3 节界面导入配置文件（looper #63）：`POST /api/config/imports` 只在这一个路由把请求体上限放宽到 256 MiB（目录上限的两倍），流式写入 runtime root 下权限 0600 的临时文件，校验格式后返回与 `loopx config import` 相同的预览，`POST .../<id>/apply` 在一个事务里应用并删除文件，`DELETE` 取消，未应用的一小时后过期删除，其余路由仍是 8 MiB。Settings 的「Move to another machine」可选择或拖入文件，按段显示新增、变化（含字段）、不变和跳过，以及待补的密钥，确认后应用，结果里的链接直接打开对应 provider、MCP 服务器或渠道的表单。验证：真实 PG 测试覆盖超过 8 MiB 的上传、其他路由 413、预览不写、应用与 CLI 结果一致、过期和未知 id 404、坏文件 400 与临时文件清理；两个一次性 `loopx serve` 之间经界面路由导出 12.4 MB、在新库的 Settings 里预览并应用 24 项，再导出除未导出的 API key 外与原文件相同；真实 PG 1020 通过。 |
 | 2026-10-14 | 全面改名为 Looper（looper #64）：命令、Python 包与 wheel、数据目录、环境变量、服务 label、导出格式、界面、prompt 与文档改为 looper/Looper；`loopx` 别名打印弃用提示后执行 `looper`，`LOOPX_*` 作为回退并警告一次，`~/.loopx` 在首次 `serve` 或 `service install` 时改名为 `~/.looper` 并留下链接，`service install` 先卸掉 `com.loopx.serve`，`loopx-config/v1` 仍可导入，默认库名 `loopx`、tag 与 NOTICE 不变。验证：真实 PG 1043 通过；临时 HOME 下 `looper serve` 移动目录并留链接、`loopx version`、只设 `LOOPX_DATABASE_URL` 的 serve 与 doctor、从 `git archive` 构建的 `looper-2.5.0` wheel 装出 `looper` 和 `loopx`，沙箱里 `install.sh` 先卸旧 `loopx` 工具；真实 haiku 评测 5/5、契约违约 0、Planner 改文件 0，送审任务多出的一步单独重跑后消失，花费 $0.44。 |
-| 2026-10-14 | M7c 交付（looper #PRNUM）：任务日志新增 `step_failed`、`step_retry`、`decision`、`user_instruction`、`session_switch` 和 `handoff`，由代码在事件发生时写入；Planner 每轮先整条注入用户指令（独立预算），再按类型分标题注入各类最新条目，Worker 首轮也拿到用户指令和失败经验；Planner、Manager 换 agent 时旧会话（进程还在时）先写交接摘要，新会话首轮带续接简报（Manager 另带各聊天最近的对话），项目级经验在 `distill_lessons` 为 `draft`、`write` 时到达即进草稿。验证：替身 Claude 下各类条目的触发、注入顺序与上限、强制换 agent 的交接与简报、三种旧会话不可用、Manager 续接和草稿规则都有测试，一次性 `looper serve` 跑通重试、聊天加步骤、会话丢失后续接和经验草稿并截图任务页；真实 haiku 评测 5/5、契约违约 0、Planner 改文件 0，$0.35（基线 $0.33）；真实 PG 1070 通过。M9b 尚未合入，续接规则留在 `session_switch.agent_switch` 一处，"中途换 provider"评测记为 M7c 的待办。 |
+| 2026-10-14 | M7c 交付（looper #66）：任务日志新增 `step_failed`、`step_retry`、`decision`、`user_instruction`、`session_switch` 和 `handoff`，由代码在事件发生时写入；Planner 每轮先整条注入用户指令（独立预算），再按类型分标题注入各类最新条目，Worker 首轮也拿到用户指令和失败经验；Planner、Manager 换 agent 时旧会话（进程还在时）先写交接摘要，新会话首轮带续接简报（Manager 另带各聊天最近的对话），项目级经验在 `distill_lessons` 为 `draft`、`write` 时到达即进草稿。验证：替身 Claude 下各类条目的触发、注入顺序与上限、强制换 agent 的交接与简报、三种旧会话不可用、Manager 续接和草稿规则都有测试，一次性 `looper serve` 跑通重试、聊天加步骤、会话丢失后续接和经验草稿并截图任务页；真实 haiku 评测 5/5、契约违约 0、Planner 改文件 0，$0.35（基线 $0.33）；真实 PG 1070 通过。M9b 尚未合入，续接规则留在 `session_switch.agent_switch` 一处，"中途换 provider"评测记为 M7c 的待办。 |
 
 ## 5. 不属于本 RFC 的待办
 
