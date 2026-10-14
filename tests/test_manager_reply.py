@@ -13,6 +13,8 @@ from typing import Any
 
 import pytest
 
+from agent_fixtures import agent_json
+
 from fake_claude import fake_claude
 from library_fixtures import ALPHA_SKILL, DEMO_PLUGIN, plugin_dirs
 from loopx.agents.agent_settings import DEFAULT_HARNESS_PROMPT
@@ -241,6 +243,7 @@ def _converse(
     between: Any = None,
     saved_session: str | None = None,
     saved_totals: dict[str, Any] | None = None,
+    saved_runtime: str | None = None,
 ) -> dict[str, Any]:
     """Send ``messages`` one at a time to one Manager backed by a fake claude, then stop it.
 
@@ -252,21 +255,23 @@ def _converse(
     ``launched``, whether each was ``running`` just before ``stop()``, the
     ``pids`` the fake logged and the work directory ``root``. ``saved_session`` (with ``saved_totals``, the
     running totals saved beside it) is what an earlier run of the server
-    left; the fake's session then has spent ``saved_totals``' cost. The saved session is kept in
-    memory in place of ``agent_sessions``; the returned ``saved_session`` and ``saved_totals`` are what
-    the Manager saved last.
+    left; the fake's session then has spent ``saved_totals``' cost, and ``saved_runtime`` is the runtime type
+    it belongs to. The saved session is kept in memory in place of ``agent_sessions``; the returned
+    ``saved_session``, ``saved_totals`` and ``saved_runtime`` are what the Manager saved last.
     """
     from loopx.db import agent_configs, agent_sessions, agent_setting_layers
 
     sessions: dict[str, dict[str, Any]] = {}
     if saved_session is not None:  # a session saved by an earlier run of the server
-        sessions["manager"] = {"session_id": saved_session, "session_totals": dict(saved_totals or {})}
+        sessions["manager"] = {"session_id": saved_session, "session_totals": dict(saved_totals or {}),
+                               "runtime_type": saved_runtime}
 
     async def _get_session(agent_id: str, **_: Any) -> dict[str, Any] | None:
         return sessions.get(agent_id)
 
-    async def _save_session(agent_id: str, session_id: str | None, totals: Any, **_: Any) -> None:
-        sessions[agent_id] = {"session_id": session_id, "session_totals": dict(totals)}
+    async def _save_session(agent_id: str, session_id: str | None, totals: Any, *, runtime_type: str | None = None,
+                            **_: Any) -> None:
+        sessions[agent_id] = {"session_id": session_id, "session_totals": dict(totals), "runtime_type": runtime_type}
 
     monkeypatch.setattr(agent_sessions, "get_session", _get_session)
     monkeypatch.setattr(agent_sessions, "save_session", _save_session)
@@ -333,7 +338,8 @@ def _converse(
             saved = sessions.get("manager") or {}
             return {"replies": replies, "spawned": spawned, "launched": launched, "running": running, "pids": pids,
                     "prompts": _prompts(root), "root": root, "files": sorted(p.name for p in root.rglob("*.json")),
-                    "saved_session": saved.get("session_id"), "saved_totals": saved.get("session_totals")}
+                    "saved_session": saved.get("session_id"), "saved_totals": saved.get("session_totals"),
+                    "saved_runtime": saved.get("runtime_type")}
 
     return asyncio.run(_run())
 
@@ -471,6 +477,19 @@ class TestManagerResidentClaude:
         # The total is saved again for the next restart, in the database: no session file is written.
         assert (chat["saved_session"], chat["saved_totals"]) == ("sess-1", {"cost_usd": 1.0})
         assert "session.json" not in chat["files"]
+
+    @pytest.mark.parametrize(("saved_runtime", "resumed"), [
+        (None, "sess-1"),  # a session from before agents: Claude Code ran it
+        ("claude-code", "sess-1"),
+        ("codex", None),  # another runtime's session: a new one starts
+    ])
+    def test_only_a_session_of_the_same_runtime_is_resumed(
+        self, monkeypatch: pytest.MonkeyPatch, saved_runtime: str | None, resumed: str | None,
+    ) -> None:
+        chat = _converse(monkeypatch, _resident(), ["hello"], saved_session="sess-1", saved_runtime=saved_runtime)
+        ((argv, _),) = chat["spawned"]
+        assert _flag(argv, "--resume") == resumed
+        assert chat["saved_runtime"] == "claude-code"  # the session now belongs to the agent's runtime
 
     @pytest.mark.parametrize(("ignore_eof", "returncode"), [(False, 0), (True, -9)])
     def test_stop_ends_and_reaps_claude(
@@ -616,7 +635,7 @@ class TestManagerHarnessAndLaunch:
         row = {"system_prompt": "You manage."}
         # A project's layer never reaches the Manager.
         layers = [_system(harness_prompt="DEFAULT"), _manager(harness_prompt="MANAGER HARNESS"),
-                  {"scope": "project", "project_id": "proj-1", "harness_prompt": "PROJECT", "model": "haiku"}]
+                  {"scope": "project", "project_id": "proj-1", "harness_prompt": "PROJECT", "agent": agent_json("haiku")}]
         chat = _converse(monkeypatch, _resident(), ["hello"], rows=[row], layers=[layers])
         (prompt,) = chat["prompts"]
         assert prompt == f"MANAGER HARNESS\n\nYou manage.\n\n{TASK_PLACEMENT_RULE}"
@@ -633,7 +652,7 @@ class TestManagerHarnessAndLaunch:
         before = [_system(harness_prompt="V1")]
         after = [_system(harness_prompt="V2" if change == "harness" else "V1"),
                  *([_manager(harness_prompt="OWN")] if change == "override" else []),
-                 *([_manager(model="sonnet")] if change == "model" else [])]
+                 *([_manager(agent=agent_json("sonnet"))] if change == "model" else [])]
         row = {"system_prompt": "M."}
         chat = _converse(monkeypatch, _resident(), ["hello", "again"], rows=[row, row], layers=[before, after])
         assert chat["replies"] == ["turn 1: hello", "turn 1: again"]  # a new process for the second message

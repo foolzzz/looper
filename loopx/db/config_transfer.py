@@ -2,7 +2,8 @@
 
 Every function takes a connection, so an export reads one snapshot and an
 import applies in one transaction. Secrets (an MCP server's environment and
-header values) are read here and leave only through the export's own rules.
+header values, a provider's API key) are read here and leave only through the
+export's own rules.
 """
 
 from __future__ import annotations
@@ -30,11 +31,39 @@ async def has_schema(conn: asyncpg.Connection) -> bool:
 
 
 async def read_layers(conn: asyncpg.Connection) -> list[dict[str, Any]]:
+    """Every layer, its agent by name (``agent``)."""
     rows = await conn.fetch(
-        "SELECT scope, role, project_id, harness_prompt, model, effort, env, run_budget_usd FROM agent_setting_layers "
-        "ORDER BY project_id NULLS FIRST, scope, role NULLS FIRST"
+        "SELECT l.scope, l.role, l.project_id, l.harness_prompt, l.agent_id, a.name AS agent, l.effort, l.env, "
+        "l.run_budget_usd FROM agent_setting_layers l LEFT JOIN agents a ON a.id = l.agent_id "
+        "ORDER BY l.project_id NULLS FIRST, l.scope, l.role NULLS FIRST"
     )
     return [{**dict(row), "env": _json(row["env"])} for row in rows]
+
+
+async def read_runtimes(conn: asyncpg.Connection) -> list[dict[str, Any]]:
+    rows = await conn.fetch("SELECT id, name, type, executable, capabilities, builtin FROM agent_runtimes "
+                            "ORDER BY name COLLATE \"C\"")
+    return [dict(row) for row in rows]
+
+
+async def read_providers(conn: asyncpg.Connection) -> list[dict[str, Any]]:
+    """Every provider with its API key (``api_key``, None without one)."""
+    rows = await conn.fetch(
+        "SELECT p.id, p.name, p.protocols, p.auth, p.oauth_runtime_type, p.base_url, p.models, p.max_concurrency, "
+        "p.builtin, s.api_key "
+        "FROM llm_providers p LEFT JOIN llm_provider_secrets s ON s.provider_id = p.id ORDER BY p.name COLLATE \"C\""
+    )
+    return [{**dict(row), "models": _json(row["models"])} for row in rows]
+
+
+async def read_agents(conn: asyncpg.Connection) -> list[dict[str, Any]]:
+    """Every agent, its runtime and provider by name."""
+    rows = await conn.fetch(
+        "SELECT a.id, a.name, r.name AS runtime, p.name AS provider, a.model, a.effort, a.builtin "
+        "FROM agents a JOIN agent_runtimes r ON r.id = a.runtime_id JOIN llm_providers p ON p.id = a.provider_id "
+        "ORDER BY a.name COLLATE \"C\""
+    )
+    return [dict(row) for row in rows]
 
 
 async def read_roles(conn: asyncpg.Connection) -> list[dict[str, Any]]:
@@ -177,16 +206,61 @@ async def write_install(
 async def write_layer(
     conn: asyncpg.Connection, scope: str, role: str | None, project_id: str | None, values: Mapping[str, Any],
 ) -> None:
-    """Make one layer exactly ``values`` (``harness_prompt``, ``model``, ``effort``, ``env``, ``run_budget_usd``)."""
+    """Make one layer exactly ``values`` (``harness_prompt``, ``agent_id``, ``effort``, ``env``,
+    ``run_budget_usd``)."""
     await conn.execute(
-        "INSERT INTO agent_setting_layers (scope, role, project_id, harness_prompt, model, effort, env, run_budget_usd) "
-        "VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8) "
+        "INSERT INTO agent_setting_layers (scope, role, project_id, harness_prompt, agent_id, effort, env, "
+        "run_budget_usd) VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8) "
         "ON CONFLICT (scope, (COALESCE(role, '')), (COALESCE(project_id, ''))) DO UPDATE SET "
-        "harness_prompt = EXCLUDED.harness_prompt, model = EXCLUDED.model, effort = EXCLUDED.effort, "
+        "harness_prompt = EXCLUDED.harness_prompt, agent_id = EXCLUDED.agent_id, effort = EXCLUDED.effort, "
         "env = EXCLUDED.env, run_budget_usd = EXCLUDED.run_budget_usd, updated_at = now()",
-        scope, role, project_id, values["harness_prompt"], values["model"], values["effort"],
+        scope, role, project_id, values["harness_prompt"], values["agent_id"], values["effort"],
         json.dumps(list(values["env"]), ensure_ascii=False), values["run_budget_usd"],
     )
+
+
+async def write_runtime(conn: asyncpg.Connection, runtime_id: str | None, values: Mapping[str, Any]) -> str:
+    """Add a runtime (``runtime_id`` None; not probed yet, with its type's capabilities) or set one's
+    executable; returns its id."""
+    if runtime_id is None:
+        runtime_id = f"rt-{uuid.uuid4().hex[:12]}"
+        await conn.execute(
+            "INSERT INTO agent_runtimes (id, name, type, executable, capabilities) VALUES ($1, $2, $3, $4, $5)",
+            runtime_id, values["name"], values["type"], values["executable"], list(values["capabilities"]),
+        )
+    else:
+        await conn.execute("UPDATE agent_runtimes SET executable = $2, updated_at = now() WHERE id = $1",
+                           runtime_id, values["executable"])
+    return runtime_id
+
+
+async def write_provider(conn: asyncpg.Connection, provider_id: str | None, values: Mapping[str, Any],
+                         api_key: str | None) -> str:
+    """Add a provider (``provider_id`` None) or replace one's fields; ``api_key`` (None: none) replaces its key."""
+    from .agent_registry import insert_provider, update_provider
+
+    fields = {k: values[k] for k in ("name", "protocols", "auth", "oauth_runtime_type", "base_url", "models",
+                                     "max_concurrency")}
+    if provider_id is None:
+        return await insert_provider(conn, fields, api_key)
+    await update_provider(conn, provider_id, fields, api_key=api_key, keep_key=False)
+    return provider_id
+
+
+async def write_agent(conn: asyncpg.Connection, agent_id: str | None, values: Mapping[str, Any]) -> str:
+    """Add an agent (``agent_id`` None) or replace one's runtime, provider, model and effort; returns its id."""
+    if agent_id is None:
+        agent_id = f"agent-{uuid.uuid4().hex[:12]}"
+        await conn.execute(
+            "INSERT INTO agents (id, name, runtime_id, provider_id, model, effort) VALUES ($1, $2, $3, $4, $5, $6)",
+            agent_id, values["name"], values["runtime_id"], values["provider_id"], values["model"], values["effort"],
+        )
+    else:
+        await conn.execute(
+            "UPDATE agents SET runtime_id = $2, provider_id = $3, model = $4, effort = $5, updated_at = now() "
+            "WHERE id = $1", agent_id, values["runtime_id"], values["provider_id"], values["model"], values["effort"],
+        )
+    return agent_id
 
 
 async def write_role(conn: asyncpg.Connection, agent_id: str, values: Mapping[str, Any], *, exists: bool) -> None:

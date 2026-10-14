@@ -96,8 +96,10 @@ class _PlanStore:
         journal = [{**entry, "step_key": keys.get(entry["step_id"], "")} for entry in self.journal.get(task_id, [])]
         return {"plan": plan, "steps": rows, "journal": journal}
 
-    async def save_session(self, agent_id: str, session_id: str | None, totals: Any, **_: object) -> None:
-        self.sessions[agent_id] = {"session_id": session_id, "session_totals": dict(totals)}
+    async def save_session(self, agent_id: str, session_id: str | None, totals: Any, *,
+                           runtime_type: str | None = None, session_agent_id: str | None = None, **_: object) -> None:
+        self.sessions[agent_id] = {"session_id": session_id, "session_totals": dict(totals),
+                                   "runtime_type": runtime_type, "session_agent_id": session_agent_id}
 
     async def get_session(self, agent_id: str, **_: object) -> dict[str, Any] | None:
         saved = self.sessions.get(agent_id)

@@ -1,9 +1,10 @@
-"""What every agent inherits: the harness prompt, the model, the effort, the environment and the per-run cap.
+"""What every agent inherits: the harness prompt, the agent, the effort, the environment and the per-run cap.
 
 Each resolves through system -> role -> project -> role in a project, a later
-layer winning; the Manager has only the first two. The environment merges
-key by key, and a Reviewer without a harness of its own at a role layer takes
-the Workers' at that layer.
+layer winning; the Manager has only the first two, and a task's choice of
+agent for one of its roles wins over them all. The environment merges key by
+key, and a Reviewer without a harness of its own at a role layer takes the
+Workers' at that layer. An agent's default effort applies under every layer.
 """
 
 from __future__ import annotations
@@ -18,6 +19,7 @@ from typing import Any
 import pytest
 
 from loopx.agents import agent_settings
+from loopx.agents.agent_registry import BUILTIN_AGENT, BUILTIN_PROVIDER, BUILTIN_RUNTIME, AgentSpec
 from loopx.agents.agent_settings import (
     BUILTIN_SETTINGS,
     DEFAULT_HARNESS_PROMPT,
@@ -41,13 +43,18 @@ def _sha(text: str) -> str:
 
 
 def _place(layer: Layer, role: str) -> tuple[Layer, AgentType | None]:
-    return layer, AgentType(role) if layer in (Layer.ROLE, Layer.ROLE_PROJECT) else None
+    return layer, AgentType(role) if layer in (Layer.ROLE, Layer.ROLE_PROJECT, Layer.TASK) else None
+
+
+def _agent(model: str, effort: str | None = None) -> AgentSpec:
+    """An agent of the built-in runtime and provider with ``model``."""
+    return AgentSpec(f"agent-{model}", f"claude-code/{model}", BUILTIN_RUNTIME, BUILTIN_PROVIDER, model, effort)
 
 
 # A distinct value of each field at each layer.
 VALUES: dict[str, dict[Layer, Any]] = {
     "harness_prompt": {layer: f"HARNESS {layer.value}" for layer in ORDER},
-    "model": {layer: f"model-{layer.value}" for layer in ORDER},
+    "agent": {layer: _agent(f"model-{layer.value}") for layer in ORDER},
     "effort": dict(zip(ORDER, ("low", "medium", "high", "max"))),
     "run_budget_usd": dict(zip(ORDER, (1.0, 2.0, 3.0, 4.0))),
     "env": {layer: (("SHARED", f"from {layer.value}"),) for layer in ORDER},
@@ -57,13 +64,26 @@ VALUES: dict[str, dict[Layer, Any]] = {
 def _resolved(settings: agent_settings.AgentSettings, field: str) -> tuple[Any, Layer]:
     if field == "harness_prompt":
         return settings.harness.text, settings.harness.source
-    if field == "model":
-        return settings.model, settings.model_source
+    if field == "agent":
+        return settings.agent, settings.agent_source
     if field == "effort":
         return settings.effort, settings.effort_source
     if field == "run_budget_usd":
         return settings.max_budget_usd, settings.max_budget_source
     return settings.env, dict(settings.env_sources).get("SHARED", Layer.BUILTIN)
+
+
+def _row(agent: AgentSpec) -> dict[str, Any]:
+    """``agent`` as the database gives it (``db.agent_registry.AGENT_JSON``)."""
+    return {"id": agent.id, "name": agent.name, "model": agent.model, "effort": agent.effort, "builtin": False,
+            "runtime_id": agent.runtime.id, "runtime_name": agent.runtime.name, "runtime_type": agent.runtime.type,
+            "runtime_executable": agent.runtime.executable,
+            "runtime_capabilities": sorted(c.value for c in agent.runtime.capabilities),
+            "provider_id": agent.provider.id, "provider_name": agent.provider.name,
+            "provider_auth": agent.provider.auth.value,
+            "provider_protocols": sorted(p.value for p in agent.provider.protocols),
+            "provider_oauth_runtime_type": agent.provider.oauth_runtime_type, "provider_base_url": "",
+            "provider_models": []}
 
 
 # --- Resolution ---
@@ -90,20 +110,39 @@ class TestPrecedence:
     def test_nothing_set_is_the_builtin_default(self) -> None:
         for role in AgentType:
             assert resolve(role, {}, "proj-a") == BUILTIN_SETTINGS
-        assert (BUILTIN_SETTINGS.harness.text, BUILTIN_SETTINGS.model, BUILTIN_SETTINGS.effort) == (
-            DEFAULT_HARNESS_PROMPT, "opus", "")
+        assert (BUILTIN_SETTINGS.harness.text, BUILTIN_SETTINGS.agent, BUILTIN_SETTINGS.model,
+                BUILTIN_SETTINGS.effort) == (DEFAULT_HARNESS_PROMPT, BUILTIN_AGENT, "opus", "")
         assert (BUILTIN_SETTINGS.env, BUILTIN_SETTINGS.max_budget_usd) == ((), None)
 
     def test_a_project_layer_counts_only_inside_its_project(self) -> None:
-        rows = [{"scope": "project", "project_id": "proj-a", "model": "a-model"},
-                {"scope": "role_project", "role": "worker", "project_id": "proj-a", "model": "a-worker"}]
+        rows = [{"scope": "project", "project_id": "proj-a", "agent": _row(_agent("a-model"))},
+                {"scope": "role_project", "role": "worker", "project_id": "proj-a", "agent": _row(_agent("a-worker"))}]
         assert resolve("worker", index_layers(rows, "proj-a"), "proj-a").model == "a-worker"
         assert resolve("worker", index_layers(rows, "proj-b"), "proj-b").model == "opus"
         assert resolve("worker", index_layers(rows, None)).model == "opus"
 
+    @pytest.mark.parametrize("role", TASK_ROLES)
+    def test_a_tasks_agent_wins_over_every_layer_for_its_role_only(self, role: str) -> None:
+        layers = {_place(layer, role): LayerValues(agent=_agent(f"model-{layer.value}"), effort="low")
+                  for layer in ORDER}
+        layers[(Layer.TASK, AgentType(role))] = LayerValues(agent=_agent("task-model"))
+        chosen = resolve(role, layers, "proj-a")
+        assert (chosen.model, chosen.agent_source, chosen.effort) == ("task-model", Layer.TASK, "low")
+        for other in set(TASK_ROLES) - {role}:
+            assert resolve(other, layers, "proj-a").agent_source is not Layer.TASK
+        # The Manager spans every task.
+        assert resolve("manager", {(Layer.TASK, AgentType.MANAGER): LayerValues(agent=_agent("x"))}).model == "opus"
+
+    def test_an_agents_effort_applies_unless_a_layer_sets_one(self) -> None:
+        layers = {(Layer.ROLE, AgentType.WORKER): LayerValues(agent=_agent("sonnet", effort="low"))}
+        worker = resolve("worker", layers)
+        assert (worker.effort, worker.effort_source) == ("low", Layer.AGENT)
+        layers[(Layer.SYSTEM, None)] = LayerValues(effort="max")  # any layer's effort, even an earlier one
+        assert (resolve("worker", layers).effort, resolve("worker", layers).effort_source) == ("max", Layer.SYSTEM)
+
     @pytest.mark.parametrize("layer", [Layer.ROLE, Layer.ROLE_PROJECT])
     def test_a_role_layer_reaches_only_its_role(self, layer: Layer) -> None:
-        layers = {_place(layer, "worker"): LayerValues(model="worker-only", effort="max", run_budget_usd=0.5,
+        layers = {_place(layer, "worker"): LayerValues(agent=_agent("worker-only"), effort="max", run_budget_usd=0.5,
                                                        env=(("ONLY", "w"),))}
         worker = resolve("worker", layers, "proj-a")
         assert (worker.model, worker.effort, worker.max_budget_usd, worker.env) == (
@@ -152,7 +191,7 @@ class TestReviewerHarness:
     @pytest.mark.parametrize("layer", [Layer.ROLE, Layer.ROLE_PROJECT])
     def test_a_reviewer_without_its_own_follows_the_workers_at_that_layer(self, layer: Layer) -> None:
         layers = {(Layer.SYSTEM, None): LayerValues(harness_prompt="SYSTEM"),
-                  _place(layer, "worker"): LayerValues(harness_prompt="WORKER", model="worker-model"),
+                  _place(layer, "worker"): LayerValues(harness_prompt="WORKER", agent=_agent("worker-model")),
                   _place(layer, "planner"): LayerValues(harness_prompt="PLANNER")}
         reviewer = resolve("reviewer", layers, "proj-a")
         assert (reviewer.harness.text, reviewer.harness.source, reviewer.harness.from_role) == (
@@ -176,14 +215,18 @@ class TestReviewerHarness:
 class TestRecord:
     def test_a_run_records_each_settings_layer(self) -> None:
         layers = {(Layer.SYSTEM, None): LayerValues(effort="high", env=(("TZ", "UTC"),)),
-                  (Layer.ROLE, AgentType.WORKER): LayerValues(model="sonnet"),
+                  (Layer.ROLE, AgentType.WORKER): LayerValues(agent=_agent("sonnet")),
                   (Layer.PROJECT, None): LayerValues(run_budget_usd=0.5),
                   (Layer.ROLE_PROJECT, AgentType.WORKER): LayerValues(harness_prompt="H", env=(("LANG", "C"),))}
         settings = resolve("worker", layers, "proj-a")
         launch = Launch(settings)
         record = launch.record()
         assert record["model_choice"] == {"model": "sonnet", "source": "role", "effort": "high"}
-        assert record["settings_sources"] == {"harness": "role_project", "model": "role", "effort": "system",
+        assert record["agent"] == {"id": "agent-sonnet", "name": "claude-code/sonnet", "model": "sonnet",
+                                   "runtime": {"id": "rt-claude-code", "name": "claude-code", "type": "claude-code"},
+                                   "provider": {"id": "prov-claude-subscription", "name": "claude-subscription",
+                                                "auth": "oauth"}, "source": "role"}
+        assert record["settings_sources"] == {"harness": "role_project", "agent": "role", "effort": "system",
                                               "env": {"TZ": "system", "LANG": "role_project"},
                                               "run_budget_usd": "project"}
         assert record["max_budget_usd"] == 0.5
@@ -197,8 +240,9 @@ class TestRecord:
 
         assert Launch().args() == [*permission_args(), "--model", "opus"]
         assert Launch().record() == {
+            "agent": {**BUILTIN_AGENT.record(), "source": "builtin"},
             "model_choice": {"model": "opus", "source": "builtin", "effort": None},
-            "settings_sources": {"harness": "builtin", "model": "builtin", "effort": "builtin", "env": {},
+            "settings_sources": {"harness": "builtin", "agent": "builtin", "effort": "builtin", "env": {},
                                  "run_budget_usd": "builtin"},
         }
 
@@ -206,7 +250,7 @@ class TestRecord:
 class TestStoredRows:
     def test_an_unusable_stored_value_is_ignored(self) -> None:
         values = LayerValues.from_row({
-            "scope": "system", "harness_prompt": "\n\n  Mine.\n", "model": "--dangerously-skip-permissions",
+            "scope": "system", "harness_prompt": "\n\n  Mine.\n", "agent": {"id": "agent-x"},
             "effort": "extreme", "env": [{"key": "lang", "value": "x"}], "run_budget_usd": -1,
         })
         assert values == LayerValues(harness_prompt="  Mine.")
@@ -259,22 +303,27 @@ class TestValidation:
 # --- The settings API (an in-memory layer table) ---
 
 
+# The registered agents of the stand-in table, by id.
+AGENTS = {agent.id: agent for agent in (BUILTIN_AGENT, _agent("sonnet"), _agent("haiku"), _agent("opus[1m]"))}
+
+
 class _Layers:
-    """An in-memory stand-in for ``agent_setting_layers``, with one project, ``proj-a``."""
+    """An in-memory stand-in for ``agent_setting_layers``, with one project, ``proj-a``, and ``AGENTS``."""
 
     def __init__(self) -> None:
         self.rows: dict[tuple[str, str | None, str | None], dict[str, Any]] = {}
         self.writes = 0
 
     async def list_layers(self, project_id: str | None = None, **_: Any) -> list[dict[str, Any]]:
-        return [{"scope": s, "role": r, "project_id": p, **values}
+        return [{"scope": s, "role": r, "project_id": p, **values,
+                 "agent": _row(AGENTS[values["agent_id"]]) if values["agent_id"] else None}
                 for (s, r, p), values in self.rows.items() if p in (None, project_id)]
 
     async def put_layer(self, scope: str, role: str | None, project_id: str | None, values: dict[str, Any],
                         **_: Any) -> None:
         self.writes += 1
         row = self.rows.setdefault((scope, role, project_id), {
-            "harness_prompt": None, "model": None, "effort": None, "env": [], "run_budget_usd": None})
+            "harness_prompt": None, "agent_id": None, "effort": None, "env": [], "run_budget_usd": None})
         row.update({k: (list(v or []) if k == "env" else v) for k, v in values.items()})
         if not any(row.values()):
             del self.rows[(scope, role, project_id)]
@@ -282,11 +331,16 @@ class _Layers:
 
 @pytest.fixture
 def layers(monkeypatch: pytest.MonkeyPatch) -> _Layers:
-    from loopx.db import agent_setting_layers, projects
+    from loopx.db import agent_registry, agent_setting_layers, projects
 
     table = _Layers()
     monkeypatch.setattr(agent_setting_layers, "list_layers", table.list_layers)
     monkeypatch.setattr(agent_setting_layers, "put_layer", table.put_layer)
+
+    async def get_agent(agent_id: str, **_: Any) -> dict[str, Any] | None:
+        return _row(AGENTS[agent_id]) if agent_id in AGENTS else None
+
+    monkeypatch.setattr(agent_registry, "get_agent", get_agent)
 
     async def get_project(project_id: str, **_: Any) -> dict[str, Any] | None:
         return {"id": project_id} if project_id == "proj-a" else None
@@ -319,7 +373,13 @@ def _call(method: str, path: str, body: Any = None) -> tuple[int, Any]:
     return int(head.split()[1]), json.loads(payload)
 
 
-UNSET = {"harness_prompt": None, "model": None, "effort": None, "env": [], "run_budget_usd": None}
+UNSET = {"harness_prompt": None, "agent": None, "effort": None, "env": [], "run_budget_usd": None}
+
+
+def _now(agent: AgentSpec, source: str) -> dict[str, Any]:
+    """An effective view's agent."""
+    return {"value": {"agent_id": agent.id, "name": agent.name, "model": agent.model, "runtime": "claude-code",
+                      "provider": "claude-subscription"}, "source": source}
 
 
 class TestSettingsApi:
@@ -332,38 +392,39 @@ class TestSettingsApi:
         for view in (body["system"], *body["roles"].values()):
             effective = view["effective"]
             assert effective["harness_prompt"] == {"value": DEFAULT_HARNESS_PROMPT, "source": "builtin"}
-            assert effective["model"] == {"value": "opus", "source": "builtin"}
+            assert effective["agent"] == _now(BUILTIN_AGENT, "builtin")
             assert (effective["effort"], effective["env"]) == ({"value": None, "source": "builtin"}, [])
 
     def test_each_page_edits_its_layer_and_shows_what_applies(self, layers: _Layers) -> None:
+        sonnet, haiku, opus_1m = AGENTS["agent-sonnet"], AGENTS["agent-haiku"], AGENTS["agent-opus[1m]"]
         status, body = _call("PUT", "/api/agent-settings/system", {
-            "harness_prompt": "\nBe careful.\n", "model": " sonnet ", "effort": "high",
+            "harness_prompt": "\nBe careful.\n", "agent": sonnet.id, "effort": "high",
             "env": [{"key": "TZ", "value": "UTC"}]})
         assert status == 200 and body["system"]["values"] == {
-            "harness_prompt": "Be careful.", "model": "sonnet", "effort": "high",
+            "harness_prompt": "Be careful.", "agent": sonnet.id, "effort": "high",
             "env": [{"key": "TZ", "value": "UTC"}], "run_budget_usd": None}
-        status, body = _call("PUT", "/api/agent-settings/roles/worker", {"model": "haiku", "run_budget_usd": 2})
+        status, body = _call("PUT", "/api/agent-settings/roles/worker", {"agent": haiku.id, "run_budget_usd": 2})
         assert status == 200
         worker = body["roles"]["worker"]["effective"]
-        assert (worker["model"], worker["run_budget_usd"]) == ({"value": "haiku", "source": "role"},
-                                                              {"value": 2.0, "source": "role"})
+        assert (worker["agent"], worker["run_budget_usd"]) == (_now(haiku, "role"), {"value": 2.0, "source": "role"})
         assert worker["harness_prompt"] == {"value": "Be careful.", "source": "system"}
-        assert body["roles"]["planner"]["effective"]["model"] == {"value": "sonnet", "source": "system"}
+        assert body["roles"]["planner"]["effective"]["agent"] == _now(sonnet, "system")
 
-        status, body = _call("PUT", "/api/projects/proj-a/agent-settings", {"model": "opus", "env": [
+        status, body = _call("PUT", "/api/projects/proj-a/agent-settings", {"agent": opus_1m.id, "env": [
             {"key": "TZ", "value": None}]})
-        assert status == 200 and body["project"]["values"]["model"] == "opus"
+        assert status == 200 and body["project"]["values"]["agent"] == opus_1m.id
         status, body = _call("PUT", "/api/projects/proj-a/agent-settings/roles/worker", {"harness_prompt": "W."})
         assert status == 200 and body["roles"]["worker"]["values"]["harness_prompt"] == "W."
         planner, worker, reviewer = (body["roles"][r]["effective"] for r in TASK_ROLES)
-        assert planner["model"] == {"value": "opus", "source": "project"} and planner["env"] == []
+        assert planner["agent"] == _now(opus_1m, "project") and planner["env"] == []
         assert worker["harness_prompt"] == {"value": "W.", "source": "role_project"}
         assert reviewer["harness_prompt"] == {"value": "W.", "source": "role_project", "from_role": "worker"}
         assert _call("GET", "/api/projects/proj-a/agent-settings")[1] == body
 
     def test_an_empty_value_or_the_builtin_text_unsets(self, layers: _Layers) -> None:
-        _call("PUT", "/api/agent-settings/system", {"harness_prompt": "Mine.", "model": "sonnet", "effort": "low"})
-        status, body = _call("PUT", "/api/agent-settings/system", {"model": "", "effort": None,
+        _call("PUT", "/api/agent-settings/system", {"harness_prompt": "Mine.", "agent": "agent-sonnet",
+                                                    "effort": "low"})
+        status, body = _call("PUT", "/api/agent-settings/system", {"agent": "", "effort": None,
                                                                    "harness_prompt": DEFAULT_HARNESS_PROMPT})
         assert status == 200 and body["system"]["values"] == UNSET
         assert layers.rows == {}  # a layer with nothing set has no row
@@ -373,18 +434,20 @@ class TestSettingsApi:
 
     @pytest.mark.parametrize(("path", "body", "status", "message"), [
         ("/api/agent-settings/system", {"harness_prompt": "x" * 20_001}, 400, "at most 20000"),
-        ("/api/agent-settings/system", {"model": "--resume"}, 400, "not a model name"),
+        ("/api/agent-settings/system", {"model": "sonnet"}, 400, "part of the agent now"),
+        ("/api/agent-settings/system", {"agent": "agent-nowhere"}, 400, "no agent 'agent-nowhere'"),
+        ("/api/agent-settings/system", {"agent": 5}, 400, "agent must be the agent_id"),
         ("/api/agent-settings/system", {"effort": "extreme"}, 400, "one of"),
         ("/api/agent-settings/system", {"env": [{"key": "GITHUB_TOKEN", "value": "x"}]}, 400, "secrets"),
         ("/api/agent-settings/system", {"env": [{"key": "TZ", "value": None}]}, 400, "at most 4000"),
         ("/api/agent-settings/system", {"run_budget_usd": 0}, 400, "more than 0"),
-        ("/api/agent-settings/system", {"model": "sonnet", "effort": "extreme"}, 400, "one of"),
+        ("/api/agent-settings/system", {"agent": "agent-sonnet", "effort": "extreme"}, 400, "one of"),
         ("/api/agent-settings/system", {"default_model": "sonnet"}, 400, "unknown field"),
         ("/api/agent-settings/system", {}, 400, "at least one"),
         ("/api/agent-settings/system", b"not json", 400, "invalid JSON"),
-        ("/api/agent-settings/roles/boss", {"model": "sonnet"}, 404, "no role"),
-        ("/api/projects/proj-a/agent-settings/roles/manager", {"model": "sonnet"}, 400, "spans every project"),
-        ("/api/projects/proj-zzz/agent-settings", {"model": "sonnet"}, 404, "not found"),
+        ("/api/agent-settings/roles/boss", {"agent": "agent-sonnet"}, 404, "no role"),
+        ("/api/projects/proj-a/agent-settings/roles/manager", {"agent": "agent-sonnet"}, 400, "spans every project"),
+        ("/api/projects/proj-zzz/agent-settings", {"agent": "agent-sonnet"}, 404, "not found"),
     ])
     def test_refused_updates_change_nothing(
         self, layers: _Layers, path: str, body: Any, status: int, message: str,

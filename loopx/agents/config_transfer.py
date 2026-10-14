@@ -5,9 +5,11 @@ file is UTF-8 text (acquiring an item refuses binary files), so JSON holds it
 as it is, and one readable file can be checked before it is shared. Its
 sections:
 
-- ``settings``: the system and role layers of the agent settings, and each
-  role's prompt (``null`` while it follows the recommended one), timeout,
-  concurrency and enabled flag;
+- ``runtimes``, ``providers`` and ``agents``: the registered ones (the
+  built-ins exist everywhere), each naming the others by name;
+- ``settings``: the system and role layers of the agent settings (a layer
+  names its agent), and each role's prompt (``null`` while it follows the
+  recommended one), timeout, concurrency and enabled flag;
 - ``channels``: each chat channel's configuration;
 - ``installs``: the global installs, naming their item by kind and name;
 - ``projects`` (``--include-projects``): each project's fields, execution
@@ -15,17 +17,19 @@ sections:
 - ``catalog``: every item outside projects with its files, or an MCP
   server's configuration.
 
-**Secrets** are an MCP server's environment and header values and a channel
-config's keys other than its known public ones (``_CHANNEL_PUBLIC_KEYS``; a
-token itself lives in the environment variable a ``*_env`` key names).
-Unless the export includes them, each is ``PLACEHOLDER``. **Machine paths**
-stay out: a project's directory is not exported, an item's source that is a
-local path is ``null``, and a path document is a reference (relative to its
-project's directory) flagged ``repoint``.
+**Secrets** are an MCP server's environment and header values, a provider's
+API key and a channel config's keys other than its known public ones
+(``_CHANNEL_PUBLIC_KEYS``; a token itself lives in the environment variable a
+``*_env`` key names). Unless the export includes them, each is
+``PLACEHOLDER``. **Machine paths** stay out: a project's directory is not
+exported, an item's source or a runtime's executable that is a local path is
+``null``, and a path document is a reference (relative to its project's
+directory) flagged ``repoint``.
 
 **Import** matches entries by natural key (an item by kind and name, a
-project-written one within its project; a project by name; a layer by scope,
-role and project; a role by name; a channel by type), and reports each as
+project-written one within its project; a project, runtime, provider or
+agent by name; a layer by scope, role and project; a role by name; a channel
+by type), and reports each as
 added, changed (with the fields), unchanged or skipped (with the reason),
 plus the secrets still to fill in. Applying writes the same plan in one
 transaction: an entry with the same key is updated in place (an item keeps
@@ -60,7 +64,8 @@ _CHANNEL_PUBLIC_KEYS = {
     "lark": frozenset({"allowed_open_ids", "app_id_env", "app_secret_env", "description"}),
 }
 _ROLE_FIELDS = ("prompt", "timeout_seconds", "max_concurrency", "enabled")
-_LAYER_FIELDS = ("harness_prompt", "model", "effort", "env", "run_budget_usd")
+_LAYER_FIELDS = ("harness_prompt", "agent", "effort", "env", "run_budget_usd")
+_PROVIDER_FIELDS = ("protocols", "auth", "oauth_runtime_type", "base_url", "models", "max_concurrency")
 _ITEM_FIELDS = ("origin", "source", "version", "description", "modified")
 _DOCUMENT_FIELDS = ("summary", "source_kind", "filename", "path", "sha256", "size_bytes")
 _CHANNEL_ID = re.compile(r"[a-zA-Z0-9_-]{1,64}")
@@ -82,8 +87,8 @@ class Action(str, Enum):
     SKIPPED = "skipped"
 
 
-SECTIONS = ("settings.layers", "settings.roles", "channels", "catalog", "installs", "projects", "project.layers",
-            "project.items", "project.knowledge", "project.installs")
+SECTIONS = ("runtimes", "providers", "agents", "settings.layers", "settings.roles", "channels", "catalog", "installs",
+            "projects", "project.layers", "project.items", "project.knowledge", "project.installs")
 
 
 @dataclass(frozen=True)
@@ -149,6 +154,21 @@ def _portable_source(source: str) -> str | None:
     if not source or source.startswith(("/", "file:")) or re.match(r"[A-Za-z]:[\\/]", source):
         return None
     return source
+
+
+def runtime_entry(row: Mapping[str, Any]) -> dict[str, Any]:
+    return {"name": row["name"], "type": row["type"], "executable": _portable_source(row["executable"])
+            if row["executable"] else ""}
+
+
+def provider_entry(row: Mapping[str, Any], include_secrets: bool) -> dict[str, Any]:
+    return {"name": row["name"], **{name: row[name] for name in _PROVIDER_FIELDS},
+            "protocols": list(row["protocols"]),
+            "api_key": None if row["api_key"] is None else _secret(row["api_key"], include_secrets)}
+
+
+def agent_entry(row: Mapping[str, Any]) -> dict[str, Any]:
+    return {name: row[name] for name in ("name", "runtime", "provider", "model", "effort")}
 
 
 def layer_entry(row: Mapping[str, Any]) -> dict[str, Any]:
@@ -231,7 +251,9 @@ class ExportSummary:
 
 
 def _secret_count(entry: Mapping[str, Any]) -> int:
-    """How many secret values a channel or MCP entry holds, or stands in for."""
+    """How many secret values a channel, MCP or provider entry holds, or stands in for."""
+    if "protocols" in entry:
+        return int(entry["api_key"] is not None)
     if "server" in entry:
         return len(entry["server"]["env"]) + len(entry["server"]["headers"])
     public = _CHANNEL_PUBLIC_KEYS.get(entry["channel_type"], frozenset())
@@ -259,20 +281,25 @@ async def export_chunks(
     items = await db.read_items(conn)
     installs = await db.read_installs(conn)
     channels = [channel_entry(row, include_secrets) for row in await db.read_channels(conn)]
+    providers = [provider_entry(r, include_secrets) for r in await db.read_providers(conn) if not r["builtin"]]
     head = {
         "format": FORMAT,
         "loopx_version": __version__,
         "exported_at": datetime.now(UTC).isoformat(timespec="seconds"),
         "secrets": "included" if include_secrets else "omitted",
+        "runtimes": [runtime_entry(r) for r in await db.read_runtimes(conn) if not r["builtin"]],
+        "providers": providers,
+        "agents": [agent_entry(r) for r in await db.read_agents(conn) if not r["builtin"]],
         "settings": {"layers": [layer_entry(r) for r in layers if r["project_id"] is None],
                      "roles": [role_entry(r) for r in await db.read_roles(conn)]},
         "channels": channels,
         "installs": [install_entry(r) for r in installs if r["scope"] == "global"],
     }
-    summary.counts.update({"settings.layers": len(head["settings"]["layers"]),
+    summary.counts.update({"runtimes": len(head["runtimes"]), "providers": len(providers),
+                           "agents": len(head["agents"]), "settings.layers": len(head["settings"]["layers"]),
                            "settings.roles": len(head["settings"]["roles"]), "channels": len(channels),
                            "installs": len(head["installs"])})
-    summary.secrets += sum(_secret_count(entry) for entry in channels)
+    summary.secrets += sum(_secret_count(entry) for entry in [*channels, *providers])
     yield "{" + ",\n".join(f"{_dump(k)}:{_dump(v)}" for k, v in head.items())
 
     if include_projects:
@@ -362,7 +389,7 @@ def read_file(path: Path) -> dict[str, Any]:
         found = data.get("format") if isinstance(data, dict) else None
         raise ConfigFileError(f"{path} is not a {FORMAT} file (format: {found!r})")
     for section, kind in (("settings", dict), ("channels", list), ("installs", list), ("catalog", list),
-                          ("projects", list)):
+                          ("projects", list), ("runtimes", list), ("providers", list), ("agents", list)):
         if section in data and not isinstance(data[section], kind):
             raise ConfigFileError(f"{section} must be a JSON {'object' if kind is dict else 'list'}")
     for section in ("layers", "roles"):
@@ -425,15 +452,28 @@ def _item_name(kind: str, raw: Any) -> str:
 
 
 def _layer_values(entry: Mapping[str, Any], scope: str) -> dict[str, Any]:
-    from .agent_settings import Layer, SettingsError, layer_update
+    """A layer's values, its agent by name (``None`` for none). A file from before agents gives a ``model``:
+    that is the agent ``claude-code/<model>``, as the upgrade made it."""
+    from .agent_settings import Layer, SettingsError, layer_update, model_name
 
-    unknown = sorted(set(entry) - {"scope", "role", *_LAYER_FIELDS})
+    unknown = sorted(set(entry) - {"scope", "role", "model", *_LAYER_FIELDS})
     if unknown:
         raise _Skip(f"unknown field {unknown[0]!r}")
+    agent = entry.get("agent")
     try:
-        return layer_update({name: entry.get(name) for name in _LAYER_FIELDS}, Layer(scope))
+        values = layer_update({name: entry.get(name) for name in _LAYER_FIELDS if name != "agent"}, Layer(scope))
+        if "model" in entry and "agent" not in entry:
+            model = model_name(entry["model"])
+            agent = f"{_MODEL_AGENT_PREFIX}{model}" if model else None
     except SettingsError as exc:
         raise _Skip(str(exc)) from None
+    if agent is not None and not isinstance(agent, str):
+        raise _Skip("agent must be an agent's name, or null")
+    return {**values, "agent": agent or None}
+
+
+# The name the upgrade gave the agent of each model layers used (Claude Code, its own login, the model).
+_MODEL_AGENT_PREFIX = "claude-code/"
 
 
 def _stored_layer(row: Mapping[str, Any] | None) -> dict[str, Any] | None:
@@ -593,6 +633,24 @@ def _document(entry: Any) -> dict[str, Any]:
                      "size_bytes": len(data)}
 
 
+def _runtime_spec(row: Mapping[str, Any]) -> Any:
+    from .agent_registry import RuntimeSpec
+    from .runtimes import Capability
+
+    known = {c.value for c in Capability}
+    return RuntimeSpec(row["id"], row["name"], row["type"], row["executable"],
+                       frozenset(Capability(c) for c in row["capabilities"] or () if c in known))
+
+
+def _provider_spec(row: Mapping[str, Any]) -> Any:
+    from .agent_registry import ProviderSpec
+    from .runtimes import ApiProtocol, AuthKind
+
+    return ProviderSpec(row["id"], row["name"], AuthKind(row["auth"]),
+                        frozenset(ApiProtocol(p) for p in row["protocols"]), row["oauth_runtime_type"],
+                        row["base_url"], tuple(m["name"] for m in row["models"]))
+
+
 # --- Import: the target and the plan ---
 
 
@@ -607,6 +665,9 @@ class _Target:
     installs: dict[tuple[str, str | None], dict[str, Any]] = field(default_factory=dict)
     projects: dict[str, dict[str, Any]] = field(default_factory=dict)  # by lower-case name
     documents: dict[str, list[dict[str, Any]]] = field(default_factory=lambda: defaultdict(list))
+    runtimes: dict[str, dict[str, Any]] = field(default_factory=dict)  # by name
+    providers: dict[str, dict[str, Any]] = field(default_factory=dict)
+    agents: dict[str, dict[str, Any]] = field(default_factory=dict)
 
     @classmethod
     async def read(cls, conn: Any) -> _Target:
@@ -625,6 +686,9 @@ class _Target:
         target.projects = {row["name"].lower(): row for row in await db.read_projects(conn)}
         for row in await db.read_documents(conn, content=False):
             target.documents[row["project_id"]].append(row)
+        target.runtimes = {row["name"]: row for row in await db.read_runtimes(conn)}
+        target.providers = {row["name"]: row for row in await db.read_providers(conn)}
+        target.agents = {row["name"]: row for row in await db.read_agents(conn)}
         return target
 
 
@@ -640,6 +704,27 @@ class _Importer:
         self.project_ids = {name: row["id"] for name, row in target.projects.items()}
         self.seen_items: set[tuple[str, str, str | None]] = set()
         self.seen_projects: set[str] = set()
+        # Runtimes, providers and agents by name, stored and from the file: their ids ("new:..." in a preview)
+        # and what an agent is checked with.
+        self.runtimes = {name: (row["id"], _runtime_spec(row)) for name, row in target.runtimes.items()}
+        self.providers = {name: (row["id"], _provider_spec(row)) for name, row in target.providers.items()}
+        self.agents: dict[str, tuple[str, Any]] = {}
+        from .agent_registry import BUILTIN_AGENT
+
+        # The built-ins are on every installation, a new database too once the import applies its schema.
+        self.runtimes.setdefault(BUILTIN_AGENT.runtime.name, (BUILTIN_AGENT.runtime.id, BUILTIN_AGENT.runtime))
+        self.providers.setdefault(BUILTIN_AGENT.provider.name, (BUILTIN_AGENT.provider.id, BUILTIN_AGENT.provider))
+        self.agents[BUILTIN_AGENT.name] = (BUILTIN_AGENT.id, BUILTIN_AGENT)
+        for name, row in target.agents.items():
+            if row["runtime"] in self.runtimes and row["provider"] in self.providers:
+                self.agents[name] = (row["id"], self._agent_spec(row["id"], name, row["runtime"], row["provider"],
+                                                                 row["model"], row["effort"]))
+
+    def _agent_spec(self, agent_id: str, name: str, runtime: str, provider: str, model: str,
+                    effort: str | None) -> Any:
+        from .agent_registry import AgentSpec
+
+        return AgentSpec(agent_id, name, self.runtimes[runtime][1], self.providers[provider][1], model, effort)
 
     def record(self, section: str, key: str, action: Action, fields: Sequence[str] = (), reason: str = "") -> None:
         self.plan.changes.append(Change(section, key, action, tuple(fields), reason))
@@ -648,6 +733,167 @@ class _Importer:
         action = Action.ADDED if current is None else Action.CHANGED if changed else Action.UNCHANGED
         self.record(section, key, action, changed)
         return action
+
+    # --- runtimes, providers and agents ---
+
+    async def runtime(self, entry: Any) -> None:
+        from .agent_registry import RegistryError, _executable, entry_name
+        from .runtimes import RuntimeUnsupported, adapter
+
+        raw = entry if isinstance(entry, Mapping) else {}
+        label = str(raw.get("name"))
+        try:
+            entry = _mapping(entry, "a runtime")
+            unknown = sorted(set(entry) - {"name", "type", "executable"})
+            if unknown:
+                raise _Skip(f"unknown field {unknown[0]!r}")
+            try:
+                name = label = entry_name(entry.get("name"), "runtime")
+                runtime = adapter(entry.get("type") if isinstance(entry.get("type"), str) else "")
+                executable = None if entry.get("executable") is None else _executable(entry["executable"])
+            except (RegistryError, RuntimeUnsupported) as exc:
+                raise _Skip(str(exc)) from None
+            row = self.target.runtimes.get(name)
+            if row is not None and row["builtin"]:
+                raise _Skip("a built-in runtime has this name here")
+            if row is not None and row["type"] != runtime.type:
+                raise _Skip(f"a {row['type']} runtime has this name here")
+        except _Skip as exc:
+            self.record("runtimes", label, Action.SKIPPED, reason=str(exc))
+            return
+        if executable is None:  # a path on the exporting machine
+            executable = row["executable"] if row is not None else ""
+            if row is None:
+                self.plan.notes.append(f"runtime {name}: its executable is a path on the exporting machine; set "
+                                       "it here (until then it runs the type's default)")
+        current = {"executable": row["executable"]} if row is not None else None
+        action = self.outcome("runtimes", name, current, _differs({"executable": executable}, current,
+                                                                  ("executable",)))
+        runtime_id = row["id"] if row is not None else f"new:{name}"
+        if self.apply and action in (Action.ADDED, Action.CHANGED):
+            from ..db import config_transfer as db
+
+            runtime_id = await db.write_runtime(self.conn, row["id"] if row is not None else None, {
+                "name": name, "type": runtime.type, "executable": executable,
+                "capabilities": sorted(c.value for c in runtime.capabilities)})
+        self.runtimes[name] = (runtime_id, _runtime_spec({"id": runtime_id, "name": name, "type": runtime.type,
+                                                          "executable": executable,
+                                                          "capabilities": sorted(c.value for c in runtime.capabilities)}
+                                                         if row is None else row))
+
+    async def provider(self, entry: Any) -> None:
+        from .agent_registry import RegistryError, _provider_fields
+
+        raw = entry if isinstance(entry, Mapping) else {}
+        label = str(raw.get("name"))
+        try:
+            entry = _mapping(entry, "a provider")
+            unknown = sorted(set(entry) - {"name", "api_key", *_PROVIDER_FIELDS})
+            if unknown:
+                raise _Skip(f"unknown field {unknown[0]!r}")
+            try:
+                fields, _ = _provider_fields({k: entry.get(k) for k in ("name", *_PROVIDER_FIELDS)}, None)
+            except RegistryError as exc:
+                raise _Skip(str(exc)) from None
+            label = name = fields["name"]
+            row = self.target.providers.get(name)
+            if row is not None and row["builtin"]:
+                raise _Skip("a built-in provider has this name here")
+            key = entry.get("api_key")
+            missing = False
+            if is_placeholder(key):
+                key = row["api_key"] if row is not None else None
+                missing = key is None
+            elif key is not None and (not isinstance(key, str) or not key.strip()):
+                raise _Skip("api_key must be the key, the secret placeholder or null")
+            if fields["auth"] == "oauth" and (key is not None or missing):
+                raise _Skip("an OAuth provider takes no api_key")
+        except _Skip as exc:
+            self.record("providers", label, Action.SKIPPED, reason=str(exc))
+            return
+        new = {**{k: fields[k] for k in _PROVIDER_FIELDS}, "api_key": key}
+        current = {**{k: row[k] for k in _PROVIDER_FIELDS}, "protocols": list(row["protocols"]),
+                   "api_key": row["api_key"]} if row is not None else None
+        action = self.outcome("providers", name, current, _differs(new, current, (*_PROVIDER_FIELDS, "api_key")))
+        if missing:
+            self.plan.need_secret.append(("providers", name, ("api_key",)))
+        provider_id = row["id"] if row is not None else f"new:{name}"
+        if self.apply and action in (Action.ADDED, Action.CHANGED):
+            from ..db import config_transfer as db
+
+            provider_id = await db.write_provider(self.conn, row["id"] if row is not None else None, fields, key)
+        self.providers[name] = (provider_id, _provider_spec({**fields, "id": provider_id}))
+
+    async def agent(self, entry: Any) -> None:
+        from .agent_registry import RegistryError, _effort, _model, check_pairing, entry_name
+
+        raw = entry if isinstance(entry, Mapping) else {}
+        label = str(raw.get("name"))
+        try:
+            entry = _mapping(entry, "an agent")
+            unknown = sorted(set(entry) - {"name", "runtime", "provider", "model", "effort"})
+            if unknown:
+                raise _Skip(f"unknown field {unknown[0]!r}")
+            try:
+                name = label = entry_name(entry.get("name"), "agent")
+                values = {"runtime": entry.get("runtime"), "provider": entry.get("provider"),
+                          "model": _model(entry.get("model")), "effort": _effort(entry.get("effort"))}
+            except RegistryError as exc:
+                raise _Skip(str(exc)) from None
+            if values["runtime"] not in self.runtimes:
+                raise _Skip(f"no runtime {values['runtime']!r} here or in the file")
+            if values["provider"] not in self.providers:
+                raise _Skip(f"no provider {values['provider']!r} here or in the file")
+            row = self.target.agents.get(name)
+            if row is not None and row["builtin"]:
+                raise _Skip("a built-in agent has this name here")
+            spec = self._agent_spec(row["id"] if row else f"new:{name}", name, values["runtime"],
+                                    values["provider"], values["model"], values["effort"])
+            try:
+                check_pairing(spec.runtime, spec.provider, spec.model)
+            except RegistryError as exc:
+                raise _Skip(str(exc)) from None
+        except _Skip as exc:
+            self.record("agents", label, Action.SKIPPED, reason=str(exc))
+            return
+        current = {k: row[k] for k in values} if row is not None else None
+        action = self.outcome("agents", name, current, _differs(values, current, values))
+        agent_id = spec.id
+        if self.apply and action in (Action.ADDED, Action.CHANGED):
+            agent_id = await self._write_agent(row["id"] if row else None, name, spec)
+        self.agents[name] = (agent_id, spec)
+
+    async def _write_agent(self, agent_id: str | None, name: str, spec: Any) -> str:
+        from ..db import config_transfer as db
+
+        return await db.write_agent(self.conn, agent_id, {
+            "name": name, "runtime_id": spec.runtime.id, "provider_id": spec.provider.id, "model": spec.model,
+            "effort": spec.effort})
+
+    async def _layer_agent(self, name: str | None, scope: str, role: str | None) -> str | None:
+        """The id of the layer's agent (``new:...`` in a preview); a model's agent from a file before agents is
+        added like the upgrade adds it."""
+        from .agent_registry import BUILTIN_PROVIDER, BUILTIN_RUNTIME, AgentSpec, RegistryError, check_roles
+
+        if name is None:
+            return None
+        if name not in self.agents and name.startswith(_MODEL_AGENT_PREFIX) \
+                and BUILTIN_RUNTIME.name in self.runtimes and BUILTIN_PROVIDER.name in self.providers:
+            runtime, provider = self.runtimes[BUILTIN_RUNTIME.name], self.providers[BUILTIN_PROVIDER.name]
+            spec = AgentSpec(f"new:{name}", name, runtime[1], provider[1], name[len(_MODEL_AGENT_PREFIX):])
+            self.record("agents", name, Action.ADDED)
+            agent_id = await self._write_agent(None, name, spec) if self.apply else spec.id
+            self.agents[name] = (agent_id, spec)
+        if name not in self.agents:
+            raise _Skip(f"no agent {name!r} here or in the file")
+        agent_id, spec = self.agents[name]
+        roles = {"system": ("manager", "planner", "worker", "reviewer"),
+                 "project": ("planner", "worker", "reviewer")}.get(scope, (role,))
+        try:
+            check_roles(spec, roles)
+        except RegistryError as exc:
+            raise _Skip(str(exc)) from None
+        return agent_id
 
     # --- settings ---
 
@@ -668,6 +914,7 @@ class _Importer:
             if scope in ("system", "project") and role is not None:
                 raise _Skip(f"a {scope} layer has no role")
             values = _layer_values(raw, scope)
+            agent_id = await self._layer_agent(values["agent"], scope, role)
         except _Skip as exc:
             self.record(section, label, Action.SKIPPED, reason=str(exc))
             return
@@ -676,7 +923,7 @@ class _Importer:
         if self.apply and action in (Action.ADDED, Action.CHANGED):
             from ..db import config_transfer as db
 
-            await db.write_layer(self.conn, scope, role, project_id, values)
+            await db.write_layer(self.conn, scope, role, project_id, {**values, "agent_id": agent_id})
 
     async def role(self, entry: Any) -> None:
         from ..db import config_transfer as db
@@ -908,6 +1155,12 @@ async def import_config(conn: Any, data: Mapping[str, Any], *, apply: bool) -> P
 
         await ensure_schema(conn)
     importer = _Importer(conn, await _Target.read(conn), apply)
+    for entry in data.get("runtimes", []):
+        await importer.runtime(entry)
+    for entry in data.get("providers", []):
+        await importer.provider(entry)
+    for entry in data.get("agents", []):
+        await importer.agent(entry)
     settings = data.get("settings", {})
     for entry in settings.get("layers", []):
         await importer.layer(entry, None)

@@ -1,4 +1,4 @@
-"""What every agent inherits: the harness prompt, the model, the effort, the environment and the per-run cap.
+"""What every agent inherits: the harness prompt, the agent, the effort, the environment and the per-run cap.
 
 The harness prompt is an agent's character and stability (working principles,
 boundaries, how it communicates); the role prompt (``agent_configs``) says
@@ -14,10 +14,15 @@ one winning (``agent_setting_layers``, one row per layer and place):
 4. **role in a project** (the same tab): one of those roles in one project.
 
 The Manager spans every project, so it has only the first two. Workers and
-Reviewers are never configured one by one. A field a layer leaves unset
-(NULL) inherits; with no layer setting it, the built-in default applies
-(``Layer.BUILTIN``): ``DEFAULT_HARNESS_PROMPT``, ``DEFAULT_MODEL``, Claude
-Code's own effort, no extra environment and no cap. The environment merges
+Reviewers are never configured one by one; a task may choose the agent of
+its Planner, Workers or Reviewers, which wins over every layer for that task
+only (``Layer.TASK``, a task's ``agent_overrides``). The **agent** is a runtime, an LLM
+provider and a model (``agent_registry``): the model comes with it, and its
+default effort applies unless a layer sets one (``Layer.AGENT``). A field a
+layer leaves unset (NULL) inherits; with no layer setting it, the built-in
+default applies (``Layer.BUILTIN``): ``DEFAULT_HARNESS_PROMPT``,
+``BUILTIN_AGENT`` (Claude Code, its own login, ``DEFAULT_MODEL``), the
+runtime's own effort, no extra environment and no cap. The environment merges
 key by key: a later layer adds or overrides a variable, or unsets one an
 earlier layer set (a null value; the system layer has nothing to unset).
 A Reviewer with no harness of its own at the role or the role-in-project
@@ -26,8 +31,8 @@ A stored value that no longer validates is ignored with a warning, as if
 unset.
 
 Every run records each setting's value and the layer it came from (the
-harness in ``prompt_layers.harness``, the model in ``model_choice`` and all of
-them in ``settings_sources``). Every run also loads the catalog items
+harness in ``prompt_layers.harness``, the agent in ``agent``, its model in
+``model_choice`` and all of them in ``settings_sources``). Every run also loads the catalog items
 installed for its role, globally or in its project (``library.load_installed``),
 and a task agent's launch carries its project's knowledge
 (``knowledge.load_knowledge``): the directories to mount. When the layers
@@ -43,10 +48,11 @@ import logging
 import math
 import re
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from typing import TYPE_CHECKING, Any
 
+from .agent_registry import BUILTIN_AGENT, AgentSpec
 from .knowledge import EMPTY_KNOWLEDGE, AgentKnowledge
 from .library import EMPTY_LIBRARY, AgentLibrary
 
@@ -87,8 +93,8 @@ principles hold whatever your role below asks of you.
 - Be concise and direct; lead with the result.
 - Reply in the language the user writes in."""
 
-# Claude Code's alias for its latest Opus model.
-DEFAULT_MODEL = "opus"
+# Claude Code's alias for its latest Opus model: the built-in agent's.
+DEFAULT_MODEL = BUILTIN_AGENT.model
 # The values Claude Code 2.1.285 accepts for --effort (it ignores any other, with a warning).
 EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")
 
@@ -98,7 +104,7 @@ ENV_VALUE_MAX_CHARS = 4_000
 MODEL_MAX_CHARS = 200
 BUDGET_MAX_USD = 100_000
 
-FIELDS = ("harness_prompt", "model", "effort", "env", "run_budget_usd")
+FIELDS = ("harness_prompt", "agent", "effort", "env", "run_budget_usd")
 
 
 class AgentType(str, Enum):
@@ -112,13 +118,19 @@ TASK_ROLES = (AgentType.PLANNER, AgentType.WORKER, AgentType.REVIEWER)
 
 
 class Layer(str, Enum):
-    """Where a setting came from, in resolution order (``BUILTIN`` when no layer sets it)."""
+    """Where a setting came from, in resolution order (``BUILTIN`` when no layer sets it).
+
+    ``AGENT`` is the selected agent's own default (its effort), under every layer; ``TASK`` is a task's choice
+    of agent, over every layer.
+    """
 
     BUILTIN = "builtin"
+    AGENT = "agent"
     SYSTEM = "system"
     ROLE = "role"
     PROJECT = "project"
     ROLE_PROJECT = "role_project"
+    TASK = "task"
 
 
 class SettingsError(ValueError):
@@ -236,7 +248,7 @@ class LayerValues:
     """What one layer sets; ``None`` (and an empty ``env``) is not set here."""
 
     harness_prompt: str | None = None
-    model: str | None = None
+    agent: AgentSpec | None = None
     effort: str | None = None
     env: tuple[tuple[str, str | None], ...] = ()
     run_budget_usd: float | None = None
@@ -246,11 +258,11 @@ class LayerValues:
         """A stored row's values; one that no longer validates is ignored (unset), with a warning."""
         if not row:
             return EMPTY_LAYER
-        place = "/".join(str(row.get(k)) for k in ("scope", "role", "project_id") if row.get(k))
+        place = "/".join(str(row.get(k)) for k in ("scope", "role", "project_id", "task_id") if row.get(k))
         values: dict[str, Any] = {}
         for name, parse in (
             ("harness_prompt", lambda raw: harness_prompt(raw) or None),
-            ("model", lambda raw: model_name(raw) or None),
+            ("agent", _stored_agent),
             ("effort", lambda raw: effort_level(raw) or None),
             ("env", lambda raw: tuple(environment(raw, unset=row.get("scope") != Layer.SYSTEM.value).items())),
             ("run_budget_usd", budget_usd),
@@ -267,7 +279,7 @@ class LayerValues:
     def view(self) -> dict[str, Any]:
         return {
             "harness_prompt": self.harness_prompt,
-            "model": self.model,
+            "agent": self.agent.id if self.agent is not None else None,
             "effort": self.effort,
             "env": [{"key": key, "value": value} for key, value in self.env],
             "run_budget_usd": self.run_budget_usd,
@@ -277,11 +289,24 @@ class LayerValues:
 EMPTY_LAYER = LayerValues()
 
 
+def _stored_agent(raw: Any) -> AgentSpec:
+    """A stored agent (``db.agent_registry.AGENT_JSON``). Whether it can run is checked when it launches
+    (``load_agent_settings``), so a layer's agent is never silently replaced by an earlier layer's."""
+    try:
+        return AgentSpec.from_row(raw)
+    except (KeyError, TypeError, ValueError, AttributeError):
+        raise SettingsError(f"not an agent: {str(raw)[:80]}") from None
+
+
 def layer_update(data: Any, scope: Layer) -> dict[str, Any]:
-    """The fields of a layer update, validated, as stored: ``None`` (or ``""``) unsets one. Raises
-    ``SettingsError``; every field is checked before anything is written."""
+    """The fields of a layer update, validated, as stored (``agent`` as ``agent_id``): ``None`` (or ``""``)
+    unsets one. Raises ``SettingsError``; every field is checked before anything is written. Whether the agent
+    exists and can run the layer's roles is ``check_agent``'s."""
     if not isinstance(data, dict):
         raise SettingsError("body must be a JSON object")
+    if "model" in data:
+        raise SettingsError("model is part of the agent now: select an agent (\"agent\": the agent_id of a "
+                            "registered agent, with its runtime, provider and model)")
     unknown = sorted(set(data) - set(FIELDS))
     if unknown:
         raise SettingsError(f"unknown field {unknown[0]!r}; the fields are {', '.join(FIELDS)}")
@@ -293,12 +318,14 @@ def layer_update(data: Any, scope: Layer) -> dict[str, Any]:
             env = environment([] if raw is None else raw, unset=scope is not Layer.SYSTEM)
             values[name] = [{"key": key, "value": value} for key, value in env.items()]
         elif raw is None or raw == "":
-            values[name] = None
+            values["agent_id" if name == "agent" else name] = None
         elif name == "harness_prompt":
             text = harness_prompt(raw)
             values[name] = None if not text or (scope is Layer.SYSTEM and _is_builtin_harness(text)) else text
-        elif name == "model":
-            values[name] = model_name(raw) or None
+        elif name == "agent":
+            if not isinstance(raw, str):
+                raise SettingsError("agent must be the agent_id of a registered agent, or null to inherit")
+            values["agent_id"] = raw
         elif name == "effort":
             values[name] = effort_level(raw) or None
         else:
@@ -333,21 +360,34 @@ class AgentSettings:
     """The settings one agent runs with, each with the layer it came from."""
 
     harness: Harness = Harness(DEFAULT_HARNESS_PROMPT, Layer.BUILTIN)
-    model: str = DEFAULT_MODEL
-    model_source: Layer = Layer.BUILTIN
-    effort: str = ""  # '' = Claude Code's default
+    agent: AgentSpec = BUILTIN_AGENT
+    agent_source: Layer = Layer.BUILTIN
+    effort: str = ""  # '' = the runtime's own default
     effort_source: Layer = Layer.BUILTIN
     env: tuple[tuple[str, str], ...] = ()
     env_sources: tuple[tuple[str, Layer], ...] = ()
     max_budget_usd: float | None = None  # --max-budget-usd on each Claude Code process; None for none
     max_budget_source: Layer = Layer.BUILTIN
     error: str | None = field(default=None, compare=False)  # why the layers could not be read
+    # Why the agent cannot run this role (its runtime and provider no longer pair, or the runtime lacks a
+    # capability the role needs): the run fails with it rather than run another agent.
+    agent_error: str | None = field(default=None, compare=False)
+
+    @property
+    def model(self) -> str:
+        """The agent's model."""
+        return self.agent.model
+
+    @property
+    def model_source(self) -> Layer:
+        """Where the model came from: where the agent did."""
+        return self.agent_source
 
     def sources(self) -> dict[str, Any]:
         """Each setting's layer, for a run's record."""
         return {
             "harness": self.harness.source.value,
-            "model": self.model_source.value,
+            "agent": self.agent_source.value,
             "effort": self.effort_source.value,
             "env": {key: layer.value for key, layer in self.env_sources},
             "run_budget_usd": self.max_budget_source.value,
@@ -361,7 +401,9 @@ class AgentSettings:
         sources = dict(self.env_sources)
         return {
             "harness_prompt": harness,
-            "model": {"value": self.model, "source": self.model_source.value},
+            "agent": {"value": {"agent_id": self.agent.id, "name": self.agent.name, "model": self.agent.model,
+                                "runtime": self.agent.runtime.name, "provider": self.agent.provider.name},
+                      "source": self.agent_source.value},
             "effort": {"value": self.effort or None, "source": self.effort_source.value},
             "env": [{"key": key, "value": value, "source": sources[key].value} for key, value in self.env],
             "run_budget_usd": {"value": self.max_budget_usd, "source": self.max_budget_source.value},
@@ -374,17 +416,21 @@ Place = tuple[Layer, AgentType | None]  # a layer and its role, within one proje
 
 
 def _chain(role: AgentType | None, project_id: str | None) -> list[Place]:
-    """The layers that apply to ``role`` (None: the system layer alone), first to last."""
+    """The layers that apply to ``role`` (None: the system layer alone), first to last; a task's choice of
+    agent, when there is one, comes last."""
     if role is None:
         return [(Layer.SYSTEM, None)]
     chain: list[Place] = [(Layer.SYSTEM, None), (Layer.ROLE, role)]
     if project_id and role is not AgentType.MANAGER:
         chain += [(Layer.PROJECT, None), (Layer.ROLE_PROJECT, role)]
+    if role is not AgentType.MANAGER:
+        chain.append((Layer.TASK, role))
     return chain
 
 
 def index_layers(rows: Iterable[Mapping[str, Any]], project_id: str | None) -> dict[Place, LayerValues]:
-    """The stored rows of one place (the system, the roles and ``project_id``) by layer and role."""
+    """The stored rows of one place (the system, the roles, ``project_id`` and a task's choices) by layer and
+    role."""
     index: dict[Place, LayerValues] = {}
     for row in rows:
         if row.get("project_id") not in (None, project_id):
@@ -403,7 +449,7 @@ def resolve(role: AgentType | str | None, layers: Mapping[Place, LayerValues],
     the system layer alone."""
     agent = AgentType(role) if role is not None else None
     harness = BUILTIN_SETTINGS.harness
-    model, model_source = DEFAULT_MODEL, Layer.BUILTIN
+    chosen, chosen_source = BUILTIN_AGENT, Layer.BUILTIN
     effort, effort_source = "", Layer.BUILTIN
     budget, budget_source = None, Layer.BUILTIN
     env: dict[str, tuple[str, Layer]] = {}
@@ -417,8 +463,8 @@ def resolve(role: AgentType | str | None, layers: Mapping[Place, LayerValues],
         if text is not None and not (layer is Layer.SYSTEM and _is_builtin_harness(text)):
             in_project = project_id if layer in (Layer.PROJECT, Layer.ROLE_PROJECT) else None
             harness = Harness(text, layer, in_project, from_role)
-        if values.model is not None:
-            model, model_source = values.model, layer
+        if values.agent is not None:
+            chosen, chosen_source = values.agent, layer
         if values.effort is not None:
             effort, effort_source = values.effort, layer
         if values.run_budget_usd is not None:
@@ -428,25 +474,45 @@ def resolve(role: AgentType | str | None, layers: Mapping[Place, LayerValues],
                 env.pop(key, None)
             else:
                 env[key] = (value, layer)
+    if effort_source is Layer.BUILTIN and chosen.effort:
+        effort, effort_source = chosen.effort, Layer.AGENT  # the agent's default, which any layer overrides
     return AgentSettings(
-        harness, model, model_source, effort, effort_source,
+        harness, chosen, chosen_source, effort, effort_source,
         tuple((key, value) for key, (value, _) in env.items()),
         tuple((key, layer) for key, (_, layer) in env.items()),
         budget, budget_source,
     )
 
 
-async def load_agent_settings(role: AgentType | str, project_id: str | None = None) -> AgentSettings:
-    """``role``'s settings in ``project_id`` (or outside any project), read now; the built-in defaults, with
-    ``error`` set, when the layers cannot be read."""
+async def load_agent_settings(
+    role: AgentType | str, project_id: str | None = None, task_id: str | None = None,
+) -> AgentSettings:
+    """``role``'s settings in ``project_id`` (or outside any project) and, with ``task_id``, the agent that task
+    chose for it, read now; the built-in defaults, with ``error`` set, when the layers cannot be read."""
     from ..db import agent_setting_layers
 
     try:
-        rows = await agent_setting_layers.list_layers(project_id)
+        rows = await agent_setting_layers.list_layers(project_id, task_id=task_id)
     except Exception as exc:
         logger.warning("cannot read the agent settings; using the built-in defaults", exc_info=True)
         return AgentSettings(error=f"cannot read the agent settings ({type(exc).__name__})")
-    return resolve(role, index_layers(rows, project_id), project_id)
+    settings = resolve(role, index_layers(rows, project_id), project_id)
+    return replace(settings, agent_error=agent_problem(settings.agent, AgentType(role)))
+
+
+def agent_problem(agent: AgentSpec, role: AgentType) -> str | None:
+    """Why ``agent`` cannot run ``role`` now, checked as when it was selected; None when it can."""
+    from .agent_registry import RegistryError, check_pairing, check_roles
+    from .runtimes import ADAPTERS
+
+    if agent.runtime.type not in ADAPTERS:
+        return f"agent {agent.name!r} runs on a {agent.runtime.type!r} runtime, which this version cannot run"
+    try:
+        check_pairing(agent.runtime, agent.provider, agent.model)
+        check_roles(agent, [role.value])
+    except RegistryError as exc:
+        return f"agent {agent.name!r} cannot run: {exc}"
+    return None
 
 
 # --- The launch ---
@@ -454,9 +520,9 @@ async def load_agent_settings(role: AgentType | str, project_id: str | None = No
 
 @dataclass(frozen=True)
 class Launch:
-    """What one agent run starts with besides its prompt: its settings (the model, effort, environment
+    """What one agent run starts with besides its prompt: its settings (the agent, effort, environment
     and per-run cap), the installed items and, for a task agent, the project knowledge; and, for every
-    agent alike, its permissions."""
+    agent alike, its permissions. The agent's runtime lays them out (``runtime``)."""
 
     settings: AgentSettings = BUILTIN_SETTINGS
     library: AgentLibrary = EMPTY_LIBRARY
@@ -483,11 +549,23 @@ class Launch:
         return self.settings.max_budget_usd
 
     @property
+    def agent(self) -> AgentSpec:
+        return self.settings.agent
+
+    @property
     def runtime(self) -> RuntimeAdapter:
-        """The runtime the agent runs on, which lays out its command."""
+        """The adapter of the agent's runtime type, which lays out its command."""
+        from .runtimes import adapter
+
+        return adapter(self.agent.runtime.type)
+
+    def executable(self, claude: str) -> str:
+        """What the run executes: its runtime's executable, else its type's default (``claude``, the server's
+        configured one, for Claude Code)."""
         from .runtimes import CLAUDE_CODE
 
-        return CLAUDE_CODE
+        runtime = self.runtime
+        return self.agent.runtime.executable or (claude if runtime is CLAUDE_CODE else runtime.default_executable)
 
     def args(self) -> list[str]:
         """The runtime's flags for these settings, installed items and knowledge (``RuntimeAdapter.launch_args``)."""
@@ -505,9 +583,10 @@ class Launch:
         return sha256_text(json.dumps(list(self.env), ensure_ascii=False, separators=(",", ":")))
 
     def record(self) -> dict[str, Any]:
-        """Its fields in a run's metadata: the model and its source, the variables' names (values hashed),
-        the installed items and their hash, the cap, and the layer each setting came from."""
+        """Its fields in a run's metadata: the agent, its model and their source, the variables' names (values
+        hashed), the installed items and their hash, the cap, and the layer each setting came from."""
         record: dict[str, Any] = {
+            "agent": {**self.agent.record(), "source": self.settings.agent_source.value},
             "model_choice": {"model": self.model, "source": self.model_source.value, "effort": self.effort or None},
             "settings_sources": self.settings.sources(),
         }
@@ -533,6 +612,7 @@ def _limits() -> dict[str, Any]:
         "effort_levels": list(EFFORT_LEVELS),
         "builtin_harness_prompt": DEFAULT_HARNESS_PROMPT,
         "builtin_model": DEFAULT_MODEL,
+        "builtin_agent": {"agent_id": BUILTIN_AGENT.id, "name": BUILTIN_AGENT.name},
         "budget_max_usd": BUDGET_MAX_USD,
     }
 
@@ -589,10 +669,23 @@ async def project_settings_view(project_id: str) -> dict[str, Any]:
     }
 
 
+async def _check_agent(values: Mapping[str, Any], roles: Iterable[AgentType]) -> None:
+    """Refuse a layer's agent that is not registered, or that cannot run one of the layer's ``roles``."""
+    from .agent_registry import RegistryError, check_selection
+
+    if values.get("agent_id"):
+        try:
+            await check_selection(values["agent_id"], [role.value for role in roles])
+        except RegistryError as exc:
+            raise SettingsError(str(exc)) from None
+
+
 async def update_system(data: Any) -> dict[str, Any]:
     from ..db import agent_setting_layers
 
-    await agent_setting_layers.put_layer(Layer.SYSTEM.value, None, None, layer_update(data, Layer.SYSTEM))
+    values = layer_update(data, Layer.SYSTEM)
+    await _check_agent(values, AgentType)
+    await agent_setting_layers.put_layer(Layer.SYSTEM.value, None, None, values)
     return await settings_view()
 
 
@@ -600,7 +693,9 @@ async def update_role(role: str, data: Any) -> dict[str, Any]:
     from ..db import agent_setting_layers
 
     agent = _role(role)
-    await agent_setting_layers.put_layer(Layer.ROLE.value, agent.value, None, layer_update(data, Layer.ROLE))
+    values = layer_update(data, Layer.ROLE)
+    await _check_agent(values, [agent])
+    await agent_setting_layers.put_layer(Layer.ROLE.value, agent.value, None, values)
     return await settings_view()
 
 
@@ -614,6 +709,7 @@ async def update_project(project_id: str, data: Any, role: str | None = None) ->
     scope = Layer.ROLE_PROJECT if agent else Layer.PROJECT
     values = layer_update(data, scope)
     await _existing_project(project_id)
+    await _check_agent(values, [agent] if agent else TASK_ROLES)
     try:
         await agent_setting_layers.put_layer(scope.value, agent.value if agent else None, project_id, values)
     except asyncpg.ForeignKeyViolationError:  # deleted meanwhile

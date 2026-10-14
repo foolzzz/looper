@@ -120,6 +120,10 @@ class _Store:
         """No runs recorded yet: every task has cost nothing."""
         return {task_id: {"cost_usd": 0.0, "runs": 0} for task_id in task_ids}
 
+    async def agent_overrides(self, task_id: str, **_: Any) -> dict[str, Any]:
+        """No task here chose an agent of its own."""
+        return {}
+
     @asynccontextmanager
     async def transaction(self) -> Any:
         self.transactions += 1
@@ -135,6 +139,9 @@ def store(monkeypatch: pytest.MonkeyPatch) -> _Store:
         monkeypatch.setattr(db_tasks, name, getattr(fake, name))
     monkeypatch.setattr(db_connection, "transaction", fake.transaction)
     monkeypatch.setattr(db_llm_records, "task_costs", fake.task_costs)
+    from loopx.db import agent_setting_layers
+
+    monkeypatch.setattr(agent_setting_layers, "agent_overrides", fake.agent_overrides)
     return fake
 
 

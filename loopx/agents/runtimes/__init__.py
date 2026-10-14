@@ -9,20 +9,30 @@ command themselves. An adapter says:
 - **what it can do** (``capabilities``, ``protocols``, ``auth_kinds``):
   which roles it can run (``ROLE_CAPABILITIES``), which LLM API protocols it
   speaks and which kinds of provider it can be started with;
+- **how a provider is bound** (``bind_provider``): what points the run at
+  its agent's LLM provider and model, beside the runtime's own flags;
 - **how a run starts** (``resident_command``, ``run_command``,
   ``launch_args``, ``environment``): the argv, the environment, and the files
   it names (the system prompt file, the installed plugin directories, the MCP
   configuration), with the runtime's own **isolation** from the operator's
   personal configuration (``isolation_args``);
-- **its stream** (``events``, ``write_turn``): its output as LoopX's internal
-  events, and one user turn written to it. The internal event is Claude Code's
-  stream-json event (``type`` ``system``/``assistant``/``user``/``result``...);
-  another runtime's adapter translates its own events into that shape;
+- **its stream** (``parse``, ``write_turn``, ``tool_summary``): its output as
+  LoopX's internal events, one user turn written to it, and a tool call in
+  words for the task's activity. The internal event is Claude Code's
+  stream-json event (``type`` ``system``/``assistant``/``user``/``result``...),
+  which the recorder, the usage and context readings (``run_usage``) and the
+  tiers read; another runtime's adapter translates its own events into it;
 - **resident sessions** (``resident_session``, ``resume_args``): a process
   that stays up and takes one user turn at a time, and the arguments that make
   a new process resume a saved session;
-- **cost and usage** (``usage``, ``budget_error``): a run's own spend and
-  tokens from its result, and why a run stopped at its spend cap.
+- **cost** (``cost``, ``budget_error``): a run's spend for its provider and
+  where the figure comes from (``CostSource``), and why a run stopped at its
+  spend cap.
+
+What the catalog and the project knowledge put in a run (plugin directories,
+the MCP configuration, knowledge directories) is materialized by
+``library.load_installed`` and ``knowledge.load_knowledge`` in Claude Code's
+plugin format; ``launch_args`` turns it into flags.
 """
 
 from __future__ import annotations
@@ -36,6 +46,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar
 
 if TYPE_CHECKING:
+    from ..agent_registry import ProviderSpec
     from ..agent_settings import Launch
     from ..claude_cli import ResidentClaude
     from ..run_usage import Usage
@@ -57,11 +68,25 @@ class AuthKind(str, Enum):
 
 
 class Capability(str, Enum):
-    """What a runtime can do for a role."""
+    """What a runtime can do; ``ROLE_CAPABILITIES`` says which of these each role needs."""
 
     RUN = "run"  # one run of a prompt, which takes more user turns while it runs (a Worker, a Reviewer)
     RESIDENT_SESSION = "resident_session"  # a process that stays up between user turns (the Manager, a Planner)
     RESUME = "resume"  # a new process continues a saved session (the Manager, a Planner)
+    STRUCTURED_OUTPUT = "structured_output"  # the runtime enforces a reply schema itself
+    CLAUDE_PLUGINS = "claude_plugins"  # it loads Claude Code plugins and skills from a directory
+    MCP = "mcp"  # it loads the MCP servers LoopX gives it
+    ADD_DIRS = "add_dirs"  # it reads extra directories (project knowledge)
+    COMPACTION_EVENTS = "compaction_events"  # it reports context compactions
+    AUTONOMOUS_TURNS = "autonomous_turns"  # it runs a turn of its own when background work ends, and says so
+    COST_REPORT = "cost_report"  # it reports what a run cost
+
+
+class CostSource(str, Enum):
+    """Where a run's cost comes from: what the runtime reported, or its tokens at the provider's prices."""
+
+    RUNTIME = "runtime"
+    PROVIDER_PRICE = "provider_price"
 
 
 # What each role needs of its runtime. The Manager and a Planner keep one process per session and resume it
@@ -72,6 +97,22 @@ ROLE_CAPABILITIES: Mapping[str, frozenset[Capability]] = {
     "worker": frozenset({Capability.RUN}),
     "reviewer": frozenset({Capability.RUN}),
 }
+
+
+@dataclass(frozen=True)
+class RunCost:
+    """A run's tokens and dollars, and where the dollars come from."""
+
+    usage: Usage
+    source: CostSource
+
+
+@dataclass(frozen=True)
+class ProviderBinding:
+    """What points a run at its agent's provider and model, beside the runtime's own flags."""
+
+    args: tuple[str, ...] = ()
+    env: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -116,8 +157,13 @@ class RuntimeAdapter(ABC):
         """The flags that keep the operator's personal configuration out of a run in ``cwd``."""
 
     @abstractmethod
+    def bind_provider(self, provider: ProviderSpec, model: str, effort: str) -> ProviderBinding:
+        """What points a run at ``provider``, ``model`` and ``effort`` beside the runtime's own flags; raises
+        ``RuntimeUnsupported`` when it cannot."""
+
+    @abstractmethod
     def launch_args(self, launch: Launch) -> list[str]:
-        """The flags of an agent's settings, installed items and knowledge."""
+        """The flags of an agent's settings, installed items, knowledge and provider binding."""
 
     @abstractmethod
     def environment(self, launch: Launch) -> dict[str, str] | None:
@@ -148,14 +194,18 @@ class RuntimeAdapter(ABC):
         """Write one user turn to a running process."""
 
     @abstractmethod
-    def events(self, stdout: asyncio.StreamReader) -> AsyncIterator[dict[str, Any]]:
+    def parse(self, stdout: asyncio.StreamReader) -> AsyncIterator[dict[str, Any]]:
         """The process's output as internal events, in order."""
+
+    @abstractmethod
+    def tool_summary(self, tool_name: str, tool_input: dict[str, Any]) -> str:
+        """One of its tool calls in a few words, for the task's activity."""
 
     # --- Cost ---
 
     @abstractmethod
-    def usage(self, result_event: dict[str, Any] | None, *, before: Usage | None = None) -> Usage:
-        """A run's own cost and tokens from its result (``before``: the session's totals it started from)."""
+    def cost(self, usage: Usage, provider: ProviderSpec) -> RunCost:
+        """A run's cost with ``provider``, from its ``usage`` (its tokens and what the runtime reported)."""
 
     @abstractmethod
     def budget_error(self, result_event: dict[str, Any] | None) -> str | None:
@@ -171,6 +221,12 @@ def _adapters() -> dict[str, RuntimeAdapter]:
 # The runtime types, by type id. Code owns this set: a registered runtime of a type missing here cannot run.
 ADAPTERS: dict[str, RuntimeAdapter] = _adapters()
 CLAUDE_CODE: RuntimeAdapter = ADAPTERS["claude-code"]
+
+
+def can_resume(session_runtime_type: str | None, runtime: RuntimeAdapter) -> bool:
+    """Whether a process of ``runtime`` can resume a session saved by one of ``session_runtime_type`` (None: a
+    session from before agents, which Claude Code ran): only one of the same type can."""
+    return (session_runtime_type or CLAUDE_CODE.type) == runtime.type
 
 
 def adapter(runtime_type: str) -> RuntimeAdapter:

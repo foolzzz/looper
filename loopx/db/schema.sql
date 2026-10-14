@@ -106,6 +106,11 @@ CREATE TABLE IF NOT EXISTS agent_sessions (
     session_totals  JSONB NOT NULL DEFAULT '{}',
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+-- The runtime type the session belongs to and the agent (agents.id) that ran it
+-- last: a process of another runtime type cannot resume it, so the next turn
+-- starts a new session. NULL: a session from before agents, which Claude Code ran.
+ALTER TABLE agent_sessions ADD COLUMN IF NOT EXISTS runtime_type TEXT;
+ALTER TABLE agent_sessions ADD COLUMN IF NOT EXISTS session_agent_id TEXT;
 
 -- A task's journal: what its steps delivered and found. Code writes an entry,
 -- never the model: 'step_accepted' in the transaction that settles an
@@ -166,7 +171,8 @@ CREATE TABLE IF NOT EXISTS agent_runtimes (
     executable    TEXT NOT NULL DEFAULT '',
     version       TEXT,
     capabilities  TEXT[] NOT NULL DEFAULT '{}'
-        CHECK (capabilities <@ ARRAY['run', 'resident_session', 'resume']),
+        CHECK (capabilities <@ ARRAY['run', 'resident_session', 'resume', 'structured_output', 'claude_plugins', 'mcp',
+                                     'add_dirs', 'compaction_events', 'autonomous_turns', 'cost_report']),
     probed_at     TIMESTAMPTZ,
     probe_error   TEXT,
     builtin       BOOLEAN NOT NULL DEFAULT false,
@@ -181,9 +187,12 @@ CREATE TABLE IF NOT EXISTS llm_providers (
     auth                TEXT NOT NULL CHECK (auth IN ('oauth', 'api_key')),
     oauth_runtime_type  TEXT,
     base_url            TEXT NOT NULL DEFAULT '',
-    -- [{"name", "input_usd_per_mtok", "output_usd_per_mtok", "cache_read_usd_per_mtok",
-    --   "cache_write_usd_per_mtok"}]; [] = any model, priced by what the runtime reports.
+    -- The model catalog: [{"name", "context_window", "input_usd_per_mtok", "output_usd_per_mtok",
+    -- "cache_read_usd_per_mtok", "cache_write_usd_per_mtok", "efforts"}], each but the name null when unknown;
+    -- [] = any model the provider takes.
     models              JSONB NOT NULL DEFAULT '[]'::jsonb CHECK (jsonb_typeof(models) = 'array'),
+    -- At most this many runs at once on the provider; NULL = no limit.
+    max_concurrency     INTEGER CHECK (max_concurrency > 0),
     builtin             BOOLEAN NOT NULL DEFAULT false,
     created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -205,11 +214,22 @@ CREATE TABLE IF NOT EXISTS agents (
     created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at   TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+-- A task's agent overrides: its own choice of agent for some of its roles (the
+-- Planner, Workers or Reviewers), the only agent setting a task has. Each wins
+-- over every layer, for that task only; an agent a task chose cannot be deleted.
+CREATE TABLE IF NOT EXISTS task_agent_overrides (
+    task_id   TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    role      TEXT NOT NULL CHECK (role IN ('planner', 'worker', 'reviewer')),
+    agent_id  TEXT NOT NULL REFERENCES agents(id),
+    PRIMARY KEY (task_id, role)
+);
 -- The built-ins, on every start: the Claude Code runtime (the server's claude),
 -- its own login as a provider, and the agent every role runs when nothing
 -- selects another (loopx/agents/agent_registry.py BUILTIN_*). A missing one comes back.
 INSERT INTO agent_runtimes (id, name, type, executable, capabilities, builtin)
-VALUES ('rt-claude-code', 'claude-code', 'claude-code', '', ARRAY['run', 'resident_session', 'resume'], true)
+VALUES ('rt-claude-code', 'claude-code', 'claude-code', '',
+        ARRAY['add_dirs', 'autonomous_turns', 'claude_plugins', 'compaction_events', 'cost_report', 'mcp',
+              'resident_session', 'resume', 'run'], true)
 ON CONFLICT DO NOTHING;
 INSERT INTO llm_providers (id, name, protocols, auth, oauth_runtime_type, builtin)
 VALUES ('prov-claude-subscription', 'claude-subscription', ARRAY['anthropic-messages'], 'oauth', 'claude-code', true)
@@ -428,14 +448,15 @@ END $$;
 -- project, a later layer winning. The Manager spans every project and has only
 -- the first two. A NULL field is not set at its layer (it inherits); env is an
 -- ordered list of {"key", "value"}, where a null value unsets a key an earlier
--- layer set (never at the system layer). Code owns the validation and the
--- resolution (loopx/agents/agent_settings.py). One row per layer and place.
+-- layer set (never at the system layer). agent_id is the agent the layer's
+-- roles run (its model with it). Code owns the validation and the resolution
+-- (loopx/agents/agent_settings.py). One row per layer and place.
 CREATE TABLE IF NOT EXISTS agent_setting_layers (
     scope           TEXT NOT NULL CHECK (scope IN ('system', 'role', 'project', 'role_project')),
     role            TEXT CHECK (role IN ('manager', 'planner', 'worker', 'reviewer')),
     project_id      TEXT REFERENCES projects(id) ON DELETE CASCADE,
     harness_prompt  TEXT,
-    model           TEXT,
+    agent_id        TEXT REFERENCES agents(id),
     effort          TEXT,
     env             JSONB NOT NULL DEFAULT '[]'::jsonb CHECK (jsonb_typeof(env) = 'array'),
     run_budget_usd  DOUBLE PRECISION CHECK (run_budget_usd > 0),
@@ -459,6 +480,8 @@ DECLARE
     env_value JSONB := '[]'::jsonb;
 BEGIN
     IF NOT EXISTS (SELECT 1 FROM schema_migrations WHERE name = 'agent_setting_layers') THEN
+        -- Layers held a model then; the agents' migration below turns it into an agent.
+        ALTER TABLE agent_setting_layers ADD COLUMN IF NOT EXISTS model TEXT;
         ALTER TABLE agent_configs ADD COLUMN IF NOT EXISTS harness_prompt TEXT NOT NULL DEFAULT '';
         ALTER TABLE agent_configs ADD COLUMN IF NOT EXISTS model TEXT;
         ALTER TABLE projects ADD COLUMN IF NOT EXISTS planner_harness_prompt TEXT NOT NULL DEFAULT '';
@@ -501,6 +524,40 @@ BEGIN
         ALTER TABLE projects DROP COLUMN run_budget_usd;
         DELETE FROM system_settings WHERE key IN ('agent.harness_prompt', 'agent.model', 'agent.effort', 'agent.env');
         INSERT INTO schema_migrations (name) VALUES ('agent_setting_layers');
+    END IF;
+END $$;
+
+-- Once (agents select the model): a layer's model becomes the agent of the
+-- Claude Code runtime, its own login and that model, named claude-code/<model>
+-- (claude-code/opus is the built-in one), so every role resolves the model it
+-- did. A stored model that no longer validates was ignored, as if unset: it
+-- selects no agent. A layer left with nothing set is removed.
+ALTER TABLE agent_setting_layers ADD COLUMN IF NOT EXISTS agent_id TEXT REFERENCES agents(id);
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM schema_migrations WHERE name = 'agent_setting_layers_agent') THEN
+        IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = current_schema()
+                   AND table_name = 'agent_setting_layers' AND column_name = 'model') THEN
+            CREATE TEMP TABLE layer_models AS
+            SELECT scope, role, project_id, btrim(model, E' \t\n\r\x0b\x0c') AS model FROM agent_setting_layers
+            WHERE model IS NOT NULL;
+            DELETE FROM layer_models
+            WHERE NOT (model ~ '^[A-Za-z0-9][A-Za-z0-9._:/\[\]-]*$' AND length(model) <= 200);
+            INSERT INTO agents (id, name, runtime_id, provider_id, model)
+            SELECT 'agent-' || left(replace(gen_random_uuid()::text, '-', ''), 12), 'claude-code/' || model,
+                   'rt-claude-code', 'prov-claude-subscription', model
+            FROM (SELECT DISTINCT model FROM layer_models) m
+            ON CONFLICT (name) DO NOTHING;
+            UPDATE agent_setting_layers l SET agent_id = a.id
+            FROM layer_models m JOIN agents a ON a.name = 'claude-code/' || m.model
+            WHERE l.scope = m.scope AND l.role IS NOT DISTINCT FROM m.role
+              AND l.project_id IS NOT DISTINCT FROM m.project_id;
+            DROP TABLE layer_models;
+            ALTER TABLE agent_setting_layers DROP COLUMN model;
+            DELETE FROM agent_setting_layers WHERE harness_prompt IS NULL AND agent_id IS NULL AND effort IS NULL
+                AND env = '[]'::jsonb AND run_budget_usd IS NULL;
+        END IF;
+        INSERT INTO schema_migrations (name) VALUES ('agent_setting_layers_agent');
     END IF;
 END $$;
 
@@ -607,6 +664,9 @@ ALTER TABLE llm_records ADD COLUMN IF NOT EXISTS context_tokens INTEGER;
 -- The context compactions during the run, each {trigger, pre_tokens, post_tokens, duration_ms};
 -- NULL for runs recorded before compactions were.
 ALTER TABLE llm_records ADD COLUMN IF NOT EXISTS compactions JSONB;
+-- Where cost_usd comes from: what the runtime reported ('runtime'; Claude Code with its own login), or the
+-- run's tokens at its provider's prices ('provider_price'); NULL for runs recorded before agents.
+ALTER TABLE llm_records ADD COLUMN IF NOT EXISTS cost_source TEXT CHECK (cost_source IN ('runtime', 'provider_price'));
 
 -- Once: runs recorded before `status` existed all defaulted to 'completed';
 -- the ones that recorded an error had failed.

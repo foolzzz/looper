@@ -904,10 +904,12 @@ class AgentHTTPServer:
         self, task_id: str, writer: asyncio.StreamWriter,
     ) -> None:
         try:
+            from ..db.agent_setting_layers import agent_overrides
             from ..db.llm_records import task_costs
             from ..db.tasks import get_task_with_steps
             raw = await get_task_with_steps(task_id)
             cost = (await task_costs([task_id]))[task_id] if raw else None
+            overrides = await agent_overrides(task_id) if raw else {}
         except Exception:
             logger.exception("DB unavailable for task_detail %s", task_id)
             writer.write(_json_response(HTTP_500, {"error": "database unavailable"}))
@@ -931,6 +933,8 @@ class AgentHTTPServer:
             "correlation_id": raw.get("correlation_id", ""),
             "work_dir": raw.get("work_dir", ""),
             "config": raw.get("config", {}),
+            # The agent the task chose for some of its roles, over the layers (agent_settings.Layer.TASK).
+            "agent_overrides": {role: agent_registry.agent_view(agent) for role, agent in overrides.items()},
             "origin_channel_id": raw.get("origin_channel_id", ""),
             "result_summary": raw.get("result_summary"),
             "error": raw.get("error"),

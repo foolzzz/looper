@@ -18,6 +18,8 @@ from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
+
+from agent_fixtures import agent_json
 from library_fixtures import ALPHA_SKILL, DEMO_PLUGIN, plugin_dirs
 
 from loopx.agents.agent_settings import DEFAULT_HARNESS_PROMPT
@@ -617,7 +619,7 @@ class TestResidentClaude:
         from loopx.db import agent_setting_layers
 
         monkeypatch.setattr(agent_setting_layers, "list_layers", AsyncMock(
-            return_value=[{"scope": "role", "role": "planner", "model": "claude-test"}]))
+            return_value=[{"scope": "role", "role": "planner", "agent": agent_json("claude-test")}]))
         claude = planner_claude(plan(step("s1")), decide("accept"))
         h = drive(claude, always(WORK_OK))
 
@@ -887,10 +889,11 @@ class TestSystemPrompt:
 
 
 def _settings(agent_db: Any, **stored: str) -> None:
-    """What the system layer holds: harness, model, effort and env (a JSON list)."""
-    names = {"harness": "harness_prompt", "model": "model", "effort": "effort", "env": "env"}
+    """What the system layer holds: harness, the agent of a model, effort and env (a JSON list)."""
+    names = {"harness": "harness_prompt", "model": "agent", "effort": "effort", "env": "env"}
     agent_db.list_layers.return_value = [
-        {"scope": "system", **{names[k]: json.loads(v) if k == "env" else v for k, v in stored.items()}}]
+        {"scope": "system", **{names[k]: json.loads(v) if k == "env" else agent_json(v) if k == "model" else v
+                               for k, v in stored.items()}}]
 
 
 def _between_turns(agent_db: Any, change: Callable[[], None]) -> Callable[[Harness], Awaitable[None]]:

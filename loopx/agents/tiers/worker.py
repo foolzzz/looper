@@ -539,7 +539,17 @@ class WorkerPool:
         knowledge = await load_knowledge(self._runtime_root, project, work_dir)
         project_id = str((project or {}).get("id") or "") or None
         library = await load_installed(self._runtime_root, agent.value, project_id)
-        agent_settings = await load_agent_settings(agent, project_id)
+        # The task's own choice of agent for this role wins over the layers.
+        agent_settings = await load_agent_settings(agent, project_id, parent_task_id or None)
+        if agent_settings.agent_error:
+            # The step fails with the reason rather than run another agent.
+            logger.error("worker %s: %s", worker_id, agent_settings.agent_error)
+            if parent_task_id:
+                await self._activity(parent_task_id, worker_id, "error", agent_settings.agent_error[:500])
+            if is_verify:
+                return {"passed": False, "findings": [agent_settings.agent_error],
+                        "summary": agent_settings.agent_error}
+            return {"status": "failed", "error": agent_settings.agent_error}
         launch = Launch(agent_settings, library, knowledge)
         background = str((project or {}).get("background") or "")
         system_prompt = build_system_prompt(
@@ -583,8 +593,8 @@ class WorkerPool:
                 return {"passed": False, "findings": [problem], "summary": problem}
             return {"status": "failed", "error": problem}
         runtime = launch.runtime
-        command = runtime.run_command(self._config.claude_bin, cwd=work_dir, prompt_file=prompt_file, launch=launch,
-                                      max_turns=max_turns)
+        command = runtime.run_command(launch.executable(self._config.claude_bin), cwd=work_dir,
+                                      prompt_file=prompt_file, launch=launch, max_turns=max_turns)
 
         if parent_task_id:
             cmd_display = _display_command(command) + f"  (prompt on stdin, {len(prompt)} chars)"
@@ -649,7 +659,7 @@ class WorkerPool:
         async def _read_stream() -> None:
             nonlocal result_event
             assert process.stdout is not None
-            async for event in runtime.events(process.stdout):
+            async for event in runtime.parse(process.stdout):
                 await recorder.record(event)
 
                 event_type = event.get("type", "")
@@ -664,7 +674,7 @@ class WorkerPool:
                         if block_type == "tool_use":
                             tool_name = block.get("name", "unknown")
                             tool_input = block.get("input", {})
-                            summary = self._format_tool_summary(tool_name, tool_input)
+                            summary = runtime.tool_summary(tool_name, tool_input)
                             if parent_task_id:
                                 try:
                                     await db_activity.insert_activity(
@@ -852,22 +862,6 @@ class WorkerPool:
             await db_activity.insert_activity(task_id=task_id, worker=worker_id, kind=kind, summary=summary)
         except Exception:
             logger.debug("failed to insert %s activity", kind, exc_info=True)
-
-    @staticmethod
-    def _format_tool_summary(tool_name: str, tool_input: dict[str, Any]) -> str:
-        if tool_name == "Read":
-            return f"Reading: {tool_input.get('file_path', '?')}"
-        if tool_name == "Edit":
-            return f"Editing: {tool_input.get('file_path', '?')}"
-        if tool_name == "Write":
-            return f"Writing: {tool_input.get('file_path', '?')}"
-        if tool_name == "Bash":
-            cmd = tool_input.get("command", "")
-            return f"Running: {cmd[:80]}"
-        if tool_name in ("Glob", "Grep"):
-            pattern = tool_input.get("pattern", tool_input.get("query", ""))
-            return f"{tool_name}: {pattern[:60]}"
-        return f"Tool: {tool_name}"
 
     def active_count(self) -> int:
         return len(self._active)

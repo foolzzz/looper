@@ -5,10 +5,13 @@ effort. A **runtime** is a registered instance of a runtime type (an adapter
 in ``loopx.agents.runtimes``): the executable it runs and what its probe found
 (``<executable> --version``, never a model call). A **provider** is where an
 agent's requests go: the protocols it serves (``anthropic-messages``,
-``openai-responses``, ``openai-chat``), its ``base_url``, its models and
-their prices, and how it authenticates: a runtime type's own login
-(``oauth``, bound to that type) or an API key, which is stored apart
-(``llm_provider_secrets``) and shown as ``***``.
+``openai-responses``, ``openai-chat``), its ``base_url``, its model catalog
+(each model's context window, prices and effort levels, each unknown until
+given), how many runs it takes at once (``max_concurrency``, none for no
+limit) and how it authenticates: a runtime type's own login (``oauth``, bound
+to that type) or an API key, which is stored apart (``llm_provider_secrets``)
+and shown as ``***``. The catalog's prices and the concurrency limit are
+stored and checked here; the runs do not use them yet.
 
 The built-ins exist on every installation and are read-only: the
 ``claude-code`` runtime (the server's configured ``claude``), the
@@ -25,6 +28,12 @@ it uses changes (``check_pairing``):
 - the runtime can be started with that kind of provider now
   (``RuntimeAdapter.auth_kinds``);
 - the model is one the provider lists, when it lists any.
+
+Where an agent is selected (a layer, or a task's choice for one of its roles),
+its runtime must have what each of those roles needs (``check_roles``,
+``runtimes.ROLE_CAPABILITIES``): a resident session and resume for the
+Manager and the Planner, a run for the Workers and Reviewers. Every runtime is
+meant to run every role; one that cannot yet is refused with the reason.
 """
 
 from __future__ import annotations
@@ -46,6 +55,10 @@ API_KEY_MAX_CHARS = 4_000
 MODELS_MAX = 100
 PRICE_MAX_USD = 10_000
 PRICE_FIELDS = ("input_usd_per_mtok", "output_usd_per_mtok", "cache_read_usd_per_mtok", "cache_write_usd_per_mtok")
+MODEL_FIELDS = ("name", "context_window", *PRICE_FIELDS, "efforts")
+CONTEXT_WINDOW_MAX = 100_000_000
+EFFORTS_MAX = 10
+CONCURRENCY_MAX = 1_000
 # What the API shows, and takes back unchanged, in place of a stored API key.
 SECRET_MASK = "***"
 
@@ -71,7 +84,7 @@ class RuntimeSpec:
     name: str
     type: str
     executable: str = ""  # '' = the type's default (for Claude Code, the server's configured claude)
-    capabilities: frozenset[Capability] = frozenset(Capability)
+    capabilities: frozenset[Capability] = frozenset()
 
 
 @dataclass(frozen=True)
@@ -120,7 +133,7 @@ class AgentSpec:
         }
 
 
-BUILTIN_RUNTIME = RuntimeSpec("rt-claude-code", "claude-code", "claude-code")
+BUILTIN_RUNTIME = RuntimeSpec("rt-claude-code", "claude-code", "claude-code", "", runtimes.CLAUDE_CODE.capabilities)
 BUILTIN_PROVIDER = ProviderSpec("prov-claude-subscription", "claude-subscription", AuthKind.OAUTH,
                                 frozenset({ApiProtocol.ANTHROPIC_MESSAGES}), "claude-code")
 BUILTIN_AGENT = AgentSpec("agent-claude-code-opus", "claude-code/opus", BUILTIN_RUNTIME, BUILTIN_PROVIDER, "opus")
@@ -198,7 +211,36 @@ def _price(raw: Any, field: str) -> float | None:
     return float(raw)
 
 
+def _context_window(raw: Any) -> int | None:
+    if raw is None:
+        return None
+    if isinstance(raw, bool) or not isinstance(raw, int) or not 0 < raw <= CONTEXT_WINDOW_MAX:
+        raise RegistryError(f"context_window must be a number of tokens from 1 to {CONTEXT_WINDOW_MAX}, or null")
+    return raw
+
+
+def _efforts(raw: Any) -> list[str] | None:
+    """The effort levels a model takes, in the provider's own words (``low``, ``minimal``...); null: unknown."""
+    if raw is None:
+        return None
+    if not isinstance(raw, list) or len(raw) > EFFORTS_MAX or len(set(map(str, raw))) != len(raw) \
+            or not all(isinstance(e, str) and re.fullmatch(r"[a-z][a-z0-9_-]{0,31}", e) for e in raw):
+        raise RegistryError(f"efforts must be a list of at most {EFFORTS_MAX} distinct effort level names "
+                            "(such as low, medium, high), or null")
+    return list(raw)
+
+
+def _max_concurrency(raw: Any) -> int | None:
+    if raw is None:
+        return None
+    if isinstance(raw, bool) or not isinstance(raw, int) or not 0 < raw <= CONCURRENCY_MAX:
+        raise RegistryError(f"max_concurrency must be a number of runs from 1 to {CONCURRENCY_MAX}, or null for "
+                            "no limit")
+    return raw
+
+
 def _models(raw: Any) -> list[dict[str, Any]]:
+    """The model catalog; every field but the name may be null (unknown)."""
     from .agent_settings import SettingsError, model_name
 
     if raw is None:
@@ -207,8 +249,8 @@ def _models(raw: Any) -> list[dict[str, Any]]:
         raise RegistryError(f"models must be a list of at most {MODELS_MAX} entries")
     models: list[dict[str, Any]] = []
     for entry in raw:
-        if not isinstance(entry, dict) or not set(entry) <= {"name", *PRICE_FIELDS}:
-            raise RegistryError(f"each model is {{\"name\", {', '.join(PRICE_FIELDS)}}} (the prices optional)")
+        if not isinstance(entry, dict) or not set(entry) <= set(MODEL_FIELDS):
+            raise RegistryError(f"each model is {{{', '.join(MODEL_FIELDS)}}}, all but the name optional")
         try:
             name = model_name(entry.get("name"), field="a model name")
         except SettingsError as exc:
@@ -217,7 +259,8 @@ def _models(raw: Any) -> list[dict[str, Any]]:
             raise RegistryError("each model needs a name")
         if any(m["name"] == name for m in models):
             raise RegistryError(f"model {name!r} is listed twice")
-        models.append({"name": name, **{f: _price(entry.get(f), f) for f in PRICE_FIELDS}})
+        models.append({"name": name, "context_window": _context_window(entry.get("context_window")),
+                       **{f: _price(entry.get(f), f) for f in PRICE_FIELDS}, "efforts": _efforts(entry.get("efforts"))})
     return models
 
 
@@ -276,6 +319,47 @@ def check_pairing(runtime: RuntimeSpec, provider: ProviderSpec, model: str) -> N
                             f"{model!r} is not one of them")
 
 
+def check_roles(agent: AgentSpec, roles: Iterable[str]) -> None:
+    """Refuse ``agent`` for a role its runtime lacks a capability for."""
+    adapter = runtimes.ADAPTERS.get(agent.runtime.type)
+    for role in roles:
+        needs = runtimes.ROLE_CAPABILITIES[role]
+        if missing := needs - agent.runtime.capabilities:
+            label = adapter.label if adapter else agent.runtime.type
+            raise RegistryError(
+                f"agent {agent.name!r} cannot run the {role}: its runtime {agent.runtime.name!r} ({label}) lacks "
+                f"{_listed(missing)}, which a {role} needs ({_listed(needs)})")
+
+
+# The roles a layer of each scope, or a task's choice, selects an agent for.
+_SCOPE_ROLES = {"system": tuple(runtimes.ROLE_CAPABILITIES), "project": ("planner", "worker", "reviewer")}
+
+
+async def check_selection(agent_id: str, roles: Iterable[str]) -> AgentSpec:
+    """The registered agent ``agent_id``, refused when it cannot run one of ``roles``."""
+    from ..db import agent_registry as db
+
+    row = await db.get_agent(agent_id) if isinstance(agent_id, str) else None
+    if row is None:
+        raise RegistryError(f"no agent {agent_id!r}: give the agent_id of a registered agent")
+    agent = AgentSpec.from_row(row)
+    if agent.runtime.type not in runtimes.ADAPTERS:
+        raise RegistryError(f"agent {agent.name!r} runs on a {agent.runtime.type!r} runtime, which this version "
+                            "cannot run")
+    check_roles(agent, roles)
+    return agent
+
+
+async def _selected_roles(agent_id: str) -> list[str]:
+    """Every role ``agent_id`` is selected for, by a layer or a task."""
+    from ..db import agent_setting_layers
+
+    roles: set[str] = set()
+    for scope, role in await agent_setting_layers.selected_roles(agent_id):
+        roles.update(_SCOPE_ROLES.get(scope, (role,)))
+    return [role for role in runtimes.ROLE_CAPABILITIES if role in roles]
+
+
 # --- Views ---
 
 
@@ -315,6 +399,7 @@ def provider_view(row: Mapping[str, Any]) -> dict[str, Any]:
     return {
         "provider_id": row["id"], "name": row["name"], "protocols": list(row["protocols"]), "auth": row["auth"],
         "oauth_runtime_type": row["oauth_runtime_type"], "base_url": row["base_url"], "models": row["models"],
+        "max_concurrency": row["max_concurrency"],
         "api_key": SECRET_MASK if row.get("api_key_set") else None, "builtin": row["builtin"],
         "agent_count": row.get("agent_count", 0), "created_at": row["created_at"], "updated_at": row["updated_at"],
     }
@@ -333,6 +418,7 @@ def _limits() -> dict[str, Any]:
 
     return {
         "name_max_chars": NAME_MAX_CHARS, "models_max": MODELS_MAX, "price_fields": list(PRICE_FIELDS),
+        "model_fields": list(MODEL_FIELDS),
         "protocols": [p.value for p in ApiProtocol], "auth_kinds": [a.value for a in AuthKind],
         "effort_levels": list(EFFORT_LEVELS),
         "role_capabilities": {role: sorted(c.value for c in needs) for role, needs in runtimes.ROLE_CAPABILITIES.items()},
@@ -464,7 +550,8 @@ async def delete_runtime(runtime_id: str) -> dict[str, Any]:
 
 # --- Providers ---
 
-_PROVIDER_FIELDS = ("name", "protocols", "auth", "oauth_runtime_type", "base_url", "models", "api_key")
+_PROVIDER_FIELDS = ("name", "protocols", "auth", "oauth_runtime_type", "base_url", "models", "max_concurrency",
+                    "api_key")
 
 
 async def _existing_provider(provider_id: str, conn: Any = None) -> dict[str, Any]:
@@ -490,6 +577,7 @@ def _provider_fields(data: Mapping[str, Any], current: Mapping[str, Any] | None)
         "auth": auth.value,
         "base_url": _base_url(merged["base_url"]),
         "models": _models(merged["models"]),
+        "max_concurrency": _max_concurrency(merged["max_concurrency"]),
     }
     key: Any = ...
     if auth is AuthKind.OAUTH:
@@ -534,7 +622,7 @@ async def _provider_answer(provider_id: str) -> dict[str, Any]:
 
 
 async def create_provider(data: Any) -> dict[str, Any]:
-    """Register ``{name, protocols, auth, oauth_runtime_type?, base_url?, models?, api_key?}``."""
+    """Register ``{name, protocols, auth, oauth_runtime_type?, base_url?, models?, max_concurrency?, api_key?}``."""
     import asyncpg
 
     from ..db import agent_registry as db
@@ -656,7 +744,10 @@ async def update_agent(agent_id: str, data: Any) -> dict[str, Any]:
             fields[name] = data[name]
     runtime, provider = await _parts(fields.get("runtime_id", row["runtime_id"]),
                                      fields.get("provider_id", row["provider_id"]))
-    check_pairing(runtime, provider, fields.get("model", row["model"]))
+    model = fields.get("model", row["model"])
+    check_pairing(runtime, provider, model)
+    check_roles(AgentSpec(agent_id, fields.get("name", row["name"]), runtime, provider, model),
+                await _selected_roles(agent_id))
     try:
         await db.update_agent(agent_id, fields)
     except asyncpg.UniqueViolationError:

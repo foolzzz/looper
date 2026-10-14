@@ -16,10 +16,12 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from .. import claude_cli
-from ..run_usage import run_usage
-from . import ApiProtocol, AuthKind, Capability, Probe, RuntimeAdapter
+from . import (
+    ApiProtocol, AuthKind, Capability, CostSource, Probe, ProviderBinding, RunCost, RuntimeAdapter, RuntimeUnsupported,
+)
 
 if TYPE_CHECKING:
+    from ..agent_registry import ProviderSpec
     from ..agent_settings import Launch
     from ..run_usage import Usage
 
@@ -30,7 +32,9 @@ class ClaudeCodeRuntime(RuntimeAdapter):
     type = "claude-code"
     label = "Claude Code"
     default_executable = "claude"
-    capabilities = frozenset({Capability.RUN, Capability.RESIDENT_SESSION, Capability.RESUME})
+    # Verified against Claude Code 2.1.285 (claude_cli); its replies follow LoopX's contracts by prompt, so no
+    # structured_output.
+    capabilities = frozenset(set(Capability) - {Capability.STRUCTURED_OUTPUT})
     protocols = frozenset({ApiProtocol.ANTHROPIC_MESSAGES})
     # Its own login (the Claude subscription) only, for now: an API key provider needs the binding to set
     # Claude Code's key and endpoint variables (bind_provider).
@@ -55,10 +59,18 @@ class ClaudeCodeRuntime(RuntimeAdapter):
     def isolation_args(self, cwd: str | Path) -> list[str]:
         return claude_cli.isolation_args(cwd)
 
+    def bind_provider(self, provider: ProviderSpec, model: str, effort: str) -> ProviderBinding:
+        """Claude Code's own login (the ``claude-subscription`` provider) needs nothing beside ``--model`` and
+        ``--effort``: it is how every agent ran before providers. Any other provider is refused before it gets
+        here (``auth_kinds``)."""
+        if provider.auth is AuthKind.OAUTH and provider.oauth_runtime_type == self.type:
+            return ProviderBinding()
+        raise RuntimeUnsupported(f"Claude Code runs with its own login only; provider {provider.name!r} is not it")
+
     def launch_args(self, launch: Launch) -> list[str]:
         """The Claude Code flags every agent starts with: the permissions, the model, the effort, the
-        plugin directories of the installed items, the directories of the project knowledge and the
-        per-run spend cap."""
+        plugin directories of the installed items, the directories of the project knowledge, the
+        per-run spend cap and the provider's binding."""
         from ..claude_cli import budget_args, knowledge_args, library_args, permission_args
 
         return [
@@ -68,11 +80,14 @@ class ClaudeCodeRuntime(RuntimeAdapter):
             *library_args(launch.library),
             *knowledge_args(launch.knowledge),
             *budget_args(launch.max_budget_usd),
+            *self.bind_provider(launch.agent.provider, launch.model, launch.effort).args,
         ]
 
     def environment(self, launch: Launch) -> dict[str, str] | None:
-        """The subprocess environment: the server's, then the settings' variables; None without any."""
-        return {**os.environ, **dict(launch.env)} if launch.env else None
+        """The subprocess environment: the server's, then the settings' variables and the provider's binding;
+        None without any."""
+        added = {**dict(launch.env), **dict(self.bind_provider(launch.agent.provider, launch.model, launch.effort).env)}
+        return {**os.environ, **added} if added else None
 
     def resident_command(self, executable: str, *, cwd: str | Path, prompt_file: Path, launch: Launch,
                          max_turns: int = 0) -> list[str]:
@@ -130,11 +145,27 @@ class ClaudeCodeRuntime(RuntimeAdapter):
     async def write_turn(self, stdin: asyncio.StreamWriter, text: str, *, uuid: str | None = None) -> None:
         await claude_cli.write_user_turn(stdin, text, uuid=uuid)
 
-    def events(self, stdout: asyncio.StreamReader) -> AsyncIterator[dict[str, Any]]:
+    def parse(self, stdout: asyncio.StreamReader) -> AsyncIterator[dict[str, Any]]:
         return claude_cli.stream_events(stdout)
 
-    def usage(self, result_event: dict[str, Any] | None, *, before: Usage | None = None) -> Usage:
-        return run_usage(result_event, before=before)
+    def tool_summary(self, tool_name: str, tool_input: dict[str, Any]) -> str:
+        if tool_name == "Read":
+            return f"Reading: {tool_input.get('file_path', '?')}"
+        if tool_name == "Edit":
+            return f"Editing: {tool_input.get('file_path', '?')}"
+        if tool_name == "Write":
+            return f"Writing: {tool_input.get('file_path', '?')}"
+        if tool_name == "Bash":
+            cmd = tool_input.get("command", "")
+            return f"Running: {cmd[:80]}"
+        if tool_name in ("Glob", "Grep"):
+            pattern = tool_input.get("pattern", tool_input.get("query", ""))
+            return f"{tool_name}: {pattern[:60]}"
+        return f"Tool: {tool_name}"
+
+    def cost(self, usage: Usage, provider: ProviderSpec) -> RunCost:
+        """With its own login, the ``total_cost_usd`` Claude Code reports, at Claude's prices."""
+        return RunCost(usage, CostSource.RUNTIME)
 
     def budget_error(self, result_event: dict[str, Any] | None) -> str | None:
         return claude_cli.budget_error(result_event)

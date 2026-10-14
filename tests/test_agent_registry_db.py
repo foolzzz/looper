@@ -143,13 +143,15 @@ def test_the_builtins_are_read_only(monkeypatch: pytest.MonkeyPatch, method: str
 def test_a_runtime_is_probed_with_version_only_when_registered_and_on_request(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
+    from loopx.agents.runtimes import CLAUDE_CODE
+
     claude = _version_claude(tmp_path)
 
     async def _test(_pool: Any) -> None:
         added = (await _ok("POST", "/api/runtimes", {"name": "claude-next", "type": "claude-code",
                                                      "executable": claude}))["runtime"]
         assert (added["version"], added["probe_error"]) == ("2.1.285 (Claude Code)", None)
-        assert set(added["capabilities"]) == {"run", "resident_session", "resume"}
+        assert set(added["capabilities"]) == {c.value for c in CLAUDE_CODE.capabilities}
 
         missing = (await _ok("POST", "/api/runtimes", {"name": "nowhere", "type": "claude-code",
                                                        "executable": str(tmp_path / "absent")}))["runtime"]
@@ -326,3 +328,252 @@ def test_the_upgrade_removes_llm_profiles_and_keeps_the_agent_configs(monkeypatc
         assert status == 400 and "runtime was removed" in payload["error"]
 
     _run(_test, monkeypatch, before=_BEFORE_AGENTS)
+
+
+# --- Selecting an agent: the layers and a task's overrides, checked for the roles they reach ---
+
+
+async def _agent(name: str, runtime_id: str = "rt-claude-code", provider_id: str = "prov-claude-subscription",
+                 model: str | None = None) -> str:
+    return (await _ok("POST", "/api/agents", {"name": name, "runtime_id": runtime_id, "provider_id": provider_id,
+                                              "model": model or name.rsplit("/", 1)[-1]}))["agent"]["agent_id"]
+
+
+async def _stand_in_agent(stand_in: str) -> str:
+    runtime_id = (await _ok("POST", "/api/runtimes", {"name": "si", "type": stand_in}))["runtime"]["runtime_id"]
+    provider_id = (await _ok("POST", "/api/providers", {"name": "si-key", "protocols": ["anthropic-messages"],
+                                                        "auth": "api_key"}))["provider"]["provider_id"]
+    return await _agent("si/sonnet", runtime_id, provider_id, "sonnet")
+
+
+def test_a_layer_selects_an_agent_only_for_roles_its_runtime_can_run(
+    monkeypatch: pytest.MonkeyPatch, stand_in: str,
+) -> None:
+    async def _test(_pool: Any) -> None:
+        one_off = await _stand_in_agent(stand_in)
+        project = (await _ok("POST", "/api/projects", {"name": "calc"}))["project_id"]
+
+        await _ok("PUT", "/api/agent-settings/roles/worker", {"agent": one_off})
+        await _ok("PUT", f"/api/projects/{project}/agent-settings/roles/reviewer", {"agent": one_off})
+        for path in ("/api/agent-settings/roles/planner", "/api/agent-settings/roles/manager",
+                     "/api/agent-settings/system", f"/api/projects/{project}/agent-settings"):
+            status, payload = await _call("PUT", path, {"agent": one_off})
+            assert status == 400 and "lacks resident_session, resume" in payload["error"], (path, payload)
+        assert (await _call("PUT", "/api/agent-settings/system", {"agent": "agent-nowhere"}))[0] == 400
+
+        # An agent selected for the Planner cannot move to a runtime that cannot run it.
+        planner = await _agent("claude-code/sonnet")
+        await _ok("PUT", "/api/agent-settings/roles/planner", {"agent": planner})
+        si_runtime = next(r["runtime_id"] for r in (await _registry())["runtimes"] if r["name"] == "si")
+        si_key = next(p["provider_id"] for p in (await _registry())["providers"] if p["name"] == "si-key")
+        status, payload = await _call("PUT", f"/api/agents/{planner}", {"runtime_id": si_runtime,
+                                                                        "provider_id": si_key})
+        assert status == 400 and "cannot run the planner" in payload["error"]
+        # A selected agent stays until nothing selects it.
+        assert (await _call("DELETE", f"/api/agents/{planner}"))[0] == 409
+
+    _run(_test, monkeypatch)
+
+
+async def _launch(role: str, task_id: str, work_dir: Path, root: Path) -> dict[str, Any]:
+    """Run ``role`` of task ``task_id`` the way the server does, with a stand-in claude; what it started with,
+    or the outcome without a start (``{"outcome": ...}``)."""
+    import agent_launch_parity as parity
+
+    from loopx.agents.message import MessageEnvelope, MessageType, planner_address, worker_address
+    from loopx.agents.tiers.planner import PlannerAgent, TaskPlan
+    from loopx.agents.tiers.worker import WorkerConfig, WorkerPool
+
+    out = root / f"{role}-{task_id}.json"
+    claude = fake_claude(root / f"claude-{role}-{task_id}", parity._CLAUDE.format(out=str(out)))
+    work_dir.mkdir(parents=True, exist_ok=True)
+    if role == "planner":
+        planner = PlannerAgent(task_id=task_id, runtime_root=root / "runtime", claude_bin=claude)
+        project = await _project_of(task_id)
+        plan = planner._plan = TaskPlan(plan_id="plan-x", goal_id="", requirement="r", work_dir=str(work_dir),
+                                        project_id=project)
+        try:
+            await planner._run_turn(planner._plan_message(plan))
+        finally:
+            await planner._claude.stop()
+        outcome: Any = None
+    else:
+        verify = role == "reviewer"
+        payload: dict[str, Any] = {"task_id": "step-x", "parent_task_id": task_id, "instruction": "do it",
+                                   "context": {"work_dir": str(work_dir)}}
+        if verify:
+            payload["work_result"] = {"status": "completed", "summary": "done", "changed_files": {}}
+        outcome = await WorkerPool(config=WorkerConfig(claude_bin=claude), runtime_root=root / "runtime")._execute(
+            MessageEnvelope.create(source=planner_address(task_id), target=worker_address(f"{role}-x"),
+                                   message_type=MessageType.VERIFY_REQUEST if verify else MessageType.WORK_ITEM,
+                                   payload=payload), is_verify=verify)
+    return json.loads(out.read_text()) if out.exists() else {"outcome": outcome}
+
+
+async def _project_of(task_id: str) -> str:
+    from loopx.db import projects
+
+    return (await projects.get_task_project(task_id))["id"]
+
+
+def _model(seen: dict[str, Any]) -> str:
+    argv = seen["argv"]
+    return argv[argv.index("--model") + 1]
+
+
+def test_a_tasks_agent_override_reaches_only_that_tasks_role(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, stand_in: str,
+) -> None:
+    async def _test(pool: Any) -> None:
+        sonnet, haiku = await _agent("claude-code/sonnet"), await _agent("claude-code/haiku")
+        one_off = await _stand_in_agent(stand_in)
+        await _ok("PUT", "/api/agent-settings/system", {"agent": sonnet})
+        project = (await _ok("POST", "/api/projects", {"name": "calc", "work_dir": str(tmp_path / "w")}))["project_id"]
+        chose = (await _ok("POST", "/api/tasks/create", {"requirement": "r", "project_id": project,
+                                                         "agent_overrides": {"worker": haiku, "planner": None}}))
+        plain = await _ok("POST", "/api/tasks/create", {"requirement": "r", "project_id": project})
+
+        seen = {(task["task_id"] == chose["task_id"], role): await _launch(role, task["task_id"], tmp_path / "w",
+                                                                           tmp_path)
+                for task in (chose, plain) for role in ("planner", "worker", "reviewer")}
+        assert {place: _model(s) for place, s in seen.items()} == {
+            (True, "planner"): "sonnet", (True, "worker"): "haiku", (True, "reviewer"): "sonnet",
+            (False, "planner"): "sonnet", (False, "worker"): "sonnet", (False, "reviewer"): "sonnet"}
+        # Every run went through the Claude Code runtime with its own login: its cost is what Claude reports.
+        assert {r["cost_source"] for r in await pool.fetch("SELECT cost_source FROM llm_records")} == {"runtime"}
+
+        detail = (await _ok("GET", f"/api/tasks/{chose['task_id']}"))["agent_overrides"]
+        assert {role: a["name"] for role, a in detail.items()} == {"worker": "claude-code/haiku"}
+        assert (await _ok("GET", f"/api/tasks/{plain['task_id']}"))["agent_overrides"] == {}
+        assert (await _call("DELETE", f"/api/agents/{haiku}"))[0] == 409  # a task chose it
+
+        # A task chooses only for its own roles, an agent that exists and can run the role.
+        for overrides, error in [({"manager": sonnet}, "not 'manager'"), ({"worker": "agent-nowhere"}, "no agent"),
+                                 ({"planner": one_off}, "cannot run the planner"), ([sonnet], "must be an object")]:
+            status, payload = await _call("POST", "/api/tasks/create", {"requirement": "r", "project_id": project,
+                                                                        "agent_overrides": overrides})
+            assert status == 400 and error in payload["error"], payload
+        assert (await _call("POST", "/api/tasks/create", {"requirement": "r", "project_id": project,
+                                                          "agent_overrides": {"worker": one_off}}))[0] == 201
+
+    _run(_test, monkeypatch)
+
+
+def test_an_agent_that_can_no_longer_run_fails_the_run_instead_of_another_agent(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, stand_in: str,
+) -> None:
+    from loopx.agents import runtimes
+
+    async def _test(_pool: Any) -> None:
+        one_off = await _stand_in_agent(stand_in)
+        await _ok("PUT", "/api/agent-settings/roles/worker", {"agent": one_off})
+        project = (await _ok("POST", "/api/projects", {"name": "calc"}))["project_id"]
+        task = (await _ok("POST", "/api/tasks/create", {"requirement": "r", "project_id": project,
+                                                        "work_dir": str(tmp_path / "w")}))["task_id"]
+        monkeypatch.delitem(runtimes.ADAPTERS, stand_in)  # a version without that runtime type
+
+        result = await _launch("worker", task, tmp_path / "w", tmp_path)
+        assert "argv" not in result  # no runtime started
+        assert result["outcome"]["status"] == "failed"
+        assert "runs on a 'stand-in' runtime, which this version cannot run" in result["outcome"]["error"]
+
+    _run(_test, monkeypatch)
+
+
+# --- The upgrade: each layer's model becomes an agent ---
+
+_BEFORE_LAYER_AGENTS = """
+CREATE TABLE schema_migrations (name TEXT PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT now());
+INSERT INTO schema_migrations (name) VALUES ('agent_setting_layers');
+CREATE TABLE projects (id TEXT PRIMARY KEY, name TEXT NOT NULL, description TEXT NOT NULL DEFAULT '',
+                       work_dir TEXT NOT NULL DEFAULT '', created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                       updated_at TIMESTAMPTZ NOT NULL DEFAULT now());
+CREATE TABLE agent_setting_layers (
+    scope TEXT NOT NULL, role TEXT, project_id TEXT REFERENCES projects(id) ON DELETE CASCADE,
+    harness_prompt TEXT, model TEXT, effort TEXT, env JSONB NOT NULL DEFAULT '[]'::jsonb,
+    run_budget_usd DOUBLE PRECISION, updated_at TIMESTAMPTZ NOT NULL DEFAULT now());
+CREATE UNIQUE INDEX idx_agent_setting_layers_place
+    ON agent_setting_layers (scope, COALESCE(role, ''), COALESCE(project_id, ''));
+INSERT INTO projects (id, name) VALUES ('proj-a', 'calc');
+INSERT INTO agent_setting_layers (scope, role, project_id, model, effort) VALUES
+    ('system', NULL, NULL, 'sonnet', 'high'),
+    ('role', 'manager', NULL, 'opus', NULL),
+    ('role', 'planner', NULL, ' haiku ', NULL),
+    ('role', 'worker', NULL, 'sonnet', NULL),
+    ('role', 'reviewer', NULL, '--resume', NULL),
+    ('project', NULL, 'proj-a', 'opus[1m]', NULL);
+"""
+
+
+def test_the_upgrade_turns_each_layer_model_into_an_agent(monkeypatch: pytest.MonkeyPatch) -> None:
+    from loopx.db.connection import ensure_schema
+
+    async def _layers(pool: Any) -> list[tuple[Any, ...]]:
+        return [tuple(r) for r in await pool.fetch(
+            "SELECT l.scope, l.role, l.project_id, a.name, a.model, a.runtime_id, a.provider_id, l.effort "
+            "FROM agent_setting_layers l LEFT JOIN agents a ON a.id = l.agent_id ORDER BY 1, 2, 3")]
+
+    async def _test(pool: Any) -> None:
+        columns = {r["column_name"] for r in await pool.fetch(
+            "SELECT column_name FROM information_schema.columns WHERE table_schema = current_schema() "
+            "AND table_name = 'agent_setting_layers'")}
+        assert "model" not in columns and "agent_id" in columns
+        builtin = ("rt-claude-code", "prov-claude-subscription")
+        assert await _layers(pool) == [
+            ("project", None, "proj-a", "claude-code/opus[1m]", "opus[1m]", *builtin, None),
+            ("role", "manager", None, "claude-code/opus", "opus", *builtin, None),  # the built-in agent
+            ("role", "planner", None, "claude-code/haiku", "haiku", *builtin, None),
+            ("role", "worker", None, "claude-code/sonnet", "sonnet", *builtin, None),
+            ("system", None, None, "claude-code/sonnet", "sonnet", *builtin, "high"),
+        ]  # the reviewer's model no longer validated (it was ignored): its layer held nothing else
+        assert await pool.fetchval("SELECT count(*) FROM agents") == 4
+        before = await _layers(pool), [tuple(r) for r in await pool.fetch("SELECT * FROM agents ORDER BY id")]
+        await ensure_schema(pool)
+        assert (await _layers(pool), [tuple(r) for r in await pool.fetch("SELECT * FROM agents ORDER BY id")]) \
+            == before
+
+    _run(_test, monkeypatch, before=_BEFORE_LAYER_AGENTS)
+
+
+# --- A provider's model catalog and concurrency: stored and checked ---
+
+
+def test_a_provider_keeps_its_model_catalog_and_concurrency_with_unknowns_as_null(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def _test(_pool: Any) -> None:
+        provider = (await _ok("POST", "/api/providers", {
+            "name": "glm", "protocols": ["anthropic-messages", "openai-chat"], "auth": "api_key",
+            "max_concurrency": 4, "models": [
+                {"name": "glm-4.6", "context_window": 200_000, "input_usd_per_mtok": 0.6, "efforts": ["low", "high"]},
+                {"name": "glm-4.5"}]}))["provider"]
+        assert provider["max_concurrency"] == 4
+        assert provider["models"] == [
+            {"name": "glm-4.6", "context_window": 200_000, "input_usd_per_mtok": 0.6, "output_usd_per_mtok": None,
+             "cache_read_usd_per_mtok": None, "cache_write_usd_per_mtok": None, "efforts": ["low", "high"]},
+            {"name": "glm-4.5", "context_window": None, "input_usd_per_mtok": None, "output_usd_per_mtok": None,
+             "cache_read_usd_per_mtok": None, "cache_write_usd_per_mtok": None, "efforts": None}]
+        unlimited = (await _ok("PUT", f"/api/providers/{provider['provider_id']}", {"max_concurrency": None}))
+        assert unlimited["provider"]["max_concurrency"] is None
+        (builtin,) = [p for p in (await _registry())["providers"] if p["builtin"]]
+        assert (builtin["max_concurrency"], builtin["models"]) == (None, [])  # no limit, any model
+
+    _run(_test, monkeypatch)
+
+
+@pytest.mark.parametrize(("change", "error"), [
+    ({"max_concurrency": 0}, "max_concurrency must be"),
+    ({"models": [{"name": "m", "context_window": 0}]}, "context_window must be"),
+    ({"models": [{"name": "m", "efforts": ["Low"]}]}, "efforts must be"),
+    ({"models": [{"name": "m", "input_usd_per_mtok": -1}]}, "per million tokens"),
+    ({"models": [{"name": "m", "speed": 1}]}, "each model is"),
+])
+def test_a_catalog_or_concurrency_that_does_not_validate_is_refused(
+    monkeypatch: pytest.MonkeyPatch, change: dict[str, Any], error: str,
+) -> None:
+    async def _test(_pool: Any) -> None:
+        status, payload = await _call("POST", "/api/providers", {"name": "p", "protocols": ["openai-chat"],
+                                                                 "auth": "api_key", **change})
+        assert status == 400 and error in payload["error"], payload
+
+    _run(_test, monkeypatch)

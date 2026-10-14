@@ -105,16 +105,18 @@ def _old_state(scenario: dict[str, Any]) -> Callable[[Any], Awaitable[None]]:
 
 
 _ENV = [{"key": "ZED", "value": "1"}, {"key": "ALPHA", "value": "two words"}]
-# Each scenario's layers after the upgrade: (scope, role, project, harness, model, effort, env, cap).
+# Each scenario's layers after the upgrade: (scope, role, project, harness, agent, effort, env, cap); each model
+# became the agent claude-code/<model> (the agents' upgrade, which follows this one).
 _EXPECTED_LAYERS = {
     "configured": [
-        ("project", None, "proj-a", None, "opus[1m]", None, [], 0.5),
-        ("role", "manager", None, "Manager harness HM.\n", "opus", None, [], None),
-        ("role", "planner", None, None, "haiku", None, [], None),
-        ("role", "worker", None, None, "claude-sonnet-4-5", None, [], None),
+        ("project", None, "proj-a", None, "claude-code/opus[1m]", None, [], 0.5),
+        ("role", "manager", None, "Manager harness HM.\n", "claude-code/opus", None, [], None),
+        ("role", "planner", None, None, "claude-code/haiku", None, [], None),
+        ("role", "worker", None, None, "claude-code/claude-sonnet-4-5", None, [], None),
         ("role_project", "planner", "proj-a", "\nPlan harness PH.", None, None, [], None),
         ("role_project", "worker", "proj-a", "Work harness WH.  ", None, None, [], None),
-        ("system", None, None, "\n\n  System harness H0.\nSecond line.  \n\n", "sonnet", "high", _ENV, None),
+        ("system", None, None, "\n\n  System harness H0.\nSecond line.  \n\n", "claude-code/sonnet", "high", _ENV,
+         None),
     ],
     "builtin_text_and_empty": [
         ("project", None, "proj-a", None, None, None, [], 0.25),
@@ -127,8 +129,9 @@ _EXPECTED_LAYERS = {
 
 async def _layers(pool: Any) -> list[tuple[Any, ...]]:
     rows = await pool.fetch(
-        "SELECT scope, role, project_id, harness_prompt, model, effort, env, run_budget_usd FROM agent_setting_layers "
-        "ORDER BY scope, role NULLS FIRST, project_id NULLS FIRST")
+        "SELECT l.scope, l.role, l.project_id, l.harness_prompt, a.name, l.effort, l.env, l.run_budget_usd "
+        "FROM agent_setting_layers l LEFT JOIN agents a ON a.id = l.agent_id "
+        "ORDER BY l.scope, l.role NULLS FIRST, l.project_id NULLS FIRST")
     return [(*tuple(r)[:6], json.loads(r["env"]), r["run_budget_usd"]) for r in rows]
 
 
@@ -198,8 +201,8 @@ def test_each_layer_round_trips_and_a_deleted_project_takes_its_layers(monkeypat
     async def _test(pool: Any) -> None:
         calc = await projects.create_project(name="calc", pool=pool)
         pid = calc["id"]
-        await agent_settings.update_system({"model": "sonnet", "env": [{"key": "TZ", "value": "UTC"},
-                                                                       {"key": "LANG", "value": "C"}]})
+        await agent_settings.update_system({"agent": "agent-claude-code-opus", "env": [
+            {"key": "TZ", "value": "UTC"}, {"key": "LANG", "value": "C"}]})
         await agent_settings.update_role("reviewer", {"effort": "max"})
         await agent_settings.update_project(pid, {"run_budget_usd": 0.5, "env": [{"key": "TZ", "value": None}]})
         view = await agent_settings.update_project(pid, {"harness_prompt": "W."}, role="worker")
@@ -216,9 +219,11 @@ def test_each_layer_round_trips_and_a_deleted_project_takes_its_layers(monkeypat
         await agent_settings.update_project(pid, {"run_budget_usd": None, "env": []})
         assert await pool.fetchval("SELECT count(*) FROM agent_setting_layers WHERE scope = 'project'") == 0
         with pytest.raises(asyncpg.CheckViolationError):
-            await agent_setting_layers.put_layer("role_project", "manager", pid, {"model": "x"}, pool=pool)
+            await agent_setting_layers.put_layer("role_project", "manager", pid, {"effort": "low"}, pool=pool)
         with pytest.raises(asyncpg.CheckViolationError):
-            await agent_setting_layers.put_layer("system", "worker", None, {"model": "x"}, pool=pool)
+            await agent_setting_layers.put_layer("system", "worker", None, {"effort": "low"}, pool=pool)
+        with pytest.raises(asyncpg.ForeignKeyViolationError):
+            await agent_setting_layers.put_layer("system", None, None, {"agent_id": "agent-nowhere"}, pool=pool)
 
         await projects.delete_project(pid, pool=pool)
         assert await pool.fetchval("SELECT count(*) FROM agent_setting_layers WHERE project_id IS NOT NULL") == 0
@@ -257,7 +262,7 @@ def test_seeding_moves_unedited_role_prompts_keeps_edited_ones_and_adds_the_revi
         assert (reviewer["system_prompt"], reviewer["default_prompt"], reviewer["role"]) == (
             REVIEWER, REVIEWER, "reviewer")
         assert (reviewer["timeout_seconds"], reviewer["max_turns"]) == (86400, 0)
-        assert "harness_prompt" not in reviewer and "model" not in reviewer  # agent settings are layers
+        assert not {"harness_prompt", "model", "runtime", "llm_profile_id"} & set(reviewer)  # settings are layers
         # The new recommendations hold responsibilities only: character and stability moved to the harness.
         assert "Default to Chinese" not in MANAGER and "Be concise" not in MANAGER
         assert "Answer the user in their language" not in PLANNER

@@ -17,6 +17,7 @@ from uuid import uuid4
 from .run_usage import Usage, compaction, reported_totals, request_context, run_usage
 
 if TYPE_CHECKING:
+    from .agent_registry import ProviderSpec
     from .agent_settings import Launch
     from .knowledge import AgentKnowledge
     from .library import AgentLibrary
@@ -848,6 +849,12 @@ class ClaudeRunRecorder:
 
         return self._launch.runtime if self._launch is not None else CLAUDE_CODE
 
+    def _provider(self) -> ProviderSpec:
+        """The provider the recorded run's agent used (Claude Code's own login without a launch)."""
+        from .agent_registry import BUILTIN_PROVIDER
+
+        return self._launch.agent.provider if self._launch is not None else BUILTIN_PROVIDER
+
     async def _heartbeat(self) -> None:
         """Any output, partial deltas included, shows the run is not stuck."""
         now = _clock()
@@ -882,7 +889,9 @@ class ClaudeRunRecorder:
         result = result_event or {}
         succeeded = error is None and result.get("subtype") == "success" and not result.get("is_error")
         if usage is None:
-            usage = self._runtime().usage(result_event)
+            usage = run_usage(result_event)
+        cost = self._runtime().cost(usage, self._provider())
+        usage = cost.usage
         try:
             await llm_records.finish_record(
                 self._record_id,
@@ -894,6 +903,7 @@ class ClaudeRunRecorder:
                 cache_read_tokens=usage.cache_read_tokens,
                 cache_creation_tokens=usage.cache_creation_tokens,
                 cost_usd=usage.cost_usd,
+                cost_source=cost.source.value,
                 context_tokens=self._context_tokens,
                 compactions=self._compactions,
                 duration_ms=int((_clock() - self._started) * 1000),

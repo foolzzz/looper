@@ -127,7 +127,7 @@ async def get_api_key(provider_id: str, *, pool: asyncpg.Pool | None = None) -> 
     return await pool.fetchval("SELECT api_key FROM llm_provider_secrets WHERE provider_id = $1", provider_id)
 
 
-_PROVIDER_COLUMNS = ("name", "protocols", "auth", "oauth_runtime_type", "base_url", "models")
+_PROVIDER_COLUMNS = ("name", "protocols", "auth", "oauth_runtime_type", "base_url", "models", "max_concurrency")
 
 
 def _provider_values(fields: Mapping[str, Any], columns: Sequence[str]) -> list[Any]:
@@ -150,7 +150,7 @@ async def insert_provider(conn: asyncpg.Connection, fields: Mapping[str, Any], a
     ``asyncpg.UniqueViolationError`` for a name in use."""
     provider_id = new_id("prov")
     await conn.execute(
-        f"INSERT INTO llm_providers (id, {', '.join(_PROVIDER_COLUMNS)}) VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)",
+        f"INSERT INTO llm_providers (id, {', '.join(_PROVIDER_COLUMNS)}) VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8)",
         provider_id, *_provider_values(fields, _PROVIDER_COLUMNS),
     )
     if api_key is not None:
