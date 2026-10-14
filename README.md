@@ -98,6 +98,25 @@ the agent configuration to one file (secrets become placeholders;
 `--include-projects` adds projects), and `uv run loopx config import
 loopx-config.json` on the new machine previews it; add `--apply` to write it.
 
+### 4. Run as a service
+
+```bash
+uv run loopx service install     # --port, --runtime-root, --label, --env NAME
+uv run loopx service status      # installed, running, PID, last exit, log, GET /api/status
+uv run loopx service restart     # e.g. after pulling new code
+uv run loopx service uninstall
+```
+
+`install` runs `loopx serve` in the background: a launchd LaunchAgent on macOS,
+a systemd user unit on Linux. It starts at login, starts again after a crash,
+and logs to `<runtime root>/logs/serve.log`. The unit runs the `loopx` that ran
+`install` (in a checkout, `.venv/bin/loopx`) in the current directory, so the
+checkout's `.env` keeps working. It copies `PATH`, locale and proxy settings,
+`CLAUDE_CONFIG_DIR`, and every `LOOPX_*`, `ANTHROPIC_*` and `LARK_*` variable
+from your shell (add others with `--env NAME`), so the unit file is private
+(mode 0600). Run `install` again to apply changes. On Linux, `loginctl
+enable-linger $USER` keeps it running without a login session.
+
 ## Architecture
 
 ### Agent Tiers
