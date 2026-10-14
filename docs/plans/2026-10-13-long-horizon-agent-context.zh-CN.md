@@ -285,12 +285,7 @@
 
 ### 5.2 工程待办
 
-- **CI 基线**：CI 已改为手动触发（looper #7），而 #6 修掉了 chat-bundle 的已知失败。需要手动跑一次 Python Tests，确认 pytest 是否真正跑通；如果还有失败，逐项修复。
-  - **B1 起**（见 5.5）Python Tests 换成只跑 agent 系统测试的 job：PR 和手动触发，带 PostgreSQL；上游的 Chat 包、Playwright、TypeScript 和 mypy 检查不再运行。
-- **Optional Ark Turn workflow** 引用了已经删除的测试文件，需要修正或移除。随上游清理消失：`ark-turn.yml` 在 B2 删除，`packages/loopx-ark-turn` 在 B3 删除。
 - **`scripts/install-from-github.sh`** 默认使用 `stable` 分支，但 looper 没有这个分支。随上游清理消失：这个脚本和 `scripts/install-local.sh` 在 B3 删除，安装只走 `install.sh`。
-- **`test_dashboard_command` 的 5 个安装模式用例**在 `main` 上就失败：干净的 checkout 里没有构建 Chat 包（`loopx/web/chat/bundle-manifest.json` 不存在）。需要先构建 Chat 包，或者让这些用例自己准备构建产物。随上游清理消失：这个文件测的是上游的 `loopx dashboard`/`chat` 启动器，在 B2 删除；B1 起 wheel 也不再构建 Chat 包。
-- **`test_dashboard_launcher_preserves_early_service_error_context` 偶发超时**：在 `-n 6` 并发下会撞上 5 秒超时，单独运行通过（M3 发现）。随上游清理消失：它在同一个文件里，B2 删除。
 - **`test_planner_agent.py::TestPlanning::test_turn_over_the_time_limit_fails_planning` 偶发失败**：`-n 6` 下失败过一次，重跑通过（上游清理盘点时发现）。它给 Planner 的时限只有 3 秒（`timeout_seconds: 3`），机器繁忙时替身进程可能来不及启动。
 - **知识索引容量**：索引每行都带一个绝对路径（在 `~/.loopx` 下约 150 字），4,000 字的索引上限实际只能放 15–25 篇，比 100 篇的数量上限先用完。改用短的挂载别名或相对路径（M3 发现）。
 - **runtime root 下的只读副本不清理**：插件与 skill 库（M1.6）、项目知识（M3）和项目 skill（M4）按内容哈希写出的只读副本，在内容替换或删除后仍留在磁盘上。需要在没有运行引用时回收。
@@ -329,7 +324,7 @@
 从 fork 里删掉不再使用的上游 LoopX：control plane、上游 CLI、`apps/` 前端、插件和它们的测试与文档，约占全部代码行数的 96%。`loopx/agents`、`loopx/db` 不导入任何上游模块，所以分四个 PR 依次删除，每个都可以独立回滚。
 
 - [x] **B1 解耦**（looper #31）：`loopx` 命令只剩 `serve`、`version` 和 `--version`，`[project.scripts]` 指向新的 `loopx/cli.py`，启动时不再加载上游模块（`tests/test_cli_entry.py` 守护）；删除 `setup.py`、`MANIFEST.in`，wheel 不再依赖上游 Chat 包，仍带 `web/` 构建的 dashboard；Python Tests 换成只跑 agent 系统测试的 job。上游代码仍留在磁盘上。
-- [ ] **B2 删除上游测试、smoke 和 CI**：`tests/**` 只留 agent 系统的测试和 helper，`examples/**` 只留两个发布 smoke，删除 `regression/`、6 个上游 workflow、`scripts/ci/`；`tests/conftest.py` 去掉 `loopx.canary` 导入和上游 fixture，CI 改为直接跑 `pytest`。先合入 #26（两边都改 `tests/conftest.py`）。
+- [x] **B2 删除上游测试、smoke 和 CI**（looper #34）：删除 1,462 个文件、475,527 行。`tests/**` 只留 agent 系统的 31 个测试文件和它们的 helper（`conftest.py`、`library_fixtures.py`、`claude_stream_replay.py`、`runtime_root_guard/`、`fixtures/claude_stream/`），`examples/**` 只留两个发布 smoke，删除 `regression/`、6 个上游 workflow、`scripts/ci/` 和 `sonar-project.properties`；`tests/conftest.py` 去掉 `loopx.canary` 导入、smoke-suite 选项和上游 fixture；`pyproject.toml` 设 `testpaths = ["tests"]`，CI 直接跑 `pytest`。不带参数的 `pytest` 收集 899 个测试，没有收集错误（之前 11,849 个，8 个文件收集失败）。第 5.2 节因此关闭 4 项：CI 基线（Python Tests 在每个 PR 上跑 agent 系统测试并通过）、Optional Ark Turn workflow、`test_dashboard_command` 的 5 个失败用例和它的偶发超时。
 - [ ] **B3 删除上游代码**：`loopx/**` 只留 `agents`、`db`、`__init__.py`、`cli.py`、`paths.py`；删除 `apps/`、`packages/`、`skills/`、`man/`、除 `stage-dashboard.sh` 和 `release-surface-args.sh` 以外的 `scripts/**`，以及根目录的 npm 和 TypeScript 配置；精简 `pyproject.toml`。
 - [ ] **B4 文档与根目录文件**：`docs/**` 只留本计划、两份架构文档、`docs/releases/` 和 `docs/design.md`；按下面的决定改写和删除其余文档。
 

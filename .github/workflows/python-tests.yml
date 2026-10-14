@@ -1,9 +1,7 @@
 name: Python Tests
 
-# The agent system's tests, with the PostgreSQL ones run against the service
-# database. The upstream LoopX tests still in tests/ are not run: they are
-# being removed, and some no longer import. Until then a new test file of the
-# agent system must be added to the list below.
+# The agent system's tests (pyproject.toml: testpaths = ["tests"]), with the
+# PostgreSQL ones run against the service database.
 on:
   pull_request:
   workflow_dispatch:
@@ -45,34 +43,4 @@ jobs:
         run: python -m pip install uv
 
       - name: Run the tests
-        run: >-
-          uv run --extra test python -m pytest -q -n auto -rs
-          tests/test_agent_bus.py
-          tests/test_agent_channels.py
-          tests/test_agent_configs_db.py
-          tests/test_agent_planner_worker.py
-          tests/test_agent_settings.py
-          tests/test_agent_settings_db.py
-          tests/test_channel_configs_db.py
-          tests/test_chat_targets.py
-          tests/test_claude_cli.py
-          tests/test_cli_entry.py
-          tests/test_dashboard_static_dir.py
-          tests/test_library.py
-          tests/test_library_db.py
-          tests/test_llm_records_db.py
-          tests/test_manager_reply.py
-          tests/test_planner_agent.py
-          tests/test_planner_chat.py
-          tests/test_planner_protocol.py
-          tests/test_planner_supervise.py
-          tests/test_project_documents_db.py
-          tests/test_project_knowledge.py
-          tests/test_projects_api.py
-          tests/test_projects_db.py
-          tests/test_request_guard.py
-          tests/test_run_usage.py
-          tests/test_system_prompt.py
-          tests/test_task_router.py
-          tests/test_task_work_dir.py
-          tests/test_usage_api_db.py
+        run: uv run --extra test python -m pytest -q -n auto -rs
