@@ -43,7 +43,7 @@ export function Sidebar({ activePage, activeProjectId, onNavigate, onOpenProject
     >
       <div className="flex h-14 shrink-0 items-center gap-2 px-4 border-b border-border">
         <Bot className="h-6 w-6 text-primary" />
-        <span className="flex-1 text-lg font-semibold tracking-tight">LoopX</span>
+        <span className="flex-1 text-lg font-semibold tracking-tight">Looper</span>
         <button
           type="button"
           onClick={onClose}
@@ -76,7 +76,7 @@ export function Sidebar({ activePage, activeProjectId, onNavigate, onOpenProject
       <ProjectsSection activeProjectId={activeProjectId} onOpenProject={onOpenProject} />
 
       <div className="shrink-0 border-t border-border px-4 py-3">
-        <p className="text-xs text-muted-foreground">LoopX Agent System</p>
+        <p className="text-xs text-muted-foreground">Looper Agent System</p>
       </div>
     </aside>
   );

@@ -10,7 +10,7 @@
 
 ## 1. 背景与目标
 
-LoopX 的 agent 系统要跑**长程任务**：一个任务从规划到验收可能持续数小时，经过多个步骤、多个 Worker 和 Reviewer，
+Looper 的 agent 系统要跑**长程任务**：一个任务从规划到验收可能持续数小时，经过多个步骤、多个 Worker 和 Reviewer，
 期间 Planner 持续监督、用户随时插话、进程可能重启。长程运行最常见的失败不是"不会做"，而是：
 
 1. **跑偏**：规则和格式在一轮轮对话里被稀释，agent 忘了契约或目标；
@@ -62,7 +62,7 @@ M0 交付后，Worker 和 Reviewer 已按第 5 节的目标形态拼装 system p
 ## 4. 分层模型
 
 ```
-system prompt（由 LoopX 追加，按顺序拼装）
+system prompt（由 Looper 追加，按顺序拼装）
   L0  Claude Code 内置 system prompt        —— 不受控，不记录原文
   L1  harness prompt                         —— agent 的性格与稳定性（工作原则、边界、沟通方式），按继承链解析（M1.5）
   L2  role prompt                            —— 该类 agent 的职责说明；agent_configs.<role>.system_prompt，可编辑，跟踪推荐版本
@@ -142,7 +142,7 @@ L5 代码契约始终最后，因为 L4 来自用户或 Planner，放在契约�
 每次运行（`llm_records`）应能回答"它看到了什么"：
 
 - 已有：完整启动参数（`metadata.command`）、工作目录、事件流、token、花费、心跳。
-- M0（已交付）：`metadata.system_prompt`（LoopX 追加部分的原文），历史页展示。
+- M0（已交付）：`metadata.system_prompt`（Looper 追加部分的原文），历史页展示。
 - M1：`metadata.system_prompt_sha` 与各层来源（角色 prompt 版本、项目档案版本、契约版本），便于把行为变化
   对应到具体的 prompt 变更；长 prompt 改用 `--append-system-prompt-file` 传入，启动命令保持可读。
 - M2：每轮的输入 token、是否发生自动压缩、会话累计 token；任务累计花费。
@@ -170,7 +170,7 @@ L5 代码契约始终最后，因为 L4 来自用户或 Planner，放在契约�
 
    另外发现：Claude Code 2.1.285 默认开启 system prompt 快照，`--resume` 续接时沿用会话第一次请求的 system
    prompt，忽略新传入的内容；M1 起四类 agent 都带 `--system-prompt-snapshot off`，常驻进程改了 prompt 重启后
-   确实用上新 prompt。仍未隔离的：管理员下发的托管设置、Claude Code 内置插件、运行 `loopx serve` 的进程环境变量。
+   确实用上新 prompt。仍未隔离的：管理员下发的托管设置、Claude Code 内置插件、运行 `looper serve` 的进程环境变量。
 3. **常驻进程的上下文增长不可见。** Planner、Manager 会话越来越长，自动压缩何时发生、压掉了什么，目前无从
    得知。P2、P3 保证契约和状态不丢，但仍需观测。
 4. **花费不可见。** 默认不设上限（已决定），但单次运行和任务的累计花费、上下文用量目前都看不到；失败循环的
@@ -204,7 +204,7 @@ L5 代码契约始终最后，因为 L4 来自用户或 Planner，放在契约�
 1. **Manager 不拆分会话。** 保留全局唯一的 Manager 会话（见第 9 节问题 1），M1 不再包含拆分。
 2. **默认不设花费上限。** M2 只做记录和展示；上限作为可选的项目执行配置放进 M5。
 3. **项目知识的来源**：手动录入、上传文件、引用项目目录内的路径；不支持 URL。
-4. **完全隔离操作者个人配置**：agent 只看到 LoopX 拼装的内容和项目仓库自己的 CLAUDE.md；需要所有项目都遵守的
+4. **完全隔离操作者个人配置**：agent 只看到 Looper 拼装的内容和项目仓库自己的 CLAUDE.md；需要所有项目都遵守的
    全局规则写进系统默认 harness prompt（见决策 6）。
 5. **任务描述进 system prompt。** 分层改为四层：角色 prompt → 项目档案 → 任务描述 → 代码契约（第 4、5 节），
    并入 M1 交付。

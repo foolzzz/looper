@@ -18,7 +18,7 @@ import { cn, formatBytes } from "@/lib/utils";
 
 const errorText = (err: unknown) => (err instanceof Error ? err.message : String(err));
 
-/** The file's sections, in the order an import takes them (loopx/agents/config_transfer.py SECTIONS). */
+/** The file's sections, in the order an import takes them (looper/agents/config_transfer.py SECTIONS). */
 const SECTION_LABELS: Record<string, string> = {
   runtimes: "Runtimes",
   providers: "Providers",
@@ -278,7 +278,7 @@ function ImportPanel({ onApplied }: { onApplied: () => void }) {
 
       {stage.step === "idle" && (
         <p className="text-xs text-muted-foreground">
-          Choose or drop a file exported here or with <code className="text-foreground">loopx config export</code> (up
+          Choose or drop a file exported here or with <code className="text-foreground">looper config export</code> (up
           to {formatBytes(CONFIG_IMPORT_MAX_BYTES)}). You see what it adds, changes and skips before anything is
           written.
         </p>
@@ -299,7 +299,7 @@ function ImportPanel({ onApplied }: { onApplied: () => void }) {
               {" · "}
               {formatBytes(stage.upload.bytes)}
               {stage.upload.file.exported_at && ` · exported ${new Date(stage.upload.file.exported_at).toLocaleString()}`}
-              {stage.upload.file.loopx_version && ` by LoopX ${stage.upload.file.loopx_version}`}
+              {stage.upload.file.looper_version && ` by Looper ${stage.upload.file.looper_version}`}
               {stage.upload.file.secrets && ` · secrets ${stage.upload.file.secrets}`}
               {" · nothing written yet"}
             </span>
@@ -360,7 +360,7 @@ function ImportPanel({ onApplied }: { onApplied: () => void }) {
 }
 
 /**
- * Export the whole agent configuration as one file (loopx/agents/config_transfer.py), downloaded as the server
+ * Export the whole agent configuration as one file (looper/agents/config_transfer.py), downloaded as the server
  * streams it, and import one: uploaded to the server's import route, previewed, then applied.
  */
 export function ConfigTransferCard({ onImported }: { onImported: () => void }) {
@@ -403,7 +403,7 @@ export function ConfigTransferCard({ onImported }: { onImported: () => void }) {
       </Button>
       <ImportPanel onApplied={onImported} />
       <div className="border-t border-border pt-3 text-xs text-muted-foreground">
-        Or import from a shell: <code className="text-foreground">loopx config import &lt;file&gt;</code> previews,
+        Or import from a shell: <code className="text-foreground">looper config import &lt;file&gt;</code> previews,
         then add <code className="text-foreground">--apply</code>. It reads the file from disk, so it takes files of
         any size. Either way, nothing missing from the file is removed, and stored secrets are kept.
       </div>

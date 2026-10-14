@@ -313,7 +313,7 @@ function PromptLayerSummary({ layers, metadata }: { layers: PromptLayers; metada
   );
 }
 
-/** What LoopX appended to Claude Code's system prompt for this run. */
+/** What Looper appended to Claude Code's system prompt for this run. */
 function SystemPrompt({ record }: { record: LlmRecord }) {
   const metadata = record.metadata;
   // Runs recorded before metadata.system_prompt existed may still carry it in their command.
@@ -327,7 +327,7 @@ function SystemPrompt({ record }: { record: LlmRecord }) {
       title={
         <span className="flex items-center gap-1.5">
           <span className="truncate">
-            System prompt · {text.length} chars{sha ? ` · ${shortSha(sha)}` : " · appended by LoopX"}
+            System prompt · {text.length} chars{sha ? ` · ${shortSha(sha)}` : " · appended by Looper"}
           </span>
           {layers?.isolation && (
             <Badge
@@ -349,7 +349,7 @@ function SystemPrompt({ record }: { record: LlmRecord }) {
         </div>
       )}
       <p className="mb-2 text-[11px] text-muted-foreground">
-        The part LoopX appends to Claude Code&apos;s system prompt; its built-in system prompt is not included.
+        The part Looper appends to Claude Code&apos;s system prompt; its built-in system prompt is not included.
       </p>
       <Pre text={text} />
     </Collapsible>

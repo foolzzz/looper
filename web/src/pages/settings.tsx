@@ -68,7 +68,7 @@ function channelIcon(type: string) {
   return MessageCircle;
 }
 
-/** Each chat channel's sender allowlist, as the server checks it (loopx/agents/channels/allowlist.py). */
+/** Each chat channel's sender allowlist, as the server checks it (looper/agents/channels/allowlist.py). */
 const SENDER_ALLOWLISTS: Record<string, { field: string; label: string; pattern: RegExp; placeholder: string; hint: string }> = {
   telegram: {
     field: "allowed_user_ids",

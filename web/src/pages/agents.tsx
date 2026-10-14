@@ -361,7 +361,7 @@ function ConfigTab({
           <code className="rounded bg-muted px-1 py-0.5 font-mono text-xs">--dangerously-skip-permissions</code>
         </p>
         <p className="text-[11px] text-muted-foreground">
-          The same for every LoopX agent; the role prompt says what this agent is for. Lark and Telegram pass on
+          The same for every Looper agent; the role prompt says what this agent is for. Lark and Telegram pass on
           only the senders listed in Settings.
         </p>
       </div>

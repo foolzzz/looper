@@ -6,7 +6,7 @@ Tells you whether a change to a recommended role prompt, a code-owned contract
 (`REPLY_CONTRACT`, `WORK_CONTRACT`, `REVIEW_CONTRACT`) or the way the system
 prompt is put together makes the agents worse.
 
-It runs five small tasks through a disposable `loopx serve` (a new
+It runs five small tasks through a disposable `looper serve` (a new
 PostgreSQL database, a free port, a temporary runtime root and working
 directories), one at a time over the HTTP API:
 
@@ -32,7 +32,7 @@ same mode and model there, or else with the committed baseline in
 
 Both modes need a PostgreSQL server where the eval may create and drop a
 database: pass `--pg-url` (any database on the server except `loopx`) or set
-`LOOPX_EVAL_DATABASE_URL`.
+`LOOPER_EVAL_DATABASE_URL`.
 
 ### Fake mode: the flow, free
 
@@ -45,7 +45,7 @@ uv run --extra test python -m evals.prompt_regression run --mode fake \
 ```
 
 `tests/test_prompt_eval.py` runs it as part of the test suite when
-`LOOPX_TEST_DATABASE_URL` is set.
+`LOOPER_TEST_DATABASE_URL` is set.
 
 ### Real mode: the effect, on demand
 

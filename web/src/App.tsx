@@ -95,7 +95,7 @@ function App() {
           >
             <Menu className="h-5 w-5" />
           </button>
-          <span className="text-sm font-semibold tracking-tight">LoopX</span>
+          <span className="text-sm font-semibold tracking-tight">Looper</span>
         </header>
         <ClaudeCheckBanner />
         <main className="min-h-0 flex-1 overflow-hidden">

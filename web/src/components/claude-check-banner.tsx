@@ -23,7 +23,7 @@ export function ClaudeCheckBanner() {
               {c.label}: {c.detail}.
             </span>{" "}
             Agents cannot run until this is fixed. To fix: {c.fix}; then restart{" "}
-            <code className="font-mono text-xs">loopx serve</code>.
+            <code className="font-mono text-xs">looper serve</code>.
           </span>
         </p>
       ))}

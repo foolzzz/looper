@@ -503,7 +503,7 @@ function ProviderForm({ provider, registry, onDone }: { provider: Provider | nul
               </label>
             )}
           </div>
-          <p className="text-[11px] text-muted-foreground">Stored in LoopX&apos;s database and never shown again.</p>
+          <p className="text-[11px] text-muted-foreground">Stored in Looper&apos;s database and never shown again.</p>
         </div>
       )}
 
@@ -700,7 +700,7 @@ function AgentRow({ agent, registry }: { agent: RegistryAgent; registry: Registr
 }
 
 /**
- * The agents LoopX can run, and what they are made of: runtimes (agent CLIs on this machine), LLM providers and
+ * The agents Looper can run, and what they are made of: runtimes (agent CLIs on this machine), LLM providers and
  * agents (a runtime, a provider and a model). The settings layers and tasks select an agent.
  */
 export function AgentRegistrySection() {
@@ -728,7 +728,7 @@ export function AgentRegistrySection() {
       </RegistryList>
       <RegistryList
         title="Providers"
-        hint="Where the model runs and how LoopX signs in to it."
+        hint="Where the model runs and how Looper signs in to it."
         addLabel="Add provider"
         form={(close) => <ProviderForm provider={null} registry={registry} onDone={close} />}
       >

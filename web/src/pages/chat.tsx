@@ -29,7 +29,11 @@ interface ChatMessage {
   streaming?: boolean;
 }
 
-const STORAGE_SESSION_KEY = "loopx-chat-session-id";
+const STORAGE_SESSION_KEY = "looper-chat-session-id";
+const messagesKey = (sessionId: string) => `looper-chat-messages-${sessionId}`;
+// The keys from before the rename (LoopX), read when the new ones are missing so an open chat carries on.
+const LEGACY_SESSION_KEY = "loopx-chat-session-id";
+const legacyMessagesKey = (sessionId: string) => `loopx-chat-messages-${sessionId}`;
 
 const MANAGER_TARGET: ChatTargetInfo = { kind: "manager", id: "manager", can_send: true };
 const TARGETS_POLL_MS = 10_000;
@@ -183,8 +187,11 @@ function truncate(text: string, max: number): string {
 }
 
 function getOrCreateSessionId(): string {
-  const existing = localStorage.getItem(STORAGE_SESSION_KEY);
-  if (existing) return existing;
+  const existing = localStorage.getItem(STORAGE_SESSION_KEY) ?? localStorage.getItem(LEGACY_SESSION_KEY);
+  if (existing) {
+    localStorage.setItem(STORAGE_SESSION_KEY, existing);
+    return existing;
+  }
   const id = `session-${crypto.randomUUID().slice(0, 8)}`;
   localStorage.setItem(STORAGE_SESSION_KEY, id);
   return id;
@@ -192,7 +199,7 @@ function getOrCreateSessionId(): string {
 
 function loadMessages(sessionId: string): ChatMessage[] {
   try {
-    const raw = localStorage.getItem(`loopx-chat-messages-${sessionId}`);
+    const raw = localStorage.getItem(messagesKey(sessionId)) ?? localStorage.getItem(legacyMessagesKey(sessionId));
     if (!raw) return [];
     const parsed = JSON.parse(raw);
     if (!Array.isArray(parsed)) return [];
@@ -204,7 +211,7 @@ function loadMessages(sessionId: string): ChatMessage[] {
 
 function saveMessages(sessionId: string, messages: ChatMessage[]) {
   const toSave = messages.map(({ streaming, ...rest }) => rest);
-  localStorage.setItem(`loopx-chat-messages-${sessionId}`, JSON.stringify(toSave));
+  localStorage.setItem(messagesKey(sessionId), JSON.stringify(toSave));
 }
 
 export function ChatPage() {
