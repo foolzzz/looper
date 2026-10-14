@@ -135,6 +135,18 @@ How the agent system works today is described in
 
 ### Changed
 
+- **Shorter project knowledge index.** The `## Project knowledge` index names
+  each directory once (`In <directory>:`) and gives every document a path
+  relative to it, `- <title>: <summary> (<path>)`, instead of an absolute
+  path of about 150 characters a line; short documents now reach the
+  100-document cap before the 4,000-character index cap (it used to fill at 15
+  to 25). Claude Code resolves a relative `Read` path against the working
+  directory only, so the agent joins the path to the directory named above
+  it. The text and upload documents are materialized together, one read-only
+  directory per set of documents (`knowledge/<set_sha256>/<filename>`, a
+  shared name gets `-2`), and that directory is the one mounted with
+  `--add-dir`.
+
 - Each task's Planner is now a Claude Code agent. It keeps one Claude process
   for the task's life, started on its first turn in the task's directory and
   ended when the task ends or the server stops. Claude splits the requirement

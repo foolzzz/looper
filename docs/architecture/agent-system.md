@@ -88,7 +88,8 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
   <background>
 
   ## Project knowledge                            L3 (left out without documents): an index,
-  - <title>: <summary> (read: <path>)                 one line per document
+  In <directory>:                                     each directory once, then one line
+  - <title>: <summary> (<path>)                       per document, its path relative to it
 
   ## Task                                         L4: what this session is for
   ...                                                 (Planner: the task; Worker, Reviewer: the step)
@@ -449,25 +450,32 @@ URL:
 100 documents and 50 MiB of stored content (path documents are not stored);
 the composed index 4,000 characters. Changes to one project's documents run
 in a transaction that holds the project's row lock, so two concurrent adds
-cannot both pass a cap. An index line carries an absolute path, about 150
-characters under `~/.loopx`, so in practice the index cap admits roughly 15
-to 25 documents, well before the count cap.
+cannot both pass a cap. An index line carries the title, the summary and a
+path relative to a directory the index names once, so short documents reach
+the count cap before the index cap (with an absolute path, about 150
+characters a line, the index used to fill at 15 to 25 documents).
 
 **Delivery.** `load_knowledge(runtime_root, project, work_dir)` runs for every
 Worker and Reviewer run and every Planner turn, never for the Manager:
 
-- each text or upload document is materialized read-only (0444), named by its
-  content's hash, at
-  `<runtime_root>/.local/projects/<project_id>/knowledge/<sha256>/<filename>`
+- the text and upload documents are materialized read-only (0444) together,
+  in one directory per set of documents, named by the hash of their file
+  names and contents:
+  `<runtime_root>/.local/projects/<project_id>/knowledge/<set_sha256>/<filename>`
   (a text document's file name comes from its title, an upload's from its
-  file name, both reduced to letters, digits, `.`, `-` and `_`). A copy that
-  already matches its hash is reused and a damaged one is rewritten;
+  file name, both reduced to letters, digits, `.`, `-` and `_`; a name an
+  earlier document took, ignoring case, gets `-2`, `-3`). A copy that already
+  matches its hash is reused and a damaged one is rewritten;
 - the project layer gains `## Project knowledge` after the background: an
-  introduction, then `- <title>: <summary> (read: <absolute path>)` per
-  document; a path document whose file is gone or leads out of the directory
-  is listed as `(missing: <path>)`. An index that grew past the cap after it
-  was saved (a longer default directory, say) is clipped with a note;
-- the launch mounts the knowledge directory with `--add-dir` when the project
+  introduction, then for each directory a line `In <directory>:` (the set
+  directory, then the project's default directory) followed by
+  `- <title>: <summary> (<path relative to it>)` per document; a path document
+  whose file is gone or leads out of the directory is listed as
+  `(missing: <path>)`. Claude Code resolves a relative `Read` path against the
+  working directory only, not against an `--add-dir` root (verified with
+  2.1.285), so the agent joins the path to the directory named above it. An
+  index that grew past the cap after it was saved is clipped with a note;
+- the launch mounts the set directory with `--add-dir` when the project
   has a text or upload document, and the project's default directory when it
   has a path document and the task runs in another directory.
   `claude_cli.knowledge_args` builds the flags and `agent_settings.Launch`

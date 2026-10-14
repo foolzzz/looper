@@ -209,13 +209,13 @@ def test_a_run_loads_the_documents_from_the_database(
 
         loaded = await knowledge.load_knowledge(tmp_path, project, str(task_dir))
 
-        root = tmp_path / ".local" / "projects" / project["id"] / "knowledge"
-        glossary = root / _sha("MARKER-ALPHA") / "Glossary.md"
-        assert glossary.read_text() == "MARKER-ALPHA"
-        assert loaded.add_dirs == (str(root), str(project_dir)) and loaded.documents == 2
+        set_dir = Path(loaded.add_dirs[0])
+        assert set_dir.parent == tmp_path / ".local" / "projects" / project["id"] / "knowledge"
+        assert (set_dir / "Glossary.md").read_text() == "MARKER-ALPHA"
+        assert loaded.add_dirs == (str(set_dir), str(project_dir)) and loaded.documents == 2
         assert loaded.index.splitlines()[2:] == [
-            f"- Glossary: Terms (read: {glossary})",
-            f"- Runbook: Deploys (read: {project_dir / 'docs' / 'runbook.md'})"]
+            f"In {set_dir}:", "- Glossary: Terms (Glossary.md)",
+            f"In {project_dir}:", "- Runbook: Deploys (docs/runbook.md)"]
         # The view the API gives shows the same index the run got.
         assert (await knowledge.knowledge_view(project["id"], tmp_path))["index"] == loaded.index
 

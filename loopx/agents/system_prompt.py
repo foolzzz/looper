@@ -11,9 +11,10 @@ The Planner, the Workers and the Reviewers get the same layout::
     ## Project: <name>       L3: only when the project has a background
     <background>
 
-    ## Project knowledge     L3: only when the project has documents: one line
-    - <title>: <summary> (read: <path>)  per document (knowledge.py); agents
-                                 read a document when they need it
+    ## Project knowledge     L3: only when the project has documents: each
+    In <directory>:              directory once, then one line per document
+    - <title>: <summary> (<path>)  with its path relative to it (knowledge.py);
+                                 agents read a document when they need it
 
     ## Task                  L4: what this session is for (the Planner's task,
     ...                          a Worker's or Reviewer's step)
