@@ -202,6 +202,7 @@ _PLANNER_CLAUDE = """\
 import json, os, sys, time
 STATE = {state!r}
 REPLIES = json.loads({replies!r})
+AUTONOMOUS = json.loads({autonomous!r})
 def log(name, value):
     with open(os.path.join(STATE, name), 'a') as f:
         f.write(json.dumps(value) + '\\n')
@@ -221,25 +222,50 @@ counter = os.path.join(STATE, 'turns')
 # Like Claude, a process that resumes a session carries on from the session's running total.
 session_cost = os.path.join(STATE, 'session_cost')
 cost = float(open(session_cost).read()) if '--resume' in sys.argv and os.path.exists(session_cost) else 0.0
+def emit(event):
+    print(json.dumps(event), flush=True)
 for line in sys.stdin:
     n = int(open(counter).read()) + 1 if os.path.exists(counter) else 1
     open(counter, 'w').write(str(n))
-    log('turns.jsonl', {{'pid': os.getpid(), 'text': json.loads(line)['message']['content']}})
+    message = json.loads(line)
+    log('turns.jsonl', {{'pid': os.getpid(), 'text': message['message']['content']}})
     reply = REPLIES[n - 1] if n <= len(REPLIES) else REPLIES[-1]
-    print(json.dumps({{'type': 'system', 'subtype': 'init', 'session_id': 'sess-p', 'model': 'fake'}}), flush=True)
+    # Like Claude Code 2.1.285 run with --replay-user-messages: the message's lifecycle and its replay
+    # carry its uuid, and so does the result that answers it.
+    mid = message.get('uuid') or 'claude-named-%d' % n
+    for state in ('queued', 'started'):
+        emit({{'type': 'command_lifecycle', 'command_uuid': mid, 'state': state, 'session_id': 'sess-p'}})
+    emit({{'type': 'system', 'subtype': 'init', 'session_id': 'sess-p', 'model': 'fake'}})
+    emit({{'type': 'user', 'message': {{'role': 'user', 'content': message['message']['content']}},
+          'session_id': 'sess-p', 'parent_tool_use_id': None, 'uuid': mid, 'isReplay': True}})
     if reply == '<exit>':
         sys.exit(3)
     if reply == '<hang>':
         time.sleep(60)
+    answers = {{'session_id': 'sess-p', 'user_message_uuid': mid, 'user_message_uuids': [mid]}}
     if reply == '<error>':
-        print(json.dumps({{'type': 'result', 'subtype': 'error_during_execution', 'is_error': True,
-                          'session_id': 'sess-p', 'total_cost_usd': cost}}), flush=True)
-        continue
-    cost += 0.25
-    open(session_cost, 'w').write(str(cost))
-    print(json.dumps({{'type': 'assistant', 'message': {{'content': [{{'type': 'text', 'text': reply}}]}}}}), flush=True)
-    print(json.dumps({{'type': 'result', 'subtype': 'success', 'is_error': False, 'result': reply,
-                      'session_id': 'sess-p', 'total_cost_usd': cost}}), flush=True)
+        emit({{'type': 'result', 'subtype': 'error_during_execution', 'is_error': True, 'total_cost_usd': cost,
+              **answers}})
+    else:
+        cost += 0.25
+        open(session_cost, 'w').write(str(cost))
+        emit({{'type': 'assistant', 'message': {{'content': [{{'type': 'text', 'text': reply}}]}},
+              'parent_tool_use_id': None}})
+        emit({{'type': 'result', 'subtype': 'success', 'is_error': False, 'result': reply, 'total_cost_usd': cost,
+              **answers}})
+    emit({{'type': 'command_lifecycle', 'command_uuid': mid, 'state': 'completed', 'session_id': 'sess-p'}})
+    if str(n) in AUTONOMOUS:
+        # Like Claude once background work started in this turn ends: a turn of its own, answering no message.
+        cost += 0.25
+        open(session_cost, 'w').write(str(cost))
+        emit({{'type': 'system', 'subtype': 'task_notification', 'task_id': 'bg-%d' % n, 'status': 'completed',
+              'session_id': 'sess-p'}})
+        emit({{'type': 'system', 'subtype': 'init', 'session_id': 'sess-p', 'model': 'fake'}})
+        emit({{'type': 'assistant', 'message': {{'content': [{{'type': 'text', 'text': AUTONOMOUS[str(n)]}}]}},
+              'parent_tool_use_id': None}})
+        emit({{'type': 'result', 'subtype': 'success', 'is_error': False, 'result': AUTONOMOUS[str(n)],
+              'session_id': 'sess-p', 'total_cost_usd': cost,
+              'origin': {{'kind': 'task-notification', 'producer': 'session-task'}}}})
 if {linger!r}:
     time.sleep(60)
 """
@@ -257,17 +283,22 @@ class FakePlannerClaude:
     with an error result. With ``linger`` it keeps running after its stdin
     closes; with ``forget_sessions`` it answers any ``--resume`` the way Claude
     answers one for a session it no longer has: an error result, no init. It logs its argv, pid, the system prompt its file held at start
-    and every turn it reads.
+    and every turn it reads. Like Claude Code 2.1.285, each turn's lifecycle
+    events, the replay of its message and its result carry the message's uuid.
+    After turn N, ``autonomous[N]`` is the reply of a turn it runs on its own, as
+    Claude does once background work ends (0.25 more).
     """
 
     def __init__(
         self, state: Path, replies: tuple[str, ...], *, linger: bool = False, forget_sessions: bool = False,
+        autonomous: dict[int, str] | None = None,
     ) -> None:
         self.state = state
         self.bin = str(state / "fake-claude")
         script = Path(self.bin)
         script.write_text(f"#!{sys.executable}\n" + _PLANNER_CLAUDE.format(
             state=str(state), replies=json.dumps(replies), linger=linger, forget_sessions=forget_sessions,
+            autonomous=json.dumps({str(turn): text for turn, text in (autonomous or {}).items()}),
         ))
         script.chmod(0o755)
 
@@ -293,9 +324,12 @@ class FakePlannerClaude:
 def planner_claude(tmp_path_factory: pytest.TempPathFactory) -> Callable[..., FakePlannerClaude]:
     """Build a ``FakePlannerClaude`` answering with the given replies."""
 
-    def make(*replies: str, linger: bool = False, forget_sessions: bool = False) -> FakePlannerClaude:
+    def make(
+        *replies: str, linger: bool = False, forget_sessions: bool = False, autonomous: dict[int, str] | None = None,
+    ) -> FakePlannerClaude:
         return FakePlannerClaude(
             tmp_path_factory.mktemp("planner-claude"), replies, linger=linger, forget_sessions=forget_sessions,
+            autonomous=autonomous,
         )
 
     return make

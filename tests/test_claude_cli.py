@@ -327,3 +327,127 @@ def test_a_turn_that_never_started_a_session_is_told_apart(tmp_path: Path, scrip
         return turn
 
     assert asyncio.run(_run()).session_started is started
+
+
+# --- Turns Claude runs on its own ---
+#
+# Recorded from Claude Code 2.1.285 (tests/claude_stream_replay.py): after
+# background work started in a turn ends, Claude runs a turn of its own and
+# writes a result that answers no user message.
+
+
+class _Observed:
+    """An owner's view of one autonomous turn: its events and how it ended."""
+
+    def __init__(self, ended: list[Any]) -> None:
+        self.events: list[dict[str, Any]] = []
+        self._ended = ended
+
+    async def event(self, event: dict[str, Any]) -> None:
+        self.events.append(event)
+
+    async def end(self, turn: Any) -> None:
+        self._ended.append((self.events, turn))
+
+
+def _resident_session(
+    tmp_path: Path, fixture: str, messages: list[str], *, observe: bool = True,
+) -> tuple[list[tuple[list[dict[str, Any]], Any]], list[tuple[list[dict[str, Any]], Any]], Any]:
+    """Send ``messages`` to a resident stand-in replaying ``fixture``.
+
+    Returns each user turn's events and outcome, each autonomous turn's events
+    and outcome (when ``observe``), and the totals after the last result.
+    """
+    from claude_stream_replay import replay_script
+
+    from loopx.agents.claude_cli import ResidentClaude
+
+    async def _run() -> Any:
+        autonomous: list[tuple[list[dict[str, Any]], Any]] = []
+
+        async def begin() -> _Observed:
+            return _Observed(autonomous)
+
+        claude = ResidentClaude(label="test")
+        await claude.start([replay_script(tmp_path, fixture)], cwd=str(tmp_path), signature=1,
+                           **({"autonomous": begin} if observe else {}))
+        turns = []
+        for text in messages:
+            seen: list[dict[str, Any]] = []
+
+            async def on_event(event: dict[str, Any], seen: list[dict[str, Any]] = seen) -> None:
+                seen.append(event)
+
+            turns.append((seen, await claude.run_turn(text, on_event)))
+        await claude.stop()  # the stand-in has nothing left to write; stop() reads to its end
+        return turns, autonomous, claude.totals
+
+    return asyncio.run(_run())
+
+
+def _kinds(events: list[dict[str, Any]]) -> list[str]:
+    return [f"{e['type']}/{e.get('subtype') or e.get('state') or ('replay' if e.get('isReplay') else '')}"
+            for e in events]
+
+
+class TestAutonomousTurns:
+    def test_a_background_subagents_turn_is_not_the_next_messages(self, tmp_path: Path) -> None:
+        turns, autonomous, totals = _resident_session(tmp_path, "background_agent", ["start it", "7*6?"])
+        (first_events, first), (second_events, second) = turns
+        assert (first.result_event["result"], second.result_event["result"]) == ("LAUNCHED", "42")
+        assert first.session_started and second.session_started
+        # The turn Claude ran on its own went to the owner, with the subagent's events before it.
+        ((events, own),) = autonomous
+        assert own.result_event["origin"] == {"kind": "task-notification", "producer": "session-task"}
+        assert own.result_event["result"].startswith("Background task completed with result")
+        # Its events start with what the subagent and Claude wrote between the turns.
+        assert _kinds(events) == [
+            "assistant/", "assistant/", "system/task_progress", "system/task_started", "system/task_notification",
+            "user/", "assistant/", "assistant/", "system/background_tasks_changed", "system/task_updated",
+            "system/task_notification", "system/init", "system/status", "assistant/", "assistant/", "result/success",
+        ]
+        assert all(e.get("parent_tool_use_id") for e in events[:2])
+        # Nothing of it reached the second message's turn, which starts with that message's own events.
+        assert _kinds(second_events)[:5] == ["command_lifecycle/queued", "command_lifecycle/started", "system/init",
+                                             "system/status", "user/replay"]
+        assert second_events[4]["message"]["content"] == "7*6?"
+        assert not any(e.get("parent_tool_use_id") or e.get("subtype") == "task_notification" for e in second_events)
+        # Each turn's own cost: Claude's running totals, taken in the order Claude wrote them.
+        assert first.usage.cost_usd == pytest.approx(0.0130063)
+        assert own.usage.cost_usd == pytest.approx(0.03359615 - 0.0130063)
+        assert second.usage.cost_usd == pytest.approx(0.03617515 - 0.03359615)
+        assert totals.cost_usd == pytest.approx(0.03617515)
+
+    def test_a_message_queued_behind_an_autonomous_turn_starts_when_claude_starts_it(self, tmp_path: Path) -> None:
+        turns, autonomous, _ = _resident_session(
+            tmp_path, "background_task_race", ["bg 1", "fg 9", "bg 2", "9+1?"],
+        )
+        assert [turn.result_event["result"] for _, turn in turns] == ["STARTED", "FG-DONE", "STARTED-2", "10"]
+        # A notification that came during a turn is part of that turn: Claude answered with it.
+        folded = [e for e in turns[1][0] if e.get("isReplay") and e.get("origin")]
+        assert len(folded) == 1 and folded[0] not in autonomous[0][0]
+        # The last message was queued while Claude ran a turn of its own; that turn is not the message's.
+        ((events, own),) = autonomous
+        assert own.result_event["result"] == "Background task BG-RACE-2 completed."
+        assert _kinds(events)[:4] == ["system/background_tasks_changed", "system/task_updated",
+                                      "system/task_notification", "system/init"]
+        last_events, last = turns[3]
+        assert _kinds(last_events)[:3] == ["command_lifecycle/queued", "command_lifecycle/started", "system/init"]
+        assert last_events[-1] is last.result_event and last.session_started
+        assert not any(e.get("isSynthetic") for e in last_events)
+        assert [turn.usage.cost_usd for _, turn in turns] == pytest.approx(
+            [0.0119405, 0.0181636 - 0.0119405, 0.0242396 - 0.0181636, 0.0347972 - 0.0317316])
+        assert own.usage.cost_usd == pytest.approx(0.0317316 - 0.0242396)
+
+    def test_without_an_owner_for_autonomous_turns_each_turn_still_costs_its_own_share(self, tmp_path: Path) -> None:
+        turns, _, totals = _resident_session(tmp_path, "background_agent", ["start it", "7*6?"], observe=False)
+        assert turns[1][1].result_event["result"] == "42"
+        assert turns[1][1].usage.cost_usd == pytest.approx(0.03617515 - 0.03359615)
+        assert totals.cost_usd == pytest.approx(0.03617515)
+
+    def test_the_turns_message_carries_the_uuid_claude_marks_it_with(self, tmp_path: Path) -> None:
+        turns, _, _ = _resident_session(tmp_path, "background_agent", ["start it", "7*6?"])
+        for events, turn in turns:
+            started = next(e for e in events if e["type"] == "command_lifecycle" and e["state"] == "started")
+            replayed = next(e for e in events if e.get("isReplay"))
+            assert started["command_uuid"] == replayed["uuid"] == turn.result_event["user_message_uuid"]

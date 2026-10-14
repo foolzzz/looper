@@ -675,6 +675,32 @@ class TestResidentClaude:
         assert [f["cost_usd"] for f in finishes] == [0.25, 0.25]
         assert finishes[1]["output_text"].endswith("```")
 
+    def test_a_turn_claude_runs_on_its_own_is_recorded_and_never_taken_for_a_reply(
+        self, planner_claude: Any, agent_db: Any, caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        # After planning, Claude runs a turn of its own (its background work ended); what it says there
+        # would fail the task if it were taken for the next turn's reply.
+        claude = planner_claude(plan(step("s1")), decide("accept"),
+                                autonomous={1: decide("fail", reason="said on its own")})
+        with caplog.at_level("INFO", logger="loopx.agents.tiers.planner"):
+            h = drive(claude, always(WORK_OK))
+
+        assert h.final().payload["status"] == "completed"  # type: ignore[union-attr]
+        assert not any("said on its own" in line for line in activity(agent_db))
+        from loopx.agents.claude_cli import AUTONOMOUS_INPUT
+
+        starts = [call.kwargs for call in agent_db.start_record.await_args_list]
+        assert [s["input_text"] for s in starts].count(AUTONOMOUS_INPUT) == 1
+        (own,) = [s for s in starts if s["input_text"] == AUTONOMOUS_INPUT]
+        assert own["agent_id"] == "planner-t1" and own["task_id"] == "t1" and own["metadata"]["autonomous"] is True
+        # Three runs at 0.25 each, the autonomous one among them; the plan keeps the whole running total.
+        finishes = [call.kwargs for call in agent_db.finish_record.await_args_list]
+        assert sorted(f["output_text"] for f in finishes) == sorted(
+            [plan(step("s1")), decide("accept"), decide("fail", reason="said on its own")])
+        assert [f["cost_usd"] for f in finishes] == [0.25, 0.25, 0.25]
+        assert h.planner._plan.session_totals == Usage(cost_usd=0.75)  # type: ignore[union-attr]
+        assert any("ran a turn on its own" in r.getMessage() for r in caplog.records)
+
 
 # --- The system prompt: harness, role, project background, task, reply contract ---
 
