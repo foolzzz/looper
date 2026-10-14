@@ -79,6 +79,8 @@ uv sync
 cd web && npm install && npx vite build && cd ..
 ```
 
+然后运行 `uv run loopx doctor`：它检查 PostgreSQL、Claude CLI 及其登录和已开启的渠道，缺什么就给出修复方法。
+
 ### 3. 运行
 
 ```bash
@@ -134,7 +136,7 @@ PostgreSQL 是启动的硬性依赖。数据表：
 
 | 接口 | 方法 | 用途 |
 |---|---|---|
-| `/api/status` | GET | 系统健康状态 |
+| `/api/status` | GET | 系统健康状态和启动自检（`checks`） |
 | `/api/tasks` | GET | 任务列表 |
 | `/api/tasks/create` | POST | 创建任务（init 状态）；必须提供 `work_dir` |
 | `/api/tasks/:id` | GET | 任务详情及步骤 |

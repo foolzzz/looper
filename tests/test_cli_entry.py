@@ -4,6 +4,7 @@ Each case runs in a fresh interpreter and calls the function that
 ``[project.scripts]`` in pyproject.toml names for ``loopx``, as the installed
 script does. ``serve_agent`` is replaced by a recorder, so nothing listens;
 the case then lists every ``loopx`` module the interpreter loaded.
+``doctor`` runs its checks against a stand-in ``claude`` on a minimal PATH.
 """
 
 from __future__ import annotations
