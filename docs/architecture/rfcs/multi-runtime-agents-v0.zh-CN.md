@@ -117,6 +117,7 @@ dashboard、M2 的观测、M6 的评测和 M7 的任务日志都只认内部事�
 | 花费报告 | ✅ `total_cost_usd` 和 `modelUsage[*].costUSD` 一律按 Claude 价格计算（不认识的模型标 `costBasis: "unknown"`）；`modelUsage` 按模型给出四种 token，接其他 provider 时由 Looper 按 provider 价格计算 | 只有 token：`turn.completed.usage`，是会话累计值，由 Looper 按 provider 价格计算 | 只有 token：每个请求一条（助手消息的 `usage`），由 Looper 按 provider 价格计算；子 agent 的用量在 `task` 工具结果里汇总 | ❓ | 只有 token 数 | 待定 |
 | 压缩事件 | ✅ `compact_boundary` | ❌ `--json` 不报，只出一条提示性的 `error` 条目 | ✅ `auto_compaction_start`/`auto_compaction_end`（`result.tokensBefore`） | ❓ | — | 待定 |
 | 自主轮（#26） | ✅ | — 一个进程只跑一轮 | — 一个进程只跑一轮 | ❓ | — | 待定 |
+| agent teams（Agent Profile 的 `agent_teams`） | ✅ `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` 加 `--teammate-mode in-process`（默认的 `auto` 在 tmux 里会把队友开成单独的 tmux 进程，花费不进结果）：队友在同一进程里作为后台任务运行，它的消息和它的结束各引出一轮自主轮，Worker 关了 stdin 也一样；每个结果的累计值都含队友的 token。队友的模型请求不在事件流里（它的助手消息在），也拿不到 `--append-system-prompt-file` | — | — | ❓ | — | 待定 |
 
 Codex 的其他核实结果：
 

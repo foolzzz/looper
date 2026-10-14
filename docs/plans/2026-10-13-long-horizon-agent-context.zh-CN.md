@@ -560,6 +560,7 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
 | 2026-10-14 | 表名与界面统一（looper #76）：一次性迁移原地改名 `agent_configs` → `role_configs`（主键 `agent_id` → `role`，先删掉只重复主键的 `role` 列）、`agents` → `agent_profiles`、`task_agent_overrides` → `task_profile_overrides`，分层、任务选择和会话里指向 Profile 的列改为 `profile_id`，约束改用新库的名字；接口改为 `/api/roles`、`/api/agent-profiles`（字段 `profile_id`、`profile`、`profile_overrides`），不保留旧别名，代码改为 `AgentProfile`、`profile_registry`、`role_configs`，导出格式升为 `looper-config/v2`（`profiles`），v1 文件仍可导入，"agent" 只指运行中的实例。验证：从 v2.6.0 的 schema.sql 加真实数据的库迁移后每行都在、各角色启动与 main 逐字节相同、迁移后的库与新库结构相同；v2.6.0 导出的文件导入后再导出只差新名字；一次性 `looper serve` 上替身 Claude 跑完一个 Worker 步骤（任务选的 Profile 生效），无头 Chrome 跑 65 项 Settings 检查（含经界面导入 v2.6.0 的文件）；真实 PG 1172 通过。 |
 | 2026-10-14 | Codex 登录（looper #78，§5.0 第 3 项）：内置 provider `codex-login`，运行目录的 `auth.json` 符号链接到操作者的登录文件、`cli_auth_credentials_store = "file"`、不写 `model_provider`、关 ChatGPT 应用，agent 的 shell 经 `shell_environment_policy.set` 拿到没有登录的 `CODEX_HOME`，每次运行后和启动时用 `lstat` 检查链接，分叉即删副本、放回链接并停用该登录直到操作者核对后清除，表单、provider、`looper doctor` 和 `/api/status` 显示登录状态。验证：真实运行里 agent 的 `$CODEX_HOME` 是空目录、`codex login status` 为 `Not logged in`；codex + `codex-login` + gpt-6.1-sol 的 M6 真实模式评测 5/5、契约违约 0、Planner 改文件 0、重试 2（与 CPA 相同），提示 647k、输出 3.9k，按价目表折合 $0.25 等价（codex + CPA + gpt-5.5 约 $0.73）；操作者登录文件的 inode、mtime、`last_refresh` 和 refresh token 指纹前后不变；真实 PG 全量通过。 |
 | 2026-10-14 | 按项目限并发（looper #81）：分层配置新增 `max_concurrency`，只能设在 Planner、Worker、Reviewer 的角色层和项目里的角色层，表示每个项目同时运行多少个任务、Worker、Reviewer（默认 8、16、8），TaskRouter 按项目排队（新建、重启和启动恢复走同一检查），WorkerPool 按项目和角色计数，每次启动前现读上限，写入该字段后立即重查，调低不停止正在运行的。去掉全机的 3 个任务、4 个 Worker 上限（每个任务最多 4 个 Worker 保留），删除从未生效的 `role_configs.max_concurrency`（导入旧文件时忽略并在报告里提示一行），Roles 页和项目设置按角色显示该字段、当前值和来源。验证：替身 Claude 下覆盖按项目排队、项目之间互不阻塞、调高立即启动、调低不停止、等待中的 Worker 可被停止，真实 PG 覆盖迁移、约束和导出导入往返，一次性 `looper serve` 上用替身 Claude 实测上限生效、调高后排队的任务和 Worker 立即启动，无头 Chrome 截图；真实 PG 1223 通过。 |
+| 2026-10-14 | Agent Profile 的 agent teams 开关（looper #PR）：`agent_profiles.agent_teams` 默认关、只允许 Claude Code 运行时，开时四类角色都带 `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` 和 `--teammate-mode in-process`，关时去掉服务继承来的或设置里写的这个变量，导出带上它、没有它的文件导入为关，Worker 照旧以最后一个 `result` 为结果，"Worker finished" 改为只记一次。验证：一次性 `looper serve` 上用 DeepSeek（`deepseek-flash[1m]`），开了的 Worker 拉起一个后台队友，stdin 关掉之后 Claude 又为队友的消息和队友结束各写了一个 `result`，报告取最后一个、写的是队友发回的词，花费 $0.0109 按 provider 价格计入队友的 token（队友用 `haiku` 时 `modelUsage` 另有 `deepseek-flash` 一项，同样计价），关了的 Planner 在服务环境带着该变量时启动不带它，常驻 Manager 把队友的消息和结束作为两轮自主轮回复；真实花费约 $0.08，真实 PG 1206 通过。 |
 
 ## 5. 不属于本 RFC 的待办
 
@@ -583,6 +584,7 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
 - **服务常驻（2026-10-14 定，✅ 已交付 looper #59）**：`service install / uninstall / status / restart`，macOS 生成 launchd LaunchAgent，Linux 生成 systemd 用户服务，开机自启、崩溃拉起；本机也改用它运行主 checkout 的代码。
 - **全面改名为 looper（2026-10-14 定，✅ 已交付 looper #64）**：命令、Python 包、数据目录（`~/.loopx` → `~/.looper`，自动迁移）、环境变量（`LOOPX_*` → `LOOPER_*`，旧名作为回退）、界面与文档统一改名；`loopx` 命令保留为别名过渡一个版本。改名是机械改动且触及几乎所有文件，**排在当前这批 PR 合入之后、M9b/M9c 开工之前**，单独一个 PR，期间不开其他分支；README 与控制台首屏的改动先请维护者预览（本次改名维护者已免除预览）。默认库名 `loopx`、发布 tag 与历史、NOTICE 对上游 LoopX 的署名不改。
 - **Codex 运行时的已知差距（M9c）**：运行中的 Codex Worker 不能被引导，Planner 的消息只能留给这一步的决策轮（评测里聊天纠偏任务因此多一次重试），要引导得改走实验性的 `app-server`；Codex 不报压缩和单次请求的用量，记录里没有上下文规模，单次上限只能在一轮结束时判断；杀掉 Codex 进程时它正在跑的 shell 命令不会结束（Codex 给每条命令单开进程组）。常驻会话的目录（`codex/sessions/<owner>`）已在 M9e 回收：服务启动时删掉已保存会话不再是 Codex 的。
+- **agent teams 的已知差距（looper #PR）**：队友的模型请求不在 stream-json 里（只有它的助手消息带着 `parent_tool_use_id` 出现），所以单次软上限在某个结果报出累计值之前看不到队友的 token，运行记录里也没有它逐个请求的用量；队友拿不到 agent 的 `--append-system-prompt-file`（harness、角色、项目、任务和契约各层）。不抓取队友的 transcript 来补。
 - **OMP 运行时的已知差距（M9e）**：运行中的 OMP Worker 不能被引导（`-p` 只读一次 stdin，`--mode rpc` 能插话但未采用），评测里聊天纠偏因此多一次重试；omp 的 `task` 工具找子 agent 定义时从工作目录一路往上找 `.omp/agents`，过了仓库根也不停，工作目录在操作者家目录下时会读到 `~/.omp/agents`（如果有），Looper 关不掉，只能整个去掉 `task` 工具；工作目录不在 git 仓库里时关掉了向上查找的发现来源，工作目录自己的 `AGENTS.md`、`CLAUDE.md`、`.omp/` 等也不读；后台请求（skill 描述压缩成路由提示、压缩摘要）不在事件流里，不计入花费和单次上限；每个新进程的首个请求基本不命中提示缓存（评测里未缓存输入 101k，Codex 约 60k），可以试 `--prompt-cache-key`；每个 runtime root 第一次运行要解压约 167 MB 的原生库（`omp/natives`）。
 
 ### 5.3 非核心待办（M6 之后统一做）
@@ -594,9 +596,9 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
 以下行为已实现，但还没有在真实环境中验证过，相关改动或排查时优先补上：
 
 - **飞书、Telegram 的真实流量**：白名单与投递（M1.7、#26）只用本地替身验证过。
-- **agent teams**：`CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` 已作为默认环境变量下发，但没有实际拉起队友验证过。
+- ~~**agent teams**~~（已覆盖，looper #PR）：Looper 从未下发 `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS`，它在 `--setting-sources project` 隔离之前随操作者的个人设置进来，之后仍会随从 Claude Code shell 启动的服务继承进来；现在由 Agent Profile 的 `agent_teams` 决定（默认关），真实运行见第 4 节台账，已知差距见第 5.2 节。
 - **多个后台任务同时结束**的自主轮切分（#26）。
-- **DeepSeek、Kimi 和 GLM 国际站的真实 key**（M9b）：预设按官方文档填写，真实运行只覆盖了本机 CPA 和 GLM（BigModel）。
+- **DeepSeek、Kimi 和 GLM 国际站的真实 key**（M9b）：预设按官方文档填写，真实运行只覆盖了本机 CPA 和 GLM（BigModel），DeepSeek 只经 `looper serve` 跑过 agent teams 的两个单步任务（looper #PR），没跑 M6 评测。
   维护者用自己的 key 各跑一次 M6 真实评测核对：`LOOPER_EVAL_API_KEY=… python -m evals.prompt_regression run --mode real
   --provider-preset deepseek`（或 `kimi-moonshot-cn`、`kimi-moonshot`、`glm-zai`），看任务都通过、`cost_basis` 全是
   `provider_price`、花费与平台账单大致一致。

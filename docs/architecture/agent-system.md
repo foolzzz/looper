@@ -320,7 +320,12 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
   plus `--max-turns N` when the config sets `max_turns` above 0. A Worker
   reads the `worker` row and a Reviewer the `reviewer` row, for every run. The
   first user turn goes on stdin; stdin stays open so the Planner can add user
-  turns mid-run, and closes when the result arrives
+  turns mid-run, and closes when the first result arrives. Background work the
+  run started that is still going then (an agent team's teammates,
+  [below](#runtimes-llm-providers-and-agent-profiles)) brings turns of Claude's
+  own, each with a result, before Claude exits: the Worker reads the output to
+  its end, and the run's last result is its outcome, its report and its cost
+  ("Worker finished" goes to the task's activity once, from it)
 - The step is the system prompt; only other agents' output is the user turn:
   - system prompt: the harness (resolved for the Worker or Reviewer in its
     project; a Reviewer without its own takes the Workers'), the
@@ -359,7 +364,7 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
   not extend the limit
 - A step counts as completed only when all of these hold; anything else fails the
   step with the reason in `error`:
-  - the run's `result` event has `subtype: success`, so hitting max turns fails;
+  - the run's last `result` event has `subtype: success`, so hitting max turns fails;
   - the final message ends with the JSON report
     `{status, changed_files, deleted_files, summary, learnings}`, with `status`
     set to `completed`;
@@ -626,8 +631,9 @@ registry, its checks and its API are `looper/agents/profile_registry.py`.
   OpenAI-format), its common models with their background model, and the
   extra environment its Claude Code guide sets; the user adds the key.
 - **Agent Profiles** (`agent_profiles`): a name, a runtime, a provider, a
-  model and a default effort. The registry (`profiles`) shows each one with
-  the roles its runtime can run (`roles`) and where it is selected
+  model, a default effort and, for a Claude Code runtime only, whether its runs
+  have agent teams (`agent_teams`, off unless set; below). The registry
+  (`profiles`) shows each one with the roles its runtime can run (`roles`) and where it is selected
   (`used_by`: the layers, a project's with its name, and how many tasks chose
   it); one in use cannot be deleted (409, naming where). A profile's id keeps
   the `agent-` prefix it had before the rename (`agent-claude-code-opus`,
@@ -679,6 +685,33 @@ the provider's own variables. The verified Claude Code behaviour is in the
 [multi-runtime RFC](rfcs/multi-runtime-agents-v0.zh-CN.md) section 7. A
 resident process whose binding changed (provider, key, endpoint) is started
 again.
+
+**Agent teams.** A profile with `agent_teams` (refused, 400, on a runtime
+other than Claude Code, also when a change moves a profile that has them to
+one) starts every role's Claude Code with
+`CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` and `--teammate-mode in-process`; a
+profile without them starts it with that variable removed, whatever the
+server's environment (a `looper serve` started from a Claude Code shell
+inherits it), the settings' or the provider's variables say. Turning them on or
+off restarts a resident process (its command changes) and resumes its session:
+the runtime and the provider are unchanged. Verified with Claude Code 2.1.285:
+it enables teams only with the variable; under its default teammate mode
+(`auto`) a process inside tmux starts each teammate as a tmux process of its
+own, whose cost the run's result does not count, hence `in-process`, where a
+teammate runs in the agent's process as a background task. Through
+`looper serve` with DeepSeek: a teammate that outlives the turn that spawned it
+starts a turn of the agent's own with its message and another when it ends,
+each with a result, also after a Worker's stdin has closed. Every result
+carries the session's totals with the teammate's tokens in `modelUsage` (under
+the agent's model, or under the background model when the teammate was spawned
+with the `haiku` alias), so a Worker's last result and a resident agent's turns
+of its own ([below](#turns-claude-runs-on-its-own)) count them at the
+provider's prices. Known gaps: a teammate's model requests are not in the stream (its
+assistant messages are, with a `parent_tool_use_id`), so the soft per-run cap
+below does not see its tokens before a result reports them, and nothing records
+its requests one by one; a teammate does not get the agent's
+`--append-system-prompt-file` (the harness, role, project, task and contract
+layers).
 
 **Cost and caps.** Each run records `cost_source`. `runtime`: Claude Code's
 own figure (`total_cost_usd`), used with its own login (shown as
@@ -1152,7 +1185,8 @@ tokens, plugin hook context 3.8k).
 (`looper/agents/config_transfer.py`) move an installation's agent configuration
 through one JSON file, `format: looper-config/v2`: `runtimes`, `providers` and
 `profiles` (the registered ones; the built-ins exist everywhere; each names the
-others by name), `settings` (the system and role layers, each naming its Agent
+others by name; a profile carries its `agent_teams`, off for one from a file
+without it), `settings` (the system and role layers, each naming its Agent
 Profile in `profile`;
 each role's prompt, `null` while it follows the recommended one, its timeout
 and enabled flag; a role's `max_concurrency` in an older file is ignored, with
@@ -1298,6 +1332,13 @@ Verified against Claude Code 2.1.285 (haiku, with the resident flags and
   `queued` at once and `started` only after that result.
 - Work that ends during a user turn is folded into that turn (a replayed
   `<task-notification>` message with an `origin`) and answered by its result.
+- An agent team's teammate (a profile with agent teams, DeepSeek through
+  `looper serve`) is such background work. Its message starts a turn of
+  Claude's own too: a replayed message with an `origin` of kind `peer`, then
+  a result with that `origin`; its end brings the `task-notification` turn.
+  A Manager asked to spawn one answered `STARTED`, then sent the teammate's
+  word and a closing line as two replies of its own, each a run with its
+  share of the totals.
 
 `ResidentClaude` reads a process's output for as long as it runs. A user
 turn starts at its message's `started` event, or its replay, and ends at the
@@ -1428,7 +1469,7 @@ PostgreSQL is a hard startup dependency. All data paths:
 | `agent_runtimes` | Runtimes, built in (one per type found on PATH) or registered by hand before and kept while an Agent Profile uses them (`builtin` false): `name`, `type` (an adapter), `executable` (`''` = the type's default), the probe's `version`, `capabilities`, `probed_at`, `probe_error`, `builtin` |
 | `llm_providers` | LLM providers: `name`, `protocols`, `auth` (`oauth` with `oauth_runtime_type`, or `api_key`), `base_url`, `models` (the catalog, with each model's prices and `background_model`), `env` (its own variables), `max_concurrency` (`NULL` = no limit), `builtin` |
 | `llm_provider_secrets` | A provider's API key, apart from the provider; read only by the launch that will use it |
-| `agent_profiles` | Agent Profiles: `name`, `runtime_id`, `provider_id`, `model`, default `effort`, `builtin`; a provider still used by one is not deleted |
+| `agent_profiles` | Agent Profiles: `name`, `runtime_id`, `provider_id`, `model`, default `effort`, `agent_teams` (Claude Code's agent teams, false unless set), `builtin`; a provider still used by one is not deleted |
 | `task_profile_overrides` | A task's Agent Profile per role (`planner`, `worker`, `reviewer`): `profile_id`, going with its task; a profile a task chose is not deleted |
 | `system_settings` | Settings shared by the whole system, one value per key (no row = the built-in default), such as the last library import's report |
 | `library_items` | The capability catalog: kind, name, `origin` (`machine`, `upload`, `git`, `ui` or `project`), `modified`, `owner_project_id` (a project-authored item; goes with its project), `description`, source label, declared version, `sha256` of the files, size, file count, `imported_at` |
@@ -1498,7 +1539,7 @@ built by `scripts/stage-dashboard.sh` at release time), and it carries
 - **Task Detail**: Overview (status, phase, times, steps and the task's cost with its run count, then "Cost by agent": the Planner's, the Workers' and the Reviewers' runs and cost with each one's share, noting runs still running or without a reported cost; steps, agent timeline, live activity feed), Pipeline DAG (React Flow), Sessions, Conversation
 - **Runs** (`#runs/<role>`): each role's sessions and run history, and no configuration. A Runs list shows every recorded Claude run of the role (the Manager, every task's Planner, Workers or Reviewers), a Manager `/new` as a `new session` row, and links each to its agent's history; each role links to its section in Settings → Roles.
 - **Agent history** (`#history/<agent-id>?task=<task-id>`): opened from History on an Agent Timeline row, a Runs entry or the Chat page. The Manager's and a Planner's page starts with "Context & cost": the latest context size, the number of compactions, the total cost and the number of turns. Below them is a sparkline of the context at the end of each of the latest 100 turns, scaled between their lowest and highest value, with a dashed marker on each turn that compacted. A list of the compactions follows (turn, time, trigger, context before → after), then a folded table of the turns. The section is re-read every 10 s. For each Claude run it shows status, model, the run's own tokens (uncached input, cache read, cache write, output), its context at the end (`ctx`), a `compacted` badge, its own cost, the launch command (cwd and argv; a long argument such as the system prompt is shown by its length, and Copy copies the exact command), a collapsible System prompt section with what Looper appended (Claude Code's built-in system prompt is not included): its title shows the prompt's size, its short sha256 and an `isolated` badge, and inside one line per layer (harness source and version, role recommended or edited, project and background version, task, contract), the model with its source and effort, and the Settings environment variable names, above the full text; runs recorded before the layers existed show the text only. A collapsible Plugins & skills section shows how many plugins and skills the run loaded from the library, with its hash, and how many project skills (from `metadata.project_skills`), and lists each with its short version hash. Then the full transcript, following a running run every 2 s. A running run shows its last output time from the record's heartbeat and is flagged after 2 minutes with no output. While Claude thinks it shows `thinking · ~N tokens` from Claude's `thinking_tokens` events. Those arrive about once a second, so the recorder keeps one row per thinking phase and updates its count in place. Hooks, background tasks and rate limits are shown as one line each, as are a compaction (`Context compacted (auto) · 25.1k → 1.36k tokens`) and a failed compaction attempt. The result line labels Claude's figure as the `session total`. Any other event type is an expandable line. A `/new` is one line, `new session`, with its channel, sender, chat and the session it ended. For a Planner each run is one of its turns, listed above your chat with it and its activity.
-- **Settings**: a folding group at the bottom of the sidebar, one page each (`#settings/<page>`): **LLM Providers** (`providers`); **Agent Runtimes** (`runtimes`, read-only, as above); **Agent Profiles** (`profiles`: each profile's runtime, provider, model and effort, the roles it can run and where it is used, with a form that picks the runtime, then a provider grouped as the runtime's own login (OAuth; Claude Code's with its `claude auth status` result, Codex's with its `codex login status` result or the forked login a run found, none for OMP) or an API-key provider that speaks its protocols, then a model from the provider's catalog, or any, with the models a Codex login offers suggested); **Roles** (`roles`: the system layer, then per role (`#settings/roles/<role>`) its layer, each field saying what applies now and from which layer, with the Planner's "Tasks running at once per project", the Workers' "Workers running at once per project" or the Reviewers' "Reviewers running at once per project", and its own fields: the role prompt (replace or append, reset to the recommended one), timeout, and the note that every agent has every tool with `--dangerously-skip-permissions`); **Skills & MCP** (`catalog`: how many of the imported items are loaded and their size, "Import from this machine" or "Re-import", the last import with what it changed and what it left out, a name filter, and the plugins and skills with their version, size and installs; a change applies to each agent's next run); **Channels** (`channels`: the Telegram and Lark channels, each with its sender allowlist, an add and remove list of Telegram user IDs or Lark open_ids, checked as you type, with blanks and repeats flagged, and, for an enabled channel that does not start, the reason); **Import / Export** (`transfer`). Wherever an Agent Profile is chosen (Roles, a project's settings, a new task's roles) it is the same dropdown, whose last entry, "+ New Agent Profile", opens the form in place and selects what it saves.
+- **Settings**: a folding group at the bottom of the sidebar, one page each (`#settings/<page>`): **LLM Providers** (`providers`); **Agent Runtimes** (`runtimes`, read-only, as above); **Agent Profiles** (`profiles`: each profile's runtime, provider, model and effort, "agent teams on" when they are, the roles it can run and where it is used, with a form that picks the runtime, then a provider grouped as the runtime's own login (OAuth; Claude Code's with its `claude auth status` result, Codex's with its `codex login status` result or the forked login a run found, none for OMP) or an API-key provider that speaks its protocols, then a model from the provider's catalog, or any, with the models a Codex login offers suggested, and, for a Claude Code runtime, an "Agent teams" checkbox, off by default); **Roles** (`roles`: the system layer, then per role (`#settings/roles/<role>`) its layer, each field saying what applies now and from which layer, with the Planner's "Tasks running at once per project", the Workers' "Workers running at once per project" or the Reviewers' "Reviewers running at once per project", and its own fields: the role prompt (replace or append, reset to the recommended one), timeout, and the note that every agent has every tool with `--dangerously-skip-permissions`); **Skills & MCP** (`catalog`: how many of the imported items are loaded and their size, "Import from this machine" or "Re-import", the last import with what it changed and what it left out, a name filter, and the plugins and skills with their version, size and installs; a change applies to each agent's next run); **Channels** (`channels`: the Telegram and Lark channels, each with its sender allowlist, an add and remove list of Telegram user IDs or Lark open_ids, checked as you type, with blanks and repeats flagged, and, for an enabled channel that does not start, the reason); **Import / Export** (`transfer`). Wherever an Agent Profile is chosen (Roles, a project's settings, a new task's roles) it is the same dropdown, whose last entry, "+ New Agent Profile", opens the form in place and selects what it saves.
 
 ### Real-Time Updates
 
@@ -1567,7 +1608,7 @@ dev proxy, which keeps `Host` and `Origin` on its own port.
 | `/api/providers` | POST | Register `{name, protocols, auth, oauth_runtime_type?, base_url?, models?, env?, max_concurrency?, api_key?}`; 201 with `provider`; 400 with the reason (an `env` name the binding sets, or that reads like a credential, too), 409 for a taken name |
 | `/api/providers/:id` | PUT/DELETE | Change a provider (`api_key` `***` keeps the key, `null` removes it; 400 when one of its profiles could no longer run); delete (409 while profiles use it). 400 for the built-in one |
 | `/api/providers/:id/login-problem` | DELETE | The operator checked `codex login status`: clear the forked Codex login a run recorded, so its runs start again; answers with `provider`. 400 for a provider that is not the Codex login |
-| `/api/agent-profiles` | POST | Register an Agent Profile `{name, runtime_id, provider_id, model, effort?}`; 201 with `profile` and `warnings` (a model without a price); 400 when the runtime and provider cannot run together or the provider does not list the model |
+| `/api/agent-profiles` | POST | Register an Agent Profile `{name, runtime_id, provider_id, model, effort?, agent_teams?}` (`agent_teams` a boolean, false when left out); 201 with `profile` and `warnings` (a model without a price); 400 when the runtime and provider cannot run together, the provider does not list the model, or `agent_teams` is on with a runtime other than Claude Code |
 | `/api/agent-profiles/:id` | PUT/DELETE | Change a profile (checked like a new one, and for every role it is selected for; answers with `profile` and `warnings`); delete (409 while a layer or a task selects it, naming where). 400 for the built-in one |
 | `/api/agent-settings/roles/:role` | PUT | Set one role's layer (`manager`, `planner`, `worker`, `reviewer`; 404 for another) |
 | `/api/catalog` | GET | The catalog: `items` (`item_id`, `kind`, `name`, `qualified_name` (how agents name it), `origin`, `owner_project_id`, `owner_project_name`, `description`, `source`, `version`, `sha256`, `size_bytes`, `file_count`, timestamps and `installs`), `installed_count`, `total_bytes`, `last_import` (counts, `added`, `updated`, `removed`, `unchanged`, `skipped`), `roles`, `task_roles` and `caps` |
