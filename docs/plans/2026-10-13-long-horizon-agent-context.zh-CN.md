@@ -35,7 +35,7 @@
 | M6 | prompt 回归评测 | ✅ 已交付（looper #36） | M1 |
 | M7a | 计划状态入库：计划、步骤和 agent 会话以 PostgreSQL 为唯一来源 | ✅ 已交付（looper #45） | M2、M5 |
 | M7b | 任务记忆：任务日志、进度与发现注入、经验沉淀为项目知识 | ✅ 已交付（looper #46） | M7a |
-| M8a | 能力目录与安装：插件和 skill 先进目录，再按范围（全局或项目）和角色安装；项目 skill 并入目录 | ✅ 已交付 | M1.6、M4 |
+| M8a | 能力目录与安装：插件和 skill 先进目录，再按范围（全局或项目）和角色安装；项目 skill 并入目录 | ✅ 已交付（looper #48） | M1.6、M4 |
 | M8b | MCP 服务器进目录，安装方式相同；密钥存库、接口打码 | ⏳ 待开工 | M8a |
 | M8c | 进库来源：上传、git、界面新建与编辑 | ⏳ 待开工 | M8a |
 | M8d | 配置层级统一：系统默认 → 角色 → 项目 → 项目里的角色 | ⏳ 待开工 | M8a |
@@ -411,7 +411,7 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
 | 2026-10-13 | M7a 交付（looper #45）：计划存进 `task_plans` 和补齐字段的 `task_steps`，Manager 与 Planner 的会话存进 `agent_sessions`，每次变化只写改动的行，多行变化一个事务，不再写计划和会话文件；启动时续跑计划仍在进行的任务（不重新规划、续接会话），并一次性导入旧文件。验证：真实 `loopx serve` 加替身 Claude 在 SIGINT 重启后续跑完成、因上限失败的任务重启后"提高上限并继续"完成；本机 11 个计划文件都是旧格式、全部跳过，导入 Manager 会话 1 个，第二次运行无操作。 |
 | 2026-10-13 | M7b 交付（looper #46）：步骤被接受时由代码在定案事务里写一条 `task_journal`（Worker 的总结加 Worker、Reviewer 回复里新增的可选 `learnings`，至多 5 条、每条 300 字符），Planner 的 DECISION、SUPERVISE、CHAT 轮注入新的在前、至多 4,000 字符的「进度与发现」，计划行带已接受步骤的总结，Worker 首轮注入依赖在前、至多 2,000 字符的发现；项目开关 `distill_lessons`（默认关）打开时任务完成后多一轮 LESSONS，把日志整理成项目知识文档。验证：真实 PG 加替身 Claude 走完各条规则，真实 haiku 回归评测 5/5、违约 0（$0.34，基线 $0.33），一次最小任务里 Worker 报出 learnings、下一轮 Planner 与依赖步骤的 Worker 都看到、经验文档入库（$0.10）。 |
 | 2026-10-13 | 启动自检（looper #47）：新增 `loopx doctor`，逐项检查 PostgreSQL（连接串的密码打码）、Claude Code CLI、它的登录（`claude auth status`，只读本机凭据、不调用模型；没有这个子命令的旧版本记为未检查）和飞书渠道开启时的 `lark-cli`，每项给出修复方法，有失败时退出码为 1。`loopx serve` 启动时先跑同一组检查：PostgreSQL 不可达仍然退出，但给出修复方法而不是堆栈；缺 `claude` 或未登录只记警告、照常启动，`GET /api/status` 返回 `checks`，控制台每页顶部显示横幅。验证：真实 PG 测试，本机实跑 `loopx doctor`，以及 `PATH` 里没有 `claude` 的一次性服务的横幅截图。 |
-| 2026-10-13 | M8a 交付：能力目录与安装。`library_items` 加上 `origin`、所属项目和描述，新增 `library_installs`（全局或某个项目、角色子集、启用开关）；一次性迁移让已导入的条目都不安装，`project_skills` 保留 id 等价迁入目录并安装给三个任务角色后删除；`load_installed(role, project)` 取代 `load_library` 和 `load_project_skills`，新增目录、安装和项目视图接口，Settings 和项目 Skills 标签改为目录与安装。验证：仿真实规模的旧库（3 个插件、104 个 skill、5 个项目 skill）升级后 107 个条目都未安装、5 个项目 skill 各有一条三角色安装、启用状态不变，再跑一次不变；真实 Claude（haiku）下全局只装给 worker 的 skill 出现在 Worker 的 init、不在 Planner 的，迁移来的 `project:release-stamp` 被 Worker 调用并写出暗号，任务 $0.051；真实 PG 789 通过 |
+| 2026-10-13 | M8a 交付（looper #48）：能力目录与安装。`library_items` 加上 `origin`、所属项目和描述，新增 `library_installs`（全局或某个项目、角色子集、启用开关）；一次性迁移让已导入的条目都不安装，`project_skills` 保留 id 等价迁入目录并安装给三个任务角色后删除；`load_installed(role, project)` 取代 `load_library` 和 `load_project_skills`，新增目录、安装和项目视图接口，Settings 和项目 Skills 标签改为目录与安装。验证：仿真实规模的旧库（3 个插件、104 个 skill、5 个项目 skill）升级后 107 个条目都未安装、5 个项目 skill 各有一条三角色安装、启用状态不变，再跑一次不变；真实 Claude（haiku）下全局只装给 worker 的 skill 出现在 Worker 的 init、不在 Planner 的，迁移来的 `project:release-stamp` 被 Worker 调用并写出暗号，任务 $0.051；真实 PG 789 通过 |
 
 ## 5. 不属于本 RFC 的待办
 
