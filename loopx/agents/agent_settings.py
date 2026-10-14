@@ -13,8 +13,10 @@ only here, for an agent type and a project:
   its project's ``worker_harness_prompt`` when set (``project_override``);
 - a **Reviewer** uses the same harness as the Workers of its project.
 
-A run's model is its agent's ``agent_configs.model`` when set
-(``agent_override``), else the Settings default, else ``DEFAULT_MODEL``. The
+A run's model is its project's ``model`` for a task agent when set
+(``project_override``), else its agent's ``agent_configs.model`` when set
+(``agent_override``), else the Settings default, else ``DEFAULT_MODEL``. A task
+agent's project may also cap each Claude Code process (``--max-budget-usd``). The
 effort, when set, and the environment variables come from Settings for every
 agent, and so does the library (``library.load_library``): the imported
 plugins and skills every run loads. A task agent's launch also carries its
@@ -113,6 +115,7 @@ class ModelSource(str, Enum):
     BUILTIN_DEFAULT = "builtin_default"
     SYSTEM_DEFAULT = "system_default"
     AGENT_OVERRIDE = "agent_override"
+    PROJECT_OVERRIDE = "project_override"
 
 
 # The project field that overrides each task agent's harness; a Reviewer follows its project's Workers.
@@ -328,12 +331,13 @@ class Launch:
     library: AgentLibrary = EMPTY_LIBRARY
     knowledge: AgentKnowledge = EMPTY_KNOWLEDGE
     project_skills: AgentProjectSkills = EMPTY_PROJECT_SKILLS
+    max_budget_usd: float | None = None  # the project's cap on each Claude Code process; None for none
 
     def args(self) -> list[str]:
         """The Claude Code flags every agent starts with: the permissions, the model, the effort, the
-        library's plugin directories, the project skills' plugin directory and the directories of the
-        project knowledge."""
-        from .claude_cli import knowledge_args, library_args, permission_args, project_skill_args
+        library's plugin directories, the project skills' plugin directory, the directories of the
+        project knowledge and the project's spend cap."""
+        from .claude_cli import budget_args, knowledge_args, library_args, permission_args, project_skill_args
 
         return [
             *permission_args(),
@@ -342,6 +346,7 @@ class Launch:
             *library_args(self.library),
             *project_skill_args(self.project_skills),
             *knowledge_args(self.knowledge),
+            *budget_args(self.max_budget_usd),
         ]
 
     def environment(self) -> dict[str, str] | None:
@@ -370,6 +375,8 @@ class Launch:
             record["library"] = library
         if (project_skills := self.project_skills.record()) is not None:
             record["project_skills"] = project_skills
+        if self.max_budget_usd is not None:
+            record["max_budget_usd"] = self.max_budget_usd
         return record
 
 
@@ -379,15 +386,20 @@ def resolve_launch(
     library: AgentLibrary = EMPTY_LIBRARY,
     knowledge: AgentKnowledge = EMPTY_KNOWLEDGE,
     project_skills: AgentProjectSkills = EMPTY_PROJECT_SKILLS,
+    *,
+    project_model: str | None = None,
+    max_budget_usd: float | None = None,
 ) -> Launch:
-    """An agent's launch settings: its own model when set, else the default; the default effort and
-    environment; the library loaded for the run; and, for a task agent, its project's knowledge and skills."""
+    """An agent's launch settings: for a task agent its project's model when set, else its own model when
+    set, else the default; the default effort and environment; the library loaded for the run; and, for a
+    task agent, its project's knowledge, skills and spend cap on each process."""
     override = model_override.strip() if isinstance(model_override, str) else ""
-    if override:
-        return Launch(override, ModelSource.AGENT_OVERRIDE, defaults.effort, defaults.env, library, knowledge,
-                      project_skills)
-    return Launch(defaults.model, defaults.model_source, defaults.effort, defaults.env, library, knowledge,
-                  project_skills)
+    model, source = defaults.model, defaults.model_source
+    if project_model:
+        model, source = project_model, ModelSource.PROJECT_OVERRIDE
+    elif override:
+        model, source = override, ModelSource.AGENT_OVERRIDE
+    return Launch(model, source, defaults.effort, defaults.env, library, knowledge, project_skills, max_budget_usd)
 
 
 # --- The settings API (GET, PUT and reset of /api/settings/agents) ---

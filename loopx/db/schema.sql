@@ -185,6 +185,16 @@ ALTER TABLE projects ADD COLUMN IF NOT EXISTS background TEXT NOT NULL DEFAULT '
 -- Reviewers; '' = the default one in Settings.
 ALTER TABLE projects ADD COLUMN IF NOT EXISTS planner_harness_prompt TEXT NOT NULL DEFAULT '';
 ALTER TABLE projects ADD COLUMN IF NOT EXISTS worker_harness_prompt TEXT NOT NULL DEFAULT '';
+-- How the project's task agents run; NULL inherits today's behavior. Code owns
+-- the types and validation (loopx/agents/project_execution.py).
+ALTER TABLE projects ADD COLUMN IF NOT EXISTS model TEXT;
+ALTER TABLE projects ADD COLUMN IF NOT EXISTS run_budget_usd DOUBLE PRECISION CHECK (run_budget_usd > 0);
+ALTER TABLE projects ADD COLUMN IF NOT EXISTS task_budget_usd DOUBLE PRECISION CHECK (task_budget_usd > 0);
+ALTER TABLE projects ADD COLUMN IF NOT EXISTS task_budget_action TEXT
+    CHECK (task_budget_action IN ('wrap_up', 'fail'));
+ALTER TABLE projects ADD COLUMN IF NOT EXISTS supervise_interval_seconds INTEGER
+    CHECK (supervise_interval_seconds >= 0);
+ALTER TABLE projects ADD COLUMN IF NOT EXISTS review_policy TEXT CHECK (review_policy IN ('planner', 'all'));
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS project_id TEXT REFERENCES projects(id);
 CREATE INDEX IF NOT EXISTS idx_tasks_project ON tasks (project_id, created_at DESC);
 

@@ -8,6 +8,8 @@ given, else its project's default; there is no global default. A project's
 Workers, Reviewers), read afresh when each prompt is built, and so do its
 harness overrides: ``planner_harness_prompt`` for its Planner and
 ``worker_harness_prompt`` for its Workers and Reviewers (``agent_settings``).
+Its execution settings (``project_execution``) are top-level fields of the
+project too, ``null`` to inherit.
 """
 
 from __future__ import annotations
@@ -21,6 +23,7 @@ import asyncpg
 
 from ..db import connection as db_connection, projects as db_projects, tasks as db_tasks
 from . import agent_settings
+from .project_execution import FIELDS as EXECUTION_FIELDS, ProjectExecution, execution_fields
 from .tiers.task import TaskRouter, resolve_work_dir
 
 HTTP_400 = "400 Bad Request"
@@ -94,6 +97,7 @@ def project_view(row: dict[str, Any]) -> dict[str, Any]:
         "background": row["background"],
         "planner_harness_prompt": row.get("planner_harness_prompt", ""),
         "worker_harness_prompt": row.get("worker_harness_prompt", ""),
+        **ProjectExecution.from_row(row).view(),
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
         "task_count": row.get("task_count", 0),
@@ -101,9 +105,9 @@ def project_view(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _project_fields(data: dict[str, Any], *, update: bool) -> dict[str, str]:
+def _project_fields(data: dict[str, Any], *, update: bool) -> dict[str, Any]:
     """The project fields in ``data``, validated; a new project needs a name."""
-    fields: dict[str, str] = {}
+    fields: dict[str, Any] = {}
     try:
         if not update or "name" in data:
             fields["name"] = project_name(data.get("name"))
@@ -118,6 +122,8 @@ def _project_fields(data: dict[str, Any], *, update: bool) -> dict[str, str]:
         for field in HARNESS_FIELDS:
             if field in data:
                 fields[field] = agent_settings.harness_prompt(data[field], field=field)
+        if execution := execution_fields(data):
+            fields["execution"] = execution
     except ValueError as exc:
         raise RequestError(HTTP_400, str(exc)) from None
     return fields
@@ -151,7 +157,8 @@ async def update_project(project_id: str, data: dict[str, Any]) -> dict[str, Any
     fields = _project_fields(data, update=True)
     if not fields:
         raise RequestError(
-            HTTP_400, "give at least one of name, description, work_dir, background, " + " and ".join(HARNESS_FIELDS),
+            HTTP_400, "give at least one of " + ", ".join(("name", "description", "work_dir", "background",
+                                                          *HARNESS_FIELDS, *EXECUTION_FIELDS)),
         )
     try:
         updated = await db_projects.update_project(project_id, **fields)

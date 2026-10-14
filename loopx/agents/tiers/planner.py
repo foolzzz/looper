@@ -22,7 +22,10 @@ harness (the project's Planner override, else the default in Settings), the
 the index of its knowledge included, the knowledge's directories mounted with
 ``--add-dir`` and its enabled skills with one more ``--plugin-dir``); when it,
 the model or the Settings environment changes, Claude restarts and resumes its
-session. An invalid reply gets one repair turn. Planning that
+session. The project's execution settings (``project_execution``) set the
+model, ``--max-budget-usd``, the supervision interval, whether every step
+needs a review and the task's spend cap, read before each event's turns. An
+invalid reply gets one repair turn. Planning that
 still fails fails the task; a decision that still fails falls back to the
 step's own verdict. When the task completes or fails, the Planner signals the
 TaskRouter, which tears it down and ends its Claude.
@@ -50,12 +53,14 @@ from ..claude_cli import (
     ClaudeRunRecorder,
     ResidentClaude,
     ResidentTurn,
+    budget_error,
     exit_note,
     isolation_args,
     system_prompt_args,
 )
 from ..knowledge import AgentKnowledge, documents_label, load_knowledge
 from ..library import load_library
+from ..project_execution import ProjectExecution, TaskBudgetAction, format_usd
 from ..project_skills import AgentProjectSkills, load_project_skills, skills_label
 from ..run_usage import Usage
 from ..system_prompt import SystemPrompt, build_system_prompt, is_recommended, plan_task_section
@@ -85,11 +90,12 @@ from .planner_protocol import (
     parse_decision,
     parse_plan,
     parse_supervise,
+    parse_wrap_up,
 )
 
 logger = logging.getLogger(__name__)
 
-from ...db import activity as db_activity, agent_configs as db_agent_configs
+from ...db import activity as db_activity, agent_configs as db_agent_configs, llm_records as db_llm_records
 from ...db import projects as db_projects, steps as db_steps
 from ...db.tasks import update_task_phase
 
@@ -102,6 +108,8 @@ DEFAULT_TURN_TIMEOUT_SEC = 1200
 # arrived (a SUPERVISE turn), to steer or stop one that drifts or stalls.
 # 0 turns the periodic check off. Any Planner turn re-arms the interval.
 DEFAULT_SUPERVISE_INTERVAL_SEC = 300
+# A plan whose task still runs.
+_LIVE = ("executing", "verifying")
 
 # The Planner has every tool, like every agent; this recommended role prompt
 # is what keeps it to planning and deciding.
@@ -214,7 +222,8 @@ class TaskPlan:
     requirement: str
     work_dir: str
     steps: list[PlanStep] = field(default_factory=list)
-    status: str = "planning"  # "planning" | "executing" | "verifying" | "completed" | "failed"
+    # "planning" | "executing" | "verifying" | "stopping" (at the spend cap) | "completed" | "failed"
+    status: str = "planning"
     correlation_id: str = ""
     origin_channel_id: str = ""
     project_id: str = ""
@@ -363,6 +372,8 @@ class PlannerAgent:
         self._knowledge: AgentKnowledge | None = None
         # The project skills the last turn ran with, kept the same way when a turn cannot read them.
         self._project_skills: AgentProjectSkills | None = None
+        # The project's execution settings as last read; everything inherits until the project is read.
+        self._execution = ProjectExecution()
 
     @property
     def agent_id(self) -> str:
@@ -430,6 +441,9 @@ class PlannerAgent:
             # Turns this event runs see the project as it is now, in their
             # message and in the system prompt (a new plan reads it itself).
             await self._refresh_project(self._plan)
+            if envelope.message_type is not MessageType.TASK_CANCEL:
+                # A task at its spend cap stops before another turn; the handlers below see it ended.
+                await self._within_budget(self._plan)
         match envelope.message_type:
             case MessageType.TASK_REQUEST:
                 await self._plan_and_dispatch(envelope)
@@ -523,7 +537,7 @@ class PlannerAgent:
                 by_label[spec.id] = step
             step.instruction = spec.instruction
             step.acceptance_criteria = list(spec.acceptance_criteria)
-            step.review = spec.review
+            step.review = spec.review or self._execution.review_all
             changed.append(step)
         for spec, step in zip(specs, changed):
             step.depends_on = [by_label[label].step_id for label in spec.depends_on]
@@ -544,10 +558,14 @@ class PlannerAgent:
     async def _dispatch_ready(self, plan: TaskPlan) -> None:
         running = sum(1 for s in plan.steps if s.status == "dispatched")
         for step in plan.ready_steps()[: max(0, MAX_CONCURRENT_WORKERS - running)]:
+            if plan.status not in _LIVE:
+                return  # the task stopped at its spend cap
             await self._dispatch_step(plan, step)
 
     async def _dispatch_step(self, plan: TaskPlan, step: PlanStep) -> None:
         assert self._bus is not None
+        if not await self._within_budget(plan):
+            return
         worker_id = f"worker-{uuid.uuid4().hex[:12]}"
         step.status = "dispatched"
         step.worker_id = worker_id
@@ -628,12 +646,14 @@ class PlannerAgent:
         )
         context = DecisionContext(
             step=step.label, result=ResultKind.WORK, succeeded=succeeded,
-            review_required=step.review, retries=step.retries,
+            review_required=self._needs_review(step), retries=step.retries,
         )
         await self._decide(plan, step, context, self._work_report(step, result))
 
     async def _spawn_reviewer(self, plan: TaskPlan, step: PlanStep) -> None:
         assert self._bus is not None
+        if not await self._within_budget(plan):
+            return
         reviewer_id = f"reviewer-{uuid.uuid4().hex[:12]}"
         step.reviewer_id = reviewer_id
         await self._activity("phase", f"Reviewer dispatched for step {step.index + 1} ({step.label})", worker=reviewer_id)
@@ -678,7 +698,7 @@ class PlannerAgent:
         )
         context = DecisionContext(
             step=step.label, result=ResultKind.REVIEW, succeeded=passed,
-            review_required=step.review, retries=step.retries,
+            review_required=self._needs_review(step), retries=step.retries,
         )
         await self._decide(plan, step, context, self._review_report(step, result))
 
@@ -697,6 +717,15 @@ class PlannerAgent:
                 TurnKind.DECISION, message, lambda text: parse_decision(text, context, view),
             )
         except PlannerTurnError as exc:
+            if self._execution.review_all and context.result is ResultKind.WORK and context.succeeded:
+                # The project reviews every step, so a Worker's own success never accepts one.
+                await self._activity(
+                    "error",
+                    f"Warning: the Planner could not decide on step {step.index + 1} ({step.label}): {exc}. "
+                    "This project reviews every step: it goes to a Reviewer.",
+                )
+                await self._send_to_review(plan, step)
+                return
             whose = "Reviewer's" if context.result is ResultKind.REVIEW else "Worker's own"
             step.status = "verified" if context.succeeded else "failed"
             await self._activity(
@@ -722,13 +751,7 @@ class PlannerAgent:
             if reply.summary:
                 plan.final_summary = reply.summary
         elif decision is Decision.REVIEW:
-            step.review = True
-            step.status = "completed"
-            self._save_plan(plan)
-            await self._persist_step(step)
-            await update_task_phase(self._task_id, "verifying")
-            await self._spawn_reviewer(plan, step)
-            await self._report_progress(plan)
+            await self._send_to_review(plan, step)
             return
         elif decision is Decision.RETRY:
             step.retries += 1
@@ -745,6 +768,20 @@ class PlannerAgent:
             step.status = "failed"
             plan.fail_reason = reply.reason
         await self._step_settled(plan, step)
+
+    async def _send_to_review(self, plan: TaskPlan, step: PlanStep) -> None:
+        step.review = True
+        step.status = "completed"
+        self._save_plan(plan)
+        await self._persist_step(step)
+        await update_task_phase(self._task_id, "verifying")
+        await self._spawn_reviewer(plan, step)
+        await self._report_progress(plan)
+
+    def _needs_review(self, step: PlanStep) -> bool:
+        """Whether ``step`` needs a passing review before it is accepted: the Planner asked for one, or the
+        project reviews every step."""
+        return step.review or self._execution.review_all
 
     async def _replan(self, plan: TaskPlan, specs: tuple[StepSpec, ...]) -> None:
         """Replace every step that has not started with ``specs``."""
@@ -878,6 +915,9 @@ class PlannerAgent:
         assert self._bus is not None
         while self._running:
             interval = (await load_settings()).supervise_interval_seconds
+            project_interval = (await self._read_execution()).supervise_interval_seconds
+            if project_interval is not None:
+                interval = project_interval
             if interval <= 0:
                 return  # the periodic check is off
             try:
@@ -963,17 +1003,18 @@ class PlannerAgent:
         step.result = result
         context = DecisionContext(
             step=step.label, result=ResultKind.WORK, succeeded=False,
-            review_required=step.review, retries=step.retries,
+            review_required=self._needs_review(step), retries=step.retries,
         )
         await self._decide(plan, step, context, self._work_report(step, result))
 
-    async def _kill_worker(self, step: PlanStep) -> bool:
-        """Ask the worker pool to stop ``step``'s running Worker; True if it was running."""
+    async def _kill_worker(self, step: PlanStep, run_id: str | None = None) -> bool:
+        """Ask the worker pool to stop ``step``'s running Worker (or its run ``run_id``, a Reviewer); True if
+        it was running."""
         assert self._bus is not None and step.worker_id is not None
         try:
             ack = await self._bus.request(MessageEnvelope.create(
                 source=self.agent_address,
-                target=worker_address(step.worker_id),
+                target=worker_address(run_id or step.worker_id),
                 message_type=MessageType.KILL_WORK,
                 payload={"task_id": step.step_id},
                 correlation_id=self._plan.correlation_id if self._plan else "",
@@ -1054,8 +1095,9 @@ class PlannerAgent:
         knowledge = await self._load_knowledge(plan)
         skills = await self._load_project_skills(plan)
         system_prompt = self._system_prompt(plan, settings, knowledge)
+        execution = self._execution
         launch = resolve_launch(settings.defaults, settings.model, await load_library(self._runtime_root), knowledge,
-                                skills)
+                                skills, project_model=execution.model, max_budget_usd=execution.run_budget_usd)
         await self._note_background(plan.project_background)
         try:
             prompt_file = system_prompt.write_file(self._runtime_root)
@@ -1146,6 +1188,11 @@ class PlannerAgent:
         error: str | None = None
         if result_event is None:
             error = f"Claude Code exited before finishing the turn (exit code {turn.exit_code})"
+        elif budget_error(result_event):
+            # The process answers every later turn the same way at once: the next turn starts a new one,
+            # with a new cap, that resumes the session.
+            error = budget_error(result_event)
+            await self._claude.stop()
         elif result_event.get("is_error") or result_event.get("subtype") != "success":
             error = f"Claude Code turn did not succeed ({result_event.get('subtype') or 'error'})"
         elif not final_text.strip():
@@ -1431,6 +1478,8 @@ class PlannerAgent:
 
     async def _report_progress(self, plan: TaskPlan) -> None:
         assert self._bus is not None
+        if plan.status in ("completed", "failed"):
+            return  # its final status is out (a task stopped at its spend cap mid-decision)
         await self._bus.publish(MessageEnvelope.create(
             source=self.agent_address,
             target=TASK_ROUTER_ADDRESS,
@@ -1479,8 +1528,75 @@ class PlannerAgent:
         plan.project_background = str(project.get("background") or "")
         plan.project_planner_harness = str(project.get("planner_harness_prompt") or "")
         plan.project_work_dir = str(project.get("work_dir") or "")
+        self._execution = ProjectExecution.from_row(project)
         updated_at = project.get("updated_at")
         plan.project_updated_at = updated_at.isoformat() if hasattr(updated_at, "isoformat") else str(updated_at or "")
+
+    async def _read_execution(self) -> ProjectExecution:
+        """The project's execution settings, read now; the last ones read when the project cannot be read."""
+        try:
+            project = await db_projects.get_task_project(self._task_id)
+        except Exception:
+            logger.warning("planner %s cannot read its task's project; keeping its last settings", self.agent_id,
+                           exc_info=True)
+            return self._execution
+        if project is not None:
+            self._execution = ProjectExecution.from_row(project)
+        return self._execution
+
+    # --- The task's spend cap ---
+
+    async def _within_budget(self, plan: TaskPlan) -> bool:
+        """Whether the task may start another run: False once it has spent its project's task cap.
+
+        At the cap the task stops for good (``_stop_at_budget``). Without a
+        cap nothing is read. A cost that cannot be read lets the task go on.
+        """
+        cap = self._execution.task_budget_usd
+        if cap is None:
+            return True
+        if plan.status not in _LIVE:
+            return False  # stopping or ended already
+        try:
+            spent = float((await db_llm_records.task_costs([self._task_id]))[self._task_id]["cost_usd"])
+        except Exception as exc:
+            logger.warning("planner %s cannot read its task's cost", self.agent_id, exc_info=True)
+            await self._activity("error", f"Warning: the task's cost is unavailable ({exc}); its spend cap "
+                                          "is not checked this time"[:500])
+            return True
+        if spent < cap:
+            return True
+        await self._stop_at_budget(plan, spent, cap)
+        return False
+
+    async def _stop_at_budget(self, plan: TaskPlan, spent: float, cap: float) -> None:
+        """Stop the runs going on, let the Planner sum up when the project asks for it, then fail the task."""
+        reason = f"Task spend cap reached: ${format_usd(spent)} spent of the ${format_usd(cap)} cap (task_budget_usd)"
+        plan.status = "stopping"  # no result is taken and nothing starts while it winds down
+        await self._activity("error", reason)
+        for step in plan.steps:
+            if step.status == "dispatched" and step.worker_id:
+                await self._kill_worker(step)
+            elif step.status == "completed" and step.reviewer_id:
+                await self._kill_worker(step, step.reviewer_id)
+        if self._execution.on_task_budget is TaskBudgetAction.WRAP_UP:
+            try:
+                summary = await self._ask(TurnKind.DECISION, self._wrap_up_message(plan, reason), parse_wrap_up)
+            except PlannerTurnError as exc:
+                summary = f"(the Planner could not sum up: {exc})"
+            reason = f"{reason}. Planner's wrap-up: {summary}"
+        plan.fail_reason = reason
+        await self._fail_plan(plan)
+
+    def _wrap_up_message(self, plan: TaskPlan, reason: str) -> str:
+        return "\n".join([
+            f"[DECISION] {reason}. No more steps run: the running ones were stopped, and the task now fails.",
+            "",
+            *self._plan_lines(plan),
+            "",
+            'Allowed decisions now: fail. In "reason", tell the user what the task delivered and what remains.',
+            "Reply with the DECISION JSON.",
+        ])
 
     async def _load_knowledge(self, plan: TaskPlan) -> AgentKnowledge:
         """The project's knowledge for this turn, read now; the last one read when it cannot be read.
