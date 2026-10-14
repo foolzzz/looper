@@ -196,6 +196,7 @@ Web 始终开启。Telegram 和 Lark 默认内置，不需要任何启动参数�
 - 左上角列出所有 agent（`GET /api/chat/targets`）：全局唯一的 Manager，以及最近 30 个任务。每个任务下有它固定的一个 Planner，和每个步骤各自独立的 Worker（做了验收的步骤还有 Reviewer）。已经结束的任务和 agent 也列出来，可以查看消息
 - 能发消息的只有 Manager 和运行中任务的 Planner。发给 Planner 的消息由它的 Claude 回复（一个 `[CHAT]` turn），Claude 可以把消息转给正在执行某一步的 Worker，作为它的下一个 user turn，也可以给计划追加步骤；Worker 已经结束的，这条消息留到这一步的决策 turn 给 Claude 看。事件按到达顺序处理，正在跑别的 turn 时发来的消息会排在它后面；任务还没有计划或已经结束时，消息不经过 Claude，直接回复。选中 Planner 时，旁边折叠显示它最近 10 次 Claude 运行。Worker 和 Reviewer 只读，页面显示它的完整运行记录
 - `POST /api/chat/send` 发送消息，`target` 指定对话对象
+- 任何渠道发来的消息只要正好是 `/new`（去掉首尾空白，不分大小写），就由 Looper 自己处理、不交给 Claude：Manager 停掉常驻 Claude、丢掉保存的会话，下一条消息（不论来自哪个渠道）开新会话，不带续接简报；重置记成一次运行。Manager 聊天顶部的「New session」按钮发的就是 `/new`
 - 花费与上下文的展示：
   - 任务列表的每一行都显示任务目前的花费。
   - 任务详情的 Overview 有一张「Cost」卡片，显示总额和运行次数。下面的「Cost by agent」列出 Planner、Workers、Reviewers 各自的运行次数、花费和占比，并注明还在跑的运行和没有报出花费的运行。
@@ -213,12 +214,12 @@ Web 始终开启。Telegram 和 Lark 默认内置，不需要任何启动参数�
 ### Telegram
 
 - Bot 长轮询接入
-- 支持 `/start`、`/status`、`/help` 命令
+- 支持 `/start`、`/status`、`/new`、`/help` 命令；`/new`（不带参数）开始新的 Manager 会话
 - 消息自动分段（4000 字符限制）
 - Settings 配置项：
   - `bot_token_env`：存放 Bot token 的环境变量名，默认 `LOOPER_TELEGRAM_BOT_TOKEN`
   - `allowed_user_ids`：发送者白名单，Telegram 的数字用户 ID（负数是群或频道，不是发送者）；以前存的逗号分隔字符串仍然能读。`LOOPX_TELEGRAM_ALLOWED_USERS` 不再生效
-- 名单外的发送者发 `/start`、`/status`、`/help` 也得不到回复
+- 名单外的发送者发 `/start`、`/status`、`/new`、`/help` 也得不到回复
 
 ### Lark（飞书）
 

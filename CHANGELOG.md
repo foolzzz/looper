@@ -18,6 +18,22 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+### Added
+
+- **`/new` starts a new Manager session.** A chat message that is exactly
+  `/new` (trimmed, any case), from the web chat, Lark or Telegram, is
+  answered by Looper instead of Claude: after any turn under way, the Manager
+  stops its resident Claude and drops its saved session, so the next message,
+  from any channel, starts a new session without `--resume` and without the
+  recent-conversation resume brief, also after a restart
+  (`agent_sessions.clean_start`). The per-turn projects and goals still come,
+  and running tasks and their Planners are untouched. The reset is recorded
+  as a Manager run (`metadata.session_reset`: channel, sender, chat, the
+  session it ended) and confirmed in the same chat. Telegram registers `/new`
+  (without arguments) as a command, and the web chat has a "New session"
+  button. Any other text, `/new foo` or `/news` included, is handled as
+  before: a message for Claude (in Telegram, an unknown command).
+
 ## [2.6.0] - 2026-10-14
 
 Covers `v2.5.0` to `v2.6.0`: pull requests #2 and #4 to #70 in
