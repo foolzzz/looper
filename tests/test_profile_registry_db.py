@@ -131,8 +131,14 @@ def test_every_database_has_the_builtin_runtime_provider_and_profile(monkeypatch
         (runtime,) = registry["runtimes"]
         assert (runtime["builtin"], runtime["executable"], runtime["version"]) == (True, "", None)
         assert set(runtime["capabilities"]) == {c.value for c in CLAUDE_CODE.capabilities}
-        (provider,) = registry["providers"]
-        assert (provider["auth"], provider["oauth_runtime_type"], provider["api_key"]) == ("oauth", "claude-code", None)
+        # Claude Code's own login, and Codex's (ChatGPT), with the models a ChatGPT login offers as suggestions.
+        claude, codex = registry["providers"]
+        assert (claude["name"], claude["auth"], claude["oauth_runtime_type"], claude["api_key"]) == (
+            "claude-subscription", "oauth", "claude-code", None)
+        assert (codex["provider_id"], codex["name"], codex["builtin"], codex["auth"], codex["oauth_runtime_type"],
+                codex["protocols"], codex["models"]) == (
+            "prov-codex-login", "codex-login", True, "oauth", "codex", ["openai-responses"], [])
+        assert codex["suggested_models"][0] == "gpt-6.1-sol" and claude["suggested_models"] == []
 
     _run(_test, monkeypatch)
 
@@ -140,6 +146,7 @@ def test_every_database_has_the_builtin_runtime_provider_and_profile(monkeypatch
 @pytest.mark.parametrize(("method", "path", "body"), [
     ("PUT", "/api/providers/prov-claude-subscription", {"models": [{"name": "opus"}]}),
     ("DELETE", "/api/providers/prov-claude-subscription", None),
+    ("DELETE", "/api/providers/prov-codex-login", None),
     ("PUT", "/api/agent-profiles/agent-claude-code-opus", {"model": "sonnet"}),
     ("DELETE", "/api/agent-profiles/agent-claude-code-opus", None),
 ])
@@ -355,7 +362,7 @@ def _version_codex(path: Path) -> str:
     ))
 
 
-def test_codex_pairs_only_with_an_api_key_provider_of_openai_responses_and_runs_every_role(
+def test_codex_pairs_with_its_own_login_or_an_api_key_provider_of_openai_responses_and_runs_every_role(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
     _version_codex(tmp_path / "codex")
@@ -382,10 +389,30 @@ def test_codex_pairs_only_with_an_api_key_provider_of_openai_responses_and_runs_
         for provider_id in (chat, anthropic, "prov-claude-subscription"):
             status, payload = await profile(provider_id)
             assert status == 400 and "share no protocol" in payload["error"]
-        # Codex's own login is not one Looper uses (API keys only).
-        status, payload = await _call("POST", "/api/providers", {
-            "name": "codex-login", "protocols": ["openai-responses"], "auth": "oauth", "oauth_runtime_type": "codex"})
-        assert status == 400 and "Codex has no login of its own" in payload["error"]
+        # Codex's own login: any model, priced at the built-in prices as a subscription equivalent.
+        status, payload = await profile("prov-codex-login")
+        assert status == 201 and payload["warnings"] == []
+        assert payload["profile"]["cost"] == {"source": "provider_price", "equivalent": True, "unpriced": []}
+        await _ok("PUT", "/api/agent-settings/system", {"profile_id": payload["profile"]["profile_id"]})
+
+    _run(_test, monkeypatch)
+
+
+def test_the_codex_login_pairs_only_with_codex_runtimes(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    _version_omp(tmp_path / "omp")
+    monkeypatch.setenv("PATH", str(tmp_path))
+
+    async def _test(_pool: Any) -> None:
+        omp = (await _ok("POST", "/api/runtimes/rt-omp/probe"))["runtime"]["runtime_id"]
+        for runtime_id in ("rt-claude-code", omp):
+            status, payload = await _call("POST", "/api/agent-profiles", {
+                "name": f"{runtime_id}-login", "model": "gpt-6.1-sol", "runtime_id": runtime_id,
+                "provider_id": "prov-codex-login"})
+            assert status == 400, payload
+            assert "pairs only with" in payload["error"] or "share no protocol" in payload["error"]
+        # A login problem is cleared only on the Codex login.
+        status, payload = await _call("DELETE", "/api/providers/prov-claude-subscription/login-problem")
+        assert status == 400 and "is not the Codex login" in payload["error"]
 
     _run(_test, monkeypatch)
 
@@ -815,8 +842,8 @@ def test_a_provider_keeps_its_model_catalog_and_concurrency_with_unknowns_as_nul
              "background_model": None}]
         unlimited = (await _ok("PUT", f"/api/providers/{provider['provider_id']}", {"max_concurrency": None}))
         assert unlimited["provider"]["max_concurrency"] is None
-        (builtin,) = [p for p in (await _registry())["providers"] if p["builtin"]]
-        assert (builtin["max_concurrency"], builtin["models"]) == (None, [])  # no limit, any model
+        builtins = [p for p in (await _registry())["providers"] if p["builtin"]]
+        assert [(b["max_concurrency"], b["models"]) for b in builtins] == [(None, [])] * 2  # no limit, any model
 
     _run(_test, monkeypatch)
 

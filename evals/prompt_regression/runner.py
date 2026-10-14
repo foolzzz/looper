@@ -468,22 +468,26 @@ def run(
 
 def register_agent(api: Api, spec: dict[str, Any]) -> dict[str, Any]:
     """Register the agent of ``spec`` in the eval's database and return it: ``{"runtime": {name?, type},
-    "provider": {name, protocols, auth, base_url?, models?, api_key_env?}, "agent": {name, model, effort?}}``.
-    Runtimes are built in: the agent runs on the runtime of that name, else the built-in one of that type
-    (``codex`` or ``omp`` when on the server's PATH); the provider's API key is read from the environment
-    variable ``api_key_env`` names, so no key is in the file or in the run's result."""
+    "provider": {name, protocols, auth, base_url?, models?, api_key_env?} or {provider_id}, "agent": {name,
+    model, effort?}}``. Runtimes are built in: the agent runs on the runtime of that name, else the built-in one
+    of that type (``codex`` or ``omp`` when on the server's PATH); a ``provider_id`` names a provider the
+    server has, such as the built-in ``prov-codex-login`` (Codex's own login); the provider's API key is read
+    from the environment variable ``api_key_env`` names, so no key is in the file or in the run's result."""
     registry = api.get("/api/registry")
     wanted = spec["runtime"]
     runtime = next((r for r in registry["runtimes"] if r["name"] == wanted.get("name")), None) or next(
         (r for r in registry["runtimes"] if r["builtin"] and r["type"] == wanted.get("type")), None)
     if runtime is None:
         raise EvalError(f"no {wanted.get('type')!r} runtime in the eval's server: put its CLI on PATH")
-    provider = {k: v for k, v in spec["provider"].items() if k != "api_key_env"}
-    if (variable := spec["provider"].get("api_key_env")) is not None:
-        if not os.environ.get(variable):
-            raise EvalError(f"the provider's API key is read from ${variable}, which is not set")
-        provider["api_key"] = os.environ[variable]
-    provider_id = api.post("/api/providers", provider)["provider"]["provider_id"]
+    if (provider_id := spec["provider"].get("provider_id")) is None:
+        provider = {k: v for k, v in spec["provider"].items() if k != "api_key_env"}
+        if (variable := spec["provider"].get("api_key_env")) is not None:
+            if not os.environ.get(variable):
+                raise EvalError(f"the provider's API key is read from ${variable}, which is not set")
+            provider["api_key"] = os.environ[variable]
+        provider_id = api.post("/api/providers", provider)["provider"]["provider_id"]
+    elif not any(p["provider_id"] == provider_id for p in registry["providers"]):
+        raise EvalError(f"no provider {provider_id!r} in the eval's server")
     return api.post("/api/agent-profiles", {**spec["agent"], "runtime_id": runtime["runtime_id"],
                                             "provider_id": provider_id})["profile"]
 

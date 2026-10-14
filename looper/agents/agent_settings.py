@@ -507,7 +507,17 @@ async def load_agent_settings(
     problem = profile_problem(settings.profile, AgentType(role))
     if problem is None and settings.profile.provider.auth is AuthKind.API_KEY:
         settings, problem = await _with_api_key(settings)
+    elif problem is None:
+        problem = await _login_problem(settings.profile)
     return replace(settings, profile_error=problem)
+
+
+async def _login_problem(profile: AgentProfile) -> str | None:
+    """Why ``profile``'s runtime cannot run with its own login now (``RuntimeAdapter.login_problem``)."""
+    from .runtimes import adapter
+
+    problem = await adapter(profile.runtime.type).login_problem(profile.provider)
+    return f"Agent Profile {profile.name!r} cannot run: {problem}" if problem else None
 
 
 async def _with_api_key(settings: AgentSettings) -> tuple[AgentSettings, str | None]:

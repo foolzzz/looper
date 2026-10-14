@@ -2,13 +2,16 @@ import { useEffect, useState } from "react";
 import { AlertTriangle } from "lucide-react";
 import { fetchStatus, type SelfCheck } from "@/lib/api";
 
-/** Says, on every page, when the server started without the Claude Code CLI or its login. */
+const shown = (c: SelfCheck) => (c.id.startsWith("claude_") || c.id === "codex_login") && c.status === "fail";
+
+/** Says, on every page, when the server started without the Claude Code CLI or its login, or when the Codex login
+ * an Agent Profile uses cannot run (not logged in, or forked in a run). */
 export function ClaudeCheckBanner() {
   const [problems, setProblems] = useState<SelfCheck[]>([]);
 
   useEffect(() => {
     fetchStatus()
-      .then((s) => setProblems((s.checks ?? []).filter((c) => c.id.startsWith("claude_") && c.status === "fail")))
+      .then((s) => setProblems((s.checks ?? []).filter(shown)))
       .catch(() => setProblems([]));
   }, []);
 
@@ -22,8 +25,14 @@ export function ClaudeCheckBanner() {
             <span className="font-medium text-destructive">
               {c.label}: {c.detail}.
             </span>{" "}
-            Agents cannot run until this is fixed. To fix: {c.fix}; then restart{" "}
-            <code className="font-mono text-xs">looper serve</code>.
+            {c.id === "codex_login" ? (
+              <>Agent Profiles with the Codex login cannot run until this is fixed. To fix: {c.fix}.</>
+            ) : (
+              <>
+                Agents cannot run until this is fixed. To fix: {c.fix}; then restart{" "}
+                <code className="font-mono text-xs">looper serve</code>.
+              </>
+            )}
           </span>
         </p>
       ))}

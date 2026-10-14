@@ -20,7 +20,7 @@ from typing import Any
 
 from . import (
     agent_settings, catalog, catalog_sources, config_imports, config_transfer, knowledge, library, mcp,
-    profile_registry, project_skills, projects, request_guard,
+    profile_registry, project_skills, projects, request_guard, self_check,
 )
 from .broadcast import Broadcaster
 from .chat_targets import ChatTargetError, list_chat_targets, resolve_chat_target
@@ -278,6 +278,7 @@ class AgentHTTPServer:
     _RE_ROLE_SETTINGS = re.compile(r"^/api/agent-settings/roles/([a-zA-Z0-9_-]+)$")
     _RE_RUNTIME_PROBE = re.compile(r"^/api/runtimes/(rt-[a-zA-Z0-9-]+)/probe$")
     _RE_PROVIDER = re.compile(r"^/api/providers/(prov-[a-zA-Z0-9-]+)$")
+    _RE_PROVIDER_LOGIN_PROBLEM = re.compile(r"^/api/providers/(prov-[a-zA-Z0-9-]+)/login-problem$")
     _RE_PROFILE = re.compile(r"^/api/agent-profiles/(agent-[a-zA-Z0-9-]+)$")
     _RE_PROJECT_SKILLS = re.compile(r"^/api/projects/(proj-[a-zA-Z0-9]+)/skills$")
     _RE_PROJECT_SKILL = re.compile(r"^/api/projects/(proj-[a-zA-Z0-9]+)/skills/(skill-[a-zA-Z0-9]+)$")
@@ -409,6 +410,8 @@ class AgentHTTPServer:
                 m.group(1), projects.json_object(body)))
         elif (m := self._RE_PROVIDER.match(path)) and method == "DELETE":
             await self._handle_registry(writer, HTTP_200, lambda: profile_registry.delete_provider(m.group(1)))
+        elif (m := self._RE_PROVIDER_LOGIN_PROBLEM.match(path)) and method == "DELETE":
+            await self._handle_registry(writer, HTTP_200, lambda: profile_registry.clear_login_problem(m.group(1)))
         elif path == "/api/agent-profiles" and method == "POST":
             await self._handle_registry(writer, HTTP_201, lambda: profile_registry.create_profile(
                 projects.json_object(body)))
@@ -508,6 +511,13 @@ class AgentHTTPServer:
         writer.write(_json_response(HTTP_200, _serialize(result)))
         await writer.drain()
 
+    async def _checks_now(self) -> list[dict[str, str]]:
+        """The startup self-check, with the Codex login read now: a run may have found it forked since."""
+        if not any(check.get("id") == "codex_login" for check in self._self_checks):
+            return self._self_checks
+        codex = (await self_check.codex_login_check()).to_dict()
+        return [codex if check.get("id") == "codex_login" else check for check in self._self_checks]
+
     async def _handle_status(self, writer: asyncio.StreamWriter) -> None:
         agents = self._supervisor.agent_status()
         web_health = self._web_adapter.healthcheck()
@@ -527,7 +537,7 @@ class AgentHTTPServer:
                 "completed": sum(1 for t in tasks if t.get("status") == "completed"),
             },
             "channels": {"web": web_health},
-            "checks": self._self_checks,
+            "checks": await self._checks_now(),
         }
         writer.write(_json_response(HTTP_200, status))
         await writer.drain()

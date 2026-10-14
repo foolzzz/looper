@@ -120,6 +120,19 @@ async def _created_project(
             "background": background}
 
 
+@pytest.fixture(scope="session", autouse=True)
+def _no_operator_codex_login(tmp_path_factory: pytest.TempPathFactory) -> Any:
+    """No test reaches the operator's Codex login: the login file a Codex login run links to is ``auth.json`` in
+    the server's ``CODEX_HOME`` (``runtimes.codex_login.login_file``), here an empty directory of the session's."""
+    previous = os.environ.get("CODEX_HOME")
+    os.environ["CODEX_HOME"] = str(tmp_path_factory.mktemp("codex-home"))
+    yield
+    if previous is None:
+        os.environ.pop("CODEX_HOME", None)
+    else:
+        os.environ["CODEX_HOME"] = previous
+
+
 @pytest.fixture(scope="session")
 def _stub_claude(tmp_path_factory: pytest.TempPathFactory) -> Path:
     stub = tmp_path_factory.mktemp("stub-claude") / "claude"

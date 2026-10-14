@@ -83,7 +83,8 @@ every role on it, with Looper's per-run cap: `{"runtime": {"name"?, "type"},
 runtimes are built in, so the profile runs on the runtime of that name or the
 built-in one of that type, such as `codex` or `omp` when on PATH, and the
 provider's key is read from the variable `api_key_env` names, never from the
-file), `--tasks
+file; `"provider": {"provider_id": "prov-codex-login"}` uses the built-in Codex
+login instead, the operator's own ChatGPT login on this machine), `--tasks
 single_step,chat_correction`, `--max-budget-usd`, `--total-cap-usd`,
 `--baseline <run.json>` (compare with this run instead), `--keep-work-dirs`. To print a comparison again:
 

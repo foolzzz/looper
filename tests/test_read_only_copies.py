@@ -304,3 +304,20 @@ def test_a_session_directory_stays_while_its_agent_saved_a_session_of_that_runti
         agent.wait()
     assert sorted(removed) == sorted([directories["omp-gone"], directories["switched"]])
     assert all(directories[name].is_dir() for name in ("omp-manager", "omp-planner", "codex-planner", "running"))
+
+
+def test_removing_a_session_directory_unlinks_its_login_link_and_leaves_the_login_file(
+    tmp_path: Path, content: _Content,
+) -> None:
+    login = tmp_path / "operator" / "auth.json"
+    login.parent.mkdir()
+    login.write_text("stand-in login")
+    session = tmp_path.absolute() / ".local" / "codex" / "sessions" / "planner-task-7"
+    (session / "sessions").mkdir(parents=True)
+    (session / "auth.json").symlink_to(login)
+    (session / "linked-dir").symlink_to(login.parent, target_is_directory=True)
+    content.sessions = []  # the task is gone
+    assert asyncio.run(reclaim_unused(tmp_path)) == [session]
+    # The links went with the directory; what they pointed at is untouched.
+    assert not session.exists() and login.read_text() == "stand-in login"
+    assert sorted(p.name for p in login.parent.iterdir()) == ["auth.json"]

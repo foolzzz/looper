@@ -21,6 +21,7 @@ import {
   type AgentRole,
   type ProfileUsedBy,
   type Provider,
+  type ProviderLogin,
   type Registry,
   type Runtime,
   type SelfCheck,
@@ -51,10 +52,12 @@ function firstProvider(registry: Registry, runtime: Runtime | undefined): string
   return (fitting.find((p) => p.auth === "oauth") ?? fitting[0])?.provider_id ?? "";
 }
 
-/** A model the provider lists: the current one if it is there, else its first; any model when it lists none. */
+/** A model the provider lists: the current one if it is there, else its first. A provider that lists none takes
+ * any model; a runtime login that suggests some (Codex's) starts from its first unless the current one is one. */
 function fittingModel(provider: Provider | undefined, current: string): string {
-  if (!provider?.models.length || provider.models.some((m) => m.name === current)) return current;
-  return provider.models[0].name;
+  if (provider?.models.length) return provider.models.some((m) => m.name === current) ? current : provider.models[0].name;
+  const suggested = provider?.suggested_models ?? [];
+  return suggested.length && !suggested.includes(current) ? suggested[0] : current;
 }
 
 function runtimeTitle(runtime: Runtime): string {
@@ -87,6 +90,37 @@ function loginText(check: SelfCheck | null | undefined): string {
   if (check.status === "ok") return check.detail;
   if (check.status === "fail") return "not logged in: run claude auth login";
   return check.detail;
+}
+
+/** A runtime login the registry reports (Codex's `codex login status`, or a fork a run found), in words. */
+function providerLoginText(login: ProviderLogin | null): string {
+  if (!login) return "login not checked";
+  return login.state === "unavailable" ? `unavailable ${login.detail}` : login.detail;
+}
+
+/** The provider's login under the form: what it is now and, when it cannot run, how to fix it. */
+function LoginHint({ provider, typeLabel, claude }: { provider: Provider; typeLabel: string; claude?: SelfCheck | null }) {
+  const own = provider.login;
+  const text = own ? providerLoginText(own) : loginText(claude);
+  const failing = own ? own.state !== "chatgpt" : claude?.status === "fail";
+  let fix: React.ReactNode = null;
+  if (!own && failing) {
+    fix = <>(<code className="font-mono">claude auth login</code>, then restart looper serve)</>;
+  } else if (own?.state === "unavailable") {
+    fix = <>(check <code className="font-mono">codex login status</code> on the server&apos;s machine, then{" "}
+      <a href={settingsHref("providers", provider.provider_id)} className="underline underline-offset-2">use the login again</a>)</>;
+  } else if (own && failing) {
+    fix = <>(<code className="font-mono">codex login</code> with ChatGPT on the server&apos;s machine)</>;
+  }
+  return (
+    <p className={failing ? "flex items-start gap-1 text-warning" : undefined}>
+      {failing && <AlertTriangle className="mt-0.5 h-3 w-3 shrink-0" aria-hidden="true" />}
+      <span>
+        {typeLabel} login (OAuth) · {text}
+        {fix && <> {fix}</>}
+      </span>
+    </p>
+  );
 }
 
 // --- The form ---
@@ -135,7 +169,6 @@ export function AgentProfileForm({
   const fitting = registry.providers.filter((p) => pairs(registry, runtime, p));
   const ownLogins = fitting.filter((p) => p.auth === "oauth");
   const keyProviders = fitting.filter((p) => p.auth === "api_key");
-  const info = RUNTIME_TYPES[runtime?.type ?? ""];
   const typeLabel = type?.label ?? runtime?.type_label ?? "";
   const undetected = registry.runtime_types.filter((t) => !registry.runtimes.some((r) => r.builtin && r.type === t.type));
 
@@ -202,13 +235,9 @@ export function AgentProfileForm({
                 {ownLogins.map((p) => (
                   <option key={p.provider_id} value={p.provider_id}>
                     {p.name}
-                    {type.type === "claude-code" ? ` (${loginText(login)})` : ""}
+                    {p.login ? ` (${providerLoginText(p.login)})` : type.type === "claude-code" ? ` (${loginText(login)})` : ""}
                   </option>
                 ))}
-              </optgroup>
-            ) : info?.loginComing ? (
-              <optgroup label={`${typeLabel} login (OAuth)`}>
-                <option value="" disabled>{typeLabel} login: {info.loginComing}</option>
               </optgroup>
             ) : null}
             <optgroup label="API key">
@@ -228,7 +257,16 @@ export function AgentProfileForm({
               ))}
             </select>
           ) : (
-            <Input id={`${id}-model`} value={draft.model} onChange={(e) => set({ model: e.target.value })} placeholder="sonnet" spellCheck={false} autoCapitalize="none" className="font-mono" />
+            <>
+              <Input id={`${id}-model`} value={draft.model} onChange={(e) => set({ model: e.target.value })} placeholder={provider?.suggested_models[0] ?? "sonnet"} list={provider?.suggested_models.length ? `${id}-suggested` : undefined} spellCheck={false} autoCapitalize="none" className="font-mono" />
+              {provider?.suggested_models.length ? (
+                <datalist id={`${id}-suggested`}>
+                  {provider.suggested_models.map((m) => (
+                    <option key={m} value={m} />
+                  ))}
+                </datalist>
+              ) : null}
+            </>
           )}
         </div>
         <div className="space-y-1">
@@ -242,21 +280,15 @@ export function AgentProfileForm({
         </div>
       </div>
       <div id={`${id}-provider-hint`} className="space-y-0.5 text-[11px] text-muted-foreground">
-        {provider?.auth === "oauth" && type?.type === "claude-code" && (
-          <p className={login?.status === "fail" ? "flex items-start gap-1 text-warning" : undefined}>
-            {login?.status === "fail" && <AlertTriangle className="mt-0.5 h-3 w-3 shrink-0" aria-hidden="true" />}
-            {typeLabel} login: {loginText(login)}
-            {login?.status === "fail" && (
-              <>
-                {" "}(<code className="font-mono">claude auth login</code>, then restart looper serve)
-              </>
-            )}
-          </p>
+        {provider?.auth === "oauth" && (provider.login || type?.type === "claude-code") && (
+          <LoginHint provider={provider} typeLabel={typeLabel} claude={login} />
         )}
         <p>
           {provider?.models.length
             ? `${provider.name} lists ${provider.models.map((m) => m.name).join(", ")}.`
-            : "The model as the runtime takes it: an alias such as sonnet or a full name."}{" "}
+            : provider?.suggested_models.length
+              ? `Any model the login offers, such as ${provider.suggested_models.slice(0, 3).join(", ")}.`
+              : "The model as the runtime takes it: an alias such as sonnet or a full name."}{" "}
           A role&apos;s effort overrides the default.
         </p>
       </div>
@@ -341,7 +373,8 @@ function costBasisText(profile: AgentProfile): string {
   if (profile.cost.source === "runtime") {
     return profile.cost.equivalent ? "cost: the runtime's figure, a subscription equivalent" : "cost: the runtime's figure";
   }
-  return profile.cost.source === "provider_price" ? "cost: tokens at the provider's prices" : "";
+  if (profile.cost.source !== "provider_price") return "";
+  return profile.cost.equivalent ? "cost: tokens at API prices, a subscription equivalent" : "cost: tokens at the provider's prices";
 }
 
 function AgentProfileRow({ profile, registry }: { profile: AgentProfile; registry: Registry }) {

@@ -10,19 +10,11 @@ export interface RuntimeTypeInfo {
   title: string;
   /** The command that installs it, when there is one to give. */
   install?: string;
-  /** Its own login, while Looper cannot sign in with it yet: why, for a disabled entry. A type whose server
-   * `auth_kinds` include "oauth" has a login Looper uses; one with neither has none. */
-  loginComing?: string;
 }
 
 export const RUNTIME_TYPES: Record<string, RuntimeTypeInfo> = {
   "claude-code": { kind: "CLI", title: "Claude Code CLI", install: "npm install -g @anthropic-ai/claude-code" },
-  codex: {
-    kind: "CLI",
-    title: "Codex CLI",
-    install: "npm install -g @openai/codex",
-    loginComing: "coming soon; use an API-key provider such as CPA for now",
-  },
+  codex: { kind: "CLI", title: "Codex CLI", install: "npm install -g @openai/codex" },
   omp: { kind: "CLI", title: "OMP CLI" },
 };
 

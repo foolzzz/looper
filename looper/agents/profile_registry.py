@@ -25,7 +25,9 @@ the concurrency limit is stored and checked only. Presets
 
 The built-ins exist on every installation and are read-only: the
 ``claude-code`` runtime (the server's configured ``claude``), the
-``claude-subscription`` provider (Claude Code's own login) and the
+``claude-subscription`` provider (Claude Code's own login), the
+``codex-login`` provider (Codex's own ChatGPT login, ``runtimes.codex_login``:
+its view carries the login's state and the models to suggest) and the
 ``claude-code/opus`` profile, which every role runs when no layer selects
 another (``BUILTIN_PROFILE``). A runtime of another type is built in too once
 ``looper serve`` finds its executable on PATH (``register_found_runtimes``),
@@ -511,16 +513,31 @@ def catalog_entries(models: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]
     return [{**dict.fromkeys(MODEL_FIELDS), **m} for m in models]
 
 
-def provider_view(row: Mapping[str, Any]) -> dict[str, Any]:
+def provider_view(row: Mapping[str, Any], logins: Mapping[str, Mapping[str, str]] | None = None) -> dict[str, Any]:
+    """A provider; an OAuth one with the models its runtime suggests for the login (``suggested_models``) and the
+    login's state when it is known (``login``, from ``logins`` by runtime type: ``{"state", "detail"}``)."""
+    adapter = runtimes.ADAPTERS.get(row["oauth_runtime_type"] or "")
+    oauth = row["auth"] == AuthKind.OAUTH.value and adapter is not None
     return {
         "provider_id": row["id"], "name": row["name"], "protocols": list(row["protocols"]), "auth": row["auth"],
         "oauth_runtime_type": row["oauth_runtime_type"], "base_url": row["base_url"],
         "models": catalog_entries(row["models"]),
+        "suggested_models": list(adapter.login_models) if oauth and adapter else [],
+        "login": dict(logins[adapter.type]) if oauth and adapter and adapter.type in (logins or {}) else None,
         "env": list(row.get("env") or []), "max_concurrency": row["max_concurrency"],
         "api_key": SECRET_MASK if row.get("api_key_set") else None, "builtin": row["builtin"],
         "profile_count": row.get("profile_count", 0), "created_at": row["created_at"],
         "updated_at": row["updated_at"],
     }
+
+
+async def _logins(providers: Iterable[Mapping[str, Any]]) -> dict[str, dict[str, str]]:
+    """The state of each runtime login a listed OAuth provider stands for, by runtime type (Codex's:
+    ``codex_login.login_view``; Claude Code's comes from the startup self-check)."""
+    from .runtimes import codex_login
+
+    types = {row["oauth_runtime_type"] for row in providers if row["auth"] == AuthKind.OAUTH.value}
+    return {"codex": await codex_login.login_view()} if "codex" in types else {}
 
 
 def cost_basis(profile: AgentProfile) -> dict[str, Any]:
@@ -601,10 +618,12 @@ async def registry_view(*, server_claude: str = "claude") -> dict[str, Any]:
     from .runtimes.pricing import BUILTIN_PRICES, PRICE_SOURCES, PRICES_AS_OF
 
     uses = await db.profile_usage()
+    providers = await db.list_providers()
+    logins = await _logins(providers)
     return {
         "runtime_types": [type_view(a) for a in runtimes.ADAPTERS.values()],
         "runtimes": [runtime_view(r, server_claude=server_claude) for r in await db.list_runtimes()],
-        "providers": [provider_view(r) for r in await db.list_providers()],
+        "providers": [provider_view(r, logins) for r in providers],
         "profiles": [profile_view(r, uses.get(r["id"], NOT_USED)) for r in await db.list_profiles()],
         "provider_presets": presets_view(),
         "prices": {"as_of": PRICES_AS_OF, "sources": list(PRICE_SOURCES),
@@ -769,7 +788,7 @@ async def _provider_answer(provider_id: str) -> dict[str, Any]:
     from ..db import profile_registry as db
 
     rows = {r["id"]: r for r in await db.list_providers()}
-    return {"provider": provider_view(rows[provider_id])}
+    return {"provider": provider_view(rows[provider_id], await _logins([rows[provider_id]]))}
 
 
 async def create_provider(data: Any) -> dict[str, Any]:
@@ -811,6 +830,18 @@ async def update_provider(provider_id: str, data: Any) -> dict[str, Any]:
             await _check_provider_profiles(conn, {**fields, "id": provider_id})
     except asyncpg.UniqueViolationError:
         raise RegistryConflict(f"a provider named {data.get('name')!r} already exists") from None
+    return await _provider_answer(provider_id)
+
+
+async def clear_login_problem(provider_id: str) -> dict[str, Any]:
+    """Make Codex's own login available to runs again after a run found it forked: the operator has checked
+    ``codex login status`` on the machine (``codex_login.clear_problem``). The provider is one of that login."""
+    from .runtimes import codex_login
+
+    row = await _existing_provider(provider_id)
+    if row["auth"] != AuthKind.OAUTH.value or row["oauth_runtime_type"] != "codex":
+        raise RegistryError(f"provider {row['name']!r} is not the Codex login")
+    await codex_login.clear_problem()
     return await _provider_answer(provider_id)
 
 
