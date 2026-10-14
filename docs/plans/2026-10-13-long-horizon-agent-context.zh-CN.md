@@ -318,7 +318,7 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
 - **确定的做法：**
   - 一次重试只记一条 `step_retry`（理由即 Planner 的反馈），放弃记为该步骤的 `step_failed`（带 Planner 的理由）；`decision` 记 replan、聊天加步骤和到达花费上限；
   - 用户指令有自己的 8,000 字符预算，整条注入、不与其他条目争预算，只有超出这个预算时才省略最旧的并计数；交接摘要只进续接简报，不进每轮的"进度与发现"；
-  - "能否续接"由 `looper/agents/session_switch.py` 的 `agent_switch` 一处决定（M7c 交付时 M9b 尚未合入，provider 规则由 M9b 加在这里）；旧会话"可用"指它的进程还在运行，交接轮失败（如 provider 不可用）或进程已不在时只用日志；
+  - "能否续接"由 `looper/agents/session_switch.py` 的 `agent_switch` 一处决定（provider 规则由 M9b 加在这里：运行时类型和 provider 都不变才续接）；旧会话"可用"指它的进程还在运行，交接轮失败（如 provider 不可用）或进程已不在时只用日志；
   - 项目级经验在 `distill_lessons` 为 `draft` 或 `write` 时到达即进草稿（`write` 也进草稿，因为单条经验未经审阅），为 `off` 时只留在任务里；
   - Manager 续接只读网页聊天存下的消息（飞书、Telegram 的对话不入 `chat_messages`），不含任务的 Planner 线程（`planner-<task_id>`）。
 - **待办：** M9b 合入后，在 M6 加"中途换 provider"的真实评测任务并跑一次（M7c 交付时 M9b 尚未合入）。
@@ -453,6 +453,13 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
 - **范围：** 订阅 OAuth（现状）、Anthropic API key、兼容 anthropic 协议的接口（GLM、Kimi 等，经 base_url 与 key 接入）；
   用 API key 时确认不会退回订阅登录（先核实环境变量的优先级）；接第三方接口时按 provider 登记的价格计算花费。
 - **验收：** 每种 provider 各跑一次 M6 真实模式评测（需要维护者提供对应的 key），花费与 provider 价格核对一致。
+- **核实后确定的做法**（Claude Code 2.1.285 的核实结果写在多运行时 RFC 第 7、8 节）：
+  - 第三方接口的 key 放 `ANTHROPIC_AUTH_TOKEN`（GLM、DeepSeek、Kimi 文档都这样写），并去掉继承的 `ANTHROPIC_API_KEY`；
+    Anthropic 官方接口放 `ANTHROPIC_API_KEY`；`apiKeySource` 在 token 和订阅下都是 `none`，用转发代理核对请求头；
+  - 模型目录新增 `background_model`，provider 新增 `env`；内置价格表在 `runtimes/pricing.py`，预设在
+    `provider_presets.py`；一个 provider 只有一个 `base_url`，所以预设按接口（Anthropic 格式、OpenAI 格式）各建一个；
+  - 单次软上限按"一次运行"（Worker 一次、常驻会话一轮）计算，由运行记录器累加内部 `usage` 事件，供 M9c 复用；
+  - 续接规则并入 M7c 的 `session_switch.agent_switch`；M6 评测加 `--provider-preset`（key 从 `LOOPER_EVAL_API_KEY` 读）。
 
 #### M9c Codex 运行时
 
@@ -541,6 +548,10 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
 - **飞书、Telegram 的真实流量**：白名单与投递（M1.7、#26）只用本地替身验证过。
 - **agent teams**：`CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` 已作为默认环境变量下发，但没有实际拉起队友验证过。
 - **多个后台任务同时结束**的自主轮切分（#26）。
+- **DeepSeek、Kimi 和 GLM 国际站的真实 key**（M9b）：预设按官方文档填写，真实运行只覆盖了本机 CPA 和 GLM（BigModel）。
+  维护者用自己的 key 各跑一次 M6 真实评测核对：`LOOPER_EVAL_API_KEY=… python -m evals.prompt_regression run --mode real
+  --provider-preset deepseek`（或 `kimi-moonshot-cn`、`kimi-moonshot`、`glm-zai`），看任务都通过、`cost_basis` 全是
+  `provider_price`、花费与平台账单大致一致。
 - ~~**非 haiku 模型**~~（已覆盖，looper #58）：M6 真实模式评测用 sonnet（`claude-sonnet-5-5`）和 opus（`claude-opus-5-5`）各跑一次，都是 5/5、契约违约 0、Planner 改文件 0，花费 $0.62 和 $1.30（haiku 基线 $0.33）；唯一差异是 opus 在聊天纠偏任务里多加了一步（7 步对 6 步），结果与契约都正常。其余验证缺口暂不安排。
 - **项目自带的权限设置**：项目的 `.claude/settings.json` 或托管设置禁止某些工具、关闭 bypass 模式时，agent 的表现（M1.7）。
 - **插件里的 agent 和命令**：M1.6 只验证了 skill 的加载和调用。

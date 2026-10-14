@@ -1,7 +1,8 @@
 # RFC：多运行时 agent 架构（v0）
 
 - **状态：** 设计已定（[长程 Agent 上下文 RFC](long-horizon-agent-context-v0.zh-CN.md) 决策 10），M9a 已交付
-  （looper #62；与本文的出入记在开发计划 M9a 的"核实后确定的做法"）；本文是 M9 的设计依据和待决问题清单。
+  （looper #62；与本文的出入记在开发计划 M9a 的"核实后确定的做法"），M9b 已交付（第 7、8 节写明核实结果）；
+  本文是 M9 的设计依据和待决问题清单。
 - **开发计划：** [长程 Agent 上下文体系开发计划](../../plans/2026-10-13-long-horizon-agent-context.zh-CN.md) 的 M9 一节。
 - **最近更新：** 2026-10-14
 
@@ -106,7 +107,7 @@ dashboard、M2 的观测、M6 的评测和 M7 的任务日志都只认内部事�
 | 不限权限 | ✅ `--dangerously-skip-permissions` | ✅ `--dangerously-bypass-approvals-and-sandbox` | ❓ | ❓ | — | 待定 |
 | 隔离 | ✅ `--setting-sources project` 等（M1） | ❓ 独立 `CODEX_HOME`，其中有全局 `AGENTS.md`、`config.toml` 和登录 | ❓ | ❓ | — | 待定 |
 | 非 git 目录 | ✅ | ✅ 需要 `--skip-git-repo-check` | ❓ | — | — | 待定 |
-| 花费报告 | `total_cost_usd`，按 Claude 价格计算 | 只有 token 数（❓） | ❓ | ❓ | 只有 token 数 | 待定 |
+| 花费报告 | ✅ `total_cost_usd` 和 `modelUsage[*].costUSD` 一律按 Claude 价格计算（不认识的模型标 `costBasis: "unknown"`）；`modelUsage` 按模型给出四种 token，接其他 provider 时由 Looper 按 provider 价格计算 | 只有 token 数（❓） | ❓ | ❓ | 只有 token 数 | 待定 |
 | 压缩事件 | ✅ `compact_boundary` | ❓ | ❓ | ❓ | — | 待定 |
 | 自主轮（#26） | ✅ | ❓ | ❓ | ❓ | — | 待定 |
 
@@ -115,13 +116,35 @@ dashboard、M2 的观测、M6 的评测和 M7 的任务日志都只认内部事�
 ## 7. provider 绑定
 
 - **Claude Code + 订阅**：保持现状。
-- **Claude Code + API key 或兼容接口（GLM、Kimi、CPA 的 `/v1/messages` 等）**：
-  - 注入 `ANTHROPIC_BASE_URL`，以及 `ANTHROPIC_API_KEY` 或 `ANTHROPIC_AUTH_TOKEN`；
-  - 主模型用 `ANTHROPIC_MODEL` 或 `--model`；
-  - **必须同时映射后台模型**：`ANTHROPIC_DEFAULT_HAIKU_MODEL`、`ANTHROPIC_SMALL_FAST_MODEL`、
-    `ANTHROPIC_DEFAULT_SONNET_MODEL`、`ANTHROPIC_DEFAULT_OPUS_MODEL`、`CLAUDE_CODE_SUBAGENT_MODEL`。否则 Claude Code
-    做标题、摘要和子 agent 时，会拿 Claude 的模型名去请求第三方接口；
-  - 这些变量在 2.1.285 的二进制里都存在，`apiKeyHelper` 也在，具体语义和"API key 是否优先于订阅登录"在 M9b 实测。
+- **Claude Code + API key 或兼容接口（GLM、Kimi、CPA 的 `/v1/messages` 等）**，M9b 的做法：
+  - 有 `base_url`（第三方接口）：注入 `ANTHROPIC_BASE_URL` 和 `ANTHROPIC_AUTH_TOKEN`，并从继承的环境里去掉
+    `ANTHROPIC_API_KEY`；没有 `base_url` 或指向 `api.anthropic.com`（Anthropic 官方）：注入 `ANTHROPIC_API_KEY`，去掉
+    `ANTHROPIC_AUTH_TOKEN`（以及没有 `base_url` 时的 `ANTHROPIC_BASE_URL`）；
+  - 主模型用 `--model`；
+  - 第三方接口同时映射后台模型：`ANTHROPIC_DEFAULT_OPUS_MODEL`、`ANTHROPIC_DEFAULT_SONNET_MODEL`、
+    `CLAUDE_CODE_SUBAGENT_MODEL` 指向 agent 的模型，`ANTHROPIC_DEFAULT_HAIKU_MODEL`、`ANTHROPIC_SMALL_FAST_MODEL`
+    指向 provider 模型目录里这个模型的 `background_model`（没填就是模型本身）；
+  - provider 自带的环境变量（`env`，如 GLM 指南里的 `API_TIMEOUT_MS`、`CLAUDE_CODE_AUTO_COMPACT_WINDOW`）跟在后面，
+    但不能覆盖上面这些由绑定决定的变量；
+  - 密钥只在运行启动时从 `llm_provider_secrets` 读出，只进子进程环境，不进 argv、运行记录、日志和导出。
+- **核实（Claude Code 2.1.285，`--print` stream-json，2026-10-14）**：在 Anthropic 格式接口前放一个只记录模型名和
+  认证头种类的转发代理，操作者的订阅保持登录：
+  - `ANTHROPIC_API_KEY` 以 `x-api-key` 发出，init 事件 `apiKeySource` 为 `"ANTHROPIC_API_KEY"`；
+    `ANTHROPIC_AUTH_TOKEN` 以 `Authorization: Bearer` 发出，`apiKeySource` 为 `"none"`，和订阅登录时一样，所以
+    `apiKeySource` 区分不了 token 和订阅；两者都只带 key，不带订阅的 token，Claude Code 在 stderr 提示 key
+    "takes precedence over your claude.ai login"；两个变量同时设置时两个头都发；
+  - `--model` 优先于 `ANTHROPIC_MODEL`，不传 `--model` 时用 `ANTHROPIC_MODEL`；
+  - 不带模型启动的子 agent 用主模型，设置了 `CLAUDE_CODE_SUBAGENT_MODEL` 时用它；模型自己选别名（`haiku`、`sonnet`、
+    `opus`）启动的子 agent 请求这个别名对应的模型（未映射时是 `claude-haiku-4-5-20251001`，CPA 返回 400），
+    `CLAUDE_CODE_SUBAGENT_MODEL` 管不到别名，`ANTHROPIC_DEFAULT_*_MODEL` 能映射；
+  - 模型名带 `[1m]`（如 `glm-5.3[1m]`）时，请求里的模型名去掉后缀、加上 `context-1m` beta，`modelUsage` 的键仍带
+    `[1m]`；价格按去掉后缀和日期后缀的模型名查；
+  - `apiKeyHelper` 未使用。
+- **预设**：GLM（BigModel 国内、Z.ai 国际）、DeepSeek、Kimi（Moonshot 国内、国际）各带 Anthropic 格式和 OpenAI
+  格式的接口地址、常用模型、建议的后台模型和厂商 Claude Code 指南里的额外变量，均取自厂商官方文档（2026-10-14，
+  见 `provider_presets.py`）；本机 CPA 作为 OpenAI 类 provider（`openai-responses`、`openai-chat`，
+  `http://127.0.0.1:8317/v1`），也提供 Anthropic 格式接口（`http://127.0.0.1:8317`）。一个 provider 只有一个
+  `base_url`，所以从预设建 provider 时选其中一种接口。
 - **Codex + 登录**：见第 13 节 P1。
 - **Codex + API key（含 CPA）**：用 `model_providers.<id>` 配置 `base_url`、密钥所在的环境变量和 `wire_api`，经
   `-c` 或隔离目录里的 `config.toml` 传入，在 M9c 实测。
@@ -134,9 +157,9 @@ dashboard、M2 的观测、M6 的评测和 M7 的任务日志都只认内部事�
 | 组合 | 运行时 | provider | 协议 | 阶段 |
 |---|---|---|---|---|
 | Claude Code + 订阅 | claude-code | Claude 订阅（OAuth） | anthropic-messages | 已支持 |
-| Claude Code + GLM | claude-code | GLM API key | anthropic-messages | M9b |
-| Claude Code + DeepSeek | claude-code | DeepSeek API key | anthropic-messages | M9b |
-| Claude Code + Kimi 等兼容接口 | claude-code | 对应 API key | anthropic-messages | M9b |
+| Claude Code + GLM | claude-code | GLM API key | anthropic-messages | 已支持（M9b） |
+| Claude Code + DeepSeek | claude-code | DeepSeek API key | anthropic-messages | 已支持（M9b；真实 key 待维护者验证） |
+| Claude Code + Kimi 等兼容接口 | claude-code | 对应 API key | anthropic-messages | 已支持（M9b；真实 key 待维护者验证） |
 | Codex + CPA | codex | CPA（OpenAI 类 provider） | openai-responses | M9c |
 | OMP + CPA | omp | CPA | openai-responses | M9e |
 
@@ -151,6 +174,14 @@ GLM、DeepSeek 等同时提供 anthropic 和 openai 两种协议，一般配 Cla
 - **订阅类 provider**：花费是按 API 价格折算的"等价花费"，不是实际支出，界面上要区分显示。
 - **单次上限**：`--max-budget-usd` 只在 `runtime` 口径可信时使用。其他情况由 Looper 从事件流累计用量，超过上限就
   停止这次运行。这是软上限，可能多出一个请求。
+  - M9b 的做法：适配器把每个请求的 token（Claude Code 取 `message_start` 的模型和 `message_delta` 的最终用量）
+    报成内部 `usage` 事件，运行记录器按 provider 价格累加，超过 `run_budget_usd` 就停止：Worker 杀掉进程；
+    Manager、Planner 的这一轮结束并杀掉进程，会话累计值加上这一轮的花费，下一轮新起进程续接。上限按"一次运行"
+    计算（Worker 一次运行，或常驻会话的一轮）；
+  - 子 agent 的请求和 Claude Code 的后台请求不出现在事件流里，只在结果的 `modelUsage` 里，计入这次运行记下的花费，
+    不参与中途停止；
+  - 运行记下的花费取结果 `modelUsage` 里每个模型的四种 token 乘以价格；没有结果（被停止、超时）时取事件累计值；
+    缺价格的模型只记 token。
 - **任务上限**（M5）和"提高上限并继续"（#43）一律按统一口径计算。
 
 ## 9. 目录、知识与 prompt
@@ -194,8 +225,8 @@ M9b 与 M9c 并行。
 | **P2** | **其他运行时的常驻会话怎么实现还不知道。** 可能是 `exec resume`（每轮起一个进程、重新加载上下文）、`app-server`（实验性）或 `queue`。自主轮和压缩事件也可能没有对应物 | "所有运行时都支持所有角色"的工期和稳定性 | **已定（2026-10-14）：** 先用"每轮起进程 + 续接会话"（逐轮续接）；连续接都不支持的运行时，每轮开新会话，由 Looper 注入完整状态（计划、任务日志、最近对话的摘要）。M9c 第一步做技术验证，结果写回能力矩阵 |
 | **P3** | **provider 的密钥对 agent 可见。** 不限权限的 agent 能读自己的环境变量 | 密钥可能被模型写进输出或带出去 | **已定（2026-10-14）：** 近期接受，在本文写明。之后再做一个本地代理持有密钥，agent 只拿到本地地址（做法类似 CPA） |
 | **P4** | **第三方模型遵守契约、使用工具的质量参差不齐**，可能需要按模型调整 prompt | Planner、Manager 不稳定 | **已定（2026-10-14）：** 先不做按模型的 prompt 变体，所有 agent 用同一套 prompt，运行时差异放在适配器追加的"运行时说明"里；靠 M6 评测把关，评测不过的 agent 不配给 Planner 和 Manager |
-| P5 | **运行中换 agent。** 常驻会话绑定在运行时和 provider 上 | 层级或任务覆盖改了以后，Planner、Manager 可能要新开会话 | **已定（2026-10-14）：** 改配置立即生效：Worker、Reviewer 下一步就用新 agent。Planner、Manager **只有运行时类型和 provider 都不变时才续接**（例如同一订阅下换模型）；**换 provider（任意方向：订阅→API key、API key→订阅、两家 API key 之间）或换运行时，一律新开会话**，因为各 provider 协议里的字段（思考签名、tool_use id、reasoning item 等）互不兼容。新会话靠 M7 的计划状态、任务日志和 M7c 的交接摘要补回进度，任务页记一条"已更换 agent" |
-| P6 | **花费口径不一致**（见第 8 节） | 观测和上限失真 | **已定（2026-10-14）：** 随版本内置常见模型的价格表，provider 的模型目录里可以覆盖；查不到价格的模型只显示 token 数，注册 agent 时提示花费上限对它无效。订阅类 provider 一律按 API 价格折算，界面标"等价"，花费上限同样生效（防止把订阅额度耗光） |
+| P5 | **运行中换 agent。** 常驻会话绑定在运行时和 provider 上 | 层级或任务覆盖改了以后，Planner、Manager 可能要新开会话 | **已定（2026-10-14）：** 改配置立即生效：Worker、Reviewer 下一步就用新 agent。Planner、Manager **只有运行时类型和 provider 都不变时才续接**（例如同一订阅下换模型）；**换 provider（任意方向：订阅→API key、API key→订阅、两家 API key 之间）或换运行时，一律新开会话**，因为各 provider 协议里的字段（思考签名、tool_use id、reasoning item 等）互不兼容。新会话靠 M7 的计划状态、任务日志和 M7c 的交接摘要补回进度，任务页记一条"已更换 agent"。M9b 已实现：会话记下 `provider_id`，判断只在 `session_switch.agent_switch`（`runtimes.can_resume`）一处 |
+| P6 | **花费口径不一致**（见第 8 节） | 观测和上限失真 | **已定（2026-10-14）：** 随版本内置常见模型的价格表，provider 的模型目录里可以覆盖；查不到价格的模型只显示 token 数，注册 agent 时提示花费上限对它无效。订阅类 provider 一律按 API 价格折算，界面标"等价"，花费上限同样生效（防止把订阅额度耗光）。M9b 已实现：价格表在 `runtimes/pricing.py`（Claude、GPT、GLM、DeepSeek、Kimi，官方美元标价，2026-10-14） |
 | P7 | **effort 档位不对应。** Claude 是 low/medium/high/xhigh，OpenAI 是 minimal/low/medium/high | 分层配置里的 effort 含义不清 | 适配器里维护映射表；provider 的模型目录声明支持哪些档位，不支持的给出提示 |
 | P8 | **并发与限流** | 某个 provider 被打满（比如 CPA 自身的并发限制） | **已定（2026-10-14）：** 默认不设上限，与现在一致；需要时在 provider 上设置，超出的排队等待，不会失败 |
 | P9 | **目录跨运行时**：Claude 插件和 Codex 插件格式不同；`SKILL.md` 是否通用还要核实 | 装了的 skill 在某些运行时上加载不了 | **已定（2026-10-14）：** 能转换就转换（MCP 翻译成对应格式，运行时原生支持的 skill 按它的格式挂载）；转换不了的 skill 降为可读文档：像项目知识一样只读挂载，并在 prompt 里给出"可用 skill：名称、描述、路径"的索引，由模型按需读取；插件里的 hook、命令等无法转换的部分跳过，并记在运行记录里。目录界面显示每个条目兼容哪些运行时 |
