@@ -5,6 +5,17 @@ export interface SystemStatus {
   agents: Record<string, { healthy: boolean; agent_id: string }>;
   channels: Record<string, unknown>;
   uptime: number;
+  /** The startup self-check, as `loopx doctor` prints it. */
+  checks?: SelfCheck[];
+}
+
+/** One startup check; "skip" means not checked, with the reason in `detail`. */
+export interface SelfCheck {
+  id: string;
+  label: string;
+  status: "ok" | "warn" | "fail" | "skip";
+  detail: string;
+  fix: string;
 }
 
 export interface TaskInfo {

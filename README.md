@@ -80,6 +80,9 @@ uv sync
 cd web && npm install && npx vite build && cd ..
 ```
 
+Then run `uv run loopx doctor`. It checks PostgreSQL, the Claude CLI and its
+login, and the enabled channels, and prints the fix for anything missing.
+
 ### 3. Run
 
 ```bash
@@ -138,7 +141,7 @@ release wheel serves the copy packaged with it.
 
 | Endpoint | Method | Purpose |
 |---|---|---|
-| `/api/status` | GET | System health |
+| `/api/status` | GET | System health and the startup self-check (`checks`) |
 | `/api/tasks` | GET | List tasks |
 | `/api/tasks/create` | POST | Create task (init status); `work_dir` is required |
 | `/api/tasks/:id` | GET | Task detail with steps |

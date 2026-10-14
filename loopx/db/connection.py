@@ -36,10 +36,15 @@ def _load_env() -> None:
         os.environ.setdefault(key, value)
 
 
+def configured_dsn() -> str:
+    """The database LoopX uses: ``LOOPX_DATABASE_URL`` (from the environment or .env), else the default."""
+    _load_env()
+    return os.environ.get("LOOPX_DATABASE_URL", DEFAULT_DSN)
+
+
 async def init_pool(dsn: str | None = None, *, min_size: int = 2, max_size: int = 10) -> asyncpg.Pool:
     global _pool
-    _load_env()
-    dsn = dsn or os.environ.get("LOOPX_DATABASE_URL", DEFAULT_DSN)
+    dsn = dsn or configured_dsn()
     _pool = await asyncpg.create_pool(dsn, min_size=min_size, max_size=max_size)
     logger.info("database pool created (%s connections)", max_size)
     return _pool
