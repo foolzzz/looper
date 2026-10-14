@@ -115,6 +115,9 @@ ALTER TABLE agent_sessions ADD COLUMN IF NOT EXISTS session_agent_id TEXT;
 -- the same provider (runtimes.can_resume). NULL: a session from before this column, run with Claude Code's own
 -- login.
 ALTER TABLE agent_sessions ADD COLUMN IF NOT EXISTS provider_id TEXT;
+-- The user dropped the session (/new in a chat with the Manager): the next session starts clean, without the
+-- resume brief a new session otherwise gets. Cleared once that session has started.
+ALTER TABLE agent_sessions ADD COLUMN IF NOT EXISTS clean_start BOOLEAN NOT NULL DEFAULT false;
 
 -- A task's journal: what happened in it that a later agent or session needs.
 -- Code writes an entry, never the model, when its event happens: a step
