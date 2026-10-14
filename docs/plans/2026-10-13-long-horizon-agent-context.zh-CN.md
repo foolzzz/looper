@@ -8,16 +8,16 @@
 
 ## 1. 工作方式
 
-1. **一个阶段一个 PR。** 每个阶段都是可以独立评审、独立回滚的交付；阶段之间按依赖顺序推进，前一个合入后再开下一个。
-2. **测试先行。** 新测试必须先在当前 `main` 上失败，再实现。
-3. **真实路径验收。** 除单测外，每个阶段都要：
-   - 用一次性数据库跑一遍 `loopx serve`；
-   - 涉及模型可见内容（prompt、契约、注入）的改动，用真实 Claude 至少跑一次；
-   - 涉及界面的改动，用无头 Chrome 截图自查。
-4. **合入后部署。** 合入后同步本机 `main`，前端有改动就重新构建 `web/dist`，然后只按端口重启本机服务（8767）。
-5. **更新本文。** 每个阶段交付后，在第 4 节进度台账记一行，并更新第 2 节的状态列。
-6. **核心优先。** 每个阶段只做核心：后端、agent 行为、能用的最小界面（能配置、能看到结果）。可视化、交互细节、
-   界面美化和"顺手加上"的辅助功能记入第 5 节的"非核心待办"，M6 之后统一做（2026-10-13 起执行，M3 开始适用）。
+1. **一个阶段一个 PR。** 每个阶段都可以独立评审、独立回滚。没有依赖关系的阶段可以并行；开 PR 前先合入最新的 `main`。
+2. **修缺陷先复现。** 修缺陷时先写出能复现它的测试；新功能不必证明测试在 `main` 上失败。
+3. **开 PR 前在本地跑一次裸 `pytest`。** 用 `LOOPX_TEST_DATABASE_URL` 指向一个新建的数据库，约 1 分钟，这就是合入的门槛。CI 也会在每个 PR 上跑，但合入不等它。
+4. **一条规则一个测试。** 测在离用户入口最近的那一层。不钉文案（文案本身就是契约时除外），不测 mock 的调用链，变体用参数化。
+5. **真实 Claude 只在改动 prompt、契约或注入方式时跑。** 用 haiku 跑一个最小场景，花费不超过 $0.5。
+6. **截图只在界面改动时做，一张即可。**
+7. **文档从简。** 每个阶段交付后在第 4 节记一行（不超过 3 句），并更新第 2 节的状态列；`agent-system.md` 只在架构变化时改。
+8. **合入后部署。** 合入后同步本机 `main`，前端有改动就重新构建 `web/dist`，然后只按端口重启本机服务（8767）。
+9. **核心优先。** 每个阶段只做核心：后端、agent 行为、能用的最小界面（能配置、能看到结果）。可视化、交互细节、
+   界面美化和"顺手加上"的辅助功能记入第 5 节的"非核心待办"，M6 之后统一做。
 
 ## 2. 阶段总览
 
@@ -291,7 +291,6 @@
 
 ### 5.2 工程待办
 
-- **`test_planner_agent.py::TestPlanning::test_turn_over_the_time_limit_fails_planning` 偶发失败**：`-n 6` 下失败过一次，重跑通过（上游清理盘点时发现）。它给 Planner 的时限只有 3 秒（`timeout_seconds: 3`），机器繁忙时替身进程可能来不及启动。
 - **知识索引容量**：索引每行都带一个绝对路径（在 `~/.loopx` 下约 150 字），4,000 字的索引上限实际只能放 15–25 篇，比 100 篇的数量上限先用完。改用短的挂载别名或相对路径（M3 发现）。
 - **runtime root 下的只读副本不清理**：插件与 skill 库（M1.6）、项目知识（M3）和项目 skill（M4）按内容哈希写出的只读副本，在内容替换或删除后仍留在磁盘上。需要在没有运行引用时回收。
 - **HTTP 服务没有请求体大小上限**：知识上传等接口靠业务上限拦截，但服务本身不限制请求体大小（M3 发现）。
@@ -337,7 +336,7 @@
 维护者的决定：
 
 - 安装和升级只走 `install.sh`（安装 Release 的 wheel），升级就是重新运行它。删除 `loopx update` 和 `loopx init`（B1）；`scripts/install-from-github.sh` 和 `scripts/install-local.sh` 在 B3 删除。
-- `AGENTS.md`、`CONTRIBUTING.md` 在 B4 改写成精简的 fork 版本：保留 `codex/` 分支上的 worktree + PR、DCO（`git commit -s`）、公开/私有边界、核心优先、测试先行、真实路径验收和首屏预览；删掉依赖被删工具的规则（`loopx canary premerge`、`loopx pr-review`、self-repair skill、benchmark smoke、control plane 细则）。
+- `AGENTS.md`、`CONTRIBUTING.md` 在 B4 改写成精简的 fork 版本：保留 `codex/` 分支上的 worktree + PR、DCO（`git commit -s`）、公开/私有边界、核心优先、第 1 节的测试与验收规则和首屏预览；删掉依赖被删工具的规则（`loopx canary premerge`、`loopx pr-review`、self-repair skill、benchmark smoke、control plane 细则）。
 - `README.zh-CN.md` 在 B4 改写为 fork `README.md` 的中文版，首屏提交前请维护者预览。
 - `docs/fork/**` 在 B4 删除，CHANGELOG 指向 `docs/fork/usage.md` 的链接改指 `docs/architecture/agent-system.md`。
 - 默认做法（B4）：发布正文检查只保留中英双语检查，去掉上游文档检查；`docs/design.md` 作为 `web/` 的设计参考，并入 `docs/development/design.md` 里通用的 UI 规则；治理文件（CODEOWNERS、SECURITY、SUPPORT、CODE_OF_CONDUCT、issue 模板）指向 `foolzzz/looper` 和 `@foolzzz`，删除上游的联系邮箱。

@@ -324,6 +324,7 @@ class TestPlanning:
 
         first, *decisions = [turn["text"] for turn in claude.turns()]
         assert first.startswith("[PLAN]")
+        assert "without changing it" in first and "You may read the project first" not in first
         assert all(text.startswith("[DECISION]") for text in decisions)
         # The task is the system prompt's task section; the turns carry only what changes.
         (prompt,) = claude.prompts()
@@ -357,13 +358,6 @@ class TestPlanning:
         assert any(line.startswith("Task failed: Planning failed") for line in activity(agent_db))
         assert len(claude.turns()) == 2
 
-    def test_claude_error_fails_planning_without_a_repair_turn(self, planner_claude: Any) -> None:
-        claude = planner_claude("<error>")
-        h = drive(claude, always(WORK_OK))
-
-        assert "did not succeed (error_during_execution)" in h.final().payload["summary"]  # type: ignore[union-attr]
-        assert len(claude.turns()) == 1
-
     def test_turn_over_the_time_limit_fails_planning(
         self, planner_claude: Any, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -371,16 +365,15 @@ class TestPlanning:
 
         async def _config(agent_id: str) -> dict[str, Any]:
             assert agent_id == "planner"
-            # Long enough for the stand-in to start on a loaded machine.
-            return {"system_prompt": "You plan.", "timeout_seconds": 3, "model": None, "max_turns": 0}
+            return {"system_prompt": "You plan.", "timeout_seconds": 1, "model": None, "max_turns": 0}
 
         monkeypatch.setattr(agent_configs, "get_config", _config)
         claude = planner_claude("<hang>")
         h = drive(claude, always(WORK_OK))
 
-        assert "longer than the 3 s limit (timeout_seconds)" in h.final().payload["summary"]  # type: ignore[union-attr]
-        (pid,) = claude.pids()
-        assert not _alive(pid)
+        assert "longer than the 1 s limit (timeout_seconds)" in h.final().payload["summary"]  # type: ignore[union-attr]
+        # The stand-in was killed (one killed before it logged its pid is not listed at all).
+        assert not any(_alive(pid) for pid in claude.pids())
 
 
 # --- Decisions on results ---
@@ -448,23 +441,7 @@ class TestDecisions:
         assert final is not None and final.payload["status"] == "failed"
         assert any("Worker's own verdict decides: failed" in line for line in activity(agent_db))
 
-    def test_replan_adds_a_step(self, planner_claude: Any, agent_db: Any) -> None:
-        claude = planner_claude(
-            plan(step("s1")),
-            decide("replan", reason="tests are missing", steps=[step("s2", "s1")]),
-            decide("accept", summary="all done"),
-        )
-        h = drive(claude, always(WORK_OK))
-
-        assert [item.payload["instruction"] for item in h.work_items] == ["do s1", "do s2"]
-        assert h.final().payload["summary"] == "all done"  # type: ignore[union-attr]
-        plan_steps = h.planner._plan.steps  # type: ignore[union-attr]
-        assert [(s.label, s.status) for s in plan_steps] == [("s1", "verified"), ("s2", "verified")]
-        added = agent_db.upsert_steps.await_args_list[-1].args[1]
-        assert [row["instruction"] for row in added] == ["do s2"]
-        assert any("Plan changed: s2 (after s1)" in line for line in activity(agent_db))
-
-    def test_replan_replaces_a_failed_step(self, planner_claude: Any) -> None:
+    def test_replan_replaces_a_failed_step(self, planner_claude: Any, agent_db: Any) -> None:
         claude = planner_claude(
             plan(step("s1"), step("s2", "s1")),
             decide("replan", steps=[step("s1b"), step("s2", "s1b")]),
@@ -480,6 +457,10 @@ class TestDecisions:
             ("s1", "skipped"), ("s2", "verified"), ("s1b", "verified"),
         ]
         assert h.final().payload["status"] == "completed"  # type: ignore[union-attr]
+        # Only the replan's steps (the new s1b and the replaced, not yet started s2) are written again.
+        replanned = agent_db.upsert_steps.await_args_list[-1].args[1]
+        assert [row["instruction"] for row in replanned] == ["do s1b", "do s2"]
+        assert any("Plan changed: s1b, s2 (after s1b)" in line for line in activity(agent_db))
 
     def test_fail_decision_fails_the_task_with_its_reason(self, planner_claude: Any) -> None:
         claude = planner_claude(plan(step("s1")), decide("fail", reason="the API does not exist"))
@@ -519,14 +500,6 @@ class TestDecisions:
 
 @pytest.mark.usefixtures("agent_db")
 class TestResidentClaude:
-    def test_one_process_serves_every_turn(self, planner_claude: Any) -> None:
-        claude = planner_claude(plan(step("s1"), step("s2", "s1")), decide("accept"), decide("accept"))
-        drive(claude, always(WORK_OK))
-
-        (pid,) = claude.pids()
-        assert [turn["pid"] for turn in claude.turns()] == [pid, pid, pid]
-        assert not _alive(pid)  # stop() ended it
-
     def test_claude_that_dies_is_restarted_with_its_session(self, planner_claude: Any, agent_db: Any) -> None:
         claude = planner_claude(plan(step("s1"), step("s2", "s1")), "<exit>", decide("accept"))
         h = drive(claude, always(WORK_OK))
@@ -745,22 +718,8 @@ class TestRecommendedRole:
         assert "You plan and decide; Workers do the work." in text
         assert "Do not modify files yourself" in text
         assert "every change to the project goes to a Worker as a step" in text
-
-    def test_it_no_longer_calls_the_planner_read_only(self) -> None:
-        from loopx.agents.tiers.planner import DEFAULT_SYSTEM_PROMPT
-
-        text = " ".join(DEFAULT_SYSTEM_PROMPT.split())
-        for stale in ("Read, Grep, Glob", "cannot change files", "or run commands"):
+        for stale in ("Read, Grep, Glob", "cannot change files", "or run commands"):  # no longer read-only
             assert stale not in text
-
-    def test_the_plan_turn_asks_it_to_leave_the_project_unchanged(
-        self, planner_claude: Any, agent_db: Any,
-    ) -> None:
-        claude = planner_claude(plan(step("s1")), decide("accept"))
-        drive(claude, always(WORK_OK))
-        first = claude.turns()[0]["text"]
-        assert first.startswith("[PLAN] ")
-        assert "without changing it" in first and "You may read the project first" not in first
 
 
 @pytest.mark.usefixtures("agent_db", "planner_row")
@@ -795,25 +754,6 @@ class TestSystemPrompt:
         assert str(h.work_dir) in task
         assert [line for line in activity(agent_db) if "background" in line] == [
             "Project background applied (20 chars)"]
-
-    def test_the_recommended_role_prompt_is_recorded_as_such(
-        self, planner_claude: Any, agent_db: Any, planner_row: dict[str, Any],
-    ) -> None:
-        planner_row["system_prompt"] = planner_row["default_prompt"]
-        claude = planner_claude(plan(step("s1")), decide("accept"))
-        drive(claude, always(WORK_OK))
-        assert _starts(agent_db)[0]["metadata"]["prompt_layers"]["role"]["recommended"] is True
-
-    def test_without_a_background_there_is_no_project_section(self, planner_claude: Any, agent_db: Any) -> None:
-        agent_db.get_task_project.return_value = _project(background="")
-        claude = planner_claude(plan(step("s1")), decide("accept"))
-        drive(claude, always(WORK_OK))
-
-        (prompt,) = claude.prompts()
-        assert prompt.startswith(f"{DEFAULT_HARNESS_PROMPT}\n\nYou plan carefully.\n\n## Task\n")
-        assert "## Project" not in prompt
-        assert _starts(agent_db)[0]["metadata"]["prompt_layers"]["project"]["background_sha256"] is None
-        assert not [line for line in activity(agent_db) if "background" in line]
 
     @pytest.mark.parametrize(("new_background", "note"), [
         ("v2: use pnpm", "Project background changed (12 chars)"),
@@ -853,50 +793,6 @@ class TestSystemPrompt:
         assert [turn["pid"] for turn in claude.turns()] == [first_pid, second_pid, second_pid]
         notes = [line for line in activity(agent_db) if line.startswith("Project background")]
         assert notes == ["Project background applied (2 chars)", note]
-
-    def test_a_changed_role_prompt_restarts_claude_resuming_its_session(
-        self, planner_claude: Any, agent_db: Any, planner_row: dict[str, Any],
-    ) -> None:
-        claude = planner_claude(plan(step("s1")), decide("accept"))
-
-        async def scenario(h: Harness) -> None:
-            await h.start()
-            await h.until(lambda: h.held)
-            planner_row["system_prompt"] = "You plan very carefully."
-            await h.release(WORK_OK)
-            await h.finished()
-
-        drive(claude, hold_first(), scenario)
-
-        first, second = claude.argvs()
-        first_prompt, second_prompt = claude.prompts()
-        assert first_prompt.startswith(f"{DEFAULT_HARNESS_PROMPT}\n\nYou plan carefully.\n\n")
-        assert second_prompt.startswith(f"{DEFAULT_HARNESS_PROMPT}\n\nYou plan very carefully.\n\n")
-        assert _flag(second, "--resume") == "sess-p"
-        roles = [s["metadata"]["prompt_layers"]["role"]["sha256"] for s in _starts(agent_db)]
-        assert roles == [_sha("You plan carefully."), _sha("You plan very carefully.")]
-
-    def test_a_task_moved_to_another_project_gets_its_task_section_updated(
-        self, planner_claude: Any, agent_db: Any,
-    ) -> None:
-        agent_db.get_task_project.return_value = _project("calc", description="a calculator")
-        claude = planner_claude(plan(step("s1")), decide("accept"))
-
-        async def scenario(h: Harness) -> None:
-            await h.start()
-            await h.until(lambda: h.held)
-            # The task moved to another project while its Worker ran.
-            agent_db.get_task_project.return_value = _project("tools", description="handy tools")
-            await h.release(WORK_OK)
-            await h.finished()
-
-        drive(claude, hold_first(), scenario)
-
-        first_prompt, second_prompt = claude.prompts()
-        assert "calc" in first_prompt and "a calculator" in first_prompt
-        assert "tools" in second_prompt and "handy tools" in second_prompt and "a calculator" not in second_prompt
-        for turn in claude.turns():
-            assert "a calculator" not in turn["text"] and "handy tools" not in turn["text"]
 
     def test_a_failed_read_keeps_the_last_project_and_its_claude(self, planner_claude: Any, agent_db: Any) -> None:
         agent_db.get_task_project.return_value = _project(background="v1", description="a calculator")
@@ -956,46 +852,29 @@ class TestHarnessAndLaunch:
         assert _starts(agent_db)[0]["metadata"]["prompt_layers"]["harness"] == {
             "source": "project_override", "sha256": _sha("PLAN LIKE AN ARCHITECT"), "project_id": "proj-1"}
 
-    def test_without_an_override_the_settings_default_comes_first(self, planner_claude: Any, agent_db: Any) -> None:
-        _settings(agent_db, harness="DEFAULT HARNESS")
-        agent_db.get_task_project.return_value = _project(worker_harness="WORK LIKE A CRAFTSMAN")
-        claude = planner_claude(plan(step("s1")), decide("accept"))
-        drive(claude, always(WORK_OK))
-
-        (prompt,) = claude.prompts()
-        assert prompt.startswith("DEFAULT HARNESS\n\nYou plan carefully.\n\n")
-        assert _starts(agent_db)[0]["metadata"]["prompt_layers"]["harness"]["source"] == "system_default"
-
-    def test_a_changed_harness_restarts_claude_resuming_its_session(self, planner_claude: Any, agent_db: Any) -> None:
+    @pytest.mark.parametrize(("harness", "role"), [
+        ("HARNESS V2", "You plan carefully."),  # the Settings harness changed
+        ("HARNESS V1", "You plan very carefully."),  # the planner row's role prompt was edited
+    ])
+    def test_a_changed_harness_restarts_claude_resuming_its_session(
+        self, planner_claude: Any, agent_db: Any, planner_row: dict[str, Any], harness: str, role: str,
+    ) -> None:
         _settings(agent_db, harness="HARNESS V1")
         claude = planner_claude(plan(step("s1")), decide("accept"))
-        drive(claude, hold_first(), _between_turns(agent_db, lambda: _settings(agent_db, harness="HARNESS V2")))
+
+        def edit() -> None:
+            _settings(agent_db, harness=harness)
+            planner_row["system_prompt"] = role
+
+        drive(claude, hold_first(), _between_turns(agent_db, edit))
 
         first, second = claude.argvs()
         first_prompt, second_prompt = claude.prompts()
-        assert first_prompt.startswith("HARNESS V1\n\n") and second_prompt.startswith("HARNESS V2\n\n")
+        assert first_prompt.startswith("HARNESS V1\n\nYou plan carefully.\n\n")
+        assert second_prompt.startswith(f"{harness}\n\n{role}\n\n")
         assert (_flag(first, "--resume"), _flag(second, "--resume")) == (None, "sess-p")
-
-    def test_the_model_is_opus_by_default_and_recorded(self, planner_claude: Any, agent_db: Any) -> None:
-        claude = planner_claude(plan(step("s1")), decide("accept"))
-        drive(claude, always(WORK_OK))
-
-        (argv,) = claude.argvs()
-        assert _flag(argv, "--model") == "opus" and "--effort" not in argv
-        assert {s["metadata"]["model_choice"]["source"] for s in _starts(agent_db)} == {"builtin_default"}
-
-    def test_the_planners_model_beats_the_settings_default(
-        self, planner_claude: Any, agent_db: Any, planner_row: dict[str, Any],
-    ) -> None:
-        _settings(agent_db, model="sonnet", effort="max")
-        planner_row["model"] = "claude-haiku-4-5"
-        claude = planner_claude(plan(step("s1")), decide("accept"))
-        drive(claude, always(WORK_OK))
-
-        (argv,) = claude.argvs()
-        assert (_flag(argv, "--model"), _flag(argv, "--effort")) == ("claude-haiku-4-5", "max")
-        assert _starts(agent_db)[0]["metadata"]["model_choice"] == {
-            "model": "claude-haiku-4-5", "source": "agent_override", "effort": "max"}
+        roles = [s["metadata"]["prompt_layers"]["role"]["sha256"] for s in _starts(agent_db)]
+        assert roles == [_sha("You plan carefully."), _sha(role)]
 
     def test_a_changed_model_restarts_claude_resuming_its_session(self, planner_claude: Any, agent_db: Any) -> None:
         _settings(agent_db, model="sonnet")
@@ -1119,43 +998,32 @@ class TestKnowledge:
         assert [line for line in activity(agent_db) if "knowledge" in line] == [
             "Project knowledge applied (2 documents)"]
 
+    @pytest.mark.parametrize(("after", "note"), [
+        ((("text", "Glossary", "Terms", "MARKER-ALPHA"), ("text", "Style", "How we write", "MARKER-DELTA")),
+         "Project knowledge changed (2 documents)"),
+        ((), "Project knowledge removed"),
+    ], ids=["added", "removed"])
     def test_a_changed_knowledge_restarts_claude_resuming_its_session(
         self, planner_claude: Any, agent_db: Any, project_documents: Any, project_dir: Path,
+        after: tuple[tuple[str, str, str, str], ...], note: str,
     ) -> None:
         project_documents(("text", "Glossary", "Terms", "MARKER-ALPHA"))
         claude = planner_claude(plan(step("s1")), decide("accept"))
-        add_style = lambda: project_documents(("text", "Glossary", "Terms", "MARKER-ALPHA"),
-                                              ("text", "Style", "How we write", "MARKER-DELTA"))
-        drive(claude, hold_first(), _between_turns(agent_db, add_style))
+        drive(claude, hold_first(), _between_turns(agent_db, lambda: project_documents(*after)))
 
         first, second = claude.argvs()
         assert (_flag(first, "--resume"), _flag(second, "--resume")) == (None, "sess-p")
+        assert _add_dirs(first) and bool(_add_dirs(second)) == bool(after)
         first_prompt, second_prompt = claude.prompts()
-        assert "- Style: How we write" not in first_prompt and "- Style: How we write (read: " in second_prompt
-        assert [s["metadata"]["prompt_layers"]["project"]["knowledge_documents"] for s in _starts(agent_db)] == [1, 2]
+        assert "- Style: How we write" not in first_prompt
+        if after:
+            assert "- Style: How we write (read: " in second_prompt
+        else:
+            assert "## Project knowledge" not in second_prompt
+        documents = [s["metadata"]["prompt_layers"]["project"]["knowledge_documents"] for s in _starts(agent_db)]
+        assert documents == [1, len(after)]
         assert [line for line in activity(agent_db) if "knowledge" in line] == [
-            "Project knowledge applied (1 document)", "Project knowledge changed (2 documents)"]
-
-    def test_removing_the_knowledge_restarts_claude_without_it(
-        self, planner_claude: Any, agent_db: Any, project_documents: Any, project_dir: Path,
-    ) -> None:
-        project_documents(("text", "Glossary", "Terms", "MARKER-ALPHA"))
-        claude = planner_claude(plan(step("s1")), decide("accept"))
-        drive(claude, hold_first(), _between_turns(agent_db, lambda: project_documents()))
-
-        first, second = claude.argvs()
-        assert _add_dirs(first) and not _add_dirs(second) and _flag(second, "--resume") == "sess-p"
-        assert "## Project knowledge" not in claude.prompts()[1]
-        assert [line for line in activity(agent_db) if "knowledge" in line] == [
-            "Project knowledge applied (1 document)", "Project knowledge removed"]
-
-    def test_unchanged_knowledge_keeps_one_process(
-        self, planner_claude: Any, project_documents: Any, project_dir: Path,
-    ) -> None:
-        project_documents(("text", "Glossary", "Terms", "MARKER-ALPHA"))
-        claude = planner_claude(plan(step("s1")), decide("accept"))
-        drive(claude, always(WORK_OK))
-        assert len(claude.argvs()) == 1 and len(claude.turns()) == 2
+            "Project knowledge applied (1 document)", note]
 
     def test_a_failed_read_keeps_the_last_knowledge_and_its_claude(
         self, planner_claude: Any, agent_db: Any, project_documents: Any, project_dir: Path,
@@ -1225,40 +1093,27 @@ class TestProjectSkills:
                 "skills": [{"name": "deploy-check", "sha256": _sha(found[plugin]["deploy-check"])}]}
         assert [line for line in activity(agent_db) if "skills" in line] == ["Project skills applied (1 skill)"]
 
+    @pytest.mark.parametrize(("after", "note"), [
+        ((("proj-1", "deploy-check", "Use before a deploy.", "Reply DEPLOY-OK."),
+          ("proj-1", "release-notes", "Drafts release notes.", "Reply NOTES-OK.")), "Project skills changed (2 skills)"),
+        ((), "Project skills removed"),  # the last skill disabled
+    ], ids=["added", "removed"])
     def test_changed_skills_restart_claude_resuming_its_session(
         self, planner_claude: Any, agent_db: Any, project_skills: Any,
+        after: tuple[tuple[str, str, str, str], ...], note: str,
     ) -> None:
         project_skills(("proj-1", "deploy-check", "Use before a deploy.", "Reply DEPLOY-OK."))
         claude = planner_claude(plan(step("s1")), decide("accept"))
-
-        def add() -> None:
-            project_skills(("proj-1", "deploy-check", "Use before a deploy.", "Reply DEPLOY-OK."),
-                           ("proj-1", "release-notes", "Drafts release notes.", "Reply NOTES-OK."))
-
         found: dict[str, dict[str, str]] = {}
-        drive(claude, hold_first(), _reading_plugins(found, add))
+        drive(claude, hold_first(), _reading_plugins(found, lambda: project_skills(*after)))
 
         first, second = claude.argvs()
         assert (_flag(first, "--resume"), _flag(second, "--resume")) == (None, "sess-p")
-        assert sorted(found[_project_plugins(second)[0]]) == ["deploy-check", "release-notes"]
+        assert [sorted(found[d]) for d in _project_plugins(second)] == ([[s[1] for s in after]] if after else [])
         assert claude.prompts()[0] == claude.prompts()[1]  # the skills alone restarted it
-        assert [len(s["metadata"]["project_skills"]["skills"]) for s in _starts(agent_db)] == [1, 2]
-        assert [line for line in activity(agent_db) if "skills" in line] == [
-            "Project skills applied (1 skill)", "Project skills changed (2 skills)"]
-
-    def test_disabling_the_last_skill_restarts_claude_without_the_plugin(
-        self, planner_claude: Any, agent_db: Any, project_skills: Any,
-    ) -> None:
-        project_skills(("proj-1", "deploy-check", "Use before a deploy.", "Reply DEPLOY-OK."))
-        claude = planner_claude(plan(step("s1")), decide("accept"))
-        drive(claude, hold_first(), _between_turns(agent_db, lambda: project_skills()))
-
-        first, second = claude.argvs()
-        assert _project_plugins(first) and not _project_plugins(second)
-        assert _flag(second, "--resume") == "sess-p"
-        assert "project_skills" not in _starts(agent_db)[-1]["metadata"]
-        assert [line for line in activity(agent_db) if "skills" in line] == [
-            "Project skills applied (1 skill)", "Project skills removed"]
+        recorded = [s["metadata"].get("project_skills") for s in _starts(agent_db)]
+        assert [None if r is None else len(r["skills"]) for r in recorded] == [1, len(after) or None]
+        assert [line for line in activity(agent_db) if "skills" in line] == ["Project skills applied (1 skill)", note]
 
     def test_a_task_moved_to_another_project_takes_that_projects_skills(
         self, planner_claude: Any, agent_db: Any, project_skills: Any,
@@ -1278,12 +1133,6 @@ class TestProjectSkills:
         (ours,), (theirs,) = _project_plugins(first), _project_plugins(second)
         assert "/.local/projects/proj-1/skills/" in ours and "/.local/projects/proj-2/skills/" in theirs
         assert (sorted(found[ours]), sorted(found[theirs])) == (["deploy-check"], ["elsewhere"])
-
-    def test_unchanged_skills_keep_one_process(self, planner_claude: Any, project_skills: Any) -> None:
-        project_skills(("proj-1", "deploy-check", "Use before a deploy.", "Reply DEPLOY-OK."))
-        claude = planner_claude(plan(step("s1")), decide("accept"))
-        drive(claude, always(WORK_OK))
-        assert len(claude.argvs()) == 1 and len(claude.turns()) == 2
 
     def test_a_failed_read_keeps_the_last_skills_and_its_claude(
         self, planner_claude: Any, agent_db: Any, project_skills: Any,

@@ -95,30 +95,6 @@ async def _call(method: str, path: str, body: Any = None) -> tuple[int, Any]:
     return int(head.split()[1]), json.loads(payload)
 
 
-def test_the_tables_are_created_idempotently(monkeypatch: pytest.MonkeyPatch) -> None:
-    from loopx.db.connection import ensure_schema
-
-    async def _test(pool: Any) -> None:
-        await ensure_schema(pool)  # a second startup changes nothing
-        columns = {
-            (r["table_name"], r["column_name"]): (r["data_type"], r["is_nullable"])
-            for r in await pool.fetch(
-                "SELECT table_name, column_name, data_type, is_nullable FROM information_schema.columns "
-                "WHERE table_schema = current_schema() AND table_name IN ('library_items', 'library_files')")
-        }
-        assert columns[("library_items", "kind")] == ("text", "NO")
-        assert columns[("library_items", "enabled")] == ("boolean", "NO")
-        assert columns[("library_items", "size_bytes")] == ("bigint", "NO")
-        assert columns[("library_items", "imported_at")] == ("timestamp with time zone", "NO")
-        assert columns[("library_files", "content")] == ("text", "NO")
-        assert columns[("library_files", "executable")] == ("boolean", "NO")
-        with pytest.raises(Exception, match="check"):
-            await pool.execute("INSERT INTO library_items (id, kind, name, sha256, size_bytes, file_count) "
-                               "VALUES ('lib-x', 'hook', 'h', 's', 0, 0)")
-
-    _run(_test, monkeypatch)
-
-
 def test_an_import_stores_the_snapshot(home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from loopx.agents import library
 

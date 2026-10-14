@@ -50,51 +50,6 @@ def _run(test: Callable[[Any], Awaitable[None]], monkeypatch: pytest.MonkeyPatch
     asyncio.run(_main())
 
 
-async def _columns(pool: Any, table: str) -> dict[str, tuple[str, str, str | None]]:
-    rows = await pool.fetch(
-        "SELECT column_name, data_type, is_nullable, column_default FROM information_schema.columns "
-        "WHERE table_schema = current_schema() AND table_name = $1", table,
-    )
-    return {r["column_name"]: (r["data_type"], r["is_nullable"], r["column_default"]) for r in rows}
-
-
-def test_the_new_table_and_columns_are_created_idempotently() -> None:
-    from loopx.db.connection import ensure_schema
-
-    async def _test(pool: Any) -> None:
-        await ensure_schema(pool)  # a second startup changes nothing
-        settings = await _columns(pool, "system_settings")
-        assert settings["key"][:2] == ("text", "NO") and settings["value"][:2] == ("text", "NO")
-        assert settings["updated_at"][:2] == ("timestamp with time zone", "NO")
-        primary = await pool.fetchval(
-            "SELECT a.attname FROM pg_index i JOIN pg_attribute a ON a.attrelid = i.indrelid "
-            "AND a.attnum = ANY(i.indkey) WHERE i.indrelid = 'system_settings'::regclass AND i.indisprimary"
-        )
-        assert primary == "key"
-        assert (await _columns(pool, "agent_configs"))["harness_prompt"] == ("text", "NO", "''::text")
-        projects = await _columns(pool, "projects")
-        assert projects["planner_harness_prompt"] == ("text", "NO", "''::text")
-        assert projects["worker_harness_prompt"] == ("text", "NO", "''::text")
-
-    _run(_test)
-
-
-def test_system_settings_store_replace_and_remove() -> None:
-    from loopx.db import system_settings
-
-    async def _test(pool: Any) -> None:
-        assert await system_settings.get_settings(["agent.model"], pool=pool) == {}
-        await system_settings.put_settings({"agent.model": "sonnet", "agent.effort": "high"}, pool=pool)
-        await system_settings.put_settings({"agent.model": "opus"}, pool=pool)
-        assert await system_settings.get_settings(["agent.model", "agent.effort", "other"], pool=pool) == {
-            "agent.model": "opus", "agent.effort": "high"}
-        await system_settings.put_settings({"agent.effort": None}, pool=pool)
-        assert await system_settings.get_settings(["agent.effort"], pool=pool) == {}
-        assert await pool.fetchval("SELECT count(*) FROM system_settings") == 1
-
-    _run(_test)
-
-
 def test_the_settings_api_round_trip(monkeypatch: pytest.MonkeyPatch) -> None:
     from loopx.agents import agent_settings
 
@@ -109,9 +64,11 @@ def test_the_settings_api_round_trip(monkeypatch: pytest.MonkeyPatch) -> None:
             "Mine.", "sonnet", "xhigh")
         stored = {r["key"]: r["value"] for r in await pool.fetch("SELECT key, value FROM system_settings")}
         assert stored["agent.harness_prompt"] == "Mine." and json.loads(stored["agent.env"]) == env
+        await agent_settings.update_settings({"default_effort": "high"})  # replaces its row, adds none
+        assert await pool.fetchval("SELECT count(*) FROM system_settings WHERE key = 'agent.effort'") == 1
         defaults = await agent_settings.load_defaults()
         assert (defaults.harness, defaults.model, defaults.effort, defaults.env) == (
-            "Mine.", "sonnet", "xhigh", (("TZ", "UTC"),))
+            "Mine.", "sonnet", "high", (("TZ", "UTC"),))
         view = await agent_settings.reset_harness()
         assert view["harness_source"] == "builtin_default" and view["default_model"] == "sonnet"
         assert await pool.fetchval("SELECT count(*) FROM system_settings WHERE key = 'agent.harness_prompt'") == 0

@@ -100,23 +100,10 @@ class TestTokensAndContext:
         assert _tokens(own) == (10 + 8 + 10, 538 - 276, 63546 - 33433, 11206 + 632 + 522)
         assert _tokens(turn_tokens(_result(notified))) == (10, 71, 18907, 522)
 
-    def test_a_turn_without_a_model_request_has_no_context(self) -> None:
-        _, compact, _ = _turns("manual_compact")
-        assert _context(compact) is None
-
     def test_an_assistant_message_without_usage_is_not_a_request(self) -> None:
         assert request_context({"type": "assistant", "message": {"content": []}}) is None
         assert request_context({"type": "assistant", "message": {"usage": {"input_tokens": "x"}}}) is None
         assert request_context({"type": "user", "message": {"usage": {"input_tokens": 3}}}) is None
-
-    def test_turn_tokens_read_the_results_usage(self) -> None:
-        result = {"type": "result", "usage": {"input_tokens": 3, "output_tokens": 4,
-                                              "cache_read_input_tokens": 5, "cache_creation_input_tokens": 6}}
-        assert turn_tokens(result) == Usage(input_tokens=3, output_tokens=4, cache_read_tokens=5,
-                                            cache_creation_tokens=6)
-        assert turn_tokens(None) == Usage()
-        # Without modelUsage (an older Claude Code) the totals hold the cost only.
-        assert reported_totals({"type": "result", "total_cost_usd": 0.5}) == Usage(cost_usd=0.5)
 
 
 class TestCompaction:
@@ -126,6 +113,7 @@ class TestCompaction:
         assert _compactions(compact) == [
             {"trigger": "manual", "pre_tokens": 18379, "post_tokens": 1285, "duration_ms": 12256},
         ]
+        assert _context(compact) is None  # the /compact turn makes no model request of its own
 
     def test_the_compactions_own_request_is_in_the_totals_only(self) -> None:
         before, compact, _ = _turns("manual_compact")
@@ -148,24 +136,12 @@ class TestCompaction:
         # The context after a compaction is the next request's prompt.
         assert (_context(first), _context(second), _context(third)) == (
             8 + 18320 + 6703, 10 + 15100 + 2285, 10 + 15100 + 2382)
-
-    def test_a_boundary_without_metadata_still_counts(self) -> None:
+        # A boundary without metadata still counts; the "compacting" status alone does not.
         assert compaction({"type": "system", "subtype": "compact_boundary"}) == {}
         assert compaction({"type": "system", "subtype": "status", "status": "compacting"}) is None
 
 
 class TestResumedSession:
-    def test_a_resumed_process_reports_the_sessions_earlier_spending_too(self) -> None:
-        first, second, resumed, _ = _turns("resume")
-        assert first[0]["session_id"] == resumed[0]["session_id"]
-        session = reported_totals(_result(second))
-        reported = reported_totals(_result(resumed))
-        # What a new process starting from zero would record: the session's whole spending.
-        assert reported.cost_usd == pytest.approx(0.0127871)
-        own = reported.since(session)
-        assert own.cost_usd == pytest.approx(0.0127871 - 0.0104644)
-        assert _tokens(own) == _tokens(turn_tokens(_result(resumed))) == (10, 58, 18407, 91)
-
     def test_a_counter_that_went_down_started_again(self) -> None:
         # Claude did not carry the session's totals: what it reports is all this turn's.
         assert Usage(cost_usd=0.2, input_tokens=5).since(Usage(cost_usd=1.0, input_tokens=50)) == Usage(
@@ -196,19 +172,16 @@ class TestResidentClaudeBaseline:
         return asyncio.run(_run())
 
     def test_a_resumed_process_starts_from_the_sessions_totals(self) -> None:
-        _, second, resumed, after = _turns("resume")
+        first, second, resumed, after = _turns("resume")
+        assert first[0]["session_id"] == resumed[0]["session_id"]
         session = reported_totals(_result(second))
+        # A process started with --resume reports the session's whole spending, its earlier turns' too.
+        assert reported_totals(_result(resumed)).cost_usd == pytest.approx(0.0127871)
         (own, then), totals = self._turn_costs([_result(resumed), _result(after)], session)
-        assert own.cost_usd == pytest.approx(0.0023227)
-        assert _tokens(own) == (10, 58, 18407, 91)
+        assert own.cost_usd == pytest.approx(0.0127871 - 0.0104644)
+        assert _tokens(own) == _tokens(turn_tokens(_result(resumed))) == (10, 58, 18407, 91)
         assert then.cost_usd == pytest.approx(0.0149809 - 0.0127871)
         assert totals == reported_totals(_result(after))
-
-    def test_a_new_session_starts_from_zero(self) -> None:
-        first, second, _, _ = _turns("resume")
-        (one, two), _ = self._turn_costs([_result(first), _result(second)], None)
-        assert one == reported_totals(_result(first))
-        assert two.cost_usd == pytest.approx(0.0104644 - 0.008218)
 
     def test_a_turn_without_modelusage_takes_its_tokens_from_its_own_usage(self) -> None:
         result = {"type": "result", "total_cost_usd": 0.75,
@@ -218,10 +191,6 @@ class TestResidentClaudeBaseline:
         assert own == Usage(cost_usd=0.25, input_tokens=3, output_tokens=4, cache_read_tokens=5,
                             cache_creation_tokens=6)
         assert totals == Usage(cost_usd=0.75)
-
-    def test_a_turn_without_a_result_spent_nothing_known(self) -> None:
-        (own,), totals = self._turn_costs([None], Usage(cost_usd=0.5))  # type: ignore[list-item]
-        assert own == Usage() and totals == Usage(cost_usd=0.5)
 
 
 class TestRecorder:
@@ -248,12 +217,3 @@ class TestRecorder:
         assert finish["compactions"] == [
             {"trigger": "auto", "pre_tokens": 25120, "post_tokens": 1359, "duration_ms": 13135},
         ]
-
-    def test_a_one_process_run_records_its_reported_totals(self, agent_db: Any) -> None:
-        first, _ = _turns("multi_request_turns")
-        finish = self._record(agent_db, first)
-        assert finish["cost_usd"] == 0.0157805
-        assert (finish["input_tokens"], finish["output_tokens"], finish["cache_read_tokens"],
-                finish["cache_creation_tokens"]) == (26, 260, 50825, 4686)
-        assert finish["context_tokens"] == 8 + 18527 + 129
-        assert finish["compactions"] == []

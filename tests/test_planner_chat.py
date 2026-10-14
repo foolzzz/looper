@@ -12,6 +12,7 @@ import pytest
 from loopx.agents.bus import MessageBus
 from loopx.agents.channels.web import WebChannelAdapter
 from loopx.agents.message import (
+    MANAGER_ADDRESS,
     MessageEnvelope,
     MessageType,
     channel_address,
@@ -19,7 +20,7 @@ from loopx.agents.message import (
 )
 from loopx.agents.tiers import planner as planner_module
 from loopx.agents.tiers.planner import PlanStep, PlannerAgent, TaskPlan
-from loopx.agents.tiers.task import Task, TaskRouter
+from loopx.agents.tiers.task import TaskRouter
 from tests.test_planner_agent import WORK_OK, Harness, activity, chat, decide, drive, hold_first, plan, step
 
 WEB = channel_address("web")
@@ -77,58 +78,43 @@ def _work_items(sent: list[MessageEnvelope]) -> list[MessageEnvelope]:
 
 
 class TestPlannerUserMessage:
-    def test_finished_plan_rejects_instruction(self) -> None:
-        plan = _executing_plan(PlanStep(step_id="s1", index=0, instruction="x", status="verified"))
-        plan.status = "completed"
+    @pytest.mark.parametrize(("status", "expected"), [("completed", "completed"), (None, "规划中")])
+    def test_finished_plan_rejects_instruction(self, status: str | None, expected: str) -> None:
+        """A finished task, or one with no plan yet, answers without touching the plan."""
+        plan = None
+        if status is not None:
+            plan = _executing_plan(PlanStep(step_id="s1", index=0, instruction="x", status="verified"))
+            plan.status = status
         planner, sent = _run_planner(plan, _user_message("t1", "one more thing"))
 
-        assert len(planner._plan.steps) == 1  # type: ignore[union-attr]
+        assert planner._plan is plan and (plan is None or len(plan.steps) == 1)
         assert _work_items(sent) == []
         (reply,) = _replies(sent)
-        assert "completed" in reply.payload["text"]
-
-    def test_message_before_plan_exists_is_answered(self) -> None:
-        planner, sent = _run_planner(None, _user_message("t1", "hello"))
-
-        assert planner._plan is None
-        assert len(_replies(sent)) == 1
-        assert _work_items(sent) == []
+        assert expected in reply.payload["text"]
 
     def test_depends_on_survives_plan_persistence(self) -> None:
-        async def _run() -> list[str]:
+        """A restarted Planner restores its plan: its id, its session, and each step's label, state and dependencies."""
+
+        async def _run() -> TaskPlan | None:
             with tempfile.TemporaryDirectory() as tmp:
-                first = PlannerAgent(task_id="t1", runtime_root=Path(tmp))
-                first._save_plan(_executing_plan(
-                    PlanStep(step_id="s1", index=0, instruction="a", status="dispatched"),
-                    PlanStep(step_id="s2", index=1, instruction="b", depends_on=["s1"]),
-                ))
+                saved = _executing_plan(
+                    PlanStep(step_id="step-1", index=0, instruction="a", key="s1", status="dispatched"),
+                    PlanStep(step_id="step-2", index=1, instruction="b", key="s2", depends_on=["step-1"]),
+                )
+                saved.session_id = "sess-p"
+                PlannerAgent(task_id="t1", runtime_root=Path(tmp))._save_plan(saved)
                 second = PlannerAgent(task_id="t1", runtime_root=Path(tmp))
                 second._load_plan()
-                return second._plan.steps[1].depends_on  # type: ignore[union-attr]
+                return second._plan
 
-        assert asyncio.run(_run()) == ["s1"]
+        restored = asyncio.run(_run())
+        assert restored is not None
+        assert (restored.plan_id, restored.session_id) == ("p1", "sess-p")
+        assert [(s.label, s.status) for s in restored.steps] == [("s1", "dispatched"), ("s2", "pending")]
+        assert restored.steps[1].depends_on == [restored.steps[0].step_id]
 
 
 class TestChatTargets:
-    def test_running_planners_lists_live_instances_only(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            router = TaskRouter(runtime_root=Path(tmp))
-            live = Task(task_id="t1", requirement="build it", goal_id="", work_dir="", project_id="proj-1",
-                        status="running", planner_id="planner-t1")
-            queued = Task(task_id="t2", requirement="later", goal_id="", work_dir="", project_id="proj-1",
-                          status="pending")
-            router._tasks = {"t1": live, "t2": queued}
-            router._planners = {"t1": PlannerAgent(task_id="t1", runtime_root=Path(tmp))}
-
-            assert router.running_planners() == [{
-                "task_id": "t1",
-                "planner_id": "planner-t1",
-                "requirement": "build it",
-                "status": "running",
-            }]
-            assert router.has_planner("t1")
-            assert not router.has_planner("t2")
-
     def test_web_message_can_target_a_planner(self) -> None:
         async def _run() -> MessageEnvelope:
             with tempfile.TemporaryDirectory() as tmp:
@@ -156,18 +142,16 @@ class TestResolveChatTarget:
         router._planners = {"t1": PlannerAgent(task_id="t1", runtime_root=Path(tmp))}
         return router
 
-    @pytest.mark.parametrize("raw", [None, {}, {"kind": "manager"}])
-    def test_manager_is_the_default(self, raw: Any) -> None:
+    @pytest.mark.parametrize(("raw", "expected"), [
+        (None, MANAGER_ADDRESS),
+        ({}, MANAGER_ADDRESS),
+        ({"kind": "manager"}, MANAGER_ADDRESS),
+        ({"kind": "planner", "task_id": "t1"}, planner_address("t1")),  # a running Planner
+    ])
+    def test_manager_is_the_default(self, raw: Any, expected: Any) -> None:
         from loopx.agents.chat_targets import resolve_chat_target
-        from loopx.agents.message import MANAGER_ADDRESS
         with tempfile.TemporaryDirectory() as tmp:
-            assert resolve_chat_target(raw, self._router(tmp)) == MANAGER_ADDRESS
-
-    def test_running_planner(self) -> None:
-        from loopx.agents.chat_targets import resolve_chat_target
-        with tempfile.TemporaryDirectory() as tmp:
-            target = {"kind": "planner", "task_id": "t1"}
-            assert resolve_chat_target(target, self._router(tmp)) == planner_address("t1")
+            assert resolve_chat_target(raw, self._router(tmp)) == expected
 
     @pytest.mark.parametrize(
         ("raw", "status"),
@@ -263,21 +247,6 @@ class TestPlannerChatThroughClaude:
         assert "arrived after the Worker finished" in decision and "also log errors" in decision
         assert h.work_items[1].payload["feedback"] == ["also log errors"]
 
-    def test_plain_reply_takes_no_action(self, planner_claude: Any) -> None:
-        claude = planner_claude(plan(step("s1")), chat("第 1 步正在执行。"), decide("accept"))
-
-        async def scenario(h: Harness) -> str:
-            await h.start()
-            await h.until(lambda: h.held)
-            answer = await h.say("现在到哪一步了？")
-            await h.release(WORK_OK)
-            await h.finished()
-            return answer
-
-        h = drive(claude, lambda envelope: None, scenario)
-        assert [r.payload["text"] for r in h.replies if r.target == WEB] == ["第 1 步正在执行。"]
-        assert h.forwarded == [] and len(h.work_items) == 1
-
     def test_invalid_action_gets_a_repair_turn(self, planner_claude: Any) -> None:
         claude = planner_claude(
             plan(step("s1")),
@@ -296,6 +265,7 @@ class TestPlannerChatThroughClaude:
 
         h = drive(claude, lambda envelope: None, scenario)
         assert [r.payload["text"] for r in h.replies if r.target == WEB] == ["好的。"]
+        assert h.forwarded == [] and len(h.work_items) == 1  # the plain reply took no action
         repair = claude.turns()[2]["text"]
         assert repair.startswith("[CHAT] Your last reply broke the reply contract: step 's2' has no running Worker")
 

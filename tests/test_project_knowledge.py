@@ -151,6 +151,7 @@ def project_dir(tmp_path: Path) -> Path:
     directory = tmp_path / "project"
     (directory / "docs").mkdir(parents=True)
     (directory / "docs" / "runbook.md").write_text("Deploy with MARKER-BETA.\n", encoding="utf-8")
+    (directory / "logo.png").write_bytes(b"\x89PNG\r\n\x1a\n\x00\x00")
     (tmp_path / "secret.txt").write_text("outside the project\n", encoding="utf-8")
     return directory
 
@@ -202,14 +203,6 @@ class TestAdd:
         assert status == 400 and reason in body["error"] and "logo.png" in body["error"]
         assert store.documents == {}
 
-    def test_an_upload_that_is_not_base64_is_refused(self, store: _Store, tmp_path: Path) -> None:
-        store.add_project()
-        status, body = _call(tmp_path, "POST", "/api/projects/proj-1/knowledge", {
-            "source_kind": "upload", "title": "Notes", "summary": "s", "filename": "notes.txt",
-            "content_base64": "not base64!",
-        })
-        assert status == 400 and "base64" in body["error"]
-
     @pytest.mark.parametrize("kind", ["text", "upload"])
     def test_a_document_over_2_mib_is_refused_naming_the_cap(self, store: _Store, tmp_path: Path, kind: str) -> None:
         store.add_project()
@@ -235,6 +228,8 @@ class TestAdd:
         ({**_text(), "summary": "two\nlines"}, "one line"),
         ({**_text(), "content": "   "}, "content"),
         ({**_text(), "path": "docs/runbook.md"}, "unknown field 'path'"),
+        ({"source_kind": "upload", "title": "Notes", "summary": "s", "filename": "notes.txt",
+          "content_base64": "not base64!"}, "base64"),
         ([], "JSON object"),
     ])
     def test_a_bad_request_is_refused(self, store: _Store, tmp_path: Path, body: Any, reason: str) -> None:
@@ -249,11 +244,13 @@ class TestAdd:
 
 
 class TestPathDocuments:
+    @pytest.mark.parametrize("absolute", [False, True])
     def test_a_file_in_the_project_directory_is_referenced_by_its_relative_path(
-        self, store: _Store, tmp_path: Path, project_dir: Path,
+        self, store: _Store, tmp_path: Path, project_dir: Path, absolute: bool,
     ) -> None:
         store.add_project(work_dir=str(project_dir))
-        status, body = _call(tmp_path, "POST", "/api/projects/proj-1/knowledge", _path("docs/../docs/./runbook.md"))
+        path = str(project_dir / "docs" / "runbook.md") if absolute else "docs/../docs/./runbook.md"
+        status, body = _call(tmp_path, "POST", "/api/projects/proj-1/knowledge", _path(path))
         assert status == 201
         doc = body["document"]
         assert (doc["path"], doc["filename"], doc["missing"]) == ("docs/runbook.md", None, False)
@@ -263,14 +260,6 @@ class TestPathDocuments:
         assert stored["content"] is None  # read live, never copied
         assert body["stored_bytes"] == 0
 
-    def test_an_absolute_path_inside_the_project_is_stored_relative(
-        self, store: _Store, tmp_path: Path, project_dir: Path,
-    ) -> None:
-        store.add_project(work_dir=str(project_dir))
-        status, body = _call(tmp_path, "POST", "/api/projects/proj-1/knowledge",
-                             _path(str(project_dir / "docs" / "runbook.md")))
-        assert status == 201 and body["document"]["path"] == "docs/runbook.md"
-
     @pytest.mark.parametrize(("path", "reason"), [
         ("../secret.txt", "outside the project's default directory"),
         ("docs/../../secret.txt", "outside the project's default directory"),
@@ -278,6 +267,7 @@ class TestPathDocuments:
         (".", "outside the project's default directory"),
         ("docs/missing.md", "does not exist"),
         ("docs", "is not a file"),
+        ("logo.png", "not a text file"),
     ])
     def test_a_path_outside_the_project_or_not_a_file_is_refused(
         self, store: _Store, tmp_path: Path, project_dir: Path, path: str, reason: str,
@@ -294,12 +284,6 @@ class TestPathDocuments:
         store.add_project(work_dir=str(project_dir))
         status, body = _call(tmp_path, "POST", "/api/projects/proj-1/knowledge", _path("docs/innocent.md"))
         assert status == 400 and "leads outside" in body["error"]
-
-    def test_a_binary_file_is_refused(self, store: _Store, tmp_path: Path, project_dir: Path) -> None:
-        (project_dir / "logo.png").write_bytes(b"\x89PNG\r\n\x1a\n\x00\x00")
-        store.add_project(work_dir=str(project_dir))
-        status, body = _call(tmp_path, "POST", "/api/projects/proj-1/knowledge", _path("logo.png"))
-        assert status == 400 and "not a text file" in body["error"]
 
     def test_a_project_without_a_directory_cannot_reference_a_path(self, store: _Store, tmp_path: Path) -> None:
         store.add_project(work_dir="")
@@ -318,10 +302,6 @@ class TestPathDocuments:
 
 
 class TestCaps:
-    def test_the_caps_are_2_mib_100_documents_50_mib_and_4000_characters(self) -> None:
-        assert (knowledge.DOCUMENT_MAX_BYTES, knowledge.PROJECT_MAX_DOCUMENTS, knowledge.PROJECT_MAX_BYTES,
-                knowledge.INDEX_MAX_CHARS) == (2 * 1024 * 1024, 100, 50 * 1024 * 1024, 4000)
-
     def test_one_document_over_the_count_cap_is_refused(
         self, store: _Store, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -520,12 +500,6 @@ class TestLoad:
         # In the project's own directory there is nothing more to mount.
         assert _load(tmp_path, {"id": "proj-1", "work_dir": str(project_dir)}, str(project_dir)).add_dirs == ()
 
-    def test_a_missing_path_document_is_listed_as_missing(self, tmp_path: Path, documents: Any, project_dir: Path) -> None:
-        documents(_row("path", "Runbook", "Deploys", "docs/gone.md"))
-        loaded = _load(tmp_path, {"id": "proj-1", "work_dir": str(project_dir)}, str(project_dir))
-        assert loaded.index.endswith(f"- Runbook: Deploys (missing: {project_dir / 'docs' / 'gone.md'})")
-        assert loaded.documents == 1 and loaded.error is None
-
     def test_without_documents_or_a_project_there_is_nothing(self, tmp_path: Path, documents: Any) -> None:
         documents()
         assert _load(tmp_path, {"id": "proj-1", "work_dir": ""}, str(tmp_path)) == EMPTY_KNOWLEDGE
@@ -551,6 +525,5 @@ class TestLaunchArgs:
         loaded = AgentKnowledge(index="## Project knowledge", documents=2, add_dirs=("/k", "/p"))
         args = resolve_launch(BUILTIN_DEFAULTS, None, knowledge=loaded).args()
         assert args[-4:] == ["--add-dir", "/k", "--add-dir", "/p"]
+        assert "--add-dir" not in resolve_launch(BUILTIN_DEFAULTS, "sonnet").args()  # nothing without knowledge
 
-    def test_a_launch_without_knowledge_mounts_nothing(self) -> None:
-        assert "--add-dir" not in resolve_launch(BUILTIN_DEFAULTS, "sonnet").args()

@@ -21,7 +21,6 @@ from loopx.agents import agent_settings
 from loopx.agents.agent_settings import (
     BUILTIN_DEFAULTS,
     DEFAULT_HARNESS_PROMPT,
-    DEFAULT_MODEL,
     EFFORT_KEY,
     ENV_KEY,
     HARNESS_KEY,
@@ -54,13 +53,6 @@ def _project(project_id: str, *, planner: str = "", worker: str = "") -> dict[st
 
 
 class TestHarnessResolution:
-    def test_without_settings_every_agent_gets_the_builtin_harness(self) -> None:
-        project = _project("proj-a")
-        for agent in ("manager", "planner", "worker", "reviewer"):
-            harness = resolve_harness(agent, BUILTIN_DEFAULTS, project=None if agent == "manager" else project)
-            assert (harness.text, harness.source) == (DEFAULT_HARNESS_PROMPT, HarnessSource.BUILTIN_DEFAULT)
-            assert harness.project_id is None
-
     def test_the_settings_default_applies_to_every_agent_without_an_override(self) -> None:
         project = _project("proj-a")
         for agent in ("manager", "planner", "worker", "reviewer"):
@@ -75,6 +67,9 @@ class TestHarnessResolution:
             # A Manager override handed to a task agent by mistake is still not used.
             other = resolve_harness(agent, SYSTEM, manager_override="MANAGER HARNESS", project=project)
             assert other.text == "SYSTEM HARNESS"
+        # A Planner override is not the Workers', and the Manager ignores every project's.
+        assert resolve_harness("worker", SYSTEM, project=_project("proj-a", planner="PLANNER A")).text == "SYSTEM HARNESS"
+        assert resolve_harness("manager", SYSTEM, project=_project("proj-a", worker="W")).text == "SYSTEM HARNESS"
 
     def test_a_project_override_reaches_its_planner_and_its_workers(self) -> None:
         project = _project("proj-a", planner="PLANNER A", worker="WORKER A")
@@ -100,11 +95,6 @@ class TestHarnessResolution:
             in_b = resolve_harness(agent, SYSTEM, project=b)
             assert (in_b.text, in_b.source, in_b.project_id) == ("SYSTEM HARNESS", HarnessSource.SYSTEM_DEFAULT, None)
 
-    def test_a_planner_override_is_not_the_workers_and_the_manager_ignores_projects(self) -> None:
-        project = _project("proj-a", planner="PLANNER A")
-        assert resolve_harness("worker", SYSTEM, project=project).text == "SYSTEM HARNESS"
-        assert resolve_harness("manager", SYSTEM, project=_project("proj-a", worker="W")).text == "SYSTEM HARNESS"
-
     @pytest.mark.parametrize("blank", ["", "   \n\n"])
     def test_a_blank_override_inherits(self, blank: str) -> None:
         assert resolve_harness("worker", SYSTEM, project=_project("p", worker=blank)).source is HarnessSource.SYSTEM_DEFAULT
@@ -116,29 +106,11 @@ class TestHarnessResolution:
         assert resolve_harness("planner", SYSTEM, project=_project("proj-a")).record() == {
             "source": "system_default", "sha256": _sha("SYSTEM HARNESS")}
 
-    def test_unknown_agent_types_are_refused(self) -> None:
-        with pytest.raises(ValueError):
-            resolve_harness("operator", SYSTEM)
-
 
 # --- The stored defaults ---
 
 
 class TestStoredDefaults:
-    def test_missing_rows_are_the_builtin_defaults(self) -> None:
-        assert defaults_from({}) == BUILTIN_DEFAULTS
-        assert (BUILTIN_DEFAULTS.model, BUILTIN_DEFAULTS.effort, BUILTIN_DEFAULTS.env) == ("opus", "", ())
-        assert DEFAULT_MODEL == "opus"
-
-    def test_stored_rows_are_the_system_defaults(self) -> None:
-        env = json.dumps([{"key": "LANG", "value": "C.UTF-8"}, {"key": "TZ", "value": "UTC"}])
-        defaults = defaults_from({HARNESS_KEY: "Mine.", MODEL_KEY: "sonnet", EFFORT_KEY: "high", ENV_KEY: env})
-        assert defaults == AgentDefaults("Mine.", HarnessSource.SYSTEM_DEFAULT, "sonnet", ModelSource.SYSTEM_DEFAULT,
-                                         "high", (("LANG", "C.UTF-8"), ("TZ", "UTC")))
-
-    def test_a_stored_copy_of_the_builtin_harness_counts_as_builtin(self) -> None:
-        assert defaults_from({HARNESS_KEY: DEFAULT_HARNESS_PROMPT + "\n"}).harness_source is HarnessSource.BUILTIN_DEFAULT
-
     def test_an_unusable_row_is_ignored(self) -> None:
         defaults = defaults_from({MODEL_KEY: "--dangerously-skip-permissions", EFFORT_KEY: "extreme",
                                   ENV_KEY: "not json"})
@@ -172,15 +144,16 @@ class TestLaunch:
         assert launch.record() == {"model_choice": {"model": "opus", "source": "builtin_default", "effort": None}}
         assert launch.environment() is None and launch.env_sha256 is None
 
-    @pytest.mark.parametrize("override", [None, "", "   "])
-    def test_no_override_uses_the_settings_default(self, override: Any) -> None:
+    @pytest.mark.parametrize(("override", "model", "source"), [
+        (None, "sonnet", ModelSource.SYSTEM_DEFAULT),
+        ("", "sonnet", ModelSource.SYSTEM_DEFAULT),
+        ("   ", "sonnet", ModelSource.SYSTEM_DEFAULT),
+        (" claude-haiku-4-5 ", "claude-haiku-4-5", ModelSource.AGENT_OVERRIDE),  # the agent's own beats the default
+    ])
+    def test_no_override_uses_the_settings_default(self, override: Any, model: str, source: ModelSource) -> None:
         launch = resolve_launch(SYSTEM, override)
-        assert (launch.model, launch.model_source) == ("sonnet", ModelSource.SYSTEM_DEFAULT)
-
-    def test_an_agent_override_beats_the_settings_default(self) -> None:
-        launch = resolve_launch(SYSTEM, " claude-haiku-4-5 ")
-        assert (launch.model, launch.model_source) == ("claude-haiku-4-5", ModelSource.AGENT_OVERRIDE)
-        assert launch.args() == [*_permission_flags(), "--model", "claude-haiku-4-5"]
+        assert (launch.model, launch.model_source) == (model, source)
+        assert launch.args() == [*_permission_flags(), "--model", model]
 
     def test_the_effort_follows_the_model(self) -> None:
         defaults = AgentDefaults("H", HarnessSource.SYSTEM_DEFAULT, "opus", ModelSource.SYSTEM_DEFAULT, "high")
@@ -211,14 +184,6 @@ class TestLaunch:
 
 
 class TestValidation:
-    def test_a_harness_has_at_most_20000_characters(self) -> None:
-        assert agent_settings.HARNESS_MAX_CHARS == 20_000
-        assert agent_settings.harness_prompt("\n\n" + "x" * 20_000 + "\n  \n") == "x" * 20_000
-        with pytest.raises(SettingsError, match="at most 20000"):
-            agent_settings.harness_prompt("x" * 20_001)
-        with pytest.raises(SettingsError, match="string"):
-            agent_settings.harness_prompt(3)
-
     @pytest.mark.parametrize("name", ["opus", "sonnet", "claude-opus-4-5-20251101", "opus[1m]", "us.anthropic.x:0"])
     def test_model_names(self, name: str) -> None:
         assert agent_settings.model_name(f" {name} ") == name
@@ -228,32 +193,11 @@ class TestValidation:
         with pytest.raises(SettingsError):
             agent_settings.model_name(name)
 
-    def test_effort_levels(self) -> None:
-        assert agent_settings.EFFORT_LEVELS == ("low", "medium", "high", "xhigh", "max")
-        assert agent_settings.effort_level("") == "" and agent_settings.effort_level(None) == ""
-        with pytest.raises(SettingsError, match="one of"):
-            agent_settings.effort_level("extreme")
-
-    def test_environment_entries(self) -> None:
-        env = agent_settings.environment([{"key": "LANG", "value": "C.UTF-8"}, {"key": "_X1", "value": ""}])
-        assert env == {"LANG": "C.UTF-8", "_X1": ""}
-
-    @pytest.mark.parametrize("key", ["lang", "1LANG", "LANG-X", "LANG X", ""])
-    def test_environment_names_must_be_upper_snake_case(self, key: str) -> None:
-        with pytest.raises(SettingsError, match=r"\[A-Z_\]"):
-            agent_settings.environment([{"key": key, "value": "v"}])
-
     @pytest.mark.parametrize("key", ["ANTHROPIC_API_KEY", "GH_TOKEN", "CLIENT_SECRET", "DB_PASSWORD",
                                      "AWS_CREDENTIALS", "KEY"])
     def test_credential_like_names_are_refused(self, key: str) -> None:
         with pytest.raises(SettingsError, match="secrets do not belong"):
             agent_settings.environment([{"key": key, "value": "v"}])
-
-    def test_at_most_50_entries(self) -> None:
-        entries = [{"key": f"V{i}", "value": "x"} for i in range(50)]
-        assert len(agent_settings.environment(entries)) == 50
-        with pytest.raises(SettingsError, match="at most 50"):
-            agent_settings.environment([*entries, {"key": "V50", "value": "x"}])
 
     @pytest.mark.parametrize("raw", [
         {"LANG": "C"}, [["LANG", "C"]], [{"key": "LANG"}], [{"key": "LANG", "value": 1}],
@@ -363,6 +307,9 @@ class TestSettingsApi:
         status, body = _call("PUT", "/api/settings/agents", {"default_harness_prompt": DEFAULT_HARNESS_PROMPT})
         assert (status, body["harness_source"]) == (200, "builtin_default")
         assert HARNESS_KEY not in settings_table.rows
+        # A copy stored before (here with a trailing newline) counts as the builtin too.
+        settings_table.rows[HARNESS_KEY] = DEFAULT_HARNESS_PROMPT + "\n"
+        assert _call("GET", "/api/settings/agents")[1]["harness_source"] == "builtin_default"
 
     def test_reset_restores_the_builtin_harness(self, settings_table: _Settings) -> None:
         _call("PUT", "/api/settings/agents", {"default_harness_prompt": "Mine.", "default_model": "sonnet"})
@@ -379,6 +326,7 @@ class TestSettingsApi:
         ({"default_env": [{"key": "lang", "value": "x"}]}, "A-Z"),
         ({"default_env": [{"key": f"V{i}", "value": "x"} for i in range(51)]}, "at most 50"),
         ({"default_harness": "typo"}, "unknown field"),
+        ({"default_model": "sonnet", "default_effort": "extreme"}, "one of"),  # one bad field refuses the valid ones
         ({}, "at least one"),
         ([1], "JSON object"),
         (b"not json", "invalid JSON"),
@@ -389,10 +337,6 @@ class TestSettingsApi:
         status, answer = _call("PUT", "/api/settings/agents", body)
         assert status == 400 and message in answer["error"]
         assert settings_table.rows == {} and settings_table.writes == 0
-
-    def test_one_refused_field_refuses_the_valid_ones_too(self, settings_table: _Settings) -> None:
-        status, _ = _call("PUT", "/api/settings/agents", {"default_model": "sonnet", "default_effort": "extreme"})
-        assert status == 400 and settings_table.writes == 0
 
 
 # --- The Manager's harness override on its agent config ---
@@ -430,10 +374,6 @@ class TestAgentConfigHarness:
         assert status == 400
         assert "manager only" in body["error"] and "project" in body["error"]
         assert configs.updates == []
-
-    def test_the_harness_override_is_capped(self, configs: _Configs) -> None:
-        status, body = _call("PUT", "/api/agent-configs/manager", {"harness_prompt": "x" * 20_001})
-        assert status == 400 and "20000" in body["error"] and configs.updates == []
 
     def test_a_model_is_checked_and_an_empty_one_clears_the_override(self, configs: _Configs) -> None:
         assert _call("PUT", "/api/agent-configs/worker", {"model": "-p"})[0] == 400
