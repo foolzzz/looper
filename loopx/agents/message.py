@@ -41,6 +41,8 @@ class MessageType(str, Enum):
     TASK_CANCEL = "task_cancel"
     TASK_STOP = "task_stop"
     TASK_RESTART = "task_restart"
+    # TaskRouter → a task's new Planner: carry on with the plan saved before the server stopped.
+    TASK_RESUME = "task_resume"
 
     # Verification (方案 C)
     VERIFY_REQUEST = "verify_request"

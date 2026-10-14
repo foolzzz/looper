@@ -16,7 +16,10 @@ make the changes. Each event is one user turn on it:
   running Worker or add steps.
 
 Every reply ends with JSON that ``planner_protocol`` validates; code then
-does the dispatching. The system prompt is rebuilt for every turn from the
+does the dispatching. The plan, its steps and the Planner's Claude session
+live in PostgreSQL (``plans``, ``agent_sessions``), written as they change; a
+Planner started after the server restarted reads them back and carries on
+(TASK_RESUME) without planning again. The system prompt is rebuilt for every turn from the
 harness (the project's Planner override, else the default in Settings), the
 ``planner`` config and the task's project as it is now (its background and
 the index of its knowledge included, the knowledge's directories mounted with
@@ -34,7 +37,6 @@ TaskRouter, which tears it down and ends its Claude.
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import time
 import uuid
@@ -96,7 +98,7 @@ from .planner_protocol import (
 logger = logging.getLogger(__name__)
 
 from ...db import activity as db_activity, agent_configs as db_agent_configs, llm_records as db_llm_records
-from ...db import projects as db_projects, steps as db_steps
+from ...db import agent_sessions as db_agent_sessions, plans as db_plans, projects as db_projects
 from ...db.tasks import update_task_phase
 
 MAX_CONCURRENT_WORKERS = 4
@@ -227,14 +229,14 @@ class TaskPlan:
     correlation_id: str = ""
     origin_channel_id: str = ""
     project_id: str = ""
-    # The task's project as last read; refreshed before every event's turns.
+    # The task's project as last read; refreshed before every event's turns, never saved.
     project_name: str = ""
     project_description: str = ""
     project_background: str = ""
     project_planner_harness: str = ""  # the project's harness for its Planner; '' for the default
     project_updated_at: str = ""  # the project's version, for the system prompt's record
     project_work_dir: str = ""  # the project's default directory, where its path documents are
-    session_id: str | None = None  # the Planner's Claude session, resumed after a restart
+    session_id: str | None = None  # the Planner's Claude session (agent_sessions), resumed after a restart
     # The session's running totals at its last result; a process that resumes the session starts from them.
     session_totals: Usage = field(default_factory=Usage)
     final_summary: str = ""  # the last accepted step's summary
@@ -292,42 +294,38 @@ class TaskPlan:
             parts.append(f"{failed} 失败")
         return ", ".join(parts)
 
-    def to_dict(self) -> dict[str, Any]:
+    def row(self) -> dict[str, Any]:
+        """The plan's own state, as ``plans.save`` writes it."""
         return {
             "plan_id": self.plan_id,
-            "goal_id": self.goal_id,
-            "requirement": self.requirement,
             "status": self.status,
-            "project_id": self.project_id,
-            "project_name": self.project_name,
-            "project_description": self.project_description,
-            "project_background": self.project_background,
-            "project_planner_harness": self.project_planner_harness,
-            "project_updated_at": self.project_updated_at,
-            "project_work_dir": self.project_work_dir,
-            "session_id": self.session_id,
-            "session_totals": self.session_totals.to_dict(),
+            "correlation_id": self.correlation_id,
+            "origin_channel_id": self.origin_channel_id,
             "final_summary": self.final_summary,
             "fail_reason": self.fail_reason,
-            "steps": [
-                {
-                    "step_id": s.step_id,
-                    "index": s.index,
-                    "key": s.key,
-                    "instruction": s.instruction,
-                    "status": s.status,
-                    "acceptance_criteria": s.acceptance_criteria,
-                    "review": s.review,
-                    "target_files": s.target_files,
-                    "depends_on": s.depends_on,
-                    "worker_id": s.worker_id,
-                    "reviewer_id": s.reviewer_id,
-                    "retries": s.retries,
-                    "feedback": s.feedback,
-                }
-                for s in self.steps
-            ],
         }
+
+
+def _step_row(step: PlanStep) -> dict[str, Any]:
+    """``step`` as ``plans.save`` writes it."""
+    return {
+        "id": step.step_id,
+        "index": step.index,
+        "key": step.key,
+        "instruction": step.instruction,
+        "target_files": step.target_files,
+        "validation_commands": step.validation_commands,
+        "acceptance_criteria": step.acceptance_criteria,
+        "depends_on": step.depends_on,
+        "review": step.review,
+        "status": step.status,
+        "result": step.result,
+        "worker_id": step.worker_id,
+        "reviewer_id": step.reviewer_id,
+        "retries": step.retries,
+        "feedback": step.feedback,
+        "missed_messages": step.missed_messages,
+    }
 
 
 def _clip(text: Any, limit: int) -> str:
@@ -357,8 +355,6 @@ class PlannerAgent:
         self._plan: TaskPlan | None = None
         self._loop_task: asyncio.Task[Any] | None = None
         self._running = False
-        self._plans_dir = runtime_root / ".local" / "planner" / f"planner-{task_id}"
-        self._plans_dir.mkdir(parents=True, exist_ok=True)
         self._claude = ResidentClaude(label=self.agent_id)
         self._turn_lock = asyncio.Lock()
         self._supervise_task: asyncio.Task[Any] | None = None
@@ -386,7 +382,7 @@ class PlannerAgent:
     async def start(self, bus: MessageBus) -> None:
         self._bus = bus
         self._running = True
-        self._load_plan()
+        await self._load_plan()
         self._loop_task = asyncio.create_task(self._message_loop())
         self._supervise_task = asyncio.create_task(self._supervise_loop())
         logger.info("planner %s started", self.agent_id)
@@ -417,8 +413,6 @@ class PlannerAgent:
             # A turn the loop was in has already killed Claude; an idle one
             # ends when its stdin closes. Never leave it running.
             await self._claude.stop(kill=cancelled)
-            if self._plan:
-                self._save_plan(self._plan)
 
     def is_healthy(self) -> bool:
         return self._running
@@ -447,6 +441,8 @@ class PlannerAgent:
         match envelope.message_type:
             case MessageType.TASK_REQUEST:
                 await self._plan_and_dispatch(envelope)
+            case MessageType.TASK_RESUME:
+                await self._resume(envelope)
             case MessageType.WORK_RESULT:
                 await self._handle_work_result(envelope)
             case MessageType.VERIFY_RESULT:
@@ -480,7 +476,8 @@ class PlannerAgent:
         # A new plan is a new conversation.
         async with self._turn_lock:
             await self._claude.stop()
-        self._save_plan(plan)
+        await self._save(plan, plan_row=True)
+        await self._save_session(plan)
 
         problem = _prepare_work_dir(plan.work_dir)
         if problem:
@@ -494,10 +491,9 @@ class PlannerAgent:
 
         steps = self._add_steps(plan, reply.steps)
         plan.status = "executing"
+        await self._save(plan, *steps, plan_row=True)
         await update_task_phase(self._task_id, "executing")
         await self._activity("phase", f"Plan created: {len(steps)} step(s): {self._describe(plan, steps)}")
-        self._save_plan(plan)
-        await self._persist_steps(steps)
 
         # Notify TaskRouter + Manager: task accepted
         await self._bus.publish(MessageEnvelope.create(
@@ -569,19 +565,8 @@ class PlannerAgent:
         worker_id = f"worker-{uuid.uuid4().hex[:12]}"
         step.status = "dispatched"
         step.worker_id = worker_id
-
-        try:
-            await db_steps.update_step_status(
-                step.step_id, "dispatched", worker_id=worker_id,
-            )
-            await db_activity.insert_activity(
-                task_id=self._task_id,
-                worker=worker_id,
-                kind="phase",
-                summary=f"Worker dispatched: {step.instruction[:80]}",
-            )
-        except Exception:
-            logger.exception("failed to persist dispatch for step %s", step.step_id)
+        await self._save(plan, step)
+        await self._activity("phase", f"Worker dispatched: {step.instruction[:80]}", worker=worker_id)
 
         await self._bus.publish(MessageEnvelope.create(
             source=self.agent_address,
@@ -608,7 +593,6 @@ class PlannerAgent:
             correlation_id=plan.correlation_id,
             metadata={"origin_channel_id": plan.origin_channel_id},
         ))
-        self._save_plan(plan)
 
     @staticmethod
     def _dependency_reports(plan: TaskPlan, step: PlanStep) -> list[dict[str, Any]]:
@@ -656,6 +640,7 @@ class PlannerAgent:
             return
         reviewer_id = f"reviewer-{uuid.uuid4().hex[:12]}"
         step.reviewer_id = reviewer_id
+        await self._save(plan, step)
         await self._activity("phase", f"Reviewer dispatched for step {step.index + 1} ({step.label})", worker=reviewer_id)
 
         await self._bus.publish(MessageEnvelope.create(
@@ -711,6 +696,8 @@ class PlannerAgent:
         view = plan.view()
         step.status = "deciding"
         message = self._decision_message(plan, step, context, report)
+        # Saved with its result and the late messages, so a restart can take the decision again.
+        await self._save(plan, step)
         step.missed_messages.clear()
         try:
             reply = await self._ask(
@@ -757,13 +744,13 @@ class PlannerAgent:
             step.retries += 1
             step.feedback.append(reply.feedback)
             step.reviewer_id = None
+            await self._save(plan, step)
             await self._dispatch_step(plan, step)
             await self._report_progress(plan)
             return
         elif decision is Decision.REPLAN:
             step.status = "verified" if context.acceptable else "skipped"
-            await self._persist_step(step)
-            await self._replan(plan, reply.steps)
+            await self._replan(plan, reply.steps, step)
         elif decision is Decision.FAIL:
             step.status = "failed"
             plan.fail_reason = reply.reason
@@ -772,8 +759,7 @@ class PlannerAgent:
     async def _send_to_review(self, plan: TaskPlan, step: PlanStep) -> None:
         step.review = True
         step.status = "completed"
-        self._save_plan(plan)
-        await self._persist_step(step)
+        await self._save(plan, step)
         await update_task_phase(self._task_id, "verifying")
         await self._spawn_reviewer(plan, step)
         await self._report_progress(plan)
@@ -783,24 +769,22 @@ class PlannerAgent:
         project reviews every step."""
         return step.review or self._execution.review_all
 
-    async def _replan(self, plan: TaskPlan, specs: tuple[StepSpec, ...]) -> None:
-        """Replace every step that has not started with ``specs``."""
+    async def _replan(self, plan: TaskPlan, specs: tuple[StepSpec, ...], decided: PlanStep) -> None:
+        """Replace every step that has not started with ``specs``; saved with the ``decided`` step at once."""
         keep = {spec.id for spec in specs}
         dropped = [s for s in plan.steps if s.status == "pending" and s.label not in keep]
         for step in dropped:
             step.status = "skipped"
-            await self._persist_step(step)
         steps = self._add_steps(plan, specs)
-        await self._persist_steps(steps)
+        await self._save(plan, decided, *dropped, *steps)
         summary = f"Plan changed: {self._describe(plan, steps) or 'no new steps'}"
         if dropped:
             summary += f"; dropped {', '.join(s.label for s in dropped)}"
         await self._activity("phase", summary)
 
     async def _step_settled(self, plan: TaskPlan, step: PlanStep) -> None:
-        """Persist ``step``'s outcome, then finish the task or start the steps now ready."""
-        self._save_plan(plan)
-        await self._persist_step(step)
+        """Save ``step``'s outcome, then finish the task or start the steps now ready."""
+        await self._save(plan, step, plan_row=True)  # an accept's summary or a fail's reason
         await self._report_progress(plan)
         if plan.has_failed:
             await self._fail_plan(plan)
@@ -809,13 +793,84 @@ class PlannerAgent:
         else:
             await self._dispatch_ready(plan)
 
+    # --- Resuming after a server restart ---
+
+    async def _resume(self, envelope: MessageEnvelope) -> None:
+        """Carry on with the plan a previous Planner of this task saved: no new plan, the same session.
+
+        The server's stop ended every run of the task: a step whose Worker was
+        running runs again (the same attempt, its retries and feedback kept), a
+        step in review gets a new Reviewer, and a decision that was cut off is
+        taken again from the step's saved result.
+        """
+        assert self._bus is not None
+        plan = self._plan
+        if plan is None:
+            await self._bus.publish(MessageEnvelope.create(
+                source=self.agent_address,
+                target=TASK_ROUTER_ADDRESS,
+                message_type=MessageType.GOAL_STATUS,
+                payload={"task_id": self._task_id, "status": "failed",
+                         "summary": "任务失败:\nCannot resume after a server restart: the saved plan cannot be read"},
+                correlation_id=envelope.correlation_id,
+            ))
+            return
+        if plan.status in ("completed", "failed"):
+            return  # it ended before this turn (at its spend cap)
+        if plan.status not in _LIVE:
+            await self._fail_plan(plan, reason=f"Cannot resume after a server restart: the plan was {plan.status}")
+            return
+        await self._activity("phase", f"Planner resumed after a server restart ({plan.progress_summary()})")
+        cut_off = [(step, step.status) for step in plan.steps if step.status in ("dispatched", "completed", "deciding")]
+        for step, status in cut_off:
+            if plan.status not in _LIVE:
+                return  # it stopped at its spend cap
+            if step.status != status:
+                continue
+            if status == "dispatched":
+                await self._dispatch_step(plan, step)
+            elif status == "completed":
+                await self._spawn_reviewer(plan, step)
+        for step, status in cut_off:
+            if plan.status not in _LIVE:
+                return
+            if status == "deciding" and step.status == status:
+                await self._decide_again(plan, step)
+        if plan.status not in _LIVE:
+            return
+        await self._report_progress(plan)
+        if plan.has_failed:
+            await self._fail_plan(plan)
+        elif plan.is_complete:
+            await self._complete_plan(plan)
+        else:
+            await self._dispatch_ready(plan)
+
+    async def _decide_again(self, plan: TaskPlan, step: PlanStep) -> None:
+        """Take the decision on ``step`` that a restart cut off, from the result saved with it."""
+        result = step.result or {}
+        if "verify_passed" in result:  # a Reviewer's verdict, added to the Worker's result
+            passed = result.get("verify_passed") is True
+            kind = ResultKind.REVIEW
+            report = self._review_report(step, {"passed": passed, "summary": result.get("verify_summary"),
+                                                "findings": result.get("verify_findings")})
+        else:
+            passed = result.get("status") == "completed"
+            kind = ResultKind.WORK
+            report = self._work_report(step, result)
+        context = DecisionContext(
+            step=step.label, result=kind, succeeded=passed,
+            review_required=self._needs_review(step), retries=step.retries,
+        )
+        await self._decide(plan, step, context, report)
+
     # --- Chat ---
 
     async def _handle_cancel(self, envelope: MessageEnvelope) -> None:
         logger.info("planner %s received cancel", self.agent_id)
         if self._plan:
             self._plan.status = "failed"
-            self._save_plan(self._plan)
+            await self._save(self._plan, plan_row=True)
         self._running = False
 
     async def _handle_user_message(self, envelope: MessageEnvelope) -> None:
@@ -856,13 +911,13 @@ class PlannerAgent:
                 return reply.reply
             # The Worker ended first; its result's decision turn gets the text instead.
             step.missed_messages.append(reply.text)
+            await self._save(plan, step)
             await self._activity("phase", f"User message for step {step.index + 1} ({step.label}) arrived after "
                                           f"{step.worker_id} finished; kept for the Planner's decision")
             return f"{reply.reply}\n\n（{step.worker_id} 在消息送达前已经结束；处理它的结果时我会考虑这条消息。）"
         if reply.action is ChatAction.ADD_STEPS:
             steps = self._add_steps(plan, reply.steps)
-            self._save_plan(plan)
-            await self._persist_steps(steps)
+            await self._save(plan, *steps)
             await self._activity("phase", f"Steps added from chat: {self._describe(plan, steps)}")
             await self._report_progress(plan)
             await self._dispatch_ready(plan)
@@ -984,6 +1039,7 @@ class PlannerAgent:
             )
         else:
             step.missed_messages.append(text)
+            await self._save(plan, step)
             await self._activity(
                 "phase", f"Planner steer for step {step.index + 1} ({step.label}) arrived after "
                          f"{step.worker_id} finished; kept for its decision",
@@ -1152,7 +1208,7 @@ class PlannerAgent:
             session_id = event.get("session_id")
             if isinstance(session_id, str) and session_id and session_id != plan.session_id:
                 plan.session_id = session_id
-                self._save_plan(plan)
+                await self._save_session(plan)
 
         limit = settings.timeout_seconds
         try:
@@ -1180,7 +1236,7 @@ class PlannerAgent:
             await self._activity("error", f"Warning: Planner {error}")
             await self._claude.stop()
             plan.session_id, plan.session_totals = None, Usage()  # its totals went with it
-            self._save_plan(plan)
+            await self._save_session(plan)
             return await self._run_turn(message, retried=True)
 
         result_event = turn.result_event
@@ -1200,7 +1256,7 @@ class PlannerAgent:
         usage = turn.usage
         if result_event is not None:
             plan.session_totals = self._claude.totals
-            self._save_plan(plan)
+            await self._save_session(plan)
         await recorder.finish(
             output_text=final_text or None,
             result_event=result_event,
@@ -1239,7 +1295,7 @@ class PlannerAgent:
             async def on_end(text: str, turn: ResidentTurn) -> None:
                 if turn.result_event is not None:
                     plan.session_totals = self._claude.totals  # it spent too: a restart resumes from here
-                    self._save_plan(plan)
+                    await self._save_session(plan)
                 logger.info("%s: Claude ran a turn on its own after background work ended; its reply decides "
                             "nothing: %s", self.agent_id, _clip(text, 300) or "(nothing)")
 
@@ -1405,7 +1461,7 @@ class PlannerAgent:
     async def _complete_plan(self, plan: TaskPlan) -> None:
         assert self._bus is not None
         plan.status = "completed"
-        self._save_plan(plan)
+        await self._save(plan, plan_row=True)
         await update_task_phase(self._task_id, "completed")
         await self._activity("phase", "All steps verified — task completed")
 
@@ -1442,7 +1498,7 @@ class PlannerAgent:
         assert self._bus is not None
         plan.status = "failed"
         plan.fail_reason = reason or plan.fail_reason
-        self._save_plan(plan)
+        await self._save(plan, plan_row=True)
         await update_task_phase(self._task_id, "failed")
 
         lines = []
@@ -1573,6 +1629,7 @@ class PlannerAgent:
         """Stop the runs going on, let the Planner sum up when the project asks for it, then fail the task."""
         reason = f"Task spend cap reached: ${format_usd(spent)} spent of the ${format_usd(cap)} cap (task_budget_usd)"
         plan.status = "stopping"  # no result is taken and nothing starts while it winds down
+        await self._save(plan, plan_row=True)
         await self._activity("error", reason)
         for step in plan.steps:
             if step.status == "dispatched" and step.worker_id:
@@ -1655,80 +1712,67 @@ class PlannerAgent:
         else:
             await self._activity("phase", f"Project background applied ({len(background)} chars)")
 
-    async def _persist_steps(self, steps: list[PlanStep]) -> None:
-        if not steps:
-            return
+    async def _save(self, plan: TaskPlan, *steps: PlanStep, plan_row: bool = False) -> None:
+        """Save ``steps`` and, with ``plan_row``, the plan's own state, in one transaction.
+
+        A failed write is logged and the task goes on from memory; only a
+        restart would miss it.
+        """
         try:
-            await db_steps.upsert_steps(self._task_id, [
-                {
-                    "id": s.step_id,
-                    "index": s.index,
-                    "instruction": s.instruction,
-                    "target_files": s.target_files,
-                    "status": s.status,
-                }
-                for s in steps
-            ])
+            await db_plans.save(self._task_id, plan=plan.row() if plan_row else None,
+                                steps=[_step_row(step) for step in dict.fromkeys(steps)])
         except Exception:
-            logger.exception("failed to persist steps for task %s", self._task_id)
+            logger.exception("failed to save the plan of task %s", self._task_id)
 
-    async def _persist_step(self, step: PlanStep) -> None:
+    async def _save_session(self, plan: TaskPlan) -> None:
+        """Save the Planner's Claude session and its running totals."""
         try:
-            await db_steps.update_step_status(step.step_id, step.status, result=step.result)
+            await db_agent_sessions.save_session(self.agent_id, plan.session_id, plan.session_totals.to_dict())
         except Exception:
-            logger.exception("failed to persist step %s", step.step_id)
+            logger.exception("failed to save the session of %s", self.agent_id)
 
-    def _save_plan(self, plan: TaskPlan) -> None:
-        path = self._plans_dir / f"{plan.plan_id}.json"
-        data = plan.to_dict()
-        data["correlation_id"] = plan.correlation_id
-        data["origin_channel_id"] = plan.origin_channel_id
-        data["work_dir"] = plan.work_dir
-        path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
-
-    def _load_plan(self) -> None:
-        if not self._plans_dir.exists():
+    async def _load_plan(self) -> None:
+        """Read back the task's live plan and the Planner's session, if a previous Planner left them."""
+        try:
+            stored = await db_plans.load(self._task_id)
+            if stored is None or stored["plan"]["status"] not in ("planning", *db_plans.LIVE_STATUSES):
+                return
+            session = await db_agent_sessions.get_session(self.agent_id) or {}
+        except Exception:
+            logger.exception("planner %s cannot read its saved plan", self.agent_id)
             return
-        for path in self._plans_dir.glob("*.json"):
-            try:
-                data = json.loads(path.read_text(encoding="utf-8"))
-                if data.get("status") in ("planning", "executing", "verifying"):
-                    self._plan = TaskPlan(
-                        plan_id=data["plan_id"],
-                        goal_id=data.get("goal_id", ""),
-                        requirement=data.get("requirement", ""),
-                        work_dir=data.get("work_dir", ""),
-                        status=data.get("status", "executing"),
-                        correlation_id=data.get("correlation_id", ""),
-                        origin_channel_id=data.get("origin_channel_id", ""),
-                        project_id=data.get("project_id", ""),
-                        project_name=data.get("project_name", ""),
-                        project_description=data.get("project_description", ""),
-                        project_background=data.get("project_background", ""),
-                        project_planner_harness=data.get("project_planner_harness", ""),
-                        project_updated_at=data.get("project_updated_at", ""),
-                        project_work_dir=data.get("project_work_dir", ""),
-                        session_id=data.get("session_id"),
-                        session_totals=Usage.from_dict(data.get("session_totals")),
-                        final_summary=data.get("final_summary", ""),
-                        fail_reason=data.get("fail_reason", ""),
-                    )
-                    for sd in data.get("steps", []):
-                        self._plan.steps.append(PlanStep(
-                            step_id=sd["step_id"],
-                            index=sd.get("index", 0),
-                            instruction=sd.get("instruction", ""),
-                            key=sd.get("key", ""),
-                            status=sd.get("status", "pending"),
-                            acceptance_criteria=sd.get("acceptance_criteria", []),
-                            review=bool(sd.get("review", False)),
-                            target_files=sd.get("target_files", []),
-                            depends_on=sd.get("depends_on", []),
-                            worker_id=sd.get("worker_id"),
-                            reviewer_id=sd.get("reviewer_id"),
-                            retries=int(sd.get("retries", 0)),
-                            feedback=sd.get("feedback", []),
-                        ))
-                    break
-            except (json.JSONDecodeError, KeyError):
-                logger.warning("skipping corrupt plan file %s", path)
+        row = stored["plan"]
+        plan = TaskPlan(
+            plan_id=row["plan_id"],
+            goal_id=row.get("goal_id") or "",
+            requirement=row.get("requirement") or "",
+            work_dir=row.get("work_dir") or "",
+            status=row["status"],
+            correlation_id=row.get("correlation_id") or "",
+            origin_channel_id=row.get("origin_channel_id") or "",
+            project_id=row.get("project_id") or "",
+            session_id=session.get("session_id"),
+            session_totals=Usage.from_dict(session.get("session_totals")),
+            final_summary=row.get("final_summary") or "",
+            fail_reason=row.get("fail_reason") or "",
+        )
+        for sd in stored["steps"]:
+            plan.steps.append(PlanStep(
+                step_id=sd["id"],
+                index=int(sd.get("step_index") or 0),
+                instruction=sd.get("instruction") or "",
+                key=sd.get("step_key") or "",
+                target_files=list(sd.get("target_files") or []),
+                validation_commands=list(sd.get("validation_commands") or []),
+                acceptance_criteria=list(sd.get("acceptance_criteria") or []),
+                depends_on=list(sd.get("depends_on") or []),
+                review=bool(sd.get("review")),
+                status=sd.get("status") or "pending",
+                result=sd.get("result"),
+                worker_id=sd.get("worker_id"),
+                reviewer_id=sd.get("reviewer_id"),
+                retries=int(sd.get("retries") or 0),
+                feedback=list(sd.get("feedback") or []),
+                missed_messages=list(sd.get("missed_messages") or []),
+            ))
+        self._plan = plan
