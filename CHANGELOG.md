@@ -370,6 +370,21 @@ How the agent system works today is described in
 
 ### Fixed
 
+- **Dashboard fixes.**
+  - What the Manager's Claude says in a turn of its own now shows in an open
+    web chat as it is saved, as a message of its own; before, it appeared
+    only after the chat was reopened. The web channel pushes it as a
+    `chat.message` event on `GET /api/chat/events?session=<chat session>`,
+    which the chat page keeps open for the Manager's chat.
+  - A task's config is stored and returned as a JSON object. It used to come
+    back as JSON text, so the task page showed `"{}"`, and saving it from
+    there stored a string that grew one layer of quoting per save. Rows
+    stored that way read back as the object; a config that is not an object
+    is refused with a 400.
+  - The Tasks list has its page padding; the task page's back button is
+    named "Back to tasks"; below 1024 px the sidebar collapses into a drawer
+    opened from a menu button (Escape, the backdrop or a choice closes it);
+    a project created from New Task can be given its background.
 - A resident Manager or Planner whose saved Claude session no longer exists
   answered nothing, forever: every turn resumed the same unknown id, Claude
   replied with only an error result ("No conversation found", no init event),

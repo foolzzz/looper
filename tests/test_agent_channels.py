@@ -90,6 +90,39 @@ class TestWebChannelAdapter:
 
         asyncio.run(_run())
 
+    def test_a_reply_naming_a_chat_session_is_pushed_live_to_that_open_chat_only(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from unittest.mock import AsyncMock
+
+        from loopx.db import chat
+
+        monkeypatch.setattr(chat, "save_message", AsyncMock(return_value=None))
+
+        async def _run() -> None:
+            adapter = WebChannelAdapter()
+            watched = adapter.iter_chat_events("chat-1")
+            other = adapter.iter_chat_events("chat-2", heartbeat=0.05)
+            reply = MessageEnvelope.create(
+                source=MANAGER_ADDRESS,
+                target=channel_address("web", "channel-web"),
+                message_type=MessageType.AGENT_REPLY,
+                payload={"text": "the background job is done", "autonomous": True, "chat_session_id": "chat-1"},
+                correlation_id="finished-corr",
+            )
+            assert (await adapter.deliver(reply)).success
+            assert await asyncio.wait_for(anext(watched), 1) == {
+                "kind": "chat.message",
+                "payload": {"message_id": reply.message_id, "role": "assistant",
+                            "content": "the background job is done", "created_at": reply.timestamp},
+            }
+            assert (await asyncio.wait_for(anext(other), 1))["kind"] == "heartbeat"
+            await watched.aclose()
+            await other.aclose()
+            assert not adapter._chats._subs  # a closed chat is no longer pushed to
+
+        asyncio.run(_run())
+
     @pytest.mark.parametrize(("message_type", "payload", "kind"), [
         (MessageType.AGENT_REPLY, {"text": "hello user"}, "answer.final"),
         (MessageType.STATUS_UPDATE, {"text": "thinking..."}, "agent.phase"),

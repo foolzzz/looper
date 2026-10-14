@@ -10,6 +10,7 @@ import {
   streamSSE,
   fetchAgentConfigs,
   fetchLlmRecords,
+  watchChat,
   type SSEEvent,
   type AgentConfig,
   type ChatTarget,
@@ -323,6 +324,29 @@ export function ChatPage() {
       dbLoadedRef.current = true;
     });
   }, [sessionId]);
+
+  // What the Manager's Claude says on its own (after background work it started
+  // ends) answers no message, so no message's stream carries it: it arrives on
+  // the open chat's own stream and shows as a message of its own.
+  useEffect(() => {
+    if (target.kind !== "manager" || !sessionId) return;
+    return watchChat(sessionId, (m) =>
+      setMessages((prev) =>
+        prev.some((p) => p.id === m.message_id)
+          ? prev
+          : [
+              ...prev,
+              {
+                id: m.message_id,
+                role: "assistant",
+                content: m.content,
+                timestamp: new Date(m.created_at).getTime(),
+                streaming: false,
+              },
+            ],
+      ),
+    );
+  }, [sessionId, target.kind]);
 
   // Keep localStorage as cache
   useEffect(() => {

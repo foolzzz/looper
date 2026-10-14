@@ -2,7 +2,7 @@
 
 Pure stdlib asyncio — zero external dependencies. Serves:
   - REST API endpoints (/api/*)
-  - SSE streaming (/api/chat/events)
+  - SSE streaming (/api/chat/events: a message's stream by ?cid=, an open chat's by ?session=)
   - Static files from web/dist/ with SPA fallback
 """
 
@@ -551,8 +551,11 @@ class AgentHTTPServer:
         writer: asyncio.StreamWriter,
     ) -> None:
         cid = query.get("cid", "")
+        if not cid and query.get("session"):
+            await self._handle_chat_session_events(query["session"], writer)
+            return
         if not cid:
-            writer.write(_json_response(HTTP_400, {"error": "cid is required"}))
+            writer.write(_json_response(HTTP_400, {"error": "cid or session is required"}))
             await writer.drain()
             return
 
@@ -575,6 +578,28 @@ class AgentHTTPServer:
                 await writer.drain()
         except (ConnectionError, BrokenPipeError):
             self._web_adapter.close_sse_stream(cid)
+
+    async def _handle_chat_session_events(self, session_id: str, writer: asyncio.StreamWriter) -> None:
+        """SSE stream of what reaches an open chat outside any message's stream, until the page leaves."""
+        events = self._web_adapter.iter_chat_events(session_id)
+        writer.write((
+            "HTTP/1.1 200 OK\r\n"
+            "Content-Type: text/event-stream\r\n"
+            "Cache-Control: no-cache\r\n"
+            "Connection: keep-alive\r\n"
+            "X-Accel-Buffering: no\r\n"
+            "\r\n"
+        ).encode("utf-8"))
+        try:
+            await writer.drain()
+            async for event in events:
+                payload = json.dumps(event.get("payload", {}), ensure_ascii=False)
+                writer.write(f"event: {event.get('kind', 'message')}\ndata: {payload}\n\n".encode("utf-8"))
+                await writer.drain()
+        except (ConnectionError, BrokenPipeError):
+            pass
+        finally:
+            await events.aclose()
 
     async def _handle_task_config_update(
         self, task_id: str, body: bytes, writer: asyncio.StreamWriter,
@@ -599,6 +624,12 @@ class AgentHTTPServer:
             await writer.drain()
             return
 
+        config = data.get("config")
+        if config is not None and not isinstance(config, dict):
+            writer.write(_json_response(HTTP_400, {"error": "config must be a JSON object"}))
+            await writer.drain()
+            return
+
         work_dir = None
         if "work_dir" in data:
             from .tiers.task import resolve_work_dir
@@ -613,7 +644,7 @@ class AgentHTTPServer:
             task_id,
             requirement=data.get("requirement"),
             work_dir=work_dir,
-            config=data.get("config"),
+            config=config,
         )
         if not ok:
             writer.write(_json_response(HTTP_500, {"error": "update failed"}))

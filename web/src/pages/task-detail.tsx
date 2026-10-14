@@ -273,6 +273,16 @@ function LiveActivityFeed({ taskId, isActive }: { taskId: string; isActive: bool
   );
 }
 
+/** The config text as an object, or null when it is not a JSON object. */
+function parseConfig(text: string): Record<string, unknown> | null {
+  try {
+    const value: unknown = JSON.parse(text.trim() || "{}");
+    return value !== null && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
+  } catch {
+    return null;
+  }
+}
+
 function TaskConfigSection({ task }: { task: TaskDetail }) {
   const isInit = task.status === "init";
   const [editReq, setEditReq] = useState(task.requirement);
@@ -294,11 +304,14 @@ function TaskConfigSection({ task }: { task: TaskDetail }) {
       setSaveError("A work directory is required.");
       return;
     }
+    const parsedConfig = parseConfig(editConfig);
+    if (!parsedConfig) {
+      setSaveError("Config must be a JSON object, such as {}.");
+      return;
+    }
     setSaving(true);
     setSaveError("");
     try {
-      let parsedConfig: Record<string, unknown> = {};
-      try { parsedConfig = JSON.parse(editConfig); } catch { /* keep empty */ }
       await updateTaskConfig(task.task_id, {
         requirement: editReq !== task.requirement ? editReq : undefined,
         work_dir: editWorkDir !== (task.work_dir || "") ? editWorkDir : undefined,
@@ -361,7 +374,6 @@ function TaskConfigSection({ task }: { task: TaskDetail }) {
           ) : (
             <p className="mt-1 text-sm font-mono">{task.work_dir || "—"}</p>
           )}
-          {saveError && <p className="mt-1 text-xs text-destructive">{saveError}</p>}
         </div>
         <div>
           <label className="text-xs font-medium text-muted-foreground">Config (JSON)</label>
@@ -378,6 +390,7 @@ function TaskConfigSection({ task }: { task: TaskDetail }) {
             </pre>
           )}
         </div>
+        {saveError && <p role="alert" className="text-xs text-destructive">{saveError}</p>}
         {isInit && (
           <p className="text-xs text-muted-foreground">
             Edit the configuration above, then click <strong>Start</strong> to begin execution.
@@ -1166,9 +1179,11 @@ export function TaskDetailPage({ taskId, onBack }: TaskDetailPageProps) {
           <button
             type="button"
             onClick={onBack}
-            className="flex h-8 w-8 items-center justify-center rounded-md hover:bg-accent transition-colors"
+            aria-label="Back to tasks"
+            title="Back to tasks"
+            className="flex h-8 w-8 items-center justify-center rounded-md hover:bg-accent transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
           >
-            <ArrowLeft className="h-4 w-4" />
+            <ArrowLeft className="h-4 w-4" aria-hidden="true" />
           </button>
           <div className="min-w-0 flex-1">
             <h1 className="text-lg font-semibold leading-tight truncate">

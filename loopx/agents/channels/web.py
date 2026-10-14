@@ -12,8 +12,9 @@ import json
 import logging
 import uuid
 from pathlib import Path
-from typing import Any, AsyncIterator
+from typing import Any, AsyncGenerator, AsyncIterator
 
+from ..broadcast import Broadcaster
 from ..bus import MessageBus
 from ..message import (
     MANAGER_ADDRESS,
@@ -36,6 +37,8 @@ class WebChannelAdapter(ChannelAdapter):
         self._bus: MessageBus | None = None
         self._address = channel_address("web", "channel-web")
         self._sse_queues: dict[str, asyncio.Queue[dict[str, Any]]] = {}
+        # Open chat pages, keyed by chat session: what reaches a chat outside any message's stream.
+        self._chats = Broadcaster()
         self._outbound_task: asyncio.Task[Any] | None = None
         self._running = False
 
@@ -87,22 +90,54 @@ class WebChannelAdapter(ChannelAdapter):
                 channel="web", success=False, error="SSE queue full"
             )
 
-    @staticmethod
-    async def _add_to_chat(session_id: str, envelope: MessageEnvelope) -> DeliveryReceipt:
+    async def _add_to_chat(self, session_id: str, envelope: MessageEnvelope) -> DeliveryReceipt:
         """Add a reply that answers no message (what the Manager's Claude said on its own) to its chat.
 
         A message's stream ends at its answer, so such a reply never goes to
-        one; the chat page shows it with the chat's other messages.
+        one. It is saved with the chat's other messages, then pushed as a
+        ``chat.message`` event to every page that has the chat open
+        (``iter_chat_events``), even when saving failed.
         """
         from ...db.chat import save_message
 
+        text = str(envelope.payload.get("text") or "")
+        receipt = DeliveryReceipt(channel="web", success=True)
         try:
-            await save_message(session_id=session_id, message_id=envelope.message_id, role="assistant",
-                               content=str(envelope.payload.get("text") or ""))
+            await save_message(session_id=session_id, message_id=envelope.message_id, role="assistant", content=text)
         except Exception as exc:
             logger.warning("web: could not add a reply to chat %s", session_id, exc_info=True)
-            return DeliveryReceipt(channel="web", success=False, error=f"could not save to chat: {exc}")
-        return DeliveryReceipt(channel="web", success=True)
+            receipt = DeliveryReceipt(channel="web", success=False, error=f"could not save to chat: {exc}")
+        self._chats.publish(session_id, {
+            "kind": "chat.message",
+            "payload": {"message_id": envelope.message_id, "role": "assistant", "content": text,
+                        "created_at": envelope.timestamp},
+        })
+        return receipt
+
+    def iter_chat_events(self, session_id: str, *, heartbeat: float = 15.0) -> AsyncGenerator[dict[str, Any], None]:
+        """The events of the chat ``session_id`` that belong to no message's stream, for as long as it is read.
+
+        Subscribes at the call, so nothing added after it is missed; the
+        stream yields a ``heartbeat`` when nothing came for ``heartbeat``
+        seconds and unsubscribes once it is closed.
+        """
+        queue = self._chats.subscribe(session_id)
+
+        async def events() -> AsyncGenerator[dict[str, Any], None]:
+            try:
+                while True:
+                    try:
+                        event = await asyncio.wait_for(queue.get(), timeout=heartbeat)
+                    except asyncio.TimeoutError:
+                        yield {"kind": "heartbeat", "payload": {}}
+                        continue
+                    if event is None:
+                        return
+                    yield event
+            finally:
+                self._chats.unsubscribe(session_id, queue)
+
+        return events()
 
     def healthcheck(self) -> dict[str, Any]:
         return {

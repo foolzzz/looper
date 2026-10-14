@@ -295,3 +295,28 @@ def test_execution_settings_are_stored_through_the_task_and_cleared() -> None:
             await projects.update_project(plain["id"], execution={"review_policy": "some"}, pool=pool)
 
     _run(_test)
+
+
+@pytest.mark.parametrize("wraps", [0, 1, 2])
+def test_task_config_is_written_as_an_object_and_a_string_wrapped_one_reads_back(wraps: int) -> None:
+    """Saves from the task page used to wrap the object in one more JSON string each time."""
+    import json
+
+    from loopx.db import projects, tasks
+
+    async def _test(pool: Any) -> None:
+        project = await projects.create_project(name="p", pool=pool)
+        await tasks.create_task(task_id="task-1", requirement="r", project_id=project["id"], config={"a": 1},
+                                status="init", pool=pool)
+        await tasks.update_task_config("task-1", config={"a": 2}, pool=pool)
+        assert await pool.fetchval("SELECT jsonb_typeof(config) FROM tasks") == "object"
+
+        stored: Any = {"a": 2}
+        for _ in range(wraps):
+            stored = json.dumps(stored)
+        await pool.execute("UPDATE tasks SET config = $1", json.dumps(stored))
+        assert (await tasks.get_task("task-1", pool=pool))["config"] == {"a": 2}
+        assert (await tasks.get_task_with_steps("task-1", pool=pool))["config"] == {"a": 2}
+        assert [t["config"] for t in await tasks.list_tasks(pool=pool)] == [{"a": 2}]
+
+    _run(_test)
