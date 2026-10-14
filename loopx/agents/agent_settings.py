@@ -18,11 +18,10 @@ A run's model is its project's ``model`` for a task agent when set
 (``agent_override``), else the Settings default, else ``DEFAULT_MODEL``. A task
 agent's project may also cap each Claude Code process (``--max-budget-usd``). The
 effort, when set, and the environment variables come from Settings for every
-agent, and so does the library (``library.load_library``): the imported
-plugins and skills every run loads. A task agent's launch also carries its
-project's knowledge (``knowledge.load_knowledge``): the directories to mount,
-and its project's skills (``project_skills.load_project_skills``): one more
-plugin directory.
+agent. Every run also loads the catalog items installed for its role, globally
+or in its project (``library.load_installed``), and a task agent's launch
+carries its project's knowledge (``knowledge.load_knowledge``): the
+directories to mount.
 Settings live in ``system_settings``, one row per key; a missing row means
 the built-in default. An unreadable table falls back to the built-in
 defaults, so an agent still runs (and its record says where its harness came
@@ -43,7 +42,6 @@ from typing import Any
 
 from .knowledge import EMPTY_KNOWLEDGE, AgentKnowledge
 from .library import EMPTY_LIBRARY, AgentLibrary
-from .project_skills import EMPTY_PROJECT_SKILLS, AgentProjectSkills
 
 logger = logging.getLogger(__name__)
 
@@ -321,8 +319,8 @@ def resolve_harness(
 
 @dataclass(frozen=True)
 class Launch:
-    """The model, effort, environment, library, project knowledge and project skills one agent run starts with
-    (and, for every agent alike, its permissions). Only a task agent's launch has knowledge and project skills."""
+    """The model, effort, environment, installed items and project knowledge one agent run starts with
+    (and, for every agent alike, its permissions). Only a task agent's launch has knowledge."""
 
     model: str
     model_source: ModelSource
@@ -330,21 +328,19 @@ class Launch:
     env: tuple[tuple[str, str], ...] = ()
     library: AgentLibrary = EMPTY_LIBRARY
     knowledge: AgentKnowledge = EMPTY_KNOWLEDGE
-    project_skills: AgentProjectSkills = EMPTY_PROJECT_SKILLS
     max_budget_usd: float | None = None  # the project's cap on each Claude Code process; None for none
 
     def args(self) -> list[str]:
         """The Claude Code flags every agent starts with: the permissions, the model, the effort, the
-        library's plugin directories, the project skills' plugin directory, the directories of the
-        project knowledge and the project's spend cap."""
-        from .claude_cli import budget_args, knowledge_args, library_args, permission_args, project_skill_args
+        plugin directories of the installed items, the directories of the project knowledge and the
+        project's spend cap."""
+        from .claude_cli import budget_args, knowledge_args, library_args, permission_args
 
         return [
             *permission_args(),
             "--model", self.model,
             *(["--effort", self.effort] if self.effort else []),
             *library_args(self.library),
-            *project_skill_args(self.project_skills),
             *knowledge_args(self.knowledge),
             *budget_args(self.max_budget_usd),
         ]
@@ -362,7 +358,7 @@ class Launch:
 
     def record(self) -> dict[str, Any]:
         """Its fields in a run's metadata: the model and its source, the variables' names (values hashed),
-        the library's items and hash, and the project skills and their hash."""
+        and the installed items and their hash."""
         record: dict[str, Any] = {
             "model_choice": {"model": self.model, "source": self.model_source.value, "effort": self.effort or None},
         }
@@ -373,8 +369,6 @@ class Launch:
             }
         if (library := self.library.record()) is not None:
             record["library"] = library
-        if (project_skills := self.project_skills.record()) is not None:
-            record["project_skills"] = project_skills
         if self.max_budget_usd is not None:
             record["max_budget_usd"] = self.max_budget_usd
         return record
@@ -385,21 +379,20 @@ def resolve_launch(
     model_override: Any = None,
     library: AgentLibrary = EMPTY_LIBRARY,
     knowledge: AgentKnowledge = EMPTY_KNOWLEDGE,
-    project_skills: AgentProjectSkills = EMPTY_PROJECT_SKILLS,
     *,
     project_model: str | None = None,
     max_budget_usd: float | None = None,
 ) -> Launch:
     """An agent's launch settings: for a task agent its project's model when set, else its own model when
-    set, else the default; the default effort and environment; the library loaded for the run; and, for a
-    task agent, its project's knowledge, skills and spend cap on each process."""
+    set, else the default; the default effort and environment; the items installed for the run; and, for a
+    task agent, its project's knowledge and spend cap on each process."""
     override = model_override.strip() if isinstance(model_override, str) else ""
     model, source = defaults.model, defaults.model_source
     if project_model:
         model, source = project_model, ModelSource.PROJECT_OVERRIDE
     elif override:
         model, source = override, ModelSource.AGENT_OVERRIDE
-    return Launch(model, source, defaults.effort, defaults.env, library, knowledge, project_skills, max_budget_usd)
+    return Launch(model, source, defaults.effort, defaults.env, library, knowledge, max_budget_usd)
 
 
 # --- The settings API (GET, PUT and reset of /api/settings/agents) ---

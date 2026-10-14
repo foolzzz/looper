@@ -39,7 +39,7 @@ from ..claude_cli import (
     isolation_args,
     system_prompt_args,
 )
-from ..library import load_library
+from ..library import load_installed
 from ..projects import project_name
 from ..run_usage import Usage
 from ..system_prompt import SystemPrompt, build_system_prompt, is_recommended
@@ -429,7 +429,8 @@ class ManagerAgent:
             await self._load_session_state()
         defaults = await agent_settings.load_defaults()
         system_prompt = self._composed_prompt(defaults)
-        launch = resolve_launch(defaults, self._model_override, await load_library(self._runtime_root))
+        launch = resolve_launch(defaults, self._model_override,
+                                await load_installed(self._runtime_root, AgentType.MANAGER.value))
         try:
             prompt_file = system_prompt.write_file(self._runtime_root)
         except OSError as exc:
@@ -660,7 +661,7 @@ class ManagerAgent:
             # turn; a turn Claude runs on its own has no such echo.
             "--replay-user-messages",
             # None of the operator's personal settings, memory, hooks, plugins or MCP servers; the
-            # permissions every agent shares and the library's plugins and skills come with the launch args.
+            # permissions every agent shares and the plugins and skills installed for it come with the launch args.
             *isolation_args(self._config.work_dir),
             *system_prompt_args(prompt_file),
             *launch.args(),

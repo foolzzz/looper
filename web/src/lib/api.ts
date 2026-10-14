@@ -504,9 +504,10 @@ export async function deleteKnowledgeDocument(projectId: string, documentId: str
   return res.json();
 }
 
-// --- A project's skills: Claude Code skills only its Planner, Workers and Reviewers load ---
+// --- A project's own skills: catalog items the project writes, installed in it for its task roles ---
 
 export interface ProjectSkill {
+  /** The catalog item's id. */
   skill_id: string;
   /** A lowercase slug; the skill's directory and frontmatter name. */
   name: string;
@@ -514,27 +515,18 @@ export interface ProjectSkill {
   qualified_name: string;
   /** One line; Claude Code shows it to the model to decide when to use the skill. */
   description: string;
-  /** Only enabled skills are loaded, from the next run on. */
-  enabled: boolean;
-  /** The size of its SKILL.md body. */
+  /** The size of its SKILL.md (frontmatter included). */
   size_bytes: number;
   created_at: string;
   updated_at: string;
 }
 
-export interface ProjectSkills {
-  project_id: string;
-  skills: ProjectSkill[];
-  count: number;
-  enabled_count: number;
-  /** The plugin agents load the skills from. */
-  plugin: string;
-  caps: {
-    name_max_chars: number;
-    description_max_chars: number;
-    content_max_bytes: number;
-    project_max_skills: number;
-  };
+export interface SkillCaps {
+  name_max_chars: number;
+  description_max_chars: number;
+  content_max_bytes: number;
+  /** How many skills one project may write. */
+  project_max_skills: number;
 }
 
 export interface NewProjectSkill {
@@ -549,14 +541,15 @@ function skillsUrl(projectId: string, skillId?: string) {
   return skillId ? `${base}/${encodeURIComponent(skillId)}` : base;
 }
 
-export async function fetchProjectSkills(projectId: string): Promise<ProjectSkills> {
-  const res = await fetch(skillsUrl(projectId));
-  if (!res.ok) await failed(res, "skills");
-  return res.json();
-}
-
-/** Add a skill; the server refuses a bad field or a cap with the reason (400) and a taken name (409). */
-export async function addProjectSkill(projectId: string, skill: NewProjectSkill): Promise<ProjectSkills> {
+/**
+ * Write a skill in the project: a catalog item, installed in the project for the Planner, Workers and Reviewers.
+ * The server refuses a bad field or a cap with the reason (400) and a taken name (409). Answers with the project's
+ * view of its installs.
+ */
+export async function addProjectSkill(
+  projectId: string,
+  skill: NewProjectSkill,
+): Promise<ProjectInstalls & { skill: ProjectSkill }> {
   const res = await fetch(skillsUrl(projectId), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -566,7 +559,7 @@ export async function addProjectSkill(projectId: string, skill: NewProjectSkill)
   return res.json();
 }
 
-/** One skill and its SKILL.md body. */
+/** One skill the project wrote and its SKILL.md body. */
 export interface ProjectSkillBody {
   skill: ProjectSkill;
   content: string;
@@ -578,12 +571,12 @@ export async function fetchProjectSkill(projectId: string, skillId: string): Pro
   return res.json();
 }
 
-/** Change a skill's name, description, body or switch; a bad field is 400, a taken name 409. */
+/** Change a skill's name, description or body; a bad field is 400, a taken name 409. Switch it with its install. */
 export async function updateProjectSkill(
   projectId: string,
   skillId: string,
-  fields: Partial<NewProjectSkill> & { enabled?: boolean },
-): Promise<ProjectSkills> {
+  fields: Partial<NewProjectSkill>,
+): Promise<ProjectInstalls & { skill: ProjectSkill }> {
   const res = await fetch(skillsUrl(projectId, skillId), {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
@@ -593,7 +586,11 @@ export async function updateProjectSkill(
   return res.json();
 }
 
-export async function deleteProjectSkill(projectId: string, skillId: string): Promise<ProjectSkills> {
+/** Delete a skill the project wrote: from the catalog and from every project it is installed in. */
+export async function deleteProjectSkill(
+  projectId: string,
+  skillId: string,
+): Promise<ProjectInstalls & { deleted: string }> {
   const res = await fetch(skillsUrl(projectId, skillId), { method: "DELETE" });
   if (!res.ok) await failed(res, "delete skill");
   return res.json();
@@ -826,9 +823,10 @@ export interface LlmRecord {
     model_choice?: { model: string; source: ModelSource; effort: string | null };
     /** The environment variables from Settings: their names, with each value's sha256. */
     env?: { sha256: string; keys: Record<string, string> };
-    /** The library items the run loaded (plugins and skills) and their hash; error when it went without them. */
+    /** The catalog items installed for the run (plugins and skills) and their hash; error when it went without
+     * them. */
     library?: RunLibrary;
-    /** The project skills the run loaded (Planner, Worker and Reviewer runs); error when it went without them. */
+    /** Runs recorded before the catalog: the project skills a task agent loaded. */
     project_skills?: RunProjectSkills;
   } | null;
   created_at: string;
@@ -1060,23 +1058,50 @@ export async function resetDefaultHarness(): Promise<AgentSettings> {
   return res.json();
 }
 
-// --- The library: imported plugins and skills every agent loads ---
+// --- The capability catalog: items acquired into LoopX, and where they are installed ---
 
 export type LibraryKind = "plugin" | "skill";
+/** How an item was acquired; only "machine" (imported from this machine) and "project" (written in a project) so far. */
+export type ItemOrigin = "machine" | "upload" | "git" | "ui" | "project";
+export type AgentRole = "manager" | "planner" | "worker" | "reviewer";
+export type InstallScope = "global" | "project";
 
-export interface LibraryItem {
-  id: string;
+/** An item installed on a scope for some roles; a project install never names the manager. */
+export interface Install {
+  install_id: string;
+  item_id: string;
+  scope: InstallScope;
+  project_id: string | null;
+  project_name: string | null;
+  roles: AgentRole[];
+  /** A disabled install loads nowhere, from the next run on. */
+  enabled: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CatalogItem {
+  item_id: string;
   kind: LibraryKind;
-  /** A plugin's name@marketplace, or a skill's directory name. */
+  /** A plugin's name@marketplace, or a skill's name. */
   name: string;
+  /** How agents see it: a plugin by its name, a skill as personal:<name> or, written in a project, project:<name>. */
+  qualified_name: string;
+  origin: ItemOrigin;
+  /** The project that wrote it (origin "project"). */
+  owner_project_id: string | null;
+  owner_project_name: string | null;
+  description: string;
   source: string;
-  /** A plugin's declared version; "" for a skill. */
+  /** A plugin's declared version; "" otherwise. */
   version: string;
   sha256: string;
-  enabled: boolean;
   size_bytes: number;
   file_count: number;
   imported_at: string;
+  updated_at: string;
+  /** Where it is installed; empty when it loads nowhere. */
+  installs: Install[];
 }
 
 export interface LibrarySkipped {
@@ -1100,53 +1125,121 @@ export interface LibraryImport {
   skipped_count: number;
 }
 
-export interface Library {
-  items: LibraryItem[];
-  last_import: LibraryImport | null;
-  enabled_count: number;
-  /** The hash of the enabled set, as each run records it; null when nothing is enabled. */
-  library_sha256: string | null;
+export interface Catalog {
+  items: CatalogItem[];
+  /** Items installed somewhere. */
+  installed_count: number;
   total_bytes: number;
-  /** The plugin the skills are loaded from: Claude Code names them <skills_plugin>:<skill>. */
-  skills_plugin: string;
+  last_import: LibraryImport | null;
+  roles: AgentRole[];
+  task_roles: AgentRole[];
+}
+
+/** One item with its files (no content) and, for a skill, its SKILL.md. */
+export interface CatalogItemDetail {
+  item: CatalogItem;
+  files: { path: string; size_bytes: number; executable: boolean }[];
+  skill_md: string | null;
+}
+
+/** An install that applies to a project, with its item; inherited ones are global (changed in Settings). */
+export interface ProjectInstall extends Install {
+  inherited: boolean;
+  item: CatalogItem;
+}
+
+export interface ProjectInstalls {
+  project_id: string;
+  /** The project's own installs first, then the global ones that reach its task roles. */
+  installs: ProjectInstall[];
+  /** How many skills the project wrote. */
+  owned_count: number;
+  task_roles: AgentRole[];
+  skill_caps: SkillCaps;
+}
+
+export interface InstallChange {
+  install: Install;
+  item: CatalogItem;
 }
 
 export interface RunLibrary {
   sha256: string | null;
-  items: { kind: LibraryKind; name: string; sha256: string }[];
+  role?: AgentRole | null;
+  project_id?: string | null;
+  /** `plugin` and `scope` are absent in runs recorded before the catalog. */
+  items: { kind: LibraryKind; name: string; sha256: string; plugin?: string; scope?: InstallScope }[];
   error?: string;
 }
 
 export interface RunProjectSkills {
   project_id: string | null;
-  /** The set's hash, which names its plugin directory; null when none was loaded. */
   sha256: string | null;
-  /** The plugin they load from: agents see each as <plugin>:<name>. */
   plugin: string;
   skills: { name: string; sha256: string }[];
   error?: string;
 }
 
-export async function fetchLibrary(): Promise<Library> {
-  const res = await fetch(`${API_BASE}/settings/library`);
-  if (!res.ok) await failed(res, "library");
+export async function fetchCatalog(): Promise<Catalog> {
+  const res = await fetch(`${API_BASE}/catalog`);
+  if (!res.ok) await failed(res, "catalog");
   return res.json();
 }
 
-/** Import (or re-import) this machine's enabled Claude Code plugins and personal skills. */
-export async function importLibrary(): Promise<Library> {
-  const res = await fetch(`${API_BASE}/settings/library/import`, { method: "POST" });
+export async function fetchCatalogItem(itemId: string): Promise<CatalogItemDetail> {
+  const res = await fetch(`${API_BASE}/catalog/${encodeURIComponent(itemId)}`);
+  if (!res.ok) await failed(res, "catalog item");
+  return res.json();
+}
+
+/** Import (or re-import) this machine's enabled Claude Code plugins and personal skills; new items are installed nowhere. */
+export async function importCatalog(): Promise<Catalog> {
+  const res = await fetch(`${API_BASE}/catalog/import`, { method: "POST" });
   if (!res.ok) await failed(res, "import");
   return res.json();
 }
 
-export async function setLibraryItemEnabled(id: string, enabled: boolean): Promise<Library> {
-  const res = await fetch(`${API_BASE}/settings/library/${id}`, {
+/** Install an item globally or in one project; roles default to every role the scope allows. 409 when it is there. */
+export async function installItem(install: {
+  item_id: string;
+  scope: InstallScope;
+  project_id?: string;
+  roles?: AgentRole[];
+  enabled?: boolean;
+}): Promise<InstallChange> {
+  const res = await fetch(`${API_BASE}/installs`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(install),
+  });
+  if (!res.ok) await failed(res, "install");
+  return res.json();
+}
+
+export async function updateInstall(
+  installId: string,
+  fields: { roles?: AgentRole[]; enabled?: boolean },
+): Promise<InstallChange> {
+  const res = await fetch(`${API_BASE}/installs/${encodeURIComponent(installId)}`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ enabled }),
+    body: JSON.stringify(fields),
   });
-  if (!res.ok) await failed(res, "update library item");
+  if (!res.ok) await failed(res, "update install");
+  return res.json();
+}
+
+/** Uninstall; the item stays in the catalog. */
+export async function uninstall(installId: string): Promise<{ deleted: string; item: CatalogItem }> {
+  const res = await fetch(`${API_BASE}/installs/${encodeURIComponent(installId)}`, { method: "DELETE" });
+  if (!res.ok) await failed(res, "uninstall");
+  return res.json();
+}
+
+/** What applies to a project: its own installs and the inherited global ones. */
+export async function fetchProjectInstalls(projectId: string): Promise<ProjectInstalls> {
+  const res = await fetch(`${API_BASE}/projects/${encodeURIComponent(projectId)}/installs`);
+  if (!res.ok) await failed(res, "installs");
   return res.json();
 }
 

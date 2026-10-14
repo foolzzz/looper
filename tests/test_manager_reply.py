@@ -648,9 +648,9 @@ class TestManagerHarnessAndLaunch:
 
 @pytest.mark.usefixtures("agent_db")
 class TestManagerLibrary:
-    """The Manager loads the enabled plugins and the skills plugin from the
-    library; a change to the enabled set restarts its Claude, which resumes
-    the session."""
+    """The Manager loads the plugins and the skills plugin installed for it
+    globally; a change to that set restarts its Claude, which resumes the
+    session."""
 
     def test_the_command_carries_the_enabled_plugins_and_the_skills_plugin(
         self, monkeypatch: pytest.MonkeyPatch, agent_db: Any, enabled_library: Any,
@@ -663,9 +663,11 @@ class TestManagerLibrary:
         # Skills need no approval of their own: the Manager runs without permission prompts.
         _assert_unrestricted(argv)
         library = agent_db.start_record.await_args.kwargs["metadata"]["library"]
-        assert library["items"] == [{"kind": "plugin", "name": "demo@market", "sha256": demo["sha256"]},
-                                    {"kind": "skill", "name": "alpha", "sha256": alpha["sha256"]}]
-        assert len(library["sha256"]) == 64
+        assert library["items"] == [
+            {"kind": "plugin", "name": "demo@market", "sha256": demo["sha256"], "plugin": "demo", "scope": "global"},
+            {"kind": "skill", "name": "alpha", "sha256": alpha["sha256"], "plugin": "personal", "scope": "global"}]
+        assert (library["role"], library["project_id"], len(library["sha256"])) == ("manager", None, 64)
+        assert agent_db.list_installed.await_args.args == ("manager", None)
 
     def test_a_changed_library_restarts_claude_resuming_its_session(
         self, monkeypatch: pytest.MonkeyPatch, agent_db: Any, enabled_library: Any,
@@ -772,7 +774,7 @@ class TestManagerAutonomousTurns:
 @pytest.mark.usefixtures("agent_db")
 class TestManagerProjectSkills:
     """The Manager spans every project, so it mounts and indexes nothing of a project's (knowledge or
-    skills), only the library."""
+    skills), only what is installed globally for it."""
 
     def test_the_manager_gets_no_project_skills_while_projects_have_some(
         self, monkeypatch: pytest.MonkeyPatch, agent_db: Any, enabled_library: Any, project_skills: Any,
@@ -783,10 +785,11 @@ class TestManagerProjectSkills:
         project_documents(("text", "Glossary", "Terms", "MARKER-ALPHA"))
         chat = _converse(monkeypatch, _resident(), ["hello"])
         ((argv, _),) = chat["spawned"]
-        (only,) = plugin_dirs(argv)  # the library's plugin, nothing more
-        assert only.endswith("/demo") and "/.local/projects/" not in " ".join(argv)
-        agent_db.list_enabled_skills.assert_not_awaited()
-        assert "project_skills" not in agent_db.start_record.await_args.kwargs["metadata"]
+        (only,) = plugin_dirs(argv)  # the global plugin, nothing more
+        assert only.endswith("/demo") and "/project" not in " ".join(plugin_dirs(argv))
+        assert {call.args for call in agent_db.list_installed.await_args_list} == {("manager", None)}
+        recorded = agent_db.start_record.await_args.kwargs["metadata"]["library"]
+        assert [(i["name"], i["scope"]) for i in recorded["items"]] == [("demo@market", "global")]
         # Nor any project's knowledge: no mounted directory, no index, the documents never read.
         assert "--add-dir" not in argv
         assert "Project knowledge" not in chat["prompts"][0]

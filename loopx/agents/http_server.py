@@ -18,7 +18,7 @@ from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
-from . import agent_settings, knowledge, library, project_skills, projects, request_guard
+from . import agent_settings, catalog, knowledge, library, project_skills, projects, request_guard
 from .broadcast import Broadcaster
 from .chat_targets import ChatTargetError, list_chat_targets, resolve_chat_target
 from .project_execution import ProjectExecution
@@ -224,7 +224,8 @@ class AgentHTTPServer:
     # --- API routing ---
 
     _RE_TASK_DETAIL = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)$")
-    _RE_LIBRARY_ITEM = re.compile(r"^/api/settings/library/(lib-[a-zA-Z0-9]+)$")
+    _RE_CATALOG_ITEM = re.compile(r"^/api/catalog/([a-z]+-[a-zA-Z0-9]+)$")
+    _RE_INSTALL = re.compile(r"^/api/installs/(inst-[a-zA-Z0-9]+)$")
     _RE_TASK_ACTIVITY = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)/activity$")
     _RE_TASK_ACTIVITY_STREAM = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)/activity/stream$")
     _RE_TASK_ACTIVITY_SEQ = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)/activity/(\d+)$")
@@ -242,6 +243,7 @@ class AgentHTTPServer:
     _RE_PROJECT = re.compile(r"^/api/projects/(proj-[a-zA-Z0-9]+)$")
     _RE_PROJECT_KNOWLEDGE = re.compile(r"^/api/projects/(proj-[a-zA-Z0-9]+)/knowledge$")
     _RE_PROJECT_DOCUMENT = re.compile(r"^/api/projects/(proj-[a-zA-Z0-9]+)/knowledge/(doc-[a-zA-Z0-9]+)$")
+    _RE_PROJECT_INSTALLS = re.compile(r"^/api/projects/(proj-[a-zA-Z0-9]+)/installs$")
     _RE_PROJECT_SKILLS = re.compile(r"^/api/projects/(proj-[a-zA-Z0-9]+)/skills$")
     _RE_PROJECT_SKILL = re.compile(r"^/api/projects/(proj-[a-zA-Z0-9]+)/skills/(skill-[a-zA-Z0-9]+)$")
 
@@ -317,19 +319,19 @@ class AgentHTTPServer:
         elif (m := self._RE_PROJECT_DOCUMENT.match(path)) and method == "DELETE":
             await self._handle_knowledge(writer, HTTP_200, lambda root: knowledge.delete_document(
                 m.group(1), m.group(2), root))
-        elif (m := self._RE_PROJECT_SKILLS.match(path)) and method == "GET":
-            await self._handle_project_skills(writer, HTTP_200, lambda: project_skills.skills_view(m.group(1)))
+        elif (m := self._RE_PROJECT_INSTALLS.match(path)) and method == "GET":
+            await self._handle_catalog(writer, HTTP_200, lambda: catalog.project_view(m.group(1)))
         elif (m := self._RE_PROJECT_SKILLS.match(path)) and method == "POST":
-            await self._handle_project_skills(writer, HTTP_201, lambda: project_skills.add_skill(
+            await self._handle_catalog(writer, HTTP_201, lambda: project_skills.add_skill(
                 m.group(1), projects.json_object(body)))
         elif (m := self._RE_PROJECT_SKILL.match(path)) and method == "GET":
-            await self._handle_project_skills(writer, HTTP_200, lambda: project_skills.get_skill(
+            await self._handle_catalog(writer, HTTP_200, lambda: project_skills.get_skill(
                 m.group(1), m.group(2)))
         elif (m := self._RE_PROJECT_SKILL.match(path)) and method == "PUT":
-            await self._handle_project_skills(writer, HTTP_200, lambda: project_skills.update_skill(
+            await self._handle_catalog(writer, HTTP_200, lambda: project_skills.update_skill(
                 m.group(1), m.group(2), projects.json_object(body)))
         elif (m := self._RE_PROJECT_SKILL.match(path)) and method == "DELETE":
-            await self._handle_project_skills(writer, HTTP_200, lambda: project_skills.delete_skill(
+            await self._handle_catalog(writer, HTTP_200, lambda: project_skills.delete_skill(
                 m.group(1), m.group(2)))
         elif path == "/api/agent-configs" and method == "GET":
             await self._handle_list_agent_configs(writer)
@@ -363,12 +365,19 @@ class AgentHTTPServer:
             await self._handle_agent_settings(writer, lambda: agent_settings.update_settings(projects.json_object(body)))
         elif path == "/api/settings/agents/reset-harness" and method == "POST":
             await self._handle_agent_settings(writer, agent_settings.reset_harness)
-        elif path == "/api/settings/library" and method == "GET":
-            await self._handle_library(writer, library.library_view)
-        elif path == "/api/settings/library/import" and method == "POST":
-            await self._handle_library(writer, library.import_from_machine)
-        elif (m := self._RE_LIBRARY_ITEM.match(path)) and method == "PUT":
-            await self._handle_library(writer, lambda: library.set_item_enabled(m.group(1), projects.json_object(body)))
+        elif path == "/api/catalog" and method == "GET":
+            await self._handle_catalog(writer, HTTP_200, catalog.catalog_view)
+        elif path == "/api/catalog/import" and method == "POST":
+            await self._handle_catalog(writer, HTTP_200, library.import_from_machine)
+        elif (m := self._RE_CATALOG_ITEM.match(path)) and method == "GET":
+            await self._handle_catalog(writer, HTTP_200, lambda: catalog.item_detail(m.group(1)))
+        elif path == "/api/installs" and method == "POST":
+            await self._handle_catalog(writer, HTTP_201, lambda: catalog.install(projects.json_object(body)))
+        elif (m := self._RE_INSTALL.match(path)) and method == "PUT":
+            await self._handle_catalog(writer, HTTP_200, lambda: catalog.update_install(
+                m.group(1), projects.json_object(body)))
+        elif (m := self._RE_INSTALL.match(path)) and method == "DELETE":
+            await self._handle_catalog(writer, HTTP_200, lambda: catalog.uninstall(m.group(1)))
         elif path == "/api/channel-configs" and method == "GET":
             await self._handle_list_channel_configs(writer)
         elif (m := self._RE_CHANNEL_CONFIG.match(path)) and method == "GET":
@@ -1100,45 +1109,25 @@ class AgentHTTPServer:
         writer.write(_json_response(status, _serialize(result)))
         await writer.drain()
 
-    # --- A project's skills (the Claude Code skills only its task agents load) ---
+    # --- The capability catalog: its items, their installs and the skills projects write ---
 
-    async def _handle_project_skills(
+    async def _handle_catalog(
         self, writer: asyncio.StreamWriter, status: str, request: Callable[[], Awaitable[Any]],
     ) -> None:
-        """Answer with ``request()``'s result; a refused request is 400, an unknown project or skill 404 and a
-        name the project already has 409."""
+        """Answer with ``request()``'s result; a refused request is 400, an unknown item, install, project or
+        skill 404, and an install that is there already or a name that is taken 409."""
         try:
             result = await request()
-        except (project_skills.ProjectSkillError, projects.RequestError) as exc:
+        except (catalog.CatalogError, library.LibraryError, project_skills.ProjectSkillError,
+                projects.RequestError) as exc:
             status, result = getattr(exc, "status", HTTP_400), {"error": str(exc)}
-        except project_skills.ProjectSkillNotFound as exc:
+        except (catalog.CatalogNotFound, project_skills.ProjectSkillNotFound) as exc:
             status, result = HTTP_404, {"error": str(exc)}
-        except project_skills.ProjectSkillConflict as exc:
+        except (catalog.CatalogConflict, project_skills.ProjectSkillConflict) as exc:
             status, result = HTTP_409, {"error": str(exc)}
         except Exception:
-            logger.exception("project skills request failed")
-            status, result = HTTP_500, {"error": "the project skills request failed; see the server log"}
-        writer.write(_json_response(status, _serialize(result)))
-        await writer.drain()
-
-    # --- The library (the imported plugins and skills every agent loads) ---
-
-    async def _handle_library(
-        self, writer: asyncio.StreamWriter, request: Callable[[], Awaitable[dict[str, Any]]],
-    ) -> None:
-        """Answer with the library view ``request()`` returns; a refused request is 400, an unknown item 404."""
-        try:
-            result = await request()
-        except (library.LibraryError, projects.RequestError) as exc:
-            status = getattr(exc, "status", HTTP_400)
-            result = {"error": str(exc)}
-        except library.LibraryItemNotFound as exc:
-            status, result = HTTP_404, {"error": str(exc)}
-        except Exception as exc:
-            logger.exception("library request failed")
-            status, result = HTTP_500, {"error": str(exc)}
-        else:
-            status = HTTP_200
+            logger.exception("catalog request failed")
+            status, result = HTTP_500, {"error": "the catalog request failed; see the server log"}
         writer.write(_json_response(status, _serialize(result)))
         await writer.drain()
 

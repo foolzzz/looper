@@ -51,11 +51,10 @@ _AGENT_DB_READS = (
     ("projects", "get_task_project", None),
     ("activity", "list_activity", []),
     ("system_settings", "get_settings", {}),
-    ("library", "list_enabled_items", []),
+    ("library", "list_installed", []),
     ("library", "get_item_files", []),
     ("project_documents", "list_documents", []),
     ("project_documents", "get_content", None),
-    ("project_skills", "list_enabled_skills", []),
 )
 
 
@@ -321,36 +320,90 @@ def agent_db(monkeypatch: pytest.MonkeyPatch, stub_claude_on_path: Path) -> Simp
     return db
 
 
-@pytest.fixture
-def enabled_library(agent_db: SimpleNamespace) -> Callable[..., list[dict[str, Any]]]:
-    """Set the library items the agents load: ``enabled_library((kind, name, {path: content}), ...)``.
+class _Installed:
+    """The catalog items the stubbed database lists as installed (``list_installed``), with their files.
 
-    The stubbed database then lists those items as the enabled ones (each
-    with the version hash of its files) and hands out their files; it
-    returns the item rows. Calling it again replaces the enabled set.
+    ``global_rows`` are installed globally for every role; ``project_rows``
+    maps a project to the skills written in it and installed there for the
+    Planner, Workers and Reviewers.
+    """
+
+    TASK_ROLES = ("planner", "worker", "reviewer")
+
+    def __init__(self, agent_db: SimpleNamespace) -> None:
+        self.global_rows: list[dict[str, Any]] = []
+        self.project_rows: dict[str, list[dict[str, Any]]] = {}
+        self.files: dict[str, list[dict[str, Any]]] = {}
+        agent_db.list_installed.side_effect = self.list_installed
+        agent_db.get_item_files.side_effect = lambda item_id, **_: [dict(f) for f in self.files[item_id]]
+
+    def item(self, item_id: str, kind: str, name: str, origin: str, owner: str | None,
+             contents: dict[str, str]) -> dict[str, Any]:
+        import hashlib
+
+        from loopx.agents.library import item_sha256
+
+        files = [{"path": path, "content": text, "sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+                  "executable": False} for path, text in sorted(contents.items())]
+        self.files[item_id] = files
+        return {"id": item_id, "kind": kind, "name": name, "origin": origin, "owner_project_id": owner,
+                "sha256": item_sha256(files)}
+
+    async def list_installed(self, role: str, project_id: str | None, **_: Any) -> list[dict[str, Any]]:
+        rows = [{**row, "scope": "global"} for row in self.global_rows]
+        if project_id and role in self.TASK_ROLES:
+            rows += [{**row, "scope": "project"} for row in self.project_rows.get(project_id, [])]
+        return sorted(rows, key=lambda row: (row["kind"], row["name"]))
+
+
+@pytest.fixture
+def _installed(agent_db: SimpleNamespace) -> _Installed:
+    return _Installed(agent_db)
+
+
+@pytest.fixture
+def enabled_library(_installed: _Installed) -> Callable[..., list[dict[str, Any]]]:
+    """Install catalog items globally for every role: ``enabled_library((kind, name, {path: content}), ...)``.
+
+    The stubbed database then lists those items as installed (each with the
+    version hash of its files) and hands out their files; it returns the item
+    rows. Calling it again replaces the global installs.
     """
     import hashlib
 
-    from loopx.agents.library import item_sha256
-
-    files_by_id: dict[str, list[dict[str, Any]]] = {}
-
-    def _sha(text: str) -> str:
-        return hashlib.sha256(text.encode("utf-8")).hexdigest()
-
     def set_items(*items: tuple[str, str, dict[str, str]]) -> list[dict[str, Any]]:
+        _installed.global_rows = [
+            _installed.item("lib-" + hashlib.sha256(f"{kind}:{name}".encode()).hexdigest()[:12], kind, name,
+                            "machine", None, contents)
+            for kind, name, contents in items
+        ]
+        return [dict(row) for row in _installed.global_rows]
+
+    return set_items
+
+
+@pytest.fixture
+def project_skills(_installed: _Installed) -> Callable[..., list[dict[str, Any]]]:
+    """Write skills in projects, each installed in its project for the task roles:
+    ``project_skills((project_id, name, description, content), ...)``.
+
+    Each is a catalog item of origin ``project`` whose one file is the
+    ``SKILL.md`` the API writes (``project_skills.skill_file``); it returns
+    every row. Calling it again replaces the skills.
+    """
+    from loopx.agents.project_skills import skill_file
+
+    def set_skills(*skills: tuple[str, str, str, str]) -> list[dict[str, Any]]:
+        _installed.project_rows = {}
         rows = []
-        for kind, name, contents in items:
-            files = [{"path": path, "content": text, "sha256": _sha(text), "executable": False}
-                     for path, text in sorted(contents.items())]
-            item_id = "lib-" + _sha(f"{kind}:{name}")[:12]
-            files_by_id[item_id] = files
-            rows.append({"id": item_id, "kind": kind, "name": name, "sha256": item_sha256(files)})
-        agent_db.list_enabled_items.return_value = rows
+        for number, (project_id, name, description, content) in enumerate(skills, start=1):
+            row = _installed.item(f"skill-{number:012d}", "skill", name, "project", project_id,
+                                  {"SKILL.md": skill_file(name, description, content)})
+            _installed.project_rows.setdefault(project_id, []).append(row)
+            rows.append(row)
         return [dict(row) for row in rows]
 
-    agent_db.get_item_files.side_effect = lambda item_id, **_: [dict(f) for f in files_by_id[item_id]]
-    return set_items
+    return set_skills
 
 
 @pytest.fixture
@@ -393,26 +446,3 @@ def project_documents(agent_db: SimpleNamespace) -> Callable[..., list[dict[str,
 
     agent_db.get_content.side_effect = lambda document_id, **_: contents.get(document_id)
     return set_documents
-
-
-@pytest.fixture
-def project_skills(agent_db: SimpleNamespace) -> Callable[..., list[dict[str, Any]]]:
-    """Set the enabled skills of each project: ``project_skills((project_id, name, description, content), ...)``.
-
-    The stubbed database then lists, for a project, the rows given for it (the
-    enabled ones, as ``list_enabled_skills`` reads them, by name); it returns
-    every row. Calling it again replaces the skills.
-    """
-    rows: list[dict[str, Any]] = []
-
-    def set_skills(*skills: tuple[str, str, str, str]) -> list[dict[str, Any]]:
-        rows.clear()
-        for number, (project_id, name, description, content) in enumerate(skills, start=1):
-            rows.append({"id": f"skill-{number:012d}", "project_id": project_id, "name": name,
-                         "description": description, "content": content})
-        return [dict(row) for row in rows]
-
-    agent_db.list_enabled_skills.side_effect = lambda project_id, **_: sorted(
-        (dict(row) for row in rows if row["project_id"] == project_id), key=lambda row: row["name"])
-    return set_skills
-

@@ -657,7 +657,7 @@ class TestWorkerHarnessAndLaunch:
 
 
 class TestWorkerLibrary:
-    """Each Worker and Reviewer run loads the library's enabled items as it starts."""
+    """Each Worker and Reviewer run loads the items installed for its role as it starts."""
 
     def test_both_commands_carry_the_library_and_record_it(self, agent_db: Any, enabled_library: Any) -> None:
         demo, alpha = enabled_library(DEMO_PLUGIN, ALPHA_SKILL)
@@ -670,6 +670,7 @@ class TestWorkerLibrary:
             library = agent_db.start_record.await_args.kwargs["metadata"]["library"]
             assert [(i["name"], i["sha256"]) for i in library["items"]] == [
                 ("demo@market", demo["sha256"]), ("alpha", alpha["sha256"])]
+            assert library["role"] == ("reviewer" if verify else "worker")
 
 
 # What the fake Claude reads like an agent would: every file the index names, joined to the directory above it.
@@ -774,13 +775,14 @@ _READ_PLUGINS = (
 
 
 def _project_plugin_dirs(argv: list[str], root: str) -> list[str]:
-    """The ``--plugin-dir`` values that are a project's skills (under the runtime root's projects)."""
-    return [d for d in plugin_dirs(argv) if d.startswith(f"{root}/.local/projects/")]
+    """The ``--plugin-dir`` values that are the generated plugin of a project's own skills."""
+    return [d for d in plugin_dirs(argv) if d.startswith(f"{root}/.local/library/") and d.endswith("/project")]
 
 
 class TestWorkerProjectSkills:
-    """Each Worker and Reviewer run mounts its own project's enabled skills as one plugin under the runtime
-    root: one --plugin-dir beside the library's, recorded with the run, and nothing in the step's directory."""
+    """Each Worker and Reviewer run mounts the skills installed in its own project as one plugin under the
+    runtime root: one --plugin-dir after the global ones, recorded with the run, and nothing in the step's
+    directory."""
 
     @pytest.fixture(autouse=True)
     def _role(self, monkeypatch: pytest.MonkeyPatch, agent_db: Any) -> None:
@@ -816,28 +818,27 @@ class TestWorkerProjectSkills:
             result, seen = self._run(verify=verify)
             assert result.get("status") == "completed" or result.get("passed") is True
             (plugin,) = _project_plugin_dirs(seen["argv"], seen["root"])
-            assert plugin.startswith(f"{seen['root']}/.local/projects/proj-a/skills/") and plugin.endswith("/project")
             files = seen["skills"][plugin]
             assert sorted(files) == ["deploy-check", "release-notes"]
             assert files["deploy-check"] == (
                 "---\nname: deploy-check\ndescription: \"Use before a deploy.\"\n---\n\nReply DEPLOY-OK.\n")
             metadata = agent_db.start_record.await_args.kwargs["metadata"]
-            assert metadata["project_skills"] == {
-                "project_id": "proj-a", "sha256": Path(plugin).parent.name, "plugin": "project",
-                "skills": [{"name": "deploy-check", "sha256": _sha(files["deploy-check"])},
-                           {"name": "release-notes", "sha256": _sha(files["release-notes"])}]}
+            library = metadata["library"]
+            assert (library["role"], library["project_id"]) == ("reviewer" if verify else "worker", "proj-a")
+            assert [(i["name"], i["plugin"], i["scope"]) for i in library["items"]] == [
+                ("deploy-check", "project", "project"), ("release-notes", "project", "project")]
             assert metadata["command"][1:] == seen["argv"]
             assert seen["work_files"] == []  # nothing in the step's directory
-        assert activity(agent_db).count("Project skills applied (2 skills)") == 2
+        assert activity(agent_db).count("Project installs applied (2 skills)") == 2
 
-    def test_unreadable_skills_run_the_step_without_them_and_warn(self, agent_db: Any) -> None:
-        agent_db.list_enabled_skills.side_effect = ConnectionError("database is down")
+    def test_unreadable_installs_run_the_step_without_them_and_warn(self, agent_db: Any) -> None:
+        agent_db.list_installed.side_effect = ConnectionError("database is down")
         result, seen = self._run()
         assert result["status"] == "completed" and "--plugin-dir" not in seen["argv"]
-        assert agent_db.start_record.await_args.kwargs["metadata"]["project_skills"] == {
-            "project_id": "proj-a", "sha256": None, "plugin": "project", "skills": [],
-            "error": "the project's skills could not be read"}
-        assert "Warning: the project's skills could not be read; this run goes without them" in activity(agent_db)
+        assert agent_db.start_record.await_args.kwargs["metadata"]["library"] == {
+            "sha256": None, "role": "worker", "project_id": "proj-a", "items": [],
+            "error": "the installed items could not be read"}
+        assert "Warning: the installed items could not be read; this run goes without them" in activity(agent_db)
 
 
 class TestWorkerPermissions:

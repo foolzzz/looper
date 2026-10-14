@@ -5,7 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { HarnessField, harnessTooLong } from "@/components/harness-field";
-import { LibraryCard } from "@/components/library-card";
+import { CatalogCard } from "@/components/catalog-card";
 import {
   fetchAgentSettings,
   fetchChannelConfigs,
@@ -479,8 +479,8 @@ export function SettingsPage() {
       </div>
 
       <div>
-        <h2 className="text-sm font-semibold mb-3">Plugins &amp; skills</h2>
-        <LibraryCard />
+        <h2 className="text-sm font-semibold mb-3">Plugins &amp; skills catalog</h2>
+        <CatalogCard />
       </div>
 
       <div>

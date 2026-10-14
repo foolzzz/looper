@@ -1,4 +1,4 @@
-"""Project skills against a real PostgreSQL: the table, the API and what a run loads.
+"""Project skills against a real PostgreSQL: catalog items a project writes, the API, and what a run loads.
 
 Runs only when LOOPX_TEST_DATABASE_URL points at a disposable database. Each
 test works in a new schema of its own, dropped afterwards.
@@ -79,71 +79,91 @@ def _skill(name: str, **extra: Any) -> dict[str, Any]:
     return {"name": name, "description": f"Use for {name}.", "content": f"Reply {name.upper()}-OK.\n", **extra}
 
 
-def test_the_table_holds_slugs_unique_per_project_and_goes_with_its_project(monkeypatch: pytest.MonkeyPatch) -> None:
+async def _items(pool: Any) -> dict[str, dict[str, Any]]:
+    rows = await pool.fetch("SELECT * FROM library_items WHERE origin = 'project' ORDER BY name")
+    return {f"{row['owner_project_id']}/{row['name']}": dict(row) for row in rows}
+
+
+def test_names_are_unique_per_owner_and_a_skill_goes_with_its_project(monkeypatch: pytest.MonkeyPatch) -> None:
     import asyncpg
 
+    from loopx.agents import project_skills
     from loopx.db import connection, projects
 
     async def _test(pool: Any) -> None:
         await connection.ensure_schema(pool)  # applying the schema again changes nothing
         calc = await projects.create_project(name="calc", pool=pool)
         other = await projects.create_project(name="other", pool=pool)
-        insert = "INSERT INTO project_skills (id, project_id, name, description, content) VALUES ($1, $2, $3, 'd', 'c')"
-        await pool.execute(insert, "skill-a", calc["id"], "deploy-check")
-        await pool.execute(insert, "skill-b", other["id"], "deploy-check")  # another project may reuse the name
-        assert await pool.fetchval("SELECT enabled FROM project_skills WHERE id = 'skill-a'") is True
+        await project_skills.add_skill(calc["id"], _skill("deploy-check"))
+        await project_skills.add_skill(other["id"], _skill("deploy-check"))  # another project may reuse the name
+        insert = ("INSERT INTO library_items (id, kind, name, sha256, size_bytes, file_count, origin, owner_project_id) "
+                  "VALUES ($1, 'skill', $2, 'x', 1, 1, $3, $4)")
         with pytest.raises(asyncpg.UniqueViolationError):
-            await pool.execute(insert, "skill-c", calc["id"], "deploy-check")
-        for bad in ("Deploy", "deploy check", "-deploy", "deploy--check", "../x", "", "x" * 65):
-            with pytest.raises(asyncpg.CheckViolationError):
-                await pool.execute(insert, f"skill-{uuid.uuid4().hex[:8]}", calc["id"], bad)
-        with pytest.raises(asyncpg.ForeignKeyViolationError):
-            await pool.execute(insert, "skill-orphan", "proj-nope", "orphan")
+            await pool.execute(insert, "skill-dup", "deploy-check", "project", calc["id"])
+        with pytest.raises(asyncpg.CheckViolationError):  # a project-authored item has an owner, and only it
+            await pool.execute(insert, "skill-orphan", "orphan", "project", None)
+        with pytest.raises(asyncpg.CheckViolationError):
+            await pool.execute(insert, "lib-owned", "owned", "machine", calc["id"])
         assert await projects.delete_project(calc["id"], pool=pool)
-        assert await pool.fetchval("SELECT array_agg(id) FROM project_skills") == ["skill-b"]
+        assert list(await _items(pool)) == [f"{other['id']}/deploy-check"]
+        assert await pool.fetchval("SELECT count(*) FROM library_installs") == 1
 
     _run(_test, monkeypatch)
 
 
-def test_the_api_adds_lists_toggles_renames_and_deletes_skills(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_the_api_writes_a_catalog_item_installed_in_the_project_then_changes_and_deletes_it(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    from loopx.agents.library import item_sha256
+    from loopx.agents.project_skills import skill_file
     from loopx.db import projects
 
     async def _test(pool: Any) -> None:
         project = await projects.create_project(name="calc", pool=pool)
         base = f"/api/projects/{project['id']}/skills"
         status, added = await _call(tmp_path, "POST", base, _skill("release-notes", content="Notes · 中文\n"))
-        assert status == 201 and added["skill"]["size_bytes"] == len("Notes · 中文\n".encode())
-        status, deploy = await _call(tmp_path, "POST", base, _skill("deploy-check"))
+        assert status == 201 and added["skill"]["size_bytes"] == len(
+            skill_file("release-notes", "Use for release-notes.", "Notes · 中文\n").encode())
+        status, deploy = await _call(tmp_path, "POST", base, _skill("deploy-check", enabled=False))
         assert status == 201
         assert (await _call(tmp_path, "POST", base, _skill("deploy-check")))[0] == 409
-        assert (await _call(tmp_path, "POST", base, _skill("Deploy Check")))[0] == 400
         assert (await _call(tmp_path, "POST", "/api/projects/proj-nope/skills", _skill("x")))[0] == 404
 
-        status, view = await _call(tmp_path, "GET", base)
-        assert status == 200
-        assert [(s["name"], s["enabled"]) for s in view["skills"]] == [("deploy-check", True), ("release-notes", True)]
-        row = await pool.fetchrow("SELECT * FROM project_skills WHERE name = 'release-notes'")
-        assert (row["content"], row["description"]) == ("Notes · 中文\n", "Use for release-notes.")
+        # Each is a catalog item owned by the project, one SKILL.md, installed there for the task roles.
+        item = (await _items(pool))[f"{project['id']}/release-notes"]
+        assert (item["kind"], item["origin"], item["description"]) == ("skill", "project", "Use for release-notes.")
+        files = [dict(r) for r in await pool.fetch(
+            "SELECT path, content, sha256, executable FROM library_files WHERE item_id = $1", item["id"])]
+        assert [f["content"] for f in files] == [skill_file("release-notes", "Use for release-notes.", "Notes · 中文\n")]
+        assert item["sha256"] == item_sha256(files)
+        assert [(e["item"]["qualified_name"], e["roles"], e["enabled"]) for e in added["installs"]] == [
+            ("project:release-notes", ["planner", "worker", "reviewer"], True)]
+        assert [(e["item"]["name"], e["enabled"]) for e in deploy["installs"]] == [
+            ("deploy-check", False), ("release-notes", True)]
+        assert deploy["owned_count"] == 2
 
         skill_id = deploy["skill"]["skill_id"]
-        status, toggled = await _call(tmp_path, "PUT", f"{base}/{skill_id}", {"enabled": False})
-        assert status == 200 and toggled["enabled_count"] == 1
-        row = await pool.fetchrow("SELECT enabled, updated_at, created_at FROM project_skills WHERE id = $1", skill_id)
-        assert row["enabled"] is False and row["updated_at"] > row["created_at"]
         assert (await _call(tmp_path, "PUT", f"{base}/{skill_id}", {"name": "release-notes"}))[0] == 409
         status, renamed = await _call(tmp_path, "PUT", f"{base}/{skill_id}", {"name": "deploy-gate", "content": "X"})
         assert status == 200 and renamed["skill"]["qualified_name"] == "project:deploy-gate"
-        assert await pool.fetchval("SELECT content FROM project_skills WHERE id = $1", skill_id) == "X"
-        assert (await _call(tmp_path, "PUT", f"{base}/skill-nope", {"enabled": True}))[0] == 404
+        assert await pool.fetchval("SELECT content FROM library_files WHERE item_id = $1", skill_id) == skill_file(
+            "deploy-gate", "Use for deploy-check.", "X")
+        status, shown = await _call(tmp_path, "GET", f"{base}/{skill_id}")
+        assert status == 200 and (shown["content"], shown["skill"]["description"]) == ("X\n", "Use for deploy-check.")
+        # The description alone changes; the body stays.
+        assert (await _call(tmp_path, "PUT", f"{base}/{skill_id}", {"description": "Gate a deploy."}))[0] == 200
+        assert (await _call(tmp_path, "GET", f"{base}/{skill_id}"))[1]["content"] == "X\n"
+        assert (await _call(tmp_path, "PUT", f"{base}/skill-nope", {"name": "y"}))[0] == 404
 
         status, after = await _call(tmp_path, "DELETE", f"{base}/{skill_id}")
-        assert status == 200 and after["count"] == 1
+        assert status == 200 and after["owned_count"] == 1 and after["deleted"] == skill_id
         assert (await _call(tmp_path, "DELETE", f"{base}/{skill_id}"))[0] == 404
+        assert await pool.fetchval("SELECT count(*) FROM library_installs WHERE item_id = $1", skill_id) == 0
 
     _run(_test, monkeypatch)
 
 
-def test_the_api_shows_one_skill_with_its_body(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_a_skill_is_read_and_changed_through_its_own_project_only(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     from loopx.db import projects
 
     async def _test(pool: Any) -> None:
@@ -157,7 +177,49 @@ def test_the_api_shows_one_skill_with_its_body(monkeypatch: pytest.MonkeyPatch, 
         assert status == 200
         assert (shown["skill"]["qualified_name"], shown["content"]) == ("project:release-notes", "Notes · 中文\n")
         assert (await _call(tmp_path, "GET", f"{base}/skill-nope"))[0] == 404
-        assert (await _call(tmp_path, "GET", f"/api/projects/{other['id']}/skills/{skill_id}"))[0] == 404
+        elsewhere = f"/api/projects/{other['id']}/skills/{skill_id}"
+        assert (await _call(tmp_path, "GET", elsewhere))[0] == 404
+        assert (await _call(tmp_path, "PUT", elsewhere, {"name": "mine"}))[0] == 404
+        assert (await _call(tmp_path, "DELETE", elsewhere))[0] == 404
+
+    _run(_test, monkeypatch)
+
+
+def test_a_skill_installed_in_another_project_keeps_one_name_per_project(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    """Every project skill loads as project:<name>, so a project cannot hold two of one name."""
+    from loopx.db import projects
+
+    async def _test(pool: Any) -> None:
+        calc = await projects.create_project(name="calc", pool=pool)
+        docs = await projects.create_project(name="docs", pool=pool)
+        _, deploy = await _call(tmp_path, "POST", f"/api/projects/{calc['id']}/skills", _skill("deploy-check"))
+        _, notes = await _call(tmp_path, "POST", f"/api/projects/{calc['id']}/skills", _skill("notes"))
+        _, theirs = await _call(tmp_path, "POST", f"/api/projects/{docs['id']}/skills", _skill("deploy-check"))
+        status, answer = await _call(tmp_path, "POST", "/api/installs", {
+            "item_id": deploy["skill"]["skill_id"], "scope": "project", "project_id": docs["id"]})
+        assert status == 409 and "both would load as project:deploy-check" in answer["error"]
+        status, _ = await _call(tmp_path, "POST", "/api/installs", {
+            "item_id": notes["skill"]["skill_id"], "scope": "project", "project_id": docs["id"], "roles": ["worker"]})
+        assert status == 201
+        # docs cannot now write a skill named notes, and calc cannot rename notes onto a name docs has.
+        status, answer = await _call(tmp_path, "POST", f"/api/projects/{docs['id']}/skills", _skill("notes"))
+        assert status == 409 and "project:notes" in answer["error"]
+        await _call(tmp_path, "POST", f"/api/projects/{docs['id']}/skills", _skill("docs-only"))
+        status, answer = await _call(tmp_path, "PUT", f"/api/projects/{calc['id']}/skills/{notes['skill']['skill_id']}",
+                                     {"name": "docs-only"})
+        assert status == 409 and "the skill is installed there" in answer["error"]
+        status, answer = await _call(tmp_path, "PUT", f"/api/projects/{calc['id']}/skills/{notes['skill']['skill_id']}",
+                                     {"name": "release-notes"})
+        assert status == 200
+        _, view = await _call(tmp_path, "GET", f"/api/projects/{docs['id']}/installs")
+        assert sorted((e["item"]["qualified_name"], e["item"]["owner_project_name"], e["roles"])
+                      for e in view["installs"]) == [
+            ("project:deploy-check", "docs", ["planner", "worker", "reviewer"]),
+            ("project:docs-only", "docs", ["planner", "worker", "reviewer"]),
+            ("project:release-notes", "calc", ["worker"])]
+        assert theirs["owned_count"] == 1
 
     _run(_test, monkeypatch)
 
@@ -181,15 +243,16 @@ def test_concurrent_adds_cannot_both_pass_the_count_cap_or_take_one_name(
                                        return_exceptions=True)
         refused = [r for r in results if isinstance(r, project_skills.ProjectSkillError)]
         assert len(refused) == 1 and "at most 2 skills" in str(refused[0])
-        assert await pool.fetchval("SELECT count(*) FROM project_skills") == 2
+        assert await pool.fetchval("SELECT count(*) FROM library_items WHERE origin = 'project'") == 2
 
     _run(_test, monkeypatch)
 
 
-def test_a_run_loads_only_its_projects_enabled_skills_from_the_database(
+def test_a_run_loads_only_the_skills_installed_and_enabled_in_its_project(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
     from loopx.agents import project_skills
+    from loopx.agents.library import load_installed
     from loopx.db import projects
 
     async def _test(pool: Any) -> None:
@@ -201,22 +264,20 @@ def test_a_run_loads_only_its_projects_enabled_skills_from_the_database(
         runtime, work = tmp_path / "runtime", tmp_path / "work"
         work.mkdir()
 
-        loaded = await project_skills.load_project_skills(runtime, calc)
+        loaded = await load_installed(runtime, "worker", calc["id"])
 
-        plugin = Path(loaded.plugin_dir or "")
-        assert plugin == runtime / ".local" / "projects" / calc["id"] / "skills" / str(loaded.sha256) / "project"
+        (plugin,) = (Path(d) for d in loaded.plugin_dirs)
+        assert plugin.parent.parent == runtime.absolute() / ".local" / "library" and plugin.name == "project"
         assert sorted(p.name for p in (plugin / "skills").iterdir()) == ["deploy-check"]
         skill_md = plugin / "skills" / "deploy-check" / "SKILL.md"
         assert skill_md.read_text() == ("---\nname: deploy-check\ndescription: \"Use for deploy-check.\"\n---\n\n"
                                         "Reply DEPLOY-CHECK-OK.\n")
         assert stat.S_IMODE(skill_md.stat().st_mode) == 0o444
-        assert [s.name for s in loaded.skills] == ["deploy-check"] and loaded.error is None
+        assert [(i.name, i.scope) for i in loaded.items] == [("deploy-check", "project")] and loaded.error is None
         assert list(work.iterdir()) == []
-        # The other project's run gets its own plugin, never this one.
-        theirs = await project_skills.load_project_skills(runtime, other)
-        assert [s.name for s in theirs.skills] == ["elsewhere"] and theirs.plugin_dir != loaded.plugin_dir
-        # The view the API gives counts the same enabled skills.
-        view = await project_skills.skills_view(calc["id"])
-        assert (view["count"], view["enabled_count"]) == (2, 1)
+        # The other project's run gets its own plugin, never this one; the Manager gets none.
+        theirs = await load_installed(runtime, "planner", other["id"])
+        assert [i.name for i in theirs.items] == ["elsewhere"] and theirs.plugin_dirs != loaded.plugin_dirs
+        assert (await load_installed(runtime, "manager")).items == ()
 
     _run(_test, monkeypatch)

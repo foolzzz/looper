@@ -325,26 +325,41 @@ function SystemPrompt({ record }: { record: LlmRecord }) {
   );
 }
 
-/** The plugins and skills this run loaded: the library's (Settings) and its project's, with their versions. */
+/**
+ * The plugins and skills this run loaded: the catalog items installed for its role, globally or in its project, with
+ * their versions. Runs recorded before the catalog list their project's skills apart (`project_skills`).
+ */
 function LoadedLibrary({ record }: { record: LlmRecord }) {
   const library = record.metadata?.library;
   const project = record.metadata?.project_skills;
   if (!library && !project) return null;
-  const plugins = library?.items.filter((item) => item.kind === "plugin") ?? [];
-  const skills = library?.items.filter((item) => item.kind === "skill") ?? [];
-  const projectSkills = (project?.skills ?? []).map((skill) => ({
-    name: `${project?.plugin ?? "project"}:${skill.name}`,
-    sha256: skill.sha256,
-  }));
+  const items = library?.items ?? [];
+  // A skill is named <plugin>:<name>; runs recorded before the catalog give only its name.
+  const named = (item: (typeof items)[number]) => ({
+    name: item.kind === "skill" && item.plugin ? `${item.plugin}:${item.name}` : item.name,
+    sha256: item.sha256,
+  });
+  const plugins = items.filter((item) => item.kind === "plugin").map(named);
+  const skills = items.filter((item) => item.kind === "skill");
+  const globalSkills = skills.filter((item) => item.scope !== "project").map(named);
+  const projectSkills = [
+    ...skills.filter((item) => item.scope === "project").map(named),
+    ...(project?.skills ?? []).map((skill) => ({ name: `${project?.plugin ?? "project"}:${skill.name}`, sha256: skill.sha256 })),
+  ];
   const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`;
   const parts = [
     library &&
       (library.error
-        ? `library not loaded: ${library.error}`
+        ? `not loaded: ${library.error}`
         : `${plural(plugins.length, "plugin")}, ${plural(skills.length, "skill")} · ${shortSha(library.sha256)}`),
     project &&
-      (project.error ? `project skills not loaded: ${project.error}` : plural(projectSkills.length, "project skill")),
+      (project.error ? `project skills not loaded: ${project.error}` : plural(project.skills.length, "project skill")),
   ].filter(Boolean);
+  const groups = [
+    ["Plugins", plugins],
+    ["Skills (global)", globalSkills],
+    ["Skills (project)", projectSkills],
+  ] as const;
   return (
     <Collapsible
       icon={<Library className="h-3 w-3" />}
@@ -357,21 +372,20 @@ function LoadedLibrary({ record }: { record: LlmRecord }) {
           <CopyButton text={library.sha256} label="Copy" />
         </div>
       )}
-      {[["Plugins", plugins] as const, ["Skills", skills] as const, ["Project skills", projectSkills] as const].map(
-        ([name, group]) =>
-          group.length ? (
-            <div key={name} className="mb-2">
-              <p className="mb-0.5 text-[11px] font-medium text-muted-foreground">{name}</p>
-              <ul className="grid gap-x-4 gap-y-0.5 font-mono text-[11px] sm:grid-cols-2">
-                {group.map((item) => (
-                  <li key={item.name} className="flex min-w-0 justify-between gap-2">
-                    <span className="truncate" title={item.name}>{item.name}</span>
-                    <span className="shrink-0 text-muted-foreground">{shortSha(item.sha256)}</span>
-                  </li>
-                ))}
-              </ul>
-            </div>
-          ) : null,
+      {groups.map(([name, group]) =>
+        group.length ? (
+          <div key={name} className="mb-2">
+            <p className="mb-0.5 text-[11px] font-medium text-muted-foreground">{name}</p>
+            <ul className="grid gap-x-4 gap-y-0.5 font-mono text-[11px] sm:grid-cols-2">
+              {group.map((item) => (
+                <li key={item.name} className="flex min-w-0 justify-between gap-2">
+                  <span className="truncate" title={item.name}>{item.name}</span>
+                  <span className="shrink-0 text-muted-foreground">{shortSha(item.sha256)}</span>
+                </li>
+              ))}
+            </ul>
+          </div>
+        ) : null,
       )}
     </Collapsible>
   );

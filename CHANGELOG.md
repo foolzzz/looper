@@ -19,6 +19,25 @@ How the agent system works today is described in
 
 ### Changed
 
+- **Behaviour change: plugins and skills load only where they are
+  installed.** The library is now a capability catalog. Importing from this
+  machine (`POST /api/catalog/import`) only adds items to the catalog; an
+  item loads once it is installed, globally or in one project, for some of
+  the roles `manager`, `planner`, `worker` and `reviewer` (a project install
+  never names the Manager). Every run loads the enabled installs that name its
+  role, globally or in its project. **The plugins and skills imported before
+  this version stay in the catalog, installed nowhere, so after the upgrade no
+  agent loads them until you install them** (Settings → "Plugins & skills catalog").
+  The item-level enabled switch is gone; an install has its own.
+- **Project skills are catalog items.** A skill written in a project is a
+  catalog item owned by that project (origin `project`), installed in it for
+  the Planner, Workers and Reviewers, and can be installed in other projects
+  too. The first start moves every `project_skills` row into the catalog with
+  the same id, project, name, description and enabled state; agents still
+  call it `project:<name>`. The `project_skills` table is dropped (recorded
+  as `library_catalog_installs` in `schema_migrations`); a rollback needs a
+  database backup from before the upgrade.
+
 - **Plan state and agent sessions live in PostgreSQL.** The Planner no longer
   writes its plan to `.local/planner/planner-<task_id>/<plan_id>.json`, and the
   Manager no longer writes `.local/manager/session.json`. A task's plan is in
@@ -43,6 +62,19 @@ How the agent system works today is described in
 
 ### Added
 
+- **Capability catalog and installs.** `GET /api/catalog` lists every item
+  (kind, origin, owning project, where it is installed), `GET
+  /api/catalog/<id>` one item with its files; `POST /api/installs`, `PUT` and
+  `DELETE /api/installs/<id>` install, change the roles or enabled flag of,
+  and uninstall an item; `GET /api/projects/<id>/installs` shows what applies
+  to a project: its own installs and the inherited global ones. Settings shows
+  the catalog with a global install (role checkboxes) and uninstall per item;
+  the project page's Skills tab shows what is installed there, installs from
+  the catalog and writes or edits the project's own skills. They replace
+  `/api/settings/library*` and `GET /api/projects/<id>/skills`; each run's
+  `metadata.library` now records its role, project and each item's plugin and
+  scope, and `metadata.project_skills` is no longer written.
+
 - **`loopx doctor` and the startup self-check.** `loopx doctor` checks
   PostgreSQL (`LOOPX_DATABASE_URL`, shown with its password masked), the
   Claude Code CLI (`claude --version`), its login (`claude auth status`,
@@ -54,6 +86,7 @@ How the agent system works today is described in
   `claude` or login is logged as a warning, the server still starts,
   `GET /api/status` reports every check under `checks`, and the dashboard
   shows a banner on every page.
+
 - **Task memory.** Code writes a `task_journal` entry when a step is
   accepted: the Worker's summary and the new optional `learnings` (up to 5
   short findings or pitfalls) of the step's Worker report and Reviewer

@@ -1,9 +1,10 @@
 """Reclaiming the read-only copies under the runtime root when ``loopx serve`` starts.
 
-The library's items, a project's stored knowledge and a project's skills are
-written once under a content hash; a change writes a new directory. At server
-start the ones neither the current content nor a running process uses are
-removed. The database is stubbed; the running processes are real.
+The catalog's items and generated skill plugins and a project's stored
+knowledge are written once under a content hash; a change writes a new
+directory. At server start the ones neither the current content (what every
+role in every project loads) nor a running process uses are removed. The
+database is stubbed; the running processes are real.
 """
 
 from __future__ import annotations
@@ -20,11 +21,10 @@ import pytest
 
 from loopx.agents import library, read_only_copies
 from loopx.agents.knowledge import load_knowledge
-from loopx.agents.project_skills import load_project_skills
+from loopx.agents.project_skills import skill_file
 from loopx.agents.read_only_copies import hashed_directories, reclaim_unused
 from loopx.db import library as db_library
 from loopx.db import project_documents as db_documents
-from loopx.db import project_skills as db_skills
 from loopx.db import projects as db_projects
 
 
@@ -33,7 +33,7 @@ def _sha(text: str) -> str:
 
 
 class _Content:
-    """The database's current content: projects, their documents and skills, and the enabled library items."""
+    """The database's current content: projects, their documents and the skills they wrote, installed there."""
 
     def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
         self.projects: list[dict[str, Any]] = []
@@ -56,18 +56,27 @@ class _Content:
             return next(content for project_id, rows in self.documents.items()
                         for n, (_, content) in enumerate(rows) if f"doc-{project_id}-{n}" == document_id)
 
-        async def list_enabled_skills(project_id: str, **_: Any) -> list[dict[str, Any]]:
-            return [{"id": f"skill-{n}", "name": name, "description": "d", "content": body}
-                    for n, (name, body) in enumerate(self.skills.get(project_id, []))]
+        def files(project_id: str, n: int) -> list[dict[str, Any]]:
+            name, body = self.skills[project_id][n]
+            text = skill_file(name, "d", body)
+            return [{"path": "SKILL.md", "content": text, "sha256": _sha(text), "executable": False}]
 
-        async def no_items(**_: Any) -> list[dict[str, Any]]:
-            return []
+        async def list_installed(role: str, project_id: str | None, **_: Any) -> list[dict[str, Any]]:
+            if role == "manager" or project_id is None:
+                return []
+            return [{"id": f"skill-{project_id}-{n}", "kind": "skill", "name": name, "origin": "project",
+                     "owner_project_id": project_id, "sha256": library.item_sha256(files(project_id, n)),
+                     "scope": "project"} for n, (name, _) in enumerate(self.skills.get(project_id, []))]
+
+        async def get_item_files(item_id: str, **_: Any) -> list[dict[str, Any]]:
+            project_id, n = item_id.removeprefix("skill-").rsplit("-", 1)
+            return files(project_id, int(n))
 
         monkeypatch.setattr(db_projects, "list_projects", list_projects)
         monkeypatch.setattr(db_documents, "list_documents", list_documents)
         monkeypatch.setattr(db_documents, "get_content", get_content)
-        monkeypatch.setattr(db_skills, "list_enabled_skills", list_enabled_skills)
-        monkeypatch.setattr(db_library, "list_enabled_items", no_items)
+        monkeypatch.setattr(db_library, "list_installed", list_installed)
+        monkeypatch.setattr(db_library, "get_item_files", get_item_files)
 
     def project(self, project_id: str, *, documents: list[tuple[str, str]], skills: list[tuple[str, str]]) -> dict:
         project = {"id": project_id, "name": project_id, "work_dir": ""}
@@ -75,12 +84,14 @@ class _Content:
         self.documents[project_id], self.skills[project_id] = documents, skills
         return project
 
-    def run(self, root: Path, project: dict[str, Any]) -> tuple[str, str]:
-        """What one run of the project mounts now: its knowledge set and its skills plugin."""
+    def run(self, root: Path, project: dict[str, Any]) -> tuple[str, ...]:
+        """What one task agent run of the project mounts now: its knowledge set, its skills (each the catalog
+        item's own copy) and the project plugin linking them."""
         knowledge = asyncio.run(load_knowledge(root, project, str(root)))
-        skills = asyncio.run(load_project_skills(root, project))
-        assert skills.plugin_dir is not None
-        return knowledge.add_dirs[0], skills.plugin_dir
+        installed = asyncio.run(library.load_installed(root, "worker", project["id"]))
+        (plugin,) = installed.plugin_dirs
+        skills = [str(library.item_directory(root, item)) for item in installed.items]
+        return knowledge.add_dirs[0], *skills, plugin
 
 
 @pytest.fixture
@@ -107,21 +118,25 @@ def test_server_start_keeps_the_current_copies_and_removes_replaced_and_deleted_
     tmp_path: Path, content: _Content,
 ) -> None:
     calc = content.project("proj-calc", documents=[("Glossary", "v1")], skills=[("deploy", "Deploy v1.")])
-    old_knowledge, old_skills = content.run(tmp_path, calc)
+    old_copies = content.run(tmp_path, calc)
     gone = content.project("proj-gone", documents=[("Notes", "n")], skills=[("lint", "Lint.")])
     gone_copies = content.run(tmp_path, gone)
     unused_item = _library_item(tmp_path, "retired", "Retired skill.")
-    # The calc documents and skills change, the other project is deleted, the library item disabled.
+    # A project's skills plugin as versions before the catalog wrote it.
+    old_layout = tmp_path / ".local" / "projects" / "proj-calc" / "skills" / ("e" * 64)
+    (old_layout / "project").mkdir(parents=True)
+    # The calc documents and skills change, the other project is deleted, the catalog item uninstalled.
     content.project("proj-calc", documents=[("Glossary", "v2")], skills=[("deploy", "Deploy v2.")])
     content.projects = [calc]
 
     removed = asyncio.run(reclaim_unused(tmp_path))
 
     current = content.run(tmp_path, calc)  # nothing to write again: what the next run mounts is there
-    assert sorted(hashed_directories(tmp_path)) == sorted(_hashed(path) for path in current)
-    assert sorted(removed) == sorted([_hashed(old_knowledge), _hashed(old_skills), *map(_hashed, gone_copies),
-                                      tmp_path / ".local" / "library" / unused_item.sha256])
+    assert sorted(hashed_directories(tmp_path)) == sorted({_hashed(path) for path in current})
+    assert sorted(removed) == sorted({*map(_hashed, old_copies), *map(_hashed, gone_copies), old_layout.absolute(),
+                                      tmp_path.absolute() / ".local" / "library" / unused_item.sha256})
     assert not (tmp_path / ".local" / "projects" / "proj-gone").exists()  # its emptied directories go too
+    assert not (tmp_path / ".local" / "projects" / "proj-calc" / "skills").exists()
 
 
 def test_a_copy_a_running_process_mounts_or_links_into_is_kept_until_it_exits(
@@ -129,13 +144,13 @@ def test_a_copy_a_running_process_mounts_or_links_into_is_kept_until_it_exits(
 ) -> None:
     """The proof that a reclaim never removes a directory a live agent has mounted."""
     calc = content.project("proj-calc", documents=[("Glossary", "v1")], skills=[("deploy", "Deploy v1.")])
-    knowledge_set, skills_plugin = content.run(tmp_path, calc)
+    knowledge_set, deploy, skills_plugin = content.run(tmp_path, calc)
     skill = _library_item(tmp_path, "alpha", "Alpha skill.")
     personal = library.skills_plugin(tmp_path, [skill])  # links into the skill's own directory
     unrelated = _library_item(tmp_path, "beta", "Beta skill.")
     content.projects = []  # nothing is current: only the process keeps them
-    mounted = {_hashed(knowledge_set), _hashed(skills_plugin), _hashed(personal),
-               tmp_path / ".local" / "library" / skill.sha256}
+    mounted = {_hashed(knowledge_set), _hashed(skills_plugin), _hashed(deploy), _hashed(personal),
+               tmp_path.absolute() / ".local" / "library" / skill.sha256}
 
     agent = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)", "--plugin-dir", str(personal),
                               "--plugin-dir", skills_plugin, "--add-dir", knowledge_set])
@@ -145,7 +160,7 @@ def test_a_copy_a_running_process_mounts_or_links_into_is_kept_until_it_exits(
             assert time.monotonic() < deadline, "the process did not show up"
             time.sleep(0.05)
         removed = asyncio.run(reclaim_unused(tmp_path))
-        assert removed == [tmp_path / ".local" / "library" / unrelated.sha256]
+        assert removed == [tmp_path.absolute() / ".local" / "library" / unrelated.sha256]
         assert set(hashed_directories(tmp_path)) == mounted
         assert (Path(personal) / "skills" / "alpha" / "SKILL.md").read_text() == "Alpha skill."
     finally:

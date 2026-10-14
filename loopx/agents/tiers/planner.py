@@ -28,7 +28,8 @@ Planner started after the server restarted reads them back and carries on
 harness (the project's Planner override, else the default in Settings), the
 ``planner`` config and the task's project as it is now (its background and
 the index of its knowledge included, the knowledge's directories mounted with
-``--add-dir`` and its enabled skills with one more ``--plugin-dir``); when it,
+``--add-dir``) and the catalog items installed for the Planner, globally or in
+the project (each a ``--plugin-dir``); when it,
 the model or the Settings environment changes, Claude restarts and resumes its
 session. The project's execution settings (``project_execution``) set the
 model, ``--max-budget-usd``, the supervision interval, whether every step
@@ -67,9 +68,8 @@ from ..claude_cli import (
 )
 from .. import knowledge as project_knowledge
 from ..knowledge import AgentKnowledge, documents_label, load_knowledge
-from ..library import load_library
+from ..library import AgentLibrary, items_label, load_installed
 from ..project_execution import ProjectExecution, TaskBudgetAction, format_usd
-from ..project_skills import AgentProjectSkills, load_project_skills, skills_label
 from ..run_usage import Usage
 from ..system_prompt import SystemPrompt, build_system_prompt, is_recommended, plan_task_section
 from ..message import (
@@ -377,8 +377,8 @@ class PlannerAgent:
         # The project knowledge the last turn ran with (None before the first turn); a turn that cannot
         # read the knowledge keeps it, as a failed project read keeps the last project.
         self._knowledge: AgentKnowledge | None = None
-        # The project skills the last turn ran with, kept the same way when a turn cannot read them.
-        self._project_skills: AgentProjectSkills | None = None
+        # The installed items the last turn ran with, kept the same way when a turn cannot read them.
+        self._library: AgentLibrary | None = None
         # The project's execution settings as last read; everything inherits until the project is read.
         self._execution = ProjectExecution()
 
@@ -1171,8 +1171,8 @@ class PlannerAgent:
             # turn; a turn Claude runs on its own has no such echo.
             "--replay-user-messages",
             # None of the operator's personal settings, memory, hooks, plugins or MCP servers; the
-            # permissions every agent shares, the library's plugins and skills and the project's skills
-            # come with the launch args.
+            # permissions every agent shares and the plugins and skills installed for the Planner come
+            # with the launch args.
             *isolation_args(work_dir),
             *system_prompt_args(prompt_file),
             *launch.args(),
@@ -1185,21 +1185,21 @@ class PlannerAgent:
         assert plan is not None
         settings = await load_settings()
         knowledge = await self._load_knowledge(plan)
-        skills = await self._load_project_skills(plan)
+        library = await self._load_installed(plan)
         system_prompt = self._system_prompt(plan, settings, knowledge)
         execution = self._execution
-        launch = resolve_launch(settings.defaults, settings.model, await load_library(self._runtime_root), knowledge,
-                                skills, project_model=execution.model, max_budget_usd=execution.run_budget_usd)
+        launch = resolve_launch(settings.defaults, settings.model, library, knowledge,
+                                project_model=execution.model, max_budget_usd=execution.run_budget_usd)
         await self._note_background(plan.project_background)
         try:
             prompt_file = system_prompt.write_file(self._runtime_root)
         except OSError as exc:
             raise PlannerTurnError(f"cannot write the system prompt file: {exc}") from None
         base = self._claude_command(prompt_file, settings, launch, plan.work_dir)
-        # The command carries the model, the effort, the library's directories, the project skills' plugin
-        # (named by their hash) and the knowledge's; the file is named by its content's hash (the knowledge
-        # index included), kept beside it all the same; the environment and the library are compared by
-        # their hashes, the mounted directories as such.
+        # The command carries the model, the effort, the installed items' directories (each named by its
+        # content's hash) and the knowledge's; the file is named by its content's hash (the knowledge
+        # index included), kept beside it all the same; the environment and the installed items are
+        # compared by their hashes, the mounted directories as such.
         signature = (tuple(base), system_prompt.sha256, launch.env_sha256, launch.library.sha256,
                      launch.knowledge.add_dirs)
         if self._claude.stale(signature):
@@ -1829,27 +1829,28 @@ class PlannerAgent:
                 await self._activity("phase", f"Project knowledge {verb} ({documents_label(knowledge.documents)})")
         return knowledge
 
-    async def _load_project_skills(self, plan: TaskPlan) -> AgentProjectSkills:
-        """The project's enabled skills for this turn, read now; the last ones read when they cannot be read.
+    async def _load_installed(self, plan: TaskPlan) -> AgentLibrary:
+        """The catalog items installed for the Planner, globally or in the project, read now; the last ones
+        read when they cannot be read.
 
-        Notes in the task's activity when the skills the turn runs with start,
+        Notes in the task's activity when the items the turn runs with start,
         change or end.
         """
-        skills = await load_project_skills(self._runtime_root, {"id": plan.project_id} if plan.project_id else None)
-        previous = self._project_skills
-        if skills.error is not None:
-            await self._activity("error", f"Warning: {skills.error}"[:500])
+        library = await load_installed(self._runtime_root, AgentType.PLANNER.value, plan.project_id or None)
+        previous = self._library
+        if library.error is not None:
+            await self._activity("error", f"Warning: {library.error}"[:500])
             if previous is not None:
                 return previous
-        self._project_skills = skills
+        self._library = library
         before = previous.sha256 if previous is not None else None
-        if skills.sha256 != before:
-            if skills.sha256 is None:
-                await self._activity("phase", "Project skills removed")
+        if library.sha256 != before:
+            if library.sha256 is None:
+                await self._activity("phase", "Installed plugins and skills removed")
             else:
                 verb = "changed" if before else "applied"
-                await self._activity("phase", f"Project skills {verb} ({skills_label(len(skills.skills))})")
-        return skills
+                await self._activity("phase", f"Installed plugins and skills {verb} ({items_label(library.items)})")
+        return library
 
     async def _note_background(self, background: str) -> None:
         """Note in the task's activity when the system prompt starts carrying, changes or drops the background."""

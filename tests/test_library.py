@@ -1,4 +1,4 @@
-"""The plugin and skill library: scanning the operator's Claude Code, caps, materializing and launching.
+"""The catalog's items: scanning the operator's Claude Code, caps, materializing and loading the installed ones.
 
 These tests use a synthetic operator home (``library_fixtures``) and stub the
 database; ``test_library_db.py`` covers the tables and the API against a real
@@ -28,8 +28,9 @@ from loopx.agents.library import (
     LibraryError,
     LoadedItem,
     item_sha256,
-    load_library,
+    load_installed,
     materialize_item,
+    resolve_installed,
     scan_machine,
     skills_plugin,
 )
@@ -138,33 +139,38 @@ class TestScan:
         assert _by_name(scan_machine(home))["alpha"].sha256 != first
 
 
-def _rows(*items: tuple[str, str, dict[str, str]]) -> tuple[list[dict[str, Any]], dict[str, list[dict[str, Any]]]]:
-    """Database rows for enabled items ``(kind, name, {path: content})`` and their files by item id."""
+def _rows(*items: tuple[str, str, dict[str, str]], origin: str = "machine", owner: str | None = None,
+          scope: str = "global") -> tuple[list[dict[str, Any]], dict[str, list[dict[str, Any]]]]:
+    """Install rows (``db.library.list_installed``) for items ``(kind, name, {path: content})`` and their files by
+    item id."""
     rows, files = [], {}
     for index, (kind, name, contents) in enumerate(items):
         item_files = [{"path": path, "content": text, "sha256": _sha(text), "executable": path.endswith(".sh")}
                       for path, text in sorted(contents.items())]
-        item_id = f"lib-{index:012d}"
-        rows.append({"id": item_id, "kind": kind, "name": name, "sha256": item_sha256(item_files)})
+        item_id = f"{'skill' if origin == 'project' else 'lib'}-{owner or ''}{index:012d}"
+        rows.append({"id": item_id, "kind": kind, "name": name, "origin": origin, "owner_project_id": owner,
+                     "sha256": item_sha256(item_files), "scope": scope})
         files[item_id] = item_files
     return rows, files
 
 
 @pytest.fixture
 def stored(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
-    """What the library tables hold (``rows``: the enabled items; ``files`` by item id) and the file reads made."""
+    """What the catalog holds (``rows``: the install rows a run reads; ``files`` by item id), the file reads
+    made and the (role, project) each read asked for."""
     from loopx.db import library as db_library
 
-    state: dict[str, Any] = {"rows": [], "files": {}, "reads": []}
+    state: dict[str, Any] = {"rows": [], "files": {}, "reads": [], "asked": []}
 
-    async def _enabled(**_: Any) -> list[dict[str, Any]]:
+    async def _installed(role: str, project_id: str | None, **_: Any) -> list[dict[str, Any]]:
+        state["asked"].append((role, project_id))
         return [dict(row) for row in state["rows"]]
 
     async def _files(item_id: str, **_: Any) -> list[dict[str, Any]]:
         state["reads"].append(item_id)
         return [dict(f) for f in state["files"][item_id]]
 
-    monkeypatch.setattr(db_library, "list_enabled_items", _enabled)
+    monkeypatch.setattr(db_library, "list_installed", _installed)
     monkeypatch.setattr(db_library, "get_item_files", _files)
     return state
 
@@ -219,54 +225,95 @@ class TestMaterialize:
         assert skills_plugin(tmp_path, list(reversed(items))) == plugin
 
 
-class TestLoadLibrary:
-    def test_enabled_plugins_then_the_skills_plugin(self, tmp_path: Path, stored: dict[str, Any]) -> None:
+def _load(root: Path, role: str = "worker", project_id: str | None = None) -> AgentLibrary:
+    return asyncio.run(load_installed(root, role, project_id))
+
+
+class TestLoadInstalled:
+    def test_plugins_then_the_skills_plugin(self, tmp_path: Path, stored: dict[str, Any]) -> None:
         stored["rows"], stored["files"] = _rows(DEMO, ALPHA, BETA)
-        loaded = asyncio.run(load_library(tmp_path))
+        loaded = _load(tmp_path)
+        assert stored["asked"] == [("worker", None)]
         sha = {row["name"]: row["sha256"] for row in stored["rows"]}
         library_dir = tmp_path.absolute() / ".local" / "library"
         assert loaded.plugin_dirs[0] == str(library_dir / sha["demo@market"] / "demo")
         assert len(loaded.plugin_dirs) == 2 and Path(loaded.plugin_dirs[1]).name == SKILLS_PLUGIN
         assert sorted(p.name for p in (Path(loaded.plugin_dirs[1]) / "skills").iterdir()) == ["alpha", "beta"]
         assert loaded.record() == {
-            "sha256": loaded.sha256,
-            "items": [{"kind": "plugin", "name": "demo@market", "sha256": sha["demo@market"]},
-                      {"kind": "skill", "name": "alpha", "sha256": sha["alpha"]},
-                      {"kind": "skill", "name": "beta", "sha256": sha["beta"]}],
+            "sha256": loaded.sha256, "role": "worker", "project_id": None,
+            "items": [{"kind": "plugin", "name": "demo@market", "sha256": sha["demo@market"], "plugin": "demo",
+                       "scope": "global"},
+                      {"kind": "skill", "name": "alpha", "sha256": sha["alpha"], "plugin": "personal",
+                       "scope": "global"},
+                      {"kind": "skill", "name": "beta", "sha256": sha["beta"], "plugin": "personal",
+                       "scope": "global"}],
         }
         # Files are read from the database only to materialize an item for the first time.
         assert len(stored["reads"]) == 3
-        assert asyncio.run(load_library(tmp_path)) == loaded and len(stored["reads"]) == 3
+        assert _load(tmp_path) == loaded and len(stored["reads"]) == 3
 
-    def test_the_library_hash_follows_the_enabled_set(self, tmp_path: Path, stored: dict[str, Any]) -> None:
+    def test_a_projects_own_skills_load_as_the_project_plugin_after_the_others(
+        self, tmp_path: Path, stored: dict[str, Any],
+    ) -> None:
+        machine, machine_files = _rows(DEMO, ALPHA)
+        own, own_files = _rows(("skill", "alpha", {"SKILL.md": "---\nname: alpha\n---\nReply OWN.\n"}),
+                               origin="project", owner="proj-1", scope="project")
+        stored["rows"], stored["files"] = machine + own, {**machine_files, **own_files}
+        loaded = _load(tmp_path, "planner", "proj-1")
+        assert [Path(d).name for d in loaded.plugin_dirs] == ["demo", "personal", "project"]
+        # One name in two plugins is two skills: personal:alpha and project:alpha.
+        assert (Path(loaded.plugin_dirs[2]) / "skills" / "alpha" / "SKILL.md").read_text().endswith("Reply OWN.\n")
+        assert [(i.plugin, i.name, i.scope) for i in loaded.items] == [
+            ("demo", "demo@market", "global"), ("personal", "alpha", "global"), ("project", "alpha", "project")]
+
+    def test_the_hash_follows_the_installed_set(self, tmp_path: Path, stored: dict[str, Any]) -> None:
         stored["rows"], stored["files"] = _rows(DEMO, ALPHA, BETA)
-        everything = asyncio.run(load_library(tmp_path))
+        everything = _load(tmp_path)
         stored["rows"] = [row for row in stored["rows"] if row["name"] != "beta"]
-        without_beta = asyncio.run(load_library(tmp_path))
+        without_beta = _load(tmp_path)
         assert without_beta.sha256 != everything.sha256
         assert sorted(p.name for p in (Path(without_beta.plugin_dirs[1]) / "skills").iterdir()) == ["alpha"]
         assert "beta" not in json.dumps(without_beta.record())
         stored["rows"] = []
-        assert asyncio.run(load_library(tmp_path)) == AgentLibrary()
+        nothing = _load(tmp_path)
+        assert (nothing.items, nothing.plugin_dirs, nothing.record()) == ((), (), None)
 
-    def test_an_unreadable_library_runs_the_agent_without_it_and_says_so(
+    def test_an_unreadable_catalog_runs_the_agent_without_it_and_says_so(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         from loopx.db import library as db_library
 
-        async def _down(**_: Any) -> list[dict[str, Any]]:
+        async def _down(*_: Any, **__: Any) -> list[dict[str, Any]]:
             raise OSError("database is down")
 
-        monkeypatch.setattr(db_library, "list_enabled_items", _down)
-        loaded = asyncio.run(load_library(tmp_path))
+        monkeypatch.setattr(db_library, "list_installed", _down)
+        loaded = _load(tmp_path, "reviewer", "proj-1")
         assert loaded.plugin_dirs == () and loaded.record() == {
-            "sha256": None, "items": [], "error": "the library could not be read"}
+            "sha256": None, "role": "reviewer", "project_id": "proj-1", "items": [],
+            "error": "the installed items could not be read"}
 
-    def test_a_damaged_item_runs_the_agent_without_the_library(self, tmp_path: Path, stored: dict[str, Any]) -> None:
+    def test_a_damaged_item_runs_the_agent_without_its_items(self, tmp_path: Path, stored: dict[str, Any]) -> None:
         stored["rows"], stored["files"] = _rows(DEMO, ALPHA)
         stored["files"]["lib-000000000001"][0]["content"] = "Reply EVIL.\n"
-        loaded = asyncio.run(load_library(tmp_path))
+        loaded = _load(tmp_path)
         assert loaded.plugin_dirs == () and "do not match" in loaded.record()["error"]
+
+
+class TestResolveInstalled:
+    """One run loads each installed item once, and one skill per name in a generated plugin."""
+
+    def test_an_item_installed_globally_and_in_the_project_loads_once_as_the_projects(self) -> None:
+        (row,), _ = _rows(ALPHA)
+        resolved = resolve_installed([row, {**row, "scope": "project"}], "proj-1")
+        assert [(item.name, item.scope) for _, item in resolved] == [("alpha", "project")]
+        assert [item.scope for _, item in resolve_installed([row], "proj-1")] == ["global"]
+
+    @pytest.mark.parametrize("order", [1, -1], ids=["own-first", "own-last"])
+    def test_of_two_project_skills_with_one_name_the_projects_own_loads(self, order: int) -> None:
+        theirs, _ = _rows(ALPHA, origin="project", owner="proj-2", scope="project")
+        ours, _ = _rows(ALPHA, origin="project", owner="proj-1", scope="project")
+        resolved = resolve_installed([*theirs, *ours][::order], "proj-1")
+        assert [row["owner_project_id"] for row, _ in resolved] == ["proj-1"]
 
 
 class TestLaunch:

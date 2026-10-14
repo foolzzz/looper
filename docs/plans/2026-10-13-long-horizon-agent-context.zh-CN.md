@@ -1,6 +1,6 @@
-# 开发计划：长程 Agent 上下文体系（M0–M7）
+# 开发计划：长程 Agent 上下文体系（M0–M8）
 
-- **状态：** M0–M7 全部交付（M7a 计划状态入库、M7b 任务记忆）；上游 LoopX 清理 B1–B4 已交付；其余见第 5 节待办
+- **状态：** M0–M7 全部交付（M7a 计划状态入库、M7b 任务记忆）；M8a 能力目录与安装已交付，M8b–M8e 待开工；上游 LoopX 清理 B1–B4 已交付；其余见第 5 节待办
 - **依据：** [RFC：长程 Agent 的上下文体系 v0](../architecture/rfcs/long-horizon-agent-context-v0.zh-CN.md)。
   设计原则、分层模型和已作出的决定以 RFC 为准；本文只管"怎么分阶段做、做到什么算完成、现在做到哪了"。
 - **仓库：** `foolzzz/looper`，基线 `main`
@@ -35,8 +35,13 @@
 | M6 | prompt 回归评测 | ✅ 已交付（looper #36） | M1 |
 | M7a | 计划状态入库：计划、步骤和 agent 会话以 PostgreSQL 为唯一来源 | ✅ 已交付（looper #45） | M2、M5 |
 | M7b | 任务记忆：任务日志、进度与发现注入、经验沉淀为项目知识 | ✅ 已交付（looper #46） | M7a |
+| M8a | 能力目录与安装：插件和 skill 先进目录，再按范围（全局或项目）和角色安装；项目 skill 并入目录 | ✅ 已交付（looper #48） | M1.6、M4 |
+| M8b | MCP 服务器进目录，安装方式相同；密钥存库、接口打码 | ⏳ 待开工 | M8a |
+| M8c | 进库来源：上传、git、界面新建与编辑 | ⏳ 待开工 | M8a |
+| M8d | 配置层级统一：系统默认 → 角色 → 项目 → 项目里的角色 | ⏳ 待开工 | M8a |
+| M8e | 导出与导入：一个文件，应用前预览，密钥默认留空 | ⏳ 待开工 | M8b、M8c、M8d |
 
-执行顺序：M1 → M1.5 → M1.6 → M1.7 → M2 → M3 → M4 → M5 → M6 → M7a → M7b。
+执行顺序：M1 → M1.5 → M1.6 → M1.7 → M2 → M3 → M4 → M5 → M6 → M7a → M7b → M8a → M8b、M8c、M8d（可并行）→ M8e。
 
 ## 3. 各阶段
 
@@ -295,6 +300,87 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
   替身 Claude 下，步骤接受后日志有对应条目，Planner 下一轮的消息里能看到，超出上限时截断最旧的；
   Worker 收到相关条目；开关关闭时任务结束不写项目知识，打开时写入或生成待确认的草稿。
 
+### M8 能力目录与配置层级
+
+插件、skill、MCP 和各项执行配置以前各有各的来源和生效方式。M8 按 RFC 决策 9 把它们统一成两件事：
+条目先**进库**（目录），再**安装**到全局或某个项目、限定角色；配置按"系统默认 → 角色 → 项目 → 项目里的角色"
+逐层解析。M8a 是基础，M8b、M8c、M8d 在它之上可以并行，M8e 最后做。
+
+#### M8a 能力目录与安装
+
+- **目标：** 插件和 skill 只在安装的地方、对安装的角色生效；导入只是进库；项目 skill 并入同一个目录。
+- **范围：**
+  - `library_items`、`library_files` 作为目录，加上 `origin`（machine、upload、git、ui、project）和项目写的条目的所属项目；
+    新增安装表：条目、范围、项目、角色、启用开关、时间戳，每个条目在每个位置只有一条；
+  - 迁移：已导入的条目一律不安装；`project_skills` 等价迁入目录后删除，幂等，记在 `schema_migrations`；
+  - 一个解析函数给出（角色，项目）加载的条目，四类 agent 的启动都用它，取代 `load_library` 和 `load_project_skills`；
+    按内容哈希物化的只读副本和回收照旧，Manager、Planner 的条目集合变化时照旧以 `--resume` 重启；
+  - API：列出和读取目录条目；在全局或项目范围安装、改角色或启用开关、卸载；项目视图列出它自己的安装和继承的全局安装；
+    项目里新建、修改、删除 skill 照旧可用，改为写目录条目加上它在本项目的安装；
+  - 界面：Settings 里的目录（种类、来源、装在哪里，全局安装带角色勾选和卸载）；项目页的 Skills 标签
+    （装了什么，含继承的全局安装；从目录安装并选角色；新建和修改项目写的 skill）。
+- **验收：** 解析按角色和范围生效（全局只给 worker 的 skill 到达 Worker、不到 Planner 和 Manager；项目安装只到达
+  该项目的任务 agent）；`project_skills` 迁移后名称和角色不变；已导入的条目迁移后未安装；卸载或停用后下一次运行
+  不再加载；回收仍保留被挂载的目录；真实 Claude（haiku，不超过 $0.5）下全局只给 worker 的目录 skill 出现在 Worker
+  的 init 里、不在 Planner 的 init 里，迁移来的项目 skill 仍叫 `project:<name>` 并被 Worker 调用；
+  Settings 目录和项目 Skills 标签各一张截图。
+- **核实后确定的做法：**
+  - 目录条目新增 `origin`、`owner_project_id`（项目删除时连带删除它写的条目）和 `description`；名称在项目以外的条目
+    之间唯一，项目写的条目在所属项目内唯一；条目上的 `enabled` 删除，启用开关只在安装上；
+  - 安装表 `library_installs`：`scope` 为 `global` 或 `project`，`roles` 是四个角色的非空子集，项目范围不含 `manager`，
+    这些都有 CHECK 约束；项目写的 skill 只能装在项目里，不能全局安装；
+  - 一次性迁移在 `schema.sql` 里（`library_catalog_installs`）：`project_skills` 的每一行成为保留原 id 的目录条目，
+    `SKILL.md` 按运行时的写法生成（frontmatter 来自名称和描述），在所属项目安装给 planner、worker、reviewer，启用状态不变；
+  - 解析：`db.library.list_installed(role, project_id)` 取启用、含该角色、全局或在该项目的安装；
+    `library.load_installed` 去重（同一条目既全局又在项目里只加载一次，记为项目安装），插件各一个 `--plugin-dir`，
+    项目写的 skill 链接进 `project` 插件，其余 skill 链接进 `personal` 插件，顺序是插件、`personal`、`project`；
+  - 同一个项目里不能有两个同名的项目 skill（都会叫 `project:<name>`）：安装、新建、改名时冲突返回 409，
+    万一并发写入，解析时保留本项目自己的那个；
+  - 每次运行的 `metadata.library` 记下角色、项目以及每个条目的插件和范围，不再写 `metadata.project_skills`；
+    Planner 读不到安装时沿用上一轮的条目，Worker 和 Reviewer 本次不加载并在活动里警告；
+  - API：`GET /api/catalog`、`GET /api/catalog/<id>`、`POST /api/catalog/import`、`POST /api/installs`、
+    `PUT`/`DELETE /api/installs/<id>`、`GET /api/projects/<id>/installs`，项目 skill 的 `POST`/`GET`/`PUT`/`DELETE`
+    路径不变（`PUT` 不再接受 `enabled`，开关在安装上）；去掉 `/api/settings/library*` 和项目 skill 列表接口。
+
+#### M8b MCP 服务器
+
+- **目标：** MCP 服务器和插件、skill 一样进目录、按范围和角色安装。
+- **范围：**
+  - MCP 服务器作为一种目录条目（命令或 URL、参数、env、header）；
+  - 密钥（env 的值、header）存数据库，API 和界面里打码；
+  - 可以从本机 `~/.claude.json` 只读导入；
+  - 每次运行把它安装的服务器写成只读的 MCP 配置文件，以 `--mcp-config` 挂载，保留 `--strict-mcp-config`。
+- **验收：** 真实 Claude 的 init 里只出现安装给该角色的 MCP 服务器；API 返回里看不到密钥；卸载后下一次运行不再加载。
+
+#### M8c 进库来源：上传、git、界面
+
+- **目标：** 除了从本机导入，还能上传、从 git 导入、在界面里新建和编辑目录条目。
+- **范围：**
+  - 上传 `SKILL.md` 或 zip（沿用 M1.6 的上限和二进制、链接规则）；
+  - 从 git 仓库导入（只读克隆到临时目录，记下 URL 和提交）；
+  - 在界面里新建和编辑 skill；
+  - 来源记在 `origin`，重新导入只影响同一来源的条目。
+- **验收：** 三种来源各进库一个条目，安装后真实 Claude 能调用；超限、二进制和越界链接被拒绝并说明原因。
+
+#### M8d 配置层级统一
+
+- **目标：** harness、模型、effort、环境变量和单次运行上限按"系统默认 → 角色 → 项目 → 项目里的角色"逐层解析。
+- **范围：**
+  - 把这几项配置的来源统一为这四层，后面的覆盖前面的；Manager 只有"系统默认 → 角色"两层；
+  - 吸收原第 5.3 节"按角色分别设模型或单次上限"；
+  - 每次运行记录每项配置取自哪一层；
+  - 界面在 Settings、Agents 页和项目 Settings 标签里按层显示和编辑。
+- **验收：** 每一层的设置都能在对应 agent 的启动参数或记录里读回；没有设置的项目与现在一致。
+
+#### M8e 导出与导入
+
+- **目标：** 把目录、安装和配置导出成一个文件，在另一台机器或另一个库里导入。
+- **范围：**
+  - 一个文件包含目录条目、安装和各层配置；
+  - 导入前先预览：新增、变化、冲突；
+  - 密钥默认不导出，留作占位符，导入后提示补填。
+- **验收：** 导出后导入到一个新库，再导出得到相同的内容（密钥除外）；预览与实际应用的变化一致。
+
 ## 4. 进度台账
 
 | 日期 | 事项 |
@@ -325,6 +411,7 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
 | 2026-10-13 | M7a 交付（looper #45）：计划存进 `task_plans` 和补齐字段的 `task_steps`，Manager 与 Planner 的会话存进 `agent_sessions`，每次变化只写改动的行，多行变化一个事务，不再写计划和会话文件；启动时续跑计划仍在进行的任务（不重新规划、续接会话），并一次性导入旧文件。验证：真实 `loopx serve` 加替身 Claude 在 SIGINT 重启后续跑完成、因上限失败的任务重启后"提高上限并继续"完成；本机 11 个计划文件都是旧格式、全部跳过，导入 Manager 会话 1 个，第二次运行无操作。 |
 | 2026-10-13 | M7b 交付（looper #46）：步骤被接受时由代码在定案事务里写一条 `task_journal`（Worker 的总结加 Worker、Reviewer 回复里新增的可选 `learnings`，至多 5 条、每条 300 字符），Planner 的 DECISION、SUPERVISE、CHAT 轮注入新的在前、至多 4,000 字符的「进度与发现」，计划行带已接受步骤的总结，Worker 首轮注入依赖在前、至多 2,000 字符的发现；项目开关 `distill_lessons`（默认关）打开时任务完成后多一轮 LESSONS，把日志整理成项目知识文档。验证：真实 PG 加替身 Claude 走完各条规则，真实 haiku 回归评测 5/5、违约 0（$0.34，基线 $0.33），一次最小任务里 Worker 报出 learnings、下一轮 Planner 与依赖步骤的 Worker 都看到、经验文档入库（$0.10）。 |
 | 2026-10-13 | 启动自检（looper #47）：新增 `loopx doctor`，逐项检查 PostgreSQL（连接串的密码打码）、Claude Code CLI、它的登录（`claude auth status`，只读本机凭据、不调用模型；没有这个子命令的旧版本记为未检查）和飞书渠道开启时的 `lark-cli`，每项给出修复方法，有失败时退出码为 1。`loopx serve` 启动时先跑同一组检查：PostgreSQL 不可达仍然退出，但给出修复方法而不是堆栈；缺 `claude` 或未登录只记警告、照常启动，`GET /api/status` 返回 `checks`，控制台每页顶部显示横幅。验证：真实 PG 测试，本机实跑 `loopx doctor`，以及 `PATH` 里没有 `claude` 的一次性服务的横幅截图。 |
+| 2026-10-13 | M8a 交付（looper #48）：能力目录与安装。`library_items` 加上 `origin`、所属项目和描述，新增 `library_installs`（全局或某个项目、角色子集、启用开关）；一次性迁移让已导入的条目都不安装，`project_skills` 保留 id 等价迁入目录并安装给三个任务角色后删除；`load_installed(role, project)` 取代 `load_library` 和 `load_project_skills`，新增目录、安装和项目视图接口，Settings 和项目 Skills 标签改为目录与安装。验证：仿真实规模的旧库（3 个插件、104 个 skill、5 个项目 skill）升级后 107 个条目都未安装、5 个项目 skill 各有一条三角色安装、启用状态不变，再跑一次不变；真实 Claude（haiku）下全局只装给 worker 的 skill 出现在 Worker 的 init、不在 Planner 的，迁移来的 `project:release-stamp` 被 Worker 调用并写出暗号，任务 $0.051；真实 PG 789 通过 |
 
 ## 5. 不属于本 RFC 的待办
 
@@ -336,12 +423,11 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
 
 ### 5.2 工程待办
 
-- **插件与 skill 库的上下文开销**：全部导入后，opus 首个请求的 token 约增加 86%（M1.6 实测）。结合 M2 的花费数据，评估停用不常用的 skill。
+- **插件与 skill 库的上下文开销**：全部导入后，opus 首个请求的 token 约增加 86%（M1.6 实测）。M8a 起导入的条目默认不加载，结合 M2 的花费数据按角色安装常用的。
 - **下一次发布**：M0–M3 及相关修复尚未发布。下个版本按 looper 的 Release workflow（推 tag 发布）进行，发布说明需覆盖 RFC 决策 4–8 带来的行为变化（个人配置隔离、默认 harness、所有 agent 免权限确认、渠道白名单等）。
 
 ### 5.3 非核心待办（M6 之后统一做）
 
-- **项目执行配置的辅助功能**（M5 只做了核心）：按角色分别设模型或单次上限。
 - **经验文档先作为草稿**（M7b 只做了开关直接入库）：任务结束时生成的经验文档先存为待确认的草稿，用户在项目页确认或修改后才进入项目知识。
 
 ### 5.4 验证缺口

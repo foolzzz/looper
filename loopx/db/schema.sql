@@ -184,12 +184,13 @@ CREATE TABLE IF NOT EXISTS system_settings (
     updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
--- The plugins and skills imported from the operator's Claude Code (the
--- library), loaded by every agent when enabled. The tables are the source of
--- truth: agents get a read-only copy materialized under the runtime root
--- (loopx/agents/library.py), never the operator's ~/.claude. An item's
--- sha256 is the hash of its files; a re-import replaces a changed item's files
--- and keeps its id and its enabled flag.
+-- The capability catalog (the library): plugins and skills acquired into LoopX.
+-- An item does nothing by itself; it loads only where it is installed
+-- (library_installs). The tables are the source of truth: agents get a
+-- read-only copy materialized under the runtime root (loopx/agents/library.py),
+-- never the operator's ~/.claude. An item's sha256 is the hash of its files; a
+-- re-import replaces a changed item's files and keeps its id and its installs.
+-- origin, owner_project_id and description are added below, after projects.
 CREATE TABLE IF NOT EXISTS library_items (
     id           TEXT PRIMARY KEY,
     kind         TEXT NOT NULL CHECK (kind IN ('plugin', 'skill')),
@@ -197,12 +198,10 @@ CREATE TABLE IF NOT EXISTS library_items (
     source       TEXT NOT NULL DEFAULT '',
     version      TEXT NOT NULL DEFAULT '',
     sha256       TEXT NOT NULL,
-    enabled      BOOLEAN NOT NULL DEFAULT true,
     size_bytes   BIGINT NOT NULL,
     file_count   INTEGER NOT NULL,
     imported_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
-    UNIQUE (kind, name)
+    updated_at   TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE TABLE IF NOT EXISTS library_files (
     item_id     TEXT NOT NULL REFERENCES library_items(id) ON DELETE CASCADE,
@@ -293,22 +292,85 @@ CREATE TABLE IF NOT EXISTS project_documents (
 );
 CREATE INDEX IF NOT EXISTS idx_project_documents_project ON project_documents (project_id, created_at, id);
 
--- A project's own Claude Code skills: only its task agents (Planner, Workers,
--- Reviewers) load them. The enabled ones are materialized read-only under the
--- runtime root as one plugin, never in the project's directory; name is the
--- skill's directory and frontmatter name (a lowercase slug), content the body
--- of its SKILL.md. Code owns validation and caps (loopx/agents/project_skills.py).
-CREATE TABLE IF NOT EXISTS project_skills (
-    id           TEXT PRIMARY KEY,
-    project_id   TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
-    name         TEXT NOT NULL CHECK (length(name) <= 64 AND name ~ '^[a-z0-9]+(-[a-z0-9]+)*$'),
-    description  TEXT NOT NULL,
-    content      TEXT NOT NULL,
-    enabled      BOOLEAN NOT NULL DEFAULT true,
-    created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
-    UNIQUE (project_id, name)
+-- How a catalog item was acquired: imported from this machine's Claude Code
+-- ('machine'), uploaded, taken from git, written in the UI, or written in a
+-- project ('project'). A project-authored item belongs to that project
+-- (owner_project_id) and goes with it. Code owns the kinds of origin and what
+-- each may do (loopx/agents/catalog.py).
+ALTER TABLE library_items ADD COLUMN IF NOT EXISTS origin TEXT NOT NULL DEFAULT 'machine'
+    CHECK (origin IN ('machine', 'upload', 'git', 'ui', 'project'));
+ALTER TABLE library_items ADD COLUMN IF NOT EXISTS owner_project_id TEXT REFERENCES projects(id) ON DELETE CASCADE;
+-- One line on what the item does; '' when it has none (an imported item).
+ALTER TABLE library_items ADD COLUMN IF NOT EXISTS description TEXT NOT NULL DEFAULT '';
+-- A name is unique among the items outside projects, and within the project that owns an item.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_library_items_name ON library_items (kind, name)
+    WHERE owner_project_id IS NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_library_items_project_name ON library_items (owner_project_id, kind, name)
+    WHERE owner_project_id IS NOT NULL;
+
+-- Where a catalog item is installed: everywhere ('global') or in one project,
+-- for some roles. Every agent run loads the enabled global installs and its
+-- project's that name its role. A project install never names the Manager,
+-- which spans every project. One install per item and place.
+CREATE TABLE IF NOT EXISTS library_installs (
+    id          TEXT PRIMARY KEY,
+    item_id     TEXT NOT NULL REFERENCES library_items(id) ON DELETE CASCADE,
+    scope       TEXT NOT NULL CHECK (scope IN ('global', 'project')),
+    project_id  TEXT REFERENCES projects(id) ON DELETE CASCADE,
+    roles       TEXT[] NOT NULL CHECK (cardinality(roles) > 0
+                                       AND roles <@ ARRAY['manager', 'planner', 'worker', 'reviewer']),
+    enabled     BOOLEAN NOT NULL DEFAULT true,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CHECK ((scope = 'project') = (project_id IS NOT NULL)),
+    CHECK (scope = 'global' OR NOT 'manager' = ANY (roles))
 );
+CREATE UNIQUE INDEX IF NOT EXISTS idx_library_installs_place
+    ON library_installs (item_id, scope, COALESCE(project_id, ''));
+CREATE INDEX IF NOT EXISTS idx_library_installs_project ON library_installs (project_id)
+    WHERE project_id IS NOT NULL;
+
+-- Once (catalog and installs): the items imported before stay in the catalog,
+-- installed nowhere, so they load nowhere until installed. Each project skill
+-- (the retired project_skills table) becomes a catalog item owned by its
+-- project, keeping its id, name and description, its SKILL.md written the way
+-- runs wrote it (frontmatter from the fields, then the body;
+-- loopx/agents/project_skills.py skill_file), and is installed in its project
+-- for the Planner, Workers and Reviewers, enabled as it was.
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM schema_migrations WHERE name = 'library_catalog_installs') THEN
+        ALTER TABLE library_items DROP CONSTRAINT IF EXISTS library_items_kind_name_key;
+        ALTER TABLE library_items DROP COLUMN IF EXISTS enabled;
+        ALTER TABLE library_items ADD CONSTRAINT library_items_owner_check
+            CHECK ((origin = 'project') = (owner_project_id IS NOT NULL));
+        IF to_regclass('project_skills') IS NOT NULL THEN
+            CREATE TEMP TABLE catalog_project_skills AS
+            SELECT s.id, s.project_id, s.name, s.description, s.enabled, s.created_at, s.updated_at, f.text,
+                   encode(sha256(convert_to(f.text, 'UTF8')), 'hex') AS file_sha256
+            FROM project_skills s,
+                 LATERAL (SELECT '---' || E'\n' || 'name: ' || s.name || E'\n'
+                                 || 'description: ' || to_json(s.description)::text || E'\n' || '---' || E'\n' || E'\n'
+                                 || s.content || CASE WHEN right(s.content, 1) = E'\n' THEN '' ELSE E'\n' END
+                                 AS text) f;
+            INSERT INTO library_items (id, kind, name, source, version, sha256, size_bytes, file_count,
+                                       imported_at, updated_at, origin, owner_project_id, description)
+            SELECT id, 'skill', name, '', '',
+                   encode(sha256(convert_to('[["SKILL.md","' || file_sha256 || '",false]]', 'UTF8')), 'hex'),
+                   octet_length(text), 1, created_at, updated_at, 'project', project_id, description
+            FROM catalog_project_skills;
+            INSERT INTO library_files (item_id, path, content, sha256, executable)
+            SELECT id, 'SKILL.md', text, file_sha256, false FROM catalog_project_skills;
+            INSERT INTO library_installs (id, item_id, scope, project_id, roles, enabled, created_at, updated_at)
+            SELECT 'inst-' || left(replace(gen_random_uuid()::text, '-', ''), 12), id, 'project', project_id,
+                   ARRAY['planner', 'worker', 'reviewer'], enabled, created_at, updated_at
+            FROM catalog_project_skills;
+            DROP TABLE catalog_project_skills;
+            DROP TABLE project_skills;
+        END IF;
+        INSERT INTO schema_migrations (name) VALUES ('library_catalog_installs');
+    END IF;
+END $$;
 
 -- Once: tasks from before projects get one project per directory, named after
 -- its last path component ('' and '/' -> 'default'). The oldest directory
