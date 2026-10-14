@@ -160,6 +160,5 @@ uninstall and package rollback procedures.
 ## Related Documents
 
 - [DeepSeek Harness connector](deepseek-harness-connector.md)
-- [DSH native LoopX design](../plans/2026-08-20-dsh-native-skill-driver.md)
 - [Runtime connector catalog](runtime-connector-catalog.md)
 - [Host integration surface v0](../reference/protocols/host-integration-surface-v0.md)

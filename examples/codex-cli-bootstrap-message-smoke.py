@@ -198,10 +198,6 @@ def assert_docs_surface_codex_cli_quickstart() -> None:
         "docs/book/en/chapters/06-codex-app.md",
         "docs/development/control-plane-course/03-first-real-loop.md",
     )
-    identity_plan_path = "docs/plans/issue-2785-thread-agent-identity.md"
-    identity_plan = (REPO_ROOT / identity_plan_path).read_text(encoding="utf-8")
-    assert "Codex CLI Thread Agent Identity Reuse" in identity_plan, identity_plan
-    assert "Codex App Thread Agent Identity Reuse" not in identity_plan, identity_plan
 
     retired_host_argument = re.compile(
         r"--host-surface(?:\s+|=)codex-app(?![-\w])",
@@ -222,7 +218,6 @@ def assert_docs_surface_codex_cli_quickstart() -> None:
     contract_docs = {
         **default_host_docs,
         "docs/product/runtimes/codex-cli/codex-cli-tui-loop.md": product_contract,
-        identity_plan_path: identity_plan,
         **{
             relative_path: (REPO_ROOT / relative_path).read_text(encoding="utf-8")
             for relative_path in retired_entry_paths
