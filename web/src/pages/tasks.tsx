@@ -34,6 +34,12 @@ import { ProjectBackgroundField, backgroundTooLong } from "@/components/project-
 import { ProjectHarnessOverrides, harnessTooLong } from "@/components/harness-field";
 import { ProjectKnowledgeSection } from "@/components/project-knowledge";
 import { ProjectSkillsSection } from "@/components/project-skills";
+import {
+  ProjectExecutionFields,
+  executionChanges,
+  executionDraft,
+  type ExecutionDraft,
+} from "@/components/project-execution";
 import { TaskDetailPage } from "./task-detail";
 
 const STATUS_FILTERS = ["all", "init", "running", "pending", "completed", "failed", "cancelled", "stopped"] as const;
@@ -159,6 +165,7 @@ function ProjectBar({ project, onDeleted }: { project: Project; onDeleted: () =>
   const [background, setBackground] = useState("");
   const [plannerHarness, setPlannerHarness] = useState("");
   const [workerHarness, setWorkerHarness] = useState("");
+  const [execution, setExecution] = useState<ExecutionDraft>(() => executionDraft(project));
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -170,6 +177,7 @@ function ProjectBar({ project, onDeleted }: { project: Project; onDeleted: () =>
     setBackground(project.background);
     setPlannerHarness(project.planner_harness_prompt ?? "");
     setWorkerHarness(project.worker_harness_prompt ?? "");
+    setExecution(executionDraft(project));
     setError("");
     setConfirmDelete(false);
     setEditing(true);
@@ -182,7 +190,7 @@ function ProjectBar({ project, onDeleted }: { project: Project; onDeleted: () =>
     }
     if (backgroundTooLong(background) || harnessTooLong(plannerHarness) || harnessTooLong(workerHarness)) return;
     // Send only what changed; an empty directory, background or harness clears it.
-    const fields: ProjectUpdate = {};
+    const fields: ProjectUpdate = executionChanges(execution, project);
     if (name.trim() !== project.name) fields.name = name.trim();
     if (description.trim() !== project.description) fields.description = description.trim();
     if (workDir.trim() !== project.work_dir) fields.work_dir = workDir.trim();
@@ -254,6 +262,7 @@ function ProjectBar({ project, onDeleted }: { project: Project; onDeleted: () =>
           onPlannerChange={setPlannerHarness}
           onWorkerChange={setWorkerHarness}
         />
+        <ProjectExecutionFields idPrefix="project-edit" draft={execution} onChange={setExecution} />
         {error && <p role="alert" className="text-xs text-destructive">{error}</p>}
         <div className="flex justify-end gap-2">
           <Button type="button" variant="outline" size="sm" onClick={() => setEditing(false)}>Cancel</Button>

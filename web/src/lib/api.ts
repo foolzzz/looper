@@ -46,8 +46,24 @@ export const BACKGROUND_MAX_CHARS = 10000;
 /** The most characters a harness prompt (the default, the Manager's or a project's) may have. */
 export const HARNESS_MAX_CHARS = 20000;
 
+/** How a project's Planner, Workers and Reviewers run; null inherits today's behavior. */
+export interface ProjectExecution {
+  /** Their model, over the agent's own and the default in Settings. */
+  model: string | null;
+  /** `--max-budget-usd` on each of their Claude Code processes. */
+  run_budget_usd: number | null;
+  /** The most one task may spend over all its runs. */
+  task_budget_usd: number | null;
+  /** At the task cap: fail at once (also when null) or after the Planner sums up. */
+  task_budget_action: "wrap_up" | "fail" | null;
+  /** How often the Planner checks running Workers; 0 = never. */
+  supervise_interval_seconds: number | null;
+  /** "planner": the Planner decides which steps are reviewed; "all": every step is. */
+  review_policy: "planner" | "all" | null;
+}
+
 /** A group of tasks with an optional default work directory and background. */
-export interface Project {
+export interface Project extends ProjectExecution {
   project_id: string;
   name: string;
   description: string;
@@ -292,8 +308,10 @@ export async function createProject(fields: NewProjectFields): Promise<Project> 
   return project;
 }
 
-/** The project fields an update can change. */
-export type ProjectUpdate = Partial<Omit<NewProjectFields, "name">> & { name?: string };
+/** The project fields an update can change; an execution setting set to null inherits again. */
+export type ProjectUpdate = Partial<Omit<NewProjectFields, "name">> & { name?: string } & {
+  [K in keyof ProjectExecution]?: ProjectExecution[K] | string;
+};
 
 /** Send only the fields to change; `work_dir: ""`, `background: ""` and an empty harness clear them. */
 export async function updateProject(projectId: string, fields: ProjectUpdate): Promise<Project> {
