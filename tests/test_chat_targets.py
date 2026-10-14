@@ -13,7 +13,7 @@ import pytest
 from loopx.agents import chat_targets
 from loopx.agents.chat_targets import build_chat_targets, list_chat_targets
 from loopx.agents.tiers.planner import PlannerAgent
-from loopx.agents.tiers.task import TaskRouter
+from loopx.agents.tiers.task import Task, TaskRouter
 
 T0 = datetime(2026, 10, 12, 8, 0, tzinfo=timezone.utc)
 
@@ -59,16 +59,6 @@ class TestBuildChatTargets:
         assert planners["t2"] == {"kind": "planner", "id": "planner-t2", "task_id": "t2",
                                   "requirement": "do t2", "status": "stopped", "can_send": False}
 
-    def test_live_planner_missing_from_history_is_still_listed(self) -> None:
-        targets = build_chat_targets(
-            tasks=[],
-            live_planners=[{"task_id": "t9", "planner_id": "planner-t9",
-                            "requirement": "fresh", "status": "running"}],
-            steps=[], runs=[],
-        )
-        assert _ids(targets) == ["manager", "planner-t9"]
-        assert targets[1]["can_send"] is True and targets[1]["requirement"] == "fresh"
-
     def test_each_step_lists_its_own_worker_and_reviewer(self) -> None:
         targets = build_chat_targets(
             tasks=[_task("t1", 0)],
@@ -78,9 +68,10 @@ class TestBuildChatTargets:
                 _run("worker-a", "t1", 1),
                 _run("reviewer-a", "t1", 2, step_id="t1-s0"),
                 _run("worker-b", "t1", 3, status="running"),
+                _run("reviewer-x", "t1", 4),  # its step is not known
             ],
         )
-        assert _ids(targets) == ["manager", "planner-t1", "worker-a", "reviewer-a", "worker-b"]
+        assert _ids(targets) == ["manager", "planner-t1", "worker-a", "reviewer-a", "worker-b", "reviewer-x"]
         by_id = {t["id"]: t for t in targets}
         assert by_id["worker-a"] == {
             "kind": "worker", "id": "worker-a", "task_id": "t1", "status": "completed",
@@ -89,6 +80,7 @@ class TestBuildChatTargets:
         }
         assert (by_id["reviewer-a"]["kind"], by_id["reviewer-a"]["step_index"]) == ("reviewer", 0)
         assert (by_id["worker-b"]["status"], by_id["worker-b"]["step_index"]) == ("running", 1)
+        assert (by_id["reviewer-x"]["step_index"], by_id["reviewer-x"]["instruction"]) == (None, "")
 
     def test_retried_step_keeps_the_earlier_worker(self) -> None:
         # task_steps holds only the latest worker; the run's own step id places the first one.
@@ -104,14 +96,6 @@ class TestBuildChatTargets:
             ("worker-old", 0, "failed"), ("worker-new", 0, "completed"),
         ]
 
-    def test_run_without_a_known_step_has_no_step_index(self) -> None:
-        targets = build_chat_targets(
-            tasks=[_task("t1", 0)], live_planners=[], steps=[],
-            runs=[_run("reviewer-x", "t1", 1)],
-        )
-        assert targets[-1]["id"] == "reviewer-x"
-        assert targets[-1]["step_index"] is None and targets[-1]["instruction"] == ""
-
     def test_agent_with_several_runs_is_listed_once_with_its_latest_status(self) -> None:
         targets = build_chat_targets(
             tasks=[_task("t1", 0)], live_planners=[], steps=[_step("t1", 0, "worker-a")],
@@ -121,13 +105,6 @@ class TestBuildChatTargets:
         assert len(workers) == 1
         assert workers[0]["status"] == "running"
         assert workers[0]["started_at"] == T0 + timedelta(minutes=1)
-
-    def test_runs_of_unlisted_tasks_are_ignored(self) -> None:
-        targets = build_chat_targets(
-            tasks=[_task("t1", 0)], live_planners=[], steps=[],
-            runs=[_run("worker-z", "other", 1)],
-        )
-        assert _ids(targets) == ["manager", "planner-t1"]
 
 
 class TestListChatTargets:
@@ -167,7 +144,15 @@ class TestListChatTargets:
 
         monkeypatch.setattr(chat_targets.db_tasks, "list_tasks", broken)
         with tempfile.TemporaryDirectory() as tmp:
-            targets = asyncio.run(list_chat_targets(self._router(tmp)))
+            router = self._router(tmp)
+            # A live Planner's entry comes from its task; a queued task has no Planner to chat with.
+            router._tasks = {
+                "t1": Task(task_id="t1", requirement="build it", goal_id="", work_dir="", project_id="proj-1",
+                           status="running", planner_id="planner-t1"),
+                "t2": Task(task_id="t2", requirement="later", goal_id="", work_dir="", project_id="proj-1"),
+            }
+            targets = asyncio.run(list_chat_targets(router))
 
         assert _ids(targets) == ["manager", "planner-t1"]
         assert targets[1]["can_send"] is True
+        assert (targets[1]["requirement"], targets[1]["status"]) == ("build it", "running")

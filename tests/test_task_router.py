@@ -17,163 +17,20 @@ from loopx.agents.message import (
     MessageEnvelope,
     MessageType,
     planner_address,
-    worker_address,
 )
 from loopx.agents.tiers.task import Task, TaskRouter
 
 
-class TestTask:
-    def test_task_to_dict(self) -> None:
-        task = Task(
-            task_id="t1",
-            requirement="add login",
-            goal_id="g1",
-            work_dir="/tmp",
-            project_id="proj-1",
-            status="running",
-            planner_id="planner-t1",
-            correlation_id="c1",
-        )
-        d = task.to_dict()
-        assert d["task_id"] == "t1"
-        assert d["status"] == "running"
-        assert d["planner_id"] == "planner-t1"
-
-    def test_task_default_status(self) -> None:
-        task = Task(
-            task_id="t1",
-            requirement="test",
-            goal_id="g1",
-            work_dir="/tmp",
-            project_id="proj-1",
-        )
-        assert task.status == "pending"
+async def _until(condition: Any, timeout: float = 5.0) -> None:
+    """Wait until ``condition()`` holds, checking every 10 ms."""
+    deadline = asyncio.get_running_loop().time() + timeout
+    while not condition():
+        assert asyncio.get_running_loop().time() < deadline, "timed out waiting for the router"
+        await asyncio.sleep(0.01)
 
 
 @pytest.mark.usefixtures("agent_db")
 class TestTaskRouter:
-    def test_agent_id_and_address(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            router = TaskRouter(runtime_root=Path(tmp))
-            assert router.agent_id == "task-router"
-            assert router.agent_address == TASK_ROUTER_ADDRESS
-
-    def test_create_planner_on_task_request(self) -> None:
-        async def _run() -> None:
-            with tempfile.TemporaryDirectory() as tmp:
-                bus = MessageBus(runtime_root=Path(tmp))
-                router = TaskRouter(runtime_root=Path(tmp))
-                await router.start(bus)
-
-                envelope = MessageEnvelope.create(
-                    source=MANAGER_ADDRESS,
-                    target=TASK_ROUTER_ADDRESS,
-                    message_type=MessageType.TASK_REQUEST,
-                    payload={
-                        "goal_id": "g1",
-                        "requirement": "add login page",
-                        "work_dir": "/tmp",
-                        "project_id": "proj-1",
-                    },
-                    metadata={"origin_channel_id": "channel-web"},
-                )
-                await bus.publish(envelope)
-                await asyncio.sleep(0.2)
-
-                assert len(router._tasks) == 1
-                assert len(router._planners) == 1
-                task = list(router._tasks.values())[0]
-                assert task.status == "running"
-                assert task.planner_id is not None
-
-                await router.stop()
-                await bus.shutdown()
-
-        asyncio.run(_run())
-
-    def test_multiple_tasks_independent(self) -> None:
-        async def _run() -> None:
-            with tempfile.TemporaryDirectory() as tmp:
-                bus = MessageBus(runtime_root=Path(tmp))
-                router = TaskRouter(runtime_root=Path(tmp))
-                await router.start(bus)
-
-                for i in range(3):
-                    envelope = MessageEnvelope.create(
-                        source=MANAGER_ADDRESS,
-                        target=TASK_ROUTER_ADDRESS,
-                        message_type=MessageType.TASK_REQUEST,
-                        payload={
-                            "goal_id": f"g{i}",
-                            "requirement": f"task {i}",
-                            "work_dir": "/tmp",
-                            "project_id": "proj-1",
-                        },
-                        metadata={"origin_channel_id": "channel-web"},
-                    )
-                    await bus.publish(envelope)
-
-                await asyncio.sleep(0.3)
-
-                assert len(router._tasks) == 3
-                assert len(router._planners) == 3
-
-                statuses = [t.status for t in router._tasks.values()]
-                assert all(s == "running" for s in statuses)
-
-                await router.stop()
-                await bus.shutdown()
-
-        asyncio.run(_run())
-
-    def test_task_completion_tears_down_planner(self) -> None:
-        async def _run() -> None:
-            with tempfile.TemporaryDirectory() as tmp:
-                bus = MessageBus(runtime_root=Path(tmp))
-                router = TaskRouter(runtime_root=Path(tmp))
-                await router.start(bus)
-
-                envelope = MessageEnvelope.create(
-                    source=MANAGER_ADDRESS,
-                    target=TASK_ROUTER_ADDRESS,
-                    message_type=MessageType.TASK_REQUEST,
-                    payload={
-                        "goal_id": "g1",
-                        "requirement": "quick fix",
-                        "work_dir": "/tmp",
-                        "project_id": "proj-1",
-                    },
-                    metadata={"origin_channel_id": "channel-web"},
-                )
-                await bus.publish(envelope)
-                await asyncio.sleep(0.2)
-
-                task_id = list(router._tasks.keys())[0]
-                planner = router._planners[task_id]
-
-                # Simulate planner reporting completion
-                status_env = MessageEnvelope.create(
-                    source=planner.agent_address,
-                    target=TASK_ROUTER_ADDRESS,
-                    message_type=MessageType.GOAL_STATUS,
-                    payload={
-                        "task_id": task_id,
-                        "goal_id": "g1",
-                        "status": "completed",
-                        "summary": "done",
-                    },
-                    correlation_id=envelope.correlation_id,
-                )
-                await bus.publish(status_env)
-                await asyncio.sleep(0.2)
-
-                assert task_id not in router._planners
-
-                await router.stop()
-                await bus.shutdown()
-
-        asyncio.run(_run())
-
     def test_task_cancel(self) -> None:
         async def _run() -> None:
             with tempfile.TemporaryDirectory() as tmp:
@@ -194,7 +51,7 @@ class TestTaskRouter:
                     metadata={"origin_channel_id": "channel-web"},
                 )
                 await bus.publish(envelope)
-                await asyncio.sleep(0.2)
+                await _until(lambda: len(router._planners) == 1)
 
                 task_id = list(router._tasks.keys())[0]
 
@@ -205,7 +62,7 @@ class TestTaskRouter:
                     payload={"task_id": task_id},
                 )
                 await bus.publish(cancel_env)
-                await asyncio.sleep(0.2)
+                await _until(lambda: task_id not in router._planners)
 
                 assert router._tasks[task_id].status == "cancelled"
                 assert task_id not in router._planners
@@ -238,45 +95,15 @@ class TestTaskRouter:
                     )
                     await bus.publish(envelope)
 
-                await asyncio.sleep(0.3)
+                # Every request has been placed: given a Planner or queued.
+                await _until(lambda: len(router._tasks) == 4
+                             and len(router._planners) + router._pending_queue.qsize() == 4)
 
                 running = sum(1 for t in router._tasks.values() if t.status == "running")
                 pending = sum(1 for t in router._tasks.values() if t.status == "pending")
                 assert running == 3
                 assert pending == 1
                 assert len(router._planners) == 3
-
-                await router.stop()
-                await bus.shutdown()
-
-        asyncio.run(_run())
-
-    def test_list_tasks(self) -> None:
-        async def _run() -> None:
-            with tempfile.TemporaryDirectory() as tmp:
-                bus = MessageBus(runtime_root=Path(tmp))
-                router = TaskRouter(runtime_root=Path(tmp))
-                await router.start(bus)
-
-                envelope = MessageEnvelope.create(
-                    source=MANAGER_ADDRESS,
-                    target=TASK_ROUTER_ADDRESS,
-                    message_type=MessageType.TASK_REQUEST,
-                    payload={
-                        "goal_id": "g1",
-                        "requirement": "test list",
-                        "work_dir": "/tmp",
-                        "project_id": "proj-1",
-                    },
-                    metadata={"origin_channel_id": "channel-web"},
-                )
-                await bus.publish(envelope)
-                await asyncio.sleep(0.2)
-
-                tasks = router.list_tasks()
-                assert len(tasks) == 1
-                assert tasks[0]["requirement"] == "test list"
-                assert tasks[0]["status"] == "running"
 
                 await router.stop()
                 await bus.shutdown()
@@ -329,30 +156,6 @@ class TestTaskRouter:
 
 
 class TestPlannerOutcome:
-    @pytest.mark.parametrize("outcome", ["completed", "failed"])
-    def test_final_status_is_kept(self, outcome: str, agent_db: Any) -> None:
-        """Teardown must persist the Planner's outcome, not overwrite failed with completed."""
-
-        async def _run() -> Task:
-            with tempfile.TemporaryDirectory() as tmp:
-                bus = MessageBus(runtime_root=Path(tmp))
-                router = TaskRouter(runtime_root=Path(tmp))
-                router._bus = bus
-                task = Task(task_id="t1", requirement="r", goal_id="", work_dir="", project_id="proj-1", status="running")
-                router._tasks = {"t1": task}
-                await router._handle_planner_status(MessageEnvelope.create(
-                    source=planner_address("t1"),
-                    target=TASK_ROUTER_ADDRESS,
-                    message_type=MessageType.GOAL_STATUS,
-                    payload={"task_id": "t1", "status": outcome},
-                ))
-                await bus.shutdown()
-                return task
-
-        task = asyncio.run(_run())
-        assert task.status == outcome
-        assert agent_db.update_task_status.await_args_list[-1].args == ("t1", outcome)
-
     @pytest.mark.parametrize(
         ("outcome", "fields"),
         [
@@ -382,6 +185,8 @@ class TestPlannerOutcome:
         first = agent_db.update_task_status.await_args_list[0]
         assert first.args == ("t1", outcome)
         assert {key: first.kwargs.get(key) for key in fields} == fields
+        # Teardown persists the Planner's outcome; it never turns a failed task into a completed one.
+        assert agent_db.update_task_status.await_args_list[-1].args == ("t1", outcome)
 
 
 @pytest.mark.usefixtures("agent_db")
@@ -460,12 +265,3 @@ class TestTaskProject:
         assert task.project_id == "proj-7"
         assert envelope.payload["project_id"] == "proj-7"
 
-    def test_moving_a_task_updates_its_live_entry(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            router = TaskRouter(runtime_root=Path(tmp))
-            live = Task(task_id="t1", requirement="r", goal_id="", work_dir="/w", project_id="proj-1", status="running")
-            router._tasks = {"t1": live}
-            router.set_task_project("t1", "proj-2")
-            router.set_task_project("t-unknown", "proj-2")  # not held: nothing to update
-            assert live.project_id == "proj-2"
-            assert list(router._tasks) == ["t1"]

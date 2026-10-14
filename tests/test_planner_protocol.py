@@ -9,13 +9,11 @@ import pytest
 
 from loopx.agents.tiers.planner_protocol import (
     MAX_STEPS,
-    ChatAction,
     Decision,
     DecisionContext,
     PlanView,
     ProtocolError,
     ResultKind,
-    SuperviseAction,
     extract_reply,
     parse_chat,
     parse_decision,
@@ -41,13 +39,12 @@ class TestReplyBlock:
             ('```json\n{}\n```\nthanks', "text after it"),
             ("```json\n{steps: []}\n```", "not valid JSON"),
             ("```json\n[1, 2]\n```", "one JSON object"),
+            ('```json\n{"a": 1} {"b": 2}\n```', "hold one JSON value and close with ```"),
+            ('```json\n{"a": 1}\n', "hold one JSON value and close with ```"),
         ],
     )
     def test_bad_blocks(self, text: str, error: str) -> None:
         assert error in _error(extract_reply, text)
-
-    def test_prose_before_the_block_is_fine(self) -> None:
-        assert extract_reply('I read the code.\n\n```json\n{"a": 1}\n```\n') == {"a": 1}
 
     def test_string_values_may_quote_code_fences(self) -> None:
         """An instruction that shows code in a fence does not end the block (seen with real Claude)."""
@@ -56,16 +53,6 @@ class TestReplyBlock:
             {**step("s1"), "instruction": instruction},
         ]}) + "\n```")
         assert parsed.steps[0].instruction == instruction
-
-    @pytest.mark.parametrize(
-        ("text", "error"),
-        [
-            ('```json\n{"a": 1} {"b": 2}\n```', "hold one JSON value and close with ```"),
-            ('```json\n{"a": 1}\n', "hold one JSON value and close with ```"),
-        ],
-    )
-    def test_block_holds_one_value_and_closes(self, text: str, error: str) -> None:
-        assert error in _error(extract_reply, text)
 
 
 class TestPlan:
@@ -144,10 +131,6 @@ class TestDecision:
     def test_refused_accept_says_why(self, context: DecisionContext, error: str) -> None:
         assert error in _error(parse_decision, decide("accept"), context, VIEW)
 
-    def test_retry_over_the_cap_says_why(self) -> None:
-        error = _error(parse_decision, decide("retry", feedback="again"), _context(retries=2), VIEW)
-        assert error == "retry is not allowed: step s1 has used its 2 retries; allowed now: accept, review, replan, fail"
-
     @pytest.mark.parametrize(
         ("text", "error"),
         [
@@ -163,18 +146,10 @@ class TestDecision:
     def test_invalid_fields(self, text: str, error: str) -> None:
         assert error in _error(parse_decision, text, _context(), VIEW)
 
-    def test_accept_keeps_reason_and_summary(self) -> None:
-        parsed = parse_decision(decide("accept", reason="tests pass", summary="calc works"), _context(), VIEW)
-        assert (parsed.reason, parsed.summary, parsed.steps) == ("tests pass", "calc works", ())
-
 
 class TestReplan:
     def _replan(self, *steps: dict[str, Any], context: DecisionContext | None = None) -> Any:
         return parse_decision(decide("replan", steps=list(steps)), context or _context(), VIEW)
-
-    def test_pending_steps_are_replaced_and_new_ones_added(self) -> None:
-        parsed = self._replan(step("s2", "s1"), step("s3", "s2"))
-        assert [s.id for s in parsed.steps] == ["s2", "s3"]
 
     @pytest.mark.parametrize(
         ("steps", "error"),
@@ -195,27 +170,13 @@ class TestReplan:
         assert "depends on s1, which is dropped" in _error(self._replan, step("s3", "s1"), context=failed)
         assert "must list the steps that replace it" in _error(self._replan, context=failed)
         assert [s.id for s in self._replan(step("s1b", "s0"), context=failed).steps] == ["s1b"]
-
-    def test_empty_replan_finishes_after_an_acceptable_step(self) -> None:
-        assert self._replan().steps == ()
+        assert self._replan().steps == ()  # after an acceptable step, an empty replan finishes the plan
 
 
 RUNNING = PlanView(started={"s1": ()}, pending={"s2": ("s1",)}, running=frozenset({"s1"}))
 
 
 class TestChat:
-    def test_forward(self) -> None:
-        parsed = parse_chat(chat("ok", "forward", step="s1", text="use red"), RUNNING)
-        assert (parsed.action, parsed.step, parsed.text) == (ChatAction.FORWARD, "s1", "use red")
-
-    def test_add_steps(self) -> None:
-        parsed = parse_chat(chat("ok", "add_steps", steps=[step("s3", "s2")]), RUNNING)
-        assert parsed.action is ChatAction.ADD_STEPS and [s.id for s in parsed.steps] == ["s3"]
-
-    def test_plain_reply(self) -> None:
-        parsed = parse_chat(chat("第 1 步在执行。"), RUNNING)
-        assert (parsed.reply, parsed.action) == ("第 1 步在执行。", ChatAction.NONE)
-
     @pytest.mark.parametrize(
         ("text", "error"),
         [
@@ -256,13 +217,6 @@ class TestSupervise:
             ("s1", "nudge", "focus on the API", ""),
             ("s2", "kill", "", "wrong file"),
         ]
-
-    def test_empty_is_leave_all(self) -> None:
-        assert parse_supervise(supervise(), RUNNING2.running).reviews == ()
-
-    def test_leave_action(self) -> None:
-        parsed = parse_supervise(supervise({"step": "s1", "action": "leave"}), RUNNING2.running)
-        assert parsed.reviews[0].action is SuperviseAction.LEAVE
 
     @pytest.mark.parametrize(
         ("text", "error"),

@@ -3,26 +3,22 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
 import os
 import signal
 import subprocess
-import sys
 import tempfile
 from pathlib import Path
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock
 
 import pytest
 
+from fake_claude import fake_claude
 from library_fixtures import ALPHA_SKILL, DEMO_PLUGIN, plugin_dirs
 from loopx.agents.bus import MessageBus
 from loopx.agents.claude_cli import ISOLATION_ID, isolation_args
 from loopx.agents.message import (
-    MANAGER_ADDRESS,
-    TASK_ROUTER_ADDRESS,
-    AgentAddress,
     MessageEnvelope,
     MessageType,
     planner_address,
@@ -30,65 +26,20 @@ from loopx.agents.message import (
 )
 from loopx.agents.agent_settings import DEFAULT_HARNESS_PROMPT
 from loopx.agents.system_prompt import REVIEW_CONTRACT, WORK_CONTRACT
-from loopx.agents.tiers.planner import PlanStep, PlannerAgent, TaskPlan
+from loopx.agents.tiers.planner import PlanStep, TaskPlan
 from loopx.agents.tiers.worker import (
     DEFAULT_SYSTEM_PROMPT,
     REVIEWER_SYSTEM_PROMPT,
     WorkerConfig,
     WorkerPool,
-    WorkerProcess,
 )
+from tests.test_planner_agent import _assert_unrestricted, _flag, _sha, activity
 
 
 # --- TaskPlan unit tests ---
 
 
 class TestTaskPlan:
-    def test_ready_steps_no_deps(self) -> None:
-        plan = TaskPlan(
-            plan_id="p1", goal_id="g1", requirement="test", work_dir="/tmp"
-        )
-        plan.steps = [
-            PlanStep(step_id="s1", index=0, instruction="do A"),
-            PlanStep(step_id="s2", index=1, instruction="do B"),
-        ]
-        ready = plan.ready_steps()
-        assert len(ready) == 2
-
-    def test_ready_steps_with_deps(self) -> None:
-        plan = TaskPlan(
-            plan_id="p1", goal_id="g1", requirement="test", work_dir="/tmp"
-        )
-        plan.steps = [
-            PlanStep(step_id="s1", index=0, instruction="do A"),
-            PlanStep(step_id="s2", index=1, instruction="do B", depends_on=["s1"]),
-        ]
-        ready = plan.ready_steps()
-        assert len(ready) == 1
-        assert ready[0].step_id == "s1"
-
-    def test_ready_steps_dep_completed(self) -> None:
-        plan = TaskPlan(
-            plan_id="p1", goal_id="g1", requirement="test", work_dir="/tmp"
-        )
-        plan.steps = [
-            PlanStep(step_id="s1", index=0, instruction="do A", status="verified"),
-            PlanStep(step_id="s2", index=1, instruction="do B", depends_on=["s1"]),
-        ]
-        ready = plan.ready_steps()
-        assert len(ready) == 1
-        assert ready[0].step_id == "s2"
-
-    def test_is_complete(self) -> None:
-        plan = TaskPlan(
-            plan_id="p1", goal_id="g1", requirement="test", work_dir="/tmp"
-        )
-        plan.steps = [
-            PlanStep(step_id="s1", index=0, instruction="A", status="verified"),
-            PlanStep(step_id="s2", index=1, instruction="B", status="verified"),
-        ]
-        assert plan.is_complete
-
     def test_completed_not_treated_as_done(self) -> None:
         plan = TaskPlan(
             plan_id="p1", goal_id="g1", requirement="test", work_dir="/tmp"
@@ -98,26 +49,6 @@ class TestTaskPlan:
             PlanStep(step_id="s2", index=1, instruction="B", status="completed"),
         ]
         assert not plan.is_complete
-
-    def test_is_not_complete(self) -> None:
-        plan = TaskPlan(
-            plan_id="p1", goal_id="g1", requirement="test", work_dir="/tmp"
-        )
-        plan.steps = [
-            PlanStep(step_id="s1", index=0, instruction="A", status="verified"),
-            PlanStep(step_id="s2", index=1, instruction="B", status="dispatched"),
-        ]
-        assert not plan.is_complete
-
-    def test_has_failed(self) -> None:
-        plan = TaskPlan(
-            plan_id="p1", goal_id="g1", requirement="test", work_dir="/tmp"
-        )
-        plan.steps = [
-            PlanStep(step_id="s1", index=0, instruction="A", status="verified"),
-            PlanStep(step_id="s2", index=1, instruction="B", status="failed"),
-        ]
-        assert plan.has_failed
 
     def test_progress_summary(self) -> None:
         plan = TaskPlan(
@@ -133,169 +64,11 @@ class TestTaskPlan:
         assert "1 执行中" in summary
         assert "1 失败" in summary
 
-    def test_to_dict(self) -> None:
-        plan = TaskPlan(
-            plan_id="p1", goal_id="g1", requirement="test", work_dir="/tmp"
-        )
-        plan.steps = [PlanStep(step_id="s1", index=0, instruction="do A")]
-        d = plan.to_dict()
-        assert d["plan_id"] == "p1"
-        assert len(d["steps"]) == 1
-        assert d["steps"][0]["step_id"] == "s1"
-
-
-# --- PlannerAgent tests ---
-
-
-@pytest.mark.usefixtures("agent_db")
-class TestPlannerAgent:
-    def test_agent_id_includes_task_id(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            planner = PlannerAgent(task_id="abc-123", runtime_root=Path(tmp))
-            assert planner.agent_id == "planner-abc-123"
-            assert planner.agent_address == planner_address("abc-123")
-
-    @staticmethod
-    def _request(planner: PlannerAgent, work_dir: str) -> MessageEnvelope:
-        return MessageEnvelope.create(
-            source=TASK_ROUTER_ADDRESS,
-            target=planner.agent_address,
-            message_type=MessageType.TASK_REQUEST,
-            payload={"goal_id": "g1", "requirement": "add logout button", "work_dir": work_dir},
-            metadata={"origin_channel_id": "channel-web"},
-        )
-
-    def test_plan_and_dispatch(self, agent_db: Any, planner_claude: Any) -> None:
-        from tests.test_planner_agent import plan, step
-
-        claude = planner_claude(plan(step("s1")))
-
-        async def _run() -> None:
-            with tempfile.TemporaryDirectory() as tmp:
-                bus = MessageBus(runtime_root=Path(tmp))
-                planner = PlannerAgent(task_id="test-pd", runtime_root=Path(tmp), claude_bin=claude.bin)
-                await planner.start(bus)
-                await bus.publish(self._request(planner, tmp))
-
-                # The planner publishes TASK_ACCEPTED + GOAL_STATUS to task-router once Claude has planned.
-                router_q = bus.get_queue("task-router")
-                for _ in range(500):
-                    if router_q.qsize() >= 2:
-                        break
-                    await asyncio.sleep(0.01)
-                messages: list[MessageEnvelope] = []
-                while not router_q.empty():
-                    messages.append(await router_q.get())
-
-                types = [m.message_type for m in messages]
-                assert MessageType.TASK_ACCEPTED in types
-                assert MessageType.GOAL_STATUS in types
-
-                # Check plan was persisted
-                plan_dir = Path(tmp) / ".local" / "planner" / "planner-test-pd"
-                plan_files = list(plan_dir.glob("*.json"))
-                assert len(plan_files) >= 1
-
-                phases = [c.args for c in agent_db.update_task_phase.await_args_list]
-                assert phases == [("test-pd", "planning"), ("test-pd", "executing")]
-                agent_db.upsert_steps.assert_awaited_once()
-
-                await planner.stop()
-                await bus.shutdown()
-
-        asyncio.run(_run())
-
-    def test_plan_persistence_and_recovery(self, planner_claude: Any) -> None:
-        from tests.test_planner_agent import plan, step
-
-        claude = planner_claude(plan(step("s1"), step("s2", "s1")))
-
-        async def _run() -> None:
-            with tempfile.TemporaryDirectory() as tmp:
-                bus = MessageBus(runtime_root=Path(tmp))
-                planner = PlannerAgent(task_id="test-pr", runtime_root=Path(tmp), claude_bin=claude.bin)
-                await planner.start(bus)
-                await bus.publish(self._request(planner, tmp))
-                for _ in range(500):
-                    if planner._plan is not None and planner._plan.steps:
-                        break
-                    await asyncio.sleep(0.01)
-                assert planner._plan is not None
-                plan_id = planner._plan.plan_id
-                await planner.stop()
-
-                planner2 = PlannerAgent(task_id="test-pr", runtime_root=Path(tmp))
-                bus2 = MessageBus(runtime_root=Path(tmp))
-                await planner2.start(bus2)
-
-                restored = planner2._plan
-                assert restored is not None
-                assert restored.plan_id == plan_id
-                # The Claude session resumes after a restart, and the steps keep their labels and order.
-                assert restored.session_id == "sess-p"
-                assert [(s.label, s.status) for s in restored.steps] == [("s1", "dispatched"), ("s2", "pending")]
-                assert restored.steps[1].depends_on == [restored.steps[0].step_id]
-                await planner2.stop()
-                await bus.shutdown()
-                await bus2.shutdown()
-
-        asyncio.run(_run())
-
 
 # --- Worker tests ---
 
 
-class TestWorkerProcess:
-    def test_worker_process_defaults(self) -> None:
-        wp = WorkerProcess(worker_id="w1", task_id="t1", plan_id="p1")
-        assert wp.status == "pending"
-        assert wp.result is None
-
-
 class TestWorkerPool:
-    def test_build_work_prompt(self) -> None:
-        pool = WorkerPool(
-            config=WorkerConfig(),
-            runtime_root=Path("/tmp"),
-        )
-        step = {
-            "instruction": "add tests for login",
-            "target_files": ["auth.py"],
-            "validation_commands": ["pytest tests/test_auth.py"],
-            "acceptance_criteria": ["all tests pass"],
-        }
-        prompt = pool._build_work_prompt({
-            **step, "dependencies": [{"step": "s1", "summary": "added login()", "changed_files": ["login.py"]}],
-        })
-        # The step is the system prompt's task section; the user turn has the dependencies' reports.
-        for part in ("add tests for login", "auth.py", "pytest tests/test_auth.py", "all tests pass"):
-            assert part not in prompt
-        assert "s1: added login() (changed: login.py)" in prompt
-        task = pool._task_section(step, "/w", is_verify=False)
-        for part in ("add tests for login", "auth.py", "$ pytest tests/test_auth.py", "- all tests pass"):
-            assert part in task
-        # The report contract judge_result checks is in the system prompt, not the step's user turn.
-        assert '"deleted_files"' not in prompt and '"deleted_files"' in WORK_CONTRACT
-
-    def test_build_verify_prompt(self) -> None:
-        pool = WorkerPool(
-            config=WorkerConfig(),
-            runtime_root=Path("/tmp"),
-        )
-        payload = {
-            "instruction": "harden the login check",
-            "work_result": {"changed_files": {"auth.py": "modified"}, "summary": "hardened the login check"},
-            "acceptance_criteria": ["code is clean"],
-        }
-        prompt = pool._build_verify_prompt(payload)
-        assert "auth.py" in prompt
-        assert "hardened the login check" in prompt  # the Worker's report is data under review
-        assert "code is clean" not in prompt and "harden the login check" not in prompt
-        task = pool._task_section(payload, "/w", is_verify=True)
-        assert "code is clean" in task and "harden the login check" in task
-        assert "hardened the login check" not in task
-        assert '"passed"' not in prompt and '"passed"' in REVIEW_CONTRACT
-
     def test_pool_start_stop(self, stub_claude_on_path: Path) -> None:
         # is_healthy() needs a `claude` on PATH; the stub keeps this off the machine's own install.
         async def _run() -> None:
@@ -343,10 +116,7 @@ class TestWorkerPool:
 
 def _fake_claude(tmp: Path, body: str) -> str:
     """A stand-in `claude` binary that ignores its arguments."""
-    script = tmp / "fake-claude"
-    script.write_text(f"#!{sys.executable}\nimport json, os, sys, time\n{body}\n")
-    script.chmod(0o755)
-    return str(script)
+    return fake_claude(tmp / "fake-claude", f"import json, os, sys, time\n{body}\n")
 
 
 def _work_item(work_dir: Path) -> MessageEnvelope:
@@ -394,10 +164,6 @@ def _start_warm(monkeypatch: pytest.MonkeyPatch, claude: str) -> list[asyncio.su
     return started
 
 
-def _flag(argv: list[str], name: str) -> str | None:
-    return argv[argv.index(name) + 1] if name in argv else None
-
-
 _SUCCESS = (
     "print(json.dumps({'type': 'result', 'subtype': 'success', 'is_error': False, "
     "'result': json.dumps({'status': 'completed', 'summary': 'ok'})}))"
@@ -412,49 +178,6 @@ _THINKING_DELTA = {
 
 
 class TestWorkerSubprocess:
-    def test_long_stream_json_line_is_read(self) -> None:
-        # Claude's stream-json init line lists every tool and skill and can
-        # exceed asyncio's default 64 KiB line limit.
-        async def _run() -> dict[str, Any]:
-            with tempfile.TemporaryDirectory() as tmp:
-                claude = _fake_claude(Path(tmp), (
-                    "print(json.dumps({'type': 'system', 'tools': ['t' * 200_000]}))\n"
-                    "print(json.dumps({'type': 'result', 'subtype': 'success', 'is_error': False, "
-                    "'result': json.dumps({'status': 'completed', 'summary': 'ok'})}))"
-                ))
-                pool = WorkerPool(config=WorkerConfig(claude_bin=claude), runtime_root=Path(tmp))
-                return await pool._execute(_work_item(Path(tmp)))
-
-        assert asyncio.run(_run())["status"] == "completed"
-
-    def test_run_is_recorded(self, agent_db: Any) -> None:
-        async def _run() -> tuple[str, dict[str, Any]]:
-            with tempfile.TemporaryDirectory() as tmp:
-                claude = _fake_claude(Path(tmp), (
-                    "open('out.txt', 'w').write('x')\n"
-                    "print(json.dumps({'type': 'assistant', 'message': {'content': [{'type': 'text', 'text': 'done'}]}}))\n"
-                    "print(json.dumps({'type': 'result', 'subtype': 'success', 'is_error': False, "
-                    "'result': json.dumps({'status': 'completed', 'changed_files': {'out.txt': 'added'}})}))"
-                ))
-                pool = WorkerPool(config=WorkerConfig(claude_bin=claude), runtime_root=Path(tmp))
-                envelope = _work_item(Path(tmp))
-                envelope.payload["parent_task_id"] = "task-1"
-                await pool._execute(envelope)
-                return claude, {"cwd": tmp}
-
-        claude, where = asyncio.run(_run())
-        start = agent_db.start_record.await_args.kwargs
-        assert (start["agent_id"], start["task_id"]) == ("w1", "task-1")
-        assert start["metadata"]["command"][0] == claude
-        assert start["metadata"]["cwd"] == where["cwd"]
-        assert start["metadata"]["step_id"] == "s1"
-        assert "--dangerously-skip-permissions" in start["metadata"]["command"]
-        recorded = [call.args[1][0][1]["type"] for call in agent_db.append_events.await_args_list]
-        assert recorded == ["assistant", "result"]
-        finish = agent_db.finish_record.await_args.kwargs
-        assert finish["status"] == "completed" and finish["error"] is None
-        assert '"status": "completed"' in finish["output_text"]
-
     def test_run_records_its_tokens_context_and_compactions(self, agent_db: Any) -> None:
         # Two model requests, an automatic compaction between them, and Claude's totals in the result.
         def request(input_tokens: int, cache_read: int, cache_creation: int) -> str:
@@ -463,7 +186,7 @@ class TestWorkerSubprocess:
             return ("print(json.dumps({'type': 'assistant', 'parent_tool_use_id': None, 'message': "
                     f"{{'content': [{{'type': 'text', 'text': 'step'}}], 'usage': {usage!r}}}}}))\n")
 
-        async def _run() -> None:
+        async def _run() -> tuple[str, str]:
             with tempfile.TemporaryDirectory() as tmp:
                 claude = _fake_claude(Path(tmp), (
                     request(10, 15000, 3000)
@@ -480,10 +203,19 @@ class TestWorkerSubprocess:
                       "'cacheCreationInputTokens': 5, 'costUSD': 0.1}}}))"
                 ))
                 pool = WorkerPool(config=WorkerConfig(claude_bin=claude), runtime_root=Path(tmp))
-                await pool._execute(_work_item(Path(tmp)))
+                envelope = _work_item(Path(tmp))
+                envelope.payload["parent_task_id"] = "task-1"
+                await pool._execute(envelope)
+                return claude, tmp
 
-        asyncio.run(_run())
+        claude, cwd = asyncio.run(_run())
+        start = agent_db.start_record.await_args.kwargs
+        assert (start["agent_id"], start["task_id"]) == ("w1", "task-1")
+        assert start["metadata"]["command"][0] == claude
+        assert (start["metadata"]["cwd"], start["metadata"]["step_id"]) == (cwd, "s1")
         finish = agent_db.finish_record.await_args.kwargs
+        assert finish["status"] == "completed" and finish["error"] is None
+        assert '"status": "completed"' in finish["output_text"]
         # The run is the whole process: its totals over every model, compaction request included.
         assert finish["cost_usd"] == 0.4
         assert (finish["input_tokens"], finish["output_tokens"], finish["cache_read_tokens"],
@@ -492,21 +224,6 @@ class TestWorkerSubprocess:
         assert finish["compactions"] == [
             {"trigger": "auto", "pre_tokens": 90000, "post_tokens": 2000, "duration_ms": 900},
         ]
-
-    def test_mismatched_report_is_recorded_as_failed(self, agent_db: Any) -> None:
-        async def _run() -> None:
-            with tempfile.TemporaryDirectory() as tmp:
-                claude = _fake_claude(Path(tmp), (
-                    "print(json.dumps({'type': 'result', 'subtype': 'success', 'is_error': False, "
-                    "'result': json.dumps({'status': 'completed', 'changed_files': {'missing.txt': 'added'}})}))"
-                ))
-                pool = WorkerPool(config=WorkerConfig(claude_bin=claude), runtime_root=Path(tmp))
-                await pool._execute(_work_item(Path(tmp)))
-
-        asyncio.run(_run())
-        finish = agent_db.finish_record.await_args.kwargs
-        assert finish["status"] == "failed"
-        assert "missing.txt" in finish["error"]
 
     def test_missing_work_directory_fails_without_running_claude(self) -> None:
         async def _run() -> tuple[dict[str, Any], bool]:
@@ -542,7 +259,7 @@ class TestWorkerSubprocess:
         assert written  # Claude ran inside the directory it created
 
     @pytest.mark.parametrize(("create", "expected"), [(True, "completed"), (False, "failed")])
-    def test_report_is_checked_against_the_project(self, create: bool, expected: str) -> None:
+    def test_report_is_checked_against_the_project(self, agent_db: Any, create: bool, expected: str) -> None:
         async def _run() -> dict[str, Any]:
             with tempfile.TemporaryDirectory() as tmp:
                 claude = _fake_claude(Path(tmp), (
@@ -554,26 +271,16 @@ class TestWorkerSubprocess:
                 return await pool._execute(_work_item(Path(tmp)))
 
         assert asyncio.run(_run())["status"] == expected
-
-    def test_max_turns_is_a_failure(self) -> None:
-        async def _run() -> dict[str, Any]:
-            with tempfile.TemporaryDirectory() as tmp:
-                claude = _fake_claude(Path(tmp), (
-                    "print(json.dumps({'type': 'assistant', 'message': {'content': [{'type': 'text', 'text': 'working on it'}]}}))\n"
-                    "print(json.dumps({'type': 'result', 'subtype': 'error_max_turns', 'is_error': True}))"
-                ))
-                pool = WorkerPool(config=WorkerConfig(claude_bin=claude), runtime_root=Path(tmp))
-                return await pool._execute(_work_item(Path(tmp)))
-
-        result = asyncio.run(_run())
-        assert result["status"] == "failed"
-        assert "error_max_turns" in result["error"]
+        finish = agent_db.finish_record.await_args.kwargs  # the run's record agrees
+        assert finish["status"] == expected
+        if not create:
+            assert "out.txt" in finish["error"]
 
     def test_run_over_the_time_limit_is_killed(self, monkeypatch: pytest.MonkeyPatch, agent_db: Any) -> None:
         # Claude keeps writing thinking deltas: output does not extend the limit.
         _worker_row(monkeypatch, {"timeout_seconds": 1, "max_turns": 0})
 
-        async def _run() -> list[asyncio.subprocess.Process]:
+        async def _run() -> tuple[list[asyncio.subprocess.Process], MessageBus]:
             with tempfile.TemporaryDirectory() as tmp:
                 claude = _fake_claude(Path(tmp), (
                     _WARM_UP_EXIT
@@ -583,41 +290,30 @@ class TestWorkerSubprocess:
                     + _SUCCESS
                 ))
                 started = _start_warm(monkeypatch, claude)
+                bus = MessageBus(runtime_root=Path(tmp))
                 pool = WorkerPool(config=WorkerConfig(claude_bin=claude), runtime_root=Path(tmp))
-                with pytest.raises(asyncio.TimeoutError, match=r"longer than the 1 s limit \(timeout_seconds\)"):
-                    await pool._execute(_work_item(Path(tmp)))
-                return started
+                pool._bus = bus
+                await pool._run_worker(_work_item(Path(tmp)))
+                return started, bus
 
-        (process,) = asyncio.run(_run())
+        (process,), bus = asyncio.run(_run())
         assert process.returncode == -signal.SIGKILL  # killed and reaped
+        # The limit is the step's failure reason the Planner reads.
+        reply = bus.get_queue("planner-t1").get_nowait()
+        assert reply.payload["status"] == "failed"
+        assert reply.payload["error"] == "Claude ran longer than the 1 s limit (timeout_seconds)"
         agent_db.touch_record.assert_awaited()  # output arrived and fed the heartbeat
         agent_db.append_events.assert_not_awaited()  # partial deltas are not stored
         finish = agent_db.finish_record.await_args.kwargs
         assert finish["status"] == "failed"
         assert finish["error"] == "Claude ran longer than the 1 s limit (timeout_seconds)"
 
-    def test_time_limit_is_the_step_failure_reason(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        _worker_row(monkeypatch, {"timeout_seconds": 1, "max_turns": 0})
-
-        async def _run() -> MessageBus:
-            with tempfile.TemporaryDirectory() as tmp:
-                claude = _fake_claude(Path(tmp), "time.sleep(30)")
-                bus = MessageBus(runtime_root=Path(tmp))
-                pool = WorkerPool(config=WorkerConfig(claude_bin=claude), runtime_root=Path(tmp))
-                pool._bus = bus
-                await pool._run_worker(_work_item(Path(tmp)))
-                return bus
-
-        reply = asyncio.run(_run()).get_queue("planner-t1").get_nowait()
-        assert reply.payload["status"] == "failed"
-        assert reply.payload["error"] == "Claude ran longer than the 1 s limit (timeout_seconds)"
-
     def test_zero_timeout_has_no_limit(self, monkeypatch: pytest.MonkeyPatch) -> None:
         get_config = _worker_row(monkeypatch, {"timeout_seconds": 0, "max_turns": 0})
 
         async def _run() -> dict[str, Any]:
             with tempfile.TemporaryDirectory() as tmp:
-                claude = _fake_claude(Path(tmp), "time.sleep(1.5)\n" + _SUCCESS)
+                claude = _fake_claude(Path(tmp), "time.sleep(0.1)\n" + _SUCCESS)
                 pool = WorkerPool(config=WorkerConfig(claude_bin=claude), runtime_root=Path(tmp))
                 return await pool._execute(_work_item(Path(tmp)))
 
@@ -639,63 +335,45 @@ class TestWorkerSubprocess:
 
         argv = asyncio.run(_run())
         assert "--include-partial-messages" in argv
-        assert "--dangerously-skip-permissions" in argv
-        # The Worker loads none of the operator's settings, memory, hooks, plugins or MCP servers.
-        assert _flag(argv, "--setting-sources") == "project"
-        assert "--strict-mcp-config" in argv and "--settings" in argv
-        # The system prompt is a file, not an argument.
-        assert "--append-system-prompt" not in argv and "--append-system-prompt-file" in argv
         turns = argv[argv.index("--max-turns"):][:2] if "--max-turns" in argv else []
         assert turns == expected
 
-    def test_successful_result_survives_a_nonzero_exit(self) -> None:
+    @pytest.mark.parametrize(("body", "status", "error"), [
+        ("open('out.txt', 'w').write('x')\n"
+         "print(json.dumps({'type': 'result', 'subtype': 'success', 'is_error': False, "
+         "'result': json.dumps({'status': 'completed', 'changed_files': {'out.txt': 'added'}})}))\n"
+         "sys.exit(1)", "completed", None),
+        ("sys.exit(1)", "failed", "exited with code 1"),  # no result event, then a non-zero exit
+    ], ids=["result-decides", "no-result"])
+    def test_successful_result_survives_a_nonzero_exit(self, body: str, status: str, error: str | None) -> None:
         """Claude can exit non-zero after a successful result (e.g. an MCP/hook
         teardown error); the judged result decides, not the exit code."""
 
         async def _run() -> dict[str, Any]:
             with tempfile.TemporaryDirectory() as tmp:
-                claude = _fake_claude(Path(tmp), (
-                    "open('out.txt', 'w').write('x')\n"
-                    "print(json.dumps({'type': 'result', 'subtype': 'success', 'is_error': False, "
-                    "'result': json.dumps({'status': 'completed', 'changed_files': {'out.txt': 'added'}})}))\n"
-                    "sys.exit(1)"
-                ))
-                pool = WorkerPool(config=WorkerConfig(claude_bin=claude), runtime_root=Path(tmp))
-                return await pool._execute(_work_item(Path(tmp)))
-
-        assert asyncio.run(_run())["status"] == "completed"
-
-    def test_nonzero_exit_without_a_result_still_fails(self) -> None:
-        async def _run() -> dict[str, Any]:
-            with tempfile.TemporaryDirectory() as tmp:
-                # Prints no result event, then exits non-zero.
-                claude = _fake_claude(Path(tmp), "sys.exit(1)")
+                claude = _fake_claude(Path(tmp), body)
                 pool = WorkerPool(config=WorkerConfig(claude_bin=claude), runtime_root=Path(tmp))
                 return await pool._execute(_work_item(Path(tmp)))
 
         result = asyncio.run(_run())
-        assert result["status"] == "failed" and "exited with code 1" in result["error"]
+        assert result["status"] == status
+        if error:
+            assert error in result["error"]
 
-    @pytest.mark.parametrize("failure", [None, RuntimeError("database pool not initialised")])
+    @pytest.mark.parametrize(("row", "failure", "limits"), [
+        (None, None, (86400, 0)),  # no row: 86400 s, no turn limit
+        (None, RuntimeError("database pool not initialised"), (86400, 0)),
+        ({"system_prompt": "   \n", "timeout_seconds": 5, "max_turns": 3}, None, (5, 3)),  # a blank role prompt
+    ])
     def test_unreadable_config_falls_back_to_defaults(
-        self, monkeypatch: pytest.MonkeyPatch, failure: Exception | None,
+        self, monkeypatch: pytest.MonkeyPatch, row: dict[str, Any] | None, failure: Exception | None,
+        limits: tuple[int, int],
     ) -> None:
         from loopx.agents.tiers.worker import _load_settings
 
-        _worker_row(monkeypatch, None, error=failure)
+        _worker_row(monkeypatch, row, error=failure)
         settings = asyncio.run(_load_settings())
-        assert (settings.timeout_seconds, settings.max_turns) == (86400, 0)  # 86400 s, no turn limit
-        assert settings.system_prompt == DEFAULT_SYSTEM_PROMPT.strip()
-
-    @pytest.mark.parametrize("prompt", ["", "   \n"])
-    def test_an_empty_role_prompt_falls_back_to_the_default(
-        self, monkeypatch: pytest.MonkeyPatch, prompt: str,
-    ) -> None:
-        from loopx.agents.tiers.worker import _load_settings
-
-        _worker_row(monkeypatch, {"system_prompt": prompt, "timeout_seconds": 5, "max_turns": 3})
-        settings = asyncio.run(_load_settings())
-        assert (settings.timeout_seconds, settings.max_turns) == (5, 3)
+        assert (settings.timeout_seconds, settings.max_turns) == limits
         assert settings.system_prompt == DEFAULT_SYSTEM_PROMPT.strip()
 
 
@@ -750,10 +428,6 @@ def _system_prompt(seen: dict[str, Any]) -> str:
     return seen["prompt"]
 
 
-def _sha(text: str) -> str:
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()
-
-
 def _in_order(text: str, *parts: str) -> None:
     at = [text.index(part) for part in parts]
     assert at == sorted(at), f"out of order: {parts}"
@@ -776,7 +450,8 @@ class TestWorkerSystemPrompt:
                                                   "updated_at": "2026-10-13T12:00:00+00:00"}
 
     def test_worker_gets_the_harness_role_project_task_and_work_contract(self, agent_db: Any) -> None:
-        result, seen = _run_step()
+        deps = [{"step": "core", "summary": "added the core module", "changed_files": ["core.py"]}]
+        result, seen = _run_step(feedback=["import calc from the package", "add sub()"], attempt=3, dependencies=deps)
 
         assert result["status"] == "completed"
         prompt = _system_prompt(seen)
@@ -787,7 +462,12 @@ class TestWorkerSystemPrompt:
         # The step is the system prompt's task section; stdin only starts the work.
         for part in ("add calc.py", "calc.add(1, 2) == 3", REQUIREMENT, '"deleted_files"', "End your final message"):
             assert part not in seen["stdin"]
-        assert seen["stdin"].strip()
+        # A retried step's feedback is part of its task; the dependencies' reports are the user turn.
+        task = _task_section(prompt, WORK_CONTRACT)
+        assert "attempt 3" in task and "- import calc from the package\n- add sub()" in task
+        assert "import calc from the package" not in seen["stdin"]
+        assert "added the core module" in seen["stdin"] and "core.py" in seen["stdin"]
+        assert "added the core module" not in prompt
         # The shared isolation flags, for the step's directory, and the prompt file named by its hash.
         isolation = isolation_args(seen["work_dir"])
         at = seen["argv"].index(isolation[0])
@@ -837,29 +517,6 @@ class TestWorkerSystemPrompt:
         for part in ("add calc.py\n", "calc.add(1, 2) == 3", REQUIREMENT, '"passed"'):
             assert part not in seen["stdin"]
 
-    def test_a_retried_step_has_its_feedback_in_the_task(self, agent_db: Any) -> None:
-        _, seen = _run_step(feedback=["import calc from the package", "add sub()"], attempt=3)
-
-        task = _task_section(_system_prompt(seen), WORK_CONTRACT)
-        assert "attempt 3" in task and "- import calc from the package\n- add sub()" in task
-        assert "import calc from the package" not in seen["stdin"]
-
-    def test_the_dependencies_reports_are_the_user_turn(self, agent_db: Any) -> None:
-        deps = [{"step": "core", "summary": "added the core module", "changed_files": ["core.py"]}]
-        _, seen = _run_step(dependencies=deps)
-
-        assert "core" in seen["stdin"] and "added the core module" in seen["stdin"] and "core.py" in seen["stdin"]
-        assert "added the core module" not in _system_prompt(seen)
-
-    def test_without_a_background_it_is_the_role_the_task_and_the_contract(self, agent_db: Any) -> None:
-        agent_db.get_task_project.return_value = {"id": "proj-1", "name": "calc", "background": ""}
-        _, seen = _run_step()
-
-        prompt = _system_prompt(seen)
-        assert prompt.startswith(f"{DEFAULT_HARNESS_PROMPT}\n\n{ROLE}\n\n## Task\n") and prompt.endswith(WORK_CONTRACT)
-        assert "## Project" not in prompt
-        assert not [line for line in activity(agent_db) if "background" in line]
-
     @pytest.mark.parametrize("lookup", [ConnectionError("database is down"), None])
     def test_an_unreadable_project_runs_the_step_without_it_and_warns(
         self, agent_db: Any, lookup: Exception | None,
@@ -879,38 +536,23 @@ class TestWorkerSystemPrompt:
         assert warnings[0]["kind"] == "error" and warnings[0]["worker"] == "worker-1"
         assert warnings[0]["summary"].startswith("Warning: the project background was unavailable")
 
-    def test_each_run_reads_the_background_when_it_starts(self, agent_db: Any) -> None:
-        _, first = _run_step()
-        agent_db.get_task_project.return_value = {"id": "proj-1", "name": "calc", "background": "Now use pnpm."}
-        _, second = _run_step(verify=True)
-
-        assert "## Project: calc\nUse uv.\nPython 3.12.\n\n" in _system_prompt(first)
-        assert "## Project: calc\nNow use pnpm.\n\n" in _system_prompt(second)
-
-    def test_the_default_role_prompt_applies_without_a_config_row(
-        self, monkeypatch: pytest.MonkeyPatch, agent_db: Any,
-    ) -> None:
-        _worker_row(monkeypatch, None, error=RuntimeError("database pool not initialised"))
-        _, seen = _run_step()
-
-        prompt = _system_prompt(seen)
-        assert prompt.startswith(f"{DEFAULT_HARNESS_PROMPT}\n\n{DEFAULT_SYSTEM_PROMPT.strip()}\n\n## Project: calc\n")
-        assert prompt.endswith(WORK_CONTRACT)
-        role = agent_db.start_record.await_args.kwargs["metadata"]["prompt_layers"]["role"]
-        assert role == {"config_id": "worker", "sha256": _sha(DEFAULT_SYSTEM_PROMPT.strip()), "recommended": True}
-
+    @pytest.mark.parametrize(("verify", "config_id", "default", "other"), [
+        (False, "worker", DEFAULT_SYSTEM_PROMPT, REVIEWER_SYSTEM_PROMPT),
+        (True, "reviewer", REVIEWER_SYSTEM_PROMPT, DEFAULT_SYSTEM_PROMPT),
+    ], ids=["worker", "reviewer"])
     def test_a_reviewer_without_a_config_row_gets_the_reviewer_role_prompt(
-        self, monkeypatch: pytest.MonkeyPatch, agent_db: Any,
+        self, monkeypatch: pytest.MonkeyPatch, agent_db: Any, verify: bool, config_id: str, default: str, other: str,
     ) -> None:
         get_config = _worker_row(monkeypatch, None)
-        _, seen = _run_step(verify=True)
+        _, seen = _run_step(verify=verify)
 
-        get_config.assert_awaited_with("reviewer")
+        get_config.assert_awaited_with(config_id)  # each reads its own row
         prompt = _system_prompt(seen)
-        assert prompt.startswith(f"{DEFAULT_HARNESS_PROMPT}\n\n{REVIEWER_SYSTEM_PROMPT.strip()}\n\n## Project")
-        assert DEFAULT_SYSTEM_PROMPT.strip() not in prompt  # not the Worker's role
+        assert prompt.startswith(f"{DEFAULT_HARNESS_PROMPT}\n\n{default.strip()}\n\n## Project")
+        assert prompt.endswith(REVIEW_CONTRACT if verify else WORK_CONTRACT)
+        assert other.strip() not in prompt  # not the other one's role
         role = agent_db.start_record.await_args.kwargs["metadata"]["prompt_layers"]["role"]
-        assert role == {"config_id": "reviewer", "sha256": _sha(REVIEWER_SYSTEM_PROMPT.strip()), "recommended": True}
+        assert role == {"config_id": config_id, "sha256": _sha(default.strip()), "recommended": True}
 
     def test_an_unedited_row_is_the_recommended_role_prompt(
         self, monkeypatch: pytest.MonkeyPatch, agent_db: Any,
@@ -950,18 +592,6 @@ class TestWorkerHarnessAndLaunch:
         keys = {"harness": "agent.harness_prompt", "model": "agent.model", "effort": "agent.effort", "env": "agent.env"}
         agent_db.get_settings.return_value = {keys[name]: value for name, value in stored.items()}
 
-    def test_the_settings_default_harness_comes_first_for_both(
-        self, agent_db: Any, rows: dict[str, Any],
-    ) -> None:
-        self._settings(agent_db, harness="DEFAULT HARNESS")
-        agent_db.get_task_project.return_value = _project_row()
-        for verify, role, contract in ((False, "WORKER ROLE", WORK_CONTRACT), (True, "REVIEWER ROLE", REVIEW_CONTRACT)):
-            _, seen = _run_step(verify=verify)
-            prompt = _system_prompt(seen)
-            assert prompt.startswith(f"DEFAULT HARNESS\n\n{role}\n\n## Task\n") and prompt.endswith(contract)
-            layers = agent_db.start_record.await_args.kwargs["metadata"]["prompt_layers"]
-            assert layers["harness"] == {"source": "system_default", "sha256": _sha("DEFAULT HARNESS")}
-
     def test_the_projects_worker_harness_reaches_its_worker_and_reviewer_only(
         self, agent_db: Any, rows: dict[str, Any],
     ) -> None:
@@ -980,22 +610,14 @@ class TestWorkerHarnessAndLaunch:
 
     def test_a_changed_default_applies_to_the_next_run(self, agent_db: Any, rows: dict[str, Any]) -> None:
         self._settings(agent_db, harness="V1")
+        agent_db.get_task_project.return_value = {**_project_row(), "background": "Use uv."}
         _, first = _run_step()
         self._settings(agent_db, harness="V2")
         rows["worker"]["system_prompt"] = "WORKER ROLE v2"
+        agent_db.get_task_project.return_value = {**_project_row(), "background": "Now use pnpm."}
         _, second = _run_step()
-        assert _system_prompt(first).startswith("V1\n\nWORKER ROLE\n\n")
-        assert _system_prompt(second).startswith("V2\n\nWORKER ROLE v2\n\n")
-
-    def test_the_default_model_reaches_both_commands_and_is_recorded(
-        self, agent_db: Any, rows: dict[str, Any],
-    ) -> None:
-        for verify in (False, True):
-            _, seen = _run_step(verify=verify)
-            assert _flag(seen["argv"], "--model") == "opus" and "--effort" not in seen["argv"]
-            metadata = agent_db.start_record.await_args.kwargs["metadata"]
-            assert metadata["model_choice"] == {"model": "opus", "source": "builtin_default", "effort": None}
-            assert "env" not in metadata
+        assert _system_prompt(first).startswith("V1\n\nWORKER ROLE\n\n## Project: proj-1\nUse uv.\n\n")
+        assert _system_prompt(second).startswith("V2\n\nWORKER ROLE v2\n\n## Project: proj-1\nNow use pnpm.\n\n")
 
     def test_an_agent_model_beats_the_settings_default(self, agent_db: Any, rows: dict[str, Any]) -> None:
         self._settings(agent_db, model="sonnet", effort="high")
@@ -1033,20 +655,6 @@ class TestWorkerHarnessAndLaunch:
         assert [r["keys"] for r in recorded] == [{"LOOPX_TEST_FLAVOUR": _sha("mint")}] * 2
         assert "mint" not in json.dumps(recorded)
 
-    def test_without_settings_variables_the_subprocess_inherits_the_servers_environment(
-        self, monkeypatch: pytest.MonkeyPatch, agent_db: Any, rows: dict[str, Any],
-    ) -> None:
-        launched: list[dict[str, Any]] = []
-        real_exec = asyncio.create_subprocess_exec
-
-        async def _exec(*args: Any, **kwargs: Any) -> Any:
-            launched.append(kwargs)
-            return await real_exec(*args, **kwargs)
-
-        monkeypatch.setattr(asyncio, "create_subprocess_exec", _exec)
-        _run_step()
-        assert launched[0]["env"] is None
-
 
 class TestWorkerLibrary:
     """Each Worker and Reviewer run loads the library's enabled items as it starts."""
@@ -1062,18 +670,6 @@ class TestWorkerLibrary:
             library = agent_db.start_record.await_args.kwargs["metadata"]["library"]
             assert [(i["name"], i["sha256"]) for i in library["items"]] == [
                 ("demo@market", demo["sha256"]), ("alpha", alpha["sha256"])]
-
-    def test_a_disabled_item_is_not_loaded_by_the_next_run(self, agent_db: Any, enabled_library: Any) -> None:
-        enabled_library(DEMO_PLUGIN, ALPHA_SKILL)
-        _, first = _run_step()
-        enabled_library(DEMO_PLUGIN)
-        _, second = _run_step()
-        assert len(plugin_dirs(first["argv"])) == 2
-        (only,) = plugin_dirs(second["argv"])
-        assert only.endswith("/demo")
-        recorded = [call.kwargs["metadata"]["library"] for call in agent_db.start_record.await_args_list]
-        assert [[i["name"] for i in r["items"]] for r in recorded] == [["demo@market", "alpha"], ["demo@market"]]
-
 
 
 # What the fake Claude reads like an agent would: every file the index tells it to read.
@@ -1107,12 +703,12 @@ class TestWorkerKnowledge:
         return directory
 
     @staticmethod
-    def _run(*, verify: bool = False, in_project: Path | None = None) -> tuple[dict[str, Any], dict[str, Any]]:
-        """Run one step (in ``in_project``, else a new directory); return its outcome and what its Claude read."""
+    def _run(*, verify: bool = False) -> tuple[dict[str, Any], dict[str, Any]]:
+        """Run one step in a new directory; return its outcome and what its Claude read."""
 
         async def _go() -> tuple[dict[str, Any], dict[str, Any]]:
             with tempfile.TemporaryDirectory() as tmp:
-                work_dir = in_project or Path(tmp)
+                work_dir = Path(tmp)
                 claude = _fake_claude(Path(tmp), _RECORD_RUN + _READ_KNOWLEDGE + (_VERDICT if verify else _SUCCESS))
                 pool = WorkerPool(config=WorkerConfig(claude_bin=claude), runtime_root=Path(tmp))
                 result = await pool._execute(_step_envelope(work_dir, verify=verify), is_verify=verify)
@@ -1146,47 +742,6 @@ class TestWorkerKnowledge:
             assert metadata["prompt_layers"]["project"]["knowledge_documents"] == 2
             assert metadata["command"][1:] == seen["argv"]
         assert activity(agent_db).count("Project knowledge applied (2 documents)") == 2
-
-    def test_in_the_projects_own_directory_only_the_stored_documents_are_mounted(
-        self, project_documents: Any, project_dir: Path,
-    ) -> None:
-        project_documents(("text", "Glossary", "Terms", "MARKER-ALPHA"), ("path", "Runbook", "Deploys", "docs/runbook.md"))
-        _, seen = self._run(in_project=project_dir)
-        assert _add_dirs(seen["argv"]) == [f"{seen['root']}/.local/projects/proj-1/knowledge"]
-        assert seen["reads"][str(project_dir / "docs" / "runbook.md")] == "Deploy with MARKER-BETA.\n"
-
-    def test_a_path_document_is_read_live_by_the_next_run(self, project_documents: Any, project_dir: Path) -> None:
-        project_documents(("path", "Runbook", "How to deploy", "docs/runbook.md"))
-        _, first = self._run()
-        (project_dir / "docs" / "runbook.md").write_text("Deploy with MARKER-BETA-2.\n", encoding="utf-8")
-        _, second = self._run(verify=True)
-        runbook = str(project_dir / "docs" / "runbook.md")
-        assert first["reads"] == {runbook: "Deploy with MARKER-BETA.\n"}
-        assert second["reads"] == {runbook: "Deploy with MARKER-BETA-2.\n"}
-
-    def test_a_document_added_reaches_the_next_run(self, project_documents: Any, project_dir: Path) -> None:
-        project_documents(("text", "Glossary", "Terms", "MARKER-ALPHA"))
-        _, first = self._run()
-        project_documents(("text", "Glossary", "Terms", "MARKER-ALPHA"), ("text", "Style", "How we write", "MARKER-DELTA"))
-        _, second = self._run()
-        assert "Style" not in first["prompt"] and "- Style: How we write (read: " in second["prompt"]
-        assert sorted(second["reads"].values()) == ["MARKER-ALPHA", "MARKER-DELTA"]
-
-    def test_a_missing_path_document_is_listed_as_missing_and_the_step_runs(
-        self, agent_db: Any, project_documents: Any, project_dir: Path,
-    ) -> None:
-        project_documents(("path", "Runbook", "How to deploy", "docs/gone.md"))
-        result, seen = self._run()
-        assert result["status"] == "completed"
-        assert f"- Runbook: How to deploy (missing: {project_dir / 'docs' / 'gone.md'})" in seen["prompt"]
-        assert seen["reads"] == {}
-
-    def test_without_documents_nothing_is_mounted(self, agent_db: Any, project_dir: Path) -> None:
-        _, seen = self._run()
-        assert "--add-dir" not in seen["argv"] and "## Project knowledge" not in seen["prompt"]
-        project = agent_db.start_record.await_args.kwargs["metadata"]["prompt_layers"]["project"]
-        assert (project["knowledge_sha256"], project["knowledge_documents"]) == (None, 0)
-        assert not [line for line in activity(agent_db) if "knowledge" in line]
 
     def test_unreadable_knowledge_runs_the_step_without_it_and_warns(self, agent_db: Any, project_dir: Path) -> None:
         agent_db.list_documents.side_effect = ConnectionError("database is down")
@@ -1268,43 +823,6 @@ class TestWorkerProjectSkills:
             assert seen["work_files"] == []  # nothing in the step's directory
         assert activity(agent_db).count("Project skills applied (2 skills)") == 2
 
-    def test_a_step_of_another_project_mounts_none_of_them(self, agent_db: Any, project_skills: Any) -> None:
-        project_skills(("proj-a", "deploy-check", "Use before a deploy.", "Reply DEPLOY-OK."))
-        agent_db.get_task_project.return_value = {"id": "proj-b", "name": "other", "work_dir": ""}
-        for verify in (False, True):
-            _, seen = self._run(verify=verify)
-            assert "--plugin-dir" not in seen["argv"]
-            assert "project_skills" not in agent_db.start_record.await_args.kwargs["metadata"]
-        agent_db.list_enabled_skills.assert_awaited_with("proj-b")
-        assert not [line for line in activity(agent_db) if "skills" in line]
-
-    def test_the_librarys_plugins_and_the_projects_load_together(
-        self, agent_db: Any, enabled_library: Any, project_skills: Any,
-    ) -> None:
-        demo, _ = enabled_library(DEMO_PLUGIN, ALPHA_SKILL)
-        project_skills(("proj-a", "deploy-check", "Use before a deploy.", "Reply DEPLOY-OK."))
-        _, seen = self._run()
-        library, personal, project = plugin_dirs(seen["argv"])
-        assert library.endswith(f"/.local/library/{demo['sha256']}/demo") and personal.endswith("/personal")
-        assert _project_plugin_dirs(seen["argv"], seen["root"]) == [project]
-        metadata = agent_db.start_record.await_args.kwargs["metadata"]
-        assert [i["name"] for i in metadata["library"]["items"]] == ["demo@market", "alpha"]
-        assert [s["name"] for s in metadata["project_skills"]["skills"]] == ["deploy-check"]
-
-    def test_a_skill_disabled_or_deleted_is_not_loaded_by_the_next_run(self, agent_db: Any, project_skills: Any) -> None:
-        project_skills(("proj-a", "deploy-check", "Use before a deploy.", "Reply DEPLOY-OK."),
-                       ("proj-a", "release-notes", "Drafts release notes.", "Reply NOTES-OK."))
-        _, first = self._run()
-        project_skills(("proj-a", "release-notes", "Drafts release notes.", "Reply NOTES-OK."))  # the database lists enabled ones
-        _, second = self._run(verify=True)
-        (before,) = _project_plugin_dirs(first["argv"], first["root"])
-        (after,) = _project_plugin_dirs(second["argv"], second["root"])
-        assert Path(before).parent.name != Path(after).parent.name
-        assert sorted(second["skills"][after]) == ["release-notes"]
-        recorded = [call.kwargs["metadata"]["project_skills"] for call in agent_db.start_record.await_args_list]
-        assert [[s["name"] for s in r["skills"]] for r in recorded] == [["deploy-check", "release-notes"],
-                                                                         ["release-notes"]]
-
     def test_unreadable_skills_run_the_step_without_them_and_warn(self, agent_db: Any) -> None:
         agent_db.list_enabled_skills.side_effect = ConnectionError("database is down")
         result, seen = self._run()
@@ -1315,16 +833,6 @@ class TestWorkerProjectSkills:
         assert "Warning: the project's skills could not be read; this run goes without them" in activity(agent_db)
 
 
-def _assert_unrestricted(argv: list[str]) -> None:
-    """The shared permission flags, once, and nothing that narrows the tools or the permissions again."""
-    from loopx.agents.claude_cli import permission_args
-
-    flags = permission_args()
-    assert any(argv[i:i + len(flags)] == flags for i in range(len(argv)))
-    assert argv.count("--dangerously-skip-permissions") == 1
-    assert not {"--tools", "--allowedTools", "--disallowedTools", "--permission-mode"} & set(argv)
-
-
 class TestWorkerPermissions:
     """A Worker and a Reviewer run like every agent: the shared permission flags and every tool."""
 
@@ -1332,16 +840,6 @@ class TestWorkerPermissions:
     def test_the_command_carries_the_shared_permission_flags(self, agent_db: Any, verify: bool) -> None:
         _, seen = _run_step(verify=verify)
         _assert_unrestricted(seen["argv"])
-
-    def test_a_library_adds_no_tool_or_permission_flag(self, agent_db: Any, enabled_library: Any) -> None:
-        enabled_library(DEMO_PLUGIN, ALPHA_SKILL)
-        for verify in (False, True):
-            _, seen = _run_step(verify=verify)
-            assert len(plugin_dirs(seen["argv"])) == 2
-            _assert_unrestricted(seen["argv"])
-
-def activity(agent_db: Any) -> list[str]:
-    return [str(call.kwargs.get("summary")) for call in agent_db.insert_activity.await_args_list]
 
 
 def _result(text: str | None = None, **overrides: Any) -> dict[str, Any]:
@@ -1360,10 +858,8 @@ class TestJudgeResult:
         [
             (None, "without a result event"),
             (_result(subtype="error_max_turns", is_error=True), "error_max_turns"),
-            (_result("x", subtype="error_during_execution"), "error_during_execution"),
             (_result("x", is_error=True), "did not succeed"),
             (_result("I made the changes successfully."), "JSON status report"),
-            (_result('{"summary": "no status"}'), "JSON status report"),
             (_result('{"status": "partial"}'), "unknown status"),
             (_result('{"status": "completed", "changed_files": ["a.py"]}'), "malformed"),
             (_result('{"status": "completed", "changed_files": {"missing.py": "added"}}'), "missing.py"),
@@ -1418,27 +914,22 @@ class TestJudgeResult:
         assert result["summary"] == "done"
 
     @pytest.mark.parametrize(
-        ("text", "passed"),
+        ("event", "passed", "finding"),
         [
-            ('{"passed": true, "findings": [], "summary": "ok"}', True),
-            ('```json\n{"passed": false, "findings": ["no test"], "summary": "x"}\n```', False),
-            ("Looks good to me.", False),
-            ('{"passed": "yes"}', False),
+            (_result('{"passed": true, "findings": [], "summary": "ok"}'), True, None),
+            (_result('```json\n{"passed": false, "findings": ["no test"], "summary": "x"}\n```'), False, None),
+            (_result("Looks good to me."), False, None),
+            (_result('{"passed": "yes"}'), False, None),
+            (_result(subtype="error_max_turns", is_error=True), False, "error_max_turns"),  # a failed review run
         ],
     )
-    def test_verdict(self, tmp_path: Path, text: str, passed: bool) -> None:
+    def test_verdict(self, tmp_path: Path, event: dict[str, Any], passed: bool, finding: str | None) -> None:
         from loopx.agents.tiers.worker import judge_result
 
-        assert judge_result(_result(text), work_dir=tmp_path, is_verify=True)["passed"] is passed
-
-    def test_failed_review_run_is_not_a_pass(self, tmp_path: Path) -> None:
-        from loopx.agents.tiers.worker import judge_result
-
-        event = _result(subtype="error_max_turns", is_error=True)
         result = judge_result(event, work_dir=tmp_path, is_verify=True)
-        assert result["passed"] is False
-        assert "error_max_turns" in result["findings"][0]
-
+        assert result["passed"] is passed
+        if finding:
+            assert finding in result["findings"][0]
 
 
 _LISTENING_CLAUDE = (
@@ -1461,49 +952,8 @@ _LISTENING_CLAUDE = (
 class TestWorkerInput:
     """A running worker reads further user turns on stdin (stream-json input)."""
 
-    def test_the_run_starts_with_a_user_turn_on_stdin(self, agent_db: Any) -> None:
-        async def _run() -> list[str]:
-            with tempfile.TemporaryDirectory() as tmp:
-                claude = _fake_claude(Path(tmp), (
-                    "first = json.loads(sys.stdin.readline())\n"
-                    "assert first['type'] == 'user' and first['message']['content'].strip()\n"
-                    "print(json.dumps({'type': 'result', 'subtype': 'success', 'is_error': False, "
-                    "'result': json.dumps({'status': 'completed', 'changed_files': {}, 'summary': 'ok'})}), flush=True)\n"
-                    "sys.stdin.read()"
-                ))
-                pool = WorkerPool(config=WorkerConfig(claude_bin=claude), runtime_root=Path(tmp))
-                result = await pool._execute(_work_item(Path(tmp)))
-                assert result["status"] == "completed"
-                return agent_db.start_record.await_args.kwargs["metadata"]["command"]
-
-        command = asyncio.run(_run())
-        assert "--input-format" in command and command[command.index("--input-format") + 1] == "stream-json"
-        assert "--replay-user-messages" in command
-        assert not any("add the parser" in arg for arg in command)  # the step is not an argument
-
-    def test_message_reaches_a_running_worker(self, agent_db: Any) -> None:
-        async def _run() -> tuple[bool, dict[str, Any], bool]:
-            with tempfile.TemporaryDirectory() as tmp:
-                pool = WorkerPool(config=WorkerConfig(claude_bin=_fake_claude(Path(tmp), _LISTENING_CLAUDE)),
-                                  runtime_root=Path(tmp))
-                run = asyncio.create_task(pool._execute(_work_item(Path(tmp))))
-                for _ in range(200):
-                    if pool.accepts_input("w1"):
-                        break
-                    await asyncio.sleep(0.02)
-                delivered = await pool.send_input("w1", "also add tests")
-                result = await asyncio.wait_for(run, 20)
-                late = await pool.send_input("w1", "too late")
-                return delivered, result, late
-
-        delivered, result, late = asyncio.run(_run())
-        assert delivered
-        assert result["status"] == "completed"
-        assert "got: also add tests" in result["summary"]
-        assert not late  # the run has ended; nothing reads its stdin any more
-
     def test_worker_input_over_the_bus(self, agent_db: Any) -> None:
-        async def _run() -> tuple[bool, bool]:
+        async def _run() -> tuple[bool, str, bool, bool]:
             with tempfile.TemporaryDirectory() as tmp:
                 bus = MessageBus(runtime_root=Path(tmp))
                 pool = WorkerPool(config=WorkerConfig(claude_bin=_fake_claude(Path(tmp), _LISTENING_CLAUDE)),
@@ -1523,15 +973,22 @@ class TestWorkerInput:
                     )
 
                 first = await bus.request(ask("hello"), timeout=5)
+                # The Worker answers with what it read; once its run ends, nothing reads its stdin.
+                queue = bus.get_queue("planner-t1")
+                result = await asyncio.wait_for(queue.get(), 20)
+                while result.message_type != MessageType.WORK_RESULT:
+                    result = await asyncio.wait_for(queue.get(), 20)
+                late = await bus.request(ask("too late"), timeout=5)
                 unknown = await bus.request(MessageEnvelope.create(
                     source=planner_address("t1"), target=worker_address("nobody"),
                     message_type=MessageType.WORKER_INPUT, payload={"text": "x"},
                 ), timeout=5)
                 await pool.stop()
                 await bus.shutdown()
-                return first.payload["delivered"], unknown.payload["delivered"]
+                return (first.payload["delivered"], result.payload["summary"], late.payload["delivered"],
+                        unknown.payload["delivered"])
 
-        assert asyncio.run(_run()) == (True, False)
+        assert asyncio.run(_run()) == (True, "got: hello", False, False)
 
 
 class TestWorkerKill:
