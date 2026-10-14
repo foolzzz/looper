@@ -60,6 +60,7 @@ _AGENT_DB_READS = (
     ("library", "get_item_files", []),
     ("project_documents", "list_documents", []),
     ("project_documents", "get_content", None),
+    ("chat", "recent_conversations", []),
 )
 
 

@@ -20,6 +20,24 @@ How the agent system works today is described in
 
 ### Added
 
+- **Progress and experience captured as they happen.** The task journal gains
+  `step_failed` and `step_retry` (what went wrong, why, and the Worker's and
+  Reviewer's learnings), `decision` (a replan, steps added from chat, a stop
+  at the spend cap, with the reason), `user_instruction` (each chat message to
+  the Planner, whole), `session_switch` and `handoff`. The Planner's turns
+  carry the user's instructions first, whole and in a budget of their own,
+  then the newest entry of each kind, the other pitfalls and the rest within
+  the 4,000-character cap, under one heading per kind; a Worker's first turn
+  gets the instructions and the pitfalls too. When the Planner's or the
+  Manager's agent can no longer resume its session, the old session, while
+  its Claude runs, writes a handoff first, and every new session's first turn
+  starts with a `[RESUME]` brief (why, where the task is, the handoff; the
+  Manager's adds the recent chats from `chat_messages`). A Worker's or
+  Reviewer's learning can say it holds for the whole project
+  (`{"text": ..., "scope": "project"}`; plain strings still work): with
+  `distill_lessons` `draft` or `write` it becomes a knowledge draft when it
+  arrives. The task page's Findings list shows each entry's kind. The
+  journal's kind check is extended once (`task_journal_kinds_m7c`).
 - **Runtimes, LLM providers and agents.** An agent is a runtime, an LLM
   provider and a model, with a default effort. Settings registers runtimes
   (a runtime type's executable, probed with `--version` when registered and

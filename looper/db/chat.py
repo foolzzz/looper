@@ -71,3 +71,40 @@ async def list_sessions(
         limit,
     )
     return [dict(r) for r in rows]
+
+
+# The web chat keeps each task's Planner thread under that Planner's agent id, ``planner-<task_id>``
+# (web/src/pages/chat.tsx ``sessionFor``); every other chat session is a conversation with the Manager.
+PLANNER_THREAD_PREFIX = "planner-"
+
+
+async def recent_conversations(
+    *,
+    sessions: int,
+    messages: int,
+    pool: asyncpg.Pool | None = None,
+) -> list[dict[str, Any]]:
+    """The Manager's most recently active chat sessions, newest first, each with its last ``messages``
+    messages, oldest first: ``[{"session_id", "messages": [{"role", "content", "created_at"}]}]``."""
+    pool = pool or get_pool()
+    rows = await pool.fetch(
+        """
+        SELECT r.session_id, m.role, m.content, m.created_at
+        FROM (
+            SELECT session_id, max(id) AS last_id FROM chat_messages
+            WHERE NOT starts_with(session_id, $3)
+            GROUP BY session_id ORDER BY max(id) DESC LIMIT $1
+        ) r
+        CROSS JOIN LATERAL (
+            SELECT c.id, c.role, c.content, c.created_at FROM chat_messages c
+            WHERE c.session_id = r.session_id ORDER BY c.id DESC LIMIT $2
+        ) m
+        ORDER BY r.last_id DESC, m.id ASC
+        """,
+        sessions, messages, PLANNER_THREAD_PREFIX,
+    )
+    conversations: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        conversations.setdefault(row["session_id"], []).append(
+            {"role": row["role"], "content": row["content"], "created_at": row["created_at"]})
+    return [{"session_id": session_id, "messages": items} for session_id, items in conversations.items()]
