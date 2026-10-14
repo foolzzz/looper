@@ -2,7 +2,7 @@
 
 - **状态：** 设计已定（[长程 Agent 上下文 RFC](long-horizon-agent-context-v0.zh-CN.md) 决策 10），M9a 已交付
   （looper #62），M9b 已交付（第 7、8 节写明核实结果），M9c 已交付（looper #67，第 6 节写明核实结果），M9e 已交付
-  （looper #70，第 6 节写明核实结果）；与本文的出入记在
+  （looper #70，第 6 节写明核实结果），Codex 登录已交付（P1）；与本文的出入记在
   开发计划各阶段的"核实后确定的做法"；本文是 M9 的设计依据和待决问题清单。
 - **开发计划：** [长程 Agent 上下文体系开发计划](../../plans/2026-10-13-long-horizon-agent-context.zh-CN.md) 的 M9 一节。
 - **最近更新：** 2026-10-14
@@ -99,7 +99,7 @@ dashboard、M2 的观测、M6 的评测和 M7 的任务日志都只认内部事�
 ## 6. 能力矩阵
 
 ✅ 已核实，❓ 待核实，❌ 不支持，— 不适用。CLI 的核实依据是本机版本的 `--help`，2026-10-14；Codex 一列另经本机 CPA
-（`gpt-5.5`）实跑核实（M9c）；OMP 一列另经本机 CPA（`gpt-5.5`）实跑、请求记录代理和上游 v18.4.3 的源码与文档核实（M9e）。
+（`gpt-5.5`）实跑核实（M9c），登录相关的几项另经 0.162.0 源码（tag `rust-v0.162.0`）和本机 ChatGPT 登录实跑核实；OMP 一列另经本机 CPA（`gpt-5.5`）实跑、请求记录代理和上游 v18.4.3 的源码与文档核实（M9e）。
 
 | 能力 | Claude Code 2.1.285 | Codex 0.162.0 | OMP 18.4.3 | Claude Agent SDK | OpenAI Agents SDK | norma |
 |---|---|---|---|---|---|---|
@@ -112,7 +112,7 @@ dashboard、M2 的观测、M6 的评测和 M7 的任务日志都只认内部事�
 | MCP | ✅ `--mcp-config` + `--strict-mcp-config`（M8b） | ✅ `config.toml` 的 `[mcp_servers.<名称>]`：stdio（`command`、`args`、`env`）和 streamable HTTP（`url`、`http_headers`）；没有 SSE | ✅ 与 Claude Code 相同的 `mcpServers` 格式（stdio、HTTP、SSE），Looper 放进家目录里生成的插件 `looper`，工具名 `mcp__looper_<服务器>_<工具>`；默认挂在 `xd://` 下经 read/write 调用，`tools.xdev: false` 改成顶层工具 | ❓ | ❓ | 待定 |
 | 额外目录（知识） | ✅ `--add-dir` | ✅ `--add-dir`，放在 `resume` 之前也有效；目录里的 `AGENTS.md` 不加载 | ✅ `--add-dir`，但目录里和它往上的 `AGENTS.md` 等会作为上下文加载，Looper 不用（第 9 节） | ❓ | — | 待定 |
 | 不限权限 | ✅ `--dangerously-skip-permissions` | ✅ `--dangerously-bypass-approvals-and-sandbox` | ✅ `tools.approvalMode: yolo`（默认值，Looper 在覆盖配置里写明） | ❓ | — | 待定 |
-| 隔离 | ✅ `--setting-sources project` 等（M1） | ✅ 独立 `CODEX_HOME`，只放生成的 `config.toml` 和 `AGENTS.md`，不读 `~/.codex`；另需关掉原生 skill 列表（见上）和插件同步（`features.plugins = false`，否则每个新目录克隆约 25 MB 的插件市场） | ✅ `HOME` 指向 Looper 的家目录（见下），不读 `~/.omp`、`~/.claude`、`~/.codex`、`~/.agents`、`~/.env`；工作目录不在 git 仓库里时另关掉向上查找的发现来源 | ❓ | — | 待定 |
+| 隔离 | ✅ `--setting-sources project` 等（M1） | ✅ 独立 `CODEX_HOME`，只放生成的 `config.toml` 和 `AGENTS.md`，不读 `~/.codex`；另需关掉原生 skill 列表（见上）和插件同步（`features.plugins = false`，否则每个新目录克隆约 25 MB 的插件市场）；用 Codex 登录时另有一个指向操作者登录文件的 `auth.json` 符号链接，并关掉 ChatGPT 应用（`features.apps = false`，否则每个目录缓存约 2.6 MB 的应用工具列表），见 P1 | ✅ `HOME` 指向 Looper 的家目录（见下），不读 `~/.omp`、`~/.claude`、`~/.codex`、`~/.agents`、`~/.env`；工作目录不在 git 仓库里时另关掉向上查找的发现来源 | ❓ | — | 待定 |
 | 非 git 目录 | ✅ | ✅ 需要 `--skip-git-repo-check` | ✅ | — | — | 待定 |
 | 花费报告 | ✅ `total_cost_usd` 和 `modelUsage[*].costUSD` 一律按 Claude 价格计算（不认识的模型标 `costBasis: "unknown"`）；`modelUsage` 按模型给出四种 token，接其他 provider 时由 Looper 按 provider 价格计算 | 只有 token：`turn.completed.usage`，是会话累计值，由 Looper 按 provider 价格计算 | 只有 token：每个请求一条（助手消息的 `usage`），由 Looper 按 provider 价格计算；子 agent 的用量在 `task` 工具结果里汇总 | ❓ | 只有 token 数 | 待定 |
 | 压缩事件 | ✅ `compact_boundary` | ❌ `--json` 不报，只出一条提示性的 `error` 条目 | ✅ `auto_compaction_start`/`auto_compaction_end`（`result.tokensBefore`） | ❓ | — | 待定 |
@@ -128,6 +128,20 @@ Codex 的其他核实结果：
   没有单次请求的用量，所以记不到上下文规模。
 - **结束**：被 SIGTERM 时退出码是 0、没有 `turn.completed`；它正在跑的 shell 命令不会随之结束。
 - **环境变量**：shell 命令默认继承 Codex 进程的全部环境变量，provider 的密钥要用 `shell_environment_policy.exclude` 排除。
+  `shell_environment_policy.set` 在继承、排除之后覆盖变量，Codex 只在其后再加 `CODEX_THREAD_ID` 等自己的变量，
+  不会把 `CODEX_HOME` 改回去（0.162.0 源码 `protocol/src/shell_environment.rs`，并经实跑核实，见 P1）。
+- **登录**（0.162.0 源码与实跑核实，2026-10-14）：
+  - `cli_auth_credentials_store = "file"` 时登录在 `$CODEX_HOME/auth.json`，路径不能单独配置；刷新后的登录是截断
+    原文件再原地写入（无临时文件和 rename、无 `O_NOFOLLOW`、无文件锁），所以顺着符号链接写回目标文件，链接和目标的
+    inode 都不变；进程内串行，跨进程不加锁，刷新前重读磁盘，磁盘上已变就采用；只在 access token 离过期不到 5 分钟时
+    主动刷新；
+  - `keyring` 模式按 `CODEX_HOME` 的规范路径区分钥匙串条目，不能共享；`auto` 模式第一次保存就写进钥匙串并删掉
+    `auth.json`，等于分叉；
+  - `CODEX_API_KEY`、`CODEX_ACCESS_TOKEN` 在环境里时优先于登录文件；
+  - `codex login status` 写到 stderr：`Logged in using ChatGPT` 退出码 0，`Not logged in` 退出码 1，API key 登录
+    也是退出码 0（`Logged in using an API key - …`，key 打码），只读本地文件、不向服务端验证；悬空的链接读作
+    `Not logged in`；
+  - `codex logout` 会在服务端吊销 refresh token 再删掉 `auth.json`。
 
 OMP 的其他核实结果：
 
@@ -189,7 +203,10 @@ OMP 的其他核实结果：
   见 `provider_presets.py`）；本机 CPA 作为 OpenAI 类 provider（`openai-responses`、`openai-chat`，
   `http://127.0.0.1:8317/v1`），也提供 Anthropic 格式接口（`http://127.0.0.1:8317`）。一个 provider 只有一个
   `base_url`，所以从预设建 provider 时选其中一种接口。
-- **Codex + 登录**：见第 13 节 P1。
+- **Codex + 登录**（内置 provider `codex-login`，OAuth，只配 Codex 运行时）：每次运行的 `CODEX_HOME` 里 `auth.json`
+  是指向操作者登录文件（服务端 `CODEX_HOME` 里的，否则 `~/.codex` 里的）绝对路径的符号链接，生成的 `config.toml`
+  写 `cli_auth_credentials_store = "file"`，不写 `model_provider`（用 Codex 内置的 OpenAI provider），去掉环境里的
+  `CODEX_API_KEY`、`CODEX_ACCESS_TOKEN`；花费按内置价目表折算为订阅等价花费，查不到价格的模型只记 token。详见第 13 节 P1。
 - **Codex + API key（含 CPA）**：隔离目录里生成的 `config.toml` 写 `model_provider` 和 `[model_providers.<id>]`
   （`base_url`、`env_key`、`wire_api = "responses"`），密钥只放进 `env_key` 指名的环境变量（M9c 已核实）。
 - **OMP + API key（含 CPA）**：家目录里生成的 `models.yml` 写 provider `looper`（`baseUrl`、`api`、只含 agent 模型的
@@ -210,6 +227,7 @@ OMP 的其他核实结果：
 | Claude Code + DeepSeek | claude-code | DeepSeek API key | anthropic-messages | 已支持（M9b；真实 key 待维护者验证） |
 | Claude Code + Kimi 等兼容接口 | claude-code | 对应 API key | anthropic-messages | 已支持（M9b；真实 key 待维护者验证） |
 | Codex + CPA | codex | CPA（OpenAI 类 provider，预设 `cpa`） | openai-responses | 已支持（M9c） |
+| Codex + Codex 登录 | codex | 内置 `codex-login`（ChatGPT OAuth） | openai-responses | 已支持（计划第 5.0 节第 3 项） |
 | OMP + CPA | omp | CPA（预设 `cpa`） | openai-responses（也支持 `openai-chat`、`anthropic-messages`） | 已支持（M9e） |
 
 GLM、DeepSeek 等同时提供 anthropic 和 openai 两种协议，一般配 Claude Code；M9b 内置它们的 provider 预设（两种协议的接口地址按官方文档核实），用户只填 key。
@@ -248,7 +266,8 @@ GLM、DeepSeek 等同时提供 anthropic 和 openai 两种协议，一般配 Cla
 
 - 每个运行时一份隔离配方，延续决策 4 和 7：只用 Looper 拼装的内容和项目仓库自带的配置，不读操作者的个人配置。
 - **API key**：存在数据库里，静态未加密，接口打码。注入子进程环境后，不限权限的 agent 能读到，见 P3。
-- **OAuth**：只在发放它的运行时内使用。
+- **OAuth**：只在发放它的运行时内使用。Codex 的登录以符号链接共用操作者的登录文件，从不复制（P1）；OMP 没有
+  自己的登录。
 
 ## 11. 评测与验收
 
@@ -272,7 +291,7 @@ M9b 与 M9c 并行。
 
 | # | 问题 | 影响 | 建议 |
 |---|---|---|---|
-| **P1** | **Codex 登录在隔离下会互相刷掉 token。** Codex 的 refresh_token 会轮换（CPA 运维中实测过）。每次运行复制一份 `CODEX_HOME` 的话，一个实例刷新 token 后，其他实例手里的就失效了 | Codex + 登录不可用，或者时好时坏 | **已定（2026-10-14）：** Codex 默认走 API key，开发阶段用 CPA。之后如果需要 Codex 登录，所有实例共用同一个 `auth.json`（符号链接）并加文件锁，只隔离配置 |
+| **P1** | **Codex 登录在隔离下会互相刷掉 token。** Codex 的 refresh_token 会轮换（CPA 运维中实测过）。每次运行复制一份 `CODEX_HOME` 的话，一个实例刷新 token 后，其他实例手里的就失效了 | Codex + 登录不可用，或者时好时坏 | **已定并实现（2026-10-14，计划第 5.0 节第 3 项）：** 所有实例共用操作者的同一个登录文件，只隔离配置。外部加文件锁做不到（刷新发生在 Codex 进程内部，Looper 插不进去），改为：<br>1. 每个运行目录和常驻会话目录的 `auth.json` 是指向登录文件绝对路径的符号链接，从不复制、不用硬链接（硬链接会钉住旧 inode）；配置写死 `cli_auth_credentials_store = "file"`（`auto`、`keyring` 会分叉，第 6 节），去掉 `CODEX_API_KEY`、`CODEX_ACCESS_TOKEN`；Codex 原地写回刷新后的登录，经链接写进操作者的文件，各进程刷新前重读磁盘；<br>2. 绕过审批和沙箱的 agent 的 shell 继承 `CODEX_HOME`，在里面执行 `codex logout` 会在服务端吊销操作者的登录。`shell_environment_policy.set` 把 shell 里的 `CODEX_HOME` 指向一个没有登录的空目录（`<runtime_root>/.local/codex/shell-home`），实跑核实 agent 的 `echo "$CODEX_HOME"` 得到这个目录，`codex login status` 得到 `Not logged in`。agent 若故意改回 `~/.codex` 仍能碰到登录，这和不经 Looper 的任何本机进程一样，Looper 管不到；<br>3. 每次登录运行之后、`looper serve` 启动时，用 `lstat` 检查每个目录的 `auth.json` 仍是指向登录文件的链接；变成普通文件（分叉：一份 token 副本，操作者文件里的 refresh token 可能已失效）、指向别处或在登录目录里不见了，都删掉该条目、放回链接，并记下问题：之后用这个登录的运行一律不启动并写明原因，任务活动、provider 和 `codex_login` 检查里都有警告，直到操作者在本机核对 `codex login status` 后在界面清除。<br>失效方式：刷新若改成先写临时文件再 rename，会把链接换成普通文件，由第 3 条发现并止损（升级 Codex 后要重做一次假文件实验）；操作者自己 `codex logout` 后链接悬空，运行因找不到登录文件而不启动，失败即关闭；写入不是原子的，并发的进程可能读到半截文件，这是 Codex 自身就有的风险，没有新增 |
 | **P2** | **其他运行时的常驻会话怎么实现还不知道。** 可能是 `exec resume`（每轮起一个进程、重新加载上下文）、`app-server`（实验性）或 `queue`。自主轮和压缩事件也可能没有对应物 | "所有运行时都支持所有角色"的工期和稳定性 | **已定（2026-10-14）：** 先用"每轮起进程 + 续接会话"（逐轮续接）；连续接都不支持的运行时，每轮开新会话，由 Looper 注入完整状态（计划、任务日志、最近对话的摘要）。M9c 第一步做技术验证，结果写回能力矩阵。**M9c 核实：** Codex 走逐轮续接（每轮一个 `exec resume` 进程），续接不了的会话照旧换新会话；没有压缩事件和自主轮，也不能在 Worker 运行中追加用户轮（第 6 节）。**M9e 核实：** OMP 同样走逐轮续接（每轮一个 `omp -p --session-dir … --resume <id>` 进程，与 Codex 共用 `per_turn.PerTurnSession`）；有压缩事件和逐请求的用量，没有自主轮，`-p` 下不能在 Worker 运行中追加用户轮（`--mode rpc` 可以，未采用） |
 | **P3** | **provider 的密钥对 agent 可见。** 不限权限的 agent 能读自己的环境变量 | 密钥可能被模型写进输出或带出去 | **已定（2026-10-14）：** 近期接受，在本文写明。之后再做一个本地代理持有密钥，agent 只拿到本地地址（做法类似 CPA） |
 | **P4** | **第三方模型遵守契约、使用工具的质量参差不齐**，可能需要按模型调整 prompt | Planner、Manager 不稳定 | **已定（2026-10-14）：** 先不做按模型的 prompt 变体，所有 agent 用同一套 prompt，运行时差异放在适配器追加的"运行时说明"里；靠 M6 评测把关，评测不过的 agent 不配给 Planner 和 Manager |

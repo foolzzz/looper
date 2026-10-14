@@ -482,7 +482,8 @@ registry, its checks and its API are `looper/agents/profile_registry.py`.
   `compaction_events`).
 - **Codex** (`looper/agents/runtimes/codex.py`, verified against Codex CLI
   0.162.0 in the RFC's section 6) runs `codex exec --json` with API key
-  providers that serve `openai-responses`. Each process gets a `CODEX_HOME`
+  providers that serve `openai-responses`, or with Codex's own ChatGPT
+  login (below). Each process gets a `CODEX_HOME`
   of Looper's own under `<runtime_root>/.local/codex`, named on its command
   line (`env CODEX_HOME=... codex exec ...`) and holding only the generated
   `config.toml` (the provider as `[model_providers.looper]`, its key only in
@@ -507,6 +508,37 @@ registry, its checks and its API are `looper/agents/profile_registry.py`.
   that nothing has written to for a day are removed when a new one is
   written. `looper serve` registers the read-only runtime `codex`
   (`rt-codex`) when `codex` is on its PATH.
+- **The Codex login** (`looper/agents/runtimes/codex_login.py`, the RFC's
+  P1) is the built-in provider `codex-login` (`prov-codex-login`, OAuth,
+  `openai-responses`), which pairs only with Codex runtimes. A run with it
+  gets a home whose `auth.json` is a symbolic link to the operator's login
+  file (`auth.json` in the server's `CODEX_HOME`, else `~/.codex`), by its
+  absolute path and never a copy, and a `config.toml` with
+  `cli_auth_credentials_store = "file"`, no `model_provider` (Codex's
+  built-in OpenAI one), `features.apps = false`, and
+  `shell_environment_policy.set` giving the agent's shell commands
+  `CODEX_HOME=<runtime_root>/.local/codex/shell-home`, which has no login, so
+  a `codex` command the agent runs (`codex logout` included) cannot reach
+  it; `CODEX_API_KEY` and `CODEX_ACCESS_TOKEN` are removed from its
+  environment. A session home gets the link before each turn while its agent
+  runs with the login and loses it otherwise. Codex saves a refreshed login
+  by writing the file in place, so it writes through the link. After every
+  login run (`RuntimeAdapter.after_run`, from the run's recorder) and when
+  `looper serve` starts, every Codex home is inspected with `lstat`: a copy
+  or any other entry in place of the link is removed (never followed) and the
+  link put back, a login home whose link is gone is reported too, and the
+  problem is recorded (`system_settings.codex_login_fork`), logged and put in
+  the task's activity as a warning. While it is recorded the login is
+  unavailable: its runs fail with the reason (`RuntimeAdapter.login_problem`,
+  checked like a missing API key), as they do when the login file is gone,
+  until the operator has checked `codex login status` and clears it
+  (`DELETE /api/providers/<id>/login-problem`, "Use the login again" on the
+  provider). The login's state (`codex login status` in a temporary home
+  holding only the link, which reads the file and does not ask the server)
+  is in the provider's view (`login`, read at most every 30 s) and in the
+  `codex_login` self-check, skipped while no Agent Profile uses the login.
+  Its runs are priced at the built-in prices as a subscription equivalent;
+  the form suggests the models a ChatGPT login offers (`suggested_models`).
 - **OMP** (`looper/agents/runtimes/omp.py`, oh-my-pi's `omp`, verified against
   omp 18.4.3 in the RFC's section 6) runs `omp -p --mode json` with API key
   providers that serve `openai-responses`, `openai-chat` or
@@ -591,12 +623,13 @@ registry, its checks and its API are `looper/agents/profile_registry.py`.
   `agent-<12 hex>`): ids are stored values.
 
 The built-ins exist on every database and are read-only: the runtime
-`claude-code`, the provider `claude-subscription` (Claude Code's login) and the
+`claude-code`, the providers `claude-subscription` (Claude Code's login) and
+`codex-login` (Codex's ChatGPT login, above), and the
 profile `claude-code/opus` (`BUILTIN_PROFILE`), which a role runs when nothing
 selects another. A profile is refused when it is created or changed if its
 runtime and provider share no protocol, an OAuth provider is paired with
 another runtime type, the runtime cannot take that kind of provider yet
-(Claude Code takes its own login and API keys, Codex and OMP API keys only), or the
+(Claude Code and Codex take their own login and API keys, OMP API keys only), or the
 provider lists models and not this one; a profile whose model or background
 model has no full price is registered with a warning (its runs record tokens
 only and no spend cap applies to them), and every profile shows how its runs
@@ -640,7 +673,8 @@ again.
 own figure (`total_cost_usd`), used with its own login (shown as
 "equivalent": what the subscription's usage would cost at API prices, not
 money spent) and with Anthropic's API. `provider_price` for every other
-provider: each model's tokens in the result's `modelUsage` (input, output,
+provider (Codex's own login too, at the built-in prices, shown as
+"equivalent" like Claude Code's): each model's tokens in the result's `modelUsage` (input, output,
 cache read, cache write) at the provider's prices, summed (`run_usage`
 `price`), so a resumed session still counts each turn's own share; a model
 without a price leaves the cost `null` and the tokens recorded. With
@@ -654,7 +688,7 @@ the request that crossed it is made, and requests the stream does not show (a
 subagent's, Claude Code's side requests) count only in the run's recorded
 cost. The task cap and "raise the cap and continue" sum the recorded costs, so
 they use the same basis. `GET /api/tasks/:id` counts the runs of each basis
-(`equivalent_runs`, `provider_price_runs`).
+(`equivalent_runs`: a runtime's own login, `provider_price_runs`: an API key provider).
 
 The `llm_profiles` table and the role configs' `runtime` and `llm_profile_id`
 were never on a launch path; the one-time migration `llm_profiles_removed`
@@ -1432,7 +1466,7 @@ built by `scripts/stage-dashboard.sh` at release time), and it carries
 - **Task Detail**: Overview (status, phase, times, steps and the task's cost with its run count, then "Cost by agent": the Planner's, the Workers' and the Reviewers' runs and cost with each one's share, noting runs still running or without a reported cost; steps, agent timeline, live activity feed), Pipeline DAG (React Flow), Sessions, Conversation
 - **Runs** (`#runs/<role>`): each role's sessions and run history, and no configuration. A Runs list shows every recorded Claude run of the role (the Manager, every task's Planner, Workers or Reviewers), a Manager `/new` as a `new session` row, and links each to its agent's history; each role links to its section in Settings → Roles.
 - **Agent history** (`#history/<agent-id>?task=<task-id>`): opened from History on an Agent Timeline row, a Runs entry or the Chat page. The Manager's and a Planner's page starts with "Context & cost": the latest context size, the number of compactions, the total cost and the number of turns. Below them is a sparkline of the context at the end of each of the latest 100 turns, scaled between their lowest and highest value, with a dashed marker on each turn that compacted. A list of the compactions follows (turn, time, trigger, context before → after), then a folded table of the turns. The section is re-read every 10 s. For each Claude run it shows status, model, the run's own tokens (uncached input, cache read, cache write, output), its context at the end (`ctx`), a `compacted` badge, its own cost, the launch command (cwd and argv; a long argument such as the system prompt is shown by its length, and Copy copies the exact command), a collapsible System prompt section with what Looper appended (Claude Code's built-in system prompt is not included): its title shows the prompt's size, its short sha256 and an `isolated` badge, and inside one line per layer (harness source and version, role recommended or edited, project and background version, task, contract), the model with its source and effort, and the Settings environment variable names, above the full text; runs recorded before the layers existed show the text only. A collapsible Plugins & skills section shows how many plugins and skills the run loaded from the library, with its hash, and how many project skills (from `metadata.project_skills`), and lists each with its short version hash. Then the full transcript, following a running run every 2 s. A running run shows its last output time from the record's heartbeat and is flagged after 2 minutes with no output. While Claude thinks it shows `thinking · ~N tokens` from Claude's `thinking_tokens` events. Those arrive about once a second, so the recorder keeps one row per thinking phase and updates its count in place. Hooks, background tasks and rate limits are shown as one line each, as are a compaction (`Context compacted (auto) · 25.1k → 1.36k tokens`) and a failed compaction attempt. The result line labels Claude's figure as the `session total`. Any other event type is an expandable line. A `/new` is one line, `new session`, with its channel, sender, chat and the session it ended. For a Planner each run is one of its turns, listed above your chat with it and its activity.
-- **Settings**: a folding group at the bottom of the sidebar, one page each (`#settings/<page>`): **LLM Providers** (`providers`); **Agent Runtimes** (`runtimes`, read-only, as above); **Agent Profiles** (`profiles`: each profile's runtime, provider, model and effort, the roles it can run and where it is used, with a form that picks the runtime, then a provider grouped as the runtime's own login (OAuth; Claude Code's with its `claude auth status` result, Codex's shown as coming soon, none for OMP) or an API-key provider that speaks its protocols, then a model from the provider's catalog or any); **Roles** (`roles`: the system layer, then per role (`#settings/roles/<role>`) its layer, each field saying what applies now and from which layer, and its own fields: the role prompt (replace or append, reset to the recommended one), timeout, concurrency, and the note that every agent has every tool with `--dangerously-skip-permissions`); **Skills & MCP** (`catalog`: how many of the imported items are loaded and their size, "Import from this machine" or "Re-import", the last import with what it changed and what it left out, a name filter, and the plugins and skills with their version, size and installs; a change applies to each agent's next run); **Channels** (`channels`: the Telegram and Lark channels, each with its sender allowlist, an add and remove list of Telegram user IDs or Lark open_ids, checked as you type, with blanks and repeats flagged, and, for an enabled channel that does not start, the reason); **Import / Export** (`transfer`). Wherever an Agent Profile is chosen (Roles, a project's settings, a new task's roles) it is the same dropdown, whose last entry, "+ New Agent Profile", opens the form in place and selects what it saves.
+- **Settings**: a folding group at the bottom of the sidebar, one page each (`#settings/<page>`): **LLM Providers** (`providers`); **Agent Runtimes** (`runtimes`, read-only, as above); **Agent Profiles** (`profiles`: each profile's runtime, provider, model and effort, the roles it can run and where it is used, with a form that picks the runtime, then a provider grouped as the runtime's own login (OAuth; Claude Code's with its `claude auth status` result, Codex's with its `codex login status` result or the forked login a run found, none for OMP) or an API-key provider that speaks its protocols, then a model from the provider's catalog, or any, with the models a Codex login offers suggested); **Roles** (`roles`: the system layer, then per role (`#settings/roles/<role>`) its layer, each field saying what applies now and from which layer, and its own fields: the role prompt (replace or append, reset to the recommended one), timeout, concurrency, and the note that every agent has every tool with `--dangerously-skip-permissions`); **Skills & MCP** (`catalog`: how many of the imported items are loaded and their size, "Import from this machine" or "Re-import", the last import with what it changed and what it left out, a name filter, and the plugins and skills with their version, size and installs; a change applies to each agent's next run); **Channels** (`channels`: the Telegram and Lark channels, each with its sender allowlist, an add and remove list of Telegram user IDs or Lark open_ids, checked as you type, with blanks and repeats flagged, and, for an enabled channel that does not start, the reason); **Import / Export** (`transfer`). Wherever an Agent Profile is chosen (Roles, a project's settings, a new task's roles) it is the same dropdown, whose last entry, "+ New Agent Profile", opens the form in place and selects what it saves.
 
 ### Real-Time Updates
 
@@ -1461,7 +1495,7 @@ dev proxy, which keeps `Host` and `Origin` on its own port.
 
 | Endpoint | Method | Purpose |
 |---|---|---|
-| `/api/status` | GET | System health |
+| `/api/status` | GET | System health, with `checks`: the startup self-check (`looper doctor`'s), the `codex_login` one read on each request |
 | `/api/projects` | GET | Projects ordered by name ignoring case, each with `task_count` and `active_count` |
 | `/api/projects` | POST | Create a project from `name` (trimmed, 1–80 characters), optional `description`, `work_dir` (absolute), `background` (stored without the blank lines around it; 400 over 10000 characters) and execution settings; 409 when the name exists ignoring case; 400 naming the agent-settings endpoint for `planner_harness_prompt`, `worker_harness_prompt`, `model` or `run_budget_usd` |
 | `/api/projects/:id` | PUT | Update any of `name`, `description`, `work_dir`, `background` (`""` clears it) and the execution settings; 400 (as for POST), 404, 409 |
@@ -1496,10 +1530,11 @@ dev proxy, which keeps `Host` and `Origin` on its own port.
 | `/api/roles/:role/reset-prompt` | POST | Reset the role prompt to the recommended one |
 | `/api/agent-settings` | GET | The agent settings outside projects: `system` and `roles` (all four), each with `values` (that layer's own: `harness_prompt`, `profile_id` (an Agent Profile's id), `effort`, `env` as `[{key, value}]`, `run_budget_usd`; `null` = not set) and `effective` (what applies, each field with its `source` layer; the profile as `profile`: `{profile_id, name, model, runtime, provider}`; `effort` may come from the profile, source `profile`), and `limits` (with `builtin_profile`: `{profile_id, name}`) |
 | `/api/agent-settings/system` | PUT | Set the system layer. Each layer's PUT changes the fields given (`null` or `""` unsets one; `env` replaces the layer's list, a `null` value unsetting a variable outside the system layer; the built-in harness text unsets the system harness) and answers with the GET view. 400 for an unknown field, `model` (part of the Agent Profile), an unknown profile or one that cannot run the layer's roles, a harness over 20000 characters, a bad effort or cap, or a bad, credential-like or 51st variable; nothing is stored then |
-| `/api/registry` | GET | The runtime types this version has (`type`, `label`, `default_executable`, `runtime_id` of its built-in runtime, `protocols`, `capabilities`, `roles`, `auth_kinds`), and every `runtime` (with its `path` on the server's PATH or `null`, and `roles`), `provider` (API key as `***` or `null`), each counting the profiles that use it (`profile_count`), and every Agent Profile in `profiles` (with its `profile_id`, `roles`, `used_by`: `layers` (`scope`, `role`, `project_id`, `project_name`) and `task_count`, and its `cost`: `source`, `equivalent`, `unpriced` models), the `provider_presets`, the built-in `prices` (`as_of`, `sources`, `models`), with `limits` |
+| `/api/registry` | GET | The runtime types this version has (`type`, `label`, `default_executable`, `runtime_id` of its built-in runtime, `protocols`, `capabilities`, `roles`, `auth_kinds`), and every `runtime` (with its `path` on the server's PATH or `null`, and `roles`), `provider` (API key as `***` or `null`; an OAuth one with `suggested_models` and its `login`: `{state, detail}`, `state` one of `chatgpt`, `other_method`, `not_logged_in`, `unknown`, `unavailable`, for Codex's login, else `null`), each counting the profiles that use it (`profile_count`), and every Agent Profile in `profiles` (with its `profile_id`, `roles`, `used_by`: `layers` (`scope`, `role`, `project_id`, `project_name`) and `task_count`, and its `cost`: `source`, `equivalent`, `unpriced` models), the `provider_presets`, the built-in `prices` (`as_of`, `sources`, `models`), with `limits` |
 | `/api/runtimes/:id/probe` | POST | Re-detect: probe again and record the version, capabilities or error; for `rt-<type>` of a type not found yet, look for it on the server's PATH and add its built-in runtime (404 when it is not there). Runtimes are built in: there is no route to register, change or delete one |
 | `/api/providers` | POST | Register `{name, protocols, auth, oauth_runtime_type?, base_url?, models?, env?, max_concurrency?, api_key?}`; 201 with `provider`; 400 with the reason (an `env` name the binding sets, or that reads like a credential, too), 409 for a taken name |
 | `/api/providers/:id` | PUT/DELETE | Change a provider (`api_key` `***` keeps the key, `null` removes it; 400 when one of its profiles could no longer run); delete (409 while profiles use it). 400 for the built-in one |
+| `/api/providers/:id/login-problem` | DELETE | The operator checked `codex login status`: clear the forked Codex login a run recorded, so its runs start again; answers with `provider`. 400 for a provider that is not the Codex login |
 | `/api/agent-profiles` | POST | Register an Agent Profile `{name, runtime_id, provider_id, model, effort?}`; 201 with `profile` and `warnings` (a model without a price); 400 when the runtime and provider cannot run together or the provider does not list the model |
 | `/api/agent-profiles/:id` | PUT/DELETE | Change a profile (checked like a new one, and for every role it is selected for; answers with `profile` and `warnings`); delete (409 while a layer or a task selects it, naming where). 400 for the built-in one |
 | `/api/agent-settings/roles/:role` | PUT | Set one role's layer (`manager`, `planner`, `worker`, `reviewer`; 404 for another) |

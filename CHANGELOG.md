@@ -20,6 +20,27 @@ How the agent system works today is described in
 
 ### Added
 
+- **Agent Profiles can run Codex with its own ChatGPT login.** A built-in
+  provider `codex-login` (OAuth, Codex runtimes only) uses the operator's
+  `codex login` on the server's machine. Each run's isolated `CODEX_HOME`
+  gets an `auth.json` that is a symbolic link to the operator's login file
+  (`auth.json` in the server's `CODEX_HOME`, else `~/.codex`), never a copy,
+  so a refresh Codex saves reaches that file; its config sets
+  `cli_auth_credentials_store = "file"`, Codex's built-in OpenAI provider and
+  no ChatGPT apps, `CODEX_API_KEY` and `CODEX_ACCESS_TOKEN` are removed from
+  its environment, and the agent's shell commands get a `CODEX_HOME` without
+  the login, so `codex logout` run by an agent cannot revoke it. After every
+  run and when `looper serve` starts, Looper checks that each home's link is
+  still a link: if a run left a copy of the login (a fork), the copy is
+  deleted and the login is unavailable to runs, with a warning in the task's
+  activity, on the provider and in the `codex_login` check, until the
+  operator has checked `codex login status` and chosen "Use the login again"
+  (`DELETE /api/providers/<id>/login-problem`). The Agent Profile form shows
+  the login's state (`codex login status`) and suggests the models a ChatGPT
+  login offers; runs are priced at the built-in prices as a subscription
+  equivalent. `looper doctor` and `/api/status` report the login when an
+  Agent Profile uses it. The eval's `--register-agent` can name it
+  (`"provider": {"provider_id": "prov-codex-login"}`).
 - **`/new` starts a new Manager session.** A chat message that is exactly
   `/new` (trimmed, any case), from the web chat, Lark or Telegram, is
   answered by Looper instead of Claude: after any turn under way, the Manager
@@ -45,8 +66,8 @@ How the agent system works today is described in
   at `/api/agent-profiles`): its list shows each profile's runtime, provider,
   model and default effort, the roles it can run and where it is used, and a
   profile in use cannot be deleted. Its form picks a runtime, then a provider grouped as
-  the runtime's own login (Claude Code's with its login state; Codex's shown
-  as coming soon) or an API-key provider that speaks its protocols, then a
+  the runtime's own login (Claude Code's and Codex's with their login state)
+  or an API-key provider that speaks its protocols, then a
   model from the provider's catalog. **Roles** holds the defaults every role
   inherits and, per role, its layer and its prompt, timeout and concurrency,
   which were on the Agents page. Everywhere an Agent Profile is chosen (Roles,
