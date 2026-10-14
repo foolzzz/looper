@@ -97,7 +97,7 @@ logger = logging.getLogger(__name__)
 
 from ...db import activity as db_activity, agent_configs as db_agent_configs, llm_records as db_llm_records
 from ...db import projects as db_projects, steps as db_steps
-from ...db.tasks import update_task_phase
+from ...db.tasks import FailKind, update_task_phase
 
 MAX_CONCURRENT_WORKERS = 4
 # How long to wait for the worker pool to confirm a forwarded user turn.
@@ -445,6 +445,8 @@ class PlannerAgent:
                 # A task at its spend cap stops before another turn; the handlers below see it ended.
                 await self._within_budget(self._plan)
         match envelope.message_type:
+            case MessageType.TASK_REQUEST if envelope.payload.get("resume"):
+                await self._continue_plan(envelope)
             case MessageType.TASK_REQUEST:
                 await self._plan_and_dispatch(envelope)
             case MessageType.WORK_RESULT:
@@ -1438,7 +1440,7 @@ class PlannerAgent:
             metadata={"origin_channel_id": plan.origin_channel_id},
         ))
 
-    async def _fail_plan(self, plan: TaskPlan, *, reason: str = "") -> None:
+    async def _fail_plan(self, plan: TaskPlan, *, reason: str = "", fail_kind: FailKind | None = None) -> None:
         assert self._bus is not None
         plan.status = "failed"
         plan.fail_reason = reason or plan.fail_reason
@@ -1471,6 +1473,7 @@ class PlannerAgent:
                 "status": "failed",
                 "progress": plan.progress_summary(),
                 "summary": summary,
+                "fail_kind": fail_kind.value if fail_kind else None,
             },
             correlation_id=plan.correlation_id,
             metadata={"origin_channel_id": plan.origin_channel_id},
@@ -1586,7 +1589,78 @@ class PlannerAgent:
                 summary = f"(the Planner could not sum up: {exc})"
             reason = f"{reason}. Planner's wrap-up: {summary}"
         plan.fail_reason = reason
-        await self._fail_plan(plan)
+        await self._fail_plan(plan, fail_kind=FailKind.TASK_BUDGET)
+
+    async def _continue_plan(self, envelope: MessageEnvelope) -> None:
+        """Continue a task its spend cap stopped, from its saved plan: no new plan, and the Planner's Claude
+        resumes its session.
+
+        The steps the cap cut short run again: a Worker's step from the start (its Worker was stopped, or
+        its result came after the cap), a step in review with a new Reviewer. What the finished steps
+        reported is read back from ``task_steps`` for the steps that depend on them.
+        """
+        self._plan = None
+        self._load_plan(("failed",))
+        plan = self._plan
+        if plan is None:
+            payload = envelope.payload
+            plan = self._plan = TaskPlan(
+                plan_id=f"plan-{uuid.uuid4().hex[:12]}", goal_id=payload.get("goal_id", ""),
+                requirement=payload.get("requirement", ""), work_dir=payload.get("work_dir", ""),
+                correlation_id=envelope.correlation_id, project_id=payload.get("project_id", "") or "",
+            )
+            await self._fail_plan(plan, reason="Cannot continue: the task has no saved plan; start it to plan anew")
+            return
+        await self._refresh_project(plan)
+        results = await self._saved_results()
+        again: list[PlanStep] = []
+        review: list[PlanStep] = []
+        for step in plan.steps:
+            if step.result is None:
+                step.result = results.get(step.step_id)
+            if step.status in ("dispatched", "deciding"):
+                step.status = "pending"
+                again.append(step)
+            elif step.status == "completed":
+                review.append(step)
+        plan.status = "executing"
+        plan.fail_reason = ""
+        self._save_plan(plan)
+        for step in again:
+            await self._persist_step(step)
+        await update_task_phase(self._task_id, "executing")
+        cap = self._execution.task_budget_usd
+        cut_short = [f"{len(again)} step(s) run again"] if again else []
+        cut_short += [f"{len(review)} step(s) go back to review"] if review else []
+        await self._activity("phase", f"Task continued from its plan with "
+                                      f"{f'a ${format_usd(cap)}' if cap is not None else 'no'} spend cap"
+                                      + (f": {', '.join(cut_short)}" if cut_short else ""))
+        for step in review:
+            await self._send_to_review(plan, step)
+        if plan.is_complete:
+            await self._complete_plan(plan)
+            return
+        await self._report_progress(plan)
+        await self._dispatch_ready(plan)
+
+    async def _saved_results(self) -> dict[str, dict[str, Any]]:
+        """Each step's last reported result as ``task_steps`` holds it; none when it cannot be read."""
+        try:
+            rows = await db_steps.list_steps(self._task_id)
+        except Exception:
+            logger.warning("planner %s cannot read its steps' results", self.agent_id, exc_info=True)
+            return {}
+        results = {}
+        for row in rows:
+            result = row.get("result")
+            if isinstance(result, str):
+                try:
+                    result = json.loads(result)
+                except ValueError:
+                    continue
+            if isinstance(result, dict):
+                results[str(row["id"])] = result
+        return results
 
     def _wrap_up_message(self, plan: TaskPlan, reason: str) -> str:
         return "\n".join([
@@ -1686,13 +1760,14 @@ class PlannerAgent:
         data["work_dir"] = plan.work_dir
         path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
 
-    def _load_plan(self) -> None:
+    def _load_plan(self, statuses: tuple[str, ...] = ("planning", "executing", "verifying")) -> None:
+        """Load the newest saved plan in one of ``statuses`` (a live one by default)."""
         if not self._plans_dir.exists():
             return
-        for path in self._plans_dir.glob("*.json"):
+        for path in sorted(self._plans_dir.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True):
             try:
                 data = json.loads(path.read_text(encoding="utf-8"))
-                if data.get("status") in ("planning", "executing", "verifying"):
+                if data.get("status") in statuses:
                     self._plan = TaskPlan(
                         plan_id=data["plan_id"],
                         goal_id=data.get("goal_id", ""),
