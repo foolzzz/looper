@@ -19,6 +19,7 @@ import pytest
 
 from loopx.agents.agent_settings import Harness, HarnessSource
 from loopx.agents.claude_cli import ISOLATION_ID
+from loopx.agents.knowledge import AgentKnowledge
 from loopx.agents.system_prompt import (
     REVIEW_CONTRACT,
     TASK_REQUIREMENT_LIMIT,
@@ -256,7 +257,8 @@ def test_layers_name_each_source_by_its_hash() -> None:
     assert layers == {
         "harness": {"source": "system_default", "sha256": _sha(HARNESS.text)},
         "role": {"config_id": "worker", "sha256": _sha("You are careful."), "recommended": False},
-        "project": {"id": "proj-1", "background_sha256": _sha("Use uv."), "updated_at": "2026-10-13T12:00:00+00:00"},
+        "project": {"id": "proj-1", "background_sha256": _sha("Use uv."), "updated_at": "2026-10-13T12:00:00+00:00",
+                    "knowledge_sha256": None, "knowledge_documents": 0},
         "task": {"kind": "work", "task_id": "t1", "step_id": "s1", "sha256": _sha(task)},
         "contract": {"name": "WORK_CONTRACT", "sha256": _sha(WORK_CONTRACT)},
         "isolation": ISOLATION_ID,
@@ -299,3 +301,55 @@ def test_build_composes_the_text_and_its_layers() -> None:
         contract_name="WORK_CONTRACT", contract=WORK_CONTRACT,
     )
     assert changed.sha256 != prompt.sha256
+
+
+# --- The project's knowledge index: in the project layer, after the background ---
+
+INDEX = "## Project knowledge\nReference documents.\n- Glossary: Terms (read: /k/abc/Glossary.md)"
+
+
+def test_the_knowledge_index_follows_the_background_before_the_task() -> None:
+    prompt = compose_system_prompt("Role.", harness="H", project_name="calc", background="Use uv.", knowledge=INDEX,
+                                   task="## Task\nGo.", contract="CONTRACT")
+    assert prompt == f"H\n\nRole.\n\n## Project: calc\nUse uv.\n\n{INDEX}\n\n## Task\nGo.\n\nCONTRACT"
+    # Without a background the index is the project layer on its own.
+    assert compose_system_prompt("Role.", project_name="calc", knowledge=INDEX, contract="CONTRACT") == (
+        f"Role.\n\n{INDEX}\n\nCONTRACT")
+
+
+def _build(knowledge: AgentKnowledge | None, *, project: dict | None = None, manager: bool = False) -> SystemPrompt:
+    return build_system_prompt(
+        harness=HARNESS, role_id="manager" if manager else "worker", role="Role.", recommended=True,
+        project=None if manager else (project or _project_row()), task_kind=None if manager else "work",
+        task="" if manager else "## Task\nGo.", contract_name="WORK_CONTRACT", contract=WORK_CONTRACT,
+        knowledge=knowledge,
+    )
+
+
+def test_the_project_layer_records_the_index_hash_and_its_document_count() -> None:
+    knowledge = AgentKnowledge(index=INDEX, documents=1, add_dirs=("/k",))
+    prompt = _build(knowledge)
+    assert f"## Project: calc\nUse uv.\n\n{INDEX}\n\n## Task" in prompt.text
+    project = prompt.layers["project"]
+    assert (project["knowledge_sha256"], project["knowledge_documents"]) == (_sha(INDEX), 1)
+    assert "knowledge_error" not in project
+    # A changed index is a changed prompt.
+    other = _build(AgentKnowledge(index=INDEX + " v2", documents=1))
+    assert other.sha256 != prompt.sha256
+
+
+def test_without_knowledge_the_layer_says_none() -> None:
+    project = _build(None).layers["project"]
+    assert (project["knowledge_sha256"], project["knowledge_documents"]) == (None, 0)
+    assert _build(None).text == _build(AgentKnowledge()).text
+
+
+def test_unreadable_knowledge_is_recorded_with_its_reason() -> None:
+    project = _build(AgentKnowledge(error="the project's knowledge could not be read")).layers["project"]
+    assert project["knowledge_sha256"] is None
+    assert project["knowledge_error"] == "the project's knowledge could not be read"
+
+
+def test_the_manager_never_gets_a_knowledge_index() -> None:
+    prompt = _build(AgentKnowledge(index=INDEX, documents=1), manager=True)
+    assert "Project knowledge" not in prompt.text and prompt.layers["project"] is None

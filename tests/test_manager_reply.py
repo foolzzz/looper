@@ -753,3 +753,19 @@ class TestManagerLibrary:
         assert [[i["name"] for i in r["items"]] for r in recorded] == [
             ["demo@market", "alpha"], ["demo@market"], ["demo@market"]]
         assert recorded[0]["sha256"] != recorded[1]["sha256"] == recorded[2]["sha256"]
+
+
+@pytest.mark.usefixtures("agent_db")
+class TestManagerKnowledge:
+    """The Manager spans every project, so it neither mounts nor indexes any project's knowledge."""
+
+    def test_the_manager_gets_no_knowledge_while_a_project_has_documents(
+        self, monkeypatch: pytest.MonkeyPatch, agent_db: Any, project_documents: Any,
+    ) -> None:
+        project_documents(("text", "Glossary", "Terms", "MARKER-ALPHA"))
+        chat = _converse(monkeypatch, _resident(), ["hello"])
+        ((argv, _),) = chat["spawned"]
+        assert "--add-dir" not in argv
+        assert "Project knowledge" not in chat["prompts"][0]
+        agent_db.list_documents.assert_not_awaited()
+        assert agent_db.start_record.await_args.kwargs["metadata"]["prompt_layers"]["project"] is None

@@ -803,7 +803,8 @@ class TestWorkerSystemPrompt:
         assert layers["harness"] == {"source": "builtin_default", "sha256": _sha(DEFAULT_HARNESS_PROMPT)}
         assert layers["role"] == {"config_id": "worker", "sha256": _sha(ROLE), "recommended": False}
         assert layers["project"] == {"id": "proj-1", "background_sha256": _sha("Use uv.\nPython 3.12."),
-                                     "updated_at": "2026-10-13T12:00:00+00:00"}
+                                     "updated_at": "2026-10-13T12:00:00+00:00", "knowledge_sha256": None,
+                                     "knowledge_documents": 0}
         assert layers["task"] == {"kind": "work", "task_id": "task-1", "step_id": "s1",
                                   "sha256": _sha(_task_section(prompt, WORK_CONTRACT))}
         assert layers["contract"] == {"name": "WORK_CONTRACT", "sha256": _sha(WORK_CONTRACT)}
@@ -1072,6 +1073,128 @@ class TestWorkerLibrary:
         recorded = [call.kwargs["metadata"]["library"] for call in agent_db.start_record.await_args_list]
         assert [[i["name"] for i in r["items"]] for r in recorded] == [["demo@market", "alpha"], ["demo@market"]]
 
+
+
+# What the fake Claude reads like an agent would: every file the index tells it to read.
+_READ_KNOWLEDGE = (
+    "import re\n"
+    "reads = {path: open(path, encoding='utf-8').read() for path in re.findall(r'\\(read: ([^)]+)\\)', prompt)}\n"
+    "json.dump({'argv': sys.argv[1:], 'prompt': prompt, 'reads': reads}, open('knowledge.json', 'w'))\n"
+)
+
+
+def _add_dirs(argv: list[str]) -> list[str]:
+    return [argv[i + 1] for i, arg in enumerate(argv) if arg == "--add-dir"]
+
+
+class TestWorkerKnowledge:
+    """Each Worker and Reviewer run reads its project's knowledge as it starts: an index in the project
+    layer of its system prompt, the stored documents materialized and mounted with --add-dir, and the
+    project's directory mounted too when a path document is there and the step runs elsewhere."""
+
+    @pytest.fixture(autouse=True)
+    def _role(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _worker_row(monkeypatch, {"system_prompt": ROLE, "timeout_seconds": 0, "max_turns": 0})
+
+    @pytest.fixture
+    def project_dir(self, tmp_path: Path, agent_db: Any) -> Path:
+        directory = tmp_path / "calc"
+        (directory / "docs").mkdir(parents=True)
+        (directory / "docs" / "runbook.md").write_text("Deploy with MARKER-BETA.\n", encoding="utf-8")
+        agent_db.get_task_project.return_value = {"id": "proj-1", "name": "calc", "background": "Use uv.",
+                                                  "work_dir": str(directory)}
+        return directory
+
+    @staticmethod
+    def _run(*, verify: bool = False, in_project: Path | None = None) -> tuple[dict[str, Any], dict[str, Any]]:
+        """Run one step (in ``in_project``, else a new directory); return its outcome and what its Claude read."""
+
+        async def _go() -> tuple[dict[str, Any], dict[str, Any]]:
+            with tempfile.TemporaryDirectory() as tmp:
+                work_dir = in_project or Path(tmp)
+                claude = _fake_claude(Path(tmp), _RECORD_RUN + _READ_KNOWLEDGE + (_VERDICT if verify else _SUCCESS))
+                pool = WorkerPool(config=WorkerConfig(claude_bin=claude), runtime_root=Path(tmp))
+                result = await pool._execute(_step_envelope(work_dir, verify=verify), is_verify=verify)
+                seen = json.loads((work_dir / "knowledge.json").read_text())
+                return result, {**seen, "root": tmp}
+
+        return asyncio.run(_go())
+
+    def test_both_read_the_documents_the_index_names_from_the_mounted_directories(
+        self, agent_db: Any, project_documents: Any, project_dir: Path,
+    ) -> None:
+        project_documents(("text", "Glossary", "Terms the code uses", "MARKER-ALPHA"),
+                          ("path", "Runbook", "How to deploy", "docs/runbook.md"))
+        for verify, contract in ((False, WORK_CONTRACT), (True, REVIEW_CONTRACT)):
+            result, seen = self._run(verify=verify)
+            assert result.get("status") == "completed" or result.get("passed") is True
+            knowledge_root = f"{seen['root']}/.local/projects/proj-1/knowledge"
+            glossary = f"{knowledge_root}/{_sha('MARKER-ALPHA')}/Glossary.md"
+            runbook = str(project_dir / "docs" / "runbook.md")
+            # The stored document's directory, and the project's since the step runs elsewhere.
+            assert _add_dirs(seen["argv"]) == [knowledge_root, str(project_dir)]
+            prompt = seen["prompt"]
+            _in_order(prompt, "## Project: calc\nUse uv.\n\n", "## Project knowledge\n",
+                      f"- Glossary: Terms the code uses (read: {glossary})\n",
+                      f"- Runbook: How to deploy (read: {runbook})\n\n", "## Task\n", contract)
+            assert "MARKER-ALPHA" not in prompt and "MARKER-BETA" not in prompt  # read on demand, not in the prompt
+            assert seen["reads"] == {glossary: "MARKER-ALPHA", runbook: "Deploy with MARKER-BETA.\n"}
+            metadata = agent_db.start_record.await_args.kwargs["metadata"]
+            index = prompt[prompt.index("## Project knowledge"):prompt.index("\n\n## Task")]
+            assert metadata["prompt_layers"]["project"]["knowledge_sha256"] == _sha(index)
+            assert metadata["prompt_layers"]["project"]["knowledge_documents"] == 2
+            assert metadata["command"][1:] == seen["argv"]
+        assert activity(agent_db).count("Project knowledge applied (2 documents)") == 2
+
+    def test_in_the_projects_own_directory_only_the_stored_documents_are_mounted(
+        self, project_documents: Any, project_dir: Path,
+    ) -> None:
+        project_documents(("text", "Glossary", "Terms", "MARKER-ALPHA"), ("path", "Runbook", "Deploys", "docs/runbook.md"))
+        _, seen = self._run(in_project=project_dir)
+        assert _add_dirs(seen["argv"]) == [f"{seen['root']}/.local/projects/proj-1/knowledge"]
+        assert seen["reads"][str(project_dir / "docs" / "runbook.md")] == "Deploy with MARKER-BETA.\n"
+
+    def test_a_path_document_is_read_live_by_the_next_run(self, project_documents: Any, project_dir: Path) -> None:
+        project_documents(("path", "Runbook", "How to deploy", "docs/runbook.md"))
+        _, first = self._run()
+        (project_dir / "docs" / "runbook.md").write_text("Deploy with MARKER-BETA-2.\n", encoding="utf-8")
+        _, second = self._run(verify=True)
+        runbook = str(project_dir / "docs" / "runbook.md")
+        assert first["reads"] == {runbook: "Deploy with MARKER-BETA.\n"}
+        assert second["reads"] == {runbook: "Deploy with MARKER-BETA-2.\n"}
+
+    def test_a_document_added_reaches_the_next_run(self, project_documents: Any, project_dir: Path) -> None:
+        project_documents(("text", "Glossary", "Terms", "MARKER-ALPHA"))
+        _, first = self._run()
+        project_documents(("text", "Glossary", "Terms", "MARKER-ALPHA"), ("text", "Style", "How we write", "MARKER-DELTA"))
+        _, second = self._run()
+        assert "Style" not in first["prompt"] and "- Style: How we write (read: " in second["prompt"]
+        assert sorted(second["reads"].values()) == ["MARKER-ALPHA", "MARKER-DELTA"]
+
+    def test_a_missing_path_document_is_listed_as_missing_and_the_step_runs(
+        self, agent_db: Any, project_documents: Any, project_dir: Path,
+    ) -> None:
+        project_documents(("path", "Runbook", "How to deploy", "docs/gone.md"))
+        result, seen = self._run()
+        assert result["status"] == "completed"
+        assert f"- Runbook: How to deploy (missing: {project_dir / 'docs' / 'gone.md'})" in seen["prompt"]
+        assert seen["reads"] == {}
+
+    def test_without_documents_nothing_is_mounted(self, agent_db: Any, project_dir: Path) -> None:
+        _, seen = self._run()
+        assert "--add-dir" not in seen["argv"] and "## Project knowledge" not in seen["prompt"]
+        project = agent_db.start_record.await_args.kwargs["metadata"]["prompt_layers"]["project"]
+        assert (project["knowledge_sha256"], project["knowledge_documents"]) == (None, 0)
+        assert not [line for line in activity(agent_db) if "knowledge" in line]
+
+    def test_unreadable_knowledge_runs_the_step_without_it_and_warns(self, agent_db: Any, project_dir: Path) -> None:
+        agent_db.list_documents.side_effect = ConnectionError("database is down")
+        result, seen = self._run()
+        assert result["status"] == "completed"
+        assert "--add-dir" not in seen["argv"] and "## Project knowledge" not in seen["prompt"]
+        project = agent_db.start_record.await_args.kwargs["metadata"]["prompt_layers"]["project"]
+        assert project["knowledge_error"] == "the project's knowledge could not be read"
+        assert "Warning: the project's knowledge could not be read; this run goes without it" in activity(agent_db)
 
 
 def _assert_unrestricted(argv: list[str]) -> None:

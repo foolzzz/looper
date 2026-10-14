@@ -18,9 +18,10 @@ make the changes. Each event is one user turn on it:
 Every reply ends with JSON that ``planner_protocol`` validates; code then
 does the dispatching. The system prompt is rebuilt for every turn from the
 harness (the project's Planner override, else the default in Settings), the
-``planner`` config and the task's project as it is now (its background
-included); when it, the model or the Settings environment changes, Claude
-restarts and resumes its session. An invalid reply gets one repair turn. Planning that
+``planner`` config and the task's project as it is now (its background and
+the index of its knowledge included, the knowledge's directories mounted with
+``--add-dir``); when it, the model or the Settings environment changes,
+Claude restarts and resumes its session. An invalid reply gets one repair turn. Planning that
 still fails fails the task; a decision that still fails falls back to the
 step's own verdict. When the task completes or fails, the Planner signals the
 TaskRouter, which tears it down and ends its Claude.
@@ -42,6 +43,7 @@ from ..bus import MessageBus
 from .. import agent_settings
 from ..agent_settings import BUILTIN_DEFAULTS, AgentDefaults, AgentType, Launch, resolve_harness, resolve_launch
 from ..claude_cli import ClaudeRunRecorder, ResidentClaude, exit_note, isolation_args, system_prompt_args
+from ..knowledge import AgentKnowledge, documents_label, load_knowledge
 from ..library import load_library
 from ..run_usage import Usage
 from ..system_prompt import SystemPrompt, build_system_prompt, is_recommended, plan_task_section
@@ -210,6 +212,7 @@ class TaskPlan:
     project_background: str = ""
     project_planner_harness: str = ""  # the project's harness for its Planner; '' for the default
     project_updated_at: str = ""  # the project's version, for the system prompt's record
+    project_work_dir: str = ""  # the project's default directory, where its path documents are
     session_id: str | None = None  # the Planner's Claude session, resumed after a restart
     # The session's running totals at its last result; a process that resumes the session starts from them.
     session_totals: Usage = field(default_factory=Usage)
@@ -280,6 +283,7 @@ class TaskPlan:
             "project_background": self.project_background,
             "project_planner_harness": self.project_planner_harness,
             "project_updated_at": self.project_updated_at,
+            "project_work_dir": self.project_work_dir,
             "session_id": self.session_id,
             "session_totals": self.session_totals.to_dict(),
             "final_summary": self.final_summary,
@@ -342,6 +346,9 @@ class PlannerAgent:
         self._last_turn_at = 0.0
         # The project background the last turn's system prompt carried (None before the first turn).
         self._prompt_background: str | None = None
+        # The project knowledge the last turn ran with (None before the first turn); a turn that cannot
+        # read the knowledge keeps it, as a failed project read keeps the last project.
+        self._knowledge: AgentKnowledge | None = None
 
     @property
     def agent_id(self) -> str:
@@ -1026,18 +1033,20 @@ class PlannerAgent:
         plan = self._plan
         assert plan is not None
         settings = await load_settings()
-        system_prompt = self._system_prompt(plan, settings)
-        launch = resolve_launch(settings.defaults, settings.model, await load_library(self._runtime_root))
+        knowledge = await self._load_knowledge(plan)
+        system_prompt = self._system_prompt(plan, settings, knowledge)
+        launch = resolve_launch(settings.defaults, settings.model, await load_library(self._runtime_root), knowledge)
         await self._note_background(plan.project_background)
         try:
             prompt_file = system_prompt.write_file(self._runtime_root)
         except OSError as exc:
             raise PlannerTurnError(f"cannot write the system prompt file: {exc}") from None
         base = self._claude_command(prompt_file, settings, launch, plan.work_dir)
-        # The command carries the model, the effort and the library's directories; the file is named by
-        # its content's hash, kept beside it all the same; the environment and the library are compared
-        # by their hashes.
-        signature = (tuple(base), system_prompt.sha256, launch.env_sha256, launch.library.sha256)
+        # The command carries the model, the effort, the library's directories and the knowledge's; the
+        # file is named by its content's hash (the knowledge index included), kept beside it all the same;
+        # the environment and the library are compared by their hashes, the mounted directories as such.
+        signature = (tuple(base), system_prompt.sha256, launch.env_sha256, launch.library.sha256,
+                     launch.knowledge.add_dirs)
         if self._claude.stale(signature):
             # Claude exited, or the config, the settings, the project or the task
             # changed: the next process resumes the session with the new prompt.
@@ -1133,8 +1142,9 @@ class PlannerAgent:
             raise PlannerTurnError(error)
         return final_text
 
-    def _system_prompt(self, plan: TaskPlan, settings: PlannerSettings) -> SystemPrompt:
-        """The harness, the role prompt, the project background, the task, then the reply contract."""
+    def _system_prompt(self, plan: TaskPlan, settings: PlannerSettings, knowledge: AgentKnowledge) -> SystemPrompt:
+        """The harness, the role prompt, the project background and knowledge index, the task, then the reply
+        contract."""
         project = None
         if plan.project_id or plan.project_name or plan.project_background or plan.project_planner_harness:
             project = {"id": plan.project_id, "name": plan.project_name, "background": plan.project_background,
@@ -1154,6 +1164,7 @@ class PlannerAgent:
             ),
             contract_name="REPLY_CONTRACT",
             contract=REPLY_CONTRACT,
+            knowledge=knowledge,
         )
 
     # --- Turn messages: only what changed (the task is the system prompt's task section) ---
@@ -1409,8 +1420,32 @@ class PlannerAgent:
         plan.project_description = str(project.get("description") or "")
         plan.project_background = str(project.get("background") or "")
         plan.project_planner_harness = str(project.get("planner_harness_prompt") or "")
+        plan.project_work_dir = str(project.get("work_dir") or "")
         updated_at = project.get("updated_at")
         plan.project_updated_at = updated_at.isoformat() if hasattr(updated_at, "isoformat") else str(updated_at or "")
+
+    async def _load_knowledge(self, plan: TaskPlan) -> AgentKnowledge:
+        """The project's knowledge for this turn, read now; the last one read when it cannot be read.
+
+        Notes in the task's activity when the knowledge the turn runs with
+        starts, changes or ends.
+        """
+        project = {"id": plan.project_id, "work_dir": plan.project_work_dir} if plan.project_id else None
+        knowledge = await load_knowledge(self._runtime_root, project, plan.work_dir)
+        previous = self._knowledge
+        if knowledge.error is not None:
+            await self._activity("error", f"Warning: {knowledge.error}"[:500])
+            if previous is not None:
+                return previous
+        self._knowledge = knowledge
+        before = previous.sha256 if previous is not None else None
+        if knowledge.sha256 != before:
+            if knowledge.sha256 is None:
+                await self._activity("phase", "Project knowledge removed")
+            else:
+                verb = "changed" if before else "applied"
+                await self._activity("phase", f"Project knowledge {verb} ({documents_label(knowledge.documents)})")
+        return knowledge
 
     async def _note_background(self, background: str) -> None:
         """Note in the task's activity when the system prompt starts carrying, changes or drops the background."""
@@ -1476,6 +1511,7 @@ class PlannerAgent:
                         project_background=data.get("project_background", ""),
                         project_planner_harness=data.get("project_planner_harness", ""),
                         project_updated_at=data.get("project_updated_at", ""),
+                        project_work_dir=data.get("project_work_dir", ""),
                         session_id=data.get("session_id"),
                         session_totals=Usage.from_dict(data.get("session_totals")),
                         final_summary=data.get("final_summary", ""),

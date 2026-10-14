@@ -6,12 +6,13 @@ collection, reporting back to the Planner via the Bus.
 
 A Worker's or Reviewer's system prompt is the harness (its project's Worker
 harness, else the default in Settings), its role prompt (the ``worker`` or
-``reviewer`` row), the task's project background, the task section (the
-step, with the task it belongs to) and the code-owned report contract, last
-(``system_prompt``). The first user turn on stdin carries only what other
-agents produced: the reports of the steps this one depends on, or the
-Worker's report under review. Each run reads its row and the Settings
-defaults (model, effort, environment) as it starts.
+``reviewer`` row), the task's project background and knowledge index, the
+task section (the step, with the task it belongs to) and the code-owned
+report contract, last (``system_prompt``). The first user turn on stdin
+carries only what other agents produced: the reports of the steps this one
+depends on, or the Worker's report under review. Each run reads its row, the
+Settings defaults (model, effort, environment) and its project's knowledge
+(the documents' directories are mounted with ``--add-dir``) as it starts.
 """
 
 from __future__ import annotations
@@ -29,6 +30,7 @@ from .. import agent_settings
 from ..agent_settings import BUILTIN_DEFAULTS, AgentDefaults, AgentType, resolve_harness, resolve_launch
 from ..bus import MessageBus
 from ..claude_cli import ClaudeRunRecorder, isolation_args, iter_lines, system_prompt_args, write_user_turn
+from ..knowledge import documents_label, load_knowledge
 from ..library import load_library
 from ..message import (
     AgentAddress,
@@ -527,9 +529,10 @@ class WorkerPool:
         agent = AgentType.REVIEWER if is_verify else AgentType.WORKER
         settings = await _load_settings(agent)
         run_timeout, max_turns = settings.timeout_seconds, settings.max_turns
-        launch = resolve_launch(settings.defaults, settings.model, await load_library(self._runtime_root))
         # Read as the run starts: a later change reaches the next run, not this one.
         project = await self._task_project(parent_task_id, worker_id)
+        knowledge = await load_knowledge(self._runtime_root, project, work_dir)
+        launch = resolve_launch(settings.defaults, settings.model, await load_library(self._runtime_root), knowledge)
         background = str((project or {}).get("background") or "")
         system_prompt = build_system_prompt(
             harness=resolve_harness(agent, settings.defaults, project=project),
@@ -543,10 +546,17 @@ class WorkerPool:
             task=self._task_section(payload, work_dir, is_verify=is_verify),
             contract_name="REVIEW_CONTRACT" if is_verify else "WORK_CONTRACT",
             contract=REVIEW_CONTRACT if is_verify else WORK_CONTRACT,
+            knowledge=knowledge,
         )
         if background.strip() and parent_task_id:
             await self._activity(parent_task_id, worker_id, "phase",
                                  f"Project background applied ({len(background)} chars)")
+        if knowledge.documents and parent_task_id:
+            await self._activity(parent_task_id, worker_id, "phase",
+                                 f"Project knowledge applied ({documents_label(knowledge.documents)})")
+        if knowledge.error and parent_task_id:
+            await self._activity(parent_task_id, worker_id, "error",
+                                 f"Warning: {knowledge.error}; this run goes without it"[:500])
         try:
             prompt_file = system_prompt.write_file(self._runtime_root)
         except OSError as exc:

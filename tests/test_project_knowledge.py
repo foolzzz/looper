@@ -24,6 +24,7 @@ from typing import Any
 import pytest
 
 from loopx.agents import knowledge
+from loopx.agents.agent_settings import BUILTIN_DEFAULTS, resolve_launch
 from loopx.agents.http_server import AgentHTTPServer
 from loopx.agents.knowledge import (
     EMPTY_KNOWLEDGE,
@@ -542,3 +543,14 @@ class TestLoad:
         assert (loaded.index, loaded.add_dirs) == ("", ())
         assert loaded.error == "the project's knowledge could not be read"
 
+
+class TestLaunchArgs:
+    """The mounted directories are launch arguments, with the library's, so the agents cannot diverge."""
+
+    def test_each_directory_is_one_add_dir_after_the_library(self) -> None:
+        loaded = AgentKnowledge(index="## Project knowledge", documents=2, add_dirs=("/k", "/p"))
+        args = resolve_launch(BUILTIN_DEFAULTS, None, knowledge=loaded).args()
+        assert args[-4:] == ["--add-dir", "/k", "--add-dir", "/p"]
+
+    def test_a_launch_without_knowledge_mounts_nothing(self) -> None:
+        assert "--add-dir" not in resolve_launch(BUILTIN_DEFAULTS, "sonnet").args()
