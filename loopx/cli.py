@@ -27,13 +27,20 @@ def build_parser() -> argparse.ArgumentParser:
     serve.add_argument("--port", type=int, help="Port (default 8767).")
     serve.add_argument("--verbose", action="store_true", help="Enable debug logging.")
     serve.add_argument("--runtime-root", help="Override the default ~/.loopx state directory.")
+    serve.add_argument(
+        "--skip-backup", action="store_true",
+        help="Change the database schema without the pg_dump backup otherwise taken first into "
+             "<runtime root>/backups (logged as a warning).",
+    )
     commands.add_parser(
         "doctor",
         allow_abbrev=False,
-        help="Check what LoopX needs: PostgreSQL, the Claude Code CLI and its login, and the enabled channels.",
+        help="Check what LoopX needs: PostgreSQL, the Claude Code CLI and its login, the enabled channels "
+             "and pg_dump.",
         description=(
-            "Check PostgreSQL (LOOPX_DATABASE_URL), the Claude Code CLI and its login, and the enabled channels; "
-            "print each result with its fix. Exits 1 when a check failed. Makes no model call."
+            "Check PostgreSQL (LOOPX_DATABASE_URL), the Claude Code CLI and its login, the enabled channels, and "
+            "the pg_dump that backs the database up before a schema change; print each result with its fix. "
+            "Exits 1 when a check failed. Makes no model call."
         ),
     )
     config = commands.add_parser(
@@ -141,6 +148,7 @@ def main(argv: list[str] | None = None) -> int:
         runtime_root=Path(args.runtime_root) if args.runtime_root else default_runtime_root(),
         work_dir=Path.cwd(),
         verbose=args.verbose,
+        skip_backup=args.skip_backup,
     )
     return 0
 
@@ -165,7 +173,7 @@ def _config(args: argparse.Namespace) -> int:
             print(config_transfer.format_export(summary, path, include_secrets=args.include_secrets))
             return 0
         plan = asyncio.run(config_transfer.import_file(configured_dsn(), path, apply=args.apply))
-    except config_transfer.ConfigFileError as exc:
+    except (config_transfer.ConfigFileError, config_transfer.SchemaChangePending) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     except (OSError, asyncpg.PostgresError) as exc:
