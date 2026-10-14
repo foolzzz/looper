@@ -11,9 +11,11 @@ Every field is optional, and ``None`` inherits today's behavior:
   (0 = never), over the ``planner`` agent config;
 - ``review_policy``: ``planner`` (the Planner decides which steps a Reviewer
   checks) or ``all`` (every step needs a passing review before it is accepted);
-- ``distill_lessons``: ``true`` makes the Planner of a task that completes turn
-  the task's journal into a lessons document in the project's knowledge; off
-  when unset.
+- ``distill_lessons``: what the Planner of a task that completes makes of the
+  task's journal: nothing (``off``, the default), a lessons draft the user
+  confirms into the project's knowledge or discards (``draft``), or a lessons
+  document in it (``write``). ``true`` and ``false``, from before the three
+  modes, are taken as ``write`` and ``off``.
 
 The columns live on ``projects`` (``db.projects.EXECUTION_COLUMNS``); this
 module owns their types and validation. Agents read them when a run or turn
@@ -49,13 +51,19 @@ class TaskBudgetAction(str, Enum):
     FAIL = "fail"
 
 
+class LessonsMode(str, Enum):
+    OFF = "off"
+    DRAFT = "draft"
+    WRITE = "write"
+
+
 @dataclass(frozen=True)
 class ProjectExecution:
     task_budget_usd: float | None = None
     task_budget_action: TaskBudgetAction | None = None
     supervise_interval_seconds: int | None = None
     review_policy: ReviewPolicy | None = None
-    distill_lessons: bool | None = None
+    distill_lessons: LessonsMode = LessonsMode.OFF
 
     @property
     def review_all(self) -> bool:
@@ -63,7 +71,7 @@ class ProjectExecution:
 
     @property
     def lessons_on(self) -> bool:
-        return self.distill_lessons is True
+        return self.distill_lessons is not LessonsMode.OFF
 
     @property
     def on_task_budget(self) -> TaskBudgetAction:
@@ -106,6 +114,8 @@ def format_usd(amount: float) -> str:
 
 
 def _parse(field: str, raw: Any) -> Any:
+    if field == "distill_lessons":
+        return _lessons_mode(raw)
     if raw is None or raw == "":
         return None
     if field == "task_budget_usd":
@@ -119,11 +129,19 @@ def _parse(field: str, raw: Any) -> Any:
             raise ValueError(f"supervise_interval_seconds must be a whole number of seconds from 0 (never) "
                              f"to {SUPERVISE_MAX_SECONDS}, or null to inherit")
         return raw
-    if field == "distill_lessons":
-        if not isinstance(raw, bool):
-            raise ValueError("distill_lessons must be true or false, or null for off")
-        return raw
     raise ValueError(f"unknown execution field {field!r}")
+
+
+def _lessons_mode(raw: Any) -> LessonsMode:
+    """``distill_lessons``: never unset, so null and ``""`` are ``off``; a boolean is from before the modes."""
+    if raw is None or raw == "":
+        return LessonsMode.OFF
+    if isinstance(raw, bool):
+        return LessonsMode.WRITE if raw else LessonsMode.OFF
+    try:
+        return LessonsMode(raw)
+    except ValueError:
+        raise ValueError("distill_lessons must be one of off, draft, write, or null for off") from None
 
 
 def _choice(field: str, raw: Any, kind: type[Enum]) -> Any:

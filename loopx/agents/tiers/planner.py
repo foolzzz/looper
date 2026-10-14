@@ -20,7 +20,7 @@ does the dispatching. An accepted step gets an entry in the task journal
 (``journal``) with its summary and its agents' learnings; the Planner's
 DECISION, SUPERVISE and CHAT turns and each Worker's first turn carry the
 journal back, and a project with ``distill_lessons`` gets one LESSONS turn when
-a task completes, saved as a project knowledge document. The plan, its steps,
+a task completes, saved as a project knowledge document or a draft of one. The plan, its steps,
 its journal and the Planner's Claude session live in PostgreSQL (``plans``,
 ``agent_sessions``), written as they change; a
 Planner started after the server restarted reads them back and carries on
@@ -70,7 +70,7 @@ from ..claude_cli import (
 from .. import knowledge as project_knowledge
 from ..knowledge import AgentKnowledge, documents_label, load_knowledge
 from ..library import AgentLibrary, items_label, load_installed
-from ..project_execution import ProjectExecution, TaskBudgetAction, format_usd
+from ..project_execution import LessonsMode, ProjectExecution, TaskBudgetAction, format_usd
 from ..run_usage import Usage
 from ..system_prompt import SystemPrompt, build_system_prompt, is_recommended, plan_task_section
 from ..message import (
@@ -1542,7 +1542,8 @@ class PlannerAgent:
 
     async def _distill_lessons(self, plan: TaskPlan) -> None:
         """One more Planner turn turns the task journal into a lessons document, saved in the project's
-        knowledge (``distill_lessons``). Any problem is a warning in the task's activity: the task completed."""
+        knowledge or, in ``draft`` mode, as a draft the user confirms or discards (``distill_lessons``). Any
+        problem is a warning in the task's activity: the task completed."""
         if not plan.journal:
             await self._activity("phase", "No lessons written: the task journal is empty")
             return
@@ -1563,17 +1564,23 @@ class PlannerAgent:
             await self._activity("error", f"Warning: the Planner could not write the task's lessons: {exc}"[:500])
             return
         title = f"Lessons: {_clip(plan.requirement, project_knowledge.TITLE_MAX_CHARS - 12)}"
+        summary = f"What task {self._task_id} found and learned, written by its Planner when it completed"
+        draft = self._execution.distill_lessons is LessonsMode.DRAFT
         try:
-            await project_knowledge.add_document(plan.project_id, {
-                "source_kind": "text", "title": title, "content": lessons,
-                "summary": f"What task {self._task_id} found and learned, written by its Planner when it completed",
-            }, self._runtime_root)
+            if draft:
+                await project_knowledge.add_draft(plan.project_id, task_id=self._task_id, title=title,
+                                                  summary=summary, content=lessons)
+            else:
+                await project_knowledge.add_document(plan.project_id, {
+                    "source_kind": "text", "title": title, "summary": summary, "content": lessons,
+                }, self._runtime_root)
         except Exception as exc:
             logger.warning("planner %s cannot save the task's lessons", self.agent_id, exc_info=True)
             await self._activity("error", f"Warning: the task's lessons were not saved to project knowledge: "
                                           f"{exc}"[:500])
             return
-        await self._activity("phase", f"Lessons saved to project knowledge: {title}"[:300])
+        where = "as a draft to review in project knowledge" if draft else "to project knowledge"
+        await self._activity("phase", f"Lessons saved {where}: {title}"[:300])
 
     def _lessons_message(self, plan: TaskPlan) -> str:
         return "\n".join([
