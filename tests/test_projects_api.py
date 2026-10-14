@@ -21,7 +21,7 @@ import pytest
 
 from loopx.agents.http_server import AgentHTTPServer
 from loopx.agents.tiers.task import Task, TaskRouter
-from loopx.db import connection as db_connection, projects as db_projects, tasks as db_tasks
+from loopx.db import connection as db_connection, llm_records as db_llm_records, projects as db_projects, tasks as db_tasks
 
 ACTIVE = ("pending", "assigned", "running", "executing")
 NOW = datetime(2026, 10, 1, tzinfo=timezone.utc)
@@ -119,6 +119,10 @@ class _Store:
             return None
         return {**row, "project_name": self.projects[row["project_id"]]["name"], "steps": []}
 
+    async def task_costs(self, task_ids: list[str], **_: Any) -> dict[str, dict[str, Any]]:
+        """No runs recorded yet: every task has cost nothing."""
+        return {task_id: {"cost_usd": 0.0, "runs": 0} for task_id in task_ids}
+
     @asynccontextmanager
     async def transaction(self) -> Any:
         self.transactions += 1
@@ -133,6 +137,7 @@ def store(monkeypatch: pytest.MonkeyPatch) -> _Store:
     for name in ("create_task", "set_task_project", "list_tasks", "get_task_with_steps"):
         monkeypatch.setattr(db_tasks, name, getattr(fake, name))
     monkeypatch.setattr(db_connection, "transaction", fake.transaction)
+    monkeypatch.setattr(db_llm_records, "task_costs", fake.task_costs)
     return fake
 
 

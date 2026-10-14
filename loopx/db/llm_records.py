@@ -166,6 +166,11 @@ _ROLE_FILTERS = {
 }
 # A task's step runs: its Workers' and its Reviewers'.
 _STEP_RUNS = f"({_ROLE_FILTERS['worker']} OR {_ROLE_FILTERS['reviewer']})"
+# The agents that work on one task, whose runs make up its cost; the Manager is not one of them.
+TASK_ROLES = ("planner", "worker", "reviewer")
+_TASK_ROLE = (
+    "CASE " + " ".join(f"WHEN {_ROLE_FILTERS[role]} THEN '{role}'" for role in TASK_ROLES) + " END"
+)
 
 
 async def list_task_runs(
@@ -237,3 +242,107 @@ async def get_record(
         return None
     return _row_to_dict(row)
 
+
+async def task_costs(
+    task_ids: list[str],
+    *,
+    pool: asyncpg.Pool | None = None,
+) -> dict[str, dict[str, Any]]:
+    """Each task's cost: the sum of its Planner's, Workers' and Reviewers' runs, in total and by role.
+
+    Every given task id gets an entry. ``runs`` counts every run; ``running``
+    those still going, whose cost is not known yet; ``unpriced_runs`` the
+    finished ones that ended without a reported cost (Claude exited first).
+    """
+    if not task_ids:
+        return {}
+    pool = pool or get_pool()
+    rows = await pool.fetch(
+        f"""
+        SELECT task_id, {_TASK_ROLE} AS role, count(*) AS runs,
+               count(*) FILTER (WHERE status = 'running') AS running,
+               count(*) FILTER (WHERE status <> 'running' AND cost_usd IS NULL) AS unpriced_runs,
+               COALESCE(sum(cost_usd), 0) AS cost_usd
+        FROM llm_records
+        WHERE task_id = ANY($1::text[]) AND {_TASK_ROLE} IS NOT NULL
+        GROUP BY task_id, role
+        """,
+        task_ids,
+    )
+    costs = {
+        task_id: {"cost_usd": 0.0, "runs": 0, "running": 0, "unpriced_runs": 0,
+                  "by_role": {role: {"cost_usd": 0.0, "runs": 0} for role in TASK_ROLES}}
+        for task_id in task_ids
+    }
+    for row in rows:
+        cost = costs[row["task_id"]]
+        for key in ("runs", "running", "unpriced_runs"):
+            cost[key] += row[key]
+        cost["cost_usd"] += row["cost_usd"]
+        cost["by_role"][row["role"]] = {"cost_usd": row["cost_usd"], "runs": row["runs"]}
+    return costs
+
+
+async def agent_usage(
+    agent_id: str,
+    *,
+    turns: int = 100,
+    pool: asyncpg.Pool | None = None,
+) -> dict[str, Any]:
+    """One agent's spending and context: totals, by session, by UTC day, and its latest ``turns`` runs.
+
+    The turns come oldest first, each with its context at the end
+    (``context_tokens``) and the compactions it went through; for a resident
+    agent (the Manager, a task's Planner) they show its context over time.
+    """
+    pool = pool or get_pool()
+    total = await pool.fetchrow(
+        """
+        SELECT count(*) AS runs,
+               count(*) FILTER (WHERE status = 'running') AS running,
+               count(*) FILTER (WHERE status <> 'running' AND cost_usd IS NULL) AS unpriced_runs,
+               COALESCE(sum(cost_usd), 0) AS cost_usd,
+               COALESCE(sum(jsonb_array_length(compactions)), 0) AS compactions
+        FROM llm_records WHERE agent_id = $1
+        """,
+        agent_id,
+    )
+    sessions = await pool.fetch(
+        """
+        SELECT session_id, count(*) AS runs, COALESCE(sum(cost_usd), 0) AS cost_usd,
+               min(created_at) AS first_at, max(created_at) AS last_at
+        FROM llm_records WHERE agent_id = $1
+        GROUP BY session_id ORDER BY max(created_at) DESC LIMIT 50
+        """,
+        agent_id,
+    )
+    days = await pool.fetch(
+        """
+        SELECT (created_at AT TIME ZONE 'UTC')::date AS day, count(*) AS runs, COALESCE(sum(cost_usd), 0) AS cost_usd
+        FROM llm_records WHERE agent_id = $1
+        GROUP BY day ORDER BY day DESC LIMIT 60
+        """,
+        agent_id,
+    )
+    latest = await pool.fetch(
+        """
+        SELECT id, created_at, status, session_id, cost_usd, context_tokens, compactions
+        FROM llm_records WHERE agent_id = $1
+        ORDER BY created_at DESC, id DESC LIMIT $2
+        """,
+        agent_id, turns,
+    )
+    turn_rows = [_row_to_dict(row) for row in reversed(latest)]
+    return {
+        "agent_id": agent_id,
+        "total": dict(total),
+        "by_session": [
+            {**dict(row), "first_at": row["first_at"].isoformat(), "last_at": row["last_at"].isoformat()}
+            for row in sessions
+        ],
+        "by_day": [{**dict(row), "day": row["day"].isoformat()} for row in days],
+        "turns": turn_rows,
+        "latest_context_tokens": next(
+            (row["context_tokens"] for row in reversed(turn_rows) if row["context_tokens"] is not None), None,
+        ),
+    }

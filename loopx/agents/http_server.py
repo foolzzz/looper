@@ -204,6 +204,7 @@ class AgentHTTPServer:
     _RE_LLM_PROFILE = re.compile(r"^/api/llm-profiles/(\d+)$")
     _RE_LLM_RECORD = re.compile(r"^/api/llm-records/(\d+)$")
     _RE_LLM_RECORD_EVENTS = re.compile(r"^/api/llm-records/(\d+)/events$")
+    _RE_AGENT_USAGE = re.compile(r"^/api/agents/([a-zA-Z0-9_-]+)/usage$")
     _RE_CHANNEL_CONFIG = re.compile(r"^/api/channel-configs/([a-zA-Z0-9_-]+)$")
     _RE_TASK_CONFIG = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)/config$")
     _RE_TASK_PROJECT = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)/project$")
@@ -279,6 +280,8 @@ class AgentHTTPServer:
             await self._handle_get_llm_record(int(m.group(1)), writer)
         elif (m := self._RE_LLM_RECORD_EVENTS.match(path)) and method == "GET":
             await self._handle_llm_record_events(int(m.group(1)), query, writer)
+        elif (m := self._RE_AGENT_USAGE.match(path)) and method == "GET":
+            await self._handle_agent_usage(m.group(1), query, writer)
         elif path == "/api/llm-profiles" and method == "GET":
             await self._handle_list_llm_profiles(writer)
         elif path == "/api/llm-profiles" and method == "POST":
@@ -363,8 +366,10 @@ class AgentHTTPServer:
 
     async def _handle_list_tasks(self, query: dict[str, str], writer: asyncio.StreamWriter) -> None:
         try:
+            from ..db.llm_records import task_costs
             from ..db.tasks import list_tasks as db_list_tasks
             tasks = await db_list_tasks(limit=50, project_id=query.get("project_id") or None)
+            costs = await task_costs([t["id"] for t in tasks])
             result = []
             for t in tasks:
                 result.append({
@@ -380,6 +385,8 @@ class AgentHTTPServer:
                     "correlation_id": t.get("correlation_id", ""),
                     "created_at": t.get("created_at"),
                     "completed_at": t.get("completed_at"),
+                    # What the task's Planner, Workers and Reviewers spent so far.
+                    "cost": costs.get(t.get("id", "")),
                 })
         except Exception:
             logger.exception("DB unavailable for list_tasks")
@@ -716,8 +723,10 @@ class AgentHTTPServer:
         self, task_id: str, writer: asyncio.StreamWriter,
     ) -> None:
         try:
+            from ..db.llm_records import task_costs
             from ..db.tasks import get_task_with_steps
             raw = await get_task_with_steps(task_id)
+            cost = (await task_costs([task_id]))[task_id] if raw else None
         except Exception:
             logger.exception("DB unavailable for task_detail %s", task_id)
             writer.write(_json_response(HTTP_500, {"error": "database unavailable"}))
@@ -748,6 +757,8 @@ class AgentHTTPServer:
             "updated_at": raw.get("updated_at"),
             "completed_at": raw.get("completed_at"),
             "steps": raw.get("steps", []),
+            # What the task's Planner, Workers and Reviewers spent: the total, by role, and the run count.
+            "cost": cost,
         }
         writer.write(_json_response(HTTP_200, _serialize(result)))
         await writer.drain()
@@ -1008,6 +1019,27 @@ class AgentHTTPServer:
             await writer.drain()
             return
         writer.write(_json_response(HTTP_200, {"events": events}))
+        await writer.drain()
+
+    async def _handle_agent_usage(
+        self, agent_id: str, query: dict[str, str], writer: asyncio.StreamWriter,
+    ) -> None:
+        """An agent's spending (in total, by session, by UTC day) and its context over its latest turns."""
+        from ..db.llm_records import agent_usage
+        try:
+            turns = min(max(int(query.get("turns", "100")), 1), 1000)
+        except ValueError:
+            writer.write(_json_response(HTTP_400, {"error": "turns must be an integer"}))
+            await writer.drain()
+            return
+        try:
+            usage = await agent_usage(agent_id, turns=turns)
+        except Exception:
+            logger.exception("DB unavailable for agent usage %s", agent_id)
+            writer.write(_json_response(HTTP_500, {"error": "database unavailable"}))
+            await writer.drain()
+            return
+        writer.write(_json_response(HTTP_200, _serialize(usage)))
         await writer.drain()
 
     async def _handle_list_llm_records(

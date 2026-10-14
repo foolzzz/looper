@@ -150,3 +150,70 @@ def test_a_runs_tokens_context_and_compactions_are_read_back() -> None:
 
     _in_fresh_schema(test)
 
+
+def test_a_tasks_cost_is_the_sum_of_its_planner_worker_and_reviewer_runs() -> None:
+    from loopx.db import llm_records
+
+    async def test(pool: Any) -> None:
+        await _run_record(pool, "planner-t1", task_id="t1", cost=0.1)
+        await _run_record(pool, "planner-t1", task_id="t1", cost=0.2)
+        await _run_record(pool, "worker-a", task_id="t1", cost=0.3)
+        await _run_record(pool, "worker-b", task_id="t1", status="failed")  # ended without a reported cost
+        await _run_record(pool, "worker-c", task_id="t1", status="running")
+        await _run_record(pool, "reviewer-d", task_id="t1", cost=0.05)
+        await _run_record(pool, "manager", task_id="t1", cost=9.0)  # the Manager is not one of the task's agents
+        await _run_record(pool, "worker-e", task_id="t2", cost=1.0)
+
+        costs = await llm_records.task_costs(["t1", "t2", "t3"], pool=pool)
+        t1 = costs["t1"]
+        assert t1["cost_usd"] == pytest.approx(0.65)
+        assert (t1["runs"], t1["running"], t1["unpriced_runs"]) == (6, 1, 1)
+        assert {role: (pytest.approx(row["cost_usd"]), row["runs"]) for role, row in t1["by_role"].items()} == {
+            "planner": (0.3, 2), "worker": (0.3, 3), "reviewer": (0.05, 1)}
+        # The total is the sum of the task's runs as each is recorded.
+        runs = [r for r in await llm_records.list_records(task_id="t1", pool=pool) if r["agent_id"] != "manager"]
+        assert t1["cost_usd"] == pytest.approx(sum(r["cost_usd"] or 0 for r in runs))
+        assert sum(row["cost_usd"] for row in t1["by_role"].values()) == pytest.approx(t1["cost_usd"])
+        assert costs["t2"]["cost_usd"] == 1.0 and costs["t2"]["runs"] == 1
+        assert costs["t3"] == {"cost_usd": 0.0, "runs": 0, "running": 0, "unpriced_runs": 0, "by_role": {
+            "planner": {"cost_usd": 0.0, "runs": 0}, "worker": {"cost_usd": 0.0, "runs": 0},
+            "reviewer": {"cost_usd": 0.0, "runs": 0}}}
+        assert await llm_records.task_costs([], pool=pool) == {}
+
+    _in_fresh_schema(test)
+
+
+def test_a_resident_agents_usage_by_session_day_and_turn() -> None:
+    from loopx.db import llm_records
+
+    async def test(pool: Any) -> None:
+        compacted = [{"trigger": "auto", "pre_tokens": 2100, "post_tokens": 300, "duration_ms": 900}]
+        ids = [
+            await _run_record(pool, "manager", session_id="s1", cost=0.1, context=1000, at="2026-10-12T23:00:00Z"),
+            await _run_record(pool, "manager", session_id="s1", cost=0.2, context=2000, at="2026-10-13T01:00:00Z"),
+            await _run_record(pool, "manager", session_id="s1", cost=0.3, context=1500, compactions=compacted,
+                              at="2026-10-13T02:00:00Z"),
+            await _run_record(pool, "manager", session_id="s2", cost=0.4, context=900, at="2026-10-13T03:00:00Z"),
+            await _run_record(pool, "manager", session_id="s2", status="running", at="2026-10-13T04:00:00Z"),
+        ]
+        await _run_record(pool, "planner-t1", session_id="s9", cost=5.0, context=99)  # another agent
+
+        usage = await llm_records.agent_usage("manager", pool=pool)
+        assert usage["agent_id"] == "manager"
+        assert usage["total"]["cost_usd"] == pytest.approx(1.0)
+        assert (usage["total"]["runs"], usage["total"]["running"], usage["total"]["compactions"]) == (5, 1, 1)
+        assert [(s["session_id"], pytest.approx(s["cost_usd"]), s["runs"]) for s in usage["by_session"]] == [
+            ("s2", 0.4, 2), ("s1", 0.6, 3)]  # the latest session first
+        assert [(d["day"], pytest.approx(d["cost_usd"]), d["runs"]) for d in usage["by_day"]] == [
+            ("2026-10-13", 0.9, 4), ("2026-10-12", 0.1, 1)]  # UTC days, the latest first
+        # The turns oldest first, each with its context and compactions; the running one has no context yet.
+        assert [t["id"] for t in usage["turns"]] == ids
+        assert [t["context_tokens"] for t in usage["turns"]] == [1000, 2000, 1500, 900, None]
+        assert usage["turns"][2]["compactions"] == compacted
+        assert usage["latest_context_tokens"] == 900
+        # Only the latest turns.
+        assert [t["id"] for t in (await llm_records.agent_usage("manager", turns=2, pool=pool))["turns"]] == ids[3:]
+        nobody = await llm_records.agent_usage("planner-none", pool=pool)
+        assert nobody["total"]["runs"] == 0 and nobody["turns"] == [] and nobody["latest_context_tokens"] is None
+
+    _in_fresh_schema(test)
