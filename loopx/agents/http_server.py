@@ -602,6 +602,12 @@ class AgentHTTPServer:
             await writer.drain()
             return
 
+        config = data.get("config")
+        if config is not None and not isinstance(config, dict):
+            writer.write(_json_response(HTTP_400, {"error": "config must be a JSON object"}))
+            await writer.drain()
+            return
+
         work_dir = None
         if "work_dir" in data:
             from .tiers.task import resolve_work_dir
@@ -616,7 +622,7 @@ class AgentHTTPServer:
             task_id,
             requirement=data.get("requirement"),
             work_dir=work_dir,
-            config=data.get("config"),
+            config=config,
         )
         if not ok:
             writer.write(_json_response(HTTP_500, {"error": "update failed"}))
