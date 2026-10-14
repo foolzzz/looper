@@ -1,12 +1,12 @@
 """Lark (Feishu) Bot Channel Adapter.
 
-Bridges Lark Bot messages with the agent Bus, reusing the existing
-lark-cli event collection and outbound delivery infrastructure from
-loopx.extensions.lark.
+Bridges Lark Bot messages with the agent Bus through ``lark-cli``:
+``lark-cli event consume`` delivers the incoming message events and
+``lark-cli message send`` posts the replies.
 
 This adapter is intentionally thin — it translates between Bus
-MessageEnvelopes and the existing Lark extension primitives rather
-than reimplementing the Lark API surface.
+MessageEnvelopes and those lark-cli calls rather than reimplementing the
+Lark API surface.
 
 Only the senders on its allowlist (their ``open_id``) reach the Manager:
 anyone else is dropped with one log line and gets no reply, and an empty
