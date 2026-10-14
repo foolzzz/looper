@@ -477,6 +477,7 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
 | 2026-10-13 | M8d 交付（looper #50）：harness、模型、effort、环境变量和单次运行上限统一存进 `agent_setting_layers`，按系统 → 角色 → 项目 → 项目里的角色逐层解析（Manager 只有前两层；环境变量逐键合并、可在后面的层取消；Reviewer 在角色层和项目角色层没有自己的 harness 时沿用同层 Worker 的），四类 agent 都用 `load_agent_settings` 启动，每次运行在 `settings_sources` 记下每项来自哪一层。一次性迁移把 Settings 默认值、各 agent 的模型和 Manager 的 harness、项目的模型和单次上限、项目的 Planner 和 Worker harness 原样迁入对应层并删除旧列；Settings、Agents 页和项目 Settings 标签分别编辑系统、角色、项目和项目里的角色层，每项显示当前取值和来源。验证：以 main（`72e72eb65`）的解析代码生成基准，两组旧数据迁移后四类 agent 的启动参数、环境变量和 system prompt 与基准逐字节相同，prompt 不变所以未跑真实 Claude；真实 PG 867 通过 |
 | 2026-10-13 | M8c 交付（looper #51）：Settings 的目录可上传（或拖入）`SKILL.md` 或 skill、插件目录的 zip，预览后从公开 `https://` git 仓库勾选导入（同一 URL 再导入就地更新、保留安装），在界面新建和编辑 skill；都只进库不安装，项目外重名返回 409、可改名，编辑上传或 git 条目标记 modified，本机导入的条目只能重新导入。zip 拒绝绝对路径、`..`、链接和超限文件，克隆为 `--depth 1`、不跑 hook 和子模块、不读操作者的 git 配置和凭据、限时限大小、用后删除，每条规则一个真实 PG 测试。验证：一次性 `loopx serve` 从 `https://github.com/anthropics/skills` 预览出 20 个 skill（56 个二进制文件未导入），全部导入 384 个文件、6.3 MB，再导入 20 个不变；上传的 skill 全局装给 worker 后出现在 Worker 的 `--plugin-dir`、不在 Planner 的；真实 PG 902 通过。 |
 | 2026-10-13 | M8e 交付（looper #53），M8 完成：`loopx config export` 把系统和角色层、角色 prompt、目录（含文件和 MCP）、全局安装、渠道以及可选的项目（`--include-projects`）写成一个 JSON 文件，密钥默认是占位符，`loopx config import` 默认只读预览、`--apply` 在一个事务里按自然键写入（同键就地更新、不删文件外的、占位符不覆盖已存的密钥），Settings 可流式下载导出。验证：真实 PG 测试覆盖往返、占位符、预览不写、冲突更新、重复导入不变和超过 8 MiB 的导出；对线上库只读导出（107 个条目、2175 个文件、23.2 MB），导入新库的预览为 115 项新增，应用后再预览全部不变、再导出与原文件相同；真实 PG 912 通过。 |
+| 2026-10-14 | 第 5.3 节经验文档先作为草稿（looper #PR）：`distill_lessons` 改为 `off`、`draft`、`write` 三档（一次性迁移：`true` 为 `write`，`false` 和 NULL 为 `off`），`draft` 时任务完成后的经验存进 `project_document_drafts`，不进任何运行的知识索引和挂载，用户在项目页 Knowledge 标签查看、修改后确认（成为受知识上限约束的文本文档）或丢弃，任务页链接到草稿。验证：真实 PG 加替身 Claude 跑完三档、确认与丢弃、被拒的确认保留草稿和迁移，一次性 `loopx serve` 上无头 Chrome 完成修改后确认、丢弃和切换档位并截图。 |
 
 ## 5. 不属于本 RFC 的待办
 
@@ -497,7 +498,6 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
 ### 5.3 非核心待办（M6 之后统一做）
 
 - **界面导入配置文件**（M8e 只做了 CLI 导入；2026-10-14 定为现在做，进行中）：按路由放宽请求体上限、流式落盘，并把预览和应用分成两步。
-- **经验文档先作为草稿**（M7b 只做了开关直接入库；2026-10-14 定为现在做，进行中）：`distill_lessons` 改为三档（关闭、存草稿、直接写入）；草稿在项目页确认、修改或丢弃后才进入项目知识。
 
 ### 5.4 验证缺口
 
