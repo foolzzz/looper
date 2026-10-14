@@ -44,6 +44,7 @@
 | M9b | Claude Code 接多种 provider：订阅 OAuth、Anthropic key、兼容 anthropic 协议的接口；按 provider 价格计算花费 | 待开工 | M9a |
 | M9c | Codex 运行时：四类角色都支持（含常驻会话），事件统一、MCP 翻译、OpenAI 登录与 key | 待开工 | M9a |
 | M9d | SDK 运行时与 norma SDK | 待定（norma 就绪后） | M9a |
+| M9e | OMP 运行时：先只读核实能力、填能力矩阵，再写适配器 | 待开工 | M9c |
 
 执行顺序：M1 → M1.5 → M1.6 → M1.7 → M2 → M3 → M4 → M5 → M6 → M7a → M7b → M8a → M8b、M8c、M8d（可并行）→ M8e。
 
@@ -431,6 +432,11 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
   协议或逐轮续接）；独立的 `CODEX_HOME` 隔离且保留登录；system prompt 注入、MCP 翻译为 `config.toml`、
   目录条目的兼容性（先核实 Codex 对 skill 的支持）；按 token 用量与 provider 价格计算花费；OpenAI 登录与 API key。
 - **验收：** 用 Codex agent 跑 M6 真实模式评测（四类角色都用 Codex 跑一次，再与 Claude 基线对比）。
+
+#### M9e OMP 运行时
+
+- **范围：** 在 M9c 验证过适配器接口之后，先只读核实 OMP 的能力（一次性运行、常驻会话、MCP、skill、隔离），写回能力矩阵，再实现适配器；开发用本机 CPA。
+- **验收：** 用 OMP agent 跑 M6 真实模式评测。
 
 #### M9d SDK 运行时与 norma
 
