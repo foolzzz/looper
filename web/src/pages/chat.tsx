@@ -8,11 +8,11 @@ import {
   fetchChatTargets,
   fetchTaskActivity,
   streamSSE,
-  fetchAgentConfigs,
+  fetchRoleConfigs,
   fetchLlmRecords,
   watchChat,
   type SSEEvent,
-  type AgentConfig,
+  type RoleConfig,
   type ChatTarget,
   type ChatTargetInfo,
   type ActivityEvent,
@@ -222,7 +222,7 @@ export function ChatPage() {
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
   const [phase, setPhase] = useState("");
-  const [agents, setAgents] = useState<AgentConfig[]>([]);
+  const [roleConfigs, setRoleConfigs] = useState<RoleConfig[]>([]);
   const [targets, setTargets] = useState<ChatTargetInfo[]>([MANAGER_TARGET]);
   const [target, setTarget] = useState<ChatTargetInfo>(MANAGER_TARGET);
   const [agentDropdown, setAgentDropdown] = useState(false);
@@ -243,7 +243,7 @@ export function ChatPage() {
   }, []);
 
   useEffect(() => {
-    fetchAgentConfigs().then(setAgents).catch(() => {});
+    fetchRoleConfigs().then(setRoleConfigs).catch(() => {});
     refreshTargets();
     // Keeps statuses current, and stops input once a viewed Planner ends.
     const timer = setInterval(refreshTargets, TARGETS_POLL_MS);
@@ -257,7 +257,7 @@ export function ChatPage() {
   const isTaskOpen = (g: TaskGroup) =>
     taskOpen[g.planner.task_id ?? ""] ?? (g.planner.can_send || g.planner.task_id === current.task_id);
 
-  const managerConfig = agents.find((a) => a.agent_id === "manager");
+  const managerConfig = roleConfigs.find((c) => c.role === "manager");
   const targetTitle = (t: ChatTargetInfo) => {
     if (t.kind === "planner") return `Planner · ${truncate(t.requirement || t.task_id || "", 40)}`;
     if (t.kind === "manager") return managerConfig?.display_name || "Manager";

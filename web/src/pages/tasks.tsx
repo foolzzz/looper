@@ -115,21 +115,21 @@ const TASK_ROLES: { id: TaskRole; label: string }[] = [
   { id: "reviewer", label: "Reviewer" },
 ];
 
-type AgentChoice = Partial<Record<TaskRole, string>>;
+type ProfileChoice = Partial<Record<TaskRole, string>>;
 
 /** The Agent Profile of each of the task's roles: from the settings (nothing chosen), or one for this task. */
-function TaskAgentsField({ value, onChange }: { value: AgentChoice; onChange: (value: AgentChoice) => void }) {
+function TaskProfilesField({ value, onChange }: { value: ProfileChoice; onChange: (value: ProfileChoice) => void }) {
   return (
     <fieldset className="space-y-2">
       <legend className="text-sm font-medium text-muted-foreground">{AGENT_PROFILE.plural}</legend>
       <div className="grid grid-cols-[auto_minmax(0,1fr)] items-start gap-x-3 gap-y-2">
         {TASK_ROLES.map((role) => (
           <div key={role.id} className="contents">
-            <label htmlFor={`new-task-agent-${role.id}`} className="pt-2 text-xs text-muted-foreground">{role.label}</label>
+            <label htmlFor={`new-task-profile-${role.id}`} className="pt-2 text-xs text-muted-foreground">{role.label}</label>
             <AgentProfileSelect
-              id={`new-task-agent-${role.id}`}
+              id={`new-task-profile-${role.id}`}
               value={value[role.id] ?? ""}
-              onChange={(agent) => onChange({ ...value, [role.id]: agent })}
+              onChange={(profile) => onChange({ ...value, [role.id]: profile })}
               emptyLabel="From settings"
               roles={[role.id]}
               className="w-full rounded-lg border border-border bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary/50"
@@ -185,7 +185,7 @@ export function TasksPage({ sub, query, onNavigate }: TasksPageProps) {
   const [newProjectDir, setNewProjectDir] = useState("");
   const [newProjectDesc, setNewProjectDesc] = useState("");
   const [newProjectBackground, setNewProjectBackground] = useState("");
-  const [newAgents, setNewAgents] = useState<AgentChoice>({});
+  const [newProfiles, setNewProfiles] = useState<ProfileChoice>({});
   const [creating, setCreating] = useState(false);
   const [createError, setCreateError] = useState("");
   const selectedTaskId = sub || null;
@@ -280,7 +280,7 @@ export function TasksPage({ sub, query, onNavigate }: TasksPageProps) {
     setNewProjectDir("");
     setNewProjectDesc("");
     setNewProjectBackground("");
-    setNewAgents({});
+    setNewProfiles({});
   };
 
   const openCreate = () => {
@@ -292,12 +292,12 @@ export function TasksPage({ sub, query, onNavigate }: TasksPageProps) {
     if (!canCreate) return;
     setCreating(true);
     setCreateError("");
-    // An empty directory is left out so the project's default applies; so is a role without a chosen agent.
-    const overrides = Object.fromEntries(Object.entries(newAgents).filter(([, agentId]) => agentId));
+    // An empty directory is left out so the project's default applies; so is a role without a chosen Agent Profile.
+    const overrides = Object.fromEntries(Object.entries(newProfiles).filter(([, profileId]) => profileId));
     const base = {
       requirement: newReq.trim(),
       work_dir: newWorkDir.trim() || undefined,
-      agent_overrides: Object.keys(overrides).length ? overrides : undefined,
+      profile_overrides: Object.keys(overrides).length ? overrides : undefined,
     };
     try {
       const result = await createTask(
@@ -657,7 +657,7 @@ export function TasksPage({ sub, query, onNavigate }: TasksPageProps) {
                   Where the task's Workers run: an absolute path or one starting with ~/. Created if it does not exist.
                 </p>
               </div>
-              <TaskAgentsField value={newAgents} onChange={setNewAgents} />
+              <TaskProfilesField value={newProfiles} onChange={setNewProfiles} />
               <p className="text-xs text-muted-foreground">
                 Task will be created in <strong>init</strong> status. You can review and edit the configuration before starting.
               </p>

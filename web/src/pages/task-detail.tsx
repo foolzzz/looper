@@ -1304,12 +1304,12 @@ export function TaskDetailPage({ taskId, onBack }: TaskDetailPageProps) {
                   }
                 />
               )}
-              {task && Object.keys(task.agent_overrides ?? {}).length > 0 && (
+              {task && Object.keys(task.profile_overrides ?? {}).length > 0 && (
                 <span className="text-xs text-muted-foreground">
                   Agents:{" "}
                   {(["planner", "worker", "reviewer"] as const)
-                    .filter((role) => task.agent_overrides?.[role])
-                    .map((role) => `${role} → ${task.agent_overrides?.[role]?.name}`)
+                    .filter((role) => task.profile_overrides?.[role])
+                    .map((role) => `${role} → ${task.profile_overrides?.[role]?.name}`)
                     .join(", ")}
                 </span>
               )}

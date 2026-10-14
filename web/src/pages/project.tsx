@@ -264,13 +264,13 @@ const PROJECT_ROLES = [
   ["reviewer", "Reviewer"],
 ] as const;
 
-/** What the project's agents run with: each role's agent, its spend cap per run when any has one, and which roles
- * this project gives a harness of their own. */
+/** What the project's agents run with: each role's Agent Profile, its spend cap per run when any has one, and which
+ * roles this project gives a harness of their own. */
 function agentRows(settings: ProjectAgentSettings): [string, string][] {
   const each = (show: (role: ProjectRole) => string) =>
     PROJECT_ROLES.map(([role, label]) => `${label} ${show(role)}`).join(" · ");
   const effective = (role: ProjectRole) => settings.roles[role].effective;
-  const rows: [string, string][] = [["Agents", each((role) => effective(role).agent.value.name)]];
+  const rows: [string, string][] = [["Agents", each((role) => effective(role).profile.value.name)]];
   if (PROJECT_ROLES.some(([role]) => effective(role).run_budget_usd.value != null))
     rows.push(["Spend cap per run", each((role) => {
       const cap = effective(role).run_budget_usd.value;

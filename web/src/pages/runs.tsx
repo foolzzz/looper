@@ -3,13 +3,13 @@ import { Bot, Loader2, RefreshCw, PowerOff, Clock, Cpu, Settings2, Zap } from "l
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
 import {
-  fetchAgentConfigs,
   fetchAgentSettings,
   fetchLlmRecords,
-  type AgentConfig,
+  fetchRoleConfigs,
   type AgentRole,
   type AgentSettings,
   type LlmRecord,
+  type RoleConfig,
 } from "@/lib/api";
 import { AGENT_PROFILE, settingsHref } from "@/lib/settings-pages";
 import { historyHref } from "@/pages/agent-history";
@@ -51,13 +51,13 @@ function AgentCard({
   config,
   selected,
   onSelect,
-  agent,
+  profile,
 }: {
-  config: AgentConfig;
+  config: RoleConfig;
   selected: boolean;
   onSelect: () => void;
-  /** The registered agent this role runs with outside any project; null while it loads. */
-  agent: string | null;
+  /** The Agent Profile this role runs with outside any project; null while it loads. */
+  profile: string | null;
 }) {
   return (
     <button
@@ -82,7 +82,7 @@ function AgentCard({
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">
             <span className="text-sm font-semibold truncate">
-              {config.display_name || config.agent_id}
+              {config.display_name || config.role}
             </span>
             {!config.enabled && <PowerOff className="h-3.5 w-3.5 text-muted-foreground" />}
           </div>
@@ -90,10 +90,10 @@ function AgentCard({
             {roleBadge(config.role)}
           </div>
           <div className="mt-2 flex items-center gap-3 text-xs text-muted-foreground">
-            {agent && (
+            {profile && (
               <span className="flex min-w-0 items-center gap-1">
                 <Cpu className="h-3 w-3 shrink-0" />
-                <span className="truncate">{agent}</span>
+                <span className="truncate">{profile}</span>
               </span>
             )}
             <span className="flex items-center gap-1">
@@ -114,7 +114,7 @@ function AgentCard({
 }
 
 const ROLES: readonly AgentRole[] = ["manager", "planner", "worker", "reviewer"];
-const isRole = (agentId: string): agentId is AgentRole => (ROLES as readonly string[]).includes(agentId);
+const isRole = (role: string): role is AgentRole => (ROLES as readonly string[]).includes(role);
 
 // --- Runs Tab ---
 
@@ -178,7 +178,7 @@ interface RunsPageProps {
 
 /** Each role's runs: choose a role, then its sessions and run history. Configuration is in Settings → Roles. */
 export function RunsPage({ sub, onNavigate }: RunsPageProps) {
-  const [configs, setConfigs] = useState<AgentConfig[]>([]);
+  const [configs, setConfigs] = useState<RoleConfig[]>([]);
   const [settings, setSettings] = useState<AgentSettings | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -186,13 +186,13 @@ export function RunsPage({ sub, onNavigate }: RunsPageProps) {
   const selectedId = (sub || "").split("/").filter(Boolean)[0] || null;
 
   const loadConfigs = useCallback(() => {
-    fetchAgentConfigs()
+    fetchRoleConfigs()
       .then((rows) => {
-        const data = [...rows].sort((a, b) => agentRank(a.agent_id) - agentRank(b.agent_id));
+        const data = [...rows].sort((a, b) => agentRank(a.role) - agentRank(b.role));
         setConfigs(data);
         setError("");
         if (!selectedId && data.length > 0) {
-          onNavigate?.(data[0].agent_id);
+          onNavigate?.(data[0].role);
         }
       })
       .catch((e) => setError(e.message))
@@ -208,7 +208,7 @@ export function RunsPage({ sub, onNavigate }: RunsPageProps) {
     loadDefaults();
   }, [loadConfigs, loadDefaults]);
 
-  const selected = configs.find((c) => c.agent_id === selectedId) ?? null;
+  const selected = configs.find((c) => c.role === selectedId) ?? null;
 
   if (loading) {
     return (
@@ -255,13 +255,13 @@ export function RunsPage({ sub, onNavigate }: RunsPageProps) {
         <div className="space-y-3 lg:w-72 lg:shrink-0">
           {configs.map((cfg) => (
             <AgentCard
-              key={cfg.agent_id}
+              key={cfg.role}
               config={cfg}
-              selected={cfg.agent_id === selectedId}
+              selected={cfg.role === selectedId}
               onSelect={() => {
-                onNavigate?.(cfg.agent_id);
+                onNavigate?.(cfg.role);
               }}
-              agent={isRole(cfg.agent_id) ? settings?.roles[cfg.agent_id]?.effective.agent.value.name ?? null : null}
+              profile={isRole(cfg.role) ? settings?.roles[cfg.role]?.effective.profile.value.name ?? null : null}
             />
           ))}
         </div>
@@ -269,10 +269,10 @@ export function RunsPage({ sub, onNavigate }: RunsPageProps) {
         {selected && (
           <div className="min-w-0 flex-1 rounded-lg border border-border bg-card">
             <div className="flex flex-wrap items-center gap-x-3 gap-y-1 border-b border-border px-4 py-3">
-              <h2 className="text-sm font-semibold">{selected.display_name || selected.agent_id}</h2>
-              <span className="font-mono text-xs text-muted-foreground">{selected.agent_id}</span>
+              <h2 className="text-sm font-semibold">{selected.display_name || selected.role}</h2>
+              <span className="font-mono text-xs text-muted-foreground">{selected.role}</span>
               <a
-                href={settingsHref("roles", selected.agent_id)}
+                href={settingsHref("roles", selected.role)}
                 className="ml-auto flex items-center gap-1 text-xs text-primary underline-offset-2 hover:underline"
               >
                 <Settings2 className="h-3.5 w-3.5" aria-hidden="true" />
@@ -280,7 +280,7 @@ export function RunsPage({ sub, onNavigate }: RunsPageProps) {
               </a>
             </div>
             <div className="p-5">
-              <RunsTab agentId={selected.agent_id} />
+              <RunsTab agentId={selected.role} />
             </div>
           </div>
         )}

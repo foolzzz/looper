@@ -424,7 +424,7 @@ function ProviderRow({ provider, registry }: { provider: Provider; registry: Reg
     provider.auth === "api_key" ? provider.base_url || "the protocol's own endpoint" : "",
     provider.max_concurrency == null ? "no concurrency limit" : `at most ${provider.max_concurrency} runs at once`,
     provider.env.length ? `env ${provider.env.map((e) => e.key).join(", ")}` : "",
-    usedBy(provider.agent_count),
+    usedBy(provider.profile_count),
   ].filter(Boolean);
   return (
     <Row
