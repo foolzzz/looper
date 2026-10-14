@@ -672,7 +672,6 @@ export interface AgentConfig {
   max_turns: number;
   timeout_seconds: number;
   max_concurrency: number;
-  permission_mode: string | null;
   extra_args: Record<string, unknown> | null;
   metadata: Record<string, unknown> | null;
   created_at: string;
