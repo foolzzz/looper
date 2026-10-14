@@ -18,7 +18,9 @@ A run's model is its agent's ``agent_configs.model`` when set
 effort, when set, and the environment variables come from Settings for every
 agent, and so does the library (``library.load_library``): the imported
 plugins and skills every run loads. A task agent's launch also carries its
-project's knowledge (``knowledge.load_knowledge``): the directories to mount.
+project's knowledge (``knowledge.load_knowledge``): the directories to mount,
+and its project's skills (``project_skills.load_project_skills``): one more
+plugin directory.
 Settings live in ``system_settings``, one row per key; a missing row means
 the built-in default. An unreadable table falls back to the built-in
 defaults, so an agent still runs (and its record says where its harness came
@@ -39,6 +41,7 @@ from typing import Any
 
 from .knowledge import EMPTY_KNOWLEDGE, AgentKnowledge
 from .library import EMPTY_LIBRARY, AgentLibrary
+from .project_skills import EMPTY_PROJECT_SKILLS, AgentProjectSkills
 
 logger = logging.getLogger(__name__)
 
@@ -315,8 +318,8 @@ def resolve_harness(
 
 @dataclass(frozen=True)
 class Launch:
-    """The model, effort, environment, library and project knowledge one agent run starts with (and, for every
-    agent alike, its permissions). Only a task agent's launch has knowledge."""
+    """The model, effort, environment, library, project knowledge and project skills one agent run starts with
+    (and, for every agent alike, its permissions). Only a task agent's launch has knowledge and project skills."""
 
     model: str
     model_source: ModelSource
@@ -324,17 +327,20 @@ class Launch:
     env: tuple[tuple[str, str], ...] = ()
     library: AgentLibrary = EMPTY_LIBRARY
     knowledge: AgentKnowledge = EMPTY_KNOWLEDGE
+    project_skills: AgentProjectSkills = EMPTY_PROJECT_SKILLS
 
     def args(self) -> list[str]:
         """The Claude Code flags every agent starts with: the permissions, the model, the effort, the
-        library's plugin directories and the directories of the project knowledge."""
-        from .claude_cli import knowledge_args, library_args, permission_args
+        library's plugin directories, the project skills' plugin directory and the directories of the
+        project knowledge."""
+        from .claude_cli import knowledge_args, library_args, permission_args, project_skill_args
 
         return [
             *permission_args(),
             "--model", self.model,
             *(["--effort", self.effort] if self.effort else []),
             *library_args(self.library),
+            *project_skill_args(self.project_skills),
             *knowledge_args(self.knowledge),
         ]
 
@@ -350,8 +356,8 @@ class Launch:
         return sha256_text(json.dumps(list(self.env), ensure_ascii=False, separators=(",", ":")))
 
     def record(self) -> dict[str, Any]:
-        """Its fields in a run's metadata: the model and its source, the variables' names (values hashed) and
-        the library's items and hash."""
+        """Its fields in a run's metadata: the model and its source, the variables' names (values hashed),
+        the library's items and hash, and the project skills and their hash."""
         record: dict[str, Any] = {
             "model_choice": {"model": self.model, "source": self.model_source.value, "effort": self.effort or None},
         }
@@ -362,6 +368,8 @@ class Launch:
             }
         if (library := self.library.record()) is not None:
             record["library"] = library
+        if (project_skills := self.project_skills.record()) is not None:
+            record["project_skills"] = project_skills
         return record
 
 
@@ -370,13 +378,16 @@ def resolve_launch(
     model_override: Any = None,
     library: AgentLibrary = EMPTY_LIBRARY,
     knowledge: AgentKnowledge = EMPTY_KNOWLEDGE,
+    project_skills: AgentProjectSkills = EMPTY_PROJECT_SKILLS,
 ) -> Launch:
     """An agent's launch settings: its own model when set, else the default; the default effort and
-    environment; the library loaded for the run; and, for a task agent, its project's knowledge."""
+    environment; the library loaded for the run; and, for a task agent, its project's knowledge and skills."""
     override = model_override.strip() if isinstance(model_override, str) else ""
     if override:
-        return Launch(override, ModelSource.AGENT_OVERRIDE, defaults.effort, defaults.env, library, knowledge)
-    return Launch(defaults.model, defaults.model_source, defaults.effort, defaults.env, library, knowledge)
+        return Launch(override, ModelSource.AGENT_OVERRIDE, defaults.effort, defaults.env, library, knowledge,
+                      project_skills)
+    return Launch(defaults.model, defaults.model_source, defaults.effort, defaults.env, library, knowledge,
+                  project_skills)
 
 
 # --- The settings API (GET, PUT and reset of /api/settings/agents) ---

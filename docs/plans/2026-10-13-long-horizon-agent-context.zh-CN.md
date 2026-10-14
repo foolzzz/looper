@@ -1,6 +1,6 @@
 # 开发计划：长程 Agent 上下文体系（M0–M6）
 
-- **状态：** 暂停中（M0、M1、M1.5、M1.6、M1.7、M2、M3 已交付；2026-10-13 按维护者要求在 M3 之后暂停，恢复后从 M4 开始，先处理第 5.1 节）
+- **状态：** 执行中（M0、M1、M1.5、M1.6、M1.7、M2、M3、M4 已交付；下一个是 M5，M6 与上游 LoopX 清理并行进行）
 - **依据：** [RFC：长程 Agent 的上下文体系 v0](../architecture/rfcs/long-horizon-agent-context-v0.zh-CN.md)。
   设计原则、分层模型和已作出的决定以 RFC 为准；本文只管"怎么分阶段做、做到什么算完成、现在做到哪了"。
 - **仓库：** `foolzzz/looper`，基线 `main`
@@ -30,7 +30,7 @@
 | M1.7 | agent 不限权限；渠道发送者白名单 | ✅ 已交付（looper #23） | M1.6 |
 | M2 | 上下文与花费观测 | ✅ 已交付（looper #24） | M0 |
 | M3 | 项目知识 | ✅ 已交付（looper #27） | M0 |
-| M4 | 项目 skill | ⏸ 暂停中（恢复后开始） | M3 |
+| M4 | 项目 skill | ✅ 已交付（looper #32） | M3 |
 | M5 | 项目执行配置 | 待开始 | M2 |
 | M6 | prompt 回归评测 | 待开始 | M1 |
 
@@ -198,6 +198,32 @@
   - 其他项目的 agent 看不到它；
   - 项目仓库目录下没有新增文件。
 - **风险：** 需要先核实 `--plugin-dir` 在 `--print` 模式下加载 skill 的行为，以及它和 M1 隔离参数是否冲突。
+- **核实后确定的做法：**
+  - `project_skills` 表：名称、一行描述、`SKILL.md` 正文（`content`）、启用开关和时间戳；删项目时连带删除。
+    - 名称是小写字母、数字和单个连字符组成的 slug，项目内唯一，数据库也用 CHECK 约束同样的格式；
+    - 正文不带 frontmatter，以 `---` 行开头的拒收，frontmatter 由名称和描述生成。
+  - 上限，超限返回 400 并写明上限，重名返回 409：
+    - 名称 64 个字符（Claude Code 对 skill 名称的上限）；
+    - 描述 1,024 个字符（skill 格式的上限；本机 104 个个人 skill 里最长的描述 975 个字符）；
+    - 正文 64 KiB（skill 被调用时整段进上下文；那 104 个里最大的 `SKILL.md` 是 61 KB，长资料应放项目知识）；
+    - 每个项目 20 个（每个启用的 skill 的名称和描述都会列进每次运行的上下文）。
+    - 增删改持有项目行锁，与项目知识相同。
+  - API：`GET`/`POST /api/projects/<id>/skills`，`PUT`/`DELETE /api/projects/<id>/skills/<skill_id>`；`PUT` 兼管启用开关和修改；不返回正文。
+  - 物化与挂载：
+    - Planner 每轮、Worker 和 Reviewer 每次运行开始时读取项目已启用的 skill（`load_project_skills`）；
+    - 写成一个插件 `<runtime_root>/.local/projects/<project_id>/skills/<sha256>/project/`（`plugin.json` 和 `skills/<名称>/SKILL.md`），`<sha256>` 是这组 skill 的哈希；
+    - 复用 M1.6 的 `write_once`（原 `_write_once`，改为公开）：只写一次、只读；
+    - 以一个 `--plugin-dir` 挂载在插件库之后，由 `claude_cli.project_skill_args` 生成、随 `Launch` 下发；
+    - Manager 没有。
+  - 记录：`metadata.project_skills` 记下项目、这组 skill 的哈希（即目录名）、插件名和每个 skill 的名称与 `SKILL.md` 哈希，读不到时记 `error`；activity 记 `Project skills applied (N skills)`，Planner 另记 `changed`、`removed`。
+  - 不在系统提示里另列清单（RFC 第 6 节原写"L2 放清单"）：Claude Code 自己把每个 skill 的名称和描述列给模型，再列一遍是重复。
+  - Planner 的重启签名不用改：插件目录按内容哈希命名，已经在启动命令里。读取失败时沿用上一轮的 skill，与项目知识相同。
+  - 已核实（Claude Code 2.1.285，隔离参数加 `--dangerously-skip-permissions`，haiku）：
+    - 插件的 skill 在 init 事件里叫 `project:<名称>`，`plugins` 里是 `{name: "project", source: "project@inline"}`；
+    - 模型用 Skill 工具调用只读目录里的 skill；
+    - frontmatter 里用 JSON 双引号写的描述能正常读取；
+    - 两个同名插件（例如插件库里也有一个叫 `project` 的）会一起加载，skill 共用同一个前缀；
+    - 只有 skill 的插件不会在 `~/.claude/plugins/data/` 下建 `project-inline` 目录。
 
 ### M5 项目执行配置
 
@@ -246,6 +272,8 @@
 
 | 2026-10-13 | M2 交付（looper #24）：上下文与花费观测，不设花费上限。核实结论见第 3 节 M2 的「核实后确定的做法」。记录：`llm_records` 新增 `cache_read_tokens`、`cache_creation_tokens`、`context_tokens`、`compactions`。每次运行的花费和 token 取会话累计值（`total_cost_usd`、`modelUsage`）的增量，上下文取最后一个主循环请求的 prompt，每次压缩记下触发方式和压缩前后的规模。修复 `--resume` 重复计费：会话累计值和会话 id 存在一起（Manager 的 `session.json`，Planner 的计划文件），续接从存下的值算起，会话被丢弃时清零。API：`GET /api/tasks/<id>` 和 `GET /api/tasks` 带 `cost`（总额、按角色、运行数、还在跑的和没报出花费的）；新增 `GET /api/agents/<id>/usage`（总额、按会话、按 UTC 日、最近各 turn 的上下文和压缩）。界面：任务列表显示花费；任务页显示「Cost」卡片和「Cost by agent」；Manager、Planner 的历史页显示「Context & cost」（上下文折线、压缩标记和清单、最新上下文规模）；运行卡片显示自身 token（含缓存）、`ctx`、压缩标记和自身花费。验收（真实 Claude，haiku）：2 步任务（第 2 步送审）完成，任务总额 $0.0985664 等于 7 次运行之和（Planner 4 次 $0.033885、Worker 2 次 $0.0450697、Reviewer 1 次 $0.0196117），任务列表和详情给出的值相同；Manager 的上下文 26,871 → 28,295 → 29,806 token，经 API 读回，历史页可见；通过 Settings 环境变量设 `CLAUDE_CODE_AUTO_COMPACT_WINDOW=100000`、`CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=31` 后，Manager 一轮里自动压缩 2 次（29,916 → 1,577、27,015 → 2,561），记录和历史页都可见；这一轮由改设置后续接的新进程执行，Claude 报会话累计 $0.13230075，记录为本轮 $0.08451635；重启服务后 Manager 第一轮，Claude 报 $0.13930815（修复前会记下的数），记录为 $0.0070074，差额正好是存下的会话累计值 $0.13230075；token 与该轮 `result.usage` 一致；Planner 的计划文件存下会话累计 $0.033885，等于它 4 个 turn 之和。无头 Chrome 截图查看了任务页（1280、768 px）、任务列表、Manager 和 Planner 的历史页、展开后带压缩事件的运行卡片。真实 Claude 花费约 $0.41（核实约 $0.18，验收约 $0.24）。测试：单测与真实 PG 915 通过（main 上 886），另有 5 个 `test_dashboard_command` 安装模式用例在 main 上同样失败。新增和改动的测试在 main 上有 12 个失败，另有 2 个文件因缺少 `run_usage` 模块无法导入 |
 | 2026-10-13 | M3 交付（looper #27）：项目知识，只做核心。`project_documents` 表与 `GET/POST /api/projects/<id>/knowledge`、`PUT/DELETE .../knowledge/<doc_id>`；来源为手动录入、上传文本文件（JSON 里 base64）、引用项目默认目录里的文件（实时读取），不支持 URL；上限为单篇 2 MiB、每个项目 100 篇和 50 MiB、索引 4,000 个字符，超限返回 400 并写明上限，同一项目的修改持有项目行锁。Planner、Worker、Reviewer 每次运行读取项目知识：录入和上传的文档按内容哈希物化为只读文件，L3 在背景之后加 `## Project knowledge` 索引，`--add-dir` 由 `claude_cli.knowledge_args` 随 `Launch` 下发（知识目录；有引用路径且任务目录不是项目目录时加项目目录），Manager 没有；`prompt_layers.project` 记 `knowledge_sha256` 和 `knowledge_documents`；Planner 的重启签名加上挂载目录。界面：项目编辑里的 Knowledge 列表（新增文本、上传、引用路径、删除，篇数、存储量和索引字数读数）。核实（Claude Code 2.1.285，隔离参数下）：`--add-dir` 目录里的文件可读，该目录及其上级的 `CLAUDE.md` 不加载，不存在的目录不会让运行失败。验收（真实 Claude，haiku）：项目带一篇 3 KB 的录入文档（暗号在第 44 行）和一篇引用路径 `docs/deploy.md`（端口）；Worker 读了两篇并在报告里引用（行号和原文）；改了端口后在另一个目录跑的任务挂载了知识目录和项目目录，读到新端口 59322（这次是 Planner 读后写进步骤），再改一次并要求由 Worker 读，Worker 自己读到并引用了新的一行（60433）；索引增到 3,819 字符后再加一篇被拒（"this would make it 4270"），`../` 路径和 PNG 上传也被拒并说明原因；Worker 运行中新增一篇文档，Planner 下一轮换了新进程（pid 5178 → 6478）以 `--resume` 续接，记录的文档数 6 → 7；无头 Chrome 里完成新增文本、上传、被拒的路径、引用路径、删除，并截图查看了 1280 和 768 px。真实 Claude 花费约 $0.36。测试：单测与真实 PG 1175 通过（main 上 1094），另有 `test_dashboard_command` 的 5 个安装模式用例在 main 上同样失败，`-n 6` 下另一个用例两边都因 5 秒超时失败、单独跑通过。新增和改动的测试在 main 上 8 个失败、11 个出错，另有 2 个文件因缺少 `knowledge` 模块无法导入 |
+| 2026-10-13 | 修复第 5.1 节核心缺陷：常驻 Manager、Planner 把 Claude 自己跑的一轮当成下一条消息的回复（looper #26）。**核实**（Claude Code 2.1.285，haiku，常驻参数；录制样例存于 `tests/fixtures/claude_stream/background_*.jsonl`）：带 `uuid` 写入的消息保留这个 uuid；Claude 读到消息就写 `command_lifecycle` `queued`，开始这一轮时写 `started`，`result` 之后写 `completed`；`started` 之后才是这一轮的 `system/init`，再之后才是 `--replay-user-messages` 的回显（`isReplay`，同一 uuid），所以回显不是这一轮的起点；`result` 用 `user_message_uuid(s)` 指明它回答的消息；不加 `--replay-user-messages` 时只少回显。后台 Bash 或后台子 agent 在空闲时结束：先有 `system/task_notification`（后台子 agent 自己的事件带 `parent_tool_use_id`，夹在两轮之间），再从 `system/init` 跑一轮到 `result`，没有 lifecycle 和回显，`result` 没有 `user_message_uuid`、带 `origin: {kind: task-notification}`；这时到达的消息立刻 `queued`，要等这一轮的 `result` 之后才 `started`（旧代码会把这一轮的话当成这条消息的回复）；在用户轮进行中结束的后台工作并入该轮（回显一条带 `origin` 的 `<task-notification>`）。**做法**：`ResidentClaude` 在进程存活期间持续读取输出；每条消息带自己的 uuid，用户轮从它的 `started`（或回显）开始、到下一个 `result` 结束，其余以 `result` 结束的事件是 Claude 自己的一轮，交给 owner 的 `autonomous` 处理；每个 `result` 读到时就按写出顺序取累计值增量；#20 的 `session_started`、M2 的基线、重启签名和 `stop()` 回收不变。Manager、Planner 的常驻命令加 `--replay-user-messages`；Claude 自己的一轮记成独立运行（`input_text` 为 "(no user message: …)"，`metadata.autonomous` 为 true）；Manager 把其中的话作为单独回复发到上一条已回答消息的渠道，Web 渠道把它写入该会话的聊天记录，不进任何消息的流；Planner 只记录和打日志，不用于计划决策。**验收**（真实 Claude，haiku，本分支的 `loopx serve` 在 8791 端口、一次性数据库）：第一条消息让 Manager 后台运行 `sleep 8`，流里回复 `STARTED`；后台结束后 Claude 自己跑了一轮，"Background task completed successfully (exit code 0)." 作为单独的助手消息进入该会话的聊天记录；第二条消息 "2+3" 的流里回复 `5`；三条运行记录花费 $0.0277812、$0.003947（autonomous）、$0.0034193，正好是 Claude 累计值 $0.0277812 → $0.0317282 → $0.0351475 的增量，`session.json` 存下 $0.0351475。真实 Claude 花费约 $0.14（核实约 $0.10，验收约 $0.035）。**测试**：新增 11 个，在 main 上全部失败（main 上第二条消息拿到的是后台那一轮的话）；单测与真实 PG 1138 通过（main 上 1127），另有 5 个 `test_dashboard_command` 安装模式用例在 main 上同样失败。**未核实**：agent teams、多个后台任务同时结束、飞书和 Telegram 的实际投递；Web 聊天页不会实时出现这条回复，打开或刷新会话时才显示 |
+| 2026-10-13 | M4 交付（looper #32）：项目 skill，只做核心。`project_skills` 表（名称 slug、一行描述、`SKILL.md` 正文、启用开关）与 `GET/POST /api/projects/<id>/skills`、`PUT/DELETE .../skills/<skill_id>`；上限为名称 64 字符、描述 1,024 字符、正文 64 KiB、每个项目 20 个，超限 400、重名 409，修改持有项目行锁。Planner 每轮、Worker 和 Reviewer 每次运行读取项目已启用的 skill，按这组 skill 的哈希用 `write_once` 只读地写成插件 `<runtime_root>/.local/projects/<project_id>/skills/<sha256>/project/`，以一个 `--plugin-dir` 挂载在插件库之后（`claude_cli.project_skill_args`，随 `Launch` 下发），Manager 没有；记录新增 `metadata.project_skills`。界面：项目编辑里 Knowledge 下面的 Skills 列表（新增、开关、删除前确认）。验收（真实 Claude，haiku）：`loopx serve` 跑在一次性数据库上，插件库里放了一个合成插件 `demo-lib`；项目 A 有启用的 `release-stamp`（正文里分三段写着暗号）和停用的 `disabled-probe`，项目 B 没有 skill。A 的任务里 Planner 和 Worker 的 init 都列出 `demo-lib:hello`、`project:release-stamp`，没有 `disabled-probe`；Worker 调用了 Skill 工具（`project:release-stamp`），报告里写出暗号 `KESTREL-8243-VIOLET`，Planner 没有调用它；B 的任务里 Planner 和 Worker 的 init 只有 `demo-lib:hello`，Worker 自己列出可用 skill 也说没有 `project:` 开头的；两个工作目录的 `git status` 都是干净的。API 在真实服务上返回了 201、400、404、409。无头 Chrome 里完成新增（先被拒的名称显示服务端原因，改正后成功）、用键盘关掉开关、删除，并截图查看了 1280、768、390 px（390 px 下开关换到文字下面一行）。真实 Claude 花费约 $0.13（核实 $0.02，两个任务 $0.11）。测试：fork 测试集加两个新测试文件在真实 PG 上 881 通过（main 上同一 fork 测试集 799 通过）；整仓 pytest 按协调方要求没有跑完（上游测试正在另行删除）。新增和改动的测试在 main 上 14 个失败，另有 1 个文件因缺少 `project_skills` 模块无法导入（另 2 个守护用例在 main 上本来就成立） |
 
 ## 5. 不属于本 RFC 的待办
 
@@ -253,9 +281,7 @@
 
 ### 5.1 核心缺陷（优先修，穿插在阶段之间）
 
-- **常驻进程的后台子 agent 导致回复错位**（M2 核实时发现）：后台子 agent 结束时，Claude Code 会自己再跑一轮，多出一个 `result`。`ResidentClaude` 按"一条 user 消息对应一个 `result`"读取，所以这一轮的事件会算到下一条消息上，Manager 的回复会错位一轮。花费总额不受影响。
-  - **修复已完成、待合入：** looper #26（已用真实 Claude 验收）。分支已合并最新 `main`，与 M3 的冲突已解决，双方改动都保留：`loopx/agents/tiers/planner.py` 的 import 与相邻方法、`tests/test_manager_reply.py` 末尾新增的测试类、`docs/architecture/agent-system.md` 里的启动命令，以及本计划的进度台账和本节。
-  - **待办：** 合并后的全量测试按维护者要求延后，和下一批改动一起跑；通过后合入 #26 并重启服务，再把本节改为"暂无"。
+（暂无。已修复的见第 4 节进度台账。）
 
 ### 5.2 工程待办
 
@@ -267,7 +293,7 @@
 - **`test_dashboard_launcher_preserves_early_service_error_context` 偶发超时**：在 `-n 6` 并发下会撞上 5 秒超时，单独运行通过（M3 发现）。随上游清理消失：它在同一个文件里，B2 删除。
 - **`test_planner_agent.py::TestPlanning::test_turn_over_the_time_limit_fails_planning` 偶发失败**：`-n 6` 下失败过一次，重跑通过（上游清理盘点时发现）。它给 Planner 的时限只有 3 秒（`timeout_seconds: 3`），机器繁忙时替身进程可能来不及启动。
 - **知识索引容量**：索引每行都带一个绝对路径（在 `~/.loopx` 下约 150 字），4,000 字的索引上限实际只能放 15–25 篇，比 100 篇的数量上限先用完。改用短的挂载别名或相对路径（M3 发现）。
-- **runtime root 下的只读副本不清理**：插件与 skill 库（M1.6）和项目知识（M3）按内容哈希写出的只读副本，在内容替换或删除后仍留在磁盘上。需要在没有运行引用时回收。
+- **runtime root 下的只读副本不清理**：插件与 skill 库（M1.6）、项目知识（M3）和项目 skill（M4）按内容哈希写出的只读副本，在内容替换或删除后仍留在磁盘上。需要在没有运行引用时回收。
 - **HTTP 服务没有请求体大小上限**：知识上传等接口靠业务上限拦截，但服务本身不限制请求体大小（M3 发现）。
 - **`agent_configs.permission_mode` 列已不再使用**（M1.7 起四类 agent 统一权限）：在后续的 schema 清理中迁移删除。
 - **插件与 skill 库的上下文开销**：全部导入后，opus 首个请求的 token 约增加 86%（M1.6 实测）。结合 M2 的花费数据，评估停用不常用的 skill。
@@ -277,7 +303,8 @@
 
 - **完整的项目页** `#projects/<id>`：概览、知识、Skills、Settings 标签（M3–M5 先用项目信息编辑里的最小界面）。
 - **项目知识的辅助功能**（M3 只做了核心）：在界面里修改已有文档（API 已支持 `PUT`）、查看正文、拖拽上传、项目视图里显示知识摘要。
-- **网页聊天实时显示 Claude 自主一轮的回复**（#26 合入后）：这类回复不对应任何提问，目前写进会话记录，但不会实时推送，要刷新或重新打开会话才看得到。
+- **项目 skill 的辅助功能**（M4 只做了核心）：在界面里查看和修改已有 skill 的正文、名称和描述（API 已支持 `PUT`），拖入或上传 `SKILL.md`（连同 frontmatter），历史页的「Plugins & skills」里列出这次运行加载的项目 skill（目前只在记录的 `metadata.project_skills` 和启动命令里），以及界面打磨。
+- **网页聊天实时显示 Claude 自主一轮的回复**（#26 的遗留）：这类回复不对应任何提问，目前写进会话记录，但不会实时推送，要刷新或重新打开会话才看得到。
 - **界面小问题**：
   - Tasks 列表页内容贴边，没有内边距；
   - 任务详情里 Config 显示成 `"{}"`（JSONB 被当成字符串写入）；

@@ -11,8 +11,9 @@ task section (the step, with the task it belongs to) and the code-owned
 report contract, last (``system_prompt``). The first user turn on stdin
 carries only what other agents produced: the reports of the steps this one
 depends on, or the Worker's report under review. Each run reads its row, the
-Settings defaults (model, effort, environment) and its project's knowledge
-(the documents' directories are mounted with ``--add-dir``) as it starts.
+Settings defaults (model, effort, environment), its project's knowledge (the
+documents' directories are mounted with ``--add-dir``) and its project's
+enabled skills (one more ``--plugin-dir``) as it starts.
 """
 
 from __future__ import annotations
@@ -32,6 +33,7 @@ from ..bus import MessageBus
 from ..claude_cli import ClaudeRunRecorder, isolation_args, iter_lines, system_prompt_args, write_user_turn
 from ..knowledge import documents_label, load_knowledge
 from ..library import load_library
+from ..project_skills import load_project_skills, skills_label
 from ..message import (
     AgentAddress,
     MessageEnvelope,
@@ -532,7 +534,9 @@ class WorkerPool:
         # Read as the run starts: a later change reaches the next run, not this one.
         project = await self._task_project(parent_task_id, worker_id)
         knowledge = await load_knowledge(self._runtime_root, project, work_dir)
-        launch = resolve_launch(settings.defaults, settings.model, await load_library(self._runtime_root), knowledge)
+        skills = await load_project_skills(self._runtime_root, project)
+        launch = resolve_launch(settings.defaults, settings.model, await load_library(self._runtime_root), knowledge,
+                                skills)
         background = str((project or {}).get("background") or "")
         system_prompt = build_system_prompt(
             harness=resolve_harness(agent, settings.defaults, project=project),
@@ -557,6 +561,12 @@ class WorkerPool:
         if knowledge.error and parent_task_id:
             await self._activity(parent_task_id, worker_id, "error",
                                  f"Warning: {knowledge.error}; this run goes without it"[:500])
+        if skills.skills and parent_task_id:
+            await self._activity(parent_task_id, worker_id, "phase",
+                                 f"Project skills applied ({skills_label(len(skills.skills))})")
+        if skills.error and parent_task_id:
+            await self._activity(parent_task_id, worker_id, "error",
+                                 f"Warning: {skills.error}; this run goes without them"[:500])
         try:
             prompt_file = system_prompt.write_file(self._runtime_root)
         except OSError as exc:
@@ -579,8 +589,8 @@ class WorkerPool:
             # None of the operator's personal settings, memory, hooks, plugins
             # or MCP servers (whose teardown could also make the CLI exit
             # non-zero). Built-in tools are unaffected; the permissions every
-            # agent shares and the library's plugins and skills come with the
-            # launch args.
+            # agent shares, the library's plugins and skills and the project's
+            # skills come with the launch args.
             *isolation_args(work_dir),
             *system_prompt_args(prompt_file),
             *launch.args(),

@@ -28,7 +28,7 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
 - Runs one resident Claude process through `ResidentClaude`
   (`loopx/agents/claude_cli.py`), which each task's Planner uses too, started
   on the first chat message:
-  `claude --print --verbose --output-format stream-json --input-format stream-json --include-partial-messages <isolation flags> --append-system-prompt-file <file> --system-prompt-snapshot off --dangerously-skip-permissions --model M [--effort E] [--plugin-dir <dir> ...] [--resume <session_id>]`
+  `claude --print --verbose --output-format stream-json --input-format stream-json --include-partial-messages --replay-user-messages <isolation flags> --append-system-prompt-file <file> --system-prompt-snapshot off --dangerously-skip-permissions --model M [--effort E] [--plugin-dir <dir> ...] [--resume <session_id>]`
   (see [What an agent's Claude Code loads](#what-an-agents-claude-code-loads),
   [What an agent may do](#what-an-agent-may-do) and
   [The library](#the-library-imported-plugins-and-skills)). Like every agent
@@ -38,9 +38,11 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
   Its system prompt is its harness (its own `harness_prompt`, else the default
   in Settings), the `manager` role prompt and `TASK_PLACEMENT_RULE`; it has no
   project and no task section.
-  Each chat message is one user turn on its stdin and ends at that turn's
-  `result`; messages are handled one at a time, and each turn is one Runs
-  record holding only that turn's cost and tokens
+  Each chat message is one user turn on its stdin; its turn starts when
+  Claude starts that message and ends at the next `result`
+  ([Turns Claude runs on its own](#turns-claude-runs-on-its-own)). Messages
+  are handled one at a time, and each turn is one Runs record holding only
+  that turn's cost and tokens
   ([What a run spent](#what-a-run-spent-and-how-large-its-context-grew)); the
   session's running totals are saved beside its id in
   `.local/manager/session.json` (`session_totals`). When Claude exits
@@ -49,6 +51,15 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
   changes, the next message starts a new process that
   resumes the saved session with `--resume`. Stopping the Manager closes
   Claude's stdin and kills it if it is still running after 5 s
+- A turn its Claude runs on its own, after background work it started ends,
+  is a Runs record of its own (input "(no user message: ...)", metadata
+  `autonomous: true`). What Claude said in it goes as a reply of its own
+  (`AGENT_REPLY` with no `reply_to`, payload `autonomous: true`) to the
+  channel and correlation of the message Claude answered before it. A web
+  message's payload names its chat session (`chat_session_id`), so the web
+  channel adds the reply to that chat's history (`chat_messages`, shown when
+  the chat is opened) instead of a message's stream; Lark and Telegram send it
+  to the chat. With no message before it, the reply is only recorded
 
 ### TaskRouter (`loopx/agents/tiers/task.py`)
 
@@ -88,7 +99,9 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
   A project can also carry knowledge: documents its task agents read on
   demand instead of getting them in the prompt ([Project
   knowledge](#project-knowledge-documents-read-on-demand)). Only their index
-  is in L3.
+  is in L3. It can carry its own Claude Code skills too ([Project
+  skills](#project-skills-claude-code-skills-of-one-project)); they are not
+  in the prompt: Claude Code lists them itself.
 
   A project can also override the harness of its Planner
   (`planner_harness_prompt`) and of its Workers (`worker_harness_prompt`,
@@ -130,7 +143,7 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
   process per step attempt.
 - Keeps one resident Claude process through `ResidentClaude`, like the
   Manager, started on the task's first turn in the task's `work_dir`:
-  `claude --print --verbose --output-format stream-json --input-format stream-json --include-partial-messages <isolation flags> --append-system-prompt-file <file> --system-prompt-snapshot off --dangerously-skip-permissions --model M [--effort E] [--plugin-dir <dir> ...] [--add-dir <dir> ...] [--max-turns N] [--resume <session_id>]`.
+  `claude --print --verbose --output-format stream-json --input-format stream-json --include-partial-messages --replay-user-messages <isolation flags> --append-system-prompt-file <file> --system-prompt-snapshot off --dangerously-skip-permissions --model M [--effort E] [--plugin-dir <dir> ...] [--add-dir <dir> ...] [--max-turns N] [--resume <session_id>]`.
   The system prompt is rebuilt for every turn from the harness (the project's
   Planner override, else the default in Settings), the `planner` role prompt,
   the task's project, the task section (task id, project name and
@@ -139,8 +152,8 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
   only what changed: the plan's progress, results, chat and supervision
   observations. When the prompt changes (a config edit, a new background,
   knowledge or harness, a task moved to another project) its file and hash
-  change, or the model, effort, Settings environment, library or mounted
-  knowledge directories change, the Planner stops
+  change, or the model, effort, Settings environment, library, project
+  skills or mounted knowledge directories change, the Planner stops
   its Claude, and the next process resumes the session with `--resume` and
   the new prompt. Like every agent it has every tool and no permission
   prompts ([What an agent may do](#what-an-agent-may-do)), and no MCP server
@@ -189,6 +202,11 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
   (`system_prompt`, `system_prompt_sha256`, `prompt_layers`). The activity gets short
   summaries: `Planner Claude Code started (pid N...)`, `Plan created: ...`,
   `Planner decision on step N (s2): accept: ...`, `Plan changed: ...`.
+- A turn its Claude runs on its own, after background work it started ends,
+  is a row of its own (input "(no user message: ...)", `metadata.autonomous`
+  true) and counts toward the task's cost. What Claude said in it answers no
+  Planner request, so it decides nothing about the plan; the Planner logs it
+  ([Turns Claude runs on its own](#turns-claude-runs-on-its-own)).
 - The TaskRouter calls `PlannerAgent.stop()`, which ends its Claude, when the
   task ends (completed, failed, stopped or cancelled) and when the server
   stops.
@@ -349,7 +367,8 @@ against pasting a secret by habit; it is not a security boundary. An
 unreadable table falls back to the built-in values, and the run's record says
 so. Changes apply to the next Worker or Reviewer run; a resident agent's
 restart signature is its command (which carries the model, the effort, the
-library's plugin directories and the knowledge's `--add-dir` directories),
+library's plugin directories, the project skills' plugin directory, named by
+their hash, and the knowledge's `--add-dir` directories),
 the prompt's sha256, the environment's sha256, the library's sha256 and, for
 the Planner, the mounted knowledge directories, so the next turn restarts it
 with `--resume`.
@@ -396,6 +415,11 @@ Every run records the prompt in `llm_records.metadata`:
 - `library`: `{sha256, items: [{kind, name, sha256}], error?}`, the library
   items the run loaded and the hash of that set, only when something was to be
   loaded; `error` says why a run went without its library.
+- `project_skills`: `{project_id, sha256, plugin, skills: [{name, sha256}],
+  error?}`, a task agent's project skills: the set's hash (which names its
+  directory), the plugin (`project`) and each skill's name and the hash of its
+  `SKILL.md`, only when the project has enabled skills; `error` says why a run
+  went without them. The Manager's runs never have it.
 
 The same inputs give the same prompt and hash; changing the harness, the role
 prompt, the background, the knowledge index, the task or a contract changes
@@ -462,6 +486,83 @@ be reading it.
 Verified with Claude Code 2.1.285 under the isolation flags: the agent reads
 files in an `--add-dir` directory, a `CLAUDE.md` in that directory or above it
 is not loaded, and a directory that does not exist does not fail the run.
+
+### Project skills: Claude Code skills of one project
+
+A project can carry its own Claude Code skills (`loopx/agents/project_skills.py`,
+RFC section 6). Only its Planner, Workers and Reviewers load them, and nothing
+is written into the project's directory. Each skill is a row of
+`project_skills`:
+
+- `name`: a lowercase slug (`deploy-check`), unique in the project. It is the
+  skill's directory and its frontmatter `name`; a CHECK holds the database to
+  the same pattern;
+- `description`: one line, which Claude Code shows the model to decide when to
+  use the skill;
+- `content`: the body of its `SKILL.md`, given without frontmatter (content
+  starting with a `---` line is refused, since the fields make it);
+- `enabled`: only enabled skills are loaded.
+
+Rows go with their project.
+
+**Caps.** Each is refused with a 400 that states it:
+
+- a name: at most 64 characters, Claude Code's limit for a skill name;
+- a description: at most 1,024 characters, the limit of Claude Code's skill
+  format. The longest of 104 real personal skills has 975;
+- a body: at most 64 KiB. It enters the context whenever the skill is used.
+  The largest of those 104 is 61 KB, and long reference material belongs in
+  the project's knowledge;
+- a project: at most 20 skills. Every enabled skill's name and description is
+  listed in every run's context.
+
+A name the project already has is a 409. Changes to one project's skills run
+in a transaction that holds the project's row lock, as its knowledge does, so
+two concurrent adds cannot both pass the count cap or take one name.
+
+**Delivery.** `load_project_skills(runtime_root, project)` runs for every
+Worker and Reviewer run and every Planner turn, never for the Manager. It reads
+the project's enabled skills and writes them as one plugin:
+
+```
+<runtime_root>/.local/projects/<project_id>/skills/<sha256>/project/
+  .claude-plugin/plugin.json      {"name": "project", ...}
+  skills/<name>/SKILL.md          frontmatter (name, description) from the fields, then the body
+```
+
+- `<sha256>` names the set of skills and the layout. The directory is written
+  once through the library's `write_once`: built beside its place, renamed in,
+  then read-only (files 0444, directories 0555). The same set reuses it, and a
+  change makes a new one.
+- The description is written as a double-quoted string, so a colon, a quote
+  or a `#` stays text.
+- `claude_cli.project_skill_args` gives the run one `--plugin-dir`, after the
+  library's plugins and before the knowledge's `--add-dir`.
+  `agent_settings.Launch` carries it, so the three task agents cannot diverge
+  and the Manager's launch has none.
+- Claude Code names each skill `project:<name>`. It lists them to the model
+  itself (the Skill tool), so the system prompt does not repeat them.
+
+Edits apply at once. The next Worker or Reviewer reads them as it starts. The
+Planner's next turn sees a new plugin directory in its command and restarts
+with `--resume`, and a task moved to another project gets that project's
+skills the same way. The task's activity notes `Project skills applied (N
+skills)` for each run that has some, and, for the Planner, `changed` or
+`removed`. When the skills cannot be read or written, a run goes without them,
+its record's `project_skills.error` says why and the activity logs a warning.
+The Planner keeps the skills it last read. A replaced or deleted set's
+directory stays on disk, since a running agent may be using it.
+
+Verified with Claude Code 2.1.285 under the isolation flags and
+`--dangerously-skip-permissions`, with haiku:
+
+- the init event lists the plugin's skills as `project:<name>`, and its
+  `plugins` as `{name: "project", source: "project@inline"}`;
+- the model invokes such a skill with the Skill tool from the read-only copy;
+- two `--plugin-dir` plugins of the same name both load, their skills listed
+  under one prefix, so a library plugin named `project` would share it;
+- no `~/.claude/plugins/data/project-inline/` directory was created for a
+  plugin with only skills.
 
 ### The library: imported plugins and skills
 
@@ -591,6 +692,43 @@ So:
   turn's context, cost and compactions. That is the Manager's and the
   Planners' context over time.
 
+### Turns Claude runs on its own
+
+A resident Claude (Manager, Planner) also runs turns that answer no message.
+Verified against Claude Code 2.1.285 (haiku, with the resident flags and
+`--replay-user-messages`; recorded in
+`tests/fixtures/claude_stream/background_*.jsonl`):
+
+- A message written with a `uuid` keeps it. Claude writes a
+  `command_lifecycle` event for it in state `queued` when it reads the
+  message, `started` when it begins the message's turn and `completed` right
+  after the turn's result. The turn's `system/init` follows `started`; then
+  comes the message's replay (`isReplay`, the same uuid; only with
+  `--replay-user-messages`). The result names the message in
+  `user_message_uuid` and `user_message_uuids`.
+- When background work a turn started (a Bash command or a subagent run in
+  the background) ends and no turn is running, Claude writes
+  `system/task_notification` and runs a turn of its own: `system/init` up to a
+  result with no `user_message_uuid` and an `origin`
+  (`{"kind": "task-notification", ...}`), with no lifecycle event and no
+  replay. A background subagent's own events (with a `parent_tool_use_id`)
+  come before it, between the turns. A message that arrives meanwhile is
+  `queued` at once and `started` only after that result.
+- Work that ends during a user turn is folded into that turn (a replayed
+  `<task-notification>` message with an `origin`) and answered by its result.
+
+`ResidentClaude` reads a process's output for as long as it runs. A user
+turn starts at its message's `started` event, or its replay, and ends at the
+next result. Every other event belongs to a turn of Claude's own, which runs
+from a `system/init` (or a lone result) to a result and starts with the
+events written since the previous turn. The owner's `autonomous` handler gets
+that turn; its cost is its share of the running totals, taken in the order
+Claude wrote the results, so the turns around it keep theirs. Until a process
+has marked a user turn (the first events of a process, a stand-in that writes
+no markers) the waiting message's turn starts with the next event, as before.
+A turn of Claude's own still running when the process stops is recorded
+without a result.
+
 ## Message Bus
 
 All inter-agent communication uses typed `MessageEnvelope` over an in-process
@@ -698,11 +836,12 @@ PostgreSQL is a hard startup dependency. All data paths:
 | `task_steps` | Planner decomposition steps per task |
 | `activity` | Execution trace events (SSE streaming to frontend) |
 | `chat_messages` | Chat conversation history |
-| `llm_records` | One row per Claude run: input and output text, status, the run's own `cost_usd`, `input_tokens`, `output_tokens`, `cache_read_tokens` and `cache_creation_tokens`, its final `context_tokens` and its `compactions`; `metadata` holds the exact argv (`command`), `cwd`, the appended `system_prompt`, its `system_prompt_sha256`, its `prompt_layers`, the `model_choice`, the Settings `env` names and the `library` items loaded |
+| `llm_records` | One row per Claude run: input and output text, status, the run's own `cost_usd`, `input_tokens`, `output_tokens`, `cache_read_tokens` and `cache_creation_tokens`, its final `context_tokens` and its `compactions`; `metadata` holds the exact argv (`command`), `cwd`, the appended `system_prompt`, its `system_prompt_sha256`, its `prompt_layers`, the `model_choice`, the Settings `env` names, the `library` items loaded and a task agent's `project_skills` |
 | `agent_configs` | Agent configuration (role prompt, model) for `manager`, `planner`, `worker` and `reviewer`; `harness_prompt` is used for the Manager only; `permission_mode` is stored but not applied |
 | `system_settings` | Settings shared by the whole system, one value per key: the default harness, model, effort and environment variables (no row = the built-in default), and the last library import's report |
 | `library_items` | The imported plugins and skills: kind, name, source label, declared version, `sha256` of the files, `enabled`, size, file count, `imported_at` |
 | `library_files` | Each library item's files: relative path, UTF-8 content, sha256, executable bit |
+| `project_skills` | A project's own Claude Code skills: `name` (a lowercase slug, unique in the project; a CHECK holds the pattern), one-line `description`, `content` (the `SKILL.md` body), `enabled`, timestamps; the rows go with their project |
 | `project_documents` | A project's knowledge: title, one-line summary, `source_kind` (`text`, `upload` or `path`), `filename` and `content` (text and upload) or `path` (relative to the project's default directory), `size_bytes`, `sha256`; a CHECK keeps each kind's columns consistent and the rows go with their project |
 | `llm_profiles` | LLM provider profiles (model, endpoint, API key env) |
 | `channel_configs` | Telegram/Lark settings (enabled flag, env var names, sender allowlist) |
@@ -728,7 +867,7 @@ built by `scripts/stage-dashboard.sh` at release time), and it carries
 ### Pages
 
 - **Chat**: Every agent and its messages, finished ones included. The selector lists the global Manager and the 30 most recent tasks; each task shows its one Planner and the Worker (and Reviewer, when reviewed) of each step. You can send to the Manager and to a running task's Planner, which keeps one thread per task; SSE streaming. A selected Planner also shows its Claude runs, one per turn, in a folded list of the latest 10 beside its activity and chat thread, re-read as a reply starts and ends and every 10 s while the task runs. A Worker or Reviewer shows its Claude runs read-only, following a running one live, and points to its task's Planner for sending.
-- **Tasks**: Task list with project and status filters, time display, each task's cost so far, Start/Stop/Delete controls. `#tasks?project=<id>` filters by a project and shows its name, description, default directory and background (three lines, then Show more; "No background" when empty), with Edit, and Delete while it has no tasks. Edit has a monospace background field with a live `n / 10000` counter and a collapsible "Harness overrides" section with the Planner and Worker harness (each `n / 20000`, or "Inherits the default" when empty); Save is disabled over a limit. Below Save, a Knowledge section lists the project's documents (title, summary, source, file name or path, size, a Missing badge for a path document whose file is gone) with a readout of documents, stored bytes and index characters against their caps, adds one as Text (title, summary, content), Upload (a file, read as base64) or Project file (a path), and deletes one after a confirmation; these apply at once, apart from Save, and a refusal shows the server's reason. The bar lists the harness overrides a project has. A new task picks an existing project or creates one in the same form; its work directory may stay empty when the project has a default. A task's detail view can move it to another project in any status.
+- **Tasks**: Task list with project and status filters, time display, each task's cost so far, Start/Stop/Delete controls. `#tasks?project=<id>` filters by a project and shows its name, description, default directory and background (three lines, then Show more; "No background" when empty), with Edit, and Delete while it has no tasks. Edit has a monospace background field with a live `n / 10000` counter and a collapsible "Harness overrides" section with the Planner and Worker harness (each `n / 20000`, or "Inherits the default" when empty); Save is disabled over a limit. Below Save, a Knowledge section lists the project's documents (title, summary, source, file name or path, size, a Missing badge for a path document whose file is gone) with a readout of documents, stored bytes and index characters against their caps, adds one as Text (title, summary, content), Upload (a file, read as base64) or Project file (a path), and deletes one after a confirmation; these apply at once, apart from Save, and a refusal shows the server's reason. Below Knowledge, a Skills section lists the project's skills (`project:<name>`, the body's size, `Off` for a disabled one, the description) with a count of skills and how many are on against the cap; it adds one (name, description, the instructions of its `SKILL.md`), switches one on or off, and deletes one after a confirmation, applying at once like Knowledge. The bar lists the harness overrides a project has. A new task picks an existing project or creates one in the same form; its work directory may stay empty when the project has a default. A task's detail view can move it to another project in any status.
 - **Projects (sidebar)**: Below the navigation, every project with its task count (or a spinner with its active count); clicking one opens the Tasks page filtered by it, and `+` creates a project (name, default directory, description, optional background and harness overrides).
 - **Task Detail**: Overview (status, phase, times, steps and the task's cost with its run count, then "Cost by agent": the Planner's, the Workers' and the Reviewers' runs and cost with each one's share, noting runs still running or without a reported cost; steps, agent timeline, live activity feed), Pipeline DAG (React Flow), Sessions, Conversation
 - **Agents**: The Manager, Planner, Worker and Reviewer configuration editor (role prompt replace/append, model, LLM profiles). Instead of a permission setting it states the permissions every agent shares: every tool, `--dangerously-skip-permissions`. The model field's placeholder is the default it inherits. The Manager also has a "Harness prompt (override)" field; the others say where their harness comes from. A Runs tab lists every recorded Claude run of the role (the Manager, every task's Planner, Workers or Reviewers)
@@ -769,6 +908,10 @@ dev proxy, which keeps `Host` and `Origin` on its own port.
 | `/api/projects/:id/knowledge` | POST | Add a document: `source_kind`, `title`, `summary`, then `content` (text), `filename` and `content_base64` (upload) or `path` (path). Answers 201 with the new `document` and the knowledge view; 400 with the reason for a bad field, a binary file, a path outside the project's default directory, or a cap; 404 for an unknown project |
 | `/api/projects/:id/knowledge/:doc_id` | PUT | Change `title`, `summary` or the source's own fields; the kind cannot change. Answers with the `document` and the view; 400 as above, 404 |
 | `/api/projects/:id/knowledge/:doc_id` | DELETE | Delete a document; answers with `deleted` and the view; 404 |
+| `/api/projects/:id/skills` | GET | The project's skills: `skills` (`skill_id`, `name`, `qualified_name` (`project:<name>`), `description`, `enabled`, `size_bytes` of the body, timestamps; no content), `count`, `enabled_count`, `plugin` and `caps`; 404 for an unknown project |
+| `/api/projects/:id/skills` | POST | Add a skill: `name`, `description`, `content`, optionally `enabled` (default true). Answers 201 with the new `skill` and the view; 400 with the reason for a bad field or the count cap, 409 for a name the project already has, 404 for an unknown project |
+| `/api/projects/:id/skills/:skill_id` | PUT | Change any of `name`, `description`, `content` and `enabled` (the switch); answers with the `skill` and the view; 400 and 409 as above, 404 for an unknown project or a skill of another project |
+| `/api/projects/:id/skills/:skill_id` | DELETE | Delete a skill; answers with `deleted` and the view; 404 |
 | `/api/projects/:id` | DELETE | Delete a project; 409 while it still has tasks |
 | `/api/tasks` | GET | List the newest tasks; `?project_id=` lists one project's. Each has `project_id`, `project_name`, `work_dir` and `cost` (as in the task detail) |
 | `/api/tasks/create` | POST | Create a task in `init` with exactly one of `project_id` (existing) and `project` (`{name, description?, work_dir?, background?, planner_harness_prompt?, worker_harness_prompt?}`, created in the same transaction). Its `work_dir` is the one given, else the project's; 400 with neither, 404 for an unknown project, 409 for a taken new name |

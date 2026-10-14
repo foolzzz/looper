@@ -446,12 +446,14 @@ def _make_writable(path: Path) -> None:
         os.chmod(directory, 0o755)
 
 
-def _write_once(target: Path, build: Callable[[Path], None]) -> None:
+def write_once(target: Path, build: Callable[[Path], None]) -> None:
     """Make ``target`` a read-only directory filled by ``build(directory)``, unless it exists.
 
     It is built in a temporary directory beside it and renamed into place, so
     a reader never sees a partial one; when another run made it first, that
-    one stays.
+    one stays. Its directories end up 0555; ``build`` sets its files' modes.
+    The library's items and a project's skills (``project_skills``) are
+    written this way, each under its content's hash.
     """
     if target.is_dir():
         return
@@ -499,7 +501,7 @@ def materialize_item(runtime_root: Path, item: LoadedItem, files: Sequence[Mappi
             os.chmod(destination, 0o555 if f["executable"] else 0o444)
 
     target = _library_dir(runtime_root) / item.sha256
-    _write_once(target, build)
+    write_once(target, build)
     return target / name
 
 
@@ -523,7 +525,7 @@ def skills_plugin(runtime_root: Path, skills: Sequence[LoadedItem]) -> Path:
             os.symlink(f"../../../{sha}/{name}", base / "skills" / name)
 
     target = _library_dir(runtime_root) / key
-    _write_once(target, build)
+    write_once(target, build)
     return target / SKILLS_PLUGIN
 
 
