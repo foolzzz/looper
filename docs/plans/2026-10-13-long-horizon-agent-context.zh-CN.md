@@ -478,6 +478,7 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
 | 2026-10-13 | M8c 交付（looper #51）：Settings 的目录可上传（或拖入）`SKILL.md` 或 skill、插件目录的 zip，预览后从公开 `https://` git 仓库勾选导入（同一 URL 再导入就地更新、保留安装），在界面新建和编辑 skill；都只进库不安装，项目外重名返回 409、可改名，编辑上传或 git 条目标记 modified，本机导入的条目只能重新导入。zip 拒绝绝对路径、`..`、链接和超限文件，克隆为 `--depth 1`、不跑 hook 和子模块、不读操作者的 git 配置和凭据、限时限大小、用后删除，每条规则一个真实 PG 测试。验证：一次性 `loopx serve` 从 `https://github.com/anthropics/skills` 预览出 20 个 skill（56 个二进制文件未导入），全部导入 384 个文件、6.3 MB，再导入 20 个不变；上传的 skill 全局装给 worker 后出现在 Worker 的 `--plugin-dir`、不在 Planner 的；真实 PG 902 通过。 |
 | 2026-10-13 | M8e 交付（looper #53），M8 完成：`loopx config export` 把系统和角色层、角色 prompt、目录（含文件和 MCP）、全局安装、渠道以及可选的项目（`--include-projects`）写成一个 JSON 文件，密钥默认是占位符，`loopx config import` 默认只读预览、`--apply` 在一个事务里按自然键写入（同键就地更新、不删文件外的、占位符不覆盖已存的密钥），Settings 可流式下载导出。验证：真实 PG 测试覆盖往返、占位符、预览不写、冲突更新、重复导入不变和超过 8 MiB 的导出；对线上库只读导出（107 个条目、2175 个文件、23.2 MB），导入新库的预览为 115 项新增，应用后再预览全部不变、再导出与原文件相同；真实 PG 912 通过。 |
 | 2026-10-14 | 第 5.4 节「非 haiku 模型」验证缺口（looper #58）：M6 真实模式评测用 `--model sonnet` 和 `--model opus`（写进一次性数据库的系统配置层，Claude Code 2.1.285 解析为 `claude-sonnet-5-5`、`claude-opus-5-5`）各跑一次，与 haiku 基线相比都是 5/5、契约违约 0、Planner 改文件 0，步骤、重试、送审相同，只有 opus 在聊天纠偏任务里多加了一步（7 步对 6 步）。花费 sonnet $0.62、opus $1.30（haiku $0.33）；按 sonnet 的 token 用量和 Opus 5.5 价目预估 opus 为 $1.13，实际多 15%，一半是多出的那一步（$0.09），其余来自约多 50% 的输出 token 和略多的缓存写入。两份结果作为 `baselines/real-sonnet.json`、`real-opus.json` 提交，评测按模型自动与各自的基线对比；本次真实花费共 $1.92。 |
+| 2026-10-14 | 服务常驻（looper #59）：`loopx service install / uninstall / status / restart` 把 `loopx serve` 装成 macOS 的 launchd LaunchAgent 或 Linux 的 systemd 用户服务（登录自启、失败退出后拉起、日志在 `<runtime root>/logs/serve.log`），服务运行执行 install 的那个 `loopx`、工作目录为当前目录，并把 `PATH`、`LOOPX_*` 等变量复制进权限为 0600 的服务文件。重装就地更新，launchd 用 bootout、等它消失后再 bootstrap（失败重试），端口被别的进程占用时不启动，`doctor` 多一行 Service。验证：单元测试覆盖 plist 与 unit 内容、文件权限、重装和命令顺序；本机用测试 label、空闲端口和新库走完 install、status、`kill -9` 后约 1 秒被拉起、restart、端口占用时拒绝启动和 uninstall，真实 PG 934 通过。 |
 
 ## 5. 不属于本 RFC 的待办
 
@@ -492,7 +493,7 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
 - **插件与 skill 库的上下文开销**：全部导入后，opus 首个请求的 token 约增加 86%（M1.6 实测）。M8a 起导入的条目默认不加载，结合 M2 的花费数据按角色安装常用的。
 - **下一次发布：v2.6.0，在 M9 完成后发（2026-10-14 定）。** "M9 完成"指 M9a、M9b、M9c、M9e；M9d 等 norma 就绪，不卡发布。自 v2.5.0 起的全部改动（M0–M9、上游清理、改名）一起发，按 Release workflow 推 tag；发布说明要覆盖全部行为变化（个人配置隔离、默认 harness、免权限确认、渠道白名单、导入的 skill 默认不加载、删除 `update`/`init`、重启后任务续跑、分层配置、改名等），推 tag 前先请维护者确认。
 - **升级时迁移前自动备份（2026-10-14 定，进行中）**：`serve` 发现有未执行的迁移时，先用 `pg_dump` 备份到 runtime root 下的 `backups/`（保留最近几份）再迁移；没有可用的 `pg_dump` 时拒绝执行破坏性迁移并提示安装方法；`doctor` 检查 `pg_dump`。自 v2.5.0 起已有 11 处删列、删表的迁移。
-- **服务常驻（2026-10-14 定，进行中）**：`service install / uninstall / status / restart`，macOS 生成 launchd LaunchAgent，Linux 生成 systemd 用户服务，开机自启、崩溃拉起；本机也改用它运行主 checkout 的代码。
+- **服务常驻（2026-10-14 定，✅ 已交付 looper #59）**：`service install / uninstall / status / restart`，macOS 生成 launchd LaunchAgent，Linux 生成 systemd 用户服务，开机自启、崩溃拉起；本机也改用它运行主 checkout 的代码。
 - **全面改名为 looper（2026-10-14 定）**：命令、Python 包、数据目录（`~/.loopx` → `~/.looper`，自动迁移）、环境变量（`LOOPX_*` → `LOOPER_*`，旧名作为回退）、界面与文档统一改名；`loopx` 命令保留为别名过渡一个版本。改名是机械改动且触及几乎所有文件，**排在当前这批 PR 合入之后、M9b/M9c 开工之前**，单独一个 PR，期间不开其他分支；README 与控制台首屏的改动先请维护者预览。
 
 ### 5.3 非核心待办（M6 之后统一做）
