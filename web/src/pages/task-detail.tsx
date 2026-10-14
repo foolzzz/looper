@@ -23,6 +23,7 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { historyHref } from "@/pages/agent-history";
 import { TaskCostBreakdown } from "@/components/task-cost";
+import { ContinueAtCap, TaskSpendMeter } from "@/components/task-budget";
 import { costCaveats, formatUsd } from "@/lib/usage";
 import { cn } from "@/lib/utils";
 import {
@@ -401,7 +402,7 @@ function TaskConfigSection({ task }: { task: TaskDetail }) {
   );
 }
 
-function OverviewTab({ task }: { task: TaskDetail }) {
+function OverviewTab({ task, onContinued }: { task: TaskDetail; onContinued: () => void }) {
   const steps = task.steps || [];
   const done = steps.filter((s) => s.status === "completed").length;
   const total = steps.length;
@@ -409,6 +410,15 @@ function OverviewTab({ task }: { task: TaskDetail }) {
 
   return (
     <div className="space-y-6 p-5">
+      {task.status === "failed" && task.fail_kind === "task_budget" && (
+        <ContinueAtCap
+          taskId={task.task_id}
+          projectName={task.project_name}
+          spent={task.cost?.cost_usd ?? 0}
+          cap={task.task_budget_usd}
+          onContinued={onContinued}
+        />
+      )}
       <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-6">
         <div className="rounded-lg border border-border bg-card p-4">
           <p className="text-xs text-muted-foreground">Status</p>
@@ -443,6 +453,9 @@ function OverviewTab({ task }: { task: TaskDetail }) {
             <p className="mt-0.5 text-xs text-muted-foreground">
               {task.cost.runs} run{task.cost.runs === 1 ? "" : "s"}
             </p>
+          )}
+          {task.cost && task.task_budget_usd != null && (
+            <TaskSpendMeter spent={task.cost.cost_usd} cap={task.task_budget_usd} />
           )}
         </div>
       </div>
@@ -1144,6 +1157,8 @@ export function TaskDetailPage({ taskId, onBack }: TaskDetailPageProps) {
   const [error, setError] = useState("");
   const [startError, setStartError] = useState("");
   const [tab, setTab] = useState<Tab>("overview");
+  // Bumped when the task runs again, so the page polls it again.
+  const [runs, setRuns] = useState(0);
 
   useEffect(() => {
     let timer: ReturnType<typeof setInterval>;
@@ -1162,7 +1177,7 @@ export function TaskDetailPage({ taskId, onBack }: TaskDetailPageProps) {
     load();
     timer = setInterval(load, 2000);
     return () => { stopped = true; clearInterval(timer); };
-  }, [taskId]);
+  }, [taskId, runs]);
 
   const tabs: { id: Tab; label: string; icon: React.ElementType }[] = [
     { id: "overview", label: "Overview", icon: Activity },
@@ -1216,7 +1231,7 @@ export function TaskDetailPage({ taskId, onBack }: TaskDetailPageProps) {
           {task && ["stopped", "failed", "cancelled", "init"].includes(task.status) && (
             <button
               type="button"
-              onClick={() => startTask(taskId).then(() => setStartError(""), (err) => setStartError(err instanceof Error ? err.message : String(err)))}
+              onClick={() => startTask(taskId).then(() => { setStartError(""); setRuns((n) => n + 1); }, (err) => setStartError(err instanceof Error ? err.message : String(err)))}
               className="flex items-center gap-1.5 rounded-md border border-success/50 px-3 py-1.5 text-xs font-medium text-success hover:bg-success/10 transition-colors"
             >
               <Play className="h-3.5 w-3.5" />
@@ -1261,7 +1276,7 @@ export function TaskDetailPage({ taskId, onBack }: TaskDetailPageProps) {
           </div>
         )}
 
-        {task && tab === "overview" && <OverviewTab task={task} />}
+        {task && tab === "overview" && <OverviewTab task={task} onContinued={() => setRuns((n) => n + 1)} />}
         {task && tab === "pipeline" && <PipelineTab task={task} />}
         {task && tab === "sessions" && <SessionsTab taskId={taskId} />}
         {task && tab === "conversation" && <ConversationTab taskId={taskId} />}

@@ -52,6 +52,7 @@ _AGENT_DB_READS = (
     ("projects", "get_project", None),
     ("projects", "get_task_project", None),
     ("activity", "list_activity", []),
+    ("steps", "list_steps", []),
     ("system_settings", "get_settings", {}),
     ("library", "list_enabled_items", []),
     ("library", "get_item_files", []),
