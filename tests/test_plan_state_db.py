@@ -184,7 +184,7 @@ def test_the_state_files_are_imported_once(tmp_path: Path, monkeypatch: pytest.M
         assert (two["step_key"], two["depends_on"], two["review"], two["retries"], two["feedback"]) == (
             "s2", ["step-1"], True, 1, ["fix it"])
         # Sessions from files predate agents: Claude Code ran them (no runtime type recorded).
-        before_agents = {"runtime_type": None, "provider_id": None, "session_agent_id": None}
+        before_agents = {"runtime_type": None, "provider_id": None, "session_agent_id": None, "clean_start": False}
         assert await agent_sessions.get_session("planner-task-new", pool=pool) == {
             "session_id": "sess-file", "session_totals": {"cost_usd": 0.42, "input_tokens": 10}, **before_agents}
         assert await agent_sessions.get_session("manager", pool=pool) == {
@@ -198,5 +198,34 @@ def test_the_state_files_are_imported_once(tmp_path: Path, monkeypatch: pytest.M
             "skipped_no_task": 0, "skipped_in_database": 0, "skipped_superseded": 0, "skipped_unreadable": 0}
         assert (await plans.load("task-new", pool=pool))["plan"]["status"] == "executing"  # type: ignore[index]
         assert len(list(planner_dir.glob("*/*.json"))) == 3
+
+    _run(test, monkeypatch)
+
+
+def test_a_manager_session_dropped_with_new_stays_clean_after_a_restart(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """/new drops the Manager's session with ``clean_start``, so a Manager started later begins without a resume
+    brief; the reset is a run under the session it ended."""
+    from looper.agents.bus import MessageBus
+    from looper.agents.tiers.manager import ManagerAgent, ManagerConfig
+    from looper.db import agent_sessions, llm_records
+    from tests.test_manager_new_session import _web
+
+    async def test(pool: Any) -> None:
+        await agent_sessions.save_session("manager", "sess-old", {"cost_usd": 1.0}, runtime_type="claude-code",
+                                          pool=pool)
+        first = ManagerAgent(config=ManagerConfig(work_dir=tmp_path), runtime_root=tmp_path)
+        first._bus = MessageBus(runtime_root=tmp_path)
+        await first._handle(_web("/new"))
+        saved = await agent_sessions.get_session("manager", pool=pool)
+        assert saved is not None and (saved["session_id"], saved["clean_start"]) == (None, True)
+        later = ManagerAgent(config=ManagerConfig(work_dir=tmp_path), runtime_root=tmp_path)  # after a restart
+        await later._load_session_state()
+        assert (later._session_id, later._clean_start) == (None, True)
+        (reset,) = await llm_records.list_records(agent_id="manager", pool=pool)
+        assert (reset["session_id"], reset["status"], reset["cost_usd"]) == ("sess-old", "completed", 0.0)
+        assert reset["metadata"]["session_reset"] == {"channel": "web", "sender": None, "chat": "session-a",
+                                                      "previous_session_id": "sess-old"}
 
     _run(test, monkeypatch)
