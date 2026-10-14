@@ -171,6 +171,8 @@ _AGENT_DB_READS = (
     ("system_settings", "get_settings", {}),
     ("library", "list_enabled_items", []),
     ("library", "get_item_files", []),
+    ("project_documents", "list_documents", []),
+    ("project_documents", "get_content", None),
 )
 
 
@@ -365,6 +367,48 @@ def enabled_library(agent_db: SimpleNamespace) -> Callable[..., list[dict[str, A
 
     agent_db.get_item_files.side_effect = lambda item_id, **_: [dict(f) for f in files_by_id[item_id]]
     return set_items
+
+
+@pytest.fixture
+def project_documents(agent_db: SimpleNamespace) -> Callable[..., list[dict[str, Any]]]:
+    """Set the documents of the task's project: ``project_documents((kind, title, summary, source), ...)``.
+
+    ``kind`` is ``text``, ``upload`` or ``path``; ``source`` is the content of a
+    text or upload document (an upload is named ``<title>.txt``) and the
+    relative path of a path document. The stubbed database then lists those
+    rows for every project and hands out their content; it returns the rows.
+    Calling it again replaces the documents.
+    """
+    import hashlib
+    from datetime import datetime, timezone
+
+    from loopx.agents.knowledge import safe_filename, text_filename
+
+    contents: dict[str, str] = {}
+
+    def set_documents(*documents: tuple[str, str, str, str]) -> list[dict[str, Any]]:
+        rows = []
+        contents.clear()
+        for number, (kind, title, summary, source) in enumerate(documents, start=1):
+            document_id = f"doc-{number:012d}"
+            stored = kind != "path"
+            data = source.encode("utf-8") if stored else b""
+            if stored:
+                contents[document_id] = source
+            rows.append({
+                "id": document_id, "project_id": "proj-1", "title": title, "summary": summary, "source_kind": kind,
+                "filename": (text_filename(title) if kind == "text" else safe_filename(f"{title}.txt", default="d.txt"))
+                if stored else "",
+                "path": None if stored else source, "size_bytes": len(data),
+                "sha256": hashlib.sha256(data).hexdigest(),
+                "created_at": datetime(2026, 10, 13, tzinfo=timezone.utc),
+                "updated_at": datetime(2026, 10, 13, tzinfo=timezone.utc),
+            })
+        agent_db.list_documents.return_value = rows
+        return [dict(row) for row in rows]
+
+    agent_db.get_content.side_effect = lambda document_id, **_: contents.get(document_id)
+    return set_documents
 
 
 @pytest.fixture

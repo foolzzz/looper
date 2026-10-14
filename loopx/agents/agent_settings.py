@@ -17,8 +17,10 @@ A run's model is its agent's ``agent_configs.model`` when set
 (``agent_override``), else the Settings default, else ``DEFAULT_MODEL``. The
 effort, when set, and the environment variables come from Settings for every
 agent, and so does the library (``library.load_library``): the imported
-plugins and skills every run loads. Settings live in ``system_settings``, one
-row per key; a missing row means the built-in default. An unreadable table falls back to the built-in
+plugins and skills every run loads. A task agent's launch also carries its
+project's knowledge (``knowledge.load_knowledge``): the directories to mount.
+Settings live in ``system_settings``, one row per key; a missing row means
+the built-in default. An unreadable table falls back to the built-in
 defaults, so an agent still runs (and its record says where its harness came
 from).
 """
@@ -35,6 +37,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any
 
+from .knowledge import EMPTY_KNOWLEDGE, AgentKnowledge
 from .library import EMPTY_LIBRARY, AgentLibrary
 
 logger = logging.getLogger(__name__)
@@ -312,25 +315,27 @@ def resolve_harness(
 
 @dataclass(frozen=True)
 class Launch:
-    """The model, effort, environment and library one agent run starts with (and, for every agent alike, its
-    permissions)."""
+    """The model, effort, environment, library and project knowledge one agent run starts with (and, for every
+    agent alike, its permissions). Only a task agent's launch has knowledge."""
 
     model: str
     model_source: ModelSource
     effort: str = ""
     env: tuple[tuple[str, str], ...] = ()
     library: AgentLibrary = EMPTY_LIBRARY
+    knowledge: AgentKnowledge = EMPTY_KNOWLEDGE
 
     def args(self) -> list[str]:
-        """The Claude Code flags every agent starts with: the permissions, the model, the effort and the
-        library's plugin directories."""
-        from .claude_cli import library_args, permission_args
+        """The Claude Code flags every agent starts with: the permissions, the model, the effort, the
+        library's plugin directories and the directories of the project knowledge."""
+        from .claude_cli import knowledge_args, library_args, permission_args
 
         return [
             *permission_args(),
             "--model", self.model,
             *(["--effort", self.effort] if self.effort else []),
             *library_args(self.library),
+            *knowledge_args(self.knowledge),
         ]
 
     def environment(self) -> dict[str, str] | None:
@@ -360,13 +365,18 @@ class Launch:
         return record
 
 
-def resolve_launch(defaults: AgentDefaults, model_override: Any = None, library: AgentLibrary = EMPTY_LIBRARY) -> Launch:
+def resolve_launch(
+    defaults: AgentDefaults,
+    model_override: Any = None,
+    library: AgentLibrary = EMPTY_LIBRARY,
+    knowledge: AgentKnowledge = EMPTY_KNOWLEDGE,
+) -> Launch:
     """An agent's launch settings: its own model when set, else the default; the default effort and
-    environment; and the library loaded for the run."""
+    environment; the library loaded for the run; and, for a task agent, its project's knowledge."""
     override = model_override.strip() if isinstance(model_override, str) else ""
     if override:
-        return Launch(override, ModelSource.AGENT_OVERRIDE, defaults.effort, defaults.env, library)
-    return Launch(defaults.model, defaults.model_source, defaults.effort, defaults.env, library)
+        return Launch(override, ModelSource.AGENT_OVERRIDE, defaults.effort, defaults.env, library, knowledge)
+    return Launch(defaults.model, defaults.model_source, defaults.effort, defaults.env, library, knowledge)
 
 
 # --- The settings API (GET, PUT and reset of /api/settings/agents) ---

@@ -188,6 +188,32 @@ ALTER TABLE projects ADD COLUMN IF NOT EXISTS worker_harness_prompt TEXT NOT NUL
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS project_id TEXT REFERENCES projects(id);
 CREATE INDEX IF NOT EXISTS idx_tasks_project ON tasks (project_id, created_at DESC);
 
+-- A project's knowledge: reference documents its task agents read on demand
+-- instead of getting them in their prompt. A text or upload document's content
+-- is stored here and materialized read-only under the runtime root; a path
+-- document is a file in the project's default directory (path is relative to
+-- it), read live. size_bytes and sha256 are the content's (a path document's
+-- as of its last save). Code owns validation and caps (loopx/agents/knowledge.py).
+CREATE TABLE IF NOT EXISTS project_documents (
+    id           TEXT PRIMARY KEY,
+    project_id   TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    title        TEXT NOT NULL,
+    summary      TEXT NOT NULL,
+    source_kind  TEXT NOT NULL CHECK (source_kind IN ('text', 'upload', 'path')),
+    filename     TEXT NOT NULL DEFAULT '',
+    content      TEXT,
+    path         TEXT,
+    size_bytes   BIGINT NOT NULL,
+    sha256       TEXT NOT NULL,
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CHECK (CASE source_kind
+               WHEN 'path' THEN path IS NOT NULL AND content IS NULL
+               ELSE content IS NOT NULL AND path IS NULL AND filename <> ''
+           END)
+);
+CREATE INDEX IF NOT EXISTS idx_project_documents_project ON project_documents (project_id, created_at, id);
+
 -- Once: tasks from before projects get one project per directory, named after
 -- its last path component ('' and '/' -> 'default'). The oldest directory
 -- keeps the plain name; a later clash, ignoring case, gets -2, -3, ...
