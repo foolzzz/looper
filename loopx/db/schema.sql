@@ -292,6 +292,8 @@ ALTER TABLE library_items ADD COLUMN IF NOT EXISTS origin TEXT NOT NULL DEFAULT 
 ALTER TABLE library_items ADD COLUMN IF NOT EXISTS owner_project_id TEXT REFERENCES projects(id) ON DELETE CASCADE;
 -- One line on what the item does; '' when it has none (an imported item).
 ALTER TABLE library_items ADD COLUMN IF NOT EXISTS description TEXT NOT NULL DEFAULT '';
+-- An uploaded or git item edited in LoopX since it came in; a re-import from its repository clears it.
+ALTER TABLE library_items ADD COLUMN IF NOT EXISTS modified BOOLEAN NOT NULL DEFAULT false;
 -- A name is unique among the items outside projects, and within the project that owns an item.
 CREATE UNIQUE INDEX IF NOT EXISTS idx_library_items_name ON library_items (kind, name)
     WHERE owner_project_id IS NULL;

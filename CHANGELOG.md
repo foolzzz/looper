@@ -32,6 +32,20 @@ How the agent system works today is described in
   `<runtime_root>/.local/mcp/`, beside `--strict-mcp-config`, and records
   their names. A plugin's own MCP servers still do not load.
 
+- **More ways into the capability catalog: upload, git and Settings.**
+  Settings' catalog can upload (or take a drop of) a `SKILL.md` or a zip of a
+  skill or plugin directory, import plugins and skills from a public
+  `https://` git repository after a preview with checkboxes, and write and
+  edit skills (`POST /api/catalog/upload`, `/api/catalog/git/preview`,
+  `/api/catalog/git/import`, `/api/catalog/skills`, `PUT /api/catalog/<id>`).
+  Nothing they add is installed. Zips are refused for absolute paths, `..`,
+  symbolic links and over-cap files; clones are shallow, run no hooks or
+  submodules, ignore the operator's git configuration and credentials, and
+  are size- and time-capped and removed. Re-importing from the same URL
+  updates those items in place; editing an uploaded or git skill marks it
+  modified; machine items stay re-import-only. A name already used outside
+  projects is refused (409) and can be renamed.
+
 ### Changed
 
 - **Agent settings resolve by layer.** The harness prompt, model, effort,

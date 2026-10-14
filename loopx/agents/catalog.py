@@ -2,10 +2,12 @@
 
 Acquiring and installing are separate. **Acquiring** puts an item into the
 catalog (``library_items``): imported from this machine
-(``library.import_from_machine``, ``mcp.import_from_machine``), added here
-(an MCP server, ``mcp.create``) or written in a project (``project_skills``);
-its ``origin`` says which (``Origin``). An item is a plugin, a skill or an
-MCP server (``mcp``), and does nothing by itself. **Installing** puts it on a scope (``library_installs``):
+(``library.import_from_machine``, ``mcp.import_from_machine``), uploaded or
+taken from a git repository (``catalog_sources``), added in Settings (an MCP
+server, ``mcp.create``; a skill, ``catalog_sources.create_skill``) or written
+in a project (``project_skills``); its ``origin`` says which (``Origin``). An
+item is a plugin, a skill or an MCP server (``mcp``), and does nothing by
+itself. **Installing** puts it on a scope (``library_installs``):
 ``global``, or one project, for some roles (``ROLES``). A project install never
 names the Manager, which spans every project, and a project's own skill is
 installed in projects only. Every agent run loads the enabled installs naming
@@ -33,8 +35,7 @@ class Scope(str, Enum):
 
 
 class Origin(str, Enum):
-    """How an item was acquired. Only ``machine``, ``ui`` (an MCP server added here) and ``project`` are acquired
-    so far."""
+    """How an item was acquired (``library``, ``mcp``, ``catalog_sources``, ``project_skills``)."""
 
     MACHINE = "machine"
     UPLOAD = "upload"
@@ -131,6 +132,7 @@ def item_view(row: Mapping[str, Any], installs: Sequence[Mapping[str, Any]] = ()
         "sha256": row["sha256"],
         "size_bytes": int(row["size_bytes"]),
         "file_count": int(row["file_count"]),
+        "modified": bool(row["modified"]),
         "imported_at": row["imported_at"],
         "updated_at": row["updated_at"],
         "mcp": public_view(row) if row["kind"] == "mcp" else None,
@@ -156,6 +158,7 @@ async def catalog_view() -> dict[str, Any]:
     from .library import (
         FILE_MAX_BYTES, ITEM_MAX_BYTES, ITEM_MAX_FILES, LAST_IMPORT_KEY, LIBRARY_MAX_BYTES,
     )
+    from .catalog_sources import UPLOAD_MAX_BYTES
 
     rows = await db_library.list_items()
     by_item: dict[str, list[dict[str, Any]]] = defaultdict(list)
@@ -178,13 +181,30 @@ async def catalog_view() -> dict[str, Any]:
         "task_roles": list(TASK_ROLES),
         "caps": {
             "file_max_bytes": FILE_MAX_BYTES, "item_max_bytes": ITEM_MAX_BYTES, "item_max_files": ITEM_MAX_FILES,
-            "library_max_bytes": LIBRARY_MAX_BYTES,
+            "library_max_bytes": LIBRARY_MAX_BYTES, "upload_max_bytes": UPLOAD_MAX_BYTES,
         },
         "mcp_caps": {
             "servers_max": mcp.SERVERS_MAX, "variables_max": mcp.VARIABLES_MAX, "value_max": mcp.VALUE_MAX,
             "args_max": mcp.ARGS_MAX, "mask": mcp.MASK,
         },
     }
+
+
+async def update_item(item_id: str, data: Any) -> dict[str, Any]:
+    """Change an item: an MCP server (``mcp.update``), or a skill written in Settings, uploaded or taken from git
+    (``catalog_sources.update_item``)."""
+    from ..db import library as db_library
+
+    row = await db_library.get_item(item_id)
+    if row is None:
+        raise CatalogNotFound(f"no catalog item {item_id!r}")
+    if row["kind"] == "mcp":
+        from .mcp import update
+
+        return await update(item_id, data)
+    from .catalog_sources import update_item as update_source
+
+    return await update_source(item_id, data)
 
 
 async def delete_item(item_id: str) -> dict[str, Any]:
@@ -206,8 +226,10 @@ async def delete_item(item_id: str) -> dict[str, Any]:
 
 
 async def item_detail(item_id: str) -> dict[str, Any]:
-    """One item with its installs, its files (no content) and, for a skill, its ``SKILL.md``."""
+    """One item with its installs, its files (no content) and, for a skill, its ``SKILL.md`` and the body below
+    its frontmatter (``content``)."""
     from ..db import library as db_library
+    from .catalog_sources import split_skill_md
 
     item = await _item(item_id)
     files = await db_library.get_file_listing(item_id)
@@ -217,6 +239,7 @@ async def item_detail(item_id: str) -> dict[str, Any]:
         "files": [{"path": f["path"], "size_bytes": int(f["size_bytes"]), "executable": bool(f["executable"])}
                   for f in files],
         "skill_md": skill_md,
+        "content": split_skill_md(skill_md)[1] if skill_md is not None else None,
     }
 
 

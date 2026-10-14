@@ -1137,8 +1137,8 @@ export function updateProjectRoleSettings(
 // --- The capability catalog: items acquired into LoopX, and where they are installed ---
 
 export type LibraryKind = "plugin" | "skill" | "mcp";
-/** How an item was acquired; only "machine" (imported from this machine), "ui" (an MCP server added here) and "project"
- * (written in a project) so far. */
+/** How an item was acquired: imported from this machine, uploaded, taken from git, written in Settings ("ui": a skill
+ * or an MCP server) or in a project. */
 export type ItemOrigin = "machine" | "upload" | "git" | "ui" | "project";
 export type AgentRole = "manager" | "planner" | "worker" | "reviewer";
 export type InstallScope = "global" | "project";
@@ -1175,6 +1175,8 @@ export interface CatalogItem {
   sha256: string;
   size_bytes: number;
   file_count: number;
+  /** An uploaded or git item edited here since it came in; re-importing it from git replaces the edit. */
+  modified: boolean;
   imported_at: string;
   updated_at: string;
   /** An MCP server's configuration, its env and header values masked; null for a plugin or a skill. */
@@ -1238,6 +1240,14 @@ export interface Catalog {
   last_mcp_import: McpImport | null;
   roles: AgentRole[];
   task_roles: AgentRole[];
+  caps: {
+    file_max_bytes: number;
+    item_max_bytes: number;
+    item_max_files: number;
+    library_max_bytes: number;
+    /** The largest SKILL.md or zip an upload takes. */
+    upload_max_bytes: number;
+  };
   mcp_caps: { servers_max: number; variables_max: number; value_max: number; args_max: number; mask: string };
 }
 
@@ -1246,6 +1256,8 @@ export interface CatalogItemDetail {
   item: CatalogItem;
   files: { path: string; size_bytes: number; executable: boolean }[];
   skill_md: string | null;
+  /** A skill's SKILL.md body, below its frontmatter. */
+  content: string | null;
 }
 
 /** An install that applies to a project, with its item; inherited ones are global (changed in Settings). */
@@ -1382,6 +1394,95 @@ export async function uninstall(installId: string): Promise<{ deleted: string; i
   const res = await fetch(`${API_BASE}/installs/${encodeURIComponent(installId)}`, { method: "DELETE" });
   if (!res.ok) await failed(res, "uninstall");
   return res.json();
+}
+
+/** Send JSON to a catalog endpoint; a refusal throws the server's reason. */
+async function catalogRequest<T>(method: string, path: string, label: string, body?: unknown): Promise<T> {
+  const res = await fetch(`${API_BASE}/catalog${path}`, {
+    method,
+    headers: body === undefined ? undefined : { "Content-Type": "application/json" },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  if (!res.ok) await failed(res, label);
+  return res.json();
+}
+
+/** Upload a SKILL.md or a zip of a skill or plugin directory; `name` renames it. Installed nowhere; 409 when the
+ * name is taken. `skipped` lists the binary files left out. */
+export function uploadCatalogItem(upload: {
+  filename: string;
+  content_base64: string;
+  name?: string;
+}): Promise<{ item: CatalogItem; skipped: LibrarySkipped[] }> {
+  return catalogRequest("POST", "/upload", "upload", upload);
+}
+
+export interface GitSource {
+  /** An https:// repository URL. */
+  url: string;
+  /** A branch or tag; the default branch when absent. */
+  ref?: string;
+  /** A directory in the repository to import from. */
+  subpath?: string;
+}
+
+/** A plugin or skill found in a repository and what importing it would do. */
+export interface GitPreviewItem {
+  /** Its directory in the repository (or the subpath): what an import names. */
+  path: string;
+  kind: LibraryKind;
+  name: string;
+  description: string;
+  version: string;
+  file_count: number;
+  size_bytes: number;
+  /** new; update or unchanged (imported from this URL before); conflict (its name is taken or unusable). */
+  status: "new" | "update" | "unchanged" | "conflict";
+  reason?: string;
+  item_id?: string;
+  /** Edited here since it was imported (status update or unchanged). */
+  modified?: boolean;
+}
+
+export interface GitPreview {
+  url: string;
+  ref: string | null;
+  subpath: string;
+  commit: string;
+  items: GitPreviewItem[];
+  skipped: LibrarySkipped[];
+}
+
+export interface GitImport {
+  url: string;
+  commit: string;
+  items: CatalogItem[];
+  added: string[];
+  updated: string[];
+  unchanged: string[];
+  skipped: LibrarySkipped[];
+}
+
+/** Clone a repository and list its plugins and skills; nothing is added. */
+export function previewGitRepo(source: GitSource): Promise<GitPreview> {
+  return catalogRequest("POST", "/git/preview", "git preview", source);
+}
+
+/** Import the chosen items of a previewed repository; 409 when a name is taken or the ref moved since `commit`. */
+export function importGitRepo(
+  source: GitSource & { commit: string; items: { path: string; name?: string }[] },
+): Promise<GitImport> {
+  return catalogRequest("POST", "/git/import", "git import", source);
+}
+
+/** Write a skill in Settings (origin "ui"); installed nowhere. */
+export function createCatalogSkill(skill: NewProjectSkill): Promise<{ item: CatalogItem }> {
+  return catalogRequest("POST", "/skills", "new skill", skill);
+}
+
+/** Change a Settings, uploaded or git skill; an uploaded or git one is marked modified. */
+export function updateCatalogItem(itemId: string, fields: Partial<NewProjectSkill>): Promise<{ item: CatalogItem }> {
+  return catalogRequest("PUT", `/${encodeURIComponent(itemId)}`, "edit", fields);
 }
 
 /** What applies to a project: its own installs and the inherited global ones. */

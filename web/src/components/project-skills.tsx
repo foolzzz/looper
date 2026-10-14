@@ -38,7 +38,7 @@ type ErrorAt = "list" | "install" | "add";
 type Apply = (change: () => Promise<ProjectInstalls>) => Promise<boolean>;
 
 /** The name, description and SKILL.md body of a skill being added or edited. */
-function SkillFields({
+export function SkillFields({
   idPrefix,
   caps,
   draft,

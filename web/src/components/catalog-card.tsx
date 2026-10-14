@@ -1,10 +1,12 @@
 import { useEffect, useId, useState } from "react";
 import { ChevronDown, ChevronRight, Download, Loader2, RefreshCw } from "lucide-react";
+import { CatalogSources, SkillForm } from "@/components/catalog-sources";
 import { OriginTag, RoleChecks } from "@/components/install-controls";
 import { McpItemActions, McpSummary, McpToolbar } from "@/components/mcp-servers";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
+  deleteCatalogItem,
   fetchCatalog,
   importCatalog,
   installItem,
@@ -42,11 +44,15 @@ function installSummary(installs: Install[]) {
   );
 }
 
+/** Items uploaded, taken from git or written in Settings are edited (skills) and deleted here. */
+const OWN_ORIGINS = new Set(["upload", "git", "ui"]);
+
 function ItemRow({
   item,
   roles,
   busy,
   error,
+  fileMaxBytes,
   onChange,
   mask,
   onReplace,
@@ -56,13 +62,31 @@ function ItemRow({
   roles: AgentRole[];
   busy: boolean;
   error: string | undefined;
+  fileMaxBytes: number;
   onChange: (request: () => Promise<{ item: CatalogItem }>) => void;
   mask: string;
   onReplace: (item: CatalogItem) => void;
   onRemove: () => void;
 }) {
+  const [editing, setEditing] = useState(false);
+  const [confirming, setConfirming] = useState(false);
+  const [removing, setRemoving] = useState(false);
+  const [removeError, setRemoveError] = useState("");
   const global = item.installs.find((install) => install.scope === "global");
   const where = installSummary(item.installs);
+  const own = OWN_ORIGINS.has(item.origin) && item.kind !== "mcp";
+  const remove = async () => {
+    setConfirming(false);
+    setRemoving(true);
+    setRemoveError("");
+    try {
+      await deleteCatalogItem(item.item_id);
+      onRemove();
+    } catch (err) {
+      setRemoveError(errorText(err));
+      setRemoving(false);
+    }
+  };
   return (
     <li className="space-y-1 border-t border-border px-5 py-2">
       <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
@@ -72,6 +96,21 @@ function ItemRow({
         {item.version && <span className="font-mono text-[11px] text-muted-foreground">v{item.version}</span>}
         <OriginTag item={item} />
         <span className="ml-auto text-[11px] tabular-nums text-muted-foreground">{formatBytes(item.size_bytes)}</span>
+        {own && (
+          <span className="flex gap-0.5">
+            {item.kind === "skill" && (
+              <Button type="button" variant="ghost" size="sm" disabled={busy || editing} onClick={() => setEditing(true)}
+                      aria-label={`Edit ${item.qualified_name}`} className="h-6 px-2">
+                Edit
+              </Button>
+            )}
+            <Button type="button" variant="ghost" size="sm" disabled={busy || removing || confirming}
+                    onClick={() => setConfirming(true)} aria-label={`Delete ${item.qualified_name}`}
+                    className="h-6 px-2 text-muted-foreground hover:bg-destructive/10 hover:text-destructive">
+              Delete
+            </Button>
+          </span>
+        )}
       </div>
       <McpSummary item={item} />
       <p className="break-words text-[11px] text-muted-foreground">
@@ -115,8 +154,32 @@ function ItemRow({
           Install globally
         </Button>
       )}
+      {confirming && (
+        <div className="flex flex-wrap items-center justify-end gap-2">
+          <span className="text-xs text-muted-foreground">
+            Delete it from the catalog{item.installs.length ? " and every place it is installed" : ""}?
+          </span>
+          <Button type="button" variant="destructive" size="sm" disabled={busy} onClick={() => void remove()}>
+            Delete
+          </Button>
+          <Button type="button" variant="ghost" size="sm" onClick={() => setConfirming(false)}>Cancel</Button>
+        </div>
+      )}
+      {editing && (
+        <div className="rounded-md border border-border p-3">
+          <SkillForm
+            item={item}
+            contentMax={item.origin === "ui" ? 64 * 1024 : fileMaxBytes}
+            onSaved={(saved) => {
+              setEditing(false);
+              onReplace(saved);
+            }}
+            onCancel={() => setEditing(false)}
+          />
+        </div>
+      )}
       {item.kind === "mcp" && <McpItemActions item={item} mask={mask} onSaved={onReplace} onDeleted={onRemove} />}
-      {error && <p role="alert" className="text-xs text-destructive">{error}</p>}
+      {(error || removeError) && <p role="alert" className="text-xs text-destructive">{error || removeError}</p>}
     </li>
   );
 }
@@ -180,8 +243,9 @@ export function CatalogCard() {
   const [rowErrors, setRowErrors] = useState<Record<string, string>>({});
   const [error, setError] = useState("");
 
+  const refresh = () => fetchCatalog().then(setCatalog).catch((e) => setError(errorText(e)));
   useEffect(() => {
-    fetchCatalog().then(setCatalog).catch((e) => setError(errorText(e)));
+    void refresh();
   }, []);
 
   const reimport = async () => {
@@ -220,11 +284,7 @@ export function CatalogCard() {
     });
     try {
       const { item } = await request();
-      setCatalog((c) => {
-        if (!c) return c;
-        const items = c.items.map((other) => (other.item_id === item.item_id ? item : other));
-        return { ...c, items, installed_count: items.filter((other) => other.installs.length).length };
-      });
+      replace(item.item_id, item);
     } catch (e) {
       setRowErrors((errors) => ({ ...errors, [itemId]: errorText(e) }));
     } finally {
@@ -282,6 +342,7 @@ export function CatalogCard() {
           {imported ? "Re-import" : "Import from this machine"}
         </Button>
       </div>
+      <CatalogSources catalog={catalog} onAdded={() => void refresh()} />
       {error && <p role="alert" className="border-t border-border px-5 py-2 text-xs text-destructive">{error}</p>}
       {catalog.last_import && <ImportReport report={catalog.last_import} />}
       <McpToolbar catalog={catalog} onCatalog={setCatalog} onAdded={(item) => replace(item.item_id, item)} />
@@ -314,6 +375,7 @@ export function CatalogCard() {
                         roles={catalog.roles}
                         busy={pending.has(item.item_id)}
                         error={rowErrors[item.item_id]}
+                        fileMaxBytes={catalog.caps.file_max_bytes}
                         onChange={(request) => void change(item.item_id, request)}
                         mask={catalog.mcp_caps.mask}
                         onReplace={(next) => replace(item.item_id, next)}

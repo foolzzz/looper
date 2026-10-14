@@ -337,6 +337,13 @@ async def import_from_machine(config_dir: Path | None = None) -> dict[str, Any]:
 
     async with _import_lock:
         scan = await asyncio.to_thread(scan_machine, config_dir)
+        # An uploaded, git or Settings item may hold the name already: it stays, and this one is reported.
+        held = {(row["kind"], row["name"]): row["origin"] for row in await db_library.list_items()
+                if row["owner_project_id"] is None and row["origin"] != "machine"}
+        for item in [item for item in scan.items if (item.kind.value, item.name) in held]:
+            scan.items.remove(item)
+            scan.skipped.append(Skipped(item.name, "", f"the catalog has a {item.kind.value} of this name from "
+                                                       f"another source ({held[(item.kind.value, item.name)]})"))
         changes = await db_library.replace_snapshot([item.row() for item in scan.items])
         report = {
             "imported_at": datetime.now(UTC).isoformat(),

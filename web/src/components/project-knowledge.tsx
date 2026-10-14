@@ -31,7 +31,7 @@ const TEXTAREA =
   "w-full resize-y rounded-md border border-input bg-transparent px-3 py-2 font-mono text-xs leading-relaxed text-foreground shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring";
 
 /** Bytes as base64, in chunks small enough for String.fromCharCode. */
-function bytesBase64(bytes: Uint8Array) {
+export function bytesBase64(bytes: Uint8Array) {
   let binary = "";
   for (let i = 0; i < bytes.length; i += 0x8000) binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
   return btoa(binary);

@@ -643,8 +643,9 @@ catalog first, and each loads only where it is installed
 
 - **Catalog.** `library_items` and `library_files` hold each item: kind
   `plugin`, `skill` or `mcp`, name, `origin` (how it was acquired: `machine`,
-  imported from this machine, `ui`, an MCP server added here, or `project`,
-  written in a project; `upload` and `git` are reserved), the owning project of a project-authored item, a
+  imported from this machine, `upload`, `git`, `ui`, added in Settings, or
+  `project`, written in a project), `modified` (an uploaded or git item edited
+  since), the owning project of a project-authored item, a
   description, source label, declared version, `sha256`, size, file count, and
   its files (relative path, UTF-8 content, sha256, executable bit). An item's
   `sha256` is the hash of its files' paths, hashes and executable bits. A name
@@ -715,6 +716,18 @@ catalog first, and each loads only where it is installed
   `--plugin-dir`s; `--strict-mcp-config` stays, so it is the only MCP source
   and a plugin's own `.mcp.json` servers do not load. The record's
   `library.mcp_servers` names them; their values are never recorded.
+- **Upload, git and Settings** (`loopx/agents/catalog_sources.py`) add
+  plugins and skills outside projects, installed nowhere: an uploaded
+  `SKILL.md` or zip (refused whole for an absolute path, `..`, a link or an
+  over-cap file; binary files left out), a shallow clone of a public
+  `https://` repository previewed and then imported (`source` is
+  `<url>@<commit>`; the same URL again updates those items in place; the
+  clone runs no hooks or submodules, reads none of the operator's git
+  configuration or credentials, is size- and time-capped and removed), or a
+  skill written in Settings (origin `ui`). Settings, uploaded and git skills
+  are edited with `PUT /api/catalog/<id>` (an uploaded or git one becomes
+  `modified`); machine items change only by re-importing. A name clash
+  outside projects is a 409, and the request may rename the item.
 - **Reclaiming copies.** `loopx serve` reclaims replaced copies when it
   starts, before any agent launches: `read_only_copies.reclaim_unused` removes
   every content-hashed directory of the catalog, project knowledge and the
@@ -959,7 +972,7 @@ PostgreSQL is a hard startup dependency. All data paths:
 | `agent_configs` | Agent configuration (role prompt, turns, timeout, concurrency) for `manager`, `planner`, `worker` and `reviewer` |
 | `agent_setting_layers` | Agent settings by layer: `scope` (`system`, `role`, `project`, `role_project`), `role`, `project_id` (goes with its project), and the nullable `harness_prompt`, `model`, `effort`, `env` (ordered `[{key, value}]`, `null` value = unset) and `run_budget_usd`; one row per layer and place |
 | `system_settings` | Settings shared by the whole system, one value per key (no row = the built-in default), such as the last library import's report |
-| `library_items` | The capability catalog: kind, name, `origin` (`machine` or `project`), `owner_project_id` (a project-authored item; goes with its project), `description`, source label, declared version, `sha256` of the files, size, file count, `imported_at` |
+| `library_items` | The capability catalog: kind, name, `origin` (`machine`, `upload`, `git`, `ui` or `project`), `modified`, `owner_project_id` (a project-authored item; goes with its project), `description`, source label, declared version, `sha256` of the files, size, file count, `imported_at` |
 | `library_files` | Each catalog item's files: relative path, UTF-8 content, sha256, executable bit |
 | `library_installs` | Where an item loads: `scope` (`global` or `project`), `project_id`, `roles` (a non-empty subset of `manager`, `planner`, `worker`, `reviewer`; never `manager` in a project), `enabled`; one per item and place, going with its item and its project |
 | `project_documents` | A project's knowledge: title, one-line summary, `source_kind` (`text`, `upload` or `path`), `filename` and `content` (text and upload) or `path` (relative to the project's default directory), `size_bytes`, `sha256`; a CHECK keeps each kind's columns consistent and the rows go with their project |
@@ -1069,6 +1082,12 @@ dev proxy, which keeps `Host` and `Origin` on its own port.
 | `/api/catalog` | GET | The catalog: `items` (`item_id`, `kind`, `name`, `qualified_name` (how agents name it), `origin`, `owner_project_id`, `owner_project_name`, `description`, `source`, `version`, `sha256`, `size_bytes`, `file_count`, timestamps and `installs`), `installed_count`, `total_bytes`, `last_import` (counts, `added`, `updated`, `removed`, `unchanged`, `skipped`), `roles`, `task_roles` and `caps` |
 | `/api/catalog/:id` | GET | One item: `item` (as in the list), `files` (`path`, `size_bytes`, `executable`; no content) and, for a skill, `skill_md`; 404 for an unknown item |
 | `/api/catalog/import` | POST | Import or re-import this machine's enabled plugins and personal skills (read-only towards `~/.claude`); new items are installed nowhere. Answers with the catalog. 400 without a Claude Code configuration, with an unreadable `settings.json` or over the 128 MiB cap (nothing changes then) |
+| `/api/catalog/upload` | POST | Add an uploaded `SKILL.md` or zip: `{filename, content_base64, name?}` (`name` renames it). Answers 201 with `item` and `skipped` (binary files left out); 400 with the reason for an unsafe or invalid zip or `SKILL.md`, 409 for a name taken outside projects |
+| `/api/catalog/git/preview` | POST | Clone `{url, ref?, subpath?}` and list its plugins and skills: `commit` and `items` (`path`, `kind`, `name`, `description`, size, `status`: `new`, `update`, `unchanged` or `conflict` with `reason`), `skipped`. Adds nothing; 400 for a URL that is not plain `https://`, a failed, oversized or slow clone |
+| `/api/catalog/git/import` | POST | `{url, ref?, subpath?, commit?, items: [{path, name?}]}`: import the chosen items (origin `git`). Answers with `items`, `added`, `updated`, `unchanged`; 409 for a taken name or a ref that moved from `commit`, 400 for an unknown or invalid path |
+| `/api/catalog/skills` | POST | Write a skill in Settings: `{name, description, content}` (origin `ui`); 201 with `item`, 400, 409 |
+| `/api/catalog/:id` | PUT | Change an MCP server, or a Settings, uploaded or git skill (`name`, `description`, `content`); answers with `item`; 400 for a machine or project item or a plugin, 409 for a taken name |
+| `/api/catalog/:id` | DELETE | Delete an item and its installs (not a project's own skill) |
 | `/api/installs` | POST | Install an item: `{item_id, scope: "global"\|"project", project_id (a project scope), roles?, enabled?}`; `roles` defaults to every role the scope allows. Answers 201 with `install` and `item`. 400 for a bad field, `manager` in a project install or a project-authored item installed globally; 404 for an unknown item or project; 409 when the item is installed there already or a project skill of its name is |
 | `/api/installs/:id` | PUT | Change an install's `roles` or `enabled`; answers with `install` and `item`; 400 as above, 404 for an unknown install |
 | `/api/installs/:id` | DELETE | Uninstall; the item stays in the catalog. Answers with `deleted` and `item`; 404 |

@@ -1,6 +1,6 @@
 # 开发计划：长程 Agent 上下文体系（M0–M8）
 
-- **状态：** M0–M7 全部交付（M7a 计划状态入库、M7b 任务记忆）；M8a 能力目录与安装、M8b MCP 服务器、M8d 配置层级统一已交付，M8c、M8e 待开工；上游 LoopX 清理 B1–B4 已交付；其余见第 5 节待办
+- **状态：** M0–M7 全部交付（M7a 计划状态入库、M7b 任务记忆）；M8a 能力目录与安装、M8b MCP 服务器、M8c 进库来源、M8d 配置层级统一已交付，M8e 待开工；上游 LoopX 清理 B1–B4 已交付；其余见第 5 节待办
 - **依据：** [RFC：长程 Agent 的上下文体系 v0](../architecture/rfcs/long-horizon-agent-context-v0.zh-CN.md)。
   设计原则、分层模型和已作出的决定以 RFC 为准；本文只管"怎么分阶段做、做到什么算完成、现在做到哪了"。
 - **仓库：** `foolzzz/looper`，基线 `main`
@@ -37,7 +37,7 @@
 | M7b | 任务记忆：任务日志、进度与发现注入、经验沉淀为项目知识 | ✅ 已交付（looper #46） | M7a |
 | M8a | 能力目录与安装：插件和 skill 先进目录，再按范围（全局或项目）和角色安装；项目 skill 并入目录 | ✅ 已交付（looper #48） | M1.6、M4 |
 | M8b | MCP 服务器进目录，安装方式相同；密钥存库、接口打码 | ✅ 已交付（looper #49） | M8a |
-| M8c | 进库来源：上传、git、界面新建与编辑 | ⏳ 待开工 | M8a |
+| M8c | 进库来源：上传、git、界面新建与编辑 | ✅ 已交付（looper #51） | M8a |
 | M8d | 配置层级统一：系统默认 → 角色 → 项目 → 项目里的角色 | ✅ 已交付（looper #50） | M8a |
 | M8e | 导出与导入：一个文件，应用前预览，密钥默认留空 | ⏳ 待开工 | M8b、M8c、M8d |
 
@@ -422,6 +422,7 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
 | 2026-10-13 | M8a 交付（looper #48）：能力目录与安装。`library_items` 加上 `origin`、所属项目和描述，新增 `library_installs`（全局或某个项目、角色子集、启用开关）；一次性迁移让已导入的条目都不安装，`project_skills` 保留 id 等价迁入目录并安装给三个任务角色后删除；`load_installed(role, project)` 取代 `load_library` 和 `load_project_skills`，新增目录、安装和项目视图接口，Settings 和项目 Skills 标签改为目录与安装。验证：仿真实规模的旧库（3 个插件、104 个 skill、5 个项目 skill）升级后 107 个条目都未安装、5 个项目 skill 各有一条三角色安装、启用状态不变，再跑一次不变；真实 Claude（haiku）下全局只装给 worker 的 skill 出现在 Worker 的 init、不在 Planner 的，迁移来的 `project:release-stamp` 被 Worker 调用并写出暗号，任务 $0.051；真实 PG 789 通过 |
 | 2026-10-13 | M8b 交付（looper #49）：MCP 服务器作为 `mcp` 目录条目（stdio 或 http/sse），安装方式与插件、skill 相同；env 和 header 的值存在 `library_mcp_servers`、接口只显示 `***`（送回 `***` 保留原值），可从本机 `~/.claude.json` 只读导入；每次运行把安装给它的服务器写成一个按内容哈希命名的只读 `--mcp-config` 文件，回收照旧。验证：真实 haiku 下全局只装给 worker 的 stdio 服务器出现在 Worker 的 init 里并被调用、报出暗号，Planner 的 init 里没有，任务 $0.05（加上核实 CLI 共约 $0.10）；真实 PG 测试与 Settings 截图。 |
 | 2026-10-13 | M8d 交付（looper #50）：harness、模型、effort、环境变量和单次运行上限统一存进 `agent_setting_layers`，按系统 → 角色 → 项目 → 项目里的角色逐层解析（Manager 只有前两层；环境变量逐键合并、可在后面的层取消；Reviewer 在角色层和项目角色层没有自己的 harness 时沿用同层 Worker 的），四类 agent 都用 `load_agent_settings` 启动，每次运行在 `settings_sources` 记下每项来自哪一层。一次性迁移把 Settings 默认值、各 agent 的模型和 Manager 的 harness、项目的模型和单次上限、项目的 Planner 和 Worker harness 原样迁入对应层并删除旧列；Settings、Agents 页和项目 Settings 标签分别编辑系统、角色、项目和项目里的角色层，每项显示当前取值和来源。验证：以 main（`72e72eb65`）的解析代码生成基准，两组旧数据迁移后四类 agent 的启动参数、环境变量和 system prompt 与基准逐字节相同，prompt 不变所以未跑真实 Claude；真实 PG 867 通过 |
+| 2026-10-13 | M8c 交付（looper #51）：Settings 的目录可上传（或拖入）`SKILL.md` 或 skill、插件目录的 zip，预览后从公开 `https://` git 仓库勾选导入（同一 URL 再导入就地更新、保留安装），在界面新建和编辑 skill；都只进库不安装，项目外重名返回 409、可改名，编辑上传或 git 条目标记 modified，本机导入的条目只能重新导入。zip 拒绝绝对路径、`..`、链接和超限文件，克隆为 `--depth 1`、不跑 hook 和子模块、不读操作者的 git 配置和凭据、限时限大小、用后删除，每条规则一个真实 PG 测试。验证：一次性 `loopx serve` 从 `https://github.com/anthropics/skills` 预览出 20 个 skill（56 个二进制文件未导入），全部导入 384 个文件、6.3 MB，再导入 20 个不变；上传的 skill 全局装给 worker 后出现在 Worker 的 `--plugin-dir`、不在 Planner 的；真实 PG 902 通过。 |
 
 ## 5. 不属于本 RFC 的待办
 
