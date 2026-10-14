@@ -238,8 +238,8 @@ def validate_release_notes_gate_self_test() -> None:
 **How to verify:** Run the following identity and behavior checks after updating.
 **Contributors:** Maintainer @example prepared this release; no community contribution was included.
 ```bash
-loopx --version
-loopx doctor
+looper --version
+looper doctor
 ```
 
 {ENGLISH_USAGE_HEADING}
@@ -271,7 +271,7 @@ loopx doctor
 **Authority boundary:** No authority is granted.
 **Docs:** https://example.com/docs.
 ```bash
-loopx example --check
+looper example --check
 ```""",
         """#### Example Surface
 **启用：**启用示例。
@@ -280,7 +280,7 @@ loopx example --check
 **权限边界：**不授予额外权限。
 **文档：**https://example.com/docs。
 ```bash
-loopx example --check
+looper example --check
 ```""",
     )
     no_changes = fixture(ENGLISH_NO_CHANGES, CHINESE_NO_CHANGES)

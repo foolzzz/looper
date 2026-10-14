@@ -65,9 +65,9 @@ jobs:
           [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::$TAG is not vX.Y.Z"; exit 1; }
           git merge-base --is-ancestor "$TAG" origin/main || { echo "::error::$TAG is not on main"; exit 1; }
           version="$(python -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')"
-          package="$(python -c 'import loopx; print(loopx.__version__)')"
+          package="$(python -c 'import looper; print(looper.__version__)')"
           [ "v$version" = "$TAG" ] && [ "$package" = "$version" ] \
-            || { echo "::error::$TAG does not match pyproject $version / loopx $package"; exit 1; }
+            || { echo "::error::$TAG does not match pyproject $version / looper $package"; exit 1; }
           for f in "docs/releases/$TAG.md" "docs/releases/$TAG.surfaces"; do
             [ -f "$f" ] || { echo "::error::$f is missing"; exit 1; }
           done
@@ -82,9 +82,9 @@ jobs:
       - name: Build the dashboard
         run: scripts/stage-dashboard.sh
 
-      - name: Check that the installed wheel runs loopx serve
+      - name: Check that the installed wheel runs looper serve
         env:
-          LOOPX_TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
+          LOOPER_TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
         run: uv run python examples/release/agent-serve-wheel-smoke.py
 
       - name: Build the wheel
@@ -93,15 +93,15 @@ jobs:
       - name: Publish the release
         run: |
           set -euo pipefail
-          wheel="dist/loopx-${TAG#v}-py3-none-any.whl"
+          wheel="dist/looper-${TAG#v}-py3-none-any.whl"
           [ -f "$wheel" ] || { echo "::error::$wheel was not built"; exit 1; }
           # A draft first: install.sh reads the latest published release, so it
           # never sees this one before its wheel and body are in place.
           if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release edit "$TAG" --draft --title "LoopX $TAG" --notes-file "docs/releases/$TAG.md"
+            gh release edit "$TAG" --draft --title "Looper $TAG" --notes-file "docs/releases/$TAG.md"
             gh release upload "$TAG" "$wheel" --clobber
           else
-            gh release create "$TAG" "$wheel" --draft --verify-tag --title "LoopX $TAG" --notes-file "docs/releases/$TAG.md"
+            gh release create "$TAG" "$wheel" --draft --verify-tag --title "Looper $TAG" --notes-file "docs/releases/$TAG.md"
           fi
           gh release view "$TAG" --json body --jq .body > readback.md
           surfaces=()

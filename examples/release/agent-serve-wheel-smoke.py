@@ -3,7 +3,8 @@
 
 Builds the wheel from this checkout, checks its contents, installs it into a
 fresh virtualenv and resolves both files from the installed package (not the
-checkout). With LOOPER_TEST_DATABASE_URL pointing at a disposable database it
+checkout), and checks that it installs the ``looper`` command with ``loopx`` as
+its alias. With LOOPER_TEST_DATABASE_URL pointing at a disposable database it
 also starts the installed `looper serve` and fetches the dashboard and the API.
 Run `scripts/stage-dashboard.sh` first; the staged dashboard is not in Git.
 """
@@ -41,7 +42,7 @@ def serve_check(venv: Path, work: Path, dsn: str) -> None:
     for name in ("LARK_APP_ID", "TELEGRAM_BOT_TOKEN"):
         env.pop(name, None)
     proc = subprocess.Popen(
-        [str(venv / "bin" / "loopx"), "serve", "--port", str(port), "--runtime-root", str(work / "rt")],
+        [str(venv / "bin" / "looper"), "serve", "--port", str(port), "--runtime-root", str(work / "rt")],
         cwd=work, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT,
     )
     try:
@@ -79,7 +80,7 @@ def main() -> int:
                 shutil.copy2(ROOT / name, src / name)
         shutil.copytree(ROOT / "looper/web/dashboard", src / "looper/web/dashboard")
         run("uv", "build", "--wheel", "--out-dir", str(work / "dist"), cwd=src)
-        (wheel,) = (work / "dist").glob("loopx-*.whl")
+        (wheel,) = (work / "dist").glob("looper-*.whl")
         names = set(zipfile.ZipFile(wheel).namelist())
         missing = [n for n in REQUIRED if n not in names]
         assert not missing, f"wheel lacks {missing}"
@@ -100,6 +101,12 @@ def main() -> int:
         assert str(work) in str(static_dir) and (static_dir / "index.html").is_file(), static_dir
         assert str(work) in str(schema) and schema.is_file(), schema
         print("PASS the installed package resolves its own schema and dashboard")
+        version = run(str(venv / "bin" / "looper"), "--version", cwd=work).split()
+        assert version[0] == "looper", version
+        alias = subprocess.run([str(venv / "bin" / "loopx"), "--version"], cwd=work, capture_output=True, text=True,
+                               check=True)
+        assert alias.stdout.split() == version and "loopx is now called looper" in alias.stderr, alias
+        print(f"PASS the wheel installs the looper command ({' '.join(version)}), and loopx as its alias")
 
         dsn = os.environ.get("LOOPER_TEST_DATABASE_URL")
         if dsn:

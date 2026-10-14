@@ -14,7 +14,7 @@ ok()    { green "  ✓ $*"; }
 fail()  { red "  ✗ $*"; exit 1; }
 
 echo ""
-echo "  LoopX Installer"
+echo "  Looper Installer"
 echo "  ────────────────"
 echo ""
 
@@ -102,17 +102,32 @@ ok "Latest release: v${RELEASE_VER}"
 
 # --- Step 3: Install via uv / pipx / pip -----------------------------------------
 
+# Before the rename the distribution was loopx. Looper still ships a `loopx`
+# alias for one release, so an old loopx installed by the same tool is removed
+# first: otherwise the two fight over that command. This removes the package
+# only; ~/.loopx is moved to ~/.looper when Looper first starts.
+OLD_DIST_NOTE="removed the old loopx package (its data in ~/.loopx is kept; Looper moves it to ~/.looper on first start)"
+
 install_with_uv() {
+  if uv tool list 2>/dev/null | grep -qE '^loopx '; then
+    uv tool uninstall loopx >/dev/null 2>&1 && ok "$OLD_DIST_NOTE"
+  fi
   info "Installing with uv..."
-  uv tool install --force --python "$PYTHON_BIN" "loopx @ $WHEEL_URL" >/dev/null 2>&1
+  uv tool install --force --python "$PYTHON_BIN" "looper @ $WHEEL_URL" >/dev/null 2>&1
 }
 
 install_with_pipx() {
+  if pipx list --short 2>/dev/null | grep -qE '^loopx '; then
+    pipx uninstall loopx >/dev/null 2>&1 && ok "$OLD_DIST_NOTE"
+  fi
   info "Installing with pipx..."
   pipx install --force --python "$PYTHON_BIN" "$WHEEL_URL" >/dev/null 2>&1
 }
 
 install_with_pip() {
+  if "$PYTHON_BIN" -m pip show loopx >/dev/null 2>&1; then
+    "$PYTHON_BIN" -m pip uninstall --yes --quiet loopx >/dev/null 2>&1 && ok "$OLD_DIST_NOTE"
+  fi
   info "Installing with pip..."
   "$PYTHON_BIN" -m pip install --user --quiet --upgrade "$WHEEL_URL" 2>/dev/null
 }
@@ -129,15 +144,15 @@ fi
 
 # --- Step 4: Verify & PATH -------------------------------------------------------
 
-LOOPX_BIN=""
-for p in "$HOME/.local/bin/loopx" "$(command -v loopx 2>/dev/null || true)"; do
+LOOPER_BIN=""
+for p in "$HOME/.local/bin/looper" "$(command -v looper 2>/dev/null || true)"; do
   if [ -n "$p" ] && [ -x "$p" ]; then
-    LOOPX_BIN="$p"
+    LOOPER_BIN="$p"
     break
   fi
 done
 
-if [ -z "$LOOPX_BIN" ]; then
+if [ -z "$LOOPER_BIN" ]; then
   echo ""
   info "Add ~/.local/bin to your PATH:"
   echo ""
@@ -145,12 +160,12 @@ if [ -z "$LOOPX_BIN" ]; then
   echo ""
   info "Then re-open your terminal or source your profile."
   echo ""
-  ok "LoopX $RELEASE_VER installed (not yet on PATH)"
+  ok "Looper $RELEASE_VER installed (not yet on PATH)"
 else
-  INSTALLED_VER="$("$LOOPX_BIN" --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' || echo "$RELEASE_VER")"
-  ok "LoopX $INSTALLED_VER installed ($LOOPX_BIN)"
+  INSTALLED_VER="$("$LOOPER_BIN" --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' || echo "$RELEASE_VER")"
+  ok "Looper $INSTALLED_VER installed ($LOOPER_BIN)"
 fi
 
 echo ""
-green "  Next: run 'loopx serve' to start."
+green "  Next: run 'looper serve' to start."
 echo ""
