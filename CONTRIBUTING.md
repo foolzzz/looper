@@ -218,6 +218,7 @@ Before opening a pull request:
   readback and failure/recovery cases;
 - keep unrelated formatting or refactors out of the PR;
 - include docs or tests when changing user-visible behavior;
+- when changing a recommended prompt, a contract or the injection order, attach the real-mode prompt eval comparison ([`evals/README.md`](evals/README.md));
 - confirm that no private/local runtime state was committed.
 
 Use the [overall roadmap](docs/architecture/rfcs/loopx-overall-roadmap-v0.md) for
