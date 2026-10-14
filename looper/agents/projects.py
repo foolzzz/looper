@@ -1,8 +1,8 @@
 """Projects over HTTP: request validation, the project view and task creation.
 
 Every task belongs to exactly one project and can move to another at any
-time. A new task may choose the agent of its Planner, Workers or Reviewers
-(``agent_overrides``), which wins over every layer for that task only. A task is created in an existing project (``project_id``) or in a new
+time. A new task may choose the Agent Profile of its Planner, Workers or Reviewers
+(``profile_overrides``), which wins over every layer for that task only. A task is created in an existing project (``project_id``) or in a new
 one made by the same request (``project``). Its work directory is the one
 given, else its project's default; there is no global default. A project's
 ``background`` goes into the system prompt of its task agents (Planner,
@@ -34,8 +34,8 @@ HTTP_409 = "409 Conflict"
 NAME_MAX_CHARS = 80
 BACKGROUND_MAX_CHARS = 10000
 NO_WORK_DIR = "a work directory is required: set one on the task or on its project"
-# The roles a task may choose the agent of; the Manager spans every task.
-TASK_AGENT_ROLES = ("planner", "worker", "reviewer")
+# The roles a task may choose the Agent Profile of; the Manager spans every task.
+TASK_PROFILE_ROLES = ("planner", "worker", "reviewer")
 # Fields a project used to hold that are agent settings now (its layer and its roles' layers).
 MOVED_FIELDS = ("planner_harness_prompt", "worker_harness_prompt", "model", "run_budget_usd")
 
@@ -226,7 +226,7 @@ async def create_task(data: dict[str, Any]) -> dict[str, Any]:
     config = data.get("config")
     if config is not None and not isinstance(config, dict):
         raise RequestError(HTTP_400, "config must be a JSON object")
-    agents = await _agent_overrides(data.get("agent_overrides"))
+    profiles = await _profile_overrides(data.get("profile_overrides"))
     task = {
         "task_id": f"task-{uuid.uuid4().hex[:12]}",
         "requirement": requirement,
@@ -235,7 +235,7 @@ async def create_task(data: dict[str, Any]) -> dict[str, Any]:
         "config": config or {},
         "status": "init",
     }
-    if project is not None and not agents:
+    if project is not None and not profiles:
         created = await db_tasks.create_task(**task, project_id=project["id"])
     else:
         try:
@@ -243,12 +243,13 @@ async def create_task(data: dict[str, Any]) -> dict[str, Any]:
                 if project is None:
                     project = await db_projects.create_project(**new_fields, pool=conn)
                 created = await db_tasks.create_task(**task, project_id=project["id"], pool=conn)
-                if agents:
-                    await db_layers.set_agent_overrides(conn, task["task_id"], agents)
+                if profiles:
+                    await db_layers.set_profile_overrides(conn, task["task_id"], profiles)
         except asyncpg.UniqueViolationError:
             raise _name_taken(new_fields["name"]) from None
-        except asyncpg.ForeignKeyViolationError:  # an agent removed meanwhile
-            raise RequestError(HTTP_400, "an agent the task chose was removed meanwhile; choose again") from None
+        except asyncpg.ForeignKeyViolationError:  # a profile removed meanwhile
+            raise RequestError(HTTP_400, "an Agent Profile the task chose was removed meanwhile; choose again") \
+                from None
     return {
         "task_id": task["task_id"],
         "status": "init",
@@ -257,29 +258,29 @@ async def create_task(data: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-async def _agent_overrides(raw: Any) -> dict[str, str]:
-    """A new task's choice of agent per role (``{"planner"|"worker"|"reviewer": agent_id}``), each registered
-    and able to run its role; an empty or null entry chooses nothing."""
-    from .agent_registry import RegistryError, check_selection
+async def _profile_overrides(raw: Any) -> dict[str, str]:
+    """A new task's choice of Agent Profile per role (``{"planner"|"worker"|"reviewer": profile_id}``), each
+    registered and able to run its role; an empty or null entry chooses nothing."""
+    from .profile_registry import RegistryError, check_selection
 
     if raw is None:
         return {}
     if not isinstance(raw, dict):
-        raise RequestError(HTTP_400, 'agent_overrides must be an object: {"planner" | "worker" | "reviewer": '
-                                     'agent_id}')
-    agents: dict[str, str] = {}
-    for role, agent_id in raw.items():
-        if role not in TASK_AGENT_ROLES:
-            raise RequestError(HTTP_400, f"a task chooses the agent of its {', '.join(TASK_AGENT_ROLES)} only, "
-                                         f"not {role!r}")
-        if agent_id in (None, ""):
+        raise RequestError(HTTP_400, 'profile_overrides must be an object: {"planner" | "worker" | "reviewer": '
+                                     'profile_id}')
+    profiles: dict[str, str] = {}
+    for role, profile_id in raw.items():
+        if role not in TASK_PROFILE_ROLES:
+            raise RequestError(HTTP_400, f"a task chooses the Agent Profile of its {', '.join(TASK_PROFILE_ROLES)} "
+                                         f"only, not {role!r}")
+        if profile_id in (None, ""):
             continue
         try:
-            await check_selection(agent_id, [role])
+            await check_selection(profile_id, [role])
         except RegistryError as exc:
             raise RequestError(HTTP_400, f"{role}: {exc}") from None
-        agents[role] = agent_id
-    return agents
+        profiles[role] = profile_id
+    return profiles
 
 
 async def move_task(task_id: str, data: dict[str, Any], task_router: TaskRouter) -> dict[str, Any]:

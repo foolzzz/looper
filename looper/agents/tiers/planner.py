@@ -115,7 +115,7 @@ from .planner_protocol import (
 
 logger = logging.getLogger(__name__)
 
-from ...db import activity as db_activity, agent_configs as db_agent_configs, llm_records as db_llm_records
+from ...db import activity as db_activity, role_configs as db_role_configs, llm_records as db_llm_records
 from ...db import agent_sessions as db_agent_sessions, plans as db_plans, projects as db_projects
 from ...db.tasks import FailKind, update_task_phase
 
@@ -174,7 +174,7 @@ class PlannerSettings:
 async def load_settings() -> PlannerSettings:
     """Read the ``planner`` agent config; without a readable row use the defaults."""
     try:
-        config = await db_agent_configs.get_config("planner")
+        config = await db_role_configs.get_config("planner")
     except Exception:
         logger.warning("cannot read the planner agent config; using defaults", exc_info=True)
         config = None
@@ -262,10 +262,10 @@ class TaskPlan:
     session_id: str | None = None  # the Planner's Claude session (agent_sessions), resumed after a restart
     # The session's running totals at its last result; a process that resumes the session starts from them.
     session_totals: Usage = field(default_factory=Usage)
-    # The runtime type and the provider the session belongs to and the agent that ran it last (None: a session
-    # saved before they were recorded).
+    # The runtime type and the provider the session belongs to and the Agent Profile that ran it last (None: a
+    # session saved before they were recorded).
     session_runtime: str | None = None
-    session_agent: str | None = None
+    session_profile: str | None = None
     session_provider: str | None = None
     final_summary: str = ""  # the last accepted step's summary
     fail_reason: str = ""
@@ -1286,9 +1286,9 @@ class PlannerAgent:
         knowledge = await self._load_knowledge(plan)
         library = await self._load_installed(plan)
         agent_settings = await self._load_agent_settings(plan)
-        if agent_settings.agent_error:
+        if agent_settings.profile_error:
             # The task fails with the reason rather than run another agent.
-            raise PlannerTurnError(agent_settings.agent_error)
+            raise PlannerTurnError(agent_settings.profile_error)
         system_prompt = self._system_prompt(plan, settings, knowledge, agent_settings.harness)
         launch = Launch(agent_settings, library, knowledge)
         await self._note_background(plan.project_background)
@@ -1303,8 +1303,8 @@ class PlannerAgent:
         # compared by their hashes, the mounted directories as such.
         signature = (tuple(base), system_prompt.sha256, launch.env_sha256, launch.library.sha256,
                      launch.knowledge.add_dirs, launch.binding_sha256)
-        switch = session_switch.agent_switch(plan.session_id, plan.session_runtime, plan.session_agent, launch,
-                                             session_provider=plan.session_provider)
+        switch = session_switch.profile_switch(plan.session_id, plan.session_runtime, plan.session_profile, launch,
+                                               session_provider=plan.session_provider)
         if switch is not None:
             # This agent cannot resume the session: a new one starts, after the old one hands over.
             await self._switch_session(plan, switch, settings.timeout_seconds)
@@ -1321,15 +1321,15 @@ class PlannerAgent:
         if self._claude.started and self._process is not None:
             process = self._process
         else:
-            plan.session_runtime, plan.session_agent = launch.runtime.type, launch.agent.id
-            plan.session_provider = launch.agent.provider.id
+            plan.session_runtime, plan.session_profile = launch.runtime.type, launch.profile.id
+            plan.session_provider = launch.profile.provider.id
             resuming = plan.session_id
             if not resuming and plan.steps:
                 # A new session for a plan under way: its first turn starts with the resume brief.
                 if self._pending_switch is None:
                     await self._drop_session(plan, session_switch.session_lost(
                         "the Planner has no saved session for this task", runtime=launch.runtime.type,
-                        agent=launch.agent.id))
+                        profile=launch.profile.id))
                 brief = self._resume_brief(plan)
             command = base + (launch.runtime.resume_args(plan.session_id) if plan.session_id else [])
             process = _Process(command, signature, system_prompt, launch)
@@ -1358,7 +1358,7 @@ class PlannerAgent:
             await self._claude.stop()
             await self._drop_session(plan, session_switch.session_lost(
                 f"its saved session {resuming} could not be resumed", runtime=launch.runtime.type,
-                agent=launch.agent.id))
+                profile=launch.profile.id))
             return await self._run_turn(message, retried=True)
 
     def _recorder(self, plan: TaskPlan, text: str, process: _Process) -> ClaudeRunRecorder:
@@ -2115,7 +2115,7 @@ class PlannerAgent:
         try:
             await db_agent_sessions.save_session(self.agent_id, plan.session_id, plan.session_totals.to_dict(),
                                                  runtime_type=plan.session_runtime, provider_id=plan.session_provider,
-                                                 session_agent_id=plan.session_agent)
+                                                 profile_id=plan.session_profile)
         except Exception:
             logger.exception("failed to save the session of %s", self.agent_id)
 
@@ -2142,7 +2142,7 @@ class PlannerAgent:
             session_id=session.get("session_id"),
             session_totals=Usage.from_dict(session.get("session_totals")),
             session_runtime=session.get("runtime_type"),
-            session_agent=session.get("session_agent_id"),
+            session_profile=session.get("profile_id"),
             session_provider=session.get("provider_id"),
             final_summary=row.get("final_summary") or "",
             fail_reason=row.get("fail_reason") or "",

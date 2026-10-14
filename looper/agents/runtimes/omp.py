@@ -80,7 +80,7 @@ from .per_turn import PerTurnSession, session_dir_name
 from .pricing import usage_event
 
 if TYPE_CHECKING:
-    from ..agent_registry import ProviderSpec
+    from ..profile_registry import ProviderSpec
     from ..agent_settings import Launch
     from ..library import AgentLibrary
 
@@ -179,7 +179,7 @@ class OmpRuntime(RuntimeAdapter):
     def launch_args(self, launch: Launch) -> list[str]:
         """The print-mode flags of every run, the model and the effort, and the installed plugin directories. The
         home's overlay, prompt and MCP plugin come with the command (``run_command``)."""
-        binding = self.bind_provider(launch.agent.provider, launch.model, launch.effort)
+        binding = self.bind_provider(launch.profile.provider, launch.model, launch.effort)
         return [
             "-p", "--mode", "json", "--no-title",
             *binding.args,
@@ -189,7 +189,7 @@ class OmpRuntime(RuntimeAdapter):
     def environment(self, launch: Launch) -> dict[str, str]:
         """The server's environment and the settings' variables, less what the isolation removes, then the
         provider's binding and the shell prefix that gives the agent's shell commands back what was removed."""
-        binding = self.bind_provider(launch.agent.provider, launch.model, launch.effort)
+        binding = self.bind_provider(launch.profile.provider, launch.model, launch.effort)
         visible = {**os.environ, **dict(launch.env)}
         return {**{k: v for k, v in visible.items() if k not in binding.unset}, **dict(binding.env),
                 SHELL_PREFIX_VAR: shell_prefix(visible)}
@@ -288,7 +288,7 @@ def models_yml(launch: Launch) -> dict[str, Any]:
     """The home's ``models.yml``: the provider ``looper`` with the agent's model, priced at nothing (Looper prices
     the tokens). Its context window comes from the provider's catalog when it gives one; a model the catalog lists
     without effort levels does not reason."""
-    provider = launch.agent.provider
+    provider = launch.profile.provider
     api = provider_api(provider)
     entry = provider.catalog_model(launch.model)
     model: dict[str, Any] = {

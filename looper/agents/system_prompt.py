@@ -6,7 +6,7 @@ The Planner, the Workers and the Reviewers get the same layout::
                                  agent_settings.resolve_harness (Settings
                                  default, or the project's override)
 
-    <role prompt>            L2: the agent's row in agent_configs (editable)
+    <role prompt>            L2: the role's row in role_configs (editable)
 
     ## Project: <name>       L3: only when the project has a background
     <background>
@@ -206,7 +206,7 @@ def compose_system_prompt(
 
 
 def is_recommended(role: str, recommended: str) -> bool:
-    """Whether the role prompt is the recommended one (``agent_configs.default_prompt``), whitespace aside."""
+    """Whether the role prompt is the recommended one (``role_configs.default_prompt``), whitespace aside."""
     return role.strip() == recommended.strip()
 
 

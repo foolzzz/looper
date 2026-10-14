@@ -58,7 +58,7 @@ from . import (
 )
 
 if TYPE_CHECKING:
-    from ..agent_registry import ProviderSpec
+    from ..profile_registry import ProviderSpec
     from ..agent_settings import Launch
     from ..run_usage import Usage
 
@@ -149,7 +149,7 @@ class ClaudeCodeRuntime(RuntimeAdapter):
         per-run spend cap (when Claude Code's own figure is the run's cost) and the provider's binding."""
         from ..claude_cli import budget_args, knowledge_args, library_args, permission_args
 
-        provider = launch.agent.provider
+        provider = launch.profile.provider
         return [
             *permission_args(),
             "--model", launch.model,
@@ -163,7 +163,7 @@ class ClaudeCodeRuntime(RuntimeAdapter):
     def environment(self, launch: Launch) -> dict[str, str] | None:
         """The subprocess environment: the server's, then the settings' variables and the provider's binding,
         less what the binding removes; None without any."""
-        binding = self.bind_provider(launch.agent.provider, launch.model, launch.effort)
+        binding = self.bind_provider(launch.profile.provider, launch.model, launch.effort)
         added = {**dict(launch.env), **dict(binding.env)}
         if not added and not binding.unset:
             return None

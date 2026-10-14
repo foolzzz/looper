@@ -16,7 +16,7 @@ from typing import Any
 import pytest
 
 from fake_claude import fake_claude
-from tests.test_agent_registry_db import _call, _launch, _ok, _run
+from tests.test_profile_registry_db import _call, _launch, _ok, _run
 from tests.test_catalog_db import DSN
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
@@ -34,9 +34,10 @@ async def _provider(name: str = "glm", *, base_url: str = THIRD_PARTY, api_key: 
     return (await _ok("POST", "/api/providers", body))["provider"]["provider_id"]
 
 
-async def _agent(provider_id: str, model: str, name: str | None = None) -> dict[str, Any]:
-    return await _ok("POST", "/api/agents", {"name": name or f"cc-{provider_id}-{model}", "runtime_id": "rt-claude-code",
-                                             "provider_id": provider_id, "model": model})
+async def _profile(provider_id: str, model: str, name: str | None = None) -> dict[str, Any]:
+    return await _ok("POST", "/api/agent-profiles", {"name": name or f"cc-{provider_id}-{model}",
+                                                     "runtime_id": "rt-claude-code", "provider_id": provider_id,
+                                                     "model": model})
 
 
 async def _task(tmp_path: Path) -> str:
@@ -66,11 +67,11 @@ def test_a_third_party_provider_gets_its_endpoint_key_and_every_model_alias_and_
         provider = await _provider(models=[{"name": "glm-5.3[1m]", "background_model": "glm-5.3-flash[1m]"},
                                            {"name": "glm-4.7"}],
                                    env=[{"key": "API_TIMEOUT_MS", "value": "3000000"}])
-        main = (await _agent(provider, "glm-5.3[1m]"))["agent"]["agent_id"]
-        plain = (await _agent(provider, "glm-4.7"))["agent"]["agent_id"]
+        main = (await _profile(provider, "glm-5.3[1m]"))["profile"]["profile_id"]
+        plain = (await _profile(provider, "glm-4.7"))["profile"]["profile_id"]
         task = await _task(tmp_path)
-        await _ok("PUT", "/api/agent-settings/roles/worker", {"agent": main, "run_budget_usd": 0.5})
-        await _ok("PUT", "/api/agent-settings/roles/reviewer", {"agent": plain})
+        await _ok("PUT", "/api/agent-settings/roles/worker", {"profile_id": main, "run_budget_usd": 0.5})
+        await _ok("PUT", "/api/agent-settings/roles/reviewer", {"profile_id": plain})
 
         worker = await _launch("worker", task, tmp_path / "w", tmp_path)
         assert _env_of(worker, "ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY", "API_TIMEOUT_MS") \
@@ -98,9 +99,9 @@ def test_anthropics_own_api_takes_the_key_as_an_api_key_and_keeps_claude_codes_c
 
     async def _test(_pool: Any) -> None:
         provider = await _provider("anthropic", base_url="")
-        agent = (await _agent(provider, "sonnet"))["agent"]["agent_id"]
+        profile = (await _profile(provider, "sonnet"))["profile"]["profile_id"]
         task = await _task(tmp_path)
-        await _ok("PUT", "/api/agent-settings/roles/worker", {"agent": agent, "run_budget_usd": 0.5})
+        await _ok("PUT", "/api/agent-settings/roles/worker", {"profile_id": profile, "run_budget_usd": 0.5})
 
         seen = await _launch("worker", task, tmp_path / "w", tmp_path)
         assert _env_of(seen, "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", *MAPPED) == {
@@ -121,8 +122,8 @@ def test_the_glm_preset_starts_claude_code_as_the_vendors_guide_says(
         provider = (await _ok("POST", "/api/providers", {
             "name": preset["name"], "protocols": api["protocols"], "base_url": api["base_url"], "auth": "api_key",
             "api_key": KEY, "models": preset["models"], "env": preset["env"]}))["provider"]["provider_id"]
-        agent = (await _agent(provider, "glm-5.3[1m]"))["agent"]["agent_id"]
-        await _ok("PUT", "/api/agent-settings/roles/worker", {"agent": agent})
+        profile = (await _profile(provider, "glm-5.3[1m]"))["profile"]["profile_id"]
+        await _ok("PUT", "/api/agent-settings/roles/worker", {"profile_id": profile})
 
         seen = await _launch("worker", await _task(tmp_path), tmp_path / "w", tmp_path)
         assert _env_of(seen, "ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_DEFAULT_HAIKU_MODEL",
@@ -137,7 +138,7 @@ def test_the_glm_preset_starts_claude_code_as_the_vendors_guide_says(
     _run(_test, monkeypatch)
 
 
-def test_every_preset_makes_providers_whose_agents_are_priced(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_every_preset_makes_providers_whose_profiles_are_priced(monkeypatch: pytest.MonkeyPatch) -> None:
     async def _test(_pool: Any) -> None:
         registry = await _ok("GET", "/api/registry")
         assert {p["preset_id"] for p in registry["provider_presets"]} >= {"glm-bigmodel", "glm-zai", "deepseek",
@@ -152,32 +153,32 @@ def test_every_preset_makes_providers_whose_agents_are_priced(monkeypatch: pytes
                 if not anthropic:
                     continue
                 for model in preset["models"]:
-                    answer = await _agent(provider["provider_id"], model["name"])
+                    answer = await _profile(provider["provider_id"], model["name"])
                     assert answer["warnings"] == [], (preset["preset_id"], model["name"])
-                    assert answer["agent"]["cost"] == {"source": "provider_price", "equivalent": False, "unpriced": []}
+                    assert answer["profile"]["cost"] == {"source": "provider_price", "equivalent": False, "unpriced": []}
 
     _run(_test, monkeypatch)
 
 
-def test_an_agent_whose_models_have_no_price_is_registered_with_a_warning(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_a_profile_whose_models_have_no_price_is_registered_with_a_warning(monkeypatch: pytest.MonkeyPatch) -> None:
     async def _test(_pool: Any) -> None:
         provider = await _provider(models=[{"name": "mystery-1", "background_model": "mystery-mini"}])
-        answer = await _agent(provider, "mystery-1")
-        assert answer["agent"]["cost"] == {"source": "provider_price", "equivalent": False,
-                                           "unpriced": ["mystery-1", "mystery-mini"]}
+        answer = await _profile(provider, "mystery-1")
+        assert answer["profile"]["cost"] == {"source": "provider_price", "equivalent": False,
+                                             "unpriced": ["mystery-1", "mystery-mini"]}
         assert len(answer["warnings"]) == 2 and all("spend caps do not apply" in w for w in answer["warnings"])
         # Priced in the catalog: no warning.
         priced = [{"name": "mystery-1", "input_usd_per_mtok": 1, "output_usd_per_mtok": 2,
                    "cache_read_usd_per_mtok": 0.1, "cache_write_usd_per_mtok": 1}]
         await _ok("PUT", f"/api/providers/{provider}", {"models": priced})
-        again = await _ok("PUT", f"/api/agents/{answer['agent']['agent_id']}", {"name": "mystery"})
+        again = await _ok("PUT", f"/api/agent-profiles/{answer['profile']['profile_id']}", {"name": "mystery"})
         assert again["warnings"] == []
         # Claude Code's own figures: the subscription's is an equivalent, an Anthropic key's real spend.
         registry = await _ok("GET", "/api/registry")
-        builtin = next(a for a in registry["agents"] if a["builtin"])
+        builtin = next(a for a in registry["profiles"] if a["builtin"])
         assert builtin["cost"] == {"source": "runtime", "equivalent": True, "unpriced": []}
-        anthropic = await _agent(await _provider("anthropic", base_url=""), "mystery-1")
-        assert (anthropic["agent"]["cost"]["source"], anthropic["warnings"]) == ("runtime", [])
+        anthropic = await _profile(await _provider("anthropic", base_url=""), "mystery-1")
+        assert (anthropic["profile"]["cost"]["source"], anthropic["warnings"]) == ("runtime", [])
 
     _run(_test, monkeypatch)
 
@@ -202,8 +203,8 @@ def test_an_api_key_provider_without_a_key_fails_the_run_with_the_reason(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
     async def _test(_pool: Any) -> None:
-        agent = (await _agent(await _provider(api_key=None), "glm-4.7"))["agent"]["agent_id"]
-        await _ok("PUT", "/api/agent-settings/roles/worker", {"agent": agent})
+        profile = (await _profile(await _provider(api_key=None), "glm-4.7"))["profile"]["profile_id"]
+        await _ok("PUT", "/api/agent-settings/roles/worker", {"profile_id": profile})
         result = await _launch("worker", await _task(tmp_path), tmp_path / "w", tmp_path)
         assert "argv" not in result  # nothing started
         assert result["outcome"]["status"] == "failed" and "has no API key" in result["outcome"]["error"]
@@ -255,8 +256,8 @@ def test_a_run_is_priced_from_each_models_tokens_cache_included(
 ) -> None:
     async def _test(pool: Any) -> None:
         provider = await _provider(models=PRICED)
-        agent = (await _agent(provider, "m-main"))["agent"]["agent_id"]
-        await _ok("PUT", "/api/agent-settings/roles/worker", {"agent": agent})
+        profile = (await _profile(provider, "m-main"))["profile"]["profile_id"]
+        await _ok("PUT", "/api/agent-settings/roles/worker", {"profile_id": profile})
         task = await _task(tmp_path)
         # Claude Code reports 9.99 at Claude's prices; the provider's prices say otherwise.
         result = {"type": "result", "subtype": "success", "is_error": False, "result": REPORT, "session_id": "s-1",
@@ -277,8 +278,8 @@ def test_a_run_is_priced_from_each_models_tokens_cache_included(
             (pytest.approx(0.040), 1, 0)
 
         # A model without a price: tokens only.
-        unknown = (await _agent(await _provider("other", models=[]), "mystery-1"))["agent"]["agent_id"]
-        await _ok("PUT", "/api/agent-settings/roles/worker", {"agent": unknown})
+        unknown = (await _profile(await _provider("other", models=[]), "mystery-1"))["profile"]["profile_id"]
+        await _ok("PUT", "/api/agent-settings/roles/worker", {"profile_id": unknown})
         await pool.execute("DELETE FROM llm_records")
         result["modelUsage"] = {"mystery-1": _usage(5, 6, 0, 0)}
         body = ("import json, sys\nsys.stdin.readline()\n"
@@ -306,8 +307,8 @@ def test_a_worker_over_its_cap_at_the_providers_prices_is_stopped(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
     async def _test(pool: Any) -> None:
-        agent = (await _agent(await _provider(models=PRICED), "m-main"))["agent"]["agent_id"]
-        await _ok("PUT", "/api/agent-settings/roles/worker", {"agent": agent, "run_budget_usd": 0.5})
+        profile = (await _profile(await _provider(models=PRICED), "m-main"))["profile"]["profile_id"]
+        await _ok("PUT", "/api/agent-settings/roles/worker", {"profile_id": profile, "run_budget_usd": 0.5})
         task = await _task(tmp_path)
         # 100000 input at 2.0 = $0.20 (under $0.50); then 200000 input and 1000 output = $0.41: $0.61 in all.
         claude = fake_claude(tmp_path / "claude-cap", _playing(
@@ -330,8 +331,8 @@ def test_a_planner_turn_over_its_cap_is_stopped_and_its_session_counts_the_spend
     from looper.db import agent_sessions
 
     async def _test(_pool: Any) -> None:
-        agent = (await _agent(await _provider(models=PRICED), "m-main"))["agent"]["agent_id"]
-        await _ok("PUT", "/api/agent-settings/roles/planner", {"agent": agent, "run_budget_usd": 0.5})
+        profile = (await _profile(await _provider(models=PRICED), "m-main"))["profile"]["profile_id"]
+        await _ok("PUT", "/api/agent-settings/roles/planner", {"profile_id": profile, "run_budget_usd": 0.5})
         task = await _task(tmp_path)
         (tmp_path / "w").mkdir(parents=True, exist_ok=True)
         claude = fake_claude(tmp_path / "claude-cap", _playing([INIT, *_request("m-main", 300_000, 0)], then_sleep=60))
@@ -373,7 +374,7 @@ def test_a_planner_resumes_its_session_only_with_the_same_runtime_type_and_provi
         plan = planner._plan = TaskPlan(
             plan_id="plan-x", goal_id="", requirement="r", work_dir=str(tmp_path / "w"),
             session_id=saved.get("session_id"), session_runtime=saved.get("runtime_type"),
-            session_agent=saved.get("session_agent_id"), session_provider=saved.get("provider_id"))
+            session_profile=saved.get("profile_id"), session_provider=saved.get("provider_id"))
         try:
             await planner._run_turn(planner._plan_message(plan))
         finally:
@@ -383,18 +384,18 @@ def test_a_planner_resumes_its_session_only_with_the_same_runtime_type_and_provi
     async def _test(pool: Any) -> None:
         catalog = [{"name": "glm-5.3[1m]"}, {"name": "glm-4.7"}]
         key_a, key_b = await _provider("key-a", models=catalog), await _provider("key-b", models=catalog)
-        agents = {"subscription": "agent-claude-code-opus",
-                  "key-a": (await _agent(key_a, "glm-5.3[1m]"))["agent"]["agent_id"],
-                  "key-a-other-model": (await _agent(key_a, "glm-4.7"))["agent"]["agent_id"],
-                  "key-b": (await _agent(key_b, "glm-5.3[1m]"))["agent"]["agent_id"]}
+        profiles = {"subscription": "agent-claude-code-opus",
+                    "key-a": (await _profile(key_a, "glm-5.3[1m]"))["profile"]["profile_id"],
+                    "key-a-other-model": (await _profile(key_a, "glm-4.7"))["profile"]["profile_id"],
+                    "key-b": (await _profile(key_b, "glm-5.3[1m]"))["profile"]["profile_id"]}
         providers = {"subscription": "prov-claude-subscription", "key-a": key_a, "key-a-other-model": key_a,
                      "key-b": key_b}
         task = await _task(tmp_path)
         (tmp_path / "w").mkdir(parents=True, exist_ok=True)
 
-        await _ok("PUT", "/api/agent-settings/roles/planner", {"agent": agents[before]})
+        await _ok("PUT", "/api/agent-settings/roles/planner", {"profile_id": profiles[before]})
         assert "--resume" not in (await _turn(task, 1))["argv"]
-        await _ok("PUT", "/api/agent-settings/roles/planner", {"agent": agents[after]})
+        await _ok("PUT", "/api/agent-settings/roles/planner", {"profile_id": profiles[after]})
         second = await _turn(task, 2)
 
         assert ("--resume" in second["argv"]) is resumes

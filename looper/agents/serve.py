@@ -186,56 +186,52 @@ async def seed_channel_configs(pool: Any = None) -> None:
     ], pool=pool)
 
 
-async def seed_agent_configs(pool: Any = None) -> None:
-    """Give every agent its config row and current recommended role prompt.
+async def seed_role_configs(pool: Any = None) -> None:
+    """Give every role its config row and current recommended role prompt.
 
     A row whose role prompt is still the recommended one follows a new
-    recommendation; an edited one is kept (``agent_configs.seed_defaults``).
+    recommendation; an edited one is kept (``role_configs.seed_defaults``).
     """
-    from ..db.agent_configs import replace_default_prompt, seed_defaults
+    from ..db.role_configs import replace_default_prompt, seed_defaults
     from .tiers.manager import DEFAULT_SYSTEM_PROMPT
     from .tiers.planner import DEFAULT_SYSTEM_PROMPT as PLANNER_SYSTEM_PROMPT
     from .tiers.worker import DEFAULT_SYSTEM_PROMPT as WORKER_SYSTEM_PROMPT, REVIEWER_SYSTEM_PROMPT
 
     await seed_defaults([
         {
-            "agent_id": "manager",
-            "display_name": "Manager (管家)",
             "role": "manager",
+            "display_name": "Manager (管家)",
             "system_prompt": DEFAULT_SYSTEM_PROMPT,
             "timeout_seconds": 0,
         },
         {
-            "agent_id": "planner",
-            "display_name": "Planner",
             "role": "planner",
+            "display_name": "Planner",
             "timeout_seconds": 1200,  # per Planner turn
             "system_prompt": PLANNER_SYSTEM_PROMPT,
         },
         {
-            "agent_id": "worker",
-            "display_name": "Worker",
             "role": "worker",
+            "display_name": "Worker",
             "max_concurrency": 3,
             "timeout_seconds": 86400,
             # The role prompt of every Worker (the report contract follows it).
             "system_prompt": WORKER_SYSTEM_PROMPT,
         },
         {
-            "agent_id": "reviewer",
-            "display_name": "Reviewer",
             "role": "reviewer",
+            "display_name": "Reviewer",
             "timeout_seconds": 86400,
             # The role prompt of every Reviewer (the verdict contract follows it).
             "system_prompt": REVIEWER_SYSTEM_PROMPT,
         },
     ], pool=pool)
     if await replace_default_prompt("planner", old=_PLANNER_PROMPT_BEFORE_CLAUDE, new=PLANNER_SYSTEM_PROMPT, pool=pool):
-        logger.info("planner agent config: replaced the old default system prompt")
+        logger.info("planner role config: replaced the old default system prompt")
     if await replace_default_prompt("manager", old=_MANAGER_PROMPT_BEFORE_PROJECTS, new=DEFAULT_SYSTEM_PROMPT, pool=pool):
-        logger.info("manager agent config: replaced the old default system prompt")
+        logger.info("manager role config: replaced the old default system prompt")
     if await replace_default_prompt("worker", old=_WORKER_PROMPT_BEFORE_CONTRACTS, new=WORKER_SYSTEM_PROMPT, pool=pool):
-        logger.info("worker agent config: replaced the old default system prompt")
+        logger.info("worker role config: replaced the old default system prompt")
 
 
 async def _register_optional_channel(
@@ -308,11 +304,11 @@ async def _run_agent_system(
     await _back_up_before_schema_change(pool, dsn, runtime_root, skip_backup=skip_backup)
     await ensure_schema(pool)
 
-    await seed_agent_configs(pool)
+    await seed_role_configs(pool)
     await seed_channel_configs(pool)
 
     # A built-in runtime for each other runtime type this machine has (Codex or OMP, when on PATH).
-    from .agent_registry import register_found_runtimes
+    from .profile_registry import register_found_runtimes
     try:
         if found := await register_found_runtimes():
             logger.info("registered the built-in runtime(s) %s", ", ".join(found))

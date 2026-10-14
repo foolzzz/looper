@@ -73,7 +73,7 @@ def _drain(queue: asyncio.Queue[MessageEnvelope]) -> list[MessageEnvelope]:
 def _saved(agent_db: Any, session_id: str = "sess-0") -> None:
     """The Manager's session as an earlier run of the server saved it."""
     agent_db.store.sessions["manager"] = {"session_id": session_id, "session_totals": {"cost_usd": 0.5},
-                                          "runtime_type": "claude-code", "session_agent_id": None}
+                                          "runtime_type": "claude-code", "profile_id": None}
 
 
 def _resets(agent_db: Any) -> list[dict[str, Any]]:
@@ -226,7 +226,7 @@ class TestNewSession:
     def test_task_planner_sessions_are_left_alone(self, monkeypatch: pytest.MonkeyPatch, agent_db: Any) -> None:
         _saved(agent_db)
         planner = {"session_id": "sess-p", "session_totals": {"cost_usd": 1.0}, "runtime_type": "claude-code",
-                   "session_agent_id": None}
+                   "profile_id": None}
         agent_db.store.sessions["planner-t1"] = dict(planner)
         _chat(monkeypatch, agent_db, ["/new"])
         assert agent_db.store.sessions["planner-t1"] == planner

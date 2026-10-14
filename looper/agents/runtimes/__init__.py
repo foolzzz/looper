@@ -58,7 +58,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, Protocol
 
 if TYPE_CHECKING:
-    from ..agent_registry import ProviderSpec
+    from ..profile_registry import ProviderSpec
     from ..agent_settings import Launch
     from ..claude_cli import CapStop, ResidentTurn
     from ..run_usage import Price, Usage
@@ -282,7 +282,7 @@ CLAUDE_CODE: RuntimeAdapter = ADAPTERS["claude-code"]
 
 
 # The provider of a session saved before sessions recorded one: Claude Code's own login, the only provider a
-# Claude Code agent could run with then (agent_registry.BUILTIN_PROVIDER).
+# Claude Code agent could run with then (profile_registry.BUILTIN_PROVIDER).
 LEGACY_SESSION_PROVIDER_ID = "prov-claude-subscription"
 
 

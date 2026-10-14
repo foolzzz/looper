@@ -19,7 +19,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from agent_fixtures import agent_json
+from agent_fixtures import profile_json
 from library_fixtures import ALPHA_SKILL, DEMO_PLUGIN, plugin_dirs
 
 from looper.agents.agent_settings import DEFAULT_HARNESS_PROMPT
@@ -367,13 +367,13 @@ class TestPlanning:
     def test_turn_over_the_time_limit_fails_planning(
         self, planner_claude: Any, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        from looper.db import agent_configs
+        from looper.db import role_configs
 
         async def _config(agent_id: str) -> dict[str, Any]:
             assert agent_id == "planner"
             return {"system_prompt": "You plan.", "timeout_seconds": 1, "max_turns": 0}
 
-        monkeypatch.setattr(agent_configs, "get_config", _config)
+        monkeypatch.setattr(role_configs, "get_config", _config)
         claude = planner_claude("<hang>")
         h = drive(claude, always(WORK_OK))
 
@@ -610,16 +610,16 @@ class TestResidentClaude:
     def test_claude_runs_unrestricted_in_the_task_directory(
         self, planner_claude: Any, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        from looper.db import agent_configs
+        from looper.db import role_configs
 
         async def _config(agent_id: str) -> dict[str, Any]:
             return {"system_prompt": "You plan carefully.", "timeout_seconds": 60, "max_turns": 9}
 
-        monkeypatch.setattr(agent_configs, "get_config", _config)
+        monkeypatch.setattr(role_configs, "get_config", _config)
         from looper.db import agent_setting_layers
 
         monkeypatch.setattr(agent_setting_layers, "list_layers", AsyncMock(
-            return_value=[{"scope": "role", "role": "planner", "agent": agent_json("claude-test")}]))
+            return_value=[{"scope": "role", "role": "planner", "profile": profile_json("claude-test")}]))
         claude = planner_claude(plan(step("s1")), decide("accept"))
         h = drive(claude, always(WORK_OK))
 
@@ -765,7 +765,7 @@ def _project(name: str = "calc", *, background: str = "", description: str = "")
 @pytest.fixture
 def planner_row(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     """The ``planner`` agent config row; a test may change its prompt between turns."""
-    from looper.db import agent_configs
+    from looper.db import role_configs
 
     row: dict[str, Any] = {"system_prompt": "You plan carefully.", "default_prompt": "You plan.", "timeout_seconds": 60,
                            "max_turns": 0}
@@ -774,7 +774,7 @@ def planner_row(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
         assert agent_id == "planner"
         return dict(row)
 
-    monkeypatch.setattr(agent_configs, "get_config", _config)
+    monkeypatch.setattr(role_configs, "get_config", _config)
     return row
 
 
@@ -889,10 +889,10 @@ class TestSystemPrompt:
 
 
 def _settings(agent_db: Any, **stored: str) -> None:
-    """What the system layer holds: harness, the agent of a model, effort and env (a JSON list)."""
-    names = {"harness": "harness_prompt", "model": "agent", "effort": "effort", "env": "env"}
+    """What the system layer holds: harness, the profile of a model, effort and env (a JSON list)."""
+    names = {"harness": "harness_prompt", "model": "profile", "effort": "effort", "env": "env"}
     agent_db.list_layers.return_value = [
-        {"scope": "system", **{names[k]: json.loads(v) if k == "env" else agent_json(v) if k == "model" else v
+        {"scope": "system", **{names[k]: json.loads(v) if k == "env" else profile_json(v) if k == "model" else v
                                for k, v in stored.items()}}]
 
 

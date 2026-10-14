@@ -1,4 +1,4 @@
-"""Runtimes, LLM providers and agents against a real PostgreSQL, through the HTTP API.
+"""Runtimes, LLM providers and Agent Profiles against a real PostgreSQL, through the HTTP API.
 
 Runs only when LOOPER_TEST_DATABASE_URL points at a disposable database. Each
 test works in a new schema of its own, dropped afterwards. A stand-in runtime
@@ -115,18 +115,18 @@ def _by_name(entries: list[dict[str, Any]], name: str) -> dict[str, Any]:
 # --- The built-ins ---
 
 
-def test_every_database_has_the_builtin_runtime_provider_and_agent(monkeypatch: pytest.MonkeyPatch) -> None:
-    from looper.agents.agent_registry import BUILTIN_AGENT, AgentSpec
+def test_every_database_has_the_builtin_runtime_provider_and_profile(monkeypatch: pytest.MonkeyPatch) -> None:
+    from looper.agents.profile_registry import BUILTIN_PROFILE, AgentProfile
     from looper.agents.runtimes import CLAUDE_CODE
-    from looper.db import agent_registry as db
+    from looper.db import profile_registry as db
     from looper.db.connection import ensure_schema
 
     async def _test(pool: Any) -> None:
-        await pool.execute("DELETE FROM agents WHERE builtin")  # a missing one comes back
+        await pool.execute("DELETE FROM agent_profiles WHERE builtin")  # a missing one comes back
         await ensure_schema(pool)
         await ensure_schema(pool)
-        (agent,) = await db.list_agents()
-        assert AgentSpec.from_row(agent) == BUILTIN_AGENT
+        (profile,) = await db.list_profiles()
+        assert AgentProfile.from_row(profile) == BUILTIN_PROFILE
         registry = await _registry()
         (runtime,) = registry["runtimes"]
         assert (runtime["builtin"], runtime["executable"], runtime["version"]) == (True, "", None)
@@ -140,8 +140,8 @@ def test_every_database_has_the_builtin_runtime_provider_and_agent(monkeypatch: 
 @pytest.mark.parametrize(("method", "path", "body"), [
     ("PUT", "/api/providers/prov-claude-subscription", {"models": [{"name": "opus"}]}),
     ("DELETE", "/api/providers/prov-claude-subscription", None),
-    ("PUT", "/api/agents/agent-claude-code-opus", {"model": "sonnet"}),
-    ("DELETE", "/api/agents/agent-claude-code-opus", None),
+    ("PUT", "/api/agent-profiles/agent-claude-code-opus", {"model": "sonnet"}),
+    ("DELETE", "/api/agent-profiles/agent-claude-code-opus", None),
 ])
 def test_the_builtins_are_read_only(monkeypatch: pytest.MonkeyPatch, method: str, path: str, body: Any) -> None:
     async def _test(_pool: Any) -> None:
@@ -211,17 +211,17 @@ def test_re_detect_probes_a_runtime_and_adds_a_type_found_on_path_since(
     _run(_test, monkeypatch)
 
 
-# Runtimes registered by hand before runtimes were built in: "claude-beta" runs an agent, "claude-old" none.
+# Runtimes registered by hand before runtimes were built in: "claude-beta" runs a profile, "claude-old" none.
 _CUSTOM_RUNTIMES = """
 INSERT INTO agent_runtimes (id, name, type, executable, capabilities)
 VALUES ('rt-custom-beta', 'claude-beta', 'claude-code', '/opt/claude-beta/bin/claude', ARRAY['run']),
        ('rt-custom-old', 'claude-old', 'claude-code', 'claude-old', ARRAY['run']);
-INSERT INTO agents (id, name, runtime_id, provider_id, model)
+INSERT INTO agent_profiles (id, name, runtime_id, provider_id, model)
 VALUES ('agent-beta', 'beta/haiku', 'rt-custom-beta', 'prov-claude-subscription', 'haiku');
 """
 
 
-def test_the_upgrade_drops_custom_runtimes_no_agent_uses_once_and_keeps_the_others(
+def test_the_upgrade_drops_custom_runtimes_no_profile_uses_once_and_keeps_the_others(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from looper.db.connection import ensure_schema
@@ -235,8 +235,8 @@ def test_the_upgrade_drops_custom_runtimes_no_agent_uses_once_and_keeps_the_othe
         runtimes = {r["name"]: r for r in (await _registry())["runtimes"]}
         assert set(runtimes) == {"claude-code", "claude-beta"}
         assert (runtimes["claude-beta"]["builtin"], runtimes["claude-beta"]["executable"],
-                runtimes["claude-beta"]["agent_count"]) == (False, "/opt/claude-beta/bin/claude", 1)
-        assert _by_name((await _registry())["agents"], "beta/haiku")["runtime_id"] == "rt-custom-beta"
+                runtimes["claude-beta"]["profile_count"]) == (False, "/opt/claude-beta/bin/claude", 1)
+        assert _by_name((await _registry())["profiles"], "beta/haiku")["runtime_id"] == "rt-custom-beta"
 
         # Once: a later run of the schema leaves the rows as they are.
         await pool.execute("INSERT INTO agent_runtimes (id, name, type) VALUES ('rt-custom-new', 'x', 'claude-code')")
@@ -294,14 +294,14 @@ def test_a_provider_that_does_not_validate_is_refused(
     _run(_test, monkeypatch)
 
 
-# --- Agents: checked when created or changed ---
+# --- Agent Profiles: checked when created or changed ---
 
 
 async def _provider(body: dict[str, Any]) -> str:
     return (await _ok("POST", "/api/providers", body))["provider"]["provider_id"]
 
 
-def test_an_agent_pairs_a_runtime_and_a_provider_that_can_run_together(
+def test_a_profile_pairs_a_runtime_and_a_provider_that_can_run_together(
     monkeypatch: pytest.MonkeyPatch, stand_in: str,
 ) -> None:
     async def _test(_pool: Any) -> None:
@@ -312,35 +312,35 @@ def test_an_agent_pairs_a_runtime_and_a_provider_that_can_run_together(
         login = await _provider({"name": "stand-in-login", "protocols": ["anthropic-messages"], "auth": "oauth",
                                  "oauth_runtime_type": stand_in})
 
-        async def agent(runtime_id: str, provider_id: str, model: str = "claude-sonnet-4-5") -> tuple[int, Any]:
-            return await _call("POST", "/api/agents", {"name": f"a-{runtime_id}-{provider_id}-{model}",
-                                                       "runtime_id": runtime_id, "provider_id": provider_id,
-                                                       "model": model})
+        async def profile(runtime_id: str, provider_id: str, model: str = "claude-sonnet-4-5") -> tuple[int, Any]:
+            return await _call("POST", "/api/agent-profiles", {"name": f"a-{runtime_id}-{provider_id}-{model}",
+                                                               "runtime_id": runtime_id, "provider_id": provider_id,
+                                                               "model": model})
 
-        status, payload = await agent("rt-claude-code", "prov-claude-subscription", "sonnet")
-        assert status == 201 and payload["agent"]["runtime_name"] == "claude-code"
-        assert (await agent(standin, key))[0] == 201  # an adapter that takes API keys
-        assert (await agent(standin, login))[0] == 201  # its own login
+        status, payload = await profile("rt-claude-code", "prov-claude-subscription", "sonnet")
+        assert status == 201 and payload["profile"]["runtime_name"] == "claude-code"
+        assert (await profile(standin, key))[0] == 201  # an adapter that takes API keys
+        assert (await profile(standin, login))[0] == 201  # its own login
 
         # Protocols must intersect.
-        status, payload = await agent("rt-claude-code", chat)
+        status, payload = await profile("rt-claude-code", chat)
         assert status == 400 and "share no protocol" in payload["error"]
         # An OAuth provider pairs only with the runtime type whose login it is, either way round.
-        status, payload = await agent(standin, "prov-claude-subscription", "sonnet")
+        status, payload = await profile(standin, "prov-claude-subscription", "sonnet")
         assert status == 400 and "login of claude-code runtimes" in payload["error"]
-        status, payload = await agent("rt-claude-code", login)
+        status, payload = await profile("rt-claude-code", login)
         assert status == 400 and "login of stand-in runtimes" in payload["error"]
         # Claude Code runs with its own login and with an API key.
-        assert (await agent("rt-claude-code", key))[0] == 201
+        assert (await profile("rt-claude-code", key))[0] == 201
         # A provider that lists its models takes no other.
-        status, payload = await agent(standin, key, "claude-opus-4-5")
+        status, payload = await profile(standin, key, "claude-opus-4-5")
         assert status == 400 and "not one of them" in payload["error"]
         # A runtime that takes only its own login refuses an API key.
         from looper.agents import runtimes
         from looper.agents.runtimes import AuthKind
 
         monkeypatch.setattr(type(runtimes.ADAPTERS[stand_in]), "auth_kinds", frozenset({AuthKind.OAUTH}))
-        status, payload = await agent(standin, key, "claude-sonnet-4-5")
+        status, payload = await profile(standin, key, "claude-sonnet-4-5")
         assert status == 400 and "cannot be started with an api_key provider" in payload["error"]
 
     _run(_test, monkeypatch)
@@ -370,16 +370,17 @@ def test_codex_pairs_only_with_an_api_key_provider_of_openai_responses_and_runs_
         chat = await _provider({"name": "chat-only", "protocols": ["openai-chat"], "auth": "api_key"})
         anthropic = await _provider({"name": "anthropic-key", "protocols": ["anthropic-messages"], "auth": "api_key"})
 
-        async def agent(provider_id: str) -> tuple[int, Any]:
-            return await _call("POST", "/api/agents", {"name": f"codex-{provider_id}", "model": "gpt-5.5",
-                                                       "runtime_id": runtime["runtime_id"], "provider_id": provider_id})
+        async def profile(provider_id: str) -> tuple[int, Any]:
+            return await _call("POST", "/api/agent-profiles", {
+                "name": f"codex-{provider_id}", "model": "gpt-5.5", "runtime_id": runtime["runtime_id"],
+                "provider_id": provider_id})
 
-        status, payload = await agent(cpa)
+        status, payload = await profile(cpa)
         assert status == 201
         # Every role can run it: the system layer selects it for all four.
-        await _ok("PUT", "/api/agent-settings/system", {"agent": payload["agent"]["agent_id"]})
+        await _ok("PUT", "/api/agent-settings/system", {"profile_id": payload["profile"]["profile_id"]})
         for provider_id in (chat, anthropic, "prov-claude-subscription"):
-            status, payload = await agent(provider_id)
+            status, payload = await profile(provider_id)
             assert status == 400 and "share no protocol" in payload["error"]
         # Codex's own login is not one Looper uses (API keys only).
         status, payload = await _call("POST", "/api/providers", {
@@ -390,7 +391,7 @@ def test_codex_pairs_only_with_an_api_key_provider_of_openai_responses_and_runs_
 
 
 def test_codex_on_path_becomes_a_builtin_runtime_once(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    from looper.agents.agent_registry import register_found_runtimes
+    from looper.agents.profile_registry import register_found_runtimes
 
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
@@ -435,19 +436,20 @@ def test_omp_pairs_with_an_api_key_provider_of_any_of_its_apis_and_runs_every_ro
             await _provider({"name": "anthropic-key", "protocols": ["anthropic-messages"], "auth": "api_key"}),
         ]
 
-        async def agent(provider_id: str) -> tuple[int, Any]:
-            return await _call("POST", "/api/agents", {"name": f"omp-{provider_id}", "model": "gpt-5.5",
-                                                       "runtime_id": runtime["runtime_id"], "provider_id": provider_id})
+        async def profile(provider_id: str) -> tuple[int, Any]:
+            return await _call("POST", "/api/agent-profiles", {
+                "name": f"omp-{provider_id}", "model": "gpt-5.5", "runtime_id": runtime["runtime_id"],
+                "provider_id": provider_id})
 
-        agents = []
+        profiles = []
         for provider_id in providers:
-            status, payload = await agent(provider_id)
+            status, payload = await profile(provider_id)
             assert status == 201, payload
-            agents.append(payload["agent"]["agent_id"])
+            profiles.append(payload["profile"]["profile_id"])
         # Every role can run it: the system layer selects it for all four.
-        await _ok("PUT", "/api/agent-settings/system", {"agent": agents[0]})
+        await _ok("PUT", "/api/agent-settings/system", {"profile_id": profiles[0]})
         # The Claude subscription is Claude Code's login, and OMP's own logins are not ones Looper uses.
-        status, payload = await agent("prov-claude-subscription")
+        status, payload = await profile("prov-claude-subscription")
         assert status == 400 and "pairs only with" in payload["error"]
         status, payload = await _call("POST", "/api/providers", {
             "name": "omp-login", "protocols": ["openai-responses"], "auth": "oauth", "oauth_runtime_type": "omp"})
@@ -457,7 +459,7 @@ def test_omp_pairs_with_an_api_key_provider_of_any_of_its_apis_and_runs_every_ro
 
 
 def test_omp_on_path_becomes_a_builtin_runtime_once(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    from looper.agents.agent_registry import register_found_runtimes
+    from looper.agents.profile_registry import register_found_runtimes
 
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
@@ -474,27 +476,28 @@ def test_omp_on_path_becomes_a_builtin_runtime_once(monkeypatch: pytest.MonkeyPa
     _run(_test, monkeypatch)
 
 
-def test_a_change_that_would_break_an_agent_is_refused_and_one_in_use_is_kept(
+def test_a_change_that_would_break_a_profile_is_refused_and_one_in_use_is_kept(
     monkeypatch: pytest.MonkeyPatch, stand_in: str,
 ) -> None:
     async def _test(_pool: Any) -> None:
         runtime_id = await _runtime(stand_in, name="si")
         provider_id = await _provider({"name": "key", "protocols": ["anthropic-messages"], "auth": "api_key"})
-        agent = (await _ok("POST", "/api/agents", {"name": "si-sonnet", "runtime_id": runtime_id,
-                                                   "provider_id": provider_id, "model": "sonnet",
-                                                   "effort": "low"}))["agent"]
+        profile = (await _ok("POST", "/api/agent-profiles", {"name": "si-sonnet", "runtime_id": runtime_id,
+                                                             "provider_id": provider_id, "model": "sonnet",
+                                                             "effort": "low"}))["profile"]
 
         status, payload = await _call("PUT", f"/api/providers/{provider_id}", {"protocols": ["openai-chat"]})
-        assert status == 400 and "agent 'si-sonnet' uses this provider" in payload["error"]
-        status, payload = await _call("PUT", f"/api/agents/{agent['agent_id']}",
+        assert status == 400 and "Agent Profile 'si-sonnet' uses this provider" in payload["error"]
+        status, payload = await _call("PUT", f"/api/agent-profiles/{profile['profile_id']}",
                                       {"provider_id": "prov-claude-subscription"})
         assert status == 400 and "login of claude-code runtimes" in payload["error"]
-        renamed = (await _ok("PUT", f"/api/agents/{agent['agent_id']}", {"name": "si-fast", "effort": None}))["agent"]
+        renamed = (await _ok("PUT", f"/api/agent-profiles/{profile['profile_id']}",
+                             {"name": "si-fast", "effort": None}))["profile"]
         assert (renamed["name"], renamed["effort"]) == ("si-fast", None)
 
         status, payload = await _call("DELETE", f"/api/providers/{provider_id}")
         assert status == 409 and "first" in payload["error"]
-        await _ok("DELETE", f"/api/agents/{agent['agent_id']}")
+        await _ok("DELETE", f"/api/agent-profiles/{profile['profile_id']}")
         await _ok("DELETE", f"/api/providers/{provider_id}")
         assert runtime_id in {r["runtime_id"] for r in (await _registry())["runtimes"]}
 
@@ -503,7 +506,7 @@ def test_a_change_that_would_break_an_agent_is_refused_and_one_in_use_is_kept(
 
 # --- LLM profiles are gone ---
 
-# What a database had before agents: LLM profiles and the two agent config columns that pointed at them.
+# What a database had before Agent Profiles: LLM profiles and the two agent config columns that pointed at them.
 _BEFORE_AGENTS = """
 CREATE TABLE llm_profiles (id BIGSERIAL PRIMARY KEY, name TEXT NOT NULL UNIQUE, provider_kind TEXT NOT NULL,
                            model TEXT NOT NULL DEFAULT '');
@@ -520,7 +523,7 @@ VALUES ('worker', 'worker', 'codex-cli', 1, 'Work.');
 """
 
 
-def test_the_upgrade_removes_llm_profiles_and_keeps_the_agent_configs(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_the_upgrade_removes_llm_profiles_and_keeps_the_role_configs(monkeypatch: pytest.MonkeyPatch) -> None:
     from looper.db.connection import ensure_schema
 
     async def _test(pool: Any) -> None:
@@ -528,101 +531,102 @@ def test_the_upgrade_removes_llm_profiles_and_keeps_the_agent_configs(monkeypatc
         assert await pool.fetchval("SELECT to_regclass('llm_profiles')") is None
         columns = {r["column_name"] for r in await pool.fetch(
             "SELECT column_name FROM information_schema.columns WHERE table_schema = current_schema() "
-            "AND table_name = 'agent_configs'")}
+            "AND table_name = 'role_configs'")}
         assert not columns & {"runtime", "llm_profile_id"}
-        assert await pool.fetchval("SELECT system_prompt FROM agent_configs WHERE agent_id = 'worker'") == "Work."
+        assert await pool.fetchval("SELECT system_prompt FROM role_configs WHERE role = 'worker'") == "Work."
         assert await pool.fetchval("SELECT 1 FROM schema_migrations WHERE name = 'llm_profiles_removed'")
 
         assert (await _call("GET", "/api/llm-profiles"))[0] == 404
-        status, payload = await _call("PUT", "/api/agent-configs/worker", {"runtime": "codex-cli"})
+        status, payload = await _call("PUT", "/api/roles/worker", {"runtime": "codex-cli"})
         assert status == 400 and "runtime was removed" in payload["error"]
 
     _run(_test, monkeypatch, before=_BEFORE_AGENTS)
 
 
-# --- Selecting an agent: the layers and a task's overrides, checked for the roles they reach ---
+# --- Selecting a profile: the layers and a task's overrides, checked for the roles they reach ---
 
 
-async def _agent(name: str, runtime_id: str = "rt-claude-code", provider_id: str = "prov-claude-subscription",
-                 model: str | None = None) -> str:
-    return (await _ok("POST", "/api/agents", {"name": name, "runtime_id": runtime_id, "provider_id": provider_id,
-                                              "model": model or name.rsplit("/", 1)[-1]}))["agent"]["agent_id"]
+async def _profile(name: str, runtime_id: str = "rt-claude-code", provider_id: str = "prov-claude-subscription",
+                   model: str | None = None) -> str:
+    return (await _ok("POST", "/api/agent-profiles", {
+        "name": name, "runtime_id": runtime_id, "provider_id": provider_id,
+        "model": model or name.rsplit("/", 1)[-1]}))["profile"]["profile_id"]
 
 
-async def _stand_in_agent(stand_in: str) -> str:
+async def _stand_in_profile(stand_in: str) -> str:
     runtime_id = await _runtime(stand_in, name="si")
     provider_id = (await _ok("POST", "/api/providers", {"name": "si-key", "protocols": ["anthropic-messages"],
                                                         "auth": "api_key"}))["provider"]["provider_id"]
-    return await _agent("si/sonnet", runtime_id, provider_id, "sonnet")
+    return await _profile("si/sonnet", runtime_id, provider_id, "sonnet")
 
 
-def test_a_layer_selects_an_agent_only_for_roles_its_runtime_can_run(
+def test_a_layer_selects_a_profile_only_for_roles_its_runtime_can_run(
     monkeypatch: pytest.MonkeyPatch, stand_in: str,
 ) -> None:
     async def _test(_pool: Any) -> None:
-        one_off = await _stand_in_agent(stand_in)
+        one_off = await _stand_in_profile(stand_in)
         project = (await _ok("POST", "/api/projects", {"name": "calc"}))["project_id"]
 
-        await _ok("PUT", "/api/agent-settings/roles/worker", {"agent": one_off})
-        await _ok("PUT", f"/api/projects/{project}/agent-settings/roles/reviewer", {"agent": one_off})
+        await _ok("PUT", "/api/agent-settings/roles/worker", {"profile_id": one_off})
+        await _ok("PUT", f"/api/projects/{project}/agent-settings/roles/reviewer", {"profile_id": one_off})
         for path in ("/api/agent-settings/roles/planner", "/api/agent-settings/roles/manager",
                      "/api/agent-settings/system", f"/api/projects/{project}/agent-settings"):
-            status, payload = await _call("PUT", path, {"agent": one_off})
+            status, payload = await _call("PUT", path, {"profile_id": one_off})
             assert status == 400 and "lacks resident_session, resume" in payload["error"], (path, payload)
-        assert (await _call("PUT", "/api/agent-settings/system", {"agent": "agent-nowhere"}))[0] == 400
+        assert (await _call("PUT", "/api/agent-settings/system", {"profile_id": "agent-nowhere"}))[0] == 400
 
-        # An agent selected for the Planner cannot move to a runtime that cannot run it.
-        planner = await _agent("claude-code/sonnet")
-        await _ok("PUT", "/api/agent-settings/roles/planner", {"agent": planner})
+        # A profile selected for the Planner cannot move to a runtime that cannot run it.
+        planner = await _profile("claude-code/sonnet")
+        await _ok("PUT", "/api/agent-settings/roles/planner", {"profile_id": planner})
         si_runtime = next(r["runtime_id"] for r in (await _registry())["runtimes"] if r["name"] == "si")
         si_key = next(p["provider_id"] for p in (await _registry())["providers"] if p["name"] == "si-key")
-        status, payload = await _call("PUT", f"/api/agents/{planner}", {"runtime_id": si_runtime,
-                                                                        "provider_id": si_key})
+        status, payload = await _call("PUT", f"/api/agent-profiles/{planner}", {"runtime_id": si_runtime,
+                                                                                "provider_id": si_key})
         assert status == 400 and "cannot run the planner" in payload["error"]
-        # A selected agent stays until nothing selects it.
-        assert (await _call("DELETE", f"/api/agents/{planner}"))[0] == 409
+        # A selected profile stays until nothing selects it.
+        assert (await _call("DELETE", f"/api/agent-profiles/{planner}"))[0] == 409
 
     _run(_test, monkeypatch)
 
 
-def test_where_an_agent_is_selected_is_read_back_and_keeps_it_from_being_deleted(
+def test_where_a_profile_is_selected_is_read_back_and_keeps_it_from_being_deleted(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, stand_in: str,
 ) -> None:
     async def _test(_pool: Any) -> None:
-        sonnet, haiku = await _agent("claude-code/sonnet"), await _agent("claude-code/haiku")
-        one_off = await _stand_in_agent(stand_in)
+        sonnet, haiku = await _profile("claude-code/sonnet"), await _profile("claude-code/haiku")
+        one_off = await _stand_in_profile(stand_in)
         calc = (await _ok("POST", "/api/projects", {"name": "calc", "work_dir": str(tmp_path)}))["project_id"]
-        await _ok("PUT", "/api/agent-settings/system", {"agent": sonnet})
-        await _ok("PUT", "/api/agent-settings/roles/worker", {"agent": sonnet})
-        await _ok("PUT", f"/api/projects/{calc}/agent-settings", {"agent": sonnet})
-        await _ok("PUT", f"/api/projects/{calc}/agent-settings/roles/reviewer", {"agent": one_off})
+        await _ok("PUT", "/api/agent-settings/system", {"profile_id": sonnet})
+        await _ok("PUT", "/api/agent-settings/roles/worker", {"profile_id": sonnet})
+        await _ok("PUT", f"/api/projects/{calc}/agent-settings", {"profile_id": sonnet})
+        await _ok("PUT", f"/api/projects/{calc}/agent-settings/roles/reviewer", {"profile_id": one_off})
         for _ in range(2):
             await _ok("POST", "/api/tasks/create", {"requirement": "r", "project_id": calc,
-                                                    "agent_overrides": {"worker": sonnet, "reviewer": sonnet}})
+                                                    "profile_overrides": {"worker": sonnet, "reviewer": sonnet}})
 
-        agents = {a["name"]: a for a in (await _registry())["agents"]}
-        assert agents["claude-code/sonnet"]["used_by"] == {"layers": [
+        profiles = {a["name"]: a for a in (await _registry())["profiles"]}
+        assert profiles["claude-code/sonnet"]["used_by"] == {"layers": [
             {"scope": "system", "role": None, "project_id": None, "project_name": None},
             {"scope": "role", "role": "worker", "project_id": None, "project_name": None},
             {"scope": "project", "role": None, "project_id": calc, "project_name": "calc"},
         ], "task_count": 2}
-        assert agents["si/sonnet"]["used_by"]["layers"] == [
+        assert profiles["si/sonnet"]["used_by"]["layers"] == [
             {"scope": "role_project", "role": "reviewer", "project_id": calc, "project_name": "calc"}]
-        assert agents["claude-code/haiku"]["used_by"] == {"layers": [], "task_count": 0}
+        assert profiles["claude-code/haiku"]["used_by"] == {"layers": [], "task_count": 0}
         # What its runtime can run: the stand-in keeps no resident session.
-        assert (agents["claude-code/sonnet"]["roles"], agents["si/sonnet"]["roles"]) == (
+        assert (profiles["claude-code/sonnet"]["roles"], profiles["si/sonnet"]["roles"]) == (
             ["manager", "planner", "worker", "reviewer"], ["worker", "reviewer"])
-        # An agent's own answer has it too.
-        changed = (await _ok("PUT", f"/api/agents/{one_off}", {"effort": "high"}))["agent"]
-        assert changed["used_by"] == agents["si/sonnet"]["used_by"]
+        # A profile's own answer has it too.
+        changed = (await _ok("PUT", f"/api/agent-profiles/{one_off}", {"effort": "high"}))["profile"]
+        assert changed["used_by"] == profiles["si/sonnet"]["used_by"]
 
-        status, payload = await _call("DELETE", f"/api/agents/{sonnet}")
+        status, payload = await _call("DELETE", f"/api/agent-profiles/{sonnet}")
         assert status == 409 and payload["error"] == (
-            "agent 'claude-code/sonnet' is selected by the defaults of every role, the worker role, project 'calc', "
-            "2 tasks: select another agent there first")
-        status, payload = await _call("DELETE", f"/api/agents/{one_off}")
+            "Agent Profile 'claude-code/sonnet' is selected by the defaults of every role, the worker role, project "
+            "'calc', 2 tasks: select another profile there first")
+        status, payload = await _call("DELETE", f"/api/agent-profiles/{one_off}")
         assert status == 409 and "the reviewer in project 'calc'" in payload["error"]
-        await _ok("DELETE", f"/api/agents/{haiku}")  # nothing selects it
+        await _ok("DELETE", f"/api/agent-profiles/{haiku}")  # nothing selects it
 
     _run(_test, monkeypatch)
 
@@ -673,16 +677,16 @@ def _model(seen: dict[str, Any]) -> str:
     return argv[argv.index("--model") + 1]
 
 
-def test_a_tasks_agent_override_reaches_only_that_tasks_role(
+def test_a_tasks_profile_override_reaches_only_that_tasks_role(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, stand_in: str,
 ) -> None:
     async def _test(pool: Any) -> None:
-        sonnet, haiku = await _agent("claude-code/sonnet"), await _agent("claude-code/haiku")
-        one_off = await _stand_in_agent(stand_in)
-        await _ok("PUT", "/api/agent-settings/system", {"agent": sonnet})
+        sonnet, haiku = await _profile("claude-code/sonnet"), await _profile("claude-code/haiku")
+        one_off = await _stand_in_profile(stand_in)
+        await _ok("PUT", "/api/agent-settings/system", {"profile_id": sonnet})
         project = (await _ok("POST", "/api/projects", {"name": "calc", "work_dir": str(tmp_path / "w")}))["project_id"]
         chose = (await _ok("POST", "/api/tasks/create", {"requirement": "r", "project_id": project,
-                                                         "agent_overrides": {"worker": haiku, "planner": None}}))
+                                                         "profile_overrides": {"worker": haiku, "planner": None}}))
         plain = await _ok("POST", "/api/tasks/create", {"requirement": "r", "project_id": project})
 
         seen = {(task["task_id"] == chose["task_id"], role): await _launch(role, task["task_id"], tmp_path / "w",
@@ -694,31 +698,32 @@ def test_a_tasks_agent_override_reaches_only_that_tasks_role(
         # Every run went through the Claude Code runtime with its own login: its cost is what Claude reports.
         assert {r["cost_source"] for r in await pool.fetch("SELECT cost_source FROM llm_records")} == {"runtime"}
 
-        detail = (await _ok("GET", f"/api/tasks/{chose['task_id']}"))["agent_overrides"]
+        detail = (await _ok("GET", f"/api/tasks/{chose['task_id']}"))["profile_overrides"]
         assert {role: a["name"] for role, a in detail.items()} == {"worker": "claude-code/haiku"}
-        assert (await _ok("GET", f"/api/tasks/{plain['task_id']}"))["agent_overrides"] == {}
-        assert (await _call("DELETE", f"/api/agents/{haiku}"))[0] == 409  # a task chose it
+        assert (await _ok("GET", f"/api/tasks/{plain['task_id']}"))["profile_overrides"] == {}
+        assert (await _call("DELETE", f"/api/agent-profiles/{haiku}"))[0] == 409  # a task chose it
 
-        # A task chooses only for its own roles, an agent that exists and can run the role.
-        for overrides, error in [({"manager": sonnet}, "not 'manager'"), ({"worker": "agent-nowhere"}, "no agent"),
+        # A task chooses only for its own roles, a profile that exists and can run the role.
+        for overrides, error in [({"manager": sonnet}, "not 'manager'"),
+                                 ({"worker": "agent-nowhere"}, "no Agent Profile"),
                                  ({"planner": one_off}, "cannot run the planner"), ([sonnet], "must be an object")]:
             status, payload = await _call("POST", "/api/tasks/create", {"requirement": "r", "project_id": project,
-                                                                        "agent_overrides": overrides})
+                                                                        "profile_overrides": overrides})
             assert status == 400 and error in payload["error"], payload
         assert (await _call("POST", "/api/tasks/create", {"requirement": "r", "project_id": project,
-                                                          "agent_overrides": {"worker": one_off}}))[0] == 201
+                                                          "profile_overrides": {"worker": one_off}}))[0] == 201
 
     _run(_test, monkeypatch)
 
 
-def test_an_agent_that_can_no_longer_run_fails_the_run_instead_of_another_agent(
+def test_a_profile_that_can_no_longer_run_fails_the_run_instead_of_another_profile(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, stand_in: str,
 ) -> None:
     from looper.agents import runtimes
 
     async def _test(_pool: Any) -> None:
-        one_off = await _stand_in_agent(stand_in)
-        await _ok("PUT", "/api/agent-settings/roles/worker", {"agent": one_off})
+        one_off = await _stand_in_profile(stand_in)
+        await _ok("PUT", "/api/agent-settings/roles/worker", {"profile_id": one_off})
         project = (await _ok("POST", "/api/projects", {"name": "calc"}))["project_id"]
         task = (await _ok("POST", "/api/tasks/create", {"requirement": "r", "project_id": project,
                                                         "work_dir": str(tmp_path / "w")}))["task_id"]
@@ -732,9 +737,9 @@ def test_an_agent_that_can_no_longer_run_fails_the_run_instead_of_another_agent(
     _run(_test, monkeypatch)
 
 
-# --- The upgrade: each layer's model becomes an agent ---
+# --- The upgrade: each layer's model becomes an Agent Profile ---
 
-_BEFORE_LAYER_AGENTS = """
+_BEFORE_LAYER_PROFILES = """
 CREATE TABLE schema_migrations (name TEXT PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT now());
 INSERT INTO schema_migrations (name) VALUES ('agent_setting_layers');
 CREATE TABLE projects (id TEXT PRIMARY KEY, name TEXT NOT NULL, description TEXT NOT NULL DEFAULT '',
@@ -757,34 +762,35 @@ INSERT INTO agent_setting_layers (scope, role, project_id, model, effort) VALUES
 """
 
 
-def test_the_upgrade_turns_each_layer_model_into_an_agent(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_the_upgrade_turns_each_layer_model_into_a_profile(monkeypatch: pytest.MonkeyPatch) -> None:
     from looper.db.connection import ensure_schema
 
     async def _layers(pool: Any) -> list[tuple[Any, ...]]:
         return [tuple(r) for r in await pool.fetch(
             "SELECT l.scope, l.role, l.project_id, a.name, a.model, a.runtime_id, a.provider_id, l.effort "
-            "FROM agent_setting_layers l LEFT JOIN agents a ON a.id = l.agent_id ORDER BY 1, 2, 3")]
+            "FROM agent_setting_layers l LEFT JOIN agent_profiles a ON a.id = l.profile_id ORDER BY 1, 2, 3")]
 
     async def _test(pool: Any) -> None:
         columns = {r["column_name"] for r in await pool.fetch(
             "SELECT column_name FROM information_schema.columns WHERE table_schema = current_schema() "
             "AND table_name = 'agent_setting_layers'")}
-        assert "model" not in columns and "agent_id" in columns
+        assert "model" not in columns and "profile_id" in columns
         builtin = ("rt-claude-code", "prov-claude-subscription")
         assert await _layers(pool) == [
             ("project", None, "proj-a", "claude-code/opus[1m]", "opus[1m]", *builtin, None),
-            ("role", "manager", None, "claude-code/opus", "opus", *builtin, None),  # the built-in agent
+            ("role", "manager", None, "claude-code/opus", "opus", *builtin, None),  # the built-in profile
             ("role", "planner", None, "claude-code/haiku", "haiku", *builtin, None),
             ("role", "worker", None, "claude-code/sonnet", "sonnet", *builtin, None),
             ("system", None, None, "claude-code/sonnet", "sonnet", *builtin, "high"),
         ]  # the reviewer's model no longer validated (it was ignored): its layer held nothing else
-        assert await pool.fetchval("SELECT count(*) FROM agents") == 4
-        before = await _layers(pool), [tuple(r) for r in await pool.fetch("SELECT * FROM agents ORDER BY id")]
+        assert await pool.fetchval("SELECT count(*) FROM agent_profiles") == 4
+        before = await _layers(pool), [tuple(r) for r in await pool.fetch("SELECT * FROM agent_profiles ORDER BY id")]
         await ensure_schema(pool)
-        assert (await _layers(pool), [tuple(r) for r in await pool.fetch("SELECT * FROM agents ORDER BY id")]) \
+        assert (await _layers(pool),
+                [tuple(r) for r in await pool.fetch("SELECT * FROM agent_profiles ORDER BY id")]) \
             == before
 
-    _run(_test, monkeypatch, before=_BEFORE_LAYER_AGENTS)
+    _run(_test, monkeypatch, before=_BEFORE_LAYER_PROFILES)
 
 
 # --- A provider's model catalog and concurrency: stored and checked ---

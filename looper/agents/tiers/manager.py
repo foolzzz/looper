@@ -63,7 +63,7 @@ from ..message import (
 logger = logging.getLogger(__name__)
 
 from ...db import activity as db_activity
-from ...db import agent_configs as db_agent_configs
+from ...db import role_configs as db_role_configs
 from ...db import chat as db_chat
 from ...db import agent_sessions as db_agent_sessions
 from ...db import llm_records as db_llm_records
@@ -209,10 +209,10 @@ class ManagerAgent:
         # The session's running totals (cost and tokens) at its last result. A process that resumes the
         # session starts from them, so its first turn records only its own share.
         self._session_totals = Usage()
-        # The runtime type and the provider the session belongs to and the agent that ran it last (None: a
-        # session saved before they were recorded).
+        # The runtime type and the provider the session belongs to and the Agent Profile that ran it last (None:
+        # a session saved before they were recorded).
         self._session_runtime: str | None = None
-        self._session_agent: str | None = None
+        self._session_profile: str | None = None
         self._session_provider: str | None = None
         self._bus: MessageBus | None = None
         self._task: asyncio.Task[Any] | None = None
@@ -257,7 +257,7 @@ class ManagerAgent:
             self._session_id = saved.get("session_id")
             self._session_totals = Usage.from_dict(saved.get("session_totals"))
             self._session_runtime = saved.get("runtime_type")
-            self._session_agent = saved.get("session_agent_id")
+            self._session_profile = saved.get("profile_id")
             self._session_provider = saved.get("provider_id")
             self._clean_start = bool(saved.get("clean_start"))
 
@@ -270,7 +270,7 @@ class ManagerAgent:
     async def _write_session_state(self) -> None:
         await db_agent_sessions.save_session(self.agent_id, self._session_id, self._session_totals.to_dict(),
                                              runtime_type=self._session_runtime, provider_id=self._session_provider,
-                                             session_agent_id=self._session_agent, clean_start=self._clean_start)
+                                             profile_id=self._session_profile, clean_start=self._clean_start)
 
     async def start(self, bus: MessageBus) -> None:
         self._bus = bus
@@ -289,7 +289,7 @@ class ManagerAgent:
     async def _load_db_config(self) -> None:
         """Load the role prompt from DB; keep the last one read on failure."""
         try:
-            config = await db_agent_configs.get_config("manager")
+            config = await db_role_configs.get_config("manager")
             if config and config.get("system_prompt"):
                 self._system_prompt = config["system_prompt"]
                 self._prompt_recommended = is_recommended(
@@ -509,8 +509,8 @@ class ManagerAgent:
         if not self._session_loaded:
             await self._load_session_state()
         agent_settings = await self._load_agent_settings()
-        if agent_settings.agent_error:
-            raise RuntimeError(agent_settings.agent_error)  # answered as an error; never another agent
+        if agent_settings.profile_error:
+            raise RuntimeError(agent_settings.profile_error)  # answered as an error; never another profile
         system_prompt = self._composed_prompt(agent_settings)
         launch = Launch(agent_settings, await load_installed(self._runtime_root, AgentType.MANAGER.value))
         try:
@@ -524,8 +524,8 @@ class ManagerAgent:
             tuple(self._claude_command(prompt_file, launch, resume=False)), system_prompt.sha256, launch.env_sha256,
             launch.library.sha256, launch.binding_sha256,
         )
-        switch = session_switch.agent_switch(self._session_id, self._session_runtime, self._session_agent, launch,
-                                             session_provider=self._session_provider)
+        switch = session_switch.profile_switch(self._session_id, self._session_runtime, self._session_profile,
+                                               launch, session_provider=self._session_provider)
         if switch is not None:
             # This agent cannot resume the session: a new one starts, after the old one hands over.
             await self._switch_session(switch)
@@ -557,8 +557,8 @@ class ManagerAgent:
         # The session this turn's new process resumes, if it starts one (its command resumes the saved session).
         resuming = self._session_id if not self._claude.started else None
         if not self._claude.started:
-            self._session_runtime, self._session_agent = launch.runtime.type, launch.agent.id
-            self._session_provider = launch.agent.provider.id
+            self._session_runtime, self._session_profile = launch.runtime.type, launch.profile.id
+            self._session_provider = launch.profile.provider.id
             try:
                 await self._claude.start(
                     command, cwd=str(self._config.work_dir), signature=signature, env=launch.environment(),
@@ -658,7 +658,7 @@ class ManagerAgent:
             await self._save_session_state()
             self._pending_switch = session_switch.session_lost(
                 f"its saved session {resuming} could not be resumed", runtime=launch.runtime.type,
-                agent=launch.agent.id)
+                profile=launch.profile.id)
             self._pending_handoff = None
             return await self._run_turn(message, context_envelope, retried=True)
 

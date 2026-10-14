@@ -79,14 +79,14 @@ async def _ok(method: str, path: str, body: Any = None) -> Any:
 
 async def _populate(monkeypatch: pytest.MonkeyPatch, pool: Any, work_dir: Path) -> dict[str, str]:
     """An installation using every section of the file, set up through the API as a user would."""
-    from looper.agents.serve import seed_agent_configs, seed_channel_configs
+    from looper.agents.serve import seed_role_configs, seed_channel_configs
     from looper.db import library as db_library
 
     _serve(monkeypatch, pool)
-    await seed_agent_configs(pool)
+    await seed_role_configs(pool)
     await seed_channel_configs(pool)
-    # Runtimes, providers and agents: a runtime registered by hand before runtimes were built in, a provider
-    # with an API key and a model catalog, and agents on the built-in and the registered pieces.
+    # Runtimes, providers and Agent Profiles: a runtime registered by hand before runtimes were built in, a
+    # provider with an API key and a model catalog, and profiles on the built-in and the registered pieces.
     beta = "rt-custom-beta"
     await pool.execute("INSERT INTO agent_runtimes (id, name, type, executable, capabilities) "
                        "VALUES ($1, 'claude-beta', 'claude-code', 'claude-beta', $2)", beta,
@@ -95,17 +95,17 @@ async def _populate(monkeypatch: pytest.MonkeyPatch, pool: Any, work_dir: Path) 
                                          "auth": "api_key", "api_key": SECRET, "base_url": "https://api.example.test",
                                          "models": [{"name": "claude-sonnet-4-5", "input_usd_per_mtok": 3,
                                                      "output_usd_per_mtok": 15}]})
-    sonnet = (await _ok("POST", "/api/agents", {"name": "claude-code/sonnet", "runtime_id": "rt-claude-code",
+    sonnet = (await _ok("POST", "/api/agent-profiles", {"name": "claude-code/sonnet", "runtime_id": "rt-claude-code",
                                                 "provider_id": "prov-claude-subscription",
-                                                "model": "sonnet"}))["agent"]["agent_id"]
-    beta_haiku = (await _ok("POST", "/api/agents", {"name": "beta-haiku", "runtime_id": beta,
+                                                        "model": "sonnet"}))["profile"]["profile_id"]
+    beta_haiku = (await _ok("POST", "/api/agent-profiles", {"name": "beta-haiku", "runtime_id": beta,
                                                     "provider_id": "prov-claude-subscription", "model": "haiku",
-                                                    "effort": "low"}))["agent"]["agent_id"]
-    await _ok("PUT", "/api/agent-settings/system", {"harness_prompt": "Be careful.", "agent": sonnet,
+                                                            "effort": "low"}))["profile"]["profile_id"]
+    await _ok("PUT", "/api/agent-settings/system", {"harness_prompt": "Be careful.", "profile_id": sonnet,
                                                     "effort": "high", "env": [{"key": "LOOPER_MODE", "value": "a"}]})
-    await _ok("PUT", "/api/agent-settings/roles/worker", {"agent": "agent-claude-code-opus", "run_budget_usd": 2.5,
+    await _ok("PUT", "/api/agent-settings/roles/worker", {"profile_id": "agent-claude-code-opus", "run_budget_usd": 2.5,
                                                           "env": [{"key": "LOOPER_MODE", "value": None}]})
-    await _ok("PUT", "/api/agent-configs/planner", {"system_prompt": "Plan in small steps.", "timeout_seconds": 900})
+    await _ok("PUT", "/api/roles/planner", {"system_prompt": "Plan in small steps.", "timeout_seconds": 900})
     await _ok("PUT", "/api/channel-configs/channel-telegram", {"enabled": True, "config": {
         "bot_token_env": "MY_TG_TOKEN", "allowed_user_ids": ["123456789"], "webhook_secret": SECRET}})
 
@@ -134,7 +134,7 @@ async def _populate(monkeypatch: pytest.MonkeyPatch, pool: Any, work_dir: Path) 
                                                 "background": "Python 3.12.", "review_policy": "all",
                                                 "distill_lessons": True}))["project_id"]
     docs = (await _ok("POST", "/api/projects", {"name": "docs"}))["project_id"]
-    await _ok("PUT", f"/api/projects/{calc}/agent-settings", {"agent": beta_haiku})
+    await _ok("PUT", f"/api/projects/{calc}/agent-settings", {"profile_id": beta_haiku})
     await _ok("PUT", f"/api/projects/{calc}/agent-settings/roles/worker", {"harness_prompt": "Test first."})
     from looper.agents.knowledge import add_document
 
@@ -168,9 +168,9 @@ def _sha(text: str) -> str:
 
 
 def _without_ids(view: dict[str, Any]) -> dict[str, Any]:
-    """An effective settings view with its agent by name."""
-    agent = view["agent"]
-    return {**view, "agent": {**agent, "value": {k: v for k, v in agent["value"].items() if k != "agent_id"}}}
+    """An effective settings view with its Agent Profile by name."""
+    profile = view["profile"]
+    return {**view, "profile": {**profile, "value": {k: v for k, v in profile["value"].items() if k != "profile_id"}}}
 
 
 async def _state(pool: Any) -> dict[str, Any]:
@@ -202,7 +202,7 @@ async def _state(pool: Any) -> dict[str, Any]:
             "runtimes": [{k: r[k] for k in ("name", "type", "executable", "capabilities")}
                          for r in await db.read_runtimes(conn)],
             "providers": [{k: v for k, v in r.items() if k != "id"} for r in await db.read_providers(conn)],
-            "agents": [{k: v for k, v in r.items() if k != "id"} for r in await db.read_agents(conn)],
+            "profiles": [{k: v for k, v in r.items() if k != "id"} for r in await db.read_profiles(conn)],
             "roles": [role_entry(r) for r in await db.read_roles(conn)],
             "channels": {c["channel_type"]: (c["display_name"], c["enabled"], c["config"])
                          for c in await db.read_channels(conn)},
@@ -218,9 +218,9 @@ async def _state(pool: Any) -> dict[str, Any]:
 
 async def _rows(pool: Any) -> dict[str, list[Any]]:
     """Every row of the tables an import writes, to tell that nothing changed."""
-    tables = ("agent_setting_layers", "agent_configs", "channel_configs", "library_items", "library_files",
+    tables = ("agent_setting_layers", "role_configs", "channel_configs", "library_items", "library_files",
               "library_mcp_servers", "library_installs", "projects", "project_documents", "agent_runtimes",
-              "llm_providers", "llm_provider_secrets", "agents")
+              "llm_providers", "llm_provider_secrets", "agent_profiles")
     async with pool.acquire() as conn:
         if not await conn.fetchval("SELECT to_regclass('library_installs') IS NOT NULL"):
             return {}
@@ -271,13 +271,13 @@ def test_a_round_trip_into_a_new_database_reproduces_the_configuration(
             assert not [c for c in plan["changes"] if c["action"] == "skipped"], plan
 
             # Agents resolve the same settings and load the same items; only the projects' directories stay
-            # behind, and the agent on the custom runtime runs on the built-in runtime of its type.
+            # behind, and the profile on the custom runtime runs on the built-in runtime of its type.
             before, after = await _state(source), await _state(target)
             before["projects"]["calc"]["work_dir"] = ""
             before["runtimes"] = [r for r in before["runtimes"] if r["name"] != "claude-beta"]
             assert after == _replaced(before, "claude-beta", "claude-code")
-            assert plan["notes"][0] == ("runtime claude-beta: runtimes are built in; its agents run on the built-in "
-                                        "claude-code runtime here")
+            assert plan["notes"][0] == ("runtime claude-beta: runtimes are built in; its Agent Profiles run on the "
+                                        "built-in claude-code runtime here")
             assert [n.split(":")[0] for n in plan["notes"]] == ["runtime claude-beta", "project calc"]
 
             # Exporting the new installation gives the same file, but for the runtime.
@@ -301,11 +301,11 @@ def test_importing_the_same_file_again_changes_nothing(monkeypatch: pytest.Monke
             assert (await _looper(monkeypatch, source_url, "config", "export", str(exported),
                                  "--include-projects"))[0] == 0
             # Here the Planner's recommended prompt is the prompt the file gives it, which it then follows.
-            from looper.agents.serve import seed_agent_configs
+            from looper.agents.serve import seed_role_configs
 
-            await seed_agent_configs(target)
-            await target.execute("UPDATE agent_configs SET default_prompt = 'Plan in small steps.' "
-                                 "WHERE agent_id = 'planner'")
+            await seed_role_configs(target)
+            await target.execute("UPDATE role_configs SET default_prompt = 'Plan in small steps.' "
+                                 "WHERE role = 'planner'")
             assert (await _looper(monkeypatch, target_url, "config", "import", str(exported), "--apply"))[0] == 0
             first = await _rows(target)
 
@@ -327,7 +327,7 @@ def test_a_preview_writes_nothing(monkeypatch: pytest.MonkeyPatch, tmp_path: Pat
             await _populate(monkeypatch, source, tmp_path / "calc")
             if target_has_schema:
                 _serve(monkeypatch, target)
-                await _ok("PUT", "/api/agent-settings/system", {"agent": "agent-claude-code-opus"})
+                await _ok("PUT", "/api/agent-settings/system", {"profile_id": "agent-claude-code-opus"})
             exported = tmp_path / "config.json"
             assert (await _looper(monkeypatch, source_url, "config", "export", str(exported),
                                  "--include-projects"))[0] == 0
@@ -350,7 +350,7 @@ def test_an_import_leaves_a_schema_about_to_change_to_serve(monkeypatch: pytest.
             exported = tmp_path / "config.json"
             assert (await _looper(monkeypatch, source_url, "config", "export", str(exported)))[0] == 0
             await target.execute("UPDATE schema_fingerprint SET sha256 = 'an older schema.sql'")
-            await target.execute("ALTER TABLE agent_configs ADD COLUMN permission_mode TEXT")
+            await target.execute("ALTER TABLE role_configs ADD COLUMN permission_mode TEXT")
             before = await _rows(target)
 
             code, _, err = await _looper(monkeypatch, target_url, "config", "import", str(exported), "--apply")
@@ -452,8 +452,9 @@ def test_an_entry_with_the_same_key_is_updated_in_place_and_nothing_else_is_remo
             state = await _state(target)
             assert state["projects"]["CALC"]["background"] == "Python 3.12."
             assert state["projects"]["CALC"]["work_dir"] == str(tmp_path)  # a directory is never imported
-            assert project["project"]["values"]["agent"] == next(
-                a["agent_id"] for a in (await _call("GET", "/api/registry"))[1]["agents"] if a["name"] == "beta-haiku")
+            assert project["project"]["values"]["profile_id"] == next(
+                a["profile_id"] for a in (await _call("GET", "/api/registry"))[1]["profiles"]
+                if a["name"] == "beta-haiku")
 
     asyncio.run(_test())
 
@@ -541,7 +542,7 @@ def test_a_file_from_before_agents_selects_the_agent_of_each_model(
             from looper.db import config_transfer as db
 
             async with target.acquire() as conn:
-                layers = {r["scope"]: r["agent"] for r in await db.read_layers(conn)}
+                layers = {r["scope"]: r["profile"] for r in await db.read_layers(conn)}
             assert layers == {"system": "claude-code/haiku", "role": "claude-code/opus"}  # opus: the built-in one
 
     asyncio.run(_test())
@@ -578,6 +579,7 @@ def test_a_runtime_of_the_file_maps_to_the_built_in_runtime_of_its_type_or_is_sk
             assert ("runtimes", "claude-beta") not in changes
             assert "runtime claude-beta: runtimes are built in" in plan["notes"][0]
             assert await target.fetch("SELECT id FROM agent_runtimes") == before
-            assert await target.fetchval("SELECT runtime_id FROM agents WHERE name = 'beta/haiku'") == "rt-claude-code"
+            assert await target.fetchval("SELECT runtime_id FROM agent_profiles WHERE name = 'beta/haiku'") \
+                == "rt-claude-code"
 
     asyncio.run(_test())

@@ -1,12 +1,13 @@
-"""Runtimes, LLM providers and agents: what they are, how they are checked, and their API (RFC decision 10).
+"""Runtimes, LLM providers and Agent Profiles: what they are, how they are checked, and their API (RFC decision 10).
 
-An **agent** (an "Agent Profile" on the dashboard) is a runtime, an LLM
-provider and a model, with a default effort. A **runtime** is a runtime type
+An **Agent Profile** is a runtime, an LLM provider and a model, with a default
+effort; a running agent (the Manager, a Planner, a step's Worker) runs the
+profile its role selects. A **runtime** is a runtime type
 (an adapter in ``looper.agents.runtimes``) found on this machine: the
 executable it runs and what its probe found (``<executable> --version``, never
 a model call). Runtimes are built in, never registered by hand: one per type
 whose executable is on the server's PATH (``detect_runtime``). A runtime row
-of another kind, registered by hand before, stays read-only while an agent
+of another kind, registered by hand before, stays read-only while a profile
 uses it (the schema drops the unused ones once). A **provider** is where an
 agent's requests go: the protocols it serves (``anthropic-messages``,
 ``openai-responses``, ``openai-chat``), its ``base_url``, its model catalog
@@ -25,12 +26,12 @@ the concurrency limit is stored and checked only. Presets
 The built-ins exist on every installation and are read-only: the
 ``claude-code`` runtime (the server's configured ``claude``), the
 ``claude-subscription`` provider (Claude Code's own login) and the
-``claude-code/opus`` agent, which every role runs when no layer selects
-another (``BUILTIN_AGENT``). A runtime of another type is built in too once
+``claude-code/opus`` profile, which every role runs when no layer selects
+another (``BUILTIN_PROFILE``). A runtime of another type is built in too once
 ``looper serve`` finds its executable on PATH (``register_found_runtimes``),
 or Re-detect does (``probe_runtime``): ``codex`` for Codex, ``omp`` for OMP.
 
-An agent is checked when it is created or changed, and again when a provider
+A profile is checked when it is created or changed, and again when a provider
 it uses changes (``check_pairing``):
 
 - its runtime's type is one this version can run;
@@ -40,7 +41,7 @@ it uses changes (``check_pairing``):
   (``RuntimeAdapter.auth_kinds``);
 - the model is one the provider lists, when it lists any.
 
-Where an agent is selected (a layer, or a task's choice for one of its roles),
+Where a profile is selected (a layer, or a task's choice for one of its roles),
 its runtime must have what each of those roles needs (``check_roles``,
 ``runtimes.ROLE_CAPABILITIES``): a resident session and resume for the
 Manager and the Planner, a run for the Workers and Reviewers. Every runtime is
@@ -79,14 +80,14 @@ class RegistryError(ValueError):
 
 
 class RegistryNotFound(LookupError):
-    """No such runtime, provider or agent (404)."""
+    """No such runtime, provider or Agent Profile (404)."""
 
 
 class RegistryConflict(Exception):
     """A name in use, or a row still referred to (409)."""
 
 
-# --- What an agent is made of ---
+# --- What an Agent Profile is made of ---
 
 
 @dataclass(frozen=True)
@@ -147,7 +148,7 @@ class ProviderSpec:
 
 
 @dataclass(frozen=True)
-class AgentSpec:
+class AgentProfile:
     id: str
     name: str
     runtime: RuntimeSpec
@@ -156,8 +157,8 @@ class AgentSpec:
     effort: str | None = None  # its default effort; a layer's effort wins
 
     @classmethod
-    def from_row(cls, row: Mapping[str, Any]) -> AgentSpec:
-        """An agent from ``db.agent_registry.AGENT_JSON``."""
+    def from_row(cls, row: Mapping[str, Any]) -> AgentProfile:
+        """A profile from ``db.profile_registry.PROFILE_JSON``."""
         known = {c.value for c in Capability}
         return cls(
             id=row["id"], name=row["name"], model=row["model"], effort=row.get("effort"),
@@ -192,7 +193,8 @@ def _env(raw: Any) -> tuple[tuple[str, str], ...]:
 BUILTIN_RUNTIME = RuntimeSpec("rt-claude-code", "claude-code", "claude-code", "", runtimes.CLAUDE_CODE.capabilities)
 BUILTIN_PROVIDER = ProviderSpec("prov-claude-subscription", "claude-subscription", AuthKind.OAUTH,
                                 frozenset({ApiProtocol.ANTHROPIC_MESSAGES}), "claude-code")
-BUILTIN_AGENT = AgentSpec("agent-claude-code-opus", "claude-code/opus", BUILTIN_RUNTIME, BUILTIN_PROVIDER, "opus")
+BUILTIN_PROFILE = AgentProfile("agent-claude-code-opus", "claude-code/opus", BUILTIN_RUNTIME, BUILTIN_PROVIDER,
+                               "opus")
 
 
 # --- Validation: each raises RegistryError ---
@@ -352,7 +354,7 @@ def _model(raw: Any) -> str:
     except SettingsError as exc:
         raise RegistryError(str(exc)) from None
     if not model:
-        raise RegistryError("an agent needs a model")
+        raise RegistryError("an Agent Profile needs a model")
     return model
 
 
@@ -376,7 +378,7 @@ def _listed(values: Iterable[Any]) -> str:
 
 
 def check_pairing(runtime: RuntimeSpec, provider: ProviderSpec, model: str) -> None:
-    """Refuse an agent of ``runtime``, ``provider`` and ``model`` that could not run (the module's rules)."""
+    """Refuse a profile of ``runtime``, ``provider`` and ``model`` that could not run (the module's rules)."""
     try:
         adapter = runtimes.adapter(runtime.type)
     except RuntimeUnsupported:
@@ -399,43 +401,43 @@ def check_pairing(runtime: RuntimeSpec, provider: ProviderSpec, model: str) -> N
                             f"{model!r} is not one of them")
 
 
-def check_roles(agent: AgentSpec, roles: Iterable[str]) -> None:
-    """Refuse ``agent`` for a role its runtime lacks a capability for."""
-    adapter = runtimes.ADAPTERS.get(agent.runtime.type)
+def check_roles(profile: AgentProfile, roles: Iterable[str]) -> None:
+    """Refuse ``profile`` for a role its runtime lacks a capability for."""
+    adapter = runtimes.ADAPTERS.get(profile.runtime.type)
     for role in roles:
         needs = runtimes.ROLE_CAPABILITIES[role]
-        if missing := needs - agent.runtime.capabilities:
-            label = adapter.label if adapter else agent.runtime.type
+        if missing := needs - profile.runtime.capabilities:
+            label = adapter.label if adapter else profile.runtime.type
             raise RegistryError(
-                f"agent {agent.name!r} cannot run the {role}: its runtime {agent.runtime.name!r} ({label}) lacks "
-                f"{_listed(missing)}, which a {role} needs ({_listed(needs)})")
+                f"Agent Profile {profile.name!r} cannot run the {role}: its runtime {profile.runtime.name!r} "
+                f"({label}) lacks {_listed(missing)}, which a {role} needs ({_listed(needs)})")
 
 
-# The roles a layer of each scope, or a task's choice, selects an agent for.
+# The roles a layer of each scope, or a task's choice, selects a profile for.
 _SCOPE_ROLES = {"system": tuple(runtimes.ROLE_CAPABILITIES), "project": ("planner", "worker", "reviewer")}
 
 
-async def check_selection(agent_id: str, roles: Iterable[str]) -> AgentSpec:
-    """The registered agent ``agent_id``, refused when it cannot run one of ``roles``."""
-    from ..db import agent_registry as db
+async def check_selection(profile_id: str, roles: Iterable[str]) -> AgentProfile:
+    """The Agent Profile ``profile_id``, refused when it cannot run one of ``roles``."""
+    from ..db import profile_registry as db
 
-    row = await db.get_agent(agent_id) if isinstance(agent_id, str) else None
+    row = await db.get_profile(profile_id) if isinstance(profile_id, str) else None
     if row is None:
-        raise RegistryError(f"no agent {agent_id!r}: give the agent_id of a registered agent")
-    agent = AgentSpec.from_row(row)
-    if agent.runtime.type not in runtimes.ADAPTERS:
-        raise RegistryError(f"agent {agent.name!r} runs on a {agent.runtime.type!r} runtime, which this version "
-                            "cannot run")
-    check_roles(agent, roles)
-    return agent
+        raise RegistryError(f"no Agent Profile {profile_id!r}: give the profile_id of a registered one")
+    profile = AgentProfile.from_row(row)
+    if profile.runtime.type not in runtimes.ADAPTERS:
+        raise RegistryError(f"Agent Profile {profile.name!r} runs on a {profile.runtime.type!r} runtime, which this "
+                            "version cannot run")
+    check_roles(profile, roles)
+    return profile
 
 
-async def _selected_roles(agent_id: str) -> list[str]:
-    """Every role ``agent_id`` is selected for, by a layer or a task."""
+async def _selected_roles(profile_id: str) -> list[str]:
+    """Every role ``profile_id`` is selected for, by a layer or a task."""
     from ..db import agent_setting_layers
 
     roles: set[str] = set()
-    for scope, role in await agent_setting_layers.selected_roles(agent_id):
+    for scope, role in await agent_setting_layers.selected_roles(profile_id):
         roles.update(_SCOPE_ROLES.get(scope, (role,)))
     return [role for role in runtimes.ROLE_CAPABILITIES if role in roles]
 
@@ -444,14 +446,14 @@ async def _selected_roles(agent_id: str) -> list[str]:
 
 
 def runtime_spec(row: Mapping[str, Any]) -> RuntimeSpec:
-    """A runtime row (``agent_runtimes``) as what an agent is checked with."""
+    """A runtime row (``agent_runtimes``) as what a profile is checked with."""
     known = {c.value for c in Capability}
     return RuntimeSpec(row["id"], row["name"], row["type"], row["executable"],
                        frozenset(Capability(c) for c in row["capabilities"] or () if c in known))
 
 
 def provider_spec(row: Mapping[str, Any]) -> ProviderSpec:
-    """A provider row (``llm_providers``, or the fields of one) as what an agent is checked with."""
+    """A provider row (``llm_providers``, or the fields of one) as what a profile is checked with."""
     return ProviderSpec(row["id"], row["name"], AuthKind(row["auth"]),
                         frozenset(ApiProtocol(p) for p in row["protocols"]), row["oauth_runtime_type"],
                         row["base_url"], _catalog(row["models"]), _env(row.get("env")))
@@ -499,7 +501,7 @@ def runtime_view(row: Mapping[str, Any], *, server_claude: str = "claude") -> di
         "protocols": sorted(p.value for p in adapter.protocols) if adapter else [],
         "version": row["version"], "capabilities": list(row["capabilities"] or ()),
         "roles": servable_roles(row["capabilities"] or ()), "probed_at": row["probed_at"],
-        "probe_error": row["probe_error"], "builtin": row["builtin"], "agent_count": row.get("agent_count", 0),
+        "probe_error": row["probe_error"], "builtin": row["builtin"], "profile_count": row.get("profile_count", 0),
         "created_at": row["created_at"], "updated_at": row["updated_at"],
     }
 
@@ -516,48 +518,49 @@ def provider_view(row: Mapping[str, Any]) -> dict[str, Any]:
         "models": catalog_entries(row["models"]),
         "env": list(row.get("env") or []), "max_concurrency": row["max_concurrency"],
         "api_key": SECRET_MASK if row.get("api_key_set") else None, "builtin": row["builtin"],
-        "agent_count": row.get("agent_count", 0), "created_at": row["created_at"], "updated_at": row["updated_at"],
+        "profile_count": row.get("profile_count", 0), "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
     }
 
 
-def cost_basis(agent: AgentSpec) -> dict[str, Any]:
-    """How an agent's runs are priced: by its runtime (``runtime``), or by Looper at its provider's prices
+def cost_basis(profile: AgentProfile) -> dict[str, Any]:
+    """How a profile's runs are priced: by its runtime (``runtime``), or by Looper at its provider's prices
     (``provider_price``), with the models of its runs that have no full price (``unpriced``: those runs record
     tokens only and no spend cap applies to them); ``equivalent`` when the figure is what a subscription's usage
     would cost at API prices, not money spent."""
     from .runtimes.pricing import model_price
 
-    adapter = runtimes.ADAPTERS.get(agent.runtime.type)
+    adapter = runtimes.ADAPTERS.get(profile.runtime.type)
     if adapter is None:
         return {"source": None, "equivalent": False, "unpriced": []}
-    source = adapter.cost_source(agent.provider)
+    source = adapter.cost_source(profile.provider)
     unpriced: list[str] = []
     if source is runtimes.CostSource.PROVIDER_PRICE:
-        entry = agent.provider.catalog_model(agent.model)
-        for model in dict.fromkeys([agent.model, *([entry.background_model] if entry and entry.background_model
-                                                   else [])]):
-            if not model_price(agent.provider, model).complete:
+        entry = profile.provider.catalog_model(profile.model)
+        for model in dict.fromkeys([profile.model, *([entry.background_model] if entry and entry.background_model
+                                                     else [])]):
+            if not model_price(profile.provider, model).complete:
                 unpriced.append(model)
-    return {"source": source.value, "equivalent": agent.provider.auth is AuthKind.OAUTH, "unpriced": unpriced}
+    return {"source": source.value, "equivalent": profile.provider.auth is AuthKind.OAUTH, "unpriced": unpriced}
 
 
-def cost_warnings(agent: AgentSpec) -> list[str]:
-    """What registering ``agent`` should warn about: models it would run without a full price."""
-    return [f"model {model!r} has no full price with provider {agent.provider.name!r} (input, output, cache read "
+def cost_warnings(profile: AgentProfile) -> list[str]:
+    """What registering ``profile`` should warn about: models it would run without a full price."""
+    return [f"model {model!r} has no full price with provider {profile.provider.name!r} (input, output, cache read "
             "and cache write): its runs record tokens only and spend caps do not apply to them; add its prices to "
-            "the provider's model catalog" for model in cost_basis(agent)["unpriced"]]
+            "the provider's model catalog" for model in cost_basis(profile)["unpriced"]]
 
 
-# Where nothing selects an agent.
+# Where nothing selects a profile.
 NOT_USED: Mapping[str, Any] = {"layers": [], "task_count": 0}
 
 
-def agent_view(row: Mapping[str, Any], used_by: Mapping[str, Any] = NOT_USED) -> dict[str, Any]:
-    """An agent, the roles its runtime can run and where it is selected (``used_by``: the layers, each
+def profile_view(row: Mapping[str, Any], used_by: Mapping[str, Any] = NOT_USED) -> dict[str, Any]:
+    """An Agent Profile, the roles its runtime can run and where it is selected (``used_by``: the layers, each
     ``{scope, role, project_id, project_name}``, and how many tasks chose it; ``db.profile_usage``)."""
-    spec = AgentSpec.from_row(row)
+    spec = AgentProfile.from_row(row)
     return {
-        "agent_id": row["id"], "name": row["name"], "model": row["model"], "effort": row.get("effort"),
+        "profile_id": row["id"], "name": row["name"], "model": row["model"], "effort": row.get("effort"),
         "runtime_id": row["runtime_id"], "runtime_name": row["runtime_name"], "runtime_type": row["runtime_type"],
         "provider_id": row["provider_id"], "provider_name": row["provider_name"], "builtin": row["builtin"],
         "roles": servable_roles(spec.runtime.capabilities), "used_by": dict(used_by),
@@ -566,7 +569,7 @@ def agent_view(row: Mapping[str, Any], used_by: Mapping[str, Any] = NOT_USED) ->
 
 
 def usage_text(used_by: Mapping[str, Any]) -> str:
-    """Where an agent is selected, in words: "the defaults of every role, the worker role, 2 tasks"."""
+    """Where a profile is selected, in words: "the defaults of every role, the worker role, 2 tasks"."""
     scopes = {"system": lambda u: "the defaults of every role", "role": lambda u: f"the {u['role']} role",
               "project": lambda u: f"project {u['project_name']!r}",
               "role_project": lambda u: f"the {u['role']} in project {u['project_name']!r}"}
@@ -591,8 +594,8 @@ def _limits() -> dict[str, Any]:
 
 
 async def registry_view(*, server_claude: str = "claude") -> dict[str, Any]:
-    """The runtime types this version has, and every runtime, provider and agent (with where it is used)."""
-    from ..db import agent_registry as db
+    """The runtime types this version has, and every runtime, provider and Agent Profile (with where it is used)."""
+    from ..db import profile_registry as db
 
     from .provider_presets import presets_view
     from .runtimes.pricing import BUILTIN_PRICES, PRICE_SOURCES, PRICES_AS_OF
@@ -602,7 +605,7 @@ async def registry_view(*, server_claude: str = "claude") -> dict[str, Any]:
         "runtime_types": [type_view(a) for a in runtimes.ADAPTERS.values()],
         "runtimes": [runtime_view(r, server_claude=server_claude) for r in await db.list_runtimes()],
         "providers": [provider_view(r) for r in await db.list_providers()],
-        "agents": [agent_view(r, uses.get(r["id"], NOT_USED)) for r in await db.list_agents()],
+        "profiles": [profile_view(r, uses.get(r["id"], NOT_USED)) for r in await db.list_profiles()],
         "provider_presets": presets_view(),
         "prices": {"as_of": PRICES_AS_OF, "sources": list(PRICE_SOURCES),
                    "models": {name: price.view() for name, price in BUILTIN_PRICES.items()}},
@@ -633,7 +636,7 @@ async def _detect(adapter: runtimes.RuntimeAdapter) -> bool:
     when its default executable is on PATH and neither it nor a runtime of its name exists; whether it did."""
     import shutil
 
-    from ..db import agent_registry as db
+    from ..db import profile_registry as db
 
     if shutil.which(adapter.default_executable) is None:
         return False
@@ -653,7 +656,7 @@ async def register_found_runtimes() -> list[str]:
 
 
 async def _existing_runtime(runtime_id: str) -> dict[str, Any]:
-    from ..db import agent_registry as db
+    from ..db import profile_registry as db
 
     row = await db.get_runtime(runtime_id)
     if row is None:
@@ -667,7 +670,7 @@ def _not_builtin(row: Mapping[str, Any], what: str) -> None:
 
 
 async def _runtime_answer(runtime_id: str, server_claude: str) -> dict[str, Any]:
-    from ..db import agent_registry as db
+    from ..db import profile_registry as db
 
     rows = {r["id"]: r for r in await db.list_runtimes()}
     return {"runtime": runtime_view(rows[runtime_id], server_claude=server_claude)}
@@ -676,7 +679,7 @@ async def _runtime_answer(runtime_id: str, server_claude: str) -> dict[str, Any]
 async def probe_runtime(runtime_id: str, *, server_claude: str = "claude") -> dict[str, Any]:
     """Re-detect a runtime: run ``<executable> --version`` again and record what it found. The built-in runtime
     of a type not found yet (``rt-<type>``) is registered when its executable is on PATH now (``_detect``)."""
-    from ..db import agent_registry as db
+    from ..db import profile_registry as db
 
     adapter = next((a for a in runtimes.ADAPTERS.values() if builtin_runtime_id(a) == runtime_id), None)
     if await db.get_runtime(runtime_id) is None and adapter is not None:
@@ -704,7 +707,7 @@ _PROVIDER_FIELDS = ("name", "protocols", "auth", "oauth_runtime_type", "base_url
 
 
 async def _existing_provider(provider_id: str, conn: Any = None) -> dict[str, Any]:
-    from ..db import agent_registry as db
+    from ..db import profile_registry as db
 
     row = await db.get_provider(provider_id, pool=conn)
     if row is None:
@@ -749,21 +752,21 @@ def _provider_fields(data: Mapping[str, Any], current: Mapping[str, Any] | None)
     return fields, key
 
 
-async def _check_provider_agents(conn: Any, provider: Mapping[str, Any]) -> None:
-    """Refuse a provider change that would leave one of its agents unable to run."""
-    from ..db import agent_registry as db
+async def _check_provider_profiles(conn: Any, provider: Mapping[str, Any]) -> None:
+    """Refuse a provider change that would leave one of its Agent Profiles unable to run."""
+    from ..db import profile_registry as db
 
     spec = provider_spec(provider)
-    for row in await db.list_agents(pool=conn, provider_id=provider["id"]):
-        agent = AgentSpec.from_row(row)
+    for row in await db.list_profiles(pool=conn, provider_id=provider["id"]):
+        profile = AgentProfile.from_row(row)
         try:
-            check_pairing(agent.runtime, spec, agent.model)
+            check_pairing(profile.runtime, spec, profile.model)
         except RegistryError as exc:
-            raise RegistryError(f"agent {agent.name!r} uses this provider: {exc}") from None
+            raise RegistryError(f"Agent Profile {profile.name!r} uses this provider: {exc}") from None
 
 
 async def _provider_answer(provider_id: str) -> dict[str, Any]:
-    from ..db import agent_registry as db
+    from ..db import profile_registry as db
 
     rows = {r["id"]: r for r in await db.list_providers()}
     return {"provider": provider_view(rows[provider_id])}
@@ -774,7 +777,7 @@ async def create_provider(data: Any) -> dict[str, Any]:
     api_key?}``."""
     import asyncpg
 
-    from ..db import agent_registry as db
+    from ..db import profile_registry as db
     from ..db.connection import transaction
 
     data = _fields(data, _PROVIDER_FIELDS)
@@ -788,10 +791,10 @@ async def create_provider(data: Any) -> dict[str, Any]:
 
 
 async def update_provider(provider_id: str, data: Any) -> dict[str, Any]:
-    """Change a provider; ``api_key`` ``***`` keeps the stored key, null removes it. Its agents must still run."""
+    """Change a provider; ``api_key`` ``***`` keeps the stored key, null removes it. Its profiles must still run."""
     import asyncpg
 
-    from ..db import agent_registry as db
+    from ..db import profile_registry as db
     from ..db.connection import transaction
 
     data = _fields(data, _PROVIDER_FIELDS)
@@ -805,7 +808,7 @@ async def update_provider(provider_id: str, data: Any) -> dict[str, Any]:
             fields, key = _provider_fields(data, current)
             await db.update_provider(conn, provider_id, fields, api_key=None if key is ... else key,
                                      keep_key=key is ...)
-            await _check_provider_agents(conn, {**fields, "id": provider_id})
+            await _check_provider_profiles(conn, {**fields, "id": provider_id})
     except asyncpg.UniqueViolationError:
         raise RegistryConflict(f"a provider named {data.get('name')!r} already exists") from None
     return await _provider_answer(provider_id)
@@ -814,33 +817,34 @@ async def update_provider(provider_id: str, data: Any) -> dict[str, Any]:
 async def delete_provider(provider_id: str) -> dict[str, Any]:
     import asyncpg
 
-    from ..db import agent_registry as db
+    from ..db import profile_registry as db
 
     row = await _existing_provider(provider_id)
     _not_builtin(row, "provider")
     try:
         await db.delete_provider(provider_id)
     except asyncpg.ForeignKeyViolationError:
-        raise RegistryConflict(f"provider {row['name']!r} still serves agents: change or remove them first") from None
+        raise RegistryConflict(f"provider {row['name']!r} still serves Agent Profiles: change or remove them first") \
+            from None
     return {"deleted": provider_id}
 
 
-# --- Agents ---
+# --- Agent Profiles ---
 
-_AGENT_FIELDS = ("name", "runtime_id", "provider_id", "model", "effort")
+_PROFILE_FIELDS = ("name", "runtime_id", "provider_id", "model", "effort")
 
 
-async def _existing_agent(agent_id: str) -> dict[str, Any]:
-    from ..db import agent_registry as db
+async def _existing_profile(profile_id: str) -> dict[str, Any]:
+    from ..db import profile_registry as db
 
-    row = await db.get_agent(agent_id)
+    row = await db.get_profile(profile_id)
     if row is None:
-        raise RegistryNotFound(f"no agent {agent_id!r}")
+        raise RegistryNotFound(f"no Agent Profile {profile_id!r}")
     return row
 
 
 async def _parts(runtime_id: Any, provider_id: Any) -> tuple[RuntimeSpec, ProviderSpec]:
-    from ..db import agent_registry as db
+    from ..db import profile_registry as db
 
     runtime = await db.get_runtime(runtime_id) if isinstance(runtime_id, str) else None
     if runtime is None:
@@ -851,48 +855,49 @@ async def _parts(runtime_id: Any, provider_id: Any) -> tuple[RuntimeSpec, Provid
     return runtime_spec(runtime), provider_spec(provider)
 
 
-async def create_agent(data: Any) -> dict[str, Any]:
+async def create_profile(data: Any) -> dict[str, Any]:
     """Register ``{name, runtime_id, provider_id, model, effort?}``; refused when it could not run."""
     import asyncpg
 
-    from ..db import agent_registry as db
+    from ..db import profile_registry as db
 
-    data = _fields(data, _AGENT_FIELDS)
-    fields = {"name": entry_name(data.get("name"), "agent"), "runtime_id": data.get("runtime_id"),
+    data = _fields(data, _PROFILE_FIELDS)
+    fields = {"name": entry_name(data.get("name"), "profile"), "runtime_id": data.get("runtime_id"),
               "provider_id": data.get("provider_id"), "model": _model(data.get("model")),
               "effort": _effort(data.get("effort"))}
     runtime, provider = await _parts(fields["runtime_id"], fields["provider_id"])
     check_pairing(runtime, provider, fields["model"])
     try:
-        agent_id = await db.insert_agent(fields)
+        profile_id = await db.insert_profile(fields)
     except asyncpg.UniqueViolationError:
-        raise RegistryConflict(f"an agent named {fields['name']!r} already exists") from None
-    return await _agent_answer(agent_id)
+        raise RegistryConflict(f"an Agent Profile named {fields['name']!r} already exists") from None
+    return await _profile_answer(profile_id)
 
 
-async def _agent_answer(agent_id: str) -> dict[str, Any]:
-    """The agent, and what registering it as it is should warn about (``cost_warnings``)."""
-    from ..db import agent_registry as db
+async def _profile_answer(profile_id: str) -> dict[str, Any]:
+    """The profile, and what registering it as it is should warn about (``cost_warnings``)."""
+    from ..db import profile_registry as db
 
-    row = await _existing_agent(agent_id)
-    uses = await db.profile_usage(agent_id)
-    return {"agent": agent_view(row, uses.get(agent_id, NOT_USED)), "warnings": cost_warnings(AgentSpec.from_row(row))}
+    row = await _existing_profile(profile_id)
+    uses = await db.profile_usage(profile_id)
+    return {"profile": profile_view(row, uses.get(profile_id, NOT_USED)),
+            "warnings": cost_warnings(AgentProfile.from_row(row))}
 
 
-async def update_agent(agent_id: str, data: Any) -> dict[str, Any]:
-    """Change an agent; the result is checked like a new one."""
+async def update_profile(profile_id: str, data: Any) -> dict[str, Any]:
+    """Change an Agent Profile; the result is checked like a new one."""
     import asyncpg
 
-    from ..db import agent_registry as db
+    from ..db import profile_registry as db
 
-    data = _fields(data, _AGENT_FIELDS)
+    data = _fields(data, _PROFILE_FIELDS)
     if not data:
-        raise RegistryError(f"give at least one of {', '.join(_AGENT_FIELDS)}")
-    row = await _existing_agent(agent_id)
-    _not_builtin(row, "agent")
+        raise RegistryError(f"give at least one of {', '.join(_PROFILE_FIELDS)}")
+    row = await _existing_profile(profile_id)
+    _not_builtin(row, "profile")
     fields: dict[str, Any] = {}
     if "name" in data:
-        fields["name"] = entry_name(data["name"], "agent")
+        fields["name"] = entry_name(data["name"], "profile")
     if "model" in data:
         fields["model"] = _model(data["model"])
     if "effort" in data:
@@ -904,29 +909,29 @@ async def update_agent(agent_id: str, data: Any) -> dict[str, Any]:
                                      fields.get("provider_id", row["provider_id"]))
     model = fields.get("model", row["model"])
     check_pairing(runtime, provider, model)
-    check_roles(AgentSpec(agent_id, fields.get("name", row["name"]), runtime, provider, model),
-                await _selected_roles(agent_id))
+    check_roles(AgentProfile(profile_id, fields.get("name", row["name"]), runtime, provider, model),
+                await _selected_roles(profile_id))
     try:
-        await db.update_agent(agent_id, fields)
+        await db.update_profile(profile_id, fields)
     except asyncpg.UniqueViolationError:
-        raise RegistryConflict(f"an agent named {fields['name']!r} already exists") from None
-    return await _agent_answer(agent_id)
+        raise RegistryConflict(f"an Agent Profile named {fields['name']!r} already exists") from None
+    return await _profile_answer(profile_id)
 
 
-async def delete_agent(agent_id: str) -> dict[str, Any]:
+async def delete_profile(profile_id: str) -> dict[str, Any]:
     import asyncpg
 
-    from ..db import agent_registry as db
+    from ..db import profile_registry as db
 
-    row = await _existing_agent(agent_id)
-    _not_builtin(row, "agent")
-    used_by = (await db.profile_usage(agent_id)).get(agent_id)
+    row = await _existing_profile(profile_id)
+    _not_builtin(row, "profile")
+    used_by = (await db.profile_usage(profile_id)).get(profile_id)
     try:
         if used_by:
-            raise RegistryConflict(f"agent {row['name']!r} is selected by {usage_text(used_by)}: select another "
-                                   "agent there first")
-        await db.delete_agent(agent_id)
+            raise RegistryConflict(f"Agent Profile {row['name']!r} is selected by {usage_text(used_by)}: select "
+                                   "another profile there first")
+        await db.delete_profile(profile_id)
     except asyncpg.ForeignKeyViolationError:  # selected since it was checked
-        raise RegistryConflict(f"agent {row['name']!r} is still selected: select another agent there first") \
-            from None
-    return {"deleted": agent_id}
+        raise RegistryConflict(f"Agent Profile {row['name']!r} is still selected: select another profile there "
+                               "first") from None
+    return {"deleted": profile_id}
