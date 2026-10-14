@@ -339,34 +339,36 @@ def test_a_turn_that_never_started_a_session_is_told_apart(tmp_path: Path, scrip
 class _Observed:
     """An owner's view of one autonomous turn: its events and how it ended."""
 
-    def __init__(self, ended: list[Any]) -> None:
+    def __init__(self, ended: list[Any], after: Any) -> None:
         self.events: list[dict[str, Any]] = []
+        self.after = after  # the tag of the user turn Claude ran before it
         self._ended = ended
 
     async def event(self, event: dict[str, Any]) -> None:
         self.events.append(event)
 
     async def end(self, turn: Any) -> None:
-        self._ended.append((self.events, turn))
+        self._ended.append((self, turn))
 
 
 def _resident_session(
     tmp_path: Path, fixture: str, messages: list[str], *, observe: bool = True,
-) -> tuple[list[tuple[list[dict[str, Any]], Any]], list[tuple[list[dict[str, Any]], Any]], Any]:
+) -> tuple[list[tuple[list[dict[str, Any]], Any]], list[tuple[_Observed, Any]], Any]:
     """Send ``messages`` to a resident stand-in replaying ``fixture``.
 
-    Returns each user turn's events and outcome, each autonomous turn's events
-    and outcome (when ``observe``), and the totals after the last result.
+    Returns each user turn's events and outcome, each autonomous turn's
+    ``_Observed`` and outcome (when ``observe``), and the totals after the
+    last result. Each message is its own turn's tag.
     """
     from claude_stream_replay import replay_script
 
     from loopx.agents.claude_cli import ResidentClaude
 
     async def _run() -> Any:
-        autonomous: list[tuple[list[dict[str, Any]], Any]] = []
+        autonomous: list[tuple[_Observed, Any]] = []
 
-        async def begin() -> _Observed:
-            return _Observed(autonomous)
+        async def begin(after: Any) -> _Observed:
+            return _Observed(autonomous, after)
 
         claude = ResidentClaude(label="test")
         await claude.start([replay_script(tmp_path, fixture)], cwd=str(tmp_path), signature=1,
@@ -378,7 +380,7 @@ def _resident_session(
             async def on_event(event: dict[str, Any], seen: list[dict[str, Any]] = seen) -> None:
                 seen.append(event)
 
-            turns.append((seen, await claude.run_turn(text, on_event)))
+            turns.append((seen, await claude.run_turn(text, on_event, tag=text)))
         await claude.stop()  # the stand-in has nothing left to write; stop() reads to its end
         return turns, autonomous, claude.totals
 
@@ -397,7 +399,9 @@ class TestAutonomousTurns:
         assert (first.result_event["result"], second.result_event["result"]) == ("LAUNCHED", "42")
         assert first.session_started and second.session_started
         # The turn Claude ran on its own went to the owner, with the subagent's events before it.
-        ((events, own),) = autonomous
+        ((observed, own),) = autonomous
+        events = observed.events
+        assert observed.after == "start it"  # the message Claude answered before it
         assert own.result_event["origin"] == {"kind": "task-notification", "producer": "session-task"}
         assert own.result_event["result"].startswith("Background task completed with result")
         # Its events start with what the subagent and Claude wrote between the turns.
@@ -425,9 +429,11 @@ class TestAutonomousTurns:
         assert [turn.result_event["result"] for _, turn in turns] == ["STARTED", "FG-DONE", "STARTED-2", "10"]
         # A notification that came during a turn is part of that turn: Claude answered with it.
         folded = [e for e in turns[1][0] if e.get("isReplay") and e.get("origin")]
-        assert len(folded) == 1 and folded[0] not in autonomous[0][0]
+        assert len(folded) == 1 and folded[0] not in autonomous[0][0].events
         # The last message was queued while Claude ran a turn of its own; that turn is not the message's.
-        ((events, own),) = autonomous
+        ((observed, own),) = autonomous
+        events = observed.events
+        assert observed.after == "bg 2"  # Claude had not started "9+1?" yet
         assert own.result_event["result"] == "Background task BG-RACE-2 completed."
         assert _kinds(events)[:4] == ["system/background_tasks_changed", "system/task_updated",
                                       "system/task_notification", "system/init"]
