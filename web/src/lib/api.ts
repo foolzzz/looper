@@ -21,6 +21,23 @@ export interface TaskInfo {
   project_id: string;
   project_name: string;
   work_dir: string;
+  /** What the task's Planner, Workers and Reviewers spent so far; null when it could not be read. */
+  cost?: TaskCost | null;
+}
+
+/** The agents that work on one task; their runs make up its cost. */
+export type TaskRole = "planner" | "worker" | "reviewer";
+
+/** A task's cost: the sum of its runs' own costs, in total and by the role of the agent that ran. */
+export interface TaskCost {
+  cost_usd: number;
+  /** Every run, the running ones included. */
+  runs: number;
+  /** Runs still going: their cost is not known yet. */
+  running: number;
+  /** Finished runs that ended without a reported cost (Claude exited first). */
+  unpriced_runs: number;
+  by_role: Record<TaskRole, { cost_usd: number; runs: number }>;
 }
 
 /** The most characters a project background may have. */
@@ -484,9 +501,18 @@ export interface LlmRecord {
   output_summary: string | null;
   input_text: string | null;
   output_text: string | null;
+  /** The run's own tokens; for a resident agent's turn, that turn's share of its session. */
   input_tokens: number | null;
   output_tokens: number | null;
+  /** Prompt tokens read from the cache and written to it. */
+  cache_read_tokens?: number | null;
+  cache_creation_tokens?: number | null;
+  /** The run's own cost; for a resident agent's turn, that turn's share of its session. */
   cost_usd: number | null;
+  /** The context at the run's end: the prompt of its last main-loop model request. */
+  context_tokens?: number | null;
+  /** The context compactions during the run; null for runs recorded before they were. */
+  compactions?: Compaction[] | null;
   duration_ms: number | null;
   model: string | null;
   error: string | null;
@@ -508,6 +534,41 @@ export interface LlmRecord {
   finished_at: string | null;
   /** Heartbeat: last time the run produced any output. */
   last_output_at: string | null;
+}
+
+/** One context compaction (Claude Code's compact_boundary): automatic or /compact, with its context before and after. */
+export interface Compaction {
+  trigger?: "auto" | "manual" | string;
+  pre_tokens?: number;
+  post_tokens?: number;
+  duration_ms?: number;
+}
+
+/** One of an agent's turns, for its context over time. */
+export interface AgentTurn {
+  id: number;
+  created_at: string;
+  status: LlmRecord["status"];
+  session_id: string | null;
+  cost_usd: number | null;
+  context_tokens: number | null;
+  compactions: Compaction[] | null;
+}
+
+/** An agent's spending in total, by session and by UTC day, and its latest turns oldest first. */
+export interface AgentUsage {
+  agent_id: string;
+  total: { cost_usd: number; runs: number; running: number; unpriced_runs: number; compactions: number };
+  by_session: { session_id: string | null; cost_usd: number; runs: number; first_at: string; last_at: string }[];
+  by_day: { day: string; cost_usd: number; runs: number }[];
+  turns: AgentTurn[];
+  latest_context_tokens: number | null;
+}
+
+export async function fetchAgentUsage(agentId: string, turns = 100): Promise<AgentUsage> {
+  const res = await fetch(`${API_BASE}/agents/${encodeURIComponent(agentId)}/usage?turns=${turns}`);
+  if (!res.ok) throw new Error(`agent usage ${res.status}`);
+  return res.json();
 }
 
 /** One stream-json event of a run, in order. */

@@ -22,6 +22,8 @@ import {
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { historyHref } from "@/pages/agent-history";
+import { TaskCostBreakdown } from "@/components/task-cost";
+import { costCaveats, formatUsd } from "@/lib/usage";
 import { cn } from "@/lib/utils";
 import {
   ReactFlow,
@@ -394,7 +396,7 @@ function OverviewTab({ task }: { task: TaskDetail }) {
 
   return (
     <div className="space-y-6 p-5">
-      <div className="grid grid-cols-2 gap-4 sm:grid-cols-5">
+      <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-6">
         <div className="rounded-lg border border-border bg-card p-4">
           <p className="text-xs text-muted-foreground">Status</p>
           <div className="mt-1">{taskStatusBadge(task.status)}</div>
@@ -419,7 +421,20 @@ function OverviewTab({ task }: { task: TaskDetail }) {
             {total > 0 ? `${done}/${total}` : "No steps yet"}
           </p>
         </div>
+        <div className="rounded-lg border border-border bg-card p-4">
+          <p className="text-xs text-muted-foreground">Cost</p>
+          <p className="mt-1 font-mono text-sm font-medium" title={task.cost ? costCaveats(task.cost).join(", ") : undefined}>
+            {task.cost ? formatUsd(task.cost.cost_usd) : "–"}
+          </p>
+          {task.cost && (
+            <p className="mt-0.5 text-xs text-muted-foreground">
+              {task.cost.runs} run{task.cost.runs === 1 ? "" : "s"}
+            </p>
+          )}
+        </div>
       </div>
+
+      {task.cost && task.cost.runs > 0 && <TaskCostBreakdown cost={task.cost} />}
 
       <TaskConfigSection task={task} />
 
