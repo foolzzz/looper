@@ -48,7 +48,7 @@
 | `agents` | 名称、运行时实例、provider、模型、默认 effort、运行时选项、启用 |
 | `agent_setting_layers.agent` | 取代原来的 `model`。其他分层字段（harness、effort、环境变量、单次上限）不变 |
 | `tasks.agent_overrides` | 任务按角色覆盖用哪个 agent，形如 `{planner: …, worker: …, reviewer: …}`；这是唯一的任务级配置 |
-| `agent_sessions` | 增加 agent 或运行时字段，用来发现"换了运行时，会话不能续接"（第 13 节 P5） |
+| `agent_sessions` | 记录运行时类型和 provider；二者任一变化都不能续接（第 13 节 P5） |
 | 运行记录（`llm_records`） | 增加 agent、运行时、provider、模型，以及花费来源（`runtime` 或 `provider_price`） |
 
 内置并自动注册：运行时 `claude-code`、provider `claude-subscription`，以及与现有分层配置里各个模型对应的 agent。
@@ -129,6 +129,19 @@ dashboard、M2 的观测、M6 的评测和 M7 的任务日志都只认内部事�
 - **开发测试**：用本机 CPA（`127.0.0.1:8317`）。它同时提供 `/v1/responses`、`/v1/chat/completions` 和 Anthropic 格式的
   `/v1/messages`。key 在运行时从 CPA 的配置文件读取，不进仓库、不进日志。
 
+### 常用组合（2026-10-14）
+
+| 组合 | 运行时 | provider | 协议 | 阶段 |
+|---|---|---|---|---|
+| Claude Code + 订阅 | claude-code | Claude 订阅（OAuth） | anthropic-messages | 已支持 |
+| Claude Code + GLM | claude-code | GLM API key | anthropic-messages | M9b |
+| Claude Code + DeepSeek | claude-code | DeepSeek API key | anthropic-messages | M9b |
+| Claude Code + Kimi 等兼容接口 | claude-code | 对应 API key | anthropic-messages | M9b |
+| Codex + CPA | codex | CPA（OpenAI 类 provider） | openai-responses | M9c |
+| OMP + CPA | omp | CPA | openai-responses | M9e |
+
+GLM、DeepSeek 等同时提供 anthropic 和 openai 两种协议，一般配 Claude Code；M9b 内置它们的 provider 预设（两种协议的接口地址按官方文档核实），用户只填 key。
+
 ## 8. 花费与上限
 
 - **统一口径**：每次运行记录花费来源。
@@ -181,7 +194,7 @@ M9b 与 M9c 并行。
 | **P2** | **其他运行时的常驻会话怎么实现还不知道。** 可能是 `exec resume`（每轮起一个进程、重新加载上下文）、`app-server`（实验性）或 `queue`。自主轮和压缩事件也可能没有对应物 | "所有运行时都支持所有角色"的工期和稳定性 | **已定（2026-10-14）：** 先用"每轮起进程 + 续接会话"（逐轮续接）；连续接都不支持的运行时，每轮开新会话，由 Looper 注入完整状态（计划、任务日志、最近对话的摘要）。M9c 第一步做技术验证，结果写回能力矩阵 |
 | **P3** | **provider 的密钥对 agent 可见。** 不限权限的 agent 能读自己的环境变量 | 密钥可能被模型写进输出或带出去 | **已定（2026-10-14）：** 近期接受，在本文写明。之后再做一个本地代理持有密钥，agent 只拿到本地地址（做法类似 CPA） |
 | **P4** | **第三方模型遵守契约、使用工具的质量参差不齐**，可能需要按模型调整 prompt | Planner、Manager 不稳定 | **已定（2026-10-14）：** 先不做按模型的 prompt 变体，所有 agent 用同一套 prompt，运行时差异放在适配器追加的"运行时说明"里；靠 M6 评测把关，评测不过的 agent 不配给 Planner 和 Manager |
-| P5 | **运行中换 agent。** 常驻会话绑定在运行时上，换了 agent 就不能续接 | 层级或任务覆盖改了以后，Planner、Manager 要新开会话 | **已定（2026-10-14）：** 改配置立即生效，与"改了下次运行就生效"一致：Worker、Reviewer 下一步就用新 agent；Planner、Manager 在同一个运行时里换模型照旧续接，换了运行时就新开会话，用 M7 的计划状态和任务日志把进度重新注入，并在任务页记一条"已更换 agent" |
+| P5 | **运行中换 agent。** 常驻会话绑定在运行时和 provider 上 | 层级或任务覆盖改了以后，Planner、Manager 可能要新开会话 | **已定（2026-10-14）：** 改配置立即生效：Worker、Reviewer 下一步就用新 agent。Planner、Manager **只有运行时类型和 provider 都不变时才续接**（例如同一订阅下换模型）；**换 provider（任意方向：订阅→API key、API key→订阅、两家 API key 之间）或换运行时，一律新开会话**，因为各 provider 协议里的字段（思考签名、tool_use id、reasoning item 等）互不兼容。新会话靠 M7 的计划状态、任务日志和 M7c 的交接摘要补回进度，任务页记一条"已更换 agent" |
 | P6 | **花费口径不一致**（见第 8 节） | 观测和上限失真 | **已定（2026-10-14）：** 随版本内置常见模型的价格表，provider 的模型目录里可以覆盖；查不到价格的模型只显示 token 数，注册 agent 时提示花费上限对它无效。订阅类 provider 一律按 API 价格折算，界面标"等价"，花费上限同样生效（防止把订阅额度耗光） |
 | P7 | **effort 档位不对应。** Claude 是 low/medium/high/xhigh，OpenAI 是 minimal/low/medium/high | 分层配置里的 effort 含义不清 | 适配器里维护映射表；provider 的模型目录声明支持哪些档位，不支持的给出提示 |
 | P8 | **并发与限流** | 某个 provider 被打满（比如 CPA 自身的并发限制） | **已定（2026-10-14）：** 默认不设上限，与现在一致；需要时在 provider 上设置，超出的排队等待，不会失败 |
