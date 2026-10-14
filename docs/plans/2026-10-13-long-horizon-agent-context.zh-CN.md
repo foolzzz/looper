@@ -1,10 +1,10 @@
 # 开发计划：长程 Agent 上下文体系（M0–M9）
 
-- **状态：** M0–M7 全部交付（M7a 计划状态入库、M7b 任务记忆）；M8 全部交付（M8a 能力目录与安装、M8b MCP 服务器、M8c 进库来源、M8d 配置层级统一、M8e 导出与导入）；上游 LoopX 清理 B1–B4 已交付；其余见第 5 节待办
+- **状态：** M0–M7 全部交付（M7a 计划状态入库、M7b 任务记忆）；M8 全部交付（M8a 能力目录与安装、M8b MCP 服务器、M8c 进库来源、M8d 配置层级统一、M8e 导出与导入）；M9a 运行时、provider 与 agent 的注册和选择已交付；上游 LoopX 清理 B1–B4 已交付；其余见第 5 节待办
 - **依据：** [RFC：长程 Agent 的上下文体系 v0](../architecture/rfcs/long-horizon-agent-context-v0.zh-CN.md)。
   设计原则、分层模型和已作出的决定以 RFC 为准；本文只管"怎么分阶段做、做到什么算完成、现在做到哪了"。
 - **仓库：** `foolzzz/looper`，基线 `main`
-- **最近更新：** 2026-10-13
+- **最近更新：** 2026-10-14
 
 ## 1. 工作方式
 
@@ -40,7 +40,7 @@
 | M8c | 进库来源：上传、git、界面新建与编辑 | ✅ 已交付（looper #51） | M8a |
 | M8d | 配置层级统一：系统默认 → 角色 → 项目 → 项目里的角色 | ✅ 已交付（looper #50） | M8a |
 | M8e | 导出与导入：一个文件，应用前预览，密钥默认留空 | ✅ 已交付（looper #53） | M8b、M8c、M8d |
-| M9a | 运行时、provider 与 agent 的注册和选择；现有 Claude Code 路径抽成第一个运行时适配器 | 待开工 | M8d |
+| M9a | 运行时、provider 与 agent 的注册和选择；现有 Claude Code 路径抽成第一个运行时适配器 | ✅ 已交付（looper #PRNUM） | M8d |
 | M9b | Claude Code 接多种 provider：订阅 OAuth、Anthropic key、兼容 anthropic 协议的接口；按 provider 价格计算花费 | 待开工 | M9a |
 | M9c | Codex 运行时：四类角色都支持（含常驻会话），事件统一、MCP 翻译、OpenAI 登录与 key | 待开工 | M9a |
 | M9d | SDK 运行时与 norma SDK | 待定（norma 就绪后） | M9a |
@@ -419,6 +419,16 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
   - 取代 `llm_profiles` 与 `agent_configs.runtime`、`llm_profile_id`；M6 评测可以指定 agent。
 - **验收：** 不做任何配置时，四类角色的启动参数和 system prompt 与 main 逐字节一致；校验的正反例各有测试；
   任务级覆盖只影响该任务的对应角色。
+- **核实后确定的做法：**
+  - 适配器接口在 `loopx/agents/runtimes`，按多运行时 RFC 第 5 节命名（`probe`、`capabilities`、`bind_provider`、
+    `parse`、`cost` 等）；内部事件暂用 Claude Code 的 stream-json 事件，其他适配器翻译成它；插件和知识的物化仍由
+    `library`、`knowledge` 按 Claude 插件格式完成，需要别的格式的运行时（M9c）再加 `materialize`；
+  - 任务级覆盖存在 `task_agent_overrides` 表（外键指向 agent，被选中的 agent 不能删），接口字段为 `agent_overrides`；
+  - 运行启动时再校验一次选中的 agent，不通过则这次运行失败并写明原因，不退回别的 agent；常驻会话记下所属运行时类型，
+    换了运行时类型就新开会话，同一类型换模型照旧续接；
+  - provider 的模型目录（上下文窗口、四种价格、effort 档位，未知为 `null`）和 `max_concurrency`（`null` 为不限）
+    只存储和校验，M9b、M9c 再使用；每次运行记 `cost_source`（M9a 恒为 `runtime`）；
+  - 未做：运行时、provider、agent 的启用开关和运行时选项（没有使用方，以后加列即可），目录条目的运行时兼容字段。
 
 #### M9b Claude Code 接多种 provider
 
@@ -477,6 +487,7 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
 | 2026-10-13 | M8d 交付（looper #50）：harness、模型、effort、环境变量和单次运行上限统一存进 `agent_setting_layers`，按系统 → 角色 → 项目 → 项目里的角色逐层解析（Manager 只有前两层；环境变量逐键合并、可在后面的层取消；Reviewer 在角色层和项目角色层没有自己的 harness 时沿用同层 Worker 的），四类 agent 都用 `load_agent_settings` 启动，每次运行在 `settings_sources` 记下每项来自哪一层。一次性迁移把 Settings 默认值、各 agent 的模型和 Manager 的 harness、项目的模型和单次上限、项目的 Planner 和 Worker harness 原样迁入对应层并删除旧列；Settings、Agents 页和项目 Settings 标签分别编辑系统、角色、项目和项目里的角色层，每项显示当前取值和来源。验证：以 main（`72e72eb65`）的解析代码生成基准，两组旧数据迁移后四类 agent 的启动参数、环境变量和 system prompt 与基准逐字节相同，prompt 不变所以未跑真实 Claude；真实 PG 867 通过 |
 | 2026-10-13 | M8c 交付（looper #51）：Settings 的目录可上传（或拖入）`SKILL.md` 或 skill、插件目录的 zip，预览后从公开 `https://` git 仓库勾选导入（同一 URL 再导入就地更新、保留安装），在界面新建和编辑 skill；都只进库不安装，项目外重名返回 409、可改名，编辑上传或 git 条目标记 modified，本机导入的条目只能重新导入。zip 拒绝绝对路径、`..`、链接和超限文件，克隆为 `--depth 1`、不跑 hook 和子模块、不读操作者的 git 配置和凭据、限时限大小、用后删除，每条规则一个真实 PG 测试。验证：一次性 `loopx serve` 从 `https://github.com/anthropics/skills` 预览出 20 个 skill（56 个二进制文件未导入），全部导入 384 个文件、6.3 MB，再导入 20 个不变；上传的 skill 全局装给 worker 后出现在 Worker 的 `--plugin-dir`、不在 Planner 的；真实 PG 902 通过。 |
 | 2026-10-13 | M8e 交付（looper #53），M8 完成：`loopx config export` 把系统和角色层、角色 prompt、目录（含文件和 MCP）、全局安装、渠道以及可选的项目（`--include-projects`）写成一个 JSON 文件，密钥默认是占位符，`loopx config import` 默认只读预览、`--apply` 在一个事务里按自然键写入（同键就地更新、不删文件外的、占位符不覆盖已存的密钥），Settings 可流式下载导出。验证：真实 PG 测试覆盖往返、占位符、预览不写、冲突更新、重复导入不变和超过 8 MiB 的导出；对线上库只读导出（107 个条目、2175 个文件、23.2 MB），导入新库的预览为 115 项新增，应用后再预览全部不变、再导出与原文件相同；真实 PG 912 通过。 |
+| 2026-10-14 | M9a 交付（looper #PRNUM）：新增运行时、provider（密钥另表存放、接口打码，模型目录与并发上限只存储）和 agent 的注册与校验，分层配置以 `agent` 取代模型（迁移把各层模型变成 `claude-code/<模型>`），新建任务可按角色覆盖 agent，四类 agent 都经运行时适配器启动，`llm_profiles` 删除。验证：以 main（`73eed752d`）的代码生成基准，未配置和迁移过模型层两组数据下四类角色的完整 argv、环境变量、system prompt 和首条输入与基准逐字节相同（prompt 不变，未跑真实 Claude）；校验正反例、任务级覆盖只到该任务的角色、启动时校验失败不换 agent、导出导入往返都有真实 PG 测试，替身模式评测（带 `--agent`）通过，真实 PG PYTEST_COUNT 通过。 |
 
 ## 5. 不属于本 RFC 的待办
 

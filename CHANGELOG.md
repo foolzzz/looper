@@ -19,6 +19,34 @@ How the agent system works today is described in
 
 ### Added
 
+- **Runtimes, LLM providers and agents.** An agent is a runtime, an LLM
+  provider and a model, with a default effort. Settings registers runtimes
+  (a runtime type's executable, probed with `--version` when registered and
+  on request), providers (protocols, `base_url`, a model catalog with context
+  windows, prices and effort levels, `max_concurrency`, and a runtime type's
+  own login or an API key, stored apart and shown as `***`) and agents
+  (`GET /api/registry`, `/api/runtimes`, `/api/providers`, `/api/agents`).
+  The built-in `claude-code` runtime, `claude-subscription` provider and
+  `claude-code/opus` agent are what every role ran before. An agent is
+  refused when its runtime and provider share no protocol, an OAuth provider
+  belongs to another runtime type, the runtime cannot take that kind of
+  provider yet (Claude Code takes its own login only), or the provider does
+  not list its model. Every tier now starts its runtime through a runtime
+  adapter (`loopx/agents/runtimes`); Claude Code is the first, its launch
+  byte-identical to before.
+- **Choosing the agent per layer and per task.** The layered settings select
+  an agent in place of a model, in Settings, on the Agents page and in a
+  project's Settings tab, and a new task can override the agent of its
+  Planner, Workers or Reviewers (`agent_overrides`, in the API and the New
+  Task dialog), for that task only. A selection is refused when the agent's
+  runtime lacks what a role needs (a resident session and resume for the
+  Manager and Planner); a run whose agent can no longer run fails with the
+  reason rather than run another agent. Runs record their agent and
+  `cost_source`; a resident session records its runtime type, so another
+  runtime starts a new session. Config export and import carry runtimes,
+  providers (keys as placeholders) and agents. The prompt eval takes
+  `--agent`.
+
 - **Configuration export and import.** `loopx config export <file>` writes an
   installation's agent configuration to one JSON file (`loopx-config/v1`):
   the system and role settings layers and role prompts, the catalog with its
@@ -65,6 +93,12 @@ How the agent system works today is described in
 
 ### Changed
 
+- **A layer's model is now its agent.** The upgrade turns each model a layer
+  held into the agent `claude-code/<model>` (Claude Code with its own login),
+  so every role keeps its model; the settings API takes `agent` (an agent id)
+  and refuses `model`, and run records' `settings_sources` name `agent`.
+  Without configuration nothing changes: every role's command, environment
+  and system prompt are byte-identical to before.
 - **Agent settings resolve by layer.** The harness prompt, model, effort,
   environment variables and per-run cap (`--max-budget-usd`) of every agent
   now come from one store (`agent_setting_layers`) and resolve through
@@ -604,6 +638,11 @@ How the agent system works today is described in
 
 ### Removed
 
+- **LLM profiles.** `llm_profiles`, `agent_configs.runtime` and
+  `agent_configs.llm_profile_id` were never on an agent's launch path;
+  runtimes, providers and agents replace them. A one-time migration drops
+  them, `/api/llm-profiles` is gone, an agent config update naming them is
+  refused, and the Agents page no longer shows them.
 - **`agent_configs.permission_mode`.** No agent applied it since every agent
   runs with `--dangerously-skip-permissions`; the startup schema drops the
   column (`DROP COLUMN IF EXISTS`), and agent configs no longer return it. An
