@@ -168,6 +168,37 @@ export async function fetchChatMessages(sessionId: string): Promise<DbChatMessag
   return data.messages || [];
 }
 
+/** How long a dropped chat watch waits before it reconnects. */
+const CHAT_WATCH_RETRY_MS = 3000;
+
+/**
+ * Follow an open chat for messages that answer none of its own (what the
+ * Manager's Claude says on its own): each reaches `onMessage` as it is saved.
+ * Reconnects while watched; the returned function stops watching.
+ */
+export function watchChat(sessionId: string, onMessage: (message: DbChatMessage) => void): () => void {
+  let stopped = false;
+  let stop = () => {};
+  let retry: ReturnType<typeof setTimeout> | undefined;
+  const connect = () => {
+    stop = streamSSE(
+      `${API_BASE}/chat/events?session=${encodeURIComponent(sessionId)}`,
+      (event) => {
+        if (event.kind === "chat.message") onMessage(event.payload as unknown as DbChatMessage);
+      },
+      () => {
+        if (!stopped) retry = setTimeout(connect, CHAT_WATCH_RETRY_MS);
+      },
+    );
+  };
+  connect();
+  return () => {
+    stopped = true;
+    clearTimeout(retry);
+    stop();
+  };
+}
+
 export async function saveChatMessage(params: {
   session_id: string;
   message_id: string;

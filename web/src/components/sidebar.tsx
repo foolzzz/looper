@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { LayoutDashboard, MessageSquare, ListTodo, Bot, Sliders, Folder, Loader2, Plus } from "lucide-react";
+import { LayoutDashboard, MessageSquare, ListTodo, Bot, Sliders, Folder, Loader2, Plus, X } from "lucide-react";
 import { ProjectDialog } from "@/components/project-dialog";
 import { useProjects } from "@/lib/use-projects";
 import { cn } from "@/lib/utils";
@@ -21,14 +21,36 @@ interface SidebarProps {
   activeProjectId: string | null;
   onNavigate: (page: Page) => void;
   onOpenProject: (projectId: string) => void;
+  /** Below the lg breakpoint the sidebar is a drawer: shown only while open. */
+  open: boolean;
+  onClose: () => void;
 }
 
-export function Sidebar({ activePage, activeProjectId, onNavigate, onOpenProject }: SidebarProps) {
+export const SIDEBAR_ID = "app-sidebar";
+
+export function Sidebar({ activePage, activeProjectId, onNavigate, onOpenProject, open, onClose }: SidebarProps) {
   return (
-    <aside className="flex h-screen w-56 flex-col border-r border-border bg-card">
+    <aside
+      id={SIDEBAR_ID}
+      aria-label="Navigation"
+      className={cn(
+        "fixed inset-y-0 left-0 z-40 flex h-screen w-56 flex-col border-r border-border bg-card",
+        "transition-[transform,visibility] duration-200 motion-reduce:transition-none",
+        "lg:visible lg:static lg:z-auto lg:translate-x-0",
+        open ? "visible translate-x-0" : "invisible -translate-x-full",
+      )}
+    >
       <div className="flex h-14 shrink-0 items-center gap-2 px-4 border-b border-border">
         <Bot className="h-6 w-6 text-primary" />
-        <span className="text-lg font-semibold tracking-tight">LoopX</span>
+        <span className="flex-1 text-lg font-semibold tracking-tight">LoopX</span>
+        <button
+          type="button"
+          onClick={onClose}
+          aria-label="Close navigation"
+          className="-mr-2 flex h-9 w-9 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring lg:hidden"
+        >
+          <X className="h-4 w-4" />
+        </button>
       </div>
 
       <nav className="shrink-0 px-2 py-3 space-y-0.5">

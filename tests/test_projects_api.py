@@ -382,8 +382,9 @@ class TestTaskCreate:
         {"project_id": "proj-a", "work_dir": "relative/dir"},
         {"project_id": "proj-a", "work_dir": 5},
         {"project_id": 5},
+        {"project_id": "proj-a", "config": "{}"},
     ])
-    def test_rejects_bad_project_or_directory_fields(self, store: _Store, fields: dict[str, Any]) -> None:
+    def test_rejects_bad_project_directory_or_config_fields(self, store: _Store, fields: dict[str, Any]) -> None:
         store.add_project("proj-a", "tetris", "/srv/tetris")
         assert _call("POST", "/api/tasks/create", {"requirement": "r", **fields})[0] == 400
         assert store.tasks == {} and len(store.projects) == 1

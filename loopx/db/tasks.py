@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+from collections.abc import Mapping
 from datetime import datetime, timezone
 from typing import Any
 
@@ -14,6 +16,45 @@ ACTIVE_STATUSES = ("pending", "assigned", "running", "executing")
 
 # A task row plus its project's name.
 _WITH_PROJECT = "SELECT t.*, p.name AS project_name FROM tasks t JOIN projects p ON p.id = t.project_id"
+
+# The most times a stored config is unwrapped from a JSON string (see _read_config).
+_CONFIG_UNWRAP_LIMIT = 8
+
+
+def _config_json(config: Mapping[str, Any] | None) -> str:
+    """``config`` for the JSONB ``config`` column: an object, never a string."""
+    if config is None:
+        return "{}"
+    if not isinstance(config, Mapping):
+        raise TypeError(f"a task config must be an object, not {type(config).__name__}")
+    return json.dumps(dict(config))
+
+
+def _read_config(value: Any) -> dict[str, Any]:
+    """A stored config as an object.
+
+    asyncpg reads JSONB as its JSON text. Rows saved from the task page before
+    configs were checked hold the object as a JSON string, wrapped once more
+    on every save, so strings are unwrapped; anything that is not an object
+    in the end reads as ``{}``.
+    """
+    for _ in range(_CONFIG_UNWRAP_LIMIT):
+        if isinstance(value, dict):
+            return value
+        if not isinstance(value, str):
+            break
+        try:
+            value = json.loads(value)
+        except ValueError:
+            break
+    return {}
+
+
+def _task(row: Mapping[str, Any]) -> dict[str, Any]:
+    task = dict(row)
+    if "config" in task:
+        task["config"] = _read_config(task["config"])
+    return task
 
 
 async def create_task(
@@ -29,10 +70,9 @@ async def create_task(
     origin_channel_id: str = "",
     pool: asyncpg.Pool | asyncpg.Connection | None = None,
 ) -> dict[str, Any]:
-    import json
     pool = pool or get_pool()
     now = datetime.now(timezone.utc)
-    config_json = json.dumps(config or {})
+    config_json = _config_json(config)
     await pool.execute(
         """
         INSERT INTO tasks (id, requirement, goal_id, work_dir, project_id,
@@ -93,7 +133,7 @@ async def get_task(task_id: str, *, pool: asyncpg.Pool | None = None) -> dict[st
     row = await pool.fetchrow("SELECT * FROM tasks WHERE id = $1", task_id)
     if row is None:
         return None
-    return dict(row)
+    return _task(row)
 
 
 async def get_task_with_steps(task_id: str, *, pool: asyncpg.Pool | None = None) -> dict[str, Any] | None:
@@ -106,7 +146,7 @@ async def get_task_with_steps(task_id: str, *, pool: asyncpg.Pool | None = None)
         "SELECT * FROM task_steps WHERE task_id = $1 ORDER BY step_index",
         task_id,
     )
-    result = dict(task_row)
+    result = _task(task_row)
     result["steps"] = [dict(r) for r in step_rows]
     return result
 
@@ -168,7 +208,6 @@ async def update_task_config(
     config: dict[str, Any] | None = None,
     pool: asyncpg.Pool | None = None,
 ) -> bool:
-    import json
     pool = pool or get_pool()
     sets: list[str] = []
     args: list[Any] = [task_id]
@@ -183,7 +222,7 @@ async def update_task_config(
         idx += 1
     if config is not None:
         sets.append(f"config = ${idx}")
-        args.append(json.dumps(config))
+        args.append(_config_json(config))
         idx += 1
     if not sets:
         return False
@@ -225,4 +264,4 @@ async def list_tasks(
         """,
         limit, offset, project_id,
     )
-    return [dict(r) for r in rows]
+    return [_task(r) for r in rows]

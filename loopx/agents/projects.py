@@ -221,12 +221,15 @@ async def create_task(data: dict[str, Any]) -> dict[str, Any]:
         new_fields = _project_fields(new_project, update=False)
         default_dir = new_fields.get("work_dir", "")
 
+    config = data.get("config")
+    if config is not None and not isinstance(config, dict):
+        raise RequestError(HTTP_400, "config must be a JSON object")
     task = {
         "task_id": f"task-{uuid.uuid4().hex[:12]}",
         "requirement": requirement,
         "goal_id": data.get("goal_id", ""),
         "work_dir": _task_work_dir(data.get("work_dir"), default_dir),
-        "config": data.get("config", {}),
+        "config": config or {},
         "status": "init",
     }
     if project is not None:

@@ -402,6 +402,7 @@ export function TasksPage({ sub, query, onNavigate }: TasksPageProps) {
   const [newProjectName, setNewProjectName] = useState("");
   const [newProjectDir, setNewProjectDir] = useState("");
   const [newProjectDesc, setNewProjectDesc] = useState("");
+  const [newProjectBackground, setNewProjectBackground] = useState("");
   const [creating, setCreating] = useState(false);
   const [createError, setCreateError] = useState("");
   const selectedTaskId = sub || null;
@@ -481,7 +482,11 @@ export function TasksPage({ sub, query, onNavigate }: TasksPageProps) {
   const projectChosen = isNewProject ? !!newProjectName.trim() : !!chosenProject;
   /** The directory a task without its own work_dir would run in. */
   const defaultWorkDir = isNewProject ? newProjectDir.trim() : chosenProject?.work_dir || "";
-  const canCreate = !!newReq.trim() && projectChosen && (!!newWorkDir.trim() || !!defaultWorkDir);
+  const canCreate =
+    !!newReq.trim() &&
+    projectChosen &&
+    (!!newWorkDir.trim() || !!defaultWorkDir) &&
+    !(isNewProject && backgroundTooLong(newProjectBackground));
 
   const resetCreate = () => {
     setShowCreate(false);
@@ -491,6 +496,7 @@ export function TasksPage({ sub, query, onNavigate }: TasksPageProps) {
     setNewProjectName("");
     setNewProjectDir("");
     setNewProjectDesc("");
+    setNewProjectBackground("");
   };
 
   const openCreate = () => {
@@ -513,6 +519,7 @@ export function TasksPage({ sub, query, onNavigate }: TasksPageProps) {
                 name: newProjectName.trim(),
                 description: newProjectDesc.trim() || undefined,
                 work_dir: newProjectDir.trim() || undefined,
+                background: newProjectBackground.trim() ? newProjectBackground : undefined,
               },
             }
           : { ...base, project_id: newProject },
@@ -546,8 +553,8 @@ export function TasksPage({ sub, query, onNavigate }: TasksPageProps) {
   }
 
   return (
-    <div className="space-y-6">
-      <div className="flex items-center justify-between">
+    <div className="space-y-6 p-6">
+      <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <h1 className="text-2xl font-bold">Tasks</h1>
           <p className="text-sm text-muted-foreground mt-1">{projectTasks.length} total tasks</p>
@@ -810,6 +817,12 @@ export function TasksPage({ sub, query, onNavigate }: TasksPageProps) {
                       className="mt-1 w-full rounded-lg border border-border bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary/50"
                     />
                   </div>
+                  <ProjectBackgroundField
+                    id="new-task-project-background"
+                    value={newProjectBackground}
+                    onChange={setNewProjectBackground}
+                    rows={4}
+                  />
                 </div>
               )}
               <div>
