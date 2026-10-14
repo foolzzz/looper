@@ -45,7 +45,6 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-import logging
 import os
 import re
 import shlex
@@ -53,7 +52,7 @@ import shutil
 import subprocess
 import tempfile
 import time
-from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
@@ -63,16 +62,13 @@ from ..run_usage import Usage, reported_totals, run_usage
 from . import (
     ApiProtocol, AuthKind, Capability, Probe, ProviderBinding, RunCost, RuntimeAdapter, RuntimeUnsupported,
 )
+from .per_turn import PerTurnSession, session_dir_name
 from .pricing import usage_event
 
 if TYPE_CHECKING:
     from ..agent_registry import ProviderSpec
     from ..agent_settings import Launch
-    from ..claude_cli import CapStop, ResidentTurn
     from ..library import AgentLibrary
-    from ..run_usage import Price
-
-logger = logging.getLogger(__name__)
 
 _PROBE_TIMEOUT_SEC = 10.0
 # The provider's id in the generated config, and the variable that holds its key.
@@ -636,31 +632,15 @@ def _tool_result(item: Mapping[str, Any]) -> tuple[str, bool]:
 
 # --- Resident sessions ---
 
-# How much of a turn's stderr is kept for the log when it ends without a result.
-_STDERR_TAIL = 4_000
 
+class ResidentCodex(PerTurnSession):
+    """The Manager's or a Planner's Codex session: one ``codex exec`` process per turn, resuming the session
+    (``per_turn.PerTurnSession``).
 
-async def _tail(stream: asyncio.StreamReader | None) -> str:
-    if stream is None:
-        return ""
-    kept = b""
-    while chunk := await stream.read(65_536):
-        kept = (kept + chunk)[-_STDERR_TAIL:]
-    return kept.decode("utf-8", errors="replace")
-
-
-def _session_dir(label: str) -> str:
-    return re.sub(r"[^A-Za-z0-9._-]+", "_", label)[:120] or "session"
-
-
-class ResidentCodex:
-    """The Manager's or a Planner's Codex session: one ``codex exec`` process per turn, resuming the session.
-
-    It stands where ``claude_cli.ResidentClaude`` stands for Claude Code, with
-    the same calls. ``start`` keeps the command (``CodexRuntime.resident_command``,
-    plus ``resume <thread>`` for a saved session) and starts nothing; each
-    ``run_turn`` runs ``codex exec ... [resume <thread>] -`` with the message
-    on stdin, and the thread its first turn starts is resumed by the next.
+    ``start`` keeps the command (``CodexRuntime.resident_command``, plus
+    ``resume <thread>`` for a saved session); each turn runs
+    ``codex exec ... [resume <thread>] -`` with the message on stdin, and the
+    thread its first turn starts is resumed by the next.
 
     The session lives in a ``CODEX_HOME`` of the owner's own,
     ``<runtime_root>/.local/codex/sessions/<label>``: every session of the
@@ -672,138 +652,27 @@ class ResidentCodex:
 
     Codex reports the session's running totals at each turn's end, carrying on
     after a resume, so a turn's own tokens are the difference (``turn_usage``).
-    It runs no turn of its own, so the ``autonomous`` handler is never called.
     """
 
-    def __init__(self, *, label: str) -> None:
-        self._label = label
-        self._command: list[str] = []  # as started: the run home's command, and the session it resumes
-        self._base: list[str] = []  # the command without the session
-        self._signature: Any = None
-        self._cwd: str = ""
-        self._env: dict[str, str] | None = None
-        self._thread: str | None = None  # the session the next turn resumes
-        self._process: asyncio.subprocess.Process | None = None  # the turn running now, if any
-        self._ended = False  # the last turn ended without a result: the owner starts over
-        self._totals = Usage()
-        self._price: Price | None = None  # prices the totals at the provider's prices
+    runtime_label = "Codex"
 
-    @property
-    def label(self) -> str:
-        return self._label
-
-    @property
-    def started(self) -> bool:
-        return bool(self._command)
-
-    @property
-    def command(self) -> list[str]:
-        return self._command
-
-    @property
-    def pid(self) -> int | None:
-        return self._process.pid if self._process is not None else None
-
-    @property
-    def totals(self) -> Usage:
-        return self._totals
-
-    def stale(self, signature: Any) -> bool:
-        """True when it was started with another ``signature``, or its last turn ended without a result."""
-        return self.started and (self._ended or self._signature != signature)
-
-    async def start(
-        self, command: list[str], *, cwd: str, signature: Any, env: dict[str, str] | None = None,
-        totals: Usage | None = None, autonomous: Callable[[Any], Awaitable[Any]] | None = None,
-        price: Price | None = None,
-    ) -> None:
-        """Keep the command for the turns; raises ``OSError`` when its executable cannot be found. ``price``
-        prices the session's totals at the provider's prices (``Launch.price``)."""
+    def _split(self, command: list[str]) -> tuple[list[str], str | None, str]:
         if len(command) < 4 or command[0] != "env" or not command[1].startswith("CODEX_HOME="):
             raise ValueError("a resident Codex command starts with env CODEX_HOME=<home> <codex> exec")
-        executable = command[2]
-        if shutil.which(executable) is None:
-            raise OSError(f"{executable!r} was not found")
-        base, thread = list(command), None
-        if len(base) >= 2 and base[-2] == "resume":
-            base, thread = base[:-2], base[-1]
-        self._command, self._signature, self._cwd, self._env = list(command), signature, cwd, env
-        self._base, self._thread, self._ended = base, thread, False
-        self._totals, self._price = totals or Usage(), price
+        if len(command) >= 2 and command[-2] == "resume":
+            return command[:-2], command[-1], command[2]
+        return command, None, command[2]
 
-    def _turn_command(self) -> tuple[list[str], Path]:
+    def _turn_argv(self) -> list[str]:
         source = Path(self._base[1].partition("=")[2])
-        home = source.parent.parent / "sessions" / _session_dir(self._label)
+        home = source.parent.parent / "sessions" / session_dir_name(self._label)
         _sync_home(source, home)
-        resume = ["resume", self._thread] if self._thread else []
-        return ["env", f"CODEX_HOME={home}", *self._base[2:], *resume, "-"], home
+        resume = ["resume", self._session] if self._session else []
+        return ["env", f"CODEX_HOME={home}", *self._base[2:], *resume, "-"]
 
-    async def run_turn(
-        self, text: str, on_event: Callable[[dict[str, Any]], Awaitable[None]], *, tag: Any = None,
-        stop: Callable[[], CapStop | None] | None = None,
-    ) -> ResidentTurn:
-        """Run ``text`` as one turn and hand each of its events to ``on_event``. A turn given up (an exception,
-        cancellation included) kills its process before it propagates.
-
-        ``stop`` is asked after each event whether the turn went over its soft
-        cap (``ClaudeRunRecorder.cap_stop``). Codex reports a turn's tokens
-        only as it ends, so that is where a turn stops: with the cap's result,
-        its process killed, the session's totals moved on by what it spent.
-        """
-        from ..claude_cli import ResidentTurn
-
-        assert self.started
-        argv, _ = await asyncio.to_thread(self._turn_command)
-        process = await asyncio.create_subprocess_exec(
-            *argv, cwd=self._cwd, env=self._env,
-            stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-        )
-        self._process = process
-        logger.info("%s started a Codex turn (pid=%s, %s)", self._label, process.pid,
-                    f"resuming {self._thread}" if self._thread else "new session")
-        stderr = asyncio.create_task(_tail(process.stderr))
+    def _stream(self) -> CodexStream:
         base = self._base
-        stream = CodexStream(model=base[base.index("-m") + 1] if "-m" in base else None, before=self._totals)
-        result: dict[str, Any] | None = None
-        session_started = False
-        capped: CapStop | None = None
-        try:
-            assert process.stdin is not None and process.stdout is not None
-            try:
-                process.stdin.write(text.encode("utf-8"))
-                await process.stdin.drain()
-                process.stdin.close()
-            except (BrokenPipeError, ConnectionResetError):
-                logger.warning("%s: Codex closed stdin before the message was sent", self._label)
-            async for event in stream.events(process.stdout):
-                if event.get("type") == "system" and event.get("subtype") == "init":
-                    session_started = True
-                    self._thread = stream.session_id or self._thread
-                await on_event(event)
-                if stop is not None and (capped := stop()) is not None:
-                    process.kill()
-                    break
-                if event.get("type") == "result":
-                    result = event
-            await process.wait()
-        except BaseException:
-            if process.returncode is None:
-                process.kill()
-            await process.wait()
-            stderr.cancel()
-            self._process, self._ended = None, True
-            raise
-        self._process = None
-        errors = await stderr
-        if capped is not None:
-            self._totals = self._totals.plus(capped.usage)
-            return ResidentTurn(capped.result_event, session_started=session_started, usage=capped.usage)
-        if result is None:
-            self._ended = True
-            logger.warning("%s: the Codex turn ended without a result (exit code %s): %s", self._label,
-                           process.returncode, errors.strip()[-500:])
-        return ResidentTurn(result, None if result is not None else process.returncode,
-                            session_started=session_started, usage=self.turn_usage(result))
+        return CodexStream(model=base[base.index("-m") + 1] if "-m" in base else None, before=self._totals)
 
     def turn_usage(self, result_event: dict[str, Any] | None) -> Usage:
         """A turn's own tokens: its result's running totals less the previous ones."""
@@ -811,12 +680,3 @@ class ResidentCodex:
         if result_event is not None:
             self._totals = self._totals.updated(reported_totals(result_event, self._price))
         return own
-
-    async def stop(self, *, kill: bool = False) -> None:
-        """Forget the session's command and thread; a turn still running is killed."""
-        process, self._process = self._process, None
-        self._command, self._signature, self._thread, self._ended = [], None, None, False
-        if process is not None and process.returncode is None:
-            process.kill()
-            await process.wait()
-        logger.info("%s stopped its Codex session", self._label)
