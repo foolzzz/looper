@@ -633,24 +633,6 @@ def _document(entry: Any) -> dict[str, Any]:
                      "size_bytes": len(data)}
 
 
-def _runtime_spec(row: Mapping[str, Any]) -> Any:
-    from .agent_registry import RuntimeSpec
-    from .runtimes import Capability
-
-    known = {c.value for c in Capability}
-    return RuntimeSpec(row["id"], row["name"], row["type"], row["executable"],
-                       frozenset(Capability(c) for c in row["capabilities"] or () if c in known))
-
-
-def _provider_spec(row: Mapping[str, Any]) -> Any:
-    from .agent_registry import ProviderSpec
-    from .runtimes import ApiProtocol, AuthKind
-
-    return ProviderSpec(row["id"], row["name"], AuthKind(row["auth"]),
-                        frozenset(ApiProtocol(p) for p in row["protocols"]), row["oauth_runtime_type"],
-                        row["base_url"], tuple(m["name"] for m in row["models"]))
-
-
 # --- Import: the target and the plan ---
 
 
@@ -706,8 +688,10 @@ class _Importer:
         self.seen_projects: set[str] = set()
         # Runtimes, providers and agents by name, stored and from the file: their ids ("new:..." in a preview)
         # and what an agent is checked with.
-        self.runtimes = {name: (row["id"], _runtime_spec(row)) for name, row in target.runtimes.items()}
-        self.providers = {name: (row["id"], _provider_spec(row)) for name, row in target.providers.items()}
+        from .agent_registry import provider_spec, runtime_spec
+
+        self.runtimes = {name: (row["id"], runtime_spec(row)) for name, row in target.runtimes.items()}
+        self.providers = {name: (row["id"], provider_spec(row)) for name, row in target.providers.items()}
         self.agents: dict[str, tuple[str, Any]] = {}
         from .agent_registry import BUILTIN_AGENT
 
@@ -737,7 +721,7 @@ class _Importer:
     # --- runtimes, providers and agents ---
 
     async def runtime(self, entry: Any) -> None:
-        from .agent_registry import RegistryError, _executable, entry_name
+        from .agent_registry import RegistryError, _executable, entry_name, runtime_spec
         from .runtimes import RuntimeUnsupported, adapter
 
         raw = entry if isinstance(entry, Mapping) else {}
@@ -776,13 +760,13 @@ class _Importer:
             runtime_id = await db.write_runtime(self.conn, row["id"] if row is not None else None, {
                 "name": name, "type": runtime.type, "executable": executable,
                 "capabilities": sorted(c.value for c in runtime.capabilities)})
-        self.runtimes[name] = (runtime_id, _runtime_spec({"id": runtime_id, "name": name, "type": runtime.type,
-                                                          "executable": executable,
-                                                          "capabilities": sorted(c.value for c in runtime.capabilities)}
-                                                         if row is None else row))
+        self.runtimes[name] = (runtime_id, runtime_spec({"id": runtime_id, "name": name, "type": runtime.type,
+                                                         "executable": executable,
+                                                         "capabilities": sorted(c.value for c in runtime.capabilities)}
+                                                        if row is None else row))
 
     async def provider(self, entry: Any) -> None:
-        from .agent_registry import RegistryError, _provider_fields
+        from .agent_registry import RegistryError, _provider_fields, provider_spec
 
         raw = entry if isinstance(entry, Mapping) else {}
         label = str(raw.get("name"))
@@ -822,7 +806,7 @@ class _Importer:
             from ..db import config_transfer as db
 
             provider_id = await db.write_provider(self.conn, row["id"] if row is not None else None, fields, key)
-        self.providers[name] = (provider_id, _provider_spec({**fields, "id": provider_id}))
+        self.providers[name] = (provider_id, provider_spec({**fields, "id": provider_id}))
 
     async def agent(self, entry: Any) -> None:
         from .agent_registry import RegistryError, _effort, _model, check_pairing, entry_name

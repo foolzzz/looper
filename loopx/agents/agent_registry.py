@@ -363,13 +363,15 @@ async def _selected_roles(agent_id: str) -> list[str]:
 # --- Views ---
 
 
-def _runtime_spec(row: Mapping[str, Any]) -> RuntimeSpec:
+def runtime_spec(row: Mapping[str, Any]) -> RuntimeSpec:
+    """A runtime row (``agent_runtimes``) as what an agent is checked with."""
     known = {c.value for c in Capability}
     return RuntimeSpec(row["id"], row["name"], row["type"], row["executable"],
                        frozenset(Capability(c) for c in row["capabilities"] or () if c in known))
 
 
-def _provider_spec(row: Mapping[str, Any]) -> ProviderSpec:
+def provider_spec(row: Mapping[str, Any]) -> ProviderSpec:
+    """A provider row (``llm_providers``, or the fields of one) as what an agent is checked with."""
     return ProviderSpec(row["id"], row["name"], AuthKind(row["auth"]),
                         frozenset(ApiProtocol(p) for p in row["protocols"]), row["oauth_runtime_type"],
                         row["base_url"], tuple(m["name"] for m in row["models"]))
@@ -603,9 +605,7 @@ async def _check_provider_agents(conn: Any, provider: Mapping[str, Any]) -> None
     """Refuse a provider change that would leave one of its agents unable to run."""
     from ..db import agent_registry as db
 
-    spec = ProviderSpec(provider["id"], provider["name"], AuthKind(provider["auth"]),
-                        frozenset(ApiProtocol(p) for p in provider["protocols"]), provider["oauth_runtime_type"],
-                        provider["base_url"], tuple(m["name"] for m in provider["models"]))
+    spec = provider_spec(provider)
     for row in await db.list_agents(pool=conn, provider_id=provider["id"]):
         agent = AgentSpec.from_row(row)
         try:
@@ -699,7 +699,7 @@ async def _parts(runtime_id: Any, provider_id: Any) -> tuple[RuntimeSpec, Provid
     provider = await db.get_provider(provider_id) if isinstance(provider_id, str) else None
     if provider is None:
         raise RegistryError(f"no provider {provider_id!r}: give the provider_id of a registered provider")
-    return _runtime_spec(runtime), _provider_spec(provider)
+    return runtime_spec(runtime), provider_spec(provider)
 
 
 async def create_agent(data: Any) -> dict[str, Any]:
