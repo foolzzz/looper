@@ -68,7 +68,8 @@ from ..knowledge import AgentKnowledge, documents_label, load_knowledge
 from ..library import AgentLibrary, items_label, load_installed
 from ..project_execution import LessonsMode, ProjectExecution, TaskBudgetAction, format_usd
 from ..run_usage import Usage
-from ..runtimes import CLAUDE_CODE, can_resume
+from ..runtimes import CLAUDE_CODE
+from ..session_switch import SessionOwner, session_switch, session_switched
 from ..system_prompt import SystemPrompt, build_system_prompt, is_recommended, plan_task_section
 from ..message import (
     TASK_ROUTER_ADDRESS,
@@ -237,9 +238,11 @@ class TaskPlan:
     session_id: str | None = None  # the Planner's Claude session (agent_sessions), resumed after a restart
     # The session's running totals at its last result; a process that resumes the session starts from them.
     session_totals: Usage = field(default_factory=Usage)
-    # The runtime type the session belongs to and the agent that ran it last (None: before agents).
+    # The runtime type and the provider the session belongs to and the agent that ran it last (None: a session
+    # saved before they were recorded).
     session_runtime: str | None = None
     session_agent: str | None = None
+    session_provider: str | None = None
     final_summary: str = ""  # the last accepted step's summary
     fail_reason: str = ""
     # The task journal (task_journal), oldest first: an entry per accepted step, written as it is accepted.
@@ -1179,30 +1182,38 @@ class PlannerAgent:
         # index included), kept beside it all the same; the environment and the installed items are
         # compared by their hashes, the mounted directories as such.
         signature = (tuple(base), system_prompt.sha256, launch.env_sha256, launch.library.sha256,
-                     launch.knowledge.add_dirs)
+                     launch.knowledge.add_dirs, launch.binding_sha256)
         if self._claude.stale(signature):
             # Claude exited, or the config, the settings, the project or the task
             # changed: the next process resumes the session with the new prompt.
             await self._claude.stop()
         start_error: str | None = None
         resuming: str | None = None  # the session this turn's new process resumes, if any
-        if not self._claude.started and plan.session_id and not can_resume(plan.session_runtime, launch.runtime):
-            # Another runtime cannot resume this session: a new one starts. Every turn carries the plan, its
-            # steps and the task journal, so the Planner goes on from where the task is.
-            await self._activity("phase", f"The Planner's agent now runs on {launch.runtime.type}, which cannot "
-                                          f"resume its {plan.session_runtime} session: starting a new session")
+        switch = None if self._claude.started else session_switch(
+            self.agent_id, self._task_id, plan.session_id,
+            SessionOwner(plan.session_runtime, plan.session_provider, plan.session_agent), launch)
+        if switch is not None:
+            # Another runtime or provider cannot resume this session: a new one starts. Every turn carries the
+            # plan, its steps and the task journal, so the Planner goes on from where the task is; the session
+            # switch hooks add what the new session is told.
+            await self._activity("phase", f"The Planner's agent changed ({switch.change()}), which cannot resume "
+                                          f"session {switch.session_id}: starting a new session")
             plan.session_id, plan.session_totals = None, Usage()
             await self._save_session(plan)
+            if brief := await session_switched(switch):
+                message = f"{brief}\n\n{message}"
         if self._claude.started:
             command = self._claude.command
         else:
             plan.session_runtime, plan.session_agent = launch.runtime.type, launch.agent.id
+            plan.session_provider = launch.agent.provider.id
             resuming = plan.session_id
             command = base + (launch.runtime.resume_args(plan.session_id) if plan.session_id else [])
             try:
                 await self._claude.start(command, cwd=plan.work_dir, signature=signature, env=launch.environment(),
                                          totals=plan.session_totals if plan.session_id else None,
-                                         autonomous=self._autonomous_turns(plan, command, system_prompt, launch))
+                                         autonomous=self._autonomous_turns(plan, command, system_prompt, launch),
+                                         price=launch.price)
             except OSError as exc:
                 start_error = f"cannot start Claude Code: {exc}"
             else:
@@ -1234,7 +1245,8 @@ class PlannerAgent:
 
         limit = settings.timeout_seconds
         try:
-            turn = await asyncio.wait_for(self._claude.run_turn(message, on_event), limit if limit > 0 else None)
+            turn = await asyncio.wait_for(self._claude.run_turn(message, on_event, stop=lambda: recorder.cap_stop),
+                                          limit if limit > 0 else None)
         except TimeoutError:
             # The turn was cancelled, which killed Claude; the next turn resumes the session.
             error = f"the turn ran longer than the {limit} s limit (timeout_seconds)"
@@ -1888,7 +1900,8 @@ class PlannerAgent:
         """Save the Planner's Claude session and its running totals."""
         try:
             await db_agent_sessions.save_session(self.agent_id, plan.session_id, plan.session_totals.to_dict(),
-                                                 runtime_type=plan.session_runtime, session_agent_id=plan.session_agent)
+                                                 runtime_type=plan.session_runtime, provider_id=plan.session_provider,
+                                                 session_agent_id=plan.session_agent)
         except Exception:
             logger.exception("failed to save the session of %s", self.agent_id)
 
@@ -1916,6 +1929,7 @@ class PlannerAgent:
             session_totals=Usage.from_dict(session.get("session_totals")),
             session_runtime=session.get("runtime_type"),
             session_agent=session.get("session_agent_id"),
+            session_provider=session.get("provider_id"),
             final_summary=row.get("final_summary") or "",
             fail_reason=row.get("fail_reason") or "",
         )

@@ -38,7 +38,8 @@ from ..claude_cli import (
 from ..library import load_installed
 from ..projects import project_name
 from ..run_usage import Usage
-from ..runtimes import CLAUDE_CODE, can_resume
+from ..runtimes import CLAUDE_CODE
+from ..session_switch import SessionOwner, session_switch, session_switched
 from ..system_prompt import SystemPrompt, build_system_prompt, is_recommended
 from .task import resolve_work_dir
 from ..message import (
@@ -156,9 +157,11 @@ class ManagerAgent:
         # The session's running totals (cost and tokens) at its last result. A process that resumes the
         # session starts from them, so its first turn records only its own share.
         self._session_totals = Usage()
-        # The runtime type the session belongs to and the agent that ran it last (None: before agents).
+        # The runtime type and the provider the session belongs to and the agent that ran it last (None: a
+        # session saved before they were recorded).
         self._session_runtime: str | None = None
         self._session_agent: str | None = None
+        self._session_provider: str | None = None
         self._bus: MessageBus | None = None
         self._task: asyncio.Task[Any] | None = None
         self._running = False
@@ -194,11 +197,13 @@ class ManagerAgent:
             self._session_totals = Usage.from_dict(saved.get("session_totals"))
             self._session_runtime = saved.get("runtime_type")
             self._session_agent = saved.get("session_agent_id")
+            self._session_provider = saved.get("provider_id")
 
     async def _save_session_state(self) -> None:
         try:
             await db_agent_sessions.save_session(self.agent_id, self._session_id, self._session_totals.to_dict(),
                                                  runtime_type=self._session_runtime,
+                                                 provider_id=self._session_provider,
                                                  session_agent_id=self._session_agent)
         except Exception:
             logger.exception("manager: failed to save its session")
@@ -450,17 +455,23 @@ class ManagerAgent:
         # by their hashes.
         signature = (
             tuple(self._claude_command(prompt_file, launch, resume=False)), system_prompt.sha256, launch.env_sha256,
-            launch.library.sha256,
+            launch.library.sha256, launch.binding_sha256,
         )
         if self._claude.stale(signature):
             await self._claude.stop()
-        if not self._claude.started and self._session_id and not can_resume(self._session_runtime, launch.runtime):
-            # Another runtime cannot resume this session: a new one starts. Each turn carries the projects and
-            # the goals again, so only the conversation is left behind.
-            logger.warning("manager: its agent now runs on %s, which cannot resume the %s session %s; starting a "
-                           "new session", launch.runtime.type, self._session_runtime, self._session_id)
+        brief = ""
+        switch = None if self._claude.started else session_switch(
+            self.agent_id, None, self._session_id,
+            SessionOwner(self._session_runtime, self._session_provider, self._session_agent), launch)
+        if switch is not None:
+            # Another runtime or provider cannot resume this session: a new one starts. Each turn carries the
+            # projects and the goals again, so only the conversation is left behind; the session switch hooks add
+            # what the new session is told.
+            logger.warning("manager: its agent changed (%s), which cannot resume session %s; starting a new "
+                           "session", switch.change(), switch.session_id)
             self._session_id, self._session_totals = None, Usage()
             await self._save_session_state()
+            brief = await session_switched(switch)
         command = self._claude.command if self._claude.started else self._claude_command(prompt_file, launch)
 
         task_id = context_envelope.metadata.get("task_id")
@@ -480,11 +491,12 @@ class ManagerAgent:
         resuming = self._session_id if not self._claude.started else None
         if not self._claude.started:
             self._session_runtime, self._session_agent = launch.runtime.type, launch.agent.id
+            self._session_provider = launch.agent.provider.id
             try:
                 await self._claude.start(
                     command, cwd=str(self._config.work_dir), signature=signature, env=launch.environment(),
                     totals=self._session_totals if resuming else None,
-                    autonomous=self._autonomous_turns(command, system_prompt, launch),
+                    autonomous=self._autonomous_turns(command, system_prompt, launch), price=launch.price,
                 )
             except OSError as exc:
                 logger.error("failed to start Claude Code: %s", exc)
@@ -547,9 +559,12 @@ class ManagerAgent:
 
         try:
             turn_text = await self._build_user_message(message)
+            if brief:
+                turn_text = f"{brief}\n\n{turn_text}"
             # A turn cut off by Claude's exit ends without a result; that Claude
             # is reaped and the next message starts a new process that resumes the session.
-            turn = await self._claude.run_turn(turn_text, on_event, tag=context_envelope)
+            turn = await self._claude.run_turn(turn_text, on_event, tag=context_envelope,
+                                               stop=lambda: recorder.cap_stop)
         except BaseException as exc:
             # Never leave Claude running once the Manager gives up on it.
             await self._claude.stop(kill=True)
@@ -579,7 +594,11 @@ class ManagerAgent:
         final_text = "".join(text_parts) or result_text
         # A turn cut off by Claude's exit is no reply, even after some text.
         exited = result_event is None
-        replied = not exited and bool(final_text)
+        # A turn stopped at its spend cap is no reply either; the next message starts a new process (a new cap).
+        over_cap = launch.runtime.budget_error(result_event)
+        if over_cap:
+            await self._claude.stop()
+        replied = not exited and not over_cap and bool(final_text)
         usage = turn.usage
         if not exited:
             self._session_totals = self._claude.totals
@@ -587,9 +606,9 @@ class ManagerAgent:
         await recorder.finish(
             output_text=final_text or None,
             result_event=result_event,
-            error=None if replied else (
+            error=over_cap or (None if replied else (
                 f"no reply (exit code {turn.exit_code})" if exited else "no reply"
-            ),
+            )),
             usage=usage,
         )
 
@@ -605,6 +624,8 @@ class ManagerAgent:
             except Exception:
                 logger.debug("failed to record manager activity", exc_info=True)
 
+        if over_cap:
+            raise RuntimeError(over_cap)
         if not replied:
             raise RuntimeError(
                 f"Claude Code 没有返回内容（退出码 {turn.exit_code}）" if exited else "Claude Code 没有返回内容"

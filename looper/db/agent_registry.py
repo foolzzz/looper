@@ -22,7 +22,7 @@ AGENT_JSON = (
     "'runtime_id', r.id, 'runtime_name', r.name, 'runtime_type', r.type, 'runtime_executable', r.executable, "
     "'runtime_capabilities', r.capabilities, 'provider_id', p.id, 'provider_name', p.name, 'provider_auth', p.auth, "
     "'provider_protocols', p.protocols, 'provider_oauth_runtime_type', p.oauth_runtime_type, "
-    "'provider_base_url', p.base_url, 'provider_models', p.models)"
+    "'provider_base_url', p.base_url, 'provider_models', p.models, 'provider_env', p.env)"
 )
 AGENT_JOIN = "agents a JOIN agent_runtimes r ON r.id = a.runtime_id JOIN llm_providers p ON p.id = a.provider_id"
 
@@ -36,7 +36,7 @@ def _json(value: Any) -> Any:
 
 
 def _provider(row: asyncpg.Record) -> dict[str, Any]:
-    return {**dict(row), "models": _json(row["models"])}
+    return {**dict(row), "models": _json(row["models"]), "env": _json(row["env"])}
 
 
 # --- Runtimes ---
@@ -127,11 +127,13 @@ async def get_api_key(provider_id: str, *, pool: asyncpg.Pool | None = None) -> 
     return await pool.fetchval("SELECT api_key FROM llm_provider_secrets WHERE provider_id = $1", provider_id)
 
 
-_PROVIDER_COLUMNS = ("name", "protocols", "auth", "oauth_runtime_type", "base_url", "models", "max_concurrency")
+_PROVIDER_COLUMNS = ("name", "protocols", "auth", "oauth_runtime_type", "base_url", "models", "env",
+                     "max_concurrency")
+_JSON_COLUMNS = ("models", "env")
 
 
 def _provider_values(fields: Mapping[str, Any], columns: Sequence[str]) -> list[Any]:
-    return [json.dumps(list(fields[c]), ensure_ascii=False) if c == "models" else
+    return [json.dumps(list(fields[c]), ensure_ascii=False) if c in _JSON_COLUMNS else
             list(fields[c]) if c == "protocols" else fields[c] for c in columns]
 
 
@@ -146,11 +148,14 @@ async def _set_secret(conn: asyncpg.Connection, provider_id: str, api_key: str |
 
 
 async def insert_provider(conn: asyncpg.Connection, fields: Mapping[str, Any], api_key: str | None) -> str:
-    """Add a provider (every column of ``_PROVIDER_COLUMNS``) and its key; its id. Raises
+    """Add a provider (every column of ``_PROVIDER_COLUMNS``; ``env`` optional) and its key; its id. Raises
     ``asyncpg.UniqueViolationError`` for a name in use."""
     provider_id = new_id("prov")
+    fields = {"env": [], **fields}
+    values = ", ".join(f"${i}" + ("::jsonb" if c in _JSON_COLUMNS else "")
+                       for i, c in enumerate(_PROVIDER_COLUMNS, start=2))
     await conn.execute(
-        f"INSERT INTO llm_providers (id, {', '.join(_PROVIDER_COLUMNS)}) VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8)",
+        f"INSERT INTO llm_providers (id, {', '.join(_PROVIDER_COLUMNS)}) VALUES ($1, {values})",
         provider_id, *_provider_values(fields, _PROVIDER_COLUMNS),
     )
     if api_key is not None:
@@ -162,7 +167,7 @@ async def update_provider(conn: asyncpg.Connection, provider_id: str, fields: Ma
                           api_key: str | None = None, keep_key: bool = True) -> None:
     """Set the columns in ``fields``; unless ``keep_key``, replace the key with ``api_key`` (None: remove it)."""
     columns = [c for c in _PROVIDER_COLUMNS if c in fields]
-    sets = [f"{c} = ${i}" + ("::jsonb" if c == "models" else "") for i, c in enumerate(columns, start=2)]
+    sets = [f"{c} = ${i}" + ("::jsonb" if c in _JSON_COLUMNS else "") for i, c in enumerate(columns, start=2)]
     await conn.execute(
         f"UPDATE llm_providers SET {', '.join([*sets, 'updated_at = now()'])} WHERE id = $1",
         provider_id, *_provider_values(fields, columns),

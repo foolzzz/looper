@@ -4,6 +4,41 @@ The process mechanics (isolation flags, the resident process, the stream)
 live in ``claude_cli``; this adapter lays them out into each kind of run's
 command, the way every tier started Claude Code before runtimes were
 pluggable.
+
+**Providers.** With its own login (the Claude subscription) a run needs
+nothing beyond ``--model``. With an API key, the binding sets the endpoint, the
+key and, for any endpoint other than Anthropic's own, every Claude model alias
+Claude Code may use behind the agent's back. Verified against Claude Code
+2.1.285 in ``--print`` stream-json mode, through a logging proxy in front of an
+Anthropic-format endpoint, with the operator's subscription signed in:
+
+- ``ANTHROPIC_API_KEY`` is sent as ``x-api-key`` and reported by the init
+  event as ``apiKeySource: "ANTHROPIC_API_KEY"``; ``ANTHROPIC_AUTH_TOKEN`` is
+  sent as ``Authorization: Bearer`` and the init event says ``apiKeySource:
+  "none"``, as it does for the subscription. Either way the request carries the
+  key and not the subscription's token, and Claude Code warns that the key
+  "takes precedence over your claude.ai login". Set together, both headers go.
+  Third-party endpoints document ``ANTHROPIC_AUTH_TOKEN`` (GLM, DeepSeek and
+  Kimi; Kimi asks for ``ANTHROPIC_API_KEY`` to be removed), Anthropic's own
+  takes ``x-api-key``: so the key goes in ``ANTHROPIC_AUTH_TOKEN`` with a
+  ``base_url`` and in ``ANTHROPIC_API_KEY`` without one, and the other variable
+  is removed from the environment the run inherits.
+- ``--model`` wins over ``ANTHROPIC_MODEL``; the agent's model is ``--model``.
+- A subagent started without a model runs the main model, or
+  ``CLAUDE_CODE_SUBAGENT_MODEL`` when set. One started with an alias
+  (``haiku``, ``sonnet``, ``opus``, as the model may choose) requests the
+  model the alias names: ``claude-haiku-4-5-20251001`` unless
+  ``ANTHROPIC_DEFAULT_HAIKU_MODEL`` maps it, and that request fails at an
+  endpoint without Claude models. ``CLAUDE_CODE_SUBAGENT_MODEL`` does not
+  override an alias. So the binding maps the opus and sonnet aliases and the
+  subagent model to the agent's model, and the haiku alias and the small/fast
+  model (``ANTHROPIC_SMALL_FAST_MODEL``, its older name) to the background
+  model of the provider's catalog (the agent's model when it names none).
+- ``total_cost_usd`` and ``modelUsage[*].costUSD`` price any model, Claude's
+  or not, at Claude's prices (``costBasis: "unknown"`` for a model Claude
+  Code does not know), so a run on another endpoint is priced by Looper at
+  its provider's prices (``cost_source``), and ``--max-budget-usd`` is not
+  passed: Looper enforces the per-run cap itself (``claude_cli``).
 """
 
 from __future__ import annotations
@@ -14,6 +49,8 @@ import subprocess
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+
+from urllib.parse import urlsplit
 
 from .. import claude_cli
 from . import (
@@ -27,6 +64,21 @@ if TYPE_CHECKING:
 
 _PROBE_TIMEOUT_SEC = 10.0
 
+BASE_URL = "ANTHROPIC_BASE_URL"
+API_KEY = "ANTHROPIC_API_KEY"  # sent as x-api-key
+AUTH_TOKEN = "ANTHROPIC_AUTH_TOKEN"  # sent as Authorization: Bearer
+# The variables that name a model Claude Code uses besides --model: the aliases a subagent or a side request
+# may ask for, and the subagents' own model.
+MAIN_MODEL_VARS = ("ANTHROPIC_DEFAULT_OPUS_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL", "CLAUDE_CODE_SUBAGENT_MODEL")
+BACKGROUND_MODEL_VARS = ("ANTHROPIC_DEFAULT_HAIKU_MODEL", "ANTHROPIC_SMALL_FAST_MODEL")
+# Anthropic's own API: the endpoint Claude Code uses without a base URL.
+ANTHROPIC_HOSTS = frozenset({"api.anthropic.com"})
+
+
+def official_endpoint(base_url: str) -> bool:
+    """Whether ``base_url`` is Anthropic's own API: none given, or its host."""
+    return not base_url or (urlsplit(base_url).hostname or "").lower() in ANTHROPIC_HOSTS
+
 
 class ClaudeCodeRuntime(RuntimeAdapter):
     type = "claude-code"
@@ -36,10 +88,11 @@ class ClaudeCodeRuntime(RuntimeAdapter):
     # structured_output.
     capabilities = frozenset(set(Capability) - {Capability.STRUCTURED_OUTPUT})
     protocols = frozenset({ApiProtocol.ANTHROPIC_MESSAGES})
-    # Its own login (the Claude subscription) only, for now: an API key provider needs the binding to set
-    # Claude Code's key and endpoint variables (bind_provider).
-    auth_kinds = frozenset({AuthKind.OAUTH})
+    # Its own login (the Claude subscription), and an API key for Anthropic's API or an Anthropic-format endpoint.
+    auth_kinds = frozenset({AuthKind.OAUTH, AuthKind.API_KEY})
     isolation_id = claude_cli.ISOLATION_ID
+    provider_env_owned = frozenset({BASE_URL, API_KEY, AUTH_TOKEN, "ANTHROPIC_MODEL", *MAIN_MODEL_VARS,
+                                    *BACKGROUND_MODEL_VARS})
 
     def probe(self, executable: str) -> Probe:
         """``<executable> --version``: Claude Code prints its version and exits without calling a model."""
@@ -60,34 +113,61 @@ class ClaudeCodeRuntime(RuntimeAdapter):
         return claude_cli.isolation_args(cwd)
 
     def bind_provider(self, provider: ProviderSpec, model: str, effort: str) -> ProviderBinding:
-        """Claude Code's own login (the ``claude-subscription`` provider) needs nothing beside ``--model`` and
-        ``--effort``: it is how every agent ran before providers. Any other provider is refused before it gets
-        here (``auth_kinds``)."""
+        """What points a run at ``provider`` (the module's notes), followed by the provider's own variables.
+
+        Claude Code's own login (the ``claude-subscription`` provider) needs
+        nothing beside ``--model`` and ``--effort``: it is how every agent ran
+        before providers. An API key goes in ``ANTHROPIC_API_KEY`` for
+        Anthropic's own API and in ``ANTHROPIC_AUTH_TOKEN`` with the
+        ``base_url`` of any other endpoint, whose binding also maps every Claude
+        model alias to the provider's models.
+        """
+        own = tuple(provider.env)
         if provider.auth is AuthKind.OAUTH and provider.oauth_runtime_type == self.type:
-            return ProviderBinding()
-        raise RuntimeUnsupported(f"Claude Code runs with its own login only; provider {provider.name!r} is not it")
+            return ProviderBinding(env=own)
+        if provider.auth is not AuthKind.API_KEY:
+            raise RuntimeUnsupported(f"Claude Code cannot run with provider {provider.name!r}, the login of "
+                                     f"{provider.oauth_runtime_type} runtimes")
+        if not provider.api_key:
+            raise RuntimeUnsupported(f"provider {provider.name!r} has no API key for this run")
+        if official_endpoint(provider.base_url):
+            return ProviderBinding(
+                env=((API_KEY, provider.api_key), *(((BASE_URL, provider.base_url),) if provider.base_url else ()),
+                     *own),
+                unset=(AUTH_TOKEN, *(() if provider.base_url else (BASE_URL,))))
+        entry = provider.catalog_model(model)
+        background = (entry.background_model if entry else None) or model
+        return ProviderBinding(
+            env=((BASE_URL, provider.base_url), (AUTH_TOKEN, provider.api_key),
+                 *((name, model) for name in MAIN_MODEL_VARS), *((name, background) for name in BACKGROUND_MODEL_VARS),
+                 *own),
+            unset=(API_KEY,))
 
     def launch_args(self, launch: Launch) -> list[str]:
         """The Claude Code flags every agent starts with: the permissions, the model, the effort, the
         plugin directories of the installed items, the directories of the project knowledge, the
-        per-run spend cap and the provider's binding."""
+        per-run spend cap (when Claude Code's own figure is the run's cost) and the provider's binding."""
         from ..claude_cli import budget_args, knowledge_args, library_args, permission_args
 
+        provider = launch.agent.provider
         return [
             *permission_args(),
             "--model", launch.model,
             *(["--effort", launch.effort] if launch.effort else []),
             *library_args(launch.library),
             *knowledge_args(launch.knowledge),
-            *budget_args(launch.max_budget_usd),
-            *self.bind_provider(launch.agent.provider, launch.model, launch.effort).args,
+            *(budget_args(launch.max_budget_usd) if self.cost_source(provider) is CostSource.RUNTIME else []),
+            *self.bind_provider(provider, launch.model, launch.effort).args,
         ]
 
     def environment(self, launch: Launch) -> dict[str, str] | None:
-        """The subprocess environment: the server's, then the settings' variables and the provider's binding;
-        None without any."""
-        added = {**dict(launch.env), **dict(self.bind_provider(launch.agent.provider, launch.model, launch.effort).env)}
-        return {**os.environ, **added} if added else None
+        """The subprocess environment: the server's, then the settings' variables and the provider's binding,
+        less what the binding removes; None without any."""
+        binding = self.bind_provider(launch.agent.provider, launch.model, launch.effort)
+        added = {**dict(launch.env), **dict(binding.env)}
+        if not added and not binding.unset:
+            return None
+        return {**{k: v for k, v in os.environ.items() if k not in binding.unset}, **added}
 
     def resident_command(self, executable: str, *, cwd: str | Path, prompt_file: Path, launch: Launch,
                          max_turns: int = 0) -> list[str]:
@@ -163,9 +243,17 @@ class ClaudeCodeRuntime(RuntimeAdapter):
             return f"{tool_name}: {pattern[:60]}"
         return f"Tool: {tool_name}"
 
+    def cost_source(self, provider: ProviderSpec) -> CostSource:
+        """Claude Code prices every model at Claude's prices: right for its own login (an "equivalent" cost) and
+        for Anthropic's API, and for anything else Looper prices the tokens at the provider's prices."""
+        if provider.auth is AuthKind.OAUTH or official_endpoint(provider.base_url):
+            return CostSource.RUNTIME
+        return CostSource.PROVIDER_PRICE
+
     def cost(self, usage: Usage, provider: ProviderSpec) -> RunCost:
-        """With its own login, the ``total_cost_usd`` Claude Code reports, at Claude's prices."""
-        return RunCost(usage, CostSource.RUNTIME)
+        """The run's ``usage``, priced where its totals were read: from ``total_cost_usd`` (``runtime``), or from
+        ``modelUsage`` at the provider's prices (``provider_price``, ``run_usage.reported_totals``)."""
+        return RunCost(usage, self.cost_source(provider))
 
     def budget_error(self, result_event: dict[str, Any] | None) -> str | None:
         return claude_cli.budget_error(result_event)

@@ -55,8 +55,10 @@ from typing import TYPE_CHECKING, Any
 from .agent_registry import BUILTIN_AGENT, AgentSpec
 from .knowledge import EMPTY_KNOWLEDGE, AgentKnowledge
 from .library import EMPTY_LIBRARY, AgentLibrary
+from .runtimes import AuthKind, CostSource
 
 if TYPE_CHECKING:
+    from .run_usage import Price
     from .runtimes import RuntimeAdapter
 
 logger = logging.getLogger(__name__)
@@ -501,7 +503,28 @@ async def load_agent_settings(
         logger.warning("cannot read the agent settings; using the built-in defaults", exc_info=True)
         return AgentSettings(error=f"cannot read the agent settings ({type(exc).__name__})")
     settings = resolve(role, index_layers(rows, project_id), project_id)
-    return replace(settings, agent_error=agent_problem(settings.agent, AgentType(role)))
+    problem = agent_problem(settings.agent, AgentType(role))
+    if problem is None and settings.agent.provider.auth is AuthKind.API_KEY:
+        settings, problem = await _with_api_key(settings)
+    return replace(settings, agent_error=problem)
+
+
+async def _with_api_key(settings: AgentSettings) -> tuple[AgentSettings, str | None]:
+    """``settings`` with its agent's provider carrying its API key, read now (the only place a key is read for a
+    run); or why the run cannot start without one."""
+    from ..db import agent_registry
+
+    agent, provider = settings.agent, settings.agent.provider
+    try:
+        key = await agent_registry.get_api_key(provider.id)
+    except Exception as exc:
+        logger.warning("cannot read the API key of provider %s", provider.id, exc_info=True)
+        return settings, f"agent {agent.name!r} cannot run: the API key of provider {provider.name!r} could not be " \
+                         f"read ({type(exc).__name__})"
+    if not key:
+        return settings, f"agent {agent.name!r} cannot run: provider {provider.name!r} has no API key; set one in " \
+                         "Settings"
+    return replace(settings, agent=replace(agent, provider=replace(provider, api_key=key))), None
 
 
 def agent_problem(agent: AgentSpec, role: AgentType) -> str | None:
@@ -578,6 +601,26 @@ class Launch:
     def environment(self) -> dict[str, str] | None:
         """The subprocess environment (``RuntimeAdapter.environment``); None to inherit the server's."""
         return self.runtime.environment(self)
+
+    @property
+    def binding_sha256(self) -> str:
+        """One hash of what points the run at its provider (``RuntimeAdapter.bind_provider``): a resident process
+        whose provider, key or binding changed is started again."""
+        binding = self.runtime.bind_provider(self.agent.provider, self.model, self.effort)
+        return sha256_text(json.dumps([self.agent.provider.id, list(binding.args), sorted(binding.env),
+                                       list(binding.unset)], ensure_ascii=False, separators=(",", ":")))
+
+    @property
+    def cost_source(self) -> CostSource:
+        """Where the run's spend figure comes from with its provider (``RuntimeAdapter.cost_source``)."""
+        return self.runtime.cost_source(self.agent.provider)
+
+    @property
+    def price(self) -> Price | None:
+        """What prices the run's tokens at its provider's prices; None when its runtime's own figure is used."""
+        from .runtimes.pricing import pricer
+
+        return pricer(self.agent.provider) if self.cost_source is CostSource.PROVIDER_PRICE else None
 
     @property
     def env_sha256(self) -> str | None:
