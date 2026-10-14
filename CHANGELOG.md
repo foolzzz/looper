@@ -19,6 +19,14 @@ How the agent system works today is described in
 
 ### Added
 
+- **Reclaiming read-only copies.** `loopx serve` now removes, when it starts
+  and before any agent launches, the content-hashed copies under the runtime
+  root (library items, project knowledge sets, project skills plugins) that
+  the current content no longer uses and no running process's command line
+  mounts or links into (`loopx/agents/read_only_copies.py`). They used to stay
+  on disk for good after their content was replaced or deleted. When the
+  content or the running processes cannot be read, nothing is removed.
+
 - **Request body cap.** The HTTP server reads a request body of at most 8 MiB,
   room for the largest legitimate one (a 2 MiB knowledge document uploaded as
   base64 in JSON). A larger `Content-Length` gets a 413 with

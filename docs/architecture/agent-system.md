@@ -490,8 +490,8 @@ applied (N documents)` for each run that has some, and, for the Planner,
 `changed` or `removed`. When the documents cannot be read or materialized a
 run goes without them, its record's `prompt_layers.project.knowledge_error`
 says why and the activity logs a warning; the Planner keeps the knowledge it
-last read. A deleted document's copy stays on disk, since a running agent may
-be reading it.
+last read. A replaced or deleted document's copy stays on disk until the
+server next starts (see the library's **Reclaiming copies**).
 
 Verified with Claude Code 2.1.285 under the isolation flags: the agent reads
 files in an `--add-dir` directory, a `CLAUDE.md` in that directory or above it
@@ -561,7 +561,8 @@ skills)` for each run that has some, and, for the Planner, `changed` or
 `removed`. When the skills cannot be read or written, a run goes without them,
 its record's `project_skills.error` says why and the activity logs a warning.
 The Planner keeps the skills it last read. A replaced or deleted set's
-directory stays on disk, since a running agent may be using it.
+directory stays on disk until the server next starts (see the library's
+**Reclaiming copies**).
 
 Verified with Claude Code 2.1.285 under the isolation flags and
 `--dangerously-skip-permissions`, with haiku:
@@ -631,6 +632,11 @@ explicitly instead of being loaded from `~/.claude`
   and `agent_settings.Launch` carries them, so all four commands get the
   same set. When the library cannot be read or written, the run goes without
   it and its record's `library.error` says why.
+- **Reclaiming copies.** `loopx serve` reclaims replaced copies when it
+  starts, before any agent launches: `read_only_copies.reclaim_unused` removes
+  every content-hashed directory of the library, project knowledge and project
+  skills that the current content does not use and no running process's
+  command line mounts (or links into through a mounted one).
 
 Verified with Claude Code 2.1.285 under the isolation flags: in `--print`
 mode `--plugin-dir` loads a plugin's skills (as `<plugin>:<skill>`), agents,
