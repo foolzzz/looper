@@ -311,6 +311,14 @@ async def _run_agent_system(
     await seed_agent_configs(pool)
     await seed_channel_configs(pool)
 
+    # A built-in runtime for each other runtime type this machine has (Codex, when codex is on PATH).
+    from .agent_registry import register_found_runtimes
+    try:
+        if found := await register_found_runtimes():
+            logger.info("registered the built-in runtime(s) %s", ", ".join(found))
+    except Exception:
+        logger.warning("could not register the runtimes found on PATH", exc_info=True)
+
     # Once per database: the plan and session files kept before the database held them.
     from .state_import import import_file_state
     try:

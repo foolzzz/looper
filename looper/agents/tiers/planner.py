@@ -359,6 +359,7 @@ class PlannerAgent:
         self._loop_task: asyncio.Task[Any] | None = None
         self._running = False
         self._claude = CLAUDE_CODE.resident_session(self.agent_id)
+        self._claude_runtime = CLAUDE_CODE  # the runtime type whose session self._claude is
         self._turn_lock = asyncio.Lock()
         self._supervise_task: asyncio.Task[Any] | None = None
         # When the last turn ended, so a periodic SUPERVISE is skipped right
@@ -1180,6 +1181,10 @@ class PlannerAgent:
         # compared by their hashes, the mounted directories as such.
         signature = (tuple(base), system_prompt.sha256, launch.env_sha256, launch.library.sha256,
                      launch.knowledge.add_dirs)
+        if launch.runtime is not self._claude_runtime:
+            # Each runtime type keeps its resident sessions its own way.
+            await self._claude.stop()
+            self._claude, self._claude_runtime = launch.runtime.resident_session(self.agent_id), launch.runtime
         if self._claude.stale(signature):
             # Claude exited, or the config, the settings, the project or the task
             # changed: the next process resumes the session with the new prompt.

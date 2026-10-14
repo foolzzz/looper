@@ -1,0 +1,5 @@
+{"type":"thread.started","thread_id":"01a139aa-37a8-7fa3-9b4c-717c3e15f2ab"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_0","type":"reasoning","text":"**Clarifying plan tool availability**"}}
+{"type":"item.completed","item":{"id":"item_1","type":"agent_message","text":"391"}}
+{"type":"turn.completed","usage":{"input_tokens":9318,"cached_input_tokens":2432,"cache_write_input_tokens":0,"output_tokens":134,"reasoning_output_tokens":127}}

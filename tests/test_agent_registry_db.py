@@ -263,6 +263,70 @@ def test_an_agent_pairs_a_runtime_and_a_provider_that_can_run_together(
     _run(_test, monkeypatch)
 
 
+def _version_codex(path: Path) -> str:
+    """A stand-in codex that prints its version for ``--version`` and fails on anything else."""
+    return fake_claude(path, (
+        "import sys\n"
+        "if sys.argv[1:] == ['--version']:\n    print('codex-cli 0.162.0')\n    sys.exit(0)\n"
+        "sys.exit(9)\n"
+    ))
+
+
+def test_codex_pairs_only_with_an_api_key_provider_of_openai_responses_and_runs_every_role(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    codex = _version_codex(tmp_path / "codex")
+
+    async def _test(_pool: Any) -> None:
+        runtime = (await _ok("POST", "/api/runtimes", {"name": "codex", "type": "codex", "executable": codex}))["runtime"]
+        assert (runtime["version"], runtime["type_label"], runtime["protocols"]) == (
+            "codex-cli 0.162.0", "Codex", ["openai-responses"])
+        cpa = await _provider({"name": "cpa", "protocols": ["openai-responses"], "auth": "api_key",
+                               "base_url": "http://127.0.0.1:8317/v1", "api_key": SECRET})
+        chat = await _provider({"name": "chat-only", "protocols": ["openai-chat"], "auth": "api_key"})
+        anthropic = await _provider({"name": "anthropic-key", "protocols": ["anthropic-messages"], "auth": "api_key"})
+
+        async def agent(provider_id: str) -> tuple[int, Any]:
+            return await _call("POST", "/api/agents", {"name": f"codex-{provider_id}", "model": "gpt-5.5",
+                                                       "runtime_id": runtime["runtime_id"], "provider_id": provider_id})
+
+        status, payload = await agent(cpa)
+        assert status == 201
+        # Every role can run it: the system layer selects it for all four.
+        await _ok("PUT", "/api/agent-settings/system", {"agent": payload["agent"]["agent_id"]})
+        for provider_id in (chat, anthropic, "prov-claude-subscription"):
+            status, payload = await agent(provider_id)
+            assert status == 400 and "share no protocol" in payload["error"]
+        # Codex's own login is not one Looper uses (API keys only).
+        status, payload = await _call("POST", "/api/providers", {
+            "name": "codex-login", "protocols": ["openai-responses"], "auth": "oauth", "oauth_runtime_type": "codex"})
+        assert status == 400 and "Codex has no login of its own" in payload["error"]
+
+    _run(_test, monkeypatch)
+
+
+def test_codex_on_path_becomes_a_builtin_runtime_once(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    from looper.agents.agent_registry import register_found_runtimes
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    _version_codex(bin_dir / "codex")
+
+    async def _test(_pool: Any) -> None:
+        monkeypatch.setenv("PATH", str(tmp_path / "empty"))
+        assert await register_found_runtimes() == []
+        monkeypatch.setenv("PATH", str(bin_dir))
+        assert await register_found_runtimes() == ["codex"]
+        runtime = _by_name((await _registry())["runtimes"], "codex")
+        assert (runtime["runtime_id"], runtime["builtin"], runtime["executable"], runtime["version"]) == (
+            "rt-codex", True, "", "codex-cli 0.162.0")
+        assert await register_found_runtimes() == []  # once
+        status, payload = await _call("DELETE", "/api/runtimes/rt-codex")
+        assert status == 400 and "built-in" in payload["error"]
+
+    _run(_test, monkeypatch)
+
+
 def test_a_change_that_would_break_an_agent_is_refused_and_one_in_use_is_kept(
     monkeypatch: pytest.MonkeyPatch, stand_in: str,
 ) -> None:

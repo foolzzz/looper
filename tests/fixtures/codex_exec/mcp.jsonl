@@ -1,0 +1,7 @@
+{"type":"thread.started","thread_id":"01a139a1-b8f7-7891-9a5c-1393f6938820"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"I’ll look up the available spike MCP tool metadata first, then call the specific tool once it’s exposed."}}
+{"type":"item.started","item":{"id":"item_1","type":"mcp_tool_call","server":"spike","tool":"secret_word","arguments":{},"result":null,"error":null,"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_1","type":"mcp_tool_call","server":"spike","tool":"secret_word","arguments":{},"result":{"content":[{"type":"text","text":"The secret word is FOXTROT-91."}],"structured_content":null},"error":null,"status":"completed"}}
+{"type":"item.completed","item":{"id":"item_2","type":"agent_message","text":"The secret word is `FOXTROT-91`."}}
+{"type":"turn.completed","usage":{"input_tokens":29243,"cached_input_tokens":22656,"cache_write_input_tokens":0,"output_tokens":101,"reasoning_output_tokens":9}}

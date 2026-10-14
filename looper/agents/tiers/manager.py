@@ -170,6 +170,7 @@ class ManagerAgent:
         # The resident Claude: started on the first chat message, then fed one
         # user turn per message; restarted when its system prompt changes.
         self._claude = CLAUDE_CODE.resident_session("manager")
+        self._claude_runtime = CLAUDE_CODE  # the runtime type whose session self._claude is
         self._turn_lock = asyncio.Lock()
         self._session_loaded = False  # whether the saved session was read (at start, else before the first turn)
 
@@ -452,6 +453,10 @@ class ManagerAgent:
             tuple(self._claude_command(prompt_file, launch, resume=False)), system_prompt.sha256, launch.env_sha256,
             launch.library.sha256,
         )
+        if launch.runtime is not self._claude_runtime:
+            # Each runtime type keeps its resident sessions its own way.
+            await self._claude.stop()
+            self._claude, self._claude_runtime = launch.runtime.resident_session("manager"), launch.runtime
         if self._claude.stale(signature):
             await self._claude.stop()
         if not self._claude.started and self._session_id and not can_resume(self._session_runtime, launch.runtime):
