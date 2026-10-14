@@ -25,7 +25,7 @@ import { ClampedText } from "@/components/clamped-text";
 import { historyHref } from "@/pages/agent-history";
 import { TaskCostBreakdown } from "@/components/task-cost";
 import { ContinueAtCap, TaskSpendMeter } from "@/components/task-budget";
-import { costCaveats, formatUsd } from "@/lib/usage";
+import { costBasis, costCaveats, formatUsd } from "@/lib/usage";
 import { cn } from "@/lib/utils";
 import {
   ReactFlow,
@@ -456,6 +456,7 @@ function OverviewTab({ task, onContinued }: { task: TaskDetail; onContinued: () 
           {task.cost && (
             <p className="mt-0.5 text-xs text-muted-foreground">
               {task.cost.runs} run{task.cost.runs === 1 ? "" : "s"}
+              {costBasis(task.cost) && ` · ${costBasis(task.cost)}`}
             </p>
           )}
           {task.cost && task.task_budget_usd != null && (

@@ -46,8 +46,12 @@ export interface TaskCost {
   runs: number;
   /** Runs still going: their cost is not known yet. */
   running: number;
-  /** Finished runs that ended without a reported cost (Claude exited first). */
+  /** Finished runs that ended without a cost (Claude exited first, or their model has no price). */
   unpriced_runs: number;
+  /** Runs whose cost is what a subscription's usage would cost at API prices, not money spent. */
+  equivalent_runs?: number;
+  /** Runs Looper priced at their provider's prices. */
+  provider_price_runs?: number;
   by_role: Record<TaskRole, { cost_usd: number; runs: number }>;
 }
 
@@ -1127,9 +1131,17 @@ export interface ProviderModel {
   cache_read_usd_per_mtok: number | null;
   cache_write_usd_per_mtok: number | null;
   efforts: string[] | null;
+  /** The model the runtime's side requests use with this one (titles, summaries, quick subagents); null: itself. */
+  background_model: string | null;
 }
 
-export type PriceField = Exclude<keyof ProviderModel, "name" | "context_window" | "efforts">;
+export type PriceField = Exclude<keyof ProviderModel, "name" | "context_window" | "efforts" | "background_model">;
+
+/** An environment variable a provider adds to the runs that use it. */
+export interface ProviderEnvEntry {
+  key: string;
+  value: string;
+}
 
 /** A registered LLM provider. The key itself is never sent: `api_key` is the mask when one is stored. */
 export interface Provider {
@@ -1143,11 +1155,34 @@ export interface Provider {
   base_url: string;
   /** Empty: any model. */
   models: ProviderModel[];
+  /** Its own environment variables for the runs that use it. */
+  env: ProviderEnvEntry[];
   /** null = no limit. */
   max_concurrency: number | null;
   api_key: string | null;
   builtin: boolean;
   agent_count: number;
+}
+
+/** A known vendor's provider, filled in except for the key: its APIs (each one provider), models and env. */
+export interface ProviderPreset {
+  preset_id: string;
+  label: string;
+  name: string;
+  apis: { protocols: string[]; base_url: string }[];
+  models: Pick<ProviderModel, "name" | "context_window" | "background_model">[];
+  env: ProviderEnvEntry[];
+  docs: string[];
+  note: string;
+}
+
+/** How an agent's runs are priced: by its runtime, or by Looper at the provider's prices; which models lack a price. */
+export interface AgentCostBasis {
+  source: "runtime" | "provider_price" | null;
+  /** The figure is what a subscription's usage would cost at API prices, not money spent. */
+  equivalent: boolean;
+  /** Models its runs use without a full price: those runs record tokens only and no spend cap applies. */
+  unpriced: string[];
 }
 
 /** A registered agent: a runtime, a provider and a model, with an optional default effort. */
@@ -1163,6 +1198,7 @@ export interface RegistryAgent {
   provider_id: string;
   provider_name: string;
   builtin: boolean;
+  cost: AgentCostBasis;
 }
 
 export interface RegistryLimits {
@@ -1176,6 +1212,8 @@ export interface RegistryLimits {
   role_capabilities: Record<AgentRole, string[]>;
   /** What a stored secret reads as; sent back, it keeps the secret. */
   secret_mask: string;
+  /** Variables a provider's env cannot set: the runtimes' bindings set them. */
+  provider_env_owned: string[];
 }
 
 export interface Registry {
@@ -1183,6 +1221,9 @@ export interface Registry {
   runtimes: Runtime[];
   providers: Provider[];
   agents: RegistryAgent[];
+  provider_presets: ProviderPreset[];
+  /** The built-in price table: a catalog price left unknown comes from it. */
+  prices: { as_of: string; sources: string[]; models: Record<string, Record<PriceField, number | null>> };
   limits: RegistryLimits;
 }
 
@@ -1195,6 +1236,7 @@ export interface ProviderFields {
   base_url?: string;
   /** A number field may go as typed, so the server's 400 explains it. */
   models?: Record<string, unknown>[];
+  env?: ProviderEnvEntry[];
   max_concurrency?: number | string | null;
   api_key?: string | null;
 }
@@ -1260,11 +1302,14 @@ export function deleteProvider(providerId: string): Promise<{ deleted: string }>
 }
 
 /** Register an agent; refused (400) when its runtime, provider and model could not run together. */
-export function createRegistryAgent(fields: AgentFields): Promise<{ agent: RegistryAgent }> {
+export function createRegistryAgent(fields: AgentFields): Promise<{ agent: RegistryAgent; warnings: string[] }> {
   return registryCall("POST", "/agents", fields, "add agent");
 }
 
-export function updateRegistryAgent(agentId: string, fields: AgentFields): Promise<{ agent: RegistryAgent }> {
+export function updateRegistryAgent(
+  agentId: string,
+  fields: AgentFields,
+): Promise<{ agent: RegistryAgent; warnings: string[] }> {
   return registryCall("PUT", `/agents/${encodeURIComponent(agentId)}`, fields, "update agent");
 }
 

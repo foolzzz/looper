@@ -19,6 +19,7 @@ import {
   type ProviderAuth,
   type ProviderFields,
   type ProviderModel,
+  type ProviderPreset,
   type Registry,
   type RegistryAgent,
   type Runtime,
@@ -297,9 +298,21 @@ const PRICE_LABELS: Record<PriceField, string> = {
 
 const AUTH_LABELS: Record<ProviderAuth, string> = { oauth: "OAuth (a runtime's login)", api_key: "API key" };
 
-/** A provider's model catalog: every field but the name may be unknown. */
-function ModelTable({ models, priceFields }: { models: ProviderModel[]; priceFields: PriceField[] }) {
+/** The built-in price of a model as the price table names it: without a [1m]-style or date suffix. */
+function builtinPrice(registry: Registry, model: string, field: PriceField): number | null {
+  const base = model.trim().replace(/\[[^\]]*\]$/, "").replace(/-\d{8}$/, "").toLowerCase();
+  return registry.prices.models[base]?.[field] ?? null;
+}
+
+/** A provider's model catalog: every field but the name may be unknown; an unknown price is the built-in one. */
+function ModelTable({ models, registry }: { models: ProviderModel[]; registry: Registry }) {
+  const priceFields = registry.limits.price_fields;
   if (!models.length) return <p className="text-xs text-muted-foreground">Models: any (no catalog)</p>;
+  const price = (model: ProviderModel, field: PriceField) => {
+    if (model[field] != null) return formatUsd(model[field]);
+    const builtin = builtinPrice(registry, model.name, field);
+    return builtin == null ? "—" : `${formatUsd(builtin)}*`;
+  };
   const cell = "py-1 pr-4 align-top";
   return (
     <div className="overflow-x-auto">
@@ -312,6 +325,7 @@ function ModelTable({ models, priceFields }: { models: ProviderModel[]; priceFie
               <th key={field} scope="col" className={`${cell} font-medium`}>{PRICE_LABELS[field]}</th>
             ))}
             <th scope="col" className={`${cell} font-medium`}>Efforts</th>
+            <th scope="col" className={`${cell} font-medium`}>Background model</th>
           </tr>
         </thead>
         <tbody className="font-mono">
@@ -320,19 +334,25 @@ function ModelTable({ models, priceFields }: { models: ProviderModel[]; priceFie
               <td className={`${cell} text-foreground`}>{model.name}</td>
               <td className={cell}>{model.context_window?.toLocaleString() ?? "—"}</td>
               {priceFields.map((field) => (
-                <td key={field} className={cell}>{model[field] == null ? "—" : formatUsd(model[field])}</td>
+                <td key={field} className={cell}>{price(model, field)}</td>
               ))}
               <td className={cell}>{model.efforts?.join(", ") ?? "—"}</td>
+              <td className={cell}>{model.background_model ?? "itself"}</td>
             </tr>
           ))}
         </tbody>
       </table>
-      <p className="text-[11px] text-muted-foreground">Prices in USD per million tokens; — is unknown.</p>
+      <p className="text-[11px] text-muted-foreground">
+        Prices in USD per million tokens; * is the built-in price ({registry.prices.as_of}), — is unknown.
+      </p>
     </div>
   );
 }
 
-type ModelDraft = { name: string; context_window: string; efforts: string } & Record<PriceField, string>;
+type ModelDraft = { name: string; context_window: string; efforts: string; background_model: string } & Record<
+  PriceField,
+  string
+>;
 
 interface ProviderDraft {
   name: string;
@@ -342,6 +362,8 @@ interface ProviderDraft {
   baseUrl: string;
   maxConcurrency: string;
   models: ModelDraft[];
+  /** Extra environment variables, one KEY=value per line. */
+  env: string;
   /** A new key; empty keeps the stored one (or sets none). */
   apiKey: string;
   removeKey: boolean;
@@ -356,13 +378,42 @@ const numberOrTyped = (raw: string) => {
   return Number.isFinite(number) ? number : value;
 };
 
-function modelDraft(model: ProviderModel | null, priceFields: PriceField[]): ModelDraft {
+function modelDraft(model: Partial<ProviderModel> | null, priceFields: PriceField[]): ModelDraft {
   const prices = Object.fromEntries(priceFields.map((f) => [f, text(model?.[f] ?? null)])) as Record<PriceField, string>;
   return {
     name: model?.name ?? "",
     context_window: text(model?.context_window ?? null),
     efforts: model?.efforts?.join(", ") ?? "",
+    background_model: model?.background_model ?? "",
     ...prices,
+  };
+}
+
+const envText = (env: { key: string; value: string }[]) => env.map((e) => `${e.key}=${e.value}`).join("\n");
+
+/** KEY=value lines as entries; a line without "=" goes as a key with an empty value, so the server's 400 explains. */
+function envEntries(raw: string) {
+  return raw
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => {
+      const at = line.indexOf("=");
+      return at < 0 ? { key: line, value: "" } : { key: line.slice(0, at).trim(), value: line.slice(at + 1) };
+    });
+}
+
+/** A new provider's draft from one API of a preset: everything but the key. */
+function presetDraft(preset: ProviderPreset, api: ProviderPreset["apis"][number], registry: Registry): ProviderDraft {
+  return {
+    ...providerDraft(null, registry),
+    name: preset.name,
+    auth: "api_key",
+    protocols: api.protocols,
+    baseUrl: api.base_url,
+    models: preset.models.map((m) => modelDraft(m, registry.limits.price_fields)),
+    // The vendor's Claude Code variables matter only to an Anthropic-format API.
+    env: api.protocols.includes("anthropic-messages") ? envText(preset.env) : "",
   };
 }
 
@@ -376,6 +427,7 @@ function providerDraft(provider: Provider | null, registry: Registry): ProviderD
     baseUrl: provider?.base_url ?? "",
     maxConcurrency: text(provider?.max_concurrency ?? null),
     models: (provider?.models ?? []).map((m) => modelDraft(m, registry.limits.price_fields)),
+    env: envText(provider?.env ?? []),
     apiKey: "",
     removeKey: false,
   };
@@ -392,7 +444,9 @@ function providerBody(draft: ProviderDraft, provider: Provider | null, registry:
       context_window: numberOrTyped(m.context_window),
       ...Object.fromEntries(registry.limits.price_fields.map((f) => [f, numberOrTyped(m[f])])),
       efforts: m.efforts.trim() ? m.efforts.split(",").map((e) => e.trim()).filter(Boolean) : null,
+      background_model: m.background_model.trim() || null,
     })),
+    env: envEntries(draft.env),
   };
   if (draft.auth === "oauth") return { ...fields, oauth_runtime_type: draft.oauthType, base_url: "" };
   fields.oauth_runtime_type = null;
@@ -419,8 +473,45 @@ function ProviderForm({ provider, registry, onDone }: { provider: Provider | nul
     if (done) onDone();
   };
 
+  const [presetKey, setPresetKey] = useState("");
+  const preset = registry.provider_presets.find((p) => presetKey.startsWith(`${p.preset_id}:`));
+  const choosePreset = (key: string) => {
+    setPresetKey(key);
+    const [presetId, index] = key.split(":");
+    const chosen = registry.provider_presets.find((p) => p.preset_id === presetId);
+    if (chosen) setDraft(presetDraft(chosen, chosen.apis[Number(index)], registry));
+  };
+  const apiLabel = (protocols: string[]) =>
+    protocols.includes("anthropic-messages") ? "Anthropic API, for Claude Code" : `OpenAI API (${protocols.join(", ")})`;
+
   return (
     <form onSubmit={save} aria-label={provider ? `Edit provider ${provider.name}` : "Add a provider"} className="space-y-3">
+      {!provider && registry.provider_presets.length > 0 && (
+        <div className="space-y-1">
+          <label htmlFor={`${id}-preset`} className={LABEL}>Start from a preset</label>
+          <select id={`${id}-preset`} value={presetKey} onChange={(e) => choosePreset(e.target.value)} className={SELECT}>
+            <option value="">None: fill in every field</option>
+            {registry.provider_presets.map((p) =>
+              p.apis.map((api, index) => (
+                <option key={`${p.preset_id}:${index}`} value={`${p.preset_id}:${index}`}>
+                  {p.label} · {apiLabel(api.protocols)}
+                </option>
+              )),
+            )}
+          </select>
+          {preset && (
+            <p className="text-[11px] text-muted-foreground">
+              Filled from the vendor&apos;s documentation: add the API key below.
+              {preset.note && ` ${preset.note[0].toUpperCase()}${preset.note.slice(1)}.`}
+              {preset.docs.map((url, i) => (
+                <a key={url} href={url} target="_blank" rel="noreferrer" className="ml-1 underline">
+                  source {i + 1}
+                </a>
+              ))}
+            </p>
+          )}
+        </div>
+      )}
       <div className="grid gap-3 sm:grid-cols-3">
         <div className="space-y-1">
           <label htmlFor={`${id}-name`} className={LABEL}>Name *</label>
@@ -523,13 +614,17 @@ function ProviderForm({ provider, registry, onDone }: { provider: Provider | nul
               {priceFields.map((field) => (
                 <div key={field} className="space-y-0.5">
                   <label htmlFor={`${id}-m${index}-${field}`} className={SMALL_LABEL}>{PRICE_LABELS[field]} $/Mtok</label>
-                  <Input id={`${id}-m${index}-${field}`} inputMode="decimal" value={model[field]} onChange={(e) => setModel(index, { [field]: e.target.value })} className="h-8 font-mono text-xs" />
+                  <Input id={`${id}-m${index}-${field}`} inputMode="decimal" value={model[field]} onChange={(e) => setModel(index, { [field]: e.target.value })} placeholder={builtinPrice(registry, model.name, field)?.toString() ?? ""} className="h-8 font-mono text-xs" />
                 </div>
               ))}
               <div className="space-y-0.5">
                 <label htmlFor={`${id}-m${index}-efforts`} className={SMALL_LABEL}>Efforts</label>
                 <Input id={`${id}-m${index}-efforts`} value={model.efforts} onChange={(e) => setModel(index, { efforts: e.target.value })} placeholder="low, high" spellCheck={false} autoCapitalize="none" className="h-8 font-mono text-xs" />
               </div>
+            </div>
+            <div className="space-y-0.5 sm:max-w-xs">
+              <label htmlFor={`${id}-m${index}-background`} className={SMALL_LABEL}>Background model</label>
+              <Input id={`${id}-m${index}-background`} value={model.background_model} onChange={(e) => setModel(index, { background_model: e.target.value })} placeholder="The model itself" spellCheck={false} autoCapitalize="none" className="h-8 font-mono text-xs" />
             </div>
             <Button type="button" variant="ghost" size="sm" onClick={() => set({ models: draft.models.filter((_, i) => i !== index) })} aria-label={`Remove model ${model.name || index + 1}`} className="text-muted-foreground">
               <X className="h-3.5 w-3.5" /> Remove model
@@ -540,10 +635,29 @@ function ProviderForm({ provider, registry, onDone }: { provider: Provider | nul
           <Plus className="h-3.5 w-3.5" /> Add model
         </Button>
         <p className="text-[11px] text-muted-foreground">
-          Blank fields are unknown; efforts are comma-separated. With no models the provider serves any model; with
-          some, its agents must use one of them.
+          Blank fields are unknown, and a blank price uses the built-in price shown greyed (from {registry.prices.as_of});
+          a model with no price records tokens only and no spend cap applies to it. Efforts are comma-separated. The
+          background model serves the runtime&apos;s side requests (titles, summaries, quick subagents). With no models
+          the provider serves any model; with some, its agents must use one of them.
         </p>
       </fieldset>
+
+      <div className="space-y-1">
+        <label htmlFor={`${id}-env`} className={LABEL}>Extra environment</label>
+        <textarea
+          id={`${id}-env`}
+          value={draft.env}
+          onChange={(e) => set({ env: e.target.value })}
+          rows={Math.max(2, draft.env.split("\n").length)}
+          placeholder="API_TIMEOUT_MS=3000000"
+          spellCheck={false}
+          className="w-full rounded-md border border-input bg-transparent px-3 py-2 font-mono text-xs"
+        />
+        <p className="text-[11px] text-muted-foreground">
+          One KEY=value per line, added to the runs that use this provider. Not for secrets (the key goes above) or
+          what the runtime sets from the fields above ({registry.limits.provider_env_owned.join(", ")}).
+        </p>
+      </div>
 
       <FormFooter error={action.error} busy={action.busy} submit={provider ? "Save" : "Add provider"} onCancel={onDone} />
     </form>
@@ -564,6 +678,7 @@ function ProviderRow({ provider, registry }: { provider: Provider; registry: Reg
     provider.protocols.join(", "),
     provider.auth === "api_key" ? provider.base_url || "the protocol's own endpoint" : "",
     provider.max_concurrency == null ? "no concurrency limit" : `at most ${provider.max_concurrency} runs at once`,
+    provider.env.length ? `env ${provider.env.map((e) => e.key).join(", ")}` : "",
     usedBy(provider.agent_count),
   ].filter(Boolean);
   return (
@@ -587,7 +702,7 @@ function ProviderRow({ provider, registry }: { provider: Provider; registry: Reg
       }
     >
       <p className="break-words text-xs text-muted-foreground">{details.join(" · ")}</p>
-      <ModelTable models={provider.models} priceFields={registry.limits.price_fields} />
+      <ModelTable models={provider.models} registry={registry} />
     </Row>
   );
 }
@@ -607,11 +722,18 @@ function AgentForm({ agent, registry, onDone }: { agent: RegistryAgent | null; r
   const set = (change: Partial<typeof draft>) => setDraft((d) => ({ ...d, ...change }));
   const provider = registry.providers.find((p) => p.provider_id === draft.provider_id);
 
+  const [warnings, setWarnings] = useState<string[]>([]);
   const save = async (e: React.FormEvent) => {
     e.preventDefault();
     const body = { ...draft, name: draft.name.trim(), model: draft.model.trim(), effort: draft.effort || null };
-    const done = await action.run(() => (agent ? updateRegistryAgent(agent.agent_id, body) : createRegistryAgent(body)));
-    if (done) onDone();
+    let answer: { warnings: string[] } | null = null;
+    const done = await action.run(async () => {
+      answer = await (agent ? updateRegistryAgent(agent.agent_id, body) : createRegistryAgent(body));
+    });
+    // Saved; a warning (a model without a price) keeps the form open until it is read.
+    const saved = answer as { warnings: string[] } | null;
+    if (done && saved?.warnings.length) setWarnings(saved.warnings);
+    else if (done) onDone();
   };
 
   return (
@@ -660,9 +782,26 @@ function AgentForm({ agent, registry, onDone }: { agent: RegistryAgent | null; r
           : "The model as the runtime takes it: an alias such as sonnet or a full name."}{" "}
         A settings layer&apos;s effort overrides the default.
       </p>
+      {warnings.length > 0 && (
+        <div role="status" className="space-y-1 rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs">
+          <p className="font-medium">Saved, with a warning:</p>
+          {warnings.map((w) => (
+            <p key={w}>{w}</p>
+          ))}
+          <Button type="button" size="sm" variant="outline" onClick={onDone}>OK</Button>
+        </div>
+      )}
       <FormFooter error={action.error} busy={action.busy} submit={agent ? "Save" : "Add agent"} onCancel={onDone} />
     </form>
   );
+}
+
+/** How an agent's runs are priced, in words. */
+function costBasisText(agent: RegistryAgent): string {
+  if (agent.cost.source === "runtime") {
+    return agent.cost.equivalent ? "cost: the runtime's figure, a subscription equivalent" : "cost: the runtime's figure";
+  }
+  return agent.cost.source === "provider_price" ? "cost: tokens at the provider's prices" : "";
 }
 
 function AgentRow({ agent, registry }: { agent: RegistryAgent; registry: Registry }) {
@@ -694,7 +833,15 @@ function AgentRow({ agent, registry }: { agent: RegistryAgent; registry: Registr
       <p className="break-words text-xs text-muted-foreground">
         {agent.runtime_name} ({runtimeLabel}) · {agent.provider_name} · model{" "}
         <span className="font-mono text-foreground/80">{agent.model}</span> · effort {agent.effort ?? "runtime default"}
+        {costBasisText(agent) && ` · ${costBasisText(agent)}`}
       </p>
+      {agent.cost.unpriced.length > 0 && (
+        <p className="flex items-start gap-1 text-xs text-amber-700 dark:text-amber-400">
+          <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+          No price for {agent.cost.unpriced.join(", ")}: its runs record tokens only and spend caps do not apply. Add
+          the prices to the provider&apos;s model catalog.
+        </p>
+      )}
     </Row>
   );
 }
