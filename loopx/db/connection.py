@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
+import re
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -71,8 +73,47 @@ async def transaction() -> AsyncIterator[asyncpg.Connection]:
         yield conn
 
 
+# The fingerprint of the schema.sql last applied: ``schema_change_pending``
+# compares it with the current file, so ``loopx serve`` can back the database
+# up before the file's migrations (some drop columns and tables) change it.
+_RECORD_FINGERPRINT = """
+CREATE TABLE IF NOT EXISTS schema_fingerprint (
+    id          BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK (id),
+    sha256      TEXT NOT NULL,
+    applied_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+INSERT INTO schema_fingerprint (id, sha256) VALUES (TRUE, '{sha256}')
+ON CONFLICT (id) DO UPDATE SET sha256 = EXCLUDED.sha256, applied_at = now()
+WHERE schema_fingerprint.sha256 <> EXCLUDED.sha256;
+"""
+
+
+def schema_fingerprint(sql: str) -> str:
+    return hashlib.sha256(sql.encode("utf-8")).hexdigest()
+
+
 async def ensure_schema(pool: asyncpg.Pool | None = None) -> None:
     pool = pool or get_pool()
     sql = SCHEMA_PATH.read_text(encoding="utf-8")
-    await pool.execute(sql)
+    # One simple query runs as one transaction: the fingerprint is recorded
+    # only together with the schema it names.
+    await pool.execute(sql + _RECORD_FINGERPRINT.format(sha256=schema_fingerprint(sql)))
     logger.info("schema ensured")
+
+
+async def schema_change_pending(conn: asyncpg.Connection) -> bool:
+    """Would ``ensure_schema`` change a database that already holds LoopX tables?
+
+    True when one of schema.sql's tables exists but the recorded fingerprint
+    is missing or differs from the current file's. A database without LoopX
+    tables is new: applying the schema loses nothing.
+    """
+    sql = SCHEMA_PATH.read_text(encoding="utf-8")
+    tables = re.findall(r"(?im)^\s*CREATE TABLE IF NOT EXISTS\s+(\w+)", sql)
+    if not await conn.fetchval(
+        "SELECT EXISTS (SELECT 1 FROM unnest($1::text[]) AS t(name) WHERE to_regclass(t.name) IS NOT NULL)", tables
+    ):
+        return False
+    if not await conn.fetchval("SELECT to_regclass('schema_fingerprint') IS NOT NULL"):
+        return True
+    return await conn.fetchval("SELECT sha256 FROM schema_fingerprint") != schema_fingerprint(sql)
