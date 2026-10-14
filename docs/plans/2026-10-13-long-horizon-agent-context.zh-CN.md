@@ -33,7 +33,7 @@
 | M4 | 项目 skill | ✅ 已交付（looper #32） | M3 |
 | M5 | 项目执行配置 | ✅ 已交付（looper #37） | M2 |
 | M6 | prompt 回归评测 | ✅ 已交付（looper #36） | M1 |
-| M7a | 计划状态入库：计划、步骤和 agent 会话以 PostgreSQL 为唯一来源 | ✅ 已交付（looper #PRNUM） | M2、M5 |
+| M7a | 计划状态入库：计划、步骤和 agent 会话以 PostgreSQL 为唯一来源 | ✅ 已交付（looper #45） | M2、M5 |
 | M7b | 任务记忆：任务日志、进度与发现注入、经验沉淀为项目知识 | ⏳ 待开工 | M7a |
 
 执行顺序：M1 → M1.5 → M1.6 → M1.7 → M2 → M3 → M4 → M5 → M6 → M7a → M7b。
@@ -322,7 +322,7 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
 | 2026-10-13 | 第 5.2 节工程待办（looper #42）：知识索引每个目录写一次、每篇只带相对路径（已核实 Claude Code 只按工作目录解析相对路径），短文档能放满 100 篇；`loopx serve` 启动时回收当前内容不用、也没有运行中进程挂载的只读副本；请求体上限 8 MiB（超限 413）；删除 `agent_configs.permission_mode` 列。验证：真实 haiku 下 Worker 按新索引读到两篇文档（$0.07），回归评测 5/5（$0.33），真实 PG 758 通过。 |
 | 2026-10-13 | 第 5.3 节任务花费辅助功能（looper #43）：项目设了任务上限时，任务页显示花费占上限的比例，达到 80% 起提醒；因上限失败的任务（`tasks.fail_kind = 'task_budget'`）可经 `POST /api/tasks/<id>/continue` 把项目上限提高到高于已花费的值后继续，非上限失败或新上限不高于花费返回 400。继续时任务保留步骤，Planner 读回保存的计划并续接会话，不重新规划：被上限打断的步骤重跑，在审的步骤重新送审。验证：真实 PG 契约测试，以及一次性 `loopx serve` 加带花费的替身 Claude 跑完「接近上限 → 达到上限失败 → 提高上限继续 → 完成」并截图。 |
 | 2026-10-13 | 第 5.3 节项目页与知识、skill 辅助功能（looper #44）：侧栏点项目打开 `#projects/<id>`，有 Overview、Knowledge、Skills、Settings 四个标签，取代 Tasks 页里的项目编辑；知识文档和项目 skill 可展开看正文、就地修改，拖入文件新增文档，上传或拖入 `SKILL.md` 按 frontmatter 填好名称、描述和正文，新增 `GET .../knowledge/<doc_id>`、`GET .../skills/<skill_id>` 返回正文；历史页列出运行加载的项目 skill，Agents 页去掉 `permission_mode` 和 Sandbox 下拉框。验证：真实 PG 测试，无头 Chrome 在一次性服务上完成各标签的读写与拖放并截图。 |
-| 2026-10-13 | M7a 交付（looper #PRNUM）：计划存进 `task_plans` 和补齐字段的 `task_steps`，Manager 与 Planner 的会话存进 `agent_sessions`，每次变化只写改动的行，多行变化一个事务，不再写计划和会话文件；启动时续跑计划仍在进行的任务（不重新规划、续接会话），并一次性导入旧文件。验证：真实 `loopx serve` 加替身 Claude 在 SIGINT 重启后续跑完成、因上限失败的任务重启后"提高上限并继续"完成；本机 11 个计划文件都是旧格式、全部跳过，导入 Manager 会话 1 个，第二次运行无操作。 |
+| 2026-10-13 | M7a 交付（looper #45）：计划存进 `task_plans` 和补齐字段的 `task_steps`，Manager 与 Planner 的会话存进 `agent_sessions`，每次变化只写改动的行，多行变化一个事务，不再写计划和会话文件；启动时续跑计划仍在进行的任务（不重新规划、续接会话），并一次性导入旧文件。验证：真实 `loopx serve` 加替身 Claude 在 SIGINT 重启后续跑完成、因上限失败的任务重启后"提高上限并继续"完成；本机 11 个计划文件都是旧格式、全部跳过，导入 Manager 会话 1 个，第二次运行无操作。 |
 
 ## 5. 不属于本 RFC 的待办
 
