@@ -246,11 +246,11 @@ async def get_record(
     return _row_to_dict(row)
 
 
-# A run whose cost is Claude Code's own figure for its own login (the subscription): what that usage would cost at
-# API prices, not money spent. A run names its Agent Profile in metadata.profile; one recorded before the rename
-# names it in metadata.agent, and one recorded before Agent Profiles names none: it ran with that login.
-EQUIVALENT = ("cost_source IS DISTINCT FROM 'provider_price' "
-              "AND COALESCE(metadata->'profile'->'provider'->>'auth', metadata->'agent'->'provider'->>'auth', "
+# A run with a runtime's own login (a subscription: Claude Code's, priced by Claude Code; Codex's, priced by Looper
+# at the built-in prices): what that usage would cost at API prices, not money spent. A run names its Agent Profile
+# in metadata.profile; one recorded before the rename names it in metadata.agent, and one recorded before Agent
+# Profiles names none: it ran with Claude Code's login.
+EQUIVALENT = ("COALESCE(metadata->'profile'->'provider'->>'auth', metadata->'agent'->'provider'->>'auth', "
               "'oauth') = 'oauth'")
 
 
@@ -266,7 +266,7 @@ async def task_costs(
     finished ones that ended without a reported cost (Claude exited first, or
     their model has no price); ``equivalent_runs`` those whose cost is what a
     subscription's usage would cost at API prices (``EQUIVALENT``), and
-    ``provider_price_runs`` those Looper priced at their provider's prices.
+    ``provider_price_runs`` the others Looper priced at their provider's prices.
     """
     if not task_ids:
         return {}
@@ -277,7 +277,8 @@ async def task_costs(
                count(*) FILTER (WHERE status = 'running') AS running,
                count(*) FILTER (WHERE status <> 'running' AND cost_usd IS NULL) AS unpriced_runs,
                count(*) FILTER (WHERE cost_usd IS NOT NULL AND {EQUIVALENT}) AS equivalent_runs,
-               count(*) FILTER (WHERE cost_usd IS NOT NULL AND cost_source = 'provider_price') AS provider_price_runs,
+               count(*) FILTER (WHERE cost_usd IS NOT NULL AND cost_source = 'provider_price' AND NOT {EQUIVALENT})
+                   AS provider_price_runs,
                COALESCE(sum(cost_usd), 0) AS cost_usd
         FROM llm_records
         WHERE task_id = ANY($1::text[]) AND {_TASK_ROLE} IS NOT NULL

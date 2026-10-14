@@ -258,8 +258,8 @@ def task_metrics(
                          for name, value in (cost.get("by_role") or {}).items()},
         "runs": int(cost.get("runs") or len(records)),
         "tokens": tokens,
-        # How the runs were priced: by Claude Code for its own login (an equivalent), by Looper at the provider's
-        # prices, or not at all (tokens only).
+        # How the runs were priced: a runtime's own login (an equivalent, Claude Code's figure or Codex's tokens at
+        # the built-in prices), by Looper at an API key provider's prices, or not at all (tokens only).
         "cost_basis": {name: int(cost.get(f"{name}_runs") or 0) for name in ("equivalent", "provider_price",
                                                                             "unpriced")},
         "contract_violations": {**violations, "total": sum(violations.values())},

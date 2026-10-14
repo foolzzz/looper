@@ -184,6 +184,24 @@ def test_a_tasks_cost_is_the_sum_of_its_planner_worker_and_reviewer_runs() -> No
     _in_fresh_schema(test)
 
 
+def test_a_run_with_a_runtimes_own_login_costs_a_subscription_equivalent() -> None:
+    from looper.db import llm_records
+
+    async def test(pool: Any) -> None:
+        for agent_id, auth, source in (("worker-claude", "oauth", "runtime"), ("worker-codex", "oauth", "provider_price"),
+                                       ("worker-key", "api_key", "provider_price"), ("worker-old", None, None)):
+            record_id = await llm_records.start_record(
+                agent_id=agent_id, task_id="t1", pool=pool,
+                metadata={"profile": {"provider": {"auth": auth}}} if auth else {})
+            await llm_records.finish_record(record_id, status="completed", cost_usd=0.1, cost_source=source, pool=pool)
+        cost = (await llm_records.task_costs(["t1"], pool=pool))["t1"]
+        # Claude Code's subscription and Codex's ChatGPT login (and a run from before Agent Profiles) are
+        # equivalents; the API key run is priced at its provider's prices.
+        assert (cost["equivalent_runs"], cost["provider_price_runs"]) == (3, 1)
+
+    _in_fresh_schema(test)
+
+
 def test_a_resident_agents_usage_by_session_day_and_turn() -> None:
     from looper.db import llm_records
 
