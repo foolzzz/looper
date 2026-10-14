@@ -174,7 +174,7 @@ def render_plist(spec: ServiceSpec) -> bytes:
 
 
 def _systemd_quote(word: str) -> str:
-    """One ExecStart word or Environment assignment: quoted, C-escaped, specifiers and variables kept literal."""
+    """One ExecStart word or Environment assignment: quoted and C-escaped, with ``%`` kept literal."""
     escaped = word.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n").replace("%", "%%")
     return f'"{escaped}"'
 
@@ -313,7 +313,9 @@ class Launchd(_Manager):
 
     def state(self) -> State:
         printed = self._print()
-        fields = dict(re.findall(r"^\t([a-z][a-z ]*?) = (.*)$", printed.stdout, re.M)) if printed.returncode == 0 else {}
+        # Top-level fields only: one tab deep; nested blocks are indented further.
+        found = re.findall(r"^\t([a-z][a-z ]*?) = (.*)$", printed.stdout, re.M) if printed.returncode == 0 else []
+        fields = dict(found)
         pid = int(fields["pid"]) if fields.get("pid", "").isdigit() else None
         last_exit = fields.get("last terminating signal") or fields.get("last exit code", "")
         port, log = self.unit_settings()
@@ -328,7 +330,8 @@ class Launchd(_Manager):
         deadline = self.host.clock() + _STOP_WAIT_SECONDS
         while self._print().returncode == 0:
             if self.host.clock() >= deadline:
-                raise ServiceError(f"launchd still has {self.target} {_STOP_WAIT_SECONDS:.0f} s after `launchctl bootout`")
+                raise ServiceError(f"launchd still lists {self.target} {_STOP_WAIT_SECONDS:.0f} s after "
+                                   "`launchctl bootout`")
             self.host.sleep(_POLL_SECONDS)
 
     def start(self) -> None:
@@ -375,7 +378,8 @@ class Systemd(_Manager):
     def _systemctl(self, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
         result = self._call("systemctl", "--user", *args)
         if check and result.returncode != 0:
-            raise ServiceError(f"`systemctl --user {' '.join(args)}` failed: {(result.stderr or result.stdout).strip()}")
+            reason = (result.stderr or result.stdout).strip()
+            raise ServiceError(f"`systemctl --user {' '.join(args)}` failed: {reason}")
         return result
 
     def state(self) -> State:
@@ -419,7 +423,8 @@ def manager(host: Host, label: str) -> _Manager:
         return Launchd(host, label)
     if host.system == "Linux":
         return Systemd(host, label)
-    raise ServiceError(f"`loopx service` supports macOS (launchd) and Linux (systemd), not {host.system or 'this system'}")
+    raise ServiceError(f"`loopx service` supports macOS (launchd) and Linux (systemd), "
+                       f"not {host.system or 'this system'}")
 
 
 # --- The commands ------------------------------------------------------------------
@@ -435,8 +440,9 @@ def _start_and_wait(mgr: _Manager, port: int, log_path: Path | None, timeout: fl
     """Start the stopped service on a free ``port`` and wait until it answers ``GET /api/status``."""
     host = mgr.host
     if host.port_in_use(port):
-        raise ServiceError(f"port {port} is in use by another process, so the service is installed but not started; "
-                           f"stop that process (or install again with another --port), then run `loopx service restart`")
+        raise ServiceError(f"port {port} is in use by another process, so the service is installed but not "
+                           "started; stop that process (or install again with another --port), then run "
+                           "`loopx service restart`")
     mgr.start()
     deadline = host.clock() + timeout
     while True:

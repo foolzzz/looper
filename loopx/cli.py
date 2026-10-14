@@ -110,7 +110,8 @@ def _add_service_parser(commands: argparse._SubParsersAction) -> None:
         "status", allow_abbrev=False,
         help="Show whether the service is installed and running, its PID, last exit and log, and GET /api/status.",
         description="Exits 0 when the service runs and answers on its port, else 1.")
-    uninstall = service_commands.add_parser("uninstall", allow_abbrev=False, help="Stop the service and remove its unit.")
+    uninstall = service_commands.add_parser(
+        "uninstall", allow_abbrev=False, help="Stop the service and remove its unit.")
     for command in (install, restart, status, uninstall):
         command.add_argument("--label", default="com.loopx.serve",
                              help="Service name: the launchd label or systemd unit name (default com.loopx.serve).")
