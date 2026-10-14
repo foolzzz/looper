@@ -325,40 +325,53 @@ function SystemPrompt({ record }: { record: LlmRecord }) {
   );
 }
 
-/** The plugins and skills this run loaded from the library (Settings), with their versions. */
+/** The plugins and skills this run loaded: the library's (Settings) and its project's, with their versions. */
 function LoadedLibrary({ record }: { record: LlmRecord }) {
   const library = record.metadata?.library;
-  if (!library) return null;
-  const { items, error, sha256 } = library;
-  const plugins = items.filter((item) => item.kind === "plugin");
-  const skills = items.filter((item) => item.kind === "skill");
-  const title = error
-    ? `Plugins & skills · not loaded: ${error}`
-    : `Plugins & skills · ${plugins.length} plugin${plugins.length === 1 ? "" : "s"}, ${skills.length} skill${
-        skills.length === 1 ? "" : "s"
-      } · ${shortSha(sha256)}`;
+  const project = record.metadata?.project_skills;
+  if (!library && !project) return null;
+  const plugins = library?.items.filter((item) => item.kind === "plugin") ?? [];
+  const skills = library?.items.filter((item) => item.kind === "skill") ?? [];
+  const projectSkills = (project?.skills ?? []).map((skill) => ({
+    name: `${project?.plugin ?? "project"}:${skill.name}`,
+    sha256: skill.sha256,
+  }));
+  const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`;
+  const parts = [
+    library &&
+      (library.error
+        ? `library not loaded: ${library.error}`
+        : `${plural(plugins.length, "plugin")}, ${plural(skills.length, "skill")} · ${shortSha(library.sha256)}`),
+    project &&
+      (project.error ? `project skills not loaded: ${project.error}` : plural(projectSkills.length, "project skill")),
+  ].filter(Boolean);
   return (
-    <Collapsible icon={<Library className="h-3 w-3" />} title={title} tone={error ? "error" : undefined}>
-      {sha256 && (
+    <Collapsible
+      icon={<Library className="h-3 w-3" />}
+      title={`Plugins & skills · ${parts.join(" · ")}`}
+      tone={library?.error || project?.error ? "error" : undefined}
+    >
+      {library?.sha256 && (
         <div className="mb-2 flex items-center gap-2">
-          <span className="min-w-0 break-all font-mono text-[11px] text-muted-foreground">library sha256 {sha256}</span>
-          <CopyButton text={sha256} label="Copy" />
+          <span className="min-w-0 break-all font-mono text-[11px] text-muted-foreground">library sha256 {library.sha256}</span>
+          <CopyButton text={library.sha256} label="Copy" />
         </div>
       )}
-      {[["Plugins", plugins] as const, ["Skills", skills] as const].map(([name, group]) =>
-        group.length ? (
-          <div key={name} className="mb-2">
-            <p className="mb-0.5 text-[11px] font-medium text-muted-foreground">{name}</p>
-            <ul className="grid gap-x-4 gap-y-0.5 font-mono text-[11px] sm:grid-cols-2">
-              {group.map((item) => (
-                <li key={item.name} className="flex min-w-0 justify-between gap-2">
-                  <span className="truncate" title={item.name}>{item.name}</span>
-                  <span className="shrink-0 text-muted-foreground">{shortSha(item.sha256)}</span>
-                </li>
-              ))}
-            </ul>
-          </div>
-        ) : null,
+      {[["Plugins", plugins] as const, ["Skills", skills] as const, ["Project skills", projectSkills] as const].map(
+        ([name, group]) =>
+          group.length ? (
+            <div key={name} className="mb-2">
+              <p className="mb-0.5 text-[11px] font-medium text-muted-foreground">{name}</p>
+              <ul className="grid gap-x-4 gap-y-0.5 font-mono text-[11px] sm:grid-cols-2">
+                {group.map((item) => (
+                  <li key={item.name} className="flex min-w-0 justify-between gap-2">
+                    <span className="truncate" title={item.name}>{item.name}</span>
+                    <span className="shrink-0 text-muted-foreground">{shortSha(item.sha256)}</span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ) : null,
       )}
     </Collapsible>
   );
