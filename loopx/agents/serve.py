@@ -350,6 +350,7 @@ async def _run_agent_system(
         task_router=task_router,
         supervisor=supervisor,
         broadcaster=broadcaster,
+        runtime_root=runtime_root,
     )
     await http_server.start()
 

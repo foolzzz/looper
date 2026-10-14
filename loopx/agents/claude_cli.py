@@ -18,6 +18,7 @@ from .run_usage import Usage, compaction, reported_totals, request_context, run_
 
 if TYPE_CHECKING:
     from .agent_settings import Launch
+    from .knowledge import AgentKnowledge
     from .library import AgentLibrary
     from .system_prompt import SystemPrompt
 
@@ -115,6 +116,18 @@ def library_args(library: AgentLibrary) -> list[str]:
     agents cannot diverge.
     """
     return [arg for directory in library.plugin_dirs for arg in ("--plugin-dir", directory)]
+
+
+def knowledge_args(knowledge: AgentKnowledge) -> list[str]:
+    """The flags that mount a run's project knowledge: one ``--add-dir`` per directory.
+
+    Every agent's launch carries them (``agent_settings.Launch.args``); only a
+    task agent's launch has knowledge, so the Manager's adds nothing. Verified
+    against Claude Code 2.1.285 with the isolation flags above: the agent reads
+    files in an added directory, and a CLAUDE.md in it or above it is not
+    loaded. ``--add-dir`` takes several values, so each directory gets its own.
+    """
+    return [arg for directory in knowledge.add_dirs for arg in ("--add-dir", directory)]
 
 
 # --- What an agent may do ---

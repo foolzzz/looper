@@ -33,6 +33,7 @@ import { cn } from "@/lib/utils";
 import { formatUsd } from "@/lib/usage";
 import { ProjectBackgroundField, backgroundTooLong } from "@/components/project-background-field";
 import { ProjectHarnessOverrides, harnessTooLong } from "@/components/harness-field";
+import { ProjectKnowledgeSection } from "@/components/project-knowledge";
 import { TaskDetailPage } from "./task-detail";
 
 const STATUS_FILTERS = ["all", "init", "running", "pending", "completed", "failed", "cancelled", "stopped"] as const;
@@ -148,7 +149,8 @@ function ClampedText({ text, className }: { text: string; className?: string }) 
   );
 }
 
-/** The selected project's name, description, default directory, count, background and harness overrides, editable in place. */
+/** The selected project's name, description, default directory, count, background and harness overrides, editable in
+ * place; the editor also manages its knowledge. */
 function ProjectBar({ project, onDeleted }: { project: Project; onDeleted: () => void }) {
   const [editing, setEditing] = useState(false);
   const [name, setName] = useState("");
@@ -265,6 +267,7 @@ function ProjectBar({ project, onDeleted }: { project: Project; onDeleted: () =>
             Save
           </Button>
         </div>
+        <ProjectKnowledgeSection projectId={project.project_id} />
       </div>
     );
   }

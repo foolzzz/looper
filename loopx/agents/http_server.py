@@ -18,7 +18,7 @@ from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
-from . import agent_settings, library, projects, request_guard
+from . import agent_settings, knowledge, library, projects, request_guard
 from .broadcast import Broadcaster
 from .chat_targets import ChatTargetError, list_chat_targets, resolve_chat_target
 from .channels.web import WebChannelAdapter
@@ -87,6 +87,7 @@ class AgentHTTPServer:
         supervisor: AgentSupervisor,
         broadcaster: Broadcaster | None = None,
         static_dir: Path | None = None,
+        runtime_root: Path | None = None,
     ) -> None:
         self._host = host
         self._port = port
@@ -95,6 +96,8 @@ class AgentHTTPServer:
         self._supervisor = supervisor
         self._broadcaster = broadcaster or Broadcaster()
         self._static_dir = static_dir or default_static_dir()
+        # Where the agents' files live: project knowledge is materialized under it.
+        self._runtime_root = runtime_root
         self._server: asyncio.Server | None = None
 
     async def start(self) -> None:
@@ -209,6 +212,8 @@ class AgentHTTPServer:
     _RE_TASK_CONFIG = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)/config$")
     _RE_TASK_PROJECT = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)/project$")
     _RE_PROJECT = re.compile(r"^/api/projects/(proj-[a-zA-Z0-9]+)$")
+    _RE_PROJECT_KNOWLEDGE = re.compile(r"^/api/projects/(proj-[a-zA-Z0-9]+)/knowledge$")
+    _RE_PROJECT_DOCUMENT = re.compile(r"^/api/projects/(proj-[a-zA-Z0-9]+)/knowledge/(doc-[a-zA-Z0-9]+)$")
 
     async def _route_api(
         self,
@@ -266,6 +271,17 @@ class AgentHTTPServer:
                 m.group(1), projects.json_object(body)))
         elif (m := self._RE_PROJECT.match(path)) and method == "DELETE":
             await self._answer(writer, HTTP_200, lambda: projects.delete_project(m.group(1)))
+        elif (m := self._RE_PROJECT_KNOWLEDGE.match(path)) and method == "GET":
+            await self._handle_knowledge(writer, HTTP_200, lambda root: knowledge.knowledge_view(m.group(1), root))
+        elif (m := self._RE_PROJECT_KNOWLEDGE.match(path)) and method == "POST":
+            await self._handle_knowledge(writer, HTTP_201, lambda root: knowledge.add_document(
+                m.group(1), projects.json_object(body), root))
+        elif (m := self._RE_PROJECT_DOCUMENT.match(path)) and method == "PUT":
+            await self._handle_knowledge(writer, HTTP_200, lambda root: knowledge.update_document(
+                m.group(1), m.group(2), projects.json_object(body), root))
+        elif (m := self._RE_PROJECT_DOCUMENT.match(path)) and method == "DELETE":
+            await self._handle_knowledge(writer, HTTP_200, lambda root: knowledge.delete_document(
+                m.group(1), m.group(2), root))
         elif path == "/api/agent-configs" and method == "GET":
             await self._handle_list_agent_configs(writer)
         elif (m := self._RE_AGENT_CONFIG.match(path)) and method == "GET":
@@ -960,6 +976,27 @@ class AgentHTTPServer:
             status, result = HTTP_500, {"error": str(exc)}
         else:
             status = HTTP_200
+        writer.write(_json_response(status, _serialize(result)))
+        await writer.drain()
+
+    # --- A project's knowledge (the documents its task agents read on demand) ---
+
+    async def _handle_knowledge(
+        self, writer: asyncio.StreamWriter, status: str, request: Callable[[Path], Awaitable[Any]],
+    ) -> None:
+        """Answer with ``request(runtime_root)``'s result; a refused request is 400, an unknown project or
+        document 404."""
+        try:
+            if self._runtime_root is None:
+                raise RuntimeError("the server was started without a runtime root")
+            result = await request(self._runtime_root)
+        except (knowledge.KnowledgeError, projects.RequestError) as exc:
+            status, result = getattr(exc, "status", HTTP_400), {"error": str(exc)}
+        except knowledge.KnowledgeNotFound as exc:
+            status, result = HTTP_404, {"error": str(exc)}
+        except Exception:
+            logger.exception("knowledge request failed")
+            status, result = HTTP_500, {"error": "the knowledge request failed; see the server log"}
         writer.write(_json_response(status, _serialize(result)))
         await writer.drain()
 

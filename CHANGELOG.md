@@ -18,6 +18,31 @@ To learn how to use these features, read the [usage guide](docs/fork/usage.md).
 
 ### Added
 
+- **Project knowledge (M3).** A project can carry reference documents that
+  its Planner, Workers and Reviewers read on demand instead of getting them
+  in the prompt (`loopx/agents/knowledge.py`).
+  - **Sources.** Text written on the dashboard, an uploaded text file (base64
+    in JSON), or a file in the project's default directory, referenced by its
+    relative path and read live. No URLs. Binary content and paths that lead
+    out of the project's directory are refused.
+  - **Caps.** A document 2 MiB; a project 100 documents and 50 MiB of stored
+    content; the index agents get 4,000 characters. Each is refused with a
+    400 that states it.
+  - **Delivery.** Text and uploads are materialized read-only under
+    `<runtime_root>/.local/projects/<project_id>/knowledge/<sha256>/` and
+    mounted with `--add-dir`; the project's directory is mounted too when the
+    task runs elsewhere. The project layer of the system prompt gains a
+    `## Project knowledge` index after the background, one line per document
+    (title, summary, the path to read); a referenced file that is gone is
+    listed as missing. The Manager gets neither.
+  - **Effect and records.** Changes reach the next Worker or Reviewer; the
+    resident Planner restarts with `--resume` on its next turn.
+    `prompt_layers.project` records the index's `knowledge_sha256` and
+    `knowledge_documents`.
+  - **API and dashboard.** `GET`/`POST /api/projects/<id>/knowledge` and
+    `PUT`/`DELETE /api/projects/<id>/knowledge/<doc_id>`; the project editor
+    gains a Knowledge list to add text, upload a file, reference a project
+    file and delete, with a count, size and index readout.
 - **Cost and context observability (M2).** Every Claude run now records
   what it spent and how large its context grew (`loopx/agents/run_usage.py`).
   There is no spending cap.

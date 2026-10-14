@@ -317,6 +317,82 @@ export async function deleteProject(projectId: string): Promise<void> {
   notifyProjectsChanged();
 }
 
+// --- A project's knowledge: documents its Planner, Workers and Reviewers read on demand ---
+
+/** Written here (text), an uploaded text file (upload), or a file in the project's default directory (path). */
+export type KnowledgeSourceKind = "text" | "upload" | "path";
+
+export interface KnowledgeDocument {
+  document_id: string;
+  title: string;
+  /** One line; the agents' index shows it beside the title. */
+  summary: string;
+  source_kind: KnowledgeSourceKind;
+  /** The materialized file's name (text and upload); null for a path document. */
+  filename: string | null;
+  /** A path document's path, relative to the project's default directory; null otherwise. */
+  path: string | null;
+  /** Where agents read it. */
+  read_path: string;
+  /** A path document whose file is gone (agents see it listed as missing). */
+  missing: boolean;
+  size_bytes: number;
+  sha256: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ProjectKnowledge {
+  project_id: string;
+  documents: KnowledgeDocument[];
+  count: number;
+  /** The text and upload documents' content; path documents are read live and not stored. */
+  stored_bytes: number;
+  /** The index agents get in their system prompt. */
+  index: string;
+  index_chars: number;
+  caps: {
+    document_max_bytes: number;
+    project_max_documents: number;
+    project_max_bytes: number;
+    index_max_chars: number;
+  };
+}
+
+export type NewKnowledgeDocument = { title: string; summary: string } & (
+  | { source_kind: "text"; content: string }
+  | { source_kind: "upload"; filename: string; content_base64: string }
+  | { source_kind: "path"; path: string }
+);
+
+function knowledgeUrl(projectId: string, documentId?: string) {
+  const base = `${API_BASE}/projects/${encodeURIComponent(projectId)}/knowledge`;
+  return documentId ? `${base}/${encodeURIComponent(documentId)}` : base;
+}
+
+export async function fetchKnowledge(projectId: string): Promise<ProjectKnowledge> {
+  const res = await fetch(knowledgeUrl(projectId));
+  if (!res.ok) await failed(res, "knowledge");
+  return res.json();
+}
+
+/** Add a document; the server refuses one over a cap with the reason (400). */
+export async function addKnowledgeDocument(projectId: string, document: NewKnowledgeDocument): Promise<ProjectKnowledge> {
+  const res = await fetch(knowledgeUrl(projectId), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(document),
+  });
+  if (!res.ok) await failed(res, "add document");
+  return res.json();
+}
+
+export async function deleteKnowledgeDocument(projectId: string, documentId: string): Promise<ProjectKnowledge> {
+  const res = await fetch(knowledgeUrl(projectId, documentId), { method: "DELETE" });
+  if (!res.ok) await failed(res, "delete document");
+  return res.json();
+}
+
 export async function updateTaskConfig(
   taskId: string,
   fields: { requirement?: string; work_dir?: string; config?: Record<string, unknown> },

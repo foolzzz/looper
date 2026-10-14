@@ -11,6 +11,10 @@ The Planner, the Workers and the Reviewers get the same layout::
     ## Project: <name>       L3: only when the project has a background
     <background>
 
+    ## Project knowledge     L3: only when the project has documents: one line
+    - <title>: <summary> (read: <path>)  per document (knowledge.py); agents
+                                 read a document when they need it
+
     ## Task                  L4: what this session is for (the Planner's task,
     ...                          a Worker's or Reviewer's step)
 
@@ -41,6 +45,7 @@ from typing import Any
 
 from .agent_settings import Harness
 from .claude_cli import ISOLATION_ID
+from .knowledge import AgentKnowledge
 
 logger = logging.getLogger(__name__)
 
@@ -180,11 +185,14 @@ def compose_system_prompt(
     harness: str = "",
     project_name: str = "",
     background: str = "",
+    knowledge: str = "",
     task: str = "",
     contract: str = "",
 ) -> str:
-    """The harness, the role prompt, the project section (when there is a background), the task, then the contract."""
-    parts = (harness.rstrip(), role.rstrip(), project_section(project_name, background), task.strip(), contract)
+    """The harness, the role prompt, the project section (its background, then its knowledge index, each when
+    there is one), the task, then the contract."""
+    parts = (harness.rstrip(), role.rstrip(), project_section(project_name, background), knowledge.strip(),
+             task.strip(), contract)
     return "\n\n".join(part for part in parts if part)
 
 
@@ -212,14 +220,18 @@ def prompt_layers(
     step_id: str | None = None,
     task: str = "",
     harness: Harness | None = None,
+    knowledge: AgentKnowledge | None = None,
 ) -> dict[str, Any]:
     """Where each layer of a system prompt came from, for the run's record.
 
     ``project`` is the project row the prompt was built from (None without
-    one); ``task_kind`` is ``plan``, ``work`` or ``review`` (None without a
-    task section).
+    one); its entry also names the knowledge index the prompt carried (its
+    hash and how many documents it lists; why there was none when it could
+    not be read). ``task_kind`` is ``plan``, ``work`` or ``review`` (None
+    without a task section).
     """
     background = str((project or {}).get("background") or "")
+    knowledge = knowledge or AgentKnowledge()
     return {
         "harness": None if harness is None else harness.record(),
         "role": {"config_id": role_id, "sha256": sha256_text(role.strip()), "recommended": recommended},
@@ -227,6 +239,9 @@ def prompt_layers(
             "id": str(project.get("id") or ""),
             "background_sha256": sha256_text(background) if background.strip() else None,
             "updated_at": _timestamp(project.get("updated_at")),
+            "knowledge_sha256": knowledge.sha256,
+            "knowledge_documents": knowledge.documents,
+            **({"knowledge_error": knowledge.error} if knowledge.error else {}),
         },
         "task": None if task_kind is None else {
             "kind": task_kind, "task_id": task_id, "step_id": step_id, "sha256": sha256_text(task.strip()),
@@ -291,20 +306,24 @@ def build_system_prompt(
     task_id: str | None = None,
     step_id: str | None = None,
     task: str = "",
+    knowledge: AgentKnowledge | None = None,
 ) -> SystemPrompt:
-    """An agent's system prompt (harness, role, project, task, contract) with its layers.
+    """An agent's system prompt (harness, role, project and its knowledge index, task, contract) with its layers.
 
-    The Manager passes neither a project nor a task.
+    The Manager passes neither a project nor a task, so it has no knowledge.
     """
+    knowledge = knowledge if project is not None and knowledge is not None else AgentKnowledge()
     text = compose_system_prompt(
         role,
         harness=harness.text,
         project_name=str((project or {}).get("name") or ""),
         background=str((project or {}).get("background") or ""),
+        knowledge=knowledge.index,
         task=task,
         contract=contract,
     )
     return SystemPrompt(text, prompt_layers(
         role_id=role_id, role=role, recommended=recommended, contract_name=contract_name, contract=contract,
         project=project, task_kind=task_kind, task_id=task_id, step_id=step_id, task=task, harness=harness,
+        knowledge=knowledge,
     ))

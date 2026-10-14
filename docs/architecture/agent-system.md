@@ -87,11 +87,19 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
   ## Project: <name>                              L3 (left out when the background is empty)
   <background>
 
+  ## Project knowledge                            L3 (left out without documents): an index,
+  - <title>: <summary> (read: <path>)                 one line per document
+
   ## Task                                         L4: what this session is for
   ...                                                 (Planner: the task; Worker, Reviewer: the step)
 
   <code-owned contract>                           L5: REPLY_CONTRACT, WORK_CONTRACT or REVIEW_CONTRACT; always last
   ```
+
+  A project can also carry knowledge: documents its task agents read on
+  demand instead of getting them in the prompt ([Project
+  knowledge](#project-knowledge-documents-read-on-demand)). Only their index
+  is in L3.
 
   A project can also override the harness of its Planner
   (`planner_harness_prompt`) and of its Workers (`worker_harness_prompt`,
@@ -133,16 +141,17 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
   process per step attempt.
 - Keeps one resident Claude process through `ResidentClaude`, like the
   Manager, started on the task's first turn in the task's `work_dir`:
-  `claude --print --verbose --output-format stream-json --input-format stream-json --include-partial-messages --replay-user-messages <isolation flags> --append-system-prompt-file <file> --system-prompt-snapshot off --dangerously-skip-permissions --model M [--effort E] [--plugin-dir <dir> ...] [--max-turns N] [--resume <session_id>]`.
+  `claude --print --verbose --output-format stream-json --input-format stream-json --include-partial-messages --replay-user-messages <isolation flags> --append-system-prompt-file <file> --system-prompt-snapshot off --dangerously-skip-permissions --model M [--effort E] [--plugin-dir <dir> ...] [--add-dir <dir> ...] [--max-turns N] [--resume <session_id>]`.
   The system prompt is rebuilt for every turn from the harness (the project's
   Planner override, else the default in Settings), the `planner` role prompt,
   the task's project, the task section (task id, project name and
   description, working directory and the requirement) and `REPLY_CONTRACT`;
   the project is read before each event's turns. The turns themselves carry
   only what changed: the plan's progress, results, chat and supervision
-  observations. When the prompt changes (a config edit, a new background or
-  harness, a task moved to another project) its file and hash change, or the
-  model, effort, Settings environment or library changes, the Planner stops
+  observations. When the prompt changes (a config edit, a new background,
+  knowledge or harness, a task moved to another project) its file and hash
+  change, or the model, effort, Settings environment, library or mounted
+  knowledge directories change, the Planner stops
   its Claude, and the next process resumes the session with `--resume` and
   the new prompt. Like every agent it has every tool and no permission
   prompts ([What an agent may do](#what-an-agent-may-do)), and no MCP server
@@ -205,7 +214,7 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
 - Manages a pool of Worker processes
 - Each Worker runs Claude CLI as a subprocess with `stream-json` output
 - Real-time event streaming (tool_use, text) captured to activity table
-- Command: `claude --print --verbose --output-format stream-json --include-partial-messages --input-format stream-json --replay-user-messages <isolation flags> --append-system-prompt-file <file> --system-prompt-snapshot off --dangerously-skip-permissions --model M [--effort E] [--plugin-dir <dir> ...]`,
+- Command: `claude --print --verbose --output-format stream-json --include-partial-messages --input-format stream-json --replay-user-messages <isolation flags> --append-system-prompt-file <file> --system-prompt-snapshot off --dangerously-skip-permissions --model M [--effort E] [--plugin-dir <dir> ...] [--add-dir <dir> ...]`,
   plus `--max-turns N` when the config sets `max_turns` above 0. A Worker
   reads the `worker` row and a Reviewer the `reviewer` row, for every run. The
   first user turn goes on stdin; stdin stays open so the Planner can add user
@@ -355,9 +364,11 @@ refused because the values are shown on the dashboard. That word check guards
 against pasting a secret by habit; it is not a security boundary. An
 unreadable table falls back to the built-in values, and the run's record says
 so. Changes apply to the next Worker or Reviewer run; a resident agent's
-restart signature is its command (which carries the model, the effort and the
-library's plugin directories), the prompt's sha256, the environment's sha256
-and the library's sha256, so the next turn restarts it with `--resume`.
+restart signature is its command (which carries the model, the effort, the
+library's plugin directories and the knowledge's `--add-dir` directories),
+the prompt's sha256, the environment's sha256, the library's sha256 and, for
+the Planner, the mounted knowledge directories, so the next turn restarts it
+with `--resume`.
 
 The composed system prompt goes to Claude Code as a file:
 `SystemPrompt.write_file` writes it once to
@@ -383,8 +394,11 @@ Every run records the prompt in `llm_records.metadata`:
   - `role`: `{config_id, sha256, recommended}`, the agent_configs row
     (`manager`, `planner`, `worker` or `reviewer`) and whether its prompt
     equals the recommended `default_prompt`;
-  - `project`: `{id, background_sha256, updated_at}` or `null`
-    (`background_sha256` is `null` without a background);
+  - `project`: `{id, background_sha256, updated_at, knowledge_sha256,
+    knowledge_documents, knowledge_error?}` or `null` (`background_sha256`
+    is `null` without a background, `knowledge_sha256` without documents;
+    `knowledge_documents` is how many documents the index lists;
+    `knowledge_error` says why a run went without its project's knowledge);
   - `task`: `{kind: plan|work|review, task_id, step_id, sha256}` or `null`
     (the Manager);
   - `contract`: `{name, sha256}` (`REPLY_CONTRACT`, `WORK_CONTRACT`,
@@ -400,7 +414,70 @@ Every run records the prompt in `llm_records.metadata`:
   loaded; `error` says why a run went without its library.
 
 The same inputs give the same prompt and hash; changing the harness, the role
-prompt, the background, the task or a contract changes it.
+prompt, the background, the knowledge index, the task or a contract changes
+it.
+
+### Project knowledge: documents read on demand
+
+A project can carry reference material too large for a prompt
+(`loopx/agents/knowledge.py`, RFC section 6 and decision 3). Each document
+has a title, a required one-line summary and one of three sources, never a
+URL:
+
+- `text`, written on the dashboard, and `upload`, a text file sent as base64
+  in JSON: stored in `project_documents` (`content`, `filename`, `size_bytes`,
+  `sha256`). Content that is not UTF-8 or holds a NUL byte is refused as
+  binary;
+- `path`: a regular file in the project's default directory, stored as its
+  path relative to that directory (an absolute path inside it is made
+  relative) and read live. On save the path must exist, be a file, be text
+  and, links followed, stay inside the directory; `..`, absolute paths
+  elsewhere and links that lead out are refused. Its size and hash are those
+  of the last save.
+
+**Caps**, each refused with a 400 that states it: a document 2 MiB; a project
+100 documents and 50 MiB of stored content (path documents are not stored);
+the composed index 4,000 characters. Changes to one project's documents run
+in a transaction that holds the project's row lock, so two concurrent adds
+cannot both pass a cap. An index line carries an absolute path, about 150
+characters under `~/.loopx`, so in practice the index cap admits roughly 15
+to 25 documents, well before the count cap.
+
+**Delivery.** `load_knowledge(runtime_root, project, work_dir)` runs for every
+Worker and Reviewer run and every Planner turn, never for the Manager:
+
+- each text or upload document is materialized read-only (0444), named by its
+  content's hash, at
+  `<runtime_root>/.local/projects/<project_id>/knowledge/<sha256>/<filename>`
+  (a text document's file name comes from its title, an upload's from its
+  file name, both reduced to letters, digits, `.`, `-` and `_`). A copy that
+  already matches its hash is reused and a damaged one is rewritten;
+- the project layer gains `## Project knowledge` after the background: an
+  introduction, then `- <title>: <summary> (read: <absolute path>)` per
+  document; a path document whose file is gone or leads out of the directory
+  is listed as `(missing: <path>)`. An index that grew past the cap after it
+  was saved (a longer default directory, say) is clipped with a note;
+- the launch mounts the knowledge directory with `--add-dir` when the project
+  has a text or upload document, and the project's default directory when it
+  has a path document and the task runs in another directory.
+  `claude_cli.knowledge_args` builds the flags and `agent_settings.Launch`
+  carries them beside the library's, so the three task agents cannot diverge
+  and the Manager's launch has none.
+
+Edits apply at once: the next Worker or Reviewer reads them as it starts, and
+the Planner's next turn sees a new index (or new directories) and restarts
+with `--resume`. A path document is read when an agent opens it, so editing
+the file needs no restart. The task's activity notes `Project knowledge
+applied (N documents)` for each run that has some, and, for the Planner,
+`changed` or `removed`. When the documents cannot be read or materialized a
+run goes without them, its record's `prompt_layers.project.knowledge_error`
+says why and the activity logs a warning; the Planner keeps the knowledge it
+last read. A deleted document's copy stays on disk, since a running agent may
+be reading it.
+
+Verified with Claude Code 2.1.285 under the isolation flags: the agent reads
+files in an `--add-dir` directory, a `CLAUDE.md` in that directory or above it
+is not loaded, and a directory that does not exist does not fail the run.
 
 ### The library: imported plugins and skills
 
@@ -679,6 +756,7 @@ PostgreSQL is a hard startup dependency. All data paths:
 | `system_settings` | Settings shared by the whole system, one value per key: the default harness, model, effort and environment variables (no row = the built-in default), and the last library import's report |
 | `library_items` | The imported plugins and skills: kind, name, source label, declared version, `sha256` of the files, `enabled`, size, file count, `imported_at` |
 | `library_files` | Each library item's files: relative path, UTF-8 content, sha256, executable bit |
+| `project_documents` | A project's knowledge: title, one-line summary, `source_kind` (`text`, `upload` or `path`), `filename` and `content` (text and upload) or `path` (relative to the project's default directory), `size_bytes`, `sha256`; a CHECK keeps each kind's columns consistent and the rows go with their project |
 | `llm_profiles` | LLM provider profiles (model, endpoint, API key env) |
 | `channel_configs` | Telegram/Lark settings (enabled flag, env var names, sender allowlist) |
 
@@ -703,7 +781,7 @@ built by `scripts/stage-dashboard.sh` at release time), and it carries
 ### Pages
 
 - **Chat**: Every agent and its messages, finished ones included. The selector lists the global Manager and the 30 most recent tasks; each task shows its one Planner and the Worker (and Reviewer, when reviewed) of each step. You can send to the Manager and to a running task's Planner, which keeps one thread per task; SSE streaming. A selected Planner also shows its Claude runs, one per turn, in a folded list of the latest 10 beside its activity and chat thread, re-read as a reply starts and ends and every 10 s while the task runs. A Worker or Reviewer shows its Claude runs read-only, following a running one live, and points to its task's Planner for sending.
-- **Tasks**: Task list with project and status filters, time display, each task's cost so far, Start/Stop/Delete controls. `#tasks?project=<id>` filters by a project and shows its name, description, default directory and background (three lines, then Show more; "No background" when empty), with Edit, and Delete while it has no tasks. Edit has a monospace background field with a live `n / 10000` counter and a collapsible "Harness overrides" section with the Planner and Worker harness (each `n / 20000`, or "Inherits the default" when empty); Save is disabled over a limit. The bar lists the harness overrides a project has. A new task picks an existing project or creates one in the same form; its work directory may stay empty when the project has a default. A task's detail view can move it to another project in any status.
+- **Tasks**: Task list with project and status filters, time display, each task's cost so far, Start/Stop/Delete controls. `#tasks?project=<id>` filters by a project and shows its name, description, default directory and background (three lines, then Show more; "No background" when empty), with Edit, and Delete while it has no tasks. Edit has a monospace background field with a live `n / 10000` counter and a collapsible "Harness overrides" section with the Planner and Worker harness (each `n / 20000`, or "Inherits the default" when empty); Save is disabled over a limit. Below Save, a Knowledge section lists the project's documents (title, summary, source, file name or path, size, a Missing badge for a path document whose file is gone) with a readout of documents, stored bytes and index characters against their caps, adds one as Text (title, summary, content), Upload (a file, read as base64) or Project file (a path), and deletes one after a confirmation; these apply at once, apart from Save, and a refusal shows the server's reason. The bar lists the harness overrides a project has. A new task picks an existing project or creates one in the same form; its work directory may stay empty when the project has a default. A task's detail view can move it to another project in any status.
 - **Projects (sidebar)**: Below the navigation, every project with its task count (or a spinner with its active count); clicking one opens the Tasks page filtered by it, and `+` creates a project (name, default directory, description, optional background and harness overrides).
 - **Task Detail**: Overview (status, phase, times, steps and the task's cost with its run count, then "Cost by agent": the Planner's, the Workers' and the Reviewers' runs and cost with each one's share, noting runs still running or without a reported cost; steps, agent timeline, live activity feed), Pipeline DAG (React Flow), Sessions, Conversation
 - **Agents**: The Manager, Planner, Worker and Reviewer configuration editor (role prompt replace/append, model, LLM profiles). Instead of a permission setting it states the permissions every agent shares: every tool, `--dangerously-skip-permissions`. The model field's placeholder is the default it inherits. The Manager also has a "Harness prompt (override)" field; the others say where their harness comes from. A Runs tab lists every recorded Claude run of the role (the Manager, every task's Planner, Workers or Reviewers)
@@ -740,6 +818,10 @@ dev proxy, which keeps `Host` and `Origin` on its own port.
 | `/api/projects` | GET | Projects ordered by name ignoring case, each with `task_count` and `active_count` |
 | `/api/projects` | POST | Create a project from `name` (trimmed, 1–80 characters), optional `description`, `work_dir` (absolute), `background` (stored without the blank lines around it; 400 over 10000 characters), `planner_harness_prompt` and `worker_harness_prompt` (400 over 20000 characters); 409 when the name exists ignoring case |
 | `/api/projects/:id` | PUT | Update any of `name`, `description`, `work_dir`, `background`, `planner_harness_prompt`, `worker_harness_prompt` (`""` clears it); 400, 404, 409 |
+| `/api/projects/:id/knowledge` | GET | The project's knowledge: `documents` (`document_id`, `title`, `summary`, `source_kind`, `filename`, `path`, `read_path`, `missing`, `size_bytes`, `sha256`, timestamps; no content), `count`, `stored_bytes`, the `index` agents get and its `index_chars`, and `caps`; 404 for an unknown project |
+| `/api/projects/:id/knowledge` | POST | Add a document: `source_kind`, `title`, `summary`, then `content` (text), `filename` and `content_base64` (upload) or `path` (path). Answers 201 with the new `document` and the knowledge view; 400 with the reason for a bad field, a binary file, a path outside the project's default directory, or a cap; 404 for an unknown project |
+| `/api/projects/:id/knowledge/:doc_id` | PUT | Change `title`, `summary` or the source's own fields; the kind cannot change. Answers with the `document` and the view; 400 as above, 404 |
+| `/api/projects/:id/knowledge/:doc_id` | DELETE | Delete a document; answers with `deleted` and the view; 404 |
 | `/api/projects/:id` | DELETE | Delete a project; 409 while it still has tasks |
 | `/api/tasks` | GET | List the newest tasks; `?project_id=` lists one project's. Each has `project_id`, `project_name`, `work_dir` and `cost` (as in the task detail) |
 | `/api/tasks/create` | POST | Create a task in `init` with exactly one of `project_id` (existing) and `project` (`{name, description?, work_dir?, background?, planner_harness_prompt?, worker_harness_prompt?}`, created in the same transaction). Its `work_dir` is the one given, else the project's; 400 with neither, 404 for an unknown project, 409 for a taken new name |

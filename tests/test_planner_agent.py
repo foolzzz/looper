@@ -786,7 +786,8 @@ class TestSystemPrompt:
         assert layers["harness"] == {"source": "builtin_default", "sha256": _sha(DEFAULT_HARNESS_PROMPT)}
         assert layers["role"] == {"config_id": "planner", "sha256": _sha("You plan carefully."), "recommended": False}
         assert layers["project"] == {"id": "proj-1", "background_sha256": _sha("Use uv.\nPython 3.12."),
-                                     "updated_at": "2026-10-13T12:00:00+00:00"}
+                                     "updated_at": "2026-10-13T12:00:00+00:00", "knowledge_sha256": None,
+                                     "knowledge_documents": 0}
         task = prompt[prompt.index("## Task"):prompt.index(REPLY_CONTRACT)].rstrip("\n")
         assert layers["task"] == {"kind": "plan", "task_id": "t1", "step_id": None, "sha256": _sha(task)}
         assert layers["contract"] == {"name": "REPLY_CONTRACT", "sha256": _sha(REPLY_CONTRACT)}
@@ -1074,6 +1075,100 @@ class TestLibrary:
         assert first_prompt == second_prompt  # the library alone restarted it
         hashes = [s["metadata"]["library"]["sha256"] for s in _starts(agent_db)]
         assert hashes[0] != hashes[1]
+
+
+def _add_dirs(argv: list[str]) -> list[str]:
+    return [argv[i + 1] for i, arg in enumerate(argv) if arg == "--add-dir"]
+
+
+@pytest.mark.usefixtures("agent_db", "planner_row")
+class TestKnowledge:
+    """The Planner's project layer carries its project's knowledge index and its command mounts the
+    documents' directories; a change to the knowledge restarts its Claude, which resumes the session."""
+
+    @pytest.fixture
+    def project_dir(self, tmp_path: Path, agent_db: Any) -> Path:
+        directory = tmp_path / "calc"
+        (directory / "docs").mkdir(parents=True)
+        (directory / "docs" / "runbook.md").write_text("Deploy with MARKER-BETA.\n", encoding="utf-8")
+        agent_db.get_task_project.return_value = {**_project(background="Use uv."), "work_dir": str(directory)}
+        return directory
+
+    def test_the_command_mounts_the_documents_and_the_prompt_carries_their_index(
+        self, planner_claude: Any, agent_db: Any, project_documents: Any, project_dir: Path,
+    ) -> None:
+        project_documents(("text", "Glossary", "Terms the code uses", "MARKER-ALPHA"),
+                          ("path", "Runbook", "How to deploy", "docs/runbook.md"))
+        claude = planner_claude(plan(step("s1")), decide("accept"))
+        h = drive(claude, always(WORK_OK))
+
+        (argv,) = claude.argvs()
+        knowledge_root = f"{h.work_dir.parent}/.local/projects/proj-1/knowledge"
+        # The task runs in its own directory, so the project's is mounted for the path document.
+        assert _add_dirs(argv) == [knowledge_root, str(project_dir)]
+        _assert_unrestricted(argv)
+        (prompt,) = claude.prompts()
+        _in_order(prompt, "## Project: calc\nUse uv.\n\n", "## Project knowledge\n",
+                  f"- Glossary: Terms the code uses (read: {knowledge_root}/{_sha('MARKER-ALPHA')}/Glossary.md)\n",
+                  f"- Runbook: How to deploy (read: {project_dir / 'docs' / 'runbook.md'})\n\n## Task\n",
+                  REPLY_CONTRACT)
+        index = prompt[prompt.index("## Project knowledge"):prompt.index("\n\n## Task")]
+        for start in _starts(agent_db):
+            project = start["metadata"]["prompt_layers"]["project"]
+            assert (project["knowledge_sha256"], project["knowledge_documents"]) == (_sha(index), 2)
+        assert [line for line in activity(agent_db) if "knowledge" in line] == [
+            "Project knowledge applied (2 documents)"]
+
+    def test_a_changed_knowledge_restarts_claude_resuming_its_session(
+        self, planner_claude: Any, agent_db: Any, project_documents: Any, project_dir: Path,
+    ) -> None:
+        project_documents(("text", "Glossary", "Terms", "MARKER-ALPHA"))
+        claude = planner_claude(plan(step("s1")), decide("accept"))
+        add_style = lambda: project_documents(("text", "Glossary", "Terms", "MARKER-ALPHA"),
+                                              ("text", "Style", "How we write", "MARKER-DELTA"))
+        drive(claude, hold_first(), _between_turns(agent_db, add_style))
+
+        first, second = claude.argvs()
+        assert (_flag(first, "--resume"), _flag(second, "--resume")) == (None, "sess-p")
+        first_prompt, second_prompt = claude.prompts()
+        assert "- Style: How we write" not in first_prompt and "- Style: How we write (read: " in second_prompt
+        assert [s["metadata"]["prompt_layers"]["project"]["knowledge_documents"] for s in _starts(agent_db)] == [1, 2]
+        assert [line for line in activity(agent_db) if "knowledge" in line] == [
+            "Project knowledge applied (1 document)", "Project knowledge changed (2 documents)"]
+
+    def test_removing_the_knowledge_restarts_claude_without_it(
+        self, planner_claude: Any, agent_db: Any, project_documents: Any, project_dir: Path,
+    ) -> None:
+        project_documents(("text", "Glossary", "Terms", "MARKER-ALPHA"))
+        claude = planner_claude(plan(step("s1")), decide("accept"))
+        drive(claude, hold_first(), _between_turns(agent_db, lambda: project_documents()))
+
+        first, second = claude.argvs()
+        assert _add_dirs(first) and not _add_dirs(second) and _flag(second, "--resume") == "sess-p"
+        assert "## Project knowledge" not in claude.prompts()[1]
+        assert [line for line in activity(agent_db) if "knowledge" in line] == [
+            "Project knowledge applied (1 document)", "Project knowledge removed"]
+
+    def test_unchanged_knowledge_keeps_one_process(
+        self, planner_claude: Any, project_documents: Any, project_dir: Path,
+    ) -> None:
+        project_documents(("text", "Glossary", "Terms", "MARKER-ALPHA"))
+        claude = planner_claude(plan(step("s1")), decide("accept"))
+        drive(claude, always(WORK_OK))
+        assert len(claude.argvs()) == 1 and len(claude.turns()) == 2
+
+    def test_a_failed_read_keeps_the_last_knowledge_and_its_claude(
+        self, planner_claude: Any, agent_db: Any, project_documents: Any, project_dir: Path,
+    ) -> None:
+        project_documents(("text", "Glossary", "Terms", "MARKER-ALPHA"))
+        claude = planner_claude(plan(step("s1")), decide("accept"))
+        fail = lambda: setattr(agent_db.list_documents, "side_effect", ConnectionError("database is down"))
+        h = drive(claude, hold_first(), _between_turns(agent_db, fail))
+
+        assert h.final().payload["status"] == "completed"  # type: ignore[union-attr]
+        (argv,) = claude.argvs()  # same knowledge, so Claude was not restarted
+        assert "- Glossary: Terms (read: " in claude.prompts()[0]
+        assert "Warning: the project's knowledge could not be read" in activity(agent_db)
 
 
 # --- Ending the task through the TaskRouter ---
