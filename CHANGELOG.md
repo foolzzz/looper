@@ -304,6 +304,28 @@ To learn how to use these features, read the [usage guide](docs/fork/usage.md).
   its id (the Manager's `session.json`, the Planner's plan file), and a
   resumed process starts from them. They reset when the session is dropped.
   Records written before this fix keep their inflated cost.
+- **A resident Manager or Planner no longer answers a message with the turn
+  before it.** When background work a turn started (a background Bash command
+  or subagent) ends, Claude Code runs a turn of its own and writes a result
+  that answers no message. Its output was only read during the next message's
+  turn, which ended at that result, so the Manager sent the autonomous turn's
+  words as the answer to the next message, and every reply after it was one
+  turn late in the chat and in the run records. Total cost was unaffected.
+  - A resident Claude's output is now read for as long as it runs. Each
+    message carries a uuid; its turn starts when Claude marks that message
+    started (its `command_lifecycle` event, or its replay, now that resident
+    agents run with `--replay-user-messages`) and ends at the next result.
+    Anything else that ends in a result is a turn of Claude's own, even one
+    that runs while the next message waits in Claude's queue.
+  - A turn of Claude's own is a run of its own: its input reads "(no user
+    message: ...)" and its metadata has `autonomous: true`. Its cost is its
+    share of Claude's running totals, which also keeps the next turn's cost
+    right.
+  - The Manager sends what Claude said in it as a reply of its own to the
+    chat of the message Claude answered before it. The web channel adds such
+    a reply to that chat's history (shown when the chat is opened) rather than
+    to a message's stream. The Planner only logs it: it decides nothing about
+    the plan.
 
 ## [2.5.0] - 2026-10-13
 

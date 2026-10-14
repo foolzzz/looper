@@ -104,6 +104,43 @@ class TestWebChannelAdapter:
 
         asyncio.run(_run())
 
+    @pytest.mark.parametrize("stream_open", [True, False])
+    def test_a_reply_naming_a_chat_session_joins_its_history_and_no_stream(
+        self, monkeypatch: pytest.MonkeyPatch, stream_open: bool,
+    ) -> None:
+        """A reply that answers no message (what Claude said on its own) never ends a message's stream."""
+        from unittest.mock import AsyncMock
+
+        from loopx.db import chat
+
+        save = AsyncMock(return_value=None)
+        monkeypatch.setattr(chat, "save_message", save)
+
+        async def _run() -> None:
+            with tempfile.TemporaryDirectory() as tmp:
+                bus = MessageBus(runtime_root=Path(tmp))
+                adapter = WebChannelAdapter()
+                await adapter.start(bus)
+                correlation_id = (await adapter.handle_user_message(text="hi"))["correlation_id"] if stream_open \
+                    else "finished-corr"
+                reply = MessageEnvelope.create(
+                    source=MANAGER_ADDRESS,
+                    target=channel_address("web", "channel-web"),
+                    message_type=MessageType.AGENT_REPLY,
+                    payload={"text": "the background job is done", "autonomous": True, "chat_session_id": "chat-1"},
+                    correlation_id=correlation_id,
+                )
+                receipt = await adapter.deliver(reply)
+                assert receipt.success
+                save.assert_awaited_once_with(session_id="chat-1", message_id=reply.message_id, role="assistant",
+                                              content="the background job is done")
+                if stream_open:
+                    assert adapter._sse_queues[correlation_id].empty()
+                await adapter.stop()
+                await bus.shutdown()
+
+        asyncio.run(_run())
+
     def test_envelope_to_sse_event_reply(self) -> None:
         env = MessageEnvelope.create(
             source=MANAGER_ADDRESS,

@@ -9,6 +9,9 @@ The Manager is the only agent that communicates with users. It:
 - Places each confirmed task in a project (creating a new one on request) and
   forwards it to the TaskRouter
 - Streams Claude Code responses in real-time to the originating channel
+- Records a turn Claude runs on its own (after background work it started
+  ends) as a run of its own, and sends what Claude said there as a reply of
+  its own to the chat of the message Claude answered before it
 """
 
 from __future__ import annotations
@@ -25,7 +28,17 @@ from ..broadcast import Broadcaster
 from ..bus import MessageBus
 from .. import agent_settings
 from ..agent_settings import AgentDefaults, AgentType, Launch, resolve_harness, resolve_launch
-from ..claude_cli import ClaudeRunRecorder, ResidentClaude, exit_note, isolation_args, system_prompt_args
+from ..claude_cli import (
+    AUTONOMOUS_INPUT,
+    AutonomousHandler,
+    AutonomousRun,
+    ClaudeRunRecorder,
+    ResidentClaude,
+    ResidentTurn,
+    exit_note,
+    isolation_args,
+    system_prompt_args,
+)
 from ..library import load_library
 from ..projects import project_name
 from ..run_usage import Usage
@@ -452,6 +465,7 @@ class ManagerAgent:
                 await self._claude.start(
                     command, cwd=str(self._config.work_dir), signature=signature, env=launch.environment(),
                     totals=self._session_totals if resuming else None,
+                    autonomous=self._autonomous_turns(command, system_prompt, launch),
                 )
             except OSError as exc:
                 logger.error("failed to start Claude Code: %s", exc)
@@ -516,7 +530,7 @@ class ManagerAgent:
             turn_text = await self._build_user_message(message)
             # A turn cut off by Claude's exit ends without a result; that Claude
             # is reaped and the next message starts a new process that resumes the session.
-            turn = await self._claude.run_turn(turn_text, on_event)
+            turn = await self._claude.run_turn(turn_text, on_event, tag=context_envelope)
         except BaseException as exc:
             # Never leave Claude running once the Manager gives up on it.
             await self._claude.stop(kill=True)
@@ -547,7 +561,7 @@ class ManagerAgent:
         # A turn cut off by Claude's exit is no reply, even after some text.
         exited = result_event is None
         replied = not exited and bool(final_text)
-        usage = self._claude.turn_usage(result_event)
+        usage = turn.usage
         if not exited:
             self._session_totals = self._claude.totals
             self._save_session_state()
@@ -578,6 +592,61 @@ class ManagerAgent:
             )
         return final_text
 
+    def _autonomous_turns(self, command: list[str], system_prompt: SystemPrompt, launch: Launch) -> AutonomousHandler:
+        """How the Manager takes a turn its Claude (started with these) runs on its own.
+
+        The turn is a run of its own; what Claude said in it goes, as a reply
+        of its own, to the chat of the message Claude answered before it (the
+        turn's tag), and only to the record when there is none.
+        """
+
+        async def begin(after: Any) -> AutonomousRun:
+            recorder = ClaudeRunRecorder(
+                agent_id="manager",
+                task_id=None,
+                command=command,
+                cwd=str(self._config.work_dir),
+                input_text=AUTONOMOUS_INPUT,
+                session_id=self._session_id,
+                system_prompt=system_prompt,
+                launch=launch,
+                autonomous=True,
+            )
+            await recorder.start()
+
+            async def on_end(text: str, turn: ResidentTurn) -> None:
+                if turn.result_event is not None:
+                    self._session_totals = self._claude.totals  # it spent too: a restart resumes from here
+                    self._save_session_state()
+                if text:
+                    await self._send_own_reply(after if isinstance(after, MessageEnvelope) else None, text)
+
+            return AutonomousRun(recorder, on_end)
+
+        return begin
+
+    async def _send_own_reply(self, last: MessageEnvelope | None, text: str) -> None:
+        """Send what Claude said on its own to the channel of ``last``, as a reply to no message.
+
+        It names ``last``'s web chat session (``chat_session_id``), so the web
+        channel adds it to that chat instead of a message's stream.
+        """
+        if last is None or self._bus is None:
+            logger.info("manager: Claude spoke on its own before any message; its words are only recorded")
+            return
+        payload: dict[str, Any] = {"text": text, "autonomous": True}
+        context = last.payload.get("channel_context")
+        if isinstance(context, dict) and context.get("session_id"):
+            payload["chat_session_id"] = context["session_id"]
+        await self._bus.publish(MessageEnvelope.create(
+            source=MANAGER_ADDRESS,
+            target=last.source,
+            message_type=MessageType.AGENT_REPLY,
+            payload=payload,
+            correlation_id=last.correlation_id,
+            metadata={"origin_channel_id": last.metadata.get("origin_channel_id")},
+        ))
+
     def _claude_command(self, prompt_file: Path, launch: Launch, *, resume: bool = True) -> list[str]:
         command = [
             self._config.claude_bin,
@@ -587,6 +656,9 @@ class ManagerAgent:
             # Each chat message is one user turn on stdin; Claude idles between turns.
             "--input-format", "stream-json",
             "--include-partial-messages",  # stream the reply as it is written
+            # Claude echoes each message, marked with the uuid it was sent with, when it starts the message's
+            # turn; a turn Claude runs on its own has no such echo.
+            "--replay-user-messages",
             # None of the operator's personal settings, memory, hooks, plugins or MCP servers; the
             # permissions every agent shares and the library's plugins and skills come with the launch args.
             *isolation_args(self._config.work_dir),
