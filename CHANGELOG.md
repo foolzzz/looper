@@ -34,6 +34,50 @@ How the agent system works today is described in
   button. Any other text, `/new foo` or `/news` included, is handled as
   before: a message for Claude (in Telegram, an unknown command).
 
+### Changed
+
+- **Settings is a group of pages, and Agents is now Runs.** The dashboard's
+  long Settings page is split into pages listed in a folding Settings group at
+  the bottom of the sidebar, each at `#settings/<page>`: **LLM Providers**,
+  **Agent Runtimes**, **Agent Profiles**, **Roles**, **Skills & MCP**,
+  **Channels** and **Import / Export**. An **Agent Profile** is what the
+  dashboard now calls a registered agent (a row of `agents`, still
+  `/api/agents`): its list shows each profile's runtime, provider, model and
+  default effort, the roles it can run and where it is used, and a profile in
+  use cannot be deleted. Its form picks a runtime, then a provider grouped as
+  the runtime's own login (Claude Code's with its login state; Codex's shown
+  as coming soon) or an API-key provider that speaks its protocols, then a
+  model from the provider's catalog. **Roles** holds the defaults every role
+  inherits and, per role, its layer and its prompt, timeout and concurrency,
+  which were on the Agents page. Everywhere an Agent Profile is chosen (Roles,
+  a project's settings, a new task's roles) the same dropdown ends with
+  "+ New Agent Profile", which opens the form in place. The top-level Agents
+  page becomes **Runs** (`#runs/<role>`), with each role's runs only and a
+  link to its settings. `#settings` and `#settings/defaults` open Roles,
+  `#agents/...` opens Runs, and the import's links to a provider, MCP server
+  or channel open its page.
+- **Runtimes are built in.** Settings → Agent Runtimes is read-only: one card
+  per runtime type (Claude Code, Codex and OMP, and the planned Claude Code
+  SDK, OpenAI Agents SDK and norma) with whether it is found on the server's
+  PATH, its path, version, capabilities and the roles it can run, and
+  Re-detect, which now also finds a type that was not on PATH when the server
+  started. The registry adds each runtime's `path` and `roles` and each
+  agent's `roles` and `used_by`, and refusing to delete an agent in use names
+  where it is selected.
+
+### Removed
+
+- **The runtime registration API.** `POST /api/runtimes` and `PUT`/`DELETE
+  /api/runtimes/<id>` are gone (404); `POST /api/runtimes/<id>/probe` stays.
+  A different binary comes from the server's PATH. On upgrade, runtimes
+  registered by hand that no agent uses are dropped once; one an agent uses
+  stays, read-only, shown as "custom (legacy)", so its agents keep running the
+  executable they ran. A configuration file's runtimes are no longer added on
+  import: an agent of the file runs on the runtime of that name here, else on
+  the built-in runtime of its type (the preview says so), else it is skipped
+  with the reason. `--register-agent` in the prompt eval uses the built-in
+  runtime of its type.
+
 ## [2.6.0] - 2026-10-14
 
 Covers `v2.5.0` to `v2.6.0`: pull requests #2 and #4 to #70 in

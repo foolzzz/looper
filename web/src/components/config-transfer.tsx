@@ -363,7 +363,7 @@ function ImportPanel({ onApplied }: { onApplied: () => void }) {
  * Export the whole agent configuration as one file (looper/agents/config_transfer.py), downloaded as the server
  * streams it, and import one: uploaded to the server's import route, previewed, then applied.
  */
-export function ConfigTransferCard({ onImported }: { onImported: () => void }) {
+export function ConfigTransferCard({ onImported }: { onImported?: () => void }) {
   const [projects, setProjects] = useState(false);
   const [secrets, setSecrets] = useState(false);
 
@@ -401,7 +401,7 @@ export function ConfigTransferCard({ onImported }: { onImported: () => void }) {
         <Download className="h-3.5 w-3.5" />
         Export configuration
       </Button>
-      <ImportPanel onApplied={onImported} />
+      <ImportPanel onApplied={() => onImported?.()} />
       <div className="border-t border-border pt-3 text-xs text-muted-foreground">
         Or import from a shell: <code className="text-foreground">looper config import &lt;file&gt;</code> previews,
         then add <code className="text-foreground">--apply</code>. It reads the file from disk, so it takes files of

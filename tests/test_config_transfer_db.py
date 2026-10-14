@@ -85,12 +85,12 @@ async def _populate(monkeypatch: pytest.MonkeyPatch, pool: Any, work_dir: Path) 
     _serve(monkeypatch, pool)
     await seed_agent_configs(pool)
     await seed_channel_configs(pool)
-    # Runtimes, providers and agents: a runtime on a command (portable) and one on a path (left out), a provider
+    # Runtimes, providers and agents: a runtime registered by hand before runtimes were built in, a provider
     # with an API key and a model catalog, and agents on the built-in and the registered pieces.
-    beta = (await _ok("POST", "/api/runtimes", {"name": "claude-beta", "type": "claude-code",
-                                                "executable": "claude-beta"}))["runtime"]["runtime_id"]
-    await _ok("POST", "/api/runtimes", {"name": "claude-local", "type": "claude-code",
-                                        "executable": "/opt/claude-local/bin/claude"})
+    beta = "rt-custom-beta"
+    await pool.execute("INSERT INTO agent_runtimes (id, name, type, executable, capabilities) "
+                       "VALUES ($1, 'claude-beta', 'claude-code', 'claude-beta', $2)", beta,
+                       ["resident_session", "resume", "run"])
     await _ok("POST", "/api/providers", {"name": "anthropic-key", "protocols": ["anthropic-messages"],
                                          "auth": "api_key", "api_key": SECRET, "base_url": "https://api.example.test",
                                          "models": [{"name": "claude-sonnet-4-5", "input_usd_per_mtok": 3,
@@ -227,6 +227,19 @@ async def _rows(pool: Any) -> dict[str, list[Any]]:
         return {t: sorted(map(repr, map(tuple, await conn.fetch(f"SELECT * FROM {t}")))) for t in tables}
 
 
+def _replaced(value: Any, old: str, new: str) -> Any:
+    """``value`` with every string ``old`` in it (not a key) replaced by ``new``."""
+    if isinstance(value, dict):
+        return {k: _replaced(v, old, new) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return type(value)(_replaced(v, old, new) for v in value)
+    return new if value == old else value
+
+
+def _by_name(entries: list[dict[str, Any]], name: str) -> dict[str, Any]:
+    return next(e for e in entries if e["name"] == name)
+
+
 def _plan(stdout: str) -> dict[str, Any]:
     return json.loads(stdout)
 
@@ -257,22 +270,24 @@ def test_a_round_trip_into_a_new_database_reproduces_the_configuration(
                                                                 "names": ["environment MY_TG_TOKEN"]}]
             assert not [c for c in plan["changes"] if c["action"] == "skipped"], plan
 
-            # Agents resolve the same settings and load the same items; only the projects' directories and a
-            # runtime's executable path stay behind.
+            # Agents resolve the same settings and load the same items; only the projects' directories stay
+            # behind, and the agent on the custom runtime runs on the built-in runtime of its type.
             before, after = await _state(source), await _state(target)
             before["projects"]["calc"]["work_dir"] = ""
-            next(r for r in before["runtimes"] if r["name"] == "claude-local")["executable"] = ""
-            assert after == before
-            assert [n.split(":")[0] for n in plan["notes"]] == ["runtime claude-local", "project calc"]
+            before["runtimes"] = [r for r in before["runtimes"] if r["name"] != "claude-beta"]
+            assert after == _replaced(before, "claude-beta", "claude-code")
+            assert plan["notes"][0] == ("runtime claude-beta: runtimes are built in; its agents run on the built-in "
+                                        "claude-code runtime here")
+            assert [n.split(":")[0] for n in plan["notes"]] == ["runtime claude-beta", "project calc"]
 
-            # Exporting the new installation gives the same file, but for the executable path left behind.
+            # Exporting the new installation gives the same file, but for the runtime.
             again = tmp_path / "again.json"
             assert (await _looper(monkeypatch, target_url, "config", "export", str(again), "--include-projects",
                                  "--include-secrets"))[0] == 0
             first = _without_time(exported)
-            local = next(r for r in first["runtimes"] if r["name"] == "claude-local")
-            assert local["executable"] is None
-            local["executable"] = ""  # the type's default here
+            assert first["runtimes"] == [{"name": "claude-beta", "type": "claude-code", "executable": "claude-beta"}]
+            first["runtimes"] = []
+            _by_name(first["agents"], "beta-haiku")["runtime"] = "claude-code"
             assert _without_time(again) == first
 
     asyncio.run(_test())
@@ -528,5 +543,41 @@ def test_a_file_from_before_agents_selects_the_agent_of_each_model(
             async with target.acquire() as conn:
                 layers = {r["scope"]: r["agent"] for r in await db.read_layers(conn)}
             assert layers == {"system": "claude-code/haiku", "role": "claude-code/opus"}  # opus: the built-in one
+
+    asyncio.run(_test())
+
+
+def test_a_runtime_of_the_file_maps_to_the_built_in_runtime_of_its_type_or_is_skipped(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    """Runtimes are built in: an import adds none, and an agent on a runtime of a type not on this machine waits."""
+    async def _test() -> None:
+        async with _installation() as (target, target_url):
+            old = tmp_path / "old.json"
+            old.write_text(json.dumps({"format": "looper-config/v1", "runtimes": [
+                {"name": "claude-beta", "type": "claude-code", "executable": "/opt/claude-beta/bin/claude"},
+                {"name": "codex-local", "type": "codex", "executable": ""}],
+                "providers": [{"name": "cpa", "protocols": ["openai-responses"], "auth": "api_key",
+                               "oauth_runtime_type": None, "base_url": "http://127.0.0.1:8317/v1", "models": [],
+                               "env": [], "max_concurrency": None, "api_key": None}],
+                "agents": [{"name": "beta/haiku", "runtime": "claude-beta", "provider": "claude-subscription",
+                            "model": "haiku", "effort": None},
+                           {"name": "codex/gpt", "runtime": "codex-local", "provider": "cpa", "model": "gpt-5.5",
+                            "effort": None}]}))
+            before = await target.fetch("SELECT id FROM agent_runtimes")
+
+            code, out, err = await _looper(monkeypatch, target_url, "config", "import", str(old), "--apply", "--json")
+
+            assert code == 0, err
+            plan = _plan(out)
+            changes = {(c["section"], c["key"]): (c["action"], c.get("reason", "")) for c in plan["changes"]}
+            assert changes[("runtimes", "codex-local")][0] == "skipped"
+            assert "Codex (codex) is not on this machine" in changes[("runtimes", "codex-local")][1]
+            assert changes[("agents", "codex/gpt")] == ("skipped", "no runtime 'codex-local' here or in the file")
+            assert changes[("agents", "beta/haiku")][0] == "added"
+            assert ("runtimes", "claude-beta") not in changes
+            assert "runtime claude-beta: runtimes are built in" in plan["notes"][0]
+            assert await target.fetch("SELECT id FROM agent_runtimes") == before
+            assert await target.fetchval("SELECT runtime_id FROM agents WHERE name = 'beta/haiku'") == "rt-claude-code"
 
     asyncio.run(_test())

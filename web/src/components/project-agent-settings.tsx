@@ -8,6 +8,7 @@ import {
   type ProjectAgentSettings,
   type ProjectRole,
 } from "@/lib/api";
+import { AGENT_PROFILE } from "@/lib/settings-pages";
 import { cn } from "@/lib/utils";
 
 const ROLES: { id: ProjectRole; label: string }[] = [
@@ -53,8 +54,8 @@ export function ProjectAgentSettingsSection({ projectId }: { projectId: string }
         <div>
           <h3 className="text-xs font-semibold">All agents in this project</h3>
           <p className="mt-0.5 text-xs text-muted-foreground">
-            Over Settings and the Agents page for this project&apos;s Planner, Workers and Reviewers. What applies to
-            each role is shown below.
+            Over Settings → Roles for this project&apos;s Planner, Workers and Reviewers. What applies to each role is
+            shown below.
           </p>
         </div>
         <LayerSettingsForm
@@ -62,6 +63,7 @@ export function ProjectAgentSettingsSection({ projectId }: { projectId: string }
           layer="project"
           values={settings.project.values}
           limits={settings.limits}
+          roles={ROLES.map((r) => r.id)}
           onSave={async (changes) => {
             const next = await updateProjectLayer(projectId, changes);
             setSettings(next);
@@ -99,6 +101,7 @@ export function ProjectAgentSettingsSection({ projectId }: { projectId: string }
             key={role}
             idPrefix={`${id}-${role}`}
             layer="role_project"
+            roles={[role]}
             values={settings.roles[role].values}
             effective={settings.roles[role].effective}
             limits={settings.limits}
@@ -118,8 +121,9 @@ export function ProjectAgentSettingsSection({ projectId }: { projectId: string }
       <div>
         <h2 id={`${id}-title`} className="text-sm font-semibold">Agent settings</h2>
         <p className="mt-1 text-xs text-muted-foreground">
-          Harness, agent, effort, environment and spend cap per run. Each resolves Settings → Agents page → this
-          project → the role in this project; the most specific one set wins, and empty fields inherit.
+          Harness, {AGENT_PROFILE.name}, effort, environment and spend cap per run. Each resolves Settings → Roles
+          (every role, then the role) → this project → the role in this project; the most specific one set wins, and
+          empty fields inherit.
         </p>
       </div>
       {body}

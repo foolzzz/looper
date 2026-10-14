@@ -25,7 +25,8 @@ import {
   type TaskRole,
 } from "@/lib/api";
 import { useProjects } from "@/lib/use-projects";
-import { agentLabel, useRegistry } from "@/lib/use-registry";
+import { AgentProfileSelect } from "@/components/agent-profiles";
+import { AGENT_PROFILE } from "@/lib/settings-pages";
 import { formatUsd } from "@/lib/usage";
 import { ProjectBackgroundField, backgroundTooLong } from "@/components/project-background-field";
 import { TaskDetailPage } from "./task-detail";
@@ -116,34 +117,29 @@ const TASK_ROLES: { id: TaskRole; label: string }[] = [
 
 type AgentChoice = Partial<Record<TaskRole, string>>;
 
-/** The agent of each of the task's roles: from the settings (nothing chosen), or a registered agent for this task. */
+/** The Agent Profile of each of the task's roles: from the settings (nothing chosen), or one for this task. */
 function TaskAgentsField({ value, onChange }: { value: AgentChoice; onChange: (value: AgentChoice) => void }) {
-  const { registry, error } = useRegistry();
   return (
     <fieldset className="space-y-2">
-      <legend className="text-sm font-medium text-muted-foreground">Agents</legend>
-      <div className="grid grid-cols-[auto_minmax(0,1fr)] items-center gap-x-3 gap-y-2">
+      <legend className="text-sm font-medium text-muted-foreground">{AGENT_PROFILE.plural}</legend>
+      <div className="grid grid-cols-[auto_minmax(0,1fr)] items-start gap-x-3 gap-y-2">
         {TASK_ROLES.map((role) => (
           <div key={role.id} className="contents">
-            <label htmlFor={`new-task-agent-${role.id}`} className="text-xs text-muted-foreground">{role.label}</label>
-            <select
+            <label htmlFor={`new-task-agent-${role.id}`} className="pt-2 text-xs text-muted-foreground">{role.label}</label>
+            <AgentProfileSelect
               id={`new-task-agent-${role.id}`}
               value={value[role.id] ?? ""}
-              onChange={(e) => onChange({ ...value, [role.id]: e.target.value })}
+              onChange={(agent) => onChange({ ...value, [role.id]: agent })}
+              emptyLabel="From settings"
+              roles={[role.id]}
               className="w-full rounded-lg border border-border bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary/50"
-            >
-              <option value="">From settings</option>
-              {registry?.agents.map((agent) => (
-                <option key={agent.agent_id} value={agent.agent_id}>{agentLabel(agent)}</option>
-              ))}
-            </select>
+            />
           </div>
         ))}
       </div>
-      {error && <p className="text-xs text-destructive">Could not load the agents: {error}</p>}
       <p className="text-xs text-muted-foreground">
-        Optional. A chosen agent runs that role for this task only, over the project&apos;s and the Agents page&apos;s
-        settings.
+        Optional. A chosen {AGENT_PROFILE.name} runs that role for this task only, over the project&apos;s settings and
+        Settings → Roles.
       </p>
     </fieldset>
   );

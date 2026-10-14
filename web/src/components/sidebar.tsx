@@ -1,27 +1,42 @@
 import { useState } from "react";
-import { LayoutDashboard, MessageSquare, ListTodo, Bot, Sliders, Folder, Loader2, Plus, X } from "lucide-react";
+import {
+  LayoutDashboard,
+  MessageSquare,
+  ListTodo,
+  Bot,
+  ChevronDown,
+  History,
+  Sliders,
+  Folder,
+  Loader2,
+  Plus,
+  X,
+} from "lucide-react";
 import { ProjectDialog } from "@/components/project-dialog";
+import { SETTINGS_PAGES, type SettingsPageId } from "@/lib/settings-pages";
 import { useProjects } from "@/lib/use-projects";
 import { cn } from "@/lib/utils";
 
-/** "history" is an agent's session history, reached from a task or agent; "projects" is one project, from the
- * sidebar's project list. */
-export type Page = "dashboard" | "chat" | "tasks" | "projects" | "agents" | "settings" | "history";
+/** "history" is an agent's session history, reached from a task or a run; "projects" is one project, from the
+ * sidebar's project list; "settings" is one of the Settings pages, from the group at the bottom. */
+export type Page = "dashboard" | "chat" | "tasks" | "projects" | "runs" | "settings" | "history";
 
 const NAV_ITEMS: { page: Page; label: string; icon: React.ElementType }[] = [
   { page: "dashboard", label: "Dashboard", icon: LayoutDashboard },
   { page: "chat", label: "Chat", icon: MessageSquare },
   { page: "tasks", label: "Tasks", icon: ListTodo },
-  { page: "agents", label: "Agents", icon: Bot },
-  { page: "settings", label: "Settings", icon: Sliders },
+  { page: "runs", label: "Runs", icon: History },
 ];
 
 interface SidebarProps {
   activePage: Page;
+  /** The Settings page open in the current route, if any. */
+  activeSettingsPage: SettingsPageId | null;
   /** The project open in the current route (its page, or the Tasks list filtered by it), if any. */
   activeProjectId: string | null;
   onNavigate: (page: Page) => void;
   onOpenProject: (projectId: string) => void;
+  onOpenSettings: (page: SettingsPageId) => void;
   /** Below the lg breakpoint the sidebar is a drawer: shown only while open. */
   open: boolean;
   onClose: () => void;
@@ -29,7 +44,16 @@ interface SidebarProps {
 
 export const SIDEBAR_ID = "app-sidebar";
 
-export function Sidebar({ activePage, activeProjectId, onNavigate, onOpenProject, open, onClose }: SidebarProps) {
+export function Sidebar({
+  activePage,
+  activeSettingsPage,
+  activeProjectId,
+  onNavigate,
+  onOpenProject,
+  onOpenSettings,
+  open,
+  onClose,
+}: SidebarProps) {
   return (
     <aside
       id={SIDEBAR_ID}
@@ -75,10 +99,95 @@ export function Sidebar({ activePage, activeProjectId, onNavigate, onOpenProject
 
       <ProjectsSection activeProjectId={activeProjectId} onOpenProject={onOpenProject} />
 
+      <SettingsGroup activePage={activeSettingsPage} onOpen={onOpenSettings} />
+
       <div className="shrink-0 border-t border-border px-4 py-3">
         <p className="text-xs text-muted-foreground">Looper Agent System</p>
       </div>
     </aside>
+  );
+}
+
+const SETTINGS_OPEN_KEY = "looper.sidebar.settings-open";
+const SETTINGS_LIST_ID = "sidebar-settings-pages";
+
+function storedOpen(): boolean | null {
+  try {
+    const value = window.localStorage.getItem(SETTINGS_OPEN_KEY);
+    return value === null ? null : value === "true";
+  } catch {
+    return null;
+  }
+}
+
+/** The Settings pages, one item each, in a group that folds; it opens by itself on a Settings page. */
+function SettingsGroup({
+  activePage,
+  onOpen,
+}: {
+  activePage: SettingsPageId | null;
+  onOpen: (page: SettingsPageId) => void;
+}) {
+  const [expanded, setExpanded] = useState(() => storedOpen() ?? activePage !== null);
+  // Opening a Settings page (from a link too) opens the group, so the page's item shows.
+  const [shownFor, setShownFor] = useState(activePage);
+  if (activePage !== shownFor) {
+    setShownFor(activePage);
+    if (activePage !== null) setExpanded(true);
+  }
+  const toggle = () => {
+    const next = !expanded;
+    setExpanded(next);
+    try {
+      window.localStorage.setItem(SETTINGS_OPEN_KEY, String(next));
+    } catch {
+      // A per-viewer convenience: without storage the group starts as the route says.
+    }
+  };
+
+  return (
+    <nav aria-label="Settings" className="shrink-0 border-t border-border px-2 py-2">
+      <button
+        type="button"
+        onClick={toggle}
+        aria-expanded={expanded}
+        aria-controls={SETTINGS_LIST_ID}
+        className={cn(
+          "flex w-full items-center gap-3 rounded-md px-3 py-2 text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
+          activePage !== null && !expanded
+            ? "bg-primary/10 text-primary"
+            : "text-muted-foreground hover:bg-accent hover:text-foreground",
+        )}
+      >
+        <Sliders className="h-4 w-4" />
+        <span className="flex-1 text-left">Settings</span>
+        <ChevronDown
+          aria-hidden="true"
+          className={cn("h-4 w-4 transition-transform duration-150 motion-reduce:transition-none", !expanded && "-rotate-90")}
+        />
+      </button>
+      <ul id={SETTINGS_LIST_ID} hidden={!expanded} className="mt-0.5 space-y-0.5">
+        {SETTINGS_PAGES.map(({ id, label, icon: Icon }) => {
+          const active = id === activePage;
+          return (
+            <li key={id}>
+              <button
+                type="button"
+                onClick={() => onOpen(id)}
+                aria-current={active ? "page" : undefined}
+                className={cn(
+                  "flex w-full items-center gap-2.5 rounded-md py-1.5 pl-9 pr-3 text-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
+                  active ? "bg-primary/10 text-primary" : "text-muted-foreground hover:bg-accent hover:text-foreground",
+                )}
+              >
+                <Icon className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+                <span className="truncate">{label}</span>
+              </button>
+            </li>
+          );
+        })}
+      </ul>
+    </nav>
   );
 }
 

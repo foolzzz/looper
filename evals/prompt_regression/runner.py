@@ -466,15 +466,17 @@ def run(
 
 
 def register_agent(api: Api, spec: dict[str, Any]) -> dict[str, Any]:
-    """Register the agent of ``spec`` in the eval's database and return it: ``{"runtime": {name, type,
-    executable?}, "provider": {name, protocols, auth, base_url?, models?, api_key_env?}, "agent": {name, model,
-    effort?}}``. A runtime of that name (such as the built-in ``codex`` or ``omp``, when on PATH) is reused;
-    the provider's API key is read from the environment variable ``api_key_env`` names, so no key is in the
-    file or in the run's result."""
+    """Register the agent of ``spec`` in the eval's database and return it: ``{"runtime": {name?, type},
+    "provider": {name, protocols, auth, base_url?, models?, api_key_env?}, "agent": {name, model, effort?}}``.
+    Runtimes are built in: the agent runs on the runtime of that name, else the built-in one of that type
+    (``codex`` or ``omp`` when on the server's PATH); the provider's API key is read from the environment
+    variable ``api_key_env`` names, so no key is in the file or in the run's result."""
     registry = api.get("/api/registry")
-    runtime = next((r for r in registry["runtimes"] if r["name"] == spec["runtime"]["name"]), None)
+    wanted = spec["runtime"]
+    runtime = next((r for r in registry["runtimes"] if r["name"] == wanted.get("name")), None) or next(
+        (r for r in registry["runtimes"] if r["builtin"] and r["type"] == wanted.get("type")), None)
     if runtime is None:
-        runtime = api.post("/api/runtimes", spec["runtime"])["runtime"]
+        raise EvalError(f"no {wanted.get('type')!r} runtime in the eval's server: put its CLI on PATH")
     provider = {k: v for k, v in spec["provider"].items() if k != "api_key_env"}
     if (variable := spec["provider"].get("api_key_env")) is not None:
         if not os.environ.get(variable):

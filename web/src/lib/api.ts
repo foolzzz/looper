@@ -1098,12 +1098,17 @@ export interface RuntimeType {
   label: string;
   /** The command a runtime of this type runs when its executable is empty. */
   default_executable: string;
+  /** The id its built-in runtime has once found on the server's PATH: rt-<type>. */
+  runtime_id: string;
   protocols: string[];
   capabilities: string[];
+  /** The roles its capabilities let it run. */
+  roles: AgentRole[];
   auth_kinds: ProviderAuth[];
 }
 
-/** A registered runtime: an agent CLI on this machine. */
+/** A runtime on this machine: built in (one per type found on the server's PATH), or one registered by hand
+ * before runtimes were built in (`builtin` false), kept read-only while an agent uses it. */
 export interface Runtime {
   runtime_id: string;
   name: string;
@@ -1112,10 +1117,14 @@ export interface Runtime {
   /** "" = the type's default (for the built-in Claude Code runtime, the server's claude). */
   executable: string;
   default_executable: string | null;
+  /** Where the executable is on the server's PATH; null when it is not found. */
+  path: string | null;
   protocols: string[];
   /** What `<executable> --version` printed at the last probe; null when not probed or it failed. */
   version: string | null;
   capabilities: string[];
+  /** The roles its capabilities let it run. */
+  roles: AgentRole[];
   probed_at: string | null;
   probe_error: string | null;
   builtin: boolean;
@@ -1188,7 +1197,13 @@ export interface AgentCostBasis {
   unpriced: string[];
 }
 
-/** A registered agent: a runtime, a provider and a model, with an optional default effort. */
+/** Where an agent is selected: the settings layers (a project's with its name) and how many tasks chose it. */
+export interface AgentUsedBy {
+  layers: { scope: SettingLayer; role: AgentRole | null; project_id: string | null; project_name: string | null }[];
+  task_count: number;
+}
+
+/** A registered agent (an Agent Profile): a runtime, a provider and a model, with an optional default effort. */
 export interface RegistryAgent {
   agent_id: string;
   name: string;
@@ -1201,6 +1216,9 @@ export interface RegistryAgent {
   provider_id: string;
   provider_name: string;
   builtin: boolean;
+  /** The roles its runtime can run. */
+  roles: AgentRole[];
+  used_by: AgentUsedBy;
   cost: AgentCostBasis;
 }
 
@@ -1273,23 +1291,10 @@ export async function fetchRegistry(): Promise<Registry> {
   return res.json();
 }
 
-/** Register a runtime; the server probes `--version` at once. */
-export function createRuntime(fields: { name: string; type: string; executable?: string }): Promise<{ runtime: Runtime }> {
-  return registryCall("POST", "/runtimes", fields, "add runtime");
-}
-
-/** Rename a runtime or change its executable (probed again); not the built-in one. */
-export function updateRuntime(runtimeId: string, fields: { name?: string; executable?: string }): Promise<{ runtime: Runtime }> {
-  return registryCall("PUT", `/runtimes/${encodeURIComponent(runtimeId)}`, fields, "update runtime");
-}
-
-export function deleteRuntime(runtimeId: string): Promise<{ deleted: string }> {
-  return registryCall("DELETE", `/runtimes/${encodeURIComponent(runtimeId)}`, undefined, "delete runtime");
-}
-
-/** Run `<executable> --version` again and record its version or error. */
+/** Re-detect: run `<executable> --version` again and record its version or error; for a type's built-in runtime
+ * not found yet (rt-<type>), look for it on the server's PATH again (404 when it is not there). */
 export function probeRuntime(runtimeId: string): Promise<{ runtime: Runtime }> {
-  return registryCall("POST", `/runtimes/${encodeURIComponent(runtimeId)}/probe`, undefined, "probe runtime");
+  return registryCall("POST", `/runtimes/${encodeURIComponent(runtimeId)}/probe`, undefined, "re-detect runtime");
 }
 
 export function createProvider(fields: ProviderFields): Promise<{ provider: Provider }> {
@@ -1322,8 +1327,8 @@ export function deleteRegistryAgent(agentId: string): Promise<{ deleted: string 
 
 // --- Agent settings: harness, agent, effort, environment and per-run cap, by layer ---
 
-/** Where a setting comes from, from least to most specific: the built-in default, Settings (every agent), a role
- * (Agents page), a project (all its agents), a role in a project. A later layer wins; the Manager has only the
+/** Where a setting comes from, from least to most specific: the built-in default, every role and a role (both in
+ * Settings → Roles), a project (all its agents), a role in a project. A later layer wins; the Manager has only the
  * first three. */
 export type SettingLayer = "builtin" | "system" | "role" | "project" | "role_project";
 /** Where a value came from: a layer, the selected agent's own default (its effort), or a task's choice of agent. */
@@ -1432,7 +1437,7 @@ export function updateSystemSettings(fields: LayerUpdate): Promise<AgentSettings
   return putJson("/agent-settings/system", fields, "update agent settings");
 }
 
-/** A role's layer (Agents page). */
+/** A role's layer (Settings → Roles). */
 export function updateRoleSettings(role: AgentRole, fields: LayerUpdate): Promise<AgentSettings> {
   return putJson(`/agent-settings/roles/${encodeURIComponent(role)}`, fields, "update agent settings");
 }

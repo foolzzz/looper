@@ -219,21 +219,6 @@ async def write_layer(
     )
 
 
-async def write_runtime(conn: asyncpg.Connection, runtime_id: str | None, values: Mapping[str, Any]) -> str:
-    """Add a runtime (``runtime_id`` None; not probed yet, with its type's capabilities) or set one's
-    executable; returns its id."""
-    if runtime_id is None:
-        runtime_id = f"rt-{uuid.uuid4().hex[:12]}"
-        await conn.execute(
-            "INSERT INTO agent_runtimes (id, name, type, executable, capabilities) VALUES ($1, $2, $3, $4, $5)",
-            runtime_id, values["name"], values["type"], values["executable"], list(values["capabilities"]),
-        )
-    else:
-        await conn.execute("UPDATE agent_runtimes SET executable = $2, updated_at = now() WHERE id = $1",
-                           runtime_id, values["executable"])
-    return runtime_id
-
-
 async def write_provider(conn: asyncpg.Connection, provider_id: str | None, values: Mapping[str, Any],
                          api_key: str | None) -> str:
     """Add a provider (``provider_id`` None) or replace one's fields; ``api_key`` (None: none) replaces its key."""
