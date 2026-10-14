@@ -19,6 +19,16 @@ How the agent system works today is described in
 
 ### Added
 
+- **Task spend against its cap, and continuing at a higher cap.** When the
+  task's project sets a spend cap per task (`task_budget_usd`), the task page
+  shows the task's spend as a share of it and warns from 80% on. A task that
+  failed at its cap (recorded as `tasks.fail_kind = 'task_budget'`) can be
+  continued: `POST /api/tasks/<id>/continue` with a new `task_budget_usd`
+  above the task's spend raises the project's cap and restarts the task from
+  its saved plan and steps, its Planner resuming its Claude session instead of
+  planning again; anything else gets a 400. The task page offers this as
+  "Raise cap and continue".
+
 - **Reclaiming read-only copies.** `loopx serve` now removes, when it starts
   and before any agent launches, the content-hashed copies under the runtime
   root (library items, project knowledge sets, project skills plugins) that
