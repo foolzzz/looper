@@ -21,6 +21,7 @@ from typing import Any
 from . import agent_settings, knowledge, library, project_skills, projects, request_guard
 from .broadcast import Broadcaster
 from .chat_targets import ChatTargetError, list_chat_targets, resolve_chat_target
+from .project_execution import ProjectExecution
 from .channels.web import WebChannelAdapter
 from .supervisor import AgentSupervisor
 from .tiers.task import TaskRouter
@@ -234,6 +235,7 @@ class AgentHTTPServer:
     _RE_CHANNEL_CONFIG = re.compile(r"^/api/channel-configs/([a-zA-Z0-9_-]+)$")
     _RE_TASK_CONFIG = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)/config$")
     _RE_TASK_PROJECT = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)/project$")
+    _RE_TASK_CONTINUE = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)/continue$")
     _RE_PROJECT = re.compile(r"^/api/projects/(proj-[a-zA-Z0-9]+)$")
     _RE_PROJECT_KNOWLEDGE = re.compile(r"^/api/projects/(proj-[a-zA-Z0-9]+)/knowledge$")
     _RE_PROJECT_DOCUMENT = re.compile(r"^/api/projects/(proj-[a-zA-Z0-9]+)/knowledge/(doc-[a-zA-Z0-9]+)$")
@@ -285,6 +287,8 @@ class AgentHTTPServer:
         elif (m := self._RE_TASK_PROJECT.match(path)) and method == "PUT":
             await self._answer(writer, HTTP_200, lambda: projects.move_task(
                 m.group(1), projects.json_object(body), self._task_router))
+        elif (m := self._RE_TASK_CONTINUE.match(path)) and method == "POST":
+            await self._answer(writer, HTTP_200, lambda: self._continue_at_cap(m.group(1), body))
         elif (m := self._RE_TASK_DETAIL.match(path)) and method == "GET":
             await self._handle_task_detail(m.group(1), writer)
         elif path == "/api/projects" and method == "GET":
@@ -771,6 +775,19 @@ class AgentHTTPServer:
         writer.write(_json_response(HTTP_200, {"started": task_id}))
         await writer.drain()
 
+    async def _continue_at_cap(self, task_id: str, body: bytes) -> dict[str, Any]:
+        """Raise the cap of a task that failed at it, then restart it from its saved plan."""
+        from .message import TASK_ROUTER_ADDRESS, MessageEnvelope, MessageType
+
+        result = await projects.raise_cap_to_continue(task_id, projects.json_object(body))
+        await self._supervisor.bus.publish(MessageEnvelope.create(
+            source=self._web_adapter._address,
+            target=TASK_ROUTER_ADDRESS,
+            message_type=MessageType.TASK_RESTART,
+            payload={"task_id": task_id, "resume": True},
+        ))
+        return {**result, "continued": task_id}
+
     async def _handle_task_delete(
         self, body: bytes, writer: asyncio.StreamWriter
     ) -> None:
@@ -842,6 +859,10 @@ class AgentHTTPServer:
             "origin_channel_id": raw.get("origin_channel_id", ""),
             "result_summary": raw.get("result_summary"),
             "error": raw.get("error"),
+            "fail_kind": raw.get("fail_kind"),  # "task_budget": it failed at its project's task spend cap
+            # The project's task spend cap as the Planner enforces it; null for none.
+            "task_budget_usd": ProjectExecution.from_row(
+                {"id": raw.get("project_id"), "task_budget_usd": raw.get("task_budget_usd")}).task_budget_usd,
             "created_at": raw.get("created_at"),
             "updated_at": raw.get("updated_at"),
             "completed_at": raw.get("completed_at"),

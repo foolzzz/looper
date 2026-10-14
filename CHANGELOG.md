@@ -19,6 +19,15 @@ How the agent system works today is described in
 
 ### Added
 
+- **Task spend against its cap, and continuing at a higher cap.** When the
+  task's project sets a spend cap per task (`task_budget_usd`), the task page
+  shows the task's spend as a share of it and warns from 80% on. A task that
+  failed at its cap (recorded as `tasks.fail_kind = 'task_budget'`) can be
+  continued: `POST /api/tasks/<id>/continue` with a new `task_budget_usd`
+  above the task's spend raises the project's cap and restarts the task from
+  its saved plan and steps, its Planner resuming its Claude session instead of
+  planning again; anything else gets a 400. The task page offers this as
+  "Raise cap and continue".
 - **Project page.** Clicking a project in the sidebar opens `#projects/<id>`
   with Overview, Knowledge, Skills and Settings tabs; it replaces the project
   editor on the Tasks page, which now links to it. Overview shows the latest

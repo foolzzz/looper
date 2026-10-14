@@ -16,6 +16,8 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from loopx.agents.message import TASK_ROUTER_ADDRESS, MessageEnvelope, MessageType
+from loopx.agents.tiers.planner import PlannerAgent
 from loopx.agents.tiers.worker import WorkerConfig, WorkerPool
 from loopx.db import llm_records as db_llm_records
 from tests.test_agent_planner_worker import _fake_claude, _flag, _run_step, _step_envelope, _worker_row
@@ -27,6 +29,7 @@ from tests.test_planner_agent import (
     always,
     decide,
     drive,
+    hold_first,
     plan,
     reply,
     step,
@@ -208,10 +211,82 @@ class TestPlanner:
         assert final is not None and final.payload["status"] == "failed"
         reason = "Task spend cap reached: $0.5 spent of the $0.4 cap (task_budget_usd)"
         assert final.payload["summary"] == f"任务失败:\n{reason}{wrap_up}"
+        assert final.payload["fail_kind"] == "task_budget"
         assert [w.payload["step_key"] for w in h.work_items] == ["s1"]  # s2 never started
         assert len(claude.turns()) == turns
         if wrap_up:
             assert claude.turns()[-1]["text"].startswith(f"[DECISION] {reason}. No more steps run")
+
+
+    def test_a_task_continued_at_a_higher_cap_resumes_its_plan_and_session(
+        self, planner_claude: Any, agent_db: Any, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """No new plan: the step the cap cut short runs again, finished steps stay, and Claude resumes."""
+        agent_db.get_task_project.return_value = _project(task_budget_usd=0.4)
+        _spend_from_records(monkeypatch, agent_db)
+        claude = planner_claude(plan(step("s1"), step("s2")), decide("accept"), decide("accept", summary="done"))
+
+        async def scenario(h: Harness) -> None:
+            await h.start()
+            await h.until(lambda: len(h.work_items) == 2)  # s1 is held, s2 is answered and accepted ($0.5)
+            await h.until(lambda: len(claude.turns()) == 2)
+            await h.release(WORK_OK)  # s1's result arrives over the cap: dropped, and the task fails
+            assert (await h.finished()).payload["fail_kind"] == "task_budget"
+            await h.planner.stop()
+
+            agent_db.get_task_project.return_value = _project(task_budget_usd=2)
+            h.statuses.clear()
+            h.planner = PlannerAgent(task_id="t1", runtime_root=h.work_dir.parent, claude_bin=claude.bin)
+            await h.planner.start(h.bus)
+            await h.bus.publish(MessageEnvelope.create(
+                source=TASK_ROUTER_ADDRESS, target=h.planner.agent_address, message_type=MessageType.TASK_REQUEST,
+                payload={"requirement": "build the calc package", "work_dir": str(h.work_dir),
+                         "project_id": "proj-1", "resume": True},
+            ))
+            final = await h.finished()
+            assert final.payload["status"] == "completed" and final.payload["summary"] == "done"
+
+        h = drive(claude, hold_first(), scenario)
+        assert [w.payload["step_key"] for w in h.work_items] == ["s1", "s2", "s1"]
+        assert h.work_items[0].payload["task_id"] == h.work_items[2].payload["task_id"]  # the same step
+        turns = claude.turns()
+        assert len(turns) == 3 and turns[2]["text"].startswith("[DECISION]")  # never planned again
+        assert _flag(claude.argvs()[-1], "--resume") == "sess-p"
+        assert any(line.startswith("Task continued from its plan with a $2 spend cap: 1 step(s) run again")
+                   for line in activity(agent_db))
+
+
+    def test_a_step_the_cap_kept_from_review_goes_to_a_reviewer_with_its_saved_result(
+        self, planner_claude: Any, agent_db: Any, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        agent_db.get_task_project.return_value = _project(task_budget_usd=0.4)
+        _spend_from_records(monkeypatch, agent_db)
+        claude = planner_claude(plan(step("s1")), decide("review"), decide("accept", summary="done"))
+
+        async def scenario(h: Harness) -> None:
+            await h.start()
+            await h.finished()  # the review decision crossed the cap: no Reviewer started
+            await h.planner.stop()
+            assert h.reviews == []
+
+            agent_db.get_task_project.return_value = _project(task_budget_usd=2)
+            agent_db.list_steps.return_value = [
+                {"id": h.work_items[0].payload["task_id"], "result": '{"status": "completed", "summary": "saved"}'}]
+            h.statuses.clear()
+            h.planner = PlannerAgent(task_id="t1", runtime_root=h.work_dir.parent, claude_bin=claude.bin)
+            await h.planner.start(h.bus)
+            await h.bus.publish(MessageEnvelope.create(
+                source=TASK_ROUTER_ADDRESS, target=h.planner.agent_address, message_type=MessageType.TASK_REQUEST,
+                payload={"requirement": "build the calc package", "work_dir": str(h.work_dir),
+                         "project_id": "proj-1", "resume": True},
+            ))
+            assert (await h.finished()).payload["status"] == "completed"
+
+        h = drive(claude, always(WORK_OK, REVIEW_PASS), scenario)
+        assert len(h.work_items) == 1
+        (review,) = h.reviews
+        assert review.payload["work_result"]["summary"] == "saved"
+        assert len(claude.turns()) == 3
 
 
 # --- Feature-off parity ---

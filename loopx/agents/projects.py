@@ -21,9 +21,10 @@ from typing import Any
 
 import asyncpg
 
-from ..db import connection as db_connection, projects as db_projects, tasks as db_tasks
+from ..db import connection as db_connection, llm_records as db_llm_records, projects as db_projects
+from ..db import tasks as db_tasks
 from . import agent_settings
-from .project_execution import FIELDS as EXECUTION_FIELDS, ProjectExecution, execution_fields
+from .project_execution import FIELDS as EXECUTION_FIELDS, ProjectExecution, execution_fields, format_usd
 from .tiers.task import TaskRouter, resolve_work_dir
 
 HTTP_400 = "400 Bad Request"
@@ -259,3 +260,31 @@ async def move_task(task_id: str, data: dict[str, Any], task_router: TaskRouter)
         raise RequestError(HTTP_404, "task not found")
     task_router.set_task_project(task_id, project_id)
     return {"task_id": task_id, "project_id": project_id, "project_name": project["name"]}
+
+
+async def raise_cap_to_continue(task_id: str, data: dict[str, Any]) -> dict[str, Any]:
+    """Raise the project's task spend cap so a task that failed at it can continue; the caller restarts it.
+
+    Only a task that failed at its cap qualifies, and the new ``task_budget_usd``
+    must be above what the task has spent, or it would stop again at once.
+    The cap is the project's, so it applies to its other tasks too.
+    """
+    task = await db_tasks.get_task(task_id)
+    if task is None:
+        raise RequestError(HTTP_404, "task not found")
+    if task.get("status") != "failed" or task.get("fail_kind") != db_tasks.FailKind.TASK_BUDGET.value:
+        raise RequestError(HTTP_400, "only a task that failed at its spend cap can continue with a higher cap; "
+                                     "start it again instead")
+    if data.get("task_budget_usd") is None:
+        raise RequestError(HTTP_400, "task_budget_usd is required: the new spend cap per task, in US dollars")
+    try:
+        cap = execution_fields({"task_budget_usd": data["task_budget_usd"]})["task_budget_usd"]
+    except ValueError as exc:
+        raise RequestError(HTTP_400, str(exc)) from None
+    spent = float((await db_llm_records.task_costs([task_id]))[task_id]["cost_usd"])
+    if cap <= spent:
+        raise RequestError(HTTP_400, f"task_budget_usd must be above the ${format_usd(spent)} the task has "
+                                     f"spent; got {format_usd(cap)}")
+    if not await db_projects.update_project(task["project_id"], execution={"task_budget_usd": cap}):
+        raise RequestError(HTTP_404, f"project {task['project_id']!r} not found")
+    return {"task_id": task_id, "project_id": task["project_id"], "task_budget_usd": cap, "spent_usd": spent}

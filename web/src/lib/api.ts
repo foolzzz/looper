@@ -255,6 +255,16 @@ export async function startTask(taskId: string): Promise<void> {
   if (!res.ok) await failed(res, "start");
 }
 
+/** Raise the project's task spend cap above what a task that failed at it spent, and continue the task. */
+export async function continueTaskAtCap(taskId: string, taskBudgetUsd: number): Promise<void> {
+  const res = await fetch(`${API_BASE}/tasks/${encodeURIComponent(taskId)}/continue`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ task_budget_usd: taskBudgetUsd }),
+  });
+  if (!res.ok) await failed(res, "continue");
+}
+
 export interface NewProjectFields {
   name: string;
   description?: string;
@@ -594,6 +604,10 @@ export interface TaskDetail extends TaskInfo {
   origin_channel_id: string;
   result_summary: string | null;
   error: string | null;
+  /** "task_budget": the task failed at its project's task spend cap and can continue with a higher one. */
+  fail_kind: "task_budget" | null;
+  /** The project's spend cap per task (USD); null for none. */
+  task_budget_usd: number | null;
   created_at: string;
   updated_at: string;
   completed_at: string | null;
