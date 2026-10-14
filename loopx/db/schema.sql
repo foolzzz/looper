@@ -155,7 +155,6 @@ CREATE TABLE IF NOT EXISTS agent_configs (
     llm_profile_id   BIGINT REFERENCES llm_profiles(id),
     enabled          BOOLEAN NOT NULL DEFAULT true,
     system_prompt    TEXT NOT NULL DEFAULT '',
-    model            TEXT,
     max_turns        INTEGER NOT NULL DEFAULT 0,
     timeout_seconds  INTEGER NOT NULL DEFAULT 1200,
     max_concurrency  INTEGER NOT NULL DEFAULT 1,
@@ -168,16 +167,13 @@ CREATE TABLE IF NOT EXISTS agent_configs (
 -- unedited row (system_prompt = default_prompt) follows it, an edited row does
 -- not, and "reset to recommended" copies it back into system_prompt.
 ALTER TABLE agent_configs ADD COLUMN IF NOT EXISTS default_prompt TEXT NOT NULL DEFAULT '';
--- The Manager's own harness prompt ('' = the default one in Settings). The
--- task agents' harness overrides belong to their project.
-ALTER TABLE agent_configs ADD COLUMN IF NOT EXISTS harness_prompt TEXT NOT NULL DEFAULT '';
 -- permission_mode was never applied: every agent runs with
 -- --dangerously-skip-permissions (claude_cli.permission_args).
 ALTER TABLE agent_configs DROP COLUMN IF EXISTS permission_mode;
 
 -- Settings the whole system shares, one value per key. Code owns each key's
--- type and validation (loopx/agents/agent_settings.py); a key without a row
--- has its built-in default.
+-- type and validation; a key without a row has its built-in default. (The
+-- agent settings live in agent_setting_layers.)
 CREATE TABLE IF NOT EXISTS system_settings (
     key         TEXT PRIMARY KEY,
     value       TEXT NOT NULL,
@@ -243,14 +239,8 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_projects_name ON projects (lower(name));
 -- What every task agent of the project (Planner, Workers, Reviewers) should
 -- know about it: added to their system prompt; '' = none.
 ALTER TABLE projects ADD COLUMN IF NOT EXISTS background TEXT NOT NULL DEFAULT '';
--- The harness prompt of the project's Planner, and of its Workers and
--- Reviewers; '' = the default one in Settings.
-ALTER TABLE projects ADD COLUMN IF NOT EXISTS planner_harness_prompt TEXT NOT NULL DEFAULT '';
-ALTER TABLE projects ADD COLUMN IF NOT EXISTS worker_harness_prompt TEXT NOT NULL DEFAULT '';
 -- How the project's task agents run; NULL inherits today's behavior. Code owns
 -- the types and validation (loopx/agents/project_execution.py).
-ALTER TABLE projects ADD COLUMN IF NOT EXISTS model TEXT;
-ALTER TABLE projects ADD COLUMN IF NOT EXISTS run_budget_usd DOUBLE PRECISION CHECK (run_budget_usd > 0);
 ALTER TABLE projects ADD COLUMN IF NOT EXISTS task_budget_usd DOUBLE PRECISION CHECK (task_budget_usd > 0);
 ALTER TABLE projects ADD COLUMN IF NOT EXISTS task_budget_action TEXT
     CHECK (task_budget_action IN ('wrap_up', 'fail'));
@@ -369,6 +359,86 @@ BEGIN
             DROP TABLE project_skills;
         END IF;
         INSERT INTO schema_migrations (name) VALUES ('library_catalog_installs');
+    END IF;
+END $$;
+
+-- Agent settings by layer: system default -> role -> project -> role in a
+-- project, a later layer winning. The Manager spans every project and has only
+-- the first two. A NULL field is not set at its layer (it inherits); env is an
+-- ordered list of {"key", "value"}, where a null value unsets a key an earlier
+-- layer set (never at the system layer). Code owns the validation and the
+-- resolution (loopx/agents/agent_settings.py). One row per layer and place.
+CREATE TABLE IF NOT EXISTS agent_setting_layers (
+    scope           TEXT NOT NULL CHECK (scope IN ('system', 'role', 'project', 'role_project')),
+    role            TEXT CHECK (role IN ('manager', 'planner', 'worker', 'reviewer')),
+    project_id      TEXT REFERENCES projects(id) ON DELETE CASCADE,
+    harness_prompt  TEXT,
+    model           TEXT,
+    effort          TEXT,
+    env             JSONB NOT NULL DEFAULT '[]'::jsonb CHECK (jsonb_typeof(env) = 'array'),
+    run_budget_usd  DOUBLE PRECISION CHECK (run_budget_usd > 0),
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CHECK ((role IS NOT NULL) = (scope IN ('role', 'role_project'))),
+    CHECK ((project_id IS NOT NULL) = (scope IN ('project', 'role_project'))),
+    CHECK (scope <> 'role_project' OR role <> 'manager')
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_setting_layers_place
+    ON agent_setting_layers (scope, COALESCE(role, ''), COALESCE(project_id, ''));
+
+-- Once (layered settings): the values that lived in four places move into
+-- their layer, unchanged; the old columns and keys are dropped. The Settings
+-- defaults (system_settings agent.*) become the system layer; each agent's
+-- model, and the Manager's harness (the only one the API took), the role
+-- layer; a project's model and per-run cap the project layer; a project's
+-- Planner and Worker harness the role-in-project layer (a Reviewer follows its
+-- project's Workers at resolution, as before).
+DO $$
+DECLARE
+    env_value JSONB := '[]'::jsonb;
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM schema_migrations WHERE name = 'agent_setting_layers') THEN
+        ALTER TABLE agent_configs ADD COLUMN IF NOT EXISTS harness_prompt TEXT NOT NULL DEFAULT '';
+        ALTER TABLE agent_configs ADD COLUMN IF NOT EXISTS model TEXT;
+        ALTER TABLE projects ADD COLUMN IF NOT EXISTS planner_harness_prompt TEXT NOT NULL DEFAULT '';
+        ALTER TABLE projects ADD COLUMN IF NOT EXISTS worker_harness_prompt TEXT NOT NULL DEFAULT '';
+        ALTER TABLE projects ADD COLUMN IF NOT EXISTS model TEXT;
+        ALTER TABLE projects ADD COLUMN IF NOT EXISTS run_budget_usd DOUBLE PRECISION;
+        BEGIN
+            SELECT value::jsonb INTO env_value FROM system_settings WHERE key = 'agent.env';
+            IF env_value IS NULL OR jsonb_typeof(env_value) <> 'array' THEN
+                env_value := '[]'::jsonb;
+            END IF;
+        EXCEPTION WHEN others THEN
+            env_value := '[]'::jsonb;  -- unreadable: it was ignored at runtime too
+        END;
+        INSERT INTO agent_setting_layers (scope, harness_prompt, model, effort, env)
+        SELECT 'system', h.value, m.value, e.value, env_value
+        FROM (SELECT 1) one
+        LEFT JOIN system_settings h ON h.key = 'agent.harness_prompt'
+        LEFT JOIN system_settings m ON m.key = 'agent.model'
+        LEFT JOIN system_settings e ON e.key = 'agent.effort'
+        WHERE h.value IS NOT NULL OR m.value IS NOT NULL OR e.value IS NOT NULL OR env_value <> '[]'::jsonb;
+        INSERT INTO agent_setting_layers (scope, role, harness_prompt, model)
+        SELECT 'role', agent_id,
+               CASE WHEN agent_id = 'manager' THEN NULLIF(harness_prompt, '') END, NULLIF(btrim(model), '')
+        FROM agent_configs
+        WHERE agent_id IN ('manager', 'planner', 'worker', 'reviewer')
+          AND ((agent_id = 'manager' AND harness_prompt <> '') OR NULLIF(btrim(model), '') IS NOT NULL);
+        INSERT INTO agent_setting_layers (scope, project_id, model, run_budget_usd)
+        SELECT 'project', id, model, run_budget_usd FROM projects
+        WHERE model IS NOT NULL OR run_budget_usd IS NOT NULL;
+        INSERT INTO agent_setting_layers (scope, role, project_id, harness_prompt)
+        SELECT 'role_project', 'planner', id, planner_harness_prompt FROM projects WHERE planner_harness_prompt <> ''
+        UNION ALL
+        SELECT 'role_project', 'worker', id, worker_harness_prompt FROM projects WHERE worker_harness_prompt <> '';
+        ALTER TABLE agent_configs DROP COLUMN harness_prompt;
+        ALTER TABLE agent_configs DROP COLUMN model;
+        ALTER TABLE projects DROP COLUMN planner_harness_prompt;
+        ALTER TABLE projects DROP COLUMN worker_harness_prompt;
+        ALTER TABLE projects DROP COLUMN model;
+        ALTER TABLE projects DROP COLUMN run_budget_usd;
+        DELETE FROM system_settings WHERE key IN ('agent.harness_prompt', 'agent.model', 'agent.effort', 'agent.env');
+        INSERT INTO schema_migrations (name) VALUES ('agent_setting_layers');
     END IF;
 END $$;
 

@@ -34,6 +34,34 @@ How the agent system works today is described in
 
 ### Changed
 
+- **Agent settings resolve by layer.** The harness prompt, model, effort,
+  environment variables and per-run cap (`--max-budget-usd`) of every agent
+  now come from one store (`agent_setting_layers`) and resolve through
+  system → role → project → role in a project, a later layer winning; the
+  Manager has the first two only. The environment merges key by key, and a
+  later layer can unset a variable. A Reviewer without a harness of its own
+  at the role or role-in-project layer still takes the Workers'. Every run
+  records each setting's layer in `metadata.settings_sources`;
+  `prompt_layers.harness.source` and `model_choice.source` now name the layer
+  (`builtin`, `system`, `role`, `project`, `role_project`). Edit the system
+  layer in Settings, a role's on the Agents page, and the project's and each
+  role's in the project on the project's Settings tab; every field shows
+  what applies now and where it comes from. **No behaviour change for
+  existing data:** the first start moves the Settings defaults, each agent's
+  model and the Manager's harness, each project's model and per-run cap, and
+  each project's Planner and Worker harness into their layers unchanged
+  (recorded as `agent_setting_layers`), so every agent launches with the same
+  flags, environment and system prompt as before; the old columns and
+  `system_settings` keys are dropped (a rollback needs a database backup).
+  API: `GET /api/agent-settings`, `PUT /api/agent-settings/system`,
+  `PUT /api/agent-settings/roles/<role>`, `GET`/`PUT
+  /api/projects/<id>/agent-settings` and `PUT
+  /api/projects/<id>/agent-settings/roles/<role>` replace
+  `/api/settings/agents` and its `reset-harness`; agent configs no longer
+  take `harness_prompt` or `model`, and projects no longer take or return
+  `planner_harness_prompt`, `worker_harness_prompt`, `model` or
+  `run_budget_usd` (400 naming the new endpoint). A run stopped at its cap now
+  says "its per-run spend cap", since the cap can come from any layer.
 - **Behaviour change: plugins and skills load only where they are
   installed.** The library is now a capability catalog. Importing from this
   machine (`POST /api/catalog/import`) only adds items to the catalog; an

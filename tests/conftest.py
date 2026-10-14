@@ -51,6 +51,7 @@ _AGENT_DB_READS = (
     ("projects", "get_task_project", None),
     ("activity", "list_activity", []),
     ("system_settings", "get_settings", {}),
+    ("agent_setting_layers", "list_layers", []),
     ("library", "list_installed", []),
     ("library", "get_item_files", []),
     ("project_documents", "list_documents", []),

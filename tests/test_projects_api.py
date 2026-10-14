@@ -39,7 +39,7 @@ class _Store:
     def add_project(self, project_id: str, name: str, work_dir: str = "", background: str = "") -> None:
         self.projects[project_id] = {
             "id": project_id, "name": name, "description": "", "work_dir": work_dir, "background": background,
-            "planner_harness_prompt": "", "worker_harness_prompt": "", "created_at": NOW, "updated_at": NOW,
+            "created_at": NOW, "updated_at": NOW,
         }
 
     def add_task(self, task_id: str, project_id: str, status: str = "init") -> None:
@@ -65,19 +65,16 @@ class _Store:
         return self._with_counts(row) if row else None
 
     async def create_project(self, *, name: str, description: str = "", work_dir: str = "", background: str = "",
-                             planner_harness_prompt: str = "", worker_harness_prompt: str = "",
                              execution: dict[str, Any] | None = None, pool: Any = None) -> dict[str, Any]:
         if self._name_taken(name):
             raise asyncpg.UniqueViolationError("duplicate key value violates unique constraint")
         project_id = f"proj-{len(self.projects):012d}"
         self.add_project(project_id, name, work_dir, background)
-        self.projects[project_id].update(description=description, planner_harness_prompt=planner_harness_prompt,
-                                         worker_harness_prompt=worker_harness_prompt, **(execution or {}))
+        self.projects[project_id].update(description=description, **(execution or {}))
         return dict(self.projects[project_id])
 
     async def update_project(self, project_id: str, *, name: str | None = None, description: str | None = None,
                              work_dir: str | None = None, background: str | None = None,
-                             planner_harness_prompt: str | None = None, worker_harness_prompt: str | None = None,
                              execution: dict[str, Any] | None = None, pool: Any = None) -> bool:
         row = self.projects.get(project_id)
         if row is None:
@@ -86,8 +83,7 @@ class _Store:
         if name is not None and self._name_taken(name, other_than=project_id):
             raise asyncpg.UniqueViolationError("duplicate key value violates unique constraint")
         for key, value in (("name", name), ("description", description), ("work_dir", work_dir),
-                           ("background", background), ("planner_harness_prompt", planner_harness_prompt),
-                           ("worker_harness_prompt", worker_harness_prompt)):
+                           ("background", background)):
             if value is not None:
                 row[key] = value
         return True
@@ -177,11 +173,9 @@ class TestProjectEndpoints:
         assert (body["name"], body["description"]) == ("tetris", "game")
         assert body["work_dir"] == os.path.join(os.path.expanduser("~"), "tetris")
         assert (body["task_count"], body["active_count"]) == (0, 0)
-        assert set(body) == {"project_id", "name", "description", "work_dir", "background", "planner_harness_prompt",
-                             "worker_harness_prompt", "created_at", "updated_at", "task_count", "active_count",
-                             "model", "run_budget_usd", "task_budget_usd", "task_budget_action",
+        assert set(body) == {"project_id", "name", "description", "work_dir", "background", "created_at",
+                             "updated_at", "task_count", "active_count", "task_budget_usd", "task_budget_action",
                              "supervise_interval_seconds", "review_policy", "distill_lessons"}
-        assert (body["planner_harness_prompt"], body["worker_harness_prompt"]) == ("", "")
 
     def test_work_dir_is_optional(self, store: _Store) -> None:
         status, body = _call("POST", "/api/projects", {"name": "notes"})
@@ -190,7 +184,7 @@ class TestProjectEndpoints:
     @pytest.mark.parametrize("body", [
         b"{not json", [], {}, {"name": ""}, {"name": "   "}, {"name": 7}, {"name": "x" * 81},
         {"name": "a", "work_dir": "relative/dir"}, {"name": "a", "description": 3},
-        {"name": "a", "background": 5}, {"name": "a", "worker_harness_prompt": ["x"]},
+        {"name": "a", "background": 5}, {"name": "a", "worker_harness_prompt": "x"},
     ])
     def test_create_rejects_a_bad_request(self, store: _Store, body: Any) -> None:
         status, response = _call("POST", "/api/projects", body)
@@ -287,42 +281,25 @@ class TestProjectBackground:
     def test_a_new_project_made_with_a_task_takes_it(self, store: _Store) -> None:
         status, body = _call("POST", "/api/tasks/create", {
             "requirement": "r", "work_dir": "/tmp/calc",
-            "project": {"name": "calc", "background": " Use uv.\n", "planner_harness_prompt": "Plan.",
-                        "worker_harness_prompt": "Work."},
+            "project": {"name": "calc", "background": " Use uv.\n"},
         })
         assert status == 201
-        project = store.projects[body["project_id"]]
-        assert (project["background"], project["planner_harness_prompt"], project["worker_harness_prompt"]) == (
-            " Use uv.", "Plan.", "Work.")
+        assert store.projects[body["project_id"]]["background"] == " Use uv."
 
 
-class TestProjectHarness:
-    """A project's Planner harness and Worker harness (its Reviewers follow the
-    Workers) override the default one; '' inherits it. Up to 20000 characters each."""
+class TestMovedProjectFields:
+    """A project's harness overrides, model and per-run cap are agent settings now (its layers)."""
 
-    @pytest.mark.parametrize("field", ["planner_harness_prompt", "worker_harness_prompt"])
-    def test_create_put_and_clear(self, store: _Store, field: str) -> None:
-        status, body = _call("POST", "/api/projects", {"name": "calc", field: "\n\nBe thorough.\n"})
-        assert status == 201 and body[field] == "Be thorough."
-        other = "worker_harness_prompt" if field == "planner_harness_prompt" else "planner_harness_prompt"
-        assert body[other] == ""
-        project_id = body["project_id"]
-        status, body = _call("PUT", f"/api/projects/{project_id}", {field: "Be brief."})
-        assert (status, body[field], body["name"]) == (200, "Be brief.", "calc")
-        assert _call("PUT", f"/api/projects/{project_id}", {"description": "d"})[1][field] == "Be brief."  # kept
-        status, body = _call("PUT", f"/api/projects/{project_id}", {field: ""})
-        assert (status, body[field]) == (200, "")
-        assert _call("GET", "/api/projects")[1]["projects"][0][field] == ""
-
-    @pytest.mark.parametrize("field", ["planner_harness_prompt", "worker_harness_prompt"])
-    def test_the_limit_is_20000_characters(self, store: _Store, field: str) -> None:
-        assert _call("POST", "/api/projects", {"name": "a", field: "x" * 20_000})[0] == 201
-        status, body = _call("POST", "/api/projects", {"name": "b", field: "x" * 20_001})
-        assert status == 400 and "20000" in body["error"] and field in body["error"]
+    @pytest.mark.parametrize("field", ["planner_harness_prompt", "worker_harness_prompt", "model", "run_budget_usd"])
+    def test_create_update_and_a_new_project_with_a_task_refuse_them(self, store: _Store, field: str) -> None:
+        status, body = _call("POST", "/api/projects", {"name": "calc", field: "x"})
+        assert status == 400 and "agent-settings" in body["error"] and store.projects == {}
         store.add_project("proj-c", "c")
-        status, body = _call("PUT", "/api/projects/proj-c", {"name": "renamed", field: "x" * 20_001})
-        assert status == 400
-        assert store.projects["proj-c"]["name"] == "c" and store.projects["proj-c"][field] == ""
+        assert _call("PUT", "/api/projects/proj-c", {"name": "renamed", field: "x"})[0] == 400
+        assert store.projects["proj-c"]["name"] == "c"
+        status, _ = _call("POST", "/api/tasks/create", {"requirement": "r", "work_dir": "/tmp/calc",
+                                                        "project": {"name": "calc", field: "x"}})
+        assert status == 400 and list(store.projects) == ["proj-c"]
 
 
 class TestTaskCreate:

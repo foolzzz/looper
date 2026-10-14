@@ -212,18 +212,20 @@ function shortSha(sha: string | null | undefined) {
   return sha ? sha.slice(0, 12) : "";
 }
 
-const HARNESS_SOURCES: Record<string, string> = {
+/** Where a run's settings came from: the settings layers, then the names runs recorded before the layers used. */
+const SETTING_SOURCES: Record<string, string> = {
+  builtin: "built-in default",
+  system: "Settings",
+  role: "role (Agents page)",
+  project: "project",
+  role_project: "role in project",
   builtin_default: "built-in default",
   system_default: "Settings default",
   manager_override: "Manager override",
+  agent_override: "agent override",
   project_override: "project override",
 };
-
-const MODEL_SOURCES: Record<string, string> = {
-  builtin_default: "built-in default",
-  system_default: "Settings default",
-  agent_override: "agent override",
-};
+const sourceName = (source: string) => SETTING_SOURCES[source] ?? source;
 
 /**
  * One line per layer, in prompt order: where the harness, role, project, task and contract came from;
@@ -235,7 +237,11 @@ function PromptLayerSummary({ layers, metadata }: { layers: PromptLayers; metada
   if (harness) {
     rows.push([
       "Harness",
-      [HARNESS_SOURCES[harness.source] ?? harness.source, harness.project_id, shortSha(harness.sha256)]
+      [
+        sourceName(harness.source) + (harness.from_role ? ` (the ${harness.from_role}'s)` : ""),
+        harness.project_id,
+        shortSha(harness.sha256),
+      ]
         .filter(Boolean)
         .join(" · "),
     ]);
@@ -264,12 +270,24 @@ function PromptLayerSummary({ layers, metadata }: { layers: PromptLayers; metada
   if (choice) {
     rows.push([
       "Model",
-      [choice.model, MODEL_SOURCES[choice.source] ?? choice.source, choice.effort && `effort ${choice.effort}`]
+      [choice.model, sourceName(choice.source), choice.effort && `effort ${choice.effort}`]
         .filter(Boolean)
         .join(" · "),
     ]);
   }
-  if (metadata?.env) rows.push(["Env", `${Object.keys(metadata.env.keys).join(", ")} · ${shortSha(metadata.env.sha256)}`]);
+  const sources = metadata?.settings_sources;
+  if (metadata?.env) {
+    const keys = Object.keys(metadata.env.keys).map((key) =>
+      sources?.env?.[key] ? `${key} (${sourceName(sources.env[key])})` : key,
+    );
+    rows.push(["Env", `${keys.join(", ")} · ${shortSha(metadata.env.sha256)}`]);
+  }
+  if (sources) {
+    rows.push([
+      "Sources",
+      `effort ${sourceName(sources.effort)} · run cap ${sourceName(sources.run_budget_usd)}`,
+    ]);
+  }
   return (
     <dl className="mb-2 grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 font-mono text-[11px]">
       {rows.map(([name, value]) => (

@@ -165,7 +165,7 @@ def knowledge_args(knowledge: AgentKnowledge) -> list[str]:
 
 
 def budget_args(max_budget_usd: float | None) -> list[str]:
-    """The flag that caps one Claude Code process's spend, for a task agent whose project sets one.
+    """The flag that caps one Claude Code process's spend, for an agent whose settings set one.
 
     Verified against Claude Code 2.1.285 in ``--print`` stream-json mode: Claude checks the cap after each
     API request, so a turn may overrun it by one request, and the turn that crosses it ends with a ``result``
@@ -188,7 +188,7 @@ def budget_error(result_event: dict[str, Any] | None) -> str | None:
         return None
     errors = result_event.get("errors")
     detail = "; ".join(str(e) for e in errors) if isinstance(errors, list) and errors else "budget reached"
-    return f"Claude Code stopped at the project's per-run spend cap (--max-budget-usd): {detail}"
+    return f"Claude Code stopped at its per-run spend cap (--max-budget-usd): {detail}"
 
 
 def permission_args() -> list[str]:

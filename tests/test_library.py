@@ -19,7 +19,7 @@ import pytest
 from library_fixtures import PLUGIN_FILES, fake_claude_home, write
 
 from loopx.agents import library
-from loopx.agents.agent_settings import BUILTIN_DEFAULTS, resolve_launch
+from loopx.agents.agent_settings import Launch
 from loopx.agents.claude_cli import permission_args
 from loopx.agents.library import (
     SKILLS_PLUGIN,
@@ -318,11 +318,11 @@ class TestResolveInstalled:
 
 class TestLaunch:
     def test_a_launch_carries_and_records_its_library(self) -> None:
-        assert "--plugin-dir" not in resolve_launch(BUILTIN_DEFAULTS).args()
-        assert "library" not in resolve_launch(BUILTIN_DEFAULTS).record()
+        assert "--plugin-dir" not in Launch().args()
+        assert "library" not in Launch().record()
         loaded = AgentLibrary(items=(LoadedItem(ItemKind.PLUGIN, "demo@market", "b" * 64),),
                               plugin_dirs=("/l/demo", "/l/personal"))
-        launch = resolve_launch(BUILTIN_DEFAULTS, None, loaded)
+        launch = Launch(library=loaded)
         # One --plugin-dir per directory: the flag takes one value.
         assert launch.args() == [*permission_args(), "--model", "opus",
                                  "--plugin-dir", "/l/demo", "--plugin-dir", "/l/personal"]

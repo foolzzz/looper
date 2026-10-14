@@ -1,11 +1,11 @@
 """Project CRUD: every task belongs to one project.
 
 A project may give its tasks a default directory (``work_dir``, ``''`` for
-none), a ``background`` its task agents get in their system prompt and
-harness prompts for its Planner (``planner_harness_prompt``) and for its
-Workers and Reviewers (``worker_harness_prompt``); ``''`` is none. Names are unique ignoring case; a taken name raises
+none) and a ``background`` its task agents get in their system prompt; ``''``
+is none. Names are unique ignoring case; a taken name raises
 ``asyncpg.UniqueViolationError``. Its execution settings (``EXECUTION_COLUMNS``,
 typed and validated by ``loopx.agents.project_execution``) are NULL to inherit.
+Its agent settings are layers of their own (``agent_setting_layers``).
 """
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ from .tasks import ACTIVE_STATUSES
 
 # How the project's task agents run; NULL inherits (loopx/agents/project_execution.py).
 EXECUTION_COLUMNS = (
-    "model", "run_budget_usd", "task_budget_usd", "task_budget_action", "supervise_interval_seconds", "review_policy",
+    "task_budget_usd", "task_budget_action", "supervise_interval_seconds", "review_policy",
     "distill_lessons",
 )
 
@@ -76,17 +76,13 @@ async def create_project(
     description: str = "",
     work_dir: str = "",
     background: str = "",
-    planner_harness_prompt: str = "",
-    worker_harness_prompt: str = "",
     execution: Mapping[str, Any] | None = None,
     pool: asyncpg.Pool | asyncpg.Connection | None = None,
 ) -> dict[str, Any]:
     pool = pool or get_pool()
     settings = _execution(execution)
-    columns = ["id", "name", "description", "work_dir", "background", "planner_harness_prompt",
-               "worker_harness_prompt", *settings]
-    values = [f"proj-{uuid.uuid4().hex[:12]}", name, description, work_dir, background,
-              planner_harness_prompt, worker_harness_prompt, *settings.values()]
+    columns = ["id", "name", "description", "work_dir", "background", *settings]
+    values = [f"proj-{uuid.uuid4().hex[:12]}", name, description, work_dir, background, *settings.values()]
     row = await pool.fetchrow(
         f"INSERT INTO projects ({', '.join(columns)}) "
         f"VALUES ({', '.join(f'${i}' for i in range(1, len(values) + 1))}) RETURNING *",
@@ -102,8 +98,6 @@ async def update_project(
     description: str | None = None,
     work_dir: str | None = None,
     background: str | None = None,
-    planner_harness_prompt: str | None = None,
-    worker_harness_prompt: str | None = None,
     execution: Mapping[str, Any] | None = None,
     pool: asyncpg.Pool | None = None,
 ) -> bool:
@@ -111,7 +105,7 @@ async def update_project(
     goes back to inheriting); False when there is no such project."""
     pool = pool or get_pool()
     settings = _execution(execution)
-    assignments = "".join(f"{column} = ${i}, " for i, column in enumerate(settings, start=8))
+    assignments = "".join(f"{column} = ${i}, " for i, column in enumerate(settings, start=6))
     result = await pool.execute(
         f"""
         UPDATE projects
@@ -119,13 +113,10 @@ async def update_project(
             description = COALESCE($3, description),
             work_dir = COALESCE($4, work_dir),
             background = COALESCE($5, background),
-            planner_harness_prompt = COALESCE($6, planner_harness_prompt),
-            worker_harness_prompt = COALESCE($7, worker_harness_prompt),
             {assignments}updated_at = now()
         WHERE id = $1
         """,
-        project_id, name, description, work_dir, background, planner_harness_prompt, worker_harness_prompt,
-        *settings.values(),
+        project_id, name, description, work_dir, background, *settings.values(),
     )
     return result == "UPDATE 1"
 

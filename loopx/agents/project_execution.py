@@ -2,11 +2,6 @@
 
 Every field is optional, and ``None`` inherits today's behavior:
 
-- ``model``: the model of the project's Planners, Workers and Reviewers, over
-  the agent's own model and the default in Settings (the Manager spans every
-  project and keeps its own);
-- ``run_budget_usd``: ``--max-budget-usd`` on every Planner, Worker and Reviewer
-  Claude Code process of the project's tasks;
 - ``task_budget_usd``: the most a task may spend over all its runs, counted
   like the task's cost (``llm_records.task_costs``);
 - ``task_budget_action``: what happens when a task reaches that cap: the task
@@ -22,25 +17,25 @@ Every field is optional, and ``None`` inherits today's behavior:
 
 The columns live on ``projects`` (``db.projects.EXECUTION_COLUMNS``); this
 module owns their types and validation. Agents read them when a run or turn
-starts, so a change reaches the next one.
+starts, so a change reaches the next one. A project's model, harness, effort,
+environment and per-run cap are agent settings: its layer and its roles'
+layers (``agent_settings``).
 """
 
 from __future__ import annotations
 
 import logging
-import math
 from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any
 
 from ..db.projects import EXECUTION_COLUMNS
-from .agent_settings import SettingsError, model_name
+from .agent_settings import budget_usd
 
 logger = logging.getLogger(__name__)
 
 FIELDS = EXECUTION_COLUMNS
-BUDGET_MAX_USD = 100_000
 SUPERVISE_MAX_SECONDS = 86_400
 
 
@@ -56,8 +51,6 @@ class TaskBudgetAction(str, Enum):
 
 @dataclass(frozen=True)
 class ProjectExecution:
-    model: str | None = None
-    run_budget_usd: float | None = None
     task_budget_usd: float | None = None
     task_budget_action: TaskBudgetAction | None = None
     supervise_interval_seconds: int | None = None
@@ -115,13 +108,8 @@ def format_usd(amount: float) -> str:
 def _parse(field: str, raw: Any) -> Any:
     if raw is None or raw == "":
         return None
-    if field == "model":
-        try:
-            return model_name(raw) or None
-        except SettingsError as exc:
-            raise ValueError(str(exc)) from None
-    if field in ("run_budget_usd", "task_budget_usd"):
-        return _dollars(field, raw)
+    if field == "task_budget_usd":
+        return budget_usd(raw, field=field)
     if field == "task_budget_action":
         return _choice(field, raw, TaskBudgetAction)
     if field == "review_policy":
@@ -136,16 +124,6 @@ def _parse(field: str, raw: Any) -> Any:
             raise ValueError("distill_lessons must be true or false, or null for off")
         return raw
     raise ValueError(f"unknown execution field {field!r}")
-
-
-def _dollars(field: str, raw: Any) -> float:
-    if isinstance(raw, bool) or not isinstance(raw, (int, float)) or not math.isfinite(raw):
-        raise ValueError(f"{field} must be a number of US dollars, or null for no cap")
-    amount = float(raw)
-    if not 0 < amount <= BUDGET_MAX_USD or round(amount, 4) != amount:
-        raise ValueError(f"{field} must be more than 0 and at most {BUDGET_MAX_USD} US dollars, with at most "
-                         f"4 decimals; got {raw}")
-    return amount
 
 
 def _choice(field: str, raw: Any, kind: type[Enum]) -> Any:

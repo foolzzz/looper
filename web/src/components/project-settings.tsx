@@ -4,7 +4,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { deleteProject, updateProject, type Project, type ProjectUpdate } from "@/lib/api";
 import { ProjectBackgroundField, backgroundTooLong } from "@/components/project-background-field";
-import { ProjectHarnessOverrides, harnessTooLong } from "@/components/harness-field";
+import { ProjectAgentSettingsSection } from "@/components/project-agent-settings";
 import {
   ProjectExecutionFields,
   executionChanges,
@@ -17,8 +17,6 @@ interface Draft {
   workDir: string;
   description: string;
   background: string;
-  plannerHarness: string;
-  workerHarness: string;
   execution: ExecutionDraft;
 }
 
@@ -28,25 +26,22 @@ function draftOf(project: Project): Draft {
     workDir: project.work_dir,
     description: project.description,
     background: project.background,
-    plannerHarness: project.planner_harness_prompt ?? "",
-    workerHarness: project.worker_harness_prompt ?? "",
     execution: executionDraft(project),
   };
 }
 
-/** What the draft changes, as the API takes it; an empty directory, background or harness clears it. */
+/** What the draft changes, as the API takes it; an empty directory or background clears it. */
 function changesOf(draft: Draft, project: Project): ProjectUpdate {
   const fields: ProjectUpdate = executionChanges(draft.execution, project);
   if (draft.name.trim() !== project.name) fields.name = draft.name.trim();
   if (draft.description.trim() !== project.description) fields.description = draft.description.trim();
   if (draft.workDir.trim() !== project.work_dir) fields.work_dir = draft.workDir.trim();
   if (draft.background !== project.background) fields.background = draft.background;
-  if (draft.plannerHarness !== (project.planner_harness_prompt ?? "")) fields.planner_harness_prompt = draft.plannerHarness;
-  if (draft.workerHarness !== (project.worker_harness_prompt ?? "")) fields.worker_harness_prompt = draft.workerHarness;
   return fields;
 }
 
-/** A project's fields and execution settings, saved together; and deleting the project once it has no tasks. */
+/** A project's fields and execution settings, saved together; its agent settings by layer; and deleting the
+ * project once it has no tasks. */
 export function ProjectSettingsForm({ project, onDeleted }: { project: Project; onDeleted: () => void }) {
   const id = useId();
   const [draft, setDraft] = useState<Draft>(() => draftOf(project));
@@ -61,8 +56,7 @@ export function ProjectSettingsForm({ project, onDeleted }: { project: Project; 
   };
   const changes = changesOf(draft, project);
   const dirty = Object.keys(changes).length > 0;
-  const tooLong =
-    backgroundTooLong(draft.background) || harnessTooLong(draft.plannerHarness) || harnessTooLong(draft.workerHarness);
+  const tooLong = backgroundTooLong(draft.background);
 
   const save = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -122,13 +116,6 @@ export function ProjectSettingsForm({ project, onDeleted }: { project: Project; 
           />
         </div>
         <ProjectBackgroundField id={`${id}-background`} value={draft.background} onChange={set("background")} />
-        <ProjectHarnessOverrides
-          idPrefix={id}
-          planner={draft.plannerHarness}
-          worker={draft.workerHarness}
-          onPlannerChange={set("plannerHarness")}
-          onWorkerChange={set("workerHarness")}
-        />
         <ProjectExecutionFields idPrefix={id} draft={draft.execution} onChange={set("execution")} />
         {error && <p role="alert" className="text-xs text-destructive">{error}</p>}
         <div className="flex flex-wrap items-center justify-end gap-2">
@@ -156,6 +143,8 @@ export function ProjectSettingsForm({ project, onDeleted }: { project: Project; 
           </Button>
         </div>
       </form>
+
+      <ProjectAgentSettingsSection projectId={project.project_id} />
 
       <section aria-labelledby={`${id}-delete`} className="rounded-lg border border-border bg-card px-5 py-4">
         <h2 id={`${id}-delete`} className="text-sm font-semibold">Delete project</h2>

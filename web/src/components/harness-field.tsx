@@ -1,5 +1,4 @@
-import { useState } from "react";
-import { AlertCircle, ChevronDown, ChevronRight } from "lucide-react";
+import { AlertCircle } from "lucide-react";
 import { HARNESS_MAX_CHARS } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
@@ -66,71 +65,6 @@ export function HarnessField({
         <p id={`${id}-hint`} className="text-xs text-muted-foreground">
           {hint}
         </p>
-      )}
-    </div>
-  );
-}
-
-/** A project's harness overrides: its Planner's, and its Workers' (which its Reviewers follow), in a collapsible section. */
-export function ProjectHarnessOverrides({
-  idPrefix,
-  planner,
-  worker,
-  onPlannerChange,
-  onWorkerChange,
-  labelClassName,
-}: {
-  idPrefix: string;
-  planner: string;
-  worker: string;
-  onPlannerChange: (value: string) => void;
-  onWorkerChange: (value: string) => void;
-  labelClassName?: string;
-}) {
-  const overridden = [planner.trim() && "Planner", worker.trim() && "Worker"].filter(Boolean);
-  // Open at first when an override is set; then only the user opens or closes it.
-  const [open, setOpen] = useState(overridden.length > 0);
-  return (
-    <div className="rounded-md border border-border">
-      <button
-        type="button"
-        onClick={() => setOpen(!open)}
-        aria-expanded={open}
-        aria-controls={`${idPrefix}-harness-overrides`}
-        className="flex w-full items-center gap-2 rounded-md px-3 py-2 text-left text-xs font-medium text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-      >
-        {open ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
-        <span>Harness overrides</span>
-        <span className="ml-auto font-normal">
-          {overridden.length ? `${overridden.join(" and ")} overridden` : "Both inherit the default"}
-        </span>
-      </button>
-      {open && (
-        <div id={`${idPrefix}-harness-overrides`} className="space-y-3 border-t border-border px-3 py-3">
-          <p className="text-xs text-muted-foreground">
-            The harness is an agent&apos;s working principles, boundaries and tone. Empty fields use the default
-            harness from Settings.
-          </p>
-          <HarnessField
-            id={`${idPrefix}-planner-harness`}
-            label="Planner harness"
-            value={planner}
-            onChange={onPlannerChange}
-            inherits="the default"
-            rows={4}
-            labelClassName={labelClassName}
-          />
-          <HarnessField
-            id={`${idPrefix}-worker-harness`}
-            label="Worker harness"
-            value={worker}
-            onChange={onWorkerChange}
-            inherits="the default"
-            hint="Reviewers of this project use it too."
-            rows={4}
-            labelClassName={labelClassName}
-          />
-        </div>
       )}
     </div>
   );

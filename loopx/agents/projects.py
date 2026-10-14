@@ -5,11 +5,11 @@ time. A task is created in an existing project (``project_id``) or in a new
 one made by the same request (``project``). Its work directory is the one
 given, else its project's default; there is no global default. A project's
 ``background`` goes into the system prompt of its task agents (Planner,
-Workers, Reviewers), read afresh when each prompt is built, and so do its
-harness overrides: ``planner_harness_prompt`` for its Planner and
-``worker_harness_prompt`` for its Workers and Reviewers (``agent_settings``).
-Its execution settings (``project_execution``) are top-level fields of the
-project too, ``null`` to inherit.
+Workers, Reviewers), read afresh when each prompt is built. Its execution
+settings (``project_execution``) are top-level fields of the project too,
+``null`` to inherit. Its agent settings (harness, model, effort, environment,
+per-run cap) are layers of their own (``agent_settings``,
+``/api/projects/<id>/agent-settings``).
 """
 
 from __future__ import annotations
@@ -23,7 +23,6 @@ import asyncpg
 
 from ..db import connection as db_connection, llm_records as db_llm_records, projects as db_projects
 from ..db import tasks as db_tasks
-from . import agent_settings
 from .project_execution import FIELDS as EXECUTION_FIELDS, ProjectExecution, execution_fields, format_usd
 from .tiers.task import TaskRouter, resolve_work_dir
 
@@ -34,8 +33,8 @@ HTTP_409 = "409 Conflict"
 NAME_MAX_CHARS = 80
 BACKGROUND_MAX_CHARS = 10000
 NO_WORK_DIR = "a work directory is required: set one on the task or on its project"
-# The project's harness overrides: its Planner's, and its Workers' and Reviewers'.
-HARNESS_FIELDS = ("planner_harness_prompt", "worker_harness_prompt")
+# Fields a project used to hold that are agent settings now (its layer and its roles' layers).
+MOVED_FIELDS = ("planner_harness_prompt", "worker_harness_prompt", "model", "run_budget_usd")
 
 _LEADING_BLANK_LINES = re.compile(r"\A(?:[ \t\r\f\v]*\n)+")
 
@@ -96,8 +95,6 @@ def project_view(row: dict[str, Any]) -> dict[str, Any]:
         "description": row["description"],
         "work_dir": row["work_dir"],
         "background": row["background"],
-        "planner_harness_prompt": row.get("planner_harness_prompt", ""),
-        "worker_harness_prompt": row.get("worker_harness_prompt", ""),
         **ProjectExecution.from_row(row).view(),
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
@@ -108,6 +105,10 @@ def project_view(row: dict[str, Any]) -> dict[str, Any]:
 
 def _project_fields(data: dict[str, Any], *, update: bool) -> dict[str, Any]:
     """The project fields in ``data``, validated; a new project needs a name."""
+    if moved := [name for name in MOVED_FIELDS if name in data]:
+        raise RequestError(HTTP_400, f"{moved[0]} is an agent setting now: set it with PUT "
+                                     "/api/projects/<id>/agent-settings (the project) or "
+                                     ".../agent-settings/roles/<role> (one role in the project)")
     fields: dict[str, Any] = {}
     try:
         if not update or "name" in data:
@@ -120,9 +121,6 @@ def _project_fields(data: dict[str, Any], *, update: bool) -> dict[str, Any]:
             fields["work_dir"] = project_work_dir(data["work_dir"])
         if "background" in data:
             fields["background"] = project_background(data["background"])
-        for field in HARNESS_FIELDS:
-            if field in data:
-                fields[field] = agent_settings.harness_prompt(data[field], field=field)
         if execution := execution_fields(data):
             fields["execution"] = execution
     except ValueError as exc:
@@ -159,7 +157,7 @@ async def update_project(project_id: str, data: dict[str, Any]) -> dict[str, Any
     if not fields:
         raise RequestError(
             HTTP_400, "give at least one of " + ", ".join(("name", "description", "work_dir", "background",
-                                                          *HARNESS_FIELDS, *EXECUTION_FIELDS)),
+                                                          *EXECUTION_FIELDS)),
         )
     try:
         updated = await db_projects.update_project(project_id, **fields)

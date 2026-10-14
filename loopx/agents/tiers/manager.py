@@ -26,8 +26,7 @@ from typing import Any
 
 from ..broadcast import Broadcaster
 from ..bus import MessageBus
-from .. import agent_settings
-from ..agent_settings import AgentDefaults, AgentType, Launch, resolve_harness, resolve_launch
+from ..agent_settings import AgentSettings, AgentType, Launch, load_agent_settings
 from ..claude_cli import (
     AUTONOMOUS_INPUT,
     AutonomousHandler,
@@ -164,9 +163,8 @@ class ManagerAgent:
         self._running = False
         self._system_prompt: str = DEFAULT_SYSTEM_PROMPT
         self._prompt_recommended = True  # whether _system_prompt is the recommended one (default_prompt)
-        # The Manager's own harness ('' = the default in Settings) and model ('' = the default).
-        self._harness_override = ""
-        self._model_override = ""
+        # The agent settings the last turn ran with, kept when a turn cannot read them (None before any).
+        self._agent_settings: AgentSettings | None = None
         self._goal_snapshots: dict[str, GoalSnapshot] = {}
         # The resident Claude: started on the first chat message, then fed one
         # user turn per message; restarted when its system prompt changes.
@@ -215,7 +213,7 @@ class ManagerAgent:
         )
 
     async def _load_db_config(self) -> None:
-        """Load the role prompt, the harness override and the model from DB; keep the last ones read on failure."""
+        """Load the role prompt from DB; keep the last one read on failure."""
         try:
             config = await db_agent_configs.get_config("manager")
             if config and config.get("system_prompt"):
@@ -224,9 +222,6 @@ class ManagerAgent:
                     self._system_prompt, str(config.get("default_prompt") or "") or DEFAULT_SYSTEM_PROMPT,
                 )
                 logger.debug("loaded manager system prompt from database")
-            if config is not None:
-                self._harness_override = str(config.get("harness_prompt") or "")
-                self._model_override = str(config.get("model") or "")
         except Exception:
             logger.debug("could not load manager config from database", exc_info=True)
 
@@ -415,10 +410,19 @@ class ManagerAgent:
         async with self._turn_lock:
             return await self._run_turn(message, context_envelope)
 
-    def _composed_prompt(self, defaults: AgentDefaults) -> SystemPrompt:
+    async def _load_agent_settings(self) -> AgentSettings:
+        """The Manager's agent settings (system and role layers), read now; the last ones read when they
+        cannot be read (the built-in defaults before any)."""
+        agent_settings = await load_agent_settings(AgentType.MANAGER)
+        if agent_settings.error is not None:
+            return self._agent_settings or agent_settings
+        self._agent_settings = agent_settings
+        return agent_settings
+
+    def _composed_prompt(self, agent_settings: AgentSettings) -> SystemPrompt:
         """The Manager's harness, its role prompt, then the task placement rule (no project, no task)."""
         return build_system_prompt(
-            harness=resolve_harness(AgentType.MANAGER, defaults, manager_override=self._harness_override),
+            harness=agent_settings.harness,
             role_id="manager", role=self._system_prompt, recommended=self._prompt_recommended,
             contract_name="TASK_PLACEMENT_RULE", contract=TASK_PLACEMENT_RULE,
         )
@@ -427,10 +431,9 @@ class ManagerAgent:
         await self._load_db_config()
         if not self._session_loaded:
             await self._load_session_state()
-        defaults = await agent_settings.load_defaults()
-        system_prompt = self._composed_prompt(defaults)
-        launch = resolve_launch(defaults, self._model_override,
-                                await load_installed(self._runtime_root, AgentType.MANAGER.value))
+        agent_settings = await self._load_agent_settings()
+        system_prompt = self._composed_prompt(agent_settings)
+        launch = Launch(agent_settings, await load_installed(self._runtime_root, AgentType.MANAGER.value))
         try:
             prompt_file = system_prompt.write_file(self._runtime_root)
         except OSError as exc:

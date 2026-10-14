@@ -15,6 +15,7 @@ import tempfile
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 from library_fixtures import ALPHA_SKILL, DEMO_PLUGIN, plugin_dirs
@@ -368,7 +369,7 @@ class TestPlanning:
 
         async def _config(agent_id: str) -> dict[str, Any]:
             assert agent_id == "planner"
-            return {"system_prompt": "You plan.", "timeout_seconds": 1, "model": None, "max_turns": 0}
+            return {"system_prompt": "You plan.", "timeout_seconds": 1, "max_turns": 0}
 
         monkeypatch.setattr(agent_configs, "get_config", _config)
         claude = planner_claude("<hang>")
@@ -610,10 +611,13 @@ class TestResidentClaude:
         from loopx.db import agent_configs
 
         async def _config(agent_id: str) -> dict[str, Any]:
-            return {"system_prompt": "You plan carefully.", "timeout_seconds": 60, "model": "claude-test",
-                    "max_turns": 9}
+            return {"system_prompt": "You plan carefully.", "timeout_seconds": 60, "max_turns": 9}
 
         monkeypatch.setattr(agent_configs, "get_config", _config)
+        from loopx.db import agent_setting_layers
+
+        monkeypatch.setattr(agent_setting_layers, "list_layers", AsyncMock(
+            return_value=[{"scope": "role", "role": "planner", "model": "claude-test"}]))
         claude = planner_claude(plan(step("s1")), decide("accept"))
         h = drive(claude, always(WORK_OK))
 
@@ -751,13 +755,9 @@ class TestResume:
 # --- The system prompt: harness, role, project background, task, reply contract ---
 
 
-def _project(
-    name: str = "calc", *, background: str = "", description: str = "", planner_harness: str = "",
-    worker_harness: str = "",
-) -> dict[str, Any]:
+def _project(name: str = "calc", *, background: str = "", description: str = "") -> dict[str, Any]:
     return {"id": "proj-1", "name": name, "description": description, "work_dir": "/srv/calc",
-            "background": background, "planner_harness_prompt": planner_harness,
-            "worker_harness_prompt": worker_harness, "updated_at": "2026-10-13T12:00:00+00:00"}
+            "background": background, "updated_at": "2026-10-13T12:00:00+00:00"}
 
 
 @pytest.fixture
@@ -766,7 +766,7 @@ def planner_row(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     from loopx.db import agent_configs
 
     row: dict[str, Any] = {"system_prompt": "You plan carefully.", "default_prompt": "You plan.", "timeout_seconds": 60,
-                           "model": None, "max_turns": 0}
+                           "max_turns": 0}
 
     async def _config(agent_id: str) -> dict[str, Any]:
         assert agent_id == "planner"
@@ -815,7 +815,7 @@ class TestSystemPrompt:
         assert [s["metadata"]["system_prompt"] for s in starts] == [prompt, prompt]
         assert {s["metadata"]["system_prompt_sha256"] for s in starts} == {_sha(prompt)}
         layers = starts[0]["metadata"]["prompt_layers"]
-        assert layers["harness"] == {"source": "builtin_default", "sha256": _sha(DEFAULT_HARNESS_PROMPT)}
+        assert layers["harness"] == {"source": "builtin", "sha256": _sha(DEFAULT_HARNESS_PROMPT)}
         assert layers["role"] == {"config_id": "planner", "sha256": _sha("You plan carefully."), "recommended": False}
         assert layers["project"] == {"id": "proj-1", "background_sha256": _sha("Use uv.\nPython 3.12."),
                                      "updated_at": "2026-10-13T12:00:00+00:00", "knowledge_sha256": None,
@@ -887,9 +887,10 @@ class TestSystemPrompt:
 
 
 def _settings(agent_db: Any, **stored: str) -> None:
-    """What the Settings table holds: harness, model, effort and env (a JSON list)."""
-    keys = {"harness": "agent.harness_prompt", "model": "agent.model", "effort": "agent.effort", "env": "agent.env"}
-    agent_db.get_settings.return_value = {keys[name]: value for name, value in stored.items()}
+    """What the system layer holds: harness, model, effort and env (a JSON list)."""
+    names = {"harness": "harness_prompt", "model": "model", "effort": "effort", "env": "env"}
+    agent_db.list_layers.return_value = [
+        {"scope": "system", **{names[k]: json.loads(v) if k == "env" else v for k, v in stored.items()}}]
 
 
 def _between_turns(agent_db: Any, change: Callable[[], None]) -> Callable[[Harness], Awaitable[None]]:
@@ -907,15 +908,19 @@ def _between_turns(agent_db: Any, change: Callable[[], None]) -> Callable[[Harne
 
 @pytest.mark.usefixtures("agent_db", "planner_row")
 class TestHarnessAndLaunch:
-    """The Planner's harness is its project's Planner override, else the Settings
-    default; its model is its own row's, else the Settings default (opus). A
-    change to either, or to the Settings environment, restarts its Claude,
-    which resumes the session."""
+    """The Planner's agent settings are resolved in its task's project every
+    turn; a changed harness, model or environment restarts its Claude, which
+    resumes the session."""
 
     def test_the_projects_planner_harness_comes_first(self, planner_claude: Any, agent_db: Any) -> None:
-        _settings(agent_db, harness="DEFAULT HARNESS")
-        agent_db.get_task_project.return_value = _project(planner_harness="PLAN LIKE AN ARCHITECT",
-                                                          worker_harness="WORK LIKE A CRAFTSMAN")
+        agent_db.list_layers.return_value = [
+            {"scope": "system", "harness_prompt": "DEFAULT HARNESS"},
+            {"scope": "role_project", "role": "planner", "project_id": "proj-1",
+             "harness_prompt": "PLAN LIKE AN ARCHITECT"},
+            {"scope": "role_project", "role": "worker", "project_id": "proj-1",
+             "harness_prompt": "WORK LIKE A CRAFTSMAN"},
+        ]
+        agent_db.get_task_project.return_value = _project()
         claude = planner_claude(plan(step("s1")), decide("accept"))
         drive(claude, always(WORK_OK))
 
@@ -923,7 +928,7 @@ class TestHarnessAndLaunch:
         assert prompt.startswith("PLAN LIKE AN ARCHITECT\n\nYou plan carefully.\n\n")
         assert "DEFAULT HARNESS" not in prompt and "WORK LIKE A CRAFTSMAN" not in prompt
         assert _starts(agent_db)[0]["metadata"]["prompt_layers"]["harness"] == {
-            "source": "project_override", "sha256": _sha("PLAN LIKE AN ARCHITECT"), "project_id": "proj-1"}
+            "source": "role_project", "sha256": _sha("PLAN LIKE AN ARCHITECT"), "project_id": "proj-1"}
 
     @pytest.mark.parametrize(("harness", "role"), [
         ("HARNESS V2", "You plan carefully."),  # the Settings harness changed
