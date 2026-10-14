@@ -8,11 +8,11 @@ import { ProjectSkillsSection } from "@/components/project-skills";
 import { ProjectSettingsForm } from "@/components/project-settings";
 import {
   fetchKnowledge,
-  fetchProjectSkills,
+  fetchProjectInstalls,
   fetchTasks,
   type Project,
+  type ProjectInstalls,
   type ProjectKnowledge,
-  type ProjectSkills,
   type TaskInfo,
 } from "@/lib/api";
 import { useProjects } from "@/lib/use-projects";
@@ -190,30 +190,39 @@ function KnowledgeCard({ project, onOpen }: { project: Project; onOpen: () => vo
 }
 
 function SkillsCard({ project, onOpen }: { project: Project; onOpen: () => void }) {
-  const loaded = useLoad<ProjectSkills>(() => fetchProjectSkills(project.project_id), project.project_id);
-  const data = loaded?.data;
+  const loaded = useLoad<ProjectInstalls>(() => fetchProjectInstalls(project.project_id), project.project_id);
+  const installs = loaded?.data?.installs;
   return (
     <OverviewCard
       title="Skills"
-      meta={data && `${data.count} ${data.count === 1 ? "skill" : "skills"} · ${data.enabled_count} on`}
+      meta={installs && `${installs.length} installed`}
       action={<CardLink onClick={onOpen}>Manage skills</CardLink>}
     >
-      {!data ? (
+      {!installs ? (
         <Loading error={loaded?.error} />
-      ) : data.count === 0 ? (
-        <p className="text-xs text-muted-foreground">No skills. Agents load only the plugin library.</p>
+      ) : installs.length === 0 ? (
+        <p className="text-xs text-muted-foreground">Nothing installed. Install plugins and skills from the Skills tab.</p>
       ) : (
         <>
           <ul className="space-y-1.5">
-            {data.skills.slice(0, PREVIEW).map((skill) => (
-              <li key={skill.skill_id} className={cn("text-xs", !skill.enabled && "opacity-60")}>
-                <span className="font-mono font-medium text-foreground">{skill.qualified_name}</span>
-                {!skill.enabled && <span className="text-muted-foreground"> (off)</span>}
-                <span className="text-muted-foreground"> — {skill.description}</span>
+            {installs.slice(0, PREVIEW).map((entry) => (
+              <li
+                key={entry.install_id}
+                className={cn("flex flex-wrap items-center gap-x-2 text-xs", !entry.enabled && "opacity-60")}
+              >
+                <span className="break-all font-mono font-medium text-foreground">{entry.item.qualified_name}</span>
+                {!entry.enabled && <span className="text-muted-foreground">(off)</span>}
+                {entry.inherited && (
+                  <Badge variant="outline" className="py-0 text-[10px]">
+                    global
+                  </Badge>
+                )}
               </li>
             ))}
           </ul>
-          {data.count > PREVIEW && <p className="text-xs text-muted-foreground">and {data.count - PREVIEW} more</p>}
+          {installs.length > PREVIEW && (
+            <p className="text-xs text-muted-foreground">and {installs.length - PREVIEW} more</p>
+          )}
         </>
       )}
     </OverviewCard>
