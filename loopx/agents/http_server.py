@@ -379,6 +379,8 @@ class AgentHTTPServer:
         elif (m := self._RE_PROJECT_ROLE_SETTINGS.match(path)) and method == "PUT":
             await self._handle_agent_settings(writer, lambda: agent_settings.update_project(
                 m.group(1), projects.json_object(body), role=m.group(2)))
+        elif path == "/api/config/export" and method == "GET":
+            await self._handle_config_export(query, writer)
         elif path == "/api/catalog" and method == "GET":
             await self._handle_catalog(writer, HTTP_200, catalog.catalog_view)
         elif path == "/api/catalog/import" and method == "POST":
@@ -1336,6 +1338,39 @@ class AgentHTTPServer:
             writer.write(_json_response(HTTP_404, {"error": "profile not found"}))
         else:
             writer.write(_json_response(HTTP_200, {"deleted": True}))
+        await writer.drain()
+
+    # --- Configuration export (loopx/agents/config_transfer.py; importing is the CLI's) ---
+
+    async def _handle_config_export(self, query: dict[str, str], writer: asyncio.StreamWriter) -> None:
+        """Stream the configuration file as a download, piece by piece from one read-only snapshot.
+
+        ``projects=1`` and ``secrets=1`` are ``loopx config export``'s
+        ``--include-projects`` and ``--include-secrets``. The status line is
+        sent before the first piece, so a failure after it ends the download
+        early, which leaves a file that is not valid JSON.
+        """
+        import datetime
+
+        from ..db.connection import get_pool
+        from .config_transfer import export_chunks
+
+        include_projects, include_secrets = query.get("projects") == "1", query.get("secrets") == "1"
+        name = f"loopx-config-{datetime.date.today().isoformat()}.json"
+        async with get_pool().acquire() as conn, conn.transaction(isolation="repeatable_read", readonly=True):
+            chunks = export_chunks(conn, include_projects=include_projects, include_secrets=include_secrets)
+            first = await anext(chunks)
+            writer.write(
+                f"HTTP/1.1 {HTTP_200}\r\n"
+                "Content-Type: application/json; charset=utf-8\r\n"
+                f'Content-Disposition: attachment; filename="{name}"\r\n'
+                "Cache-Control: no-store\r\n"
+                "Connection: close\r\n"
+                "\r\n".encode() + first.encode("utf-8")
+            )
+            async for chunk in chunks:
+                writer.write(chunk.encode("utf-8"))
+                await writer.drain()
         await writer.drain()
 
     # --- Channel config handlers ---
