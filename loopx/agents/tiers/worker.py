@@ -12,8 +12,9 @@ report contract, last (``system_prompt``). The first user turn on stdin
 carries only what other agents produced: the reports of the steps this one
 depends on, or the Worker's report under review. Each run reads its row, the
 Settings defaults (model, effort, environment), its project's knowledge (the
-documents' directories are mounted with ``--add-dir``) and its project's
-enabled skills (one more ``--plugin-dir``) as it starts.
+documents' directories are mounted with ``--add-dir``), its project's
+enabled skills (one more ``--plugin-dir``) and its project's execution settings
+(``project_execution``: the model and ``--max-budget-usd``) as it starts.
 """
 
 from __future__ import annotations
@@ -30,9 +31,17 @@ from typing import Any
 from .. import agent_settings
 from ..agent_settings import BUILTIN_DEFAULTS, AgentDefaults, AgentType, resolve_harness, resolve_launch
 from ..bus import MessageBus
-from ..claude_cli import ClaudeRunRecorder, isolation_args, iter_lines, system_prompt_args, write_user_turn
+from ..claude_cli import (
+    ClaudeRunRecorder,
+    budget_error,
+    isolation_args,
+    iter_lines,
+    system_prompt_args,
+    write_user_turn,
+)
 from ..knowledge import documents_label, load_knowledge
 from ..library import load_library
+from ..project_execution import ProjectExecution
 from ..project_skills import load_project_skills, skills_label
 from ..message import (
     AgentAddress,
@@ -188,7 +197,7 @@ def judge_result(
         return failed("Claude Code ended without a result event")
     if result_event.get("is_error") or result_event.get("subtype") != "success":
         subtype = result_event.get("subtype") or "error"
-        return failed(f"Claude Code run did not succeed ({subtype})")
+        return failed(budget_error(result_event) or f"Claude Code run did not succeed ({subtype})")
     text = str(result_event.get("result") or "")
     if is_verify:
         verdict = extract_report(text, "passed")
@@ -535,8 +544,9 @@ class WorkerPool:
         project = await self._task_project(parent_task_id, worker_id)
         knowledge = await load_knowledge(self._runtime_root, project, work_dir)
         skills = await load_project_skills(self._runtime_root, project)
+        execution = ProjectExecution.from_row(project)
         launch = resolve_launch(settings.defaults, settings.model, await load_library(self._runtime_root), knowledge,
-                                skills)
+                                skills, project_model=execution.model, max_budget_usd=execution.run_budget_usd)
         background = str((project or {}).get("background") or "")
         system_prompt = build_system_prompt(
             harness=resolve_harness(agent, settings.defaults, project=project),
@@ -765,7 +775,8 @@ class WorkerPool:
             and not result_event.get("is_error")
             and result_event.get("subtype") == "success"
         )
-        if return_code != 0 and not result_ok:
+        # A run stopped at its spend cap exits non-zero too; its result says why.
+        if return_code != 0 and not result_ok and budget_error(result_event) is None:
             stderr = ""
             if process.stderr:
                 stderr_bytes = await process.stderr.read()

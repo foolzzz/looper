@@ -1,6 +1,0 @@
-import retry
-
-
-def test_constants_exist():
-    assert retry.DEFAULT_DELAY == 1
-    assert retry.MAX_ATTEMPTS == 1

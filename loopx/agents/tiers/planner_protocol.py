@@ -235,6 +235,15 @@ def parse_decision(text: str, context: DecisionContext, plan: PlanView) -> Decis
     return DecisionReply(decision, reason, feedback, steps, summary)
 
 
+def parse_wrap_up(text: str) -> str:
+    """The reason of a DECISION reply that may only fail the task (it reached its spend cap)."""
+    data = extract_reply(text)
+    _only_keys(data, {"decision", "reason"}, "the DECISION reply")
+    if data.get("decision") != Decision.FAIL.value:
+        raise ProtocolError(f"the only decision allowed now is fail; got {data.get('decision')!r}")
+    return _required_text(data, "reason")
+
+
 def parse_chat(text: str, plan: PlanView) -> ChatReply:
     data = extract_reply(text)
     _only_keys(data, {"reply", "action", "step", "text", "steps"}, "the CHAT reply")

@@ -18,6 +18,20 @@ To learn how to use these features, read the [usage guide](docs/fork/usage.md).
 
 ### Added
 
+- **Project execution settings (M5).** A project can set how its Planner,
+  Workers and Reviewers run; every field is optional and `null` inherits, so
+  a project with none set runs as before (`loopx/agents/project_execution.py`).
+  The fields are typed columns on `projects`, read and written through the
+  project `GET`/`PUT` (a 400 names a bad value) and the project editor:
+  - `model`, over the agent's own model and the default (not the Manager's);
+  - `run_budget_usd`, passed as `--max-budget-usd` to every task agent process;
+  - `task_budget_usd`, a cap on the task's cost (M2 accounting), and
+    `task_budget_action`: `fail` at once (the default) or `wrap_up` after one
+    more Planner turn; the task's error states the cap and the amount spent;
+  - `supervise_interval_seconds`, over the `planner` config (0 = off);
+  - `review_policy`: `planner` (as before) or `all` (every step needs a
+    passing review before it is accepted).
+
 - **Project skills (M4).** A project can carry its own Claude Code skills.
   Only its Planner, Workers and Reviewers load them, and nothing is written
   into the project's directory (`loopx/agents/project_skills.py`).
@@ -102,6 +116,15 @@ To learn how to use these features, read the [usage guide](docs/fork/usage.md).
     compaction markers, the latest context size and the compaction count.
     Every run card shows its own tokens (cache included), its final context,
     whether it compacted, and its own cost.
+- **Prompt regression eval (M6).** `python -m evals.prompt_regression run`
+  drives five small tasks (one step, dependent steps, a reviewed step, a
+  retry, a mid-task chat correction) through a disposable `loopx serve` and
+  reports success, steps, retries, reviews, cost, contract violations and
+  whether the Planner modified files, compared with the previous run or the
+  committed baseline as a Markdown table. Fake mode (a scripted stand-in
+  Claude) runs in the test suite; real mode (haiku by default) runs on demand
+  under a per-run `--max-budget-usd` and a total spending cap
+  ([`evals/README.md`](evals/README.md)).
 
 ### Changed
 
@@ -376,6 +399,16 @@ To learn how to use these features, read the [usage guide](docs/fork/usage.md).
   now an error.
 - The release wheel no longer requires or builds the upstream Chat bundle
   (`loopx/web/chat`). It still carries the dashboard built from `web/`.
+- **The upstream LoopX code.** The package is now the agent system alone
+  (`loopx.agents`, `loopx.db`, `loopx.cli`, `loopx.paths`): the upstream
+  control plane, capabilities, extensions, Chat server and the other upstream
+  modules are gone, and with them the `loopx-lark-provider`,
+  `loopx-openviking-history-export` and `loopx-openviking-semantic-preference`
+  commands, the `deepseek-harness` extra and the workflow skills the wheel
+  installed under `share/loopx/skills`. The repository no longer has the
+  upstream `apps/` frontends, `packages/` plugins, `skills/`, the man page,
+  or the source-snapshot installers `scripts/install-from-github.sh` and
+  `scripts/install-local.sh`; `install.sh` is the way to install and upgrade.
 
 ## [2.5.0] - 2026-10-13
 

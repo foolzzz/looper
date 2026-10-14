@@ -1,0 +1,83 @@
+"""``python -m evals.prompt_regression run|compare`` (see ``evals/README.md``)."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+from pathlib import Path
+
+from . import compare, runner, tasks
+
+
+def _parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="python -m evals.prompt_regression", description=__doc__)
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    run = sub.add_parser("run", help="Run the task set and compare it with the previous run or the baseline.")
+    run.add_argument("--mode", choices=("fake", "real"), default="fake",
+                     help="fake: the scripted stand-in Claude (free); real: Claude Code (costs money)")
+    run.add_argument("--model", default="haiku", help="real mode: the model every agent runs (default haiku)")
+    run.add_argument("--tasks", help="comma-separated task ids (default: all)")
+    run.add_argument("--max-budget-usd", type=float, default=0.25,
+                     help="real mode: --max-budget-usd for every Claude Code run (default 0.25)")
+    run.add_argument("--total-cap-usd", type=float, default=0.80,
+                     help="real mode: stop the run once its tasks have spent this much (default 0.80)")
+    run.add_argument("--pg-url", default=os.environ.get("LOOPX_EVAL_DATABASE_URL")
+                     or os.environ.get("LOOPX_TEST_DATABASE_URL"),
+                     help="a PostgreSQL server to create the run's database on "
+                          "(default $LOOPX_EVAL_DATABASE_URL, else $LOOPX_TEST_DATABASE_URL)")
+    run.add_argument("--out-dir", type=Path, default=runner.DEFAULT_OUT_DIR,
+                     help="where the run's JSON and server log go (default evals/runs, ignored by git)")
+    run.add_argument("--baseline", type=Path,
+                     help="compare with this run instead of the previous one (or the committed baseline)")
+    run.add_argument("--task-timeout", type=float, help="seconds before a task is cancelled")
+    run.add_argument("--keep-work-dirs", action="store_true", help="keep the temporary root for inspection")
+
+    cmp = sub.add_parser("compare", help="Print the comparison table of two run files.")
+    cmp.add_argument("new", type=Path)
+    cmp.add_argument("base", type=Path, nargs="?")
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = _parser().parse_args(argv)
+    if args.command == "compare":
+        new = json.loads(args.new.read_text(encoding="utf-8"))
+        base = json.loads(args.base.read_text(encoding="utf-8")) if args.base else None
+        print(compare.markdown(new, base))
+        return 0
+
+    if not args.pg_url:
+        print("error: give --pg-url (or set LOOPX_EVAL_DATABASE_URL)", file=sys.stderr)
+        return 2
+    try:
+        selected = tasks.select(args.tasks.split(",") if args.tasks else None)
+        real = args.mode == "real"
+        result, path = runner.run(
+            mode=args.mode,
+            tasks=selected,
+            admin_url=args.pg_url,
+            out_dir=args.out_dir,
+            model=args.model if real else None,
+            max_budget_usd=args.max_budget_usd if real else None,
+            total_cap_usd=args.total_cap_usd if real else None,
+            task_timeout=args.task_timeout,
+            keep_work_dirs=args.keep_work_dirs,
+        )
+    except (ValueError, runner.EvalError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    if args.baseline:
+        base = json.loads(args.baseline.read_text(encoding="utf-8"))
+    else:
+        base = runner.previous_run(args.out_dir, path, mode=args.mode, model=result.get("model"))
+    print(f"Run written to {path}")
+    print(f"Total cost: {result['total_cost_usd']:.4f} USD\n")
+    print(compare.markdown(result, base))
+    return 0 if all(t.get("success") for t in result["tasks"]) else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -2,8 +2,6 @@
 .venv/
 .idea
 node_modules/
-apps/dashboard/public/*.local.json
-apps/presentation/dashboard/public/*.local.json
 __pycache__/
 *.pyc
 *.tsbuildinfo
@@ -20,10 +18,6 @@ htmlcov/
 .playwright-cli/
 output/playwright/
 
-# Local/private operator skills. Generic, reusable contracts belong in docs or
-# product code; account-specific creator/operator skills stay outside git.
-skills/loopx-social-media/
-
 # Project-local private state. Keep real project paths, task ids, tokens,
 # internal logs, and active goal state outside the public repository.
 .local/
@@ -36,15 +30,12 @@ goals/**/ACTIVE_GOAL_STATE.md
 goals/**/ACTIVE_GOAL_STATE.md.lock
 /runtime/
 logs/
-
-# Legacy semantic census reports are derived locally, never repository authority.
-/loopx/semantics/inventory_v0.json
+# Prompt eval runs (JSON and server logs); only evals/prompt_regression/baselines/ is committed.
+/evals/runs/
 
 # Environment files with secrets
 .env
 .env.local
 
 # Frontend delivery artifacts are built and qualified from source.
-/loopx/web/chat/
 /loopx/web/dashboard/
-/loopx/web/.chat-build-*/

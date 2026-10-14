@@ -66,22 +66,23 @@ class _Store:
 
     async def create_project(self, *, name: str, description: str = "", work_dir: str = "", background: str = "",
                              planner_harness_prompt: str = "", worker_harness_prompt: str = "",
-                             pool: Any = None) -> dict[str, Any]:
+                             execution: dict[str, Any] | None = None, pool: Any = None) -> dict[str, Any]:
         if self._name_taken(name):
             raise asyncpg.UniqueViolationError("duplicate key value violates unique constraint")
         project_id = f"proj-{len(self.projects):012d}"
         self.add_project(project_id, name, work_dir, background)
         self.projects[project_id].update(description=description, planner_harness_prompt=planner_harness_prompt,
-                                         worker_harness_prompt=worker_harness_prompt)
+                                         worker_harness_prompt=worker_harness_prompt, **(execution or {}))
         return dict(self.projects[project_id])
 
     async def update_project(self, project_id: str, *, name: str | None = None, description: str | None = None,
                              work_dir: str | None = None, background: str | None = None,
                              planner_harness_prompt: str | None = None, worker_harness_prompt: str | None = None,
-                             pool: Any = None) -> bool:
+                             execution: dict[str, Any] | None = None, pool: Any = None) -> bool:
         row = self.projects.get(project_id)
         if row is None:
             return False
+        row.update(execution or {})
         if name is not None and self._name_taken(name, other_than=project_id):
             raise asyncpg.UniqueViolationError("duplicate key value violates unique constraint")
         for key, value in (("name", name), ("description", description), ("work_dir", work_dir),
@@ -177,7 +178,9 @@ class TestProjectEndpoints:
         assert body["work_dir"] == os.path.join(os.path.expanduser("~"), "tetris")
         assert (body["task_count"], body["active_count"]) == (0, 0)
         assert set(body) == {"project_id", "name", "description", "work_dir", "background", "planner_harness_prompt",
-                             "worker_harness_prompt", "created_at", "updated_at", "task_count", "active_count"}
+                             "worker_harness_prompt", "created_at", "updated_at", "task_count", "active_count",
+                             "model", "run_budget_usd", "task_budget_usd", "task_budget_action",
+                             "supervise_interval_seconds", "review_policy"}
         assert (body["planner_harness_prompt"], body["worker_harness_prompt"]) == ("", "")
 
     def test_work_dir_is_optional(self, store: _Store) -> None:

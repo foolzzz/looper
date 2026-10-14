@@ -1,8 +1,0 @@
-"""Run the DeepSeek Harness host adapter with ``python -m loopx.dsh_goal_mode``."""
-
-from __future__ import annotations
-
-from .turn_host_adapter import main
-
-if __name__ == "__main__":
-    raise SystemExit(main())

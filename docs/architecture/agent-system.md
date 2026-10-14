@@ -210,6 +210,8 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
 - The TaskRouter calls `PlannerAgent.stop()`, which ends its Claude, when the
   task ends (completed, failed, stopped or cancelled) and when the server
   stops.
+- Before changing a recommended prompt, a contract or the prompt's layers, run
+  the prompt regression eval ([`evals/README.md`](../../evals/README.md)).
 
 ### WorkerPool (`loopx/agents/tiers/worker.py`)
 
@@ -563,6 +565,20 @@ Verified with Claude Code 2.1.285 under the isolation flags and
   under one prefix, so a library plugin named `project` would share it;
 - no `~/.claude/plugins/data/project-inline/` directory was created for a
   plugin with only skills.
+
+### Project execution settings
+
+A project can set how its task agents run (`loopx/agents/project_execution.py`,
+typed nullable columns on `projects`, `null` = as before): a `model` for its
+Planner, Workers and Reviewers (`model_choice.source` `project_override`);
+`run_budget_usd`, passed as `--max-budget-usd` to each of their processes (a
+Planner turn that hits it fails, and the next turn starts a new process);
+`task_budget_usd`, checked against the task's cost before every Planner turn
+and every new Worker or Reviewer: at the cap the running ones are stopped and
+the task fails, at once (`task_budget_action` `fail`, the default) or after one
+more Planner turn that sums up (`wrap_up`), with the cap and the amount in its
+error; `supervise_interval_seconds` over the `planner` config; and
+`review_policy` `all`, under which no step is accepted without a passing review.
 
 ### The library: imported plugins and skills
 

@@ -267,3 +267,31 @@ def test_background_round_trips_and_is_read_through_the_task() -> None:
         assert await projects.get_task_project("task-nope", pool=pool) is None
 
     _run(_test)
+
+
+def test_execution_settings_are_stored_through_the_task_and_cleared() -> None:
+    """The execution columns as the API stores them: given ones set, None back to NULL, the rest kept."""
+    import asyncpg
+
+    from loopx.agents.project_execution import ProjectExecution, execution_fields
+    from loopx.db import projects, tasks
+
+    async def _test(pool: Any) -> None:
+        settings = execution_fields({"model": "sonnet", "run_budget_usd": 0.5, "task_budget_usd": 2,
+                                     "task_budget_action": "wrap_up", "supervise_interval_seconds": 0,
+                                     "review_policy": "all"})
+        calc = await projects.create_project(name="calc", execution=settings, pool=pool)
+        await tasks.create_task(task_id="task-1", requirement="r", work_dir="/w", project_id=calc["id"], pool=pool)
+        assert ProjectExecution.from_row(await projects.get_task_project("task-1", pool=pool)).view() == {
+            **settings, "task_budget_usd": 2.0}
+
+        assert await projects.update_project(calc["id"], execution={"run_budget_usd": None, "model": "opus"},
+                                             pool=pool)
+        row = await projects.get_project(calc["id"], pool=pool)
+        assert (row["run_budget_usd"], row["model"], row["review_policy"]) == (None, "opus", "all")
+        plain = await projects.create_project(name="plain", pool=pool)
+        assert all(plain[column] is None for column in projects.EXECUTION_COLUMNS)
+        with pytest.raises(asyncpg.CheckViolationError):  # the table refuses what validation would
+            await projects.update_project(plain["id"], execution={"review_policy": "some"}, pool=pool)
+
+    _run(_test)

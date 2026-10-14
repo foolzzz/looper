@@ -160,6 +160,33 @@ def knowledge_args(knowledge: AgentKnowledge) -> list[str]:
 # (channels/allowlist.py).
 
 
+def budget_args(max_budget_usd: float | None) -> list[str]:
+    """The flag that caps one Claude Code process's spend, for a task agent whose project sets one.
+
+    Verified against Claude Code 2.1.285 in ``--print`` stream-json mode: Claude checks the cap after each
+    API request, so a turn may overrun it by one request, and the turn that crosses it ends with a ``result``
+    of subtype ``error_max_budget_usd`` and no reply text. The cap counts this process's spend only (not
+    what a resumed session spent before), and every later turn of the process ends the same way at once.
+    """
+    if max_budget_usd is None:
+        return []
+    from .project_execution import format_usd
+
+    return ["--max-budget-usd", format_usd(max_budget_usd)]
+
+
+BUDGET_SUBTYPE = "error_max_budget_usd"
+
+
+def budget_error(result_event: dict[str, Any] | None) -> str | None:
+    """Why a run stopped at its spend cap (``--max-budget-usd``); None when it did not."""
+    if not result_event or result_event.get("subtype") != BUDGET_SUBTYPE:
+        return None
+    errors = result_event.get("errors")
+    detail = "; ".join(str(e) for e in errors) if isinstance(errors, list) and errors else "budget reached"
+    return f"Claude Code stopped at the project's per-run spend cap (--max-budget-usd): {detail}"
+
+
 def permission_args() -> list[str]:
     """The flags that let an agent use every tool without asking; every agent's launch carries them."""
     return ["--dangerously-skip-permissions"]
