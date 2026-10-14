@@ -427,7 +427,7 @@ function LoginLine({ provider }: { provider: Provider }) {
       <p className="flex items-start gap-1">
         <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden="true" />
         <span>
-          Login {login.state === "unavailable" ? "unavailable" : "not usable"}: {login.detail}.{" "}
+          {login.state === "unavailable" ? `Login unavailable ${login.detail}` : `Login not usable: ${login.detail}`}.{" "}
           {login.state === "unavailable" ? (
             <>Runs with it do not start. Check <code className="font-mono">codex login status</code> on the server&apos;s
               machine (<code className="font-mono">codex login</code> if it is not logged in), then use it again.</>

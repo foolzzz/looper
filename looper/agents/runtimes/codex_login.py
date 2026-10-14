@@ -168,12 +168,15 @@ def inspect_homes(codex_dir: Path, target: Path) -> list[LinkProblem]:
         for home in sorted(parent.iterdir()) if parent.is_dir() else []:
             if home.name.startswith(".") or home.is_symlink() or not home.is_dir():
                 continue  # a home being built, or not one of Looper's
-            state = link_state(home, target)
-            if state is LinkState.INTACT or (state is LinkState.MISSING and not _is_login_home(home)):
-                continue
-            if state is not LinkState.MISSING:
-                _remove_entry(home / LOGIN_FILE)
-            link_login(home, target)
+            try:
+                state = link_state(home, target)
+                if state is LinkState.INTACT or (state is LinkState.MISSING and not _is_login_home(home)):
+                    continue
+                if state is not LinkState.MISSING:
+                    _remove_entry(home / LOGIN_FILE)
+                link_login(home, target)
+            except FileNotFoundError:
+                continue  # an idle home removed meanwhile (``codex._remove_idle_homes``)
             problems.append(LinkProblem(home, state))
     return problems
 
