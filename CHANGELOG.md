@@ -43,6 +43,18 @@ How the agent system works today is described in
 
 ### Added
 
+- **Task memory.** Code writes a `task_journal` entry when a step is
+  accepted: the Worker's summary and the new optional `learnings` (up to 5
+  short findings or pitfalls) of the step's Worker report and Reviewer
+  verdict. The Planner's DECISION, SUPERVISE and CHAT turns carry a
+  "Progress and findings" section (newest first, at most 4,000 characters)
+  and the summaries of accepted steps; a Worker's first turn carries
+  "Findings so far in this task" (its dependencies first, at most 2,000
+  characters). The task page lists the entries under Findings.
+- **Lessons in project knowledge.** A project's `distill_lessons` switch (off
+  by default; Settings tab, or `PUT /api/projects/<id>`) gives the Planner of
+  a task that completes one more turn, whose Markdown summary of the journal
+  is saved as the knowledge document `Lessons: <requirement>`.
 - **Task spend against its cap, and continuing at a higher cap.** When the
   task's project sets a spend cap per task (`task_budget_usd`), the task page
   shows the task's spend as a share of it and warns from 80% on. A task that

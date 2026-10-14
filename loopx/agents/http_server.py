@@ -867,6 +867,8 @@ class AgentHTTPServer:
             "updated_at": raw.get("updated_at"),
             "completed_at": raw.get("completed_at"),
             "steps": raw.get("steps", []),
+            # The task journal, oldest first: an entry per accepted step with its summary and learnings.
+            "journal": raw.get("journal", []),
             # What the task's Planner, Workers and Reviewers spent: the total, by role, and the run count.
             "cost": cost,
         }

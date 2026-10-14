@@ -22,6 +22,7 @@ from .tasks import ACTIVE_STATUSES
 # How the project's task agents run; NULL inherits (loopx/agents/project_execution.py).
 EXECUTION_COLUMNS = (
     "model", "run_budget_usd", "task_budget_usd", "task_budget_action", "supervise_interval_seconds", "review_policy",
+    "distill_lessons",
 )
 
 

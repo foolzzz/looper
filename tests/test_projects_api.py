@@ -180,7 +180,7 @@ class TestProjectEndpoints:
         assert set(body) == {"project_id", "name", "description", "work_dir", "background", "planner_harness_prompt",
                              "worker_harness_prompt", "created_at", "updated_at", "task_count", "active_count",
                              "model", "run_budget_usd", "task_budget_usd", "task_budget_action",
-                             "supervise_interval_seconds", "review_policy"}
+                             "supervise_interval_seconds", "review_policy", "distill_lessons"}
         assert (body["planner_harness_prompt"], body["worker_harness_prompt"]) == ("", "")
 
     def test_work_dir_is_optional(self, store: _Store) -> None:

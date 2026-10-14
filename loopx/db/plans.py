@@ -2,8 +2,9 @@
 
 The Planner writes each change as it happens, one row per changed step; a
 change to several rows (a new plan, a replan, added steps, a settled step and
-the plan's summary) is one transaction. On a restart the Planner reads the
-plan back with ``load``.
+the plan's summary, with the step's ``task_journal`` entry when it was
+accepted) is one transaction. On a restart the Planner reads the plan and its
+journal back with ``load``.
 """
 
 from __future__ import annotations
@@ -14,6 +15,7 @@ from typing import Any
 
 import asyncpg
 
+from . import journal as db_journal
 from .connection import get_pool
 
 # Every status a plan can have (task_plans.status).
@@ -67,20 +69,22 @@ async def save(
     *,
     plan: Mapping[str, Any] | None = None,
     steps: Sequence[Mapping[str, Any]] = (),
+    journal: Sequence[Mapping[str, Any]] = (),
     pool: asyncpg.Pool | None = None,
 ) -> None:
-    """Write the plan's own row (when given) and ``steps``' rows, in one transaction.
+    """Write the plan's own row (when given), ``steps``' rows and ``journal``'s entries, in one transaction.
 
     ``plan`` has ``plan_id``, ``status``, ``correlation_id``,
     ``origin_channel_id``, ``final_summary`` and ``fail_reason``; each step
     has ``id``, ``index``, ``key``, ``instruction``, ``status`` and the rest of
-    a step's columns, a missing one written as empty.
+    a step's columns, a missing one written as empty; each journal entry has
+    ``step_id``, ``kind``, ``summary`` and ``learnings`` (``journal.insert``).
     """
-    if plan is None and not steps:
+    if plan is None and not steps and not journal:
         return
     pool = pool or get_pool()
     async with pool.acquire() as conn, conn.transaction():
-        await write(conn, task_id, plan=plan, steps=steps)
+        await write(conn, task_id, plan=plan, steps=steps, journal=journal)
 
 
 async def write(
@@ -89,6 +93,7 @@ async def write(
     *,
     plan: Mapping[str, Any] | None = None,
     steps: Sequence[Mapping[str, Any]] = (),
+    journal: Sequence[Mapping[str, Any]] = (),
 ) -> None:
     """``save``'s writes on ``conn``, in the caller's transaction."""
     if plan is not None:
@@ -98,6 +103,8 @@ async def write(
         )
     if steps:
         await conn.executemany(_SAVE_STEP, [_step_args(task_id, step) for step in steps])
+    # After the steps: an entry belongs to a step saved with it.
+    await db_journal.insert(conn, task_id, journal)
 
 
 def _step(row: Mapping[str, Any]) -> dict[str, Any]:
@@ -113,9 +120,10 @@ def _step(row: Mapping[str, Any]) -> dict[str, Any]:
 async def load(task_id: str, *, pool: asyncpg.Pool | None = None) -> dict[str, Any] | None:
     """The task's plan, or None when it has none.
 
-    ``{"plan": ..., "steps": [...]}``: the plan's row with the task's
-    ``requirement``, ``goal_id``, ``work_dir`` and ``project_id``, and its
-    steps in order, each ``result`` decoded.
+    ``{"plan": ..., "steps": [...], "journal": [...]}``: the plan's row with
+    the task's ``requirement``, ``goal_id``, ``work_dir`` and ``project_id``,
+    its steps in order, each ``result`` decoded, and its journal oldest first
+    (``journal.list_entries``).
     """
     pool = pool or get_pool()
     row = await pool.fetchrow(
@@ -128,7 +136,8 @@ async def load(task_id: str, *, pool: asyncpg.Pool | None = None) -> dict[str, A
     if row is None:
         return None
     steps = await pool.fetch("SELECT * FROM task_steps WHERE task_id = $1 ORDER BY step_index, created_at", task_id)
-    return {"plan": dict(row), "steps": [_step(step) for step in steps]}
+    return {"plan": dict(row), "steps": [_step(step) for step in steps],
+            "journal": await db_journal.list_entries(task_id, pool=pool)}
 
 
 async def resumable_task_ids(

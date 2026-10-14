@@ -72,12 +72,15 @@ class _PlanStore:
         self.steps: dict[str, dict[str, dict[str, Any]]] = {}
         self.sessions: dict[str, dict[str, Any]] = {}
         self.tasks: dict[str, dict[str, Any]] = {}
+        self.journal: dict[str, list[dict[str, Any]]] = {}
 
-    async def save(self, task_id: str, *, plan: Any = None, steps: Any = (), **_: object) -> None:
+    async def save(self, task_id: str, *, plan: Any = None, steps: Any = (), journal: Any = (), **_: object) -> None:
         if plan is not None:
             self.plans[task_id] = json.loads(json.dumps(dict(plan)))
         for step in steps:
             self.steps.setdefault(task_id, {})[step["id"]] = json.loads(json.dumps(dict(step)))
+        for entry in journal:
+            self.journal.setdefault(task_id, []).append(json.loads(json.dumps(dict(entry))))
 
     async def load(self, task_id: str, **_: object) -> dict[str, Any] | None:
         if task_id not in self.plans:
@@ -89,7 +92,9 @@ class _PlanStore:
             rows.append({**row, "step_index": step["index"], "step_key": step["key"]})
         plan = {"task_id": task_id, **self.plans[task_id],
                 **{k: task.get(k, "") for k in ("requirement", "goal_id", "work_dir", "project_id")}}
-        return {"plan": plan, "steps": rows}
+        keys = {step["id"]: step["key"] for step in self.steps.get(task_id, {}).values()}
+        journal = [{**entry, "step_key": keys.get(entry["step_id"], "")} for entry in self.journal.get(task_id, [])]
+        return {"plan": plan, "steps": rows, "journal": journal}
 
     async def save_session(self, agent_id: str, session_id: str | None, totals: Any, **_: object) -> None:
         self.sessions[agent_id] = {"session_id": session_id, "session_totals": dict(totals)}

@@ -49,6 +49,7 @@ from ..message import (
     MessageType,
     worker_address,
 )
+from . import journal
 from ..system_prompt import (
     REVIEW_CONTRACT,
     WORK_CONTRACT,
@@ -208,6 +209,7 @@ def judge_result(
             "passed": verdict["passed"],
             "findings": findings if isinstance(findings, list) else [str(findings)],
             "summary": str(verdict.get("summary") or ""),
+            "learnings": journal.learnings(verdict.get("learnings")),
         }
 
     report = extract_report(text, "status")
@@ -222,8 +224,10 @@ def judge_result(
         return _work_failed(f"Worker reported an unknown status {status!r}")
     if not isinstance(changed, dict) or not isinstance(deleted, list):
         return _work_failed("Worker report has malformed changed_files or deleted_files")
+    learnings = journal.learnings(report.get("learnings"))
     if status == "failed":
-        return _work_failed(summary or "Worker reported failure", summary=summary, changed_files=changed)
+        return _work_failed(summary or "Worker reported failure", summary=summary, changed_files=changed,
+                            learnings=learnings)
 
     def on_disk(path: Any) -> bool:
         candidate = Path(str(path))
@@ -243,6 +247,7 @@ def judge_result(
         "changed_files": changed,
         "deleted_files": deleted,
         "summary": summary,
+        "learnings": learnings,
     }
 
 
@@ -817,9 +822,10 @@ class WorkerPool:
         )
 
     def _build_work_prompt(self, payload: dict[str, Any]) -> str:
-        """The run's first user turn: what the steps this one depends on reported.
+        """The run's first user turn: what the steps this one depends on reported, and the task's findings.
 
-        The step itself is the system prompt's task section; the reports are
+        The step itself is the system prompt's task section; the reports and
+        the findings (the task journal's section, built by the Planner) are
         other agents' output, so they stay here as data.
         """
         parts = ["Start your step (the Task section of your instructions)."]
@@ -832,6 +838,9 @@ class WorkerPool:
                 if changed:
                     line += f" (changed: {', '.join(changed)})"
                 parts.append(line)
+        findings = str(payload.get("findings") or "")
+        if findings:
+            parts += ["", findings]
         return "\n".join(parts)
 
     def _build_verify_prompt(self, payload: dict[str, Any]) -> str:

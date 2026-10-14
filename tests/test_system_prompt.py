@@ -53,8 +53,9 @@ def _example(contract: str, key: str) -> dict:
 
 def test_the_work_contract_shows_the_report_judge_result_checks(tmp_path: Path) -> None:
     example = _example(WORK_CONTRACT, "status")
-    assert set(example) == {"status", "changed_files", "deleted_files", "summary"}
+    assert set(example) == {"status", "changed_files", "deleted_files", "summary", "learnings"}
     assert isinstance(example["changed_files"], dict) and isinstance(example["deleted_files"], list)
+    assert isinstance(example["learnings"], list)
     for word in ('"completed"', '"failed"', "changed_files", "deleted_files", "relative to the working directory"):
         assert word in WORK_CONTRACT
     # A report in the contract's shape, for files that exist, completes the step.
@@ -66,12 +67,34 @@ def test_the_work_contract_shows_the_report_judge_result_checks(tmp_path: Path) 
 
 def test_the_review_contract_shows_the_verdict_the_verify_path_reads(tmp_path: Path) -> None:
     example = _example(REVIEW_CONTRACT, "passed")
-    assert set(example) == {"passed", "findings", "summary"}
+    assert set(example) == {"passed", "findings", "summary", "learnings"}
     assert isinstance(example["passed"], bool) and isinstance(example["findings"], list)
+    assert isinstance(example["learnings"], list)
     event = {"type": "result", "subtype": "success", "is_error": False,
              "result": '{"passed": false, "findings": ["no tests"], "summary": "missing tests"}'}
     assert judge_result(event, work_dir=tmp_path, is_verify=True) == {
-        "passed": False, "findings": ["no tests"], "summary": "missing tests"}
+        "passed": False, "findings": ["no tests"], "summary": "missing tests", "learnings": []}
+
+
+@pytest.mark.parametrize("is_verify", [False, True])
+@pytest.mark.parametrize(("learnings", "kept"), [
+    pytest.param("use make gen", [], id="a string"),
+    pytest.param({"tip": "use make gen"}, [], id="an object"),
+    pytest.param([1, None, "  ", ["nested"], " use\n  make gen "], ["use make gen"], id="non-strings and blanks"),
+    pytest.param([f"tip {n}" for n in range(8)], [f"tip {n}" for n in range(5)], id="more than five"),
+    pytest.param(["x" * 500], ["x" * 299 + "…"], id="an item over 300 characters"),
+])
+def test_malformed_or_oversized_learnings_are_clipped_or_dropped_never_fatal(
+    tmp_path: Path, is_verify: bool, learnings: object, kept: list[str],
+) -> None:
+    """``learnings`` is optional: a bad value never fails the step or the review."""
+    report = ({"passed": True, "findings": [], "summary": "ok"} if is_verify else
+              {"status": "completed", "changed_files": {}, "deleted_files": [], "summary": "ok"})
+    event = {"type": "result", "subtype": "success", "is_error": False,
+             "result": "Done.\n" + json.dumps({**report, "learnings": learnings})}
+    judged = judge_result(event, work_dir=tmp_path, is_verify=is_verify)
+    assert judged["passed" if is_verify else "status"] == (True if is_verify else "completed")
+    assert judged["learnings"] == kept
 
 
 # --- The layers' order: harness, role, project (background, knowledge index), task, contract last ---

@@ -1286,3 +1286,30 @@ class TestTaskEnd:
         took, alive = asyncio.run(_run())
         assert took < 2  # well inside the 5 s stop grace
         assert not alive
+
+
+@pytest.mark.usefixtures("agent_db")
+class TestTaskJournal:
+    def test_over_its_cap_the_progress_section_drops_the_oldest_entries_and_counts_them(
+        self, planner_claude: Any,
+    ) -> None:
+        """Each accepted step's entry carries five 300-character learnings, so two entries fill the section."""
+
+        def learned(envelope: MessageEnvelope) -> dict[str, Any]:
+            key = envelope.payload["step_key"]
+            return {**WORK_OK, "summary": f"{key} done", "learnings": [f"{key}-tip{n} " + "x" * 290 for n in range(5)]}
+
+        claude = planner_claude(
+            plan(step("s1"), step("s2", "s1"), step("s3", "s2"), step("s4", "s3")),
+            decide("accept"), decide("accept"), decide("accept"), decide("accept"),
+        )
+        drive(claude, learned)
+
+        decision_on_s4 = claude.turns()[-1]["text"]
+        assert decision_on_s4.startswith("[DECISION] Step s4")
+        section = decision_on_s4[decision_on_s4.index("Progress and findings"):decision_on_s4.index("Result of step")]
+        assert len(section) <= 4_000
+        assert "(1 older entries omitted)" in section.splitlines()[0]
+        # Newest first: s3, then s2; s1, the oldest, is the one left out.
+        assert section.index("- s3: s3 done") < section.index("- s2: s2 done")
+        assert "s1-tip" not in section and "s3-tip4" in section

@@ -15,7 +15,10 @@ Every field is optional, and ``None`` inherits today's behavior:
 - ``supervise_interval_seconds``: how often the Planner checks running Workers
   (0 = never), over the ``planner`` agent config;
 - ``review_policy``: ``planner`` (the Planner decides which steps a Reviewer
-  checks) or ``all`` (every step needs a passing review before it is accepted).
+  checks) or ``all`` (every step needs a passing review before it is accepted);
+- ``distill_lessons``: ``true`` makes the Planner of a task that completes turn
+  the task's journal into a lessons document in the project's knowledge; off
+  when unset.
 
 The columns live on ``projects`` (``db.projects.EXECUTION_COLUMNS``); this
 module owns their types and validation. Agents read them when a run or turn
@@ -59,10 +62,15 @@ class ProjectExecution:
     task_budget_action: TaskBudgetAction | None = None
     supervise_interval_seconds: int | None = None
     review_policy: ReviewPolicy | None = None
+    distill_lessons: bool | None = None
 
     @property
     def review_all(self) -> bool:
         return self.review_policy is ReviewPolicy.ALL
+
+    @property
+    def lessons_on(self) -> bool:
+        return self.distill_lessons is True
 
     @property
     def on_task_budget(self) -> TaskBudgetAction:
@@ -122,6 +130,10 @@ def _parse(field: str, raw: Any) -> Any:
         if isinstance(raw, bool) or not isinstance(raw, int) or not 0 <= raw <= SUPERVISE_MAX_SECONDS:
             raise ValueError(f"supervise_interval_seconds must be a whole number of seconds from 0 (never) "
                              f"to {SUPERVISE_MAX_SECONDS}, or null to inherit")
+        return raw
+    if field == "distill_lessons":
+        if not isinstance(raw, bool):
+            raise ValueError("distill_lessons must be true or false, or null for off")
         return raw
     raise ValueError(f"unknown execution field {field!r}")
 
