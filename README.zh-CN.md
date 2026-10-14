@@ -93,6 +93,39 @@ uv run loopx serve
 换到新机器：`uv run loopx config export loopx-config.json` 把 agent 配置导出成一个文件（密钥留作占位符，
 `--include-projects` 连同项目），在新机器上 `uv run loopx config import loopx-config.json` 先预览，加 `--apply` 才写入。
 
+### 4. 作为服务常驻
+
+```bash
+uv run loopx service install     # 可选 --port、--runtime-root、--label、--env NAME
+uv run loopx service status      # 是否安装、是否运行、PID、上次退出、日志、GET /api/status
+uv run loopx service restart     # 例如拉取新代码之后
+uv run loopx service uninstall
+```
+
+`install` 让 `loopx serve` 在后台常驻：macOS 上是 launchd LaunchAgent，Linux 上是 systemd 用户服务。登录后自动启动，
+崩溃后自动拉起，日志写到 `<runtime root>/logs/serve.log`。服务运行执行 `install` 的那个 `loopx`（在 checkout 里就是
+`.venv/bin/loopx`），工作目录是当前目录，所以 checkout 的 `.env` 照常生效。它从当前 shell 复制 `PATH`、语言和代理设置、
+`CLAUDE_CONFIG_DIR` 以及所有 `LOOPX_*`、`ANTHROPIC_*`、`LARK_*` 变量（其他变量用 `--env NAME` 加入），因此服务文件的权限是
+0600。改了配置再执行一次 `install` 即可生效。Linux 上执行 `loginctl enable-linger $USER` 后，未登录时也会运行。
+
+### 升级时的备份
+
+`loopx serve` 每次启动都会应用 schema，升级可能删列、删表。schema 将要变化时，serve 先用 `pg_dump`
+备份到 `~/.loopx/backups/`（runtime root 下的 `backups/`，每个库保留最近 5 份），并在日志里给出恢复方法；
+新建的空库不需要备份。它用 PATH 上的 `pg_dump` 或 `LOOPX_PG_DUMP` 指定的那个，主版本不能低于服务器
+（`loopx doctor` 会检查；macOS 上 `brew install libpq`，再把 `$(brew --prefix libpq)/bin` 加进 PATH）。
+PostgreSQL 跑在 Docker 里时，可以改在容器里备份：
+
+```bash
+export LOOPX_BACKUP_CMD='docker exec agentbox-postgres pg_dump --format=custom -U {user} {dbname}'
+```
+
+没有可用的 `pg_dump` 或备份失败时，serve 在改动任何东西之前退出；`loopx serve --skip-backup`
+不备份直接迁移，并记一条警告。回退时先停掉 LoopX，把数据库重建为空库，用
+`pg_restore --no-owner --dbname "$LOOPX_DATABASE_URL" <文件>`（Docker 里用
+`docker exec -i agentbox-postgres pg_restore --no-owner -U postgres -d loopx < <文件>`）恢复，再运行旧版本。
+`loopx service install` 会复制 `PATH` 和 `LOOPX_*` 变量，所以要在它之前设好。
+
 ## 架构
 
 ### Agent 层级

@@ -46,7 +46,36 @@ How the agent system works today is described in
   runtime starts a new session. Config export and import carry runtimes,
   providers (keys as placeholders) and agents. The prompt eval takes
   `--agent`.
-
+- **Run as a service.** `loopx service install` runs `loopx serve` in the
+  background as a launchd LaunchAgent (macOS) or a systemd user unit (Linux):
+  started at login, started again after a crash, logging to
+  `<runtime root>/logs/serve.log`. The unit runs the `loopx` that ran
+  `install`, in the current directory, with `PATH`, locale and proxy settings,
+  `CLAUDE_CONFIG_DIR` and the `LOOPX_*`, `ANTHROPIC_*` and `LARK_*` variables
+  copied from the shell (more with `--env NAME`), so it is written with mode
+  0600. Running `install` again updates the unit and restarts the service; it
+  is not started when another process holds the port. `status` shows whether
+  it is installed and running, its PID, last exit, log and `GET /api/status`;
+  `restart` stops and starts it and waits until the port serves (on macOS with
+  `launchctl bootout` and `bootstrap`, not `kickstart -k`); `uninstall` stops
+  it and removes the unit. `loopx doctor` adds a Service line.
+- **Backup before a schema change.** `loopx serve` records the sha256 of the
+  `schema.sql` it applied (`schema_fingerprint`, in the same transaction).
+  When a database that already holds LoopX tables has a different or no
+  fingerprint, serve first writes a `pg_dump --format=custom` backup (mode
+  0600) to `<runtime root>/backups/`, checks it (`pg_restore --list` when a
+  `pg_restore` is at hand), keeps the newest 5 per database and logs the
+  restore command, and only then applies the schema; a new, empty database
+  needs none. The dump comes from `LOOPX_PG_DUMP` or `pg_dump` on PATH, of at
+  least the server's major version, or from `LOOPX_BACKUP_CMD`, a command whose
+  stdout is the dump (`{dbname}` and `{user}` are filled in), such as
+  `docker exec <container> pg_dump --format=custom -U {user} {dbname}`.
+  `loopx doctor` reports the `pg_dump`, failing when a schema change is
+  pending without one. **Behavior change:** without a usable `pg_dump`, or
+  when the backup fails, `loopx serve` exits before changing the schema;
+  `--skip-backup` migrates without a backup and logs a warning.
+  `loopx config import --apply` no longer migrates such a database: it asks
+  to start `loopx serve` once first.
 - **Configuration export and import.** `loopx config export <file>` writes an
   installation's agent configuration to one JSON file (`loopx-config/v1`):
   the system and role settings layers and role prompts, the catalog with its
@@ -203,10 +232,17 @@ How the agent system works today is described in
   and the summaries of accepted steps; a Worker's first turn carries
   "Findings so far in this task" (its dependencies first, at most 2,000
   characters). The task page lists the entries under Findings.
-- **Lessons in project knowledge.** A project's `distill_lessons` switch (off
-  by default; Settings tab, or `PUT /api/projects/<id>`) gives the Planner of
-  a task that completes one more turn, whose Markdown summary of the journal
-  is saved as the knowledge document `Lessons: <requirement>`.
+- **Lessons in project knowledge, as drafts or written.** A project's
+  `distill_lessons` (`off` by default, `draft` or `write`; Settings tab, or
+  `PUT /api/projects/<id>`) gives the Planner of a task that completes one
+  more turn, whose Markdown summary of the journal becomes the text document
+  `Lessons: <requirement>`. `write` saves it to the project's knowledge;
+  `draft` keeps it as a draft that no agent sees until the user confirms it,
+  optionally edited, or discards it on the project's Knowledge tab
+  (`GET /api/projects/<id>/knowledge/drafts`,
+  `POST .../drafts/<draft_id>/confirm`, `DELETE .../drafts/<draft_id>`); the
+  task page links to its draft. A project that had the earlier boolean
+  switch on is migrated to `write`, off to `off`.
 - **Task spend against its cap, and continuing at a higher cap.** When the
   task's project sets a spend cap per task (`task_budget_usd`), the task page
   shows the task's spend as a share of it and warns from 80% on. A task that

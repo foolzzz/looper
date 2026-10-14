@@ -97,12 +97,22 @@ class TestProjectApi:
         ("supervise_interval_seconds", -5, "from 0"),
         ("supervise_interval_seconds", 1.5, "whole number"),
         ("supervise_interval_seconds", 86_401, "86400"),
+        ("distill_lessons", "sometimes", "off, draft, write"),
     ])
     def test_an_invalid_setting_is_refused(self, store: _Store, field: str, value: Any, says: str) -> None:
         store.add_project("proj-a", "calc")
         status, body = _call("PUT", "/api/projects/proj-a", {field: value})
         assert status == 400 and says in body["error"]
         assert store.projects["proj-a"].get(field) is None
+
+    @pytest.mark.parametrize("value, mode", [
+        ("draft", "draft"), ("write", "write"), ("off", "off"), (None, "off"), ("", "off"),
+        (True, "write"), (False, "off"),  # from before the three modes
+    ])
+    def test_distill_lessons_is_one_of_three_modes(self, store: _Store, value: Any, mode: str) -> None:
+        store.add_project("proj-a", "calc")
+        status, body = _call("PUT", "/api/projects/proj-a", {"distill_lessons": value})
+        assert status == 200 and body["distill_lessons"] == mode == store.projects["proj-a"]["distill_lessons"]
 
 
 # --- Workers and Reviewers ---

@@ -248,7 +248,13 @@ function executionRows(project: Project): [string, string][] {
       "Planner supervision",
       project.supervise_interval_seconds === 0 ? "Off" : `Every ${project.supervise_interval_seconds} s`,
     ]);
-  if (project.distill_lessons) rows.push(["Lessons", "Distilled into knowledge when a task completes"]);
+  if (project.distill_lessons !== "off")
+    rows.push([
+      "Lessons",
+      project.distill_lessons === "draft"
+        ? "A draft to review in Knowledge when a task completes"
+        : "Written into knowledge when a task completes",
+    ]);
   return rows;
 }
 
@@ -326,14 +332,14 @@ function Overview({ project, onTab }: { project: Project; onTab: (tab: Tab) => v
 }
 
 interface ProjectPageProps {
-  /** "<project id>" or "<project id>/<tab>". */
+  /** "<project id>", "<project id>/<tab>", or "<project id>/knowledge/<draft id>" to open one draft. */
   sub: string;
   onNavigate: (sub: string) => void;
 }
 
 /** One project: an overview, its knowledge, its skills and its settings, each a tab with its own address. */
 export function ProjectPage({ sub, onNavigate }: ProjectPageProps) {
-  const [projectId, tabPart] = sub.split("/");
+  const [projectId, tabPart, focus] = sub.split("/");
   const tab: Tab = TABS.some((t) => t.id === tabPart) ? (tabPart as Tab) : "overview";
   const { projects, error, reload } = useProjects();
   const project = projects?.find((p) => p.project_id === projectId) ?? null;
@@ -428,7 +434,7 @@ export function ProjectPage({ sub, onNavigate }: ProjectPageProps) {
 
       <div id="project-tabpanel" role="tabpanel" aria-labelledby={`project-tab-${tab}`}>
         {tab === "overview" && <Overview project={project} onTab={openTab} />}
-        {tab === "knowledge" && <ProjectKnowledgeSection projectId={project.project_id} />}
+        {tab === "knowledge" && <ProjectKnowledgeSection projectId={project.project_id} openDraftId={focus} />}
         {tab === "skills" && <ProjectSkillsSection projectId={project.project_id} />}
         {tab === "settings" && (
           <ProjectSettingsForm

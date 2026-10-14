@@ -4,8 +4,9 @@ The Planner plans ``d``, then ``x`` after ``d``, ``y`` after ``x`` and ``c``
 after ``d`` and ``y``, and accepts each step. Each Worker reports
 ``learnings``; code writes a journal entry when a step is accepted, the
 Planner's next turn and a later Worker's first turn carry the entries back,
-and a project with ``distill_lessons`` gets a lessons document in its
-knowledge when the task completes. Runs only when LOOPX_TEST_DATABASE_URL
+and a project's ``distill_lessons`` decides what the completed task leaves:
+a lessons document in its knowledge (``write``), a draft the user confirms
+into it (``draft``), or nothing (``off``). Runs only when LOOPX_TEST_DATABASE_URL
 points at a disposable database (each run creates and drops one beside it).
 """
 
@@ -95,9 +96,9 @@ def _install(root: Path) -> tuple[Path, Path]:
     return bin_dir, state
 
 
-@pytest.mark.parametrize("distill_lessons", [True, None], ids=["lessons on", "lessons off"])
+@pytest.mark.parametrize("distill_lessons", ["write", "draft", "off"])
 def test_accepted_steps_are_journaled_fed_back_and_distilled_into_knowledge(
-    tmp_path: Path, distill_lessons: bool | None,
+    tmp_path: Path, distill_lessons: str,
 ) -> None:
     root = tmp_path.resolve()
     bin_dir, state = _install(root)
@@ -110,14 +111,17 @@ def test_accepted_steps_are_journaled_fed_back_and_distilled_into_knowledge(
                             log_path=root / "serve.log") as api:
             project = api.post("/api/projects", {"name": "calc", "work_dir": str(work),
                                                  "distill_lessons": distill_lessons})
-            assert project["distill_lessons"] is distill_lessons
+            assert project["distill_lessons"] == distill_lessons
             task_id = api.post("/api/tasks/create", {"requirement": "build the calc package",
                                                       "project_id": project["project_id"]})["task_id"]
             api.post("/api/tasks/start", {"task_id": task_id})
             done = _wait(api, task_id, lambda d: d["status"] in ("completed", "failed", "stopped"))
-            knowledge = api.get(f"/api/projects/{project['project_id']}/knowledge")
-            documents = [api.get(f"/api/projects/{project['project_id']}/knowledge/{doc['document_id']}")
-                         for doc in knowledge["documents"]]
+            base = f"/api/projects/{project['project_id']}/knowledge"
+            knowledge = api.get(base)
+            documents = [api.get(f"{base}/{doc['document_id']}") for doc in knowledge["documents"]]
+            drafts = api.get(f"{base}/drafts")["drafts"]
+            # Confirming the draft makes it a document of the knowledge, in the index agents get.
+            confirmed = api.post(f"{base}/drafts/{drafts[0]['draft_id']}/confirm", {}) if drafts else None
 
     assert done["status"] == "completed", (done.get("error"), (root / "serve.log").read_text()[-3000:])
     # An accepted step writes a journal entry with its summary and learnings, in the order accepted.
@@ -142,11 +146,20 @@ def test_accepted_steps_are_journaled_fed_back_and_distilled_into_knowledge(
     assert "build needs `make gen` first" in findings
     assert "Findings so far" not in worker["c"]["prompt"]  # data in the user turn, not instructions
 
-    # With distill_lessons, completion adds one lessons document to the project's knowledge; without, nothing.
+    # write: completion adds one lessons document to the project's knowledge; draft: one draft, which is not in
+    # the knowledge until confirmed; off: nothing, and no LESSONS turn.
     lessons_turns = [t for t in turns if t.startswith("[LESSONS]")]
-    if distill_lessons:
-        assert len(lessons_turns) == 1 and "build needs `make gen` first" in lessons_turns[0]
+    title = "Lessons: build the calc package"
+    if distill_lessons == "off":
+        assert lessons_turns == [] and documents == [] and drafts == []
+        return
+    assert len(lessons_turns) == 1 and "build needs `make gen` first" in lessons_turns[0]
+    if distill_lessons == "write":
         assert [(d["document"]["title"], d["document"]["source_kind"], d["content"]) for d in documents] == [
-            ("Lessons: build the calc package", "text", LESSONS)]
+            (title, "text", LESSONS)]
+        assert drafts == []
     else:
-        assert lessons_turns == [] and documents == []
+        assert documents == [] and knowledge["index"] == ""
+        assert [(d["title"], d["content"], d["task_id"]) for d in drafts] == [(title, LESSONS, task_id)]
+        assert [(d["title"], d["source_kind"]) for d in confirmed["documents"]] == [(title, "text")]
+        assert f"- {title}: What task {task_id} found and learned" in confirmed["index"]

@@ -248,6 +248,10 @@ class AgentHTTPServer:
     _RE_PROJECT = re.compile(r"^/api/projects/(proj-[a-zA-Z0-9]+)$")
     _RE_PROJECT_KNOWLEDGE = re.compile(r"^/api/projects/(proj-[a-zA-Z0-9]+)/knowledge$")
     _RE_PROJECT_DOCUMENT = re.compile(r"^/api/projects/(proj-[a-zA-Z0-9]+)/knowledge/(doc-[a-zA-Z0-9]+)$")
+    _RE_PROJECT_DRAFTS = re.compile(r"^/api/projects/(proj-[a-zA-Z0-9]+)/knowledge/drafts$")
+    _RE_PROJECT_DRAFT = re.compile(r"^/api/projects/(proj-[a-zA-Z0-9]+)/knowledge/drafts/(draft-[a-zA-Z0-9]+)$")
+    _RE_PROJECT_DRAFT_CONFIRM = re.compile(
+        r"^/api/projects/(proj-[a-zA-Z0-9]+)/knowledge/drafts/(draft-[a-zA-Z0-9]+)/confirm$")
     _RE_PROJECT_INSTALLS = re.compile(r"^/api/projects/(proj-[a-zA-Z0-9]+)/installs$")
     _RE_PROJECT_AGENT_SETTINGS = re.compile(r"^/api/projects/(proj-[a-zA-Z0-9]+)/agent-settings$")
     _RE_PROJECT_ROLE_SETTINGS = re.compile(r"^/api/projects/(proj-[a-zA-Z0-9]+)/agent-settings/roles/([a-zA-Z0-9_-]+)$")
@@ -331,6 +335,15 @@ class AgentHTTPServer:
         elif (m := self._RE_PROJECT_DOCUMENT.match(path)) and method == "DELETE":
             await self._handle_knowledge(writer, HTTP_200, lambda root: knowledge.delete_document(
                 m.group(1), m.group(2), root))
+        elif (m := self._RE_PROJECT_DRAFTS.match(path)) and method == "GET":
+            await self._handle_knowledge(writer, HTTP_200, lambda root: knowledge.drafts_view(m.group(1)))
+        elif (m := self._RE_PROJECT_DRAFT_CONFIRM.match(path)) and method == "POST":
+            # The body is optional: the title, summary or content to confirm the draft with.
+            await self._handle_knowledge(writer, HTTP_200, lambda root: knowledge.confirm_draft(
+                m.group(1), m.group(2), projects.json_object(body) if body.strip() else {}, root))
+        elif (m := self._RE_PROJECT_DRAFT.match(path)) and method == "DELETE":
+            await self._handle_knowledge(writer, HTTP_200, lambda root: knowledge.discard_draft(
+                m.group(1), m.group(2)))
         elif (m := self._RE_PROJECT_INSTALLS.match(path)) and method == "GET":
             await self._handle_catalog(writer, HTTP_200, lambda: catalog.project_view(m.group(1)))
         elif (m := self._RE_PROJECT_SKILLS.match(path)) and method == "POST":

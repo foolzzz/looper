@@ -248,6 +248,41 @@ async def _register_optional_channel(
             await registry.unregister(adapter.channel_id)
 
 
+async def _back_up_before_schema_change(pool: Any, dsn: str, runtime_root: Path, *, skip_backup: bool) -> None:
+    """Dump the database into ``<runtime root>/backups`` when ``ensure_schema`` is about to change it.
+
+    Raises ``StartupCheckFailed``, before any DDL, when there is no usable
+    ``pg_dump`` or the dump fails; ``skip_backup`` goes ahead without one.
+    """
+    from ..db.connection import schema_change_pending
+    from . import db_backup
+
+    async with pool.acquire() as conn:
+        if not await schema_change_pending(conn):
+            return
+        server_version_num = int(await conn.fetchval("SELECT current_setting('server_version_num')"))
+    shown = self_check.mask_dsn(dsn)
+    if skip_backup:
+        logger.warning("BACKUP SKIPPED (--skip-backup): the database schema of %s changes now without a backup; "
+                       "the columns and tables its migrations drop cannot be restored", shown)
+        return
+    check, dumper = await asyncio.to_thread(self_check.check_pg_dump, server_version_num, True)
+    if dumper is None:
+        raise StartupCheckFailed(self_check.format_checks([check]))
+    logger.info("the database schema is about to change; backing up %s with %s", shown, dumper.detail)
+    try:
+        path, checked = await asyncio.to_thread(
+            db_backup.back_up, dumper, dsn, runtime_root / db_backup.BACKUP_DIRNAME)
+    except db_backup.BackupFailed as exc:
+        raise StartupCheckFailed(self_check.format_checks([self_check.Check(
+            "pg_dump", "pg_dump backup", self_check.FAIL, f"{exc}; the schema was not changed",
+            "fix the problem above and start again, or migrate once without a backup: loopx serve --skip-backup",
+        )])) from None
+    logger.info("backed up the database to %s (%d bytes, %s); to restore it, stop LoopX, recreate the database "
+                "empty, then run: pg_restore --no-owner --dbname '%s' '%s'",
+                path, path.stat().st_size, checked, shown, path)
+
+
 async def _run_agent_system(
     *,
     host: str = "127.0.0.1",
@@ -255,6 +290,7 @@ async def _run_agent_system(
     runtime_root: Path,
     work_dir: Path,
     claude_bin: str = "claude",
+    skip_backup: bool = False,
 ) -> None:
     """Start the full agent system and run until interrupted."""
 
@@ -267,6 +303,7 @@ async def _run_agent_system(
     if database_check.status != self_check.OK:
         raise StartupCheckFailed(self_check.format_checks([database_check]))
     pool = await init_pool(dsn)
+    await _back_up_before_schema_change(pool, dsn, runtime_root, skip_backup=skip_backup)
     await ensure_schema(pool)
 
     await seed_agent_configs(pool)
@@ -412,6 +449,7 @@ def serve_agent(
     work_dir: Path | None = None,
     claude_bin: str = "claude",
     verbose: bool = False,
+    skip_backup: bool = False,
 ) -> None:
     """Synchronous entry point for the agent system."""
     logging.basicConfig(
@@ -430,6 +468,7 @@ def serve_agent(
                 runtime_root=resolved_root,
                 work_dir=resolved_work_dir,
                 claude_bin=claude_bin,
+                skip_backup=skip_backup,
             )
         )
     except StartupCheckFailed as exc:

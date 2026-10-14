@@ -1,15 +1,19 @@
-import { useEffect, useId, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { AlertCircle, ChevronRight, FileText, FolderOpen, Loader2, Pencil, Plus, Trash2, Upload } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
   addKnowledgeDocument,
+  confirmKnowledgeDraft,
   deleteKnowledgeDocument,
+  discardKnowledgeDraft,
   fetchKnowledge,
   fetchKnowledgeDocument,
+  fetchKnowledgeDrafts,
   updateKnowledgeDocument,
   type KnowledgeDocument,
+  type KnowledgeDraft,
   type KnowledgeDocumentBody,
   type KnowledgeDocumentUpdate,
   type KnowledgeSourceKind,
@@ -263,14 +267,186 @@ function DocumentRow({
   );
 }
 
+type DraftChanges = { title?: string; summary?: string; content?: string };
+
+/** A draft: lessons a task wrote, which agents see only once it is confirmed. Edit confirms it with the changes. */
+function DraftRow({
+  draft,
+  busy,
+  startOpen,
+  onConfirm,
+  onDiscard,
+}: {
+  draft: KnowledgeDraft;
+  busy: boolean;
+  /** Opened and scrolled to: the draft a link pointed at. */
+  startOpen: boolean;
+  onConfirm: (changes: DraftChanges) => void;
+  onDiscard: () => void;
+}) {
+  const id = useId();
+  const row = useRef<HTMLLIElement>(null);
+  const [open, setOpen] = useState(startOpen);
+  const [editing, setEditing] = useState(false);
+  const [discarding, setDiscarding] = useState(false);
+  const [title, setTitle] = useState("");
+  const [summary, setSummary] = useState("");
+  const [content, setContent] = useState("");
+
+  useEffect(() => {
+    if (startOpen) row.current?.scrollIntoView({ block: "center" });
+  }, [startOpen]);
+
+  const startEdit = () => {
+    setTitle(draft.title);
+    setSummary(draft.summary);
+    setContent(draft.content);
+    setDiscarding(false);
+    setEditing(true);
+  };
+
+  const confirmEdited = (e: React.FormEvent) => {
+    e.preventDefault();
+    const changes: DraftChanges = {};
+    if (title.trim() !== draft.title) changes.title = title.trim();
+    if (summary.trim() !== draft.summary) changes.summary = summary.trim();
+    if (content !== draft.content) changes.content = content;
+    onConfirm(changes);
+  };
+
+  if (editing) {
+    return (
+      <li className="border-t border-border py-3 first:border-t-0">
+        <form onSubmit={confirmEdited} className="space-y-2" aria-label={`Edit draft ${draft.title}`}>
+          <div className="grid gap-2 sm:grid-cols-2">
+            <div className="space-y-1">
+              <label htmlFor={`${id}-title`} className="text-xs font-medium text-muted-foreground">Title *</label>
+              <Input id={`${id}-title`} value={title} maxLength={120} onChange={(e) => setTitle(e.target.value)} autoFocus />
+            </div>
+            <div className="space-y-1">
+              <label htmlFor={`${id}-summary`} className="text-xs font-medium text-muted-foreground">
+                One-line summary *
+              </label>
+              <Input id={`${id}-summary`} value={summary} maxLength={300} onChange={(e) => setSummary(e.target.value)} />
+            </div>
+          </div>
+          <div className="space-y-1">
+            <label htmlFor={`${id}-content`} className="text-xs font-medium text-muted-foreground">Content *</label>
+            <textarea
+              id={`${id}-content`}
+              value={content}
+              onChange={(e) => setContent(e.target.value)}
+              rows={14}
+              spellCheck={false}
+              className={TEXTAREA}
+            />
+          </div>
+          <div className="flex justify-end gap-2">
+            <Button type="button" variant="outline" size="sm" onClick={() => setEditing(false)}>Cancel</Button>
+            <Button type="submit" size="sm" disabled={busy || !title.trim() || !summary.trim() || !content.trim()}>
+              {busy && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+              Confirm
+            </Button>
+          </div>
+        </form>
+      </li>
+    );
+  }
+
+  return (
+    <li ref={row} className="space-y-2 border-t border-border py-2 first:border-t-0">
+      <div className="flex flex-wrap items-start gap-2">
+        <div className="min-w-0 flex-1 space-y-0.5">
+          <span className="block truncate text-sm font-medium">{draft.title}</span>
+          <span className="block break-words text-xs text-muted-foreground">{draft.summary}</span>
+          <span className="flex flex-wrap items-center gap-x-2 gap-y-1 font-mono text-[11px] text-muted-foreground">
+            {draft.task_id ? (
+              <a
+                href={`#tasks/${encodeURIComponent(draft.task_id)}`}
+                className="underline-offset-2 hover:text-foreground hover:underline"
+              >
+                {draft.task_id}
+              </a>
+            ) : (
+              <span className="font-sans">Its task was deleted</span>
+            )}
+            <span aria-hidden="true">·</span>
+            <span className="tabular-nums">{formatBytes(draft.size_bytes)}</span>
+          </span>
+        </div>
+        {!discarding && (
+          <div className="flex shrink-0 flex-wrap items-center gap-1">
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              onClick={() => setOpen(!open)}
+              aria-expanded={open}
+              aria-controls={`${id}-body`}
+              aria-label={`${open ? "Hide" : "View"} ${draft.title}`}
+            >
+              {open ? "Hide" : "View"}
+            </Button>
+            <Button type="button" variant="ghost" size="sm" onClick={startEdit} aria-label={`Edit ${draft.title}`}>
+              Edit
+            </Button>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={() => onConfirm({})}
+              disabled={busy}
+              aria-label={`Confirm ${draft.title}`}
+            >
+              Confirm
+            </Button>
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              onClick={() => setDiscarding(true)}
+              aria-label={`Discard ${draft.title}`}
+              className="text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
+            >
+              Discard
+            </Button>
+          </div>
+        )}
+      </div>
+      {discarding && (
+        <div className="flex flex-wrap items-center justify-end gap-2">
+          <span className="text-xs text-muted-foreground">Discard this draft? It is not kept.</span>
+          <Button type="button" variant="destructive" size="sm" onClick={onDiscard} disabled={busy}>
+            Discard
+          </Button>
+          <Button type="button" variant="ghost" size="sm" onClick={() => setDiscarding(false)}>
+            Cancel
+          </Button>
+        </div>
+      )}
+      {open && (
+        <pre
+          id={`${id}-body`}
+          className="max-h-[28rem] overflow-auto whitespace-pre-wrap break-words rounded-md border border-border bg-muted/40 p-3 font-mono text-xs leading-relaxed text-foreground/90"
+        >
+          {draft.content}
+        </pre>
+      )}
+    </li>
+  );
+}
+
 /**
- * The project's knowledge: documents its Planner, Workers and Reviewers read when they need them. Opening a row
- * shows its body; adding (also by dropping a file on the section), editing and deleting apply at once.
+ * The project's knowledge: documents its Planner, Workers and Reviewers read when they need them, and the drafts
+ * waiting to become documents. Opening a row shows its body; adding (also by dropping a file on the section),
+ * editing, deleting, confirming and discarding apply at once.
  */
-export function ProjectKnowledgeSection({ projectId }: { projectId: string }) {
+export function ProjectKnowledgeSection({ projectId, openDraftId }: { projectId: string; openDraftId?: string }) {
   const id = useId();
   const [knowledge, setKnowledge] = useState<ProjectKnowledge | null>(null);
   const [loadError, setLoadError] = useState("");
+  const [drafts, setDrafts] = useState<KnowledgeDraft[] | null>(null);
+  const [draftError, setDraftError] = useState("");
   const [adding, setAdding] = useState<KnowledgeSourceKind | null>(null);
   const [title, setTitle] = useState("");
   const [summary, setSummary] = useState("");
@@ -285,6 +461,9 @@ export function ProjectKnowledgeSection({ projectId }: { projectId: string }) {
     fetchKnowledge(projectId)
       .then((data) => alive && setKnowledge(data))
       .catch((err) => alive && setLoadError(errorText(err)));
+    fetchKnowledgeDrafts(projectId)
+      .then((data) => alive && setDrafts(data.drafts))
+      .catch((err) => alive && setDraftError(errorText(err)));
     return () => {
       alive = false;
     };
@@ -316,6 +495,26 @@ export function ProjectKnowledgeSection({ projectId }: { projectId: string }) {
       setBusy(false);
     }
   };
+
+  /** Confirm or discard a draft; a refusal (a cap, say) shows the server's reason and keeps the draft. */
+  const changeDraft = async (change: () => Promise<void>) => {
+    setBusy(true);
+    setDraftError("");
+    try {
+      await change();
+    } catch (err) {
+      setDraftError(errorText(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+  const confirmDraft = (draftId: string, changes: DraftChanges) =>
+    changeDraft(async () => {
+      setKnowledge(await confirmKnowledgeDraft(projectId, draftId, changes));
+      setDrafts((list) => list && list.filter((draft) => draft.draft_id !== draftId));
+    });
+  const discardDraft = (draftId: string) =>
+    changeDraft(async () => setDrafts((await discardKnowledgeDraft(projectId, draftId)).drafts));
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -368,6 +567,29 @@ export function ProjectKnowledgeSection({ projectId }: { projectId: string }) {
         Documents this project&apos;s Planner, Workers and Reviewers read when they need them; their prompt lists each
         title and summary. Changes apply at once.
       </p>
+      {!!drafts?.length && (
+        <div role="group" aria-labelledby={`${id}-drafts`} className="space-y-1 rounded-md border border-border px-3 py-2">
+          <h3 id={`${id}-drafts`} className="text-xs font-semibold">
+            Drafts <span className="font-normal tabular-nums text-muted-foreground">({drafts.length})</span>
+          </h3>
+          <p className="text-xs text-muted-foreground">
+            Lessons that tasks wrote. Agents do not see a draft until you confirm it.
+          </p>
+          <ul>
+            {drafts.map((draft) => (
+              <DraftRow
+                key={draft.draft_id}
+                draft={draft}
+                busy={busy}
+                startOpen={draft.draft_id === openDraftId}
+                onConfirm={(changes) => confirmDraft(draft.draft_id, changes)}
+                onDiscard={() => discardDraft(draft.draft_id)}
+              />
+            ))}
+          </ul>
+        </div>
+      )}
+      {draftError && <p role="alert" className="text-xs text-destructive">{draftError}</p>}
       {loadError && <p role="alert" className="text-xs text-destructive">{loadError}</p>}
       {!knowledge && !loadError && <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" aria-label="Loading" />}
       {knowledge &&
