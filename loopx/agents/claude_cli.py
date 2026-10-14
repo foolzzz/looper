@@ -368,7 +368,8 @@ class _Output:
             if event.get("type") == "result":
                 turn.usage = self._claude.turn_usage(event)
                 self.turn = None
-                turn.done.set_result(event)
+                if not turn.done.done():  # else the turn was given up (cancelled) meanwhile
+                    turn.done.set_result(event)
             return
         if event.get("type") == "command_lifecycle":
             return  # the "completed" of a message whose turn has ended

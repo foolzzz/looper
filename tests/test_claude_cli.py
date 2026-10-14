@@ -457,3 +457,79 @@ class TestAutonomousTurns:
             started = next(e for e in events if e["type"] == "command_lifecycle" and e["state"] == "started")
             replayed = next(e for e in events if e.get("isReplay"))
             assert started["command_uuid"] == replayed["uuid"] == turn.result_event["user_message_uuid"]
+
+    def test_a_handler_that_fails_never_breaks_the_users_turns(self, tmp_path: Path) -> None:
+        from claude_stream_replay import replay_script
+
+        from loopx.agents.claude_cli import ResidentClaude
+
+        class Broken:
+            async def event(self, event: dict[str, Any]) -> None:
+                raise RuntimeError("database down")
+
+            async def end(self, turn: Any) -> None:
+                raise RuntimeError("database down")
+
+        async def _run() -> list[Any]:
+            async def begin(after: Any) -> Broken:
+                return Broken()
+
+            async def on_event(event: dict[str, Any]) -> None:
+                return None
+
+            claude = ResidentClaude(label="test")
+            await claude.start([replay_script(tmp_path, "background_agent")], cwd=str(tmp_path), signature=1,
+                               autonomous=begin)
+            turns = [await claude.run_turn(text, on_event) for text in ("start it", "7*6?")]
+            await claude.stop()
+            return turns
+
+        first, second = asyncio.run(_run())
+        assert (first.result_event["result"], second.result_event["result"]) == ("LAUNCHED", "42")
+        assert second.usage.cost_usd == pytest.approx(0.03617515 - 0.03359615)
+
+    def test_a_turn_of_its_own_that_stop_cuts_short_ends_without_a_result(self, tmp_path: Path) -> None:
+        import sys
+
+        from loopx.agents.claude_cli import ResidentClaude
+
+        fake = tmp_path / "claude"
+        fake.write_text(
+            f"#!{sys.executable}\n"
+            "import json, sys, time\n"
+            "line = json.loads(sys.stdin.readline())\n"
+            "def emit(event): print(json.dumps(event), flush=True)\n"
+            "for state in ('queued', 'started'):\n"
+            "    emit({'type': 'command_lifecycle', 'command_uuid': line['uuid'], 'state': state})\n"
+            "emit({'type': 'system', 'subtype': 'init', 'session_id': 's'})\n"
+            "emit({'type': 'result', 'subtype': 'success', 'is_error': False, 'result': 'ok', 'total_cost_usd': 0.5,\n"
+            "      'user_message_uuid': line['uuid']})\n"
+            "emit({'type': 'system', 'subtype': 'task_notification', 'status': 'completed'})\n"
+            "emit({'type': 'system', 'subtype': 'init', 'session_id': 's'})\n"
+            "sys.stdin.read()\n"
+            "time.sleep(30)  # still working on its own turn when stopped\n"
+        )
+        fake.chmod(0o755)
+
+        async def _run() -> list[Any]:
+            ended: list[Any] = []
+            begun = asyncio.Event()
+
+            async def begin(after: Any) -> _Observed:
+                begun.set()
+                return _Observed(ended, after)
+
+            async def on_event(event: dict[str, Any]) -> None:
+                return None
+
+            claude = ResidentClaude(label="test")
+            await claude.start([str(fake)], cwd=str(tmp_path), signature=1, autonomous=begin)
+            await claude.run_turn("hi", on_event, tag="hi")
+            await asyncio.wait_for(begun.wait(), 10)
+            await claude.stop(kill=True)
+            return ended
+
+        ((observed, own),) = asyncio.run(_run())
+        assert own.result_event is None and own.usage.cost_usd is None
+        assert [e["subtype"] for e in observed.events] == ["task_notification", "init"]
+        assert observed.after == "hi"
