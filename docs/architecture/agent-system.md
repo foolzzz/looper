@@ -749,6 +749,40 @@ with 3 plugins and 104 skills, the first request of a minimal `--print` run
 on Opus went from 15,674 to 29,114 tokens (`/context`: skills 2.1k → 10k
 tokens, plugin hook context 3.8k).
 
+### Moving the configuration: export and import
+
+`loopx config export <file>` and `loopx config import <file>`
+(`loopx/agents/config_transfer.py`) move an installation's agent configuration
+through one JSON file, `format: loopx-config/v1`: `settings` (the system and
+role layers; each role's prompt, `null` while it follows the recommended one,
+its timeout, concurrency and enabled flag), `channels`, `installs` (global),
+`projects` (with `--include-projects`: fields, execution settings, layers,
+knowledge, own skills and installs) and `catalog` (each item with its files,
+or an MCP server's configuration). Catalog files are UTF-8 text, so JSON holds
+them as they are; the file is written piece by piece from one read-only,
+repeatable-read snapshot, by the CLI straight from the database (a catalog is
+often over the server's 8 MiB request cap) or streamed by Settings' Export
+download (`GET /api/config/export`).
+
+Secrets (MCP environment and header values, a channel config's keys other
+than its sender allowlist, `*_env` names and description) are
+`{"secret": "omitted"}` unless `--include-secrets`. A project's directory and
+an item's source that is a local path are not exported; a path document is a
+reference relative to its project's directory, flagged `repoint`.
+
+An import matches entries by natural key: an item by kind and name (a
+project's own skill within its project), a project by name, a layer by scope,
+role and project, a role by name, a channel by type. The preview (the
+default, in a read-only transaction) lists per section what would be added,
+changed (with the fields), unchanged or skipped (with the reason), and the
+secrets to fill in. `--apply` applies the schema and writes the same plan in
+one transaction: an existing entry is updated in place (an item keeps its id
+and installs), nothing missing from the file is removed, and a placeholder
+keeps a stored secret, or leaves the value empty when there is none. Imported
+items keep their origin. Importing the same file again changes nothing, and
+exporting the new installation gives the same file. Settings offers no
+import: its file would usually be over the request cap.
+
 ### What a run spent and how large its context grew
 
 Every run records its own cost and tokens, its context at the end and the

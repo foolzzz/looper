@@ -90,6 +90,9 @@ uv run loopx serve
 
 首次启动时会自动建表。飞书和 Telegram 不需要命令行参数，在 Settings 页面开启即可（见[渠道](#渠道)）。
 
+换到新机器：`uv run loopx config export loopx-config.json` 把 agent 配置导出成一个文件（密钥留作占位符，
+`--include-projects` 连同项目），在新机器上 `uv run loopx config import loopx-config.json` 先预览，加 `--apply` 才写入。
+
 ## 架构
 
 ### Agent 层级

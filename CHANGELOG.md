@@ -19,6 +19,23 @@ How the agent system works today is described in
 
 ### Added
 
+- **Configuration export and import.** `loopx config export <file>` writes an
+  installation's agent configuration to one JSON file (`loopx-config/v1`):
+  the system and role settings layers and role prompts, the catalog with its
+  files and MCP servers, global installs and channel configs, and with
+  `--include-projects` each project's fields, execution settings, layers,
+  knowledge, own skills and installs. MCP environment and header values and
+  channel secrets are placeholders unless `--include-secrets` (which warns);
+  a project's directory and an item's local source path are left out, and
+  path documents are references to re-point. `loopx config import <file>`
+  previews what it would add, change, leave and skip, and the secrets left
+  to fill in; `--apply` writes it in one transaction. Entries match by name,
+  an existing one is updated in place (an item keeps its id and installs),
+  nothing missing from the file is removed, a placeholder never replaces a
+  stored secret, and importing the same file again changes nothing. Both
+  use the database directly, so a catalog over the server's 8 MiB request cap
+  moves too. Settings has an Export download (streamed,
+  `GET /api/config/export?projects=1&secrets=1`); importing is CLI-only.
 - **MCP servers in the capability catalog.** An MCP server is a catalog item
   of kind `mcp` (stdio: command, arguments, environment; or http/sse: URL,
   headers), installed like a plugin or a skill: globally or in one project,
