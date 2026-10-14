@@ -1,4 +1,4 @@
-# 开发计划：长程 Agent 上下文体系（M0–M8）
+# 开发计划：长程 Agent 上下文体系（M0–M9）
 
 - **状态：** M0–M7 全部交付（M7a 计划状态入库、M7b 任务记忆）；M8a 能力目录与安装、M8b MCP 服务器、M8c 进库来源、M8d 配置层级统一已交付，M8e 待开工；上游 LoopX 清理 B1–B4 已交付；其余见第 5 节待办
 - **依据：** [RFC：长程 Agent 的上下文体系 v0](../architecture/rfcs/long-horizon-agent-context-v0.zh-CN.md)。
@@ -40,6 +40,10 @@
 | M8c | 进库来源：上传、git、界面新建与编辑 | ✅ 已交付（looper #51） | M8a |
 | M8d | 配置层级统一：系统默认 → 角色 → 项目 → 项目里的角色 | ✅ 已交付（looper #50） | M8a |
 | M8e | 导出与导入：一个文件，应用前预览，密钥默认留空 | ⏳ 待开工 | M8b、M8c、M8d |
+| M9a | 运行时、provider 与 agent 的注册和选择；现有 Claude Code 路径抽成第一个运行时适配器 | 待开工 | M8d |
+| M9b | Claude Code 接多种 provider：订阅 OAuth、Anthropic key、兼容 anthropic 协议的接口；按 provider 价格计算花费 | 待开工 | M9a |
+| M9c | Codex 运行时：四类角色都支持（含常驻会话），事件统一、MCP 翻译、OpenAI 登录与 key | 待开工 | M9a |
+| M9d | SDK 运行时与 norma SDK | 待定（norma 就绪后） | M9a |
 
 执行顺序：M1 → M1.5 → M1.6 → M1.7 → M2 → M3 → M4 → M5 → M6 → M7a → M7b → M8a → M8b、M8c、M8d（可并行）→ M8e。
 
@@ -388,6 +392,43 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
   - 导入前先预览：新增、变化、冲突；
   - 密钥默认不导出，留作占位符，导入后提示补填。
 - **验收：** 导出后导入到一个新库，再导出得到相同的内容（密钥除外）；预览与实际应用的变化一致。
+
+### M9 agent 多样性：运行时与 LLM provider
+
+依据 RFC 决策 10：agent = 运行时 + LLM provider + 模型。M9a 先打地基，之后 M9b 与 M9c 并行。
+
+#### M9a 注册与选择
+
+- **目标：** 运行时、provider 和 agent 可以注册；按层级和任务选用 agent；现有行为不变。
+- **范围：**
+  - 三张表：`agent_runtimes`（类型、名称、二进制或 SDK 位置、探测到的版本和能力、默认参数）、
+    `llm_providers`（协议列表、认证方式：OAuth 关联到运行时的登录，或 API key 存库打码；base_url；模型及价格）、
+    `agents`（运行时、provider、模型、effort、运行时选项）；内置一个"Claude Code + Claude 订阅 + 默认模型"的 agent；
+  - 运行时适配器接口，由现有 Claude Code 路径抽出：启动参数、system prompt 注入、隔离、把事件解析为内部事件、
+    会话续接、花费；
+  - 分层配置新增 `agent`（模型并入 agent）；新建任务时可以按角色覆盖 agent；
+  - 校验：协议有交集、OAuth 只配给发放它的运行时、角色所需能力具备；
+  - 界面：Settings 里注册运行时、provider 和 agent，分层表单里选 agent，新建任务时可按角色选；
+  - 取代 `llm_profiles` 与 `agent_configs.runtime`、`llm_profile_id`；M6 评测可以指定 agent。
+- **验收：** 不做任何配置时，四类角色的启动参数和 system prompt 与 main 逐字节一致；校验的正反例各有测试；
+  任务级覆盖只影响该任务的对应角色。
+
+#### M9b Claude Code 接多种 provider
+
+- **范围：** 订阅 OAuth（现状）、Anthropic API key、兼容 anthropic 协议的接口（GLM、Kimi 等，经 base_url 与 key 接入）；
+  用 API key 时确认不会退回订阅登录（先核实环境变量的优先级）；接第三方接口时按 provider 登记的价格计算花费。
+- **验收：** 每种 provider 各跑一次 M6 真实模式评测（需要维护者提供对应的 key），花费与 provider 价格核对一致。
+
+#### M9c Codex 运行时
+
+- **范围：** Codex 适配器支持四类角色：Worker、Reviewer 一次一轮；Manager、Planner 常驻会话与续接（先核实 app-server
+  协议或逐轮续接）；独立的 `CODEX_HOME` 隔离且保留登录；system prompt 注入、MCP 翻译为 `config.toml`、
+  目录条目的兼容性（先核实 Codex 对 skill 的支持）；按 token 用量与 provider 价格计算花费；OpenAI 登录与 API key。
+- **验收：** 用 Codex agent 跑 M6 真实模式评测（四类角色都用 Codex 跑一次，再与 Claude 基线对比）。
+
+#### M9d SDK 运行时与 norma
+
+- **范围：** 在适配器接口上接 SDK 类运行时；norma SDK 就绪后接入，验证它的双协议。范围在 M9a–M9c 之后再细化。
 
 ## 4. 进度台账
 

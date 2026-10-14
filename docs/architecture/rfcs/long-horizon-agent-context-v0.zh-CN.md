@@ -242,3 +242,23 @@ L5 代码契约始终最后，因为 L4 来自用户或 Planner，放在契约�
      从 git 导入、在界面新建和编辑（M8c）；harness、模型、effort、环境变量和单次上限按第一条的层级统一解析，
      原"按角色分别设模型"的待办并入（M8d）；导出与导入用同一个文件，应用前先预览，密钥默认不导出、留作
      占位符（M8e）。
+10. **agent 多样性：运行时与 LLM provider（M9）。** 维护者决定把 agent 从固定的"Claude Code CLI + 订阅 OAuth"
+   抽象为**运行时 + LLM provider**：
+   - **运行时**是跑 agent 循环和工具的一层，分 CLI（Claude Code、Codex、OMP 等）和 SDK（Claude Agent SDK、
+     OpenAI Agents SDK、自研的 norma SDK 等）。运行时的**类型**由代码里的适配器提供；**实例**由用户注册
+     （二进制或 SDK、版本、默认参数），注册时探测版本和能力。
+   - **LLM provider** 是凭据、接口地址、协议和模型：OAuth（Claude Code、Codex 各自的登录）或 API key
+     （Anthropic、OpenAI、GLM、Kimi 等）。协议按接口区分为 `anthropic-messages`、`openai-responses`、
+     `openai-chat`，一个 provider 支持其中一种或几种（norma 两类都支持）。API key 存数据库、接口打码（同 M8b）。
+   - **agent = 运行时 + provider + 模型**（加 effort 等运行时选项）。注册时校验：运行时要求的协议与 provider
+     支持的协议有交集；OAuth provider 只能配给发放它的运行时（Claude 订阅只给 Claude Code 及基于它的
+     Claude Agent SDK，Codex 登录只给 Codex），不把 token 取出来给别的运行时。
+   - **选用哪个 agent 是一项分层配置**，按决策 9 的层级（系统默认 → 角色 → 项目 → 项目里的角色）解析，
+     模型随 agent 走；**任务可以覆盖各角色用哪个 agent**，其他配置不设任务层。
+   - **所有运行时都要支持所有角色。** Manager、Planner 需要常驻会话和续接，非 Claude 运行时也要实现
+     （例如 Codex 的 app-server 协议或逐轮续接，实现前先核实）。
+   - 运行时之间的差异由适配器吸收：system prompt 的注入方式、隔离方式（如 Codex 用独立的 `CODEX_HOME`）、
+     把事件流统一成内部事件、MCP 配置格式的翻译、目录条目按运行时标注兼容性（Claude 插件只挂给 Claude 系
+     运行时），以及花费（运行时不报告花费或接第三方接口时，按 provider 登记的模型价格计算）。
+   - 现有的 `llm_profiles` 表和 `agent_configs.runtime`、`llm_profile_id` 两列从未接入启动路径，由新模型取代。
+   - 每个新 agent 先用 M6 回归评测验收，评测可以指定 agent。
