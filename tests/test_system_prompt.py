@@ -80,7 +80,7 @@ def test_the_review_contract_shows_the_verdict_the_verify_path_reads(tmp_path: P
 HARNESS = Harness("## How you work\nVerify.", HarnessSource.SYSTEM_DEFAULT)
 
 # The project's knowledge index is in the project layer, after the background.
-INDEX = "## Project knowledge\nReference documents.\n- Glossary: Terms (read: /k/abc/Glossary.md)"
+INDEX = "## Project knowledge\nReference documents.\nIn /k/abc:\n- Glossary: Terms (Glossary.md)"
 
 
 def test_the_five_layers_are_harness_role_project_task_contract() -> None:

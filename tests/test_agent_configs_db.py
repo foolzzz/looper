@@ -110,3 +110,38 @@ def test_worker_rows_move_to_the_new_recommended_prompt() -> None:
             await pool.close()
 
     asyncio.run(_run())
+
+
+def test_permission_mode_is_dropped_and_an_update_that_sends_it_still_applies() -> None:
+    """No agent ever applied permission_mode (all run with --dangerously-skip-permissions): the startup
+    schema drops the column, also from a database that still has it, and an update from an older
+    dashboard that still sends the field changes the rest."""
+    import asyncpg
+
+    from loopx.db import agent_configs
+    from loopx.db.connection import ensure_schema
+
+    agent_id = f"test-agent-{uuid.uuid4().hex[:8]}"
+
+    async def _columns(pool: asyncpg.Pool) -> set[str]:
+        rows = await pool.fetch("SELECT column_name FROM information_schema.columns "
+                                "WHERE table_schema = current_schema() AND table_name = 'agent_configs'")
+        return {row["column_name"] for row in rows}
+
+    async def _run() -> None:
+        pool = await asyncpg.create_pool(DSN, min_size=1, max_size=2)
+        try:
+            await pool.execute("ALTER TABLE IF EXISTS agent_configs ADD COLUMN IF NOT EXISTS permission_mode TEXT")
+            await ensure_schema(pool)
+            await ensure_schema(pool)  # idempotent
+            assert "permission_mode" not in await _columns(pool)
+
+            await agent_configs.seed_defaults([{"agent_id": agent_id, "role": "worker"}], pool=pool)
+            updated = await agent_configs.set_config(
+                agent_id, {"permission_mode": "plan", "max_turns": 7}, pool=pool)
+            assert updated["max_turns"] == 7 and "permission_mode" not in updated
+        finally:
+            await pool.execute("DELETE FROM agent_configs WHERE agent_id = $1", agent_id)
+            await pool.close()
+
+    asyncio.run(_run())

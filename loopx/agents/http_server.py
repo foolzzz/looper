@@ -56,7 +56,15 @@ HTTP_403 = "403 Forbidden"
 HTTP_404 = "404 Not Found"
 HTTP_405 = "405 Method Not Allowed"
 HTTP_409 = "409 Conflict"
+HTTP_413 = "413 Content Too Large"
 HTTP_500 = "500 Internal Server Error"
+
+
+# The largest request body the server reads. The largest legitimate one is a
+# knowledge upload: a document of at most knowledge.DOCUMENT_MAX_BYTES (2 MiB)
+# as base64 in JSON is about 2.7 MiB, and as JSON-escaped text up to twice its
+# size; 8 MiB leaves room for both. A larger body is refused unread.
+REQUEST_BODY_MAX_BYTES = 4 * knowledge.DOCUMENT_MAX_BYTES
 
 
 def _json_response(status: str, body: Any) -> bytes:
@@ -137,7 +145,21 @@ class AgentHTTPServer:
 
             headers = await self._read_headers(reader)
             body = b""
-            content_length = int(headers.get("content-length", "0"))
+            try:
+                content_length = int(headers.get("content-length", "0"))
+            except ValueError:
+                content_length = -1
+            if content_length < 0:
+                writer.write(_json_response(HTTP_400, {"error": "bad Content-Length"}))
+                await writer.drain()
+                return
+            if content_length > REQUEST_BODY_MAX_BYTES:
+                writer.write(_json_response(HTTP_413, {
+                    "error": f"the request body has {content_length} bytes; the server takes at most "
+                             f"{REQUEST_BODY_MAX_BYTES // (1024 * 1024)} MiB ({REQUEST_BODY_MAX_BYTES} bytes)",
+                }))
+                await writer.drain()
+                return
             if content_length > 0:
                 body = await asyncio.wait_for(
                     reader.readexactly(content_length), timeout=30.0

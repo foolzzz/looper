@@ -19,6 +19,20 @@ How the agent system works today is described in
 
 ### Added
 
+- **Reclaiming read-only copies.** `loopx serve` now removes, when it starts
+  and before any agent launches, the content-hashed copies under the runtime
+  root (library items, project knowledge sets, project skills plugins) that
+  the current content no longer uses and no running process's command line
+  mounts or links into (`loopx/agents/read_only_copies.py`). They used to stay
+  on disk for good after their content was replaced or deleted. When the
+  content or the running processes cannot be read, nothing is removed.
+
+- **Request body cap.** The HTTP server reads a request body of at most 8 MiB,
+  room for the largest legitimate one (a 2 MiB knowledge document uploaded as
+  base64 in JSON). A larger `Content-Length` gets a 413 with
+  `{"error": ...}` naming the cap, before any of the body is read; a
+  malformed one gets a 400 instead of a 500.
+
 - **Project execution settings (M5).** A project can set how its Planner,
   Workers and Reviewers run; every field is optional and `null` inherits, so
   a project with none set runs as before (`loopx/agents/project_execution.py`).
@@ -128,6 +142,18 @@ How the agent system works today is described in
   ([`evals/README.md`](evals/README.md)).
 
 ### Changed
+
+- **Shorter project knowledge index.** The `## Project knowledge` index names
+  each directory once (`In <directory>:`) and gives every document a path
+  relative to it, `- <title>: <summary> (<path>)`, instead of an absolute
+  path of about 150 characters a line; short documents now reach the
+  100-document cap before the 4,000-character index cap (it used to fill at 15
+  to 25). Claude Code resolves a relative `Read` path against the working
+  directory only, so the agent joins the path to the directory named above
+  it. The text and upload documents are materialized together, one read-only
+  directory per set of documents (`knowledge/<set_sha256>/<filename>`, a
+  shared name gets `-2`), and that directory is the one mounted with
+  `--add-dir`.
 
 - Each task's Planner is now a Claude Code agent. It keeps one Claude process
   for the task's life, started on its first turn in the task's directory and
@@ -402,6 +428,11 @@ How the agent system works today is described in
 
 ### Removed
 
+- **`agent_configs.permission_mode`.** No agent applied it since every agent
+  runs with `--dangerously-skip-permissions`; the startup schema drops the
+  column (`DROP COLUMN IF EXISTS`), and agent configs no longer return it. An
+  update that still sends it, as the current dashboard does, is applied
+  without it.
 - **`loopx update` and `loopx init`.** To upgrade, re-run `install.sh`: it
   installs the latest release wheel over the current one. `loopx init` wrote
   `providers.yaml` and `agents/*.yaml`, which nothing in the agent system

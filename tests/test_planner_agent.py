@@ -982,14 +982,15 @@ class TestKnowledge:
         h = drive(claude, always(WORK_OK))
 
         (argv,) = claude.argvs()
-        knowledge_root = f"{h.work_dir.parent}/.local/projects/proj-1/knowledge"
-        # The task runs in its own directory, so the project's is mounted for the path document.
-        assert _add_dirs(argv) == [knowledge_root, str(project_dir)]
+        set_dir, mounted_project = _add_dirs(argv)
+        # The stored documents' set directory, and the project's since the task runs in its own directory.
+        assert Path(set_dir).parent == h.work_dir.parent / ".local" / "projects" / "proj-1" / "knowledge"
+        assert mounted_project == str(project_dir)
         _assert_unrestricted(argv)
         (prompt,) = claude.prompts()
         _in_order(prompt, "## Project: calc\nUse uv.\n\n", "## Project knowledge\n",
-                  f"- Glossary: Terms the code uses (read: {knowledge_root}/{_sha('MARKER-ALPHA')}/Glossary.md)\n",
-                  f"- Runbook: How to deploy (read: {project_dir / 'docs' / 'runbook.md'})\n\n## Task\n",
+                  f"In {set_dir}:\n- Glossary: Terms the code uses (Glossary.md)\n",
+                  f"In {project_dir}:\n- Runbook: How to deploy (docs/runbook.md)\n\n## Task\n",
                   REPLY_CONTRACT)
         index = prompt[prompt.index("## Project knowledge"):prompt.index("\n\n## Task")]
         for start in _starts(agent_db):
@@ -1017,7 +1018,7 @@ class TestKnowledge:
         first_prompt, second_prompt = claude.prompts()
         assert "- Style: How we write" not in first_prompt
         if after:
-            assert "- Style: How we write (read: " in second_prompt
+            assert "- Style: How we write (Style.md)" in second_prompt
         else:
             assert "## Project knowledge" not in second_prompt
         documents = [s["metadata"]["prompt_layers"]["project"]["knowledge_documents"] for s in _starts(agent_db)]
@@ -1035,7 +1036,7 @@ class TestKnowledge:
 
         assert h.final().payload["status"] == "completed"  # type: ignore[union-attr]
         (argv,) = claude.argvs()  # same knowledge, so Claude was not restarted
-        assert "- Glossary: Terms (read: " in claude.prompts()[0]
+        assert "- Glossary: Terms (Glossary.md)" in claude.prompts()[0]
         assert "Warning: the project's knowledge could not be read" in activity(agent_db)
 
 

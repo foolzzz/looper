@@ -98,7 +98,6 @@ CREATE TABLE IF NOT EXISTS agent_configs (
     max_turns        INTEGER NOT NULL DEFAULT 0,
     timeout_seconds  INTEGER NOT NULL DEFAULT 1200,
     max_concurrency  INTEGER NOT NULL DEFAULT 1,
-    permission_mode  TEXT,
     extra_args       JSONB,
     metadata         JSONB,
     created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -111,6 +110,9 @@ ALTER TABLE agent_configs ADD COLUMN IF NOT EXISTS default_prompt TEXT NOT NULL 
 -- The Manager's own harness prompt ('' = the default one in Settings). The
 -- task agents' harness overrides belong to their project.
 ALTER TABLE agent_configs ADD COLUMN IF NOT EXISTS harness_prompt TEXT NOT NULL DEFAULT '';
+-- permission_mode was never applied: every agent runs with
+-- --dangerously-skip-permissions (claude_cli.permission_args).
+ALTER TABLE agent_configs DROP COLUMN IF EXISTS permission_mode;
 
 -- Settings the whole system shares, one value per key. Code owns each key's
 -- type and validation (loopx/agents/agent_settings.py); a key without a row

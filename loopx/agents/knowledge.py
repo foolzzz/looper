@@ -11,17 +11,23 @@ M3). Each document has a title, a one-line summary and one of three sources
 
 Agents do not get the documents in their prompt. The project layer (L3) of the
 Planner's, the Workers' and the Reviewers' system prompt gains an index after
-the background (``## Project knowledge``): one line per document with its
-title, its summary and the absolute path to read it from; a path document
-whose file is gone is listed as missing. Text and upload documents are
-materialized read-only, named by their content's hash, under
-``<runtime_root>/.local/projects/<project_id>/knowledge/<sha256>/<filename>``,
-and every run of those agents mounts that directory with ``--add-dir``
-(``claude_cli.knowledge_args``, through ``agent_settings.Launch``); it also
-mounts the project's directory when the project has a path document and the
-task runs in another directory. The Manager spans every project and gets
-neither. Everything is read when a run starts, so a change reaches the next
-Worker or Reviewer, and the resident Planner restarts on its next turn.
+the background (``## Project knowledge``): under a line naming each directory
+once, one line per document with its title, its summary and its path relative
+to that directory; a path document whose file is gone is listed as missing.
+Claude Code resolves a relative path against the working directory only, not
+against an ``--add-dir`` root, so the index names the root and the agent joins
+the two. Short paths keep the index near its document cap: the absolute path
+was about 150 characters a line. Text and upload documents are materialized
+read-only together, one directory per set of documents named by their hash:
+``<runtime_root>/.local/projects/<project_id>/knowledge/<set_sha256>/<filename>``
+(a file name two documents share gets ``-2``, ``-3``). Every run of those
+agents mounts that directory with ``--add-dir`` (``claude_cli.knowledge_args``,
+through ``agent_settings.Launch``); it also mounts the project's directory
+when the project has a path document and the task runs in another directory.
+The Manager spans every project and gets neither. Everything is read when a
+run starts, so a change reaches the next Worker or Reviewer, and the resident
+Planner restarts on its next turn. A set no current run uses is removed when
+the server starts (``read_only_copies``).
 
 Caps, each refused with a message that states it: a document has at most
 ``DOCUMENT_MAX_BYTES``; a project at most ``PROJECT_MAX_DOCUMENTS`` documents
@@ -36,6 +42,7 @@ import asyncio
 import base64
 import binascii
 import hashlib
+import json
 import logging
 import os
 import re
@@ -58,9 +65,11 @@ FILENAME_MAX_CHARS = 100
 
 INDEX_HEADING = "## Project knowledge"
 INDEX_INTRO = (
-    "Reference documents for this project. They are not in this prompt: read the ones your work needs from "
-    "the path given, and say which ones you used."
+    "Reference documents for this project. They are not in this prompt: read the ones your work needs and "
+    "say which ones you used. A document's path is relative to the directory named above it."
 )
+# Names the layout of a set's directory: change it when the layout changes.
+_SET_LAYOUT_ID = "knowledge-set/v1"
 
 _PROJECT_ID = re.compile(r"proj-[A-Za-z0-9]+")
 _UNSAFE_FILENAME = re.compile(r"[^\w.-]+")
@@ -247,27 +256,70 @@ def knowledge_dir(runtime_root: Path, project_id: str) -> Path:
     return runtime_root.absolute() / ".local" / "projects" / project_id / "knowledge"
 
 
-def stored_file(runtime_root: Path, project_id: str, row: Mapping[str, Any]) -> Path:
-    """Where a text or upload document is materialized: ``<knowledge_dir>/<sha256>/<filename>``."""
-    return knowledge_dir(runtime_root, project_id) / str(row["sha256"]) / str(row["filename"])
+@dataclass(frozen=True)
+class StoredSet:
+    """Where a project's text and upload documents are materialized: one directory and a file name each."""
+
+    directory: Path | None  # None without stored documents
+    names: Mapping[str, str]  # document id -> file name in ``directory``
+
+
+def stored_set(runtime_root: Path, project_id: str, rows: Sequence[Mapping[str, Any]]) -> StoredSet:
+    """The set directory of the stored documents in ``rows``: ``<knowledge_dir>/<set_sha256>``.
+
+    Each document keeps its file name; a later document whose name an earlier
+    one took (ignoring case, as macOS does) gets ``-2``, ``-3`` before its
+    extension. The hash covers the names and the contents' hashes.
+    """
+    names: dict[str, str] = {}
+    taken: set[str] = set()
+    for row in rows:
+        if SourceKind(row["source_kind"]) not in STORED_KINDS:
+            continue
+        stem, dot, extension = str(row["filename"]).rpartition(".")
+        if not dot:
+            stem, extension = str(row["filename"]), ""
+        name, number = str(row["filename"]), 1
+        while name.casefold() in taken:
+            number += 1
+            name = f"{stem}-{number}{dot}{extension}"
+        taken.add(name.casefold())
+        names[str(row["id"])] = name
+    if not names:
+        return StoredSet(None, {})
+    listing = [[names[str(row["id"])], str(row["sha256"])] for row in rows if str(row["id"]) in names]
+    key = _sha256(json.dumps([_SET_LAYOUT_ID, listing], separators=(",", ":")).encode("utf-8"))
+    return StoredSet(knowledge_dir(runtime_root, project_id) / key, names)
 
 
 @dataclass(frozen=True)
 class IndexEntry:
     title: str
     summary: str
-    path: str  # absolute where the project has a directory
+    root: str  # the directory the path is relative to
+    path: str
     missing: bool = False
 
     def line(self) -> str:
-        return f"- {self.title}: {self.summary} ({'missing' if self.missing else 'read'}: {self.path})"
+        return f"- {self.title}: {self.summary} ({'missing: ' if self.missing else ''}{self.path})"
+
+    @property
+    def read_path(self) -> str:
+        return str(Path(self.root) / self.path) if self.root else self.path
 
 
 def compose_index(entries: Sequence[IndexEntry]) -> str:
-    """The ``## Project knowledge`` section; ``''`` without documents."""
+    """The ``## Project knowledge`` section; ``''`` without documents.
+
+    The entries are grouped by their directory, which a line names once.
+    """
     if not entries:
         return ""
-    return "\n".join([INDEX_HEADING, INDEX_INTRO, *(entry.line() for entry in entries)])
+    lines = [INDEX_HEADING, INDEX_INTRO]
+    for root in dict.fromkeys(entry.root for entry in entries):
+        lines.append(f"In {root or 'the project directory, which is not set'}:")
+        lines.extend(entry.line() for entry in entries if entry.root == root)
+    return "\n".join(lines)
 
 
 def clipped_index(entries: Sequence[IndexEntry]) -> str:
@@ -288,25 +340,27 @@ def clipped_index(entries: Sequence[IndexEntry]) -> str:
     return ""
 
 
-def _entry(runtime_root: Path, project: Mapping[str, Any], row: Mapping[str, Any]) -> IndexEntry:
+def _entry(stored: StoredSet, project: Mapping[str, Any], row: Mapping[str, Any]) -> IndexEntry:
     project_dir = str(project.get("work_dir") or "")
     if SourceKind(row["source_kind"]) is SourceKind.PATH:
         relative = str(row["path"])
-        shown = str(Path(project_dir) / relative) if project_dir else relative
         missing = _readable_project_file(project_dir, relative) is None
-        return IndexEntry(str(row["title"]), str(row["summary"]), shown, missing)
-    return IndexEntry(str(row["title"]), str(row["summary"]), str(stored_file(runtime_root, str(project["id"]), row)))
+        return IndexEntry(str(row["title"]), str(row["summary"]), project_dir, relative, missing)
+    return IndexEntry(str(row["title"]), str(row["summary"]), str(stored.directory), stored.names[str(row["id"])])
 
 
 def _index_entries(runtime_root: Path, project: Mapping[str, Any], rows: Sequence[Mapping[str, Any]]) -> list[IndexEntry]:
-    return [_entry(runtime_root, project, row) for row in rows]
+    """The index's entries: the stored documents first, then the path documents, each in the rows' order."""
+    stored = stored_set(runtime_root, str(project["id"]), rows)
+    entries = [_entry(stored, project, row) for row in rows]
+    return sorted(entries, key=lambda entry: entry.root != str(stored.directory))
 
 
 # --- Materializing a stored document ---
 
 
-def materialize(runtime_root: Path, project_id: str, row: Mapping[str, Any], content: str) -> Path:
-    """Write a stored document read-only at ``stored_file``; returns its path.
+def materialize(target: Path, row: Mapping[str, Any], content: str) -> Path:
+    """Write a stored document read-only at ``target``, in its set's directory; returns ``target``.
 
     A file whose content already matches the hash is kept; a damaged one is
     replaced. Writes go through a temporary file, so a reader never sees a
@@ -316,7 +370,6 @@ def materialize(runtime_root: Path, project_id: str, row: Mapping[str, Any], con
     data = content.encode("utf-8")
     if _sha256(data) != row["sha256"]:
         raise KnowledgeError(f"the content of document {row['id']} does not match its hash")
-    target = stored_file(runtime_root, project_id, row)
     try:
         if _sha256(target.read_bytes()) == row["sha256"]:
             return target
@@ -392,23 +445,25 @@ async def load_knowledge(runtime_root: Path, project: Mapping[str, Any] | None, 
         return AgentKnowledge(error="the project's knowledge could not be read")
     if not rows:
         return EMPTY_KNOWLEDGE
+    stored = stored_set(runtime_root, project_id, rows)
     try:
         for row in rows:
-            if SourceKind(row["source_kind"]) not in STORED_KINDS:
+            if (name := stored.names.get(str(row["id"]))) is None:
                 continue
-            if not _is_materialized(stored_file(runtime_root, project_id, row), str(row["sha256"])):
+            target = stored.directory / name
+            if not _is_materialized(target, str(row["sha256"])):
                 content = await db_documents.get_content(str(row["id"]))
                 if content is None:
                     raise KnowledgeError(f"document {row['id']} has no content")
-                await asyncio.to_thread(materialize, runtime_root, project_id, row, content)
+                await asyncio.to_thread(materialize, target, row, content)
     except Exception as exc:
         logger.warning("cannot prepare the knowledge of project %s; the run goes without it", project_id,
                        exc_info=True)
         return AgentKnowledge(error=f"the project's knowledge could not be prepared: {exc}")
     project_dir = str(project.get("work_dir") or "")
     add_dirs: list[str] = []
-    if any(SourceKind(row["source_kind"]) in STORED_KINDS for row in rows):
-        add_dirs.append(str(knowledge_dir(runtime_root, project_id)))
+    if stored.directory is not None:
+        add_dirs.append(str(stored.directory))
     if (any(SourceKind(row["source_kind"]) is SourceKind.PATH for row in rows) and project_dir
             and Path(project_dir).is_dir() and not _same_directory(project_dir, work_dir)):
         add_dirs.append(project_dir)
@@ -419,9 +474,9 @@ async def load_knowledge(runtime_root: Path, project: Mapping[str, Any] | None, 
 # --- The API: list, add, change and delete a project's documents ---
 
 
-def document_view(runtime_root: Path, project: Mapping[str, Any], row: Mapping[str, Any]) -> dict[str, Any]:
+def document_view(stored: StoredSet, project: Mapping[str, Any], row: Mapping[str, Any]) -> dict[str, Any]:
     """A document as the API shows it: no content; ``read_path`` is where agents read it."""
-    entry = _entry(runtime_root, project, row)
+    entry = _entry(stored, project, row)
     kind = SourceKind(row["source_kind"])
     size = int(row["size_bytes"])
     if kind is SourceKind.PATH and (live := _readable_project_file(str(project.get("work_dir") or ""), str(row["path"]))):
@@ -433,7 +488,7 @@ def document_view(runtime_root: Path, project: Mapping[str, Any], row: Mapping[s
         "source_kind": kind.value,
         "filename": row["filename"] or None,
         "path": row["path"],
-        "read_path": entry.path,
+        "read_path": entry.read_path,
         "missing": entry.missing,
         "size_bytes": size,
         "sha256": row["sha256"],
@@ -443,10 +498,11 @@ def document_view(runtime_root: Path, project: Mapping[str, Any], row: Mapping[s
 
 
 def _view(runtime_root: Path, project: Mapping[str, Any], rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    stored = stored_set(runtime_root, str(project["id"]), rows)
     index = compose_index(_index_entries(runtime_root, project, rows))
     return {
         "project_id": project["id"],
-        "documents": [document_view(runtime_root, project, row) for row in rows],
+        "documents": [document_view(stored, project, row) for row in rows],
         "count": len(rows),
         "stored_bytes": _stored_bytes(rows),
         "index": index,
@@ -544,6 +600,12 @@ def _pending_row(project_id: str, fields: Mapping[str, Any], *, like: Mapping[st
     return row
 
 
+async def _with_document(project_id: str, document_id: str, runtime_root: Path) -> dict[str, Any]:
+    """The knowledge view after a change, with the changed document's view as ``document``."""
+    view = await knowledge_view(project_id, runtime_root)
+    return {"document": next(doc for doc in view["documents"] if doc["document_id"] == document_id), **view}
+
+
 async def add_document(project_id: str, data: Mapping[str, Any], runtime_root: Path) -> dict[str, Any]:
     """Add a document (``source_kind``, ``title``, ``summary`` and its source's fields); returns the view."""
     from ..db import project_documents as db_documents
@@ -561,7 +623,7 @@ async def add_document(project_id: str, data: Mapping[str, Any], runtime_root: P
         rows = await db_documents.list_documents(project_id, pool=conn)
         _check_caps(runtime_root, project, [*rows, _pending_row(project_id, fields)])
         row = await db_documents.insert_document(conn, project_id=project_id, **fields)
-    return {"document": document_view(runtime_root, project, row), **await knowledge_view(project_id, runtime_root)}
+    return await _with_document(project_id, str(row["id"]), runtime_root)
 
 
 async def update_document(
@@ -599,11 +661,11 @@ async def update_document(
         row = await db_documents.update_document(conn, project_id, document_id, **fields)
         if row is None:  # pragma: no cover - the row is locked through its project
             raise KnowledgeNotFound(f"project {project_id!r} has no document {document_id!r}")
-    return {"document": document_view(runtime_root, project, row), **await knowledge_view(project_id, runtime_root)}
+    return await _with_document(project_id, str(row["id"]), runtime_root)
 
 
 async def delete_document(project_id: str, document_id: str, runtime_root: Path) -> dict[str, Any]:
-    """Remove a document; returns the view. Its materialized copy stays (a running agent may be reading it)."""
+    """Remove a document; returns the view. Its materialized copy stays until a server start reclaims it."""
     from ..db import project_documents as db_documents
 
     async with db_documents.locked_project(project_id) as (conn, project):

@@ -672,10 +672,16 @@ class TestWorkerLibrary:
                 ("demo@market", demo["sha256"]), ("alpha", alpha["sha256"])]
 
 
-# What the fake Claude reads like an agent would: every file the index tells it to read.
+# What the fake Claude reads like an agent would: every file the index names, joined to the directory above it.
 _READ_KNOWLEDGE = (
-    "import re\n"
-    "reads = {path: open(path, encoding='utf-8').read() for path in re.findall(r'\\(read: ([^)]+)\\)', prompt)}\n"
+    "import os, re\n"
+    "reads, root = {}, ''\n"
+    "for line in prompt.splitlines():\n"
+    "    if line.startswith('In ') and line.endswith(':'):\n"
+    "        root = line[3:-1]\n"
+    "    elif match := re.fullmatch(r'- .*\\(([^)]+)\\)', line):\n"
+    "        path = os.path.join(root, match.group(1))\n"
+    "        reads[path] = open(path, encoding='utf-8').read()\n"
     "json.dump({'argv': sys.argv[1:], 'prompt': prompt, 'reads': reads}, open('knowledge.json', 'w'))\n"
 )
 
@@ -725,15 +731,16 @@ class TestWorkerKnowledge:
         for verify, contract in ((False, WORK_CONTRACT), (True, REVIEW_CONTRACT)):
             result, seen = self._run(verify=verify)
             assert result.get("status") == "completed" or result.get("passed") is True
-            knowledge_root = f"{seen['root']}/.local/projects/proj-1/knowledge"
-            glossary = f"{knowledge_root}/{_sha('MARKER-ALPHA')}/Glossary.md"
+            set_dir, mounted_project = _add_dirs(seen["argv"])
+            glossary = f"{set_dir}/Glossary.md"
             runbook = str(project_dir / "docs" / "runbook.md")
-            # The stored document's directory, and the project's since the step runs elsewhere.
-            assert _add_dirs(seen["argv"]) == [knowledge_root, str(project_dir)]
+            # The stored document's set directory, and the project's since the step runs elsewhere.
+            assert Path(set_dir).parent == Path(seen["root"]) / ".local" / "projects" / "proj-1" / "knowledge"
+            assert mounted_project == str(project_dir)
             prompt = seen["prompt"]
             _in_order(prompt, "## Project: calc\nUse uv.\n\n", "## Project knowledge\n",
-                      f"- Glossary: Terms the code uses (read: {glossary})\n",
-                      f"- Runbook: How to deploy (read: {runbook})\n\n", "## Task\n", contract)
+                      f"In {set_dir}:\n- Glossary: Terms the code uses (Glossary.md)\n",
+                      f"In {project_dir}:\n- Runbook: How to deploy (docs/runbook.md)\n\n", "## Task\n", contract)
             assert "MARKER-ALPHA" not in prompt and "MARKER-BETA" not in prompt  # read on demand, not in the prompt
             assert seen["reads"] == {glossary: "MARKER-ALPHA", runbook: "Deploy with MARKER-BETA.\n"}
             metadata = agent_db.start_record.await_args.kwargs["metadata"]

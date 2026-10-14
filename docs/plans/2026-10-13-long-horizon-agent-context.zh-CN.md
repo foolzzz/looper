@@ -1,6 +1,6 @@
 # 开发计划：长程 Agent 上下文体系（M0–M6）
 
-- **状态：** M0–M6 全部交付；上游 LoopX 清理 B1–B4 已交付，只剩 `README.zh-CN.md` 等首屏预览后提交；其余见第 5 节待办
+- **状态：** M0–M6 全部交付；上游 LoopX 清理 B1–B4 已交付；其余见第 5 节待办
 - **依据：** [RFC：长程 Agent 的上下文体系 v0](../architecture/rfcs/long-horizon-agent-context-v0.zh-CN.md)。
   设计原则、分层模型和已作出的决定以 RFC 为准；本文只管"怎么分阶段做、做到什么算完成、现在做到哪了"。
 - **仓库：** `foolzzz/looper`，基线 `main`
@@ -181,10 +181,10 @@
   - `project_documents` 表：标题、必填的一句话摘要、来源类型 `text`/`upload`/`path`、`filename` 和 `content`（录入、上传）或 `path`（相对项目默认目录）、大小、`sha256`、更新时间；CHECK 约束保证每种来源的列一致，删项目时连带删除；
   - 上限：单篇 2 MiB，每个项目 100 篇、存储内容 50 MiB（引用路径不计入），索引 4,000 个字符，超限返回 400 并写明上限；增删改在持有项目行锁的事务里做；
   - 上传走 JSON 里的 base64；不是 UTF-8 或含 NUL 字节的按二进制拒绝；引用路径必须是默认目录里的普通文本文件，跟随链接后仍在目录内；
-  - 索引在 L3 背景之后（`## Project knowledge`，每篇一行 `- <标题>: <摘要> (read: <绝对路径>)`，已不存在的引用文件标为 `missing`）；`--add-dir` 由 `claude_cli.knowledge_args` 生成、随 `Launch` 下发：录入和上传的文档挂载知识目录，有引用路径且任务目录不是项目目录时再挂载项目目录；Manager 都没有；
+  - 索引在 L3 背景之后（`## Project knowledge`，每个目录写一次 `In <目录>:`，其下每篇一行 `- <标题>: <摘要> (<相对路径>)`，已不存在的引用文件标为 `missing`）；`--add-dir` 由 `claude_cli.knowledge_args` 生成、随 `Launch` 下发：录入和上传的文档一组一个目录（按文件名和内容的哈希命名），挂载这个目录，有引用路径且任务目录不是项目目录时再挂载项目目录；Manager 都没有；
   - Planner 的重启签名加上挂载的目录（索引本身已在 prompt 哈希里）；`prompt_layers.project` 记 `knowledge_sha256`、`knowledge_documents`，读不到时记 `knowledge_error`；
   - 已核实（Claude Code 2.1.285，隔离参数下）：agent 能读 `--add-dir` 目录里的文件，该目录及其上级的 `CLAUDE.md` 不会被加载，不存在的目录不会让运行失败；
-  - 索引每行带绝对路径（在 `~/.loopx` 下约 150 个字符），索引上限实际在 15 到 25 篇左右先到，100 篇的上限很难达到。
+  - 索引原来每行带绝对路径（在 `~/.loopx` 下约 150 个字符），15 到 25 篇就占满索引；后改为相对路径，短文档能放满 100 篇（见进度台账）。
 
 ### M4 项目 skill
 
@@ -281,6 +281,7 @@
 | 2026-10-13 | M6 交付（looper #36）：`evals/prompt_regression/` 用 5 个小任务（单步、依赖、送审、重试、聊天纠偏）经一次性 `loopx serve`（新数据库、空闲端口、临时目录）走 HTTP API，读回成功、步骤、重试、送审、花费、契约违约和 Planner 是否改文件，与上一次运行或已提交的基线对比输出 Markdown 表；替身 Claude 模式进测试套件，真实模式按需跑，单次运行带 `--max-budget-usd`、整轮有总花费上限。验收：替身模式 5/5 通过，并识别出故意的 Planner、Worker 违约和 Planner 写文件；真实 haiku 基线 5/5、$0.33，去掉 Planner 的 `REPLY_CONTRACT`（本地临时补丁，已撤回）后 0/5、违约 10 次，真实花费共 $0.82，分叉测试 843 通过。 |
 | 2026-10-13 | M5 交付（looper #37）：项目执行配置，只做核心。`projects` 新增六个可空字段（模型、单次运行上限 `--max-budget-usd`、任务累计上限及到达后的处理方式、Planner 监督间隔、验收策略），未设置时行为与 main 一致，经项目 GET/PUT 和项目编辑读写，非法值返回 400。验证：fork 测试集加新测试在真实 PG 上 916 通过，真实 Claude 只用于核实 `--max-budget-usd`（约 $0.013）。 |
 | 2026-10-13 | 第一批非核心待办（looper #41，第 5.3 节前两项）：网页聊天打开时，Manager 的 Claude 自主一轮的回复经 `GET /api/chat/events?session=` 实时推送并作为单独一条消息显示；任务 config 按 JSON 对象写入和返回，已按字符串存下的行读回为对象，非对象返回 400。界面：Tasks 列表内边距、返回按钮的可访问名称、1024 px 以下侧栏收成抽屉、新建任务时新项目的背景输入框；验证为通道层测试、真实 PG 测试和无头 Chrome 检查与截图 |
+| 2026-10-13 | 第 5.2 节工程待办（looper #42）：知识索引每个目录写一次、每篇只带相对路径（已核实 Claude Code 只按工作目录解析相对路径），短文档能放满 100 篇；`loopx serve` 启动时回收当前内容不用、也没有运行中进程挂载的只读副本；请求体上限 8 MiB（超限 413）；删除 `agent_configs.permission_mode` 列。验证：真实 haiku 下 Worker 按新索引读到两篇文档（$0.07），回归评测 5/5（$0.33），真实 PG 758 通过。 |
 
 ## 5. 不属于本 RFC 的待办
 
@@ -292,10 +293,6 @@
 
 ### 5.2 工程待办
 
-- **知识索引容量**：索引每行都带一个绝对路径（在 `~/.loopx` 下约 150 字），4,000 字的索引上限实际只能放 15–25 篇，比 100 篇的数量上限先用完。改用短的挂载别名或相对路径（M3 发现）。
-- **runtime root 下的只读副本不清理**：插件与 skill 库（M1.6）、项目知识（M3）和项目 skill（M4）按内容哈希写出的只读副本，在内容替换或删除后仍留在磁盘上。需要在没有运行引用时回收。
-- **HTTP 服务没有请求体大小上限**：知识上传等接口靠业务上限拦截，但服务本身不限制请求体大小（M3 发现）。
-- **`agent_configs.permission_mode` 列已不再使用**（M1.7 起四类 agent 统一权限）：在后续的 schema 清理中迁移删除。
 - **插件与 skill 库的上下文开销**：全部导入后，opus 首个请求的 token 约增加 86%（M1.6 实测）。结合 M2 的花费数据，评估停用不常用的 skill。
 - **下一次发布**：M0–M3 及相关修复尚未发布。下个版本按 looper 的 Release workflow（推 tag 发布）进行，发布说明需覆盖 RFC 决策 4–8 带来的行为变化（个人配置隔离、默认 harness、所有 agent 免权限确认、渠道白名单等）。
 
@@ -305,6 +302,7 @@
 - **项目知识的辅助功能**（M3 只做了核心）：在界面里修改已有文档（API 已支持 `PUT`）、查看正文、拖拽上传、项目视图里显示知识摘要。
 - **项目 skill 的辅助功能**（M4 只做了核心）：在界面里查看和修改已有 skill 的正文、名称和描述（API 已支持 `PUT`），拖入或上传 `SKILL.md`（连同 frontmatter），历史页的「Plugins & skills」里列出这次运行加载的项目 skill（目前只在记录的 `metadata.project_skills` 和启动命令里），以及界面打磨。
 - **项目执行配置的辅助功能**（M5 只做了核心）：项目视图显示已设的执行配置；任务页显示花费占任务上限的比例，接近上限时提醒；任务因上限失败后"提高上限并继续"的操作；按角色分别设模型或单次上限。
+- **Agents 页的 `permission_mode`**：`web/src/lib/api.ts` 的类型和 codex-cli 的「Sandbox」下拉框仍读写这个已删除的字段，服务端不再返回、保存时忽略，可以去掉。
 
 ### 5.4 验证缺口
 
@@ -325,7 +323,7 @@
 - [x] **B1 解耦**（looper #31）：`loopx` 命令只剩 `serve`、`version` 和 `--version`，`[project.scripts]` 指向新的 `loopx/cli.py`，启动时不再加载上游模块（`tests/test_cli_entry.py` 守护）；删除 `setup.py`、`MANIFEST.in`，wheel 不再依赖上游 Chat 包，仍带 `web/` 构建的 dashboard；Python Tests 换成只跑 agent 系统测试的 job。上游代码仍留在磁盘上。
 - [x] **B2 删除上游测试、smoke 和 CI**（looper #34）：删除 1,462 个文件、475,527 行。`tests/**` 只留 agent 系统的 31 个测试文件和它们的 helper（`conftest.py`、`library_fixtures.py`、`claude_stream_replay.py`、`runtime_root_guard/`、`fixtures/claude_stream/`），`examples/**` 只留两个发布 smoke，删除 `regression/`、6 个上游 workflow、`scripts/ci/` 和 `sonar-project.properties`；`tests/conftest.py` 去掉 `loopx.canary` 导入、smoke-suite 选项和上游 fixture；`pyproject.toml` 设 `testpaths = ["tests"]`，CI 直接跑 `pytest`。不带参数的 `pytest` 收集 899 个测试，没有收集错误（之前 11,849 个，8 个文件收集失败）。第 5.2 节因此关闭 4 项：CI 基线（Python Tests 在每个 PR 上跑 agent 系统测试并通过）、Optional Ark Turn workflow、`test_dashboard_command` 的 5 个失败用例和它的偶发超时。
 - [x] **B3 删除上游代码**（looper #35）：删除 2,040 个文件、638,943 行。`loopx/**` 只留 `agents`、`db`、`__init__.py`、`cli.py`、`paths.py`（`paths.py` 只留 runtime root 的三个函数）；删除 `apps/`、`packages/`、`skills/`、`man/`、除 `stage-dashboard.sh` 和 `release-surface-args.sh` 以外的 `scripts/**`（包括 `install-from-github.sh` 和 `install-local.sh`），以及根目录的 `package.json`、`package-lock.json`、`tsconfig.control-plane.json`。`pyproject.toml` 只留 `loopx` 一个命令，去掉 `deepseek-harness` extra、上游的测试依赖、package-data、data-files 和 mypy 配置；dependabot、CODEOWNERS 和 `.gitignore` 里指向已删路径的条目一并去掉。第 5.2 节因此关闭 `scripts/install-from-github.sh` 默认 `stable` 分支一项。
-- [ ] **B4 文档与根目录文件**（looper #38，除 `README.zh-CN.md` 外已交付）：删除 587 个文件、146,883 行。`docs/**` 只留本计划、两份架构文档、`docs/design.md` 和 `docs/releases/`；删除 `docs/fork/**`、`ADOPTERS.md`、`mkdocs.yaml`、`.github/GOVERNANCE.md` 和 4 个上游 issue 模板。`AGENTS.md`、`CONTRIBUTING.md` 改写成精简的 fork 版本；`docs/development/design.md` 的通用界面规则并入 `docs/design.md` 的「界面设计」一节；发布流程移到 `docs/releases/README.md`，发布正文检查只保留中英双语部分；CODEOWNERS、SECURITY、SUPPORT、CODE_OF_CONDUCT 和 PR、issue 模板指向 `foolzzz/looper` 和 `@foolzzz`；CHANGELOG 里指向已删文档的链接改为指向删除前最后一个提交的固定链接（使用说明改指 `docs/architecture/agent-system.md`）。`README.zh-CN.md` 改写为英文 README 的中文版，首屏经维护者预览后单独提交，届时勾选本项。
+- [x] **B4 文档与根目录文件**（looper #38、#40）：删除 587 个文件、146,883 行。`docs/**` 只留本计划、两份架构文档、`docs/design.md` 和 `docs/releases/`；删除 `docs/fork/**`、`ADOPTERS.md`、`mkdocs.yaml`、`.github/GOVERNANCE.md` 和 4 个上游 issue 模板。`AGENTS.md`、`CONTRIBUTING.md` 改写成精简的 fork 版本；`docs/development/design.md` 的通用界面规则并入 `docs/design.md` 的「界面设计」一节；发布流程移到 `docs/releases/README.md`，发布正文检查只保留中英双语部分；CODEOWNERS、SECURITY、SUPPORT、CODE_OF_CONDUCT 和 PR、issue 模板指向 `foolzzz/looper` 和 `@foolzzz`；CHANGELOG 里指向已删文档的链接改为指向删除前最后一个提交的固定链接（使用说明改指 `docs/architecture/agent-system.md`）。`README.zh-CN.md` 改写为英文 README 的中文版，首屏经维护者预览后单独提交（looper #40）。
 
 维护者的决定：
 

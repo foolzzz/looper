@@ -1,15 +1,16 @@
-"""The local API answers the dashboard and local clients, never another web page."""
+"""The local API answers the dashboard and local clients, never another web page, and reads bounded bodies."""
 
 from __future__ import annotations
 
 import asyncio
+import json
 import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
-from loopx.agents.http_server import AgentHTTPServer
+from loopx.agents.http_server import REQUEST_BODY_MAX_BYTES, AgentHTTPServer
 from loopx.agents.request_guard import refusal
 
 ATTACKER = "https://attacker.example"
@@ -56,7 +57,7 @@ async def _exchange(port: int, request: str) -> tuple[str, str]:
     reader, writer = await asyncio.open_connection("127.0.0.1", port)
     writer.write(request.encode())
     await writer.drain()
-    raw = (await reader.read()).decode(errors="replace")
+    raw = (await asyncio.wait_for(reader.read(), timeout=10)).decode(errors="replace")
     writer.close()
     head, _, body = raw.partition("\r\n\r\n")
     return head, body
@@ -93,3 +94,17 @@ def test_server_refuses_cross_site_requests_and_sends_no_cors_headers() -> None:
     assert same.startswith("HTTP/1.1 200") and "dashboard" in page
     for head in (cross_post, preflight, same):
         assert "access-control-allow-origin" not in head.lower()
+
+
+def test_a_body_over_the_cap_is_refused_before_it_is_read() -> None:
+    """The cap fits the largest upload, a 2 MiB knowledge document as base64 in JSON, with room to spare."""
+    assert REQUEST_BODY_MAX_BYTES == 8 * 1024 * 1024
+    head = "Host: 127.0.0.1:8767\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n"
+    (over, refusal), (at_cap, _) = _serve(
+        # Only the headers: the answer comes without the server waiting for the body.
+        "POST /api/projects/proj-0/knowledge HTTP/1.1\r\n" + head.format(REQUEST_BODY_MAX_BYTES + 1),
+        "POST /api/nothing-here HTTP/1.1\r\n" + head.format(REQUEST_BODY_MAX_BYTES) + "x" * REQUEST_BODY_MAX_BYTES,
+    )
+    assert over.startswith("HTTP/1.1 413")
+    assert "at most 8 MiB (8388608 bytes)" in json.loads(refusal)["error"]
+    assert at_cap.startswith("HTTP/1.1 404")  # read whole and routed

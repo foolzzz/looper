@@ -289,6 +289,11 @@ async def _run_agent_system(
     if orphan_count:
         logger.info("marked %d orphaned task(s) as stopped", orphan_count)
 
+    # Before any agent launches: remove the read-only copies of replaced or
+    # deleted content that no running process mounts.
+    from .read_only_copies import reclaim_unused
+    await reclaim_unused(runtime_root)
+
     logger.info("database initialised")
 
     broadcaster = Broadcaster()

@@ -88,7 +88,8 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
   <background>
 
   ## Project knowledge                            L3 (left out without documents): an index,
-  - <title>: <summary> (read: <path>)                 one line per document
+  In <directory>:                                     each directory once, then one line
+  - <title>: <summary> (<path>)                       per document, its path relative to it
 
   ## Task                                         L4: what this session is for
   ...                                                 (Planner: the task; Worker, Reviewer: the step)
@@ -449,25 +450,32 @@ URL:
 100 documents and 50 MiB of stored content (path documents are not stored);
 the composed index 4,000 characters. Changes to one project's documents run
 in a transaction that holds the project's row lock, so two concurrent adds
-cannot both pass a cap. An index line carries an absolute path, about 150
-characters under `~/.loopx`, so in practice the index cap admits roughly 15
-to 25 documents, well before the count cap.
+cannot both pass a cap. An index line carries the title, the summary and a
+path relative to a directory the index names once, so short documents reach
+the count cap before the index cap (with an absolute path, about 150
+characters a line, the index used to fill at 15 to 25 documents).
 
 **Delivery.** `load_knowledge(runtime_root, project, work_dir)` runs for every
 Worker and Reviewer run and every Planner turn, never for the Manager:
 
-- each text or upload document is materialized read-only (0444), named by its
-  content's hash, at
-  `<runtime_root>/.local/projects/<project_id>/knowledge/<sha256>/<filename>`
+- the text and upload documents are materialized read-only (0444) together,
+  in one directory per set of documents, named by the hash of their file
+  names and contents:
+  `<runtime_root>/.local/projects/<project_id>/knowledge/<set_sha256>/<filename>`
   (a text document's file name comes from its title, an upload's from its
-  file name, both reduced to letters, digits, `.`, `-` and `_`). A copy that
-  already matches its hash is reused and a damaged one is rewritten;
+  file name, both reduced to letters, digits, `.`, `-` and `_`; a name an
+  earlier document took, ignoring case, gets `-2`, `-3`). A copy that already
+  matches its hash is reused and a damaged one is rewritten;
 - the project layer gains `## Project knowledge` after the background: an
-  introduction, then `- <title>: <summary> (read: <absolute path>)` per
-  document; a path document whose file is gone or leads out of the directory
-  is listed as `(missing: <path>)`. An index that grew past the cap after it
-  was saved (a longer default directory, say) is clipped with a note;
-- the launch mounts the knowledge directory with `--add-dir` when the project
+  introduction, then for each directory a line `In <directory>:` (the set
+  directory, then the project's default directory) followed by
+  `- <title>: <summary> (<path relative to it>)` per document; a path document
+  whose file is gone or leads out of the directory is listed as
+  `(missing: <path>)`. Claude Code resolves a relative `Read` path against the
+  working directory only, not against an `--add-dir` root (verified with
+  2.1.285), so the agent joins the path to the directory named above it. An
+  index that grew past the cap after it was saved is clipped with a note;
+- the launch mounts the set directory with `--add-dir` when the project
   has a text or upload document, and the project's default directory when it
   has a path document and the task runs in another directory.
   `claude_cli.knowledge_args` builds the flags and `agent_settings.Launch`
@@ -482,8 +490,8 @@ applied (N documents)` for each run that has some, and, for the Planner,
 `changed` or `removed`. When the documents cannot be read or materialized a
 run goes without them, its record's `prompt_layers.project.knowledge_error`
 says why and the activity logs a warning; the Planner keeps the knowledge it
-last read. A deleted document's copy stays on disk, since a running agent may
-be reading it.
+last read. A replaced or deleted document's copy stays on disk until the
+server next starts (see the library's **Reclaiming copies**).
 
 Verified with Claude Code 2.1.285 under the isolation flags: the agent reads
 files in an `--add-dir` directory, a `CLAUDE.md` in that directory or above it
@@ -553,7 +561,8 @@ skills)` for each run that has some, and, for the Planner, `changed` or
 `removed`. When the skills cannot be read or written, a run goes without them,
 its record's `project_skills.error` says why and the activity logs a warning.
 The Planner keeps the skills it last read. A replaced or deleted set's
-directory stays on disk, since a running agent may be using it.
+directory stays on disk until the server next starts (see the library's
+**Reclaiming copies**).
 
 Verified with Claude Code 2.1.285 under the isolation flags and
 `--dangerously-skip-permissions`, with haiku:
@@ -623,6 +632,11 @@ explicitly instead of being loaded from `~/.claude`
   and `agent_settings.Launch` carries them, so all four commands get the
   same set. When the library cannot be read or written, the run goes without
   it and its record's `library.error` says why.
+- **Reclaiming copies.** `loopx serve` reclaims replaced copies when it
+  starts, before any agent launches: `read_only_copies.reclaim_unused` removes
+  every content-hashed directory of the library, project knowledge and project
+  skills that the current content does not use and no running process's
+  command line mounts (or links into through a mounted one).
 
 Verified with Claude Code 2.1.285 under the isolation flags: in `--print`
 mode `--plugin-dir` loads a plugin's skills (as `<plugin>:<skill>`), agents,
@@ -853,7 +867,7 @@ PostgreSQL is a hard startup dependency. All data paths:
 | `activity` | Execution trace events (SSE streaming to frontend) |
 | `chat_messages` | Chat conversation history |
 | `llm_records` | One row per Claude run: input and output text, status, the run's own `cost_usd`, `input_tokens`, `output_tokens`, `cache_read_tokens` and `cache_creation_tokens`, its final `context_tokens` and its `compactions`; `metadata` holds the exact argv (`command`), `cwd`, the appended `system_prompt`, its `system_prompt_sha256`, its `prompt_layers`, the `model_choice`, the Settings `env` names, the `library` items loaded and a task agent's `project_skills` |
-| `agent_configs` | Agent configuration (role prompt, model) for `manager`, `planner`, `worker` and `reviewer`; `harness_prompt` is used for the Manager only; `permission_mode` is stored but not applied |
+| `agent_configs` | Agent configuration (role prompt, model) for `manager`, `planner`, `worker` and `reviewer`; `harness_prompt` is used for the Manager only |
 | `system_settings` | Settings shared by the whole system, one value per key: the default harness, model, effort and environment variables (no row = the built-in default), and the last library import's report |
 | `library_items` | The imported plugins and skills: kind, name, source label, declared version, `sha256` of the files, `enabled`, size, file count, `imported_at` |
 | `library_files` | Each library item's files: relative path, UTF-8 content, sha256, executable bit |
@@ -967,7 +981,6 @@ Agent behavior is configured via the `agent_configs` table (editable in the dash
 - **runtime**: stored per agent; only `claude-code` is implemented, and the
   Manager, Planners and Workers always run the Claude CLI
 - **model**: This agent's model (`--model`); empty uses the default model in Settings (`opus` built in)
-- **permission_mode**: stored but not applied: every agent runs with `--dangerously-skip-permissions`
 - **max_turns**: Maximum conversation turns (0 = unlimited)
 - **timeout_seconds**: Execution timeout. For workers it limits one Claude
   run's total time (default 86400, 0 = no limit). Workers read
@@ -981,8 +994,8 @@ The `planner` row configures every task's Planner and is read for every turn.
 limit): a turn over it fails and its Claude is killed. `max_turns` above 0
 passes `--max-turns`, as for Workers, and `model`, when set, passes
 `--model`. A change that alters the Planner's command restarts its Claude at
-the next turn with `--resume`. `permission_mode` does not apply: like every
-agent, the Planner has every tool and no permission prompts.
+the next turn with `--resume`. Like every agent, the Planner has every tool
+and no permission prompts (`--dangerously-skip-permissions`).
 
 The `worker` row configures every Worker and the `reviewer` row every
 Reviewer; each is read for every run. `system_prompt` is the role prompt; code

@@ -2,8 +2,9 @@
 
 A document is text written on the dashboard, an uploaded text file or a file
 in the project's default directory. Agents get an index in their system
-prompt (title, one-line summary, the path to read) and the directories to
-read from as ``--add-dir``; the documents themselves stay out of the prompt.
+prompt (each directory once, then per document its title, one-line summary
+and path relative to that directory) and the directories to read from as
+``--add-dir``; the documents themselves stay out of the prompt.
 The real-PostgreSQL side is ``test_project_documents_db.py``.
 """
 
@@ -146,6 +147,13 @@ def _path(path: str, title: str = "Runbook", summary: str = "How to deploy") -> 
     return {"source_kind": "path", "title": title, "summary": summary, "path": path}
 
 
+def _set_dir(root: Path) -> Path:
+    """The one directory the project's stored documents are materialized in, named by a SHA-256."""
+    (directory,) = (root / ".local" / "projects" / "proj-1" / "knowledge").iterdir()
+    assert len(directory.name) == 64 and int(directory.name, 16) >= 0
+    return directory
+
+
 @pytest.fixture
 def project_dir(tmp_path: Path) -> Path:
     directory = tmp_path / "project"
@@ -165,16 +173,17 @@ class TestAdd:
         status, body = _call(tmp_path, "POST", "/api/projects/proj-1/knowledge", _text())
         assert status == 201
         doc = body["document"]
-        expected = tmp_path / ".local" / "projects" / "proj-1" / "knowledge" / _sha("MARKER-ALPHA") / "Glossary.md"
+        set_dir = Path(doc["read_path"]).parent
+        assert set_dir.parent == tmp_path / ".local" / "projects" / "proj-1" / "knowledge" and len(set_dir.name) == 64
         assert (doc["title"], doc["summary"], doc["source_kind"], doc["filename"]) == (
             "Glossary", "Terms the code uses", "text", "Glossary.md")
-        assert doc["read_path"] == str(expected) and doc["missing"] is False
+        assert doc["read_path"] == str(set_dir / "Glossary.md") and doc["missing"] is False
         assert (doc["size_bytes"], doc["sha256"]) == (len("MARKER-ALPHA"), _sha("MARKER-ALPHA"))
         assert "content" not in doc
         (stored,) = store.documents.values()
         assert stored["content"] == "MARKER-ALPHA" and stored["path"] is None
         assert (body["count"], body["stored_bytes"]) == (1, len("MARKER-ALPHA"))
-        assert body["index"] == f"{INDEX_HEADING}\n{INDEX_INTRO}\n- Glossary: Terms the code uses (read: {expected})"
+        assert body["index"] == f"{INDEX_HEADING}\n{INDEX_INTRO}\nIn {set_dir}:\n- Glossary: Terms the code uses (Glossary.md)"
         assert body["index_chars"] == len(body["index"])
         assert body["caps"] == {"document_max_bytes": 2 * 1024 * 1024, "project_max_documents": 100,
                                 "project_max_bytes": 50 * 1024 * 1024, "index_max_chars": 4000}
@@ -187,7 +196,8 @@ class TestAdd:
         })
         assert status == 201
         assert body["document"]["filename"] == "My-Schema-v2.sql"
-        assert body["document"]["read_path"].endswith(f"/{_sha('CREATE TABLE t();' + chr(10))}/My-Schema-v2.sql")
+        assert body["document"]["read_path"].endswith("/My-Schema-v2.sql")
+        assert body["index"].endswith("- Schema: The tables (My-Schema-v2.sql)")
 
     @pytest.mark.parametrize(("data", "reason"), [
         (b"\x89PNG\r\n\x1a\n\x00\x00\x00IHDR", "not a text file"),
@@ -298,7 +308,7 @@ class TestPathDocuments:
         (project_dir / "docs" / "runbook.md").unlink()
         status, body = _call(tmp_path, "GET", "/api/projects/proj-1/knowledge")
         assert status == 200 and body["documents"][0]["missing"] is True
-        assert body["index"].endswith(f"- Runbook: How to deploy (missing: {project_dir / 'docs' / 'runbook.md'})")
+        assert body["index"].endswith(f"In {project_dir}:\n- Runbook: How to deploy (missing: docs/runbook.md)")
 
 
 class TestCaps:
@@ -338,6 +348,24 @@ class TestCaps:
         assert status == 400 and "at most 4000 characters" in body["error"]
         assert added >= 5 and len(store.documents) == added
         assert _call(tmp_path, "GET", "/api/projects/proj-1/knowledge")[1]["index_chars"] <= INDEX_MAX_CHARS
+
+    def test_a_line_costs_its_own_text_not_the_runtime_root_so_short_documents_reach_the_count_cap(
+        self, store: _Store, tmp_path: Path,
+    ) -> None:
+        """The index names the documents' directory once; a line carries a path relative to it. Short
+        documents then fill the 100-document cap before the 4,000-character index (with an absolute
+        path, about 150 characters, a line used to fill it at 15 to 25 documents)."""
+        root = tmp_path / "home" / "someone-with-a-long-name" / ".loopx"
+        store.add_project()
+        for n in range(100):
+            status, body = _call(root, "POST", "/api/projects/proj-1/knowledge",
+                                 _text(title=f"Doc {n:03d}", summary="A note.", content=f"content {n}"))
+            assert status == 201, body
+        assert body["index_chars"] <= INDEX_MAX_CHARS
+        lines = [line for line in body["index"].splitlines() if line.startswith("- ")]
+        assert len(lines) == 100 and lines[-1] == "- Doc 099: A note. (Doc-099.md)"
+        status, body = _call(root, "POST", "/api/projects/proj-1/knowledge", _text(title="Doc 100", content="c"))
+        assert status == 400 and "at most 100 documents" in body["error"]
 
 
 class TestChangeAndDelete:
@@ -430,19 +458,20 @@ def _load(root: Path, project: dict[str, Any] | None, work_dir: str) -> AgentKno
 
 
 class TestIndex:
-    def test_one_line_per_document_after_the_heading(self) -> None:
-        index = compose_index([IndexEntry("Glossary", "Terms", "/k/a/Glossary.md"),
-                               IndexEntry("Runbook", "Deploys", "/p/docs/runbook.md", missing=True)])
+    def test_each_directory_once_then_one_line_per_document_relative_to_it(self) -> None:
+        index = compose_index([IndexEntry("Glossary", "Terms", "/k/set", "Glossary.md"),
+                               IndexEntry("Runbook", "Deploys", "/p", "docs/runbook.md", missing=True),
+                               IndexEntry("Style", "Prose", "/p", "docs/style.md")])
         assert index.split("\n") == [
-            "## Project knowledge", INDEX_INTRO, "- Glossary: Terms (read: /k/a/Glossary.md)",
-            "- Runbook: Deploys (missing: /p/docs/runbook.md)"]
+            "## Project knowledge", INDEX_INTRO, "In /k/set:", "- Glossary: Terms (Glossary.md)",
+            "In /p:", "- Runbook: Deploys (missing: docs/runbook.md)", "- Style: Prose (docs/style.md)"]
         assert compose_index([]) == ""
 
     def test_an_index_over_its_cap_is_clipped_with_a_note(self) -> None:
-        entries = [IndexEntry(f"Document {n}", "s" * 200, f"/k/{n}/d.md") for n in range(40)]
+        entries = [IndexEntry(f"Document {n}", "s" * 200, "/k", f"{n}.md") for n in range(40)]
         index = clipped_index(entries)
         assert len(index) <= INDEX_MAX_CHARS
-        assert index.startswith(f"{INDEX_HEADING}\n{INDEX_INTRO}\n- Document 0: ")
+        assert index.startswith(f"{INDEX_HEADING}\n{INDEX_INTRO}\nIn /k:\n- Document 0: ")
         assert index.endswith("more documents are not listed: the index is over its limit of 4000 characters)")
         assert clipped_index(entries[:3]) == compose_index(entries[:3])
 
@@ -463,15 +492,15 @@ class TestLoad:
                           contents={"doc-000000000001": "MARKER-ALPHA", "doc-000000000002": "CREATE TABLE t();"})
         loaded = _load(tmp_path, {"id": "proj-1", "work_dir": str(project_dir)}, str(project_dir))
 
-        root = tmp_path / ".local" / "projects" / "proj-1" / "knowledge"
-        glossary = root / _sha("MARKER-ALPHA") / "Glossary.md"
+        set_dir = _set_dir(tmp_path)
+        glossary = set_dir / "Glossary.md"
         assert glossary.read_text() == "MARKER-ALPHA"
         assert stat.S_IMODE(glossary.stat().st_mode) == 0o444
-        assert (root / _sha("CREATE TABLE t();") / "Schema.md").read_text() == "CREATE TABLE t();"
-        assert loaded.add_dirs == (str(root),)  # no path document: the project directory is not mounted
+        assert (set_dir / "Schema.md").read_text() == "CREATE TABLE t();"
+        assert loaded.add_dirs == (str(set_dir),)  # no path document: the project directory is not mounted
         assert loaded.documents == 2 and loaded.error is None
-        assert loaded.index == compose_index([IndexEntry("Glossary", "Terms", str(glossary)),
-                                              IndexEntry("Schema", "Tables", str(root / _sha("CREATE TABLE t();") / "Schema.md"))])
+        assert loaded.index == compose_index([IndexEntry("Glossary", "Terms", str(set_dir), "Glossary.md"),
+                                              IndexEntry("Schema", "Tables", str(set_dir), "Schema.md")])
         assert loaded.sha256 == _sha(loaded.index)
         # A second run reuses the copies without reading the content again.
         state["content_reads"].clear()
@@ -481,7 +510,7 @@ class TestLoad:
     def test_a_damaged_copy_is_written_again(self, tmp_path: Path, documents: Any) -> None:
         documents(_row("text", "Glossary", "Terms", "MARKER-ALPHA"), contents={"doc-000000000001": "MARKER-ALPHA"})
         _load(tmp_path, {"id": "proj-1", "work_dir": ""}, str(tmp_path))
-        copy = tmp_path / ".local" / "projects" / "proj-1" / "knowledge" / _sha("MARKER-ALPHA") / "Glossary.md"
+        copy = _set_dir(tmp_path) / "Glossary.md"
         os.chmod(copy, 0o644)
         copy.write_text("tampered")
         _load(tmp_path, {"id": "proj-1", "work_dir": ""}, str(tmp_path))
@@ -495,10 +524,18 @@ class TestLoad:
         elsewhere.mkdir()
         loaded = _load(tmp_path, {"id": "proj-1", "work_dir": str(project_dir)}, str(elsewhere))
         assert loaded.add_dirs == (str(project_dir),)
-        assert loaded.index.endswith(f"- Runbook: Deploys (read: {project_dir / 'docs' / 'runbook.md'})")
+        assert loaded.index.endswith(f"In {project_dir}:\n- Runbook: Deploys (docs/runbook.md)")
         assert not (tmp_path / ".local" / "projects").exists()  # nothing copied
         # In the project's own directory there is nothing more to mount.
         assert _load(tmp_path, {"id": "proj-1", "work_dir": str(project_dir)}, str(project_dir)).add_dirs == ()
+
+    def test_documents_sharing_a_file_name_get_their_own(self, tmp_path: Path, documents: Any) -> None:
+        rows = [_row("upload", title, "s", f"MARKER-{n}", number=n) for n, title in enumerate(("notes", "Notes", "notes"), 1)]
+        documents(*rows, contents={row["id"]: f"MARKER-{n}" for n, row in enumerate(rows, 1)})
+        loaded = _load(tmp_path, {"id": "proj-1", "work_dir": ""}, str(tmp_path))
+        names = ["notes.md", "Notes-2.md", "notes-3.md"]
+        assert [line.rsplit("(", 1)[1].rstrip(")") for line in loaded.index.splitlines()[3:]] == names
+        assert [(_set_dir(tmp_path) / name).read_text() for name in names] == ["MARKER-1", "MARKER-2", "MARKER-3"]
 
     def test_without_documents_or_a_project_there_is_nothing(self, tmp_path: Path, documents: Any) -> None:
         documents()
