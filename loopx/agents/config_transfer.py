@@ -67,7 +67,7 @@ _CHANNEL_ID = re.compile(r"[a-zA-Z0-9_-]{1,64}")
 _ITEM_NAME_MAX = 255
 _PATH_MAX = 1024
 _PROMPT_MAX_CHARS = 100_000
-_TIMEOUT_MAX_SECONDS = 7 * 86400
+_TIMEOUT_MAX_SECONDS = 365 * 86400
 _CONCURRENCY_MAX = 64
 
 
@@ -698,6 +698,8 @@ class _Importer:
             self.record("settings.roles", str(role), Action.SKIPPED, reason=str(exc))
             return
         row = self.target.roles.get(role)
+        if row is not None and values["prompt"] == row["default_prompt"]:
+            values["prompt"] = None  # this installation's recommended prompt, which it then follows
         current = role_entry(row) if row is not None else None
         action = self.outcome("settings.roles", role, current, _differs(values, current, _ROLE_FIELDS))
         if self.apply and action in (Action.ADDED, Action.CHANGED):

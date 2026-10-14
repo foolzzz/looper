@@ -249,6 +249,12 @@ def test_importing_the_same_file_again_changes_nothing(monkeypatch: pytest.Monke
             exported = tmp_path / "config.json"
             assert (await _loopx(monkeypatch, source_url, "config", "export", str(exported),
                                  "--include-projects"))[0] == 0
+            # Here the Planner's recommended prompt is the prompt the file gives it, which it then follows.
+            from loopx.agents.serve import seed_agent_configs
+
+            await seed_agent_configs(target)
+            await target.execute("UPDATE agent_configs SET default_prompt = 'Plan in small steps.' "
+                                 "WHERE agent_id = 'planner'")
             assert (await _loopx(monkeypatch, target_url, "config", "import", str(exported), "--apply"))[0] == 0
             first = await _rows(target)
 
