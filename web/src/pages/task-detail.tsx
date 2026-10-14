@@ -44,6 +44,8 @@ import {
   startTask,
   updateTaskConfig,
   setTaskProject,
+  fetchKnowledgeDrafts,
+  type KnowledgeDraft,
   type TaskDetail,
   type TaskStep,
   type JournalEntry,
@@ -527,12 +529,44 @@ function OverviewTab({ task, onContinued }: { task: TaskDetail; onContinued: () 
         </div>
       )}
 
+      {task.status === "completed" && task.project_id && (
+        <LessonsDraftNote taskId={task.task_id} projectId={task.project_id} />
+      )}
+
       <TaskFindings entries={task.journal || []} />
 
       <AgentTimeline taskId={task.task_id} />
 
       <LiveActivityFeed taskId={task.task_id} isActive={isActive} />
     </div>
+  );
+}
+
+// --- Lessons: the draft a completed task left for review ---
+
+/** When the task's lessons wait as a draft (the project's distill_lessons "draft"), a link to review it. */
+function LessonsDraftNote({ taskId, projectId }: { taskId: string; projectId: string }) {
+  const [draft, setDraft] = useState<KnowledgeDraft | null>(null);
+  useEffect(() => {
+    let alive = true;
+    fetchKnowledgeDrafts(projectId)
+      .then(({ drafts }) => alive && setDraft(drafts.find((d) => d.task_id === taskId) ?? null))
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, [taskId, projectId]);
+  if (!draft) return null;
+  return (
+    <p className="rounded-lg border border-border bg-card px-4 py-3 text-sm">
+      This task&apos;s lessons are a draft that agents do not see yet: <span className="font-medium">{draft.title}</span>.{" "}
+      <a
+        href={`#projects/${encodeURIComponent(projectId)}/knowledge/${encodeURIComponent(draft.draft_id)}`}
+        className="font-medium text-primary underline-offset-2 hover:underline"
+      >
+        Review the draft
+      </a>
+    </p>
   );
 }
 
