@@ -136,8 +136,8 @@ function InheritedRow({ entry, projectId, taskRoles }: { entry: ProjectInstall; 
           {roles.join(", ")}
           {!entry.enabled && " (off)"}
         </span>
-        <a href="#settings" className="underline-offset-2 hover:text-foreground hover:underline">
-          Change in Settings
+        <a href="#settings/catalog" className="underline-offset-2 hover:text-foreground hover:underline">
+          Change in Settings → Skills &amp; MCP
         </a>
       </p>
     </li>
@@ -404,7 +404,10 @@ function InstallFromCatalog({
       ) : catalog.items.length === 0 ? (
         <p className="text-xs text-muted-foreground">
           The catalog is empty. Import plugins and skills in{" "}
-          <a href="#settings" className="underline underline-offset-2 hover:text-foreground">Settings</a>.
+          <a href="#settings/catalog" className="underline underline-offset-2 hover:text-foreground">
+            Settings → Skills &amp; MCP
+          </a>
+          .
         </p>
       ) : candidates.length === 0 ? (
         <p className="text-xs text-muted-foreground">Everything in the catalog is installed here.</p>

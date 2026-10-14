@@ -237,7 +237,7 @@ export function McpItemActions({
   onDeleted: () => void;
 }) {
   const [editing, setEditing] = useState(false);
-  // An import's "secrets to fill in" links here (#settings/mcp/<id>) to open the form.
+  // An import's "secrets to fill in" links here (#settings/catalog/mcp/<id>) to open the form.
   const ref = useSettingsTarget<HTMLDivElement>("mcp", item.item_id, () => setEditing(true));
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");

@@ -1,19 +1,22 @@
 import { useId, useState } from "react";
-import { AlertTriangle, Loader2, Pencil, Plus, RefreshCw, Trash2, X } from "lucide-react";
-import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
+import { Loader2, Plus, X } from "lucide-react";
 import { Input } from "@/components/ui/input";
+import { Button } from "@/components/ui/button";
+import {
+  EDIT_BOX,
+  EditDelete,
+  FormFooter,
+  LABEL,
+  RegistryList,
+  Row,
+  RowName,
+  SELECT,
+  SMALL_LABEL,
+} from "@/components/registry-ui";
 import {
   createProvider,
-  createRegistryAgent,
-  createRuntime,
   deleteProvider,
-  deleteRegistryAgent,
-  deleteRuntime,
-  probeRuntime,
   updateProvider,
-  updateRegistryAgent,
-  updateRuntime,
   type PriceField,
   type Provider,
   type ProviderAuth,
@@ -21,273 +24,15 @@ import {
   type ProviderModel,
   type ProviderPreset,
   type Registry,
-  type RegistryAgent,
-  type Runtime,
 } from "@/lib/api";
+import { AGENT_PROFILE } from "@/lib/settings-pages";
+import { useAction } from "@/lib/use-action";
 import { formatUsd } from "@/lib/usage";
 import { useRegistry } from "@/lib/use-registry";
 import { useSettingsTarget } from "@/lib/settings-target";
 
-const SELECT = "flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm text-foreground";
-const LABEL = "text-xs font-medium text-muted-foreground";
-const SMALL_LABEL = "text-[11px] text-muted-foreground";
-
-const errorText = (err: unknown) => (err instanceof Error ? err.message : String(err));
-const usedBy = (count: number) => (count === 0 ? "no agents" : `used by ${count} ${count === 1 ? "agent" : "agents"}`);
-
-/** One request at a time, with the error it ended with; `run` resolves to whether it succeeded. */
-function useAction() {
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState("");
-  const run = async (action: () => Promise<unknown>) => {
-    setBusy(true);
-    setError("");
-    try {
-      await action();
-      return true;
-    } catch (err) {
-      setError(errorText(err));
-      return false;
-    } finally {
-      setBusy(false);
-    }
-  };
-  return { busy, error, run };
-}
-
-/** A titled list with an add form that opens above its rows. */
-function RegistryList({
-  title,
-  hint,
-  addLabel,
-  form,
-  children,
-}: {
-  title: string;
-  hint: React.ReactNode;
-  addLabel: string;
-  form: (close: () => void) => React.ReactNode;
-  children: React.ReactNode;
-}) {
-  const id = useId();
-  const [adding, setAdding] = useState(false);
-  return (
-    <section aria-labelledby={`${id}-title`} className="rounded-lg border border-border bg-card">
-      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 px-5 py-3">
-        <h3 id={`${id}-title`} className="text-sm font-semibold">{title}</h3>
-        <p className="min-w-0 flex-1 text-[11px] text-muted-foreground">{hint}</p>
-        <Button type="button" size="sm" variant="outline" onClick={() => setAdding(!adding)} aria-expanded={adding}>
-          <Plus className="h-3.5 w-3.5" /> {addLabel}
-        </Button>
-      </div>
-      {adding && <div className="border-t border-border bg-muted/20 px-5 py-3">{form(() => setAdding(false))}</div>}
-      <ul className="divide-y divide-border border-t border-border">{children}</ul>
-    </section>
-  );
-}
-
-/** One registered entry: its name and badges, its actions, its details, then any error and its edit form. */
-function Row({
-  title,
-  actions,
-  children,
-  below,
-  ref,
-}: {
-  title: React.ReactNode;
-  actions: React.ReactNode;
-  children: React.ReactNode;
-  below: React.ReactNode;
-  ref?: React.Ref<HTMLLIElement>;
-}) {
-  return (
-    <li ref={ref} className="space-y-1 px-5 py-3">
-      <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-        {title}
-        <div className="ml-auto flex flex-wrap gap-1">{actions}</div>
-      </div>
-      {children}
-      {below}
-    </li>
-  );
-}
-
-function RowName({ name, builtin, kind }: { name: string; builtin: boolean; kind?: string }) {
-  return (
-    <>
-      <span className="break-all text-sm font-medium">{name}</span>
-      {builtin && <Badge variant="outline">built-in</Badge>}
-      {kind && <span className="text-xs text-muted-foreground">{kind}</span>}
-    </>
-  );
-}
-
-/** Edit and Delete for an entry that is not built in. */
-function EditDelete({
-  what,
-  name,
-  editing,
-  busy,
-  onEdit,
-  onDelete,
-}: {
-  what: string;
-  name: string;
-  editing: boolean;
-  busy: boolean;
-  onEdit: () => void;
-  onDelete: () => void;
-}) {
-  return (
-    <>
-      <Button type="button" variant="ghost" size="sm" onClick={onEdit} aria-expanded={editing} aria-label={`Edit ${what} ${name}`}>
-        <Pencil className="h-3.5 w-3.5" /> Edit
-      </Button>
-      <Button
-        type="button"
-        variant="ghost"
-        size="sm"
-        onClick={onDelete}
-        disabled={busy}
-        aria-label={`Delete ${what} ${name}`}
-        className="text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
-      >
-        <Trash2 className="h-3.5 w-3.5" /> Delete
-      </Button>
-    </>
-  );
-}
-
-function FormFooter({ error, busy, submit, onCancel }: { error: string; busy: boolean; submit: string; onCancel: () => void }) {
-  return (
-    <>
-      {error && <p role="alert" className="text-xs text-destructive">{error}</p>}
-      <div className="flex gap-2">
-        <Button type="submit" size="sm" disabled={busy}>
-          {busy && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
-          {submit}
-        </Button>
-        <Button type="button" size="sm" variant="ghost" onClick={onCancel} disabled={busy}>
-          Cancel
-        </Button>
-      </div>
-    </>
-  );
-}
-
-const EDIT_BOX = "mt-2 rounded-md border border-border bg-muted/20 p-3";
-
-// --- Runtimes ---
-
-function RuntimeForm({ runtime, registry, onDone }: { runtime: Runtime | null; registry: Registry; onDone: () => void }) {
-  const id = useId();
-  const [name, setName] = useState(runtime?.name ?? "");
-  const [type, setType] = useState(runtime?.type ?? registry.runtime_types[0]?.type ?? "");
-  const [executable, setExecutable] = useState(runtime?.executable ?? "");
-  const action = useAction();
-  const defaultExecutable = registry.runtime_types.find((t) => t.type === type)?.default_executable ?? "";
-
-  const save = async (e: React.FormEvent) => {
-    e.preventDefault();
-    const done = await action.run(() =>
-      runtime
-        ? updateRuntime(runtime.runtime_id, { name: name.trim(), executable: executable.trim() })
-        : createRuntime({ name: name.trim(), type, executable: executable.trim() || undefined }),
-    );
-    if (done) onDone();
-  };
-
-  return (
-    <form onSubmit={save} aria-label={runtime ? `Edit runtime ${runtime.name}` : "Add a runtime"} className="space-y-3">
-      <div className="grid gap-3 sm:grid-cols-3">
-        <div className="space-y-1">
-          <label htmlFor={`${id}-name`} className={LABEL}>Name *</label>
-          <Input id={`${id}-name`} value={name} maxLength={registry.limits.name_max_chars} onChange={(e) => setName(e.target.value)} placeholder="claude-beta" spellCheck={false} autoCapitalize="none" autoFocus />
-        </div>
-        <div className="space-y-1">
-          <label htmlFor={`${id}-type`} className={LABEL}>Type</label>
-          <select id={`${id}-type`} value={type} onChange={(e) => setType(e.target.value)} disabled={!!runtime} className={SELECT}>
-            {registry.runtime_types.map((t) => (
-              <option key={t.type} value={t.type}>{t.label}</option>
-            ))}
-          </select>
-        </div>
-        <div className="space-y-1">
-          <label htmlFor={`${id}-executable`} className={LABEL}>Executable</label>
-          <Input id={`${id}-executable`} value={executable} onChange={(e) => setExecutable(e.target.value)} placeholder={`Default: ${defaultExecutable}`} spellCheck={false} autoCapitalize="none" className="font-mono" />
-        </div>
-      </div>
-      <p className="text-[11px] text-muted-foreground">
-        A command on the server&apos;s PATH or an absolute path; empty runs the type&apos;s default. Saving runs it with
-        --version to check it.
-      </p>
-      <FormFooter error={action.error} busy={action.busy} submit={runtime ? "Save" : "Add runtime"} onCancel={onDone} />
-    </form>
-  );
-}
-
-/** What the last --version probe found, and when. */
-function ProbeState({ runtime }: { runtime: Runtime }) {
-  const when = runtime.probed_at ? ` · checked ${new Date(runtime.probed_at).toLocaleString()}` : "";
-  if (runtime.probe_error) {
-    return (
-      <span className="inline-flex min-w-0 items-center gap-1 text-warning">
-        <AlertTriangle className="h-3 w-3 shrink-0" aria-hidden="true" />
-        <span className="break-all">Probe failed: {runtime.probe_error}{when}</span>
-      </span>
-    );
-  }
-  if (runtime.version) return <span>version {runtime.version}{when}</span>;
-  return <span>not probed yet</span>;
-}
-
-function RuntimeRow({ runtime, registry }: { runtime: Runtime; registry: Registry }) {
-  const [editing, setEditing] = useState(false);
-  const action = useAction();
-  const remove = () => {
-    if (confirm(`Delete runtime "${runtime.name}"?`)) action.run(() => deleteRuntime(runtime.runtime_id));
-  };
-  return (
-    <Row
-      title={<RowName name={runtime.name} builtin={runtime.builtin} kind={runtime.type_label} />}
-      actions={
-        <>
-          <Button type="button" variant="ghost" size="sm" onClick={() => action.run(() => probeRuntime(runtime.runtime_id))} disabled={action.busy} aria-label={`Probe runtime ${runtime.name}`}>
-            {action.busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />} Probe
-          </Button>
-          {!runtime.builtin && (
-            <EditDelete what="runtime" name={runtime.name} editing={editing} busy={action.busy} onEdit={() => setEditing(!editing)} onDelete={remove} />
-          )}
-        </>
-      }
-      below={
-        <>
-          {action.error && <p role="alert" className="text-xs text-destructive">{action.error}</p>}
-          {editing && (
-            <div className={EDIT_BOX}>
-              <RuntimeForm runtime={runtime} registry={registry} onDone={() => setEditing(false)} />
-            </div>
-          )}
-        </>
-      }
-    >
-      <p className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs text-muted-foreground">
-        <span className="break-all font-mono text-foreground/80">
-          {runtime.executable || `default (${runtime.default_executable ?? "none"})`}
-        </span>
-        <span aria-hidden="true">·</span>
-        <ProbeState runtime={runtime} />
-        <span aria-hidden="true">·</span>
-        <span>{usedBy(runtime.agent_count)}</span>
-      </p>
-      <p className="break-words font-mono text-[11px] text-muted-foreground">
-        {runtime.capabilities.length ? runtime.capabilities.join(", ") : "no capabilities"}
-      </p>
-    </Row>
-  );
-}
-
-// --- Providers ---
+const usedBy = (count: number) =>
+  count === 0 ? `no ${AGENT_PROFILE.plural}` : `used by ${count} ${count === 1 ? AGENT_PROFILE.name : AGENT_PROFILE.plural}`;
 
 const PRICE_LABELS: Record<PriceField, string> = {
   input_usd_per_mtok: "Input",
@@ -666,7 +411,7 @@ function ProviderForm({ provider, registry, onDone }: { provider: Provider | nul
 
 function ProviderRow({ provider, registry }: { provider: Provider; registry: Registry }) {
   const [editing, setEditing] = useState(false);
-  // An import's "secrets to fill in" links here (#settings/provider/<id>) to open the form.
+  // An import's "secrets to fill in" links here (#settings/providers/<id>) to open the form.
   const ref = useSettingsTarget<HTMLLIElement>("provider", provider.provider_id, () => setEditing(!provider.builtin));
   const action = useAction();
   const remove = () => {
@@ -707,150 +452,11 @@ function ProviderRow({ provider, registry }: { provider: Provider; registry: Reg
   );
 }
 
-// --- Agents ---
-
-function AgentForm({ agent, registry, onDone }: { agent: RegistryAgent | null; registry: Registry; onDone: () => void }) {
-  const id = useId();
-  const [draft, setDraft] = useState({
-    name: agent?.name ?? "",
-    runtime_id: agent?.runtime_id ?? registry.runtimes[0]?.runtime_id ?? "",
-    provider_id: agent?.provider_id ?? registry.providers[0]?.provider_id ?? "",
-    model: agent?.model ?? "",
-    effort: agent?.effort ?? "",
-  });
-  const action = useAction();
-  const set = (change: Partial<typeof draft>) => setDraft((d) => ({ ...d, ...change }));
-  const provider = registry.providers.find((p) => p.provider_id === draft.provider_id);
-
-  const [warnings, setWarnings] = useState<string[]>([]);
-  const save = async (e: React.FormEvent) => {
-    e.preventDefault();
-    const body = { ...draft, name: draft.name.trim(), model: draft.model.trim(), effort: draft.effort || null };
-    let answer: { warnings: string[] } | null = null;
-    const done = await action.run(async () => {
-      answer = await (agent ? updateRegistryAgent(agent.agent_id, body) : createRegistryAgent(body));
-    });
-    // Saved; a warning (a model without a price) keeps the form open until it is read.
-    const saved = answer as { warnings: string[] } | null;
-    if (done && saved?.warnings.length) setWarnings(saved.warnings);
-    else if (done) onDone();
-  };
-
-  return (
-    <form onSubmit={save} aria-label={agent ? `Edit agent ${agent.name}` : "Add an agent"} className="space-y-3">
-      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-        <div className="space-y-1">
-          <label htmlFor={`${id}-name`} className={LABEL}>Name *</label>
-          <Input id={`${id}-name`} value={draft.name} maxLength={registry.limits.name_max_chars} onChange={(e) => set({ name: e.target.value })} placeholder="claude-code/sonnet" spellCheck={false} autoCapitalize="none" className="font-mono" autoFocus />
-        </div>
-        <div className="space-y-1">
-          <label htmlFor={`${id}-runtime`} className={LABEL}>Runtime</label>
-          <select id={`${id}-runtime`} value={draft.runtime_id} onChange={(e) => set({ runtime_id: e.target.value })} className={SELECT}>
-            {registry.runtimes.map((r) => (
-              <option key={r.runtime_id} value={r.runtime_id}>{r.name} ({r.type_label})</option>
-            ))}
-          </select>
-        </div>
-        <div className="space-y-1">
-          <label htmlFor={`${id}-provider`} className={LABEL}>Provider</label>
-          <select id={`${id}-provider`} value={draft.provider_id} onChange={(e) => set({ provider_id: e.target.value })} className={SELECT}>
-            {registry.providers.map((p) => (
-              <option key={p.provider_id} value={p.provider_id}>{p.name} ({AUTH_LABELS[p.auth]})</option>
-            ))}
-          </select>
-        </div>
-        <div className="space-y-1">
-          <label htmlFor={`${id}-model`} className={LABEL}>Model *</label>
-          <Input id={`${id}-model`} list={`${id}-models`} value={draft.model} onChange={(e) => set({ model: e.target.value })} placeholder="sonnet" spellCheck={false} autoCapitalize="none" className="font-mono" />
-          <datalist id={`${id}-models`}>
-            {provider?.models.map((m) => <option key={m.name} value={m.name} />)}
-          </datalist>
-        </div>
-        <div className="space-y-1">
-          <label htmlFor={`${id}-effort`} className={LABEL}>Default effort</label>
-          <select id={`${id}-effort`} value={draft.effort} onChange={(e) => set({ effort: e.target.value })} className={SELECT}>
-            <option value="">Runtime default</option>
-            {registry.limits.effort_levels.map((level) => (
-              <option key={level} value={level}>{level}</option>
-            ))}
-          </select>
-        </div>
-      </div>
-      <p className="text-[11px] text-muted-foreground">
-        {provider?.models.length
-          ? `${provider.name} lists ${provider.models.map((m) => m.name).join(", ")}.`
-          : "The model as the runtime takes it: an alias such as sonnet or a full name."}{" "}
-        A settings layer&apos;s effort overrides the default.
-      </p>
-      {warnings.length > 0 && (
-        <div role="status" className="space-y-1 rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs">
-          <p className="font-medium">Saved, with a warning:</p>
-          {warnings.map((w) => (
-            <p key={w}>{w}</p>
-          ))}
-          <Button type="button" size="sm" variant="outline" onClick={onDone}>OK</Button>
-        </div>
-      )}
-      <FormFooter error={action.error} busy={action.busy} submit={agent ? "Save" : "Add agent"} onCancel={onDone} />
-    </form>
-  );
-}
-
-/** How an agent's runs are priced, in words. */
-function costBasisText(agent: RegistryAgent): string {
-  if (agent.cost.source === "runtime") {
-    return agent.cost.equivalent ? "cost: the runtime's figure, a subscription equivalent" : "cost: the runtime's figure";
-  }
-  return agent.cost.source === "provider_price" ? "cost: tokens at the provider's prices" : "";
-}
-
-function AgentRow({ agent, registry }: { agent: RegistryAgent; registry: Registry }) {
-  const [editing, setEditing] = useState(false);
-  const action = useAction();
-  const remove = () => {
-    if (confirm(`Delete agent "${agent.name}"?`)) action.run(() => deleteRegistryAgent(agent.agent_id));
-  };
-  const runtimeLabel = registry.runtimes.find((r) => r.runtime_id === agent.runtime_id)?.type_label ?? agent.runtime_type;
-  return (
-    <Row
-      title={<RowName name={agent.name} builtin={agent.builtin} />}
-      actions={
-        !agent.builtin && (
-          <EditDelete what="agent" name={agent.name} editing={editing} busy={action.busy} onEdit={() => setEditing(!editing)} onDelete={remove} />
-        )
-      }
-      below={
-        <>
-          {action.error && <p role="alert" className="text-xs text-destructive">{action.error}</p>}
-          {editing && (
-            <div className={EDIT_BOX}>
-              <AgentForm agent={agent} registry={registry} onDone={() => setEditing(false)} />
-            </div>
-          )}
-        </>
-      }
-    >
-      <p className="break-words text-xs text-muted-foreground">
-        {agent.runtime_name} ({runtimeLabel}) · {agent.provider_name} · model{" "}
-        <span className="font-mono text-foreground/80">{agent.model}</span> · effort {agent.effort ?? "runtime default"}
-        {costBasisText(agent) && ` · ${costBasisText(agent)}`}
-      </p>
-      {agent.cost.unpriced.length > 0 && (
-        <p className="flex items-start gap-1 text-xs text-amber-700 dark:text-amber-400">
-          <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-          No price for {agent.cost.unpriced.join(", ")}: its runs record tokens only and spend caps do not apply. Add
-          the prices to the provider&apos;s model catalog.
-        </p>
-      )}
-    </Row>
-  );
-}
-
 /**
- * The agents Looper can run, and what they are made of: runtimes (agent CLIs on this machine), LLM providers and
- * agents (a runtime, a provider and a model). The settings layers and tasks select an agent.
+ * Settings → LLM Providers: where agents' requests go and how Looper signs in to them. `adding` opens the add
+ * form (the link #settings/providers/new, from an Agent Profile's provider list).
  */
-export function AgentRegistrySection() {
+export function ProvidersSection({ adding = false }: { adding?: boolean }) {
   const { registry, error } = useRegistry();
   if (!registry) {
     return error ? (
@@ -862,37 +468,16 @@ export function AgentRegistrySection() {
     );
   }
   return (
-    <div className="space-y-4">
-      <RegistryList
-        title="Agents"
-        hint="What Settings, the Agents page, projects and tasks select."
-        addLabel="Add agent"
-        form={(close) => <AgentForm agent={null} registry={registry} onDone={close} />}
-      >
-        {registry.agents.map((agent) => (
-          <AgentRow key={agent.agent_id} agent={agent} registry={registry} />
-        ))}
-      </RegistryList>
-      <RegistryList
-        title="Providers"
-        hint="Where the model runs and how Looper signs in to it."
-        addLabel="Add provider"
-        form={(close) => <ProviderForm provider={null} registry={registry} onDone={close} />}
-      >
-        {registry.providers.map((provider) => (
-          <ProviderRow key={provider.provider_id} provider={provider} registry={registry} />
-        ))}
-      </RegistryList>
-      <RegistryList
-        title="Runtimes"
-        hint="The agent CLIs on this machine; their capabilities decide the roles their agents can run."
-        addLabel="Add runtime"
-        form={(close) => <RuntimeForm runtime={null} registry={registry} onDone={close} />}
-      >
-        {registry.runtimes.map((runtime) => (
-          <RuntimeRow key={runtime.runtime_id} runtime={runtime} registry={registry} />
-        ))}
-      </RegistryList>
-    </div>
+    <RegistryList
+      title="Providers"
+      hint="Where the model runs and how Looper signs in to it."
+      addLabel="Add provider"
+      defaultAdding={adding}
+      form={(close) => <ProviderForm provider={null} registry={registry} onDone={close} />}
+    >
+      {registry.providers.map((provider) => (
+        <ProviderRow key={provider.provider_id} provider={provider} registry={registry} />
+      ))}
+    </RegistryList>
   );
 }

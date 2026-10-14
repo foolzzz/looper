@@ -217,8 +217,8 @@ function shortSha(sha: string | null | undefined) {
 const SETTING_SOURCES: Record<string, string> = {
   builtin: "built-in default",
   agent: "the agent's default",
-  system: "Settings",
-  role: "role (Agents page)",
+  system: "every role (Settings → Roles)",
+  role: "role (Settings → Roles)",
   project: "project",
   role_project: "role in project",
   task: "task override",

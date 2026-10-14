@@ -3,7 +3,9 @@ import { CheckCircle2, Loader2, Plus, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { HarnessField } from "@/components/harness-field";
+import { AgentProfileSelect } from "@/components/agent-profiles";
 import type {
+  AgentRole,
   EffectiveAgent,
   EffectiveSettings,
   LayerUpdate,
@@ -14,15 +16,15 @@ import type {
   Sourced,
 } from "@/lib/api";
 import { formatUsd } from "@/lib/usage";
-import { agentLabel, useRegistry } from "@/lib/use-registry";
+import { AGENT_PROFILE } from "@/lib/settings-pages";
 import { cn } from "@/lib/utils";
 
 /** Where a value came from, in words. */
 const LAYER_LABELS: Record<SettingSource, string> = {
   builtin: "built-in default",
-  agent: "the agent",
-  system: "Settings",
-  role: "Agents page",
+  agent: `the ${AGENT_PROFILE.name}`,
+  system: "every role's defaults (Settings → Roles)",
+  role: "the role (Settings → Roles)",
   project: "this project",
   role_project: "this role in the project",
   task: "this task",
@@ -87,7 +89,7 @@ function changesOf(draft: Draft, values: LayerValues): LayerUpdate {
 function sourceText(source: SettingSource, layer: SettingLayer, fromRole?: string) {
   if (fromRole) {
     const whose = `the ${fromRole[0].toUpperCase()}${fromRole.slice(1)}'s`;
-    return source === "role_project" ? `${whose} in this project` : `${whose} on the Agents page`;
+    return source === "role_project" ? `${whose} in this project` : `${whose} in Settings → Roles`;
   }
   return source === layer ? "set here" : `from ${LAYER_LABELS[source]}`;
 }
@@ -95,9 +97,9 @@ function sourceText(source: SettingSource, layer: SettingLayer, fromRole?: strin
 /** What an empty harness at each layer inherits. */
 const HARNESS_INHERITS: Record<Exclude<SettingLayer, "builtin">, string> = {
   system: "the built-in harness",
-  role: "Settings",
-  project: "the Agents page or Settings",
-  role_project: "the project, the Agents page or Settings",
+  role: "every role's defaults",
+  project: "Settings → Roles",
+  role_project: "the project or Settings → Roles",
 };
 
 function Now({ id, children }: { id?: string; children: React.ReactNode }) {
@@ -141,6 +143,7 @@ export function LayerSettingsForm({
   limits,
   onSave,
   harnessHint,
+  roles,
 }: {
   idPrefix: string;
   layer: Exclude<SettingLayer, "builtin">;
@@ -151,10 +154,10 @@ export function LayerSettingsForm({
   /** Store the changes; resolves to this layer's values as saved. */
   onSave: (changes: LayerUpdate) => Promise<LayerValues>;
   harnessHint?: React.ReactNode;
+  /** The roles this layer selects an Agent Profile for; one that cannot run them all is disabled. */
+  roles: AgentRole[];
 }) {
   const [draft, setDraft] = useState<Draft>(() => draftOf(values));
-  const { registry, error: registryError } = useRegistry();
-  const agents = registry?.agents ?? [];
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [saved, setSaved] = useState(false);
@@ -189,14 +192,7 @@ export function LayerSettingsForm({
 
   const harness = effective?.harness_prompt;
   const effortText = (value: string | null) => value || "runtime default";
-  const agentText = (value: EffectiveAgent) => `${value.name} · ${value.model}`;
-  // The selected agent before the registry loads (or when it is gone): its name when it is the one in effect.
-  const unlisted =
-    draft.agent && !agents.some((a) => a.agent_id === draft.agent)
-      ? effective?.agent.value.agent_id === draft.agent
-        ? effective.agent.value.name
-        : draft.agent
-      : "";
+  const agentText = (value: EffectiveAgent) => `${value.name} (${value.runtime} · ${value.provider} · ${value.model})`;
   const budgetText = (value: number | null) => (value == null ? "no cap" : formatUsd(value));
 
   return (
@@ -240,22 +236,19 @@ export function LayerSettingsForm({
 
       <div className="grid gap-4 sm:grid-cols-2">
         <div className="space-y-1 sm:col-span-2">
-          <label htmlFor={`${idPrefix}-agent`} className="text-xs font-medium text-muted-foreground">Agent</label>
-          <select
+          <label htmlFor={`${idPrefix}-agent`} className="text-xs font-medium text-muted-foreground">
+            {AGENT_PROFILE.name}
+          </label>
+          <AgentProfileSelect
             id={`${idPrefix}-agent`}
             value={draft.agent}
-            onChange={(e) => set({ agent: e.target.value })}
-            aria-describedby={`${idPrefix}-agent-now`}
-            className={SELECT}
-          >
-            <option value="">{isSystem ? `Built-in: ${limits.builtin_agent.name}` : "Inherit"}</option>
-            {agents.map((agent) => (
-              <option key={agent.agent_id} value={agent.agent_id}>{agentLabel(agent)}</option>
-            ))}
-            {unlisted && <option value={draft.agent}>{unlisted}</option>}
-          </select>
+            onChange={(agent) => set({ agent })}
+            emptyLabel={isSystem ? `Built-in: ${limits.builtin_agent.name}` : "Inherit"}
+            roles={roles}
+            describedBy={`${idPrefix}-agent-now`}
+            unlistedName={effective?.agent.value.agent_id === draft.agent ? effective.agent.value.name : undefined}
+          />
           <NowValue id={`${idPrefix}-agent-now`} setting={effective?.agent} layer={layer} show={agentText} />
-          {registryError && <p className="text-xs text-destructive">Could not load the agents: {registryError}</p>}
         </div>
         <div className="space-y-1">
           <label htmlFor={`${idPrefix}-effort`} className="text-xs font-medium text-muted-foreground">Effort</label>
@@ -266,7 +259,7 @@ export function LayerSettingsForm({
             aria-describedby={`${idPrefix}-effort-now`}
             className={SELECT}
           >
-            <option value="">{isSystem ? "The agent's or the runtime's default" : "Inherit"}</option>
+            <option value="">{isSystem ? `The ${AGENT_PROFILE.name}'s or the runtime's default` : "Inherit"}</option>
             {limits.effort_levels.map((level) => (
               <option key={level} value={level}>{level}</option>
             ))}

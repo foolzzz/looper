@@ -279,7 +279,7 @@ function agentRows(settings: ProjectAgentSettings): [string, string][] {
   const harness = PROJECT_ROLES.filter(([role]) =>
     ["project", "role_project"].includes(effective(role).harness_prompt.source),
   ).map(([, label]) => label);
-  rows.push(["Harness", harness.length ? `set in this project for ${harness.join(", ")}` : "from Settings or the Agents page"]);
+  rows.push(["Harness", harness.length ? `set in this project for ${harness.join(", ")}` : "from Settings → Roles"]);
   return rows;
 }
 
