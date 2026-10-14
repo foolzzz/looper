@@ -1,4 +1,0 @@
-f4664dae1e7552925208b60b5392192556f33182
-test(capability): include external evidence research in registry smoke
-
-Signed-off-by: huangruiteng <14976749+huangruiteng@users.noreply.github.com>

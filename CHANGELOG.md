@@ -385,6 +385,16 @@ To learn how to use these features, read the [usage guide](docs/fork/usage.md).
   now an error.
 - The release wheel no longer requires or builds the upstream Chat bundle
   (`loopx/web/chat`). It still carries the dashboard built from `web/`.
+- **The upstream LoopX code.** The package is now the agent system alone
+  (`loopx.agents`, `loopx.db`, `loopx.cli`, `loopx.paths`): the upstream
+  control plane, capabilities, extensions, Chat server and the other upstream
+  modules are gone, and with them the `loopx-lark-provider`,
+  `loopx-openviking-history-export` and `loopx-openviking-semantic-preference`
+  commands, the `deepseek-harness` extra and the workflow skills the wheel
+  installed under `share/loopx/skills`. The repository no longer has the
+  upstream `apps/` frontends, `packages/` plugins, `skills/`, the man page,
+  or the source-snapshot installers `scripts/install-from-github.sh` and
+  `scripts/install-local.sh`; `install.sh` is the way to install and upgrade.
 
 ## [2.5.0] - 2026-10-13
 

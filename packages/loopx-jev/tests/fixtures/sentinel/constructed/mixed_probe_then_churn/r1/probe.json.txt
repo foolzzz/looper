@@ -1,8 +1,0 @@
-{
-  "probe": "timeout_without_retry",
-  "executed_at": "2026-09-21T00:00:01Z",
-  "command": "python -m pytest test_retry.py -q",
-  "delays_tried_seconds": [1, 2, 4],
-  "result": "TimeoutError propagates to the caller on every delay; no retry attempted",
-  "conclusion": "the single-attempt path is the defect, not the transport timing"
-}

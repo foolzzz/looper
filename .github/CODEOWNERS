@@ -3,7 +3,6 @@
 
 # Repository governance, CI and release-policy files remain lead-owned.
 /.github/workflows/** @huangruiteng
-/scripts/ci/** @huangruiteng
 /AGENTS.md @huangruiteng
 /CONTRIBUTING.md @huangruiteng
 /docs/product/release-*.md @huangruiteng
@@ -12,19 +11,8 @@
 /docs/development/contributor-tasks.md @huangruiteng
 /docs/project/technical-directions*.md @huangruiteng
 
-# Frontend source and bundled web assets.
-/apps/presentation/dashboard/** @huangruiteng @maxliux5
-/loopx/web/chat/** @huangruiteng @maxliux5
-
 # First-review contacts without accepted CODEOWNER appointments are listed in
 # GOVERNANCE.md. Do not add pending invitations as required owners.
 
 # Lark integration review routing.
-/loopx/extensions/lark/** @huangruiteng @steven-kid
-/loopx/cli_commands/lark_*.py @huangruiteng @steven-kid
-/docs/capabilities/lark-*.md @huangruiteng @steven-kid
 /docs/integrations/lark-*.md @huangruiteng @steven-kid
-/examples/lark-* @huangruiteng @steven-kid
-/examples/lark_extension_test_support.py @huangruiteng @steven-kid
-/examples/control_plane/lark-* @huangruiteng @steven-kid
-/tests/extensions/test_lark_*.py @huangruiteng @steven-kid
