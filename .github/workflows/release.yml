@@ -79,10 +79,8 @@ jobs:
           while IFS= read -r arg; do surfaces+=("$arg"); done < <(scripts/release-surface-args.sh "docs/releases/$TAG.surfaces")
           uv run --extra test python examples/release/release-readiness-doc-smoke.py --release-notes "docs/releases/$TAG.md" "${surfaces[@]}"
 
-      - name: Build the Chat bundle and the dashboard
-        run: |
-          python scripts/chat_bundle.py build --install
-          scripts/stage-dashboard.sh
+      - name: Build the dashboard
+        run: scripts/stage-dashboard.sh
 
       - name: Check that the installed wheel runs loopx serve
         env:

@@ -286,10 +286,12 @@
 ### 5.2 工程待办
 
 - **CI 基线**：CI 已改为手动触发（looper #7），而 #6 修掉了 chat-bundle 的已知失败。需要手动跑一次 Python Tests，确认 pytest 是否真正跑通；如果还有失败，逐项修复。
-- **Optional Ark Turn workflow** 引用了已经删除的测试文件，需要修正或移除。
-- **`scripts/install-from-github.sh`** 默认使用 `stable` 分支，但 looper 没有这个分支。
-- **`test_dashboard_command` 的 5 个安装模式用例**在 `main` 上就失败：干净的 checkout 里没有构建 Chat 包（`loopx/web/chat/bundle-manifest.json` 不存在）。需要先构建 Chat 包，或者让这些用例自己准备构建产物。
-- **`test_dashboard_launcher_preserves_early_service_error_context` 偶发超时**：在 `-n 6` 并发下会撞上 5 秒超时，单独运行通过（M3 发现）。
+  - **B1 起**（见 5.5）Python Tests 换成只跑 agent 系统测试的 job：PR 和手动触发，带 PostgreSQL；上游的 Chat 包、Playwright、TypeScript 和 mypy 检查不再运行。
+- **Optional Ark Turn workflow** 引用了已经删除的测试文件，需要修正或移除。随上游清理消失：`ark-turn.yml` 在 B2 删除，`packages/loopx-ark-turn` 在 B3 删除。
+- **`scripts/install-from-github.sh`** 默认使用 `stable` 分支，但 looper 没有这个分支。随上游清理消失：这个脚本和 `scripts/install-local.sh` 在 B3 删除，安装只走 `install.sh`。
+- **`test_dashboard_command` 的 5 个安装模式用例**在 `main` 上就失败：干净的 checkout 里没有构建 Chat 包（`loopx/web/chat/bundle-manifest.json` 不存在）。需要先构建 Chat 包，或者让这些用例自己准备构建产物。随上游清理消失：这个文件测的是上游的 `loopx dashboard`/`chat` 启动器，在 B2 删除；B1 起 wheel 也不再构建 Chat 包。
+- **`test_dashboard_launcher_preserves_early_service_error_context` 偶发超时**：在 `-n 6` 并发下会撞上 5 秒超时，单独运行通过（M3 发现）。随上游清理消失：它在同一个文件里，B2 删除。
+- **`test_planner_agent.py::TestPlanning::test_turn_over_the_time_limit_fails_planning` 偶发失败**：`-n 6` 下失败过一次，重跑通过（上游清理盘点时发现）。它给 Planner 的时限只有 3 秒（`timeout_seconds: 3`），机器繁忙时替身进程可能来不及启动。
 - **知识索引容量**：索引每行都带一个绝对路径（在 `~/.loopx` 下约 150 字），4,000 字的索引上限实际只能放 15–25 篇，比 100 篇的数量上限先用完。改用短的挂载别名或相对路径（M3 发现）。
 - **runtime root 下的只读副本不清理**：插件与 skill 库（M1.6）、项目知识（M3）和项目 skill（M4）按内容哈希写出的只读副本，在内容替换或删除后仍留在磁盘上。需要在没有运行引用时回收。
 - **HTTP 服务没有请求体大小上限**：知识上传等接口靠业务上限拦截，但服务本身不限制请求体大小（M3 发现）。
@@ -321,3 +323,20 @@
 - **项目自带的权限设置**：项目的 `.claude/settings.json` 或托管设置禁止某些工具、关闭 bypass 模式时，agent 的表现（M1.7）。
 - **插件里的 agent 和命令**：M1.6 只验证了 skill 的加载和调用。
 - **Planner 不亲自改文件**：M1.7 起只靠 role prompt 约束。M6 的回归评测里加一项检查。
+
+### 5.5 上游 LoopX 清理（B1–B4）
+
+从 fork 里删掉不再使用的上游 LoopX：control plane、上游 CLI、`apps/` 前端、插件和它们的测试与文档，约占全部代码行数的 96%。`loopx/agents`、`loopx/db` 不导入任何上游模块，所以分四个 PR 依次删除，每个都可以独立回滚。
+
+- [x] **B1 解耦**（looper #31）：`loopx` 命令只剩 `serve`、`version` 和 `--version`，`[project.scripts]` 指向新的 `loopx/cli.py`，启动时不再加载上游模块（`tests/test_cli_entry.py` 守护）；删除 `setup.py`、`MANIFEST.in`，wheel 不再依赖上游 Chat 包，仍带 `web/` 构建的 dashboard；Python Tests 换成只跑 agent 系统测试的 job。上游代码仍留在磁盘上。
+- [ ] **B2 删除上游测试、smoke 和 CI**：`tests/**` 只留 agent 系统的测试和 helper，`examples/**` 只留两个发布 smoke，删除 `regression/`、6 个上游 workflow、`scripts/ci/`；`tests/conftest.py` 去掉 `loopx.canary` 导入和上游 fixture，CI 改为直接跑 `pytest`。先合入 #26（两边都改 `tests/conftest.py`）。
+- [ ] **B3 删除上游代码**：`loopx/**` 只留 `agents`、`db`、`__init__.py`、`cli.py`、`paths.py`；删除 `apps/`、`packages/`、`skills/`、`man/`、除 `stage-dashboard.sh` 和 `release-surface-args.sh` 以外的 `scripts/**`，以及根目录的 npm 和 TypeScript 配置；精简 `pyproject.toml`。
+- [ ] **B4 文档与根目录文件**：`docs/**` 只留本计划、两份架构文档、`docs/releases/` 和 `docs/design.md`；按下面的决定改写和删除其余文档。
+
+维护者的决定：
+
+- 安装和升级只走 `install.sh`（安装 Release 的 wheel），升级就是重新运行它。删除 `loopx update` 和 `loopx init`（B1）；`scripts/install-from-github.sh` 和 `scripts/install-local.sh` 在 B3 删除。
+- `AGENTS.md`、`CONTRIBUTING.md` 在 B4 改写成精简的 fork 版本：保留 `codex/` 分支上的 worktree + PR、DCO（`git commit -s`）、公开/私有边界、核心优先、测试先行、真实路径验收和首屏预览；删掉依赖被删工具的规则（`loopx canary premerge`、`loopx pr-review`、self-repair skill、benchmark smoke、control plane 细则）。
+- `README.zh-CN.md` 在 B4 改写为 fork `README.md` 的中文版，首屏提交前请维护者预览。
+- `docs/fork/**` 在 B4 删除，CHANGELOG 指向 `docs/fork/usage.md` 的链接改指 `docs/architecture/agent-system.md`。
+- 默认做法（B4）：发布正文检查只保留中英双语检查，去掉上游文档检查；`docs/design.md` 作为 `web/` 的设计参考，并入 `docs/development/design.md` 里通用的 UI 规则；治理文件（CODEOWNERS、SECURITY、SUPPORT、CODE_OF_CONDUCT、issue 模板）指向 `foolzzz/looper` 和 `@foolzzz`，删除上游的联系邮箱。
