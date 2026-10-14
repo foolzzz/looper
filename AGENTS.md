@@ -60,7 +60,8 @@ start:
 - Run tests from the worktree root with `uv run --extra test python -m pytest`.
   The PostgreSQL tests run only when `LOOPX_TEST_DATABASE_URL` points at a
   disposable database.
-- Validate on the real path as well as with unit tests:
+- When a change affects runtime behavior, also validate it on the real path;
+  plan section 1 says which of these a change needs:
   - run `loopx serve` from the worktree against a fresh database, on a port
     other than the operator's 8767, with a throwaway `--runtime-root`;
   - run a change to model-visible content (prompts, contracts, injected
