@@ -30,7 +30,9 @@ from typing import Any
 from looper.agents.tiers.worker import extract_report
 
 TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled", "stopped"})
-FILE_EDIT_TOOLS = frozenset({"Write", "Edit", "MultiEdit", "NotebookEdit"})
+# Claude Code's file-editing tools, each naming one file, and Codex's patches (``runtimes.codex``), naming each
+# file they change.
+FILE_EDIT_TOOLS = frozenset({"Write", "Edit", "MultiEdit", "NotebookEdit", "apply_patch"})
 
 _BROKE_CONTRACT = re.compile(r"^Planner reply broke the (PLAN|DECISION|CHAT|SUPERVISE) contract \(")
 _REPAIR_REJECTED = "invalid reply after a repair turn"
@@ -127,9 +129,9 @@ def edit_tool_paths(events: Iterable[Mapping[str, Any]], work_dir: Path) -> list
         for block in (event.get("message") or {}).get("content") or []:
             if isinstance(block, Mapping) and block.get("type") == "tool_use" and block.get("name") in FILE_EDIT_TOOLS:
                 tool_input = block.get("input") or {}
-                path = tool_input.get("file_path") or tool_input.get("notebook_path")
-                if path:
-                    paths.append(_relative(str(path), work_dir))
+                named = [tool_input.get("file_path") or tool_input.get("notebook_path"),
+                         *(c.get("path") for c in tool_input.get("changes") or [] if isinstance(c, Mapping))]
+                paths += [_relative(str(path), work_dir) for path in named if path]
     return paths
 
 

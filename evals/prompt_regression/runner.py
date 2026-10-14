@@ -387,6 +387,7 @@ def run(
     out_dir: Path,
     model: str | None = None,
     agent: str | None = None,
+    register: dict[str, Any] | None = None,
     max_budget_usd: float | None = None,
     total_cap_usd: float | None = None,
     task_timeout: float | None = None,
@@ -395,7 +396,8 @@ def run(
     """Run ``tasks`` in ``mode`` (``fake`` or ``real``); returns the run and the JSON file written to ``out_dir``.
 
     Every role runs ``agent`` (by name), else the Claude Code agent of ``model`` (``claude-code/<model>``,
-    registered for the run), else the built-in agent.
+    registered for the run), else the built-in agent. ``register`` registers an agent first
+    (``register_agent``), which ``agent`` then names.
     """
     if mode not in ("fake", "real"):
         raise EvalError(f"mode must be fake or real, not {mode!r}")
@@ -422,6 +424,8 @@ def run(
             database_url=database_url, runtime_root=root / "runtime", bin_dir=root / "bin", log_path=log_path,
             home=home,
         ) as api:
+            if register is not None:
+                agent = register_agent(api, register)["name"]
             chosen = select_agent(api, agent=agent, model=model)
             results, stopped = run_suite(
                 tasks,
@@ -449,6 +453,26 @@ def run(
     path = out_dir / f"{stamp}-{mode}.json"
     path.write_text(json.dumps(run_result, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     return run_result, path
+
+
+def register_agent(api: Api, spec: dict[str, Any]) -> dict[str, Any]:
+    """Register the agent of ``spec`` in the eval's database and return it: ``{"runtime": {name, type,
+    executable?}, "provider": {name, protocols, auth, base_url?, models?, api_key_env?}, "agent": {name, model,
+    effort?}}``. A runtime of that name (such as the built-in ``codex``, when ``codex`` is on PATH) is reused;
+    the provider's API key is read from the environment variable ``api_key_env`` names, so no key is in the
+    file or in the run's result."""
+    registry = api.get("/api/registry")
+    runtime = next((r for r in registry["runtimes"] if r["name"] == spec["runtime"]["name"]), None)
+    if runtime is None:
+        runtime = api.post("/api/runtimes", spec["runtime"])["runtime"]
+    provider = {k: v for k, v in spec["provider"].items() if k != "api_key_env"}
+    if (variable := spec["provider"].get("api_key_env")) is not None:
+        if not os.environ.get(variable):
+            raise EvalError(f"the provider's API key is read from ${variable}, which is not set")
+        provider["api_key"] = os.environ[variable]
+    provider_id = api.post("/api/providers", provider)["provider"]["provider_id"]
+    return api.post("/api/agents", {**spec["agent"], "runtime_id": runtime["runtime_id"],
+                                    "provider_id": provider_id})["agent"]
 
 
 def select_agent(api: Api, *, agent: str | None, model: str | None) -> dict[str, Any]:

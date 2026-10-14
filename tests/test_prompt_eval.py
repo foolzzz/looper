@@ -95,10 +95,13 @@ def test_edit_tool_paths_are_relative_and_never_local_paths(tmp_path: Path) -> N
         return {"event": {"type": "assistant", "message": {"content": [
             {"type": "tool_use", "name": name, "input": {"file_path": path}}]}}}
 
+    patch = {"event": {"type": "assistant", "message": {"content": [  # a Codex patch, naming each file it changes
+        {"type": "tool_use", "name": "apply_patch", "input": {"changes": [
+            {"path": str(tmp_path / "e.txt"), "kind": "add"}, {"path": str(tmp_path / "f.txt"), "kind": "update"}]}}]}}}
     events = [tool("Write", str(tmp_path / "a.txt")), tool("Read", str(tmp_path / "b.txt")),
-              tool("Edit", "sub/c.txt"), tool("Write", "/elsewhere/secret/d.txt")]
+              tool("Edit", "sub/c.txt"), tool("Write", "/elsewhere/secret/d.txt"), patch]
     assert metrics.edit_tool_paths(events, tmp_path) == [
-        "a.txt", "sub/c.txt", "<outside the working directory>/d.txt"]
+        "a.txt", "sub/c.txt", "<outside the working directory>/d.txt", "e.txt", "f.txt"]
 
 
 def test_changed_files_are_the_planners_only_while_no_step_ran() -> None:

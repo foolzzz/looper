@@ -23,6 +23,9 @@ def _parser() -> argparse.ArgumentParser:
                      help="real mode: every role runs Claude Code with this model (default haiku)")
     run.add_argument("--agent", help="every role runs this agent, by name, instead (a registered agent of the "
                                      "eval's new database, such as the built-in claude-code/opus)")
+    run.add_argument("--register-agent", type=Path, metavar="SPEC.json",
+                     help="register this agent (runtime, provider, agent; the provider's key from the variable "
+                          "its api_key_env names) and run every role on it; see evals/README.md")
     run.add_argument("--tasks", help="comma-separated task ids (default: all)")
     run.add_argument("--max-budget-usd", type=float, default=0.25,
                      help="real mode: --max-budget-usd for every Claude Code run (default 0.25)")
@@ -63,8 +66,9 @@ def main(argv: list[str] | None = None) -> int:
             tasks=selected,
             admin_url=args.pg_url,
             out_dir=args.out_dir,
-            model=args.model if real and not args.agent else None,
+            model=args.model if real and not args.agent and not args.register_agent else None,
             agent=args.agent,
+            register=json.loads(args.register_agent.read_text(encoding="utf-8")) if args.register_agent else None,
             max_budget_usd=args.max_budget_usd if real else None,
             total_cap_usd=args.total_cap_usd if real else None,
             task_timeout=args.task_timeout,
