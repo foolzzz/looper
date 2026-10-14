@@ -292,6 +292,25 @@ def test_a_preview_writes_nothing(monkeypatch: pytest.MonkeyPatch, tmp_path: Pat
     asyncio.run(_test())
 
 
+def test_an_import_leaves_a_schema_about_to_change_to_serve(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Applying the newer schema drops columns; ``loopx serve`` backs the database up before it does."""
+    async def _test() -> None:
+        async with _installation() as (_, source_url), _installation() as (target, target_url):
+            exported = tmp_path / "config.json"
+            assert (await _loopx(monkeypatch, source_url, "config", "export", str(exported)))[0] == 0
+            await target.execute("UPDATE schema_fingerprint SET sha256 = 'an older schema.sql'")
+            await target.execute("ALTER TABLE agent_configs ADD COLUMN permission_mode TEXT")
+            before = await _rows(target)
+
+            code, _, err = await _loopx(monkeypatch, target_url, "config", "import", str(exported), "--apply")
+
+            assert code == 1 and "start `loopx serve` once" in err, err
+            assert await _rows(target) == before
+            assert await target.fetchval("SELECT sha256 FROM schema_fingerprint") == "an older schema.sql"
+
+    asyncio.run(_test())
+
+
 def test_secrets_are_placeholders_by_default_and_never_replace_stored_ones(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:

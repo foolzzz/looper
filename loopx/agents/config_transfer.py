@@ -75,6 +75,10 @@ class ConfigFileError(ValueError):
     """A file the import cannot use at all; nothing is written."""
 
 
+class SchemaChangePending(RuntimeError):
+    """The database's schema is older than this LoopX; ``loopx serve`` backs it up, then changes it."""
+
+
 class Action(str, Enum):
     ADDED = "added"
     CHANGED = "changed"
@@ -904,8 +908,12 @@ async def import_config(conn: Any, data: Mapping[str, Any], *, apply: bool) -> P
     """The import's plan for ``data`` (from ``read_file``); with ``apply`` also written, in the caller's
     transaction. Raises ``ConfigFileError`` when the result would break a catalog cap."""
     if apply:
-        from ..db.connection import ensure_schema
+        from ..db.connection import ensure_schema, schema_change_pending
 
+        if await schema_change_pending(conn):
+            raise SchemaChangePending(
+                "the database schema is older than this LoopX; start `loopx serve` once (it backs the database up "
+                "before changing the schema), then import again")
         await ensure_schema(conn)
     importer = _Importer(conn, await _Target.read(conn), apply)
     settings = data.get("settings", {})

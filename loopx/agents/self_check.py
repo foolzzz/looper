@@ -3,7 +3,10 @@
 ``loopx doctor`` prints these checks and exits 1 when one failed. ``loopx
 serve`` runs the same checks first: an unreachable PostgreSQL stops it; a
 missing Claude Code CLI or login is logged as a warning, the dashboard still
-starts, and ``GET /api/status`` reports every result under ``checks``.
+starts, and ``GET /api/status`` reports every result under ``checks``. The
+``pg_dump`` check matters only when the schema is about to change: serve then
+backs the database up first and does not start without a way to
+(``db_backup``); doctor reports it as a warning otherwise.
 
 Nothing here spends money: the Claude login is read with
 ``claude auth status``, which reads the local credentials and makes no model
@@ -18,8 +21,11 @@ import logging
 import re
 import shutil
 import subprocess
+import sys
 import urllib.parse
 from dataclasses import asdict, dataclass
+
+from . import db_backup
 
 logger = logging.getLogger(__name__)
 
@@ -159,30 +165,83 @@ def check_lark_cli(lark_enabled: bool | None) -> Check:
                  LARK_CLI_FIX)
 
 
-async def _lark_enabled(dsn: str) -> bool | None:
+def pg_dump_fix(server_major: int | None) -> str:
+    """How to give LoopX a pg_dump for the server, or do without one."""
+    version = f"{server_major} or newer" if server_major else "of at least the server's major version"
+    install = (
+        'macOS: brew install libpq, then put it on PATH: export PATH="$(brew --prefix libpq)/bin:$PATH"'
+        if sys.platform == "darwin" else
+        f"Debian/Ubuntu: apt install postgresql-client-{server_major or '<major>'} (from apt.postgresql.org)"
+    )
+    return (
+        f"install pg_dump {version}. {install}\n"
+        f"or set {db_backup.PG_DUMP_ENV} to a pg_dump; with PostgreSQL in Docker, dump inside its container:\n"
+        f"  export {db_backup.BACKUP_CMD_ENV}='docker exec <container> pg_dump --format=custom -U {{user}} {{dbname}}'\n"
+        "or migrate once without a backup: loopx serve --skip-backup"
+    )
+
+
+def check_pg_dump(server_version_num: int | None, pending: bool | None) -> tuple[Check, db_backup.Dumper | None]:
+    """Can LoopX back the database up before it changes the schema? With the way it would, when it can.
+
+    ``pending``: whether the schema is about to change (``None``: unknown).
+    Without a way to back up, ``loopx serve`` refuses only then, so only then
+    is this a failure.
+    """
+    server_major = server_version_num // 10000 if server_version_num else None
+    try:
+        dumper = db_backup.find_dumper(server_major)
+    except db_backup.NoDumper as exc:
+        if pending:
+            return Check("pg_dump", "pg_dump", FAIL,
+                         f"{exc}; the database schema is about to change, and LoopX backs it up first",
+                         pg_dump_fix(server_major)), None
+        return Check("pg_dump", "pg_dump", WARN,
+                     f"{exc}; after an upgrade that changes the database schema, `loopx serve` backs the database "
+                     "up first and will not start without it",
+                     pg_dump_fix(server_major)), None
+    unchecked = "" if server_major or dumper.command else "; not compared with the server, which is unreachable"
+    return Check("pg_dump", "pg_dump", OK, dumper.detail + unchecked), dumper
+
+
+@dataclass(frozen=True)
+class _DatabaseFacts:
+    lark_enabled: bool | None = None
+    server_version_num: int | None = None
+    schema_change_pending: bool | None = None
+
+
+async def _database_facts(dsn: str) -> _DatabaseFacts:
     import asyncpg
 
     from ..db.channel_configs import get_config
+    from ..db.connection import schema_change_pending
 
     try:
         conn = await asyncpg.connect(dsn, timeout=_DATABASE_TIMEOUT_SECONDS)
     except Exception:
-        return None
+        return _DatabaseFacts()
     try:
-        row = await get_config("channel-lark", pool=conn)  # a connection answers like a pool here
-    except asyncpg.UndefinedTableError:  # a database `loopx serve` has not set up yet
-        row = None
+        try:
+            row = await get_config("channel-lark", pool=conn)  # a connection answers like a pool here
+        except asyncpg.UndefinedTableError:  # a database `loopx serve` has not set up yet
+            row = None
+        return _DatabaseFacts(
+            lark_enabled=bool(row and row.get("enabled")),
+            server_version_num=int(await conn.fetchval("SELECT current_setting('server_version_num')")),
+            schema_change_pending=await schema_change_pending(conn),
+        )
     finally:
         await conn.close()
-    return bool(row and row.get("enabled"))
 
 
 async def run_checks(*, dsn: str, claude_bin: str = "claude") -> list[Check]:
-    """Every check, reading only what it can: the channel settings need the database."""
+    """Every check, reading only what it can: the channel settings and the schema state need the database."""
     database = await check_database(dsn)
-    lark_enabled = await _lark_enabled(dsn) if database.status == OK else None
+    facts = await _database_facts(dsn) if database.status == OK else _DatabaseFacts()
     claude = await asyncio.to_thread(check_claude, claude_bin)
-    return [database, *claude, check_lark_cli(lark_enabled)]
+    pg_dump, _ = await asyncio.to_thread(check_pg_dump, facts.server_version_num, facts.schema_change_pending)
+    return [database, *claude, check_lark_cli(facts.lark_enabled), pg_dump]
 
 
 def format_checks(checks: list[Check]) -> str:
