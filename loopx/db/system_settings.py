@@ -1,8 +1,8 @@
 """The ``system_settings`` table: one text value per key.
 
-Code owns each key's meaning, type and validation
-(``loopx.agents.agent_settings``); a key without a row has its built-in
-default.
+Code owns each key's meaning, type and validation (such as the catalog's
+last import report, ``loopx.agents.catalog``); a key without a row has its
+built-in default. Agent settings live in ``agent_setting_layers``.
 """
 
 from __future__ import annotations
