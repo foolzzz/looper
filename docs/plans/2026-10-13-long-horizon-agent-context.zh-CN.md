@@ -1,6 +1,6 @@
 # 开发计划：长程 Agent 上下文体系（M0–M9）
 
-- **状态：** M0–M7 全部交付（M7a 计划状态入库、M7b 任务记忆、M7c 及时沉淀）；M8 全部交付（M8a 能力目录与安装、M8b MCP 服务器、M8c 进库来源、M8d 配置层级统一、M8e 导出与导入）；M9a 运行时、provider 与 agent 的注册和选择已交付；上游 LoopX 清理 B1–B4 已交付；全面改名为 Looper 已交付；其余见第 5 节待办
+- **状态：** M0–M7 全部交付（M7a 计划状态入库、M7b 任务记忆、M7c 及时沉淀）；M8 全部交付（M8a 能力目录与安装、M8b MCP 服务器、M8c 进库来源、M8d 配置层级统一、M8e 导出与导入）；M9a 运行时、provider 与 agent 的注册和选择、M9c Codex 运行时已交付；上游 LoopX 清理 B1–B4 已交付；全面改名为 Looper 已交付；其余见第 5 节待办
 - **依据：** [RFC：长程 Agent 的上下文体系 v0](../architecture/rfcs/long-horizon-agent-context-v0.zh-CN.md)。
   设计原则、分层模型和已作出的决定以 RFC 为准；本文只管"怎么分阶段做、做到什么算完成、现在做到哪了"。
 - **仓库：** `foolzzz/looper`，基线 `main`
@@ -43,7 +43,7 @@
 | M8e | 导出与导入：一个文件，应用前预览，密钥默认留空 | ✅ 已交付（looper #53） | M8b、M8c、M8d |
 | M9a | 运行时、provider 与 agent 的注册和选择；现有 Claude Code 路径抽成第一个运行时适配器 | ✅ 已交付（looper #62） | M8d |
 | M9b | Claude Code 接多种 provider：订阅 OAuth、Anthropic key、兼容 anthropic 协议的接口；按 provider 价格计算花费 | 待开工 | M9a |
-| M9c | Codex 运行时：四类角色都支持（含常驻会话），事件统一、MCP 翻译、OpenAI 登录与 key | 待开工 | M9a |
+| M9c | Codex 运行时：四类角色都支持（含常驻会话），事件统一、MCP 翻译、API key（Codex 登录不做） | ✅ 已交付（looper #67） | M9a |
 | M9d | SDK 运行时与 norma SDK | 待定（norma 就绪后） | M9a |
 | M9e | OMP 运行时：先只读核实能力、填能力矩阵，再写适配器 | 待开工 | M9c |
 
@@ -460,6 +460,20 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
   协议或逐轮续接）；独立的 `CODEX_HOME` 隔离且保留登录；system prompt 注入、MCP 翻译为 `config.toml`、
   目录条目的兼容性（先核实 Codex 对 skill 的支持）；按 token 用量与 provider 价格计算花费；OpenAI 登录与 API key。
 - **验收：** 用 Codex agent 跑 M6 真实模式评测（四类角色都用 Codex 跑一次，再与 Claude 基线对比）。
+- **核实后确定的做法**（技术验证结果见多运行时 RFC 第 6 节）：
+  - 只用 API key provider（P1）；Codex 登录不做；
+  - Worker、Reviewer 是一次 `codex exec --json --ephemeral … -`，提示从 stdin 读完即关，运行中不能再引导，Planner 的
+    引导消息留给这一步的决策轮；Manager、Planner 每轮起一个 `exec … resume <thread> -` 进程（`ResidentCodex`），
+    没采用实验性的 `app-server`，`queue` 送不进 `exec`；
+  - 隔离：每次运行一个 Looper 自己的 `CODEX_HOME`（`<runtime_root>/.local/codex`），只有生成的 `config.toml` 和
+    `AGENTS.md`，经 `env CODEX_HOME=…` 写在命令里；常驻会话另有按 owner 的会话目录，每轮前同步这两个文件；
+    原生 skill 列表和插件同步关掉（前者总会列出 `$HOME/.agents/skills`）；一天没写过的运行目录在写新目录时删掉；
+  - system prompt 写进 `AGENTS.md`，前面是适配器加的"运行时说明"；`developer_instructions` 续接时不更新，没用；
+  - P9：MCP 写进 `config.toml`（stdio、HTTP；SSE 跳过），skill 只读挂载并在运行时说明里列索引，插件的 hook、命令、
+    agent 跳过，都记在运行记录的 `runtime_catalog`；
+  - 只有 token：`turn.completed` 的会话累计值换算成每轮的 `usage` 事件和结果里的 `modelUsage`，单次上限只能在一轮结束时
+    判断；没有压缩事件和自主轮；
+  - `looper serve` 发现 PATH 上有 `codex` 时注册内置运行时 `codex`；评测加 `--register-agent` 和每个任务的 token 数。
 
 #### M9e OMP 运行时
 
@@ -513,6 +527,7 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
 | 2026-10-14 | 第 5.3 节界面导入配置文件（looper #63）：`POST /api/config/imports` 只在这一个路由把请求体上限放宽到 256 MiB（目录上限的两倍），流式写入 runtime root 下权限 0600 的临时文件，校验格式后返回与 `loopx config import` 相同的预览，`POST .../<id>/apply` 在一个事务里应用并删除文件，`DELETE` 取消，未应用的一小时后过期删除，其余路由仍是 8 MiB。Settings 的「Move to another machine」可选择或拖入文件，按段显示新增、变化（含字段）、不变和跳过，以及待补的密钥，确认后应用，结果里的链接直接打开对应 provider、MCP 服务器或渠道的表单。验证：真实 PG 测试覆盖超过 8 MiB 的上传、其他路由 413、预览不写、应用与 CLI 结果一致、过期和未知 id 404、坏文件 400 与临时文件清理；两个一次性 `loopx serve` 之间经界面路由导出 12.4 MB、在新库的 Settings 里预览并应用 24 项，再导出除未导出的 API key 外与原文件相同；真实 PG 1020 通过。 |
 | 2026-10-14 | 全面改名为 Looper（looper #64）：命令、Python 包与 wheel、数据目录、环境变量、服务 label、导出格式、界面、prompt 与文档改为 looper/Looper；`loopx` 别名打印弃用提示后执行 `looper`，`LOOPX_*` 作为回退并警告一次，`~/.loopx` 在首次 `serve` 或 `service install` 时改名为 `~/.looper` 并留下链接，`service install` 先卸掉 `com.loopx.serve`，`loopx-config/v1` 仍可导入，默认库名 `loopx`、tag 与 NOTICE 不变。验证：真实 PG 1043 通过；临时 HOME 下 `looper serve` 移动目录并留链接、`loopx version`、只设 `LOOPX_DATABASE_URL` 的 serve 与 doctor、从 `git archive` 构建的 `looper-2.5.0` wheel 装出 `looper` 和 `loopx`，沙箱里 `install.sh` 先卸旧 `loopx` 工具；真实 haiku 评测 5/5、契约违约 0、Planner 改文件 0，送审任务多出的一步单独重跑后消失，花费 $0.44。 |
 | 2026-10-14 | M7c 交付（looper #66）：任务日志新增 `step_failed`、`step_retry`、`decision`、`user_instruction`、`session_switch` 和 `handoff`，由代码在事件发生时写入；Planner 每轮先整条注入用户指令（独立预算），再按类型分标题注入各类最新条目，Worker 首轮也拿到用户指令和失败经验；Planner、Manager 换 agent 时旧会话（进程还在时）先写交接摘要，新会话首轮带续接简报（Manager 另带各聊天最近的对话），项目级经验在 `distill_lessons` 为 `draft`、`write` 时到达即进草稿。验证：替身 Claude 下各类条目的触发、注入顺序与上限、强制换 agent 的交接与简报、三种旧会话不可用、Manager 续接和草稿规则都有测试，一次性 `looper serve` 跑通重试、聊天加步骤、会话丢失后续接和经验草稿并截图任务页；真实 haiku 评测 5/5、契约违约 0、Planner 改文件 0，$0.35（基线 $0.33）；真实 PG 1070 通过。M9b 尚未合入，续接规则留在 `session_switch.agent_switch` 一处，"中途换 provider"评测记为 M7c 的待办。 |
+| 2026-10-14 | M9c 交付（looper #67）：Codex 运行时，四类角色都能跑：Worker、Reviewer 一次 `codex exec --json`，Manager、Planner 每轮起一个进程续接会话；每次运行一个 Looper 自己的 `CODEX_HOME`（只有生成的 `config.toml` 和 `AGENTS.md`，不读 `~/.codex`），MCP 翻译进 `config.toml`，skill 降为可读文档，跳过的插件部分记进运行记录，技术验证结果见多运行时 RFC 第 6 节。验证：codex + CPA + gpt-5.5 的 M6 真实模式评测 5/5、契约违约 0、Planner 改文件 0（haiku 基线 5/5），聊天纠偏任务因运行中的 Codex Worker 不能被引导而多一次重试，token 约 52 万提示、6.7 千输出，按 gpt-5.5 价目折合约 $0.73，Manager 两轮续接同一会话，评测时密钥经未提交的本地垫片注入（M9b 合入后改用它的实现）；真实 PG 1092 通过。 |
 
 ## 5. 不属于本 RFC 的待办
 
@@ -529,6 +544,7 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
 - **升级时迁移前自动备份（2026-10-14 定，✅ 已交付 looper #60）**：`serve` 发现有未执行的迁移时，先用 `pg_dump` 备份到 runtime root 下的 `backups/`（保留最近几份）再迁移；没有可用的 `pg_dump` 时拒绝执行破坏性迁移并提示安装方法；`doctor` 检查 `pg_dump`。自 v2.5.0 起已有 11 处删列、删表的迁移。
 - **服务常驻（2026-10-14 定，✅ 已交付 looper #59）**：`service install / uninstall / status / restart`，macOS 生成 launchd LaunchAgent，Linux 生成 systemd 用户服务，开机自启、崩溃拉起；本机也改用它运行主 checkout 的代码。
 - **全面改名为 looper（2026-10-14 定，✅ 已交付 looper #64）**：命令、Python 包、数据目录（`~/.loopx` → `~/.looper`，自动迁移）、环境变量（`LOOPX_*` → `LOOPER_*`，旧名作为回退）、界面与文档统一改名；`loopx` 命令保留为别名过渡一个版本。改名是机械改动且触及几乎所有文件，**排在当前这批 PR 合入之后、M9b/M9c 开工之前**，单独一个 PR，期间不开其他分支；README 与控制台首屏的改动先请维护者预览（本次改名维护者已免除预览）。默认库名 `loopx`、发布 tag 与历史、NOTICE 对上游 LoopX 的署名不改。
+- **Codex 运行时的已知差距（M9c）**：运行中的 Codex Worker 不能被引导，Planner 的消息只能留给这一步的决策轮（评测里聊天纠偏任务因此多一次重试），要引导得改走实验性的 `app-server`；Codex 不报压缩和单次请求的用量，记录里没有上下文规模，单次上限只能在一轮结束时判断；杀掉 Codex 进程时它正在跑的 shell 命令不会结束（Codex 给每条命令单开进程组）；常驻会话的目录（`codex/sessions/<owner>`）随任务累积，还没有回收。
 
 ### 5.3 非核心待办（M6 之后统一做）
 

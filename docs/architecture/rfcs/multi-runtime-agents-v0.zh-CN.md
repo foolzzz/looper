@@ -1,7 +1,7 @@
 # RFC：多运行时 agent 架构（v0）
 
 - **状态：** 设计已定（[长程 Agent 上下文 RFC](long-horizon-agent-context-v0.zh-CN.md) 决策 10），M9a 已交付
-  （looper #62；与本文的出入记在开发计划 M9a 的"核实后确定的做法"）；本文是 M9 的设计依据和待决问题清单。
+  （looper #62）、M9c 已交付（looper #67）；与本文的出入记在开发计划各阶段的"核实后确定的做法"；本文是 M9 的设计依据和待决问题清单。
 - **开发计划：** [长程 Agent 上下文体系开发计划](../../plans/2026-10-13-long-horizon-agent-context.zh-CN.md) 的 M9 一节。
 - **最近更新：** 2026-10-14
 
