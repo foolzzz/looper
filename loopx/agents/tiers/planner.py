@@ -25,15 +25,17 @@ its journal and the Planner's Claude session live in PostgreSQL (``plans``,
 ``agent_sessions``), written as they change; a
 Planner started after the server restarted reads them back and carries on
 (TASK_RESUME) without planning again. The system prompt is rebuilt for every turn from the
-harness (the project's Planner override, else the default in Settings), the
-``planner`` config and the task's project as it is now (its background and
-the index of its knowledge included, the knowledge's directories mounted with
-``--add-dir``) and the catalog items installed for the Planner, globally or in
-the project (each a ``--plugin-dir``); when it,
-the model or the Settings environment changes, Claude restarts and resumes its
-session. The project's execution settings (``project_execution``) set the
-model, ``--max-budget-usd``, the supervision interval, whether every step
-needs a review and the task's spend cap, read before each event's turns. An
+harness, the ``planner`` config and the task's project as it is now (its
+background and the index of its knowledge included, the knowledge's
+directories mounted with ``--add-dir``) and the catalog items installed for
+the Planner, globally or in the project (each a ``--plugin-dir``). Its agent
+settings (harness, model, effort, environment, ``--max-budget-usd``) are
+resolved for the Planner in the task's project every turn
+(``agent_settings.load_agent_settings``); when the prompt, a flag or the
+environment changes, Claude restarts and resumes its session. The project's
+execution settings (``project_execution``) set the supervision interval,
+whether every step needs a review and the task's spend cap, read before each
+event's turns. An
 invalid reply gets one repair turn. Planning that
 still fails fails the task; a decision that still fails falls back to the
 step's own verdict. When the task completes or fails, the Planner signals the
@@ -52,8 +54,7 @@ from pathlib import Path
 from typing import Any, TypeVar
 
 from ..bus import MessageBus
-from .. import agent_settings
-from ..agent_settings import BUILTIN_DEFAULTS, AgentDefaults, AgentType, Launch, resolve_harness, resolve_launch
+from ..agent_settings import AgentSettings, AgentType, Harness, Launch, load_agent_settings
 from ..claude_cli import (
     AUTONOMOUS_INPUT,
     AutonomousHandler,
@@ -157,38 +158,30 @@ class PlannerSettings:
 
     system_prompt: str
     timeout_seconds: int  # per turn; 0 for no limit
-    model: str | None  # the planner's own model; None for the default in Settings
     max_turns: int  # 0 for no limit
     supervise_interval_seconds: int  # periodic SUPERVISE turn; 0 to turn off
     recommended: bool = True  # whether system_prompt is the recommended one (default_prompt)
-    defaults: AgentDefaults = BUILTIN_DEFAULTS  # the harness, model, effort and environment in Settings
 
 
 async def load_settings() -> PlannerSettings:
-    """Read the ``planner`` agent config and the Settings defaults; without a readable row use the defaults."""
-    defaults = await agent_settings.load_defaults()
+    """Read the ``planner`` agent config; without a readable row use the defaults."""
     try:
         config = await db_agent_configs.get_config("planner")
     except Exception:
         logger.warning("cannot read the planner agent config; using defaults", exc_info=True)
         config = None
     if config is None:
-        return PlannerSettings(
-            DEFAULT_SYSTEM_PROMPT, DEFAULT_TURN_TIMEOUT_SEC, None, 0, DEFAULT_SUPERVISE_INTERVAL_SEC,
-            defaults=defaults,
-        )
+        return PlannerSettings(DEFAULT_SYSTEM_PROMPT, DEFAULT_TURN_TIMEOUT_SEC, 0, DEFAULT_SUPERVISE_INTERVAL_SEC)
     interval = config.get("supervise_interval_seconds")
     system_prompt = str(config.get("system_prompt") or "").strip() or DEFAULT_SYSTEM_PROMPT
     return PlannerSettings(
         system_prompt=system_prompt,
         recommended=is_recommended(system_prompt, str(config.get("default_prompt") or "") or DEFAULT_SYSTEM_PROMPT),
         timeout_seconds=int(config.get("timeout_seconds") or 0),
-        model=str(config.get("model") or "").strip() or None,
         max_turns=int(config.get("max_turns") or 0),
         supervise_interval_seconds=(
             DEFAULT_SUPERVISE_INTERVAL_SEC if interval is None else max(0, int(interval))
         ),
-        defaults=defaults,
     )
 
 
@@ -242,7 +235,6 @@ class TaskPlan:
     project_name: str = ""
     project_description: str = ""
     project_background: str = ""
-    project_planner_harness: str = ""  # the project's harness for its Planner; '' for the default
     project_updated_at: str = ""  # the project's version, for the system prompt's record
     project_work_dir: str = ""  # the project's default directory, where its path documents are
     session_id: str | None = None  # the Planner's Claude session (agent_sessions), resumed after a restart
@@ -379,6 +371,8 @@ class PlannerAgent:
         self._knowledge: AgentKnowledge | None = None
         # The installed items the last turn ran with, kept the same way when a turn cannot read them.
         self._library: AgentLibrary | None = None
+        # The agent settings the last turn ran with, kept the same way when a turn cannot read them.
+        self._agent_settings: AgentSettings | None = None
         # The project's execution settings as last read; everything inherits until the project is read.
         self._execution = ProjectExecution()
 
@@ -1186,10 +1180,9 @@ class PlannerAgent:
         settings = await load_settings()
         knowledge = await self._load_knowledge(plan)
         library = await self._load_installed(plan)
-        system_prompt = self._system_prompt(plan, settings, knowledge)
-        execution = self._execution
-        launch = resolve_launch(settings.defaults, settings.model, library, knowledge,
-                                project_model=execution.model, max_budget_usd=execution.run_budget_usd)
+        agent_settings = await self._load_agent_settings(plan)
+        system_prompt = self._system_prompt(plan, settings, knowledge, agent_settings.harness)
+        launch = Launch(agent_settings, library, knowledge)
         await self._note_background(plan.project_background)
         try:
             prompt_file = system_prompt.write_file(self._runtime_root)
@@ -1339,16 +1332,16 @@ class PlannerAgent:
 
         return begin
 
-    def _system_prompt(self, plan: TaskPlan, settings: PlannerSettings, knowledge: AgentKnowledge) -> SystemPrompt:
+    def _system_prompt(self, plan: TaskPlan, settings: PlannerSettings, knowledge: AgentKnowledge,
+                       harness: Harness) -> SystemPrompt:
         """The harness, the role prompt, the project background and knowledge index, the task, then the reply
         contract."""
         project = None
-        if plan.project_id or plan.project_name or plan.project_background or plan.project_planner_harness:
+        if plan.project_id or plan.project_name or plan.project_background:
             project = {"id": plan.project_id, "name": plan.project_name, "background": plan.project_background,
-                       "planner_harness_prompt": plan.project_planner_harness,
                        "updated_at": plan.project_updated_at}
         return build_system_prompt(
-            harness=resolve_harness(AgentType.PLANNER, settings.defaults, project=project),
+            harness=harness,
             role_id="planner",
             role=settings.system_prompt,
             recommended=settings.recommended,
@@ -1686,7 +1679,6 @@ class PlannerAgent:
         plan.project_name = str(project.get("name") or "")
         plan.project_description = str(project.get("description") or "")
         plan.project_background = str(project.get("background") or "")
-        plan.project_planner_harness = str(project.get("planner_harness_prompt") or "")
         plan.project_work_dir = str(project.get("work_dir") or "")
         self._execution = ProjectExecution.from_row(project)
         updated_at = project.get("updated_at")
@@ -1828,6 +1820,18 @@ class PlannerAgent:
                 verb = "changed" if before else "applied"
                 await self._activity("phase", f"Project knowledge {verb} ({documents_label(knowledge.documents)})")
         return knowledge
+
+    async def _load_agent_settings(self, plan: TaskPlan) -> AgentSettings:
+        """The Planner's agent settings in the task's project, read now; the last ones read when they cannot
+        be read (the built-in defaults before any)."""
+        agent_settings = await load_agent_settings(AgentType.PLANNER, plan.project_id or None)
+        if agent_settings.error is not None:
+            await self._activity("error", f"Warning: {agent_settings.error}"[:500])
+            if self._agent_settings is not None:
+                return self._agent_settings
+            return agent_settings
+        self._agent_settings = agent_settings
+        return agent_settings
 
     async def _load_installed(self, plan: TaskPlan) -> AgentLibrary:
         """The catalog items installed for the Planner, globally or in the project, read now; the last ones

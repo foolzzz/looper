@@ -1,4 +1,5 @@
-"""A project's execution settings: the model, the spend caps, the supervision interval and the review policy.
+"""A project's execution settings (the task spend cap, the supervision interval and the review policy), and
+its agent settings' model and per-run cap as its agents launch with them.
 
 Each setting is read where its agent starts a run or a turn; a project that
 sets none runs its agents as before. Claude is a stand-in throughout: the
@@ -36,14 +37,22 @@ from tests.test_planner_agent import (
 )
 from tests.test_projects_api import _call, _Store, store  # noqa: F401  (the store fixture)
 
-UNSET = {"model": None, "run_budget_usd": None, "task_budget_usd": None, "task_budget_action": None,
+UNSET = {"task_budget_usd": None, "task_budget_action": None,
          "supervise_interval_seconds": None, "review_policy": None}
 
 
 def _project(**settings: Any) -> dict[str, Any]:
     """A project row as the database returns it: every execution column, NULL unless given."""
-    return {"id": "proj-1", "name": "calc", "background": "", "planner_harness_prompt": "",
-            "worker_harness_prompt": "", **UNSET, **settings}
+    return {"id": "proj-1", "name": "calc", "background": "", **UNSET, **settings}
+
+
+def _layers(agent_db: Any, *rows: dict[str, Any]) -> None:
+    """The agent setting layers' rows the agents read."""
+    agent_db.list_layers.return_value = list(rows)
+
+
+def _in_project(**values: Any) -> dict[str, Any]:
+    return {"scope": "project", "project_id": "proj-1", **values}
 
 
 def _spend_from_records(monkeypatch: pytest.MonkeyPatch, agent_db: Any) -> None:
@@ -64,24 +73,23 @@ class TestProjectApi:
         store.add_project("proj-a", "calc")
         assert {k: v for k, v in _call("GET", "/api/projects")[1]["projects"][0].items() if k in UNSET} == UNSET
 
-        settings = {"model": " sonnet ", "run_budget_usd": 0.5, "task_budget_usd": 2,
+        settings = {"task_budget_usd": 2,
                     "task_budget_action": "wrap_up", "supervise_interval_seconds": 0, "review_policy": "all"}
         status, body = _call("PUT", "/api/projects/proj-a", settings)
         assert status == 200
-        assert {k: body[k] for k in UNSET} == {**settings, "model": "sonnet", "task_budget_usd": 2.0}
+        assert {k: body[k] for k in UNSET} == {**settings, "task_budget_usd": 2.0}
 
-        status, body = _call("PUT", "/api/projects/proj-a", {"run_budget_usd": None, "model": ""})
-        assert status == 200 and (body["run_budget_usd"], body["model"]) == (None, None)
+        status, body = _call("PUT", "/api/projects/proj-a", {"task_budget_usd": None, "task_budget_action": ""})
+        assert status == 200 and (body["task_budget_usd"], body["task_budget_action"]) == (None, None)
         assert body["review_policy"] == "all"  # a field left out keeps its value
 
     @pytest.mark.parametrize("field, value, says", [
-        ("model", "--evil", "not a model name"),
-        ("run_budget_usd", 0, "more than 0"),
-        ("run_budget_usd", -1, "more than 0"),
+        ("task_budget_usd", 0, "more than 0"),
+        ("task_budget_usd", -1, "more than 0"),
         ("task_budget_usd", 0.00001, "4 decimals"),
         ("task_budget_usd", 100_001, "at most 100000"),
         ("task_budget_usd", "5", "number of US dollars"),
-        ("run_budget_usd", True, "number of US dollars"),
+        ("task_budget_usd", True, "number of US dollars"),
         ("task_budget_action", "pause", "wrap_up, fail"),
         ("review_policy", "some", "planner, all"),
         ("supervise_interval_seconds", -5, "from 0"),
@@ -103,17 +111,21 @@ class TestWorkerRuns:
     def test_the_project_model_and_run_cap_reach_worker_and_reviewer(
         self, agent_db: Any, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        _worker_row(monkeypatch, {"system_prompt": "ROLE", "timeout_seconds": 0, "max_turns": 0, "model": "haiku"})
-        agent_db.get_task_project.return_value = _project(model="sonnet", run_budget_usd=0.25)
+        _worker_row(monkeypatch, {"system_prompt": "ROLE", "timeout_seconds": 0, "max_turns": 0})
+        _layers(agent_db, {"scope": "role", "role": "worker", "model": "haiku"},
+                _in_project(model="sonnet", run_budget_usd=0.25))
+        agent_db.get_task_project.return_value = _project()
         for verify in (False, True):
             _, seen = _run_step(verify=verify)
             assert (_flag(seen["argv"], "--model"), _flag(seen["argv"], "--max-budget-usd")) == ("sonnet", "0.25")
             metadata = agent_db.start_record.await_args.kwargs["metadata"]
-            assert metadata["model_choice"]["source"] == "project_override"
+            assert metadata["model_choice"]["source"] == "project"
             assert metadata["max_budget_usd"] == 0.25
+            assert metadata["settings_sources"]["run_budget_usd"] == "project"
 
     def test_a_run_stopped_at_its_cap_fails_with_the_reason(self, agent_db: Any) -> None:
-        agent_db.get_task_project.return_value = _project(run_budget_usd=0.01)
+        _layers(agent_db, _in_project(run_budget_usd=0.01))
+        agent_db.get_task_project.return_value = _project()
         # What Claude Code 2.1.285 writes at the cap, then it exits 1 when its input ends.
         body = (
             "sys.stdin.readline()\n"
@@ -129,7 +141,7 @@ class TestWorkerRuns:
 
         result = asyncio.run(_run())
         assert result["status"] == "failed"
-        assert result["error"] == ("Claude Code stopped at the project's per-run spend cap (--max-budget-usd): "
+        assert result["error"] == ("Claude Code stopped at its per-run spend cap (--max-budget-usd): "
                                    "Reached maximum budget ($0.01)")
 
 
@@ -139,16 +151,36 @@ class TestWorkerRuns:
 @pytest.mark.usefixtures("agent_db")
 class TestPlanner:
     def test_the_project_model_and_run_cap_reach_the_planner(self, planner_claude: Any, agent_db: Any) -> None:
-        agent_db.get_task_project.return_value = _project(model="sonnet", run_budget_usd=1.5)
+        _layers(agent_db, _in_project(model="sonnet", run_budget_usd=1.5))
+        agent_db.get_task_project.return_value = _project()
         claude = planner_claude(plan(step("s1")), decide("accept"))
         drive(claude, always(WORK_OK))
         (argv,) = claude.argvs()
         assert (_flag(argv, "--model"), _flag(argv, "--max-budget-usd")) == ("sonnet", "1.5")
 
+    def test_a_role_in_project_model_reaches_only_that_roles_argv(
+        self, planner_claude: Any, agent_db: Any, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _layers(agent_db, {"scope": "system", "model": "sonnet"},
+                {"scope": "role_project", "role": "worker", "project_id": "proj-1", "model": "haiku"},
+                {"scope": "role_project", "role": "worker", "project_id": "proj-other", "model": "opus"})
+        agent_db.get_task_project.return_value = _project()
+        claude = planner_claude(plan(step("s1")), decide("accept"))
+        drive(claude, always(WORK_OK))
+        (planner_argv,) = claude.argvs()
+        _worker_row(monkeypatch, {"system_prompt": "ROLE", "timeout_seconds": 0, "max_turns": 0})
+        worker_argv, reviewer_argv = (_run_step(verify=verify)[1]["argv"] for verify in (False, True))
+        assert [_flag(argv, "--model") for argv in (planner_argv, worker_argv, reviewer_argv)] == [
+            "sonnet", "haiku", "sonnet"]
+        # Outside the project, the Worker has the system's.
+        agent_db.get_task_project.return_value = {**_project(), "id": "proj-2"}
+        assert _flag(_run_step()[1]["argv"], "--model") == "sonnet"
+
     def test_a_turn_at_the_run_cap_fails_and_the_next_turn_gets_a_new_process(
         self, planner_claude: Any, agent_db: Any,
     ) -> None:
-        agent_db.get_task_project.return_value = _project(run_budget_usd=0.1)
+        _layers(agent_db, _in_project(run_budget_usd=0.1))
+        agent_db.get_task_project.return_value = _project()
         claude = planner_claude(plan(step("s1"), step("s2", "s1")), "<budget>", decide("accept", summary="done"))
         h = drive(claude, always(WORK_OK))
 
@@ -326,4 +358,4 @@ def test_a_project_without_settings_runs_as_before(
         assert "--max-budget-usd" not in argv and _flag(argv, "--model") == "opus"
     task_costs.assert_not_awaited()
     metadata = agent_db.start_record.await_args.kwargs["metadata"]
-    assert metadata["model_choice"]["source"] == "builtin_default" and "max_budget_usd" not in metadata
+    assert metadata["model_choice"]["source"] == "builtin" and "max_budget_usd" not in metadata

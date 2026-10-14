@@ -246,13 +246,13 @@ RESTRICTING_FLAGS = {"--tools", "--allowedTools", "--allowed-tools", "--disallow
 class TestPermissionArgs:
     def test_every_launch_carries_them_with_and_without_a_library(self, tmp_path: Path) -> None:
         # The four agents build their commands from a Launch, so the flags cannot diverge.
-        from loopx.agents.agent_settings import BUILTIN_DEFAULTS, resolve_launch
+        from loopx.agents.agent_settings import Launch
         from loopx.agents.claude_cli import permission_args
         from loopx.agents.library import AgentLibrary
 
         assert permission_args() == ["--dangerously-skip-permissions"]
         library = AgentLibrary(plugin_dirs=(str(tmp_path / "plugin"),))
-        for launch in (resolve_launch(BUILTIN_DEFAULTS), resolve_launch(BUILTIN_DEFAULTS, library=library)):
+        for launch in (Launch(), Launch(library=library)):
             args = launch.args()
             assert args[:len(permission_args())] == permission_args()
             assert args.count("--dangerously-skip-permissions") == 1

@@ -277,18 +277,17 @@ def test_execution_settings_are_stored_through_the_task_and_cleared() -> None:
     from loopx.db import projects, tasks
 
     async def _test(pool: Any) -> None:
-        settings = execution_fields({"model": "sonnet", "run_budget_usd": 0.5, "task_budget_usd": 2,
-                                     "task_budget_action": "wrap_up", "supervise_interval_seconds": 0,
+        settings = execution_fields({"task_budget_usd": 2, "task_budget_action": "wrap_up", "supervise_interval_seconds": 0,
                                      "review_policy": "all", "distill_lessons": True})
         calc = await projects.create_project(name="calc", execution=settings, pool=pool)
         await tasks.create_task(task_id="task-1", requirement="r", work_dir="/w", project_id=calc["id"], pool=pool)
         assert ProjectExecution.from_row(await projects.get_task_project("task-1", pool=pool)).view() == {
             **settings, "task_budget_usd": 2.0}
 
-        assert await projects.update_project(calc["id"], execution={"run_budget_usd": None, "model": "opus"},
-                                             pool=pool)
+        assert await projects.update_project(calc["id"], execution={"task_budget_usd": None,
+                                                                    "supervise_interval_seconds": 60}, pool=pool)
         row = await projects.get_project(calc["id"], pool=pool)
-        assert (row["run_budget_usd"], row["model"], row["review_policy"]) == (None, "opus", "all")
+        assert (row["task_budget_usd"], row["supervise_interval_seconds"], row["review_policy"]) == (None, 60, "all")
         plain = await projects.create_project(name="plain", pool=pool)
         assert all(plain[column] is None for column in projects.EXECUTION_COLUMNS)
         with pytest.raises(asyncpg.CheckViolationError):  # the table refuses what validation would

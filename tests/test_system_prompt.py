@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 
-from loopx.agents.agent_settings import Harness, HarnessSource
+from loopx.agents.agent_settings import Harness, Layer
 from loopx.agents.claude_cli import ISOLATION_ID
 from loopx.agents.system_prompt import (
     REVIEW_CONTRACT,
@@ -100,7 +100,7 @@ def test_malformed_or_oversized_learnings_are_clipped_or_dropped_never_fatal(
 # --- The layers' order: harness, role, project (background, knowledge index), task, contract last ---
 
 
-HARNESS = Harness("## How you work\nVerify.", HarnessSource.SYSTEM_DEFAULT)
+HARNESS = Harness("## How you work\nVerify.", Layer.SYSTEM)
 
 # The project's knowledge index is in the project layer, after the background.
 INDEX = "## Project knowledge\nReference documents.\nIn /k/abc:\n- Glossary: Terms (Glossary.md)"
@@ -191,7 +191,7 @@ def test_layers_name_each_source_by_its_hash() -> None:
         contract_name="WORK_CONTRACT", contract=WORK_CONTRACT, harness=HARNESS,
     )
     assert layers == {
-        "harness": {"source": "system_default", "sha256": _sha(HARNESS.text)},
+        "harness": {"source": "system", "sha256": _sha(HARNESS.text)},
         "role": {"config_id": "worker", "sha256": _sha("You are careful."), "recommended": False},
         "project": {"id": "proj-1", "background_sha256": _sha("Use uv."), "updated_at": "2026-10-13T12:00:00+00:00",
                     "knowledge_sha256": None, "knowledge_documents": 0},

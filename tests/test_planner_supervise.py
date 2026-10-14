@@ -74,7 +74,7 @@ def test_the_timer_posts_a_tick_while_a_worker_runs(planner_claude: Any, monkeyp
 
     async def fast_settings() -> PlannerSettings:
         return PlannerSettings(
-            system_prompt="You are the Planner.", timeout_seconds=0, model=None,
+            system_prompt="You are the Planner.", timeout_seconds=0,
             max_turns=0, supervise_interval_seconds=0.2,  # type: ignore[arg-type]
         )
 

@@ -16,8 +16,6 @@ _UPDATABLE_FIELDS = (
     "llm_profile_id",
     "enabled",
     "system_prompt",
-    "harness_prompt",
-    "model",
     "max_turns",
     "timeout_seconds",
     "max_concurrency",
@@ -146,7 +144,6 @@ async def seed_defaults(
         role = cfg.get("role", "")
         runtime = cfg.get("runtime", "claude-code")
         system_prompt = cfg.get("system_prompt", "")
-        model = cfg.get("model")
         max_turns = cfg.get("max_turns", 0)
         timeout_seconds = cfg.get("timeout_seconds", 1200)
         max_concurrency = cfg.get("max_concurrency", 1)
@@ -154,9 +151,9 @@ async def seed_defaults(
         await pool.execute(
             """
             INSERT INTO agent_configs
-                (agent_id, display_name, role, runtime, system_prompt, default_prompt, model,
+                (agent_id, display_name, role, runtime, system_prompt, default_prompt,
                  max_turns, timeout_seconds, max_concurrency)
-            VALUES ($1, $2, $3, $4, $5, $5, $6, $7, $8, $9)
+            VALUES ($1, $2, $3, $4, $5, $5, $6, $7, $8)
             ON CONFLICT (agent_id) DO UPDATE SET
                 display_name = CASE WHEN agent_configs.display_name = '' THEN EXCLUDED.display_name ELSE agent_configs.display_name END,
                 -- An unedited row (its prompt still equals the recommended one) follows
@@ -174,7 +171,6 @@ async def seed_defaults(
             role,
             runtime,
             system_prompt,
-            model,
             max_turns,
             timeout_seconds,
             max_concurrency,

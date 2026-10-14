@@ -418,7 +418,7 @@ def run(
             home=home,
         ) as api:
             if model:
-                api.put("/api/settings/agents", {"default_model": model})
+                api.put("/api/agent-settings/system", {"model": model})
             results, stopped = run_suite(
                 tasks,
                 lambda task, cap_left: run_task(api, task, work_dirs[task.id], timeout=timeout, poll=poll,

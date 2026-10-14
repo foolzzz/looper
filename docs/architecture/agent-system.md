@@ -35,9 +35,10 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
   it has every tool and no permission prompts, skills included, so it can run
   any command on this machine; that is why Telegram and Lark pass on only the
   senders they list ([Channels](#channels)).
-  Its system prompt is its harness (its own `harness_prompt`, else the default
-  in Settings), the `manager` role prompt and `TASK_PLACEMENT_RULE`; it has no
-  project and no task section.
+  Its system prompt is its harness (its role layer's, else the system
+  layer's, else the built-in one; [Harness, model and environment](#harness-model-and-environment)),
+  the `manager` role prompt and `TASK_PLACEMENT_RULE`; it has no project and
+  no task section.
   Each chat message is one user turn on its stdin; its turn starts when
   Claude starts that message and ends at the next `result`
   ([Turns Claude runs on its own](#turns-claude-runs-on-its-own)). Messages
@@ -47,7 +48,7 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
   session's running totals are saved beside its id in the `agent_sessions`
   row `manager` (`session_totals`). When Claude exits
   (or dies mid-turn, which answers that message with an error) or the
-  Manager's system prompt, model, effort, Settings environment or installed
+  Manager's system prompt, model, effort, environment or installed
   plugins and skills change, the next message starts a new process that
   resumes the saved session with `--resume`. Stopping the Manager closes
   Claude's stdin and kills it if it is still running after 5 s
@@ -104,10 +105,10 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
   own skills ([Project skills](#project-skills-skills-a-project-writes)); they
   are not in the prompt: Claude Code lists them itself.
 
-  A project can also override the harness of its Planner
-  (`planner_harness_prompt`) and of its Workers (`worker_harness_prompt`,
-  which its Reviewers use too); `''` inherits the default in Settings. They
-  are read through the task the same way as the background.
+  A project's agent settings (harness, model, effort, environment, per-run
+  cap) are two layers of their own: the project's, for all its task agents,
+  and each role's in the project ([Harness, model and
+  environment](#harness-model-and-environment)). They are read when each run or turn starts.
 
   The task section is fixed for the session: the Planner lives as long as its
   task, a Worker or Reviewer as long as its step. It is in the system prompt
@@ -147,15 +148,15 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
 - Keeps one resident Claude process through `ResidentClaude`, like the
   Manager, started on the task's first turn in the task's `work_dir`:
   `claude --print --verbose --output-format stream-json --input-format stream-json --include-partial-messages --replay-user-messages <isolation flags> --append-system-prompt-file <file> --system-prompt-snapshot off --dangerously-skip-permissions --model M [--effort E] [--plugin-dir <dir> ...] [--mcp-config <file>] [--add-dir <dir> ...] [--max-turns N] [--resume <session_id>]`.
-  The system prompt is rebuilt for every turn from the harness (the project's
-  Planner override, else the default in Settings), the `planner` role prompt,
+  The system prompt is rebuilt for every turn from the harness (resolved for
+  the Planner in the task's project), the `planner` role prompt,
   the task's project, the task section (task id, project name and
   description, working directory and the requirement) and `REPLY_CONTRACT`;
   the project is read before each event's turns. The turns themselves carry
   only what changed: the plan's progress, results, chat and supervision
   observations. When the prompt changes (a config edit, a new background,
   knowledge or harness, a task moved to another project) its file and hash
-  change, or the model, effort, Settings environment, installed plugins and
+  change, or the model, effort, per-run cap, environment, installed plugins and
   skills or mounted knowledge directories change, the Planner stops
   its Claude, and the next process resumes the session with `--resume` and
   the new prompt. Like every agent it has every tool and no permission
@@ -256,8 +257,8 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
   first user turn goes on stdin; stdin stays open so the Planner can add user
   turns mid-run, and closes when the result arrives
 - The step is the system prompt; only other agents' output is the user turn:
-  - system prompt: the harness (the project's Worker override, else the
-    default in Settings; Reviewers follow the Workers of their project), the
+  - system prompt: the harness (resolved for the Worker or Reviewer in its
+    project; a Reviewer without its own takes the Workers'), the
     role prompt of the `worker` or `reviewer` row (the default when the
     row's prompt is empty or unreadable), the project section, the task
     section, then the code-owned contract, last:
@@ -387,25 +388,45 @@ principles, boundaries and communication. The role prompt says what that kind
 of agent is responsible for. Keeping them apart means no harness edit can
 drop an agent's responsibilities.
 
-| Agent | Harness (first match) | Model (first match) |
-| --- | --- | --- |
-| Manager | `agent_configs.manager.harness_prompt` → default | its row's `model` → default |
-| Planner | the project's `planner_harness_prompt` → default | `planner` row's `model` → default |
-| Worker | the project's `worker_harness_prompt` → default | `worker` row's `model` → default |
-| Reviewer | the project's `worker_harness_prompt` → default | `reviewer` row's `model` → default |
+Five settings resolve through four layers (`agent_setting_layers`, one row per
+layer and place), a later layer winning (RFC decision 9). The smallest unit is
+a role in a project; Workers and Reviewers are never configured one by one.
 
-The defaults live in `system_settings` (one row per key; no row means the
-built-in value): the default harness (`DEFAULT_HARNESS_PROMPT`, public and
-generic), the default model (`opus`), an optional effort (`--effort`: `low`,
-`medium`, `high`, `xhigh` or `max`; none passes no flag) and up to 50
-environment variables. Every launch passes `--model` and, when set,
-`--effort`. The variables are added on top of the server's environment for
+| Layer | Edited in | Applies to |
+| --- | --- | --- |
+| `system` | Settings | every agent |
+| `role` | Agents page | one role everywhere: Manager, Planner, Workers or Reviewers |
+| `project` | the project's Settings tab | the Planner, Workers and Reviewers of one project |
+| `role_project` | the same tab, per role | one of those roles in one project |
+
+The Manager spans every project, so it has the first two only. With no layer
+setting a field, the built-in value applies (`builtin`): the harness
+`DEFAULT_HARNESS_PROMPT` (public and generic), the model `opus`, Claude Code's
+own effort, no extra environment and no cap. The fields are the harness, the
+model, the effort (`--effort`: `low`, `medium`, `high`, `xhigh` or `max`), up
+to 50 environment variables per layer, and the per-run cap
+(`--max-budget-usd`, on each Claude Code process; a Planner turn that hits it
+fails, and the next turn starts a new process). The environment merges key by
+key: a later layer adds or overrides a variable or unsets one an earlier layer
+set (a `null` value; the system layer has nothing to unset). A Reviewer
+without a harness of its own at the role or role-in-project layer takes the
+Workers' at that same layer. `load_agent_settings(role, project)` returns
+every field with the layer it came from; all four roles launch from it.
+Every launch passes `--model` and, when set, `--effort` and
+`--max-budget-usd`. The variables are added on top of the server's environment for
 every agent's `claude` process; names must match `[A-Z_][A-Z0-9_]*`, and a
 name containing `KEY`, `TOKEN`, `SECRET`, `PASSWORD` or `CREDENTIAL` is
 refused because the values are shown on the dashboard. That word check guards
-against pasting a secret by habit; it is not a security boundary. An
-unreadable table falls back to the built-in values, and the run's record says
-so. Changes apply to the next Worker or Reviewer run; a resident agent's
+against pasting a secret by habit; it is not a security boundary. A stored
+value that no longer validates is ignored as unset. When the layers cannot be
+read, the Manager and a Planner keep what they last read, and a Worker or
+Reviewer run uses the built-in values with a warning in the task's activity.
+A one-time migration (`agent_setting_layers` in `schema.sql`) moved the
+earlier values into their layers unchanged: the Settings defaults to `system`;
+each agent's `model` and the Manager's `harness_prompt` to `role`; a
+project's `model` and `run_budget_usd` to `project`; a project's
+`planner_harness_prompt` and `worker_harness_prompt` to `role_project`. The
+old columns and keys are dropped. Changes apply to the next Worker or Reviewer run; a resident agent's
 restart signature is its command (which carries the model, the effort, the
 plugin directories of its installed items, each named by its content's hash,
 and the knowledge's `--add-dir` directories),
@@ -423,7 +444,7 @@ the resident agents: by default Claude Code 2.1.285 keeps the system prompt of
 a session's first request and sends it again on every `--resume`, so a
 restarted Planner or Manager would keep running with its old prompt. A
 resident agent's restart signature is its command, the prompt's sha256 and the
-sha256s of the Settings environment and of the installed items.
+sha256s of the environment and of the installed items.
 
 Every run records the prompt in `llm_records.metadata`:
 
@@ -431,9 +452,12 @@ Every run records the prompt in `llm_records.metadata`:
 - `system_prompt_sha256`: the hash of that text, which is also the file name;
 - `prompt_layers`: where each layer came from, built in
   `loopx/agents/system_prompt.py`:
-  - `harness`: `{source, sha256, project_id?}`; `source` is
+  - `harness`: `{source, sha256, project_id?, from_role?}`; `source` is the
+    layer (`builtin`, `system`, `role`, `project` or `role_project`, the last
+    two naming the project), and `from_role` is `worker` when a Reviewer took
+    the Workers' harness. Runs recorded before the layers have
     `builtin_default`, `system_default`, `manager_override` or
-    `project_override` (which names the project);
+    `project_override`;
   - `role`: `{config_id, sha256, recommended}`, the agent_configs row
     (`manager`, `planner`, `worker` or `reviewer`) and whether its prompt
     equals the recommended `default_prompt`;
@@ -448,10 +472,14 @@ Every run records the prompt in `llm_records.metadata`:
     `REVIEW_CONTRACT` or `TASK_PLACEMENT_RULE`);
   - `isolation`: `ISOLATION_ID`.
 - `model_choice`: `{model, source, effort}`, the model asked for (`source` is
-  `builtin_default`, `system_default` or `agent_override`); the record's
-  `model` column keeps the model Claude reports;
-- `env`: `{sha256, keys: {NAME: sha256 of the value}}`, only when Settings
-  holds variables; values are never recorded;
+  its layer; earlier runs have `builtin_default`, `system_default`,
+  `agent_override` or `project_override`); the record's `model` column keeps
+  the model Claude reports;
+- `settings_sources`: `{harness, model, effort, run_budget_usd, env: {NAME:
+  layer}}`, the layer each setting came from;
+- `max_budget_usd`: the per-run cap, when one applies;
+- `env`: `{sha256, keys: {NAME: sha256 of the value}}`, only when the run
+  has variables; values are never recorded;
 - `library`: `{sha256, role, project_id, items: [{kind, name, sha256, plugin,
   scope}], mcp_servers?, error?}`, the catalog items installed for the run
   (an MCP server has no `plugin`; `mcp_servers` lists their names): its role and
@@ -596,10 +624,8 @@ Verified with Claude Code 2.1.285 under the isolation flags and
 ### Project execution settings
 
 A project can set how its task agents run (`loopx/agents/project_execution.py`,
-typed nullable columns on `projects`, `null` = as before): a `model` for its
-Planner, Workers and Reviewers (`model_choice.source` `project_override`);
-`run_budget_usd`, passed as `--max-budget-usd` to each of their processes (a
-Planner turn that hits it fails, and the next turn starts a new process);
+typed nullable columns on `projects`, `null` = as before; its model and per-run
+cap are agent settings, [Harness, model and environment](#harness-model-and-environment)):
 `task_budget_usd`, checked against the task's cost before every Planner turn
 and every new Worker or Reviewer: at the cap the running ones are stopped and
 the task fails, at once (`task_budget_action` `fail`, the default) or after one
@@ -921,7 +947,7 @@ PostgreSQL is a hard startup dependency. All data paths:
 
 | Table | Purpose |
 |---|---|
-| `projects` | Projects: name (unique ignoring case), description, default `work_dir` (`''` = none), `background` for the task agents' system prompt (`''` = none), `planner_harness_prompt` and `worker_harness_prompt` (`''` = the default harness) |
+| `projects` | Projects: name (unique ignoring case), description, default `work_dir` (`''` = none), `background` for the task agents' system prompt (`''` = none), and the execution settings (`project_execution`) |
 | `tasks` | Task metadata, status, phase, timestamps, `work_dir`, `project_id` (required) |
 | `task_steps` | A task's steps, each with everything its Planner decides with: `step_key` (label), `depends_on` (step ids), `review`, `acceptance_criteria`, `validation_commands`, `status`, `result`, `worker_id`, `reviewer_id`, `retries`, `feedback`, `missed_messages` |
 | `task_plans` | A task's plan, one row per task: `plan_id`, `status` (`planning`, `executing`, `verifying`, `stopping`, `completed`, `failed`), `correlation_id`, `origin_channel_id`, `final_summary`, `fail_reason`; replaced when the task is planned again |
@@ -930,8 +956,9 @@ PostgreSQL is a hard startup dependency. All data paths:
 | `activity` | Execution trace events (SSE streaming to frontend) |
 | `chat_messages` | Chat conversation history |
 | `llm_records` | One row per Claude run: input and output text, status, the run's own `cost_usd`, `input_tokens`, `output_tokens`, `cache_read_tokens` and `cache_creation_tokens`, its final `context_tokens` and its `compactions`; `metadata` holds the exact argv (`command`), `cwd`, the appended `system_prompt`, its `system_prompt_sha256`, its `prompt_layers`, the `model_choice`, the Settings `env` names, the `library` items loaded and a task agent's `project_skills` |
-| `agent_configs` | Agent configuration (role prompt, model) for `manager`, `planner`, `worker` and `reviewer`; `harness_prompt` is used for the Manager only |
-| `system_settings` | Settings shared by the whole system, one value per key: the default harness, model, effort and environment variables (no row = the built-in default), and the last library import's report |
+| `agent_configs` | Agent configuration (role prompt, turns, timeout, concurrency) for `manager`, `planner`, `worker` and `reviewer` |
+| `agent_setting_layers` | Agent settings by layer: `scope` (`system`, `role`, `project`, `role_project`), `role`, `project_id` (goes with its project), and the nullable `harness_prompt`, `model`, `effort`, `env` (ordered `[{key, value}]`, `null` value = unset) and `run_budget_usd`; one row per layer and place |
+| `system_settings` | Settings shared by the whole system, one value per key (no row = the built-in default), such as the last library import's report |
 | `library_items` | The capability catalog: kind, name, `origin` (`machine` or `project`), `owner_project_id` (a project-authored item; goes with its project), `description`, source label, declared version, `sha256` of the files, size, file count, `imported_at` |
 | `library_files` | Each catalog item's files: relative path, UTF-8 content, sha256, executable bit |
 | `library_installs` | Where an item loads: `scope` (`global` or `project`), `project_id`, `roles` (a non-empty subset of `manager`, `planner`, `worker`, `reviewer`; never `manager` in a project), `enabled`; one per item and place, going with its item and its project |
@@ -969,12 +996,12 @@ built by `scripts/stage-dashboard.sh` at release time), and it carries
 
 - **Chat**: Every agent and its messages, finished ones included. The selector lists the global Manager and the 30 most recent tasks; each task shows its one Planner and the Worker (and Reviewer, when reviewed) of each step. You can send to the Manager and to a running task's Planner, which keeps one thread per task; SSE streaming. A selected Planner also shows its Claude runs, one per turn, in a folded list of the latest 10 beside its activity and chat thread, re-read as a reply starts and ends and every 10 s while the task runs. A Worker or Reviewer shows its Claude runs read-only, following a running one live, and points to its task's Planner for sending.
 - **Tasks**: Task list with project and status filters, time display, each task's cost so far, Start/Stop/Delete controls. `#tasks?project=<id>` filters by a project and shows its name and default directory with a link to its project page. A new task picks an existing project or creates one in the same form; its work directory may stay empty when the project has a default. A task's detail view can move it to another project in any status.
-- **Projects (sidebar)**: Below the navigation, every project with its task count (or a spinner with its active count); clicking one opens its project page, and `+` creates a project (name, default directory, description, optional background and harness overrides).
-- **Project** (`#projects/<id>`, `#projects/<id>/knowledge|skills|settings`): a header with the name, description, default directory and task count (a link to the filtered Tasks page), then four tabs, arrow keys moving between them. **Overview**: the 5 latest tasks with status and cost and a link to all of them; the background (three lines, then Show more); the knowledge (document count, stored size, the first 5 titles and summaries, how many referenced files are missing); the skills (count, how many are on, the first 5 names and descriptions); and the execution settings that are set, in words, with the harness overrides. **Knowledge**: the documents (title, summary, source, file name or path, size, a Missing badge for a path document whose file is gone) with a readout of documents, stored bytes and index characters against their caps. Opening a row shows its body (a path document's file as it is now); Edit changes the title, summary and content (a text or upload document) or path (a path document); a document is added as Text, Upload or Project file, or by dropping a file on the section; delete asks first. **Skills**: the skills (`project:<name>`, the body's size, `Off` for a disabled one, the description) with a count against the cap. Opening a row shows its `SKILL.md` body; Edit changes the name, description and body; a skill is added by hand or from a `SKILL.md` (Upload SKILL.md, or a drop on the section), whose frontmatter fills the name and description and whose body below it fills the instructions, for review before Add; a switch turns one on or off; delete asks first. Knowledge and skill changes apply at once and a refusal shows the server's reason. **Settings**: the name, default directory, description, background (`n / 10000`), harness overrides (`n / 20000` each) and execution settings, saved together (Save is disabled over a limit or without a change; Discard changes resets them), then Delete project, offered only while the project has no tasks.
+- **Projects (sidebar)**: Below the navigation, every project with its task count (or a spinner with its active count); clicking one opens its project page, and `+` creates a project (name, default directory, description, optional background).
+- **Project** (`#projects/<id>`, `#projects/<id>/knowledge|skills|settings`): a header with the name, description, default directory and task count (a link to the filtered Tasks page), then four tabs, arrow keys moving between them. **Overview**: the 5 latest tasks with status and cost and a link to all of them; the background (three lines, then Show more); the knowledge (document count, stored size, the first 5 titles and summaries, how many referenced files are missing); the skills (count, how many are on, the first 5 names and descriptions); and the execution settings that are set, in words, with each role's model, per-run cap and harness from this project. **Knowledge**: the documents (title, summary, source, file name or path, size, a Missing badge for a path document whose file is gone) with a readout of documents, stored bytes and index characters against their caps. Opening a row shows its body (a path document's file as it is now); Edit changes the title, summary and content (a text or upload document) or path (a path document); a document is added as Text, Upload or Project file, or by dropping a file on the section; delete asks first. **Skills**: the skills (`project:<name>`, the body's size, `Off` for a disabled one, the description) with a count against the cap. Opening a row shows its `SKILL.md` body; Edit changes the name, description and body; a skill is added by hand or from a `SKILL.md` (Upload SKILL.md, or a drop on the section), whose frontmatter fills the name and description and whose body below it fills the instructions, for review before Add; a switch turns one on or off; delete asks first. Knowledge and skill changes apply at once and a refusal shows the server's reason. **Settings**: the name, default directory, description, background (`n / 10000`) and execution settings, saved together (Save is disabled over a limit or without a change; Discard changes resets them); then Agent settings: a form for the project's layer ("All agents in this project") and one for each role in the project (Planner, Worker, Reviewer), where every field also says what applies now and from which layer; then Delete project, offered only while the project has no tasks.
 - **Task Detail**: Overview (status, phase, times, steps and the task's cost with its run count, then "Cost by agent": the Planner's, the Workers' and the Reviewers' runs and cost with each one's share, noting runs still running or without a reported cost; steps, agent timeline, live activity feed), Pipeline DAG (React Flow), Sessions, Conversation
-- **Agents**: The Manager, Planner, Worker and Reviewer configuration editor (role prompt replace/append, model, LLM profiles). Instead of a permission setting it states the permissions every agent shares: every tool, `--dangerously-skip-permissions`. The model field's placeholder is the default it inherits. The Manager also has a "Harness prompt (override)" field; the others say where their harness comes from. A Runs tab lists every recorded Claude run of the role (the Manager, every task's Planner, Workers or Reviewers)
+- **Agents**: The Manager, Planner, Worker and Reviewer configuration editor (role prompt replace/append, LLM profiles). Instead of a permission setting it states the permissions every agent shares: every tool, `--dangerously-skip-permissions`. Each role also has its role layer of the agent settings (harness, model, effort, environment, per-run cap), each field saying what applies now and from which layer. A Runs tab lists every recorded Claude run of the role (the Manager, every task's Planner, Workers or Reviewers)
 - **Agent history** (`#history/<agent-id>?task=<task-id>`): opened from History on an Agent Timeline row, a Runs entry or the Chat page. The Manager's and a Planner's page starts with "Context & cost": the latest context size, the number of compactions, the total cost and the number of turns. Below them is a sparkline of the context at the end of each of the latest 100 turns, scaled between their lowest and highest value, with a dashed marker on each turn that compacted. A list of the compactions follows (turn, time, trigger, context before → after), then a folded table of the turns. The section is re-read every 10 s. For each Claude run it shows status, model, the run's own tokens (uncached input, cache read, cache write, output), its context at the end (`ctx`), a `compacted` badge, its own cost, the launch command (cwd and argv; a long argument such as the system prompt is shown by its length, and Copy copies the exact command), a collapsible System prompt section with what LoopX appended (Claude Code's built-in system prompt is not included): its title shows the prompt's size, its short sha256 and an `isolated` badge, and inside one line per layer (harness source and version, role recommended or edited, project and background version, task, contract), the model with its source and effort, and the Settings environment variable names, above the full text; runs recorded before the layers existed show the text only. A collapsible Plugins & skills section shows how many plugins and skills the run loaded from the library, with its hash, and how many project skills (from `metadata.project_skills`), and lists each with its short version hash. Then the full transcript, following a running run every 2 s. A running run shows its last output time from the record's heartbeat and is flagged after 2 minutes with no output. While Claude thinks it shows `thinking · ~N tokens` from Claude's `thinking_tokens` events. Those arrive about once a second, so the recorder keeps one row per thinking phase and updates its count in place. Hooks, background tasks and rate limits are shown as one line each, as are a compaction (`Context compacted (auto) · 25.1k → 1.36k tokens`) and a failed compaction attempt. The result line labels Claude's figure as the `session total`. Any other event type is an expandable line. For a Planner each run is one of its turns, listed above your chat with it and its activity.
-- **Settings**: Agent defaults (the default harness prompt with an `n / 20000` counter and Reset to built-in, the default model, the effort and the environment variables), then Plugins & skills (how many of the imported items are loaded and their size, "Import from this machine" or "Re-import", the last import with what it changed and what it left out, a name filter, and the plugins and skills with their version, size and a switch each; a change applies to each agent's next run), then the Telegram and Lark channels, each with its sender allowlist (an add and remove list of Telegram user IDs or Lark open_ids, checked as you type, with blanks and repeats flagged) and, for an enabled channel that does not start, the reason
+- **Settings**: Agent defaults, the system layer of the agent settings (the harness prompt with an `n / 20000` counter, empty for the built-in one, the model, the effort, the environment variables and the per-run cap, each saying what applies now), then Plugins & skills (how many of the imported items are loaded and their size, "Import from this machine" or "Re-import", the last import with what it changed and what it left out, a name filter, and the plugins and skills with their version, size and a switch each; a change applies to each agent's next run), then the Telegram and Lark channels, each with its sender allowlist (an add and remove list of Telegram user IDs or Lark open_ids, checked as you type, with blanks and repeats flagged) and, for an enabled channel that does not start, the reason
 
 ### Real-Time Updates
 
@@ -1005,8 +1032,10 @@ dev proxy, which keeps `Host` and `Origin` on its own port.
 |---|---|---|
 | `/api/status` | GET | System health |
 | `/api/projects` | GET | Projects ordered by name ignoring case, each with `task_count` and `active_count` |
-| `/api/projects` | POST | Create a project from `name` (trimmed, 1–80 characters), optional `description`, `work_dir` (absolute), `background` (stored without the blank lines around it; 400 over 10000 characters), `planner_harness_prompt` and `worker_harness_prompt` (400 over 20000 characters); 409 when the name exists ignoring case |
-| `/api/projects/:id` | PUT | Update any of `name`, `description`, `work_dir`, `background`, `planner_harness_prompt`, `worker_harness_prompt` (`""` clears it); 400, 404, 409 |
+| `/api/projects` | POST | Create a project from `name` (trimmed, 1–80 characters), optional `description`, `work_dir` (absolute), `background` (stored without the blank lines around it; 400 over 10000 characters) and execution settings; 409 when the name exists ignoring case; 400 naming the agent-settings endpoint for `planner_harness_prompt`, `worker_harness_prompt`, `model` or `run_budget_usd` |
+| `/api/projects/:id` | PUT | Update any of `name`, `description`, `work_dir`, `background` (`""` clears it) and the execution settings; 400 (as for POST), 404, 409 |
+| `/api/projects/:id/agent-settings` | GET/PUT | GET: `project.values` (the project layer), `roles` (`planner`, `worker`, `reviewer`, each with `values`, its role-in-project layer, and `effective`: every field's `value` and `source` layer, the harness with `from_role` when a Reviewer takes the Workers'), and `limits`. PUT sets the project layer; 404 for an unknown project |
+| `/api/projects/:id/agent-settings/roles/:role` | PUT | Set one role's layer in the project (`planner`, `worker` or `reviewer`; 400 for `manager`) |
 | `/api/projects/:id/knowledge` | GET | The project's knowledge: `documents` (`document_id`, `title`, `summary`, `source_kind`, `filename`, `path`, `read_path`, `missing`, `size_bytes`, `sha256`, timestamps; no content), `count`, `stored_bytes`, the `index` agents get and its `index_chars`, and `caps`; 404 for an unknown project |
 | `/api/projects/:id/knowledge` | POST | Add a document: `source_kind`, `title`, `summary`, then `content` (text), `filename` and `content_base64` (upload) or `path` (path). Answers 201 with the new `document` and the knowledge view; 400 with the reason for a bad field, a binary file, a path outside the project's default directory, or a cap; 404 for an unknown project |
 | `/api/projects/:id/knowledge/:doc_id` | GET | One document: `document` (as in the list) and its `content`: stored for text and upload, the file as it is now for a path document; `content` is `null` with a `content_error` when that file is missing or not text; 404 for an unknown project or a document of another project |
@@ -1019,7 +1048,7 @@ dev proxy, which keeps `Host` and `Origin` on its own port.
 | `/api/projects/:id/skills/:skill_id` | DELETE | Delete a skill the project wrote, from the catalog and every project it is installed in; answers with `deleted` and the installs view; 404 |
 | `/api/projects/:id` | DELETE | Delete a project; 409 while it still has tasks |
 | `/api/tasks` | GET | List the newest tasks; `?project_id=` lists one project's. Each has `project_id`, `project_name`, `work_dir` and `cost` (as in the task detail) |
-| `/api/tasks/create` | POST | Create a task in `init` with exactly one of `project_id` (existing) and `project` (`{name, description?, work_dir?, background?, planner_harness_prompt?, worker_harness_prompt?}`, created in the same transaction). Its `work_dir` is the one given, else the project's; 400 with neither, 404 for an unknown project, 409 for a taken new name |
+| `/api/tasks/create` | POST | Create a task in `init` with exactly one of `project_id` (existing) and `project` (`{name, description?, work_dir?, background?}`, created in the same transaction). Its `work_dir` is the one given, else the project's; 400 with neither, 404 for an unknown project, 409 for a taken new name |
 | `/api/tasks/:id/project` | PUT | Move a task to `{project_id}`, whatever its status |
 | `/api/tasks/:id` | GET | Task detail with steps, `project_id`, `project_name` and `cost`: `cost_usd` (the sum of its Planner's, Workers' and Reviewers' runs), `runs`, `running`, `unpriced_runs` and `by_role` (`planner`, `worker`, `reviewer`, each `{cost_usd, runs}`) |
 | `/api/tasks/cancel` | POST | Cancel task (permanent) |
@@ -1032,10 +1061,11 @@ dev proxy, which keeps `Host` and `Origin` on its own port.
 | `/api/chat/targets` | GET | The Manager, then per recent task its Planner and step Workers/Reviewers, with `can_send` |
 | `/api/chat/messages` | GET/POST | Chat history |
 | `/api/agent-configs` | GET | List agents |
-| `/api/agent-configs/:id` | GET/PUT | Agent config CRUD; `harness_prompt` only for `manager` (400 for the others, and over 20000 characters); `model` must be a model name (`""` or null clears it) |
+| `/api/agent-configs/:id` | GET/PUT | Agent config CRUD; `harness_prompt` and `model` are agent settings (400 naming the role's endpoint) |
 | `/api/agent-configs/:id/reset-prompt` | POST | Reset the role prompt to the recommended one |
-| `/api/settings/agents` | GET/PUT | The defaults every agent inherits: `default_harness_prompt`, `default_model`, `default_effort`, `default_env` (`[{key, value}]`). PUT changes the fields given; an empty value goes back to the built-in default. 400 for an unknown field, a harness over 20000 characters, a bad model name or effort, or a bad, credential-like or 51st variable; nothing is stored then |
-| `/api/settings/agents/reset-harness` | POST | Go back to the built-in default harness |
+| `/api/agent-settings` | GET | The agent settings outside projects: `system` and `roles` (all four), each with `values` (that layer's own: `harness_prompt`, `model`, `effort`, `env` as `[{key, value}]`, `run_budget_usd`; `null` = not set) and `effective` (what applies, each field with its `source` layer), and `limits` |
+| `/api/agent-settings/system` | PUT | Set the system layer. Each layer's PUT changes the fields given (`null` or `""` unsets one; `env` replaces the layer's list, a `null` value unsetting a variable outside the system layer; the built-in harness text unsets the system harness) and answers with the GET view. 400 for an unknown field, a harness over 20000 characters, a bad model name, effort or cap, or a bad, credential-like or 51st variable; nothing is stored then |
+| `/api/agent-settings/roles/:role` | PUT | Set one role's layer (`manager`, `planner`, `worker`, `reviewer`; 404 for another) |
 | `/api/catalog` | GET | The catalog: `items` (`item_id`, `kind`, `name`, `qualified_name` (how agents name it), `origin`, `owner_project_id`, `owner_project_name`, `description`, `source`, `version`, `sha256`, `size_bytes`, `file_count`, timestamps and `installs`), `installed_count`, `total_bytes`, `last_import` (counts, `added`, `updated`, `removed`, `unchanged`, `skipped`), `roles`, `task_roles` and `caps` |
 | `/api/catalog/:id` | GET | One item: `item` (as in the list), `files` (`path`, `size_bytes`, `executable`; no content) and, for a skill, `skill_md`; 404 for an unknown item |
 | `/api/catalog/import` | POST | Import or re-import this machine's enabled plugins and personal skills (read-only towards `~/.claude`); new items are installed nowhere. Answers with the catalog. 400 without a Claude Code configuration, with an unreadable `settings.json` or over the 128 MiB cap (nothing changes then) |
@@ -1052,13 +1082,12 @@ dev proxy, which keeps `Host` and `Origin` on its own port.
 
 ## Configuration
 
-Agent behavior is configured via the `agent_configs` table (editable in the dashboard):
+Agent behavior is configured via the `agent_configs` table (editable in the dashboard); the harness, model,
+effort, environment and per-run cap are agent settings ([Harness, model and environment](#harness-model-and-environment)):
 
 - **system_prompt**: The role prompt: what this kind of agent is responsible for
-- **harness_prompt**: The Manager's own harness (`''` = the default in Settings)
 - **runtime**: stored per agent; only `claude-code` is implemented, and the
   Manager, Planners and Workers always run the Claude CLI
-- **model**: This agent's model (`--model`); empty uses the default model in Settings (`opus` built in)
 - **max_turns**: Maximum conversation turns (0 = unlimited)
 - **timeout_seconds**: Execution timeout. For workers it limits one Claude
   run's total time (default 86400, 0 = no limit). Workers read
@@ -1070,8 +1099,7 @@ The `planner` row configures every task's Planner and is read for every turn.
 `system_prompt` is the editable role prompt; code appends the reply contract
 (`REPLY_CONTRACT`). `timeout_seconds` bounds each turn (default 1200, 0 = no
 limit): a turn over it fails and its Claude is killed. `max_turns` above 0
-passes `--max-turns`, as for Workers, and `model`, when set, passes
-`--model`. A change that alters the Planner's command restarts its Claude at
+passes `--max-turns`, as for Workers. A change that alters the Planner's command restarts its Claude at
 the next turn with `--resume`. Like every agent, the Planner has every tool
 and no permission prompts (`--dangerously-skip-permissions`).
 
