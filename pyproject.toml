@@ -50,7 +50,7 @@ loopx-openviking-semantic-preference = "loopx.extensions.openviking_semantic_pre
 include = ["loopx*"]
 
 [tool.setuptools.package-data]
-"loopx" = ["web/chat/*.html", "web/chat/*.json", "web/chat/assets/*", "web/chat/manifest.webmanifest", "web/chat/pwa/*", "web/dashboard/*", "web/dashboard/assets/*"]
+"loopx" = ["web/dashboard/*", "web/dashboard/assets/*"]
 "loopx.db" = ["*.sql"]
 "loopx.control_plane" = ["*.json", "*.ts", "presentation/*.ts"]
 "loopx.semantics" = ["*.json"]

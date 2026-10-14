@@ -77,8 +77,7 @@ def main() -> int:
             if name and (ROOT / name).is_file():
                 (src / name).parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(ROOT / name, src / name)
-        for staged in ("loopx/web/chat", "loopx/web/dashboard"):
-            shutil.copytree(ROOT / staged, src / staged)
+        shutil.copytree(ROOT / "loopx/web/dashboard", src / "loopx/web/dashboard")
         run("uv", "build", "--wheel", "--out-dir", str(work / "dist"), cwd=src)
         (wheel,) = (work / "dist").glob("loopx-*.whl")
         names = set(zipfile.ZipFile(wheel).namelist())
