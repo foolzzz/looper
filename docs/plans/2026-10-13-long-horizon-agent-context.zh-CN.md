@@ -254,7 +254,8 @@
 ### 5.1 核心缺陷（优先修，穿插在阶段之间）
 
 - **常驻进程的后台子 agent 导致回复错位**（M2 核实时发现）：后台子 agent 结束时，Claude Code 会自己再跑一轮，多出一个 `result`。`ResidentClaude` 按"一条 user 消息对应一个 `result`"读取，所以这一轮的事件会算到下一条消息上，Manager 的回复会错位一轮。花费总额不受影响。
-  - **修复已完成、待合入：** looper #26（已用真实 Claude 验收）。恢复时先合并 `main`，解决与 M3 的两处简单冲突（`loopx/agents/tiers/planner.py` 的 import 与相邻新增方法、`tests/test_manager_reply.py` 末尾各自新增的测试类，保留双方），重跑测试后合入。
+  - **修复已完成、待合入：** looper #26（已用真实 Claude 验收）。分支已合并最新 `main`，与 M3 的冲突已解决，双方改动都保留：`loopx/agents/tiers/planner.py` 的 import 与相邻方法、`tests/test_manager_reply.py` 末尾新增的测试类、`docs/architecture/agent-system.md` 里的启动命令，以及本计划的进度台账和本节。
+  - **待办：** 合并后的全量测试按维护者要求延后，和下一批改动一起跑；通过后合入 #26 并重启服务，再把本节改为"暂无"。
 
 ### 5.2 工程待办
 
