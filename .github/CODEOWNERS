@@ -1,18 +1,2 @@
-# Unassigned paths require lead-maintainer review; later narrow routes override.
-* @huangruiteng
-
-# Repository governance, CI and release-policy files remain lead-owned.
-/.github/workflows/** @huangruiteng
-/AGENTS.md @huangruiteng
-/CONTRIBUTING.md @huangruiteng
-/docs/product/release-*.md @huangruiteng
-/.github/CODEOWNERS @huangruiteng
-/.github/GOVERNANCE.md @huangruiteng
-/docs/development/contributor-tasks.md @huangruiteng
-/docs/project/technical-directions*.md @huangruiteng
-
-# First-review contacts without accepted CODEOWNER appointments are listed in
-# GOVERNANCE.md. Do not add pending invitations as required owners.
-
-# Lark integration review routing.
-/docs/integrations/lark-*.md @huangruiteng @steven-kid
+# The maintainer reviews every change.
+* @foolzzz

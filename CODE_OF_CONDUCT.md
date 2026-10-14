@@ -59,8 +59,11 @@ representative at an online or offline event.
 ## Enforcement
 
 Instances of abusive, harassing, or otherwise unacceptable behavior may be
-reported to the community leaders responsible for enforcement at
-huangrt01@163.com.
+reported to the maintainer responsible for enforcement,
+[@foolzzz](https://github.com/foolzzz). Report through an issue in
+[foolzzz/looper](https://github.com/foolzzz/looper/issues), or, for anything
+that should not be public, through the repository's private reporting (the
+**Security** tab, then **Report a vulnerability**).
 All complaints will be reviewed and investigated promptly and fairly.
 
 All community leaders are obligated to respect the privacy and security of the
@@ -181,8 +184,10 @@ Wiki 编辑、Issue 及其他贡献，并在适当时说明管理决定的原因
 
 ### 执行
 
-如遇辱骂、骚扰或其他不可接受的行为，可向负责执行的社区维护者举报：
-huangrt01@163.com。
+如遇辱骂、骚扰或其他不可接受的行为，可向负责执行的维护者
+[@foolzzz](https://github.com/foolzzz) 举报：在
+[foolzzz/looper](https://github.com/foolzzz/looper/issues) 提 issue；不宜公开的，
+通过仓库的私密报告（**Security** 标签页中的 **Report a vulnerability**）提交。
 所有投诉都会被及时、公正地审查与调查。
 
 所有社区维护者都有义务尊重事件举报者的隐私与安全。
