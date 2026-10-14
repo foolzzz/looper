@@ -246,6 +246,12 @@ async def get_record(
     return _row_to_dict(row)
 
 
+# A run whose cost is Claude Code's own figure for its own login (the subscription): what that usage would cost at
+# API prices, not money spent. Runs recorded before agents (no agent in their metadata) ran with that login.
+EQUIVALENT = ("cost_source IS DISTINCT FROM 'provider_price' "
+              "AND COALESCE(metadata->'agent'->'provider'->>'auth', 'oauth') = 'oauth'")
+
+
 async def task_costs(
     task_ids: list[str],
     *,
@@ -255,7 +261,10 @@ async def task_costs(
 
     Every given task id gets an entry. ``runs`` counts every run; ``running``
     those still going, whose cost is not known yet; ``unpriced_runs`` the
-    finished ones that ended without a reported cost (Claude exited first).
+    finished ones that ended without a reported cost (Claude exited first, or
+    their model has no price); ``equivalent_runs`` those whose cost is what a
+    subscription's usage would cost at API prices (``EQUIVALENT``), and
+    ``provider_price_runs`` those Looper priced at their provider's prices.
     """
     if not task_ids:
         return {}
@@ -265,6 +274,8 @@ async def task_costs(
         SELECT task_id, {_TASK_ROLE} AS role, count(*) AS runs,
                count(*) FILTER (WHERE status = 'running') AS running,
                count(*) FILTER (WHERE status <> 'running' AND cost_usd IS NULL) AS unpriced_runs,
+               count(*) FILTER (WHERE cost_usd IS NOT NULL AND {EQUIVALENT}) AS equivalent_runs,
+               count(*) FILTER (WHERE cost_usd IS NOT NULL AND cost_source = 'provider_price') AS provider_price_runs,
                COALESCE(sum(cost_usd), 0) AS cost_usd
         FROM llm_records
         WHERE task_id = ANY($1::text[]) AND {_TASK_ROLE} IS NOT NULL
@@ -273,13 +284,13 @@ async def task_costs(
         task_ids,
     )
     costs = {
-        task_id: {"cost_usd": 0.0, "runs": 0, "running": 0, "unpriced_runs": 0,
-                  "by_role": {role: {"cost_usd": 0.0, "runs": 0} for role in TASK_ROLES}}
+        task_id: {"cost_usd": 0.0, "runs": 0, "running": 0, "unpriced_runs": 0, "equivalent_runs": 0,
+                  "provider_price_runs": 0, "by_role": {role: {"cost_usd": 0.0, "runs": 0} for role in TASK_ROLES}}
         for task_id in task_ids
     }
     for row in rows:
         cost = costs[row["task_id"]]
-        for key in ("runs", "running", "unpriced_runs"):
+        for key in ("runs", "running", "unpriced_runs", "equivalent_runs", "provider_price_runs"):
             cost[key] += row[key]
         cost["cost_usd"] += row["cost_usd"]
         cost["by_role"][row["role"]] = {"cost_usd": row["cost_usd"], "runs": row["runs"]}

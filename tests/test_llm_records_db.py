@@ -175,7 +175,8 @@ def test_a_tasks_cost_is_the_sum_of_its_planner_worker_and_reviewer_runs() -> No
         assert t1["cost_usd"] == pytest.approx(sum(r["cost_usd"] or 0 for r in runs))
         assert sum(row["cost_usd"] for row in t1["by_role"].values()) == pytest.approx(t1["cost_usd"])
         assert costs["t2"]["cost_usd"] == 1.0 and costs["t2"]["runs"] == 1
-        assert costs["t3"] == {"cost_usd": 0.0, "runs": 0, "running": 0, "unpriced_runs": 0, "by_role": {
+        assert costs["t3"] == {"cost_usd": 0.0, "runs": 0, "running": 0, "unpriced_runs": 0, "equivalent_runs": 0,
+                               "provider_price_runs": 0, "by_role": {
             "planner": {"cost_usd": 0.0, "runs": 0}, "worker": {"cost_usd": 0.0, "runs": 0},
             "reviewer": {"cost_usd": 0.0, "runs": 0}}}
         assert await llm_records.task_costs([], pool=pool) == {}
