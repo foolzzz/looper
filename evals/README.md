@@ -52,8 +52,11 @@ uv run --extra test python -m evals.prompt_regression run --mode fake \
 Runs real Claude Code (`haiku` by default) and costs money. Every Claude Code
 run gets `--max-budget-usd` (default 0.25), and the run stops once its tasks
 have spent `--total-cap-usd` (default 0.80); a task that reaches the cap is
-cancelled and the rest are skipped. A full run with haiku costs about $0.33
-and takes about 3.5 minutes. Expect some noise between identical runs: cost
+cancelled and the rest are skipped. `--model` sets the model in the system
+settings layer of the run's database, so every agent uses it. A full run costs
+about $0.33 with haiku (about 3.5 minutes), $0.62 with sonnet and $1.30 with
+opus (about 3 minutes each); give opus a higher `--total-cap-usd`, such as
+2.50. Expect some noise between identical runs: cost
 moves by up to about 10%, and an occasional single contract violation that a
 repair turn fixes is not a regression by itself.
 
@@ -73,6 +76,7 @@ uv run python -m evals.prompt_regression compare evals/runs/<new>.json [evals/ru
 A pull request that changes a recommended prompt, a contract or the injection
 order runs real mode on the change (comparing with the committed baseline, or
 with a run of the base branch via `--baseline`) and pastes the table into its
-description. Update the committed baseline
-(`baselines/real-haiku.json`) when an intended change moves the numbers; it
-holds numbers only, never transcripts or local paths.
+description. Update the model's committed baseline
+(`baselines/real-haiku.json`, `real-sonnet.json` or `real-opus.json`) when an
+intended change moves the numbers; it holds numbers only, never transcripts or
+local paths.
