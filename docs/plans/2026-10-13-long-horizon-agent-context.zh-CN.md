@@ -1,6 +1,6 @@
 # 开发计划：长程 Agent 上下文体系（M0–M6）
 
-- **状态：** 执行中（M0、M1、M1.5、M1.6、M1.7、M2、M3、M4 已交付；下一个是 M5，M6 与上游 LoopX 清理并行进行）
+- **状态：** M0–M6 全部交付；剩余上游 LoopX 清理 B4 和第 5 节待办
 - **依据：** [RFC：长程 Agent 的上下文体系 v0](../architecture/rfcs/long-horizon-agent-context-v0.zh-CN.md)。
   设计原则、分层模型和已作出的决定以 RFC 为准；本文只管"怎么分阶段做、做到什么算完成、现在做到哪了"。
 - **仓库：** `foolzzz/looper`，基线 `main`
@@ -31,7 +31,7 @@
 | M2 | 上下文与花费观测 | ✅ 已交付（looper #24） | M0 |
 | M3 | 项目知识 | ✅ 已交付（looper #27） | M0 |
 | M4 | 项目 skill | ✅ 已交付（looper #32） | M3 |
-| M5 | 项目执行配置 | 待开始 | M2 |
+| M5 | 项目执行配置 | ✅ 已交付（looper #37） | M2 |
 | M6 | prompt 回归评测 | ✅ 已交付（looper #36） | M1 |
 
 执行顺序：M1 → M1.5 → M1.6 → M1.7 → M2 → M3 → M4 → M5 → M6。
@@ -240,6 +240,10 @@
   - 每项配置都能在对应 agent 的启动参数或行为里读回；
   - 设了上限的项目在上限处停下，并写明原因；
   - 没有配置的项目，行为与现在一致。
+- **核实**（Claude Code 2.1.285，haiku，`--print` stream-json）：`--max-budget-usd` 在每次请求之后检查，所以一轮可能超出上限一个请求的花费（上限 $0.001，这一轮花了 $0.0103）；
+  超限的一轮照常回复，但 `result` 为 `subtype: error_max_budget_usd`、`is_error: true`、没有 `result` 文本，`errors` 为 `["Reached maximum budget ($0.001)"]`；
+  上限按进程累计，同一进程的后续每一轮都立即以同样的 `result` 结束，不再发请求，进程退出码为 1；
+  `--resume` 续接的新进程只算自己的花费，不把会话以前的花费计入上限（而 `total_cost_usd` 仍然计入）。
 
 ### M6 prompt 回归评测
 
@@ -275,6 +279,7 @@
 | 2026-10-13 | 修复第 5.1 节核心缺陷：常驻 Manager、Planner 把 Claude 自己跑的一轮当成下一条消息的回复（looper #26）。**核实**（Claude Code 2.1.285，haiku，常驻参数；录制样例存于 `tests/fixtures/claude_stream/background_*.jsonl`）：带 `uuid` 写入的消息保留这个 uuid；Claude 读到消息就写 `command_lifecycle` `queued`，开始这一轮时写 `started`，`result` 之后写 `completed`；`started` 之后才是这一轮的 `system/init`，再之后才是 `--replay-user-messages` 的回显（`isReplay`，同一 uuid），所以回显不是这一轮的起点；`result` 用 `user_message_uuid(s)` 指明它回答的消息；不加 `--replay-user-messages` 时只少回显。后台 Bash 或后台子 agent 在空闲时结束：先有 `system/task_notification`（后台子 agent 自己的事件带 `parent_tool_use_id`，夹在两轮之间），再从 `system/init` 跑一轮到 `result`，没有 lifecycle 和回显，`result` 没有 `user_message_uuid`、带 `origin: {kind: task-notification}`；这时到达的消息立刻 `queued`，要等这一轮的 `result` 之后才 `started`（旧代码会把这一轮的话当成这条消息的回复）；在用户轮进行中结束的后台工作并入该轮（回显一条带 `origin` 的 `<task-notification>`）。**做法**：`ResidentClaude` 在进程存活期间持续读取输出；每条消息带自己的 uuid，用户轮从它的 `started`（或回显）开始、到下一个 `result` 结束，其余以 `result` 结束的事件是 Claude 自己的一轮，交给 owner 的 `autonomous` 处理；每个 `result` 读到时就按写出顺序取累计值增量；#20 的 `session_started`、M2 的基线、重启签名和 `stop()` 回收不变。Manager、Planner 的常驻命令加 `--replay-user-messages`；Claude 自己的一轮记成独立运行（`input_text` 为 "(no user message: …)"，`metadata.autonomous` 为 true）；Manager 把其中的话作为单独回复发到上一条已回答消息的渠道，Web 渠道把它写入该会话的聊天记录，不进任何消息的流；Planner 只记录和打日志，不用于计划决策。**验收**（真实 Claude，haiku，本分支的 `loopx serve` 在 8791 端口、一次性数据库）：第一条消息让 Manager 后台运行 `sleep 8`，流里回复 `STARTED`；后台结束后 Claude 自己跑了一轮，"Background task completed successfully (exit code 0)." 作为单独的助手消息进入该会话的聊天记录；第二条消息 "2+3" 的流里回复 `5`；三条运行记录花费 $0.0277812、$0.003947（autonomous）、$0.0034193，正好是 Claude 累计值 $0.0277812 → $0.0317282 → $0.0351475 的增量，`session.json` 存下 $0.0351475。真实 Claude 花费约 $0.14（核实约 $0.10，验收约 $0.035）。**测试**：新增 11 个，在 main 上全部失败（main 上第二条消息拿到的是后台那一轮的话）；单测与真实 PG 1138 通过（main 上 1127），另有 5 个 `test_dashboard_command` 安装模式用例在 main 上同样失败。**未核实**：agent teams、多个后台任务同时结束、飞书和 Telegram 的实际投递；Web 聊天页不会实时出现这条回复，打开或刷新会话时才显示 |
 | 2026-10-13 | M4 交付（looper #32）：项目 skill，只做核心。`project_skills` 表（名称 slug、一行描述、`SKILL.md` 正文、启用开关）与 `GET/POST /api/projects/<id>/skills`、`PUT/DELETE .../skills/<skill_id>`；上限为名称 64 字符、描述 1,024 字符、正文 64 KiB、每个项目 20 个，超限 400、重名 409，修改持有项目行锁。Planner 每轮、Worker 和 Reviewer 每次运行读取项目已启用的 skill，按这组 skill 的哈希用 `write_once` 只读地写成插件 `<runtime_root>/.local/projects/<project_id>/skills/<sha256>/project/`，以一个 `--plugin-dir` 挂载在插件库之后（`claude_cli.project_skill_args`，随 `Launch` 下发），Manager 没有；记录新增 `metadata.project_skills`。界面：项目编辑里 Knowledge 下面的 Skills 列表（新增、开关、删除前确认）。验收（真实 Claude，haiku）：`loopx serve` 跑在一次性数据库上，插件库里放了一个合成插件 `demo-lib`；项目 A 有启用的 `release-stamp`（正文里分三段写着暗号）和停用的 `disabled-probe`，项目 B 没有 skill。A 的任务里 Planner 和 Worker 的 init 都列出 `demo-lib:hello`、`project:release-stamp`，没有 `disabled-probe`；Worker 调用了 Skill 工具（`project:release-stamp`），报告里写出暗号 `KESTREL-8243-VIOLET`，Planner 没有调用它；B 的任务里 Planner 和 Worker 的 init 只有 `demo-lib:hello`，Worker 自己列出可用 skill 也说没有 `project:` 开头的；两个工作目录的 `git status` 都是干净的。API 在真实服务上返回了 201、400、404、409。无头 Chrome 里完成新增（先被拒的名称显示服务端原因，改正后成功）、用键盘关掉开关、删除，并截图查看了 1280、768、390 px（390 px 下开关换到文字下面一行）。真实 Claude 花费约 $0.13（核实 $0.02，两个任务 $0.11）。测试：fork 测试集加两个新测试文件在真实 PG 上 881 通过（main 上同一 fork 测试集 799 通过）；整仓 pytest 按协调方要求没有跑完（上游测试正在另行删除）。新增和改动的测试在 main 上 14 个失败，另有 1 个文件因缺少 `project_skills` 模块无法导入（另 2 个守护用例在 main 上本来就成立） |
 | 2026-10-13 | M6 交付（looper #36）：`evals/prompt_regression/` 用 5 个小任务（单步、依赖、送审、重试、聊天纠偏）经一次性 `loopx serve`（新数据库、空闲端口、临时目录）走 HTTP API，读回成功、步骤、重试、送审、花费、契约违约和 Planner 是否改文件，与上一次运行或已提交的基线对比输出 Markdown 表；替身 Claude 模式进测试套件，真实模式按需跑，单次运行带 `--max-budget-usd`、整轮有总花费上限。验收：替身模式 5/5 通过，并识别出故意的 Planner、Worker 违约和 Planner 写文件；真实 haiku 基线 5/5、$0.33，去掉 Planner 的 `REPLY_CONTRACT`（本地临时补丁，已撤回）后 0/5、违约 10 次，真实花费共 $0.82，分叉测试 843 通过。 |
+| 2026-10-13 | M5 交付（looper #37）：项目执行配置，只做核心。`projects` 新增六个可空字段（模型、单次运行上限 `--max-budget-usd`、任务累计上限及到达后的处理方式、Planner 监督间隔、验收策略），未设置时行为与 main 一致，经项目 GET/PUT 和项目编辑读写，非法值返回 400。验证：fork 测试集加新测试在真实 PG 上 916 通过，真实 Claude 只用于核实 `--max-budget-usd`（约 $0.013）。 |
 
 ## 5. 不属于本 RFC 的待办
 
@@ -299,6 +304,7 @@
 - **完整的项目页** `#projects/<id>`：概览、知识、Skills、Settings 标签（M3–M5 先用项目信息编辑里的最小界面）。
 - **项目知识的辅助功能**（M3 只做了核心）：在界面里修改已有文档（API 已支持 `PUT`）、查看正文、拖拽上传、项目视图里显示知识摘要。
 - **项目 skill 的辅助功能**（M4 只做了核心）：在界面里查看和修改已有 skill 的正文、名称和描述（API 已支持 `PUT`），拖入或上传 `SKILL.md`（连同 frontmatter），历史页的「Plugins & skills」里列出这次运行加载的项目 skill（目前只在记录的 `metadata.project_skills` 和启动命令里），以及界面打磨。
+- **项目执行配置的辅助功能**（M5 只做了核心）：项目视图显示已设的执行配置；任务页显示花费占任务上限的比例，接近上限时提醒；任务因上限失败后"提高上限并继续"的操作；按角色分别设模型或单次上限。
 - **网页聊天实时显示 Claude 自主一轮的回复**（#26 的遗留）：这类回复不对应任何提问，目前写进会话记录，但不会实时推送，要刷新或重新打开会话才看得到。
 - **界面小问题**：
   - Tasks 列表页内容贴边，没有内边距；

@@ -18,6 +18,20 @@ To learn how to use these features, read the [usage guide](docs/fork/usage.md).
 
 ### Added
 
+- **Project execution settings (M5).** A project can set how its Planner,
+  Workers and Reviewers run; every field is optional and `null` inherits, so
+  a project with none set runs as before (`loopx/agents/project_execution.py`).
+  The fields are typed columns on `projects`, read and written through the
+  project `GET`/`PUT` (a 400 names a bad value) and the project editor:
+  - `model`, over the agent's own model and the default (not the Manager's);
+  - `run_budget_usd`, passed as `--max-budget-usd` to every task agent process;
+  - `task_budget_usd`, a cap on the task's cost (M2 accounting), and
+    `task_budget_action`: `fail` at once (the default) or `wrap_up` after one
+    more Planner turn; the task's error states the cap and the amount spent;
+  - `supervise_interval_seconds`, over the `planner` config (0 = off);
+  - `review_policy`: `planner` (as before) or `all` (every step needs a
+    passing review before it is accepted).
+
 - **Project skills (M4).** A project can carry its own Claude Code skills.
   Only its Planner, Workers and Reviewers load them, and nothing is written
   into the project's directory (`loopx/agents/project_skills.py`).

@@ -132,6 +132,13 @@ for line in sys.stdin:
     if reply == '<error>':
         emit({{'type': 'result', 'subtype': 'error_during_execution', 'is_error': True, 'total_cost_usd': cost,
               **answers}})
+    elif reply == '<budget>':
+        # Like Claude Code 2.1.285 run with --max-budget-usd: the request is made and paid, then the turn
+        # ends at the cap without a reply.
+        cost += 0.25
+        open(session_cost, 'w').write(str(cost))
+        emit({{'type': 'result', 'subtype': 'error_max_budget_usd', 'is_error': True, 'total_cost_usd': cost,
+              'errors': ['Reached maximum budget ($0.1)'], **answers}})
     else:
         cost += 0.25
         open(session_cost, 'w').write(str(cost))
@@ -165,8 +172,9 @@ class FakePlannerClaude:
     Like Claude, each result's ``total_cost_usd`` is its session's running
     total (0.25 per answered turn), which a process started with ``--resume``
     carries on from. A reply of ``<exit>`` exits mid-turn
-    without a result, ``<hang>`` never answers, and ``<error>`` ends the turn
-    with an error result. With ``linger`` it keeps running after its stdin
+    without a result, ``<hang>`` never answers, ``<error>`` ends the turn
+    with an error result and ``<budget>`` ends it at its ``--max-budget-usd`` cap
+    (0.25 spent, no reply). With ``linger`` it keeps running after its stdin
     closes; with ``forget_sessions`` it answers any ``--resume`` the way Claude
     answers one for a session it no longer has: an error result, no init. It logs its argv, pid, the system prompt its file held at start
     and every turn it reads. Like Claude Code 2.1.285, each turn's lifecycle
