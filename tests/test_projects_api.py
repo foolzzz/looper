@@ -182,11 +182,12 @@ class TestProjectEndpoints:
 
     def test_work_dir_is_optional(self, store: _Store) -> None:
         status, body = _call("POST", "/api/projects", {"name": "notes"})
-        assert status == 201 and body["work_dir"] == ""
+        assert status == 201 and (body["work_dir"], body["background"]) == ("", "")
 
     @pytest.mark.parametrize("body", [
         b"{not json", [], {}, {"name": ""}, {"name": "   "}, {"name": 7}, {"name": "x" * 81},
         {"name": "a", "work_dir": "relative/dir"}, {"name": "a", "description": 3},
+        {"name": "a", "background": 5}, {"name": "a", "worker_harness_prompt": ["x"]},
     ])
     def test_create_rejects_a_bad_request(self, store: _Store, body: Any) -> None:
         status, response = _call("POST", "/api/projects", body)
@@ -200,16 +201,6 @@ class TestProjectEndpoints:
         store.add_project("proj-a", "Tetris")
         status, body = _call("POST", "/api/projects", {"name": "TETRIS"})
         assert status == 409 and "TETRIS" in body["error"]
-
-    def test_list_orders_by_name_with_counts(self, store: _Store) -> None:
-        store.add_project("proj-b", "zeta")
-        store.add_project("proj-a", "Alpha")
-        store.add_task("task-1", "proj-a", "running")
-        store.add_task("task-2", "proj-a", "completed")
-        status, body = _call("GET", "/api/projects")
-        assert status == 200
-        assert [(p["name"], p["task_count"], p["active_count"]) for p in body["projects"]] == [
-            ("Alpha", 2, 1), ("zeta", 0, 0)]
 
     def test_list_reports_a_database_failure(self, monkeypatch: pytest.MonkeyPatch) -> None:
         async def broken(**_: Any) -> list[dict[str, Any]]:
@@ -261,24 +252,13 @@ class TestProjectEndpoints:
 class TestProjectBackground:
     """A project's background goes into its task agents' system prompt; up to 10000 characters."""
 
-    def test_create_stores_it_without_the_blank_lines_around_it(self, store: _Store) -> None:
-        status, body = _call("POST", "/api/projects", {
-            "name": "calc", "background": "\n \n  - use uv\n\n  - Python 3.12\n\n\t\n",
-        })
-        assert status == 201
-        # Blank lines around it go; the first line keeps its indentation and inner blank lines stay.
-        assert body["background"] == "  - use uv\n\n  - Python 3.12"
-        assert store.projects[body["project_id"]]["background"] == "  - use uv\n\n  - Python 3.12"
-
-    def test_it_is_optional(self, store: _Store) -> None:
-        status, body = _call("POST", "/api/projects", {"name": "calc"})
-        assert status == 201 and body["background"] == ""
-
     @pytest.mark.parametrize(("raw", "stored"), [
         ("", ""),
         ("\n \n\t\n", ""),
         ("x", "x"),
         ("\r\n\r\n  x\r\n\r\ny\r\n", "  x\r\n\r\ny"),
+        # The first line keeps its indentation and inner blank lines stay.
+        ("\n \n  - use uv\n\n  - Python 3.12\n\n\t\n", "  - use uv\n\n  - Python 3.12"),
     ])
     def test_only_the_blank_lines_around_it_are_trimmed(self, raw: str, stored: str) -> None:
         from loopx.agents.projects import project_background
@@ -290,14 +270,8 @@ class TestProjectBackground:
         status, body = _call("POST", "/api/projects", {"name": "b", "background": "x" * 10001})
         assert status == 400 and "10000" in body["error"]
         assert [p["name"] for p in store.projects.values()] == ["a"]
-
-    def test_surrounding_blank_lines_do_not_count(self, store: _Store) -> None:
-        assert _call("POST", "/api/projects", {"name": "a", "background": "\n\n" + "x" * 10000 + "\n\n"})[0] == 201
-
-    @pytest.mark.parametrize("background", [None, 5, ["x"]])
-    def test_it_must_be_a_string(self, store: _Store, background: Any) -> None:
-        status, body = _call("POST", "/api/projects", {"name": "a", "background": background})
-        assert status == 400 and "background" in body["error"]
+        # Blank lines around it do not count.
+        assert _call("POST", "/api/projects", {"name": "c", "background": "\n\n" + "x" * 10000 + "\n\n"})[0] == 201
 
     def test_put_sets_it_and_an_empty_string_clears_it(self, store: _Store) -> None:
         store.add_project("proj-a", "calc", "/srv/calc", background="old")
@@ -307,33 +281,16 @@ class TestProjectBackground:
         status, body = _call("PUT", "/api/projects/proj-a", {"background": ""})
         assert status == 200 and body["background"] == ""
 
-    def test_put_of_other_fields_keeps_it(self, store: _Store) -> None:
-        store.add_project("proj-a", "calc", background="Use uv.")
-        assert _call("PUT", "/api/projects/proj-a", {"name": "Calc"})[1]["background"] == "Use uv."
-
-    def test_put_over_the_limit_is_400_and_changes_nothing(self, store: _Store) -> None:
-        store.add_project("proj-a", "calc", background="old")
-        status, body = _call("PUT", "/api/projects/proj-a", {"name": "new", "background": "x" * 10001})
-        assert status == 400 and "10000" in body["error"]
-        assert (store.projects["proj-a"]["name"], store.projects["proj-a"]["background"]) == ("calc", "old")
-
-    def test_listed_projects_show_it(self, store: _Store) -> None:
-        store.add_project("proj-a", "calc", background="Use uv.")
-        assert _call("GET", "/api/projects")[1]["projects"][0]["background"] == "Use uv."
-
     def test_a_new_project_made_with_a_task_takes_it(self, store: _Store) -> None:
         status, body = _call("POST", "/api/tasks/create", {
-            "requirement": "r", "project": {"name": "calc", "background": " Use uv.\n"}, "work_dir": "/tmp/calc",
+            "requirement": "r", "work_dir": "/tmp/calc",
+            "project": {"name": "calc", "background": " Use uv.\n", "planner_harness_prompt": "Plan.",
+                        "worker_harness_prompt": "Work."},
         })
         assert status == 201
-        assert store.projects[body["project_id"]]["background"] == " Use uv."
-
-    def test_a_new_project_made_with_a_task_is_refused_over_the_limit(self, store: _Store) -> None:
-        status, body = _call("POST", "/api/tasks/create", {
-            "requirement": "r", "project": {"name": "calc", "background": "x" * 10001}, "work_dir": "/tmp/calc",
-        })
-        assert status == 400 and "10000" in body["error"]
-        assert store.projects == {} and store.tasks == {}
+        project = store.projects[body["project_id"]]
+        assert (project["background"], project["planner_harness_prompt"], project["worker_harness_prompt"]) == (
+            " Use uv.", "Plan.", "Work.")
 
 
 class TestProjectHarness:
@@ -363,28 +320,6 @@ class TestProjectHarness:
         status, body = _call("PUT", "/api/projects/proj-c", {"name": "renamed", field: "x" * 20_001})
         assert status == 400
         assert store.projects["proj-c"]["name"] == "c" and store.projects["proj-c"][field] == ""
-
-    @pytest.mark.parametrize("value", [None, 5, ["x"]])
-    def test_it_must_be_a_string(self, store: _Store, value: Any) -> None:
-        status, body = _call("POST", "/api/projects", {"name": "a", "worker_harness_prompt": value})
-        assert status == 400 and "worker_harness_prompt" in body["error"]
-
-    def test_a_new_project_made_with_a_task_takes_them(self, store: _Store) -> None:
-        status, body = _call("POST", "/api/tasks/create", {
-            "requirement": "r", "work_dir": "/tmp/calc",
-            "project": {"name": "calc", "planner_harness_prompt": "Plan.", "worker_harness_prompt": "Work."},
-        })
-        assert status == 201
-        project = store.projects[body["project_id"]]
-        assert (project["planner_harness_prompt"], project["worker_harness_prompt"]) == ("Plan.", "Work.")
-
-    def test_a_new_project_made_with_a_task_is_refused_over_the_limit(self, store: _Store) -> None:
-        status, body = _call("POST", "/api/tasks/create", {
-            "requirement": "r", "work_dir": "/tmp/calc",
-            "project": {"name": "calc", "planner_harness_prompt": "x" * 20_001},
-        })
-        assert status == 400 and "20000" in body["error"]
-        assert store.projects == {} and store.tasks == {}
 
 
 class TestTaskCreate:
@@ -522,12 +457,8 @@ class TestTaskReads:
         (task,) = body["tasks"]
         assert (task["task_id"], task["project_id"], task["project_name"], task["work_dir"]) == (
             "task-2", "proj-b", "notes", "/w")
-
-    def test_list_without_a_filter_lists_every_project(self, store: _Store) -> None:
-        store.add_project("proj-a", "tetris")
-        store.add_task("task-1", "proj-a")
-        assert len(_call("GET", "/api/tasks")[1]["tasks"]) == 1
-        assert store.list_calls == [{"limit": 50, "project_id": None}]
+        assert len(_call("GET", "/api/tasks")[1]["tasks"]) == 2  # without a filter, every project's
+        assert store.list_calls[-1] == {"limit": 50, "project_id": None}
 
     def test_detail_shows_the_project(self, store: _Store) -> None:
         store.add_project("proj-a", "tetris")

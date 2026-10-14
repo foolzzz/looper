@@ -21,11 +21,10 @@ def _dirs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, checkout_built: bo
     return checkout, packaged
 
 
-def test_checkout_build_wins(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    checkout, _ = _dirs(tmp_path, monkeypatch, checkout_built=True)
-    assert http_server.default_static_dir() == checkout
+@pytest.mark.parametrize("checkout_built", [True, False])
+def test_checkout_build_wins(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, checkout_built: bool) -> None:
+    checkout, packaged = _dirs(tmp_path, monkeypatch, checkout_built=checkout_built)
+    # An installed wheel has no checkout build and serves its packaged copy.
+    assert http_server.default_static_dir() == (checkout if checkout_built else packaged)
 
 
-def test_installed_wheel_uses_the_packaged_copy(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    _, packaged = _dirs(tmp_path, monkeypatch, checkout_built=False)
-    assert http_server.default_static_dir() == packaged

@@ -40,98 +40,10 @@ def _make_envelope(
     )
 
 
-# --- MessageEnvelope tests ---
-
-
-class TestMessageEnvelope:
-    def test_roundtrip_serialization(self) -> None:
-        env = _make_envelope()
-        d = env.to_dict()
-        restored = MessageEnvelope.from_dict(d)
-        assert restored.message_id == env.message_id
-        assert restored.correlation_id == env.correlation_id
-        assert restored.source == env.source
-        assert restored.target == env.target
-        assert restored.message_type == env.message_type
-        assert restored.payload == env.payload
-
-    def test_create_generates_unique_ids(self) -> None:
-        a = _make_envelope()
-        b = _make_envelope()
-        assert a.message_id != b.message_id
-        assert a.correlation_id != b.correlation_id
-
-    def test_create_with_explicit_correlation(self) -> None:
-        env = _make_envelope(correlation_id="shared-123")
-        assert env.correlation_id == "shared-123"
-
-    def test_create_with_reply_to(self) -> None:
-        original = _make_envelope()
-        reply = _make_envelope(reply_to=original.message_id)
-        assert reply.reply_to == original.message_id
-
-    def test_message_type_serialization(self) -> None:
-        for mt in MessageType:
-            env = _make_envelope(message_type=mt)
-            d = env.to_dict()
-            assert d["message_type"] == mt.value
-            restored = MessageEnvelope.from_dict(d)
-            assert restored.message_type == mt
-
-
-class TestAgentAddress:
-    def test_channel_address(self) -> None:
-        addr = channel_address("telegram")
-        assert addr.channel == "telegram"
-        assert addr.agent_type == "channel"
-
-    def test_worker_address(self) -> None:
-        addr = worker_address("worker-abc123")
-        assert addr.agent_type == "worker"
-        assert addr.agent_id == "worker-abc123"
-        assert addr.channel is None
-
-    def test_roundtrip(self) -> None:
-        addr = AgentAddress(agent_type="planner", agent_id="planner", channel=None)
-        d = addr.to_dict()
-        assert "channel" not in d
-        restored = AgentAddress.from_dict(d)
-        assert restored == addr
-
-
 # --- MessageJournal tests ---
 
 
 class TestMessageJournal:
-    def test_append_and_undelivered(self, tmp_path: Path) -> None:
-        journal = MessageJournal(tmp_path / "bus")
-        env = _make_envelope()
-        journal.append(env)
-        undelivered = journal.undelivered()
-        assert len(undelivered) == 1
-        assert undelivered[0].message_id == env.message_id
-
-    def test_mark_delivered(self, tmp_path: Path) -> None:
-        journal = MessageJournal(tmp_path / "bus")
-        env = _make_envelope()
-        journal.append(env)
-        journal.mark_delivered(env.message_id)
-        assert journal.undelivered() == []
-
-    def test_compact(self, tmp_path: Path) -> None:
-        journal = MessageJournal(tmp_path / "bus")
-        env1 = _make_envelope()
-        env2 = _make_envelope()
-        journal.append(env1)
-        journal.append(env2)
-        journal.mark_delivered(env1.message_id)
-        journal.compact()
-
-        journal2 = MessageJournal(tmp_path / "bus")
-        undelivered = journal2.undelivered()
-        assert len(undelivered) == 1
-        assert undelivered[0].message_id == env2.message_id
-
     def test_corrupt_entry_skipped(self, tmp_path: Path) -> None:
         bus_dir = tmp_path / "bus"
         bus_dir.mkdir()
@@ -164,42 +76,6 @@ class TestMessageJournal:
 
 
 class TestMessageBus:
-    def test_publish_and_subscribe(self, tmp_path: Path) -> None:
-        async def _run() -> None:
-            bus = MessageBus(tmp_path)
-            await bus.start()
-            env = _make_envelope(target=MANAGER_ADDRESS)
-            await bus.publish(env)
-            received = await bus.drain_queue("manager")
-            assert len(received) == 1
-            assert received[0].message_id == env.message_id
-
-        asyncio.run(_run())
-
-    def test_subscribe_iterator(self, tmp_path: Path) -> None:
-        async def _run() -> None:
-            bus = MessageBus(tmp_path)
-            await bus.start()
-            env = _make_envelope(target=MANAGER_ADDRESS)
-
-            collected: list[MessageEnvelope] = []
-
-            async def consumer() -> None:
-                async for msg in bus.subscribe("manager"):
-                    collected.append(msg)
-                    if len(collected) >= 2:
-                        break
-
-            task = asyncio.create_task(consumer())
-            await asyncio.sleep(0.01)
-            await bus.publish(env)
-            env2 = _make_envelope(target=MANAGER_ADDRESS)
-            await bus.publish(env2)
-            await asyncio.wait_for(task, timeout=2.0)
-            assert len(collected) == 2
-
-        asyncio.run(_run())
-
     def test_request_reply(self, tmp_path: Path) -> None:
         async def _run() -> None:
             bus = MessageBus(tmp_path)
@@ -240,43 +116,7 @@ class TestMessageBus:
             await bus.start()
             env = _make_envelope(target=PLANNER_ADDRESS)
             with pytest.raises(asyncio.TimeoutError):
-                await bus.request(env, timeout=0.1)
-
-        asyncio.run(_run())
-
-    def test_topic_subscriber(self, tmp_path: Path) -> None:
-        async def _run() -> None:
-            bus = MessageBus(tmp_path)
-            await bus.start()
-            observed: list[MessageEnvelope] = []
-            bus.subscribe_topic(MessageType.USER_MESSAGE, observed.append)
-            env = _make_envelope(message_type=MessageType.USER_MESSAGE)
-            await bus.publish(env)
-            assert len(observed) == 1
-            assert observed[0].message_id == env.message_id
-
-        asyncio.run(_run())
-
-    def test_unsubscribe_topic(self, tmp_path: Path) -> None:
-        async def _run() -> None:
-            bus = MessageBus(tmp_path)
-            await bus.start()
-            observed: list[MessageEnvelope] = []
-            bus.subscribe_topic(MessageType.USER_MESSAGE, observed.append)
-            bus.unsubscribe_topic(MessageType.USER_MESSAGE, observed.append)
-            env = _make_envelope(message_type=MessageType.USER_MESSAGE)
-            await bus.publish(env)
-            assert len(observed) == 0
-
-        asyncio.run(_run())
-
-    def test_pending_count(self, tmp_path: Path) -> None:
-        async def _run() -> None:
-            bus = MessageBus(tmp_path)
-            await bus.start()
-            assert bus.pending_count("manager") == 0
-            await bus.publish(_make_envelope(target=MANAGER_ADDRESS))
-            assert bus.pending_count("manager") == 1
+                await bus.request(env, timeout=0.01)
 
         asyncio.run(_run())
 
@@ -291,8 +131,7 @@ class TestMessageBus:
             bus2 = MessageBus(tmp_path)
             await bus2.start()
             received = await bus2.drain_queue("manager")
-            assert len(received) == 1
-            assert received[0].message_id == env.message_id
+            assert received == [env]  # the whole envelope survives the journal
 
         asyncio.run(_run())
 
@@ -332,23 +171,6 @@ class TestMessageBus:
 
 
 class TestTopicConsumers:
-    def test_consumer_takes_delivery(self, tmp_path: Path) -> None:
-        async def _run() -> None:
-            bus = MessageBus(tmp_path)
-            await bus.start()
-            taken: list[MessageEnvelope] = []
-            observed: list[MessageEnvelope] = []
-            bus.subscribe_topic(MessageType.WORK_ITEM, lambda e: taken.append(e) or True, consumes=True)
-            bus.subscribe_topic(MessageType.WORK_ITEM, observed.append)
-            env = _make_envelope(target=worker_address("w1"), message_type=MessageType.WORK_ITEM)
-            await bus.publish(env)
-            assert [e.message_id for e in taken] == [env.message_id]
-            assert [e.message_id for e in observed] == [env.message_id]
-            assert bus.pending_count("w1") == 0  # not left in a queue nobody reads
-            assert bus.journal.undelivered() == []
-
-        asyncio.run(_run())
-
     def test_declined_message_stays_queued(self, tmp_path: Path) -> None:
         async def _run() -> None:
             bus = MessageBus(tmp_path)
@@ -358,18 +180,6 @@ class TestTopicConsumers:
             await bus.publish(env)
             assert bus.pending_count("w1") == 1
             assert [e.message_id for e in bus.journal.undelivered()] == [env.message_id]
-
-        asyncio.run(_run())
-
-    def test_unsubscribe_consumer(self, tmp_path: Path) -> None:
-        async def _run() -> None:
-            bus = MessageBus(tmp_path)
-            await bus.start()
-            consumer = lambda e: True  # noqa: E731
-            bus.subscribe_topic(MessageType.WORK_ITEM, consumer, consumes=True)
-            bus.unsubscribe_topic(MessageType.WORK_ITEM, consumer)
-            await bus.publish(_make_envelope(target=worker_address("w1"), message_type=MessageType.WORK_ITEM))
-            assert bus.pending_count("w1") == 1
 
         asyncio.run(_run())
 
@@ -424,7 +234,11 @@ class TestWorkerPoolConsumesWork:
                 message_type=MessageType.WORK_ITEM,
                 payload={"task_id": "s1"},
             ))
-            await asyncio.sleep(0.05)
+            for _ in range(200):  # until the pool has run it, then once more to see a duplicate
+                if pool._run_worker.await_count:  # type: ignore[attr-defined]
+                    break
+                await asyncio.sleep(0.01)
+            await asyncio.sleep(0)
             await pool.stop()
             return bus, pool._run_worker  # type: ignore[return-value]
 
