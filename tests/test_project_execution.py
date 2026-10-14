@@ -17,7 +17,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from agent_fixtures import agent_json
+from agent_fixtures import profile_json
 
 from looper.agents.message import TASK_ROUTER_ADDRESS, MessageEnvelope, MessageType
 from looper.agents.tiers.planner import PlannerAgent
@@ -124,8 +124,8 @@ class TestWorkerRuns:
         self, agent_db: Any, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         _worker_row(monkeypatch, {"system_prompt": "ROLE", "timeout_seconds": 0, "max_turns": 0})
-        _layers(agent_db, {"scope": "role", "role": "worker", "agent": agent_json("haiku")},
-                _in_project(agent=agent_json("sonnet"), run_budget_usd=0.25))
+        _layers(agent_db, {"scope": "role", "role": "worker", "profile": profile_json("haiku")},
+                _in_project(profile=profile_json("sonnet"), run_budget_usd=0.25))
         agent_db.get_task_project.return_value = _project()
         for verify in (False, True):
             _, seen = _run_step(verify=verify)
@@ -163,7 +163,7 @@ class TestWorkerRuns:
 @pytest.mark.usefixtures("agent_db")
 class TestPlanner:
     def test_the_project_model_and_run_cap_reach_the_planner(self, planner_claude: Any, agent_db: Any) -> None:
-        _layers(agent_db, _in_project(agent=agent_json("sonnet"), run_budget_usd=1.5))
+        _layers(agent_db, _in_project(profile=profile_json("sonnet"), run_budget_usd=1.5))
         agent_db.get_task_project.return_value = _project()
         claude = planner_claude(plan(step("s1")), decide("accept"))
         drive(claude, always(WORK_OK))
@@ -173,9 +173,9 @@ class TestPlanner:
     def test_a_role_in_project_model_reaches_only_that_roles_argv(
         self, planner_claude: Any, agent_db: Any, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        _layers(agent_db, {"scope": "system", "agent": agent_json("sonnet")},
-                {"scope": "role_project", "role": "worker", "project_id": "proj-1", "agent": agent_json("haiku")},
-                {"scope": "role_project", "role": "worker", "project_id": "proj-other", "agent": agent_json("opus")})
+        _layers(agent_db, {"scope": "system", "profile": profile_json("sonnet")},
+                {"scope": "role_project", "role": "worker", "project_id": "proj-1", "profile": profile_json("haiku")},
+                {"scope": "role_project", "role": "worker", "project_id": "proj-other", "profile": profile_json("opus")})
         agent_db.get_task_project.return_value = _project()
         claude = planner_claude(plan(step("s1")), decide("accept"))
         drive(claude, always(WORK_OK))

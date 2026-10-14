@@ -66,7 +66,7 @@ from .per_turn import PerTurnSession, session_dir_name
 from .pricing import usage_event
 
 if TYPE_CHECKING:
-    from ..agent_registry import ProviderSpec
+    from ..profile_registry import ProviderSpec
     from ..agent_settings import Launch
     from ..library import AgentLibrary
 
@@ -140,7 +140,7 @@ class CodexRuntime(RuntimeAdapter):
     def launch_args(self, launch: Launch) -> list[str]:
         """The ``exec`` flags of every run: JSON events, no git requirement, no approvals or sandbox (RFC
         decision 8), the model and the effort, and the knowledge and skill directories."""
-        binding = self.bind_provider(launch.agent.provider, launch.model, launch.effort)
+        binding = self.bind_provider(launch.profile.provider, launch.model, launch.effort)
         mounts = [*launch.knowledge.add_dirs, *materialize(launch.library).skill_dirs]
         return [
             "--json", "--skip-git-repo-check", "--dangerously-bypass-approvals-and-sandbox",
@@ -151,7 +151,7 @@ class CodexRuntime(RuntimeAdapter):
     def environment(self, launch: Launch) -> dict[str, str]:
         """The server's environment, then the settings' variables and the provider's binding (its own variables
         and its key)."""
-        binding = self.bind_provider(launch.agent.provider, launch.model, launch.effort)
+        binding = self.bind_provider(launch.profile.provider, launch.model, launch.effort)
         return {**{k: v for k, v in os.environ.items() if k not in binding.unset}, **dict(launch.env),
                 **dict(binding.env)}
 
@@ -284,7 +284,7 @@ def mcp_servers(library: AgentLibrary) -> tuple[list[tuple[str, dict[str, Any]]]
 
 def config_toml(launch: Launch) -> str:
     """The ``config.toml`` of a run's home: isolation, the provider, and the MCP servers."""
-    provider = launch.agent.provider
+    provider = launch.profile.provider
     lines = [
         "# Written by Looper for its Codex runs. Only this file and AGENTS.md come from Looper.",
         f"model_provider = {_toml_value(PROVIDER_ID)}",

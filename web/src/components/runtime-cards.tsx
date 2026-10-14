@@ -113,7 +113,7 @@ function RuntimeCard({ type, runtime }: { type: RuntimeType | undefined; runtime
         </Fact>
         {runtime && (
           <Fact label={AGENT_PROFILE.plural}>
-            {runtime.agent_count === 0 ? "none" : `${runtime.agent_count} ${runtime.agent_count === 1 ? "uses" : "use"} it`}
+            {runtime.profile_count === 0 ? "none" : `${runtime.profile_count} ${runtime.profile_count === 1 ? "uses" : "use"} it`}
           </Fact>
         )}
       </dl>

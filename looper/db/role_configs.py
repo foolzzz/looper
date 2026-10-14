@@ -1,4 +1,5 @@
-"""Agent configuration CRUD — DB-driven config for the agent-tiers system."""
+"""Role configs: each role's own settings (``role_configs``), keyed by the role: its display name, role prompt,
+timeout and concurrency."""
 
 from __future__ import annotations
 
@@ -11,7 +12,6 @@ from .connection import get_pool
 
 _UPDATABLE_FIELDS = (
     "display_name",
-    "role",
     "enabled",
     "system_prompt",
     "max_turns",
@@ -36,10 +36,10 @@ def _row_to_dict(row: asyncpg.Record) -> dict[str, Any]:
     return d
 
 
-async def get_config(agent_id: str, *, pool: asyncpg.Pool | None = None) -> dict[str, Any] | None:
+async def get_config(role: str, *, pool: asyncpg.Pool | None = None) -> dict[str, Any] | None:
     pool = pool or get_pool()
     row = await pool.fetchrow(
-        "SELECT * FROM agent_configs WHERE agent_id = $1", agent_id,
+        "SELECT * FROM role_configs WHERE role = $1", role,
     )
     if row is None:
         return None
@@ -47,7 +47,7 @@ async def get_config(agent_id: str, *, pool: asyncpg.Pool | None = None) -> dict
 
 
 async def set_config(
-    agent_id: str,
+    role: str,
     fields: dict[str, Any],
     *,
     pool: asyncpg.Pool | None = None,
@@ -61,7 +61,7 @@ async def set_config(
             updates[key] = fields[key]
 
     if not updates:
-        return await get_config(agent_id, pool=pool)
+        return await get_config(role, pool=pool)
 
     import json
     for key in ("extra_args", "metadata"):
@@ -77,19 +77,19 @@ async def set_config(
     set_clauses.append(f"updated_at = ${len(values) + 2}")
     values.append(datetime.now(timezone.utc))
 
-    sql = f"UPDATE agent_configs SET {', '.join(set_clauses)} WHERE agent_id = $1"
-    await pool.execute(sql, agent_id, *values)
-    return await get_config(agent_id, pool=pool)
+    sql = f"UPDATE role_configs SET {', '.join(set_clauses)} WHERE role = $1"
+    await pool.execute(sql, role, *values)
+    return await get_config(role, pool=pool)
 
 
 async def list_configs(*, pool: asyncpg.Pool | None = None) -> list[dict[str, Any]]:
     pool = pool or get_pool()
-    rows = await pool.fetch("SELECT * FROM agent_configs ORDER BY agent_id")
+    rows = await pool.fetch("SELECT * FROM role_configs ORDER BY role")
     return [_row_to_dict(r) for r in rows]
 
 
 async def replace_default_prompt(
-    agent_id: str,
+    role: str,
     *,
     old: str,
     new: str,
@@ -101,32 +101,32 @@ async def replace_default_prompt(
     """
     pool = pool or get_pool()
     result = await pool.execute(
-        "UPDATE agent_configs SET system_prompt = $3, updated_at = now() "
-        "WHERE agent_id = $1 AND system_prompt = $2",
-        agent_id, old, new,
+        "UPDATE role_configs SET system_prompt = $3, updated_at = now() "
+        "WHERE role = $1 AND system_prompt = $2",
+        role, old, new,
     )
     return result == "UPDATE 1"
 
 
 async def reset_prompt(
-    agent_id: str,
+    role: str,
     *,
     pool: asyncpg.Pool | None = None,
 ) -> dict[str, Any] | None:
-    """Reset an agent's system prompt to the system-recommended ``default_prompt``.
+    """Reset a role's prompt to the system-recommended ``default_prompt``.
 
-    Returns the updated config, or ``None`` when there is no such agent (or it
+    Returns the updated config, or ``None`` when there is no such role (or it
     has no recommended prompt to reset to).
     """
     pool = pool or get_pool()
     result = await pool.execute(
-        "UPDATE agent_configs SET system_prompt = default_prompt, updated_at = now() "
-        "WHERE agent_id = $1 AND default_prompt <> ''",
-        agent_id,
+        "UPDATE role_configs SET system_prompt = default_prompt, updated_at = now() "
+        "WHERE role = $1 AND default_prompt <> ''",
+        role,
     )
     if result != "UPDATE 1":
         return None
-    return await get_config(agent_id, pool=pool)
+    return await get_config(role, pool=pool)
 
 
 async def seed_defaults(
@@ -134,12 +134,11 @@ async def seed_defaults(
     *,
     pool: asyncpg.Pool | None = None,
 ) -> None:
-    """Insert default agent configs that don't exist yet."""
+    """Insert default role configs that don't exist yet."""
     pool = pool or get_pool()
     for cfg in defaults:
-        agent_id = cfg["agent_id"]
+        role = cfg["role"]
         display_name = cfg.get("display_name", "")
-        role = cfg.get("role", "")
         system_prompt = cfg.get("system_prompt", "")
         max_turns = cfg.get("max_turns", 0)
         timeout_seconds = cfg.get("timeout_seconds", 1200)
@@ -147,24 +146,23 @@ async def seed_defaults(
 
         await pool.execute(
             """
-            INSERT INTO agent_configs
-                (agent_id, display_name, role, system_prompt, default_prompt,
+            INSERT INTO role_configs
+                (role, display_name, system_prompt, default_prompt,
                  max_turns, timeout_seconds, max_concurrency)
-            VALUES ($1, $2, $3, $4, $4, $5, $6, $7)
-            ON CONFLICT (agent_id) DO UPDATE SET
-                display_name = CASE WHEN agent_configs.display_name = '' THEN EXCLUDED.display_name ELSE agent_configs.display_name END,
+            VALUES ($1, $2, $3, $3, $4, $5, $6)
+            ON CONFLICT (role) DO UPDATE SET
+                display_name = CASE WHEN role_configs.display_name = '' THEN EXCLUDED.display_name ELSE role_configs.display_name END,
                 -- An unedited row (its prompt still equals the recommended one) follows
                 -- the new recommendation; an edited row keeps the user's prompt. An empty
                 -- prompt is always (re)seeded.
                 system_prompt = CASE
-                    WHEN agent_configs.system_prompt = '' THEN EXCLUDED.system_prompt
-                    WHEN agent_configs.system_prompt = agent_configs.default_prompt THEN EXCLUDED.system_prompt
-                    ELSE agent_configs.system_prompt END,
+                    WHEN role_configs.system_prompt = '' THEN EXCLUDED.system_prompt
+                    WHEN role_configs.system_prompt = role_configs.default_prompt THEN EXCLUDED.system_prompt
+                    ELSE role_configs.system_prompt END,
                 default_prompt = EXCLUDED.default_prompt
             """,
-            agent_id,
-            display_name,
             role,
+            display_name,
             system_prompt,
             max_turns,
             timeout_seconds,

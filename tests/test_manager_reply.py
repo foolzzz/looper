@@ -13,7 +13,7 @@ from typing import Any
 
 import pytest
 
-from agent_fixtures import agent_json
+from agent_fixtures import profile_json
 
 from fake_claude import fake_claude
 from library_fixtures import ALPHA_SKILL, DEMO_PLUGIN, plugin_dirs
@@ -259,7 +259,7 @@ def _converse(
     it belongs to. The saved session is kept in memory in place of ``agent_sessions``; the returned
     ``saved_session``, ``saved_totals`` and ``saved_runtime`` are what the Manager saved last.
     """
-    from looper.db import agent_configs, agent_sessions, agent_setting_layers
+    from looper.db import agent_sessions, agent_setting_layers, role_configs
 
     sessions: dict[str, dict[str, Any]] = {}
     if saved_session is not None:  # a session saved by an earlier run of the server
@@ -299,7 +299,7 @@ def _converse(
         return [dict(row) for row in layers[current["message"]]] if layers else []
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", _exec)
-    monkeypatch.setattr(agent_configs, "get_config", _get_config)
+    monkeypatch.setattr(role_configs, "get_config", _get_config)
     monkeypatch.setattr(agent_setting_layers, "list_layers", _list_layers)
 
     async def _run() -> dict[str, Any]:
@@ -635,7 +635,7 @@ class TestManagerHarnessAndLaunch:
         row = {"system_prompt": "You manage."}
         # A project's layer never reaches the Manager.
         layers = [_system(harness_prompt="DEFAULT"), _manager(harness_prompt="MANAGER HARNESS"),
-                  {"scope": "project", "project_id": "proj-1", "harness_prompt": "PROJECT", "agent": agent_json("haiku")}]
+                  {"scope": "project", "project_id": "proj-1", "harness_prompt": "PROJECT", "profile": profile_json("haiku")}]
         chat = _converse(monkeypatch, _resident(), ["hello"], rows=[row], layers=[layers])
         (prompt,) = chat["prompts"]
         assert prompt == f"MANAGER HARNESS\n\nYou manage.\n\n{TASK_PLACEMENT_RULE}"
@@ -652,7 +652,7 @@ class TestManagerHarnessAndLaunch:
         before = [_system(harness_prompt="V1")]
         after = [_system(harness_prompt="V2" if change == "harness" else "V1"),
                  *([_manager(harness_prompt="OWN")] if change == "override" else []),
-                 *([_manager(agent=agent_json("sonnet"))] if change == "model" else [])]
+                 *([_manager(profile=profile_json("sonnet"))] if change == "model" else [])]
         row = {"system_prompt": "M."}
         chat = _converse(monkeypatch, _resident(), ["hello", "again"], rows=[row, row], layers=[before, after])
         assert chat["replies"] == ["turn 1: hello", "turn 1: again"]  # a new process for the second message
@@ -826,10 +826,10 @@ class TestManagerProjectSkills:
         assert agent_db.start_record.await_args.kwargs["metadata"]["prompt_layers"]["project"] is None
 
 
-def _codex_agent(executable: str) -> dict[str, Any]:
-    """An agent on Codex with an API key provider, as the database gives it."""
+def _codex_profile(executable: str) -> dict[str, Any]:
+    """An Agent Profile on Codex with an API key provider, as the database gives it."""
     return {
-        **agent_json("gpt-5.5"), "id": "agent-codex", "name": "codex/gpt-5.5",
+        **profile_json("gpt-5.5"), "id": "agent-codex", "name": "codex/gpt-5.5",
         "runtime_id": "rt-codex", "runtime_name": "codex", "runtime_type": "codex", "runtime_executable": executable,
         "runtime_capabilities": ["add_dirs", "mcp", "resident_session", "resume", "run", "structured_output"],
         "provider_id": "prov-cpa", "provider_name": "cpa", "provider_auth": "api_key",
@@ -857,11 +857,11 @@ def test_the_manager_moves_to_codex_after_a_handoff_and_resumes_it_turn_by_turn(
 ) -> None:
     from unittest.mock import AsyncMock
 
-    from looper.db import agent_registry as db_registry
+    from looper.db import profile_registry as db_registry
 
     monkeypatch.setattr(db_registry, "get_api_key", AsyncMock(return_value="sk-test-manager-codex"))
     codex = fake_claude(tmp_path / "codex", _CODEX)
-    on_codex = [_manager(agent=_codex_agent(codex))]
+    on_codex = [_manager(profile=_codex_profile(codex))]
     chat = _converse(monkeypatch, _resident(), ["hello", "again", "third"], layers=[[], on_codex, on_codex])
     # Claude Code answers first; it writes the handoff before the Manager moves to Codex, which then resumes its
     # own session on the next message, one process per turn.

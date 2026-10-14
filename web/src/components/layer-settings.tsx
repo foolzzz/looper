@@ -6,7 +6,7 @@ import { HarnessField } from "@/components/harness-field";
 import { AgentProfileSelect } from "@/components/agent-profiles";
 import type {
   AgentRole,
-  EffectiveAgent,
+  EffectiveProfile,
   EffectiveSettings,
   LayerUpdate,
   LayerValues,
@@ -22,7 +22,7 @@ import { cn } from "@/lib/utils";
 /** Where a value came from, in words. */
 const LAYER_LABELS: Record<SettingSource, string> = {
   builtin: "built-in default",
-  agent: `the ${AGENT_PROFILE.name}`,
+  profile: `the ${AGENT_PROFILE.name}`,
   system: "every role's defaults (Settings → Roles)",
   role: "the role (Settings → Roles)",
   project: "this project",
@@ -51,8 +51,8 @@ interface EnvRow {
 /** A layer's values as the editor holds them: text, "" = not set here. */
 interface Draft {
   harness: string;
-  /** A registered agent's agent_id. */
-  agent: string;
+  /** An Agent Profile's profile_id. */
+  profile: string;
   effort: string;
   env: EnvRow[];
   budget: string;
@@ -61,7 +61,7 @@ interface Draft {
 function draftOf(values: LayerValues): Draft {
   return {
     harness: values.harness_prompt ?? "",
-    agent: values.agent ?? "",
+    profile: values.profile_id ?? "",
     effort: values.effort ?? "",
     env: values.env.map((e) => ({ key: e.key, value: e.value ?? "", unset: e.value === null })),
     budget: values.run_budget_usd == null ? "" : String(values.run_budget_usd),
@@ -73,7 +73,7 @@ function changesOf(draft: Draft, values: LayerValues): LayerUpdate {
   const before = draftOf(values);
   const changes: LayerUpdate = {};
   if (draft.harness !== before.harness) changes.harness_prompt = draft.harness.trim() ? draft.harness : null;
-  if (draft.agent !== before.agent) changes.agent = draft.agent || null;
+  if (draft.profile !== before.profile) changes.profile_id = draft.profile || null;
   if (draft.effort !== before.effort) changes.effort = draft.effort || null;
   if (JSON.stringify(draft.env) !== JSON.stringify(before.env))
     changes.env = draft.env.map((e) => ({ key: e.key, value: e.unset ? null : e.value }));
@@ -132,7 +132,7 @@ function NowValue<T>({
 const SELECT = "flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm text-foreground";
 
 /**
- * One settings layer's harness, agent, effort, environment and per-run cap. An empty field is not set here and
+ * One settings layer's harness, Agent Profile, effort, environment and per-run cap. An empty field is not set here and
  * inherits; with `effective`, each field also says what applies now and where it comes from.
  */
 export function LayerSettingsForm({
@@ -192,7 +192,7 @@ export function LayerSettingsForm({
 
   const harness = effective?.harness_prompt;
   const effortText = (value: string | null) => value || "runtime default";
-  const agentText = (value: EffectiveAgent) => `${value.name} (${value.runtime} · ${value.provider} · ${value.model})`;
+  const profileText = (value: EffectiveProfile) => `${value.name} (${value.runtime} · ${value.provider} · ${value.model})`;
   const budgetText = (value: number | null) => (value == null ? "no cap" : formatUsd(value));
 
   return (
@@ -236,19 +236,19 @@ export function LayerSettingsForm({
 
       <div className="grid gap-4 sm:grid-cols-2">
         <div className="space-y-1 sm:col-span-2">
-          <label htmlFor={`${idPrefix}-agent`} className="text-xs font-medium text-muted-foreground">
+          <label htmlFor={`${idPrefix}-profile`} className="text-xs font-medium text-muted-foreground">
             {AGENT_PROFILE.name}
           </label>
           <AgentProfileSelect
-            id={`${idPrefix}-agent`}
-            value={draft.agent}
-            onChange={(agent) => set({ agent })}
-            emptyLabel={isSystem ? `Built-in: ${limits.builtin_agent.name}` : "Inherit"}
+            id={`${idPrefix}-profile`}
+            value={draft.profile}
+            onChange={(profile) => set({ profile })}
+            emptyLabel={isSystem ? `Built-in: ${limits.builtin_profile.name}` : "Inherit"}
             roles={roles}
-            describedBy={`${idPrefix}-agent-now`}
-            unlistedName={effective?.agent.value.agent_id === draft.agent ? effective.agent.value.name : undefined}
+            describedBy={`${idPrefix}-profile-now`}
+            unlistedName={effective?.profile.value.profile_id === draft.profile ? effective.profile.value.name : undefined}
           />
-          <NowValue id={`${idPrefix}-agent-now`} setting={effective?.agent} layer={layer} show={agentText} />
+          <NowValue id={`${idPrefix}-profile-now`} setting={effective?.profile} layer={layer} show={profileText} />
         </div>
         <div className="space-y-1">
           <label htmlFor={`${idPrefix}-effort`} className="text-xs font-medium text-muted-foreground">Effort</label>

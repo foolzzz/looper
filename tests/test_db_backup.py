@@ -54,7 +54,7 @@ async def dropped_column():
     conn = await asyncpg.connect(args[-1].split("=", 1)[1], password=os.environ.get("PGPASSWORD"))
     try:
         return await conn.fetchval("SELECT count(*) FROM information_schema.columns "
-                                   "WHERE table_name = 'agent_configs' AND column_name = 'permission_mode'")
+                                   "WHERE table_name = 'role_configs' AND column_name = 'permission_mode'")
     finally:
         await conn.close()
 sys.stdout.buffer.write(b"PGDMP" + json.dumps({"permission_mode": asyncio.run(dropped_column())}).encode())
@@ -144,7 +144,7 @@ def _db(url: str, *statements: str) -> None:
 
 
 _OLD_SCHEMA = ("UPDATE schema_fingerprint SET sha256 = 'an older schema.sql'",
-               "ALTER TABLE agent_configs ADD COLUMN permission_mode TEXT")
+               "ALTER TABLE role_configs ADD COLUMN permission_mode TEXT")
 
 
 def _state(url: str) -> dict[str, object]:
@@ -159,7 +159,7 @@ def _state(url: str) -> dict[str, object]:
             return {
                 "permission_mode": await conn.fetchval(
                     "SELECT count(*) FROM information_schema.columns "
-                    "WHERE table_name = 'agent_configs' AND column_name = 'permission_mode'"),
+                    "WHERE table_name = 'role_configs' AND column_name = 'permission_mode'"),
                 "current": await conn.fetchval("SELECT sha256 FROM schema_fingerprint")
                 == schema_fingerprint(SCHEMA_PATH.read_text(encoding="utf-8")),
             }

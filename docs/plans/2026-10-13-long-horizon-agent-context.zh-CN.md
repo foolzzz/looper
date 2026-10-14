@@ -557,6 +557,7 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
 | 2026-10-14 | 发布 v2.6.0（looper #71，tag 打在 `591054c56`）：Release workflow 构建并发布 `looper-2.6.0` wheel；发布后在空白 HOME 里实测了全新安装和从 v2.5.0 升级（旧包卸载、数据目录搬迁、先备份再迁移）。 |
 | 2026-10-14 | Manager `/new`（looper #73）：网页、飞书、Telegram（白名单照旧）发来正好是 `/new` 的消息由 Looper 自己处理、不交给 Claude：进行中的 turn 结束后停掉常驻 Claude，`manager` 会话存为空并标 `clean_start`，下一条消息从任何渠道来都开新会话，不带 `--resume` 和 M7c 的续接简报（重启后也一样），重置记为一次 Manager 运行并在原聊天确认，网页聊天加「New session」按钮。验证：替身 Claude 下覆盖干净的新会话（含重启）、近似文本照常给 Claude、进行中的 turn 先完成、两个渠道的白名单、重置记录和 Planner 会话不变，真实 PG 覆盖 `clean_start` 跨重启；一次性 `looper serve` 上真实 haiku 先记暗号、`/new` 后再问答 UNKNOWN，会话 id 改变，花费 $0.03；真实 PG 1165 通过。 |
 | 2026-10-14 | Settings 拆页（looper #75）：侧栏底部可折叠的 Settings 分组，子页为 LLM Providers、Agent Runtimes（只读，按服务的 PATH 自动检测，Re-detect 也能补上启动后才装好的类型）、Agent Profiles（即 `agents` 的一行，写明能跑的角色和被谁使用，使用中的不能删）、Roles（所有角色的系统层，再是各角色的层、prompt、超时和并发）、Skills & MCP、Channels、Import / Export，凡是选 Profile 的地方都用同一个带「+ New Agent Profile」的下拉框，Agents 页改为只看运行记录的 Runs，旧地址跳到新页。删除 `POST /api/runtimes` 和 `PUT`/`DELETE /api/runtimes/<id>`，一次性迁移删掉没有 agent 在用的手动注册运行时、在用的保留为只读的 custom (legacy)，导入文件里的运行时映射到本机同名或同类型的内置运行时。验证：真实 PG 测试覆盖接口删除、迁移、Re-detect、被谁使用与删除受阻、导入映射，一次性 `looper serve` 上无头 Chrome 跑 59 项检查（各页渲染、侧栏折叠、旧地址跳转、各页编辑保存后读回、导出下载、Runs 历史）并截图；真实 PG 1169 通过。 |
+| 2026-10-14 | 表名与界面统一（looper #76）：一次性迁移原地改名 `agent_configs` → `role_configs`（主键 `agent_id` → `role`，先删掉只重复主键的 `role` 列）、`agents` → `agent_profiles`、`task_agent_overrides` → `task_profile_overrides`，分层、任务选择和会话里指向 Profile 的列改为 `profile_id`，约束改用新库的名字；接口改为 `/api/roles`、`/api/agent-profiles`（字段 `profile_id`、`profile`、`profile_overrides`），不保留旧别名，代码改为 `AgentProfile`、`profile_registry`、`role_configs`，导出格式升为 `looper-config/v2`（`profiles`），v1 文件仍可导入，"agent" 只指运行中的实例。验证：从 v2.6.0 的 schema.sql 加真实数据的库迁移后每行都在、各角色启动与 main 逐字节相同、迁移后的库与新库结构相同；v2.6.0 导出的文件导入后再导出只差新名字；一次性 `looper serve` 上替身 Claude 跑完一个 Worker 步骤（任务选的 Profile 生效），无头 Chrome 跑 65 项 Settings 检查（含经界面导入 v2.6.0 的文件）；真实 PG 1172 通过。 |
 
 ## 5. 不属于本 RFC 的待办
 
@@ -565,7 +566,7 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
 ### 5.0 当前队列（按顺序执行，2026-10-14 定）
 
 1. **Settings 拆页**（✅ 已交付 looper #75）：侧栏底部 SETTINGS 分组，子页依次为 LLM Providers、Agent Runtimes（只读、自动检测，删除手动注册运行时的界面和 API）、Agent Profiles（可复用的运行时 + provider + 模型 + 默认 effort；provider 可选 API key，也可选运行时自己的 OAuth 登录）、Roles（各角色选 Profile，加 harness、角色 prompt、上限、超时、并发）、Skills & MCP、Channels、Import / Export；顶部 Agents 页改名 Runs，只看运行记录。
-2. **表名与界面统一**：单独一个机械改名 PR。`agents` → `agent_profiles`，`agent_configs` → `role_configs`（列 `agent_id` → `role`），`/api/agents` → `/api/agent-profiles`，`/api/agent-configs` → `/api/roles`，分层配置 `agent` → `profile_id`，`task_agent_overrides` → `task_profile_overrides`，代码类名与模块对应改名；"agent" 只指运行中的实例。不保留旧 API 别名，旧导出文件仍可导入；迁移前自动备份。
+2. **表名与界面统一**（✅ 已交付 looper #76）：单独一个机械改名 PR。`agents` → `agent_profiles`，`agent_configs` → `role_configs`（列 `agent_id` → `role`），`/api/agents` → `/api/agent-profiles`，`/api/agent-configs` → `/api/roles`，分层配置 `agent` → `profile_id`，`task_agent_overrides` → `task_profile_overrides`，代码类名与模块对应改名；"agent" 只指运行中的实例。不保留旧 API 别名，旧导出文件仍可导入；迁移前自动备份。
 3. **Codex 与 OMP 的 OAuth 登录**：Agent Profile 里两者自己的登录可以选用。要解决隔离目录读不到本机登录的问题，以及 Codex refresh_token 轮换（多个实例共用同一份登录文件并加锁，不复制副本）；OMP 的登录方式先核实。
 
 ### 5.1 核心缺陷（优先修，穿插在阶段之间）
@@ -584,7 +585,7 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
 
 ### 5.3 非核心待办（M6 之后统一做）
 
-（暂无。已完成的见第 4 节进度台账。）
+- **界面里还把 Profile 叫 Agent 的三处**：运行历史里的「Agent」一行和 Sources 一行的「agent <来源>」、任务页头部的「Agents:」、导入预览里的「Agents」分段标签，统一改为「Agent Profile(s)」，在一次界面整理里做。
 
 ### 5.4 验证缺口
 

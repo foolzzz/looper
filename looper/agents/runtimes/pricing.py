@@ -39,7 +39,7 @@ from ..run_usage import Price, Usage
 from . import CostSource, RunCost
 
 if TYPE_CHECKING:
-    from ..agent_registry import ProviderSpec
+    from ..profile_registry import ProviderSpec
 
 PRICE_FIELDS = ("input_usd_per_mtok", "output_usd_per_mtok", "cache_read_usd_per_mtok", "cache_write_usd_per_mtok")
 

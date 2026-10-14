@@ -1,9 +1,9 @@
-"""The ``agent_runtimes``, ``llm_providers`` (with ``llm_provider_secrets``) and ``agents`` tables.
+"""The ``agent_runtimes``, ``llm_providers`` (with ``llm_provider_secrets``) and ``agent_profiles`` tables.
 
-Runtimes are built in (``looper.agents.agent_registry``): the schema adds Claude Code's, ``looper serve`` and
+Runtimes are built in (``looper.agents.profile_registry``): the schema adds Claude Code's, ``looper serve`` and
 Re-detect add another type's when its executable is on PATH, and a probe records what it found.
 
-Code owns the validation (``looper.agents.agent_registry``); this module only
+Code owns the validation (``looper.agents.profile_registry``); this module only
 reads and writes rows. A provider's API key is read here only by
 ``get_api_key``; every other read says whether one is set.
 """
@@ -19,15 +19,16 @@ import asyncpg
 
 from .connection import get_pool
 
-# The columns of an agent row joined with its runtime and provider, as one JSON object (also inside a layer).
-AGENT_JSON = (
+# The columns of an Agent Profile row joined with its runtime and provider, as one JSON object (also inside a layer).
+PROFILE_JSON = (
     "json_build_object('id', a.id, 'name', a.name, 'model', a.model, 'effort', a.effort, 'builtin', a.builtin, "
     "'runtime_id', r.id, 'runtime_name', r.name, 'runtime_type', r.type, 'runtime_executable', r.executable, "
     "'runtime_capabilities', r.capabilities, 'provider_id', p.id, 'provider_name', p.name, 'provider_auth', p.auth, "
     "'provider_protocols', p.protocols, 'provider_oauth_runtime_type', p.oauth_runtime_type, "
     "'provider_base_url', p.base_url, 'provider_models', p.models, 'provider_env', p.env)"
 )
-AGENT_JOIN = "agents a JOIN agent_runtimes r ON r.id = a.runtime_id JOIN llm_providers p ON p.id = a.provider_id"
+PROFILE_JOIN = ("agent_profiles a JOIN agent_runtimes r ON r.id = a.runtime_id "
+                "JOIN llm_providers p ON p.id = a.provider_id")
 
 
 def new_id(prefix: str) -> str:
@@ -48,7 +49,7 @@ def _provider(row: asyncpg.Record) -> dict[str, Any]:
 async def list_runtimes(*, pool: asyncpg.Pool | asyncpg.Connection | None = None) -> list[dict[str, Any]]:
     pool = pool or get_pool()
     rows = await pool.fetch(
-        "SELECT r.*, (SELECT count(*) FROM agents a WHERE a.runtime_id = r.id) AS agent_count "
+        "SELECT r.*, (SELECT count(*) FROM agent_profiles a WHERE a.runtime_id = r.id) AS profile_count "
         "FROM agent_runtimes r ORDER BY r.builtin DESC, r.name"
     )
     return [dict(r) for r in rows]
@@ -94,7 +95,7 @@ async def list_providers(*, pool: asyncpg.Pool | asyncpg.Connection | None = Non
     pool = pool or get_pool()
     rows = await pool.fetch(
         "SELECT p.*, s.provider_id IS NOT NULL AS api_key_set, "
-        "(SELECT count(*) FROM agents a WHERE a.provider_id = p.id) AS agent_count "
+        "(SELECT count(*) FROM agent_profiles a WHERE a.provider_id = p.id) AS profile_count "
         "FROM llm_providers p LEFT JOIN llm_provider_secrets s ON s.provider_id = p.id "
         "ORDER BY p.builtin DESC, p.name"
     )
@@ -168,79 +169,81 @@ async def update_provider(conn: asyncpg.Connection, provider_id: str, fields: Ma
 
 
 async def delete_provider(provider_id: str, *, pool: asyncpg.Pool | None = None) -> bool:
-    """Raises ``asyncpg.ForeignKeyViolationError`` while an agent uses it."""
+    """Raises ``asyncpg.ForeignKeyViolationError`` while an Agent Profile uses it."""
     pool = pool or get_pool()
     return await pool.execute("DELETE FROM llm_providers WHERE id = $1", provider_id) == "DELETE 1"
 
 
-# --- Agents ---
+# --- Agent Profiles ---
 
 
-async def list_agents(*, pool: asyncpg.Pool | asyncpg.Connection | None = None,
-                      provider_id: str | None = None) -> list[dict[str, Any]]:
-    """Every agent (or those of one provider) as ``AGENT_JSON`` objects."""
+async def list_profiles(*, pool: asyncpg.Pool | asyncpg.Connection | None = None,
+                        provider_id: str | None = None) -> list[dict[str, Any]]:
+    """Every Agent Profile (or those of one provider) as ``PROFILE_JSON`` objects."""
     pool = pool or get_pool()
     rows = await pool.fetch(
-        f"SELECT {AGENT_JSON} AS agent FROM {AGENT_JOIN} WHERE $1::text IS NULL OR a.provider_id = $1 "
+        f"SELECT {PROFILE_JSON} AS profile FROM {PROFILE_JOIN} WHERE $1::text IS NULL OR a.provider_id = $1 "
         "ORDER BY a.builtin DESC, a.name", provider_id,
     )
-    return [_json(r["agent"]) for r in rows]
+    return [_json(r["profile"]) for r in rows]
 
 
-async def get_agent(agent_id: str, *, pool: asyncpg.Pool | asyncpg.Connection | None = None,
-                    ) -> dict[str, Any] | None:
+async def get_profile(profile_id: str, *, pool: asyncpg.Pool | asyncpg.Connection | None = None,
+                      ) -> dict[str, Any] | None:
     pool = pool or get_pool()
-    row = await pool.fetchval(f"SELECT {AGENT_JSON} FROM {AGENT_JOIN} WHERE a.id = $1", agent_id)
+    row = await pool.fetchval(f"SELECT {PROFILE_JSON} FROM {PROFILE_JOIN} WHERE a.id = $1", profile_id)
     return _json(row) if row else None
 
 
-async def insert_agent(fields: Mapping[str, Any], *, pool: asyncpg.Pool | None = None) -> str:
-    """Add an agent (``name``, ``runtime_id``, ``provider_id``, ``model``, ``effort``); its id. Raises
+async def insert_profile(fields: Mapping[str, Any], *, pool: asyncpg.Pool | None = None) -> str:
+    """Add an Agent Profile (``name``, ``runtime_id``, ``provider_id``, ``model``, ``effort``); its id. Raises
     ``asyncpg.UniqueViolationError`` for a name in use."""
     pool = pool or get_pool()
-    agent_id = new_id("agent")
+    # Profile ids keep the agent- prefix they had before the rename, so stored ids and new ones read alike.
+    profile_id = new_id("agent")
     await pool.execute(
-        "INSERT INTO agents (id, name, runtime_id, provider_id, model, effort) VALUES ($1, $2, $3, $4, $5, $6)",
-        agent_id, fields["name"], fields["runtime_id"], fields["provider_id"], fields["model"], fields["effort"],
+        "INSERT INTO agent_profiles (id, name, runtime_id, provider_id, model, effort) "
+        "VALUES ($1, $2, $3, $4, $5, $6)",
+        profile_id, fields["name"], fields["runtime_id"], fields["provider_id"], fields["model"], fields["effort"],
     )
-    return agent_id
+    return profile_id
 
 
-async def update_agent(agent_id: str, fields: Mapping[str, Any], *, pool: asyncpg.Pool | None = None) -> None:
+async def update_profile(profile_id: str, fields: Mapping[str, Any], *, pool: asyncpg.Pool | None = None) -> None:
     pool = pool or get_pool()
     columns = [c for c in ("name", "runtime_id", "provider_id", "model", "effort") if c in fields]
     sets = [f"{c} = ${i}" for i, c in enumerate(columns, start=2)]
-    await pool.execute(f"UPDATE agents SET {', '.join([*sets, 'updated_at = now()'])} WHERE id = $1",
-                       agent_id, *[fields[c] for c in columns])
+    await pool.execute(f"UPDATE agent_profiles SET {', '.join([*sets, 'updated_at = now()'])} WHERE id = $1",
+                       profile_id, *[fields[c] for c in columns])
 
 
-async def profile_usage(agent_id: str | None = None, *, pool: asyncpg.Pool | asyncpg.Connection | None = None,
-                     ) -> dict[str, dict[str, Any]]:
-    """Where each agent (or ``agent_id``) is selected, by agent id: ``layers``, each ``{scope, role, project_id,
-    project_name}`` (system, then roles, then projects by name), and ``task_count``, how many tasks chose it for
-    one of their roles. An agent nothing selects is not in the result."""
+async def profile_usage(profile_id: str | None = None, *, pool: asyncpg.Pool | asyncpg.Connection | None = None,
+                        ) -> dict[str, dict[str, Any]]:
+    """Where each Agent Profile (or ``profile_id``) is selected, by profile id: ``layers``, each ``{scope, role,
+    project_id, project_name}`` (system, then roles, then projects by name), and ``task_count``, how many tasks
+    chose it for one of their roles. A profile nothing selects is not in the result."""
     pool = pool or get_pool()
     layers = await pool.fetch(
-        "SELECT l.agent_id, l.scope, l.role, l.project_id, p.name AS project_name FROM agent_setting_layers l "
-        "LEFT JOIN projects p ON p.id = l.project_id WHERE l.agent_id IS NOT NULL "
-        "AND ($1::text IS NULL OR l.agent_id = $1) "
+        "SELECT l.profile_id, l.scope, l.role, l.project_id, p.name AS project_name FROM agent_setting_layers l "
+        "LEFT JOIN projects p ON p.id = l.project_id WHERE l.profile_id IS NOT NULL "
+        "AND ($1::text IS NULL OR l.profile_id = $1) "
         "ORDER BY array_position(ARRAY['system', 'role', 'project', 'role_project'], l.scope), p.name, "
-        "array_position(ARRAY['manager', 'planner', 'worker', 'reviewer'], l.role)", agent_id,
+        "array_position(ARRAY['manager', 'planner', 'worker', 'reviewer'], l.role)", profile_id,
     )
     tasks = await pool.fetch(
-        "SELECT agent_id, count(DISTINCT task_id) AS n FROM task_agent_overrides "
-        "WHERE $1::text IS NULL OR agent_id = $1 GROUP BY agent_id", agent_id,
+        "SELECT profile_id, count(DISTINCT task_id) AS n FROM task_profile_overrides "
+        "WHERE $1::text IS NULL OR profile_id = $1 GROUP BY profile_id", profile_id,
     )
     uses: dict[str, dict[str, Any]] = {}
     for row in layers:
-        entry = uses.setdefault(row["agent_id"], {"layers": [], "task_count": 0})
+        entry = uses.setdefault(row["profile_id"], {"layers": [], "task_count": 0})
         entry["layers"].append({k: row[k] for k in ("scope", "role", "project_id", "project_name")})
     for row in tasks:
-        uses.setdefault(row["agent_id"], {"layers": [], "task_count": 0})["task_count"] = row["n"]
+        uses.setdefault(row["profile_id"], {"layers": [], "task_count": 0})["task_count"] = row["n"]
     return uses
 
 
-async def delete_agent(agent_id: str, *, pool: asyncpg.Pool | None = None) -> bool:
+async def delete_profile(profile_id: str, *, pool: asyncpg.Pool | None = None) -> bool:
     """Raises ``asyncpg.ForeignKeyViolationError`` while a layer or a task selects it."""
     pool = pool or get_pool()
-    return await pool.execute("DELETE FROM agents WHERE id = $1", agent_id) == "DELETE 1"
+    return await pool.execute("DELETE FROM agent_profiles WHERE id = $1", profile_id) == "DELETE 1"

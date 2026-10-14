@@ -1,9 +1,9 @@
-"""Agents as the database gives them to the agent settings (``db.agent_registry.AGENT_JSON``).
+"""Agent Profiles as the database gives them to the agent settings (``db.profile_registry.PROFILE_JSON``).
 
-``agent_json(model)`` is an agent of the built-in Claude Code runtime and its
+``profile_json(model)`` is a profile of the built-in Claude Code runtime and its
 own login with ``model``, named ``claude-code/<model>`` the way the upgrade
-names the agent of a model a layer held: what a test stores in a layer row's
-``agent`` where it used to store a ``model``.
+names the profile of a model a layer held: what a test stores in a layer row's
+``profile`` where it used to store a ``model``.
 """
 
 from __future__ import annotations
@@ -11,7 +11,7 @@ from __future__ import annotations
 from typing import Any
 
 
-def agent_json(model: str, *, effort: str | None = None) -> dict[str, Any]:
+def profile_json(model: str, *, effort: str | None = None) -> dict[str, Any]:
     return {
         "id": f"agent-{model}", "name": f"claude-code/{model}", "model": model, "effort": effort, "builtin": False,
         "runtime_id": "rt-claude-code", "runtime_name": "claude-code", "runtime_type": "claude-code",

@@ -67,22 +67,23 @@ uv run --extra test python -m evals.prompt_regression run --mode real \
 ```
 
 Options: `--model` (every role runs Claude Code with its own login and this
-model, the agent `claude-code/<model>`), `--agent <name>` (every role runs
-this agent instead: a registered agent of the eval's new database, such as the
-built-in `claude-code/opus`; the run records it as `agent`), `--provider-preset
-<id>` (every role runs Claude Code with a provider registered from this
+model, the Agent Profile `claude-code/<model>`), `--agent <name>` (every role
+runs this Agent Profile instead: one registered in the eval's new database,
+such as the built-in `claude-code/opus`; the run records it as `agent`),
+`--provider-preset <id>` (every role runs Claude Code with a provider registered from this
 preset's Anthropic-format API, such as `glm-bigmodel` or `deepseek`, its key
 read from `LOOPER_EVAL_API_KEY`; `--agent-model` picks the model, default the
 preset's first, and `--provider-base-url` replaces the preset's endpoint, for
 example with a logging proxy; the per-run cap is then Looper's own at the
 provider's prices, and each task reports its `cost_basis`), `--register-agent
-SPEC.json` (register an agent in the eval's database first and run every role
-on it, with Looper's per-run cap: `{"runtime": {"name"?, "type"},
+SPEC.json` (register an Agent Profile in the eval's database first and run
+every role on it, with Looper's per-run cap: `{"runtime": {"name"?, "type"},
 "provider": {"name", "protocols", "auth", "base_url"?, "api_key_env"?},
-"agent": {"name", "model", "effort"?}}`; runtimes are built in, so the agent
-runs on the runtime of that name or the built-in one of that type, such as
-`codex` or `omp` when on PATH, and the provider's key is read
-from the variable `api_key_env` names, never from the file), `--tasks
+"agent": {"name", "model", "effort"?}}`, its `agent` being the profile;
+runtimes are built in, so the profile runs on the runtime of that name or the
+built-in one of that type, such as `codex` or `omp` when on PATH, and the
+provider's key is read from the variable `api_key_env` names, never from the
+file), `--tasks
 single_step,chat_correction`, `--max-budget-usd`, `--total-cap-usd`,
 `--baseline <run.json>` (compare with this run instead), `--keep-work-dirs`. To print a comparison again:
 

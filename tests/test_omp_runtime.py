@@ -21,7 +21,7 @@ from typing import Any
 import pytest
 
 from fake_claude import fake_claude
-from looper.agents.agent_registry import AgentSpec, CatalogModel, ProviderSpec, RuntimeSpec
+from looper.agents.profile_registry import AgentProfile, CatalogModel, ProviderSpec, RuntimeSpec
 from looper.agents.agent_settings import AgentSettings, Launch
 from looper.agents.knowledge import AgentKnowledge
 from looper.agents.library import AgentLibrary, ItemKind, LoadedItem
@@ -48,9 +48,11 @@ def _provider(**fields: Any) -> ProviderSpec:
 def _launch(*, executable: str = "omp", library: AgentLibrary | None = None,
             knowledge: AgentKnowledge | None = None, provider: ProviderSpec | None = None, effort: str = "low",
             env: tuple[tuple[str, str], ...] = (), budget: float | None = None) -> Launch:
-    agent = AgentSpec("agent-omp", "omp/gpt-5.5", RuntimeSpec("rt-omp", "omp", "omp", executable, OMP.capabilities),
-                      provider or _provider(), "gpt-5.5")
-    return Launch(AgentSettings(agent=agent, effort=effort, env=env, max_budget_usd=budget), library or AgentLibrary(),
+    profile = AgentProfile("agent-omp", "omp/gpt-5.5",
+                           RuntimeSpec("rt-omp", "omp", "omp", executable, OMP.capabilities),
+                           provider or _provider(), "gpt-5.5")
+    return Launch(AgentSettings(profile=profile, effort=effort, env=env, max_budget_usd=budget),
+                  library or AgentLibrary(),
                   knowledge or AgentKnowledge())
 
 

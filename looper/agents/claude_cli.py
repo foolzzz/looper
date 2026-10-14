@@ -17,7 +17,7 @@ from uuid import uuid4
 from .run_usage import Price, Usage, compaction, reported_totals, request_context, request_tokens, run_usage
 
 if TYPE_CHECKING:
-    from .agent_registry import ProviderSpec
+    from .profile_registry import ProviderSpec
     from .agent_settings import Launch
     from .knowledge import AgentKnowledge
     from .library import AgentLibrary
@@ -881,7 +881,7 @@ class ClaudeRunRecorder:
         if launch is not None and launch.price is not None:
             from .runtimes.pricing import RunSpend
 
-            self._spend = RunSpend(launch.agent.provider, launch.model, launch.max_budget_usd)
+            self._spend = RunSpend(launch.profile.provider, launch.model, launch.max_budget_usd)
 
     async def start(self) -> None:
         from ..db import llm_records
@@ -960,9 +960,9 @@ class ClaudeRunRecorder:
 
     def _provider(self) -> ProviderSpec:
         """The provider the recorded run's agent used (Claude Code's own login without a launch)."""
-        from .agent_registry import BUILTIN_PROVIDER
+        from .profile_registry import BUILTIN_PROVIDER
 
-        return self._launch.agent.provider if self._launch is not None else BUILTIN_PROVIDER
+        return self._launch.profile.provider if self._launch is not None else BUILTIN_PROVIDER
 
     async def _heartbeat(self) -> None:
         """Any output, partial deltas included, shows the run is not stuck."""

@@ -297,8 +297,8 @@ export async function createTask(
     work_dir?: string;
     config?: Record<string, unknown>;
     goal_id?: string;
-    /** The registered agent (agent_id) of some of the task's roles, over every settings layer. */
-    agent_overrides?: Partial<Record<TaskRole, string>>;
+    /** The Agent Profile (profile_id) of some of the task's roles, over every settings layer. */
+    profile_overrides?: Partial<Record<TaskRole, string>>;
   } & TaskProjectChoice,
 ): Promise<{ task_id: string; status: string; created_at: string; project_id: string }> {
   const res = await fetch(`${API_BASE}/tasks/create`, {
@@ -730,8 +730,8 @@ export interface TaskDetail extends TaskInfo {
   steps: TaskStep[];
   /** The task journal, oldest first: what happened in the task that later agents and sessions need. */
   journal?: JournalEntry[];
-  /** The agent the task chose for some of its roles, over every settings layer; {} when none. */
-  agent_overrides?: Partial<Record<TaskRole, RegistryAgent>>;
+  /** The Agent Profile the task chose for some of its roles, over every settings layer; {} when none. */
+  profile_overrides?: Partial<Record<TaskRole, AgentProfile>>;
 }
 
 /** What a task journal entry records; code writes each when its event happens. */
@@ -866,12 +866,11 @@ export function streamTaskActivity(
   return () => abortController.abort();
 }
 
-// --- Agent configs ---
+// --- Role configs: each role's own settings ---
 
-export interface AgentConfig {
-  agent_id: string;
-  display_name: string;
+export interface RoleConfig {
   role: string;
+  display_name: string;
   enabled: boolean;
   /** The role prompt: what this kind of agent is responsible for. */
   system_prompt: string;
@@ -894,7 +893,23 @@ export type HarnessSource =
   | "manager_override"
   | "project_override";
 /** Where a run's model came from: a settings layer, or (older runs) the old source names. */
-export type ModelSource = SettingSource | "builtin_default" | "system_default" | "agent_override" | "project_override";
+export type ModelSource =
+  | RunSettingSource
+  | "builtin_default"
+  | "system_default"
+  | "agent_override"
+  | "project_override";
+/** Where a run's setting came from: runs recorded before Agent Profiles were named say "agent" for "profile". */
+export type RunSettingSource = SettingSource | "agent";
+/** The Agent Profile a run used and where it was selected. */
+export interface RunProfile {
+  id: string;
+  name: string;
+  model: string;
+  runtime: { id: string; name: string; type: string };
+  provider: { id: string; name: string; auth: ProviderAuth };
+  source: RunSettingSource;
+}
 
 /** Where each layer of a run's system prompt came from (absent on runs recorded before it existed). */
 export interface PromptLayers {
@@ -942,15 +957,11 @@ export interface LlmRecord {
     system_prompt?: string;
     system_prompt_sha256?: string;
     prompt_layers?: PromptLayers;
-    /** The registered agent the run used and where it was selected (runs recorded before agents lack it). */
-    agent?: {
-      id: string;
-      name: string;
-      model: string;
-      runtime: { id: string; name: string; type: string };
-      provider: { id: string; name: string; auth: ProviderAuth };
-      source: SettingSource;
-    };
+    /** The Agent Profile the run used and where it was selected (`runProfile` reads it for every run). */
+    profile?: RunProfile;
+    /** Runs recorded before Agent Profiles were named: the profile under its old name (runs before Agent
+     * Profiles lack both). */
+    agent?: RunProfile;
     /** The model asked for (an alias or full name) and where it came from. */
     model_choice?: { model: string; source: ModelSource; effort: string | null };
     /** The environment variables from the agent settings: their names, with each value's sha256. */
@@ -958,10 +969,12 @@ export interface LlmRecord {
     /** The settings layer each setting of the run came from (runs recorded before the layers lack it). */
     settings_sources?: {
       harness: SettingLayer;
-      /** Runs recorded before agents name the model's layer instead. */
-      agent?: SettingSource;
-      model?: SettingSource;
-      effort: SettingSource;
+      profile?: RunSettingSource;
+      /** Runs recorded before Agent Profiles were named name the profile's layer `agent`; runs before Agent
+       * Profiles name the model's layer instead. */
+      agent?: RunSettingSource;
+      model?: RunSettingSource;
+      effort: RunSettingSource;
       run_budget_usd: SettingLayer;
       env: Record<string, SettingLayer>;
     };
@@ -978,6 +991,12 @@ export interface LlmRecord {
   finished_at: string | null;
   /** Heartbeat: last time the run produced any output. */
   last_output_at: string | null;
+}
+
+/** The Agent Profile a run used: `metadata.profile`, or `metadata.agent` on a run recorded before Agent Profiles were
+ * named; null for a run recorded before Agent Profiles. */
+export function runProfile(record: Pick<LlmRecord, "metadata">): RunProfile | null {
+  return record.metadata?.profile ?? record.metadata?.agent ?? null;
 }
 
 /** One context compaction (Claude Code's compact_boundary): automatic or /compact, with its context before and after. */
@@ -1022,45 +1041,45 @@ export interface LlmRecordEvent {
   created_at: string;
 }
 
-export async function fetchAgentConfigs(): Promise<AgentConfig[]> {
-  const res = await fetch(`${API_BASE}/agent-configs`);
-  if (!res.ok) throw new Error(`agent-configs ${res.status}`);
+export async function fetchRoleConfigs(): Promise<RoleConfig[]> {
+  const res = await fetch(`${API_BASE}/roles`);
+  if (!res.ok) throw new Error(`roles ${res.status}`);
   const data = await res.json();
   return data.configs ?? [];
 }
 
-export async function fetchAgentConfig(agentId: string): Promise<AgentConfig> {
-  const res = await fetch(`${API_BASE}/agent-configs/${agentId}`);
-  if (!res.ok) throw new Error(`agent-config ${res.status}`);
+export async function fetchRoleConfig(role: string): Promise<RoleConfig> {
+  const res = await fetch(`${API_BASE}/roles/${role}`);
+  if (!res.ok) throw new Error(`role ${res.status}`);
   return res.json();
 }
 
-export async function updateAgentConfig(
-  agentId: string,
-  fields: Partial<AgentConfig>,
-): Promise<AgentConfig> {
-  const res = await fetch(`${API_BASE}/agent-configs/${agentId}`, {
+export async function updateRoleConfig(
+  role: string,
+  fields: Partial<RoleConfig>,
+): Promise<RoleConfig> {
+  const res = await fetch(`${API_BASE}/roles/${role}`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(fields),
   });
-  if (!res.ok) await failed(res, "update agent-config");
+  if (!res.ok) await failed(res, "update role");
   return res.json();
 }
 
-/** Reset an agent's system prompt to the system-recommended default. */
-export async function resetAgentPrompt(agentId: string): Promise<AgentConfig> {
-  const res = await fetch(`${API_BASE}/agent-configs/${agentId}/reset-prompt`, {
+/** Reset a role's prompt to the system-recommended default. */
+export async function resetRolePrompt(role: string): Promise<RoleConfig> {
+  const res = await fetch(`${API_BASE}/roles/${role}/reset-prompt`, {
     method: "POST",
   });
-  if (!res.ok) throw new Error(`reset agent-config ${res.status}`);
+  if (!res.ok) throw new Error(`reset role prompt ${res.status}`);
   return res.json();
 }
 
 export async function fetchLlmRecords(params: {
   agent_id?: string;
   task_id?: string;
-  /** An agent_configs id: "manager", "planner" (each task's Planner), "worker" or "reviewer". */
+  /** A role: "manager", "planner" (each task's Planner), "worker" or "reviewer". */
   role?: string;
   limit?: number;
   offset?: number;
@@ -1090,9 +1109,9 @@ export async function fetchLlmRecordEvents(recordId: number, after = 0): Promise
   return (await res.json()).events ?? [];
 }
 
-// --- The agent registry: runtimes, LLM providers and the agents made of them ---
+// --- The registry: runtimes, LLM providers and the Agent Profiles made of them ---
 
-/** What a runtime of one type can do; `capabilities` decide which roles its agents can run. */
+/** What a runtime of one type can do; `capabilities` decide which roles its Agent Profiles can run. */
 export interface RuntimeType {
   type: string;
   label: string;
@@ -1108,7 +1127,7 @@ export interface RuntimeType {
 }
 
 /** A runtime on this machine: built in (one per type found on the server's PATH), or one registered by hand
- * before runtimes were built in (`builtin` false), kept read-only while an agent uses it. */
+ * before runtimes were built in (`builtin` false), kept read-only while an Agent Profile uses it. */
 export interface Runtime {
   runtime_id: string;
   name: string;
@@ -1128,7 +1147,7 @@ export interface Runtime {
   probed_at: string | null;
   probe_error: string | null;
   builtin: boolean;
-  agent_count: number;
+  profile_count: number;
 }
 
 /** "oauth": the runtime's own login; "api_key": a key stored in Looper. */
@@ -1173,7 +1192,7 @@ export interface Provider {
   max_concurrency: number | null;
   api_key: string | null;
   builtin: boolean;
-  agent_count: number;
+  profile_count: number;
 }
 
 /** A known vendor's provider, filled in except for the key: its APIs (each one provider), models and env. */
@@ -1188,8 +1207,9 @@ export interface ProviderPreset {
   note: string;
 }
 
-/** How an agent's runs are priced: by its runtime, or by Looper at the provider's prices; which models lack a price. */
-export interface AgentCostBasis {
+/** How a profile's runs are priced: by its runtime, or by Looper at the provider's prices; which models lack a
+ * price. */
+export interface ProfileCostBasis {
   source: "runtime" | "provider_price" | null;
   /** The figure is what a subscription's usage would cost at API prices, not money spent. */
   equivalent: boolean;
@@ -1197,15 +1217,15 @@ export interface AgentCostBasis {
   unpriced: string[];
 }
 
-/** Where an agent is selected: the settings layers (a project's with its name) and how many tasks chose it. */
-export interface AgentUsedBy {
+/** Where a profile is selected: the settings layers (a project's with its name) and how many tasks chose it. */
+export interface ProfileUsedBy {
   layers: { scope: SettingLayer; role: AgentRole | null; project_id: string | null; project_name: string | null }[];
   task_count: number;
 }
 
-/** A registered agent (an Agent Profile): a runtime, a provider and a model, with an optional default effort. */
-export interface RegistryAgent {
-  agent_id: string;
+/** An Agent Profile: a runtime, a provider and a model, with an optional default effort. */
+export interface AgentProfile {
+  profile_id: string;
   name: string;
   model: string;
   /** null = the runtime's default. */
@@ -1218,8 +1238,8 @@ export interface RegistryAgent {
   builtin: boolean;
   /** The roles its runtime can run. */
   roles: AgentRole[];
-  used_by: AgentUsedBy;
-  cost: AgentCostBasis;
+  used_by: ProfileUsedBy;
+  cost: ProfileCostBasis;
 }
 
 export interface RegistryLimits {
@@ -1241,7 +1261,7 @@ export interface Registry {
   runtime_types: RuntimeType[];
   runtimes: Runtime[];
   providers: Provider[];
-  agents: RegistryAgent[];
+  profiles: AgentProfile[];
   provider_presets: ProviderPreset[];
   /** The built-in price table: a catalog price left unknown comes from it. */
   prices: { as_of: string; sources: string[]; models: Record<string, Record<PriceField, number | null>> };
@@ -1262,7 +1282,7 @@ export interface ProviderFields {
   api_key?: string | null;
 }
 
-export interface AgentFields {
+export interface ProfileFields {
   name?: string;
   runtime_id?: string;
   provider_id?: string;
@@ -1270,7 +1290,7 @@ export interface AgentFields {
   effort?: string | null;
 }
 
-/** Window event fired after this dashboard changes the registry, so agent selectors reload at once. */
+/** Window event fired after this dashboard changes the registry, so profile selectors reload at once. */
 export const REGISTRY_CHANGED_EVENT = "looper:registry-changed";
 
 async function registryCall<T>(method: string, path: string, body: unknown, label: string): Promise<T> {
@@ -1309,30 +1329,32 @@ export function deleteProvider(providerId: string): Promise<{ deleted: string }>
   return registryCall("DELETE", `/providers/${encodeURIComponent(providerId)}`, undefined, "delete provider");
 }
 
-/** Register an agent; refused (400) when its runtime, provider and model could not run together. */
-export function createRegistryAgent(fields: AgentFields): Promise<{ agent: RegistryAgent; warnings: string[] }> {
-  return registryCall("POST", "/agents", fields, "add agent");
+/** Register an Agent Profile; refused (400) when its runtime, provider and model could not run together. */
+export function createAgentProfile(fields: ProfileFields): Promise<{ profile: AgentProfile; warnings: string[] }> {
+  return registryCall("POST", "/agent-profiles", fields, "add Agent Profile");
 }
 
-export function updateRegistryAgent(
-  agentId: string,
-  fields: AgentFields,
-): Promise<{ agent: RegistryAgent; warnings: string[] }> {
-  return registryCall("PUT", `/agents/${encodeURIComponent(agentId)}`, fields, "update agent");
+export function updateAgentProfile(
+  profileId: string,
+  fields: ProfileFields,
+): Promise<{ profile: AgentProfile; warnings: string[] }> {
+  return registryCall("PUT", `/agent-profiles/${encodeURIComponent(profileId)}`, fields, "update Agent Profile");
 }
 
-export function deleteRegistryAgent(agentId: string): Promise<{ deleted: string }> {
-  return registryCall("DELETE", `/agents/${encodeURIComponent(agentId)}`, undefined, "delete agent");
+export function deleteAgentProfile(profileId: string): Promise<{ deleted: string }> {
+  return registryCall("DELETE", `/agent-profiles/${encodeURIComponent(profileId)}`, undefined,
+    "delete Agent Profile");
 }
 
-// --- Agent settings: harness, agent, effort, environment and per-run cap, by layer ---
+// --- Agent settings: harness, Agent Profile, effort, environment and per-run cap, by layer ---
 
 /** Where a setting comes from, from least to most specific: the built-in default, every role and a role (both in
  * Settings → Roles), a project (all its agents), a role in a project. A later layer wins; the Manager has only the
  * first three. */
 export type SettingLayer = "builtin" | "system" | "role" | "project" | "role_project";
-/** Where a value came from: a layer, the selected agent's own default (its effort), or a task's choice of agent. */
-export type SettingSource = SettingLayer | "agent" | "task";
+/** Where a value came from: a layer, the selected profile's own default (its effort), or a task's choice of
+ * profile. */
+export type SettingSource = SettingLayer | "profile" | "task";
 /** The roles a project's agents have: the Manager spans every project. */
 export type ProjectRole = Exclude<AgentRole, "manager">;
 
@@ -1345,8 +1367,8 @@ export interface LayerEnvEntry {
 /** One layer's own values; null is not set here (inherits). */
 export interface LayerValues {
   harness_prompt: string | null;
-  /** A registered agent's agent_id. */
-  agent: string | null;
+  /** An Agent Profile's profile_id. */
+  profile_id: string | null;
   /** One of `SettingLimits.effort_levels`. */
   effort: string | null;
   env: LayerEnvEntry[];
@@ -1359,9 +1381,9 @@ export interface Sourced<T> {
   source: SettingSource;
 }
 
-/** The agent that applies, as the layered settings show it. */
-export interface EffectiveAgent {
-  agent_id: string;
+/** The Agent Profile that applies, as the layered settings show it. */
+export interface EffectiveProfile {
+  profile_id: string;
   name: string;
   model: string;
   /** The runtime's and the provider's names. */
@@ -1373,8 +1395,8 @@ export interface EffectiveAgent {
 export interface EffectiveSettings {
   /** from_role "worker": a Reviewer without its own harness at that layer uses the Worker's. */
   harness_prompt: Sourced<string> & { from_role?: "worker" };
-  agent: Sourced<EffectiveAgent>;
-  /** null = the runtime's default effort; source "agent": the agent's own default. */
+  profile: Sourced<EffectiveProfile>;
+  /** null = the runtime's default effort; source "profile": the profile's own default. */
   effort: Sourced<string | null>;
   env: ({ key: string } & Sourced<string>)[];
   /** null = no cap. */
@@ -1387,8 +1409,8 @@ export interface SettingLimits {
   effort_levels: string[];
   builtin_harness_prompt: string;
   builtin_model: string;
-  /** The agent every role runs with when no layer selects one. */
-  builtin_agent: { agent_id: string; name: string };
+  /** The Agent Profile every role runs with when no layer selects one. */
+  builtin_profile: { profile_id: string; name: string };
   budget_max_usd: number;
 }
 

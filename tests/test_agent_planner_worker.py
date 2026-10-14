@@ -14,7 +14,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from agent_fixtures import agent_json
+from agent_fixtures import profile_json
 
 from fake_claude import fake_claude
 from library_fixtures import ALPHA_SKILL, DEMO_PLUGIN, plugin_dirs
@@ -136,11 +136,11 @@ def _worker_row(
     *,
     error: Exception | None = None,
 ) -> AsyncMock:
-    """Serve the ``worker`` row of agent_configs (or a failed read) to the pool."""
-    from looper.db import agent_configs
+    """Serve the ``worker`` row of role_configs (or a failed read) to the pool."""
+    from looper.db import role_configs
 
     get_config = AsyncMock(return_value=row, side_effect=error)
-    monkeypatch.setattr(agent_configs, "get_config", get_config)
+    monkeypatch.setattr(role_configs, "get_config", get_config)
     return get_config
 
 
@@ -576,7 +576,7 @@ class TestWorkerHarnessAndLaunch:
     @pytest.fixture
     def rows(self, monkeypatch: pytest.MonkeyPatch) -> dict[str, dict[str, Any]]:
         """The ``worker`` and ``reviewer`` config rows, by agent id."""
-        from looper.db import agent_configs
+        from looper.db import role_configs
 
         rows = {"worker": {"system_prompt": "WORKER ROLE", "timeout_seconds": 0, "max_turns": 0},
                 "reviewer": {"system_prompt": "REVIEWER ROLE", "timeout_seconds": 0, "max_turns": 0}}
@@ -584,7 +584,7 @@ class TestWorkerHarnessAndLaunch:
         async def _config(agent_id: str) -> dict[str, Any] | None:
             return dict(rows[agent_id]) if agent_id in rows else None
 
-        monkeypatch.setattr(agent_configs, "get_config", _config)
+        monkeypatch.setattr(role_configs, "get_config", _config)
         return rows
 
     @staticmethod
@@ -627,8 +627,8 @@ class TestWorkerHarnessAndLaunch:
 
     def test_a_role_model_beats_the_system_default(self, agent_db: Any, rows: dict[str, Any]) -> None:
         agent_db.list_layers.return_value = [
-            {"scope": "system", "agent": agent_json("sonnet"), "effort": "high"},
-            {"scope": "role", "role": "reviewer", "agent": agent_json("claude-haiku-4-5")},
+            {"scope": "system", "profile": profile_json("sonnet"), "effort": "high"},
+            {"scope": "role", "role": "reviewer", "profile": profile_json("claude-haiku-4-5")},
         ]
         _, work = _run_step()
         work_metadata = agent_db.start_record.await_args.kwargs["metadata"]
@@ -638,7 +638,7 @@ class TestWorkerHarnessAndLaunch:
         assert (_flag(review["argv"], "--model"), _flag(review["argv"], "--effort")) == ("claude-haiku-4-5", "high")
         assert work_metadata["model_choice"] == {"model": "sonnet", "source": "system", "effort": "high"}
         assert review_metadata["model_choice"] == {"model": "claude-haiku-4-5", "source": "role", "effort": "high"}
-        assert review_metadata["settings_sources"]["agent"] == "role"
+        assert review_metadata["settings_sources"]["profile"] == "role"
 
     def test_the_settings_environment_reaches_the_subprocess_and_its_names_are_recorded(
         self, monkeypatch: pytest.MonkeyPatch, agent_db: Any, rows: dict[str, Any],

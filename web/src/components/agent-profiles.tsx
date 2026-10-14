@@ -13,22 +13,22 @@ import {
   SELECT,
 } from "@/components/registry-ui";
 import {
-  createRegistryAgent,
-  deleteRegistryAgent,
+  createAgentProfile,
+  deleteAgentProfile,
   fetchStatus,
-  updateRegistryAgent,
+  updateAgentProfile,
+  type AgentProfile,
   type AgentRole,
-  type AgentUsedBy,
+  type ProfileUsedBy,
   type Provider,
   type Registry,
-  type RegistryAgent,
   type Runtime,
   type SelfCheck,
 } from "@/lib/api";
 import { PLANNED_RUNTIMES, RUNTIME_TYPES, roleLabel } from "@/lib/runtime-catalog";
 import { AGENT_PROFILE, settingsHref } from "@/lib/settings-pages";
 import { useAction } from "@/lib/use-action";
-import { agentLabel, useRegistry } from "@/lib/use-registry";
+import { profileLabel, useRegistry } from "@/lib/use-registry";
 
 // --- What a runtime can be paired with ---
 
@@ -105,9 +105,9 @@ export function AgentProfileForm({
   onDone,
   nested = false,
 }: {
-  profile: RegistryAgent | null;
+  profile: AgentProfile | null;
   registry: Registry;
-  onDone: (saved?: RegistryAgent) => void;
+  onDone: (saved?: AgentProfile) => void;
   nested?: boolean;
 }) {
   const id = useId();
@@ -127,7 +127,7 @@ export function AgentProfileForm({
   });
   const action = useAction();
   const [warnings, setWarnings] = useState<string[]>([]);
-  const [saved, setSaved] = useState<RegistryAgent | null>(null);
+  const [saved, setSaved] = useState<AgentProfile | null>(null);
   const set = (change: Partial<typeof draft>) => setDraft((d) => ({ ...d, ...change }));
   const runtime = registry.runtimes.find((r) => r.runtime_id === draft.runtime_id);
   const type = runtimeType(registry, runtime);
@@ -157,17 +157,17 @@ export function AgentProfileForm({
   const save = async (e?: React.FormEvent) => {
     e?.preventDefault();
     const body = { ...draft, name: draft.name.trim(), model: draft.model.trim(), effort: draft.effort || null };
-    let answer: { agent: RegistryAgent; warnings: string[] } | null = null;
+    let answer: { profile: AgentProfile; warnings: string[] } | null = null;
     const done = await action.run(async () => {
-      answer = await (profile ? updateRegistryAgent(profile.agent_id, body) : createRegistryAgent(body));
+      answer = await (profile ? updateAgentProfile(profile.profile_id, body) : createAgentProfile(body));
     });
-    const result = answer as { agent: RegistryAgent; warnings: string[] } | null;
+    const result = answer as { profile: AgentProfile; warnings: string[] } | null;
     if (!done || !result) return;
     // Saved; a warning (a model without a price) keeps the form open until it is read.
     if (result.warnings.length) {
       setWarnings(result.warnings);
-      setSaved(result.agent);
-    } else onDone(result.agent);
+      setSaved(result.profile);
+    } else onDone(result.profile);
   };
 
   const fields = (
@@ -292,7 +292,7 @@ export function AgentProfileForm({
 // --- Where a profile is used ---
 
 /** Each place that selects an Agent Profile, as a link to where it is changed. */
-function usedByPlaces(used: AgentUsedBy): { text: string; href?: string }[] {
+function usedByPlaces(used: ProfileUsedBy): { text: string; href?: string }[] {
   const places: { text: string; href?: string }[] = used.layers.map((layer) => {
     const role = layer.role ? roleLabel(layer.role) : "";
     switch (layer.scope) {
@@ -310,11 +310,11 @@ function usedByPlaces(used: AgentUsedBy): { text: string; href?: string }[] {
   return places;
 }
 
-function usedByText(used: AgentUsedBy): string {
+function usedByText(used: ProfileUsedBy): string {
   return usedByPlaces(used).map((p) => p.text).join(", ");
 }
 
-function UsedBy({ used }: { used: AgentUsedBy }) {
+function UsedBy({ used }: { used: ProfileUsedBy }) {
   const places = usedByPlaces(used);
   if (!places.length) return <p className="text-xs text-muted-foreground">Not used</p>;
   return (
@@ -336,30 +336,30 @@ function UsedBy({ used }: { used: AgentUsedBy }) {
 
 // --- The list ---
 
-/** How an agent's runs are priced, in words. */
-function costBasisText(agent: RegistryAgent): string {
-  if (agent.cost.source === "runtime") {
-    return agent.cost.equivalent ? "cost: the runtime's figure, a subscription equivalent" : "cost: the runtime's figure";
+/** How a profile's runs are priced, in words. */
+function costBasisText(profile: AgentProfile): string {
+  if (profile.cost.source === "runtime") {
+    return profile.cost.equivalent ? "cost: the runtime's figure, a subscription equivalent" : "cost: the runtime's figure";
   }
-  return agent.cost.source === "provider_price" ? "cost: tokens at the provider's prices" : "";
+  return profile.cost.source === "provider_price" ? "cost: tokens at the provider's prices" : "";
 }
 
-function AgentProfileRow({ agent, registry }: { agent: RegistryAgent; registry: Registry }) {
+function AgentProfileRow({ profile, registry }: { profile: AgentProfile; registry: Registry }) {
   const [editing, setEditing] = useState(false);
   const action = useAction();
   const remove = () => {
-    if (confirm(`Delete ${AGENT_PROFILE.name} "${agent.name}"?`)) action.run(() => deleteRegistryAgent(agent.agent_id));
+    if (confirm(`Delete ${AGENT_PROFILE.name} "${profile.name}"?`)) action.run(() => deleteAgentProfile(profile.profile_id));
   };
-  const runtime = registry.runtimes.find((r) => r.runtime_id === agent.runtime_id);
-  const inUse = usedByText(agent.used_by);
+  const runtime = registry.runtimes.find((r) => r.runtime_id === profile.runtime_id);
+  const inUse = usedByText(profile.used_by);
   return (
     <Row
-      title={<RowName name={agent.name} builtin={agent.builtin} />}
+      title={<RowName name={profile.name} builtin={profile.builtin} />}
       actions={
-        !agent.builtin && (
+        !profile.builtin && (
           <EditDelete
             what={AGENT_PROFILE.name}
-            name={agent.name}
+            name={profile.name}
             editing={editing}
             busy={action.busy}
             onEdit={() => setEditing(!editing)}
@@ -373,28 +373,28 @@ function AgentProfileRow({ agent, registry }: { agent: RegistryAgent; registry: 
           {action.error && <p role="alert" className="text-xs text-destructive">{action.error}</p>}
           {editing && (
             <div className={EDIT_BOX}>
-              <AgentProfileForm profile={agent} registry={registry} onDone={() => setEditing(false)} />
+              <AgentProfileForm profile={profile} registry={registry} onDone={() => setEditing(false)} />
             </div>
           )}
         </>
       }
     >
       <p className="break-words text-xs text-muted-foreground">
-        {runtime ? runtimeTitle(runtime) : agent.runtime_name} · {agent.provider_name} · model{" "}
-        <span className="font-mono text-foreground/80">{agent.model}</span> · effort {agent.effort ?? "runtime default"}
-        {costBasisText(agent) && ` · ${costBasisText(agent)}`}
+        {runtime ? runtimeTitle(runtime) : profile.runtime_name} · {profile.provider_name} · model{" "}
+        <span className="font-mono text-foreground/80">{profile.model}</span> · effort {profile.effort ?? "runtime default"}
+        {costBasisText(profile) && ` · ${costBasisText(profile)}`}
       </p>
       <p className="text-xs text-muted-foreground">
         Can run{" "}
         <span className="text-foreground">
-          {agent.roles.length ? agent.roles.map(roleLabel).join(", ") : "no role"}
+          {profile.roles.length ? profile.roles.map(roleLabel).join(", ") : "no role"}
         </span>
       </p>
-      <UsedBy used={agent.used_by} />
-      {agent.cost.unpriced.length > 0 && (
+      <UsedBy used={profile.used_by} />
+      {profile.cost.unpriced.length > 0 && (
         <p className="flex items-start gap-1 text-xs text-warning">
           <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-          No price for {agent.cost.unpriced.join(", ")}: its runs record tokens only and spend caps do not apply. Add
+          No price for {profile.cost.unpriced.join(", ")}: its runs record tokens only and spend caps do not apply. Add
           the prices to the provider&apos;s model catalog.
         </p>
       )}
@@ -421,8 +421,8 @@ export function AgentProfilesSection() {
       addLabel={`Add ${AGENT_PROFILE.name}`}
       form={(close) => <AgentProfileForm profile={null} registry={registry} onDone={close} />}
     >
-      {registry.agents.map((agent) => (
-        <AgentProfileRow key={agent.agent_id} agent={agent} registry={registry} />
+      {registry.profiles.map((profile) => (
+        <AgentProfileRow key={profile.profile_id} profile={profile} registry={registry} />
       ))}
     </RegistryList>
   );
@@ -448,7 +448,7 @@ export function AgentProfileSelect({
 }: {
   id: string;
   value: string;
-  onChange: (agentId: string) => void;
+  onChange: (profileId: string) => void;
   emptyLabel: string;
   roles?: AgentRole[];
   describedBy?: string;
@@ -458,8 +458,8 @@ export function AgentProfileSelect({
 }) {
   const { registry, error } = useRegistry();
   const [creating, setCreating] = useState(false);
-  const profiles = registry?.agents ?? [];
-  const unlisted = value && !profiles.some((a) => a.agent_id === value) ? unlistedName || value : "";
+  const profiles = registry?.profiles ?? [];
+  const unlisted = value && !profiles.some((p) => p.profile_id === value) ? unlistedName || value : "";
 
   return (
     <div className="space-y-2">
@@ -471,11 +471,11 @@ export function AgentProfileSelect({
         className={className}
       >
         <option value="">{emptyLabel}</option>
-        {profiles.map((agent) => {
-          const missing = roles.filter((role) => !agent.roles.includes(role));
+        {profiles.map((profile) => {
+          const missing = roles.filter((role) => !profile.roles.includes(role));
           return (
-            <option key={agent.agent_id} value={agent.agent_id} disabled={missing.length > 0 && agent.agent_id !== value}>
-              {agentLabel(agent)}
+            <option key={profile.profile_id} value={profile.profile_id} disabled={missing.length > 0 && profile.profile_id !== value}>
+              {profileLabel(profile)}
               {missing.length > 0 ? ` (cannot run the ${missing.map(roleLabel).join(", ")})` : ""}
             </option>
           );
@@ -492,7 +492,7 @@ export function AgentProfileSelect({
             nested
             onDone={(saved) => {
               setCreating(false);
-              if (saved) onChange(saved.agent_id);
+              if (saved) onChange(saved.profile_id);
             }}
           />
         </div>

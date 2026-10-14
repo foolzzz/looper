@@ -6,26 +6,26 @@ import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { LayerSettingsForm } from "@/components/layer-settings";
 import {
-  fetchAgentConfigs,
   fetchAgentSettings,
-  resetAgentPrompt,
-  updateAgentConfig,
+  fetchRoleConfigs,
+  resetRolePrompt,
+  updateRoleConfig,
   updateRoleSettings,
   updateSystemSettings,
-  type AgentConfig,
   type AgentRole,
   type AgentSettings,
+  type RoleConfig,
 } from "@/lib/api";
 import { roleLabel } from "@/lib/runtime-catalog";
 import { AGENT_PROFILE } from "@/lib/settings-pages";
 import { cn } from "@/lib/utils";
 
 const ROLES: readonly AgentRole[] = ["manager", "planner", "worker", "reviewer"];
-const isRole = (agentId: string): agentId is AgentRole => (ROLES as readonly string[]).includes(agentId);
+const isRole = (role: string): role is AgentRole => (ROLES as readonly string[]).includes(role);
 
 /** The role configs in the order a task meets them. */
-function rank(agentId: string) {
-  const at = (ROLES as readonly string[]).indexOf(agentId);
+function rank(role: string) {
+  const at = (ROLES as readonly string[]).indexOf(role);
   return at < 0 ? ROLES.length : at;
 }
 
@@ -116,7 +116,7 @@ function RolePromptEditor({ id, value, onChange }: { id: string; value: string; 
   );
 }
 
-// --- A role's own fields (agent_configs) ---
+// --- A role's own fields (role_configs) ---
 
 function RoleConfigForm({
   config,
@@ -124,8 +124,8 @@ function RoleConfigForm({
   onResetPrompt,
   saving,
 }: {
-  config: AgentConfig;
-  onSave: (fields: Partial<AgentConfig>) => void;
+  config: RoleConfig;
+  onSave: (fields: Partial<RoleConfig>) => void;
   onResetPrompt: () => void;
   saving: boolean;
 }) {
@@ -220,7 +220,7 @@ function RoleConfigForm({
         <Switch
           checked={form.enabled}
           onChange={(enabled) => setForm({ ...form, enabled })}
-          label={`Enable ${config.display_name || config.agent_id}`}
+          label={`Enable ${config.display_name || config.role}`}
         />
       </div>
 
@@ -258,7 +258,7 @@ function RoleConfigForm({
  * (#settings/roles/<role>), which a link scrolls into view.
  */
 export function RolesSection({ sub, onNavigate }: { sub: string; onNavigate: (sub: string) => void }) {
-  const [configs, setConfigs] = useState<AgentConfig[]>([]);
+  const [configs, setConfigs] = useState<RoleConfig[]>([]);
   const [settings, setSettings] = useState<AgentSettings | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -267,9 +267,9 @@ export function RolesSection({ sub, onNavigate }: { sub: string; onNavigate: (su
   const roleRef = useRef<HTMLElement>(null);
 
   useEffect(() => {
-    fetchAgentConfigs()
+    fetchRoleConfigs()
       .then((rows) => {
-        setConfigs([...rows].sort((a, b) => rank(a.agent_id) - rank(b.agent_id)));
+        setConfigs([...rows].sort((a, b) => rank(a.role) - rank(b.role)));
         setError("");
       })
       .catch((e) => setError(e.message))
@@ -277,8 +277,8 @@ export function RolesSection({ sub, onNavigate }: { sub: string; onNavigate: (su
     fetchAgentSettings().then(setSettings).catch((e) => setError(e.message));
   }, []);
 
-  const selectedId = sub.split("/")[0] || configs[0]?.agent_id || "";
-  const selected = configs.find((c) => c.agent_id === selectedId) ?? null;
+  const selectedId = sub.split("/")[0] || configs[0]?.role || "";
+  const selected = configs.find((c) => c.role === selectedId) ?? null;
 
   // A link to a role (from Runs or an Agent Profile's "used by") shows its section.
   const linked = !!sub;
@@ -292,11 +292,11 @@ export function RolesSection({ sub, onNavigate }: { sub: string; onNavigate: (su
     setToast(text);
     setTimeout(() => setToast(""), text.startsWith("Error") ? 3000 : 2000);
   };
-  const run = useCallback(async (action: () => Promise<AgentConfig>, done: string) => {
+  const run = useCallback(async (action: () => Promise<RoleConfig>, done: string) => {
     setSaving(true);
     try {
       const updated = await action();
-      setConfigs((prev) => prev.map((c) => (c.agent_id === updated.agent_id ? updated : c)));
+      setConfigs((prev) => prev.map((c) => (c.role === updated.role ? updated : c)));
       flash(done);
     } catch (e) {
       flash(`Error: ${(e as Error).message}`);
@@ -360,16 +360,16 @@ export function RolesSection({ sub, onNavigate }: { sub: string; onNavigate: (su
           <div role="group" aria-label="Role" className="flex flex-wrap rounded-md border border-border p-0.5">
             {configs.map((c) => (
               <button
-                key={c.agent_id}
+                key={c.role}
                 type="button"
-                aria-pressed={c.agent_id === selectedId}
-                onClick={() => onNavigate(c.agent_id)}
+                aria-pressed={c.role === selectedId}
+                onClick={() => onNavigate(c.role)}
                 className={cn(
                   "rounded px-3 py-1.5 text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
-                  c.agent_id === selectedId ? "bg-primary/10 text-primary" : "text-muted-foreground hover:text-foreground",
+                  c.role === selectedId ? "bg-primary/10 text-primary" : "text-muted-foreground hover:text-foreground",
                 )}
               >
-                {isRole(c.agent_id) ? roleLabel(c.agent_id) : c.display_name || c.agent_id}
+                {isRole(c.role) ? roleLabel(c.role) : c.display_name || c.role}
               </button>
             ))}
           </div>
@@ -398,10 +398,10 @@ export function RolesSection({ sub, onNavigate }: { sub: string; onNavigate: (su
         {selected && (
           <div className="space-y-5 rounded-lg border border-border bg-card px-5 py-4">
             <div className="flex flex-wrap items-center gap-2">
-              <h3 className="text-sm font-semibold">{selected.display_name || selected.agent_id}</h3>
+              <h3 className="text-sm font-semibold">{selected.display_name || selected.role}</h3>
               <Badge variant="outline">{selected.role || "—"}</Badge>
               <a
-                href={`#runs/${encodeURIComponent(selected.agent_id)}`}
+                href={`#runs/${encodeURIComponent(selected.role)}`}
                 className="ml-auto flex items-center gap-1 text-xs text-primary underline-offset-2 hover:underline"
               >
                 <History className="h-3.5 w-3.5" aria-hidden="true" />
@@ -409,35 +409,35 @@ export function RolesSection({ sub, onNavigate }: { sub: string; onNavigate: (su
               </a>
             </div>
 
-            {settings && isRole(selected.agent_id) && (
-              <section aria-labelledby={`role-layer-${selected.agent_id}`} className="space-y-3">
+            {settings && isRole(selected.role) && (
+              <section aria-labelledby={`role-layer-${selected.role}`} className="space-y-3">
                 <div>
-                  <h4 id={`role-layer-${selected.agent_id}`} className="text-xs font-semibold">
+                  <h4 id={`role-layer-${selected.role}`} className="text-xs font-semibold">
                     {AGENT_PROFILE.name}, harness and environment
                   </h4>
                   <p className="mt-1 text-xs text-muted-foreground">
-                    {selected.agent_id === "manager"
+                    {selected.role === "manager"
                       ? "The Manager's own settings over every role's. Empty fields inherit."
                       : "This role's settings in every project, over every role's. A project's Settings tab can " +
                         "override them for all its agents or for this role. Empty fields inherit."}
                   </p>
                 </div>
                 <LayerSettingsForm
-                  key={selected.agent_id}
-                  idPrefix={`role-${selected.agent_id}`}
+                  key={selected.role}
+                  idPrefix={`role-${selected.role}`}
                   layer="role"
-                  roles={[selected.agent_id]}
-                  values={settings.roles[selected.agent_id].values}
-                  effective={settings.roles[selected.agent_id].effective}
+                  roles={[selected.role]}
+                  values={settings.roles[selected.role].values}
+                  effective={settings.roles[selected.role].effective}
                   limits={settings.limits}
                   onSave={async (changes) => {
-                    const role = selected.agent_id as AgentRole;
+                    const role = selected.role as AgentRole;
                     const next = await updateRoleSettings(role, changes);
                     setSettings(next);
                     return next.roles[role].values;
                   }}
                   harnessHint={
-                    selected.agent_id === "reviewer"
+                    selected.role === "reviewer"
                       ? "Empty: the Worker's harness at this layer, else the default."
                       : "Working principles, boundaries and tone, placed before the role prompt."
                   }
@@ -445,14 +445,14 @@ export function RolesSection({ sub, onNavigate }: { sub: string; onNavigate: (su
               </section>
             )}
 
-            <section aria-labelledby={`role-config-${selected.agent_id}`} className="space-y-3 border-t border-border pt-5">
-              <h4 id={`role-config-${selected.agent_id}`} className="text-xs font-semibold">Role prompt and limits</h4>
+            <section aria-labelledby={`role-config-${selected.role}`} className="space-y-3 border-t border-border pt-5">
+              <h4 id={`role-config-${selected.role}`} className="text-xs font-semibold">Role prompt and limits</h4>
               <RoleConfigForm
-                key={selected.agent_id}
+                key={selected.role}
                 config={selected}
                 saving={saving}
-                onSave={(fields) => run(() => updateAgentConfig(selected.agent_id, fields), "Saved")}
-                onResetPrompt={() => run(() => resetAgentPrompt(selected.agent_id), "Reset to recommended prompt")}
+                onSave={(fields) => run(() => updateRoleConfig(selected.role, fields), "Saved")}
+                onResetPrompt={() => run(() => resetRolePrompt(selected.role), "Reset to recommended prompt")}
               />
             </section>
           </div>

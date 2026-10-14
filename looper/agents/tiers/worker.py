@@ -53,7 +53,7 @@ from ..system_prompt import (
 )
 
 from ...db import activity as db_activity
-from ...db import agent_configs as db_agent_configs
+from ...db import role_configs as db_role_configs
 from ...db import projects as db_projects
 
 logger = logging.getLogger(__name__)
@@ -118,7 +118,7 @@ async def _load_settings(agent: AgentType = AgentType.WORKER) -> WorkerSettings:
     the default role prompt; an empty role prompt also falls back to it.
     """
     try:
-        config = await db_agent_configs.get_config(agent.value)
+        config = await db_role_configs.get_config(agent.value)
     except Exception:
         logger.warning("cannot read the %s agent config; using defaults", agent.value, exc_info=True)
         config = None
@@ -540,17 +540,17 @@ class WorkerPool:
         knowledge = await load_knowledge(self._runtime_root, project, work_dir)
         project_id = str((project or {}).get("id") or "") or None
         library = await load_installed(self._runtime_root, agent.value, project_id)
-        # The task's own choice of agent for this role wins over the layers.
+        # The task's own choice of Agent Profile for this role wins over the layers.
         agent_settings = await load_agent_settings(agent, project_id, parent_task_id or None)
-        if agent_settings.agent_error:
+        if agent_settings.profile_error:
             # The step fails with the reason rather than run another agent.
-            logger.error("worker %s: %s", worker_id, agent_settings.agent_error)
+            logger.error("worker %s: %s", worker_id, agent_settings.profile_error)
             if parent_task_id:
-                await self._activity(parent_task_id, worker_id, "error", agent_settings.agent_error[:500])
+                await self._activity(parent_task_id, worker_id, "error", agent_settings.profile_error[:500])
             if is_verify:
-                return {"passed": False, "findings": [agent_settings.agent_error],
-                        "summary": agent_settings.agent_error}
-            return {"status": "failed", "error": agent_settings.agent_error}
+                return {"passed": False, "findings": [agent_settings.profile_error],
+                        "summary": agent_settings.profile_error}
+            return {"status": "failed", "error": agent_settings.profile_error}
         launch = Launch(agent_settings, library, knowledge)
         background = str((project or {}).get("background") or "")
         system_prompt = build_system_prompt(

@@ -19,8 +19,8 @@ from pathlib import Path
 from typing import Any
 
 from . import (
-    agent_registry, agent_settings, catalog, catalog_sources, config_imports, config_transfer, knowledge, library, mcp,
-    project_skills, projects, request_guard,
+    agent_settings, catalog, catalog_sources, config_imports, config_transfer, knowledge, library, mcp,
+    profile_registry, project_skills, projects, request_guard,
 )
 from .broadcast import Broadcaster
 from .chat_targets import ChatTargetError, list_chat_targets, resolve_chat_target
@@ -256,8 +256,8 @@ class AgentHTTPServer:
     _RE_TASK_ACTIVITY_STREAM = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)/activity/stream$")
     _RE_TASK_ACTIVITY_SEQ = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)/activity/(\d+)$")
     _RE_TASK_CONVERSATION = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)/conversation$")
-    _RE_AGENT_CONFIG = re.compile(r"^/api/agent-configs/([a-zA-Z0-9_-]+)$")
-    _RE_AGENT_CONFIG_RESET = re.compile(r"^/api/agent-configs/([a-zA-Z0-9_-]+)/reset-prompt$")
+    _RE_ROLE_CONFIG = re.compile(r"^/api/roles/([a-zA-Z0-9_-]+)$")
+    _RE_ROLE_CONFIG_RESET = re.compile(r"^/api/roles/([a-zA-Z0-9_-]+)/reset-prompt$")
     _RE_LLM_RECORD = re.compile(r"^/api/llm-records/(\d+)$")
     _RE_LLM_RECORD_EVENTS = re.compile(r"^/api/llm-records/(\d+)/events$")
     _RE_AGENT_USAGE = re.compile(r"^/api/agents/([a-zA-Z0-9_-]+)/usage$")
@@ -278,7 +278,7 @@ class AgentHTTPServer:
     _RE_ROLE_SETTINGS = re.compile(r"^/api/agent-settings/roles/([a-zA-Z0-9_-]+)$")
     _RE_RUNTIME_PROBE = re.compile(r"^/api/runtimes/(rt-[a-zA-Z0-9-]+)/probe$")
     _RE_PROVIDER = re.compile(r"^/api/providers/(prov-[a-zA-Z0-9-]+)$")
-    _RE_AGENT = re.compile(r"^/api/agents/(agent-[a-zA-Z0-9-]+)$")
+    _RE_PROFILE = re.compile(r"^/api/agent-profiles/(agent-[a-zA-Z0-9-]+)$")
     _RE_PROJECT_SKILLS = re.compile(r"^/api/projects/(proj-[a-zA-Z0-9]+)/skills$")
     _RE_PROJECT_SKILL = re.compile(r"^/api/projects/(proj-[a-zA-Z0-9]+)/skills/(skill-[a-zA-Z0-9]+)$")
     _RE_CONFIG_IMPORT = re.compile(r"^/api/config/imports/(cfgimp-[0-9a-f]{16})$")
@@ -379,14 +379,14 @@ class AgentHTTPServer:
         elif (m := self._RE_PROJECT_SKILL.match(path)) and method == "DELETE":
             await self._handle_catalog(writer, HTTP_200, lambda: project_skills.delete_skill(
                 m.group(1), m.group(2)))
-        elif path == "/api/agent-configs" and method == "GET":
-            await self._handle_list_agent_configs(writer)
-        elif (m := self._RE_AGENT_CONFIG.match(path)) and method == "GET":
-            await self._handle_get_agent_config(m.group(1), writer)
-        elif (m := self._RE_AGENT_CONFIG_RESET.match(path)) and method == "POST":
-            await self._handle_reset_agent_prompt(m.group(1), writer)
-        elif (m := self._RE_AGENT_CONFIG.match(path)) and method == "PUT":
-            await self._handle_update_agent_config(m.group(1), body, writer)
+        elif path == "/api/roles" and method == "GET":
+            await self._handle_list_role_configs(writer)
+        elif (m := self._RE_ROLE_CONFIG.match(path)) and method == "GET":
+            await self._handle_get_role_config(m.group(1), writer)
+        elif (m := self._RE_ROLE_CONFIG_RESET.match(path)) and method == "POST":
+            await self._handle_reset_role_prompt(m.group(1), writer)
+        elif (m := self._RE_ROLE_CONFIG.match(path)) and method == "PUT":
+            await self._handle_update_role_config(m.group(1), body, writer)
         elif path == "/api/llm-records" and method == "GET":
             await self._handle_list_llm_records(query, writer)
         elif (m := self._RE_LLM_RECORD.match(path)) and method == "GET":
@@ -396,27 +396,27 @@ class AgentHTTPServer:
         elif (m := self._RE_AGENT_USAGE.match(path)) and method == "GET":
             await self._handle_agent_usage(m.group(1), query, writer)
         elif path == "/api/registry" and method == "GET":
-            await self._handle_registry(writer, HTTP_200, lambda: agent_registry.registry_view(
+            await self._handle_registry(writer, HTTP_200, lambda: profile_registry.registry_view(
                 server_claude=self._claude_bin))
         elif (m := self._RE_RUNTIME_PROBE.match(path)) and method == "POST":
-            await self._handle_registry(writer, HTTP_200, lambda: agent_registry.probe_runtime(
+            await self._handle_registry(writer, HTTP_200, lambda: profile_registry.probe_runtime(
                 m.group(1), server_claude=self._claude_bin))
         elif path == "/api/providers" and method == "POST":
-            await self._handle_registry(writer, HTTP_201, lambda: agent_registry.create_provider(
+            await self._handle_registry(writer, HTTP_201, lambda: profile_registry.create_provider(
                 projects.json_object(body)))
         elif (m := self._RE_PROVIDER.match(path)) and method == "PUT":
-            await self._handle_registry(writer, HTTP_200, lambda: agent_registry.update_provider(
+            await self._handle_registry(writer, HTTP_200, lambda: profile_registry.update_provider(
                 m.group(1), projects.json_object(body)))
         elif (m := self._RE_PROVIDER.match(path)) and method == "DELETE":
-            await self._handle_registry(writer, HTTP_200, lambda: agent_registry.delete_provider(m.group(1)))
-        elif path == "/api/agents" and method == "POST":
-            await self._handle_registry(writer, HTTP_201, lambda: agent_registry.create_agent(
+            await self._handle_registry(writer, HTTP_200, lambda: profile_registry.delete_provider(m.group(1)))
+        elif path == "/api/agent-profiles" and method == "POST":
+            await self._handle_registry(writer, HTTP_201, lambda: profile_registry.create_profile(
                 projects.json_object(body)))
-        elif (m := self._RE_AGENT.match(path)) and method == "PUT":
-            await self._handle_registry(writer, HTTP_200, lambda: agent_registry.update_agent(
+        elif (m := self._RE_PROFILE.match(path)) and method == "PUT":
+            await self._handle_registry(writer, HTTP_200, lambda: profile_registry.update_profile(
                 m.group(1), projects.json_object(body)))
-        elif (m := self._RE_AGENT.match(path)) and method == "DELETE":
-            await self._handle_registry(writer, HTTP_200, lambda: agent_registry.delete_agent(m.group(1)))
+        elif (m := self._RE_PROFILE.match(path)) and method == "DELETE":
+            await self._handle_registry(writer, HTTP_200, lambda: profile_registry.delete_profile(m.group(1)))
         elif path == "/api/agent-settings" and method == "GET":
             await self._handle_agent_settings(writer, agent_settings.settings_view)
         elif path == "/api/agent-settings/system" and method == "PUT":
@@ -935,12 +935,12 @@ class AgentHTTPServer:
         self, task_id: str, writer: asyncio.StreamWriter,
     ) -> None:
         try:
-            from ..db.agent_setting_layers import agent_overrides
+            from ..db.agent_setting_layers import profile_overrides
             from ..db.llm_records import task_costs
             from ..db.tasks import get_task_with_steps
             raw = await get_task_with_steps(task_id)
             cost = (await task_costs([task_id]))[task_id] if raw else None
-            overrides = await agent_overrides(task_id) if raw else {}
+            overrides = await profile_overrides(task_id) if raw else {}
         except Exception:
             logger.exception("DB unavailable for task_detail %s", task_id)
             writer.write(_json_response(HTTP_500, {"error": "database unavailable"}))
@@ -964,8 +964,8 @@ class AgentHTTPServer:
             "correlation_id": raw.get("correlation_id", ""),
             "work_dir": raw.get("work_dir", ""),
             "config": raw.get("config", {}),
-            # The agent the task chose for some of its roles, over the layers (agent_settings.Layer.TASK).
-            "agent_overrides": {role: agent_registry.agent_view(agent) for role, agent in overrides.items()},
+            # The Agent Profile the task chose for some of its roles, over the layers (agent_settings.Layer.TASK).
+            "profile_overrides": {role: profile_registry.profile_view(profile) for role, profile in overrides.items()},
             "origin_channel_id": raw.get("origin_channel_id", ""),
             "result_summary": raw.get("result_summary"),
             "error": raw.get("error"),
@@ -1086,33 +1086,33 @@ class AgentHTTPServer:
         writer.write(_json_response(HTTP_200, {"conversation": [_serialize(r) for r in rows]}))
         await writer.drain()
 
-    # --- Agent config handlers ---
+    # --- Role config handlers ---
 
-    async def _handle_list_agent_configs(self, writer: asyncio.StreamWriter) -> None:
+    async def _handle_list_role_configs(self, writer: asyncio.StreamWriter) -> None:
         try:
-            from ..db.agent_configs import list_configs
+            from ..db.role_configs import list_configs
             configs = await list_configs()
         except Exception:
             configs = []
         writer.write(_json_response(HTTP_200, {"configs": configs}))
         await writer.drain()
 
-    async def _handle_get_agent_config(
-        self, agent_id: str, writer: asyncio.StreamWriter,
+    async def _handle_get_role_config(
+        self, role: str, writer: asyncio.StreamWriter,
     ) -> None:
         try:
-            from ..db.agent_configs import get_config
-            config = await get_config(agent_id)
+            from ..db.role_configs import get_config
+            config = await get_config(role)
         except Exception:
             config = None
         if config is None:
-            writer.write(_json_response(HTTP_404, {"error": f"agent '{agent_id}' not found"}))
+            writer.write(_json_response(HTTP_404, {"error": f"role '{role}' not found"}))
         else:
             writer.write(_json_response(HTTP_200, config))
         await writer.drain()
 
-    async def _handle_update_agent_config(
-        self, agent_id: str, body: bytes, writer: asyncio.StreamWriter,
+    async def _handle_update_role_config(
+        self, role: str, body: bytes, writer: asyncio.StreamWriter,
     ) -> None:
         try:
             data = json.loads(body.decode("utf-8"))
@@ -1127,33 +1127,33 @@ class AgentHTTPServer:
             return
 
         try:
-            data = agent_settings.agent_config_fields(agent_id, data)
+            data = agent_settings.role_config_fields(role, data)
         except agent_settings.SettingsError as exc:
             writer.write(_json_response(HTTP_400, {"error": str(exc)}))
             await writer.drain()
             return
 
         try:
-            from ..db.agent_configs import set_config
-            updated = await set_config(agent_id, data)
+            from ..db.role_configs import set_config
+            updated = await set_config(role, data)
         except Exception as exc:
             writer.write(_json_response(HTTP_500, {"error": str(exc)}))
             await writer.drain()
             return
 
         if updated is None:
-            writer.write(_json_response(HTTP_404, {"error": f"agent '{agent_id}' not found"}))
+            writer.write(_json_response(HTTP_404, {"error": f"role '{role}' not found"}))
         else:
             writer.write(_json_response(HTTP_200, updated))
         await writer.drain()
 
-    async def _handle_reset_agent_prompt(
-        self, agent_id: str, writer: asyncio.StreamWriter,
+    async def _handle_reset_role_prompt(
+        self, role: str, writer: asyncio.StreamWriter,
     ) -> None:
-        """Reset an agent's system prompt to the system-recommended default."""
+        """Reset a role's prompt to the system-recommended default."""
         try:
-            from ..db.agent_configs import reset_prompt
-            updated = await reset_prompt(agent_id)
+            from ..db.role_configs import reset_prompt
+            updated = await reset_prompt(role)
         except Exception as exc:
             writer.write(_json_response(HTTP_500, {"error": str(exc)}))
             await writer.drain()
@@ -1161,7 +1161,7 @@ class AgentHTTPServer:
 
         if updated is None:
             writer.write(_json_response(
-                HTTP_404, {"error": f"agent '{agent_id}' has no recommended prompt to reset to"},
+                HTTP_404, {"error": f"role '{role}' has no recommended prompt to reset to"},
             ))
         else:
             writer.write(_json_response(HTTP_200, updated))
@@ -1191,18 +1191,18 @@ class AgentHTTPServer:
     async def _handle_registry(
         self, writer: asyncio.StreamWriter, status: str, request: Callable[[], Awaitable[Any]],
     ) -> None:
-        """Answer with ``request()``'s result; a refused request is 400, an unknown runtime, provider or agent
-        404, and a name in use or a row still referred to 409."""
+        """Answer with ``request()``'s result; a refused request is 400, an unknown runtime, provider or Agent
+        Profile 404, and a name in use or a row still referred to 409."""
         try:
             result = await request()
-        except (agent_registry.RegistryError, projects.RequestError) as exc:
+        except (profile_registry.RegistryError, projects.RequestError) as exc:
             status, result = getattr(exc, "status", HTTP_400), {"error": str(exc)}
-        except agent_registry.RegistryNotFound as exc:
+        except profile_registry.RegistryNotFound as exc:
             status, result = HTTP_404, {"error": str(exc)}
-        except agent_registry.RegistryConflict as exc:
+        except profile_registry.RegistryConflict as exc:
             status, result = HTTP_409, {"error": str(exc)}
         except Exception:
-            logger.exception("agent registry request failed")
+            logger.exception("registry request failed")
             status, result = HTTP_500, {"error": "the request failed; see the server log"}
         writer.write(_json_response(status, _serialize(result)))
         await writer.drain()

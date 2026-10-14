@@ -158,7 +158,7 @@ async def list_events(
     ]
 
 
-# Which records belong to an agent role (the ids in agent_configs). Each
+# Which records belong to an agent role (the roles of role_configs). Each
 # task's Planner records its turns as planner-<task_id>; Workers and Reviewers
 # record under their per-run instance id.
 _ROLE_FILTERS = {
@@ -247,9 +247,11 @@ async def get_record(
 
 
 # A run whose cost is Claude Code's own figure for its own login (the subscription): what that usage would cost at
-# API prices, not money spent. Runs recorded before agents (no agent in their metadata) ran with that login.
+# API prices, not money spent. A run names its Agent Profile in metadata.profile; one recorded before the rename
+# names it in metadata.agent, and one recorded before Agent Profiles names none: it ran with that login.
 EQUIVALENT = ("cost_source IS DISTINCT FROM 'provider_price' "
-              "AND COALESCE(metadata->'agent'->'provider'->>'auth', 'oauth') = 'oauth'")
+              "AND COALESCE(metadata->'profile'->'provider'->>'auth', metadata->'agent'->'provider'->>'auth', "
+              "'oauth') = 'oauth'")
 
 
 async def task_costs(

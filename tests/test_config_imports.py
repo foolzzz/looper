@@ -97,8 +97,9 @@ def test_another_site_cannot_upload(tmp_path: Path) -> None:
     (b"", "the request holds no file"),
     (b"PK\x03\x04 a zip", "the uploaded file is not a Looper configuration file"),
     (b"\xff\xfe{}", "the uploaded file is not a Looper configuration file"),
-    (b"[]", "is not a looper-config/v1 file (format: None)"),
-    (b'{"format": "looper-config/v2"}', "is not a looper-config/v1 file (format: 'looper-config/v2')"),
+    (b"[]", "is not a looper-config/v2 or looper-config/v1 file (format: None)"),
+    (b'{"format": "looper-config/v3"}',
+     "is not a looper-config/v2 or looper-config/v1 file (format: 'looper-config/v3')"),
     (b'{"format": "loopx-config/v1", "catalog": {}}', "catalog must be a JSON list"),
 ], ids=["empty", "not-json", "not-utf8", "no-format", "newer-version", "bad-section"])
 def test_a_file_that_is_not_a_configuration_file_is_refused_and_removed(
@@ -189,7 +190,7 @@ def test_a_file_over_the_request_cap_is_previewed_without_writing(
 
             assert status == 201, answer
             assert answer["bytes"] == exported.stat().st_size
-            assert answer["file"] == {"format": "looper-config/v1", "looper_version": __version__,
+            assert answer["file"] == {"format": "looper-config/v2", "looper_version": __version__,
                                       "exported_at": answer["file"]["exported_at"], "secrets": "omitted"}
             plan = answer["plan"]
             assert not plan["applied"]

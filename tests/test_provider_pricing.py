@@ -11,7 +11,7 @@ import json
 
 import pytest
 
-from looper.agents.agent_registry import CatalogModel, ProviderSpec
+from looper.agents.profile_registry import CatalogModel, ProviderSpec
 from looper.agents.run_usage import Usage, reported_totals, run_usage
 from looper.agents.runtimes import ApiProtocol, AuthKind, CostSource, cap_exceeded, price_cost
 from looper.agents.runtimes.pricing import RunSpend, model_price, pricer, usage_event

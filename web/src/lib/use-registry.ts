@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { fetchRegistry, REGISTRY_CHANGED_EVENT, type Registry, type RegistryAgent } from "@/lib/api";
+import { fetchRegistry, REGISTRY_CHANGED_EVENT, type AgentProfile, type Registry } from "@/lib/api";
 
 /**
- * The agent registry, loaded once and again at once when this dashboard changes it. `registry` is null until
+ * The registry (runtimes, providers, Agent Profiles), loaded once and again at once when this dashboard changes it. `registry` is null until
  * the first load succeeds.
  */
 export function useRegistry() {
@@ -34,7 +34,7 @@ export function useRegistry() {
   return { registry, error, reload };
 }
 
-/** An agent as a select option names it: "claude-code/sonnet — claude-code · claude-subscription · sonnet". */
-export function agentLabel(agent: RegistryAgent) {
-  return `${agent.name} — ${agent.runtime_name} · ${agent.provider_name} · ${agent.model}`;
+/** A profile as a select option names it: "claude-code/sonnet — claude-code · claude-subscription · sonnet". */
+export function profileLabel(profile: AgentProfile) {
+  return `${profile.name} — ${profile.runtime_name} · ${profile.provider_name} · ${profile.model}`;
 }

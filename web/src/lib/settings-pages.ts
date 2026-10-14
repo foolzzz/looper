@@ -1,8 +1,8 @@
 import { ArrowLeftRight, Bot, Cloud, Cpu, MessageCircle, Puzzle, Users, type LucideIcon } from "lucide-react";
 
 /**
- * What the dashboard calls a registered agent: a row of `agents` (the API's `/api/agents`), a runtime, an LLM
- * provider and a model with a default effort. Its name, plural, route and help text live here only.
+ * An Agent Profile: a row of `agent_profiles` (the API's `/api/agent-profiles`), a runtime, an LLM provider and a
+ * model with a default effort. Its name, plural, route and help text live here only.
  */
 export const AGENT_PROFILE = {
   name: "Agent Profile",

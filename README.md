@@ -174,8 +174,8 @@ Looper was called LoopX up to v2.5.0. The upgrade needs no manual step:
   `.env`.
 - **Service:** `com.looper.serve`. `looper service install` stops and removes
   the old `com.loopx.serve` unit first.
-- **Configuration files:** export writes `looper-config/v1`; files exported as
-  `loopx-config/v1` still import.
+- **Configuration files:** export writes `looper-config/v2`; files exported as
+  `looper-config/v1` or `loopx-config/v1` still import.
 - **Unchanged:** the default database is still named `loopx`
   (`postgresql://localhost:5432/loopx`), and the data in it, such as your own
   harness text, is not rewritten; release tags and history keep their names;
@@ -203,9 +203,9 @@ PostgreSQL is a hard startup dependency; `looper serve` applies
 
 | Area | Tables | What they hold |
 |---|---|---|
-| Projects and tasks | `projects`, `tasks`, `task_steps`, `task_plans`, `task_agent_overrides` | Projects with their default directory, background and execution settings; tasks, their Planner's plan and steps, and the agent a task chose for a role |
+| Projects and tasks | `projects`, `tasks`, `task_steps`, `task_plans`, `task_profile_overrides` | Projects with their default directory, background and execution settings; tasks, their Planner's plan and steps, and the Agent Profile a task chose for a role |
 | Task memory and knowledge | `task_journal`, `project_documents`, `project_document_drafts` | The journal code writes as a task runs; a project's knowledge documents and the drafts waiting for your review |
-| Agents and settings | `agent_runtimes`, `llm_providers`, `llm_provider_secrets`, `agents`, `agent_setting_layers`, `agent_configs`, `agent_sessions` | Runtimes, providers (their API keys kept apart) and agents; the settings layers; each role's prompt and limits; the sessions the Manager and Planners resume |
+| Agents and settings | `agent_runtimes`, `llm_providers`, `llm_provider_secrets`, `agent_profiles`, `agent_setting_layers`, `role_configs`, `agent_sessions` | Runtimes, providers (their API keys kept apart) and Agent Profiles; the settings layers; each role's prompt and limits; the sessions the Manager and Planners resume |
 | Capability catalog | `library_items`, `library_files`, `library_mcp_servers`, `library_installs` | Plugins, skills and MCP servers with their files or server configuration, and where each is installed |
 | Runs and conversations | `llm_records`, `llm_record_events`, `activity`, `chat_messages` | Every agent run with its usage, cost and stream events; each task's activity feed; chat history |
 | System | `system_settings`, `channel_configs`, `schema_migrations`, `schema_fingerprint` | Shared settings, the Telegram and Lark channels, the one-time migrations already applied, and the hash of the schema last applied (which tells serve to back up before a change) |
@@ -238,10 +238,10 @@ site's page (its `Origin`) is refused. The main route groups:
 |---|---|---|
 | Status | `GET /api/status` | System health and the startup self-check (`checks`) |
 | Projects | `/api/projects`, `/api/projects/:id`, `/api/projects/:id/knowledge/...` | Create, edit and delete projects; their knowledge documents and drafts |
-| Tasks | `/api/tasks`, `/api/tasks/create`, `/api/tasks/:id/...`, `/api/tasks/{start,stop,cancel,delete}` | List and create tasks (in a project, with optional `agent_overrides`), read one, start, stop, cancel, delete; activity and its SSE stream |
+| Tasks | `/api/tasks`, `/api/tasks/create`, `/api/tasks/:id/...`, `/api/tasks/{start,stop,cancel,delete}` | List and create tasks (in a project, with optional `profile_overrides`), read one, start, stop, cancel, delete; activity and its SSE stream |
 | Catalog and installs | `/api/catalog/...`, `/api/installs/...`, `/api/projects/:id/installs`, `/api/projects/:id/skills/...` | Plugins, skills and MCP servers: import, upload, git, write, edit, delete; install them globally or in a project |
-| Agent settings | `/api/agent-settings/...`, `/api/projects/:id/agent-settings/...`, `/api/agent-configs/...` | The settings layers, each field with its effective value and source; each role's prompt and limits |
-| Registry | `GET /api/registry`, `/api/runtimes/:id/probe`, `/api/providers/...`, `/api/agents/...` | Runtime types and the built-in runtimes (Re-detect probes one); register, edit and delete providers (API keys masked) and agents (Agent Profiles), each with where it is used |
+| Agent settings | `/api/agent-settings/...`, `/api/projects/:id/agent-settings/...`, `/api/roles/...` | The settings layers, each field with its effective value and source; each role's prompt and limits |
+| Registry | `GET /api/registry`, `/api/runtimes/:id/probe`, `/api/providers/...`, `/api/agent-profiles/...` | Runtime types and the built-in runtimes (Re-detect probes one); register, edit and delete providers (API keys masked) and Agent Profiles, each with where it is used |
 | Configuration transfer | `GET /api/config/export`, `/api/config/imports/...` | Download the configuration file; upload one, preview it, then apply or cancel |
 | Chat | `/api/chat/send`, `/api/chat/targets`, `/api/chat/messages`, `/api/chat/events` | Talk to the Manager or a running task's Planner; history and SSE stream |
 | Runs | `/api/llm-records/...`, `/api/agents/:id/usage` | Every agent run with its launch command, usage, cost and events; one agent's spending and context |
@@ -321,17 +321,17 @@ layers, a later layer winning:
 | Role in project | The same tab, per role | One of those roles in one project |
 
 The Manager spans every project, so only the first two layers apply to it. A
-task can also choose the agent of its Planner, Workers or Reviewers when it is
-created (`agent_overrides`); that choice wins over every layer, for that task
-only. A field no layer sets keeps its built-in default, and the dashboard shows
+task can also choose the Agent Profile of its Planner, Workers or Reviewers when
+it is created (`profile_overrides`); that choice wins over every layer, for that
+task only. A field no layer sets keeps its built-in default, and the dashboard shows
 each field's value with the layer it came from. Environment variables are not
 for secrets: a name that looks like a credential is refused. A change applies
 from each agent's next run or turn. See
-[Harness, agent and environment](docs/architecture/agent-system.md#harness-agent-and-environment)
+[Harness, profile and environment](docs/architecture/agent-system.md#harness-profile-and-environment)
 for the details.
 
 **Role configuration.** Settings → Roles also edits each role's own fields
-(`agent_configs`):
+(`role_configs`):
 
 - **system_prompt**: The role prompt, what this kind of agent is responsible
   for; the harness goes before it, and the prompt can be reset to the

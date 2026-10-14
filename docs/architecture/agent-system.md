@@ -36,7 +36,7 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
   any command on this machine; that is why Telegram and Lark pass on only the
   senders they list ([Channels](#channels)).
   Its system prompt is its harness (its role layer's, else the system
-  layer's, else the built-in one; [Harness, agent and environment](#harness-agent-and-environment)),
+  layer's, else the built-in one; [Harness, profile and environment](#harness-profile-and-environment)),
   the `manager` role prompt and `TASK_PLACEMENT_RULE`; it has no project and
   no task section.
   Each chat message is one user turn on its stdin; its turn starts when
@@ -103,8 +103,8 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
   that prompt for all three, in five layers:
 
   ```
-  <harness prompt>                                L1: see Harness, agent and environment
-  <role prompt from agent_configs>                L2: planner, worker or reviewer row
+  <harness prompt>                                L1: see Harness, profile and environment
+  <role prompt from role_configs>                 L2: planner, worker or reviewer row
 
   ## Project: <name>                              L3 (left out when the background is empty)
   <background>
@@ -126,10 +126,10 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
   own skills ([Project skills](#project-skills-skills-a-project-writes)); they
   are not in the prompt: Claude Code lists them itself.
 
-  A project's agent settings (harness, agent, effort, environment, per-run
-  cap) are two layers of their own: the project's, for all its task agents,
-  and each role's in the project ([Harness, agent and
-  environment](#harness-agent-and-environment)). They are read when each run or turn starts.
+  A project's agent settings (harness, Agent Profile, effort, environment,
+  per-run cap) are two layers of their own: the project's, for all its task agents,
+  and each role's in the project ([Harness, profile and
+  environment](#harness-profile-and-environment)). They are read when each run or turn starts.
 
   The task section is fixed for the session: the Planner lives as long as its
   task, a Worker or Reviewer as long as its step. It is in the system prompt
@@ -437,13 +437,15 @@ Lark pass on only the senders they list, and a channel without such a list
 does not start ([Channels](#channels)). The web dashboard stays local-only
 ([HTTP API](#http-api)).
 
-### Runtimes, LLM providers and agents
+### Runtimes, LLM providers and Agent Profiles
 
-An agent is a runtime, an LLM provider and a model (RFC decision 10, the
-[multi-runtime RFC](rfcs/multi-runtime-agents-v0.zh-CN.md)), selected per role
-([next section](#harness-agent-and-environment)). The dashboard calls a
-registered agent an **Agent Profile**: an Agent Profile is a row of `agents`,
-edited in Settings → Agent Profiles; the API keeps the name `agents`.
+An **Agent Profile** is a runtime, an LLM provider and a model (RFC decision
+10, the [multi-runtime RFC](rfcs/multi-runtime-agents-v0.zh-CN.md)), selected
+per role ([next section](#harness-profile-and-environment)); "agent" names only
+a running agent (the Manager, a Planner, a step's Worker or Reviewer), which
+runs the profile its role selects. A profile is a row of `agent_profiles`,
+edited in Settings → Agent Profiles and through `/api/agent-profiles`; the
+registry, its checks and its API are `looper/agents/profile_registry.py`.
 
 - **Runtime types** are code: one adapter per type in `looper/agents/runtimes`
   (`RuntimeAdapter`). Every tier starts its runtime through it, so no tier
@@ -555,10 +557,10 @@ edited in Settings → Agent Profiles; the API keeps the name `agents`.
   roles it can run, and Re-detect (`POST /api/runtimes/<id>/probe`) probes it
   again, or looks for a type not found yet and adds its runtime when it is on
   PATH now. Runtimes registered by hand before (`builtin` false) are dropped
-  once by the schema when no agent uses them (`schema_migrations`
-  `agent_runtimes_unused_custom_removed`); one an agent uses stays, read-only,
-  shown as "custom (legacy)", so the agent keeps running the executable it
-  ran.
+  once by the schema when no profile uses them (`schema_migrations`
+  `agent_runtimes_unused_custom_removed`); one a profile uses stays,
+  read-only, shown as "custom (legacy)", so the profile keeps running the
+  executable it ran.
 - **Providers** (`llm_providers`) are where requests go: `protocols`
   (`anthropic-messages`, `openai-responses`, `openai-chat`), `base_url`,
   `max_concurrency` (`null` = no limit, stored and checked only), a model
@@ -580,40 +582,44 @@ edited in Settings → Agent Profiles; the API keeps the name `agents`.
   provider from one of a vendor's APIs (Anthropic-format for Claude Code, or
   OpenAI-format), its common models with their background model, and the
   extra environment its Claude Code guide sets; the user adds the key.
-- **Agents** (`agents`, Agent Profiles on the dashboard): a name, a runtime,
-  a provider, a model and a default effort. The registry shows each one with
+- **Agent Profiles** (`agent_profiles`): a name, a runtime, a provider, a
+  model and a default effort. The registry (`profiles`) shows each one with
   the roles its runtime can run (`roles`) and where it is selected
   (`used_by`: the layers, a project's with its name, and how many tasks chose
-  it); one in use cannot be deleted (409, naming where).
+  it); one in use cannot be deleted (409, naming where). A profile's id keeps
+  the `agent-` prefix it had before the rename (`agent-claude-code-opus`,
+  `agent-<12 hex>`): ids are stored values.
 
 The built-ins exist on every database and are read-only: the runtime
 `claude-code`, the provider `claude-subscription` (Claude Code's login) and the
-agent `claude-code/opus` (`BUILTIN_AGENT`), which a role runs when nothing
-selects another. An agent is refused when it is created or changed if its
+profile `claude-code/opus` (`BUILTIN_PROFILE`), which a role runs when nothing
+selects another. A profile is refused when it is created or changed if its
 runtime and provider share no protocol, an OAuth provider is paired with
 another runtime type, the runtime cannot take that kind of provider yet
 (Claude Code takes its own login and API keys, Codex and OMP API keys only), or the
-provider lists models and not this one; an agent whose model or background
+provider lists models and not this one; a profile whose model or background
 model has no full price is registered with a warning (its runs record tokens
-only and no spend cap applies to them), and every agent shows how its runs are
-priced (`cost`); a provider change that would break one of its agents is refused
-too. Wherever it is selected (a layer, a task override), its runtime must
-have what each role reached needs (`ROLE_CAPABILITIES`): `resident_session`
-and `resume` for the Manager and Planner, `run` for Workers and Reviewers; a
-layer of every role (`system`) or of a project checks all of them. A row
-still referred to is not deleted (409). The resolved agent is checked again
-when each run starts (`agent_settings.agent_problem`): a run whose agent
-cannot run fails with the reason (the Manager answers with it, the Planner's
-turn fails, a Worker or Reviewer step fails) and never runs another agent.
+only and no spend cap applies to them), and every profile shows how its runs
+are priced (`cost`); a provider change that would break one of its profiles is
+refused too. Wherever it is selected (a layer, a task override), its runtime
+must have what each role reached needs (`ROLE_CAPABILITIES`):
+`resident_session` and `resume` for the Manager and Planner, `run` for
+Workers and Reviewers; a layer of every role (`system`) or of a project
+checks all of them. A row still referred to is not deleted (409). The
+resolved profile is checked again when each run starts
+(`agent_settings.profile_problem`): a run whose profile cannot run fails with
+the reason (the Manager answers with it, the Planner's turn fails, a Worker
+or Reviewer step fails) and never runs another profile.
 
 A resident session belongs to a runtime type and a provider
-(`agent_sessions.runtime_type` and `provider_id`, with the agent that ran it
-last): it resumes only while both are unchanged, so another runtime type or
-any change of provider (subscription to API key, back, or one API key provider
-to another) starts a new session, after a handoff from the old one
-([New sessions](#new-sessions-handoff-and-resume-brief)). A session from
-before agents counts as Claude Code's, one from before `provider_id` as Claude
-Code's own login's. Changing the model alone resumes as before.
+(`agent_sessions.runtime_type` and `provider_id`, with `profile_id`, the
+profile that ran it last): it resumes only while both are unchanged, so
+another runtime type or any change of provider (subscription to API key,
+back, or one API key provider to another) starts a new session, after a
+handoff from the old one ([New sessions](#new-sessions-handoff-and-resume-brief)).
+A session from before Agent Profiles counts as Claude Code's, one from before
+`provider_id` as Claude Code's own login's. Changing the model alone resumes
+as before.
 
 **Claude Code with an API key.** The binding sets `ANTHROPIC_BASE_URL` and
 the key: in `ANTHROPIC_AUTH_TOKEN` (sent as `Authorization: Bearer`, what GLM,
@@ -623,7 +629,7 @@ API (no `base_url`, or `api.anthropic.com`), removing an inherited
 `ANTHROPIC_AUTH_TOKEN`. With a `base_url` it also maps every model Claude Code
 may use behind the agent: `ANTHROPIC_DEFAULT_OPUS_MODEL`,
 `ANTHROPIC_DEFAULT_SONNET_MODEL` and `CLAUDE_CODE_SUBAGENT_MODEL` to the
-agent's model, `ANTHROPIC_DEFAULT_HAIKU_MODEL` and `ANTHROPIC_SMALL_FAST_MODEL`
+profile's model, `ANTHROPIC_DEFAULT_HAIKU_MODEL` and `ANTHROPIC_SMALL_FAST_MODEL`
 to the catalog's background model (the model itself without one). Then come
 the provider's own variables. The verified Claude Code behaviour is in the
 [multi-runtime RFC](rfcs/multi-runtime-agents-v0.zh-CN.md) section 7. A
@@ -650,10 +656,10 @@ cost. The task cap and "raise the cap and continue" sum the recorded costs, so
 they use the same basis. `GET /api/tasks/:id` counts the runs of each basis
 (`equivalent_runs`, `provider_price_runs`).
 
-The `llm_profiles` table and `agent_configs.runtime` and `llm_profile_id` were
-never on a launch path; the one-time migration `llm_profiles_removed` drops
-them (with `/api/llm-profiles`), and an agent config update naming them is a
-400.
+The `llm_profiles` table and the role configs' `runtime` and `llm_profile_id`
+were never on a launch path; the one-time migration `llm_profiles_removed`
+drops them (with `/api/llm-profiles`), and a role config update naming them
+is a 400.
 
 ### New sessions: handoff and resume brief
 
@@ -687,7 +693,7 @@ for work under way).
   first. The Manager's brief adds the recent conversations. The brief is
   given once: until the new session reports its id.
 
-### Harness, agent and environment
+### Harness, profile and environment
 
 `looper/agents/agent_settings.py` is the one place that resolves what an agent
 inherits. The harness prompt is an agent's character and stability: working
@@ -698,9 +704,9 @@ drop an agent's responsibilities.
 Five settings resolve through four layers (`agent_setting_layers`, one row per
 layer and place), a later layer winning (RFC decision 9). The smallest unit is
 a role in a project; Workers and Reviewers are never configured one by one. A
-task may override the agent of its Planner, Workers and Reviewers
-(`agent_overrides` at creation, stored in `task_agent_overrides`); that is the
-only task-level setting, and it wins over every layer for that task only
+task may override the Agent Profile of its Planner, Workers and Reviewers
+(`profile_overrides` at creation, stored in `task_profile_overrides`); that is
+the only task-level setting, and it wins over every layer for that task only
 (source `task`).
 
 | Layer | Edited in | Applies to |
@@ -712,11 +718,11 @@ only task-level setting, and it wins over every layer for that task only
 
 The Manager spans every project, so it has the first two only. With no layer
 setting a field, the built-in value applies (`builtin`): the harness
-`DEFAULT_HARNESS_PROMPT` (public and generic), the agent `claude-code/opus`
+`DEFAULT_HARNESS_PROMPT` (public and generic), the profile `claude-code/opus`
 (Claude Code, its own login, `opus`), the runtime's own effort, no extra
-environment and no cap. The fields are the harness, the agent (its model comes
-with it; an agent's default effort applies unless a layer sets one, source
-`agent`), the effort (`--effort`: `low`, `medium`, `high`, `xhigh` or `max`), up
+environment and no cap. The fields are the harness, the Agent Profile
+(`profile_id`; its model comes with it, and a profile's default effort applies
+unless a layer sets one, source `profile`), the effort (`--effort`: `low`, `medium`, `high`, `xhigh` or `max`), up
 to 50 environment variables per layer, and the per-run cap
 (`--max-budget-usd`, on each Claude Code process, when Claude Code's own
 figure is the run's cost; otherwise Looper's soft cap at the provider's
@@ -738,12 +744,12 @@ read, the Manager and a Planner keep what they last read, and a Worker or
 Reviewer run uses the built-in values with a warning in the task's activity.
 A one-time migration (`agent_setting_layers` in `schema.sql`) moved the
 earlier values into their layers unchanged: the Settings defaults to `system`;
-each agent's `model` and the Manager's `harness_prompt` to `role`; a
+each role's `model` and the Manager's `harness_prompt` to `role`; a
 project's `model` and `run_budget_usd` to `project`; a project's
 `planner_harness_prompt` and `worker_harness_prompt` to `role_project`. The
 old columns and keys are dropped. A second one-time migration
-(`agent_setting_layers_agent`) turned each layer's `model` into the agent
-`claude-code/<model>` (the built-in one for `opus`), so every role resolves the
+(`agent_setting_layers_agent`) turned each layer's `model` into the Agent
+Profile `claude-code/<model>` (the built-in one for `opus`), so every role resolves the
 model it did; a stored model that no longer validated was ignored, so it
 selects nothing. Changes apply to the next Worker or Reviewer run; a resident agent's
 restart signature is its command (which carries the model, the effort, the
@@ -777,7 +783,7 @@ Every run records the prompt in `llm_records.metadata`:
     the Workers' harness. Runs recorded before the layers have
     `builtin_default`, `system_default`, `manager_override` or
     `project_override`;
-  - `role`: `{config_id, sha256, recommended}`, the agent_configs row
+  - `role`: `{config_id, sha256, recommended}`, the role_configs row
     (`manager`, `planner`, `worker` or `reviewer`) and whether its prompt
     equals the recommended `default_prompt`;
   - `project`: `{id, background_sha256, updated_at, knowledge_sha256,
@@ -790,15 +796,18 @@ Every run records the prompt in `llm_records.metadata`:
   - `contract`: `{name, sha256}` (`REPLY_CONTRACT`, `WORK_CONTRACT`,
     `REVIEW_CONTRACT` or `TASK_PLACEMENT_RULE`);
   - `isolation`: `ISOLATION_ID`.
-- `agent`: `{id, name, model, runtime: {id, name, type}, provider: {id, name,
-  auth}, source}`, the agent the run used and where it was selected;
+- `profile`: `{id, name, model, runtime: {id, name, type}, provider: {id, name,
+  auth}, source}`, the Agent Profile the run used (`id` is its profile id) and
+  where it was selected; runs recorded before the rename to Agent Profiles have
+  it as `agent`, which the dashboard and the cost query read too;
 - `model_choice`: `{model, source, effort}`, the model asked for (`source` is
-  the agent's layer; earlier runs have `builtin_default`, `system_default`,
+  the profile's layer; earlier runs have `builtin_default`, `system_default`,
   `agent_override` or `project_override`); the record's `model` column keeps
   the model Claude reports;
-- `settings_sources`: `{harness, agent, effort, run_budget_usd, env: {NAME:
-  layer}}`, the layer each setting came from (runs before agents have
-  `model` in place of `agent`);
+- `settings_sources`: `{harness, profile, effort, run_budget_usd, env: {NAME:
+  layer}}`, the layer each setting came from (runs recorded before the rename
+  have `agent` in place of `profile`, and an effort from the profile's own
+  default as `agent`; runs before Agent Profiles have `model`);
 - `max_budget_usd`: the per-run cap, when one applies;
 - `env`: `{sha256, keys: {NAME: sha256 of the value}}`, only when the run
   has variables; values are never recorded;
@@ -947,7 +956,7 @@ Verified with Claude Code 2.1.285 under the isolation flags and
 
 A project can set how its task agents run (`looper/agents/project_execution.py`,
 typed nullable columns on `projects`, `null` = as before; its agent and per-run
-cap are agent settings, [Harness, agent and environment](#harness-agent-and-environment)):
+cap are agent settings, [Harness, profile and environment](#harness-profile-and-environment)):
 `task_budget_usd`, checked against the task's cost before every Planner turn
 and every new Worker or Reviewer: at the cap the running ones are stopped and
 the task fails, at once (`task_budget_action` `fail`, the default) or after one
@@ -1076,10 +1085,10 @@ tokens, plugin hook context 3.8k).
 
 `looper config export <file>` and `looper config import <file>`
 (`looper/agents/config_transfer.py`) move an installation's agent configuration
-through one JSON file, `format: looper-config/v1` (a `loopx-config/v1` file from
-before the rename imports the same way): `runtimes`, `providers` and
-`agents` (the registered ones; the built-ins exist everywhere; each names the
-others by name), `settings` (the system and role layers, each naming its agent;
+through one JSON file, `format: looper-config/v2`: `runtimes`, `providers` and
+`profiles` (the registered ones; the built-ins exist everywhere; each names the
+others by name), `settings` (the system and role layers, each naming its Agent
+Profile in `profile`;
 each role's prompt, `null` while it follows the recommended one, its timeout,
 concurrency and enabled flag), `channels`, `installs` (global),
 `projects` (with `--include-projects`: fields, execution settings, layers,
@@ -1088,20 +1097,24 @@ or an MCP server's configuration). Catalog files are UTF-8 text, so JSON holds
 them as they are; the file is written piece by piece from one read-only,
 repeatable-read snapshot, by the CLI straight from the database (a catalog is
 often over the server's 8 MiB request cap) or streamed by Settings' Export
-download (`GET /api/config/export`).
+download (`GET /api/config/export`). A v1 file (`looper-config/v1`, or
+`loopx-config/v1` from before the rename to Looper) imports too: it is read as
+v2 under its older names (`_from_v1`), its `agents` being the `profiles` and a
+layer's `agent` its `profile`.
 
 Secrets (MCP environment and header values, a provider's API key, a channel
 config's keys other than its sender allowlist, `*_env` names and description)
 are `{"secret": "omitted"}` unless `--include-secrets`. A project's directory,
 an item's source and a runtime's executable that are local paths are not
 exported; a path document is a reference relative to its project's directory,
-flagged `repoint`. A layer of a file written before agents gives a `model`:
-the import selects the agent `claude-code/<model>`, adding it as the upgrade
-does. Tasks are not exported, so neither are their agent overrides.
+flagged `repoint`. A layer of a file written before Agent Profiles gives a
+`model`: the import selects the profile `claude-code/<model>`, adding it as
+the upgrade does. Tasks are not exported, so neither are their profile
+overrides.
 
 An import matches entries by natural key: an item by kind and name (a
-project's own skill within its project), a project, runtime, provider or agent
-by name, a layer by scope,
+project's own skill within its project), a project, runtime, provider or
+profile by name, a layer by scope,
 role and project, a role by name, a channel by type. The preview (the
 default, in a read-only transaction) lists per section what would be added,
 changed (with the fields), unchanged or skipped (with the reason), and the
@@ -1339,18 +1352,18 @@ PostgreSQL is a hard startup dependency. All data paths:
 | `tasks` | Task metadata, status, phase, timestamps, `work_dir`, `project_id` (required) |
 | `task_steps` | A task's steps, each with everything its Planner decides with: `step_key` (label), `depends_on` (step ids), `review`, `acceptance_criteria`, `validation_commands`, `status`, `result`, `worker_id`, `reviewer_id`, `retries`, `feedback`, `missed_messages` |
 | `task_plans` | A task's plan, one row per task: `plan_id`, `status` (`planning`, `executing`, `verifying`, `stopping`, `completed`, `failed`), `correlation_id`, `origin_channel_id`, `final_summary`, `fail_reason`; replaced when the task is planned again |
-| `agent_sessions` | The session each resident agent resumes: `manager` or `planner-<task_id>`, its `session_id`, `session_totals`, the `runtime_type` and `provider_id` it belongs to and the `session_agent_id` that ran it last (`NULL` runtime: before agents, Claude Code; `NULL` provider: before providers were recorded, Claude Code's own login), and `clean_start` (the user dropped the session with `/new`: the next one starts without a resume brief) |
+| `agent_sessions` | The session each resident agent resumes: `manager` or `planner-<task_id>`, its `session_id`, `session_totals`, the `runtime_type` and `provider_id` it belongs to and the `profile_id` that ran it last (`NULL` runtime: before Agent Profiles, Claude Code; `NULL` provider: before providers were recorded, Claude Code's own login), and `clean_start` (the user dropped the session with `/new`: the next one starts without a resume brief) |
 | `task_journal` | A task's journal, written by code as things happen: `step_accepted`, `step_failed`, `step_retry`, `decision`, `user_instruction`, `session_switch` and `handoff` entries, each with its `step_id` (`''` for the whole task), `summary` and `learnings`; `GET /api/tasks/<id>` returns it as `journal` and the task page lists it as Findings, each entry with its kind |
 | `activity` | Execution trace events (SSE streaming to frontend) |
 | `chat_messages` | Chat conversation history; a new Manager session's resume brief reads the recent chats that are not a task's Planner thread (`planner-<task_id>`) |
-| `llm_records` | One row per agent run: input and output text, status, the run's own `cost_usd` and its `cost_source` (`runtime` or `provider_price`), `input_tokens`, `output_tokens`, `cache_read_tokens` and `cache_creation_tokens`, its final `context_tokens` and its `compactions`; `metadata` holds the exact argv (`command`), `cwd`, the appended `system_prompt`, its `system_prompt_sha256`, its `prompt_layers`, the `agent`, the `model_choice`, the Settings `env` names, the `library` items loaded and a task agent's `project_skills` |
-| `agent_configs` | Agent configuration (role prompt, turns, timeout, concurrency) for `manager`, `planner`, `worker` and `reviewer` |
-| `agent_setting_layers` | Agent settings by layer: `scope` (`system`, `role`, `project`, `role_project`), `role`, `project_id` (goes with its project), and the nullable `harness_prompt`, `agent_id`, `effort`, `env` (ordered `[{key, value}]`, `null` value = unset) and `run_budget_usd`; one row per layer and place |
-| `agent_runtimes` | Runtimes, built in (one per type found on PATH) or registered by hand before and kept while an agent uses them (`builtin` false): `name`, `type` (an adapter), `executable` (`''` = the type's default), the probe's `version`, `capabilities`, `probed_at`, `probe_error`, `builtin` |
+| `llm_records` | One row per agent run: input and output text, status, the run's own `cost_usd` and its `cost_source` (`runtime` or `provider_price`), `input_tokens`, `output_tokens`, `cache_read_tokens` and `cache_creation_tokens`, its final `context_tokens` and its `compactions`; `metadata` holds the exact argv (`command`), `cwd`, the appended `system_prompt`, its `system_prompt_sha256`, its `prompt_layers`, the `profile` (`agent` on runs recorded before the rename), the `model_choice`, the Settings `env` names, the `library` items loaded and a task agent's `project_skills` |
+| `role_configs` | Each role's own settings, keyed by `role` (`manager`, `planner`, `worker`, `reviewer`): display name, role prompt and its recommended `default_prompt`, turns, timeout, concurrency, enabled |
+| `agent_setting_layers` | Agent settings by layer: `scope` (`system`, `role`, `project`, `role_project`), `role`, `project_id` (goes with its project), and the nullable `harness_prompt`, `profile_id`, `effort`, `env` (ordered `[{key, value}]`, `null` value = unset) and `run_budget_usd`; one row per layer and place |
+| `agent_runtimes` | Runtimes, built in (one per type found on PATH) or registered by hand before and kept while an Agent Profile uses them (`builtin` false): `name`, `type` (an adapter), `executable` (`''` = the type's default), the probe's `version`, `capabilities`, `probed_at`, `probe_error`, `builtin` |
 | `llm_providers` | LLM providers: `name`, `protocols`, `auth` (`oauth` with `oauth_runtime_type`, or `api_key`), `base_url`, `models` (the catalog, with each model's prices and `background_model`), `env` (its own variables), `max_concurrency` (`NULL` = no limit), `builtin` |
 | `llm_provider_secrets` | A provider's API key, apart from the provider; read only by the launch that will use it |
-| `agents` | Agents (Agent Profiles on the dashboard): `name`, `runtime_id`, `provider_id`, `model`, default `effort`, `builtin`; a provider still used by one is not deleted |
-| `task_agent_overrides` | A task's agent per role (`planner`, `worker`, `reviewer`), going with its task; an agent a task chose is not deleted |
+| `agent_profiles` | Agent Profiles: `name`, `runtime_id`, `provider_id`, `model`, default `effort`, `builtin`; a provider still used by one is not deleted |
+| `task_profile_overrides` | A task's Agent Profile per role (`planner`, `worker`, `reviewer`): `profile_id`, going with its task; a profile a task chose is not deleted |
 | `system_settings` | Settings shared by the whole system, one value per key (no row = the built-in default), such as the last library import's report |
 | `library_items` | The capability catalog: kind, name, `origin` (`machine`, `upload`, `git`, `ui` or `project`), `modified`, `owner_project_id` (a project-authored item; goes with its project), `description`, source label, declared version, `sha256` of the files, size, file count, `imported_at` |
 | `library_files` | Each catalog item's files: relative path, UTF-8 content, sha256, executable bit |
@@ -1373,6 +1386,16 @@ after the directory's last path component (`''` and `/` become `default`);
 the oldest directory keeps the plain name and a later clash, ignoring case,
 gets `-2`, `-3`, .... A task's "active" statuses are `pending`, `assigned`,
 `running` and `executing`.
+
+The names follow the dashboard's, and "agent" names only a running agent:
+the one-time migration `profiles_roles_renamed`, which runs first in
+`schema.sql`, renamed `agent_configs` to `role_configs` (its key `agent_id` to
+`role`, after dropping the `role` column that only repeated it), `agents` to
+`agent_profiles`, `task_agent_overrides` to `task_profile_overrides`, and the
+`agent_id` of a layer and of a task's choice, and a session's
+`session_agent_id`, to `profile_id`. The tables and columns are renamed in
+place (their foreign keys follow) and their constraints take the names a new
+database gives them, so a migrated database is shaped like a new one.
 
 Connection: `LOOPER_DATABASE_URL` environment variable or `.env` file, else
 `postgresql://localhost:5432/loopx`: the default database keeps its name from
@@ -1456,9 +1479,9 @@ dev proxy, which keeps `Host` and `Origin` on its own port.
 | `/api/projects/:id/skills/:skill_id` | DELETE | Delete a skill the project wrote, from the catalog and every project it is installed in; answers with `deleted` and the installs view; 404 |
 | `/api/projects/:id` | DELETE | Delete a project; 409 while it still has tasks |
 | `/api/tasks` | GET | List the newest tasks; `?project_id=` lists one project's. Each has `project_id`, `project_name`, `work_dir` and `cost` (as in the task detail) |
-| `/api/tasks/create` | POST | Create a task in `init` with exactly one of `project_id` (existing) and `project` (`{name, description?, work_dir?, background?}`, created in the same transaction). Its `work_dir` is the one given, else the project's. Optional `agent_overrides`: `{planner?, worker?, reviewer?}` agent ids for this task's roles (an empty one chooses nothing). 400 with neither project field, for an override of another role, an unknown agent or one that cannot run its role; 404 for an unknown project, 409 for a taken new name |
+| `/api/tasks/create` | POST | Create a task in `init` with exactly one of `project_id` (existing) and `project` (`{name, description?, work_dir?, background?}`, created in the same transaction). Its `work_dir` is the one given, else the project's. Optional `profile_overrides`: `{planner?, worker?, reviewer?}` Agent Profile ids for this task's roles (an empty one chooses nothing). 400 with neither project field, for an override of another role, an unknown profile or one that cannot run its role; 404 for an unknown project, 409 for a taken new name |
 | `/api/tasks/:id/project` | PUT | Move a task to `{project_id}`, whatever its status |
-| `/api/tasks/:id` | GET | Task detail with steps, `project_id`, `project_name`, `agent_overrides` (`{role: agent}`, `{}` when none) and `cost`: `cost_usd` (the sum of its Planner's, Workers' and Reviewers' runs), `runs`, `running`, `unpriced_runs` and `by_role` (`planner`, `worker`, `reviewer`, each `{cost_usd, runs}`) |
+| `/api/tasks/:id` | GET | Task detail with steps, `project_id`, `project_name`, `profile_overrides` (`{role: profile}`, `{}` when none) and `cost`: `cost_usd` (the sum of its Planner's, Workers' and Reviewers' runs), `runs`, `running`, `unpriced_runs` and `by_role` (`planner`, `worker`, `reviewer`, each `{cost_usd, runs}`) |
 | `/api/tasks/cancel` | POST | Cancel task (permanent) |
 | `/api/tasks/stop` | POST | Stop/pause task |
 | `/api/tasks/start` | POST | Start/resume task |
@@ -1468,17 +1491,17 @@ dev proxy, which keeps `Host` and `Origin` on its own port.
 | `/api/chat/send` | POST | Send chat message; `target` is the Manager (default) or `{kind: planner, task_id}`, 409 when that task has no running Planner |
 | `/api/chat/targets` | GET | The Manager, then per recent task its Planner and step Workers/Reviewers, with `can_send` |
 | `/api/chat/messages` | GET/POST | Chat history |
-| `/api/agent-configs` | GET | List agents |
-| `/api/agent-configs/:id` | GET/PUT | Agent config CRUD; `harness_prompt` and `model` are agent settings (400 naming the role's endpoint); `runtime` and `llm_profile_id` were removed (400) |
-| `/api/agent-configs/:id/reset-prompt` | POST | Reset the role prompt to the recommended one |
-| `/api/agent-settings` | GET | The agent settings outside projects: `system` and `roles` (all four), each with `values` (that layer's own: `harness_prompt`, `agent` (an agent id), `effort`, `env` as `[{key, value}]`, `run_budget_usd`; `null` = not set) and `effective` (what applies, each field with its `source` layer; `agent` as `{agent_id, name, model, runtime, provider}`, `effort` may come from the agent), and `limits` |
-| `/api/agent-settings/system` | PUT | Set the system layer. Each layer's PUT changes the fields given (`null` or `""` unsets one; `env` replaces the layer's list, a `null` value unsetting a variable outside the system layer; the built-in harness text unsets the system harness) and answers with the GET view. 400 for an unknown field, `model` (part of the agent now), an unknown agent or one that cannot run the layer's roles, a harness over 20000 characters, a bad effort or cap, or a bad, credential-like or 51st variable; nothing is stored then |
-| `/api/registry` | GET | The runtime types this version has (`type`, `label`, `default_executable`, `runtime_id` of its built-in runtime, `protocols`, `capabilities`, `roles`, `auth_kinds`), and every `runtime` (with its `path` on the server's PATH or `null`, and `roles`), `provider` (API key as `***` or `null`) and `agent` (with its `roles`, `used_by`: `layers` (`scope`, `role`, `project_id`, `project_name`) and `task_count`, and its `cost`: `source`, `equivalent`, `unpriced` models), the `provider_presets`, the built-in `prices` (`as_of`, `sources`, `models`), with `limits` |
+| `/api/roles` | GET | List the role configs: `configs`, one per role, each keyed by `role` |
+| `/api/roles/:role` | GET/PUT | One role's config; PUT changes the fields given. `harness_prompt` and `model` are agent settings (400 naming the role's endpoint); `runtime` and `llm_profile_id` were removed (400); 404 for an unknown role |
+| `/api/roles/:role/reset-prompt` | POST | Reset the role prompt to the recommended one |
+| `/api/agent-settings` | GET | The agent settings outside projects: `system` and `roles` (all four), each with `values` (that layer's own: `harness_prompt`, `profile_id` (an Agent Profile's id), `effort`, `env` as `[{key, value}]`, `run_budget_usd`; `null` = not set) and `effective` (what applies, each field with its `source` layer; the profile as `profile`: `{profile_id, name, model, runtime, provider}`; `effort` may come from the profile, source `profile`), and `limits` (with `builtin_profile`: `{profile_id, name}`) |
+| `/api/agent-settings/system` | PUT | Set the system layer. Each layer's PUT changes the fields given (`null` or `""` unsets one; `env` replaces the layer's list, a `null` value unsetting a variable outside the system layer; the built-in harness text unsets the system harness) and answers with the GET view. 400 for an unknown field, `model` (part of the Agent Profile), an unknown profile or one that cannot run the layer's roles, a harness over 20000 characters, a bad effort or cap, or a bad, credential-like or 51st variable; nothing is stored then |
+| `/api/registry` | GET | The runtime types this version has (`type`, `label`, `default_executable`, `runtime_id` of its built-in runtime, `protocols`, `capabilities`, `roles`, `auth_kinds`), and every `runtime` (with its `path` on the server's PATH or `null`, and `roles`), `provider` (API key as `***` or `null`), each counting the profiles that use it (`profile_count`), and every Agent Profile in `profiles` (with its `profile_id`, `roles`, `used_by`: `layers` (`scope`, `role`, `project_id`, `project_name`) and `task_count`, and its `cost`: `source`, `equivalent`, `unpriced` models), the `provider_presets`, the built-in `prices` (`as_of`, `sources`, `models`), with `limits` |
 | `/api/runtimes/:id/probe` | POST | Re-detect: probe again and record the version, capabilities or error; for `rt-<type>` of a type not found yet, look for it on the server's PATH and add its built-in runtime (404 when it is not there). Runtimes are built in: there is no route to register, change or delete one |
 | `/api/providers` | POST | Register `{name, protocols, auth, oauth_runtime_type?, base_url?, models?, env?, max_concurrency?, api_key?}`; 201 with `provider`; 400 with the reason (an `env` name the binding sets, or that reads like a credential, too), 409 for a taken name |
-| `/api/providers/:id` | PUT/DELETE | Change a provider (`api_key` `***` keeps the key, `null` removes it; 400 when one of its agents could no longer run); delete (409 while agents use it). 400 for the built-in one |
-| `/api/agents` | POST | Register `{name, runtime_id, provider_id, model, effort?}`; 201 with `agent` and `warnings` (a model without a price); 400 when the runtime and provider cannot run together or the provider does not list the model |
-| `/api/agents/:id` | PUT/DELETE | Change an agent (checked like a new one, and for every role it is selected for); delete (409 while a layer or a task selects it, naming where). 400 for the built-in one |
+| `/api/providers/:id` | PUT/DELETE | Change a provider (`api_key` `***` keeps the key, `null` removes it; 400 when one of its profiles could no longer run); delete (409 while profiles use it). 400 for the built-in one |
+| `/api/agent-profiles` | POST | Register an Agent Profile `{name, runtime_id, provider_id, model, effort?}`; 201 with `profile` and `warnings` (a model without a price); 400 when the runtime and provider cannot run together or the provider does not list the model |
+| `/api/agent-profiles/:id` | PUT/DELETE | Change a profile (checked like a new one, and for every role it is selected for; answers with `profile` and `warnings`); delete (409 while a layer or a task selects it, naming where). 400 for the built-in one |
 | `/api/agent-settings/roles/:role` | PUT | Set one role's layer (`manager`, `planner`, `worker`, `reviewer`; 404 for another) |
 | `/api/catalog` | GET | The catalog: `items` (`item_id`, `kind`, `name`, `qualified_name` (how agents name it), `origin`, `owner_project_id`, `owner_project_name`, `description`, `source`, `version`, `sha256`, `size_bytes`, `file_count`, timestamps and `installs`), `installed_count`, `total_bytes`, `last_import` (counts, `added`, `updated`, `removed`, `unchanged`, `skipped`), `roles`, `task_roles` and `caps` |
 | `/api/catalog/:id` | GET | One item: `item` (as in the list), `files` (`path`, `size_bytes`, `executable`; no content) and, for a skill, `skill_md`; 404 for an unknown item |
@@ -1501,8 +1524,8 @@ dev proxy, which keeps `Host` and `Origin` on its own port.
 
 ## Configuration
 
-Agent behavior is configured via the `agent_configs` table (editable in the dashboard); the harness, agent,
-effort, environment and per-run cap are agent settings ([Harness, agent and environment](#harness-agent-and-environment)):
+Agent behavior is configured via the `role_configs` table (Settings → Roles); the harness, Agent Profile,
+effort, environment and per-run cap are agent settings ([Harness, profile and environment](#harness-profile-and-environment)):
 
 - **system_prompt**: The role prompt: what this kind of agent is responsible for
 - **max_turns**: Maximum conversation turns (0 = unlimited)

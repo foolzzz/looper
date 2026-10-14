@@ -130,7 +130,7 @@ _EXPECTED_LAYERS = {
 async def _layers(pool: Any) -> list[tuple[Any, ...]]:
     rows = await pool.fetch(
         "SELECT l.scope, l.role, l.project_id, l.harness_prompt, a.name, l.effort, l.env, l.run_budget_usd "
-        "FROM agent_setting_layers l LEFT JOIN agents a ON a.id = l.agent_id "
+        "FROM agent_setting_layers l LEFT JOIN agent_profiles a ON a.id = l.profile_id "
         "ORDER BY l.scope, l.role NULLS FIRST, l.project_id NULLS FIRST")
     return [(*tuple(r)[:6], json.loads(r["env"]), r["run_budget_usd"]) for r in rows]
 
@@ -150,8 +150,8 @@ def test_the_upgrade_moves_every_value_into_its_layer_and_each_role_launches_as_
         # The old columns and keys are gone; another key stays.
         columns = {(r["table_name"], r["column_name"]) for r in await pool.fetch(
             "SELECT table_name, column_name FROM information_schema.columns WHERE table_schema = current_schema() "
-            "AND table_name IN ('agent_configs', 'projects')")}
-        assert not columns & {("agent_configs", "harness_prompt"), ("agent_configs", "model"),
+            "AND table_name IN ('role_configs', 'projects')")}
+        assert not columns & {("role_configs", "harness_prompt"), ("role_configs", "model"),
                               ("projects", "planner_harness_prompt"), ("projects", "worker_harness_prompt"),
                               ("projects", "model"), ("projects", "run_budget_usd")}
         assert {r["key"] for r in await pool.fetch("SELECT key FROM system_settings")} == {"catalog.last_import"}
@@ -201,7 +201,7 @@ def test_each_layer_round_trips_and_a_deleted_project_takes_its_layers(monkeypat
     async def _test(pool: Any) -> None:
         calc = await projects.create_project(name="calc", pool=pool)
         pid = calc["id"]
-        await agent_settings.update_system({"agent": "agent-claude-code-opus", "env": [
+        await agent_settings.update_system({"profile_id": "agent-claude-code-opus", "env": [
             {"key": "TZ", "value": "UTC"}, {"key": "LANG", "value": "C"}]})
         await agent_settings.update_role("reviewer", {"effort": "max"})
         await agent_settings.update_project(pid, {"run_budget_usd": 0.5, "env": [{"key": "TZ", "value": None}]})
@@ -223,7 +223,7 @@ def test_each_layer_round_trips_and_a_deleted_project_takes_its_layers(monkeypat
         with pytest.raises(asyncpg.CheckViolationError):
             await agent_setting_layers.put_layer("system", "worker", None, {"effort": "low"}, pool=pool)
         with pytest.raises(asyncpg.ForeignKeyViolationError):
-            await agent_setting_layers.put_layer("system", None, None, {"agent_id": "agent-nowhere"}, pool=pool)
+            await agent_setting_layers.put_layer("system", None, None, {"profile_id": "agent-nowhere"}, pool=pool)
 
         await projects.delete_project(pid, pool=pool)
         assert await pool.fetchval("SELECT count(*) FROM agent_setting_layers WHERE project_id IS NOT NULL") == 0
@@ -232,27 +232,27 @@ def test_each_layer_round_trips_and_a_deleted_project_takes_its_layers(monkeypat
 
 
 def test_seeding_moves_unedited_role_prompts_keeps_edited_ones_and_adds_the_reviewer() -> None:
-    from looper.agents.serve import seed_agent_configs
+    from looper.agents.serve import seed_role_configs
     from looper.agents.tiers.manager import DEFAULT_SYSTEM_PROMPT as MANAGER
     from looper.agents.tiers.planner import DEFAULT_SYSTEM_PROMPT as PLANNER
     from looper.agents.tiers.worker import DEFAULT_SYSTEM_PROMPT as WORKER, REVIEWER_SYSTEM_PROMPT as REVIEWER
-    from looper.db import agent_configs
+    from looper.db import role_configs
 
     async def _test(pool: Any) -> None:
         # Rows as the previous release left them: manager and worker unedited, planner edited.
-        for agent_id, prompt, recommended in [
+        for role, prompt, recommended in [
             ("manager", "previous manager recommendation", "previous manager recommendation"),
             ("planner", "My own planner prompt.", "previous planner recommendation"),
             ("worker", "previous worker recommendation", "previous worker recommendation"),
         ]:
             await pool.execute(
-                "INSERT INTO agent_configs (agent_id, role, system_prompt, default_prompt, max_turns) "
-                "VALUES ($1, $1, $2, $3, $4)", agent_id, prompt, recommended, 7 if agent_id == "worker" else 0,
+                "INSERT INTO role_configs (role, system_prompt, default_prompt, max_turns) "
+                "VALUES ($1, $2, $3, $4)", role, prompt, recommended, 7 if role == "worker" else 0,
             )
-        await seed_agent_configs(pool)
+        await seed_role_configs(pool)
 
-        rows = {agent_id: await agent_configs.get_config(agent_id, pool=pool)
-                for agent_id in ("manager", "planner", "worker", "reviewer")}
+        rows = {role: await role_configs.get_config(role, pool=pool)
+                for role in ("manager", "planner", "worker", "reviewer")}
         assert (rows["manager"]["system_prompt"], rows["manager"]["default_prompt"]) == (MANAGER, MANAGER)
         assert (rows["worker"]["system_prompt"], rows["worker"]["default_prompt"]) == (WORKER, WORKER)
         assert rows["worker"]["max_turns"] == 7  # other fields stay
@@ -269,8 +269,8 @@ def test_seeding_moves_unedited_role_prompts_keeps_edited_ones_and_adds_the_revi
         assert "Check by running things" not in WORKER
 
         # A second startup changes nothing.
-        before = await pool.fetch("SELECT agent_id, system_prompt, default_prompt FROM agent_configs ORDER BY 1")
-        await seed_agent_configs(pool)
-        assert await pool.fetch("SELECT agent_id, system_prompt, default_prompt FROM agent_configs ORDER BY 1") == before
+        before = await pool.fetch("SELECT role, system_prompt, default_prompt FROM role_configs ORDER BY 1")
+        await seed_role_configs(pool)
+        assert await pool.fetch("SELECT role, system_prompt, default_prompt FROM role_configs ORDER BY 1") == before
 
     _run(_test)

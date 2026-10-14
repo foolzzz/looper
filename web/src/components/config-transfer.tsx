@@ -22,7 +22,7 @@ const errorText = (err: unknown) => (err instanceof Error ? err.message : String
 const SECTION_LABELS: Record<string, string> = {
   runtimes: "Runtimes",
   providers: "Providers",
-  agents: "Agents",
+  profiles: "Agents",
   "settings.layers": "Settings layers",
   "settings.roles": "Role settings",
   channels: "Channels",

@@ -1,6 +1,6 @@
 /** Dollars and token counts, as the dashboard shows them. */
 
-import type { Compaction, LlmRecord, TaskCost } from "@/lib/api";
+import { runProfile, type Compaction, type LlmRecord, type TaskCost } from "@/lib/api";
 
 export function formatUsd(value: number | null | undefined): string {
   if (value == null) return "–";
@@ -40,6 +40,6 @@ export function costBasis(cost: TaskCost): string {
 /** How one run's cost was priced, in a word or two; "" for an Anthropic API key's actual spend. */
 export function runCostLabel(record: Pick<LlmRecord, "cost_source" | "metadata">): string {
   if (record.cost_source === "provider_price") return "provider price";
-  // Claude Code's own figure for its own login (runs recorded before agents ran with it too).
-  return (record.metadata?.agent?.provider.auth ?? "oauth") === "oauth" ? "equivalent" : "";
+  // Claude Code's own figure for its own login (runs recorded before Agent Profiles ran with it too).
+  return (runProfile(record)?.provider.auth ?? "oauth") === "oauth" ? "equivalent" : "";
 }

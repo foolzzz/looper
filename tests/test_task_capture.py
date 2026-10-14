@@ -213,23 +213,24 @@ class TestInjection:
 
 
 class _Switch:
-    """``session_switch.agent_switch`` that also reports one agent change when ``armed``, as when a layer moves the
-    agent to another runtime or provider."""
+    """``session_switch.profile_switch`` that also reports one profile change when ``armed``, as when a layer moves
+    the profile to another runtime or provider."""
 
     def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
         self.armed = False
-        real = session_switch.agent_switch
+        real = session_switch.profile_switch
 
-        def agent_switch(session_id: str | None, runtime: str | None, agent: str | None, launch: Any,
-                         **kwargs: Any) -> Any:
+        def profile_switch(session_id: str | None, runtime: str | None, profile: str | None, launch: Any,
+                           **kwargs: Any) -> Any:
             if self.armed and session_id:
                 self.armed = False
-                return SessionSwitch(SwitchReason.AGENT_CHANGED, "a codex process cannot resume a claude-code session",
-                                     old_runtime="claude-code", old_agent=agent, new_runtime="codex",
-                                     new_agent="agent-codex")
-            return real(session_id, runtime, agent, launch, **kwargs)
+                return SessionSwitch(SwitchReason.PROFILE_CHANGED,
+                                     "a codex process cannot resume a claude-code session",
+                                     old_runtime="claude-code", old_profile=profile, new_runtime="codex",
+                                     new_profile="agent-codex")
+            return real(session_id, runtime, profile, launch, **kwargs)
 
-        monkeypatch.setattr(session_switch, "agent_switch", agent_switch)
+        monkeypatch.setattr(session_switch, "profile_switch", profile_switch)
 
 
 def _kill(pid: int) -> None:
@@ -394,7 +395,7 @@ class TestManagerContinuity:
         agent_db.recent_conversations.return_value = CHATS
         if saved:
             agent_db.store.sessions["manager"] = {"session_id": saved, "session_totals": {},
-                                                  "runtime_type": "claude-code", "session_agent_id": None}
+                                                  "runtime_type": "claude-code", "profile_id": None}
         first, second = _manager_turns(monkeypatch, agent_db, ["hello", "again"])
         assert second == "again"
         if saved:

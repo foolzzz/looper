@@ -435,7 +435,8 @@ def run(
                 agent = register_agent(api, register)["name"]
             chosen = select_agent(api, agent=agent, model=model, provider=provider, run_budget_usd=max_budget_usd)
             if register is not None:
-                api.put("/api/agent-settings/system", {"agent": chosen["agent_id"], "run_budget_usd": max_budget_usd})
+                api.put("/api/agent-settings/system", {"profile_id": chosen["profile_id"],
+                                                       "run_budget_usd": max_budget_usd})
             results, stopped = run_suite(
                 tasks,
                 lambda task, cap_left: run_task(api, task, work_dirs[task.id], timeout=timeout, poll=poll,
@@ -483,8 +484,8 @@ def register_agent(api: Api, spec: dict[str, Any]) -> dict[str, Any]:
             raise EvalError(f"the provider's API key is read from ${variable}, which is not set")
         provider["api_key"] = os.environ[variable]
     provider_id = api.post("/api/providers", provider)["provider"]["provider_id"]
-    return api.post("/api/agents", {**spec["agent"], "runtime_id": runtime["runtime_id"],
-                                    "provider_id": provider_id})["agent"]
+    return api.post("/api/agent-profiles", {**spec["agent"], "runtime_id": runtime["runtime_id"],
+                                            "provider_id": provider_id})["profile"]
 
 
 # The API key of a provider an eval registers (``--provider-preset``): read from the environment, never a file.
@@ -516,11 +517,12 @@ def register_provider_agent(api: Api, choice: ProviderChoice) -> dict[str, Any]:
         "base_url": choice.base_url or api_entry["base_url"], "models": preset["models"], "env": preset["env"],
     })["provider"]
     model = choice.model or preset["models"][0]["name"]
-    answer = api.post("/api/agents", {"name": f"claude-code/{preset['name']}/{model}", "runtime_id": "rt-claude-code",
-                                      "provider_id": provider["provider_id"], "model": model})
+    answer = api.post("/api/agent-profiles", {"name": f"claude-code/{preset['name']}/{model}",
+                                              "runtime_id": "rt-claude-code", "provider_id": provider["provider_id"],
+                                              "model": model})
     for warning in answer.get("warnings") or []:
         print(f"warning: {warning}", file=sys.stderr)
-    return answer["agent"]
+    return answer["profile"]
 
 
 def select_agent(api: Api, *, agent: str | None, model: str | None, provider: ProviderChoice | None = None,
@@ -529,23 +531,23 @@ def select_agent(api: Api, *, agent: str | None, model: str | None, provider: Pr
     ``model``, every role's agent (the system layer); returns it. Without any, every role keeps the built-in
     agent. With ``provider``, the system layer also caps each run at ``run_budget_usd``."""
     registry = api.get("/api/registry")
-    agents = {a["name"]: a for a in registry["agents"]}
+    agents = {a["name"]: a for a in registry["profiles"]}
     if agent is not None:
         if agent not in agents:
             raise EvalError(f"no agent {agent!r} in the eval's database; it has {', '.join(sorted(agents))}")
         chosen = agents[agent]
     elif provider is not None:
         chosen = register_provider_agent(api, provider)
-        api.put("/api/agent-settings/system", {"agent": chosen["agent_id"], "run_budget_usd": run_budget_usd})
+        api.put("/api/agent-settings/system", {"profile_id": chosen["profile_id"], "run_budget_usd": run_budget_usd})
         return chosen
     elif model:
         name = f"claude-code/{model}"
-        chosen = agents.get(name) or api.post("/api/agents", {
+        chosen = agents.get(name) or api.post("/api/agent-profiles", {
             "name": name, "runtime_id": "rt-claude-code", "provider_id": "prov-claude-subscription",
-            "model": model})["agent"]
+            "model": model})["profile"]
     else:
-        return next(a for a in registry["agents"] if a["builtin"])
-    api.put("/api/agent-settings/system", {"agent": chosen["agent_id"]})
+        return next(a for a in registry["profiles"] if a["builtin"])
+    api.put("/api/agent-settings/system", {"profile_id": chosen["profile_id"]})
     return chosen
 
 
