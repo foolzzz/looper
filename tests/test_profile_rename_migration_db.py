@@ -43,7 +43,8 @@ RENAMED = [
 ]
 DROPPED = {"agent_configs": {"role", "max_concurrency"}}
 # What a later migration of main adds to a v2.6.0 database, not the rename's doing: columns, and a built-in row.
-ADDED = {"agent_sessions": {"clean_start": False}, "agent_setting_layers": {"max_concurrency": None}}
+ADDED = {"agent_sessions": {"clean_start": False}, "agent_setting_layers": {"max_concurrency": None},
+         "agents": {"agent_teams": False}}
 ADDED_ROWS = {"llm_providers": {"prov-codex-login"}}
 UNCHANGED = ["agent_runtimes", "llm_providers", "llm_provider_secrets", "projects", "tasks"]
 

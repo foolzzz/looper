@@ -190,6 +190,8 @@ class TestEnvironment:
         record = launch.record()
         assert record["env"] == {"sha256": launch.env_sha256, "keys": {"TZ": _sha("UTC"), "LANG": _sha("C.UTF-8")}}
         assert "C.UTF-8" not in json.dumps(record)
+        # Nothing to change for a server without the agent teams variable, which a profile without them removes.
+        monkeypatch.delenv("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS", raising=False)
         assert Launch().environment() is None and Launch().env_sha256 is None
 
 
