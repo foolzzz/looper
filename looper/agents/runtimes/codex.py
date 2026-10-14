@@ -28,6 +28,14 @@ Verified against Codex CLI 0.162.0 (the multi-runtime RFC, section 6):
   the config (``wire_api = "responses"``); its key is only in the
   environment variable the config names (``KEY_ENV``), which the agent's
   shell commands do not inherit (``shell_environment_policy.exclude``).
+- **Codex's own login** (ChatGPT, an OAuth provider; RFC P1,
+  ``codex_login``): the config sets no ``model_provider`` (Codex's built-in
+  OpenAI one) and ``cli_auth_credentials_store = "file"``, the home's
+  ``auth.json`` is a link to the operator's login file, never a copy, and
+  ``CODEX_API_KEY`` and ``CODEX_ACCESS_TOKEN`` are removed from the
+  environment. The agent's shell commands get a ``CODEX_HOME`` without the
+  link (``shell_environment_policy.set``), and every home is inspected after
+  the run for a forked login (``after_run``). ChatGPT's apps are off.
 - **The catalog** (RFC P9): MCP servers become ``[mcp_servers.<name>]``
   (stdio and streamable HTTP; Codex has no SSE). Skills are mounted
   read-only like project knowledge (``--add-dir``) and listed in the runtime
@@ -61,6 +69,7 @@ from typing import TYPE_CHECKING, Any, ClassVar
 from ..run_usage import Usage, reported_totals, run_usage
 from . import (
     ApiProtocol, AuthKind, Capability, Probe, ProviderBinding, RunCost, RuntimeAdapter, RuntimeUnsupported,
+    codex_login,
 )
 from .per_turn import PerTurnSession, session_dir_name
 from .pricing import usage_event
@@ -95,8 +104,9 @@ class CodexRuntime(RuntimeAdapter):
     capabilities = frozenset({Capability.RUN, Capability.RESIDENT_SESSION, Capability.RESUME,
                               Capability.STRUCTURED_OUTPUT, Capability.MCP, Capability.ADD_DIRS})
     protocols = frozenset({ApiProtocol.OPENAI_RESPONSES})
-    # API keys only (RFC P1): Codex's own login is not used.
-    auth_kinds = frozenset({AuthKind.API_KEY})
+    # An API key provider, or Codex's own login (RFC P1, ``codex_login``).
+    auth_kinds = frozenset({AuthKind.API_KEY, AuthKind.OAUTH})
+    login_models = codex_login.SUGGESTED_MODELS
     isolation_id = HOME_LAYOUT_ID
     # Set by the binding and the run's home: a provider's own variables cannot set them.
     provider_env_owned: ClassVar[frozenset[str]] = frozenset({KEY_ENV, "CODEX_HOME"})
@@ -125,17 +135,19 @@ class CodexRuntime(RuntimeAdapter):
 
     def bind_provider(self, provider: ProviderSpec, model: str, effort: str) -> ProviderBinding:
         """The model and the effort as flags; the provider's own variables, then its key in ``KEY_ENV`` (Codex
-        sends it as a bearer token). The provider's endpoint is in the generated config (``config_toml``)."""
-        if provider.auth is not AuthKind.API_KEY:
-            raise RuntimeUnsupported(f"Codex runs with an API key provider only; provider {provider.name!r} is not one")
+        sends it as a bearer token). The provider's endpoint is in the generated config (``config_toml``). With
+        Codex's own login there is no key: what would replace the login is removed from the environment."""
         if ApiProtocol.OPENAI_RESPONSES not in provider.protocols:
             raise RuntimeUnsupported(f"Codex speaks openai-responses; provider {provider.name!r} does not serve it")
+        args = ("-m", model, *(("-c", f"model_reasoning_effort={_toml_value(effort)}") if effort else ()))
+        if provider.auth is AuthKind.OAUTH:
+            if provider.oauth_runtime_type != self.type:
+                raise RuntimeUnsupported(f"provider {provider.name!r} is the login of {provider.oauth_runtime_type} "
+                                         "runtimes, not of Codex")
+            return ProviderBinding(args=args, env=provider.env, unset=codex_login.ENV_UNSET)
         if not provider.api_key:
             raise RuntimeUnsupported(f"provider {provider.name!r} has no API key: set one in Settings")
-        return ProviderBinding(
-            args=("-m", model, *(("-c", f"model_reasoning_effort={_toml_value(effort)}") if effort else ())),
-            env=(*provider.env, (KEY_ENV, provider.api_key)),
-        )
+        return ProviderBinding(args=args, env=(*provider.env, (KEY_ENV, provider.api_key)))
 
     def launch_args(self, launch: Launch) -> list[str]:
         """The ``exec`` flags of every run: JSON events, no git requirement, no approvals or sandbox (RFC
@@ -156,7 +168,10 @@ class CodexRuntime(RuntimeAdapter):
                 **dict(binding.env)}
 
     def _command(self, executable: str, prompt_file: Path, launch: Launch) -> list[str]:
-        home = write_home(_local_dir(prompt_file), config_toml(launch), agents_md(prompt_file, launch))
+        local = _local_dir(prompt_file)
+        login = codex_login.login_file() if launch.profile.provider.auth is AuthKind.OAUTH else None
+        home = write_home(local, config_toml(launch, shell_home=_shell_home(local) if login else None),
+                          agents_md(prompt_file, launch), login=login)
         return ["env", f"CODEX_HOME={home}", executable, "exec", *self.launch_args(launch)]
 
     def resident_command(self, executable: str, *, cwd: str | Path, prompt_file: Path, launch: Launch,
@@ -211,6 +226,22 @@ class CodexRuntime(RuntimeAdapter):
         from .. import claude_cli
 
         return claude_cli.budget_error(result_event) if (result_event or {}).get(claude_cli.SOFT_CAP) else None
+
+    async def login_problem(self, provider: ProviderSpec) -> str | None:
+        """Why a run with Codex's own login cannot start now (``codex_login.launch_problem``)."""
+        return await codex_login.launch_problem() if provider.auth is AuthKind.OAUTH else None
+
+    async def after_run(self, launch: Launch, command: list[str]) -> list[str]:
+        """After a run with Codex's own login: every home under the run's ``codex`` directory whose login link is
+        not intact, its copy removed and the problem recorded (``codex_login.inspect_homes``)."""
+        if launch.profile.provider.auth is not AuthKind.OAUTH:
+            return []
+        home = next((arg.partition("=")[2] for arg in command[:2] if arg.startswith("CODEX_HOME=")), "")
+        if not home:
+            return []
+        problems = await asyncio.to_thread(codex_login.inspect_homes, Path(home).parent.parent,
+                                           codex_login.login_file())
+        return [await codex_login.record_problems(problems)] if problems else []
 
     def launch_record(self, launch: Launch) -> dict[str, Any]:
         """The skills given as documents and what Codex could not load, when there are any (RFC P9)."""
@@ -282,8 +313,12 @@ def mcp_servers(library: AgentLibrary) -> tuple[list[tuple[str, dict[str, Any]]]
     return tables, skipped
 
 
-def config_toml(launch: Launch) -> str:
-    """The ``config.toml`` of a run's home: isolation, the provider, and the MCP servers."""
+def config_toml(launch: Launch, *, shell_home: Path | None = None) -> str:
+    """The ``config.toml`` of a run's home: isolation, the provider, and the MCP servers. With Codex's own login
+    (``shell_home``, the ``CODEX_HOME`` the agent's shell commands get), see ``_login_config``."""
+    if launch.profile.provider.auth is AuthKind.OAUTH:
+        assert shell_home is not None
+        return _with_mcp(_login_config(shell_home), launch)
     provider = launch.profile.provider
     lines = [
         "# Written by Looper for its Codex runs. Only this file and AGENTS.md come from Looper.",
@@ -307,6 +342,35 @@ def config_toml(launch: Launch) -> str:
         f"env_key = {_toml_value(KEY_ENV)}",
         'wire_api = "responses"',
     ]
+    return _with_mcp(lines, launch)
+
+
+def _login_config(shell_home: Path) -> list[str]:
+    """A login home's config: Codex's built-in OpenAI provider (no ``model_provider``) and its login read from
+    this home's ``auth.json`` (a link to the operator's login file), ChatGPT's apps off, and a ``CODEX_HOME``
+    without the login for the agent's shell commands."""
+    return [
+        "# Written by Looper for its Codex runs. Only this file, AGENTS.md and the auth.json link come from Looper.",
+        "# Codex's own login: auth.json here links to the operator's login file, never a copy.",
+        codex_login.CONFIG_MARKER,
+        "",
+        "# Codex's own skill list always includes $HOME/.agents/skills; Looper lists the run's skills itself.",
+        "[skills]",
+        "include_instructions = false",
+        "",
+        "# No plugin marketplace sync and no ChatGPT apps in this home.",
+        "[features]",
+        "plugins = false",
+        "apps = false",
+        "",
+        "# The agent's shell commands get a CODEX_HOME without the login, so a codex command there cannot use it",
+        "# or log it out.",
+        "[shell_environment_policy]",
+        f"set = {_toml_value({'CODEX_HOME': str(shell_home)})}",
+    ]
+
+
+def _with_mcp(lines: list[str], launch: Launch) -> str:
     for name, table in mcp_servers(launch.library)[0]:
         lines += ["", f"[mcp_servers.{_toml_key(name)}]", *(f"{_toml_key(k)} = {_toml_value(v)}" for k, v in table.items())]
     return "\n".join(lines) + "\n"
@@ -398,6 +462,14 @@ def _codex_dir(local: Path) -> Path:
     return directory
 
 
+def _shell_home(local: Path) -> Path:
+    """``<runtime_root>/.local/codex/shell-home``: the ``CODEX_HOME`` a login run's shell commands get, empty of
+    any login of Looper's."""
+    directory = _codex_dir(local) / codex_login.SHELL_HOME
+    directory.mkdir(exist_ok=True)
+    return directory
+
+
 def _write_private(path: Path, text: str) -> None:
     """Write ``path`` (0600) through a temporary file beside it, so a reader never sees a partial one."""
     fd, building = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
@@ -430,13 +502,17 @@ def _remove_idle_homes(runs: Path, now: float) -> None:
             shutil.rmtree(home, ignore_errors=True)
 
 
-def write_home(local: Path, config: str, agents: str) -> Path:
+def write_home(local: Path, config: str, agents: str, *, login: Path | None = None) -> Path:
     """The home of the runs of this ``config.toml`` and ``AGENTS.md``: ``<local>/codex/runs/<sha256>``, written
-    once; Codex keeps its own state there too. Writing a new one removes the idle ones (``_remove_idle_homes``)."""
-    key = hashlib.sha256(f"{HOME_LAYOUT_ID}\n{config}\0{agents}".encode("utf-8")).hexdigest()
+    once; Codex keeps its own state there too. With ``login`` (the operator's login file), its ``auth.json`` is a
+    link to it (``codex_login.link_login``). Writing a new one removes the idle ones (``_remove_idle_homes``)."""
+    named = f"{HOME_LAYOUT_ID}\n{config}\0{agents}" + (f"\0{login}" if login is not None else "")
+    key = hashlib.sha256(named.encode("utf-8")).hexdigest()
     runs = _codex_dir(local) / "runs"
     target = runs / key
     if (target / "AGENTS.md").is_file():
+        if login is not None:
+            codex_login.link_login(target, login)
         return target
     runs.mkdir(exist_ok=True)
     _remove_idle_homes(runs, time.time())
@@ -444,6 +520,8 @@ def write_home(local: Path, config: str, agents: str) -> Path:
     try:
         _write_private(building / "config.toml", config)
         _write_private(building / "AGENTS.md", agents)
+        if login is not None:
+            codex_login.link_login(building, login)
         try:
             os.rename(building, target)
         except OSError:
@@ -458,14 +536,22 @@ def write_home(local: Path, config: str, agents: str) -> Path:
 
 
 def _sync_home(source: Path, home: Path) -> None:
-    """Give a session's ``home`` the ``config.toml`` and ``AGENTS.md`` of the run home ``source``."""
+    """Give a session's ``home`` the ``config.toml``, the ``AGENTS.md`` and the login link (or none) of the run
+    home ``source``. The link comes before a login config and goes after an API key one, so a home with a
+    login config always has it (``codex_login.inspect_homes``)."""
     home.mkdir(parents=True, exist_ok=True)
     os.chmod(home, 0o700)
+    link = source / codex_login.LOGIN_FILE
+    login = Path(os.readlink(link)) if link.is_symlink() else None
+    if login is not None:
+        codex_login.link_login(home, login)
     for name in ("config.toml", "AGENTS.md"):
         text = (source / name).read_text(encoding="utf-8")
         target = home / name
         if not target.is_file() or target.read_text(encoding="utf-8") != text:
             _write_private(target, text)
+    if login is None:
+        codex_login.unlink_login(home)
 
 
 # --- Events ---
@@ -646,7 +732,8 @@ class ResidentCodex(PerTurnSession):
     ``<runtime_root>/.local/codex/sessions/<label>``: every session of the
     Manager (or of a task's Planner) is kept there, while what the turns run
     with, the ``config.toml`` and the ``AGENTS.md``, is copied in before each
-    turn from the run home the command names. A changed system prompt
+    turn from the run home the command names, and so is its login link (never
+    a copy of the login itself; ``_sync_home``). A changed system prompt
     restarts the session (its command changes): Codex then sends the new
     ``AGENTS.md`` into the resumed session.
 

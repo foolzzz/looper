@@ -42,8 +42,9 @@ RENAMED = [
     ("agent_sessions", "agent_sessions", "agent_id", {"session_agent_id": "profile_id"}),
 ]
 DROPPED = {"agent_configs": {"role"}}
-# What a later migration of main adds to a v2.6.0 database, not the rename's doing.
+# What a later migration of main adds to a v2.6.0 database, not the rename's doing: a column, and a built-in row.
 ADDED = {"agent_sessions": {"clean_start": False}}
+ADDED_ROWS = {"llm_providers": {"prov-codex-login"}}
 UNCHANGED = ["agent_runtimes", "llm_providers", "llm_provider_secrets", "projects", "tasks"]
 
 
@@ -103,7 +104,10 @@ def test_a_v2_6_0_database_keeps_every_row_under_the_new_names_and_every_role_ru
                 assert expected, old  # the seed has rows in every renamed table
             # The dropped column only repeated the key.
             assert all(row["role"] == row["agent_id"] for row in before["agent_configs"])
-            assert {table: await _rows(pool, table, "1") for table in UNCHANGED} == unchanged
+            assert {table: [row for row in await _rows(pool, table, "1")
+                            if row.get("id") not in ADDED_ROWS.get(table, ())] for table in UNCHANGED} == unchanged
+            assert {row["id"] for row in await _rows(pool, "llm_providers", "1")} - {
+                row["id"] for row in unchanged["llm_providers"]} == ADDED_ROWS["llm_providers"]
             for old in ("agent_configs", "agents", "task_agent_overrides"):
                 assert await pool.fetchval("SELECT to_regclass($1)", old) is None
             assert await pool.fetchval(

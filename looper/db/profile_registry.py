@@ -188,6 +188,14 @@ async def list_profiles(*, pool: asyncpg.Pool | asyncpg.Connection | None = None
     return [_json(r["profile"]) for r in rows]
 
 
+async def login_profile_count(runtime_type: str, *, pool: asyncpg.Pool | asyncpg.Connection | None = None) -> int:
+    """How many Agent Profiles use the own login (an OAuth provider) of ``runtime_type`` runtimes."""
+    pool = pool or get_pool()
+    return int(await pool.fetchval(
+        "SELECT count(*) FROM agent_profiles a JOIN llm_providers p ON p.id = a.provider_id "
+        "WHERE p.auth = 'oauth' AND p.oauth_runtime_type = $1", runtime_type))
+
+
 async def get_profile(profile_id: str, *, pool: asyncpg.Pool | asyncpg.Connection | None = None,
                       ) -> dict[str, Any] | None:
     pool = pool or get_pool()

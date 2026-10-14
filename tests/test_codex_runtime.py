@@ -249,6 +249,100 @@ def test_writing_a_new_run_home_removes_the_idle_ones(tmp_path: Path) -> None:
     assert sorted(p.name for p in fresh.parent.iterdir()) == sorted([busy.name, fresh.name])
 
 
+def _login_provider() -> ProviderSpec:
+    """Codex's own login, as the built-in provider ``codex-login`` is."""
+    return ProviderSpec("prov-codex-login", "codex-login", AuthKind.OAUTH, frozenset({ApiProtocol.OPENAI_RESPONSES}),
+                        "codex")
+
+
+def _operator_login(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, codex_home_set: bool) -> Path:
+    """A stand-in for the operator's login file: in ``CODEX_HOME`` when it is set, else in ``~/.codex``."""
+    if codex_home_set:
+        directory = tmp_path / "operator-codex"
+        monkeypatch.setenv("CODEX_HOME", str(directory))
+    else:
+        monkeypatch.delenv("CODEX_HOME", raising=False)
+        monkeypatch.setenv("HOME", str(tmp_path / "operator"))
+        directory = tmp_path / "operator" / ".codex"
+    directory.mkdir(parents=True)
+    login = directory / "auth.json"
+    login.write_text('{"auth_mode": "chatgpt", "tokens": "stand-in"}')
+    os.chmod(login, 0o600)
+    return login
+
+
+@pytest.mark.parametrize("codex_home_set", [True, False], ids=["CODEX_HOME", "~/.codex"])
+def test_a_login_run_links_the_operators_login_and_keeps_it_from_the_agents_shell(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, codex_home_set: bool,
+) -> None:
+    login = _operator_login(tmp_path, monkeypatch, codex_home_set=codex_home_set)
+    monkeypatch.setenv("CODEX_API_KEY", "sk-would-replace-the-login")
+    monkeypatch.setenv("CODEX_ACCESS_TOKEN", "would-replace-the-login")
+    root = tmp_path / "runtime"
+    launch = _launch(provider=_login_provider())
+    command = CODEX.run_command("codex", cwd=tmp_path, prompt_file=_prompt_file(root), launch=launch)
+
+    home = Path(command[1].removeprefix("CODEX_HOME="))
+    link = home / "auth.json"
+    # A symbolic link to the login file by its absolute path: never a copy, never a hard link.
+    assert link.is_symlink() and os.readlink(link) == str(login) and Path(os.readlink(link)).is_absolute()
+    assert link.read_text() == login.read_text() and os.stat(login).st_nlink == 1
+    assert sorted(p.name for p in home.iterdir()) == ["AGENTS.md", "auth.json", "config.toml"]
+    config = tomllib.loads((home / "config.toml").read_text())
+    # Codex's built-in OpenAI provider and its login from this home's file; ChatGPT's apps off.
+    assert config["cli_auth_credentials_store"] == "file"
+    assert "model_provider" not in config and "model_providers" not in config
+    assert config["features"] == {"plugins": False, "apps": False}
+    # The agent's shell commands get a CODEX_HOME without the login.
+    shell_home = Path(config["shell_environment_policy"]["set"]["CODEX_HOME"])
+    assert config["shell_environment_policy"] == {"set": {"CODEX_HOME": str(shell_home)}}
+    assert shell_home.is_dir() and shell_home != home and list(shell_home.iterdir()) == []
+    # Nothing in the environment replaces the login; the model and the effort are flags as before.
+    environment = launch.environment()
+    assert not {"CODEX_API_KEY", "CODEX_ACCESS_TOKEN", KEY_ENV} & set(environment)
+    assert command[command.index("-m") + 1] == "gpt-5.5" and 'model_reasoning_effort="low"' in command
+    assert "stand-in" not in " ".join(command) + (home / "config.toml").read_text()
+
+
+def test_a_session_home_links_the_login_only_while_its_agent_runs_with_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    login = _operator_login(tmp_path, monkeypatch, codex_home_set=True)
+    root = tmp_path / "runtime"
+    codex = fake_claude(tmp_path / "codex", _FAKE_CODEX)
+    session_home = root / ".local" / "codex" / "sessions" / "manager"
+
+    async def _turn(provider: ProviderSpec) -> Any:
+        launch = _launch(executable=codex, provider=provider)
+        session = CODEX.resident_session("manager")
+        command = CODEX.resident_command(codex, cwd=root, prompt_file=_prompt_file(root), launch=launch)
+        await session.start(command, cwd=str(tmp_path), signature="s", env=launch.environment())
+        turn = await session.run_turn("hello", lambda event: asyncio.sleep(0))
+        await session.stop()
+        return turn
+
+    assert asyncio.run(_turn(_login_provider())).result_event["subtype"] == "success"
+    assert (session_home / "auth.json").is_symlink() and os.readlink(session_home / "auth.json") == str(login)
+    # The Manager moves to an API key provider: its session home keeps no link to the login.
+    assert asyncio.run(_turn(_provider())).result_event["subtype"] == "success"
+    assert not os.path.lexists(session_home / "auth.json") and login.is_file()
+
+
+def test_removing_an_idle_login_home_unlinks_the_login_and_leaves_the_file(tmp_path: Path) -> None:
+    from looper.agents.runtimes.codex import RUN_HOME_IDLE_SEC, write_home
+
+    login = tmp_path / "operator" / "auth.json"
+    login.parent.mkdir()
+    login.write_text("stand-in login")
+    local = tmp_path / ".local"
+    idle = write_home(local, "# login\n", "A", login=login)
+    then = time.time() - RUN_HOME_IDLE_SEC - 60
+    for path in (idle, *idle.iterdir()):
+        os.utime(path, (then, then), follow_symlinks=False)
+    write_home(local, "# other\n", "B")
+    assert not idle.exists() and login.read_text() == "stand-in login"
+
+
 def test_without_a_base_url_the_provider_is_openais_own_endpoint(tmp_path: Path) -> None:
     command = CODEX.run_command("codex", cwd=tmp_path, prompt_file=_prompt_file(tmp_path),
                                 launch=_launch(provider=_provider(base_url=""), effort=""))
@@ -260,7 +354,7 @@ def test_without_a_base_url_the_provider_is_openais_own_endpoint(tmp_path: Path)
 @pytest.mark.parametrize(("provider", "error"), [
     (_provider(api_key=None), "has no API key"),
     (_provider(protocols=frozenset({ApiProtocol.ANTHROPIC_MESSAGES})), "openai-responses"),
-    (_provider(auth=AuthKind.OAUTH, oauth_runtime_type="codex"), "API key provider only"),
+    (_provider(auth=AuthKind.OAUTH, oauth_runtime_type="claude-code", api_key=None), "not of Codex"),
 ])
 def test_a_provider_codex_cannot_use_fails_the_launch(provider: ProviderSpec, error: str, tmp_path: Path) -> None:
     with pytest.raises(RuntimeUnsupported, match=error):

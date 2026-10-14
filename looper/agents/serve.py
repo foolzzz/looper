@@ -331,6 +331,15 @@ async def _run_agent_system(
     if orphan_count:
         logger.info("marked %d orphaned task(s) as stopped", orphan_count)
 
+    # A Codex login that forked in a run the previous server did not see end (before the session directories
+    # it may be in are reclaimed).
+    from .runtimes import codex_login
+    try:
+        if problem := await codex_login.inspect_at_start(runtime_root):
+            logger.warning("%s", problem)
+    except Exception:
+        logger.warning("could not inspect the Codex homes for a forked login", exc_info=True)
+
     # Before any agent launches: remove the read-only copies of replaced or
     # deleted content that no running process mounts.
     from .read_only_copies import reclaim_unused
@@ -368,6 +377,7 @@ async def _run_agent_system(
     checks = [
         database_check,
         *await asyncio.to_thread(self_check.check_claude, claude_bin),
+        await self_check.codex_login_check(),
         self_check.check_lark_cli(lark_enabled),
     ]
     self_check.log_problems(checks)

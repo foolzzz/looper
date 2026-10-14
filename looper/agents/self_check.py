@@ -10,7 +10,9 @@ backs the database up first and does not start without a way to
 
 Nothing here spends money: the Claude login is read with
 ``claude auth status``, which reads the local credentials and makes no model
-call.
+call. The Codex login (``codex_login``) is checked only when an Agent Profile
+uses it, with ``codex login status`` in a probe home; a forked login that a
+run recorded is a failure until the operator clears it.
 """
 
 from __future__ import annotations
@@ -23,9 +25,14 @@ import shutil
 import subprocess
 import sys
 import urllib.parse
+from collections.abc import Callable
 from dataclasses import asdict, dataclass
+from typing import TYPE_CHECKING
 
 from . import db_backup
+
+if TYPE_CHECKING:
+    from .runtimes.codex_login import LoginStatus
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +52,7 @@ DATABASE_FIX = (
     '  export LOOPER_DATABASE_URL="postgresql://postgres:postgres@localhost:54329/loopx"'
 )
 LARK_CLI_FIX = "install lark-cli and sign in, or turn the Lark channel off on the Settings page"
+CODEX_LOGIN_FIX = "run `codex login` and sign in with ChatGPT, or give the Agent Profiles an API key provider"
 
 _COMMAND_TIMEOUT_SECONDS = 15.0
 _DATABASE_TIMEOUT_SECONDS = 5.0
@@ -152,6 +160,42 @@ def _check_login(path: str) -> Check:
     return Check("claude_login", "Claude login", FAIL, "not logged in", CLAUDE_LOGIN_FIX)
 
 
+def check_codex_login(profiles: int | None, problem: dict[str, str] | None, probe: Callable[[], LoginStatus]) -> Check:
+    """Can the Agent Profiles that use Codex's own login run? ``profiles``: how many there are (``None``:
+    unknown); ``problem``: the forked login a run recorded; ``probe`` reads ``codex login status``."""
+    from .runtimes.codex_login import PROBLEM_FIX, LoginState
+
+    if profiles is None:
+        return Check("codex_login", "Codex login", SKIP,
+                     "not checked: the Agent Profiles are stored in PostgreSQL, which is unreachable")
+    if not profiles:
+        return Check("codex_login", "Codex login", SKIP, "not checked: no Agent Profile uses the Codex login")
+    if problem is not None:
+        return Check("codex_login", "Codex login", FAIL,
+                     f"unavailable since {problem.get('at') or '?'}: {problem.get('detail')}", PROBLEM_FIX)
+    status = probe()
+    if status.state is LoginState.CHATGPT:
+        return Check("codex_login", "Codex login", OK, status.detail)
+    if status.state is LoginState.UNKNOWN:
+        return Check("codex_login", "Codex login", WARN, f"not checked: {status.detail}", CODEX_LOGIN_FIX)
+    return Check("codex_login", "Codex login", FAIL, status.detail, CODEX_LOGIN_FIX)
+
+
+async def codex_login_check() -> Check:
+    """``check_codex_login`` with the server's pool, read now (``/api/status`` asks on every poll; the probe's
+    answer is reused for a while)."""
+    from ..db import profile_registry
+    from .runtimes import codex_login
+
+    try:
+        profiles = await profile_registry.login_profile_count("codex")
+        problem = await codex_login.recorded_problem()
+    except Exception:
+        logger.warning("cannot read whether an Agent Profile uses the Codex login", exc_info=True)
+        profiles, problem = None, None
+    return await asyncio.to_thread(check_codex_login, profiles, problem, codex_login.cached_probe)
+
+
 def check_lark_cli(lark_enabled: bool | None) -> Check:
     """Does the enabled Lark channel have ``lark-cli``? ``None``: whether it is enabled is unknown."""
     if lark_enabled is None:
@@ -209,6 +253,8 @@ class _DatabaseFacts:
     lark_enabled: bool | None = None
     server_version_num: int | None = None
     schema_change_pending: bool | None = None
+    codex_login_profiles: int | None = None
+    codex_login_problem: dict[str, str] | None = None
 
 
 async def _database_facts(dsn: str) -> _DatabaseFacts:
@@ -216,6 +262,8 @@ async def _database_facts(dsn: str) -> _DatabaseFacts:
 
     from ..db.channel_configs import get_config
     from ..db.connection import schema_change_pending
+    from ..db.profile_registry import login_profile_count
+    from .runtimes.codex_login import recorded_problem
 
     try:
         conn = await asyncpg.connect(dsn, timeout=_DATABASE_TIMEOUT_SECONDS)
@@ -226,10 +274,17 @@ async def _database_facts(dsn: str) -> _DatabaseFacts:
             row = await get_config("channel-lark", pool=conn)  # a connection answers like a pool here
         except asyncpg.UndefinedTableError:  # a database `looper serve` has not set up yet
             row = None
+        try:
+            profiles: int | None = await login_profile_count("codex", pool=conn)
+            problem = await recorded_problem(pool=conn)
+        except (asyncpg.UndefinedTableError, asyncpg.UndefinedColumnError):  # set up by an older `looper serve`
+            profiles, problem = 0, None
         return _DatabaseFacts(
             lark_enabled=bool(row and row.get("enabled")),
             server_version_num=int(await conn.fetchval("SELECT current_setting('server_version_num')")),
             schema_change_pending=await schema_change_pending(conn),
+            codex_login_profiles=profiles,
+            codex_login_problem=problem,
         )
     finally:
         await conn.close()
@@ -239,9 +294,13 @@ async def run_checks(*, dsn: str, claude_bin: str = "claude") -> list[Check]:
     """Every check, reading only what it can: the channel settings and the schema state need the database."""
     database = await check_database(dsn)
     facts = await _database_facts(dsn) if database.status == OK else _DatabaseFacts()
+    from .runtimes.codex_login import probe_login
+
     claude = await asyncio.to_thread(check_claude, claude_bin)
+    codex = await asyncio.to_thread(check_codex_login, facts.codex_login_profiles, facts.codex_login_problem,
+                                    probe_login)
     pg_dump, _ = await asyncio.to_thread(check_pg_dump, facts.server_version_num, facts.schema_change_pending)
-    return [database, *claude, check_lark_cli(facts.lark_enabled), pg_dump]
+    return [database, *claude, codex, check_lark_cli(facts.lark_enabled), pg_dump]
 
 
 def format_checks(checks: list[Check]) -> str:
@@ -260,7 +319,9 @@ def log_problems(checks: list[Check]) -> None:
     """Log every check that is not ok or skipped, loudly."""
     for check in checks:
         if check.status in (FAIL, WARN):
-            consequence = " Agents cannot run until this is fixed." if check.id.startswith("claude") else ""
+            consequence = (" Agents cannot run until this is fixed." if check.id.startswith("claude") else
+                           " Agent Profiles with the Codex login cannot run until this is fixed."
+                           if check.id == "codex_login" else "")
             logger.warning("SELF-CHECK %s %s: %s.%s Fix: %s", check.status.upper(), check.label, check.detail,
                            consequence, check.fix.replace("\n", " "))
 

@@ -964,6 +964,27 @@ class ClaudeRunRecorder:
 
         return self._launch.profile.provider if self._launch is not None else BUILTIN_PROVIDER
 
+    async def _after_run(self) -> None:
+        """Tell the operator what the run left wrong in its runtime's own state, as a warning in the log and an
+        ``error`` row in the task's activity."""
+        if self._launch is None:
+            return
+        try:
+            warnings = await self._launch.runtime.after_run(self._launch, self._command)
+        except Exception:
+            logger.warning("could not check what the run of %s left behind", self._agent_id, exc_info=True)
+            return
+        from ..db import activity
+
+        for warning in warnings:
+            logger.warning("%s: %s", self._agent_id, warning)
+            if self._task_id:
+                try:
+                    await activity.insert_activity(task_id=self._task_id, worker=self._agent_id, kind="error",
+                                                   summary=f"Warning: {warning}"[:500])
+                except Exception:
+                    logger.warning("could not record the warning for %s", self._agent_id, exc_info=True)
+
     async def _heartbeat(self) -> None:
         """Any output, partial deltas included, shows the run is not stuck."""
         now = _clock()
@@ -989,8 +1010,11 @@ class ClaudeRunRecorder:
 
         Claude reports the running totals of its session, so a run that is
         one turn of a longer-lived session passes its own share
-        (``ResidentClaude.turn_usage``).
+        (``ResidentClaude.turn_usage``). What the run left wrong in its
+        runtime's own state (``RuntimeAdapter.after_run``: a forked Codex
+        login) goes to the server log and the task's activity first.
         """
+        await self._after_run()
         if self._record_id is None:
             return
         from ..db import llm_records

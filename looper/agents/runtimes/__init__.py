@@ -30,7 +30,11 @@ command themselves. An adapter says:
   and why a run stopped at its spend cap. Tokens priced at a provider's prices
   (``pricing.price_cost``) and the per-run soft cap Looper enforces itself
   (``pricing.cap_exceeded``, fed by internal ``usage`` events) are shared by
-  every adapter.
+  every adapter;
+- **its own login** (``login_problem``, ``after_run``, ``login_models``):
+  why a run with the runtime's login cannot start now, what a run left wrong
+  with the login, and the models the form suggests for it (Codex:
+  ``codex_login``).
 
 What the catalog and the project knowledge put in a run (plugin directories,
 the MCP configuration, knowledge directories) is materialized by
@@ -259,6 +263,22 @@ class RuntimeAdapter(ABC):
     @abstractmethod
     def budget_error(self, result_event: dict[str, Any] | None) -> str | None:
         """Why a run stopped at its spend cap; None when it did not."""
+
+    # --- Its own login ---
+
+    # The models the Agent Profile form suggests with the runtime's own login (any model is taken).
+    login_models: ClassVar[tuple[str, ...]] = ()
+
+    async def login_problem(self, provider: ProviderSpec) -> str | None:
+        """Why a run with ``provider`` (the runtime's own login) cannot start now; None when it can, or when the
+        adapter cannot tell."""
+        return None
+
+    async def after_run(self, launch: Launch, command: list[str]) -> list[str]:
+        """Checked when a run (or a resident turn) of ``command`` ends: what it left wrong in the runtime's own
+        state that the operator must hear of (the run's task activity and the server log carry it); nothing
+        unless the adapter says otherwise."""
+        return []
 
     # --- The record ---
 
