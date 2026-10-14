@@ -93,6 +93,28 @@ uv run loopx serve
 The schema is applied automatically on first startup. Telegram and Lark need
 no flags; turn them on from the Settings page (see [Channels](#channels)).
 
+### Backups when upgrading
+
+`loopx serve` applies the schema at every start, and an upgrade may drop
+columns or tables. When the schema is about to change, serve first writes a
+`pg_dump` backup to `~/.loopx/backups/` (the runtime root's `backups/`, newest
+5 per database kept) and logs how to restore it; a new, empty database needs
+none. It uses the `pg_dump` on PATH, or the one `LOOPX_PG_DUMP` names, which
+must be at least the server's major version (`loopx doctor` checks it; on
+macOS, `brew install libpq` and put `$(brew --prefix libpq)/bin` on PATH).
+With PostgreSQL in Docker, dump inside the container instead:
+
+```bash
+export LOOPX_BACKUP_CMD='docker exec agentbox-postgres pg_dump --format=custom -U {user} {dbname}'
+```
+
+Without a usable `pg_dump`, or when the backup fails, serve exits before it
+changes anything; `loopx serve --skip-backup` migrates without a backup and
+logs a warning. To roll back, stop LoopX, recreate the database empty, restore
+the file with `pg_restore --no-owner --dbname "$LOOPX_DATABASE_URL" <file>`
+(in Docker: `docker exec -i agentbox-postgres pg_restore --no-owner -U postgres
+-d loopx < <file>`), and run the previous LoopX version.
+
 Moving to a new machine: `uv run loopx config export loopx-config.json` writes
 the agent configuration to one file (secrets become placeholders;
 `--include-projects` adds projects), and `uv run loopx config import

@@ -19,6 +19,23 @@ How the agent system works today is described in
 
 ### Added
 
+- **Backup before a schema change.** `loopx serve` records the sha256 of the
+  `schema.sql` it applied (`schema_fingerprint`, in the same transaction).
+  When a database that already holds LoopX tables has a different or no
+  fingerprint, serve first writes a `pg_dump --format=custom` backup (mode
+  0600) to `<runtime root>/backups/`, checks it (`pg_restore --list` when a
+  `pg_restore` is at hand), keeps the newest 5 per database and logs the
+  restore command, and only then applies the schema; a new, empty database
+  needs none. The dump comes from `LOOPX_PG_DUMP` or `pg_dump` on PATH, of at
+  least the server's major version, or from `LOOPX_BACKUP_CMD`, a command whose
+  stdout is the dump (`{dbname}` and `{user}` are filled in), such as
+  `docker exec <container> pg_dump --format=custom -U {user} {dbname}`.
+  `loopx doctor` reports the `pg_dump`, failing when a schema change is
+  pending without one. **Behavior change:** without a usable `pg_dump`, or
+  when the backup fails, `loopx serve` exits before changing the schema;
+  `--skip-backup` migrates without a backup and logs a warning.
+  `loopx config import --apply` no longer migrates such a database: it asks
+  to start `loopx serve` once first.
 - **Configuration export and import.** `loopx config export <file>` writes an
   installation's agent configuration to one JSON file (`loopx-config/v1`):
   the system and role settings layers and role prompts, the catalog with its
