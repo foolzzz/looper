@@ -73,7 +73,8 @@ def test_serve_starts_the_agent_system_without_upstream_modules(
     monkeypatch.setenv("LOOPX_RUNTIME_ROOT", str(tmp_path / "env-root"))
     argv = ["serve"]
     if flags:
-        argv += ["--host", "0.0.0.0", "--port", "9999", "--verbose", "--runtime-root", str(tmp_path / "flag-root")]
+        argv += ["--host", "0.0.0.0", "--port", "9999", "--verbose", "--runtime-root", str(tmp_path / "flag-root"),
+                 "--skip-backup"]
 
     result, _, stderr = _run_loopx(*argv, cwd=tmp_path)
 
@@ -85,6 +86,7 @@ def test_serve_starts_the_agent_system_without_upstream_modules(
             "runtime_root": str(tmp_path / ("flag-root" if flags else "env-root")),
             "work_dir": str(tmp_path.resolve()),
             "verbose": str(flags),
+            "skip_backup": str(flags),
         }
     ]
     upstream = _upstream(result["modules"])
@@ -161,7 +163,8 @@ def _doctor_env(tmp_path: Path, *, claude: str | None, database_url: str) -> dic
         stub = bin_dir / "claude"
         stub.write_text(_STUB_CLAUDE.format(calls=tmp_path / "calls", state=claude))
         stub.chmod(0o755)
-    return {**os.environ, "PATH": f"{bin_dir}{os.pathsep}/usr/bin{os.pathsep}/bin", "LOOPX_DATABASE_URL": database_url}
+    env = {key: value for key, value in os.environ.items() if key not in ("LOOPX_PG_DUMP", "LOOPX_BACKUP_CMD")}
+    return {**env, "PATH": f"{bin_dir}{os.pathsep}/usr/bin{os.pathsep}/bin", "LOOPX_DATABASE_URL": database_url}
 
 
 def _closed_port() -> int:
@@ -238,11 +241,12 @@ def test_doctor_passes_unless_a_check_failed(tmp_path: Path, lark: str, lark_lin
     import asyncpg
 
     from evals.prompt_regression.runner import fresh_database
+    from loopx.db.connection import ensure_schema
 
     async def set_up(url: str) -> None:
         conn = await asyncpg.connect(url)
         try:
-            await conn.execute((REPO_ROOT / "loopx" / "db" / "schema.sql").read_text())
+            await ensure_schema(conn)
             await conn.execute("INSERT INTO channel_configs (channel_id, channel_type, enabled) "
                                "VALUES ('channel-lark', 'lark', $1)", lark != "off")
         finally:
@@ -260,3 +264,72 @@ def test_doctor_passes_unless_a_check_failed(tmp_path: Path, lark: str, lark_lin
     assert [line[:5].strip() for line in _check_lines(output).values()] == ["ok", "ok", "ok", lark_line], output
     if lark_line == "warn":
         assert "install lark-cli" in output
+
+
+def _stub_pg_dump(bin_dir: Path, version: str) -> None:
+    stub = bin_dir / "pg_dump"
+    stub.write_text(f"#!/bin/sh\necho 'pg_dump (PostgreSQL) {version}'\n")
+    stub.chmod(0o755)
+
+
+def _pg_dump_line(output: str) -> tuple[str, str]:
+    """The pg_dump check's line and the line after it (its fix, when it has one)."""
+    lines = [*output.splitlines(), ""]
+    [index] = [i for i, line in enumerate(lines) if line[6:].startswith("pg_dump ")]
+    return lines[index], lines[index + 1]
+
+
+@pytest.mark.parametrize(("pg_dump", "status"), [(None, "warn"), ("16.4", "ok")], ids=["missing", "found"])
+def test_doctor_reports_the_pg_dump_that_backs_up_before_a_schema_change(
+    tmp_path: Path, pg_dump: str | None, status: str,
+) -> None:
+    env = _doctor_env(tmp_path, claude="logged_in", database_url=f"postgresql://127.0.0.1:{_closed_port()}/loopx")
+    env["PATH"] = str(tmp_path / "bin")  # no system pg_dump
+    if pg_dump:
+        _stub_pg_dump(tmp_path / "bin", pg_dump)
+
+    _, output, _ = _run_loopx("doctor", cwd=tmp_path, env=env)
+
+    line, fix = _pg_dump_line(output)
+    assert line.startswith(status), output
+    if pg_dump:
+        assert "pg_dump (PostgreSQL) 16.4" in line
+    else:
+        assert fix.lstrip().startswith("fix: install pg_dump"), output
+
+
+@pytest.mark.skipif(not os.environ.get("LOOPX_TEST_DATABASE_URL"), reason="LOOPX_TEST_DATABASE_URL is not set")
+@pytest.mark.parametrize(("pg_dump", "status", "code"), [(None, "fail", 1), ("9.6.24", "fail", 1), ("99.0", "ok", 0)],
+                         ids=["missing", "older-than-the-server", "usable"])
+def test_doctor_fails_without_a_usable_pg_dump_when_the_schema_is_about_to_change(
+    tmp_path: Path, pg_dump: str | None, status: str, code: int,
+) -> None:
+    import asyncio
+
+    import asyncpg
+
+    from evals.prompt_regression.runner import fresh_database
+    from loopx.db.connection import ensure_schema
+
+    async def set_up(url: str) -> None:
+        conn = await asyncpg.connect(url)
+        try:
+            await ensure_schema(conn)
+            await conn.execute("UPDATE schema_fingerprint SET sha256 = 'an older schema.sql'")
+        finally:
+            await conn.close()
+
+    with fresh_database(os.environ["LOOPX_TEST_DATABASE_URL"]) as (database_url, _):
+        asyncio.run(set_up(database_url))
+        env = _doctor_env(tmp_path, claude="logged_in", database_url=database_url)
+        env["PATH"] = str(tmp_path / "bin")
+        if pg_dump:
+            _stub_pg_dump(tmp_path / "bin", pg_dump)
+        result, output, stderr = _run_loopx("doctor", cwd=tmp_path, env=env)
+
+    assert result["code"] == code, output + stderr
+    line, _ = _pg_dump_line(output)
+    assert line.startswith(status), output
+    if status == "fail":
+        assert "the database schema is about to change" in line
+

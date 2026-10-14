@@ -49,14 +49,14 @@ LARK_CLI_FIX = "install lark-cli and sign in, or turn the Lark channel off on th
 
 def pg_dump_fix(server_major: int | None) -> str:
     """How to give LoopX a pg_dump for the server, or do without one."""
-    version = f"{server_major} or newer" if server_major else "at least the server's major version"
+    version = f"{server_major} or newer" if server_major else "of at least the server's major version"
     install = (
         'macOS: brew install libpq, then put it on PATH: export PATH="$(brew --prefix libpq)/bin:$PATH"'
         if sys.platform == "darwin" else
         f"Debian/Ubuntu: apt install postgresql-client-{server_major or '<major>'} (from apt.postgresql.org)"
     )
     return (
-        f"install pg_dump {version}; {install}\n"
+        f"install pg_dump {version}. {install}\n"
         f"or set {db_backup.PG_DUMP_ENV} to a pg_dump; with PostgreSQL in Docker, dump inside its container:\n"
         f"  export {db_backup.BACKUP_CMD_ENV}='docker exec <container> pg_dump --format=custom -U {{user}} {{dbname}}'\n"
         "or migrate once without a backup: loopx serve --skip-backup"
@@ -197,7 +197,8 @@ def check_pg_dump(server_version_num: int | None, pending: bool | None) -> tuple
                          f"{exc}; the database schema is about to change, and LoopX backs it up first",
                          pg_dump_fix(server_major)), None
         return Check("pg_dump", "pg_dump", WARN,
-                     f"{exc}; `loopx serve` will not start after an upgrade that changes the database schema",
+                     f"{exc}; after an upgrade that changes the database schema, `loopx serve` backs the database "
+                     "up first and will not start without it",
                      pg_dump_fix(server_major)), None
     unchecked = "" if server_major or dumper.command else "; not compared with the server, which is unreachable"
     return Check("pg_dump", "pg_dump", OK, dumper.detail + unchecked), dumper
