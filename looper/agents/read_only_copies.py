@@ -1,6 +1,6 @@
 """Reclaiming the read-only copies agent runs mount from under the runtime root.
 
-Agent runs read five kinds of content from directories or files written once,
+Agent runs read four kinds of content from directories or files written once,
 named by a SHA-256 of their content, under ``<runtime_root>/.local``; a change
 writes a new one and leaves the old one:
 
@@ -10,11 +10,7 @@ writes a new one and leaves the old one:
   (``knowledge.py``);
 - a project's skills plugin as versions before the catalog wrote it:
   ``projects/<id>/skills/<sha256>/``; nothing writes these any more;
-- the MCP servers installed for a run: ``mcp/<sha256>.json`` (``mcp.py``);
-- the ``CODEX_HOME`` of Codex runs, named by the configuration and
-  ``AGENTS.md`` they run with: ``codex/runs/<sha256>/`` (``runtimes/codex.py``;
-  not read-only: Codex keeps its own state there). The resident sessions'
-  homes, ``codex/sessions/``, hold the sessions and stay.
+- the MCP servers installed for a run: ``mcp/<sha256>.json`` (``mcp.py``).
 
 ``reclaim_unused`` removes the ones nothing uses. ``looper serve`` runs it at
 start, before any agent launches. It keeps a directory that the database's
@@ -44,11 +40,11 @@ _HASHED_FILE = re.compile(r"[0-9a-f]{64}\.json")
 
 
 def hashed_directories(runtime_root: Path) -> list[Path]:
-    """Every content-hashed directory of the library, the projects' knowledge, the projects' skills and the Codex
-    run homes, and every content-hashed MCP configuration file."""
+    """Every content-hashed directory of the library, the projects' knowledge and the projects' skills, and
+    every content-hashed MCP configuration file."""
     local = runtime_root.absolute() / ".local"
     parents = [local / "library", *sorted((local / "projects").glob("proj-*/knowledge")),
-               *sorted((local / "projects").glob("proj-*/skills")), local / "codex" / "runs"]
+               *sorted((local / "projects").glob("proj-*/skills"))]
     directories = [child for parent in parents if parent.is_dir() for child in sorted(parent.iterdir())
                    if _HASHED.fullmatch(child.name) and child.is_dir() and not child.is_symlink()]
     mcp = local / "mcp"

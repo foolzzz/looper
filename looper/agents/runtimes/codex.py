@@ -52,6 +52,7 @@ import shlex
 import shutil
 import subprocess
 import tempfile
+import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from functools import lru_cache
@@ -82,6 +83,9 @@ HOME_LAYOUT_ID = "codex-home/v1"
 # The parts of a Claude Code plugin Codex cannot load.
 _PLUGIN_PARTS_LEFT_OUT = ("commands", "agents", "hooks", ".mcp.json", "output-styles")
 _DESCRIPTION_MAX_CHARS = 300
+# How long a run home may go unwritten before it is removed (``_remove_idle_homes``): far beyond any run.
+RUN_HOME_IDLE_SEC = 24 * 3600
+_HASHED = re.compile(r"[0-9a-f]{64}")
 
 
 class CodexRuntime(RuntimeAdapter):
@@ -409,16 +413,36 @@ def _write_private(path: Path, text: str) -> None:
         raise
 
 
+def _remove_idle_homes(runs: Path, now: float) -> None:
+    """Remove the run homes in ``runs`` that nothing has written to for ``RUN_HOME_IDLE_SEC``.
+
+    A home in use is written to all along (Codex keeps its state and logs
+    there), and the tiers write the home of the next turn or run again when
+    it is gone, so an idle one is garbage. The process list cannot tell: a
+    run's command line names its home only through ``env``, which is gone
+    once Codex runs.
+    """
+    for home in runs.iterdir():
+        if not _HASHED.fullmatch(home.name) or not home.is_dir() or home.is_symlink():
+            continue
+        try:
+            newest = max([home.stat().st_mtime, *(path.lstat().st_mtime for path in home.rglob("*"))])
+        except OSError:
+            continue
+        if now - newest > RUN_HOME_IDLE_SEC:
+            shutil.rmtree(home, ignore_errors=True)
+
+
 def write_home(local: Path, config: str, agents: str) -> Path:
     """The home of the runs of this ``config.toml`` and ``AGENTS.md``: ``<local>/codex/runs/<sha256>``, written
-    once. Codex keeps its own state there too; ``looper serve`` removes the homes no running process names
-    (``read_only_copies``)."""
+    once; Codex keeps its own state there too. Writing a new one removes the idle ones (``_remove_idle_homes``)."""
     key = hashlib.sha256(f"{HOME_LAYOUT_ID}\n{config}\0{agents}".encode("utf-8")).hexdigest()
     runs = _codex_dir(local) / "runs"
     target = runs / key
     if (target / "AGENTS.md").is_file():
         return target
     runs.mkdir(exist_ok=True)
+    _remove_idle_homes(runs, time.time())
     building = Path(tempfile.mkdtemp(prefix=".building.", dir=runs))
     try:
         _write_private(building / "config.toml", config)

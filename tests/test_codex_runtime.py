@@ -13,6 +13,7 @@ import asyncio
 import json
 import os
 import stat
+import time
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
@@ -235,6 +236,22 @@ def test_a_run_gets_a_home_of_its_own_with_only_the_generated_config_and_agents_
     assert CODEX.run_command("codex", cwd=tmp_path, prompt_file=_prompt_file(root), launch=launch) == command
     other = CODEX.run_command("codex", cwd=tmp_path, prompt_file=_prompt_file(root, "OTHER"), launch=launch)
     assert other[1] != command[1]
+
+
+def test_writing_a_new_run_home_removes_the_idle_ones(tmp_path: Path) -> None:
+    from looper.agents.runtimes.codex import RUN_HOME_IDLE_SEC, write_home
+
+    local = tmp_path / ".local"
+    idle, busy = write_home(local, "# a\n", "A"), write_home(local, "# b\n", "B")
+    (busy / "state_5.sqlite").write_bytes(b"written by a running Codex")
+    then = time.time() - RUN_HOME_IDLE_SEC - 60
+    for home in (idle, busy):
+        for path in (home, *home.iterdir()):
+            os.utime(path, (then, then))
+    (busy / "state_5.sqlite").touch()  # still being written
+    assert write_home(local, "# b\n", "B") == busy and idle.is_dir()  # an existing home removes nothing
+    fresh = write_home(local, "# c\n", "C")
+    assert sorted(p.name for p in fresh.parent.iterdir()) == sorted([busy.name, fresh.name])
 
 
 def test_without_a_base_url_the_provider_is_openais_own_endpoint(tmp_path: Path) -> None:
