@@ -6,8 +6,10 @@ retries ``b`` with feedback and sends ``c`` to review. While ``b``'s retry and
 ``c``'s Reviewer run, the server stops; the next server resumes the task:
 no new plan, the Planner's session resumed with its cost baseline, ``b``'s
 retry run again with its feedback, ``c`` reviewed again, then ``d``. No plan
-or session file is written. Runs only when LOOPX_TEST_DATABASE_URL points at a
-disposable database (each run creates and drops a database beside it).
+or session file is written. A task that failed at its spend cap continues the
+same way after a restart, from its plan in the database. Runs only when
+LOOPX_TEST_DATABASE_URL points at a disposable database (each run creates and
+drops a database beside it).
 """
 
 from __future__ import annotations
@@ -92,7 +94,11 @@ else:
         text = content if isinstance(content, str) else "".join(b.get("text", "") for b in content)
         log("planner_turns.jsonl", text.splitlines()[0])
         uuid = json.loads(line).get("uuid")
-        if text.startswith("[PLAN]"):
+        if text.startswith("[PLAN]") and "capped" in prompt:
+            reply = {"steps": [
+                {"id": x, "instruction": f"do {x}", "acceptance_criteria": [f"{x} works"], "depends_on": [],
+                 "review": False} for x in ("x", "y")]}
+        elif text.startswith("[PLAN]"):
             reply = {"steps": [
                 {"id": "a", "instruction": "do a", "acceptance_criteria": ["a works"], "depends_on": [], "review": False},
                 {"id": "b", "instruction": "do b", "acceptance_criteria": ["b works"], "depends_on": [], "review": False},
@@ -196,3 +202,33 @@ def test_a_task_carries_on_after_the_server_restarts(tmp_path: Path) -> None:
     # The database holds the state: no plan or session file was written.
     assert list(runtime.glob(".local/**/*.json")) == []
     assert not (runtime / ".local" / "planner").exists() and not (runtime / ".local" / "manager").exists()
+
+
+def test_a_task_failed_at_its_cap_continues_from_the_database_after_a_restart(tmp_path: Path) -> None:
+    root = tmp_path.resolve()
+    bin_dir, state = _install(root)
+    runtime, work, home = root / "runtime", root / "work", root / "home"
+    for path in (runtime, work, home):
+        path.mkdir()
+
+    with fresh_database(str(DSN)) as (database_url, _):
+        server = {"database_url": database_url, "runtime_root": runtime, "bin_dir": bin_dir, "home": home}
+        with running_server(**server, log_path=root / "first.log") as api:
+            # The plan turn ($0.001) leaves room for both Workers; their $0.002 each crosses the cap.
+            project = api.post("/api/projects", {"name": "capped", "work_dir": str(work), "task_budget_usd": 0.0015})
+            task_id = api.post("/api/tasks/create", {"requirement": "capped calc", "project_id": project["project_id"]})[
+                "task_id"]
+            api.post("/api/tasks/start", {"task_id": task_id})
+            failed = _wait(api, task_id, lambda d: d["status"] == "failed")
+        with running_server(**server, log_path=root / "second.log") as api:
+            assert api.get(f"/api/tasks/{task_id}")["status"] == "failed"  # a failed task is not resumed
+            api.post(f"/api/tasks/{task_id}/continue", {"task_budget_usd": 1})
+            done = _wait(api, task_id, lambda d: d["status"] == "completed")
+
+    assert failed["fail_kind"] == "task_budget"
+    assert {k: s["status"] for k, s in _steps(done).items()} == {"x": "verified", "y": "verified"}
+    turns = _log(state, "planner_turns.jsonl")
+    assert [t for t in turns if t.startswith("[PLAN]")] == [turns[0]]  # planned once
+    argvs = _log(state, "planner_argv.jsonl")
+    assert argvs[-1][argvs[-1].index("--resume") + 1] == "fake-planner-session"
+    assert list(runtime.glob(".local/**/*.json")) == []

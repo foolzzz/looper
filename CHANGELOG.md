@@ -17,6 +17,30 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+### Changed
+
+- **Plan state and agent sessions live in PostgreSQL.** The Planner no longer
+  writes its plan to `.local/planner/planner-<task_id>/<plan_id>.json`, and the
+  Manager no longer writes `.local/manager/session.json`. A task's plan is in
+  `task_plans` and its steps, with everything the Planner decides with
+  (label, dependencies, review flag, retries, feedback, late user messages),
+  in `task_steps`; each change writes only the rows it touches, and a change
+  to several rows is one transaction. Each resident agent's Claude session
+  and its running totals are in `agent_sessions`. The dashboard and the
+  Planner now read the same rows.
+- **Tasks carry on after a server restart.** A task the previous server left
+  running with a live plan is resumed at startup instead of being marked
+  stopped: its new Planner reads the plan back and resumes its Claude session
+  without planning again; a step whose Worker was running runs again (the same
+  attempt, its feedback kept), a step in review gets a new Reviewer, and a
+  decision the stop cut off is taken again. Other tasks left running are still
+  marked stopped.
+- **One-time import of the old files.** The first start imports the plan
+  files in the resident Planner's format and the Manager's `session.json`
+  (rows already in the database win; recorded as `file_state_import`); plan
+  files from before the resident Planner are skipped with a log line. The
+  files are left on disk and can be removed.
+
 ### Added
 
 - **Task spend against its cap, and continuing at a higher cap.** When the

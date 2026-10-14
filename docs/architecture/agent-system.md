@@ -44,8 +44,8 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
   are handled one at a time, and each turn is one Runs record holding only
   that turn's cost and tokens
   ([What a run spent](#what-a-run-spent-and-how-large-its-context-grew)); the
-  session's running totals are saved beside its id in
-  `.local/manager/session.json` (`session_totals`). When Claude exits
+  session's running totals are saved beside its id in the `agent_sessions`
+  row `manager` (`session_totals`). When Claude exits
   (or dies mid-turn, which answers that message with an error) or the
   Manager's system prompt, model, effort, Settings environment or library
   changes, the next message starts a new process that
@@ -133,7 +133,9 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
 - Creates/destroys PlannerAgent instances per task
 - Handles task lifecycle: start, stop (pause), restart (resume), cancel
 - Queues tasks when at capacity, auto-dequeues on completion
-- Orphan detection on server startup (stuck tasks → "stopped")
+- At server startup, resumes the tasks the previous server left running whose
+  plan is live (`executing` or `verifying`): each gets a new Planner and a
+  `TASK_RESUME`. Any other task left running is marked "stopped"
 
 ### Planner (`loopx/agents/tiers/planner.py`)
 
@@ -196,8 +198,22 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
     action.
   - When Claude dies, its turn fails and the next turn starts a new process
     with `--resume <session_id>`; the session id and the session's running
-    totals (`session_totals`) are kept in the Planner's plan file under
-    `.local/planner/`.
+    totals (`session_totals`) are kept in the `agent_sessions` row
+    `planner-<task_id>`.
+- The plan lives in PostgreSQL: its own state (id, status, origin,
+  `final_summary`, `fail_reason`) in `task_plans` and each step, with
+  everything the Planner decides with (label, dependencies, review flag,
+  acceptance criteria, result, retries, feedback, late user messages), in
+  `task_steps`. Each change writes the rows it touches; a change to several
+  (a new plan, a replan, added steps, a settled step with the plan's summary)
+  is one transaction. The project is not saved with it: it is read again
+  before every event's turns.
+- After a server restart (`TASK_RESUME`), a new Planner reads its plan and
+  session back and carries on without planning again: a step whose Worker was
+  running runs again as the same attempt with its feedback, a step in review
+  gets a new Reviewer, a decision the stop cut off is taken again from the
+  step's saved result, and Claude resumes its session from its saved totals.
+  Continuing a task that failed at its spend cap reads the same rows.
 - Each turn is one `llm_records` row with agent_id `planner-<task_id>`, the
   `task_id`, its own cost and tokens, its context at the end, `metadata.pid` and the system prompt's record
   (`system_prompt`, `system_prompt_sha256`, `prompt_layers`). The activity gets short
@@ -698,8 +714,8 @@ So:
   totals over the run. A Worker or Reviewer run is a whole process, so they
   are its totals. A resident agent's turn subtracts the totals at the
   previous result. `ResidentClaude` keeps those totals. A process that
-  resumes a session starts from the totals saved beside its id: the
-  Manager's `session.json` and the Planner's plan file. The saved totals are
+  resumes a session starts from the totals saved beside its id in
+  `agent_sessions`. The saved totals are
   rewritten after every result. When a session cannot be resumed and is
   dropped (`session_started` false), its totals are dropped with it, and the
   new session starts from zero. A counter that went down is taken as having
@@ -767,8 +783,8 @@ delivery and marked delivered once consumed. The WorkerPool consumes
 `WORK_ITEM` and `VERIFY_REQUEST` through topic consumers that take delivery.
 On restart the bus replays undelivered messages for the Manager, the TaskRouter
 and channels. It drops messages for Planners and Workers: those exist per task,
-the server stops their tasks at startup, and replaying would re-run their work.
-The journal is then compacted.
+and a resumed task's Planner works out what to run again from its plan in the
+database. The journal is then compacted.
 
 Key message types:
 
@@ -781,6 +797,7 @@ Key message types:
 | `TASK_CANCEL` | HTTP → TaskRouter → Planner | Terminate task permanently |
 | `TASK_STOP` | HTTP → TaskRouter | Pause task (preserves state) |
 | `TASK_RESTART` | HTTP → TaskRouter | Resume stopped/failed task |
+| `TASK_RESUME` | TaskRouter → a resumed task's new Planner | Carry on with the saved plan after a server restart |
 | `GOAL_STATUS` | Planner → TaskRouter → Manager | Report progress/completion |
 | `WORK_ITEM` | Planner → Worker | Dispatch step |
 | `WORK_RESULT` | Worker → Planner | Step result |
@@ -863,7 +880,9 @@ PostgreSQL is a hard startup dependency. All data paths:
 |---|---|
 | `projects` | Projects: name (unique ignoring case), description, default `work_dir` (`''` = none), `background` for the task agents' system prompt (`''` = none), `planner_harness_prompt` and `worker_harness_prompt` (`''` = the default harness) |
 | `tasks` | Task metadata, status, phase, timestamps, `work_dir`, `project_id` (required) |
-| `task_steps` | Planner decomposition steps per task |
+| `task_steps` | A task's steps, each with everything its Planner decides with: `step_key` (label), `depends_on` (step ids), `review`, `acceptance_criteria`, `validation_commands`, `status`, `result`, `worker_id`, `reviewer_id`, `retries`, `feedback`, `missed_messages` |
+| `task_plans` | A task's plan, one row per task: `plan_id`, `status` (`planning`, `executing`, `verifying`, `stopping`, `completed`, `failed`), `correlation_id`, `origin_channel_id`, `final_summary`, `fail_reason`; replaced when the task is planned again |
+| `agent_sessions` | The Claude session each resident agent resumes: `manager` or `planner-<task_id>`, its `session_id` and `session_totals` |
 | `activity` | Execution trace events (SSE streaming to frontend) |
 | `chat_messages` | Chat conversation history |
 | `llm_records` | One row per Claude run: input and output text, status, the run's own `cost_usd`, `input_tokens`, `output_tokens`, `cache_read_tokens` and `cache_creation_tokens`, its final `context_tokens` and its `compactions`; `metadata` holds the exact argv (`command`), `cwd`, the appended `system_prompt`, its `system_prompt_sha256`, its `prompt_layers`, the `model_choice`, the Settings `env` names, the `library` items loaded and a task agent's `project_skills` |
@@ -875,6 +894,14 @@ PostgreSQL is a hard startup dependency. All data paths:
 | `project_documents` | A project's knowledge: title, one-line summary, `source_kind` (`text`, `upload` or `path`), `filename` and `content` (text and upload) or `path` (relative to the project's default directory), `size_bytes`, `sha256`; a CHECK keeps each kind's columns consistent and the rows go with their project |
 | `llm_profiles` | LLM provider profiles (model, endpoint, API key env) |
 | `channel_configs` | Telegram/Lark settings (enabled flag, env var names, sender allowlist) |
+
+Plans and sessions used to be files (`.local/planner/planner-<task_id>/*.json`,
+`.local/manager/session.json`). The first start with the database holding
+them imports them once (`loopx/agents/state_import.py`, recorded as
+`file_state_import` in `schema_migrations`); plan files from before the
+resident Planner are skipped with a log line. Nothing reads the files after
+that, so they can be removed. The bus journal (`.local/agent-bus`) and the
+read-only copies under `.local` stay files.
 
 Every task belongs to one project. On the first start after projects were
 added, the one-time migration `tasks_project_backfill` creates one project per
