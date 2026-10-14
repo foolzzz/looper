@@ -39,7 +39,7 @@
 | M8b | MCP 服务器进目录，安装方式相同；密钥存库、接口打码 | ✅ 已交付（looper #49） | M8a |
 | M8c | 进库来源：上传、git、界面新建与编辑 | ✅ 已交付（looper #51） | M8a |
 | M8d | 配置层级统一：系统默认 → 角色 → 项目 → 项目里的角色 | ✅ 已交付（looper #50） | M8a |
-| M8e | 导出与导入：一个文件，应用前预览，密钥默认留空 | ✅ 已交付（looper #PRNUM） | M8b、M8c、M8d |
+| M8e | 导出与导入：一个文件，应用前预览，密钥默认留空 | ✅ 已交付（looper #53） | M8b、M8c、M8d |
 | M9a | 运行时、provider 与 agent 的注册和选择；现有 Claude Code 路径抽成第一个运行时适配器 | 待开工 | M8d |
 | M9b | Claude Code 接多种 provider：订阅 OAuth、Anthropic key、兼容 anthropic 协议的接口；按 provider 价格计算花费 | 待开工 | M9a |
 | M9c | Codex 运行时：四类角色都支持（含常驻会话），事件统一、MCP 翻译、OpenAI 登录与 key | 待开工 | M9a |
@@ -469,7 +469,7 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
 | 2026-10-13 | M8b 交付（looper #49）：MCP 服务器作为 `mcp` 目录条目（stdio 或 http/sse），安装方式与插件、skill 相同；env 和 header 的值存在 `library_mcp_servers`、接口只显示 `***`（送回 `***` 保留原值），可从本机 `~/.claude.json` 只读导入；每次运行把安装给它的服务器写成一个按内容哈希命名的只读 `--mcp-config` 文件，回收照旧。验证：真实 haiku 下全局只装给 worker 的 stdio 服务器出现在 Worker 的 init 里并被调用、报出暗号，Planner 的 init 里没有，任务 $0.05（加上核实 CLI 共约 $0.10）；真实 PG 测试与 Settings 截图。 |
 | 2026-10-13 | M8d 交付（looper #50）：harness、模型、effort、环境变量和单次运行上限统一存进 `agent_setting_layers`，按系统 → 角色 → 项目 → 项目里的角色逐层解析（Manager 只有前两层；环境变量逐键合并、可在后面的层取消；Reviewer 在角色层和项目角色层没有自己的 harness 时沿用同层 Worker 的），四类 agent 都用 `load_agent_settings` 启动，每次运行在 `settings_sources` 记下每项来自哪一层。一次性迁移把 Settings 默认值、各 agent 的模型和 Manager 的 harness、项目的模型和单次上限、项目的 Planner 和 Worker harness 原样迁入对应层并删除旧列；Settings、Agents 页和项目 Settings 标签分别编辑系统、角色、项目和项目里的角色层，每项显示当前取值和来源。验证：以 main（`72e72eb65`）的解析代码生成基准，两组旧数据迁移后四类 agent 的启动参数、环境变量和 system prompt 与基准逐字节相同，prompt 不变所以未跑真实 Claude；真实 PG 867 通过 |
 | 2026-10-13 | M8c 交付（looper #51）：Settings 的目录可上传（或拖入）`SKILL.md` 或 skill、插件目录的 zip，预览后从公开 `https://` git 仓库勾选导入（同一 URL 再导入就地更新、保留安装），在界面新建和编辑 skill；都只进库不安装，项目外重名返回 409、可改名，编辑上传或 git 条目标记 modified，本机导入的条目只能重新导入。zip 拒绝绝对路径、`..`、链接和超限文件，克隆为 `--depth 1`、不跑 hook 和子模块、不读操作者的 git 配置和凭据、限时限大小、用后删除，每条规则一个真实 PG 测试。验证：一次性 `loopx serve` 从 `https://github.com/anthropics/skills` 预览出 20 个 skill（56 个二进制文件未导入），全部导入 384 个文件、6.3 MB，再导入 20 个不变；上传的 skill 全局装给 worker 后出现在 Worker 的 `--plugin-dir`、不在 Planner 的；真实 PG 902 通过。 |
-| 2026-10-13 | M8e 交付（looper #PRNUM），M8 完成：`loopx config export` 把系统和角色层、角色 prompt、目录（含文件和 MCP）、全局安装、渠道以及可选的项目（`--include-projects`）写成一个 JSON 文件，密钥默认是占位符，`loopx config import` 默认只读预览、`--apply` 在一个事务里按自然键写入（同键就地更新、不删文件外的、占位符不覆盖已存的密钥），Settings 可流式下载导出。验证：真实 PG 测试覆盖往返、占位符、预览不写、冲突更新、重复导入不变和超过 8 MiB 的导出；对线上库只读导出（107 个条目、2175 个文件、23.2 MB），导入新库的预览为 115 项新增，应用后再预览全部不变、再导出与原文件相同。 |
+| 2026-10-13 | M8e 交付（looper #53），M8 完成：`loopx config export` 把系统和角色层、角色 prompt、目录（含文件和 MCP）、全局安装、渠道以及可选的项目（`--include-projects`）写成一个 JSON 文件，密钥默认是占位符，`loopx config import` 默认只读预览、`--apply` 在一个事务里按自然键写入（同键就地更新、不删文件外的、占位符不覆盖已存的密钥），Settings 可流式下载导出。验证：真实 PG 测试覆盖往返、占位符、预览不写、冲突更新、重复导入不变和超过 8 MiB 的导出；对线上库只读导出（107 个条目、2175 个文件、23.2 MB），导入新库的预览为 115 项新增，应用后再预览全部不变、再导出与原文件相同；真实 PG 912 通过。 |
 
 ## 5. 不属于本 RFC 的待办
 
