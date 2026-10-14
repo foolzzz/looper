@@ -18,6 +18,40 @@ To learn how to use these features, read the [usage guide](docs/fork/usage.md).
 
 ### Added
 
+- **Project skills (M4).** A project can carry its own Claude Code skills.
+  Only its Planner, Workers and Reviewers load them, and nothing is written
+  into the project's directory (`loopx/agents/project_skills.py`).
+  - **Storage.** Each skill is a row of `project_skills`, deleted with its
+    project:
+    - a name, a lowercase slug unique in the project;
+    - a one-line description;
+    - the body of its `SKILL.md`;
+    - an enabled switch.
+  - **Caps.** Each cap is refused with a 400 that states it, and a name the
+    project already has is a 409:
+    - a name has at most 64 characters;
+    - a description has at most 1,024 characters;
+    - a body has at most 64 KiB, and frontmatter is refused because the
+      fields make it;
+    - a project has at most 20 skills.
+  - **Delivery.** Every Planner turn and every Worker and Reviewer run reads
+    the project's enabled skills as it starts. They are written once,
+    read-only, as one plugin, `project`, under
+    `<runtime_root>/.local/projects/<project_id>/skills/<sha256>/`. The
+    `SKILL.md` frontmatter is generated from the name and description. The
+    plugin is mounted with one `--plugin-dir` after the library's, so Claude
+    Code names each skill `project:<name>`. The Manager gets none.
+  - **Effect and records.** A change reaches the next Worker or Reviewer, and
+    the resident Planner restarts with `--resume` on its next turn. Each run
+    records `metadata.project_skills`: the project, the set's hash and each
+    skill's name and `SKILL.md` hash.
+  - **API and dashboard.**
+    - `GET`/`POST /api/projects/<id>/skills` and
+      `PUT`/`DELETE /api/projects/<id>/skills/<skill_id>`; `PUT` takes the
+      enabled switch and edits.
+    - The project editor gains a Skills list below Knowledge: add a skill
+      (name, description, instructions), switch one on or off, and delete
+      one.
 - **Project knowledge (M3).** A project can carry reference documents that
   its Planner, Workers and Reviewers read on demand instead of getting them
   in the prompt (`loopx/agents/knowledge.py`).

@@ -1171,6 +1171,137 @@ class TestKnowledge:
         assert "Warning: the project's knowledge could not be read" in activity(agent_db)
 
 
+def _project_plugins(argv: list[str]) -> list[str]:
+    """The ``--plugin-dir`` values that are a project's skills."""
+    return [d for d in plugin_dirs(argv) if "/.local/projects/" in d]
+
+
+def _reading_plugins(
+    found: dict[str, dict[str, str]], change: Callable[[], None] | None = None,
+) -> Callable[[Harness], Awaitable[None]]:
+    """Run the task (making ``change`` while the first step's Worker runs, if given), then keep the
+    SKILL.md files of every project plugin the Planner's commands mounted, by directory, before the
+    runtime root goes away."""
+
+    async def scenario(h: Harness) -> None:
+        await h.start()
+        if change is not None:
+            await h.until(lambda: h.held)
+            change()
+            await h.release(WORK_OK)
+        await h.finished()
+        for argv in h.claude.argvs():
+            for directory in _project_plugins(argv):
+                skills = Path(directory) / "skills"
+                found[directory] = {p.name: (p / "SKILL.md").read_text(encoding="utf-8")
+                                    for p in sorted(skills.iterdir())}
+
+    return scenario
+
+
+@pytest.mark.usefixtures("agent_db", "planner_row")
+class TestProjectSkills:
+    """The Planner's command mounts its task's project's enabled skills as one plugin, read as each turn
+    starts; a change to them restarts its Claude, which resumes the session."""
+
+    def test_the_command_mounts_its_projects_skills_once_and_records_them(
+        self, planner_claude: Any, agent_db: Any, project_skills: Any,
+    ) -> None:
+        project_skills(("proj-1", "deploy-check", "Use before a deploy.", "Reply DEPLOY-OK."),
+                       ("proj-2", "elsewhere", "Another project's.", "Reply ELSEWHERE."))
+        claude = planner_claude(plan(step("s1")), decide("accept"))
+        found: dict[str, dict[str, str]] = {}
+        h = drive(claude, always(WORK_OK), _reading_plugins(found))
+
+        (argv,) = claude.argvs()
+        (plugin,) = _project_plugins(argv)
+        assert plugin.startswith(f"{h.work_dir.parent}/.local/projects/proj-1/skills/") and plugin.endswith("/project")
+        assert found[plugin] == {"deploy-check": (
+            "---\nname: deploy-check\ndescription: \"Use before a deploy.\"\n---\n\nReply DEPLOY-OK.\n")}
+        _assert_unrestricted(argv)
+        for start in _starts(agent_db):
+            assert start["metadata"]["project_skills"] == {
+                "project_id": "proj-1", "sha256": Path(plugin).parent.name, "plugin": "project",
+                "skills": [{"name": "deploy-check", "sha256": _sha(found[plugin]["deploy-check"])}]}
+        assert [line for line in activity(agent_db) if "skills" in line] == ["Project skills applied (1 skill)"]
+
+    def test_changed_skills_restart_claude_resuming_its_session(
+        self, planner_claude: Any, agent_db: Any, project_skills: Any,
+    ) -> None:
+        project_skills(("proj-1", "deploy-check", "Use before a deploy.", "Reply DEPLOY-OK."))
+        claude = planner_claude(plan(step("s1")), decide("accept"))
+
+        def add() -> None:
+            project_skills(("proj-1", "deploy-check", "Use before a deploy.", "Reply DEPLOY-OK."),
+                           ("proj-1", "release-notes", "Drafts release notes.", "Reply NOTES-OK."))
+
+        found: dict[str, dict[str, str]] = {}
+        drive(claude, hold_first(), _reading_plugins(found, add))
+
+        first, second = claude.argvs()
+        assert (_flag(first, "--resume"), _flag(second, "--resume")) == (None, "sess-p")
+        assert sorted(found[_project_plugins(second)[0]]) == ["deploy-check", "release-notes"]
+        assert claude.prompts()[0] == claude.prompts()[1]  # the skills alone restarted it
+        assert [len(s["metadata"]["project_skills"]["skills"]) for s in _starts(agent_db)] == [1, 2]
+        assert [line for line in activity(agent_db) if "skills" in line] == [
+            "Project skills applied (1 skill)", "Project skills changed (2 skills)"]
+
+    def test_disabling_the_last_skill_restarts_claude_without_the_plugin(
+        self, planner_claude: Any, agent_db: Any, project_skills: Any,
+    ) -> None:
+        project_skills(("proj-1", "deploy-check", "Use before a deploy.", "Reply DEPLOY-OK."))
+        claude = planner_claude(plan(step("s1")), decide("accept"))
+        drive(claude, hold_first(), _between_turns(agent_db, lambda: project_skills()))
+
+        first, second = claude.argvs()
+        assert _project_plugins(first) and not _project_plugins(second)
+        assert _flag(second, "--resume") == "sess-p"
+        assert "project_skills" not in _starts(agent_db)[-1]["metadata"]
+        assert [line for line in activity(agent_db) if "skills" in line] == [
+            "Project skills applied (1 skill)", "Project skills removed"]
+
+    def test_a_task_moved_to_another_project_takes_that_projects_skills(
+        self, planner_claude: Any, agent_db: Any, project_skills: Any,
+    ) -> None:
+        project_skills(("proj-1", "deploy-check", "Use before a deploy.", "Reply DEPLOY-OK."),
+                       ("proj-2", "elsewhere", "Another project's.", "Reply ELSEWHERE."))
+        agent_db.get_task_project.return_value = _project()
+        claude = planner_claude(plan(step("s1")), decide("accept"))
+
+        def move() -> None:
+            agent_db.get_task_project.return_value = {**_project("other"), "id": "proj-2"}
+
+        found: dict[str, dict[str, str]] = {}
+        drive(claude, hold_first(), _reading_plugins(found, move))
+
+        first, second = claude.argvs()
+        (ours,), (theirs,) = _project_plugins(first), _project_plugins(second)
+        assert "/.local/projects/proj-1/skills/" in ours and "/.local/projects/proj-2/skills/" in theirs
+        assert (sorted(found[ours]), sorted(found[theirs])) == (["deploy-check"], ["elsewhere"])
+
+    def test_unchanged_skills_keep_one_process(self, planner_claude: Any, project_skills: Any) -> None:
+        project_skills(("proj-1", "deploy-check", "Use before a deploy.", "Reply DEPLOY-OK."))
+        claude = planner_claude(plan(step("s1")), decide("accept"))
+        drive(claude, always(WORK_OK))
+        assert len(claude.argvs()) == 1 and len(claude.turns()) == 2
+
+    def test_a_failed_read_keeps_the_last_skills_and_its_claude(
+        self, planner_claude: Any, agent_db: Any, project_skills: Any,
+    ) -> None:
+        project_skills(("proj-1", "deploy-check", "Use before a deploy.", "Reply DEPLOY-OK."))
+        claude = planner_claude(plan(step("s1")), decide("accept"))
+
+        def fail() -> None:
+            agent_db.list_enabled_skills.side_effect = ConnectionError("database is down")
+
+        h = drive(claude, hold_first(), _between_turns(agent_db, fail))
+
+        assert h.final().payload["status"] == "completed"  # type: ignore[union-attr]
+        (argv,) = claude.argvs()  # the same skills, so Claude was not restarted
+        assert _project_plugins(argv)
+        assert "Warning: the project's skills could not be read" in activity(agent_db)
+
+
 # --- Ending the task through the TaskRouter ---
 
 
