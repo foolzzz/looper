@@ -18,6 +18,11 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.6.0] - 2026-10-14
+
+Covers `v2.5.0` to `v2.6.0`: pull requests #2 and #4 to #70 in
+[foolzzz/looper](https://github.com/foolzzz/looper/pulls).
+
 ### Added
 
 - **Claude Code with API keys and Anthropic-compatible providers.** A Claude
