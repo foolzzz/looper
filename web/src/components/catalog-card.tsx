@@ -96,6 +96,21 @@ function ItemRow({
         {item.version && <span className="font-mono text-[11px] text-muted-foreground">v{item.version}</span>}
         <OriginTag item={item} />
         <span className="ml-auto text-[11px] tabular-nums text-muted-foreground">{formatBytes(item.size_bytes)}</span>
+        {own && (
+          <span className="flex gap-0.5">
+            {item.kind === "skill" && (
+              <Button type="button" variant="ghost" size="sm" disabled={busy || editing} onClick={() => setEditing(true)}
+                      aria-label={`Edit ${item.qualified_name}`} className="h-6 px-2">
+                Edit
+              </Button>
+            )}
+            <Button type="button" variant="ghost" size="sm" disabled={busy || removing || confirming}
+                    onClick={() => setConfirming(true)} aria-label={`Delete ${item.qualified_name}`}
+                    className="h-6 px-2 text-muted-foreground hover:bg-destructive/10 hover:text-destructive">
+              Delete
+            </Button>
+          </span>
+        )}
       </div>
       <McpSummary item={item} />
       <p className="break-words text-[11px] text-muted-foreground">
@@ -138,21 +153,6 @@ function ItemRow({
           {busy && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
           Install globally
         </Button>
-      )}
-      {own && !editing && !confirming && (
-        <div className="flex flex-wrap justify-end gap-1">
-          {item.kind === "skill" && (
-            <Button type="button" variant="ghost" size="sm" disabled={busy} onClick={() => setEditing(true)}
-                    aria-label={`Edit ${item.qualified_name}`}>
-              Edit
-            </Button>
-          )}
-          <Button type="button" variant="ghost" size="sm" disabled={busy || removing} onClick={() => setConfirming(true)}
-                  aria-label={`Delete ${item.qualified_name}`}
-                  className="text-muted-foreground hover:bg-destructive/10 hover:text-destructive">
-            Delete
-          </Button>
-        </div>
       )}
       {confirming && (
         <div className="flex flex-wrap items-center justify-end gap-2">

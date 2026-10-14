@@ -127,6 +127,8 @@ const STATUS_TEXT: Record<GitPreviewItem["status"], string> = {
   conflict: "name taken",
 };
 
+const STATUS_ORDER: Record<GitPreviewItem["status"], number> = { new: 0, update: 1, conflict: 2, unchanged: 3 };
+
 /** Preview a repository's plugins and skills, then import the checked ones. */
 function GitForm({ onDone, onCancel }: { onDone: (message: string) => void; onCancel: () => void }) {
   const id = useId();
@@ -151,6 +153,8 @@ function GitForm({ onDone, onCancel }: { onDone: (message: string) => void; onCa
     setError("");
     try {
       const result = await previewGitRepo(source());
+      // What an import would change first; unchanged items last.
+      result.items.sort((a, b) => STATUS_ORDER[a.status] - STATUS_ORDER[b.status]);
       setPreview(result);
       setChosen(Object.fromEntries(result.items.map((item) => [item.path, item.status === "new" || item.status === "update"])));
       setNames(Object.fromEntries(result.items.map((item) => [item.path, item.name])));
