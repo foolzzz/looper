@@ -136,7 +136,7 @@ def _worker_row(
     *,
     error: Exception | None = None,
 ) -> AsyncMock:
-    """Serve the ``worker`` row of agent_configs (or a failed read) to the pool."""
+    """Serve the ``worker`` row of role_configs (or a failed read) to the pool."""
     from looper.db import role_configs
 
     get_config = AsyncMock(return_value=row, side_effect=error)
