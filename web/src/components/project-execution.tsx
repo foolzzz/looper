@@ -5,15 +5,13 @@ import { Input } from "@/components/ui/input";
 export type ExecutionDraft = Record<keyof ProjectExecution, string>;
 
 const FIELDS: (keyof ProjectExecution)[] = [
-  "model",
-  "run_budget_usd",
   "task_budget_usd",
   "task_budget_action",
   "supervise_interval_seconds",
   "review_policy",
   "distill_lessons",
 ];
-const NUMBERS = new Set<keyof ProjectExecution>(["run_budget_usd", "task_budget_usd", "supervise_interval_seconds"]);
+const NUMBERS = new Set<keyof ProjectExecution>(["task_budget_usd", "supervise_interval_seconds"]);
 // A switch: "true" is on; "" (null) and "false" are off.
 const SWITCHES = new Set<keyof ProjectExecution>(["distill_lessons"]);
 
@@ -69,26 +67,12 @@ export function ProjectExecutionFields({
       </p>
       <div className="grid gap-3 sm:grid-cols-2">
         <div className="space-y-1">
-          {label("model", "Model")}
-          <Input id={`${idPrefix}-model`} value={draft.model} onChange={set("model")} placeholder="Inherit (agent or Settings)" />
-        </div>
-        <div className="space-y-1">
           {label("review_policy", "Review")}
           <select id={`${idPrefix}-review_policy`} value={draft.review_policy} onChange={set("review_policy")} className={SELECT}>
             <option value="">Inherit: the Planner decides</option>
             <option value="planner">The Planner decides</option>
             <option value="all">Every step goes to the Reviewer</option>
           </select>
-        </div>
-        <div className="space-y-1">
-          {label("run_budget_usd", "Spend cap per run (USD)")}
-          <Input
-            id={`${idPrefix}-run_budget_usd`}
-            inputMode="decimal"
-            value={draft.run_budget_usd}
-            onChange={set("run_budget_usd")}
-            placeholder="No cap"
-          />
         </div>
         <div className="space-y-1">
           {label("task_budget_usd", "Spend cap per task (USD)")}

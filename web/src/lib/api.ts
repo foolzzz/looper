@@ -54,15 +54,12 @@ export interface TaskCost {
 /** The most characters a project background may have. */
 export const BACKGROUND_MAX_CHARS = 10000;
 
-/** The most characters a harness prompt (the default, the Manager's or a project's) may have. */
+/** The most characters a harness prompt may have, at any settings layer (also in `SettingLimits`). */
 export const HARNESS_MAX_CHARS = 20000;
 
-/** How a project's Planner, Workers and Reviewers run; null inherits today's behavior. */
+/** How a project's tasks run; null inherits today's behavior. Model, harness, effort, environment and the
+ * per-run cap are agent settings (`ProjectAgentSettings`). */
 export interface ProjectExecution {
-  /** Their model, over the agent's own and the default in Settings. */
-  model: string | null;
-  /** `--max-budget-usd` on each of their Claude Code processes. */
-  run_budget_usd: number | null;
   /** The most one task may spend over all its runs. */
   task_budget_usd: number | null;
   /** At the task cap: fail at once (also when null) or after the Planner sums up. */
@@ -84,10 +81,6 @@ export interface Project extends ProjectExecution {
   work_dir: string;
   /** Added to the system prompt of the project's Planner, Workers and Reviewers; "" = none. */
   background: string;
-  /** The harness prompt of the project's Planner; "" = the default one in Settings. */
-  planner_harness_prompt: string;
-  /** The harness prompt of the project's Workers and Reviewers; "" = the default one in Settings. */
-  worker_harness_prompt: string;
   created_at: string;
   updated_at: string;
   task_count: number;
@@ -285,9 +278,6 @@ export interface NewProjectFields {
   work_dir?: string;
   /** At most BACKGROUND_MAX_CHARS characters; omit or "" for none. */
   background?: string;
-  /** At most HARNESS_MAX_CHARS characters each; omit or "" to inherit the default harness. */
-  planner_harness_prompt?: string;
-  worker_harness_prompt?: string;
 }
 
 /** A new task names exactly one project: an existing one or one created with it. */
@@ -367,7 +357,7 @@ export type ProjectUpdate = Partial<Omit<NewProjectFields, "name">> & { name?: s
   [K in keyof ProjectExecution]?: ProjectExecution[K] | string;
 };
 
-/** Send only the fields to change; `work_dir: ""`, `background: ""` and an empty harness clear them. */
+/** Send only the fields to change; `work_dir: ""` and `background: ""` clear them. */
 export async function updateProject(projectId: string, fields: ProjectUpdate): Promise<Project> {
   const res = await fetch(`${API_BASE}/projects/${encodeURIComponent(projectId)}`, {
     method: "PUT",
@@ -759,10 +749,6 @@ export interface AgentConfig {
   system_prompt: string;
   /** The system-recommended prompt; "Reset to recommended" copies it into system_prompt. */
   default_prompt: string;
-  /** The Manager's own harness prompt; "" inherits the default. Other agents refuse it (their harness is per project). */
-  harness_prompt: string;
-  /** This agent's model; null or "" uses the default model in Settings. */
-  model: string | null;
   max_turns: number;
   timeout_seconds: number;
   max_concurrency: number;
@@ -772,13 +758,20 @@ export interface AgentConfig {
   updated_at: string;
 }
 
-/** One Claude run of an agent (Manager, Worker or reviewer). */
-export type HarnessSource = "builtin_default" | "system_default" | "manager_override" | "project_override";
-export type ModelSource = "builtin_default" | "system_default" | "agent_override";
+/** Where a run's harness came from: a settings layer, or (runs recorded before the layers) the old source names. */
+export type HarnessSource =
+  | SettingLayer
+  | "builtin_default"
+  | "system_default"
+  | "manager_override"
+  | "project_override";
+/** Where a run's model came from: a settings layer, or (older runs) the old source names. */
+export type ModelSource = SettingLayer | "builtin_default" | "system_default" | "agent_override" | "project_override";
 
 /** Where each layer of a run's system prompt came from (absent on runs recorded before it existed). */
 export interface PromptLayers {
-  harness?: { source: HarnessSource; sha256: string; project_id?: string } | null;
+  /** from_role "worker": a Reviewer without a harness of its own at that layer ran with the Worker's. */
+  harness?: { source: HarnessSource; sha256: string; project_id?: string; from_role?: "worker" } | null;
   role?: { config_id: string; sha256: string; recommended: boolean };
   project?: { id: string; background_sha256: string | null; updated_at: string | null } | null;
   task?: { kind: "plan" | "work" | "review"; task_id: string | null; step_id: string | null; sha256: string } | null;
@@ -821,8 +814,16 @@ export interface LlmRecord {
     prompt_layers?: PromptLayers;
     /** The model asked for (an alias or full name) and where it came from. */
     model_choice?: { model: string; source: ModelSource; effort: string | null };
-    /** The environment variables from Settings: their names, with each value's sha256. */
+    /** The environment variables from the agent settings: their names, with each value's sha256. */
     env?: { sha256: string; keys: Record<string, string> };
+    /** The settings layer each setting of the run came from (runs recorded before the layers lack it). */
+    settings_sources?: {
+      harness: SettingLayer;
+      model: SettingLayer;
+      effort: SettingLayer;
+      run_budget_usd: SettingLayer;
+      env: Record<string, SettingLayer>;
+    };
     /** The catalog items installed for the run (plugins and skills) and their hash; error when it went without
      * them. */
     library?: RunLibrary;
@@ -1007,55 +1008,130 @@ export async function deleteLlmProfile(profileId: number): Promise<void> {
   if (!res.ok) throw new Error(`delete llm-profile ${res.status}`);
 }
 
-// --- Agent settings: what every agent inherits ---
+// --- Agent settings: harness, model, effort, environment and per-run cap, by layer ---
 
-export interface EnvEntry {
+/** Where a setting comes from, from least to most specific: the built-in default, Settings (every agent), a role
+ * (Agents page), a project (all its agents), a role in a project. A later layer wins; the Manager has only the
+ * first three. */
+export type SettingLayer = "builtin" | "system" | "role" | "project" | "role_project";
+/** The roles a project's agents have: the Manager spans every project. */
+export type ProjectRole = Exclude<AgentRole, "manager">;
+
+/** An environment variable a layer sets; value null unsets a variable an earlier layer set (not in Settings). */
+export interface LayerEnvEntry {
   key: string;
-  value: string;
+  value: string | null;
 }
 
-export interface AgentSettings {
-  /** The default harness every agent inherits unless the Manager or a project overrides it. */
-  default_harness_prompt: string;
-  harness_source: "builtin_default" | "system_default";
-  builtin_harness_prompt: string;
+/** One layer's own values; null is not set here (inherits). */
+export interface LayerValues {
+  harness_prompt: string | null;
+  model: string | null;
+  /** One of `SettingLimits.effort_levels`. */
+  effort: string | null;
+  env: LayerEnvEntry[];
+  /** `--max-budget-usd` on each Claude Code process. */
+  run_budget_usd: number | null;
+}
+
+export interface Sourced<T> {
+  value: T;
+  source: SettingLayer;
+}
+
+/** What applies to an agent, and the layer each value came from. */
+export interface EffectiveSettings {
+  /** from_role "worker": a Reviewer without its own harness at that layer uses the Worker's. */
+  harness_prompt: Sourced<string> & { from_role?: "worker" };
+  model: Sourced<string>;
+  /** null = Claude Code's default effort. */
+  effort: Sourced<string | null>;
+  env: ({ key: string } & Sourced<string>)[];
+  /** null = no cap. */
+  run_budget_usd: Sourced<number | null>;
+}
+
+export interface SettingLimits {
   harness_max_chars: number;
-  default_model: string;
-  model_source: "builtin_default" | "system_default";
-  builtin_model: string;
-  /** "" = Claude Code's default effort. */
-  default_effort: string;
-  effort_levels: string[];
-  /** Non-secret variables added to every agent's environment. */
-  default_env: EnvEntry[];
   env_max_entries: number;
+  effort_levels: string[];
+  builtin_harness_prompt: string;
+  builtin_model: string;
+  budget_max_usd: number;
 }
 
-export type AgentSettingsUpdate = Partial<
-  Pick<AgentSettings, "default_harness_prompt" | "default_model" | "default_effort" | "default_env">
->;
+export interface LayerState {
+  values: LayerValues;
+  effective: EffectiveSettings;
+}
+
+/** Settings (the system layer) and each role's layer, with what applies to each role outside any project. */
+export interface AgentSettings {
+  limits: SettingLimits;
+  system: LayerState;
+  roles: Record<AgentRole, LayerState>;
+}
+
+/** A project's layer and its roles' layers, with what applies to each role in the project. */
+export interface ProjectAgentSettings {
+  project_id: string;
+  limits: SettingLimits;
+  project: { values: LayerValues };
+  roles: Record<ProjectRole, LayerState>;
+}
+
+/** The fields to change; null (or "") inherits again, `env` replaces the layer's whole list. A number field may be
+ * sent as typed, so the server's 400 explains it. */
+export type LayerUpdate = { [K in keyof LayerValues]?: LayerValues[K] | string };
+
+async function putJson<T>(path: string, body: unknown, label: string): Promise<T> {
+  const res = await fetch(`${API_BASE}${path}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) await failed(res, label);
+  return res.json();
+}
 
 export async function fetchAgentSettings(): Promise<AgentSettings> {
-  const res = await fetch(`${API_BASE}/settings/agents`);
+  const res = await fetch(`${API_BASE}/agent-settings`);
   if (!res.ok) await failed(res, "agent settings");
   return res.json();
 }
 
-/** Send only the fields to change; an empty value goes back to the built-in default. */
-export async function updateAgentSettings(fields: AgentSettingsUpdate): Promise<AgentSettings> {
-  const res = await fetch(`${API_BASE}/settings/agents`, {
-    method: "PUT",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(fields),
-  });
-  if (!res.ok) await failed(res, "update agent settings");
+/** The system layer: what every agent inherits (Settings). */
+export function updateSystemSettings(fields: LayerUpdate): Promise<AgentSettings> {
+  return putJson("/agent-settings/system", fields, "update agent settings");
+}
+
+/** A role's layer (Agents page). */
+export function updateRoleSettings(role: AgentRole, fields: LayerUpdate): Promise<AgentSettings> {
+  return putJson(`/agent-settings/roles/${encodeURIComponent(role)}`, fields, "update agent settings");
+}
+
+export async function fetchProjectAgentSettings(projectId: string): Promise<ProjectAgentSettings> {
+  const res = await fetch(`${API_BASE}/projects/${encodeURIComponent(projectId)}/agent-settings`);
+  if (!res.ok) await failed(res, "project agent settings");
   return res.json();
 }
 
-export async function resetDefaultHarness(): Promise<AgentSettings> {
-  const res = await fetch(`${API_BASE}/settings/agents/reset-harness`, { method: "POST" });
-  if (!res.ok) await failed(res, "reset harness");
-  return res.json();
+/** A project's layer: all its agents. */
+export function updateProjectLayer(projectId: string, fields: LayerUpdate): Promise<ProjectAgentSettings> {
+  return putJson(`/projects/${encodeURIComponent(projectId)}/agent-settings`, fields, "update project agent settings");
+}
+
+/** One role's layer in a project. */
+export function updateProjectRoleSettings(
+  projectId: string,
+  role: ProjectRole,
+  fields: LayerUpdate,
+): Promise<ProjectAgentSettings> {
+  return putJson(
+    `/projects/${encodeURIComponent(projectId)}/agent-settings/roles/${encodeURIComponent(role)}`,
+    fields,
+    "update project agent settings",
+  );
 }
 
 // --- The capability catalog: items acquired into LoopX, and where they are installed ---

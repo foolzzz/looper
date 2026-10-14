@@ -8,10 +8,13 @@ import { ProjectSkillsSection } from "@/components/project-skills";
 import { ProjectSettingsForm } from "@/components/project-settings";
 import {
   fetchKnowledge,
+  fetchProjectAgentSettings,
   fetchProjectInstalls,
   fetchTasks,
   type Project,
+  type ProjectAgentSettings,
   type ProjectInstalls,
+  type ProjectRole,
   type ProjectKnowledge,
   type TaskInfo,
 } from "@/lib/api";
@@ -232,10 +235,8 @@ function SkillsCard({ project, onOpen }: { project: Project; onOpen: () => void 
 /** The execution settings a project sets, in words; unset ones inherit and are left out. */
 function executionRows(project: Project): [string, string][] {
   const rows: [string, string][] = [];
-  if (project.model) rows.push(["Model", project.model]);
   if (project.review_policy)
     rows.push(["Review", project.review_policy === "all" ? "Every step goes to the Reviewer" : "The Planner decides"]);
-  if (project.run_budget_usd != null) rows.push(["Spend cap per run", formatUsd(project.run_budget_usd)]);
   if (project.task_budget_usd != null) rows.push(["Spend cap per task", formatUsd(project.task_budget_usd)]);
   if (project.task_budget_action)
     rows.push([
@@ -251,13 +252,37 @@ function executionRows(project: Project): [string, string][] {
   return rows;
 }
 
+const PROJECT_ROLES = [
+  ["planner", "Planner"],
+  ["worker", "Worker"],
+  ["reviewer", "Reviewer"],
+] as const;
+
+/** What the project's agents run with: each role's model, its spend cap per run when any has one, and which roles
+ * this project gives a harness of their own. */
+function agentRows(settings: ProjectAgentSettings): [string, string][] {
+  const each = (show: (role: ProjectRole) => string) =>
+    PROJECT_ROLES.map(([role, label]) => `${label} ${show(role)}`).join(" · ");
+  const effective = (role: ProjectRole) => settings.roles[role].effective;
+  const rows: [string, string][] = [["Models", each((role) => effective(role).model.value)]];
+  if (PROJECT_ROLES.some(([role]) => effective(role).run_budget_usd.value != null))
+    rows.push(["Spend cap per run", each((role) => {
+      const cap = effective(role).run_budget_usd.value;
+      return cap == null ? "none" : formatUsd(cap);
+    })]);
+  const harness = PROJECT_ROLES.filter(([role]) =>
+    ["project", "role_project"].includes(effective(role).harness_prompt.source),
+  ).map(([, label]) => label);
+  rows.push(["Harness", harness.length ? `set in this project for ${harness.join(", ")}` : "from Settings or the Agents page"]);
+  return rows;
+}
+
 function ExecutionCard({ project, onOpen }: { project: Project; onOpen: () => void }) {
-  const rows = executionRows(project);
-  const harness = [project.planner_harness_prompt && "Planner", project.worker_harness_prompt && "Worker and Reviewer"]
-    .filter(Boolean)
-    .join(" · ");
+  const agents = useLoad(() => fetchProjectAgentSettings(project.project_id), project.project_id);
+  const rows = [...(agents?.data ? agentRows(agents.data) : []), ...executionRows(project)];
   return (
     <OverviewCard title="Execution" action={<CardLink onClick={onOpen}>Change in Settings</CardLink>}>
+      {agents?.error && <p className="text-xs text-destructive">{agents.error}</p>}
       {rows.length === 0 ? (
         <p className="text-xs text-muted-foreground">
           Nothing set: the Planner, Workers and Reviewers run with the agents&apos; and Settings&apos; defaults.
@@ -272,9 +297,6 @@ function ExecutionCard({ project, onOpen }: { project: Project; onOpen: () => vo
           ))}
         </dl>
       )}
-      <p className="text-xs text-muted-foreground">
-        Harness: {harness ? <span className="text-foreground">{harness} overridden</span> : "the default from Settings"}
-      </p>
     </OverviewCard>
   );
 }
