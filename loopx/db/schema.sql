@@ -189,7 +189,7 @@ CREATE TABLE IF NOT EXISTS system_settings (
 -- origin, owner_project_id and description are added below, after projects.
 CREATE TABLE IF NOT EXISTS library_items (
     id           TEXT PRIMARY KEY,
-    kind         TEXT NOT NULL CHECK (kind IN ('plugin', 'skill')),
+    kind         TEXT NOT NULL CHECK (kind IN ('plugin', 'skill', 'mcp')),
     name         TEXT NOT NULL,
     source       TEXT NOT NULL DEFAULT '',
     version      TEXT NOT NULL DEFAULT '',
@@ -439,6 +439,38 @@ BEGIN
         ALTER TABLE projects DROP COLUMN run_budget_usd;
         DELETE FROM system_settings WHERE key IN ('agent.harness_prompt', 'agent.model', 'agent.effort', 'agent.env');
         INSERT INTO schema_migrations (name) VALUES ('agent_setting_layers');
+    END IF;
+END $$;
+
+-- MCP servers are catalog items too (kind 'mcp'), installed the same way. How
+-- Claude Code starts or reaches one is in library_mcp_servers, one row per
+-- item: a command with its arguments and environment (stdio), or a URL with
+-- its headers (http, sse). The environment's and the headers' values are
+-- secrets: only their names leave the database through the API
+-- (loopx/agents/mcp.py), and each run that loads the server gets them in a
+-- read-only file under the runtime root. The item's sha256 is the hash of
+-- the whole configuration, so changing a value is a new version.
+CREATE TABLE IF NOT EXISTS library_mcp_servers (
+    item_id    TEXT PRIMARY KEY REFERENCES library_items(id) ON DELETE CASCADE,
+    transport  TEXT NOT NULL CHECK (transport IN ('stdio', 'http', 'sse')),
+    command    TEXT NOT NULL DEFAULT '',
+    args       TEXT[] NOT NULL DEFAULT '{}',
+    env        JSONB NOT NULL DEFAULT '{}',
+    url        TEXT NOT NULL DEFAULT '',
+    headers    JSONB NOT NULL DEFAULT '{}',
+    CHECK ((transport = 'stdio') = (command <> '')),
+    CHECK ((transport = 'stdio') = (url = '')),
+    CHECK (transport = 'stdio' OR (cardinality(args) = 0 AND env = '{}'::jsonb)),
+    CHECK (transport <> 'stdio' OR headers = '{}'::jsonb)
+);
+-- Once: a catalog from before MCP servers accepts them.
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM schema_migrations WHERE name = 'library_items_kind_mcp') THEN
+        ALTER TABLE library_items DROP CONSTRAINT IF EXISTS library_items_kind_check;
+        ALTER TABLE library_items ADD CONSTRAINT library_items_kind_check
+            CHECK (kind IN ('plugin', 'skill', 'mcp'));
+        INSERT INTO schema_migrations (name) VALUES ('library_items_kind_mcp');
     END IF;
 END $$;
 

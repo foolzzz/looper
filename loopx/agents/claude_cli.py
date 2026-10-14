@@ -53,6 +53,15 @@ logger = logging.getLogger(__name__)
 # (named <plugin>:<skill>), agents, commands and hooks; a plugin needs no more
 # than a directory (a manifest names it). The operator's own hooks, such as a
 # UserPromptSubmit hook in ~/.claude/settings.json, still do not run.
+# The MCP servers installed for the run come in one "--mcp-config" file
+# (loopx/agents/mcp.py). Verified against Claude Code 2.1.285 in --print
+# stream-json mode with the flags above: a file {"mcpServers": {<name>:
+# {"type": "stdio", "command", "args", "env"} or {"type": "http" | "sse",
+# "url", "headers"}}} loads each server beside --strict-mcp-config (init lists
+# it with source "dynamic", its tools as mcp__<name>__<tool>, and the model
+# calls them without a prompt); --strict-mcp-config still drops every other
+# source, claude.ai connectors and a plugin's own MCP servers (a --plugin-dir
+# with .mcp.json) included, so a plugin's servers never load.
 
 # Names this flag set in every run's record (prompt_layers.isolation); change
 # it whenever the flags change.
@@ -110,7 +119,8 @@ def isolation_args(cwd: str | os.PathLike[str]) -> list[str]:
 
 
 def library_args(library: AgentLibrary) -> list[str]:
-    """The flags that load the items installed for an agent run: one ``--plugin-dir`` per plugin directory.
+    """The flags that load the items installed for an agent run: one ``--plugin-dir`` per plugin directory, and
+    ``--mcp-config`` with the file of its MCP servers when it has any.
 
     Every agent's launch carries them (``agent_settings.Launch.args``), so the
     agents cannot diverge. The generated skill plugins come after the
@@ -121,7 +131,8 @@ def library_args(library: AgentLibrary) -> list[str]:
     plugins of the same name both load, their skills listed under the one
     prefix.
     """
-    return [arg for directory in library.plugin_dirs for arg in ("--plugin-dir", directory)]
+    return [*(arg for directory in library.plugin_dirs for arg in ("--plugin-dir", directory)),
+            *(["--mcp-config", library.mcp_config] if library.mcp_config else [])]
 
 
 def knowledge_args(knowledge: AgentKnowledge) -> list[str]:

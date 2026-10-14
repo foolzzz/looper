@@ -28,8 +28,10 @@ installed (``library_installs``, ``loopx.agents.catalog``):
   database. Each plugin is one ``--plugin-dir``; the skills are linked into
   generated plugins: a project's own skills into ``project`` (Claude Code
   names them ``project:<skill>``), every other skill into ``personal``
-  (``personal:<skill>``). The flags come from ``claude_cli.library_args`` and
-  the run records the items and their hash.
+  (``personal:<skill>``). The MCP servers installed for the run go into one
+  read-only ``--mcp-config`` file (``loopx.agents.mcp``). The flags come from
+  ``claude_cli.library_args`` and the run records the items (an MCP server by
+  its name, never its values) and their hash.
 """
 
 from __future__ import annotations
@@ -81,6 +83,7 @@ LAST_IMPORT_KEY = "library.last_import"
 class ItemKind(str, Enum):
     PLUGIN = "plugin"
     SKILL = "skill"
+    MCP = "mcp"
 
 
 class LibraryError(ValueError):
@@ -359,22 +362,21 @@ class LoadedItem:
     kind: ItemKind
     name: str
     sha256: str
-    # The plugin it loads in: a plugin's own directory name, or the generated plugin of a skill.
+    # The plugin it loads in: a plugin's own directory name, or the generated plugin of a skill; '' for an MCP
+    # server, which loads from the run's --mcp-config file.
     plugin: str = SKILLS_PLUGIN
     scope: str = "global"  # where it is installed for the run: "global", or "project" when its project has it
 
     def view(self) -> dict[str, Any]:
-        return {"kind": self.kind.value, "name": self.name, "sha256": self.sha256, "plugin": self.plugin,
-                "scope": self.scope}
+        return {"kind": self.kind.value, "name": self.name, "sha256": self.sha256,
+                **({"plugin": self.plugin} if self.plugin else {}), "scope": self.scope}
 
 
 def items_label(items: Sequence[LoadedItem]) -> str:
-    """``1 plugin, 2 skills``; a kind with none is left out."""
-    plugins = sum(item.kind is ItemKind.PLUGIN for item in items)
-    skills = len(items) - plugins
-    parts = [f"{plugins} plugin{'' if plugins == 1 else 's'}" if plugins else "",
-             f"{skills} skill{'' if skills == 1 else 's'}" if skills or not plugins else ""]
-    return ", ".join(part for part in parts if part)
+    """``1 plugin, 2 skills, 1 MCP server``; a kind with none is left out (``0 skills`` for nothing)."""
+    counts = [(sum(item.kind is kind for item in items), word)
+              for kind, word in ((ItemKind.PLUGIN, "plugin"), (ItemKind.SKILL, "skill"), (ItemKind.MCP, "MCP server"))]
+    return ", ".join(f"{n} {word}{'' if n == 1 else 's'}" for n, word in counts if n) or "0 skills"
 
 
 def library_sha256(items: Sequence[LoadedItem]) -> str | None:
@@ -392,6 +394,7 @@ class AgentLibrary:
 
     items: tuple[LoadedItem, ...] = ()
     plugin_dirs: tuple[str, ...] = ()  # each one --plugin-dir, absolute
+    mcp_config: str | None = None  # the --mcp-config file of its MCP servers, absolute; None without any
     error: str | None = None  # why the run goes without its installed items
     role: str | None = None
     project_id: str | None = None
@@ -409,6 +412,8 @@ class AgentLibrary:
             "role": self.role,
             "project_id": self.project_id,
             "items": [item.view() for item in self.items],
+            **({"mcp_servers": servers} if (servers := [i.name for i in self.items if i.kind is ItemKind.MCP])
+               else {}),
             **({"error": self.error} if self.error is not None else {}),
         }
 
@@ -524,47 +529,6 @@ def skill_plugin(origin: str) -> str:
     return PROJECT_SKILLS_PLUGIN if origin == "project" else SKILLS_PLUGIN
 
 
-def resolve_installed(
-    rows: Sequence[Mapping[str, Any]], project_id: str | None,
-) -> list[tuple[Mapping[str, Any], LoadedItem]]:
-    """The items a run loads from its install rows (``db.library.list_installed``), each once, in their order.
-
-    An item installed globally and in the project loads once, as the
-    project's. Two project-authored skills of one name would both be
-    ``project:<name>``: the project's own one loads, else the first (the API
-    refuses such a pair; this only settles a race).
-    """
-    by_item: dict[str, tuple[Mapping[str, Any], LoadedItem]] = {}
-    for row in rows:
-        kind = ItemKind(row["kind"])
-        plugin = directory_name(kind, row["name"]) if kind is ItemKind.PLUGIN else skill_plugin(row["origin"])
-        previous = by_item.get(row["id"])
-        in_project = row["scope"] == "project" or (previous is not None and previous[1].scope == "project")
-        by_item[row["id"]] = (row, LoadedItem(kind, row["name"], row["sha256"], plugin,
-                                              "project" if in_project else "global"))
-    loaded: dict[tuple[str, str, str], tuple[Mapping[str, Any], LoadedItem]] = {}
-    for row, item in by_item.values():
-        key = (item.kind.value, item.plugin, item.name)
-        other = loaded.get(key)
-        if other is not None:
-            own = row.get("owner_project_id") == project_id and other[0].get("owner_project_id") != project_id
-            kept, dropped = (row, other[0]) if own else (other[0], row)
-            logger.warning("%s:%s of item %s is not loaded: item %s has the name", item.plugin, item.name,
-                           dropped["id"], kept["id"])
-            if not own:
-                continue
-        loaded[key] = (row, item)
-    return list(loaded.values())
-
-
-EMPTY_LIBRARY = AgentLibrary()
-
-
-def skill_plugin(origin: str) -> str:
-    """The generated plugin a skill of ``origin`` loads in."""
-    return PROJECT_SKILLS_PLUGIN if origin == "project" else SKILLS_PLUGIN
-
-
 def resolve_installed(rows: Sequence[Mapping[str, Any]], project_id: str | None) -> list[tuple[Mapping[str, Any], LoadedItem]]:
     """The items a run loads from its install rows (``db.library.list_installed``), each once.
 
@@ -576,7 +540,8 @@ def resolve_installed(rows: Sequence[Mapping[str, Any]], project_id: str | None)
     chosen: dict[str, tuple[Mapping[str, Any], LoadedItem]] = {}
     for row in rows:
         kind = ItemKind(row["kind"])
-        plugin = directory_name(kind, row["name"]) if kind is ItemKind.PLUGIN else skill_plugin(row["origin"])
+        plugin = (directory_name(kind, row["name"]) if kind is ItemKind.PLUGIN
+                  else skill_plugin(row["origin"]) if kind is ItemKind.SKILL else "")
         scope = "project" if row["scope"] == "project" or row["id"] in chosen and \
             chosen[row["id"]][1].scope == "project" else "global"
         chosen[row["id"]] = (row, LoadedItem(kind, row["name"], row["sha256"], plugin, scope))
@@ -595,17 +560,15 @@ def resolve_installed(rows: Sequence[Mapping[str, Any]], project_id: str | None)
     return list(loaded.values())
 
 
-EMPTY_LIBRARY = AgentLibrary()
-
-
 async def load_installed(runtime_root: Path, role: str, project_id: str | None = None) -> AgentLibrary:
     """The items installed for one run of ``role`` in ``project_id``, materialized under ``runtime_root``.
 
     They are the enabled installs naming the role, global or in the project
     (``resolve_installed``). An item is written from the database the first
     time a run needs it. The plugins come first, then ``personal`` and
-    ``project``. When the catalog cannot be read or written, the run goes
-    without its items and its record says why.
+    ``project``. The MCP servers go into one ``--mcp-config`` file
+    (``mcp.write_config``). When the catalog cannot be read or written, the
+    run goes without its items and its record says why.
     """
     from ..db import library as db_library
 
@@ -621,7 +584,11 @@ async def load_installed(runtime_root: Path, role: str, project_id: str | None =
     items = tuple(item for _, item in resolved)
     try:
         plugin_dirs: list[str] = []
+        servers = [(row, item) for row, item in resolved if item.kind is ItemKind.MCP]
+        mcp_config = await _mcp_config(runtime_root, servers) if servers else None
         for row, item in resolved:
+            if item.kind is ItemKind.MCP:
+                continue
             directory = item_directory(runtime_root, item)
             if not directory.is_dir():
                 files = await db_library.get_item_files(row["id"])
@@ -636,4 +603,22 @@ async def load_installed(runtime_root: Path, role: str, project_id: str | None =
         logger.warning("cannot prepare the installed items; the agent runs without them", exc_info=True)
         return AgentLibrary(error=f"the installed items could not be prepared: {exc}", role=role,
                             project_id=project_id)
-    return AgentLibrary(items, tuple(plugin_dirs), role=role, project_id=project_id)
+    return AgentLibrary(items, tuple(plugin_dirs), mcp_config=mcp_config, role=role, project_id=project_id)
+
+
+async def _mcp_config(runtime_root: Path, servers: Sequence[tuple[Mapping[str, Any], LoadedItem]]) -> str:
+    """The ``--mcp-config`` file of the MCP servers a run loads, written if missing.
+
+    Raises ``LibraryError`` when a server changed since its install was read.
+    """
+    from ..db import library as db_library
+    from .mcp import Server, write_config
+
+    stored = await db_library.get_mcp_servers([row["id"] for row, _ in servers])
+    configs = []
+    for row, item in servers:
+        server = Server.from_row(stored[row["id"]]) if row["id"] in stored else None
+        if server is None or server.sha256 != item.sha256:
+            raise LibraryError(f"MCP server {item.name} changed while the run was being prepared")
+        configs.append((item.name, server.config()))
+    return str(await asyncio.to_thread(write_config, runtime_root, configs))

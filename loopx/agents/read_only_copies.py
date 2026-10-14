@@ -1,22 +1,23 @@
 """Reclaiming the read-only copies agent runs mount from under the runtime root.
 
-Agent runs read three kinds of content from directories written once, named by
-a SHA-256 of their content, under ``<runtime_root>/.local``; a change writes a
-new directory and leaves the old one:
+Agent runs read four kinds of content from directories or files written once,
+named by a SHA-256 of their content, under ``<runtime_root>/.local``; a change
+writes a new one and leaves the old one:
 
 - the catalog's items and the generated skill plugins (``personal``,
   ``project``): ``library/<sha256>/`` (``library.py``);
 - a project's text and upload documents: ``projects/<id>/knowledge/<sha256>/``
   (``knowledge.py``);
 - a project's skills plugin as versions before the catalog wrote it:
-  ``projects/<id>/skills/<sha256>/``; nothing writes these any more.
+  ``projects/<id>/skills/<sha256>/``; nothing writes these any more;
+- the MCP servers installed for a run: ``mcp/<sha256>.json`` (``mcp.py``).
 
 ``reclaim_unused`` removes the ones nothing uses. ``loopx serve`` runs it at
 start, before any agent launches. It keeps a directory that the database's
 current content uses (what the next runs of every role in every project mount,
 and those of a task agent without a project; loading it also writes it) or
 that the command line of a running process names, as every run's
-``--plugin-dir`` and ``--add-dir`` do, which covers agents an earlier server
+``--plugin-dir``, ``--add-dir`` and ``--mcp-config`` do, which covers agents an earlier server
 left running and those of another server on the same runtime root; a
 directory that a kept one links into stays too. When the current content or the running
 processes cannot be read, nothing is removed.
@@ -35,15 +36,21 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 _HASHED = re.compile(r"[0-9a-f]{64}")
+_HASHED_FILE = re.compile(r"[0-9a-f]{64}\.json")
 
 
 def hashed_directories(runtime_root: Path) -> list[Path]:
-    """Every content-hashed directory of the library, the projects' knowledge and the projects' skills."""
+    """Every content-hashed directory of the library, the projects' knowledge and the projects' skills, and
+    every content-hashed MCP configuration file."""
     local = runtime_root.absolute() / ".local"
     parents = [local / "library", *sorted((local / "projects").glob("proj-*/knowledge")),
                *sorted((local / "projects").glob("proj-*/skills"))]
-    return [child for parent in parents if parent.is_dir() for child in sorted(parent.iterdir())
-            if _HASHED.fullmatch(child.name) and child.is_dir() and not child.is_symlink()]
+    directories = [child for parent in parents if parent.is_dir() for child in sorted(parent.iterdir())
+                   if _HASHED.fullmatch(child.name) and child.is_dir() and not child.is_symlink()]
+    mcp = local / "mcp"
+    files = [child for child in sorted(mcp.iterdir()) if _HASHED_FILE.fullmatch(child.name)
+             and child.is_file() and not child.is_symlink()] if mcp.is_dir() else []
+    return directories + files
 
 
 def _forms(path: Path) -> tuple[str, ...]:
@@ -90,6 +97,9 @@ def _used(directories: list[Path], keep: Iterable[str | Path], command_lines: li
 
 
 def _remove(directory: Path) -> None:
+    if directory.is_file():
+        directory.unlink()
+        return
     for walked, _, _ in os.walk(directory):
         os.chmod(walked, 0o755)
     shutil.rmtree(directory)
@@ -145,7 +155,7 @@ async def current_copies(runtime_root: Path) -> list[str] | None:
         library = await load_installed(runtime_root, role, project_id)
         if library.error is not None:
             return None
-        paths += library.plugin_dirs
+        paths += [*library.plugin_dirs, *([library.mcp_config] if library.mcp_config else [])]
     for project in projects:
         knowledge = await load_knowledge(runtime_root, project, str(project.get("work_dir") or ""))
         if knowledge.error is not None:

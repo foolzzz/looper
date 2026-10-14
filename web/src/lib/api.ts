@@ -1136,8 +1136,9 @@ export function updateProjectRoleSettings(
 
 // --- The capability catalog: items acquired into LoopX, and where they are installed ---
 
-export type LibraryKind = "plugin" | "skill";
-/** How an item was acquired; only "machine" (imported from this machine) and "project" (written in a project) so far. */
+export type LibraryKind = "plugin" | "skill" | "mcp";
+/** How an item was acquired; only "machine" (imported from this machine), "ui" (an MCP server added here) and "project"
+ * (written in a project) so far. */
 export type ItemOrigin = "machine" | "upload" | "git" | "ui" | "project";
 export type AgentRole = "manager" | "planner" | "worker" | "reviewer";
 export type InstallScope = "global" | "project";
@@ -1176,8 +1177,35 @@ export interface CatalogItem {
   file_count: number;
   imported_at: string;
   updated_at: string;
+  /** An MCP server's configuration, its env and header values masked; null for a plugin or a skill. */
+  mcp: McpConfig | null;
   /** Where it is installed; empty when it loads nowhere. */
   installs: Install[];
+}
+
+export type McpTransport = "stdio" | "http" | "sse";
+
+/** How Claude Code starts (stdio) or reaches (http, sse) an MCP server. In a response every env and header value is
+ * the mask; sending the mask back for a name keeps its stored value. */
+export interface McpConfig {
+  transport: McpTransport;
+  command: string;
+  args: string[];
+  env: Record<string, string>;
+  url: string;
+  headers: Record<string, string>;
+}
+
+export interface McpImport {
+  imported_at: string;
+  source: string;
+  servers: number;
+  added: string[];
+  updated: string[];
+  removed: string[];
+  unchanged: number;
+  skipped: { item: string; path: string; reason: string }[];
+  skipped_count: number;
 }
 
 export interface LibrarySkipped {
@@ -1207,8 +1235,10 @@ export interface Catalog {
   installed_count: number;
   total_bytes: number;
   last_import: LibraryImport | null;
+  last_mcp_import: McpImport | null;
   roles: AgentRole[];
   task_roles: AgentRole[];
+  mcp_caps: { servers_max: number; variables_max: number; value_max: number; args_max: number; mask: string };
 }
 
 /** One item with its files (no content) and, for a skill, its SKILL.md. */
@@ -1245,6 +1275,8 @@ export interface RunLibrary {
   project_id?: string | null;
   /** `plugin` and `scope` are absent in runs recorded before the catalog. */
   items: { kind: LibraryKind; name: string; sha256: string; plugin?: string; scope?: InstallScope }[];
+  /** The MCP servers the run mounted, by name. */
+  mcp_servers?: string[];
   error?: string;
 }
 
@@ -1273,6 +1305,46 @@ export async function importCatalog(): Promise<Catalog> {
   const res = await fetch(`${API_BASE}/catalog/import`, { method: "POST" });
   if (!res.ok) await failed(res, "import");
   return res.json();
+}
+
+/** Import (or re-import) this machine's user-level MCP servers (~/.claude.json); new ones are installed nowhere. */
+export async function importMcpServers(): Promise<Catalog> {
+  const res = await fetch(`${API_BASE}/catalog/mcp/import`, { method: "POST" });
+  if (!res.ok) await failed(res, "MCP import");
+  return res.json();
+}
+
+/** Add an MCP server to the catalog, installed nowhere. 409 when its name is taken. */
+export async function createMcpServer(server: { name: string; description?: string } & Partial<McpConfig>): Promise<{
+  item: CatalogItem;
+}> {
+  const res = await fetch(`${API_BASE}/catalog/mcp`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(server),
+  });
+  if (!res.ok) await failed(res, "add MCP server");
+  return res.json();
+}
+
+/** Change an MCP server; a field left out stays, and the mask as a value keeps the stored one. */
+export async function updateMcpServer(
+  itemId: string,
+  change: { name?: string; description?: string } & Partial<McpConfig>,
+): Promise<{ item: CatalogItem }> {
+  const res = await fetch(`${API_BASE}/catalog/${encodeURIComponent(itemId)}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(change),
+  });
+  if (!res.ok) await failed(res, "update MCP server");
+  return res.json();
+}
+
+/** Remove an item from the catalog with its installs (not a project's own skill). */
+export async function deleteCatalogItem(itemId: string): Promise<void> {
+  const res = await fetch(`${API_BASE}/catalog/${encodeURIComponent(itemId)}`, { method: "DELETE" });
+  if (!res.ok) await failed(res, "delete");
 }
 
 /** Install an item globally or in one project; roles default to every role the scope allows. 409 when it is there. */
