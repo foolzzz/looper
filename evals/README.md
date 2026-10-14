@@ -20,7 +20,8 @@ directories), one at a time over the HTTP API:
 
 For each task it reads back from the API: success (the task completed, its
 files are right and the flow happened, such as the review or the retry), step
-count, retries, reviews, cost (the task cost API), contract violations
+count, retries, reviews, cost (the task cost API), tokens (the runs' records: prompt, uncached
+and cached, and output; what a runtime without prices still reports), contract violations
 (replies the Planner's reply parser or the Worker/Reviewer report check
 rejected) and whether the Planner modified files itself (its file-editing tool
 calls, and files changed while only a Planner turn ran).

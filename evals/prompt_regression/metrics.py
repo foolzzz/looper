@@ -239,6 +239,9 @@ def task_metrics(
     problems += flow_problems(expect, observed)
 
     cost = detail.get("cost") or {}
+    # Tokens are what every runtime reports, priced or not (a subscription, a provider without prices).
+    tokens = {name: sum(int(r.get(f"{name}_tokens") or 0) for r in records)
+              for name in ("input", "output", "cache_read", "cache_creation")}
     violations = {"planner": planner_violations(activity), "worker": worker_violations,
                   "reviewer": reviewer_violations}
     return {
@@ -251,6 +254,7 @@ def task_metrics(
         "cost_by_role": {name: round(float((value or {}).get("cost_usd") or 0.0), 6)
                          for name, value in (cost.get("by_role") or {}).items()},
         "runs": int(cost.get("runs") or len(records)),
+        "tokens": tokens,
         "contract_violations": {**violations, "total": sum(violations.values())},
         "planner_edit_tool_paths": planner_edits,
         "planner_changed_files": changed_by_planner,
