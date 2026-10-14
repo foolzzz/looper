@@ -316,12 +316,14 @@ class TaskRouter:
             return
 
         summary = envelope.payload.get("summary") or None
+        fail_kind = envelope.payload.get("fail_kind") if status == "failed" else None
         try:
             # The Planner's final summary is the task's result, or its error.
             await db_tasks.update_task_status(
                 task_id, status,
                 result_summary=summary if status == "completed" else None,
                 error=summary if status == "failed" else None,
+                fail_kind=db_tasks.FailKind(fail_kind) if fail_kind else None,
             )
             await db_activity.insert_activity(
                 task_id=task_id,
@@ -412,8 +414,10 @@ class TaskRouter:
         await self._try_dequeue()
 
     async def _handle_restart(self, envelope: MessageEnvelope) -> None:
+        """Run a task again: planned anew, or, with ``resume``, continued from its saved plan and steps."""
         assert self._bus is not None
         task_id = envelope.payload.get("task_id", "")
+        resume = bool(envelope.payload.get("resume"))
 
         existing = self._tasks.get(task_id)
         if existing and existing.status in ("running", "assigned"):
@@ -436,7 +440,7 @@ class TaskRouter:
             return
 
         try:
-            await db_tasks.reset_task_for_restart(task_id)
+            await db_tasks.reset_task_for_restart(task_id, keep_steps=resume)
         except Exception:
             logger.exception("failed to reset task %s for restart", task_id)
             return
@@ -461,6 +465,7 @@ class TaskRouter:
                 "goal_id": task.goal_id,
                 "work_dir": task.work_dir,
                 "project_id": task.project_id,
+                **({"resume": True} if resume else {}),
             },
             correlation_id=task.correlation_id,
         )

@@ -99,7 +99,7 @@ logger = logging.getLogger(__name__)
 
 from ...db import activity as db_activity, agent_configs as db_agent_configs, llm_records as db_llm_records
 from ...db import agent_sessions as db_agent_sessions, plans as db_plans, projects as db_projects
-from ...db.tasks import update_task_phase
+from ...db.tasks import FailKind, update_task_phase
 
 MAX_CONCURRENT_WORKERS = 4
 # How long to wait for the worker pool to confirm a forwarded user turn.
@@ -439,6 +439,8 @@ class PlannerAgent:
                 # A task at its spend cap stops before another turn; the handlers below see it ended.
                 await self._within_budget(self._plan)
         match envelope.message_type:
+            case MessageType.TASK_REQUEST if envelope.payload.get("resume"):
+                await self._continue_plan(envelope)
             case MessageType.TASK_REQUEST:
                 await self._plan_and_dispatch(envelope)
             case MessageType.TASK_RESUME:
@@ -1494,7 +1496,7 @@ class PlannerAgent:
             metadata={"origin_channel_id": plan.origin_channel_id},
         ))
 
-    async def _fail_plan(self, plan: TaskPlan, *, reason: str = "") -> None:
+    async def _fail_plan(self, plan: TaskPlan, *, reason: str = "", fail_kind: FailKind | None = None) -> None:
         assert self._bus is not None
         plan.status = "failed"
         plan.fail_reason = reason or plan.fail_reason
@@ -1527,6 +1529,7 @@ class PlannerAgent:
                 "status": "failed",
                 "progress": plan.progress_summary(),
                 "summary": summary,
+                "fail_kind": fail_kind.value if fail_kind else None,
             },
             correlation_id=plan.correlation_id,
             metadata={"origin_channel_id": plan.origin_channel_id},
@@ -1643,7 +1646,54 @@ class PlannerAgent:
                 summary = f"(the Planner could not sum up: {exc})"
             reason = f"{reason}. Planner's wrap-up: {summary}"
         plan.fail_reason = reason
-        await self._fail_plan(plan)
+        await self._fail_plan(plan, fail_kind=FailKind.TASK_BUDGET)
+
+    async def _continue_plan(self, envelope: MessageEnvelope) -> None:
+        """Continue a task its spend cap stopped, from its saved plan: no new plan, and the Planner's Claude
+        resumes its session.
+
+        The steps the cap cut short run again: a Worker's step from the start (its Worker was stopped, or
+        its result came after the cap), a step in review with a new Reviewer. The plan, its steps with
+        what they reported, and the session are read back from the database.
+        """
+        self._plan = None
+        await self._load_plan(("failed",))
+        plan = self._plan
+        if plan is None:
+            payload = envelope.payload
+            plan = self._plan = TaskPlan(
+                plan_id=f"plan-{uuid.uuid4().hex[:12]}", goal_id=payload.get("goal_id", ""),
+                requirement=payload.get("requirement", ""), work_dir=payload.get("work_dir", ""),
+                correlation_id=envelope.correlation_id, project_id=payload.get("project_id", "") or "",
+            )
+            await self._fail_plan(plan, reason="Cannot continue: the task has no saved plan; start it to plan anew")
+            return
+        await self._refresh_project(plan)
+        again: list[PlanStep] = []
+        review: list[PlanStep] = []
+        for step in plan.steps:
+            if step.status in ("dispatched", "deciding"):
+                step.status = "pending"
+                again.append(step)
+            elif step.status == "completed":
+                review.append(step)
+        plan.status = "executing"
+        plan.fail_reason = ""
+        await self._save(plan, *again, plan_row=True)
+        await update_task_phase(self._task_id, "executing")
+        cap = self._execution.task_budget_usd
+        cut_short = [f"{len(again)} step(s) run again"] if again else []
+        cut_short += [f"{len(review)} step(s) go back to review"] if review else []
+        await self._activity("phase", f"Task continued from its plan with "
+                                      f"{f'a ${format_usd(cap)}' if cap is not None else 'no'} spend cap"
+                                      + (f": {', '.join(cut_short)}" if cut_short else ""))
+        for step in review:
+            await self._send_to_review(plan, step)
+        if plan.is_complete:
+            await self._complete_plan(plan)
+            return
+        await self._report_progress(plan)
+        await self._dispatch_ready(plan)
 
     def _wrap_up_message(self, plan: TaskPlan, reason: str) -> str:
         return "\n".join([
@@ -1731,11 +1781,11 @@ class PlannerAgent:
         except Exception:
             logger.exception("failed to save the session of %s", self.agent_id)
 
-    async def _load_plan(self) -> None:
-        """Read back the task's live plan and the Planner's session, if a previous Planner left them."""
+    async def _load_plan(self, statuses: tuple[str, ...] = ("planning", *db_plans.LIVE_STATUSES)) -> None:
+        """Read back the task's plan in one of ``statuses`` (a live one by default) and the Planner's session."""
         try:
             stored = await db_plans.load(self._task_id)
-            if stored is None or stored["plan"]["status"] not in ("planning", *db_plans.LIVE_STATUSES):
+            if stored is None or stored["plan"]["status"] not in statuses:
                 return
             session = await db_agent_sessions.get_session(self.agent_id) or {}
         except Exception:

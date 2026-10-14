@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping
 from datetime import datetime, timezone
+from enum import Enum
 from typing import Any
 
 import asyncpg
@@ -14,14 +15,21 @@ from .connection import get_pool
 # A task in one of these is queued or running.
 ACTIVE_STATUSES = ("pending", "assigned", "running", "executing")
 
+# A task row plus its project's name and task spend cap.
+_WITH_PROJECT = ("SELECT t.*, p.name AS project_name, p.task_budget_usd "
+                 "FROM tasks t JOIN projects p ON p.id = t.project_id")
+
 
 def planner_agent_id(task_id: str) -> str:
     """The agent id of ``task_id``'s Planner, which keys its saved session."""
     return f"planner-{task_id}"
 
 
-# A task row plus its project's name.
-_WITH_PROJECT = "SELECT t.*, p.name AS project_name FROM tasks t JOIN projects p ON p.id = t.project_id"
+class FailKind(str, Enum):
+    """Why a failed task failed, when code can tell (``tasks.fail_kind``)."""
+
+    TASK_BUDGET = "task_budget"  # it reached its project's task spend cap (task_budget_usd)
+
 
 # The most times a stored config is unwrapped from a JSON string (see _read_config).
 _CONFIG_UNWRAP_LIMIT = 8
@@ -100,8 +108,10 @@ async def update_task_status(
     planner_id: str | None = None,
     result_summary: str | None = None,
     error: str | None = None,
+    fail_kind: FailKind | None = None,
     pool: asyncpg.Pool | None = None,
 ) -> None:
+    """Set the task's status; the fields given (not ``None``) are set too, and kept until a restart."""
     pool = pool or get_pool()
     now = datetime.now(timezone.utc)
     completed_at = now if status in ("completed", "failed", "cancelled") else None
@@ -114,10 +124,12 @@ async def update_task_status(
             result_summary = COALESCE($4, result_summary),
             error = COALESCE($5, error),
             updated_at = $6,
-            completed_at = COALESCE($7, completed_at)
+            completed_at = COALESCE($7, completed_at),
+            fail_kind = COALESCE($8, fail_kind)
         WHERE id = $1
         """,
         task_id, status, planner_id, result_summary, error, now, completed_at,
+        FailKind(fail_kind).value if fail_kind else None,
     )
 
 
@@ -174,18 +186,24 @@ async def delete_task(
 async def reset_task_for_restart(
     task_id: str,
     *,
+    keep_steps: bool = False,
     pool: asyncpg.Pool | None = None,
 ) -> bool:
-    """Clear the task's run for a new start: its steps, its plan and its Planner's session go."""
+    """Clear the task's outcome before it runs again.
+
+    Planned anew, its steps, its plan and its Planner's session go; continuing
+    its plan (``keep_steps``), they stay.
+    """
     pool = pool or get_pool()
-    await pool.execute("DELETE FROM task_steps WHERE task_id = $1", task_id)
-    await pool.execute("DELETE FROM task_plans WHERE task_id = $1", task_id)
-    await pool.execute("DELETE FROM agent_sessions WHERE agent_id = $1", planner_agent_id(task_id))
+    if not keep_steps:
+        await pool.execute("DELETE FROM task_steps WHERE task_id = $1", task_id)
+        await pool.execute("DELETE FROM task_plans WHERE task_id = $1", task_id)
+        await pool.execute("DELETE FROM agent_sessions WHERE agent_id = $1", planner_agent_id(task_id))
     result = await pool.execute(
         """
         UPDATE tasks
         SET status = 'pending', phase = 'pending',
-            error = NULL, completed_at = NULL,
+            error = NULL, completed_at = NULL, fail_kind = NULL,
             result_summary = NULL, updated_at = now()
         WHERE id = $1
         """,

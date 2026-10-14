@@ -240,6 +240,9 @@ ALTER TABLE projects ADD COLUMN IF NOT EXISTS supervise_interval_seconds INTEGER
     CHECK (supervise_interval_seconds >= 0);
 ALTER TABLE projects ADD COLUMN IF NOT EXISTS review_policy TEXT CHECK (review_policy IN ('planner', 'all'));
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS project_id TEXT REFERENCES projects(id);
+-- Why a failed task failed, when code can tell (loopx/db/tasks.py FailKind); NULL
+-- otherwise. 'task_budget': it reached its project's task_budget_usd.
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS fail_kind TEXT CHECK (fail_kind IN ('task_budget'));
 CREATE INDEX IF NOT EXISTS idx_tasks_project ON tasks (project_id, created_at DESC);
 
 -- A project's knowledge: reference documents its task agents read on demand
