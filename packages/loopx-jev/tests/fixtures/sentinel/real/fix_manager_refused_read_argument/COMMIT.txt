@@ -1,8 +1,0 @@
-02dfd43b3a0ad622f47499c391e2466df163ebaf
-fix(manager): name the refused read argument instead of a bare failure
-
-A manager read that fails validation returned only invalid_arguments. The caller is a model that can repair its own tool call, so a bare refusal makes it retry blind and the steward answer degrades into an unexplained failure.
-
-The reader now derives its allowlist and ranges from the published tool schema and returns every rejected entry as <argument>:<what it must be>, next to the allowed arguments, allowed views and a repair instruction naming the tool the caller actually used. Legal reads keep their existing shape.
-
-Signed-off-by: huangruiteng <14976749+huangruiteng@users.noreply.github.com>

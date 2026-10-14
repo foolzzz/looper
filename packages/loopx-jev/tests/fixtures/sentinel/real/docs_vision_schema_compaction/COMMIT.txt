@@ -1,4 +1,0 @@
-815d67cd342b1e3e5108e50a64666d8bff341dfd
-docs(quota): explain vision schema compaction boundary
-
-Signed-off-by: huangruiteng <14976749+huangruiteng@users.noreply.github.com>
