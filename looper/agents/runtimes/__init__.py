@@ -37,10 +37,14 @@ the MCP configuration, knowledge directories) is materialized by
 ``library.load_installed`` and ``knowledge.load_knowledge`` in Claude Code's
 plugin format; ``launch_args`` turns it into flags. A runtime of another
 format translates it at launch (Codex: ``codex.materialize``,
-``codex.config_toml``) and says in the run's record what it left out
-(``launch_record``).
+``codex.config_toml``; OMP: ``omp.overlay``, ``omp.mcp_config``) and says in
+the run's record what it left out (``launch_record``).
 
-The types: ``claude-code`` (``claude_code``) and ``codex`` (``codex``).
+A runtime whose CLI runs one turn per process keeps the Manager's and a
+Planner's session by resuming it on every turn (``per_turn.PerTurnSession``).
+
+The types: ``claude-code`` (``claude_code``), ``codex`` (``codex``) and ``omp``
+(``omp``).
 """
 
 from __future__ import annotations
@@ -138,8 +142,8 @@ class Probe:
 class ResidentSession(Protocol):
     """The Manager's or a Planner's session on a runtime, as the tiers drive it (``RuntimeAdapter.resident_session``):
     ``start`` with a command, then one ``run_turn`` per user turn, ``stop``; ``stale`` when it must start over.
-    Claude Code keeps one process for it (``claude_cli.ResidentClaude``), Codex one process per turn
-    (``codex.ResidentCodex``)."""
+    Claude Code keeps one process for it (``claude_cli.ResidentClaude``), Codex and OMP one process per turn
+    (``per_turn.PerTurnSession``: ``codex.ResidentCodex``, ``omp.ResidentOmp``)."""
 
     @property
     def label(self) -> str: ...
@@ -267,8 +271,9 @@ class RuntimeAdapter(ABC):
 def _adapters() -> dict[str, RuntimeAdapter]:
     from .claude_code import ClaudeCodeRuntime
     from .codex import CodexRuntime
+    from .omp import OmpRuntime
 
-    return {adapter.type: adapter for adapter in (ClaudeCodeRuntime(), CodexRuntime())}
+    return {adapter.type: adapter for adapter in (ClaudeCodeRuntime(), CodexRuntime(), OmpRuntime())}
 
 
 # The runtime types, by type id. Code owns this set: a registered runtime of a type missing here cannot run.

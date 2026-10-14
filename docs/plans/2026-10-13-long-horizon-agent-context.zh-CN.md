@@ -1,6 +1,6 @@
 # 开发计划：长程 Agent 上下文体系（M0–M9）
 
-- **状态：** M0–M7 全部交付（M7a 计划状态入库、M7b 任务记忆、M7c 及时沉淀）；M8 全部交付（M8a 能力目录与安装、M8b MCP 服务器、M8c 进库来源、M8d 配置层级统一、M8e 导出与导入）；M9a 运行时、provider 与 agent 的注册和选择已交付，M9b Claude Code 接 API key 与兼容接口、M9c Codex 运行时已交付；上游 LoopX 清理 B1–B4 已交付；全面改名为 Looper 已交付；其余见第 5 节待办
+- **状态：** M0–M7 全部交付（M7a 计划状态入库、M7b 任务记忆、M7c 及时沉淀）；M8 全部交付（M8a 能力目录与安装、M8b MCP 服务器、M8c 进库来源、M8d 配置层级统一、M8e 导出与导入）；M9a 运行时、provider 与 agent 的注册和选择已交付，M9b Claude Code 接 API key 与兼容接口、M9c Codex 运行时、M9e OMP 运行时已交付；上游 LoopX 清理 B1–B4 已交付；全面改名为 Looper 已交付；其余见第 5 节待办
 - **依据：** [RFC：长程 Agent 的上下文体系 v0](../architecture/rfcs/long-horizon-agent-context-v0.zh-CN.md)。
   设计原则、分层模型和已作出的决定以 RFC 为准；本文只管"怎么分阶段做、做到什么算完成、现在做到哪了"。
 - **仓库：** `foolzzz/looper`，基线 `main`
@@ -45,7 +45,7 @@
 | M9b | Claude Code 接多种 provider：订阅 OAuth、Anthropic key、兼容 anthropic 协议的接口；按 provider 价格计算花费 | ✅ 已交付（looper #68；DeepSeek、Kimi 真实 key 待维护者验证） | M9a |
 | M9c | Codex 运行时：四类角色都支持（含常驻会话），事件统一、MCP 翻译、API key（Codex 登录不做） | ✅ 已交付（looper #67） | M9a |
 | M9d | SDK 运行时与 norma SDK | 待定（norma 就绪后） | M9a |
-| M9e | OMP 运行时：先只读核实能力、填能力矩阵，再写适配器 | 待开工 | M9c |
+| M9e | OMP 运行时：先只读核实能力、填能力矩阵，再写适配器 | ✅ 已交付（looper #70） | M9c |
 
 执行顺序：M1 → M1.5 → M1.6 → M1.7 → M2 → M3 → M4 → M5 → M6 → M7a → M7b → M8a → M8b、M8c、M8d（可并行）→ M8e。
 
@@ -486,6 +486,23 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
 
 - **范围：** 在 M9c 验证过适配器接口之后，先只读核实 OMP 的能力（一次性运行、常驻会话、MCP、skill、隔离），写回能力矩阵，再实现适配器；开发用本机 CPA。
 - **验收：** 用 OMP agent 跑 M6 真实模式评测。
+- **核实后确定的做法**（omp 18.4.3 的核实结果写在多运行时 RFC 第 6 节）：
+  - 只用 API key provider；`models.yml` 的 `api` 按 provider 的协议依次选 `openai-responses`、`openai-completions`、
+    `anthropic-messages`，密钥只在 `apiKey` 指名的环境变量里；
+  - 隔离：每个 omp 进程的 `HOME` 指向 `<runtime_root>/.local/omp/homes/<sha256>`（同一套生成设置的运行共用），里面只有
+    生成的 `models.yml`、`--config` 覆盖文件、prompt 文件、有 MCP 时的 `looper` 插件和共用原生库的链接；会把 omp 指回
+    操作者目录的变量不传；shell 命令经 `PI_SHELL_PREFIX` 拿回操作者的 `HOME` 等变量、去掉密钥；工作目录不在 git 仓库
+    里时关掉向上查找的发现来源；
+  - Worker、Reviewer 是一次 `omp -p --mode json --no-session`，提示从 stdin 读完即关；Manager、Planner 每轮起一个进程
+    （`--session-dir omp/sessions/<agent> --resume <id>`，`ResidentOmp`），与 `ResidentCodex` 共用
+    `per_turn.PerTurnSession`；开新会话的那一轮删掉这个 agent 之前的会话；
+  - system prompt 用 `--append-system-prompt`，前面是适配器加的"运行时说明"；
+  - P9：插件原生加载（skill、命令、agent），hook 和输出样式不加载、插件自带的 MCP 服务器关掉，都记在
+    `runtime_catalog`；Looper 的 MCP 服务器放进家目录的 `looper` 插件；知识不挂目录，按索引里的路径读；
+  - 每个请求报一次用量，所以有上下文规模、单次上限能在请求之间停；子 agent 的用量随 `task` 工具结果报；压缩记为
+    `compact_boundary`；
+  - `looper serve` 发现 PATH 上有 `omp` 时注册内置运行时 `omp`；启动时回收没有进程在用的 OMP 家目录，以及已保存
+    会话不再属于该运行时的 Codex、OMP 会话目录。
 
 #### M9d SDK 运行时与 norma
 
@@ -536,6 +553,7 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
 | 2026-10-14 | M7c 交付（looper #66）：任务日志新增 `step_failed`、`step_retry`、`decision`、`user_instruction`、`session_switch` 和 `handoff`，由代码在事件发生时写入；Planner 每轮先整条注入用户指令（独立预算），再按类型分标题注入各类最新条目，Worker 首轮也拿到用户指令和失败经验；Planner、Manager 换 agent 时旧会话（进程还在时）先写交接摘要，新会话首轮带续接简报（Manager 另带各聊天最近的对话），项目级经验在 `distill_lessons` 为 `draft`、`write` 时到达即进草稿。验证：替身 Claude 下各类条目的触发、注入顺序与上限、强制换 agent 的交接与简报、三种旧会话不可用、Manager 续接和草稿规则都有测试，一次性 `looper serve` 跑通重试、聊天加步骤、会话丢失后续接和经验草稿并截图任务页；真实 haiku 评测 5/5、契约违约 0、Planner 改文件 0，$0.35（基线 $0.33）；真实 PG 1070 通过。M9b 尚未合入，续接规则留在 `session_switch.agent_switch` 一处，"中途换 provider"评测记为 M7c 的待办。 |
 | 2026-10-14 | M9b 交付（looper #68）：Claude Code 可用 API key 接 Anthropic 官方或兼容 Anthropic 格式的接口（第三方接口用 `ANTHROPIC_AUTH_TOKEN`，opus、sonnet 和子 agent 映射到 agent 的模型，haiku 和 small/fast 映射到模型目录新增的 `background_model`），provider 可带 `env`，内置 GLM、DeepSeek、Kimi、CPA 预设和 2026-10-14 的价格表；非订阅、非官方的运行按 provider 价格计算花费并由 Looper 执行单次软上限，常驻会话只在运行时类型和 provider 都不变时续接（并入 `agent_switch`）。验证：经只记录模型名和认证头的转发代理，用真实 Claude Code 2.1.285 跑 CPA（`gpt-6.1-sol`）和 GLM BigModel（`glm-5.3[1m]`）各一个单步任务和一次 M6 真实评测，都是 5/5、契约违约 0、Planner 改文件 0，请求只带 provider 的 key、没有 Claude 模型名，44 次运行都是 `provider_price` 且与价格表手算一致（CPA 等价 $0.80，GLM $0.48）；真实 PG 1093 通过。DeepSeek、Kimi 的真实 key 验证留给维护者（第 5.4 节）。 |
 | 2026-10-14 | M9c 交付（looper #67）：Codex 运行时，四类角色都能跑：Worker、Reviewer 一次 `codex exec --json`，Manager、Planner 每轮起一个进程续接会话；每次运行一个 Looper 自己的 `CODEX_HOME`（只有生成的 `config.toml` 和 `AGENTS.md`，不读 `~/.codex`），MCP 翻译进 `config.toml`，skill 降为可读文档，跳过的插件部分记进运行记录，技术验证结果见多运行时 RFC 第 6 节。验证：codex + CPA + gpt-5.5 的 M6 真实模式评测 5/5、契约违约 0、Planner 改文件 0（haiku 基线 5/5），聊天纠偏任务因运行中的 Codex Worker 不能被引导而多一次重试，token 约 52 万提示、6.7 千输出，按 gpt-5.5 价目折合约 $0.73，Manager 两轮续接同一会话，评测时 M9b 未合入、密钥经未提交的本地垫片注入；合入 M9b 后经 `looper serve` 用 `cpa` 预设和 gpt-6.1-sol 冒烟（Planner 规划和续接的决策轮、Worker 一步，按 provider 价格计 $0.045）；真实 PG 1117 通过。 |
+| 2026-10-14 | M9e 交付（looper #70）：OMP 运行时，四类角色都能跑：Worker、Reviewer 一次 `omp -p --mode json`，Manager、Planner 每轮起一个进程续接会话（与 Codex 共用 `per_turn.PerTurnSession`），每个 omp 进程的 `HOME` 指向 Looper 的家目录（生成的 `models.yml` 和 `--config` 覆盖文件），不读 `~/.omp`、`~/.agents`、`~/.claude`、`~/.env`，插件原生加载、hook 和插件自带的 MCP 不加载，服务启动时回收没人用的 OMP 家目录和 Codex、OMP 的过期会话目录。验证：omp + `cpa` 预设的 OpenAI 接口 + gpt-5.5（effort medium）的 M6 真实模式评测 5/5、契约违约 0、Planner 改文件 0、重试 2（与 Codex 相同：Worker 不能被引导，聊天纠偏多一次），提示 386k（未缓存 101k）、输出 4.2k，按 gpt-5.5 价目 $0.78（Codex 约 $0.73 等价，haiku 基线 $0.33），Manager 两轮聊天续接同一会话并答出第一轮的词；真实 PG 1147 通过。 |
 
 ## 5. 不属于本 RFC 的待办
 
@@ -552,7 +570,8 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
 - **升级时迁移前自动备份（2026-10-14 定，✅ 已交付 looper #60）**：`serve` 发现有未执行的迁移时，先用 `pg_dump` 备份到 runtime root 下的 `backups/`（保留最近几份）再迁移；没有可用的 `pg_dump` 时拒绝执行破坏性迁移并提示安装方法；`doctor` 检查 `pg_dump`。自 v2.5.0 起已有 11 处删列、删表的迁移。
 - **服务常驻（2026-10-14 定，✅ 已交付 looper #59）**：`service install / uninstall / status / restart`，macOS 生成 launchd LaunchAgent，Linux 生成 systemd 用户服务，开机自启、崩溃拉起；本机也改用它运行主 checkout 的代码。
 - **全面改名为 looper（2026-10-14 定，✅ 已交付 looper #64）**：命令、Python 包、数据目录（`~/.loopx` → `~/.looper`，自动迁移）、环境变量（`LOOPX_*` → `LOOPER_*`，旧名作为回退）、界面与文档统一改名；`loopx` 命令保留为别名过渡一个版本。改名是机械改动且触及几乎所有文件，**排在当前这批 PR 合入之后、M9b/M9c 开工之前**，单独一个 PR，期间不开其他分支；README 与控制台首屏的改动先请维护者预览（本次改名维护者已免除预览）。默认库名 `loopx`、发布 tag 与历史、NOTICE 对上游 LoopX 的署名不改。
-- **Codex 运行时的已知差距（M9c）**：运行中的 Codex Worker 不能被引导，Planner 的消息只能留给这一步的决策轮（评测里聊天纠偏任务因此多一次重试），要引导得改走实验性的 `app-server`；Codex 不报压缩和单次请求的用量，记录里没有上下文规模，单次上限只能在一轮结束时判断；杀掉 Codex 进程时它正在跑的 shell 命令不会结束（Codex 给每条命令单开进程组）；常驻会话的目录（`codex/sessions/<owner>`）随任务累积，还没有回收。
+- **Codex 运行时的已知差距（M9c）**：运行中的 Codex Worker 不能被引导，Planner 的消息只能留给这一步的决策轮（评测里聊天纠偏任务因此多一次重试），要引导得改走实验性的 `app-server`；Codex 不报压缩和单次请求的用量，记录里没有上下文规模，单次上限只能在一轮结束时判断；杀掉 Codex 进程时它正在跑的 shell 命令不会结束（Codex 给每条命令单开进程组）。常驻会话的目录（`codex/sessions/<owner>`）已在 M9e 回收：服务启动时删掉已保存会话不再是 Codex 的。
+- **OMP 运行时的已知差距（M9e）**：运行中的 OMP Worker 不能被引导（`-p` 只读一次 stdin，`--mode rpc` 能插话但未采用），评测里聊天纠偏因此多一次重试；omp 的 `task` 工具找子 agent 定义时从工作目录一路往上找 `.omp/agents`，过了仓库根也不停，工作目录在操作者家目录下时会读到 `~/.omp/agents`（如果有），Looper 关不掉，只能整个去掉 `task` 工具；工作目录不在 git 仓库里时关掉了向上查找的发现来源，工作目录自己的 `AGENTS.md`、`CLAUDE.md`、`.omp/` 等也不读；后台请求（skill 描述压缩成路由提示、压缩摘要）不在事件流里，不计入花费和单次上限；每个新进程的首个请求基本不命中提示缓存（评测里未缓存输入 101k，Codex 约 60k），可以试 `--prompt-cache-key`；每个 runtime root 第一次运行要解压约 167 MB 的原生库（`omp/natives`）。
 
 ### 5.3 非核心待办（M6 之后统一做）
 

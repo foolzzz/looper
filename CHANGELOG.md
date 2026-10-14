@@ -101,6 +101,31 @@ How the agent system works today is described in
   serve` registers the built-in `codex` runtime when `codex` is on its
   PATH. The prompt eval takes `--register-agent SPEC.json` to run every
   role on an agent it registers, and reports each task's tokens.
+- **The OMP runtime.** Agents can run on OMP (oh-my-pi's `omp`, verified
+  against omp 18.4.3) with an API key provider that serves
+  `openai-responses`, `openai-chat` or `anthropic-messages`, such as the
+  `cpa` preset; omp's own logins are not used. Every role can run on it: a
+  Worker or Reviewer is one `omp -p --mode json` run, and the Manager and a
+  Planner run one process per turn that resumes their session from a
+  directory of their own. Every omp process runs with `HOME` set to a home of
+  Looper's under `<runtime root>/.local/omp/homes`, holding a generated
+  `models.yml` (the provider, its key named by an environment variable) and
+  a `--config` overlay (only the agent's model, no approvals, no background
+  jobs, no update checks), so the operator's `~/.omp`, `~/.claude`,
+  `~/.agents`, `~/.env` and similar stay out; the agent's shell commands get
+  the operator's `HOME` back, without the provider's key. Outside a git
+  repository the discovery sources that would climb past the work directory
+  are off. The system prompt is appended with `--append-system-prompt`,
+  after a short block of OMP runtime notes. The installed plugins load
+  natively (skills, commands, agents); their hooks and their own MCP servers
+  do not, and Looper's MCP servers come in a plugin of the home; knowledge is
+  read by the index's paths. omp reports each request's tokens, so runs
+  record their context size and the per-run soft cap can stop a run between
+  requests; a subagent's tokens come with its tool result. A Worker cannot be
+  steered while it runs. `looper serve` registers the built-in `omp`
+  runtime when `omp` is on its PATH, and removes, when it starts, the OMP
+  homes no running process uses and the session directories (OMP's and
+  Codex's) of agents whose saved session is no longer of that runtime.
 - **Choosing the agent per layer and per task.** The layered settings select
   an agent in place of a model, in Settings, on the Agents page and in a
   project's Settings tab, and a new task can override the agent of its

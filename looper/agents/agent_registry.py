@@ -24,7 +24,7 @@ The built-ins exist on every installation and are read-only: the
 ``claude-code/opus`` agent, which every role runs when no layer selects
 another (``BUILTIN_AGENT``). A runtime of another type is built in too once
 ``looper serve`` finds its executable on PATH (``register_found_runtimes``):
-``codex`` for Codex.
+``codex`` for Codex, ``omp`` for OMP.
 
 An agent is checked when it is created or changed, and again when a provider
 it uses changes (``check_pairing``):

@@ -1,6 +1,6 @@
 """Worker tier: subprocess-isolated task execution.
 
-Each Worker runs as a subprocess (Claude Code or Codex) with limited
+Each Worker runs as a subprocess (Claude Code, Codex or OMP) with limited
 permissions. The WorkerPool manages lifecycle, concurrency, and result
 collection, reporting back to the Planner via the Bus.
 

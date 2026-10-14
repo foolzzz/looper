@@ -333,6 +333,70 @@ def test_codex_on_path_becomes_a_builtin_runtime_once(monkeypatch: pytest.Monkey
     _run(_test, monkeypatch)
 
 
+def _version_omp(path: Path) -> str:
+    """A stand-in omp that prints its version for ``--version`` and fails on anything else."""
+    return fake_claude(path, (
+        "import sys\n"
+        "if sys.argv[1:] == ['--version']:\n    print('omp/18.4.3')\n    sys.exit(0)\n"
+        "sys.exit(9)\n"
+    ))
+
+
+def test_omp_pairs_with_an_api_key_provider_of_any_of_its_apis_and_runs_every_role(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    omp = _version_omp(tmp_path / "omp")
+
+    async def _test(_pool: Any) -> None:
+        runtime = (await _ok("POST", "/api/runtimes", {"name": "omp", "type": "omp", "executable": omp}))["runtime"]
+        assert (runtime["version"], runtime["type_label"], runtime["protocols"]) == (
+            "omp/18.4.3", "OMP", ["anthropic-messages", "openai-chat", "openai-responses"])
+        providers = [
+            await _provider({"name": "cpa", "protocols": ["openai-responses", "openai-chat"], "auth": "api_key",
+                             "base_url": "http://127.0.0.1:8317/v1", "api_key": SECRET}),
+            await _provider({"name": "chat-only", "protocols": ["openai-chat"], "auth": "api_key"}),
+            await _provider({"name": "anthropic-key", "protocols": ["anthropic-messages"], "auth": "api_key"}),
+        ]
+
+        async def agent(provider_id: str) -> tuple[int, Any]:
+            return await _call("POST", "/api/agents", {"name": f"omp-{provider_id}", "model": "gpt-5.5",
+                                                       "runtime_id": runtime["runtime_id"], "provider_id": provider_id})
+
+        agents = []
+        for provider_id in providers:
+            status, payload = await agent(provider_id)
+            assert status == 201, payload
+            agents.append(payload["agent"]["agent_id"])
+        # Every role can run it: the system layer selects it for all four.
+        await _ok("PUT", "/api/agent-settings/system", {"agent": agents[0]})
+        # The Claude subscription is Claude Code's login, and OMP's own logins are not ones Looper uses.
+        status, payload = await agent("prov-claude-subscription")
+        assert status == 400 and "pairs only with" in payload["error"]
+        status, payload = await _call("POST", "/api/providers", {
+            "name": "omp-login", "protocols": ["openai-responses"], "auth": "oauth", "oauth_runtime_type": "omp"})
+        assert status == 400 and "OMP has no login of its own" in payload["error"]
+
+    _run(_test, monkeypatch)
+
+
+def test_omp_on_path_becomes_a_builtin_runtime_once(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    from looper.agents.agent_registry import register_found_runtimes
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    _version_omp(bin_dir / "omp")
+
+    async def _test(_pool: Any) -> None:
+        monkeypatch.setenv("PATH", str(bin_dir))
+        assert await register_found_runtimes() == ["omp"]
+        runtime = _by_name((await _registry())["runtimes"], "omp")
+        assert (runtime["runtime_id"], runtime["builtin"], runtime["executable"], runtime["version"]) == (
+            "rt-omp", True, "", "omp/18.4.3")
+        assert await register_found_runtimes() == []  # once
+
+    _run(_test, monkeypatch)
+
+
 def test_a_change_that_would_break_an_agent_is_refused_and_one_in_use_is_kept(
     monkeypatch: pytest.MonkeyPatch, stand_in: str,
 ) -> None:
