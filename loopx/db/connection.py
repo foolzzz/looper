@@ -71,8 +71,13 @@ async def transaction() -> AsyncIterator[asyncpg.Connection]:
         yield conn
 
 
-async def ensure_schema(pool: asyncpg.Pool | None = None) -> None:
+# Serializes schema runs on one database (any schema in it): the script's statements run as one transaction,
+# which takes this lock first, so two processes starting together cannot both create a table or migrate.
+_SCHEMA_LOCK = 0x6C6F6F70  # "loop"
+
+
+async def ensure_schema(pool: asyncpg.Pool | asyncpg.Connection | None = None) -> None:
     pool = pool or get_pool()
     sql = SCHEMA_PATH.read_text(encoding="utf-8")
-    await pool.execute(sql)
+    await pool.execute(f"SELECT pg_advisory_xact_lock({_SCHEMA_LOCK});\n{sql}")
     logger.info("schema ensured")
