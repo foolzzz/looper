@@ -16,16 +16,24 @@ make the changes. Each event is one user turn on it:
   running Worker or add steps.
 
 Every reply ends with JSON that ``planner_protocol`` validates; code then
-does the dispatching. An accepted step gets an entry in the task journal
-(``journal``) with its summary and its agents' learnings; the Planner's
+does the dispatching. Code writes the task journal (``journal``) as things
+happen: a step accepted, failed or retried, with its agents' learnings; the
+Planner's replans, added steps and spend-cap stop, with the reason; the user's
+chat messages; a new session and the handoff before it. The Planner's
 DECISION, SUPERVISE and CHAT turns and each Worker's first turn carry the
 journal back, and a project with ``distill_lessons`` gets one LESSONS turn when
-a task completes, saved as a project knowledge document or a draft of one. The plan, its steps,
+a task completes, saved as a project knowledge document or a draft of one; a
+learning a Worker or Reviewer says holds for the whole project becomes a draft
+when it arrives. The plan, its steps,
 its journal and the Planner's Claude session live in PostgreSQL (``plans``,
 ``agent_sessions``), written as they change; a
 Planner started after the server restarted reads them back and carries on
-(TASK_RESUME) without planning again. The system prompt is rebuilt for every turn from the
-harness, the ``planner`` config and the task's project as it is now (its
+(TASK_RESUME) without planning again. When the Planner's agent can no longer
+resume its session (``session_switch``), the old session, while it runs, hands
+over in one HANDOFF turn, and the new session's first turn starts with a resume
+brief; so does the first turn of any new session for a plan under way. The
+system prompt is rebuilt for every turn from the harness, the ``planner``
+config and the task's project as it is now (its
 background and the index of its knowledge included, the knowledge's
 directories mounted with ``--add-dir``) and the catalog items installed for
 the Planner, globally or in the project (each a ``--plugin-dir``). Its agent
@@ -48,7 +56,7 @@ import asyncio
 import logging
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, TypeVar
@@ -64,12 +72,13 @@ from ..claude_cli import (
     exit_note,
 )
 from .. import knowledge as project_knowledge
+from .. import session_switch
 from ..knowledge import AgentKnowledge, documents_label, load_knowledge
 from ..library import AgentLibrary, items_label, load_installed
 from ..project_execution import LessonsMode, ProjectExecution, TaskBudgetAction, format_usd
 from ..run_usage import Usage
 from ..runtimes import CLAUDE_CODE
-from ..session_switch import SessionOwner, session_switch, session_switched
+from ..session_switch import SessionSwitch
 from ..system_prompt import SystemPrompt, build_system_prompt, is_recommended, plan_task_section
 from ..message import (
     TASK_ROUTER_ADDRESS,
@@ -80,7 +89,7 @@ from ..message import (
     worker_address,
 )
 from . import journal
-from .journal import JournalEntry
+from .journal import JournalEntry, JournalKind, LearningScope
 from .planner_protocol import (
     MAX_RETRIES,
     MAX_STEPS,
@@ -97,6 +106,7 @@ from .planner_protocol import (
     TurnKind,
     parse_chat,
     parse_decision,
+    parse_handoff,
     parse_lessons,
     parse_plan,
     parse_supervise,
@@ -185,6 +195,20 @@ async def load_settings() -> PlannerSettings:
 
 class PlannerTurnError(Exception):
     """A Planner turn produced no valid reply; the message says why."""
+
+
+class _SessionNotResumed(Exception):
+    """Claude never started the saved session its process was told to resume; the message says so."""
+
+
+@dataclass(frozen=True)
+class _Process:
+    """What the Planner's running Claude was started with; each turn on it is recorded with these."""
+
+    command: list[str]
+    signature: Any
+    system_prompt: SystemPrompt
+    launch: Launch
 
 
 @dataclass
@@ -339,6 +363,12 @@ def _clip(text: Any, limit: int) -> str:
     return flat if len(flat) <= limit else flat[: limit - 1] + "…"
 
 
+def _learning_lines(value: Any) -> list[str]:
+    """A report's learnings as decision-turn lines, a project-wide one marked as such."""
+    return [f"- learning{' (holds for the whole project)' if item.scope is LearningScope.PROJECT else ''}: "
+            f"{item.text}" for item in journal.parse_learnings(value)]
+
+
 def _prepare_work_dir(work_dir: str) -> str | None:
     """Create the task's directory if needed; the problem, if it cannot be used."""
     if not work_dir:
@@ -378,6 +408,14 @@ class PlannerAgent:
         self._agent_settings: AgentSettings | None = None
         # The project's execution settings as last read; everything inherits until the project is read.
         self._execution = ProjectExecution()
+        # What the running Claude was started with (None before the first start).
+        self._process: _Process | None = None
+        # Why the session was last dropped and the handoff its old session wrote, until the new session's first
+        # turn has its resume brief.
+        self._pending_switch: SessionSwitch | None = None
+        self._pending_handoff: str | None = None
+        # The project-wide learnings already saved as drafts, so a retry that reports one again adds none.
+        self._drafted: set[str] = set()
 
     @property
     def agent_id(self) -> str:
@@ -483,9 +521,10 @@ class PlannerAgent:
         )
         await self._refresh_project(plan)
         self._plan = plan
-        # A new plan is a new conversation.
+        # A new plan is a new conversation, which needs no resume brief.
         async with self._turn_lock:
             await self._claude.stop()
+        self._pending_switch = self._pending_handoff = None
         await self._save(plan, plan_row=True)
         await self._save_session(plan)
 
@@ -633,6 +672,7 @@ class PlannerAgent:
             return
 
         step.result = result
+        await self._capture_project_learnings(plan, step, result.get("learnings"), "Worker")
         succeeded = result.get("status") == "completed"
         await self._activity(
             "text" if succeeded else "error",
@@ -685,9 +725,10 @@ class PlannerAgent:
 
         passed = result.get("passed") is True
         findings = result.get("findings") or []
+        await self._capture_project_learnings(plan, step, result.get("learnings"), "Reviewer")
         step.result = {**(step.result or {}), "verify_passed": passed, "verify_findings": findings,
                        "verify_summary": result.get("summary", ""),
-                       "verify_learnings": journal.learnings(result.get("learnings"))}
+                       "verify_learnings": journal.reported_learnings(result.get("learnings"))}
         await self._activity(
             "text" if passed else "error",
             f"Verify {'passed' if passed else 'failed'}: {str(result.get('summary') or '')[:150]}",
@@ -732,7 +773,8 @@ class PlannerAgent:
                 f"Warning: the Planner could not decide on step {step.index + 1} ({step.label}): {exc}. "
                 f"The {whose} verdict decides: {step.status}.",
             )
-            await self._step_settled(plan, step)
+            await self._step_settled(plan, step, note=f"The Planner could not decide on it; the {whose} verdict "
+                                                      "failed it.")
             return
         await self._apply_decision(plan, step, context, reply)
 
@@ -753,19 +795,25 @@ class PlannerAgent:
             await self._send_to_review(plan, step)
             return
         elif decision is Decision.RETRY:
+            # The attempt's pitfalls, saved with the retry.
+            retried = self._step_entry(
+                JournalKind.STEP_RETRY, step, f"attempt {step.retries + 1} {self._outcome(step)}. "
+                                              f"Retry: {reply.feedback}")
             step.retries += 1
             step.feedback.append(reply.feedback)
             step.reviewer_id = None
-            await self._save(plan, step)
+            await self._save(plan, step, entries=[retried])
             await self._dispatch_step(plan, step)
             await self._report_progress(plan)
             return
         elif decision is Decision.REPLAN:
             step.status = "verified" if context.acceptable else "skipped"
-            await self._replan(plan, reply.steps, step)
+            await self._replan(plan, reply.steps, step, reply.reason)
         elif decision is Decision.FAIL:
             step.status = "failed"
             plan.fail_reason = reply.reason
+            await self._step_settled(plan, step, note=f"The Planner failed the task: {reply.reason}")
+            return
         await self._step_settled(plan, step)
 
     async def _send_to_review(self, plan: TaskPlan, step: PlanStep) -> None:
@@ -781,27 +829,42 @@ class PlannerAgent:
         project reviews every step."""
         return step.review or self._execution.review_all
 
-    async def _replan(self, plan: TaskPlan, specs: tuple[StepSpec, ...], decided: PlanStep) -> None:
-        """Replace every step that has not started with ``specs``; saved with the ``decided`` step at once."""
+    async def _replan(self, plan: TaskPlan, specs: tuple[StepSpec, ...], decided: PlanStep, reason: str) -> None:
+        """Replace every step that has not started with ``specs``; saved with the ``decided`` step and the
+        decision's journal entry at once."""
         keep = {spec.id for spec in specs}
         dropped = [s for s in plan.steps if s.status == "pending" and s.label not in keep]
         for step in dropped:
             step.status = "skipped"
         steps = self._add_steps(plan, specs)
-        await self._save(plan, decided, *dropped, *steps)
         summary = f"Plan changed: {self._describe(plan, steps) or 'no new steps'}"
         if dropped:
             summary += f"; dropped {', '.join(s.label for s in dropped)}"
+        note = f"replan: {reason or 'no reason given'}. {summary}"
+        if decided.status == "skipped":
+            # The step's attempt is dropped: what went wrong with it and what it learned stay in the entry.
+            entry = self._step_entry(JournalKind.DECISION, decided, f"{note}. The step was dropped "
+                                                                    f"({self._outcome(decided)})")
+        else:
+            entry = JournalEntry(decided.step_id, decided.label, journal.clip(note, journal.SUMMARY_MAX_CHARS),
+                                 kind=JournalKind.DECISION)
+        await self._save(plan, decided, *dropped, *steps, entries=[entry])
         await self._activity("phase", summary)
 
-    async def _step_settled(self, plan: TaskPlan, step: PlanStep) -> None:
+    async def _step_settled(self, plan: TaskPlan, step: PlanStep, *, note: str = "") -> None:
         """Save ``step``'s outcome, then finish the task or start the steps now ready.
 
-        An accepted step's journal entry is saved with it, in one transaction.
+        An accepted or failed step's journal entry is saved with it, in one
+        transaction; ``note`` says why a step failed.
         """
-        entry = self._accepted_entry(plan, step) if step.status == "verified" else None
+        entry: JournalEntry | None = None
+        if step.status == "verified":
+            entry = self._accepted_entry(plan, step)
+        elif step.status == "failed":
+            outcome = self._outcome(step)
+            entry = self._step_entry(JournalKind.STEP_FAILED, step, f"{outcome}. {note}" if note else outcome)
         # An accept's summary or a fail's reason, and the journal entry.
-        await self._save(plan, step, plan_row=True, entry=entry)
+        await self._save(plan, step, plan_row=True, entries=[entry] if entry else [])
         await self._report_progress(plan)
         if plan.has_failed:
             await self._fail_plan(plan)
@@ -810,20 +873,63 @@ class PlannerAgent:
         else:
             await self._dispatch_ready(plan)
 
-    @staticmethod
-    def _accepted_entry(plan: TaskPlan, step: PlanStep) -> JournalEntry | None:
-        """The journal entry of ``step``, just accepted, added to the plan's journal; None if it has one."""
-        if any(entry.step_id == step.step_id for entry in plan.journal):
+    @classmethod
+    def _accepted_entry(cls, plan: TaskPlan, step: PlanStep) -> JournalEntry | None:
+        """The journal entry of ``step``, just accepted; None if it has one."""
+        if any(entry.step_id == step.step_id and entry.kind is JournalKind.STEP_ACCEPTED for entry in plan.journal):
             return None
+        return cls._step_entry(JournalKind.STEP_ACCEPTED, step, (step.result or {}).get("summary"))
+
+    @staticmethod
+    def _step_entry(kind: JournalKind, step: PlanStep, summary: Any) -> JournalEntry:
+        """A journal entry of ``kind`` for ``step``, with the learnings of its last result (its Worker's and,
+        after a review, its Reviewer's)."""
         result = step.result or {}
-        entry = JournalEntry(
-            step_id=step.step_id, step=step.label,
-            summary=journal.clip(result.get("summary"), journal.SUMMARY_MAX_CHARS),
+        return JournalEntry(
+            step_id=step.step_id, step=step.label, kind=kind,
+            summary=journal.clip(summary, journal.SUMMARY_MAX_CHARS),
             learnings=journal.merged_learnings(journal.learnings(result.get("learnings")),
                                                journal.learnings(result.get("verify_learnings"))),
         )
-        plan.journal.append(entry)
-        return entry
+
+    @staticmethod
+    def _outcome(step: PlanStep) -> str:
+        """What ``step``'s last result was, in a line: what a retry or a failure is about."""
+        result = step.result or {}
+        if "verify_passed" in result and result.get("verify_passed") is not True:
+            findings = "; ".join(_clip(f, 200) for f in result.get("verify_findings") or [] if str(f).strip())
+            return f"review failed: {findings or _clip(result.get('verify_summary'), 300) or 'no reason given'}"
+        status = str(result.get("status") or "unknown")
+        detail = result.get("summary") if status == "completed" else result.get("error") or result.get("summary")
+        return f"{status}: {_clip(detail, 400) or 'no reason given'}"
+
+    async def _capture_project_learnings(self, plan: TaskPlan, step: PlanStep, value: Any, who: str) -> None:
+        """Save the learnings ``who`` (the step's Worker or Reviewer) reported as holding for the whole project as
+        a draft of the project's knowledge, as they arrive, when the project distills lessons (``draft`` or
+        ``write``; single learnings are unreviewed, so ``write`` drafts them too). With ``off`` they stay the
+        task's. A draft that cannot be saved is a warning in the activity."""
+        items = [text for text in journal.project_learnings(value) if text not in self._drafted]
+        if not items or not plan.project_id or not self._execution.lessons_on:
+            return
+        self._drafted.update(items)
+        where = f"step {step.label} of task {self._task_id}"
+        try:
+            await project_knowledge.add_draft(
+                plan.project_id, task_id=self._task_id,
+                title=_clip(f"Learnings from step {step.label}: {plan.requirement}",
+                            project_knowledge.TITLE_MAX_CHARS),
+                summary=_clip(f"What the {who} of {where} found that holds for the whole project",
+                              project_knowledge.SUMMARY_MAX_CHARS),
+                content="\n".join([f"# Learnings from step {step.label}", "", *(f"- {text}" for text in items), "",
+                                   f"Reported by the {who} of {where} ({_clip(plan.requirement, 200)})."]),
+            )
+        except Exception as exc:
+            logger.warning("planner %s cannot save project learnings as a draft", self.agent_id, exc_info=True)
+            await self._activity("error", f"Warning: the project learnings of step {step.index + 1} ({step.label}) "
+                                          f"were not saved as a draft: {exc}"[:500])
+            return
+        await self._activity("phase", f"{len(items)} project learning(s) from the {who} of step {step.index + 1} "
+                                      f"({step.label}) saved as a draft to review in project knowledge")
 
     # --- Resuming after a server restart ---
 
@@ -930,10 +1036,12 @@ class PlannerAgent:
 
     async def _chat(self, plan: TaskPlan, text: str, envelope: MessageEnvelope) -> str:
         view = plan.view()
+        message = self._chat_message(plan, text)
+        # Kept before the turn, so the instruction outlives a failed turn and the session.
+        instruction = journal.kept_text(text, journal.USER_INSTRUCTIONS_MAX_CHARS)
+        await self._save(plan, entries=[JournalEntry("", "", instruction, kind=JournalKind.USER_INSTRUCTION)])
         try:
-            reply = await self._ask(
-                TurnKind.CHAT, self._chat_message(plan, text), lambda answer: parse_chat(answer, view),
-            )
+            reply = await self._ask(TurnKind.CHAT, message, lambda answer: parse_chat(answer, view))
         except PlannerTurnError as exc:
             await self._activity("error", f"Planner could not answer a chat message: {exc}"[:500])
             return f"Planner 出错，没能处理这条消息：{exc}"
@@ -950,8 +1058,11 @@ class PlannerAgent:
             return f"{reply.reply}\n\n（{step.worker_id} 在消息送达前已经结束；处理它的结果时我会考虑这条消息。）"
         if reply.action is ChatAction.ADD_STEPS:
             steps = self._add_steps(plan, reply.steps)
-            await self._save(plan, *steps)
-            await self._activity("phase", f"Steps added from chat: {self._describe(plan, steps)}")
+            added = self._describe(plan, steps)
+            await self._save(plan, *steps, entries=[JournalEntry(
+                "", "", journal.clip(f"added steps {added} at the user's message: {reply.reply}",
+                                     journal.SUMMARY_MAX_CHARS), kind=JournalKind.DECISION)])
+            await self._activity("phase", f"Steps added from chat: {added}")
             await self._report_progress(plan)
             await self._dispatch_ready(plan)
             return reply.reply
@@ -1126,18 +1237,23 @@ class PlannerAgent:
 
     # --- Turns on the Planner's Claude ---
 
-    async def _ask(self, kind: TurnKind, message: str, parse: Callable[[str], T]) -> T:
-        """Run one turn and parse its reply; an invalid reply gets one repair turn.
+    async def _ask(
+        self, kind: TurnKind, message: str, parse: Callable[[str], T],
+        run: Callable[[str], Awaitable[str]] | None = None,
+    ) -> T:
+        """Run one turn (with ``run``, on the running Claude as it is; else ``_turn``) and parse its reply; an
+        invalid reply gets one repair turn.
 
         Raises ``PlannerTurnError`` when Claude fails or times out, or when the
         repaired reply is still invalid.
         """
-        reply = await self._turn(message)
+        run = run or self._turn
+        reply = await run(message)
         try:
             return parse(reply)
         except ProtocolError as first:
             await self._activity("error", f"Planner reply broke the {kind.value} contract ({first}); asking again"[:500])
-            reply = await self._turn(
+            reply = await run(
                 f"[{kind.value}] Your last reply broke the reply contract: {first}\n"
                 f"Answer the same request again. End with exactly one ```json block in the {kind.value} shape."
             )
@@ -1159,7 +1275,10 @@ class PlannerAgent:
                                                prompt_file=prompt_file, launch=launch, max_turns=settings.max_turns)
 
     async def _run_turn(self, message: str, *, retried: bool = False) -> str:
-        """Send ``message`` as one turn and return Claude's final message; raises ``PlannerTurnError``."""
+        """Send ``message`` as one turn and return Claude's final message; raises ``PlannerTurnError``.
+
+        The first turn of a new session for a plan under way starts with the resume brief.
+        """
         plan = self._plan
         assert plan is not None
         settings = await load_settings()
@@ -1183,58 +1302,81 @@ class PlannerAgent:
         # compared by their hashes, the mounted directories as such.
         signature = (tuple(base), system_prompt.sha256, launch.env_sha256, launch.library.sha256,
                      launch.knowledge.add_dirs, launch.binding_sha256)
+        switch = session_switch.agent_switch(plan.session_id, plan.session_runtime, plan.session_agent, launch,
+                                             session_provider=plan.session_provider)
+        if switch is not None:
+            # This agent cannot resume the session: a new one starts, after the old one hands over.
+            await self._switch_session(plan, switch, settings.timeout_seconds)
         if self._claude.stale(signature):
             # Claude exited, or the config, the settings, the project or the task
             # changed: the next process resumes the session with the new prompt.
             await self._claude.stop()
-        start_error: str | None = None
+        brief = ""
         resuming: str | None = None  # the session this turn's new process resumes, if any
-        switch = None if self._claude.started else session_switch(
-            self.agent_id, self._task_id, plan.session_id,
-            SessionOwner(plan.session_runtime, plan.session_provider, plan.session_agent), launch)
-        if switch is not None:
-            # Another runtime or provider cannot resume this session: a new one starts. Every turn carries the
-            # plan, its steps and the task journal, so the Planner goes on from where the task is; the session
-            # switch hooks add what the new session is told.
-            await self._activity("phase", f"The Planner's agent changed ({switch.change()}), which cannot resume "
-                                          f"session {switch.session_id}: starting a new session")
-            plan.session_id, plan.session_totals = None, Usage()
-            await self._save_session(plan)
-            if brief := await session_switched(switch):
-                message = f"{brief}\n\n{message}"
-        if self._claude.started:
-            command = self._claude.command
+        if self._claude.started and self._process is not None:
+            process = self._process
         else:
             plan.session_runtime, plan.session_agent = launch.runtime.type, launch.agent.id
             plan.session_provider = launch.agent.provider.id
             resuming = plan.session_id
+            if not resuming and plan.steps:
+                # A new session for a plan under way: its first turn starts with the resume brief.
+                if self._pending_switch is None:
+                    await self._drop_session(plan, session_switch.session_lost(
+                        "the Planner has no saved session for this task", runtime=launch.runtime.type,
+                        agent=launch.agent.id))
+                brief = self._resume_brief(plan)
             command = base + (launch.runtime.resume_args(plan.session_id) if plan.session_id else [])
+            process = _Process(command, signature, system_prompt, launch)
             try:
                 await self._claude.start(command, cwd=plan.work_dir, signature=signature, env=launch.environment(),
                                          totals=plan.session_totals if plan.session_id else None,
                                          autonomous=self._autonomous_turns(plan, command, system_prompt, launch),
                                          price=launch.price)
             except OSError as exc:
-                start_error = f"cannot start Claude Code: {exc}"
-            else:
-                resumed = f", resuming session {plan.session_id}" if plan.session_id else ""
-                await self._activity("phase", f"Planner Claude Code started (pid {self._claude.pid}{resumed})")
+                error = f"cannot start Claude Code: {exc}"
+                recorder = self._recorder(plan, f"{brief}\n\n{message}" if brief else message, process)
+                await recorder.start()
+                await recorder.finish(output_text=None, result_event=None, error=error)
+                raise PlannerTurnError(error) from None
+            self._process = process
+            resumed = f", resuming session {plan.session_id}" if plan.session_id else ""
+            await self._activity("phase", f"Planner Claude Code started (pid {self._claude.pid}{resumed})")
 
-        recorder = ClaudeRunRecorder(
+        try:
+            return await self._exchange(f"{brief}\n\n{message}" if brief else message, process,
+                                        settings.timeout_seconds, resuming=None if retried else resuming)
+        except _SessionNotResumed as exc:
+            # Claude never started the saved session: it no longer exists, and resuming it again would fail
+            # every turn. The Planner continues in a new session, which the resume brief starts.
+            await self._activity("error", f"Warning: Planner {exc}")
+            await self._claude.stop()
+            await self._drop_session(plan, session_switch.session_lost(
+                f"its saved session {resuming} could not be resumed", runtime=launch.runtime.type,
+                agent=launch.agent.id))
+            return await self._run_turn(message, retried=True)
+
+    def _recorder(self, plan: TaskPlan, text: str, process: _Process) -> ClaudeRunRecorder:
+        return ClaudeRunRecorder(
             agent_id=self.agent_id,
             task_id=self._task_id,
-            command=command,
+            command=process.command,
             cwd=plan.work_dir,
-            input_text=message,
+            input_text=text,
             session_id=plan.session_id,
             pid=self._claude.pid,
-            system_prompt=system_prompt,
-            launch=launch,
+            system_prompt=process.system_prompt,
+            launch=process.launch,
         )
+
+    async def _exchange(self, text: str, process: _Process, limit: int, *, resuming: str | None = None) -> str:
+        """Run ``text`` as one turn on the running Claude (started with ``process``) and return its final
+        message, recorded as one run; raises ``PlannerTurnError``, or ``_SessionNotResumed`` when Claude never
+        started ``resuming``, the session it was told to resume."""
+        plan = self._plan
+        assert plan is not None
+        recorder = self._recorder(plan, text, process)
         await recorder.start()
-        if start_error:
-            await recorder.finish(output_text=None, result_event=None, error=start_error)
-            raise PlannerTurnError(start_error)
 
         async def on_event(event: dict[str, Any]) -> None:
             await recorder.record(event)
@@ -1242,10 +1384,11 @@ class PlannerAgent:
             if isinstance(session_id, str) and session_id and session_id != plan.session_id:
                 plan.session_id = session_id
                 await self._save_session(plan)
+                # The new session has its resume brief.
+                self._pending_switch = self._pending_handoff = None
 
-        limit = settings.timeout_seconds
         try:
-            turn = await asyncio.wait_for(self._claude.run_turn(message, on_event, stop=lambda: recorder.cap_stop),
+            turn = await asyncio.wait_for(self._claude.run_turn(text, on_event, stop=lambda: recorder.cap_stop),
                                           limit if limit > 0 else None)
         except TimeoutError:
             # The turn was cancelled, which killed Claude; the next turn resumes the session.
@@ -1261,33 +1404,25 @@ class PlannerAgent:
                                   error=f"Planner stopped reading Claude: {type(exc).__name__}")
             raise
 
-        if resuming and not turn.session_started and not retried:
-            # Claude never started the saved session: it no longer exists, and
-            # resuming it again would fail every turn. Each turn carries the plan
-            # state, so the Planner continues in a new session.
+        if resuming and not turn.session_started:
             error = f"session {resuming} could not be resumed{exit_note(turn.exit_code)}; retried in a new session"
             await recorder.finish(output_text=None, result_event=None, error=error)
-            await self._activity("error", f"Warning: Planner {error}")
-            await self._claude.stop()
-            plan.session_id, plan.session_totals = None, Usage()  # its totals went with it
-            await self._save_session(plan)
-            return await self._run_turn(message, retried=True)
+            raise _SessionNotResumed(error)
 
         result_event = turn.result_event
         final_text = str((result_event or {}).get("result") or "")
         error: str | None = None
         if result_event is None:
             error = f"Claude Code exited before finishing the turn (exit code {turn.exit_code})"
-        elif launch.runtime.budget_error(result_event):
+        elif process.launch.runtime.budget_error(result_event):
             # The process answers every later turn the same way at once: the next turn starts a new one,
             # with a new cap, that resumes the session.
-            error = launch.runtime.budget_error(result_event)
+            error = process.launch.runtime.budget_error(result_event)
             await self._claude.stop()
         elif result_event.get("is_error") or result_event.get("subtype") != "success":
             error = f"Claude Code turn did not succeed ({result_event.get('subtype') or 'error'})"
         elif not final_text.strip():
             error = "Claude Code returned an empty reply"
-        usage = turn.usage
         if result_event is not None:
             plan.session_totals = self._claude.totals
             await self._save_session(plan)
@@ -1295,11 +1430,82 @@ class PlannerAgent:
             output_text=final_text or None,
             result_event=result_event,
             error=error,
-            usage=usage,
+            usage=turn.usage,
         )
         if error:
             raise PlannerTurnError(error)
         return final_text
+
+    # --- A new session: the handoff before it and the resume brief that starts it ---
+
+    async def _switch_session(self, plan: TaskPlan, switch: SessionSwitch, limit: int) -> None:
+        """Move to a new session because the Planner's agent changed. While the old session's Claude still runs,
+        it first writes a handoff for the new one (one HANDOFF turn); otherwise the new session starts from the
+        task journal alone."""
+        process = self._process
+        handoff: str | None = None
+        if self._claude.started and process is not None and not self._claude.stale(process.signature):
+            try:
+                handoff = await self._ask(TurnKind.HANDOFF, self._handoff_message(plan, switch), parse_handoff,
+                                          run=lambda text: self._exchange(text, process, limit))
+            except PlannerTurnError as exc:
+                await self._activity("error",
+                                     f"Warning: the Planner's previous session wrote no handoff: {exc}"[:500])
+        await self._claude.stop()
+        await self._drop_session(plan, switch, handoff)
+
+    async def _drop_session(self, plan: TaskPlan, switch: SessionSwitch, handoff: str | None = None) -> None:
+        """Forget the saved session, so the next process starts a new one, and journal why (with the handoff
+        before it, in one transaction); the new session's first turn gets the resume brief."""
+        entries = [JournalEntry("", "", handoff, kind=JournalKind.HANDOFF)] if handoff else []
+        entries.append(JournalEntry("", "", journal.clip(switch.describe(), journal.SUMMARY_MAX_CHARS),
+                                    kind=JournalKind.SESSION_SWITCH))
+        await self._save(plan, entries=entries)
+        plan.session_id, plan.session_totals = None, Usage()  # its totals go with it
+        await self._save_session(plan)
+        self._pending_switch, self._pending_handoff = switch, handoff
+        handed = "; its previous session wrote a handoff" if handoff else ""
+        await self._activity("phase", f"The Planner starts a new session ({switch.describe()}){handed}"[:500])
+
+    def _handoff_message(self, plan: TaskPlan, switch: SessionSwitch) -> str:
+        return "\n".join([
+            f"[HANDOFF] This session ends here ({switch.describe()}). The next session for this task starts fresh "
+            "and cannot read this conversation; it gets the plan, the user's instructions and the task journal. "
+            "Hand over what it needs beyond those: your understanding of the codebase (its layout, how it builds "
+            "and tests, its conventions), reasoning you have not finished, open risks, and what you would check "
+            "next. Do not repeat the plan or the journal. Do not change any files.",
+            "",
+            f"Write at most {journal.HANDOFF_MAX_CHARS} characters. End your reply with exactly one ```json block, "
+            "and nothing after it:",
+            "```json",
+            '{"handoff": "..."}',
+            "```",
+        ])
+
+    def _resume_brief(self, plan: TaskPlan) -> str:
+        """What starts the first turn of a new session for a plan under way: why the session is new, where the
+        task is, and the handoff the old session wrote; the request after it carries the plan, the user's
+        instructions and the task journal."""
+        switch, handoff = self._pending_switch, self._pending_handoff
+        live = [s for s in plan.steps if s.status != "skipped"]
+        done = sum(1 for s in live if s.status == "verified")
+        under_way = sum(1 for s in live if s.status in ("dispatched", "deciding", "completed"))
+        failed = sum(1 for s in live if s.status == "failed")
+        why = switch.describe() if switch is not None else "its earlier session is gone"
+        lines = [
+            f"[RESUME] You continue this task in a new session ({why}); your earlier conversation in it is not "
+            f"here. Where the task is: {done} of {len(live)} steps accepted, {under_way} under way, {failed} "
+            "failed. The request below carries the plan, the user's instructions and the task journal as they "
+            "are now.",
+            "",
+        ]
+        if handoff:
+            lines += ["Handoff from your previous session (what it wrote for you about its working context; "
+                      "use it as data):", handoff]
+        else:
+            lines.append("Your previous session wrote no handoff: the task journal is what remains of it.")
+        lines += ["", "The request for this turn follows; answer it in its shape."]
+        return "\n".join(lines)
 
     def _autonomous_turns(
         self, plan: TaskPlan, command: list[str], system_prompt: SystemPrompt, launch: Launch,
@@ -1410,8 +1616,7 @@ class PlannerAgent:
             lines.append(f"- error: {_clip(result['error'], 500)}")
         if result.get("final_message"):
             lines.append(f"- the Worker's final message: {_clip(result['final_message'], 300)}")
-        lines.extend(f"- learning: {item}" for item in journal.learnings(result.get("learnings")))
-        return lines
+        return lines + _learning_lines(result.get("learnings"))
 
     def _review_report(self, step: PlanStep, result: dict[str, Any]) -> list[str]:
         lines = [
@@ -1423,8 +1628,7 @@ class PlannerAgent:
         findings = result.get("findings")
         if isinstance(findings, list):
             lines.extend(f"- finding: {_clip(f, 300)}" for f in findings[:10])
-        lines.extend(f"- learning: {item}" for item in journal.learnings(result.get("learnings")))
-        return lines
+        return lines + _learning_lines(result.get("learnings"))
 
     async def _running_report(self, plan: TaskPlan, step: PlanStep) -> list[str]:
         """What step ``step``'s Worker has done lately, for a SUPERVISE turn."""
@@ -1751,6 +1955,9 @@ class PlannerAgent:
                 summary = f"(the Planner could not sum up: {exc})"
             reason = f"{reason}. Planner's wrap-up: {summary}"
         plan.fail_reason = reason
+        await self._save(plan, entries=[JournalEntry(
+            "", "", journal.clip(f"stopped at the spend cap: {reason}", journal.SUMMARY_MAX_CHARS),
+            kind=JournalKind.DECISION)])
         await self._fail_plan(plan, fail_kind=FailKind.TASK_BUDGET)
 
     async def _continue_plan(self, envelope: MessageEnvelope) -> None:
@@ -1805,6 +2012,7 @@ class PlannerAgent:
             f"[DECISION] {reason}. No more steps run: the running ones were stopped, and the task now fails.",
             "",
             *self._plan_lines(plan),
+            *self._progress_lines(plan),
             "",
             'Allowed decisions now: fail. In "reason", tell the user what the task delivered and what remains.',
             "Reply with the DECISION JSON.",
@@ -1881,18 +2089,19 @@ class PlannerAgent:
             await self._activity("phase", f"Project background applied ({len(background)} chars)")
 
     async def _save(
-        self, plan: TaskPlan, *steps: PlanStep, plan_row: bool = False, entry: JournalEntry | None = None,
+        self, plan: TaskPlan, *steps: PlanStep, plan_row: bool = False, entries: Sequence[JournalEntry] = (),
     ) -> None:
-        """Save ``steps``, with ``plan_row`` the plan's own state and with ``entry`` a journal entry, in one
-        transaction.
+        """Save ``steps``, with ``plan_row`` the plan's own state and the journal ``entries`` (added to the
+        plan's journal first), in one transaction.
 
         A failed write is logged and the task goes on from memory; only a
         restart would miss it.
         """
+        plan.journal.extend(entries)
         try:
             await db_plans.save(self._task_id, plan=plan.row() if plan_row else None,
                                 steps=[_step_row(step) for step in {id(step): step for step in steps}.values()],
-                                journal=[entry.row()] if entry else [])
+                                journal=[entry.row() for entry in entries])
         except Exception:
             logger.exception("failed to save the plan of task %s", self._task_id)
 

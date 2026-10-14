@@ -359,17 +359,11 @@ def test_a_planner_turn_over_its_cap_is_stopped_and_its_session_counts_the_spend
 def test_a_planner_resumes_its_session_only_with_the_same_runtime_type_and_provider(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, before: str, after: str, resumes: bool,
 ) -> None:
-    from looper.agents.session_switch import SessionSwitch, SwitchReason, on_session_switch
     from looper.agents.tiers.planner import PlannerAgent, TaskPlan
     from looper.db import agent_sessions
 
-    switches: list[SessionSwitch] = []
-
-    async def _hook(switch: SessionSwitch) -> str:
-        switches.append(switch)
-        return "RESUME-BRIEF: where the task is."
-
     async def _turn(task: str, n: int) -> dict[str, Any]:
+        """One Planner turn after a restart: a new Planner that reads the saved session, as the server does."""
         import agent_launch_parity as parity
 
         out = tmp_path / f"turn-{n}.json"
@@ -386,38 +380,33 @@ def test_a_planner_resumes_its_session_only_with_the_same_runtime_type_and_provi
             await planner._claude.stop()
         return json.loads(out.read_text())
 
-    async def _test(_pool: Any) -> None:
+    async def _test(pool: Any) -> None:
         catalog = [{"name": "glm-5.3[1m]"}, {"name": "glm-4.7"}]
         key_a, key_b = await _provider("key-a", models=catalog), await _provider("key-b", models=catalog)
         agents = {"subscription": "agent-claude-code-opus",
                   "key-a": (await _agent(key_a, "glm-5.3[1m]"))["agent"]["agent_id"],
                   "key-a-other-model": (await _agent(key_a, "glm-4.7"))["agent"]["agent_id"],
                   "key-b": (await _agent(key_b, "glm-5.3[1m]"))["agent"]["agent_id"]}
+        providers = {"subscription": "prov-claude-subscription", "key-a": key_a, "key-a-other-model": key_a,
+                     "key-b": key_b}
         task = await _task(tmp_path)
         (tmp_path / "w").mkdir(parents=True, exist_ok=True)
 
         await _ok("PUT", "/api/agent-settings/roles/planner", {"agent": agents[before]})
-        first = await _turn(task, 1)
-        assert "--resume" not in first["argv"]
+        assert "--resume" not in (await _turn(task, 1))["argv"]
         await _ok("PUT", "/api/agent-settings/roles/planner", {"agent": agents[after]})
-        remove = on_session_switch(_hook)
-        try:
-            second = await _turn(task, 2)
-        finally:
-            remove()
+        second = await _turn(task, 2)
 
         assert ("--resume" in second["argv"]) is resumes
+        switches = [r["summary"] for r in await pool.fetch(
+            "SELECT summary FROM task_journal WHERE task_id = $1 AND kind = 'session_switch'", task)]
         if resumes:
-            assert switches == [] and not second["stdin"].startswith("RESUME-BRIEF")
-        else:
+            assert switches == []
+        else:  # journalled as a session switch, naming both providers
             (switch,) = switches
-            assert (switch.agent, switch.task_id, switch.session_id, switch.reason) == \
-                (f"planner-{task}", task, "sess-parity", SwitchReason.PROVIDER)
-            assert switch.current.agent_id == agents[after]
-            # What the hooks return opens the new session's first turn.
-            assert second["stdin"].startswith("RESUME-BRIEF: where the task is.\n\n")
+            assert f"a session of provider {providers[before]} cannot go on with provider {providers[after]}" \
+                in switch
         saved = await agent_sessions.get_session(f"planner-{task}")
-        provider_after = {"subscription": "prov-claude-subscription", "key-b": key_b}.get(after, key_a)
-        assert (saved["runtime_type"], saved["provider_id"]) == ("claude-code", provider_after)
+        assert (saved["runtime_type"], saved["provider_id"]) == ("claude-code", providers[after])
 
     _run(_test, monkeypatch)

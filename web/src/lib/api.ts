@@ -724,19 +724,31 @@ export interface TaskDetail extends TaskInfo {
   updated_at: string;
   completed_at: string | null;
   steps: TaskStep[];
-  /** The task journal, oldest first: an entry per accepted step. */
+  /** The task journal, oldest first: what happened in the task that later agents and sessions need. */
   journal?: JournalEntry[];
   /** The agent the task chose for some of its roles, over every settings layer; {} when none. */
   agent_overrides?: Partial<Record<TaskRole, RegistryAgent>>;
 }
 
-/** What an accepted step delivered and what its Worker and Reviewer found. */
+/** What a task journal entry records; code writes each when its event happens. */
+export type JournalKind =
+  | "step_accepted"
+  | "step_failed"
+  | "step_retry"
+  | "decision"
+  | "user_instruction"
+  | "session_switch"
+  | "handoff";
+
+/** One event of a task that later agents and sessions need: a step's outcome with its agents' learnings, a
+ * Planner decision, a user instruction, a new Planner session or the handoff before it. */
 export interface JournalEntry {
   id: number;
+  /** "" for an entry of the whole task. */
   step_id: string;
-  /** The Planner's label for the step; "" when the step is gone. */
+  /** The Planner's label for the step; "" for an entry of the whole task or when the step is gone. */
   step_key: string;
-  kind: "step_accepted";
+  kind: JournalKind;
   summary: string;
   learnings: string[];
   created_at: string;

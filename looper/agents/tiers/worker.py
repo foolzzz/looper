@@ -198,7 +198,7 @@ def judge_result(
             "passed": verdict["passed"],
             "findings": findings if isinstance(findings, list) else [str(findings)],
             "summary": str(verdict.get("summary") or ""),
-            "learnings": journal.learnings(verdict.get("learnings")),
+            "learnings": journal.reported_learnings(verdict.get("learnings")),
         }
 
     report = extract_report(text, "status")
@@ -213,7 +213,7 @@ def judge_result(
         return _work_failed(f"Worker reported an unknown status {status!r}")
     if not isinstance(changed, dict) or not isinstance(deleted, list):
         return _work_failed("Worker report has malformed changed_files or deleted_files")
-    learnings = journal.learnings(report.get("learnings"))
+    learnings = journal.reported_learnings(report.get("learnings"))
     if status == "failed":
         return _work_failed(summary or "Worker reported failure", summary=summary, changed_files=changed,
                             learnings=learnings)

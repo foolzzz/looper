@@ -71,7 +71,9 @@ after it:
 - summary: what you did and how you checked it.
 - learnings (optional): up to 5 short findings or pitfalls later steps of the
   task should know, such as "the build needs `make gen` first"; leave out what
-  the summary already says.
+  the summary already says. Write one that holds for any later task of this
+  project (a build command, a convention, a trap in the code) as
+  {"text": "...", "scope": "project"}.
 Give paths relative to the working directory. The report is checked against
 the files on disk: a changed file that does not exist, or a deleted file that
 still does, fails the step."""
@@ -95,7 +97,8 @@ after it:
 - findings: each problem you found, one per item; [] when there is none.
 - summary: your conclusion in a sentence or two.
 - learnings (optional): up to 5 short findings or pitfalls later steps of the
-  task should know, beyond this step's problems."""
+  task should know, beyond this step's problems. Write one that holds for any
+  later task of this project as {"text": "...", "scope": "project"}."""
 
 
 # The task requirement's share of a task section; a longer one is clipped so

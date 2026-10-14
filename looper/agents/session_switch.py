@@ -1,114 +1,91 @@
-"""When a resident agent's session cannot go on: the seam for what its new session is told.
+"""Why a resident agent starts a new session instead of resuming its saved one (multi-runtime RFC P5).
 
-The Manager and each task's Planner keep one session and resume it after a
-restart. A session resumes only while its agent keeps the same runtime type
-and the same provider (``runtimes.can_resume``, RFC P5); when either changes,
-the agent's next turn starts a new session. Before it does, the agent hands a
-``SessionSwitch`` to every hook registered here (``on_session_switch``) and
-puts what the hooks return in front of that turn's message. Hooks decide what
-a new session is told (a handoff summary, a resume brief); the tiers only
-decide when a session switches and where the text goes.
+The Manager and a task's Planner each keep one session and resume it after a
+restart. Their next turn starts a new session instead when:
 
-A hook runs once per switch, in the order registered, and is awaited before the
-new session's first turn. Its failure is logged and skipped: a switch never
-fails the turn.
+- ``AGENT_CHANGED``: the agent the turn runs cannot resume the saved session.
+  ``agent_switch`` decides it before every turn, from what the session was
+  saved with and the agent the turn resolved. It is the one place the rule
+  lives (``runtimes.can_resume``): a session resumes only when both its
+  runtime type and its provider are unchanged, so another runtime type, or any
+  change of provider (subscription to API key, API key to subscription, one API
+  key provider to another), starts a new session; a change of model alone does
+  not.
+- ``SESSION_LOST``: the runtime could not resume the saved session (it no
+  longer exists), or there is none to resume for work under way.
+
+Before an ``AGENT_CHANGED`` switch, an old session whose process still runs
+takes one handoff turn: it writes for the next session what that one cannot
+read back (its understanding of the code, unfinished reasoning, open risks).
+The new session's first turn then gets a resume brief: why it is new, the
+handoff, and the state the owner keeps (a Planner's plan and task journal, the
+Manager's recent chats). Without a running old session, the brief is built
+from that state alone.
 """
 
 from __future__ import annotations
 
-import logging
-from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from enum import Enum
 from typing import TYPE_CHECKING
 
+from .runtimes import CLAUDE_CODE, LEGACY_SESSION_PROVIDER_ID, can_resume
+
 if TYPE_CHECKING:
     from .agent_settings import Launch
 
-logger = logging.getLogger(__name__)
-
 
 class SwitchReason(str, Enum):
-    """What changed: the runtime type (whatever happened to the provider), or only the provider."""
-
-    RUNTIME = "runtime"
-    PROVIDER = "provider"
-
-
-@dataclass(frozen=True)
-class SessionOwner:
-    """What a session belongs to: a runtime type, a provider and the agent (``agents.id``); None where a session
-    saved before it was recorded does not say."""
-
-    runtime_type: str | None
-    provider_id: str | None
-    agent_id: str | None
+    AGENT_CHANGED = "agent_changed"
+    SESSION_LOST = "session_lost"
 
 
 @dataclass(frozen=True)
 class SessionSwitch:
-    """A resident agent's saved session that its current agent cannot resume.
+    """A resident agent's move to a new session: why, and from which runtime and agent to which."""
 
-    ``agent`` is the resident agent (``manager`` or ``planner-<task_id>``),
-    ``task_id`` its task (a Planner's), ``session_id`` the session left behind,
-    ``previous`` what it belonged to and ``current`` what the new session will.
-    """
-
-    agent: str
-    task_id: str | None
-    session_id: str
     reason: SwitchReason
-    previous: SessionOwner
-    current: SessionOwner
+    detail: str  # why, in words: what cannot resume what, or what happened to the session
+    old_runtime: str | None = None
+    old_agent: str | None = None
+    new_runtime: str | None = None
+    new_agent: str | None = None
+    old_provider: str | None = None
+    new_provider: str | None = None
 
-    def change(self) -> str:
-        """What changed, in a few words: ``runtime claude-code -> codex`` or ``provider <id> -> <id>``."""
-        if self.reason is SwitchReason.RUNTIME:
-            return f"runtime {self.previous.runtime_type or 'claude-code'} -> {self.current.runtime_type}"
-        return f"provider {self.previous.provider_id or 'prov-claude-subscription'} -> {self.current.provider_id}"
+    def describe(self) -> str:
+        """One line for the task journal and the activity."""
+        def side(runtime: str | None, agent: str | None) -> str:
+            return f"{runtime or '?'}" + (f" (agent {agent})" if agent else "")
 
-
-# Returns text for the new session's first turn, or None for nothing.
-SessionSwitchHook = Callable[[SessionSwitch], Awaitable[str | None]]
-
-_hooks: list[SessionSwitchHook] = []
-
-
-def on_session_switch(hook: SessionSwitchHook) -> Callable[[], None]:
-    """Register ``hook`` for every session switch; returns what unregisters it."""
-    _hooks.append(hook)
-
-    def _remove() -> None:
-        if hook in _hooks:
-            _hooks.remove(hook)
-
-    return _remove
+        if self.reason is SwitchReason.AGENT_CHANGED:
+            return (f"agent changed from {side(self.old_runtime, self.old_agent)} to "
+                    f"{side(self.new_runtime, self.new_agent)}: {self.detail}")
+        return f"session lost: {self.detail}"
 
 
-async def session_switched(switch: SessionSwitch) -> str:
-    """Hand ``switch`` to every hook; what they return, in order, blank-line separated ('' for nothing)."""
-    texts: list[str] = []
-    for hook in list(_hooks):
-        try:
-            text = await hook(switch)
-        except Exception:
-            logger.warning("%s: a session switch hook failed", switch.agent, exc_info=True)
-            continue
-        if text and text.strip():
-            texts.append(text.strip())
-    return "\n\n".join(texts)
-
-
-def session_switch(agent: str, task_id: str | None, session_id: str | None, previous: SessionOwner,
-                   launch: Launch) -> SessionSwitch | None:
-    """The switch ``agent`` makes when ``launch``'s agent cannot resume its saved session ``session_id``, which
-    belongs to ``previous``; None when there is no saved session or it can be resumed."""
-    from .runtimes import CLAUDE_CODE, can_resume
-
-    runtime, provider = launch.runtime, launch.agent.provider
-    if not session_id or can_resume(previous.runtime_type, previous.provider_id, runtime, provider.id):
+def agent_switch(
+    session_id: str | None, session_runtime: str | None, session_agent: str | None, launch: Launch, *,
+    session_provider: str | None,
+) -> SessionSwitch | None:
+    """The switch a turn about to run with ``launch`` makes from the session saved with ``session_runtime``,
+    ``session_provider`` and ``session_agent`` (None runtime: from before agents, which Claude Code ran; None
+    provider: from before sessions recorded it, Claude Code's own login); None when there is no saved session
+    or the turn's agent resumes it."""
+    provider = launch.agent.provider.id
+    if not session_id or can_resume(session_runtime, session_provider, launch.runtime, provider):
         return None
-    reason = SwitchReason.RUNTIME if (previous.runtime_type or CLAUDE_CODE.type) != runtime.type \
-        else SwitchReason.PROVIDER
-    return SessionSwitch(agent, task_id, session_id, reason, previous,
-                         SessionOwner(runtime.type, provider.id, launch.agent.id))
+    old, old_provider = session_runtime or CLAUDE_CODE.type, session_provider or LEGACY_SESSION_PROVIDER_ID
+    detail = (f"a {launch.runtime.type} process cannot resume a {old} session" if old != launch.runtime.type
+              else f"a session of provider {old_provider} cannot go on with provider {provider}")
+    return SessionSwitch(
+        SwitchReason.AGENT_CHANGED, detail,
+        old_runtime=old, old_agent=session_agent, new_runtime=launch.runtime.type, new_agent=launch.agent.id,
+        old_provider=old_provider, new_provider=provider,
+    )
+
+
+def session_lost(detail: str, *, runtime: str | None = None, agent: str | None = None) -> SessionSwitch:
+    """The switch to a new session when the saved one cannot be resumed, or there is none."""
+    return SessionSwitch(SwitchReason.SESSION_LOST, detail, old_runtime=runtime, old_agent=agent,
+                         new_runtime=runtime, new_agent=agent)
