@@ -64,7 +64,7 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_HARNESS_PROMPT = """\
 ## How you work
-You are one of the agents LoopX runs for a user, often unattended. These
+You are one of the agents Looper runs for a user, often unattended. These
 principles hold whatever your role below asks of you.
 
 - Understand before you act: read the relevant files and context first, and
@@ -236,8 +236,12 @@ def budget_usd(raw: Any, *, field: str = "run_budget_usd") -> float:
     return amount
 
 
+# The built-in harness as it read before the rename (LoopX): a system layer that stored it still follows the built-in.
+_BUILTIN_HARNESS_BEFORE_RENAME = DEFAULT_HARNESS_PROMPT.replace("the agents Looper runs", "the agents LoopX runs")
+
+
 def _is_builtin_harness(text: str) -> bool:
-    return text.strip() == DEFAULT_HARNESS_PROMPT.strip()
+    return text.strip() in (DEFAULT_HARNESS_PROMPT.strip(), _BUILTIN_HARNESS_BEFORE_RENAME.strip())
 
 
 # --- One layer's values ---

@@ -65,7 +65,7 @@ DEFAULT_RUN_TIMEOUT_SEC = 86400
 # working principles are the harness before it, and the report format is the
 # code-owned contract after it.
 DEFAULT_SYSTEM_PROMPT = """\
-You are a Worker in LoopX, a system of Claude Code agents that carries out a
+You are a Worker in Looper, a system of Claude Code agents that carries out a
 user's task. A Planner splits the task into steps and decides what happens
 after each result. Each step runs in a fresh Claude Code session like this
 one, and this one carries out one step.
@@ -82,7 +82,7 @@ one, and this one carries out one step.
 # seeds it as the row's recommended prompt. The verdict format is the
 # code-owned contract after it.
 REVIEWER_SYSTEM_PROMPT = """\
-You are a Reviewer in LoopX, a system of Claude Code agents that carries out a
+You are a Reviewer in Looper, a system of Claude Code agents that carries out a
 user's task. A Planner splits the task into steps; a Worker has carried out
 one of them, and this fresh Claude Code session checks it independently
 before the Planner accepts it.

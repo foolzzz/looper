@@ -42,7 +42,7 @@ BASELINES_DIR = Path(__file__).resolve().with_name("baselines")
 DEFAULT_OUT_DIR = REPO_ROOT / "evals" / "runs"
 RESERVED_PORT = 8767  # the operator's own server
 RESERVED_DATABASE = "loopx"  # the operator's own database
-SCHEMA = "loopx-prompt-eval/v1"
+SCHEMA = "looper-prompt-eval/v1"
 
 # The server, started the way ``looper serve`` starts it, without depending on the CLI module.
 _SERVE = (
@@ -74,7 +74,7 @@ def fresh_database(admin_url: str) -> Iterator[tuple[str, float]]:
     if admin_db == RESERVED_DATABASE:
         raise EvalError(f"refusing to connect to the {RESERVED_DATABASE!r} database; give a URL to 'postgres' "
                         "or a disposable database on the same server")
-    name = f"loopx_eval_{uuid.uuid4().hex[:12]}"
+    name = f"looper_eval_{uuid.uuid4().hex[:12]}"
 
     async def create() -> float:
         conn = await asyncpg.connect(admin_url)
@@ -404,7 +404,7 @@ def run(
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     out_dir.mkdir(parents=True, exist_ok=True)
     log_path = out_dir / f"{stamp}-{mode}.server.log"
-    raw_root = Path(tempfile.mkdtemp(prefix="loopx-eval-"))
+    raw_root = Path(tempfile.mkdtemp(prefix="looper-eval-"))
     root = raw_root.resolve()
     timeout = task_timeout or (60.0 if mode == "fake" else 900.0)
     poll = 0.3 if mode == "fake" else 2.0

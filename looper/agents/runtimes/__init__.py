@@ -17,7 +17,7 @@ command themselves. An adapter says:
   configuration), with the runtime's own **isolation** from the operator's
   personal configuration (``isolation_args``);
 - **its stream** (``parse``, ``write_turn``, ``tool_summary``): its output as
-  LoopX's internal events, one user turn written to it, and a tool call in
+  Looper's internal events, one user turn written to it, and a tool call in
   words for the task's activity. The internal event is Claude Code's
   stream-json event (``type`` ``system``/``assistant``/``user``/``result``...),
   which the recorder, the usage and context readings (``run_usage``) and the
@@ -61,7 +61,7 @@ class ApiProtocol(str, Enum):
 
 
 class AuthKind(str, Enum):
-    """How a provider authenticates: a runtime type's own login, or an API key LoopX stores."""
+    """How a provider authenticates: a runtime type's own login, or an API key Looper stores."""
 
     OAUTH = "oauth"
     API_KEY = "api_key"
@@ -75,7 +75,7 @@ class Capability(str, Enum):
     RESUME = "resume"  # a new process continues a saved session (the Manager, a Planner)
     STRUCTURED_OUTPUT = "structured_output"  # the runtime enforces a reply schema itself
     CLAUDE_PLUGINS = "claude_plugins"  # it loads Claude Code plugins and skills from a directory
-    MCP = "mcp"  # it loads the MCP servers LoopX gives it
+    MCP = "mcp"  # it loads the MCP servers Looper gives it
     ADD_DIRS = "add_dirs"  # it reads extra directories (project knowledge)
     COMPACTION_EVENTS = "compaction_events"  # it reports context compactions
     AUTONOMOUS_TURNS = "autonomous_turns"  # it runs a turn of its own when background work ends, and says so

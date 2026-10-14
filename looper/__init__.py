@@ -1,4 +1,4 @@
-"""LoopX agent system: a Manager, a Planner per task and a pool of Claude Code Workers, with a web dashboard."""
+"""Looper agent system: a Manager, a Planner per task and a pool of Claude Code Workers, with a web dashboard."""
 
 __all__ = ["__version__"]
 

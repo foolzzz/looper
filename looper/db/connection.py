@@ -112,10 +112,10 @@ async def ensure_schema(pool: asyncpg.Pool | asyncpg.Connection | None = None) -
 
 
 async def schema_change_pending(conn: asyncpg.Connection) -> bool:
-    """Would ``ensure_schema`` change a database that already holds LoopX tables?
+    """Would ``ensure_schema`` change a database that already holds Looper tables?
 
     True when one of schema.sql's tables exists but the recorded fingerprint
-    is missing or differs from the current file's. A database without LoopX
+    is missing or differs from the current file's. A database without Looper
     tables is new: applying the schema loses nothing.
     """
     sql = SCHEMA_PATH.read_text(encoding="utf-8")

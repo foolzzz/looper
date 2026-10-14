@@ -76,8 +76,8 @@ class TelegramChannelAdapter(ChannelAdapter):
 
         if not _check_telegram_available():
             logger.error(
-                "python-telegram-bot not installed; it is a default LoopX "
-                "dependency, so reinstall LoopX (for a checkout: uv sync)"
+                "python-telegram-bot not installed; it is a default Looper "
+                "dependency, so reinstall Looper (for a checkout: uv sync)"
             )
             return
 
@@ -194,7 +194,7 @@ class TelegramChannelAdapter(ChannelAdapter):
         if not self._admits(update):
             return
         await update.message.reply_text(
-            "LoopX Agent 已就绪。直接发消息给我，或使用:\n"
+            "Looper Agent 已就绪。直接发消息给我，或使用:\n"
             "/status — 查看当前任务进度\n"
             "/help — 帮助信息"
         )
@@ -227,7 +227,7 @@ class TelegramChannelAdapter(ChannelAdapter):
         if not self._admits(update):
             return
         await update.message.reply_text(
-            "LoopX Agent 命令:\n"
+            "Looper Agent 命令:\n"
             "直接发消息 — 提需求或问问题\n"
             "/status — 查看当前任务进度\n"
             "/help — 显示此帮助"

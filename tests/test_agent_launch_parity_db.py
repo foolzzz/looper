@@ -60,7 +60,7 @@ def test_each_role_starts_its_runtime_as_main_did(monkeypatch: pytest.MonkeyPatc
     from looper.db import connection
 
     async def _main() -> dict[str, Any]:
-        schema = f"loopx_test_{uuid.uuid4().hex[:12]}"
+        schema = f"looper_test_{uuid.uuid4().hex[:12]}"
         admin = await asyncpg.connect(DSN)
         await admin.execute(f'CREATE SCHEMA "{schema}"')
         pool = await asyncpg.create_pool(DSN, min_size=1, max_size=4, server_settings={"search_path": schema})

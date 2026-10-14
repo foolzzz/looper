@@ -59,8 +59,8 @@ logger = logging.getLogger(__name__)
 SKILLS_PLUGIN = "personal"
 PROJECT_SKILLS_PLUGIN = "project"
 _PLUGIN_DESCRIPTIONS = {
-    SKILLS_PLUGIN: "Skills installed from the LoopX catalog.",
-    PROJECT_SKILLS_PLUGIN: "This project's own skills, managed by LoopX.",
+    SKILLS_PLUGIN: "Skills installed from the Looper catalog.",
+    PROJECT_SKILLS_PLUGIN: "This project's own skills, managed by Looper.",
 }
 
 # Caps, measured against a real configuration (3 plugins and 104 skills, about
@@ -517,7 +517,7 @@ def skills_plugin(runtime_root: Path, skills: Sequence[LoadedItem], plugin: str 
         base = directory / plugin
         (base / ".claude-plugin").mkdir(parents=True)
         (base / ".claude-plugin" / "plugin.json").write_text(json.dumps({
-            "name": plugin, "description": _PLUGIN_DESCRIPTIONS.get(plugin, "Skills managed by LoopX."),
+            "name": plugin, "description": _PLUGIN_DESCRIPTIONS.get(plugin, "Skills managed by Looper."),
         }, indent=2) + "\n", encoding="utf-8")
         (base / "skills").mkdir()
         for name, sha in listing:

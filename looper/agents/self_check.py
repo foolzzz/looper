@@ -1,6 +1,6 @@
-"""What a machine still needs before LoopX can run, and how to fix it.
+"""What a machine still needs before Looper can run, and how to fix it.
 
-``looper doctor`` prints these checks and exits 1 when one failed. ``loopx
+``looper doctor`` prints these checks and exits 1 when one failed. ``looper
 serve`` runs the same checks first: an unreachable PostgreSQL stops it; a
 missing Claude Code CLI or login is logged as a warning, the dashboard still
 starts, and ``GET /api/status`` reports every result under ``checks``. The
@@ -86,7 +86,7 @@ def _without_password(text: str, dsn: str) -> str:
 
 
 async def check_database(dsn: str) -> Check:
-    """Can LoopX open a connection to ``dsn``?"""
+    """Can Looper open a connection to ``dsn``?"""
     import asyncpg
 
     shown = mask_dsn(dsn)
@@ -166,7 +166,7 @@ def check_lark_cli(lark_enabled: bool | None) -> Check:
 
 
 def pg_dump_fix(server_major: int | None) -> str:
-    """How to give LoopX a pg_dump for the server, or do without one."""
+    """How to give Looper a pg_dump for the server, or do without one."""
     version = f"{server_major} or newer" if server_major else "of at least the server's major version"
     install = (
         'macOS: brew install libpq, then put it on PATH: export PATH="$(brew --prefix libpq)/bin:$PATH"'
@@ -182,7 +182,7 @@ def pg_dump_fix(server_major: int | None) -> str:
 
 
 def check_pg_dump(server_version_num: int | None, pending: bool | None) -> tuple[Check, db_backup.Dumper | None]:
-    """Can LoopX back the database up before it changes the schema? With the way it would, when it can.
+    """Can Looper back the database up before it changes the schema? With the way it would, when it can.
 
     ``pending``: whether the schema is about to change (``None``: unknown).
     Without a way to back up, ``looper serve`` refuses only then, so only then
@@ -194,7 +194,7 @@ def check_pg_dump(server_version_num: int | None, pending: bool | None) -> tuple
     except db_backup.NoDumper as exc:
         if pending:
             return Check("pg_dump", "pg_dump", FAIL,
-                         f"{exc}; the database schema is about to change, and LoopX backs it up first",
+                         f"{exc}; the database schema is about to change, and Looper backs it up first",
                          pg_dump_fix(server_major)), None
         return Check("pg_dump", "pg_dump", WARN,
                      f"{exc}; after an upgrade that changes the database schema, `looper serve` backs the database "

@@ -138,7 +138,7 @@ def test_config_loads_no_upstream_modules(tmp_path: Path, argv: list[str]) -> No
 
 def test_service_status_loads_no_upstream_modules(tmp_path: Path) -> None:
     """``looper service status`` asks the real service manager (read-only) about a label never installed."""
-    result, output, stderr = _run_looper("service", "status", "--label", "com.loopx.serve.never-installed", cwd=tmp_path)
+    result, output, stderr = _run_looper("service", "status", "--label", "com.looper.serve.never-installed", cwd=tmp_path)
 
     assert result["code"] == 1, stderr
     assert "not installed" in output
@@ -211,14 +211,14 @@ def test_the_database_url_from_before_the_rename_still_works_with_a_warning(tmp_
 
 def test_doctor_shows_an_unreachable_database_masked_with_its_fix(tmp_path: Path) -> None:
     port = _closed_port()
-    env = _doctor_env(tmp_path, claude="logged_in", database_url=f"postgresql://loopx:s3cret-pw@127.0.0.1:{port}/loopx")
+    env = _doctor_env(tmp_path, claude="logged_in", database_url=f"postgresql://looper:s3cret-pw@127.0.0.1:{port}/loopx")
 
     result, output, stderr = _run_looper("doctor", cwd=tmp_path, env=env)
 
     assert result["code"] == 1, stderr
     lines = _check_lines(output)
     assert lines["PostgreSQL"].startswith("fail")
-    assert f"postgresql://loopx:***@127.0.0.1:{port}/loopx" in lines["PostgreSQL"]
+    assert f"postgresql://looper:***@127.0.0.1:{port}/loopx" in lines["PostgreSQL"]
     assert "s3cret-pw" not in output + stderr
     assert "docker run" in output and "export LOOPER_DATABASE_URL=" in output
     assert lines["Claude Code CLI"].startswith("ok") and lines["Claude login"].startswith("ok")
@@ -265,7 +265,7 @@ def test_doctor_never_runs_a_claude_without_auth_status(tmp_path: Path) -> None:
     ids=["lark-off", "lark-on", "lark-on-without-cli"],
 )
 def test_doctor_passes_unless_a_check_failed(tmp_path: Path, lark: str, lark_line: str, code: int) -> None:
-    """An enabled Lark channel needs lark-cli; without it the channel will not start, but LoopX runs."""
+    """An enabled Lark channel needs lark-cli; without it the channel will not start, but Looper runs."""
     import asyncio
 
     import asyncpg

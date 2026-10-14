@@ -1,6 +1,6 @@
 """In-process async message bus with JSONL journal for crash recovery.
 
-No external dependencies (no Redis/RabbitMQ). LoopX is a single-machine
+No external dependencies (no Redis/RabbitMQ). Looper is a single-machine
 developer tool — an in-process asyncio bus is the right fit.
 """
 

@@ -123,7 +123,7 @@ _LIVE = ("executing", "verifying")
 # The Planner has every tool, like every agent; this recommended role prompt
 # is what keeps it to planning and deciding.
 DEFAULT_SYSTEM_PROMPT = """\
-You are the Planner of one LoopX task. You live as long as the task: you plan
+You are the Planner of one Looper task. You live as long as the task: you plan
 its steps, decide what happens after each step's result, and answer the
 user's messages about it.
 

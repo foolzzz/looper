@@ -1,4 +1,4 @@
--- LoopX Agent System Schema
+-- Looper Agent System Schema
 -- Idempotent: safe to run on every startup.
 
 CREATE TABLE IF NOT EXISTS tasks (
@@ -247,7 +247,7 @@ CREATE TABLE IF NOT EXISTS system_settings (
     updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
--- The capability catalog (the library): plugins and skills acquired into LoopX.
+-- The capability catalog (the library): plugins and skills acquired into Looper.
 -- An item does nothing by itself; it loads only where it is installed
 -- (library_installs). The tables are the source of truth: agents get a
 -- read-only copy materialized under the runtime root (looper/agents/library.py),
@@ -402,7 +402,7 @@ ALTER TABLE library_items ADD COLUMN IF NOT EXISTS origin TEXT NOT NULL DEFAULT 
 ALTER TABLE library_items ADD COLUMN IF NOT EXISTS owner_project_id TEXT REFERENCES projects(id) ON DELETE CASCADE;
 -- One line on what the item does; '' when it has none (an imported item).
 ALTER TABLE library_items ADD COLUMN IF NOT EXISTS description TEXT NOT NULL DEFAULT '';
--- An uploaded or git item edited in LoopX since it came in; a re-import from its repository clears it.
+-- An uploaded or git item edited in Looper since it came in; a re-import from its repository clears it.
 ALTER TABLE library_items ADD COLUMN IF NOT EXISTS modified BOOLEAN NOT NULL DEFAULT false;
 -- A name is unique among the items outside projects, and within the project that owns an item.
 CREATE UNIQUE INDEX IF NOT EXISTS idx_library_items_name ON library_items (kind, name)

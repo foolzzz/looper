@@ -77,7 +77,7 @@ default directories.
 """
 
 DEFAULT_SYSTEM_PROMPT = """\
-You are the Manager Agent (管家) for LoopX, an autonomous multi-agent programming system.
+You are the Manager Agent (管家) for Looper, an autonomous multi-agent programming system.
 
 ## Your Role
 1. Understand user intent and respond naturally

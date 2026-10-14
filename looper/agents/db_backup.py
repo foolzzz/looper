@@ -1,4 +1,4 @@
-"""A ``pg_dump`` of LoopX's database before ``looper serve`` changes its schema.
+"""A ``pg_dump`` of Looper's database before ``looper serve`` changes its schema.
 
 ``looper serve`` applies ``schema.sql`` at every start, and the file holds
 migrations that drop columns and tables. When the schema is about to change

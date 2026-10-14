@@ -85,7 +85,7 @@ def test_run_is_recorded_end_to_end() -> None:
 
 
 def _in_fresh_schema(test: Any) -> None:
-    """Run ``test(pool)`` against a new schema holding LoopX's tables."""
+    """Run ``test(pool)`` against a new schema holding Looper's tables."""
     import uuid
 
     import asyncpg
@@ -93,7 +93,7 @@ def _in_fresh_schema(test: Any) -> None:
     from looper.db.connection import ensure_schema
 
     async def _run() -> None:
-        schema = f"loopx_test_{uuid.uuid4().hex[:12]}"
+        schema = f"looper_test_{uuid.uuid4().hex[:12]}"
         admin = await asyncpg.connect(DSN)
         await admin.execute(f'CREATE SCHEMA "{schema}"')
         pool = await asyncpg.create_pool(DSN, min_size=1, max_size=2, server_settings={"search_path": schema})

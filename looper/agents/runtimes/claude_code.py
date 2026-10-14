@@ -32,7 +32,7 @@ class ClaudeCodeRuntime(RuntimeAdapter):
     type = "claude-code"
     label = "Claude Code"
     default_executable = "claude"
-    # Verified against Claude Code 2.1.285 (claude_cli); its replies follow LoopX's contracts by prompt, so no
+    # Verified against Claude Code 2.1.285 (claude_cli); its replies follow Looper's contracts by prompt, so no
     # structured_output.
     capabilities = frozenset(set(Capability) - {Capability.STRUCTURED_OUTPUT})
     protocols = frozenset({ApiProtocol.ANTHROPIC_MESSAGES})

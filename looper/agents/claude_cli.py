@@ -29,8 +29,8 @@ logger = logging.getLogger(__name__)
 
 # --- What an agent's Claude Code loads ---
 #
-# An agent sees what LoopX composes and the project's own CLAUDE.md, not the
-# personal Claude Code configuration of whoever runs LoopX. Verified against
+# An agent sees what Looper composes and the project's own CLAUDE.md, not the
+# personal Claude Code configuration of whoever runs Looper. Verified against
 # Claude Code 2.1.285:
 # - "--setting-sources project" leaves out the user and local settings and,
 #   with them, user and local memory (~/.claude/CLAUDE.md and its @imports,
@@ -742,8 +742,8 @@ class ClaudeRunRecorder:
     """Record one Claude CLI run in ``llm_records``.
 
     The record opens as ``running`` with the launch command, the system
-    prompt LoopX appended (its text, its sha256 and its layers' sources), the
-    model and its source, the names of the environment variables LoopX set
+    prompt Looper appended (its text, its sha256 and its layers' sources), the
+    model and its source, the names of the environment variables Looper set
     (their values hashed) and the working directory, gets every stream-json event as it arrives
     (partial text deltas excepted: the full message follows), and closes with
     the outcome, the run's own cost and tokens, its context size at the end
@@ -799,7 +799,7 @@ class ClaudeRunRecorder:
                 input_text=self._input_text,
                 metadata={
                     "command": self._command,
-                    # What LoopX appended (its file holds the same text); Claude Code's own prompt is not included.
+                    # What Looper appended (its file holds the same text); Claude Code's own prompt is not included.
                     **(self._system_prompt.record() if self._system_prompt is not None else {}),
                     # The model asked for and where it came from; the variables' names, not their values.
                     **(self._launch.record() if self._launch is not None else {}),

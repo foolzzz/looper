@@ -118,7 +118,7 @@ REPO_FILES: dict[str, str | bytes] = {
 
 def _clones(scratch: Path) -> list[str]:
     """The clone directories left in ``scratch``."""
-    return [p.name for p in scratch.iterdir() if p.name.startswith("loopx-git-")]
+    return [p.name for p in scratch.iterdir() if p.name.startswith("looper-git-")]
 
 
 @pytest.fixture
@@ -231,7 +231,7 @@ def test_a_name_taken_outside_projects_is_refused_with_409_and_an_upload_can_be_
         assert status == 201
         _, detail = await _call("GET", f"/api/catalog/{body['item']['item_id']}")
         assert detail["item"]["qualified_name"] == "demo-two"
-        for bad, reason in (("Bad Name", "must be lowercase letters"), ("personal", "a plugin LoopX generates")):
+        for bad, reason in (("Bad Name", "must be lowercase letters"), ("personal", "a plugin Looper generates")):
             status, body = await _upload("demo.zip", plugin, name=bad)
             assert status == 400 and reason in body["error"], body
 

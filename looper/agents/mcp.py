@@ -247,7 +247,7 @@ async def _item(item_id: str) -> dict[str, Any]:
 
 async def _locked_count(conn: Any) -> int:
     """How many MCP servers the catalog holds; adding or importing them is serialized on this lock."""
-    await conn.execute("SELECT pg_advisory_xact_lock(hashtext('loopx.catalog.mcp'))")
+    await conn.execute("SELECT pg_advisory_xact_lock(hashtext('looper.catalog.mcp'))")
     return int(await conn.fetchval("SELECT count(*) FROM library_items WHERE kind = 'mcp'"))
 
 
@@ -322,7 +322,7 @@ class McpScan:
 def scan_claude_json(path: Path) -> McpScan:
     """The user-level ``mcpServers`` of a Claude Code ``.claude.json``; nothing is written.
 
-    A server whose name or configuration LoopX cannot use is left out and
+    A server whose name or configuration Looper cannot use is left out and
     reported, and so is a field it does not support (the server is kept
     without it). Raises ``CatalogError`` when the file cannot be read.
     """

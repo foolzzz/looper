@@ -48,7 +48,7 @@ logger = logging.getLogger(__name__)
 
 
 class StartupCheckFailed(RuntimeError):
-    """A check LoopX cannot start without failed; the message says what to fix."""
+    """A check Looper cannot start without failed; the message says what to fix."""
 
 
 # The Planner's default prompt before it became a Claude Code agent; a
@@ -68,7 +68,7 @@ _PLANNER_PROMPT_BEFORE_CLAUDE = (
 # The Manager's default prompt before tasks gained projects; a database still
 # holding it gets the current default (which teaches project placement) at startup.
 _MANAGER_PROMPT_BEFORE_PROJECTS = """\
-You are the Manager Agent (管家) for LoopX, an autonomous multi-agent programming system.
+You are the Manager Agent (管家) for Looper, an autonomous multi-agent programming system.
 
 ## Your Role
 1. Understand user intent and respond naturally in the user's language
@@ -280,7 +280,7 @@ async def _back_up_before_schema_change(pool: Any, dsn: str, runtime_root: Path,
             "pg_dump", "pg_dump backup", self_check.FAIL, f"{exc}; the schema was not changed",
             "fix the problem above and start again, or migrate once without a backup: looper serve --skip-backup",
         )])) from None
-    logger.info("backed up the database to %s (%d bytes, %s); to restore it, stop LoopX, recreate the database "
+    logger.info("backed up the database to %s (%d bytes, %s); to restore it, stop Looper, recreate the database "
                 "empty, then run: pg_restore --no-owner --dbname '%s' '%s'",
                 path, path.stat().st_size, checked, shown, path)
 

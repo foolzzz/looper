@@ -253,7 +253,7 @@ class Declared:
 
 
 def item_name(raw: Any, kind: ItemKind) -> str:
-    """An item's name: a lowercase slug of at most ``NAME_MAX_CHARS``; a plugin's is not one LoopX generates."""
+    """An item's name: a lowercase slug of at most ``NAME_MAX_CHARS``; a plugin's is not one Looper generates."""
     if not isinstance(raw, str) or not raw.strip():
         raise CatalogError(f"a {kind.value} needs a name")
     name = raw.strip()
@@ -263,7 +263,7 @@ def item_name(raw: Any, kind: ItemKind) -> str:
             f"{NAME_MAX_CHARS} characters, such as deploy-check; give it another name"
         )
     if kind is ItemKind.PLUGIN and name in (SKILLS_PLUGIN, PROJECT_SKILLS_PLUGIN):
-        raise CatalogError(f"{name!r} is a plugin LoopX generates; give this plugin another name")
+        raise CatalogError(f"{name!r} is a plugin Looper generates; give this plugin another name")
     return name
 
 
@@ -742,9 +742,9 @@ async def checkout(source: GitSource) -> AsyncIterator[tuple[Path, str]]:
     """A shallow clone of ``source`` in a temporary directory, its subpath and commit; removed on exit."""
     git = shutil.which("git")
     if git is None:
-        raise CatalogError("git is not installed where LoopX runs")
+        raise CatalogError("git is not installed where Looper runs")
     async with _clones:
-        scratch = Path(tempfile.mkdtemp(prefix="loopx-git-"))
+        scratch = Path(tempfile.mkdtemp(prefix="looper-git-"))
         try:
             repository = scratch / "repo"
             await _clone(git, source, repository)

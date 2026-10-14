@@ -5,7 +5,7 @@ Reviewer of ``scenario`` the way the server does (``ManagerAgent._run_turn``,
 ``PlannerAgent._run_turn``, ``WorkerPool._execute``) against the database the
 caller set up (``connection._pool``), each with a stand-in ``claude`` that
 writes down what it was started with: its argv (the executable included), the
-environment variables LoopX set, the appended system prompt and the first
+environment variables Looper set, the appended system prompt and the first
 user turn on its stdin. Paths under ``root`` read ``<root>``; the
 directories above it, which differ between machines, read ``<above>`` in the
 isolation settings.
@@ -183,7 +183,7 @@ def _normalized(seen: dict[str, Any], root: str, executable: str, environ: dict[
     return {
         "executable": "<claude>" if seen["executable"] == executable else seen["executable"],
         "argv": [arg.replace(root, "<root>") for arg in argv],
-        # The variables LoopX set: those whose value differs from the server's.
+        # The variables Looper set: those whose value differs from the server's.
         "env": {key: value for key, value in sorted(seen["env"].items()) if environ.get(key) != value},
         "system_prompt": (seen["system_prompt"] or "").replace(root, "<root>"),
         "stdin": seen["stdin"].replace(root, "<root>"),
@@ -286,7 +286,7 @@ async def _generate(dsn: str) -> dict[str, Any]:
 
     result: dict[str, Any] = {}
     for scenario in SCENARIOS:
-        schema = f"loopx_parity_{uuid.uuid4().hex[:12]}"
+        schema = f"looper_parity_{uuid.uuid4().hex[:12]}"
         admin = await asyncpg.connect(dsn)
         await admin.execute(f'CREATE SCHEMA "{schema}"')
         pool = await asyncpg.create_pool(dsn, min_size=1, max_size=4, server_settings={"search_path": schema})

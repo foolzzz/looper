@@ -40,7 +40,7 @@ def test_serve_without_postgresql_stops_with_the_fix(tmp_path: Path) -> None:
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
         port = sock.getsockname()[1]
-    env = {**os.environ, "LOOPER_DATABASE_URL": f"postgresql://loopx:s3cret-pw@127.0.0.1:{port}/loopx",
+    env = {**os.environ, "LOOPER_DATABASE_URL": f"postgresql://looper:s3cret-pw@127.0.0.1:{port}/loopx",
            "PYTHONPATH": str(REPO_ROOT)}
     serve = ("from pathlib import Path; from looper.agents.serve import serve_agent; "
              "serve_agent(port=1, runtime_root=Path.cwd(), work_dir=Path.cwd())")
@@ -49,7 +49,7 @@ def test_serve_without_postgresql_stops_with_the_fix(tmp_path: Path) -> None:
                           timeout=60)
 
     assert proc.returncode == 1, proc.stderr
-    assert f"fail  PostgreSQL  cannot connect to postgresql://loopx:***@127.0.0.1:{port}/loopx" in proc.stderr
+    assert f"fail  PostgreSQL  cannot connect to postgresql://looper:***@127.0.0.1:{port}/loopx" in proc.stderr
     assert "docker run" in proc.stderr and "Traceback" not in proc.stderr
     assert "s3cret-pw" not in proc.stdout + proc.stderr
 

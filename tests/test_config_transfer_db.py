@@ -29,12 +29,12 @@ ROLES = ("manager", "planner", "worker", "reviewer")
 
 @contextlib.asynccontextmanager
 async def _installation(*, schema: bool = True) -> AsyncIterator[tuple[Any, str]]:
-    """A new schema (with LoopX's tables unless ``schema`` is False): its pool and a URL that reaches it."""
+    """A new schema (with Looper's tables unless ``schema`` is False): its pool and a URL that reaches it."""
     import asyncpg
 
     from looper.db.connection import ensure_schema
 
-    name = f"loopx_test_{uuid.uuid4().hex[:12]}"
+    name = f"looper_test_{uuid.uuid4().hex[:12]}"
     admin = await asyncpg.connect(DSN)
     await admin.execute(f'CREATE SCHEMA "{name}"')
     pool = await asyncpg.create_pool(DSN, min_size=1, max_size=3, server_settings={"search_path": name})

@@ -1,4 +1,4 @@
-"""LoopX database layer — asyncpg-backed PostgreSQL access."""
+"""Looper database layer — asyncpg-backed PostgreSQL access."""
 
 from .connection import get_pool, init_pool, close_pool, ensure_schema
 from . import agent_configs

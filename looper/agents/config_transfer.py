@@ -84,7 +84,7 @@ class ConfigFileError(ValueError):
 
 
 class SchemaChangePending(RuntimeError):
-    """The database's schema is older than this LoopX; ``looper serve`` backs it up, then changes it."""
+    """The database's schema is older than this Looper; ``looper serve`` backs it up, then changes it."""
 
 
 class Action(str, Enum):
@@ -1169,7 +1169,7 @@ async def import_config(conn: Any, data: Mapping[str, Any], *, apply: bool) -> P
 
         if await schema_change_pending(conn):
             raise SchemaChangePending(
-                "the database schema is older than this LoopX; start `looper serve` once (it backs the database up "
+                "the database schema is older than this Looper; start `looper serve` once (it backs the database up "
                 "before changing the schema), then import again")
         await ensure_schema(conn)
     importer = _Importer(conn, await _Target.read(conn), apply)

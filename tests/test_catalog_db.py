@@ -30,7 +30,7 @@ TASK_ROLES = ["planner", "worker", "reviewer"]
 async def _fresh_schema() -> AsyncIterator[Any]:
     import asyncpg
 
-    schema = f"loopx_test_{uuid.uuid4().hex[:12]}"
+    schema = f"looper_test_{uuid.uuid4().hex[:12]}"
     admin = await asyncpg.connect(DSN)
     await admin.execute(f'CREATE SCHEMA "{schema}"')
     pool = await asyncpg.create_pool(DSN, min_size=1, max_size=3, server_settings={"search_path": schema})

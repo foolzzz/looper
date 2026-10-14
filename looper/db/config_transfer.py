@@ -23,7 +23,7 @@ def _json(value: Any) -> Any:
 
 
 async def has_schema(conn: asyncpg.Connection) -> bool:
-    """Whether the database holds LoopX's tables (a new one does not until ``ensure_schema``)."""
+    """Whether the database holds Looper's tables (a new one does not until ``ensure_schema``)."""
     return await conn.fetchval("SELECT to_regclass('library_installs') IS NOT NULL")
 
 

@@ -1,1 +1,1 @@
-"""LoopX three-tier agent system: Manager → Planner → Worker."""
+"""Looper three-tier agent system: Manager → Planner → Worker."""

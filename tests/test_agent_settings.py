@@ -151,9 +151,14 @@ class TestPrecedence:
             assert resolve(other, layers, "proj-a").model == "opus"
             assert resolve(other, layers, "proj-a").env == ()
 
-    def test_a_system_harness_equal_to_the_builtin_one_is_the_builtin(self) -> None:
-        layers = {(Layer.SYSTEM, None): LayerValues(harness_prompt=DEFAULT_HARNESS_PROMPT)}
+    @pytest.mark.parametrize("before_rename", [False, True], ids=["current", "before-the-rename"])
+    def test_a_system_harness_equal_to_the_builtin_one_is_the_builtin(self, before_rename: bool) -> None:
+        """Also the built-in as it read when the product was LoopX, so a stored copy follows the renamed one."""
+        text = DEFAULT_HARNESS_PROMPT.replace("Looper", "LoopX") if before_rename else DEFAULT_HARNESS_PROMPT
+        assert "LoopX" in text if before_rename else "Looper" in text
+        layers = {(Layer.SYSTEM, None): LayerValues(harness_prompt=text)}
         assert resolve("worker", layers).harness.source is Layer.BUILTIN
+        assert resolve("worker", layers).harness.text == DEFAULT_HARNESS_PROMPT
 
 
 class TestEnvironment:

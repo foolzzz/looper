@@ -321,7 +321,7 @@ async def replace_mcp_snapshot(
     taken: list[str] = []
     unchanged = 0
     async with pool.acquire() as conn, conn.transaction():
-        await conn.execute("SELECT pg_advisory_xact_lock(hashtext('loopx.catalog.mcp'))")
+        await conn.execute("SELECT pg_advisory_xact_lock(hashtext('looper.catalog.mcp'))")
         rows = await conn.fetch(f"SELECT {_MCP_COLUMNS} FROM library_items i JOIN library_mcp_servers m "
                                 "ON m.item_id = i.id FOR UPDATE OF i, m")
         existing = {row["name"]: dict(row) for row in rows if row["origin"] == "machine"}

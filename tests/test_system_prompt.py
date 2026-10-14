@@ -1,4 +1,4 @@
-"""The system prompt LoopX appends for the Planner, the Workers and the Reviewers.
+"""The system prompt Looper appends for the Planner, the Workers and the Reviewers.
 
 Layout: the harness prompt, the role prompt, then the project section when the
 project has a background, then the task section, then the code-owned contract,

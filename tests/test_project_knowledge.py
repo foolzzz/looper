@@ -355,7 +355,7 @@ class TestCaps:
         """The index names the documents' directory once; a line carries a path relative to it. Short
         documents then fill the 100-document cap before the 4,000-character index (with an absolute
         path, about 150 characters, a line used to fill it at 15 to 25 documents)."""
-        root = tmp_path / "home" / "someone-with-a-long-name" / ".loopx"
+        root = tmp_path / "home" / "someone-with-a-long-name" / ".looper"
         store.add_project()
         for n in range(100):
             status, body = _call(root, "POST", "/api/projects/proj-1/knowledge",

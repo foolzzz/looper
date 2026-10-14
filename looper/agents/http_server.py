@@ -1,4 +1,4 @@
-"""Async HTTP server for the LoopX agent system.
+"""Async HTTP server for the Looper agent system.
 
 Pure stdlib asyncio — zero external dependencies. Serves:
   - REST API endpoints (/api/*)
