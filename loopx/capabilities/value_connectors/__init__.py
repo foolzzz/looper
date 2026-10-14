@@ -1,1 +1,0 @@
-"""Value connector planning capability."""
