@@ -18,10 +18,10 @@ from typing import Any
 import pytest
 from library_fixtures import PLUGIN_FILES, fake_claude_home, write
 
-from loopx.agents import library
-from loopx.agents.agent_settings import Launch
-from loopx.agents.claude_cli import permission_args
-from loopx.agents.library import (
+from looper.agents import library
+from looper.agents.agent_settings import Launch
+from looper.agents.claude_cli import permission_args
+from looper.agents.library import (
     SKILLS_PLUGIN,
     AgentLibrary,
     ItemKind,
@@ -158,7 +158,7 @@ def _rows(*items: tuple[str, str, dict[str, str]], origin: str = "machine", owne
 def stored(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     """What the catalog holds (``rows``: the install rows a run reads; ``files`` by item id), the file reads
     made and the (role, project) each read asked for."""
-    from loopx.db import library as db_library
+    from looper.db import library as db_library
 
     state: dict[str, Any] = {"rows": [], "files": {}, "reads": [], "asked": []}
 
@@ -281,7 +281,7 @@ class TestLoadInstalled:
     def test_an_unreadable_catalog_runs_the_agent_without_it_and_says_so(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        from loopx.db import library as db_library
+        from looper.db import library as db_library
 
         async def _down(*_: Any, **__: Any) -> list[dict[str, Any]]:
             raise OSError("database is down")

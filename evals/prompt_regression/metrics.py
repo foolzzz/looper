@@ -27,7 +27,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from loopx.agents.tiers.worker import extract_report
+from looper.agents.tiers.worker import extract_report
 
 TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled", "stopped"})
 FILE_EDIT_TOOLS = frozenset({"Write", "Edit", "MultiEdit", "NotebookEdit"})

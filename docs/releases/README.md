@@ -6,7 +6,7 @@ procedure that publishes them.
 
 ## How a release is published
 
-LoopX releases are tagged in GitHub, and a tag publishes its release through
+Looper releases are tagged in GitHub, and a tag publishes its release through
 the [Release workflow](../../.github/workflows/release.yml). Nothing is built
 or uploaded from a maintainer's machine, and the fork does not publish to
 PyPI. `install.sh` installs the wheel attached to the latest GitHub release,
@@ -14,7 +14,7 @@ so every release carries one, built from its tag. Users upgrade by running
 `install.sh` again.
 
 1. **Release pull request.**
-   - Bump `loopx.__version__` (`loopx/__init__.py`) and `version` in
+   - Bump `looper.__version__` (`looper/__init__.py`) and `version` in
      `pyproject.toml` together.
    - Move the CHANGELOG's `[Unreleased]` entries under the new version.
    - Commit the exact release body as `docs/releases/vX.Y.Z.md` and its
@@ -32,21 +32,21 @@ so every release carries one, built from its tag. Users upgrade by running
    tag:
 
    ```bash
-   git tag -a vX.Y.Z -m "LoopX vX.Y.Z" <merge commit> && git push origin vX.Y.Z
+   git tag -a vX.Y.Z -m "Looper vX.Y.Z" <merge commit> && git push origin vX.Y.Z
    ```
 
 3. **The workflow** then:
    1. checks that the tag is `vX.Y.Z`, is on `main`, matches
-      `pyproject.toml` and `loopx.__version__`, and that both release files
+      `pyproject.toml` and `looper.__version__`, and that both release files
       exist;
    2. runs `release-readiness-doc-smoke` on the committed body with its
       surfaces;
-   3. builds the dashboard from `web/` into `loopx/web/dashboard`
+   3. builds the dashboard from `web/` into `looper/web/dashboard`
       (`scripts/stage-dashboard.sh`);
    4. runs `examples/release/agent-serve-wheel-smoke.py` against a PostgreSQL
       service: it builds the wheel from a clean copy of the tracked files,
       installs it into a fresh virtualenv and runs the installed
-      `loopx serve`;
+      `looper serve`;
    5. builds the wheel and creates the release as a draft with the body and
       the wheel, reads the body back, checks it again and only then publishes
       it as the latest release, so the latest release never lacks its wheel.

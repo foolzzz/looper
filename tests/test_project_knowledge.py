@@ -24,10 +24,10 @@ from typing import Any
 
 import pytest
 
-from loopx.agents import knowledge
-from loopx.agents.agent_settings import Launch
-from loopx.agents.http_server import AgentHTTPServer
-from loopx.agents.knowledge import (
+from looper.agents import knowledge
+from looper.agents.agent_settings import Launch
+from looper.agents.http_server import AgentHTTPServer
+from looper.agents.knowledge import (
     EMPTY_KNOWLEDGE,
     INDEX_HEADING,
     INDEX_INTRO,
@@ -39,8 +39,8 @@ from loopx.agents.knowledge import (
     load_knowledge,
     safe_filename,
 )
-from loopx.agents.tiers.task import TaskRouter
-from loopx.db import project_documents as db_documents, projects as db_projects
+from looper.agents.tiers.task import TaskRouter
+from looper.db import project_documents as db_documents, projects as db_projects
 
 NOW = datetime(2026, 10, 13, 12, 0, tzinfo=timezone.utc)
 
@@ -355,7 +355,7 @@ class TestCaps:
         """The index names the documents' directory once; a line carries a path relative to it. Short
         documents then fill the 100-document cap before the 4,000-character index (with an absolute
         path, about 150 characters, a line used to fill it at 15 to 25 documents)."""
-        root = tmp_path / "home" / "someone-with-a-long-name" / ".loopx"
+        root = tmp_path / "home" / "someone-with-a-long-name" / ".looper"
         store.add_project()
         for n in range(100):
             status, body = _call(root, "POST", "/api/projects/proj-1/knowledge",

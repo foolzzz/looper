@@ -19,7 +19,7 @@ details out of it.
 
 A useful report includes:
 
-- the affected LoopX version or commit;
+- the affected Looper version or commit;
 - the affected surface (the HTTP API, a channel, the agents' Claude runs,
   installation) and the boundary you expected to hold;
 - minimal reproduction steps or a proof of concept;
@@ -36,7 +36,7 @@ risk.
 
 ## Scope
 
-This policy covers the LoopX source in this repository, the release wheel,
+This policy covers the Looper source in this repository, the release wheel,
 `install.sh` and the repository's workflows. Every agent runs Claude Code with
 `--dangerously-skip-permissions`, so whoever can drive the HTTP API or a
 channel can run commands on the host. The API refuses requests from other web
@@ -46,5 +46,5 @@ allowlists name. See the HTTP API and Channels sections of
 [the architecture](../docs/architecture/agent-system.md), and report any way
 around these boundaries. Serving on a non-loopback `--host` exposes the API to
 that network by design. Vulnerabilities that exist only in a dependency belong
-with that project; report them here as well when LoopX's use of the
+with that project; report them here as well when Looper's use of the
 dependency makes them worse.

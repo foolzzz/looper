@@ -12,10 +12,10 @@ worker hands those refusals to the controller.
 
 The session environment also puts the source tree under test on PYTHONPATH,
 ahead of any earlier entries, so a Python subprocess that inherits it imports
-``loopx`` from that tree rather than from wherever the environment's editable
+``looper`` from that tree rather than from wherever the environment's editable
 install points. Python searches the script directory (or, for ``-c`` and
 ``-m``, the cwd) before PYTHONPATH, so a subprocess started from inside
-another checkout still imports that checkout's ``loopx``. A directory whose
+another checkout still imports that checkout's ``looper``. A directory whose
 path contains ``os.pathsep`` cannot be a PYTHONPATH entry and is left out.
 """
 
@@ -33,22 +33,22 @@ import real_runtime_root_guard as guard
 
 GUARD_DIR = Path(__file__).resolve().parent
 SOURCE_ROOT = GUARD_DIR.parents[1]
-_WORKER_OUTPUT_KEY = "loopx_runtime_root_unattributed"
+_WORKER_OUTPUT_KEY = "looper_runtime_root_unattributed"
 _unattributed: list[dict[str, object]] = []
 
 
 def session_roots() -> list[str]:
-    """Return the real LoopX roots this session protects.
+    """Return the real Looper roots this session protects.
 
     They are computed with the resolver of the tree under test, before any test
     can monkeypatch HOME: the default runtime root of the starting HOME and of
-    the account's home directory, the retired ``~/.codex/loopx`` of both, and an
-    ambient LOOPX_RUNTIME_ROOT.
+    the account's home directory, the retired ``~/.loopx`` and ``~/.codex/loopx`` of both, and an
+    ambient LOOPER_RUNTIME_ROOT.
     """
 
     if str(SOURCE_ROOT) not in sys.path:
         sys.path.insert(0, str(SOURCE_ROOT))
-    from loopx.paths import configured_runtime_root, home_runtime_root
+    from looper.paths import configured_runtime_root, home_runtime_root
 
     homes = [Path.home()]
     try:
@@ -66,7 +66,7 @@ def session_roots() -> list[str]:
 
 
 def _start() -> None:
-    """Protect the real LoopX roots for this process and its Python children.
+    """Protect the real Looper roots for this process and its Python children.
 
     A nested pytest session inherits its parent's roots instead of protecting
     the temporary HOME it may run under.
@@ -74,7 +74,7 @@ def _start() -> None:
 
     inherited = os.environ.get(guard.PROTECTED_ROOTS_ENV)
     roots = inherited.split(os.pathsep) if inherited else session_roots()
-    handle, report_path = tempfile.mkstemp(prefix="loopx-runtime-root-guard-", suffix=".jsonl")
+    handle, report_path = tempfile.mkstemp(prefix="looper-runtime-root-guard-", suffix=".jsonl")
     os.close(handle)
     atexit.register(Path(report_path).unlink, missing_ok=True)
     guard.configure(roots, report_path)
@@ -95,7 +95,7 @@ _start()
 
 
 @pytest.fixture(autouse=True)
-def _refuse_real_loopx_runtime_root(request: pytest.FixtureRequest):
+def _refuse_real_looper_runtime_root(request: pytest.FixtureRequest):
     yield
     own, others = guard.take_violations(request.node.nodeid)
     _unattributed.extend(others)
@@ -120,5 +120,5 @@ def pytest_testnodedown(node, error) -> None:
 
 def pytest_terminal_summary(terminalreporter) -> None:
     if _unattributed and not hasattr(terminalreporter.config, "workeroutput"):
-        terminalreporter.section("real LoopX roots", red=True, bold=True)
+        terminalreporter.section("real Looper roots", red=True, bold=True)
         terminalreporter.line(guard.describe_unattributed(_unattributed))

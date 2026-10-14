@@ -1,6 +1,6 @@
-"""A task carries on after ``loopx serve`` is stopped with SIGINT and started again, from the database alone.
+"""A task carries on after ``looper serve`` is stopped with SIGINT and started again, from the database alone.
 
-A real server (the M6 eval's disposable ``loopx serve`` on a new database)
+A real server (the M6 eval's disposable ``looper serve`` on a new database)
 runs a stand-in ``claude``: the Planner plans four steps, accepts ``a``,
 retries ``b`` with feedback and sends ``c`` to review. While ``b``'s retry and
 ``c``'s Reviewer run, the server stops; the next server resumes the task:
@@ -8,7 +8,7 @@ no new plan, the Planner's session resumed with its cost baseline, ``b``'s
 retry run again with its feedback, ``c`` reviewed again, then ``d``. No plan
 or session file is written. A task that failed at its spend cap continues the
 same way after a restart, from its plan in the database. Runs only when
-LOOPX_TEST_DATABASE_URL points at a disposable database (each run creates and
+LOOPER_TEST_DATABASE_URL points at a disposable database (each run creates and
 drops a database beside it).
 """
 
@@ -26,8 +26,8 @@ import pytest
 
 from evals.prompt_regression.runner import Api, fresh_database, running_server
 
-DSN = os.environ.get("LOOPX_TEST_DATABASE_URL")
-pytestmark = pytest.mark.skipif(not DSN, reason="LOOPX_TEST_DATABASE_URL is not set")
+DSN = os.environ.get("LOOPER_TEST_DATABASE_URL")
+pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
 PLANNER_TURN_COST = 0.001
 

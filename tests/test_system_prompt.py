@@ -1,4 +1,4 @@
-"""The system prompt LoopX appends for the Planner, the Workers and the Reviewers.
+"""The system prompt Looper appends for the Planner, the Workers and the Reviewers.
 
 Layout: the harness prompt, the role prompt, then the project section when the
 project has a background, then the task section, then the code-owned contract,
@@ -17,9 +17,9 @@ from pathlib import Path
 
 import pytest
 
-from loopx.agents.agent_settings import Harness, Layer
-from loopx.agents.claude_cli import ISOLATION_ID
-from loopx.agents.system_prompt import (
+from looper.agents.agent_settings import Harness, Layer
+from looper.agents.claude_cli import ISOLATION_ID
+from looper.agents.system_prompt import (
     REVIEW_CONTRACT,
     TASK_REQUIREMENT_LIMIT,
     WORK_CONTRACT,
@@ -29,7 +29,7 @@ from loopx.agents.system_prompt import (
     prompt_layers,
     work_task_section,
 )
-from loopx.agents.tiers.worker import extract_report, judge_result
+from looper.agents.tiers.worker import extract_report, judge_result
 
 
 def _sha(text: str) -> str:

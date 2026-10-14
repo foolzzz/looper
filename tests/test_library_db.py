@@ -1,6 +1,6 @@
 """The catalog's import from this machine, and its items' installs across a re-import, against a real PostgreSQL.
 
-Runs only when LOOPX_TEST_DATABASE_URL points at a disposable database. Each
+Runs only when LOOPER_TEST_DATABASE_URL points at a disposable database. Each
 test works in a new schema of its own, dropped afterwards. The operator home
 is synthetic (``library_fixtures``).
 """
@@ -22,15 +22,15 @@ from typing import Any
 import pytest
 from library_fixtures import fake_claude_home, write
 
-DSN = os.environ.get("LOOPX_TEST_DATABASE_URL")
-pytestmark = pytest.mark.skipif(not DSN, reason="LOOPX_TEST_DATABASE_URL is not set")
+DSN = os.environ.get("LOOPER_TEST_DATABASE_URL")
+pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
 
 @asynccontextmanager
 async def _fresh_schema() -> AsyncIterator[Any]:
     import asyncpg
 
-    schema = f"loopx_test_{uuid.uuid4().hex[:12]}"
+    schema = f"looper_test_{uuid.uuid4().hex[:12]}"
     admin = await asyncpg.connect(DSN)
     await admin.execute(f'CREATE SCHEMA "{schema}"')
     pool = await asyncpg.create_pool(DSN, min_size=1, max_size=3, server_settings={"search_path": schema})
@@ -44,7 +44,7 @@ async def _fresh_schema() -> AsyncIterator[Any]:
 
 def _run(test: Callable[[Any], Awaitable[None]], monkeypatch: pytest.MonkeyPatch) -> None:
     """Run ``test(pool)`` on a new schema that is also the server's pool."""
-    from loopx.db import connection
+    from looper.db import connection
 
     async def _main() -> None:
         async with _fresh_schema() as pool:
@@ -83,8 +83,8 @@ class _Writer:
 
 
 async def _call(method: str, path: str, body: Any = None) -> tuple[int, Any]:
-    from loopx.agents.http_server import AgentHTTPServer
-    from loopx.agents.tiers.task import TaskRouter
+    from looper.agents.http_server import AgentHTTPServer
+    from looper.agents.tiers.task import TaskRouter
 
     server = AgentHTTPServer(web_adapter=SimpleNamespace(), supervisor=SimpleNamespace(),
                              task_router=TaskRouter(runtime_root=Path(tempfile.mkdtemp())))
@@ -96,7 +96,7 @@ async def _call(method: str, path: str, body: Any = None) -> tuple[int, Any]:
 
 
 def test_an_import_stores_the_snapshot(home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    from loopx.agents import library
+    from looper.agents import library
 
     async def _test(pool: Any) -> None:
         status, view = await _call("POST", "/api/catalog/import")
@@ -181,7 +181,7 @@ def test_a_reimport_replaces_changed_items_keeps_their_installs_and_leaves_proje
 
 
 def test_an_import_over_the_cap_changes_nothing(home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    from loopx.agents import library
+    from looper.agents import library
 
     async def _test(pool: Any) -> None:
         await _call("POST", "/api/catalog/import")
@@ -198,7 +198,7 @@ def test_an_import_over_the_cap_changes_nothing(home: Path, monkeypatch: pytest.
 def test_agents_load_the_installed_items_from_the_database(
     home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from loopx.agents.library import SKILLS_PLUGIN, load_installed
+    from looper.agents.library import SKILLS_PLUGIN, load_installed
 
     async def _test(pool: Any) -> None:
         _, view = await _call("POST", "/api/catalog/import")

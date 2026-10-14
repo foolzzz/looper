@@ -20,7 +20,7 @@ _DRIVER: list[Path] = []
 
 def _driver() -> Path:
     if not _DRIVER:
-        home = Path(tempfile.mkdtemp(prefix="loopx-fake-claude-"))
+        home = Path(tempfile.mkdtemp(prefix="looper-fake-claude-"))
         atexit.register(shutil.rmtree, home, True)
         driver = home / "driver"
         driver.write_text(

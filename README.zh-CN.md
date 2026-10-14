@@ -1,6 +1,6 @@
 <div align="center">
 
-<h1>LoopX</h1>
+<h1>Looper</h1>
 
 **三层多 Agent 编排系统，自带实时 Web 控制台。**
 
@@ -12,9 +12,9 @@
 
 ---
 
-## LoopX 是什么
+## Looper 是什么
 
-LoopX 是一个自托管的多 Agent 系统，把一段任务描述变成协同运转的"规划—执行—验证"循环：
+Looper 是一个自托管的多 Agent 系统，把一段任务描述变成协同运转的"规划—执行—验证"循环：
 **Manager** 负责与用户对话，**TaskRouter** 管理任务生命周期和并发，**Planner** 把工作拆成步骤，
 **WorkerPool** 运行 Claude CLI 子进程完成实际的编码。
 
@@ -65,7 +65,7 @@ docker run -d --name agentbox-postgres \
   postgres:16
 
 # 设置连接串
-export LOOPX_DATABASE_URL="postgresql://postgres:postgres@localhost:54329/loopx"
+export LOOPER_DATABASE_URL="postgresql://postgres:postgres@localhost:54329/loopx"
 # 也可以写进 .env（已被 git 忽略）
 ```
 
@@ -79,53 +79,69 @@ uv sync
 cd web && npm install && npx vite build && cd ..
 ```
 
-然后运行 `uv run loopx doctor`：它检查 PostgreSQL、Claude CLI 及其登录和已开启的渠道，缺什么就给出修复方法。
+然后运行 `uv run looper doctor`：它检查 PostgreSQL、Claude CLI 及其登录和已开启的渠道，缺什么就给出修复方法。
 
 ### 3. 运行
 
 ```bash
-uv run loopx serve
+uv run looper serve
 # 控制台地址：http://127.0.0.1:8767
 ```
 
 首次启动时会自动建表。飞书和 Telegram 不需要命令行参数，在 Settings 页面开启即可（见[渠道](#渠道)）。
 
-换到新机器：`uv run loopx config export loopx-config.json` 把 agent 配置导出成一个文件（密钥留作占位符，
-`--include-projects` 连同项目），在新机器上 `uv run loopx config import loopx-config.json` 先预览，加 `--apply` 才写入。
+换到新机器：`uv run looper config export looper-config.json` 把 agent 配置导出成一个文件（密钥留作占位符，
+`--include-projects` 连同项目），在新机器上 `uv run looper config import looper-config.json` 先预览，加 `--apply` 才写入。
 Settings 页的「Move to another machine」也能导出和导入。
 
 ### 4. 作为服务常驻
 
 ```bash
-uv run loopx service install     # 可选 --port、--runtime-root、--label、--env NAME
-uv run loopx service status      # 是否安装、是否运行、PID、上次退出、日志、GET /api/status
-uv run loopx service restart     # 例如拉取新代码之后
-uv run loopx service uninstall
+uv run looper service install     # 可选 --port、--runtime-root、--label、--env NAME
+uv run looper service status      # 是否安装、是否运行、PID、上次退出、日志、GET /api/status
+uv run looper service restart     # 例如拉取新代码之后
+uv run looper service uninstall
 ```
 
-`install` 让 `loopx serve` 在后台常驻：macOS 上是 launchd LaunchAgent，Linux 上是 systemd 用户服务。登录后自动启动，
-崩溃后自动拉起，日志写到 `<runtime root>/logs/serve.log`。服务运行执行 `install` 的那个 `loopx`（在 checkout 里就是
-`.venv/bin/loopx`），工作目录是当前目录，所以 checkout 的 `.env` 照常生效。它从当前 shell 复制 `PATH`、语言和代理设置、
-`CLAUDE_CONFIG_DIR` 以及所有 `LOOPX_*`、`ANTHROPIC_*`、`LARK_*` 变量（其他变量用 `--env NAME` 加入），因此服务文件的权限是
+`install` 让 `looper serve` 在后台常驻：macOS 上是 launchd LaunchAgent，Linux 上是 systemd 用户服务。登录后自动启动，
+崩溃后自动拉起，日志写到 `<runtime root>/logs/serve.log`。服务运行执行 `install` 的那个 `looper`（在 checkout 里就是
+`.venv/bin/looper`），工作目录是当前目录，所以 checkout 的 `.env` 照常生效。它从当前 shell 复制 `PATH`、语言和代理设置、
+`CLAUDE_CONFIG_DIR` 以及所有 `LOOPER_*`、`ANTHROPIC_*`、`LARK_*` 变量（其他变量用 `--env NAME` 加入），因此服务文件的权限是
 0600。改了配置再执行一次 `install` 即可生效。Linux 上执行 `loginctl enable-linger $USER` 后，未登录时也会运行。
 
 ### 升级时的备份
 
-`loopx serve` 每次启动都会应用 schema，升级可能删列、删表。schema 将要变化时，serve 先用 `pg_dump`
-备份到 `~/.loopx/backups/`（runtime root 下的 `backups/`，每个库保留最近 5 份），并在日志里给出恢复方法；
-新建的空库不需要备份。它用 PATH 上的 `pg_dump` 或 `LOOPX_PG_DUMP` 指定的那个，主版本不能低于服务器
-（`loopx doctor` 会检查；macOS 上 `brew install libpq`，再把 `$(brew --prefix libpq)/bin` 加进 PATH）。
+`looper serve` 每次启动都会应用 schema，升级可能删列、删表。schema 将要变化时，serve 先用 `pg_dump`
+备份到 `~/.looper/backups/`（runtime root 下的 `backups/`，每个库保留最近 5 份），并在日志里给出恢复方法；
+新建的空库不需要备份。它用 PATH 上的 `pg_dump` 或 `LOOPER_PG_DUMP` 指定的那个，主版本不能低于服务器
+（`looper doctor` 会检查；macOS 上 `brew install libpq`，再把 `$(brew --prefix libpq)/bin` 加进 PATH）。
 PostgreSQL 跑在 Docker 里时，可以改在容器里备份：
 
 ```bash
-export LOOPX_BACKUP_CMD='docker exec agentbox-postgres pg_dump --format=custom -U {user} {dbname}'
+export LOOPER_BACKUP_CMD='docker exec agentbox-postgres pg_dump --format=custom -U {user} {dbname}'
 ```
 
-没有可用的 `pg_dump` 或备份失败时，serve 在改动任何东西之前退出；`loopx serve --skip-backup`
-不备份直接迁移，并记一条警告。回退时先停掉 LoopX，把数据库重建为空库，用
-`pg_restore --no-owner --dbname "$LOOPX_DATABASE_URL" <文件>`（Docker 里用
+没有可用的 `pg_dump` 或备份失败时，serve 在改动任何东西之前退出；`looper serve --skip-backup`
+不备份直接迁移，并记一条警告。回退时先停掉 Looper，把数据库重建为空库，用
+`pg_restore --no-owner --dbname "$LOOPER_DATABASE_URL" <文件>`（Docker 里用
 `docker exec -i agentbox-postgres pg_restore --no-owner -U postgres -d loopx < <文件>`）恢复，再运行旧版本。
-`loopx service install` 会复制 `PATH` 和 `LOOPX_*` 变量，所以要在它之前设好。
+`looper service install` 会复制 `PATH` 和 `LOOPER_*` 变量，所以要在它之前设好。
+
+### 从 LoopX 升级
+
+Looper 在 v2.5.0 及以前叫 LoopX。升级不需要手动操作：
+
+- **命令：**`looper`。`loopx` 再保留一个版本：先打印一行弃用提示，再执行 `looper`。`install.sh`
+  会先卸掉同一工具装的旧 `loopx` 包（数据不动）。
+- **数据目录：**`~/.looper`。第一次运行 `looper serve` 或 `looper service install` 时把 `~/.loopx`
+  移过去（一次重命名，不复制也不删除任何文件），并在原处留一个指向它的链接，保留一个版本。两个目录都在时用
+  `~/.looper` 并记一条警告。
+- **环境变量：**`LOOPER_*`。`LOOPER_*` 没设时仍读对应的 `LOOPX_*`，并给出警告；请在 shell 和 `.env` 里改名。
+- **服务：**`com.looper.serve`。`looper service install` 会先停掉并删除旧的 `com.loopx.serve`。
+- **配置文件：**导出写 `looper-config/v1`；以前导出的 `loopx-config/v1` 文件仍然能导入。
+- **不变的：**默认数据库仍叫 `loopx`（`postgresql://localhost:5432/loopx`），里面的数据（比如你自己写的
+  harness）不会被改写；发布 tag 和历史保留原名；[NOTICE](NOTICE) 保留对上游 LoopX 的署名。因为 `schema.sql`
+  有变化，升级后第一次启动会照常先备份。
 
 ## 架构
 
@@ -133,10 +149,10 @@ export LOOPX_BACKUP_CMD='docker exec agentbox-postgres pg_dump --format=custom -
 
 | 层级 | 模块 | 职责 |
 |---|---|---|
-| **Manager** | `loopx/agents/tiers/manager.py` | 面向用户的管家：识别意图、对话 |
-| **TaskRouter** | `loopx/agents/tiers/task.py` | 任务生命周期、并发控制（同时 3 个）、排队 |
-| **Planner** | `loopx/agents/tiers/planner.py` | 拆解步骤、派发、核验 |
-| **WorkerPool** | `loopx/agents/tiers/worker.py` | Claude CLI 子进程池，输出 stream-json |
+| **Manager** | `looper/agents/tiers/manager.py` | 面向用户的管家：识别意图、对话 |
+| **TaskRouter** | `looper/agents/tiers/task.py` | 任务生命周期、并发控制（同时 3 个）、排队 |
+| **Planner** | `looper/agents/tiers/planner.py` | 拆解步骤、派发、核验 |
+| **WorkerPool** | `looper/agents/tiers/worker.py` | Claude CLI 子进程池，输出 stream-json |
 
 各 agent 之间的通信都经过一个带类型的异步 **MessageBus**，按 `MessageEnvelope` 路由。
 
@@ -197,7 +213,7 @@ PostgreSQL 是启动的硬性依赖。数据表：
 
 | 变量 | 必需 | 说明 |
 |---|---|---|
-| `LOOPX_DATABASE_URL` | 是 | PostgreSQL 连接串 |
+| `LOOPER_DATABASE_URL` | 是 | PostgreSQL 连接串 |
 
 `claude` 进程继承服务的环境变量，所以 Claude CLI 的认证方式和你在 shell 里一样：已登录，或按它自己的文档使用 API key。
 
@@ -205,11 +221,11 @@ PostgreSQL 是启动的硬性依赖。数据表：
 
 ### 渠道
 
-网页对话始终开启。Telegram 和飞书是内置渠道，不需要命令行参数：在控制台的 **Settings** 页开启并配置。设置保存在 `channel_configs` 表里，服务启动时读取，所以改动后要重启 `loopx serve`。表里保存的是环境变量的**名字**，不是密钥本身。
+网页对话始终开启。Telegram 和飞书是内置渠道，不需要命令行参数：在控制台的 **Settings** 页开启并配置。设置保存在 `channel_configs` 表里，服务启动时读取，所以改动后要重启 `looper serve`。表里保存的是环境变量的**名字**，不是密钥本身。
 
 | 渠道 | Settings 字段 | 另外需要 |
 |---|---|---|
-| Telegram | `bot_token_env`：存放 bot token 的环境变量（默认 `LOOPX_TELEGRAM_BOT_TOKEN`）。`allowed_user_ids`：允许和 bot 对话的 Telegram 数字用户 ID。 | 该环境变量里的 token。 |
+| Telegram | `bot_token_env`：存放 bot token 的环境变量（默认 `LOOPER_TELEGRAM_BOT_TOKEN`）。`allowed_user_ids`：允许和 bot 对话的 Telegram 数字用户 ID。 | 该环境变量里的 token。 |
 | 飞书 | `app_id_env`：存放应用 ID 的环境变量（默认 `LARK_APP_ID`）。`allowed_open_ids`：发送者的飞书 `open_id`（`ou_...`）。 | `PATH` 上有 `lark-cli` 并已登录；消息由它收发。 |
 
 - 每个 agent 运行 Claude Code 时都不弹权限确认，所以 Manager 能在这台机器上执行任何命令。因此每个渠道只转发名单上的发送者：其他人的消息会被丢弃并记一行日志（只记发送者 ID），不回复。名单为空或格式不对的渠道不会启动，Settings 页会写明原因。`LOOPX_TELEGRAM_ALLOWED_USERS` 已不再生效。
@@ -258,7 +274,7 @@ cd web && npx tsc --noEmit
 npx vite build
 
 # 运行服务（自动建表）
-uv run loopx serve
+uv run looper serve
 ```
 
 ## 发布

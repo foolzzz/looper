@@ -1,6 +1,6 @@
 # Agent System Architecture
 
-The LoopX agent system is a three-tier multi-agent architecture with a web
+The Looper agent system is a three-tier multi-agent architecture with a web
 dashboard for task management and real-time monitoring.
 
 ## Tiers
@@ -9,7 +9,7 @@ dashboard for task management and real-time monitoring.
 User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPool → Claude CLI
 ```
 
-### Manager (`loopx/agents/tiers/manager.py`)
+### Manager (`looper/agents/tiers/manager.py`)
 
 - Entry point for all user messages
 - Classifies intent (chat vs task creation)
@@ -26,7 +26,7 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
   instead of creating the task
 - Maintains chat conversation context per session
 - Runs one resident Claude process through `ResidentClaude`
-  (`loopx/agents/claude_cli.py`), which each task's Planner uses too, started
+  (`looper/agents/claude_cli.py`), which each task's Planner uses too, started
   on the first chat message:
   `claude --print --verbose --output-format stream-json --input-format stream-json --include-partial-messages --replay-user-messages <isolation flags> --append-system-prompt-file <file> --system-prompt-snapshot off --dangerously-skip-permissions --model M [--effort E] [--plugin-dir <dir> ...] [--mcp-config <file>] [--resume <session_id>]`
   (see [What an agent's Claude Code loads](#what-an-agents-claude-code-loads),
@@ -62,7 +62,7 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
   the chat is opened) instead of a message's stream; Lark and Telegram send it
   to the chat. With no message before it, the reply is only recorded
 
-### TaskRouter (`loopx/agents/tiers/task.py`)
+### TaskRouter (`looper/agents/tiers/task.py`)
 
 - Every task belongs to exactly one project (`project_id`) and runs in its
   `work_dir`. There is no global default: the directory is the one given
@@ -78,7 +78,7 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
 - A project may have a `background` (at most 10000 characters, `''` = none):
   what every task agent of the project should know. It goes into the system
   prompt of the project's Planner, Workers and Reviewers, never the
-  Manager's, which spans all projects. `loopx/agents/system_prompt.py` builds
+  Manager's, which spans all projects. `looper/agents/system_prompt.py` builds
   that prompt for all three, in five layers:
 
   ```
@@ -138,7 +138,7 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
   plan is live (`executing` or `verifying`): each gets a new Planner and a
   `TASK_RESUME`. Any other task left running is marked "stopped"
 
-### Planner (`loopx/agents/tiers/planner.py`)
+### Planner (`looper/agents/tiers/planner.py`)
 
 - One Planner per task for the task's whole run. It is a Claude Code agent: it
   plans the steps, decides what happens after every Worker and Reviewer
@@ -177,7 +177,7 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
     Events are handled in arrival order, so a message sent during another
     turn waits for it; one that arrives before the task has a plan, or after
     it ended, is answered without a turn.
-- Reply contract (`loopx/agents/tiers/planner_protocol.py`): `REPLY_CONTRACT`
+- Reply contract (`looper/agents/tiers/planner_protocol.py`): `REPLY_CONTRACT`
   comes last in the system prompt, after the editable role prompt and the
   project section. Every reply ends with exactly
   one ```` ```json ```` fenced object, parsed into typed dataclasses and enums
@@ -209,7 +209,7 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
   (a new plan, a replan, added steps, a settled step with the plan's summary)
   is one transaction. The project is not saved with it: it is read again
   before every event's turns.
-- Task memory (`loopx/agents/tiers/journal.py`): when a step is accepted,
+- Task memory (`looper/agents/tiers/journal.py`): when a step is accepted,
   code writes a `task_journal` entry (`step_accepted`) in the transaction that
   settles it, with the Worker's summary and the `learnings` its Worker and
   Reviewer reported; the model never writes one. Every `[DECISION]`,
@@ -248,7 +248,7 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
 - Before changing a recommended prompt, a contract or the prompt's layers, run
   the prompt regression eval ([`evals/README.md`](../../evals/README.md)).
 
-### WorkerPool (`loopx/agents/tiers/worker.py`)
+### WorkerPool (`looper/agents/tiers/worker.py`)
 
 - Manages a pool of Worker processes
 - Each Worker runs Claude CLI as a subprocess with `stream-json` output
@@ -310,9 +310,9 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
 
 ### What an agent's Claude Code loads
 
-Every agent (Manager, Planner, Worker, Reviewer) sees what LoopX composes and
+Every agent (Manager, Planner, Worker, Reviewer) sees what Looper composes and
 the project's own `CLAUDE.md`, not the personal Claude Code configuration of
-whoever runs LoopX. `isolation_args(cwd)` in `loopx/agents/claude_cli.py` is
+whoever runs Looper. `isolation_args(cwd)` in `looper/agents/claude_cli.py` is
 the one flag set all four commands carry; `ISOLATION_ID`
 (`personal-config-off/v1`) names it in each run's record:
 
@@ -350,16 +350,16 @@ directory with `.git`, or the work directory itself), plus the operator's
 `--safe-mode` also drops the project's `CLAUDE.md`; `--disable-slash-commands`
 also drops built-in skills. Not covered: managed (admin policy) settings,
 built-in plugins, and the environment variables of the process that runs
-`loopx serve`. With user settings gone, the model, the effort and any
-environment variables come from LoopX (next section), not from the operator's
-Claude Code settings, and the plugins and skills come from the LoopX catalog,
+`looper serve`. With user settings gone, the model, the effort and any
+environment variables come from Looper (next section), not from the operator's
+Claude Code settings, and the plugins and skills come from the Looper catalog,
 where they are installed (below), never from `~/.claude` itself.
 
 ### What an agent may do
 
 Every agent (Manager, Planner, Worker, Reviewer) has every tool and runs
 without permission prompts (RFC decision 8). `permission_args()` in
-`loopx/agents/claude_cli.py` is `--dangerously-skip-permissions`, and
+`looper/agents/claude_cli.py` is `--dangerously-skip-permissions`, and
 `agent_settings.Launch.args` puts it in front of every agent's launch flags,
 beside the installed plugins', so the four commands cannot diverge. No command
 carries `--tools`, `--allowedTools` or `--permission-mode`. What an agent is
@@ -388,7 +388,7 @@ An agent is a runtime, an LLM provider and a model (RFC decision 10, the
 [multi-runtime RFC](rfcs/multi-runtime-agents-v0.zh-CN.md)), registered in
 Settings and selected per role ([next section](#harness-agent-and-environment)).
 
-- **Runtime types** are code: one adapter per type in `loopx/agents/runtimes`
+- **Runtime types** are code: one adapter per type in `looper/agents/runtimes`
   (`RuntimeAdapter`). Every tier starts its runtime through it, so no tier
   builds a command itself. An adapter declares its `capabilities`, the API
   `protocols` it speaks and the provider `auth_kinds` it takes, and it
@@ -459,7 +459,7 @@ them (with `/api/llm-profiles`), and an agent config update naming them is a
 
 ### Harness, agent and environment
 
-`loopx/agents/agent_settings.py` is the one place that resolves what an agent
+`looper/agents/agent_settings.py` is the one place that resolves what an agent
 inherits. The harness prompt is an agent's character and stability: working
 principles, boundaries and communication. The role prompt says what that kind
 of agent is responsible for. Keeping them apart means no harness edit can
@@ -538,7 +538,7 @@ Every run records the prompt in `llm_records.metadata`:
 - `system_prompt`: the text, as before;
 - `system_prompt_sha256`: the hash of that text, which is also the file name;
 - `prompt_layers`: where each layer came from, built in
-  `loopx/agents/system_prompt.py`:
+  `looper/agents/system_prompt.py`:
   - `harness`: `{source, sha256, project_id?, from_role?}`; `source` is the
     layer (`builtin`, `system`, `role`, `project` or `role_project`, the last
     two naming the project), and `from_role` is `worker` when a Reviewer took
@@ -588,7 +588,7 @@ it.
 ### Project knowledge: documents read on demand
 
 A project can carry reference material too large for a prompt
-(`loopx/agents/knowledge.py`, RFC section 6 and decision 3). Each document
+(`looper/agents/knowledge.py`, RFC section 6 and decision 3). Each document
 has a title, a required one-line summary and one of three sources, never a
 URL:
 
@@ -656,7 +656,7 @@ is not loaded, and a directory that does not exist does not fail the run.
 
 ### Project skills: skills a project writes
 
-A project can write its own Claude Code skills (`loopx/agents/project_skills.py`,
+A project can write its own Claude Code skills (`looper/agents/project_skills.py`,
 RFC section 6 and decision 9). Each is a catalog item of origin `project`,
 owned by the project (`owner_project_id`; it goes with its project) with one
 file, its `SKILL.md`, and nothing is written into the project's directory:
@@ -713,7 +713,7 @@ Verified with Claude Code 2.1.285 under the isolation flags and
 
 ### Project execution settings
 
-A project can set how its task agents run (`loopx/agents/project_execution.py`,
+A project can set how its task agents run (`looper/agents/project_execution.py`,
 typed nullable columns on `projects`, `null` = as before; its agent and per-run
 cap are agent settings, [Harness, agent and environment](#harness-agent-and-environment)):
 `task_budget_usd`, checked against the task's cost before every Planner turn
@@ -730,7 +730,7 @@ that completes leaves a lessons draft or document in the project's knowledge
 
 What agents load is not read from `~/.claude`. Items are acquired into a
 catalog first, and each loads only where it is installed
-(`loopx/agents/library.py`, `loopx/agents/catalog.py`; RFC decisions 7 and 9):
+(`looper/agents/library.py`, `looper/agents/catalog.py`; RFC decisions 7 and 9):
 
 - **Catalog.** `library_items` and `library_files` hold each item: kind
   `plugin`, `skill` or `mcp`, name, `origin` (how it was acquired: `machine`,
@@ -791,7 +791,7 @@ catalog first, and each loads only where it is installed
   read. The task's activity notes `Project installs applied (...)` for a
   Worker or Reviewer run that has project installs, and `Installed plugins and
   skills applied`, `changed` or `removed` for the Planner.
-- **MCP servers** (`loopx/agents/mcp.py`) are items of kind `mcp`, installed
+- **MCP servers** (`looper/agents/mcp.py`) are items of kind `mcp`, installed
   the same way. `library_mcp_servers` holds how Claude Code starts one
   (`stdio`: command, args, env) or reaches it (`http`/`sse`: URL, headers); the
   env and header values are secrets, so catalog rows carry only their names and
@@ -807,7 +807,7 @@ catalog first, and each loads only where it is installed
   `--plugin-dir`s; `--strict-mcp-config` stays, so it is the only MCP source
   and a plugin's own `.mcp.json` servers do not load. The record's
   `library.mcp_servers` names them; their values are never recorded.
-- **Upload, git and Settings** (`loopx/agents/catalog_sources.py`) add
+- **Upload, git and Settings** (`looper/agents/catalog_sources.py`) add
   plugins and skills outside projects, installed nowhere: an uploaded
   `SKILL.md` or zip (refused whole for an absolute path, `..`, a link or an
   over-cap file; binary files left out), a shallow clone of a public
@@ -819,7 +819,7 @@ catalog first, and each loads only where it is installed
   are edited with `PUT /api/catalog/<id>` (an uploaded or git one becomes
   `modified`); machine items change only by re-importing. A name clash
   outside projects is a 409, and the request may rename the item.
-- **Reclaiming copies.** `loopx serve` reclaims replaced copies when it
+- **Reclaiming copies.** `looper serve` reclaims replaced copies when it
   starts, before any agent launches: `read_only_copies.reclaim_unused` removes
   every content-hashed directory of the catalog, project knowledge and the
   project skills plugins of versions before the catalog, and every
@@ -842,9 +842,10 @@ tokens, plugin hook context 3.8k).
 
 ### Moving the configuration: export and import
 
-`loopx config export <file>` and `loopx config import <file>`
-(`loopx/agents/config_transfer.py`) move an installation's agent configuration
-through one JSON file, `format: loopx-config/v1`: `runtimes`, `providers` and
+`looper config export <file>` and `looper config import <file>`
+(`looper/agents/config_transfer.py`) move an installation's agent configuration
+through one JSON file, `format: looper-config/v1` (a `loopx-config/v1` file from
+before the rename imports the same way): `runtimes`, `providers` and
 `agents` (the registered ones; the built-ins exist everywhere; each names the
 others by name), `settings` (the system and role layers, each naming its agent;
 each role's prompt, `null` while it follows the recommended one, its timeout,
@@ -879,7 +880,7 @@ keeps a stored secret, or leaves the value empty when there is none. Imported
 items keep their origin. Importing the same file again changes nothing, and
 exporting the new installation gives the same file.
 
-Settings imports too (`loopx/agents/config_imports.py`). `POST
+Settings imports too (`looper/agents/config_imports.py`). `POST
 /api/config/imports` is the one route that reads past the 8 MiB request cap:
 it streams up to 256 MiB (twice the catalog's cap) to a 0600 file under
 `<runtime root>/config-imports/`, after the Origin and Host checks, and
@@ -893,7 +894,7 @@ Settings links to its form (`#settings/<kind>/<id>`).
 ### What a run spent and how large its context grew
 
 Every run records its own cost and tokens, its context at the end and the
-context compactions it went through (`loopx/agents/run_usage.py`; RFC §8, M2).
+context compactions it went through (`looper/agents/run_usage.py`; RFC §8, M2).
 There is no spending cap (RFC decision 2); caps come as optional project
 settings in M5.
 
@@ -1001,7 +1002,7 @@ without a result.
 ## Message Bus
 
 All inter-agent communication uses typed `MessageEnvelope` over an in-process
-async message bus (`loopx/agents/bus.py`). Every message is journaled before
+async message bus (`looper/agents/bus.py`). Every message is journaled before
 delivery and marked delivered once consumed. The WorkerPool consumes
 `WORK_ITEM` and `VERIFY_REQUEST` through topic consumers that take delivery.
 On restart the bus replays undelivered messages for the Manager, the TaskRouter
@@ -1126,7 +1127,7 @@ PostgreSQL is a hard startup dependency. All data paths:
 
 Plans and sessions used to be files (`.local/planner/planner-<task_id>/*.json`,
 `.local/manager/session.json`). The first start with the database holding
-them imports them once (`loopx/agents/state_import.py`, recorded as
+them imports them once (`looper/agents/state_import.py`, recorded as
 `file_state_import` in `schema_migrations`); plan files from before the
 resident Planner are skipped with a log line. Nothing reads the files after
 that, so they can be removed. The bus journal (`.local/agent-bus`) and the
@@ -1140,15 +1141,31 @@ the oldest directory keeps the plain name and a later clash, ignoring case,
 gets `-2`, `-3`, .... A task's "active" statuses are `pending`, `assigned`,
 `running` and `executing`.
 
-Connection: `LOOPX_DATABASE_URL` environment variable or `.env` file.
+Connection: `LOOPER_DATABASE_URL` environment variable or `.env` file, else
+`postgresql://localhost:5432/loopx`: the default database keeps its name from
+before the rename, because it holds the user's data.
+
+### Renamed from LoopX
+
+The product was LoopX up to v2.5.0. `looper.env` reads every `LOOPER_*`
+variable's `LOOPX_*` name when the new one is unset, with a warning once per
+name, for one release; the `loopx` command is an alias that prints a
+deprecation note. `looper.paths.settle_runtime_root` moves `~/.loopx` to
+`~/.looper` the first time `looper serve` or `looper service install` uses the
+default runtime root (one `rename`, leaving `~/.loopx` as a link to it; both
+present: `~/.looper` is used, with a warning). `looper service install`
+replaces a `com.loopx.serve` unit with `com.looper.serve`. Data in the database
+(an operator's harness text, a channel's `bot_token_env`) is not rewritten; a
+stored `LOOPX_*` variable name finds its `LOOPER_*` counterpart, and a system
+harness stored as the pre-rename built-in still follows the built-in.
 
 ## Web Dashboard
 
 Single-page React app served from `web/dist/` via the built-in HTTP server
-(`loopx/agents/http_server.py`). Default port: 8767. An installed wheel has no
-`web/`; it serves the copy staged into the package (`loopx/web/dashboard`,
+(`looper/agents/http_server.py`). Default port: 8767. An installed wheel has no
+`web/`; it serves the copy staged into the package (`looper/web/dashboard`,
 built by `scripts/stage-dashboard.sh` at release time), and it carries
-`loopx/db/schema.sql` the same way.
+`looper/db/schema.sql` the same way.
 
 ### Pages
 
@@ -1158,7 +1175,7 @@ built by `scripts/stage-dashboard.sh` at release time), and it carries
 - **Project** (`#projects/<id>`, `#projects/<id>/knowledge|skills|settings`): a header with the name, description, default directory and task count (a link to the filtered Tasks page), then four tabs, arrow keys moving between them. **Overview**: the 5 latest tasks with status and cost and a link to all of them; the background (three lines, then Show more); the knowledge (document count, stored size, the first 5 titles and summaries, how many referenced files are missing); the skills (count, how many are on, the first 5 names and descriptions); and the execution settings that are set, in words, with each role's model, per-run cap and harness from this project. **Knowledge**: the documents (title, summary, source, file name or path, size, a Missing badge for a path document whose file is gone) with a readout of documents, stored bytes and index characters against their caps. Opening a row shows its body (a path document's file as it is now); Edit changes the title, summary and content (a text or upload document) or path (a path document); a document is added as Text, Upload or Project file, or by dropping a file on the section; delete asks first. **Skills**: the skills (`project:<name>`, the body's size, `Off` for a disabled one, the description) with a count against the cap. Opening a row shows its `SKILL.md` body; Edit changes the name, description and body; a skill is added by hand or from a `SKILL.md` (Upload SKILL.md, or a drop on the section), whose frontmatter fills the name and description and whose body below it fills the instructions, for review before Add; a switch turns one on or off; delete asks first. Knowledge and skill changes apply at once and a refusal shows the server's reason. **Settings**: the name, default directory, description, background (`n / 10000`) and execution settings, saved together (Save is disabled over a limit or without a change; Discard changes resets them); then Agent settings: a form for the project's layer ("All agents in this project") and one for each role in the project (Planner, Worker, Reviewer), where every field also says what applies now and from which layer; then Delete project, offered only while the project has no tasks.
 - **Task Detail**: Overview (status, phase, times, steps and the task's cost with its run count, then "Cost by agent": the Planner's, the Workers' and the Reviewers' runs and cost with each one's share, noting runs still running or without a reported cost; steps, agent timeline, live activity feed), Pipeline DAG (React Flow), Sessions, Conversation
 - **Agents**: The Manager, Planner, Worker and Reviewer configuration editor (role prompt replace/append, LLM profiles). Instead of a permission setting it states the permissions every agent shares: every tool, `--dangerously-skip-permissions`. Each role also has its role layer of the agent settings (harness, model, effort, environment, per-run cap), each field saying what applies now and from which layer. A Runs tab lists every recorded Claude run of the role (the Manager, every task's Planner, Workers or Reviewers)
-- **Agent history** (`#history/<agent-id>?task=<task-id>`): opened from History on an Agent Timeline row, a Runs entry or the Chat page. The Manager's and a Planner's page starts with "Context & cost": the latest context size, the number of compactions, the total cost and the number of turns. Below them is a sparkline of the context at the end of each of the latest 100 turns, scaled between their lowest and highest value, with a dashed marker on each turn that compacted. A list of the compactions follows (turn, time, trigger, context before → after), then a folded table of the turns. The section is re-read every 10 s. For each Claude run it shows status, model, the run's own tokens (uncached input, cache read, cache write, output), its context at the end (`ctx`), a `compacted` badge, its own cost, the launch command (cwd and argv; a long argument such as the system prompt is shown by its length, and Copy copies the exact command), a collapsible System prompt section with what LoopX appended (Claude Code's built-in system prompt is not included): its title shows the prompt's size, its short sha256 and an `isolated` badge, and inside one line per layer (harness source and version, role recommended or edited, project and background version, task, contract), the model with its source and effort, and the Settings environment variable names, above the full text; runs recorded before the layers existed show the text only. A collapsible Plugins & skills section shows how many plugins and skills the run loaded from the library, with its hash, and how many project skills (from `metadata.project_skills`), and lists each with its short version hash. Then the full transcript, following a running run every 2 s. A running run shows its last output time from the record's heartbeat and is flagged after 2 minutes with no output. While Claude thinks it shows `thinking · ~N tokens` from Claude's `thinking_tokens` events. Those arrive about once a second, so the recorder keeps one row per thinking phase and updates its count in place. Hooks, background tasks and rate limits are shown as one line each, as are a compaction (`Context compacted (auto) · 25.1k → 1.36k tokens`) and a failed compaction attempt. The result line labels Claude's figure as the `session total`. Any other event type is an expandable line. For a Planner each run is one of its turns, listed above your chat with it and its activity.
+- **Agent history** (`#history/<agent-id>?task=<task-id>`): opened from History on an Agent Timeline row, a Runs entry or the Chat page. The Manager's and a Planner's page starts with "Context & cost": the latest context size, the number of compactions, the total cost and the number of turns. Below them is a sparkline of the context at the end of each of the latest 100 turns, scaled between their lowest and highest value, with a dashed marker on each turn that compacted. A list of the compactions follows (turn, time, trigger, context before → after), then a folded table of the turns. The section is re-read every 10 s. For each Claude run it shows status, model, the run's own tokens (uncached input, cache read, cache write, output), its context at the end (`ctx`), a `compacted` badge, its own cost, the launch command (cwd and argv; a long argument such as the system prompt is shown by its length, and Copy copies the exact command), a collapsible System prompt section with what Looper appended (Claude Code's built-in system prompt is not included): its title shows the prompt's size, its short sha256 and an `isolated` badge, and inside one line per layer (harness source and version, role recommended or edited, project and background version, task, contract), the model with its source and effort, and the Settings environment variable names, above the full text; runs recorded before the layers existed show the text only. A collapsible Plugins & skills section shows how many plugins and skills the run loaded from the library, with its hash, and how many project skills (from `metadata.project_skills`), and lists each with its short version hash. Then the full transcript, following a running run every 2 s. A running run shows its last output time from the record's heartbeat and is flagged after 2 minutes with no output. While Claude thinks it shows `thinking · ~N tokens` from Claude's `thinking_tokens` events. Those arrive about once a second, so the recorder keeps one row per thinking phase and updates its count in place. Hooks, background tasks and rate limits are shown as one line each, as are a compaction (`Context compacted (auto) · 25.1k → 1.36k tokens`) and a failed compaction attempt. The result line labels Claude's figure as the `session total`. Any other event type is an expandable line. For a Planner each run is one of its turns, listed above your chat with it and its activity.
 - **Settings**: Agent defaults, the system layer of the agent settings (the harness prompt with an `n / 20000` counter, empty for the built-in one, the model, the effort, the environment variables and the per-run cap, each saying what applies now), then Plugins & skills (how many of the imported items are loaded and their size, "Import from this machine" or "Re-import", the last import with what it changed and what it left out, a name filter, and the plugins and skills with their version, size and a switch each; a change applies to each agent's next run), then the Telegram and Lark channels, each with its sender allowlist (an add and remove list of Telegram user IDs or Lark open_ids, checked as you type, with blanks and repeats flagged) and, for an enabled channel that does not start, the reason
 
 ### Real-Time Updates
@@ -1286,12 +1303,12 @@ seeded default from before the recommendation was tracked get the current one.
 
 ## Channels
 
-The Web channel is always on. Telegram and Lark are built in; `loopx serve`
+The Web channel is always on. Telegram and Lark are built in; `looper serve`
 takes no flags for them. At startup it reads `channel_configs`, which the
 Settings page edits, and starts each enabled channel. Changes apply after a
 restart.
 
-- **Sender allowlist** (`loopx/agents/channels/allowlist.py`, RFC decision 8):
+- **Sender allowlist** (`looper/agents/channels/allowlist.py`, RFC decision 8):
   the Manager runs any command it is asked to, so Telegram and Lark pass on
   only the messages of the senders their configuration lists. A message from
   anyone else never reaches the Manager: the adapter logs one line with the
@@ -1300,7 +1317,7 @@ restart.
   the Settings page (`start_problem`) say why. The list holds at most 100
   ids; the API checks each one and stores the list as a JSON array.
 - **Telegram**: the token comes from the env var named by `bot_token_env`
-  (default `LOOPX_TELEGRAM_BOT_TOKEN`). `allowed_user_ids` lists numeric
+  (default `LOOPER_TELEGRAM_BOT_TOKEN`). `allowed_user_ids` lists numeric
   Telegram user IDs (a negative id is a group or channel, not a sender); a
   comma-separated string from before is still read.
   `LOOPX_TELEGRAM_ALLOWED_USERS` no longer applies. `/start`, `/status` and

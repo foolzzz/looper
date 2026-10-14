@@ -1,9 +1,9 @@
 # Agent Instructions
 
-This repository is the LoopX agent system, published as `foolzzz/looper`.
-`loopx serve` runs a Manager, a Planner per task and a pool of Claude Code
-Workers and Reviewers (`loopx/agents`), stores everything in PostgreSQL
-(`loopx/db`) and serves the dashboard built from `web/`. Read these before you
+This repository is the Looper agent system, published as `foolzzz/looper`.
+`looper serve` runs a Manager, a Planner per task and a pool of Claude Code
+Workers and Reviewers (`looper/agents`), stores everything in PostgreSQL
+(`looper/db`) and serves the dashboard built from `web/`. Read these before you
 start:
 
 - [docs/architecture/agent-system.md](docs/architecture/agent-system.md): how
@@ -58,20 +58,21 @@ start:
 - Follow the testing scheme in the plan's section 1; it says which tests a
   change needs and when they are written.
 - Run tests from the worktree root with `uv run --extra test python -m pytest`.
-  The PostgreSQL tests run only when `LOOPX_TEST_DATABASE_URL` points at a
+  The PostgreSQL tests run only when `LOOPER_TEST_DATABASE_URL` points at a
   disposable database.
 - When a change affects runtime behavior, also validate it on the real path;
   plan section 1 says which of these a change needs:
-  - run `loopx serve` from the worktree against a fresh database, on a port
+  - run `looper serve` from the worktree against a fresh database, on a port
     other than the operator's 8767, with a throwaway `--runtime-root`;
   - run a change to model-visible content (prompts, contracts, injected
     context) once with the real Claude CLI, and attach the real-mode prompt
     eval comparison ([evals/README.md](evals/README.md));
   - check a UI change in a headless browser, with screenshots.
-- Never test against an active database, the operator's `~/.loopx`, or a live
+- Never test against an active database, the operator's `~/.looper` (or
+  `~/.loopx`, its name before the rename), or a live
   service. When the real environment is unavailable, report the gap. A
   skipped test is not a pass.
-- Check `sys.executable` and `loopx.__file__` when you are unsure which
+- Check `sys.executable` and `looper.__file__` when you are unsure which
   checkout an interpreter loads.
 
 ## Public And Private Boundary
@@ -80,7 +81,7 @@ The repository is public. Do not commit or post:
 
 - private planning, internal team or customer context;
 - local absolute paths, raw logs or transcripts;
-- credentials, private links or runtime state (`~/.loopx`, `.local/`, `.env`).
+- credentials, private links or runtime state (`~/.looper`, `.local/`, `.env`).
 
 Keep that material in ignored local state. Only commit it after it has been
 rewritten as public-safe product or developer language. This applies to

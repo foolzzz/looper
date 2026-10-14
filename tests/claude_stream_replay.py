@@ -1,7 +1,7 @@
 """A stand-in resident ``claude`` that replays a recorded Claude Code session turn by turn.
 
 The ``background_*`` fixtures in ``fixtures/claude_stream`` are Claude Code
-2.1.285 (haiku) sessions run with LoopX's resident flags and
+2.1.285 (haiku) sessions run with Looper's resident flags and
 ``--replay-user-messages``, trimmed to public-safe fields. A ``{"stdin":
 <uuid>}`` line marks where the recording wrote a user message with that uuid.
 The stand-in reads one message from its stdin there and replays the events up

@@ -8,8 +8,8 @@ from pathlib import Path
 
 import pytest
 
-from loopx.agents.bus import MessageBus, MessageJournal
-from loopx.agents.message import (
+from looper.agents.bus import MessageBus, MessageJournal
+from looper.agents.message import (
     MANAGER_ADDRESS,
     PLANNER_ADDRESS,
     AgentAddress,
@@ -219,7 +219,7 @@ class TestWorkerPoolConsumesWork:
     def test_dispatched_work_is_delivered_once(self, tmp_path: Path) -> None:
         from unittest.mock import AsyncMock
 
-        from loopx.agents.tiers.worker import WorkerConfig, WorkerPool
+        from looper.agents.tiers.worker import WorkerConfig, WorkerPool
 
         async def _run() -> tuple[MessageBus, AsyncMock]:
             bus = MessageBus(tmp_path)

@@ -1,4 +1,4 @@
-"""A task's memory through a real ``loopx serve`` on a new database, with a stand-in ``claude``.
+"""A task's memory through a real ``looper serve`` on a new database, with a stand-in ``claude``.
 
 The Planner plans ``d``, then ``x`` after ``d``, ``y`` after ``x`` and ``c``
 after ``d`` and ``y``, and accepts each step. Each Worker reports
@@ -6,7 +6,7 @@ after ``d`` and ``y``, and accepts each step. Each Worker reports
 Planner's next turn and a later Worker's first turn carry the entries back,
 and a project's ``distill_lessons`` decides what the completed task leaves:
 a lessons document in its knowledge (``write``), a draft the user confirms
-into it (``draft``), or nothing (``off``). Runs only when LOOPX_TEST_DATABASE_URL
+into it (``draft``), or nothing (``off``). Runs only when LOOPER_TEST_DATABASE_URL
 points at a disposable database (each run creates and drops one beside it).
 """
 
@@ -21,7 +21,7 @@ import pytest
 from evals.prompt_regression.runner import fresh_database, running_server
 from tests.test_restart_resume_db import DSN, _log, _wait
 
-pytestmark = pytest.mark.skipif(not DSN, reason="LOOPX_TEST_DATABASE_URL is not set")
+pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
 LESSONS = "# Lessons\n\n- The build needs `make gen` first."
 LEARNINGS = {"d": ["build needs `make gen` first"], "x": ["x found a flaky test"], "y": ["y found a slow API"], "c": []}

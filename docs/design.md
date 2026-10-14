@@ -1,10 +1,10 @@
-# LoopX Agent System — 产品设计
+# Looper Agent System — 产品设计
 
 本文是 agent 系统的产品设计，也是 `web/` dashboard 的界面设计参考（见文末「界面设计」）。
 
 ## 概述
 
-LoopX Agent System 是一个三层多 Agent 协作架构，通过统一消息总线将 **Manager（管家）**、**TaskRouter + Planner（编排器）**、**Worker（执行者）** 组织为一个可扩展的自主编程系统。
+Looper Agent System 是一个三层多 Agent 协作架构，通过统一消息总线将 **Manager（管家）**、**TaskRouter + Planner（编排器）**、**Worker（执行者）** 组织为一个可扩展的自主编程系统。
 
 用户通过任意接入渠道（Web、Telegram、Lark）提出需求，系统自动完成任务分解、并发执行、质量验证和结果汇报。
 
@@ -62,12 +62,12 @@ Task 是系统的一等实体，代表一个完整的用户需求。
 每个 Task 属于且只属于一个 Project。项目是任务的一个属性，任务在任何状态下都可以移到另一个项目。
 
 - 项目有名称、描述、可选的默认目录、可选的背景（`background`）和可选的 harness 覆盖（`planner_harness_prompt`、`worker_harness_prompt`）。名称去掉首尾空白后是 1–80 个字符，忽略大小写不能重名
-- 项目背景是这个项目的所有任务 agent 都该知道的内容，最多 10000 个字符，保存时去掉前后空行，`""` 表示清空。它加进这个项目的 Planner、Worker 和 Reviewer 的系统提示，不加给 Manager（Manager 面向所有项目）。三者的系统提示由 `loopx/agents/system_prompt.py` 统一拼装，共五层：先是 harness（见下一条）；再是 `agent_configs` 里可编辑的角色提示；背景不为空时接一段 `## Project: <名称>` 加背景；然后是任务段；最后是代码维护的契约（Planner 是 `REPLY_CONTRACT`，Worker 是 `WORK_CONTRACT`，Reviewer 是 `REVIEW_CONTRACT`），契约总在最后
-- **harness 与 role**：harness 是 agent 的性格与稳定性（工作原则、边界、沟通方式），role 是这类 agent 的职责，两者分开存，怎么改 harness 都不会让 agent 丢掉职责。harness 由 `loopx/agents/agent_settings.py` 统一解析：系统默认存在 Settings（`system_settings` 表；没有存时用仓库内置的公开通用版 `DEFAULT_HARNESS_PROMPT`，可一键恢复）；Manager 可以在 Agents 页覆盖（`agent_configs.manager.harness_prompt`）；Planner 和 Worker 只能在项目里覆盖（`planner_harness_prompt`、`worker_harness_prompt`）；Reviewer 跟随同一项目的 Worker；为空都表示继承系统默认。每段最多 20000 个字符。推荐的角色提示只写职责，原来夹在里面的原则和语气移进了默认 harness；未改过的角色提示行随推荐版升级，改过的保留，并新增 `reviewer` 行
-- **模型、effort 与环境变量**：Settings 里有全局默认模型（内置 `opus`）、可选的 effort（`low`、`medium`、`high`、`xhigh`、`max`，不设就不传）和最多 50 个非机密的环境变量。四类 agent 都传 `--model`（Agents 页上该 agent 的 `model` 优先），设了 effort 时传 `--effort`；环境变量加在 `loopx serve` 自身环境之上，名称须为 `[A-Z_][A-Z0-9_]*`，名称里带 `KEY`、`TOKEN`、`SECRET`、`PASSWORD`、`CREDENTIAL` 的拒收（值会显示在页面上，这只是防手滑，不是安全边界）。这些改动对下一次 Worker、Reviewer 运行生效；常驻的 Manager 和 Planner 在下一个 turn 比较启动命令、提示哈希、环境变量哈希和插件库哈希，变了就用 `--resume` 重启
-- **插件与 skill（能力目录与安装，RFC 决策 7、9）**：agent 加载的插件和 skill 先进**目录**，再**安装**才生效（`loopx/agents/library.py`、`loopx/agents/catalog.py`）。进库来源目前有两种：Settings 页的「Import from this machine」（之后是「Re-import」）只读地读取本机 Claude Code 配置（`$CLAUDE_CONFIG_DIR`，否则 `~/.claude`）里启用的插件（整个导入，连同其 skill、agent、命令和 hook）和 `skills/` 下的个人 skill，不读个人 hook、MCP、权限和记忆；以及项目里写的 skill（见下一条）。数据库是事实来源：`library_items` 存条目（类型、名称、来源 `origin`、所属项目、描述、版本、文件哈希、大小），`library_files` 存文件，`library_installs` 存安装（范围 `global` 或某个项目、角色是 manager、planner、worker、reviewer 的非空子集、启用开关；项目范围不含 manager，项目写的 skill 只能装在项目里）。重新导入只动从本机导入的条目：替换内容变了的、保留它们的安装，新条目不安装，本机已没有的连同安装删除。上限照旧：单个文件 2 MiB、二进制文件和指向条目外的链接不导入，单个条目 32 MiB 或 5000 个文件，整个库 128 MiB。每次运行加载启用的、含自己角色的全局安装和所在项目的安装（同一条目只加载一次），在 runtime root 的 `.local/library/<sha256>/` 下取只读副本，每个插件一个 `--plugin-dir`，项目写的 skill 链接进生成的 `project` 插件（`project:<skill>`），其他 skill 链接进 `personal` 插件（`personal:<skill>`）；这组参数由 `claude_cli.library_args` 统一生成、随启动参数下发。每次运行在 `metadata.library` 记下角色、项目、每个条目的插件和范围以及整组的哈希。**升级时已导入的条目一律不安装**，升级后不再加载，直到在 Settings 或项目页安装。代价照旧是上下文：3 个插件加 104 个个人 skill 全装时，Opus 上一次最小的 `--print` 运行首个请求从 15,674 token 增至 29,114 token
-- **项目知识**：项目可以挂载大块参考资料，Planner、Worker、Reviewer 按需读取，不塞进 prompt（`loopx/agents/knowledge.py`，RFC 第 6 节、决策 3）。每篇文档有标题、必填的一句话摘要和来源：手动录入（`text`）、上传文本文件（`upload`，JSON 里用 base64 传）、引用项目默认目录里的文件（`path`，存相对路径，实时读取）；不支持 URL。录入和上传的内容存进 `project_documents`；不是 UTF-8 或含 NUL 字节的内容按二进制拒绝；引用的路径保存时必须存在、是普通文件、是文本，且跟随链接后仍在默认目录里，`..`、目录外的绝对路径和指向目录外的链接都拒绝。上限（超限返回 400 并写明上限）：单篇 2 MiB；每个项目 100 篇、存储内容 50 MiB（引用路径不计入）；拼出的索引 4,000 个字符。同一项目的增删改在持有项目行锁的事务里做，并发新增不会一起越过上限。每次运行（Manager 除外）读取项目的文档：录入和上传的文档一起写成只读文件，每组文档一个目录，按文件名和内容的哈希命名：`<runtime_root>/.local/projects/<project_id>/knowledge/<组哈希>/<文件名>`（重名的加 `-2`、`-3`）；L3 在背景之后加 `## Project knowledge` 索引，每个目录写一次（`In <目录>:`），其下每篇一行 `- <标题>: <摘要> (<相对该目录的路径>)`，已不存在的引用文件标为 `(missing: <路径>)`（Claude Code 只按工作目录解析相对路径，不按 `--add-dir` 解析，所以由 agent 拼接）；启动参数用 `--add-dir` 挂载这组文档的目录，项目有引用路径且任务目录不是项目目录时也挂载项目目录。这组参数由 `claude_cli.knowledge_args` 生成、随 `Launch` 下发，三类 agent 不会不一致。改动立即生效：下一个 Worker、Reviewer 读到新索引，常驻的 Planner 下一轮因索引或挂载目录变化用 `--resume` 重启；引用文件的内容 agent 打开时才读，改文件不需要重启。`prompt_layers.project` 记下索引的 `knowledge_sha256` 和文档数 `knowledge_documents`，读不到时记 `knowledge_error` 并照常运行。索引每行只带相对路径，篇幅短的文档先到 100 篇的上限（原来每行带约 150 个字符的绝对路径，15 到 25 篇就占满索引）
-- **项目 skill**：项目可以写自己的 Claude Code skill，不往项目目录里写任何东西（`loopx/agents/project_skills.py`，RFC 第 6 节和决策 9）。每个是一个来源为 `project`、属于这个项目的目录条目（删项目时连带删除）：名称（小写 slug，在项目写的 skill 里唯一）、一行描述和一个 `SKILL.md`（frontmatter 由名称和描述生成，正文不带 frontmatter）。写好后自动安装到本项目，给 Planner、Worker、Reviewer；也可以安装到其他项目，不能全局安装。所有项目 skill 都在 `project` 插件里，Claude Code 里叫 `project:<名称>`，所以同一个项目里不能有两个同名的项目 skill（安装、新建、改名时冲突返回 409）。上限（超限返回 400 并写明上限）：名称 64 个字符、描述 1,024 个字符、正文 64 KiB、每个项目写 20 个。同一项目的增删改持有项目行锁。M4 的 `project_skills` 表在升级时等价迁入目录（同样的 id、项目、名称、描述、三个任务角色和启用状态）后删除
+- 项目背景是这个项目的所有任务 agent 都该知道的内容，最多 10000 个字符，保存时去掉前后空行，`""` 表示清空。它加进这个项目的 Planner、Worker 和 Reviewer 的系统提示，不加给 Manager（Manager 面向所有项目）。三者的系统提示由 `looper/agents/system_prompt.py` 统一拼装，共五层：先是 harness（见下一条）；再是 `agent_configs` 里可编辑的角色提示；背景不为空时接一段 `## Project: <名称>` 加背景；然后是任务段；最后是代码维护的契约（Planner 是 `REPLY_CONTRACT`，Worker 是 `WORK_CONTRACT`，Reviewer 是 `REVIEW_CONTRACT`），契约总在最后
+- **harness 与 role**：harness 是 agent 的性格与稳定性（工作原则、边界、沟通方式），role 是这类 agent 的职责，两者分开存，怎么改 harness 都不会让 agent 丢掉职责。harness 由 `looper/agents/agent_settings.py` 统一解析：系统默认存在 Settings（`system_settings` 表；没有存时用仓库内置的公开通用版 `DEFAULT_HARNESS_PROMPT`，可一键恢复）；Manager 可以在 Agents 页覆盖（`agent_configs.manager.harness_prompt`）；Planner 和 Worker 只能在项目里覆盖（`planner_harness_prompt`、`worker_harness_prompt`）；Reviewer 跟随同一项目的 Worker；为空都表示继承系统默认。每段最多 20000 个字符。推荐的角色提示只写职责，原来夹在里面的原则和语气移进了默认 harness；未改过的角色提示行随推荐版升级，改过的保留，并新增 `reviewer` 行
+- **模型、effort 与环境变量**：Settings 里有全局默认模型（内置 `opus`）、可选的 effort（`low`、`medium`、`high`、`xhigh`、`max`，不设就不传）和最多 50 个非机密的环境变量。四类 agent 都传 `--model`（Agents 页上该 agent 的 `model` 优先），设了 effort 时传 `--effort`；环境变量加在 `looper serve` 自身环境之上，名称须为 `[A-Z_][A-Z0-9_]*`，名称里带 `KEY`、`TOKEN`、`SECRET`、`PASSWORD`、`CREDENTIAL` 的拒收（值会显示在页面上，这只是防手滑，不是安全边界）。这些改动对下一次 Worker、Reviewer 运行生效；常驻的 Manager 和 Planner 在下一个 turn 比较启动命令、提示哈希、环境变量哈希和插件库哈希，变了就用 `--resume` 重启
+- **插件与 skill（能力目录与安装，RFC 决策 7、9）**：agent 加载的插件和 skill 先进**目录**，再**安装**才生效（`looper/agents/library.py`、`looper/agents/catalog.py`）。进库来源目前有两种：Settings 页的「Import from this machine」（之后是「Re-import」）只读地读取本机 Claude Code 配置（`$CLAUDE_CONFIG_DIR`，否则 `~/.claude`）里启用的插件（整个导入，连同其 skill、agent、命令和 hook）和 `skills/` 下的个人 skill，不读个人 hook、MCP、权限和记忆；以及项目里写的 skill（见下一条）。数据库是事实来源：`library_items` 存条目（类型、名称、来源 `origin`、所属项目、描述、版本、文件哈希、大小），`library_files` 存文件，`library_installs` 存安装（范围 `global` 或某个项目、角色是 manager、planner、worker、reviewer 的非空子集、启用开关；项目范围不含 manager，项目写的 skill 只能装在项目里）。重新导入只动从本机导入的条目：替换内容变了的、保留它们的安装，新条目不安装，本机已没有的连同安装删除。上限照旧：单个文件 2 MiB、二进制文件和指向条目外的链接不导入，单个条目 32 MiB 或 5000 个文件，整个库 128 MiB。每次运行加载启用的、含自己角色的全局安装和所在项目的安装（同一条目只加载一次），在 runtime root 的 `.local/library/<sha256>/` 下取只读副本，每个插件一个 `--plugin-dir`，项目写的 skill 链接进生成的 `project` 插件（`project:<skill>`），其他 skill 链接进 `personal` 插件（`personal:<skill>`）；这组参数由 `claude_cli.library_args` 统一生成、随启动参数下发。每次运行在 `metadata.library` 记下角色、项目、每个条目的插件和范围以及整组的哈希。**升级时已导入的条目一律不安装**，升级后不再加载，直到在 Settings 或项目页安装。代价照旧是上下文：3 个插件加 104 个个人 skill 全装时，Opus 上一次最小的 `--print` 运行首个请求从 15,674 token 增至 29,114 token
+- **项目知识**：项目可以挂载大块参考资料，Planner、Worker、Reviewer 按需读取，不塞进 prompt（`looper/agents/knowledge.py`，RFC 第 6 节、决策 3）。每篇文档有标题、必填的一句话摘要和来源：手动录入（`text`）、上传文本文件（`upload`，JSON 里用 base64 传）、引用项目默认目录里的文件（`path`，存相对路径，实时读取）；不支持 URL。录入和上传的内容存进 `project_documents`；不是 UTF-8 或含 NUL 字节的内容按二进制拒绝；引用的路径保存时必须存在、是普通文件、是文本，且跟随链接后仍在默认目录里，`..`、目录外的绝对路径和指向目录外的链接都拒绝。上限（超限返回 400 并写明上限）：单篇 2 MiB；每个项目 100 篇、存储内容 50 MiB（引用路径不计入）；拼出的索引 4,000 个字符。同一项目的增删改在持有项目行锁的事务里做，并发新增不会一起越过上限。每次运行（Manager 除外）读取项目的文档：录入和上传的文档一起写成只读文件，每组文档一个目录，按文件名和内容的哈希命名：`<runtime_root>/.local/projects/<project_id>/knowledge/<组哈希>/<文件名>`（重名的加 `-2`、`-3`）；L3 在背景之后加 `## Project knowledge` 索引，每个目录写一次（`In <目录>:`），其下每篇一行 `- <标题>: <摘要> (<相对该目录的路径>)`，已不存在的引用文件标为 `(missing: <路径>)`（Claude Code 只按工作目录解析相对路径，不按 `--add-dir` 解析，所以由 agent 拼接）；启动参数用 `--add-dir` 挂载这组文档的目录，项目有引用路径且任务目录不是项目目录时也挂载项目目录。这组参数由 `claude_cli.knowledge_args` 生成、随 `Launch` 下发，三类 agent 不会不一致。改动立即生效：下一个 Worker、Reviewer 读到新索引，常驻的 Planner 下一轮因索引或挂载目录变化用 `--resume` 重启；引用文件的内容 agent 打开时才读，改文件不需要重启。`prompt_layers.project` 记下索引的 `knowledge_sha256` 和文档数 `knowledge_documents`，读不到时记 `knowledge_error` 并照常运行。索引每行只带相对路径，篇幅短的文档先到 100 篇的上限（原来每行带约 150 个字符的绝对路径，15 到 25 篇就占满索引）
+- **项目 skill**：项目可以写自己的 Claude Code skill，不往项目目录里写任何东西（`looper/agents/project_skills.py`，RFC 第 6 节和决策 9）。每个是一个来源为 `project`、属于这个项目的目录条目（删项目时连带删除）：名称（小写 slug，在项目写的 skill 里唯一）、一行描述和一个 `SKILL.md`（frontmatter 由名称和描述生成，正文不带 frontmatter）。写好后自动安装到本项目，给 Planner、Worker、Reviewer；也可以安装到其他项目，不能全局安装。所有项目 skill 都在 `project` 插件里，Claude Code 里叫 `project:<名称>`，所以同一个项目里不能有两个同名的项目 skill（安装、新建、改名时冲突返回 409）。上限（超限返回 400 并写明上限）：名称 64 个字符、描述 1,024 个字符、正文 64 KiB、每个项目写 20 个。同一项目的增删改持有项目行锁。M4 的 `project_skills` 表在升级时等价迁入目录（同样的 id、项目、名称、描述、三个任务角色和启用状态）后删除
 - 背景改了立即生效：系统提示每次构建时都通过任务读当前项目（任务移到别的项目后读新项目）。Planner 每个 turn 重建系统提示，变了就用 `--resume` 重启它的 Claude；之后启动的 Worker 和 Reviewer 用新背景；已经在跑的 Worker 不受影响。第一次用上背景时 activity 记一条 `Project background applied (N chars)`，Planner 的背景变化或被清空时再记 `changed` 或 `removed`，不写入原文
 - 背景只是参考信息，读不到不影响执行：Worker 和 Reviewer 读项目失败（数据库出错、找不到项目）时照常执行，只是不带项目段，并记一条 `Warning: the project background was unavailable ...` 的 error activity；Planner 读失败时沿用上次读到的项目，并写一条警告日志
 - 新建任务时，要么选一个已有项目（`project_id`），要么在同一个请求里新建项目（`project`），两者必须且只能给一个。新建项目和任务在同一个数据库事务里完成
@@ -114,13 +114,13 @@ Task 是系统的一等实体，代表一个完整的用户需求。
   - Claude 进程中途退出：这个 turn 失败，下一个 turn 用 `--resume <session_id>` 起新进程，session id 存在 Planner 的计划文件里
 - **结果**：任务完成时 `tasks.result_summary` 是最后一个 accept 的步骤给出的 summary（没有时用自动生成的逐步摘要）；任务失败时 `tasks.error` 是 Planner 的失败摘要
 - **配置**：`agent_configs` 的 `planner` 行每个 turn 读一次。`system_prompt` 是可编辑的角色提示，代码在前面放 harness，在后面接上项目段、任务段（任务 id、项目名和简介、工作目录、任务需求）和回复契约；每个 turn 的消息只带变化的内容（计划进度、结果、聊天、监督观察），不再重复任务需求；`timeout_seconds` 限制每个 turn（默认 1200 秒，0 表示不限），超时的 turn 失败并杀掉 Claude；`max_turns` 大于 0 时传 `--max-turns`，`model` 有值时用它，否则用 Settings 的默认模型。命令、系统提示的哈希或 Settings 环境变量的哈希变了（包括项目背景、harness、模型变了），下一个 turn 用 `--resume` 重启 Claude，并用新的系统提示（`--system-prompt-snapshot off`，否则 Claude Code 续接时沿用会话第一次请求的旧提示）。数据库里还是旧默认提示的会在启动时换成新默认，改过的保留
-- **记录**：每个 turn 都会产生 Claude 费用，各记一条 `llm_records`（agent_id 为 `planner-<task_id>`，带这个 turn 自己的花费和进程 `pid`）；决定以简短摘要写进 activity。Manager、Planner、Worker、Reviewer 的每次运行都在 `llm_records.metadata` 记下 LoopX 追加的系统提示（`system_prompt`）、它的 `system_prompt_sha256` 和各层来源 `prompt_layers`（harness 的来源与哈希、角色、项目、任务、契约、隔离参数版本），项目层还记下知识索引的哈希和文档数，以及 `model_choice`（请求的模型、来源、effort）、Settings 环境变量的名称（值只记哈希）和加载的插件库条目（`library`），`metadata.command` 仍是完整 argv；系统提示文件按哈希存在 runtime root 的 `.local/prompts/` 下，只写一次。会话历史页的每条运行有可折叠的「System prompt」段，标题显示长度、短哈希和 `isolated` 标记，展开后先逐层列出来源（harness 来源、角色是推荐版还是改过的、项目和背景版本、任务、契约），再是模型及其来源、环境变量名称，最后是原文；不含 Claude Code 内置的系统提示。另有可折叠的「Plugins & skills」段，标题显示加载了几个插件、几个 skill 和库的短哈希，展开后逐条列出名称和版本哈希。Chat 页的 Planner 和 Worker/Reviewer 视图复用同一个组件
+- **记录**：每个 turn 都会产生 Claude 费用，各记一条 `llm_records`（agent_id 为 `planner-<task_id>`，带这个 turn 自己的花费和进程 `pid`）；决定以简短摘要写进 activity。Manager、Planner、Worker、Reviewer 的每次运行都在 `llm_records.metadata` 记下 Looper 追加的系统提示（`system_prompt`）、它的 `system_prompt_sha256` 和各层来源 `prompt_layers`（harness 的来源与哈希、角色、项目、任务、契约、隔离参数版本），项目层还记下知识索引的哈希和文档数，以及 `model_choice`（请求的模型、来源、effort）、Settings 环境变量的名称（值只记哈希）和加载的插件库条目（`library`），`metadata.command` 仍是完整 argv；系统提示文件按哈希存在 runtime root 的 `.local/prompts/` 下，只写一次。会话历史页的每条运行有可折叠的「System prompt」段，标题显示长度、短哈希和 `isolated` 标记，展开后先逐层列出来源（harness 来源、角色是推荐版还是改过的、项目和背景版本、任务、契约），再是模型及其来源、环境变量名称，最后是原文；不含 Claude Code 内置的系统提示。另有可折叠的「Plugins & skills」段，标题显示加载了几个插件、几个 skill 和库的短哈希，展开后逐条列出名称和版本哈希。Chat 页的 Planner 和 Worker/Reviewer 视图复用同一个组件
 - **不限权限**（RFC 决策 8）：四类 agent 都开放全部工具、跳过权限确认。这个参数只在一处定义（`claude_cli.permission_args`，即 `--dangerously-skip-permissions`），由 `agent_settings.Launch.args` 和插件库参数一起放进每个 agent 的启动参数，四类 agent 不会不一致；启动命令里不再有 `--tools`、`--allowedTools`、`--permission-mode`。职责边界改由 role prompt 和代码契约约束：推荐的 Planner role prompt 写明它负责规划和决策、不亲自修改文件，具体改动都作为步骤交给 Worker。Manager 因此能在本机执行任何命令，所以飞书、Telegram 渠道必须配置发送者白名单（见「接入渠道」）。用 Claude Code 2.1.285 核实：`--print` 加隔离参数和 `--plugin-dir` 时，init 事件的 `permissionMode` 为 `bypassPermissions`，Bash、Write 和声明了 `allowed-tools` 的插件 skill 都不再被拒绝；隔离用的 `--settings` 不影响权限
-- **不加载操作者的个人配置**：四类 agent 的启动命令都带同一组隔离参数（`claude_cli.isolation_args`）：`--setting-sources project`、`--strict-mcp-config`，以及 `--settings` 里的 `autoMemoryEnabled: false` 和 `claudeMdExcludes`（排除工作目录所在仓库以上各级目录的 `CLAUDE.md`、`.claude/CLAUDE.md`、`.claude/rules/`，以及 `~/.claude` 下的用户记忆）。agent 只看到 LoopX 拼装的内容和项目仓库自己的 `CLAUDE.md`；操作者的 `~/.claude/CLAUDE.md`、用户设置、hook、个人 skill、插件、自定义 agent、输出风格、MCP 和自动记忆都不加载，登录不受影响；插件和 skill 只经由上面的插件库进来。核实过程见 [Agent 系统架构](architecture/agent-system.md#what-an-agents-claude-code-loads)
+- **不加载操作者的个人配置**：四类 agent 的启动命令都带同一组隔离参数（`claude_cli.isolation_args`）：`--setting-sources project`、`--strict-mcp-config`，以及 `--settings` 里的 `autoMemoryEnabled: false` 和 `claudeMdExcludes`（排除工作目录所在仓库以上各级目录的 `CLAUDE.md`、`.claude/CLAUDE.md`、`.claude/rules/`，以及 `~/.claude` 下的用户记忆）。agent 只看到 Looper 拼装的内容和项目仓库自己的 `CLAUDE.md`；操作者的 `~/.claude/CLAUDE.md`、用户设置、hook、个人 skill、插件、自定义 agent、输出风格、MCP 和自动记忆都不加载，登录不受影响；插件和 skill 只经由上面的插件库进来。核实过程见 [Agent 系统架构](architecture/agent-system.md#what-an-agents-claude-code-loads)
 
 ### 花费与上下文
 
-长程运行的成本和上下文增长都可以看到（RFC 第 8 节，M2；`loopx/agents/run_usage.py`）。每次运行（`llm_records`）记录以下内容：
+长程运行的成本和上下文增长都可以看到（RFC 第 8 节，M2；`looper/agents/run_usage.py`）。每次运行（`llm_records`）记录以下内容：
 
 - **自身的花费和 token**：`cost_usd`、`input_tokens`、`output_tokens`、`cache_read_tokens`、`cache_creation_tokens`。Claude Code 在每个 `result` 里报告会话的累计值：`total_cost_usd` 和 `modelUsage`，后者覆盖所有请求，包括压缩时的摘要请求和子 agent 的请求。一次运行自己的份额是累计值的增量。`result.usage` 只算本轮主循环的请求，漏掉了压缩和子 agent，所以不用它（只在没有 `modelUsage` 时兜底）。
   - Worker 和 Reviewer 一次运行就是一个进程，增量就是进程的累计值。
@@ -184,9 +184,9 @@ Task 是系统的一等实体，代表一个完整的用户需求。
 
 ## 接入渠道
 
-Web 始终开启。Telegram 和 Lark 默认内置，不需要任何启动参数：在控制台 **Settings** 页启用并编辑配置，配置存进数据库 `channel_configs` 表。服务启动时读取一次，改完配置要重启 `loopx serve` 才生效。
+Web 始终开启。Telegram 和 Lark 默认内置，不需要任何启动参数：在控制台 **Settings** 页启用并编辑配置，配置存进数据库 `channel_configs` 表。服务启动时读取一次，改完配置要重启 `looper serve` 才生效。
 
-**发送者白名单**（RFC 决策 8，`loopx/agents/channels/allowlist.py`）：Manager 能在本机执行任何命令，所以 Telegram 和飞书只把白名单里的发送者的消息交给 Manager。不在名单里的消息不会到达 Manager：只记一条日志（渠道和发送者 ID，不含消息内容），不回复。白名单为空或格式不对的渠道不启动，启动日志和 Settings 页（接口的 `start_problem`）写明原因。每个名单最多 100 个 ID；接口逐个校验，按 JSON 数组保存，格式不对返回 400 并指出第一个错误的 ID。Settings 页每个渠道有「Allowed senders」列表，可以增删，输入时就校验格式，空行和重复会标出。Web 渠道不受影响：接口只接受本机访问。
+**发送者白名单**（RFC 决策 8，`looper/agents/channels/allowlist.py`）：Manager 能在本机执行任何命令，所以 Telegram 和飞书只把白名单里的发送者的消息交给 Manager。不在名单里的消息不会到达 Manager：只记一条日志（渠道和发送者 ID，不含消息内容），不回复。白名单为空或格式不对的渠道不启动，启动日志和 Settings 页（接口的 `start_problem`）写明原因。每个名单最多 100 个 ID；接口逐个校验，按 JSON 数组保存，格式不对返回 400 并指出第一个错误的 ID。Settings 页每个渠道有「Allowed senders」列表，可以增删，输入时就校验格式，空行和重复会标出。Web 渠道不受影响：接口只接受本机访问。
 
 数据库里只存环境变量的**名字**，不存密钥本身；密钥放在对应的环境变量或仓库根目录的 `.env` 里。某个渠道启动失败只记日志，不影响 Web 控制台。
 
@@ -216,7 +216,7 @@ Web 始终开启。Telegram 和 Lark 默认内置，不需要任何启动参数�
 - 支持 `/start`、`/status`、`/help` 命令
 - 消息自动分段（4000 字符限制）
 - Settings 配置项：
-  - `bot_token_env`：存放 Bot token 的环境变量名，默认 `LOOPX_TELEGRAM_BOT_TOKEN`
+  - `bot_token_env`：存放 Bot token 的环境变量名，默认 `LOOPER_TELEGRAM_BOT_TOKEN`
   - `allowed_user_ids`：发送者白名单，Telegram 的数字用户 ID（负数是群或频道，不是发送者）；以前存的逗号分隔字符串仍然能读。`LOOPX_TELEGRAM_ALLOWED_USERS` 不再生效
 - 名单外的发送者发 `/start`、`/status`、`/help` 也得不到回复
 
@@ -252,10 +252,10 @@ Web 始终开启。Telegram 和 Lark 默认内置，不需要任何启动参数�
 
 ```bash
 # 启动 Agent 系统（在源码目录下运行）
-uv run loopx serve
+uv run looper serve
 
 # 或 Python 调用
-from loopx.agents.serve import serve_agent
+from looper.agents.serve import serve_agent
 serve_agent(host="127.0.0.1", port=8767)
 ```
 
@@ -275,7 +275,7 @@ Telegram 和 Lark 不需要启动参数，见「接入渠道」。
 ## 目录结构
 
 ```
-loopx/agents/
+looper/agents/
 ├── bus.py           # MessageBus + JSONL Journal
 ├── message.py       # MessageEnvelope 协议 + 地址常量
 ├── supervisor.py    # AgentSupervisor 生命周期管理

@@ -1,6 +1,6 @@
 """Project skills against a real PostgreSQL: catalog items a project writes, the API, and what a run loads.
 
-Runs only when LOOPX_TEST_DATABASE_URL points at a disposable database. Each
+Runs only when LOOPER_TEST_DATABASE_URL points at a disposable database. Each
 test works in a new schema of its own, dropped afterwards.
 """
 
@@ -19,15 +19,15 @@ from typing import Any
 
 import pytest
 
-DSN = os.environ.get("LOOPX_TEST_DATABASE_URL")
-pytestmark = pytest.mark.skipif(not DSN, reason="LOOPX_TEST_DATABASE_URL is not set")
+DSN = os.environ.get("LOOPER_TEST_DATABASE_URL")
+pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
 
 @asynccontextmanager
 async def _fresh_schema() -> AsyncIterator[Any]:
     import asyncpg
 
-    schema = f"loopx_test_{uuid.uuid4().hex[:12]}"
+    schema = f"looper_test_{uuid.uuid4().hex[:12]}"
     admin = await asyncpg.connect(DSN)
     await admin.execute(f'CREATE SCHEMA "{schema}"')
     pool = await asyncpg.create_pool(DSN, min_size=1, max_size=3, server_settings={"search_path": schema})
@@ -41,7 +41,7 @@ async def _fresh_schema() -> AsyncIterator[Any]:
 
 def _run(test: Callable[[Any], Awaitable[None]], monkeypatch: pytest.MonkeyPatch) -> None:
     """Run ``test(pool)`` on a new schema that is also the server's pool."""
-    from loopx.db import connection
+    from looper.db import connection
 
     async def _main() -> None:
         async with _fresh_schema() as pool:
@@ -64,8 +64,8 @@ class _Writer:
 
 
 async def _call(root: Path, method: str, path: str, body: Any = None) -> tuple[int, Any]:
-    from loopx.agents.http_server import AgentHTTPServer
-    from loopx.agents.tiers.task import TaskRouter
+    from looper.agents.http_server import AgentHTTPServer
+    from looper.agents.tiers.task import TaskRouter
 
     server = AgentHTTPServer(web_adapter=SimpleNamespace(), task_router=TaskRouter(runtime_root=root),
                              supervisor=SimpleNamespace(), runtime_root=root)
@@ -87,8 +87,8 @@ async def _items(pool: Any) -> dict[str, dict[str, Any]]:
 def test_names_are_unique_per_owner_and_a_skill_goes_with_its_project(monkeypatch: pytest.MonkeyPatch) -> None:
     import asyncpg
 
-    from loopx.agents import project_skills
-    from loopx.db import connection, projects
+    from looper.agents import project_skills
+    from looper.db import connection, projects
 
     async def _test(pool: Any) -> None:
         await connection.ensure_schema(pool)  # applying the schema again changes nothing
@@ -114,9 +114,9 @@ def test_names_are_unique_per_owner_and_a_skill_goes_with_its_project(monkeypatc
 def test_the_api_writes_a_catalog_item_installed_in_the_project_then_changes_and_deletes_it(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
-    from loopx.agents.library import item_sha256
-    from loopx.agents.project_skills import skill_file
-    from loopx.db import projects
+    from looper.agents.library import item_sha256
+    from looper.agents.project_skills import skill_file
+    from looper.db import projects
 
     async def _test(pool: Any) -> None:
         project = await projects.create_project(name="calc", pool=pool)
@@ -164,7 +164,7 @@ def test_the_api_writes_a_catalog_item_installed_in_the_project_then_changes_and
 
 
 def test_a_skill_is_read_and_changed_through_its_own_project_only(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    from loopx.db import projects
+    from looper.db import projects
 
     async def _test(pool: Any) -> None:
         project = await projects.create_project(name="calc", pool=pool)
@@ -189,7 +189,7 @@ def test_a_skill_installed_in_another_project_keeps_one_name_per_project(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
     """Every project skill loads as project:<name>, so a project cannot hold two of one name."""
-    from loopx.db import projects
+    from looper.db import projects
 
     async def _test(pool: Any) -> None:
         calc = await projects.create_project(name="calc", pool=pool)
@@ -227,8 +227,8 @@ def test_a_skill_installed_in_another_project_keeps_one_name_per_project(
 def test_concurrent_adds_cannot_both_pass_the_count_cap_or_take_one_name(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from loopx.agents import project_skills
-    from loopx.db import projects
+    from looper.agents import project_skills
+    from looper.db import projects
 
     async def _test(pool: Any) -> None:
         project = await projects.create_project(name="calc", pool=pool)
@@ -251,9 +251,9 @@ def test_concurrent_adds_cannot_both_pass_the_count_cap_or_take_one_name(
 def test_a_run_loads_only_the_skills_installed_and_enabled_in_its_project(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
-    from loopx.agents import project_skills
-    from loopx.agents.library import load_installed
-    from loopx.db import projects
+    from looper.agents import project_skills
+    from looper.agents.library import load_installed
+    from looper.db import projects
 
     async def _test(pool: Any) -> None:
         calc = await projects.create_project(name="calc", pool=pool)

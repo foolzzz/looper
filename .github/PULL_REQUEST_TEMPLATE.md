@@ -18,7 +18,7 @@ options, API fields or defaults. Write "None" when there are none. -->
 <!-- Facts, not a self-assessment. For each check: the command or procedure
 (repository-relative), the commit it ran on, and the result. Include failures,
 skips and anything not run, with the reason. Unit tests do not prove the real
-entry point: say how `loopx serve`, the database, the real Claude CLI or the
+entry point: say how `looper serve`, the database, the real Claude CLI or the
 browser were exercised when the change touches them. -->
 
 ## Checklist

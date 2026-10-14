@@ -21,6 +21,7 @@ output/playwright/
 # Project-local private state. Keep real project paths, task ids, tokens,
 # internal logs, and active goal state outside the public repository.
 .local/
+.looper/
 .loopx/
 .goal-harness/
 .goal-wrapper.local/
@@ -38,4 +39,4 @@ logs/
 .env.local
 
 # Frontend delivery artifacts are built and qualified from source.
-/loopx/web/dashboard/
+/looper/web/dashboard/

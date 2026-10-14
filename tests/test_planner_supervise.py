@@ -14,7 +14,7 @@ from typing import Any
 
 import pytest
 
-from loopx.agents.tiers.planner import PlannerSettings
+from looper.agents.tiers.planner import PlannerSettings
 
 from tests.test_planner_agent import Harness, always, decide, drive, plan, reply, step
 
@@ -70,7 +70,7 @@ def test_kill_then_retry_redispatches_the_step(planner_claude: Any) -> None:
 
 def test_the_timer_posts_a_tick_while_a_worker_runs(planner_claude: Any, monkeypatch: pytest.MonkeyPatch) -> None:
     """With a short interval, the Planner supervises a held Worker on its own; an empty review leaves it running."""
-    from loopx.agents.tiers import planner as planner_module
+    from looper.agents.tiers import planner as planner_module
 
     async def fast_settings() -> PlannerSettings:
         return PlannerSettings(

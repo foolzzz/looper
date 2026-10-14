@@ -1,11 +1,12 @@
-"""Refuse test access to the real user LoopX roots.
+"""Refuse test access to the real user Looper roots.
 
-Tests must keep LoopX state under temporary directories. The owner's live
-roots may be in use while the suite runs: the runtime root (``~/.loopx``, which
-also holds the home registry and machine-scoped leases such as the Lark event
-consumer locks under ``lark-consumers/``) by a running dispatcher or chat
-server. The pre-``~/.loopx`` runtime root ``~/.codex/loopx`` stays protected so
-that code still writing there fails here instead of on the owner's machine.
+Tests must keep Looper state under temporary directories. The owner's live
+roots may be in use while the suite runs: the runtime root (``~/.looper``,
+which also holds machine-scoped leases such as the Lark event consumer locks
+under ``lark-consumers/``) by a running server. The runtime roots from before
+it, ``~/.loopx`` (before the rename; a link to ``~/.looper`` once moved) and
+``~/.codex/loopx``, stay protected so that code still using them fails here
+instead of on the owner's machine.
 This guard never inspects any of these directories. It installs a
 Python audit hook that checks the path arguments of the audited filesystem
 events listed in ``_PATH_ARGUMENTS`` (``open``, ``os.mkdir``, ``os.remove``,
@@ -21,9 +22,9 @@ shim next to this module installs the hook in those subprocesses.
 
 Not covered:
 
-- other LoopX state locations, such as a project's own ``.loopx`` directory or
+- other Looper state locations, such as a project's own ``.looper`` directory or
   a runtime root passed by path, unless it is the ambient
-  ``LOOPX_RUNTIME_ROOT``;
+  ``LOOPER_RUNTIME_ROOT``;
 - metadata checks that raise no audit event: ``os.stat``, ``os.lstat``,
   ``os.access`` and ``os.readlink``, hence ``Path.exists()`` and
   ``Path.stat()``;
@@ -52,8 +53,8 @@ import sys
 from collections.abc import Iterator
 from pathlib import Path
 
-PROTECTED_ROOTS_ENV = "PYTEST_LOOPX_PROTECTED_RUNTIME_ROOTS"
-REPORT_PATH_ENV = "PYTEST_LOOPX_RUNTIME_ROOT_GUARD_REPORT"
+PROTECTED_ROOTS_ENV = "PYTEST_LOOPER_PROTECTED_RUNTIME_ROOTS"
+REPORT_PATH_ENV = "PYTEST_LOOPER_RUNTIME_ROOT_GUARD_REPORT"
 
 # Audited event -> positions of the path arguments to check. Reads count too: a
 # test that reads the owner's live state is not hermetic either. os.symlink is
@@ -116,12 +117,13 @@ _reporting = False
 
 
 def legacy_home_roots(home: str | os.PathLike[str]) -> tuple[str, ...]:
-    """Return the retired LoopX runtime roots under ``home``: ``~/.codex/loopx``.
+    """Return the retired runtime roots under ``home``: ``~/.loopx`` (before the rename) and ``~/.codex/loopx``.
 
-    The current roots come from ``loopx.paths``; this module must not import it.
+    The current roots come from ``looper.paths``; this module must not import it.
     """
 
-    return (os.path.join(os.path.abspath(os.fspath(home)), ".codex", "loopx"),)
+    home = os.path.abspath(os.fspath(home))
+    return (os.path.join(home, ".loopx"), os.path.join(home, ".codex", "loopx"))
 
 
 def configure(protected_roots: list[str], report_path: str) -> None:
@@ -215,7 +217,7 @@ def take_violations(
 
 
 _FIX_HINT = (
-    "Keep LoopX state under tmp_path: give the registry a temporary "
+    "Keep Looper state under tmp_path: give the registry a temporary "
     "'common_runtime_root', pass --runtime-root / runtime_root, or set HOME to "
     "a temporary directory (monkeypatch.setenv for code that resolves "
     "Path.home(), env= for CLI subprocesses)."
@@ -229,7 +231,7 @@ def _origin(record: dict[str, object]) -> str:
 
 
 def describe(nodeid: str, violations: list[dict[str, object]]) -> str:
-    lines = [f"{nodeid} used a real LoopX root instead of a temporary one:"]
+    lines = [f"{nodeid} used a real Looper root instead of a temporary one:"]
     for violation in violations[:10]:
         lines.append(f"  - {violation.get('event')} {violation.get('path')} ({_origin(violation)})")
     if len(violations) > 10:
@@ -240,7 +242,7 @@ def describe(nodeid: str, violations: list[dict[str, object]]) -> str:
 
 def describe_unattributed(records: list[dict[str, object]]) -> str:
     lines = [
-        f"{len(records)} refused access(es) to a real LoopX root could not "
+        f"{len(records)} refused access(es) to a real Looper root could not "
         "be charged to the test that was running when they were read:"
     ]
     for record in records[:20]:
@@ -333,6 +335,6 @@ def _refuse(event: str, path: str, root: str) -> None:
         _reporting = False
     raise PermissionError(
         errno.EACCES,
-        f"test guard refused {event} under the real LoopX root {root}",
+        f"test guard refused {event} under the real Looper root {root}",
         path,
     )

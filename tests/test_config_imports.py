@@ -1,6 +1,6 @@
 """Configuration imports through the dashboard's API: a streamed upload with its own cap, a preview, then apply.
 
-The tests that preview or apply need PostgreSQL (LOOPX_TEST_DATABASE_URL); each
+The tests that preview or apply need PostgreSQL (LOOPER_TEST_DATABASE_URL); each
 works in new schemas of its own, dropped afterwards. The server is a real
 ``AgentHTTPServer`` on a free port, spoken to over a socket.
 """
@@ -19,11 +19,12 @@ from typing import Any
 
 import pytest
 
-from loopx.agents import config_imports
-from loopx.agents.http_server import CONFIG_IMPORTS_PATH, REQUEST_BODY_MAX_BYTES, AgentHTTPServer
+from looper import __version__
+from looper.agents import config_imports
+from looper.agents.http_server import CONFIG_IMPORTS_PATH, REQUEST_BODY_MAX_BYTES, AgentHTTPServer
 from tests.test_catalog_db import DSN
 
-needs_db = pytest.mark.skipif(not DSN, reason="LOOPX_TEST_DATABASE_URL is not set")
+needs_db = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 UNKNOWN = "cfgimp-0123456789abcdef"
 
 
@@ -94,10 +95,10 @@ def test_another_site_cannot_upload(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize(("body", "error"), [
     (b"", "the request holds no file"),
-    (b"PK\x03\x04 a zip", "the uploaded file is not a LoopX configuration file"),
-    (b"\xff\xfe{}", "the uploaded file is not a LoopX configuration file"),
-    (b"[]", "is not a loopx-config/v1 file (format: None)"),
-    (b'{"format": "loopx-config/v2"}', "is not a loopx-config/v1 file (format: 'loopx-config/v2')"),
+    (b"PK\x03\x04 a zip", "the uploaded file is not a Looper configuration file"),
+    (b"\xff\xfe{}", "the uploaded file is not a Looper configuration file"),
+    (b"[]", "is not a looper-config/v1 file (format: None)"),
+    (b'{"format": "looper-config/v2"}', "is not a looper-config/v1 file (format: 'looper-config/v2')"),
     (b'{"format": "loopx-config/v1", "catalog": {}}', "catalog must be a JSON list"),
 ], ids=["empty", "not-json", "not-utf8", "no-format", "newer-version", "bad-section"])
 def test_a_file_that_is_not_a_configuration_file_is_refused_and_removed(
@@ -153,8 +154,8 @@ async def _serving(monkeypatch: pytest.MonkeyPatch, pool: Any, runtime_root: Pat
 
 async def _export(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, *, big: bool) -> Path:
     """A configuration file of an installation using every section (``big``: over the request cap, too)."""
-    from loopx.db import library as db_library
-    from tests.test_config_transfer_db import _installation, _item, _loopx, _populate
+    from looper.db import library as db_library
+    from tests.test_config_transfer_db import _installation, _item, _looper, _populate
 
     exported = tmp_path / "config.json"
     async with _installation() as (source, source_url):
@@ -166,7 +167,7 @@ async def _export(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, *, big: bool)
                     await db_library.insert_item(conn, _item("skill", f"big-{n}", [
                         {"path": "SKILL.md", "content": f"---\nname: big-{n}\n---\n"},
                         {"path": "reference.md", "content": body}]), origin="upload")
-        code, _, err = await _loopx(monkeypatch, source_url, "config", "export", str(exported), "--include-projects")
+        code, _, err = await _looper(monkeypatch, source_url, "config", "export", str(exported), "--include-projects")
         assert code == 0, err
     return exported
 
@@ -188,7 +189,8 @@ def test_a_file_over_the_request_cap_is_previewed_without_writing(
 
             assert status == 201, answer
             assert answer["bytes"] == exported.stat().st_size
-            assert answer["file"]["format"] == "loopx-config/v1" and answer["file"]["secrets"] == "omitted"
+            assert answer["file"] == {"format": "looper-config/v1", "looper_version": __version__,
+                                      "exported_at": answer["file"]["exported_at"], "secrets": "omitted"}
             plan = answer["plan"]
             assert not plan["applied"]
             assert plan["counts"]["catalog"] == {"added": 10, "changed": 0, "unchanged": 0, "skipped": 0}
@@ -209,7 +211,7 @@ def test_a_file_over_the_request_cap_is_previewed_without_writing(
 def test_applying_writes_what_the_cli_apply_writes_and_removes_the_file(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
-    from tests.test_config_transfer_db import _installation, _loopx, _plan, _state
+    from tests.test_config_transfer_db import _installation, _looper, _plan, _state
 
     async def _test() -> None:
         exported = await _export(monkeypatch, tmp_path, big=False)
@@ -226,7 +228,7 @@ def test_applying_writes_what_the_cli_apply_writes_and_removes_the_file(
                 again = await _request(port, "POST", f"{CONFIG_IMPORTS_PATH}/{uploaded['import_id']}/apply")
                 assert again[0] == 404 and "upload the file again" in again[1]["error"]
 
-            code, out, err = await _loopx(monkeypatch, cli_url, "config", "import", str(exported), "--apply", "--json")
+            code, out, err = await _looper(monkeypatch, cli_url, "config", "import", str(exported), "--apply", "--json")
             assert code == 0, err
             plan = applied["plan"]
             targets = {(n["section"], n["key"]): n.pop("target", None) for n in plan["need_secret"]}
@@ -245,6 +247,29 @@ def test_applying_writes_what_the_cli_apply_writes_and_removes_the_file(
                                ("catalog", "mcp:search"): {"kind": "mcp", "id": await by_api.fetchval(
                                    "SELECT id FROM library_items WHERE kind = 'mcp' AND name = 'search'")},
                                ("channels", "telegram"): {"kind": "channel", "id": telegram}}
+
+    asyncio.run(_test())
+
+
+@needs_db
+def test_a_file_exported_before_the_rename_is_previewed_with_its_version(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    from tests.test_config_transfer_db import _installation
+
+    async def _test() -> None:
+        old = tmp_path / "old.json"
+        old.write_text(json.dumps({"format": "loopx-config/v1", "loopx_version": "2.5.0", "secrets": "omitted",
+                                   "settings": {"layers": [
+                                       {"scope": "system", "harness_prompt": "Be brief.", "agent": None,
+                                        "effort": None, "env": [], "run_budget_usd": None}]}}))
+        async with _installation() as (target, _), _serving(monkeypatch, target, tmp_path / "runtime") as port:
+            status, answer = await _request(port, "POST", CONFIG_IMPORTS_PATH, old)
+
+        assert status == 201, answer
+        assert answer["file"] == {"format": "loopx-config/v1", "looper_version": "2.5.0", "secrets": "omitted"}
+        assert [(c["section"], c["key"], c["action"]) for c in answer["plan"]["changes"]] == [
+            ("settings.layers", "system", "added")]
 
     asyncio.run(_test())
 

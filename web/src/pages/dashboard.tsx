@@ -56,7 +56,7 @@ export function DashboardPage() {
           <p className="text-lg text-destructive">Connection failed</p>
           <p className="mt-1 text-sm text-muted-foreground">{error}</p>
           <p className="mt-3 text-xs text-muted-foreground">
-            Make sure <code className="text-foreground">loopx serve</code> is running
+            Make sure <code className="text-foreground">looper serve</code> is running
           </p>
         </div>
       </div>

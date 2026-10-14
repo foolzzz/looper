@@ -1,6 +1,6 @@
 """Project knowledge against a real PostgreSQL: the table, the API and what a run loads.
 
-Runs only when LOOPX_TEST_DATABASE_URL points at a disposable database. Each
+Runs only when LOOPER_TEST_DATABASE_URL points at a disposable database. Each
 test works in a new schema of its own, dropped afterwards.
 """
 
@@ -20,15 +20,15 @@ from typing import Any
 
 import pytest
 
-DSN = os.environ.get("LOOPX_TEST_DATABASE_URL")
-pytestmark = pytest.mark.skipif(not DSN, reason="LOOPX_TEST_DATABASE_URL is not set")
+DSN = os.environ.get("LOOPER_TEST_DATABASE_URL")
+pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
 
 @asynccontextmanager
 async def _fresh_schema() -> AsyncIterator[Any]:
     import asyncpg
 
-    schema = f"loopx_test_{uuid.uuid4().hex[:12]}"
+    schema = f"looper_test_{uuid.uuid4().hex[:12]}"
     admin = await asyncpg.connect(DSN)
     await admin.execute(f'CREATE SCHEMA "{schema}"')
     pool = await asyncpg.create_pool(DSN, min_size=1, max_size=3, server_settings={"search_path": schema})
@@ -42,7 +42,7 @@ async def _fresh_schema() -> AsyncIterator[Any]:
 
 def _run(test: Callable[[Any], Awaitable[None]], monkeypatch: pytest.MonkeyPatch) -> None:
     """Run ``test(pool)`` on a new schema that is also the server's pool."""
-    from loopx.db import connection
+    from looper.db import connection
 
     async def _main() -> None:
         async with _fresh_schema() as pool:
@@ -69,8 +69,8 @@ class _Writer:
 
 
 async def _call(root: Path, method: str, path: str, body: Any = None) -> tuple[int, Any]:
-    from loopx.agents.http_server import AgentHTTPServer
-    from loopx.agents.tiers.task import TaskRouter
+    from looper.agents.http_server import AgentHTTPServer
+    from looper.agents.tiers.task import TaskRouter
 
     server = AgentHTTPServer(web_adapter=SimpleNamespace(), task_router=TaskRouter(runtime_root=root),
                              supervisor=SimpleNamespace(), runtime_root=root)
@@ -92,7 +92,7 @@ def project_dir(tmp_path: Path) -> Path:
 def test_the_table_keeps_each_kind_consistent_and_goes_with_its_project(monkeypatch: pytest.MonkeyPatch) -> None:
     import asyncpg
 
-    from loopx.db import connection, projects, tasks
+    from looper.db import connection, projects, tasks
 
     async def _test(pool: Any) -> None:
         await connection.ensure_schema(pool)  # applying the schema again changes nothing
@@ -128,7 +128,7 @@ def test_the_table_keeps_each_kind_consistent_and_goes_with_its_project(monkeypa
 def test_the_api_adds_lists_changes_and_deletes_documents(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, project_dir: Path,
 ) -> None:
-    from loopx.db import projects
+    from looper.db import projects
 
     async def _test(pool: Any) -> None:
         project = await projects.create_project(name="calc", work_dir=str(project_dir), pool=pool)
@@ -181,7 +181,7 @@ def test_the_api_adds_lists_changes_and_deletes_documents(
 def test_the_api_shows_one_document_with_its_body(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, project_dir: Path,
 ) -> None:
-    from loopx.db import projects
+    from looper.db import projects
 
     async def _test(pool: Any) -> None:
         project = await projects.create_project(name="calc", work_dir=str(project_dir), pool=pool)
@@ -212,8 +212,8 @@ def test_the_api_shows_one_document_with_its_body(
 
 
 def test_concurrent_adds_cannot_both_pass_the_count_cap(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    from loopx.agents import knowledge
-    from loopx.db import projects
+    from looper.agents import knowledge
+    from looper.db import projects
 
     monkeypatch.setattr(knowledge, "PROJECT_MAX_DOCUMENTS", 1)
 
@@ -235,8 +235,8 @@ def test_concurrent_adds_cannot_both_pass_the_count_cap(monkeypatch: pytest.Monk
 def test_a_run_loads_the_documents_from_the_database(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, project_dir: Path,
 ) -> None:
-    from loopx.agents import knowledge
-    from loopx.db import projects
+    from looper.agents import knowledge
+    from looper.db import projects
 
     async def _test(pool: Any) -> None:
         project = await projects.create_project(name="calc", work_dir=str(project_dir), pool=pool)
@@ -266,8 +266,8 @@ def test_a_draft_stays_out_of_runs_until_it_is_confirmed(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, project_dir: Path,
 ) -> None:
     """A draft is in no run's index or mounts; confirmed, it is a text document every run gets; discarded, gone."""
-    from loopx.agents import knowledge
-    from loopx.db import projects, tasks
+    from looper.agents import knowledge
+    from looper.db import projects, tasks
 
     async def _test(pool: Any) -> None:
         project = await projects.create_project(name="calc", work_dir=str(project_dir), pool=pool)
@@ -300,8 +300,8 @@ def test_a_draft_stays_out_of_runs_until_it_is_confirmed(
 
 
 def test_a_refused_confirm_or_discard_leaves_the_draft(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    from loopx.agents import knowledge
-    from loopx.db import projects
+    from looper.agents import knowledge
+    from looper.db import projects
 
     async def _test(pool: Any) -> None:
         project = await projects.create_project(name="calc", pool=pool)

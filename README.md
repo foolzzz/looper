@@ -1,6 +1,6 @@
 <div align="center">
 
-<h1>LoopX</h1>
+<h1>Looper</h1>
 
 **Three-tier multi-agent orchestration system with a real-time web dashboard.**
 
@@ -10,9 +10,9 @@ Deploy autonomous coding agents that plan, decompose, and execute complex tasks 
 
 ---
 
-## What is LoopX
+## What is Looper
 
-LoopX is a self-hosted multi-agent system that turns a single task description
+Looper is a self-hosted multi-agent system that turns a single task description
 into a coordinated plan–execute–verify loop. A **Manager** agent talks to users,
 a **TaskRouter** manages lifecycle and concurrency, a **Planner** decomposes work
 into steps, and a **WorkerPool** runs Claude CLI subprocesses to do the actual
@@ -66,7 +66,7 @@ docker run -d --name agentbox-postgres \
   postgres:16
 
 # Set connection string
-export LOOPX_DATABASE_URL="postgresql://postgres:postgres@localhost:54329/loopx"
+export LOOPER_DATABASE_URL="postgresql://postgres:postgres@localhost:54329/loopx"
 # Or put it in .env (gitignored)
 ```
 
@@ -80,66 +80,90 @@ uv sync
 cd web && npm install && npx vite build && cd ..
 ```
 
-Then run `uv run loopx doctor`. It checks PostgreSQL, the Claude CLI and its
+Then run `uv run looper doctor`. It checks PostgreSQL, the Claude CLI and its
 login, and the enabled channels, and prints the fix for anything missing.
 
 ### 3. Run
 
 ```bash
-uv run loopx serve
+uv run looper serve
 # Dashboard at http://127.0.0.1:8767
 ```
 
 The schema is applied automatically on first startup. Telegram and Lark need
 no flags; turn them on from the Settings page (see [Channels](#channels)).
 
-Moving to a new machine: `uv run loopx config export loopx-config.json` writes
+Moving to a new machine: `uv run looper config export looper-config.json` writes
 the agent configuration to one file (secrets become placeholders;
-`--include-projects` adds projects), and `uv run loopx config import
-loopx-config.json` on the new machine previews it; add `--apply` to write it.
+`--include-projects` adds projects), and `uv run looper config import
+looper-config.json` on the new machine previews it; add `--apply` to write it.
 Settings does both too, under "Move to another machine".
 
 ### 4. Run as a service
 
 ```bash
-uv run loopx service install     # --port, --runtime-root, --label, --env NAME
-uv run loopx service status      # installed, running, PID, last exit, log, GET /api/status
-uv run loopx service restart     # e.g. after pulling new code
-uv run loopx service uninstall
+uv run looper service install     # --port, --runtime-root, --label, --env NAME
+uv run looper service status      # installed, running, PID, last exit, log, GET /api/status
+uv run looper service restart     # e.g. after pulling new code
+uv run looper service uninstall
 ```
 
-`install` runs `loopx serve` in the background: a launchd LaunchAgent on macOS,
+`install` runs `looper serve` in the background: a launchd LaunchAgent on macOS,
 a systemd user unit on Linux. It starts at login, starts again after a crash,
-and logs to `<runtime root>/logs/serve.log`. The unit runs the `loopx` that ran
-`install` (in a checkout, `.venv/bin/loopx`) in the current directory, so the
+and logs to `<runtime root>/logs/serve.log`. The unit runs the `looper` that ran
+`install` (in a checkout, `.venv/bin/looper`) in the current directory, so the
 checkout's `.env` keeps working. It copies `PATH`, locale and proxy settings,
-`CLAUDE_CONFIG_DIR`, and every `LOOPX_*`, `ANTHROPIC_*` and `LARK_*` variable
+`CLAUDE_CONFIG_DIR`, and every `LOOPER_*`, `ANTHROPIC_*` and `LARK_*` variable
 from your shell (add others with `--env NAME`), so the unit file is private
 (mode 0600). Run `install` again to apply changes. On Linux, `loginctl
 enable-linger $USER` keeps it running without a login session.
 
 ### Backups when upgrading
 
-`loopx serve` applies the schema at every start, and an upgrade may drop
+`looper serve` applies the schema at every start, and an upgrade may drop
 columns or tables. When the schema is about to change, serve first writes a
-`pg_dump` backup to `~/.loopx/backups/` (the runtime root's `backups/`, newest
+`pg_dump` backup to `~/.looper/backups/` (the runtime root's `backups/`, newest
 5 per database kept) and logs how to restore it; a new, empty database needs
-none. It uses the `pg_dump` on PATH, or the one `LOOPX_PG_DUMP` names, which
-must be at least the server's major version (`loopx doctor` checks it; on
+none. It uses the `pg_dump` on PATH, or the one `LOOPER_PG_DUMP` names, which
+must be at least the server's major version (`looper doctor` checks it; on
 macOS, `brew install libpq` and put `$(brew --prefix libpq)/bin` on PATH).
 With PostgreSQL in Docker, dump inside the container instead:
 
 ```bash
-export LOOPX_BACKUP_CMD='docker exec agentbox-postgres pg_dump --format=custom -U {user} {dbname}'
+export LOOPER_BACKUP_CMD='docker exec agentbox-postgres pg_dump --format=custom -U {user} {dbname}'
 ```
 
 Without a usable `pg_dump`, or when the backup fails, serve exits before it
-changes anything; `loopx serve --skip-backup` migrates without a backup and
-logs a warning. To roll back, stop LoopX, recreate the database empty, restore
-the file with `pg_restore --no-owner --dbname "$LOOPX_DATABASE_URL" <file>`
+changes anything; `looper serve --skip-backup` migrates without a backup and
+logs a warning. To roll back, stop Looper, recreate the database empty, restore
+the file with `pg_restore --no-owner --dbname "$LOOPER_DATABASE_URL" <file>`
 (in Docker: `docker exec -i agentbox-postgres pg_restore --no-owner -U postgres
--d loopx < <file>`), and run the previous LoopX version. `loopx service
-install` copies `PATH` and the `LOOPX_*` variables, so set these before it.
+-d loopx < <file>`), and run the previous Looper version. `looper service
+install` copies `PATH` and the `LOOPER_*` variables, so set these before it.
+
+### Upgrading from LoopX
+
+Looper was called LoopX up to v2.5.0. The upgrade needs no manual step:
+
+- **Command:** `looper`. `loopx` still works for one release: it prints a
+  deprecation note, then runs `looper`. `install.sh` first removes an old
+  `loopx` package installed by the same tool (your data stays).
+- **Data directory:** `~/.looper`. The first `looper serve` or
+  `looper service install` moves `~/.loopx` there (one rename; nothing is
+  copied or deleted) and leaves `~/.loopx` as a link to it for one release.
+  When both exist, Looper uses `~/.looper` and logs a warning.
+- **Environment variables:** `LOOPER_*`. A `LOOPX_*` name is still read when
+  its `LOOPER_*` name is unset, with a warning; rename them in your shell and
+  `.env`.
+- **Service:** `com.looper.serve`. `looper service install` stops and removes
+  the old `com.loopx.serve` unit first.
+- **Configuration files:** export writes `looper-config/v1`; files exported as
+  `loopx-config/v1` still import.
+- **Unchanged:** the default database is still named `loopx`
+  (`postgresql://localhost:5432/loopx`), and the data in it, such as your own
+  harness text, is not rewritten; release tags and history keep their names;
+  [NOTICE](NOTICE) keeps the attribution to upstream LoopX. The first start
+  takes the usual pre-migration backup, because `schema.sql` changed.
 
 ## Architecture
 
@@ -147,10 +171,10 @@ install` copies `PATH` and the `LOOPX_*` variables, so set these before it.
 
 | Tier | Module | Role |
 |---|---|---|
-| **Manager** | `loopx/agents/tiers/manager.py` | User-facing steward, intent classification, chat |
-| **TaskRouter** | `loopx/agents/tiers/task.py` | Task lifecycle, concurrency control (3 parallel), queue |
-| **Planner** | `loopx/agents/tiers/planner.py` | Step decomposition, dispatch, verification |
-| **WorkerPool** | `loopx/agents/tiers/worker.py` | Claude CLI subprocess pool with stream-json output |
+| **Manager** | `looper/agents/tiers/manager.py` | User-facing steward, intent classification, chat |
+| **TaskRouter** | `looper/agents/tiers/task.py` | Task lifecycle, concurrency control (3 parallel), queue |
+| **Planner** | `looper/agents/tiers/planner.py` | Step decomposition, dispatch, verification |
+| **WorkerPool** | `looper/agents/tiers/worker.py` | Claude CLI subprocess pool with stream-json output |
 
 All inter-agent communication flows through a typed async **MessageBus** with
 `MessageEnvelope` routing.
@@ -213,7 +237,7 @@ release wheel serves the copy packaged with it.
 
 | Variable | Required | Description |
 |---|---|---|
-| `LOOPX_DATABASE_URL` | Yes | PostgreSQL connection string |
+| `LOOPER_DATABASE_URL` | Yes | PostgreSQL connection string |
 
 The `claude` processes inherit the server's environment, so the Claude CLI
 authenticates as it does in your shell: signed in, or with an API key as its
@@ -228,12 +252,12 @@ read from the repository root), never in source.
 The web chat is always on. Telegram and Lark are built in and need no
 command-line flags: enable and configure them on the dashboard **Settings**
 page. Settings are saved in the `channel_configs` table and read when the
-server starts, so restart `loopx serve` after changing them. The table stores
+server starts, so restart `looper serve` after changing them. The table stores
 environment variable **names**, not secret values.
 
 | Channel | Settings fields | Also needed |
 |---|---|---|
-| Telegram | `bot_token_env`: env var holding the bot token (default `LOOPX_TELEGRAM_BOT_TOKEN`). `allowed_user_ids`: the numeric Telegram user IDs that may talk to the bot. | The token in that env var. |
+| Telegram | `bot_token_env`: env var holding the bot token (default `LOOPER_TELEGRAM_BOT_TOKEN`). `allowed_user_ids`: the numeric Telegram user IDs that may talk to the bot. | The token in that env var. |
 | Lark | `app_id_env`: env var holding the app ID (default `LARK_APP_ID`). `allowed_open_ids`: the senders' Lark `open_id` (`ou_...`). | `lark-cli` on PATH and signed in; it receives and sends the messages. |
 
 - Every agent runs Claude Code without permission prompts, so the Manager
@@ -293,7 +317,7 @@ cd web && npx tsc --noEmit
 npx vite build
 
 # Run server (auto-applies schema)
-uv run loopx serve
+uv run looper serve
 ```
 
 ## Releases

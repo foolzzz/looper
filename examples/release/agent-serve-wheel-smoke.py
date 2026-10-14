@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""A release wheel runs `loopx serve`: it carries the schema and the dashboard.
+"""A release wheel runs `looper serve`: it carries the schema and the dashboard.
 
 Builds the wheel from this checkout, checks its contents, installs it into a
 fresh virtualenv and resolves both files from the installed package (not the
-checkout). With LOOPX_TEST_DATABASE_URL pointing at a disposable database it
-also starts the installed `loopx serve` and fetches the dashboard and the API.
+checkout), and checks that it installs the ``looper`` command with ``loopx`` as
+its alias. With LOOPER_TEST_DATABASE_URL pointing at a disposable database it
+also starts the installed `looper serve` and fetches the dashboard and the API.
 Run `scripts/stage-dashboard.sh` first; the staged dashboard is not in Git.
 """
 
@@ -22,7 +23,7 @@ import zipfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-REQUIRED = ("loopx/db/schema.sql", "loopx/web/dashboard/index.html")
+REQUIRED = ("looper/db/schema.sql", "looper/web/dashboard/index.html")
 
 
 def run(*cmd: str, cwd: Path, env: dict[str, str] | None = None) -> str:
@@ -37,11 +38,11 @@ def free_port() -> int:
 
 def serve_check(venv: Path, work: Path, dsn: str) -> None:
     port = free_port()
-    env = {**os.environ, "LOOPX_DATABASE_URL": dsn}
+    env = {**os.environ, "LOOPER_DATABASE_URL": dsn}
     for name in ("LARK_APP_ID", "TELEGRAM_BOT_TOKEN"):
         env.pop(name, None)
     proc = subprocess.Popen(
-        [str(venv / "bin" / "loopx"), "serve", "--port", str(port), "--runtime-root", str(work / "rt")],
+        [str(venv / "bin" / "looper"), "serve", "--port", str(port), "--runtime-root", str(work / "rt")],
         cwd=work, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT,
     )
     try:
@@ -53,20 +54,20 @@ def serve_check(venv: Path, work: Path, dsn: str) -> None:
             except OSError:
                 time.sleep(0.5)
         else:
-            raise SystemExit("installed loopx serve did not come up")
+            raise SystemExit("installed looper serve did not come up")
         page = urllib.request.urlopen(f"{base}/", timeout=5).read().decode()
         assert "<div id=\"root\">" in page, page[:200]
         projects = urllib.request.urlopen(f"{base}/api/projects", timeout=5).read().decode()
         assert projects.startswith('{"projects"'), projects[:200]
-        print("PASS installed loopx serve answers the dashboard and the API")
+        print("PASS installed looper serve answers the dashboard and the API")
     finally:
         proc.terminate()
         proc.wait(timeout=30)
 
 
 def main() -> int:
-    if not (ROOT / "loopx/web/dashboard/index.html").is_file():
-        print("loopx/web/dashboard is not staged; run scripts/stage-dashboard.sh first", file=sys.stderr)
+    if not (ROOT / "looper/web/dashboard/index.html").is_file():
+        print("looper/web/dashboard is not staged; run scripts/stage-dashboard.sh first", file=sys.stderr)
         return 2
     with tempfile.TemporaryDirectory() as tmp:
         work = Path(tmp)
@@ -77,13 +78,13 @@ def main() -> int:
             if name and (ROOT / name).is_file():
                 (src / name).parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(ROOT / name, src / name)
-        shutil.copytree(ROOT / "loopx/web/dashboard", src / "loopx/web/dashboard")
+        shutil.copytree(ROOT / "looper/web/dashboard", src / "looper/web/dashboard")
         run("uv", "build", "--wheel", "--out-dir", str(work / "dist"), cwd=src)
-        (wheel,) = (work / "dist").glob("loopx-*.whl")
+        (wheel,) = (work / "dist").glob("looper-*.whl")
         names = set(zipfile.ZipFile(wheel).namelist())
         missing = [n for n in REQUIRED if n not in names]
         assert not missing, f"wheel lacks {missing}"
-        assert any(n.startswith("loopx/web/dashboard/assets/") for n in names), "wheel lacks dashboard assets"
+        assert any(n.startswith("looper/web/dashboard/assets/") for n in names), "wheel lacks dashboard assets"
         print(f"PASS {wheel.name} carries the schema and the dashboard")
 
         venv = work / "venv"
@@ -91,8 +92,8 @@ def main() -> int:
         run("uv", "pip", "install", "--python", str(venv / "bin" / "python"), str(wheel), cwd=work)
         located = run(
             str(venv / "bin" / "python"), "-c",
-            "from loopx.agents.http_server import default_static_dir;"
-            "from loopx.db.connection import SCHEMA_PATH;"
+            "from looper.agents.http_server import default_static_dir;"
+            "from looper.db.connection import SCHEMA_PATH;"
             "print(default_static_dir()); print(SCHEMA_PATH)",
             cwd=work,
         ).split()
@@ -100,12 +101,18 @@ def main() -> int:
         assert str(work) in str(static_dir) and (static_dir / "index.html").is_file(), static_dir
         assert str(work) in str(schema) and schema.is_file(), schema
         print("PASS the installed package resolves its own schema and dashboard")
+        version = run(str(venv / "bin" / "looper"), "--version", cwd=work).split()
+        assert version[0] == "looper", version
+        alias = subprocess.run([str(venv / "bin" / "loopx"), "--version"], cwd=work, capture_output=True, text=True,
+                               check=True)
+        assert alias.stdout.split() == version and "loopx is now called looper" in alias.stderr, alias
+        print(f"PASS the wheel installs the looper command ({' '.join(version)}), and loopx as its alias")
 
-        dsn = os.environ.get("LOOPX_TEST_DATABASE_URL")
+        dsn = os.environ.get("LOOPER_TEST_DATABASE_URL")
         if dsn:
             serve_check(venv, work, dsn)
         else:
-            print("SKIP serve check: LOOPX_TEST_DATABASE_URL is not set")
+            print("SKIP serve check: LOOPER_TEST_DATABASE_URL is not set")
     return 0
 
 

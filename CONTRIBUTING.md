@@ -1,10 +1,10 @@
-# Contributing To LoopX
+# Contributing To Looper
 
 Thank you for helping. Bug reports with clear reproduction steps, fixes,
 documentation and reviews are all welcome. Please follow the
 [Code of Conduct](CODE_OF_CONDUCT.md).
 
-This repository is the LoopX agent system (`loopx serve` and its dashboard).
+This repository is the Looper agent system (`looper serve` and its dashboard).
 [docs/architecture/agent-system.md](docs/architecture/agent-system.md)
 describes how it works, and
 [the development plan](docs/plans/2026-10-13-long-horizon-agent-context.zh-CN.md)
@@ -19,7 +19,7 @@ dashboard, PostgreSQL and the Claude CLI.
 ```bash
 uv sync --extra test
 cd web && npm ci && npm run build && cd ..
-LOOPX_DATABASE_URL=postgresql://localhost:5432/<your database> uv run loopx serve --port 8800
+LOOPER_DATABASE_URL=postgresql://localhost:5432/<your database> uv run looper serve --port 8800
 ```
 
 ## Test
@@ -28,7 +28,7 @@ LOOPX_DATABASE_URL=postgresql://localhost:5432/<your database> uv run loopx serv
 uv run --extra test python -m pytest -n auto
 ```
 
-The PostgreSQL tests run only when `LOOPX_TEST_DATABASE_URL` points at a
+The PostgreSQL tests run only when `LOOPER_TEST_DATABASE_URL` points at a
 disposable database; they create and drop their own schemas. CI runs the same
 command against a PostgreSQL service on every pull request. Which tests a
 change needs is described in section 1 of the development plan.
@@ -43,7 +43,7 @@ change needs is described in section 1 of the development plan.
 - Describe the pull request with **Goal**, **Changes** and **Validation**,
   and list any behavior change explicitly. The
   [template](.github/PULL_REQUEST_TEMPLATE.md) has the outline.
-- Validate on the real path: besides the tests, run `loopx serve` against a
+- Validate on the real path: besides the tests, run `looper serve` against a
   disposable database for backend changes. Check UI changes in a browser
   and attach screenshots.
 - When you change a recommended prompt, a contract or the injection order,
@@ -63,7 +63,7 @@ Report a vulnerability privately as described in
 
 ## License
 
-LoopX is licensed under the [Apache License 2.0](LICENSE). Unless you state
+Looper is licensed under the [Apache License 2.0](LICENSE). Unless you state
 otherwise, contributions are submitted under the same terms, without a
 copyright assignment or a contributor license agreement. Upstream LoopX
 releases through v0.4.7 were MIT-licensed; see [NOTICE](NOTICE) and

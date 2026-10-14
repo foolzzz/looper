@@ -1,6 +1,7 @@
 # Changelog
 
-This file records the changes of this LoopX fork. The fork branched from
+This file records the changes of Looper, a fork of LoopX that kept the LoopX
+name up to v2.5.0. The fork branched from
 upstream [`loopx-project/loopx`](https://github.com/loopx-project/loopx) at
 `71dbfd5e6` (2026-09-26) and no longer tracks upstream
 ([design-v0](https://github.com/foolzzz/looper/blob/a93a851d61530f9feb7e8c262d6a16e07ebe547d/docs/fork/design-v0.md)). For upstream history before that
@@ -32,7 +33,7 @@ How the agent system works today is described in
   belongs to another runtime type, the runtime cannot take that kind of
   provider yet (Claude Code takes its own login only), or the provider does
   not list its model. Every tier now starts its runtime through a runtime
-  adapter (`loopx/agents/runtimes`); Claude Code is the first, its launch
+  adapter (`looper/agents/runtimes`); Claude Code is the first, its launch
   byte-identical to before.
 - **Choosing the agent per layer and per task.** The layered settings select
   an agent in place of a model, in Settings, on the Agents page and in a
@@ -46,45 +47,45 @@ How the agent system works today is described in
   runtime starts a new session. Config export and import carry runtimes,
   providers (keys as placeholders) and agents. The prompt eval takes
   `--agent`.
-- **Run as a service.** `loopx service install` runs `loopx serve` in the
+- **Run as a service.** `looper service install` runs `looper serve` in the
   background as a launchd LaunchAgent (macOS) or a systemd user unit (Linux):
   started at login, started again after a crash, logging to
-  `<runtime root>/logs/serve.log`. The unit runs the `loopx` that ran
+  `<runtime root>/logs/serve.log`. The unit runs the `looper` that ran
   `install`, in the current directory, with `PATH`, locale and proxy settings,
-  `CLAUDE_CONFIG_DIR` and the `LOOPX_*`, `ANTHROPIC_*` and `LARK_*` variables
+  `CLAUDE_CONFIG_DIR` and the `LOOPER_*`, `ANTHROPIC_*` and `LARK_*` variables
   copied from the shell (more with `--env NAME`), so it is written with mode
   0600. Running `install` again updates the unit and restarts the service; it
   is not started when another process holds the port. `status` shows whether
   it is installed and running, its PID, last exit, log and `GET /api/status`;
   `restart` stops and starts it and waits until the port serves (on macOS with
   `launchctl bootout` and `bootstrap`, not `kickstart -k`); `uninstall` stops
-  it and removes the unit. `loopx doctor` adds a Service line.
-- **Backup before a schema change.** `loopx serve` records the sha256 of the
+  it and removes the unit. `looper doctor` adds a Service line.
+- **Backup before a schema change.** `looper serve` records the sha256 of the
   `schema.sql` it applied (`schema_fingerprint`, in the same transaction).
-  When a database that already holds LoopX tables has a different or no
+  When a database that already holds Looper tables has a different or no
   fingerprint, serve first writes a `pg_dump --format=custom` backup (mode
   0600) to `<runtime root>/backups/`, checks it (`pg_restore --list` when a
   `pg_restore` is at hand), keeps the newest 5 per database and logs the
   restore command, and only then applies the schema; a new, empty database
-  needs none. The dump comes from `LOOPX_PG_DUMP` or `pg_dump` on PATH, of at
-  least the server's major version, or from `LOOPX_BACKUP_CMD`, a command whose
+  needs none. The dump comes from `LOOPER_PG_DUMP` or `pg_dump` on PATH, of at
+  least the server's major version, or from `LOOPER_BACKUP_CMD`, a command whose
   stdout is the dump (`{dbname}` and `{user}` are filled in), such as
   `docker exec <container> pg_dump --format=custom -U {user} {dbname}`.
-  `loopx doctor` reports the `pg_dump`, failing when a schema change is
+  `looper doctor` reports the `pg_dump`, failing when a schema change is
   pending without one. **Behavior change:** without a usable `pg_dump`, or
-  when the backup fails, `loopx serve` exits before changing the schema;
+  when the backup fails, `looper serve` exits before changing the schema;
   `--skip-backup` migrates without a backup and logs a warning.
-  `loopx config import --apply` no longer migrates such a database: it asks
-  to start `loopx serve` once first.
-- **Configuration export and import.** `loopx config export <file>` writes an
-  installation's agent configuration to one JSON file (`loopx-config/v1`):
+  `looper config import --apply` no longer migrates such a database: it asks
+  to start `looper serve` once first.
+- **Configuration export and import.** `looper config export <file>` writes an
+  installation's agent configuration to one JSON file (`looper-config/v1`):
   the system and role settings layers and role prompts, the catalog with its
   files and MCP servers, global installs and channel configs, and with
   `--include-projects` each project's fields, execution settings, layers,
   knowledge, own skills and installs. MCP environment and header values and
   channel secrets are placeholders unless `--include-secrets` (which warns);
   a project's directory and an item's local source path are left out, and
-  path documents are references to re-point. `loopx config import <file>`
+  path documents are references to re-point. `looper config import <file>`
   previews what it would add, change, leave and skip, and the secrets left
   to fill in; `--apply` writes it in one transaction. Entries match by name,
   an existing one is updated in place (an item keeps its id and installs),
@@ -102,10 +103,10 @@ How the agent system works today is described in
   only route that takes more than the 8 MiB request cap: it streams up to
   256 MiB to a 0600 file under `<runtime root>/config-imports/` and answers
   with an import id and the preview; `POST /api/config/imports/<id>/apply`
-  writes it in one transaction like `loopx config import --apply` and deletes
+  writes it in one transaction like `looper config import --apply` and deletes
   the file, `DELETE /api/config/imports/<id>` cancels, and an import not
   applied expires after an hour (404 afterwards, as after a restart). At most
-  4 imports wait at once. `loopx config import` remains the way for larger
+  4 imports wait at once. `looper config import` remains the way for larger
   files.
 - **MCP servers in the capability catalog.** An MCP server is a catalog item
   of kind `mcp` (stdio: command, arguments, environment; or http/sse: URL,
@@ -136,6 +137,33 @@ How the agent system works today is described in
 
 ### Changed
 
+- **Renamed to Looper.** The command is `looper`, the Python package and
+  distribution are `looper` (`looper-<version>-py3-none-any.whl`), the
+  dashboard, prompts and docs say Looper, and `looper version --format json`
+  reports `name: looper` and `schema_version: looper_version_v0`. The upgrade
+  path, for one release:
+  - `loopx` stays as an alias that prints a one-line deprecation note to
+    stderr and runs `looper`; `install.sh` removes an old `loopx` package
+    installed by the same tool first.
+  - The runtime root is `~/.looper`: the first `looper serve` or
+    `looper service install` that uses it renames `~/.loopx` to it (nothing
+    is copied or deleted) and leaves `~/.loopx` as a link; when both exist,
+    `~/.looper` is used with a warning.
+  - Environment variables are `LOOPER_*`; an unset one falls back to its
+    `LOOPX_*` name with a warning, and a stored `LOOPX_*` name (a channel's
+    `bot_token_env`) finds the renamed variable. `service install` copies
+    both prefixes.
+  - The service is `com.looper.serve`; `looper service install` first stops
+    and removes `com.loopx.serve`.
+  - Export writes `looper-config/v1` (with `looper_version`); import still
+    reads `loopx-config/v1`. Backups are named `looper-<database>-*.dump`;
+    older `loopx-*` backups are kept and not pruned.
+
+  Unchanged: the default database name `loopx`, the data in the database
+  (a system harness stored as the old built-in text still follows the
+  built-in), release tags and history, and NOTICE's attribution to upstream
+  LoopX. The prompts' "LoopX" becomes "Looper", and `schema.sql`'s comments
+  change, so the first start takes the pre-migration backup.
 - **A layer's model is now its agent.** The upgrade turns each model a layer
   held into the agent `claude-code/<model>` (Claude Code with its own login),
   so every role keeps its model; the settings API takes `agent` (an agent id)
@@ -226,13 +254,13 @@ How the agent system works today is described in
   `metadata.library` now records its role, project and each item's plugin and
   scope, and `metadata.project_skills` is no longer written.
 
-- **`loopx doctor` and the startup self-check.** `loopx doctor` checks
-  PostgreSQL (`LOOPX_DATABASE_URL`, shown with its password masked), the
+- **`looper doctor` and the startup self-check.** `looper doctor` checks
+  PostgreSQL (`LOOPER_DATABASE_URL`, shown with its password masked), the
   Claude Code CLI (`claude --version`), its login (`claude auth status`,
   which reads local credentials and makes no model call; a CLI without it
   is reported as not checked) and, when the Lark channel is enabled,
   `lark-cli`. It prints one line per check with its fix and exits 1 when a
-  check failed. `loopx serve` runs the same checks first: an unreachable
+  check failed. `looper serve` runs the same checks first: an unreachable
   PostgreSQL stops it with the fix instead of a traceback; a missing
   `claude` or login is logged as a warning, the server still starts,
   `GET /api/status` reports every check under `checks`, and the dashboard
@@ -279,11 +307,11 @@ How the agent system works today is described in
   and the Agents page no longer offers the removed `permission_mode` (the
   codex-cli Sandbox dropdown).
 
-- **Reclaiming read-only copies.** `loopx serve` now removes, when it starts
+- **Reclaiming read-only copies.** `looper serve` now removes, when it starts
   and before any agent launches, the content-hashed copies under the runtime
   root (library items, project knowledge sets, project skills plugins) that
   the current content no longer uses and no running process's command line
-  mounts or links into (`loopx/agents/read_only_copies.py`). They used to stay
+  mounts or links into (`looper/agents/read_only_copies.py`). They used to stay
   on disk for good after their content was replaced or deleted. When the
   content or the running processes cannot be read, nothing is removed.
 
@@ -295,7 +323,7 @@ How the agent system works today is described in
 
 - **Project execution settings (M5).** A project can set how its Planner,
   Workers and Reviewers run; every field is optional and `null` inherits, so
-  a project with none set runs as before (`loopx/agents/project_execution.py`).
+  a project with none set runs as before (`looper/agents/project_execution.py`).
   The fields are typed columns on `projects`, read and written through the
   project `GET`/`PUT` (a 400 names a bad value) and the project editor:
   - `model`, over the agent's own model and the default (not the Manager's);
@@ -309,7 +337,7 @@ How the agent system works today is described in
 
 - **Project skills (M4).** A project can carry its own Claude Code skills.
   Only its Planner, Workers and Reviewers load them, and nothing is written
-  into the project's directory (`loopx/agents/project_skills.py`).
+  into the project's directory (`looper/agents/project_skills.py`).
   - **Storage.** Each skill is a row of `project_skills`, deleted with its
     project:
     - a name, a lowercase slug unique in the project;
@@ -343,7 +371,7 @@ How the agent system works today is described in
       one.
 - **Project knowledge (M3).** A project can carry reference documents that
   its Planner, Workers and Reviewers read on demand instead of getting them
-  in the prompt (`loopx/agents/knowledge.py`).
+  in the prompt (`looper/agents/knowledge.py`).
   - **Sources.** Text written on the dashboard, an uploaded text file (base64
     in JSON), or a file in the project's default directory, referenced by its
     relative path and read live. No URLs. Binary content and paths that lead
@@ -367,7 +395,7 @@ How the agent system works today is described in
     gains a Knowledge list to add text, upload a file, reference a project
     file and delete, with a count, size and index readout.
 - **Cost and context observability (M2).** Every Claude run now records
-  what it spent and how large its context grew (`loopx/agents/run_usage.py`).
+  what it spent and how large its context grew (`looper/agents/run_usage.py`).
   There is no spending cap.
   - **Usage per run.** `llm_records` gains `cache_read_tokens`,
     `cache_creation_tokens`, `context_tokens` and `compactions`. The run's
@@ -393,7 +421,7 @@ How the agent system works today is described in
     whether it compacted, and its own cost.
 - **Prompt regression eval (M6).** `python -m evals.prompt_regression run`
   drives five small tasks (one step, dependent steps, a reviewed step, a
-  retry, a mid-task chat correction) through a disposable `loopx serve` and
+  retry, a mid-task chat correction) through a disposable `looper serve` and
   reports success, steps, retries, reviews, cost, contract violations and
   whether the Planner modified files, compared with the previous run or the
   committed baseline as a Markdown table. Fake mode (a scripted stand-in
@@ -471,14 +499,14 @@ How the agent system works today is described in
   startup, including one seeded before the recommended prompt was tracked,
   and an edited one is kept.
 - Every agent run (Manager, Planner, Worker, Reviewer) records the system
-  prompt LoopX appended in `llm_records.metadata.system_prompt`;
+  prompt Looper appended in `llm_records.metadata.system_prompt`;
   `metadata.command` still holds the exact argv. Each run on the history page,
   and in the Chat page's Planner and step views, has a collapsible System
   prompt section; Claude Code's built-in system prompt is not included.
 - **Behaviour change: agents no longer load the operator's personal Claude
   Code configuration.** The Manager, the Planner, the Workers and the
   Reviewers all start Claude Code with one flag set
-  (`loopx/agents/claude_cli.py` `isolation_args`, recorded as
+  (`looper/agents/claude_cli.py` `isolation_args`, recorded as
   `personal-config-off/v1`): `--setting-sources project`,
   `--strict-mcp-config`, and `--settings` with `autoMemoryEnabled: false` and
   `claudeMdExcludes` for every `CLAUDE.md`, `.claude/CLAUDE.md` and
@@ -489,7 +517,7 @@ How the agent system works today is described in
   installed plugins and their skills, agents and hooks, custom agents, output
   styles, MCP servers (the Manager loaded them until now) or auto memory. The
   project's own `CLAUDE.md` and `.claude/settings.json` still load, and the
-  login is unaffected. The model and effort now come from LoopX's settings
+  login is unaffected. The model and effort now come from Looper's settings
   instead of the operator's (below), and rules that every project must follow
   go into the default harness (below).
 - **Behaviour change: the task description is part of the system prompt.**
@@ -609,7 +637,7 @@ How the agent system works today is described in
   unedited `planner` row gets the new prompt at startup; an edited one is
   kept and may still describe the Planner as read-only, so review it. The
   Agents page shows these shared permissions in place of the Claude Code
-  "Permission Mode" select, which no LoopX agent read.
+  "Permission Mode" select, which no Looper agent read.
 - **Behaviour change: Telegram and Lark refuse to start without a sender
   allowlist.** Because the Manager can now run any command on this machine,
   each chat channel passes on only the senders its Settings configuration

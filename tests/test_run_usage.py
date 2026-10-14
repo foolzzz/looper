@@ -25,8 +25,8 @@ from typing import Any
 
 import pytest
 
-from loopx.agents.claude_cli import ClaudeRunRecorder, ResidentClaude
-from loopx.agents.run_usage import Usage, compaction, reported_totals, request_context, turn_tokens
+from looper.agents.claude_cli import ClaudeRunRecorder, ResidentClaude
+from looper.agents.run_usage import Usage, compaction, reported_totals, request_context, turn_tokens
 
 FIXTURES = Path(__file__).parent / "fixtures" / "claude_stream"
 

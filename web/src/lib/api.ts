@@ -5,7 +5,7 @@ export interface SystemStatus {
   agents: Record<string, { healthy: boolean; agent_id: string }>;
   channels: Record<string, unknown>;
   uptime: number;
-  /** The startup self-check, as `loopx doctor` prints it. */
+  /** The startup self-check, as `looper doctor` prints it. */
   checks?: SelfCheck[];
 }
 
@@ -330,7 +330,7 @@ export async function setTaskProject(
  * Window event fired after this dashboard creates, edits or deletes a project,
  * or creates, moves or deletes a task, so project lists and counts reload at once.
  */
-/** The download of the whole configuration (``loopx config export``'s --include-projects and --include-secrets). */
+/** The download of the whole configuration (``looper config export``'s --include-projects and --include-secrets). */
 export function configExportUrl({ projects, secrets }: { projects: boolean; secrets: boolean }): string {
   return `${API_BASE}/config/export?projects=${projects ? 1 : 0}&secrets=${secrets ? 1 : 0}`;
 }
@@ -340,7 +340,7 @@ export const CONFIG_IMPORT_MAX_BYTES = 256 * 1024 * 1024;
 
 export type ConfigImportAction = "added" | "changed" | "unchanged" | "skipped";
 
-/** What an import does or did, as `loopx config import --json` prints it. */
+/** What an import does or did, as `looper config import --json` prints it. */
 export interface ConfigImportPlan {
   applied: boolean;
   /** Each section the file holds: how many of its entries are added, changed, unchanged and skipped. */
@@ -357,8 +357,8 @@ export interface ConfigImportUpload {
   import_id: string;
   bytes: number;
   expires_at: string;
-  /** The file's own head: format, loopx_version, exported_at and secrets ("omitted" or "included"). */
-  file: Partial<Record<"format" | "loopx_version" | "exported_at" | "secrets", string>>;
+  /** The file's own head: format, looper_version, exported_at and secrets ("omitted" or "included"). */
+  file: Partial<Record<"format" | "looper_version" | "exported_at" | "secrets", string>>;
   plan: ConfigImportPlan;
 }
 
@@ -373,7 +373,7 @@ export async function uploadConfigImport(file: File): Promise<ConfigImportUpload
   return res.json();
 }
 
-/** Write an uploaded file in one transaction, like `loopx config import --apply`; the server deletes the file. */
+/** Write an uploaded file in one transaction, like `looper config import --apply`; the server deletes the file. */
 export async function applyConfigImport(importId: string): Promise<{ import_id: string; plan: ConfigImportPlan }> {
   const res = await fetch(`${API_BASE}/config/imports/${encodeURIComponent(importId)}/apply`, { method: "POST" });
   if (!res.ok) await failed(res, "apply");
@@ -389,7 +389,7 @@ export async function cancelConfigImport(importId: string): Promise<void> {
   if (!res.ok && res.status !== 404) await failed(res, "cancel");
 }
 
-export const PROJECTS_CHANGED_EVENT = "loopx:projects-changed";
+export const PROJECTS_CHANGED_EVENT = "looper:projects-changed";
 
 function notifyProjectsChanged() {
   window.dispatchEvent(new Event(PROJECTS_CHANGED_EVENT));
@@ -910,7 +910,7 @@ export interface LlmRecord {
   cache_creation_tokens?: number | null;
   /** The run's own cost; for a resident agent's turn, that turn's share of its session. */
   cost_usd: number | null;
-  /** Who priced the run: the runtime reported it, or LoopX from the provider's prices; null when unpriced. */
+  /** Who priced the run: the runtime reported it, or Looper from the provider's prices; null when unpriced. */
   cost_source?: "runtime" | "provider_price" | null;
   /** The context at the run's end: the prompt of its last main-loop model request. */
   context_tokens?: number | null;
@@ -922,7 +922,7 @@ export interface LlmRecord {
   metadata: {
     command?: string[];
     cwd?: string;
-    /** What LoopX appended to Claude Code's system prompt (its built-in prompt is not included). */
+    /** What Looper appended to Claude Code's system prompt (its built-in prompt is not included). */
     system_prompt?: string;
     system_prompt_sha256?: string;
     prompt_layers?: PromptLayers;
@@ -1103,7 +1103,7 @@ export interface Runtime {
   agent_count: number;
 }
 
-/** "oauth": the runtime's own login; "api_key": a key stored in LoopX. */
+/** "oauth": the runtime's own login; "api_key": a key stored in Looper. */
 export type ProviderAuth = "oauth" | "api_key";
 
 /** One model a provider serves; every field but the name may be null (unknown). Prices are USD per million tokens. */
@@ -1196,7 +1196,7 @@ export interface AgentFields {
 }
 
 /** Window event fired after this dashboard changes the registry, so agent selectors reload at once. */
-export const REGISTRY_CHANGED_EVENT = "loopx:registry-changed";
+export const REGISTRY_CHANGED_EVENT = "looper:registry-changed";
 
 async function registryCall<T>(method: string, path: string, body: unknown, label: string): Promise<T> {
   const res = await fetch(`${API_BASE}${path}`, {
@@ -1401,7 +1401,7 @@ export function updateProjectRoleSettings(
   );
 }
 
-// --- The capability catalog: items acquired into LoopX, and where they are installed ---
+// --- The capability catalog: items acquired into Looper, and where they are installed ---
 
 export type LibraryKind = "plugin" | "skill" | "mcp";
 /** How an item was acquired: imported from this machine, uploaded, taken from git, written in Settings ("ui": a skill

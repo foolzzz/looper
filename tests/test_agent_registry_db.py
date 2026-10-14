@@ -1,6 +1,6 @@
 """Runtimes, LLM providers and agents against a real PostgreSQL, through the HTTP API.
 
-Runs only when LOOPX_TEST_DATABASE_URL points at a disposable database. Each
+Runs only when LOOPER_TEST_DATABASE_URL points at a disposable database. Each
 test works in a new schema of its own, dropped afterwards. A stand-in runtime
 type (``StandIn``) plays a second adapter: one that cannot keep a resident
 session, and has a login of its own.
@@ -21,13 +21,13 @@ import pytest
 from fake_claude import fake_claude
 from tests.test_catalog_db import DSN, _fresh_schema, _Writer
 
-pytestmark = pytest.mark.skipif(not DSN, reason="LOOPX_TEST_DATABASE_URL is not set")
+pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
 SECRET = "sk-test-registry-0123456789"
 
 
 def _run(test: Callable[[Any], Awaitable[None]], monkeypatch: pytest.MonkeyPatch, *, before: str = "") -> None:
-    from loopx.db import connection
+    from looper.db import connection
 
     async def _main() -> None:
         async with _fresh_schema() as pool:
@@ -41,8 +41,8 @@ def _run(test: Callable[[Any], Awaitable[None]], monkeypatch: pytest.MonkeyPatch
 
 
 async def _call(method: str, path: str, body: Any = None, *, claude: str = "claude") -> tuple[int, Any]:
-    from loopx.agents.http_server import AgentHTTPServer
-    from loopx.agents.tiers.task import TaskRouter
+    from looper.agents.http_server import AgentHTTPServer
+    from looper.agents.tiers.task import TaskRouter
 
     server = AgentHTTPServer(web_adapter=SimpleNamespace(), supervisor=SimpleNamespace(),
                              task_router=TaskRouter(runtime_root=Path(tempfile.mkdtemp())), claude_bin=claude)
@@ -70,9 +70,9 @@ def _version_claude(directory: Path, version: str = "2.1.285 (Claude Code)") -> 
 @pytest.fixture
 def stand_in(monkeypatch: pytest.MonkeyPatch) -> str:
     """A second runtime type: one-off runs only, anthropic-messages, its own login and API keys."""
-    from loopx.agents import runtimes
-    from loopx.agents.runtimes import AuthKind, Capability, Probe
-    from loopx.agents.runtimes.claude_code import ClaudeCodeRuntime
+    from looper.agents import runtimes
+    from looper.agents.runtimes import AuthKind, Capability, Probe
+    from looper.agents.runtimes.claude_code import ClaudeCodeRuntime
 
     class StandIn(ClaudeCodeRuntime):
         type = "stand-in"
@@ -100,10 +100,10 @@ def _by_name(entries: list[dict[str, Any]], name: str) -> dict[str, Any]:
 
 
 def test_every_database_has_the_builtin_runtime_provider_and_agent(monkeypatch: pytest.MonkeyPatch) -> None:
-    from loopx.agents.agent_registry import BUILTIN_AGENT, AgentSpec
-    from loopx.agents.runtimes import CLAUDE_CODE
-    from loopx.db import agent_registry as db
-    from loopx.db.connection import ensure_schema
+    from looper.agents.agent_registry import BUILTIN_AGENT, AgentSpec
+    from looper.agents.runtimes import CLAUDE_CODE
+    from looper.db import agent_registry as db
+    from looper.db.connection import ensure_schema
 
     async def _test(pool: Any) -> None:
         await pool.execute("DELETE FROM agents WHERE builtin")  # a missing one comes back
@@ -143,7 +143,7 @@ def test_the_builtins_are_read_only(monkeypatch: pytest.MonkeyPatch, method: str
 def test_a_runtime_is_probed_with_version_only_when_registered_and_on_request(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
-    from loopx.agents.runtimes import CLAUDE_CODE
+    from looper.agents.runtimes import CLAUDE_CODE
 
     claude = _version_claude(tmp_path)
 
@@ -311,7 +311,7 @@ VALUES ('worker', 'worker', 'codex-cli', 1, 'Work.');
 
 
 def test_the_upgrade_removes_llm_profiles_and_keeps_the_agent_configs(monkeypatch: pytest.MonkeyPatch) -> None:
-    from loopx.db.connection import ensure_schema
+    from looper.db.connection import ensure_schema
 
     async def _test(pool: Any) -> None:
         await ensure_schema(pool)  # once only
@@ -380,9 +380,9 @@ async def _launch(role: str, task_id: str, work_dir: Path, root: Path) -> dict[s
     or the outcome without a start (``{"outcome": ...}``)."""
     import agent_launch_parity as parity
 
-    from loopx.agents.message import MessageEnvelope, MessageType, planner_address, worker_address
-    from loopx.agents.tiers.planner import PlannerAgent, TaskPlan
-    from loopx.agents.tiers.worker import WorkerConfig, WorkerPool
+    from looper.agents.message import MessageEnvelope, MessageType, planner_address, worker_address
+    from looper.agents.tiers.planner import PlannerAgent, TaskPlan
+    from looper.agents.tiers.worker import WorkerConfig, WorkerPool
 
     out = root / f"{role}-{task_id}.json"
     claude = fake_claude(root / f"claude-{role}-{task_id}", parity._CLAUDE.format(out=str(out)))
@@ -411,7 +411,7 @@ async def _launch(role: str, task_id: str, work_dir: Path, root: Path) -> dict[s
 
 
 async def _project_of(task_id: str) -> str:
-    from loopx.db import projects
+    from looper.db import projects
 
     return (await projects.get_task_project(task_id))["id"]
 
@@ -462,7 +462,7 @@ def test_a_tasks_agent_override_reaches_only_that_tasks_role(
 def test_an_agent_that_can_no_longer_run_fails_the_run_instead_of_another_agent(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, stand_in: str,
 ) -> None:
-    from loopx.agents import runtimes
+    from looper.agents import runtimes
 
     async def _test(_pool: Any) -> None:
         one_off = await _stand_in_agent(stand_in)
@@ -506,7 +506,7 @@ INSERT INTO agent_setting_layers (scope, role, project_id, model, effort) VALUES
 
 
 def test_the_upgrade_turns_each_layer_model_into_an_agent(monkeypatch: pytest.MonkeyPatch) -> None:
-    from loopx.db.connection import ensure_schema
+    from looper.db.connection import ensure_schema
 
     async def _layers(pool: Any) -> list[tuple[Any, ...]]:
         return [tuple(r) for r in await pool.fetch(

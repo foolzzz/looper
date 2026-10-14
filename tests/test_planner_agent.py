@@ -22,11 +22,11 @@ import pytest
 from agent_fixtures import agent_json
 from library_fixtures import ALPHA_SKILL, DEMO_PLUGIN, plugin_dirs
 
-from loopx.agents.agent_settings import DEFAULT_HARNESS_PROMPT
-from loopx.agents.bus import MessageBus
-from loopx.agents.claude_cli import ISOLATION_ID, isolation_args
-from loopx.agents.run_usage import Usage
-from loopx.agents.message import (
+from looper.agents.agent_settings import DEFAULT_HARNESS_PROMPT
+from looper.agents.bus import MessageBus
+from looper.agents.claude_cli import ISOLATION_ID, isolation_args
+from looper.agents.run_usage import Usage
+from looper.agents.message import (
     MANAGER_ADDRESS,
     TASK_ROUTER_ADDRESS,
     MessageEnvelope,
@@ -34,9 +34,9 @@ from loopx.agents.message import (
     channel_address,
     planner_address,
 )
-from loopx.agents.tiers.planner import PlannerAgent
-from loopx.agents.tiers.planner_protocol import REPLY_CONTRACT
-from loopx.agents.tiers.task import TaskRouter
+from looper.agents.tiers.planner import PlannerAgent
+from looper.agents.tiers.planner_protocol import REPLY_CONTRACT
+from looper.agents.tiers.task import TaskRouter
 
 WEB = channel_address("web")
 
@@ -271,7 +271,7 @@ def _flag(argv: list[str], name: str) -> str | None:
 
 def _assert_unrestricted(argv: list[str]) -> None:
     """The shared permission flags, once, and nothing that narrows the tools or the permissions again."""
-    from loopx.agents.claude_cli import permission_args
+    from looper.agents.claude_cli import permission_args
 
     flags = permission_args()
     assert any(argv[i:i + len(flags)] == flags for i in range(len(argv)))
@@ -367,7 +367,7 @@ class TestPlanning:
     def test_turn_over_the_time_limit_fails_planning(
         self, planner_claude: Any, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        from loopx.db import agent_configs
+        from looper.db import agent_configs
 
         async def _config(agent_id: str) -> dict[str, Any]:
             assert agent_id == "planner"
@@ -610,13 +610,13 @@ class TestResidentClaude:
     def test_claude_runs_unrestricted_in_the_task_directory(
         self, planner_claude: Any, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        from loopx.db import agent_configs
+        from looper.db import agent_configs
 
         async def _config(agent_id: str) -> dict[str, Any]:
             return {"system_prompt": "You plan carefully.", "timeout_seconds": 60, "max_turns": 9}
 
         monkeypatch.setattr(agent_configs, "get_config", _config)
-        from loopx.db import agent_setting_layers
+        from looper.db import agent_setting_layers
 
         monkeypatch.setattr(agent_setting_layers, "list_layers", AsyncMock(
             return_value=[{"scope": "role", "role": "planner", "agent": agent_json("claude-test")}]))
@@ -669,12 +669,12 @@ class TestResidentClaude:
         # would fail the task if it were taken for the next turn's reply.
         claude = planner_claude(plan(step("s1")), decide("accept"),
                                 autonomous={1: decide("fail", reason="said on its own")})
-        with caplog.at_level("INFO", logger="loopx.agents.tiers.planner"):
+        with caplog.at_level("INFO", logger="looper.agents.tiers.planner"):
             h = drive(claude, always(WORK_OK))
 
         assert h.final().payload["status"] == "completed"  # type: ignore[union-attr]
         assert not any("said on its own" in line for line in activity(agent_db))
-        from loopx.agents.claude_cli import AUTONOMOUS_INPUT
+        from looper.agents.claude_cli import AUTONOMOUS_INPUT
 
         starts = [call.kwargs for call in agent_db.start_record.await_args_list]
         assert [s["input_text"] for s in starts].count(AUTONOMOUS_INPUT) == 1
@@ -765,7 +765,7 @@ def _project(name: str = "calc", *, background: str = "", description: str = "")
 @pytest.fixture
 def planner_row(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     """The ``planner`` agent config row; a test may change its prompt between turns."""
-    from loopx.db import agent_configs
+    from looper.db import agent_configs
 
     row: dict[str, Any] = {"system_prompt": "You plan carefully.", "default_prompt": "You plan.", "timeout_seconds": 60,
                            "max_turns": 0}
@@ -787,7 +787,7 @@ class TestRecommendedRole:
     it to planning: it decides and hands every change to a Worker."""
 
     def test_it_says_the_planner_plans_and_workers_do_the_work(self) -> None:
-        from loopx.agents.tiers.planner import DEFAULT_SYSTEM_PROMPT
+        from looper.agents.tiers.planner import DEFAULT_SYSTEM_PROMPT
 
         text = " ".join(DEFAULT_SYSTEM_PROMPT.split())
         assert "You plan and decide; Workers do the work." in text
@@ -980,20 +980,20 @@ class TestHarnessAndLaunch:
             return await real_exec(*args, **kwargs)
 
         monkeypatch.setattr(asyncio, "create_subprocess_exec", _exec)
-        _settings(agent_db, env=json.dumps([{"key": "LOOPX_TEST_FLAVOUR", "value": "mint"}]))
+        _settings(agent_db, env=json.dumps([{"key": "LOOPER_TEST_FLAVOUR", "value": "mint"}]))
         claude = planner_claude(plan(step("s1")), decide("accept"))
-        change = lambda: _settings(agent_db, env=json.dumps([{"key": "LOOPX_TEST_FLAVOUR", "value": "lime"}]))
+        change = lambda: _settings(agent_db, env=json.dumps([{"key": "LOOPER_TEST_FLAVOUR", "value": "lime"}]))
         drive(claude, hold_first(), _between_turns(agent_db, change))
 
-        assert [kwargs["env"]["LOOPX_TEST_FLAVOUR"] for kwargs in launched] == ["mint", "lime"]
+        assert [kwargs["env"]["LOOPER_TEST_FLAVOUR"] for kwargs in launched] == ["mint", "lime"]
         first, second = claude.argvs()
         assert first == [arg for arg in second if arg not in ("--resume", "sess-p")]  # same command, new env
         assert _flag(second, "--resume") == "sess-p"
         recorded = [s["metadata"]["env"]["keys"] for s in _starts(agent_db)]
-        assert recorded == [{"LOOPX_TEST_FLAVOUR": _sha("mint")}, {"LOOPX_TEST_FLAVOUR": _sha("lime")}]
+        assert recorded == [{"LOOPER_TEST_FLAVOUR": _sha("mint")}, {"LOOPER_TEST_FLAVOUR": _sha("lime")}]
 
     def test_unchanged_settings_keep_one_process(self, planner_claude: Any, agent_db: Any) -> None:
-        _settings(agent_db, harness="H", model="sonnet", env=json.dumps([{"key": "LOOPX_TEST_FLAVOUR", "value": "x"}]))
+        _settings(agent_db, harness="H", model="sonnet", env=json.dumps([{"key": "LOOPER_TEST_FLAVOUR", "value": "x"}]))
         claude = planner_claude(plan(step("s1")), decide("accept"))
         drive(claude, always(WORK_OK))
         assert len(claude.argvs()) == 1 and len(claude.turns()) == 2

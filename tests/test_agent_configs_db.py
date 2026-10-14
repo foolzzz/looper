@@ -1,6 +1,6 @@
 """Agent config rows against a real PostgreSQL: replacing a stale default prompt.
 
-Runs only when LOOPX_TEST_DATABASE_URL points at a disposable database; the
+Runs only when LOOPER_TEST_DATABASE_URL points at a disposable database; the
 schema is applied to it and the test's rows are removed afterwards.
 """
 
@@ -12,8 +12,8 @@ import uuid
 
 import pytest
 
-DSN = os.environ.get("LOOPX_TEST_DATABASE_URL")
-pytestmark = pytest.mark.skipif(not DSN, reason="LOOPX_TEST_DATABASE_URL is not set")
+DSN = os.environ.get("LOOPER_TEST_DATABASE_URL")
+pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
 
 def test_default_prompt_tracks_recommendation_and_reset() -> None:
@@ -21,8 +21,8 @@ def test_default_prompt_tracks_recommendation_and_reset() -> None:
     one, and reset restores the recommended prompt."""
     import asyncpg
 
-    from loopx.db import agent_configs
-    from loopx.db.connection import ensure_schema
+    from looper.db import agent_configs
+    from looper.db.connection import ensure_schema
 
     unedited = f"test-agent-{uuid.uuid4().hex[:8]}"
     edited = f"test-agent-{uuid.uuid4().hex[:8]}"
@@ -68,10 +68,10 @@ def test_worker_rows_move_to_the_new_recommended_prompt() -> None:
     startup replacement; an edited row is kept."""
     import asyncpg
 
-    from loopx.agents.serve import _WORKER_PROMPT_BEFORE_CONTRACTS
-    from loopx.agents.tiers.worker import DEFAULT_SYSTEM_PROMPT
-    from loopx.db import agent_configs
-    from loopx.db.connection import ensure_schema
+    from looper.agents.serve import _WORKER_PROMPT_BEFORE_CONTRACTS
+    from looper.agents.tiers.worker import DEFAULT_SYSTEM_PROMPT
+    from looper.db import agent_configs
+    from looper.db.connection import ensure_schema
 
     tracked, untracked, edited = (f"test-worker-{uuid.uuid4().hex[:8]}" for _ in range(3))
     old, new = _WORKER_PROMPT_BEFORE_CONTRACTS, DEFAULT_SYSTEM_PROMPT
@@ -118,8 +118,8 @@ def test_permission_mode_is_dropped_and_an_update_that_sends_it_still_applies() 
     dashboard that still sends the field changes the rest."""
     import asyncpg
 
-    from loopx.db import agent_configs
-    from loopx.db.connection import ensure_schema
+    from looper.db import agent_configs
+    from looper.db.connection import ensure_schema
 
     agent_id = f"test-agent-{uuid.uuid4().hex[:8]}"
 

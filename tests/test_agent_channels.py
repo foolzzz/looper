@@ -9,10 +9,10 @@ from typing import Any
 
 import pytest
 
-from loopx.agents.bus import MessageBus
-from loopx.agents.channels.registry import ChannelRegistry
-from loopx.agents.channels.web import WebChannelAdapter
-from loopx.agents.message import (
+from looper.agents.bus import MessageBus
+from looper.agents.channels.registry import ChannelRegistry
+from looper.agents.channels.web import WebChannelAdapter
+from looper.agents.message import (
     MANAGER_ADDRESS,
     MessageEnvelope,
     MessageType,
@@ -60,7 +60,7 @@ class TestWebChannelAdapter:
         """A reply that answers no message (what Claude said on its own) never ends a message's stream."""
         from unittest.mock import AsyncMock
 
-        from loopx.db import chat
+        from looper.db import chat
 
         save = AsyncMock(return_value=None)
         monkeypatch.setattr(chat, "save_message", save)
@@ -95,7 +95,7 @@ class TestWebChannelAdapter:
     ) -> None:
         from unittest.mock import AsyncMock
 
-        from loopx.db import chat
+        from looper.db import chat
 
         monkeypatch.setattr(chat, "save_message", AsyncMock(return_value=None))
 
@@ -143,7 +143,7 @@ class TestWebChannelAdapter:
 
 class TestTelegramAdapter:
     def test_split_message_long(self) -> None:
-        from loopx.agents.channels.telegram import TelegramChannelAdapter
+        from looper.agents.channels.telegram import TelegramChannelAdapter
         assert TelegramChannelAdapter._split_message("hello", max_len=100) == ["hello"]
         text = "line one\nline two\nline three\nline four"
         chunks = TelegramChannelAdapter._split_message(text, max_len=20)
@@ -156,7 +156,7 @@ class TestServeChannelWiring:
     a channel without a usable sender allowlist does not start."""
 
     def test_telegram_adapter_reads_settings(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        from loopx.agents.serve import _telegram_adapter_from_config
+        from looper.agents.serve import _telegram_adapter_from_config
         monkeypatch.setenv("MY_TG_TOKEN", "token-from-env")
         adapter = _telegram_adapter_from_config(
             {"bot_token_env": "MY_TG_TOKEN", "allowed_user_ids": ["7", "8"]}
@@ -167,8 +167,8 @@ class TestServeChannelWiring:
 
     def test_telegram_keeps_reading_a_comma_separated_list(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # How the setting was stored before it became a list.
-        from loopx.agents.serve import _telegram_adapter_from_config
-        monkeypatch.setenv("LOOPX_TELEGRAM_BOT_TOKEN", "default-token")
+        from looper.agents.serve import _telegram_adapter_from_config
+        monkeypatch.setenv("LOOPER_TELEGRAM_BOT_TOKEN", "default-token")
         adapter = _telegram_adapter_from_config({"allowed_user_ids": "7, 8"})
         assert adapter is not None
         assert adapter._bot_token == "default-token"
@@ -185,15 +185,15 @@ class TestServeChannelWiring:
         self, config: dict[str, Any], problem: str, monkeypatch: pytest.MonkeyPatch,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
-        from loopx.agents.serve import _telegram_adapter_from_config
+        from looper.agents.serve import _telegram_adapter_from_config
         # The environment fallback no longer opens the channel either.
-        monkeypatch.setenv("LOOPX_TELEGRAM_ALLOWED_USERS", "7")
+        monkeypatch.setenv("LOOPER_TELEGRAM_ALLOWED_USERS", "7")
         with caplog.at_level("ERROR"):
             assert _telegram_adapter_from_config(config) is None
         assert "channel-telegram not started" in caplog.text and problem in caplog.text
 
     def test_lark_adapter_reads_settings(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-        from loopx.agents.serve import _lark_adapter_from_config
+        from looper.agents.serve import _lark_adapter_from_config
         monkeypatch.setenv("MY_LARK_APP", "cli_test")
         adapter = _lark_adapter_from_config({"app_id_env": "MY_LARK_APP", "allowed_open_ids": [OPEN_ID]}, tmp_path)
         assert adapter is not None
@@ -204,14 +204,14 @@ class TestServeChannelWiring:
     def test_lark_without_a_valid_allowlist_does_not_start(
         self, config: dict[str, Any], tmp_path: Path, caplog: pytest.LogCaptureFixture,
     ) -> None:
-        from loopx.agents.serve import _lark_adapter_from_config
+        from looper.agents.serve import _lark_adapter_from_config
         with caplog.at_level("ERROR"):
             assert _lark_adapter_from_config(config, tmp_path) is None
         assert "channel-lark not started" in caplog.text
 
     def test_failed_optional_channel_does_not_stop_server(self) -> None:
-        from loopx.agents.channels.base import ChannelAdapter, DeliveryReceipt
-        from loopx.agents.serve import _register_optional_channel
+        from looper.agents.channels.base import ChannelAdapter, DeliveryReceipt
+        from looper.agents.serve import _register_optional_channel
 
         class _FailingAdapter(ChannelAdapter):
             stopped = False
@@ -251,7 +251,7 @@ class TestLarkAdapter:
         (MessageType.STATUS_UPDATE, {"text": "chunk", "delta": True}, ""),
     ])
     def test_format_reply_delta_skipped(self, message_type: MessageType, payload: dict[str, Any], sent: str) -> None:
-        from loopx.agents.channels.lark import LarkChannelAdapter
+        from looper.agents.channels.lark import LarkChannelAdapter
         env = MessageEnvelope.create(
             source=MANAGER_ADDRESS,
             target=channel_address("lark"),
@@ -299,8 +299,8 @@ class TestDeliverOnce:
         assert asyncio.run(_run()) == 2  # one delta + one final, not four
 
     def test_manager_progress_is_addressed_to_the_channel(self, agent_db: Any) -> None:
-        from loopx.agents.message import TASK_ROUTER_ADDRESS
-        from loopx.agents.tiers.manager import ManagerAgent, ManagerConfig
+        from looper.agents.message import TASK_ROUTER_ADDRESS
+        from looper.agents.tiers.manager import ManagerAgent, ManagerConfig
 
         async def _run() -> tuple[int, int]:
             with tempfile.TemporaryDirectory() as tmp:
@@ -334,12 +334,12 @@ class TestSenderIds:
         ([123456789], ("123456789",)),  # a number from a JSON client
     ])
     def test_telegram_user_ids(self, raw: Any, expected: tuple[str, ...]) -> None:
-        from loopx.agents.channels.allowlist import sender_ids
+        from looper.agents.channels.allowlist import sender_ids
         assert sender_ids("telegram", raw) == expected
 
     @pytest.mark.parametrize("bad", ["abc", "-1001234567890", "0", "007", "1.5", "@someone", "12 34"])
     def test_telegram_refuses_what_is_not_a_user_id(self, bad: str) -> None:
-        from loopx.agents.channels.allowlist import AllowlistError, sender_ids
+        from looper.agents.channels.allowlist import AllowlistError, sender_ids
         with pytest.raises(AllowlistError, match="is not a Telegram user ID"):
             sender_ids("telegram", ["7", bad])
 
@@ -352,18 +352,18 @@ class TestSenderIds:
         "123456789",
     ])
     def test_lark_refuses_what_is_not_an_open_id(self, bad: str) -> None:
-        from loopx.agents.channels.allowlist import AllowlistError, sender_ids
+        from looper.agents.channels.allowlist import AllowlistError, sender_ids
         with pytest.raises(AllowlistError, match="is not a Lark open_id; .*starts with ou_"):
             sender_ids("lark", [bad])
 
     @pytest.mark.parametrize("raw", [{"id": "7"}, 7, [True], [["7"]]])
     def test_a_list_holds_strings(self, raw: Any) -> None:
-        from loopx.agents.channels.allowlist import AllowlistError, sender_ids
+        from looper.agents.channels.allowlist import AllowlistError, sender_ids
         with pytest.raises(AllowlistError):
             sender_ids("lark" if raw == [True] else "telegram", raw)
 
     def test_a_list_is_bounded(self) -> None:
-        from loopx.agents.channels.allowlist import MAX_SENDERS, AllowlistError, sender_ids
+        from looper.agents.channels.allowlist import MAX_SENDERS, AllowlistError, sender_ids
         assert len(sender_ids("telegram", [str(n) for n in range(1, MAX_SENDERS + 1)])) == MAX_SENDERS
         with pytest.raises(AllowlistError, match=f"at most {MAX_SENDERS}"):
             sender_ids("telegram", [str(n) for n in range(1, MAX_SENDERS + 2)])
@@ -378,12 +378,12 @@ class TestSenderIds:
         ("web", {}, None),  # the web channel has no allowlist: it is local-only
     ])
     def test_why_a_channel_does_not_start(self, channel_type: str, config: dict[str, Any], problem: str | None) -> None:
-        from loopx.agents.channels.allowlist import start_problem
+        from looper.agents.channels.allowlist import start_problem
         found = start_problem(channel_type, config)
         assert found is None if problem is None else problem in (found or "")
 
     def test_a_stored_config_holds_the_validated_list(self) -> None:
-        from loopx.agents.channels.allowlist import AllowlistError, normalized_config
+        from looper.agents.channels.allowlist import AllowlistError, normalized_config
         assert normalized_config("telegram", {"bot_token_env": "T", "allowed_user_ids": " 7, 8 "}) == {
             "bot_token_env": "T", "allowed_user_ids": ["7", "8"]}
         assert normalized_config("lark", {"app_id_env": "A"}) == {"app_id_env": "A"}
@@ -392,7 +392,7 @@ class TestSenderIds:
 
 
 def _allowlist(channel_id: str, *ids: str) -> Any:
-    from loopx.agents.channels.allowlist import SenderAllowlist
+    from looper.agents.channels.allowlist import SenderAllowlist
     return SenderAllowlist(channel_id, frozenset(ids))
 
 
@@ -418,7 +418,7 @@ class TestTelegramAllowlist:
     """At the adapter's message handlers: only a listed sender reaches the Manager."""
 
     def _run(self, tmp_path: Path, handler: str, update: Any, *ids: str) -> list[MessageEnvelope]:
-        from loopx.agents.channels.telegram import TelegramChannelAdapter
+        from looper.agents.channels.telegram import TelegramChannelAdapter
 
         async def _main() -> list[MessageEnvelope]:
             bus = MessageBus(runtime_root=tmp_path)
@@ -461,7 +461,7 @@ class TestTelegramAllowlist:
     def test_an_empty_allowlist_keeps_the_channel_from_starting(
         self, tmp_path: Path, caplog: pytest.LogCaptureFixture,
     ) -> None:
-        from loopx.agents.channels.telegram import TelegramChannelAdapter
+        from looper.agents.channels.telegram import TelegramChannelAdapter
 
         async def _main() -> tuple[Any, dict[str, Any]]:
             bus = MessageBus(runtime_root=tmp_path)
@@ -497,7 +497,7 @@ class TestLarkAllowlist:
     def _run(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, event: dict[str, Any], *ids: str) -> Any:
         from types import SimpleNamespace
 
-        from loopx.agents.channels.lark import LarkChannelAdapter
+        from looper.agents.channels.lark import LarkChannelAdapter
 
         sent: list[tuple[str, str]] = []
 
@@ -541,7 +541,7 @@ class TestLarkAllowlist:
     def test_an_empty_allowlist_keeps_the_channel_from_starting(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
     ) -> None:
-        from loopx.agents.channels import lark
+        from looper.agents.channels import lark
         # lark-cli and an app id are there: only the empty list stops it.
         monkeypatch.setattr(lark, "_check_lark_cli_available", lambda: True)
 

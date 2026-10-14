@@ -1,6 +1,6 @@
 """MCP servers in the catalog against a real PostgreSQL: what each run mounts, the secrets, and the import.
 
-Runs only when LOOPX_TEST_DATABASE_URL points at a disposable database. Each
+Runs only when LOOPER_TEST_DATABASE_URL points at a disposable database. Each
 test works in a new schema of its own, dropped afterwards.
 """
 
@@ -14,7 +14,7 @@ import pytest
 
 from tests.test_catalog_db import DSN, _call, _projects, _run
 
-pytestmark = pytest.mark.skipif(not DSN, reason="LOOPX_TEST_DATABASE_URL is not set")
+pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
 SECRET = "sk-test-0123456789"
 
@@ -29,8 +29,8 @@ async def _server(name: str, **fields: Any) -> dict[str, Any]:
 
 async def _mounted(root: Path, role: str, project_id: str | None = None) -> tuple[list[str], dict[str, Any] | None]:
     """The argv a run of ``role`` gets from its installs, and the servers its --mcp-config file names."""
-    from loopx.agents.claude_cli import library_args
-    from loopx.agents.library import load_installed
+    from looper.agents.claude_cli import library_args
+    from looper.agents.library import load_installed
 
     library = await load_installed(root, role, project_id)
     assert library.error is None
@@ -81,7 +81,7 @@ def test_a_server_reaches_only_the_roles_and_projects_it_is_installed_for(
         assert await _mounted(root, "manager") == ([], None)
 
         # The record names the servers, never their values; uninstalling takes the server out of the next run.
-        from loopx.agents.library import load_installed
+        from looper.agents.library import load_installed
 
         record = (await load_installed(root, "reviewer", calc)).record()
         assert record is not None and record["mcp_servers"] == ["search"]
@@ -163,7 +163,7 @@ def test_adding_a_server_refuses_what_it_cannot_be(
 def test_importing_from_this_machine_reads_its_user_mcp_servers(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
-    from loopx.agents import mcp
+    from looper.agents import mcp
 
     claude_json = tmp_path / ".claude.json"
 
@@ -208,7 +208,7 @@ def test_importing_from_this_machine_reads_its_user_mcp_servers(
         assert marker["item_id"] == by_name["marker"]["item_id"] and len(marker["installs"]) == 1
         assert (await _mounted(tmp_path / "rt", "worker"))[1]["marker"]["args"] == ["m.py", "-v"]
         # The plugins-and-skills import leaves the MCP servers alone.
-        from loopx.db import library as db_library
+        from looper.db import library as db_library
 
         await db_library.replace_snapshot([], pool=pool)
         assert sorted(i["name"] for i in (await _call("GET", "/api/catalog"))[1]["items"]) == [

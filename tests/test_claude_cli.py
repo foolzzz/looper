@@ -16,7 +16,7 @@ from typing import Any
 import pytest
 
 from fake_claude import fake_claude
-from loopx.agents.claude_cli import isolation_args, iter_lines, system_prompt_args
+from looper.agents.claude_cli import isolation_args, iter_lines, system_prompt_args
 
 
 def _lines(*chunks: bytes) -> list[bytes]:
@@ -52,7 +52,7 @@ def test_line_longer_than_any_reader_limit() -> None:
 
 class TestClaudeRunRecorder:
     def _recorder(self) -> Any:
-        from loopx.agents.claude_cli import ClaudeRunRecorder
+        from looper.agents.claude_cli import ClaudeRunRecorder
 
         return ClaudeRunRecorder(
             agent_id="worker-1", task_id="task-1", command=["claude", "--print", "go"],
@@ -122,7 +122,7 @@ class TestClaudeRunRecorder:
 
 
 def test_heartbeat_counts_partial_deltas_and_is_throttled(agent_db: Any, monkeypatch: pytest.MonkeyPatch) -> None:
-    from loopx.agents import claude_cli
+    from looper.agents import claude_cli
 
     clock = iter([0.0, 1.0, 2.0, 15.0, 16.0, 17.0])
     monkeypatch.setattr(claude_cli, "_clock", lambda: next(clock))
@@ -144,7 +144,7 @@ def test_heartbeat_counts_partial_deltas_and_is_throttled(agent_db: Any, monkeyp
 
 
 def test_thinking_progress_is_one_row_per_thinking_phase(agent_db: Any) -> None:
-    from loopx.agents.claude_cli import ClaudeRunRecorder
+    from looper.agents.claude_cli import ClaudeRunRecorder
 
     def thinking(tokens: int) -> dict[str, Any]:
         return {"type": "system", "subtype": "thinking_tokens", "estimated_tokens": tokens}
@@ -246,9 +246,9 @@ RESTRICTING_FLAGS = {"--tools", "--allowedTools", "--allowed-tools", "--disallow
 class TestPermissionArgs:
     def test_every_launch_carries_them_with_and_without_a_library(self, tmp_path: Path) -> None:
         # The four agents build their commands from a Launch, so the flags cannot diverge.
-        from loopx.agents.agent_settings import Launch
-        from loopx.agents.claude_cli import permission_args
-        from loopx.agents.library import AgentLibrary
+        from looper.agents.agent_settings import Launch
+        from looper.agents.claude_cli import permission_args
+        from looper.agents.library import AgentLibrary
 
         assert permission_args() == ["--dangerously-skip-permissions"]
         library = AgentLibrary(plugin_dirs=(str(tmp_path / "plugin"),))
@@ -300,7 +300,7 @@ def _resident_session(
     """
     from claude_stream_replay import replay_script
 
-    from loopx.agents.claude_cli import ResidentClaude
+    from looper.agents.claude_cli import ResidentClaude
 
     async def _run() -> Any:
         autonomous: list[tuple[_Observed, Any]] = []
@@ -356,7 +356,7 @@ class TestAutonomousTurns:
     def test_a_handler_that_fails_never_breaks_the_users_turns(self, tmp_path: Path) -> None:
         from claude_stream_replay import replay_script
 
-        from loopx.agents.claude_cli import ResidentClaude
+        from looper.agents.claude_cli import ResidentClaude
 
         class Broken:
             async def event(self, event: dict[str, Any]) -> None:
@@ -384,7 +384,7 @@ class TestAutonomousTurns:
         assert second.usage.cost_usd == pytest.approx(0.03617515 - 0.03359615)
 
     def test_a_turn_of_its_own_that_stop_cuts_short_ends_without_a_result(self, tmp_path: Path) -> None:
-        from loopx.agents.claude_cli import ResidentClaude
+        from looper.agents.claude_cli import ResidentClaude
 
         fake = fake_claude(
             tmp_path / "claude",

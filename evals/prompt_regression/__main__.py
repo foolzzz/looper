@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import sys
 from pathlib import Path
+
+from looper import env
 
 from . import compare, runner, tasks
 
@@ -27,10 +28,9 @@ def _parser() -> argparse.ArgumentParser:
                      help="real mode: --max-budget-usd for every Claude Code run (default 0.25)")
     run.add_argument("--total-cap-usd", type=float, default=0.80,
                      help="real mode: stop the run once its tasks have spent this much (default 0.80)")
-    run.add_argument("--pg-url", default=os.environ.get("LOOPX_EVAL_DATABASE_URL")
-                     or os.environ.get("LOOPX_TEST_DATABASE_URL"),
+    run.add_argument("--pg-url", default=env.get("LOOPER_EVAL_DATABASE_URL") or env.get("LOOPER_TEST_DATABASE_URL"),
                      help="a PostgreSQL server to create the run's database on "
-                          "(default $LOOPX_EVAL_DATABASE_URL, else $LOOPX_TEST_DATABASE_URL)")
+                          "(default $LOOPER_EVAL_DATABASE_URL, else $LOOPER_TEST_DATABASE_URL)")
     run.add_argument("--out-dir", type=Path, default=runner.DEFAULT_OUT_DIR,
                      help="where the run's JSON and server log go (default evals/runs, ignored by git)")
     run.add_argument("--baseline", type=Path,
@@ -53,7 +53,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if not args.pg_url:
-        print("error: give --pg-url (or set LOOPX_EVAL_DATABASE_URL)", file=sys.stderr)
+        print("error: give --pg-url (or set LOOPER_EVAL_DATABASE_URL)", file=sys.stderr)
         return 2
     try:
         selected = tasks.select(args.tasks.split(",") if args.tasks else None)

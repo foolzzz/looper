@@ -1,9 +1,9 @@
-"""Run the task set through a disposable ``loopx serve`` and read the results back.
+"""Run the task set through a disposable ``looper serve`` and read the results back.
 
 Each run gets a new PostgreSQL database (created on the given server and
 dropped afterwards), a free port, and a temporary runtime root and working
-directories. The server is the same entry point ``loopx serve`` runs
-(``loopx.agents.serve.serve_agent``); ``claude`` on its PATH is either the
+directories. The server is the same entry point ``looper serve`` runs
+(``looper.agents.serve.serve_agent``); ``claude`` on its PATH is either the
 scripted stand-in (fake mode) or a wrapper that adds ``--max-budget-usd`` to
 every real Claude Code run (real mode). Tasks go through the HTTP API one at
 a time; the run stops at the total spending cap.
@@ -42,13 +42,13 @@ BASELINES_DIR = Path(__file__).resolve().with_name("baselines")
 DEFAULT_OUT_DIR = REPO_ROOT / "evals" / "runs"
 RESERVED_PORT = 8767  # the operator's own server
 RESERVED_DATABASE = "loopx"  # the operator's own database
-SCHEMA = "loopx-prompt-eval/v1"
+SCHEMA = "looper-prompt-eval/v1"
 
-# The server, started the way ``loopx serve`` starts it, without depending on the CLI module.
+# The server, started the way ``looper serve`` starts it, without depending on the CLI module.
 _SERVE = (
     "import sys\n"
     "from pathlib import Path\n"
-    "from loopx.agents.serve import serve_agent\n"
+    "from looper.agents.serve import serve_agent\n"
     "serve_agent(host='127.0.0.1', port=int(sys.argv[1]), runtime_root=Path(sys.argv[2]), work_dir=Path(sys.argv[3]))\n"
 )
 
@@ -74,7 +74,7 @@ def fresh_database(admin_url: str) -> Iterator[tuple[str, float]]:
     if admin_db == RESERVED_DATABASE:
         raise EvalError(f"refusing to connect to the {RESERVED_DATABASE!r} database; give a URL to 'postgres' "
                         "or a disposable database on the same server")
-    name = f"loopx_eval_{uuid.uuid4().hex[:12]}"
+    name = f"looper_eval_{uuid.uuid4().hex[:12]}"
 
     async def create() -> float:
         conn = await asyncpg.connect(admin_url)
@@ -166,11 +166,11 @@ def install_claude(bin_dir: Path, *, mode: str, scenarios: Path | None = None,
 @contextmanager
 def running_server(*, database_url: str, runtime_root: Path, bin_dir: Path, log_path: Path,
                    home: Path | None = None, startup_timeout: float = 90.0) -> Iterator[Api]:
-    """``loopx serve`` on a free port; stopped with SIGINT, as the operator would."""
+    """``looper serve`` on a free port; stopped with SIGINT, as the operator would."""
     port = free_port()
     manager_dir = runtime_root / "manager"
     manager_dir.mkdir(parents=True, exist_ok=True)
-    env = {**os.environ, "LOOPX_DATABASE_URL": database_url, "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+    env = {**os.environ, "LOOPER_DATABASE_URL": database_url, "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
            "PYTHONPATH": os.pathsep.join(filter(None, [str(REPO_ROOT), os.environ.get("PYTHONPATH")]))}
     if home is not None:
         env["HOME"] = str(home)
@@ -404,7 +404,7 @@ def run(
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     out_dir.mkdir(parents=True, exist_ok=True)
     log_path = out_dir / f"{stamp}-{mode}.server.log"
-    raw_root = Path(tempfile.mkdtemp(prefix="loopx-eval-"))
+    raw_root = Path(tempfile.mkdtemp(prefix="looper-eval-"))
     root = raw_root.resolve()
     timeout = task_timeout or (60.0 if mode == "fake" else 900.0)
     poll = 0.3 if mode == "fake" else 2.0

@@ -4,7 +4,7 @@ The Planner saves its plan row by row and a Planner started later reads it
 back; the Manager's and the Planner's sessions live in ``agent_sessions``;
 the server resumes the tasks it left running with a live plan; and the plan
 and session files kept before are imported once. Runs only when
-LOOPX_TEST_DATABASE_URL points at a disposable database.
+LOOPER_TEST_DATABASE_URL points at a disposable database.
 """
 
 from __future__ import annotations
@@ -15,15 +15,15 @@ from typing import Any
 
 import pytest
 
-from loopx.agents.run_usage import Usage
-from loopx.agents.tiers.planner import PlannerAgent, PlanStep, TaskPlan
+from looper.agents.run_usage import Usage
+from looper.agents.tiers.planner import PlannerAgent, PlanStep, TaskPlan
 from tests.test_usage_api_db import DSN, _run
 
-pytestmark = pytest.mark.skipif(not DSN, reason="LOOPX_TEST_DATABASE_URL is not set")
+pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
 
 async def _task(pool: Any, task_id: str = "task-a", *, status: str = "running") -> str:
-    from loopx.db import projects, tasks
+    from looper.db import projects, tasks
 
     project = await projects.create_project(name=f"calc-{task_id}", work_dir="/w", pool=pool)
     await tasks.create_task(task_id=task_id, requirement="build calc", goal_id="g1", project_id=project["id"],
@@ -48,7 +48,7 @@ def _plan() -> TaskPlan:
 
 def test_a_restarted_planner_reads_back_its_plan_and_session(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Every field the Planner decides with comes back, from rows written one change at a time."""
-    from loopx.db import tasks
+    from looper.db import tasks
 
     async def test(pool: Any) -> None:
         project_id = await _task(pool)
@@ -87,7 +87,7 @@ def test_a_restarted_planner_reads_back_its_plan_and_session(tmp_path: Path, mon
 
 def test_resumable_tasks_and_restart_cleanup(monkeypatch: pytest.MonkeyPatch) -> None:
     """A running task with a live plan is resumed, any other running one stopped; a new start drops the plan."""
-    from loopx.db import agent_sessions, plans, tasks
+    from looper.db import agent_sessions, plans, tasks
 
     async def test(pool: Any) -> None:
         for task_id, status, plan_status in (("task-live", "running", "executing"),
@@ -153,8 +153,8 @@ def _write(path: Path, data: Any) -> None:
 
 
 def test_the_state_files_are_imported_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    from loopx.agents.state_import import import_file_state
-    from loopx.db import agent_sessions, plans
+    from looper.agents.state_import import import_file_state
+    from looper.db import agent_sessions, plans
 
     planner_dir = tmp_path / ".local" / "planner"
     _write(planner_dir / "planner-task-new" / "plan-new.json", CURRENT_PLAN)

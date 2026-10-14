@@ -1,8 +1,8 @@
 """The channel configuration API and its sender allowlists against a real PostgreSQL.
 
-Runs only when LOOPX_TEST_DATABASE_URL points at a disposable database. Each
+Runs only when LOOPER_TEST_DATABASE_URL points at a disposable database. Each
 test works in a new schema of its own, dropped afterwards, seeded the way
-``loopx serve`` seeds it.
+``looper serve`` seeds it.
 """
 
 from __future__ import annotations
@@ -20,8 +20,8 @@ from typing import Any
 
 import pytest
 
-DSN = os.environ.get("LOOPX_TEST_DATABASE_URL")
-pytestmark = pytest.mark.skipif(not DSN, reason="LOOPX_TEST_DATABASE_URL is not set")
+DSN = os.environ.get("LOOPER_TEST_DATABASE_URL")
+pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
 OPEN_ID = "ou_7dab8a3d3cdcc9da365777c7ad535d62"
 
@@ -30,7 +30,7 @@ OPEN_ID = "ou_7dab8a3d3cdcc9da365777c7ad535d62"
 async def _fresh_schema() -> AsyncIterator[Any]:
     import asyncpg
 
-    schema = f"loopx_test_{uuid.uuid4().hex[:12]}"
+    schema = f"looper_test_{uuid.uuid4().hex[:12]}"
     admin = await asyncpg.connect(DSN)
     await admin.execute(f'CREATE SCHEMA "{schema}"')
     pool = await asyncpg.create_pool(DSN, min_size=1, max_size=3, server_settings={"search_path": schema})
@@ -44,8 +44,8 @@ async def _fresh_schema() -> AsyncIterator[Any]:
 
 def _run(test: Callable[[Any], Awaitable[None]], monkeypatch: pytest.MonkeyPatch) -> None:
     """Run ``test(pool)`` on a new, seeded schema that is also the server's pool."""
-    from loopx.agents.serve import seed_channel_configs
-    from loopx.db import connection
+    from looper.agents.serve import seed_channel_configs
+    from looper.db import connection
 
     async def _main() -> None:
         async with _fresh_schema() as pool:
@@ -69,8 +69,8 @@ class _Writer:
 
 
 async def _call(method: str, path: str, body: Any = None) -> tuple[int, Any]:
-    from loopx.agents.http_server import AgentHTTPServer
-    from loopx.agents.tiers.task import TaskRouter
+    from looper.agents.http_server import AgentHTTPServer
+    from looper.agents.tiers.task import TaskRouter
 
     server = AgentHTTPServer(web_adapter=SimpleNamespace(), supervisor=SimpleNamespace(),
                              task_router=TaskRouter(runtime_root=Path(tempfile.mkdtemp())))
@@ -109,7 +109,7 @@ def test_an_allowlist_round_trips_validated(monkeypatch: pytest.MonkeyPatch) -> 
         assert lark["start_problem"] is None
         # A Telegram list written the way it was stored before comes back as a list.
         status, telegram = await _call("PUT", "/api/channel-configs/channel-telegram", {
-            "config": {"bot_token_env": "LOOPX_TELEGRAM_BOT_TOKEN", "allowed_user_ids": "7, 8"},
+            "config": {"bot_token_env": "LOOPER_TELEGRAM_BOT_TOKEN", "allowed_user_ids": "7, 8"},
         })
         assert status == 200 and telegram["config"]["allowed_user_ids"] == ["7", "8"]
 

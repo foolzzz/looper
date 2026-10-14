@@ -1,6 +1,6 @@
 """Every role starts its runtime exactly as before agents: the argv, the environment, the system prompt bytes.
 
-Runs only when LOOPX_TEST_DATABASE_URL points at a disposable database. Each
+Runs only when LOOPER_TEST_DATABASE_URL points at a disposable database. Each
 scenario works in a new schema of its own, dropped afterwards.
 
 ``fixtures/agent_launch_parity_main.json`` is what the code before agents
@@ -27,8 +27,8 @@ import pytest
 
 import agent_launch_parity as parity
 
-DSN = os.environ.get("LOOPX_TEST_DATABASE_URL")
-pytestmark = pytest.mark.skipif(not DSN, reason="LOOPX_TEST_DATABASE_URL is not set")
+DSN = os.environ.get("LOOPER_TEST_DATABASE_URL")
+pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
 MAIN = json.loads((Path(__file__).parent / "fixtures" / "agent_launch_parity_main.json").read_text("utf-8"))
 
@@ -57,10 +57,10 @@ CREATE UNIQUE INDEX idx_agent_setting_layers_place
 def test_each_role_starts_its_runtime_as_main_did(monkeypatch: pytest.MonkeyPatch, scenario: str) -> None:
     import asyncpg
 
-    from loopx.db import connection
+    from looper.db import connection
 
     async def _main() -> dict[str, Any]:
-        schema = f"loopx_test_{uuid.uuid4().hex[:12]}"
+        schema = f"looper_test_{uuid.uuid4().hex[:12]}"
         admin = await asyncpg.connect(DSN)
         await admin.execute(f'CREATE SCHEMA "{schema}"')
         pool = await asyncpg.create_pool(DSN, min_size=1, max_size=4, server_settings={"search_path": schema})
