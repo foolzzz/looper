@@ -1,6 +1,6 @@
 # 开发计划：长程 Agent 上下文体系（M0–M8）
 
-- **状态：** M0–M7 全部交付（M7a 计划状态入库、M7b 任务记忆）；M8a 能力目录与安装已交付，M8b–M8e 待开工；上游 LoopX 清理 B1–B4 已交付；其余见第 5 节待办
+- **状态：** M0–M7 全部交付（M7a 计划状态入库、M7b 任务记忆）；M8a 能力目录与安装、M8b MCP 服务器已交付，M8c–M8e 待开工；上游 LoopX 清理 B1–B4 已交付；其余见第 5 节待办
 - **依据：** [RFC：长程 Agent 的上下文体系 v0](../architecture/rfcs/long-horizon-agent-context-v0.zh-CN.md)。
   设计原则、分层模型和已作出的决定以 RFC 为准；本文只管"怎么分阶段做、做到什么算完成、现在做到哪了"。
 - **仓库：** `foolzzz/looper`，基线 `main`
@@ -36,7 +36,7 @@
 | M7a | 计划状态入库：计划、步骤和 agent 会话以 PostgreSQL 为唯一来源 | ✅ 已交付（looper #45） | M2、M5 |
 | M7b | 任务记忆：任务日志、进度与发现注入、经验沉淀为项目知识 | ✅ 已交付（looper #46） | M7a |
 | M8a | 能力目录与安装：插件和 skill 先进目录，再按范围（全局或项目）和角色安装；项目 skill 并入目录 | ✅ 已交付（looper #48） | M1.6、M4 |
-| M8b | MCP 服务器进目录，安装方式相同；密钥存库、接口打码 | ⏳ 待开工 | M8a |
+| M8b | MCP 服务器进目录，安装方式相同；密钥存库、接口打码 | ✅ 已交付 | M8a |
 | M8c | 进库来源：上传、git、界面新建与编辑 | ⏳ 待开工 | M8a |
 | M8d | 配置层级统一：系统默认 → 角色 → 项目 → 项目里的角色 | ⏳ 待开工 | M8a |
 | M8e | 导出与导入：一个文件，应用前预览，密钥默认留空 | ⏳ 待开工 | M8b、M8c、M8d |
@@ -351,6 +351,14 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
   - 可以从本机 `~/.claude.json` 只读导入；
   - 每次运行把它安装的服务器写成只读的 MCP 配置文件，以 `--mcp-config` 挂载，保留 `--strict-mcp-config`。
 - **验收：** 真实 Claude 的 init 里只出现安装给该角色的 MCP 服务器；API 返回里看不到密钥；卸载后下一次运行不再加载。
+- **核实后确定的做法**（Claude Code 2.1.285，`--print` stream-json，带隔离参数）：
+  - `--mcp-config <文件>` 的格式是 `{"mcpServers": {<名称>: {"type": "stdio", "command", "args", "env"}}}`，http、sse
+    为 `{"type", "url", "headers"}`；与 `--strict-mcp-config` 同用时照常加载，init 里 `source` 为 `dynamic`，工具名
+    `mcp__<名称>__<工具>`，`--dangerously-skip-permissions` 下直接调用；`--strict-mcp-config` 仍挡掉 claude.ai 连接器；
+  - 插件自带的 MCP 服务器（`--plugin-dir` 里的 `.mcp.json`）在 `--strict-mcp-config` 下**不加载**，不加这个参数时以
+    `plugin:<插件>:<名称>` 加载；所以 MCP 只能经目录安装进入运行；
+  - 配置存 `library_mcp_servers`，env 和 header 的值只经 `get_mcp_server(s)` 读出，目录行只带名称，接口显示 `***`；
+    条目的 `sha256` 是整份配置的哈希，Manager、Planner 换配置时照旧以 `--resume` 重启。
 
 #### M8c 进库来源：上传、git、界面
 
@@ -412,6 +420,7 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
 | 2026-10-13 | M7b 交付（looper #46）：步骤被接受时由代码在定案事务里写一条 `task_journal`（Worker 的总结加 Worker、Reviewer 回复里新增的可选 `learnings`，至多 5 条、每条 300 字符），Planner 的 DECISION、SUPERVISE、CHAT 轮注入新的在前、至多 4,000 字符的「进度与发现」，计划行带已接受步骤的总结，Worker 首轮注入依赖在前、至多 2,000 字符的发现；项目开关 `distill_lessons`（默认关）打开时任务完成后多一轮 LESSONS，把日志整理成项目知识文档。验证：真实 PG 加替身 Claude 走完各条规则，真实 haiku 回归评测 5/5、违约 0（$0.34，基线 $0.33），一次最小任务里 Worker 报出 learnings、下一轮 Planner 与依赖步骤的 Worker 都看到、经验文档入库（$0.10）。 |
 | 2026-10-13 | 启动自检（looper #47）：新增 `loopx doctor`，逐项检查 PostgreSQL（连接串的密码打码）、Claude Code CLI、它的登录（`claude auth status`，只读本机凭据、不调用模型；没有这个子命令的旧版本记为未检查）和飞书渠道开启时的 `lark-cli`，每项给出修复方法，有失败时退出码为 1。`loopx serve` 启动时先跑同一组检查：PostgreSQL 不可达仍然退出，但给出修复方法而不是堆栈；缺 `claude` 或未登录只记警告、照常启动，`GET /api/status` 返回 `checks`，控制台每页顶部显示横幅。验证：真实 PG 测试，本机实跑 `loopx doctor`，以及 `PATH` 里没有 `claude` 的一次性服务的横幅截图。 |
 | 2026-10-13 | M8a 交付（looper #48）：能力目录与安装。`library_items` 加上 `origin`、所属项目和描述，新增 `library_installs`（全局或某个项目、角色子集、启用开关）；一次性迁移让已导入的条目都不安装，`project_skills` 保留 id 等价迁入目录并安装给三个任务角色后删除；`load_installed(role, project)` 取代 `load_library` 和 `load_project_skills`，新增目录、安装和项目视图接口，Settings 和项目 Skills 标签改为目录与安装。验证：仿真实规模的旧库（3 个插件、104 个 skill、5 个项目 skill）升级后 107 个条目都未安装、5 个项目 skill 各有一条三角色安装、启用状态不变，再跑一次不变；真实 Claude（haiku）下全局只装给 worker 的 skill 出现在 Worker 的 init、不在 Planner 的，迁移来的 `project:release-stamp` 被 Worker 调用并写出暗号，任务 $0.051；真实 PG 789 通过 |
+| 2026-10-13 | M8b 交付：MCP 服务器作为 `mcp` 目录条目（stdio 或 http/sse），安装方式与插件、skill 相同；env 和 header 的值存在 `library_mcp_servers`、接口只显示 `***`（送回 `***` 保留原值），可从本机 `~/.claude.json` 只读导入；每次运行把安装给它的服务器写成一个按内容哈希命名的只读 `--mcp-config` 文件，回收照旧。验证：真实 haiku 下全局只装给 worker 的 stdio 服务器出现在 Worker 的 init 里并被调用、报出暗号，Planner 的 init 里没有，任务 $0.05（加上核实 CLI 共约 $0.10）；真实 PG 测试与 Settings 截图。 |
 
 ## 5. 不属于本 RFC 的待办
 

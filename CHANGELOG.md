@@ -17,6 +17,21 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+### Added
+
+- **MCP servers in the capability catalog.** An MCP server is a catalog item
+  of kind `mcp` (stdio: command, arguments, environment; or http/sse: URL,
+  headers), installed like a plugin or a skill: globally or in one project,
+  for some roles. Add, edit and delete them in Settings or with
+  `POST /api/catalog/mcp`, `PUT` and `DELETE /api/catalog/<id>`, or import the
+  user-level `mcpServers` of this machine's `~/.claude.json` read-only
+  (`POST /api/catalog/mcp/import`; new ones are installed nowhere).
+  Environment and header values are stored in the database and shown only
+  as `***`; sending `***` back keeps a value. Each run mounts the servers
+  installed for its role as one read-only `--mcp-config` file under
+  `<runtime_root>/.local/mcp/`, beside `--strict-mcp-config`, and records
+  their names. A plugin's own MCP servers still do not load.
+
 ### Changed
 
 - **Behaviour change: plugins and skills load only where they are
