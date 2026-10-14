@@ -68,6 +68,7 @@ export function OriginTag({ item, projectId }: { item: CatalogItem; projectId?: 
   return (
     <Badge variant="outline" className="py-0 font-sans text-[10px] font-normal">
       {text}
+      {item.modified && " · modified"}
     </Badge>
   );
 }

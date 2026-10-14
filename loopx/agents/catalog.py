@@ -148,6 +148,7 @@ async def catalog_view() -> dict[str, Any]:
     from .library import (
         FILE_MAX_BYTES, ITEM_MAX_BYTES, ITEM_MAX_FILES, LAST_IMPORT_KEY, LIBRARY_MAX_BYTES,
     )
+    from .catalog_sources import UPLOAD_MAX_BYTES
 
     rows = await db_library.list_items()
     by_item: dict[str, list[dict[str, Any]]] = defaultdict(list)
@@ -167,7 +168,7 @@ async def catalog_view() -> dict[str, Any]:
         "task_roles": list(TASK_ROLES),
         "caps": {
             "file_max_bytes": FILE_MAX_BYTES, "item_max_bytes": ITEM_MAX_BYTES, "item_max_files": ITEM_MAX_FILES,
-            "library_max_bytes": LIBRARY_MAX_BYTES,
+            "library_max_bytes": LIBRARY_MAX_BYTES, "upload_max_bytes": UPLOAD_MAX_BYTES,
         },
     }
 

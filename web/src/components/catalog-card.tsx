@@ -1,9 +1,11 @@
 import { useEffect, useId, useState } from "react";
 import { ChevronDown, ChevronRight, Download, Loader2, RefreshCw } from "lucide-react";
+import { CatalogSources, SkillForm } from "@/components/catalog-sources";
 import { OriginTag, RoleChecks } from "@/components/install-controls";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
+  deleteCatalogItem,
   fetchCatalog,
   importCatalog,
   installItem,
@@ -40,21 +42,33 @@ function installSummary(installs: Install[]) {
   );
 }
 
+/** Items uploaded, taken from git or written in Settings are edited (skills) and deleted here. */
+const OWN_ORIGINS = new Set(["upload", "git", "ui"]);
+
 function ItemRow({
   item,
   roles,
   busy,
   error,
+  fileMaxBytes,
   onChange,
+  onReplace,
+  onDelete,
 }: {
   item: CatalogItem;
   roles: AgentRole[];
   busy: boolean;
   error: string | undefined;
+  fileMaxBytes: number;
   onChange: (request: () => Promise<{ item: CatalogItem }>) => void;
+  onReplace: (item: CatalogItem) => void;
+  onDelete: () => void;
 }) {
+  const [editing, setEditing] = useState(false);
+  const [confirming, setConfirming] = useState(false);
   const global = item.installs.find((install) => install.scope === "global");
   const where = installSummary(item.installs);
+  const own = OWN_ORIGINS.has(item.origin);
   return (
     <li className="space-y-1 border-t border-border px-5 py-2">
       <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
@@ -105,6 +119,45 @@ function ItemRow({
           {busy && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
           Install globally
         </Button>
+      )}
+      {own && !editing && !confirming && (
+        <div className="flex flex-wrap justify-end gap-1">
+          {item.kind === "skill" && (
+            <Button type="button" variant="ghost" size="sm" disabled={busy} onClick={() => setEditing(true)}
+                    aria-label={`Edit ${item.qualified_name}`}>
+              Edit
+            </Button>
+          )}
+          <Button type="button" variant="ghost" size="sm" disabled={busy} onClick={() => setConfirming(true)}
+                  aria-label={`Delete ${item.qualified_name}`}
+                  className="text-muted-foreground hover:bg-destructive/10 hover:text-destructive">
+            Delete
+          </Button>
+        </div>
+      )}
+      {confirming && (
+        <div className="flex flex-wrap items-center justify-end gap-2">
+          <span className="text-xs text-muted-foreground">
+            Delete it from the catalog{item.installs.length ? " and every place it is installed" : ""}?
+          </span>
+          <Button type="button" variant="destructive" size="sm" disabled={busy} onClick={() => { setConfirming(false); onDelete(); }}>
+            Delete
+          </Button>
+          <Button type="button" variant="ghost" size="sm" onClick={() => setConfirming(false)}>Cancel</Button>
+        </div>
+      )}
+      {editing && (
+        <div className="rounded-md border border-border p-3">
+          <SkillForm
+            item={item}
+            contentMax={item.origin === "ui" ? 64 * 1024 : fileMaxBytes}
+            onSaved={(saved) => {
+              setEditing(false);
+              onReplace(saved);
+            }}
+            onCancel={() => setEditing(false)}
+          />
+        </div>
       )}
       {error && <p role="alert" className="text-xs text-destructive">{error}</p>}
     </li>
@@ -170,8 +223,9 @@ export function CatalogCard() {
   const [rowErrors, setRowErrors] = useState<Record<string, string>>({});
   const [error, setError] = useState("");
 
+  const refresh = () => fetchCatalog().then(setCatalog).catch((e) => setError(errorText(e)));
   useEffect(() => {
-    fetchCatalog().then(setCatalog).catch((e) => setError(errorText(e)));
+    void refresh();
   }, []);
 
   const reimport = async () => {
@@ -187,6 +241,14 @@ export function CatalogCard() {
     }
   };
 
+  /** Put an item the server answered with in its row. */
+  const replace = (item: CatalogItem) =>
+    setCatalog((c) => {
+      if (!c) return c;
+      const items = c.items.map((other) => (other.item_id === item.item_id ? item : other));
+      return { ...c, items, installed_count: items.filter((other) => other.installs.length).length };
+    });
+
   /** Run one install change; the item it answers with replaces the row, and a refusal shows the server's reason. */
   const change = async (itemId: string, request: () => Promise<{ item: CatalogItem }>) => {
     setPending((p) => new Set(p).add(itemId));
@@ -196,12 +258,7 @@ export function CatalogCard() {
       return next;
     });
     try {
-      const { item } = await request();
-      setCatalog((c) => {
-        if (!c) return c;
-        const items = c.items.map((other) => (other.item_id === item.item_id ? item : other));
-        return { ...c, items, installed_count: items.filter((other) => other.installs.length).length };
-      });
+      replace((await request()).item);
     } catch (e) {
       setRowErrors((errors) => ({ ...errors, [itemId]: errorText(e) }));
     } finally {
@@ -258,6 +315,7 @@ export function CatalogCard() {
           {imported ? "Re-import" : "Import from this machine"}
         </Button>
       </div>
+      <CatalogSources catalog={catalog} onAdded={() => void refresh()} />
       {error && <p role="alert" className="border-t border-border px-5 py-2 text-xs text-destructive">{error}</p>}
       {catalog.last_import && <ImportReport report={catalog.last_import} />}
       {!empty && (
@@ -289,7 +347,17 @@ export function CatalogCard() {
                         roles={catalog.roles}
                         busy={pending.has(item.item_id)}
                         error={rowErrors[item.item_id]}
+                        fileMaxBytes={catalog.caps.file_max_bytes}
                         onChange={(request) => void change(item.item_id, request)}
+                        onReplace={replace}
+                        onDelete={() =>
+                          void change(item.item_id, () =>
+                            deleteCatalogItem(item.item_id).then(() => {
+                              void refresh();
+                              return { item };
+                            }),
+                          )
+                        }
                       />
                     ))}
                   </ul>
