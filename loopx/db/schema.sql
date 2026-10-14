@@ -107,6 +107,25 @@ CREATE TABLE IF NOT EXISTS agent_sessions (
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+-- A task's journal: what its steps delivered and found. Code writes an entry,
+-- never the model: 'step_accepted' in the transaction that settles an
+-- accepted step, with the step's summary and the learnings its Worker and
+-- Reviewer reported. The Planner's turns and a Worker's first turn get the
+-- entries back in bounded sections (loopx/agents/tiers/journal.py).
+CREATE TABLE IF NOT EXISTS task_journal (
+    id          BIGSERIAL PRIMARY KEY,
+    task_id     TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    step_id     TEXT NOT NULL,
+    kind        TEXT NOT NULL CHECK (kind IN ('step_accepted')),
+    summary     TEXT NOT NULL DEFAULT '',
+    learnings   TEXT[] NOT NULL DEFAULT '{}',
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_task_journal_task ON task_journal (task_id, id);
+-- A step is accepted once.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_task_journal_accepted ON task_journal (task_id, step_id)
+    WHERE kind = 'step_accepted';
+
 CREATE TABLE IF NOT EXISTS llm_profiles (
     id               BIGSERIAL PRIMARY KEY,
     name             TEXT NOT NULL UNIQUE,
@@ -239,6 +258,9 @@ ALTER TABLE projects ADD COLUMN IF NOT EXISTS task_budget_action TEXT
 ALTER TABLE projects ADD COLUMN IF NOT EXISTS supervise_interval_seconds INTEGER
     CHECK (supervise_interval_seconds >= 0);
 ALTER TABLE projects ADD COLUMN IF NOT EXISTS review_policy TEXT CHECK (review_policy IN ('planner', 'all'));
+-- true: when a task completes, its Planner turns the task journal into a
+-- lessons document in the project's knowledge; NULL or false: off.
+ALTER TABLE projects ADD COLUMN IF NOT EXISTS distill_lessons BOOLEAN;
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS project_id TEXT REFERENCES projects(id);
 -- Why a failed task failed, when code can tell (loopx/db/tasks.py FailKind); NULL
 -- otherwise. 'task_budget': it reached its project's task_budget_usd.

@@ -16,6 +16,8 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any
 
+from .journal import LESSONS_MAX_CHARS
+
 MAX_STEPS = 8
 MAX_RETRIES = 2  # per step
 
@@ -32,6 +34,8 @@ class TurnKind(str, Enum):
     DECISION = "DECISION"
     CHAT = "CHAT"
     SUPERVISE = "SUPERVISE"
+    # The extra turn of a completed task whose project distills lessons; its message gives its own shape.
+    LESSONS = "LESSONS"
 
 
 class SuperviseAction(str, Enum):
@@ -242,6 +246,14 @@ def parse_wrap_up(text: str) -> str:
     if data.get("decision") != Decision.FAIL.value:
         raise ProtocolError(f"the only decision allowed now is fail; got {data.get('decision')!r}")
     return _required_text(data, "reason")
+
+
+def parse_lessons(text: str) -> str:
+    """The Markdown document of a LESSONS reply, clipped to ``LESSONS_MAX_CHARS``."""
+    data = extract_reply(text)
+    _only_keys(data, {"lessons"}, "the LESSONS reply")
+    lessons = _required_text(data, "lessons")
+    return lessons if len(lessons) <= LESSONS_MAX_CHARS else lessons[: LESSONS_MAX_CHARS - 1].rstrip() + "…"
 
 
 def parse_chat(text: str, plan: PlanView) -> ChatReply:

@@ -62,13 +62,16 @@ the Planner or the user); take them into account.
 
 End your final message with exactly one JSON object, your report, and nothing
 after it:
-{"status": "completed", "changed_files": {"path": "description"}, "deleted_files": ["path"], "summary": "..."}
+{"status": "completed", "changed_files": {"path": "description"}, "deleted_files": ["path"], "summary": "...", "learnings": ["..."]}
 - status: "completed" only when every part of the step is done; "failed" when
   any part was not done.
 - changed_files: every file you created or modified, with a short description
   of the change.
 - deleted_files: every file you deleted.
 - summary: what you did and how you checked it.
+- learnings (optional): up to 5 short findings or pitfalls later steps of the
+  task should know, such as "the build needs `make gen` first"; leave out what
+  the summary already says.
 Give paths relative to the working directory. The report is checked against
 the files on disk: a changed file that does not exist, or a deleted file that
 still does, fails the step."""
@@ -86,11 +89,13 @@ wrong instead.
 
 End your final message with exactly one JSON object, your verdict, and nothing
 after it:
-{"passed": true, "findings": ["..."], "summary": "..."}
+{"passed": true, "findings": ["..."], "summary": "...", "learnings": ["..."]}
 - passed: the JSON boolean true only when the work meets every acceptance
   criterion; false otherwise.
 - findings: each problem you found, one per item; [] when there is none.
-- summary: your conclusion in a sentence or two."""
+- summary: your conclusion in a sentence or two.
+- learnings (optional): up to 5 short findings or pitfalls later steps of the
+  task should know, beyond this step's problems."""
 
 
 # The task requirement's share of a task section; a longer one is clipped so

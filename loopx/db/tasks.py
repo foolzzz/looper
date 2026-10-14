@@ -10,6 +10,7 @@ from typing import Any
 
 import asyncpg
 
+from . import journal as db_journal
 from .connection import get_pool
 
 # A task in one of these is queued or running.
@@ -166,6 +167,7 @@ async def get_task_with_steps(task_id: str, *, pool: asyncpg.Pool | None = None)
     )
     result = _task(task_row)
     result["steps"] = [dict(r) for r in step_rows]
+    result["journal"] = await db_journal.list_entries(task_id, pool=pool)
     return result
 
 

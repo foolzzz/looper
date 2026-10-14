@@ -16,7 +16,11 @@ make the changes. Each event is one user turn on it:
   running Worker or add steps.
 
 Every reply ends with JSON that ``planner_protocol`` validates; code then
-does the dispatching. The plan, its steps and the Planner's Claude session
+does the dispatching. An accepted step gets an entry in the task journal
+(``journal``) with its summary and its agents' learnings; the Planner's
+DECISION, SUPERVISE and CHAT turns and each Worker's first turn carry the
+journal back, and a project with ``distill_lessons`` gets one LESSONS turn when
+a task completes, saved as a project knowledge document. The plan, its steps and the Planner's Claude session
 live in PostgreSQL (``plans``, ``agent_sessions``), written as they change; a
 Planner started after the server restarted reads them back and carries on
 (TASK_RESUME) without planning again. The system prompt is rebuilt for every turn from the
@@ -60,6 +64,7 @@ from ..claude_cli import (
     isolation_args,
     system_prompt_args,
 )
+from .. import knowledge as project_knowledge
 from ..knowledge import AgentKnowledge, documents_label, load_knowledge
 from ..library import load_library
 from ..project_execution import ProjectExecution, TaskBudgetAction, format_usd
@@ -74,6 +79,8 @@ from ..message import (
     planner_address,
     worker_address,
 )
+from . import journal
+from .journal import JournalEntry
 from .planner_protocol import (
     MAX_RETRIES,
     MAX_STEPS,
@@ -90,6 +97,7 @@ from .planner_protocol import (
     TurnKind,
     parse_chat,
     parse_decision,
+    parse_lessons,
     parse_plan,
     parse_supervise,
     parse_wrap_up,
@@ -241,6 +249,8 @@ class TaskPlan:
     session_totals: Usage = field(default_factory=Usage)
     final_summary: str = ""  # the last accepted step's summary
     fail_reason: str = ""
+    # The task journal (task_journal), oldest first: an entry per accepted step, written as it is accepted.
+    journal: list[JournalEntry] = field(default_factory=list)
 
     @property
     def is_complete(self) -> bool:
@@ -588,8 +598,9 @@ class PlannerAgent:
                 "acceptance_criteria": step.acceptance_criteria,
                 "feedback": list(step.feedback),
                 "attempt": step.retries + 1,
-                # Its first user turn: what the steps it depends on reported.
+                # Its first user turn: what the steps it depends on reported, and the task journal's findings.
                 "dependencies": self._dependency_reports(plan, step),
+                "findings": journal.worker_section(plan.journal, step.depends_on),
                 "context": {"work_dir": plan.work_dir},
             },
             correlation_id=plan.correlation_id,
@@ -677,7 +688,8 @@ class PlannerAgent:
         passed = result.get("passed") is True
         findings = result.get("findings") or []
         step.result = {**(step.result or {}), "verify_passed": passed, "verify_findings": findings,
-                       "verify_summary": result.get("summary", "")}
+                       "verify_summary": result.get("summary", ""),
+                       "verify_learnings": journal.learnings(result.get("learnings"))}
         await self._activity(
             "text" if passed else "error",
             f"Verify {'passed' if passed else 'failed'}: {str(result.get('summary') or '')[:150]}",
@@ -785,8 +797,13 @@ class PlannerAgent:
         await self._activity("phase", summary)
 
     async def _step_settled(self, plan: TaskPlan, step: PlanStep) -> None:
-        """Save ``step``'s outcome, then finish the task or start the steps now ready."""
-        await self._save(plan, step, plan_row=True)  # an accept's summary or a fail's reason
+        """Save ``step``'s outcome, then finish the task or start the steps now ready.
+
+        An accepted step's journal entry is saved with it, in one transaction.
+        """
+        entry = self._accepted_entry(plan, step) if step.status == "verified" else None
+        # An accept's summary or a fail's reason, and the journal entry.
+        await self._save(plan, step, plan_row=True, entry=entry)
         await self._report_progress(plan)
         if plan.has_failed:
             await self._fail_plan(plan)
@@ -794,6 +811,21 @@ class PlannerAgent:
             await self._complete_plan(plan)
         else:
             await self._dispatch_ready(plan)
+
+    @staticmethod
+    def _accepted_entry(plan: TaskPlan, step: PlanStep) -> JournalEntry | None:
+        """The journal entry of ``step``, just accepted, added to the plan's journal; None if it has one."""
+        if any(entry.step_id == step.step_id for entry in plan.journal):
+            return None
+        result = step.result or {}
+        entry = JournalEntry(
+            step_id=step.step_id, step=step.label,
+            summary=journal.clip(result.get("summary"), journal.SUMMARY_MAX_CHARS),
+            learnings=journal.merged_learnings(journal.learnings(result.get("learnings")),
+                                               journal.learnings(result.get("verify_learnings"))),
+        )
+        plan.journal.append(entry)
+        return entry
 
     # --- Resuming after a server restart ---
 
@@ -855,7 +887,8 @@ class PlannerAgent:
             passed = result.get("verify_passed") is True
             kind = ResultKind.REVIEW
             report = self._review_report(step, {"passed": passed, "summary": result.get("verify_summary"),
-                                                "findings": result.get("verify_findings")})
+                                                "findings": result.get("verify_findings"),
+                                                "learnings": result.get("verify_learnings")})
         else:
             passed = result.get("status") == "completed"
             kind = ResultKind.WORK
@@ -1341,7 +1374,16 @@ class PlannerAgent:
                 f"- {step.label} [{step.status}] {_clip(step.instruction, 200)} "
                 f"(depends on: {deps}; review: {'yes' if step.review else 'no'}; retries: {step.retries})"
             )
+            summary = _clip((step.result or {}).get("summary"), 200) if step.status == "verified" else ""
+            if summary:
+                lines.append(f"  summary: {summary}")
         return lines
+
+    @staticmethod
+    def _progress_lines(plan: TaskPlan) -> list[str]:
+        """The task journal's "Progress and findings" section, after a blank line; nothing before an entry."""
+        section = journal.planner_section(plan.journal)
+        return ["", *section] if section else []
 
     def _plan_message(self, plan: TaskPlan) -> str:
         return "\n".join([
@@ -1369,6 +1411,7 @@ class PlannerAgent:
             lines.append(f"- error: {_clip(result['error'], 500)}")
         if result.get("final_message"):
             lines.append(f"- the Worker's final message: {_clip(result['final_message'], 300)}")
+        lines.extend(f"- learning: {item}" for item in journal.learnings(result.get("learnings")))
         return lines
 
     def _review_report(self, step: PlanStep, result: dict[str, Any]) -> list[str]:
@@ -1381,6 +1424,7 @@ class PlannerAgent:
         findings = result.get("findings")
         if isinstance(findings, list):
             lines.extend(f"- finding: {_clip(f, 300)}" for f in findings[:10])
+        lines.extend(f"- learning: {item}" for item in journal.learnings(result.get("learnings")))
         return lines
 
     async def _running_report(self, plan: TaskPlan, step: PlanStep) -> list[str]:
@@ -1403,6 +1447,7 @@ class PlannerAgent:
             "[SUPERVISE] A periodic check on the Workers running now — no result has arrived.",
             "",
             *self._plan_lines(plan),
+            *self._progress_lines(plan),
             "",
             "Workers running now and what they have done lately:",
         ]
@@ -1430,6 +1475,7 @@ class PlannerAgent:
             f"[DECISION] Step {step.label} (step {step.index + 1}) has its {who}'s result.",
             "",
             *self._plan_lines(plan),
+            *self._progress_lines(plan),
             "",
             *report,
         ]
@@ -1450,6 +1496,7 @@ class PlannerAgent:
             "",
             *self._plan_lines(plan),
             f"Running now: {running_text}",
+            *self._progress_lines(plan),
             "",
             "User message:",
             text,
@@ -1466,6 +1513,9 @@ class PlannerAgent:
         await self._save(plan, plan_row=True)
         await update_task_phase(self._task_id, "completed")
         await self._activity("phase", "All steps verified — task completed")
+        if self._execution.lessons_on:
+            # Before the final status: the TaskRouter ends the Planner when it gets it.
+            await self._distill_lessons(plan)
 
         summary = plan.final_summary
         if not summary:
@@ -1495,6 +1545,56 @@ class PlannerAgent:
             correlation_id=plan.correlation_id,
             metadata={"origin_channel_id": plan.origin_channel_id},
         ))
+
+    async def _distill_lessons(self, plan: TaskPlan) -> None:
+        """One more Planner turn turns the task journal into a lessons document, saved in the project's
+        knowledge (``distill_lessons``). Any problem is a warning in the task's activity: the task completed."""
+        if not plan.journal:
+            await self._activity("phase", "No lessons written: the task journal is empty")
+            return
+        cap = self._execution.task_budget_usd
+        if cap is not None:
+            try:
+                spent = float((await db_llm_records.task_costs([self._task_id]))[self._task_id]["cost_usd"])
+            except Exception:
+                logger.warning("planner %s cannot read its task's cost", self.agent_id, exc_info=True)
+                spent = 0.0
+            if spent >= cap:
+                await self._activity("error", f"Warning: no lessons written: the task has spent its "
+                                              f"${format_usd(cap)} cap (task_budget_usd)")
+                return
+        try:
+            lessons = await self._ask(TurnKind.LESSONS, self._lessons_message(plan), parse_lessons)
+        except PlannerTurnError as exc:
+            await self._activity("error", f"Warning: the Planner could not write the task's lessons: {exc}"[:500])
+            return
+        title = f"Lessons: {_clip(plan.requirement, project_knowledge.TITLE_MAX_CHARS - 12)}"
+        try:
+            await project_knowledge.add_document(plan.project_id, {
+                "source_kind": "text", "title": title, "content": lessons,
+                "summary": f"What task {self._task_id} found and learned, written by its Planner when it completed",
+            }, self._runtime_root)
+        except Exception as exc:
+            logger.warning("planner %s cannot save the task's lessons", self.agent_id, exc_info=True)
+            await self._activity("error", f"Warning: the task's lessons were not saved to project knowledge: "
+                                          f"{exc}"[:500])
+            return
+        await self._activity("phase", f"Lessons saved to project knowledge: {title}"[:300])
+
+    def _lessons_message(self, plan: TaskPlan) -> str:
+        return "\n".join([
+            "[LESSONS] The task is complete. Turn its journal below into a short lessons document for the "
+            "project's knowledge, which later tasks of the project read: the findings, pitfalls, commands and "
+            "conventions that will still hold. Leave out what mattered to this task only. Do not change any files.",
+            "",
+            *journal.lessons_journal(plan.journal),
+            "",
+            f"Write the document in Markdown, at most {journal.LESSONS_MAX_CHARS} characters. End your reply with "
+            "exactly one ```json block, and nothing after it:",
+            "```json",
+            '{"lessons": "# Lessons\\n\\n- ..."}',
+            "```",
+        ])
 
     async def _fail_plan(self, plan: TaskPlan, *, reason: str = "", fail_kind: FailKind | None = None) -> None:
         assert self._bus is not None
@@ -1762,15 +1862,19 @@ class PlannerAgent:
         else:
             await self._activity("phase", f"Project background applied ({len(background)} chars)")
 
-    async def _save(self, plan: TaskPlan, *steps: PlanStep, plan_row: bool = False) -> None:
-        """Save ``steps`` and, with ``plan_row``, the plan's own state, in one transaction.
+    async def _save(
+        self, plan: TaskPlan, *steps: PlanStep, plan_row: bool = False, entry: JournalEntry | None = None,
+    ) -> None:
+        """Save ``steps``, with ``plan_row`` the plan's own state and with ``entry`` a journal entry, in one
+        transaction.
 
         A failed write is logged and the task goes on from memory; only a
         restart would miss it.
         """
         try:
             await db_plans.save(self._task_id, plan=plan.row() if plan_row else None,
-                                steps=[_step_row(step) for step in {id(step): step for step in steps}.values()])
+                                steps=[_step_row(step) for step in {id(step): step for step in steps}.values()],
+                                journal=[entry.row()] if entry else [])
         except Exception:
             logger.exception("failed to save the plan of task %s", self._task_id)
 
@@ -1825,4 +1929,5 @@ class PlannerAgent:
                 feedback=list(sd.get("feedback") or []),
                 missed_messages=list(sd.get("missed_messages") or []),
             ))
+        plan.journal = [JournalEntry.from_row(row) for row in stored.get("journal") or []]
         self._plan = plan
