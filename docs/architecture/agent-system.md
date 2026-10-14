@@ -28,7 +28,7 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
 - Runs one resident Claude process through `ResidentClaude`
   (`loopx/agents/claude_cli.py`), which each task's Planner uses too, started
   on the first chat message:
-  `claude --print --verbose --output-format stream-json --input-format stream-json --include-partial-messages <isolation flags> --append-system-prompt-file <file> --system-prompt-snapshot off --dangerously-skip-permissions --model M [--effort E] [--plugin-dir <dir> ...] [--resume <session_id>]`
+  `claude --print --verbose --output-format stream-json --input-format stream-json --include-partial-messages --replay-user-messages <isolation flags> --append-system-prompt-file <file> --system-prompt-snapshot off --dangerously-skip-permissions --model M [--effort E] [--plugin-dir <dir> ...] [--resume <session_id>]`
   (see [What an agent's Claude Code loads](#what-an-agents-claude-code-loads),
   [What an agent may do](#what-an-agent-may-do) and
   [The library](#the-library-imported-plugins-and-skills)). Like every agent
@@ -38,9 +38,11 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
   Its system prompt is its harness (its own `harness_prompt`, else the default
   in Settings), the `manager` role prompt and `TASK_PLACEMENT_RULE`; it has no
   project and no task section.
-  Each chat message is one user turn on its stdin and ends at that turn's
-  `result`; messages are handled one at a time, and each turn is one Runs
-  record holding only that turn's cost and tokens
+  Each chat message is one user turn on its stdin; its turn starts when
+  Claude starts that message and ends at the next `result`
+  ([Turns Claude runs on its own](#turns-claude-runs-on-its-own)). Messages
+  are handled one at a time, and each turn is one Runs record holding only
+  that turn's cost and tokens
   ([What a run spent](#what-a-run-spent-and-how-large-its-context-grew)); the
   session's running totals are saved beside its id in
   `.local/manager/session.json` (`session_totals`). When Claude exits
@@ -49,6 +51,15 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
   changes, the next message starts a new process that
   resumes the saved session with `--resume`. Stopping the Manager closes
   Claude's stdin and kills it if it is still running after 5 s
+- A turn its Claude runs on its own, after background work it started ends,
+  is a Runs record of its own (input "(no user message: ...)", metadata
+  `autonomous: true`). What Claude said in it goes as a reply of its own
+  (`AGENT_REPLY` with no `reply_to`, payload `autonomous: true`) to the
+  channel and correlation of the message Claude answered before it. A web
+  message's payload names its chat session (`chat_session_id`), so the web
+  channel adds the reply to that chat's history (`chat_messages`, shown when
+  the chat is opened) instead of a message's stream; Lark and Telegram send it
+  to the chat. With no message before it, the reply is only recorded
 
 ### TaskRouter (`loopx/agents/tiers/task.py`)
 
@@ -132,7 +143,7 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
   process per step attempt.
 - Keeps one resident Claude process through `ResidentClaude`, like the
   Manager, started on the task's first turn in the task's `work_dir`:
-  `claude --print --verbose --output-format stream-json --input-format stream-json --include-partial-messages <isolation flags> --append-system-prompt-file <file> --system-prompt-snapshot off --dangerously-skip-permissions --model M [--effort E] [--plugin-dir <dir> ...] [--add-dir <dir> ...] [--max-turns N] [--resume <session_id>]`.
+  `claude --print --verbose --output-format stream-json --input-format stream-json --include-partial-messages --replay-user-messages <isolation flags> --append-system-prompt-file <file> --system-prompt-snapshot off --dangerously-skip-permissions --model M [--effort E] [--plugin-dir <dir> ...] [--add-dir <dir> ...] [--max-turns N] [--resume <session_id>]`.
   The system prompt is rebuilt for every turn from the harness (the project's
   Planner override, else the default in Settings), the `planner` role prompt,
   the task's project, the task section (task id, project name and
@@ -191,6 +202,11 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
   (`system_prompt`, `system_prompt_sha256`, `prompt_layers`). The activity gets short
   summaries: `Planner Claude Code started (pid N...)`, `Plan created: ...`,
   `Planner decision on step N (s2): accept: ...`, `Plan changed: ...`.
+- A turn its Claude runs on its own, after background work it started ends,
+  is a row of its own (input "(no user message: ...)", `metadata.autonomous`
+  true) and counts toward the task's cost. What Claude said in it answers no
+  Planner request, so it decides nothing about the plan; the Planner logs it
+  ([Turns Claude runs on its own](#turns-claude-runs-on-its-own)).
 - The TaskRouter calls `PlannerAgent.stop()`, which ends its Claude, when the
   task ends (completed, failed, stopped or cancelled) and when the server
   stops.
@@ -675,6 +691,43 @@ So:
   by session and by UTC day, and its latest turns (oldest first) with each
   turn's context, cost and compactions. That is the Manager's and the
   Planners' context over time.
+
+### Turns Claude runs on its own
+
+A resident Claude (Manager, Planner) also runs turns that answer no message.
+Verified against Claude Code 2.1.285 (haiku, with the resident flags and
+`--replay-user-messages`; recorded in
+`tests/fixtures/claude_stream/background_*.jsonl`):
+
+- A message written with a `uuid` keeps it. Claude writes a
+  `command_lifecycle` event for it in state `queued` when it reads the
+  message, `started` when it begins the message's turn and `completed` right
+  after the turn's result. The turn's `system/init` follows `started`; then
+  comes the message's replay (`isReplay`, the same uuid; only with
+  `--replay-user-messages`). The result names the message in
+  `user_message_uuid` and `user_message_uuids`.
+- When background work a turn started (a Bash command or a subagent run in
+  the background) ends and no turn is running, Claude writes
+  `system/task_notification` and runs a turn of its own: `system/init` up to a
+  result with no `user_message_uuid` and an `origin`
+  (`{"kind": "task-notification", ...}`), with no lifecycle event and no
+  replay. A background subagent's own events (with a `parent_tool_use_id`)
+  come before it, between the turns. A message that arrives meanwhile is
+  `queued` at once and `started` only after that result.
+- Work that ends during a user turn is folded into that turn (a replayed
+  `<task-notification>` message with an `origin`) and answered by its result.
+
+`ResidentClaude` reads a process's output for as long as it runs. A user
+turn starts at its message's `started` event, or its replay, and ends at the
+next result. Every other event belongs to a turn of Claude's own, which runs
+from a `system/init` (or a lone result) to a result and starts with the
+events written since the previous turn. The owner's `autonomous` handler gets
+that turn; its cost is its share of the running totals, taken in the order
+Claude wrote the results, so the turns around it keep theirs. Until a process
+has marked a user turn (the first events of a process, a stand-in that writes
+no markers) the waiting message's turn starts with the next event, as before.
+A turn of Claude's own still running when the process stops is recorded
+without a result.
 
 ## Message Bus
 

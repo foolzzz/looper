@@ -43,7 +43,17 @@ from typing import Any, TypeVar
 from ..bus import MessageBus
 from .. import agent_settings
 from ..agent_settings import BUILTIN_DEFAULTS, AgentDefaults, AgentType, Launch, resolve_harness, resolve_launch
-from ..claude_cli import ClaudeRunRecorder, ResidentClaude, exit_note, isolation_args, system_prompt_args
+from ..claude_cli import (
+    AUTONOMOUS_INPUT,
+    AutonomousHandler,
+    AutonomousRun,
+    ClaudeRunRecorder,
+    ResidentClaude,
+    ResidentTurn,
+    exit_note,
+    isolation_args,
+    system_prompt_args,
+)
 from ..knowledge import AgentKnowledge, documents_label, load_knowledge
 from ..library import load_library
 from ..project_skills import AgentProjectSkills, load_project_skills, skills_label
@@ -1024,6 +1034,9 @@ class PlannerAgent:
             "--input-format", "stream-json",
             # Partial deltas keep the turn's heartbeat current while Claude writes.
             "--include-partial-messages",
+            # Claude echoes each message, marked with the uuid it was sent with, when it starts the message's
+            # turn; a turn Claude runs on its own has no such echo.
+            "--replay-user-messages",
             # None of the operator's personal settings, memory, hooks, plugins or MCP servers; the
             # permissions every agent shares, the library's plugins and skills and the project's skills
             # come with the launch args.
@@ -1068,7 +1081,8 @@ class PlannerAgent:
             command = base + (["--resume", plan.session_id] if plan.session_id else [])
             try:
                 await self._claude.start(command, cwd=plan.work_dir, signature=signature, env=launch.environment(),
-                                         totals=plan.session_totals if plan.session_id else None)
+                                         totals=plan.session_totals if plan.session_id else None,
+                                         autonomous=self._autonomous_turns(plan, command, system_prompt, launch))
             except OSError as exc:
                 start_error = f"cannot start Claude Code: {exc}"
             else:
@@ -1136,7 +1150,7 @@ class PlannerAgent:
             error = f"Claude Code turn did not succeed ({result_event.get('subtype') or 'error'})"
         elif not final_text.strip():
             error = "Claude Code returned an empty reply"
-        usage = self._claude.turn_usage(result_event)
+        usage = turn.usage
         if result_event is not None:
             plan.session_totals = self._claude.totals
             self._save_plan(plan)
@@ -1149,6 +1163,42 @@ class PlannerAgent:
         if error:
             raise PlannerTurnError(error)
         return final_text
+
+    def _autonomous_turns(
+        self, plan: TaskPlan, command: list[str], system_prompt: SystemPrompt, launch: Launch,
+    ) -> AutonomousHandler:
+        """How the Planner takes a turn its Claude (started with these) runs on its own.
+
+        The turn is a run of its own. What Claude said in it answers none of
+        the Planner's requests, so it decides nothing about the plan and is
+        only logged.
+        """
+
+        async def begin(_after: Any) -> AutonomousRun:
+            recorder = ClaudeRunRecorder(
+                agent_id=self.agent_id,
+                task_id=self._task_id,
+                command=command,
+                cwd=plan.work_dir,
+                input_text=AUTONOMOUS_INPUT,
+                session_id=plan.session_id,
+                pid=self._claude.pid,
+                system_prompt=system_prompt,
+                launch=launch,
+                autonomous=True,
+            )
+            await recorder.start()
+
+            async def on_end(text: str, turn: ResidentTurn) -> None:
+                if turn.result_event is not None:
+                    plan.session_totals = self._claude.totals  # it spent too: a restart resumes from here
+                    self._save_plan(plan)
+                logger.info("%s: Claude ran a turn on its own after background work ended; its reply decides "
+                            "nothing: %s", self.agent_id, _clip(text, 300) or "(nothing)")
+
+            return AutonomousRun(recorder, on_end)
+
+        return begin
 
     def _system_prompt(self, plan: TaskPlan, settings: PlannerSettings, knowledge: AgentKnowledge) -> SystemPrompt:
         """The harness, the role prompt, the project background and knowledge index, the task, then the reply
