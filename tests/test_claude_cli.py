@@ -395,7 +395,7 @@ def _kinds(events: list[dict[str, Any]]) -> list[str]:
 class TestAutonomousTurns:
     def test_a_background_subagents_turn_is_not_the_next_messages(self, tmp_path: Path) -> None:
         turns, autonomous, totals = _resident_session(tmp_path, "background_agent", ["start it", "7*6?"])
-        (first_events, first), (second_events, second) = turns
+        (_, first), (second_events, second) = turns
         assert (first.result_event["result"], second.result_event["result"]) == ("LAUNCHED", "42")
         assert first.session_started and second.session_started
         # The turn Claude ran on its own went to the owner, with the subagent's events before it.

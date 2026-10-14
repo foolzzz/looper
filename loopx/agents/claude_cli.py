@@ -9,7 +9,7 @@ import os
 import time
 from collections import deque
 from collections.abc import AsyncIterator, Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
 from uuid import uuid4
@@ -239,7 +239,7 @@ class ResidentTurn:
     result_event: dict[str, Any] | None
     exit_code: int | None = None
     session_started: bool = True
-    usage: Usage = Usage()
+    usage: Usage = field(default_factory=Usage)
 
 
 def exit_note(exit_code: int | None) -> str:
@@ -280,7 +280,7 @@ class _UserTurn:
     done: asyncio.Future[dict[str, Any] | None]
     started: bool = False
     session_started: bool = False
-    usage: Usage = Usage()
+    usage: Usage = field(default_factory=Usage)
 
     def starts_with(self, event: dict[str, Any]) -> bool:
         """Claude began this message's turn: its "started" lifecycle event, or its replay."""
