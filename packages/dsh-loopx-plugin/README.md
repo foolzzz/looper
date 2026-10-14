@@ -30,9 +30,7 @@ followup.
 The package does not expose LoopX model tools, a binding sidecar, or its own
 Goal/Todo state. Models use the installed LoopX skills and call the LoopX CLI
 directly. LoopX remains the only authority for Goal, Agent, Todo, quota,
-activation, and durable thread-binding data. The GoalBar protocol and its
-deferred atomicity limit are specified in the versioned
-[DSH native LoopX design](../../docs/plans/2026-08-20-dsh-native-skill-driver.md).
+activation, and durable thread-binding data.
 
 ## Install
 
