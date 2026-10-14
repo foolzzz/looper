@@ -6,8 +6,9 @@ its last probe found. Every agent run goes through its runtime's adapter, so
 the four tiers (Manager, Planner, Worker, Reviewer) never build a runtime's
 command themselves. An adapter says:
 
-- **what it can do** (``capabilities``): which roles it can run
-  (``ROLE_CAPABILITIES``);
+- **what it can do** (``capabilities``, ``protocols``, ``auth_kinds``):
+  which roles it can run (``ROLE_CAPABILITIES``), which LLM API protocols it
+  speaks and which kinds of provider it can be started with;
 - **how a run starts** (``resident_command``, ``run_command``,
   ``launch_args``, ``environment``): the argv, the environment, and the files
   it names (the system prompt file, the installed plugin directories, the MCP
@@ -38,6 +39,21 @@ if TYPE_CHECKING:
     from ..agent_settings import Launch
     from ..claude_cli import ResidentClaude
     from ..run_usage import Usage
+
+
+class ApiProtocol(str, Enum):
+    """The LLM API an agent's requests speak; a runtime speaks some, a provider serves some."""
+
+    ANTHROPIC_MESSAGES = "anthropic-messages"
+    OPENAI_RESPONSES = "openai-responses"
+    OPENAI_CHAT = "openai-chat"
+
+
+class AuthKind(str, Enum):
+    """How a provider authenticates: a runtime type's own login, or an API key LoopX stores."""
+
+    OAUTH = "oauth"
+    API_KEY = "api_key"
 
 
 class Capability(str, Enum):
@@ -78,6 +94,9 @@ class RuntimeAdapter(ABC):
     label: ClassVar[str]  # how the dashboard names the type
     default_executable: ClassVar[str]
     capabilities: ClassVar[frozenset[Capability]]
+    protocols: ClassVar[frozenset[ApiProtocol]]
+    # The provider auth kinds it can be started with now; OAUTH is the type's own login.
+    auth_kinds: ClassVar[frozenset[AuthKind]]
     isolation_id: ClassVar[str]  # names its isolation flags in each run's record
 
     # --- Registration ---

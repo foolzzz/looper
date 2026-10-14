@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING, Any
 
 from .. import claude_cli
 from ..run_usage import run_usage
-from . import Capability, Probe, RuntimeAdapter
+from . import ApiProtocol, AuthKind, Capability, Probe, RuntimeAdapter
 
 if TYPE_CHECKING:
     from ..agent_settings import Launch
@@ -31,6 +31,10 @@ class ClaudeCodeRuntime(RuntimeAdapter):
     label = "Claude Code"
     default_executable = "claude"
     capabilities = frozenset({Capability.RUN, Capability.RESIDENT_SESSION, Capability.RESUME})
+    protocols = frozenset({ApiProtocol.ANTHROPIC_MESSAGES})
+    # Its own login (the Claude subscription) only, for now: an API key provider needs the binding to set
+    # Claude Code's key and endpoint variables (bind_provider).
+    auth_kinds = frozenset({AuthKind.OAUTH})
     isolation_id = claude_cli.ISOLATION_ID
 
     def probe(self, executable: str) -> Probe:

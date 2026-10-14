@@ -12,8 +12,6 @@ from .connection import get_pool
 _UPDATABLE_FIELDS = (
     "display_name",
     "role",
-    "runtime",
-    "llm_profile_id",
     "enabled",
     "system_prompt",
     "max_turns",
@@ -142,7 +140,6 @@ async def seed_defaults(
         agent_id = cfg["agent_id"]
         display_name = cfg.get("display_name", "")
         role = cfg.get("role", "")
-        runtime = cfg.get("runtime", "claude-code")
         system_prompt = cfg.get("system_prompt", "")
         max_turns = cfg.get("max_turns", 0)
         timeout_seconds = cfg.get("timeout_seconds", 1200)
@@ -151,9 +148,9 @@ async def seed_defaults(
         await pool.execute(
             """
             INSERT INTO agent_configs
-                (agent_id, display_name, role, runtime, system_prompt, default_prompt,
+                (agent_id, display_name, role, system_prompt, default_prompt,
                  max_turns, timeout_seconds, max_concurrency)
-            VALUES ($1, $2, $3, $4, $5, $5, $6, $7, $8)
+            VALUES ($1, $2, $3, $4, $4, $5, $6, $7)
             ON CONFLICT (agent_id) DO UPDATE SET
                 display_name = CASE WHEN agent_configs.display_name = '' THEN EXCLUDED.display_name ELSE agent_configs.display_name END,
                 -- An unedited row (its prompt still equals the recommended one) follows
@@ -163,13 +160,11 @@ async def seed_defaults(
                     WHEN agent_configs.system_prompt = '' THEN EXCLUDED.system_prompt
                     WHEN agent_configs.system_prompt = agent_configs.default_prompt THEN EXCLUDED.system_prompt
                     ELSE agent_configs.system_prompt END,
-                default_prompt = EXCLUDED.default_prompt,
-                runtime = CASE WHEN agent_configs.runtime = 'claude-code' AND EXCLUDED.runtime != 'claude-code' THEN EXCLUDED.runtime ELSE agent_configs.runtime END
+                default_prompt = EXCLUDED.default_prompt
             """,
             agent_id,
             display_name,
             role,
-            runtime,
             system_prompt,
             max_turns,
             timeout_seconds,

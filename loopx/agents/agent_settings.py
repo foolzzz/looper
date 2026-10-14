@@ -624,8 +624,18 @@ async def update_project(project_id: str, data: Any, role: str | None = None) ->
 _MOVED_AGENT_FIELDS = ("harness_prompt", "model")
 
 
+# Fields agent configs held before agents (RFC decision 10), never used by a launch.
+_REMOVED_AGENT_FIELDS = ("runtime", "llm_profile_id")
+
+
 def agent_config_fields(agent_id: str, data: dict[str, Any]) -> dict[str, Any]:
     """Refuse the settings an agent config no longer holds: they are the role layer's."""
+    for name in _REMOVED_AGENT_FIELDS:
+        if name in data:
+            raise SettingsError(
+                f"{name} was removed: a role runs an agent (a runtime, an LLM provider and a model), registered "
+                f"in Settings and selected on the {agent_id}'s role layer"
+            )
     for name in _MOVED_AGENT_FIELDS:
         if name in data:
             raise SettingsError(

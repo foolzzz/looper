@@ -19,7 +19,8 @@ from pathlib import Path
 from typing import Any
 
 from . import (
-    agent_settings, catalog, catalog_sources, knowledge, library, mcp, project_skills, projects, request_guard,
+    agent_registry, agent_settings, catalog, catalog_sources, knowledge, library, mcp, project_skills, projects,
+    request_guard,
 )
 from .broadcast import Broadcaster
 from .chat_targets import ChatTargetError, list_chat_targets, resolve_chat_target
@@ -101,6 +102,7 @@ class AgentHTTPServer:
         static_dir: Path | None = None,
         runtime_root: Path | None = None,
         self_checks: list[dict[str, str]] | None = None,
+        claude_bin: str = "claude",
     ) -> None:
         self._host = host
         self._port = port
@@ -113,6 +115,8 @@ class AgentHTTPServer:
         self._runtime_root = runtime_root
         # The startup self-check (self_check.Check.to_dict), reported on /api/status.
         self._self_checks = self_checks or []
+        # The Claude Code the server runs: what a Claude Code runtime without an executable of its own probes.
+        self._claude_bin = claude_bin
         self._server: asyncio.Server | None = None
 
     async def start(self) -> None:
@@ -234,7 +238,6 @@ class AgentHTTPServer:
     _RE_TASK_CONVERSATION = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)/conversation$")
     _RE_AGENT_CONFIG = re.compile(r"^/api/agent-configs/([a-zA-Z0-9_-]+)$")
     _RE_AGENT_CONFIG_RESET = re.compile(r"^/api/agent-configs/([a-zA-Z0-9_-]+)/reset-prompt$")
-    _RE_LLM_PROFILE = re.compile(r"^/api/llm-profiles/(\d+)$")
     _RE_LLM_RECORD = re.compile(r"^/api/llm-records/(\d+)$")
     _RE_LLM_RECORD_EVENTS = re.compile(r"^/api/llm-records/(\d+)/events$")
     _RE_AGENT_USAGE = re.compile(r"^/api/agents/([a-zA-Z0-9_-]+)/usage$")
@@ -249,6 +252,10 @@ class AgentHTTPServer:
     _RE_PROJECT_AGENT_SETTINGS = re.compile(r"^/api/projects/(proj-[a-zA-Z0-9]+)/agent-settings$")
     _RE_PROJECT_ROLE_SETTINGS = re.compile(r"^/api/projects/(proj-[a-zA-Z0-9]+)/agent-settings/roles/([a-zA-Z0-9_-]+)$")
     _RE_ROLE_SETTINGS = re.compile(r"^/api/agent-settings/roles/([a-zA-Z0-9_-]+)$")
+    _RE_RUNTIME = re.compile(r"^/api/runtimes/(rt-[a-zA-Z0-9-]+)$")
+    _RE_RUNTIME_PROBE = re.compile(r"^/api/runtimes/(rt-[a-zA-Z0-9-]+)/probe$")
+    _RE_PROVIDER = re.compile(r"^/api/providers/(prov-[a-zA-Z0-9-]+)$")
+    _RE_AGENT = re.compile(r"^/api/agents/(agent-[a-zA-Z0-9-]+)$")
     _RE_PROJECT_SKILLS = re.compile(r"^/api/projects/(proj-[a-zA-Z0-9]+)/skills$")
     _RE_PROJECT_SKILL = re.compile(r"^/api/projects/(proj-[a-zA-Z0-9]+)/skills/(skill-[a-zA-Z0-9]+)$")
 
@@ -354,16 +361,35 @@ class AgentHTTPServer:
             await self._handle_llm_record_events(int(m.group(1)), query, writer)
         elif (m := self._RE_AGENT_USAGE.match(path)) and method == "GET":
             await self._handle_agent_usage(m.group(1), query, writer)
-        elif path == "/api/llm-profiles" and method == "GET":
-            await self._handle_list_llm_profiles(writer)
-        elif path == "/api/llm-profiles" and method == "POST":
-            await self._handle_create_llm_profile(body, writer)
-        elif (m := self._RE_LLM_PROFILE.match(path)) and method == "GET":
-            await self._handle_get_llm_profile(int(m.group(1)), writer)
-        elif (m := self._RE_LLM_PROFILE.match(path)) and method == "PUT":
-            await self._handle_update_llm_profile(int(m.group(1)), body, writer)
-        elif (m := self._RE_LLM_PROFILE.match(path)) and method == "DELETE":
-            await self._handle_delete_llm_profile(int(m.group(1)), writer)
+        elif path == "/api/registry" and method == "GET":
+            await self._handle_registry(writer, HTTP_200, agent_registry.registry_view)
+        elif path == "/api/runtimes" and method == "POST":
+            await self._handle_registry(writer, HTTP_201, lambda: agent_registry.create_runtime(
+                projects.json_object(body), server_claude=self._claude_bin))
+        elif (m := self._RE_RUNTIME_PROBE.match(path)) and method == "POST":
+            await self._handle_registry(writer, HTTP_200, lambda: agent_registry.probe_runtime(
+                m.group(1), server_claude=self._claude_bin))
+        elif (m := self._RE_RUNTIME.match(path)) and method == "PUT":
+            await self._handle_registry(writer, HTTP_200, lambda: agent_registry.update_runtime(
+                m.group(1), projects.json_object(body), server_claude=self._claude_bin))
+        elif (m := self._RE_RUNTIME.match(path)) and method == "DELETE":
+            await self._handle_registry(writer, HTTP_200, lambda: agent_registry.delete_runtime(m.group(1)))
+        elif path == "/api/providers" and method == "POST":
+            await self._handle_registry(writer, HTTP_201, lambda: agent_registry.create_provider(
+                projects.json_object(body)))
+        elif (m := self._RE_PROVIDER.match(path)) and method == "PUT":
+            await self._handle_registry(writer, HTTP_200, lambda: agent_registry.update_provider(
+                m.group(1), projects.json_object(body)))
+        elif (m := self._RE_PROVIDER.match(path)) and method == "DELETE":
+            await self._handle_registry(writer, HTTP_200, lambda: agent_registry.delete_provider(m.group(1)))
+        elif path == "/api/agents" and method == "POST":
+            await self._handle_registry(writer, HTTP_201, lambda: agent_registry.create_agent(
+                projects.json_object(body)))
+        elif (m := self._RE_AGENT.match(path)) and method == "PUT":
+            await self._handle_registry(writer, HTTP_200, lambda: agent_registry.update_agent(
+                m.group(1), projects.json_object(body)))
+        elif (m := self._RE_AGENT.match(path)) and method == "DELETE":
+            await self._handle_registry(writer, HTTP_200, lambda: agent_registry.delete_agent(m.group(1)))
         elif path == "/api/agent-settings" and method == "GET":
             await self._handle_agent_settings(writer, agent_settings.settings_view)
         elif path == "/api/agent-settings/system" and method == "PUT":
@@ -1127,6 +1153,25 @@ class AgentHTTPServer:
         writer.write(_json_response(status, _serialize(result)))
         await writer.drain()
 
+    async def _handle_registry(
+        self, writer: asyncio.StreamWriter, status: str, request: Callable[[], Awaitable[Any]],
+    ) -> None:
+        """Answer with ``request()``'s result; a refused request is 400, an unknown runtime, provider or agent
+        404, and a name in use or a row still referred to 409."""
+        try:
+            result = await request()
+        except (agent_registry.RegistryError, projects.RequestError) as exc:
+            status, result = getattr(exc, "status", HTTP_400), {"error": str(exc)}
+        except agent_registry.RegistryNotFound as exc:
+            status, result = HTTP_404, {"error": str(exc)}
+        except agent_registry.RegistryConflict as exc:
+            status, result = HTTP_409, {"error": str(exc)}
+        except Exception:
+            logger.exception("agent registry request failed")
+            status, result = HTTP_500, {"error": "the request failed; see the server log"}
+        writer.write(_json_response(status, _serialize(result)))
+        await writer.drain()
+
     # --- A project's knowledge (the documents its task agents read on demand) ---
 
     async def _handle_knowledge(
@@ -1246,101 +1291,7 @@ class AgentHTTPServer:
         writer.write(_json_response(HTTP_200, {"records": records}))
         await writer.drain()
 
-    # --- Agent session handlers ---
-
-    # --- LLM profile handlers ---
-
-    async def _handle_list_llm_profiles(self, writer: asyncio.StreamWriter) -> None:
-        try:
-            from ..db.llm_profiles import list_profiles
-            profiles = await list_profiles()
-        except Exception:
-            profiles = []
-        writer.write(_json_response(HTTP_200, {"profiles": profiles}))
-        await writer.drain()
-
-    async def _handle_get_llm_profile(
-        self, profile_id: int, writer: asyncio.StreamWriter,
-    ) -> None:
-        try:
-            from ..db.llm_profiles import get_profile
-            profile = await get_profile(profile_id)
-        except Exception:
-            profile = None
-        if profile is None:
-            writer.write(_json_response(HTTP_404, {"error": "profile not found"}))
-        else:
-            writer.write(_json_response(HTTP_200, profile))
-        await writer.drain()
-
-    async def _handle_create_llm_profile(
-        self, body: bytes, writer: asyncio.StreamWriter,
-    ) -> None:
-        try:
-            data = json.loads(body.decode("utf-8"))
-        except (json.JSONDecodeError, UnicodeDecodeError):
-            writer.write(_json_response(HTTP_400, {"error": "invalid JSON body"}))
-            await writer.drain()
-            return
-
-        if not isinstance(data, dict) or not data.get("name"):
-            writer.write(_json_response(HTTP_400, {"error": "name is required"}))
-            await writer.drain()
-            return
-
-        try:
-            from ..db.llm_profiles import create_profile
-            created = await create_profile(data)
-        except Exception as exc:
-            writer.write(_json_response(HTTP_500, {"error": str(exc)}))
-            await writer.drain()
-            return
-
-        writer.write(_json_response("201 Created", created))
-        await writer.drain()
-
-    async def _handle_update_llm_profile(
-        self, profile_id: int, body: bytes, writer: asyncio.StreamWriter,
-    ) -> None:
-        try:
-            data = json.loads(body.decode("utf-8"))
-        except (json.JSONDecodeError, UnicodeDecodeError):
-            writer.write(_json_response(HTTP_400, {"error": "invalid JSON body"}))
-            await writer.drain()
-            return
-
-        try:
-            from ..db.llm_profiles import update_profile
-            updated = await update_profile(profile_id, data)
-        except Exception as exc:
-            writer.write(_json_response(HTTP_500, {"error": str(exc)}))
-            await writer.drain()
-            return
-
-        if updated is None:
-            writer.write(_json_response(HTTP_404, {"error": "profile not found"}))
-        else:
-            writer.write(_json_response(HTTP_200, updated))
-        await writer.drain()
-
-    async def _handle_delete_llm_profile(
-        self, profile_id: int, writer: asyncio.StreamWriter,
-    ) -> None:
-        try:
-            from ..db.llm_profiles import delete_profile
-            deleted = await delete_profile(profile_id)
-        except Exception as exc:
-            writer.write(_json_response(HTTP_500, {"error": str(exc)}))
-            await writer.drain()
-            return
-
-        if not deleted:
-            writer.write(_json_response(HTTP_404, {"error": "profile not found"}))
-        else:
-            writer.write(_json_response(HTTP_200, {"deleted": True}))
-        await writer.drain()
-
-    # --- Configuration export (loopx/agents/config_transfer.py; importing is the CLI's) ---
+    # --- Configuration export ---
 
     async def _handle_config_export(self, query: dict[str, str], writer: asyncio.StreamWriter) -> None:
         """Stream the configuration file as a download, piece by piece from one read-only snapshot.

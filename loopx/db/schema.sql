@@ -126,33 +126,10 @@ CREATE INDEX IF NOT EXISTS idx_task_journal_task ON task_journal (task_id, id);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_task_journal_accepted ON task_journal (task_id, step_id)
     WHERE kind = 'step_accepted';
 
-CREATE TABLE IF NOT EXISTS llm_profiles (
-    id               BIGSERIAL PRIMARY KEY,
-    name             TEXT NOT NULL UNIQUE,
-    display_name     TEXT NOT NULL DEFAULT '',
-    provider_kind    TEXT NOT NULL DEFAULT 'anthropic',
-    model            TEXT NOT NULL DEFAULT '',
-    base_url         TEXT,
-    api_key_env      TEXT,
-    reasoning_effort TEXT,
-    max_tokens       INTEGER,
-    context_window_k INTEGER,
-    rate_per_minute  INTEGER,
-    streaming        BOOLEAN NOT NULL DEFAULT true,
-    is_default       BOOLEAN NOT NULL DEFAULT false,
-    priority         INTEGER NOT NULL DEFAULT 0,
-    description      TEXT NOT NULL DEFAULT '',
-    metadata         JSONB,
-    created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at       TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-
 CREATE TABLE IF NOT EXISTS agent_configs (
     agent_id         TEXT PRIMARY KEY,
     display_name     TEXT NOT NULL DEFAULT '',
     role             TEXT NOT NULL DEFAULT '',
-    runtime          TEXT NOT NULL DEFAULT 'claude-code',
-    llm_profile_id   BIGINT REFERENCES llm_profiles(id),
     enabled          BOOLEAN NOT NULL DEFAULT true,
     system_prompt    TEXT NOT NULL DEFAULT '',
     max_turns        INTEGER NOT NULL DEFAULT 0,
@@ -170,6 +147,76 @@ ALTER TABLE agent_configs ADD COLUMN IF NOT EXISTS default_prompt TEXT NOT NULL 
 -- permission_mode was never applied: every agent runs with
 -- --dangerously-skip-permissions (claude_cli.permission_args).
 ALTER TABLE agent_configs DROP COLUMN IF EXISTS permission_mode;
+
+-- Agents (RFC decision 10): an agent is a runtime, an LLM provider and a
+-- model. A runtime is a registered instance of a runtime type, which code
+-- provides (an adapter, loopx/agents/runtimes): the executable it runs ('' =
+-- the type's default, for Claude Code the server's configured one) and what
+-- its last probe found (version, capabilities). A provider is where an agent's
+-- requests go: the protocols it serves, its models and their prices, and how
+-- it authenticates: a runtime type's own login (oauth, bound to that type) or
+-- an API key, kept in llm_provider_secrets and never shown by the API. Code
+-- owns the types, the protocols, the capabilities and the validation
+-- (loopx/agents/agent_registry.py). The built-in rows (builtin) are
+-- read-only; a runtime, provider or agent still referred to cannot be deleted.
+CREATE TABLE IF NOT EXISTS agent_runtimes (
+    id            TEXT PRIMARY KEY,
+    name          TEXT NOT NULL UNIQUE,
+    type          TEXT NOT NULL,
+    executable    TEXT NOT NULL DEFAULT '',
+    version       TEXT,
+    capabilities  TEXT[] NOT NULL DEFAULT '{}'
+        CHECK (capabilities <@ ARRAY['run', 'resident_session', 'resume']),
+    probed_at     TIMESTAMPTZ,
+    probe_error   TEXT,
+    builtin       BOOLEAN NOT NULL DEFAULT false,
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TABLE IF NOT EXISTS llm_providers (
+    id                  TEXT PRIMARY KEY,
+    name                TEXT NOT NULL UNIQUE,
+    protocols           TEXT[] NOT NULL CHECK (cardinality(protocols) > 0
+        AND protocols <@ ARRAY['anthropic-messages', 'openai-responses', 'openai-chat']),
+    auth                TEXT NOT NULL CHECK (auth IN ('oauth', 'api_key')),
+    oauth_runtime_type  TEXT,
+    base_url            TEXT NOT NULL DEFAULT '',
+    -- [{"name", "input_usd_per_mtok", "output_usd_per_mtok", "cache_read_usd_per_mtok",
+    --   "cache_write_usd_per_mtok"}]; [] = any model, priced by what the runtime reports.
+    models              JSONB NOT NULL DEFAULT '[]'::jsonb CHECK (jsonb_typeof(models) = 'array'),
+    builtin             BOOLEAN NOT NULL DEFAULT false,
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CHECK ((auth = 'oauth') = (oauth_runtime_type IS NOT NULL))
+);
+CREATE TABLE IF NOT EXISTS llm_provider_secrets (
+    provider_id  TEXT PRIMARY KEY REFERENCES llm_providers(id) ON DELETE CASCADE,
+    api_key      TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS agents (
+    id           TEXT PRIMARY KEY,
+    name         TEXT NOT NULL UNIQUE,
+    runtime_id   TEXT NOT NULL REFERENCES agent_runtimes(id),
+    provider_id  TEXT NOT NULL REFERENCES llm_providers(id),
+    model        TEXT NOT NULL CHECK (model <> ''),
+    -- The agent's default effort; a layer's effort overrides it. NULL: the runtime's own default.
+    effort       TEXT CHECK (effort IN ('low', 'medium', 'high', 'xhigh', 'max')),
+    builtin      BOOLEAN NOT NULL DEFAULT false,
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+-- The built-ins, on every start: the Claude Code runtime (the server's claude),
+-- its own login as a provider, and the agent every role runs when nothing
+-- selects another (loopx/agents/agent_registry.py BUILTIN_*). A missing one comes back.
+INSERT INTO agent_runtimes (id, name, type, executable, capabilities, builtin)
+VALUES ('rt-claude-code', 'claude-code', 'claude-code', '', ARRAY['run', 'resident_session', 'resume'], true)
+ON CONFLICT DO NOTHING;
+INSERT INTO llm_providers (id, name, protocols, auth, oauth_runtime_type, builtin)
+VALUES ('prov-claude-subscription', 'claude-subscription', ARRAY['anthropic-messages'], 'oauth', 'claude-code', true)
+ON CONFLICT DO NOTHING;
+INSERT INTO agents (id, name, runtime_id, provider_id, model, builtin)
+VALUES ('agent-claude-code-opus', 'claude-code/opus', 'rt-claude-code', 'prov-claude-subscription', 'opus', true)
+ON CONFLICT DO NOTHING;
 
 -- Settings the whole system shares, one value per key. Code owns each key's
 -- type and validation; a key without a row has its built-in default. (The
@@ -222,6 +269,19 @@ BEGIN
         UPDATE agent_configs SET timeout_seconds = 86400
         WHERE agent_id = 'worker' AND timeout_seconds = 600;
         INSERT INTO schema_migrations (name) VALUES ('worker_timeout_default_86400');
+    END IF;
+END $$;
+
+-- Once (agents replace LLM profiles): llm_profiles and agent_configs.runtime
+-- and llm_profile_id were never on any agent's launch path; runtimes,
+-- providers and agents replace them.
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM schema_migrations WHERE name = 'llm_profiles_removed') THEN
+        ALTER TABLE agent_configs DROP COLUMN IF EXISTS llm_profile_id;
+        ALTER TABLE agent_configs DROP COLUMN IF EXISTS runtime;
+        DROP TABLE IF EXISTS llm_profiles;
+        INSERT INTO schema_migrations (name) VALUES ('llm_profiles_removed');
     END IF;
 END $$;
 
