@@ -93,6 +93,11 @@ How the agent system works today is described in
   and `loopx-config/v1` files still import. In code, `AgentSpec` is
   `AgentProfile`, and `looper.agents.agent_registry`, `looper.db.agent_registry`
   and `looper.db.agent_configs` are `profile_registry` and `role_configs`.
+- **The dashboard calls a profile an Agent Profile everywhere.** A run's
+  prompt layers (the profile row, its source, a profile's default), a task's
+  header, the config import preview, a project's Execution card and a
+  provider's model note said "Agent(s)" or "agent" for a profile; they now
+  say "Agent Profile(s)".
 
 ### Removed
 

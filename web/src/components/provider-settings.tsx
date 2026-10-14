@@ -383,7 +383,7 @@ function ProviderForm({ provider, registry, onDone }: { provider: Provider | nul
           Blank fields are unknown, and a blank price uses the built-in price shown greyed (from {registry.prices.as_of});
           a model with no price records tokens only and no spend cap applies to it. Efforts are comma-separated. The
           background model serves the runtime&apos;s side requests (titles, summaries, quick subagents). With no models
-          the provider serves any model; with some, its agents must use one of them.
+          the provider serves any model; with some, its {AGENT_PROFILE.plural} must use one of them.
         </p>
       </fieldset>
 

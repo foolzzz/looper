@@ -18,6 +18,7 @@ import {
   type ProjectKnowledge,
   type TaskInfo,
 } from "@/lib/api";
+import { AGENT_PROFILE } from "@/lib/settings-pages";
 import { useProjects } from "@/lib/use-projects";
 import { formatUsd } from "@/lib/usage";
 import { cn, formatBytes } from "@/lib/utils";
@@ -270,7 +271,7 @@ function agentRows(settings: ProjectAgentSettings): [string, string][] {
   const each = (show: (role: ProjectRole) => string) =>
     PROJECT_ROLES.map(([role, label]) => `${label} ${show(role)}`).join(" · ");
   const effective = (role: ProjectRole) => settings.roles[role].effective;
-  const rows: [string, string][] = [["Agents", each((role) => effective(role).profile.value.name)]];
+  const rows: [string, string][] = [[AGENT_PROFILE.plural, each((role) => effective(role).profile.value.name)]];
   if (PROJECT_ROLES.some(([role]) => effective(role).run_budget_usd.value != null))
     rows.push(["Spend cap per run", each((role) => {
       const cap = effective(role).run_budget_usd.value;
@@ -291,7 +292,8 @@ function ExecutionCard({ project, onOpen }: { project: Project; onOpen: () => vo
       {agents?.error && <p className="text-xs text-destructive">{agents.error}</p>}
       {rows.length === 0 ? (
         <p className="text-xs text-muted-foreground">
-          Nothing set: the Planner, Workers and Reviewers run with the agents&apos; and Settings&apos; defaults.
+          Nothing set: the Planner, Workers and Reviewers run with the {AGENT_PROFILE.plural}&apos; and Settings&apos;
+          defaults.
         </p>
       ) : (
         <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-1.5 text-xs">

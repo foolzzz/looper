@@ -12,6 +12,7 @@ import {
   type ConfigImportPlan,
   type ConfigImportUpload,
 } from "@/lib/api";
+import { AGENT_PROFILE } from "@/lib/settings-pages";
 import { settingsTargetHash } from "@/lib/settings-target";
 import { useFileDrop } from "@/lib/use-file-drop";
 import { cn, formatBytes } from "@/lib/utils";
@@ -22,7 +23,7 @@ const errorText = (err: unknown) => (err instanceof Error ? err.message : String
 const SECTION_LABELS: Record<string, string> = {
   runtimes: "Runtimes",
   providers: "Providers",
-  profiles: "Agents",
+  profiles: AGENT_PROFILE.plural,
   "settings.layers": "Settings layers",
   "settings.roles": "Role settings",
   channels: "Channels",
