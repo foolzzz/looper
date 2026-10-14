@@ -20,7 +20,8 @@ directories), one at a time over the HTTP API:
 
 For each task it reads back from the API: success (the task completed, its
 files are right and the flow happened, such as the review or the retry), step
-count, retries, reviews, cost (the task cost API), contract violations
+count, retries, reviews, cost (the task cost API), tokens (the runs' records: prompt, uncached
+and cached, and output; what a runtime without prices still reports), contract violations
 (replies the Planner's reply parser or the Worker/Reviewer report check
 rejected) and whether the Planner modified files itself (its file-editing tool
 calls, and files changed while only a Planner turn ran).
@@ -74,7 +75,13 @@ preset's Anthropic-format API, such as `glm-bigmodel` or `deepseek`, its key
 read from `LOOPER_EVAL_API_KEY`; `--agent-model` picks the model, default the
 preset's first, and `--provider-base-url` replaces the preset's endpoint, for
 example with a logging proxy; the per-run cap is then Looper's own at the
-provider's prices, and each task reports its `cost_basis`), `--tasks
+provider's prices, and each task reports its `cost_basis`), `--register-agent
+SPEC.json` (register an agent in the eval's database first and run every role
+on it, with Looper's per-run cap: `{"runtime": {"name", "type",
+"executable"?}, "provider": {"name", "protocols", "auth", "base_url"?,
+"api_key_env"?}, "agent": {"name", "model", "effort"?}}`; a runtime of that
+name, such as the built-in `codex`, is reused, and the provider's key is read
+from the variable `api_key_env` names, never from the file), `--tasks
 single_step,chat_correction`, `--max-budget-usd`, `--total-cap-usd`,
 `--baseline <run.json>` (compare with this run instead), `--keep-work-dirs`. To print a comparison again:
 

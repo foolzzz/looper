@@ -389,6 +389,7 @@ def run(
     model: str | None = None,
     agent: str | None = None,
     provider: ProviderChoice | None = None,
+    register: dict[str, Any] | None = None,
     max_budget_usd: float | None = None,
     total_cap_usd: float | None = None,
     task_timeout: float | None = None,
@@ -398,8 +399,9 @@ def run(
 
     Every role runs ``agent`` (by name), else Claude Code with ``provider`` (registered for the run from a preset),
     else the Claude Code agent of ``model`` (``claude-code/<model>``, registered for the run), else the built-in
-    agent. With a provider, Looper prices the runs at its prices, so ``max_budget_usd`` is the per-run cap
-    Looper keeps (the system layer's ``run_budget_usd``) instead of Claude Code's ``--max-budget-usd``.
+    agent. ``register`` registers an agent first (``register_agent``), which every role then runs. With a
+    provider or a registered agent, Looper prices the runs at its prices, so ``max_budget_usd`` is the per-run
+    cap Looper keeps (the system layer's ``run_budget_usd``) instead of Claude Code's ``--max-budget-usd``.
     """
     if mode not in ("fake", "real"):
         raise EvalError(f"mode must be fake or real, not {mode!r}")
@@ -419,7 +421,8 @@ def run(
         work_dirs = {task.id: root / "work" / task.id for task in tasks}
         scenarios.write_text(json.dumps({os.path.realpath(work_dirs[t.id]): t.fake for t in tasks}), encoding="utf-8")
         install_claude(root / "bin", mode=mode, scenarios=scenarios,
-                       max_budget_usd=None if provider is not None else max_budget_usd, real_claude=real_claude)
+                       max_budget_usd=None if provider is not None or register is not None else max_budget_usd,
+                       real_claude=real_claude)
         (root / "runtime").mkdir()
         home = root / "home" if mode == "fake" else None
         if home is not None:
@@ -428,7 +431,11 @@ def run(
             database_url=database_url, runtime_root=root / "runtime", bin_dir=root / "bin", log_path=log_path,
             home=home,
         ) as api:
+            if register is not None:
+                agent = register_agent(api, register)["name"]
             chosen = select_agent(api, agent=agent, model=model, provider=provider, run_budget_usd=max_budget_usd)
+            if register is not None:
+                api.put("/api/agent-settings/system", {"agent": chosen["agent_id"], "run_budget_usd": max_budget_usd})
             results, stopped = run_suite(
                 tasks,
                 lambda task, cap_left: run_task(api, task, work_dirs[task.id], timeout=timeout, poll=poll,
@@ -456,6 +463,26 @@ def run(
     path = out_dir / f"{stamp}-{mode}.json"
     path.write_text(json.dumps(run_result, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     return run_result, path
+
+
+def register_agent(api: Api, spec: dict[str, Any]) -> dict[str, Any]:
+    """Register the agent of ``spec`` in the eval's database and return it: ``{"runtime": {name, type,
+    executable?}, "provider": {name, protocols, auth, base_url?, models?, api_key_env?}, "agent": {name, model,
+    effort?}}``. A runtime of that name (such as the built-in ``codex``, when ``codex`` is on PATH) is reused;
+    the provider's API key is read from the environment variable ``api_key_env`` names, so no key is in the
+    file or in the run's result."""
+    registry = api.get("/api/registry")
+    runtime = next((r for r in registry["runtimes"] if r["name"] == spec["runtime"]["name"]), None)
+    if runtime is None:
+        runtime = api.post("/api/runtimes", spec["runtime"])["runtime"]
+    provider = {k: v for k, v in spec["provider"].items() if k != "api_key_env"}
+    if (variable := spec["provider"].get("api_key_env")) is not None:
+        if not os.environ.get(variable):
+            raise EvalError(f"the provider's API key is read from ${variable}, which is not set")
+        provider["api_key"] = os.environ[variable]
+    provider_id = api.post("/api/providers", provider)["provider"]["provider_id"]
+    return api.post("/api/agents", {**spec["agent"], "runtime_id": runtime["runtime_id"],
+                                    "provider_id": provider_id})["agent"]
 
 
 # The API key of a provider an eval registers (``--provider-preset``): read from the environment, never a file.

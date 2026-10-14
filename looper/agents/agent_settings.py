@@ -646,7 +646,7 @@ class Launch:
             record["library"] = library
         if self.max_budget_usd is not None:
             record["max_budget_usd"] = self.max_budget_usd
-        return record
+        return {**record, **self.runtime.launch_record(self)}
 
 
 # --- The settings API ---

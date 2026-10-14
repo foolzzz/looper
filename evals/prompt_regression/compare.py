@@ -13,6 +13,7 @@ _COLUMNS: tuple[tuple[str, str], ...] = (
     ("reviews", "reviews"),
     ("contract violations", "violations"),
     ("Planner file edits", "planner_modified_files"),
+    ("tokens (prompt / output)", "tokens"),
     ("cost (USD)", "cost_usd"),
 )
 
@@ -24,7 +25,19 @@ def _value(task: Mapping[str, Any] | None, key: str) -> Any:
         return "skipped"
     if key == "violations":
         return (task.get("contract_violations") or {}).get("total", 0)
+    if key == "tokens":
+        return _tokens([task])
     return task.get(key)
+
+
+def _tokens(tasks: list[Mapping[str, Any]]) -> tuple[int, int] | None:
+    """The tasks' prompt tokens (uncached, read from and written to the cache) and output tokens; None when no
+    task has them (a run from before they were read)."""
+    counted = [t["tokens"] for t in tasks if isinstance(t.get("tokens"), Mapping)]
+    if not counted:
+        return None
+    prompt = sum(int(c.get(k) or 0) for c in counted for k in ("input", "cache_read", "cache_creation"))
+    return prompt, sum(int(c.get("output") or 0) for c in counted)
 
 
 def _text(value: Any, key: str) -> str:
@@ -36,6 +49,9 @@ def _text(value: Any, key: str) -> str:
         return "pass" if value else "FAIL"
     if key == "cost_usd":
         return f"{float(value):.4f}"
+    if key == "tokens":
+        prompt, output = value
+        return f"{prompt / 1000:.0f}k / {output / 1000:.1f}k"
     return str(value)
 
 
@@ -55,6 +71,7 @@ def totals(run: Mapping[str, Any]) -> dict[str, Any]:
         "reviews": sum(int(t.get("reviews") or 0) for t in ran),
         "violations": sum(int((t.get("contract_violations") or {}).get("total", 0)) for t in ran),
         "planner_modified_files": sum(int(t.get("planner_modified_files") or 0) for t in ran),
+        "tokens": _tokens(ran),
         "cost_usd": round(sum(float(t.get("cost_usd") or 0.0) for t in ran), 6),
     }
 

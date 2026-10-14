@@ -74,6 +74,20 @@ async def insert_runtime(fields: Mapping[str, Any], *, pool: asyncpg.Pool | None
     return runtime_id
 
 
+async def insert_builtin_runtime(runtime_id: str, fields: Mapping[str, Any], *, pool: asyncpg.Pool | None = None,
+                                 ) -> bool:
+    """Add the built-in runtime ``runtime_id`` (fields as ``insert_runtime``) unless it, or a runtime of its name,
+    exists; whether it was added."""
+    pool = pool or get_pool()
+    result = await pool.execute(
+        "INSERT INTO agent_runtimes (id, name, type, executable, version, capabilities, probed_at, probe_error, builtin) "
+        "VALUES ($1, $2, $3, $4, $5, $6, now(), $7, true) ON CONFLICT DO NOTHING",
+        runtime_id, fields["name"], fields["type"], fields["executable"], fields["version"],
+        list(fields["capabilities"]), fields["probe_error"],
+    )
+    return result == "INSERT 0 1"
+
+
 async def update_runtime(runtime_id: str, fields: Mapping[str, Any], *, pool: asyncpg.Pool | None = None) -> bool:
     """Set ``name``, ``executable`` and the probe's ``version``, ``capabilities`` and ``probe_error`` (each
     optional); False when there is no such runtime."""

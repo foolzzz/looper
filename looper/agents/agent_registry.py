@@ -22,7 +22,9 @@ The built-ins exist on every installation and are read-only: the
 ``claude-code`` runtime (the server's configured ``claude``), the
 ``claude-subscription`` provider (Claude Code's own login) and the
 ``claude-code/opus`` agent, which every role runs when no layer selects
-another (``BUILTIN_AGENT``).
+another (``BUILTIN_AGENT``). A runtime of another type is built in too once
+``looper serve`` finds its executable on PATH (``register_found_runtimes``):
+``codex`` for Codex.
 
 An agent is checked when it is created or changed, and again when a provider
 it uses changes (``check_pairing``):
@@ -573,6 +575,27 @@ async def _probe(runtime_type: str, executable: str, server_claude: str) -> dict
     probe = await asyncio.to_thread(adapter.probe, _probe_executable(runtime_type, executable, server_claude))
     return {"version": probe.version, "capabilities": sorted(c.value for c in probe.capabilities),
             "probe_error": probe.error}
+
+
+async def register_found_runtimes() -> list[str]:
+    """Register a built-in runtime (``rt-<type>``, named after its type) for each runtime type other than Claude
+    Code whose default executable is on PATH, probed once; one that exists already, or whose name is taken, is
+    left alone. Claude Code's built-in runtime comes with the schema. Returns the names registered."""
+    import shutil
+
+    from ..db import agent_registry as db
+
+    registered = []
+    for adapter in runtimes.ADAPTERS.values():
+        if adapter is runtimes.CLAUDE_CODE or shutil.which(adapter.default_executable) is None:
+            continue
+        if await db.get_runtime(f"rt-{adapter.type}") is not None:
+            continue
+        probe = await _probe(adapter.type, "", adapter.default_executable)
+        if await db.insert_builtin_runtime(f"rt-{adapter.type}", {"name": adapter.type, "type": adapter.type,
+                                                                   "executable": "", **probe}):
+            registered.append(adapter.type)
+    return registered
 
 
 async def _existing_runtime(runtime_id: str) -> dict[str, Any]:

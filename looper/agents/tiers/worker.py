@@ -660,7 +660,7 @@ class WorkerPool:
         async def _read_stream() -> None:
             nonlocal result_event
             assert process.stdout is not None
-            async for event in runtime.parse(process.stdout):
+            async for event in runtime.parse(process.stdout, model=launch.model):
                 await recorder.record(event)
                 if (capped := recorder.cap_stop) is not None:
                     # Over its per-run cap at the provider's prices: stopped now, ending with the cap's result.

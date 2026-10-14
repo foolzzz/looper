@@ -1,8 +1,8 @@
 # RFC：多运行时 agent 架构（v0）
 
 - **状态：** 设计已定（[长程 Agent 上下文 RFC](long-horizon-agent-context-v0.zh-CN.md) 决策 10），M9a 已交付
-  （looper #62；与本文的出入记在开发计划 M9a 的"核实后确定的做法"），M9b 已交付（第 7、8 节写明核实结果）；
-  本文是 M9 的设计依据和待决问题清单。
+  （looper #62），M9b 已交付（第 7、8 节写明核实结果），M9c 已交付（looper #67，第 6 节写明核实结果）；与本文的出入记在
+  开发计划各阶段的"核实后确定的做法"；本文是 M9 的设计依据和待决问题清单。
 - **开发计划：** [长程 Agent 上下文体系开发计划](../../plans/2026-10-13-long-horizon-agent-context.zh-CN.md) 的 M9 一节。
 - **最近更新：** 2026-10-14
 
@@ -94,22 +94,36 @@ dashboard、M2 的观测、M6 的评测和 M7 的任务日志都只认内部事�
 
 ## 6. 能力矩阵
 
-✅ 已核实，❓ 待核实，— 不适用。CLI 的核实依据是本机版本的 `--help`，2026-10-14。
+✅ 已核实，❓ 待核实，❌ 不支持，— 不适用。CLI 的核实依据是本机版本的 `--help`，2026-10-14；Codex 一列另经本机 CPA
+（`gpt-5.5`）实跑核实（M9c）。
 
 | 能力 | Claude Code 2.1.285 | Codex 0.162.0 | OMP 18.4.3 | Claude Agent SDK | OpenAI Agents SDK | norma |
 |---|---|---|---|---|---|---|
-| 一次性运行 | ✅ `--print` stream-json | ✅ `exec --json` | ❓ | ❓ | ❓ | 待定 |
-| 常驻会话与续接 | ✅ stream-json 输入 + `--resume` | ❓ `exec resume <id>`（逐轮起进程）、`app-server`（实验性）、`queue` | ❓ | ❓ | ❓ | 待定 |
-| 强制结构化输出 | 靠 prompt 契约 | ✅ `--output-schema`（常驻轮次能否用 ❓） | ❓ | ❓ | ❓ | 待定 |
-| skill 与插件 | ✅ Claude 插件，`--plugin-dir` | ❓ 有 `codex plugin`，格式和是否读 `SKILL.md` 待核实 | ❓ | ❓ | — | 待定 |
-| MCP | ✅ `--mcp-config` + `--strict-mcp-config`（M8b） | ❓ `codex mcp`、`config.toml` 的 `[mcp_servers]` 或 `-c` | ❓ | ❓ | ❓ | 待定 |
-| 额外目录（知识） | ✅ `--add-dir` | ✅ `--add-dir` | ❓ | ❓ | — | 待定 |
+| 一次性运行 | ✅ `--print` stream-json | ✅ `exec --json`，提示用 `-` 从 stdin 读完为止，一个进程一轮 | ❓ | ❓ | ❓ | 待定 |
+| 常驻会话与续接 | ✅ stream-json 输入 + `--resume` | ✅ 逐轮续接：每轮起一个 `exec … resume <id> -` 进程；`thread.started` 的 `thread_id` 就是会话 id，续接时不变；会话不存在时退出码 1、没有任何事件。`app-server` 是实验性的 JSON-RPC，未采用；`queue` 只投给 app-server 守护进程上的会话，到不了 `exec` | ❓ | ❓ | ❓ | 待定 |
+| 运行中追加用户轮（引导 Worker） | ✅ stream-json 输入 | ❌ `exec` 只读一次提示；`queue` 也送不进正在跑的 `exec` | ❓ | ❓ | ❓ | 待定 |
+| system prompt 注入 | ✅ `--append-system-prompt-file`，快照关闭 | ✅ `CODEX_HOME/AGENTS.md`：作为用户消息进会话，排在项目 `AGENTS.md` 之前，不截断；续接时内容变了会补发"取代此前的 AGENTS.md"。`developer_instructions`（`-c` 或配置）只在会话开始时生效，续接时改了不生效；`model_instructions_file` 会替换 Codex 自带的基础指令 | ❓ | ❓ | ❓ | 待定 |
+| 强制结构化输出 | 靠 prompt 契约 | ✅ `--output-schema`，续接轮次也生效（Looper 未启用） | ❓ | ❓ | ❓ | 待定 |
+| skill 与插件 | ✅ Claude 插件，`--plugin-dir` | 原生读 `SKILL.md`（开发者消息里列名称、描述和路径），但列表总带着 `$HOME/.agents/skills`，只有改 `HOME` 才去得掉，所以关掉原生列表（`skills.include_instructions = false`），skill 按 P9 降为可读文档；Claude 插件不加载 | ❓ | ❓ | — | 待定 |
+| MCP | ✅ `--mcp-config` + `--strict-mcp-config`（M8b） | ✅ `config.toml` 的 `[mcp_servers.<名称>]`：stdio（`command`、`args`、`env`）和 streamable HTTP（`url`、`http_headers`）；没有 SSE | ❓ | ❓ | ❓ | 待定 |
+| 额外目录（知识） | ✅ `--add-dir` | ✅ `--add-dir`，放在 `resume` 之前也有效；目录里的 `AGENTS.md` 不加载 | ❓ | ❓ | — | 待定 |
 | 不限权限 | ✅ `--dangerously-skip-permissions` | ✅ `--dangerously-bypass-approvals-and-sandbox` | ❓ | ❓ | — | 待定 |
-| 隔离 | ✅ `--setting-sources project` 等（M1） | ❓ 独立 `CODEX_HOME`，其中有全局 `AGENTS.md`、`config.toml` 和登录 | ❓ | ❓ | — | 待定 |
+| 隔离 | ✅ `--setting-sources project` 等（M1） | ✅ 独立 `CODEX_HOME`，只放生成的 `config.toml` 和 `AGENTS.md`，不读 `~/.codex`；另需关掉原生 skill 列表（见上）和插件同步（`features.plugins = false`，否则每个新目录克隆约 25 MB 的插件市场） | ❓ | ❓ | — | 待定 |
 | 非 git 目录 | ✅ | ✅ 需要 `--skip-git-repo-check` | ❓ | — | — | 待定 |
-| 花费报告 | ✅ `total_cost_usd` 和 `modelUsage[*].costUSD` 一律按 Claude 价格计算（不认识的模型标 `costBasis: "unknown"`）；`modelUsage` 按模型给出四种 token，接其他 provider 时由 Looper 按 provider 价格计算 | 只有 token 数（❓） | ❓ | ❓ | 只有 token 数 | 待定 |
-| 压缩事件 | ✅ `compact_boundary` | ❓ | ❓ | ❓ | — | 待定 |
-| 自主轮（#26） | ✅ | ❓ | ❓ | ❓ | — | 待定 |
+| 花费报告 | ✅ `total_cost_usd` 和 `modelUsage[*].costUSD` 一律按 Claude 价格计算（不认识的模型标 `costBasis: "unknown"`）；`modelUsage` 按模型给出四种 token，接其他 provider 时由 Looper 按 provider 价格计算 | 只有 token：`turn.completed.usage`，是会话累计值，由 Looper 按 provider 价格计算 | ❓ | ❓ | 只有 token 数 | 待定 |
+| 压缩事件 | ✅ `compact_boundary` | ❌ `--json` 不报，只出一条提示性的 `error` 条目 | ❓ | ❓ | — | 待定 |
+| 自主轮（#26） | ✅ | — 一个进程只跑一轮 | ❓ | ❓ | — | 待定 |
+
+Codex 的其他核实结果：
+
+- **事件**：`thread.started`（`thread_id`）、`turn.started`、`item.started`/`item.completed`（`agent_message`、`reasoning`、
+  `command_execution`、`file_change`、`mcp_tool_call`，以及 `web_search`、`todo_list`、`error`）、`turn.completed`（`usage`）、
+  `turn.failed`（`error.message`）和顶层 `error`（如重连提示）。一轮可以有多条 `agent_message`，最后一条是回复。
+- **用量**：`input_tokens` 含 `cached_input_tokens`，`output_tokens` 含 `reasoning_output_tokens`，另有
+  `cache_write_input_tokens`。数值是会话累计值，续接后接着累计；被杀掉的那一轮不计入，下一轮从上次落盘的累计值算起。
+  没有单次请求的用量，所以记不到上下文规模。
+- **结束**：被 SIGTERM 时退出码是 0、没有 `turn.completed`；它正在跑的 shell 命令不会随之结束。
+- **环境变量**：shell 命令默认继承 Codex 进程的全部环境变量，provider 的密钥要用 `shell_environment_policy.exclude` 排除。
 
 决策 10 要求所有运行时都支持所有角色。矩阵里 ❓ 的项，在对应阶段开工时第一件事就是实测，结果写回本表。
 
@@ -146,8 +160,8 @@ dashboard、M2 的观测、M6 的评测和 M7 的任务日志都只认内部事�
   `http://127.0.0.1:8317/v1`），也提供 Anthropic 格式接口（`http://127.0.0.1:8317`）。一个 provider 只有一个
   `base_url`，所以从预设建 provider 时选其中一种接口。
 - **Codex + 登录**：见第 13 节 P1。
-- **Codex + API key（含 CPA）**：用 `model_providers.<id>` 配置 `base_url`、密钥所在的环境变量和 `wire_api`，经
-  `-c` 或隔离目录里的 `config.toml` 传入，在 M9c 实测。
+- **Codex + API key（含 CPA）**：隔离目录里生成的 `config.toml` 写 `model_provider` 和 `[model_providers.<id>]`
+  （`base_url`、`env_key`、`wire_api = "responses"`），密钥只放进 `env_key` 指名的环境变量（M9c 已核实）。
 - **SDK**：直接传入 key 和 base_url。
 - **开发测试**：用本机 CPA（`127.0.0.1:8317`）。它同时提供 `/v1/responses`、`/v1/chat/completions` 和 Anthropic 格式的
   `/v1/messages`。key 在运行时从 CPA 的配置文件读取，不进仓库、不进日志。
@@ -160,7 +174,7 @@ dashboard、M2 的观测、M6 的评测和 M7 的任务日志都只认内部事�
 | Claude Code + GLM | claude-code | GLM API key | anthropic-messages | 已支持（M9b） |
 | Claude Code + DeepSeek | claude-code | DeepSeek API key | anthropic-messages | 已支持（M9b；真实 key 待维护者验证） |
 | Claude Code + Kimi 等兼容接口 | claude-code | 对应 API key | anthropic-messages | 已支持（M9b；真实 key 待维护者验证） |
-| Codex + CPA | codex | CPA（OpenAI 类 provider） | openai-responses | M9c |
+| Codex + CPA | codex | CPA（OpenAI 类 provider，预设 `cpa`） | openai-responses | 已支持（M9c） |
 | OMP + CPA | omp | CPA | openai-responses | M9e |
 
 GLM、DeepSeek 等同时提供 anthropic 和 openai 两种协议，一般配 Claude Code；M9b 内置它们的 provider 预设（两种协议的接口地址按官方文档核实），用户只填 key。
@@ -222,7 +236,7 @@ M9b 与 M9c 并行。
 | # | 问题 | 影响 | 建议 |
 |---|---|---|---|
 | **P1** | **Codex 登录在隔离下会互相刷掉 token。** Codex 的 refresh_token 会轮换（CPA 运维中实测过）。每次运行复制一份 `CODEX_HOME` 的话，一个实例刷新 token 后，其他实例手里的就失效了 | Codex + 登录不可用，或者时好时坏 | **已定（2026-10-14）：** Codex 默认走 API key，开发阶段用 CPA。之后如果需要 Codex 登录，所有实例共用同一个 `auth.json`（符号链接）并加文件锁，只隔离配置 |
-| **P2** | **其他运行时的常驻会话怎么实现还不知道。** 可能是 `exec resume`（每轮起一个进程、重新加载上下文）、`app-server`（实验性）或 `queue`。自主轮和压缩事件也可能没有对应物 | "所有运行时都支持所有角色"的工期和稳定性 | **已定（2026-10-14）：** 先用"每轮起进程 + 续接会话"（逐轮续接）；连续接都不支持的运行时，每轮开新会话，由 Looper 注入完整状态（计划、任务日志、最近对话的摘要）。M9c 第一步做技术验证，结果写回能力矩阵 |
+| **P2** | **其他运行时的常驻会话怎么实现还不知道。** 可能是 `exec resume`（每轮起一个进程、重新加载上下文）、`app-server`（实验性）或 `queue`。自主轮和压缩事件也可能没有对应物 | "所有运行时都支持所有角色"的工期和稳定性 | **已定（2026-10-14）：** 先用"每轮起进程 + 续接会话"（逐轮续接）；连续接都不支持的运行时，每轮开新会话，由 Looper 注入完整状态（计划、任务日志、最近对话的摘要）。M9c 第一步做技术验证，结果写回能力矩阵。**M9c 核实：** Codex 走逐轮续接（每轮一个 `exec resume` 进程），续接不了的会话照旧换新会话；没有压缩事件和自主轮，也不能在 Worker 运行中追加用户轮（第 6 节） |
 | **P3** | **provider 的密钥对 agent 可见。** 不限权限的 agent 能读自己的环境变量 | 密钥可能被模型写进输出或带出去 | **已定（2026-10-14）：** 近期接受，在本文写明。之后再做一个本地代理持有密钥，agent 只拿到本地地址（做法类似 CPA） |
 | **P4** | **第三方模型遵守契约、使用工具的质量参差不齐**，可能需要按模型调整 prompt | Planner、Manager 不稳定 | **已定（2026-10-14）：** 先不做按模型的 prompt 变体，所有 agent 用同一套 prompt，运行时差异放在适配器追加的"运行时说明"里；靠 M6 评测把关，评测不过的 agent 不配给 Planner 和 Manager |
 | P5 | **运行中换 agent。** 常驻会话绑定在运行时和 provider 上 | 层级或任务覆盖改了以后，Planner、Manager 可能要新开会话 | **已定（2026-10-14）：** 改配置立即生效：Worker、Reviewer 下一步就用新 agent。Planner、Manager **只有运行时类型和 provider 都不变时才续接**（例如同一订阅下换模型）；**换 provider（任意方向：订阅→API key、API key→订阅、两家 API key 之间）或换运行时，一律新开会话**，因为各 provider 协议里的字段（思考签名、tool_use id、reasoning item 等）互不兼容。新会话靠 M7 的计划状态、任务日志和 M7c 的交接摘要补回进度，任务页记一条"已更换 agent"。M9b 已实现：会话记下 `provider_id`，判断只在 `session_switch.agent_switch`（`runtimes.can_resume`）一处 |

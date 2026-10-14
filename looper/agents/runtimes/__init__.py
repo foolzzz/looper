@@ -35,24 +35,29 @@ command themselves. An adapter says:
 What the catalog and the project knowledge put in a run (plugin directories,
 the MCP configuration, knowledge directories) is materialized by
 ``library.load_installed`` and ``knowledge.load_knowledge`` in Claude Code's
-plugin format; ``launch_args`` turns it into flags.
+plugin format; ``launch_args`` turns it into flags. A runtime of another
+format translates it at launch (Codex: ``codex.materialize``,
+``codex.config_toml``) and says in the run's record what it left out
+(``launch_record``).
+
+The types: ``claude-code`` (``claude_code``) and ``codex`` (``codex``).
 """
 
 from __future__ import annotations
 
 import asyncio
 from abc import ABC, abstractmethod
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar, Protocol
 
 if TYPE_CHECKING:
     from ..agent_registry import ProviderSpec
     from ..agent_settings import Launch
-    from ..claude_cli import ResidentClaude
-    from ..run_usage import Usage
+    from ..claude_cli import CapStop, ResidentTurn
+    from ..run_usage import Price, Usage
 
 
 class ApiProtocol(str, Enum):
@@ -130,6 +135,31 @@ class Probe:
     error: str | None = None
 
 
+class ResidentSession(Protocol):
+    """The Manager's or a Planner's session on a runtime, as the tiers drive it (``RuntimeAdapter.resident_session``):
+    ``start`` with a command, then one ``run_turn`` per user turn, ``stop``; ``stale`` when it must start over.
+    Claude Code keeps one process for it (``claude_cli.ResidentClaude``), Codex one process per turn
+    (``codex.ResidentCodex``)."""
+
+    @property
+    def label(self) -> str: ...
+    @property
+    def started(self) -> bool: ...
+    @property
+    def command(self) -> list[str]: ...
+    @property
+    def pid(self) -> int | None: ...
+    @property
+    def totals(self) -> Usage: ...
+    def stale(self, signature: Any) -> bool: ...
+    async def start(self, command: list[str], *, cwd: str, signature: Any, env: dict[str, str] | None = None,
+                    totals: Usage | None = None, autonomous: Callable[[Any], Awaitable[Any]] | None = None,
+                    price: Price | None = None) -> None: ...
+    async def run_turn(self, text: str, on_event: Callable[[dict[str, Any]], Awaitable[None]], *,
+                       tag: Any = None, stop: Callable[[], CapStop | None] | None = None) -> ResidentTurn: ...
+    async def stop(self, *, kill: bool = False) -> None: ...
+
+
 class RuntimeUnsupported(ValueError):
     """The runtime cannot do what was asked of it (yet)."""
 
@@ -195,16 +225,17 @@ class RuntimeAdapter(ABC):
     # --- Sessions and the stream ---
 
     @abstractmethod
-    def resident_session(self, label: str) -> ResidentClaude:
-        """A resident process, not started yet: ``start``, then one ``run_turn`` per user turn, ``stop``."""
+    def resident_session(self, label: str) -> ResidentSession:
+        """A resident session, not started yet: ``start``, then one ``run_turn`` per user turn, ``stop``."""
 
     @abstractmethod
     async def write_turn(self, stdin: asyncio.StreamWriter, text: str, *, uuid: str | None = None) -> None:
         """Write one user turn to a running process."""
 
     @abstractmethod
-    def parse(self, stdout: asyncio.StreamReader) -> AsyncIterator[dict[str, Any]]:
-        """The process's output as internal events, in order."""
+    def parse(self, stdout: asyncio.StreamReader, *, model: str | None = None) -> AsyncIterator[dict[str, Any]]:
+        """The process's output as internal events, in order; ``model`` is the one the run was started with, for a
+        runtime whose output does not name it."""
 
     @abstractmethod
     def tool_summary(self, tool_name: str, tool_input: dict[str, Any]) -> str:
@@ -225,11 +256,19 @@ class RuntimeAdapter(ABC):
     def budget_error(self, result_event: dict[str, Any] | None) -> str | None:
         """Why a run stopped at its spend cap; None when it did not."""
 
+    # --- The record ---
+
+    def launch_record(self, launch: Launch) -> dict[str, Any]:
+        """What the runtime adds to a run's record, such as the installed items it could not load; nothing
+        unless the adapter says otherwise."""
+        return {}
+
 
 def _adapters() -> dict[str, RuntimeAdapter]:
     from .claude_code import ClaudeCodeRuntime
+    from .codex import CodexRuntime
 
-    return {adapter.type: adapter for adapter in (ClaudeCodeRuntime(),)}
+    return {adapter.type: adapter for adapter in (ClaudeCodeRuntime(), CodexRuntime())}
 
 
 # The runtime types, by type id. Code owns this set: a registered runtime of a type missing here cannot run.

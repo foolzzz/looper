@@ -95,10 +95,13 @@ def test_edit_tool_paths_are_relative_and_never_local_paths(tmp_path: Path) -> N
         return {"event": {"type": "assistant", "message": {"content": [
             {"type": "tool_use", "name": name, "input": {"file_path": path}}]}}}
 
+    patch = {"event": {"type": "assistant", "message": {"content": [  # a Codex patch, naming each file it changes
+        {"type": "tool_use", "name": "apply_patch", "input": {"changes": [
+            {"path": str(tmp_path / "e.txt"), "kind": "add"}, {"path": str(tmp_path / "f.txt"), "kind": "update"}]}}]}}}
     events = [tool("Write", str(tmp_path / "a.txt")), tool("Read", str(tmp_path / "b.txt")),
-              tool("Edit", "sub/c.txt"), tool("Write", "/elsewhere/secret/d.txt")]
+              tool("Edit", "sub/c.txt"), tool("Write", "/elsewhere/secret/d.txt"), patch]
     assert metrics.edit_tool_paths(events, tmp_path) == [
-        "a.txt", "sub/c.txt", "<outside the working directory>/d.txt"]
+        "a.txt", "sub/c.txt", "<outside the working directory>/d.txt", "e.txt", "f.txt"]
 
 
 def test_changed_files_are_the_planners_only_while_no_step_ran() -> None:
@@ -136,6 +139,8 @@ def test_task_metrics_read_the_flow_cost_and_violations(tmp_path: Path) -> None:
         _record(6, "planner-task-1", input_text="[CHAT] A message from the user."),
         _record(7, "reviewer-c"),
     ]
+    records[2].update(input_tokens=100, output_tokens=20, cache_read_tokens=3000, cache_creation_tokens=None)
+    records[4].update(input_tokens=50, output_tokens=5, cache_read_tokens=None, cache_creation_tokens=400)
     events = {3: _result("no report"), 5: _result(good), 7: _result('{"passed": true}')}
     detail = {"status": "completed", "steps": [{"id": "step-1"}],
               "cost": {"cost_usd": 0.0123, "runs": 7, "by_role": {"planner": {"cost_usd": 0.004, "runs": 4}}}}
@@ -152,6 +157,8 @@ def test_task_metrics_read_the_flow_cost_and_violations(tmp_path: Path) -> None:
     assert result["contract_violations"] == {"planner": 1, "worker": 1, "reviewer": 0, "total": 2}
     assert (result["cost_usd"], result["cost_by_role"], result["planner_modified_files"]) == (
         0.0123, {"planner": 0.004}, 0)
+    # Tokens are summed whether or not a run's cost is known.
+    assert result["tokens"] == {"input": 150, "output": 25, "cache_read": 3000, "cache_creation": 400}
 
 
 # --- Comparison -----------------------------------------------------------------------------------------
@@ -168,16 +175,19 @@ _OK = {"success": True, "steps": 1, "retries": 0, "reviews": 0, "contract_violat
 
 def test_comparison_marks_what_changed_and_sums_the_run() -> None:
     base = _run(single_step=_OK, chat_correction=_OK)
-    new = _run(single_step={**_OK, "cost_usd": 0.03},
+    tokens = {"input": 1200, "output": 2500, "cache_read": 30000, "cache_creation": 800}
+    new = _run(single_step={**_OK, "cost_usd": 0.03, "tokens": tokens},
                chat_correction={**_OK, "success": False, "contract_violations": {"total": 2},
                                 "problems": ["color.txt holds 'red', expected 'blue'"]})
     new["git"]["dirty"] = True
     table = compare.markdown(new, base)
     lines = table.splitlines()
     assert lines[0] == "Prompt eval: real/haiku @ abcdef123 → real/haiku @ abcdef123+local changes"
-    assert "| single_step | pass | 1 | 0 | 0 | 0 | 0 | 0.0200 → **0.0300** |" in lines
-    assert "| chat_correction | pass → **FAIL** | 1 | 0 | 0 | 0 → **2** | 0 | 0.0200 |" in lines
-    assert "| **total** | 2/2 → **1/2** | 2 | 0 | 0 | 0 → **2** | 0 | 0.0400 → **0.0500** |" in lines
+    # A run from before tokens were read has none: only the new side shows them.
+    assert "| single_step | pass | 1 | 0 | 0 | 0 | 0 | 32k / 2.5k | 0.0200 → **0.0300** |" in lines
+    assert "| chat_correction | pass → **FAIL** | 1 | 0 | 0 | 0 → **2** | 0 | – | 0.0200 |" in lines
+    assert "| **total** | 2/2 → **1/2** | 2 | 0 | 0 | 0 → **2** | 0 | – → **32k / 2.5k** | 0.0400 → **0.0500** |" \
+        in lines
     assert "- chat_correction: color.txt holds 'red', expected 'blue'" in lines
 
 
@@ -186,8 +196,8 @@ def test_comparison_without_a_base_and_with_skipped_tasks() -> None:
     new.update(stopped_by_cap=True, caps={"total_cap_usd": 0.8})
     lines = compare.markdown(new).splitlines()
     assert lines[0].endswith("(no earlier run to compare with)")
-    assert "| chat_correction | skipped | skipped | skipped | skipped | skipped | skipped | skipped |" in lines
-    assert "| **total** | 1/1 | 1 | 0 | 0 | 0 | 0 | 0.0200 |" in lines
+    assert "| chat_correction | skipped | skipped | skipped | skipped | skipped | skipped | skipped | skipped |" in lines
+    assert "| **total** | 1/1 | 1 | 0 | 0 | 0 | 0 | – | 0.0200 |" in lines
     assert "- stopped at the spending cap (0.8 USD)" in lines
 
 
