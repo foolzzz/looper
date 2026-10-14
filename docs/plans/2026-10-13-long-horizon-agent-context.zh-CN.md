@@ -1,6 +1,6 @@
 # 开发计划：长程 Agent 上下文体系（M0–M6）
 
-- **状态：** 执行中（M0、M1、M1.5、M1.6、M1.7 已交付）
+- **状态：** 执行中（M0、M1、M1.5、M1.6、M1.7、M2 已交付）
 - **依据：** [RFC：长程 Agent 的上下文体系 v0](../architecture/rfcs/long-horizon-agent-context-v0.zh-CN.md)。
   设计原则、分层模型和已作出的决定以 RFC 为准；本文只管"怎么分阶段做、做到什么算完成、现在做到哪了"。
 - **仓库：** `foolzzz/looper`，基线 `main`
@@ -26,7 +26,7 @@
 | M1.5 | harness 与 role 分层；harness 继承链 | ✅ 已交付（looper #19） | M1 |
 | M1.6 | 导入本机插件与 skill 作为全局默认 | ✅ 已交付（looper #22） | M1.5 |
 | M1.7 | agent 不限权限；渠道发送者白名单 | ✅ 已交付（looper #23） | M1.6 |
-| M2 | 上下文与花费观测 | 待开始 | M0 |
+| M2 | 上下文与花费观测 | ✅ 已交付（looper #24） | M0 |
 | M3 | 项目知识 | 待开始 | M0 |
 | M4 | 项目 skill | 待开始 | M3 |
 | M5 | 项目执行配置 | 待开始 | M2 |
@@ -143,6 +143,24 @@
   - 以上数据通过 API 可读。
 - **验收：** 跑一个多步骤任务后，任务页的累计花费等于各次运行花费之和；人为构造一次自动压缩（或用替身产生对应事件），历史页能看到；Manager 长会话的上下文用量随对话增长且可读回。
 - **风险：** 需要先核实 stream-json 中自动压缩事件的确切形态，以实测为准。
+- **核实后确定的做法**（Claude Code 2.1.285，haiku 实测，样例存于 `tests/fixtures/claude_stream/`）：
+  - **token 与花费的来源**：
+    - `result` 的 `total_cost_usd` 和 `modelUsage` 是会话在本进程里的累计值，包含压缩时的摘要请求和子 agent 的请求；
+    - `result.usage` 只算本轮主循环的请求。压缩那一轮它报全零，实际花了 $0.0088；子 agent 的请求它也不算；
+    - assistant 消息上的 `output_tokens` 是流式过程中的快照，不是最终值；
+    - 所以每次运行的 token 和花费都取累计值的增量（`loopx/agents/run_usage.py`），没有 `modelUsage` 时才退回 `result.usage`。
+  - **上下文规模**：取本轮最后一个主循环请求（`parent_tool_use_id` 为空）的 input + cache read + cache creation；子 agent 的请求不算。
+  - **压缩事件**：
+    - 形态是 `{"type":"system","subtype":"compact_boundary","compact_metadata":{"trigger":"auto"|"manual","pre_tokens","post_tokens","cumulative_dropped_tokens","duration_ms",...}}`，前面有 `system/status` 的 `compacting` 和 `compact_result: "success"`；
+    - 压缩失败只有 `compact_result: "failed"`（例如 `too_few_groups`），不算一次压缩；
+    - `/compact` 作为 stream-json 的 user turn 发送时会生效；
+    - `--autocompact`（或环境变量 `CLAUDE_CODE_AUTO_COMPACT_WINDOW`）的下限是 100k，配合 `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` 可以低成本触发自动压缩。
+  - **`--resume` 重复计费**：
+    - 已核实，续接进程的第一个 `result` 把会话以前的花费一并计入：一个已花 $0.01046 的会话，续接后第一轮报 $0.01279，本轮只花了 $0.00232；`modelUsage` 也一样累计；
+    - 做法：会话的累计值（花费和四类 token）和会话 id 存在一起，Manager 存在 `session.json` 的 `session_totals`，Planner 存在计划文件；
+    - 续接时以存下的值为起点，每个 `result` 后重写；
+    - 会话无法续接而被丢弃时一起清零；某项累计值变小时，视为从零重新计数。
+  - **任务花费**：只算 Planner、Worker、Reviewer 的运行，不算 Manager；另外分开计数还在跑的运行和没报出花费的运行。
 
 ### M3 项目知识
 
@@ -216,6 +234,8 @@
 | 2026-10-13 | M1.6 交付（looper #22）：插件库。从本机 Claude Code 配置只读导入已启用的插件（整个导入，连同其 skill、agent、命令和 hook）和全部个人 skill，存进数据库（`library_items`、`library_files`），条目的版本是其文件的哈希；每次运行在 runtime root 下取只读副本，每个插件一个 `--plugin-dir`，个人 skill 合成一个 `personal` 插件；加载了插件库的运行里，Planner 多一个 `Skill` 工具，Manager 多一个 `--allowedTools Skill`；库的哈希进入常驻进程的重启签名；记录新增 `metadata.library`；Settings 新增「Plugins & skills」，历史页列出每次运行的加载清单。核实（Claude Code 2.1.285）：在 `--print` 和隔离参数下，`--plugin-dir` 加载插件的 skill（名为 `<插件>:<skill>`）、agent、命令和 hook，插件自带的 `SessionStart` hook 会运行，操作者的 `UserPromptSubmit` hook 不会；没有 `Skill` 工具时 Claude Code 不列出任何 skill；`--print` 默认权限下，声明了 `allowed-tools` 的 skill 会被拒绝，放行 `Skill` 不会连带放行它声明的工具。验收：真实 Claude（opus，effort low）下，导入 3 个插件、104 个个人 skill（约 21 MB、2,200 个文件；未导入 5 项：4 个图片文件、1 个没有 `SKILL.md` 的目录）；四类 agent 的 init 事件都列出 4 个库插件和 142 个 skill；Manager 调用一个个人 skill 并答出其中的样例值，Worker 和 Reviewer 调用同一个 skill、运行它自带的脚本（来自只读副本），结果与独立计算一致，Planner 产出有效计划，Worker 判为 completed，Reviewer 给出 `passed`；Manager 答出项目 `CLAUDE.md` 的暗号，答不出个人 `CLAUDE.md` 的内容；提问日志里没有任何 LoopX 会话的记录；停用这个 skill 后，Manager 下一轮以 `--resume` 重启，记录和 init 里都少了它（个人 skill 104 → 103）；上下文：Opus 上一次最小运行的首个请求从 15,674 token 增至 29,114 token；真实 Claude 花费约 $1.2；单测与真实 PG 929 通过（main 上 898） |
 | 2026-10-13 | M1.7 交付（looper #23）：agent 不限权限，渠道必须有发送者白名单。权限参数只在 `claude_cli.permission_args`（`--dangerously-skip-permissions`）定义，由 `agent_settings.Launch.args` 和插件库参数一起下发给四类 agent；去掉 Planner 的 `--tools`/`--allowedTools Read,Grep,Glob[,Skill]`/`--permission-mode dontAsk` 和 Manager 的 `--allowedTools Skill`，隔离参数和 `--plugin-dir` 不变。推荐的 Planner role prompt 写明负责规划和决策、不亲自修改文件、改动都作为步骤交给 Worker，未改过的 `planner` 行启动时随推荐升级，改过的保留。飞书（`allowed_open_ids`，消息事件里的 `open_id`）和 Telegram（`allowed_user_ids`，数字用户 ID）各有发送者白名单：名单外的消息不交给 Manager，只记一条日志（渠道和发送者 ID，不含内容），不回复，Telegram 的 `/start`、`/status`、`/help` 也一样；名单为空或格式不对的渠道不启动，启动日志和 Settings 页（`start_problem`）写明原因；`LOOPX_TELEGRAM_ALLOWED_USERS` 不再生效。Settings 页可增删白名单并即时校验格式；Agents 页用一行说明代替不起作用的「Permission Mode」下拉框。核实（Claude Code 2.1.285）：`--print` 加隔离参数和 `--plugin-dir` 时，加上 `--dangerously-skip-permissions` 后 init 的 `permissionMode` 为 `bypassPermissions`，Bash、Write 和声明了 `allowed-tools: Bash` 的插件 skill 都不再被拒绝；不加时 Write 和这个 skill 被拒绝（`date` 这类只读命令两种情况都放行）；隔离用的 `--settings` 不影响权限。验收：真实 Claude（opus，effort low）下，Manager 用 Bash 运行 `date … | tee` 写文件并如实回报输出，没有被拒绝；Planner 规划时运行了 `python3 -c …`，产出有效计划并把改动派给 Worker，Planner 的工具调用里没有任何编辑，工作目录的改动全部来自 Worker；Worker 判为 completed，Reviewer 给出 `passed`。在真实服务上用本地替身（`PATH` 上的伪 `lark-cli`；只在验收环境里把 python-telegram-bot 指向本地伪 Bot API；不连真实飞书和 Telegram，不用真实 token）发合成消息：已启用但白名单为空的两个渠道都没有启动，替身一次也没被调用；在 Settings 页填好白名单并重启后，名单内的飞书和 Telegram 发送者都到达 Manager 并收到回复，名单外的 4 条消息（含 Telegram `/start`、`/help`）都被丢弃，各记一行日志，日志里没有消息内容，Manager 没有新增运行，也没有任何回复。无头 Chrome 里完成白名单的增删、校验、保存和刷新读回，并截图查看了 Settings（1280、768 px）、Planner 运行的启动命令和 Agents 页。真实 Claude 花费约 $0.52；单测与真实 PG 990 通过（main 上 933），另有 5 个 `test_dashboard_command` 安装模式用例在 main 上同样失败 |
 
+| 2026-10-13 | M2 交付（looper #24）：上下文与花费观测，不设花费上限。核实结论见第 3 节 M2 的「核实后确定的做法」。记录：`llm_records` 新增 `cache_read_tokens`、`cache_creation_tokens`、`context_tokens`、`compactions`。每次运行的花费和 token 取会话累计值（`total_cost_usd`、`modelUsage`）的增量，上下文取最后一个主循环请求的 prompt，每次压缩记下触发方式和压缩前后的规模。修复 `--resume` 重复计费：会话累计值和会话 id 存在一起（Manager 的 `session.json`，Planner 的计划文件），续接从存下的值算起，会话被丢弃时清零。API：`GET /api/tasks/<id>` 和 `GET /api/tasks` 带 `cost`（总额、按角色、运行数、还在跑的和没报出花费的）；新增 `GET /api/agents/<id>/usage`（总额、按会话、按 UTC 日、最近各 turn 的上下文和压缩）。界面：任务列表显示花费；任务页显示「Cost」卡片和「Cost by agent」；Manager、Planner 的历史页显示「Context & cost」（上下文折线、压缩标记和清单、最新上下文规模）；运行卡片显示自身 token（含缓存）、`ctx`、压缩标记和自身花费。验收（真实 Claude，haiku）：2 步任务（第 2 步送审）完成，任务总额 $0.0985664 等于 7 次运行之和（Planner 4 次 $0.033885、Worker 2 次 $0.0450697、Reviewer 1 次 $0.0196117），任务列表和详情给出的值相同；Manager 的上下文 26,871 → 28,295 → 29,806 token，经 API 读回，历史页可见；通过 Settings 环境变量设 `CLAUDE_CODE_AUTO_COMPACT_WINDOW=100000`、`CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=31` 后，Manager 一轮里自动压缩 2 次（29,916 → 1,577、27,015 → 2,561），记录和历史页都可见；这一轮由改设置后续接的新进程执行，Claude 报会话累计 $0.13230075，记录为本轮 $0.08451635；重启服务后 Manager 第一轮，Claude 报 $0.13930815（修复前会记下的数），记录为 $0.0070074，差额正好是存下的会话累计值 $0.13230075；token 与该轮 `result.usage` 一致；Planner 的计划文件存下会话累计 $0.033885，等于它 4 个 turn 之和。无头 Chrome 截图查看了任务页（1280、768 px）、任务列表、Manager 和 Planner 的历史页、展开后带压缩事件的运行卡片。真实 Claude 花费约 $0.41（核实约 $0.18，验收约 $0.24）。测试：单测与真实 PG 915 通过（main 上 886），另有 5 个 `test_dashboard_command` 安装模式用例在 main 上同样失败。新增和改动的测试在 main 上有 12 个失败，另有 2 个文件因缺少 `run_usage` 模块无法导入 |
+
 ## 5. 不属于本 RFC 的待办
 
 这些问题在开发过程中发现，独立排期，不阻塞 M1–M6：
@@ -229,3 +249,5 @@
   - 新建任务时"顺带新建项目"的表单里没有背景输入框。
 - **Optional Ark Turn workflow** 引用了已经删除的测试文件，需要修正或移除。
 - **`scripts/install-from-github.sh`** 默认使用 `stable` 分支，但 looper 没有这个分支。
+- **`test_dashboard_command` 的 5 个安装模式用例**在 `main` 上就失败：干净的 checkout 里没有构建 Chat 包（`loopx/web/chat/bundle-manifest.json` 不存在）。需要先构建 Chat 包，或者让这些用例自己准备构建产物。
+- **常驻进程的后台子 agent**：后台子 agent 结束时，Claude Code 会自己再跑一轮，多出一个 `result`（M2 核实时发现）。`ResidentClaude` 按"一条 user 消息对应一个 `result`"读取，所以这种事件会算到下一轮，回复也会错位。花费总额不受影响，只是记到了下一轮。

@@ -16,6 +16,34 @@ To learn how to use these features, read the [usage guide](docs/fork/usage.md).
 
 ## [Unreleased]
 
+### Added
+
+- **Cost and context observability (M2).** Every Claude run now records
+  what it spent and how large its context grew (`loopx/agents/run_usage.py`).
+  There is no spending cap.
+  - **Usage per run.** `llm_records` gains `cache_read_tokens`,
+    `cache_creation_tokens`, `context_tokens` and `compactions`. The run's
+    own cost and its four token counts come from the change in Claude's
+    session totals (`total_cost_usd` and `modelUsage`). `result.usage` is not
+    used: it leaves out compaction and subagent requests.
+  - **Context.** `context_tokens` is the prompt of the run's last main-loop
+    request.
+  - **Compactions.** `compactions` lists each `compact_boundary` event, with
+    its trigger and the context before and after.
+  - **Task cost.** `GET /api/tasks/<id>` and every task in `GET /api/tasks`
+    carry `cost`: the total of the task's Planner, Worker and Reviewer runs,
+    the total by role, the run count, and the runs still running or without
+    a reported cost.
+  - **Agent usage.** `GET /api/agents/<agent_id>/usage` returns an agent's
+    total, its cost by session and by UTC day, and its latest turns, each
+    with its context, cost and compactions.
+  - **Dashboard.** The task list and the task page show the task's cost; the
+    task page also breaks it down by agent. The Manager's and each Planner's
+    history page shows the context over its turns as a sparkline, with
+    compaction markers, the latest context size and the compaction count.
+    Every run card shows its own tokens (cache included), its final context,
+    whether it compacted, and its own cost.
+
 ### Changed
 
 - Each task's Planner is now a Claude Code agent. It keeps one Claude process
@@ -241,6 +269,16 @@ To learn how to use these features, read the [usage guide](docs/fork/usage.md).
   the turn once more in a new session; the run record names the dropped id.
   The context each turn carries is rebuilt by code, so nothing of the task's
   state is lost.
+- **The first turn of a resumed Manager or Planner session is no longer
+  counted twice.** A Claude process started with `--resume` reports, in its
+  first result, the session's earlier spending plus its own. Each new
+  process used to start counting from zero, so the turn after every server
+  restart, prompt or settings change, or Claude exit was recorded with the
+  whole session's cost again. For example, a resumed turn that spent $0.0070
+  was recorded as $0.1393. The session's running totals are now saved beside
+  its id (the Manager's `session.json`, the Planner's plan file), and a
+  resumed process starts from them. They reset when the session is dropped.
+  Records written before this fix keep their inflated cost.
 
 ## [2.5.0] - 2026-10-13
 

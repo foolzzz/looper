@@ -40,8 +40,10 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
   project and no task section.
   Each chat message is one user turn on its stdin and ends at that turn's
   `result`; messages are handled one at a time, and each turn is one Runs
-  record. Claude's `total_cost_usd` is its process's running total, so a
-  record's cost is the increase since the previous turn. When Claude exits
+  record holding only that turn's cost and tokens
+  ([What a run spent](#what-a-run-spent-and-how-large-its-context-grew)); the
+  session's running totals are saved beside its id in
+  `.local/manager/session.json` (`session_totals`). When Claude exits
   (or dies mid-turn, which answers that message with an error) or the
   Manager's system prompt, model, effort, Settings environment or library
   changes, the next message starts a new process that
@@ -170,10 +172,11 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
   - A chat turn that fails answers the user with the error and takes no
     action.
   - When Claude dies, its turn fails and the next turn starts a new process
-    with `--resume <session_id>`; the session id is kept in the Planner's plan
-    file under `.local/planner/`.
+    with `--resume <session_id>`; the session id and the session's running
+    totals (`session_totals`) are kept in the Planner's plan file under
+    `.local/planner/`.
 - Each turn is one `llm_records` row with agent_id `planner-<task_id>`, the
-  `task_id`, its own cost, `metadata.pid` and the system prompt's record
+  `task_id`, its own cost and tokens, its context at the end, `metadata.pid` and the system prompt's record
   (`system_prompt`, `system_prompt_sha256`, `prompt_layers`). The activity gets short
   summaries: `Planner Claude Code started (pid N...)`, `Plan created: ...`,
   `Planner decision on step N (s2): accept: ...`, `Plan changed: ...`.
@@ -216,7 +219,8 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
   `step_key`.
 - Each run is one `llm_records` row with `metadata.command` (the exact
   argv), the system prompt's record (`system_prompt`, `system_prompt_sha256`,
-  `prompt_layers`) and `metadata.step_id`; the activity's launch line shows
+  `prompt_layers`), `metadata.step_id`, and the process's cost, tokens, final
+  context and compactions; the activity's launch line shows
   the isolation settings by their size
 - Claude is stopped when a run takes longer than its row's (`worker` or
   `reviewer`) `timeout_seconds` in total (default 86400, 0 = no limit). The step fails
@@ -439,6 +443,77 @@ with 3 plugins and 104 skills, the first request of a minimal `--print` run
 on Opus went from 15,674 to 29,114 tokens (`/context`: skills 2.1k → 10k
 tokens, plugin hook context 3.8k).
 
+### What a run spent and how large its context grew
+
+Every run records its own cost and tokens, its context at the end and the
+context compactions it went through (`loopx/agents/run_usage.py`; RFC §8, M2).
+There is no spending cap (RFC decision 2); caps come as optional project
+settings in M5.
+
+Verified with Claude Code 2.1.285 (haiku, recorded in
+`tests/fixtures/claude_stream/`):
+
+- A `result`'s `total_cost_usd` and `modelUsage` (per model: `inputTokens`,
+  `outputTokens`, `cacheReadInputTokens`, `cacheCreationInputTokens`) are the
+  running totals of the session in that process. They count every request,
+  including a compaction's summary request and subagents' requests.
+- A process started with `--resume` carries on from the session's earlier
+  totals: its first result reports the earlier spending plus its own. Measured:
+  a session at $0.01046 reported $0.01279 for a resumed turn of its own
+  $0.00232.
+- A `result`'s `usage` covers only the turn's own main-loop requests. A
+  compaction-only turn reports zeros there although it cost $0.0088, and a
+  subagent's requests are left out too. An assistant message's `usage`
+  describes its request, but its `output_tokens` is a snapshot taken while
+  streaming.
+- A request's prompt is `input_tokens + cache_read_input_tokens +
+  cache_creation_input_tokens` of its assistant message. A subagent's messages
+  carry a `parent_tool_use_id`.
+- A compaction, automatic or `/compact` sent as a user turn, is
+  `{"type": "system", "subtype": "compact_boundary", "compact_metadata":
+  {"trigger": "auto"|"manual", "pre_tokens", "post_tokens",
+  "cumulative_dropped_tokens", "duration_ms", ...}}`. It follows
+  `system/status` events `status: "compacting"` and then `compact_result:
+  "success"`. A failed attempt is only the status event, with
+  `compact_result: "failed"` and `compact_error` (for example `too_few_groups`).
+  `--autocompact` (or `CLAUDE_CODE_AUTO_COMPACT_WINDOW`) accepts 100k–1M
+  tokens, and `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` lowers the threshold to about
+  that percentage of the window. With the window at 100k, haiku sessions
+  compacted at about 25k tokens with the override at 15, and at about 30k with
+  it at 31. Without a window, the override at 10 did not compact a 25k
+  session.
+
+So:
+
+- **Cost and tokens** (`cost_usd`, `input_tokens`, `output_tokens`,
+  `cache_read_tokens`, `cache_creation_tokens`) are the change in the reported
+  totals over the run. A Worker or Reviewer run is a whole process, so they
+  are its totals. A resident agent's turn subtracts the totals at the
+  previous result. `ResidentClaude` keeps those totals. A process that
+  resumes a session starts from the totals saved beside its id: the
+  Manager's `session.json` and the Planner's plan file. The saved totals are
+  rewritten after every result. When a session cannot be resumed and is
+  dropped (`session_started` false), its totals are dropped with it, and the
+  new session starts from zero. A counter that went down is taken as having
+  started again. Without `modelUsage` (an older Claude Code), the tokens come
+  from the turn's own `usage`.
+- **Context** (`context_tokens`) is the prompt of the run's last main-loop
+  request. Subagents' requests do not count. It is null for a turn that made
+  no request, such as `/compact`.
+- **Compactions** (`compactions`) lists each `compact_boundary` as
+  `{trigger, pre_tokens, post_tokens, duration_ms}`. It is `[]` when there
+  were none, and null for runs recorded before M2.
+- **A task's cost** (`llm_records.task_costs`) is the sum of its Planner's,
+  Workers' and Reviewers' runs, in total and by role, with the run count. It
+  also counts `running` runs (cost not known yet) and `unpriced_runs`
+  (finished without a reported cost). A Manager turn about the task is not
+  part of it.
+- **An agent's usage** (`llm_records.agent_usage`, `GET
+  /api/agents/:id/usage`) gives its total cost, runs and compactions, its cost
+  by session and by UTC day, and its latest turns (oldest first) with each
+  turn's context, cost and compactions. That is the Manager's and the
+  Planners' context over time.
+
 ## Message Bus
 
 All inter-agent communication uses typed `MessageEnvelope` over an in-process
@@ -546,7 +621,7 @@ PostgreSQL is a hard startup dependency. All data paths:
 | `task_steps` | Planner decomposition steps per task |
 | `activity` | Execution trace events (SSE streaming to frontend) |
 | `chat_messages` | Chat conversation history |
-| `llm_records` | One row per Claude run: input and output text, status, cost; `metadata` holds the exact argv (`command`), `cwd`, the appended `system_prompt`, its `system_prompt_sha256`, its `prompt_layers`, the `model_choice`, the Settings `env` names and the `library` items loaded |
+| `llm_records` | One row per Claude run: input and output text, status, the run's own `cost_usd`, `input_tokens`, `output_tokens`, `cache_read_tokens` and `cache_creation_tokens`, its final `context_tokens` and its `compactions`; `metadata` holds the exact argv (`command`), `cwd`, the appended `system_prompt`, its `system_prompt_sha256`, its `prompt_layers`, the `model_choice`, the Settings `env` names and the `library` items loaded |
 | `agent_configs` | Agent configuration (role prompt, model) for `manager`, `planner`, `worker` and `reviewer`; `harness_prompt` is used for the Manager only; `permission_mode` is stored but not applied |
 | `system_settings` | Settings shared by the whole system, one value per key: the default harness, model, effort and environment variables (no row = the built-in default), and the last library import's report |
 | `library_items` | The imported plugins and skills: kind, name, source label, declared version, `sha256` of the files, `enabled`, size, file count, `imported_at` |
@@ -575,11 +650,11 @@ built by `scripts/stage-dashboard.sh` at release time), and it carries
 ### Pages
 
 - **Chat**: Every agent and its messages, finished ones included. The selector lists the global Manager and the 30 most recent tasks; each task shows its one Planner and the Worker (and Reviewer, when reviewed) of each step. You can send to the Manager and to a running task's Planner, which keeps one thread per task; SSE streaming. A selected Planner also shows its Claude runs, one per turn, in a folded list of the latest 10 beside its activity and chat thread, re-read as a reply starts and ends and every 10 s while the task runs. A Worker or Reviewer shows its Claude runs read-only, following a running one live, and points to its task's Planner for sending.
-- **Tasks**: Task list with project and status filters, time display, Start/Stop/Delete controls. `#tasks?project=<id>` filters by a project and shows its name, description, default directory and background (three lines, then Show more; "No background" when empty), with Edit, and Delete while it has no tasks. Edit has a monospace background field with a live `n / 10000` counter and a collapsible "Harness overrides" section with the Planner and Worker harness (each `n / 20000`, or "Inherits the default" when empty); Save is disabled over a limit. The bar lists the harness overrides a project has. A new task picks an existing project or creates one in the same form; its work directory may stay empty when the project has a default. A task's detail view can move it to another project in any status.
+- **Tasks**: Task list with project and status filters, time display, each task's cost so far, Start/Stop/Delete controls. `#tasks?project=<id>` filters by a project and shows its name, description, default directory and background (three lines, then Show more; "No background" when empty), with Edit, and Delete while it has no tasks. Edit has a monospace background field with a live `n / 10000` counter and a collapsible "Harness overrides" section with the Planner and Worker harness (each `n / 20000`, or "Inherits the default" when empty); Save is disabled over a limit. The bar lists the harness overrides a project has. A new task picks an existing project or creates one in the same form; its work directory may stay empty when the project has a default. A task's detail view can move it to another project in any status.
 - **Projects (sidebar)**: Below the navigation, every project with its task count (or a spinner with its active count); clicking one opens the Tasks page filtered by it, and `+` creates a project (name, default directory, description, optional background and harness overrides).
-- **Task Detail**: Overview (steps, agent timeline, live activity feed), Pipeline DAG (React Flow), Sessions, Conversation
+- **Task Detail**: Overview (status, phase, times, steps and the task's cost with its run count, then "Cost by agent": the Planner's, the Workers' and the Reviewers' runs and cost with each one's share, noting runs still running or without a reported cost; steps, agent timeline, live activity feed), Pipeline DAG (React Flow), Sessions, Conversation
 - **Agents**: The Manager, Planner, Worker and Reviewer configuration editor (role prompt replace/append, model, LLM profiles). Instead of a permission setting it states the permissions every agent shares: every tool, `--dangerously-skip-permissions`. The model field's placeholder is the default it inherits. The Manager also has a "Harness prompt (override)" field; the others say where their harness comes from. A Runs tab lists every recorded Claude run of the role (the Manager, every task's Planner, Workers or Reviewers)
-- **Agent history** (`#history/<agent-id>?task=<task-id>`): opened from History on an Agent Timeline row, a Runs entry or the Chat page. For each Claude run it shows status, model, tokens, cost, the launch command (cwd and argv; a long argument such as the system prompt is shown by its length, and Copy copies the exact command), a collapsible System prompt section with what LoopX appended (Claude Code's built-in system prompt is not included): its title shows the prompt's size, its short sha256 and an `isolated` badge, and inside one line per layer (harness source and version, role recommended or edited, project and background version, task, contract), the model with its source and effort, and the Settings environment variable names, above the full text; runs recorded before the layers existed show the text only. A collapsible Plugins & skills section shows how many plugins and skills the run loaded and the library hash, and lists each with its short version hash. Then the full transcript, following a running run every 2 s. A running run shows its last output time from the record's heartbeat and is flagged after 2 minutes with no output. While Claude thinks it shows `thinking · ~N tokens` from Claude's `thinking_tokens` events. Those arrive about once a second, so the recorder keeps one row per thinking phase and updates its count in place. Hooks, background tasks and rate limits are shown as one line each, and any other event type as an expandable line. For a Planner each run is one of its turns, listed above your chat with it and its activity.
+- **Agent history** (`#history/<agent-id>?task=<task-id>`): opened from History on an Agent Timeline row, a Runs entry or the Chat page. The Manager's and a Planner's page starts with "Context & cost": the latest context size, the number of compactions, the total cost and the number of turns. Below them is a sparkline of the context at the end of each of the latest 100 turns, scaled between their lowest and highest value, with a dashed marker on each turn that compacted. A list of the compactions follows (turn, time, trigger, context before → after), then a folded table of the turns. The section is re-read every 10 s. For each Claude run it shows status, model, the run's own tokens (uncached input, cache read, cache write, output), its context at the end (`ctx`), a `compacted` badge, its own cost, the launch command (cwd and argv; a long argument such as the system prompt is shown by its length, and Copy copies the exact command), a collapsible System prompt section with what LoopX appended (Claude Code's built-in system prompt is not included): its title shows the prompt's size, its short sha256 and an `isolated` badge, and inside one line per layer (harness source and version, role recommended or edited, project and background version, task, contract), the model with its source and effort, and the Settings environment variable names, above the full text; runs recorded before the layers existed show the text only. A collapsible Plugins & skills section shows how many plugins and skills the run loaded and the library hash, and lists each with its short version hash. Then the full transcript, following a running run every 2 s. A running run shows its last output time from the record's heartbeat and is flagged after 2 minutes with no output. While Claude thinks it shows `thinking · ~N tokens` from Claude's `thinking_tokens` events. Those arrive about once a second, so the recorder keeps one row per thinking phase and updates its count in place. Hooks, background tasks and rate limits are shown as one line each, as are a compaction (`Context compacted (auto) · 25.1k → 1.36k tokens`) and a failed compaction attempt. The result line labels Claude's figure as the `session total`. Any other event type is an expandable line. For a Planner each run is one of its turns, listed above your chat with it and its activity.
 - **Settings**: Agent defaults (the default harness prompt with an `n / 20000` counter and Reset to built-in, the default model, the effort and the environment variables), then Plugins & skills (how many of the imported items are loaded and their size, "Import from this machine" or "Re-import", the last import with what it changed and what it left out, a name filter, and the plugins and skills with their version, size and a switch each; a change applies to each agent's next run), then the Telegram and Lark channels, each with its sender allowlist (an add and remove list of Telegram user IDs or Lark open_ids, checked as you type, with blanks and repeats flagged) and, for an enabled channel that does not start, the reason
 
 ### Real-Time Updates
@@ -613,10 +688,10 @@ dev proxy, which keeps `Host` and `Origin` on its own port.
 | `/api/projects` | POST | Create a project from `name` (trimmed, 1–80 characters), optional `description`, `work_dir` (absolute), `background` (stored without the blank lines around it; 400 over 10000 characters), `planner_harness_prompt` and `worker_harness_prompt` (400 over 20000 characters); 409 when the name exists ignoring case |
 | `/api/projects/:id` | PUT | Update any of `name`, `description`, `work_dir`, `background`, `planner_harness_prompt`, `worker_harness_prompt` (`""` clears it); 400, 404, 409 |
 | `/api/projects/:id` | DELETE | Delete a project; 409 while it still has tasks |
-| `/api/tasks` | GET | List the newest tasks; `?project_id=` lists one project's. Each has `project_id`, `project_name` and `work_dir` |
+| `/api/tasks` | GET | List the newest tasks; `?project_id=` lists one project's. Each has `project_id`, `project_name`, `work_dir` and `cost` (as in the task detail) |
 | `/api/tasks/create` | POST | Create a task in `init` with exactly one of `project_id` (existing) and `project` (`{name, description?, work_dir?, background?, planner_harness_prompt?, worker_harness_prompt?}`, created in the same transaction). Its `work_dir` is the one given, else the project's; 400 with neither, 404 for an unknown project, 409 for a taken new name |
 | `/api/tasks/:id/project` | PUT | Move a task to `{project_id}`, whatever its status |
-| `/api/tasks/:id` | GET | Task detail with steps, `project_id` and `project_name` |
+| `/api/tasks/:id` | GET | Task detail with steps, `project_id`, `project_name` and `cost`: `cost_usd` (the sum of its Planner's, Workers' and Reviewers' runs), `runs`, `running`, `unpriced_runs` and `by_role` (`planner`, `worker`, `reviewer`, each `{cost_usd, runs}`) |
 | `/api/tasks/cancel` | POST | Cancel task (permanent) |
 | `/api/tasks/stop` | POST | Stop/pause task |
 | `/api/tasks/start` | POST | Start/resume task |
@@ -638,6 +713,7 @@ dev proxy, which keeps `Host` and `Origin` on its own port.
 | `/api/llm-records` | GET | Claude runs; filter by `agent_id`, `task_id` or `role` (`manager`, `planner`, `worker`, `reviewer`) |
 | `/api/llm-records/:id` | GET | One run (status, usage, cost, launch command, heartbeat) |
 | `/api/llm-records/:id/events?after=N` | GET | The run's stream-json events after seq N |
+| `/api/agents/:id/usage?turns=N` | GET | One agent's (`manager`, `planner-<task_id>`, ...) spending and context: `total` (`cost_usd`, `runs`, `running`, `unpriced_runs`, `compactions`), `by_session` and `by_day` (UTC; each `cost_usd`, `runs`), its latest N turns (default 100, at most 1000) oldest first with `context_tokens`, `cost_usd` and `compactions`, and `latest_context_tokens`; 400 for a bad `turns` |
 | `/api/channel-configs` | GET | List channels, each with `start_problem`: why it does not start as configured (an empty or invalid sender allowlist), else null |
 | `/api/channel-configs/:id` | GET/PUT | Channel config. PUT validates the sender allowlist (`allowed_user_ids` for Telegram, `allowed_open_ids` for Lark) and stores it as a list; 400 naming the first bad id, and nothing is stored then; 404 for an unknown channel |
 
