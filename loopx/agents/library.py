@@ -1,12 +1,13 @@
-"""The library: the operator's Claude Code plugins and skills, imported as defaults every agent loads.
+"""The library: the capability catalog's items, how they are acquired, and how an agent run loads the ones installed.
 
 Agents never load the operator's personal Claude Code configuration
-(``claude_cli.isolation_args``). The capabilities the operator wants them to
-have are imported explicitly instead, as a snapshot LoopX manages:
+(``claude_cli.isolation_args``). What they load comes from the catalog
+(``library_items`` and ``library_files``) instead, and only where an item is
+installed (``library_installs``, ``loopx.agents.catalog``):
 
-- **Import** (``import_from_machine``, ``POST /api/settings/library/import``)
-  reads, and only reads, the operator's Claude Code configuration
-  (``$CLAUDE_CONFIG_DIR``, else ``~/.claude``): every plugin
+- **Import** (``import_from_machine``, ``POST /api/catalog/import``) acquires
+  items from this machine. It reads, and only reads, the operator's Claude
+  Code configuration (``$CLAUDE_CONFIG_DIR``, else ``~/.claude``): every plugin
   ``settings.json`` enables, from its user-scope install in
   ``plugins/installed_plugins.json``, taken whole (its skills, agents, commands
   and hooks); and every personal skill, ``skills/<name>/`` with a
@@ -14,18 +15,21 @@ have are imported explicitly instead, as a snapshot LoopX manages:
   MCP servers and memory are not read. Each item and its files go into the
   database (``loopx.db.library``), which is the source of truth; an item's
   version is the hash of its files. A re-import replaces the items that
-  changed, keeps every item's enabled flag and removes the items that are gone.
+  changed, keeps every item's installs and removes the items that are gone.
+  A new item is installed nowhere. Items of other origins (a project's own
+  skills, ``project_skills``) are left alone.
 - **Caps**: a file over ``FILE_MAX_BYTES``, a binary file (not UTF-8 text) and
   a link out of its item are left out; an item over ``ITEM_MAX_BYTES`` or
   ``ITEM_MAX_FILES`` is left out whole; all of them are reported. A library
   over ``LIBRARY_MAX_BYTES`` is refused and nothing changes.
-- **Launch** (``load_library``): every agent run reads the enabled items and
-  gets a read-only copy of each under ``<runtime_root>/.local/library/<sha256>/``,
-  written once from the database. Each enabled plugin is one ``--plugin-dir``;
-  the enabled skills are linked into one generated plugin, ``personal``, so
-  Claude Code names them ``personal:<skill>``. The flags come from
-  ``claude_cli.library_args`` and the run records the items and the
-  library's hash.
+- **Launch** (``load_installed``): every agent run reads the items installed
+  for its role, globally or in its project, and gets a read-only copy of each
+  under ``<runtime_root>/.local/library/<sha256>/``, written once from the
+  database. Each plugin is one ``--plugin-dir``; the skills are linked into
+  generated plugins: a project's own skills into ``project`` (Claude Code
+  names them ``project:<skill>``), every other skill into ``personal``
+  (``personal:<skill>``). The flags come from ``claude_cli.library_args`` and
+  the run records the items and their hash.
 """
 
 from __future__ import annotations
@@ -48,8 +52,14 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-# The plugin Claude Code loads the enabled personal skills from: they are named personal:<skill>.
+# The plugins Claude Code loads the installed skills from: a project's own skills are named project:<skill>,
+# every other skill personal:<skill>.
 SKILLS_PLUGIN = "personal"
+PROJECT_SKILLS_PLUGIN = "project"
+_PLUGIN_DESCRIPTIONS = {
+    SKILLS_PLUGIN: "Skills installed from the LoopX catalog.",
+    PROJECT_SKILLS_PLUGIN: "This project's own skills, managed by LoopX.",
+}
 
 # Caps, measured against a real configuration (3 plugins and 104 skills, about
 # 22 MiB of text in 2,200 files; the largest file 0.7 MiB, the largest item 9 MiB).
@@ -75,10 +85,6 @@ class ItemKind(str, Enum):
 
 class LibraryError(ValueError):
     """An import, a request or a stored item the library refuses (answered with 400)."""
-
-
-class LibraryItemNotFound(LookupError):
-    """No library item has the id asked for (answered with 404)."""
 
 
 def _sha256(data: bytes) -> str:
@@ -316,13 +322,13 @@ def scan_machine(config_dir: Path | None = None) -> Scan:
     return scan
 
 
-# --- The API: import, list, enable ---
+# --- Acquiring from this machine ---
 
 _import_lock = asyncio.Lock()
 
 
 async def import_from_machine(config_dir: Path | None = None) -> dict[str, Any]:
-    """Import (or re-import) the operator's plugins and skills; returns the library view with the report."""
+    """Import (or re-import) the operator's plugins and skills; returns the catalog view with the report."""
     from ..db import library as db_library
     from ..db import system_settings
 
@@ -340,48 +346,9 @@ async def import_from_machine(config_dir: Path | None = None) -> dict[str, Any]:
         }
         await system_settings.put_settings({LAST_IMPORT_KEY: json.dumps(report, ensure_ascii=False)})
     logger.info("library import: %s", {k: v for k, v in report.items() if k != "skipped"})
-    return await library_view()
+    from .catalog import catalog_view
 
-
-async def library_view() -> dict[str, Any]:
-    """The items (without their files), the last import's report and the hash agents load."""
-    from ..db import library as db_library
-    from ..db import system_settings
-
-    rows = await db_library.list_items()
-    stored = await system_settings.get_settings([LAST_IMPORT_KEY])
-    try:
-        last_import = json.loads(stored[LAST_IMPORT_KEY]) if LAST_IMPORT_KEY in stored else None
-    except ValueError:
-        last_import = None
-    enabled = [LoadedItem(ItemKind(r["kind"]), r["name"], r["sha256"]) for r in rows if r["enabled"]]
-    return {
-        "items": [
-            {key: row[key] for key in ("id", "kind", "name", "source", "version", "sha256", "enabled", "size_bytes",
-                                       "file_count", "imported_at")}
-            for row in rows
-        ],
-        "last_import": last_import,
-        "enabled_count": len(enabled),
-        "library_sha256": library_sha256(enabled),
-        "total_bytes": sum(int(row["size_bytes"]) for row in rows),
-        "skills_plugin": SKILLS_PLUGIN,
-        "caps": {
-            "file_max_bytes": FILE_MAX_BYTES, "item_max_bytes": ITEM_MAX_BYTES, "item_max_files": ITEM_MAX_FILES,
-            "library_max_bytes": LIBRARY_MAX_BYTES,
-        },
-    }
-
-
-async def set_item_enabled(item_id: str, data: Any) -> dict[str, Any]:
-    """Enable or disable one item (``{"enabled": true|false}``); returns the library view."""
-    from ..db import library as db_library
-
-    if not isinstance(data, dict) or set(data) != {"enabled"} or not isinstance(data["enabled"], bool):
-        raise LibraryError('the body is {"enabled": true} or {"enabled": false}')
-    if await db_library.set_enabled(item_id, data["enabled"]) is None:
-        raise LibraryItemNotFound(f"no library item {item_id}")
-    return await library_view()
+    return await catalog_view()
 
 
 # --- Loading the library for an agent run ---
@@ -392,23 +359,42 @@ class LoadedItem:
     kind: ItemKind
     name: str
     sha256: str
+    # The plugin it loads in: a plugin's own directory name, or the generated plugin of a skill.
+    plugin: str = SKILLS_PLUGIN
+    scope: str = "global"  # where it is installed for the run: "global", or "project" when its project has it
+
+    def view(self) -> dict[str, Any]:
+        return {"kind": self.kind.value, "name": self.name, "sha256": self.sha256, "plugin": self.plugin,
+                "scope": self.scope}
+
+
+def items_label(items: Sequence[LoadedItem]) -> str:
+    """``1 plugin, 2 skills``; a kind with none is left out."""
+    plugins = sum(item.kind is ItemKind.PLUGIN for item in items)
+    skills = len(items) - plugins
+    parts = [f"{plugins} plugin{'' if plugins == 1 else 's'}" if plugins else "",
+             f"{skills} skill{'' if skills == 1 else 's'}" if skills or not plugins else ""]
+    return ", ".join(part for part in parts if part)
 
 
 def library_sha256(items: Sequence[LoadedItem]) -> str | None:
-    """One hash of the items an agent loads; None for none."""
+    """One hash of the items an agent loads and the plugins they load in; None for none."""
     if not items:
         return None
-    listing = sorted([item.kind.value, item.name, item.sha256] for item in items)
+    listing = sorted([item.kind.value, item.plugin, item.name, item.sha256] for item in items)
     return _sha256(json.dumps(listing, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
 
 
 @dataclass(frozen=True)
 class AgentLibrary:
-    """What one agent run loads from the library: the items and the plugin directories naming them."""
+    """What one agent run loads from the catalog: the items installed for it and the plugin directories naming
+    them."""
 
     items: tuple[LoadedItem, ...] = ()
     plugin_dirs: tuple[str, ...] = ()  # each one --plugin-dir, absolute
-    error: str | None = None  # why the run goes without its library
+    error: str | None = None  # why the run goes without its installed items
+    role: str | None = None
+    project_id: str | None = None
 
     @property
     def sha256(self) -> str | None:
@@ -420,7 +406,9 @@ class AgentLibrary:
             return None
         return {
             "sha256": self.sha256,
-            "items": [{"kind": i.kind.value, "name": i.name, "sha256": i.sha256} for i in self.items],
+            "role": self.role,
+            "project_id": self.project_id,
+            "items": [item.view() for item in self.items],
             **({"error": self.error} if self.error is not None else {}),
         }
 
@@ -452,8 +440,8 @@ def write_once(target: Path, build: Callable[[Path], None]) -> None:
     It is built in a temporary directory beside it and renamed into place, so
     a reader never sees a partial one; when another run made it first, that
     one stays. Its directories end up 0555; ``build`` sets its files' modes.
-    The library's items and a project's skills (``project_skills``) are
-    written this way, each under its content's hash.
+    The catalog's items and the generated skill plugins are written this
+    way, each under its content's hash.
     """
     if target.is_dir():
         return
@@ -505,20 +493,19 @@ def materialize_item(runtime_root: Path, item: LoadedItem, files: Sequence[Mappi
     return target / name
 
 
-def skills_plugin(runtime_root: Path, skills: Sequence[LoadedItem]) -> Path:
-    """The plugin of the enabled ``skills``: a manifest and a link to each materialized skill.
+def skills_plugin(runtime_root: Path, skills: Sequence[LoadedItem], plugin: str = SKILLS_PLUGIN) -> Path:
+    """The generated ``plugin`` holding ``skills``: a manifest and a link to each materialized skill.
 
-    It is named by the set of skills, so another set is another directory.
+    It is named by the plugin and its set of skills, so another set is another directory.
     """
     listing = sorted([item.name, item.sha256] for item in skills)
-    key = _sha256(("skills-plugin\n" + json.dumps(listing, separators=(",", ":"))).encode("utf-8"))
+    key = _sha256(("skills-plugin\n" + json.dumps([plugin, listing], separators=(",", ":"))).encode("utf-8"))
 
     def build(directory: Path) -> None:
-        base = directory / SKILLS_PLUGIN
+        base = directory / plugin
         (base / ".claude-plugin").mkdir(parents=True)
         (base / ".claude-plugin" / "plugin.json").write_text(json.dumps({
-            "name": SKILLS_PLUGIN,
-            "description": "The operator's personal Claude Code skills, imported into LoopX.",
+            "name": plugin, "description": _PLUGIN_DESCRIPTIONS.get(plugin, "Skills managed by LoopX."),
         }, indent=2) + "\n", encoding="utf-8")
         (base / "skills").mkdir()
         for name, sha in listing:
@@ -526,42 +513,127 @@ def skills_plugin(runtime_root: Path, skills: Sequence[LoadedItem]) -> Path:
 
     target = _library_dir(runtime_root) / key
     write_once(target, build)
-    return target / SKILLS_PLUGIN
+    return target / plugin
 
 
 EMPTY_LIBRARY = AgentLibrary()
 
 
-async def load_library(runtime_root: Path) -> AgentLibrary:
-    """The enabled items, materialized under ``runtime_root``, for one agent run.
+def skill_plugin(origin: str) -> str:
+    """The generated plugin a skill of ``origin`` loads in."""
+    return PROJECT_SKILLS_PLUGIN if origin == "project" else SKILLS_PLUGIN
 
-    An item is written from the database the first time a run needs it. When
-    the library cannot be read or written, the run goes without it and its
-    record says why.
+
+def resolve_installed(
+    rows: Sequence[Mapping[str, Any]], project_id: str | None,
+) -> list[tuple[Mapping[str, Any], LoadedItem]]:
+    """The items a run loads from its install rows (``db.library.list_installed``), each once, in their order.
+
+    An item installed globally and in the project loads once, as the
+    project's. Two project-authored skills of one name would both be
+    ``project:<name>``: the project's own one loads, else the first (the API
+    refuses such a pair; this only settles a race).
+    """
+    by_item: dict[str, tuple[Mapping[str, Any], LoadedItem]] = {}
+    for row in rows:
+        kind = ItemKind(row["kind"])
+        plugin = directory_name(kind, row["name"]) if kind is ItemKind.PLUGIN else skill_plugin(row["origin"])
+        previous = by_item.get(row["id"])
+        in_project = row["scope"] == "project" or (previous is not None and previous[1].scope == "project")
+        by_item[row["id"]] = (row, LoadedItem(kind, row["name"], row["sha256"], plugin,
+                                              "project" if in_project else "global"))
+    loaded: dict[tuple[str, str, str], tuple[Mapping[str, Any], LoadedItem]] = {}
+    for row, item in by_item.values():
+        key = (item.kind.value, item.plugin, item.name)
+        other = loaded.get(key)
+        if other is not None:
+            own = row.get("owner_project_id") == project_id and other[0].get("owner_project_id") != project_id
+            kept, dropped = (row, other[0]) if own else (other[0], row)
+            logger.warning("%s:%s of item %s is not loaded: item %s has the name", item.plugin, item.name,
+                           dropped["id"], kept["id"])
+            if not own:
+                continue
+        loaded[key] = (row, item)
+    return list(loaded.values())
+
+
+EMPTY_LIBRARY = AgentLibrary()
+
+
+def skill_plugin(origin: str) -> str:
+    """The generated plugin a skill of ``origin`` loads in."""
+    return PROJECT_SKILLS_PLUGIN if origin == "project" else SKILLS_PLUGIN
+
+
+def resolve_installed(rows: Sequence[Mapping[str, Any]], project_id: str | None) -> list[tuple[Mapping[str, Any], LoadedItem]]:
+    """The items a run loads from its install rows (``db.library.list_installed``), each once.
+
+    An item installed globally and in the project loads once, as the
+    project's. Two project-authored skills of one name would both be
+    ``project:<name>``: the project's own one loads, else the first by owner
+    (the API refuses such a pair; this only settles a race).
+    """
+    chosen: dict[str, tuple[Mapping[str, Any], LoadedItem]] = {}
+    for row in rows:
+        kind = ItemKind(row["kind"])
+        plugin = directory_name(kind, row["name"]) if kind is ItemKind.PLUGIN else skill_plugin(row["origin"])
+        scope = "project" if row["scope"] == "project" or row["id"] in chosen and \
+            chosen[row["id"]][1].scope == "project" else "global"
+        chosen[row["id"]] = (row, LoadedItem(kind, row["name"], row["sha256"], plugin, scope))
+    loaded: dict[tuple[str, str, str], tuple[Mapping[str, Any], LoadedItem]] = {}
+    for row, item in chosen.values():
+        key = (item.kind.value, item.plugin, item.name)
+        if item.kind is ItemKind.SKILL and key in loaded:
+            other = loaded[key][0]
+            if other.get("owner_project_id") == project_id or row.get("owner_project_id") != project_id:
+                logger.warning("skill %s:%s of item %s is shadowed by item %s", item.plugin, item.name, row["id"],
+                               other["id"])
+                continue
+            logger.warning("skill %s:%s of item %s is shadowed by item %s", item.plugin, item.name, other["id"],
+                           row["id"])
+        loaded[key] = (row, item)
+    return list(loaded.values())
+
+
+EMPTY_LIBRARY = AgentLibrary()
+
+
+async def load_installed(runtime_root: Path, role: str, project_id: str | None = None) -> AgentLibrary:
+    """The items installed for one run of ``role`` in ``project_id``, materialized under ``runtime_root``.
+
+    They are the enabled installs naming the role, global or in the project
+    (``resolve_installed``). An item is written from the database the first
+    time a run needs it. The plugins come first, then ``personal`` and
+    ``project``. When the catalog cannot be read or written, the run goes
+    without its items and its record says why.
     """
     from ..db import library as db_library
 
+    project_id = project_id or None
     try:
-        rows = await db_library.list_enabled_items()
+        rows = await db_library.list_installed(role, project_id)
     except Exception:
-        logger.warning("cannot read the library; the agent runs without it", exc_info=True)
-        return AgentLibrary(error="the library could not be read")
+        logger.warning("cannot read the installed items; the agent runs without them", exc_info=True)
+        return AgentLibrary(error="the installed items could not be read", role=role, project_id=project_id)
     if not rows:
-        return EMPTY_LIBRARY
-    items = tuple(LoadedItem(ItemKind(row["kind"]), row["name"], row["sha256"]) for row in rows)
+        return AgentLibrary(role=role, project_id=project_id)
+    resolved = resolve_installed(rows, project_id)
+    items = tuple(item for _, item in resolved)
     try:
         plugin_dirs: list[str] = []
-        for row, item in zip(rows, items):
+        for row, item in resolved:
             directory = item_directory(runtime_root, item)
             if not directory.is_dir():
                 files = await db_library.get_item_files(row["id"])
                 directory = await asyncio.to_thread(materialize_item, runtime_root, item, files)
             if item.kind is ItemKind.PLUGIN:
                 plugin_dirs.append(str(directory))
-        skills = [item for item in items if item.kind is ItemKind.SKILL]
-        if skills:
-            plugin_dirs.append(str(await asyncio.to_thread(skills_plugin, runtime_root, skills)))
+        for plugin in (SKILLS_PLUGIN, PROJECT_SKILLS_PLUGIN):
+            skills = [item for item in items if item.kind is ItemKind.SKILL and item.plugin == plugin]
+            if skills:
+                plugin_dirs.append(str(await asyncio.to_thread(skills_plugin, runtime_root, skills, plugin)))
     except Exception as exc:
-        logger.warning("cannot prepare the library; the agent runs without it", exc_info=True)
-        return AgentLibrary(error=f"the library could not be prepared: {exc}")
-    return AgentLibrary(items, tuple(plugin_dirs))
+        logger.warning("cannot prepare the installed items; the agent runs without them", exc_info=True)
+        return AgentLibrary(error=f"the installed items could not be prepared: {exc}", role=role,
+                            project_id=project_id)
+    return AgentLibrary(items, tuple(plugin_dirs), role=role, project_id=project_id)

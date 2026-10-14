@@ -4,16 +4,17 @@ Agent runs read three kinds of content from directories written once, named by
 a SHA-256 of their content, under ``<runtime_root>/.local``; a change writes a
 new directory and leaves the old one:
 
-- the library's items and the generated ``personal`` skills plugin:
-  ``library/<sha256>/`` (``library.py``);
+- the catalog's items and the generated skill plugins (``personal``,
+  ``project``): ``library/<sha256>/`` (``library.py``);
 - a project's text and upload documents: ``projects/<id>/knowledge/<sha256>/``
   (``knowledge.py``);
-- a project's skills plugin: ``projects/<id>/skills/<sha256>/``
-  (``project_skills.py``).
+- a project's skills plugin as versions before the catalog wrote it:
+  ``projects/<id>/skills/<sha256>/``; nothing writes these any more.
 
 ``reclaim_unused`` removes the ones nothing uses. ``loopx serve`` runs it at
 start, before any agent launches. It keeps a directory that the database's
-current content uses (what the next runs mount; loading it also writes it) or
+current content uses (what the next runs of every role in every project mount,
+and those of a task agent without a project; loading it also writes it) or
 that the command line of a running process names, as every run's
 ``--plugin-dir`` and ``--add-dir`` do, which covers agents an earlier server
 left running and those of another server on the same runtime root; a
@@ -128,25 +129,28 @@ def command_lines() -> list[str]:
 
 
 async def current_copies(runtime_root: Path) -> list[str] | None:
-    """The directories the current library and every project's knowledge and skills use, written if missing.
+    """The directories the installed items of every role and every project's knowledge use, written if missing.
 
     None when any of them cannot be read or written.
     """
     from ..db import projects as db_projects
+    from .catalog import ROLES, TASK_ROLES
     from .knowledge import load_knowledge
-    from .library import load_library
-    from .project_skills import load_project_skills
+    from .library import load_installed
 
-    library = await load_library(runtime_root)
-    if library.error is not None:
-        return None
-    paths = list(library.plugin_dirs)
-    for project in await db_projects.list_projects():
-        knowledge = await load_knowledge(runtime_root, project, str(project.get("work_dir") or ""))
-        skills = await load_project_skills(runtime_root, project)
-        if knowledge.error is not None or skills.error is not None:
+    paths: list[str] = []
+    projects = await db_projects.list_projects()
+    places = [(role, None) for role in ROLES] + [(role, str(p["id"])) for p in projects for role in TASK_ROLES]
+    for role, project_id in places:
+        library = await load_installed(runtime_root, role, project_id)
+        if library.error is not None:
             return None
-        paths += [*knowledge.add_dirs, *([skills.plugin_dir] if skills.plugin_dir else [])]
+        paths += library.plugin_dirs
+    for project in projects:
+        knowledge = await load_knowledge(runtime_root, project, str(project.get("work_dir") or ""))
+        if knowledge.error is not None:
+            return None
+        paths += knowledge.add_dirs
     return paths
 
 
@@ -155,7 +159,7 @@ async def reclaim_unused(runtime_root: Path) -> list[Path]:
     try:
         keep = await current_copies(runtime_root)
         if keep is None:
-            logger.warning("not reclaiming unused copies: the current library or project content cannot be read")
+            logger.warning("not reclaiming unused copies: the installed items or project content cannot be read")
             return []
         removed = reclaim(runtime_root, keep=keep, command_lines=command_lines())
     except Exception:

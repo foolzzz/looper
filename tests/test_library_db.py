@@ -1,4 +1,4 @@
-"""The library tables, the import and the library API against a real PostgreSQL.
+"""The catalog's import from this machine, and its items' installs across a re-import, against a real PostgreSQL.
 
 Runs only when LOOPX_TEST_DATABASE_URL points at a disposable database. Each
 test works in a new schema of its own, dropped afterwards. The operator home
@@ -99,14 +99,14 @@ def test_an_import_stores_the_snapshot(home: Path, monkeypatch: pytest.MonkeyPat
     from loopx.agents import library
 
     async def _test(pool: Any) -> None:
-        status, view = await _call("POST", "/api/settings/library/import")
+        status, view = await _call("POST", "/api/catalog/import")
         assert status == 200
         items = await _items(pool)
         assert sorted((r["kind"], r["name"]) for r in items.values()) == [
             ("plugin", "demo@market"), ("skill", "alpha"), ("skill", "beta")]
         demo = items["demo@market"]
-        assert (demo["source"], demo["version"], demo["enabled"]) == (
-            "~/.claude/plugins/cache/market/demo/1.2.0", "1.2.0", True)
+        assert (demo["source"], demo["version"], demo["origin"]) == (
+            "~/.claude/plugins/cache/market/demo/1.2.0", "1.2.0", "machine")
         files = {r["path"]: dict(r) for r in await pool.fetch(
             "SELECT path, content, sha256, executable FROM library_files WHERE item_id = $1", demo["id"])}
         assert files["hooks/start.sh"]["executable"] and files["hooks/start.sh"]["content"].startswith("#!/bin/sh")
@@ -116,74 +116,66 @@ def test_an_import_stores_the_snapshot(home: Path, monkeypatch: pytest.MonkeyPat
         assert demo["sha256"] == library.item_sha256(list(files.values()))
         assert "assets/logo.png" not in files and not any(p.startswith(".git/") for p in files)
 
-        # The view lists the items and the import, with what was left out.
-        assert [(i["kind"], i["name"], i["enabled"]) for i in view["items"]] == [
-            ("plugin", "demo@market", True), ("skill", "alpha", True), ("skill", "beta", True)]
+        # The view lists the items, installed nowhere, and the import, with what was left out.
+        assert [(i["kind"], i["name"], i["origin"], i["installs"]) for i in view["items"]] == [
+            ("plugin", "demo@market", "machine", []), ("skill", "alpha", "machine", []),
+            ("skill", "beta", "machine", [])]
         report = view["last_import"]
         assert (report["plugins"], report["skills"], sorted(report["added"])) == (
             1, 2, ["plugin:demo@market", "skill:alpha", "skill:beta"])
         assert {"item": "demo@market", "path": "assets/logo.png", "reason": "binary",
                 "size_bytes": 17} in report["skipped"]
-        assert view["enabled_count"] == 3 and view["library_sha256"]
-        status, again = await _call("GET", "/api/settings/library")
+        assert view["installed_count"] == 0
+        assert await pool.fetchval("SELECT count(*) FROM library_installs") == 0
+        status, again = await _call("GET", "/api/catalog")
         assert status == 200 and again["items"] == view["items"] and again["last_import"] == report
 
     _run(_test, monkeypatch)
 
 
-def test_a_reimport_replaces_changed_items_and_keeps_each_enabled_flag(
+def test_a_reimport_replaces_changed_items_keeps_their_installs_and_leaves_project_skills_alone(
     home: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async def _test(pool: Any) -> None:
-        await _call("POST", "/api/settings/library/import")
+        await _call("POST", "/api/catalog/import")
         before = await _items(pool)
-        for name in ("alpha", "demo@market"):
-            status, _ = await _call("PUT", f"/api/settings/library/{before[name]['id']}", {"enabled": False})
-            assert status == 200
+        for name in ("alpha", "demo@market", "beta"):
+            status, _ = await _call("POST", "/api/installs", {"item_id": before[name]["id"], "scope": "global",
+                                                              "roles": ["worker"]})
+            assert status == 201
+        status, project = await _call("POST", "/api/projects", {"name": "calc"})
+        status, _ = await _call("POST", f"/api/projects/{project['project_id']}/skills",
+                                {"name": "alpha", "description": "The project's own alpha.", "content": "Reply OWN."})
+        assert status == 201
 
         (home / "skills" / "alpha" / "SKILL.md").write_text("---\nname: alpha\n---\nReply ALPHA-v2.\n")
         os.unlink(home / "skills" / "beta")
         write(home / "skills" / "gamma" / "SKILL.md", "---\nname: gamma\n---\nReply GAMMA.\n")
-        status, view = await _call("POST", "/api/settings/library/import")
+        status, view = await _call("POST", "/api/catalog/import")
         assert status == 200
-        after = await _items(pool)
-        assert sorted(after) == ["alpha", "demo@market", "gamma"]
-        # A changed item keeps its id and its flag; its files are the new ones.
-        assert after["alpha"]["id"] == before["alpha"]["id"] and after["alpha"]["enabled"] is False
-        assert after["alpha"]["sha256"] != before["alpha"]["sha256"]
+        machine = {r["name"]: dict(r) for r in await pool.fetch("SELECT * FROM library_items WHERE origin = 'machine'")}
+        assert sorted(machine) == ["alpha", "demo@market", "gamma"]
+        # A changed item keeps its id and its installs; its files are the new ones.
+        assert machine["alpha"]["id"] == before["alpha"]["id"]
+        assert machine["alpha"]["sha256"] != before["alpha"]["sha256"]
         content = await pool.fetchval(
-            "SELECT content FROM library_files WHERE item_id = $1 AND path = 'SKILL.md'", after["alpha"]["id"])
+            "SELECT content FROM library_files WHERE item_id = $1 AND path = 'SKILL.md'", machine["alpha"]["id"])
         assert content.endswith("Reply ALPHA-v2.\n")
-        # An unchanged item is left as it was, disabled included.
-        assert {k: after["demo@market"][k] for k in ("id", "sha256", "enabled", "imported_at")} == {
-            k: before["demo@market"][k] for k in ("id", "sha256", "imported_at")} | {"enabled": False}
-        assert after["gamma"]["enabled"] is True
+        installed = {r["item_id"]: list(r["roles"]) for r in await pool.fetch("SELECT * FROM library_installs")}
+        assert installed[machine["alpha"]["id"]] == installed[machine["demo@market"]["id"]] == ["worker"]
+        # An unchanged item is left as it was; a new one is installed nowhere; a removed one goes with its install.
+        assert {k: machine["demo@market"][k] for k in ("id", "sha256", "imported_at")} == {
+            k: before["demo@market"][k] for k in ("id", "sha256", "imported_at")}
+        assert machine["gamma"]["id"] not in installed and before["beta"]["id"] not in installed
         report = view["last_import"]
         assert (report["added"], report["updated"], report["removed"], report["unchanged"]) == (
             ["skill:gamma"], ["skill:alpha"], ["skill:beta"], 1)
         assert await pool.fetchval(
             "SELECT count(*) FROM library_files WHERE item_id = $1", before["beta"]["id"]) == 0
-
-    _run(_test, monkeypatch)
-
-
-def test_toggling_answers_with_the_library_and_refuses_bad_requests(
-    home: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    async def _test(pool: Any) -> None:
-        _, view = await _call("POST", "/api/settings/library/import")
-        alpha = next(i for i in view["items"] if i["name"] == "alpha")
-        status, toggled = await _call("PUT", f"/api/settings/library/{alpha['id']}", {"enabled": False})
-        assert status == 200 and toggled["enabled_count"] == 2
-        assert toggled["library_sha256"] != view["library_sha256"]
-        assert next(i for i in toggled["items"] if i["name"] == "alpha")["enabled"] is False
-        status, body = await _call("PUT", "/api/settings/library/lib-000000000000", {"enabled": True})
-        assert status == 404 and "no library item" in body["error"]
-        for bad in ({"enabled": "yes"}, {"enabled": True, "name": "x"}, {}):
-            status, body = await _call("PUT", f"/api/settings/library/{alpha['id']}", bad)
-            assert status == 400, bad
-        status, body = await _call("PUT", f"/api/settings/library/{alpha['id']}", b"not json")
-        assert status == 400
+        # The project's own alpha is not this machine's: the import left it and its install alone.
+        own = await pool.fetchrow("SELECT * FROM library_items WHERE origin = 'project'")
+        assert (own["name"], own["description"]) == ("alpha", "The project's own alpha.")
+        assert own["id"] in installed and await pool.fetchval("SELECT count(*) FROM library_items") == 4
 
     _run(_test, monkeypatch)
 
@@ -192,36 +184,34 @@ def test_an_import_over_the_cap_changes_nothing(home: Path, monkeypatch: pytest.
     from loopx.agents import library
 
     async def _test(pool: Any) -> None:
-        await _call("POST", "/api/settings/library/import")
-        before = await pool.fetch("SELECT id, sha256, enabled FROM library_items ORDER BY id")
+        await _call("POST", "/api/catalog/import")
+        before = await pool.fetch("SELECT id, sha256 FROM library_items ORDER BY id")
         write(home / "skills" / "huge" / "SKILL.md", "x" * 2_000)
         monkeypatch.setattr(library, "LIBRARY_MAX_BYTES", 1_500)
-        status, body = await _call("POST", "/api/settings/library/import")
+        status, body = await _call("POST", "/api/catalog/import")
         assert status == 400 and "over the cap" in body["error"]
-        assert await pool.fetch("SELECT id, sha256, enabled FROM library_items ORDER BY id") == before
+        assert await pool.fetch("SELECT id, sha256 FROM library_items ORDER BY id") == before
 
     _run(_test, monkeypatch)
 
 
-def test_agents_load_the_enabled_items_from_the_database(
+def test_agents_load_the_installed_items_from_the_database(
     home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from loopx.agents.library import SKILLS_PLUGIN, load_library
+    from loopx.agents.library import SKILLS_PLUGIN, load_installed
 
     async def _test(pool: Any) -> None:
-        _, view = await _call("POST", "/api/settings/library/import")
-        beta = next(i for i in view["items"] if i["name"] == "beta")
-        await _call("PUT", f"/api/settings/library/{beta['id']}", {"enabled": False})
+        _, view = await _call("POST", "/api/catalog/import")
+        for item in view["items"]:
+            if item["name"] != "beta":
+                await _call("POST", "/api/installs", {"item_id": item["item_id"], "scope": "global"})
         runtime = tmp_path / "runtime"
-        loaded = await load_library(runtime)
+        loaded = await load_installed(runtime, "reviewer")
         assert [i["name"] for i in loaded.record()["items"]] == ["demo@market", "alpha"]
         plugin, skills = (Path(d) for d in loaded.plugin_dirs)
         assert (plugin / "hooks" / "start.sh").read_text() == "#!/bin/sh\necho started\n"
         assert os.access(plugin / "hooks" / "start.sh", os.X_OK)
         assert skills.name == SKILLS_PLUGIN and [p.name for p in (skills / "skills").iterdir()] == ["alpha"]
         assert (skills / "skills" / "alpha" / "SKILL.md").read_text().endswith("Reply ALPHA-OK.\n")
-        # The API's hash is the one the agents record.
-        _, now = await _call("GET", "/api/settings/library")
-        assert loaded.sha256 == now["library_sha256"]
 
     _run(_test, monkeypatch)

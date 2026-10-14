@@ -20,7 +20,6 @@ if TYPE_CHECKING:
     from .agent_settings import Launch
     from .knowledge import AgentKnowledge
     from .library import AgentLibrary
-    from .project_skills import AgentProjectSkills
     from .system_prompt import SystemPrompt
 
 logger = logging.getLogger(__name__)
@@ -47,9 +46,9 @@ logger = logging.getLogger(__name__)
 # Authentication is unaffected. "--bare" and a separate CLAUDE_CONFIG_DIR were
 # rejected: both lose the operator's login.
 #
-# What the operator wants every agent to have comes from the library instead
-# (loopx/agents/library.py): the imported plugins and skills, each a
-# "--plugin-dir" (library_args). Verified against Claude Code 2.1.285: with
+# What an agent has comes from the capability catalog instead
+# (loopx/agents/library.py): the plugins and skills installed for its role,
+# globally or in its project, each a "--plugin-dir" (library_args). Verified against Claude Code 2.1.285: with
 # the flags above, "--plugin-dir" in --print mode loads a plugin's skills
 # (named <plugin>:<skill>), agents, commands and hooks; a plugin needs no more
 # than a directory (a manifest names it). The operator's own hooks, such as a
@@ -111,24 +110,18 @@ def isolation_args(cwd: str | os.PathLike[str]) -> list[str]:
 
 
 def library_args(library: AgentLibrary) -> list[str]:
-    """The flags that load an agent run's library: one ``--plugin-dir`` per plugin directory.
+    """The flags that load the items installed for an agent run: one ``--plugin-dir`` per plugin directory.
 
     Every agent's launch carries them (``agent_settings.Launch.args``), so the
-    agents cannot diverge.
+    agents cannot diverge. The generated skill plugins come after the
+    plugins: ``personal`` and then a project's own skills, ``project``.
+    Verified against Claude Code 2.1.285 with the isolation flags above: the
+    init event lists a generated plugin's skills as ``<plugin>:<name>``, the
+    model invokes one with the Skill tool from a read-only directory, and two
+    plugins of the same name both load, their skills listed under the one
+    prefix.
     """
     return [arg for directory in library.plugin_dirs for arg in ("--plugin-dir", directory)]
-
-
-def project_skill_args(skills: AgentProjectSkills) -> list[str]:
-    """The flag that loads a task agent run's project skills: one ``--plugin-dir``, the ``project`` plugin.
-
-    Every agent's launch carries it after the library's (``agent_settings.Launch.args``); only a task
-    agent's launch has project skills, so the Manager's adds nothing. Verified against Claude Code 2.1.285
-    with the isolation flags above: the init event lists the plugin's skills as ``project:<name>``, the
-    model invokes one with the Skill tool from a read-only directory, and two plugins of the same name both
-    load, their skills listed under the one prefix.
-    """
-    return ["--plugin-dir", skills.plugin_dir] if skills.plugin_dir else []
 
 
 def knowledge_args(knowledge: AgentKnowledge) -> list[str]:

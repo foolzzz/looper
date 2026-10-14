@@ -1,120 +1,25 @@
-"""A project's own Claude Code skills, with the database stubbed.
+"""A project's own Claude Code skills: what the API refuses, and the SKILL.md a skill is written as.
 
-A project can carry skills (a name, a one-line description and the body of
-their ``SKILL.md``) that only its own Planner, Workers and Reviewers load:
-the enabled ones are written, read-only and once per content hash, as one
-plugin under the runtime root and mounted with ``--plugin-dir``. Nothing goes
-into the project's repository. The real-PostgreSQL side is
-``test_project_skills_db.py``.
+A project writes skills (a name, a one-line description and the body of their
+``SKILL.md``) into the catalog. Every refusal here happens before the
+database is touched, so none is needed; writing, installing and loading them
+against a real PostgreSQL is ``test_project_skills_db.py``.
 """
 
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
-import stat
-from contextlib import asynccontextmanager
-from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
-from library_fixtures import plugin_dirs
 from loopx.agents import project_skills
-from loopx.agents.agent_settings import BUILTIN_DEFAULTS, resolve_launch
 from loopx.agents.http_server import AgentHTTPServer
-from loopx.agents.knowledge import AgentKnowledge
-from loopx.agents.library import AgentLibrary
-from loopx.agents.project_skills import (
-    EMPTY_PROJECT_SKILLS,
-    AgentProjectSkills,
-    LoadedSkill,
-    load_project_skills,
-    skill_file,
-)
+from loopx.agents.project_skills import skill_body, skill_content, skill_description, skill_file, skill_name
 from loopx.agents.tiers.task import TaskRouter
-from loopx.db import project_skills as db_skills, projects as db_projects
-
-NOW = datetime(2026, 10, 13, 12, 0, tzinfo=timezone.utc)
-CAPS = {"name_max_chars": 64, "description_max_chars": 1024, "content_max_bytes": 64 * 1024,
-        "project_max_skills": 20}
-
-
-def _sha(data: str) -> str:
-    return hashlib.sha256(data.encode("utf-8")).hexdigest()
-
-
-class _Store:
-    """An in-memory stand-in for the projects and project_skills tables."""
-
-    def __init__(self) -> None:
-        self.projects: dict[str, dict[str, Any]] = {}
-        self.skills: dict[str, dict[str, Any]] = {}  # with their content
-        self.locks = 0
-
-    def add_project(self, project_id: str = "proj-1") -> None:
-        self.projects[project_id] = {"id": project_id, "name": "calc", "work_dir": "", "description": "",
-                                     "background": "", "created_at": NOW, "updated_at": NOW, "task_count": 0,
-                                     "active_count": 0}
-
-    @staticmethod
-    def _listed(row: dict[str, Any]) -> dict[str, Any]:
-        return {**{k: v for k, v in row.items() if k != "content"}, "size_bytes": len(row["content"].encode())}
-
-    async def get_project(self, project_id: str, **_: Any) -> dict[str, Any] | None:
-        row = self.projects.get(project_id)
-        return dict(row) if row else None
-
-    @asynccontextmanager
-    async def locked_project(self, project_id: str, **_: Any) -> Any:
-        self.locks += 1
-        project = self.projects.get(project_id)
-        yield "conn", ({"id": project_id, "name": project["name"], "work_dir": ""} if project else None)
-
-    async def list_skills(self, project_id: str, **_: Any) -> list[dict[str, Any]]:
-        rows = [row for row in self.skills.values() if row["project_id"] == project_id]
-        return [self._listed(row) for row in sorted(rows, key=lambda row: row["name"])]
-
-    async def list_enabled_skills(self, project_id: str, **_: Any) -> list[dict[str, Any]]:
-        rows = [row for row in self.skills.values() if row["project_id"] == project_id and row["enabled"]]
-        return [{k: row[k] for k in ("id", "name", "description", "content")}
-                for row in sorted(rows, key=lambda row: row["name"])]
-
-    async def insert_skill(self, conn: Any, *, project_id: str, **fields: Any) -> dict[str, Any]:
-        assert conn == "conn"
-        skill_id = f"skill-{len(self.skills) + 1:012d}"
-        row = {"id": skill_id, "project_id": project_id, "enabled": True, "created_at": NOW, "updated_at": NOW,
-               **fields}
-        self.skills[skill_id] = row
-        return self._listed(row)
-
-    async def update_skill(self, conn: Any, project_id: str, skill_id: str, **fields: Any) -> dict[str, Any] | None:
-        assert conn == "conn"
-        row = self.skills.get(skill_id)
-        if row is None or row["project_id"] != project_id:
-            return None
-        row.update(fields)
-        return self._listed(row)
-
-    async def delete_skill(self, project_id: str, skill_id: str, **_: Any) -> bool:
-        row = self.skills.get(skill_id)
-        if row is None or row["project_id"] != project_id:
-            return False
-        del self.skills[skill_id]
-        return True
-
-
-@pytest.fixture
-def store(monkeypatch: pytest.MonkeyPatch) -> _Store:
-    fake = _Store()
-    monkeypatch.setattr(db_projects, "get_project", fake.get_project)
-    for name in ("locked_project", "list_skills", "list_enabled_skills", "insert_skill", "update_skill",
-                 "delete_skill"):
-        monkeypatch.setattr(db_skills, name, getattr(fake, name))
-    return fake
 
 
 class _Writer:
@@ -139,54 +44,15 @@ def _call(root: Path, method: str, path: str, body: Any = None) -> tuple[int, An
     return int(head.split()[1]), json.loads(payload)
 
 
-def _skill(name: str = "deploy-check", description: str = "Use before a deploy: checks the release steps.",
-           content: str = "Run `make check`, then reply DEPLOY-OK.\n", **extra: Any) -> dict[str, Any]:
+def _skill(name: Any = "deploy-check", description: Any = "Use before a deploy: checks the release steps.",
+           content: Any = "Run `make check`, then reply DEPLOY-OK.\n", **extra: Any) -> dict[str, Any]:
     return {"name": name, "description": description, "content": content, **extra}
 
 
 BASE = "/api/projects/proj-1/skills"
 
 
-# --- Adding skills and their validation ---
-
-
-class TestAdd:
-    def test_a_skill_is_stored_enabled_and_listed_without_its_content(self, store: _Store, tmp_path: Path) -> None:
-        store.add_project()
-        status, body = _call(tmp_path, "POST", BASE, _skill())
-        assert status == 201
-        skill = body["skill"]
-        assert (skill["name"], skill["qualified_name"], skill["enabled"]) == (
-            "deploy-check", "project:deploy-check", True)
-        assert skill["description"] == "Use before a deploy: checks the release steps."
-        assert skill["size_bytes"] == len("Run `make check`, then reply DEPLOY-OK.\n")
-        assert skill["skill_id"].startswith("skill-") and "content" not in skill
-        (stored,) = store.skills.values()
-        assert stored["content"] == "Run `make check`, then reply DEPLOY-OK.\n"
-        assert (body["count"], body["enabled_count"], body["plugin"]) == (1, 1, "project")
-        assert body["skills"] == [skill]
-        assert body["caps"] == CAPS
-        assert store.locks == 1  # under the project's row lock
-
-    def test_a_skill_can_be_added_disabled(self, store: _Store, tmp_path: Path) -> None:
-        store.add_project()
-        status, body = _call(tmp_path, "POST", BASE, _skill(enabled=False))
-        assert status == 201 and body["skill"]["enabled"] is False
-        assert (body["count"], body["enabled_count"]) == (1, 0)
-
-    def test_the_list_is_by_name(self, store: _Store, tmp_path: Path) -> None:
-        store.add_project()
-        for name in ("zeta", "alpha", "mid-way"):
-            assert _call(tmp_path, "POST", BASE, _skill(name=name))[0] == 201
-        status, body = _call(tmp_path, "GET", BASE)
-        assert status == 200
-        assert [s["name"] for s in body["skills"]] == ["alpha", "mid-way", "zeta"]
-
-    @pytest.mark.parametrize("name", ["a", "deploy-check", "v2", "x" * 64, "0-9-a"])
-    def test_a_slug_is_a_name(self, store: _Store, tmp_path: Path, name: str) -> None:
-        store.add_project()
-        assert _call(tmp_path, "POST", BASE, _skill(name=name))[0] == 201
-
+class TestRefused:
     @pytest.mark.parametrize(("name", "reason"), [
         ("", "a skill needs a name"),
         ("Deploy", "lowercase letters, digits and hyphens"),
@@ -201,11 +67,9 @@ class TestAdd:
         ("x" * 65, "at most 64 characters"),
         (7, "a skill needs a name"),
     ])
-    def test_a_name_that_is_not_a_slug_is_refused(self, store: _Store, tmp_path: Path, name: Any, reason: str) -> None:
-        store.add_project()
+    def test_a_name_that_is_not_a_slug(self, tmp_path: Path, name: Any, reason: str) -> None:
         status, body = _call(tmp_path, "POST", BASE, _skill(name=name))
         assert status == 400 and reason in body["error"]
-        assert store.skills == {}
 
     @pytest.mark.parametrize(("description", "reason"), [
         ("", "a skill needs a description"),
@@ -215,17 +79,9 @@ class TestAdd:
         ("tab\there", "control characters"),
         ("x" * 1025, "at most 1024 characters"),
     ])
-    def test_a_bad_description_is_refused(
-        self, store: _Store, tmp_path: Path, description: Any, reason: str,
-    ) -> None:
-        store.add_project()
+    def test_a_bad_description(self, tmp_path: Path, description: Any, reason: str) -> None:
         status, body = _call(tmp_path, "POST", BASE, _skill(description=description))
         assert status == 400 and reason in body["error"]
-        assert store.skills == {}
-
-    def test_a_description_of_1024_characters_is_accepted(self, store: _Store, tmp_path: Path) -> None:
-        store.add_project()
-        assert _call(tmp_path, "POST", BASE, _skill(description="d" * 1024))[0] == 201
 
     @pytest.mark.parametrize(("content", "reason"), [
         ("", "a skill needs its content"),
@@ -236,15 +92,9 @@ class TestAdd:
         ("x" * (64 * 1024 + 1), "at most 64 KiB"),
         ("é" * (32 * 1024 + 1), "at most 64 KiB"),  # counted in UTF-8 bytes
     ])
-    def test_bad_content_is_refused(self, store: _Store, tmp_path: Path, content: Any, reason: str) -> None:
-        store.add_project()
+    def test_bad_content(self, tmp_path: Path, content: Any, reason: str) -> None:
         status, body = _call(tmp_path, "POST", BASE, _skill(content=content))
         assert status == 400 and reason in body["error"]
-        assert store.skills == {}
-
-    def test_content_of_exactly_64_kib_is_accepted(self, store: _Store, tmp_path: Path) -> None:
-        store.add_project()
-        assert _call(tmp_path, "POST", BASE, _skill(content="x" * 64 * 1024))[0] == 201
 
     @pytest.mark.parametrize(("body", "reason"), [
         ({**_skill(), "allowed_tools": "Bash"}, "unknown field 'allowed_tools'"),
@@ -252,104 +102,31 @@ class TestAdd:
         ([], "JSON object"),
         (b"{not json", "invalid JSON"),
     ])
-    def test_a_bad_request_is_refused(self, store: _Store, tmp_path: Path, body: Any, reason: str) -> None:
-        store.add_project()
+    def test_a_bad_request(self, tmp_path: Path, body: Any, reason: str) -> None:
         status, answer = _call(tmp_path, "POST", BASE, body)
         assert status == 400 and reason in answer["error"]
-        assert store.skills == {}
-
-    def test_a_name_the_project_already_has_is_a_conflict(self, store: _Store, tmp_path: Path) -> None:
-        store.add_project()
-        store.add_project("proj-2")
-        assert _call(tmp_path, "POST", BASE, _skill())[0] == 201
-        status, body = _call(tmp_path, "POST", BASE, _skill(description="Another one."))
-        assert status == 409 and "already has a skill named 'deploy-check'" in body["error"]
-        # Another project may use the same name.
-        assert _call(tmp_path, "POST", "/api/projects/proj-2/skills", _skill())[0] == 201
-        assert len(store.skills) == 2
-
-    def test_a_project_holds_at_most_20_skills(self, store: _Store, tmp_path: Path) -> None:
-        store.add_project()
-        for n in range(20):
-            assert _call(tmp_path, "POST", BASE, _skill(name=f"skill-{n}"))[0] == 201
-        status, body = _call(tmp_path, "POST", BASE, _skill(name="one-more"))
-        assert status == 400 and "a project has at most 20 skills" in body["error"]
-        assert len(store.skills) == 20
-
-    def test_an_unknown_project_is_404(self, store: _Store, tmp_path: Path) -> None:
-        assert _call(tmp_path, "POST", "/api/projects/proj-nope/skills", _skill())[0] == 404
-        status, body = _call(tmp_path, "GET", "/api/projects/proj-nope/skills")
-        assert status == 404 and "proj-nope" in body["error"]
-
-
-# --- Changing and deleting ---
-
-
-class TestChangeAndDelete:
-    @pytest.fixture
-    def skill_id(self, store: _Store, tmp_path: Path) -> str:
-        store.add_project()
-        _call(tmp_path, "POST", BASE, _skill(name="release-notes"))
-        return _call(tmp_path, "POST", BASE, _skill())[1]["skill"]["skill_id"]
-
-    def test_the_switch_disables_and_enables_a_skill(self, store: _Store, tmp_path: Path, skill_id: str) -> None:
-        status, body = _call(tmp_path, "PUT", f"{BASE}/{skill_id}", {"enabled": False})
-        assert status == 200 and body["skill"]["enabled"] is False
-        assert (body["count"], body["enabled_count"]) == (2, 1)
-        assert store.skills[skill_id]["content"] == "Run `make check`, then reply DEPLOY-OK.\n"  # untouched
-        assert _call(tmp_path, "PUT", f"{BASE}/{skill_id}", {"enabled": True})[1]["skill"]["enabled"] is True
-
-    def test_name_description_and_content_can_change(self, store: _Store, tmp_path: Path, skill_id: str) -> None:
-        status, body = _call(tmp_path, "PUT", f"{BASE}/{skill_id}", {
-            "name": "deploy-gate", "description": "Gate a deploy.", "content": "Reply GATE-OK."})
-        assert status == 200
-        assert (body["skill"]["name"], body["skill"]["qualified_name"]) == ("deploy-gate", "project:deploy-gate")
-        assert body["skill"]["size_bytes"] == len("Reply GATE-OK.")
-        assert (store.skills[skill_id]["description"], store.skills[skill_id]["content"]) == (
-            "Gate a deploy.", "Reply GATE-OK.")
-
-    def test_keeping_its_own_name_is_no_conflict(self, store: _Store, tmp_path: Path, skill_id: str) -> None:
-        assert _call(tmp_path, "PUT", f"{BASE}/{skill_id}", {"name": "deploy-check", "enabled": False})[0] == 200
-
-    def test_renaming_onto_another_skill_is_a_conflict(self, store: _Store, tmp_path: Path, skill_id: str) -> None:
-        status, body = _call(tmp_path, "PUT", f"{BASE}/{skill_id}", {"name": "release-notes"})
-        assert status == 409 and "already has a skill named 'release-notes'" in body["error"]
-        assert store.skills[skill_id]["name"] == "deploy-check"
 
     @pytest.mark.parametrize(("body", "reason"), [
         ({}, "give at least one of"),
-        ({"enabled": 1}, "enabled must be true or false"),
+        ({"enabled": False}, "where it is installed"),
         ({"name": "Bad Name"}, "lowercase letters, digits and hyphens"),
         ({"content": ""}, "a skill needs its content"),
         ({"description": "a\nb"}, "one line"),
         ({"project_id": "proj-2"}, "unknown field 'project_id'"),
     ])
-    def test_a_bad_change_is_refused(
-        self, store: _Store, tmp_path: Path, skill_id: str, body: Any, reason: str,
-    ) -> None:
-        before = dict(store.skills[skill_id])
-        status, answer = _call(tmp_path, "PUT", f"{BASE}/{skill_id}", body)
+    def test_a_bad_change(self, tmp_path: Path, body: Any, reason: str) -> None:
+        status, answer = _call(tmp_path, "PUT", f"{BASE}/skill-000000000001", body)
         assert status == 400 and reason in answer["error"]
-        assert store.skills[skill_id] == before
-
-    def test_delete_removes_it_and_a_second_delete_is_404(self, store: _Store, tmp_path: Path, skill_id: str) -> None:
-        status, body = _call(tmp_path, "DELETE", f"{BASE}/{skill_id}")
-        assert status == 200 and body["deleted"] == skill_id and body["count"] == 1
-        assert skill_id not in store.skills
-        assert _call(tmp_path, "DELETE", f"{BASE}/{skill_id}")[0] == 404
-
-    def test_unknown_skills_and_projects_are_404(self, store: _Store, tmp_path: Path, skill_id: str) -> None:
-        assert _call(tmp_path, "PUT", f"{BASE}/skill-nope", {"enabled": False})[0] == 404
-        assert _call(tmp_path, "DELETE", f"{BASE}/skill-nope")[0] == 404
-        # A skill is reached through its own project only.
-        store.add_project("proj-2")
-        assert _call(tmp_path, "PUT", f"/api/projects/proj-2/skills/{skill_id}", {"enabled": False})[0] == 404
-        assert _call(tmp_path, "DELETE", f"/api/projects/proj-2/skills/{skill_id}")[0] == 404
-        assert _call(tmp_path, "PUT", f"/api/projects/proj-nope/skills/{skill_id}", {"enabled": False})[0] == 404
-        assert store.skills[skill_id]["enabled"] is True
 
 
-# --- The SKILL.md agents load ---
+class TestAccepted:
+    @pytest.mark.parametrize("name", ["a", "deploy-check", "v2", "x" * 64, "0-9-a"])
+    def test_a_slug_is_a_name(self, name: str) -> None:
+        assert skill_name(f"  {name} ") == name
+
+    def test_a_description_of_1024_characters_and_content_of_exactly_64_kib(self) -> None:
+        assert skill_description("d" * 1024) == "d" * 1024
+        assert skill_content("x" * 64 * 1024) == "x" * 64 * 1024
 
 
 class TestSkillFile:
@@ -364,148 +141,20 @@ class TestSkillFile:
         assert line == 'description: "Checks: \\"deploy\\" steps # not a comment \\\\ [x] {y} 中文"'
         assert json.loads(line.removeprefix("description: ")) == 'Checks: "deploy" steps # not a comment \\ [x] {y} 中文'
 
+    @pytest.mark.parametrize("content", ["Reply OK.\n", "Two\n\nparagraphs\n", "---\n inside the body\n"])
+    def test_the_body_reads_back_from_the_file(self, content: str) -> None:
+        text = skill_file("deploy-check", 'Says "OK": yes', content)
+        assert skill_body(text, "deploy-check", 'Says "OK": yes') == content
 
-# --- Materializing the enabled skills for a run ---
+    def test_one_skill_is_one_file_and_its_version_is_the_items(self) -> None:
+        from loopx.agents.library import item_sha256
 
-
-def _load(root: Path, project: dict[str, Any] | None) -> AgentProjectSkills:
-    return asyncio.run(load_project_skills(root, project))
-
-
-def _files(directory: Path) -> dict[str, str]:
-    return {p.relative_to(directory).as_posix(): p.read_text(encoding="utf-8")
-            for p in sorted(directory.rglob("*")) if p.is_file()}
-
-
-class TestLoad:
-    @pytest.fixture
-    def two_skills(self, store: _Store, tmp_path: Path) -> None:
-        store.add_project()
-        store.add_project("proj-2")
-        _call(tmp_path, "POST", BASE, _skill(name="release-notes", description="Drafts notes.", content="Reply NOTES."))
-        _call(tmp_path, "POST", BASE, _skill())
-        _call(tmp_path, "POST", BASE, _skill(name="off", enabled=False))
-        _call(tmp_path, "POST", "/api/projects/proj-2/skills", _skill(name="elsewhere"))
-
-    def test_the_enabled_skills_are_one_read_only_plugin_under_the_runtime_root(
-        self, tmp_path: Path, two_skills: None,
-    ) -> None:
-        runtime, work = tmp_path / "runtime", tmp_path / "work"
-        work.mkdir()
-        loaded = _load(runtime, {"id": "proj-1", "work_dir": str(work)})
-
-        plugin = Path(loaded.plugin_dir or "")
-        assert plugin.name == "project" and plugin.parent.name == loaded.sha256
-        assert plugin.parent.parent == runtime / ".local" / "projects" / "proj-1" / "skills"
-        files = _files(plugin)
-        assert sorted(files) == [".claude-plugin/plugin.json", "skills/deploy-check/SKILL.md",
-                                 "skills/release-notes/SKILL.md"]  # the disabled one and proj-2's are not there
-        assert json.loads(files[".claude-plugin/plugin.json"])["name"] == "project"
-        assert files["skills/release-notes/SKILL.md"] == skill_file("release-notes", "Drafts notes.", "Reply NOTES.")
-        assert files["skills/deploy-check/SKILL.md"].startswith(
-            "---\nname: deploy-check\ndescription: \"Use before a deploy: checks the release steps.\"\n---\n")
-        # Each recorded hash is the hash of the file Claude Code reads.
-        assert loaded.skills == (
-            LoadedSkill("deploy-check", _sha(files["skills/deploy-check/SKILL.md"])),
-            LoadedSkill("release-notes", _sha(files["skills/release-notes/SKILL.md"])),
-        )
-        assert (loaded.project_id, loaded.error) == ("proj-1", None)
-        # Read-only: every file 0444, every directory 0555, the hash directory included.
-        for path in [plugin.parent, *plugin.parent.rglob("*")]:
-            assert stat.S_IMODE(path.stat().st_mode) == (0o555 if path.is_dir() else 0o444), path
-        # Nothing in the task's directory; under the runtime root, only the project's skills.
-        assert list(work.iterdir()) == []
-        assert [p.relative_to(runtime).as_posix() for p in sorted(runtime.rglob("*")) if p.is_dir()][:4] == [
-            ".local", ".local/projects", ".local/projects/proj-1", ".local/projects/proj-1/skills"]
-
-    def test_the_same_skills_reuse_the_directory_and_a_change_makes_a_new_one(
-        self, store: _Store, tmp_path: Path, two_skills: None,
-    ) -> None:
-        first = _load(tmp_path, {"id": "proj-1"})
-        written = Path(first.plugin_dir or "") / "skills" / "deploy-check" / "SKILL.md"
-        mtime = written.stat().st_mtime_ns
-        again = _load(tmp_path, {"id": "proj-1"})
-        assert again == first and written.stat().st_mtime_ns == mtime  # written once
-
-        seen = {first.sha256}
-        for change in ({"content": "Reply DEPLOY-OK-2."}, {"description": "Checks a deploy."},
-                       {"name": "deploy-gate"}, {"enabled": False}):
-            skill_id = next(i for i, r in store.skills.items() if r["name"] in ("deploy-check", "deploy-gate"))
-            assert _call(tmp_path, "PUT", f"{BASE}/{skill_id}", change)[0] == 200
-            changed = _load(tmp_path, {"id": "proj-1"})
-            assert changed.sha256 not in seen and Path(changed.plugin_dir or "").is_dir()
-            seen.add(changed.sha256)
-        assert Path(first.plugin_dir or "").is_dir()  # an older copy stays for a run that may still use it
-        assert [s.name for s in changed.skills] == ["release-notes"]
-
-    def test_without_enabled_skills_or_a_project_there_is_nothing(self, store: _Store, tmp_path: Path) -> None:
-        store.add_project()
-        _call(tmp_path, "POST", BASE, _skill(enabled=False))
-        assert _load(tmp_path, {"id": "proj-1"}) == EMPTY_PROJECT_SKILLS
-        assert _load(tmp_path, None) == EMPTY_PROJECT_SKILLS
-        assert _load(tmp_path, {"id": ""}) == EMPTY_PROJECT_SKILLS
-        assert not (tmp_path / ".local").exists()
-        assert EMPTY_PROJECT_SKILLS.record() is None and EMPTY_PROJECT_SKILLS.plugin_dir is None
-
-    def test_an_unreadable_database_leaves_the_run_without_skills_and_says_why(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        async def _broken(*_: Any, **__: Any) -> list[dict[str, Any]]:
-            raise ConnectionError("database is down")
-
-        monkeypatch.setattr(db_skills, "list_enabled_skills", _broken)
-        loaded = _load(tmp_path, {"id": "proj-1"})
-        assert (loaded.plugin_dir, loaded.skills) == (None, ())
-        assert loaded.error == "the project's skills could not be read"
-        assert loaded.record() == {"project_id": "proj-1", "sha256": None, "plugin": "project", "skills": [],
-                                   "error": "the project's skills could not be read"}
-
-    def test_a_stored_name_that_is_not_a_slug_is_never_written(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        async def _rows(*_: Any, **__: Any) -> list[dict[str, Any]]:
-            return [{"id": "skill-1", "name": "../../escape", "description": "d", "content": "c"}]
-
-        monkeypatch.setattr(db_skills, "list_enabled_skills", _rows)
-        loaded = _load(tmp_path / "runtime", {"id": "proj-1"})
-        assert loaded.plugin_dir is None and "could not be prepared" in (loaded.error or "")
-        assert not (tmp_path / "escape").exists()
-
-
-# --- The launch: one --plugin-dir, beside the library's ---
-
-
-SKILLS = AgentProjectSkills(project_id="proj-1", skills=(LoadedSkill("deploy-check", "a" * 64),),
-                            plugin_dir="/runtime/.local/projects/proj-1/skills/abc/project")
-
-
-class TestLaunch:
-    def test_the_project_plugin_is_one_plugin_dir_after_the_librarys(self) -> None:
-        library = AgentLibrary(plugin_dirs=("/lib/demo", "/lib/personal"))
-        knowledge = AgentKnowledge(index="## Project knowledge", documents=1, add_dirs=("/k",))
-        args = resolve_launch(BUILTIN_DEFAULTS, None, library, knowledge, SKILLS).args()
-        assert plugin_dirs(args) == ["/lib/demo", "/lib/personal", SKILLS.plugin_dir]
-        assert args[-2:] == ["--add-dir", "/k"]
-
-    def test_the_run_records_the_skills_and_their_hash(self) -> None:
-        record = resolve_launch(BUILTIN_DEFAULTS, None, project_skills=SKILLS).record()
-        assert record["project_skills"] == {"project_id": "proj-1", "sha256": SKILLS.sha256, "plugin": "project",
-                                            "skills": [{"name": "deploy-check", "sha256": "a" * 64}]}
-        assert len(SKILLS.sha256 or "") == 64
-
-    def test_a_launch_without_project_skills_adds_nothing(self) -> None:
-        launch = resolve_launch(BUILTIN_DEFAULTS, "sonnet")
-        assert "--plugin-dir" not in launch.args() and "project_skills" not in launch.record()
-
-    def test_the_set_hash_ignores_order_and_follows_every_skill(self) -> None:
-        a, b = LoadedSkill("a", "1" * 64), LoadedSkill("b", "2" * 64)
-        assert AgentProjectSkills(skills=(a, b)).sha256 == AgentProjectSkills(skills=(b, a)).sha256
-        assert AgentProjectSkills(skills=(a,)).sha256 != AgentProjectSkills(skills=(a, b)).sha256
-        assert AgentProjectSkills(skills=(a,)).sha256 != AgentProjectSkills(skills=(LoadedSkill("a", "3" * 64),)).sha256
-        assert AgentProjectSkills().sha256 is None
+        file, sha = project_skills.skill_md("deploy-check", "Use before a deploy.", "Reply OK.")
+        assert (file["path"], file["executable"]) == ("SKILL.md", False)
+        assert file["content"] == skill_file("deploy-check", "Use before a deploy.", "Reply OK.")
+        assert sha == item_sha256([file])
 
 
 def test_the_caps_are_the_documented_ones() -> None:
-    assert (project_skills.NAME_MAX_CHARS, project_skills.DESCRIPTION_MAX_CHARS, project_skills.CONTENT_MAX_BYTES,
-            project_skills.PROJECT_MAX_SKILLS) == (64, 1024, 65536, 20)
-    assert project_skills.PLUGIN_NAME == "project"
+    assert project_skills.skill_caps() == {"name_max_chars": 64, "description_max_chars": 1024,
+                                           "content_max_bytes": 64 * 1024, "project_max_skills": 20}

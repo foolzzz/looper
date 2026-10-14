@@ -1,7 +1,9 @@
-"""The ``library_items`` and ``library_files`` tables: the imported plugins and skills.
+"""The capability catalog: ``library_items`` and ``library_files`` (what was acquired) and ``library_installs``
+(where it loads).
 
 ``loopx.agents.library`` owns what an item is (scanning, validation, caps,
-version hashes); this module stores and reads it.
+version hashes) and how a run loads it, ``loopx.agents.catalog`` what an
+install may be; this module stores and reads them.
 """
 
 from __future__ import annotations
@@ -14,30 +16,47 @@ import asyncpg
 
 from .connection import get_pool
 
-_ITEM_COLUMNS = "id, kind, name, source, version, sha256, enabled, size_bytes, file_count, imported_at, updated_at"
+_ITEM_COLUMNS = (
+    "i.id, i.kind, i.name, i.origin, i.owner_project_id, p.name AS owner_project_name, i.description, i.source, "
+    "i.version, i.sha256, i.size_bytes, i.file_count, i.imported_at, i.updated_at"
+)
+_ITEMS = "library_items i LEFT JOIN projects p ON p.id = i.owner_project_id"
+_INSTALL_COLUMNS = (
+    "s.id, s.item_id, s.scope, s.project_id, p.name AS project_name, s.roles, s.enabled, s.created_at, s.updated_at"
+)
+_INSTALLS = "library_installs s LEFT JOIN projects p ON p.id = s.project_id"
+# Byte order, whatever the database's collation: the same order as the names sorted in Python.
+_BY_NAME = 'i.kind, i.name COLLATE "C", i.owner_project_id NULLS FIRST'
+
+Executor = asyncpg.Pool | asyncpg.Connection
 
 
 def _label(row: Mapping[str, Any]) -> str:
     return f"{row['kind']}:{row['name']}"
 
 
-async def list_items(*, pool: asyncpg.Pool | None = None) -> list[dict[str, Any]]:
-    """Every item, plugins first, then by name; without their files."""
+def new_install_id() -> str:
+    return f"inst-{uuid.uuid4().hex[:12]}"
+
+
+# --- Items ---
+
+
+async def list_items(*, pool: Executor | None = None) -> list[dict[str, Any]]:
+    """Every item without its files: plugins first, then by name."""
     pool = pool or get_pool()
-    rows = await pool.fetch(f"SELECT {_ITEM_COLUMNS} FROM library_items ORDER BY kind, name")
+    rows = await pool.fetch(f"SELECT {_ITEM_COLUMNS} FROM {_ITEMS} ORDER BY {_BY_NAME}")
     return [dict(row) for row in rows]
 
 
-async def list_enabled_items(*, pool: asyncpg.Pool | None = None) -> list[dict[str, Any]]:
-    """The enabled items' ``id``, ``kind``, ``name`` and ``sha256``, plugins first, then by name."""
+async def get_item(item_id: str, *, pool: Executor | None = None) -> dict[str, Any] | None:
+    """One item without its files; None when there is none."""
     pool = pool or get_pool()
-    rows = await pool.fetch(
-        "SELECT id, kind, name, sha256 FROM library_items WHERE enabled ORDER BY kind, name"
-    )
-    return [dict(row) for row in rows]
+    row = await pool.fetchrow(f"SELECT {_ITEM_COLUMNS} FROM {_ITEMS} WHERE i.id = $1", item_id)
+    return dict(row) if row is not None else None
 
 
-async def get_item_files(item_id: str, *, pool: asyncpg.Pool | None = None) -> list[dict[str, Any]]:
+async def get_item_files(item_id: str, *, pool: Executor | None = None) -> list[dict[str, Any]]:
     """An item's files: ``path``, ``content``, ``sha256`` and ``executable``, by path."""
     pool = pool or get_pool()
     rows = await pool.fetch(
@@ -46,29 +65,42 @@ async def get_item_files(item_id: str, *, pool: asyncpg.Pool | None = None) -> l
     return [dict(row) for row in rows]
 
 
-async def set_enabled(item_id: str, enabled: bool, *, pool: asyncpg.Pool | None = None) -> dict[str, Any] | None:
-    """Enable or disable an item; its row, or None when there is no such item."""
+async def get_file_listing(item_id: str, *, pool: Executor | None = None) -> list[dict[str, Any]]:
+    """An item's files without their content: ``path``, ``size_bytes`` and ``executable``, by path."""
     pool = pool or get_pool()
-    row = await pool.fetchrow(
-        f"UPDATE library_items SET enabled = $2, updated_at = now() WHERE id = $1 RETURNING {_ITEM_COLUMNS}",
-        item_id, enabled,
+    rows = await pool.fetch(
+        "SELECT path, octet_length(content) AS size_bytes, executable FROM library_files WHERE item_id = $1 "
+        "ORDER BY path", item_id,
     )
-    return dict(row) if row is not None else None
+    return [dict(row) for row in rows]
+
+
+async def get_file(item_id: str, path: str, *, pool: Executor | None = None) -> str | None:
+    """The content of one of an item's files; None when it has no such file."""
+    pool = pool or get_pool()
+    return await pool.fetchval("SELECT content FROM library_files WHERE item_id = $1 AND path = $2", item_id, path)
+
+
+async def delete_item(item_id: str, *, pool: Executor | None = None) -> bool:
+    """Remove an item with its files and installs; False when there is none."""
+    pool = pool or get_pool()
+    return await pool.execute("DELETE FROM library_items WHERE id = $1", item_id) == "DELETE 1"
 
 
 async def replace_snapshot(
     items: Sequence[Mapping[str, Any]], *, pool: asyncpg.Pool | None = None,
 ) -> dict[str, Any]:
-    """Make the library hold exactly ``items``, in one transaction.
+    """Make the items imported from this machine (origin ``machine``) exactly ``items``, in one transaction.
 
     Each item gives ``kind``, ``name``, ``source``, ``version``, ``sha256``,
     ``size_bytes``, ``file_count`` and ``files`` (``path``, ``content``,
-    ``sha256``, ``executable``). A new item is added enabled; one whose
-    ``sha256`` changed gets its new files and keeps its id and its enabled
-    flag; an unchanged one keeps its files (its source and version labels
-    are refreshed); an item that is no longer given is removed with its files.
-    Returns the ``added``, ``updated`` and ``removed`` items as
-    ``kind:name`` labels and the ``unchanged`` count.
+    ``sha256``, ``executable``). A new item is added, installed nowhere; one
+    whose ``sha256`` changed gets its new files and keeps its id and its
+    installs; an unchanged one keeps its files (its source and version labels
+    are refreshed); an item that is no longer given is removed with its files
+    and installs. Items of any other origin are left alone. Returns the
+    ``added``, ``updated`` and ``removed`` items as ``kind:name`` labels and the
+    ``unchanged`` count.
     """
     pool = pool or get_pool()
     added: list[str] = []
@@ -77,7 +109,9 @@ async def replace_snapshot(
     async with pool.acquire() as conn, conn.transaction():
         existing = {
             (row["kind"], row["name"]): dict(row)
-            for row in await conn.fetch("SELECT id, kind, name, sha256 FROM library_items FOR UPDATE")
+            for row in await conn.fetch(
+                "SELECT id, kind, name, sha256 FROM library_items WHERE origin = 'machine' FOR UPDATE"
+            )
         }
         given = set()
         for item in items:
@@ -95,8 +129,8 @@ async def replace_snapshot(
             if current is None:
                 item_id = f"lib-{uuid.uuid4().hex[:12]}"
                 await conn.execute(
-                    "INSERT INTO library_items (id, kind, name, source, version, sha256, size_bytes, file_count) "
-                    "VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+                    "INSERT INTO library_items (id, kind, name, source, version, sha256, size_bytes, file_count, "
+                    "origin) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'machine')",
                     item_id, item["kind"], item["name"], item["source"], item["version"], item["sha256"],
                     item["size_bytes"], item["file_count"],
                 )
@@ -126,3 +160,156 @@ async def replace_snapshot(
         "removed": [f"{kind}:{name}" for kind, name in removed],
         "unchanged": unchanged,
     }
+
+
+# --- Project-authored skills: an item owned by a project, with one file, SKILL.md ---
+
+
+async def list_owned_items(project_id: str, *, pool: Executor | None = None) -> list[dict[str, Any]]:
+    """The items the project wrote, by name."""
+    pool = pool or get_pool()
+    rows = await pool.fetch(
+        f"SELECT {_ITEM_COLUMNS} FROM {_ITEMS} WHERE i.owner_project_id = $1 ORDER BY {_BY_NAME}", project_id,
+    )
+    return [dict(row) for row in rows]
+
+
+async def insert_owned_skill(
+    conn: asyncpg.Connection, *, item_id: str, project_id: str, name: str, description: str,
+    file: Mapping[str, Any], sha256: str, roles: Sequence[str], enabled: bool,
+) -> dict[str, Any]:
+    """Add a project-authored skill (``file`` is its SKILL.md) and install it in its project; returns the item."""
+    content = str(file["content"])
+    await conn.execute(
+        "INSERT INTO library_items (id, kind, name, source, version, sha256, size_bytes, file_count, origin, "
+        "owner_project_id, description) VALUES ($1, 'skill', $2, '', '', $3, $4, 1, 'project', $5, $6)",
+        item_id, name, sha256, len(content.encode("utf-8")), project_id, description,
+    )
+    await conn.execute(
+        "INSERT INTO library_files (item_id, path, content, sha256, executable) VALUES ($1, $2, $3, $4, false)",
+        item_id, file["path"], content, file["sha256"],
+    )
+    await insert_install(conn, item_id=item_id, scope="project", project_id=project_id, roles=roles, enabled=enabled)
+    row = await get_item(item_id, pool=conn)
+    assert row is not None
+    return row
+
+
+async def update_owned_skill(
+    conn: asyncpg.Connection, item_id: str, *, name: str, description: str, file: Mapping[str, Any], sha256: str,
+) -> dict[str, Any]:
+    """Replace a project-authored skill's name, description and SKILL.md; returns the item."""
+    content = str(file["content"])
+    await conn.execute(
+        "UPDATE library_items SET name = $2, description = $3, sha256 = $4, size_bytes = $5, updated_at = now() "
+        "WHERE id = $1",
+        item_id, name, description, sha256, len(content.encode("utf-8")),
+    )
+    await conn.execute("DELETE FROM library_files WHERE item_id = $1", item_id)
+    await conn.execute(
+        "INSERT INTO library_files (item_id, path, content, sha256, executable) VALUES ($1, $2, $3, $4, false)",
+        item_id, file["path"], content, file["sha256"],
+    )
+    row = await get_item(item_id, pool=conn)
+    assert row is not None
+    return row
+
+
+async def project_skill_names(
+    project_id: str, *, pool: Executor | None = None,
+) -> list[dict[str, Any]]:
+    """The project-authored skills that load in the project as ``project:<name>``, or would once installed.
+
+    That is, the ones the project wrote and the ones written elsewhere that
+    are installed in it: ``id``, ``name`` and ``owner_project_id``.
+    """
+    pool = pool or get_pool()
+    rows = await pool.fetch(
+        "SELECT i.id, i.name, i.owner_project_id FROM library_items i WHERE i.origin = 'project' "
+        "AND (i.owner_project_id = $1 OR EXISTS (SELECT 1 FROM library_installs s WHERE s.item_id = i.id "
+        "AND s.project_id = $1))",
+        project_id,
+    )
+    return [dict(row) for row in rows]
+
+
+# --- Installs ---
+
+
+async def list_installs(
+    *, item_ids: Sequence[str] | None = None, project_id: str | None = None, pool: Executor | None = None,
+) -> list[dict[str, Any]]:
+    """Installs, global ones first, then by project name: all, those of ``item_ids``, or those in ``project_id``
+    and the global ones."""
+    pool = pool or get_pool()
+    where, args = [], []
+    if item_ids is not None:
+        args.append(list(item_ids))
+        where.append(f"s.item_id = ANY(${len(args)}::text[])")
+    if project_id is not None:
+        args.append(project_id)
+        where.append(f"(s.scope = 'global' OR s.project_id = ${len(args)})")
+    rows = await pool.fetch(
+        f"SELECT {_INSTALL_COLUMNS} FROM {_INSTALLS} {'WHERE ' + ' AND '.join(where) if where else ''} "
+        "ORDER BY s.scope, p.name COLLATE \"C\" NULLS FIRST, s.id",
+        *args,
+    )
+    return [dict(row) for row in rows]
+
+
+async def get_install(install_id: str, *, pool: Executor | None = None) -> dict[str, Any] | None:
+    pool = pool or get_pool()
+    row = await pool.fetchrow(f"SELECT {_INSTALL_COLUMNS} FROM {_INSTALLS} WHERE s.id = $1", install_id)
+    return dict(row) if row is not None else None
+
+
+async def insert_install(
+    conn: Executor, *, item_id: str, scope: str, project_id: str | None, roles: Sequence[str], enabled: bool,
+) -> dict[str, Any]:
+    """Install an item; returns the install. Raises ``asyncpg.UniqueViolationError`` when it is there already."""
+    install_id = new_install_id()
+    await conn.execute(
+        "INSERT INTO library_installs (id, item_id, scope, project_id, roles, enabled) VALUES ($1, $2, $3, $4, $5, $6)",
+        install_id, item_id, scope, project_id, list(roles), enabled,
+    )
+    row = await get_install(install_id, pool=conn)
+    assert row is not None
+    return row
+
+
+async def update_install(
+    install_id: str, *, roles: Sequence[str] | None = None, enabled: bool | None = None, pool: Executor | None = None,
+) -> dict[str, Any] | None:
+    """Change an install's roles or enabled flag; the install, or None when there is none."""
+    pool = pool or get_pool()
+    updated = await pool.fetchval(
+        "UPDATE library_installs SET roles = COALESCE($2, roles), enabled = COALESCE($3, enabled), "
+        "updated_at = now() WHERE id = $1 RETURNING id",
+        install_id, list(roles) if roles is not None else None, enabled,
+    )
+    return await get_install(install_id, pool=pool) if updated else None
+
+
+async def delete_install(install_id: str, *, pool: Executor | None = None) -> bool:
+    pool = pool or get_pool()
+    return await pool.execute("DELETE FROM library_installs WHERE id = $1", install_id) == "DELETE 1"
+
+
+async def list_installed(role: str, project_id: str | None, *, pool: Executor | None = None) -> list[dict[str, Any]]:
+    """The installs one run of ``role`` in ``project_id`` loads: the enabled ones naming the role, global or in
+    the project.
+
+    Each row is an install with its item's ``id``, ``kind``, ``name``,
+    ``origin``, ``owner_project_id`` and ``sha256``: plugins first, then by
+    name, the global install before the project's. An item installed in both
+    places has two rows.
+    """
+    pool = pool or get_pool()
+    rows = await pool.fetch(
+        "SELECT i.id, i.kind, i.name, i.origin, i.owner_project_id, i.sha256, s.scope "
+        "FROM library_installs s JOIN library_items i ON i.id = s.item_id "
+        "WHERE s.enabled AND $1 = ANY(s.roles) AND (s.scope = 'global' OR s.project_id = $2) "
+        f"ORDER BY {_BY_NAME}, s.scope",
+        role, project_id,
+    )
+    return [dict(row) for row in rows]

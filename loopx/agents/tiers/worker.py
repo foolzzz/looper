@@ -12,8 +12,9 @@ report contract, last (``system_prompt``). The first user turn on stdin
 carries only what other agents produced: the reports of the steps this one
 depends on, or the Worker's report under review. Each run reads its row, the
 Settings defaults (model, effort, environment), its project's knowledge (the
-documents' directories are mounted with ``--add-dir``), its project's
-enabled skills (one more ``--plugin-dir``) and its project's execution settings
+documents' directories are mounted with ``--add-dir``), the catalog items
+installed for its role, globally or in its project (each plugin and generated
+skill plugin a ``--plugin-dir``) and its project's execution settings
 (``project_execution``: the model and ``--max-budget-usd``) as it starts.
 """
 
@@ -40,9 +41,8 @@ from ..claude_cli import (
     write_user_turn,
 )
 from ..knowledge import documents_label, load_knowledge
-from ..library import load_library
+from ..library import items_label, load_installed
 from ..project_execution import ProjectExecution
-from ..project_skills import load_project_skills, skills_label
 from ..message import (
     AgentAddress,
     MessageEnvelope,
@@ -548,10 +548,10 @@ class WorkerPool:
         # Read as the run starts: a later change reaches the next run, not this one.
         project = await self._task_project(parent_task_id, worker_id)
         knowledge = await load_knowledge(self._runtime_root, project, work_dir)
-        skills = await load_project_skills(self._runtime_root, project)
+        library = await load_installed(self._runtime_root, agent.value, str((project or {}).get("id") or "") or None)
         execution = ProjectExecution.from_row(project)
-        launch = resolve_launch(settings.defaults, settings.model, await load_library(self._runtime_root), knowledge,
-                                skills, project_model=execution.model, max_budget_usd=execution.run_budget_usd)
+        launch = resolve_launch(settings.defaults, settings.model, library, knowledge,
+                                project_model=execution.model, max_budget_usd=execution.run_budget_usd)
         background = str((project or {}).get("background") or "")
         system_prompt = build_system_prompt(
             harness=resolve_harness(agent, settings.defaults, project=project),
@@ -576,12 +576,12 @@ class WorkerPool:
         if knowledge.error and parent_task_id:
             await self._activity(parent_task_id, worker_id, "error",
                                  f"Warning: {knowledge.error}; this run goes without it"[:500])
-        if skills.skills and parent_task_id:
+        if (in_project := [item for item in library.items if item.scope == "project"]) and parent_task_id:
             await self._activity(parent_task_id, worker_id, "phase",
-                                 f"Project skills applied ({skills_label(len(skills.skills))})")
-        if skills.error and parent_task_id:
+                                 f"Project installs applied ({items_label(in_project)})")
+        if library.error and parent_task_id:
             await self._activity(parent_task_id, worker_id, "error",
-                                 f"Warning: {skills.error}; this run goes without them"[:500])
+                                 f"Warning: {library.error}; this run goes without them"[:500])
         try:
             prompt_file = system_prompt.write_file(self._runtime_root)
         except OSError as exc:
@@ -604,8 +604,8 @@ class WorkerPool:
             # None of the operator's personal settings, memory, hooks, plugins
             # or MCP servers (whose teardown could also make the CLI exit
             # non-zero). Built-in tools are unaffected; the permissions every
-            # agent shares, the library's plugins and skills and the project's
-            # skills come with the launch args.
+            # agent shares and the plugins and skills installed for this run
+            # come with the launch args.
             *isolation_args(work_dir),
             *system_prompt_args(prompt_file),
             *launch.args(),

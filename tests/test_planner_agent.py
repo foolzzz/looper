@@ -993,9 +993,9 @@ class TestHarnessAndLaunch:
 
 @pytest.mark.usefixtures("agent_db", "planner_row")
 class TestLibrary:
-    """The Planner loads the enabled plugins and the skills plugin from the
-    library; a change to the enabled set restarts its Claude, which resumes
-    the session."""
+    """The Planner loads the plugins and the skills plugin installed for it
+    globally; a change to that set restarts its Claude, which resumes the
+    session."""
 
     def test_the_command_carries_the_library_and_records_it(
         self, planner_claude: Any, agent_db: Any, enabled_library: Any,
@@ -1010,8 +1010,10 @@ class TestLibrary:
         # Every tool, Skill included, so that the library's skills reach the Planner too.
         _assert_unrestricted(argv)
         assert all(s["metadata"]["library"]["items"] == [
-            {"kind": "plugin", "name": "demo@market", "sha256": demo["sha256"]},
-            {"kind": "skill", "name": "alpha", "sha256": alpha["sha256"]}] for s in _starts(agent_db))
+            {"kind": "plugin", "name": "demo@market", "sha256": demo["sha256"], "plugin": "demo", "scope": "global"},
+            {"kind": "skill", "name": "alpha", "sha256": alpha["sha256"], "plugin": "personal", "scope": "global"}]
+            for s in _starts(agent_db))
+        assert {call.args[0] for call in agent_db.list_installed.await_args_list} == {"planner"}
 
     def test_a_changed_library_restarts_claude_resuming_its_session(
         self, planner_claude: Any, agent_db: Any, enabled_library: Any,
@@ -1114,8 +1116,8 @@ class TestKnowledge:
 
 
 def _project_plugins(argv: list[str]) -> list[str]:
-    """The ``--plugin-dir`` values that are a project's skills."""
-    return [d for d in plugin_dirs(argv) if "/.local/projects/" in d]
+    """The ``--plugin-dir`` values that are the generated plugin of a project's own skills."""
+    return [d for d in plugin_dirs(argv) if d.endswith("/project")]
 
 
 def _reading_plugins(
@@ -1143,8 +1145,8 @@ def _reading_plugins(
 
 @pytest.mark.usefixtures("agent_db", "planner_row")
 class TestProjectSkills:
-    """The Planner's command mounts its task's project's enabled skills as one plugin, read as each turn
-    starts; a change to them restarts its Claude, which resumes the session."""
+    """The Planner's command mounts the skills its task's project wrote and installed for the Planner as one
+    plugin, read as each turn starts; a change to them restarts its Claude, which resumes the session."""
 
     def test_the_command_mounts_its_projects_skills_once_and_records_them(
         self, planner_claude: Any, agent_db: Any, project_skills: Any,
@@ -1157,20 +1159,23 @@ class TestProjectSkills:
 
         (argv,) = claude.argvs()
         (plugin,) = _project_plugins(argv)
-        assert plugin.startswith(f"{h.work_dir.parent}/.local/projects/proj-1/skills/") and plugin.endswith("/project")
+        assert plugin.startswith(f"{h.work_dir.parent}/.local/library/")
         assert found[plugin] == {"deploy-check": (
             "---\nname: deploy-check\ndescription: \"Use before a deploy.\"\n---\n\nReply DEPLOY-OK.\n")}
         _assert_unrestricted(argv)
         for start in _starts(agent_db):
-            assert start["metadata"]["project_skills"] == {
-                "project_id": "proj-1", "sha256": Path(plugin).parent.name, "plugin": "project",
-                "skills": [{"name": "deploy-check", "sha256": _sha(found[plugin]["deploy-check"])}]}
-        assert [line for line in activity(agent_db) if "skills" in line] == ["Project skills applied (1 skill)"]
+            library = start["metadata"]["library"]
+            assert (library["role"], library["project_id"]) == ("planner", "proj-1")
+            assert library["items"] == [{"kind": "skill", "name": "deploy-check", "plugin": "project",
+                                         "scope": "project", "sha256": library["items"][0]["sha256"]}]
+        assert [line for line in activity(agent_db) if "skills" in line] == [
+            "Installed plugins and skills applied (1 skill)"]
 
     @pytest.mark.parametrize(("after", "note"), [
         ((("proj-1", "deploy-check", "Use before a deploy.", "Reply DEPLOY-OK."),
-          ("proj-1", "release-notes", "Drafts release notes.", "Reply NOTES-OK.")), "Project skills changed (2 skills)"),
-        ((), "Project skills removed"),  # the last skill disabled
+          ("proj-1", "release-notes", "Drafts release notes.", "Reply NOTES-OK.")),
+         "Installed plugins and skills changed (2 skills)"),
+        ((), "Installed plugins and skills removed"),  # the last skill uninstalled
     ], ids=["added", "removed"])
     def test_changed_skills_restart_claude_resuming_its_session(
         self, planner_claude: Any, agent_db: Any, project_skills: Any,
@@ -1185,9 +1190,10 @@ class TestProjectSkills:
         assert (_flag(first, "--resume"), _flag(second, "--resume")) == (None, "sess-p")
         assert [sorted(found[d]) for d in _project_plugins(second)] == ([[s[1] for s in after]] if after else [])
         assert claude.prompts()[0] == claude.prompts()[1]  # the skills alone restarted it
-        recorded = [s["metadata"].get("project_skills") for s in _starts(agent_db)]
-        assert [None if r is None else len(r["skills"]) for r in recorded] == [1, len(after) or None]
-        assert [line for line in activity(agent_db) if "skills" in line] == ["Project skills applied (1 skill)", note]
+        recorded = [s["metadata"].get("library") for s in _starts(agent_db)]
+        assert [None if r is None else len(r["items"]) for r in recorded] == [1, len(after) or None]
+        assert [line for line in activity(agent_db) if "skills" in line] == [
+            "Installed plugins and skills applied (1 skill)", note]
 
     def test_a_task_moved_to_another_project_takes_that_projects_skills(
         self, planner_claude: Any, agent_db: Any, project_skills: Any,
@@ -1205,8 +1211,9 @@ class TestProjectSkills:
 
         first, second = claude.argvs()
         (ours,), (theirs,) = _project_plugins(first), _project_plugins(second)
-        assert "/.local/projects/proj-1/skills/" in ours and "/.local/projects/proj-2/skills/" in theirs
         assert (sorted(found[ours]), sorted(found[theirs])) == (["deploy-check"], ["elsewhere"])
+        assert [call.args for call in agent_db.list_installed.await_args_list][-2:] == [
+            ("planner", "proj-1"), ("planner", "proj-2")]
 
     def test_a_failed_read_keeps_the_last_skills_and_its_claude(
         self, planner_claude: Any, agent_db: Any, project_skills: Any,
@@ -1215,14 +1222,14 @@ class TestProjectSkills:
         claude = planner_claude(plan(step("s1")), decide("accept"))
 
         def fail() -> None:
-            agent_db.list_enabled_skills.side_effect = ConnectionError("database is down")
+            agent_db.list_installed.side_effect = ConnectionError("database is down")
 
         h = drive(claude, hold_first(), _between_turns(agent_db, fail))
 
         assert h.final().payload["status"] == "completed"  # type: ignore[union-attr]
         (argv,) = claude.argvs()  # the same skills, so Claude was not restarted
         assert _project_plugins(argv)
-        assert "Warning: the project's skills could not be read" in activity(agent_db)
+        assert "Warning: the installed items could not be read" in activity(agent_db)
 
 
 # --- Ending the task through the TaskRouter ---
