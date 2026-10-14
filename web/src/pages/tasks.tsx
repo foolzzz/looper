@@ -30,6 +30,7 @@ import {
 } from "@/lib/api";
 import { useProjects } from "@/lib/use-projects";
 import { cn } from "@/lib/utils";
+import { formatUsd } from "@/lib/usage";
 import { ProjectBackgroundField, backgroundTooLong } from "@/components/project-background-field";
 import { ProjectHarnessOverrides, harnessTooLong } from "@/components/harness-field";
 import { TaskDetailPage } from "./task-detail";
@@ -671,6 +672,14 @@ export function TasksPage({ sub, query, onNavigate }: TasksPageProps) {
                       {durationLabel(task.created_at, task.completed_at) && (
                         <span className="text-xs text-muted-foreground font-mono">
                           ({durationLabel(task.created_at, task.completed_at)})
+                        </span>
+                      )}
+                      {task.cost && task.cost.runs > 0 && (
+                        <span
+                          className="text-xs text-muted-foreground font-mono"
+                          title={`What its Planner, Workers and Reviewers spent over ${task.cost.runs} run${task.cost.runs === 1 ? "" : "s"}`}
+                        >
+                          {formatUsd(task.cost.cost_usd)}
                         </span>
                       )}
                     </div>

@@ -13,13 +13,16 @@ import {
   MessageSquare,
   Plug,
   ScrollText,
+  Shrink,
   Terminal,
   User,
   Wrench,
 } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import { Badge } from "@/components/ui/badge";
+import { ContextUsagePanel } from "@/components/context-usage";
 import { cn } from "@/lib/utils";
+import { compactionChange, formatTokens, formatUsd } from "@/lib/usage";
 import {
   fetchChatMessages,
   fetchLlmRecord,
@@ -27,6 +30,7 @@ import {
   fetchLlmRecords,
   fetchTaskActivity,
   type ActivityEvent,
+  type Compaction,
   type DbChatMessage,
   type LlmRecord,
   type LlmRecordEvent,
@@ -457,6 +461,31 @@ function EventView({ item, startedAt, live }: { item: LlmRecordEvent; startedAt?
       </div>
     );
   }
+  if (type === "system" && event.subtype === "compact_boundary") {
+    const meta = (event.compact_metadata as Compaction | undefined) ?? {};
+    return (
+      <div className="flex gap-2">
+        {time}
+        <EventLine
+          icon={<Shrink className="h-3 w-3" />}
+          text={`Context compacted (${String(meta.trigger ?? "?")}) · ${compactionChange(meta)}`}
+          detail={JSON.stringify(meta, null, 2)}
+        />
+      </div>
+    );
+  }
+  if (type === "system" && event.subtype === "status" && event.compact_result === "failed") {
+    return (
+      <div className="flex gap-2">
+        {time}
+        <EventLine
+          icon={<Shrink className="h-3 w-3" />}
+          text={`Context compaction failed · ${String(event.compact_error ?? "no reason given")}`}
+          tone="error"
+        />
+      </div>
+    );
+  }
   if (type === "system" && (event.subtype === "hook_started" || event.subtype === "status")) {
     return null; // the hook's response line and the run itself say enough
   }
@@ -604,7 +633,8 @@ function EventView({ item, startedAt, live }: { item: LlmRecordEvent; startedAt?
   }
   if (type === "result") {
     const ok = event.subtype === "success" && !event.is_error;
-    const cost = typeof event.total_cost_usd === "number" ? ` · $${event.total_cost_usd.toFixed(4)}` : "";
+    // Claude's figure is its session's running total; the run's own cost is in the card's header.
+    const cost = typeof event.total_cost_usd === "number" ? ` · session total ${formatUsd(event.total_cost_usd)}` : "";
     return (
       <div className="flex gap-2">
         {time}
@@ -626,6 +656,55 @@ function EventView({ item, startedAt, live }: { item: LlmRecordEvent; startedAt?
         detail={JSON.stringify(event, null, 2)}
       />
     </div>
+  );
+}
+
+/** The run's own tokens (cache included), its context at the end, its compactions and its own cost. */
+function RunUsage({ record }: { record: LlmRecord }) {
+  const tokens: [string, number | null | undefined, string][] = [
+    ["in", record.input_tokens, "Uncached input tokens"],
+    ["cache read", record.cache_read_tokens, "Prompt tokens read from the cache"],
+    ["cache write", record.cache_creation_tokens, "Prompt tokens written to the cache"],
+    ["out", record.output_tokens, "Output tokens"],
+  ];
+  const shown = tokens.filter(([, value]) => value != null);
+  const compactions = record.compactions ?? [];
+  return (
+    <>
+      {shown.length > 0 && (
+        <span className="font-mono text-muted-foreground" title="This run's own tokens">
+          {shown.map(([label, value, title], i) => (
+            <span key={label} title={title}>
+              {i > 0 && " · "}
+              {formatTokens(value)} {label}
+            </span>
+          ))}
+        </span>
+      )}
+      {record.context_tokens != null && (
+        <span
+          className="font-mono text-muted-foreground"
+          title="Context at the end of the run: the prompt of its last model request"
+        >
+          ctx {formatTokens(record.context_tokens)}
+        </span>
+      )}
+      {compactions.length > 0 && (
+        <Badge
+          variant="outline"
+          className="py-0 text-[10px]"
+          title={compactions.map((c) => `${c.trigger ?? "?"}: ${compactionChange(c)}`).join("\n")}
+        >
+          <Shrink className="mr-1 h-3 w-3" />
+          compacted{compactions.length > 1 ? ` ×${compactions.length}` : ""}
+        </Badge>
+      )}
+      {record.cost_usd != null && (
+        <span className="font-mono text-muted-foreground" title="This run's own cost">
+          {formatUsd(record.cost_usd)}
+        </span>
+      )}
+    </>
   );
 }
 
@@ -689,10 +768,7 @@ export function RunCard({ initial, defaultOpen }: { initial: LlmRecord; defaultO
         </Badge>
         <span className="text-muted-foreground">{formatMs(duration)}</span>
         {record.model && <span className="text-muted-foreground">{record.model}</span>}
-        {(record.input_tokens != null || record.output_tokens != null) && (
-          <span className="text-muted-foreground">{record.input_tokens ?? 0} in / {record.output_tokens ?? 0} out</span>
-        )}
-        {record.cost_usd != null && <span className="text-muted-foreground">${record.cost_usd.toFixed(4)}</span>}
+        <RunUsage record={record} />
         {record.status === "running" && (
           <span className={cn("flex items-center gap-1", stuck ? "text-warning" : "text-muted-foreground")}>
             {stuck && <AlertTriangle className="h-3.5 w-3.5" />}
@@ -812,6 +888,8 @@ export function AgentHistoryPage({ sub }: { sub: string }) {
           Reviewer result, and answers your messages. Each run below is one of its turns.
         </p>
       )}
+
+      {(role === "Manager" || role === "Planner") && <ContextUsagePanel key={agentId} agentId={agentId} />}
 
       <section className="space-y-2">
         <h2 className="text-sm font-semibold">Runs</h2>

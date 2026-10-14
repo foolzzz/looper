@@ -223,14 +223,17 @@ def _resident(*, exit_after: int | None = None, die_on: int | None = None, ignor
 
     It appends its pid to ``pids`` on start and answers each turn with
     ``turn N: <message>`` (the user's message, after the context sections)
-    and a result. Like Claude, the result's
-    ``total_cost_usd`` is the process's running total (0.25 per turn). It
-    exits on EOF, after turn ``exit_after``, or without a result during turn
-    ``die_on``. With ``ignore_eof`` it keeps running after stdin closes.
+    and a result. Like Claude, the result's ``total_cost_usd`` is the
+    session's running total (0.25 per turn): a process started with
+    ``--resume`` carries on from the total the session had (kept in
+    ``session_cost``). It exits on EOF, after turn ``exit_after``, or
+    without a result during turn ``die_on``. With ``ignore_eof`` it keeps
+    running after stdin closes.
     """
     return (
         "open('pids', 'a').write(f'{os.getpid()}\\n')\n"
         "turn = 0\n"
+        "cost = float(open('session_cost').read()) if '--resume' in sys.argv and os.path.exists('session_cost') else 0.0\n"
         "for line in sys.stdin:\n"
         "    turn += 1\n"
         "    text = json.loads(line)['message']['content'].rpartition('\\n\\n')[2]\n"
@@ -238,12 +241,24 @@ def _resident(*, exit_after: int | None = None, die_on: int | None = None, ignor
         f"    if turn == {die_on!r}:\n"
         "        sys.exit(3)\n"
         "    print(json.dumps({'type': 'assistant', 'message': {'content': [{'type': 'text', 'text': f'turn {turn}: {text}'}]}}), flush=True)\n"
+        "    cost += 0.25\n"
+        "    open('session_cost', 'w').write(str(cost))\n"
         "    print(json.dumps({'type': 'result', 'subtype': 'success', 'is_error': False, 'session_id': 'sess-1',\n"
-        "                      'total_cost_usd': turn * 0.25}), flush=True)\n"
+        "                      'total_cost_usd': cost}), flush=True)\n"
         f"    if turn == {exit_after!r}:\n"
         "        break\n"
         + ("time.sleep(30)\n" if ignore_eof else "")
     )
+
+
+def _forgetting() -> str:
+    """Like Claude given a ``--resume`` id it no longer has: an error result, no init; else ``_resident()``."""
+    return (
+        "if '--resume' in sys.argv:\n"
+        "    sys.stdin.readline()\n"
+        "    print(json.dumps({'type': 'result', 'subtype': 'error_during_execution', 'is_error': True, 'num_turns': 0, 'total_cost_usd': 0, 'errors': ['No conversation found with session ID: gone']}), flush=True)\n"
+        "    sys.exit(0)\n"
+    ) + _resident()
 
 
 def _converse(
@@ -256,6 +271,7 @@ def _converse(
     settings: list[dict[str, str]] | None = None,
     between: Any = None,
     saved_session: str | None = None,
+    saved_totals: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Send ``messages`` one at a time to one Manager backed by a fake claude, then stop it.
 
@@ -265,7 +281,9 @@ def _converse(
     the first. Returns the final ``replies``, every started Claude as
     ``(argv, process)`` in ``spawned`` with its launch keywords in
     ``launched``, whether each was ``running`` just before ``stop()``, and the
-    ``pids`` the fake logged.
+    ``pids`` the fake logged. ``saved_session`` (with ``saved_totals``, the
+    running totals saved beside it) is what an earlier run of the server
+    left; the fake's session then has spent ``saved_totals``' cost.
     """
     from loopx.db import agent_configs, system_settings
 
@@ -300,7 +318,11 @@ def _converse(
             root = Path(tmp)
             if saved_session is not None:  # a session saved by an earlier run of the server
                 (root / ".local" / "manager").mkdir(parents=True)
-                (root / ".local" / "manager" / "session.json").write_text(json.dumps({"session_id": saved_session}))
+                state = {"session_id": saved_session}
+                if saved_totals is not None:
+                    state["session_totals"] = saved_totals
+                    (root / "session_cost").write_text(str(saved_totals.get("cost_usd", 0.0)))
+                (root / ".local" / "manager" / "session.json").write_text(json.dumps(state))
             bus = MessageBus(runtime_root=root)
             manager = ManagerAgent(
                 config=ManagerConfig(claude_bin=_fake_claude(root, body), work_dir=root),
@@ -332,7 +354,8 @@ def _converse(
             state = root / ".local" / "manager" / "session.json"
             return {"replies": replies, "spawned": spawned, "launched": launched, "running": running, "pids": pids,
                     "prompts": _prompts(root),
-                    "saved_session": json.loads(state.read_text())["session_id"] if state.exists() else None}
+                    "saved_session": json.loads(state.read_text())["session_id"] if state.exists() else None,
+                    "saved_totals": json.loads(state.read_text()).get("session_totals") if state.exists() else None}
 
     return asyncio.run(_run())
 
@@ -391,13 +414,17 @@ class TestManagerResidentClaude:
         assert positional == []
         assert _flag(argv, "--resume") is None  # no session yet
 
-    def test_claude_that_exited_is_restarted_with_its_session(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_claude_that_exited_is_restarted_with_its_session(
+        self, monkeypatch: pytest.MonkeyPatch, agent_db: Any,
+    ) -> None:
         chat = _converse(monkeypatch, _resident(exit_after=1), ["hello", "again"], between=_first_claude_exits)
         assert chat["replies"] == ["turn 1: hello", "turn 1: again"]
         (first, _), (second, _) = chat["spawned"]
         assert _flag(first, "--resume") is None
         assert _flag(second, "--resume") == "sess-1"
         assert len(chat["pids"]) == 2
+        # The resumed process reports the session's total (0.5); the turn spent 0.25 of it.
+        assert [call.kwargs["cost_usd"] for call in agent_db.finish_record.await_args_list] == [0.25, 0.25]
 
     def test_claude_dying_mid_turn_is_reported_then_restarted(self, monkeypatch: pytest.MonkeyPatch) -> None:
         chat = _converse(monkeypatch, _resident(die_on=2), ["hello", "again", "third"])
@@ -411,7 +438,8 @@ class TestManagerResidentClaude:
         chat = _converse(monkeypatch, _resident(), ["hello", "again", "third"],
                          prompts=["prompt A", "prompt B", "prompt B"])
         assert chat["replies"] == ["turn 1: hello", "turn 1: again", "turn 2: third"]
-        # A new process starts its running cost from zero.
+        # The restarted process resumes the session and reports its running total (0.5, then 0.75);
+        # each record holds only its own turn's share.
         assert [call.kwargs["cost_usd"] for call in agent_db.finish_record.await_args_list] == [0.25, 0.25, 0.25]
         (first, _), (second, _) = chat["spawned"]
         first_prompt, second_prompt = chat["prompts"]
@@ -430,14 +458,7 @@ class TestManagerResidentClaude:
     def test_a_session_that_no_longer_exists_is_dropped_and_the_message_still_answered(
         self, monkeypatch: pytest.MonkeyPatch, agent_db: Any,
     ) -> None:
-        # Like Claude given an unknown --resume id: an error result without an init event.
-        forgetting = (
-            "if '--resume' in sys.argv:\n"
-            "    sys.stdin.readline()\n"
-            "    print(json.dumps({'type': 'result', 'subtype': 'error_during_execution', 'is_error': True, 'num_turns': 0, 'total_cost_usd': 0, 'errors': ['No conversation found with session ID: gone']}), flush=True)\n"
-            "    sys.exit(0)\n"
-        ) + _resident()
-        chat = _converse(monkeypatch, forgetting, ["hello", "again"], saved_session="gone")
+        chat = _converse(monkeypatch, _forgetting(), ["hello", "again"], saved_session="gone")
         assert chat["replies"] == ["turn 1: hello", "turn 2: again"]
         (first, _), (second, _) = chat["spawned"]
         assert _flag(first, "--resume") == "gone"
@@ -452,6 +473,25 @@ class TestManagerResidentClaude:
         (reply,) = chat["replies"]
         assert "Manager" in reply  # the usual error reply, not a loop
         assert [_flag(argv, "--resume") for argv, _ in chat["spawned"]] == ["gone", None]
+
+    def test_the_first_turn_after_a_server_restart_records_only_its_own_cost(
+        self, monkeypatch: pytest.MonkeyPatch, agent_db: Any,
+    ) -> None:
+        # An earlier run of the server left the session at $0.50, saved beside its id.
+        chat = _converse(monkeypatch, _resident(), ["hello", "again"], saved_session="sess-1",
+                         saved_totals={"cost_usd": 0.5})
+        ((argv, _),) = chat["spawned"]
+        assert _flag(argv, "--resume") == "sess-1"
+        # The resumed Claude reports 0.75 and then 1.0: the session's running total.
+        assert [call.kwargs["cost_usd"] for call in agent_db.finish_record.await_args_list] == [0.25, 0.25]
+        # The total is saved again for the next restart.
+        assert (chat["saved_session"], chat["saved_totals"]) == ("sess-1", {"cost_usd": 1.0})
+
+    def test_a_dropped_session_takes_its_totals_with_it(self, monkeypatch: pytest.MonkeyPatch, agent_db: Any) -> None:
+        chat = _converse(monkeypatch, _forgetting(), ["hello"], saved_session="gone", saved_totals={"cost_usd": 0.1})
+        # The new session's first turn spent 0.25; the dropped session's 0.1 is not taken off it.
+        assert [call.kwargs["cost_usd"] for call in agent_db.finish_record.await_args_list] == [None, 0.25]
+        assert (chat["saved_session"], chat["saved_totals"]) == ("sess-1", {"cost_usd": 0.25})
 
     @pytest.mark.parametrize(("ignore_eof", "returncode"), [(False, 0), (True, -9)])
     def test_stop_ends_and_reaps_claude(

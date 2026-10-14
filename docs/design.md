@@ -53,6 +53,7 @@ Task 是系统的一等实体，代表一个完整的用户需求。
 - 每个 Task 自动分配独立的 Planner 实例
 - Task 结束（完成、失败、停止、取消）时 TaskRouter 停掉 Planner，连同它的 Claude 进程
 - 最多 3 个 Task 并发执行，超出排队
+- Task 的花费是它的 Planner、Worker、Reviewer 各次运行自身花费之和，按角色分开计，并附运行次数（见下文「花费与上下文」）；Manager 不计入。默认不设花费上限（RFC 决策 2），上限留给 M5 的项目执行配置
 
 ### Project（项目）
 
@@ -113,6 +114,25 @@ Task 是系统的一等实体，代表一个完整的用户需求。
 - **不限权限**（RFC 决策 8）：四类 agent 都开放全部工具、跳过权限确认。这个参数只在一处定义（`claude_cli.permission_args`，即 `--dangerously-skip-permissions`），由 `agent_settings.Launch.args` 和插件库参数一起放进每个 agent 的启动参数，四类 agent 不会不一致；启动命令里不再有 `--tools`、`--allowedTools`、`--permission-mode`。职责边界改由 role prompt 和代码契约约束：推荐的 Planner role prompt 写明它负责规划和决策、不亲自修改文件，具体改动都作为步骤交给 Worker。Manager 因此能在本机执行任何命令，所以飞书、Telegram 渠道必须配置发送者白名单（见「接入渠道」）。用 Claude Code 2.1.285 核实：`--print` 加隔离参数和 `--plugin-dir` 时，init 事件的 `permissionMode` 为 `bypassPermissions`，Bash、Write 和声明了 `allowed-tools` 的插件 skill 都不再被拒绝；隔离用的 `--settings` 不影响权限
 - **不加载操作者的个人配置**：四类 agent 的启动命令都带同一组隔离参数（`claude_cli.isolation_args`）：`--setting-sources project`、`--strict-mcp-config`，以及 `--settings` 里的 `autoMemoryEnabled: false` 和 `claudeMdExcludes`（排除工作目录所在仓库以上各级目录的 `CLAUDE.md`、`.claude/CLAUDE.md`、`.claude/rules/`，以及 `~/.claude` 下的用户记忆）。agent 只看到 LoopX 拼装的内容和项目仓库自己的 `CLAUDE.md`；操作者的 `~/.claude/CLAUDE.md`、用户设置、hook、个人 skill、插件、自定义 agent、输出风格、MCP 和自动记忆都不加载，登录不受影响；插件和 skill 只经由上面的插件库进来。核实过程见 [Agent 系统架构](architecture/agent-system.md#what-an-agents-claude-code-loads)
 
+### 花费与上下文
+
+长程运行的成本和上下文增长都可以看到（RFC 第 8 节，M2；`loopx/agents/run_usage.py`）。每次运行（`llm_records`）记录以下内容：
+
+- **自身的花费和 token**：`cost_usd`、`input_tokens`、`output_tokens`、`cache_read_tokens`、`cache_creation_tokens`。Claude Code 在每个 `result` 里报告会话的累计值：`total_cost_usd` 和 `modelUsage`，后者覆盖所有请求，包括压缩时的摘要请求和子 agent 的请求。一次运行自己的份额是累计值的增量。`result.usage` 只算本轮主循环的请求，漏掉了压缩和子 agent，所以不用它（只在没有 `modelUsage` 时兜底）。
+  - Worker 和 Reviewer 一次运行就是一个进程，增量就是进程的累计值。
+  - Manager、Planner 的每个 turn 减去上一个 turn 结束时的累计值。用 `--resume` 起的新进程会接着会话原来的累计值报告：已核实，一个已花 $0.01046 的会话续接后，第一轮报 $0.01279，其中本轮只花了 $0.00232。所以会话的累计值和会话 id 存在一起：Manager 存在 `session.json`，Planner 存在计划文件。续接时以存下的值为起点；会话因为无法续接被丢弃时，累计值一起清零。
+  - 修复前，续接后的第一轮会把整个会话以前的花费再记一遍。重启服务、改 prompt 或设置导致进程重启，都会触发这个问题。
+- **结束时的上下文规模**（`context_tokens`）：本轮最后一个主循环请求的 prompt 大小，即 input + cache read + cache creation，不算子 agent 的请求。
+- **上下文压缩**（`compactions`）：Claude Code 每次压缩（自动的，或以 user turn 发送的 `/compact`）都会输出一个 `system/compact_boundary` 事件。每次压缩记一项 `{trigger, pre_tokens, post_tokens, duration_ms}`；没有压缩时为 `[]`，M2 之前的记录为 null。
+
+读取方式：
+
+- `GET /api/tasks/<id>` 和 `GET /api/tasks` 的每个任务都带 `cost`：总额 `cost_usd`、`runs`、`running`（还在跑，花费未知）、`unpriced_runs`（结束了但没报花费）、`by_role`（planner、worker、reviewer 各自的 `cost_usd` 和 `runs`）。
+- `GET /api/agents/<agent_id>/usage` 给出一个 agent 的数据，例如 `manager`、`planner-<task_id>`：
+  - 总花费、运行数、压缩次数；
+  - 按会话和按 UTC 日的花费；
+  - 最近 N 个 turn（默认 100）各自的上下文、花费和压缩，以及最新的上下文规模。
+
 ---
 
 ## 消息流
@@ -172,6 +192,15 @@ Web 始终开启。Telegram 和 Lark 默认内置，不需要任何启动参数�
 - 左上角列出所有 agent（`GET /api/chat/targets`）：全局唯一的 Manager，以及最近 30 个任务。每个任务下有它固定的一个 Planner，和每个步骤各自独立的 Worker（做了验收的步骤还有 Reviewer）。已经结束的任务和 agent 也列出来，可以查看消息
 - 能发消息的只有 Manager 和运行中任务的 Planner。发给 Planner 的消息由它的 Claude 回复（一个 `[CHAT]` turn），Claude 可以把消息转给正在执行某一步的 Worker，作为它的下一个 user turn，也可以给计划追加步骤；Worker 已经结束的，这条消息留到这一步的决策 turn 给 Claude 看。事件按到达顺序处理，正在跑别的 turn 时发来的消息会排在它后面；任务还没有计划或已经结束时，消息不经过 Claude，直接回复。选中 Planner 时，旁边折叠显示它最近 10 次 Claude 运行。Worker 和 Reviewer 只读，页面显示它的完整运行记录
 - `POST /api/chat/send` 发送消息，`target` 指定对话对象
+- 花费与上下文的展示：
+  - 任务列表的每一行都显示任务目前的花费。
+  - 任务详情的 Overview 有一张「Cost」卡片，显示总额和运行次数。下面的「Cost by agent」列出 Planner、Workers、Reviewers 各自的运行次数、花费和占比，并注明还在跑的运行和没有报出花费的运行。
+  - Manager 和 Planner 的历史页开头是「Context & cost」：
+    - 最新的上下文规模、压缩次数、总花费和 turn 数；
+    - 最近 100 个 turn 结束时上下文的折线，按最小值和最大值缩放，发生过压缩的 turn 画一条虚线；
+    - 压缩清单（第几个 turn、时间、触发方式、压缩前 → 压缩后）；
+    - 一张可展开的 turn 表。
+  - 每张运行卡片显示这次运行自己的 token（未缓存输入、缓存读、缓存写、输出）、结束时的上下文 `ctx`、`compacted` 标记和自身花费。记录里的压缩事件显示为一行。`result` 那一行的金额标为 `session total`，因为那是 Claude 报告的会话累计值。
 - SSE `GET /api/chat/events` 接收实时响应
 - Settings 页的「Agent Defaults」：默认 harness（实时显示 `n / 20000`，标明内置或已自定义，可恢复内置）、默认模型、effort 和环境变量。「Plugins & skills」：已加载几个、总大小，一行说明这些会加载进每个 agent；「Import from this machine」或「Re-import」和上次导入的时间、变化与未导入的内容；按名称筛选；插件和 skill 分组列出，各有版本、大小和启用开关，改动对每个 agent 的下一次运行生效。Agents 页列出 Manager、Planner、Worker、Reviewer：原来的提示编辑框改叫「Role prompt」；模型输入框的占位符显示继承的默认模型；Manager 多一个「Harness prompt (override)」，为空时显示继承默认，其他三类说明 harness 从哪里来；原来的「Permission Mode」下拉框（这些 agent 从来不读它）改为一行说明：所有 agent 都开放全部工具、带 `--dangerously-skip-permissions`
 - 左侧栏导航下面列出所有项目（任务数，有进行中任务时显示进行中的数量），点击打开按该项目筛选的 Tasks 页，`+` 新建项目。Tasks 页可以按项目筛选；选中项目时显示项目信息和背景（默认显示 3 行，可展开；为空时显示 No background），可以编辑（背景用等宽文本框，实时显示 `n / 10000`，超限不能保存；可折叠的「Harness overrides」里编辑 Planner 和 Worker 的 harness，为空时显示继承默认），没有任务时可以删除。新建项目的对话框也可以填背景。新建任务时先选项目或当场新建一个，项目有默认目录时工作目录可以不填。任务详情里可以把任务移到其他项目，任何状态都可以

@@ -43,6 +43,7 @@ from .. import agent_settings
 from ..agent_settings import BUILTIN_DEFAULTS, AgentDefaults, AgentType, Launch, resolve_harness, resolve_launch
 from ..claude_cli import ClaudeRunRecorder, ResidentClaude, exit_note, isolation_args, system_prompt_args
 from ..library import load_library
+from ..run_usage import Usage
 from ..system_prompt import SystemPrompt, build_system_prompt, is_recommended, plan_task_section
 from ..message import (
     TASK_ROUTER_ADDRESS,
@@ -210,6 +211,8 @@ class TaskPlan:
     project_planner_harness: str = ""  # the project's harness for its Planner; '' for the default
     project_updated_at: str = ""  # the project's version, for the system prompt's record
     session_id: str | None = None  # the Planner's Claude session, resumed after a restart
+    # The session's running totals at its last result; a process that resumes the session starts from them.
+    session_totals: Usage = field(default_factory=Usage)
     final_summary: str = ""  # the last accepted step's summary
     fail_reason: str = ""
 
@@ -278,6 +281,7 @@ class TaskPlan:
             "project_planner_harness": self.project_planner_harness,
             "project_updated_at": self.project_updated_at,
             "session_id": self.session_id,
+            "session_totals": self.session_totals.to_dict(),
             "final_summary": self.final_summary,
             "fail_reason": self.fail_reason,
             "steps": [
@@ -1046,7 +1050,8 @@ class PlannerAgent:
             resuming = plan.session_id
             command = base + (["--resume", plan.session_id] if plan.session_id else [])
             try:
-                await self._claude.start(command, cwd=plan.work_dir, signature=signature, env=launch.environment())
+                await self._claude.start(command, cwd=plan.work_dir, signature=signature, env=launch.environment(),
+                                         totals=plan.session_totals if plan.session_id else None)
             except OSError as exc:
                 start_error = f"cannot start Claude Code: {exc}"
             else:
@@ -1101,7 +1106,7 @@ class PlannerAgent:
             await recorder.finish(output_text=None, result_event=None, error=error)
             await self._activity("error", f"Warning: Planner {error}")
             await self._claude.stop()
-            plan.session_id = None
+            plan.session_id, plan.session_totals = None, Usage()  # its totals went with it
             self._save_plan(plan)
             return await self._run_turn(message, retried=True)
 
@@ -1114,11 +1119,15 @@ class PlannerAgent:
             error = f"Claude Code turn did not succeed ({result_event.get('subtype') or 'error'})"
         elif not final_text.strip():
             error = "Claude Code returned an empty reply"
+        usage = self._claude.turn_usage(result_event)
+        if result_event is not None:
+            plan.session_totals = self._claude.totals
+            self._save_plan(plan)
         await recorder.finish(
             output_text=final_text or None,
             result_event=result_event,
             error=error,
-            cost_usd=self._claude.turn_cost(result_event),
+            usage=usage,
         )
         if error:
             raise PlannerTurnError(error)
@@ -1468,6 +1477,7 @@ class PlannerAgent:
                         project_planner_harness=data.get("project_planner_harness", ""),
                         project_updated_at=data.get("project_updated_at", ""),
                         session_id=data.get("session_id"),
+                        session_totals=Usage.from_dict(data.get("session_totals")),
                         final_summary=data.get("final_summary", ""),
                         fail_reason=data.get("fail_reason", ""),
                     )

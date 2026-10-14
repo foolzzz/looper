@@ -218,7 +218,9 @@ if {forget_sessions!r} and '--resume' in sys.argv:
 if '--append-system-prompt-file' in sys.argv:
     log('prompts.jsonl', open(sys.argv[sys.argv.index('--append-system-prompt-file') + 1], encoding='utf-8').read())
 counter = os.path.join(STATE, 'turns')
-cost = 0.0
+# Like Claude, a process that resumes a session carries on from the session's running total.
+session_cost = os.path.join(STATE, 'session_cost')
+cost = float(open(session_cost).read()) if '--resume' in sys.argv and os.path.exists(session_cost) else 0.0
 for line in sys.stdin:
     n = int(open(counter).read()) + 1 if os.path.exists(counter) else 1
     open(counter, 'w').write(str(n))
@@ -234,6 +236,7 @@ for line in sys.stdin:
                           'session_id': 'sess-p', 'total_cost_usd': cost}}), flush=True)
         continue
     cost += 0.25
+    open(session_cost, 'w').write(str(cost))
     print(json.dumps({{'type': 'assistant', 'message': {{'content': [{{'type': 'text', 'text': reply}}]}}}}), flush=True)
     print(json.dumps({{'type': 'result', 'subtype': 'success', 'is_error': False, 'result': reply,
                       'session_id': 'sess-p', 'total_cost_usd': cost}}), flush=True)
@@ -247,8 +250,9 @@ class FakePlannerClaude:
 
     It reads stream-json user turns like the real CLI and answers turn N with
     ``replies[N-1]`` (the last reply repeats), counting turns across restarts.
-    Like Claude, each result's ``total_cost_usd`` is its process's running
-    total (0.25 per answered turn). A reply of ``<exit>`` exits mid-turn
+    Like Claude, each result's ``total_cost_usd`` is its session's running
+    total (0.25 per answered turn), which a process started with ``--resume``
+    carries on from. A reply of ``<exit>`` exits mid-turn
     without a result, ``<hang>`` never answers, and ``<error>`` ends the turn
     with an error result. With ``linger`` it keeps running after its stdin
     closes; with ``forget_sessions`` it answers any ``--resume`` the way Claude
