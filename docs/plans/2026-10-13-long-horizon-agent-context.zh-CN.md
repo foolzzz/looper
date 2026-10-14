@@ -1,6 +1,6 @@
 # 开发计划：长程 Agent 上下文体系（M0–M9）
 
-- **状态：** M0–M7 全部交付（M7a 计划状态入库、M7b 任务记忆）；M8 全部交付（M8a 能力目录与安装、M8b MCP 服务器、M8c 进库来源、M8d 配置层级统一、M8e 导出与导入）；M9a 运行时、provider 与 agent 的注册和选择已交付；上游 LoopX 清理 B1–B4 已交付；其余见第 5 节待办
+- **状态：** M0–M7 全部交付（M7a 计划状态入库、M7b 任务记忆）；M8 全部交付（M8a 能力目录与安装、M8b MCP 服务器、M8c 进库来源、M8d 配置层级统一、M8e 导出与导入）；M9a 运行时、provider 与 agent 的注册和选择已交付；上游 LoopX 清理 B1–B4 已交付；全面改名为 Looper 已交付；其余见第 5 节待办
 - **依据：** [RFC：长程 Agent 的上下文体系 v0](../architecture/rfcs/long-horizon-agent-context-v0.zh-CN.md)。
   设计原则、分层模型和已作出的决定以 RFC 为准；本文只管"怎么分阶段做、做到什么算完成、现在做到哪了"。
 - **仓库：** `foolzzz/looper`，基线 `main`
@@ -10,12 +10,12 @@
 
 1. **一个阶段一个 PR。** 每个阶段都可以独立评审、独立回滚。没有依赖关系的阶段可以并行；开 PR 前先合入最新的 `main`。
 2. **修缺陷先复现。** 修缺陷时先写出能复现它的测试；新功能不必证明测试在 `main` 上失败。
-3. **开 PR 前在本地跑一次裸 `pytest`。** 用 `LOOPX_TEST_DATABASE_URL` 指向一个新建的数据库，约 1 分钟，这就是合入的门槛。CI 也会在每个 PR 上跑，但合入不等它。
+3. **开 PR 前在本地跑一次裸 `pytest`。** 用 `LOOPER_TEST_DATABASE_URL` 指向一个新建的数据库，约 1 分钟，这就是合入的门槛。CI 也会在每个 PR 上跑，但合入不等它。
 4. **一条规则一个测试。** 测在离用户入口最近的那一层。不钉文案（文案本身就是契约时除外），不测 mock 的调用链，变体用参数化。
 5. **真实 Claude 只在改动 prompt、契约或注入方式时跑。** 用 haiku 跑一个最小场景，花费不超过 $0.5。
 6. **截图只在界面改动时做，一张即可。**
 7. **文档从简。** 每个阶段交付后在第 4 节记一行（不超过 3 句），并更新第 2 节的状态列；`agent-system.md` 只在架构变化时改。
-8. **合入后部署。** 合入后同步本机 `main`，前端有改动就重新构建 `web/dist`，然后执行 `loopx service restart` 重启本机服务（8767，由 `loopx service` 托管）。
+8. **合入后部署。** 合入后同步本机 `main`，前端有改动就重新构建 `web/dist`，然后执行 `looper service restart` 重启本机服务（8767，由 `looper service` 托管）。
 9. **核心优先。** 每个阶段只做核心：后端、agent 行为、能用的最小界面（能配置、能看到结果）。可视化、交互细节、
    界面美化和"顺手加上"的辅助功能记入第 5 节的"非核心待办"，M6 之后统一做。
 
@@ -493,6 +493,7 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
 | 2026-10-14 | 第 5.3 节经验文档先作为草稿（looper #61）：`distill_lessons` 改为 `off`、`draft`、`write` 三档（一次性迁移：`true` 为 `write`，`false` 和 NULL 为 `off`），`draft` 时任务完成后的经验存进 `project_document_drafts`，不进任何运行的知识索引和挂载，用户在项目页 Knowledge 标签查看、修改后确认（成为受知识上限约束的文本文档）或丢弃，任务页链接到草稿。验证：真实 PG 加替身 Claude 跑完三档、确认与丢弃、被拒的确认保留草稿和迁移，一次性 `loopx serve` 上无头 Chrome 完成修改后确认、丢弃和切换档位并截图。 |
 | 2026-10-14 | M9a 交付（looper #62）：新增运行时、provider（密钥另表存放、接口打码，模型目录与并发上限只存储）和 agent 的注册与校验，分层配置以 `agent` 取代模型（迁移把各层模型变成 `claude-code/<模型>`），新建任务可按角色覆盖 agent，四类 agent 都经运行时适配器启动，`llm_profiles` 删除。验证：以 main（`73eed752d`）的代码生成基准，未配置和迁移过模型层两组数据下四类角色的完整 argv、环境变量、system prompt 和首条输入与基准逐字节相同（prompt 不变，未跑真实 Claude）；校验正反例、任务级覆盖只到该任务的角色、启动时校验失败不换 agent、导出导入往返都有真实 PG 测试，替身模式评测（带 `--agent`）通过，真实 PG 1005 通过。 |
 | 2026-10-14 | 第 5.3 节界面导入配置文件（looper #63）：`POST /api/config/imports` 只在这一个路由把请求体上限放宽到 256 MiB（目录上限的两倍），流式写入 runtime root 下权限 0600 的临时文件，校验格式后返回与 `loopx config import` 相同的预览，`POST .../<id>/apply` 在一个事务里应用并删除文件，`DELETE` 取消，未应用的一小时后过期删除，其余路由仍是 8 MiB。Settings 的「Move to another machine」可选择或拖入文件，按段显示新增、变化（含字段）、不变和跳过，以及待补的密钥，确认后应用，结果里的链接直接打开对应 provider、MCP 服务器或渠道的表单。验证：真实 PG 测试覆盖超过 8 MiB 的上传、其他路由 413、预览不写、应用与 CLI 结果一致、过期和未知 id 404、坏文件 400 与临时文件清理；两个一次性 `loopx serve` 之间经界面路由导出 12.4 MB、在新库的 Settings 里预览并应用 24 项，再导出除未导出的 API key 外与原文件相同；真实 PG 1020 通过。 |
+| 2026-10-14 | 全面改名为 Looper（looper #64）：命令、Python 包与 wheel、数据目录、环境变量、服务 label、导出格式、界面、prompt 与文档改为 looper/Looper；`loopx` 别名打印弃用提示后执行 `looper`，`LOOPX_*` 作为回退并警告一次，`~/.loopx` 在首次 `serve` 或 `service install` 时改名为 `~/.looper` 并留下链接，`service install` 先卸掉 `com.loopx.serve`，`loopx-config/v1` 仍可导入，默认库名 `loopx`、tag 与 NOTICE 不变。验证：真实 PG 1043 通过；临时 HOME 下 `looper serve` 移动目录并留链接、`loopx version`、只设 `LOOPX_DATABASE_URL` 的 serve 与 doctor、从 `git archive` 构建的 `looper-2.5.0` wheel 装出 `looper` 和 `loopx`，沙箱里 `install.sh` 先卸旧 `loopx` 工具；真实 haiku 评测 5/5、契约违约 0、Planner 改文件 0，送审任务多出的一步单独重跑后消失，花费 $0.44。 |
 
 ## 5. 不属于本 RFC 的待办
 
@@ -508,7 +509,7 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
 - **下一次发布：v2.6.0，在 M9 完成后发（2026-10-14 定）。** "M9 完成"指 M9a、M9b、M9c、M9e；M9d 等 norma 就绪，不卡发布。自 v2.5.0 起的全部改动（M0–M9、上游清理、改名）一起发，按 Release workflow 推 tag；发布说明要覆盖全部行为变化（个人配置隔离、默认 harness、免权限确认、渠道白名单、导入的 skill 默认不加载、删除 `update`/`init`、重启后任务续跑、分层配置、改名等），推 tag 前先请维护者确认。
 - **升级时迁移前自动备份（2026-10-14 定，✅ 已交付 looper #60）**：`serve` 发现有未执行的迁移时，先用 `pg_dump` 备份到 runtime root 下的 `backups/`（保留最近几份）再迁移；没有可用的 `pg_dump` 时拒绝执行破坏性迁移并提示安装方法；`doctor` 检查 `pg_dump`。自 v2.5.0 起已有 11 处删列、删表的迁移。
 - **服务常驻（2026-10-14 定，✅ 已交付 looper #59）**：`service install / uninstall / status / restart`，macOS 生成 launchd LaunchAgent，Linux 生成 systemd 用户服务，开机自启、崩溃拉起；本机也改用它运行主 checkout 的代码。
-- **全面改名为 looper（2026-10-14 定）**：命令、Python 包、数据目录（`~/.loopx` → `~/.looper`，自动迁移）、环境变量（`LOOPX_*` → `LOOPER_*`，旧名作为回退）、界面与文档统一改名；`loopx` 命令保留为别名过渡一个版本。改名是机械改动且触及几乎所有文件，**排在当前这批 PR 合入之后、M9b/M9c 开工之前**，单独一个 PR，期间不开其他分支；README 与控制台首屏的改动先请维护者预览。
+- **全面改名为 looper（2026-10-14 定，✅ 已交付 looper #64）**：命令、Python 包、数据目录（`~/.loopx` → `~/.looper`，自动迁移）、环境变量（`LOOPX_*` → `LOOPER_*`，旧名作为回退）、界面与文档统一改名；`loopx` 命令保留为别名过渡一个版本。改名是机械改动且触及几乎所有文件，**排在当前这批 PR 合入之后、M9b/M9c 开工之前**，单独一个 PR，期间不开其他分支；README 与控制台首屏的改动先请维护者预览（本次改名维护者已免除预览）。默认库名 `loopx`、发布 tag 与历史、NOTICE 对上游 LoopX 的署名不改。
 
 ### 5.3 非核心待办（M6 之后统一做）
 
