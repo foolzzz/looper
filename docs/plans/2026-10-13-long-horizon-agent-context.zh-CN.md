@@ -282,7 +282,7 @@
 | 2026-10-13 | M5 交付（looper #37）：项目执行配置，只做核心。`projects` 新增六个可空字段（模型、单次运行上限 `--max-budget-usd`、任务累计上限及到达后的处理方式、Planner 监督间隔、验收策略），未设置时行为与 main 一致，经项目 GET/PUT 和项目编辑读写，非法值返回 400。验证：fork 测试集加新测试在真实 PG 上 916 通过，真实 Claude 只用于核实 `--max-budget-usd`（约 $0.013）。 |
 | 2026-10-13 | 第一批非核心待办（looper #41，第 5.3 节前两项）：网页聊天打开时，Manager 的 Claude 自主一轮的回复经 `GET /api/chat/events?session=` 实时推送并作为单独一条消息显示；任务 config 按 JSON 对象写入和返回，已按字符串存下的行读回为对象，非对象返回 400。界面：Tasks 列表内边距、返回按钮的可访问名称、1024 px 以下侧栏收成抽屉、新建任务时新项目的背景输入框；验证为通道层测试、真实 PG 测试和无头 Chrome 检查与截图 |
 | 2026-10-13 | 第 5.2 节工程待办（looper #42）：知识索引每个目录写一次、每篇只带相对路径（已核实 Claude Code 只按工作目录解析相对路径），短文档能放满 100 篇；`loopx serve` 启动时回收当前内容不用、也没有运行中进程挂载的只读副本；请求体上限 8 MiB（超限 413）；删除 `agent_configs.permission_mode` 列。验证：真实 haiku 下 Worker 按新索引读到两篇文档（$0.07），回归评测 5/5（$0.33），真实 PG 758 通过。 |
-| 2026-10-13 | 第 5.3 节项目页与知识、skill 辅助功能（looper #PR）：侧栏点项目打开 `#projects/<id>`，有 Overview、Knowledge、Skills、Settings 四个标签，取代 Tasks 页里的项目编辑；知识文档和项目 skill 可展开看正文、就地修改，拖入文件新增文档，上传或拖入 `SKILL.md` 按 frontmatter 填好名称、描述和正文，新增 `GET .../knowledge/<doc_id>`、`GET .../skills/<skill_id>` 返回正文；历史页列出运行加载的项目 skill，Agents 页去掉 `permission_mode` 和 Sandbox 下拉框。验证：真实 PG 测试，无头 Chrome 在一次性服务上完成各标签的读写与拖放并截图。 |
+| 2026-10-13 | 第 5.3 节项目页与知识、skill 辅助功能（looper #44）：侧栏点项目打开 `#projects/<id>`，有 Overview、Knowledge、Skills、Settings 四个标签，取代 Tasks 页里的项目编辑；知识文档和项目 skill 可展开看正文、就地修改，拖入文件新增文档，上传或拖入 `SKILL.md` 按 frontmatter 填好名称、描述和正文，新增 `GET .../knowledge/<doc_id>`、`GET .../skills/<skill_id>` 返回正文；历史页列出运行加载的项目 skill，Agents 页去掉 `permission_mode` 和 Sandbox 下拉框。验证：真实 PG 测试，无头 Chrome 在一次性服务上完成各标签的读写与拖放并截图。 |
 
 ## 5. 不属于本 RFC 的待办
 
