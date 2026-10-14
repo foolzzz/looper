@@ -20,8 +20,9 @@ does the dispatching. An accepted step gets an entry in the task journal
 (``journal``) with its summary and its agents' learnings; the Planner's
 DECISION, SUPERVISE and CHAT turns and each Worker's first turn carry the
 journal back, and a project with ``distill_lessons`` gets one LESSONS turn when
-a task completes, saved as a project knowledge document. The plan, its steps and the Planner's Claude session
-live in PostgreSQL (``plans``, ``agent_sessions``), written as they change; a
+a task completes, saved as a project knowledge document. The plan, its steps,
+its journal and the Planner's Claude session live in PostgreSQL (``plans``,
+``agent_sessions``), written as they change; a
 Planner started after the server restarted reads them back and carries on
 (TASK_RESUME) without planning again. The system prompt is rebuilt for every turn from the
 harness (the project's Planner override, else the default in Settings), the
