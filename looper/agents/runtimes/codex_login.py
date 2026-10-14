@@ -53,8 +53,6 @@ SHELL_HOME = "shell-home"
 CONFIG_MARKER = 'cli_auth_credentials_store = "file"'
 # The system_settings key of the recorded problem: {"detail", "at"}.
 FORK_KEY = "codex_login_fork"
-# The built-in provider of the login (db/schema.sql).
-PROVIDER_ID = "prov-codex-login"
 # The models a ChatGPT login offers in Codex 0.162.0, its default first, as the Agent Profile form suggests them.
 # Each has a built-in price (``pricing.BUILTIN_PRICES``), so its runs show an equivalent cost.
 SUGGESTED_MODELS = ("gpt-6.1-sol", "gpt-6-sol", "gpt-6-astra", "gpt-6-luna", "gpt-5.6-sol", "gpt-5.6-terra",
