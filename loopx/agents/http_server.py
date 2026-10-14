@@ -18,7 +18,9 @@ from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
-from . import agent_settings, catalog, catalog_sources, knowledge, library, project_skills, projects, request_guard
+from . import (
+    agent_settings, catalog, catalog_sources, knowledge, library, mcp, project_skills, projects, request_guard,
+)
 from .broadcast import Broadcaster
 from .chat_targets import ChatTargetError, list_chat_targets, resolve_chat_target
 from .project_execution import ProjectExecution
@@ -380,13 +382,17 @@ class AgentHTTPServer:
         elif path == "/api/catalog/skills" and method == "POST":
             await self._handle_catalog(writer, HTTP_201, lambda: catalog_sources.create_skill(
                 projects.json_object(body)))
+        elif path == "/api/catalog/mcp" and method == "POST":
+            await self._handle_catalog(writer, HTTP_201, lambda: mcp.create(projects.json_object(body)))
+        elif path == "/api/catalog/mcp/import" and method == "POST":
+            await self._handle_catalog(writer, HTTP_200, mcp.import_from_machine)
         elif (m := self._RE_CATALOG_ITEM.match(path)) and method == "GET":
             await self._handle_catalog(writer, HTTP_200, lambda: catalog.item_detail(m.group(1)))
         elif (m := self._RE_CATALOG_ITEM.match(path)) and method == "PUT":
-            await self._handle_catalog(writer, HTTP_200, lambda: catalog_sources.update_item(
+            await self._handle_catalog(writer, HTTP_200, lambda: catalog.update_item(
                 m.group(1), projects.json_object(body)))
         elif (m := self._RE_CATALOG_ITEM.match(path)) and method == "DELETE":
-            await self._handle_catalog(writer, HTTP_200, lambda: catalog_sources.delete_item(m.group(1)))
+            await self._handle_catalog(writer, HTTP_200, lambda: catalog.delete_item(m.group(1)))
         elif path == "/api/installs" and method == "POST":
             await self._handle_catalog(writer, HTTP_201, lambda: catalog.install(projects.json_object(body)))
         elif (m := self._RE_INSTALL.match(path)) and method == "PUT":

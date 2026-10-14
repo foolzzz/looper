@@ -2,10 +2,12 @@
 
 Acquiring and installing are separate. **Acquiring** puts an item into the
 catalog (``library_items``): imported from this machine
-(``library.import_from_machine``), uploaded, taken from a git repository or
-written in Settings (``catalog_sources``), or written in a project
-(``project_skills``); its ``origin`` says which (``Origin``). An item does
-nothing by itself. **Installing** puts it on a scope (``library_installs``):
+(``library.import_from_machine``, ``mcp.import_from_machine``), uploaded or
+taken from a git repository (``catalog_sources``), added in Settings (an MCP
+server, ``mcp.create``; a skill, ``catalog_sources.create_skill``) or written
+in a project (``project_skills``); its ``origin`` says which (``Origin``). An
+item is a plugin, a skill or an MCP server (``mcp``), and does nothing by
+itself. **Installing** puts it on a scope (``library_installs``):
 ``global``, or one project, for some roles (``ROLES``). A project install never
 names the Manager, which spans every project, and a project's own skill is
 installed in projects only. Every agent run loads the enabled installs naming
@@ -33,7 +35,7 @@ class Scope(str, Enum):
 
 
 class Origin(str, Enum):
-    """How an item was acquired (``library``, ``catalog_sources``, ``project_skills``)."""
+    """How an item was acquired (``library``, ``mcp``, ``catalog_sources``, ``project_skills``)."""
 
     MACHINE = "machine"
     UPLOAD = "upload"
@@ -86,9 +88,12 @@ def _enabled(raw: Any) -> bool:
 
 
 def qualified_name(row: Mapping[str, Any]) -> str:
-    """How agents name the item: a plugin by its directory, a skill as ``<plugin>:<name>``."""
+    """How agents name the item: a plugin by its directory, a skill as ``<plugin>:<name>``, an MCP server by its
+    name (its tools are ``mcp__<name>__<tool>``)."""
     from .library import ItemKind, directory_name, skill_plugin
 
+    if row["kind"] == ItemKind.MCP.value:
+        return str(row["name"])
     if row["kind"] == ItemKind.PLUGIN.value:
         return directory_name(ItemKind.PLUGIN, row["name"])
     return f"{skill_plugin(row['origin'])}:{row['name']}"
@@ -109,7 +114,10 @@ def install_view(row: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def item_view(row: Mapping[str, Any], installs: Sequence[Mapping[str, Any]] = ()) -> dict[str, Any]:
-    """An item without its files, and where it is installed."""
+    """An item without its files, and where it is installed; an MCP server with its configuration, values
+    masked."""
+    from .mcp import public_view
+
     return {
         "item_id": row["id"],
         "kind": row["kind"],
@@ -127,6 +135,7 @@ def item_view(row: Mapping[str, Any], installs: Sequence[Mapping[str, Any]] = ()
         "modified": bool(row["modified"]),
         "imported_at": row["imported_at"],
         "updated_at": row["updated_at"],
+        "mcp": public_view(row) if row["kind"] == "mcp" else None,
         "installs": [install_view(install) for install in installs],
     }
 
@@ -145,6 +154,7 @@ async def catalog_view() -> dict[str, Any]:
     """Every item with its installs, the last import's report and the caps."""
     from ..db import library as db_library
     from ..db import system_settings
+    from . import mcp
     from .library import (
         FILE_MAX_BYTES, ITEM_MAX_BYTES, ITEM_MAX_FILES, LAST_IMPORT_KEY, LIBRARY_MAX_BYTES,
     )
@@ -154,23 +164,65 @@ async def catalog_view() -> dict[str, Any]:
     by_item: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for install in await db_library.list_installs():
         by_item[install["item_id"]].append(install)
-    stored = await system_settings.get_settings([LAST_IMPORT_KEY])
-    try:
-        last_import = json.loads(stored[LAST_IMPORT_KEY]) if LAST_IMPORT_KEY in stored else None
-    except ValueError:
-        last_import = None
+    stored = await system_settings.get_settings([LAST_IMPORT_KEY, mcp.LAST_IMPORT_KEY])
+
+    def report(key: str) -> Any:
+        try:
+            return json.loads(stored[key]) if key in stored else None
+        except ValueError:
+            return None
     return {
         "items": [item_view(row, by_item.get(row["id"], ())) for row in rows],
         "installed_count": sum(1 for row in rows if by_item.get(row["id"])),
         "total_bytes": sum(int(row["size_bytes"]) for row in rows),
-        "last_import": last_import,
+        "last_import": report(LAST_IMPORT_KEY),
+        "last_mcp_import": report(mcp.LAST_IMPORT_KEY),
         "roles": list(ROLES),
         "task_roles": list(TASK_ROLES),
         "caps": {
             "file_max_bytes": FILE_MAX_BYTES, "item_max_bytes": ITEM_MAX_BYTES, "item_max_files": ITEM_MAX_FILES,
             "library_max_bytes": LIBRARY_MAX_BYTES, "upload_max_bytes": UPLOAD_MAX_BYTES,
         },
+        "mcp_caps": {
+            "servers_max": mcp.SERVERS_MAX, "variables_max": mcp.VARIABLES_MAX, "value_max": mcp.VALUE_MAX,
+            "args_max": mcp.ARGS_MAX, "mask": mcp.MASK,
+        },
     }
+
+
+async def update_item(item_id: str, data: Any) -> dict[str, Any]:
+    """Change an item: an MCP server (``mcp.update``), or a skill written in Settings, uploaded or taken from git
+    (``catalog_sources.update_item``)."""
+    from ..db import library as db_library
+
+    row = await db_library.get_item(item_id)
+    if row is None:
+        raise CatalogNotFound(f"no catalog item {item_id!r}")
+    if row["kind"] == "mcp":
+        from .mcp import update
+
+        return await update(item_id, data)
+    from .catalog_sources import update_item as update_source
+
+    return await update_source(item_id, data)
+
+
+async def delete_item(item_id: str) -> dict[str, Any]:
+    """Remove an item from the catalog with its installs. A project's own skill goes through its project.
+
+    An imported plugin, skill or MCP server comes back, installed nowhere, if
+    a later import still finds it.
+    """
+    from ..db import library as db_library
+
+    row = await db_library.get_item(item_id)
+    if row is None:
+        raise CatalogNotFound(f"no catalog item {item_id!r}")
+    if row["origin"] == Origin.PROJECT.value:
+        raise CatalogError("a project's own skill is deleted from its project's Skills tab")
+    if not await db_library.delete_item(item_id):
+        raise CatalogNotFound(f"no catalog item {item_id!r}")
+    return {"deleted": item_id}
 
 
 async def item_detail(item_id: str) -> dict[str, Any]:

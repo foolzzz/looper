@@ -8,6 +8,7 @@ install may be; this module stores and reads them.
 
 from __future__ import annotations
 
+import json
 import uuid
 from collections.abc import Mapping, Sequence
 from typing import Any
@@ -16,11 +17,17 @@ import asyncpg
 
 from .connection import get_pool
 
+# An MCP server's configuration comes with its item, but of its environment and headers only the names: the
+# values are secrets and are read by get_mcp_server(s) alone.
 _ITEM_COLUMNS = (
     "i.id, i.kind, i.name, i.origin, i.owner_project_id, p.name AS owner_project_name, i.description, i.source, "
-    "i.version, i.sha256, i.size_bytes, i.file_count, i.modified, i.imported_at, i.updated_at"
+    "i.version, i.sha256, i.size_bytes, i.file_count, i.modified, i.imported_at, i.updated_at, "
+    "m.transport AS mcp_transport, m.command AS mcp_command, m.args AS mcp_args, m.url AS mcp_url, "
+    "ARRAY(SELECT k FROM jsonb_object_keys(m.env) k ORDER BY k COLLATE \"C\") AS mcp_env_keys, "
+    "ARRAY(SELECT k FROM jsonb_object_keys(m.headers) k ORDER BY k COLLATE \"C\") AS mcp_header_keys"
 )
-_ITEMS = "library_items i LEFT JOIN projects p ON p.id = i.owner_project_id"
+_ITEMS = ("library_items i LEFT JOIN projects p ON p.id = i.owner_project_id "
+          "LEFT JOIN library_mcp_servers m ON m.item_id = i.id")
 _INSTALL_COLUMNS = (
     "s.id, s.item_id, s.scope, s.project_id, p.name AS project_name, s.roles, s.enabled, s.created_at, s.updated_at"
 )
@@ -90,7 +97,8 @@ async def delete_item(item_id: str, *, pool: Executor | None = None) -> bool:
 async def replace_snapshot(
     items: Sequence[Mapping[str, Any]], *, pool: asyncpg.Pool | None = None,
 ) -> dict[str, Any]:
-    """Make the items imported from this machine (origin ``machine``) exactly ``items``, in one transaction.
+    """Make the plugins and skills imported from this machine (origin ``machine``) exactly ``items``, in one
+    transaction.
 
     Each item gives ``kind``, ``name``, ``source``, ``version``, ``sha256``,
     ``size_bytes``, ``file_count`` and ``files`` (``path``, ``content``,
@@ -98,7 +106,8 @@ async def replace_snapshot(
     whose ``sha256`` changed gets its new files and keeps its id and its
     installs; an unchanged one keeps its files (its source and version labels
     are refreshed); an item that is no longer given is removed with its files
-    and installs. Items of any other origin are left alone. Returns the
+    and installs. Items of any other origin, and MCP servers
+    (``replace_mcp_snapshot``), are left alone. Returns the
     ``added``, ``updated`` and ``removed`` items as ``kind:name`` labels and the
     ``unchanged`` count.
     """
@@ -110,7 +119,7 @@ async def replace_snapshot(
         existing = {
             (row["kind"], row["name"]): dict(row)
             for row in await conn.fetch(
-                "SELECT id, kind, name, sha256 FROM library_items WHERE origin = 'machine' FOR UPDATE"
+                "SELECT id, kind, name, sha256 FROM library_items WHERE origin = 'machine' AND kind <> 'mcp' FOR UPDATE"
             )
         }
         given = set()
@@ -217,6 +226,135 @@ async def catalog_bytes(*, pool: Executor | None = None) -> int:
     """The size of every item in the catalog."""
     pool = pool or get_pool()
     return int(await pool.fetchval("SELECT COALESCE(sum(size_bytes), 0) FROM library_items"))
+
+
+# --- MCP servers: an item of kind 'mcp' and its library_mcp_servers row ---
+
+
+def _jsonb(mapping: Mapping[str, str]) -> str:
+    return json.dumps(dict(mapping), ensure_ascii=False, sort_keys=True)
+
+
+async def insert_mcp(
+    conn: asyncpg.Connection, *, item_id: str, name: str, description: str, origin: str, source: str,
+    server: Mapping[str, Any], sha256: str, size_bytes: int,
+) -> None:
+    """Add an MCP server (``server`` holds the ``library_mcp_servers`` columns), installed nowhere.
+
+    Raises ``asyncpg.UniqueViolationError`` when the name is taken.
+    """
+    await conn.execute(
+        "INSERT INTO library_items (id, kind, name, source, version, sha256, size_bytes, file_count, origin, "
+        "description) VALUES ($1, 'mcp', $2, $3, '', $4, $5, 0, $6, $7)",
+        item_id, name, source, sha256, size_bytes, origin, description,
+    )
+    await conn.execute(
+        "INSERT INTO library_mcp_servers (item_id, transport, command, args, env, url, headers) "
+        "VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7::jsonb)",
+        item_id, server["transport"], server["command"], list(server["args"]), _jsonb(server["env"]),
+        server["url"], _jsonb(server["headers"]),
+    )
+
+
+async def update_mcp(
+    conn: asyncpg.Connection, item_id: str, *, name: str, description: str, server: Mapping[str, Any],
+    sha256: str, size_bytes: int, source: str | None = None,
+) -> None:
+    """Replace an MCP server's name, description and configuration; ``source`` too when given."""
+    await conn.execute(
+        "UPDATE library_items SET name = $2, description = $3, sha256 = $4, size_bytes = $5, "
+        "source = COALESCE($6, source), updated_at = now() WHERE id = $1",
+        item_id, name, description, sha256, size_bytes, source,
+    )
+    await conn.execute(
+        "UPDATE library_mcp_servers SET transport = $2, command = $3, args = $4, env = $5::jsonb, url = $6, "
+        "headers = $7::jsonb WHERE item_id = $1",
+        item_id, server["transport"], server["command"], list(server["args"]), _jsonb(server["env"]),
+        server["url"], _jsonb(server["headers"]),
+    )
+
+
+_MCP_COLUMNS = ("i.id, i.name, i.description, i.origin, i.sha256, m.transport, m.command, m.args, m.env, m.url, "
+                "m.headers")
+
+
+async def get_mcp_server(
+    item_id: str, *, pool: Executor | None = None, for_update: bool = False,
+) -> dict[str, Any] | None:
+    """An MCP server's item and whole configuration, values included; None when it is not one."""
+    pool = pool or get_pool()
+    row = await pool.fetchrow(
+        f"SELECT {_MCP_COLUMNS} FROM library_items i JOIN library_mcp_servers m ON m.item_id = i.id "
+        f"WHERE i.id = $1{' FOR UPDATE OF i, m' if for_update else ''}", item_id,
+    )
+    return dict(row) if row is not None else None
+
+
+async def get_mcp_servers(item_ids: Sequence[str], *, pool: Executor | None = None) -> dict[str, dict[str, Any]]:
+    """The whole configuration of each MCP server in ``item_ids``, values included, by item id."""
+    pool = pool or get_pool()
+    rows = await pool.fetch(
+        f"SELECT {_MCP_COLUMNS} FROM library_items i JOIN library_mcp_servers m ON m.item_id = i.id "
+        "WHERE i.id = ANY($1::text[])", list(item_ids),
+    )
+    return {row["id"]: dict(row) for row in rows}
+
+
+async def replace_mcp_snapshot(
+    servers: Sequence[Mapping[str, Any]], *, servers_max: int, pool: asyncpg.Pool | None = None,
+) -> dict[str, Any]:
+    """Make the MCP servers imported from this machine exactly ``servers``, in one transaction.
+
+    Each gives ``name``, ``source``, ``server`` (the ``library_mcp_servers``
+    columns), ``sha256`` and ``size_bytes``. A new one is added, installed
+    nowhere; a changed one gets its new configuration and keeps its id, its
+    description and its installs; one no longer given is removed with its
+    installs. A server added here (another origin) keeps its name: an
+    imported one of that name is not imported (``taken``). Raises
+    ``CatalogError`` when the catalog would hold more than ``servers_max``.
+    """
+    from ..agents.catalog import CatalogError
+
+    pool = pool or get_pool()
+    added: list[str] = []
+    updated: list[str] = []
+    taken: list[str] = []
+    unchanged = 0
+    async with pool.acquire() as conn, conn.transaction():
+        await conn.execute("SELECT pg_advisory_xact_lock(hashtext('loopx.catalog.mcp'))")
+        rows = await conn.fetch(f"SELECT {_MCP_COLUMNS} FROM library_items i JOIN library_mcp_servers m "
+                                "ON m.item_id = i.id FOR UPDATE OF i, m")
+        existing = {row["name"]: dict(row) for row in rows if row["origin"] == "machine"}
+        others = {row["name"] for row in rows if row["origin"] != "machine"}
+        given = set()
+        for entry in servers:
+            name = entry["name"]
+            if name in others:
+                taken.append(name)
+                continue
+            given.add(name)
+            current = existing.get(name)
+            if current is None:
+                await insert_mcp(conn, item_id=f"mcp-{uuid.uuid4().hex[:12]}", name=name, description="",
+                                 origin="machine", source=entry["source"], server=entry["server"],
+                                 sha256=entry["sha256"], size_bytes=entry["size_bytes"])
+                added.append(f"mcp:{name}")
+            elif current["sha256"] != entry["sha256"]:
+                await update_mcp(conn, current["id"], name=name, description=current["description"],
+                                 server=entry["server"], sha256=entry["sha256"], size_bytes=entry["size_bytes"],
+                                 source=entry["source"])
+                updated.append(f"mcp:{name}")
+            else:
+                unchanged += 1
+        removed = sorted(name for name in existing if name not in given)
+        if removed:
+            await conn.execute("DELETE FROM library_items WHERE id = ANY($1::text[])",
+                               [existing[name]["id"] for name in removed])
+        if len(others) + len(given) > servers_max:
+            raise CatalogError(f"the catalog would hold {len(others) + len(given)} MCP servers, over its cap of "
+                               f"{servers_max}; nothing was imported")
+    return {"added": added, "updated": updated, "removed": [f"mcp:{name}" for name in removed],
+            "unchanged": unchanged, "taken": taken}
 
 
 # --- Project-authored skills: an item owned by a project, with one file, SKILL.md ---

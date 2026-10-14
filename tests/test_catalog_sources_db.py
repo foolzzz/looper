@@ -552,9 +552,8 @@ def test_editing_an_uploaded_skill_keeps_its_other_files_and_marks_it_modified_a
         plugin = (await _upload("p.zip", _zip({".claude-plugin/plugin.json": '{"name": "p"}'})))[1]["item"]
         refusals = [
             (ids["mine"], "PUT", "not edited here: they follow its Claude Code configuration"),
-            (ids["mine"], "DELETE", "not deleted here"),
             (own["skill"]["skill_id"], "PUT", "edited in its project's Skills tab"),
-            (own["skill"]["skill_id"], "DELETE", "deleted in its project's Skills tab"),
+            (own["skill"]["skill_id"], "DELETE", "deleted from its project's Skills tab"),
             (plugin["item_id"], "PUT", "a plugin is not edited here"),
         ]
         for item_id, method, reason in refusals:

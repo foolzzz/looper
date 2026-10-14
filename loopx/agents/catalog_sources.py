@@ -18,14 +18,15 @@ installs anything; an item loads only where it is installed (``catalog``).
 - **Settings** (``create_skill``, ``POST /api/catalog/skills``): a skill
   written in the UI. Origin ``ui``.
 
-**Edits** (``update_item``, ``PUT /api/catalog/<id>``): a skill written in
+**Edits** (``update_item``, ``PUT /api/catalog/<id>`` through
+``catalog.update_item``): a skill written in
 Settings, uploaded or taken from git can be renamed and have its description
 and the body of its ``SKILL.md`` changed; an uploaded or git skill is then
 marked ``modified`` (re-importing it from its repository replaces the edit).
 Items imported from this machine change only by re-importing it (an edit
 would be overwritten by the next import), a project's own skills in their
-project, and plugins by uploading or importing them again. ``delete_item``
-removes an uploaded, git or Settings item together with its installs.
+project, and plugins by uploading or importing them again. Any item but a
+project's own skill is deleted with ``catalog.delete_item``.
 
 **Names**: a name is a lowercase slug, unique per kind among the items
 outside projects. A clash is refused (409) and the request can give another
@@ -330,7 +331,7 @@ def _held_by(row: Mapping[str, Any]) -> str:
     if origin == Origin.GIT.value:
         return f"imported from {_url_of(row['source'])}"
     return {Origin.MACHINE.value: "imported from this machine", Origin.UPLOAD.value: "uploaded",
-            Origin.UI.value: "written in Settings"}.get(origin, origin)
+            Origin.UI.value: "added in Settings"}.get(origin, origin)
 
 
 def _taken(kind: str, name: str, row: Mapping[str, Any]) -> str:
@@ -958,13 +959,13 @@ async def create_skill(data: Any) -> dict[str, Any]:
     return {"item": stored["items"][0]}
 
 
-def _not_editable(row: Mapping[str, Any], what: str) -> CatalogError | None:
+def _not_editable(row: Mapping[str, Any]) -> CatalogError | None:
     origin = row["origin"]
     if origin == Origin.MACHINE.value:
-        return CatalogError(f"items imported from this machine are not {what} here: they follow its Claude Code "
+        return CatalogError("items imported from this machine are not edited here: they follow its Claude Code "
                             "configuration and change on the next re-import")
     if origin == Origin.PROJECT.value:
-        return CatalogError(f"a project's own skill is {what} in its project's Skills tab")
+        return CatalogError("a project's own skill is edited in its project's Skills tab")
     return None
 
 
@@ -991,7 +992,7 @@ async def update_item(item_id: str, data: Any) -> dict[str, Any]:
                 raise CatalogNotFound(f"no catalog item {item_id!r}")
             row = await db_library.get_item(item_id, pool=conn)
             assert row is not None
-            if (refusal := _not_editable(row, "edited")) is not None:
+            if (refusal := _not_editable(row)) is not None:
                 raise refusal
             if row["kind"] != ItemKind.SKILL.value:
                 raise CatalogError("a plugin is not edited here: upload it or import it from git again")
@@ -1019,17 +1020,3 @@ async def update_item(item_id: str, data: Any) -> dict[str, Any]:
         raise CatalogConflict(f"another request took the name {fields.get('name')!r} just now") from None
     installs = await _installs([item_id])
     return {"item": item_view(row, installs.get(item_id, ()))}
-
-
-async def delete_item(item_id: str) -> dict[str, Any]:
-    """Remove an uploaded, git or Settings item from the catalog, with its installs."""
-    from ..db import library as db_library
-
-    row = await db_library.get_item(item_id)
-    if row is None:
-        raise CatalogNotFound(f"no catalog item {item_id!r}")
-    if (refusal := _not_editable(row, "deleted")) is not None:
-        raise refusal
-    if not await db_library.delete_item(item_id):
-        raise CatalogNotFound(f"no catalog item {item_id!r}")
-    return {"deleted": item_id}

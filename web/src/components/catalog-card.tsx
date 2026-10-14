@@ -2,6 +2,7 @@ import { useEffect, useId, useState } from "react";
 import { ChevronDown, ChevronRight, Download, Loader2, RefreshCw } from "lucide-react";
 import { CatalogSources, SkillForm } from "@/components/catalog-sources";
 import { OriginTag, RoleChecks } from "@/components/install-controls";
+import { McpItemActions, McpSummary, McpToolbar } from "@/components/mcp-servers";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -23,6 +24,7 @@ import { formatBytes } from "@/lib/utils";
 const GROUPS: { kind: LibraryKind; title: string }[] = [
   { kind: "plugin", title: "Plugins" },
   { kind: "skill", title: "Skills" },
+  { kind: "mcp", title: "MCP servers" },
 ];
 
 const errorText = (err: unknown) => (err instanceof Error ? err.message : String(err));
@@ -52,8 +54,9 @@ function ItemRow({
   error,
   fileMaxBytes,
   onChange,
+  mask,
   onReplace,
-  onDelete,
+  onRemove,
 }: {
   item: CatalogItem;
   roles: AgentRole[];
@@ -61,14 +64,29 @@ function ItemRow({
   error: string | undefined;
   fileMaxBytes: number;
   onChange: (request: () => Promise<{ item: CatalogItem }>) => void;
+  mask: string;
   onReplace: (item: CatalogItem) => void;
-  onDelete: () => void;
+  onRemove: () => void;
 }) {
   const [editing, setEditing] = useState(false);
   const [confirming, setConfirming] = useState(false);
+  const [removing, setRemoving] = useState(false);
+  const [removeError, setRemoveError] = useState("");
   const global = item.installs.find((install) => install.scope === "global");
   const where = installSummary(item.installs);
-  const own = OWN_ORIGINS.has(item.origin);
+  const own = OWN_ORIGINS.has(item.origin) && item.kind !== "mcp";
+  const remove = async () => {
+    setConfirming(false);
+    setRemoving(true);
+    setRemoveError("");
+    try {
+      await deleteCatalogItem(item.item_id);
+      onRemove();
+    } catch (err) {
+      setRemoveError(errorText(err));
+      setRemoving(false);
+    }
+  };
   return (
     <li className="space-y-1 border-t border-border px-5 py-2">
       <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
@@ -79,6 +97,7 @@ function ItemRow({
         <OriginTag item={item} />
         <span className="ml-auto text-[11px] tabular-nums text-muted-foreground">{formatBytes(item.size_bytes)}</span>
       </div>
+      <McpSummary item={item} />
       <p className="break-words text-[11px] text-muted-foreground">
         {where.length ? where.join(" · ") : "Installed nowhere"}
       </p>
@@ -128,7 +147,7 @@ function ItemRow({
               Edit
             </Button>
           )}
-          <Button type="button" variant="ghost" size="sm" disabled={busy} onClick={() => setConfirming(true)}
+          <Button type="button" variant="ghost" size="sm" disabled={busy || removing} onClick={() => setConfirming(true)}
                   aria-label={`Delete ${item.qualified_name}`}
                   className="text-muted-foreground hover:bg-destructive/10 hover:text-destructive">
             Delete
@@ -140,7 +159,7 @@ function ItemRow({
           <span className="text-xs text-muted-foreground">
             Delete it from the catalog{item.installs.length ? " and every place it is installed" : ""}?
           </span>
-          <Button type="button" variant="destructive" size="sm" disabled={busy} onClick={() => { setConfirming(false); onDelete(); }}>
+          <Button type="button" variant="destructive" size="sm" disabled={busy} onClick={() => void remove()}>
             Delete
           </Button>
           <Button type="button" variant="ghost" size="sm" onClick={() => setConfirming(false)}>Cancel</Button>
@@ -159,7 +178,8 @@ function ItemRow({
           />
         </div>
       )}
-      {error && <p role="alert" className="text-xs text-destructive">{error}</p>}
+      {item.kind === "mcp" && <McpItemActions item={item} mask={mask} onSaved={onReplace} onDeleted={onRemove} />}
+      {(error || removeError) && <p role="alert" className="text-xs text-destructive">{error || removeError}</p>}
     </li>
   );
 }
@@ -241,11 +261,16 @@ export function CatalogCard() {
     }
   };
 
-  /** Put an item the server answered with in its row. */
-  const replace = (item: CatalogItem) =>
+  /** Put an added or changed item in the list, or take a deleted one (`item` null) out of it. */
+  const replace = (itemId: string, item: CatalogItem | null) =>
     setCatalog((c) => {
       if (!c) return c;
-      const items = c.items.map((other) => (other.item_id === item.item_id ? item : other));
+      const kept = c.items.filter((other) => other.item_id !== itemId);
+      const items = item
+        ? c.items.some((other) => other.item_id === itemId)
+          ? c.items.map((other) => (other.item_id === itemId ? item : other))
+          : [...kept, item].sort((a, b) => a.kind.localeCompare(b.kind) || a.name.localeCompare(b.name))
+        : kept;
       return { ...c, items, installed_count: items.filter((other) => other.installs.length).length };
     });
 
@@ -258,7 +283,8 @@ export function CatalogCard() {
       return next;
     });
     try {
-      replace((await request()).item);
+      const { item } = await request();
+      replace(item.item_id, item);
     } catch (e) {
       setRowErrors((errors) => ({ ...errors, [itemId]: errorText(e) }));
     } finally {
@@ -283,7 +309,8 @@ export function CatalogCard() {
   }
 
   const empty = catalog.items.length === 0;
-  const imported = catalog.last_import != null || catalog.items.some((item) => item.origin === "machine");
+  const imported =
+    catalog.last_import != null || catalog.items.some((item) => item.origin === "machine" && item.kind !== "mcp");
   const needle = filter.trim().toLowerCase();
   const shown = needle
     ? catalog.items.filter((item) => item.qualified_name.toLowerCase().includes(needle))
@@ -318,12 +345,13 @@ export function CatalogCard() {
       <CatalogSources catalog={catalog} onAdded={() => void refresh()} />
       {error && <p role="alert" className="border-t border-border px-5 py-2 text-xs text-destructive">{error}</p>}
       {catalog.last_import && <ImportReport report={catalog.last_import} />}
+      <McpToolbar catalog={catalog} onCatalog={setCatalog} onAdded={(item) => replace(item.item_id, item)} />
       {!empty && (
         <>
           <div className="border-t border-border px-5 py-2">
             <Input
               id={`${id}-filter`}
-              aria-label="Filter plugins and skills"
+              aria-label="Filter plugins, skills and MCP servers"
               placeholder="Filter by name"
               value={filter}
               onChange={(e) => setFilter(e.target.value)}
@@ -349,15 +377,9 @@ export function CatalogCard() {
                         error={rowErrors[item.item_id]}
                         fileMaxBytes={catalog.caps.file_max_bytes}
                         onChange={(request) => void change(item.item_id, request)}
-                        onReplace={replace}
-                        onDelete={() =>
-                          void change(item.item_id, () =>
-                            deleteCatalogItem(item.item_id).then(() => {
-                              void refresh();
-                              return { item };
-                            }),
-                          )
-                        }
+                        mask={catalog.mcp_caps.mask}
+                        onReplace={(next) => replace(item.item_id, next)}
+                        onRemove={() => replace(item.item_id, null)}
                       />
                     ))}
                   </ul>
