@@ -4,8 +4,9 @@ import { ProjectDialog } from "@/components/project-dialog";
 import { useProjects } from "@/lib/use-projects";
 import { cn } from "@/lib/utils";
 
-/** "history" is an agent's session history; it is reached from a task or agent, not the nav. */
-export type Page = "dashboard" | "chat" | "tasks" | "agents" | "settings" | "history";
+/** "history" is an agent's session history, reached from a task or agent; "projects" is one project, from the
+ * sidebar's project list. */
+export type Page = "dashboard" | "chat" | "tasks" | "projects" | "agents" | "settings" | "history";
 
 const NAV_ITEMS: { page: Page; label: string; icon: React.ElementType }[] = [
   { page: "dashboard", label: "Dashboard", icon: LayoutDashboard },
@@ -17,7 +18,7 @@ const NAV_ITEMS: { page: Page; label: string; icon: React.ElementType }[] = [
 
 interface SidebarProps {
   activePage: Page;
-  /** The project the Tasks list is filtered by in the current route, if any. */
+  /** The project open in the current route (its page, or the Tasks list filtered by it), if any. */
   activeProjectId: string | null;
   onNavigate: (page: Page) => void;
   onOpenProject: (projectId: string) => void;

@@ -531,6 +531,34 @@ async def knowledge_view(project_id: str, runtime_root: Path) -> dict[str, Any]:
     return _view(runtime_root, project, await db_documents.list_documents(project_id))
 
 
+async def get_document(project_id: str, document_id: str, runtime_root: Path) -> dict[str, Any]:
+    """One document with its ``content``: stored for text and upload, the file as it is now for a path document.
+
+    ``content`` is None, with ``content_error`` saying why, when a path document's file is missing or not text.
+    """
+    from ..db import project_documents as db_documents
+    from ..db import projects as db_projects
+
+    project = await db_projects.get_project(project_id)
+    if project is None:
+        raise KnowledgeNotFound(f"project {project_id!r} not found")
+    rows = await db_documents.list_documents(project_id)
+    row = next((row for row in rows if row["id"] == document_id), None)
+    if row is None:
+        raise KnowledgeNotFound(f"project {project_id!r} has no document {document_id!r}")
+    view = document_view(stored_set(runtime_root, project_id, rows), project, row)
+    if SourceKind(row["source_kind"]) in STORED_KINDS:
+        return {"document": view, "content": await db_documents.get_content(document_id)}
+    live = _readable_project_file(str(project.get("work_dir") or ""), str(row["path"]))
+    if live is None:
+        return {"document": view, "content": None,
+                "content_error": f"{row['path']} is missing from the project's default directory"}
+    try:
+        return {"document": view, "content": text_from_bytes(live.read_bytes(), str(row["path"]))}
+    except (KnowledgeError, OSError) as exc:
+        return {"document": view, "content": None, "content_error": str(exc)}
+
+
 _COMMON_FIELDS = {"title", "summary"}
 _SOURCE_FIELDS = {
     SourceKind.TEXT: {"content"},

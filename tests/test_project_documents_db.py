@@ -171,6 +171,39 @@ def test_the_api_adds_lists_changes_and_deletes_documents(
     _run(_test, monkeypatch)
 
 
+def test_the_api_shows_one_document_with_its_body(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, project_dir: Path,
+) -> None:
+    from loopx.db import projects
+
+    async def _test(pool: Any) -> None:
+        project = await projects.create_project(name="calc", work_dir=str(project_dir), pool=pool)
+        other = await projects.create_project(name="other", pool=pool)
+        base = f"/api/projects/{project['id']}/knowledge"
+        _, text = await _call(tmp_path, "POST", base, {
+            "source_kind": "text", "title": "Glossary", "summary": "Terms", "content": "MARKER-ALPHA · 中文"})
+        _, path = await _call(tmp_path, "POST", base, {
+            "source_kind": "path", "title": "Runbook", "summary": "Deploys", "path": "docs/runbook.md"})
+        text_id, path_id = text["document"]["document_id"], path["document"]["document_id"]
+
+        status, shown = await _call(tmp_path, "GET", f"{base}/{text_id}")
+        assert status == 200
+        assert (shown["document"]["title"], shown["content"]) == ("Glossary", "MARKER-ALPHA · 中文")
+        # A path document shows its file as it is now.
+        (project_dir / "docs" / "runbook.md").write_text("Deploy with MARKER-DELTA.\n", encoding="utf-8")
+        status, shown = await _call(tmp_path, "GET", f"{base}/{path_id}")
+        assert (status, shown["content"]) == (200, "Deploy with MARKER-DELTA.\n")
+        (project_dir / "docs" / "runbook.md").unlink()
+        status, shown = await _call(tmp_path, "GET", f"{base}/{path_id}")
+        assert status == 200 and shown["content"] is None and shown["document"]["missing"]
+        assert "missing" in shown["content_error"]
+
+        assert (await _call(tmp_path, "GET", f"{base}/doc-nope"))[0] == 404
+        assert (await _call(tmp_path, "GET", f"/api/projects/{other['id']}/knowledge/{text_id}"))[0] == 404
+
+    _run(_test, monkeypatch)
+
+
 def test_concurrent_adds_cannot_both_pass_the_count_cap(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     from loopx.agents import knowledge
     from loopx.db import projects

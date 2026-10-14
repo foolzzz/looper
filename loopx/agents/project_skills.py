@@ -313,6 +313,16 @@ async def skills_view(project_id: str) -> dict[str, Any]:
     return _view(project_id, await db_skills.list_skills(project_id))
 
 
+async def get_skill(project_id: str, skill_id: str) -> dict[str, Any]:
+    """One skill with its ``content``, the ``SKILL.md`` body."""
+    from ..db import project_skills as db_skills
+
+    row = await db_skills.get_skill(project_id, skill_id)
+    if row is None:
+        raise ProjectSkillNotFound(f"project {project_id!r} has no skill {skill_id!r}")
+    return {"skill": skill_view(row), "content": row["content"]}
+
+
 def _fields(data: Any, *, adding: bool) -> dict[str, Any]:
     """The validated fields of a request; adding needs name, description and content."""
     if not isinstance(data, Mapping):

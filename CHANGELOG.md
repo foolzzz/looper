@@ -28,6 +28,18 @@ How the agent system works today is described in
   its saved plan and steps, its Planner resuming its Claude session instead of
   planning again; anything else gets a 400. The task page offers this as
   "Raise cap and continue".
+- **Project page.** Clicking a project in the sidebar opens `#projects/<id>`
+  with Overview, Knowledge, Skills and Settings tabs; it replaces the project
+  editor on the Tasks page, which now links to it. Overview shows the latest
+  tasks, the background, knowledge and skill summaries and the execution
+  settings that are set. Knowledge documents and project skills can be opened
+  to read their body and edited in place; a dropped file adds a document, and
+  an uploaded or dropped `SKILL.md` fills a new skill from its frontmatter and
+  body. `GET /api/projects/<id>/knowledge/<doc_id>` and
+  `GET /api/projects/<id>/skills/<skill_id>` return one item with its body.
+  The history page's Plugins & skills lists the project skills a run loaded,
+  and the Agents page no longer offers the removed `permission_mode` (the
+  codex-cli Sandbox dropdown).
 
 - **Reclaiming read-only copies.** `loopx serve` now removes, when it starts
   and before any agent launches, the content-hashed copies under the runtime
