@@ -5,12 +5,13 @@ import { ClaudeCheckBanner } from "@/components/claude-check-banner";
 import { DashboardPage } from "@/pages/dashboard";
 import { ChatPage } from "@/pages/chat";
 import { TasksPage } from "@/pages/tasks";
-import { AgentsPage } from "@/pages/agents";
+import { RunsPage } from "@/pages/runs";
 import { SettingsPage } from "@/pages/settings";
 import { AgentHistoryPage } from "@/pages/agent-history";
 import { ProjectPage } from "@/pages/project";
+import { DEFAULT_SETTINGS_PAGE, isSettingsPage, type SettingsPageId } from "@/lib/settings-pages";
 
-const PAGES = new Set<Page>(["dashboard", "chat", "tasks", "projects", "agents", "settings", "history"]);
+const PAGES = new Set<Page>(["dashboard", "chat", "tasks", "projects", "runs", "settings", "history"]);
 
 interface Route {
   page: Page;
@@ -20,8 +21,25 @@ interface Route {
   query: string;
 }
 
+/** Where the links from before the Settings pages and the Runs page go now (the hash without #). */
+function currentHash(raw: string): string {
+  // #agents/<id>[/sessions]: the role's runs.
+  const agents = /^agents(?:\/([^/?]+))?(?:\/sessions)?(\?.*)?$/.exec(raw);
+  if (agents) return `runs${agents[1] ? `/${agents[1]}` : ""}${agents[2] ?? ""}`;
+  const settings = /^settings(?:\/([^/?]*))?(?:\/([^?]*))?/.exec(raw);
+  if (!settings) return raw;
+  const [, page = "", rest = ""] = settings;
+  // The import's links from before: #settings/provider|mcp|channel/<id>.
+  const moved: Record<string, string> = { provider: "providers", mcp: "catalog/mcp", channel: "channels", defaults: "roles" };
+  if (page in moved) return `settings/${moved[page]}${rest ? `/${rest}` : ""}`;
+  return isSettingsPage(page) ? raw : `settings/${DEFAULT_SETTINGS_PAGE}`;
+}
+
 function readHash(): Route {
-  const raw = window.location.hash.replace(/^#\/?/, "");
+  const shown = window.location.hash.replace(/^#\/?/, "");
+  const raw = currentHash(shown);
+  // An old link is replaced in place, so Back does not return to it.
+  if (raw !== shown) window.history.replaceState(null, "", `#${raw}`);
   const cut = raw.search(/[/?]/);
   const pagePart = (cut >= 0 ? raw.slice(0, cut) : raw) as Page;
   const rest = cut >= 0 ? raw.slice(cut) : "";
@@ -62,6 +80,7 @@ function App() {
     <div className="flex h-screen w-screen overflow-hidden bg-background">
       <Sidebar
         activePage={route.page}
+        activeSettingsPage={route.page === "settings" ? (route.sub.split("/")[0] as SettingsPageId) : null}
         activeProjectId={
           route.page === "projects"
             ? route.sub.split("/")[0] || null
@@ -76,6 +95,10 @@ function App() {
         onOpenProject={(id) => {
           setNavOpen(false);
           navigateSub("projects", id);
+        }}
+        onOpenSettings={(id) => {
+          setNavOpen(false);
+          navigateSub("settings", id);
         }}
         open={navOpen}
         onClose={() => setNavOpen(false)}
@@ -123,11 +146,11 @@ function App() {
               />
             </div>
           )}
-          {route.page === "agents" && (
+          {route.page === "runs" && (
             <div className="h-full overflow-y-auto">
-              <AgentsPage
+              <RunsPage
                 sub={route.sub}
-                onNavigate={(sub) => navigateSub("agents", sub)}
+                onNavigate={(sub) => navigateSub("runs", sub)}
               />
             </div>
           )}
@@ -138,7 +161,7 @@ function App() {
           )}
           {route.page === "settings" && (
             <div className="h-full overflow-y-auto">
-              <SettingsPage />
+              <SettingsPage sub={route.sub} onNavigate={(sub) => navigateSub("settings", sub)} />
             </div>
           )}
         </main>
