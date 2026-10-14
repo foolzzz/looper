@@ -93,6 +93,11 @@ uv run loopx serve
 The schema is applied automatically on first startup. Telegram and Lark need
 no flags; turn them on from the Settings page (see [Channels](#channels)).
 
+Moving to a new machine: `uv run loopx config export loopx-config.json` writes
+the agent configuration to one file (secrets become placeholders;
+`--include-projects` adds projects), and `uv run loopx config import
+loopx-config.json` on the new machine previews it; add `--apply` to write it.
+
 ## Architecture
 
 ### Agent Tiers

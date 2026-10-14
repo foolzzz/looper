@@ -112,6 +112,22 @@ def test_version_loads_only_the_cli(tmp_path: Path, argv: list[str]) -> None:
     assert result["modules"] == ["loopx", "loopx.cli"]
 
 
+@pytest.mark.parametrize(
+    "argv",
+    [["config", "import", "missing.json"], ["config", "export", "out.json"]],
+    ids=["config-import", "config-export"],
+)
+def test_config_loads_no_upstream_modules(tmp_path: Path, argv: list[str]) -> None:
+    """``loopx config`` reports a missing file or an unreachable database as an error line and exits 1."""
+    env = {**os.environ, "LOOPX_DATABASE_URL": f"postgresql://127.0.0.1:{_closed_port()}/loopx"}
+
+    result, _, stderr = _run_loopx(*argv, cwd=tmp_path, env=env)
+
+    assert result["code"] == 1 and stderr.startswith("error: "), stderr
+    assert not (tmp_path / "out.json").exists()
+    assert not _upstream(result["modules"])
+
+
 @pytest.mark.parametrize("command", ["update", "init"])
 def test_removed_commands_are_rejected(tmp_path: Path, command: str) -> None:
     result, _, stderr = _run_loopx(command, "--help", cwd=tmp_path)

@@ -327,6 +327,11 @@ export async function setTaskProject(
  * Window event fired after this dashboard creates, edits or deletes a project,
  * or creates, moves or deletes a task, so project lists and counts reload at once.
  */
+/** The download of the whole configuration (``loopx config export``'s --include-projects and --include-secrets). */
+export function configExportUrl({ projects, secrets }: { projects: boolean; secrets: boolean }): string {
+  return `${API_BASE}/config/export?projects=${projects ? 1 : 0}&secrets=${secrets ? 1 : 0}`;
+}
+
 export const PROJECTS_CHANGED_EVENT = "loopx:projects-changed";
 
 function notifyProjectsChanged() {
