@@ -2,9 +2,9 @@
   "schema": "loopx-prompt-eval/v1",
   "mode": "real",
   "model": "haiku",
-  "started_at": "20261014T033917Z",
+  "started_at": "20261014T034606Z",
   "git": {
-    "commit": "3dc253394c3876570f5b1baf2b561ced63a206d0",
+    "commit": "c4055de29e3c2c5b541de892203f031032ac1088",
     "dirty": false
   },
   "caps": {
@@ -12,7 +12,7 @@
     "total_cap_usd": 0.8
   },
   "stopped_by_cap": false,
-  "total_cost_usd": 0.322404,
+  "total_cost_usd": 0.325379,
   "tasks": [
     {
       "id": "single_step",
@@ -27,10 +27,10 @@
         "plan": 1,
         "decision": 1
       },
-      "cost_usd": 0.045604,
+      "cost_usd": 0.041755,
       "cost_by_role": {
-        "planner": 0.023848,
-        "worker": 0.021756,
+        "planner": 0.021058,
+        "worker": 0.020697,
         "reviewer": 0.0
       },
       "runs": 3,
@@ -43,7 +43,7 @@
       "planner_edit_tool_paths": [],
       "planner_changed_files": [],
       "planner_modified_files": 0,
-      "duration_s": 28.2,
+      "duration_s": 24.2,
       "stopped_by_cap": false,
       "timed_out": false
     },
@@ -60,10 +60,10 @@
         "plan": 1,
         "decision": 2
       },
-      "cost_usd": 0.07037,
+      "cost_usd": 0.078883,
       "cost_by_role": {
-        "planner": 0.026657,
-        "worker": 0.043713,
+        "planner": 0.027668,
+        "worker": 0.051215,
         "reviewer": 0.0
       },
       "runs": 5,
@@ -76,7 +76,7 @@
       "planner_edit_tool_paths": [],
       "planner_changed_files": [],
       "planner_modified_files": 0,
-      "duration_s": 38.4,
+      "duration_s": 44.3,
       "stopped_by_cap": false,
       "timed_out": false
     },
@@ -93,11 +93,11 @@
         "plan": 1,
         "decision": 2
       },
-      "cost_usd": 0.070551,
+      "cost_usd": 0.0688,
       "cost_by_role": {
-        "planner": 0.029549,
-        "worker": 0.023023,
-        "reviewer": 0.017979
+        "planner": 0.027902,
+        "worker": 0.022006,
+        "reviewer": 0.018893
       },
       "runs": 5,
       "contract_violations": {
@@ -109,7 +109,7 @@
       "planner_edit_tool_paths": [],
       "planner_changed_files": [],
       "planner_modified_files": 0,
-      "duration_s": 44.4,
+      "duration_s": 40.3,
       "stopped_by_cap": false,
       "timed_out": false
     },
@@ -124,26 +124,25 @@
       "chat_turns": 0,
       "planner_turns": {
         "plan": 1,
-        "decision": 2,
-        "repair": 1
+        "decision": 2
       },
-      "cost_usd": 0.084665,
+      "cost_usd": 0.08598,
       "cost_by_role": {
-        "planner": 0.041487,
-        "worker": 0.043178,
+        "planner": 0.041317,
+        "worker": 0.044663,
         "reviewer": 0.0
       },
-      "runs": 6,
+      "runs": 5,
       "contract_violations": {
-        "planner": 1,
+        "planner": 0,
         "worker": 0,
         "reviewer": 0,
-        "total": 1
+        "total": 0
       },
       "planner_edit_tool_paths": [],
       "planner_changed_files": [],
       "planner_modified_files": 0,
-      "duration_s": 62.5,
+      "duration_s": 64.5,
       "stopped_by_cap": false,
       "timed_out": false
     },
@@ -161,10 +160,10 @@
         "chat": 1,
         "decision": 1
       },
-      "cost_usd": 0.051214,
+      "cost_usd": 0.049961,
       "cost_by_role": {
-        "planner": 0.024945,
-        "worker": 0.026269,
+        "planner": 0.024821,
+        "worker": 0.02514,
         "reviewer": 0.0
       },
       "runs": 4,
@@ -177,7 +176,7 @@
       "planner_edit_tool_paths": [],
       "planner_changed_files": [],
       "planner_modified_files": 0,
-      "duration_s": 26.2,
+      "duration_s": 24.2,
       "stopped_by_cap": false,
       "timed_out": false
     }
