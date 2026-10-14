@@ -445,14 +445,41 @@ Settings and selected per role ([next section](#harness-agent-and-environment)).
   event, which another adapter translates into), summarizes a tool call for
   the task's activity, prices a run (`cost`, with its `CostSource`) and says
   why a run stopped at its cap. `ClaudeCodeRuntime` (`claude-code`) is the
-  only type: the command layouts moved out of the tiers unchanged, the
+  first type: the command layouts moved out of the tiers unchanged, the
   process mechanics stay in `claude_cli.py`, and the catalog and knowledge
-  are still materialized in Claude Code's plugin format by
-  `library.load_installed` and `knowledge.load_knowledge`. Capabilities:
+  are materialized in Claude Code's plugin format by
+  `library.load_installed` and `knowledge.load_knowledge`. `CodexRuntime`
+  (`codex`, below) translates them at launch. Capabilities:
   `run`, `resident_session`, `resume`, `structured_output`,
   `claude_plugins`, `mcp`, `add_dirs`, `compaction_events`,
   `autonomous_turns`, `cost_report` (Claude Code has all but
-  `structured_output`).
+  `structured_output`; Codex has `run`, `resident_session`, `resume`,
+  `structured_output`, `mcp` and `add_dirs`).
+- **Codex** (`looper/agents/runtimes/codex.py`, verified against Codex CLI
+  0.162.0 in the RFC's section 6) runs `codex exec --json` with API key
+  providers that serve `openai-responses`. Each process gets a `CODEX_HOME`
+  of Looper's own under `<runtime_root>/.local/codex`, named on its command
+  line (`env CODEX_HOME=... codex exec ...`) and holding only the generated
+  `config.toml` (the provider as `[model_providers.looper]`, its key only in
+  the `LOOPER_PROVIDER_API_KEY` variable, which shell commands do not get;
+  the run's MCP servers as `[mcp_servers.<name>]`, stdio and HTTP; Codex's
+  own skill list and plugin sync off) and `AGENTS.md`: a short block of
+  Codex runtime notes, then the system prompt. The operator's `~/.codex` is
+  never read. A Worker or Reviewer is one `--ephemeral` process with its
+  prompt on stdin, which then closes: it cannot be steered while it runs.
+  The Manager and a Planner run one process per turn that resumes the
+  session (`exec ... resume <thread> -`, `ResidentCodex`), in a home of their
+  own (`codex/sessions/manager`, `codex/sessions/planner-<task_id>`) whose
+  `config.toml` and `AGENTS.md` are refreshed before each turn, so a changed
+  prompt reaches a resumed session. Skills are mounted read-only
+  (`--add-dir`) and listed in the runtime notes for the agent to read; a
+  plugin's hooks, commands and agents, and SSE MCP servers, are left out and
+  named in the run's `metadata.runtime_catalog`. Codex reports tokens only,
+  as the session's running totals at the end of each turn; it reports no
+  compaction and runs no turn of its own. Run homes (`codex/runs/<sha256>`)
+  that nothing has written to for a day are removed when a new one is
+  written. `looper serve` registers the read-only runtime `codex`
+  (`rt-codex`) when `codex` is on its PATH.
 - **Runtimes** (`agent_runtimes`) are registered instances of a type: a name,
   an `executable` (`''` = the type's default; for Claude Code the server's
   configured `claude`) and what its last probe found (`version`,
@@ -476,7 +503,7 @@ agent `claude-code/opus` (`BUILTIN_AGENT`), which a role runs when nothing
 selects another. An agent is refused when it is created or changed if its
 runtime and provider share no protocol, an OAuth provider is paired with
 another runtime type, the runtime cannot take that kind of provider yet
-(Claude Code takes its own login only), or the provider lists models and not
+(Claude Code takes its own login only, Codex API keys only), or the provider lists models and not
 this one; a provider change that would break one of its agents is refused
 too. Wherever it is selected (a layer, a task override), its runtime must
 have what each role reached needs (`ROLE_CAPABILITIES`): `resident_session`
