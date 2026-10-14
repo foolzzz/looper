@@ -46,22 +46,6 @@ DATABASE_FIX = (
 )
 LARK_CLI_FIX = "install lark-cli and sign in, or turn the Lark channel off on the Settings page"
 
-
-def pg_dump_fix(server_major: int | None) -> str:
-    """How to give LoopX a pg_dump for the server, or do without one."""
-    version = f"{server_major} or newer" if server_major else "of at least the server's major version"
-    install = (
-        'macOS: brew install libpq, then put it on PATH: export PATH="$(brew --prefix libpq)/bin:$PATH"'
-        if sys.platform == "darwin" else
-        f"Debian/Ubuntu: apt install postgresql-client-{server_major or '<major>'} (from apt.postgresql.org)"
-    )
-    return (
-        f"install pg_dump {version}. {install}\n"
-        f"or set {db_backup.PG_DUMP_ENV} to a pg_dump; with PostgreSQL in Docker, dump inside its container:\n"
-        f"  export {db_backup.BACKUP_CMD_ENV}='docker exec <container> pg_dump --format=custom -U {{user}} {{dbname}}'\n"
-        "or migrate once without a backup: loopx serve --skip-backup"
-    )
-
 _COMMAND_TIMEOUT_SECONDS = 15.0
 _DATABASE_TIMEOUT_SECONDS = 5.0
 
@@ -179,6 +163,22 @@ def check_lark_cli(lark_enabled: bool | None) -> Check:
         return Check("lark_cli", "Lark channel", OK, "enabled, lark-cli found")
     return Check("lark_cli", "Lark channel", WARN, "enabled, but `lark-cli` is not on PATH; it will not start",
                  LARK_CLI_FIX)
+
+
+def pg_dump_fix(server_major: int | None) -> str:
+    """How to give LoopX a pg_dump for the server, or do without one."""
+    version = f"{server_major} or newer" if server_major else "of at least the server's major version"
+    install = (
+        'macOS: brew install libpq, then put it on PATH: export PATH="$(brew --prefix libpq)/bin:$PATH"'
+        if sys.platform == "darwin" else
+        f"Debian/Ubuntu: apt install postgresql-client-{server_major or '<major>'} (from apt.postgresql.org)"
+    )
+    return (
+        f"install pg_dump {version}. {install}\n"
+        f"or set {db_backup.PG_DUMP_ENV} to a pg_dump; with PostgreSQL in Docker, dump inside its container:\n"
+        f"  export {db_backup.BACKUP_CMD_ENV}='docker exec <container> pg_dump --format=custom -U {{user}} {{dbname}}'\n"
+        "or migrate once without a backup: loopx serve --skip-backup"
+    )
 
 
 def check_pg_dump(server_version_num: int | None, pending: bool | None) -> tuple[Check, db_backup.Dumper | None]:
