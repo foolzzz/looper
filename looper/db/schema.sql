@@ -1,6 +1,73 @@
 -- Looper Agent System Schema
 -- Idempotent: safe to run on every startup.
 
+-- One-time data migrations; schema.sql itself runs on every startup.
+CREATE TABLE IF NOT EXISTS schema_migrations (
+    name        TEXT PRIMARY KEY,
+    applied_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- Once (the names the dashboard uses): "agent" names only a running agent. A
+-- role's settings (agent_configs, keyed by agent_id) are role_configs keyed by
+-- role; what was registered as an agent (agents) is an Agent Profile
+-- (agent_profiles), and what selects one names it profile_id: a settings
+-- layer, a task's choice (task_agent_overrides, now task_profile_overrides) and
+-- a saved session (session_agent_id). The tables and columns are renamed in
+-- place (their foreign keys follow), and their constraints take the names a
+-- new database gives them. agent_configs.role is dropped first: it repeated
+-- the key in every row Looper wrote, and nothing read it. This runs before
+-- anything below names the new tables, so a database of any earlier version
+-- arrives at them with its rows.
+DO $$
+DECLARE
+    c RECORD;
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM schema_migrations WHERE name = 'profiles_roles_renamed') THEN
+        IF to_regclass('agent_configs') IS NOT NULL THEN
+            ALTER TABLE agent_configs DROP COLUMN IF EXISTS role;
+            ALTER TABLE agent_configs RENAME COLUMN agent_id TO role;
+            ALTER TABLE agent_configs RENAME TO role_configs;
+        END IF;
+        IF to_regclass('agents') IS NOT NULL THEN
+            ALTER TABLE agents RENAME TO agent_profiles;
+        END IF;
+        IF to_regclass('task_agent_overrides') IS NOT NULL THEN
+            ALTER TABLE task_agent_overrides RENAME COLUMN agent_id TO profile_id;
+            ALTER TABLE task_agent_overrides RENAME TO task_profile_overrides;
+        END IF;
+        IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = current_schema()
+                   AND table_name = 'agent_setting_layers' AND column_name = 'agent_id') THEN
+            ALTER TABLE agent_setting_layers RENAME COLUMN agent_id TO profile_id;
+        END IF;
+        IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = current_schema()
+                   AND table_name = 'agent_sessions' AND column_name = 'session_agent_id') THEN
+            ALTER TABLE agent_sessions RENAME COLUMN session_agent_id TO profile_id;
+        END IF;
+        FOR c IN
+            SELECT t.tbl, t.old_name, t.new_name
+            FROM (VALUES
+                ('role_configs', 'agent_configs_pkey', 'role_configs_pkey'),
+                ('agent_profiles', 'agents_pkey', 'agent_profiles_pkey'),
+                ('agent_profiles', 'agents_name_key', 'agent_profiles_name_key'),
+                ('agent_profiles', 'agents_runtime_id_fkey', 'agent_profiles_runtime_id_fkey'),
+                ('agent_profiles', 'agents_provider_id_fkey', 'agent_profiles_provider_id_fkey'),
+                ('agent_profiles', 'agents_model_check', 'agent_profiles_model_check'),
+                ('agent_profiles', 'agents_effort_check', 'agent_profiles_effort_check'),
+                ('task_profile_overrides', 'task_agent_overrides_pkey', 'task_profile_overrides_pkey'),
+                ('task_profile_overrides', 'task_agent_overrides_task_id_fkey', 'task_profile_overrides_task_id_fkey'),
+                ('task_profile_overrides', 'task_agent_overrides_role_check', 'task_profile_overrides_role_check'),
+                ('task_profile_overrides', 'task_agent_overrides_agent_id_fkey',
+                 'task_profile_overrides_profile_id_fkey'),
+                ('agent_setting_layers', 'agent_setting_layers_agent_id_fkey', 'agent_setting_layers_profile_id_fkey')
+            ) AS t(tbl, old_name, new_name)
+            JOIN pg_constraint k ON k.conname = t.old_name AND k.conrelid = to_regclass(t.tbl)
+        LOOP
+            EXECUTE format('ALTER TABLE %I RENAME CONSTRAINT %I TO %I', c.tbl, c.old_name, c.new_name);
+        END LOOP;
+        INSERT INTO schema_migrations (name) VALUES ('profiles_roles_renamed');
+    END IF;
+END $$;
+
 CREATE TABLE IF NOT EXISTS tasks (
     id                TEXT PRIMARY KEY,
     requirement       TEXT NOT NULL,
@@ -106,11 +173,11 @@ CREATE TABLE IF NOT EXISTS agent_sessions (
     session_totals  JSONB NOT NULL DEFAULT '{}',
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
--- The runtime type the session belongs to and the agent (agents.id) that ran it
+-- The runtime type the session belongs to and the Agent Profile (agent_profiles.id) that ran it
 -- last: a process of another runtime type cannot resume it, so the next turn
--- starts a new session. NULL: a session from before agents, which Claude Code ran.
+-- starts a new session. NULL: a session from before Agent Profiles, which Claude Code ran.
 ALTER TABLE agent_sessions ADD COLUMN IF NOT EXISTS runtime_type TEXT;
-ALTER TABLE agent_sessions ADD COLUMN IF NOT EXISTS session_agent_id TEXT;
+ALTER TABLE agent_sessions ADD COLUMN IF NOT EXISTS profile_id TEXT;
 -- The provider (llm_providers.id) the session ran with: a session resumes only with the same runtime type and
 -- the same provider (runtimes.can_resume). NULL: a session from before this column, run with Claude Code's own
 -- login.
@@ -143,10 +210,11 @@ CREATE INDEX IF NOT EXISTS idx_task_journal_task ON task_journal (task_id, id);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_task_journal_accepted ON task_journal (task_id, step_id)
     WHERE kind = 'step_accepted';
 
-CREATE TABLE IF NOT EXISTS agent_configs (
-    agent_id         TEXT PRIMARY KEY,
+-- Each role's own settings: its display name, role prompt, timeout and concurrency (manager, planner, worker,
+-- reviewer).
+CREATE TABLE IF NOT EXISTS role_configs (
+    role             TEXT PRIMARY KEY,
     display_name     TEXT NOT NULL DEFAULT '',
-    role             TEXT NOT NULL DEFAULT '',
     enabled          BOOLEAN NOT NULL DEFAULT true,
     system_prompt    TEXT NOT NULL DEFAULT '',
     max_turns        INTEGER NOT NULL DEFAULT 0,
@@ -157,27 +225,27 @@ CREATE TABLE IF NOT EXISTS agent_configs (
     created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at       TIMESTAMPTZ NOT NULL DEFAULT now()
 );
--- The system-recommended prompt for this agent. seed keeps it current; an
+-- The system-recommended prompt for this role. seed keeps it current; an
 -- unedited row (system_prompt = default_prompt) follows it, an edited row does
 -- not, and "reset to recommended" copies it back into system_prompt.
-ALTER TABLE agent_configs ADD COLUMN IF NOT EXISTS default_prompt TEXT NOT NULL DEFAULT '';
+ALTER TABLE role_configs ADD COLUMN IF NOT EXISTS default_prompt TEXT NOT NULL DEFAULT '';
 -- permission_mode was never applied: every agent runs with
 -- --dangerously-skip-permissions (claude_cli.permission_args).
-ALTER TABLE agent_configs DROP COLUMN IF EXISTS permission_mode;
+ALTER TABLE role_configs DROP COLUMN IF EXISTS permission_mode;
 
--- Agents (RFC decision 10): an agent is a runtime, an LLM provider and a
--- model. A runtime is a runtime type, which code provides (an adapter,
+-- Agent Profiles (RFC decision 10): a profile is a runtime, an LLM provider and
+-- a model. A runtime is a runtime type, which code provides (an adapter,
 -- looper/agents/runtimes), found on this machine: built in, one per type on
 -- the server's PATH, with the executable it runs ('' = the type's default, for
 -- Claude Code the server's configured one) and what its last probe found
 -- (version, capabilities). A runtime registered by hand before (builtin
--- false) stays read-only while an agent uses it. A provider is where an agent's
+-- false) stays read-only while a profile uses it. A provider is where an agent's
 -- requests go: the protocols it serves, its models and their prices, and how
 -- it authenticates: a runtime type's own login (oauth, bound to that type) or
 -- an API key, kept in llm_provider_secrets and never shown by the API. Code
 -- owns the types, the protocols, the capabilities and the validation
--- (looper/agents/agent_registry.py). The built-in rows (builtin) are
--- read-only; a runtime, provider or agent still referred to cannot be deleted.
+-- (looper/agents/profile_registry.py). The built-in rows (builtin) are
+-- read-only; a runtime, provider or profile still referred to cannot be deleted.
 CREATE TABLE IF NOT EXISTS agent_runtimes (
     id            TEXT PRIMARY KEY,
     name          TEXT NOT NULL UNIQUE,
@@ -220,30 +288,31 @@ CREATE TABLE IF NOT EXISTS llm_provider_secrets (
     provider_id  TEXT PRIMARY KEY REFERENCES llm_providers(id) ON DELETE CASCADE,
     api_key      TEXT NOT NULL
 );
-CREATE TABLE IF NOT EXISTS agents (
+CREATE TABLE IF NOT EXISTS agent_profiles (
     id           TEXT PRIMARY KEY,
     name         TEXT NOT NULL UNIQUE,
     runtime_id   TEXT NOT NULL REFERENCES agent_runtimes(id),
     provider_id  TEXT NOT NULL REFERENCES llm_providers(id),
     model        TEXT NOT NULL CHECK (model <> ''),
-    -- The agent's default effort; a layer's effort overrides it. NULL: the runtime's own default.
+    -- The profile's default effort; a layer's effort overrides it. NULL: the runtime's own default.
     effort       TEXT CHECK (effort IN ('low', 'medium', 'high', 'xhigh', 'max')),
     builtin      BOOLEAN NOT NULL DEFAULT false,
     created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at   TIMESTAMPTZ NOT NULL DEFAULT now()
 );
--- A task's agent overrides: its own choice of agent for some of its roles (the
--- Planner, Workers or Reviewers), the only agent setting a task has. Each wins
--- over every layer, for that task only; an agent a task chose cannot be deleted.
-CREATE TABLE IF NOT EXISTS task_agent_overrides (
-    task_id   TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
-    role      TEXT NOT NULL CHECK (role IN ('planner', 'worker', 'reviewer')),
-    agent_id  TEXT NOT NULL REFERENCES agents(id),
+-- A task's profile overrides: its own choice of Agent Profile for some of its
+-- roles (the Planner, Workers or Reviewers), the only agent setting a task has.
+-- Each wins over every layer, for that task only; a profile a task chose cannot
+-- be deleted.
+CREATE TABLE IF NOT EXISTS task_profile_overrides (
+    task_id     TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    role        TEXT NOT NULL CHECK (role IN ('planner', 'worker', 'reviewer')),
+    profile_id  TEXT NOT NULL REFERENCES agent_profiles(id),
     PRIMARY KEY (task_id, role)
 );
 -- The built-ins, on every start: the Claude Code runtime (the server's claude),
--- its own login as a provider, and the agent every role runs when nothing
--- selects another (looper/agents/agent_registry.py BUILTIN_*). A missing one comes back.
+-- its own login as a provider, and the profile every role runs when nothing
+-- selects another (looper/agents/profile_registry.py BUILTIN_*). A missing one comes back.
 INSERT INTO agent_runtimes (id, name, type, executable, capabilities, builtin)
 VALUES ('rt-claude-code', 'claude-code', 'claude-code', '',
         ARRAY['add_dirs', 'autonomous_turns', 'claude_plugins', 'compaction_events', 'cost_report', 'mcp',
@@ -252,7 +321,7 @@ ON CONFLICT DO NOTHING;
 INSERT INTO llm_providers (id, name, protocols, auth, oauth_runtime_type, builtin)
 VALUES ('prov-claude-subscription', 'claude-subscription', ARRAY['anthropic-messages'], 'oauth', 'claude-code', true)
 ON CONFLICT DO NOTHING;
-INSERT INTO agents (id, name, runtime_id, provider_id, model, builtin)
+INSERT INTO agent_profiles (id, name, runtime_id, provider_id, model, builtin)
 VALUES ('agent-claude-code-opus', 'claude-code/opus', 'rt-claude-code', 'prov-claude-subscription', 'opus', true)
 ON CONFLICT DO NOTHING;
 
@@ -293,19 +362,13 @@ CREATE TABLE IF NOT EXISTS library_files (
     PRIMARY KEY (item_id, path)
 );
 
--- One-time data migrations; schema.sql itself runs on every startup.
-CREATE TABLE IF NOT EXISTS schema_migrations (
-    name        TEXT PRIMARY KEY,
-    applied_at  TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-
 -- Once: move the worker's old seeded limit (600 s) to the new default. A value
 -- set later, including 600, stays.
 DO $$
 BEGIN
     IF NOT EXISTS (SELECT 1 FROM schema_migrations WHERE name = 'worker_timeout_default_86400') THEN
-        UPDATE agent_configs SET timeout_seconds = 86400
-        WHERE agent_id = 'worker' AND timeout_seconds = 600;
+        UPDATE role_configs SET timeout_seconds = 86400
+        WHERE role = 'worker' AND timeout_seconds = 600;
         INSERT INTO schema_migrations (name) VALUES ('worker_timeout_default_86400');
     END IF;
 END $$;
@@ -323,27 +386,27 @@ BEGIN
     END IF;
 END $$;
 
--- Once (agents replace LLM profiles): llm_profiles and agent_configs.runtime
--- and llm_profile_id were never on any agent's launch path; runtimes,
--- providers and agents replace them.
+-- Once (Agent Profiles replace LLM profiles): llm_profiles and the role
+-- configs' runtime and llm_profile_id were never on any agent's launch path;
+-- runtimes, providers and Agent Profiles replace them.
 DO $$
 BEGIN
     IF NOT EXISTS (SELECT 1 FROM schema_migrations WHERE name = 'llm_profiles_removed') THEN
-        ALTER TABLE agent_configs DROP COLUMN IF EXISTS llm_profile_id;
-        ALTER TABLE agent_configs DROP COLUMN IF EXISTS runtime;
+        ALTER TABLE role_configs DROP COLUMN IF EXISTS llm_profile_id;
+        ALTER TABLE role_configs DROP COLUMN IF EXISTS runtime;
         DROP TABLE IF EXISTS llm_profiles;
         INSERT INTO schema_migrations (name) VALUES ('llm_profiles_removed');
     END IF;
 END $$;
 
--- Once (runtimes are built in): a runtime registered by hand, which no agent
--- uses, is dropped; one an agent uses stays (read-only), so the agent keeps
--- running the executable it ran.
+-- Once (runtimes are built in): a runtime registered by hand, which no Agent
+-- Profile uses, is dropped; one a profile uses stays (read-only), so the
+-- profile keeps running the executable it ran.
 DO $$
 BEGIN
     IF NOT EXISTS (SELECT 1 FROM schema_migrations WHERE name = 'agent_runtimes_unused_custom_removed') THEN
         DELETE FROM agent_runtimes r
-        WHERE NOT r.builtin AND NOT EXISTS (SELECT 1 FROM agents a WHERE a.runtime_id = r.id);
+        WHERE NOT r.builtin AND NOT EXISTS (SELECT 1 FROM agent_profiles a WHERE a.runtime_id = r.id);
         INSERT INTO schema_migrations (name) VALUES ('agent_runtimes_unused_custom_removed');
     END IF;
 END $$;
@@ -521,15 +584,15 @@ END $$;
 -- project, a later layer winning. The Manager spans every project and has only
 -- the first two. A NULL field is not set at its layer (it inherits); env is an
 -- ordered list of {"key", "value"}, where a null value unsets a key an earlier
--- layer set (never at the system layer). agent_id is the agent the layer's
--- roles run (its model with it). Code owns the validation and the resolution
+-- layer set (never at the system layer). profile_id is the Agent Profile the
+-- layer's roles run (its model with it). Code owns the validation and the resolution
 -- (looper/agents/agent_settings.py). One row per layer and place.
 CREATE TABLE IF NOT EXISTS agent_setting_layers (
     scope           TEXT NOT NULL CHECK (scope IN ('system', 'role', 'project', 'role_project')),
     role            TEXT CHECK (role IN ('manager', 'planner', 'worker', 'reviewer')),
     project_id      TEXT REFERENCES projects(id) ON DELETE CASCADE,
     harness_prompt  TEXT,
-    agent_id        TEXT REFERENCES agents(id),
+    profile_id      TEXT REFERENCES agent_profiles(id),
     effort          TEXT,
     env             JSONB NOT NULL DEFAULT '[]'::jsonb CHECK (jsonb_typeof(env) = 'array'),
     run_budget_usd  DOUBLE PRECISION CHECK (run_budget_usd > 0),
@@ -543,7 +606,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_setting_layers_place
 
 -- Once (layered settings): the values that lived in four places move into
 -- their layer, unchanged; the old columns and keys are dropped. The Settings
--- defaults (system_settings agent.*) become the system layer; each agent's
+-- defaults (system_settings agent.*) become the system layer; each role's
 -- model, and the Manager's harness (the only one the API took), the role
 -- layer; a project's model and per-run cap the project layer; a project's
 -- Planner and Worker harness the role-in-project layer (a Reviewer follows its
@@ -553,10 +616,10 @@ DECLARE
     env_value JSONB := '[]'::jsonb;
 BEGIN
     IF NOT EXISTS (SELECT 1 FROM schema_migrations WHERE name = 'agent_setting_layers') THEN
-        -- Layers held a model then; the agents' migration below turns it into an agent.
+        -- Layers held a model then; the profiles' migration below turns it into an Agent Profile.
         ALTER TABLE agent_setting_layers ADD COLUMN IF NOT EXISTS model TEXT;
-        ALTER TABLE agent_configs ADD COLUMN IF NOT EXISTS harness_prompt TEXT NOT NULL DEFAULT '';
-        ALTER TABLE agent_configs ADD COLUMN IF NOT EXISTS model TEXT;
+        ALTER TABLE role_configs ADD COLUMN IF NOT EXISTS harness_prompt TEXT NOT NULL DEFAULT '';
+        ALTER TABLE role_configs ADD COLUMN IF NOT EXISTS model TEXT;
         ALTER TABLE projects ADD COLUMN IF NOT EXISTS planner_harness_prompt TEXT NOT NULL DEFAULT '';
         ALTER TABLE projects ADD COLUMN IF NOT EXISTS worker_harness_prompt TEXT NOT NULL DEFAULT '';
         ALTER TABLE projects ADD COLUMN IF NOT EXISTS model TEXT;
@@ -577,11 +640,11 @@ BEGIN
         LEFT JOIN system_settings e ON e.key = 'agent.effort'
         WHERE h.value IS NOT NULL OR m.value IS NOT NULL OR e.value IS NOT NULL OR env_value <> '[]'::jsonb;
         INSERT INTO agent_setting_layers (scope, role, harness_prompt, model)
-        SELECT 'role', agent_id,
-               CASE WHEN agent_id = 'manager' THEN NULLIF(harness_prompt, '') END, NULLIF(btrim(model), '')
-        FROM agent_configs
-        WHERE agent_id IN ('manager', 'planner', 'worker', 'reviewer')
-          AND ((agent_id = 'manager' AND harness_prompt <> '') OR NULLIF(btrim(model), '') IS NOT NULL);
+        SELECT 'role', role,
+               CASE WHEN role = 'manager' THEN NULLIF(harness_prompt, '') END, NULLIF(btrim(model), '')
+        FROM role_configs
+        WHERE role IN ('manager', 'planner', 'worker', 'reviewer')
+          AND ((role = 'manager' AND harness_prompt <> '') OR NULLIF(btrim(model), '') IS NOT NULL);
         INSERT INTO agent_setting_layers (scope, project_id, model, run_budget_usd)
         SELECT 'project', id, model, run_budget_usd FROM projects
         WHERE model IS NOT NULL OR run_budget_usd IS NOT NULL;
@@ -589,8 +652,8 @@ BEGIN
         SELECT 'role_project', 'planner', id, planner_harness_prompt FROM projects WHERE planner_harness_prompt <> ''
         UNION ALL
         SELECT 'role_project', 'worker', id, worker_harness_prompt FROM projects WHERE worker_harness_prompt <> '';
-        ALTER TABLE agent_configs DROP COLUMN harness_prompt;
-        ALTER TABLE agent_configs DROP COLUMN model;
+        ALTER TABLE role_configs DROP COLUMN harness_prompt;
+        ALTER TABLE role_configs DROP COLUMN model;
         ALTER TABLE projects DROP COLUMN planner_harness_prompt;
         ALTER TABLE projects DROP COLUMN worker_harness_prompt;
         ALTER TABLE projects DROP COLUMN model;
@@ -600,12 +663,13 @@ BEGIN
     END IF;
 END $$;
 
--- Once (agents select the model): a layer's model becomes the agent of the
--- Claude Code runtime, its own login and that model, named claude-code/<model>
--- (claude-code/opus is the built-in one), so every role resolves the model it
--- did. A stored model that no longer validates was ignored, as if unset: it
--- selects no agent. A layer left with nothing set is removed.
-ALTER TABLE agent_setting_layers ADD COLUMN IF NOT EXISTS agent_id TEXT REFERENCES agents(id);
+-- Once (Agent Profiles select the model): a layer's model becomes the profile
+-- of the Claude Code runtime, its own login and that model, named
+-- claude-code/<model> (claude-code/opus is the built-in one), so every role
+-- resolves the model it did. A stored model that no longer validates was
+-- ignored, as if unset: it selects no profile. A layer left with nothing set is
+-- removed.
+ALTER TABLE agent_setting_layers ADD COLUMN IF NOT EXISTS profile_id TEXT REFERENCES agent_profiles(id);
 DO $$
 BEGIN
     IF NOT EXISTS (SELECT 1 FROM schema_migrations WHERE name = 'agent_setting_layers_agent') THEN
@@ -616,18 +680,18 @@ BEGIN
             WHERE model IS NOT NULL;
             DELETE FROM layer_models
             WHERE NOT (model ~ '^[A-Za-z0-9][A-Za-z0-9._:/\[\]-]*$' AND length(model) <= 200);
-            INSERT INTO agents (id, name, runtime_id, provider_id, model)
+            INSERT INTO agent_profiles (id, name, runtime_id, provider_id, model)
             SELECT 'agent-' || left(replace(gen_random_uuid()::text, '-', ''), 12), 'claude-code/' || model,
                    'rt-claude-code', 'prov-claude-subscription', model
             FROM (SELECT DISTINCT model FROM layer_models) m
             ON CONFLICT (name) DO NOTHING;
-            UPDATE agent_setting_layers l SET agent_id = a.id
-            FROM layer_models m JOIN agents a ON a.name = 'claude-code/' || m.model
+            UPDATE agent_setting_layers l SET profile_id = a.id
+            FROM layer_models m JOIN agent_profiles a ON a.name = 'claude-code/' || m.model
             WHERE l.scope = m.scope AND l.role IS NOT DISTINCT FROM m.role
               AND l.project_id IS NOT DISTINCT FROM m.project_id;
             DROP TABLE layer_models;
             ALTER TABLE agent_setting_layers DROP COLUMN model;
-            DELETE FROM agent_setting_layers WHERE harness_prompt IS NULL AND agent_id IS NULL AND effort IS NULL
+            DELETE FROM agent_setting_layers WHERE harness_prompt IS NULL AND profile_id IS NULL AND effort IS NULL
                 AND env = '[]'::jsonb AND run_budget_usd IS NULL;
         END IF;
         INSERT INTO schema_migrations (name) VALUES ('agent_setting_layers_agent');
@@ -738,7 +802,7 @@ ALTER TABLE llm_records ADD COLUMN IF NOT EXISTS context_tokens INTEGER;
 -- NULL for runs recorded before compactions were.
 ALTER TABLE llm_records ADD COLUMN IF NOT EXISTS compactions JSONB;
 -- Where cost_usd comes from: what the runtime reported ('runtime'; Claude Code with its own login), or the
--- run's tokens at its provider's prices ('provider_price'); NULL for runs recorded before agents.
+-- run's tokens at its provider's prices ('provider_price'); NULL for runs recorded before Agent Profiles.
 ALTER TABLE llm_records ADD COLUMN IF NOT EXISTS cost_source TEXT CHECK (cost_source IN ('runtime', 'provider_price'));
 
 -- Once: runs recorded before `status` existed all defaulted to 'completed';
