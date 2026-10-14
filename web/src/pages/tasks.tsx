@@ -17,7 +17,6 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
   fetchTasks,
-  cancelTask,
   deleteTask,
   stopTask,
   startTask,
@@ -434,15 +433,6 @@ export function TasksPage({ sub, query, onNavigate }: TasksPageProps) {
     const timer = setInterval(load, 3000);
     return () => clearInterval(timer);
   }, [projectFilter]);
-
-  const handleCancel = async (taskId: string) => {
-    try {
-      await cancelTask(taskId);
-      load();
-    } catch {
-      // ignore
-    }
-  };
 
   const handleStop = async (taskId: string) => {
     try {
