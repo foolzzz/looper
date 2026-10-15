@@ -5,7 +5,8 @@ the Manager launched it with, starts the ``looper`` server from it (``looper
 mcp-server``) and, for each user turn, makes that turn's scripted calls. In a
 call's arguments, ``<confirmation>`` stands for the confirmation id the note
 before the message names, and ``<task id>`` for the last task id an answer
-gave. Its reply is the calls' answers as JSON. It saves its argv
+gave. Its reply is the calls' answers as JSON (a call Looper did not answer as
+its error text). It saves its argv
 (``argv.json``), the tools it was given (``tools.json``) and each user turn
 (``turns.jsonl``) in its directory.
 
@@ -37,7 +38,8 @@ def rpc(method, params):
     server.stdin.flush()
     return json.loads(server.stdout.readline())
 rpc('initialize', {'protocolVersion': '2025-06-18', 'capabilities': {}, 'clientInfo': {'name': 'stand-in'}})
-open('tools.json', 'w').write(json.dumps([tool['name'] for tool in rpc('tools/list', {})['result']['tools']]))
+listed = rpc('tools/list', {})
+open('tools.json', 'w').write(json.dumps([tool['name'] for tool in (listed.get('result') or {}).get('tools', [])]))
 last_task = ''
 for turn, line in zip(TURNS, sys.stdin):
     content = json.loads(line)['message']['content']
@@ -47,7 +49,11 @@ for turn, line in zip(TURNS, sys.stdin):
     for name, arguments in turn:
         text = json.dumps(arguments).replace('<confirmation>', named.group(1) if named else '')
         result = rpc('tools/call', {'name': name, 'arguments': json.loads(text.replace('<task id>', last_task))})
-        answer = json.loads(result['result']['content'][0]['text'])
+        text = result['result']['content'][0]['text']
+        try:
+            answer = json.loads(text)
+        except ValueError:  # Looper did not answer: the forwarder says why
+            answer = {'status': 'error', 'text': text}
         last_task = ((answer.get('result') or {}).get('task_id') if isinstance(answer.get('result'), dict)
                      else None) or last_task
         answers.append(answer)

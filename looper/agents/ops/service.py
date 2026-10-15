@@ -18,6 +18,13 @@ to ``call``.
   ``CONFIRMATION_SECONDS``. After that turn it lapses. Confirmations live in
   memory: a restart drops them, and the user is asked again.
 - **The trail.** Every call is a ``manager_actions`` row (``db.manager_actions``).
+- **When the tools do not work.** Before a turn answering the user, the
+  Manager asks ``tools_problem``: it starts the MCP entry's command as the
+  runtime would and lists the tools through it, so a server that does not
+  start or a token Looper refuses is found before Claude runs (a success is
+  kept for ``PROBE_KEPT_SECONDS``). A request the endpoint refuses during a
+  turn marks the turn (``refuse``). Either is logged as an error, and the
+  user gets ``tools_down_reply`` instead of anything Claude says.
 """
 
 from __future__ import annotations
@@ -26,7 +33,9 @@ import hashlib
 import hmac
 import json
 import logging
+import os
 import secrets
+import subprocess
 import sys
 import time
 import uuid
@@ -49,6 +58,9 @@ CONFIRMATION_SECONDS = 600
 # The most chats with a confirmation waiting at once; past it, the oldest one's is dropped.
 CONFIRMATION_CHATS = 50
 CONFIRM_TOOL = "looper_confirm"
+# How long a working MCP entry is trusted before the next turn checks it again, and how long a check may take.
+PROBE_KEPT_SECONDS = 300
+PROBE_TIMEOUT_SECONDS = 20
 
 CONFIRM = Tool(
     name=CONFIRM_TOOL,
@@ -99,6 +111,7 @@ class ManagerOps:
         self._clock = clock
         self._turn: Turn | None = None
         self._pending: dict[tuple[str | None, str | None], _Pending] = {}
+        self._working_at: float | None = None  # when the MCP entry last listed the tools
 
     # --- The endpoint ---
 
@@ -109,6 +122,49 @@ class ManagerOps:
 
     def listing(self) -> list[dict[str, Any]]:
         return [tool.listing() for tool in self._tools.values()]
+
+    def refuse(self, path: str) -> None:
+        """The endpoint refused a request for its token: logged, and the turn running (if any) is marked."""
+        logger.error("refused a request to %s: not the Manager's token; the Manager's tools do not work", path)
+        self._working_at = None
+        if self._turn is not None and not self._turn.autonomous:
+            self._turn.refused = True
+
+    async def tools_problem(self) -> str | None:
+        """Why the Manager's tools cannot work now (its MCP server does not start, or Looper refuses it); None when
+        they work."""
+        import asyncio
+
+        if self._working_at is not None and self._clock() - self._working_at < PROBE_KEPT_SECONDS:
+            return None
+        problem = await asyncio.to_thread(self._probe)
+        if problem is None:
+            self._working_at = self._clock()
+        return problem
+
+    def _probe(self) -> str | None:
+        """Start the MCP entry's command as a runtime would, and list the tools through it."""
+        config = self.server_config()
+        requests = [{"jsonrpc": "2.0", "id": 1, "method": "initialize",
+                     "params": {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "looper"}}},
+                    {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}}]
+        try:
+            done = subprocess.run([config["command"], *config["args"]], env={**os.environ, **config["env"]},
+                                  input="".join(json.dumps(r) + "\n" for r in requests), capture_output=True,
+                                  text=True, timeout=PROBE_TIMEOUT_SECONDS, check=False)
+        except (OSError, subprocess.SubprocessError) as exc:
+            return f"looper mcp-server did not start: {exc}"
+        for line in done.stdout.splitlines():
+            try:
+                answer = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if answer.get("id") == 2:
+                if (answer.get("result") or {}).get("tools"):
+                    return None
+                return str((answer.get("error") or {}).get("message") or "it listed no tools")
+        last = (done.stderr.strip().splitlines() or [""])[-1]
+        return f"looper mcp-server exited ({done.returncode}) without listing the tools{': ' + last if last else ''}"
 
     async def call(self, name: str, raw: Any) -> dict[str, Any]:
         """Run one tool call in the current turn; the protocol's answer."""
@@ -266,6 +322,11 @@ class _Recorded(OpError):
 
     def __init__(self, error: OpError) -> None:
         super().__init__(error.code, str(error))
+
+
+def tools_down_reply(problem: str) -> str:
+    """What the user gets when the Manager's tools do not work: nothing was done, whatever Claude says."""
+    return f"平台工具不可用，没有执行任何操作：{problem}。请检查 looper serve 的日志，或先在控制台里操作。"
 
 
 def _error(code: ErrorCode, message: str) -> dict[str, Any]:

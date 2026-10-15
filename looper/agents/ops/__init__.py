@@ -66,6 +66,8 @@ class Turn:
     sender: str | None = None  # who sent it (Lark's open_id, Telegram's user id; the web chat names none)
     envelope: MessageEnvelope | None = None
     blocks: list[str] = field(default_factory=list)
+    # Looper refused a call of this turn for its token: the tools did not work, whatever Claude says.
+    refused: bool = False
 
     @property
     def autonomous(self) -> bool:

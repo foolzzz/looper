@@ -561,6 +561,8 @@ class AgentHTTPServer:
         token of this server's Manager gets in."""
         ops = self._manager_ops
         if ops is None or not ops.authorized(headers.get("authorization")):
+            if ops is not None:
+                ops.refuse(path)
             writer.write(_json_response(HTTP_401, {"error": "this endpoint is the Manager's: a valid token is "
                                                             "required"}))
         elif path == f"{AGENT_API}tools" and method == "GET":

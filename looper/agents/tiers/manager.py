@@ -58,6 +58,7 @@ from ..session_switch import SessionSwitch
 from ..system_prompt import SystemPrompt, build_system_prompt, is_recommended
 from .journal import HANDOFF_MAX_CHARS, clip, kept_text
 from ..ops import Turn
+from ..ops.service import tools_down_reply
 from ..task_notice import Notice
 from ..message import (
     MANAGER_ADDRESS,
@@ -420,16 +421,32 @@ class ManagerAgent:
         origin = _message_origin(envelope)
         await self._persist_chat(envelope, "user", text, envelope.message_id)
         await self._send_status(envelope, "thinking", phase=True, activity="thinking")
+        # Claude can do nothing without Looper's tools, and might say it did: the user hears that they are down.
+        problem = await self.ops.tools_problem() if self.ops is not None else None
+        if problem is not None:
+            logger.error("manager: Looper's tools do not work (%s); %s was not answered", problem,
+                         envelope.message_id)
+            await self._send_reply(envelope, tools_down_reply(problem), error=problem)
+            return
         # The calls Claude makes while answering belong to this message and its chat.
         turn = Turn(channel=origin["channel"], chat=origin["chat"], message_id=envelope.message_id,
                     envelope=envelope, sender=origin["sender"])
         try:
             response = await self._invoke_claude(text, envelope, turn=turn)
         except Exception as exc:
-            # Always answer: the chat stream waits for a final reply. What a tool did before is still shown.
-            logger.exception("manager failed to answer %s", envelope.message_id)
-            await self._send_reply(envelope, _with_blocks(f"Manager 出错，没能完成这次回复：{exc}", turn.blocks),
-                                   error=str(exc))
+            if turn.refused:
+                response = ""  # answered below: the tools did not work
+            else:
+                # Always answer: the chat stream waits for a final reply. What a tool did before is still shown.
+                logger.exception("manager failed to answer %s", envelope.message_id)
+                await self._send_reply(envelope, _with_blocks(f"Manager 出错，没能完成这次回复：{exc}", turn.blocks),
+                                       error=str(exc))
+                return
+        if turn.refused:
+            problem = "Looper 拒绝了管家工具的令牌"
+            logger.error("manager: Looper refused the tools' token in the turn answering %s; Claude's reply was not "
+                         "sent", envelope.message_id)
+            await self._send_reply(envelope, _with_blocks(tools_down_reply(problem), turn.blocks), error=problem)
             return
         await self._send_reply(envelope, _with_blocks(response, turn.blocks))
 

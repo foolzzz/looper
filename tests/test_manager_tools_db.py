@@ -25,9 +25,10 @@ pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not
 
 WEB = channel_address("web")
 
-async def _converse(root: Path, turns: list[list[tuple[str, dict[str, Any]]]], messages: list[str]) -> Any:
-    """Send ``messages`` to a Manager whose Claude makes ``turns``' calls; the replies, Claude's user turns and
-    the tools it was given."""
+async def _converse(root: Path, turns: list[list[tuple[str, dict[str, Any]]]], messages: list[str],
+                    before: Any = None) -> Any:
+    """Send ``messages`` to a Manager whose Claude makes ``turns``' calls (``before(index, ops)`` runs before each);
+    the replies, Claude's user turns and the tools it was given (None for what a Claude that never ran left)."""
     from looper.agents.tiers.manager import ManagerAgent, ManagerConfig
 
     bus = MessageBus(runtime_root=root)
@@ -36,8 +37,10 @@ async def _converse(root: Path, turns: list[list[tuple[str, dict[str, Any]]]], m
     manager._bus = bus
     router = SimpleNamespace(has_planner=lambda task_id: False)
     replies = []
-    async with manager_endpoint(manager, bus, router, root):
+    async with manager_endpoint(manager, bus, router, root) as ops:
         for index, text in enumerate(messages):
+            if before is not None:
+                before(index, ops)
             await manager._handle(MessageEnvelope.create(
                 source=WEB, target=MANAGER_ADDRESS, message_type=MessageType.USER_MESSAGE,
                 payload={"text": text, "channel_context": {"session_id": "chat-1"}}, correlation_id=f"corr-{index}",
@@ -50,9 +53,11 @@ async def _converse(root: Path, turns: list[list[tuple[str, dict[str, Any]]]], m
                     replies.append(envelope.payload["text"])
         await manager.stop()
     await bus.shutdown()
+    turns = root / "turns.jsonl"
     return SimpleNamespace(
-        replies=replies, turns=[json.loads(line) for line in (root / "turns.jsonl").read_text().splitlines()],
-        tools=json.loads((root / "tools.json").read_text()), argv=json.loads((root / "argv.json").read_text()))
+        replies=replies, turns=[json.loads(line) for line in turns.read_text().splitlines()] if turns.exists() else None,
+        tools=json.loads((root / "tools.json").read_text()) if (root / "tools.json").exists() else None,
+        argv=json.loads((root / "argv.json").read_text()) if (root / "argv.json").exists() else None)
 
 
 def test_the_managers_calls_create_a_new_project_only_after_the_next_message_confirms_it(
@@ -99,5 +104,76 @@ def test_a_manager_without_a_turn_running_only_reads(monkeypatch: pytest.MonkeyP
         answer = await ops.call("looper_task_create", {"requirement": "r", "title": "t", "project": "p"})
         assert answer["error"]["code"] == "needs_user_turn"
         assert await pool.fetchval("SELECT count(*) FROM tasks") == 0
+
+    _run(test, monkeypatch)
+
+
+_CREATE_CALC = [("looper_task_create", {"requirement": "build calc", "title": "计算器", "project": "calc"})]
+
+
+def _broken(config: dict[str, Any], how: str) -> dict[str, Any]:
+    if how == "wrong-token":
+        return {**config, "env": {**config["env"], "LOOPER_AGENT_TOKEN": "not-the-token"}}
+    return {**config, "command": "/nonexistent/python"}  # the server does not start
+
+
+@pytest.mark.parametrize("how", ["wrong-token", "does-not-start"])
+def test_tools_that_do_not_work_are_said_so_and_claude_never_answers(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture, how: str,
+) -> None:
+    async def test(pool: Any) -> None:
+        from looper.db import projects
+
+        await projects.create_project(name="calc", work_dir="/w", pool=pool)
+
+        def break_it(index: int, ops: Any) -> None:
+            real = ops.server_config
+            monkeypatch.setattr(ops, "server_config", lambda: _broken(real(), how))
+
+        with caplog.at_level("ERROR"):
+            chat = await _converse(tmp_path, [_CREATE_CALC], ["在 calc 里建个计算器任务，确认"], before=break_it)
+        (reply,) = chat.replies
+        assert reply.startswith("平台工具不可用，没有执行任何操作：")
+        assert chat.turns is None  # Claude never ran, so it claimed nothing
+        assert await pool.fetchval("SELECT count(*) FROM tasks") == 0
+        assert any("Looper's tools do not work" in r.getMessage() for r in caplog.records if r.levelname == "ERROR")
+
+    _run(test, monkeypatch)
+
+
+def test_a_token_refused_during_a_turn_replaces_claudes_reply(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The check before the turn passed (kept from the turn before), but the Claude that runs this turn calls with
+    a token Looper refuses: whatever Claude says, the user hears that nothing was done."""
+
+    async def test(pool: Any) -> None:
+        from looper.db import projects
+
+        await projects.create_project(name="calc", work_dir="/w", pool=pool)
+
+        def break_launch(index: int, ops: Any) -> None:
+            if index == 1:  # the launch's entry only: the kept check does not run again
+                real = ops.server_config
+                real_inject = ops.library_with_server
+
+                async def inject(library: Any, root: Path) -> Any:
+                    monkeypatch.setattr(ops, "server_config", lambda: _broken(real(), "wrong-token"))
+                    try:
+                        return await real_inject(library, root)
+                    finally:
+                        monkeypatch.setattr(ops, "server_config", real)
+
+                monkeypatch.setattr(ops, "library_with_server", inject)
+
+        with caplog.at_level("ERROR"):
+            chat = await _converse(tmp_path, [[("looper_tasks", {"action": "list"})], _CREATE_CALC],
+                                   ["有哪些任务？", "在 calc 里建个计算器任务，确认"], before=break_launch)
+        listed, refused = chat.replies
+        assert '"status": "ok"' in listed
+        assert refused.startswith("平台工具不可用，没有执行任何操作：Looper 拒绝了管家工具的令牌")
+        assert await pool.fetchval("SELECT count(*) FROM tasks") == 0
+        assert any("not the Manager's token" in r.getMessage() for r in caplog.records)
+        assert any("Claude's reply was not sent" in r.getMessage() for r in caplog.records)
 
     _run(test, monkeypatch)
