@@ -46,6 +46,9 @@ def _parser() -> argparse.ArgumentParser:
                      help="compare with this run instead of the previous one (or the committed baseline)")
     run.add_argument("--task-timeout", type=float, help="seconds before a task is cancelled")
     run.add_argument("--keep-work-dirs", action="store_true", help="keep the temporary root for inspection")
+    run.add_argument("--step-workspaces", choices=("shared", "worktree"),
+                     help="make each working directory a git repository and give the task's project this "
+                          "step_workspaces setting")
 
     talk = sub.add_parser("dialogs", help="Run the Manager's dialogs and check what Looper did after each reply.")
     talk.add_argument("--mode", choices=("fake", "real"), default="fake")
@@ -99,6 +102,7 @@ def main(argv: list[str] | None = None) -> int:
             total_cap_usd=args.total_cap_usd if real else None,
             task_timeout=args.task_timeout,
             keep_work_dirs=args.keep_work_dirs,
+            step_workspaces=args.step_workspaces,
         )
     except (ValueError, runner.EvalError) as exc:
         print(f"error: {exc}", file=sys.stderr)

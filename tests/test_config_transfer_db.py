@@ -746,7 +746,9 @@ def test_a_file_exported_by_v2_6_0_imports_and_exports_again_under_the_new_names
             expected["providers"] = [{**_by_name(old["providers"], "glm"), "api_key": None}]
             expected["settings"] = {"layers": [renamed(x) for x in old["settings"]["layers"]], "roles": [
                 {k: v for k, v in role.items() if k != "max_concurrency"} for role in old["settings"]["roles"]]}
-            expected["projects"] = [{**p, "layers": [renamed(x) for x in p["layers"]]} for p in old["projects"]]
+            # A file from before step workspaces leaves them unset.
+            expected["projects"] = [{**p, "execution": {**p["execution"], "step_workspaces": None},
+                                     "layers": [renamed(x) for x in p["layers"]]} for p in old["projects"]]
             assert new == expected
 
     asyncio.run(_test())

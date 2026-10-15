@@ -79,12 +79,14 @@ from ..claude_cli import (
 )
 from .. import knowledge as project_knowledge
 from .. import session_switch
+from .. import step_workspaces as workspaces
 from ..knowledge import AgentKnowledge, documents_label, load_knowledge
 from ..library import AgentLibrary, items_label, load_installed
 from ..project_execution import LessonsMode, ProjectExecution, TaskBudgetAction, format_usd
 from ..run_usage import Usage
 from ..runtimes import CLAUDE_CODE
 from ..session_switch import SessionSwitch
+from ..step_workspaces import MergeError, MergeResult, Repo, StepWorkspace, StepWorkspaceState, Unusable
 from ..system_prompt import SystemPrompt, build_system_prompt, is_recommended, plan_task_section
 from ..message import (
     TASK_ROUTER_ADDRESS,
@@ -125,7 +127,8 @@ logger = logging.getLogger(__name__)
 
 from ...db import activity as db_activity, role_configs as db_role_configs, llm_records as db_llm_records
 from ...db import agent_sessions as db_agent_sessions, plans as db_plans, projects as db_projects
-from ...db import journal as db_journal, task_changes as db_changes, tasks as db_tasks
+from ...db import journal as db_journal, step_workspaces as db_step_workspaces, task_changes as db_changes
+from ...db import tasks as db_tasks
 from ...db.task_changes import TaskChanges
 from ...db.tasks import FailKind, update_task_phase
 
@@ -140,6 +143,16 @@ DEFAULT_TURN_TIMEOUT_SEC = 1200
 DEFAULT_SUPERVISE_INTERVAL_SEC = 300
 # A plan whose task still runs.
 _LIVE = ("executing", "verifying")
+# A step in flight: its Worker runs, a decision on its result is due, or it is in review.
+_IN_FLIGHT = ("dispatched", "deciding", "completed")
+# Why an accepted step's branch could not be merged, for the decision turn.
+_MERGE_REASONS = {
+    MergeError.CONFLICT: "its changes conflict with what the branch has now",
+    MergeError.LOCAL_CHANGES: "uncommitted changes in the task directory are in the way",
+    MergeError.BRANCH_CHANGED: "the task directory's branch changed under the task",
+    MergeError.STEP_BRANCH_CHANGED: "the step's own branch was switched or rewritten",
+    MergeError.GIT_FAILED: "a git command failed",
+}
 
 # The Planner has every tool, like every agent; this recommended role prompt
 # is what keeps it to planning and deciding.
@@ -251,10 +264,19 @@ class PlanStep:
     feedback: list[str] = field(default_factory=list)  # for retries
     # User text the Planner forwarded that reached this step's Worker too late.
     missed_messages: list[str] = field(default_factory=list)
+    # Its latest worktree, in a project with step workspaces (step_workspaces rows, not the step's).
+    workspace: StepWorkspace | None = None
 
     @property
     def label(self) -> str:
         return self.key or self.step_id
+
+    @property
+    def isolated(self) -> bool:
+        """Whether the step works in a worktree of its own: in it now, being merged, or awaiting a decision on
+        a merge that failed."""
+        return self.workspace is not None and self.workspace.state in (
+            StepWorkspaceState.ACTIVE, StepWorkspaceState.MERGING, StepWorkspaceState.UNMERGED)
 
     @property
     def started(self) -> bool:
@@ -292,6 +314,9 @@ class TaskPlan:
     fail_reason: str = ""
     # The task journal (task_journal), oldest first: an entry per accepted step, written as it is accepted.
     journal: list[JournalEntry] = field(default_factory=list)
+    # With step workspaces: the task directory's branch and its commit when the task dispatched its first step.
+    start_branch: str = ""
+    start_commit: str = ""
 
     @property
     def is_complete(self) -> bool:
@@ -359,6 +384,8 @@ class TaskPlan:
             "origin_channel_id": self.origin_channel_id,
             "final_summary": self.final_summary,
             "fail_reason": self.fail_reason,
+            "start_branch": self.start_branch,
+            "start_commit": self.start_commit,
         }
 
 
@@ -447,6 +474,21 @@ def _prepare_work_dir(work_dir: str) -> str | None:
     return None
 
 
+@dataclass(frozen=True)
+class _RoundBase:
+    """Where the new worktrees of a round of steps start: a commit on the task directory's branch, or why there
+    is none."""
+
+    repo: Repo | None = None
+    commit: str = ""
+    checkpoint: bool = False
+    error: str = ""
+
+
+class _NoWorkspace(Exception):
+    """A step that needs a worktree could not get one; the message says why."""
+
+
 class PlannerAgent:
     """Per-task Planner: one instance and one resident Claude per task."""
 
@@ -484,6 +526,8 @@ class PlannerAgent:
         self._pending_handoff: str | None = None
         # The project-wide learnings already saved as drafts, so a retry that reports one again adds none.
         self._drafted: set[str] = set()
+        # Why the last round of steps started fewer than were ready (step workspaces), noted once.
+        self._round_note = ""
 
     @property
     def agent_id(self) -> str:
@@ -683,20 +727,41 @@ class PlannerAgent:
 
     async def _dispatch_ready(self, plan: TaskPlan) -> None:
         running = sum(1 for s in plan.steps if s.status == "dispatched")
-        for step in plan.ready_steps()[: max(0, MAX_CONCURRENT_WORKERS - running)]:
+        ready = plan.ready_steps()[: max(0, MAX_CONCURRENT_WORKERS - running)]
+        base: _RoundBase | None = None
+        if ready and self._execution.isolate_steps:
+            ready, base = await self._plan_round(plan, ready)
+        for step in ready:
             if plan.status not in _LIVE:
                 return  # the task stopped at its spend cap
-            await self._dispatch_step(plan, step)
+            if step.status == "pending":  # a decision on an earlier step of the round may have started it
+                await self._dispatch_step(plan, step, base=base)
 
-    async def _dispatch_step(self, plan: TaskPlan, step: PlanStep) -> None:
+    async def _dispatch_step(self, plan: TaskPlan, step: PlanStep, *, base: _RoundBase | None = None) -> None:
+        """Start ``step``'s Worker: in the step's worktree when it has one or ``base`` gives it one (a retry after
+        a merge that failed gets a new one), else in the task directory."""
         assert self._bus is not None
         if not await self._within_budget(plan):
             return
         worker_id = f"worker-{uuid.uuid4().hex[:12]}"
         step.status = "dispatched"
         step.worker_id = worker_id
+        previous = (step.result or {}) if (step.result or {}).get("status") == "unmerged" else {}
+        try:
+            await self._open_workspace(plan, step, base)
+        except _NoWorkspace as exc:
+            await self._save(plan, step)
+            await self._workspace_failed(plan, step, str(exc))
+            return
         await self._save(plan, step)
         await self._activity("phase", f"Worker dispatched: {step.instruction[:80]}", worker=worker_id)
+        context: dict[str, Any] = {"work_dir": plan.work_dir}
+        if step.isolated and step.workspace is not None:
+            context = {"work_dir": step.workspace.work_dir, "workspace": step.workspace.context()}
+            if previous:
+                context["workspace"].update(previous_branch=previous.get("branch"),
+                                            previous_error=previous.get("merge_error"),
+                                            previous_files=list(previous.get("merge_files") or [])[:20])
 
         await self._bus.publish(MessageEnvelope.create(
             source=self.agent_address,
@@ -720,7 +785,7 @@ class PlannerAgent:
                 # Its first user turn: what the steps it depends on reported, and the task journal's findings.
                 "dependencies": self._dependency_reports(plan, step),
                 "findings": journal.worker_section(plan.journal, step.depends_on),
-                "context": {"work_dir": plan.work_dir},
+                "context": context,
             },
             correlation_id=plan.correlation_id,
             metadata={"origin_channel_id": plan.origin_channel_id},
@@ -740,6 +805,193 @@ class PlannerAgent:
                 "changed_files": [str(path) for path in changed][:50] if isinstance(changed, dict) else [],
             })
         return reports
+
+    # --- Step workspaces (a project with step_workspaces = worktree) ---
+
+    async def _plan_round(self, plan: TaskPlan, ready: list[PlanStep]) -> tuple[list[PlanStep], _RoundBase | None]:
+        """Which of the ready steps start now (``workspaces.plan_round``), and where the new worktrees among them
+        start (None: none of them needs one)."""
+        repo = await self._task_repo(plan)
+        decided = workspaces.plan_round(in_flight=[s.isolated for s in plan.steps if s.status in _IN_FLIGHT],
+                                        ready=[s.isolated for s in ready], repo=repo)
+        if decided.note and decided.note != self._round_note:
+            await self._activity("phase", decided.note[:500])
+        self._round_note = decided.note
+        ready = ready[: decided.start]
+        if not decided.isolate or not ready or not isinstance(repo, Repo):
+            return ready, None
+        if all(s.workspace is not None and s.workspace.state is StepWorkspaceState.ACTIVE for s in ready):
+            return ready, None  # they carry on in their worktrees
+        return ready, await self._round_base(repo)
+
+    async def _task_repo(self, plan: TaskPlan) -> Repo | Unusable:
+        """The task directory as step workspaces see it now; the first time it can have them, where its branch
+        starts is recorded (undoing the task's commits goes back there)."""
+        repo = await workspaces.inspect(plan.work_dir)
+        if isinstance(repo, Repo) and not plan.start_commit:
+            plan.start_branch, plan.start_commit = repo.branch, repo.head
+            await self._save(plan, plan_row=True)
+            await self._activity("phase", f"Step workspaces: the task starts with {workspaces.short_branch(repo.branch)} "
+                                          f"at {repo.head[:12]}; `git reset {repo.head[:12]}` in the task directory "
+                                          "undoes the commits the task adds")
+        return repo
+
+    async def _round_base(self, repo: Repo) -> _RoundBase:
+        """The commit a round's new worktrees start from: the branch's tip, after a checkpoint commit of the task
+        directory's pending changes when it has any."""
+        try:
+            commit, files = await workspaces.checkpoint(repo, task_id=self._task_id)
+        except workspaces.GitError as exc:
+            return _RoundBase(error=f"cannot commit the task directory's pending changes as a checkpoint: {exc}")
+        if files:
+            await self._activity("phase", f"Checkpoint {commit[:12]} on {workspaces.short_branch(repo.branch)}: "
+                                          f"{files} pending file(s) of the task directory committed for the steps "
+                                          "that start now")
+        return _RoundBase(repo=repo, commit=commit, checkpoint=bool(files))
+
+    async def _open_workspace(self, plan: TaskPlan, step: PlanStep, base: _RoundBase | None) -> None:
+        """Give ``step`` its worktree: the one it works in, or a new one from ``base`` (a retry after a merge that
+        failed gets one from the branch as it is now; the old branch stays for its commits). Nothing for a step
+        that works in the task directory. Raises ``_NoWorkspace``."""
+        current = step.workspace
+        if current is not None and current.state is StepWorkspaceState.ACTIVE:
+            try:
+                await workspaces.ensure_worktree(current)
+            except workspaces.GitError as exc:
+                raise _NoWorkspace(str(exc)) from None
+            return
+        if current is not None and current.state is StepWorkspaceState.UNMERGED:
+            step.workspace = await self._discard(current, keep_branch=True)
+            if base is None:
+                repo = await self._task_repo(plan)
+                base = await self._round_base(repo) if isinstance(repo, Repo) else _RoundBase(error=repo.reason)
+        elif base is None:
+            return
+        if base.error or base.repo is None:
+            raise _NoWorkspace(base.error)
+        try:
+            workspace = workspaces.new_workspace(
+                base.repo, runtime_root=self._runtime_root, workspace_id=await db_step_workspaces.next_id(),
+                task_id=self._task_id, step_id=step.step_id, step_key=step.label, base=base.commit,
+                checkpointed=base.checkpoint)
+            await db_step_workspaces.save(workspace.row())
+        except Exception as exc:
+            raise _NoWorkspace(f"cannot record its workspace: {exc}") from None
+        step.workspace = workspace
+        try:
+            await workspaces.ensure_worktree(workspace)
+        except workspaces.GitError as exc:
+            step.workspace = await self._discard(workspace)
+            raise _NoWorkspace(str(exc)) from None
+        await self._activity("phase", f"Step {step.label} works in a worktree of its own: branch {workspace.branch}, "
+                                      f"from {workspace.target} at {workspace.base_commit[:12]}", worker=step.worker_id)
+
+    async def _workspace_failed(self, plan: TaskPlan, step: PlanStep, problem: str) -> None:
+        """A step that needed a worktree got none: the attempt failed, and the Planner decides what follows."""
+        result = {"status": "failed", "error": f"Cannot create a worktree for step {step.label}: {problem}"}
+        step.result = result
+        await self._activity("error", result["error"][:500], worker=step.worker_id)
+        context = DecisionContext(step=step.label, result=ResultKind.WORK, succeeded=False,
+                                  review_required=self._needs_review(step), retries=step.retries)
+        await self._decide(plan, step, context, self._work_report(step, result))
+
+    async def _merged(self, plan: TaskPlan, step: PlanStep) -> bool:
+        """Merge the worktree of ``step``, just accepted, into the task directory's branch; True when it has
+        none or the merge landed. A merge that failed leaves the task directory as it was and goes to the
+        Planner's decision instead (False)."""
+        current = step.workspace
+        if current is None or current.state not in (StepWorkspaceState.ACTIVE, StepWorkspaceState.MERGING):
+            return True
+        outcome = await workspaces.merge(current, step_key=step.label, title=_clip(step.instruction, 72),
+                                         save=self._save_workspace)
+        merged = step.workspace = outcome.workspace
+        if outcome.leftovers:
+            await self._activity("phase", f"Step {step.label} left changes uncommitted: committed on its branch as "
+                                          f"{outcome.leftovers[:12]}")
+        if merged.state is not StepWorkspaceState.MERGED:
+            await self._merge_failed(plan, step, outcome)
+            return False
+        if merged.merge_commit and outcome.files:
+            note = f"Step {step.label} merged into {merged.target} as {merged.merge_commit[:12]}: " \
+                   f"{len(outcome.files)} file(s)"
+        elif merged.merge_commit:
+            note = f"Step {step.label} merged into {merged.target} as {merged.merge_commit[:12]}"
+        else:
+            note = f"Step {step.label} changed nothing to merge into {merged.target}"
+        await self._activity("phase", note)
+        step.workspace = await self._remove_workspace(merged)  # its commits are on the branch now
+        return True
+
+    async def _merge_failed(self, plan: TaskPlan, step: PlanStep, outcome: MergeResult) -> None:
+        failed = outcome.workspace
+        assert failed.merge_error is not None
+        error = (f"Step {step.label} was accepted, but its branch could not be merged into {failed.target} "
+                 f"({failed.merge_error.value}): {failed.detail}")
+        step.result = {**(step.result or {}), "status": "unmerged", "error": error,
+                       "merge_error": failed.merge_error.value, "merge_files": list(outcome.files[:50]),
+                       "branch": failed.branch}
+        await self._activity("error", error[:500], worker=step.worker_id)
+        context = DecisionContext(step=step.label, result=ResultKind.WORK, succeeded=False,
+                                  review_required=self._needs_review(step), retries=step.retries)
+        await self._decide(plan, step, context, self._merge_report(step, failed, outcome.files))
+
+    @staticmethod
+    def _merge_report(step: PlanStep, failed: StepWorkspace, files: Sequence[str]) -> list[str]:
+        assert failed.merge_error is not None
+        lines = [
+            f"Step {step.label} was accepted, but Looper could not merge its branch {failed.branch} into "
+            f"{failed.target} in the task directory:",
+            f"- why: {_MERGE_REASONS[failed.merge_error]} ({failed.merge_error.value})",
+            f"- detail: {_clip(failed.detail, 500)}",
+        ]
+        if files:
+            lines.append(f"- files: {', '.join(files[:20])}" + (f" (+{len(files) - 20} more)" if len(files) > 20 else ""))
+        lines.append(f"The task directory is as it was before the merge. A retry starts from {failed.target} as it is "
+                     f"now, and its Worker is told the previous attempt's branch {failed.branch} to bring the work over.")
+        return lines
+
+    async def _finish_merge(self, plan: TaskPlan, step: PlanStep) -> None:
+        """Finish the merge of an accepted step that a restart cut off, then settle the step."""
+        if await self._merged(plan, step):
+            step.status = "verified"
+            await self._step_settled(plan, step)
+
+    async def _drop_workspace(self, step: PlanStep) -> None:
+        """A step dropped from the plan: its worktree and branch go with it."""
+        if step.isolated and step.workspace is not None:
+            step.workspace = await self._discard(step.workspace)
+
+    async def _discard(self, workspace: StepWorkspace, *, keep_branch: bool = False) -> StepWorkspace:
+        """Drop a workspace without merging it: its directory goes, and its branch unless ``keep_branch``."""
+        if StepWorkspaceState.DISCARDED in workspaces.ALLOWED_TRANSITIONS[workspace.state]:
+            workspace = workspace.moved(StepWorkspaceState.DISCARDED)
+        return await self._remove_workspace(workspace, keep_branch=keep_branch)
+
+    async def _remove_workspace(self, workspace: StepWorkspace, *, keep_branch: bool = False) -> StepWorkspace:
+        try:
+            workspace = await workspaces.remove(workspace, keep_branch=keep_branch)
+        except workspaces.GitError:
+            logger.warning("planner %s cannot remove the worktree %s", self.agent_id, workspace.path, exc_info=True)
+        await self._save_workspace(workspace)
+        return workspace
+
+    async def _remove_workspaces(self) -> None:
+        """Remove every worktree and step branch the task still has (it completed)."""
+        try:
+            removed = await workspaces.remove_task(self._task_id)
+        except Exception as exc:
+            logger.warning("planner %s cannot remove its step worktrees", self.agent_id, exc_info=True)
+            await self._activity("error", f"Warning: the task's step worktrees were not all removed: {exc}"[:500])
+            return
+        if removed:
+            await self._activity("phase", f"Removed the task's {removed} step worktree(s) and their branches")
+
+    async def _save_workspace(self, workspace: StepWorkspace) -> None:
+        """Write a workspace's row; a failed write is logged, and only a restart would miss it."""
+        try:
+            await db_step_workspaces.save(workspace.row())
+        except Exception:
+            logger.exception("failed to save step workspace %s of task %s", workspace.id, self._task_id)
 
     # --- Results and decisions ---
 
@@ -775,6 +1027,10 @@ class PlannerAgent:
         step.reviewer_id = reviewer_id
         await self._save(plan, step)
         await self._activity("phase", f"Reviewer dispatched for step {step.index + 1} ({step.label})", worker=reviewer_id)
+        context: dict[str, Any] = {"work_dir": plan.work_dir}
+        if step.isolated and step.workspace is not None:
+            # It reviews the step's own result, in the step's worktree.
+            context = {"work_dir": step.workspace.work_dir, "workspace": step.workspace.context()}
 
         await self._bus.publish(MessageEnvelope.create(
             source=self.agent_address,
@@ -790,7 +1046,7 @@ class PlannerAgent:
                 "instruction": step.instruction,
                 "work_result": step.result or {},
                 "acceptance_criteria": step.acceptance_criteria,
-                "context": {"work_dir": plan.work_dir},
+                "context": context,
             },
             correlation_id=plan.correlation_id,
             metadata={"origin_channel_id": plan.origin_channel_id},
@@ -851,6 +1107,8 @@ class PlannerAgent:
                 await self._send_to_review(plan, step)
                 return
             whose = "Reviewer's" if context.result is ResultKind.REVIEW else "Worker's own"
+            if context.succeeded and not await self._merged(plan, step):
+                return
             step.status = "verified" if context.succeeded else "failed"
             await self._activity(
                 "error",
@@ -872,6 +1130,9 @@ class PlannerAgent:
         await self._activity("phase", f"Planner decision on step {step.index + 1} ({step.label}): {decision.value}{note}"[:500])
         if reply.progress is not None:
             await self._record_progress(plan, reply.progress)
+        keeps_work = decision is Decision.ACCEPT or (decision is Decision.REPLAN and context.acceptable)
+        if keeps_work and not await self._merged(plan, step):
+            return  # the decision turn on the failed merge took over
         if reply.final is not None:
             plan.final_summary = reply.final.markdown()
 
@@ -896,6 +1157,8 @@ class PlannerAgent:
             return
         elif decision is Decision.REPLAN:
             step.status = "verified" if context.acceptable else "skipped"
+            if step.status == "skipped":
+                await self._drop_workspace(step)
             await self._replan(plan, reply.steps, step, reply.reason)
         elif decision is Decision.FAIL:
             step.status = "failed"
@@ -924,6 +1187,7 @@ class PlannerAgent:
         dropped = [s for s in plan.steps if s.status == "pending" and s.label not in keep]
         for step in dropped:
             step.status = "skipped"
+            await self._drop_workspace(step)
         steps = self._add_steps(plan, specs)
         summary = f"Plan changed: {self._describe(plan, steps) or 'no new steps'}"
         if dropped:
@@ -1055,7 +1319,10 @@ class PlannerAgent:
             if plan.status not in _LIVE:
                 return
             if status == "deciding" and step.status == status:
-                await self._decide_again(plan, step)
+                if step.workspace is not None and step.workspace.state is StepWorkspaceState.MERGING:
+                    await self._finish_merge(plan, step)  # it was accepted: only its merge was cut off
+                else:
+                    await self._decide_again(plan, step)
         if plan.status not in _LIVE:
             return
         await self._report_progress(plan)
@@ -1225,10 +1492,12 @@ class PlannerAgent:
             except Exception:
                 logger.debug("planner %s could not stop worker %s", self.agent_id, step.worker_id, exc_info=True)
             step.status = "skipped"
+            await self._drop_workspace(step)
         keep = {spec.id for spec in reply.steps}
         dropped = [s for s in plan.steps if s.status == "pending" and s.label not in keep]
         for step in dropped:
             step.status = "skipped"
+            await self._drop_workspace(step)
         steps = self._add_steps(plan, reply.steps)
         summary = f"Plan changed: {self._describe(plan, steps) or 'no new steps'}"
         if stopped:
@@ -1920,6 +2189,7 @@ class PlannerAgent:
         await self._save(plan, plan_row=True)
         await update_task_phase(self._task_id, "completed")
         await self._activity("phase", "All steps verified — task completed")
+        await self._remove_workspaces()
         if self._execution.lessons_on:
             # Before the final status: the TaskRouter ends the Planner when it gets it.
             await self._distill_lessons(plan)
@@ -2021,6 +2291,10 @@ class PlannerAgent:
         summary = closing_note(plan.fail_reason or "A step failed and the Planner could not go on.",
                                ((s.label, s.status, s.result) for s in plan.steps))
         await self._activity("error", f"Task failed: {plan.fail_reason or 'see step details'}"[:500])
+        kept = [s.workspace.branch for s in plan.steps if s.isolated and s.workspace is not None]
+        if kept:
+            await self._activity("phase", f"Kept {len(kept)} step worktree(s) with work not merged, until the task "
+                                          f"is restarted or deleted: {', '.join(kept)}"[:500])
 
         await self._bus.publish(MessageEnvelope.create(
             source=self.agent_address,
@@ -2177,8 +2451,12 @@ class PlannerAgent:
         await self._refresh_project(plan)
         again: list[PlanStep] = []
         review: list[PlanStep] = []
+        merging: list[PlanStep] = []
         for step in plan.steps:
-            if step.status in ("dispatched", "deciding"):
+            if step.status == "deciding" and step.workspace is not None and \
+                    step.workspace.state is StepWorkspaceState.MERGING:
+                merging.append(step)  # accepted: only its merge was cut off
+            elif step.status in ("dispatched", "deciding"):
                 step.status = "pending"
                 again.append(step)
             elif step.status == "completed":
@@ -2195,6 +2473,10 @@ class PlannerAgent:
                                       + (f": {', '.join(cut_short)}" if cut_short else ""))
         for step in review:
             await self._send_to_review(plan, step)
+        for step in merging:
+            await self._finish_merge(plan, step)
+            if plan.status not in _LIVE:
+                return
         if plan.is_complete:
             await self._complete_plan(plan)
             return
@@ -2335,6 +2617,8 @@ class PlannerAgent:
             session_provider=session.get("provider_id"),
             final_summary=row.get("final_summary") or "",
             fail_reason=row.get("fail_reason") or "",
+            start_branch=row.get("start_branch") or "",
+            start_commit=row.get("start_commit") or "",
         )
         for sd in stored["steps"]:
             plan.steps.append(PlanStep(
@@ -2356,4 +2640,13 @@ class PlannerAgent:
                 missed_messages=list(sd.get("missed_messages") or []),
             ))
         plan.journal = [JournalEntry.from_row(row) for row in stored.get("journal") or []]
+        try:
+            rows = await db_step_workspaces.list_for_task(self._task_id)
+        except Exception:
+            logger.exception("planner %s cannot read its step workspaces", self.agent_id)
+            rows = []
+        latest = {row["step_id"]: row for row in rows}  # oldest first: a step's newest wins
+        for step in plan.steps:
+            if step.step_id in latest:
+                step.workspace = StepWorkspace.from_row(latest[step.step_id])
         self._plan = plan

@@ -15,7 +15,11 @@ Every field is optional, and ``None`` inherits today's behavior:
   task's journal: nothing (``off``, the default), a lessons draft the user
   confirms into the project's knowledge or discards (``draft``), or a lessons
   document in it (``write``). ``true`` and ``false``, from before the three
-  modes, are taken as ``write`` and ``off``.
+  modes, are taken as ``write`` and ``off``;
+- ``step_workspaces``: where a step that runs alongside others works: the
+  task directory (``shared``, also when unset) or, when the task directory is
+  a git checkout on a branch, a worktree of its own that is merged into the
+  branch when the step is accepted (``worktree``, ``step_workspaces``).
 
 The columns live on ``projects`` (``db.projects.EXECUTION_COLUMNS``); this
 module owns their types and validation. Agents read them when a run or turn
@@ -51,6 +55,11 @@ class TaskBudgetAction(str, Enum):
     FAIL = "fail"
 
 
+class StepWorkspaces(str, Enum):
+    SHARED = "shared"
+    WORKTREE = "worktree"
+
+
 class LessonsMode(str, Enum):
     OFF = "off"
     DRAFT = "draft"
@@ -64,6 +73,7 @@ class ProjectExecution:
     supervise_interval_seconds: int | None = None
     review_policy: ReviewPolicy | None = None
     distill_lessons: LessonsMode = LessonsMode.OFF
+    step_workspaces: StepWorkspaces | None = None
 
     @property
     def review_all(self) -> bool:
@@ -72,6 +82,11 @@ class ProjectExecution:
     @property
     def lessons_on(self) -> bool:
         return self.distill_lessons is not LessonsMode.OFF
+
+    @property
+    def isolate_steps(self) -> bool:
+        """Whether steps that run alongside others get worktrees of their own."""
+        return self.step_workspaces is StepWorkspaces.WORKTREE
 
     @property
     def on_task_budget(self) -> TaskBudgetAction:
@@ -124,6 +139,8 @@ def _parse(field: str, raw: Any) -> Any:
         return _choice(field, raw, TaskBudgetAction)
     if field == "review_policy":
         return _choice(field, raw, ReviewPolicy)
+    if field == "step_workspaces":
+        return _choice(field, raw, StepWorkspaces)
     if field == "supervise_interval_seconds":
         if isinstance(raw, bool) or not isinstance(raw, int) or not 0 <= raw <= SUPERVISE_MAX_SECONDS:
             raise ValueError(f"supervise_interval_seconds must be a whole number of seconds from 0 (never) "

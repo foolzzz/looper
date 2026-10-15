@@ -27,6 +27,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .. import step_workspaces
 from ..agent_settings import AgentType, load_concurrency
 from ..broadcast import Broadcaster
 from ..bus import MessageBus
@@ -546,6 +547,12 @@ class TaskRouter:
             logger.warning("task %s status=%s not restartable", task_id, db_row["status"])
             return
 
+        if not resume:
+            # Planned anew: the steps go, and so do their worktrees and branches.
+            try:
+                await step_workspaces.remove_task(task_id)
+            except Exception:
+                logger.warning("could not remove the step worktrees of task %s", task_id, exc_info=True)
         try:
             await db_tasks.reset_task_for_restart(task_id, keep_steps=resume)
         except Exception:

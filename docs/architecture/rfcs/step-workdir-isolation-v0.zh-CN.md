@@ -1,6 +1,6 @@
 # RFC：并行步骤的工作目录隔离（v0）
 
-- **状态：** 设计提案，待维护者审阅。第 9 节的问题已由维护者答复：合回改为把步骤分支合并进用户检出的分支并保留提交，各节已按此修订。
+- **状态：** 已批准。I1 已实现（项目设置默认 `shared`，按项目开启），实现见 [Agent 系统架构](../agent-system.md#step-workspaces)；I2、I3 未开始。第 9 节的问题由维护者答复：合回改为把步骤分支合并进用户检出的分支并保留提交，各节已按此修订。
 - **开发计划：** [长程 Agent 上下文体系开发计划](../../plans/2026-10-13-long-horizon-agent-context.zh-CN.md) 第 5.0 节第 11 项。
 - **最近更新：** 2026-10-15
 
@@ -89,7 +89,8 @@ step_workspaces                      一个隔离步骤的一个工作区
   id              BIGSERIAL
   task_id         → tasks ON DELETE CASCADE
   step_id         → task_steps.id ON DELETE CASCADE
-  repo_dir        任务目录
+  repo_dir        仓库顶层：任务目录，或任务目录所在的上级目录
+  subdir          任务目录相对 repo_dir 的路径，'' 表示就是顶层；Worker 在 worktree 里的同一位置运行
   target_branch   B，如 refs/heads/main
   path            <runtime_root>/worktrees/<task_id>/<key>-<id>
   branch          looper/<task_id>/<key>-<id>      <key>：step_key 里 git 引用名不允许的字符换成 -
@@ -158,7 +159,8 @@ step_workspaces                      一个隔离步骤的一个工作区
 
 **清理**（`git worktree remove --force`、`git branch -D`，写 `removed_at`；Q4）：
 
-- 任务完成：删掉全部工作区。已合回步骤的提交通过合并提交留在 B 上。
+- 合回之后：立即删掉这个工作区的目录和分支，它的提交通过合并提交留在 B 上。
+- 任务完成：删掉剩下的全部工作区和分支（包括合并失败后保留的旧分支）。
 - 任务失败、停止、取消：已合回、已丢弃的删掉；没合回的（`active`、`unmerged`）保留目录和分支，用户可以去取半成品。
 - 重启：重新规划先删掉这个任务的全部工作区，再删步骤；从计划续跑则保留，没验收的步骤在原工作区里继续（同 `_resume`）。
 - 删除任务：全部删掉。

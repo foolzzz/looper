@@ -255,6 +255,8 @@ function executionRows(project: Project): [string, string][] {
       "Planner supervision",
       project.supervise_interval_seconds === 0 ? "Off" : `Every ${project.supervise_interval_seconds} s`,
     ]);
+  if (project.step_workspaces === "worktree")
+    rows.push(["Steps at the same time", "A git worktree each, merged into the branch when accepted"]);
   if (project.distill_lessons !== "off")
     rows.push([
       "Lessons",

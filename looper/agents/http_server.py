@@ -1080,6 +1080,11 @@ class AgentHTTPServer:
             await writer.drain()
             return
 
+        from . import step_workspaces
+        try:
+            await step_workspaces.remove_task(task_id)
+        except Exception:
+            logger.warning("could not remove the step worktrees of task %s", task_id, exc_info=True)
         await delete_task(task_id)
         writer.write(_json_response(HTTP_200, {"deleted": task_id}))
         await writer.drain()
