@@ -8,6 +8,7 @@ import { LABEL, SELECT } from "@/components/registry-ui";
 import { fetchAllSchedules, fetchSchedule, runSchedule, updateSchedule, type ScheduleInfo } from "@/lib/api";
 import { lastFiredAt, omit, runNotice, useNotices, type Notice } from "@/lib/schedules";
 import { errorText } from "@/lib/use-action";
+import { useProjects } from "@/lib/use-projects";
 import { formatUsd } from "@/lib/usage";
 import { cn } from "@/lib/utils";
 
@@ -37,6 +38,25 @@ function byProject(schedules: ScheduleInfo[]): ProjectGroup[] {
 }
 
 const onCount = (schedules: ScheduleInfo[]) => schedules.filter((s) => s.enabled).length;
+
+type Status = "all" | "enabled" | "disabled";
+
+/** The list's filters as the hash query has them (`project=<id>&enabled=true|false`); an unknown status is all. */
+function readFilters(query: string): { project: string; status: Status } {
+  const params = new URLSearchParams(query);
+  const enabled = params.get("enabled");
+  return { project: params.get("project") ?? "", status: enabled === "true" ? "enabled" : enabled === "false" ? "disabled" : "all" };
+}
+
+/** The hash query for these filters; "" for none. */
+function filterQuery(project: string, status: Status): string {
+  const params = new URLSearchParams();
+  if (project) params.set("project", project);
+  if (status !== "all") params.set("enabled", String(status === "enabled"));
+  return params.toString();
+}
+
+const byLowerName = (a: { name: string }, b: { name: string }) => a.name.toLowerCase().localeCompare(b.name.toLowerCase());
 
 /** When it runs next, in its own zone; a disabled one does not. */
 function NextRun({ schedule }: { schedule: ScheduleInfo }) {
@@ -141,22 +161,35 @@ function ScheduleRow({
   );
 }
 
-/** `#schedules`: every schedule; `#schedules/<id>`: one, with the runs it fired. */
-export function SchedulesPage({ sub }: { sub: string }) {
+/** `#schedules`: every schedule, filtered by the hash query (`?project=<id>&enabled=true|false`); `#schedules/<id>`:
+ * one, with the runs it fired. `onNavigate` changes the address. */
+export function SchedulesPage({
+  sub,
+  query,
+  onNavigate,
+}: {
+  sub: string;
+  query: string;
+  onNavigate: (sub: string, query?: string) => void;
+}) {
   const scheduleId = decodeURIComponent(sub.split("/")[0] ?? "");
-  return scheduleId ? <ScheduleDetail key={scheduleId} scheduleId={scheduleId} /> : <ScheduleList />;
+  return scheduleId ? (
+    <ScheduleDetail key={scheduleId} scheduleId={scheduleId} />
+  ) : (
+    <ScheduleList query={query} onFilter={(next) => onNavigate("", next)} />
+  );
 }
 
 /**
  * Every project's schedules, the disabled ones too, by project: each with its switch and "Run now", its name opening
- * its detail view; it is edited on its project's Schedules tab.
+ * its detail view; it is edited on its project's Schedules tab. A project and a status filter, kept in the address
+ * (`query`), narrow the list; `onFilter` sets them.
  */
-function ScheduleList() {
+function ScheduleList({ query, onFilter }: { query: string; onFilter: (query: string) => void }) {
   const id = useId();
   const [schedules, setSchedules] = useState<ScheduleInfo[] | null>(null);
   const [error, setError] = useState("");
-  /** The project shown; "" for all. */
-  const [project, setProject] = useState("");
+  const { projects } = useProjects();
   /** The enabled value being saved, by schedule. */
   const [switching, setSwitching] = useState<Record<string, boolean>>({});
   /** Schedules whose "Run now" is on its way. */
@@ -217,10 +250,22 @@ function ScheduleList() {
   };
 
   const groups = byProject(schedules ?? []);
-  // A project that has no schedule any more shows them all again.
-  const current = groups.some((g) => g.projectId === project) ? project : "";
-  const shown = current ? groups.filter((g) => g.projectId === current) : groups;
   const total = schedules?.length ?? 0;
+  // Every project is a choice (its schedules' groups until the project list has loaded); an unknown one is all.
+  const options = projects
+    ? projects.map((p) => ({ projectId: p.project_id, name: p.name })).sort(byLowerName)
+    : groups.map((g) => ({ projectId: g.projectId, name: g.name }));
+  const wanted = readFilters(query);
+  const project = options.some((o) => o.projectId === wanted.project) ? wanted.project : "";
+  const status = wanted.status;
+  const filtered = project !== "" || status !== "all";
+  const matches = (s: ScheduleInfo) => status === "all" || s.enabled === (status === "enabled");
+  // A group keeps all its schedules for its "N of M on", and shows those that match.
+  const shown = groups
+    .filter((g) => !project || g.projectId === project)
+    .map((g) => ({ ...g, visible: g.schedules.filter(matches) }))
+    .filter((g) => g.visible.length > 0);
+  const shownCount = shown.reduce((n, g) => n + g.visible.length, 0);
 
   return (
     <div className="space-y-6 p-6">
@@ -233,27 +278,55 @@ function ScheduleList() {
             Turn a schedule on or off or run it now; open one to see the runs it fired.
           </p>
         </div>
-        {groups.length > 1 && (
+      </div>
+
+      {schedules && (
+        <div role="group" aria-label="Filters" className="flex flex-wrap items-end gap-3">
           <div className="w-full space-y-1 sm:w-56">
             <label htmlFor={`${id}-project`} className={LABEL}>
               Project
             </label>
             <select
               id={`${id}-project`}
-              value={current}
-              onChange={(e) => setProject(e.target.value)}
+              value={project}
+              onChange={(e) => onFilter(filterQuery(e.target.value, status))}
               className={SELECT}
             >
               <option value="">All projects</option>
-              {groups.map((g) => (
-                <option key={g.projectId} value={g.projectId}>
-                  {g.name}
+              {options.map((o) => (
+                <option key={o.projectId} value={o.projectId}>
+                  {o.name}
                 </option>
               ))}
             </select>
           </div>
-        )}
-      </div>
+          <div className="w-full space-y-1 sm:w-44">
+            <label htmlFor={`${id}-status`} className={LABEL}>
+              Status
+            </label>
+            <select
+              id={`${id}-status`}
+              value={status}
+              onChange={(e) => onFilter(filterQuery(project, e.target.value as Status))}
+              className={SELECT}
+            >
+              <option value="all">All</option>
+              <option value="enabled">Enabled</option>
+              <option value="disabled">Disabled</option>
+            </select>
+          </div>
+          {filtered && (
+            <div className="flex min-h-9 items-center gap-3 text-xs text-muted-foreground">
+              <span>
+                Showing {shownCount} of {total}
+              </span>
+              <Button type="button" variant="ghost" size="sm" onClick={() => onFilter("")} className="h-11 sm:h-8">
+                Clear filters
+              </Button>
+            </div>
+          )}
+        </div>
+      )}
 
       {!schedules ? (
         error ? (
@@ -276,6 +349,14 @@ function ScheduleList() {
               No schedules yet. A schedule belongs to a project: add one on the project&apos;s Schedules tab.
             </p>
           )}
+          {total > 0 && shownCount === 0 && (
+            <div className="flex flex-col items-center gap-3 rounded-lg border border-dashed border-border px-5 py-6 text-center text-sm text-muted-foreground">
+              <p>No schedules match these filters.</p>
+              <Button type="button" variant="outline" size="sm" onClick={() => onFilter("")}>
+                Clear filters
+              </Button>
+            </div>
+          )}
           {shown.map((group) => (
             <section key={group.projectId} aria-labelledby={`${id}-${group.projectId}`} className="space-y-2">
               <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
@@ -294,7 +375,7 @@ function ScheduleList() {
                 </span>
               </div>
               <ul className="space-y-2">
-                {group.schedules.map((schedule) => {
+                {group.visible.map((schedule) => {
                   const sid = schedule.schedule_id;
                   return (
                     <ScheduleRow
