@@ -113,7 +113,9 @@ else:
         elif "needs a passing review" in text:
             reply = {"decision": "review", "reason": "c needs a look"}
         elif text.startswith("[DECISION]"):
-            reply = {"decision": "accept", "reason": "meets the criteria", "summary": "all four steps done"}
+            reply = {"decision": "accept", "reason": "meets the criteria", "summary": "all four steps done",
+                     "final": {"delivered": "all four steps done", "how_to_use": "run d",
+                               "verification": "each step's check passed", "open_issues": "none"}}
         else:
             reply = {"reviews": []}
         cost += 0.001
@@ -179,7 +181,7 @@ def test_a_task_carries_on_after_the_server_restarts(tmp_path: Path) -> None:
             records = api.get("/api/llm-records", task_id=task_id, limit=500)["records"]
 
     assert after["status"] == "completed", (after.get("error"), (root / "second.log").read_text()[-3000:])
-    assert after["result_summary"] == "all four steps done"
+    assert after["result_summary"].startswith("## Delivered\nall four steps done\n\n## How to use\nrun d")
     assert before["status"] == "executing"
     assert (_steps(before)["b"]["retries"], _steps(before)["b"]["feedback"]) == (1, ["fix the parser"])
     steps = _steps(after)

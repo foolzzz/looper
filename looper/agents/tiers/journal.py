@@ -19,7 +19,10 @@ change it records (``db.plans.save``); the model never writes one. The kinds
 - ``session_switch``: the Planner starts a new session for the task: why, and
   from which runtime and agent to which;
 - ``handoff``: before a switch, what the old session wrote for the next one
-  (its understanding of the codebase, unfinished reasoning, open risks).
+  (its understanding of the codebase, unfinished reasoning, open risks);
+- ``progress``: the progress note a DECISION or SUPERVISE reply carried
+  (``planner_protocol.ProgressNote``, as JSON), for the task page only: no
+  agent's section shows it (``progress_notes``).
 
 The entries come back as bounded sections:
 
@@ -77,6 +80,7 @@ class JournalKind(str, Enum):
     USER_INSTRUCTION = "user_instruction"
     SESSION_SWITCH = "session_switch"
     HANDOFF = "handoff"
+    PROGRESS = "progress"
 
 
 # How a section heads each kind, in the order the Planner's section shows them: pitfalls first.
@@ -299,6 +303,20 @@ def worker_section(entries: Sequence[JournalEntry], depends_on: Sequence[str]) -
     if lines and findings:
         lines.append("")
     return "\n".join(lines + findings)
+
+
+def progress_notes(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """The progress notes in a task's journal rows (``db.journal.list_entries``), newest first: each note's fields
+    and when it was written (``at``)."""
+    from dataclasses import asdict
+
+    from .planner_protocol import ProgressNote
+
+    notes = []
+    for row in reversed(rows):
+        if row.get("kind") == JournalKind.PROGRESS.value and (note := ProgressNote.from_json(str(row.get("summary")))):
+            notes.append({**asdict(note), "at": row.get("created_at")})
+    return notes
 
 
 def lessons_journal(entries: Sequence[JournalEntry]) -> list[str]:

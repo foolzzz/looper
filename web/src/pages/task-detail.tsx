@@ -22,6 +22,7 @@ import {
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { ClampedText } from "@/components/clamped-text";
+import { Markdown } from "@/components/markdown";
 import { ScheduledBadge } from "@/components/scheduled-badge";
 import { historyHref } from "@/pages/agent-history";
 import { TaskCostBreakdown } from "@/components/task-cost";
@@ -56,6 +57,7 @@ import {
   type TaskDetail,
   type TaskStep,
   type JournalEntry,
+  type ProgressNote,
   type ActivityEvent,
 } from "@/lib/api";
 
@@ -472,27 +474,11 @@ function OverviewTab({ task, onContinued }: { task: TaskDetail; onContinued: () 
         </div>
       </div>
 
+      <TaskProgress task={task} />
+
       {task.cost && task.cost.runs > 0 && <TaskCostBreakdown cost={task.cost} />}
 
       <TaskConfigSection task={task} />
-
-      {task.result_summary && (
-        <div>
-          <h3 className="text-sm font-semibold mb-2">Result</h3>
-          <div className="rounded-lg border border-success/30 bg-success/5 px-4 py-3">
-            <p className="text-sm whitespace-pre-wrap">{task.result_summary}</p>
-          </div>
-        </div>
-      )}
-
-      {task.error && (
-        <div>
-          <h3 className="text-sm font-semibold mb-2">Error</h3>
-          <div className="rounded-lg border border-destructive/30 bg-destructive/5 px-4 py-3">
-            <p className="text-sm whitespace-pre-wrap text-destructive">{task.error}</p>
-          </div>
-        </div>
-      )}
 
       {steps.length > 0 && (
         <div>
@@ -551,6 +537,91 @@ function OverviewTab({ task, onContinued }: { task: TaskDetail; onContinued: () 
   );
 }
 
+// --- Progress: the Planner's notes, and the task's final summary or closing note ---
+
+const NOTE_FIELDS: [keyof Omit<ProgressNote, "at">, string][] = [
+  ["done", "Done"],
+  ["now", "Now"],
+  ["next", "Next"],
+  ["risks", "Risks"],
+  ["estimate", "Estimate"],
+];
+
+function NoteFields({ note }: { note: ProgressNote }) {
+  return (
+    <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-sm">
+      {NOTE_FIELDS.map(([field, label]) => (
+        <div key={field} className="contents">
+          <dt className="text-muted-foreground">{label}</dt>
+          <dd className="min-w-0 whitespace-pre-wrap break-words">{note[field]}</dd>
+        </div>
+      ))}
+    </dl>
+  );
+}
+
+// How an ended task's last word is shown: a completed task's final summary (its result), a failed one's closing
+// note (its error), a stopped one's closing note (its result).
+const ENDINGS: Record<string, { title: string; Icon: typeof CheckCircle2; box: string; label: string }> = {
+  completed: { title: "Final summary", Icon: CheckCircle2, box: "border-success/30 bg-success/5", label: "text-muted-foreground" },
+  failed: { title: "Closing note", Icon: AlertCircle, box: "border-destructive/30 bg-destructive/5", label: "text-destructive" },
+  stopped: { title: "Closing note", Icon: Pause, box: "border-border bg-card", label: "text-muted-foreground" },
+};
+
+/**
+ * Where the task stands: once it has ended, its final summary (completed) or closing note (failed, stopped) on top;
+ * then the Planner's latest progress note, and the earlier ones below it. Nothing while there is neither.
+ */
+function TaskProgress({ task }: { task: TaskDetail }) {
+  const notes = task.progress ?? [];
+  const ending = ENDINGS[task.status];
+  const endingText = ending && (task.status === "failed" ? task.error : task.result_summary);
+  if (!endingText && notes.length === 0) return null;
+  const [latest, ...earlier] = notes;
+  return (
+    <section aria-labelledby="task-progress-title">
+      <h3 id="task-progress-title" className="mb-2 text-sm font-semibold">
+        Progress
+      </h3>
+      <div className="space-y-3">
+        {ending && endingText && (
+          <div className={cn("rounded-lg border px-4 py-3", ending.box)}>
+            <p className={cn("mb-2 flex items-center gap-1.5 text-xs font-medium", ending.label)}>
+              <ending.Icon className="h-3.5 w-3.5" />
+              {ending.title}
+            </p>
+            {/* One heading per field, kept below the section's own heading. */}
+            <div className="[&_h2]:mb-1 [&_h2]:mt-4 [&_h2]:text-sm [&_h2]:font-semibold">
+              <Markdown>{endingText}</Markdown>
+            </div>
+          </div>
+        )}
+        {latest && (
+          <div className="rounded-lg border border-border bg-card px-4 py-3">
+            <p className="mb-2 text-xs text-muted-foreground">Latest note from the Planner · {formatTime(latest.at)}</p>
+            <NoteFields note={latest} />
+          </div>
+        )}
+        {earlier.length > 0 && (
+          <details className="rounded-lg border border-border bg-card">
+            <summary className="cursor-pointer px-4 py-2 text-xs text-muted-foreground">
+              Earlier notes ({earlier.length})
+            </summary>
+            <ol className="divide-y divide-border border-t border-border">
+              {earlier.map((note) => (
+                <li key={note.at} className="px-4 py-3">
+                  <p className="mb-1.5 text-xs text-muted-foreground">{formatTime(note.at)}</p>
+                  <NoteFields note={note} />
+                </li>
+              ))}
+            </ol>
+          </details>
+        )}
+      </div>
+    </section>
+  );
+}
+
 // --- Lessons: the draft a completed task left for review ---
 
 /** When the task's lessons wait as a draft (the project's distill_lessons "draft"), a link to review it. */
@@ -591,11 +662,14 @@ const JOURNAL_KINDS: Record<JournalEntry["kind"], { label: string; variant: Badg
   user_instruction: { label: "User", variant: "default" },
   session_switch: { label: "New session", variant: "outline" },
   handoff: { label: "Handoff", variant: "outline" },
+  progress: { label: "Progress", variant: "outline" },
 };
 
 /** The task journal, newest first: steps accepted, failed or retried with what their Worker and Reviewer
  * learned, the Planner's decisions, the user's instructions, and new Planner sessions with their handoffs. */
-function TaskFindings({ entries }: { entries: JournalEntry[] }) {
+function TaskFindings({ entries: all }: { entries: JournalEntry[] }) {
+  // The progress notes have a section of their own (TaskProgress).
+  const entries = all.filter((entry) => entry.kind !== "progress");
   if (entries.length === 0) return null;
   return (
     <div>

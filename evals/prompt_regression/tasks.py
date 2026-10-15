@@ -27,7 +27,7 @@ class EvalTask:
     files: dict[str, str] = field(default_factory=dict)  # seeded into the working directory
     chat: str | None = None  # sent to the task's Planner once its plan exists
     # min_steps, min_reviews, min_retries, min_chat_turns, min_independent_pairs, min_bracketed_pairs,
-    # min_parallel_workers
+    # min_parallel_workers, min_progress_notes, min_final_summary
     expect: dict[str, int] = field(default_factory=dict)
     fake: dict[str, Any] = field(default_factory=dict)  # the stand-in Claude's script
 
@@ -163,7 +163,8 @@ TASKS: tuple[EvalTask, ...] = (
                     "line. Then, as a separate step that depends on the first one, create sum.txt holding only "
                     "their sum, computed from numbers.txt.",
         check=_numbers_and_sum,
-        expect={"min_steps": 2},
+        # A task of several steps ends with a final summary of every field, and its decisions left progress notes.
+        expect={"min_steps": 2, "min_progress_notes": 1, "min_final_summary": 1},
         fake={
             "plan": [
                 _step("s1", "Create numbers.txt with 1 to 5, one per line.", ["numbers.txt holds 1..5"]),

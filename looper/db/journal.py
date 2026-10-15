@@ -17,7 +17,8 @@ import asyncpg
 from .connection import get_pool
 
 # Every kind an entry can have (task_journal.kind; agents.tiers.journal.JournalKind).
-KINDS = ("step_accepted", "step_failed", "step_retry", "decision", "user_instruction", "session_switch", "handoff")
+KINDS = ("step_accepted", "step_failed", "step_retry", "decision", "user_instruction", "session_switch", "handoff",
+         "progress")
 
 _INSERT = """
 INSERT INTO task_journal (task_id, step_id, kind, summary, learnings)

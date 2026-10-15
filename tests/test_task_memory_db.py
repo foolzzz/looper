@@ -72,7 +72,11 @@ else:
         elif text.startswith("[LESSONS]"):
             reply = {"lessons": os.environ["FAKE_LESSONS"]}
         else:
-            reply = {"decision": "accept", "reason": "meets the criteria", "summary": "all done"}
+            key = text.split()[2]  # [DECISION] Step <key> ...
+            reply = {"decision": "accept", "reason": "meets the criteria", "summary": "all done",
+                     "final": {"delivered": "all done", "how_to_use": "-", "verification": "-", "open_issues": "none"},
+                     "progress": {"done": f"{key} accepted", "now": "-", "next": "-", "risks": "none",
+                                  "estimate": "-"}}
         answer("fake-planner", fenced(reply))
 '''
 
@@ -126,8 +130,11 @@ def test_accepted_steps_are_journaled_fed_back_and_distilled_into_knowledge(
     assert done["status"] == "completed", (done.get("error"), (root / "serve.log").read_text()[-3000:])
     # An accepted step writes a journal entry with its summary and learnings, in the order accepted.
     journal = done["journal"]
-    assert [(e["step_key"], e["kind"], e["summary"], e["learnings"]) for e in journal] == [
+    assert [(e["step_key"], e["kind"], e["summary"], e["learnings"]) for e in journal if e["kind"] != "progress"] == [
         (key, "step_accepted", f"{key} done", LEARNINGS[key]) for key in "dxyc"]
+    # Each decision's progress note is kept too, and the task page gets them newest first.
+    assert [note["done"] for note in done["progress"]] == [f"{key} accepted" for key in "cyxd"]
+    assert all(note["at"] for note in done["progress"])
 
     # The Planner's next turn after d's acceptance carries d's entry, and the plan line its summary.
     turns = _log(state, "planner_turns.jsonl")
@@ -136,6 +143,7 @@ def test_accepted_steps_are_journaled_fed_back_and_distilled_into_knowledge(
     progress = on_x[on_x.index("Progress and findings"):on_x.index("Result of step x")]
     assert "- d: d done\n  - build needs `make gen` first" in progress
     assert "- d [verified] do d" in on_x and "  summary: d done" in on_x
+    assert "d accepted" not in on_x  # the progress notes are the task page's, not the agents'
 
     # c depends on d and y: their entries come first (in that order), then x's, though x is newer than d.
     worker = {run["step"]: run for run in _log(state, "workers.jsonl")}

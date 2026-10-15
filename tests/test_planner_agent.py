@@ -69,8 +69,18 @@ def plan(*steps: dict[str, Any]) -> str:
     return reply({"steps": list(steps)})
 
 
+# The final summary every scripted accept carries (code keeps it only on the decision that completes the task),
+# and how the task's result shows it.
+FINAL = {"delivered": "calc.py with add and its tests", "how_to_use": "import calc; calc.add(1, 2)",
+         "verification": "pytest: 3 passed", "open_issues": "none"}
+FINAL_RESULT = ("## Delivered\ncalc.py with add and its tests\n\n## How to use\nimport calc; calc.add(1, 2)\n\n"
+                "## Verification\npytest: 3 passed\n\n## Open issues\nnone")
+
+
 def decide(decision: str, **fields: Any) -> str:
-    return reply({"decision": decision, **fields})
+    if decision == "accept":
+        fields.setdefault("final", FINAL)
+    return reply({"decision": decision, **{k: v for k, v in fields.items() if v is not None}})
 
 
 def chat(answer: str, action: str = "none", **fields: Any) -> str:
@@ -305,7 +315,7 @@ class TestPlanning:
 
         final = h.final()
         assert final is not None and final.payload["status"] == "completed"
-        assert final.payload["summary"] == "calc is built and tested"  # the last accept's summary
+        assert final.payload["summary"] == FINAL_RESULT  # the final summary of the accept that completed it
         assert [item.payload["instruction"] for item in h.work_items] == ["do s1", "do s2", "do s3"]
         # s1 and s2 start together after the plan turn; s3 waits for both decisions.
         assert h.dispatched_at_turn == [1, 1, 3]
@@ -409,7 +419,7 @@ class TestDecisions:
         assert texts[3].startswith("[DECISION]") and "Review of step s1" in texts[3]
         final = h.final()
         assert final is not None and final.payload["status"] == "completed"
-        assert final.payload["summary"] == "reviewed and done"
+        assert final.payload["summary"] == FINAL_RESULT
 
     def test_failed_review_cannot_be_accepted(self, planner_claude: Any, agent_db: Any) -> None:
         claude = planner_claude(plan(step("s1", review=True)), decide("review"), decide("accept"))
@@ -1273,7 +1283,7 @@ class TestTaskEnd:
 
         asyncio.run(_run())
         final = agent_db.update_task_status.await_args_list
-        assert any(call.args[1] == "completed" and call.kwargs.get("result_summary") == "calc works"
+        assert any(call.args[1] == "completed" and call.kwargs.get("result_summary") == FINAL_RESULT
                    for call in final)
 
     def test_server_stop_during_a_teardown_still_reaps_claude(self, planner_claude: Any) -> None:
@@ -1336,3 +1346,46 @@ class TestTaskJournal:
         # Newest first: s3, then s2; s1, the oldest, is the one left out.
         assert section.index("- s3: s3 done") < section.index("- s2: s2 done")
         assert "s1-tip" not in section and "s3-tip4" in section
+
+
+@pytest.mark.usefixtures("agent_db")
+class TestProgressAndFinalSummary:
+    def test_progress_notes_go_to_the_journal_and_the_last_open_step_is_named(
+        self, planner_claude: Any, agent_db: Any,
+    ) -> None:
+        notes = [{"done": "nothing yet", "now": "s2", "next": "nothing", "risks": "none", "estimate": "a minute"},
+                 {"done": "s1 and s2", "now": "nothing", "next": "nothing", "risks": "none", "estimate": "done"}]
+        claude = planner_claude(plan(step("s1"), step("s2", "s1")), decide("accept", progress=notes[0]),
+                                decide("accept", progress=notes[1]))
+        final = drive(claude, always(WORK_OK)).final()
+
+        assert final is not None and final.payload["summary"] == FINAL_RESULT
+        # Each decision's note is a journal entry of the whole task, which the agents' sections leave out.
+        kept = [e for e in agent_db.store.journal["t1"] if e["kind"] == "progress"]
+        assert [(e["step_id"], json.loads(e["summary"])) for e in kept] == [("", note) for note in notes]
+        decisions = [t["text"] for t in claude.turns() if t["text"].startswith("[DECISION]")]
+        assert "nothing yet" not in decisions[1]
+        # Only the decision on the last open step is told it must carry the final summary.
+        assert "last open step" not in decisions[0] and "This is the task's last open step" in decisions[1]
+
+    def test_a_completing_accept_without_a_final_summary_gets_a_repair_turn(self, planner_claude: Any) -> None:
+        claude = planner_claude(plan(step("s1")), decide("accept", final=None), decide("accept"))
+        final = drive(claude, always(WORK_OK)).final()
+
+        assert final is not None and final.payload["summary"] == FINAL_RESULT
+        repair = claude.turns()[-1]["text"]
+        assert repair.startswith("[DECISION] Your last reply broke the reply contract")
+        assert 'must carry "final"' in repair
+
+    def test_a_stopped_task_gets_a_closing_note_from_its_saved_plan(self, agent_db: Any) -> None:
+        from looper.agents.tiers.task import TaskRouter
+
+        agent_db.store.plans["task-x"] = {"plan_id": "p1", "status": "executing"}
+        agent_db.store.steps["task-x"] = {
+            "a": {"id": "a", "key": "a", "index": 0, "status": "verified", "result": {"summary": "parser written"}},
+            "b": {"id": "b", "key": "b", "index": 1, "status": "dispatched", "result": None},
+        }
+        note = asyncio.run(TaskRouter._stop_note("task-x"))
+        assert note == ("## Why it ended\nThe task was stopped before it finished.\n\n## Done\n- a: parser written"
+                        "\n\n## Not done\n- b (was running)")
+

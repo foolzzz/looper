@@ -38,11 +38,11 @@ from ..message import (
     MessageType,
     planner_address,
 )
-from .planner import PlannerAgent
+from .planner import PlannerAgent, closing_note
 
 logger = logging.getLogger(__name__)
 
-from ...db import activity as db_activity, tasks as db_tasks
+from ...db import activity as db_activity, plans as db_plans, tasks as db_tasks
 
 # Told each task's id and final status when it ends.
 TaskEndListener = Callable[[str, str], Awaitable[None]]
@@ -445,7 +445,7 @@ class TaskRouter:
         task = self._tasks.get(task_id)
         if not task:
             try:
-                await db_tasks.update_task_status(task_id, "stopped")
+                await db_tasks.update_task_status(task_id, "stopped", result_summary=await self._stop_note(task_id))
             except Exception:
                 logger.exception("failed to mark orphan task %s stopped", task_id)
             await self._task_ended(task_id, "stopped")
@@ -463,7 +463,7 @@ class TaskRouter:
             ))
 
         try:
-            await db_tasks.update_task_status(task_id, "stopped")
+            await db_tasks.update_task_status(task_id, "stopped", result_summary=await self._stop_note(task_id))
         except Exception:
             logger.exception("failed to persist stop for task %s", task_id)
 
@@ -477,6 +477,19 @@ class TaskRouter:
         logger.info("task %s stopped", task_id)
         await self._task_ended(task_id, "stopped")
         await self.recheck()
+
+    @staticmethod
+    async def _stop_note(task_id: str) -> str:
+        """A stopped task's closing note, from its saved plan: what its steps delivered and what is not done."""
+        why = "The task was stopped before it finished."
+        try:
+            saved = await db_plans.load(task_id)
+        except Exception:
+            logger.warning("cannot read the plan of stopped task %s", task_id, exc_info=True)
+            saved = None
+        steps = (saved or {}).get("steps") or []
+        return closing_note(why, ((str(s.get("step_key") or s.get("id")), str(s.get("status")), s.get("result"))
+                                  for s in steps))
 
     async def _handle_restart(self, envelope: MessageEnvelope) -> None:
         """Run a task again: planned anew, or, with ``resume``, continued from its saved plan and steps."""

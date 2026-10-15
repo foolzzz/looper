@@ -200,7 +200,7 @@ CREATE TABLE IF NOT EXISTS task_journal (
     step_id     TEXT NOT NULL,
     kind        TEXT NOT NULL CONSTRAINT task_journal_kind_check CHECK (kind IN (
                     'step_accepted', 'step_failed', 'step_retry', 'decision', 'user_instruction',
-                    'session_switch', 'handoff')),
+                    'session_switch', 'handoff', 'progress')),
     summary     TEXT NOT NULL DEFAULT '',
     learnings   TEXT[] NOT NULL DEFAULT '{}',
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -398,6 +398,19 @@ BEGIN
             'step_accepted', 'step_failed', 'step_retry', 'decision', 'user_instruction', 'session_switch',
             'handoff'));
         INSERT INTO schema_migrations (name) VALUES ('task_journal_kinds_m7c');
+    END IF;
+END $$;
+
+-- Once (task progress): the Planner's progress notes join the journal kinds. After the block above, which
+-- sets the kinds before them, so a new database ends with these too.
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM schema_migrations WHERE name = 'task_journal_kinds_progress') THEN
+        ALTER TABLE task_journal DROP CONSTRAINT IF EXISTS task_journal_kind_check;
+        ALTER TABLE task_journal ADD CONSTRAINT task_journal_kind_check CHECK (kind IN (
+            'step_accepted', 'step_failed', 'step_retry', 'decision', 'user_instruction', 'session_switch',
+            'handoff', 'progress'));
+        INSERT INTO schema_migrations (name) VALUES ('task_journal_kinds_progress');
     END IF;
 END $$;
 

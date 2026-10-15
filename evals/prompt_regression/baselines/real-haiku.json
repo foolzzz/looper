@@ -4,17 +4,17 @@
   "model": "haiku",
   "agent": "claude-code/haiku",
   "provider_preset": null,
-  "started_at": "20261015T072512Z",
+  "started_at": "20261015T091550Z",
   "git": {
-    "commit": "0061eeb329c26bd5f93dc12957871af1dbf4c545",
+    "commit": "bec7c029d137a7b2ca9f27d2b03a1fcabcc82c3a",
     "dirty": false
   },
   "caps": {
     "max_budget_usd": 0.25,
-    "total_cap_usd": 0.6
+    "total_cap_usd": 0.8
   },
   "stopped_by_cap": false,
-  "total_cost_usd": 0.607836,
+  "total_cost_usd": 0.661849,
   "tasks": [
     {
       "id": "single_step",
@@ -26,23 +26,26 @@
       "retries": 0,
       "chat_turns": 0,
       "independent_pairs": 0,
+      "bracketed_pairs": 0,
       "parallel_workers": 1,
+      "progress_notes": 1,
+      "final_summary": 1,
       "planner_turns": {
         "plan": 1,
         "decision": 1
       },
-      "cost_usd": 0.042654,
+      "cost_usd": 0.043519,
       "cost_by_role": {
-        "planner": 0.020541,
-        "worker": 0.022112,
+        "planner": 0.022287,
+        "worker": 0.021232,
         "reviewer": 0.0
       },
       "runs": 3,
       "tokens": {
         "input": 46,
-        "output": 1469,
-        "cache_read": 87327,
-        "cache_creation": 13265
+        "output": 1568,
+        "cache_read": 87453,
+        "cache_creation": 13444
       },
       "cost_basis": {
         "equivalent": 3,
@@ -58,7 +61,7 @@
       "planner_edit_tool_paths": [],
       "planner_changed_files": [],
       "planner_modified_files": 0,
-      "duration_s": 30.3,
+      "duration_s": 22.2,
       "stopped_by_cap": false,
       "timed_out": false
     },
@@ -72,23 +75,26 @@
       "retries": 0,
       "chat_turns": 0,
       "independent_pairs": 0,
+      "bracketed_pairs": 0,
       "parallel_workers": 1,
+      "progress_notes": 2,
+      "final_summary": 1,
       "planner_turns": {
         "plan": 1,
         "decision": 2
       },
-      "cost_usd": 0.077275,
+      "cost_usd": 0.082148,
       "cost_by_role": {
-        "planner": 0.029196,
-        "worker": 0.048079,
+        "planner": 0.032594,
+        "worker": 0.049554,
         "reviewer": 0.0
       },
       "runs": 5,
       "tokens": {
         "input": 98,
-        "output": 2900,
-        "cache_read": 203408,
-        "cache_creation": 21168
+        "output": 3594,
+        "cache_read": 204400,
+        "cache_creation": 21820
       },
       "cost_basis": {
         "equivalent": 5,
@@ -104,7 +110,7 @@
       "planner_edit_tool_paths": [],
       "planner_changed_files": [],
       "planner_modified_files": 0,
-      "duration_s": 42.6,
+      "duration_s": 64.8,
       "stopped_by_cap": false,
       "timed_out": false
     },
@@ -118,23 +124,26 @@
       "retries": 0,
       "chat_turns": 0,
       "independent_pairs": 1,
+      "bracketed_pairs": 0,
       "parallel_workers": 2,
+      "progress_notes": 3,
+      "final_summary": 1,
       "planner_turns": {
         "plan": 1,
         "decision": 3
       },
-      "cost_usd": 0.118006,
+      "cost_usd": 0.127791,
       "cost_by_role": {
-        "planner": 0.039731,
-        "worker": 0.078275,
+        "planner": 0.043626,
+        "worker": 0.084165,
         "reviewer": 0.0
       },
       "runs": 7,
       "tokens": {
-        "input": 134,
-        "output": 5588,
-        "cache_read": 282763,
-        "cache_creation": 30828
+        "input": 142,
+        "output": 6768,
+        "cache_read": 305671,
+        "cache_creation": 31621
       },
       "cost_basis": {
         "equivalent": 7,
@@ -150,7 +159,7 @@
       "planner_edit_tool_paths": [],
       "planner_changed_files": [],
       "planner_modified_files": 0,
-      "duration_s": 56.7,
+      "duration_s": 81.2,
       "stopped_by_cap": false,
       "timed_out": false
     },
@@ -169,22 +178,24 @@
       "independent_pairs": 0,
       "bracketed_pairs": 0,
       "parallel_workers": 1,
+      "progress_notes": 3,
+      "final_summary": 1,
       "planner_turns": {
         "plan": 1,
         "decision": 3
       },
-      "cost_usd": 0.157071,
+      "cost_usd": 0.18072,
       "cost_by_role": {
-        "planner": 0.048903,
-        "worker": 0.108168,
+        "planner": 0.044115,
+        "worker": 0.136605,
         "reviewer": 0.0
       },
       "runs": 7,
       "tokens": {
-        "input": 206,
-        "output": 7973,
-        "cache_read": 475941,
-        "cache_creation": 34703
+        "input": 254,
+        "output": 9099,
+        "cache_read": 609110,
+        "cache_creation": 37030
       },
       "cost_basis": {
         "equivalent": 7,
@@ -200,7 +211,7 @@
       "planner_edit_tool_paths": [],
       "planner_changed_files": [],
       "planner_modified_files": 0,
-      "duration_s": 101.0,
+      "duration_s": 120.3,
       "stopped_by_cap": false,
       "timed_out": false
     },
@@ -214,23 +225,26 @@
       "retries": 0,
       "chat_turns": 0,
       "independent_pairs": 0,
+      "bracketed_pairs": 0,
       "parallel_workers": 1,
+      "progress_notes": 2,
+      "final_summary": 1,
       "planner_turns": {
         "plan": 1,
         "decision": 2
       },
-      "cost_usd": 0.069648,
+      "cost_usd": 0.080728,
       "cost_by_role": {
-        "planner": 0.027981,
-        "worker": 0.023197,
-        "reviewer": 0.018471
+        "planner": 0.037479,
+        "worker": 0.024288,
+        "reviewer": 0.018961
       },
       "runs": 5,
       "tokens": {
-        "input": 82,
-        "output": 2647,
-        "cache_read": 162569,
-        "cache_creation": 20037
+        "input": 90,
+        "output": 3871,
+        "cache_read": 185632,
+        "cache_creation": 21360
       },
       "cost_basis": {
         "equivalent": 5,
@@ -246,7 +260,7 @@
       "planner_edit_tool_paths": [],
       "planner_changed_files": [],
       "planner_modified_files": 0,
-      "duration_s": 38.4,
+      "duration_s": 54.7,
       "stopped_by_cap": false,
       "timed_out": false
     },
@@ -260,23 +274,26 @@
       "retries": 1,
       "chat_turns": 0,
       "independent_pairs": 0,
+      "bracketed_pairs": 0,
       "parallel_workers": 1,
+      "progress_notes": 2,
+      "final_summary": 1,
       "planner_turns": {
         "plan": 1,
         "decision": 2
       },
-      "cost_usd": 0.091997,
+      "cost_usd": 0.089344,
       "cost_by_role": {
-        "planner": 0.045334,
-        "worker": 0.046662,
+        "planner": 0.043741,
+        "worker": 0.045603,
         "reviewer": 0.0
       },
       "runs": 5,
       "tokens": {
         "input": 98,
-        "output": 4911,
-        "cache_read": 206699,
-        "cache_creation": 23337
+        "output": 4517,
+        "cache_read": 206750,
+        "cache_creation": 22993
       },
       "cost_basis": {
         "equivalent": 5,
@@ -292,7 +309,7 @@
       "planner_edit_tool_paths": [],
       "planner_changed_files": [],
       "planner_modified_files": 0,
-      "duration_s": 60.5,
+      "duration_s": 64.8,
       "stopped_by_cap": false,
       "timed_out": false
     },
@@ -306,24 +323,27 @@
       "retries": 0,
       "chat_turns": 1,
       "independent_pairs": 0,
+      "bracketed_pairs": 0,
       "parallel_workers": 1,
+      "progress_notes": 1,
+      "final_summary": 1,
       "planner_turns": {
         "plan": 1,
         "chat": 1,
         "decision": 1
       },
-      "cost_usd": 0.051185,
+      "cost_usd": 0.057599,
       "cost_by_role": {
-        "planner": 0.024416,
-        "worker": 0.026768,
+        "planner": 0.031592,
+        "worker": 0.026007,
         "reviewer": 0.0
       },
       "runs": 4,
       "tokens": {
-        "input": 64,
-        "output": 1951,
-        "cache_read": 128639,
-        "cache_creation": 14251
+        "input": 72,
+        "output": 2420,
+        "cache_read": 150755,
+        "cache_creation": 15176
       },
       "cost_basis": {
         "equivalent": 4,
@@ -339,7 +359,7 @@
       "planner_edit_tool_paths": [],
       "planner_changed_files": [],
       "planner_modified_files": 0,
-      "duration_s": 26.2,
+      "duration_s": 36.4,
       "stopped_by_cap": false,
       "timed_out": false
     }

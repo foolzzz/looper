@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from typing import Any
 
 import pytest
@@ -11,7 +12,9 @@ from looper.agents.tiers.planner_protocol import (
     MAX_STEPS,
     Decision,
     DecisionContext,
+    FinalSummary,
     PlanView,
+    ProgressNote,
     ProtocolError,
     ResultKind,
     extract_reply,
@@ -20,7 +23,7 @@ from looper.agents.tiers.planner_protocol import (
     parse_plan,
     parse_supervise,
 )
-from tests.test_planner_agent import chat, decide, plan, reply, step
+from tests.test_planner_agent import FINAL, FINAL_RESULT, chat, decide, plan, reply, step
 
 
 def _error(parse: Any, *args: Any, **kwargs: Any) -> str:
@@ -236,6 +239,42 @@ class TestSupervise:
     )
     def test_invalid_supervise_replies(self, text: str, error: str) -> None:
         assert error in _error(parse_supervise, text, RUNNING2.running)
+
+
+PROGRESS = {"done": "s0", "now": "s1", "next": "s2", "risks": "none", "estimate": "about 5 minutes"}
+
+
+class TestProgressAndFinal:
+    def test_a_decision_and_a_supervise_reply_may_carry_a_progress_note(self) -> None:
+        note = ProgressNote(**PROGRESS)
+        assert parse_decision(decide("review", progress=PROGRESS), _context(), VIEW).progress == note
+        assert parse_supervise(reply({"reviews": [], "progress": PROGRESS}), RUNNING2.running).progress == note
+        assert parse_decision(decide("review"), _context(), VIEW).progress is None
+        assert ProgressNote.from_json(note.to_json()) == note
+
+    @pytest.mark.parametrize(("progress", "error"), [
+        ("busy", "progress must be an object with done, now, next, risks, estimate"),
+        ({**PROGRESS, "eta": "soon"}, "progress has unknown keys: eta"),
+        ({**PROGRESS, "risks": " "}, "progress needs risks"),
+        ({k: v for k, v in PROGRESS.items() if k != "now"}, "progress needs now"),
+    ])
+    def test_an_invalid_progress_note_is_refused(self, progress: Any, error: str) -> None:
+        assert error in _error(parse_decision, decide("review", progress=progress), _context(), VIEW)
+        assert error in _error(parse_supervise, reply({"reviews": [], "progress": progress}), RUNNING2.running)
+
+    def test_the_decision_that_completes_the_task_must_carry_its_final_summary(self) -> None:
+        last = replace(_context(), last_open=True)
+        accepted = parse_decision(decide("accept"), last, VIEW)  # the scripted accept carries FINAL
+        assert accepted.final == FinalSummary(**FINAL) and accepted.final.markdown() == FINAL_RESULT
+        assert 'must carry "final"' in _error(parse_decision, decide("accept", final=None), last, VIEW)
+        assert 'must carry "final"' in _error(parse_decision, decide("replan", steps=[]), last, VIEW)
+        assert "final needs open_issues" in _error(
+            parse_decision, decide("accept", final={**FINAL, "open_issues": ""}), last, VIEW)
+        # A fail, or a replan with new steps, does not complete the task.
+        assert parse_decision(decide("fail", reason="r"), last, VIEW).final is None
+        assert parse_decision(decide("replan", steps=[step("s3")]), last, VIEW).final is None
+        # Not the last open step: an accept completes nothing, and its final summary is not kept.
+        assert parse_decision(decide("accept"), _context(), VIEW).final is None
 
 
 def test_contract_examples_parse() -> None:

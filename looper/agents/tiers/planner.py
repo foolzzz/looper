@@ -56,8 +56,8 @@ import asyncio
 import logging
 import time
 import uuid
-from collections.abc import Awaitable, Callable, Sequence
-from dataclasses import dataclass, field
+from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, TypeVar
 
@@ -99,6 +99,7 @@ from .planner_protocol import (
     DecisionContext,
     DecisionReply,
     PlanView,
+    ProgressNote,
     ProtocolError,
     ResultKind,
     StepSpec,
@@ -277,7 +278,8 @@ class TaskPlan:
     session_runtime: str | None = None
     session_profile: str | None = None
     session_provider: str | None = None
-    final_summary: str = ""  # the last accepted step's summary
+    # The task's result: the final summary of the decision that completed it, else the last accepted step's summary.
+    final_summary: str = ""
     fail_reason: str = ""
     # The task journal (task_journal), oldest first: an entry per accepted step, written as it is accepted.
     journal: list[JournalEntry] = field(default_factory=list)
@@ -289,6 +291,10 @@ class TaskPlan:
     @property
     def has_failed(self) -> bool:
         return any(s.status == "failed" for s in self.steps)
+
+    def last_open(self, step: PlanStep) -> bool:
+        """Whether ``step`` is the only step not done: settling it settles the task."""
+        return all(s.status in ("verified", "skipped") for s in self.steps if s is not step)
 
     def ready_steps(self) -> list[PlanStep]:
         """Steps whose dependencies are all verified."""
@@ -371,6 +377,36 @@ def _step_row(step: PlanStep) -> dict[str, Any]:
 def _clip(text: Any, limit: int) -> str:
     flat = " ".join(str(text or "").split())
     return flat if len(flat) <= limit else flat[: limit - 1] + "…"
+
+
+def result_outcome(result: Mapping[str, Any]) -> str:
+    """What a step's last result was, in a line: what a retry, a failure or an unfinished step is about."""
+    if "verify_passed" in result and result.get("verify_passed") is not True:
+        findings = "; ".join(_clip(f, 200) for f in result.get("verify_findings") or [] if str(f).strip())
+        return f"review failed: {findings or _clip(result.get('verify_summary'), 300) or 'no reason given'}"
+    status = str(result.get("status") or "unknown")
+    detail = result.get("summary") if status == "completed" else result.get("error") or result.get("summary")
+    return f"{status}: {_clip(detail, 400) or 'no reason given'}"
+
+
+# How a closing note names a step that is not done, by its status.
+_NOT_DONE = {"pending": "not started", "dispatched": "was running", "deciding": "awaiting a decision",
+             "completed": "awaiting review", "failed": "failed"}
+
+
+def closing_note(why: str, steps: Iterable[tuple[str, str, Mapping[str, Any] | None]]) -> str:
+    """What a task that ended without completing leaves as its result: why it ended, what its steps delivered, and
+    what is not done. ``steps`` are (label, status, last result); a dropped step is neither."""
+    done: list[str] = []
+    not_done: list[str] = []
+    for label, status, result in steps:
+        if status == "verified":
+            done.append(f"- {label}: {_clip((result or {}).get('summary'), 300) or 'done'}")
+        elif status != "skipped":
+            outcome = f": {result_outcome(result)}" if result else ""
+            not_done.append(f"- {label} ({_NOT_DONE.get(status, status)}){outcome}")
+    return "\n\n".join([f"## Why it ended\n{why}", "## Done\n" + ("\n".join(done) or "- nothing"),
+                        "## Not done\n" + ("\n".join(not_done) or "- nothing")])
 
 
 def _learning_lines(value: Any) -> list[str]:
@@ -758,6 +794,7 @@ class PlannerAgent:
         Reviewer is spawned.
         """
         view = plan.view()
+        context = replace(context, last_open=plan.last_open(step))
         step.status = "deciding"
         message = self._decision_message(plan, step, context, report)
         # Saved with its result and the late messages, so a restart can take the decision again.
@@ -797,10 +834,14 @@ class PlannerAgent:
         if decision is Decision.RETRY:
             note = f": {reply.feedback}"
         await self._activity("phase", f"Planner decision on step {step.index + 1} ({step.label}): {decision.value}{note}"[:500])
+        if reply.progress is not None:
+            await self._record_progress(plan, reply.progress)
+        if reply.final is not None:
+            plan.final_summary = reply.final.markdown()
 
         if decision is Decision.ACCEPT:
             step.status = "verified"
-            if reply.summary:
+            if reply.summary and reply.final is None:
                 plan.final_summary = reply.summary
         elif decision is Decision.REVIEW:
             await self._send_to_review(plan, step)
@@ -906,13 +947,7 @@ class PlannerAgent:
     @staticmethod
     def _outcome(step: PlanStep) -> str:
         """What ``step``'s last result was, in a line: what a retry or a failure is about."""
-        result = step.result or {}
-        if "verify_passed" in result and result.get("verify_passed") is not True:
-            findings = "; ".join(_clip(f, 200) for f in result.get("verify_findings") or [] if str(f).strip())
-            return f"review failed: {findings or _clip(result.get('verify_summary'), 300) or 'no reason given'}"
-        status = str(result.get("status") or "unknown")
-        detail = result.get("summary") if status == "completed" else result.get("error") or result.get("summary")
-        return f"{status}: {_clip(detail, 400) or 'no reason given'}"
+        return result_outcome(step.result or {})
 
     async def _capture_project_learnings(self, plan: TaskPlan, step: PlanStep, value: Any, who: str) -> None:
         """Save the learnings ``who`` (the step's Worker or Reviewer) reported as holding for the whole project as
@@ -1174,6 +1209,8 @@ class PlannerAgent:
         except PlannerTurnError as exc:
             await self._activity("error", f"Planner could not supervise the running steps: {exc}"[:500])
             return
+        if reply.progress is not None:
+            await self._record_progress(plan, reply.progress)
         for review in reply.reviews:
             step = next((s for s in plan.steps if s.label == review.step and s.status == "dispatched"), None)
             if step is None:
@@ -1182,6 +1219,11 @@ class PlannerAgent:
                 await self._nudge_worker(plan, step, review.text)
             elif review.action is SuperviseAction.KILL:
                 await self._kill_and_decide(plan, step, review.reason)
+
+    async def _record_progress(self, plan: TaskPlan, note: ProgressNote) -> None:
+        """Keep a progress note the Planner's reply carried, as a journal entry of the whole task: the task page
+        shows the newest first (``journal.progress_notes``)."""
+        await self._save(plan, entries=[JournalEntry("", "", note.to_json(), kind=JournalKind.PROGRESS)])
 
     async def _nudge_worker(self, plan: TaskPlan, step: PlanStep, text: str) -> None:
         message = (
@@ -1702,6 +1744,9 @@ class PlannerAgent:
             lines += [f"- {_clip(m, 500)}" for m in step.missed_messages]
         if context.result is ResultKind.WORK and context.succeeded and context.review_required:
             lines += ["", "This step needs a passing review before it can be accepted."]
+        if context.last_open:
+            lines += ["", "This is the task's last open step: a decision that completes the task (accept, or replan "
+                          'with no new steps) must carry "final", the task\'s final summary.']
         lines += ["", f"Allowed decisions now: {', '.join(allowed)}.", "Reply with the DECISION JSON."]
         return "\n".join(lines)
 
@@ -1828,19 +1873,9 @@ class PlannerAgent:
         await self._save(plan, plan_row=True)
         await update_task_phase(self._task_id, "failed")
 
-        lines = []
-        if plan.fail_reason:
-            lines.append(plan.fail_reason)
-        for step in plan.steps:
-            if step.status == "failed":
-                result = step.result or {}
-                findings = "; ".join(str(f) for f in result.get("verify_findings") or [])
-                if result.get("verify_passed") is False:
-                    error = f"review failed: {findings or result.get('verify_summary') or '未知原因'}"
-                else:
-                    error = result.get("error") or result.get("summary") or "未知错误"
-                lines.append(f"  - {step.instruction[:50]}: {error}")
-        summary = "任务失败:\n" + "\n".join(lines) if lines else "任务失败"
+        # The closing note: why the task failed, what its steps delivered and what is not done.
+        summary = closing_note(plan.fail_reason or "A step failed and the Planner could not go on.",
+                               ((s.label, s.status, s.result) for s in plan.steps))
         await self._activity("error", f"Task failed: {plan.fail_reason or 'see step details'}"[:500])
 
         await self._bus.publish(MessageEnvelope.create(
