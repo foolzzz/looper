@@ -10,7 +10,8 @@ which makes each turn's scripted tool calls over MCP; real mode runs Claude
 Code. The run stops at the total spending cap.
 
 Cases (Manager tools RFC, section 12): asking for the project when the user
-named none; creating, starting and stopping a task; a supplement, a
+named none; the whole ask → restate → 「确认」 → create → 「开始」 → start
+flow, with no raw JSON in any reply; creating, starting and stopping a task; a supplement, a
 requirement edit and an Agent Profile for a running task; cancelling only
 after the user's confirmation, and nothing after a refusal; and, for any
 runtime, a read-only status question (``status``).
@@ -121,6 +122,28 @@ def _created_ready(look: Look) -> str | None:
     return None if "任务已创建" in look.reply else "the reply lacks the task's configuration"
 
 
+def _raw_json(reply: str) -> str | None:
+    """A reply that shows the user raw JSON (a tool call or its answer) instead of words."""
+    return "the reply shows raw JSON" if any(mark in reply for mark in ('{"', '"action"', "```json")) else None
+
+
+def _restated_and_asked(look: Look) -> str | None:
+    return _raw_json(look.reply) or _asked_for_the_project(look)
+
+
+def _created_with_a_title(look: Look) -> str | None:
+    found = _raw_json(look.reply) or _created_ready(look)
+    if found:
+        return found
+    created = _writes(look, status="ok", tool="looper_task_create")
+    titled = [a for a in created if str(a["arguments"].get("title") or "").strip()]
+    return None if titled else "looper_task_create ran without a title"
+
+
+def _started(look: Look) -> str | None:
+    return _raw_json(look.reply) or _status_is(*ACTIVE, newest=True)(look)
+
+
 def _status_is(*statuses: str, seconds: float = 30.0, newest: bool = False) -> Callable[[Look], str | None]:
     def check(look: Look) -> str | None:
         def problem() -> str | None:
@@ -191,6 +214,12 @@ _CREATE = ("looper_task_create", {"requirement": SLOW_TASK, "title": "hello 脚�
 DIALOGS: tuple[Dialog, ...] = (
     Dialog("ask_project", (
         Say("帮我写一个 Python 脚本 hello.py，打印 hello。", _asked_for_the_project),
+    )),
+    Dialog("confirm_create_start", (
+        Say(f"帮我写个小脚本：在 {PROJECT} 项目里创建 hello.py，运行时打印 hello，目录用项目默认的。", _restated_and_asked),
+        Say("确认", _created_with_a_title, (("looper_task_create", {
+            "requirement": "在工作目录里创建 hello.py，运行时打印 hello。", "title": "hello 脚本", "project": PROJECT}),)),
+        Say("开始", _started, (("looper_task_control", {"task_id": "<task id>", "action": "start"}),)),
     )),
     Dialog("create_start_stop", (
         Say(f"在 {PROJECT} 项目里建一个任务：先在工作目录里运行 sleep 300，再创建 done.txt，内容是 done。"
@@ -323,12 +352,25 @@ def run_dialog(api: Api, dialog: Dialog, *, database_url: str, project_id: str, 
             "duration_s": round(time.monotonic() - started, 1)}
 
 
+def _manager_profile(api: Api, model: str, effort: str | None) -> dict[str, Any]:
+    """Claude Code with ``model`` and ``effort`` for the Manager alone (its role layer), registered if missing."""
+    name = f"claude-code/{model}" + (f" · {effort}" if effort else "")
+    profiles = {p["name"]: p for p in api.get("/api/registry")["profiles"]}
+    chosen = profiles.get(name) or api.post("/api/agent-profiles", {
+        "name": name, "runtime_id": "rt-claude-code", "provider_id": "prov-claude-subscription", "model": model,
+        **({"effort": effort} if effort else {})})["profile"]
+    api.put("/api/agent-settings/roles/manager", {"profile_id": chosen["profile_id"]})
+    return chosen
+
+
 def run(
     *, mode: str, dialogs: tuple[Dialog, ...], admin_url: str, out_dir: Path, model: str | None = None,
     agent: str | None = None, register: dict[str, Any] | None = None, max_budget_usd: float | None = None,
     total_cap_usd: float | None = None, timeout: float | None = None, keep_work_dirs: bool = False,
+    manager_model: str | None = None, manager_effort: str | None = None,
 ) -> tuple[dict[str, Any], Path]:
-    """Run ``dialogs`` in ``mode``; the run and the JSON file written to ``out_dir`` (``runner.run``'s setup)."""
+    """Run ``dialogs`` in ``mode``; the run and the JSON file written to ``out_dir`` (``runner.run``'s setup). With
+    ``manager_model`` the Manager alone runs Claude Code with that model and ``manager_effort``."""
     real_claude = shutil.which("claude") if mode == "real" else None
     git = _git()
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -360,6 +402,7 @@ def run(
             if register is not None:
                 api.put("/api/agent-settings/system", {"profile_id": chosen["profile_id"],
                                                        "run_budget_usd": max_budget_usd})
+            manager = _manager_profile(api, manager_model, manager_effort) if manager_model else chosen
             project = api.post("/api/projects", {"name": PROJECT, "work_dir": str(work_dir)})
             project_id = project["project_id"]
             for dialog in dialogs:
@@ -375,7 +418,7 @@ def run(
             shutil.rmtree(root, ignore_errors=True)
     result = scrub({
         "schema": SCHEMA, "mode": mode, "model": chosen.get("model") if mode == "real" else None,
-        "agent": chosen["name"], "started_at": stamp, "git": git,
+        "agent": chosen["name"], "manager_agent": manager["name"], "started_at": stamp, "git": git,
         "caps": {"max_budget_usd": max_budget_usd, "total_cap_usd": total_cap_usd}, "stopped_by_cap": stopped,
         "total_cost_usd": round(total, 6), "dialogs": results,
     }, {str(root): "<eval-root>", str(raw_root): "<eval-root>", str(Path.home()): "~"})
@@ -386,7 +429,8 @@ def run(
 
 def markdown(result: dict[str, Any]) -> str:
     """The run as a table: each dialog's outcome, its tool calls per turn and its cost."""
-    lines = [f"Manager dialogs: {result['mode']}/{result.get('model') or result['agent']} @ "
+    lines = [f"Manager dialogs: {result['mode']}/{result.get('manager_agent') or result['agent']} "
+             f"(other roles {result.get('model') or result['agent']}) @ "
              f"{(result['git'].get('commit') or '')[:9]}{'+local changes' if result['git'].get('dirty') else ''}",
              "", "| dialog | success | turns | tool calls | cost (USD) |", "|---|---|---|---|---|"]
     for dialog in result["dialogs"]:

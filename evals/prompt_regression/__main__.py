@@ -56,6 +56,8 @@ def _parser() -> argparse.ArgumentParser:
     talk.add_argument("--agent", help="every role runs this agent, by name, instead")
     talk.add_argument("--register-agent", type=Path, metavar="SPEC.json",
                       help="register this agent and run every role on it, as for run")
+    talk.add_argument("--manager-model", help="the Manager alone runs Claude Code with this model (its role layer)")
+    talk.add_argument("--manager-effort", help="with --manager-model: its effort, such as xhigh")
     talk.add_argument("--dialogs", help="comma-separated dialog ids (default: all)")
     talk.add_argument("--max-budget-usd", type=float, default=0.25, help="real mode: the cap of every run")
     talk.add_argument("--total-cap-usd", type=float, default=0.50,
@@ -127,6 +129,7 @@ def _dialogs(args: argparse.Namespace) -> int:
             register=json.loads(args.register_agent.read_text(encoding="utf-8")) if args.register_agent else None,
             max_budget_usd=args.max_budget_usd if real else None, total_cap_usd=args.total_cap_usd if real else None,
             timeout=args.timeout, keep_work_dirs=args.keep_work_dirs,
+            manager_model=args.manager_model if real else None, manager_effort=args.manager_effort,
         )
     except (ValueError, runner.EvalError) as exc:
         print(f"error: {exc}", file=sys.stderr)

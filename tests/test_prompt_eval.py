@@ -396,3 +396,15 @@ def test_the_managers_dialogs_pass_in_fake_mode_and_a_wrong_call_fails(tmp_path:
     assert by_id["eager"]["problems"] == ["a task was created though the user named no project"]
     assert "| cancel_confirmation | pass | 4 |" in dialogs.markdown(result)
     assert str(tmp_path) not in path.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize(("reply", "raw"), [
+    ("任务已创建，还没有开始（Ready — not started）：\n- 任务：hello", False),
+    ('好的。{"action": "task_start", "task_id": "task-1"}', True),
+    ('```json\n{"status": "ok"}\n```', True),
+    ('[{"status": "ok", "result": {}}]', True),
+])
+def test_a_dialog_reply_must_not_show_raw_json(reply: str, raw: bool) -> None:
+    from evals.prompt_regression.dialogs import _raw_json
+
+    assert (_raw_json(reply) is not None) is raw

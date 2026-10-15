@@ -130,6 +130,7 @@ database, a disposable `looper serve`, and fake or real mode.
 | dialog | what it checks |
 |---|---|
 | `ask_project` | a task without a project: the Manager asks, and creates and changes nothing |
+| `confirm_create_start` | the whole flow: a small task is asked for, the Manager restates it and asks; 「确认」 creates it with a title (`looper_task_create`); 「开始」 starts it; no reply shows raw JSON |
 | `create_start_stop` | a confirmed task is created ready in the named project with its configuration in the reply; "start" starts it, "stop" stops it |
 | `change_running_task` | for a running task: a supplement (or a requirement edit) reaches its Planner in a turn; an edited requirement is a new version; the Reviewer's Agent Profile changes |
 | `cancel_confirmation` | cancelling waits for the user's word: a refusal leaves the task running, a confirmation in the next message cancels it |
@@ -147,6 +148,9 @@ uv run --extra test python -m evals.prompt_regression dialogs --mode real \
 ```
 
 Options: `--dialogs status,ask_project`, `--model`, `--agent`,
+`--manager-model opus --manager-effort xhigh` (the Manager alone on that
+model, the other roles on `--model`; one `confirm_create_start` with opus at
+xhigh cost $0.12, so give it `--max-budget-usd 1.00`),
 `--register-agent SPEC.json` (as for `run`; `--dialogs status` with a Codex or
 OMP agent checks that runtime's tool calls), `--max-budget-usd`,
 `--total-cap-usd`, `--timeout` (seconds for each reply and each check),

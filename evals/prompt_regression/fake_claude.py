@@ -22,7 +22,7 @@ agent system started it in:
 - the Manager (its system prompt has Looper's tools contract) starts the
   ``looper`` MCP server of its ``--mcp-config`` and, for each user message,
   makes the calls ``scenarios.json``'s ``manager`` lists for that message's
-  text (re-read every turn), replying with their answers as JSON. In the
+  text (re-read every turn), replying with each call's tool and status. In the
   calls, ``<task id>`` is the last task id an answer gave and
   ``<confirmation>`` the confirmation id the note before the message names.
 
@@ -239,8 +239,8 @@ def _manager(scenarios_path: str, args: list[str], stdin: _Stdin) -> None:
             last_task = created.get("task_id") or last_task
             answers.append(answer)
         cost += MANAGER_TURN_COST
-        _answer("fake-manager", json.dumps(answers, ensure_ascii=False) if answers else "Which project, and which "
-                "directory?", cost)
+        done = "；".join(f"{name}：{answer.get('status')}" for (name, _), answer in zip(calls, answers))
+        _answer("fake-manager", f"已处理（{done}）。" if answers else "放在哪个项目、哪个目录？", cost)
 
 
 def main(argv: list[str]) -> int:
