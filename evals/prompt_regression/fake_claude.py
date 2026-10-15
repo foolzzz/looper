@@ -13,9 +13,9 @@ agent system started it in:
   [CHAT] by forwarding the message to the running step, if any; [SUPERVISE]
   with no review;
 - a Worker (its task section says "Your step:") writes the files its step's
-  scripted attempt lists and reports that attempt's status; with
-  ``wait_for_input`` it first waits for a forwarded user turn and then writes
-  the files given there;
+  scripted attempt lists and reports that attempt's status, after the
+  attempt's ``seconds`` when it gives them; with ``wait_for_input`` it first
+  waits for a forwarded user turn and then writes the files given there;
 - a Reviewer ("The step under review:") passes the step.
 
 To show that the eval notices misbehaviour, a script may also make the
@@ -164,6 +164,7 @@ def _worker(script: dict[str, Any], system_prompt: str, stdin: _Stdin) -> None:
     wait = (script.get("wait_for_input") or {}).get(label)
     if wait and attempt_no == 1 and stdin.readline(timeout=float(wait.get("seconds", 10))) is not None:
         files = dict(wait.get("files") or {})
+    time.sleep(float(attempt.get("seconds", 0)))
     work_dir = os.getcwd()
     _write(work_dir, files)
     report = {"status": attempt.get("status", "completed"),
