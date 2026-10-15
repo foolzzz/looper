@@ -130,8 +130,10 @@ async def build_overview(
         "idle_projects": len(set(names) - active),
         "spend_today": {"since": since.isoformat(), **spend},
         "schedules": await schedule_overview(since),
+        # Every component not simply running: down and being restarted, or crash-looping (up or down now).
         "health": {"unhealthy": [
-            {"name": name, "restart_count": entry["restart_count"], "max_restarts": entry["max_restarts"]}
+            {"name": name, **{key: entry[key] for key in ("state", "up", "restart_count", "last_crash_at",
+                                                         "next_restart_at")}}
             for name, entry in supervisor.agent_status().items() if not entry["healthy"]
         ]},
     }
