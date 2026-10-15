@@ -807,6 +807,22 @@ class TestRecommendedRole:
             assert stale not in text
 
 
+def test_every_ready_step_is_dispatched_at_once(planner_claude: Any, agent_db: Any) -> None:
+    """No per-task cap: six steps that need nothing of each other all go to the worker pool together."""
+    claude = planner_claude(plan(*(step(f"s{i}") for i in range(1, 7))), *(decide("accept") for _ in range(6)))
+
+    async def scenario(h: Harness) -> None:
+        await h.start()
+        await h.until(lambda: len(h.held) == 6)
+        assert len(h.work_items) == 6 and set(h.dispatched_at_turn) == {1}  # all after the PLAN turn
+        for _ in range(6):
+            await h.release(WORK_OK)
+        await h.finished()
+
+    h = drive(claude, lambda envelope: None, scenario)
+    assert h.final().payload["status"] == "completed"  # type: ignore[union-attr]
+
+
 @pytest.mark.usefixtures("agent_db", "planner_row")
 class TestSystemPrompt:
     def test_the_layers_are_harness_role_project_task_then_the_reply_contract(

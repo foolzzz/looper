@@ -131,7 +131,6 @@ from ...db import tasks as db_tasks
 from ...db.task_changes import TaskChanges
 from ...db.tasks import FailKind, update_task_phase
 
-MAX_CONCURRENT_WORKERS = 4
 # How long to wait for the worker pool to confirm a forwarded user turn.
 WORKER_INPUT_TIMEOUT = 5.0
 # A Planner turn's time limit without a readable ``planner`` config row.
@@ -724,8 +723,8 @@ class PlannerAgent:
         return ", ".join(parts)
 
     async def _dispatch_ready(self, plan: TaskPlan) -> None:
-        running = sum(1 for s in plan.steps if s.status == "dispatched")
-        ready = plan.ready_steps()[: max(0, MAX_CONCURRENT_WORKERS - running)]
+        # Every ready step starts; the worker pool runs them within its project's Worker limit.
+        ready = plan.ready_steps()
         base: _RoundBase | None = None
         if ready and self._execution.isolate_steps:
             ready, base = await self._plan_round(plan, ready)
