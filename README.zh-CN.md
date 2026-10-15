@@ -191,7 +191,7 @@ PostgreSQL 是启动的硬性依赖；`looper serve` 每次启动都会应用 `l
 | **Task Detail** | 配置编辑（init 状态）、概览、流水线 DAG、会话、对话；Agent Timeline 每行都有 **History** 按钮 |
 | **Runs** | 每个角色的会话和运行记录（Manager 的 `/new` 显示为新会话），每次运行都能打开其历史；不含配置，并链接到 Settings → Roles 里的该角色 |
 | **Agent history** | 单个 agent 的启动命令、完整记录（文本、思考、工具调用及结果）和活动；跟随运行中的 agent，2 分钟没有输出会标出 |
-| **Settings** | 侧栏底部可折叠的分组，每项一页：**LLM Providers**；**Agent Runtimes**（只读：每种运行时类型，在服务的 PATH 上找到与否，可 Re-detect，以及规划中的类型）；**Agent Profiles**（运行时、提供方和模型，各自能跑的角色和被谁使用）；**Roles**（所有角色的默认值，再是每个角色的 Agent Profile、设置层、prompt 和限制）；**Skills & MCP**；**Channels**；**Import / Export** |
+| **Settings** | 侧栏底部可折叠的分组，每项一页：**LLM Providers**；**Agent Runtimes**（只读：每种运行时类型，在服务的 PATH 上找到与否，可 Re-detect，以及规划中的类型）；**Agent Profiles**（运行时、提供方和模型，各自能跑的角色和被谁使用）；**Roles**（可折叠的列表：先是共享默认值 Shared defaults，再是每个角色一行，含它的覆盖项、prompt 和限制）；**Skills & MCP**；**Channels**；**Import / Export** |
 
 ### HTTP API
 
@@ -251,8 +251,8 @@ API 只响应控制台和本机客户端：来自其他网站页面的请求（�
 
 | 层 | 在哪里编辑 | 作用范围 |
 |---|---|---|
-| 系统 | Settings → Roles 的所有角色部分 | 所有 agent |
-| 角色 | Settings → Roles，按角色 | 一个角色，不分项目：Manager、Planner、Worker 或 Reviewer |
+| 系统 | Settings → Roles 的 Shared defaults | 所有 agent |
+| 角色 | Settings → Roles，该角色的覆盖项 | 一个角色，不分项目：Manager、Planner、Worker 或 Reviewer |
 | 项目 | 项目的 Settings 标签页 | 该项目的 Planner、Worker 和 Reviewer |
 | 项目内角色 | 同一标签页，按角色 | 某个项目里的其中一个角色 |
 
