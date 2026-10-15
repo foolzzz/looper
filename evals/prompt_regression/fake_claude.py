@@ -34,6 +34,7 @@ import json
 import os
 import re
 import select
+import subprocess
 import sys
 import time
 from typing import Any
@@ -188,11 +189,18 @@ def _reviewer(stdin: _Stdin) -> None:
             REVIEWER_RUN_COST)
 
 
+def _main_checkout() -> str:
+    """The task directory of a step that runs in a worktree of its own: the repository's main checkout."""
+    done = subprocess.run(["git", "rev-parse", "--path-format=absolute", "--git-common-dir"], capture_output=True,
+                          text=True, check=False)
+    return os.path.realpath(os.path.dirname(done.stdout.strip())) if done.returncode == 0 else ""
+
+
 def main(argv: list[str]) -> int:
     scenarios_path, args = argv[0], argv[1:]
     with open(scenarios_path, encoding="utf-8") as handle:
         scenarios = json.load(handle)
-    script = scenarios.get(os.path.realpath(os.getcwd()), {})
+    script = scenarios.get(os.path.realpath(os.getcwd())) or scenarios.get(_main_checkout(), {})
     system_prompt = ""
     if "--append-system-prompt-file" in args:
         with open(args[args.index("--append-system-prompt-file") + 1], encoding="utf-8") as handle:

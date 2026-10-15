@@ -209,10 +209,10 @@ def running_server(*, database_url: str, runtime_root: Path, bin_dir: Path, log_
 
 
 def snapshot(work_dir: Path) -> dict[str, tuple[float, str]]:
-    """Every file under ``work_dir``: relative path → (mtime, sha256)."""
+    """Every file under ``work_dir`` but git's own: relative path → (mtime, sha256)."""
     files = {}
     for path in sorted(work_dir.rglob("*")):
-        if path.is_file() and not path.is_symlink():
+        if path.is_file() and not path.is_symlink() and ".git" not in path.relative_to(work_dir).parts:
             files[path.relative_to(work_dir).as_posix()] = (
                 path.stat().st_mtime, hashlib.sha256(path.read_bytes()).hexdigest())
     return files
@@ -225,6 +225,30 @@ def changed_files(before: dict[str, tuple[float, str]], after: dict[str, tuple[f
 
 
 # --- One task -----------------------------------------------------------------------------------------
+
+
+def _git_in(work_dir: Path, *args: str) -> str:
+    """A git command in a task's working directory (no hooks, no signing), its output."""
+    return subprocess.run(["git", "-c", "core.hooksPath=/dev/null", "-c", "commit.gpgSign=false", *args],
+                          cwd=work_dir, capture_output=True, text=True, check=True).stdout.strip()
+
+
+def init_repository(work_dir: Path) -> None:
+    """Make ``work_dir`` a git repository on main whose one commit holds what is there."""
+    _git_in(work_dir, "init", "-q", "-b", "main")
+    _git_in(work_dir, "config", "user.name", "Eval")
+    _git_in(work_dir, "config", "user.email", "eval@localhost")
+    _git_in(work_dir, "add", "-A")
+    _git_in(work_dir, "commit", "-q", "--allow-empty", "-m", "eval: the task's files")
+
+
+def looper_commits(work_dir: Path, task_id: str) -> dict[str, int]:
+    """The commits the task's step workspaces added to the working directory's branch."""
+    def count(*args: str) -> int:
+        return int(_git_in(work_dir, "rev-list", "--count", "--first-parent", f"--grep=^Looper-Task: {task_id}$",
+                           *args, "HEAD") or 0)
+
+    return {"merges": count("--merges"), "checkpoints": count("--no-merges")}
 
 
 def _all_activity(api: Api, task_id: str) -> list[dict[str, Any]]:
@@ -256,21 +280,24 @@ def run_task(
     cap_left: float | None = None,
     clock_offset: float = 0.0,
     settle: float = 15.0,
+    step_workspaces: str | None = None,
 ) -> dict[str, Any]:
     """Create and start ``task`` in ``work_dir``, wait until it ends, and read back what it shows.
 
     The task is cancelled when its cost reaches ``cap_left`` or it runs longer
-    than ``timeout`` seconds.
+    than ``timeout`` seconds. With ``step_workspaces``, ``work_dir`` is a git
+    repository and the task's project has that setting.
     """
     work_dir.mkdir(parents=True, exist_ok=True)
     for name, content in task.files.items():
         (work_dir / name).write_text(content, encoding="utf-8")
+    project: dict[str, Any] = {"name": f"eval-{task.id}-{uuid.uuid4().hex[:6]}", "work_dir": str(work_dir)}
+    if step_workspaces:
+        init_repository(work_dir)
+        project["step_workspaces"] = step_workspaces
     before = snapshot(work_dir)
     started = time.monotonic()
-    created = api.post("/api/tasks/create", {
-        "requirement": task.requirement,
-        "project": {"name": f"eval-{task.id}-{uuid.uuid4().hex[:6]}", "work_dir": str(work_dir)},
-    })
+    created = api.post("/api/tasks/create", {"requirement": task.requirement, "project": project})
     task_id = created["task_id"]
     api.post("/api/tasks/start", {"task_id": task_id})
 
@@ -325,6 +352,8 @@ def run_task(
     if timed_out:
         result["problems"].append(f"cancelled after {timeout:g} s")
         result["success"] = False
+    if step_workspaces:
+        result["looper_commits"] = looper_commits(work_dir, task_id)
     return {"id": task.id, **result, "duration_s": round(duration, 1), "stopped_by_cap": stopped_by_cap,
             "timed_out": timed_out}
 
@@ -394,6 +423,7 @@ def run(
     total_cap_usd: float | None = None,
     task_timeout: float | None = None,
     keep_work_dirs: bool = False,
+    step_workspaces: str | None = None,
 ) -> tuple[dict[str, Any], Path]:
     """Run ``tasks`` in ``mode`` (``fake`` or ``real``); returns the run and the JSON file written to ``out_dir``.
 
@@ -440,7 +470,8 @@ def run(
             results, stopped = run_suite(
                 tasks,
                 lambda task, cap_left: run_task(api, task, work_dirs[task.id], timeout=timeout, poll=poll,
-                                                cap_left=cap_left, clock_offset=clock_offset),
+                                                cap_left=cap_left, clock_offset=clock_offset,
+                                                step_workspaces=step_workspaces),
                 total_cap_usd=total_cap_usd,
             )
     finally:
@@ -456,6 +487,7 @@ def run(
         "started_at": stamp,
         "git": git,
         "caps": {"max_budget_usd": max_budget_usd, "total_cap_usd": total_cap_usd},
+        "step_workspaces": step_workspaces,
         "stopped_by_cap": stopped,
         "total_cost_usd": round(sum(float(r.get("cost_usd") or 0.0) for r in results), 6),
         "tasks": results,
