@@ -1475,9 +1475,15 @@ dashboard only). A new schedule is disabled.
   restricted (neither starts with `*`) a day matches either. Fire times are
   wall times in the zone: a time a DST change skips fires at the first valid
   time after it, a repeated time fires once, the first time. Two fires must be
-  at least 5 minutes apart over the next 24 hours when the rule is saved;
-  `LOOPER_SCHEDULE_MIN_INTERVAL_SECONDS`, read when `looper serve` starts, lowers
-  that for tests and validation only. The dashboard shows each rule in words
+  at least 5 minutes apart over the next 24 hours when the rule is saved, or 1
+  minute apart for a schedule with a gate command
+  (`schedules.min_interval_seconds`, `MIN_INTERVAL_GATED_SECONDS`): its run
+  ends at the gate when there is nothing new, with no task and no cost. A
+  rule that fires closer is refused when the schedule is created or changed,
+  and so is removing the gate of a schedule that fires every minute ("without
+  its gate command, …"). The preview takes `gated` for the same check.
+  `LOOPER_SCHEDULE_MIN_INTERVAL_SECONDS`, read when `looper serve` starts,
+  lowers both for tests and validation only. The dashboard shows each rule in words
   ("Weekdays at 09:00 (America/Los_Angeles)", "Every 30 minutes"), or as
   written when no wording fits.
 - **The scheduler** (`looper/agents/scheduler.py`) runs inside `looper serve`,
@@ -1531,7 +1537,18 @@ dashboard only). A new schedule is disabled.
   prints nothing gets a task (`carried_from` names the run). The outputs
   share what is left of the 8,000 characters a task requirement keeps
   (at least 600), each clipped with a marker. A run left `gating` by a server
-  that stopped is `gate_failed` at the next start.
+  that stopped is `gate_failed` at the next start. A gate never runs twice at
+  once: a firing while the schedule's run is `gating` is `skipped_overlap`.
+- **Repeated skips are counted, not stored.** A skipped firing (`skipped_gate`,
+  `skipped_overlap`, `skipped_missed`, `skipped_budget`) whose schedule's latest
+  run is a skip for the same reason recorded the same day (the scheduler's day)
+  is counted on that run (`schedule_runs.firings` one more, `finished_at` the
+  latest firing), and a gate that found nothing leaves no row of its own
+  (`count_skip`). A schedule firing every minute therefore adds a row only
+  when the outcome changes: one row for an hour of nothing new, one for the
+  minutes its task runs. Each counted `skipped_gate` still sets `last_ok_at`
+  and ends a no-success alert, as a run of its own did. The run history shows
+  `×N, until <time>`, and the Dashboard's `skipped_today` adds the firings.
 - **The end of a run.** The TaskRouter reports every task that ends
   (`on_task_end`, from its teardown and its stop); the scheduler writes the
   run's final status (`completed`, `failed`, `stopped`, `cancelled`), its
@@ -2001,7 +2018,7 @@ PostgreSQL is a hard startup dependency. All data paths:
 | `task_profile_overrides` | A task's Agent Profile per role (`planner`, `worker`, `reviewer`): `profile_id`, going with its task; a profile a task chose is not deleted |
 | `schedules` | A project's schedules: `name` (unique in the project ignoring case), `cron`, `timezone`, `requirement`, `work_dir` (`''`: the project's default), `overlap`, `catch_up`, `run_timeout_seconds`, `run_budget_usd`, `gate_command`, `gate_timeout_seconds`, `daily_budget_usd`, `notify`, `notify_channel` and `notify_chat` (both or neither), `enabled` (false when created), `enabled_at` (when it was created or last enabled; the no-success alert counts from it), `next_fire_at` (null while disabled), `last_fired_at`, `last_success_at`, `last_ok_at`, `consecutive_failures`, `failures_alert_at` and `stale_alert_at` (set while that alert is active), `created_via`; a project with schedules is not deleted |
 | `schedule_profile_overrides` | A schedule's Agent Profile per task role, copied into each task it fires; a profile a schedule chose is not deleted |
-| `schedule_runs` | Each firing of a schedule: `scheduled_for`, `fired_at`, `trigger` (`scheduled`, `catch_up`, `manual`), `missed`, `status` (`queued`, `gating`, `running`, then once `completed`, `failed`, `stopped`, `cancelled`, `timed_out`, `gate_failed`, or `skipped_overlap`, `skipped_missed`, `skipped_gate`, `skipped_budget`), `task_id` (null when skipped, or once the task is deleted), `summary`, `cost_usd`, `error`, `gate_output`, `carried_from` (the run whose unfinished input it was given), `finished_at`; going with its schedule |
+| `schedule_runs` | Each firing of a schedule: `scheduled_for`, `fired_at`, `trigger` (`scheduled`, `catch_up`, `manual`), `missed`, `status` (`queued`, `gating`, `running`, then once `completed`, `failed`, `stopped`, `cancelled`, `timed_out`, `gate_failed`, or `skipped_overlap`, `skipped_missed`, `skipped_gate`, `skipped_budget`), `task_id` (null when skipped, or once the task is deleted), `summary`, `cost_usd`, `error`, `gate_output`, `carried_from` (the run whose unfinished input it was given), `finished_at`, `firings` (how many firings it stands for: a repeated skip is counted on one run, from `scheduled_for` to `finished_at`); going with its schedule |
 | `schedule_notifications` | Every message about a schedule: `run_id`, `kind` (`run`, `failures_alert`, `failures_recovered`, `stale_alert`, `stale_recovered`), `channel`, `chat`, `text`, `status` (`sent`, `failed`, `dashboard`), `error`; going with its schedule |
 | `system_settings` | Settings shared by the whole system, one value per key (no row = the built-in default), such as the last library import's report |
 | `library_items` | The capability catalog: kind, name, `origin` (`machine`, `upload`, `git`, `ui` or `project`), `modified`, `owner_project_id` (a project-authored item; goes with its project), `description`, source label, declared version, `sha256` of the files, size, file count, `imported_at` |
@@ -2128,9 +2145,9 @@ dev proxy, which keeps `Host` and `Origin` on its own port.
 | `/api/projects/:id/schedules` | POST | Create a schedule, disabled, from `name`, `cron`, `requirement` and optionally `timezone`, `work_dir`, `overlap`, `catch_up`, `run_timeout_seconds`, `run_budget_usd`, `profile_overrides`, `gate_command` (at most 2000 characters), `gate_timeout_seconds`, `daily_budget_usd`, `notify`, `notify_target` (`{channel, chat}` among `notify_targets`, or null); 201 with `schedule`. 400 with the reason for a bad field (an invalid rule or zone, a rule that never fires or fires closer than the minimum interval, no work directory here or on the project, a chat no allowlist allows, `enabled`, an unknown field), 409 for a name the project has, 404 for an unknown project |
 | `/api/schedules/:id` | GET/PUT/DELETE | Read one schedule; PUT changes the fields given and `enabled` (enabling, or a new rule or zone while enabled, sets `next_fire_at` from now; disabling clears it), 400 and 409 as for POST; DELETE deletes it and its runs, keeping its tasks; 404 |
 | `/api/schedules/:id/run` | POST | Run now: fire it with `trigger` `manual` (also while disabled) through the same overlap check; answers with the `run` (`running`, `gating` while its gate runs, `queued`, `skipped_overlap`, `skipped_budget`, or `failed` with `error`); `next_fire_at` stays; 404 |
-| `/api/schedules/:id/runs` | GET | The runs, newest first (`?limit=`, default 50, at most 200): `run_id`, `scheduled_for`, `fired_at`, `trigger`, `missed`, `status`, `task_id`, `task_status`, `summary`, `cost_usd` (the task's so far while it runs), `error`, `gate_output`, `carried_from`, `finished_at`; 404 |
+| `/api/schedules/:id/runs` | GET | The runs, newest first (`?limit=`, default 50, at most 200): `run_id`, `scheduled_for`, `fired_at`, `trigger`, `missed`, `status`, `task_id`, `task_status`, `summary`, `cost_usd` (the task's so far while it runs), `error`, `gate_output`, `carried_from`, `finished_at`, `firings` (a repeated skip's count); 404 |
 | `/api/schedules/:id/notifications` | GET | The schedule's messages, newest first (`?limit=` as for runs): `notification_id`, `kind`, `run_id`, `channel`, `chat`, `text`, `status`, `error`, `created_at`; 404 |
-| `/api/schedules/preview` | POST | `{cron, timezone?, count?}` (1–20, default 5): `valid`, `description` and the `next` fire times, or `valid` false with the `error`; 400 only for a malformed body |
+| `/api/schedules/preview` | POST | `{cron, timezone?, count?, gated?}` (1–20, default 5; `gated`: checked as a schedule with a gate command, 1 minute apart instead of 5): `valid`, `description`, the `next` fire times and `min_interval_seconds`, or `valid` false with the `error`; 400 only for a malformed body |
 | `/api/tasks` | GET | List the newest tasks; `?project_id=` lists one project's, `?group=` one task group's (400 for an unknown group), `?schedule_id=` one schedule's. Each has its status's `group`, `project_id`, `project_name`, `work_dir`, `schedule_id` and `schedule_name` (null for a task no schedule created) and `cost` (as in the task detail) |
 | `/api/tasks/create` | POST | Create a ready task (`init`) with exactly one of `project_id` (existing) and `project` (`{name, description?, work_dir?, background?}`, created in the same transaction). Its `work_dir` is the one given, else the project's. Optional `profile_overrides`: `{planner?, worker?, reviewer?}` Agent Profile ids for this task's roles (an empty one chooses nothing). 400 with neither project field, for an override of another role, an unknown profile or one that cannot run its role; 404 for an unknown project, 409 for a taken new name |
 | `/api/tasks/:id/project` | PUT | Move a task to `{project_id}`, whatever its status |
