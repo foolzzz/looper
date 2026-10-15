@@ -82,7 +82,7 @@ Looper 之外用 cron 或 launchd 写脚本，再自己调 agent。一个典型�
 | **D4** | **入口是项目页和管家** | 维护者选定 |
 | D5 | **调度器在 `looper serve` 进程内**，到点从数据库读出到期的定时任务 | 配置、记录、界面都在数据库里，只有一处事实；服务本身由 launchd 守护。每个定时任务写一个 launchd 配置的方案，配置分散在两处，不采用 |
 | D6 | **启用定时任务就是批准**：触发建出的任务直接开始，不停在「未开始」 | 无人值守是定时任务的本意；批准发生在创建和启用时（管家流程里明确问「要启用吗」） |
-| D7 | **重叠时默认跳过这一次**，可改成「排队」（最多排一个） | 与 launchd 单实例的行为一致，防止任务越堆越多 |
+| D7 | **重叠时默认跳过这一次**，可改成「排队」（最多排一个）或「并行」（可重入，最多 `max_parallel_runs` 个，前置检查不并发） | 与 launchd 单实例的行为一致，防止任务越堆越多；并行留给增量、按认领分工的场景 |
 | D8 | **cron 表达式自己解析**（标准 5 段：分 时 日 月 周，支持 `*`、列表、范围、步长），时区用标准库 `zoneinfo` | 项目运行时只依赖两个库，一个小解析器加表驱动测试足够；不支持秒和 `L`、`W`、`#` 这类扩展 |
 
 ## 5. 数据模型
@@ -96,7 +96,8 @@ schedules
   requirement         每次运行的任务需求
   work_dir            为空时用项目默认目录
   gate_command        前置检查命令（S2），可空；gate_timeout_seconds
-  overlap             'skip' | 'queue'，默认 'skip'
+  overlap             'skip' | 'queue' | 'parallel'，默认 'skip'
+  max_parallel_runs   overlap 为 'parallel' 时最多同时进行的运行数，1–10，默认 3
   catch_up            'once' | 'skip'，默认 'once'
   run_timeout_seconds 一次运行（任务）的最长墙钟时间，可空
   run_budget_usd      覆盖项目的单任务花费上限，可空
@@ -134,7 +135,7 @@ tasks.budget_usd      任务自己的花费上限，覆盖项目的单任务上�
 1. **算漏跑**：从 `next_fire_at` 到现在，按时间规则应触发几次（启用和改规则时 `next_fire_at` 从当时算起，所以不会回补）。只有一次且距现在不超过 2 分钟（正常到点）时，`trigger='scheduled'`；不止一次，或唯一的一次已过去 2 分钟以上（休眠醒来），都算漏跑，按 `catch_up` 处理：
    - `once`：只跑一次，`trigger='catch_up'`，`missed` 记录漏掉的次数；
    - `skip`：最近一次应触发的时刻距现在不超过 2 分钟时照常跑，否则记一条 `skipped_missed`，等下一个时间点。
-2. **重叠**：上一次运行的任务还在进行中或排队，`skip` 记 `skipped_overlap`；`queue` 记下待跑，上一个结束后立刻跑，最多排一个。
+2. **重叠**：上一次运行的任务还在进行中或排队，`skip` 记 `skipped_overlap`；`queue` 记下待跑，上一个结束后立刻跑，最多排一个；`parallel`（可重入，2026-10-15 加入，用于每分钟增量检查而一次运行较长的场景）在进行中的运行旁边再起一个，最多 `max_parallel_runs` 个同时进行，超过就记 `skipped_overlap`。前置检查任何时候都不并发：有运行在前置检查中时，这次触发记 `skipped_overlap`，只有任务阶段重叠。前置检查的环境里有 `LOOPER_SCHEDULE_ID`、`LOOPER_SCHEDULE_RUN_ID`、`LOOPER_SCHEDULE_SCHEDULED_FOR` 和 `LOOPER_SCHEDULE_RUN_TIMEOUT_SECONDS`，便于它为这次运行认领条目、按运行超时释放；失败那一轮的输入只交给下一次运行；每日花费上限按所有运行合计；在项目 Planner 并发上限下排队的运行，运行超时照样计时，`max_parallel_runs` 超过这个上限时保存会给出提醒。
 3. **每日花费**（S2）：这个定时任务今天的运行花费已达 `daily_budget_usd`，记 `skipped_budget`。
 4. **前置检查**（S2）：在工作目录里执行，有超时；超时（或服务停止）时按停止 agent 的方式结束它的整个进程树（`proc_tree`：先发终止信号，宽限期后强杀）。
    - 输出为空：记 `skipped_gate`；
