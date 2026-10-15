@@ -289,7 +289,9 @@ environment variable **names**, not secret values.
   id only) with no reply. A channel with an empty or malformed list does not
   start, and the Settings page says why. `LOOPX_TELEGRAM_ALLOWED_USERS` no
   longer applies.
-- `app_secret_env` is not read yet; `lark-cli` holds the Lark credentials.
+- `app_secret_env` is not read, and `app_id_env` only has to be set for the
+  Lark channel to start: `lark-cli` holds the Lark credentials and acts as the
+  app it is configured for (`lark-cli whoami`).
 - Send `/new` (the whole message) in the web chat, Lark or Telegram to start a
   new Manager session: the next message, from any channel, starts with a clean
   context. The web chat's **New session** button sends it. Running tasks are

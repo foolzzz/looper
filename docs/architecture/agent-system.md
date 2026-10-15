@@ -1984,10 +1984,17 @@ restart.
   `LOOPX_TELEGRAM_ALLOWED_USERS` no longer applies. `/new` (without
   arguments) goes to the Manager as `/new`. `/start`, `/status`, `/new` and
   `/help` from an unlisted sender get no answer either.
-- **Lark**: needs `lark-cli` on PATH and signed in. The app ID comes from the
-  env var named by `app_id_env` (default `LARK_APP_ID`). `allowed_open_ids`
-  lists the senders' `open_id` (`ou_...`), the id each message event carries
-  in `event.sender.sender_id.open_id`; a `union_id` or `user_id` is refused.
+- **Lark**: needs `lark-cli` on PATH and signed in (the commands of lark-cli
+  1.0.97). It receives with `lark-cli event consume im.message.receive_v1 --as
+  bot`, one flat JSON event per line (a text message's text in `content`, the
+  sender's open_id in `sender_id`; other message types and bots' messages are
+  ignored), and sends with `lark-cli im +messages-send --as bot`: a reply to
+  the chat its message came from (`--chat-id`), a schedule's message to a user
+  (`--user-id`); a failed send carries lark-cli's reason. lark-cli acts as the
+  app it is configured for (`lark-cli whoami`): the env var named by
+  `app_id_env` (default `LARK_APP_ID`) must be set for the channel to start,
+  but it no longer selects the app. `allowed_open_ids` lists the senders'
+  `open_id` (`ou_...`); a `union_id` or `user_id` is refused.
 - **Web**: unaffected, it has no list: the HTTP API answers only local
   requests ([HTTP API](#http-api)).
 - A channel that fails to start is logged and skipped; the server keeps
