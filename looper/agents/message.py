@@ -21,6 +21,8 @@ class MessageType(str, Enum):
     CLARIFICATION_REQUEST = "clarification_request"
     CLARIFICATION_RESPONSE = "clarification_response"
     STATUS_UPDATE = "status_update"
+    # Manager → Telegram or Lark: tell a chat, unprompted, that a task ended (``task_notice.Notice``).
+    CHAT_NOTICE = "chat_notice"
 
     # Manager ↔ Planner
     TASK_REQUEST = "task_request"
