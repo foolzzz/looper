@@ -86,6 +86,10 @@ _CHANNEL_PUBLIC_KEYS = {
     "telegram": frozenset({"allowed_user_ids", "bot_token_env", "description"}),
     "lark": frozenset({"allowed_open_ids", "app_id_env", "app_secret_env", "description"}),
 }
+
+# A channel whose credential is a DB-stored secret (channel_secrets), not a config key: it is not
+# carried in the file, so an import of an enabled such channel still needs it set on this machine.
+_CHANNEL_TOKEN_SECRET = {"telegram": "bot token (Settings → Channels)"}
 _ROLE_FIELDS = ("prompt", "timeout_seconds", "enabled")
 _LAYER_FIELDS = ("harness_prompt", "profile", "env", "run_budget_usd", "max_concurrency")
 _PROVIDER_FIELDS = ("protocols", "auth", "oauth_runtime_type", "base_url", "models", "env", "max_concurrency")
@@ -1161,6 +1165,9 @@ class _Importer:
         if values["enabled"]:
             needed += [f"environment {value}" for name, value in sorted(config.items())
                        if name.endswith("_env") and isinstance(value, str) and value]
+            # A DB-stored token is not in the file; an enabled channel still needs it set here.
+            if kind in _CHANNEL_TOKEN_SECRET:
+                needed.append(_CHANNEL_TOKEN_SECRET[kind])
         if self.apply and action in (Action.ADDED, Action.CHANGED):
             from ..db import config_transfer as db
 

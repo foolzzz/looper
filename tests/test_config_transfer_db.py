@@ -272,7 +272,7 @@ def test_a_round_trip_into_a_new_database_reproduces_the_configuration(
             assert code == 0, err
             plan = _plan(out)
             assert plan["applied"] and plan["need_secret"] == [{"section": "channels", "key": "telegram",
-                                                                "names": ["environment MY_TG_TOKEN"]}]
+                                                                "names": ["environment MY_TG_TOKEN", "bot token (Settings → Channels)"]}]
             assert not [c for c in plan["changes"] if c["action"] == "skipped"], plan
 
             # Agents resolve the same settings and load the same items; only the projects' directories stay
@@ -405,7 +405,7 @@ def test_secrets_are_placeholders_by_default_and_never_replace_stored_ones(
             assert json.loads(servers["search"]["env"]) == {"API_KEY": "target-own"}
             assert json.loads(servers["web"]["headers"]) == {"Authorization": ""}
             assert {(n["section"], n["key"]): n["names"] for n in plan["need_secret"]} == {
-                ("channels", "telegram"): ["config webhook_secret", "environment MY_TG_TOKEN"],
+                ("channels", "telegram"): ["config webhook_secret", "environment MY_TG_TOKEN", "bot token (Settings → Channels)"],
                 ("catalog", "mcp:web"): ["header Authorization"],
                 ("providers", "anthropic-key"): ["api_key"],
             }
