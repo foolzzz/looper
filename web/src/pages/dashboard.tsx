@@ -1,7 +1,15 @@
 import { useEffect, useState } from "react";
 import { AlertTriangle, CheckCircle2, Loader2 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
-import { fetchOverview, TASK_GROUPS, type LiveStepRun, type Overview, type TaskGroup } from "@/lib/api";
+import { RunStatusBadge, ScheduleTime } from "@/components/project-schedules";
+import {
+  fetchOverview,
+  TASK_GROUPS,
+  type LiveStepRun,
+  type Overview,
+  type OverviewSchedules,
+  type TaskGroup,
+} from "@/lib/api";
 import { historyHref } from "@/pages/agent-history";
 import { formatUsd } from "@/lib/usage";
 import { cn } from "@/lib/utils";
@@ -219,6 +227,115 @@ function Concurrency({ projects, idle }: { projects: Overview["projects"]; idle:
   );
 }
 
+/** Today's skipped runs by reason, in words. */
+const SKIPPED: { key: keyof OverviewSchedules["skipped_today"]; label: string }[] = [
+  { key: "skipped_gate", label: "nothing new" },
+  { key: "skipped_overlap", label: "previous run still going" },
+  { key: "skipped_missed", label: "missed" },
+  { key: "skipped_budget", label: "daily budget" },
+];
+
+const subhead = "text-xs font-medium text-muted-foreground";
+
+const scheduleHref = (s: { project_id: string; schedule_id: string }) =>
+  `#projects/${encodeURIComponent(s.project_id)}/schedules/${encodeURIComponent(s.schedule_id)}`;
+
+function Schedules({ schedules }: { schedules: OverviewSchedules }) {
+  const { total, enabled, next, failing, skipped_today } = schedules;
+  const skipped = SKIPPED.filter((reason) => skipped_today[reason.key] > 0);
+  return (
+    <Section title="Schedules" meta={`${enabled} of ${total} enabled`}>
+      <div className="grid gap-x-6 gap-y-4 lg:grid-cols-3">
+        <div className="min-w-0">
+          <h3 className={subhead}>Next</h3>
+          {next.length === 0 ? (
+            <p className="mt-1.5 text-sm text-muted-foreground">No schedule is enabled</p>
+          ) : (
+            <ul className="mt-1.5 space-y-2">
+              {next.map((s) => (
+                <li key={s.schedule_id} className="min-w-0 text-sm">
+                  <a href={scheduleHref(s)} className={cn("block truncate font-medium", linkClass)}>
+                    {s.name}
+                  </a>
+                  <p className="truncate text-xs text-muted-foreground">
+                    <ScheduleTime iso={s.next_fire_at} timeZone={s.timezone} className="tabular-nums text-foreground/90" />
+                    {" · "}
+                    {s.project_name}
+                  </p>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+        <div className="min-w-0">
+          <h3 className={subhead}>Failing</h3>
+          {failing.length === 0 ? (
+            <p className="mt-1.5 text-sm text-muted-foreground">No failing schedules</p>
+          ) : (
+            <ul className="mt-1.5 space-y-2">
+              {failing.map((s) => {
+                const failures = s.consecutive_failures;
+                return (
+                  <li key={s.schedule_id} className="min-w-0 space-y-1 text-sm">
+                    <a href={scheduleHref(s)} className={cn("block truncate font-medium", linkClass)}>
+                      {s.name}
+                    </a>
+                    <div className="flex flex-wrap items-center gap-1.5 text-xs text-muted-foreground">
+                      <span className="min-w-0 max-w-full truncate">{s.project_name}</span>
+                      {/* An active alert is red; failures below its threshold are a warning. */}
+                      {(failures > 0 || s.failures_since) && (
+                        <Badge variant={s.failures_since ? "destructive" : "warning"} className="gap-1">
+                          <AlertTriangle className="h-3 w-3" aria-hidden="true" />
+                          {failures === 0 ? "Failing" : failures === 1 ? "1 failure" : `${failures} failures in a row`}
+                        </Badge>
+                      )}
+                      {s.stale_since && (
+                        <Badge variant="destructive" className="gap-1">
+                          <AlertTriangle className="h-3 w-3" aria-hidden="true" />
+                          <span>
+                            {s.last_success_at ? (
+                              <>
+                                No success since <ScheduleTime iso={s.last_success_at} timeZone={s.timezone} />
+                              </>
+                            ) : (
+                              "No success yet"
+                            )}
+                          </span>
+                        </Badge>
+                      )}
+                      {s.last_status && (
+                        <span className="flex items-center gap-1.5">
+                          last run
+                          <RunStatusBadge status={s.last_status} />
+                        </span>
+                      )}
+                    </div>
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+        </div>
+        <div className="min-w-0">
+          <h3 className={subhead}>Skipped today</h3>
+          {skipped.length === 0 ? (
+            <p className="mt-1.5 text-sm text-muted-foreground">No skipped runs today</p>
+          ) : (
+            <ul className="mt-1.5 space-y-1 text-sm">
+              {skipped.map((reason) => (
+                <li key={reason.key} className="flex items-baseline gap-2">
+                  <span className="min-w-6 text-right font-semibold tabular-nums">{skipped_today[reason.key]}</span>
+                  <span className="text-muted-foreground">{reason.label}</span>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      </div>
+    </Section>
+  );
+}
+
 function Spend({ spend }: { spend: Overview["spend_today"] }) {
   return (
     <Section title="Today's spend" meta={<span title={spend.since}>runs started since midnight, server time</span>}>
@@ -301,6 +418,7 @@ export function DashboardPage() {
       <TaskCounts tasks={overview.tasks} />
       <Agents agents={overview.agents} />
       <Concurrency projects={overview.projects} idle={overview.idle_projects} />
+      {overview.schedules.total > 0 && <Schedules schedules={overview.schedules} />}
       <Spend spend={overview.spend_today} />
     </div>
   );
