@@ -99,7 +99,7 @@ dashboard、M2 的观测、M6 的评测和 M7 的任务日志都只认内部事�
 ## 6. 能力矩阵
 
 ✅ 已核实，❓ 待核实，❌ 不支持，— 不适用。CLI 的核实依据是本机版本的 `--help`，2026-10-14；Codex 一列另经本机 CPA
-（`gpt-5.5`）实跑核实（M9c），登录相关的几项另经 0.162.0 源码（tag `rust-v0.162.0`）和本机 ChatGPT 登录实跑核实；OMP 一列另经本机 CPA（`gpt-5.5`）实跑、请求记录代理和上游 v18.4.3 的源码与文档核实（M9e）。
+（`gpt-5.5`）实跑核实（M9c），登录相关的几项另经 0.162.0 源码（tag `rust-v0.162.0`）和本机 ChatGPT 登录实跑核实；OMP 一列另经本机 CPA（`gpt-5.5`）实跑、请求记录代理和上游 v18.4.3 的源码与文档核实（M9e）。「项目说明文件」一行另经三种运行时在 Looper 隔离下的实跑核实（探针仓库里放只有一个词的说明文件，关掉工具后问 agent 这个词，2026-10-15）。
 
 | 能力 | Claude Code 2.1.285 | Codex 0.162.0 | OMP 18.4.3 | Claude Agent SDK | OpenAI Agents SDK | norma |
 |---|---|---|---|---|---|---|
@@ -110,6 +110,7 @@ dashboard、M2 的观测、M6 的评测和 M7 的任务日志都只认内部事�
 | 强制结构化输出 | 靠 prompt 契约 | ✅ `--output-schema`，续接轮次也生效（Looper 未启用） | 靠 prompt 契约 | ❓ | ❓ | 待定 |
 | skill 与插件 | ✅ Claude 插件，`--plugin-dir` | 原生读 `SKILL.md`（开发者消息里列名称、描述和路径），但列表总带着 `$HOME/.agents/skills`，只有改 `HOME` 才去得掉，所以关掉原生列表（`skills.include_instructions = false`），skill 按 P9 降为可读文档；Claude 插件不加载 | ✅ `--plugin-dir` 原生加载 Claude 插件的 `skills/<名称>/SKILL.md`（按 frontmatter 的 name 命名，没有插件前缀）、`commands/`、`agents/`；Claude 格式的 `hooks/hooks.json` 不加载；插件自带的 MCP 服务器会加载，Looper 用 `disabledExtensions` 关掉 | ❓ | — | 待定 |
 | MCP | ✅ `--mcp-config` + `--strict-mcp-config`（M8b） | ✅ `config.toml` 的 `[mcp_servers.<名称>]`：stdio（`command`、`args`、`env`）和 streamable HTTP（`url`、`http_headers`）；没有 SSE | ✅ 与 Claude Code 相同的 `mcpServers` 格式（stdio、HTTP、SSE），Looper 放进家目录里生成的插件 `looper`，工具名 `mcp__looper_<服务器>_<工具>`；默认挂在 `xd://` 下经 read/write 调用，`tools.xdev: false` 改成顶层工具 | ❓ | ❓ | 待定 |
+| 项目说明文件（仓库的 `CLAUDE.md`、`AGENTS.md`；第 9 节） | ✅ 读工作目录到仓库根之间每一级的 `CLAUDE.md`；这些目录里一个 `CLAUDE.md` 都没有时，改读同样位置的 `AGENTS.md`（内置默认，设置项 `instructionFiles: "claude-md-or-agents-md"`），两者都有时只读 `CLAUDE.md`。仓库以上的 `AGENTS.md` 原先也会读进来，现在由 `claudeMdExcludes` 排除；被排除的 `CLAUDE.md` 不会挡住仓库自己的 `AGENTS.md` | ✅ 从仓库根到工作目录每一级读一个：`AGENTS.md`，没有时读 `project_doc_fallback_filenames` 里的名字，Looper 在 `config.toml` 里写 `["CLAUDE.md"]`（隔离的 `CODEX_HOME` 下照样生效）；不往仓库以上找，不在仓库里时只读工作目录 | ✅ 从工作目录到仓库根每一级读一个（按深度去重），`AGENTS.md` 先于 `CLAUDE.md`；不在仓库里时这两个发现来源已关掉，改由 Looper 把工作目录的那一个放进 `--append-system-prompt`（最多 32 KiB） | ❓ | ❓ | 待定 |
 | 额外目录（知识） | ✅ `--add-dir` | ✅ `--add-dir`，放在 `resume` 之前也有效；目录里的 `AGENTS.md` 不加载 | ✅ `--add-dir`，但目录里和它往上的 `AGENTS.md` 等会作为上下文加载，Looper 不用（第 9 节） | ❓ | — | 待定 |
 | 不限权限 | ✅ `--dangerously-skip-permissions` | ✅ `--dangerously-bypass-approvals-and-sandbox` | ✅ `tools.approvalMode: yolo`（默认值，Looper 在覆盖配置里写明） | ❓ | — | 待定 |
 | 隔离 | ✅ `--setting-sources project` 等（M1） | ✅ 独立 `CODEX_HOME`，只放生成的 `config.toml` 和 `AGENTS.md`，不读 `~/.codex`；另需关掉原生 skill 列表（见上）和插件同步（`features.plugins = false`，否则每个新目录克隆约 25 MB 的插件市场）；用 Codex 登录时另有一个指向操作者登录文件的 `auth.json` 符号链接，并关掉 ChatGPT 应用（`features.apps = false`，否则每个目录缓存约 2.6 MB 的应用工具列表），见 P1 | ✅ `HOME` 指向 Looper 的家目录（见下），不读 `~/.omp`、`~/.claude`、`~/.codex`、`~/.agents`、`~/.env`；工作目录不在 git 仓库里时另关掉向上查找的发现来源 | ❓ | — | 待定 |
@@ -155,7 +156,8 @@ OMP 的其他核实结果：
 - **向上查找**：项目级的 skill、`AGENTS.md`/`CLAUDE.md` 和 `.omp` 目录从工作目录往上找，到 git 仓库根为止；不在
   仓库里时以 `HOME` 为界。`HOME` 换掉以后，仓库外的工作目录会一直找到 `/`，把操作者家目录里的 `.agents/skills`、
   `.claude/skills`、`.omp/skills` 和 `AGENTS.md` 当成项目内容加载（用替身家目录实测到）。所以工作目录不在仓库里时
-  关掉 `native`、`claude`、`agents`、`agents-md`、`claude-md` 这几个发现来源，代价是工作目录自己的这几类文件也不读。
+  关掉 `native`、`claude`、`agents`、`agents-md`、`claude-md` 这几个发现来源，代价是工作目录自己的 skill 和 `.omp`
+  也不读；它的 `AGENTS.md` 或 `CLAUDE.md` 由 Looper 放进 system prompt（第 9 节）。
   `task` 工具的子 agent 定义（`.omp/agents`）无论在不在仓库都一直找到 `/`，关不掉，记为差距。
 - **设置**：项目的 `.omp/config.yml` 会覆盖全局设置，所以 Looper 的设置放在 `--config` 覆盖文件里（优先级更高）：
   只启用 agent 的模型（`enabledModels`，各角色 `modelRoles` 都指向它），`retry.modelFallback`、
@@ -258,6 +260,15 @@ GLM、DeepSeek 等同时提供 anthropic 和 openai 两种协议，一般配 Cla
   但它当前运行时不兼容的条目会跳过，并记在运行记录里，不会让运行失败。
 - **知识**：Claude Code 和 Codex 都有 `--add-dir`。OMP 也有，但它会把每个额外目录当成工作区，读它往上直到 `/` 的
   `AGENTS.md` 等上下文文件，所以 OMP 不挂目录，按 prompt 里知识索引给出的路径读（索引写明了每个文档所在的目录）。
+- **项目说明文件**（2026-10-15）：仓库自带的 `CLAUDE.md`、`AGENTS.md` 各运行时读法不同（第 6 节），Looper 让每种
+  运行时都看到它，且同一份内容不给两次：
+  - 范围是工作目录所在仓库的根到工作目录之间的各级目录，不在仓库里时只有工作目录；不往仓库以上找；
+  - 能原生读的就用原生：Claude Code 本来就在没有 `CLAUDE.md` 时读 `AGENTS.md`；Codex 靠生成的 `config.toml` 里的
+    `project_doc_fallback_filenames = ["CLAUDE.md"]`；OMP 在仓库里本来两者都认；
+  - 只有 OMP 在仓库外没有原生办法（向上查找会一路找到 `/`），由适配器把工作目录的 `AGENTS.md`（没有时 `CLAUDE.md`）
+    放在它的 system prompt 最前面，写明来源，最多 32 KiB；
+  - 两个文件都在时各读各的原生文件：Claude Code 读 `CLAUDE.md`，Codex 和 OMP 读 `AGENTS.md`；
+  - 不改动用户仓库里的任何文件；每次运行记录给了哪些文件、怎么给的（`metadata.project_instructions`）。
 - **prompt**：
   - harness 和角色 prompt 保持与运行时无关。核查过，现有 prompt 没有写死工具名；
   - 运行时之间的差异（工具名、怎么输出结构化结果）由适配器在代码契约层前追加一小段"运行时说明"；

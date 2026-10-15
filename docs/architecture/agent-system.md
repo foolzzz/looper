@@ -425,10 +425,10 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
 ### What an agent's Claude Code loads
 
 Every agent (Manager, Planner, Worker, Reviewer) sees what Looper composes and
-the project's own `CLAUDE.md`, not the personal Claude Code configuration of
-whoever runs Looper. `isolation_args(cwd)` in `looper/agents/claude_cli.py` is
-the one flag set all four commands carry; `ISOLATION_ID`
-(`personal-config-off/v1`) names it in each run's record:
+the project's own `CLAUDE.md` (or `AGENTS.md`, below), not the personal Claude
+Code configuration of whoever runs Looper. `isolation_args(cwd)` in
+`looper/agents/claude_cli.py` is the one flag set all four commands carry;
+`ISOLATION_ID` (`personal-config-off/v2`) names it in each run's record:
 
 ```
 --setting-sources project --strict-mcp-config
@@ -449,17 +449,22 @@ events, and real-model probes):
 | Custom agents in `~/.claude/agents`, output styles | loaded | not loaded |
 | MCP servers: user (dropped by `--setting-sources`), project `.mcp.json` and claude.ai connectors (dropped by `--strict-mcp-config`) | loaded | none |
 | Auto memory under `~/.claude/projects/<dir>/memory/` | loaded | off |
-| Project `.claude/settings.json` and `CLAUDE.md` | loaded | loaded |
+| Project `.claude/settings.json` and `CLAUDE.md` (its `AGENTS.md` when it has no `CLAUDE.md`) | loaded | loaded |
 | Login (OAuth in the Keychain) | works | works |
 
 `--setting-sources project` alone is not enough: Claude Code also reads
 `CLAUDE.md`, `.claude/CLAUDE.md` and `.claude/rules/` in every directory from
 the working directory up to `/` as project memory, so any work directory under
-`$HOME` would still load `~/.claude/CLAUDE.md`. `claudeMdExcludes` lists those
-files for every directory above the work directory's repository (the nearest
-directory with `.git`, or the work directory itself), plus the operator's
-`~/.claude/` (and `$CLAUDE_CONFIG_DIR`) memory, so a repository's own
-`CLAUDE.md` files load and nothing above it does. `--bare` and a separate
+`$HOME` would still load `~/.claude/CLAUDE.md`. Where a project has no
+`CLAUDE.md` of its own, Claude Code reads its `AGENTS.md` files (and
+`.claude/AGENTS.md`) instead, from the same directories (its built-in default,
+the `instructionFiles` setting `claude-md-or-agents-md`). `claudeMdExcludes`
+lists all of these files for every directory above the work directory's
+repository (the nearest directory with `.git`, or the work directory itself),
+plus the operator's `~/.claude/` (and `$CLAUDE_CONFIG_DIR`) memory, so a
+repository's own `CLAUDE.md` (or `AGENTS.md`) files load and nothing above it
+does; an excluded `CLAUDE.md` above the repository does not keep the
+repository's `AGENTS.md` out. `--bare` and a separate
 `CLAUDE_CONFIG_DIR` were rejected because both lose the operator's login;
 `--safe-mode` also drops the project's `CLAUDE.md`; `--disable-slash-commands`
 also drops built-in skills. Not covered: managed (admin policy) settings,
@@ -548,8 +553,10 @@ registry, its checks and its API are `looper/agents/profile_registry.py`.
   `config.toml` (the provider as `[model_providers.looper]`, its key only in
   the `LOOPER_PROVIDER_API_KEY` variable, which shell commands do not get;
   the run's MCP servers as `[mcp_servers.<name>]`, stdio and HTTP; Codex's
-  own skill list and plugin sync off) and `AGENTS.md`: a short block of
-  Codex runtime notes, then the system prompt. The operator's `~/.codex` is
+  own skill list and plugin sync off; `project_doc_fallback_filenames =
+  ["CLAUDE.md"]`, so a project directory without `AGENTS.md` gives its
+  `CLAUDE.md`) and `AGENTS.md`: a short block of Codex runtime notes, then
+  the system prompt. The operator's `~/.codex` is
   never read. A Worker or Reviewer is one `--ephemeral` process with its
   prompt on stdin, which then closes: it cannot be steered while it runs.
   The Manager and a Planner run one process per turn that resumes the
@@ -619,9 +626,11 @@ registry, its checks and its API are `looper/agents/profile_registry.py`.
   commands the operator's `HOME` and those variables back, without the key.
   Outside a git repository omp's search for a project's content would climb
   past the operator's home, so there the sources that climb (`native`,
-  `claude`, `agents`, `agents-md`, `claude-md`) are off. The system prompt is
-  `--append-system-prompt` (OMP runtime notes, then the prompt), which a
-  resumed session takes up. A Worker or Reviewer is one `--no-session`
+  `claude`, `agents`, `agents-md`, `claude-md`) are off, and the work
+  directory's own `AGENTS.md` (else `CLAUDE.md`) goes into the system prompt
+  instead. The system prompt is `--append-system-prompt` (that file when
+  there is one, OMP runtime notes, then the prompt), which a resumed session
+  takes up. A Worker or Reviewer is one `--no-session`
   process with its prompt on stdin, which then closes. The Manager and a
   Planner run one process per turn with `--session-dir omp/sessions/<agent>`
   and `--resume <id>` (`ResidentOmp`); the turn that starts a new session
@@ -976,7 +985,22 @@ Every run records the prompt in `llm_records.metadata`:
   loaded; `error` says why a run went without them. Runs recorded before the
   catalog have items without `plugin` and `scope`, and a task agent's run may
   have `project_skills` (`{project_id, sha256, plugin, skills}`), which is no
-  longer written.
+  longer written;
+- `project_instructions`: `[{path, delivery, sha256?, bytes?, clipped_bytes?,
+  error?}]`, the repository's own `CLAUDE.md` and `AGENTS.md` files the run's
+  runtime was given (`RuntimeAdapter.instruction_files`,
+  `looper/agents/runtimes/instructions.py`), each `path` from the work
+  directory. The files are those in the directories from the work directory's
+  repository root down to the work directory (the work directory alone
+  outside a repository). Claude Code reads every `CLAUDE.md` of them, else
+  every `AGENTS.md`; Codex and omp read one a directory, `AGENTS.md` before
+  `CLAUDE.md`, so each runtime gets its own file and the other one where the
+  project has only that, never both. `delivery` is `native` when the runtime
+  reads the file itself and `injected` when Looper put its text in the
+  runtime's system prompt (omp outside a repository: the first 32 KiB, with
+  the text's `sha256`, the file's `bytes` and the `clipped_bytes`, or the
+  `error` that kept it out). The Runs page shows them as the prompt layers'
+  "Instructions" row.
 
 The same inputs give the same prompt and hash; changing the harness, the role
 prompt, the background, the knowledge index, the task or a contract changes
@@ -1549,7 +1573,7 @@ PostgreSQL is a hard startup dependency. All data paths:
 | `task_journal` | A task's journal, written by code as things happen: `step_accepted`, `step_failed`, `step_retry`, `decision`, `user_instruction`, `session_switch` and `handoff` entries, each with its `step_id` (`''` for the whole task), `summary` and `learnings`; `GET /api/tasks/<id>` returns it as `journal` and the task page lists it as Findings, each entry with its kind |
 | `activity` | Execution trace events (SSE streaming to frontend) |
 | `chat_messages` | Chat conversation history; a new Manager session's resume brief reads the recent chats that are not a task's Planner thread (`planner-<task_id>`) |
-| `llm_records` | One row per agent run: input and output text, status, the run's own `cost_usd` and its `cost_source` (`runtime` or `provider_price`), `input_tokens`, `output_tokens`, `cache_read_tokens` and `cache_creation_tokens`, its final `context_tokens` and its `compactions`; `metadata` holds the exact argv (`command`), `cwd`, the appended `system_prompt`, its `system_prompt_sha256`, its `prompt_layers`, the `profile` (`agent` on runs recorded before the rename), the `model_choice`, the Settings `env` names, the `library` items loaded and a task agent's `project_skills` |
+| `llm_records` | One row per agent run: input and output text, status, the run's own `cost_usd` and its `cost_source` (`runtime` or `provider_price`), `input_tokens`, `output_tokens`, `cache_read_tokens` and `cache_creation_tokens`, its final `context_tokens` and its `compactions`; `metadata` holds the exact argv (`command`), `cwd`, the appended `system_prompt`, its `system_prompt_sha256`, its `prompt_layers`, the `profile` (`agent` on runs recorded before the rename), the `model_choice`, the Settings `env` names, the `library` items loaded, the `project_instructions` the runtime was given and a task agent's `project_skills` |
 | `role_configs` | Each role's own settings, keyed by `role` (`manager`, `planner`, `worker`, `reviewer`): display name, role prompt and its recommended `default_prompt`, turns, timeout, enabled |
 | `agent_setting_layers` | Agent settings by layer: `scope` (`system`, `role`, `project`, `role_project`), `role`, `project_id` (goes with its project), and the nullable `harness_prompt`, `profile_id` (the effort is the profile's), `env` (ordered `[{key, value}]`, `null` value = unset), `run_budget_usd` and `max_concurrency` (a Planner, Worker or Reviewer `role` or `role_project` layer only); one row per layer and place |
 | `agent_runtimes` | Runtimes, built in (one per type found on PATH) or registered by hand before and kept while an Agent Profile uses them (`builtin` false): `name`, `type` (an adapter), `executable` (`''` = the type's default), the probe's `version`, `capabilities`, `probed_at`, `probe_error`, `builtin` |
