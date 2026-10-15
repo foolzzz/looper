@@ -167,9 +167,8 @@ def most_at_once(spans: Iterable[tuple[float, float]]) -> int:
     return most
 
 
-def independent_pairs(steps: Iterable[Mapping[str, Any]]) -> int:
-    """Pairs of the plan's steps with no dependency between them, directly or through other steps: the work the
-    plan lets run at the same time."""
+def _before(steps: Iterable[Mapping[str, Any]]) -> dict[str, set[str]]:
+    """Each of the plan's steps and every step it depends on, directly or through other steps."""
     needs = {str(step.get("id")): {str(d) for d in step.get("depends_on") or []} for step in steps}
 
     def upstream(step_id: str) -> set[str]:
@@ -181,9 +180,26 @@ def independent_pairs(steps: Iterable[Mapping[str, Any]]) -> int:
                 todo += needs.get(current, ())
         return found
 
-    before = {step_id: upstream(step_id) for step_id in needs}
-    ids = sorted(needs)
-    return sum(1 for i, a in enumerate(ids) for b in ids[i + 1:] if a not in before[b] and b not in before[a])
+    return {step_id: upstream(step_id) for step_id in needs}
+
+
+def _independent(before: Mapping[str, set[str]]) -> list[tuple[str, str]]:
+    ids = sorted(before)
+    return [(a, b) for i, a in enumerate(ids) for b in ids[i + 1:] if a not in before[b] and b not in before[a]]
+
+
+def independent_pairs(steps: Iterable[Mapping[str, Any]]) -> int:
+    """Pairs of the plan's steps with no dependency between them, directly or through other steps: the work the
+    plan lets run at the same time."""
+    return len(_independent(_before(steps)))
+
+
+def bracketed_pairs(steps: Iterable[Mapping[str, Any]]) -> int:
+    """Independent pairs of the plan's steps with a step both depend on (an interface they share) and a step that
+    depends on both (their integration): coordinated parts built side by side."""
+    before = _before(steps)
+    return sum(1 for a, b in _independent(before)
+               if before[a] & before[b] and any({a, b} <= upstream for upstream in before.values()))
 
 
 def planner_changed_files(
@@ -263,6 +279,7 @@ def task_metrics(
         "chat_turns": kinds.get("chat", 0),
         # What the plan lets run at the same time, and the most Workers that did.
         "independent_pairs": independent_pairs(detail.get("steps") or []),
+        "bracketed_pairs": bracketed_pairs(detail.get("steps") or []),
         "parallel_workers": most_at_once(windows.get("worker", [])),
     }
     status = str(detail.get("status") or "")

@@ -11,6 +11,8 @@ the same flow without a model.
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -24,7 +26,8 @@ class EvalTask:
     check: Callable[[Path], str | None]  # the reason the delivered files are wrong, else None
     files: dict[str, str] = field(default_factory=dict)  # seeded into the working directory
     chat: str | None = None  # sent to the task's Planner once its plan exists
-    # min_steps, min_reviews, min_retries, min_chat_turns, min_independent_pairs, min_parallel_workers
+    # min_steps, min_reviews, min_retries, min_chat_turns, min_independent_pairs, min_bracketed_pairs,
+    # min_parallel_workers
     expect: dict[str, int] = field(default_factory=dict)
     fake: dict[str, Any] = field(default_factory=dict)  # the stand-in Claude's script
 
@@ -79,6 +82,41 @@ def _powers_and_table(work_dir: Path) -> str | None:
     expected = [f"{n} {n ** 2} {n ** 3}" for n in range(1, 6)]
     return None if [" ".join(line.split()) for line in table.splitlines()] == expected else \
         "table.txt does not hold `n n² n³` for n from 1 to 5, one per line"
+
+
+def _client_calls_service(work_dir: Path) -> str | None:
+    client = work_dir / "client" / "client.py"
+    if not client.is_file():
+        return "client/client.py is missing"
+    if not (work_dir / "service" / "service.py").is_file():
+        return "service/service.py is missing"
+    for args, expected in ((["add", "2", "3"], "5"), (["mul", "4", "5"], "20")):
+        command = "client.py " + " ".join(args)
+        try:
+            done = subprocess.run([sys.executable, str(client), *args], cwd=work_dir, capture_output=True, text=True,
+                                  timeout=30, check=False)
+        except subprocess.TimeoutExpired:
+            return f"{command} did not finish in 30 s"
+        if done.stdout.strip() != expected:
+            return f"{command} printed {done.stdout.strip()[:40]!r}, expected {expected}"
+    return None
+
+
+# The fake Claude's service and client for interface_first: JSON {"op", "a", "b"} in, {"result"} out.
+_FAKE_SERVICE = """\
+import json, sys
+request = json.load(sys.stdin)
+ops = {"add": lambda a, b: a + b, "mul": lambda a, b: a * b}
+json.dump({"result": ops[request["op"]](request["a"], request["b"])}, sys.stdout)
+"""
+_FAKE_CLIENT = """\
+import json, os, subprocess, sys
+op, a, b = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
+service = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "service", "service.py")
+answer = subprocess.run([sys.executable, service], input=json.dumps({"op": op, "a": a, "b": b}),
+                        capture_output=True, text=True, check=True)
+print(json.loads(answer.stdout)["result"])
+"""
 
 
 def _build_log(work_dir: Path) -> str | None:
@@ -160,6 +198,40 @@ TASKS: tuple[EvalTask, ...] = (
                 "s2": [{"status": "completed", "seconds": 1, "files": {"cubes.txt": "1\n8\n27\n64\n125\n"}}],
                 "s3": [{"status": "completed",
                         "files": {"table.txt": "".join(f"{n} {n ** 2} {n ** 3}\n" for n in range(1, 6))}}],
+            },
+        },
+    ),
+    EvalTask(
+        # A service and its client, which must agree on a request format the requirement leaves open: the plan
+        # should fix the format first, build the two parts side by side, and check them together last.
+        id="interface_first",
+        requirement="Build a tiny calculator as a service and its client, in two directories of the working "
+                    "directory. service/service.py is a command-line service: it reads one request from standard "
+                    "input and writes its answer to standard output, both as JSON in a format you design, and it "
+                    "can add and multiply two integers. client/client.py is a command-line client: `python "
+                    "client/client.py add 2 3` sends the request to the service by running service/service.py "
+                    "and prints only the result, here 5, and `python client/client.py mul 4 5` prints 20. The "
+                    "client must not compute the result itself. Finish by checking the two together with those "
+                    "two commands.",
+        check=_client_calls_service,
+        expect={"min_bracketed_pairs": 1, "min_parallel_workers": 2},
+        fake={
+            "plan": [
+                _step("s1", "Write the request and answer format both parts use in PROTOCOL.md.",
+                      ["PROTOCOL.md defines the request and the answer"]),
+                _step("s2", "Write service/service.py to PROTOCOL.md.", ["service.py answers add and mul"],
+                      depends_on=["s1"]),
+                _step("s3", "Write client/client.py to PROTOCOL.md.", ["client.py runs the service"],
+                      depends_on=["s1"]),
+                _step("s4", "Run both client commands.", ["add 2 3 prints 5, mul 4 5 prints 20"],
+                      depends_on=["s2", "s3"]),
+            ],
+            "attempts": {
+                "s1": [{"status": "completed", "files": {
+                    "PROTOCOL.md": 'Request: {"op": "add" | "mul", "a": int, "b": int}. Answer: {"result": int}.\n'}}],
+                "s2": [{"status": "completed", "seconds": 1, "files": {"service/service.py": _FAKE_SERVICE}}],
+                "s3": [{"status": "completed", "seconds": 1, "files": {"client/client.py": _FAKE_CLIENT}}],
+                "s4": [{"status": "completed", "files": {}}],
             },
         },
     ),
