@@ -16,6 +16,7 @@ import {
 import { roleLabel } from "@/lib/runtime-catalog";
 import { settingsHref } from "@/lib/settings-pages";
 import { useCollapsibleRows } from "@/lib/use-collapsible-rows";
+import { profileName } from "@/lib/use-registry";
 
 const ROLES: ProjectRole[] = ["planner", "worker", "reviewer"];
 
@@ -31,34 +32,28 @@ const SOURCES: Partial<Record<SettingSource, string>> = {
   role_project: "this role in this project",
 };
 
-const effortText = (effort: string | null) => (effort ? `effort ${effort}` : "default effort");
 const profileText = (effective: EffectiveSettings) =>
-  `${effective.profile.value.name} (${SOURCES[effective.profile.source] ?? effective.profile.source})`;
+  `${profileName(effective.profile.value)} (${SOURCES[effective.profile.source] ?? effective.profile.source})`;
 
-/** A role's line: the Agent Profile in effect and where it comes from, the effort, the limit on how many run. */
+/** A role's line: the Agent Profile in effect (with its effort) and where it comes from, the limit on how many run. */
 function roleSummary(role: ProjectRole, effective: EffectiveSettings) {
   const limit = effective.max_concurrency?.value;
   return [
     profileText(effective),
-    effortText(effective.effort.value),
     limit == null ? "" : role === "planner" ? `up to ${limit} ${limit === 1 ? "task" : "tasks"} at once` : `up to ${limit} at once`,
   ]
     .filter(Boolean)
     .join(" · ");
 }
 
-/** The project row's line: what the roles that do not set it again here run with, when they agree. */
+/** The project row's line: the Agent Profile the roles that do not set one here run with, when they agree. */
 function projectSummary(settings: ProjectAgentSettings) {
-  const agreed = (field: "profile_id" | "effort", show: (effective: EffectiveSettings) => string, what: string) => {
-    const shown = new Set(
-      ROLES.filter((role) => settings.roles[role].values[field] == null).map((role) => show(settings.roles[role].effective)),
-    );
-    return shown.size === 1 ? [...shown][0] : shown.size === 0 ? `${what} set per role` : `${what} varies by role`;
-  };
-  return [
-    agreed("profile_id", profileText, "Agent Profile"),
-    agreed("effort", (effective) => effortText(effective.effort.value), "effort"),
-  ].join(" · ");
+  const shown = new Set(
+    ROLES.filter((role) => settings.roles[role].values.profile_id == null).map((role) =>
+      profileText(settings.roles[role].effective),
+    ),
+  );
+  return shown.size === 1 ? [...shown][0] : shown.size === 0 ? "Agent Profile set per role" : "Agent Profile varies by role";
 }
 
 /** Whether a layer sets anything itself. */

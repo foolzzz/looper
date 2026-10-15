@@ -22,6 +22,7 @@ import {
 } from "@/lib/api";
 import { AGENT_PROFILE } from "@/lib/settings-pages";
 import { useProjects } from "@/lib/use-projects";
+import { profileName } from "@/lib/use-registry";
 import { formatUsd } from "@/lib/usage";
 import { cn, formatBytes } from "@/lib/utils";
 
@@ -274,7 +275,7 @@ function agentRows(settings: ProjectAgentSettings): [string, string][] {
   const each = (show: (role: ProjectRole) => string) =>
     PROJECT_ROLES.map(([role, label]) => `${label} ${show(role)}`).join(" · ");
   const effective = (role: ProjectRole) => settings.roles[role].effective;
-  const rows: [string, string][] = PROJECT_ROLES.map(([role, label]) => [label, effective(role).profile.value.name]);
+  const rows: [string, string][] = PROJECT_ROLES.map(([role, label]) => [label, profileName(effective(role).profile.value)]);
   if (PROJECT_ROLES.some(([role]) => effective(role).run_budget_usd.value != null))
     rows.push(["Spend cap per run", each((role) => {
       const cap = effective(role).run_budget_usd.value;

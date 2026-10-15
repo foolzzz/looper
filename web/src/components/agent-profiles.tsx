@@ -135,7 +135,7 @@ const NEW_PROVIDER = "__new_provider__";
 
 /**
  * Create or edit an Agent Profile: a name, then Runtime → Provider (its own login, or an API-key provider that
- * speaks its protocol) → Model (from the provider's catalog, or any), and a default effort. `nested` renders it
+ * speaks its protocol) → Model (from the provider's catalog, or any), and the effort its runs use. `nested` renders it
  * without a form element of its own, for use inside another form; `onDone` gets the saved profile, or nothing
  * when cancelled.
  */
@@ -285,7 +285,7 @@ export function AgentProfileForm({
           )}
         </div>
         <div className="space-y-1">
-          <label htmlFor={`${id}-effort`} className={LABEL}>Default effort</label>
+          <label htmlFor={`${id}-effort`} className={LABEL}>Effort</label>
           <select id={`${id}-effort`} value={draft.effort} onChange={(e) => set({ effort: e.target.value })} className={SELECT}>
             <option value="">Runtime default</option>
             {registry.limits.effort_levels.map((level) => (
@@ -318,7 +318,8 @@ export function AgentProfileForm({
             : provider?.suggested_models.length
               ? `Any model the login offers, such as ${provider.suggested_models.slice(0, 3).join(", ")}.`
               : "The model as the runtime takes it: an alias such as sonnet or a full name."}{" "}
-          A role&apos;s effort overrides the default.
+          Runs of this profile use this effort; to run a role with another effort, select or create a profile
+          with it.
         </p>
       </div>
       {warnings.length > 0 && (

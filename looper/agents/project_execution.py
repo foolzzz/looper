@@ -19,9 +19,9 @@ Every field is optional, and ``None`` inherits today's behavior:
 
 The columns live on ``projects`` (``db.projects.EXECUTION_COLUMNS``); this
 module owns their types and validation. Agents read them when a run or turn
-starts, so a change reaches the next one. A project's model, harness, effort,
-environment and per-run cap are agent settings: its layer and its roles'
-layers (``agent_settings``).
+starts, so a change reaches the next one. A project's harness, Agent Profile
+(its model and effort), environment and per-run cap are agent settings: its
+layer and its roles' layers (``agent_settings``).
 """
 
 from __future__ import annotations

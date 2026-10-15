@@ -8,8 +8,8 @@ given, else its project's default; there is no global default. A project's
 ``background`` goes into the system prompt of its task agents (Planner,
 Workers, Reviewers), read afresh when each prompt is built. Its execution
 settings (``project_execution``) are top-level fields of the project too,
-``null`` to inherit. Its agent settings (harness, model, effort, environment,
-per-run cap) are layers of their own (``agent_settings``,
+``null`` to inherit. Its agent settings (harness, Agent Profile with its model and
+effort, environment, per-run cap) are layers of their own (``agent_settings``,
 ``/api/projects/<id>/agent-settings``).
 """
 

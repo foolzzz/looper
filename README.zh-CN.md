@@ -247,7 +247,7 @@ API 只响应控制台和本机客户端：来自其他网站页面的请求（�
 - **提供方**是 agent 请求发往的地方：它支持的协议、模型及价格，以及认证方式：运行时自己的登录，或 API key（API 从不返回它）。
 - 内置 agent `claude-code/opus`（Claude Code、它自己的登录、`opus`）运行所有没有另选 agent 的角色。
 
-**分层设置**：harness prompt、agent、effort、环境变量和单次运行的花费上限这五项设置，经过四层解析，后面的层优先：
+**分层设置**：harness prompt、agent（含模型和 effort）、环境变量和单次运行的花费上限这四项设置，经过四层解析，后面的层优先：
 
 | 层 | 在哪里编辑 | 作用范围 |
 |---|---|---|
@@ -257,7 +257,7 @@ API 只响应控制台和本机客户端：来自其他网站页面的请求（�
 | 项目内角色 | 同一标签页，该角色的一行 | 某个项目里的其中一个角色 |
 
 Manager 横跨所有项目，所以只有前两层。任务创建时还可以给它的 Planner、Worker 或 Reviewer 选 Agent Profile（`profile_overrides`），
-这一选择优先于所有层，只对该任务生效。没有任何一层设置的字段用内置默认值，控制台会显示每个字段的值及其来源层。
+这一选择优先于所有层，只对该任务生效。effort 属于 agent：要让某个角色用别的 effort，就给它选一个带该 effort 的 agent。没有任何一层设置的字段用内置默认值，控制台会显示每个字段的值及其来源层。
 环境变量不用来放密钥：看起来像凭据的变量名会被拒绝。改动从每个 agent 的下一次运行或下一轮起生效。详见
 [Harness, profile and environment](docs/architecture/agent-system.md#harness-profile-and-environment)。
 

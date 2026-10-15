@@ -67,8 +67,8 @@ export const BACKGROUND_MAX_CHARS = 10000;
 /** The most characters a harness prompt may have, at any settings layer (also in `SettingLimits`). */
 export const HARNESS_MAX_CHARS = 20000;
 
-/** How a project's tasks run; null inherits today's behavior. Model, harness, effort, environment and the
- * per-run cap are agent settings (`ProjectAgentSettings`). */
+/** How a project's tasks run; null inherits today's behavior. The Agent Profile (model and effort), harness,
+ * environment and the per-run cap are agent settings (`ProjectAgentSettings`). */
 export interface ProjectExecution {
   /** The most one task may spend over all its runs. */
   task_budget_usd: number | null;
@@ -1341,7 +1341,7 @@ export interface ProfileUsedBy {
   task_count: number;
 }
 
-/** An Agent Profile: a runtime, a provider and a model, with an optional default effort. */
+/** An Agent Profile: a runtime, a provider and a model, with an optional effort, which its runs use. */
 export interface AgentProfile {
   profile_id: string;
   name: string;
@@ -1474,14 +1474,13 @@ export function deleteAgentProfile(profileId: string): Promise<{ deleted: string
     "delete Agent Profile");
 }
 
-// --- Agent settings: harness, Agent Profile, effort, environment and per-run cap, by layer ---
+// --- Agent settings: harness, Agent Profile (with its effort), environment and per-run cap, by layer ---
 
 /** Where a setting comes from, from least to most specific: the built-in default, every role and a role (both in
  * Settings → Roles), a project (all its agents), a role in a project. A later layer wins; the Manager has only the
  * first three. */
 export type SettingLayer = "builtin" | "system" | "role" | "project" | "role_project";
-/** Where a value came from: a layer, the selected profile's own default (its effort), or a task's choice of
- * profile. */
+/** Where a value came from: a layer, the selected profile itself (its effort), or a task's choice of profile. */
 export type SettingSource = SettingLayer | "profile" | "task";
 /** The roles a project's agents have: the Manager spans every project. */
 export type ProjectRole = Exclude<AgentRole, "manager">;
@@ -1497,8 +1496,6 @@ export interface LayerValues {
   harness_prompt: string | null;
   /** An Agent Profile's profile_id. */
   profile_id: string | null;
-  /** One of `SettingLimits.effort_levels`. */
-  effort: string | null;
   env: LayerEnvEntry[];
   /** `--max-budget-usd` on each Claude Code process. */
   run_budget_usd: number | null;
@@ -1517,6 +1514,8 @@ export interface EffectiveProfile {
   profile_id: string;
   name: string;
   model: string;
+  /** The profile's effort; null = the runtime's default. */
+  effort: string | null;
   /** The runtime's and the provider's names. */
   runtime: string;
   provider: string;
@@ -1527,7 +1526,7 @@ export interface EffectiveSettings {
   /** from_role "worker": a Reviewer without its own harness at that layer uses the Worker's. */
   harness_prompt: Sourced<string> & { from_role?: "worker" };
   profile: Sourced<EffectiveProfile>;
-  /** null = the runtime's default effort; source "profile": the profile's own default. */
+  /** The profile's own effort: source "profile"; null = the runtime's default (source "builtin"). */
   effort: Sourced<string | null>;
   env: ({ key: string } & Sourced<string>)[];
   /** null = no cap. */
@@ -1539,7 +1538,6 @@ export interface EffectiveSettings {
 export interface SettingLimits {
   harness_max_chars: number;
   env_max_entries: number;
-  effort_levels: string[];
   builtin_harness_prompt: string;
   builtin_model: string;
   /** The Agent Profile every role runs with when no layer selects one. */

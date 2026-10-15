@@ -17,6 +17,7 @@ import type {
   Sourced,
 } from "@/lib/api";
 import { formatUsd } from "@/lib/usage";
+import { profileName } from "@/lib/use-registry";
 import { AGENT_PROFILE } from "@/lib/settings-pages";
 import { cn } from "@/lib/utils";
 
@@ -61,7 +62,6 @@ interface Draft {
   harness: string;
   /** An Agent Profile's profile_id. */
   profile: string;
-  effort: string;
   env: EnvRow[];
   budget: string;
   concurrency: string;
@@ -71,7 +71,6 @@ function draftOf(values: LayerValues): Draft {
   return {
     harness: values.harness_prompt ?? "",
     profile: values.profile_id ?? "",
-    effort: values.effort ?? "",
     env: values.env.map((e) => ({ key: e.key, value: e.value ?? "", unset: e.value === null })),
     budget: values.run_budget_usd == null ? "" : String(values.run_budget_usd),
     concurrency: values.max_concurrency == null ? "" : String(values.max_concurrency),
@@ -90,7 +89,6 @@ function changesOf(draft: Draft, values: LayerValues): LayerUpdate {
   const changes: LayerUpdate = {};
   if (draft.harness !== before.harness) changes.harness_prompt = draft.harness.trim() ? draft.harness : null;
   if (draft.profile !== before.profile) changes.profile_id = draft.profile || null;
-  if (draft.effort !== before.effort) changes.effort = draft.effort || null;
   if (JSON.stringify(draft.env) !== JSON.stringify(before.env))
     changes.env = draft.env.map((e) => ({ key: e.key, value: e.unset ? null : e.value }));
   const budget = draft.budget.trim();
@@ -144,13 +142,12 @@ function NowValue<T>({
   );
 }
 
-const SELECT = "flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm text-foreground";
-
 /**
- * One settings layer's harness, Agent Profile, effort, environment and per-run cap; a Planner's, Worker's or
- * Reviewer's role layer (in Settings → Roles or in a project) also has the role's concurrency limit per project. An
- * empty field is not set here and inherits; with `effective`, each field also says what applies now and where it
- * comes from. `profileFirst` puts the Agent Profile above the other fields, which follow as "More overrides".
+ * One settings layer's harness, Agent Profile (which brings its model and effort), environment and per-run cap; a
+ * Planner's, Worker's or Reviewer's role layer (in Settings → Roles or in a project) also has the role's concurrency
+ * limit per project. An empty field is not set here and inherits; with `effective`, each field also says what applies
+ * now and where it comes from. `profileFirst` puts the Agent Profile above the other fields, which follow as "More
+ * overrides".
  */
 export function LayerSettingsForm({
   idPrefix,
@@ -219,8 +216,8 @@ export function LayerSettingsForm({
   };
 
   const harness = effective?.harness_prompt;
-  const effortText = (value: string | null) => value || "runtime default";
-  const profileText = (value: EffectiveProfile) => `${value.name} (${value.runtime} · ${value.provider} · ${value.model})`;
+  const profileText = (value: EffectiveProfile) =>
+    `${profileName(value)} (${value.runtime} · ${value.provider} · ${value.model})`;
   const budgetText = (value: number | null) => (value == null ? "no cap" : formatUsd(value));
   const concurrencyText = (value: number) => String(value);
 
@@ -235,8 +232,8 @@ export function LayerSettingsForm({
         onChange={(profile) => set({ profile })}
         emptyLabel={isSystem ? `Built-in: ${limits.builtin_profile.name}` : "Inherit"}
         roles={roles}
-        describedBy={`${idPrefix}-profile-now`}
-        unlistedName={effective?.profile.value.profile_id === draft.profile ? effective.profile.value.name : undefined}
+        describedBy={`${idPrefix}-profile-now ${idPrefix}-profile-hint`}
+        unlistedName={effective?.profile.value.profile_id === draft.profile ? profileName(effective.profile.value) : undefined}
       />
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
         <NowValue id={`${idPrefix}-profile-now`} setting={effective?.profile} layer={layer} show={profileText} />
@@ -250,6 +247,10 @@ export function LayerSettingsForm({
           </button>
         )}
       </div>
+      <p id={`${idPrefix}-profile-hint`} className="text-[11px] text-muted-foreground">
+        The model and the effort come with the {AGENT_PROFILE.name}: for another effort, select or create a profile
+        with it.
+      </p>
     </div>
   );
 
@@ -298,22 +299,6 @@ export function LayerSettingsForm({
 
       <div className="grid gap-4 sm:grid-cols-2">
         {!profileFirst && profileField}
-        <div className="space-y-1">
-          <label htmlFor={`${idPrefix}-effort`} className="text-xs font-medium text-muted-foreground">Effort</label>
-          <select
-            id={`${idPrefix}-effort`}
-            value={draft.effort}
-            onChange={(e) => set({ effort: e.target.value })}
-            aria-describedby={`${idPrefix}-effort-now`}
-            className={SELECT}
-          >
-            <option value="">{isSystem ? `The ${AGENT_PROFILE.name}'s or the runtime's default` : "Inherit"}</option>
-            {limits.effort_levels.map((level) => (
-              <option key={level} value={level}>{level}</option>
-            ))}
-          </select>
-          <NowValue id={`${idPrefix}-effort-now`} setting={effective?.effort} layer={layer} show={effortText} />
-        </div>
         <div className="space-y-1">
           <label htmlFor={`${idPrefix}-budget`} className="text-xs font-medium text-muted-foreground">
             Spend cap per run (USD)

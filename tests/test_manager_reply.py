@@ -710,10 +710,10 @@ class TestManagerTaskPlacement:
     def test_the_configuration_comes_from_the_settings_in_effect_in_the_project(self, agent_db: Any) -> None:
         project = "proj-111111111111"
         agent_db.list_layers.return_value = [
-            {"scope": "system", "profile": profile_json("haiku")},
-            {"scope": "role", "role": "reviewer", "effort": "low"},
-            {"scope": "role_project", "role": "worker", "project_id": project, "effort": "high",
-             "profile": {**profile_json("sonnet"), "agent_teams": True}},
+            {"scope": "system", "profile": {**profile_json("haiku", effort="low"), "id": "agent-haiku-low",
+                                            "name": "claude-code/haiku · low"}},
+            {"scope": "role_project", "role": "worker", "project_id": project,
+             "profile": {**profile_json("sonnet", effort="high"), "agent_teams": True}},
             {"scope": "role_project", "role": "planner", "project_id": project, "max_concurrency": 3,
              "profile": {**profile_json("opus"), "agent_teams": True}},
         ]
@@ -729,10 +729,10 @@ class TestManagerTaskPlacement:
             lines[3],  # the task's goal and id
             "- 项目：tetris（已有）",
             "- 目录：/srv/tetris",
-            # A Planner never has agent teams, whatever its profile says.
-            "- Planner：claude-code/opus（来源：本项目里的这个角色），effort 默认",
-            "- Worker：claude-code/sonnet（来源：本项目里的这个角色），effort high（来源：本项目里的这个角色），agent teams 开",
-            f"- Reviewer：claude-code/haiku（来源：{shared}），effort low（来源：角色默认），agent teams 关",
+            # A Planner never has agent teams, whatever its profile says. The effort is each profile's.
+            "- Planner：claude-code/opus（effort 默认，来源：本项目里的这个角色）",
+            "- Worker：claude-code/sonnet（effort high，来源：本项目里的这个角色），agent teams 开",
+            f"- Reviewer：claude-code/haiku · low（effort low，来源：{shared}），agent teams 关",
             "- 评审：每一步都要 Reviewer 评审通过",
             "- 每个任务的花费上限：$2.5，达到时再让 Planner 总结一轮后结束",
             "- 经验沉淀：任务完成后生成草稿，由你确认后写入项目知识",

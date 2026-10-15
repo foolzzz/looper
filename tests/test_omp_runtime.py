@@ -50,8 +50,8 @@ def _launch(*, executable: str = "omp", library: AgentLibrary | None = None,
             env: tuple[tuple[str, str], ...] = (), budget: float | None = None) -> Launch:
     profile = AgentProfile("agent-omp", "omp/gpt-5.5",
                            RuntimeSpec("rt-omp", "omp", "omp", executable, OMP.capabilities),
-                           provider or _provider(), "gpt-5.5")
-    return Launch(AgentSettings(profile=profile, effort=effort, env=env, max_budget_usd=budget),
+                           provider or _provider(), "gpt-5.5", effort or None)
+    return Launch(AgentSettings(profile=profile, env=env, max_budget_usd=budget),
                   library or AgentLibrary(),
                   knowledge or AgentKnowledge())
 

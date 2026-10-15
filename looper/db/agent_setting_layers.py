@@ -3,9 +3,9 @@
 A layer is ``system``, ``role`` (with a role), ``project`` (with a project)
 or ``role_project`` (with both). A NULL field is not set at its layer;
 ``env`` is a JSON list of ``{"key", "value"}`` (a null value unsets a key);
-``profile_id`` is the Agent Profile its roles run; ``max_concurrency`` (a task role's role or role-in-a-project
-layer only) how many of the role run at once in one project. A task may choose the profile of some
-of its roles (``task_profile_overrides``). Code owns the fields' types, validation and
+``profile_id`` is the Agent Profile its roles run (its model and effort with it); ``max_concurrency`` (a task
+role's role or role-in-a-project layer only) how many of the role run at once in one project. A task may choose
+the profile of some of its roles (``task_profile_overrides``). Code owns the fields' types, validation and
 resolution (``looper.agents.agent_settings``); this module only stores rows.
 """
 
@@ -20,7 +20,7 @@ import asyncpg
 from .profile_registry import PROFILE_JOIN, PROFILE_JSON
 from .connection import get_pool
 
-FIELDS = ("harness_prompt", "profile_id", "effort", "env", "run_budget_usd", "max_concurrency")
+FIELDS = ("harness_prompt", "profile_id", "env", "run_budget_usd", "max_concurrency")
 
 
 def _row(row: asyncpg.Record) -> dict[str, Any]:
@@ -39,7 +39,7 @@ async def list_layers(
     chose a profile for."""
     pool = pool or get_pool()
     rows = await pool.fetch(
-        f"SELECT l.scope, l.role, l.project_id, l.harness_prompt, l.profile_id, l.effort, l.env, l.run_budget_usd, "
+        f"SELECT l.scope, l.role, l.project_id, l.harness_prompt, l.profile_id, l.env, l.run_budget_usd, "
         f"l.max_concurrency, "
         f"(SELECT {PROFILE_JSON} FROM {PROFILE_JOIN} WHERE a.id = l.profile_id) AS profile "
         "FROM agent_setting_layers l WHERE l.project_id IS NULL OR l.project_id = $1",
@@ -90,7 +90,7 @@ async def put_layer(
         await conn.execute(
             "DELETE FROM agent_setting_layers WHERE scope = $1 AND role IS NOT DISTINCT FROM $2 "
             "AND project_id IS NOT DISTINCT FROM $3 AND harness_prompt IS NULL AND profile_id IS NULL "
-            "AND effort IS NULL AND env = '[]'::jsonb AND run_budget_usd IS NULL AND max_concurrency IS NULL",
+            "AND env = '[]'::jsonb AND run_budget_usd IS NULL AND max_concurrency IS NULL",
             scope, role, project_id,
         )
 

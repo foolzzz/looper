@@ -794,7 +794,7 @@ def test_the_upgrade_turns_each_layer_model_into_a_profile(monkeypatch: pytest.M
 
     async def _layers(pool: Any) -> list[tuple[Any, ...]]:
         return [tuple(r) for r in await pool.fetch(
-            "SELECT l.scope, l.role, l.project_id, a.name, a.model, a.runtime_id, a.provider_id, l.effort "
+            "SELECT l.scope, l.role, l.project_id, a.name, a.model, a.runtime_id, a.provider_id, a.effort "
             "FROM agent_setting_layers l LEFT JOIN agent_profiles a ON a.id = l.profile_id ORDER BY 1, 2, 3")]
 
     async def _test(pool: Any) -> None:
@@ -803,14 +803,16 @@ def test_the_upgrade_turns_each_layer_model_into_a_profile(monkeypatch: pytest.M
             "AND table_name = 'agent_setting_layers'")}
         assert "model" not in columns and "profile_id" in columns
         builtin = ("rt-claude-code", "prov-claude-subscription")
+        # Each model's profile, then (the effort's upgrade) the one of each with the system's effort, which every
+        # role ran with.
         assert await _layers(pool) == [
-            ("project", None, "proj-a", "claude-code/opus[1m]", "opus[1m]", *builtin, None),
-            ("role", "manager", None, "claude-code/opus", "opus", *builtin, None),  # the built-in profile
-            ("role", "planner", None, "claude-code/haiku", "haiku", *builtin, None),
-            ("role", "worker", None, "claude-code/sonnet", "sonnet", *builtin, None),
-            ("system", None, None, "claude-code/sonnet", "sonnet", *builtin, "high"),
+            ("project", None, "proj-a", "claude-code/opus[1m] · high", "opus[1m]", *builtin, "high"),
+            ("role", "manager", None, "claude-code/opus · high", "opus", *builtin, "high"),
+            ("role", "planner", None, "claude-code/haiku · high", "haiku", *builtin, "high"),
+            ("role", "worker", None, "claude-code/sonnet · high", "sonnet", *builtin, "high"),
+            ("system", None, None, "claude-code/sonnet · high", "sonnet", *builtin, "high"),
         ]  # the reviewer's model no longer validated (it was ignored): its layer held nothing else
-        assert await pool.fetchval("SELECT count(*) FROM agent_profiles") == 4
+        assert await pool.fetchval("SELECT count(*) FROM agent_profiles") == 8  # the built-in opus among them
         before = await _layers(pool), [tuple(r) for r in await pool.fetch("SELECT * FROM agent_profiles ORDER BY id")]
         await ensure_schema(pool)
         assert (await _layers(pool),

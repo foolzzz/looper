@@ -177,7 +177,6 @@ ACTIONS = ("task_request", "task_start")
 # Where a setting in a task's configuration came from (``agent_settings.Layer``), named as the dashboard names it.
 SOURCE_WORDS = {
     Layer.BUILTIN: "内置默认",
-    Layer.PROFILE: "Agent Profile 自带",
     Layer.SYSTEM: "共用默认（Settings → Roles → Shared defaults）",
     Layer.ROLE: "角色默认",
     Layer.PROJECT: "本项目",
@@ -229,11 +228,11 @@ class _NewProject:
 
 
 def _role_line(role: AgentType, settings: AgentSettings) -> str:
-    """One task role's line in a task's configuration: its Agent Profile, its effort and, but for the Planner
-    (which never has them), whether it has agent teams; each with where it came from."""
-    line = (f"- {role.value.capitalize()}：{settings.profile.name}（来源：{SOURCE_WORDS[settings.profile_source]}），"
-            + (f"effort {settings.effort}（来源：{SOURCE_WORDS[settings.effort_source]}）" if settings.effort
-               else "effort 默认"))
+    """One task role's line in a task's configuration: its Agent Profile with the profile's effort and where the
+    profile came from, and, but for the Planner (which never has them), whether it has agent teams."""
+    effort = f"effort {settings.effort}" if settings.effort else "effort 默认"
+    line = (f"- {role.value.capitalize()}：{settings.profile.name}"
+            f"（{effort}，来源：{SOURCE_WORDS[settings.profile_source]}）")
     if role is not AgentType.PLANNER:
         line += f"，agent teams {'开' if settings.profile.agent_teams else '关'}"
     return line

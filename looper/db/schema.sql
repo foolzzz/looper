@@ -301,7 +301,7 @@ CREATE TABLE IF NOT EXISTS agent_profiles (
     runtime_id   TEXT NOT NULL REFERENCES agent_runtimes(id),
     provider_id  TEXT NOT NULL REFERENCES llm_providers(id),
     model        TEXT NOT NULL CHECK (model <> ''),
-    -- The profile's default effort; a layer's effort overrides it. NULL: the runtime's own default.
+    -- The effort of the profile's runs (no layer sets one). NULL: the runtime's own default.
     effort       TEXT CHECK (effort IN ('low', 'medium', 'high', 'xhigh', 'max')),
     builtin      BOOLEAN NOT NULL DEFAULT false,
     created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -600,7 +600,7 @@ END $$;
 -- the first two. A NULL field is not set at its layer (it inherits); env is an
 -- ordered list of {"key", "value"}, where a null value unsets a key an earlier
 -- layer set (never at the system layer). profile_id is the Agent Profile the
--- layer's roles run (its model with it). Code owns the validation and the resolution
+-- layer's roles run (its model and effort with it). Code owns the validation and the resolution
 -- (looper/agents/agent_settings.py). One row per layer and place.
 CREATE TABLE IF NOT EXISTS agent_setting_layers (
     scope           TEXT NOT NULL CHECK (scope IN ('system', 'role', 'project', 'role_project')),
@@ -608,7 +608,6 @@ CREATE TABLE IF NOT EXISTS agent_setting_layers (
     project_id      TEXT REFERENCES projects(id) ON DELETE CASCADE,
     harness_prompt  TEXT,
     profile_id      TEXT REFERENCES agent_profiles(id),
-    effort          TEXT,
     env             JSONB NOT NULL DEFAULT '[]'::jsonb CHECK (jsonb_typeof(env) = 'array'),
     run_budget_usd  DOUBLE PRECISION CHECK (run_budget_usd > 0),
     max_concurrency INTEGER CONSTRAINT agent_setting_layers_max_concurrency_check CHECK (max_concurrency IS NULL
@@ -634,8 +633,10 @@ DECLARE
     env_value JSONB := '[]'::jsonb;
 BEGIN
     IF NOT EXISTS (SELECT 1 FROM schema_migrations WHERE name = 'agent_setting_layers') THEN
-        -- Layers held a model then; the profiles' migration below turns it into an Agent Profile.
+        -- Layers held a model and an effort then; the profiles' migration below turns the model into an Agent
+        -- Profile, and the effort moves onto profiles after this file (looper/agents/layer_effort.py).
         ALTER TABLE agent_setting_layers ADD COLUMN IF NOT EXISTS model TEXT;
+        ALTER TABLE agent_setting_layers ADD COLUMN IF NOT EXISTS effort TEXT;
         ALTER TABLE role_configs ADD COLUMN IF NOT EXISTS harness_prompt TEXT NOT NULL DEFAULT '';
         ALTER TABLE role_configs ADD COLUMN IF NOT EXISTS model TEXT;
         ALTER TABLE projects ADD COLUMN IF NOT EXISTS planner_harness_prompt TEXT NOT NULL DEFAULT '';

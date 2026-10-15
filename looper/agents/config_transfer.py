@@ -16,6 +16,8 @@ sections:
   names its Agent Profile, ``profile``), and each role's prompt (``null`` while
   it follows the recommended one), timeout and enabled flag. A role's
   ``max_concurrency`` from before the layers held it is ignored, with a note;
+  a layer's ``effort`` from before the effort was the Agent Profile's moves
+  onto profiles as the upgrade moved it (``layer_effort``; see **Import**);
 - ``channels``: each chat channel's configuration;
 - ``installs``: the global installs, naming their item by kind and name;
 - ``projects`` (``--include-projects``): each project's fields, execution
@@ -42,6 +44,14 @@ transaction: an entry with the same key is updated in place (an item keeps
 its id and installs), nothing missing from the file is removed, and a
 placeholder never replaces a stored secret (without one, the value is left
 empty). Importing the same file again changes nothing.
+
+**A layer's effort** in an older file is converted like the upgrade converts
+a database (``layer_effort.convert``), over the layers as the import leaves
+them (this installation's, each replaced by the file's of the same key): every
+role then runs the profile and effort it would have run with the file's
+layers, through the profiles they select, added as needed (``<profile> ·
+<effort>``). A layer this changes that the file does not give, such as a
+role's in a project, is changed too; a note says each.
 
 **Runtimes** are built in, so a file's runtime only says what its profiles run
 on here: the runtime of its name when one of its type is here, else the
@@ -77,7 +87,7 @@ _CHANNEL_PUBLIC_KEYS = {
     "lark": frozenset({"allowed_open_ids", "app_id_env", "app_secret_env", "description"}),
 }
 _ROLE_FIELDS = ("prompt", "timeout_seconds", "enabled")
-_LAYER_FIELDS = ("harness_prompt", "profile", "effort", "env", "run_budget_usd", "max_concurrency")
+_LAYER_FIELDS = ("harness_prompt", "profile", "env", "run_budget_usd", "max_concurrency")
 _PROVIDER_FIELDS = ("protocols", "auth", "oauth_runtime_type", "base_url", "models", "env", "max_concurrency")
 _ITEM_FIELDS = ("origin", "source", "version", "description", "modified")
 _DOCUMENT_FIELDS = ("summary", "source_kind", "filename", "path", "sha256", "size_bytes")
@@ -508,18 +518,20 @@ def _item_name(kind: str, raw: Any) -> str:
     return name
 
 
-def _layer_values(entry: Mapping[str, Any], scope: str, role: str | None) -> dict[str, Any]:
-    """A layer's values, its Agent Profile by name (``None`` for none). A file from before Agent Profiles gives a
-    ``model``: that is the profile ``claude-code/<model>``, as the upgrade made it."""
-    from .agent_settings import AgentType, Layer, SettingsError, layer_update, model_name
+def _layer_values(entry: Mapping[str, Any], scope: str, role: str | None) -> tuple[dict[str, Any], str | None]:
+    """A layer's values, its Agent Profile by name (``None`` for none), and the effort a file from before the effort
+    was the Agent Profile's gives it (``None`` for none). A file from before Agent Profiles gives a ``model``: that
+    is the profile ``claude-code/<model>``, as the upgrade made it."""
+    from .agent_settings import AgentType, Layer, SettingsError, effort_level, layer_update, model_name
 
-    unknown = sorted(set(entry) - {"scope", "role", "model", *_LAYER_FIELDS})
+    unknown = sorted(set(entry) - {"scope", "role", "model", "effort", *_LAYER_FIELDS})
     if unknown:
         raise _Skip(f"unknown field {unknown[0]!r}")
     profile = entry.get("profile")
     try:
         values = layer_update({name: entry.get(name) for name in _LAYER_FIELDS if name != "profile"},
                               Layer(scope), AgentType(role) if role else None)
+        effort = effort_level(entry.get("effort")) or None
         if "model" in entry and "profile" not in entry:
             model = model_name(entry["model"])
             profile = f"{_MODEL_PROFILE_PREFIX}{model}" if model else None
@@ -527,7 +539,7 @@ def _layer_values(entry: Mapping[str, Any], scope: str, role: str | None) -> dic
         raise _Skip(str(exc)) from None
     if profile is not None and not isinstance(profile, str):
         raise _Skip("profile must be an Agent Profile's name, or null")
-    return {**values, "profile": profile or None}
+    return {**values, "profile": profile or None}, effort
 
 
 # The name the upgrade gave the Agent Profile of each model layers used (Claude Code, its own login, the model).
@@ -732,6 +744,26 @@ class _Target:
         return target
 
 
+@dataclass(frozen=True)
+class _FileLayer:
+    """A layer of the file, checked: its values (its profile by name), its profile's id and the effort it carries."""
+
+    section: str
+    label: str
+    key: tuple[str, str | None, str | None]  # scope, role, project id
+    values: dict[str, Any]
+    profile_id: str | None
+    effort: str | None
+
+
+def _effort_key(key: tuple[str, str | None, str | None]) -> Any:
+    """A layer's key as ``layer_effort`` names it."""
+    from .agent_settings import AgentType, Layer
+
+    scope, role, project_id = key
+    return Layer(scope), AgentType(role) if role else None, project_id
+
+
 class _Importer:
     def __init__(self, conn: Any, target: _Target, apply: bool) -> None:
         self.conn = conn
@@ -742,6 +774,8 @@ class _Importer:
         self.item_ids = {key: row["id"] for key, row in target.items.items()}
         self.item_sizes = {key: int(row["size_bytes"]) for key, row in target.items.items()}
         self.project_ids = {name: row["id"] for name, row in target.projects.items()}
+        self.project_labels = {row["id"]: f"{row['name']} / " for row in target.projects.values()}
+        self.file_layers: list[_FileLayer] = []
         self.seen_items: set[tuple[str, str, str | None]] = set()
         self.seen_projects: set[str] = set()
         # Runtimes, providers and Agent Profiles by name, stored and from the file: their ids ("new:..." in a
@@ -948,6 +982,7 @@ class _Importer:
     # --- settings ---
 
     async def layer(self, entry: Any, project_id: str | None, project_label: str = "") -> None:
+        """Check one layer of the file; ``settle_layers`` records and writes it."""
         section = "project.layers" if project_label else "settings.layers"
         raw = entry if isinstance(entry, Mapping) else {}
         scope, role = raw.get("scope"), raw.get("role")
@@ -964,17 +999,97 @@ class _Importer:
             if scope in ("system", "project") and role is not None:
                 raise _Skip(f"a {scope} layer has no role")
             raw = self._without_agent_teams_env(raw, section, label)
-            values = _layer_values(raw, scope, role)
+            values, effort = _layer_values(raw, scope, role)
             profile_id = await self._layer_profile(values["profile"], scope, role)
         except _Skip as exc:
             self.record(section, label, Action.SKIPPED, reason=str(exc))
             return
-        current = _stored_layer(self.target.layers.get((scope, role, project_id)))
+        self.file_layers.append(_FileLayer(section, label, (scope, role, project_id), values, profile_id, effort))
+
+    async def settle_layers(self) -> None:
+        """Record and write the file's layers. When one carries an effort, the effort first moves onto profiles
+        (the module's **A layer's effort**): the profiles that takes are added, and each layer it changes selects
+        its profile."""
+        from .layer_effort import Derived
+
+        conversion = self._effort_conversion() if any(layer.effort for layer in self.file_layers) else None
+        changes = dict(conversion.layers) if conversion else {}
+        ids: dict[str, str] = {}
+        for derived in conversion.derived if conversion else ():
+            ids[derived.name] = await self._add_derived(derived)
+
+        def selected(choice: Any) -> tuple[str | None, str | None]:
+            if choice is None:
+                return None, None
+            return (ids[choice.name] if isinstance(choice, Derived) else choice.id), choice.name
+
+        for layer in self.file_layers:
+            values, profile_id = layer.values, layer.profile_id
+            key = _effort_key(layer.key)
+            if key in changes:
+                profile_id, name = selected(changes.pop(key))
+                values = {**values, "profile": name}
+                self._effort_note(layer.section, layer.label, layer.effort, name, layer.values["profile"])
+            current = _stored_layer(self.target.layers.get(layer.key))
+            await self._write_layer(layer.section, layer.label, layer.key, current, values, profile_id)
+        for key, choice in changes.items():  # the layers of this installation the conversion changes
+            scope, role, project_id = key[0].value, key[1].value if key[1] else None, key[2]
+            section = "project.layers" if project_id else "settings.layers"
+            label = f"{self.project_labels.get(project_id or '', '')}{scope}" + (f":{role}" if role else "")
+            current = _stored_layer(self.target.layers.get((scope, role, project_id)))
+            profile_id, name = selected(choice)
+            empty = {"harness_prompt": None, "env": [], "run_budget_usd": None, "max_concurrency": None}
+            self._effort_note(section, label, None, name, current["profile"] if current else None)
+            await self._write_layer(section, label, (scope, role, project_id), current,
+                                    {**(current or empty), "profile": name}, profile_id)
+
+    async def _write_layer(self, section: str, label: str, key: tuple[str, str | None, str | None],
+                           current: Mapping[str, Any] | None, values: Mapping[str, Any], profile_id: str | None,
+                           ) -> None:
         action = self.outcome(section, label, current, _differs(values, current, _LAYER_FIELDS))
         if self.apply and action in (Action.ADDED, Action.CHANGED):
             from ..db import config_transfer as db
 
-            await db.write_layer(self.conn, scope, role, project_id, {**values, "profile_id": profile_id})
+            await db.write_layer(self.conn, *key, {**values, "profile_id": profile_id})
+
+    def _effort_conversion(self) -> Any:
+        """``layer_effort.convert`` over this installation's layers, each replaced by the file's of the same key."""
+        from dataclasses import replace
+
+        from .layer_effort import Before, convert
+
+        # A profile this import adds keeps its "new:..." spec id in self.profiles; the conversion names it by its id.
+        specs = {profile_id: replace(spec, id=profile_id) for profile_id, spec in self.profiles.values()}
+        layers = {_effort_key(key): Before(specs.get(row["profile_id"])) for key, row in self.target.layers.items()}
+        for layer in self.file_layers:
+            layers[_effort_key(layer.key)] = Before(specs.get(layer.profile_id), layer.effort)
+        return convert(layers, specs.values())
+
+    async def _add_derived(self, derived: Any) -> str:
+        """Add a profile the effort conversion takes; its id (``new:...`` in a preview)."""
+        from dataclasses import replace
+
+        from .profile_registry import AgentProfile
+
+        base = derived.base
+        spec = AgentProfile(f"new:{derived.name}", derived.name, base.runtime, base.provider, base.model,
+                            derived.effort, base.agent_teams)
+        self.record("profiles", derived.name, Action.ADDED)
+        profile_id = await self._write_profile(None, derived.name, spec) if self.apply else spec.id
+        self.profiles[derived.name] = (profile_id, replace(spec, id=profile_id))
+        self.plan.notes.append(f"profiles {derived.name}: added, {base.name} with effort {derived.effort}, for the "
+                               "effort the file's layers set (the effort is the Agent Profile's now)")
+        return profile_id
+
+    def _effort_note(self, section: str, label: str, effort: str | None, name: str | None,
+                     before: str | None) -> None:
+        selects = f"selects {name}" if name else "selects no Agent Profile of its own"
+        if effort:
+            self.plan.notes.append(f"{section} {label}: its effort {effort} is the Agent Profile's now: the layer "
+                                   f"{selects}")
+        elif name != before:
+            self.plan.notes.append(f"{section} {label}: {selects}, so its roles keep the effort the file's layers "
+                                   "give them (the effort is the Agent Profile's now)")
 
     def _without_agent_teams_env(self, raw: Mapping[str, Any], section: str, label: str) -> Mapping[str, Any]:
         """The layer without Claude Code's agent teams variable, which an Agent Profile's switch now owns (a file
@@ -1177,6 +1292,7 @@ class _Importer:
             await update_project(row["id"], description=values["description"], background=background,
                                  execution=execution, pool=self.conn)
         self.project_ids[name.lower()] = project_id
+        self.project_labels[project_id] = f"{name} / "
         repoint = sum(1 for d in entry.get("knowledge") or () if isinstance(d, Mapping) and d.get("source_kind") == "path")
         if repoint and not (row and row.get("work_dir")):
             self.plan.notes.append(f"project {name}: {repoint} path document(s) refer to files in the project's "
@@ -1255,6 +1371,7 @@ async def import_config(conn: Any, data: Mapping[str, Any], *, apply: bool) -> P
         for item in entry.get("items") or ():
             await importer.item(item, project_id, label)
         await importer.documents(entry.get("knowledge") or [], project_id, label)
+    await importer.settle_layers()
     importer.check_caps()
 
     for entry in data.get("installs", []):

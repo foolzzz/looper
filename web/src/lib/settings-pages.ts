@@ -2,13 +2,13 @@ import { ArrowLeftRight, Bot, Cloud, Cpu, MessageCircle, Puzzle, Users, type Luc
 
 /**
  * An Agent Profile: a row of `agent_profiles` (the API's `/api/agent-profiles`), a runtime, an LLM provider and a
- * model with a default effort. Its name, plural, route and help text live here only.
+ * model with an effort. Its name, plural, route and help text live here only.
  */
 export const AGENT_PROFILE = {
   name: "Agent Profile",
   plural: "Agent Profiles",
   slug: "profiles",
-  help: "A runtime, an LLM provider and a model, with a default effort. Roles, projects and tasks select one.",
+  help: "A runtime, an LLM provider and a model, with an effort. Roles, projects and tasks select one.",
 } as const;
 
 /** The Settings pages, in the order the sidebar lists them; each is #settings/<id>. */
