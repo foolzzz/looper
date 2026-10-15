@@ -66,6 +66,12 @@ def test_planner_violations_count_the_replies_its_parser_rejected(
     assert metrics.planner_violations(activity) == expected
 
 
+def test_flow_problems_check_the_least_and_the_most() -> None:
+    expect = {"min_steps": 2, "max_plan_changes": 0}
+    assert metrics.flow_problems(expect, {"steps": 2, "plan_changes": 0}) == []
+    assert metrics.flow_problems(expect, {"steps": 1, "plan_changes": 1}) == ["steps 1 < 2", "plan_changes 1 > 0"]
+
+
 @pytest.mark.parametrize(("text", "is_verify"), [
     ('Done.\n{"status": "completed", "changed_files": {}, "deleted_files": [], "summary": "ok"}', False),
     ('{"status": "failed", "changed_files": {}, "deleted_files": [], "summary": "could not"}', False),
@@ -341,7 +347,8 @@ def test_fake_mode_runs_every_task_and_sees_misbehaviour(tmp_path: Path) -> None
                     "interface_first": (4, 0, 0, 0), "reviewed_step": (1, 0, 1, 0),
                     "retry_after_failure": (1, 1, 0, 0), "chat_correction": (1, 0, 0, 1), "misbehaving": (1, 1, 0, 0),
                     # The change to the second step replaced it: s1, the dropped s2, and its replacement.
-                    "supplement_replan": (3, 0, 0, 1), "requirement_edit": (3, 0, 0, 1)}
+                    "supplement_replan": (3, 0, 0, 1), "requirement_edit": (3, 0, 0, 1),
+                    "supplement_no_change": (2, 0, 0, 1)}
     # Only the parts that need nothing of each other run side by side; interface_first's sit between its interface
     # step and its integration step.
     shape = {t: (by_id[t]["independent_pairs"], by_id[t]["bracketed_pairs"], by_id[t]["parallel_workers"])
@@ -350,8 +357,12 @@ def test_fake_mode_runs_every_task_and_sees_misbehaviour(tmp_path: Path) -> None
                      "interface_first": (1, 1, 2), "reviewed_step": (0, 0, 1), "retry_after_failure": (0, 0, 1),
                      "chat_correction": (0, 0, 1), "misbehaving": (0, 0, 1),
                      # The dropped second step and its replacement both depend on s1 alone.
-                     "supplement_replan": (1, 0, 1), "requirement_edit": (1, 0, 1)}
+                     "supplement_replan": (1, 0, 1), "requirement_edit": (1, 0, 1),
+                     "supplement_no_change": (0, 0, 1)}
     assert by_id["chat_correction"]["planner_turns"]["chat"] == 1
+    # Only the two changes that make the second step wrong change the plan.
+    assert {t: by_id[t]["plan_changes"] for t in by_id if by_id[t]["plan_changes"]} == {
+        "supplement_replan": 1, "requirement_edit": 1}
     # The fake Planner's decisions carry progress notes, and its completing accept the final summary.
     assert by_id["dependent_steps"]["progress_notes"] == 2 and by_id["dependent_steps"]["final_summary"] == 1
     assert all(task["cost_usd"] > 0 for task in result["tasks"])

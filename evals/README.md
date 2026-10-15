@@ -6,7 +6,7 @@ Tells you whether a change to a recommended role prompt, a code-owned contract
 (`REPLY_CONTRACT`, `WORK_CONTRACT`, `REVIEW_CONTRACT`) or the way the system
 prompt is put together makes the agents worse.
 
-It runs seven small tasks through a disposable `looper serve` (a new
+It runs ten small tasks through a disposable `looper serve` (a new
 PostgreSQL database, a free port, a temporary runtime root and working
 directories), one at a time over the HTTP API:
 
@@ -19,13 +19,17 @@ directories), one at a time over the HTTP API:
 | `reviewed_step` | a step an independent Reviewer must pass |
 | `retry_after_failure` | a step that fails once (a flaky `build.sh`) and is retried |
 | `chat_correction` | a correction sent to the task's Planner mid-task |
+| `supplement_replan` | a message to the task's Planner, while its first step runs, that changes what the second step writes: the Planner must change the plan (`add_steps` or `replan`), not leave it to the Worker |
+| `requirement_edit` | the same change as an edit of the requirement |
+| `supplement_no_change` | a message that changes nothing: the plan must stay as it is |
 
 For each task it reads back from the API: success (the task completed, its
 files are right and the flow happened, such as the review or the retry), step
 count, the pairs of steps the plan lets run at the same time
 (`independent_pairs`), those of them with a step both depend on and a step
 that depends on both (`bracketed_pairs`), and the most Workers that ran at once
-(`parallel_workers`, from the runs' records), retries, reviews, cost (the task cost API), tokens (the runs' records: prompt, uncached
+(`parallel_workers`, from the runs' records), the changes to the task the
+Planner answered by changing the plan (`plan_changes`), retries, reviews, cost (the task cost API), tokens (the runs' records: prompt, uncached
 and cached, and output; what a runtime without prices still reports), contract violations
 (replies the Planner's reply parser or the Worker/Reviewer report check
 rejected) and whether the Planner modified files itself (its file-editing tool
