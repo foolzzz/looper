@@ -84,6 +84,9 @@ export interface ProjectExecution {
   /** What a task that completes leaves in the project's knowledge: nothing ("off"), a lessons draft to confirm
    * or discard ("draft"), or a lessons document ("write"). Never null. */
   distill_lessons: "off" | "draft" | "write";
+  /** Where a step that runs alongside others works: the task directory ("shared", also when null) or, in a git
+   * checkout on a branch, a worktree of its own merged into the branch when the step is accepted ("worktree"). */
+  step_workspaces: "shared" | "worktree" | null;
 }
 
 /** A group of tasks with an optional default work directory and background. */
