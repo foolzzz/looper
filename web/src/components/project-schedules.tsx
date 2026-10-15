@@ -142,6 +142,8 @@ interface Draft {
   requirement: string;
   workDir: string;
   overlap: ScheduleOverlap;
+  /** With overlap "parallel". */
+  maxParallel: string;
   catchUp: ScheduleCatchUp;
   /** Minutes; "" = no limit. */
   timeout: string;
@@ -177,6 +179,7 @@ function draftOf(schedule: ScheduleInfo | null, limits: ScheduleLimits): Draft {
       requirement: "",
       workDir: "",
       overlap: "skip",
+      maxParallel: "3",
       catchUp: "once",
       timeout: "",
       budget: "",
@@ -194,6 +197,7 @@ function draftOf(schedule: ScheduleInfo | null, limits: ScheduleLimits): Draft {
     requirement: schedule.requirement,
     workDir: schedule.work_dir,
     overlap: schedule.overlap,
+    maxParallel: String(schedule.max_parallel_runs),
     catchUp: schedule.catch_up,
     timeout: schedule.run_timeout_seconds == null ? "" : String(schedule.run_timeout_seconds / 60),
     budget: schedule.run_budget_usd == null ? "" : String(schedule.run_budget_usd),
@@ -222,6 +226,7 @@ function fieldsOf(draft: Draft, limits: ScheduleLimits): Required<ScheduleFields
     timezone: draft.timezone.trim() || limits.default_timezone,
     work_dir: draft.workDir.trim(),
     overlap: draft.overlap,
+    max_parallel_runs: Number(draft.maxParallel.trim() || NaN),
     catch_up: draft.catchUp,
     run_timeout_seconds: minutes == null ? null : Math.round(minutes * 60),
     run_budget_usd: numberOf(draft.budget),
@@ -243,6 +248,9 @@ function changesOf(fields: Required<ScheduleFields>, schedule: ScheduleInfo): Sc
   for (const key of ["name", "cron", "requirement", "timezone", "work_dir", "overlap", "catch_up", "notify"] as const) {
     if (fields[key] !== schedule[key]) (changes as Record<string, unknown>)[key] = fields[key];
   }
+  // The cap counts only for a parallel schedule; it is left alone otherwise.
+  if (fields.overlap === "parallel" && fields.max_parallel_runs !== schedule.max_parallel_runs)
+    changes.max_parallel_runs = fields.max_parallel_runs;
   if (fields.run_timeout_seconds !== schedule.run_timeout_seconds) changes.run_timeout_seconds = fields.run_timeout_seconds;
   if (fields.run_budget_usd !== schedule.run_budget_usd) changes.run_budget_usd = fields.run_budget_usd;
   if (!sameProfiles(fields.profile_overrides, schedule.profile_overrides))
@@ -259,6 +267,7 @@ function changesOf(fields: Required<ScheduleFields>, schedule: ScheduleInfo): Sc
 function createFields(fields: Required<ScheduleFields>): ScheduleFields {
   const {
     work_dir,
+    max_parallel_runs,
     run_timeout_seconds,
     run_budget_usd,
     profile_overrides,
@@ -271,6 +280,7 @@ function createFields(fields: Required<ScheduleFields>): ScheduleFields {
   return {
     ...rest,
     ...(work_dir ? { work_dir } : {}),
+    ...(rest.overlap === "parallel" ? { max_parallel_runs } : {}),
     ...(run_timeout_seconds != null ? { run_timeout_seconds } : {}),
     ...(run_budget_usd != null ? { run_budget_usd } : {}),
     ...(Object.keys(profile_overrides).length ? { profile_overrides } : {}),
@@ -643,8 +653,13 @@ function ScheduleForm({
     gateTimeout != null &&
     !(Number.isInteger(gateTimeout) && gateTimeout >= 1 && gateTimeout <= limits.gate_timeout_max_seconds);
   const badDailyBudget = Number.isNaN(fields.daily_budget_usd);
+  const maxParallel = fields.max_parallel_runs;
+  const badMaxParallel =
+    fields.overlap === "parallel" &&
+    !(Number.isInteger(maxParallel) && maxParallel >= 1 && maxParallel <= limits.max_parallel_runs_limit);
   const invalid =
     missing.length > 0 ||
+    badMaxParallel ||
     tooLong ||
     ruleInvalid ||
     badTimeout ||
@@ -795,6 +810,11 @@ function ScheduleForm({
           options={[
             { value: "skip", label: "Skip", hint: "Skip this firing while the previous run is in progress." },
             { value: "queue", label: "Queue", hint: "Start it when the previous run ends; at most one waits." },
+            {
+              value: "parallel",
+              label: "Parallel (reentrant)",
+              hint: "Start it beside the runs in progress, up to the most below. Gates never run at once.",
+            },
           ]}
         />
         <Choices
@@ -812,6 +832,38 @@ function ScheduleForm({
           ]}
         />
       </div>
+      {draft.overlap === "parallel" && (
+        <div className="space-y-1 sm:max-w-[calc(50%-0.375rem)]">
+          <label htmlFor={id("max-parallel")} className={LABEL}>Most runs at once</label>
+          <Input
+            id={id("max-parallel")}
+            inputMode="numeric"
+            value={draft.maxParallel}
+            onChange={(e) => set("maxParallel", e.target.value)}
+            aria-invalid={badMaxParallel}
+            aria-describedby={id("max-parallel-hint")}
+            className="aria-invalid:border-destructive"
+          />
+          <p
+            id={id("max-parallel-hint")}
+            className={cn(
+              "text-xs",
+              badMaxParallel
+                ? "text-destructive"
+                : limits.planner_limit != null && maxParallel > limits.planner_limit
+                  ? "text-warning"
+                  : "text-muted-foreground",
+            )}
+          >
+            {badMaxParallel
+              ? `A whole number from 1 to ${limits.max_parallel_runs_limit}.`
+              : limits.planner_limit != null && maxParallel > limits.planner_limit
+                ? `This project runs at most ${limits.planner_limit} tasks at once (its Planner limit): runs past it ` +
+                  "wait as pending, and their run timeout counts while they wait."
+                : "Runs of this schedule in progress at once; a firing past it is skipped as busy."}
+          </p>
+        </div>
+      )}
 
       <div className="grid gap-3 sm:grid-cols-2">
         <div className="space-y-1">
