@@ -189,7 +189,7 @@ Looper was called LoopX up to v2.5.0. The upgrade needs no manual step:
 | Tier | Module | Role |
 |---|---|---|
 | **Manager** | `looper/agents/tiers/manager.py` | User-facing steward, intent classification, chat |
-| **TaskRouter** | `looper/agents/tiers/task.py` | Task lifecycle, concurrency control (3 parallel), queue |
+| **TaskRouter** | `looper/agents/tiers/task.py` | Task lifecycle, a limit of running tasks per project (8 by default), queue |
 | **Planner** | `looper/agents/tiers/planner.py` | Step decomposition, dispatch, verification |
 | **WorkerPool** | `looper/agents/tiers/worker.py` | Claude CLI subprocess pool with stream-json output |
 
@@ -340,7 +340,10 @@ for the details.
 - **timeout_seconds**: The limit on one run or turn (0 = no limit). For
   Workers it is one run's total time (default 86400); output does not extend
   it. Workers apply both limits from the next step on
-- **max_concurrency**: Worker pool size
+
+How many Planners (one per task), Workers and Reviewers run at once in a
+project (8, 16 and 8 by default) is a layered setting too: per role in
+Settings → Roles, and per role in a project on its Agent Profiles tab.
 
 ## Task Lifecycle
 

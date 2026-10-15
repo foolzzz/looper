@@ -157,7 +157,7 @@ Looper 在 v2.5.0 及以前叫 LoopX。升级不需要手动操作：
 | 层级 | 模块 | 职责 |
 |---|---|---|
 | **Manager** | `looper/agents/tiers/manager.py` | 面向用户的管家：识别意图、对话 |
-| **TaskRouter** | `looper/agents/tiers/task.py` | 任务生命周期、并发控制（同时 3 个）、排队 |
+| **TaskRouter** | `looper/agents/tiers/task.py` | 任务生命周期、按项目限制同时运行的任务数（默认 8 个）、排队 |
 | **Planner** | `looper/agents/tiers/planner.py` | 拆解步骤、派发、核验 |
 | **WorkerPool** | `looper/agents/tiers/worker.py` | Claude CLI 子进程池，输出 stream-json |
 
@@ -266,7 +266,8 @@ Manager 横跨所有项目，所以只有前两层。任务创建时还可以给
 - **system_prompt**：角色 prompt，说明这类 agent 负责什么；harness 放在它前面，可以重置为推荐的 prompt
 - **max_turns**：对话轮数上限（0 表示不限）
 - **timeout_seconds**：一次运行或一轮的时长上限（0 表示不限）。对 worker 来说，它是一次运行的总时长（默认 86400），有输出也不会延长；worker 从下一个步骤起应用这两个限制
-- **max_concurrency**：Worker 池大小
+
+每个项目同时运行多少个 Planner（每个任务一个）、Worker 和 Reviewer（默认 8、16、8）也属于分层设置：在 Settings → Roles 按角色设置，在项目的 Agent Profiles 标签页按项目里的角色覆盖。
 
 ## 任务生命周期
 
