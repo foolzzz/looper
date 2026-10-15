@@ -324,6 +324,8 @@ class AgentHTTPServer:
             await self._handle_chat_send(body, writer)
         elif path == "/api/chat/targets" and method == "GET":
             await self._handle_chat_targets(writer)
+        elif path == "/api/chat/sessions" and method == "GET":
+            await self._handle_chat_sessions(writer)
         elif path == "/api/chat/messages" and method == "GET":
             await self._handle_chat_messages(query, writer)
         elif path == "/api/chat/messages" and method == "POST":
@@ -709,6 +711,17 @@ class AgentHTTPServer:
         """The Manager, then each recent task's Planner and step agents (finished ones too)."""
         targets = await list_chat_targets(self._task_router)
         writer.write(_json_response(HTTP_200, {"targets": _serialize(targets)}))
+        await writer.drain()
+
+    async def _handle_chat_sessions(self, writer: asyncio.StreamWriter) -> None:
+        """Every channel's chat sessions, newest first, for the read-only Conversations view."""
+        try:
+            from ..db.chat import list_sessions
+            sessions = await list_sessions()
+            writer.write(_json_response(HTTP_200, {"sessions": _serialize(sessions)}))
+        except Exception:
+            logger.debug("failed to list chat sessions", exc_info=True)
+            writer.write(_json_response(HTTP_200, {"sessions": []}))
         await writer.drain()
 
     async def _handle_chat_messages(
