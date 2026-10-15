@@ -6,7 +6,7 @@ Tells you whether a change to a recommended role prompt, a code-owned contract
 (`REPLY_CONTRACT`, `WORK_CONTRACT`, `REVIEW_CONTRACT`) or the way the system
 prompt is put together makes the agents worse.
 
-It runs five small tasks through a disposable `looper serve` (a new
+It runs six small tasks through a disposable `looper serve` (a new
 PostgreSQL database, a free port, a temporary runtime root and working
 directories), one at a time over the HTTP API:
 
@@ -14,13 +14,16 @@ directories), one at a time over the HTTP API:
 |---|---|
 | `single_step` | one step |
 | `dependent_steps` | two steps, the second depending on the first |
+| `parallel_parts` | two parts that need nothing of each other, then one that needs both: the plan must leave the two independent and their Workers must run at the same time |
 | `reviewed_step` | a step an independent Reviewer must pass |
 | `retry_after_failure` | a step that fails once (a flaky `build.sh`) and is retried |
 | `chat_correction` | a correction sent to the task's Planner mid-task |
 
 For each task it reads back from the API: success (the task completed, its
 files are right and the flow happened, such as the review or the retry), step
-count, retries, reviews, cost (the task cost API), tokens (the runs' records: prompt, uncached
+count, the pairs of steps the plan lets run at the same time
+(`independent_pairs`) and the most Workers that ran at once (`parallel_workers`,
+from the runs' records), retries, reviews, cost (the task cost API), tokens (the runs' records: prompt, uncached
 and cached, and output; what a runtime without prices still reports), contract violations
 (replies the Planner's reply parser or the Worker/Reviewer report check
 rejected) and whether the Planner modified files itself (its file-editing tool

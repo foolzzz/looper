@@ -157,6 +157,35 @@ def run_windows(records: Iterable[Mapping[str, Any]], *, now: float) -> dict[str
     return windows
 
 
+def most_at_once(spans: Iterable[tuple[float, float]]) -> int:
+    """The most of ``spans`` (start, end) that overlap at one moment; spans that only touch do not."""
+    edges = sorted(edge for start, end in spans for edge in ((start, 1), (end, -1)))
+    running = most = 0
+    for _, change in edges:
+        running += change
+        most = max(most, running)
+    return most
+
+
+def independent_pairs(steps: Iterable[Mapping[str, Any]]) -> int:
+    """Pairs of the plan's steps with no dependency between them, directly or through other steps: the work the
+    plan lets run at the same time."""
+    needs = {str(step.get("id")): {str(d) for d in step.get("depends_on") or []} for step in steps}
+
+    def upstream(step_id: str) -> set[str]:
+        found: set[str] = set()
+        todo = list(needs.get(step_id, ()))
+        while todo:
+            if (current := todo.pop()) not in found:
+                found.add(current)
+                todo += needs.get(current, ())
+        return found
+
+    before = {step_id: upstream(step_id) for step_id in needs}
+    ids = sorted(needs)
+    return sum(1 for i, a in enumerate(ids) for b in ids[i + 1:] if a not in before[b] and b not in before[a])
+
+
 def planner_changed_files(
     changes: Mapping[str, float],
     windows: Mapping[str, list[tuple[float, float]]],
@@ -223,7 +252,8 @@ def task_metrics(
         path for record in by_role.get("planner", []) for path in edit_tool_paths(events.get(int(record["id"]), []),
                                                                                   work_dir)
     })
-    changed_by_planner = planner_changed_files(changes, run_windows(records, now=now), clock_offset=clock_offset)
+    windows = run_windows(records, now=now)
+    changed_by_planner = planner_changed_files(changes, windows, clock_offset=clock_offset)
 
     kinds = turn_kinds(records)
     observed = {
@@ -231,6 +261,9 @@ def task_metrics(
         "reviews": len(by_role.get("reviewer", [])),
         "retries": retries(records),
         "chat_turns": kinds.get("chat", 0),
+        # What the plan lets run at the same time, and the most Workers that did.
+        "independent_pairs": independent_pairs(detail.get("steps") or []),
+        "parallel_workers": most_at_once(windows.get("worker", [])),
     }
     status = str(detail.get("status") or "")
     problems = []

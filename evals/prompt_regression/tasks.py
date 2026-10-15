@@ -24,7 +24,8 @@ class EvalTask:
     check: Callable[[Path], str | None]  # the reason the delivered files are wrong, else None
     files: dict[str, str] = field(default_factory=dict)  # seeded into the working directory
     chat: str | None = None  # sent to the task's Planner once its plan exists
-    expect: dict[str, int] = field(default_factory=dict)  # min_steps, min_reviews, min_retries, min_chat_turns
+    # min_steps, min_reviews, min_retries, min_chat_turns, min_independent_pairs, min_parallel_workers
+    expect: dict[str, int] = field(default_factory=dict)
     fake: dict[str, Any] = field(default_factory=dict)  # the stand-in Claude's script
 
 
@@ -63,6 +64,21 @@ def _config_json(work_dir: Path) -> str | None:
     if not isinstance(data, dict) or data.get("name") != "demo" or data.get("port") != 8080:
         return "config.json does not have name \"demo\" and port 8080"
     return None
+
+
+def _powers_and_table(work_dir: Path) -> str | None:
+    for name, power in (("squares.txt", 2), ("cubes.txt", 3)):
+        text = _read(work_dir, name)
+        if text is None:
+            return f"{name} is missing"
+        if text.split() != [str(n ** power) for n in range(1, 6)]:
+            return f"{name} does not hold n**{power} for n from 1 to 5, one per line"
+    table = _read(work_dir, "table.txt")
+    if table is None:
+        return "table.txt is missing"
+    expected = [f"{n} {n ** 2} {n ** 3}" for n in range(1, 6)]
+    return None if [" ".join(line.split()) for line in table.splitlines()] == expected else \
+        "table.txt does not hold `n n² n³` for n from 1 to 5, one per line"
 
 
 def _build_log(work_dir: Path) -> str | None:
@@ -118,6 +134,32 @@ TASKS: tuple[EvalTask, ...] = (
             "attempts": {
                 "s1": [{"status": "completed", "files": {"numbers.txt": "1\n2\n3\n4\n5\n"}}],
                 "s2": [{"status": "completed", "files": {"sum.txt": "15\n"}}],
+            },
+        },
+    ),
+    EvalTask(
+        # Two parts that need nothing of each other, then one that needs both: the plan should let the two run at
+        # the same time.
+        id="parallel_parts",
+        requirement="In the working directory, produce three files, each by a step of its own: squares.txt holding "
+                    "the squares of 1 to 5, one per line; cubes.txt holding the cubes of 1 to 5, one per line; and "
+                    "table.txt, made from those two files, with one line per number n from 1 to 5 holding n, its "
+                    "square and its cube separated by single spaces (for example `2 4 8`).",
+        check=_powers_and_table,
+        expect={"min_steps": 3, "min_independent_pairs": 1, "min_parallel_workers": 2},
+        fake={
+            "plan": [
+                _step("s1", "Create squares.txt with the squares of 1 to 5.", ["squares.txt holds 1 4 9 16 25"]),
+                _step("s2", "Create cubes.txt with the cubes of 1 to 5.", ["cubes.txt holds 1 8 27 64 125"]),
+                _step("s3", "Create table.txt from squares.txt and cubes.txt.", ["table.txt holds n n² n³"],
+                      depends_on=["s1", "s2"]),
+            ],
+            "attempts": {
+                # Each takes a second, so the two run side by side as real Workers would.
+                "s1": [{"status": "completed", "seconds": 1, "files": {"squares.txt": "1\n4\n9\n16\n25\n"}}],
+                "s2": [{"status": "completed", "seconds": 1, "files": {"cubes.txt": "1\n8\n27\n64\n125\n"}}],
+                "s3": [{"status": "completed",
+                        "files": {"table.txt": "".join(f"{n} {n ** 2} {n ** 3}\n" for n in range(1, 6))}}],
             },
         },
     ),
