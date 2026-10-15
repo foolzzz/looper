@@ -37,6 +37,7 @@ import {
   type DbChatMessage,
   type LlmRecord,
   type LlmRecordEvent,
+  type ProjectInstructionFile,
   type PromptLayers,
 } from "@/lib/api";
 
@@ -234,9 +235,18 @@ const SETTING_SOURCES: Record<string, string> = {
 };
 const sourceName = (source: string) => SETTING_SOURCES[source] ?? source;
 
+/** One of the repository's instruction files the run was given, and how. */
+function instructionFile(file: ProjectInstructionFile) {
+  if (file.delivery === "native") return `${file.path} (read by the runtime)`;
+  if (file.error) return `${file.path} (not given: ${file.error})`;
+  const clipped = file.clipped_bytes ? `, ${file.clipped_bytes} bytes clipped` : "";
+  return `${file.path} (added by Looper to the runtime's system prompt${clipped} · ${shortSha(file.sha256)})`;
+}
+
 /**
- * One line per layer, in prompt order: where the harness, role, project, task and contract came from;
- * then the Agent Profile and model the run asked for and the Settings environment variables it got.
+ * One line per layer, in prompt order: where the harness, role, project (and the repository's instruction files),
+ * task and contract came from; then the Agent Profile and model the run asked for and the Settings environment
+ * variables it got.
  */
 function PromptLayerSummary({ layers, metadata }: { layers: PromptLayers; metadata: LlmRecord["metadata"] }) {
   const { harness, role, project, task, contract } = layers;
@@ -266,6 +276,10 @@ function PromptLayerSummary({ layers, metadata }: { layers: PromptLayers; metada
           .join(" · ")
       : "none",
   ]);
+  const instructions = metadata?.project_instructions;
+  if (instructions) {
+    rows.push(["Instructions", instructions.length ? instructions.map(instructionFile).join(" · ") : "none"]);
+  }
   rows.push([
     "Task",
     task

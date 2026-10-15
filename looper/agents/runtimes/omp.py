@@ -24,7 +24,9 @@ Verified against omp 18.4.3 (the multi-runtime RFC, section 6):
   a project's own content (skills, ``AGENTS.md``, ``.omp``) from the work
   directory up to its git repository's root; outside a repository it would
   climb past the operator's home up to ``/``, so there the sources that climb
-  are turned off (``CLIMBING_SOURCES``). The homes share one copy of omp's
+  are turned off (``CLIMBING_SOURCES``) and the work directory's own
+  ``AGENTS.md`` or ``CLAUDE.md`` goes into the system prompt instead
+  (``instruction_files``, ``instructions``). The homes share one copy of omp's
   native library (``<runtime_root>/.local/omp/natives``), which omp would
   otherwise unpack into each (about 167 MB).
 - **Settings** go in a ``--config`` overlay (``overlay``), which a project's
@@ -33,8 +35,9 @@ Verified against omp 18.4.3 (the multi-runtime RFC, section 6):
   ordinary tools (``tools.xdev`` off); no background jobs, so a subagent's
   tokens come with its tool's result; no update check, no issue reports.
 - **The system prompt** is ``--append-system-prompt <file>``: after omp's own
-  prompt and the project's context, a short block of runtime notes first
-  (``runtime_notes``); Looper's prompts themselves stay runtime-neutral.
+  prompt and the project's context: the work directory's instruction file
+  when omp does not read it itself, a short block of runtime notes
+  (``runtime_notes``), then Looper's prompt, which stays runtime-neutral.
 - **The provider** is ``models.yml``'s provider ``looper``: its endpoint, its
   API (``API_NAMES``) and the agent's model at no price (Looper prices the
   tokens); its ``apiKey`` names the variable that holds the key (``KEY_ENV``),
@@ -75,7 +78,9 @@ from typing import TYPE_CHECKING, Any, ClassVar
 from ..run_usage import Usage, run_usage
 from . import (
     ApiProtocol, AuthKind, Capability, Probe, ProviderBinding, RunCost, RuntimeAdapter, RuntimeUnsupported,
+    instructions,
 )
+from .instructions import Delivery, InstructionFile
 from .per_turn import PerTurnSession, session_dir_name
 from .pricing import usage_event
 
@@ -199,7 +204,9 @@ class OmpRuntime(RuntimeAdapter):
         visible = {**os.environ, **dict(launch.env)}
         mcp = mcp_config(launch.library, visible)
         home = write_home(local, models_yml(launch), overlay(launch, outside_repository=outside_repository(cwd)), mcp)
-        prompt = write_prompt(home, runtime_notes() + "\n\n---\n\n" + Path(prompt_file).read_text(encoding="utf-8"))
+        project = instructions.injected_section(self.instruction_files(cwd), self.label)
+        prompt = write_prompt(home, "\n\n---\n\n".join(
+            part for part in (project, runtime_notes(), Path(prompt_file).read_text(encoding="utf-8")) if part))
         return [
             "env", f"HOME={home}", executable, *self.launch_args(launch),
             "--config", str(home / OVERLAY), "--append-system-prompt", str(prompt),
@@ -265,6 +272,13 @@ class OmpRuntime(RuntimeAdapter):
         from .. import claude_cli
 
         return claude_cli.budget_error(result_event) if (result_event or {}).get(claude_cli.SOFT_CAP) else None
+
+    def instruction_files(self, cwd: str | Path) -> tuple[InstructionFile, ...]:
+        """One file a directory of the project, ``AGENTS.md`` before ``CLAUDE.md``, which omp reads itself in a
+        repository; outside one, where its discovery is off, the work directory's, put in the system prompt."""
+        delivery = Delivery.INJECTED if outside_repository(cwd) else Delivery.NATIVE
+        return tuple(InstructionFile(path, delivery) for path in instructions.first_per_directory(
+            cwd, (instructions.AGENTS_MD, instructions.CLAUDE_MD)))
 
     def launch_record(self, launch: Launch) -> dict[str, Any]:
         """What omp could not load of the installed items, when there is any (RFC P9)."""

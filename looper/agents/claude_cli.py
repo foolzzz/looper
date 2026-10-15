@@ -44,6 +44,12 @@ logger = logging.getLogger(__name__)
 #   directory from the working directory up to "/" as project memory, so a
 #   directory under $HOME still loads ~/.claude/CLAUDE.md; "claudeMdExcludes"
 #   leaves out everything above the repository.
+# - Where a project has no CLAUDE.md of its own, Claude Code reads its AGENTS.md
+#   files instead, from the same directories (its built-in default, the
+#   "instructionFiles" setting "claude-md-or-agents-md"), so an AGENTS.md above
+#   the repository came in too: "claudeMdExcludes" leaves those out as well. An
+#   excluded CLAUDE.md does not keep the project's own AGENTS.md out
+#   (runtimes.instructions).
 # - "autoMemoryEnabled": false turns off the per-directory auto memory under
 #   ~/.claude/projects/.
 # Authentication is unaffected. "--bare" and a separate CLAUDE_CONFIG_DIR were
@@ -68,10 +74,10 @@ logger = logging.getLogger(__name__)
 
 # Names this flag set in every run's record (prompt_layers.isolation); change
 # it whenever the flags change.
-ISOLATION_ID = "personal-config-off/v1"
+ISOLATION_ID = "personal-config-off/v2"
 
 
-def _repository_root(directory: Path) -> Path:
+def repository_root(directory: Path) -> Path:
     """The nearest directory at or above ``directory`` holding ``.git``; ``directory`` without one."""
     for candidate in (directory, *directory.parents):
         if (candidate / ".git").exists():
@@ -96,13 +102,13 @@ def _outside_memory(cwd: Path) -> list[str]:
 
     # Both spellings of a path through a symbolic link.
     for directory in dict.fromkeys((cwd.absolute(), cwd.resolve())):
-        for parent in _repository_root(directory).parents:
-            add(parent, "CLAUDE.md", ".claude/CLAUDE.md", ".claude/rules/**")
+        for parent in repository_root(directory).parents:
+            add(parent, "CLAUDE.md", ".claude/CLAUDE.md", ".claude/rules/**", "AGENTS.md", ".claude/AGENTS.md")
     config_dirs = [Path.home() / ".claude"]
     if os.environ.get("CLAUDE_CONFIG_DIR"):
         config_dirs.append(Path(os.environ["CLAUDE_CONFIG_DIR"]).expanduser())
     for config_dir in config_dirs:
-        add(config_dir.absolute(), "CLAUDE.md", "rules/**")
+        add(config_dir.absolute(), "CLAUDE.md", "rules/**", "AGENTS.md")
     return patterns
 
 
@@ -885,6 +891,7 @@ class ClaudeRunRecorder:
 
     async def start(self) -> None:
         from ..db import llm_records
+        from .runtimes.instructions import record as instructions_record
 
         try:
             self._record_id = await llm_records.start_record(
@@ -898,6 +905,10 @@ class ClaudeRunRecorder:
                     **(self._system_prompt.record() if self._system_prompt is not None else {}),
                     # The model asked for and where it came from; the variables' names, not their values.
                     **(self._launch.record() if self._launch is not None else {}),
+                    # The repository's own CLAUDE.md and AGENTS.md the runtime was given, and how.
+                    **({"project_instructions": instructions_record(
+                        self._launch.runtime.instruction_files(self._cwd), self._cwd)}
+                       if self._launch is not None else {}),
                     "cwd": self._cwd,
                     # The task step a Worker or Reviewer ran, so its run stays tied to that step.
                     **({"step_id": self._step_id} if self._step_id else {}),

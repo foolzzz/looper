@@ -34,7 +34,10 @@ command themselves. An adapter says:
 - **its own login** (``login_problem``, ``after_run``, ``login_models``):
   why a run with the runtime's login cannot start now, what a run left wrong
   with the login, and the models the form suggests for it (Codex:
-  ``codex_login``).
+  ``codex_login``);
+- **the project's instruction files** (``instruction_files``): which of the
+  repository's ``CLAUDE.md`` and ``AGENTS.md`` a run is given, read by the
+  runtime itself or put in its system prompt by Looper (``instructions``).
 
 What the catalog and the project knowledge put in a run (plugin directories,
 the MCP configuration, knowledge directories) is materialized by
@@ -66,6 +69,7 @@ if TYPE_CHECKING:
     from ..agent_settings import Launch
     from ..claude_cli import CapStop, ResidentTurn
     from ..run_usage import Price, Usage
+    from .instructions import InstructionFile
 
 
 class ApiProtocol(str, Enum):
@@ -279,6 +283,13 @@ class RuntimeAdapter(ABC):
         state that the operator must hear of (the run's task activity and the server log carry it); nothing
         unless the adapter says otherwise."""
         return []
+
+    # --- The project's instruction files ---
+
+    @abstractmethod
+    def instruction_files(self, cwd: str | Path) -> tuple[InstructionFile, ...]:
+        """Which of its project's own instruction files (``CLAUDE.md``, ``AGENTS.md``) a run in ``cwd`` is given,
+        and how (``instructions``)."""
 
     # --- The record ---
 
