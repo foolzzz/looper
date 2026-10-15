@@ -100,7 +100,6 @@ from . import journal
 from .journal import JournalEntry, JournalKind, LearningScope
 from .planner_protocol import (
     MAX_RETRIES,
-    MAX_STEPS,
     REPLY_CONTRACT,
     ChatAction,
     ChatReply,
@@ -357,7 +356,6 @@ class TaskPlan:
             started={s.label: deps(s) for s in live if s.started},
             pending={s.label: deps(s) for s in live if not s.started},
             retired=frozenset(s.label for s in dropped),
-            spent=sum(1 for s in dropped if s.started),
             running=frozenset(s.label for s in live if s.status == "dispatched"),
             done=frozenset(s.label for s in live if s.started and s.status == "verified"),
         )
@@ -2052,7 +2050,7 @@ class PlannerAgent:
             + (", with the supplements below." if added else "."),
             *(["", *added] if added else []),
             "",
-            f"You may look at the project first, without changing it. Reply with the PLAN JSON: 1 to {MAX_STEPS} steps.",
+            "You may look at the project first, without changing it. Reply with the PLAN JSON: at least 1 step.",
         ])
 
     def _work_report(self, step: PlanStep, result: dict[str, Any]) -> list[str]:

@@ -23,7 +23,6 @@ from typing import Any
 
 from .journal import HANDOFF_MAX_CHARS, LESSONS_MAX_CHARS, kept_text
 
-MAX_STEPS = 8
 MAX_RETRIES = 2  # per step
 # A progress note's fields and a final summary's, in the order they are shown, and what each keeps of a field.
 PROGRESS_FIELDS = ("done", "now", "next", "risks", "estimate")
@@ -185,22 +184,19 @@ class PlanView:
     ``started`` maps each live step that has run (or runs) to its
     dependencies and ``pending`` each step not started yet. ``retired``
     holds the labels of dropped steps, which cannot be reused or depended
-    on; ``spent`` counts the dropped steps that had run, which still count
-    toward ``MAX_STEPS``. ``running`` holds the steps a Worker runs now.
+    on. ``running`` holds the steps a Worker runs now.
     """
 
     started: Mapping[str, tuple[str, ...]]
     pending: Mapping[str, tuple[str, ...]]
     retired: frozenset[str] = frozenset()
-    spent: int = 0
     running: frozenset[str] = frozenset()
     done: frozenset[str] = frozenset()  # the started steps that are verified
 
     def dropping(self, step: str) -> PlanView:
         """This plan once ``step``, a started step, is dropped."""
         started = {k: v for k, v in self.started.items() if k != step}
-        return PlanView(started, self.pending, self.retired | {step}, self.spent + 1, self.running - {step},
-                        self.done)
+        return PlanView(started, self.pending, self.retired | {step}, self.running - {step}, self.done)
 
 
 @dataclass(frozen=True)
@@ -496,11 +492,6 @@ def _check_new_steps(steps: tuple[StepSpec, ...], plan: PlanView, *, replace_pen
                 raise ProtocolError(f"step {step.id} depends on {dependency}, which is dropped")
             if dependency not in graph:
                 raise ProtocolError(f"step {step.id} depends on unknown step {dependency!r}")
-    total = len(graph) + plan.spent
-    if total > MAX_STEPS:
-        raise ProtocolError(
-            f"the task would have {total} steps (dropped steps that ran count too); at most {MAX_STEPS} are allowed"
-        )
     cycle = _find_cycle(graph)
     if cycle:
         raise ProtocolError("depends_on has a cycle: " + " -> ".join(cycle))
@@ -601,7 +592,7 @@ the project has one.
 ```json
 {{"steps": [{{"id": "s1", "instruction": "...", "acceptance_criteria": ["..."], "depends_on": [], "review": false}}]}}
 ```
-- 1 to {MAX_STEPS} steps. id: a short unique label (letters, digits, - _ .).
+- At least 1 step. id: a short unique label (letters, digits, - _ .).
 - depends_on: ids of the steps whose results this one needs before it starts,
   and only those; no cycles. Steps without a dependency between them run at
   the same time in the same directory, so a step that touches another step's

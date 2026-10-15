@@ -91,14 +91,14 @@ Task 是系统的一等实体，代表一个完整的用户需求。
 每个 Task 只有一个 Planner，它是一个常驻的 Claude Code 进程（和 Manager 共用 `ResidentClaude`）：第一个 turn 时在任务目录里启动，每个事件喂一个 stream-json user turn，任务结束或服务停止时退出。Planner 和所有 agent 一样开放全部工具、跳过权限确认（不加载 MCP），可以读代码、运行无害的命令来做规划和判断结果；推荐的 role prompt 要求它不亲自修改文件，改动都作为步骤交给 Worker 完成，每次执行仍是一个独立进程。
 
 - **谁来决定**：Planner 的 Claude 做判断，代码校验后执行。每个事件一个 turn，依次处理：
-  - `[PLAN]`：收到 `TASK_REQUEST` 时把需求拆成 1–8 个步骤，每步有 `id`、`instruction`、`acceptance_criteria`、`depends_on` 和 `review`（是否必须由独立 Reviewer 通过）
+  - `[PLAN]`：收到 `TASK_REQUEST` 时把需求拆成若干步骤（至少 1 步，不设上限），每步有 `id`、`instruction`、`acceptance_criteria`、`depends_on` 和 `review`（是否必须由独立 Reviewer 通过）
   - `[DECISION]`：每个 Worker 结果、每个 Reviewer 结果之后各一次
   - `[CHAT]`：用户发来消息时回复，并最多做一个动作：`none`、`forward`（把文本转给正在执行某一步的 Worker）、`add_steps`
 - **五种决定**：
   - `accept`：只有结果可以接受时才允许，即 Worker 完成且这一步不需要验收，或 Reviewer 通过
   - `review`：只能在 Worker 成功之后；另起 Reviewer，它拿到这一步的 instruction、Worker 结果和验收标准
   - `retry`：同一步派给一个新的 Worker，反馈附在 instruction 后面；每步最多重试 2 次
-  - `replan`：替换所有还没开始的步骤，已开始的不能改；当前步骤结果可以接受就算 verified，否则作为 skipped 丢弃（跑过的丢弃步骤仍计入 8 步上限）
+  - `replan`：替换所有还没开始的步骤，已开始的不能改；当前步骤结果可以接受就算 verified，否则作为 skipped 丢弃
   - `fail`：任务失败，附上原因
 - **什么时候必须验收**：计划里标了 `review` 的步骤，或者被决定送审过一次的步骤，必须有一次通过的 Review 才能 accept，重试之后也一样
 - **Worker 怎样才算完成**：三个条件都满足才算，任何一条不满足，这一步都判失败：
@@ -107,7 +107,7 @@ Task 是系统的一等实体，代表一个完整的用户需求。
   - 报告里 `changed_files` 列出的文件都存在，`deleted_files` 列出的文件都已删除。
 - **Reviewer**：必须给出布尔类型的 `passed`，纯文本不算通过
 - **Worker 和 Reviewer 的提示怎么分**：会话期间不变的内容放系统提示（以 `--append-system-prompt-file` 传入），其他 agent 的产出放 stdin 上的第一个 user turn。系统提示依次是 harness（项目的 Worker 覆盖，没有就用系统默认；Reviewer 跟随 Worker）、角色提示（Worker 用 `worker` 行，Reviewer 用 `reviewer` 行，为空或读不到时用默认值）、项目段、任务段（`## Task`），最后是 `WORK_CONTRACT`（这一步的规则和上面的 JSON 报告格式）或 `REVIEW_CONTRACT`（验收的规则和 `passed` 结论格式）。Worker 的任务段先给整体任务需求作背景，再给这一步的标签、instruction、工作目录、目标文件、验收标准、验证命令，重做时加上第几次和之前的反馈；Reviewer 的任务段是整体需求加上被验收步骤的 instruction 和验收标准。Worker 的 user turn 只有一句开始提示和所依赖步骤的报告（summary、改动的文件）；Reviewer 的 user turn 是被验收的 Worker 报告（summary、改动和删除的文件），作为待核对的数据，不进系统提示。运行中转来的消息（用户聊天、Planner 纠偏）仍是 user turn，不重复契约。`worker`、`reviewer` 行每次运行各读一次（角色提示、`model`、`timeout_seconds`、`max_turns`）
-- **回复契约**：每次回复以且只以一个 ```` ```json ```` 代码块结尾，由 `planner_protocol.py` 用类型化的 dataclass 和枚举严格校验：不允许未知字段，step id 唯一，`depends_on` 只能指向已知步骤且无环，最多 8 步（`MAX_STEPS`），决定必须在当前允许的范围内，重试不超限，replan 不能动已开始的步骤。不合规的回复有一次修复 turn，提示里写明错在哪里
+- **回复契约**：每次回复以且只以一个 ```` ```json ```` 代码块结尾，由 `planner_protocol.py` 用类型化的 dataclass 和枚举严格校验：不允许未知字段，step id 唯一，`depends_on` 只能指向已知步骤且无环，至少 1 步（步骤数不设上限，花费由任务花费上限和超时兜底），决定必须在当前允许的范围内，重试不超限，replan 不能动已开始的步骤。不合规的回复有一次修复 turn，提示里写明错在哪里
 - **兜底**：
   - 规划仍然失败（修复后仍不合规、Claude 出错、超时、无法启动）：任务失败（fail-closed），原因写进 `tasks.error` 和 activity，不会退回成单步执行
   - 决策仍然失败：按这一步自己的结论处理（Worker 的 fail-closed 结论，或 Reviewer 的结论），不另起 Reviewer，并记一条 `Warning: the Planner could not decide ...` 的 error activity

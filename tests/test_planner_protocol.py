@@ -10,7 +10,6 @@ import pytest
 
 from looper.agents.tiers.planner_protocol import (
     ChatAction,
-    MAX_STEPS,
     Decision,
     DecisionContext,
     FinalSummary,
@@ -65,6 +64,11 @@ class TestPlan:
         assert [(s.id, s.depends_on, s.review) for s in parsed.steps] == [("s1", (), False), ("s2", ("s1",), True)]
         assert parsed.steps[1].acceptance_criteria == ("s2 works",)
 
+    def test_a_plan_has_as_many_steps_as_it_needs(self) -> None:
+        """No step limit: one step per episode of a 12-episode run, each after the one before, then a closing step."""
+        steps = [step("e1"), *(step(f"e{i}", f"e{i - 1}") for i in range(2, 13)), step("close", "e12")]
+        assert [s.id for s in parse_plan(plan(*steps)).steps] == [*(f"e{i}" for i in range(1, 13)), "close"]
+
     @pytest.mark.parametrize(
         ("steps", "error"),
         [
@@ -73,7 +77,6 @@ class TestPlan:
             ([step("s1", "s9")], "unknown step 's9'"),
             ([step("s1", "s1")], "depends on itself"),
             ([step("a", "b"), step("b", "c"), step("c", "a")], "cycle: a -> b -> c -> a"),
-            ([step(f"s{i}") for i in range(MAX_STEPS + 1)], f"at most {MAX_STEPS}"),
             ([{**step("s1"), "notes": "x"}], "unknown keys: notes"),
             ([{k: v for k, v in step("s1").items() if k != "review"}], "missing review"),
             ([{**step("s1"), "id": "has space"}], "short label"),
@@ -97,7 +100,7 @@ def _context(
 
 
 # s1 has its result; s2 has not started; s0 is done.
-VIEW = PlanView(started={"s0": (), "s1": ("s0",)}, pending={"s2": ("s1",)}, retired=frozenset({"old"}), spent=1)
+VIEW = PlanView(started={"s0": (), "s1": ("s0",)}, pending={"s2": ("s1",)}, retired=frozenset({"old"}))
 
 
 class TestDecision:
@@ -163,11 +166,15 @@ class TestReplan:
             ([step("old")], "belongs to a dropped step"),
             ([step("s3", "old")], "depends on old, which is dropped"),
             ([step("s3", "s2")], "unknown step 's2'"),  # s2 is replaced by this list, which drops it
-            ([step(f"n{i}") for i in range(MAX_STEPS - 2)], "would have 9 steps (dropped steps that ran count too)"),
         ],
     )
     def test_invalid_replans(self, steps: list[dict[str, Any]], error: str) -> None:
         assert error in _error(self._replan, *steps)
+
+    def test_a_replan_may_grow_the_task_past_eight_steps(self) -> None:
+        # Two started steps, a dropped one that ran, and twelve new ones: fifteen steps in all.
+        replan = self._replan(*(step(f"n{i}", "s1") for i in range(12)))
+        assert len(replan.steps) == 12
 
     def test_a_step_that_cannot_be_accepted_is_dropped(self) -> None:
         failed = _context(succeeded=False)

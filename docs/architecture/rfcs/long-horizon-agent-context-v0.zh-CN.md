@@ -36,7 +36,7 @@ M0 交付后，Worker 和 Reviewer 已按第 5 节的目标形态拼装 system p
 | Reviewer | 每次验收 1 个 | **无**（M0 中改造） | 首条 stdin：验收契约 + 待验收结果 | 一次性 |
 
 已有的防跑偏机制：Planner 回复的 JSON 由 `planner_protocol` 严格校验并允许一次修复；Worker 完成判定 fail-closed
-（`judge_result`）；步骤上限 8、每步重试上限 2；Planner 周期性 SUPERVISE turn 可纠偏或终止运行中的 Worker；
+（`judge_result`）；每步重试上限 2（步骤数原为最多 8 步，2026-10-15 取消上限）；Planner 周期性 SUPERVISE turn 可纠偏或终止运行中的 Worker；
 推荐 prompt 跟踪（`role_configs.default_prompt`，未改过的行随推荐升级，改过的保留）。
 
 注：角色配置表当时叫 `agent_configs`（主键 `agent_id`），后来改用控制台的叫法 `role_configs`（主键 `role`），本文按新名字写。
@@ -131,7 +131,7 @@ L5 代码契约始终最后，因为 L4 来自用户或 Planner，放在契约�
 | 契约在 system prompt 末尾 + 代码严格校验 + 一次修复 | 已有（Worker、Reviewer 于 M0 补齐） | 格式和规则不被对话稀释 |
 | 状态由代码每轮重新注入 | Planner 已有 | 压缩、续接后不丢状态 |
 | fail-closed 完成判定 | 已有 | Worker 自报完成不算数，要和磁盘一致 |
-| 步骤上限 8、每步重试上限 2 | 已有 | 防止失败循环 |
+| 每步重试上限 2（步骤数不设上限，花费上限和超时兜底） | 已有 | 防止失败循环 |
 | Planner 周期监督（纠偏 / 终止） | 已有（#4） | 运行中途发现方向错误 |
 | Worker 每步新进程 | 已有 | 单步上下文有界，失败不污染后续步骤 |
 | Planner、Worker 会话按任务、步骤隔离 | 已有 | 任务之间不串上下文；Manager 的全局会话是有意为之，见第 9 节问题 1 |
