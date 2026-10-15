@@ -309,9 +309,9 @@ Settings → Agent Profiles and selected in Settings → Roles.
 - The built-in agent `claude-code/opus` (Claude Code, its own login, `opus`)
   runs every role that nothing else selects an agent for.
 
-**Layered settings.** Five settings, the harness prompt, the agent, the
-effort, environment variables and a per-run spend cap, resolve through four
-layers, a later layer winning:
+**Layered settings.** Four settings, the harness prompt, the agent (with its
+model and effort), environment variables and a per-run spend cap, resolve
+through four layers, a later layer winning:
 
 | Layer | Edited in | Applies to |
 |---|---|---|
@@ -323,7 +323,8 @@ layers, a later layer winning:
 The Manager spans every project, so only the first two layers apply to it. A
 task can also choose the Agent Profile of its Planner, Workers or Reviewers when
 it is created (`profile_overrides`); that choice wins over every layer, for that
-task only. A field no layer sets keeps its built-in default, and the dashboard shows
+task only. The effort is the agent's: to run a role with another effort, select
+an agent that has it. A field no layer sets keeps its built-in default, and the dashboard shows
 each field's value with the layer it came from. Environment variables are not
 for secrets: a name that looks like a credential is refused. A change applies
 from each agent's next run or turn. See
