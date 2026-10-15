@@ -231,8 +231,9 @@ async def update_profile(profile_id: str, fields: Mapping[str, Any], *, pool: as
 async def profile_usage(profile_id: str | None = None, *, pool: asyncpg.Pool | asyncpg.Connection | None = None,
                         ) -> dict[str, dict[str, Any]]:
     """Where each Agent Profile (or ``profile_id``) is selected, by profile id: ``layers``, each ``{scope, role,
-    project_id, project_name}`` (system, then roles, then projects by name), and ``task_count``, how many tasks
-    chose it for one of their roles. A profile nothing selects is not in the result."""
+    project_id, project_name}`` (system, then roles, then projects by name), ``task_count``, how many tasks
+    chose it for one of their roles, and ``schedule_count``, how many schedules did. A profile nothing selects is
+    not in the result."""
     pool = pool or get_pool()
     layers = await pool.fetch(
         "SELECT l.profile_id, l.scope, l.role, l.project_id, p.name AS project_name FROM agent_setting_layers l "
@@ -245,12 +246,21 @@ async def profile_usage(profile_id: str | None = None, *, pool: asyncpg.Pool | a
         "SELECT profile_id, count(DISTINCT task_id) AS n FROM task_profile_overrides "
         "WHERE $1::text IS NULL OR profile_id = $1 GROUP BY profile_id", profile_id,
     )
+    schedules = await pool.fetch(
+        "SELECT profile_id, count(DISTINCT schedule_id) AS n FROM schedule_profile_overrides "
+        "WHERE $1::text IS NULL OR profile_id = $1 GROUP BY profile_id", profile_id,
+    )
     uses: dict[str, dict[str, Any]] = {}
+
+    def use(profile: str) -> dict[str, Any]:
+        return uses.setdefault(profile, {"layers": [], "task_count": 0, "schedule_count": 0})
+
     for row in layers:
-        entry = uses.setdefault(row["profile_id"], {"layers": [], "task_count": 0})
-        entry["layers"].append({k: row[k] for k in ("scope", "role", "project_id", "project_name")})
+        use(row["profile_id"])["layers"].append({k: row[k] for k in ("scope", "role", "project_id", "project_name")})
     for row in tasks:
-        uses.setdefault(row["profile_id"], {"layers": [], "task_count": 0})["task_count"] = row["n"]
+        use(row["profile_id"])["task_count"] = row["n"]
+    for row in schedules:
+        use(row["profile_id"])["schedule_count"] = row["n"]
     return uses
 
 

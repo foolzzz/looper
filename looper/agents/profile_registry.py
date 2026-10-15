@@ -593,12 +593,12 @@ def cost_warnings(profile: AgentProfile) -> list[str]:
 
 
 # Where nothing selects a profile.
-NOT_USED: Mapping[str, Any] = {"layers": [], "task_count": 0}
+NOT_USED: Mapping[str, Any] = {"layers": [], "task_count": 0, "schedule_count": 0}
 
 
 def profile_view(row: Mapping[str, Any], used_by: Mapping[str, Any] = NOT_USED) -> dict[str, Any]:
     """An Agent Profile, the roles its runtime can run and where it is selected (``used_by``: the layers, each
-    ``{scope, role, project_id, project_name}``, and how many tasks chose it; ``db.profile_usage``)."""
+    ``{scope, role, project_id, project_name}``, and how many tasks and schedules chose it; ``db.profile_usage``)."""
     spec = AgentProfile.from_row(row)
     return {
         "profile_id": row["id"], "name": row["name"], "model": row["model"], "effort": row.get("effort"),
@@ -618,6 +618,8 @@ def usage_text(used_by: Mapping[str, Any]) -> str:
     parts = [scopes[u["scope"]](u) for u in used_by["layers"]]
     if count := used_by["task_count"]:
         parts.append(f"{count} {'task' if count == 1 else 'tasks'}")
+    if count := used_by.get("schedule_count"):
+        parts.append(f"{count} {'schedule' if count == 1 else 'schedules'}")
     return ", ".join(parts)
 
 
