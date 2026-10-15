@@ -1505,13 +1505,15 @@ dashboard only). A new schedule is disabled.
   timeout is `gate_failed` (a failure, the reason and stderr's tail in
   `error`); nothing printed is `skipped_gate`; otherwise the task is created
   with the output in its context ("the gate's output is this run's input:
-  only these"). The run that ran something and ended last hands on its gate
-  output, labelled 「上一轮未完成」, when it failed, timed out, was stopped or
-  cancelled, or its gate failed: only that one run, to the next run only (a
-  parallel schedule's later runs do not get it again), and then even a gate
-  that prints nothing gets a task (`carried_from` names the run). The outputs
+  only these"). Each run that failed, timed out, was stopped or cancelled, or
+  whose gate failed hands its gate output on to the next run, labelled
+  「上一轮未完成」, once (`schedule_runs.carried_on`): all of them when several
+  runs of a parallel schedule ended so before it, oldest first, one block
+  each, and then even a gate that prints nothing gets a task (`carried_from`
+  names the latest of them). The outputs
   share what is left of the 8,000 characters a task requirement keeps
-  (at least 600), each clipped with a marker. A run left `gating` by a server
+  (at least 600), each clipped with a marker; earlier runs' inputs that do not
+  fit at 300 characters each are left out, the oldest first, and counted. A run left `gating` by a server
   that stopped is `gate_failed` at the next start. A gate never runs twice at
   once: a firing while the schedule's run is `gating` is `skipped_overlap`.
 - **Repeated skips are counted, not stored.** A skipped firing (`skipped_gate`,
@@ -2066,7 +2068,7 @@ PostgreSQL is a hard startup dependency. All data paths:
 | `task_profile_overrides` | A task's Agent Profile per role (`planner`, `worker`, `reviewer`): `profile_id`, going with its task; a profile a task chose is not deleted |
 | `schedules` | A project's schedules: `name` (unique in the project ignoring case), `cron`, `timezone`, `requirement`, `work_dir` (`''`: the project's default), `overlap` (`skip`, `queue`, `parallel`), `max_parallel_runs` (1–10, default 3: a parallel schedule's runs at once), `catch_up`, `run_timeout_seconds`, `run_budget_usd`, `gate_command`, `gate_timeout_seconds`, `daily_budget_usd`, `notify`, `notify_channel` and `notify_chat` (both or neither), `enabled` (false when created), `enabled_at` (when it was created or last enabled) and `rule_changed_at` (when its rule or zone last changed; the no-success alert counts from the later of them), `next_fire_at` (null while disabled), `last_fired_at`, `last_success_at`, `last_ok_at`, `consecutive_failures`, `failures_alert_at` and `stale_alert_at` (set while that alert is active), `created_via`; a project with schedules is not deleted |
 | `schedule_profile_overrides` | A schedule's Agent Profile per task role, copied into each task it fires; a profile a schedule chose is not deleted |
-| `schedule_runs` | Each firing of a schedule: `scheduled_for`, `fired_at`, `trigger` (`scheduled`, `catch_up`, `manual`), `missed`, `status` (`queued`, `gating`, `running`, then once `completed`, `failed`, `stopped`, `cancelled`, `timed_out`, `gate_failed`, or `skipped_overlap`, `skipped_missed`, `skipped_gate`, `skipped_budget`), `task_id` (null when skipped, or once the task is deleted), `summary`, `cost_usd`, `error`, `gate_output`, `carried_from` (the run whose unfinished input it was given), `finished_at`, `firings` (how many firings it stands for: a repeated skip is counted on one run, from `scheduled_for` to `finished_at`); going with its schedule |
+| `schedule_runs` | Each firing of a schedule: `scheduled_for`, `fired_at`, `trigger` (`scheduled`, `catch_up`, `manual`), `missed`, `status` (`queued`, `gating`, `running`, then once `completed`, `failed`, `stopped`, `cancelled`, `timed_out`, `gate_failed`, or `skipped_overlap`, `skipped_missed`, `skipped_gate`, `skipped_budget`), `task_id` (null when skipped, or once the task is deleted), `summary`, `cost_usd`, `error`, `gate_output`, `carried_from` (the latest run whose unfinished input it was given), `carried_on` (its own unfinished input was handed on to a later run), `finished_at`, `firings` (how many firings it stands for: a repeated skip is counted on one run, from `scheduled_for` to `finished_at`); going with its schedule |
 | `schedule_notifications` | Every message about a schedule: `run_id`, `kind` (`run`, `failures_alert`, `failures_recovered`, `stale_alert`, `stale_recovered`), `channel`, `chat`, `text`, `status` (`sent`, `failed`, `dashboard`), `error`; going with its schedule |
 | `system_settings` | Settings shared by the whole system, one value per key (no row = the built-in default), such as the last library import's report |
 | `library_items` | The capability catalog: kind, name, `origin` (`machine`, `upload`, `git`, `ui` or `project`), `modified`, `owner_project_id` (a project-authored item; goes with its project), `description`, source label, declared version, `sha256` of the files, size, file count, `imported_at` |
