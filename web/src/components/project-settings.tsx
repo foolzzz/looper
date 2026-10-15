@@ -4,7 +4,6 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { deleteProject, updateProject, type Project, type ProjectUpdate } from "@/lib/api";
 import { ProjectBackgroundField, backgroundTooLong } from "@/components/project-background-field";
-import { ProjectAgentSettingsSection } from "@/components/project-agent-settings";
 import {
   ProjectExecutionFields,
   executionChanges,
@@ -40,8 +39,8 @@ function changesOf(draft: Draft, project: Project): ProjectUpdate {
   return fields;
 }
 
-/** A project's fields and execution settings, saved together; its agent settings by layer; and deleting the
- * project once it has no tasks. */
+/** A project's fields and execution settings, saved together, and deleting the project once it has no tasks. Its
+ * agent settings are on its Agent Profiles tab. */
 export function ProjectSettingsForm({ project, onDeleted }: { project: Project; onDeleted: () => void }) {
   const id = useId();
   const [draft, setDraft] = useState<Draft>(() => draftOf(project));
@@ -143,8 +142,6 @@ export function ProjectSettingsForm({ project, onDeleted }: { project: Project; 
           </Button>
         </div>
       </form>
-
-      <ProjectAgentSettingsSection projectId={project.project_id} />
 
       <section aria-labelledby={`${id}-delete`} className="rounded-lg border border-border bg-card px-5 py-4">
         <h2 id={`${id}-delete`} className="text-sm font-semibold">Delete project</h2>

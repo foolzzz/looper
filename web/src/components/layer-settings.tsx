@@ -150,7 +150,7 @@ const SELECT = "flex h-9 w-full rounded-md border border-input bg-transparent px
  * One settings layer's harness, Agent Profile, effort, environment and per-run cap; a Planner's, Worker's or
  * Reviewer's role layer (in Settings → Roles or in a project) also has the role's concurrency limit per project. An
  * empty field is not set here and inherits; with `effective`, each field also says what applies now and where it
- * comes from.
+ * comes from. `profileFirst` puts the Agent Profile above the other fields, which follow as "More overrides".
  */
 export function LayerSettingsForm({
   idPrefix,
@@ -163,6 +163,7 @@ export function LayerSettingsForm({
   roles,
   submitLabel = "Save",
   onDirtyChange,
+  profileFirst = false,
 }: {
   idPrefix: string;
   layer: Exclude<SettingLayer, "builtin">;
@@ -178,6 +179,7 @@ export function LayerSettingsForm({
   submitLabel?: string;
   /** Told whether the form holds unsaved edits. */
   onDirtyChange?: (dirty: boolean) => void;
+  profileFirst?: boolean;
 }) {
   const [draft, setDraft] = useState<Draft>(() => draftOf(values));
   const [busy, setBusy] = useState(false);
@@ -222,8 +224,41 @@ export function LayerSettingsForm({
   const budgetText = (value: number | null) => (value == null ? "no cap" : formatUsd(value));
   const concurrencyText = (value: number) => String(value);
 
+  const profileField = (
+    <div className="space-y-1 sm:col-span-2">
+      <label htmlFor={`${idPrefix}-profile`} className="text-xs font-medium text-muted-foreground">
+        {AGENT_PROFILE.name}
+      </label>
+      <AgentProfileSelect
+        id={`${idPrefix}-profile`}
+        value={draft.profile}
+        onChange={(profile) => set({ profile })}
+        emptyLabel={isSystem ? `Built-in: ${limits.builtin_profile.name}` : "Inherit"}
+        roles={roles}
+        describedBy={`${idPrefix}-profile-now`}
+        unlistedName={effective?.profile.value.profile_id === draft.profile ? effective.profile.value.name : undefined}
+      />
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+        <NowValue id={`${idPrefix}-profile-now`} setting={effective?.profile} layer={layer} show={profileText} />
+        {!isSystem && draft.profile && (
+          <button
+            type="button"
+            onClick={() => set({ profile: "" })}
+            className="text-[11px] text-primary underline-offset-2 hover:underline focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+          >
+            Remove override
+          </button>
+        )}
+      </div>
+    </div>
+  );
+
   return (
     <form onSubmit={save} className="space-y-4">
+      {profileFirst && profileField}
+      {profileFirst && (
+        <h4 className="border-t border-border pt-4 text-xs font-semibold">More overrides</h4>
+      )}
       <div className="space-y-1">
         <HarnessField
           id={`${idPrefix}-harness`}
@@ -262,21 +297,7 @@ export function LayerSettingsForm({
       </div>
 
       <div className="grid gap-4 sm:grid-cols-2">
-        <div className="space-y-1 sm:col-span-2">
-          <label htmlFor={`${idPrefix}-profile`} className="text-xs font-medium text-muted-foreground">
-            {AGENT_PROFILE.name}
-          </label>
-          <AgentProfileSelect
-            id={`${idPrefix}-profile`}
-            value={draft.profile}
-            onChange={(profile) => set({ profile })}
-            emptyLabel={isSystem ? `Built-in: ${limits.builtin_profile.name}` : "Inherit"}
-            roles={roles}
-            describedBy={`${idPrefix}-profile-now`}
-            unlistedName={effective?.profile.value.profile_id === draft.profile ? effective.profile.value.name : undefined}
-          />
-          <NowValue id={`${idPrefix}-profile-now`} setting={effective?.profile} layer={layer} show={profileText} />
-        </div>
+        {!profileFirst && profileField}
         <div className="space-y-1">
           <label htmlFor={`${idPrefix}-effort`} className="text-xs font-medium text-muted-foreground">Effort</label>
           <select
