@@ -127,7 +127,9 @@ Codex 的其他核实结果：
 - **用量**：`input_tokens` 含 `cached_input_tokens`，`output_tokens` 含 `reasoning_output_tokens`，另有
   `cache_write_input_tokens`。数值是会话累计值，续接后接着累计；被杀掉的那一轮不计入，下一轮从上次落盘的累计值算起。
   没有单次请求的用量，所以记不到上下文规模。
-- **结束**：被 SIGTERM 时退出码是 0、没有 `turn.completed`；它正在跑的 shell 命令不会随之结束。
+- **结束**：被 SIGTERM 时退出码是 0、没有 `turn.completed`；它正在跑的 shell 命令不会随之结束：Codex 让每条命令自成
+  一个会话（也就是自成一个进程组），Codex 退出后这些命令被挂到 1 号进程下。所以 Looper 在发任何信号之前先用一次 `ps`
+  快照取出整棵进程树（含这些会话），连同它们一起结束（`looper/agents/proc_tree.py`，looper #96；0.162.0 实跑核实）。
 - **环境变量**：shell 命令默认继承 Codex 进程的全部环境变量，provider 的密钥要用 `shell_environment_policy.exclude` 排除。
   `shell_environment_policy.set` 在继承、排除之后覆盖变量，Codex 只在其后再加 `CODEX_THREAD_ID` 等自己的变量，
   不会把 `CODEX_HOME` 改回去（0.162.0 源码 `protocol/src/shell_environment.rs`，并经实跑核实，见 P1）。
