@@ -7,7 +7,8 @@ retries ``b`` with feedback and sends ``c`` to review. While ``b``'s retry and
 no new plan, the Planner's session resumed with its cost baseline, ``b``'s
 retry run again with its feedback, ``c`` reviewed again, then ``d``. No plan
 or session file is written. A task that failed at its spend cap continues the
-same way after a restart, from its plan in the database. Runs only when
+same way after a restart, from its plan in the database. A ready task (created,
+never started) stays ready through a restart until it is started. Runs only when
 LOOPER_TEST_DATABASE_URL points at a disposable database (each run creates and
 drops a database beside it).
 """
@@ -24,7 +25,7 @@ from typing import Any
 
 import pytest
 
-from evals.prompt_regression.runner import Api, fresh_database, running_server
+from evals.prompt_regression.runner import Api, EvalError, fresh_database, running_server
 
 DSN = os.environ.get("LOOPER_TEST_DATABASE_URL")
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
@@ -234,3 +235,29 @@ def test_a_task_failed_at_its_cap_continues_from_the_database_after_a_restart(tm
     argvs = _log(state, "planner_argv.jsonl")
     assert argvs[-1][argvs[-1].index("--resume") + 1] == "fake-planner-session"
     assert list(runtime.glob(".local/**/*.json")) == []
+
+
+def test_a_ready_task_stays_ready_through_a_restart_until_it_is_started(tmp_path: Path) -> None:
+    root = tmp_path.resolve()
+    bin_dir, state = _install(root)
+    (state / "release").touch()  # nothing the task runs waits
+    runtime, work, home = root / "runtime", root / "work", root / "home"
+    for path in (runtime, work, home):
+        path.mkdir()
+
+    with fresh_database(str(DSN)) as (database_url, _):
+        server = {"database_url": database_url, "runtime_root": runtime, "bin_dir": bin_dir, "home": home}
+        with running_server(**server, log_path=root / "first.log") as api:
+            task_id = api.post("/api/tasks/create", {"requirement": "build calc",
+                                                      "project": {"name": "calc", "work_dir": str(work)}})["task_id"]
+        with running_server(**server, log_path=root / "second.log") as api:
+            time.sleep(1)  # time for a resumed task to start its Planner
+            ready, planned = api.get(f"/api/tasks/{task_id}")["status"], _log(state, "planner_argv.jsonl")
+            api.post(f"/api/tasks/{task_id}/start", None)
+            done = _wait(api, task_id, lambda d: d["status"] in ("completed", "failed", "stopped"))
+            with pytest.raises(EvalError, match="answered 400"):
+                api.post(f"/api/tasks/{task_id}/start", None)  # it is no longer ready
+
+    assert (ready, planned) == ("init", [])
+    assert done["status"] == "completed", (done.get("error"), (root / "second.log").read_text()[-3000:])
+    assert len(_log(state, "planner_argv.jsonl")) == 1

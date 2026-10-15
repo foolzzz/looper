@@ -43,6 +43,7 @@ class TestTaskRouter:
                     target=TASK_ROUTER_ADDRESS,
                     message_type=MessageType.TASK_REQUEST,
                     payload={
+                        "task_id": "task-c1",
                         "goal_id": "g1",
                         "requirement": "some work",
                         "work_dir": "/tmp",
@@ -51,6 +52,7 @@ class TestTaskRouter:
                     metadata={"origin_channel_id": "channel-web"},
                 )
                 await bus.publish(envelope)
+                await bus.publish(_start("task-c1"))
                 await _until(lambda: len(router._planners) == 1)
 
                 task_id = list(router._tasks.keys())[0]
@@ -88,6 +90,7 @@ class TestTaskRouter:
                     target=TASK_ROUTER_ADDRESS,
                     message_type=MessageType.TASK_REQUEST,
                     payload={
+                        "task_id": "task-p1",
                         "goal_id": "g1",
                         "requirement": "progress test",
                         "work_dir": "/tmp",
@@ -96,6 +99,7 @@ class TestTaskRouter:
                     metadata={"origin_channel_id": "channel-web"},
                 )
                 await bus.publish(envelope)
+                await bus.publish(_start("task-p1"))
                 manager_q = bus.get_queue("manager")
                 for _ in range(500):
                     if manager_q.qsize() >= 2:
@@ -126,11 +130,25 @@ def _planner_limits(agent_db: Any, *, role: int | None = None, projects: dict[st
 
 
 def _request(project_id: str, requirement: str) -> MessageEnvelope:
+    """The Manager asking for a task, named after its requirement (``task-<requirement>``)."""
     return MessageEnvelope.create(
         source=MANAGER_ADDRESS, target=TASK_ROUTER_ADDRESS, message_type=MessageType.TASK_REQUEST,
-        payload={"goal_id": "g", "requirement": requirement, "work_dir": "/tmp", "project_id": project_id},
+        payload={"task_id": f"task-{requirement}", "goal_id": "g", "requirement": requirement, "work_dir": "/tmp",
+                 "project_id": project_id},
         metadata={"origin_channel_id": "channel-web"},
     )
+
+
+def _start(task_id: str) -> MessageEnvelope:
+    """A user starting a ready task (the dashboard's Start, or the Manager's ``task_start``)."""
+    return MessageEnvelope.create(source=MANAGER_ADDRESS, target=TASK_ROUTER_ADDRESS,
+                                  message_type=MessageType.TASK_START, payload={"task_id": task_id})
+
+
+async def _ask_and_start(bus: MessageBus, project_id: str, requirement: str) -> None:
+    """Ask for a task, then start it."""
+    await bus.publish(_request(project_id, requirement))
+    await bus.publish(_start(f"task-{requirement}"))
 
 
 def _ended(task_id: str) -> MessageEnvelope:
@@ -166,8 +184,8 @@ class TestProjectConcurrency:
                 router = TaskRouter(runtime_root=Path(tmp))
                 await router.start(bus)
                 for requirement in ("a1", "a2", "a3", "a4"):
-                    await bus.publish(_request("proj-a", requirement))
-                await bus.publish(_request("proj-b", "b1"))
+                    await _ask_and_start(bus, "proj-a", requirement)
+                await _ask_and_start(bus, "proj-b", "b1")
                 await _until(self._placed(router, 5))
                 before = self._statuses(router)
 
@@ -192,7 +210,7 @@ class TestProjectConcurrency:
                 router = TaskRouter(runtime_root=Path(tmp))
                 await router.start(bus)
                 for requirement in ("a1", "a2", "a3"):
-                    await bus.publish(_request("proj-a", requirement))
+                    await _ask_and_start(bus, "proj-a", requirement)
                 await _until(self._placed(router, 3))
                 seen = [self._statuses(router)]
 
@@ -206,7 +224,7 @@ class TestProjectConcurrency:
 
                 _planner_limits(agent_db, role=1)
                 await router.recheck()
-                await bus.publish(_request("proj-a", "a4"))
+                await _ask_and_start(bus, "proj-a", "a4")
                 await _until(self._placed(router, 4))
                 seen.append(self._statuses(router))
                 await router.stop()
@@ -220,8 +238,8 @@ class TestProjectConcurrency:
         # Lowering a limit stops nothing that runs; a new task waits until fewer run than it.
         assert lowered == {**cleared, "a4": "pending"}
 
-    @pytest.mark.parametrize("arrival", ["request", "restart", "resume"])
-    def test_a_new_restarted_or_resumed_task_waits_for_room(
+    @pytest.mark.parametrize("arrival", ["start", "restart", "resume"])
+    def test_a_started_restarted_or_resumed_task_waits_for_room(
         self, agent_db: Any, monkeypatch: pytest.MonkeyPatch, arrival: str,
     ) -> None:
         from looper.db import tasks as db_tasks
@@ -246,10 +264,10 @@ class TestProjectConcurrency:
 
                 router._assign_task = recording  # type: ignore[method-assign]
                 await router.start(bus)
-                await bus.publish(_request("proj-a", "a1"))
+                await _ask_and_start(bus, "proj-a", "a1")
                 await _until(self._placed(router, 1))
-                if arrival == "request":
-                    await bus.publish(_request("proj-a", "a2"))
+                if arrival == "start":
+                    await _ask_and_start(bus, "proj-a", "a2")
                 elif arrival == "restart":
                     await bus.publish(MessageEnvelope.create(
                         source=MANAGER_ADDRESS, target=TASK_ROUTER_ADDRESS, message_type=MessageType.TASK_RESTART,
@@ -315,21 +333,29 @@ class TestTaskProject:
             metadata={"origin_channel_id": "channel-web"},
         )
 
-    def test_task_keeps_its_project(self, agent_db: Any) -> None:
-        async def _run() -> Task:
+    def test_a_request_creates_the_task_ready_and_only_a_start_runs_it_once(self, agent_db: Any) -> None:
+        async def _run() -> tuple[dict[str, Task], list[Any]]:
             with tempfile.TemporaryDirectory() as tmp:
                 bus = MessageBus(runtime_root=Path(tmp))
                 router = TaskRouter(runtime_root=Path(tmp))
                 router._bus = bus
-                router._assign_task = AsyncMock()  # type: ignore[method-assign]
-                await router._handle_task_request(self._request(project_id="proj-1"))
+                assign = AsyncMock()
+                router._assign_task = assign  # type: ignore[method-assign]
+                await router._handle_task_request(self._request(project_id="proj-1", task_id="task-r1"))
+                waiting = dict(router._tasks)
+                assign.assert_not_awaited()  # no Planner until a user starts it
+                for _ in range(2):  # starting it again does nothing
+                    await router._handle_start(_start("task-r1"))
                 await bus.shutdown()
-                (task,) = router._tasks.values()
-                return task
+                return waiting, [call.args for call in assign.await_args_list]
 
-        task = asyncio.run(_run())
-        assert task.project_id == "proj-1"
-        assert agent_db.create_task.await_args.kwargs["project_id"] == "proj-1"
+        waiting, assigned = asyncio.run(_run())
+        assert waiting == {}
+        created = agent_db.create_task.await_args.kwargs
+        assert (created["task_id"], created["project_id"], created["status"]) == ("task-r1", "proj-1", "init")
+        ((task, envelope),) = assigned
+        assert (task.task_id, task.project_id, task.requirement) == ("task-r1", "proj-1", "build it")
+        assert (envelope.payload["project_id"], envelope.metadata["origin_channel_id"]) == ("proj-1", "channel-web")
 
     def test_request_without_a_project_is_dropped(
         self, agent_db: Any, caplog: pytest.LogCaptureFixture,

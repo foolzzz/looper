@@ -10,6 +10,7 @@ import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -21,7 +22,7 @@ from looper.agents.agent_settings import DEFAULT_HARNESS_PROMPT
 from looper.agents.bus import MessageBus
 from looper.agents.claude_cli import ISOLATION_ID, isolation_args
 from looper.agents.message import MANAGER_ADDRESS, MessageEnvelope, MessageType, channel_address
-from looper.agents.tiers.manager import TASK_PLACEMENT_RULE, ManagerAgent, ManagerConfig
+from looper.agents.tiers.manager import START_QUESTION, TASK_PLACEMENT_RULE, ManagerAgent, ManagerConfig
 
 WEB = channel_address("web")
 
@@ -560,6 +561,80 @@ def _project(name: str, work_dir: str = "", description: str = "", project_id: s
 TETRIS_DIR = os.path.join(os.path.expanduser("~"), "projects", "tetris")
 
 
+def _answer(**fields: Any) -> str:
+    """Claude's reply: the task JSON with ``fields`` (``action`` task_request unless given), in a json fence."""
+    report = {"action": "task_request", "goal_id": "g", "structured_requirement": "build it",
+              "acknowledgment": "ok", **fields}
+    return "```json\n" + json.dumps(report) + "\n```"
+
+
+_CONFIRM_TETRIS = _answer(project="Tetris", work_dir="~/projects/tetris", new_project=True)
+
+
+def _scripted(*answers: str) -> str:
+    """A fake resident claude that answers its turns with ``answers`` in order (``<task id>`` in one becomes the
+    last task id its turn names) and saves each user turn it gets to ``turns.jsonl``."""
+    return (
+        f"answers = {list(answers)!r}\n"
+        "import re\n"
+        "for index, line in enumerate(sys.stdin):\n"
+        "    content = json.loads(line)['message']['content']\n"
+        "    open('turns.jsonl', 'a').write(json.dumps(content) + '\\n')\n"
+        "    # '<task id>' answers with the last task id the turn names, as Claude reads it from Looper's note.\n"
+        "    named = re.findall(r'task-[0-9a-f]{12}', content)\n"
+        "    text = answers[index].replace('<task id>', named[-1] if named else '')\n"
+        "    print(json.dumps({'type': 'assistant', 'message': {'content': [{'type': 'text', 'text': text}]}}), flush=True)\n"
+        "    print(json.dumps({'type': 'result', 'subtype': 'success', 'is_error': False, 'result': text}), flush=True)\n"
+    )
+
+
+def _task_chat(answers: list[str], messages: list[str | tuple[str, str]]) -> SimpleNamespace:
+    """Send ``messages`` (text, or ``(text, chat)`` for a web chat session other than the default) one at a time
+    to one Manager whose Claude answers with ``answers``; return each message's ``replies``, the TASK_REQUESTs
+    and TASK_STARTs sent (``requests``, ``starts``; ``sent``: the types each message sent) and the user ``turns``
+    Claude got."""
+
+    async def _run() -> SimpleNamespace:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bus = MessageBus(runtime_root=root)
+            manager = ManagerAgent(
+                config=ManagerConfig(claude_bin=_fake_claude(root, _scripted(*answers)), work_dir=root),
+                runtime_root=root,
+            )
+            manager._bus = bus
+            queue, router = bus.get_queue(WEB.agent_id), bus.get_queue("task-router")
+            replies, sent, by_message = [], [], []
+            for index, message in enumerate(messages):
+                text, chat = message if isinstance(message, tuple) else (message, "chat-1")
+                await manager._handle(MessageEnvelope.create(
+                    source=WEB, target=MANAGER_ADDRESS, message_type=MessageType.USER_MESSAGE,
+                    payload={"text": text, "channel_context": {"session_id": chat}}, correlation_id=f"corr-{index}",
+                ))
+                answers_sent = [e.payload["text"] for e in _drain(queue) if e.message_type == MessageType.AGENT_REPLY]
+                assert len(answers_sent) == 1, "each message gets exactly one final reply"
+                replies.append(answers_sent[0])
+                sent += (envelopes := _drain(router))
+                by_message.append([envelope.message_type for envelope in envelopes])
+            await manager.stop()
+            turns = [json.loads(line) for line in (root / "turns.jsonl").read_text().splitlines()]
+            await bus.shutdown()
+            return SimpleNamespace(
+                replies=replies, turns=turns, sent=by_message,
+                requests=[e for e in sent if e.message_type == MessageType.TASK_REQUEST],
+                starts=[e for e in sent if e.message_type == MessageType.TASK_START],
+            )
+
+    return asyncio.run(_run())
+
+
+def _drain(queue: Any) -> list[MessageEnvelope]:
+    envelopes = []
+    while not queue.empty():
+        envelopes.append(queue.get_nowait())
+    return envelopes
+
+
 @pytest.mark.usefixtures("agent_db")
 class TestManagerTaskPlacement:
     def test_projects_section_starts_each_user_turn(self, agent_db: Any) -> None:
@@ -584,14 +659,120 @@ class TestManagerTaskPlacement:
         agent_db.create_project.assert_not_awaited()
         (request,) = result.requests
         assert (request.payload["project_id"], request.payload["work_dir"]) == ("proj-111111111111", expected)
-        assert result.reply == "ok"
+        # The task is created ready: the reply is Claude's acknowledgement, then the task's configuration.
+        assert result.reply.startswith("ok\n\n任务已创建，还没有开始")
+        assert request.payload["task_id"] in result.reply and "Tetris（已有）" in result.reply
 
-    def test_unknown_project_is_created_with_the_task_directory(self, agent_db: Any) -> None:
-        result = _ask_for_task(_task_json(project=" Tetris ", work_dir="~/projects/tetris"))
+    # Claude claiming the user agreed to the new project changes nothing: only Looper's own question counts.
+    @pytest.mark.parametrize("claimed", [{}, {"new_project": True}])
+    def test_a_new_project_is_created_only_after_looper_asked_and_the_user_confirmed(
+        self, agent_db: Any, claimed: dict[str, Any],
+    ) -> None:
+        agent_db.list_projects.return_value = [_project("snake", "/srv/snake")]
+        first = _answer(project=" Tetris ", work_dir="~/projects/tetris", **claimed)
+        confirmed = _answer(project="tetris", work_dir="", new_project=True)  # the confirmed directory is kept
+        chat = _task_chat([first, confirmed], ["确认", "确认新建"])
+
+        asked, created = chat.replies
+        assert "「Tetris」还不存在" in asked and TETRIS_DIR in asked and "snake（/srv/snake）" in asked
+        # Claude learns what Looper asked before the user's answer.
+        assert '"new_project": true' in chat.turns[1] and chat.turns[1].endswith("确认新建")
         agent_db.create_project.assert_awaited_once_with(name="Tetris", work_dir=TETRIS_DIR)
-        (request,) = result.requests
-        assert request.payload["project_id"] == "proj-000000000000"
-        assert result.reply.startswith("ok") and "Tetris" in result.reply
+        (request,) = chat.requests
+        assert (request.payload["project_id"], request.payload["work_dir"]) == ("proj-000000000000", TETRIS_DIR)
+        assert "Tetris（新建）" in created
+
+    @pytest.mark.parametrize("second", [
+        _answer(project="Snake", work_dir="~/projects/tetris", new_project=True),  # another name
+        _answer(project="Tetris", work_dir="~/projects/other", new_project=True),  # another directory
+        _answer(project="Tetris", work_dir="~/projects/tetris"),  # not confirmed
+        _answer(project="Tetris", work_dir="~/projects/tetris", new_project="true"),  # not the typed field
+    ])
+    def test_any_other_new_project_asks_again(self, agent_db: Any, second: str) -> None:
+        chat = _task_chat([_answer(project="Tetris", work_dir="~/projects/tetris"), second], ["确认", "确认"])
+        agent_db.create_project.assert_not_awaited()
+        assert chat.requests == []
+        assert all("还不存在" in reply for reply in chat.replies)
+
+    @pytest.mark.parametrize(("answers", "messages"), [
+        # The confirmation counts only in the very next message...
+        ([_answer(project="Tetris", work_dir="~/projects/tetris"), "好的。", _CONFIRM_TETRIS], ["确认", "先聊点别的", "确认"]),
+        # ...and only from the chat that was asked.
+        ([_answer(project="Tetris", work_dir="~/projects/tetris"), _CONFIRM_TETRIS], ["确认", ("确认", "chat-2")]),
+    ])
+    def test_a_confirmation_counts_only_in_the_next_message_from_that_chat(
+        self, agent_db: Any, answers: list[str], messages: list[Any],
+    ) -> None:
+        chat = _task_chat(answers, messages)
+        agent_db.create_project.assert_not_awaited()
+        assert chat.requests == [] and "还不存在" in chat.replies[-1]
+
+    def test_the_configuration_comes_from_the_settings_in_effect_in_the_project(self, agent_db: Any) -> None:
+        project = "proj-111111111111"
+        agent_db.list_layers.return_value = [
+            {"scope": "system", "profile": profile_json("haiku")},
+            {"scope": "role_project", "role": "worker", "project_id": project, "effort": "high",
+             "profile": {**profile_json("sonnet"), "agent_teams": True}},
+            {"scope": "role_project", "role": "planner", "project_id": project, "max_concurrency": 3,
+             "profile": {**profile_json("opus"), "agent_teams": True}},
+        ]
+        agent_db.find_project_by_name.return_value = {
+            **_project("tetris", "/srv/tetris"), "review_policy": "all", "task_budget_usd": 2.5,
+            "task_budget_action": "wrap_up", "distill_lessons": "draft",
+        }
+        lines = _ask_for_task(_task_json(project="tetris")).reply.splitlines()
+        agent_db.list_layers.assert_any_await(project)
+        roles = "所有角色的默认（Settings → Roles）"
+        assert lines[2:] == [
+            "任务已创建，还没有开始（Ready — not started）：",
+            lines[3],  # the task's goal and id
+            "- 项目：tetris（已有）",
+            "- 目录：/srv/tetris",
+            # A Planner never has agent teams, whatever its profile says.
+            "- Planner：claude-code/opus（来源：本项目里的该角色），effort 默认",
+            "- Worker：claude-code/sonnet（来源：本项目里的该角色），effort high（来源：本项目里的该角色），agent teams 开",
+            f"- Reviewer：claude-code/haiku（来源：{roles}），effort 默认，agent teams 关",
+            "- 评审：每一步都要 Reviewer 评审通过",
+            "- 每个任务的花费上限：$2.5，达到时再让 Planner 总结一轮后结束",
+            "- 经验沉淀：任务完成后生成草稿，由你确认后写入项目知识",
+            "- 并发：这个项目同时最多运行 3 个任务",
+            "",
+            START_QUESTION,
+        ]
+        assert lines[3].startswith("- 任务：g（task-")
+
+    def test_a_ready_task_is_started_by_the_users_word(self, agent_db: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+        from looper.db import tasks as db_tasks
+
+        agent_db.find_project_by_name.return_value = _project("tetris", "/srv/tetris")
+        agent_db.list_tasks.return_value = [
+            {"id": "task-aaaaaaaaaaaa", "project_name": "tetris", "goal_id": "old", "requirement": "an older one"}]
+        monkeypatch.setattr(db_tasks, "get_task", AsyncMock(
+            side_effect=lambda task_id: {"id": task_id, "status": "init", "project_id": "proj-111111111111"}))
+        chat = _task_chat([_answer(project="tetris"), json.dumps({"action": "task_start", "task_id": "<task id>"})],
+                          ["确认", "开始"])
+        created, started = chat.replies
+        (request,) = chat.requests
+        task_id = request.payload["task_id"]
+        # The task is created ready, and only the user's word starts it.
+        assert chat.sent == [[MessageType.TASK_REQUEST], [MessageType.TASK_START]]
+        assert created.endswith(START_QUESTION)
+        # Every turn lists the ready tasks; the next one also says which task Looper just created.
+        agent_db.list_tasks.assert_awaited_with(limit=10, status="init")
+        assert "  - task-aaaaaaaaaaaa (project tetris, goal old): an older one" in chat.turns[1].splitlines()
+        assert f'"task_id": "{task_id}"' in chat.turns[1]
+        assert [start.payload for start in chat.starts] == [{"task_id": task_id}]
+        assert started.startswith(f"已开始任务 {task_id}")
+
+    @pytest.mark.parametrize("row", [None, {"id": "task-aaaaaaaaaaaa", "status": "running", "project_id": "p"}])
+    def test_only_a_ready_task_is_started(self, agent_db: Any, monkeypatch: pytest.MonkeyPatch,
+                                          row: dict[str, Any] | None) -> None:
+        from looper.db import tasks as db_tasks
+
+        monkeypatch.setattr(db_tasks, "get_task", AsyncMock(return_value=row))
+        chat = _task_chat([json.dumps({"action": "task_start", "task_id": "task-aaaaaaaaaaaa"})], ["开始"])
+        assert chat.starts == []
+        assert chat.replies[0].startswith("没能开始任务 task-aaaaaaaaaaaa")
 
     @pytest.mark.parametrize("fields", [{}, {"project": ""}, {"project": "  "}, {"project": "x" * 81}])
     def test_task_without_a_project_asks_and_creates_nothing(self, agent_db: Any, fields: dict[str, Any]) -> None:

@@ -6,8 +6,15 @@ The Manager is the only agent that communicates with users. It:
   the session saved in PostgreSQL (``agent_sessions``)
 - Receives user messages from all channels via the Bus
 - Classifies intent (direct answer, clarification, task request)
-- Places each confirmed task in a project (creating a new one on request) and
-  forwards it to the TaskRouter
+- Places each confirmed task in a project and forwards it to the TaskRouter,
+  which creates it ready, not started. A project that does not exist is created
+  only after Looper itself asked the user to confirm it (``_NewProject``). The
+  reply ends with the task's configuration, written by code from the effective
+  settings, and asks whether to start it; the user's word to start it is a
+  ``task_start`` action, which code checks and passes to the TaskRouter
+- Tells Claude, before the next message from that chat, what Looper itself
+  said there after Claude's last reply (``_Followup``), since Claude does not
+  see Looper's own replies
 - Streams Claude Code responses in real-time to the originating channel
 - Records a turn Claude runs on its own (after background work it started
   ends) as a run of its own, and sends what Claude said there as a reply of
@@ -28,13 +35,17 @@ import asyncio
 import json
 import logging
 import shutil
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from ..broadcast import Broadcaster
 from ..bus import MessageBus
-from ..agent_settings import AgentSettings, AgentType, Launch, load_agent_settings
+from ..agent_settings import (
+    TASK_ROLES, AgentSettings, AgentType, Launch, Layer, index_layers, load_agent_settings, load_concurrency, resolve,
+    resolve_concurrency,
+)
 from ..claude_cli import (
     AUTONOMOUS_INPUT,
     AutonomousHandler,
@@ -44,7 +55,8 @@ from ..claude_cli import (
     exit_note,
 )
 from ..library import load_installed
-from ..projects import project_name
+from ..project_execution import LessonsMode, ProjectExecution, ReviewPolicy, TaskBudgetAction, format_usd
+from ..projects import RequestError, project_name, start_ready_task
 from ..run_usage import Usage
 from .. import session_switch
 from ..runtimes import CLAUDE_CODE
@@ -63,7 +75,9 @@ from ..message import (
 logger = logging.getLogger(__name__)
 
 from ...db import activity as db_activity
+from ...db import agent_setting_layers as db_layers
 from ...db import role_configs as db_role_configs
+from ...db import tasks as db_tasks
 from ...db import chat as db_chat
 from ...db import agent_sessions as db_agent_sessions
 from ...db import llm_records as db_llm_records
@@ -131,6 +145,26 @@ If the user says "不", "取消", "算了", "no", "cancel" or modifies the requi
 """
 
 
+# The ready tasks each user turn lists, newest first, so Claude can start one by its id.
+READY_TASKS_LISTED = 10
+# The existing projects a new-project question offers instead.
+PROJECTS_OFFERED = 10
+# The actions Claude's JSON may name.
+ACTIONS = ("task_request", "task_start")
+
+# Where a setting in a task's configuration came from (``agent_settings.Layer``), in the words of the chat.
+SOURCE_WORDS = {
+    Layer.BUILTIN: "内置默认",
+    Layer.PROFILE: "Agent Profile 自带",
+    Layer.SYSTEM: "所有角色的默认（Settings → Roles）",
+    Layer.ROLE: "该角色的设置（Settings → Roles）",
+    Layer.PROJECT: "本项目",
+    Layer.ROLE_PROJECT: "本项目里的该角色",
+    Layer.TASK: "本任务",
+}
+START_QUESTION = "现在开始吗？回复「开始」就会启动；也可以稍后在 Tasks 页面点 Start。"
+
+
 # A new session's resume brief: the recent conversation of the most recently active chats, from the stored
 # chat messages, each message clipped, all of it in at most CONVERSATION_MAX_CHARS.
 CONVERSATION_CHATS = 3
@@ -161,8 +195,62 @@ def _message_origin(envelope: MessageEnvelope) -> dict[str, str | None]:
             "sender": str(sender) if sender else None, "chat": str(chat) if chat else None}
 
 
+@dataclass(frozen=True)
+class _NewProject:
+    """A project that does not exist, which Looper asked the user to confirm creating, with its default directory."""
+
+    name: str
+    work_dir: str
+
+    def same(self, other: _NewProject) -> bool:
+        return self.name.casefold() == other.name.casefold() and self.work_dir == other.work_dir
+
+
+def _role_line(role: AgentType, settings: AgentSettings) -> str:
+    """One task role's line in a task's configuration: its Agent Profile, its effort and, but for the Planner
+    (which never has them), whether it has agent teams; each with where it came from."""
+    line = (f"- {role.value.capitalize()}：{settings.profile.name}（来源：{SOURCE_WORDS[settings.profile_source]}），"
+            + (f"effort {settings.effort}（来源：{SOURCE_WORDS[settings.effort_source]}）" if settings.effort
+               else "effort 默认"))
+    if role is not AgentType.PLANNER:
+        line += f"，agent teams {'开' if settings.profile.agent_teams else '关'}"
+    return line
+
+
 class _AskUser(Exception):
-    """A confirmed task lacks something only the user can give; the message asks for it."""
+    """A confirmed task lacks something only the user can give; the message asks for it. With ``new_project``, it
+    asks the user to confirm creating that project."""
+
+    def __init__(self, question: str, new_project: _NewProject | None = None) -> None:
+        super().__init__(question)
+        self.new_project = new_project
+
+    def note(self) -> str:
+        """What Claude is told about the question before the user's answer."""
+        if self.new_project is None:
+            return f"[Looper] Looper did not create the task of your last task JSON; it asked the user instead: {self}"
+        name, work_dir = self.new_project.name, self.new_project.work_dir
+        return (
+            f'[Looper] Looper did not create the task of your last task JSON: its project "{name}" does not exist. '
+            f"Looper asked the user to confirm creating that project, with default directory {work_dir}, or to "
+            "choose an existing project. If the message below confirms, output the task JSON again with "
+            f'"project": "{name}", "work_dir": "{work_dir}" and "new_project": true; if it names an existing project, '
+            "output the task JSON with that project instead."
+        )
+
+
+@dataclass(frozen=True)
+class _Followup:
+    """What Looper itself said in a chat after Claude's last reply there; Claude does not see Looper's own replies.
+
+    Only the next message, and only one from that chat, carries it: Claude
+    gets ``note`` before the message, and the project the user was asked to
+    confirm (``new_project``) may be created by that message's task JSON.
+    """
+
+    chat: tuple[str | None, str | None]  # the channel and the chat (``_message_origin``)
+    note: str
+    new_project: _NewProject | None = None
 
 
 @dataclass(frozen=True)
@@ -236,6 +324,8 @@ class ManagerAgent:
         # The user dropped the session (/new): the next one starts without a resume brief. Saved with the session,
         # so a restart before the next message keeps it; cleared once the new session has started.
         self._clean_start = False
+        # What Looper said after Claude's last reply, for the next message only.
+        self._followup: _Followup | None = None
 
     @property
     def agent_id(self) -> str:
@@ -348,11 +438,17 @@ class ManagerAgent:
         if is_new_session_command(text):
             await self._start_new_session(envelope)
             return
+        origin = _message_origin(envelope)
+        chat = (origin["channel"], origin["chat"])
+        # What Looper said after Claude's last reply applies to the next message only, from that chat only.
+        followup, self._followup = self._followup, None
+        if followup is not None and followup.chat != chat:
+            followup = None
 
         await self._send_status(envelope, "thinking", phase=True)
 
         try:
-            response = await self._invoke_claude(text, envelope)
+            response = await self._invoke_claude(text, envelope, note=followup.note if followup else "")
             parsed = self._parse_response(response)
         except Exception as exc:
             # Always answer: the chat stream waits for a final reply.
@@ -365,20 +461,25 @@ class ManagerAgent:
             await self._send_reply(envelope, clarification)
         elif parsed.get("action") == "task_request":
             try:
-                project, work_dir, created = await self._place_task(parsed)
+                project, work_dir, created = await self._place_task(
+                    parsed, followup.new_project if followup else None)
             except _AskUser as ask:
+                self._followup = _Followup(chat, ask.note(), ask.new_project)
                 await self._send_reply(envelope, str(ask))
                 return
             except Exception as exc:
                 logger.exception("manager failed to place task from %s", envelope.message_id)
                 await self._send_reply(envelope, f"Manager 出错，没能创建任务：{exc}")
                 return
+            task_id = f"task-{uuid.uuid4().hex[:12]}"
+            goal_id = str(parsed.get("goal_id") or "")
             await self._bus.publish(MessageEnvelope.create(
                 source=MANAGER_ADDRESS,
                 target=TASK_ROUTER_ADDRESS,
                 message_type=MessageType.TASK_REQUEST,
                 payload={
-                    "goal_id": parsed.get("goal_id", ""),
+                    "task_id": task_id,
+                    "goal_id": goal_id,
                     "requirement": parsed.get("structured_requirement", text),
                     "original_user_text": text,
                     "user_language": envelope.payload.get("language", "zh"),
@@ -390,21 +491,36 @@ class ManagerAgent:
                 correlation_id=envelope.correlation_id,
                 metadata={"origin_channel_id": envelope.metadata.get("origin_channel_id")},
             ))
-            ack_text = parsed.get("acknowledgment", f"收到，已安排处理: {text[:100]}")
-            if created:
-                ack_text += f"\n\n已新建项目「{project['name']}」，默认目录 {work_dir}。"
-            await self._send_reply(envelope, ack_text)
+            ack_text = parsed.get("acknowledgment", f"收到，已创建任务: {text[:100]}")
+            block = await self._configuration_block(task_id, goal_id, project, work_dir, created)
+            self._followup = _Followup(chat, (
+                f'[Looper] Looper created the task of your last task JSON as {task_id}, ready and not started, showed '
+                "the user its configuration and asked whether to start it now. If the message below says to start "
+                f'it, output {{"action": "task_start", "task_id": "{task_id}"}}; if it declines, remind the user how '
+                "to start it later."
+            ))
+            await self._send_reply(envelope, f"{ack_text}\n\n{block}")
+        elif parsed.get("action") == "task_start":
+            reply, note = await self._start_task(parsed)
+            self._followup = _Followup(chat, note)
+            await self._send_reply(envelope, reply)
         else:
             reply_text = parsed.get("response_text", response)
             await self._send_reply(envelope, reply_text)
 
-    async def _place_task(self, parsed: dict[str, Any]) -> tuple[dict[str, Any], str, bool]:
+    async def _place_task(
+        self, parsed: dict[str, Any], confirmed: _NewProject | None,
+    ) -> tuple[dict[str, Any], str, bool]:
         """The confirmed task's project, its work directory, and whether the project is new.
 
-        The project is matched by name ignoring case; an unknown name becomes a
-        new project whose default directory is the task's. The directory is the
-        task's own, else the project's default. Raises ``_AskUser`` when the
-        project or the directory is missing.
+        The project is matched by name ignoring case. The directory is the
+        task's own, else the project's default. A project that does not exist
+        is created only when the user confirmed it in answer to Looper's own
+        question in the exchange before (``confirmed``): the task JSON says
+        ``"new_project": true`` and names that project and directory (no
+        directory: the confirmed one). Raises ``_AskUser`` when the project or
+        the directory is missing, and to ask that question about any other new
+        project.
         """
         try:
             name = project_name(parsed.get("project"))
@@ -412,8 +528,11 @@ class ManagerAgent:
             raise _AskUser(f"这个任务属于哪个项目？请告诉我项目名，可以是已有项目，也可以新建一个。（{exc}）") from None
         project = await db_projects.find_project_by_name(name)
         explicit = parsed.get("work_dir")
-        if project and project["work_dir"] and not (isinstance(explicit, str) and explicit.strip()):
+        explicit = explicit.strip() if isinstance(explicit, str) else ""
+        if project and project["work_dir"] and not explicit:
             return project, project["work_dir"], False
+        if project is None and not explicit and confirmed is not None and confirmed.name.casefold() == name.casefold():
+            explicit = confirmed.work_dir
         try:
             work_dir = resolve_work_dir(explicit)
         except ValueError as exc:
@@ -421,7 +540,87 @@ class ManagerAgent:
             raise _AskUser(f"这个任务要在哪个目录里做？请告诉我完整路径（例如 ~/projects/xxx）。（{exc}）") from None
         if project:
             return project, work_dir, False
-        return await db_projects.create_project(name=name, work_dir=work_dir), work_dir, True
+        asked = _NewProject(name, work_dir)
+        if parsed.get("new_project") is True and confirmed is not None and confirmed.same(asked):
+            return await db_projects.create_project(name=confirmed.name, work_dir=work_dir), work_dir, True
+        raise _AskUser(await self._new_project_question(asked), asked)
+
+    async def _new_project_question(self, asked: _NewProject) -> str:
+        """Ask the user to confirm creating ``asked``, or to choose one of the existing projects instead."""
+        lines = [
+            f"项目「{asked.name}」还不存在，任务还没有创建。要新建这个项目吗？它的默认目录会是 {asked.work_dir}。",
+            "- 回复「确认」：新建这个项目，并在里面创建任务；",
+        ]
+        try:
+            projects = await db_projects.list_projects()
+        except Exception:
+            logger.warning("manager could not list projects for a new-project question", exc_info=True)
+            lines.append("- 也可以告诉我改用哪个已有项目（项目列表暂时读不到）。")
+            return "\n".join(lines)
+        if not projects:
+            lines.append("- 目前还没有其他项目；也可以告诉我换一个名字或目录。")
+            return "\n".join(lines)
+        offered = "、".join(f"{p['name']}（{p['work_dir'] or '没有默认目录'}）" for p in projects[:PROJECTS_OFFERED])
+        more = f"，共 {len(projects)} 个" if len(projects) > PROJECTS_OFFERED else ""
+        lines.append(f"- 或者告诉我改用哪个已有项目：{offered}{more}。")
+        return "\n".join(lines)
+
+    async def _configuration_block(
+        self, task_id: str, goal_id: str, project: dict[str, Any], work_dir: str, created: bool,
+    ) -> str:
+        """The new ready task's configuration, from the settings in effect in its project (resolved as the project's
+        agent settings view resolves them), ending with the question whether to start it."""
+        project_id = project["id"]
+        lines = [
+            "任务已创建，还没有开始（Ready — not started）：",
+            f"- 任务：{goal_id}（{task_id}）" if goal_id else f"- 任务：{task_id}",
+            f"- 项目：{project['name']}（{'新建' if created else '已有'}）",
+            f"- 目录：{work_dir}",
+        ]
+        limit: int | None = None
+        try:
+            layers = index_layers(await db_layers.list_layers(project_id), project_id)
+        except Exception as exc:
+            logger.warning("manager could not read the agent settings of project %s", project_id, exc_info=True)
+            lines.append(f"- Agent 设置：暂时读不到（{type(exc).__name__}），可以在项目的 Settings 页查看")
+        else:
+            lines += [_role_line(role, resolve(role, layers, project_id)) for role in TASK_ROLES]
+            limit = resolve_concurrency(AgentType.PLANNER, layers, project_id).value
+        execution = ProjectExecution.from_row(project)
+        lines.append("- 评审：每一步都要 Reviewer 评审通过" if execution.review_policy is ReviewPolicy.ALL
+                     else "- 评审：由 Planner 决定哪些步骤要 Reviewer 评审")
+        if execution.task_budget_usd is None:
+            lines.append("- 每个任务的花费上限：不限")
+        else:
+            at_cap = ("再让 Planner 总结一轮后结束" if execution.on_task_budget is TaskBudgetAction.WRAP_UP
+                      else "立即失败")
+            lines.append(f"- 每个任务的花费上限：${format_usd(execution.task_budget_usd)}，达到时{at_cap}")
+        lines.append({
+            LessonsMode.OFF: "- 经验沉淀：关",
+            LessonsMode.DRAFT: "- 经验沉淀：任务完成后生成草稿，由你确认后写入项目知识",
+            LessonsMode.WRITE: "- 经验沉淀：任务完成后直接写入项目知识",
+        }[execution.distill_lessons])
+        if limit is not None:
+            lines.append(f"- 并发：这个项目同时最多运行 {limit} 个任务")
+        return "\n".join([*lines, "", START_QUESTION])
+
+    async def _start_task(self, parsed: dict[str, Any]) -> tuple[str, str]:
+        """Start the ready task Claude names (``task_start``) through the TaskRouter; the reply, and the note that
+        tells Claude what happened."""
+        assert self._bus is not None
+        task_id = parsed.get("task_id")
+        task_id = task_id.strip() if isinstance(task_id, str) else ""
+        if not task_id:
+            return ("要开始哪个任务？没有拿到任务 id，没有开始任何任务。",
+                    "[Looper] Your task_start JSON named no task_id; Looper started nothing.")
+        try:
+            started = await start_ready_task(task_id, self._bus, MANAGER_ADDRESS)
+        except RequestError as exc:
+            return (f"没能开始任务 {task_id}：{exc}",
+                    f"[Looper] Looper did not start {task_id}: {exc}. It told the user so.")
+        limit = await load_concurrency(AgentType.PLANNER, started["project_id"])
+        return (f"已开始任务 {task_id}。它的项目同时最多运行 {limit} 个任务，已满时它会排队，等有任务结束再开始。",
+                f"[Looper] Looper started {task_id}; it waits while its project runs {limit} tasks.")
 
     async def _handle_goal_status(self, envelope: MessageEnvelope) -> None:
         goal_id = envelope.payload.get("goal_id", "")
@@ -477,15 +676,16 @@ class ManagerAgent:
         if event == "max_restarts_exceeded":
             logger.error("agent %s has exceeded max restarts", agent_id)
 
-    async def _invoke_claude(self, message: str, context_envelope: MessageEnvelope) -> str:
-        """Send the message to the resident Claude as one user turn; return its reply.
+    async def _invoke_claude(self, message: str, context_envelope: MessageEnvelope, *, note: str = "") -> str:
+        """Send the message to the resident Claude as one user turn, after ``note`` (what Looper said in the chat
+        after Claude's last reply); return its reply.
 
         Claude starts on the first message and is restarted, resuming the
         saved session, after it exits or when the system prompt changes.
         Turns run one at a time.
         """
         async with self._turn_lock:
-            return await self._run_turn(message, context_envelope)
+            return await self._run_turn(message, context_envelope, note=note)
 
     async def _load_agent_settings(self) -> AgentSettings:
         """The Manager's agent settings (system and role layers), read now; the last ones read when they
@@ -504,7 +704,8 @@ class ManagerAgent:
             contract_name="TASK_PLACEMENT_RULE", contract=TASK_PLACEMENT_RULE,
         )
 
-    async def _run_turn(self, message: str, context_envelope: MessageEnvelope, *, retried: bool = False) -> str:
+    async def _run_turn(self, message: str, context_envelope: MessageEnvelope, *, note: str = "",
+                        retried: bool = False) -> str:
         await self._load_db_config()
         if not self._session_loaded:
             await self._load_session_state()
@@ -543,12 +744,13 @@ class ManagerAgent:
             else await self._resume_brief(context_envelope, message)
 
         task_id = context_envelope.metadata.get("task_id")
+        asked = f"{note}\n\n{message}" if note else message
         recorder = ClaudeRunRecorder(
             agent_id="manager",
             task_id=task_id,
             command=command,
             cwd=str(self._config.work_dir),
-            input_text=f"{brief}\n\n{message}" if brief else message,
+            input_text=f"{brief}\n\n{asked}" if brief else asked,
             session_id=self._session_id,
             system_prompt=system_prompt,
             launch=launch,
@@ -628,7 +830,7 @@ class ManagerAgent:
                             await self._send_status(context_envelope, "thinking", phase=True)
 
         try:
-            turn_text = await self._build_user_message(message)
+            turn_text = await self._build_user_message(message, note)
             if brief:
                 turn_text = f"{brief}\n\n{turn_text}"
             # A turn cut off by Claude's exit ends without a result; that Claude
@@ -661,7 +863,7 @@ class ManagerAgent:
                 f"its saved session {resuming} could not be resumed", runtime=launch.runtime.type,
                 profile=launch.profile.id)
             self._pending_handoff = None
-            return await self._run_turn(message, context_envelope, retried=True)
+            return await self._run_turn(message, context_envelope, note=note, retried=True)
 
         result_event = turn.result_event
         result_text = str((result_event or {}).get("result") or "")
@@ -729,6 +931,7 @@ class ManagerAgent:
                 await self._send_reply(envelope, f"Manager 出错，没能开始新会话：{exc}")
                 return
             self._pending_switch = self._pending_handoff = None
+            self._followup = None
             await self._record_new_session(envelope, origin, previous[0])
         logger.info("manager: a new session on /new from %s (sender %s); the previous one was %s",
                     origin["channel"], origin["sender"] or "-", previous[0] or "none")
@@ -937,8 +1140,9 @@ class ManagerAgent:
             command.extend(runtime.resume_args(self._session_id))
         return command
 
-    async def _build_user_message(self, user_message: str) -> str:
+    async def _build_user_message(self, user_message: str, note: str = "") -> str:
         parts = await self._projects_section()
+        parts += await self._ready_tasks_section()
 
         if self._goal_snapshots:
             parts.append("当前活跃目标:")
@@ -946,6 +1150,8 @@ class ManagerAgent:
                 parts.append(f"  - [{snap.status}] {snap.title or gid}: {snap.progress}")
             parts.append("")
 
+        if note:
+            parts += [note, ""]
         parts.append(user_message)
         return "\n".join(parts)
 
@@ -969,6 +1175,22 @@ class ManagerAgent:
         lines.append("")
         return lines
 
+    async def _ready_tasks_section(self) -> list[str]:
+        """The tasks created but not started, newest first, so Claude can start one by its id; none, no section."""
+        try:
+            tasks = await db_tasks.list_tasks(limit=READY_TASKS_LISTED, status=db_tasks.READY)
+        except Exception:
+            logger.warning("manager could not list the ready tasks", exc_info=True)
+            return ["Ready tasks: (could not be read)", ""]
+        if not tasks:
+            return []
+        lines = ["Ready tasks (created, not started; newest first):"]
+        for task in tasks:
+            goal = f", goal {task['goal_id']}" if task.get("goal_id") else ""
+            lines.append(f"  - {task['id']} (project {task['project_name']}{goal}): {clip(task['requirement'], 80)}")
+        lines.append("")
+        return lines
+
     def _parse_response(self, response: str) -> dict[str, Any]:
         response = response.strip()
 
@@ -978,7 +1200,7 @@ class ManagerAgent:
         if response.startswith("{"):
             try:
                 data = json.loads(response)
-                if isinstance(data, dict) and data.get("action") == "task_request":
+                if isinstance(data, dict) and data.get("action") in ACTIONS:
                     task_json = data
                     json_start = 0
             except json.JSONDecodeError:
@@ -990,7 +1212,7 @@ class ManagerAgent:
                 start = fence + 7
                 end = response.index("```", start)
                 data = json.loads(response[start:end].strip())
-                if isinstance(data, dict) and data.get("action") == "task_request":
+                if isinstance(data, dict) and data.get("action") in ACTIONS:
                     task_json = data
                     json_start = fence
             except (json.JSONDecodeError, ValueError):
@@ -1001,7 +1223,7 @@ class ManagerAgent:
             candidate = response[idx:]
             try:
                 data = json.loads(candidate)
-                if isinstance(data, dict) and data.get("action") == "task_request":
+                if isinstance(data, dict) and data.get("action") in ACTIONS:
                     task_json = data
                     json_start = idx
             except json.JSONDecodeError:

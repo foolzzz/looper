@@ -269,6 +269,7 @@ class AgentHTTPServer:
     _RE_TASK_CONFIG = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)/config$")
     _RE_TASK_PROJECT = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)/project$")
     _RE_TASK_CONTINUE = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)/continue$")
+    _RE_TASK_START = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)/start$")
     _RE_PROJECT = re.compile(r"^/api/projects/(proj-[a-zA-Z0-9]+)$")
     _RE_PROJECT_KNOWLEDGE = re.compile(r"^/api/projects/(proj-[a-zA-Z0-9]+)/knowledge$")
     _RE_PROJECT_DOCUMENT = re.compile(r"^/api/projects/(proj-[a-zA-Z0-9]+)/knowledge/(doc-[a-zA-Z0-9]+)$")
@@ -336,6 +337,9 @@ class AgentHTTPServer:
                 m.group(1), projects.json_object(body), self._task_router))
         elif (m := self._RE_TASK_CONTINUE.match(path)) and method == "POST":
             await self._answer(writer, HTTP_200, lambda: self._continue_at_cap(m.group(1), body))
+        elif (m := self._RE_TASK_START.match(path)) and method == "POST":
+            await self._answer(writer, HTTP_200, lambda: projects.start_ready_task(
+                m.group(1), self._supervisor.bus, self._web_adapter._address))
         elif (m := self._RE_TASK_DETAIL.match(path)) and method == "GET":
             await self._handle_task_detail(m.group(1), writer)
         elif path == "/api/projects" and method == "GET":

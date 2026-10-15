@@ -38,6 +38,8 @@ class MessageType(str, Enum):
     KILL_WORK_RESULT = "kill_work_result"
 
     # Task lifecycle
+    # Dashboard or Manager → TaskRouter: start a ready task (created, never started).
+    TASK_START = "task_start"
     TASK_CANCEL = "task_cancel"
     TASK_STOP = "task_stop"
     TASK_RESTART = "task_restart"
