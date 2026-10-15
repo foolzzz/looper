@@ -13,6 +13,16 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
 
 - Entry point for all user messages
 - Classifies intent (chat vs task creation)
+- Reads an action (`task_request`, `task_start`) from Claude's reply as one
+  JSON object (`action_object`): decoded with `raw_decode` in the first
+  ```` ```json ```` fence, else at the first `{`, so text after it is allowed.
+  That text is dropped: the user gets the reply code writes for the action,
+  never the JSON. More than 20 characters of prose before the object is
+  Claude still talking, so only that prose is sent and nothing runs. A reply
+  that names an action in JSON Looper could not read (invalid, or not the
+  first object) is never sent, since it may say the action ran: a warning is
+  logged, the user gets 「没有执行：…什么都没做。请再说一次。」, and that chat's
+  next message tells Claude nothing ran
 - Routes task requests to the TaskRouter via `TASK_REQUEST` messages, each
   with its project's `project_id` and a `task_id` the Manager chooses; the
   TaskRouter creates the task ready (`init`), without a Planner
