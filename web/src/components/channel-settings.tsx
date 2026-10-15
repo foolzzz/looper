@@ -74,10 +74,12 @@ function ChannelCard({ channel, onSaved }: { channel: ChannelConfig; onSaved: ()
   const ref = useSettingsTarget<HTMLDivElement>("channel", channel.channel_id);
 
   const savedIds = allowlist ? storedIds(saved[allowlist.field]) : [];
+  const savedToken = channel.has_bot_token ? SECRET_MASK : "";
   const dirty =
     enabled !== channel.enabled ||
     JSON.stringify(fields) !== JSON.stringify(stringFields(saved, skip)) ||
-    JSON.stringify(ids) !== JSON.stringify(savedIds);
+    JSON.stringify(ids) !== JSON.stringify(savedIds) ||
+    (!!tokenChannel && botToken !== savedToken);
   const idProblems = ids.map((value, index) => {
     const text = value.trim();
     if (!text) return "Enter an ID or remove this row.";
@@ -105,6 +107,8 @@ function ChannelCard({ channel, onSaved }: { channel: ChannelConfig; onSaved: ()
       // Only send the token when it changed from the mask; the mask would keep it anyway, but this avoids a needless write.
       if (tokenChannel && botToken !== SECRET_MASK) payload.bot_token = botToken;
       await updateChannelConfig(channel.channel_id, payload);
+      // Reflect the new stored state: a sent non-empty token is now kept (masked), a sent empty one is gone.
+      if (payload.bot_token !== undefined) setBotToken(payload.bot_token === "" ? "" : SECRET_MASK);
       setJustSaved(true);
       setTimeout(() => setJustSaved(false), 2000);
       onSaved();
@@ -242,13 +246,14 @@ function ChannelCard({ channel, onSaved }: { channel: ChannelConfig; onSaved: ()
           <p className="text-[10px] text-muted-foreground">
             Channel ID: <code className="text-foreground">{channel.channel_id}</code>
             {" · "}Updated: {new Date(channel.updated_at).toLocaleString()}
+            {" · "}Saved changes take effect after the server restarts.
           </p>
           <div className="flex items-center gap-2">
             {error && <p role="alert" className="text-xs text-destructive">{error}</p>}
             {justSaved && (
               <span className="flex items-center gap-1 text-xs text-success">
                 <CheckCircle2 className="h-3.5 w-3.5" />
-                Saved
+                Saved — restart to apply
               </span>
             )}
             <Button type="button" size="sm" onClick={handleSave} disabled={saving || !dirty || invalid}>
