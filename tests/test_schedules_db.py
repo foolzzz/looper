@@ -238,6 +238,36 @@ def test_enabling_sets_the_next_fire_from_now_and_never_back_fills(monkeypatch: 
     _run(test, monkeypatch, tmp_path)
 
 
+def test_every_projects_schedules_are_listed_together_the_disabled_ones_too(monkeypatch: pytest.MonkeyPatch,
+                                                                           tmp_path: Path) -> None:
+    from looper.db import projects
+
+    async def test(env: _Env) -> None:
+        assert await env.ok("GET", "/api/schedules") == {"schedules": []}
+        billing = await projects.create_project(name="Billing", work_dir=env.work_dir, pool=env.pool)
+        await env.ok("POST", f"/api/projects/{billing['id']}/schedules", {
+            "name": "Invoices", "cron": "0 6 * * *", "timezone": "Europe/Berlin", "requirement": "Check them."})
+        await env.schedule(name="nightly")
+        hourly = await env.enabled(name="Hourly check", cron="0 * * * *")
+        run = (await env.ok("POST", f"/api/schedules/{hourly['schedule_id']}/run"))["run"]
+        await env.end_task(run["task_id"], "completed", summary="nothing new", cost=0.25)
+
+        listed = (await env.ok("GET", "/api/schedules"))["schedules"]
+        # By project name, then by name, ignoring case; the disabled ones too.
+        assert [(s["project_name"], s["name"], s["enabled"]) for s in listed] == [
+            ("alerts", "Hourly check", True), ("alerts", "nightly", False), ("Billing", "Invoices", False)]
+        assert listed[2]["project_id"] == billing["id"]
+        assert listed[2]["description"] == "Daily at 06:00 (Europe/Berlin)" and listed[2]["next_fire_at"] is None
+        assert (listed[0]["last_run"]["task_id"], listed[0]["last_run"]["status"]) == (run["task_id"], "completed")
+        assert listed[0]["spent_today_usd"] == pytest.approx(0.25) and listed[1]["spent_today_usd"] == 0
+        assert listed[0]["alerts"] == {"failures_since": None, "stale_since": None}
+        # The same rows a project's list and a schedule's own answer give.
+        assert (await env.ok("GET", f"/api/projects/{env.project_id}/schedules"))["schedules"] == listed[:2]
+        assert (await env.ok("GET", f"/api/schedules/{hourly['schedule_id']}"))["schedule"] == listed[0]
+
+    _run(test, monkeypatch, tmp_path)
+
+
 def test_a_schedule_with_a_gate_may_fire_every_minute(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     async def test(env: _Env) -> None:
         base = {"name": "every minute", "cron": "* * * * *", "timezone": "UTC", "requirement": "Look."}

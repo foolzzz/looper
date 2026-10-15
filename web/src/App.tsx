@@ -6,12 +6,13 @@ import { DashboardPage } from "@/pages/dashboard";
 import { ChatPage } from "@/pages/chat";
 import { TasksPage } from "@/pages/tasks";
 import { RunsPage } from "@/pages/runs";
+import { SchedulesPage } from "@/pages/schedules";
 import { SettingsPage } from "@/pages/settings";
 import { AgentHistoryPage } from "@/pages/agent-history";
 import { ProjectPage } from "@/pages/project";
 import { DEFAULT_SETTINGS_PAGE, isSettingsPage, type SettingsPageId } from "@/lib/settings-pages";
 
-const PAGES = new Set<Page>(["dashboard", "chat", "tasks", "projects", "runs", "settings", "history"]);
+const PAGES = new Set<Page>(["dashboard", "chat", "tasks", "projects", "runs", "schedules", "settings", "history"]);
 
 interface Route {
   page: Page;
@@ -152,6 +153,11 @@ function App() {
                 sub={route.sub}
                 onNavigate={(sub) => navigateSub("runs", sub)}
               />
+            </div>
+          )}
+          {route.page === "schedules" && (
+            <div className="h-full overflow-y-auto">
+              <SchedulesPage />
             </div>
           )}
           {route.page === "history" && (

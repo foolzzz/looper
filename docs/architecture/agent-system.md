@@ -12,72 +12,30 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
 ### Manager (`looper/agents/tiers/manager.py`)
 
 - Entry point for all user messages
-- Classifies intent (chat vs task creation)
-- Reads an action (`task_request`, `task_start`) from Claude's reply as one
-  JSON object (`action_object`): decoded with `raw_decode` in the first
-  ```` ```json ```` fence, else at the first `{`, so text after it is allowed.
-  That text is dropped: the user gets the reply code writes for the action,
-  never the JSON. More than 20 characters of prose before the object is
-  Claude still talking, so only that prose is sent and nothing runs. A reply
-  that names an action in JSON Looper could not read (invalid, or not the
-  first object) is never sent, since it may say the action ran: a warning is
-  logged, the user gets 「没有执行：…什么都没做。请再说一次。」, and that chat's
-  next message tells Claude nothing ran
-- Routes task requests to the TaskRouter via `TASK_REQUEST` messages, each
-  with its project's `project_id` and a `task_id` the Manager chooses; the
-  TaskRouter creates the task ready (`init`), without a Planner
-- Names each task by the task JSON's `title`, which the recommended prompt
-  requires: a few words in the user's language, stored in `tasks.title` (one
-  line, at most 60 characters). The task JSON usually answers the user's
-  「确认」, so no message of the user's names the task. `db.tasks.task_name`
-  is what lists, headings, the Chat page and the end notice show: the title,
-  else the goal id, else the requirement's first line, else the task id (a
-  task from before titles, or a JSON without one)
-- Places each confirmed task in a project. Every user turn starts with a
-  `Projects` section listing the existing projects (name, default directory or
-  "no default directory", description cut to 80 characters) and, when there
-  are any, a `Ready tasks` section: the 10 newest tasks created but not
-  started (id, project, goal, requirement cut to 80 characters). The
-  code-owned rule appended to the editable system prompt
-  (`TASK_PLACEMENT_RULE`) asks for `"project"` and `"work_dir"` in the task
-  JSON. The project is matched by name ignoring case. The directory is the
-  task's own, else the project's default. Without a project name, or without
-  any directory, the Manager asks instead of creating the task
-- A project that does not exist is never created on Claude's word alone. A
-  task JSON naming one creates nothing: code answers with its own question
-  (the new project's name and default directory, that confirming creates it,
-  and up to 10 existing projects to choose instead) and keeps a typed pending
-  state (`_NewProject`) for that chat. Only that chat's next message (channel
-  and chat id) can confirm it; a message from another chat in between leaves
-  it pending. Code creates the project when that turn's task JSON has
-  `"new_project": true` (the boolean) and the same name (ignoring case) and
-  directory (none: the asked one). Any other new name or directory, a missing
-  or non-boolean `new_project`, a later message from that chat, or a message
-  from another chat asks again
-- After it creates a ready task the reply is Claude's acknowledgement, then a
-  configuration block code writes from the settings in effect in the task's
-  project (the resolution behind `GET /api/projects/:id/agent-settings`): the
-  task's title (else its goal) and id, the project (new or existing), the directory; for the
-  Planner, Workers and Reviewers the Agent Profile with its effort and the
-  layer it came from, and agent teams for the Workers and Reviewers (never a
-  Planner's); the project's review policy, spend cap per task and what
-  happens at it, lessons setting and the Planner's concurrency limit there.
-  It ends asking whether to start the task now (reply "开始", or press Start
-  on the Tasks page)
-- `{"action": "task_start", "task_id": ...}` in Claude's reply starts a ready
-  task: code checks that the task exists and is ready (as
-  `POST /api/tasks/:id/start` does) and sends `TASK_START` to the TaskRouter,
-  which queues it under the project's concurrency limit; the reply says it
-  started or why not. Declining needs no JSON: the role prompt has Claude
-  remind the user of both ways to start it later
-- Claude never sees what code itself answers in a chat (these questions, the
-  configuration block, a start's result). Each chat keeps its own followup
-  (`_Followup`, keyed by channel and chat id), so another chat speaking does
-  not drop it: that chat's next message, and only that one, starts with a
-  `[Looper]` note saying what code said about Claude's last task JSON "in
-  this chat", so Claude can re-emit the task JSON or name the task to start.
-  At most 50 chats keep one (`FOLLOWUP_CHATS`); past that the oldest chat's
-  is dropped. `/new` drops them all. The Runs record's input holds the note
+- Acts on Looper only through its platform tools
+  ([The Manager's platform tools](#the-managers-platform-tools)): the MCP
+  server `looper` is in every launch of its Claude, and each turn tells
+  `ManagerOps` which chat and message the calls belong to. Every user turn
+  starts with a `Projects` section listing the existing projects (name,
+  default directory or "no default directory", description cut to 80
+  characters) and, when there are any, a `Ready tasks` section: the 10 newest
+  tasks created but not started (id, project, goal, requirement cut to 80
+  characters). The code-owned `TOOLS_CONTRACT`, appended to the editable
+  system prompt, says how to use the tools: read freely; change things only
+  when the user's message asks, in the turn answering it; before creating a
+  task, know its project (never presented as decided before the user chose
+  it) and its directory (never picked by Claude); a task under way gets what
+  the user adds as a supplement; refer to what Looper writes itself instead
+  of repeating it; and never say an operation ran unless its answer was `ok`
+- The reply is Claude's words, then what Looper itself writes to the user in
+  that turn (`Turn.blocks`): a new task's configuration with the question
+  whether to start it, and what an operation needing confirmation does. A
+  turn that fails still shows what a tool did before it failed
+- A new task is named by the tool's required `title`: a few words in the
+  user's language, stored in `tasks.title` (one line, at most 60
+  characters). `db.tasks.task_name` is what lists, headings, the Chat page and
+  the end notice show: the title, else the goal id, else the requirement's
+  first line, else the task id (a task from before titles)
 - The dashboard chat, Lark and Telegram share the Manager's one session, so
   every message ends with a code-written line saying where it came from, just
   before the message: `Channel: the Looper dashboard chat`, `Channel: a Lark
@@ -100,7 +58,7 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
   senders they list ([Channels](#channels)).
   Its system prompt is its harness (its role layer's, else the system
   layer's, else the built-in one; [Harness, profile and environment](#harness-profile-and-environment)),
-  the `manager` role prompt and `TASK_PLACEMENT_RULE`; it has no project and
+  the `manager` role prompt and `TOOLS_CONTRACT`; it has no project and
   no task section.
   Each chat message is one user turn on its stdin; its turn starts when
   Claude starts that message and ends at the next `result`
@@ -272,12 +230,14 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
   was unavailable (...)` as an `error` activity, and the Planner keeps the
   project it last read and logs a warning.
 
-- A `TASK_REQUEST` creates the task ready (`init`), with the `task_id` it
-  names (a request without one, such as one replayed from before, gets a new
-  id; replaying one with an id creates nothing more), and starts no Planner
+- A `TASK_REQUEST` (as the Manager sent before its tools, or one replayed
+  from then) creates the task ready (`init`), with the `task_id` it names (a
+  request without one gets a new id; replaying one with an id creates nothing
+  more), and starts no Planner. The Manager's `looper_task_create` writes the
+  ready task itself
 - Creates a PlannerAgent when a task starts and destroys it when the task
   ends. `TASK_START` (the dashboard's Start on a ready task, or the
-  Manager's `task_start`) moves a ready task to `pending` once
+  Manager's `looper_task_control` start) moves a ready task to `pending` once
   (`tasks.start_ready_task`, a conditional update: a task that is not ready
   is logged and left alone); the started task reports its plan and outcome
   to the chat it was asked for in
@@ -1166,7 +1126,7 @@ Every run records the prompt in `llm_records.metadata`:
   - `task`: `{kind: plan|work|review, task_id, step_id, sha256}` or `null`
     (the Manager);
   - `contract`: `{name, sha256}` (`REPLY_CONTRACT`, `WORK_CONTRACT`,
-    `REVIEW_CONTRACT` or `TASK_PLACEMENT_RULE`);
+    `REVIEW_CONTRACT` or `TOOLS_CONTRACT`);
   - `isolation`: `ISOLATION_ID`.
 - `profile`: `{id, name, model, runtime: {id, name, type}, provider: {id, name,
   auth}, source}`, the Agent Profile the run used (`id` is its profile id) and
@@ -1833,6 +1793,74 @@ So:
   turn's context, cost and compactions. That is the Manager's and the
   Planners' context over time.
 
+### The Manager's platform tools
+
+The Manager acts on Looper through MCP tools, one catalog in
+`looper/agents/ops/` ([Manager tools RFC](rfcs/manager-platform-tools-v0.zh-CN.md),
+T1). Each tool has a name, a description, a JSON Schema for its arguments, a
+risk tier and the code that runs it; the code is what the dashboard's API
+calls (`projects`, the TaskRouter's messages, `db.task_changes`), so both
+check alike.
+
+- **Reaching Looper.** `looper serve` makes one `ManagerOps`
+  (`ops/service.py`) with a random token at start. Every launch of the
+  Manager's Claude has the MCP server `looper` in its `--mcp-config` (Codex:
+  `[mcp_servers.looper]` in its `config.toml`; OMP: the generated plugin's
+  `.mcp.json`), over a catalog server of the same name: `<python> -m
+  looper.cli mcp-server` with `LOOPER_AGENT_URL` (this server, on loopback)
+  and `LOOPER_AGENT_TOKEN`. That process (`looper/agents/mcp_server.py`) only
+  forwards: MCP's `tools/list` is `GET /api/agent/v1/tools`, `tools/call` is
+  `POST /api/agent/v1/ops/<tool>` with the arguments as the body, and the
+  answer is the tool result's text (an error result when its `status` is
+  `error`). The endpoint refuses any other token with 401.
+- **The turn.** The Manager tells `ManagerOps` which turn runs: the chat
+  (channel and chat id), the message it answers and its sender, or a turn
+  Claude runs on its own. A call belongs to the turn running when it comes;
+  without one it counts as Claude's own.
+- **Answers.** `{"status": "ok", "result"}`, `{"status":
+  "needs_confirmation", "confirmation_id", "expires_in_seconds"}` or
+  `{"status": "error", "error": {"code", "message"}}`, the codes being
+  `not_found`, `invalid` (the arguments fail the schema, or something only
+  the user can give is missing), `needs_user_turn`, `forbidden`, `conflict`
+  (the task's status does not allow it), `expired` and `unavailable` (the
+  database failed; it may work later).
+- **Tiers.** `read` runs in any turn. `write` runs only in a turn that
+  answers a user's message. `high` runs only after the user confirms: the
+  call is registered for its chat (one per chat, a new one replacing it; at
+  most 50 chats), Looper adds what it does and 「回复「确认」就执行」 to the
+  reply, and the user's next message in that chat starts with a `[Looper]`
+  note naming its `confirmation_id`. Only in the turn answering that message,
+  within 10 minutes, does `looper_confirm` run it, with the arguments it was
+  asked with; after that turn it lapses. Another chat speaking in between
+  changes nothing. Confirmations live in memory: a restart or `/new` drops
+  them.
+- **When the tools do not work.** Before a turn that answers a user, the
+  Manager checks its MCP entry: it starts the entry's command as a runtime
+  would and lists the tools through it (a success is trusted for 5 minutes).
+  If the server does not start, or Looper refuses its token, Claude is not
+  run at all. A request the endpoint refuses during a turn marks that turn,
+  and Claude's reply is dropped. Either way the failure is logged as an
+  error, and the user gets 「平台工具不可用，没有执行任何操作：<why>。…」, never
+  a reply that may claim something was done.
+- **The trail.** Every call is a `manager_actions` row: the chat, the
+  message, the tool, its arguments (values under a key naming a key, token,
+  secret or password masked), the tier, how it ended, the result of a change
+  and the `confirmation_id`. `GET /api/tasks/:id` lists a task's
+  (`manager_actions`), and the task page shows them under "By the Manager".
+
+| Tool | Does | Tier |
+|---|---|---|
+| `looper_overview` | Task counts by group, the running tasks and step runs, each active project's load against its limits, today's spend, unhealthy components | read |
+| `looper_tasks` | `list` (newest first; by `query` words in the id, name, requirement or project, by `group`, by `project`; at most `limit`) or `get` one task: status, phase, directory, requirement, steps, supplements (delivered or not), latest progress note, result, cost | read |
+| `looper_task_create` | Create a ready task: `requirement`, `title`, `project` (matched by name ignoring case), `work_dir` (else the project's default; a new project, or one without a default, needs one), `goal_id`, `profiles` (an Agent Profile by id or name for some roles). The task records the chat it came from (its progress, and in Telegram or Lark its end notice). Looper adds the configuration block (the settings in effect for the task, with the layer each came from, the project's review policy, spend cap, lessons setting and concurrency limit) and the start question | write; a new project is high |
+| `looper_task_control` | `start` a ready task (`TASK_START`); `stop` a queued or running one; `restart` a stopped, failed or cancelled one, planned anew; `cancel` a running one | write; cancel is high |
+| `looper_task_instruct` | Add the user's words to a queued or running task as a supplement (`via` `manager:<channel>`), delivered to its Planner like any ([Changes to a task](#changes-to-a-task)) | write |
+| `looper_task_update` | Change a task that has not ended: its `requirement` (a new version, as on the task page), its `work_dir` (a task not started only), its `profiles` (a profile per role, `null` to drop the task's choice; a Worker or Reviewer uses it from its next step, the Planner at its next turn after a handoff) | write |
+| `looper_confirm` | Run the call waiting for confirmation in this chat | — |
+
+Continuing a task that failed at its spend cap needs a higher cap, which is
+not one of these tools yet.
+
 ### Turns Claude runs on its own
 
 A resident Claude (Manager, Planner) also runs turns that answer no message.
@@ -1894,7 +1922,7 @@ Key message types:
 |---|---|---|
 | `USER_MESSAGE` | Channel → Manager, or Web Chat → a task's Planner | User chat message |
 | `AGENT_REPLY` | Manager or Planner → Channel | Reply to the user |
-| `TASK_REQUEST` | Manager → TaskRouter, then TaskRouter → Planner | Create a ready task; then the started task's request to its Planner |
+| `TASK_REQUEST` | TaskRouter → Planner (and, from before the Manager's tools, Manager → TaskRouter) | The started task's request to its Planner; a replayed one from the Manager creates a ready task |
 | `TASK_START` | HTTP or Manager → TaskRouter | Start a ready task |
 | `TASK_ACCEPTED` | Planner → TaskRouter → Manager | Plan made, with its step count |
 | `TASK_CANCEL` | HTTP → TaskRouter → Planner | Terminate task permanently |
@@ -2006,6 +2034,7 @@ PostgreSQL is a hard startup dependency. All data paths:
 | `agent_sessions` | The session each resident agent resumes: `manager` or `planner-<task_id>`, its `session_id`, `session_totals`, the `runtime_type` and `provider_id` it belongs to and the `profile_id` that ran it last (`NULL` runtime: before Agent Profiles, Claude Code; `NULL` provider: before providers were recorded, Claude Code's own login), and `clean_start` (the user dropped the session with `/new`: the next one starts without a resume brief) |
 | `task_journal` | A task's journal, written by code as things happen: `step_accepted`, `step_failed`, `step_retry`, `decision`, `supplement`, `session_switch`, `handoff` and `progress` entries, each with its `step_id` (`''` for the whole task), `summary` and `learnings`, and for a supplement its `via` and `delivered_at`; `GET /api/tasks/<id>` returns it as `journal` (and the progress notes, parsed and newest first, as `progress`); the task page lists the entries as Findings, each with its kind, and the progress notes in its Progress section |
 | `task_requirement_versions` | Every version of an edited task requirement: `task_id`, `version` (1 is the text the task was created with, written at its first edit), `text`, `via` (`created`, `task_page`, or the Manager's), `created_at` and `delivered_at` (when the Planner had it in a turn; `tasks.requirement` is the newest) |
+| `manager_actions` | The Manager's tool calls (`looper/agents/ops`), one row each: `channel`, `chat` and `message_id` of the turn (empty for a turn Claude ran on its own), `tool`, `arguments` (secret values masked), `risk` (`read`, `write`, `high`), `status` (`ok`, `needs_confirmation`, `error` with `error_code`), `result` (of a change; a read's is not kept), `confirmation_id` (the call that asked, on a confirmed one) and `task_id` (the task it acted on, no foreign key) |
 | `activity` | Execution trace events (SSE streaming to frontend) |
 | `chat_messages` | Chat conversation history of every channel: `session_id` (the web chat's session, or `<channel>:<chat_id>` for Telegram and Lark, private chats only), `message_id`, `role`, `content`, `channel` (`web`, `telegram` or `lark`; rows from before it read `web`); a new Manager session's resume brief reads the recent chats that are not a task's Planner thread (`planner-<task_id>`) |
 | `llm_records` | One row per agent run: input and output text, status, the run's own `cost_usd` and its `cost_source` (`runtime` or `provider_price`), `input_tokens`, `output_tokens`, `cache_read_tokens` and `cache_creation_tokens`, its final `context_tokens` and its `compactions`; `metadata` holds the exact argv (`command`), `cwd`, the appended `system_prompt`, its `system_prompt_sha256`, its `prompt_layers`, the `profile` (`agent` on runs recorded before the rename), the `model_choice`, the Settings `env` names, the `library` items loaded, the `project_instructions` the runtime was given and a task agent's `project_skills` |
@@ -2092,6 +2121,7 @@ built by `scripts/stage-dashboard.sh` at release time), and it carries
 - **Projects (sidebar)**: Below the navigation, every project with its task count (or a spinner with its active count); clicking one opens its project page, and `+` creates a project (name, default directory, description, optional background).
 - **Project** (`#projects/<id>`, `#projects/<id>/knowledge|skills|profiles|schedules|settings`): a header with the name, description, default directory and task count (a link to the filtered Tasks page), then six tabs, arrow keys moving between them. **Overview**: the 5 latest tasks with status and cost and a link to all of them; the background (three lines, then Show more); the knowledge (document count, stored size, the first 5 titles and summaries, how many referenced files are missing); the skills (count, how many are on, the first 5 names and descriptions); each role's Agent Profile, the per-run caps and which roles this project gives a harness (linking to Agent Profiles); and the execution settings that are set, in words (linking to Settings). **Knowledge**: the documents (title, summary, source, file name or path, size, a Missing badge for a path document whose file is gone) with a readout of documents, stored bytes and index characters against their caps. Opening a row shows its body (a path document's file as it is now); Edit changes the title, summary and content (a text or upload document) or path (a path document); a document is added as Text, Upload or Project file, or by dropping a file on the section; delete asks first. **Skills**: the skills (`project:<name>`, the body's size, `Off` for a disabled one, the description) with a count against the cap. Opening a row shows its `SKILL.md` body; Edit changes the name, description and body; a skill is added by hand or from a `SKILL.md` (Upload SKILL.md, or a drop on the section), whose frontmatter fills the name and description and whose body below it fills the instructions, for review before Add; a switch turns one on or off; delete asks first. Knowledge and skill changes apply at once and a refusal shows the server's reason. **Agent Profiles**: a line saying it overrides the shared defaults in Settings → Roles for the Planner, Workers and Reviewers, and that the Manager is set there, then one collapsible row for the project's layer ("All roles in this project") and one for each role in the project (Planner, Worker, Reviewer), all closed at first. A closed row shows the Agent Profile in effect and where it comes from (shared defaults, role default, this project, or this role in this project; the project's row shows what the roles that do not set it again agree on), a role's limit of how many run at once, "overridden here" when the row sets anything and "unsaved" over unsaved edits. An open row has the Agent Profile first, with Remove override, then "More overrides": the harness, spend cap, a role's limit (empty or Clear inherits) and environment, where every field of a role's row also says what applies now and from which layer, and one Save. Closing a row keeps its unsaved edits; `#projects/<id>/profiles/<role>` or `/project` opens that row and scrolls to it, and an Agent Profile's "used by" links there. **Schedules**: a line saying a schedule runs a full task of the project on a time rule and starts disabled, New schedule, then one collapsible row per schedule. A closed row shows the name, the rule in words, the next run in the schedule's zone (or Disabled), the last run's status and the failures in a row, with the enable switch and Run now beside it (outside the row's button). A closed row also shows "Failing" or "No success lately" while an alert is active. An open row edits every field (the gate command and timeout, the daily budget with today's spend, notify and the chat to send to, or Dashboard only, under "Before each run and after"), previews the rule's next 5 fire times as it is typed (an invalid rule says why and disables Save), saves with one Save, deletes after a confirmation, and lists the run history: when, how it fired (Scheduled, Catch-up with the missed count, Manual), the status, the cost, the summary or error, a collapsed gate output, a note when the run carries the previous run's input, and a link to the task. `#projects/<id>/schedules/<schedule id>` opens that row, and a task's Scheduled badge links there. **Settings**: the name, default directory, description, background (`n / 10000`) and execution settings, saved together (Save is disabled over a limit or without a change; Discard changes resets them); then Delete project, offered only while the project has no tasks and no schedules.
 - **Task Detail**: Overview (status, phase, times, steps and the task's cost with its run count; the requirement, with Edit while the task has not ended and its earlier versions under History, then the supplements, each with how it came and whether the Planner has seen it; then Progress: once the task has ended, its final summary (completed) or closing note (failed, stopped) as Markdown, then the Planner's latest progress note (done, now, next, risks, estimate, and when) and the earlier ones under a disclosure; then "Cost by agent": the Planner's, the Workers' and the Reviewers' runs and cost with each one's share, noting runs still running or without a reported cost; steps, agent timeline, live activity feed), Pipeline DAG (React Flow), Sessions, Conversation
+- **Schedules** (`#schedules`, below Runs in the sidebar): every project's schedules from `GET /api/schedules`, re-read every 10 s, grouped by project (a Project filter when there are several, each group with how many are on and a link to the project's Schedules tab to add or edit one). Each row shows the name (opening it on its project's Schedules tab, where it is edited), the rule in words, the next run in the schedule's zone (or Disabled), the last run's status, time and task, "Failing" or "No success lately" while an alert is on, and today's spend (against the daily budget when set); a disabled schedule is dimmed (a dashed edge, a muted name). Beside it, the enable switch (`PUT /api/schedules/:id` with `enabled`: the switch shows the new value while it saves, then "Turned on" or "Turned off"; a refusal puts it back and says why) and Run now (its answer, as on the project tab). Loading, empty and error states, and a failed refresh keeps the last list with the error.
 - **Runs** (`#runs/<role>`): each role's sessions and run history, and no configuration. A Runs list shows every recorded Claude run of the role (the Manager, every task's Planner, Workers or Reviewers), a Manager `/new` as a `new session` row, and links each to its agent's history; each role links to its row in Settings → Roles.
 - **Agent history** (`#history/<agent-id>?task=<task-id>`): opened from History on an Agent Timeline row, a Runs entry or the Chat page. The Manager's and a Planner's page starts with "Context & cost": the latest context size, the number of compactions, the total cost and the number of turns. Below them is a sparkline of the context at the end of each of the latest 100 turns, scaled between their lowest and highest value, with a dashed marker on each turn that compacted. A list of the compactions follows (turn, time, trigger, context before → after), then a folded table of the turns. The section is re-read every 10 s. For each Claude run it shows status, model, the run's own tokens (uncached input, cache read, cache write, output), its context at the end (`ctx`), a `compacted` badge, its own cost, the launch command (cwd and argv; a long argument such as the system prompt is shown by its length, and Copy copies the exact command), a collapsible System prompt section with what Looper appended (Claude Code's built-in system prompt is not included): its title shows the prompt's size, its short sha256 and an `isolated` badge, and inside one line per layer (harness source and version, role recommended or edited, project and background version, task, contract), the model with its source and effort, and the Settings environment variable names, above the full text; runs recorded before the layers existed show the text only. A collapsible Plugins & skills section shows how many plugins and skills the run loaded from the library, with its hash, and how many project skills (from `metadata.project_skills`), and lists each with its short version hash. Then the full transcript, following a running run every 2 s. A running run shows its last output time from the record's heartbeat and is flagged after 2 minutes with no output. While Claude thinks it shows `thinking · ~N tokens` from Claude's `thinking_tokens` events. Those arrive about once a second, so the recorder keeps one row per thinking phase and updates its count in place. Hooks, background tasks and rate limits are shown as one line each, as are a compaction (`Context compacted (auto) · 25.1k → 1.36k tokens`) and a failed compaction attempt. The result line labels Claude's figure as the `session total`. Any other event type is an expandable line. A `/new` is one line, `new session`, with its channel, sender, chat and the session it ended. For a Planner each run is one of its turns, listed above your chat with it and its activity.
 - **Settings**: a folding group at the bottom of the sidebar, one page each (`#settings/<page>`): **LLM Providers** (`providers`); **Agent Runtimes** (`runtimes`, read-only, as above); **Agent Profiles** (`profiles`: each profile's runtime, provider, model and effort, "agent teams on" when they are, the roles it can run and where it is used, with a form that picks the runtime, then a provider grouped as the runtime's own login (OAuth; Claude Code's with its `claude auth status` result, Codex's with its `codex login status` result or the forked login a run found, none for OMP) or an API-key provider that speaks its protocols, then a model from the provider's catalog, or any, with the models a Codex login offers suggested, and, for a Claude Code runtime, an "Agent teams" checkbox, checked by default); **Roles** (`roles`: a line naming the roles the server has, then a collapsible row for the Shared defaults (the system layer, which the dashboard calls the shared defaults wherever it names a value's source) and one per role, all closed at first and any number open. Wherever the dashboard names an Agent Profile (these summaries, its dropdowns), it adds " · <effort>" when the profile has an effort its name does not end with already. A closed row is a one-line summary: for the Shared defaults the number of roles, the Agent Profile, spend cap and how many environment variables are set; for a role its job, the Agent Profile in effect and whether it is shared or its own, the Planner's, Workers' or Reviewers' limit per project, and "Disabled" or "unsaved" when so. An open role has "Overrides for this role" (its layer, each field saying what applies now and from which layer, with the Planner's "Tasks running at once per project", the Workers' "Workers running at once per project" or the Reviewers' "Reviewers running at once per project") and "Role prompt and limits" (the role prompt, replace or append, reset to the recommended one, max turns, timeout, enabled, and the note that every agent has every tool with `--dangerously-skip-permissions`); closing a row keeps its unsaved edits, and `#settings/roles/<role>` or `#settings/roles/shared` opens that row and scrolls to it); **Skills & MCP** (`catalog`: how many of the imported items are loaded and their size, "Import from this machine" or "Re-import", the last import with what it changed and what it left out, a name filter, and the plugins and skills with their version, size and installs; a change applies to each agent's next run); **Channels** (`channels`: the Telegram and Lark channels, each with its sender allowlist, an add and remove list of Telegram user IDs or Lark open_ids, checked as you type, with blanks and repeats flagged, and, for an enabled channel that does not start, the reason); **Import / Export** (`transfer`). Wherever an Agent Profile is chosen (Roles, a project's settings, a new task's roles) it is the same dropdown, whose last entry, "+ New Agent Profile", opens the form in place and selects what it saves.
@@ -2141,8 +2171,9 @@ dev proxy, which keeps `Host` and `Origin` on its own port.
 | `/api/projects/:id/skills/:skill_id` | PUT | Change any of `name`, `description` and `content` (its switch is on the install: `PUT /api/installs/:id`); answers with the `skill` and the installs view; 400 and 409 as above (a new name must be free in every project the skill is installed in), 404 for an unknown project or a skill another project wrote |
 | `/api/projects/:id/skills/:skill_id` | DELETE | Delete a skill the project wrote, from the catalog and every project it is installed in; answers with `deleted` and the installs view; 404 |
 | `/api/projects/:id` | DELETE | Delete a project; 409 while it still has tasks or schedules |
-| `/api/projects/:id/schedules` | GET | The project's schedules by name, each with `description` (the rule in words), its fields, `enabled`, `next_fire_at`, `last_fired_at`, `last_success_at`, `consecutive_failures`, the S2 fields, `spent_today_usd`, `alerts` (`failures_since`, `stale_since`) and `last_run`; and `limits` (`name_max_chars`, `requirement_max_chars` 6000, `min_interval_seconds`, `default_timezone`, `run_timeout_max_seconds`, `roles`, `gate_command_max_chars`, `gate_timeout_default_seconds`, `gate_timeout_max_seconds`, `notify_targets`: the chats the channels' sender allowlists allow, each with `channel_enabled`); 404 for an unknown project |
+| `/api/projects/:id/schedules` | GET | The project's schedules by name, each with `project_name`, `description` (the rule in words), its fields, `enabled`, `next_fire_at`, `last_fired_at`, `last_success_at`, `consecutive_failures`, the S2 fields, `spent_today_usd`, `alerts` (`failures_since`, `stale_since`) and `last_run`; and `limits` (`name_max_chars`, `requirement_max_chars` 6000, `min_interval_seconds`, `default_timezone`, `run_timeout_max_seconds`, `roles`, `gate_command_max_chars`, `gate_timeout_default_seconds`, `gate_timeout_max_seconds`, `notify_targets`: the chats the channels' sender allowlists allow, each with `channel_enabled`); 404 for an unknown project |
 | `/api/projects/:id/schedules` | POST | Create a schedule, disabled, from `name`, `cron`, `requirement` and optionally `timezone`, `work_dir`, `overlap`, `catch_up`, `run_timeout_seconds`, `run_budget_usd`, `profile_overrides`, `gate_command` (at most 2000 characters), `gate_timeout_seconds`, `daily_budget_usd`, `notify`, `notify_target` (`{channel, chat}` among `notify_targets`, or null); 201 with `schedule`. 400 with the reason for a bad field (an invalid rule or zone, a rule that never fires or fires closer than the minimum interval, no work directory here or on the project, a chat no allowlist allows, `enabled`, an unknown field), 409 for a name the project has, 404 for an unknown project |
+| `/api/schedules` | GET | Every project's schedules, the disabled ones too, by project name and then name, ignoring case: `schedules`, each as a project's list gives it (with `project_id` and `project_name`); the Schedules page reads it |
 | `/api/schedules/:id` | GET/PUT/DELETE | Read one schedule; PUT changes the fields given and `enabled` (enabling, or a new rule or zone while enabled, sets `next_fire_at` from now; disabling clears it), 400 and 409 as for POST; DELETE deletes it and its runs, keeping its tasks; 404 |
 | `/api/schedules/:id/run` | POST | Run now: fire it with `trigger` `manual` (also while disabled) through the same overlap check; answers with the `run` (`running`, `gating` while its gate runs, `queued`, `skipped_overlap`, `skipped_budget`, or `failed` with `error`); `next_fire_at` stays; 404 |
 | `/api/schedules/:id/runs` | GET | The runs, newest first (`?limit=`, default 50, at most 200): `run_id`, `scheduled_for`, `fired_at`, `trigger`, `missed`, `status`, `task_id`, `task_status`, `summary`, `cost_usd` (the task's so far while it runs), `error`, `gate_output`, `carried_from`, `finished_at`, `firings` (a repeated skip's count); 404 |
@@ -2151,10 +2182,12 @@ dev proxy, which keeps `Host` and `Origin` on its own port.
 | `/api/tasks` | GET | List the newest tasks; `?project_id=` lists one project's, `?group=` one task group's (400 for an unknown group), `?schedule_id=` one schedule's. Each has its status's `group`, `project_id`, `project_name`, `work_dir`, `schedule_id` and `schedule_name` (null for a task no schedule created) and `cost` (as in the task detail) |
 | `/api/tasks/create` | POST | Create a ready task (`init`) with exactly one of `project_id` (existing) and `project` (`{name, description?, work_dir?, background?}`, created in the same transaction). Its `work_dir` is the one given, else the project's. Optional `profile_overrides`: `{planner?, worker?, reviewer?}` Agent Profile ids for this task's roles (an empty one chooses nothing). 400 with neither project field, for an override of another role, an unknown profile or one that cannot run its role; 404 for an unknown project, 409 for a taken new name |
 | `/api/tasks/:id/project` | PUT | Move a task to `{project_id}`, whatever its status |
-| `/api/tasks/:id` | GET | Task detail with steps, its status's `group`, `project_id`, `project_name`, `schedule_id`, `schedule_name`, `task_budget_usd` (its cap: its own, else its project's) and `own_budget_usd`, `profile_overrides` (`{role: profile}`, `{}` when none), `requirement_versions` (each `{version, text, via, created_at, delivered_at}`, oldest first; none for a requirement never edited), `supplements` (each `{text, via, created_at, delivered_at}`, oldest first) and `cost`: `cost_usd` (the sum of its Planner's, Workers' and Reviewers' runs), `runs`, `running`, `unpriced_runs` and `by_role` (`planner`, `worker`, `reviewer`, each `{cost_usd, runs}`) |
+| `/api/tasks/:id` | GET | Task detail with steps, its status's `group`, `project_id`, `project_name`, `schedule_id`, `schedule_name`, `task_budget_usd` (its cap: its own, else its project's) and `own_budget_usd`, `profile_overrides` (`{role: profile}`, `{}` when none), `requirement_versions` (each `{version, text, via, created_at, delivered_at}`, oldest first; none for a requirement never edited), `supplements` (each `{text, via, created_at, delivered_at}`, oldest first), `manager_actions` (what the Manager did to the task or asked to confirm, newest first: `{created_at, channel, tool, arguments, risk, status, confirmation_id}`) and `cost`: `cost_usd` (the sum of its Planner's, Workers' and Reviewers' runs), `runs`, `running`, `unpriced_runs` and `by_role` (`planner`, `worker`, `reviewer`, each `{cost_usd, runs}`) |
 | `/api/tasks/cancel` | POST | Cancel task (permanent) |
 | `/api/tasks/stop` | POST | Stop/pause task |
 | `/api/tasks/start` | POST | Run a stopped, failed or cancelled task again (it also starts a ready one, as before) |
+| `/api/agent/v1/tools` | GET | The Manager's tools (`ops`), for its MCP server; only with the Manager's token (`Authorization: Bearer`), else 401 |
+| `/api/agent/v1/ops/:tool` | POST | Call one of the Manager's tools with the JSON body as its arguments, in the Manager's current turn; answers the tool's `status` object with 200, refusals included; only with the Manager's token |
 | `/api/tasks/:id/requirement` | PUT | Edit the requirement of a task that has not ended to `{requirement}`, kept as a new version (`{task_id, version, requirement}`); a running task's Planner gets it in a `[CHAT]` turn. 400 for an empty or unchanged text, 404 for an unknown task, 409 for one that ended |
 | `/api/tasks/:id/start` | POST | Start a ready task (`TASK_START`); it waits for a place in its project like any start. Answers `{started, project_id}`; 400 unless the task is ready, 404 for an unknown task |
 | `/api/tasks/delete` | POST | Delete task (must be stopped first) |

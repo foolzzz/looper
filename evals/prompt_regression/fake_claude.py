@@ -18,7 +18,13 @@ agent system started it in:
   scripted attempt lists and reports that attempt's status, after the
   attempt's ``seconds`` when it gives them; with ``wait_for_input`` it first
   waits for a forwarded user turn and then writes the files given there;
-- a Reviewer ("The step under review:") passes the step.
+- a Reviewer ("The step under review:") passes the step;
+- the Manager (its system prompt has Looper's tools contract) starts the
+  ``looper`` MCP server of its ``--mcp-config`` and, for each user message,
+  makes the calls ``scenarios.json``'s ``manager`` lists for that message's
+  text (re-read every turn), replying with each call's tool and status. In the
+  calls, ``<task id>`` is the last task id an answer gave and
+  ``<confirmation>`` the confirmation id the note before the message names.
 
 To show that the eval notices misbehaviour, a script may also make the
 Planner write files with the Write tool during [PLAN] (``planner_writes``),
@@ -41,6 +47,7 @@ import time
 from typing import Any
 
 PLANNER_TURN_COST = 0.001
+MANAGER_TURN_COST = 0.001
 WORKER_RUN_COST = 0.002
 REVIEWER_RUN_COST = 0.001
 
@@ -200,6 +207,42 @@ def _main_checkout() -> str:
     return os.path.realpath(os.path.dirname(done.stdout.strip())) if done.returncode == 0 else ""
 
 
+def _manager(scenarios_path: str, args: list[str], stdin: _Stdin) -> None:
+    config = json.load(open(args[args.index("--mcp-config") + 1], encoding="utf-8"))["mcpServers"]["looper"]
+    server = subprocess.Popen([config["command"], *config["args"]], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                              env={**os.environ, **config.get("env", {})}, text=True)
+    ids = iter(range(1, 1_000_000))
+
+    def rpc(method: str, params: dict[str, Any]) -> dict[str, Any]:
+        assert server.stdin is not None and server.stdout is not None
+        server.stdin.write(json.dumps({"jsonrpc": "2.0", "id": next(ids), "method": method, "params": params}) + "\n")
+        server.stdin.flush()
+        return json.loads(server.stdout.readline())
+
+    rpc("initialize", {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "fake"}})
+    cost, last_task = 0.0, ""
+    while (line := stdin.readline()) is not None:
+        if not line.strip():
+            continue
+        content = _user_text(line)
+        channel = re.search(r"^Channel: .*\n\n", content, re.MULTILINE)
+        message = content[channel.end():] if channel else content
+        named = re.search(r"confirmation_id (c-[0-9a-f]+)", content)
+        with open(scenarios_path, encoding="utf-8") as handle:
+            calls = (json.load(handle).get("manager") or {}).get(message.strip(), [])
+        answers = []
+        for name, arguments in calls:
+            text = json.dumps(arguments).replace("<confirmation>", named.group(1) if named else "")
+            result = rpc("tools/call", {"name": name, "arguments": json.loads(text.replace("<task id>", last_task))})
+            answer = json.loads(result["result"]["content"][0]["text"])
+            created = answer.get("result") if isinstance(answer.get("result"), dict) else {}
+            last_task = created.get("task_id") or last_task
+            answers.append(answer)
+        cost += MANAGER_TURN_COST
+        done = "；".join(f"{name}：{answer.get('status')}" for (name, _), answer in zip(calls, answers))
+        _answer("fake-manager", f"已处理（{done}）。" if answers else "放在哪个项目、哪个目录？", cost)
+
+
 def main(argv: list[str]) -> int:
     scenarios_path, args = argv[0], argv[1:]
     with open(scenarios_path, encoding="utf-8") as handle:
@@ -210,8 +253,11 @@ def main(argv: list[str]) -> int:
         with open(args[args.index("--append-system-prompt-file") + 1], encoding="utf-8") as handle:
             system_prompt = handle.read()
     stdin = _Stdin()
-    # The role is in the task section: a Reviewer's names the step under review, a Worker's its step.
-    if re.search(r"^The step under review:", system_prompt, re.MULTILINE):
+    # The role is in the task section: a Reviewer's names the step under review, a Worker's its step; the
+    # Manager's prompt ends with Looper's tools contract.
+    if "## Looper's tools (required)" in system_prompt:
+        _manager(scenarios_path, args, stdin)
+    elif re.search(r"^The step under review:", system_prompt, re.MULTILINE):
         _reviewer(stdin)
     elif re.search(r"^Your step:", system_prompt, re.MULTILINE):
         _worker(script, system_prompt, stdin)

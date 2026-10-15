@@ -377,3 +377,34 @@ def test_fake_mode_runs_every_task_and_sees_misbehaviour(tmp_path: Path) -> None
     assert written == result and written["schema"] == runner.SCHEMA
     assert str(Path.home()) not in path.read_text(encoding="utf-8")
     assert str(tmp_path) not in path.read_text(encoding="utf-8")
+
+
+@pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
+def test_the_managers_dialogs_pass_in_fake_mode_and_a_wrong_call_fails(tmp_path: Path) -> None:
+    from evals.prompt_regression import dialogs
+
+    # The stand-in creates a task though the user named no project: the check sees it.
+    eager = dialogs.Dialog("eager", (dialogs.Say("帮我写个脚本。", dialogs._asked_for_the_project, (dialogs._CREATE,)),))
+    result, path = dialogs.run(mode="fake", dialogs=(*dialogs.DIALOGS, eager), admin_url=str(DSN), out_dir=tmp_path,
+                               agent="claude-code/opus")
+    by_id = {dialog["id"]: dialog for dialog in result["dialogs"]}
+    for dialog in dialogs.DIALOGS:
+        assert by_id[dialog.id]["success"], (dialog.id, by_id[dialog.id]["problems"])
+    assert [turn["calls"] for turn in by_id["cancel_confirmation"]["turns"]] == [
+        ["looper_task_control:needs_confirmation"], [], ["looper_task_control:needs_confirmation"],
+        ["looper_task_control:ok"]]
+    assert by_id["eager"]["problems"] == ["a task was created though the user named no project"]
+    assert "| cancel_confirmation | pass | 4 |" in dialogs.markdown(result)
+    assert str(tmp_path) not in path.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize(("reply", "raw"), [
+    ("任务已创建，还没有开始（Ready — not started）：\n- 任务：hello", False),
+    ('好的。{"action": "task_start", "task_id": "task-1"}', True),
+    ('```json\n{"status": "ok"}\n```', True),
+    ('[{"status": "ok", "result": {}}]', True),
+])
+def test_a_dialog_reply_must_not_show_raw_json(reply: str, raw: bool) -> None:
+    from evals.prompt_regression.dialogs import _raw_json
+
+    assert (_raw_json(reply) is not None) is raw

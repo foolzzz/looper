@@ -1,6 +1,5 @@
 """The Manager records Telegram/Lark turns in chat_messages (tagged by channel) so the
-console shows every channel's conversation; web turns keep their own path. Each chat keeps
-its own pending followup, so another chat speaking does not drop it."""
+console shows every channel's conversation; web turns keep their own path."""
 
 from __future__ import annotations
 
@@ -16,7 +15,7 @@ from fake_claude import fake_claude
 from looper.agents.bus import MessageBus
 from looper.agents.message import MANAGER_ADDRESS, MessageEnvelope, MessageType, channel_address
 from looper.agents.tiers import manager as manager_mod
-from looper.agents.tiers.manager import ManagerAgent, ManagerConfig, _Followup
+from looper.agents.tiers.manager import ManagerAgent, ManagerConfig
 
 WEB = channel_address("web")
 TELEGRAM = channel_address("telegram", "channel-telegram")
@@ -82,31 +81,6 @@ class TestChannelPersistence:
 
 
 @pytest.mark.usefixtures("agent_db")
-def test_a_followup_survives_another_chats_message() -> None:
-    """A pending followup for one chat is not dropped when a different chat sends the next message."""
-
-    async def _go() -> _Followup | None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            mgr = ManagerAgent(config=ManagerConfig(claude_bin=_reply_claude(root), work_dir=root),
-                               runtime_root=root)
-            mgr._bus = MessageBus(runtime_root=root)
-            chat_a = ("telegram", "A")
-            mgr._followup[chat_a] = _Followup(chat_a, "pending for A")
-            with pytest.MonkeyPatch.context() as mp:
-                mp.setattr(manager_mod.db_chat, "save_message", AsyncMock())
-                # A different chat (B) speaks.
-                await mgr._handle(_user(TELEGRAM, "hi from B", chat_id="B", corr="c2"))
-            kept = mgr._followup.get(chat_a)
-            await mgr.stop()
-            await mgr._bus.shutdown()
-            return kept
-
-    kept = asyncio.run(_go())
-    assert kept is not None and kept.note == "pending for A"
-
-
-@pytest.mark.usefixtures("agent_db")
 class TestPrivateChatsOnly:
     """Only private chats are stored: a Telegram group's id is negative, and nothing from it reaches chat_messages,
     neither the message, nor the Manager's reply to it, nor a reply Claude sends on its own afterwards."""
@@ -144,13 +118,3 @@ class TestPrivateChatsOnly:
             ("telegram:12345", "user", "hello"), ("telegram:12345", "assistant", "ok"),
             ("telegram:12345", "assistant", "done on my own")]
 
-
-def test_followups_are_kept_for_at_most_so_many_chats_the_oldest_dropped_first() -> None:
-    mgr = ManagerAgent(config=ManagerConfig(), runtime_root=Path(tempfile.mkdtemp()))
-    chats = [("telegram", str(n)) for n in range(manager_mod.FOLLOWUP_CHATS + 1)]
-    for chat in chats:
-        mgr._keep_followup(_Followup(chat, f"note {chat[1]}"))
-    mgr._keep_followup(_Followup(chats[1], "newer note"))  # a chat's newer note replaces its older one
-    assert len(mgr._followup) == manager_mod.FOLLOWUP_CHATS
-    assert chats[0] not in mgr._followup
-    assert list(mgr._followup)[-1] == chats[1] and mgr._followup[chats[1]].note == "newer note"
