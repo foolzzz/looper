@@ -470,6 +470,8 @@ async def update_schedule(schedule_id: str, data: dict[str, Any], *, now: dateti
                 fields["enabled"] = enabled
             if enabled and not row["enabled"]:
                 fields["enabled_at"] = now  # the no-success alert counts from here (``stale_deadline``)
+            if rule.text != row["cron"] or zone_name != row["timezone"]:
+                fields["rule_changed_at"] = now  # so does it from a new rule or zone
             await db_schedules.update_schedule(conn, schedule_id, fields, profiles=profiles)
     except asyncpg.UniqueViolationError:
         raise _name_taken(fields["name"]) from None

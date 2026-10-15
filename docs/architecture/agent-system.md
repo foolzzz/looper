@@ -1527,12 +1527,16 @@ dashboard only). A new schedule is disabled.
   `always` for each run that ran something, `never` none; skipped runs never
   do. Two alerts go out once per streak, each with one recovery message: 3
   failures in a row (`failures_alert_at`), recovered by a completed run; and
-  no run completed and no gate found nothing to do for the shorter of 3
-  periods of the rule and 24 hours, counted from the first fire after the last
-  such run or after the schedule was last enabled (`enabled_at`), whichever is
-  later, so a schedule enabled again after a pause is not stale at once
-  (`stale_alert_at`, checked on every pass while enabled; a disabled schedule
-  is never stale), recovered the same way. The text is code-written (the schedule, the run's status, a
+  no run completed and no gate found nothing to do for 3 periods of the rule,
+  at least 15 minutes (`STALE_FLOOR`: three fires of the shortest rule without
+  a gate; a gated schedule may fire every minute, where 3 periods are noise)
+  and at most 24 hours, counted from the first fire after the latest of that
+  run, the schedule's last enabling (`enabled_at`) and its rule's or zone's
+  last change (`rule_changed_at`), so neither enabling nor a new rule is stale
+  at once (`stale_alert_at`, checked on every pass while enabled; a disabled
+  schedule is never stale, and neither is one whose run is in progress:
+  queued, checking its gate or its task running within its run timeout, nor
+  the busy skips it causes), recovered the same way. The text is code-written (the schedule, the run's status, a
   summary snippet, its cost and the link to the task, absolute (`links`)). It goes through
   the channel registry to the running Telegram or Lark channel
   (`ChannelAdapter.notify`: Telegram's bot to the user's private chat, Lark's
@@ -2045,7 +2049,7 @@ PostgreSQL is a hard startup dependency. All data paths:
 | `llm_provider_secrets` | A provider's API key, apart from the provider; read only by the launch that will use it |
 | `agent_profiles` | Agent Profiles: `name`, `runtime_id`, `provider_id`, `model`, `effort` (its runs'; null: the runtime's own), `agent_teams` (Claude Code's agent teams: on by default for Claude Code profiles, set by the registry and once by the upgrade; the column's default, false, is for other runtimes), `builtin`; a provider still used by one is not deleted |
 | `task_profile_overrides` | A task's Agent Profile per role (`planner`, `worker`, `reviewer`): `profile_id`, going with its task; a profile a task chose is not deleted |
-| `schedules` | A project's schedules: `name` (unique in the project ignoring case), `cron`, `timezone`, `requirement`, `work_dir` (`''`: the project's default), `overlap`, `catch_up`, `run_timeout_seconds`, `run_budget_usd`, `gate_command`, `gate_timeout_seconds`, `daily_budget_usd`, `notify`, `notify_channel` and `notify_chat` (both or neither), `enabled` (false when created), `enabled_at` (when it was created or last enabled; the no-success alert counts from it), `next_fire_at` (null while disabled), `last_fired_at`, `last_success_at`, `last_ok_at`, `consecutive_failures`, `failures_alert_at` and `stale_alert_at` (set while that alert is active), `created_via`; a project with schedules is not deleted |
+| `schedules` | A project's schedules: `name` (unique in the project ignoring case), `cron`, `timezone`, `requirement`, `work_dir` (`''`: the project's default), `overlap`, `catch_up`, `run_timeout_seconds`, `run_budget_usd`, `gate_command`, `gate_timeout_seconds`, `daily_budget_usd`, `notify`, `notify_channel` and `notify_chat` (both or neither), `enabled` (false when created), `enabled_at` (when it was created or last enabled) and `rule_changed_at` (when its rule or zone last changed; the no-success alert counts from the later of them), `next_fire_at` (null while disabled), `last_fired_at`, `last_success_at`, `last_ok_at`, `consecutive_failures`, `failures_alert_at` and `stale_alert_at` (set while that alert is active), `created_via`; a project with schedules is not deleted |
 | `schedule_profile_overrides` | A schedule's Agent Profile per task role, copied into each task it fires; a profile a schedule chose is not deleted |
 | `schedule_runs` | Each firing of a schedule: `scheduled_for`, `fired_at`, `trigger` (`scheduled`, `catch_up`, `manual`), `missed`, `status` (`queued`, `gating`, `running`, then once `completed`, `failed`, `stopped`, `cancelled`, `timed_out`, `gate_failed`, or `skipped_overlap`, `skipped_missed`, `skipped_gate`, `skipped_budget`), `task_id` (null when skipped, or once the task is deleted), `summary`, `cost_usd`, `error`, `gate_output`, `carried_from` (the run whose unfinished input it was given), `finished_at`, `firings` (how many firings it stands for: a repeated skip is counted on one run, from `scheduled_for` to `finished_at`); going with its schedule |
 | `schedule_notifications` | Every message about a schedule: `run_id`, `kind` (`run`, `failures_alert`, `failures_recovered`, `stale_alert`, `stale_recovered`), `channel`, `chat`, `text`, `status` (`sent`, `failed`, `dashboard`), `error`; going with its schedule |
