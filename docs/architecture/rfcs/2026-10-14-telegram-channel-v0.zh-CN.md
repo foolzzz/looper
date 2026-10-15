@@ -132,7 +132,7 @@
 管家 `self._followup` 是**单个全局槽**，别的 chat 插话会把你这个 chat 的待确认 followup 弹掉丢弃。改成 **per-(channel,chat) dict**（每个会话各存各的），正好贴合「共享 manager 但各渠道/会话状态独立」。小改 manager.py，低风险。
 
 ### 已知边界（非 v1 目标）
-- **无法主动推送到任意 chat**：自主回复只回「最近应答过的那个 correlation 的 chat」，管家不把 `chat_id` 放进出站 payload。→「任务完成主动 TG 通知」要做得加管家侧指定 chat 目标，另立 RFC。
+- **主动推送到指定 chat（已具备）**：`ChannelRegistry.notify(channel_type, chat, text)` 是现成的出站原语（定时任务通知已在用）。任务完成通知即建于其上：任务记录 `chat_id`（随 TASK_REQUEST 入库），完成/失败时 TaskRouter 用 `registry.notify` 向原 Telegram/Lark chat 推一行；Web 跳过（看面板）。
 - `/new` 重置的是**全局** session（任意渠道发都重置所有）——符合「共享一个 session」的语义；在 `/help` 里说明即可。
 
 ## 6. 分期与改动文件
