@@ -104,7 +104,8 @@ async def _populate(monkeypatch: pytest.MonkeyPatch, pool: Any, work_dir: Path) 
     await _ok("PUT", "/api/agent-settings/system", {"harness_prompt": "Be careful.", "profile_id": sonnet,
                                                     "effort": "high", "env": [{"key": "LOOPER_MODE", "value": "a"}]})
     await _ok("PUT", "/api/agent-settings/roles/worker", {"profile_id": "agent-claude-code-opus", "run_budget_usd": 2.5,
-                                                          "env": [{"key": "LOOPER_MODE", "value": None}]})
+                                                          "env": [{"key": "LOOPER_MODE", "value": None}],
+                                                          "max_concurrency": 6})
     await _ok("PUT", "/api/roles/planner", {"system_prompt": "Plan in small steps.", "timeout_seconds": 900})
     await _ok("PUT", "/api/channel-configs/channel-telegram", {"enabled": True, "config": {
         "bot_token_env": "MY_TG_TOKEN", "allowed_user_ids": ["123456789"], "webhook_secret": SECRET}})
@@ -135,7 +136,8 @@ async def _populate(monkeypatch: pytest.MonkeyPatch, pool: Any, work_dir: Path) 
                                                 "distill_lessons": True}))["project_id"]
     docs = (await _ok("POST", "/api/projects", {"name": "docs"}))["project_id"]
     await _ok("PUT", f"/api/projects/{calc}/agent-settings", {"profile_id": beta_haiku})
-    await _ok("PUT", f"/api/projects/{calc}/agent-settings/roles/worker", {"harness_prompt": "Test first."})
+    await _ok("PUT", f"/api/projects/{calc}/agent-settings/roles/worker", {"harness_prompt": "Test first.",
+                                                                           "max_concurrency": 2})
     from looper.agents.knowledge import add_document
 
     runtime_root = work_dir.parent / "runtime"
@@ -175,7 +177,7 @@ def _without_ids(view: dict[str, Any]) -> dict[str, Any]:
 
 async def _state(pool: Any) -> dict[str, Any]:
     """An installation's configuration as agents and the dashboard see it, without ids or times."""
-    from looper.agents.agent_settings import TASK_ROLES, index_layers, resolve
+    from looper.agents.agent_settings import TASK_ROLES, index_layers, resolve, resolve_concurrency
     from looper.agents.config_transfer import role_entry
     from looper.db import agent_setting_layers
     from looper.db import config_transfer as db
@@ -199,6 +201,8 @@ async def _state(pool: Any) -> dict[str, Any]:
             "project_settings": {(names[p], role.value): _without_ids(resolve(role, index_layers(in_projects[p], p),
                                                                               p).view())
                                  for p in names for role in TASK_ROLES},
+            "concurrency": {(names.get(p), role.value): resolve_concurrency(role, index_layers(rows, p), p).view()
+                            for p, rows in [(None, layers), *in_projects.items()] for role in TASK_ROLES},
             "runtimes": [{k: r[k] for k in ("name", "type", "executable", "capabilities")}
                          for r in await db.read_runtimes(conn)],
             "providers": [{k: v for k, v in r.items() if k != "id"} for r in await db.read_providers(conn)],
@@ -605,6 +609,11 @@ def test_a_file_exported_by_v2_6_0_imports_and_exports_again_under_the_new_names
             assert plan["counts"]["profiles"] == {"added": 3, "changed": 0, "unchanged": 0, "skipped": 0}
             assert not [c for c in plan["changes"] if c["action"] == "skipped"], plan
             assert plan["need_secret"] == [{"section": "providers", "key": "glm", "names": ["api_key"]}]
+            # Each role's max_concurrency is ignored, and one note says so.
+            assert [n for n in plan["notes"] if "max_concurrency" in n] == [
+                "settings.roles: a role's max_concurrency is no longer a role setting and was ignored; how many "
+                "Planners (tasks), Workers and Reviewers run at once in a project is the max_concurrency of their "
+                "role layers"]
 
             from looper.db import config_transfer as db
 
@@ -622,7 +631,7 @@ def test_a_file_exported_by_v2_6_0_imports_and_exports_again_under_the_new_names
             assert new["format"] == "looper-config/v2" and "agents" not in new
 
             def renamed(layer: dict[str, Any]) -> dict[str, Any]:
-                return {("profile" if k == "agent" else k): v for k, v in layer.items()}
+                return {**{("profile" if k == "agent" else k): v for k, v in layer.items()}, "max_concurrency": None}
 
             expected = {k: v for k, v in old.items() if k not in ("exported_at", "agents")}
             expected.update(format="looper-config/v2", looper_version=new["looper_version"], runtimes=[],
@@ -631,7 +640,8 @@ def test_a_file_exported_by_v2_6_0_imports_and_exports_again_under_the_new_names
             _by_name(expected["profiles"], "beta/haiku")["runtime"] = "claude-code"
             # The file left the provider's key out, so none is stored here to export.
             expected["providers"] = [{**_by_name(old["providers"], "glm"), "api_key": None}]
-            expected["settings"] = {**old["settings"], "layers": [renamed(x) for x in old["settings"]["layers"]]}
+            expected["settings"] = {"layers": [renamed(x) for x in old["settings"]["layers"]], "roles": [
+                {k: v for k, v in role.items() if k != "max_concurrency"} for role in old["settings"]["roles"]]}
             expected["projects"] = [{**p, "layers": [renamed(x) for x in p["layers"]]} for p in old["projects"]]
             assert new == expected
 

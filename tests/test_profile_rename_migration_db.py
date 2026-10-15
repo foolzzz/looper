@@ -33,7 +33,7 @@ pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not
 MAIN = json.loads((Path(__file__).parent / "fixtures" / "profile_rename_parity_main.json").read_text("utf-8"))
 
 # Each renamed table before and after, with its key and the columns that were renamed (old -> new). A column the
-# rename drops is in DROPPED; every other column keeps its name and value.
+# rename, or a later migration of main, drops is in DROPPED; every other column keeps its name and value.
 RENAMED = [
     ("agent_configs", "role_configs", "agent_id", {"agent_id": "role"}),
     ("agents", "agent_profiles", "id", {}),
@@ -41,9 +41,9 @@ RENAMED = [
     ("agent_setting_layers", "agent_setting_layers", "scope, role, project_id", {"agent_id": "profile_id"}),
     ("agent_sessions", "agent_sessions", "agent_id", {"session_agent_id": "profile_id"}),
 ]
-DROPPED = {"agent_configs": {"role"}}
-# What a later migration of main adds to a v2.6.0 database, not the rename's doing: a column, and a built-in row.
-ADDED = {"agent_sessions": {"clean_start": False}}
+DROPPED = {"agent_configs": {"role", "max_concurrency"}}
+# What a later migration of main adds to a v2.6.0 database, not the rename's doing: columns, and a built-in row.
+ADDED = {"agent_sessions": {"clean_start": False}, "agent_setting_layers": {"max_concurrency": None}}
 ADDED_ROWS = {"llm_providers": {"prov-codex-login"}}
 UNCHANGED = ["agent_runtimes", "llm_providers", "llm_provider_secrets", "projects", "tasks"]
 
