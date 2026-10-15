@@ -92,20 +92,24 @@ def test_resumable_tasks_and_restart_cleanup(monkeypatch: pytest.MonkeyPatch) ->
     async def test(pool: Any) -> None:
         for task_id, status, plan_status in (("task-live", "running", "executing"),
                                              ("task-review", "running", "verifying"),
+                                             ("task-verifying", "verifying", "executing"),
                                              ("task-ended", "running", "failed"),
                                              ("task-stopped", "stopped", "executing"),
-                                             ("task-unplanned", "running", None)):
+                                             ("task-unplanned", "running", None),
+                                             ("task-planning", "planning", "planning")):
             await _task(pool, task_id, status=status)
             if plan_status:
                 await plans.save(task_id, plan={"plan_id": f"plan-{task_id}", "status": plan_status},
                                  steps=[{"id": f"step-{task_id}", "index": 0, "instruction": "x"}], pool=pool)
                 await agent_sessions.save_session(f"planner-{task_id}", "sess", {"cost_usd": 0.1}, pool=pool)
         resumable = await plans.resumable_task_ids(tasks.ACTIVE_STATUSES, pool=pool)
-        assert resumable == ["task-live", "task-review"]
-        assert await tasks.mark_orphaned_tasks_stopped(keep=resumable, pool=pool) == 2
+        # A task the Planner left in one of its own statuses counts as running too.
+        assert resumable == ["task-live", "task-review", "task-verifying"]
+        assert await tasks.mark_orphaned_tasks_stopped(keep=resumable, pool=pool) == 3
         statuses = {t["id"]: t["status"] for t in await tasks.list_tasks(pool=pool)}
-        assert statuses == {"task-live": "running", "task-review": "running", "task-ended": "stopped",
-                            "task-stopped": "stopped", "task-unplanned": "stopped"}
+        assert statuses == {"task-live": "running", "task-review": "running", "task-verifying": "verifying",
+                            "task-ended": "stopped", "task-stopped": "stopped", "task-unplanned": "stopped",
+                            "task-planning": "stopped"}
 
         # Continuing keeps the plan and the session; starting anew and deleting drop them.
         await tasks.reset_task_for_restart("task-live", keep_steps=True, pool=pool)

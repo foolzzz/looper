@@ -209,3 +209,31 @@ def test_todays_spend_keeps_money_apart_from_the_subscription_equivalent(monkeyp
         assert (spend["runs"], spend["running"], spend["unpriced_runs"]) == (7, 1, 1)
 
     _run(test, monkeypatch)
+
+
+def test_a_planning_or_verifying_task_is_active_for_the_sidebar_and_the_delete_guard(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from looper.db import projects
+
+    async def test(pool: Any) -> None:
+        project = await projects.create_project(name="alpha", pool=pool)
+        for status in ("planning", "verifying", "executing", "pending", "init", "completed"):
+            await pool.execute("INSERT INTO tasks (id, requirement, project_id, status) VALUES ($1, 'x', $2, $1)",
+                               status, project["id"])
+
+        status, body = await _get(_server(), "/api/projects")
+        assert status == 200
+        (listed,) = body["projects"]
+        assert (listed["task_count"], listed["active_count"]) == (6, 4)
+        status, body = await _get(_server(), "/api/tasks")
+        assert {t["task_id"]: t["group"] for t in body["tasks"]} == {
+            "planning": "in_progress", "verifying": "in_progress", "executing": "in_progress", "pending": "queued",
+            "init": "ready", "completed": "completed"}
+
+        server, writer = _server(), _Writer()
+        await server._route_api("POST", "/api/tasks/delete", {}, json.dumps({"task_id": "planning"}).encode(), writer)
+        assert writer.data.startswith(b"HTTP/1.1 400") and b"stop the task before deleting" in writer.data
+        assert await pool.fetchval("SELECT count(*) FROM tasks WHERE id = 'planning'") == 1
+
+    _run(test, monkeypatch)

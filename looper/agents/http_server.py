@@ -18,6 +18,7 @@ from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
+from ..db.tasks import TaskGroup, task_group
 from . import (
     agent_settings, catalog, catalog_sources, config_imports, config_transfer, knowledge, library, mcp, overview,
     profile_registry, project_skills, projects, request_guard, self_check,
@@ -570,7 +571,6 @@ class AgentHTTPServer:
         await writer.drain()
 
     async def _handle_list_tasks(self, query: dict[str, str], writer: asyncio.StreamWriter) -> None:
-        from ..db.tasks import TaskGroup
         try:
             group = TaskGroup(query["group"]) if query.get("group") else None
         except ValueError:
@@ -593,6 +593,7 @@ class AgentHTTPServer:
                     "project_name": t.get("project_name", ""),
                     "work_dir": t.get("work_dir", ""),
                     "status": t.get("status", "pending"),
+                    "group": task_group(t.get("status")).value,
                     "phase": t.get("phase", "pending"),
                     "planner_id": t.get("planner_id"),
                     "correlation_id": t.get("correlation_id", ""),
@@ -1005,6 +1006,7 @@ class AgentHTTPServer:
             "project_id": raw.get("project_id", ""),
             "project_name": raw.get("project_name", ""),
             "status": raw.get("status", "pending"),
+            "group": task_group(raw.get("status")).value,
             "phase": raw.get("phase", "pending"),
             "planner_id": raw.get("planner_id"),
             "correlation_id": raw.get("correlation_id", ""),

@@ -14,8 +14,6 @@ import asyncpg
 from . import journal as db_journal
 from .connection import get_pool
 
-# A task in one of these is queued or running.
-ACTIVE_STATUSES = ("pending", "assigned", "running", "executing")
 # A ready task: created (from the dashboard or by the Manager) and never started. Only a user starts it
 # (``start_ready_task``); a server start never resumes it.
 READY = "init"
@@ -49,6 +47,12 @@ STATUS_GROUPS: Mapping[str, TaskGroup] = MappingProxyType({
     "completed": TaskGroup.COMPLETED,
     "cancelled": TaskGroup.CANCELLED,
 })
+
+
+# A task in one of these is queued or running: the sidebar's active count, the guard on deleting, and what a server
+# start resumes (with a live plan) or else marks stopped.
+ACTIVE_STATUSES = tuple(status for status, group in STATUS_GROUPS.items()
+                        if group in (TaskGroup.IN_PROGRESS, TaskGroup.QUEUED))
 
 
 def task_group(status: str | None) -> TaskGroup:
