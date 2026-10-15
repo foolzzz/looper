@@ -363,6 +363,10 @@ def test_a_gated_schedule_every_minute_counts_its_repeated_skips_on_one_run(monk
         # The dashboard counts every skipped firing of the day, not the runs.
         skipped = (await schedule_overview(NOON - timedelta(hours=12)))["skipped_today"]
         assert (skipped["skipped_gate"], skipped["skipped_overlap"]) == (4, 2)
+        # So does a schedule's run history, over its whole history, shown or left out.
+        status, listed = await env.call("GET", f"/api/schedules/{sid}/runs", query={"skips": "hide"})
+        assert (status, listed["routine_skips"]) == (200, {"skipped_gate": 4, "skipped_overlap": 2})
+        assert [run["status"] for run in listed["runs"]] == ["completed"]
         assert env.bus.of("task_start") == [task_id]
 
     _run(test, monkeypatch, tmp_path)

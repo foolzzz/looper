@@ -245,10 +245,11 @@ async def list_runs(schedule_id: str, *, limit: int, before: str | None = None, 
 
 
 async def run_counts(schedule_id: str, statuses: Sequence[str], *, pool: Db | None = None) -> dict[str, int]:
-    """How many of the schedule's runs have each of ``statuses`` (0 for none)."""
+    """How many of the schedule's firings ended with each of ``statuses`` (0 for none): a run that counts repeated
+    skips counts each of its ``firings``."""
     db = pool or get_pool()
     rows = await db.fetch(
-        "SELECT status, count(*) AS n FROM schedule_runs WHERE schedule_id = $1 AND status = ANY($2::text[]) "
+        "SELECT status, sum(firings) AS n FROM schedule_runs WHERE schedule_id = $1 AND status = ANY($2::text[]) "
         "GROUP BY status",
         schedule_id, list(statuses),
     )
