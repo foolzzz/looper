@@ -37,6 +37,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import shutil
 import uuid
 from dataclasses import dataclass, field
@@ -182,6 +183,11 @@ PROJECTS_OFFERED = 10
 FOLLOWUP_CHATS = 50
 # The actions Claude's JSON may name.
 ACTIONS = ("task_request", "task_start")
+# An action named as a JSON field, found in a reply whose action object could not be read: nothing was run, so the
+# reply, which may claim it was, is not sent.
+ACTION_FIELD = re.compile(r'"action"\s*:\s*"(' + "|".join(map(re.escape, ACTIONS)) + r')"')
+# Prose before the action object longer than this is Claude still talking to the user: the action is not run.
+PROSE_BEFORE_ACTION_CHARS = 20
 
 # Where a setting in a task's configuration came from (``agent_settings.Layer``), named as the dashboard names it.
 SOURCE_WORDS = {
@@ -273,6 +279,30 @@ class _NewProject:
 
     def same(self, other: _NewProject) -> bool:
         return self.name.casefold() == other.name.casefold() and self.work_dir == other.work_dir
+
+
+def action_object(text: str) -> tuple[dict[str, Any], int] | None:
+    """The action object a reply carries and where it starts: an object naming one of ``ACTIONS``, decoded with
+    ``raw_decode`` (so text after it is allowed) in the first ```` ```json ```` fence, else at the first ``{``. The
+    start is the fence's for a fenced object. None when neither is one."""
+    decoder = json.JSONDecoder()
+    candidates: list[tuple[int, int]] = []  # (where the object starts, where the action starts)
+    fence = text.find("```json")
+    if fence >= 0:
+        brace = text.find("{", fence)
+        if brace >= 0 and not text[fence + len("```json"):brace].strip():
+            candidates.append((brace, fence))
+    first = text.find("{")
+    if first >= 0:
+        candidates.append((first, first))
+    for brace, start in candidates:
+        try:
+            data, _ = decoder.raw_decode(text, brace)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(data, dict) and data.get("action") in ACTIONS:
+            return data, start
+    return None
 
 
 def _role_line(role: AgentType, settings: AgentSettings) -> str:
@@ -537,6 +567,13 @@ class ManagerAgent:
         if parsed.get("needs_clarification"):
             clarification = parsed.get("clarification_text", "")
             await self._send_reply(envelope, clarification)
+        elif unread := parsed.get("unread_action"):
+            # Never pass on a reply that names an action Looper did not run: it may say the action was done.
+            self._keep_followup(_Followup(chat, (
+                f"[Looper] Looper could not read the {unread} JSON in your last reply in this chat, so it ran "
+                "nothing and told the user so. Output the action JSON as one object, first in your reply."
+            )))
+            await self._send_reply(envelope, f"没有执行：这次回复里的 {unread} 操作没能读出来，所以什么都没做。请再说一次。")
         elif parsed.get("action") == "task_request":
             try:
                 project, work_dir, created = await self._place_task(
@@ -1289,51 +1326,27 @@ class ManagerAgent:
         return lines
 
     def _parse_response(self, response: str) -> dict[str, Any]:
+        """Claude's reply as the action it asks for, or as text to send.
+
+        The action object (``action_object``) is run, and the text after it
+        dropped: the reply the user gets is the one code writes for the action.
+        Prose of more than ``PROSE_BEFORE_ACTION_CHARS`` before it is Claude
+        still talking: only that prose is sent (``needs_clarification``). A
+        reply that names an action in JSON Looper could not read is never sent
+        (``unread_action``).
+        """
         response = response.strip()
-
-        task_json: dict[str, Any] | None = None
-        json_start = -1
-
-        if response.startswith("{"):
-            try:
-                data = json.loads(response)
-                if isinstance(data, dict) and data.get("action") in ACTIONS:
-                    task_json = data
-                    json_start = 0
-            except json.JSONDecodeError:
-                pass
-
-        if task_json is None and "```json" in response:
-            try:
-                fence = response.index("```json")
-                start = fence + 7
-                end = response.index("```", start)
-                data = json.loads(response[start:end].strip())
-                if isinstance(data, dict) and data.get("action") in ACTIONS:
-                    task_json = data
-                    json_start = fence
-            except (json.JSONDecodeError, ValueError):
-                pass
-
-        if task_json is None and "{" in response:
-            idx = response.index("{")
-            candidate = response[idx:]
-            try:
-                data = json.loads(candidate)
-                if isinstance(data, dict) and data.get("action") in ACTIONS:
-                    task_json = data
-                    json_start = idx
-            except json.JSONDecodeError:
-                pass
-
-        if task_json is not None:
-            prose_before = response[:json_start].strip() if json_start > 0 else ""
-            if prose_before and len(prose_before) > 20:
-                task_json["needs_clarification"] = True
-                task_json["clarification_text"] = prose_before
-                return task_json
-            return task_json
-
+        found = action_object(response)
+        if found is not None:
+            action, start = found
+            prose_before = response[:start].strip()
+            if len(prose_before) > PROSE_BEFORE_ACTION_CHARS:
+                return {**action, "needs_clarification": True, "clarification_text": prose_before}
+            return action
+        if named := ACTION_FIELD.search(response):
+            logger.warning("manager: Claude's reply names the %s action in JSON Looper could not read; nothing ran",
+                           named.group(1))
+            return {"unread_action": named.group(1)}
         return {"response_text": response}
 
     async def _persist_chat(
