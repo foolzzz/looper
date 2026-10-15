@@ -32,6 +32,14 @@ const SENDER_ALLOWLISTS: Record<string, { field: string; label: string; pattern:
 };
 const MAX_SENDERS = 100;
 
+/** The server's secret sentinel: sending it back keeps the stored token unchanged (looper/agents/profile_registry.py). */
+const SECRET_MASK = "***";
+
+/** Channels whose bot token is stored server-side (masked). */
+const TOKEN_CHANNELS: Record<string, { label: string; hint: string }> = {
+  telegram: { label: "Bot token", hint: "From @BotFather. Stored on the server and never shown; leave as is to keep it, clear to remove it." },
+};
+
 /** The ids stored in an allowlist field: a list, or one comma-separated string as older Telegram settings hold it. */
 function storedIds(raw: unknown): string[] {
   if (Array.isArray(raw)) return raw.map(String);
@@ -55,6 +63,9 @@ function ChannelCard({ channel, onSaved }: { channel: ChannelConfig; onSaved: ()
   const [enabled, setEnabled] = useState(channel.enabled);
   const [fields, setFields] = useState<Record<string, string>>(stringFields(saved, skip));
   const [ids, setIds] = useState<string[]>(allowlist ? storedIds(saved[allowlist.field]) : []);
+  const tokenChannel = TOKEN_CHANNELS[channel.channel_type];
+  // Prefilled with the mask when a token is stored: sending it back unchanged keeps it.
+  const [botToken, setBotToken] = useState(channel.has_bot_token ? SECRET_MASK : "");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const [justSaved, setJustSaved] = useState(false);
@@ -90,7 +101,10 @@ function ChannelCard({ channel, onSaved }: { channel: ChannelConfig; onSaved: ()
     try {
       const config: Record<string, unknown> = { ...saved, ...fields };
       if (allowlist) config[allowlist.field] = ids.map((value) => value.trim());
-      await updateChannelConfig(channel.channel_id, { enabled, config });
+      const payload: Partial<ChannelConfig> & { bot_token?: string } = { enabled, config };
+      // Only send the token when it changed from the mask; the mask would keep it anyway, but this avoids a needless write.
+      if (tokenChannel && botToken !== SECRET_MASK) payload.bot_token = botToken;
+      await updateChannelConfig(channel.channel_id, payload);
       setJustSaved(true);
       setTimeout(() => setJustSaved(false), 2000);
       onSaved();
@@ -134,6 +148,24 @@ function ChannelCard({ channel, onSaved }: { channel: ChannelConfig; onSaved: ()
           <div role="status" className="flex items-start gap-2 rounded-md border border-warning/50 bg-warning/10 px-3 py-2 text-xs text-foreground">
             <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-warning" />
             <span>Does not start: {startProblem}.</span>
+          </div>
+        )}
+
+        {tokenChannel && (
+          <div>
+            <label htmlFor={`${id}-bot_token`} className="block text-xs font-medium text-muted-foreground mb-1.5">
+              {tokenChannel.label}
+            </label>
+            <input
+              id={`${id}-bot_token`}
+              type="password"
+              autoComplete="off"
+              value={botToken}
+              onChange={(e) => setBotToken(e.target.value)}
+              placeholder={channel.has_bot_token ? "" : "123456:ABC-DEF…"}
+              className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground outline-none focus:ring-2 focus:ring-ring"
+            />
+            <p className="mt-1 text-[10px] text-muted-foreground">{tokenChannel.hint}</p>
           </div>
         )}
 
