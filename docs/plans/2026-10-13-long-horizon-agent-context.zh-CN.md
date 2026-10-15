@@ -638,7 +638,7 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
 
 以下行为已实现，但还没有在真实环境中验证过，相关改动或排查时优先补上：
 
-- **飞书、Telegram 的真实流量**：飞书私聊的收发已经实测过（2026-10-15，维护者给自己的飞书机器人发私聊，收到消息并以 Markdown 回复）。收到消息时的表情、状态消息原地编辑、任务进度和结束通知还没在真实飞书里验证。Telegram 仍只用本地替身验证过（M1.7、#26）。
+- **飞书、Telegram 的真实流量**：飞书私聊的收发已经实测过（2026-10-15，维护者给自己的飞书机器人发私聊，收到消息并以 Markdown 回复）。收到消息时的「Get」表情和单条状态消息的原地编辑也已实测（2026-10-15，维护者在真实飞书里看到表情出现、同一条状态消息原地更新）；任务进度和任务结束通知还没在真实飞书里验证。Telegram 仍只用本地替身验证过（M1.7、#26）。
 - ~~**agent teams**~~（已覆盖，looper #80）：Looper 从未下发 `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS`，它在 `--setting-sources project` 隔离之前随操作者的个人设置进来，之后仍会随从 Claude Code shell 启动的服务继承进来；现在由 Agent Profile 的 `agent_teams` 决定（Claude Code profile 默认开），真实运行见第 4 节台账，已知差距见第 5.2 节。
 - **多个后台任务同时结束**的自主轮切分（#26）。
 - **DeepSeek、Kimi 和 GLM 国际站的真实 key**（M9b）：预设按官方文档填写，真实运行只覆盖了本机 CPA 和 GLM（BigModel），DeepSeek 只经 `looper serve` 跑过 agent teams 的两个单步任务（looper #80），没跑 M6 评测。
