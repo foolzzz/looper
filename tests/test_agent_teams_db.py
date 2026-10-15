@@ -131,8 +131,11 @@ def test_the_manager_workers_and_reviewers_start_with_agent_teams_only_when_thei
             assert (_teammate_mode(seen["argv"]), seen["env"].get(TEAMS) == "1") == expected, role
             assert role != "planner" or TEAMS not in seen["env"]
 
-        # Off, the variable is gone even when the server's environment or the settings' variables set it.
-        await _ok("PUT", "/api/agent-settings/system", {"profile_id": off, "env": [{"key": TEAMS, "value": "1"}]})
+        # Off, the variable is gone even when the server's environment or the settings' variables set it. The API
+        # refuses it in a layer's environment now; a layer stored before still has it.
+        await _ok("PUT", "/api/agent-settings/system", {"profile_id": off})
+        await _pool.execute("UPDATE agent_setting_layers SET env = $1::jsonb WHERE scope = 'system'",
+                            json.dumps([{"key": TEAMS, "value": "1"}]))
         for role in roles:
             seen = await _seen(role, task, tmp_path)
             assert (_teammate_mode(seen["argv"]), TEAMS in seen["env"]) == (None, False), role
