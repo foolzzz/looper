@@ -83,13 +83,32 @@ def test_the_gate_output_and_the_previous_unfinished_input_share_the_room() -> N
     schedule = {**SCHEDULE, "gate_command": "python3 new_alerts.py"}
     carried = Carried("srun-1", "failed", NOW - 30 * MINUTE, "alert-7\nalert-8")
     text = run_context(schedule, Firing(Trigger.SCHEDULED, NOW), [], description="Every 30 minutes",
-                       gate_output="alert-9 ```code```\n" + "y" * 2000, carried=carried, room=900)
+                       gate_output="alert-9 ```code```\n" + "y" * 2000, carried=[carried], room=900)
     assert "- 前置检查（`python3 new_alerts.py`）的输出就是这一轮的输入：只处理这些，不要再自己运行这条命令或读它的来源去找别的条目：\n````\nalert-9 ```code```" in text
     assert "[截断：还有 1419 个字符，完整内容见这次运行的记录]" in text  # two thirds of 900 for its own output
     assert "- 上一轮未完成：2026-10-15 08:30 PDT 的运行失败" in text and "```\nalert-7\nalert-8\n```" in text
     assert text.index("前置检查（") < text.index("上一轮未完成") < text.index("这是第一次")
     # Without them the section is as before.
     assert "前置检查" not in run_context(schedule, Firing(Trigger.SCHEDULED, NOW), [], description="d")
+
+
+def test_every_earlier_unfinished_input_gets_its_own_block_the_oldest_left_out_when_it_does_not_fit() -> None:
+    from looper.agents.scheduler import CARRIED_MIN_CHARS, Carried
+
+    schedule = {**SCHEDULE, "gate_command": "python3 new_alerts.py"}
+    carried = [Carried(f"srun-{n}", status, NOW - (40 - 10 * n) * MINUTE, f"alert-{n}")
+               for n, status in ((1, "failed"), (2, "timed_out"), (3, "failed"))]
+    text = run_context(schedule, Firing(Trigger.SCHEDULED, NOW), [], description="d", carried=carried, room=2000)
+    blocks = [line for line in text.splitlines() if line.startswith("- 上一轮未完成：")]
+    assert blocks == ["- 上一轮未完成：2026-10-15 08:30 PDT 的运行失败，它的前置检查输出如下；这一轮请一并处理还没完成的部分：",
+                      "- 上一轮未完成：2026-10-15 08:40 PDT 的运行超时被停止，它的前置检查输出如下；这一轮请一并处理还没完成的部分：",
+                      "- 上一轮未完成：2026-10-15 08:50 PDT 的运行失败，它的前置检查输出如下；这一轮请一并处理还没完成的部分："]
+    assert text.index("alert-1") < text.index("alert-2") < text.index("alert-3") and "另有" not in text
+    # Room for two: the newest two are kept, and the oldest is counted.
+    tight = run_context(schedule, Firing(Trigger.SCHEDULED, NOW), [], description="d", carried=carried,
+                        room=2 * CARRIED_MIN_CHARS + 10)
+    assert "- 另有 1 次更早的运行也没有完成，这里放不下它们的前置检查输出，见各自的运行记录。" in tight
+    assert "alert-1" not in tight and "alert-2" in tight and "alert-3" in tight
 
 
 @pytest.mark.parametrize(("notify", "status", "sent"), [

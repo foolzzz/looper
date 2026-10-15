@@ -19,9 +19,9 @@ import asyncpg
 from .connection import get_pool
 
 # The schedule fields a request sets (looper/agents/schedules.py validates them).
-FIELDS = ("name", "cron", "timezone", "requirement", "work_dir", "overlap", "catch_up", "run_timeout_seconds",
-          "run_budget_usd", "gate_command", "gate_timeout_seconds", "daily_budget_usd", "notify", "notify_channel",
-          "notify_chat")
+FIELDS = ("name", "cron", "timezone", "requirement", "work_dir", "overlap", "max_parallel_runs", "catch_up",
+          "run_timeout_seconds", "run_budget_usd", "gate_command", "gate_timeout_seconds", "daily_budget_usd", "notify",
+          "notify_channel", "notify_chat")
 
 QUEUED = "queued"
 GATING = "gating"
@@ -340,14 +340,26 @@ async def recent_runs(conn: Db, schedule_id: str, *, limit: int) -> list[dict[st
     return [dict(row) for row in rows]
 
 
-async def previous_run(conn: Db, schedule_id: str, *, before: str | None = None) -> dict[str, Any] | None:
-    """The schedule's latest run that ran something and has ended (not ``before``, the run being started)."""
-    row = await conn.fetchrow(
-        f"{_RUN} WHERE r.schedule_id = $1 AND NOT (r.status = ANY($2::text[])) AND r.id IS DISTINCT FROM $3 "
-        "ORDER BY r.created_at DESC, r.id DESC LIMIT 1",
-        schedule_id, [*OPEN_STATUSES, *NOTHING_RAN], before,
+async def unhanded_runs(conn: Db, schedule_id: str, *, besides: str | None = None) -> list[dict[str, Any]]:
+    """The schedule's runs that ended without finishing their input (``UNFINISHED``, with a gate output) and have not
+    handed it on to a later run yet (``carried_on``), oldest to end first; not ``besides``, the run being started.
+    A ``parallel`` schedule's runs end in any order, and several may fail before the next one starts."""
+    rows = await conn.fetch(
+        """
+        SELECT * FROM schedule_runs
+        WHERE schedule_id = $1 AND status = ANY($2::text[]) AND NOT carried_on AND finished_at IS NOT NULL
+          AND btrim(COALESCE(gate_output, '')) <> '' AND id IS DISTINCT FROM $3
+        ORDER BY finished_at, id
+        """,
+        schedule_id, list(UNFINISHED), besides,
     )
-    return dict(row) if row else None
+    return [dict(row) for row in rows]
+
+
+async def hand_on(conn: Db, run_ids: Sequence[str]) -> None:
+    """Mark these runs' unfinished input as handed on: no later run is given it again."""
+    if run_ids:
+        await conn.execute("UPDATE schedule_runs SET carried_on = true WHERE id = ANY($1::text[])", list(run_ids))
 
 
 async def spent_since(conn: Db, schedule_id: str, since: datetime) -> float:
