@@ -995,7 +995,7 @@ class PlannerAgent:
                 target=TASK_ROUTER_ADDRESS,
                 message_type=MessageType.GOAL_STATUS,
                 payload={"task_id": self._task_id, "status": "failed",
-                         "summary": "任务失败:\nCannot resume after a server restart: the saved plan cannot be read"},
+                         "summary": "Cannot resume after a server restart: the saved plan cannot be read"},
                 correlation_id=envelope.correlation_id,
             ))
             return

@@ -39,6 +39,7 @@ from ..message import (
     planner_address,
 )
 from ..schedule_notify import Sender
+from ..task_notice import NotifyChannel, ends_task, notice_text, notify_channel
 from .planner import PlannerAgent, closing_note
 
 logger = logging.getLogger(__name__)
@@ -107,8 +108,9 @@ class TaskRouter:
     ) -> None:
         self._runtime_root = runtime_root
         self._on_task_end = on_task_end
-        # Pushes a one-line notice to the chat a task came from when it finishes (the server's channels; None: off).
+        # Tells the chat a task came from that it ended (the server's channels, ``task_notice``; None: off).
         self._sender = sender
+        self._notices: set[asyncio.Task[None]] = set()  # notices being sent
         self._claude_bin = claude_bin  # each task's Planner runs it
         self._bus: MessageBus | None = None
         self._tasks: dict[str, Task] = {}
@@ -144,6 +146,9 @@ class TaskRouter:
                 await self._loop_task
             except asyncio.CancelledError:
                 pass
+        for notice in list(self._notices):
+            notice.cancel()
+        await asyncio.gather(*self._notices, return_exceptions=True)
         for planner in list(self._planners.values()):
             await planner.stop()
         self._planners.clear()
@@ -263,7 +268,7 @@ class TaskRouter:
                 status=db_tasks.READY,
                 correlation_id=envelope.correlation_id,
                 origin_channel_id=envelope.metadata.get("origin_channel_id") or "",
-                chat_id=payload.get("chat_id") or "",
+                chat_id=payload.get("chat_id") or None,
             )
         except Exception:
             logger.exception("failed to persist task %s", task_id)
@@ -422,39 +427,32 @@ class TaskRouter:
             metadata=envelope.metadata,
         ))
 
-        if status in ("completed", "failed"):
+        if ends_task(status):
             task.status = status  # teardown persists this; it would default to "completed"
-            await self._notify_origin_chat(task, status, summary)
             await self._teardown_task(task_id)
             await self.recheck()
+            self._tell_chat(task, status, summary)
 
-    async def _notify_origin_chat(self, task: Task, status: str, summary: str | None) -> None:
-        """Tell the Telegram chat a task came from that it finished, in one line.
-
-        Web tasks are skipped (the dashboard shows them, and the web channel cannot be sent to); a missing sender
-        (tests), channel or chat skips too. A channel's failure is logged, never raised into task teardown.
-
-        Lark is deferred: the chat id a Lark task stores is its conversation (``oc_...``), but the notify path
-        sends to a user open id (``ou_...``), so a Lark notice would target the wrong recipient. A chat-targeted
-        Lark send is a follow-up.
-        """
-        if self._sender is None or not task.chat_id:
+    def _tell_chat(self, task: Task, status: str, summary: str | None) -> None:
+        """Tell the chat a Telegram or Lark task came from that it ended (``task_notice``), in the background: a
+        slow channel holds up no routing. A web task, or one that recorded no chat, is not told."""
+        channel = notify_channel(task.origin_channel_id)
+        if self._sender is None or channel is None or not task.chat_id:
             return
-        channel_type = task.origin_channel_id.removeprefix("channel-")
-        if channel_type != "telegram":
-            return
-        detail = (summary or task.requirement or "").strip()
-        if status == "completed":
-            text = f"✅ 任务完成：{detail}" if detail else "✅ 任务完成"
-        else:
-            text = f"❌ 任务失败：{detail}" if detail else "❌ 任务失败"
+        notice = asyncio.ensure_future(self._send_notice(
+            task.task_id, channel, task.chat_id, notice_text(task.task_id, task.requirement, status, summary)))
+        self._notices.add(notice)
+        notice.add_done_callback(self._notices.discard)
+
+    async def _send_notice(self, task_id: str, channel: NotifyChannel, chat: str, text: str) -> None:
+        assert self._sender is not None
         try:
-            sent, error = await self._sender(channel_type, task.chat_id, text)
+            sent, error = await self._sender(channel.value, chat, text)
         except Exception:  # a channel's failure is the notice's, never the task's
-            logger.exception("task %s: could not notify its %s chat", task.task_id, channel_type)
+            logger.exception("task %s: could not tell its %s chat that it ended", task_id, channel.value)
             return
         if not sent:
-            logger.warning("task %s: the %s notification was not sent: %s", task.task_id, channel_type, error)
+            logger.warning("task %s: its %s chat was not told that it ended: %s", task_id, channel.value, error)
 
     async def _handle_cancel(self, envelope: MessageEnvelope) -> None:
         assert self._bus is not None

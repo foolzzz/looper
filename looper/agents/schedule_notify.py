@@ -79,7 +79,7 @@ def stale_deadline(rule: cron.CronRule, tz: Any, *, last_ok: datetime | None,
     return start + min(STALE_PERIODS * period, STALE_LIMIT)
 
 
-def _snippet(text: str | None) -> str:
+def snippet(text: str | None) -> str:
     flat = " ".join((text or "").split())
     return flat if len(flat) <= SNIPPET_CHARS else f"{flat[:SNIPPET_CHARS]}…"
 
@@ -96,8 +96,8 @@ def run_text(schedule: Mapping[str, Any], project_name: str, run: Mapping[str, A
     when = _local(run.get("fired_at") or run["scheduled_for"], schedule["timezone"])
     lines = [f"定时任务「{schedule['name']}」（项目 {project_name}）{when} 的运行："
              f"{STATUS_WORDS.get(run['status'], run['status'])}"]
-    if snippet := _snippet(run.get("summary") or run.get("error")):
-        lines.append(snippet)
+    if text := snippet(run.get("summary") or run.get("error")):
+        lines.append(text)
     cost = f"花费 ${format_usd(float(run['cost_usd']))}" if run.get("cost_usd") is not None else "无花费"
     link = f"/#tasks/{run['task_id']}" if run.get("task_id") else schedule_link(schedule)
     lines.append(f"{cost} · {link}")
@@ -108,8 +108,8 @@ def failures_alert_text(schedule: Mapping[str, Any], project_name: str, run: Map
     last = ""
     if run is not None:
         last = f"最近一次：{STATUS_WORDS.get(run['status'], run['status'])}"
-        if snippet := _snippet(run.get("summary") or run.get("error")):
-            last += f" · {snippet}"
+        if text := snippet(run.get("summary") or run.get("error")):
+            last += f" · {text}"
         last += "\n"
     return (f"告警：定时任务「{schedule['name']}」（项目 {project_name}）已连续失败 "
             f"{schedule['consecutive_failures']} 次。\n{last}{schedule_link(schedule)}")

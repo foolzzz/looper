@@ -60,7 +60,7 @@ class ChannelAdapter(ABC):
         ...
 
     async def notify(self, chat: str, text: str) -> DeliveryReceipt:
-        """Send ``text``, unprompted, to ``chat`` (a sender its allowlist lets in): a schedule's message."""
+        """Send ``text``, unprompted, to ``chat``: a schedule's message, or a task's end (``task_notice``)."""
         return DeliveryReceipt(channel=self.channel_type, success=False,
                                error=f"the {self.channel_type} channel cannot send notifications")
 

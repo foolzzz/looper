@@ -137,15 +137,15 @@ async def create_task(
     status: str = "pending",
     correlation_id: str = "",
     origin_channel_id: str = "",
-    chat_id: str = "",
+    chat_id: str | None = None,
     schedule_id: str | None = None,
     budget_usd: float | None = None,
     pool: asyncpg.Pool | asyncpg.Connection | None = None,
 ) -> dict[str, Any]:
     """Insert a task; ``schedule_id`` names the schedule that fired it, ``budget_usd`` its own spend cap.
 
-    ``chat_id`` is the chat the task came from (with ``origin_channel_id``), so a Telegram or Lark task can be told
-    there when it finishes.
+    ``chat_id`` is who to tell when the task ends (``agents.task_notice``): a Telegram chat id or a Lark sender's
+    open_id; None for a task that did not come from either.
     """
     pool = pool or get_pool()
     now = datetime.now(timezone.utc)
