@@ -623,6 +623,11 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
 - **Manager 自己动手做小活（looper #88 的真实对话发现）**：haiku 收到「创建一个 hello.txt」这类一句话的小活时没有走任务流程，直接用自己的工具在 Manager 的工作目录里写了文件（Manager 有全部工具、不需确认）；要不要在 role prompt 里限定 Manager 不亲自改文件，或收窄它的工具，待定。
 - **OMP 运行时的已知差距（M9e）**：运行中的 OMP Worker 不能被引导（`-p` 只读一次 stdin，`--mode rpc` 能插话但未采用），评测里聊天纠偏因此多一次重试；omp 的 `task` 工具找子 agent 定义时从工作目录一路往上找 `.omp/agents`，过了仓库根也不停，工作目录在操作者家目录下时会读到 `~/.omp/agents`（如果有），Looper 关不掉，只能整个去掉 `task` 工具；工作目录不在 git 仓库里时关掉了向上查找的发现来源，工作目录自己的 `AGENTS.md`、`CLAUDE.md`、`.omp/` 等也不读；后台请求（skill 描述压缩成路由提示、压缩摘要）不在事件流里，不计入花费和单次上限；每个新进程的首个请求基本不命中提示缓存（评测里未缓存输入 101k，Codex 约 60k），可以试 `--prompt-cache-key`；每个 runtime root 第一次运行要解压约 167 MB 的原生库（`omp/natives`）。
 
+- **Reviewer 看不到重试时补充的说明（2026-10-15，alarm 影子运行发现）**：Planner 决定重试一个步骤时写给 Worker 的补充说明（例如放宽的边界、只需补齐某个输出），Reviewer 看不到，它按原始的步骤说明评审。结果是 Worker 照补充说明做了，评审却判不通过，整步作废、重新规划，或者多重试几次。重试时应把 Planner 的补充说明一并交给 Reviewer。
+- **定时任务里 Planner 的花费占比高（2026-10-15，alarm 影子运行）**：告警分诊这类每轮结构相同的定时任务里，Planner（opus · xhigh）占一轮花费的 38–48%，其中仅制定计划一次就约 $0.6。可选做法：定时任务的 Planner 用较低强度的 Profile，或者让规划参考上一轮的计划。待定。
+- **任务结束通知的过渡缺口（looper #108 的后续）**：在 Telegram 或飞书发起、但任务没有记录通知对象的（例如升级前就已在跑的），结束时 TaskRouter 不发通知，Manager 也不再转发结束状态，只能在面板上看到。可以让 TaskRouter 在 GOAL_STATUS 的 metadata 里标明「会发通知」，没标的由 Manager 照常转发。
+- **渠道对话的存储挪到渠道层（looper #106 的后续）**：Telegram、飞书的回复现在是 Manager 发出时就记下的，渠道之后发送失败也算已回复；应改成渠道发送成功后再记。另外两点：用户发的 `/new` 本身不存（它的回复会存），以及缺少「存储失败不影响回复」的测试。
+
 ### 5.3 非核心待办（M6 之后统一做）
 
 （暂无。已完成的见第 4 节进度台账。）
@@ -631,7 +636,7 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
 
 以下行为已实现，但还没有在真实环境中验证过，相关改动或排查时优先补上：
 
-- **飞书、Telegram 的真实流量**：白名单与投递（M1.7、#26）只用本地替身验证过。
+- **飞书、Telegram 的真实流量**：飞书私聊的收发已经实测过（2026-10-15，维护者给 HBDataBot 发私聊，收到消息并以 Markdown 回复）。收到消息时的表情、状态消息原地编辑、任务进度和结束通知还没在真实飞书里验证。Telegram 仍只用本地替身验证过（M1.7、#26）。
 - ~~**agent teams**~~（已覆盖，looper #80）：Looper 从未下发 `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS`，它在 `--setting-sources project` 隔离之前随操作者的个人设置进来，之后仍会随从 Claude Code shell 启动的服务继承进来；现在由 Agent Profile 的 `agent_teams` 决定（Claude Code profile 默认开），真实运行见第 4 节台账，已知差距见第 5.2 节。
 - **多个后台任务同时结束**的自主轮切分（#26）。
 - **DeepSeek、Kimi 和 GLM 国际站的真实 key**（M9b）：预设按官方文档填写，真实运行只覆盖了本机 CPA 和 GLM（BigModel），DeepSeek 只经 `looper serve` 跑过 agent teams 的两个单步任务（looper #80），没跑 M6 评测。
