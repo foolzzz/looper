@@ -112,17 +112,22 @@ def test_worker_rows_move_to_the_new_recommended_prompt() -> None:
     asyncio.run(_run())
 
 
-def test_the_manager_row_moves_from_its_default_before_ready_tasks() -> None:
-    """Startup (``seed_role_configs``) gives a manager row still holding the default from before ready tasks the
-    current one, whether that default was tracked or not; an edited prompt is kept."""
+@pytest.mark.parametrize("role", ["manager", "planner"])
+def test_a_row_moves_from_its_previous_default(role: str) -> None:
+    """Startup (``seed_role_configs``) gives a row still holding its role's previous default (the Manager's from
+    before ready tasks, the Planner's from before parallel steps) the current one, whether that default was
+    tracked or not; an edited prompt is kept."""
     import asyncpg
 
-    from looper.agents.serve import _MANAGER_PROMPT_BEFORE_READY_TASKS, seed_role_configs
-    from looper.agents.tiers.manager import DEFAULT_SYSTEM_PROMPT
+    from looper.agents import serve
+    from looper.agents.serve import seed_role_configs
+    from looper.agents.tiers import manager, planner
     from looper.db import role_configs
     from looper.db.connection import ensure_schema
 
-    old, new, edited = _MANAGER_PROMPT_BEFORE_READY_TASKS, DEFAULT_SYSTEM_PROMPT, "My own manager prompt."
+    old, new = {"manager": (serve._MANAGER_PROMPT_BEFORE_READY_TASKS, manager.DEFAULT_SYSTEM_PROMPT),
+                "planner": (serve._PLANNER_PROMPT_BEFORE_PARALLEL, planner.DEFAULT_SYSTEM_PROMPT)}[role]
+    edited = f"My own {role} prompt."
 
     async def _run() -> list[tuple[str, str]]:
         pool = await asyncpg.create_pool(DSN, min_size=1, max_size=2)
@@ -132,13 +137,13 @@ def test_the_manager_row_moves_from_its_default_before_ready_tasks() -> None:
             await seed_role_configs(pool)
             for system_prompt, default_prompt in ((old, old), (old, ""), (edited, old)):
                 await pool.execute("UPDATE role_configs SET system_prompt = $1, default_prompt = $2 "
-                                   "WHERE role = 'manager'", system_prompt, default_prompt)
+                                   "WHERE role = $3", system_prompt, default_prompt, role)
                 await seed_role_configs(pool)
-                row = await role_configs.get_config("manager", pool=pool)
+                row = await role_configs.get_config(role, pool=pool)
                 seen.append((row["system_prompt"], row["default_prompt"]))
         finally:
-            await pool.execute("UPDATE role_configs SET system_prompt = $1, default_prompt = $1 WHERE role = 'manager'",
-                               new)
+            await pool.execute("UPDATE role_configs SET system_prompt = $1, default_prompt = $1 WHERE role = $2",
+                               new, role)
             await pool.close()
         return seen
 

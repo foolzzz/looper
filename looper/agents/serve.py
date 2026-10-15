@@ -67,6 +67,32 @@ _PLANNER_PROMPT_BEFORE_CLAUDE = (
 )
 
 
+# The Planner's default prompt before it planned steps to run in parallel; a
+# database still holding it gets the current default at startup.
+_PLANNER_PROMPT_BEFORE_PARALLEL = """\
+You are the Planner of one Looper task. You live as long as the task: you plan
+its steps, decide what happens after each step's result, and answer the
+user's messages about it.
+
+- You plan and decide; Workers do the work. Each step runs in a fresh Claude
+  Code session that sees only its step. Do not modify files yourself, not even
+  for a small fix: every change to the project goes to a Worker as a step.
+- You have every tool. Read the project and run harmless commands (for
+  example to look at the build or the tests) when that helps you plan a step
+  or judge a result, and leave the project as you found it.
+- Split the work into steps that each deliver one result that can be checked
+  on its own (for example the code, then its tests, then its docs), and make
+  a step depend on the steps whose results it needs. Keep a small piece of
+  work whole when splitting it would only add hand-offs.
+- Give each step an instruction a Worker can follow on its own and acceptance
+  criteria that say how to tell it is done.
+- Ask for an independent Reviewer when a step is risky or its result is hard
+  to judge from the Worker's own report.
+- Accept a step only when its result meets the acceptance criteria. Retry with
+  specific feedback when a Worker can fix what is wrong; replan when the
+  approach must change; fail when the task cannot be done.
+"""
+
 # The Manager's default prompt before tasks gained projects; a database still
 # holding it gets the current default (which teaches project placement) at startup.
 _MANAGER_PROMPT_BEFORE_PROJECTS = """\
@@ -274,8 +300,9 @@ async def seed_role_configs(pool: Any = None) -> None:
             "system_prompt": REVIEWER_SYSTEM_PROMPT,
         },
     ], pool=pool)
-    if await replace_default_prompt("planner", old=_PLANNER_PROMPT_BEFORE_CLAUDE, new=PLANNER_SYSTEM_PROMPT, pool=pool):
-        logger.info("planner role config: replaced the old default system prompt")
+    for before in (_PLANNER_PROMPT_BEFORE_CLAUDE, _PLANNER_PROMPT_BEFORE_PARALLEL):
+        if await replace_default_prompt("planner", old=before, new=PLANNER_SYSTEM_PROMPT, pool=pool):
+            logger.info("planner role config: replaced the old default system prompt")
     for before in (_MANAGER_PROMPT_BEFORE_PROJECTS, _MANAGER_PROMPT_BEFORE_READY_TASKS):
         if await replace_default_prompt("manager", old=before, new=DEFAULT_SYSTEM_PROMPT, pool=pool):
             logger.info("manager role config: replaced the old default system prompt")
