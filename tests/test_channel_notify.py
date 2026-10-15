@@ -53,7 +53,7 @@ def test_lark_sends_as_the_bot_to_the_users_open_id(tmp_path: Path, monkeypatch:
                 f"import json, sys\njson.dump(sys.argv[1:], open({str(log)!r}, 'w'))\n"
                 "sys.exit(0 if '--user-id' in sys.argv else 2)\n")
     monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
-    adapter = LarkChannelAdapter(app_id="cli_test", runtime_root=tmp_path,
+    adapter = LarkChannelAdapter(runtime_root=tmp_path,
                                  allowlist=SenderAllowlist("channel-lark", frozenset({"ou_abcdefgh12"})))
     receipt = asyncio.run(adapter.notify("ou_abcdefgh12", "告警：定时任务「triage」已连续失败 3 次。"))
     assert receipt.success

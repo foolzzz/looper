@@ -66,6 +66,7 @@ HTTP_405 = "405 Method Not Allowed"
 HTTP_409 = "409 Conflict"
 HTTP_413 = "413 Content Too Large"
 HTTP_500 = "500 Internal Server Error"
+HTTP_502 = "502 Bad Gateway"
 
 
 # The largest request body the server reads. The largest legitimate one is a
@@ -518,6 +519,10 @@ class AgentHTTPServer:
                 m.group(1), projects.json_object(body)))
         elif (m := self._RE_INSTALL.match(path)) and method == "DELETE":
             await self._handle_catalog(writer, HTTP_200, lambda: catalog.uninstall(m.group(1)))
+        elif path == "/api/channels/lark/status" and method == "GET":
+            await self._answer(writer, HTTP_200, self._lark_status)
+        elif path == "/api/channels/lark/people" and method == "GET":
+            await self._answer(writer, HTTP_200, lambda: self._lark_people(query.get("q", "")))
         elif path == "/api/channel-configs" and method == "GET":
             await self._handle_list_channel_configs(writer)
         elif (m := self._RE_CHANNEL_CONFIG.match(path)) and method == "GET":
@@ -1505,6 +1510,21 @@ class AgentHTTPServer:
 
     # --- Channel config handlers ---
 
+    async def _lark_status(self) -> dict[str, Any]:
+        from .channels import lark_settings
+
+        return await lark_settings.status()
+
+    async def _lark_people(self, q: str) -> dict[str, Any]:
+        from .channels import lark_cli, lark_settings
+
+        try:
+            return await lark_settings.people(q)
+        except ValueError as exc:
+            raise projects.RequestError(HTTP_400, str(exc)) from None
+        except lark_cli.LarkCliError as exc:
+            raise projects.RequestError(HTTP_502, f"lark-cli could not search: {exc}") from None
+
     async def _handle_list_channel_configs(self, writer: asyncio.StreamWriter) -> None:
         from .channels.allowlist import channel_view
 
@@ -1570,7 +1590,15 @@ class AgentHTTPServer:
             if "config" in data:
                 # The sender allowlist is validated before anything is written: a rejected
                 # request (AllowlistError -> 400) must not change the stored token or config.
-                data = {**data, "config": normalized_config(str(current.get("channel_type") or ""), data["config"])}
+                kind = str(current.get("channel_type") or "")
+                config = normalized_config(kind, data["config"])
+                if kind == "lark":
+                    from .channels import lark_settings
+                    try:
+                        config = await lark_settings.bound_config(current.get("config") or {}, config)
+                    except ValueError as exc:
+                        raise AllowlistError(str(exc)) from None
+                data = {**data, "config": config}
             # Apply the token and the config in one transaction so a failure leaves neither changed.
             async with get_pool().acquire() as conn, conn.transaction():
                 if token != SECRET_MASK:

@@ -1012,3 +1012,15 @@ CREATE TABLE IF NOT EXISTS channel_secrets (
     channel_id TEXT PRIMARY KEY REFERENCES channel_configs(channel_id) ON DELETE CASCADE,
     bot_token  TEXT NOT NULL
 );
+
+-- The latest senders a channel's allowlist refused (the Lark channel records them), so Settings → Channels can
+-- name them and let one in: one row per channel and sender, with the start of their latest message and how
+-- often they wrote; the channel keeps its 20 newest.
+CREATE TABLE IF NOT EXISTS channel_rejected_senders (
+    channel_id  TEXT NOT NULL,
+    sender_id   TEXT NOT NULL,
+    snippet     TEXT NOT NULL DEFAULT '',
+    count       INTEGER NOT NULL DEFAULT 1,
+    last_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (channel_id, sender_id)
+);

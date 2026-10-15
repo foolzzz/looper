@@ -80,11 +80,12 @@ V1_FORMATS = ("looper-config/v1", "loopx-config/v1")
 # What the file holds in place of a secret value it leaves out.
 PLACEHOLDER = {"secret": "omitted"}
 
-# The channel config keys that are not secrets: the sender allowlist, the names of the environment variables the
-# channel reads its credentials from, and the description. Any other key is treated as a secret.
+# The channel config keys that are not secrets: the sender allowlist (Lark's with the app it was made for), the
+# name of the environment variable Telegram may read its token from, Lark's lark-cli profile, and the description.
+# Any other key is treated as a secret.
 _CHANNEL_PUBLIC_KEYS = {
     "telegram": frozenset({"allowed_user_ids", "bot_token_env", "description"}),
-    "lark": frozenset({"allowed_open_ids", "app_id_env", "app_secret_env", "description"}),
+    "lark": frozenset({"allowed_open_ids", "allowlist_app_id", "profile", "description"}),
 }
 
 # A channel whose credential is a DB-stored secret (channel_secrets), not a config key: it is not
@@ -1150,7 +1151,12 @@ class _Importer:
                                                  dict(row["config"] or {}) if row else {})
             try:
                 config = normalized_config(kind, config)
-            except AllowlistError as exc:
+                if kind == "lark":
+                    # A file from before lark-cli's profile chose the app names the app's env vars: dropped.
+                    from .channels.lark_cli import lark_config
+
+                    config = lark_config(config)
+            except (AllowlistError, ValueError) as exc:
                 raise _Skip(str(exc)) from None
             values = {"display_name": _string(entry.get("display_name", ""), "display_name", max_chars=200),
                       "enabled": _boolean(entry.get("enabled", False), "enabled"), "config": config}

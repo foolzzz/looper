@@ -278,12 +278,11 @@ class TestServeChannelWiring:
             assert _telegram_adapter_from_config(config) is None
         assert "channel-telegram not started" in caplog.text and problem in caplog.text
 
-    def test_lark_adapter_reads_settings(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    def test_lark_adapter_reads_settings(self, tmp_path: Path) -> None:
         from looper.agents.serve import _lark_adapter_from_config
-        monkeypatch.setenv("MY_LARK_APP", "cli_test")
-        adapter = _lark_adapter_from_config({"app_id_env": "MY_LARK_APP", "allowed_open_ids": [OPEN_ID]}, tmp_path)
+        adapter = _lark_adapter_from_config({"profile": "work", "allowed_open_ids": [OPEN_ID]}, tmp_path)
         assert adapter is not None
-        assert adapter._app_id == "cli_test"
+        assert adapter._profile == "work"
         assert adapter._allowlist.ids == {OPEN_ID}
 
     @pytest.mark.parametrize("config", [{}, {"allowed_open_ids": []}, {"allowed_open_ids": ["on_0123456789abcdef"]}])
@@ -459,7 +458,7 @@ class TestSenderIds:
         ("telegram", {"allowed_user_ids": ""}, "allowlist is empty"),
         ("telegram", {"allowed_user_ids": "7,abc"}, "allowlist is invalid: 'abc' is not a Telegram user ID"),
         ("telegram", {"allowed_user_ids": ["7"]}, None),
-        ("lark", {"app_id_env": "LARK_APP_ID"}, "allowlist is empty"),
+        ("lark", {"profile": ""}, "allowlist is empty"),
         ("lark", {"allowed_open_ids": [OPEN_ID]}, None),
         ("web", {}, None),  # the web channel has no allowlist: it is local-only
     ])
@@ -472,7 +471,7 @@ class TestSenderIds:
         from looper.agents.channels.allowlist import AllowlistError, normalized_config
         assert normalized_config("telegram", {"bot_token_env": "T", "allowed_user_ids": " 7, 8 "}) == {
             "bot_token_env": "T", "allowed_user_ids": ["7", "8"]}
-        assert normalized_config("lark", {"app_id_env": "A"}) == {"app_id_env": "A"}
+        assert normalized_config("lark", {"profile": "A"}) == {"profile": "A"}
         with pytest.raises(AllowlistError, match="must be a JSON object"):
             normalized_config("lark", ["ou_x"])
 
@@ -581,21 +580,26 @@ class TestLarkAllowlist:
         from looper.agents.channels.lark import LarkChannelAdapter
 
         sent: list[tuple[str, str]] = []
+        rejected: list[tuple[str, str]] = []
 
         async def _send(self: Any, chat_id: str, text: str) -> None:
             sent.append((chat_id, text))
+
+        async def _rejected(sender_id: str, snippet: str) -> None:
+            rejected.append((sender_id, snippet))
 
         monkeypatch.setattr(LarkChannelAdapter, "_send_lark_message", _send)
 
         async def _main() -> Any:
             bus = MessageBus(runtime_root=tmp_path)
-            adapter = LarkChannelAdapter(app_id="cli_test", runtime_root=tmp_path,
-                                         allowlist=_allowlist("channel-lark", *ids))
+            adapter = LarkChannelAdapter(runtime_root=tmp_path, allowlist=_allowlist("channel-lark", *ids),
+                                         on_rejected=_rejected)
             adapter._bus = bus  # what start() sets, without running lark-cli
             await adapter._handle_lark_event(event)
             messages = _manager_messages(bus)
             await bus.shutdown()
-            return SimpleNamespace(messages=messages, sent=sent, conversations=dict(adapter._correlation_chat))
+            return SimpleNamespace(messages=messages, sent=sent, conversations=dict(adapter._correlation_chat),
+                                   rejected=rejected)
 
         return asyncio.run(_main())
 
@@ -611,6 +615,8 @@ class TestLarkAllowlist:
         with caplog.at_level("WARNING"):
             seen = self._run(tmp_path, monkeypatch, _lark_event(OTHER_OPEN_ID, "the secret plan"), OPEN_ID)
         assert seen.messages == [] and seen.sent == [] and seen.conversations == {}
+        # Recorded, with the start of the message, so Settings → Channels can name the sender and let them in.
+        assert seen.rejected == [(OTHER_OPEN_ID, "the secret plan")]
         (line,) = [r.getMessage() for r in caplog.records if "allowlist" in r.getMessage()]
         assert "channel-lark" in line and OTHER_OPEN_ID in line and "secret plan" not in line
 
@@ -625,6 +631,15 @@ class TestLarkAllowlist:
                                                            fields: dict[str, Any]) -> None:
         assert self._run(tmp_path, monkeypatch, _lark_event(OPEN_ID, **fields), OPEN_ID).messages == []
 
+    def test_a_group_message_is_ignored_and_never_answered(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        with caplog.at_level("INFO"):
+            for sender in (OPEN_ID, OTHER_OPEN_ID):
+                seen = self._run(tmp_path, monkeypatch, _lark_event(sender, "hi all", chat_type="group"), OPEN_ID)
+                assert (seen.messages, seen.conversations, seen.rejected) == ([], {}, [])
+        assert "only direct messages are handled" in caplog.text
+
     def test_the_reply_goes_back_to_the_chat_the_message_came_from(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -638,13 +653,12 @@ class TestLarkAllowlist:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
     ) -> None:
         from looper.agents.channels import lark
-        # lark-cli and an app id are there: only the empty list stops it.
+        # lark-cli is there: only the empty list stops it.
         monkeypatch.setattr(lark, "_check_lark_cli_available", lambda: True)
 
         async def _main() -> tuple[Any, dict[str, Any]]:
             bus = MessageBus(runtime_root=tmp_path)
-            adapter = lark.LarkChannelAdapter(app_id="cli_test", runtime_root=tmp_path,
-                                              allowlist=_allowlist("channel-lark"))
+            adapter = lark.LarkChannelAdapter(runtime_root=tmp_path, allowlist=_allowlist("channel-lark"))
             await adapter.start(bus)
             tasks = adapter._collector_task
             await adapter.stop()
