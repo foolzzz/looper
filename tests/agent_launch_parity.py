@@ -191,7 +191,7 @@ def _normalized(seen: dict[str, Any], root: str, executable: str, environ: dict[
 
 
 # Agent teams, on by default for every Claude Code profile since after these fixtures were made: every role of their
-# scenarios starts with them.
+# scenarios but the Planner, which never has them, starts with them.
 AGENT_TEAMS = "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS"
 
 
@@ -203,11 +203,14 @@ def without_agent_teams(argv: list[str]) -> list[str]:
 
 
 def set_aside_agent_teams(captured: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
-    """The captures without agent teams, after checking each one had the flag and the variable (the caller removed
-    the variable from the server's environment, so the capture shows it)."""
-    for seen in captured.values():
+    """The captures without agent teams, after checking each one but a Planner's had the flag and the variable and
+    a Planner's had neither (the caller removed the variable from the server's environment, so a capture shows it)."""
+    for case, seen in captured.items():
+        if case.partition("@")[0] == "planner":
+            assert "--teammate-mode" not in seen["argv"] and AGENT_TEAMS not in seen["env"], case
+            continue
         seen["argv"] = without_agent_teams(seen["argv"])
-        assert seen["env"].pop(AGENT_TEAMS) == "1"
+        assert seen["env"].pop(AGENT_TEAMS) == "1", case
     return captured
 
 

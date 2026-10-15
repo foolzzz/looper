@@ -109,7 +109,7 @@ def _teammate_mode(argv: list[str]) -> str | None:
     return argv[argv.index("--teammate-mode") + 1] if "--teammate-mode" in argv else None
 
 
-def test_every_role_starts_with_agent_teams_only_when_its_profile_has_them(
+def test_the_manager_workers_and_reviewers_start_with_agent_teams_only_when_their_profile_has_them(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
     # A server started from a Claude Code shell inherits the variable: only the profile decides.
@@ -126,7 +126,10 @@ def test_every_role_starts_with_agent_teams_only_when_its_profile_has_them(
         await _ok("PUT", "/api/agent-settings/system", {"profile_id": on})
         for role in roles:
             seen = await _seen(role, task, tmp_path)
-            assert (_teammate_mode(seen["argv"]), seen["env"].get(TEAMS)) == ("in-process", "1"), role
+            # A Planner never has them: its decisions are read from its own turn's result.
+            expected = (None, False) if role == "planner" else ("in-process", True)
+            assert (_teammate_mode(seen["argv"]), seen["env"].get(TEAMS) == "1") == expected, role
+            assert role != "planner" or TEAMS not in seen["env"]
 
         # Off, the variable is gone even when the server's environment or the settings' variables set it.
         await _ok("PUT", "/api/agent-settings/system", {"profile_id": off, "env": [{"key": TEAMS, "value": "1"}]})
