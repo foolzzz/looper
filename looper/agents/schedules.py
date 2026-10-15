@@ -429,6 +429,8 @@ async def update_schedule(schedule_id: str, data: dict[str, Any], *, now: dateti
                 fields["next_fire_at"] = cron.next_fire(rule, cron.zone(zone_name), now)
             if enabled is not None:
                 fields["enabled"] = enabled
+            if enabled and not row["enabled"]:
+                fields["enabled_at"] = now  # the no-success alert counts from here (``stale_deadline``)
             await db_schedules.update_schedule(conn, schedule_id, fields, profiles=profiles)
     except asyncpg.UniqueViolationError:
         raise _name_taken(fields["name"]) from None

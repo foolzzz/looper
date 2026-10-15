@@ -105,19 +105,26 @@ def test_which_runs_get_a_message(notify: str, status: str, sent: bool) -> None:
     assert wants_run_message(notify, status) is sent
 
 
-@pytest.mark.parametrize(("rule", "last_ok", "first_run", "deadline"), [
+ENABLED_LONG_AGO = NOW - timedelta(days=30)
+
+
+@pytest.mark.parametrize(("rule", "last_ok", "first_run", "enabled_at", "deadline"), [
     # Every 30 minutes: 3 periods after the first fire after the last success.
-    ("*/30 * * * *", NOW.replace(second=0), None, NOW.replace(second=0) + 120 * MINUTE),
+    ("*/30 * * * *", NOW.replace(second=0), None, ENABLED_LONG_AGO, NOW.replace(second=0) + 120 * MINUTE),
     # Daily: 24 hours, shorter than 3 days.
-    ("0 9 * * *", NOW.replace(second=0), None, NOW.replace(second=0) + timedelta(days=2)),
-    # Never a success: counted from the first run.
-    ("*/30 * * * *", None, NOW.replace(second=0), NOW.replace(second=0) + 90 * MINUTE),
-    ("*/30 * * * *", None, None, None),
+    ("0 9 * * *", NOW.replace(second=0), None, ENABLED_LONG_AGO, NOW.replace(second=0) + timedelta(days=2)),
+    # Never a success: counted from the first fire after it was enabled, which is its first run.
+    ("*/30 * * * *", None, NOW.replace(second=0), NOW.replace(second=0) - MINUTE, NOW.replace(second=0) + 90 * MINUTE),
+    ("*/30 * * * *", None, None, ENABLED_LONG_AGO, None),
+    # Enabled again after its last success: counted from the first fire after the enabling, not the success.
+    ("*/30 * * * *", NOW - timedelta(days=2), NOW - timedelta(days=3), NOW, NOW.replace(second=0) + 120 * MINUTE),
+    ("*/30 * * * *", None, NOW - timedelta(days=3), NOW, NOW.replace(second=0) + 120 * MINUTE),
 ])
 def test_when_the_no_success_alert_is_due(rule: str, last_ok: datetime | None, first_run: datetime | None,
-                                          deadline: datetime | None) -> None:
+                                          enabled_at: datetime, deadline: datetime | None) -> None:
     from looper.agents import cron
     from looper.agents.schedule_notify import stale_deadline
 
     tz = cron.zone("America/Los_Angeles")
-    assert stale_deadline(cron.parse(rule), tz, last_ok=last_ok, first_run=first_run) == deadline
+    assert stale_deadline(cron.parse(rule), tz, last_ok=last_ok, first_run=first_run,
+                          enabled_at=enabled_at) == deadline

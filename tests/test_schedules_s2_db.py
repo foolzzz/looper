@@ -306,6 +306,113 @@ def test_the_no_success_alert_goes_out_once_with_one_recovery(monkeypatch: pytes
     _run(test, monkeypatch, tmp_path)
 
 
+EVERY_5 = cron.parse("*/5 * * * *")
+
+
+async def _stale(env: _Env, sid: str) -> list[str]:
+    """The schedule's no-success messages so far, after a scheduler pass at the clock's time."""
+    await env.scheduler.tick()
+    await env.scheduler.idle()
+    return [n["kind"] for n in await _outbox(env, sid) if n["kind"].startswith("stale")]
+
+
+async def _ran_without_success(env: _Env, sid: str, *, days_ago: int) -> None:
+    """One run that did not succeed (stopped: no message under notify failures), its fire and the schedule's
+    enabling moved ``days_ago`` days back; the schedule does not fire again for a day."""
+    run = await _fire(env, sid)
+    await env.end_task(run["task_id"], "stopped")
+    await env.scheduler.idle()
+    back = timedelta(days=days_ago)
+    await env.pool.execute(
+        "UPDATE schedule_runs SET scheduled_for = scheduled_for - $2::interval WHERE schedule_id = $1", sid, back)
+    await env.pool.execute(
+        "UPDATE schedules SET enabled_at = enabled_at - $2::interval, next_fire_at = $3 WHERE id = $1",
+        sid, back, env.clock.now + timedelta(days=1))
+
+
+async def _enable_again(env: _Env, sid: str) -> datetime:
+    """Disable the schedule and enable it again through the API; when it was enabled. It does not fire for a day."""
+    await env.ok("PUT", f"/api/schedules/{sid}", {"enabled": False})
+    await env.ok("PUT", f"/api/schedules/{sid}", {"enabled": True})
+    enabled_at = await env.pool.fetchval("SELECT enabled_at FROM schedules WHERE id = $1", sid)
+    await env.pool.execute("UPDATE schedules SET next_fire_at = $2 WHERE id = $1", sid,
+                           enabled_at + timedelta(days=1))
+    return enabled_at
+
+
+def test_enabling_a_schedule_whose_last_success_is_old_raises_no_alert_at_once(monkeypatch: pytest.MonkeyPatch,
+                                                                               tmp_path: Path) -> None:
+    async def test(env: _Env) -> None:
+        _setup(env)
+        sid = (await env.enabled())["schedule_id"]
+        ok = await _fire(env, sid)
+        await env.end_task(ok["task_id"], "completed")
+        await env.scheduler.idle()
+        # Paused two days after that success, then enabled again.
+        await env.pool.execute("UPDATE schedules SET last_ok_at = last_ok_at - interval '2 days' WHERE id = $1", sid)
+        enabled_at = await _enable_again(env, sid)
+        # Due 3 periods after the first fire after the enabling, not after the old success.
+        due = cron.next_fire(EVERY_5, LA, enabled_at) + timedelta(minutes=15)
+        env.clock.now = enabled_at + timedelta(seconds=1)
+        assert await _stale(env, sid) == []
+        env.clock.now = due - timedelta(seconds=1)
+        assert await _stale(env, sid) == []
+        env.clock.now = due
+        assert await _stale(env, sid) == ["stale_alert"]
+
+    _run(test, monkeypatch, tmp_path)
+
+
+def test_a_schedule_enabled_long_ago_without_a_success_still_alerts(monkeypatch: pytest.MonkeyPatch,
+                                                                     tmp_path: Path) -> None:
+    async def test(env: _Env) -> None:
+        _setup(env)
+        sid = (await env.enabled())["schedule_id"]
+        await _ran_without_success(env, sid, days_ago=7)
+        assert await _stale(env, sid) == ["stale_alert"]
+
+    _run(test, monkeypatch, tmp_path)
+
+
+def test_disabling_and_enabling_again_starts_the_clock_again(monkeypatch: pytest.MonkeyPatch,
+                                                             tmp_path: Path) -> None:
+    async def test(env: _Env) -> None:
+        _setup(env)
+        sid = (await env.enabled())["schedule_id"]
+        await _ran_without_success(env, sid, days_ago=7)  # it would be stale now
+        await env.ok("PUT", f"/api/schedules/{sid}", {"enabled": False})
+        assert await _stale(env, sid) == []  # a disabled schedule is never stale
+        enabled_at = await _enable_again(env, sid)
+        due = cron.next_fire(EVERY_5, LA, enabled_at) + timedelta(minutes=15)
+        env.clock.now = enabled_at + timedelta(seconds=1)
+        assert await _stale(env, sid) == []
+        env.clock.now = due
+        assert await _stale(env, sid) == ["stale_alert"]
+        # Enabling an enabled schedule changes nothing.
+        await env.ok("PUT", f"/api/schedules/{sid}", {"enabled": True})
+        assert await env.pool.fetchval("SELECT enabled_at FROM schedules WHERE id = $1", sid) == enabled_at
+
+    _run(test, monkeypatch, tmp_path)
+
+
+def test_a_schedule_from_before_counts_from_its_last_change(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    async def test(env: _Env) -> None:
+        from looper.db import connection
+
+        sid = (await env.enabled())["schedule_id"]
+        # A database from before enabled_at, whose schedule was last changed three days ago.
+        await env.pool.execute("ALTER TABLE schedules DROP COLUMN enabled_at")
+        await env.pool.execute("UPDATE schedules SET updated_at = updated_at - interval '3 days' WHERE id = $1", sid)
+        for _ in range(2):  # the migration runs once
+            await connection.ensure_schema(env.pool)
+            row = await env.pool.fetchrow("SELECT enabled_at, updated_at FROM schedules WHERE id = $1", sid)
+            assert row["enabled_at"] == row["updated_at"]
+        created = (await env.schedule())["schedule_id"]
+        assert await env.pool.fetchval("SELECT enabled_at IS NOT NULL FROM schedules WHERE id = $1", created)
+
+    _run(test, monkeypatch, tmp_path)
+
+
 @pytest.mark.parametrize(("body", "error"), [
     ({"gate_timeout_seconds": 601}, "gate_timeout_seconds must be"),
     ({"gate_command": "x" * 2001}, "at most 2000 characters"),
