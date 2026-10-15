@@ -65,7 +65,8 @@ run gets `--max-budget-usd` (default 0.25), and the run stops once its tasks
 have spent `--total-cap-usd` (default 0.80); a task that reaches the cap is
 cancelled and the rest are skipped. `--model` sets the model in the system
 settings layer of the run's database, so every agent uses it. A full run costs
-about $0.61 with haiku (about 6 minutes); before `parallel_parts` and
+about $0.61 with haiku (about 6 minutes) without `many_steps`, which adds about
+$0.25 (about $0.023 a step); before `parallel_parts` and
 `interface_first` were added, the other five cost $0.62 with sonnet and $1.30
 with opus (about 3 minutes each), so give sonnet and opus a higher
 `--total-cap-usd`, such as 1.50 and 3.00 (`interface_first` alone costs about
