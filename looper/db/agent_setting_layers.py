@@ -103,6 +103,24 @@ async def set_profile_overrides(conn: asyncpg.Connection, task_id: str, profiles
     )
 
 
+async def set_task_profiles(task_id: str, profiles: Mapping[str, str | None], *,
+                            pool: asyncpg.Pool | None = None) -> None:
+    """Change task ``task_id``'s choice of Agent Profile for each role in ``profiles`` (role -> profile id; None
+    drops the task's choice of that role), in one transaction. Raises ``asyncpg.ForeignKeyViolationError`` for an
+    unknown task or profile."""
+    pool = pool or get_pool()
+    async with pool.acquire() as conn, conn.transaction():
+        for role, profile_id in profiles.items():
+            if profile_id is None:
+                await conn.execute("DELETE FROM task_profile_overrides WHERE task_id = $1 AND role = $2",
+                                   task_id, role)
+            else:
+                await conn.execute(
+                    "INSERT INTO task_profile_overrides (task_id, role, profile_id) VALUES ($1, $2, $3) "
+                    "ON CONFLICT (task_id, role) DO UPDATE SET profile_id = EXCLUDED.profile_id",
+                    task_id, role, profile_id)
+
+
 async def profile_overrides(task_id: str, *, pool: asyncpg.Pool | None = None) -> dict[str, dict[str, Any]]:
     """The Agent Profiles task ``task_id`` chose, by role (``PROFILE_JSON``)."""
     pool = pool or get_pool()

@@ -11,7 +11,6 @@ import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import AsyncMock
 
 import pytest
 
@@ -23,7 +22,7 @@ from looper.agents.agent_settings import DEFAULT_HARNESS_PROMPT
 from looper.agents.bus import MessageBus
 from looper.agents.claude_cli import ISOLATION_ID, isolation_args
 from looper.agents.message import MANAGER_ADDRESS, MessageEnvelope, MessageType, channel_address
-from looper.agents.tiers.manager import START_QUESTION, TASK_PLACEMENT_RULE, ManagerAgent, ManagerConfig
+from looper.agents.tiers.manager import TOOLS_CONTRACT, ManagerAgent, ManagerConfig
 
 WEB = channel_address("web")
 
@@ -118,13 +117,13 @@ class TestManagerReply:
         # The Manager has three layers (no project, no task): its harness, its role, then the placement rule.
         assert start["metadata"]["system_prompt"] == system_prompt
         assert system_prompt.startswith(f"{DEFAULT_HARNESS_PROMPT}\n\nYou are the Manager Agent")
-        assert system_prompt.endswith(TASK_PLACEMENT_RULE)
+        assert system_prompt.endswith(TOOLS_CONTRACT)
         assert start["metadata"]["system_prompt_sha256"] == _sha(system_prompt)
         layers = start["metadata"]["prompt_layers"]
         assert layers["harness"] == {"source": "builtin", "sha256": _sha(DEFAULT_HARNESS_PROMPT)}
         assert layers["role"]["config_id"] == "manager" and layers["role"]["recommended"] is True
         assert (layers["project"], layers["task"]) == (None, None)
-        assert layers["contract"] == {"name": "TASK_PLACEMENT_RULE", "sha256": _sha(TASK_PLACEMENT_RULE)}
+        assert layers["contract"] == {"name": "TOOLS_CONTRACT", "sha256": _sha(TOOLS_CONTRACT)}
         assert layers["isolation"] == ISOLATION_ID
         finish = agent_db.finish_record.await_args.kwargs
         assert (finish["status"], finish["output_text"], finish["model"], finish["session_id"]) == (
@@ -560,68 +559,8 @@ class TestManagerResidentClaude:
         assert process.returncode == returncode
 
 
-def _task_json(**fields: Any) -> str:
-    """A fake claude that saves the user turn it gets to ``turn.txt`` and answers with this task JSON."""
-    report = {"action": "task_request", "goal_id": "g", "structured_requirement": "build it",
-              "acknowledgment": "ok", **fields}
-    text = "```json\n" + json.dumps(report) + "\n```"
-    return (
-        "open('turn.txt', 'w').write(json.loads(sys.stdin.readline())['message']['content'])\n"
-        f"print(json.dumps({{'type': 'assistant', 'message': {{'content': [{{'type': 'text', 'text': {text!r}}}]}}}}))\n"
-        f"print(json.dumps({{'type': 'result', 'subtype': 'success', 'is_error': False, 'result': {text!r}}}))"
-    )
-
-
-def _ask_for_task(body: str) -> SimpleNamespace:
-    """Run one Manager turn; return its ``reply``, any TASK_REQUEST ``requests``, its ``argv`` and the user ``turn``."""
-
-    async def _run() -> SimpleNamespace:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            bus = MessageBus(runtime_root=root)
-            manager = ManagerAgent(
-                config=ManagerConfig(claude_bin=_fake_claude(root, body), work_dir=root),
-                runtime_root=root,
-            )
-            manager._bus = bus
-            await manager._handle(MessageEnvelope.create(
-                source=WEB, target=MANAGER_ADDRESS, message_type=MessageType.USER_MESSAGE,
-                payload={"text": "确认"}, correlation_id="corr-1",
-            ))
-            await manager.stop()
-            reply = ""
-            queue = bus.get_queue(WEB.agent_id)
-            while not queue.empty():
-                envelope = queue.get_nowait()
-                if envelope.message_type == MessageType.AGENT_REPLY:
-                    reply = envelope.payload["text"]
-            router = bus.get_queue("task-router")
-            requests = []
-            while not router.empty():
-                requests.append(router.get_nowait())
-            argv = json.loads((root / "argv.json").read_text())
-            turn = (root / "turn.txt").read_text()
-            await bus.shutdown()
-            return SimpleNamespace(reply=reply, requests=requests, argv=argv, turn=turn, prompts=_prompts(root))
-
-    return asyncio.run(_run())
-
-
 def _project(name: str, work_dir: str = "", description: str = "", project_id: str = "proj-111111111111") -> dict[str, Any]:
     return {"id": project_id, "name": name, "description": description, "work_dir": work_dir}
-
-
-TETRIS_DIR = os.path.join(os.path.expanduser("~"), "projects", "tetris")
-
-
-def _answer(**fields: Any) -> str:
-    """Claude's reply: the task JSON with ``fields`` (``action`` task_request unless given), in a json fence."""
-    report = {"action": "task_request", "goal_id": "g", "structured_requirement": "build it",
-              "acknowledgment": "ok", **fields}
-    return "```json\n" + json.dumps(report) + "\n```"
-
-
-_CONFIRM_TETRIS = _answer(project="Tetris", work_dir="~/projects/tetris", new_project=True)
 
 
 def _scripted(*answers: str) -> str:
@@ -716,223 +655,23 @@ def _drain(queue: Any) -> list[MessageEnvelope]:
 
 
 @pytest.mark.usefixtures("agent_db")
-class TestManagerTaskPlacement:
-    def test_projects_section_starts_each_user_turn(self, agent_db: Any) -> None:
+class TestManagerTurnSections:
+    def test_projects_and_ready_tasks_start_each_user_turn(self, agent_db: Any) -> None:
         agent_db.list_projects.return_value = [
             _project("tetris", "/srv/tetris", "falling\nblocks " + "x" * 100),
             _project("notes", project_id="proj-222222222222"),
         ]
-        turn = _ask_for_task(_task_json(project="tetris")).turn
+        agent_db.list_tasks.return_value = [
+            {"id": "task-aaaaaaaaaaaa", "project_name": "tetris", "goal_id": "old", "requirement": "an older one"}]
+        (turn,) = _task_chat(["ok"], ["确认"]).turns
         lines = turn.splitlines()
         assert lines[0] == "Projects:"
         assert lines[1].startswith("  - tetris (default directory /srv/tetris): falling blocks xxx")
         assert len(lines[1].partition("): ")[2]) == 80  # the description, cut to 80 characters
         assert lines[2] == "  - notes (no default directory)"
-        assert lines[-1] == "确认"
-
-    # A chosen directory wins; without one the task takes the project's default directory.
-    @pytest.mark.parametrize(("work_dir", "expected"), [("~/projects/tetris", TETRIS_DIR), ("", "/srv/tetris")])
-    def test_existing_project_is_matched_by_name(self, agent_db: Any, work_dir: str, expected: str) -> None:
-        agent_db.find_project_by_name.return_value = _project("Tetris", "/srv/tetris")
-        result = _ask_for_task(_task_json(project="tetris", work_dir=work_dir))
-        agent_db.find_project_by_name.assert_awaited_once_with("tetris")
-        agent_db.create_project.assert_not_awaited()
-        (request,) = result.requests
-        assert (request.payload["project_id"], request.payload["work_dir"]) == ("proj-111111111111", expected)
-        # The task is created ready: the reply is Claude's acknowledgement, then the task's configuration.
-        assert result.reply.startswith("ok\n\n任务已创建，还没有开始")
-        assert request.payload["task_id"] in result.reply and "Tetris（已有）" in result.reply
-
-    # Claude claiming the user agreed to the new project changes nothing: only Looper's own question counts.
-    @pytest.mark.parametrize("claimed", [{}, {"new_project": True}])
-    def test_a_new_project_is_created_only_after_looper_asked_and_the_user_confirmed(
-        self, agent_db: Any, claimed: dict[str, Any],
-    ) -> None:
-        agent_db.list_projects.return_value = [_project("snake", "/srv/snake")]
-        first = _answer(project=" Tetris ", work_dir="~/projects/tetris", **claimed)
-        confirmed = _answer(project="tetris", work_dir="", new_project=True)  # the confirmed directory is kept
-        chat = _task_chat([first, confirmed], ["确认", "确认新建"])
-
-        asked, created = chat.replies
-        assert "「Tetris」还不存在" in asked and TETRIS_DIR in asked and "snake（/srv/snake）" in asked
-        # Claude learns what Looper asked before the user's answer.
-        assert '"new_project": true' in chat.turns[1] and chat.turns[1].endswith("确认新建")
-        agent_db.create_project.assert_awaited_once_with(name="Tetris", work_dir=TETRIS_DIR)
-        (request,) = chat.requests
-        assert (request.payload["project_id"], request.payload["work_dir"]) == ("proj-000000000000", TETRIS_DIR)
-        assert "Tetris（新建）" in created
-
-    @pytest.mark.parametrize("second", [
-        _answer(project="Snake", work_dir="~/projects/tetris", new_project=True),  # another name
-        _answer(project="Tetris", work_dir="~/projects/other", new_project=True),  # another directory
-        _answer(project="Tetris", work_dir="~/projects/tetris"),  # not confirmed
-        _answer(project="Tetris", work_dir="~/projects/tetris", new_project="true"),  # not the typed field
-    ])
-    def test_any_other_new_project_asks_again(self, agent_db: Any, second: str) -> None:
-        chat = _task_chat([_answer(project="Tetris", work_dir="~/projects/tetris"), second], ["确认", "确认"])
-        agent_db.create_project.assert_not_awaited()
-        assert chat.requests == []
-        assert all("还不存在" in reply for reply in chat.replies)
-
-    @pytest.mark.parametrize(("answers", "messages"), [
-        # The confirmation counts only in the very next message...
-        ([_answer(project="Tetris", work_dir="~/projects/tetris"), "好的。", _CONFIRM_TETRIS], ["确认", "先聊点别的", "确认"]),
-        # ...and only from the chat that was asked.
-        ([_answer(project="Tetris", work_dir="~/projects/tetris"), _CONFIRM_TETRIS], ["确认", ("确认", "chat-2")]),
-    ])
-    def test_a_confirmation_counts_only_in_the_next_message_from_that_chat(
-        self, agent_db: Any, answers: list[str], messages: list[Any],
-    ) -> None:
-        chat = _task_chat(answers, messages)
-        agent_db.create_project.assert_not_awaited()
-        assert chat.requests == [] and "还不存在" in chat.replies[-1]
-
-    def test_the_configuration_comes_from_the_settings_in_effect_in_the_project(self, agent_db: Any) -> None:
-        project = "proj-111111111111"
-        agent_db.list_layers.return_value = [
-            {"scope": "system", "profile": {**profile_json("haiku", effort="low"), "id": "agent-haiku-low",
-                                            "name": "claude-code/haiku · low"}},
-            {"scope": "role_project", "role": "worker", "project_id": project,
-             "profile": {**profile_json("sonnet", effort="high"), "agent_teams": True}},
-            {"scope": "role_project", "role": "planner", "project_id": project, "max_concurrency": 3,
-             "profile": {**profile_json("opus"), "agent_teams": True}},
-        ]
-        agent_db.find_project_by_name.return_value = {
-            **_project("tetris", "/srv/tetris"), "review_policy": "all", "task_budget_usd": 2.5,
-            "task_budget_action": "wrap_up", "distill_lessons": "draft",
-        }
-        lines = _ask_for_task(_task_json(project="tetris")).reply.splitlines()
-        agent_db.list_layers.assert_any_await(project)
-        shared = "共用默认（Settings → Roles → Shared defaults）"
-        assert lines[2:] == [
-            "任务已创建，还没有开始（Ready — not started）：",
-            lines[3],  # the task's goal and id
-            "- 项目：tetris（已有）",
-            "- 目录：/srv/tetris",
-            # A Planner never has agent teams, whatever its profile says. The effort is each profile's.
-            "- Planner：claude-code/opus（effort 默认，来源：本项目里的这个角色）",
-            "- Worker：claude-code/sonnet（effort high，来源：本项目里的这个角色），agent teams 开",
-            f"- Reviewer：claude-code/haiku · low（effort low，来源：{shared}），agent teams 关",
-            "- 评审：每一步都要 Reviewer 评审通过",
-            "- 每个任务的花费上限：$2.5，达到时再让 Planner 总结一轮后结束",
-            "- 经验沉淀：任务完成后生成草稿，由你确认后写入项目知识",
-            "- 并发：这个项目同时最多运行 3 个任务",
-            "",
-            START_QUESTION,
-        ]
-        assert lines[3].startswith("- 任务：g（task-")
-
-    def test_a_ready_task_is_started_by_the_users_word(self, agent_db: Any, monkeypatch: pytest.MonkeyPatch) -> None:
-        from looper.db import tasks as db_tasks
-
-        agent_db.find_project_by_name.return_value = _project("tetris", "/srv/tetris")
-        agent_db.list_tasks.return_value = [
-            {"id": "task-aaaaaaaaaaaa", "project_name": "tetris", "goal_id": "old", "requirement": "an older one"}]
-        monkeypatch.setattr(db_tasks, "get_task", AsyncMock(
-            side_effect=lambda task_id: {"id": task_id, "status": "init", "project_id": "proj-111111111111"}))
-        chat = _task_chat([_answer(project="tetris"), json.dumps({"action": "task_start", "task_id": "<task id>"})],
-                          ["确认", "开始"])
-        created, started = chat.replies
-        (request,) = chat.requests
-        task_id = request.payload["task_id"]
-        # The task is created ready, and only the user's word starts it.
-        assert chat.sent == [[MessageType.TASK_REQUEST], [MessageType.TASK_START]]
-        assert created.endswith(START_QUESTION)
-        # Every turn lists the ready tasks; the next one also says which task Looper just created.
         agent_db.list_tasks.assert_awaited_with(limit=10, status="init")
-        assert "  - task-aaaaaaaaaaaa (project tetris, goal old): an older one" in chat.turns[1].splitlines()
-        assert f'"task_id": "{task_id}"' in chat.turns[1]
-        assert [start.payload for start in chat.starts] == [{"task_id": task_id}]
-        assert started.startswith(f"已开始任务 {task_id}")
-
-    @pytest.mark.parametrize("row", [None, {"id": "task-aaaaaaaaaaaa", "status": "running", "project_id": "p"}])
-    def test_only_a_ready_task_is_started(self, agent_db: Any, monkeypatch: pytest.MonkeyPatch,
-                                          row: dict[str, Any] | None) -> None:
-        from looper.db import tasks as db_tasks
-
-        monkeypatch.setattr(db_tasks, "get_task", AsyncMock(return_value=row))
-        chat = _task_chat([json.dumps({"action": "task_start", "task_id": "task-aaaaaaaaaaaa"})], ["开始"])
-        assert chat.starts == []
-        assert chat.replies[0].startswith("没能开始任务 task-aaaaaaaaaaaa")
-
-    @pytest.mark.parametrize("fields", [{}, {"project": ""}, {"project": "  "}, {"project": "x" * 81}])
-    def test_task_without_a_project_asks_and_creates_nothing(self, agent_db: Any, fields: dict[str, Any]) -> None:
-        result = _ask_for_task(_task_json(work_dir="~/projects/tetris", **fields))
-        assert result.requests == []
-        assert "项目" in result.reply
-        agent_db.create_project.assert_not_awaited()
-
-    @pytest.mark.parametrize("fields", [{}, {"work_dir": ""}, {"work_dir": "relative/dir"}])
-    @pytest.mark.parametrize("known", [False, True])
-    def test_task_without_a_directory_is_not_created(self, agent_db: Any, fields: dict[str, Any], known: bool) -> None:
-        if known:  # an existing project without a default directory
-            agent_db.find_project_by_name.return_value = _project("tetris")
-        result = _ask_for_task(_task_json(project="tetris", **fields))
-        assert result.requests == []
-        assert "目录" in result.reply
-        agent_db.create_project.assert_not_awaited()
-
-    def test_database_failure_is_answered(self, agent_db: Any) -> None:
-        agent_db.find_project_by_name.side_effect = ConnectionError("database is down")
-        result = _ask_for_task(_task_json(project="tetris", work_dir="/tmp/t"))
-        assert result.requests == []
-        assert "database is down" in result.reply
-
-
-_START = '{"action": "task_start", "task_id": "task-aaaaaaaaaaaa"}'
-_CLAIM = "测试任务已经启动，预计 1–2 分钟完成。**下一步：** 等它跑完。"
-
-
-@pytest.mark.usefixtures("agent_db")
-class TestManagerActionReplies:
-    """An action JSON in Claude's reply is run whatever text follows it, and the user gets the reply code writes
-    for it; a reply that names an action Looper could not read is never sent, since it may claim the action ran."""
-
-    @staticmethod
-    def _start(answer: str, monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
-        from looper.db import tasks as db_tasks
-
-        monkeypatch.setattr(db_tasks, "get_task", AsyncMock(
-            return_value={"id": "task-aaaaaaaaaaaa", "status": "init", "project_id": "proj-111111111111"}))
-        return _task_chat([answer], ["开始"])
-
-    @pytest.mark.parametrize("answer", [
-        f"{_START}  {_CLAIM}",  # the JSON first, then prose
-        f"好的，开始：{_START}\n\n{_CLAIM}",  # short prose before it
-        f"```json\n{_START}\n```\n{_CLAIM}",  # fenced, with text after the fence
-    ], ids=["json-then-prose", "short-prose-first", "fenced-then-prose"])
-    def test_an_action_is_run_and_only_code_answers(self, answer: str, monkeypatch: pytest.MonkeyPatch) -> None:
-        chat = self._start(answer, monkeypatch)
-        assert [start.payload for start in chat.starts] == [{"task_id": "task-aaaaaaaaaaaa"}]
-        (reply,) = chat.replies
-        assert reply.startswith("已开始任务 task-aaaaaaaaaaaa")
-        assert '"action"' not in reply and _CLAIM not in reply
-
-    def test_long_prose_before_an_action_is_sent_and_the_action_is_not_run(
-        self, monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        prose = "在开始之前我想先确认一下：这个任务会改动你的工作目录，你确定现在就开始吗？"
-        chat = self._start(f"{prose}\n{_START}", monkeypatch)
-        assert (chat.starts, chat.replies) == ([], [prose])
-
-    @pytest.mark.parametrize("answer", [
-        '{"action": "task_start", "task_id": "task-aaaaaaaaaaaa"  ' + _CLAIM,  # not valid JSON
-        '示例 {"step": 1} 之后：' + _START + " " + _CLAIM,  # an action object that is not the first one
-    ], ids=["invalid-json", "not-the-first-object"])
-    def test_a_reply_naming_an_action_that_was_not_run_never_claims_it_ran(
-        self, answer: str, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
-    ) -> None:
-        with caplog.at_level("WARNING", logger="looper.agents.tiers.manager"):
-            chat = self._start(answer, monkeypatch)
-        assert chat.starts == []
-        (reply,) = chat.replies
-        assert reply.startswith("没有执行") and _CLAIM not in reply and '"action"' not in reply
-        assert any("task_start" in record.getMessage() for record in caplog.records)
-
-    def test_json_that_names_no_action_stays_text(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        answer = '配置是这样的：{"name": "demo", "port": 8080}，改好了告诉我。'
-        chat = self._start(answer, monkeypatch)
-        assert (chat.starts, chat.replies) == ([], [answer])
+        assert "  - task-aaaaaaaaaaaa (project tetris, goal old): an older one" in lines
+        assert lines[-1] == "确认"
 
 
 LARK = channel_address("lark", "channel-lark")
@@ -980,7 +719,7 @@ class TestManagerHarnessAndLaunch:
                   {"scope": "project", "project_id": "proj-1", "harness_prompt": "PROJECT", "profile": profile_json("haiku")}]
         chat = _converse(monkeypatch, _resident(), ["hello"], rows=[row], layers=[layers])
         (prompt,) = chat["prompts"]
-        assert prompt == f"MANAGER HARNESS\n\nYou manage.\n\n{TASK_PLACEMENT_RULE}"
+        assert prompt == f"MANAGER HARNESS\n\nYou manage.\n\n{TOOLS_CONTRACT}"
         metadata = agent_db.start_record.await_args.kwargs["metadata"]
         assert metadata["prompt_layers"]["harness"] == {"source": "role", "sha256": _sha("MANAGER HARNESS")}
         assert metadata["model_choice"]["model"] == "opus"

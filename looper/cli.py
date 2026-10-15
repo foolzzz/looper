@@ -1,6 +1,6 @@
 """The ``looper`` command: ``serve`` starts the agent system, ``service`` runs it in the background, ``doctor``
-checks what it needs, ``version`` prints the version. ``loopx``, its name before the rename, is kept as an
-alias for one release."""
+checks what it needs, ``mcp-server`` serves the Manager's platform tools, ``version`` prints the version.
+``loopx``, its name before the rename, is kept as an alias for one release."""
 
 from __future__ import annotations
 
@@ -80,6 +80,12 @@ def build_parser() -> argparse.ArgumentParser:
     import_.add_argument("--apply", action="store_true", help="Write the changes the preview shows.")
     import_.add_argument("--json", action="store_true", help="Print the plan as JSON.")
     _add_service_parser(commands)
+    commands.add_parser(
+        "mcp-server",
+        allow_abbrev=False,
+        help="Serve Looper's platform tools to the Manager over MCP on stdin/stdout; the Manager's runtime starts "
+             "it, with LOOPER_AGENT_URL and LOOPER_AGENT_TOKEN.",
+    )
     version = commands.add_parser("version", allow_abbrev=False, help="Print the installed Looper version.")
     version.add_argument("--format", choices=["markdown", "json"], default="markdown", help="Output format.")
     # serve prints no payload; --format stays accepted so existing invocations keep working.
@@ -145,6 +151,10 @@ def main(argv: list[str] | None = None) -> int:
         return _config(args)
     if args.command == "service":
         return _service(args)
+    if args.command == "mcp-server":
+        from .agents import mcp_server
+
+        return mcp_server.main()
     # Imported here so that `looper version` and `--version` stay instant.
     from .agents.serve import serve_agent
     from .paths import default_runtime_root
