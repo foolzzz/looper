@@ -154,7 +154,8 @@ def schedule_view(row: Mapping[str, Any], last_run: dict[str, Any] | None = None
                   spent_today: float = 0.0) -> dict[str, Any]:
     target = {"channel": row["notify_channel"], "chat": row["notify_chat"]} if row.get("notify_channel") else None
     return {
-        "schedule_id": row["id"], "project_id": row["project_id"], "name": row["name"], "cron": row["cron"],
+        "schedule_id": row["id"], "project_id": row["project_id"], "project_name": row["project_name"],
+        "name": row["name"], "cron": row["cron"],
         "timezone": row["timezone"], "description": describe(row["cron"], row["timezone"]),
         "requirement": row["requirement"], "work_dir": row["work_dir"], "overlap": row["overlap"],
         "catch_up": row["catch_up"], "run_timeout_seconds": row["run_timeout_seconds"],
@@ -362,16 +363,24 @@ def _check_rule(rule_text: Any, zone_name: Any, now: datetime) -> cron.CronRule:
 # --- Requests ---
 
 
+async def _schedule_views(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """``schedule_view`` of each row, with its newest run and what it spent today."""
+    ids = [row["id"] for row in rows]
+    latest = await db_schedules.latest_runs(ids)
+    views = dict(zip(latest, await _run_views(list(latest.values()))))
+    spent = await db_schedules.spent_since_each(db_connection.get_pool(), ids, local_midnight())
+    return [schedule_view(row, views.get(row["id"]), spent_today=spent[row["id"]]) for row in rows]
+
+
 async def list_schedules(project_id: str) -> dict[str, Any]:
     await _existing_project(project_id)
-    rows = await db_schedules.list_schedules(project_id)
-    latest = await db_schedules.latest_runs([row["id"] for row in rows])
-    views = dict(zip(latest, await _run_views(list(latest.values()))))
-    since = local_midnight()
-    pool = db_connection.get_pool()
-    spent = {row["id"]: await db_schedules.spent_since(pool, row["id"], since) for row in rows}
-    return {"schedules": [schedule_view(row, views.get(row["id"]), spent_today=spent[row["id"]]) for row in rows],
+    return {"schedules": await _schedule_views(await db_schedules.list_schedules(project_id)),
             "limits": await limits()}
+
+
+async def list_all_schedules() -> dict[str, Any]:
+    """Every project's schedules, by project name and then name, the disabled ones too (the Schedules page)."""
+    return {"schedules": await _schedule_views(await db_schedules.list_schedules())}
 
 
 async def create_schedule(project_id: str, data: dict[str, Any], *, created_via: str = "dashboard",

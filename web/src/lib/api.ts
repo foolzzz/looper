@@ -689,6 +689,7 @@ export interface ScheduleRunInfo {
 export interface ScheduleInfo {
   schedule_id: string;
   project_id: string;
+  project_name: string;
   name: string;
   /** Five-field cron rule, read in `timezone`. */
   cron: string;
@@ -791,6 +792,11 @@ async function scheduleCall<T>(method: string, url: string, label: string, body?
   });
   if (!res.ok) await failed(res, label);
   return res.json();
+}
+
+/** Every project's schedules, the disabled ones too, by project name and then name (the Schedules page). */
+export async function fetchAllSchedules(): Promise<ScheduleInfo[]> {
+  return (await scheduleCall<{ schedules: ScheduleInfo[] }>("GET", `${API_BASE}/schedules`, "schedules")).schedules;
 }
 
 /** A project's schedules, ordered by name, and the limits their fields have. */
