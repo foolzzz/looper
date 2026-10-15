@@ -691,14 +691,13 @@ class WorkerPool:
 
         logger.info("worker %s starting subprocess: %s (cwd=%s)", worker_id, command[0], work_dir)
         try:
-            process = await asyncio.create_subprocess_exec(
+            process = await proc_tree.spawn(
                 *command,
                 cwd=work_dir,
                 env=launch.environment(),
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
-                start_new_session=True,  # its children share its group, which ends with it (proc_tree)
             )
             logger.info("worker %s subprocess started (pid=%s)", worker_id, process.pid)
             wp = self._active.get(worker_id)

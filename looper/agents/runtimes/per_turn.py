@@ -166,10 +166,9 @@ class PerTurnSession(ABC):
         assert self.started
         argv = await asyncio.to_thread(self._turn_argv)
         resuming = self._session
-        process = await asyncio.create_subprocess_exec(
+        process = await proc_tree.spawn(
             *argv, cwd=self._cwd, env=self._env,
             stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-            start_new_session=True,  # its children share its group, which ends with it (proc_tree)
         )
         self._process = process
         logger.info("%s started a %s turn (pid=%s, %s)", self._label, self.runtime_label, process.pid,

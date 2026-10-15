@@ -366,6 +366,14 @@ async def _run_agent_system(
     except Exception:
         logger.exception("the one-time import of plan and session files failed; it runs again at the next start")
 
+    # Before any task resumes or agent launches: end the agents a previous server that crashed or was killed
+    # left running, then record this server's.
+    from . import proc_tree
+    try:
+        await proc_tree.sweep(runtime_root)
+    except Exception:
+        logger.exception("could not sweep the agents a previous server left running")
+
     # The tasks the previous server was running: those with a live plan carry
     # on once the agents are up; the others are stopped.
     from ..db.plans import resumable_task_ids

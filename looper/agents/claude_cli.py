@@ -650,14 +650,13 @@ class ResidentClaude:
         provider's prices (``Launch.price``); without it, their cost is
         Claude Code's ``total_cost_usd``.
         """
-        process = await asyncio.create_subprocess_exec(
+        process = await proc_tree.spawn(
             *command,
             cwd=cwd,
             env=env,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL,
-            start_new_session=True,  # its children share its group, which ends with it (proc_tree)
         )
         assert process.stdout is not None
         self._process, self._command, self._signature = process, command, signature

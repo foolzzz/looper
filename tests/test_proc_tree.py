@@ -249,3 +249,101 @@ def test_stopping_a_per_turn_session_ends_the_running_turns_tree(
 
     tree = asyncio.run(_run())
     assert _running(list(tree.values())) == []
+
+
+# --- The sweep at the next start ---
+
+
+@pytest.fixture
+def runtime_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """A runtime root to sweep; recording, which a sweep turns on, is off again afterwards."""
+    monkeypatch.setattr(proc_tree, "_records", None)
+    monkeypatch.setattr(proc_tree, "_server", None)
+    return tmp_path / "runtime"
+
+
+def _exited() -> tuple[int, str]:
+    """The pid and start time of a process that has exited since."""
+    process = subprocess.Popen(["/bin/sleep", "0.2"])
+    started = proc_tree._start_time(process.pid)
+    process.wait()
+    assert started is not None
+    return process.pid, started
+
+
+def _record(root: Path, pid: int, started: str, server: tuple[int, str]) -> Path:
+    directory = root / proc_tree.RECORDS_DIR
+    directory.mkdir(parents=True, exist_ok=True)
+    return proc_tree._write_record(directory, pid, started, server)
+
+
+def test_the_next_start_ends_the_tree_of_an_agent_whose_server_is_gone(
+    tmp_path: Path, runtime_root: Path, trees: list[dict[str, int]], caplog: pytest.LogCaptureFixture,
+) -> None:
+    script = tmp_path / "agent.py"
+    script.write_text(_SPAWN_TREE + "sys.stdin.read()\n", encoding="utf-8")
+
+    async def _run() -> tuple[dict[str, int], Path]:
+        await proc_tree.sweep(runtime_root)  # this server records its agents from here on
+        process = await proc_tree.spawn(sys.executable, str(script), cwd=tmp_path, stdin=asyncio.subprocess.PIPE)
+        tree = await _started(tmp_path, trees)
+        record = runtime_root / proc_tree.RECORDS_DIR / f"{process.pid}.json"
+        # The server that started it crashed: the next one finds the agent still running.
+        saved = json.loads(record.read_text())
+        assert (saved["pid"], saved["started"]) == (process.pid, proc_tree._start_time(process.pid))
+        _record(runtime_root, process.pid, saved["started"], _exited())
+        await proc_tree.sweep(runtime_root)
+        await asyncio.wait_for(process.wait(), 10)
+        return tree, record
+
+    caplog.set_level(logging.INFO, logger=proc_tree.__name__)
+    tree, record = asyncio.run(_run())
+    assert _running(list(tree.values())) == []
+    assert not record.exists()
+    assert _ended_line(caplog).endswith(": 4 found, 4 exited on SIGTERM, 0 killed")
+
+
+@pytest.mark.parametrize("server", ["gone", "running"])
+def test_the_sweep_leaves_a_reused_pid_and_another_running_servers_agent_alone(
+    runtime_root: Path, server: str,
+) -> None:
+    # A live process recorded with another start time is not the agent the record names: its pid was reused.
+    reused = subprocess.Popen(["/bin/sleep", "30"], start_new_session=True)
+    other_server = subprocess.Popen(["/bin/sleep", "30"])
+    agent = subprocess.Popen(["/bin/sleep", "30"], start_new_session=True)
+    try:
+        owner = _exited() if server == "gone" else (other_server.pid, proc_tree._start_time(other_server.pid))
+        records = [_record(runtime_root, reused.pid, "Thu Jan 1 00:00:00 1970", owner),
+                   _record(runtime_root, agent.pid, str(proc_tree._start_time(agent.pid)), owner)]
+        asyncio.run(proc_tree.sweep(runtime_root))
+        assert _running([reused.pid], settle=0) == [reused.pid]
+        if server == "running":  # a server still running on this runtime root keeps its agents and records
+            assert _running([agent.pid], settle=0) == [agent.pid]
+            assert all(record.exists() for record in records)
+        else:
+            assert _running([agent.pid]) == []
+            assert not any(record.exists() for record in records)
+    finally:
+        for process in (reused, other_server, agent):
+            process.kill()
+            process.wait()
+
+
+def test_the_sweep_drops_records_of_agents_that_exited(runtime_root: Path) -> None:
+    pid, started = _exited()
+    record = _record(runtime_root, pid, started, _exited())
+    asyncio.run(proc_tree.sweep(runtime_root))
+    assert not record.exists()
+
+
+def test_a_reaped_agents_record_is_removed(tmp_path: Path, runtime_root: Path) -> None:
+    async def _run() -> tuple[bool, bool]:
+        await proc_tree.sweep(runtime_root)
+        process = await proc_tree.spawn("/bin/sleep", "0.2")
+        record = runtime_root / proc_tree.RECORDS_DIR / f"{process.pid}.json"
+        recorded = record.exists()
+        await process.wait()
+        await asyncio.sleep(0.05)  # the record is removed once the process is reaped
+        return recorded, record.exists()
+
+    assert asyncio.run(_run()) == (True, False)

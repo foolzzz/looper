@@ -16,11 +16,20 @@ hands it to ``end``.
 Every stop, kill, timeout and spend-cap path of the Workers, the Reviewers
 and the resident Manager and Planner sessions ends its process this way, as
 does server shutdown.
+
+Agents no longer share the server's process group, so nothing ends them when
+the server itself dies (SIGKILL, a crash). Each agent process is started
+through ``spawn``, which records its pid and start time, and the server that
+started it, under the runtime root (``RECORDS_DIR``) until it is reaped. At
+the next start ``sweep`` ends the tree of every recorded agent still running
+with the same start time, so a reused pid is never touched; a record whose
+server still runs is left alone.
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import signal
@@ -28,12 +37,20 @@ import subprocess
 import time
 from collections import defaultdict
 from collections.abc import Callable
+from pathlib import Path
+from typing import Any, Protocol
 
 logger = logging.getLogger(__name__)
 
 TERM_GRACE_SEC = 3.0  # how long the tree has to exit after SIGTERM before what is left is killed
 _POLL_SEC = 0.05
 _PS_TIMEOUT_SEC = 5.0
+RECORDS_DIR = Path(".local") / "agent-processes"  # under the runtime root: one ``<pid>.json`` per running agent
+
+# Set by ``sweep``: where this server records its agents, and the server (pid, start time) each record names.
+_records: Path | None = None
+_server: tuple[int, str] | None = None
+_forgetting: set[asyncio.Task[None]] = set()
 
 # pid -> (ppid, pgid) of every live process; a zombie has exited already and is left out.
 Table = dict[int, tuple[int, int]]
@@ -64,7 +81,28 @@ def _snapshot() -> Table:
     return table
 
 
-def _tree(process: asyncio.subprocess.Process, table: Table, known: Tree) -> Tree:
+class _Agent(Protocol):
+    pid: int
+
+    @property
+    def returncode(self) -> int | None: ...
+
+    def send_signal(self, sig: int) -> None: ...
+
+
+class _Orphan:
+    """An agent a previous server started: not this server's child, so it is signalled by pid and never reaped."""
+
+    returncode = None
+
+    def __init__(self, pid: int) -> None:
+        self.pid = pid
+
+    def send_signal(self, sig: int) -> None:
+        os.kill(self.pid, sig)
+
+
+def _tree(process: _Agent, table: Table, known: Tree) -> Tree:
     """The processes of ``process``'s tree that ``table`` lists: the agent, every process whose parent is in the
     tree, every member of a group the agent or one of them leads, and each of ``known`` still in its group."""
     root = process.pid
@@ -100,7 +138,7 @@ def _tree(process: asyncio.subprocess.Process, table: Table, known: Tree) -> Tre
     return tree
 
 
-def _signal(process: asyncio.subprocess.Process, tree: Tree, sig: int) -> None:
+def _signal(process: _Agent, tree: Tree, sig: int) -> None:
     """Send ``sig`` to every group a process of ``tree`` leads and to the tree's other processes."""
     leaders = {pgid for pid, pgid in tree.items() if pid == pgid} - {os.getpgrp()}
     for pgid in leaders:
@@ -112,7 +150,7 @@ def _signal(process: asyncio.subprocess.Process, tree: Tree, sig: int) -> None:
     if process.pid in tree and tree[process.pid] not in leaders and process.returncode is None:
         try:
             process.send_signal(sig)
-        except ProcessLookupError:
+        except (ProcessLookupError, PermissionError):
             pass
 
 
@@ -132,7 +170,12 @@ async def end(process: asyncio.subprocess.Process, *, label: str, known: Tree | 
     """End ``process`` and its tree: SIGTERM, then SIGKILL for what is still running after ``TERM_GRACE_SEC``;
     ``process`` is reaped. ``known`` is its tree as ``tree_of`` took it earlier. Processes that appear during the
     grace period get SIGTERM too, and a cancelled wait kills the rest at once."""
-    seen = _tree(process, _snapshot(), known or {})
+    await _end(process, label=label, known=known or {})
+    await process.wait()
+
+
+async def _end(process: _Agent, *, label: str, known: Tree) -> None:
+    seen = _tree(process, _snapshot(), known)
     alive = dict(seen)
     if alive:
         _signal(process, alive, signal.SIGTERM)
@@ -152,4 +195,96 @@ async def end(process: asyncio.subprocess.Process, *, label: str, known: Tree | 
             _signal(process, alive, signal.SIGKILL)
         logger.info("%s: ended the process tree of pid %s: %d found, %d exited on SIGTERM, %d killed",
                     label, process.pid, len(seen), len(seen) - len(alive), len(alive))
+
+
+# --- Recording agents for the next server's sweep ---
+
+
+def _start_time(pid: int) -> str | None:
+    """When ``pid`` started, as ``ps -o lstart=`` prints it in UTC; None when no such process runs."""
+    try:
+        listed = subprocess.run(["ps", "-o", "lstart=", "-p", str(pid)], capture_output=True, text=True,
+                                timeout=_PS_TIMEOUT_SEC, check=False, env={**os.environ, "LC_ALL": "C", "TZ": "UTC"})
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return " ".join(listed.stdout.split()) or None
+
+
+def _write_record(directory: Path, pid: int, started: str, server: tuple[int, str]) -> Path:
+    """Record agent ``pid``, started at ``started``, as started by ``server`` (its pid and start time)."""
+    path = directory / f"{pid}.json"
+    path.write_text(json.dumps({"pid": pid, "started": started, "server_pid": server[0],
+                                "server_started": server[1]}) + "\n", encoding="utf-8")
+    return path
+
+
+async def spawn(*argv: str, **kwargs: Any) -> asyncio.subprocess.Process:
+    """Start an agent process in a session of its own, so its children share its process group, and record it
+    until it is reaped (once ``sweep`` has run)."""
+    process = await asyncio.create_subprocess_exec(*argv, start_new_session=True, **kwargs)
+    if _records is not None and _server is not None:
+        if (started := _start_time(process.pid)) is None:
+            logger.warning("cannot read the start time of agent pid %s; it is not recorded for the next sweep",
+                           process.pid)
+            return process
+        try:
+            path = _write_record(_records, process.pid, started, _server)
+        except OSError as exc:
+            logger.warning("cannot record agent pid %s for the next sweep: %s", process.pid, exc)
+            return process
+        forget = asyncio.get_running_loop().create_task(_forget(process, path, started))
+        _forgetting.add(forget)
+        forget.add_done_callback(_forgetting.discard)
+    return process
+
+
+async def _forget(process: asyncio.subprocess.Process, path: Path, started: str) -> None:
     await process.wait()
+    try:
+        if json.loads(path.read_text(encoding="utf-8")).get("started") == started:  # not a later agent's pid
+            path.unlink()
+    except (OSError, ValueError):
+        pass
+
+
+async def sweep(runtime_root: Path) -> None:
+    """End what agents of a previous server on ``runtime_root`` left running, then record this server's agents.
+
+    A record names an agent's pid and start time and the server that started
+    it. One whose server still runs (another server on this runtime root) is
+    left alone. Otherwise the record is removed, and its agent's tree is
+    ended when its pid still runs with the same start time: the same process,
+    orphaned by a server that crashed or was killed. A pid that no longer
+    runs, or that now belongs to another process, is left alone. Children of an
+    agent that has already exited are not found: nothing links them to it.
+    """
+    global _records, _server
+    directory = runtime_root / RECORDS_DIR
+    directory.mkdir(parents=True, exist_ok=True)
+    own_start = _start_time(os.getpid())
+    _records, _server = (directory, (os.getpid(), own_start)) if own_start else (None, None)
+    if own_start is None:
+        logger.warning("cannot read this server's start time; its agents are not recorded for the next sweep")
+    servers: dict[tuple[int, str], bool] = {}  # whether each (pid, start time) still runs
+    orphans: list[int] = []
+    for path in sorted(directory.glob("*.json")):
+        try:
+            record = json.loads(path.read_text(encoding="utf-8"))
+            pid, started = int(record["pid"]), str(record["started"])
+            server = (int(record["server_pid"]), str(record["server_started"]))
+        except (OSError, ValueError, KeyError, TypeError):
+            logger.warning("removing the unreadable agent record %s", path.name)
+            path.unlink(missing_ok=True)
+            continue
+        if server != _server:
+            if server not in servers:
+                servers[server] = _start_time(server[0]) == server[1]
+            if servers[server]:
+                continue  # its server runs: the agent is that server's to end
+        if _start_time(pid) == started:
+            orphans.append(pid)
+        path.unlink(missing_ok=True)
+    if orphans:
+        logger.warning("ending %d agent(s) a previous server left running: pid %s", len(orphans),
+                       ", ".join(map(str, orphans)))
+        await asyncio.gather(*(_end(_Orphan(pid), label=f"orphaned agent {pid}", known={}) for pid in orphans))
