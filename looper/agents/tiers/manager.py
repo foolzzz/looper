@@ -15,6 +15,9 @@ The Manager is the only agent that communicates with users. It:
 - Tells Claude, before the next message from that chat, what Looper itself
   said there after Claude's last reply (``_Followup``), since Claude does not
   see Looper's own replies
+- Puts a ``Channel:`` line before each message naming where it came from (the
+  dashboard chat, a Lark or Telegram direct message): the channels share one
+  session, and the recommended prompt has Claude answer only that message
 - Streams Claude Code responses in real-time to the originating channel
 - Records a turn Claude runs on its own (after background work it started
   ends) as a run of its own, and sends what Claude said there as a reply of
@@ -162,6 +165,8 @@ Instead, follow this flow:
 If the user says "不", "取消", "算了", "no", "cancel" or modifies the requirement, do NOT output the JSON. Instead continue the conversation.
 
 ## Rules
+- Answer the message you were just sent. The dashboard chat, Lark and Telegram share this one conversation (the "Channel:" line before each message says where it came from), so do not continue an earlier topic, run checks or volunteer a status report unless this message asks for it
+- A greeting or a short check-in gets a short reply
 - For ambiguous requests, ask clarifying questions before even proposing the task summary
 - Never refuse a reasonable development task
 - Never output task_request JSON without user's explicit confirmation

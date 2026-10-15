@@ -112,17 +112,20 @@ def test_worker_rows_move_to_the_new_recommended_prompt() -> None:
     asyncio.run(_run())
 
 
-def test_the_manager_row_moves_from_its_default_before_ready_tasks() -> None:
-    """Startup (``seed_role_configs``) gives a manager row still holding the default from before ready tasks the
-    current one, whether that default was tracked or not; an edited prompt is kept."""
+@pytest.mark.parametrize("before", ["_MANAGER_PROMPT_BEFORE_READY_TASKS", "_MANAGER_PROMPT_BEFORE_CURRENT_MESSAGE"])
+def test_the_manager_row_moves_from_an_older_default(before: str) -> None:
+    """Startup (``seed_role_configs``) gives a manager row still holding an older default (before ready tasks,
+    before it answered only the current message) the current one, whether that default was tracked or not; an
+    edited prompt is kept."""
     import asyncpg
 
-    from looper.agents.serve import _MANAGER_PROMPT_BEFORE_READY_TASKS, seed_role_configs
+    from looper.agents import serve
+    from looper.agents.serve import seed_role_configs
     from looper.agents.tiers.manager import DEFAULT_SYSTEM_PROMPT
     from looper.db import role_configs
     from looper.db.connection import ensure_schema
 
-    old, new, edited = _MANAGER_PROMPT_BEFORE_READY_TASKS, DEFAULT_SYSTEM_PROMPT, "My own manager prompt."
+    old, new, edited = getattr(serve, before), DEFAULT_SYSTEM_PROMPT, "My own manager prompt."
 
     async def _run() -> list[tuple[str, str]]:
         pool = await asyncpg.create_pool(DSN, min_size=1, max_size=2)
