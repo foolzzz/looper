@@ -155,4 +155,6 @@ xhigh cost $0.12, so give it `--max-budget-usd 1.00`),
 OMP agent checks that runtime's tool calls), `--max-budget-usd`,
 `--total-cap-usd`, `--timeout` (seconds for each reply and each check),
 `--keep-work-dirs`. The run's JSON and server log go to `evals/runs/`; the
-table shows each dialog's outcome, its tool calls per turn and its cost.
+table shows each dialog's outcome, its tool calls per turn (a refused one with
+its error code) and its cost, and the JSON keeps what each refused call was
+told and the arguments it came with.

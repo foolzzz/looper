@@ -272,11 +272,12 @@ def _trail(database_url: str, since: int) -> list[dict[str, Any]]:
     async def read() -> list[dict[str, Any]]:
         conn = await asyncpg.connect(database_url)
         try:
-            rows = await conn.fetch("SELECT id, tool, risk, status, error_code, confirmation_id, task_id, arguments "
-                                    "FROM manager_actions WHERE id > $1 ORDER BY id", since)
+            rows = await conn.fetch("SELECT id, tool, risk, status, error_code, confirmation_id, task_id, arguments, "
+                                    "result FROM manager_actions WHERE id > $1 ORDER BY id", since)
         finally:
             await conn.close()
-        return [{**dict(row), "arguments": json.loads(row["arguments"])} for row in rows]
+        return [{**dict(row), "arguments": json.loads(row["arguments"]),
+                 "result": json.loads(row["result"]) if row["result"] else None} for row in rows]
 
     return asyncio.run(read())
 
@@ -341,8 +342,12 @@ def run_dialog(api: Api, dialog: Dialog, *, database_url: str, project_id: str, 
         before = _last_action(database_url)
         reply = _ask(api, session, text, timeout=timeout)
         problem = say.check(Look(api, task, reply, database_url, since, known))
-        calls = [f"{a['tool']}:{a['status']}" for a in _trail(database_url, before)]
-        turns.append({"text": text, "reply": reply[:2000], "calls": calls, "problem": problem})
+        trail = _trail(database_url, before)
+        calls = [f"{a['tool']}:{a['status']}" + (f" ({a['error_code']})" if a["error_code"] else "") for a in trail]
+        # What a refused call was told, and the arguments it came with: what to fix in a tool or its description.
+        errors = [{"tool": a["tool"], "arguments": a["arguments"], "message": (a["result"] or {}).get("message")}
+                  for a in trail if a["status"] == "error"]
+        turns.append({"text": text, "reply": reply[:2000], "calls": calls, "errors": errors, "problem": problem})
         if problem:
             break
     _stop_leftovers(api)
