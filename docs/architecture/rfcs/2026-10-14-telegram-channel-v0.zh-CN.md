@@ -132,7 +132,7 @@
 管家 `self._followup` 是**单个全局槽**，别的 chat 插话会把你这个 chat 的待确认 followup 弹掉丢弃。改成 **per-(channel,chat) dict**（每个会话各存各的），正好贴合「共享 manager 但各渠道/会话状态独立」。小改 manager.py，低风险。
 
 ### 已知边界（非 v1 目标）
-- **主动推送到指定 chat（已具备）**：`ChannelRegistry.notify(channel_type, chat, text)` 是现成的出站原语（定时任务通知已在用）。任务完成通知即建于其上（`looper/agents/task_notice.py`）：任务记录 `chat_id`（随 TASK_REQUEST 入库，取 notify 要的形式：Telegram 的 chat id、飞书发送者的 open_id），完成/失败时 TaskRouter 在回收 Planner 之后后台用 `registry.notify` 向它发一条通知；Manager 不再把任务的终态转发给 Telegram/飞书，结束只说一次；Web 跳过（看面板）。
+- **主动推送到指定 chat（已具备）**：`ChannelRegistry.notify(channel_type, chat, text)` 是现成的出站原语（定时任务通知已在用）。任务完成通知（`looper/agents/task_notice.py`）发给同样的对象：任务记录 `chat_id`（随 TASK_REQUEST 入库，取 notify 要的形式：Telegram 的 chat id、飞书发送者的 open_id），完成/失败时 TaskRouter 把通知附在交给 Manager 的终态上，Manager 用它代替终态总结，和任务进度走同一条路径发给渠道（`CHAT_NOTICE`），所以通知是这个任务在该会话里的最后一条消息；渠道像回答一样发（飞书 Markdown）；Web 跳过（看面板）。
 - `/new` 重置的是**全局** session（任意渠道发都重置所有）——符合「共享一个 session」的语义；在 `/help` 里说明即可。
 
 ## 6. 分期与改动文件

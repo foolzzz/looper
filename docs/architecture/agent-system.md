@@ -167,18 +167,40 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
   channels whose adapter implements `notify` (`NotifyChannel`), records who
   to tell in `tasks.chat_id`. The Manager sets it when it creates the task,
   in the form that channel's `notify` takes: the Telegram chat id, or the
-  Lark sender's open_id (Lark's `notify` sends to a user,
-  `lark-cli im +messages-send --as bot --user-id ou_…`). When the task
-  completes or fails, the TaskRouter tears its Planner down, starts what may
-  start, and then sends one notice through the channel in the background.
-  The router's serial loop never waits on a channel. A notice still being
-  sent is cancelled when the router stops, and a channel's failure is logged.
-  The notice reads 「✅ 任务完成 · <the requirement's first 40 characters, or
-  the task id>」 or 「❌ 任务失败 · …」, then the first 300 characters of the
-  summary or closing note on one line, then `/#tasks/<id>`. A task asked for
-  in the web chat, from the dashboard or by a schedule records no chat and
-  is not told: the dashboard shows it, and a schedule notifies on its own
-  terms.
+  Lark sender's open_id (Lark's `notify` sends to a user). It also records
+  what the user wrote (`tasks.original_user_text`): the message that asked
+  for the task, before any question Looper asked about it.
+  - When the task completes or fails, the TaskRouter adds a `Notice` to the
+    final `GOAL_STATUS` it passes to the Manager. Then it tears the Planner
+    down and starts what may start; it never waits on a channel, and a status
+    that comes after the task's end is dropped.
+  - The Manager sends the notice (`CHAT_NOTICE`) to the channel instead of
+    the final summary, on the same path as the task's progress. The channel
+    delivers its messages one at a time, so the notice is the task's last
+    message in that chat.
+  - The channel sends it like an answer, to who the task recorded: Lark as
+    Markdown (`lark-cli im +messages-send --as bot --user-id ou_… --markdown`),
+    Telegram as MarkdownV2, as plain text when Telegram cannot parse it.
+  - The notice reads 「✅ 任务完成 · <the first 40 characters of what the user
+    wrote, else of the requirement, else the task id>」 or 「❌ 任务失败 · …」.
+    Then the first section of the summary or closing note (what was
+    delivered, or why the task ended), its line breaks kept, at most 300
+    characters; the full text is on the task's page. Then the absolute link
+    to that page (`links`; on Lark a Markdown link).
+  - A task without a notice gets its final status from the Manager as
+    before: one asked for in the web chat, and one that recorded no chat. A
+    task created from the dashboard or by a schedule is not told; the
+    dashboard shows it, and a schedule notifies on its own terms.
+- **Links in chat messages** (`looper/agents/links.py`). A task's notice and
+  a schedule's messages link to the dashboard with an absolute URL, which a
+  chat client opens. It is `LOOPER_PUBLIC_URL` when set (the address people
+  open the dashboard at, such as `https://looper.example.com` behind a
+  proxy, kept with a path and without a trailing slash), else the server's
+  own `http://<host>:<port>`, with `127.0.0.1` for a server bound to every
+  address. `looper serve` reads it at start and does not start when it is
+  not an http or https URL with a host, or has a user, a query or a
+  fragment. For the background service, pass it with
+  `looper service install --env LOOPER_PUBLIC_URL`.
 - A project may have a `background` (at most 10000 characters, `''` = none):
   what every task agent of the project should know. It goes into the system
   prompt of the project's Planner, Workers and Reviewers, never the
@@ -1401,7 +1423,7 @@ dashboard only). A new schedule is disabled.
   later, so a schedule enabled again after a pause is not stale at once
   (`stale_alert_at`, checked on every pass while enabled; a disabled schedule
   is never stale), recovered the same way. The text is code-written (the schedule, the run's status, a
-  summary snippet, its cost and the link path to the task). It goes through
+  summary snippet, its cost and the link to the task, absolute (`links`)). It goes through
   the channel registry to the running Telegram or Lark channel
   (`ChannelAdapter.notify`: Telegram's bot to the user's private chat, Lark's
   `lark-cli im +messages-send --as bot --user-id`), to a chat the channel's
@@ -1729,7 +1751,8 @@ Key message types:
 | `TASK_STOP` | HTTP → TaskRouter | Pause task (preserves state) |
 | `TASK_RESTART` | HTTP → TaskRouter | Resume stopped/failed task |
 | `TASK_RESUME` | TaskRouter → a resumed task's new Planner | Carry on with the saved plan after a server restart |
-| `GOAL_STATUS` | Planner → TaskRouter → Manager | Report progress/completion |
+| `GOAL_STATUS` | Planner → TaskRouter → Manager | Report progress/completion; the end of a Telegram or Lark task carries its `notice` |
+| `CHAT_NOTICE` | Manager → Telegram or Lark | A task's end, to who the task recorded, after its progress |
 | `WORK_ITEM` | Planner → Worker | Dispatch step |
 | `WORK_RESULT` | Worker → Planner | Step result |
 | `VERIFY_REQUEST` | Planner → Reviewer | Review a step's result |
@@ -1783,9 +1806,9 @@ Key message types:
    Planner could not decide, the last accepted step's summary or a generated
    per-step summary). The TaskRouter writes it to `tasks.result_summary` and
    forwards it to the Manager, which passes it to the web chat it came from
-   (a Telegram or Lark chat gets the TaskRouter's notice instead, so the end
-   arrives once); it then stops the Planner, which ends its Claude, starts a
-   queued task, and sends that notice.
+   (a Telegram or Lark chat gets the TaskRouter's notice instead, which the
+   router adds to that status, so the end arrives once and last); it then
+   stops the Planner, which ends its Claude, and starts a queued task.
 7. Failure: a `fail` decision, a step that fails by its own verdict after a
    decision turn failed, or planning that cannot finish (see the Planner's
    failures above) sends `GOAL_STATUS` `failed` with a closing note written
@@ -1822,7 +1845,7 @@ PostgreSQL is a hard startup dependency. All data paths:
 | Table | Purpose |
 |---|---|
 | `projects` | Projects: name (unique ignoring case), description, default `work_dir` (`''` = none), `background` for the task agents' system prompt (`''` = none), and the execution settings (`project_execution`) |
-| `tasks` | Task metadata, status, phase, timestamps, `work_dir`, `project_id` (required), `schedule_id` (the schedule that fired it), `budget_usd` (its own spend cap, over its project's) and `chat_id` (who is told when it ends: a Telegram chat id or a Lark sender's open_id; NULL for a task asked for elsewhere) |
+| `tasks` | Task metadata, status, phase, timestamps, `work_dir`, `project_id` (required), `schedule_id` (the schedule that fired it), `budget_usd` (its own spend cap, over its project's), `chat_id` (who is told when it ends: a Telegram chat id or a Lark sender's open_id; NULL for a task asked for elsewhere) and `original_user_text` (what the user wrote when asking for it in a chat; it names the task in that notice) |
 | `task_steps` | A task's steps, each with everything its Planner decides with: `step_key` (label), `depends_on` (step ids), `review`, `acceptance_criteria`, `validation_commands`, `status`, `result`, `worker_id`, `reviewer_id`, `retries`, `feedback`, `missed_messages` |
 | `task_plans` | A task's plan, one row per task: `plan_id`, `status` (`planning`, `executing`, `verifying`, `stopping`, `completed`, `failed`), `correlation_id`, `origin_channel_id`, `final_summary`, `fail_reason`; replaced when the task is planned again |
 | `agent_sessions` | The session each resident agent resumes: `manager` or `planner-<task_id>`, its `session_id`, `session_totals`, the `runtime_type` and `provider_id` it belongs to and the `profile_id` that ran it last (`NULL` runtime: before Agent Profiles, Claude Code; `NULL` provider: before providers were recorded, Claude Code's own login), and `clean_start` (the user dropped the session with `/new`: the next one starts without a resume brief) |
@@ -2090,9 +2113,9 @@ restart.
   streamed text is the Manager's task progress (「任务已分解为 N 个步骤，开始执行...」
   when the task is accepted, then the Planner's progress), and it is sent as
   a message of its own, like an answer, without touching the status message
-  or counting as one of its edits; a status without text is not sent. The
-  Manager does not forward a task's end (completed or failed) to Telegram or
-  Lark, whose chat the TaskRouter tells (see the TaskRouter).
+  or counting as one of its edits; a status without text is not sent. A
+  task's end comes as its notice instead (`CHAT_NOTICE`, see the
+  TaskRouter), after its progress.
 - **A reaction when the bot sees a message** (`status_line.Reactions`): a
   direct message from a listed sender that goes to the Manager first gets a
   reaction from the bot, Lark's 「Get」 (`lark-cli im reactions create --as bot
