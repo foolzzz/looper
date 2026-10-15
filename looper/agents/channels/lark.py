@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from collections import deque
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
@@ -36,6 +37,36 @@ from .base import ChannelAdapter, DeliveryReceipt
 from .lark_cli import RECEIVE_EVENT, LarkCliError, consume_command, run, send_command
 
 logger = logging.getLogger(__name__)
+
+# How much of the consumer's stderr is kept for the log line written when it stops.
+_CONSUMER_STDERR_LINES = 5
+# How long a consumer gets to stop after its stdin closes, and then after SIGTERM, before it is killed.
+_CONSUMER_STOP_GRACE_SEC = 5.0
+
+
+async def _stop_consumer(process: asyncio.subprocess.Process) -> None:
+    """Stop ``lark-cli event consume`` the way it asks: close its stdin, then SIGTERM; SIGKILL only if both fail
+    (it skips lark-cli's cleanup of the server-side subscription)."""
+    if process.returncode is not None:
+        return
+    for step in ("stdin", "term"):
+        try:
+            if step == "stdin":
+                if process.stdin is not None and not process.stdin.is_closing():
+                    process.stdin.close()
+            else:
+                process.terminate()
+        except ProcessLookupError:
+            return
+        try:
+            await asyncio.wait_for(process.wait(), timeout=_CONSUMER_STOP_GRACE_SEC)
+            return
+        except asyncio.TimeoutError:
+            continue
+    try:
+        process.kill()
+    except ProcessLookupError:
+        pass
 
 # Told the open_id of a sender the allowlist refused (never what they wrote).
 RejectedListener = Callable[[str], Awaitable[None]]
@@ -170,14 +201,30 @@ class LarkChannelAdapter(ChannelAdapter):
             await asyncio.sleep(10)
 
     async def _run_event_consumer(self) -> None:
-        """Start lark-cli event consume subprocess and read events from stdout."""
+        """Run ``lark-cli event consume`` and handle the events it prints.
+
+        Its stdin is a pipe kept open for as long as it runs: lark-cli (1.0.97) treats stdin EOF as the signal to
+        stop, so a consumer started with the server's stdin (``/dev/null`` under launchd) stops at once. Closing
+        that pipe is also how it is stopped, so it can end its server-side subscription; SIGKILL is the last resort.
+        What it wrote to stderr last is logged when it stops while the channel runs.
+        """
         process = await asyncio.create_subprocess_exec(
             *consume_command(self._profile),
+            stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.PIPE,
         )
+        assert process.stdout is not None and process.stderr is not None
+        stderr_tail: deque[str] = deque(maxlen=_CONSUMER_STDERR_LINES)
 
-        assert process.stdout is not None
+        async def _read_stderr() -> None:
+            assert process.stderr is not None
+            async for raw in process.stderr:
+                text = raw.decode("utf-8", errors="replace").strip()
+                if text:
+                    stderr_tail.append(text[:300])
+
+        stderr_task = asyncio.create_task(_read_stderr())
         try:
             async for raw_line in process.stdout:
                 if not self._running:
@@ -191,8 +238,15 @@ class LarkChannelAdapter(ChannelAdapter):
                 except Exception:
                     logger.debug("skipping non-JSON lark event line")
         finally:
-            if process.returncode is None:
-                process.kill()
+            await _stop_consumer(process)
+            stderr_task.cancel()
+            try:
+                await stderr_task
+            except (asyncio.CancelledError, Exception):
+                pass
+            if self._running and stderr_tail:
+                logger.warning("lark event consumer stopped (exit %s); its last output: %s",
+                               process.returncode, " | ".join(stderr_tail))
 
     async def _handle_lark_event(self, event: dict[str, Any]) -> None:
         """Publish a received text message to the Bus. The event is lark-cli's flat one: ``chat_id``,
