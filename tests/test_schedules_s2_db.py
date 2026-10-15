@@ -42,11 +42,12 @@ def _short_grace(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(proc_tree, "TERM_GRACE_SEC", 0.2)  # a timed-out gate's tree is ended quickly
 
 
-def _setup(env: _Env, *, day_zone: str = "America/Los_Angeles") -> _Sender:
+def _setup(env: _Env, *, day_zone: str = "America/Los_Angeles", dashboard_url: str = "") -> _Sender:
     from looper.agents.scheduler import Scheduler
 
     sender = _Sender()
-    env.scheduler = Scheduler(bus=env.bus, clock=env.clock, sender=sender, day_zone=day_zone)
+    env.scheduler = Scheduler(bus=env.bus, clock=env.clock, sender=sender, day_zone=day_zone,
+                              dashboard_url=dashboard_url)
     return sender
 
 
@@ -189,7 +190,7 @@ def test_the_daily_budget_skips_runs_until_the_next_day(monkeypatch: pytest.Monk
 @pytest.mark.parametrize("notify", ["failures", "always", "never"])
 def test_a_runs_message_follows_notify(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, notify: str) -> None:
     async def test(env: _Env) -> None:
-        sender = _setup(env)
+        sender = _setup(env, dashboard_url="https://looper.example.com")
         await _allow_telegram(env)
         sid = (await env.enabled(name="Alert triage", notify=notify,
                                  notify_target={"channel": "telegram", "chat": TELEGRAM_CHAT}))["schedule_id"]
@@ -205,7 +206,7 @@ def test_a_runs_message_follows_notify(monkeypatch: pytest.MonkeyPatch, tmp_path
             channel, chat, text = sender.sent[0]
             assert (channel, chat) == ("telegram", TELEGRAM_CHAT)
             assert text.startswith("定时任务「Alert triage」（项目 alerts）") and "2 new alerts, both known" in text
-            assert text.endswith(f"花费 $0.05 · /#tasks/{done['task_id']}")
+            assert text.endswith(f"花费 $0.05 · https://looper.example.com/#tasks/{done['task_id']}")
         assert [n["status"] for n in await _outbox(env, sid)] == ["sent"] * len(expected)
 
     _run(test, monkeypatch, tmp_path)

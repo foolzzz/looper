@@ -455,9 +455,10 @@ async def _run_agent_system(
     from ..db import init_pool, ensure_schema, close_pool
     from ..db.connection import configured_dsn
 
-    from . import schedules
+    from . import links, schedules
     try:
         min_interval = schedules.configure_min_interval()
+        dashboard_url = links.dashboard_url(host=host, port=port)
     except ValueError as exc:
         raise StartupCheckFailed(str(exc)) from None
     if min_interval != schedules.DEFAULT_MIN_INTERVAL_SECONDS:
@@ -579,9 +580,9 @@ async def _run_agent_system(
 
     # It fires the schedules once the agents and the HTTP server are up, and hears from the TaskRouter when a
     # task ends, to record a scheduled run's outcome.
-    scheduler = Scheduler(bus=bus, sender=registry.notify)
+    scheduler = Scheduler(bus=bus, sender=registry.notify, dashboard_url=dashboard_url)
     task_router = TaskRouter(runtime_root=runtime_root, broadcaster=broadcaster, claude_bin=claude_bin,
-                             on_task_end=scheduler.task_ended, sender=registry.notify)
+                             on_task_end=scheduler.task_ended, dashboard_url=dashboard_url)
     supervisor.register(task_router)
 
     worker_config = WorkerConfig(claude_bin=claude_bin)
