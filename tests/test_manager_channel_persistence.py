@@ -144,3 +144,13 @@ class TestPrivateChatsOnly:
             ("telegram:12345", "user", "hello"), ("telegram:12345", "assistant", "ok"),
             ("telegram:12345", "assistant", "done on my own")]
 
+
+def test_followups_are_kept_for_at_most_so_many_chats_the_oldest_dropped_first() -> None:
+    mgr = ManagerAgent(config=ManagerConfig(), runtime_root=Path(tempfile.mkdtemp()))
+    chats = [("telegram", str(n)) for n in range(manager_mod.FOLLOWUP_CHATS + 1)]
+    for chat in chats:
+        mgr._keep_followup(_Followup(chat, f"note {chat[1]}"))
+    mgr._keep_followup(_Followup(chats[1], "newer note"))  # a chat's newer note replaces its older one
+    assert len(mgr._followup) == manager_mod.FOLLOWUP_CHATS
+    assert chats[0] not in mgr._followup
+    assert list(mgr._followup)[-1] == chats[1] and mgr._followup[chats[1]].note == "newer note"

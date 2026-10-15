@@ -176,6 +176,8 @@ If the user says "不", "取消", "算了", "no", "cancel" or modifies the requi
 READY_TASKS_LISTED = 10
 # The existing projects a new-project question offers instead.
 PROJECTS_OFFERED = 10
+# The most chats that keep what Looper said after Claude's last reply there (``_Followup``) at once.
+FOLLOWUP_CHATS = 50
 # The actions Claude's JSON may name.
 ACTIONS = ("task_request", "task_start")
 
@@ -293,10 +295,12 @@ class _AskUser(Exception):
     def note(self) -> str:
         """What Claude is told about the question before the user's answer."""
         if self.new_project is None:
-            return f"[Looper] Looper did not create the task of your last task JSON; it asked the user instead: {self}"
+            return (f"[Looper] Looper did not create the task of your last task JSON in this chat; it asked the user "
+                    f"instead: {self}")
         name, work_dir = self.new_project.name, self.new_project.work_dir
         return (
-            f'[Looper] Looper did not create the task of your last task JSON: its project "{name}" does not exist. '
+            f'[Looper] Looper did not create the task of your last task JSON in this chat: its project "{name}" does not '
+            "exist. "
             f"Looper asked the user to confirm creating that project, with default directory {work_dir}, or to "
             "choose an existing project. If the message below confirms, output the task JSON again with "
             f'"project": "{name}", "work_dir": "{work_dir}" and "new_project": true; if it names an existing project, '
@@ -390,6 +394,7 @@ class ManagerAgent:
         # so a restart before the next message keeps it; cleared once the new session has started.
         self._clean_start = False
         # What Looper said after Claude's last reply, for the next message only.
+        # At most FOLLOWUP_CHATS chats keep one; past it, the oldest is dropped (``_keep_followup``).
         self._followup: dict[tuple[str | None, str | None], _Followup] = {}
 
     @property
@@ -535,7 +540,7 @@ class ManagerAgent:
                 project, work_dir, created = await self._place_task(
                     parsed, followup.new_project if followup else None)
             except _AskUser as ask:
-                self._followup[chat] = _Followup(chat, ask.note(), ask.new_project)
+                self._keep_followup(_Followup(chat, ask.note(), ask.new_project))
                 await self._send_reply(envelope, str(ask))
                 return
             except Exception as exc:
@@ -564,20 +569,30 @@ class ManagerAgent:
             ))
             ack_text = parsed.get("acknowledgment", f"收到，已创建任务: {text[:100]}")
             block = await self._configuration_block(task_id, goal_id, project, work_dir, created)
-            self._followup[chat] = _Followup(chat, (
-                f'[Looper] Looper created the task of your last task JSON as {task_id}, ready and not started, showed '
+            self._keep_followup(_Followup(chat, (
+                f'[Looper] Looper created the task of your last task JSON in this chat as {task_id}, ready and not '
+                "started, showed "
                 "the user its configuration and asked whether to start it now. If the message below says to start "
                 f'it, output {{"action": "task_start", "task_id": "{task_id}"}}; if it declines, remind the user how '
                 "to start it later."
-            ))
+            )))
             await self._send_reply(envelope, f"{ack_text}\n\n{block}")
         elif parsed.get("action") == "task_start":
             reply, note = await self._start_task(parsed)
-            self._followup[chat] = _Followup(chat, note)
+            self._keep_followup(_Followup(chat, note))
             await self._send_reply(envelope, reply)
         else:
             reply_text = parsed.get("response_text", response)
             await self._send_reply(envelope, reply_text)
+
+    def _keep_followup(self, followup: _Followup) -> None:
+        """Keep ``followup`` for its chat's next message, newest last; past ``FOLLOWUP_CHATS`` chats the oldest one's
+        is dropped (that chat's next message then gets no note, and a new project it was asked about is asked
+        again)."""
+        self._followup.pop(followup.chat, None)
+        self._followup[followup.chat] = followup
+        while len(self._followup) > FOLLOWUP_CHATS:
+            self._followup.pop(next(iter(self._followup)))
 
     async def _place_task(
         self, parsed: dict[str, Any], confirmed: _NewProject | None,
