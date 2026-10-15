@@ -128,3 +128,18 @@ def test_when_the_no_success_alert_is_due(rule: str, last_ok: datetime | None, f
     tz = cron.zone("America/Los_Angeles")
     assert stale_deadline(cron.parse(rule), tz, last_ok=last_ok, first_run=first_run,
                           enabled_at=enabled_at) == deadline
+
+
+@pytest.mark.parametrize(("name", "zone", "title"), [
+    ("alarm-triage-critical", "America/Los_Angeles", "alarm-triage-critical · 10-15 09:00"),
+    ("  nightly\n report ", "Asia/Shanghai", "nightly report · 10-16 00:00"),
+    # A long name is clipped so the time still fits the title's limit.
+    ("x" * 80, "UTC", f"{'x' * 46} · 10-15 16:00"),  # 60 characters
+])
+def test_a_runs_task_is_titled_by_the_schedule_and_the_fire_time(name: str, zone: str, title: str) -> None:
+    from looper.agents.scheduler import run_title
+    from looper.db.tasks import TITLE_MAX_CHARS
+
+    firing = Firing(Trigger.SCHEDULED, NOW.replace(second=0))
+    assert run_title({"name": name, "timezone": zone}, firing) == title
+    assert len(title) <= TITLE_MAX_CHARS
