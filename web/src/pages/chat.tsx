@@ -1,10 +1,13 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { Send, Loader2, Bot, User, Plus, ChevronDown, ChevronRight, RotateCcw } from "lucide-react";
+import { Send, Loader2, Bot, User, Plus, ChevronDown, ChevronRight, RotateCcw, MessagesSquare } from "lucide-react";
 import { Markdown } from "@/components/markdown";
+import { ChannelBadge, ConversationList } from "@/components/chat-conversations";
+import { channelLabel } from "@/lib/chat-channels";
 import {
   sendChat,
   saveChatMessage,
   fetchChatMessages,
+  fetchChatSessions,
   fetchChatTargets,
   fetchTaskActivity,
   streamSSE,
@@ -16,6 +19,8 @@ import {
   type ChatTarget,
   type ChatTargetInfo,
   type ActivityEvent,
+  type ChatSession,
+  type DbChatMessage,
   type LlmRecord,
 } from "@/lib/api";
 import { RunCard, activityBelongsTo, historyHref } from "@/pages/agent-history";
@@ -237,6 +242,23 @@ export function ChatPage() {
   const sessionIdRef = useRef(sessionId);
   sessionIdRef.current = sessionId;
   const dbLoadedRef = useRef(false);
+  // The Manager's conversations on every channel, and the Lark or Telegram one open read-only (null: the web thread).
+  const [conversations, setConversations] = useState<ChatSession[] | null>(null);
+  const [conversationsError, setConversationsError] = useState("");
+  const [viewing, setViewing] = useState<ChatSession | null>(null);
+  // Its messages as last read, by session id, so another conversation's never show while one loads.
+  const [viewingMessages, setViewingMessages] = useState<{ id: string; rows: DbChatMessage[] } | null>(null);
+  // Below the md breakpoint the list takes the messages' place while it is open.
+  const [listOpen, setListOpen] = useState(false);
+
+  const refreshConversations = useCallback(() => {
+    fetchChatSessions()
+      .then((rows) => {
+        setConversations(rows);
+        setConversationsError("");
+      })
+      .catch((err) => setConversationsError(err instanceof Error ? err.message : String(err)));
+  }, []);
 
   const refreshTargets = useCallback(() => {
     fetchChatTargets().then(setTargets).catch(() => {});
@@ -282,8 +304,53 @@ export function ChatPage() {
     return () => clearInterval(timer);
   }, [target]);
 
+  // The conversation list, while the Manager is shown: re-read on the targets cadence and after each answer.
+  useEffect(() => {
+    if (target.kind !== "manager" || sending) return;
+    refreshConversations();
+    const timer = setInterval(refreshConversations, TARGETS_POLL_MS);
+    return () => clearInterval(timer);
+  }, [target.kind, sending, refreshConversations]);
+
+  // A Lark or Telegram conversation is read-only here: its newest messages, re-read on the same cadence.
+  const viewingId = viewing?.session_id;
+  useEffect(() => {
+    if (!viewingId) return;
+    let alive = true;
+    const load = () =>
+      fetchChatMessages(viewingId)
+        .then((rows) => alive && setViewingMessages({ id: viewingId, rows }))
+        .catch(() => alive && setViewingMessages((prev) => (prev?.id === viewingId ? prev : { id: viewingId, rows: [] })));
+    load();
+    const timer = setInterval(load, TARGETS_POLL_MS);
+    return () => {
+      alive = false;
+      clearInterval(timer);
+    };
+  }, [viewingId]);
+
+  const openConversation = (session: ChatSession) => {
+    setListOpen(false);
+    if (session.channel !== "web") {
+      setViewing(session);
+      return;
+    }
+    // A dashboard chat thread opens as the web chat, as if the page had been opened on it.
+    setViewing(null);
+    if (session.session_id === sessionId) return;
+    cleanupRef.current?.();
+    cleanupRef.current = null;
+    localStorage.setItem(STORAGE_SESSION_KEY, session.session_id);
+    setSessionId(session.session_id);
+    setMessages([]);
+    setSending(false);
+    setPhase("");
+  };
+
   const selectTarget = (next: ChatTargetInfo) => {
     setAgentDropdown(false);
+    setViewing(null);
+    setListOpen(false);
     if (next.id === target.id) return;
     cleanupRef.current?.();
     cleanupRef.current = null;
@@ -373,6 +440,7 @@ export function ChatPage() {
   }, [messages, sessionId]);
 
   const handleNewChat = () => {
+    setViewing(null);
     cleanupRef.current?.();
     cleanupRef.current = null;
     const newId = `session-${crypto.randomUUID().slice(0, 8)}`;
@@ -488,10 +556,35 @@ export function ChatPage() {
     }
   };
 
+  const managerView = target.kind === "manager";
+  const conversationList = (
+    <ConversationList
+      sessions={conversations}
+      error={conversationsError}
+      selected={viewing?.session_id ?? sessionId}
+      onSelect={openConversation}
+      onRefresh={refreshConversations}
+    />
+  );
+
   return (
-    <div className="flex h-full flex-col">
+    <div className="flex h-full">
+      {managerView && <aside className="hidden w-72 shrink-0 border-r border-border md:block">{conversationList}</aside>}
+      <div className="flex h-full min-w-0 flex-1 flex-col">
       <div className="border-b border-border px-5 py-3">
         <div className="flex items-center gap-2">
+          {managerView && (
+            <button
+              type="button"
+              onClick={() => setListOpen(!listOpen)}
+              aria-expanded={listOpen}
+              className="flex h-8 w-8 items-center justify-center rounded-md border border-border text-muted-foreground hover:bg-accent hover:text-foreground transition-colors md:hidden"
+              title="Conversations"
+              aria-label="Conversations"
+            >
+              <MessagesSquare className="h-4 w-4" />
+            </button>
+          )}
           {/* Agent selector */}
           <div className="relative">
             <button
@@ -581,8 +674,16 @@ export function ChatPage() {
           </div>
 
           <div className="ml-auto flex items-center gap-3">
-            {sessionId && <span className="font-mono text-[11px] text-muted-foreground">{sessionId}</span>}
-            {target.kind === "manager" && (
+            {viewing && (
+              <span className="flex items-center gap-2 text-xs text-muted-foreground">
+                <ChannelBadge channel={viewing.channel} />
+                Read-only
+              </span>
+            )}
+            {!viewing && sessionId && (
+              <span className="hidden font-mono text-[11px] text-muted-foreground sm:inline">{sessionId}</span>
+            )}
+            {target.kind === "manager" && !viewing && (
               <button
                 type="button"
                 onClick={() => handleSend(NEW_SESSION_COMMAND)}
@@ -594,7 +695,7 @@ export function ChatPage() {
                 New session
               </button>
             )}
-            {target.kind === "manager" && (
+            {target.kind === "manager" && !viewing && (
               <button
                 type="button"
                 onClick={handleNewChat}
@@ -626,9 +727,11 @@ export function ChatPage() {
         )}
       </div>
 
+      {managerView && listOpen && <div className="min-h-0 flex-1 md:hidden">{conversationList}</div>}
+
       <div
         ref={scrollRef}
-        className="flex-1 overflow-y-auto px-5 py-4 space-y-4"
+        className={cn("flex-1 overflow-y-auto px-5 py-4 space-y-4", managerView && listOpen && "hidden md:block")}
         onClick={() => agentDropdown && setAgentDropdown(false)}
       >
         {target.kind === "planner" && target.task_id && (
@@ -673,7 +776,14 @@ export function ChatPage() {
 
         {(target.kind === "worker" || target.kind === "reviewer") && <StepAgentView agent={current} />}
 
-        {messages.length === 0 && target.kind === "manager" && (
+        {viewing && (
+          <ChannelMessages
+            session={conversations?.find((c) => c.session_id === viewing.session_id) ?? viewing}
+            messages={viewingMessages?.id === viewing.session_id ? viewingMessages.rows : null}
+          />
+        )}
+
+        {messages.length === 0 && target.kind === "manager" && !viewing && (
           <div className="flex h-full items-center justify-center">
             <div className="text-center">
               <Bot className="mx-auto h-12 w-12 text-muted-foreground/50" />
@@ -682,7 +792,7 @@ export function ChatPage() {
           </div>
         )}
 
-        {messages.map((msg) => (
+        {!viewing && messages.map((msg) => (
           <div
             key={msg.id}
             className={cn("flex gap-3", msg.role === "user" ? "justify-end" : "justify-start")}
@@ -719,8 +829,12 @@ export function ChatPage() {
         ))}
       </div>
 
-      <div className="border-t border-border p-4">
-        {!current.can_send ? (
+      <div className={cn("border-t border-border p-4", managerView && listOpen && "hidden md:block")}>
+        {viewing ? (
+          <p className="text-xs text-muted-foreground">
+            This conversation is in {channelLabel(viewing.channel)}, where the Manager answers it; here it is read-only.
+          </p>
+        ) : !current.can_send ? (
           <div className="flex items-center gap-3 text-xs text-muted-foreground">
             <span className="flex-1">
               {current.kind === "planner"
@@ -778,7 +892,61 @@ export function ChatPage() {
         </form>
         )}
       </div>
+      </div>
     </div>
+  );
+}
+
+/** A Lark or Telegram conversation's newest messages, read-only, each with its time. */
+function ChannelMessages({ session, messages }: { session: ChatSession; messages: DbChatMessage[] | null }) {
+  if (messages === null) {
+    return (
+      <div className="flex justify-center py-10">
+        <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
+      </div>
+    );
+  }
+  if (messages.length === 0) {
+    return <p className="py-10 text-center text-sm text-muted-foreground">No messages in this conversation.</p>;
+  }
+  return (
+    <>
+      {session.message_count > messages.length && (
+        <p className="rounded-md border border-border bg-muted/40 px-3 py-2 text-center text-xs text-muted-foreground">
+          Showing the newest {messages.length} of {session.message_count} messages.
+        </p>
+      )}
+      {messages.map((msg) => {
+        const isUser = msg.role === "user";
+        return (
+          <div key={msg.message_id} className={cn("flex gap-3", isUser ? "justify-end" : "justify-start")}>
+            {!isUser && (
+              <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-primary/10">
+                <Bot className="h-4 w-4 text-primary" />
+              </div>
+            )}
+            <div className={cn("flex min-w-0 max-w-[70%] flex-col", isUser ? "items-end" : "items-start")}>
+              <div
+                className={cn(
+                  "min-w-0 rounded-lg px-4 py-2.5 text-sm [overflow-wrap:anywhere]",
+                  isUser ? "bg-primary text-primary-foreground" : "bg-muted text-foreground",
+                )}
+              >
+                {isUser ? <p className="whitespace-pre-wrap">{msg.content}</p> : <Markdown>{msg.content}</Markdown>}
+              </div>
+              <time dateTime={msg.created_at} className="mt-1 text-[10px] tabular-nums text-muted-foreground">
+                {new Date(msg.created_at).toLocaleString([], { hour12: false })}
+              </time>
+            </div>
+            {isUser && (
+              <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-accent">
+                <User className="h-4 w-4 text-muted-foreground" />
+              </div>
+            )}
+          </div>
+        );
+      })}
+    </>
   );
 }
 

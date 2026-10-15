@@ -2,7 +2,6 @@ import { useState } from "react";
 import {
   LayoutDashboard,
   MessageSquare,
-  MessagesSquare,
   ListTodo,
   Bot,
   ChevronDown,
@@ -20,20 +19,11 @@ import { cn } from "@/lib/utils";
 
 /** "history" is an agent's session history, reached from a task or a run; "projects" is one project, from the
  * sidebar's project list; "settings" is one of the Settings pages, from the group at the bottom. */
-export type Page =
-  | "dashboard"
-  | "chat"
-  | "conversations"
-  | "tasks"
-  | "projects"
-  | "runs"
-  | "settings"
-  | "history";
+export type Page = "dashboard" | "chat" | "tasks" | "projects" | "runs" | "settings" | "history";
 
 const NAV_ITEMS: { page: Page; label: string; icon: React.ElementType }[] = [
   { page: "dashboard", label: "Dashboard", icon: LayoutDashboard },
   { page: "chat", label: "Chat", icon: MessageSquare },
-  { page: "conversations", label: "Conversations", icon: MessagesSquare },
   { page: "tasks", label: "Tasks", icon: ListTodo },
   { page: "runs", label: "Runs", icon: History },
 ];
