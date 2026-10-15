@@ -275,6 +275,7 @@ def run_task(
     api.post("/api/tasks/start", {"task_id": task_id})
 
     chat_pending = task.chat is not None
+    edit_pending = task.edit_requirement is not None
     stopped_by_cap = timed_out = False
     while True:
         detail = api.get(f"/api/tasks/{task_id}")
@@ -294,6 +295,9 @@ def run_task(
                 chat_pending = False
             except EvalError:
                 pass  # the Planner is not live yet; try again at the next poll
+        elif edit_pending and detail.get("steps") and detail.get("phase") in ("executing", "verifying"):
+            api.put(f"/api/tasks/{task_id}/requirement", {"requirement": task.edit_requirement})
+            edit_pending = False
         time.sleep(poll)
     duration = time.monotonic() - started
 

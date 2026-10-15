@@ -11,8 +11,9 @@ agent system started it in:
   what a careful Planner decides from the allowed decisions (accept, else
   review a completed step that needs one, else retry a failed one, else fail),
   with a progress note, and an accept with the task's final summary;
-  [CHAT] by forwarding the message to the running step, if any; [SUPERVISE]
-  with no review and a progress note;
+  [CHAT] (a change to the task) with the script's ``change_replan`` steps
+  when it gives them, else by forwarding the new supplements to the running
+  step, if any; [SUPERVISE] with no review and a progress note;
 - a Worker (its task section says "Your step:") writes the files its step's
   scripted attempt lists and reports that attempt's status, after the
   attempt's ``seconds`` when it gives them; with ``wait_for_input`` it first
@@ -118,9 +119,12 @@ def _decide(message: str) -> dict[str, Any]:
     return {"decision": "fail", "reason": "the step cannot be done"}
 
 
-def _chat(message: str) -> dict[str, Any]:
+def _chat(script: dict[str, Any], message: str) -> dict[str, Any]:
+    if script.get("change_replan"):
+        return {"reply": "Replanning the steps not started.", "action": "replan", "steps": script["change_replan"]}
     running = re.search(r"^Running now: (\S+) \(", message, re.MULTILINE)
-    text = message.split("User message:\n", 1)[-1].split("\n\nAllowed actions:", 1)[0].strip()
+    added = message.split("(new supplements, oldest first; every message the user sends you is one):\n", 1)
+    text = added[-1].split("\n\n", 1)[0].removeprefix("- ").strip()
     if running:
         return {"reply": "Passing it on to the running step.", "action": "forward", "step": running.group(1),
                 "text": text}
@@ -146,7 +150,7 @@ def _planner(script: dict[str, Any], stdin: _Stdin) -> None:
         elif message.startswith("[DECISION]"):
             reply = {**_decide(message), "progress": PROGRESS}
         elif message.startswith("[CHAT]"):
-            reply = _chat(message)
+            reply = _chat(script, message)
         else:
             reply = {"reviews": [], "progress": PROGRESS}
         cost += PLANNER_TURN_COST
