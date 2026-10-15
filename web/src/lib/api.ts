@@ -1123,6 +1123,8 @@ export interface TaskDetail extends TaskInfo {
   steps: TaskStep[];
   /** The task journal, oldest first: what happened in the task that later agents and sessions need. */
   journal?: JournalEntry[];
+  /** The Planner's progress notes, newest first (absent before the API gave them). */
+  progress?: ProgressNote[];
   /** The Agent Profile the task chose for some of its roles, over every settings layer; {} when none. */
   profile_overrides?: Partial<Record<TaskRole, AgentProfile>>;
 }
@@ -1135,7 +1137,19 @@ export type JournalKind =
   | "decision"
   | "user_instruction"
   | "session_switch"
-  | "handoff";
+  | "handoff"
+  | "progress";
+
+/** Where a task stood, as its Planner said with a decision or a periodic check. */
+export interface ProgressNote {
+  done: string;
+  now: string;
+  next: string;
+  risks: string;
+  estimate: string;
+  /** When the note was kept. */
+  at: string;
+}
 
 /** One event of a task that later agents and sessions need: a step's outcome with its agents' learnings, a
  * Planner decision, a user instruction, a new Planner session or the handoff before it. */
