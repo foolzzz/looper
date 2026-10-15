@@ -119,6 +119,9 @@ ENABLED_LONG_AGO = NOW - timedelta(days=30)
     # Enabled again after its last success: counted from the first fire after the enabling, not the success.
     ("*/30 * * * *", NOW - timedelta(days=2), NOW - timedelta(days=3), NOW, NOW.replace(second=0) + 120 * MINUTE),
     ("*/30 * * * *", None, NOW - timedelta(days=3), NOW, NOW.replace(second=0) + 120 * MINUTE),
+    # Every minute or every 5 minutes: at least 15 minutes (STALE_FLOOR), not 3 or 15 periods' worth of noise.
+    ("* * * * *", NOW.replace(second=0), None, ENABLED_LONG_AGO, NOW.replace(second=0) + 16 * MINUTE),
+    ("*/5 * * * *", NOW.replace(second=0), None, ENABLED_LONG_AGO, NOW.replace(second=0) + 20 * MINUTE),
 ])
 def test_when_the_no_success_alert_is_due(rule: str, last_ok: datetime | None, first_run: datetime | None,
                                           enabled_at: datetime, deadline: datetime | None) -> None:
@@ -143,3 +146,15 @@ def test_a_runs_task_is_titled_by_the_schedule_and_the_fire_time(name: str, zone
     firing = Firing(Trigger.SCHEDULED, NOW.replace(second=0))
     assert run_title({"name": name, "timezone": zone}, firing) == title
     assert len(title) <= TITLE_MAX_CHARS
+
+
+def test_a_rule_change_starts_the_no_success_clock_again() -> None:
+    from looper.agents import cron
+    from looper.agents.schedule_notify import stale_deadline
+
+    tz, rule = cron.zone("UTC"), cron.parse("* * * * *")
+    old_ok = NOW - timedelta(hours=7)
+    assert stale_deadline(rule, tz, last_ok=old_ok, first_run=old_ok, enabled_at=ENABLED_LONG_AGO) < NOW
+    changed = stale_deadline(rule, tz, last_ok=old_ok, first_run=old_ok, enabled_at=ENABLED_LONG_AGO,
+                             rule_changed_at=NOW)
+    assert changed == NOW.replace(second=0) + 16 * MINUTE

@@ -8,11 +8,12 @@ streak, each with one recovery message:
 
 - **failures**: ``consecutive_failures`` reaches ``FAILURES_ALERT_AT`` (3);
   it recovers with the next completed run;
-- **stale**: no run completed, and no gate found nothing to do, for the
-  shorter of 3 periods of the rule and 24 hours, counted from the first fire
-  after the last such run or after the schedule was last enabled, whichever
-  is later (``stale_deadline``); checked on every scheduler pass while the
-  schedule is enabled, it recovers the same way.
+- **stale**: no run completed, and no gate found nothing to do, for 3
+  periods of the rule, at least 15 minutes and at most 24 hours, counted
+  from the first fire after the latest of that run, the schedule's last
+  enabling and its rule's last change (``stale_deadline``); checked on every
+  scheduler pass while the schedule is enabled and no run of it is in
+  progress, it recovers the same way.
 
 Alerts and recoveries follow ``notify`` too, except that ``never`` sends
 none. Every message is recorded in ``schedule_notifications`` (the outbox):
@@ -42,6 +43,10 @@ Sender = Callable[[str, str, str], Awaitable[tuple[bool, str | None]]]
 FAILURES_ALERT_AT = 3
 STALE_LIMIT = timedelta(hours=24)
 STALE_PERIODS = 3
+# The shortest no-success window: three fires of the shortest rule without a gate (5 minutes apart). A gated
+# schedule may fire every minute, where three periods would be three minutes: one slow gate or a couple of busy
+# minutes, not a schedule gone quiet.
+STALE_FLOOR = STALE_PERIODS * timedelta(minutes=5)
 SNIPPET_CHARS = 300
 
 # The final statuses of a run that ran something (a task, or a gate that failed).
@@ -69,18 +74,20 @@ def wants_run_message(notify: str, status: str) -> bool:
 
 
 def stale_deadline(rule: cron.CronRule, tz: Any, *, last_ok: datetime | None, first_run: datetime | None,
-                   enabled_at: datetime) -> datetime | None:
-    """When the stale alert is due: ``STALE_PERIODS`` periods of the rule or ``STALE_LIMIT``, whichever is
-    shorter, after the first fire that could have been a success: the first fire after ``last_ok`` or after
-    ``enabled_at`` (the schedule's creation or its last enabling), whichever is later. None before any run."""
+                   enabled_at: datetime, rule_changed_at: datetime | None = None) -> datetime | None:
+    """When the stale alert is due: ``STALE_PERIODS`` periods of the rule, at least ``STALE_FLOOR`` and at most
+    ``STALE_LIMIT``, after the first fire that could have been a success: the first fire after the latest of
+    ``last_ok``, ``enabled_at`` (the schedule's creation or its last enabling) and ``rule_changed_at`` (its rule's
+    or zone's last change). None before any run."""
     if last_ok is None and first_run is None:
         return None
-    start = cron.next_fire(rule, tz, max(last_ok, enabled_at) if last_ok is not None else enabled_at)
+    since = max(moment for moment in (last_ok, enabled_at, rule_changed_at) if moment is not None)
+    start = cron.next_fire(rule, tz, since)
     if start is None:
         return None
     following = cron.next_fire(rule, tz, start)
     period = (following - start) if following is not None else STALE_LIMIT
-    return start + min(STALE_PERIODS * period, STALE_LIMIT)
+    return start + min(max(STALE_PERIODS * period, STALE_FLOOR), STALE_LIMIT)
 
 
 def snippet(text: str | None) -> str:
@@ -169,15 +176,21 @@ class Notifier:
                                 run_id=run_id)
 
     async def check_stale(self, now: datetime) -> None:
-        """Start the stale alert of each enabled schedule past its deadline."""
+        """Start the stale alert of each enabled schedule past its deadline. A schedule whose run is in progress
+        (queued, checking its gate, or its task running: within its run timeout, as the pass before this one stops
+        a run past it) is not stale; neither are the firings it makes skip."""
+        pool = db_connection.get_pool()
         for schedule in await db_schedules.enabled_schedules():
             if schedule["stale_alert_at"] is not None:
                 continue
             try:
+                if await db_schedules.open_runs(pool, schedule["id"]):
+                    continue
                 rule, tz = cron.parse(schedule["cron"]), cron.zone(schedule["timezone"])
-                first_run = await db_schedules.first_run_at(db_connection.get_pool(), schedule["id"])
+                first_run = await db_schedules.first_run_at(pool, schedule["id"])
                 deadline = stale_deadline(rule, tz, last_ok=schedule["last_ok_at"], first_run=first_run,
-                                          enabled_at=schedule["enabled_at"])
+                                          enabled_at=schedule["enabled_at"],
+                                          rule_changed_at=schedule.get("rule_changed_at"))
                 if deadline is None or now < deadline or not await self._switch(schedule["id"], "stale_alert_at", now):
                     continue
                 project = await db_projects.get_project(schedule["project_id"])

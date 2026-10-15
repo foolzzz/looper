@@ -968,6 +968,9 @@ BEGIN
         ALTER TABLE schedules ALTER COLUMN enabled_at SET NOT NULL;
     END IF;
 END $$;
+-- When the schedule's rule or zone last changed: the no-success alert counts from it too, so a new rule (such as one
+-- firing more often) is not stale at once. NULL until a change.
+ALTER TABLE schedules ADD COLUMN IF NOT EXISTS rule_changed_at TIMESTAMPTZ;
 DO $$
 BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'schedules_notify_target_check'

@@ -112,9 +112,9 @@ async def create_schedule(conn: asyncpg.Connection, *, project_id: str, fields: 
 
 async def update_schedule(conn: asyncpg.Connection, schedule_id: str, fields: Mapping[str, Any], *,
                           profiles: Mapping[str, str] | None = None) -> None:
-    """Set ``fields`` (any of ``FIELDS``, ``enabled``, ``enabled_at`` and ``next_fire_at``), and the profile overrides
-    when given."""
-    columns = [name for name in (*FIELDS, "enabled", "enabled_at", "next_fire_at") if name in fields]
+    """Set ``fields`` (any of ``FIELDS``, ``enabled``, ``enabled_at``, ``rule_changed_at`` and ``next_fire_at``),
+    and the profile overrides when given."""
+    columns = [name for name in (*FIELDS, "enabled", "enabled_at", "rule_changed_at", "next_fire_at") if name in fields]
     sets = [f"{name} = ${i}" for i, name in enumerate(columns, start=2)]
     await conn.execute(
         f"UPDATE schedules SET {', '.join([*sets, 'updated_at = now()'])} WHERE id = $1",

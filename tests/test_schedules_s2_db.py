@@ -512,6 +512,57 @@ def test_a_schedule_from_before_counts_from_its_last_change(monkeypatch: pytest.
     _run(test, monkeypatch, tmp_path)
 
 
+def test_changing_the_rule_to_every_minute_raises_no_alert_at_once(monkeypatch: pytest.MonkeyPatch,
+                                                                    tmp_path: Path) -> None:
+    async def test(env: _Env) -> None:
+        _setup(env)
+        (tmp_path / "items.txt").write_text("")
+        sid = (await env.enabled(gate_command="cat items.txt"))["schedule_id"]  # every 5 minutes
+        assert (await _fire(env, sid))["status"] == "skipped_gate"
+        # The last ok firing was hours ago, as for a schedule whose gate failed for a while, enabled long ago.
+        await env.pool.execute("UPDATE schedules SET last_ok_at = last_ok_at - interval '7 hours', "
+                               "enabled_at = enabled_at - interval '2 days' WHERE id = $1", sid)
+        changed = (await env.ok("PUT", f"/api/schedules/{sid}", {"cron": "* * * * *"}))["schedule"]
+        assert changed["cron"] == "* * * * *"
+        at = datetime.fromisoformat(changed["updated_at"])  # when the rule changed
+        await env.pool.execute("UPDATE schedules SET next_fire_at = $2 WHERE id = $1", sid, at + timedelta(days=1))
+        # The new rule's window counts from the change: nothing at once, the alert only once it has passed.
+        due = cron.next_fire(cron.parse("* * * * *"), LA, at) + timedelta(minutes=15)
+        env.clock.now = at + timedelta(seconds=1)
+        assert await _stale(env, sid) == []
+        env.clock.now = due - timedelta(seconds=1)
+        assert await _stale(env, sid) == []
+        env.clock.now = due
+        assert await _stale(env, sid) == ["stale_alert"]
+
+    _run(test, monkeypatch, tmp_path)
+
+
+def test_a_minute_schedule_is_not_stale_while_its_task_runs(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    async def test(env: _Env) -> None:
+        _setup(env)
+        env.clock.now = NOON
+        items = tmp_path / "items.txt"
+        items.write_text("")
+        sid = (await env.enabled(cron="* * * * *", gate_command="cat items.txt",
+                                 run_timeout_seconds=3600))["schedule_id"]
+        assert _shape(await _next_minute(env, sid)) == [("skipped_gate", 1)]
+        items.write_text("alert-1\n")
+        runs = await _next_minute(env, sid)
+        await env.pool.execute("UPDATE tasks SET status = 'running' WHERE id = $1", runs[0]["task_id"])
+        # Its task runs for 25 minutes (within its timeout): every minute is a busy skip, never a stale alert.
+        for _ in range(25):
+            runs = await _next_minute(env, sid)
+        assert _shape(runs)[:2] == [("skipped_overlap", 25), ("running", 1)]
+        assert [n["kind"] for n in await _outbox(env, sid) if n["kind"].startswith("stale")] == []
+        await env.end_task(runs[1]["task_id"], "completed", summary="triaged")
+        items.write_text("")
+        assert _shape(await _next_minute(env, sid))[:2] == [("skipped_gate", 1), ("skipped_overlap", 25)]
+        assert [n["kind"] for n in await _outbox(env, sid) if n["kind"].startswith("stale")] == []
+
+    _run(test, monkeypatch, tmp_path)
+
+
 @pytest.mark.parametrize(("body", "error"), [
     ({"gate_timeout_seconds": 601}, "gate_timeout_seconds must be"),
     ({"gate_command": "x" * 2001}, "at most 2000 characters"),
