@@ -260,3 +260,58 @@ def test_a_tasks_name_is_its_title_else_its_goal_else_its_requirement(monkeypatc
         assert await pool.fetchval("SELECT title FROM tasks WHERE id = 'task-titled'") == "写 hello 脚本"
 
     _run(test, monkeypatch)
+
+
+def test_the_tasks_list_pages_newest_first_under_its_filters(monkeypatch: pytest.MonkeyPatch) -> None:
+    from looper.db import projects
+
+    async def test(pool: Any) -> None:
+        a = await projects.create_project(name="alpha", pool=pool)
+        b = await projects.create_project(name="beta", pool=pool)
+        start = datetime.now(timezone.utc) - timedelta(days=1)
+        # 120 tasks a minute apart, oldest first: alternately alpha's and beta's, every third failed.
+        rows = [(f"task-{i:04d}", a["id"] if i % 2 == 0 else b["id"], "failed" if i % 3 == 0 else "completed",
+                 start + timedelta(minutes=i)) for i in range(120)]
+        # Three more created at the same moment: the id breaks the tie, so none is lost or listed twice.
+        rows += [(f"task-tie{i}", b["id"], "completed", start + timedelta(minutes=200)) for i in range(3)]
+        await pool.executemany(
+            "INSERT INTO tasks (id, requirement, project_id, status, created_at) VALUES ($1, 'work', $2, $3, $4)", rows)
+        newest_first = [row for row in sorted(rows, key=lambda r: (r[3], r[0]), reverse=True)]
+        server = _server()
+
+        async def every_page(limit: int = 50, **query: str) -> tuple[list[str], int, dict[str, int]]:
+            ids: list[str] = []
+            before, pages = None, 0
+            while True:
+                status, body = await _get(server, "/api/tasks", {
+                    **query, "limit": str(limit), **({"before": before} if before else {})})
+                assert status == 200, body
+                ids += [t["task_id"] for t in body["tasks"]]
+                pages += 1
+                before = body["next_before"]
+                if before is None:
+                    return ids, pages, body["counts"]
+
+        everything, pages, counts = await every_page()
+        assert (everything, pages) == ([r[0] for r in newest_first], 3)
+        assert counts == {"completed": 83, "failed": 40}
+        # The default page is 50, the newest.
+        status, body = await _get(server, "/api/tasks")
+        assert [t["task_id"] for t in body["tasks"]] == everything[:50] and body["next_before"] == everything[49]
+
+        alpha_failed, _, counts = await every_page(limit=7, project_id=a["id"], status="failed")
+        assert alpha_failed == [r[0] for r in newest_first if r[1] == a["id"] and r[2] == "failed"]
+        assert counts == {"completed": 40, "failed": 20}  # the project's, whatever the status filter
+        beta_attention, _, counts = await every_page(limit=9, project_id=b["id"], group="attention")
+        assert beta_attention == [r[0] for r in newest_first if r[1] == b["id"] and r[2] == "failed"]
+        assert counts == {"failed": 20}
+        ties, _, _ = await every_page(limit=1, project_id=b["id"], status="completed")
+        assert len(ties) == len(set(ties)) == 43 and ties[:3] == ["task-tie2", "task-tie1", "task-tie0"]
+
+        for query, says in [({"limit": "0"}, "limit must be a whole number from 1 to 200"),
+                            ({"limit": "201"}, "limit must be"), ({"status": "busy"}, "status must be one of"),
+                            ({"before": "task-nope"}, "before must be a task id")]:
+            status, body = await _get(server, "/api/tasks", query)
+            assert status == 400 and says in body["error"], body
+
+    _run(test, monkeypatch)

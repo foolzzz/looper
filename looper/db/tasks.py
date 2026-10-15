@@ -388,6 +388,13 @@ async def set_task_project(
     return result == "UPDATE 1"
 
 
+# The filters a task list takes ($1 project, $2 status, $3 and $4 a group's statuses, $5 schedule).
+_FILTERS = """
+    ($1::text IS NULL OR t.project_id = $1) AND ($2::text IS NULL OR t.status = $2)
+    AND ($3::text[] IS NULL OR (t.status = ANY($3::text[])) = $4) AND ($5::text IS NULL OR t.schedule_id = $5)
+"""
+
+
 async def list_tasks(
     *,
     limit: int = 50,
@@ -396,24 +403,46 @@ async def list_tasks(
     status: str | None = None,
     group: TaskGroup | None = None,
     schedule_id: str | None = None,
+    before: str | None = None,
     pool: asyncpg.Pool | None = None,
 ) -> list[dict[str, Any]]:
-    """The newest tasks, each with its ``project_name`` and ``schedule_name``; only one project's when
-    ``project_id`` is given, one schedule's when ``schedule_id`` is, and only those in ``status``, or in ``group``,
-    when it is."""
+    """The newest tasks (by creation, then id), each with its ``project_name`` and ``schedule_name``; only one
+    project's when ``project_id`` is given, one schedule's when ``schedule_id`` is, only those in ``status``, or in
+    ``group``, when it is, and only those older than the task ``before`` when it is."""
     pool = pool or get_pool()
     statuses, inside = _group_filter(group)
     rows = await pool.fetch(
         f"""
         {_WITH_PROJECT}
-        WHERE ($3::text IS NULL OR t.project_id = $3) AND ($4::text IS NULL OR t.status = $4)
-          AND ($5::text[] IS NULL OR (t.status = ANY($5::text[])) = $6)
-          AND ($7::text IS NULL OR t.schedule_id = $7)
-        ORDER BY t.created_at DESC LIMIT $1 OFFSET $2
+        WHERE {_FILTERS}
+          AND ($6::text IS NULL OR (t.created_at, t.id) < (SELECT b.created_at, b.id FROM tasks b WHERE b.id = $6))
+        ORDER BY t.created_at DESC, t.id DESC LIMIT $7 OFFSET $8
         """,
-        limit, offset, project_id, status, statuses, inside, schedule_id,
+        project_id, status, statuses, inside, schedule_id, before, limit, offset,
     )
     return [_task(r) for r in rows]
+
+
+async def count_by_status(
+    *,
+    project_id: str | None = None,
+    group: TaskGroup | None = None,
+    schedule_id: str | None = None,
+    pool: asyncpg.Pool | None = None,
+) -> dict[str, int]:
+    """How many tasks ``list_tasks`` with these filters holds in all, by status."""
+    pool = pool or get_pool()
+    statuses, inside = _group_filter(group)
+    rows = await pool.fetch(
+        f"SELECT t.status, count(*) AS n FROM tasks t WHERE {_FILTERS} GROUP BY t.status",
+        project_id, None, statuses, inside, schedule_id,
+    )
+    return {row["status"]: int(row["n"]) for row in rows}
+
+
+async def task_exists(task_id: str, *, pool: asyncpg.Pool | None = None) -> bool:
+    pool = pool or get_pool()
+    return bool(await pool.fetchval("SELECT EXISTS (SELECT 1 FROM tasks WHERE id = $1)", task_id))
 
 
 async def status_counts(*, pool: asyncpg.Pool | None = None) -> list[dict[str, Any]]:
