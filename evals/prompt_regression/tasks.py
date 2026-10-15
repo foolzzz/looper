@@ -1,9 +1,10 @@
 """The fixed task set.
 
 Each task is a requirement the real Planner gets, the files its working
-directory starts with, an optional chat message sent to the Planner once the
-plan exists, a check of the delivered files, and the flow it must show (at
-least so many steps, reviews, retries or chat turns). ``fake`` scripts what
+directory starts with, an optional chat message sent to the Planner (a
+supplement) or new requirement text it is edited to, once the plan exists,
+a check of the delivered files, and the flow it must show (at least so many
+steps, reviews, retries or chat turns). ``fake`` scripts what
 the stand-in Claude (``fake_claude.py``) does for it, so fake mode exercises
 the same flow without a model.
 """
@@ -25,7 +26,8 @@ class EvalTask:
     requirement: str
     check: Callable[[Path], str | None]  # the reason the delivered files are wrong, else None
     files: dict[str, str] = field(default_factory=dict)  # seeded into the working directory
-    chat: str | None = None  # sent to the task's Planner once its plan exists
+    chat: str | None = None  # sent to the task's Planner once its plan exists (a supplement to the task)
+    edit_requirement: str | None = None  # the requirement is edited to this once the plan exists
     # min_steps, min_reviews, min_retries, min_chat_turns, min_independent_pairs, min_bracketed_pairs,
     # min_parallel_workers, min_progress_notes, min_final_summary
     expect: dict[str, int] = field(default_factory=dict)
@@ -143,6 +145,33 @@ touch .build-attempted
 echo "BUILD FAILED: transient error, run it again in a new attempt" >&2
 exit 1
 """
+
+
+# Two steps, the first slow enough that a change made once the plan exists reaches the Planner before the second
+# starts; the change is to the second step.
+_TWO_STEPS = ("Work in two steps, the second depending on the first. Step 1: run `sleep 20`, then create part1.txt "
+              "in the working directory whose whole content is `one`. Step 2: create part2.txt in the working "
+              "directory whose whole content is `{word}`.")
+
+
+def _all(*checks: Callable[[Path], str | None]) -> Callable[[Path], str | None]:
+    def check(work_dir: Path) -> str | None:
+        return next((problem for c in checks if (problem := c(work_dir))), None)
+
+    return check
+
+
+def _two_steps_fake(changed: str) -> dict[str, Any]:
+    """The script of a two-step task whose change the stand-in Planner answers by replanning the second step."""
+    return {
+        "plan": [_step("s1", "Run sleep 20, then create part1.txt containing one.", ["part1.txt holds one"]),
+                 _step("s2", "Create part2.txt containing two.", ["part2.txt holds two"], depends_on=["s1"])],
+        "change_replan": [_step("s2b", f"Create part2.txt containing {changed}.", [f"part2.txt holds {changed}"],
+                                depends_on=["s1"])],
+        "attempts": {"s1": [{"status": "completed", "seconds": 3, "files": {"part1.txt": "one\n"}}],
+                     "s2": [{"status": "completed", "files": {"part2.txt": "two\n"}}],
+                     "s2b": [{"status": "completed", "files": {"part2.txt": f"{changed}\n"}}]},
+    }
 
 
 TASKS: tuple[EvalTask, ...] = (
@@ -284,6 +313,22 @@ TASKS: tuple[EvalTask, ...] = (
             # The Worker waits for the forwarded correction before it writes.
             "wait_for_input": {"s1": {"seconds": 20, "files": {"color.txt": "blue\n"}}},
         },
+    ),
+    EvalTask(
+        id="supplement_replan",
+        requirement=_TWO_STEPS.format(word="two"),
+        chat="Change for the second step: part2.txt must contain `TWO-CHANGED` instead of `two`.",
+        check=_all(_equals("part1.txt", "one"), _equals("part2.txt", "TWO-CHANGED")),
+        expect={"min_steps": 2, "min_chat_turns": 1},
+        fake=_two_steps_fake("TWO-CHANGED"),
+    ),
+    EvalTask(
+        id="requirement_edit",
+        requirement=_TWO_STEPS.format(word="two"),
+        edit_requirement=_TWO_STEPS.format(word="TWO-EDITED"),
+        check=_all(_equals("part1.txt", "one"), _equals("part2.txt", "TWO-EDITED")),
+        expect={"min_steps": 2, "min_chat_turns": 1},
+        fake=_two_steps_fake("TWO-EDITED"),
     ),
 )
 

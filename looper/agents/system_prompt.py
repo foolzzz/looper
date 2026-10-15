@@ -126,6 +126,14 @@ def _requirement(text: str) -> str:
     return f"{text[:TASK_REQUIREMENT_LIMIT]}\n[clipped: {len(text) - TASK_REQUIREMENT_LIMIT} more characters]"
 
 
+def _supplements(supplements: Sequence[str]) -> list[str]:
+    """What the user added to the task while it ran, after its requirement (``journal.supplement_texts``)."""
+    if not supplements:
+        return []
+    return ["Supplements (what the user added to the task while it ran, oldest first; a later one wins over an "
+            "earlier one):", *("- " + text.strip().replace("\n", "\n  ") for text in supplements)]
+
+
 def _items(title: str, items: Sequence[str], *, prefix: str = "- ") -> list[str]:
     return [title, *(f"{prefix}{item}" for item in items)] if items else []
 
@@ -158,13 +166,15 @@ def work_task_section(
     target_files: Sequence[str] = (),
     feedback: Sequence[str] = (),
     attempt: int = 1,
+    supplements: Sequence[str] = (),
     workspace: Mapping[str, Any] | None = None,
 ) -> str:
-    """A Worker's task: its step, after the task the step belongs to (as context), and the step's own worktree
-    when it has one (``workspace``, the dispatch's ``context.workspace``)."""
+    """A Worker's task: its step, after the task the step belongs to (as context) and its supplements, and the
+    step's own worktree when it has one (``workspace``, the dispatch's ``context.workspace``)."""
     lines = ["## Task"]
     if requirement.strip():
-        lines += ["The whole task, for context (your step is only part of it):", _requirement(requirement), ""]
+        lines += ["The whole task, for context (your step is only part of it):", _requirement(requirement),
+                  *_supplements(supplements), ""]
     lines += [f"Your step: {step}" if step else "Your step:", instruction.strip()]
     if work_dir:
         lines.append(f"Working directory: {work_dir}")
@@ -203,13 +213,14 @@ def _worktree_lines(workspace: Mapping[str, Any]) -> list[str]:
 
 def review_task_section(
     *, requirement: str, step: str, instruction: str, acceptance_criteria: Sequence[str], work_dir: str,
+    supplements: Sequence[str] = (),
     workspace: Mapping[str, Any] | None = None,
 ) -> str:
-    """A Reviewer's task: the step under review, after the task it belongs to (as context), and the step's own
-    worktree when it ran in one."""
+    """A Reviewer's task: the step under review, after the task it belongs to (as context) and its supplements,
+    and the step's own worktree when it ran in one."""
     lines = ["## Task"]
     if requirement.strip():
-        lines += ["The whole task, for context:", _requirement(requirement), ""]
+        lines += ["The whole task, for context:", _requirement(requirement), *_supplements(supplements), ""]
     lines += [f"The step under review: {step}" if step else "The step under review:", instruction.strip()]
     if work_dir:
         lines.append(f"Working directory: {work_dir}")

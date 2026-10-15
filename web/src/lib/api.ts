@@ -1138,6 +1138,37 @@ export async function updateTaskConfig(
   if (!res.ok) await failed(res, "update task config");
 }
 
+/** One text a task's requirement has had (version 1 is the text it was created with). */
+export interface RequirementVersion {
+  version: number;
+  text: string;
+  /** How it came: "created", "task_page", "manager:<channel>". */
+  via: string;
+  created_at: string;
+  /** When the task's Planner had the edit in a turn; null while it has not. */
+  delivered_at: string | null;
+}
+
+/** What the user added to a running task: a message sent to its Planner, or one the Manager passed on. */
+export interface Supplement {
+  text: string;
+  /** "chat", "manager:<channel>". */
+  via: string;
+  created_at: string;
+  /** When the task's Planner had it in a turn; null while it has not. */
+  delivered_at: string | null;
+}
+
+/** Edit the requirement of a task that has not ended; its Planner, if it runs, gets the edit in a turn. */
+export async function editTaskRequirement(taskId: string, requirement: string): Promise<void> {
+  const res = await fetch(`${API_BASE}/tasks/${encodeURIComponent(taskId)}/requirement`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ requirement }),
+  });
+  if (!res.ok) await failed(res, "edit requirement");
+}
+
 export interface TaskDetail extends TaskInfo {
   work_dir: string;
   config: Record<string, unknown>;
@@ -1160,6 +1191,10 @@ export interface TaskDetail extends TaskInfo {
   progress?: ProgressNote[];
   /** The Agent Profile the task chose for some of its roles, over every settings layer; {} when none. */
   profile_overrides?: Partial<Record<TaskRole, AgentProfile>>;
+  /** Every version of an edited requirement, oldest first; empty for one never edited. */
+  requirement_versions?: RequirementVersion[];
+  /** What the user added to the task while it ran, oldest first. */
+  supplements?: Supplement[];
 }
 
 /** What a task journal entry records; code writes each when its event happens. */
@@ -1168,7 +1203,7 @@ export type JournalKind =
   | "step_failed"
   | "step_retry"
   | "decision"
-  | "user_instruction"
+  | "supplement"
   | "session_switch"
   | "handoff"
   | "progress";

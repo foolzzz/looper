@@ -17,7 +17,7 @@ import asyncpg
 from .connection import get_pool
 
 # Every kind an entry can have (task_journal.kind; agents.tiers.journal.JournalKind).
-KINDS = ("step_accepted", "step_failed", "step_retry", "decision", "user_instruction", "session_switch", "handoff",
+KINDS = ("step_accepted", "step_failed", "step_retry", "decision", "supplement", "session_switch", "handoff",
          "progress")
 
 _INSERT = """
@@ -46,7 +46,7 @@ async def list_entries(
     rows = await pool.fetch(
         """
         SELECT j.id, j.task_id, j.step_id, COALESCE(s.step_key, '') AS step_key, j.kind, j.summary, j.learnings,
-               j.created_at
+               j.via, j.delivered_at, j.created_at
         FROM task_journal j LEFT JOIN task_steps s ON s.id = j.step_id
         WHERE j.task_id = $1 ORDER BY j.id
         """,

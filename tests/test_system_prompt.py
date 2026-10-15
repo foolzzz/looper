@@ -170,6 +170,18 @@ def test_a_step_in_a_worktree_of_its_own_is_told_how_it_is_merged() -> None:
         requirement="", step="s2", instruction="Add it.", acceptance_criteria=[], work_dir="/w")
 
 
+@pytest.mark.parametrize("verify", [False, True], ids=["worker", "reviewer"])
+def test_a_workers_and_a_reviewers_task_lists_the_supplements_after_the_requirement(verify: bool) -> None:
+    from looper.agents.tiers.worker import WorkerPool
+
+    payload = {"requirement": "Build calc.", "step_key": "s1", "instruction": "Add add().",
+               "supplements": ["Use CSV.", "Also subtraction.\nWith tests."]}
+    section = WorkerPool._task_section(payload, "/w", is_verify=verify)
+    assert section.index("Build calc.") < section.index("Supplements (what the user added") \
+        < section.index("- Use CSV.") < section.index("- Also subtraction.\n  With tests.") < section.index("Add add().")
+    assert "Supplements" not in WorkerPool._task_section({**payload, "supplements": []}, "/w", is_verify=verify)
+
+
 def test_a_long_requirement_is_clipped_with_a_visible_marker() -> None:
     requirement = "x" * (TASK_REQUIREMENT_LIMIT + 500)
     section = plan_task_section(task_id="t1", requirement=requirement, project_name="p", work_dir="/w")

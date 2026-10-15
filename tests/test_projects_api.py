@@ -34,6 +34,7 @@ class _Store:
         self.projects: dict[str, dict[str, Any]] = {}
         self.tasks: dict[str, dict[str, Any]] = {}
         self.list_calls: list[dict[str, Any]] = []
+        self.versions: dict[str, list[dict[str, Any]]] = {}
         self.transactions = 0
 
     def add_project(self, project_id: str, name: str, work_dir: str = "", background: str = "") -> None:
@@ -124,6 +125,21 @@ class _Store:
         """No runs recorded yet: every task has cost nothing."""
         return {task_id: {"cost_usd": 0.0, "runs": 0} for task_id in task_ids}
 
+    async def requirement_versions(self, task_id: str, **_: Any) -> list[dict[str, Any]]:
+        return list(self.versions.get(task_id, []))
+
+    async def edit_requirement(self, task_id: str, text: str, *, via: str, delivered: bool, **_: Any) -> int | None:
+        """``task_changes.edit_requirement``: version 1 is the text the task had, then each edit."""
+        task = self.tasks.get(task_id)
+        if task is None:
+            return None
+        versions = self.versions.setdefault(task_id, [])
+        if not versions:
+            versions.append({"version": 1, "text": task["requirement"], "via": "created", "delivered": True})
+        versions.append({"version": len(versions) + 1, "text": text, "via": via, "delivered": delivered})
+        task["requirement"] = text
+        return len(versions)
+
     async def profile_overrides(self, task_id: str, **_: Any) -> dict[str, Any]:
         """No task here chose an Agent Profile of its own."""
         return {}
@@ -146,6 +162,10 @@ def store(monkeypatch: pytest.MonkeyPatch) -> _Store:
     from looper.db import agent_setting_layers
 
     monkeypatch.setattr(agent_setting_layers, "profile_overrides", fake.profile_overrides)
+    from looper.db import task_changes
+
+    monkeypatch.setattr(task_changes, "requirement_versions", fake.requirement_versions)
+    monkeypatch.setattr(task_changes, "edit_requirement", fake.edit_requirement)
     return fake
 
 
@@ -498,3 +518,85 @@ class TestStartReadyTask:
     def test_an_unknown_task_is_404(self, store: _Store) -> None:
         status, _, published = self._call("task-nope")
         assert (status, published) == (404, [])
+
+
+class TestEditRequirement:
+    """``PUT /api/tasks/<id>/requirement`` edits the requirement of a task that has not ended, keeping every
+    version; a running task's Planner is woken to get it in a turn."""
+
+    @staticmethod
+    def _call(task_id: str, body: Any, *, planner: bool = False) -> tuple[int, Any, list[Any]]:
+        from looper.agents.message import channel_address
+        from looper.agents.tiers.planner import PlannerAgent
+
+        published: list[Any] = []
+
+        async def publish(envelope: Any) -> None:
+            published.append(envelope)
+
+        router = TaskRouter(runtime_root=Path(tempfile.mkdtemp()))
+        if planner:
+            router._planners = {task_id: PlannerAgent(task_id=task_id, runtime_root=Path(tempfile.mkdtemp()))}
+        server = AgentHTTPServer(web_adapter=SimpleNamespace(_address=channel_address("web")), task_router=router,
+                                 supervisor=SimpleNamespace(bus=SimpleNamespace(publish=publish)))
+        status, answer = _call("PUT", f"/api/tasks/{task_id}/requirement", body, server=server)
+        return status, answer, published
+
+    @pytest.mark.parametrize(("task_status", "planner", "delivered"), [
+        ("init", False, True),  # not started: it plans the new text
+        ("pending", False, False),  # waiting for room: its PLAN turn gets the edit
+        ("running", True, False),  # its Planner gets the edit in a turn
+    ])
+    def test_an_edit_is_kept_as_a_version(self, store: _Store, task_status: str, planner: bool,
+                                          delivered: bool) -> None:
+        from looper.agents.message import MessageType, planner_address
+
+        store.add_project("proj-a", "tetris")
+        store.add_task("task-1", "proj-a", task_status)
+        status, body, published = self._call("task-1", {"requirement": "r, with a CLI"}, planner=planner)
+        assert (status, body) == (200, {"task_id": "task-1", "version": 2, "requirement": "r, with a CLI"})
+        assert [(v["version"], v["text"], v["delivered"]) for v in store.versions["task-1"]] == [
+            (1, "r", True), (2, "r, with a CLI", delivered)]
+        assert [(e.message_type, e.target) for e in published] == (
+            [(MessageType.TASK_CHANGE, planner_address("task-1"))] if planner else [])
+
+    @pytest.mark.parametrize(("task_status", "body", "expected"), [
+        ("completed", {"requirement": "new"}, 409),
+        ("stopped", {"requirement": "new"}, 409),
+        ("running", {"requirement": "  "}, 400),
+        ("running", {}, 400),
+        ("running", {"requirement": "r"}, 400),  # unchanged
+    ])
+    def test_rejects(self, store: _Store, task_status: str, body: Any, expected: int) -> None:
+        store.add_project("proj-a", "tetris")
+        store.add_task("task-1", "proj-a", task_status)
+        status, _, published = self._call("task-1", body)
+        assert (status, published, store.versions) == (expected, [], {})
+
+    def test_an_unknown_task_is_404(self, store: _Store) -> None:
+        assert self._call("task-nope", {"requirement": "x"})[0] == 404
+
+    def test_the_task_pages_edit_of_a_task_not_started_is_kept_as_a_version_too(self, store: _Store) -> None:
+        store.add_project("proj-a", "tetris")
+        store.add_task("task-1", "proj-a", "init")
+        status, body = _call("PUT", "/api/tasks/task-1/config", {"requirement": "r2"})
+        assert (status, body["requirement"]) == (200, "r2")
+        assert [(v["version"], v["text"], v["via"]) for v in store.versions["task-1"]] == [
+            (1, "r", "created"), (2, "r2", "task_page")]
+
+
+def test_a_chat_message_to_a_planner_is_stored_as_a_supplement(monkeypatch: pytest.MonkeyPatch) -> None:
+    from looper.agents import projects
+    from looper.agents.message import MANAGER_ADDRESS, planner_address
+    from looper.db import task_changes
+
+    stored: list[tuple[str, str, str]] = []
+
+    async def add_supplement(task_id: str, text: str, *, via: str, **_: Any) -> int:
+        stored.append((task_id, text, via))
+        return 7
+
+    monkeypatch.setattr(task_changes, "add_supplement", add_supplement)
+    assert asyncio.run(projects.store_chat_supplement(planner_address("task-1"), "use CSV")) == 7
+    assert asyncio.run(projects.store_chat_supplement(MANAGER_ADDRESS, "hello")) is None
+    assert stored == [("task-1", "use CSV", "chat")]

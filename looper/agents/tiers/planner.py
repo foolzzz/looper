@@ -12,16 +12,22 @@ make the changes. Each event is one user turn on it:
 - each Worker or Reviewer result: Claude decides to accept the step, send it
   to review, retry it in a new Worker, replan the steps not started yet, or
   fail the task;
-- each chat message from a user: Claude replies, and may pass the text to a
-  running Worker or add steps.
+- each change to the task (``db.task_changes``): a supplement (every chat
+  message from a user is one, and the Manager passes others on) or an edit of
+  the requirement. Claude answers, and decides whether the plan still fits:
+  it may pass text to a running Worker, add steps, or replan the steps not
+  started (stopping running steps the change makes wrong). Every change
+  reaches Claude in a turn: one arriving while a turn runs waits for it to
+  end, several waiting are given together, and a change is delivered only once
+  its turn's reply is done, so a failed turn or a restart gives it again.
 
 Every reply ends with JSON that ``planner_protocol`` validates; code then
 does the dispatching. Code writes the task journal (``journal``) as things
 happen: a step accepted, failed or retried, with its agents' learnings; the
-Planner's replans, added steps and spend-cap stop, with the reason; the user's
-chat messages; a new session and the handoff before it. The Planner's
+Planner's replans, added steps and spend-cap stop, with the reason; the
+supplements; a new session and the handoff before it. The Planner's
 DECISION, SUPERVISE and CHAT turns and each Worker's first turn carry the
-journal back, and a project with ``distill_lessons`` gets one LESSONS turn when
+journal back, each Worker's and Reviewer's task section the supplements, and a project with ``distill_lessons`` gets one LESSONS turn when
 a task completes, saved as a project knowledge document or a draft of one; a
 learning a Worker or Reviewer says holds for the whole project becomes a draft
 when it arrives. The plan, its steps,
@@ -97,6 +103,7 @@ from .planner_protocol import (
     MAX_STEPS,
     REPLY_CONTRACT,
     ChatAction,
+    ChatReply,
     Decision,
     DecisionContext,
     DecisionReply,
@@ -120,7 +127,9 @@ logger = logging.getLogger(__name__)
 
 from ...db import activity as db_activity, role_configs as db_role_configs, llm_records as db_llm_records
 from ...db import agent_sessions as db_agent_sessions, plans as db_plans, projects as db_projects
-from ...db import step_workspaces as db_step_workspaces
+from ...db import journal as db_journal, step_workspaces as db_step_workspaces, task_changes as db_changes
+from ...db import tasks as db_tasks
+from ...db.task_changes import TaskChanges
 from ...db.tasks import FailKind, update_task_phase
 
 MAX_CONCURRENT_WORKERS = 4
@@ -350,6 +359,7 @@ class TaskPlan:
             retired=frozenset(s.label for s in dropped),
             spent=sum(1 for s in dropped if s.started),
             running=frozenset(s.label for s in live if s.status == "dispatched"),
+            done=frozenset(s.label for s in live if s.started and s.status == "verified"),
         )
 
     def progress_summary(self) -> str:
@@ -436,6 +446,17 @@ def closing_note(why: str, steps: Iterable[tuple[str, str, Mapping[str, Any] | N
                         "## Not done\n" + ("\n".join(not_done) or "- nothing")])
 
 
+def _requirement_diff(edit: Any) -> str:
+    """What a requirement edit changed: a unified diff of its lines, else (a diff longer than the new text) the
+    new text whole."""
+    import difflib
+
+    before, after = edit.before_text.splitlines(), edit.text.splitlines()
+    diff = "\n".join(difflib.unified_diff(before, after, f"version {edit.before_version}", f"version {edit.version}",
+                                          lineterm=""))
+    return diff if len(diff) <= len(edit.text) + 200 else "(rewritten; the new text is in the Task section)"
+
+
 def _learning_lines(value: Any) -> list[str]:
     """A report's learnings as decision-turn lines, a project-wide one marked as such."""
     return [f"- learning{' (holds for the whole project)' if item.scope is LearningScope.PROJECT else ''}: "
@@ -518,6 +539,7 @@ class PlannerAgent:
 
     async def start(self, bus: MessageBus) -> None:
         self._bus = bus
+        self._replies: dict[int, str] = {}  # a supplement's journal id → the reply of the turn that delivered it
         self._running = True
         await self._load_plan()
         self._loop_task = asyncio.create_task(self._message_loop())
@@ -575,6 +597,8 @@ class PlannerAgent:
             if envelope.message_type is not MessageType.TASK_CANCEL:
                 # A task at its spend cap stops before another turn; the handlers below see it ended.
                 await self._within_budget(self._plan)
+            # Steps this event dispatches see every change stored so far; Claude gets them in a turn below.
+            await self._read_changes(self._plan, await self._pending_changes())
         match envelope.message_type:
             case MessageType.TASK_REQUEST if envelope.payload.get("resume"):
                 await self._continue_plan(envelope)
@@ -590,8 +614,16 @@ class PlannerAgent:
                 await self._handle_cancel(envelope)
             case MessageType.USER_MESSAGE:
                 await self._handle_user_message(envelope)
+            case MessageType.TASK_CHANGE:
+                pass  # delivered below, with any other change waiting
             case MessageType.SYSTEM_EVENT:
                 await self._handle_system_event(envelope)
+        # Every change waiting reaches Claude once the event's turns are done: one that arrived meanwhile, or
+        # one a failed turn or a restart left undelivered.
+        if self._plan is not None:
+            reply = await self._deliver_changes(self._plan)
+            if reply is not None:
+                await self._activity("phase", f"Planner answered a change to the task: {reply}"[:300])
 
     # --- Planning ---
 
@@ -611,6 +643,9 @@ class PlannerAgent:
             project_id=payload.get("project_id", "") or "",
         )
         await self._refresh_project(plan)
+        # The task's changes so far: a requirement edited while the task waited, and its supplements.
+        changes = await self._pending_changes()
+        await self._read_changes(plan, changes)
         self._plan = plan
         # A new plan is a new conversation, which needs no resume brief.
         async with self._turn_lock:
@@ -632,6 +667,7 @@ class PlannerAgent:
         steps = self._add_steps(plan, reply.steps)
         plan.status = "executing"
         await self._save(plan, *steps, plan_row=True)
+        await self._mark_delivered(changes)
         await update_task_phase(self._task_id, "executing")
         await self._activity("phase", f"Plan created: {len(steps)} step(s): {self._describe(plan, steps)}")
 
@@ -738,8 +774,9 @@ class PlannerAgent:
                 "parent_task_id": self._task_id,
                 "plan_id": plan.plan_id,
                 "step_index": step.index,
-                # The Worker's task section: the task, then this step and its retry feedback.
+                # The Worker's task section: the task and its supplements, then this step and its retry feedback.
                 "requirement": plan.requirement,
+                "supplements": journal.supplement_texts(plan.journal),
                 "step_key": step.label,
                 "instruction": step.instruction,
                 "target_files": step.target_files,
@@ -1001,6 +1038,7 @@ class PlannerAgent:
                 "parent_task_id": self._task_id,
                 "plan_id": plan.plan_id,
                 "requirement": plan.requirement,
+                "supplements": journal.supplement_texts(plan.journal),
                 "step_key": step.label,
                 "instruction": step.instruction,
                 "work_result": step.result or {},
@@ -1344,20 +1382,81 @@ class PlannerAgent:
         ))
 
     async def _chat(self, plan: TaskPlan, text: str, envelope: MessageEnvelope) -> str:
+        """A chat message is a supplement to the task: delivered, with any other change waiting, in a CHAT turn,
+        whose reply answers the message."""
+        supplement = envelope.payload.get("supplement_id")
+        if not isinstance(supplement, int):
+            # Stored when it was sent (``projects.send_supplement``); one that was not is stored now.
+            try:
+                supplement = await db_changes.add_supplement(
+                    self._task_id, journal.kept_text(text, journal.SUPPLEMENTS_MAX_CHARS), via="chat")
+            except Exception:
+                logger.exception("planner %s could not store a chat message as a supplement", self.agent_id)
+                supplement = None
+        reply = await self._deliver_changes(plan, envelope)
+        if reply is not None:
+            return reply
+        # A turn after another event already gave it to Claude, with any other change waiting.
+        answered = self._replies.pop(supplement, None) if supplement is not None else None
+        return answered or "收到，已交给规划者处理。"
+
+    async def _pending_changes(self) -> TaskChanges:
+        try:
+            return await db_changes.pending(self._task_id)
+        except Exception:
+            logger.exception("planner %s cannot read its task's changes", self.agent_id)
+            return TaskChanges()
+
+    async def _read_changes(self, plan: TaskPlan, changes: TaskChanges) -> None:
+        """Take ``changes`` into ``plan``: the journal as stored (with the supplements, added from elsewhere too)
+        and the latest requirement."""
+        if changes.empty:
+            return
+        try:
+            plan.journal = [JournalEntry.from_row(row) for row in await db_journal.list_entries(self._task_id)]
+        except Exception:
+            logger.exception("planner %s cannot read its task's journal", self.agent_id)
+        if changes.requirement is not None:
+            plan.requirement = changes.requirement.text
+
+    async def _mark_delivered(self, changes: TaskChanges) -> None:
+        if changes.empty:
+            return
+        try:
+            await db_changes.mark_delivered(self._task_id, changes)
+        except Exception:
+            # Given again at the next turn: more than once, never not at all.
+            logger.exception("planner %s could not record its task's changes as delivered", self.agent_id)
+
+    async def _deliver_changes(self, plan: TaskPlan, envelope: MessageEnvelope | None = None) -> str | None:
+        """Give Claude the task's changes it has not had (supplements, a requirement edit) in one CHAT turn and do
+        what it decides; the reply, or None when there was nothing to give. The changes are marked delivered only
+        once that is done: a failed turn leaves them for the next one."""
+        if plan.status not in _LIVE:
+            return None
+        changes = await self._pending_changes()
+        if changes.empty:
+            return None
+        await self._read_changes(plan, changes)
         view = plan.view()
-        message = self._chat_message(plan, text)
-        # Kept before the turn, so the instruction outlives a failed turn and the session.
-        instruction = journal.kept_text(text, journal.USER_INSTRUCTIONS_MAX_CHARS)
-        await self._save(plan, entries=[JournalEntry("", "", instruction, kind=JournalKind.USER_INSTRUCTION)])
+        message = self._change_message(plan, changes)
         try:
             reply = await self._ask(TurnKind.CHAT, message, lambda answer: parse_chat(answer, view))
         except PlannerTurnError as exc:
-            await self._activity("error", f"Planner could not answer a chat message: {exc}"[:500])
-            return f"Planner 出错，没能处理这条消息：{exc}"
+            await self._activity("error", f"Planner could not take a change to the task: {exc}"[:500])
+            return f"Planner 出错，没能处理这次变更（会在下一轮重试）：{exc}"
+        text = await self._apply_chat(plan, reply, envelope)
+        await self._mark_delivered(changes)
+        for supplement in changes.supplements:
+            self._replies[supplement.id] = text
+        return text
 
+    async def _apply_chat(self, plan: TaskPlan, reply: ChatReply, envelope: MessageEnvelope | None) -> str:
+        """Do what a CHAT reply decided; the answer for the user."""
         if reply.action is ChatAction.FORWARD:
             step = next(s for s in plan.steps if s.label == reply.step and s.status == "dispatched")
-            if await self._forward_to_worker(step, reply.text, envelope):
+            correlation = envelope.correlation_id if envelope is not None else plan.correlation_id
+            if await self._forward_to_worker(step, reply.text, correlation):
                 return reply.reply
             # The Worker ended first; its result's decision turn gets the text instead.
             step.missed_messages.append(reply.text)
@@ -1369,22 +1468,51 @@ class PlannerAgent:
             steps = self._add_steps(plan, reply.steps)
             added = self._describe(plan, steps)
             await self._save(plan, *steps, entries=[JournalEntry(
-                "", "", journal.clip(f"added steps {added} at the user's message: {reply.reply}",
+                "", "", journal.clip(f"added steps {added} at a change to the task: {reply.reply}",
                                      journal.SUMMARY_MAX_CHARS), kind=JournalKind.DECISION)])
-            await self._activity("phase", f"Steps added from chat: {added}")
+            await self._activity("phase", f"Steps added at a change to the task: {added}")
             await self._report_progress(plan)
             await self._dispatch_ready(plan)
             return reply.reply
-        await self._activity("phase", f"Planner answered a chat message: {reply.reply}"[:300])
+        if reply.action is ChatAction.REPLAN:
+            await self._chat_replan(plan, reply)
+            return reply.reply
+        await self._activity("phase", f"Planner answered a change to the task: {reply.reply}"[:300])
         return reply.reply
 
-    async def _forward_to_worker(self, step: PlanStep, text: str, envelope: MessageEnvelope) -> bool:
+    async def _chat_replan(self, plan: TaskPlan, reply: ChatReply) -> None:
+        """Stop and drop the running steps the change makes wrong, replace every step not started, then go on."""
+        stopped = [s for s in plan.steps if s.label in reply.stop and s.status == "dispatched"]
+        for step in stopped:
+            try:
+                await self._kill_worker(step)  # a Worker that finished first has its result ignored
+            except Exception:
+                logger.debug("planner %s could not stop worker %s", self.agent_id, step.worker_id, exc_info=True)
+            step.status = "skipped"
+        keep = {spec.id for spec in reply.steps}
+        dropped = [s for s in plan.steps if s.status == "pending" and s.label not in keep]
+        for step in dropped:
+            step.status = "skipped"
+        steps = self._add_steps(plan, reply.steps)
+        summary = f"Plan changed: {self._describe(plan, steps) or 'no new steps'}"
+        if stopped:
+            summary += f"; stopped {', '.join(s.label for s in stopped)}"
+        if dropped:
+            summary += f"; dropped {', '.join(s.label for s in dropped)}"
+        entry = JournalEntry("", "", journal.clip(f"replan at a change to the task: {reply.reply}. {summary}",
+                                                  journal.SUMMARY_MAX_CHARS), kind=JournalKind.DECISION)
+        await self._save(plan, *stopped, *dropped, *steps, entries=[entry])
+        await self._activity("phase", summary)
+        await self._report_progress(plan)
+        await self._dispatch_ready(plan)
+
+    async def _forward_to_worker(self, step: PlanStep, text: str, correlation_id: str) -> bool:
         """Ask the worker pool to add a user message as the running worker's next turn."""
         message = (
             "A message from the user, passed on by the Planner while you work on this step. "
             "Take it into account, then continue:\n\n" + text
         )
-        if not await self._send_worker_input(step, message, envelope.correlation_id):
+        if not await self._send_worker_input(step, message, correlation_id):
             return False
         await self._activity(
             "phase", f"User message passed to {step.worker_id} (step {step.index + 1}): {text[:80]}",
@@ -1911,8 +2039,13 @@ class PlannerAgent:
         return ["", *section] if section else []
 
     def _plan_message(self, plan: TaskPlan) -> str:
+        added = journal.supplements(
+            plan.journal, title="Supplements (what the user added to the task, oldest first; each stands unless a "
+                                "later one changes it)")
         return "\n".join([
-            "[PLAN] Plan the task in the Task section of your instructions.",
+            "[PLAN] Plan the task in the Task section of your instructions"
+            + (", with the supplements below." if added else "."),
+            *(["", *added] if added else []),
             "",
             f"You may look at the project first, without changing it. Reply with the PLAN JSON: 1 to {MAX_STEPS} steps.",
         ])
@@ -2013,20 +2146,32 @@ class PlannerAgent:
         lines += ["", f"Allowed decisions now: {', '.join(allowed)}.", "Reply with the DECISION JSON."]
         return "\n".join(lines)
 
-    def _chat_message(self, plan: TaskPlan, text: str) -> str:
+    def _change_message(self, plan: TaskPlan, changes: TaskChanges) -> str:
+        """A CHAT turn's message: the task's changes the Planner has not had, and the plan as it is."""
         running = [s for s in plan.steps if s.status == "dispatched"]
         running_text = ", ".join(f"{s.label} ({s.worker_id})" for s in running) or "none"
-        actions = ["none", "add_steps"] + (["forward (to a running step)"] if running else [])
+        actions = ["none", "add_steps", "replan"] + (["forward (to a running step)"] if running else [])
+        new = {supplement.id for supplement in changes.supplements}
+        lines = ["[CHAT] The task changed."]
+        if changes.supplements:
+            lines += ["", "The user added to the task (new supplements, oldest first; every message the user sends "
+                          "you is one):"]
+            lines += ["- " + supplement.text.strip().replace("\n", "\n  ") for supplement in changes.supplements]
+        if changes.requirement is not None:
+            edit = changes.requirement
+            lines += ["", f"The requirement was edited (version {edit.before_version} -> {edit.version}); the Task "
+                          "section of your instructions has the new text. What changed:", _requirement_diff(edit)]
+        # The supplements given before, and the rest of the journal.
+        earlier = [entry for entry in plan.journal if entry.id is None or entry.id not in new]
+        section = journal.planner_section(earlier)
         return "\n".join([
-            "[CHAT] A message from the user.",
+            *lines,
             "",
             *self._plan_lines(plan),
             f"Running now: {running_text}",
-            *self._progress_lines(plan),
+            *(["", *section] if section else []),
             "",
-            "User message:",
-            text,
-            "",
+            "Decide whether the plan still fits the task as it is now.",
             f"Allowed actions: {', '.join(actions)}.",
             "Reply with the CHAT JSON.",
         ])
