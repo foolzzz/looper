@@ -2295,6 +2295,40 @@ export interface ChannelConfig {
   updated_at: string;
 }
 
+/** The Lark (lark-cli) channel as lark-cli sees its saved settings (`GET /api/channels/lark/status`). */
+export interface LarkStatus {
+  /** The bot lark-cli acts as under the channel's profile; null when it cannot (see `problem`). */
+  bot: { name: string; app_id: string; open_id: string; profile: string } | null;
+  /** Why the channel would not start (lark-cli, or the allowlist made for another app); null otherwise. */
+  problem: string | null;
+  /** The app the sender allowlist was made for; open_ids differ per app. */
+  allowlist_app_id: string | null;
+  /** Names of the allowlist's and the refused senders' open_ids, where lark-cli knows them. */
+  names: Record<string, string>;
+  /** The latest senders the allowlist refused, newest first, not on the saved allowlist. */
+  rejected: { open_id: string; name: string | null; snippet: string; count: number; last_at: string }[];
+}
+
+/** A person the people search found: their open_id for the channel's app. */
+export interface LarkPerson {
+  open_id: string;
+  name: string;
+  email: string;
+  department: string;
+}
+
+export async function fetchLarkStatus(): Promise<LarkStatus> {
+  const res = await fetch(`${API_BASE}/channels/lark/status`);
+  if (!res.ok) await failed(res, "lark status");
+  return res.json();
+}
+
+export async function searchLarkPeople(query: string): Promise<LarkPerson[]> {
+  const res = await fetch(`${API_BASE}/channels/lark/people?q=${encodeURIComponent(query)}`);
+  if (!res.ok) await failed(res, "lark people");
+  return (await res.json()).people ?? [];
+}
+
 export async function fetchChannelConfigs(): Promise<ChannelConfig[]> {
   const res = await fetch(`${API_BASE}/channel-configs`);
   if (!res.ok) throw new Error(`channel-configs ${res.status}`);

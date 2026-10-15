@@ -1,10 +1,18 @@
 import { useEffect, useId, useState } from "react";
-import { AlertTriangle, Save, Loader2, MessageCircle, Send, CheckCircle2, XCircle, Plus, Trash2 } from "lucide-react";
+import { AlertTriangle, Bot, Save, Loader2, MessageCircle, Search, Send, CheckCircle2, XCircle, Plus, Trash2, UserPlus } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
-import { fetchChannelConfigs, updateChannelConfig, type ChannelConfig } from "@/lib/api";
+import {
+  fetchChannelConfigs,
+  fetchLarkStatus,
+  searchLarkPeople,
+  updateChannelConfig,
+  type ChannelConfig,
+  type LarkPerson,
+  type LarkStatus,
+} from "@/lib/api";
 import { useSettingsTarget } from "@/lib/settings-target";
 import { cn } from "@/lib/utils";
 
@@ -27,7 +35,7 @@ const SENDER_ALLOWLISTS: Record<string, { field: string; label: string; pattern:
     label: "Lark open_ids",
     pattern: /^ou_[0-9A-Za-z]{8,64}$/,
     placeholder: "ou_…",
-    hint: "Each sender's open_id for this app, starting with ou_ (not a union_id or a user_id).",
+    hint: "Each sender's open_id for this bot's app, starting with ou_ (not a union_id or a user_id); open_ids differ per app. Only direct messages to the bot are handled.",
   },
 };
 const MAX_SENDERS = 100;
@@ -38,6 +46,17 @@ const SECRET_MASK = "***";
 /** Channels whose bot token is stored server-side (masked). */
 const TOKEN_CHANNELS: Record<string, { label: string; hint: string }> = {
   telegram: { label: "Bot token", hint: "From @BotFather. Stored on the server and never shown; leave as is to keep it, clear to remove it." },
+};
+
+/** Config keys the server owns: shown elsewhere or not at all, never as an editable field. */
+const SERVER_KEYS = ["allowlist_app_id"];
+
+/** Placeholders and hints for config fields that are not environment variable names. */
+const FIELD_HELP: Record<string, { placeholder: string; hint: string }> = {
+  profile: {
+    placeholder: "Empty: lark-cli's active profile",
+    hint: "The lark-cli profile the channel runs as (`lark-cli profile list`): it chooses the app, and so the bot.",
+  },
 };
 
 /** The ids stored in an allowlist field: a list, or one comma-separated string as older Telegram settings hold it. */
@@ -59,7 +78,7 @@ function ChannelCard({ channel, onSaved }: { channel: ChannelConfig; onSaved: ()
   const id = useId();
   const allowlist = SENDER_ALLOWLISTS[channel.channel_type];
   const saved = channel.config || {};
-  const skip = ["description", ...(allowlist ? [allowlist.field] : [])];
+  const skip = ["description", ...SERVER_KEYS, ...(allowlist ? [allowlist.field] : [])];
   const [enabled, setEnabled] = useState(channel.enabled);
   const [fields, setFields] = useState<Record<string, string>>(stringFields(saved, skip));
   const [ids, setIds] = useState<string[]>(allowlist ? storedIds(saved[allowlist.field]) : []);
@@ -70,6 +89,20 @@ function ChannelCard({ channel, onSaved }: { channel: ChannelConfig; onSaved: ()
   const [error, setError] = useState("");
   const [justSaved, setJustSaved] = useState(false);
   const Icon = channelIcon(channel.channel_type);
+  const isLark = channel.channel_type === "lark";
+  // The Lark channel as lark-cli sees its saved settings: the bot, names, refused senders. Read again after a save.
+  const [lark, setLark] = useState<LarkStatus | null>(null);
+  const [larkError, setLarkError] = useState("");
+  useEffect(() => {
+    if (!isLark) return;
+    let alive = true;
+    fetchLarkStatus()
+      .then((status) => alive && (setLark(status), setLarkError("")))
+      .catch((e: Error) => alive && setLarkError(e.message));
+    return () => {
+      alive = false;
+    };
+  }, [isLark, channel.updated_at]);
   // An import's "secrets to fill in" links here (#settings/channels/<id>).
   const ref = useSettingsTarget<HTMLDivElement>("channel", channel.channel_id);
 
@@ -95,7 +128,7 @@ function ChannelCard({ channel, onSaved }: { channel: ChannelConfig; onSaved: ()
       ? ids.length === 0
         ? "its sender allowlist is empty; nobody could reach the Manager through it"
         : null
-      : channel.start_problem ?? null;
+      : channel.start_problem ?? lark?.problem ?? null;
 
   const handleSave = async () => {
     setSaving(true);
@@ -137,6 +170,7 @@ function ChannelCard({ channel, onSaved }: { channel: ChannelConfig; onSaved: ()
           <div>
             <h3 className="text-sm font-semibold">{channel.display_name}</h3>
             <p className="text-xs text-muted-foreground">{description}</p>
+            {isLark && <LarkBotLine status={lark} error={larkError} />}
           </div>
         </div>
         <div className="flex items-center gap-3">
@@ -183,14 +217,16 @@ function ChannelCard({ channel, onSaved }: { channel: ChannelConfig; onSaved: ()
               type="text"
               value={fields[key] || ""}
               onChange={(e) => setFields({ ...fields, [key]: e.target.value })}
-              placeholder={key.endsWith("_env") ? "Environment variable name" : ""}
+              placeholder={key.endsWith("_env") ? "Environment variable name" : FIELD_HELP[key]?.placeholder ?? ""}
               className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground outline-none focus:ring-2 focus:ring-ring"
             />
-            {key.endsWith("_env") && (
+            {key.endsWith("_env") ? (
               <p className="mt-1 text-[10px] text-muted-foreground">
                 The server reads the actual value from this environment variable at startup
               </p>
-            )}
+            ) : FIELD_HELP[key] ? (
+              <p className="mt-1 text-[10px] text-muted-foreground">{FIELD_HELP[key].hint}</p>
+            ) : null}
           </div>
         ))}
 
@@ -204,13 +240,16 @@ function ChannelCard({ channel, onSaved }: { channel: ChannelConfig; onSaved: ()
               <div key={index} className="space-y-1">
                 <div className="flex items-center gap-2">
                   <Input
-                    aria-label={`Allowed sender ${index + 1}`}
+                    aria-label={`Allowed sender ${index + 1}${lark?.names[value.trim()] ? `, ${lark.names[value.trim()]}` : ""}`}
                     value={value}
                     onChange={(e) => setIds(ids.map((current, i) => (i === index ? e.target.value : current)))}
                     placeholder={allowlist.placeholder}
                     aria-invalid={!!idProblems[index]}
                     className="flex-1 font-mono"
                   />
+                  {isLark && lark?.names[value.trim()] && (
+                    <span className="max-w-[40%] shrink-0 truncate text-xs text-foreground">{lark.names[value.trim()]}</span>
+                  )}
                   <Button
                     type="button"
                     variant="ghost"
@@ -242,6 +281,15 @@ function ChannelCard({ channel, onSaved }: { channel: ChannelConfig; onSaved: ()
           </div>
         )}
 
+        {isLark && (
+          <LarkPeople
+            status={lark}
+            ids={ids.map((value) => value.trim())}
+            onAdd={(openId) => setIds((current) => (current.some((v) => v.trim() === openId) ? current : [...current, openId]))}
+            full={ids.length >= MAX_SENDERS}
+          />
+        )}
+
         <div className="flex items-center justify-between gap-2 pt-2">
           <p className="text-[10px] text-muted-foreground">
             Channel ID: <code className="text-foreground">{channel.channel_id}</code>
@@ -267,7 +315,146 @@ function ChannelCard({ channel, onSaved }: { channel: ChannelConfig; onSaved: ()
   );
 }
 
-/** Settings → Channels: the Telegram and Lark channels, each with its sender allowlist. */
+function shortId(id: string): string {
+  return id.length > 14 ? `${id.slice(0, 12)}…` : id;
+}
+
+/** "Bot: HBDataBot (cli_a945…, profile …)", or why lark-cli cannot act as the bot. */
+function LarkBotLine({ status, error }: { status: LarkStatus | null; error: string }) {
+  if (error) return <p className="mt-0.5 text-xs text-destructive">Bot: {error}</p>;
+  if (!status) return <p className="mt-0.5 text-xs text-muted-foreground">Bot: checking lark-cli…</p>;
+  if (!status.bot) return <p className="mt-0.5 text-xs text-warning">Bot: unknown, lark-cli cannot act as it</p>;
+  return (
+    <p className="mt-0.5 flex items-center gap-1 text-xs text-foreground">
+      <Bot className="h-3.5 w-3.5 text-muted-foreground" aria-hidden="true" />
+      <span>
+        Bot: <span className="font-medium">{status.bot.name}</span>{" "}
+        <span className="text-muted-foreground">
+          ({shortId(status.bot.app_id)}, profile {status.bot.profile})
+        </span>
+      </span>
+    </p>
+  );
+}
+
+/** Add Lark senders by name or email, and let in the ones the allowlist refused lately. Adding changes the draft
+ * allowlist above; Save stores it. */
+function LarkPeople({
+  status,
+  ids,
+  onAdd,
+  full,
+}: {
+  status: LarkStatus | null;
+  ids: string[];
+  onAdd: (openId: string) => void;
+  full: boolean;
+}) {
+  const id = useId();
+  const [query, setQuery] = useState("");
+  const [people, setPeople] = useState<LarkPerson[] | null>(null);
+  const [searching, setSearching] = useState(false);
+  const [error, setError] = useState("");
+  const listed = (openId: string) => ids.includes(openId);
+
+  const search = (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!query.trim()) return;
+    setSearching(true);
+    setError("");
+    searchLarkPeople(query.trim())
+      .then(setPeople, (e: Error) => setError(e.message))
+      .finally(() => setSearching(false));
+  };
+
+  const rejected = (status?.rejected ?? []).filter((r) => !listed(r.open_id));
+  return (
+    <div className="space-y-4 rounded-md border border-border px-4 py-3">
+      <form onSubmit={search} className="space-y-2" role="search" aria-label="Find a Lark sender">
+        <label htmlFor={`${id}-q`} className="block text-xs font-medium text-muted-foreground">
+          Add a sender by name or email
+        </label>
+        <div className="flex gap-2">
+          <Input
+            id={`${id}-q`}
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="Name or email"
+            maxLength={50}
+            className="flex-1"
+          />
+          <Button type="submit" variant="outline" size="sm" disabled={searching || !query.trim()}>
+            {searching ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Search className="h-3.5 w-3.5" />}
+            Search
+          </Button>
+        </div>
+        {error && <p role="alert" className="text-xs text-destructive">{error}</p>}
+        {people && (
+          <ul aria-live="polite" className="space-y-1">
+            {people.length === 0 && <li className="text-xs text-muted-foreground">Nobody found</li>}
+            {people.map((person) => (
+              <li key={person.open_id} className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs">
+                <span className="font-medium text-foreground">{person.name || person.open_id}</span>
+                <span className="min-w-0 max-w-full truncate text-muted-foreground">
+                  {[person.email, person.department].filter(Boolean).join(" · ")}
+                </span>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  className="ml-auto"
+                  disabled={listed(person.open_id) || full}
+                  onClick={() => onAdd(person.open_id)}
+                  aria-label={`Add ${person.name || person.open_id}`}
+                >
+                  <UserPlus className="h-3.5 w-3.5" />
+                  {listed(person.open_id) ? "Listed" : "Add"}
+                </Button>
+              </li>
+            ))}
+          </ul>
+        )}
+        <p className="text-[10px] text-muted-foreground">
+          Searches as the user lark-cli is signed in as; the open_ids found are this app&apos;s.
+        </p>
+      </form>
+
+      <div className="space-y-1">
+        <span className="block text-xs font-medium text-muted-foreground">Recently refused senders</span>
+        {rejected.length === 0 ? (
+          <p className="text-xs text-muted-foreground">None</p>
+        ) : (
+          <ul className="space-y-1.5">
+            {rejected.map((r) => (
+              <li key={r.open_id} className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs">
+                <span className="font-medium text-foreground">{r.name || shortId(r.open_id)}</span>
+                <span className="text-muted-foreground">
+                  {r.count > 1 ? `${r.count} messages, last ` : ""}
+                  {new Date(r.last_at).toLocaleString()}
+                </span>
+                {r.snippet && <span className="min-w-0 max-w-full truncate italic text-muted-foreground">“{r.snippet}”</span>}
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  className="ml-auto"
+                  disabled={full}
+                  onClick={() => onAdd(r.open_id)}
+                  aria-label={`Allow ${r.name || r.open_id}`}
+                >
+                  <UserPlus className="h-3.5 w-3.5" />
+                  Allow
+                </Button>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/** Settings → Channels: the Telegram and Lark (lark-cli) channels, each with its sender allowlist. */
 export function ChannelsSection() {
   const [channels, setChannels] = useState<ChannelConfig[]>([]);
   const [loading, setLoading] = useState(true);
