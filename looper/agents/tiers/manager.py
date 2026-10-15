@@ -205,6 +205,23 @@ def is_new_session_command(text: str) -> bool:
     return text.strip().lower() == NEW_SESSION_COMMAND
 
 
+# How the line before each message names the channel it came from (``AgentAddress.channel``). The Lark channel
+# takes direct messages only; Telegram's are told apart by the chat id.
+CHANNEL_NAMES = {"web": "the Looper dashboard chat", "lark": "a Lark direct message"}
+
+
+def channel_line(envelope: MessageEnvelope) -> str:
+    """The line before a message that tells Claude where it came from, and so where its reply goes."""
+    origin = _message_origin(envelope)
+    channel = origin["channel"] or "unknown"
+    if channel == "telegram":
+        # A private chat's id is its user's; a group's or a channel's id is negative.
+        where = "a Telegram group chat" if (origin["chat"] or "").startswith("-") else "a Telegram direct message"
+    else:
+        where = CHANNEL_NAMES.get(channel, f"the {channel} channel")
+    return f"Channel: {where}"
+
+
 def _message_origin(envelope: MessageEnvelope) -> dict[str, str | None]:
     """The channel a message came from, its sender (Lark's open_id, Telegram's user id; the web chat names none)
     and its chat (the Lark or Telegram chat, the web chat session)."""
@@ -857,7 +874,7 @@ class ManagerAgent:
                             await self._send_status(context_envelope, "thinking", phase=True)
 
         try:
-            turn_text = await self._build_user_message(message, note)
+            turn_text = await self._build_user_message(message, note, channel=channel_line(context_envelope))
             if brief:
                 turn_text = f"{brief}\n\n{turn_text}"
             # A turn cut off by Claude's exit ends without a result; that Claude
@@ -1167,7 +1184,7 @@ class ManagerAgent:
             command.extend(runtime.resume_args(self._session_id))
         return command
 
-    async def _build_user_message(self, user_message: str, note: str = "") -> str:
+    async def _build_user_message(self, user_message: str, note: str = "", *, channel: str = "") -> str:
         parts = await self._projects_section()
         parts += await self._ready_tasks_section()
 
@@ -1179,6 +1196,8 @@ class ManagerAgent:
 
         if note:
             parts += [note, ""]
+        if channel:
+            parts += [channel, ""]
         parts.append(user_message)
         return "\n".join(parts)
 

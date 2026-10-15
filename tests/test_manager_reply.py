@@ -629,6 +629,33 @@ def _task_chat(answers: list[str], messages: list[str | tuple[str, str]]) -> Sim
     return asyncio.run(_run())
 
 
+def _channel_turns(messages: list[tuple[Any, dict[str, Any], str]]) -> list[str]:
+    """Send each ``(source, channel_context, text)`` to one Manager, as that channel's adapter would; return the
+    user turns its Claude got."""
+
+    async def _run() -> list[str]:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bus = MessageBus(runtime_root=root)
+            manager = ManagerAgent(
+                config=ManagerConfig(claude_bin=_fake_claude(root, _scripted(*["ok"] * len(messages))), work_dir=root),
+                runtime_root=root,
+            )
+            manager._bus = bus
+            for index, (source, context, text) in enumerate(messages):
+                await manager._handle(MessageEnvelope.create(
+                    source=source, target=MANAGER_ADDRESS, message_type=MessageType.USER_MESSAGE,
+                    payload={"text": text, "channel_context": context}, correlation_id=f"corr-{index}",
+                    metadata={"origin_channel_id": source.agent_id},
+                ))
+            await manager.stop()
+            turns = [json.loads(line) for line in (root / "turns.jsonl").read_text().splitlines()]
+            await bus.shutdown()
+            return turns
+
+    return asyncio.run(_run())
+
+
 def _drain(queue: Any) -> list[MessageEnvelope]:
     envelopes = []
     while not queue.empty():
@@ -798,6 +825,30 @@ class TestManagerTaskPlacement:
         result = _ask_for_task(_task_json(project="tetris", work_dir="/tmp/t"))
         assert result.requests == []
         assert "database is down" in result.reply
+
+
+LARK = channel_address("lark", "channel-lark")
+TELEGRAM = channel_address("telegram", "channel-telegram")
+
+
+@pytest.mark.usefixtures("agent_db")
+class TestManagerChannelLine:
+    """The dashboard chat, Lark and Telegram share the Manager's session, so each turn says where its message came
+    from, on the line just before it."""
+
+    def test_each_message_names_its_own_channel(self) -> None:
+        turns = _channel_turns([
+            (WEB, {"session_id": "chat-1"}, "the dashboard asks"),
+            (LARK, {"chat_id": "oc_1", "sender_id": "ou_1"}, "hi"),
+            (TELEGRAM, {"chat_id": 42, "user_id": 42}, "hi again"),
+            (TELEGRAM, {"chat_id": -100123, "user_id": 42}, "hi all"),
+        ])
+        assert [turn.split("\n\n")[-2:] for turn in turns] == [
+            ["Channel: the Looper dashboard chat", "the dashboard asks"],
+            ["Channel: a Lark direct message", "hi"],
+            ["Channel: a Telegram direct message", "hi again"],
+            ["Channel: a Telegram group chat", "hi all"],
+        ]
 
 
 def _system(**values: Any) -> dict[str, Any]:
