@@ -155,7 +155,7 @@ Task 是系统的一等实体，代表一个完整的用户需求。
 5. 用户开始任务（聊天里说「开始」，Manager 输出 `task_start`；或在 Tasks 页面点 Start）→ TASK_START →
    TaskRouter 按项目并发上限创建 Planner 实例
 6. Planner 启动常驻 Claude，[PLAN] turn 拆出步骤，发 TASK_ACCEPTED
-7. Planner 按依赖顺序发 WORK_ITEM → Bus → WorkerPool（每个任务最多 4 个并行）
+7. Planner 按依赖顺序发 WORK_ITEM → Bus → WorkerPool（就绪的步骤一次全部派出，同时运行多少个只由项目的 Worker 并发上限决定，默认每个项目 16 个）
 8. Worker 子进程执行，返回 WORK_RESULT
 9. Planner 的 [DECISION] turn 决定 accept / review / retry / replan / fail；
    review 时另起 Reviewer（VERIFY_REQUEST → VERIFY_RESULT），之后再决定一次
