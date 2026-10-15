@@ -30,12 +30,13 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
   task JSON naming one creates nothing: code answers with its own question
   (the new project's name and default directory, that confirming creates it,
   and up to 10 existing projects to choose instead) and keeps a typed pending
-  state (`_NewProject`) for that chat. Only the next message, and only from the
-  same chat (channel and chat id), can confirm it: code creates the project
-  when that turn's task JSON has `"new_project": true` (the boolean) and the
-  same name (ignoring case) and directory (none: the asked one). Any other new
-  name or directory, a missing or non-boolean `new_project`, a later message
-  or another chat asks again
+  state (`_NewProject`) for that chat. Only that chat's next message (channel
+  and chat id) can confirm it; a message from another chat in between leaves
+  it pending. Code creates the project when that turn's task JSON has
+  `"new_project": true` (the boolean) and the same name (ignoring case) and
+  directory (none: the asked one). Any other new name or directory, a missing
+  or non-boolean `new_project`, a later message from that chat, or a message
+  from another chat asks again
 - After it creates a ready task the reply is Claude's acknowledgement, then a
   configuration block code writes from the settings in effect in the task's
   project (the resolution behind `GET /api/projects/:id/agent-settings`): the
@@ -53,10 +54,13 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
   started or why not. Declining needs no JSON: the role prompt has Claude
   remind the user of both ways to start it later
 - Claude never sees what code itself answers in a chat (these questions, the
-  configuration block, a start's result). The next message from that chat,
-  and only that one, starts with a `[Looper]` note saying what code said, so
-  Claude can re-emit the task JSON or name the task to start. The Runs
-  record's input holds the note
+  configuration block, a start's result). Each chat keeps its own followup
+  (`_Followup`, keyed by channel and chat id), so another chat speaking does
+  not drop it: that chat's next message, and only that one, starts with a
+  `[Looper]` note saying what code said about Claude's last task JSON "in
+  this chat", so Claude can re-emit the task JSON or name the task to start.
+  At most 50 chats keep one (`FOLLOWUP_CHATS`); past that the oldest chat's
+  is dropped. `/new` drops them all. The Runs record's input holds the note
 - The dashboard chat, Lark and Telegram share the Manager's one session, so
   every message ends with a code-written line saying where it came from, just
   before the message: `Channel: the Looper dashboard chat`, `Channel: a Lark
@@ -102,9 +106,20 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
   changed, session lost, or none saved) starts with a `[RESUME]` brief: why it
   is new, the handoff, and the recent conversations from `chat_messages`: the
   3 most recently active chats that are not a task's Planner thread
-  (`planner-<task_id>`), each its last 8 messages oldest first, 300 characters
-  each, at most 4,000 characters in all, without the message being answered.
-  Nothing new to say, no brief. The Runs record's input holds the brief
+  (`planner-<task_id>`), web, Telegram and Lark chats alike, each its last 8
+  messages oldest first, 300 characters each, at most 4,000 characters in
+  all, without the message being answered (found by the chat's stored session
+  id, `_session_key`, in every channel). Nothing new to say, no brief. The
+  Runs record's input holds the brief
+- Telegram and Lark turns are stored in `chat_messages` by the Manager (the
+  web chat's by the web channel and the chat API): the user's message before
+  Claude is called, as `<message_id>`; the reply when the Manager publishes
+  it, as `<message_id>:reply`, so a reply the channel then fails to send is
+  still recorded; a reply Claude sends on its own as `auto-<id>`. Each is
+  stored under the session `<channel>:<chat_id>` with its `channel`. Private
+  chats only (`_private_chat`): a Telegram chat whose id is negative is a
+  group or a channel, and nothing from it is stored (Lark takes direct
+  messages only). A failed store is logged and never blocks the reply
 - `/new`, a chat message that is exactly that (trimmed, any case) from the web
   chat, Lark or Telegram (the sender allowlists apply), is answered by Looper,
   never by Claude. After any turn under way, the Manager stops its Claude and
@@ -1803,7 +1818,7 @@ PostgreSQL is a hard startup dependency. All data paths:
 | `agent_sessions` | The session each resident agent resumes: `manager` or `planner-<task_id>`, its `session_id`, `session_totals`, the `runtime_type` and `provider_id` it belongs to and the `profile_id` that ran it last (`NULL` runtime: before Agent Profiles, Claude Code; `NULL` provider: before providers were recorded, Claude Code's own login), and `clean_start` (the user dropped the session with `/new`: the next one starts without a resume brief) |
 | `task_journal` | A task's journal, written by code as things happen: `step_accepted`, `step_failed`, `step_retry`, `decision`, `user_instruction`, `session_switch`, `handoff` and `progress` entries, each with its `step_id` (`''` for the whole task), `summary` and `learnings`; `GET /api/tasks/<id>` returns it as `journal` (and the progress notes, parsed and newest first, as `progress`); the task page lists the entries as Findings, each with its kind, and the progress notes in its Progress section |
 | `activity` | Execution trace events (SSE streaming to frontend) |
-| `chat_messages` | Chat conversation history; a new Manager session's resume brief reads the recent chats that are not a task's Planner thread (`planner-<task_id>`) |
+| `chat_messages` | Chat conversation history of every channel: `session_id` (the web chat's session, or `<channel>:<chat_id>` for Telegram and Lark, private chats only), `message_id`, `role`, `content`, `channel` (`web`, `telegram` or `lark`; rows from before it read `web`); a new Manager session's resume brief reads the recent chats that are not a task's Planner thread (`planner-<task_id>`) |
 | `llm_records` | One row per agent run: input and output text, status, the run's own `cost_usd` and its `cost_source` (`runtime` or `provider_price`), `input_tokens`, `output_tokens`, `cache_read_tokens` and `cache_creation_tokens`, its final `context_tokens` and its `compactions`; `metadata` holds the exact argv (`command`), `cwd`, the appended `system_prompt`, its `system_prompt_sha256`, its `prompt_layers`, the `profile` (`agent` on runs recorded before the rename), the `model_choice`, the Settings `env` names, the `library` items loaded, the `project_instructions` the runtime was given and a task agent's `project_skills` |
 | `role_configs` | Each role's own settings, keyed by `role` (`manager`, `planner`, `worker`, `reviewer`): display name, role prompt and its recommended `default_prompt`, turns, timeout, enabled |
 | `agent_setting_layers` | Agent settings by layer: `scope` (`system`, `role`, `project`, `role_project`), `role`, `project_id` (goes with its project), and the nullable `harness_prompt`, `profile_id` (the effort is the profile's), `env` (ordered `[{key, value}]`, `null` value = unset), `run_budget_usd` and `max_concurrency` (a Planner, Worker or Reviewer `role` or `role_project` layer only); one row per layer and place |

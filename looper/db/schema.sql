@@ -1007,6 +1007,10 @@ CREATE TABLE IF NOT EXISTS chat_messages (
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+-- Which channel the turn came from (web, telegram, lark): so the console shows every channel's
+-- conversation, each labelled. A non-web session id is "<channel>:<chat_id>".
+ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS channel TEXT NOT NULL DEFAULT 'web';
+
 CREATE UNIQUE INDEX IF NOT EXISTS idx_chat_msg_unique ON chat_messages(session_id, message_id);
 CREATE INDEX IF NOT EXISTS idx_chat_session ON chat_messages(session_id, id);
 
