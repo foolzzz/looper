@@ -307,8 +307,9 @@ CREATE TABLE IF NOT EXISTS agent_profiles (
     created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at   TIMESTAMPTZ NOT NULL DEFAULT now()
 );
--- Claude Code's agent teams for the profile's runs (only on a Claude Code runtime, checked in code): off for every
--- profile until the user turns it on.
+-- Claude Code's agent teams for the profile's runs, only on a Claude Code runtime. On by default there: the
+-- registry sets a new profile's (profile_registry.default_agent_teams) and a migration below turned them on once
+-- for the profiles before; the column's default is for the other runtimes, which have none.
 ALTER TABLE agent_profiles ADD COLUMN IF NOT EXISTS agent_teams BOOLEAN NOT NULL DEFAULT false;
 -- A task's profile overrides: its own choice of Agent Profile for some of its
 -- roles (the Planner, Workers or Reviewers), the only agent setting a task has.
@@ -335,8 +336,8 @@ ON CONFLICT DO NOTHING;
 INSERT INTO llm_providers (id, name, protocols, auth, oauth_runtime_type, builtin)
 VALUES ('prov-codex-login', 'codex-login', ARRAY['openai-responses'], 'oauth', 'codex', true)
 ON CONFLICT DO NOTHING;
-INSERT INTO agent_profiles (id, name, runtime_id, provider_id, model, builtin)
-VALUES ('agent-claude-code-opus', 'claude-code/opus', 'rt-claude-code', 'prov-claude-subscription', 'opus', true)
+INSERT INTO agent_profiles (id, name, runtime_id, provider_id, model, builtin, agent_teams)
+VALUES ('agent-claude-code-opus', 'claude-code/opus', 'rt-claude-code', 'prov-claude-subscription', 'opus', true, true)
 ON CONFLICT DO NOTHING;
 
 -- Settings the whole system shares, one value per key. Code owns each key's
@@ -719,6 +720,18 @@ END $$;
 ALTER TABLE agent_setting_layers ADD COLUMN IF NOT EXISTS max_concurrency INTEGER
     CONSTRAINT agent_setting_layers_max_concurrency_check CHECK (max_concurrency IS NULL
         OR (max_concurrency BETWEEN 1 AND 64 AND scope IN ('role', 'role_project') AND role <> 'manager'));
+
+-- Once (agent teams are on by default for Claude Code profiles): every profile on a Claude Code runtime, the
+-- built-in one and those the migrations above added included, gets them. Only once, so a profile the user turns
+-- off later stays off.
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM schema_migrations WHERE name = 'agent_profiles_agent_teams_on') THEN
+        UPDATE agent_profiles a SET agent_teams = true FROM agent_runtimes r
+        WHERE r.id = a.runtime_id AND r.type = 'claude-code';
+        INSERT INTO schema_migrations (name) VALUES ('agent_profiles_agent_teams_on');
+    END IF;
+END $$;
 
 -- MCP servers are catalog items too (kind 'mcp'), installed the same way. How
 -- Claude Code starts or reaches one is in library_mcp_servers, one row per

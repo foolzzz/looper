@@ -868,7 +868,7 @@ class _Importer:
 
     async def profile(self, entry: Any) -> None:
         from .profile_registry import RegistryError, _agent_teams, _effort, _model, check_agent_teams, check_pairing, \
-            entry_name
+            default_agent_teams, entry_name
 
         raw = entry if isinstance(entry, Mapping) else {}
         label = str(raw.get("name"))
@@ -879,15 +879,16 @@ class _Importer:
                 raise _Skip(f"unknown field {unknown[0]!r}")
             try:
                 name = label = entry_name(entry.get("name"), "agent")
-                # A file from before agent teams has none: they are off.
                 values = {"runtime": entry.get("runtime"), "provider": entry.get("provider"),
                           "model": _model(entry.get("model")), "effort": _effort(entry.get("effort")),
-                          "agent_teams": _agent_teams(entry.get("agent_teams", False))}
+                          "agent_teams": _agent_teams(entry["agent_teams"]) if "agent_teams" in entry else None}
             except RegistryError as exc:
                 raise _Skip(str(exc)) from None
             if values["runtime"] not in self.runtimes:
                 raise _Skip(f"no runtime {values['runtime']!r} here or in the file")
             values["runtime"] = self.runtimes[values["runtime"]][1].name  # the one it runs on here
+            if values["agent_teams"] is None:  # a file from before agent teams: the default of the runtime here
+                values["agent_teams"] = default_agent_teams(self.runtimes[values["runtime"]][1])
             if values["provider"] not in self.providers:
                 raise _Skip(f"no provider {values['provider']!r} here or in the file")
             row = self.target.profiles.get(name)
@@ -920,14 +921,16 @@ class _Importer:
     async def _layer_profile(self, name: str | None, scope: str, role: str | None) -> str | None:
         """The id of the layer's Agent Profile (``new:...`` in a preview); a model's profile from a file before
         Agent Profiles is added like the upgrade adds it."""
-        from .profile_registry import BUILTIN_PROVIDER, BUILTIN_RUNTIME, AgentProfile, RegistryError, check_roles
+        from .profile_registry import BUILTIN_PROVIDER, BUILTIN_RUNTIME, AgentProfile, RegistryError, check_roles, \
+            default_agent_teams
 
         if name is None:
             return None
         if name not in self.profiles and name.startswith(_MODEL_PROFILE_PREFIX) \
                 and BUILTIN_RUNTIME.name in self.runtimes and BUILTIN_PROVIDER.name in self.providers:
             runtime, provider = self.runtimes[BUILTIN_RUNTIME.name], self.providers[BUILTIN_PROVIDER.name]
-            spec = AgentProfile(f"new:{name}", name, runtime[1], provider[1], name[len(_MODEL_PROFILE_PREFIX):])
+            spec = AgentProfile(f"new:{name}", name, runtime[1], provider[1], name[len(_MODEL_PROFILE_PREFIX):],
+                                agent_teams=default_agent_teams(runtime[1]))
             self.record("profiles", name, Action.ADDED)
             profile_id = await self._write_profile(None, name, spec) if self.apply else spec.id
             self.profiles[name] = (profile_id, spec)

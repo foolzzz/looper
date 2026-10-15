@@ -60,6 +60,12 @@ function fittingModel(provider: Provider | undefined, current: string): string {
   return suggested.length && !suggested.includes(current) ? suggested[0] : current;
 }
 
+/** Agent teams for a profile on `runtime` that does not say: on for Claude Code, whose feature they are, off for
+ * any other runtime. The server decides the same way for a profile saved without them. */
+function defaultTeams(registry: Registry, runtime: Runtime | undefined): boolean {
+  return runtimeType(registry, runtime)?.type === "claude-code";
+}
+
 function runtimeTitle(runtime: Runtime): string {
   if (!runtime.builtin) return `${runtime.name} (custom, legacy)`;
   return RUNTIME_TYPES[runtime.type]?.title ?? runtime.type_label;
@@ -157,7 +163,7 @@ export function AgentProfileForm({
       provider_id: providerId,
       model: profile?.model ?? fittingModel(provider, ""),
       effort: profile?.effort ?? "",
-      agent_teams: profile?.agent_teams ?? false,
+      agent_teams: profile?.agent_teams ?? defaultTeams(registry, runtime),
     };
   });
   const action = useAction();
@@ -178,9 +184,13 @@ export function AgentProfileForm({
   const chooseRuntime = (runtimeId: string) => {
     const next = registry.runtimes.find((r) => r.runtime_id === runtimeId);
     const providerId = firstProvider(registry, next);
+    const nextType = runtimeType(registry, next)?.type;
+    // Another runtime type takes its default (on for Claude Code); back on the profile's own type, its saved setting.
+    const agentTeams = nextType === type?.type ? draft.agent_teams
+      : profile && profile.runtime_type === nextType ? profile.agent_teams : defaultTeams(registry, next);
     set({ runtime_id: runtimeId, provider_id: providerId,
           model: fittingModel(registry.providers.find((p) => p.provider_id === providerId), draft.model),
-          agent_teams: draft.agent_teams && runtimeType(registry, next)?.type === "claude-code" });
+          agent_teams: agentTeams });
   };
   const chooseProvider = (providerId: string) => {
     if (providerId === NEW_PROVIDER) {
@@ -290,8 +300,9 @@ export function AgentProfileForm({
               Agent teams
             </label>
             <p id={`${id}-teams-hint`} className="text-[11px] text-muted-foreground">
-              Lets the agent start teammates that work beside it (Claude Code&apos;s experimental agent teams). Their
-              cost is counted in the run&apos;s once it ends.
+              On by default: the agent can start teammates that work beside it (Claude Code&apos;s experimental agent
+              teams), and their cost is counted in the run&apos;s once it ends. Untick it to run this profile without
+              teammates.
             </p>
           </div>
         )}

@@ -1,8 +1,8 @@
 """Runtimes, LLM providers and Agent Profiles: what they are, how they are checked, and their API (RFC decision 10).
 
 An **Agent Profile** is a runtime, an LLM provider and a model, with a default
-effort and, on Claude Code, whether its runs have agent teams (off by default);
-a running agent (the Manager, a Planner, a step's Worker) runs the
+effort and, on Claude Code, whether its runs have agent teams (on unless turned
+off, ``default_agent_teams``); a running agent (the Manager, a Planner, a step's Worker) runs the
 profile its role selects. A **runtime** is a runtime type
 (an adapter in ``looper.agents.runtimes``) found on this machine: the
 executable it runs and what its probe found (``<executable> --version``, never
@@ -200,7 +200,7 @@ BUILTIN_RUNTIME = RuntimeSpec("rt-claude-code", "claude-code", "claude-code", ""
 BUILTIN_PROVIDER = ProviderSpec("prov-claude-subscription", "claude-subscription", AuthKind.OAUTH,
                                 frozenset({ApiProtocol.ANTHROPIC_MESSAGES}), "claude-code")
 BUILTIN_PROFILE = AgentProfile("agent-claude-code-opus", "claude-code/opus", BUILTIN_RUNTIME, BUILTIN_PROVIDER,
-                               "opus")
+                               "opus", agent_teams=True)
 
 
 # --- Validation: each raises RegistryError ---
@@ -405,6 +405,12 @@ def check_pairing(runtime: RuntimeSpec, provider: ProviderSpec, model: str) -> N
     if provider.models and model not in provider.models:
         raise RegistryError(f"provider {provider.name!r} lists the models {', '.join(provider.models)}; "
                             f"{model!r} is not one of them")
+
+
+def default_agent_teams(runtime: RuntimeSpec) -> bool:
+    """Whether a profile of ``runtime`` that does not say has agent teams: on for Claude Code, whose feature they are,
+    off for any other runtime."""
+    return runtime.type == runtimes.CLAUDE_CODE.type
 
 
 def check_agent_teams(runtime: RuntimeSpec, agent_teams: bool) -> None:
@@ -905,7 +911,8 @@ async def _parts(runtime_id: Any, provider_id: Any) -> tuple[RuntimeSpec, Provid
 
 
 async def create_profile(data: Any) -> dict[str, Any]:
-    """Register ``{name, runtime_id, provider_id, model, effort?, agent_teams?}``; refused when it could not run."""
+    """Register ``{name, runtime_id, provider_id, model, effort?, agent_teams?}`` (agent teams by default on a Claude
+    Code runtime); refused when it could not run."""
     import asyncpg
 
     from ..db import profile_registry as db
@@ -913,8 +920,9 @@ async def create_profile(data: Any) -> dict[str, Any]:
     data = _fields(data, _PROFILE_FIELDS)
     fields = {"name": entry_name(data.get("name"), "profile"), "runtime_id": data.get("runtime_id"),
               "provider_id": data.get("provider_id"), "model": _model(data.get("model")),
-              "effort": _effort(data.get("effort")), "agent_teams": _agent_teams(data.get("agent_teams", False))}
+              "effort": _effort(data.get("effort"))}
     runtime, provider = await _parts(fields["runtime_id"], fields["provider_id"])
+    fields["agent_teams"] = _agent_teams(data["agent_teams"]) if "agent_teams" in data else default_agent_teams(runtime)
     check_pairing(runtime, provider, fields["model"])
     check_agent_teams(runtime, fields["agent_teams"])
     try:
@@ -960,6 +968,9 @@ async def update_profile(profile_id: str, data: Any) -> dict[str, Any]:
     runtime, provider = await _parts(fields.get("runtime_id", row["runtime_id"]),
                                      fields.get("provider_id", row["provider_id"]))
     model = fields.get("model", row["model"])
+    if "agent_teams" not in fields and runtime.type != row["runtime_type"]:
+        # A profile moved to a runtime of another type takes that type's default, unless the change says.
+        fields["agent_teams"] = default_agent_teams(runtime)
     check_pairing(runtime, provider, model)
     check_agent_teams(runtime, fields.get("agent_teams", bool(row.get("agent_teams"))))
     check_roles(AgentProfile(profile_id, fields.get("name", row["name"]), runtime, provider, model),
