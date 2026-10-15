@@ -2020,6 +2020,38 @@ restart.
   channel whose list is empty or invalid does not start; the startup log and
   Settings → Channels (`start_problem`) say why. The list holds at most 100
   ids; the API checks each one and stores the list as a JSON array.
+- **One status message per message** (`looper/agents/channels/status_line.py`,
+  Telegram and Lark): the Manager's phases (`STATUS_UPDATE` with `phase`,
+  `activity` `thinking` or `tool` with the `tool`'s name; streamed text is
+  never sent) become one status message, sent at the first phase
+  (「⏳ 处理中：思考中 · 0s」; a tool shows as, say, 「运行命令 (Bash)」 or
+  「读文件 (Read)」, with the seconds so far) and edited in place: only when its
+  text changed, at most once every 3 s (a phase that comes sooner is shown by
+  one trailing edit), and at most 18 times (Feishu edits a message at most 20
+  times); after that it is left as it is. The answer goes as a new message, so
+  the user is notified, and the status message is then edited a last time to
+  「✅ 完成 · 用时 Ns · 工具 N 次」, or 「❌ 出错：<reason>」 when the reply carries
+  an `error` (the Manager's failed turns do). A failed send or edit is logged
+  once and the status message is left alone: it never becomes more messages.
+  A reply the Manager sends on its own (`autonomous`) has no status message,
+  and a phase after its message's answer is ignored; at most 200 status
+  messages are open and 1000 answered messages remembered per channel. Lark
+  sends it as text with `lark-cli im +messages-send` and edits it with
+  `lark-cli im +messages-edit --as bot --message-id <om_…> --text` (with the
+  channel's `--profile`), taking the id from the send's JSON answer; Telegram
+  uses `send_message` and `edit_message_text`.
+- **A reaction when the bot sees a message** (`status_line.Reactions`): a
+  direct message from a listed sender that goes to the Manager first gets a
+  reaction from the bot, Lark's 「Get」 (`lark-cli im reactions create --as bot
+  --message-id <om_…> --data '{"reaction_type":{"emoji_type":"Get"}}'`, with
+  the channel's `--profile`; the app needs the
+  `im:message.reactions:write_only` scope) and Telegram's 👀
+  (`set_message_reaction`). The call runs in the background, so the message
+  reaches the Manager without waiting for it. A failed reaction is not
+  retried and never becomes a chat message; the first failure of a run of the
+  channel is logged, naming the missing scope when lark-cli reports one. A
+  rejected sender, a group message and a message that is not handed on (not
+  text, empty) get no reaction.
 - **Telegram**: the token comes from the env var named by `bot_token_env`
   (default `LOOPER_TELEGRAM_BOT_TOKEN`). `allowed_user_ids` lists numeric
   Telegram user IDs (a negative id is a group or channel, not a sender); a

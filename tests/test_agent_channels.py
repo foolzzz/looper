@@ -597,6 +597,7 @@ class TestLarkAllowlist:
             adapter._bus = bus  # what start() sets, without running lark-cli
             await adapter._handle_lark_event(event)
             messages = _manager_messages(bus)
+            await adapter.stop()  # with its reaction call still running
             await bus.shutdown()
             return SimpleNamespace(messages=messages, sent=sent, conversations=dict(adapter._correlation_chat),
                                    rejected=rejected)

@@ -6,7 +6,7 @@ every call, and without one lark-cli's active profile is used. Open_ids are
 per app, so the sender allowlist records the app it was made for
 (``allowlist_app_id``) and the channel does not start under another one.
 
-Only read calls run here besides the adapter's receive and send: ``whoami``,
+Only read calls run here besides the adapter's receive, send and reaction: ``whoami``,
 the bot's info (``api GET /open-apis/bot/v3/info --as bot``) and
 ``contact +search-user --as user``; nothing reads lark-cli's configuration
 file, which holds the app secret.
@@ -15,6 +15,7 @@ file, which holds the app secret.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import re
 import time
@@ -70,6 +71,30 @@ def send_command(*, chat_id: str | None = None, user_id: str | None = None, text
     return [*_base(profile), "im", "+messages-send", "--as", "bot", *target, *body]
 
 
+def edit_command(message_id: str, *, text: str | None = None, markdown: str | None = None,
+                 profile: str | None = None) -> list[str]:
+    """The lark-cli argv that replaces, as the bot, the content of a message it sent (``om_...``) with ``text`` or
+    ``markdown``. Feishu edits one message at most 20 times."""
+    if (text is None) == (markdown is None):
+        raise ValueError("edit with exactly one of text and markdown")
+    body = ["--text", text] if text is not None else ["--markdown", markdown]
+    return [*_base(profile), "im", "+messages-edit", "--as", "bot", "--message-id", message_id, *body]
+
+
+def reaction_command(message_id: str, emoji: str = "Get", *, profile: str | None = None) -> list[str]:
+    """The lark-cli argv that adds, as the bot, the reaction ``emoji`` (a Feishu emoji type) to a message
+    (``om_...``). It needs the app's ``im:message.reactions:write_only`` scope."""
+    data = json.dumps({"reaction_type": {"emoji_type": emoji}})
+    return [*_base(profile), "im", "reactions", "create", "--as", "bot", "--message-id", message_id, "--data", data]
+
+
+def sent_message_id(answer: Mapping[str, Any]) -> str | None:
+    """The id of the message ``+messages-send`` sent, from its JSON answer."""
+    data = answer.get("data") if isinstance(answer.get("data"), Mapping) else answer
+    message_id = data.get("message_id") if isinstance(data, Mapping) else None
+    return str(message_id) if message_id else None
+
+
 def whoami_command(profile: str | None = None) -> list[str]:
     return [*_base(profile), "whoami"]
 
@@ -91,13 +116,23 @@ def search_command(*, query: str | None = None, open_ids: Iterable[str] = (), pr
 
 
 def failure(stderr: bytes | str) -> str:
-    """lark-cli's reason for a failed call: its JSON error's message, else the tail of what it printed."""
+    """lark-cli's reason for a failed call: its JSON error's message, with the scopes it reports missing
+    (``missing_scopes``, ``required_scope``), else the tail of what it printed."""
     text = (stderr.decode("utf-8", errors="replace") if isinstance(stderr, bytes) else stderr).strip()
     try:
-        message = (json.loads(text).get("error") or {}).get("message")
+        error = json.loads(text).get("error")
     except (ValueError, AttributeError):
-        message = None
-    return str(message) if message else text[-300:]
+        error = None
+    message = error.get("message") if isinstance(error, Mapping) else None
+    if not message:
+        return text[-300:]
+    message = str(message)
+    scopes: list[str] = []
+    for key in ("missing_scopes", "required_scope"):
+        value = error.get(key)
+        scopes += [str(scope) for scope in (value if isinstance(value, list) else [value]) if scope]
+    unnamed = [scope for scope in dict.fromkeys(scopes) if scope not in message]
+    return f"{message} (missing scope: {', '.join(unnamed)})" if unnamed else message
 
 
 async def run(argv: list[str], *, timeout: float = CALL_TIMEOUT_SECONDS) -> bytes:
@@ -114,6 +149,12 @@ async def run(argv: list[str], *, timeout: float = CALL_TIMEOUT_SECONDS) -> byte
         process.kill()
         await process.wait()
         raise LarkCliError(f"lark-cli did not answer within {timeout:g} s") from None
+    except asyncio.CancelledError:
+        # The channel is stopping: leave no lark-cli call behind.
+        with contextlib.suppress(ProcessLookupError):
+            process.kill()
+        await process.wait()
+        raise
     if process.returncode != 0:
         raise LarkCliError(f"lark-cli exited {process.returncode}: {failure(stderr or b'')}")
     return stdout

@@ -6,7 +6,8 @@ Bridges Telegram Bot API with the agent Bus. Uses long-polling by default
 
 Only the senders on its allowlist reach the Manager (``allowlist``): anyone
 else is dropped with one log line and gets no reply, and an empty list keeps
-the adapter from starting.
+the adapter from starting. A direct message that reaches the Manager first
+gets the bot's 👀 reaction (``status_line.Reactions``).
 
 Fallback when the constructor's token is empty:
   LOOPER_TELEGRAM_BOT_TOKEN — Bot token from @BotFather
@@ -30,6 +31,7 @@ from ..message import (
 )
 from .allowlist import SenderAllowlist
 from .base import ChannelAdapter, DeliveryReceipt
+from .status_line import Reactions, StatusLines
 
 logger = logging.getLogger(__name__)
 
@@ -72,6 +74,9 @@ class TelegramChannelAdapter(ChannelAdapter):
         self._running = False
         # correlation_id → telegram chat_id for reply routing (bounded, oldest evicted first)
         self._correlation_chat: OrderedDict[str, int] = OrderedDict()
+        # One status message per message answered, edited in place (``status_line``).
+        self._status = StatusLines(channel="channel-telegram", send=self._send_status, edit=self._edit_status)
+        self._reactions = Reactions(channel="channel-telegram", react=self._react)
 
     @property
     def channel_type(self) -> str:
@@ -150,6 +155,7 @@ class TelegramChannelAdapter(ChannelAdapter):
             await self._app.updater.stop()  # type: ignore[union-attr]
             await self._app.stop()
             await self._app.shutdown()
+        await self._reactions.stop()
         logger.info("telegram channel adapter stopped")
 
     async def notify(self, chat: str, text: str) -> DeliveryReceipt:
@@ -165,9 +171,8 @@ class TelegramChannelAdapter(ChannelAdapter):
             return DeliveryReceipt(channel="telegram", success=False, error=str(exc))
 
     async def deliver(self, envelope: MessageEnvelope) -> DeliveryReceipt:
-        """Send a message to the Telegram user who started the conversation."""
-        import telegram
-
+        """Show a status on the message's status line, or send the answer to the Telegram user who wrote and close
+        its status line."""
         corr_id = envelope.correlation_id
         chat_id = self._correlation_chat.get(corr_id)
         if chat_id is None:
@@ -177,9 +182,34 @@ class TelegramChannelAdapter(ChannelAdapter):
                 error=f"no chat_id for correlation {corr_id}",
             )
 
+        if envelope.message_type is MessageType.STATUS_UPDATE:
+            await self._status.update(corr_id, str(chat_id), envelope.payload)
+            return DeliveryReceipt(channel="telegram", success=True)
+
         text = self._format_reply(envelope)
         if not text:
             return DeliveryReceipt(channel="telegram", success=True)
+
+        receipt = await self._send_answer(chat_id, text)
+        if not envelope.payload.get("autonomous"):
+            await self._status.finish(corr_id, error=envelope.payload.get("error"))
+        return receipt
+
+    async def _send_status(self, chat_id: str, text: str) -> str | None:
+        if self._app is None:
+            return None
+        message = await self._app.bot.send_message(chat_id=int(chat_id), text=text)
+        return str(message.message_id)
+
+    async def _edit_status(self, chat_id: str, message_id: str, text: str) -> None:
+        await self._app.bot.edit_message_text(chat_id=int(chat_id), message_id=int(message_id), text=text)
+
+    async def _react(self, chat_id: str, message_id: str) -> None:
+        await self._app.bot.set_message_reaction(chat_id=int(chat_id), message_id=int(message_id), reaction="👀")
+
+    async def _send_answer(self, chat_id: int, text: str) -> DeliveryReceipt:
+        """Send ``text`` as Markdown, or as plain text when Telegram cannot parse it."""
+        import telegram
 
         try:
             bot = self._app.bot
@@ -229,6 +259,12 @@ class TelegramChannelAdapter(ChannelAdapter):
         user = getattr(update, "effective_user", None)
         return self._allowlist.admits(getattr(user, "id", None))
 
+    def _acknowledge(self, update: Any) -> None:
+        """React to a direct message the Manager gets, in the background: the bot saw it."""
+        chat = update.effective_chat
+        if getattr(chat, "type", None) == "private" and update.message is not None:
+            self._reactions.add(str(chat.id), str(update.message.message_id))
+
     # --- Telegram handlers ---
 
     async def _cmd_start(self, update: Any, context: Any) -> None:
@@ -247,6 +283,7 @@ class TelegramChannelAdapter(ChannelAdapter):
         assert self._bus is not None
         import uuid as _uuid
 
+        self._acknowledge(update)
         correlation_id = str(_uuid.uuid4())
         chat_id = update.effective_chat.id
         self._remember(correlation_id, chat_id)
@@ -294,6 +331,7 @@ class TelegramChannelAdapter(ChannelAdapter):
         assert self._bus is not None
         import uuid as _uuid
 
+        self._acknowledge(update)
         chat_id = update.effective_chat.id
         correlation_id = str(_uuid.uuid4())
         self._remember(correlation_id, chat_id)
@@ -330,14 +368,10 @@ class TelegramChannelAdapter(ChannelAdapter):
 
     @staticmethod
     def _format_reply(envelope: MessageEnvelope) -> str:
+        """The text of an answer; a status goes to the status line instead (``deliver``)."""
         match envelope.message_type:
             case MessageType.AGENT_REPLY | MessageType.CLARIFICATION_REQUEST:
                 return envelope.payload.get("text", "")
-            case MessageType.STATUS_UPDATE:
-                text = envelope.payload.get("text", "")
-                if envelope.payload.get("delta"):
-                    return ""  # Don't send streaming deltas to Telegram
-                return text
             case _:
                 return ""
 

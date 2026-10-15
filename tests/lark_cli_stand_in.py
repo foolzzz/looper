@@ -61,7 +61,27 @@ if args[:4] == ["im", "+messages-send", "--as", "bot"]:
         refuse("specify at least one of --chat-id or --user-id")
     if rest[1].endswith("gone"):
         refuse("Bot/User can NOT be out of the chat")
-    answer({{"ok": True}})
+    with open({log!r}) as sent:
+        count = sum(1 for line in sent if "+messages-send" in line)
+    answer({{"ok": True, "identity": "bot", "data": {{"message_id": "om_%04d" % count, "chat_id": rest[1]}}}})
+if args[:6] == ["im", "+messages-edit", "--as", "bot", "--message-id"] and len(args) == 9:
+    if args[7] not in ("--text", "--markdown"):
+        refuse("specify one of --text, --markdown or --content")
+    if args[5].endswith("gone"):
+        refuse("the message was recalled or the bot did not send it")
+    answer({{"ok": True, "identity": "bot", "data": {{"message_id": args[5]}}}})
+if args[:6] == ["im", "reactions", "create", "--as", "bot", "--message-id"] and args[7:8] == ["--data"]:
+    if not json.loads(args[8]).get("reaction_type", {{}}).get("emoji_type"):
+        refuse("reaction_type.emoji_type is required")
+    if args[6].endswith("noscope"):
+        # How lark-cli reports a scope the app lacks.
+        print(json.dumps({{"ok": False, "identity": "bot", "error": {{
+            "type": "authorization", "subtype": "missing_scope", "code": 99991672,
+            "message": "access denied: the app lacks a scope this call needs",
+            "missing_scopes": ["im:message.reactions:write_only"]}}}}), file=sys.stderr)
+        sys.exit(1)
+    answer({{"ok": True, "identity": "bot", "data": {{"reaction_id": "re_" + args[6],
+                                                    "reaction_type": json.loads(args[8])["reaction_type"]}}}})
 if args == ["event", "consume", "im.message.receive_v1", "--as", "bot"]:
     # Like lark-cli 1.0.97: stdin EOF is the signal to stop, so a consumer whose stdin is /dev/null or closed
     # stops before it delivers anything.

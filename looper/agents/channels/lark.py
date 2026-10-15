@@ -12,7 +12,9 @@ Only direct messages (``chat_type`` ``p2p``) are handled: a group message is
 logged and ignored, and the bot never answers in a group. Only the senders on
 its allowlist (their ``open_id`` for this app) reach the Manager: anyone else
 is dropped with one log line, recorded as a rejected sender (``on_rejected``)
-and gets no reply, and an empty list keeps the adapter from starting.
+and gets no reply, and an empty list keeps the adapter from starting. A
+message that reaches the Manager first gets the bot's 「Get」 reaction
+(``status_line.Reactions``).
 """
 
 from __future__ import annotations
@@ -34,7 +36,11 @@ from ..message import (
 )
 from .allowlist import SenderAllowlist
 from .base import ChannelAdapter, DeliveryReceipt
-from .lark_cli import RECEIVE_EVENT, LarkCliError, consume_command, run, send_command
+from .lark_cli import (
+    RECEIVE_EVENT, LarkCliError, consume_command, edit_command, reaction_command, run, run_json, send_command,
+    sent_message_id,
+)
+from .status_line import Reactions, StatusLines
 
 logger = logging.getLogger(__name__)
 
@@ -96,6 +102,9 @@ class LarkChannelAdapter(ChannelAdapter):
     ) -> None:
         self._allowlist = allowlist  # open_ids
         self._profile = profile  # lark-cli's --profile; "" for its active one
+        # One status message per message answered, edited in place (``status_line``).
+        self._status = StatusLines(channel="channel-lark", send=self._send_status, edit=self._edit_status)
+        self._reactions = Reactions(channel="channel-lark", react=self._react)
         self._on_rejected = on_rejected
         self._runtime_root = runtime_root or Path.cwd()
         self._bus: MessageBus | None = None
@@ -142,10 +151,12 @@ class LarkChannelAdapter(ChannelAdapter):
                     await task
                 except asyncio.CancelledError:
                     pass
+        await self._reactions.stop()
         logger.info("lark channel adapter stopped")
 
     async def deliver(self, envelope: MessageEnvelope) -> DeliveryReceipt:
-        """Send a reply to the Lark chat that originated the conversation."""
+        """Show a status on the message's status line, or send the answer to the chat the message came from and
+        close its status line."""
         corr_id = envelope.correlation_id
         chat_id = self._correlation_chat.get(corr_id)
         if chat_id is None:
@@ -155,16 +166,32 @@ class LarkChannelAdapter(ChannelAdapter):
                 error=f"no chat_id for correlation {corr_id}",
             )
 
+        if envelope.message_type is MessageType.STATUS_UPDATE:
+            await self._status.update(corr_id, chat_id, envelope.payload)
+            return DeliveryReceipt(channel="lark", success=True)
+
         text = self._format_reply(envelope)
         if not text:
             return DeliveryReceipt(channel="lark", success=True)
 
         try:
             await self._send_lark_message(chat_id, text)
-            return DeliveryReceipt(channel="lark", success=True)
+            receipt = DeliveryReceipt(channel="lark", success=True)
         except Exception as exc:
             logger.warning("lark delivery failed: %s", exc)
-            return DeliveryReceipt(channel="lark", success=False, error=str(exc))
+            receipt = DeliveryReceipt(channel="lark", success=False, error=str(exc))
+        if not envelope.payload.get("autonomous"):
+            await self._status.finish(corr_id, error=envelope.payload.get("error"))
+        return receipt
+
+    async def _send_status(self, chat_id: str, text: str) -> str | None:
+        return sent_message_id(await run_json(send_command(chat_id=chat_id, text=text, profile=self._profile)))
+
+    async def _edit_status(self, chat_id: str, message_id: str, text: str) -> None:
+        await run(edit_command(message_id, text=text, profile=self._profile))
+
+    async def _react(self, chat_id: str, message_id: str) -> None:
+        await run(reaction_command(message_id, profile=self._profile))
 
     async def notify(self, chat: str, text: str) -> DeliveryReceipt:
         """Send ``text`` as the bot to Lark user ``chat`` (an open_id)."""
@@ -287,6 +314,8 @@ class LarkChannelAdapter(ChannelAdapter):
         if not text.strip():
             return
 
+        message_id = event.get("message_id") or ""
+        self._reactions.add(chat_id, message_id)  # the bot saw it; in the background, the Manager gets it now
         correlation_id = str(_uuid.uuid4())
         self._correlation_chat[correlation_id] = chat_id
 
@@ -300,7 +329,7 @@ class LarkChannelAdapter(ChannelAdapter):
                 "channel_context": {
                     "chat_id": chat_id,
                     "sender_id": sender_open_id or "",
-                    "message_id": event.get("message_id", ""),
+                    "message_id": message_id,
                 },
             },
             correlation_id=correlation_id,
@@ -327,14 +356,10 @@ class LarkChannelAdapter(ChannelAdapter):
 
     @staticmethod
     def _format_reply(envelope: MessageEnvelope) -> str:
+        """The text of an answer; a status goes to the status line instead (``deliver``)."""
         match envelope.message_type:
             case MessageType.AGENT_REPLY | MessageType.CLARIFICATION_REQUEST:
                 return envelope.payload.get("text", "")
-            case MessageType.STATUS_UPDATE:
-                text = envelope.payload.get("text", "")
-                if envelope.payload.get("delta"):
-                    return ""
-                return text
             case _:
                 return ""
 
