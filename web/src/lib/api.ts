@@ -89,6 +89,8 @@ export interface ProjectExecution {
   /** Where a step that runs alongside others works: the task directory ("shared", also when null) or, in a git
    * checkout on a branch, a worktree of its own merged into the branch when the step is accepted ("worktree"). */
   step_workspaces: "shared" | "worktree" | null;
+  /** How many times the Planner may retry one step, 0 to 20; null = 2. */
+  max_step_retries: number | null;
 }
 
 /** A group of tasks with an optional default work directory and background. */
