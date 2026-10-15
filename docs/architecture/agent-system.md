@@ -200,9 +200,10 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
   oldest first, and starts when one of the project's tasks ends or the limit
   is raised; a project at its limit never delays another project's tasks.
   There is no machine-wide limit
-- At server startup, resumes the tasks the previous server left running whose
-  plan is live (`executing` or `verifying`): each gets a new Planner and a
-  `TASK_RESUME`. Any other task left running is marked "stopped". A ready task
+- At server startup, resumes the tasks the previous server left active
+  (`ACTIVE_STATUSES`) whose plan is live (`executing` or `verifying`): each
+  gets a new Planner and a `TASK_RESUME`. Any other task left active is
+  marked "stopped". A ready task
   is neither: it stays ready until someone starts it
 
 ### Planner (`looper/agents/tiers/planner.py`)
@@ -1555,8 +1556,12 @@ added, the one-time migration `tasks_project_backfill` creates one project per
 distinct task directory and assigns those tasks to it. The project is named
 after the directory's last path component (`''` and `/` become `default`);
 the oldest directory keeps the plain name and a later clash, ignoring case,
-gets `-2`, `-3`, .... A task's "active" statuses are `pending`, `assigned`,
-`running` and `executing`; a ready task (`init`) is not active.
+gets `-2`, `-3`, .... A task's "active" statuses (`ACTIVE_STATUSES`) are those of
+the in progress and queued groups (see the status values above), the
+Planner's own `planning`, `verifying` and `stopping` included: they count in
+a project's `active_count`, a task in one cannot be deleted before it is
+stopped, and a server start resumes or stops it. A ready task (`init`) is not
+active.
 
 The names follow the dashboard's, and "agent" names only a running agent:
 the one-time migration `profiles_roles_renamed`, which runs first in
@@ -1651,10 +1656,10 @@ dev proxy, which keeps `Host` and `Origin` on its own port.
 | `/api/projects/:id/skills/:skill_id` | PUT | Change any of `name`, `description` and `content` (its switch is on the install: `PUT /api/installs/:id`); answers with the `skill` and the installs view; 400 and 409 as above (a new name must be free in every project the skill is installed in), 404 for an unknown project or a skill another project wrote |
 | `/api/projects/:id/skills/:skill_id` | DELETE | Delete a skill the project wrote, from the catalog and every project it is installed in; answers with `deleted` and the installs view; 404 |
 | `/api/projects/:id` | DELETE | Delete a project; 409 while it still has tasks |
-| `/api/tasks` | GET | List the newest tasks; `?project_id=` lists one project's, `?group=` one task group's (400 for an unknown group). Each has `project_id`, `project_name`, `work_dir` and `cost` (as in the task detail) |
+| `/api/tasks` | GET | List the newest tasks; `?project_id=` lists one project's, `?group=` one task group's (400 for an unknown group). Each has its status's `group`, `project_id`, `project_name`, `work_dir` and `cost` (as in the task detail) |
 | `/api/tasks/create` | POST | Create a ready task (`init`) with exactly one of `project_id` (existing) and `project` (`{name, description?, work_dir?, background?}`, created in the same transaction). Its `work_dir` is the one given, else the project's. Optional `profile_overrides`: `{planner?, worker?, reviewer?}` Agent Profile ids for this task's roles (an empty one chooses nothing). 400 with neither project field, for an override of another role, an unknown profile or one that cannot run its role; 404 for an unknown project, 409 for a taken new name |
 | `/api/tasks/:id/project` | PUT | Move a task to `{project_id}`, whatever its status |
-| `/api/tasks/:id` | GET | Task detail with steps, `project_id`, `project_name`, `profile_overrides` (`{role: profile}`, `{}` when none) and `cost`: `cost_usd` (the sum of its Planner's, Workers' and Reviewers' runs), `runs`, `running`, `unpriced_runs` and `by_role` (`planner`, `worker`, `reviewer`, each `{cost_usd, runs}`) |
+| `/api/tasks/:id` | GET | Task detail with steps, its status's `group`, `project_id`, `project_name`, `profile_overrides` (`{role: profile}`, `{}` when none) and `cost`: `cost_usd` (the sum of its Planner's, Workers' and Reviewers' runs), `runs`, `running`, `unpriced_runs` and `by_role` (`planner`, `worker`, `reviewer`, each `{cost_usd, runs}`) |
 | `/api/tasks/cancel` | POST | Cancel task (permanent) |
 | `/api/tasks/stop` | POST | Stop/pause task |
 | `/api/tasks/start` | POST | Run a stopped, failed or cancelled task again (it also starts a ready one, as before) |
