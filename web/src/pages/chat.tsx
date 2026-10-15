@@ -400,7 +400,9 @@ export function ChatPage() {
     };
     setMessages((prev) => [...prev, userMsg]);
 
-    const assistantId = crypto.randomUUID();
+    // The server saves the answer to the chat under this id (`reply_message_id`), even when the page is left before
+    // it comes: the stream's bubble and the saved row are the same message.
+    const assistantId = `${userMsg.id}:reply`;
     const assistantMsg: ChatMessage = {
       id: assistantId,
       role: "assistant",
@@ -435,12 +437,6 @@ export function ChatPage() {
                     : m
                 )
               );
-              saveChatMessage({
-                session_id: sessionIdRef.current,
-                message_id: assistantId,
-                role: "assistant",
-                content: finalText,
-              });
               setSending(false);
               setPhase("");
               break;
@@ -698,14 +694,15 @@ export function ChatPage() {
             )}
             <div
               className={cn(
-                "max-w-[70%] rounded-lg px-4 py-2.5 text-sm",
+                // A long line (a JSON reply, a path, a URL) wraps inside the bubble instead of widening the page.
+                "min-w-0 max-w-[70%] rounded-lg px-4 py-2.5 text-sm [overflow-wrap:anywhere]",
                 msg.role === "user"
                   ? "bg-primary text-primary-foreground"
                   : "bg-muted text-foreground"
               )}
             >
               {msg.role === "assistant" ? (
-                <div className="prose prose-invert prose-sm max-w-none [&>*:first-child]:mt-0 [&>*:last-child]:mb-0">
+                <div className="prose prose-invert prose-sm max-w-none [&>*:first-child]:mt-0 [&>*:last-child]:mb-0 [&_pre]:whitespace-pre-wrap">
                   <ReactMarkdown>{msg.content || (msg.streaming ? "..." : "")}</ReactMarkdown>
                 </div>
               ) : (
