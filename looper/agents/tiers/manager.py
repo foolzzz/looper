@@ -220,8 +220,7 @@ def channel_line(envelope: MessageEnvelope) -> str:
     origin = _message_origin(envelope)
     channel = origin["channel"] or "unknown"
     if channel == "telegram":
-        # A private chat's id is its user's; a group's or a channel's id is negative.
-        where = "a Telegram group chat" if (origin["chat"] or "").startswith("-") else "a Telegram direct message"
+        where = "a Telegram direct message" if _private_chat(origin) else "a Telegram group chat"
     else:
         where = CHANNEL_NAMES.get(channel, f"the {channel} channel")
     return f"Channel: {where}"
@@ -238,14 +237,24 @@ def _message_origin(envelope: MessageEnvelope) -> dict[str, str | None]:
             "sender": str(sender) if sender else None, "chat": str(chat) if chat else None}
 
 
+def _private_chat(origin: dict[str, str | None]) -> bool:
+    """Whether a message (``_message_origin``) came from a private chat: the web chat and a Lark direct message
+    always (the Lark channel takes nothing else), a Telegram chat when its id is its user's, since a group's or a
+    channel's id is negative. Only private chats are stored (``_session_key``)."""
+    return not (origin["channel"] == "telegram" and (origin["chat"] or "").startswith("-"))
+
+
 def _session_key(envelope: MessageEnvelope) -> str | None:
     """The chat_messages session id a turn is stored under: the web chat's ``session_id``, or
-    ``<channel>:<chat_id>`` for Telegram/Lark. None when neither identifies a chat."""
+    ``<channel>:<chat_id>`` for Telegram/Lark. None when neither identifies a chat, and for a chat that is not
+    private (a Telegram group), whose turns are never stored."""
+    origin = _message_origin(envelope)
+    if not _private_chat(origin):
+        return None
     context = envelope.payload.get("channel_context")
     context = context if isinstance(context, dict) else {}
     if context.get("session_id"):
         return str(context["session_id"])
-    origin = _message_origin(envelope)
     if origin["channel"] and origin["chat"]:
         return f"{origin['channel']}:{origin['chat']}"
     return None
