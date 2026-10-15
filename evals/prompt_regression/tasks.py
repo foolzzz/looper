@@ -29,7 +29,7 @@ class EvalTask:
     chat: str | None = None  # sent to the task's Planner once its plan exists (a supplement to the task)
     edit_requirement: str | None = None  # the requirement is edited to this once the plan exists
     # min_steps, min_reviews, min_retries, min_chat_turns, min_independent_pairs, min_bracketed_pairs,
-    # min_parallel_workers, min_progress_notes, min_final_summary
+    # min_parallel_workers, min_progress_notes, min_final_summary, min_plan_changes; max_plan_changes
     expect: dict[str, int] = field(default_factory=dict)
     fake: dict[str, Any] = field(default_factory=dict)  # the stand-in Claude's script
 
@@ -161,17 +161,20 @@ def _all(*checks: Callable[[Path], str | None]) -> Callable[[Path], str | None]:
     return check
 
 
-def _two_steps_fake(changed: str) -> dict[str, Any]:
-    """The script of a two-step task whose change the stand-in Planner answers by replanning the second step."""
-    return {
+def _two_steps_fake(changed: str | None) -> dict[str, Any]:
+    """The script of a two-step task whose change the stand-in Planner answers by replanning the second step to
+    write ``changed`` (None: a change that leaves the plan as it is, passed on to the running step)."""
+    script: dict[str, Any] = {
         "plan": [_step("s1", "Run sleep 20, then create part1.txt containing one.", ["part1.txt holds one"]),
                  _step("s2", "Create part2.txt containing two.", ["part2.txt holds two"], depends_on=["s1"])],
-        "change_replan": [_step("s2b", f"Create part2.txt containing {changed}.", [f"part2.txt holds {changed}"],
-                                depends_on=["s1"])],
         "attempts": {"s1": [{"status": "completed", "seconds": 3, "files": {"part1.txt": "one\n"}}],
-                     "s2": [{"status": "completed", "files": {"part2.txt": "two\n"}}],
-                     "s2b": [{"status": "completed", "files": {"part2.txt": f"{changed}\n"}}]},
+                     "s2": [{"status": "completed", "files": {"part2.txt": "two\n"}}]},
     }
+    if changed is not None:
+        script["change_replan"] = [_step("s2b", f"Create part2.txt containing {changed}.",
+                                         [f"part2.txt holds {changed}"], depends_on=["s1"])]
+        script["attempts"]["s2b"] = [{"status": "completed", "files": {"part2.txt": f"{changed}\n"}}]
+    return script
 
 
 TASKS: tuple[EvalTask, ...] = (
@@ -319,7 +322,8 @@ TASKS: tuple[EvalTask, ...] = (
         requirement=_TWO_STEPS.format(word="two"),
         chat="Change for the second step: part2.txt must contain `TWO-CHANGED` instead of `two`.",
         check=_all(_equals("part1.txt", "one"), _equals("part2.txt", "TWO-CHANGED")),
-        expect={"min_steps": 2, "min_chat_turns": 1},
+        # The second step's instruction and criteria say `two`: the plan must change, not only the Worker's reading.
+        expect={"min_steps": 2, "min_chat_turns": 1, "min_plan_changes": 1},
         fake=_two_steps_fake("TWO-CHANGED"),
     ),
     EvalTask(
@@ -327,8 +331,16 @@ TASKS: tuple[EvalTask, ...] = (
         requirement=_TWO_STEPS.format(word="two"),
         edit_requirement=_TWO_STEPS.format(word="TWO-EDITED"),
         check=_all(_equals("part1.txt", "one"), _equals("part2.txt", "TWO-EDITED")),
-        expect={"min_steps": 2, "min_chat_turns": 1},
+        expect={"min_steps": 2, "min_chat_turns": 1, "min_plan_changes": 1},
         fake=_two_steps_fake("TWO-EDITED"),
+    ),
+    EvalTask(
+        id="supplement_no_change",
+        requirement=_TWO_STEPS.format(word="two"),
+        chat="Just confirming, nothing changes: part2.txt should contain `two`, as the task says.",
+        check=_all(_equals("part1.txt", "one"), _equals("part2.txt", "two")),
+        expect={"min_steps": 2, "min_chat_turns": 1, "max_plan_changes": 0},
+        fake=_two_steps_fake(None),
     ),
 )
 

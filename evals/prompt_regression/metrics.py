@@ -39,6 +39,8 @@ FILE_EDIT_TOOLS = frozenset({"Write", "Edit", "MultiEdit", "NotebookEdit", "appl
 
 _BROKE_CONTRACT = re.compile(r"^Planner reply broke the (PLAN|DECISION|CHAT|SUPERVISE) contract \(")
 _REPAIR_REJECTED = "invalid reply after a repair turn"
+# The Planner's answer to a change to the task, with the action it chose.
+_CHANGE_ANSWERED = re.compile(r"^Planner answered a change to the task \((\w+)\)")
 _TURN_KIND = re.compile(r"^\[(PLAN|DECISION|CHAT|SUPERVISE)\]( Your last reply broke the reply contract)?")
 
 
@@ -234,13 +236,22 @@ def planner_changed_files(
     )
 
 
+def plan_changes(activity: Iterable[Mapping[str, Any]]) -> int:
+    """The changes to the task the Planner answered by changing the plan (``add_steps`` or ``replan``)."""
+    return sum(1 for row in activity if (match := _CHANGE_ANSWERED.match(str(row.get("summary") or "")))
+               and match.group(1) in ("add_steps", "replan"))
+
+
 def flow_problems(expect: Mapping[str, int], observed: Mapping[str, int]) -> list[str]:
-    """The expected flow counts (``min_<metric>``) the task fell short of."""
+    """The expected flow counts (``min_<metric>``, ``max_<metric>``) the task missed."""
     problems = []
-    for key, minimum in expect.items():
-        metric = key.removeprefix("min_")
-        if observed.get(metric, 0) < minimum:
-            problems.append(f"{metric} {observed.get(metric, 0)} < {minimum}")
+    for key, bound in expect.items():
+        metric = key.removeprefix("min_").removeprefix("max_")
+        value = observed.get(metric, 0)
+        if key.startswith("max_") and value > bound:
+            problems.append(f"{metric} {value} > {bound}")
+        elif key.startswith("min_") and value < bound:
+            problems.append(f"{metric} {value} < {bound}")
     return problems
 
 
@@ -285,6 +296,7 @@ def task_metrics(
         "reviews": len(by_role.get("reviewer", [])),
         "retries": retries(records),
         "chat_turns": kinds.get("chat", 0),
+        "plan_changes": plan_changes(activity),
         # What the plan lets run at the same time, and the most Workers that did.
         "independent_pairs": independent_pairs(detail.get("steps") or []),
         "bracketed_pairs": bracketed_pairs(detail.get("steps") or []),
