@@ -15,7 +15,7 @@ import pytest
 
 from lark_cli_stand_in import OPEN_ID, OTHER
 from looper.agents.channels.allowlist import SenderAllowlist
-from looper.agents.channels.status_line import MAX_PROGRESS_EDITS, StatusLines, phase_label
+from looper.agents.channels.status_line import MAX_PROGRESS_EDITS, StatusKind, StatusLines, phase_label, status_kind
 from looper.agents.bus import MessageBus
 from looper.agents.message import MANAGER_ADDRESS, MessageEnvelope, MessageType, channel_address
 
@@ -166,6 +166,20 @@ def test_a_phase_after_the_answer_is_ignored_and_state_is_bounded() -> None:
     lines = asyncio.run(main())
     assert len(chat.sent) == 1 + 250
     assert lines.tracked() == 200
+
+
+@pytest.mark.parametrize(("payload", "kind"), [
+    ({"text": "thinking", "delta": False, "phase": True, "activity": "thinking"}, StatusKind.PHASE),
+    ({"text": "任务已分解为 3 个步骤，开始执行..."}, StatusKind.PROGRESS),
+    ({"text": "进度更新: 1/3 完成", "delta": False, "phase": False}, StatusKind.PROGRESS),
+    ({"text": "tok", "delta": True}, StatusKind.IGNORED),
+    ({"text": "tok", "delta": True, "phase": True}, StatusKind.IGNORED),
+    ({"text": ""}, StatusKind.IGNORED),
+    ({"text": "  \n"}, StatusKind.IGNORED),
+    ({}, StatusKind.IGNORED),
+])
+def test_status_kinds(payload: dict[str, Any], kind: StatusKind) -> None:
+    assert status_kind(payload) is kind
 
 
 # --- Lark, end to end through the stand-in lark-cli ---
@@ -467,3 +481,79 @@ def test_telegram_reacts_with_eyes_to_an_admitted_direct_message(caplog: pytest.
     assert len(failing.calls) == 3  # one call per message, none retried, nothing sent
     (line,) = [r.getMessage() for r in caplog.records if "could not react" in r.getMessage()]
     assert line.startswith("channel-telegram: could not react to a message") and "unavailable" in line
+
+
+# --- The Manager's task progress: messages of their own, beside the status line ---
+
+
+async def _manager_progress(tmp_path: Path, channel_id: str) -> list[MessageEnvelope]:
+    """What the Manager sends the channel a task came from when the task is accepted and when its Planner reports."""
+    from looper.agents.message import TASK_ROUTER_ADDRESS
+    from looper.agents.tiers.manager import ManagerAgent, ManagerConfig
+
+    bus = MessageBus(runtime_root=tmp_path)
+    manager = ManagerAgent(config=ManagerConfig(work_dir=tmp_path), runtime_root=tmp_path)
+    manager._bus = bus
+    for kind, payload in ((MessageType.TASK_ACCEPTED, {"task_id": "t1", "step_count": 3}),
+                          (MessageType.GOAL_STATUS, {"task_id": "t1", "status": "executing",
+                                                     "summary": "进度更新: 1/3 完成"})):
+        await manager._handle(MessageEnvelope.create(source=TASK_ROUTER_ADDRESS, target=MANAGER_ADDRESS,
+                                                     message_type=kind, payload=payload, correlation_id="c1",
+                                                     metadata={"origin_channel_id": channel_id}))
+    queue = bus.get_queue(channel_id)
+    progress = [queue.get_nowait() for _ in range(queue.qsize())]
+    await bus.shutdown()
+    return progress
+
+
+async def _with_progress(tmp_path: Path, adapter: Any, channel_id: str) -> int:
+    """Phases, the task's progress, a delta and empty statuses, then the answer; the status line's progress edits
+    before the answer."""
+    accepted, summary = await _manager_progress(tmp_path, channel_id)
+    adapter._status._interval = 0  # every phase that changes the text edits at once
+    adapter._correlation_chat["c1"] = adapter._correlation_chat.get("c1") or "oc_dm"
+    await adapter.deliver(_envelope(MessageType.STATUS_UPDATE, _phase(0)))
+    assert (await adapter.deliver(accepted)).success
+    await adapter.deliver(_envelope(MessageType.STATUS_UPDATE, _phase(1)))
+    for nothing in ({"text": "tok", "delta": True}, {"text": ""}, {"text": "  "}):
+        assert (await adapter.deliver(_envelope(MessageType.STATUS_UPDATE, nothing))).success
+    assert (await adapter.deliver(summary)).success
+    await adapter.deliver(_envelope(MessageType.STATUS_UPDATE, _phase(2)))
+    edits = adapter._status._open["c1"].edits
+    await adapter.deliver(_envelope(MessageType.AGENT_REPLY, {"text": "done"}))
+    return edits
+
+
+def test_lark_sends_task_progress_as_messages_of_their_own(tmp_path: Path, lark_cli_stand_in: Path) -> None:
+    from looper.agents.channels.lark import LarkChannelAdapter
+
+    adapter = LarkChannelAdapter(runtime_root=tmp_path,
+                                 allowlist=SenderAllowlist("channel-lark", frozenset({OPEN_ID})))
+    edits = asyncio.run(_with_progress(tmp_path, adapter, "channel-lark"))
+    calls = _calls(lark_cli_stand_in)
+    sends = [c for c in calls if "+messages-send" in c]
+    assert [(c[-2], c[-1]) for c in sends[1:]] == [("--markdown", "任务已分解为 3 个步骤，开始执行..."),
+                                                   ("--markdown", "进度更新: 1/3 完成"), ("--markdown", "done")]
+    assert sends[0][-2:] == ["--text", sends[0][-1]] and sends[0][-1].startswith("⏳ 处理中：思考中")
+    # The phases edit the one status message; the progress counts as none of its edits.
+    status_edits = [c for c in calls if "+messages-edit" in c]
+    assert {c[c.index("--message-id") + 1] for c in status_edits} == {"om_0001"}
+    assert edits == 2 and len(status_edits) == 3
+    assert status_edits[-1][-1].startswith("✅ 完成") and status_edits[-1][-1].endswith("工具 2 次")
+
+
+def test_telegram_sends_task_progress_as_messages_of_their_own(tmp_path: Path) -> None:
+    pytest.importorskip("telegram")
+    from looper.agents.channels.telegram import TelegramChannelAdapter
+
+    bot = _Bot()
+    adapter = TelegramChannelAdapter(bot_token="0:not-a-token",
+                                     allowlist=SenderAllowlist("channel-telegram", frozenset({"7"})))
+    adapter._app = SimpleNamespace(bot=bot)
+    adapter._correlation_chat["c1"] = 7
+    edits = asyncio.run(_with_progress(tmp_path, adapter, "channel-telegram"))
+    assert [kind for kind, _ in bot.calls] == ["send", "send", "edit", "send", "edit", "send", "edit"]
+    texts = [kwargs["text"] for kind, kwargs in bot.calls if kind == "send"]
+    assert texts[1:] == ["任务已分解为 3 个步骤，开始执行...", "进度更新: 1/3 完成", "done"]
+    assert {kwargs["message_id"] for kind, kwargs in bot.calls if kind == "edit"} == {101}
+    assert edits == 2

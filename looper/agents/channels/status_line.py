@@ -15,6 +15,12 @@ left alone: it never turns into more messages. A reply the Manager sends on
 its own (``autonomous``) has no status message, and a phase that comes after
 its message's answer is ignored. What is tracked is bounded.
 
+Only phases go to the status line (``status_kind``). A status that is
+neither a phase nor streamed text is the Manager's task progress (「任务已分解为
+N 个步骤，开始执行...」, the Planner's progress and its summary): the channel
+sends it as a message of its own and leaves the status line alone. Streamed
+text and a status without text are not shown.
+
 Before any of that, the channel acknowledges a message it hands to the
 Manager with a reaction (``Reactions``: Lark's 「Get」, Telegram's 👀). The
 call runs in the background, so it never holds the message up; a failed one
@@ -30,6 +36,7 @@ import time
 from collections import OrderedDict
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -60,9 +67,25 @@ _TOOL_WORDS = {
 }
 
 
+class StatusKind(Enum):
+    """What a chat channel does with a ``STATUS_UPDATE``."""
+
+    PHASE = "phase"  # shown on its message's status line
+    PROGRESS = "progress"  # the Manager's task progress: sent as a message of its own
+    IGNORED = "ignored"  # streamed text, or no text
+
+
+def status_kind(payload: Mapping[str, Any]) -> StatusKind:
+    if payload.get("delta"):
+        return StatusKind.IGNORED
+    if payload.get("phase"):
+        return StatusKind.PHASE
+    return StatusKind.PROGRESS if str(payload.get("text") or "").strip() else StatusKind.IGNORED
+
+
 def phase_label(payload: Mapping[str, Any]) -> tuple[str, bool] | None:
     """A phase's short label and whether it is a tool run; None for a status that is not a phase."""
-    if not payload.get("phase") or payload.get("delta"):
+    if status_kind(payload) is not StatusKind.PHASE:
         return None
     if payload.get("activity") == "tool":
         tool = str(payload.get("tool") or "tool")
