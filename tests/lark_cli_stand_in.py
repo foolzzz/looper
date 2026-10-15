@@ -64,8 +64,8 @@ if args[:4] == ["im", "+messages-send", "--as", "bot"]:
     with open({log!r}) as sent:
         count = sum(1 for line in sent if "+messages-send" in line)
     answer({{"ok": True, "identity": "bot", "data": {{"message_id": "om_%04d" % count, "chat_id": rest[1]}}}})
-if args[:6] == ["im", "+messages-edit", "--as", "bot", "--message-id"] and len(args) == 9:
-    if args[7] not in ("--text", "--markdown"):
+if args[:5] == ["im", "+messages-edit", "--as", "bot", "--message-id"] and len(args) == 8:
+    if args[6] not in ("--text", "--markdown"):
         refuse("specify one of --text, --markdown or --content")
     if args[5].endswith("gone"):
         refuse("the message was recalled or the bot did not send it")

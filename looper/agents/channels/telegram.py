@@ -31,7 +31,7 @@ from ..message import (
 )
 from .allowlist import SenderAllowlist
 from .base import ChannelAdapter, DeliveryReceipt
-from .status_line import Reactions, StatusLines
+from .status_line import Reactions, StatusKind, StatusLines, status_kind
 
 logger = logging.getLogger(__name__)
 
@@ -171,8 +171,8 @@ class TelegramChannelAdapter(ChannelAdapter):
             return DeliveryReceipt(channel="telegram", success=False, error=str(exc))
 
     async def deliver(self, envelope: MessageEnvelope) -> DeliveryReceipt:
-        """Show a status on the message's status line, or send the answer to the Telegram user who wrote and close
-        its status line."""
+        """Show a phase on the message's status line, send task progress as a message of its own, or send the
+        answer to the Telegram user who wrote and close its status line."""
         corr_id = envelope.correlation_id
         chat_id = self._correlation_chat.get(corr_id)
         if chat_id is None:
@@ -183,7 +183,12 @@ class TelegramChannelAdapter(ChannelAdapter):
             )
 
         if envelope.message_type is MessageType.STATUS_UPDATE:
-            await self._status.update(corr_id, str(chat_id), envelope.payload)
+            match status_kind(envelope.payload):
+                case StatusKind.PHASE:
+                    await self._status.update(corr_id, str(chat_id), envelope.payload)
+                case StatusKind.PROGRESS:
+                    # Task progress leaves the status line alone.
+                    return await self._send_answer(chat_id, str(envelope.payload["text"]))
             return DeliveryReceipt(channel="telegram", success=True)
 
         text = self._format_reply(envelope)
@@ -368,7 +373,7 @@ class TelegramChannelAdapter(ChannelAdapter):
 
     @staticmethod
     def _format_reply(envelope: MessageEnvelope) -> str:
-        """The text of an answer; a status goes to the status line instead (``deliver``)."""
+        """The text of an answer; a status is handled by ``deliver``."""
         match envelope.message_type:
             case MessageType.AGENT_REPLY | MessageType.CLARIFICATION_REQUEST:
                 return envelope.payload.get("text", "")
