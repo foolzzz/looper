@@ -606,7 +606,7 @@ class WorkerPool:
                 return {"passed": False, "findings": [agent_settings.profile_error],
                         "summary": agent_settings.profile_error}
             return {"status": "failed", "error": agent_settings.profile_error}
-        launch = Launch(agent_settings, library, knowledge)
+        launch = Launch(agent_settings, library, knowledge, role=AgentType.REVIEWER if is_verify else AgentType.WORKER)
         background = str((project or {}).get("background") or "")
         system_prompt = build_system_prompt(
             harness=agent_settings.harness,

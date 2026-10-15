@@ -40,22 +40,23 @@ Anthropic-format endpoint, with the operator's subscription signed in:
   its provider's prices (``cost_source``), and ``--max-budget-usd`` is not
   passed: Looper enforces the per-run cap itself (``claude_cli``).
 
-**Agent teams** (an Agent Profile's ``agent_teams``). Claude Code 2.1.285
-enables them only when ``CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS`` is set. A
-teammate it spawns runs where ``--teammate-mode`` says; under its default
-(``auto``) a process inside tmux starts each one as a tmux process of its own,
-whose cost the run's result never counts, so a run with teams has
-``--teammate-mode in-process``. Then a teammate runs in the run's process as a
-background task (``system/task_started``). One that outlives the turn that
-spawned it starts a turn of the lead's own with its message and another when it
-ends, also after stdin closed, and the process exits after them: every
-``result`` carries the session's totals, the teammate's models included in
-``modelUsage``, and the last one comes once the teammate is done. A teammate does not get the lead's ``--append-system-prompt-file``. Its
-assistant messages are in the stream (with a ``parent_tool_use_id``) but its
-model requests are not (no ``message_start``), so the per-run soft cap misses
-their tokens. The profile owns the variable: a run without teams has it
-removed, whatever the server's environment, the settings' or the provider's
-variables say.
+**Agent teams** (an Agent Profile's ``agent_teams``, never for a Planner:
+``Launch.agent_teams``). Claude Code 2.1.285 enables them only when
+``CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS`` is set. A teammate it spawns runs
+where ``--teammate-mode`` says; under its default (``auto``) a process inside
+tmux starts each one as a tmux process of its own, whose cost the run's result
+never counts, so a run with teams has ``--teammate-mode in-process``. Then a
+teammate runs in the run's process as a background task
+(``system/task_started``). One that outlives the turn that spawned it starts a
+turn of the lead's own with its message and another when it ends, also after
+stdin closed, and the process exits after them: every ``result`` carries the
+session's totals, the teammate's models included in ``modelUsage``, and the
+last one comes once the teammate is done. A teammate does not get the lead's
+``--append-system-prompt-file``. Its assistant messages are in the stream (with
+a ``parent_tool_use_id``) but its model requests are not (no
+``message_start``), so the per-run soft cap misses their tokens. The launch
+owns the variable: a run without teams has it removed, whatever the server's
+environment, the settings' or the provider's variables say.
 """
 
 from __future__ import annotations
@@ -167,7 +168,7 @@ class ClaudeCodeRuntime(RuntimeAdapter):
         """The Claude Code flags every agent starts with: the permissions, the model, the effort, the
         plugin directories of the installed items, the directories of the project knowledge, the
         per-run spend cap (when Claude Code's own figure is the run's cost), the provider's binding and, with
-        the profile's agent teams, where teammates run."""
+        agent teams (``Launch.agent_teams``), where teammates run."""
         from ..claude_cli import budget_args, knowledge_args, library_args, permission_args
 
         provider = launch.profile.provider
@@ -179,16 +180,16 @@ class ClaudeCodeRuntime(RuntimeAdapter):
             *knowledge_args(launch.knowledge),
             *(budget_args(launch.max_budget_usd) if self.cost_source(provider) is CostSource.RUNTIME else []),
             *self.bind_provider(provider, launch.model, launch.effort).args,
-            *(TEAMMATE_MODE_ARGS if launch.profile.agent_teams else ()),
+            *(TEAMMATE_MODE_ARGS if launch.agent_teams else ()),
         ]
 
     def environment(self, launch: Launch) -> dict[str, str] | None:
         """The subprocess environment: the server's, then the settings' variables and the provider's binding,
-        less what the binding removes, with the agent teams variable set by the profile alone; None without any
-        of these."""
+        less what the binding removes, with the agent teams variable set by the launch alone (``Launch.agent_teams``);
+        None without any of these."""
         binding = self.bind_provider(launch.profile.provider, launch.model, launch.effort)
         added = {k: v for k, v in (*launch.env, *binding.env) if k != AGENT_TEAMS}
-        if launch.profile.agent_teams:
+        if launch.agent_teams:
             added[AGENT_TEAMS] = "1"
         if not added and not binding.unset and AGENT_TEAMS not in os.environ:
             return None

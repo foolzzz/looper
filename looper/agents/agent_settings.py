@@ -634,6 +634,15 @@ class Launch:
     settings: AgentSettings = BUILTIN_SETTINGS
     library: AgentLibrary = EMPTY_LIBRARY
     knowledge: AgentKnowledge = EMPTY_KNOWLEDGE
+    role: AgentType | None = None  # the role the run is for; None: one that follows its profile in everything
+
+    @property
+    def agent_teams(self) -> bool:
+        """Whether the run has Claude Code's agent teams: its profile's, never for a Planner. A Planner's plan and
+        each of its decisions are read from the result of its own turn, so a turn that waits for a teammate ends
+        without its decision, and the teammate's later turns are Claude's own, only logged (#26); the Planner runs
+        work in parallel through Looper's Workers, whose steps Looper tracks, which teammates would bypass."""
+        return self.profile.agent_teams and self.role is not AgentType.PLANNER
 
     @property
     def model(self) -> str:

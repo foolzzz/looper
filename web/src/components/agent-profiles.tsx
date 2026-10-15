@@ -300,9 +300,10 @@ export function AgentProfileForm({
               Agent teams
             </label>
             <p id={`${id}-teams-hint`} className="text-[11px] text-muted-foreground">
-              On by default: the agent can start teammates that work beside it (Claude Code&apos;s experimental agent
-              teams), and their cost is counted in the run&apos;s once it ends. Untick it to run this profile without
-              teammates.
+              On by default for the Manager, Workers and Reviewers: they can start teammates that work beside them
+              (Claude Code&apos;s experimental agent teams), whose cost is counted in the run&apos;s once it ends.
+              Planners always run without them, since a Planner&apos;s decisions come from its own turn. Untick it to
+              run this profile without teammates.
             </p>
           </div>
         )}
