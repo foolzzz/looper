@@ -157,7 +157,7 @@ def _run(test: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     ({"timezone": "Mars/Base"}, "unknown time zone"),
     ({"requirement": "   "}, "requirement is required"),
     ({"requirement": "x" * 30_001}, "at most 30000 characters"),
-    ({"overlap": "parallel"}, "overlap must be one of skip, queue"),
+    ({"overlap": "both"}, "overlap must be one of skip, queue, parallel"),
     ({"catch_up": "all"}, "catch_up must be one of once, skip"),
     ({"run_timeout_seconds": 0}, "run_timeout_seconds must be"),
     ({"run_timeout_seconds": 1.5}, "run_timeout_seconds must be"),

@@ -32,7 +32,7 @@ from .. import env
 from ..db import channel_configs as db_channel_configs, connection as db_connection, llm_records as db_llm_records
 from ..db import projects as db_projects, schedules as db_schedules
 from . import cron
-from .agent_settings import budget_usd
+from .agent_settings import AgentType, budget_usd, load_concurrency
 from .channels.allowlist import SENDER_ID_FORMATS, sender_ids
 from .projects import HTTP_400, HTTP_404, HTTP_409, TASK_PROFILE_ROLES, RequestError, _profile_overrides
 from .scheduler import GATE_TIMEOUT_DEFAULT_SECONDS, GATE_TIMEOUT_MAX_SECONDS
@@ -50,6 +50,7 @@ PREVIEW_MAX = 20
 RUNS_DEFAULT = 50
 RUNS_MAX = 200
 GATE_COMMAND_MAX_CHARS = 2000
+MAX_PARALLEL_RUNS_LIMIT = 10
 
 MIN_INTERVAL_ENV = "LOOPER_SCHEDULE_MIN_INTERVAL_SECONDS"
 DEFAULT_MIN_INTERVAL_SECONDS = 300
@@ -63,6 +64,7 @@ NO_WORK_DIR = "a work directory is required: set one on the schedule or on its p
 class Overlap(str, Enum):
     SKIP = "skip"  # a firing while the previous run's task is in progress is skipped
     QUEUE = "queue"  # it waits for that task to end; at most one waits
+    PARALLEL = "parallel"  # it starts beside the runs in progress, up to max_parallel_runs (reentrant)
 
 
 class CatchUp(str, Enum):
@@ -185,6 +187,7 @@ def schedule_view(row: Mapping[str, Any], last_run: dict[str, Any] | None = None
         "name": row["name"], "cron": row["cron"],
         "timezone": row["timezone"], "description": describe(row["cron"], row["timezone"]),
         "requirement": row["requirement"], "work_dir": row["work_dir"], "overlap": row["overlap"],
+        "max_parallel_runs": row["max_parallel_runs"],
         "catch_up": row["catch_up"], "run_timeout_seconds": row["run_timeout_seconds"],
         "run_budget_usd": row["run_budget_usd"], "profile_overrides": dict(row.get("profile_overrides") or {}),
         "enabled": row["enabled"], "next_fire_at": row["next_fire_at"], "last_fired_at": row["last_fired_at"],
@@ -237,7 +240,8 @@ async def limits() -> dict[str, Any]:
         "min_interval_gated_seconds": min_interval_seconds(gated=True), "default_timezone": cron.local_zone_name(),
         "run_timeout_max_seconds": RUN_TIMEOUT_MAX_SECONDS, "roles": list(TASK_PROFILE_ROLES),
         "gate_command_max_chars": GATE_COMMAND_MAX_CHARS, "gate_timeout_default_seconds": GATE_TIMEOUT_DEFAULT_SECONDS,
-        "gate_timeout_max_seconds": GATE_TIMEOUT_MAX_SECONDS, "notify_targets": await notify_targets(),
+        "gate_timeout_max_seconds": GATE_TIMEOUT_MAX_SECONDS, "max_parallel_runs_limit": MAX_PARALLEL_RUNS_LIMIT,
+        "notify_targets": await notify_targets(),
     }
 
 
@@ -286,6 +290,13 @@ def _timeout(raw: Any) -> int | None:
     return raw
 
 
+def _max_parallel_runs(raw: Any) -> int:
+    if isinstance(raw, bool) or not isinstance(raw, int) or not 1 <= raw <= MAX_PARALLEL_RUNS_LIMIT:
+        raise ValueError(f"max_parallel_runs must be a whole number from 1 to {MAX_PARALLEL_RUNS_LIMIT}: how many "
+                         "runs of a parallel schedule may be in progress at once")
+    return raw
+
+
 def _budget(field: str) -> Any:
     return lambda raw: None if raw is None else budget_usd(raw, field=field)
 
@@ -312,7 +323,7 @@ def _gate_timeout(raw: Any) -> int | None:
 
 _PARSERS = {
     "name": _name, "requirement": _requirement, "work_dir": _work_dir,
-    "overlap": lambda raw: _choice("overlap", raw, Overlap),
+    "overlap": lambda raw: _choice("overlap", raw, Overlap), "max_parallel_runs": _max_parallel_runs,
     "catch_up": lambda raw: _choice("catch_up", raw, CatchUp),
     "run_timeout_seconds": _timeout, "run_budget_usd": _budget("run_budget_usd"),
     "gate_command": _gate_command, "gate_timeout_seconds": _gate_timeout,
@@ -403,9 +414,11 @@ async def _schedule_views(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 async def list_schedules(project_id: str) -> dict[str, Any]:
+    """The project's schedules, and the limits a schedule of it is checked against: the shared ones, and the
+    project's Planner limit (``planner_limit``), past which a parallel schedule's runs wait."""
     await _existing_project(project_id)
     return {"schedules": await _schedule_views(await db_schedules.list_schedules(project_id)),
-            "limits": await limits()}
+            "limits": {**await limits(), "planner_limit": await load_concurrency(AgentType.PLANNER, project_id)}}
 
 
 async def list_all_schedules() -> dict[str, Any]:
@@ -430,7 +443,7 @@ async def create_schedule(project_id: str, data: dict[str, Any], *, created_via:
     except asyncpg.ForeignKeyViolationError:  # the project or a profile was removed meanwhile
         raise RequestError(HTTP_400, "the project or an Agent Profile the schedule chose was removed meanwhile") \
             from None
-    return await _schedule_answer(schedule_id)
+    return await _with_warnings(await _schedule_answer(schedule_id))
 
 
 async def get_schedule(schedule_id: str) -> dict[str, Any]:
@@ -480,7 +493,21 @@ async def update_schedule(schedule_id: str, data: dict[str, Any], *, now: dateti
     except asyncpg.ForeignKeyViolationError:
         raise RequestError(HTTP_400, "an Agent Profile the schedule chose was removed meanwhile; choose again") \
             from None
-    return await _schedule_answer(schedule_id)
+    return await _with_warnings(await _schedule_answer(schedule_id))
+
+
+async def _with_warnings(answer: dict[str, Any]) -> dict[str, Any]:
+    """A saved schedule's answer with what deserves a look (``warnings``): a parallel schedule allowed more runs at
+    once than its project's Planner limit, whose runs past it wait as pending while their run timeout counts."""
+    schedule = answer["schedule"]
+    warnings = []
+    if schedule["overlap"] == Overlap.PARALLEL.value:
+        limit = await load_concurrency(AgentType.PLANNER, schedule["project_id"])
+        if schedule["max_parallel_runs"] > limit:
+            warnings.append(f"max_parallel_runs is {schedule['max_parallel_runs']}, but its project runs at most "
+                            f"{limit} tasks at once (the Planner limit): the runs past it wait as pending, and their "
+                            "run timeout counts while they wait")
+    return {**answer, "warnings": warnings}
 
 
 async def delete_schedule(schedule_id: str) -> dict[str, Any]:

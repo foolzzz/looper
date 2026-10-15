@@ -2,7 +2,8 @@
 
 The command runs with ``/bin/sh -c`` in the run's work directory, in a session
 of its own (``proc_tree.spawn``, so a server that crashes meanwhile has it swept
-at its next start), with the server's environment and no stdin. It has
+at its next start), with the server's environment plus what the scheduler
+tells it about its run (``scheduler.gate_env``) and no stdin. It has
 ``timeout_seconds``; past it, or when the gate is cancelled, its whole process
 tree is ended the way an agent's is (``proc_tree.end``: SIGTERM, then SIGKILL
 after ``proc_tree.TERM_GRACE_SEC``). What it leaves running in its own group
@@ -17,6 +18,7 @@ import asyncio
 import contextlib
 import os
 import signal
+from collections.abc import Mapping
 from dataclasses import dataclass
 
 from . import proc_tree
@@ -97,12 +99,15 @@ async def _end_tree(process: asyncio.subprocess.Process, label: str) -> None:
         pass  # every signal was sent; what holds the pipes left the tree
 
 
-async def run_gate(command: str, work_dir: str, timeout_seconds: float, *, label: str = "gate") -> GateResult:
-    """Run the gate and say what it printed and how it ended. Cancelling it ends the gate's process tree."""
+async def run_gate(command: str, work_dir: str, timeout_seconds: float, *, label: str = "gate",
+                   env: Mapping[str, str] | None = None) -> GateResult:
+    """Run the gate, with ``env`` added to the server's environment, and say what it printed and how it ended.
+    Cancelling it ends the gate's process tree."""
     try:
         process = await proc_tree.spawn(
             "/bin/sh", "-c", command, cwd=work_dir, stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            env={**os.environ, **env} if env else None,
         )
     except OSError as exc:
         return GateResult(None, "", "", error=f"the gate could not start in {work_dir}: {exc}")

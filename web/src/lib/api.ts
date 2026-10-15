@@ -625,7 +625,8 @@ export async function deleteProject(projectId: string): Promise<void> {
 // --- A project's schedules: a full task of the project on a time rule ---
 
 /** "skip": a firing while the previous run's task is in progress is skipped; "queue": it waits (at most one). */
-export type ScheduleOverlap = "skip" | "queue";
+/** While a run is in progress: skip the firing, queue one, or start runs beside it (reentrant). */
+export type ScheduleOverlap = "skip" | "queue" | "parallel";
 /** After downtime: "once" runs once for all missed fires; "skip" skips them unless the latest was within 2 minutes. */
 export type ScheduleCatchUp = "once" | "skip";
 export type ScheduleRunTrigger = "scheduled" | "catch_up" | "manual";
@@ -706,6 +707,8 @@ export interface ScheduleInfo {
   /** "" = the project's default directory at firing time. */
   work_dir: string;
   overlap: ScheduleOverlap;
+  /** With overlap "parallel": how many runs may be in progress at once. */
+  max_parallel_runs: number;
   catch_up: ScheduleCatchUp;
   /** Null: no limit. */
   run_timeout_seconds: number | null;
@@ -752,6 +755,10 @@ export interface ScheduleLimits {
   gate_command_max_chars: number;
   gate_timeout_default_seconds: number;
   gate_timeout_max_seconds: number;
+  /** The most runs of a parallel schedule in progress at once. */
+  max_parallel_runs_limit: number;
+  /** In a project's listing: how many tasks its Planner limit runs at once; a parallel schedule's runs past it wait. */
+  planner_limit?: number;
   /** Empty: no channel has a sender to send to. */
   notify_targets: ScheduleNotifyTargetOption[];
 }
@@ -774,6 +781,7 @@ export interface ScheduleFields {
   timezone?: string;
   work_dir?: string;
   overlap?: ScheduleOverlap;
+  max_parallel_runs?: number;
   catch_up?: ScheduleCatchUp;
   run_timeout_seconds?: number | null;
   run_budget_usd?: number | null;

@@ -19,7 +19,10 @@ server was down or the computer slept are handled), one pass:
 
 A firing while one of the schedule's tasks is still active is recorded
 ``skipped_overlap``, or, with overlap ``queue``, waits as the one ``queued``
-run. Otherwise it creates the task (the schedule's requirement plus the
+run. With overlap ``parallel`` (reentrant) it starts beside the runs in
+progress, up to ``max_parallel_runs`` at once, but never while a run of the
+schedule checks its gate: only tasks overlap, so a gate can claim what it hands
+to its run (``gate_env`` tells it which run). Otherwise it creates the task (the schedule's requirement plus the
 code-written run context, ``run_context``; its profile overrides; its own
 spend cap) and starts it at once with ``TASK_START``: enabling the schedule was
 the approval (D6), and the TaskRouter's start path applies the project's
@@ -32,10 +35,11 @@ A schedule with a ``gate_command`` records the run ``gating`` and runs the
 gate outside the transaction (``schedule_gate``): a failure or timeout is
 ``gate_failed`` (a failure); nothing printed is ``skipped_gate``, unless the
 previous run that ran something did not finish its input; else the task is
-created with the gate's output in its context. The previous run's gate output
-is handed on, labelled 「上一轮未完成」, when that run failed, timed out, was
-stopped or cancelled, or its gate failed (only that one run, so it stays
-bounded). Each run that ends is reported to the ``Notifier``, which sends its
+created with the gate's output in its context. The gate output of each run
+that failed, timed out, was stopped or cancelled, or whose gate failed is
+handed on to the next run, labelled 「上一轮未完成」, once (``carried_on``): all
+of them when several runs of a parallel schedule ended so before it, oldest
+first, the oldest left out (and counted) when they do not fit. Each run that ends is reported to the ``Notifier``, which sends its
 message and the alerts (``schedule_notify``); each pass checks the stale
 alert. Gates and messages run in the background, so a slow one holds up
 neither the pass nor the TaskRouter.
@@ -47,7 +51,7 @@ import asyncio
 import logging
 import re
 import uuid
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from enum import Enum
@@ -79,6 +83,8 @@ GATE_TIMEOUT_DEFAULT_SECONDS = 60
 GATE_TIMEOUT_MAX_SECONDS = 600
 # The least room the gate outputs get in a run's context, however long the requirement.
 GATE_CONTEXT_MIN_CHARS = 600
+# The least room an earlier run's unfinished input gets there; those that do not fit are left out, oldest first.
+CARRIED_MIN_CHARS = 300
 
 # A task's final status, as its run's.
 _OUTCOMES = {"completed": "completed", "failed": "failed", "stopped": "stopped", "cancelled": "cancelled"}
@@ -145,6 +151,16 @@ def _local(moment: datetime, tz: Any) -> str:
     return moment.astimezone(tz).strftime("%Y-%m-%d %H:%M %Z")
 
 
+def gate_env(schedule: Mapping[str, Any], run_id: str, firing: Firing) -> dict[str, str]:
+    """What a gate is told about its run, so it can claim the items it hands to this run (a ``parallel`` schedule's
+    runs overlap): the schedule, the run, its fire time (ISO 8601) and the run timeout in seconds ("" for none),
+    after which a claim may be taken back."""
+    timeout = schedule.get("run_timeout_seconds")
+    return {"LOOPER_SCHEDULE_ID": str(schedule["id"]), "LOOPER_SCHEDULE_RUN_ID": run_id,
+            "LOOPER_SCHEDULE_SCHEDULED_FOR": firing.scheduled_for.isoformat(),
+            "LOOPER_SCHEDULE_RUN_TIMEOUT_SECONDS": "" if timeout is None else str(timeout)}
+
+
 def run_title(schedule: Mapping[str, Any], firing: Firing) -> str | None:
     """A run's task title: the schedule's name and the fire time in its zone (``alarm-triage · 10-15 12:30``), the
     name clipped so the time fits ``db.tasks.task_title``'s limit."""
@@ -160,7 +176,7 @@ def _snippet(text: str | None) -> str:
 
 @dataclass(frozen=True)
 class Carried:
-    """The unfinished input of the previous run, handed to this one."""
+    """The unfinished input of an earlier run, handed to this one."""
 
     run_id: str
     status: str
@@ -177,12 +193,14 @@ def _fenced(text: str, room: int) -> str:
 
 
 def run_context(schedule: Mapping[str, Any], firing: Firing, recent: list[Mapping[str, Any]], *,
-                description: str, gate_output: str | None = None, carried: Carried | None = None,
+                description: str, gate_output: str | None = None, carried: Sequence[Carried] = (),
                 room: int | None = None) -> str:
     """The section the scheduler appends to a run's requirement: which schedule and firing this is, the fires it
-    stands in for, what the gate printed, the previous run's unfinished input, the latest runs' outcomes, and that
-    nobody is there to answer. The gate outputs share ``room`` characters (at least ``GATE_CONTEXT_MIN_CHARS``),
-    the current one two thirds of it when both are there."""
+    stands in for, what the gate printed, the unfinished input of the runs that handed it on (``carried``, oldest
+    first, one block each), the latest runs' outcomes, and that nobody is there to answer. The gate outputs share
+    ``room`` characters (at least ``GATE_CONTEXT_MIN_CHARS``), the current one two thirds of it when there are
+    earlier ones; those that do not fit at ``CARRIED_MIN_CHARS`` each are left out, the oldest first, and
+    counted."""
     tz = cron.zone(schedule["timezone"])
     lines = [
         "## 定时运行上下文",
@@ -208,9 +226,14 @@ def run_context(schedule: Mapping[str, Any], firing: Firing, recent: list[Mappin
                      "不要再自己运行这条命令或读它的来源去找别的条目：")
         lines.append(_fenced(gate_output, own_room))
     if carried:
-        lines.append(f"- 上一轮未完成：{_local(carried.at, tz)} 的运行{_STATUS_WORDS.get(carried.status, carried.status)}，"
-                     "它的前置检查输出如下；这一轮请一并处理还没完成的部分：")
-        lines.append(_fenced(carried.gate_output, room - own_room if gate_output else room))
+        carried_room = room - own_room if gate_output else room
+        kept = carried[-max(1, carried_room // CARRIED_MIN_CHARS):]
+        if omitted := len(carried) - len(kept):
+            lines.append(f"- 另有 {omitted} 次更早的运行也没有完成，这里放不下它们的前置检查输出，见各自的运行记录。")
+        for one in kept:
+            lines.append(f"- 上一轮未完成：{_local(one.at, tz)} 的运行{_STATUS_WORDS.get(one.status, one.status)}，"
+                         "它的前置检查输出如下；这一轮请一并处理还没完成的部分：")
+            lines.append(_fenced(one.gate_output, carried_room // len(kept)))
     if recent:
         lines.append(f"- 最近 {len(recent)} 次运行（新的在前）：")
         for run in recent:
@@ -410,6 +433,14 @@ class Scheduler:
         open_runs = await db_schedules.open_runs(conn, schedule["id"])
         queued = next((run for run in open_runs if run["status"] == db_schedules.QUEUED), None)
         gating = next((run for run in open_runs if run["status"] == db_schedules.GATING), None)
+        if schedule["overlap"] == "parallel":
+            # Runs overlap in their tasks only: a gate never runs beside another, up to max_parallel_runs at once.
+            running = sum(run["status"] == db_schedules.RUNNING for run in open_runs)
+            if gating is None and running < schedule["max_parallel_runs"]:
+                return await self._launch(conn, schedule, firing, now, common=common)
+            reason = ("the previous run is still checking its gate" if gating
+                      else f"{running} runs are in progress, the most this schedule runs at once (max_parallel_runs)")
+            return _Launched(await self._skip(conn, "skipped_overlap", now, common, fired_at=now, error=reason))
         busy = await self._busy_task(conn, schedule["id"])
         if busy or queued or gating:
             if schedule["overlap"] == "queue" and queued is None:
@@ -462,10 +493,12 @@ class Scheduler:
 
     async def _create_run(self, conn: asyncpg.Connection, schedule: dict[str, Any], firing: Firing, now: datetime, *,
                           common: Mapping[str, Any] | None = None, run_id: str | None = None,
-                          gate_output: str | None = None, carried: Carried | None = None,
+                          gate_output: str | None = None, carried: list[Carried] | None = None,
                           fires_now: bool = True) -> _Launched:
         """Create the run's task (or fail the run, saying why) and record the run running; ``fires_now`` sets its
         ``fired_at`` (a gating run's was set when its gate started)."""
+        if carried is None:
+            carried = await self._carried(conn, schedule["id"], before=run_id)
         task_id, error = await self._create_task(conn, schedule, firing, run_id=run_id, gate_output=gate_output,
                                                  carried=carried)
         fired = {"fired_at": now} if fires_now else {}
@@ -473,8 +506,10 @@ class Scheduler:
             run_id = await self._put(conn, run_id, common, status="failed", finished_at=now, error=error, **fired)
             await db_schedules.count_outcome(conn, schedule["id"], "failed", now)
             return _Launched(run_id, ended=True)
+        # Every earlier run's unfinished input goes to this run, and to no later one; it names the latest of them.
         run_id = await self._put(conn, run_id, common, status=db_schedules.RUNNING, task_id=task_id,
-                                 carried_from=carried.run_id if carried else None, **fired)
+                                 carried_from=carried[-1].run_id if carried else None, **fired)
+        await db_schedules.hand_on(conn, [one.run_id for one in carried])
         logger.info("schedule %s fired (%s): task %s", schedule["id"], firing.trigger.value, task_id)
         return _Launched(run_id, task_id=task_id)
 
@@ -484,13 +519,11 @@ class Scheduler:
 
     async def _create_task(self, conn: asyncpg.Connection, schedule: dict[str, Any], firing: Firing, *,
                            run_id: str | None, gate_output: str | None,
-                           carried: Carried | None) -> tuple[str | None, str | None]:
+                           carried: list[Carried]) -> tuple[str | None, str | None]:
         """Create the run's task, ready to start; its id, or None and why it could not be created."""
         work_dir = await self._work_dir(conn, schedule)
         if not work_dir:
             return None, "a work directory is required: set one on the schedule or on its project"
-        if carried is None:
-            carried = await self._carried(conn, schedule["id"], before=run_id)
         recent = await db_schedules.recent_runs(conn, schedule["id"], limit=CONTEXT_RUNS)
         description = cron.describe(cron.parse(schedule["cron"]), schedule["timezone"])
         bare = run_context(schedule, firing, recent, description=description)
@@ -508,15 +541,13 @@ class Scheduler:
         return task_id, None
 
     @staticmethod
-    async def _carried(conn: asyncpg.Connection, schedule_id: str, *, before: str | None) -> Carried | None:
-        """The previous run's input when it did not finish it: its gate output, if it had one."""
-        previous = await db_schedules.previous_run(conn, schedule_id, before=before)
-        if previous is None or previous["status"] not in db_schedules.UNFINISHED:
-            return None
-        if not (previous.get("gate_output") or "").strip():
-            return None
-        return Carried(previous["id"], previous["status"], previous.get("fired_at") or previous["scheduled_for"],
-                       previous["gate_output"].strip())
+    async def _carried(conn: asyncpg.Connection, schedule_id: str, *, before: str | None) -> list[Carried]:
+        """The unfinished input of every run that ended without finishing it and has not handed it on yet, oldest
+        first: each goes to the next run only, all of them when several runs of a parallel schedule failed before
+        it."""
+        return [Carried(run["id"], run["status"], run.get("fired_at") or run["scheduled_for"],
+                        run["gate_output"].strip())
+                for run in await db_schedules.unhanded_runs(conn, schedule_id, besides=before)]
 
     async def _gate(self, schedule_id: str, run_id: str, firing: Firing) -> None:
         """Run a gating run's gate, then record what it decided: gate_failed, skipped_gate, or the task."""
@@ -530,7 +561,8 @@ class Scheduler:
                 result = GateResult(None, "", "", error="a work directory is required: set one on the schedule or "
                                                         "on its project")
             else:
-                result = await run_gate(schedule["gate_command"], work_dir, timeout, label=f"gate of {run_id}")
+                result = await run_gate(schedule["gate_command"], work_dir, timeout, label=f"gate of {run_id}",
+                                        env=gate_env(schedule, run_id, firing))
             now = self._clock()
             launched: _Launched | None = None
             async with db_connection.transaction() as conn:
@@ -548,7 +580,7 @@ class Scheduler:
                     carried = await self._carried(conn, schedule_id, before=run_id)
                     if output:
                         await db_schedules.update_run(conn, run_id, gate_output=output)
-                    if not output and carried is None:
+                    if not output and not carried:
                         # Nothing new: counted on the latest run when that is a skipped_gate of today too.
                         merged = await db_schedules.count_skip(conn, schedule_id, status="skipped_gate", at=now,
                                                                since=self.day_start(now), besides=run_id)
