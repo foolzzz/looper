@@ -390,7 +390,7 @@ def result_outcome(result: Mapping[str, Any]) -> str:
 
 
 # How a closing note names a step that is not done, by its status.
-_NOT_DONE = {"pending": "not started", "dispatched": "running", "deciding": "awaiting a decision",
+_NOT_DONE = {"pending": "not started", "dispatched": "was running", "deciding": "awaiting a decision",
              "completed": "awaiting review", "failed": "failed"}
 
 

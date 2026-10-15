@@ -1387,5 +1387,5 @@ class TestProgressAndFinalSummary:
         }
         note = asyncio.run(TaskRouter._stop_note("task-x"))
         assert note == ("## Why it ended\nThe task was stopped before it finished.\n\n## Done\n- a: parser written"
-                        "\n\n## Not done\n- b (running)")
+                        "\n\n## Not done\n- b (was running)")
 
