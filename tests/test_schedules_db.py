@@ -165,7 +165,7 @@ def _run(test: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     ({"profile_overrides": {"manager": "agent-claude-code-opus"}}, "not 'manager'"),
     ({"profile_overrides": {"planner": "agent-nope"}}, "planner:"),
     ({"enabled": True}, "created disabled"),
-    ({"gate_command": "true"}, "unknown field 'gate_command'"),
+    ({"gate": "true"}, "unknown field 'gate'"),
 ])
 def test_a_bad_schedule_is_refused_with_the_reason(monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
                                                    body: dict[str, Any], error: str) -> None:

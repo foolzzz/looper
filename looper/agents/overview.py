@@ -11,6 +11,9 @@
 - **Today's spend**: what the runs started since the server's local midnight
   cost, money and subscription equivalent apart (``llm_records.spend_since``).
 - **Health**: the supervisor's components that are unhealthy.
+- **Schedules**: how many there are and are enabled, the next 5 fires, the
+  failing ones (failures in a row or an alert active) and the runs skipped
+  today by reason (``schedules.schedule_overview``).
 """
 
 from __future__ import annotations
@@ -22,6 +25,7 @@ from typing import Any
 from ..db import llm_records as db_llm_records, tasks as db_tasks
 from ..db.tasks import TaskGroup
 from .agent_settings import AgentType, load_concurrency
+from .schedules import schedule_overview
 from .supervisor import AgentSupervisor
 from .tiers.manager import ManagerAgent
 from .tiers.task import TaskRouter
@@ -125,6 +129,7 @@ async def build_overview(
         "projects": projects,
         "idle_projects": len(set(names) - active),
         "spend_today": {"since": since.isoformat(), **spend},
+        "schedules": await schedule_overview(since),
         "health": {"unhealthy": [
             {"name": name, "restart_count": entry["restart_count"], "max_restarts": entry["max_restarts"]}
             for name, entry in supervisor.agent_status().items() if not entry["healthy"]
