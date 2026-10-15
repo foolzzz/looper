@@ -112,11 +112,15 @@ def test_worker_rows_move_to_the_new_recommended_prompt() -> None:
     asyncio.run(_run())
 
 
-@pytest.mark.parametrize("role", ["manager", "planner"])
-def test_a_row_moves_from_its_previous_default(role: str) -> None:
-    """Startup (``seed_role_configs``) gives a row still holding its role's previous default (the Manager's from
-    before ready tasks, the Planner's from before parallel steps) the current one, whether that default was
-    tracked or not; an edited prompt is kept."""
+@pytest.mark.parametrize(("role", "before"), [
+    ("manager", "_MANAGER_PROMPT_BEFORE_READY_TASKS"),
+    ("manager", "_MANAGER_PROMPT_BEFORE_CURRENT_MESSAGE"),
+    ("planner", "_PLANNER_PROMPT_BEFORE_PARALLEL"),
+])
+def test_a_row_moves_from_a_previous_default(role: str, before: str) -> None:
+    """Startup (``seed_role_configs``) gives a row still holding one of its role's previous defaults (the Manager's
+    from before ready tasks or before it answered only the current message, the Planner's from before parallel
+    steps) the current one, whether that default was tracked or not; an edited prompt is kept."""
     import asyncpg
 
     from looper.agents import serve
@@ -125,8 +129,8 @@ def test_a_row_moves_from_its_previous_default(role: str) -> None:
     from looper.db import role_configs
     from looper.db.connection import ensure_schema
 
-    old, new = {"manager": (serve._MANAGER_PROMPT_BEFORE_READY_TASKS, manager.DEFAULT_SYSTEM_PROMPT),
-                "planner": (serve._PLANNER_PROMPT_BEFORE_PARALLEL, planner.DEFAULT_SYSTEM_PROMPT)}[role]
+    old = getattr(serve, before)
+    new = {"manager": manager.DEFAULT_SYSTEM_PROMPT, "planner": planner.DEFAULT_SYSTEM_PROMPT}[role]
     edited = f"My own {role} prompt."
 
     async def _run() -> list[tuple[str, str]]:
