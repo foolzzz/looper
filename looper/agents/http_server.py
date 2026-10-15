@@ -722,7 +722,8 @@ class AgentHTTPServer:
             writer.write(_json_response(HTTP_200, {"sessions": _serialize(sessions)}))
         except Exception as exc:
             logger.warning("failed to list chat sessions", exc_info=True)
-            writer.write(_json_response(HTTP_500, {"error": f"cannot read the conversations: {type(exc).__name__}"}))
+            error = f"the database could not be read ({type(exc).__name__})"
+            writer.write(_json_response(HTTP_500, {"error": error}))
         await writer.drain()
 
     async def _handle_chat_messages(

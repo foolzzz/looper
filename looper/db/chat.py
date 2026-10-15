@@ -82,11 +82,11 @@ async def list_sessions(
             FROM chat_messages
             WHERE NOT starts_with(session_id, $2)
             GROUP BY session_id
-            ORDER BY max(id) DESC
+            ORDER BY max(created_at) DESC, max(id) DESC
             LIMIT $1
         ) s
         JOIN chat_messages last ON last.id = s.last_id
-        ORDER BY s.last_id DESC
+        ORDER BY s.last_message_at DESC, s.last_id DESC
         """,
         limit, PLANNER_THREAD_PREFIX, LAST_MESSAGE_MAX_CHARS,
     )

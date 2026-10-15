@@ -366,6 +366,9 @@ export function ChatPage() {
   }, []);
 
   useEffect(scrollToBottom, [messages, scrollToBottom]);
+  // A read-only conversation opens at its newest message, and follows when one arrives (not on every re-read).
+  const viewingShown = viewingMessages ? `${viewingMessages.id}:${viewingMessages.rows.length}` : "";
+  useEffect(scrollToBottom, [viewingShown, scrollToBottom]);
 
   useEffect(() => {
     if (!sending) inputRef.current?.focus();
@@ -675,7 +678,7 @@ export function ChatPage() {
 
           <div className="ml-auto flex items-center gap-3">
             {viewing && (
-              <span className="flex items-center gap-2 text-xs text-muted-foreground">
+              <span className="flex items-center gap-2 whitespace-nowrap text-xs text-muted-foreground">
                 <ChannelBadge channel={viewing.channel} />
                 Read-only
               </span>
