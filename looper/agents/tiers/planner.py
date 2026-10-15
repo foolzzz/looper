@@ -577,9 +577,7 @@ class PlannerAgent:
         # Every change waiting reaches Claude once the event's turns are done: one that arrived meanwhile, or
         # one a failed turn or a restart left undelivered.
         if self._plan is not None:
-            reply = await self._deliver_changes(self._plan)
-            if reply is not None:
-                await self._activity("phase", f"Planner answered a change to the task: {reply}"[:300])
+            await self._deliver_changes(self._plan)
 
     # --- Planning ---
 
@@ -1123,7 +1121,7 @@ class PlannerAgent:
         whose reply answers the message."""
         supplement = envelope.payload.get("supplement_id")
         if not isinstance(supplement, int):
-            # Stored when it was sent (``projects.send_supplement``); one that was not is stored now.
+            # Stored when it was sent (``projects.store_chat_supplement``); one that was not is stored now.
             try:
                 supplement = await db_changes.add_supplement(
                     self._task_id, journal.kept_text(text, journal.SUPPLEMENTS_MAX_CHARS), via="chat")
@@ -1183,6 +1181,9 @@ class PlannerAgent:
             await self._activity("error", f"Planner could not take a change to the task: {exc}"[:500])
             return f"Planner 出错，没能处理这次变更（会在下一轮重试）：{exc}"
         text = await self._apply_chat(plan, reply, envelope)
+        # The answer to a change made on the task page has no chat to go to: the activity keeps it.
+        await self._activity("phase", f"Planner answered a change to the task ({reply.action.value}): "
+                                      f"{reply.reply}"[:300])
         await self._mark_delivered(changes)
         for supplement in changes.supplements:
             self._replies[supplement.id] = text
@@ -1213,8 +1214,6 @@ class PlannerAgent:
             return reply.reply
         if reply.action is ChatAction.REPLAN:
             await self._chat_replan(plan, reply)
-            return reply.reply
-        await self._activity("phase", f"Planner answered a change to the task: {reply.reply}"[:300])
         return reply.reply
 
     async def _chat_replan(self, plan: TaskPlan, reply: ChatReply) -> None:
