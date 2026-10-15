@@ -157,8 +157,15 @@ def _isolation_settings(raw: str, root: str) -> str:
     settings = json.loads(raw)
     if json.dumps(settings, ensure_ascii=False, separators=(",", ":")) != raw:
         raise AssertionError(f"--settings is not in its canonical form: {raw}")
+    patterns = settings.get("claudeMdExcludes", [])
+    # Each excluded CLAUDE.md has its AGENTS.md beside it, which Claude Code reads where a project has no CLAUDE.md;
+    # the fixtures predate them, so they are set aside once checked.
+    agents = [pattern for pattern in patterns if pattern.endswith("/AGENTS.md")]
+    beside = [pattern.removesuffix("CLAUDE.md") + "AGENTS.md" for pattern in patterns if pattern.endswith("/CLAUDE.md")]
+    if sorted(agents) != sorted(beside):
+        raise AssertionError(f"an excluded CLAUDE.md without its AGENTS.md, or the other way round: {patterns}")
     excludes: list[str] = []
-    for pattern in settings.get("claudeMdExcludes", []):
+    for pattern in (pattern for pattern in patterns if pattern not in agents):
         if not pattern.startswith(root + "/"):
             name = next(n for n in _MEMORY_NAMES if pattern.endswith("/" + n))
             pattern = f"<above>/{name}"

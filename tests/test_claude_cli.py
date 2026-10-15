@@ -177,7 +177,8 @@ def _settings(args: list[str]) -> dict[str, Any]:
 
 
 def _memory_patterns(directory: Path) -> list[str]:
-    return [f"{directory}/CLAUDE.md", f"{directory}/.claude/CLAUDE.md", f"{directory}/.claude/rules/**"]
+    return [f"{directory}/CLAUDE.md", f"{directory}/.claude/CLAUDE.md", f"{directory}/.claude/rules/**",
+            f"{directory}/AGENTS.md", f"{directory}/.claude/AGENTS.md"]
 
 
 class TestIsolationArgs:
@@ -201,8 +202,9 @@ class TestIsolationArgs:
         excludes = _settings(isolation_args(work))["claudeMdExcludes"]
 
         # Claude Code reads CLAUDE.md, .claude/CLAUDE.md and .claude/rules/ in
-        # every directory up to the root; above the repository they are not the
-        # project's (the home directory's .claude/ is the operator's own).
+        # every directory up to the root, and AGENTS.md where the project has no
+        # CLAUDE.md; above the repository they are not the project's (the home
+        # directory's .claude/ is the operator's own).
         # Without a repository the work directory is the project.
         project = (repo, repo / "pkg", work) if repository else (work,)
         above = (home, tmp_path, *tmp_path.parents) + (() if repository else (repo, repo / "pkg"))
@@ -223,9 +225,9 @@ class TestIsolationArgs:
         monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "config"))
         excludes = _settings(isolation_args(home))["claudeMdExcludes"]
         for directory in (home / ".claude", tmp_path / "config"):
-            assert f"{directory}/CLAUDE.md" in excludes
+            assert f"{directory}/CLAUDE.md" in excludes and f"{directory}/AGENTS.md" in excludes
             assert f"{directory}/rules/**" in excludes
-        assert f"{home}/CLAUDE.md" not in excludes
+        assert f"{home}/CLAUDE.md" not in excludes and f"{home}/AGENTS.md" not in excludes
 
     def test_a_symlinked_work_directory_is_covered_by_both_paths(self, tmp_path: Path) -> None:
         real = tmp_path / "real" / "work"

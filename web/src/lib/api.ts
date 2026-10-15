@@ -1029,6 +1029,18 @@ export interface PromptLayers {
   isolation?: string;
 }
 
+/** One of the repository's instruction files a run's runtime was given: read by the runtime itself, or put in its
+ * system prompt by Looper (the text's sha256, the file's size and the bytes clipped; or why it could not be read). */
+export interface ProjectInstructionFile {
+  /** From the run's working directory. */
+  path: string;
+  delivery: "native" | "injected";
+  sha256?: string;
+  bytes?: number;
+  clipped_bytes?: number;
+  error?: string;
+}
+
 export interface LlmRecord {
   id: number;
   agent_id: string;
@@ -1084,6 +1096,8 @@ export interface LlmRecord {
       run_budget_usd: SettingLayer;
       env: Record<string, SettingLayer>;
     };
+    /** The repository's own CLAUDE.md and AGENTS.md the runtime was given (runs recorded before it lack it). */
+    project_instructions?: ProjectInstructionFile[];
     /** The catalog items installed for the run (plugins and skills) and their hash; error when it went without
      * them. */
     library?: RunLibrary;
