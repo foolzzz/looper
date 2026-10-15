@@ -87,7 +87,14 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
   no task section.
   Each chat message is one user turn on its stdin; its turn starts when
   Claude starts that message and ends at the next `result`
-  ([Turns Claude runs on its own](#turns-claude-runs-on-its-own)). Messages
+  ([Turns Claude runs on its own](#turns-claude-runs-on-its-own)). The reply,
+  sent to the channel, stored in `chat_messages` and recorded as the run's
+  output, is the turn's final answer: the result's `result`, the text of its
+  last top-level assistant message (`claude_cli.answer_text`). What Claude
+  writes before its tool calls ("checking the logs now…") still streams to the
+  chat as the turn runs, but is not part of the reply; a result without text
+  (a turn that ended on a tool call) falls back to all the turn's top-level
+  text. Messages
   are handled one at a time, and each turn is one Runs record holding only
   that turn's cost and tokens
   ([What a run spent](#what-a-run-spent-and-how-large-its-context-grew)); the
@@ -133,7 +140,8 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
   message for Claude (in Telegram, an unknown command)
 - A turn its Claude runs on its own, after background work it started ends,
   is a Runs record of its own (input "(no user message: ...)", metadata
-  `autonomous: true`). What Claude said in it goes as a reply of its own
+  `autonomous: true`). What Claude answered in it (its result's text, as for a
+  user turn) goes as a reply of its own
   (`AGENT_REPLY` with no `reply_to`, payload `autonomous: true`) to the
   channel and correlation of the message Claude answered before it. A web
   message's payload names its chat session (`chat_session_id`), so the web

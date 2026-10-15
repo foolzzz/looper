@@ -771,11 +771,19 @@ class ResidentClaude:
         logger.info("%s stopped Claude Code (pid=%s, exit code %s)", self._label, process.pid, process.returncode)
 
 
+def answer_text(result_event: dict[str, Any] | None, texts: list[str]) -> str:
+    """What a turn answered: its result's ``result``, the text of the turn's last top-level assistant message, as
+    Claude Code reports it and the Codex and OMP adapters write it. What Claude wrote before its tool calls ("checking
+    the logs now…") is not part of it. When the result has no text (the turn ended on a tool call, or without a
+    result), the turn's top-level ``texts``, joined, so nothing it said is lost."""
+    return str((result_event or {}).get("result") or "") or "".join(texts)
+
+
 class AutonomousRun:
     """A turn Claude ran on its own, recorded as a run of its own (``recorder``).
 
-    When it ends, ``on_end`` gets what Claude said in it (its top-level text,
-    else its result; empty when it ended without a result) and how it ended.
+    When it ends, ``on_end`` gets what Claude answered in it (``answer_text``; empty when it ended without a
+    result) and how it ended.
     """
 
     def __init__(
@@ -796,7 +804,7 @@ class AutonomousRun:
 
     async def end(self, turn: ResidentTurn) -> None:
         result = turn.result_event
-        text = ("".join(self._text) or str(result.get("result") or "")) if result is not None else ""
+        text = answer_text(result, self._text) if result is not None else ""
         await self._recorder.finish(
             output_text=text or None, result_event=result, usage=turn.usage,
             error=None if result is not None else "Claude Code stopped before this turn of its own ended",
