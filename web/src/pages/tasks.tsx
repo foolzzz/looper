@@ -138,8 +138,8 @@ function TaskProfilesField({ value, onChange }: { value: ProfileChoice; onChange
         ))}
       </div>
       <p className="text-xs text-muted-foreground">
-        Optional. A chosen {AGENT_PROFILE.name} runs that role for this task only, over the project&apos;s settings and
-        Settings → Roles.
+        Optional. A chosen {AGENT_PROFILE.name} runs that role for this task only, over the project&apos;s{" "}
+        {AGENT_PROFILE.plural} and Settings → Roles.
       </p>
     </fieldset>
   );

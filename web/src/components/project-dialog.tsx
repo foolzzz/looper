@@ -11,7 +11,7 @@ interface ProjectDialogProps {
 }
 
 /** Create a project: a name, an optional default directory, description and background. Its agent settings are
- * in its Settings tab. */
+ * on its Agent Profiles tab. */
 export function ProjectDialog({ onClose, onCreated }: ProjectDialogProps) {
   const id = useId();
   const [name, setName] = useState("");

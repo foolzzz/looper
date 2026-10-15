@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useId, useRef, useState } from "react";
-import { ChevronDown, History, Loader2, Power, PowerOff, RotateCcw, Save } from "lucide-react";
+import { History, Loader2, Power, PowerOff, RotateCcw, Save } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
+import { CollapsibleRow } from "@/components/collapsible-row";
 import { LayerSettingsForm } from "@/components/layer-settings";
 import {
   fetchAgentSettings,
@@ -18,6 +19,7 @@ import {
   type RoleConfig,
 } from "@/lib/api";
 import { roleLabel } from "@/lib/runtime-catalog";
+import { useCollapsibleRows } from "@/lib/use-collapsible-rows";
 import { formatUsd } from "@/lib/usage";
 import { cn } from "@/lib/utils";
 
@@ -292,89 +294,6 @@ function roleSummary(role: AgentRole, effective: EffectiveSettings | undefined) 
   return parts.join(" · ");
 }
 
-/** A row that has been opened: its content mounts the first time it opens and stays mounted, hidden while the row
- * is closed, so closing a row keeps its unsaved edits. */
-type RowState = "open" | "closed";
-
-/** Where a row's forms say whether they hold unsaved edits. */
-interface DirtyMarks {
-  layer: (dirty: boolean) => void;
-  config: (dirty: boolean) => void;
-}
-
-/** One row of the Roles page: a one-line summary that opens and closes the row's settings. */
-function RoleRow({
-  id,
-  name,
-  detail,
-  summary,
-  disabled = false,
-  state,
-  onToggle,
-  rowRef,
-  children,
-}: {
-  id: string;
-  name: string;
-  /** The role's display name, when it differs from its name. */
-  detail?: string;
-  summary: string;
-  disabled?: boolean;
-  /** Undefined until the row first opens. */
-  state: RowState | undefined;
-  onToggle: () => void;
-  rowRef: (element: HTMLElement | null) => void;
-  children: (marks: DirtyMarks) => React.ReactNode;
-}) {
-  // State setters are stable, so the forms can report through them from an effect.
-  const [layerDirty, setLayerDirty] = useState(false);
-  const [configDirty, setConfigDirty] = useState(false);
-  const open = state === "open";
-  const buttonId = `roles-${id}-button`;
-  const panelId = `roles-${id}-panel`;
-
-  return (
-    <section ref={rowRef} className="scroll-mt-4 rounded-lg border border-border bg-card">
-      <h2>
-        <button
-          id={buttonId}
-          type="button"
-          aria-expanded={open}
-          aria-controls={panelId}
-          onClick={onToggle}
-          className="flex min-h-11 w-full items-center gap-3 rounded-lg px-5 py-2.5 text-left transition-colors hover:bg-accent/50 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-        >
-          <ChevronDown
-            aria-hidden="true"
-            className={cn(
-              "h-4 w-4 shrink-0 text-muted-foreground transition-transform duration-150 motion-reduce:transition-none",
-              !open && "-rotate-90",
-            )}
-          />
-          <span className="min-w-0 flex-1 truncate">
-            <span className="text-sm font-semibold">{name}</span>
-            {detail && <span className="text-sm text-muted-foreground"> · {detail}</span>}
-            {summary && <span className="text-xs text-muted-foreground"> · {summary}</span>}
-          </span>
-          {!open && (layerDirty || configDirty) && (
-            <Badge variant="warning" className="shrink-0">unsaved</Badge>
-          )}
-          {disabled && <Badge variant="outline" className="shrink-0">Disabled</Badge>}
-        </button>
-      </h2>
-      <div
-        id={panelId}
-        role="region"
-        aria-labelledby={buttonId}
-        hidden={!open}
-        className="space-y-5 border-t border-border px-5 py-4"
-      >
-        {state && children({ layer: setLayerDirty, config: setConfigDirty })}
-      </div>
-    </section>
-  );
-}
-
 /**
  * Settings → Roles: a row for the shared defaults (the system layer), then one per role with its overrides of them
  * (its layer) and its own prompt and limits. Every row starts closed and any number can be open; `sub`
@@ -387,16 +306,8 @@ export function RolesSection({ sub }: { sub: string }) {
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
   const [toast, setToast] = useState<{ role: string; text: string } | null>(null);
-  const linked = sub.split("/")[0];
-  const [rows, setRows] = useState<Record<string, RowState>>(() => (linked ? { [linked]: "open" } : {}));
-  const [linkedRow, setLinkedRow] = useState(linked);
-  const rowRefs = useRef<Record<string, HTMLElement | null>>({});
-
   // A link to a row (from Runs or an Agent Profile's "used by") opens it, also while the page is showing.
-  if (linked !== linkedRow) {
-    setLinkedRow(linked);
-    if (linked) setRows((current) => ({ ...current, [linked]: "open" }));
-  }
+  const row = useCollapsibleRows(sub.split("/")[0], !loading);
 
   useEffect(() => {
     const roles = fetchRoleConfigs().then((list) => setConfigs([...list].sort((a, b) => rank(a.role) - rank(b.role))));
@@ -407,12 +318,6 @@ export function RolesSection({ sub }: { sub: string }) {
       setLoading(false);
     });
   }, []);
-
-  useEffect(() => {
-    if (!linked || loading) return;
-    const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-    rowRefs.current[linked]?.scrollIntoView({ block: "start", behavior: reduce ? "auto" : "smooth" });
-  }, [linked, loading]);
 
   const flash = (role: string, text: string) => {
     setToast({ role, text });
@@ -439,14 +344,6 @@ export function RolesSection({ sub }: { sub: string }) {
     );
   }
 
-  const rowProps = (id: string) => ({
-    id,
-    state: rows[id],
-    onToggle: () => setRows((current) => ({ ...current, [id]: current[id] === "open" ? "closed" : "open" })),
-    rowRef: (element: HTMLElement | null) => {
-      rowRefs.current[id] = element;
-    },
-  });
   const nameOf = (config: RoleConfig) => (isRole(config.role) ? roleLabel(config.role) : config.display_name || config.role);
 
   return (
@@ -455,7 +352,7 @@ export function RolesSection({ sub }: { sub: string }) {
         // In the place of the page's description, right under its title: it names the roles the server has.
         <p className="-mt-5 max-w-3xl text-sm text-muted-foreground">
           Looper has {count(configs.length, "role")}: {listed(configs.map(nameOf))}. Each runs with the shared
-          defaults unless it sets its own value. A project can override both in its settings.
+          defaults unless it sets its own value. A project can override both on its Agent Profiles tab.
         </p>
       )}
 
@@ -473,7 +370,12 @@ export function RolesSection({ sub }: { sub: string }) {
 
       <div className="space-y-2">
         {settings && (
-          <RoleRow {...rowProps(SHARED)} name="Shared defaults" summary={sharedSummary(settings.system.effective, configs.length)}>
+          <CollapsibleRow
+            id={`roles-${SHARED}`}
+            {...row(SHARED)}
+            name="Shared defaults"
+            summary={sharedSummary(settings.system.effective, configs.length)}
+          >
             {(marks) => (
               <LayerSettingsForm
                 idPrefix="roles-system"
@@ -496,7 +398,7 @@ export function RolesSection({ sub }: { sub: string }) {
                 }
               />
             )}
-          </RoleRow>
+          </CollapsibleRow>
         )}
 
         {configs.map((config) => {
@@ -512,13 +414,14 @@ export function RolesSection({ sub }: { sub: string }) {
             </a>
           );
           return (
-            <RoleRow
+            <CollapsibleRow
               key={config.role}
-              {...rowProps(config.role)}
+              id={`roles-${config.role}`}
+              {...row(config.role)}
               name={name}
               detail={config.display_name && config.display_name !== name ? config.display_name : undefined}
               summary={role ? roleSummary(role, settings?.roles[role].effective) : ""}
-              disabled={!config.enabled}
+              marks={!config.enabled && <Badge variant="outline" className="shrink-0">Disabled</Badge>}
             >
               {(marks) => (
                 <>
@@ -587,7 +490,7 @@ export function RolesSection({ sub }: { sub: string }) {
                   </section>
                 </>
               )}
-            </RoleRow>
+            </CollapsibleRow>
           );
         })}
       </div>

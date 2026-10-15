@@ -362,9 +362,15 @@ function usedByPlaces(used: ProfileUsedBy): { text: string; href?: string }[] {
       case "role":
         return { text: `the ${role}`, href: settingsHref("roles", layer.role ?? "") };
       case "project":
-        return { text: `project ${layer.project_name}`, href: `#projects/${layer.project_id}/settings` };
+        return {
+          text: `project ${layer.project_name}`,
+          href: `#projects/${layer.project_id}/${AGENT_PROFILE.slug}/project`,
+        };
       default:
-        return { text: `the ${role} in ${layer.project_name}`, href: `#projects/${layer.project_id}/settings` };
+        return {
+          text: `the ${role} in ${layer.project_name}`,
+          href: `#projects/${layer.project_id}/${AGENT_PROFILE.slug}/${layer.role ?? ""}`,
+        };
     }
   });
   if (used.task_count) places.push({ text: `${used.task_count} ${used.task_count === 1 ? "task" : "tasks"}` });
@@ -480,7 +486,7 @@ export function AgentProfilesSection() {
   return (
     <RegistryList
       title={AGENT_PROFILE.plural}
-      hint="Selected in Settings → Roles, a project's settings and a new task."
+      hint="Selected in Settings → Roles, a project's Agent Profiles tab and a new task."
       addLabel={`Add ${AGENT_PROFILE.name}`}
       form={(close) => <AgentProfileForm profile={null} registry={registry} onDone={close} />}
     >

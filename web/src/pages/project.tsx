@@ -3,6 +3,7 @@ import { AlertCircle, ArrowRight, Folder, Loader2 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { ClampedText } from "@/components/clamped-text";
+import { ProjectAgentSettingsSection } from "@/components/project-agent-settings";
 import { ProjectKnowledgeSection } from "@/components/project-knowledge";
 import { ProjectSkillsSection } from "@/components/project-skills";
 import { ProjectSettingsForm } from "@/components/project-settings";
@@ -27,6 +28,7 @@ const TABS = [
   { id: "overview", label: "Overview" },
   { id: "knowledge", label: "Knowledge" },
   { id: "skills", label: "Skills" },
+  { id: AGENT_PROFILE.slug, label: AGENT_PROFILE.plural },
   { id: "settings", label: "Settings" },
 ] as const;
 type Tab = (typeof TABS)[number]["id"];
@@ -271,7 +273,7 @@ function agentRows(settings: ProjectAgentSettings): [string, string][] {
   const each = (show: (role: ProjectRole) => string) =>
     PROJECT_ROLES.map(([role, label]) => `${label} ${show(role)}`).join(" · ");
   const effective = (role: ProjectRole) => settings.roles[role].effective;
-  const rows: [string, string][] = [[AGENT_PROFILE.plural, each((role) => effective(role).profile.value.name)]];
+  const rows: [string, string][] = PROJECT_ROLES.map(([role, label]) => [label, effective(role).profile.value.name]);
   if (PROJECT_ROLES.some(([role]) => effective(role).run_budget_usd.value != null))
     rows.push(["Spend cap per run", each((role) => {
       const cap = effective(role).run_budget_usd.value;
@@ -284,26 +286,39 @@ function agentRows(settings: ProjectAgentSettings): [string, string][] {
   return rows;
 }
 
-function ExecutionCard({ project, onOpen }: { project: Project; onOpen: () => void }) {
+function Rows({ rows }: { rows: [string, string][] }) {
+  return (
+    <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-1.5 text-xs">
+      {rows.map(([label, value]) => (
+        <div key={label} className="contents">
+          <dt className="text-muted-foreground">{label}</dt>
+          <dd className="break-words font-medium">{value}</dd>
+        </div>
+      ))}
+    </dl>
+  );
+}
+
+function AgentProfilesCard({ project, onOpen }: { project: Project; onOpen: () => void }) {
   const agents = useLoad(() => fetchProjectAgentSettings(project.project_id), project.project_id);
-  const rows = [...(agents?.data ? agentRows(agents.data) : []), ...executionRows(project)];
+  return (
+    <OverviewCard
+      title={AGENT_PROFILE.plural}
+      action={<CardLink onClick={onOpen}>Change in {AGENT_PROFILE.plural}</CardLink>}
+    >
+      {agents?.data ? <Rows rows={agentRows(agents.data)} /> : <Loading error={agents?.error} />}
+    </OverviewCard>
+  );
+}
+
+function ExecutionCard({ project, onOpen }: { project: Project; onOpen: () => void }) {
+  const rows = executionRows(project);
   return (
     <OverviewCard title="Execution" action={<CardLink onClick={onOpen}>Change in Settings</CardLink>}>
-      {agents?.error && <p className="text-xs text-destructive">{agents.error}</p>}
       {rows.length === 0 ? (
-        <p className="text-xs text-muted-foreground">
-          Nothing set: the Planner, Workers and Reviewers run with the {AGENT_PROFILE.plural}&apos; and Settings&apos;
-          defaults.
-        </p>
+        <p className="text-xs text-muted-foreground">Nothing set: this project&apos;s tasks run with the defaults.</p>
       ) : (
-        <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-1.5 text-xs">
-          {rows.map(([label, value]) => (
-            <div key={label} className="contents">
-              <dt className="text-muted-foreground">{label}</dt>
-              <dd className="break-words font-medium">{value}</dd>
-            </div>
-          ))}
-        </dl>
+        <Rows rows={rows} />
       )}
     </OverviewCard>
   );
@@ -328,18 +343,21 @@ function Overview({ project, onTab }: { project: Project; onTab: (tab: Tab) => v
       </OverviewCard>
       <KnowledgeCard project={project} onOpen={() => onTab("knowledge")} />
       <SkillsCard project={project} onOpen={() => onTab("skills")} />
+      <AgentProfilesCard project={project} onOpen={() => onTab(AGENT_PROFILE.slug)} />
       <ExecutionCard project={project} onOpen={() => onTab("settings")} />
     </div>
   );
 }
 
 interface ProjectPageProps {
-  /** "<project id>", "<project id>/<tab>", or "<project id>/knowledge/<draft id>" to open one draft. */
+  /** "<project id>", "<project id>/<tab>", "<project id>/knowledge/<draft id>" to open one draft, or
+   * "<project id>/profiles/<role or project>" to open one row. */
   sub: string;
   onNavigate: (sub: string) => void;
 }
 
-/** One project: an overview, its knowledge, its skills and its settings, each a tab with its own address. */
+/** One project: an overview, its knowledge, its skills, its Agent Profiles and its settings, each a tab with its own
+ * address. */
 export function ProjectPage({ sub, onNavigate }: ProjectPageProps) {
   const [projectId, tabPart, focus] = sub.split("/");
   const tab: Tab = TABS.some((t) => t.id === tabPart) ? (tabPart as Tab) : "overview";
@@ -438,6 +456,9 @@ export function ProjectPage({ sub, onNavigate }: ProjectPageProps) {
         {tab === "overview" && <Overview project={project} onTab={openTab} />}
         {tab === "knowledge" && <ProjectKnowledgeSection projectId={project.project_id} openDraftId={focus} />}
         {tab === "skills" && <ProjectSkillsSection projectId={project.project_id} />}
+        {tab === AGENT_PROFILE.slug && (
+          <ProjectAgentSettingsSection key={project.project_id} projectId={project.project_id} linked={focus ?? ""} />
+        )}
         {tab === "settings" && (
           <ProjectSettingsForm
             key={project.project_id}
