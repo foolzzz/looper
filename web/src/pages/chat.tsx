@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Send, Loader2, Bot, User, Plus, ChevronDown, ChevronRight, RotateCcw } from "lucide-react";
-import ReactMarkdown from "react-markdown";
+import { Markdown } from "@/components/markdown";
 import {
   sendChat,
   saveChatMessage,
@@ -702,9 +702,7 @@ export function ChatPage() {
               )}
             >
               {msg.role === "assistant" ? (
-                <div className="prose prose-invert prose-sm max-w-none [&>*:first-child]:mt-0 [&>*:last-child]:mb-0 [&_pre]:whitespace-pre-wrap">
-                  <ReactMarkdown>{msg.content || (msg.streaming ? "..." : "")}</ReactMarkdown>
-                </div>
+                <Markdown>{msg.content || (msg.streaming ? "..." : "")}</Markdown>
               ) : (
                 <p className="whitespace-pre-wrap">{msg.content}</p>
               )}
