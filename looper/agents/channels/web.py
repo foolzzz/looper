@@ -182,9 +182,11 @@ class WebChannelAdapter(ChannelAdapter):
         attachments: list[dict[str, Any]] | None = None,
         target: AgentAddress = MANAGER_ADDRESS,
         message_id: str | None = None,
+        supplement_id: int | None = None,
     ) -> dict[str, str]:
         """Send a chat message (``message_id``, in the chat ``session_id``) to its agent; its answer is saved to
-        that chat under ``reply_message_id(message_id)``."""
+        that chat under ``reply_message_id(message_id)``. ``supplement_id``: a message to a task's Planner, stored
+        as that supplement of the task."""
         assert self._bus is not None
         correlation_id = str(uuid.uuid4())
 
@@ -207,6 +209,7 @@ class WebChannelAdapter(ChannelAdapter):
                     "session_id": session_id,
                     "goal_id": goal_id,
                 },
+                **({"supplement_id": supplement_id} if supplement_id is not None else {}),
             },
             correlation_id=correlation_id,
             metadata={"origin_channel_id": self.channel_id},

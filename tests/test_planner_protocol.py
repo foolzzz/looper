@@ -9,6 +9,7 @@ from typing import Any
 import pytest
 
 from looper.agents.tiers.planner_protocol import (
+    ChatAction,
     MAX_STEPS,
     Decision,
     DecisionContext,
@@ -188,14 +189,33 @@ class TestChat:
             (chat("ok", text="x"), "step and text are only for action forward"),
             (chat("ok", "add_steps", steps=[step("s2")]), "step id 's2' is already used"),
             (chat("ok", "add_steps", steps=[]), "at least one step"),
-            (chat("ok", steps=[step("s3")]), "steps is only for action add_steps"),
+            (chat("ok", steps=[step("s3")]), "steps is only for actions add_steps and replan"),
             (chat(""), "reply is required"),
-            (chat("ok", "stop"), "action must be one of none, forward, add_steps"),
+            (chat("ok", "stop"), "action must be one of none, forward, add_steps, replan"),
             (reply({"reply": "ok"}), "action must be one of"),
+            (chat("ok", "add_steps", steps=[step("s3")], stop=["s1"]), "stop is only for action replan"),
+            (chat("ok", "replan", steps=[step("s3")], stop=["s2"]), "stop: step 's2' has no running Worker"),
+            (chat("ok", "replan", steps=[step("s3")], stop=["s1", "s1"]), "stop lists a step twice"),
+            # Stopping the only running step and replacing the pending one with nothing leaves nothing to run.
+            (chat("ok", "replan", steps=[], stop=["s1"]), "no step would be left to run"),
+            # A stopped step is dropped: a new step cannot depend on it, nor reuse its id.
+            (chat("ok", "replan", steps=[step("s3", "s1")], stop=["s1"]), "depends on s1, which is dropped"),
+            (chat("ok", "replan", steps=[step("s1")], stop=["s1"]), "belongs to a dropped step"),
         ],
     )
     def test_invalid_chat_replies(self, text: str, error: str) -> None:
         assert error in _error(parse_chat, text, RUNNING)
+
+    @pytest.mark.parametrize(("text", "steps", "stop"), [
+        # The running step stays; the pending one is replaced by a step that depends on it.
+        (chat("ok", "replan", steps=[step("s3", "s1")]), ["s3"], ()),
+        # No new steps: the running step is left to run.
+        (chat("ok", "replan", steps=[]), [], ()),
+        (chat("ok", "replan", steps=[step("s3")], stop=["s1"]), ["s3"], ("s1",)),
+    ], ids=["keep-running", "keep-running-only", "stop-running"])
+    def test_replan(self, text: str, steps: list[str], stop: tuple[str, ...]) -> None:
+        parsed = parse_chat(text, RUNNING)
+        assert (parsed.action, [s.id for s in parsed.steps], parsed.stop) == (ChatAction.REPLAN, steps, stop)
 
 
 def supervise(*reviews: dict[str, Any]) -> str:

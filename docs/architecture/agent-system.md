@@ -348,11 +348,16 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
     repair turn. Code writes it as the task's result with one Markdown heading
     per field (Delivered, How to use, Verification, Open issues). On another
     decision `final` is ignored.
-  - `[CHAT]` on a user chat message: a reply and at most one action: `none`,
-    `forward` (pass text to the Worker of a running step) or `add_steps`.
-    Events are handled in arrival order, so a message sent during another
-    turn waits for it; one that arrives before the task has a plan, or after
-    it ended, is answered without a turn.
+  - `[CHAT]` when the task changed (a supplement, or an edited requirement;
+    see [Changes to a task](#changes-to-a-task)): a reply and at most one
+    action: `none`, `forward` (pass text to the Worker of a running step),
+    `add_steps`, or `replan`, which replaces the steps not started with
+    `steps` and may `stop` running steps (their Workers are killed and the
+    steps `skipped`); a running step it does not name keeps running, and at
+    least one step must be left to run. Events are handled in arrival order,
+    so a change made during another turn waits for it; one made before the
+    task has a plan reaches the `[PLAN]` turn, and a message after the task
+    ended is answered without a turn.
 - Reply contract (`looper/agents/tiers/planner_protocol.py`): `REPLY_CONTRACT`
   comes last in the system prompt, after the editable role prompt and the
   project section. Every reply ends with exactly
@@ -400,8 +405,12 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
     step's outcome and learnings when its attempt is dropped), steps added
     from a chat message, the task stopped at its spend cap (with the
     wrap-up);
-  - `user_instruction`: a user's chat message to the Planner while the task
-    runs, written before the `[CHAT]` turn, whole (up to 8,000 characters);
+  - `supplement`: what the user added to the task while it runs, whole (up
+    to 8,000 characters), with its `via` (`chat` for a message sent to the
+    Planner, `task_page`, or the Manager's) and `delivered_at` (when the
+    Planner had it in a turn); only added, never changed, a later one winning
+    over an earlier one. Entries of the former `user_instruction` kind read
+    as supplements from the chat, delivered;
   - `session_switch` and `handoff`: a new Planner session and what the old one
     handed over ([New sessions](#new-sessions-handoff-and-resume-brief));
   - `progress`: a progress note a `[DECISION]` or `[SUPERVISE]` reply carried,
@@ -409,10 +418,10 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
     `GET /api/tasks/<id>` gives the notes newest first as `progress` (each
     `{done, now, next, risks, estimate, at}`).
 
-  An entry of the whole task has the step id `''`. Every `[DECISION]`,
-  `[SUPERVISE]` and `[CHAT]` turn (and the spend-cap wrap-up) carries the
-  user's instructions, every one whole and oldest first, in a budget of their
-  own (8,000 characters, which no other entry uses; only past it are the
+  An entry of the whole task has the step id `''`. Every `[PLAN]`,
+  `[DECISION]`, `[SUPERVISE]` and `[CHAT]` turn (and the spend-cap wrap-up)
+  carries the supplements, every one whole and oldest first, in a budget of
+  their own (8,000 characters, which no other entry uses; only past it are the
   oldest left out and counted), then "Progress and findings": the newest entry
   of each kind first, then the other failures and retries, then the rest
   newest first, in at most 4,000 characters (what does not fit is left out and
@@ -459,6 +468,34 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
 - Before changing a recommended prompt, a contract or the prompt's layers, run
   the prompt regression eval ([`evals/README.md`](../../evals/README.md)).
 
+### Changes to a task
+
+A task that has not ended changes in two ways, each stored before its Planner
+hears of it (`looper/db/task_changes.py`):
+
+- a supplement, a `supplement` journal entry, only ever added: a message sent
+  to the task's Planner on the Chat page is one (`via` `chat`), stored when
+  it is sent;
+- a requirement edit (`PUT /api/tasks/:id/requirement`, the task page's
+  Edit): the text becomes the task's requirement, and every version is a
+  `task_requirement_versions` row (version 1, the text the task was created
+  with, is written at the first edit). The Planner's system prompt and the
+  Workers and Reviewers dispatched afterwards have the new text.
+
+A change waits undelivered (`delivered_at` empty). When the Planner handles
+an event, it first reads the changes waiting into the plan, so a step it
+dispatches in that event already lists them, and after the event it gives
+every one in a single `[CHAT]` turn ("The task changed."): the new
+supplements, the requirement's diff from the version it had, the plan and the
+journal. They are marked delivered only once that turn's reply is applied; a
+failed turn leaves them for the turn after the next event, and a restarted
+Planner gives them after its first event, so a change made during a turn,
+in a failed turn or before a restart is not lost. `TASK_CHANGE` only wakes
+the Planner. A task waiting for room gets its changes in its `[PLAN]` turn,
+and an edit of a task not started is delivered at once, since it plans the
+new text. The reply to a chat message is the reply of the turn that
+delivered it.
+
 ### WorkerPool (`looper/agents/tiers/worker.py`)
 
 - Manages a pool of Worker processes
@@ -493,11 +530,13 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
     step's label, instruction, working directory, target files, acceptance
     criteria, validation commands and, on a retry, the attempt number and the
     feedback on the previous attempts. A Reviewer's has the requirement, then
-    the reviewed step's instruction and acceptance criteria;
+    the reviewed step's instruction and acceptance criteria. Both list the
+    task's supplements after the requirement (`WORK_ITEM` and
+    `VERIFY_REQUEST` `supplements`: whole, oldest first, in their own 8,000
+    characters), as they were when the step was dispatched;
   - first user turn: for a Worker, a short start cue, what the steps it
     depends on reported (summary and changed files, from `WORK_ITEM`
-    `dependencies`), the user's instructions (whole, oldest first, in their own
-    budget) and "Findings so far in this task" (`WORK_ITEM` `findings`: the
+    `dependencies`) and "Findings so far in this task" (`WORK_ITEM` `findings`: the
     accepted steps it depends on first, then the failures and retries, then
     the other accepted steps newest first, in at most 2,000 characters); for a Reviewer, the Worker's report (summary, changed
     and deleted files) as data to check, never in the system prompt;
@@ -1005,8 +1044,8 @@ for work under way).
   Manager session with something to say) starts with a `[RESUME]` brief: why
   the session is new, where the task is (steps accepted, under way, failed)
   and the handoff, or that there is none and the journal is what remains.
-  The Planner's request after it carries the plan, the user's instructions
-  and the journal as every turn does; `REPLY_CONTRACT` says a brief may come
+  The Planner's request after it carries the plan, the supplements and the
+  journal as every turn does; `REPLY_CONTRACT` says a brief may come
   first. The Manager's brief adds the recent conversations. The brief is
   given once: until the new session reports its id.
 
@@ -1770,6 +1809,7 @@ Key message types:
 | `TASK_STOP` | HTTP → TaskRouter | Pause task (preserves state) |
 | `TASK_RESTART` | HTTP → TaskRouter | Resume stopped/failed task |
 | `TASK_RESUME` | TaskRouter → a resumed task's new Planner | Carry on with the saved plan after a server restart |
+| `TASK_CHANGE` | HTTP → a task's Planner | The task changed (its stored changes are what count; this only wakes the Planner) |
 | `GOAL_STATUS` | Planner → TaskRouter → Manager | Report progress/completion; the end of a Telegram or Lark task carries its `notice` |
 | `CHAT_NOTICE` | Manager → Telegram or Lark | A task's end, to who the task recorded, after its progress |
 | `WORK_ITEM` | Planner → Worker | Dispatch step |
@@ -1814,11 +1854,12 @@ Key message types:
      change. The current step counts as verified if its result can be
      accepted, and is dropped (`skipped`) otherwise.
    - `fail` fails the task with the given reason.
-5. Chat: a message to the Planner gets a `[CHAT]` turn. Claude replies, and
-   may `forward` text to a running step's Worker (`WORKER_INPUT`, confirmed by
-   `WORKER_INPUT_RESULT` within 5 s) or `add_steps`, which are dispatched once
-   ready. Text that arrives after its Worker finished is kept and shown to
-   Claude in that step's decision turn.
+5. Changes: a message to the Planner, or an edit of the requirement, gets a
+   `[CHAT]` turn ([Changes to a task](#changes-to-a-task)). Claude replies,
+   and may `forward` text to a running step's Worker (`WORKER_INPUT`,
+   confirmed by `WORKER_INPUT_RESULT` within 5 s), `add_steps`, which are
+   dispatched once ready, or `replan`. Text that arrives after its Worker
+   finished is kept and shown to Claude in that step's decision turn.
 6. Completion: when every step is verified or dropped, the Planner sends
    `GOAL_STATUS` `completed` with the final summary of the decision that
    completed it (else, when a step's own verdict settled it because the
@@ -1868,7 +1909,8 @@ PostgreSQL is a hard startup dependency. All data paths:
 | `task_steps` | A task's steps, each with everything its Planner decides with: `step_key` (label), `depends_on` (step ids), `review`, `acceptance_criteria`, `validation_commands`, `status`, `result`, `worker_id`, `reviewer_id`, `retries`, `feedback`, `missed_messages` |
 | `task_plans` | A task's plan, one row per task: `plan_id`, `status` (`planning`, `executing`, `verifying`, `stopping`, `completed`, `failed`), `correlation_id`, `origin_channel_id`, `final_summary`, `fail_reason`; replaced when the task is planned again |
 | `agent_sessions` | The session each resident agent resumes: `manager` or `planner-<task_id>`, its `session_id`, `session_totals`, the `runtime_type` and `provider_id` it belongs to and the `profile_id` that ran it last (`NULL` runtime: before Agent Profiles, Claude Code; `NULL` provider: before providers were recorded, Claude Code's own login), and `clean_start` (the user dropped the session with `/new`: the next one starts without a resume brief) |
-| `task_journal` | A task's journal, written by code as things happen: `step_accepted`, `step_failed`, `step_retry`, `decision`, `user_instruction`, `session_switch`, `handoff` and `progress` entries, each with its `step_id` (`''` for the whole task), `summary` and `learnings`; `GET /api/tasks/<id>` returns it as `journal` (and the progress notes, parsed and newest first, as `progress`); the task page lists the entries as Findings, each with its kind, and the progress notes in its Progress section |
+| `task_journal` | A task's journal, written by code as things happen: `step_accepted`, `step_failed`, `step_retry`, `decision`, `supplement`, `session_switch`, `handoff` and `progress` entries, each with its `step_id` (`''` for the whole task), `summary` and `learnings`, and for a supplement its `via` and `delivered_at`; `GET /api/tasks/<id>` returns it as `journal` (and the progress notes, parsed and newest first, as `progress`); the task page lists the entries as Findings, each with its kind, and the progress notes in its Progress section |
+| `task_requirement_versions` | Every version of an edited task requirement: `task_id`, `version` (1 is the text the task was created with, written at its first edit), `text`, `via` (`created`, `task_page`, or the Manager's), `created_at` and `delivered_at` (when the Planner had it in a turn; `tasks.requirement` is the newest) |
 | `activity` | Execution trace events (SSE streaming to frontend) |
 | `chat_messages` | Chat conversation history of every channel: `session_id` (the web chat's session, or `<channel>:<chat_id>` for Telegram and Lark, private chats only), `message_id`, `role`, `content`, `channel` (`web`, `telegram` or `lark`; rows from before it read `web`); a new Manager session's resume brief reads the recent chats that are not a task's Planner thread (`planner-<task_id>`) |
 | `llm_records` | One row per agent run: input and output text, status, the run's own `cost_usd` and its `cost_source` (`runtime` or `provider_price`), `input_tokens`, `output_tokens`, `cache_read_tokens` and `cache_creation_tokens`, its final `context_tokens` and its `compactions`; `metadata` holds the exact argv (`command`), `cwd`, the appended `system_prompt`, its `system_prompt_sha256`, its `prompt_layers`, the `profile` (`agent` on runs recorded before the rename), the `model_choice`, the Settings `env` names, the `library` items loaded, the `project_instructions` the runtime was given and a task agent's `project_skills` |
@@ -1954,7 +1996,7 @@ built by `scripts/stage-dashboard.sh` at release time), and it carries
 - **Tasks**: Task list with project and status filters (`Ready` for ready tasks), time display, each task's cost so far, a "Scheduled" badge linking to the schedule that created the task, Start/Stop/Delete controls; a ready task is labelled "Ready — not started" and its Start (here and on its detail page) calls `POST /api/tasks/:id/start`. `#tasks?project=<id>` filters by a project and shows its name and default directory with a link to its project page; `#tasks?group=<group>` lists one task group, shown as a chip that clears it, `#tasks?schedule=<id>` one schedule's tasks, shown as a chip too, and they combine. A new task picks an existing project or creates one in the same form; its work directory may stay empty when the project has a default. A task's detail view can move it to another project in any status.
 - **Projects (sidebar)**: Below the navigation, every project with its task count (or a spinner with its active count); clicking one opens its project page, and `+` creates a project (name, default directory, description, optional background).
 - **Project** (`#projects/<id>`, `#projects/<id>/knowledge|skills|profiles|schedules|settings`): a header with the name, description, default directory and task count (a link to the filtered Tasks page), then six tabs, arrow keys moving between them. **Overview**: the 5 latest tasks with status and cost and a link to all of them; the background (three lines, then Show more); the knowledge (document count, stored size, the first 5 titles and summaries, how many referenced files are missing); the skills (count, how many are on, the first 5 names and descriptions); each role's Agent Profile, the per-run caps and which roles this project gives a harness (linking to Agent Profiles); and the execution settings that are set, in words (linking to Settings). **Knowledge**: the documents (title, summary, source, file name or path, size, a Missing badge for a path document whose file is gone) with a readout of documents, stored bytes and index characters against their caps. Opening a row shows its body (a path document's file as it is now); Edit changes the title, summary and content (a text or upload document) or path (a path document); a document is added as Text, Upload or Project file, or by dropping a file on the section; delete asks first. **Skills**: the skills (`project:<name>`, the body's size, `Off` for a disabled one, the description) with a count against the cap. Opening a row shows its `SKILL.md` body; Edit changes the name, description and body; a skill is added by hand or from a `SKILL.md` (Upload SKILL.md, or a drop on the section), whose frontmatter fills the name and description and whose body below it fills the instructions, for review before Add; a switch turns one on or off; delete asks first. Knowledge and skill changes apply at once and a refusal shows the server's reason. **Agent Profiles**: a line saying it overrides the shared defaults in Settings → Roles for the Planner, Workers and Reviewers, and that the Manager is set there, then one collapsible row for the project's layer ("All roles in this project") and one for each role in the project (Planner, Worker, Reviewer), all closed at first. A closed row shows the Agent Profile in effect and where it comes from (shared defaults, role default, this project, or this role in this project; the project's row shows what the roles that do not set it again agree on), a role's limit of how many run at once, "overridden here" when the row sets anything and "unsaved" over unsaved edits. An open row has the Agent Profile first, with Remove override, then "More overrides": the harness, spend cap, a role's limit (empty or Clear inherits) and environment, where every field of a role's row also says what applies now and from which layer, and one Save. Closing a row keeps its unsaved edits; `#projects/<id>/profiles/<role>` or `/project` opens that row and scrolls to it, and an Agent Profile's "used by" links there. **Schedules**: a line saying a schedule runs a full task of the project on a time rule and starts disabled, New schedule, then one collapsible row per schedule. A closed row shows the name, the rule in words, the next run in the schedule's zone (or Disabled), the last run's status and the failures in a row, with the enable switch and Run now beside it (outside the row's button). A closed row also shows "Failing" or "No success lately" while an alert is active. An open row edits every field (the gate command and timeout, the daily budget with today's spend, notify and the chat to send to, or Dashboard only, under "Before each run and after"), previews the rule's next 5 fire times as it is typed (an invalid rule says why and disables Save), saves with one Save, deletes after a confirmation, and lists the run history: when, how it fired (Scheduled, Catch-up with the missed count, Manual), the status, the cost, the summary or error, a collapsed gate output, a note when the run carries the previous run's input, and a link to the task. `#projects/<id>/schedules/<schedule id>` opens that row, and a task's Scheduled badge links there. **Settings**: the name, default directory, description, background (`n / 10000`) and execution settings, saved together (Save is disabled over a limit or without a change; Discard changes resets them); then Delete project, offered only while the project has no tasks and no schedules.
-- **Task Detail**: Overview (status, phase, times, steps and the task's cost with its run count; then Progress: once the task has ended, its final summary (completed) or closing note (failed, stopped) as Markdown, then the Planner's latest progress note (done, now, next, risks, estimate, and when) and the earlier ones under a disclosure; then "Cost by agent": the Planner's, the Workers' and the Reviewers' runs and cost with each one's share, noting runs still running or without a reported cost; steps, agent timeline, live activity feed), Pipeline DAG (React Flow), Sessions, Conversation
+- **Task Detail**: Overview (status, phase, times, steps and the task's cost with its run count; the requirement, with Edit while the task has not ended and its earlier versions under History, then the supplements, each with how it came and whether the Planner has seen it; then Progress: once the task has ended, its final summary (completed) or closing note (failed, stopped) as Markdown, then the Planner's latest progress note (done, now, next, risks, estimate, and when) and the earlier ones under a disclosure; then "Cost by agent": the Planner's, the Workers' and the Reviewers' runs and cost with each one's share, noting runs still running or without a reported cost; steps, agent timeline, live activity feed), Pipeline DAG (React Flow), Sessions, Conversation
 - **Runs** (`#runs/<role>`): each role's sessions and run history, and no configuration. A Runs list shows every recorded Claude run of the role (the Manager, every task's Planner, Workers or Reviewers), a Manager `/new` as a `new session` row, and links each to its agent's history; each role links to its row in Settings → Roles.
 - **Agent history** (`#history/<agent-id>?task=<task-id>`): opened from History on an Agent Timeline row, a Runs entry or the Chat page. The Manager's and a Planner's page starts with "Context & cost": the latest context size, the number of compactions, the total cost and the number of turns. Below them is a sparkline of the context at the end of each of the latest 100 turns, scaled between their lowest and highest value, with a dashed marker on each turn that compacted. A list of the compactions follows (turn, time, trigger, context before → after), then a folded table of the turns. The section is re-read every 10 s. For each Claude run it shows status, model, the run's own tokens (uncached input, cache read, cache write, output), its context at the end (`ctx`), a `compacted` badge, its own cost, the launch command (cwd and argv; a long argument such as the system prompt is shown by its length, and Copy copies the exact command), a collapsible System prompt section with what Looper appended (Claude Code's built-in system prompt is not included): its title shows the prompt's size, its short sha256 and an `isolated` badge, and inside one line per layer (harness source and version, role recommended or edited, project and background version, task, contract), the model with its source and effort, and the Settings environment variable names, above the full text; runs recorded before the layers existed show the text only. A collapsible Plugins & skills section shows how many plugins and skills the run loaded from the library, with its hash, and how many project skills (from `metadata.project_skills`), and lists each with its short version hash. Then the full transcript, following a running run every 2 s. A running run shows its last output time from the record's heartbeat and is flagged after 2 minutes with no output. While Claude thinks it shows `thinking · ~N tokens` from Claude's `thinking_tokens` events. Those arrive about once a second, so the recorder keeps one row per thinking phase and updates its count in place. Hooks, background tasks and rate limits are shown as one line each, as are a compaction (`Context compacted (auto) · 25.1k → 1.36k tokens`) and a failed compaction attempt. The result line labels Claude's figure as the `session total`. Any other event type is an expandable line. A `/new` is one line, `new session`, with its channel, sender, chat and the session it ended. For a Planner each run is one of its turns, listed above your chat with it and its activity.
 - **Settings**: a folding group at the bottom of the sidebar, one page each (`#settings/<page>`): **LLM Providers** (`providers`); **Agent Runtimes** (`runtimes`, read-only, as above); **Agent Profiles** (`profiles`: each profile's runtime, provider, model and effort, "agent teams on" when they are, the roles it can run and where it is used, with a form that picks the runtime, then a provider grouped as the runtime's own login (OAuth; Claude Code's with its `claude auth status` result, Codex's with its `codex login status` result or the forked login a run found, none for OMP) or an API-key provider that speaks its protocols, then a model from the provider's catalog, or any, with the models a Codex login offers suggested, and, for a Claude Code runtime, an "Agent teams" checkbox, checked by default); **Roles** (`roles`: a line naming the roles the server has, then a collapsible row for the Shared defaults (the system layer, which the dashboard calls the shared defaults wherever it names a value's source) and one per role, all closed at first and any number open. Wherever the dashboard names an Agent Profile (these summaries, its dropdowns), it adds " · <effort>" when the profile has an effort its name does not end with already. A closed row is a one-line summary: for the Shared defaults the number of roles, the Agent Profile, spend cap and how many environment variables are set; for a role its job, the Agent Profile in effect and whether it is shared or its own, the Planner's, Workers' or Reviewers' limit per project, and "Disabled" or "unsaved" when so. An open role has "Overrides for this role" (its layer, each field saying what applies now and from which layer, with the Planner's "Tasks running at once per project", the Workers' "Workers running at once per project" or the Reviewers' "Reviewers running at once per project") and "Role prompt and limits" (the role prompt, replace or append, reset to the recommended one, max turns, timeout, enabled, and the note that every agent has every tool with `--dangerously-skip-permissions`); closing a row keeps its unsaved edits, and `#settings/roles/<role>` or `#settings/roles/shared` opens that row and scrolls to it); **Skills & MCP** (`catalog`: how many of the imported items are loaded and their size, "Import from this machine" or "Re-import", the last import with what it changed and what it left out, a name filter, and the plugins and skills with their version, size and installs; a change applies to each agent's next run); **Channels** (`channels`: the Telegram and Lark channels, each with its sender allowlist, an add and remove list of Telegram user IDs or Lark open_ids, checked as you type, with blanks and repeats flagged, and, for an enabled channel that does not start, the reason); **Import / Export** (`transfer`). Wherever an Agent Profile is chosen (Roles, a project's settings, a new task's roles) it is the same dropdown, whose last entry, "+ New Agent Profile", opens the form in place and selects what it saves.
@@ -2014,15 +2056,16 @@ dev proxy, which keeps `Host` and `Origin` on its own port.
 | `/api/tasks` | GET | List the newest tasks; `?project_id=` lists one project's, `?group=` one task group's (400 for an unknown group), `?schedule_id=` one schedule's. Each has its status's `group`, `project_id`, `project_name`, `work_dir`, `schedule_id` and `schedule_name` (null for a task no schedule created) and `cost` (as in the task detail) |
 | `/api/tasks/create` | POST | Create a ready task (`init`) with exactly one of `project_id` (existing) and `project` (`{name, description?, work_dir?, background?}`, created in the same transaction). Its `work_dir` is the one given, else the project's. Optional `profile_overrides`: `{planner?, worker?, reviewer?}` Agent Profile ids for this task's roles (an empty one chooses nothing). 400 with neither project field, for an override of another role, an unknown profile or one that cannot run its role; 404 for an unknown project, 409 for a taken new name |
 | `/api/tasks/:id/project` | PUT | Move a task to `{project_id}`, whatever its status |
-| `/api/tasks/:id` | GET | Task detail with steps, its status's `group`, `project_id`, `project_name`, `schedule_id`, `schedule_name`, `task_budget_usd` (its cap: its own, else its project's) and `own_budget_usd`, `profile_overrides` (`{role: profile}`, `{}` when none) and `cost`: `cost_usd` (the sum of its Planner's, Workers' and Reviewers' runs), `runs`, `running`, `unpriced_runs` and `by_role` (`planner`, `worker`, `reviewer`, each `{cost_usd, runs}`) |
+| `/api/tasks/:id` | GET | Task detail with steps, its status's `group`, `project_id`, `project_name`, `schedule_id`, `schedule_name`, `task_budget_usd` (its cap: its own, else its project's) and `own_budget_usd`, `profile_overrides` (`{role: profile}`, `{}` when none), `requirement_versions` (each `{version, text, via, created_at, delivered_at}`, oldest first; none for a requirement never edited), `supplements` (each `{text, via, created_at, delivered_at}`, oldest first) and `cost`: `cost_usd` (the sum of its Planner's, Workers' and Reviewers' runs), `runs`, `running`, `unpriced_runs` and `by_role` (`planner`, `worker`, `reviewer`, each `{cost_usd, runs}`) |
 | `/api/tasks/cancel` | POST | Cancel task (permanent) |
 | `/api/tasks/stop` | POST | Stop/pause task |
 | `/api/tasks/start` | POST | Run a stopped, failed or cancelled task again (it also starts a ready one, as before) |
+| `/api/tasks/:id/requirement` | PUT | Edit the requirement of a task that has not ended to `{requirement}`, kept as a new version (`{task_id, version, requirement}`); a running task's Planner gets it in a `[CHAT]` turn. 400 for an empty or unchanged text, 404 for an unknown task, 409 for one that ended |
 | `/api/tasks/:id/start` | POST | Start a ready task (`TASK_START`); it waits for a place in its project like any start. Answers `{started, project_id}`; 400 unless the task is ready, 404 for an unknown task |
 | `/api/tasks/delete` | POST | Delete task (must be stopped first) |
 | `/api/tasks/:id/activity` | GET | Activity events |
 | `/api/tasks/:id/activity/stream` | GET | SSE activity stream |
-| `/api/chat/send` | POST | Send chat message; `target` is the Manager (default) or `{kind: planner, task_id}`, 409 when that task has no running Planner |
+| `/api/chat/send` | POST | Send chat message; `target` is the Manager (default) or `{kind: planner, task_id}` (the message is stored as a supplement of the task first), 409 when that task has no running Planner |
 | `/api/chat/targets` | GET | The Manager, then per recent task its Planner and step Workers/Reviewers, with `can_send` |
 | `/api/chat/sessions` | GET | The Manager's conversations on every channel (Planner threads left out), the 50 most recently active first: `session_id` (`<channel>:<chat id>` for Lark and Telegram), `channel`, `message_count`, `first_message_at`, `last_message_at`, `last_role` and the first 200 characters of the last message (`last_content`); 500 when they cannot be read |
 | `/api/chat/messages` | GET/POST | Chat history. GET returns the session's newest 200 messages, oldest first, each with its `channel`. The server saves both sides of a web chat: the message when it is sent, and its answer when it comes (`<message_id>:reply`), whether or not a page still reads its stream; the answer is also pushed to the chat's open pages (`chat.message`), so a page opened again before it came shows it |

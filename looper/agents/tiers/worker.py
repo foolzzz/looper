@@ -866,11 +866,13 @@ class WorkerPool:
         step = str(payload.get("step_key") or payload.get("task_id") or "")
         instruction = str(payload.get("instruction") or "")
         acceptance = [str(c) for c in payload.get("acceptance_criteria") or []]
+        supplements = [str(text) for text in payload.get("supplements") or []]
         if is_verify:
             return review_task_section(requirement=requirement, step=step, instruction=instruction,
-                                       acceptance_criteria=acceptance, work_dir=work_dir)
+                                       acceptance_criteria=acceptance, work_dir=work_dir, supplements=supplements)
         return work_task_section(
             requirement=requirement, step=step, instruction=instruction, acceptance_criteria=acceptance,
+            supplements=supplements,
             validation_commands=[str(c) for c in payload.get("validation_commands") or []],
             target_files=[str(f) for f in payload.get("target_files") or []],
             feedback=[str(f) for f in payload.get("feedback") or []],

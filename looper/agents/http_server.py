@@ -281,6 +281,7 @@ class AgentHTTPServer:
     _RE_TASK_PROJECT = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)/project$")
     _RE_TASK_CONTINUE = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)/continue$")
     _RE_TASK_START = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)/start$")
+    _RE_TASK_REQUIREMENT = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)/requirement$")
     _RE_PROJECT = re.compile(r"^/api/projects/(proj-[a-zA-Z0-9]+)$")
     _RE_PROJECT_KNOWLEDGE = re.compile(r"^/api/projects/(proj-[a-zA-Z0-9]+)/knowledge$")
     _RE_PROJECT_DOCUMENT = re.compile(r"^/api/projects/(proj-[a-zA-Z0-9]+)/knowledge/(doc-[a-zA-Z0-9]+)$")
@@ -357,6 +358,10 @@ class AgentHTTPServer:
                 m.group(1), projects.json_object(body), self._task_router))
         elif (m := self._RE_TASK_CONTINUE.match(path)) and method == "POST":
             await self._answer(writer, HTTP_200, lambda: self._continue_at_cap(m.group(1), body))
+        elif (m := self._RE_TASK_REQUIREMENT.match(path)) and method == "PUT":
+            await self._answer(writer, HTTP_200, lambda: projects.edit_requirement(
+                m.group(1), projects.json_object(body), task_router=self._task_router, bus=self._supervisor.bus,
+                source=self._web_adapter._address, via=projects.VIA_TASK_PAGE))
         elif (m := self._RE_TASK_START.match(path)) and method == "POST":
             await self._answer(writer, HTTP_200, lambda: projects.start_ready_task(
                 m.group(1), self._supervisor.bus, self._web_adapter._address))
@@ -685,6 +690,9 @@ class AgentHTTPServer:
 
         session_id = data.get("session_id", "")
         message_id = data.get("message_id", "")
+        # A message to a task's Planner is a supplement to the task, stored before the Planner gets it, so it is
+        # not lost when the Planner is busy and the server restarts first.
+        supplement_id = await projects.store_chat_supplement(target, text)
 
         if session_id and message_id:
             try:
@@ -704,6 +712,7 @@ class AgentHTTPServer:
             attachments=data.get("attachments"),
             target=target,
             message_id=message_id or None,
+            supplement_id=supplement_id,
         )
         writer.write(_json_response(HTTP_200, result))
         await writer.drain()
@@ -866,9 +875,13 @@ class AgentHTTPServer:
                 await writer.drain()
                 return
 
-        ok = await update_task_config(
+        requirement = data.get("requirement")
+        if isinstance(requirement, str) and requirement.strip() and requirement != task.get("requirement"):
+            # Kept as a new version, like an edit of a running task's; the task has no Planner to tell yet.
+            from ..db.task_changes import edit_requirement
+            await edit_requirement(task_id, requirement, via=projects.VIA_TASK_PAGE, delivered=True)
+        ok = work_dir is None and config is None or await update_task_config(
             task_id,
-            requirement=data.get("requirement"),
             work_dir=work_dir,
             config=config,
         )
@@ -1048,9 +1061,11 @@ class AgentHTTPServer:
             from ..db.agent_setting_layers import profile_overrides
             from ..db.llm_records import task_costs
             from ..db.tasks import get_task_with_steps
+            from ..db.task_changes import requirement_versions
             raw = await get_task_with_steps(task_id)
             cost = (await task_costs([task_id]))[task_id] if raw else None
             overrides = await profile_overrides(task_id) if raw else {}
+            versions = await requirement_versions(task_id) if raw else []
         except Exception:
             logger.exception("DB unavailable for task_detail %s", task_id)
             writer.write(_json_response(HTTP_500, {"error": "database unavailable"}))
@@ -1066,6 +1081,13 @@ class AgentHTTPServer:
             "task_id": raw.get("id", ""),
             "requirement": raw.get("requirement", ""),
             "name": raw.get("name", ""),
+            # Every version of an edited requirement, oldest first (none for one never edited): version, text, via,
+            # created_at, delivered_at (when the Planner had the edit in a turn).
+            "requirement_versions": versions,
+            # What the user added to the task while it ran, oldest first: text, via, created_at, delivered_at.
+            "supplements": [{"text": entry["summary"], "via": entry.get("via") or "", "created_at": entry["created_at"],
+                             "delivered_at": entry.get("delivered_at")}
+                            for entry in raw.get("journal", []) if entry.get("kind") == "supplement"],
             "goal_id": raw.get("goal_id", ""),
             "project_id": raw.get("project_id", ""),
             "project_name": raw.get("project_name", ""),

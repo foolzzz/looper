@@ -146,6 +146,18 @@ def test_the_work_task_carries_the_step_and_the_task_as_context() -> None:
     assert section.index("Build a calculator.") < section.index("Add tests for add().")
 
 
+@pytest.mark.parametrize("verify", [False, True], ids=["worker", "reviewer"])
+def test_a_workers_and_a_reviewers_task_lists_the_supplements_after_the_requirement(verify: bool) -> None:
+    from looper.agents.tiers.worker import WorkerPool
+
+    payload = {"requirement": "Build calc.", "step_key": "s1", "instruction": "Add add().",
+               "supplements": ["Use CSV.", "Also subtraction.\nWith tests."]}
+    section = WorkerPool._task_section(payload, "/w", is_verify=verify)
+    assert section.index("Build calc.") < section.index("Supplements (what the user added") \
+        < section.index("- Use CSV.") < section.index("- Also subtraction.\n  With tests.") < section.index("Add add().")
+    assert "Supplements" not in WorkerPool._task_section({**payload, "supplements": []}, "/w", is_verify=verify)
+
+
 def test_a_long_requirement_is_clipped_with_a_visible_marker() -> None:
     requirement = "x" * (TASK_REQUIREMENT_LIMIT + 500)
     section = plan_task_section(task_id="t1", requirement=requirement, project_name="p", work_dir="/w")
