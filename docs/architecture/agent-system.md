@@ -57,6 +57,15 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
   and only that one, starts with a `[Looper]` note saying what code said, so
   Claude can re-emit the task JSON or name the task to start. The Runs
   record's input holds the note
+- The dashboard chat, Lark and Telegram share the Manager's one session, so
+  every message ends with a code-written line saying where it came from, just
+  before the message: `Channel: the Looper dashboard chat`, `Channel: a Lark
+  direct message`, or for Telegram `a Telegram direct message` (a group's chat
+  id is negative: `a Telegram group chat`), from the message's source channel.
+  The recommended role prompt has Claude answer only the message it was just
+  sent: no earlier topic, check or status report unless that message asks for
+  one, and a short reply to a greeting or a check-in. A manager row still
+  holding the previous recommended prompt gets this one at startup
 - Maintains chat conversation context per session
 - Runs one resident Claude process through `ResidentClaude`
   (`looper/agents/claude_cli.py`), which each task's Planner uses too, started
