@@ -1616,7 +1616,7 @@ dev proxy, which keeps `Host` and `Origin` on its own port.
 | `/api/tasks/:id/activity/stream` | GET | SSE activity stream |
 | `/api/chat/send` | POST | Send chat message; `target` is the Manager (default) or `{kind: planner, task_id}`, 409 when that task has no running Planner |
 | `/api/chat/targets` | GET | The Manager, then per recent task its Planner and step Workers/Reviewers, with `can_send` |
-| `/api/chat/messages` | GET/POST | Chat history |
+| `/api/chat/messages` | GET/POST | Chat history. The server saves both sides of a web chat: the message when it is sent, and its answer when it comes (`<message_id>:reply`), whether or not a page still reads its stream; the answer is also pushed to the chat's open pages (`chat.message`), so a page opened again before it came shows it |
 | `/api/roles` | GET | List the role configs: `configs`, one per role, each keyed by `role` |
 | `/api/roles/:role` | GET/PUT | One role's config; PUT changes the fields given. `harness_prompt`, `model` and `max_concurrency` are agent settings (400 naming the role's endpoint); `runtime` and `llm_profile_id` were removed (400); 404 for an unknown role |
 | `/api/roles/:role/reset-prompt` | POST | Reset the role prompt to the recommended one |
