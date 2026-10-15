@@ -23,16 +23,50 @@ def _row_to_dict(row: asyncpg.Record) -> dict[str, Any]:
     return d
 
 
+_SELECT_WITH_SECRET = (
+    "SELECT c.*, s.channel_id IS NOT NULL AS has_bot_token "
+    "FROM channel_configs c LEFT JOIN channel_secrets s ON s.channel_id = c.channel_id"
+)
+
+
 async def get_config(
     channel_id: str, *, pool: asyncpg.Pool | None = None
 ) -> dict[str, Any] | None:
     pool = pool or get_pool()
     row = await pool.fetchrow(
-        "SELECT * FROM channel_configs WHERE channel_id = $1", channel_id
+        f"{_SELECT_WITH_SECRET} WHERE c.channel_id = $1", channel_id
     )
     if row is None:
         return None
     return _row_to_dict(row)
+
+
+async def get_bot_token(
+    channel_id: str, *, pool: asyncpg.Pool | None = None
+) -> str | None:
+    """The channel's bot token, for the launch that builds its adapter; None without one."""
+    pool = pool or get_pool()
+    return await pool.fetchval(
+        "SELECT bot_token FROM channel_secrets WHERE channel_id = $1", channel_id
+    )
+
+
+async def set_bot_token(
+    channel_id: str, token: str | None, *, pool: asyncpg.Pool | None = None
+) -> None:
+    """Store (or, with None, remove) the channel's bot token. It never goes through ``config``."""
+    pool = pool or get_pool()
+    if token is None:
+        await pool.execute(
+            "DELETE FROM channel_secrets WHERE channel_id = $1", channel_id
+        )
+    else:
+        await pool.execute(
+            "INSERT INTO channel_secrets (channel_id, bot_token) VALUES ($1, $2) "
+            "ON CONFLICT (channel_id) DO UPDATE SET bot_token = EXCLUDED.bot_token",
+            channel_id,
+            token,
+        )
 
 
 async def set_config(
@@ -70,7 +104,7 @@ async def set_config(
 
 async def list_configs(*, pool: asyncpg.Pool | None = None) -> list[dict[str, Any]]:
     pool = pool or get_pool()
-    rows = await pool.fetch("SELECT * FROM channel_configs ORDER BY channel_id")
+    rows = await pool.fetch(f"{_SELECT_WITH_SECRET} ORDER BY c.channel_id")
     return [_row_to_dict(r) for r in rows]
 
 

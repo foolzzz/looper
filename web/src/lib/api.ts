@@ -2289,6 +2289,8 @@ export interface ChannelConfig {
   config: Record<string, unknown>;
   /** Why this channel does not start as configured (its sender allowlist); null when nothing stops it. */
   start_problem?: string | null;
+  /** Whether a bot token is stored (the token itself never leaves the server). */
+  has_bot_token?: boolean;
   created_at: string;
   updated_at: string;
 }
@@ -2308,7 +2310,8 @@ export async function fetchChannelConfig(channelId: string): Promise<ChannelConf
 
 export async function updateChannelConfig(
   channelId: string,
-  fields: Partial<ChannelConfig>,
+  /** `bot_token`: the mask ("***") keeps the stored token, "" removes it, any other value stores it. */
+  fields: Partial<ChannelConfig> & { bot_token?: string },
 ): Promise<ChannelConfig> {
   const res = await fetch(`${API_BASE}/channel-configs/${channelId}`, {
     method: "PUT",

@@ -150,3 +150,64 @@ def test_an_enabled_channel_with_an_empty_list_is_saved_but_says_it_will_not_sta
         assert status == 404
 
     _run(_test, monkeypatch)
+
+
+def test_bot_token_is_stored_masked_and_never_returned(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The token goes to channel_secrets, not config: the API shows only has_bot_token, and
+    ``***`` keeps it while ``""`` clears it. Mirrors the LLM-provider api_key contract."""
+    from looper.db.channel_configs import get_bot_token
+
+    async def _test(pool: Any) -> None:
+        # No token to start with.
+        status, body = await _call("GET", "/api/channel-configs/channel-telegram")
+        assert status == 200 and body.get("has_bot_token") is False
+        assert "bot_token" not in body["config"]
+
+        # Store a token.
+        status, body = await _call("PUT", "/api/channel-configs/channel-telegram", {"bot_token": "123:secret"})
+        assert status == 200 and body["has_bot_token"] is True
+        # The token value never leaves the server, in config or anywhere in the view.
+        assert "123:secret" not in json.dumps(body)
+        assert await get_bot_token("channel-telegram") == "123:secret"
+        # It is kept out of channel_configs.config entirely.
+        stored = await pool.fetchval("SELECT config FROM channel_configs WHERE channel_id = 'channel-telegram'")
+        assert "bot_token" not in json.loads(stored)
+
+        # The mask keeps the stored token; other fields can change alongside it.
+        status, body = await _call("PUT", "/api/channel-configs/channel-telegram",
+                                   {"bot_token": "***", "config": {"allowed_user_ids": ["7"]}})
+        assert status == 200 and body["has_bot_token"] is True
+        assert await get_bot_token("channel-telegram") == "123:secret"
+        assert body["config"]["allowed_user_ids"] == ["7"]
+
+        # An empty string removes it.
+        status, body = await _call("PUT", "/api/channel-configs/channel-telegram", {"bot_token": ""})
+        assert status == 200 and body["has_bot_token"] is False
+        assert await get_bot_token("channel-telegram") is None
+
+        # A non-string token is refused.
+        status, _ = await _call("PUT", "/api/channel-configs/channel-telegram", {"bot_token": 123})
+        assert status == 400
+
+    _run(_test, monkeypatch)
+
+
+def test_a_rejected_update_does_not_change_the_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A PUT whose allowlist is invalid returns 400 and leaves the stored token untouched."""
+    from looper.db.channel_configs import get_bot_token
+
+    async def _test(pool: Any) -> None:
+        status, _ = await _call("PUT", "/api/channel-configs/channel-telegram", {"bot_token": "keep:me"})
+        assert status == 200 and await get_bot_token("channel-telegram") == "keep:me"
+        # Change the token and break the allowlist in the same request.
+        status, _ = await _call("PUT", "/api/channel-configs/channel-telegram",
+                                 {"bot_token": "new:token", "config": {"allowed_user_ids": "12,abc"}})
+        assert status == 400
+        assert await get_bot_token("channel-telegram") == "keep:me"  # unchanged
+        # Clearing the token with a bad allowlist must not delete it either.
+        status, _ = await _call("PUT", "/api/channel-configs/channel-telegram",
+                                 {"bot_token": "", "config": {"allowed_user_ids": "12,abc"}})
+        assert status == 400
+        assert await get_bot_token("channel-telegram") == "keep:me"  # still there
+
+    _run(_test, monkeypatch)
