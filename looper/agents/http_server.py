@@ -1544,14 +1544,27 @@ class AgentHTTPServer:
             return
 
         from .channels.allowlist import AllowlistError, channel_view, normalized_config
+        from .profile_registry import SECRET_MASK
+
+        # The bot token is a secret kept out of config: SECRET_MASK (or absent) keeps the
+        # stored token, "" / null removes it, anything else stores it. It is never returned.
+        token = data.pop("bot_token", SECRET_MASK)
+        if token != SECRET_MASK and token is not None and (
+            not isinstance(token, str) or len(token) > 4096
+        ):
+            writer.write(_json_response(HTTP_400, {"error": "bot_token must be a string (<=4096 chars) or null"}))
+            await writer.drain()
+            return
 
         try:
-            from ..db.channel_configs import get_config, set_config
+            from ..db.channel_configs import get_config, set_bot_token, set_config
             current = await get_config(channel_id)
             if current is None:
                 writer.write(_json_response(HTTP_404, {"error": f"channel '{channel_id}' not found"}))
                 await writer.drain()
                 return
+            if token != SECRET_MASK:
+                await set_bot_token(channel_id, None if token in (None, "") else token)
             if "config" in data:
                 # The sender allowlist is validated before anything is written.
                 data = {**data, "config": normalized_config(str(current.get("channel_type") or ""), data["config"])}
