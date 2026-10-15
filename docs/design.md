@@ -233,14 +233,15 @@ Web 始终开启。Telegram 和 Lark 默认内置，不需要任何启动参数�
   - `allowed_user_ids`：发送者白名单，Telegram 的数字用户 ID（负数是群或频道，不是发送者）；以前存的逗号分隔字符串仍然能读。`LOOPX_TELEGRAM_ALLOWED_USERS` 不再生效
 - 名单外的发送者发 `/start`、`/status`、`/new`、`/help` 也得不到回复
 
-### Lark（飞书）
+### Lark（lark-cli）
 
-- 需要 `lark-cli` 在 PATH 上且已登录，收发消息都通过它
-- Settings 配置项 `app_id_env`：存放 App ID 的环境变量名，默认 `LARK_APP_ID`。`app_secret_env` 目前不会被读取，凭据由 `lark-cli` 管理
-- Settings 配置项 `allowed_open_ids`：发送者白名单，飞书用户在这个应用下的 `open_id`（`ou_` 开头），即每条消息事件里的 `event.sender.sender_id.open_id`；`union_id`、`user_id` 会被拒收
-- 通过 `lark-cli event consume` 订阅事件
-- 支持 @mention 触发
-- 富文本回复
+- 需要 `lark-cli` 在 PATH 上且已登录，收发消息都通过它；只处理私聊（`p2p`），群消息记一行日志后忽略，机器人从不在群里回复
+- Settings 配置项 `profile`：lark-cli 的 profile，决定用哪个应用（也就是哪个机器人），为空时用 lark-cli 当前的 profile；每次调用都带 `--profile`。旧的 `app_id_env`、`app_secret_env` 启动时删除
+- Settings 配置项 `allowed_open_ids`：发送者白名单，飞书用户在这个应用下的 `open_id`（`ou_` 开头）；open_id 因应用而异，名单记下它是为哪个应用建的，换成别的应用的 profile 后不启动，直到重建名单
+- 启动前用 `lark-cli whoami` 和机器人信息核对能否以机器人身份收发，不行就不启动，Settings → Channels 显示原因；能就显示「Bot: 名字（app_id，profile）」
+- Settings → Channels 可按姓名或邮箱搜索并添加发送者（以 lark-cli 登录的用户身份查），名单旁显示姓名，并列出最近被拒的发送者，可一键允许
+- 回复以 Markdown 富文本发送（`--markdown`）
+- 用机器人 token 直连开放平台、不经 lark-cli 的飞书渠道是以后的另一种渠道类型
 
 ---
 

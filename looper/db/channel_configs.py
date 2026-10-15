@@ -134,3 +134,50 @@ async def seed_defaults(
             enabled,
             config,
         )
+
+
+REJECTED_KEPT = 20
+
+
+async def record_rejected(channel_id: str, sender_id: str, *, pool: asyncpg.Pool | None = None) -> None:
+    """Record that the channel's allowlist refused a message from ``sender_id`` (never what it said); the channel
+    keeps its ``REJECTED_KEPT`` newest senders."""
+    pool = pool or get_pool()
+    async with pool.acquire() as conn, conn.transaction():
+        await conn.execute(
+            """
+            INSERT INTO channel_rejected_senders (channel_id, sender_id) VALUES ($1, $2)
+            ON CONFLICT (channel_id, sender_id)
+            DO UPDATE SET count = channel_rejected_senders.count + 1, last_at = now()
+            """,
+            channel_id, sender_id,
+        )
+        await conn.execute(
+            """
+            DELETE FROM channel_rejected_senders WHERE channel_id = $1 AND sender_id NOT IN (
+                SELECT sender_id FROM channel_rejected_senders WHERE channel_id = $1
+                ORDER BY last_at DESC LIMIT $2)
+            """,
+            channel_id, REJECTED_KEPT,
+        )
+
+
+async def rejected_senders(channel_id: str, *, pool: asyncpg.Pool | None = None) -> list[dict[str, Any]]:
+    """The channel's latest refused senders, newest first."""
+    pool = pool or get_pool()
+    rows = await pool.fetch(
+        "SELECT sender_id, count, last_at FROM channel_rejected_senders WHERE channel_id = $1 "
+        "ORDER BY last_at DESC LIMIT $2", channel_id, REJECTED_KEPT,
+    )
+    return [dict(r) for r in rows]
+
+
+async def drop_config_keys(channel_type: str, keys: list[str], *, pool: asyncpg.Pool | None = None) -> list[str]:
+    """Remove ``keys`` from the configs of ``channel_type``'s channels; the ids of the channels that held one."""
+    pool = pool or get_pool()
+    rows = await pool.fetch(
+        "UPDATE channel_configs SET config = config - $2::text[], updated_at = now() "
+        "WHERE channel_type = $1 AND config ?| $2::text[] RETURNING channel_id",
+        channel_type, keys,
+    )
+    return [r["channel_id"] for r in rows]

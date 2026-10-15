@@ -262,8 +262,7 @@ class TestNewFromLarkAndTelegram:
             bus = MessageBus(runtime_root=tmp_path)
             adapter: Any
             if channel == "lark":
-                adapter = LarkChannelAdapter(app_id="cli_test", runtime_root=tmp_path,
-                                             allowlist=_allowlist("channel-lark", OPEN_ID))
+                adapter = LarkChannelAdapter(runtime_root=tmp_path, allowlist=_allowlist("channel-lark", OPEN_ID))
                 adapter._bus = bus  # what start() sets, without running lark-cli
                 await adapter._handle_lark_event(_lark_event(OPEN_ID if listed else OTHER_OPEN_ID, "/new"))
             else:

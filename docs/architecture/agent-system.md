@@ -1773,7 +1773,8 @@ PostgreSQL is a hard startup dependency. All data paths:
 | `library_files` | Each catalog item's files: relative path, UTF-8 content, sha256, executable bit |
 | `library_installs` | Where an item loads: `scope` (`global` or `project`), `project_id`, `roles` (a non-empty subset of `manager`, `planner`, `worker`, `reviewer`; never `manager` in a project), `enabled`; one per item and place, going with its item and its project |
 | `project_documents` | A project's knowledge: title, one-line summary, `source_kind` (`text`, `upload` or `path`), `filename` and `content` (text and upload) or `path` (relative to the project's default directory), `size_bytes`, `sha256`; a CHECK keeps each kind's columns consistent and the rows go with their project |
-| `channel_configs` | Telegram/Lark settings (enabled flag, env var names, sender allowlist) |
+| `channel_configs` | Telegram/Lark settings (enabled flag, Telegram's token env var name, Lark's lark-cli `profile`, the sender allowlist, and for Lark the app it was made for) |
+| `channel_rejected_senders` | The latest senders a channel's allowlist refused (the Lark channel records them): `sender_id`, `count` and `last_at`, never what they wrote; the 20 newest per channel |
 
 Plans and sessions used to be files (`.local/planner/planner-<task_id>/*.json`,
 `.local/manager/session.json`). The first start with the database holding
@@ -1939,6 +1940,8 @@ dev proxy, which keeps `Host` and `Origin` on its own port.
 | `/api/llm-records/:id/events?after=N` | GET | The run's stream-json events after seq N |
 | `/api/agents/:id/usage?turns=N` | GET | One agent's (`manager`, `planner-<task_id>`, ...) spending and context: `total` (`cost_usd`, `runs`, `running`, `unpriced_runs`, `compactions`), `by_session` and `by_day` (UTC; each `cost_usd`, `runs`), its latest N turns (default 100, at most 1000) oldest first with `context_tokens`, `cost_usd` and `compactions`, and `latest_context_tokens`; 400 for a bad `turns` |
 | `/api/channel-configs` | GET | List channels, each with `start_problem`: why it does not start as configured (an empty or invalid sender allowlist), else null |
+| `/api/channels/lark/status` | GET | The Lark (lark-cli) channel as lark-cli sees its saved settings: `bot` (`name`, `app_id`, `open_id`, `profile`; null when lark-cli cannot act as it), `problem` (why it would not start: lark-cli, or the allowlist made for another app), `allowlist_app_id`, `names` (open_id to name, for the allowlist and the refused senders) and `rejected` (`open_id`, `name`, `count`, `last_at`, newest first, not on the allowlist; never what they wrote) |
+| `/api/channels/lark/people` | GET | `?q=` a name or an email (1–50 characters): `people`, each `open_id` (for the channel's app), `name`, `email`, `department`; 400 for a bad query, 502 when lark-cli cannot search |
 | `/api/channel-configs/:id` | GET/PUT | Channel config. PUT validates the sender allowlist (`allowed_user_ids` for Telegram, `allowed_open_ids` for Lark) and stores it as a list; 400 naming the first bad id, and nothing is stored then; 404 for an unknown channel |
 
 ## Configuration
@@ -1996,17 +1999,35 @@ restart.
   `LOOPX_TELEGRAM_ALLOWED_USERS` no longer applies. `/new` (without
   arguments) goes to the Manager as `/new`. `/start`, `/status`, `/new` and
   `/help` from an unlisted sender get no answer either.
-- **Lark**: needs `lark-cli` on PATH and signed in (the commands of lark-cli
-  1.0.97). It receives with `lark-cli event consume im.message.receive_v1 --as
-  bot`, one flat JSON event per line (a text message's text in `content`, the
-  sender's open_id in `sender_id`; other message types and bots' messages are
-  ignored), and sends with `lark-cli im +messages-send --as bot`: a reply to
-  the chat its message came from (`--chat-id`), a schedule's message to a user
-  (`--user-id`); a failed send carries lark-cli's reason. lark-cli acts as the
-  app it is configured for (`lark-cli whoami`): the env var named by
-  `app_id_env` (default `LARK_APP_ID`) must be set for the channel to start,
-  but it no longer selects the app. `allowed_open_ids` lists the senders'
-  `open_id` (`ou_...`); a `union_id` or `user_id` is refused.
+- **Lark (lark-cli)** (`looper/agents/channels/lark.py`, `lark_cli.py`,
+  `lark_settings.py`): the Manager in Lark direct messages, through `lark-cli`
+  on PATH and signed in (the commands of lark-cli 1.0.97). A lark-cli profile
+  chooses the app and so the bot: the channel's optional `profile` is passed
+  as `--profile` on every call, and empty means lark-cli's active profile
+  (`app_id_env` and `app_secret_env`, from before, are dropped from the row at
+  startup, and from an imported file). It receives with `lark-cli event
+  consume im.message.receive_v1 --as bot`, one flat JSON event per line, and
+  handles direct messages only (`chat_type` `p2p`): a group message is logged
+  and ignored, and the bot never answers in a group; other message types and
+  bots' messages are ignored too. It sends with `lark-cli im +messages-send
+  --as bot`: a reply as Markdown (`--markdown`, a rich-text post) to the chat
+  its message came from, a schedule's message as text to a user
+  (`--user-id`); a failed send carries lark-cli's reason. A consumer that
+  stops is started again after 10 s. At startup the channel runs `lark-cli
+  whoami` and `lark-cli api GET /open-apis/bot/v3/info --as bot` with its
+  profile and does not start when lark-cli is missing, the profile is
+  unknown, it is not signed in or the app has no bot; it logs the bot
+  otherwise. `allowed_open_ids` lists the senders' `open_id` (`ou_...`), which
+  differ per app: the server binds the list to the app it was made for
+  (`allowlist_app_id`, set when the list changes, kept when only the profile
+  does), and the channel does not start under a profile of another app until
+  the list is rebuilt. A refused sender is also recorded: who, how often
+  and when, never what they wrote (`channel_rejected_senders`, the 20 newest). Settings →
+  Channels shows the bot ("Bot: HBDataBot (cli_…, profile …)") or why it would
+  not start, the senders' names next to their ids, a search by name or email
+  that adds a sender (`contact +search-user --as user`, as the user lark-cli
+  is signed in as), and the recently refused senders with Allow. A Lark
+  channel with its own bot token, without lark-cli, is a later channel type.
 - **Web**: unaffected, it has no list: the HTTP API answers only local
   requests ([HTTP API](#http-api)).
 - A channel that fails to start is logged and skipped; the server keeps

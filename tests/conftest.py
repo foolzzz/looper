@@ -31,6 +31,7 @@ from real_runtime_root_guard_plugin import (  # noqa: E402,F401
     pytest_testnodedown,
 )
 from fake_claude import fake_claude  # noqa: E402
+from lark_cli_stand_in import lark_cli_stand_in  # noqa: E402,F401 (a fixture for every test)
 
 
 # PostgreSQL writes made by the agent tiers (Manager, Planner, TaskRouter, WorkerPool).
@@ -140,6 +141,20 @@ def _no_operator_codex_login(tmp_path_factory: pytest.TempPathFactory) -> Any:
         os.environ.pop("CODEX_HOME", None)
     else:
         os.environ["CODEX_HOME"] = previous
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _no_real_lark_cli(tmp_path_factory: pytest.TempPathFactory) -> Any:
+    """No test reaches the operator's lark-cli (its signed-in bot and user): a ``lark-cli`` that refuses every call
+    comes first on PATH; a test that needs one puts the stand-in of ``lark_cli_stand_in`` before it."""
+    directory = tmp_path_factory.mktemp("no-lark-cli")
+    fake_claude(directory / "lark-cli", "import json, sys\n"
+                "print(json.dumps({'ok': False, 'error': {'message': 'lark-cli is not available in tests'}}),"
+                " file=sys.stderr)\nsys.exit(2)\n")
+    previous = os.environ.get("PATH", "")
+    os.environ["PATH"] = f"{directory}{os.pathsep}{previous}"
+    yield
+    os.environ["PATH"] = previous
 
 
 @pytest.fixture(scope="session")
