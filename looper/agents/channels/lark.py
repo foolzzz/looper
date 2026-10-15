@@ -131,6 +131,19 @@ class LarkChannelAdapter(ChannelAdapter):
             logger.warning("lark delivery failed: %s", exc)
             return DeliveryReceipt(channel="lark", success=False, error=str(exc))
 
+    async def notify(self, chat: str, text: str) -> DeliveryReceipt:
+        """Send ``text`` as the bot to Lark user ``chat`` (an open_id) with ``lark-cli im +messages-send``."""
+        process = await asyncio.create_subprocess_exec(
+            "lark-cli", "im", "+messages-send", "--as", "bot", "--user-id", chat, "--text", text,
+            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE,
+        )
+        _, stderr = await process.communicate()
+        if process.returncode != 0:
+            error = (stderr or b"").decode("utf-8", errors="replace").strip()[:300]
+            logger.warning("lark notification to %s failed (rc=%s): %s", chat, process.returncode, error)
+            return DeliveryReceipt(channel="lark", success=False, error=f"lark-cli exited {process.returncode}: {error}")
+        return DeliveryReceipt(channel="lark", success=True)
+
     def healthcheck(self) -> dict[str, Any]:
         return {
             "channel": "lark",

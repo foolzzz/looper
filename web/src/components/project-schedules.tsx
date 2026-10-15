@@ -6,7 +6,7 @@ import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { AgentProfileSelect } from "@/components/agent-profiles";
 import { CollapsibleRow } from "@/components/collapsible-row";
-import { LABEL } from "@/components/registry-ui";
+import { LABEL, SELECT } from "@/components/registry-ui";
 import {
   createSchedule,
   deleteSchedule,
@@ -21,6 +21,8 @@ import {
   type ScheduleFields,
   type ScheduleInfo,
   type ScheduleLimits,
+  type ScheduleNotify,
+  type ScheduleNotifyTarget,
   type ScheduleOverlap,
   type SchedulePreview,
   type ScheduleRunInfo,
@@ -29,7 +31,7 @@ import {
   type TaskRole,
 } from "@/lib/api";
 import { roleLabel } from "@/lib/runtime-catalog";
-import { AGENT_PROFILE } from "@/lib/settings-pages";
+import { AGENT_PROFILE, settingsHref } from "@/lib/settings-pages";
 import { errorText } from "@/lib/use-action";
 import { useCollapsibleRows } from "@/lib/use-collapsible-rows";
 import { formatUsd } from "@/lib/usage";
@@ -50,6 +52,7 @@ type Variant = "default" | "success" | "warning" | "destructive" | "outline";
 
 const RUN_STATUS: Record<ScheduleRunStatus, { label: string; variant: Variant }> = {
   queued: { label: "Queued", variant: "warning" },
+  gating: { label: "Checking", variant: "default" },
   running: { label: "Running", variant: "default" },
   completed: { label: "Completed", variant: "success" },
   failed: { label: "Failed", variant: "destructive" },
@@ -58,11 +61,16 @@ const RUN_STATUS: Record<ScheduleRunStatus, { label: string; variant: Variant }>
   timed_out: { label: "Timed out", variant: "destructive" },
   skipped_overlap: { label: "Skipped: busy", variant: "outline" },
   skipped_missed: { label: "Skipped: missed", variant: "outline" },
+  skipped_gate: { label: "Skipped: nothing new", variant: "outline" },
+  gate_failed: { label: "Gate failed", variant: "destructive" },
+  skipped_budget: { label: "Skipped: daily budget", variant: "warning" },
 };
 
-const isActiveRun = (run: ScheduleRunInfo) => run.status === "running" || run.status === "queued";
+const isActiveRun = (run: ScheduleRunInfo) =>
+  run.status === "running" || run.status === "queued" || run.status === "gating";
 
-function RunStatusBadge({ status }: { status: ScheduleRunStatus }) {
+/** A run's status as a badge; the dashboard shows a failing schedule's last one too. */
+export function RunStatusBadge({ status }: { status: ScheduleRunStatus }) {
   const shown = RUN_STATUS[status] ?? { label: status, variant: "outline" };
   return (
     <Badge variant={shown.variant} className="shrink-0">
@@ -79,12 +87,12 @@ function triggerText(run: ScheduleRunInfo) {
 
 const formats = new Map<string, Intl.DateTimeFormat>();
 
-/** A time as the schedule's own zone shows it: "Tue, Oct 15, 09:00 PDT". */
-function formatInZone(iso: string | null, timeZone: string): string {
+/** A time as the schedule's own zone shows it: "Tue, Oct 15, 09:00 PDT"; without a zone, as the browser's does. */
+function formatInZone(iso: string | null, timeZone?: string): string {
   if (!iso) return "—";
   const date = new Date(iso);
   if (isNaN(date.getTime())) return iso;
-  let format = formats.get(timeZone);
+  let format = formats.get(timeZone ?? "");
   if (!format) {
     const options: Intl.DateTimeFormatOptions = {
       weekday: "short",
@@ -100,9 +108,18 @@ function formatInZone(iso: string | null, timeZone: string): string {
       // A zone this browser does not know: its own zone, still named.
       format = new Intl.DateTimeFormat(undefined, options);
     }
-    formats.set(timeZone, format);
+    formats.set(timeZone ?? "", format);
   }
   return format.format(date);
+}
+
+/** A `<time>` in a schedule's zone (see `formatInZone`). */
+export function ScheduleTime({ iso, timeZone, className }: { iso: string; timeZone?: string; className?: string }) {
+  return (
+    <time dateTime={iso} className={className}>
+      {formatInZone(iso, timeZone)}
+    </time>
+  );
 }
 
 let zoneList: string[] | null = null;
@@ -155,6 +172,24 @@ interface Draft {
   /** USD; "" = the project's task cap. */
   budget: string;
   profiles: Partial<Record<TaskRole, string>>;
+  /** "" = no gate. */
+  gateCommand: string;
+  /** Seconds; "" = the default. */
+  gateTimeout: string;
+  /** USD; "" = no daily cap. */
+  dailyBudget: string;
+  notify: ScheduleNotify;
+  /** `targetKey` of the target; "" = dashboard only. */
+  notifyTarget: string;
+}
+
+/** A notify target as the target select holds it. */
+const targetKey = (target: ScheduleNotifyTarget | null) => (target ? `${target.channel}\n${target.chat}` : "");
+
+function targetOf(key: string): ScheduleNotifyTarget | null {
+  if (!key) return null;
+  const at = key.indexOf("\n");
+  return { channel: key.slice(0, at), chat: key.slice(at + 1) };
 }
 
 function draftOf(schedule: ScheduleInfo | null, limits: ScheduleLimits): Draft {
@@ -170,6 +205,11 @@ function draftOf(schedule: ScheduleInfo | null, limits: ScheduleLimits): Draft {
       timeout: "",
       budget: "",
       profiles: {},
+      gateCommand: "",
+      gateTimeout: "",
+      dailyBudget: "",
+      notify: "failures",
+      notifyTarget: "",
     };
   return {
     name: schedule.name,
@@ -182,6 +222,11 @@ function draftOf(schedule: ScheduleInfo | null, limits: ScheduleLimits): Draft {
     timeout: schedule.run_timeout_seconds == null ? "" : String(schedule.run_timeout_seconds / 60),
     budget: schedule.run_budget_usd == null ? "" : String(schedule.run_budget_usd),
     profiles: { ...schedule.profile_overrides },
+    gateCommand: schedule.gate_command ?? "",
+    gateTimeout: schedule.gate_timeout_seconds == null ? "" : String(schedule.gate_timeout_seconds),
+    dailyBudget: schedule.daily_budget_usd == null ? "" : String(schedule.daily_budget_usd),
+    notify: schedule.notify,
+    notifyTarget: targetKey(schedule.notify_target),
   };
 }
 
@@ -205,34 +250,58 @@ function fieldsOf(draft: Draft, limits: ScheduleLimits): Required<ScheduleFields
     run_timeout_seconds: minutes == null ? null : Math.round(minutes * 60),
     run_budget_usd: numberOf(draft.budget),
     profile_overrides: Object.fromEntries(Object.entries(draft.profiles).filter(([, profile]) => profile)),
+    gate_command: draft.gateCommand.trim() || null,
+    gate_timeout_seconds: numberOf(draft.gateTimeout),
+    daily_budget_usd: numberOf(draft.dailyBudget),
+    notify: draft.notify,
+    notify_target: targetOf(draft.notifyTarget),
   };
 }
 
 const sameProfiles = (a: Partial<Record<TaskRole, string>>, b: Partial<Record<TaskRole, string>>) =>
   ROLES.every((role) => (a[role] || "") === (b[role] || ""));
 
-/** What the fields change, as a PUT takes it; `profile_overrides` is sent whole. */
+/** What the fields change, as a PUT takes it; `profile_overrides` is sent whole, and a cleared field as null. */
 function changesOf(fields: Required<ScheduleFields>, schedule: ScheduleInfo): ScheduleUpdate {
   const changes: ScheduleUpdate = {};
-  for (const key of ["name", "cron", "requirement", "timezone", "work_dir", "overlap", "catch_up"] as const) {
+  for (const key of ["name", "cron", "requirement", "timezone", "work_dir", "overlap", "catch_up", "notify"] as const) {
     if (fields[key] !== schedule[key]) (changes as Record<string, unknown>)[key] = fields[key];
   }
   if (fields.run_timeout_seconds !== schedule.run_timeout_seconds) changes.run_timeout_seconds = fields.run_timeout_seconds;
   if (fields.run_budget_usd !== schedule.run_budget_usd) changes.run_budget_usd = fields.run_budget_usd;
   if (!sameProfiles(fields.profile_overrides, schedule.profile_overrides))
     changes.profile_overrides = fields.profile_overrides;
+  if ((fields.gate_command ?? "") !== (schedule.gate_command ?? "")) changes.gate_command = fields.gate_command;
+  if (fields.gate_timeout_seconds !== schedule.gate_timeout_seconds)
+    changes.gate_timeout_seconds = fields.gate_timeout_seconds;
+  if (fields.daily_budget_usd !== schedule.daily_budget_usd) changes.daily_budget_usd = fields.daily_budget_usd;
+  if (targetKey(fields.notify_target) !== targetKey(schedule.notify_target)) changes.notify_target = fields.notify_target;
   return changes;
 }
 
 /** A new schedule's fields: the optional ones that are empty are left out, so the server's defaults apply. */
 function createFields(fields: Required<ScheduleFields>): ScheduleFields {
-  const { work_dir, run_timeout_seconds, run_budget_usd, profile_overrides, ...rest } = fields;
+  const {
+    work_dir,
+    run_timeout_seconds,
+    run_budget_usd,
+    profile_overrides,
+    gate_command,
+    gate_timeout_seconds,
+    daily_budget_usd,
+    notify_target,
+    ...rest
+  } = fields;
   return {
     ...rest,
     ...(work_dir ? { work_dir } : {}),
     ...(run_timeout_seconds != null ? { run_timeout_seconds } : {}),
     ...(run_budget_usd != null ? { run_budget_usd } : {}),
     ...(Object.keys(profile_overrides).length ? { profile_overrides } : {}),
+    ...(gate_command ? { gate_command } : {}),
+    ...(gate_timeout_seconds != null ? { gate_timeout_seconds } : {}),
+    ...(daily_budget_usd != null ? { daily_budget_usd } : {}),
+    ...(notify_target ? { notify_target } : {}),
   };
 }
 
@@ -346,6 +415,208 @@ function Choices<T extends string>({
   );
 }
 
+const NOTIFY_OPTIONS: { value: ScheduleNotify; label: string; hint: string }[] = [
+  {
+    value: "failures",
+    label: "Failures",
+    hint: "Failed runs, plus the alerts (3 failures in a row, no success for a while) and their recoveries.",
+  },
+  { value: "always", label: "Always", hint: "Every run that ran a task, plus the alerts." },
+  { value: "never", label: "Never", hint: "Nothing is sent; the dashboard still shows failing schedules." },
+];
+
+const linkClass =
+  "rounded-sm underline underline-offset-2 hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring";
+
+/** The gate command, the daily budget and the notifications: the form's "Before each run and after" group. */
+function GateBudgetNotify({
+  id,
+  schedule,
+  limits,
+  draft,
+  set,
+  gateLength,
+  gateTooLong,
+  badGateTimeout,
+  badDailyBudget,
+}: {
+  id: (field: string) => string;
+  schedule: ScheduleInfo | null;
+  limits: ScheduleLimits;
+  draft: Draft;
+  set: <K extends keyof Draft>(key: K, value: Draft[K]) => void;
+  gateLength: number;
+  gateTooLong: boolean;
+  badGateTimeout: boolean;
+  badDailyBudget: boolean;
+}) {
+  const targets = limits.notify_targets;
+  const chosen = targets.find((target) => targetKey(target) === draft.notifyTarget);
+  // A saved target the allowlist no longer has stays selectable, so the select shows what is saved.
+  const gone = draft.notifyTarget && !chosen ? targetOf(draft.notifyTarget) : null;
+  const spent = schedule?.spent_today_usd;
+  const cap = schedule?.daily_budget_usd;
+  const reached = spent != null && cap != null && spent >= cap;
+  const channelsLink = (
+    <a href={settingsHref("channels")} className={linkClass}>
+      Settings → Channels
+    </a>
+  );
+
+  return (
+    <section aria-labelledby={id("around")} className="space-y-3 border-t border-border pt-4">
+      <h3 id={id("around")} className="text-xs font-semibold">Before each run and after</h3>
+
+      <div className="space-y-1">
+        <div className="flex items-baseline justify-between gap-2">
+          <label htmlFor={id("gate")} className={LABEL}>Gate command</label>
+          <span
+            id={id("gate-count")}
+            className={cn(
+              "flex items-center gap-1 text-[11px] tabular-nums",
+              gateTooLong ? "text-destructive" : "text-muted-foreground",
+            )}
+          >
+            {gateTooLong && <AlertCircle className="h-3 w-3" aria-label="Too long" />}
+            {gateLength} / {limits.gate_command_max_chars}
+          </span>
+        </div>
+        <Input
+          id={id("gate")}
+          value={draft.gateCommand}
+          onChange={(e) => set("gateCommand", e.target.value)}
+          placeholder="python3 scripts/new_alerts.py"
+          spellCheck={false}
+          autoComplete="off"
+          aria-invalid={gateTooLong}
+          aria-describedby={`${id("gate-count")} ${id("gate-hint")}`}
+          className="font-mono aria-invalid:border-destructive"
+        />
+        <p id={id("gate-hint")} className="text-xs text-muted-foreground">
+          Optional. Runs in the work directory before each run: when it prints nothing the run is skipped, what it
+          prints goes to the task, and when it fails or times out the run fails.
+        </p>
+      </div>
+
+      <div className="grid gap-3 sm:grid-cols-2">
+        <div className="space-y-1">
+          {/* A block, so it lines up with the budget's label beside it, which shares a row with "Spent today". */}
+          <label htmlFor={id("gate-timeout")} className={cn(LABEL, "block")}>Gate timeout (seconds)</label>
+          <Input
+            id={id("gate-timeout")}
+            inputMode="numeric"
+            value={draft.gateTimeout}
+            onChange={(e) => set("gateTimeout", e.target.value)}
+            placeholder={`Default: ${limits.gate_timeout_default_seconds}`}
+            aria-invalid={badGateTimeout}
+            aria-describedby={id("gate-timeout-hint")}
+            className="aria-invalid:border-destructive"
+          />
+          <p
+            id={id("gate-timeout-hint")}
+            className={cn("text-xs", badGateTimeout ? "text-destructive" : "text-muted-foreground")}
+          >
+            {badGateTimeout
+              ? `Enter whole seconds from 1 to ${limits.gate_timeout_max_seconds}, or leave it empty.`
+              : `Empty: the default, ${interval(limits.gate_timeout_default_seconds)}. At most ${interval(limits.gate_timeout_max_seconds)}.`}
+          </p>
+        </div>
+        <div className="space-y-1">
+          <div className="flex items-baseline justify-between gap-2">
+            <label htmlFor={id("daily-budget")} className={LABEL}>Daily budget (USD)</label>
+            {spent != null && (
+              <span
+                id={id("spent-today")}
+                className={cn(
+                  "flex items-center gap-1 text-[11px] tabular-nums",
+                  reached ? "text-warning" : "text-muted-foreground",
+                )}
+              >
+                {reached && <AlertCircle className="h-3 w-3" aria-hidden="true" />}
+                Spent today: {formatUsd(spent)}
+                {reached && " · reached"}
+              </span>
+            )}
+          </div>
+          <Input
+            id={id("daily-budget")}
+            inputMode="decimal"
+            value={draft.dailyBudget}
+            onChange={(e) => set("dailyBudget", e.target.value)}
+            placeholder="No daily cap"
+            aria-invalid={badDailyBudget}
+            aria-describedby={`${spent != null ? `${id("spent-today")} ` : ""}${id("daily-budget-hint")}`}
+            className="aria-invalid:border-destructive"
+          />
+          <p
+            id={id("daily-budget-hint")}
+            className={cn("text-xs", badDailyBudget ? "text-destructive" : "text-muted-foreground")}
+          >
+            {badDailyBudget
+              ? "Enter dollars as a number, or leave it empty."
+              : "Empty: none. Once this schedule's runs today have spent it, later fires are skipped until midnight, server time."}
+          </p>
+        </div>
+      </div>
+
+      <div className="grid gap-3 sm:grid-cols-2">
+        <Choices
+          name={id("notify")}
+          legend="Notify"
+          value={draft.notify}
+          onChange={(value) => set("notify", value)}
+          options={NOTIFY_OPTIONS}
+        />
+        <div className="space-y-1">
+          {targets.length === 0 && !gone ? (
+            <>
+              <p className={LABEL}>Send to</p>
+              <p className="text-sm text-foreground">Dashboard only</p>
+              <p className="text-xs text-muted-foreground">
+                No channel has a sender to send to.{" "}
+                <a href={settingsHref("channels")} className={linkClass}>
+                  Add a sender in Settings → Channels
+                </a>
+              </p>
+            </>
+          ) : (
+            <>
+              <label htmlFor={id("target")} className={LABEL}>Send to</label>
+              <select
+                id={id("target")}
+                value={draft.notifyTarget}
+                onChange={(e) => set("notifyTarget", e.target.value)}
+                aria-describedby={id("target-hint")}
+                className={SELECT}
+              >
+                <option value="">Dashboard only</option>
+                {targets.map((target) => (
+                  <option key={targetKey(target)} value={targetKey(target)}>
+                    {`${target.label}${target.channel_enabled ? "" : " (channel off)"}`}
+                  </option>
+                ))}
+                {gone && (
+                  <option value={draft.notifyTarget}>{`${gone.channel} · ${gone.chat} (not in the allowlist)`}</option>
+                )}
+              </select>
+              <p id={id("target-hint")} className="text-xs text-muted-foreground">
+                {chosen && !chosen.channel_enabled ? (
+                  <span className="text-warning">This channel is turned off in {channelsLink}. </span>
+                ) : gone ? (
+                  <span className="text-warning">
+                    This chat is no longer in its channel&apos;s sender allowlist ({channelsLink}).{" "}
+                  </span>
+                ) : null}
+                Chats a channel&apos;s sender allowlist allows. Dashboard only: nothing is sent to a channel.
+              </p>
+            </>
+          )}
+        </div>
+      </div>
+    </section>
+  );
+}
+
 /**
  * Every field of a schedule, with the live check of its rule. Null `schedule`: a new one, created disabled. The
  * server's refusal (400, 409) is shown as it gives it.
@@ -399,7 +670,22 @@ function ScheduleForm({
   const tooLong = fields.requirement.length > limits.requirement_max_chars;
   const badTimeout = Number.isNaN(fields.run_timeout_seconds);
   const badBudget = Number.isNaN(fields.run_budget_usd);
-  const invalid = missing.length > 0 || tooLong || ruleInvalid || badTimeout || badBudget;
+  const gateLength = (fields.gate_command ?? "").length;
+  const gateTooLong = gateLength > limits.gate_command_max_chars;
+  const gateTimeout = fields.gate_timeout_seconds;
+  const badGateTimeout =
+    gateTimeout != null &&
+    !(Number.isInteger(gateTimeout) && gateTimeout >= 1 && gateTimeout <= limits.gate_timeout_max_seconds);
+  const badDailyBudget = Number.isNaN(fields.daily_budget_usd);
+  const invalid =
+    missing.length > 0 ||
+    tooLong ||
+    ruleInvalid ||
+    badTimeout ||
+    badBudget ||
+    gateTooLong ||
+    badGateTimeout ||
+    badDailyBudget;
   const id = (field: string) => `${idPrefix}-${field}`;
 
   const submit = async (e: React.FormEvent) => {
@@ -623,6 +909,18 @@ function ScheduleForm({
         </p>
       </fieldset>
 
+      <GateBudgetNotify
+        id={id}
+        schedule={schedule}
+        limits={limits}
+        draft={draft}
+        set={set}
+        gateLength={gateLength}
+        gateTooLong={gateTooLong}
+        badGateTimeout={badGateTimeout}
+        badDailyBudget={badDailyBudget}
+      />
+
       {error && <p role="alert" className="text-xs text-destructive">{error}</p>}
       <div className="flex flex-wrap items-center justify-end gap-2">
         {schedule &&
@@ -729,7 +1027,7 @@ function RunHistory({ schedule, open, version }: { schedule: ScheduleInfo; open:
             const when = run.fired_at ?? run.scheduled_for;
             const text = run.error ?? run.summary;
             return (
-              <li key={run.run_id} className="flex flex-col gap-1 py-2 sm:flex-row sm:items-center sm:gap-3">
+              <li key={run.run_id} className="flex flex-col gap-1 py-2 sm:flex-row sm:flex-wrap sm:items-center sm:gap-x-3">
                 <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs sm:shrink-0">
                   <time dateTime={when} className="tabular-nums text-foreground">
                     {formatInZone(when, schedule.timezone)}
@@ -754,6 +1052,19 @@ function RunHistory({ schedule, open, version }: { schedule: ScheduleInfo; open:
                     <ArrowRight className="h-3 w-3" aria-hidden="true" />
                   </a>
                 )}
+                {run.carried_from && (
+                  <p className="text-xs text-muted-foreground sm:basis-full">Carries the input of the previous run</p>
+                )}
+                {run.gate_output && (
+                  <details className="min-w-0 text-xs sm:basis-full">
+                    <summary className="w-fit cursor-pointer rounded-sm text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring">
+                      Gate output
+                    </summary>
+                    <pre className="mt-1 max-h-48 overflow-auto whitespace-pre-wrap break-words rounded-md border border-border bg-muted/20 px-3 py-2 font-mono text-[11px] text-foreground/90">
+                      {run.gate_output}
+                    </pre>
+                  </details>
+                )}
               </li>
             );
           })}
@@ -777,8 +1088,16 @@ function runNotice(run: ScheduleRunInfo): Notice {
       return { text: "Started", tone: "ok" };
     case "queued":
       return { text: "Queued behind the running task", tone: "ok" };
+    case "gating":
+      return { text: "Checking: the gate is running", tone: "ok" };
     case "skipped_overlap":
       return { text: "Skipped: the previous run is still in progress", tone: "warn" };
+    case "skipped_budget":
+      return { text: "Skipped: today's spend reached the daily budget", tone: "warn" };
+    case "skipped_gate":
+      return { text: "Skipped: the gate printed nothing, so there is nothing new", tone: "warn" };
+    case "gate_failed":
+      return { text: run.error ? `Gate failed: ${run.error}` : "Gate failed", tone: "error" };
     default:
       return {
         text: run.error ? `Not started: ${run.error}` : RUN_STATUS[run.status]?.label ?? run.status,
@@ -823,9 +1142,13 @@ function NoticeText({ notice }: { notice: Notice }) {
   );
 }
 
-/** The last run's result and the failures in a row, as a schedule's row shows them. */
+/** The last run's result, the failures in a row and the active alerts, as a schedule's row shows them. */
 function LastRun({ schedule }: { schedule: ScheduleInfo }) {
   const failures = schedule.consecutive_failures;
+  const { failures_since: failing, stale_since: stale } = schedule.alerts;
+  const at = (iso: string) => formatInZone(iso, schedule.timezone);
+  const lastSuccess = schedule.last_success_at ? at(schedule.last_success_at) : "never";
+  const count = failures === 1 ? "1 failure" : `${failures} failures in a row`;
   return (
     <>
       <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
@@ -838,10 +1161,32 @@ function LastRun({ schedule }: { schedule: ScheduleInfo }) {
           "No runs yet"
         )}
       </span>
-      {failures > 0 && (
-        <Badge variant={failures >= 3 ? "destructive" : "warning"} className="shrink-0 gap-1">
+      {/* While the failures alert is on, its badge carries the count. */}
+      {failing ? (
+        <Badge
+          variant="destructive"
+          className="shrink-0 gap-1"
+          title={failures > 0 ? `${count}; alert since ${at(failing)}` : `Alert since ${at(failing)}`}
+        >
           <AlertCircle className="h-3 w-3" aria-hidden="true" />
-          {failures === 1 ? "1 failure" : `${failures} failures in a row`}
+          Failing{failures > 0 && ` · ${failures} in a row`}
+        </Badge>
+      ) : (
+        failures > 0 && (
+          <Badge variant={failures >= 3 ? "destructive" : "warning"} className="shrink-0 gap-1">
+            <AlertCircle className="h-3 w-3" aria-hidden="true" />
+            {count}
+          </Badge>
+        )
+      )}
+      {stale && (
+        <Badge
+          variant="destructive"
+          className="shrink-0 gap-1"
+          title={`No success for a while: alert since ${at(stale)}; last success ${lastSuccess}`}
+        >
+          <AlertCircle className="h-3 w-3" aria-hidden="true" />
+          No success lately
         </Badge>
       )}
     </>

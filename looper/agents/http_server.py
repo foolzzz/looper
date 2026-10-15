@@ -300,6 +300,7 @@ class AgentHTTPServer:
     _RE_SCHEDULE = re.compile(r"^/api/schedules/(sched-[a-zA-Z0-9]+)$")
     _RE_SCHEDULE_RUN = re.compile(r"^/api/schedules/(sched-[a-zA-Z0-9]+)/run$")
     _RE_SCHEDULE_RUNS = re.compile(r"^/api/schedules/(sched-[a-zA-Z0-9]+)/runs$")
+    _RE_SCHEDULE_NOTIFICATIONS = re.compile(r"^/api/schedules/(sched-[a-zA-Z0-9]+)/notifications$")
     _RE_CONFIG_IMPORT = re.compile(r"^/api/config/imports/(cfgimp-[0-9a-f]{16})$")
     _RE_CONFIG_IMPORT_APPLY = re.compile(r"^/api/config/imports/(cfgimp-[0-9a-f]{16})/apply$")
 
@@ -384,6 +385,8 @@ class AgentHTTPServer:
             await self._answer(writer, HTTP_200, lambda: self._run_schedule_now(m.group(1)))
         elif (m := self._RE_SCHEDULE_RUNS.match(path)) and method == "GET":
             await self._answer(writer, HTTP_200, lambda: schedules.list_runs(m.group(1), query))
+        elif (m := self._RE_SCHEDULE_NOTIFICATIONS.match(path)) and method == "GET":
+            await self._answer(writer, HTTP_200, lambda: schedules.list_notifications(m.group(1), query))
         elif (m := self._RE_PROJECT_KNOWLEDGE.match(path)) and method == "GET":
             await self._handle_knowledge(writer, HTTP_200, lambda root: knowledge.knowledge_view(m.group(1), root))
         elif (m := self._RE_PROJECT_KNOWLEDGE.match(path)) and method == "POST":

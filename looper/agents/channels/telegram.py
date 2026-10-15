@@ -152,6 +152,18 @@ class TelegramChannelAdapter(ChannelAdapter):
             await self._app.shutdown()
         logger.info("telegram channel adapter stopped")
 
+    async def notify(self, chat: str, text: str) -> DeliveryReceipt:
+        """Send ``text`` as plain text to the private chat of Telegram user ``chat`` (its id is the user's)."""
+        if self._app is None:
+            return DeliveryReceipt(channel="telegram", success=False, error="the Telegram bot is not started")
+        try:
+            for chunk in self._split_message(text, max_len=4000):
+                msg = await self._app.bot.send_message(chat_id=int(chat), text=chunk)
+            return DeliveryReceipt(channel="telegram", success=True, external_id=str(msg.message_id))
+        except Exception as exc:
+            logger.warning("telegram notification to %s failed: %s", chat, exc)
+            return DeliveryReceipt(channel="telegram", success=False, error=str(exc))
+
     async def deliver(self, envelope: MessageEnvelope) -> DeliveryReceipt:
         """Send a message to the Telegram user who started the conversation."""
         import telegram

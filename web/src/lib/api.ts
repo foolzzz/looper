@@ -204,6 +204,35 @@ export interface Overview {
     unpriced_runs: number;
   };
   health: { unhealthy: { name: string; restart_count: number; max_restarts: number }[] };
+  schedules: OverviewSchedules;
+}
+
+/** One schedule as the overview lists it; each links to #projects/<project_id>/schedules/<schedule_id>. */
+interface OverviewScheduleRef {
+  schedule_id: string;
+  name: string;
+  project_id: string;
+  project_name: string;
+}
+
+/** The overview's schedules: the next fires, the failing ones and today's skipped runs. */
+export interface OverviewSchedules {
+  total: number;
+  enabled: number;
+  /** Up to 5, soonest first, enabled schedules only. */
+  next: (OverviewScheduleRef & { next_fire_at: string; timezone: string })[];
+  /** Failures in a row, or an alert active. */
+  failing: (OverviewScheduleRef & {
+    timezone: string;
+    consecutive_failures: number;
+    failures_since: string | null;
+    /** Set while the "no success for a while" alert is active: when it started. */
+    stale_since: string | null;
+    last_success_at: string | null;
+    last_status: ScheduleRunStatus | null;
+  })[];
+  /** Runs since the server's local midnight. */
+  skipped_today: Record<"skipped_gate" | "skipped_overlap" | "skipped_missed" | "skipped_budget", number>;
 }
 
 export async function fetchOverview(): Promise<Overview> {
@@ -565,9 +594,10 @@ export type ScheduleOverlap = "skip" | "queue";
 /** After downtime: "once" runs once for all missed fires; "skip" skips them unless the latest was within 2 minutes. */
 export type ScheduleCatchUp = "once" | "skip";
 export type ScheduleRunTrigger = "scheduled" | "catch_up" | "manual";
-/** Final: all but "queued" and "running". Failures: "failed" and "timed_out". */
+/** Final: all but "queued", "gating" and "running". Failures: "failed", "timed_out" and "gate_failed". */
 export type ScheduleRunStatus =
   | "queued"
+  | "gating"
   | "running"
   | "completed"
   | "failed"
@@ -575,7 +605,25 @@ export type ScheduleRunStatus =
   | "cancelled"
   | "timed_out"
   | "skipped_overlap"
-  | "skipped_missed";
+  | "skipped_missed"
+  | "skipped_gate"
+  | "gate_failed"
+  | "skipped_budget";
+/** "failures": failed runs and the two alerts with their recoveries; "always": every run that ran a task, and the
+ * alerts; "never": nothing is sent. */
+export type ScheduleNotify = "failures" | "always" | "never";
+
+/** A chat of a channel the notifications go to. */
+export interface ScheduleNotifyTarget {
+  channel: string;
+  chat: string;
+}
+
+/** A chat a channel's sender allowlist (Settings → Channels) allows, as a schedule's notify target. */
+export interface ScheduleNotifyTargetOption extends ScheduleNotifyTarget {
+  label: string;
+  channel_enabled: boolean;
+}
 
 /** One firing of a schedule (or a "Run now"), and the task it started. */
 export interface ScheduleRunInfo {
@@ -596,9 +644,13 @@ export interface ScheduleRunInfo {
   summary: string | null;
   /** The task's cost, live while it runs. */
   cost_usd: number | null;
-  /** Why the run failed or was skipped. */
+  /** Why the run failed or was skipped; for "gate_failed", the reason and the tail of the gate's stderr. */
   error: string | null;
   finished_at: string | null;
+  /** What the gate command printed (stored truncated); null without a gate. */
+  gate_output: string | null;
+  /** The run whose unfinished input this run was given. */
+  carried_from: string | null;
 }
 
 export interface ScheduleInfo {
@@ -633,6 +685,19 @@ export interface ScheduleInfo {
   updated_at: string;
   /** The newest run of any status. */
   last_run: ScheduleRunInfo | null;
+  /** Runs in the work directory before each run; null: no gate. */
+  gate_command: string | null;
+  /** Null: `limits.gate_timeout_default_seconds`. */
+  gate_timeout_seconds: number | null;
+  /** Null: no daily cap. */
+  daily_budget_usd: number | null;
+  notify: ScheduleNotify;
+  /** Null: dashboard only. */
+  notify_target: ScheduleNotifyTarget | null;
+  /** This schedule's runs since the server's local midnight (running ones at their cost so far). */
+  spent_today_usd: number;
+  /** When each alert became active; null while it is not. */
+  alerts: { failures_since: string | null; stale_since: string | null };
 }
 
 export interface ScheduleLimits {
@@ -642,6 +707,11 @@ export interface ScheduleLimits {
   min_interval_seconds: number;
   default_timezone: string;
   roles: TaskRole[];
+  gate_command_max_chars: number;
+  gate_timeout_default_seconds: number;
+  gate_timeout_max_seconds: number;
+  /** Empty: no channel has a sender to send to. */
+  notify_targets: ScheduleNotifyTargetOption[];
 }
 
 /** A rule checked by the server: its description and next fire times, or why it is invalid. */
@@ -666,6 +736,12 @@ export interface ScheduleFields {
   run_timeout_seconds?: number | null;
   run_budget_usd?: number | null;
   profile_overrides?: Partial<Record<TaskRole, string>>;
+  /** "" or null clears it. */
+  gate_command?: string | null;
+  gate_timeout_seconds?: number | null;
+  daily_budget_usd?: number | null;
+  notify?: ScheduleNotify;
+  notify_target?: ScheduleNotifyTarget | null;
 }
 
 /** Any of a schedule's fields, plus turning it on or off. */
@@ -727,6 +803,32 @@ export async function fetchScheduleRuns(scheduleId: string, limit?: number): Pro
   const qs = limit ? `?limit=${limit}` : "";
   return (await scheduleCall<{ runs: ScheduleRunInfo[] }>("GET", `${scheduleUrl(scheduleId)}/runs${qs}`, "schedule runs"))
     .runs;
+}
+
+/** A message about a schedule: a run's result, or an alert or its recovery. */
+export interface ScheduleNotification {
+  notification_id: string;
+  kind: "run" | "failures_alert" | "failures_recovered" | "stale_alert" | "stale_recovered";
+  run_id: string | null;
+  channel: string | null;
+  chat: string | null;
+  text: string;
+  /** "dashboard": it had no target. */
+  status: "sent" | "failed" | "dashboard";
+  error: string | null;
+  created_at: string;
+}
+
+/** A schedule's notifications, newest first. */
+export async function fetchScheduleNotifications(scheduleId: string, limit?: number): Promise<ScheduleNotification[]> {
+  const qs = limit ? `?limit=${limit}` : "";
+  return (
+    await scheduleCall<{ notifications: ScheduleNotification[] }>(
+      "GET",
+      `${scheduleUrl(scheduleId)}/notifications${qs}`,
+      "schedule notifications",
+    )
+  ).notifications;
 }
 
 /** Check a rule: its description and next `count` fire times (5 by default), or why it is invalid. */

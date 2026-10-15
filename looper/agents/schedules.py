@@ -8,6 +8,12 @@ before is run. Two fires of a rule are at least ``min_interval_seconds()``
 apart (5 minutes), checked over the next 24 hours when it is saved;
 ``LOOPER_SCHEDULE_MIN_INTERVAL_SECONDS``, read when the server starts, lowers
 it for tests and validation only.
+
+S2 adds a gate command (run before each run), a daily spend cap, and whom to
+tell (``notify`` and a ``notify_target``: a chat that a channel's sender
+allowlist in Settings → Channels already allows; none means the dashboard
+only). Each schedule's view carries what its runs cost today and its active
+alerts; ``schedule_overview`` is the dashboard's summary.
 """
 
 from __future__ import annotations
@@ -20,11 +26,13 @@ from typing import Any
 import asyncpg
 
 from .. import env
-from ..db import connection as db_connection, llm_records as db_llm_records, projects as db_projects
-from ..db import schedules as db_schedules
+from ..db import channel_configs as db_channel_configs, connection as db_connection, llm_records as db_llm_records
+from ..db import projects as db_projects, schedules as db_schedules
 from . import cron
 from .agent_settings import budget_usd
+from .channels.allowlist import SENDER_ID_FORMATS, sender_ids
 from .projects import HTTP_400, HTTP_404, HTTP_409, TASK_PROFILE_ROLES, RequestError, _profile_overrides
+from .scheduler import GATE_TIMEOUT_DEFAULT_SECONDS, GATE_TIMEOUT_MAX_SECONDS
 from .tiers.task import resolve_work_dir
 
 NAME_MAX_CHARS = 80
@@ -36,6 +44,7 @@ PREVIEW_COUNT = 5
 PREVIEW_MAX = 20
 RUNS_DEFAULT = 50
 RUNS_MAX = 200
+GATE_COMMAND_MAX_CHARS = 2000
 
 MIN_INTERVAL_ENV = "LOOPER_SCHEDULE_MIN_INTERVAL_SECONDS"
 DEFAULT_MIN_INTERVAL_SECONDS = 300
@@ -52,6 +61,12 @@ class Overlap(str, Enum):
 class CatchUp(str, Enum):
     ONCE = "once"  # missed fires run once, told how many were missed
     SKIP = "skip"  # missed fires are skipped unless the latest is within the grace period
+
+
+class Notify(str, Enum):
+    FAILURES = "failures"  # failed runs, the alerts and their recoveries
+    ALWAYS = "always"  # every run that ran something, the alerts and their recoveries
+    NEVER = "never"  # nothing is sent; the dashboard still shows the alerts
 
 
 def configure_min_interval() -> int:
@@ -124,7 +139,8 @@ def run_view(row: Mapping[str, Any], cost: Mapping[str, Any] | None = None) -> d
         "fired_at": row.get("fired_at"), "trigger": row["trigger"], "missed": row["missed"],
         "status": row["status"], "task_id": row.get("task_id"), "task_status": row.get("task_status"),
         "summary": row.get("summary"), "cost_usd": cost_usd, "error": row.get("error"),
-        "finished_at": row.get("finished_at"),
+        "finished_at": row.get("finished_at"), "gate_output": row.get("gate_output"),
+        "carried_from": row.get("carried_from"),
     }
 
 
@@ -134,7 +150,9 @@ async def _run_views(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [run_view(row, costs.get(row.get("task_id") or "")) for row in rows]
 
 
-def schedule_view(row: Mapping[str, Any], last_run: dict[str, Any] | None = None) -> dict[str, Any]:
+def schedule_view(row: Mapping[str, Any], last_run: dict[str, Any] | None = None, *,
+                  spent_today: float = 0.0) -> dict[str, Any]:
+    target = {"channel": row["notify_channel"], "chat": row["notify_chat"]} if row.get("notify_channel") else None
     return {
         "schedule_id": row["id"], "project_id": row["project_id"], "name": row["name"], "cron": row["cron"],
         "timezone": row["timezone"], "description": describe(row["cron"], row["timezone"]),
@@ -144,22 +162,53 @@ def schedule_view(row: Mapping[str, Any], last_run: dict[str, Any] | None = None
         "enabled": row["enabled"], "next_fire_at": row["next_fire_at"], "last_fired_at": row["last_fired_at"],
         "last_success_at": row["last_success_at"], "consecutive_failures": row["consecutive_failures"],
         "created_via": row["created_via"], "created_at": row["created_at"], "updated_at": row["updated_at"],
+        "gate_command": row.get("gate_command"), "gate_timeout_seconds": row.get("gate_timeout_seconds"),
+        "daily_budget_usd": row.get("daily_budget_usd"), "notify": row.get("notify") or Notify.FAILURES.value,
+        "notify_target": target, "spent_today_usd": round(spent_today, 6),
+        "alerts": {"failures_since": row.get("failures_alert_at"), "stale_since": row.get("stale_alert_at")},
         "last_run": last_run,
     }
+
+
+def local_midnight(now: datetime | None = None) -> datetime:
+    """The start of today in the server's zone, where a schedule's day (its daily budget) starts."""
+    zone = cron.zone(cron.local_zone_name())
+    local = (now or _utcnow()).astimezone(zone)
+    return datetime.combine(local.date(), datetime.min.time(), tzinfo=zone)
 
 
 async def _schedule_answer(schedule_id: str) -> dict[str, Any]:
     row = await _existing(schedule_id)
     latest = (await db_schedules.latest_runs([schedule_id])).get(schedule_id)
     last_run = (await _run_views([latest]))[0] if latest else None
-    return {"schedule": schedule_view(row, last_run)}
+    spent = await db_schedules.spent_since(db_connection.get_pool(), schedule_id, local_midnight())
+    return {"schedule": schedule_view(row, last_run, spent_today=spent)}
 
 
-def limits() -> dict[str, Any]:
+async def notify_targets() -> list[dict[str, Any]]:
+    """The chats a schedule may tell: the senders each channel's allowlist (Settings → Channels) already lets in."""
+    targets = []
+    for row in await db_channel_configs.list_configs():
+        channel = row["channel_type"]
+        if channel not in SENDER_ID_FORMATS:
+            continue
+        try:
+            chats = sender_ids(channel, (row.get("config") or {}).get(SENDER_ID_FORMATS[channel].field))
+        except ValueError:
+            continue  # an invalid stored list: the channel does not start either
+        label = "Telegram" if channel == "telegram" else "Lark"
+        targets += [{"channel": channel, "chat": chat, "label": f"{label} · {chat}",
+                     "channel_enabled": bool(row.get("enabled"))} for chat in chats]
+    return targets
+
+
+async def limits() -> dict[str, Any]:
     return {
         "name_max_chars": NAME_MAX_CHARS, "requirement_max_chars": REQUIREMENT_MAX_CHARS,
         "min_interval_seconds": _min_interval, "default_timezone": cron.local_zone_name(),
         "run_timeout_max_seconds": RUN_TIMEOUT_MAX_SECONDS, "roles": list(TASK_PROFILE_ROLES),
+        "gate_command_max_chars": GATE_COMMAND_MAX_CHARS, "gate_timeout_default_seconds": GATE_TIMEOUT_DEFAULT_SECONDS,
+        "gate_timeout_max_seconds": GATE_TIMEOUT_MAX_SECONDS, "notify_targets": await notify_targets(),
     }
 
 
@@ -208,17 +257,54 @@ def _timeout(raw: Any) -> int | None:
     return raw
 
 
-def _budget(raw: Any) -> float | None:
-    return None if raw is None else budget_usd(raw, field="run_budget_usd")
+def _budget(field: str) -> Any:
+    return lambda raw: None if raw is None else budget_usd(raw, field=field)
+
+
+def _gate_command(raw: Any) -> str | None:
+    if raw is None:
+        return None
+    if not isinstance(raw, str):
+        raise ValueError("gate_command must be a string: a shell command, or empty for no gate")
+    text = raw.strip()
+    if len(text) > GATE_COMMAND_MAX_CHARS:
+        raise ValueError(f"a gate command has at most {GATE_COMMAND_MAX_CHARS} characters, got {len(text)}")
+    return text or None
+
+
+def _gate_timeout(raw: Any) -> int | None:
+    if raw is None:
+        return None
+    if isinstance(raw, bool) or not isinstance(raw, int) or not 1 <= raw <= GATE_TIMEOUT_MAX_SECONDS:
+        raise ValueError(f"gate_timeout_seconds must be a whole number of seconds from 1 to "
+                         f"{GATE_TIMEOUT_MAX_SECONDS}, or null for {GATE_TIMEOUT_DEFAULT_SECONDS}")
+    return raw
 
 
 _PARSERS = {
     "name": _name, "requirement": _requirement, "work_dir": _work_dir,
     "overlap": lambda raw: _choice("overlap", raw, Overlap),
     "catch_up": lambda raw: _choice("catch_up", raw, CatchUp),
-    "run_timeout_seconds": _timeout, "run_budget_usd": _budget,
+    "run_timeout_seconds": _timeout, "run_budget_usd": _budget("run_budget_usd"),
+    "gate_command": _gate_command, "gate_timeout_seconds": _gate_timeout,
+    "daily_budget_usd": _budget("daily_budget_usd"), "notify": lambda raw: _choice("notify", raw, Notify),
 }
-_ACCEPTED = (*db_schedules.FIELDS, "profile_overrides")
+_ACCEPTED = (*(name for name in db_schedules.FIELDS if name not in ("notify_channel", "notify_chat")),
+             "notify_target", "profile_overrides")
+
+
+async def _notify_target(raw: Any) -> dict[str, str | None]:
+    """``notify_target`` as the stored columns: one of ``notify_targets()``, or none (null)."""
+    if raw is None:
+        return {"notify_channel": None, "notify_chat": None}
+    if not isinstance(raw, dict) or not isinstance(raw.get("channel"), str) or not isinstance(raw.get("chat"), str):
+        raise RequestError(HTTP_400, 'notify_target must be {"channel": "telegram" | "lark", "chat": "<id>"} or '
+                                     "null for the dashboard only")
+    allowed = {(target["channel"], target["chat"]) for target in await notify_targets()}
+    if (raw["channel"], raw["chat"]) not in allowed:
+        raise RequestError(HTTP_400, f"{raw['channel']} chat {raw['chat']!r} is not one the channel allows: add the "
+                                     "sender in Settings → Channels first")
+    return {"notify_channel": raw["channel"], "notify_chat": raw["chat"]}
 
 
 async def _fields(data: Mapping[str, Any], *, update: bool) -> tuple[dict[str, Any], dict[str, str] | None]:
@@ -242,6 +328,8 @@ async def _fields(data: Mapping[str, Any], *, update: bool) -> tuple[dict[str, A
             fields["timezone"] = zone_name if zone_name not in (None, "") else cron.local_zone_name()
     except ValueError as exc:
         raise RequestError(HTTP_400, str(exc)) from None
+    if "notify_target" in data:
+        fields.update(await _notify_target(data["notify_target"]))
     profiles = await _profile_overrides(data["profile_overrides"]) if "profile_overrides" in data else None
     return fields, profiles
 
@@ -279,7 +367,11 @@ async def list_schedules(project_id: str) -> dict[str, Any]:
     rows = await db_schedules.list_schedules(project_id)
     latest = await db_schedules.latest_runs([row["id"] for row in rows])
     views = dict(zip(latest, await _run_views(list(latest.values()))))
-    return {"schedules": [schedule_view(row, views.get(row["id"])) for row in rows], "limits": limits()}
+    since = local_midnight()
+    pool = db_connection.get_pool()
+    spent = {row["id"]: await db_schedules.spent_since(pool, row["id"], since) for row in rows}
+    return {"schedules": [schedule_view(row, views.get(row["id"]), spent_today=spent[row["id"]]) for row in rows],
+            "limits": await limits()}
 
 
 async def create_schedule(project_id: str, data: dict[str, Any], *, created_via: str = "dashboard",
@@ -390,3 +482,36 @@ async def run_now(schedule_id: str, scheduler: Any) -> dict[str, Any]:
         raise RequestError(HTTP_404, f"schedule {schedule_id!r} not found")
     row = await db_schedules.get_run(run_id)
     return {"run": (await _run_views([row]))[0]}
+
+
+async def list_notifications(schedule_id: str, query: Mapping[str, str]) -> dict[str, Any]:
+    """The schedule's messages, sent or not, newest first."""
+    raw = query.get("limit") or str(RUNS_DEFAULT)
+    if not raw.isdigit() or not 1 <= int(raw) <= RUNS_MAX:
+        raise RequestError(HTTP_400, f"limit must be a whole number from 1 to {RUNS_MAX}")
+    await _existing(schedule_id)
+    rows = await db_schedules.list_notifications(schedule_id, limit=int(raw))
+    return {"notifications": [
+        {"notification_id": row["id"], "kind": row["kind"], "run_id": row["run_id"], "channel": row["channel"],
+         "chat": row["chat"], "text": row["text"], "status": row["status"], "error": row["error"],
+         "created_at": row["created_at"]} for row in rows]}
+
+
+async def schedule_overview(since: datetime) -> dict[str, Any]:
+    """The dashboard's schedules: how many there are, the next 5 fires, the failing ones, and the runs skipped
+    since ``since`` by reason."""
+    summary = await db_schedules.overview(since)
+    return {
+        "total": summary["total"], "enabled": summary["enabled"],
+        "next": [{"schedule_id": row["id"], "name": row["name"], "project_id": row["project_id"],
+                  "project_name": row["project_name"], "next_fire_at": row["next_fire_at"],
+                  "timezone": row["timezone"]} for row in summary["upcoming"]],
+        "failing": [{"schedule_id": row["id"], "name": row["name"], "project_id": row["project_id"],
+                     "project_name": row["project_name"], "timezone": row["timezone"],
+                     "consecutive_failures": row["consecutive_failures"],
+                     "failures_since": row["failures_alert_at"], "stale_since": row["stale_alert_at"],
+                     "last_success_at": row["last_success_at"], "last_status": row["last_status"]}
+                    for row in summary["failing"]],
+        "skipped_today": {status: summary["skipped"].get(status, 0)
+                          for status in ("skipped_gate", "skipped_overlap", "skipped_missed", "skipped_budget")},
+    }

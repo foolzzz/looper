@@ -38,6 +38,18 @@ class ChannelRegistry:
         for channel_id in list(self._channels):
             await self.unregister(channel_id)
 
+    def get(self, channel_id: str) -> ChannelAdapter | None:
+        return self._channels.get(channel_id)
+
+    async def notify(self, channel_type: str, chat: str, text: str) -> tuple[bool, str | None]:
+        """Send a schedule's message through the running ``channel_type`` channel: whether it was sent, and why
+        not."""
+        adapter = self._channels.get(f"channel-{channel_type}")
+        if adapter is None:
+            return False, f"the {channel_type} channel is not running: enable it in Settings → Channels"
+        receipt = await adapter.notify(chat, text)
+        return receipt.success, receipt.error
+
     def list_channels(self) -> list[dict[str, Any]]:
         return [
             {

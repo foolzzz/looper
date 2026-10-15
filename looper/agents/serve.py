@@ -469,7 +469,7 @@ async def _run_agent_system(
 
     # It fires the schedules once the agents and the HTTP server are up, and hears from the TaskRouter when a
     # task ends, to record a scheduled run's outcome.
-    scheduler = Scheduler(bus=bus)
+    scheduler = Scheduler(bus=bus, sender=registry.notify)
     task_router = TaskRouter(runtime_root=runtime_root, broadcaster=broadcaster, claude_bin=claude_bin,
                              on_task_end=scheduler.task_ended)
     supervisor.register(task_router)
