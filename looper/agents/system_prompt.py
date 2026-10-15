@@ -103,9 +103,11 @@ after it:
   later task of this project as {"text": "...", "scope": "project"}."""
 
 
-# The task requirement's share of a task section; a longer one is clipped so
-# it cannot crowd out the other layers.
-TASK_REQUIREMENT_LIMIT = 8_000
+# The longest task requirement. Where a requirement comes in (a task created or
+# edited, a schedule, the Manager's tools) a longer one is refused
+# (``projects.check_requirement``); clipping it in a task section is only a
+# last resort for rows stored before that check.
+TASK_REQUIREMENT_LIMIT = 32_000
 
 
 def sha256_text(text: str) -> str:

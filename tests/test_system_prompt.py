@@ -185,7 +185,8 @@ def test_a_workers_and_a_reviewers_task_lists_the_supplements_after_the_requirem
 def test_a_long_requirement_is_clipped_with_a_visible_marker() -> None:
     requirement = "x" * (TASK_REQUIREMENT_LIMIT + 500)
     section = plan_task_section(task_id="t1", requirement=requirement, project_name="p", work_dir="/w")
-    assert TASK_REQUIREMENT_LIMIT == 8_000
+    # Only a row from before the input checks can be longer (``projects.check_requirement``).
+    assert TASK_REQUIREMENT_LIMIT == 32_000
     assert "x" * TASK_REQUIREMENT_LIMIT in section and "x" * (TASK_REQUIREMENT_LIMIT + 1) not in section
     assert "[clipped: 500 more characters]" in section
     short = plan_task_section(task_id="t1", requirement="y" * TASK_REQUIREMENT_LIMIT, project_name="p", work_dir="/w")

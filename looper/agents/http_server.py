@@ -912,6 +912,13 @@ class AgentHTTPServer:
                 return
 
         requirement = data.get("requirement")
+        if isinstance(requirement, str):
+            try:
+                projects.check_requirement(requirement)
+            except projects.RequestError as exc:
+                writer.write(_json_response(exc.status, {"error": str(exc)}))
+                await writer.drain()
+                return
         if isinstance(requirement, str) and requirement.strip() and requirement != task.get("requirement"):
             # Kept as a new version, like an edit of a running task's; the task has no Planner to tell yet.
             from ..db.task_changes import edit_requirement
