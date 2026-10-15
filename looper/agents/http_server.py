@@ -324,6 +324,8 @@ class AgentHTTPServer:
             await self._handle_chat_send(body, writer)
         elif path == "/api/chat/targets" and method == "GET":
             await self._handle_chat_targets(writer)
+        elif path == "/api/chat/sessions" and method == "GET":
+            await self._handle_chat_sessions(writer)
         elif path == "/api/chat/messages" and method == "GET":
             await self._handle_chat_messages(query, writer)
         elif path == "/api/chat/messages" and method == "POST":
@@ -709,6 +711,19 @@ class AgentHTTPServer:
         """The Manager, then each recent task's Planner and step agents (finished ones too)."""
         targets = await list_chat_targets(self._task_router)
         writer.write(_json_response(HTTP_200, {"targets": _serialize(targets)}))
+        await writer.drain()
+
+    async def _handle_chat_sessions(self, writer: asyncio.StreamWriter) -> None:
+        """The Manager's conversations on every channel, newest first, for the Chat page's conversation list; a
+        failed read is a 500, so the page shows it rather than an empty list."""
+        try:
+            from ..db.chat import list_sessions
+            sessions = await list_sessions()
+            writer.write(_json_response(HTTP_200, {"sessions": _serialize(sessions)}))
+        except Exception as exc:
+            logger.warning("failed to list chat sessions", exc_info=True)
+            error = f"the database could not be read ({type(exc).__name__})"
+            writer.write(_json_response(HTTP_500, {"error": error}))
         await writer.drain()
 
     async def _handle_chat_messages(
