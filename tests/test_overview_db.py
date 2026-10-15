@@ -140,9 +140,15 @@ def test_the_agents_running_now_and_each_active_projects_limits(monkeypatch: pyt
              "since": now - timedelta(minutes=12)},
             {**run, "agent_id": "reviewer-1", "role": "reviewer", "step": "parser", "state": "running", "since": now},
         ]
+        down = {"healthy": False, "state": "restarting", "up": False, "restart_count": 2,
+                "last_crash_at": "2026-10-15T12:00:00+00:00", "next_restart_at": "2026-10-15T12:00:04+00:00",
+                "agent_type": "worker"}
+        looping = {**down, "state": "crash_looping", "up": True, "restart_count": 3, "next_restart_at": None,
+                   "agent_type": "task_router"}
         supervisor = SimpleNamespace(agent_status=lambda: {
-            "manager": {"healthy": True, "restart_count": 0, "max_restarts": 3, "agent_type": "manager"},
-            "worker-pool": {"healthy": False, "restart_count": 2, "max_restarts": 3, "agent_type": "worker"}})
+            "manager": {"healthy": True, "state": "running", "up": True, "restart_count": 0, "last_crash_at": None,
+                        "next_restart_at": None, "agent_type": "manager"},
+            "worker-pool": down, "task-router": looping})
         server = _server(task_router=router, worker_pool=SimpleNamespace(runs=lambda: pool_runs),
                          manager=SimpleNamespace(agent_id="manager", busy=True), supervisor=supervisor)
 
@@ -167,7 +173,13 @@ def test_the_agents_running_now_and_each_active_projects_limits(monkeypatch: pyt
              "reviewers": {"running": 0, "waiting": 0, "limit": 8}},
         ]
         assert body["idle_projects"] == 2
-        assert body["health"] == {"unhealthy": [{"name": "worker-pool", "restart_count": 2, "max_restarts": 3}]}
+        # The components not simply running: one waiting to restart, one crash-looping though up now.
+        assert body["health"] == {"unhealthy": [
+            {"name": "worker-pool", **{k: down[k] for k in ("state", "up", "restart_count", "last_crash_at",
+                                                            "next_restart_at")}},
+            {"name": "task-router", **{k: looping[k] for k in ("state", "up", "restart_count", "last_crash_at",
+                                                              "next_restart_at")}},
+        ]}
 
         # Without a Manager, a router or a pool to ask, nothing runs.
         status, body = await _get(_server(), "/api/overview")

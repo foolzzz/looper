@@ -513,8 +513,11 @@ class ManagerAgent:
     async def _handle_lifecycle(self, envelope: MessageEnvelope) -> None:
         event = envelope.payload.get("event", "")
         agent_id = envelope.payload.get("agent_id", "")
-        if event == "max_restarts_exceeded":
-            logger.error("agent %s has exceeded max restarts", agent_id)
+        if event == "crash_looping":
+            logger.error("agent %s is crash-looping; the supervisor keeps restarting it, waiting longer each time",
+                         agent_id)
+        elif event == "recovered":
+            logger.info("agent %s is stable again after crash-looping", agent_id)
 
     async def _invoke_claude(self, message: str, context_envelope: MessageEnvelope, *, turn: Turn) -> str:
         """Send the message to the resident Claude as one user turn and return its reply; the tools Claude calls
