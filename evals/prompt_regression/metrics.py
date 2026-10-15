@@ -29,6 +29,7 @@ from typing import Any
 
 from looper.agents.runtimes.omp import EDIT_TOOLS as OMP_EDIT_TOOLS
 from looper.agents.runtimes.omp import edited_paths as omp_edited_paths
+from looper.agents.tiers.planner_protocol import FINAL_HEADINGS
 from looper.agents.tiers.worker import extract_report
 
 TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled", "stopped"})
@@ -202,6 +203,13 @@ def bracketed_pairs(steps: Iterable[Mapping[str, Any]]) -> int:
                if before[a] & before[b] and any({a, b} <= upstream for upstream in before.values()))
 
 
+def final_summary(detail: Mapping[str, Any]) -> int:
+    """1 when the task's result is a final summary with every field (code writes one heading per field only when
+    the Planner gave them all), else 0."""
+    result = str(detail.get("result_summary") or "")
+    return int(all(f"## {heading}\n" in result for heading in FINAL_HEADINGS.values()))
+
+
 def planner_changed_files(
     changes: Mapping[str, float],
     windows: Mapping[str, list[tuple[float, float]]],
@@ -281,6 +289,9 @@ def task_metrics(
         "independent_pairs": independent_pairs(detail.get("steps") or []),
         "bracketed_pairs": bracketed_pairs(detail.get("steps") or []),
         "parallel_workers": most_at_once(windows.get("worker", [])),
+        # The Planner's progress notes kept in the task journal, and whether the task ended with a final summary.
+        "progress_notes": sum(1 for entry in detail.get("journal") or [] if entry.get("kind") == "progress"),
+        "final_summary": final_summary(detail),
     }
     status = str(detail.get("status") or "")
     problems = []

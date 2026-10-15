@@ -142,6 +142,13 @@ def test_bracketed_pairs_need_a_shared_step_before_and_a_step_after(depends_on: 
     assert metrics.bracketed_pairs(steps) == pairs
 
 
+def test_a_final_summary_needs_every_field_heading() -> None:
+    full = "## Delivered\na\n\n## How to use\nb\n\n## Verification\nc\n\n## Open issues\nnone"
+    assert metrics.final_summary({"result_summary": full}) == 1
+    assert metrics.final_summary({"result_summary": full.replace("## Verification\nc\n\n", "")}) == 0
+    assert metrics.final_summary({"result_summary": "calc is built"}) == 0
+
+
 def test_most_at_once_counts_overlapping_runs_but_not_touching_ones() -> None:
     assert metrics.most_at_once([(0.0, 10.0), (5.0, 12.0), (11.0, 20.0)]) == 2
     assert metrics.most_at_once([(0.0, 10.0), (10.0, 20.0)]) == 1
@@ -341,6 +348,8 @@ def test_fake_mode_runs_every_task_and_sees_misbehaviour(tmp_path: Path) -> None
                      "interface_first": (1, 1, 2), "reviewed_step": (0, 0, 1), "retry_after_failure": (0, 0, 1),
                      "chat_correction": (0, 0, 1), "misbehaving": (0, 0, 1)}
     assert by_id["chat_correction"]["planner_turns"]["chat"] == 1
+    # The fake Planner's decisions carry progress notes, and its completing accept the final summary.
+    assert by_id["dependent_steps"]["progress_notes"] == 2 and by_id["dependent_steps"]["final_summary"] == 1
     assert all(task["cost_usd"] > 0 for task in result["tasks"])
 
     bad = by_id["misbehaving"]

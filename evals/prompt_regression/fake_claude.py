@@ -9,9 +9,10 @@ agent system started it in:
 - the Planner (a resident process; its task section has neither of the
   markers below) answers each user turn by its kind: [PLAN] with the task's scripted plan; [DECISION] with
   what a careful Planner decides from the allowed decisions (accept, else
-  review a completed step that needs one, else retry a failed one, else fail);
+  review a completed step that needs one, else retry a failed one, else fail),
+  with a progress note, and an accept with the task's final summary;
   [CHAT] by forwarding the message to the running step, if any; [SUPERVISE]
-  with no review;
+  with no review and a progress note;
 - a Worker (its task section says "Your step:") writes the files its step's
   scripted attempt lists and reports that attempt's status, after the
   attempt's ``seconds`` when it gives them; with ``wait_for_input`` it first
@@ -97,11 +98,19 @@ def _fenced(value: dict[str, Any]) -> str:
     return "```json\n" + json.dumps(value, ensure_ascii=False) + "\n```"
 
 
+PROGRESS = {"done": "the steps accepted so far", "now": "the next step", "next": "the rest of the plan",
+            "risks": "none", "estimate": "a minute"}
+# Kept only on the accept that completes the task.
+FINAL = {"delivered": "the task's files", "how_to_use": "read them", "verification": "each step was checked",
+         "open_issues": "none"}
+
+
 def _decide(message: str) -> dict[str, Any]:
     allowed_line = re.search(r"^Allowed decisions now: (.*)\.$", message, re.MULTILINE)
     allowed = {item.split(" ")[0] for item in (allowed_line.group(1).split(", ") if allowed_line else [])}
     if "accept" in allowed:
-        return {"decision": "accept", "reason": "meets the acceptance criteria", "summary": "The step is done."}
+        return {"decision": "accept", "reason": "meets the acceptance criteria", "summary": "The step is done.",
+                "final": FINAL}
     if "review" in allowed and "needs a passing review" in message:
         return {"decision": "review", "reason": "the step asks for an independent review"}
     if "retry" in allowed:
@@ -135,11 +144,11 @@ def _planner(script: dict[str, Any], stdin: _Stdin) -> None:
             reply = {"steps": script["plan"]}
             writes = script.get("planner_writes")
         elif message.startswith("[DECISION]"):
-            reply = _decide(message)
+            reply = {**_decide(message), "progress": PROGRESS}
         elif message.startswith("[CHAT]"):
             reply = _chat(message)
         else:
-            reply = {"reviews": []}
+            reply = {"reviews": [], "progress": PROGRESS}
         cost += PLANNER_TURN_COST
         _answer("fake-planner", "Done.\n\n" + _fenced(reply), cost, writes=writes)
 
