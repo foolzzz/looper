@@ -63,6 +63,17 @@ class CatchUp(str, Enum):
     SKIP = "skip"  # missed fires are skipped unless the latest is within the grace period
 
 
+class SkipRows(str, Enum):
+    """Whether a list of runs shows the routine skips (``ROUTINE_SKIPS``)."""
+
+    SHOW = "show"
+    HIDE = "hide"
+
+
+# Runs that only say there was nothing to do: the gate found nothing new, or the previous run was still going.
+ROUTINE_SKIPS = ("skipped_gate", "skipped_overlap")
+
+
 class Notify(str, Enum):
     FAILURES = "failures"  # failed runs, the alerts and their recoveries
     ALWAYS = "always"  # every run that ran something, the alerts and their recoveries
@@ -138,6 +149,7 @@ def run_view(row: Mapping[str, Any], cost: Mapping[str, Any] | None = None) -> d
         "run_id": row["id"], "schedule_id": row["schedule_id"], "scheduled_for": row["scheduled_for"],
         "fired_at": row.get("fired_at"), "trigger": row["trigger"], "missed": row["missed"],
         "status": row["status"], "task_id": row.get("task_id"), "task_status": row.get("task_status"),
+        "task_title": row.get("task_title"),
         "summary": row.get("summary"), "cost_usd": cost_usd, "error": row.get("error"),
         "finished_at": row.get("finished_at"), "gate_output": row.get("gate_output"),
         "carried_from": row.get("carried_from"),
@@ -457,11 +469,29 @@ async def delete_schedule(schedule_id: str) -> dict[str, Any]:
 
 
 async def list_runs(schedule_id: str, query: Mapping[str, str]) -> dict[str, Any]:
+    """A page of the schedule's runs, newest first: ``limit`` of them, older than the run ``before`` when given,
+    without the routine skips when ``skips`` is ``hide``. ``next_before`` continues the list (None at its end), and
+    ``routine_skips`` counts those skips over the schedule's whole history, shown or not."""
     raw = query.get("limit") or str(RUNS_DEFAULT)
     if not raw.isdigit() or not 1 <= int(raw) <= RUNS_MAX:
         raise RequestError(HTTP_400, f"limit must be a whole number from 1 to {RUNS_MAX}")
+    try:
+        skips = _choice("skips", query.get("skips") or SkipRows.SHOW.value, SkipRows)
+    except ValueError as exc:
+        raise RequestError(HTTP_400, str(exc)) from None
     await _existing(schedule_id)
-    return {"runs": await _run_views(await db_schedules.list_runs(schedule_id, limit=int(raw)))}
+    before = query.get("before") or None
+    if before is not None:
+        run = await db_schedules.get_run(before)
+        if run is None or run["schedule_id"] != schedule_id:
+            raise RequestError(HTTP_400, f"before must be a run of schedule {schedule_id}")
+    limit = int(raw)
+    rows = await db_schedules.list_runs(schedule_id, limit=limit + 1, before=before,
+                                        without=ROUTINE_SKIPS if skips == SkipRows.HIDE.value else ())
+    page = rows[:limit]
+    return {"runs": await _run_views(page),
+            "next_before": page[-1]["id"] if len(rows) > limit else None,
+            "routine_skips": await db_schedules.run_counts(schedule_id, ROUTINE_SKIPS)}
 
 
 def preview(data: Mapping[str, Any], *, now: datetime | None = None) -> dict[str, Any]:
