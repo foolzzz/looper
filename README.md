@@ -192,6 +192,7 @@ Looper was called LoopX up to v2.5.0. The upgrade needs no manual step:
 | **TaskRouter** | `looper/agents/tiers/task.py` | Task lifecycle, a limit of running tasks per project (8 by default), queue |
 | **Planner** | `looper/agents/tiers/planner.py` | Step decomposition, dispatch, verification |
 | **WorkerPool** | `looper/agents/tiers/worker.py` | Claude CLI subprocess pool with stream-json output |
+| **Scheduler** | `looper/agents/scheduler.py` | Fires each project's schedules: a full task per firing, started at once; missed fires run once, an overlapping firing is skipped or queued, a run past its timeout is stopped |
 
 All inter-agent communication flows through a typed async **MessageBus** with
 `MessageEnvelope` routing.
@@ -204,6 +205,7 @@ PostgreSQL is a hard startup dependency; `looper serve` applies
 | Area | Tables | What they hold |
 |---|---|---|
 | Projects and tasks | `projects`, `tasks`, `task_steps`, `task_plans`, `task_profile_overrides` | Projects with their default directory, background and execution settings; tasks, their Planner's plan and steps, and the Agent Profile a task chose for a role |
+| Schedules | `schedules`, `schedule_profile_overrides`, `schedule_runs` | A project's schedules (time rule and zone, requirement, run policies, Agent Profiles) and each firing's run with its task, outcome and cost |
 | Task memory and knowledge | `task_journal`, `project_documents`, `project_document_drafts` | The journal code writes as a task runs; a project's knowledge documents and the drafts waiting for your review |
 | Agents and settings | `agent_runtimes`, `llm_providers`, `llm_provider_secrets`, `agent_profiles`, `agent_setting_layers`, `role_configs`, `agent_sessions` | Runtimes, providers (their API keys kept apart) and Agent Profiles; the settings layers; each role's prompt and limits; the sessions the Manager and Planners resume |
 | Capability catalog | `library_items`, `library_files`, `library_mcp_servers`, `library_installs` | Plugins, skills and MCP servers with their files or server configuration, and where each is installed |
@@ -222,8 +224,8 @@ release wheel serves the copy packaged with it.
 |---|---|
 | **Dashboard** | What is happening now: task counts by group (each opening the filtered Tasks page), the agents running now, each active project's concurrency against its limits, today's spend, and a warning when a component is unhealthy |
 | **Chat** | Talk to the global Manager, or to a running task's Planner (each message becomes a new step of that task); SSE streaming |
-| **Tasks** | Task list, project and status filters, create/start/stop/delete controls |
-| **Project** | One project's overview, knowledge documents, its own skills and installs, the Agent Profiles and other agent settings its roles override, and its settings |
+| **Tasks** | Task list, project, status and schedule filters, a Scheduled badge on the tasks a schedule created, create/start/stop/delete controls |
+| **Project** | One project's overview, knowledge documents, its own skills and installs, the Agent Profiles and other agent settings its roles override, its schedules (rule, next fire times, enable, Run now, run history) and its settings |
 | **Task Detail** | Config editor (init status), overview, pipeline DAG, sessions, conversation; each Agent Timeline row has a **History** button |
 | **Runs** | Each role's sessions and run history (a Manager `/new` shows as a new session), each run opening its history; no configuration, a link to the role in Settings → Roles |
 | **Agent history** | One agent's launch command, full transcript (text, thinking, tool calls and results) and activity; follows a running agent and flags one with no output for 2 minutes |
@@ -239,6 +241,7 @@ site's page (its `Origin`) is refused. The main route groups:
 | Status | `GET /api/status`, `GET /api/overview` | System health and the startup self-check (`checks`); the Dashboard's overview of what is happening now |
 | Projects | `/api/projects`, `/api/projects/:id`, `/api/projects/:id/knowledge/...` | Create, edit and delete projects; their knowledge documents and drafts |
 | Tasks | `/api/tasks`, `/api/tasks/create`, `/api/tasks/:id/...`, `/api/tasks/{start,stop,cancel,delete}` | List and create tasks (in a project, with optional `profile_overrides`), read one, start, stop, cancel, delete; activity and its SSE stream |
+| Schedules | `/api/projects/:id/schedules`, `/api/schedules/:id/...`, `POST /api/schedules/preview` | Create, edit, enable and delete a project's schedules; run one now; its run history; a rule's next fire times |
 | Catalog and installs | `/api/catalog/...`, `/api/installs/...`, `/api/projects/:id/installs`, `/api/projects/:id/skills/...` | Plugins, skills and MCP servers: import, upload, git, write, edit, delete; install them globally or in a project |
 | Agent settings | `/api/agent-settings/...`, `/api/projects/:id/agent-settings/...`, `/api/roles/...` | The settings layers, each field with its effective value and source; each role's prompt and limits |
 | Registry | `GET /api/registry`, `/api/runtimes/:id/probe`, `/api/providers/...`, `/api/agent-profiles/...` | Runtime types and the built-in runtimes (Re-detect probes one); register, edit and delete providers (API keys masked) and Agent Profiles, each with where it is used |
@@ -257,6 +260,7 @@ the endpoints with their fields and errors.
 | Variable | Required | Description |
 |---|---|---|
 | `LOOPER_DATABASE_URL` | Yes | PostgreSQL connection string |
+| `LOOPER_SCHEDULE_MIN_INTERVAL_SECONDS` | No | For tests and validation only: the least time between two fires of a schedule (default 300), read at startup |
 
 The `claude` processes inherit the server's environment, so the Claude CLI
 authenticates as it does in your shell: signed in, or with an API key as its

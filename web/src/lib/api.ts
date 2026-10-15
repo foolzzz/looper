@@ -40,6 +40,9 @@ export interface TaskInfo {
   work_dir: string;
   /** What the task's Planner, Workers and Reviewers spent so far; null when it could not be read. */
   cost?: TaskCost | null;
+  /** The schedule that created the task; null for any other task (and once that schedule is deleted). */
+  schedule_id: string | null;
+  schedule_name: string | null;
 }
 
 /** The agents that work on one task; their runs make up its cost. */
@@ -97,6 +100,8 @@ export interface Project extends ProjectExecution {
   task_count: number;
   /** Tasks pending, assigned, running or executing. */
   active_count: number;
+  /** Its schedules; a project with any cannot be deleted. */
+  schedule_count: number;
 }
 
 export interface ChatSendResponse {
@@ -207,10 +212,11 @@ export async function fetchOverview(): Promise<Overview> {
   return res.json();
 }
 
-export async function fetchTasks(projectId?: string, group?: TaskGroup): Promise<TaskInfo[]> {
+export async function fetchTasks(projectId?: string, group?: TaskGroup, scheduleId?: string): Promise<TaskInfo[]> {
   const params = new URLSearchParams();
   if (projectId) params.set("project_id", projectId);
   if (group) params.set("group", group);
+  if (scheduleId) params.set("schedule_id", scheduleId);
   const qs = params.toString();
   const res = await fetch(`${API_BASE}/tasks${qs ? `?${qs}` : ""}`);
   if (!res.ok) throw new Error(`tasks ${res.status}`);
@@ -552,6 +558,182 @@ export async function deleteProject(projectId: string): Promise<void> {
   notifyProjectsChanged();
 }
 
+// --- A project's schedules: a full task of the project on a time rule ---
+
+/** "skip": a firing while the previous run's task is in progress is skipped; "queue": it waits (at most one). */
+export type ScheduleOverlap = "skip" | "queue";
+/** After downtime: "once" runs once for all missed fires; "skip" skips them unless the latest was within 2 minutes. */
+export type ScheduleCatchUp = "once" | "skip";
+export type ScheduleRunTrigger = "scheduled" | "catch_up" | "manual";
+/** Final: all but "queued" and "running". Failures: "failed" and "timed_out". */
+export type ScheduleRunStatus =
+  | "queued"
+  | "running"
+  | "completed"
+  | "failed"
+  | "stopped"
+  | "cancelled"
+  | "timed_out"
+  | "skipped_overlap"
+  | "skipped_missed";
+
+/** One firing of a schedule (or a "Run now"), and the task it started. */
+export interface ScheduleRunInfo {
+  run_id: string;
+  schedule_id: string;
+  /** The fire time this run is for. */
+  scheduled_for: string;
+  /** Null while queued. */
+  fired_at: string | null;
+  trigger: ScheduleRunTrigger;
+  /** Fires missed before this run (a catch-up run stands in for them). */
+  missed: number;
+  status: ScheduleRunStatus;
+  /** Null for a skipped run, and while queued. */
+  task_id: string | null;
+  task_status: string | null;
+  /** The task's result or error, set when the run ends. */
+  summary: string | null;
+  /** The task's cost, live while it runs. */
+  cost_usd: number | null;
+  /** Why the run failed or was skipped. */
+  error: string | null;
+  finished_at: string | null;
+}
+
+export interface ScheduleInfo {
+  schedule_id: string;
+  project_id: string;
+  name: string;
+  /** Five-field cron rule, read in `timezone`. */
+  cron: string;
+  timezone: string;
+  /** The rule in words, e.g. "Weekdays at 09:00 (America/Los_Angeles)". */
+  description: string;
+  requirement: string;
+  /** "" = the project's default directory at firing time. */
+  work_dir: string;
+  overlap: ScheduleOverlap;
+  catch_up: ScheduleCatchUp;
+  /** Null: no limit. */
+  run_timeout_seconds: number | null;
+  /** Null: the project's task spend cap applies. */
+  run_budget_usd: number | null;
+  /** The Agent Profile of some of a run's roles; {} = none. */
+  profile_overrides: Partial<Record<TaskRole, string>>;
+  /** A new schedule starts disabled. */
+  enabled: boolean;
+  /** Null while disabled. */
+  next_fire_at: string | null;
+  last_fired_at: string | null;
+  last_success_at: string | null;
+  consecutive_failures: number;
+  created_via: "dashboard" | "manager";
+  created_at: string;
+  updated_at: string;
+  /** The newest run of any status. */
+  last_run: ScheduleRunInfo | null;
+}
+
+export interface ScheduleLimits {
+  name_max_chars: number;
+  requirement_max_chars: number;
+  /** Fires closer than this make a rule invalid. */
+  min_interval_seconds: number;
+  default_timezone: string;
+  roles: TaskRole[];
+}
+
+/** A rule checked by the server: its description and next fire times, or why it is invalid. */
+export interface SchedulePreview {
+  valid: boolean;
+  cron: string;
+  timezone: string;
+  description: string | null;
+  next: string[];
+  error: string | null;
+}
+
+/** A new schedule's fields; one is always created disabled. */
+export interface ScheduleFields {
+  name: string;
+  cron: string;
+  requirement: string;
+  timezone?: string;
+  work_dir?: string;
+  overlap?: ScheduleOverlap;
+  catch_up?: ScheduleCatchUp;
+  run_timeout_seconds?: number | null;
+  run_budget_usd?: number | null;
+  profile_overrides?: Partial<Record<TaskRole, string>>;
+}
+
+/** Any of a schedule's fields, plus turning it on or off. */
+export type ScheduleUpdate = Partial<ScheduleFields> & { enabled?: boolean };
+
+const scheduleUrl = (scheduleId: string) => `${API_BASE}/schedules/${encodeURIComponent(scheduleId)}`;
+
+/** Send JSON (or nothing) to a schedule endpoint; a refusal throws the server's reason. */
+async function scheduleCall<T>(method: string, url: string, label: string, body?: unknown): Promise<T> {
+  const res = await fetch(url, {
+    method,
+    headers: body === undefined ? undefined : { "Content-Type": "application/json" },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  if (!res.ok) await failed(res, label);
+  return res.json();
+}
+
+/** A project's schedules, ordered by name, and the limits their fields have. */
+export function fetchSchedules(projectId: string): Promise<{ schedules: ScheduleInfo[]; limits: ScheduleLimits }> {
+  return scheduleCall("GET", `${API_BASE}/projects/${encodeURIComponent(projectId)}/schedules`, "schedules");
+}
+
+/** Create a schedule, disabled; 409 when the project has one with that name already. */
+export async function createSchedule(projectId: string, fields: ScheduleFields): Promise<ScheduleInfo> {
+  const data = await scheduleCall<{ schedule: ScheduleInfo }>(
+    "POST",
+    `${API_BASE}/projects/${encodeURIComponent(projectId)}/schedules`,
+    "create schedule",
+    fields,
+  );
+  notifyProjectsChanged();
+  return data.schedule;
+}
+
+export async function fetchSchedule(scheduleId: string): Promise<ScheduleInfo> {
+  return (await scheduleCall<{ schedule: ScheduleInfo }>("GET", scheduleUrl(scheduleId), "schedule")).schedule;
+}
+
+/** Send only the fields to change; enabling sets the next fire time from now, disabling clears it. */
+export async function updateSchedule(scheduleId: string, fields: ScheduleUpdate): Promise<ScheduleInfo> {
+  return (await scheduleCall<{ schedule: ScheduleInfo }>("PUT", scheduleUrl(scheduleId), "update schedule", fields))
+    .schedule;
+}
+
+/** Delete a schedule with its runs; the tasks it created stay. */
+export async function deleteSchedule(scheduleId: string): Promise<void> {
+  await scheduleCall("DELETE", scheduleUrl(scheduleId), "delete schedule");
+  notifyProjectsChanged();
+}
+
+/** Run now, also while disabled: the run is running, queued, skipped_overlap, or failed with its error. */
+export async function runSchedule(scheduleId: string): Promise<ScheduleRunInfo> {
+  return (await scheduleCall<{ run: ScheduleRunInfo }>("POST", `${scheduleUrl(scheduleId)}/run`, "run schedule")).run;
+}
+
+/** A schedule's runs, newest first. */
+export async function fetchScheduleRuns(scheduleId: string, limit?: number): Promise<ScheduleRunInfo[]> {
+  const qs = limit ? `?limit=${limit}` : "";
+  return (await scheduleCall<{ runs: ScheduleRunInfo[] }>("GET", `${scheduleUrl(scheduleId)}/runs${qs}`, "schedule runs"))
+    .runs;
+}
+
+/** Check a rule: its description and next `count` fire times (5 by default), or why it is invalid. */
+export function previewSchedule(fields: { cron: string; timezone?: string; count?: number }): Promise<SchedulePreview> {
+  return scheduleCall("POST", `${API_BASE}/schedules/preview`, "preview", fields);
+}
+
 // --- A project's knowledge: documents its Planner, Workers and Reviewers read on demand ---
 
 /** Written here (text), an uploaded text file (upload), or a file in the project's default directory (path). */
@@ -829,8 +1011,10 @@ export interface TaskDetail extends TaskInfo {
   error: string | null;
   /** "task_budget": the task failed at its project's task spend cap and can continue with a higher one. */
   fail_kind: "task_budget" | null;
-  /** The project's spend cap per task (USD); null for none. */
+  /** The task's spend cap (USD): its own, else its project's per task; null for none. */
   task_budget_usd: number | null;
+  /** The task's own cap (a scheduled run's), raised alone when it continues at its cap; null for none. */
+  own_budget_usd: number | null;
   created_at: string;
   updated_at: string;
   completed_at: string | null;

@@ -49,6 +49,8 @@ ADDED = {"agent_sessions": {"clean_start": False}, "agent_setting_layers": {"max
          "agents": {"agent_teams": True}}
 ADDED_ROWS = {"llm_providers": {"prov-codex-login"}}
 UNCHANGED = ["agent_runtimes", "llm_providers", "llm_provider_secrets", "projects", "tasks"]
+# Columns a later migration of main adds to those tables, empty on the rows from before.
+NEW_COLUMNS = {"tasks": ("schedule_id", "budget_usd")}
 # What the effort's upgrade, a later migration of main, changes: each layer's effort moved onto the profiles its
 # roles ran with it, so these layers and task choices select another profile (by name here; it changes their
 # updated_at), and the profiles they take are added (EFFORT_PROFILES: model, effort).
@@ -145,8 +147,11 @@ def test_a_v2_6_0_database_keeps_every_row_under_the_new_names_and_every_role_ru
                 assert expected, old  # the seed has rows in every renamed table
             # The dropped column only repeated the key.
             assert all(row["role"] == row["agent_id"] for row in before["agent_configs"])
-            assert {table: [row for row in await _rows(pool, table, "1")
-                            if row.get("id") not in ADDED_ROWS.get(table, ())] for table in UNCHANGED} == unchanged
+            after_unchanged = {table: [row for row in await _rows(pool, table, "1")
+                                       if row.get("id") not in ADDED_ROWS.get(table, ())] for table in UNCHANGED}
+            for table, columns in NEW_COLUMNS.items():
+                assert all(row.pop(column) is None for row in after_unchanged[table] for column in columns)
+            assert after_unchanged == unchanged
             assert {row["id"] for row in await _rows(pool, "llm_providers", "1")} - {
                 row["id"] for row in unchanged["llm_providers"]} == ADDED_ROWS["llm_providers"]
             for old in ("agent_configs", "agents", "task_agent_overrides"):

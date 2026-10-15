@@ -11,7 +11,9 @@ concurrency limit of a project's tasks run at once (``agent_settings.load_concur
 read each time one may start); the others wait, oldest first, without
 holding up another project's. At server start it resumes the tasks the
 previous server was running, from their plans in the database
-(``resume_tasks``).
+(``resume_tasks``). Each task that ends (completed, failed, cancelled or
+stopped) is reported to ``on_task_end``: the scheduler records a scheduled
+run's outcome there.
 """
 
 from __future__ import annotations
@@ -20,6 +22,7 @@ import asyncio
 import logging
 import os
 import uuid
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -40,6 +43,9 @@ from .planner import PlannerAgent
 logger = logging.getLogger(__name__)
 
 from ...db import activity as db_activity, tasks as db_tasks
+
+# Told each task's id and final status when it ends.
+TaskEndListener = Callable[[str, str], Awaitable[None]]
 
 
 def resolve_work_dir(raw: str | None) -> str:
@@ -94,8 +100,10 @@ class TaskRouter:
         runtime_root: Path,
         broadcaster: Broadcaster | None = None,
         claude_bin: str = "claude",
+        on_task_end: TaskEndListener | None = None,
     ) -> None:
         self._runtime_root = runtime_root
+        self._on_task_end = on_task_end
         self._claude_bin = claude_bin  # each task's Planner runs it
         self._bus: MessageBus | None = None
         self._tasks: dict[str, Task] = {}
@@ -440,6 +448,7 @@ class TaskRouter:
                 await db_tasks.update_task_status(task_id, "stopped")
             except Exception:
                 logger.exception("failed to mark orphan task %s stopped", task_id)
+            await self._task_ended(task_id, "stopped")
             return
 
         task.status = "stopped"
@@ -466,6 +475,7 @@ class TaskRouter:
             self._broadcaster.close_task(task_id)
 
         logger.info("task %s stopped", task_id)
+        await self._task_ended(task_id, "stopped")
         await self.recheck()
 
     async def _handle_restart(self, envelope: MessageEnvelope) -> None:
@@ -541,6 +551,15 @@ class TaskRouter:
                 await db_tasks.update_task_status(task_id, task.status)
             except Exception:
                 logger.exception("failed to persist teardown for task %s", task_id)
+            await self._task_ended(task_id, task.status)
 
         if self._broadcaster:
             self._broadcaster.close_task(task_id)
+
+    async def _task_ended(self, task_id: str, status: str) -> None:
+        if self._on_task_end is None:
+            return
+        try:
+            await self._on_task_end(task_id, status)
+        except Exception:
+            logger.exception("the task-end listener failed for task %s", task_id)

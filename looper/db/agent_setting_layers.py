@@ -115,10 +115,11 @@ async def profile_overrides(task_id: str, *, pool: asyncpg.Pool | None = None) -
 
 async def selected_roles(profile_id: str, *, pool: asyncpg.Pool | None = None) -> list[tuple[str, str | None]]:
     """Where Agent Profile ``profile_id`` is selected: (scope, role) of each layer, ('task', role) of each task's
-    choice."""
+    choice and ('schedule', role) of each schedule's."""
     pool = pool or get_pool()
     rows = await pool.fetch(
         "SELECT scope, role FROM agent_setting_layers WHERE profile_id = $1 "
-        "UNION SELECT 'task', role FROM task_profile_overrides WHERE profile_id = $1", profile_id,
+        "UNION SELECT 'task', role FROM task_profile_overrides WHERE profile_id = $1 "
+        "UNION SELECT 'schedule', role FROM schedule_profile_overrides WHERE profile_id = $1", profile_id,
     )
     return [(r["scope"], r["role"]) for r in rows]

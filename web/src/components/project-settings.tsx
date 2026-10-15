@@ -39,8 +39,8 @@ function changesOf(draft: Draft, project: Project): ProjectUpdate {
   return fields;
 }
 
-/** A project's fields and execution settings, saved together, and deleting the project once it has no tasks. Its
- * agent settings are on its Agent Profiles tab. */
+/** A project's fields and execution settings, saved together, and deleting the project once it has no tasks and no
+ * schedules. Its agent settings are on its Agent Profiles tab. */
 export function ProjectSettingsForm({ project, onDeleted }: { project: Project; onDeleted: () => void }) {
   const id = useId();
   const [draft, setDraft] = useState<Draft>(() => draftOf(project));
@@ -148,7 +148,20 @@ export function ProjectSettingsForm({ project, onDeleted }: { project: Project; 
         {project.task_count > 0 ? (
           <p className="mt-1 text-xs text-muted-foreground">
             Only a project without tasks can be deleted; move or delete its {project.task_count}{" "}
-            {project.task_count === 1 ? "task" : "tasks"} first.
+            {project.task_count === 1 ? "task" : "tasks"} first
+            {project.schedule_count > 0 && ", and delete its schedules"}.
+          </p>
+        ) : project.schedule_count > 0 ? (
+          <p className="mt-1 text-xs text-muted-foreground">
+            Only a project without schedules can be deleted. Delete its schedules first: it has{" "}
+            {project.schedule_count} on its{" "}
+            <a
+              href={`#projects/${project.project_id}/schedules`}
+              className="text-primary underline-offset-2 hover:underline focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+            >
+              Schedules tab
+            </a>
+            .
           </p>
         ) : (
           <div className="mt-2 flex flex-wrap items-center gap-2">
