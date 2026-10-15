@@ -213,10 +213,14 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
   The task section is fixed for the session: the Planner lives as long as its
   task, a Worker or Reviewer as long as its step. It is in the system prompt
   so it survives auto-compaction, and it comes before the contract so nothing
-  a user or the Planner wrote can override the output format. The task
-  requirement in it is clipped at 8,000 characters (`TASK_REQUIREMENT_LIMIT`)
-  with a visible `[clipped: N more characters]` marker. What changes from turn
-  to turn stays in user turns.
+  a user or the Planner wrote can override the output format. A task
+  requirement has at most 32,000 characters (`TASK_REQUIREMENT_LIMIT`): every
+  place one comes in (creating a task, editing it on the task page or through
+  its config, a schedule, the Manager's tools) refuses a longer one with a 400
+  or an `invalid` answer that says so (`projects.check_requirement`). Only a row
+  stored before that check can be longer; its task section clips it there with
+  a visible `[clipped: N more characters]` marker. What changes from turn to
+  turn stays in user turns.
 
   The project is read through the task (`get_task_project`), so a task moved
   to another project gets the new one. Every prompt reads it when it is
@@ -326,7 +330,8 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
   `depends_on` naming known steps without cycles, at least one step (there is
   no upper limit: a task's spend cap and timeouts bound its cost), only the
   decisions allowed for that result, at
-  most 2 retries per step, and started steps never changed. An invalid reply
+  most the project's `max_step_retries` retries per step (2 unless set; the
+  contract states the number), and started steps never changed. An invalid reply
   gets one repair turn that names the error.
 - Failures:
   - Planning that still fails (an invalid reply after the repair turn, a
@@ -467,8 +472,9 @@ answer to an edit on the task page goes.
   read at that moment. Until then it waits (status `pending`, and one
   `Worker waits for room in this project (N running, limit L)` activity) and
   checks again when a run ends or a limit changes; a waiting run can be killed
-  like a running one. Each task's Planner also keeps at most 4 Workers running
-  (`MAX_CONCURRENT_WORKERS`)
+  like a running one. A task's Planner sends every step that is ready at once;
+  this limit alone decides how many run (16 Workers per project unless a layer
+  sets one)
 - Each Worker runs Claude CLI as a subprocess with `stream-json` output
 - Real-time event streaming (tool_use, text) captured to activity table
 - Command: `claude --print --verbose --output-format stream-json --include-partial-messages --input-format stream-json --replay-user-messages <isolation flags> --append-system-prompt-file <file> --system-prompt-snapshot off --dangerously-skip-permissions --model M [--effort E] [--plugin-dir <dir> ...] [--mcp-config <file>] [--add-dir <dir> ...]`,
@@ -1357,9 +1363,12 @@ error; `supervise_interval_seconds` over the `planner` config; and
 `review_policy` `all`, under which no step is accepted without a passing review;
 and `distill_lessons` (`off`, `draft` or `write`, never null), whether a task
 that completes leaves a lessons draft or document in the project's knowledge
-(see the Planner); and `step_workspaces` (`shared`, also when null, or
+(see the Planner); `step_workspaces` (`shared`, also when null, or
 `worktree`), where a step that runs alongside others works ([Step
-workspaces](#step-workspaces)).
+workspaces](#step-workspaces)); and `max_step_retries` (0 to 20, null for 2),
+how many times the Planner may retry one step: its reply contract and each
+decision turn's allowed decisions say how many are left, and a retry past it is
+refused.
 
 A task can also have a spend cap of its own (`tasks.budget_usd`, a scheduled
 run's `run_budget_usd`), which replaces its project's `task_budget_usd` for it
@@ -1443,7 +1452,7 @@ A project's schedules fire a full task of the project on a time rule
 ([scheduled-tasks RFC](rfcs/scheduled-tasks-v0.zh-CN.md), S1 and S2; the
 Manager's actions and export come with the Manager platform tools). A schedule has a `name` (unique in the project ignoring case),
 a `cron` rule and an IANA `timezone` (default: the server's own zone), the
-`requirement` each run's task gets, a `work_dir` (`''`: the project's default
+`requirement` each run's task gets (at most 30,000 characters), a `work_dir` (`''`: the project's default
 when it fires), `overlap` (`skip`, `queue` or `parallel`, with
 `max_parallel_runs` 1–10, default 3), `catch_up` (`once` or `skip`),
 an optional `run_timeout_seconds` and `run_budget_usd`, and `profile_overrides`
@@ -1534,9 +1543,11 @@ dashboard only). A new schedule is disabled.
   runs of a parallel schedule ended so before it, oldest first, one block
   each, and then even a gate that prints nothing gets a task (`carried_from`
   names the latest of them). The outputs
-  share what is left of the 8,000 characters a task requirement keeps
+  share what is left of the 32,000 characters a task requirement may have
   (at least 600), each clipped with a marker; earlier runs' inputs that do not
-  fit at 300 characters each are left out, the oldest first, and counted. A run left `gating` by a server
+  fit at 300 characters each are left out, the oldest first, and counted; a
+  schedule's own requirement has at most 30,000 characters, so the run
+  context always has room. A run left `gating` by a server
   that stopped is `gate_failed` at the next start. A gate never runs twice at
   once: a firing while the schedule's run is `gating` is `skipped_overlap`.
 - **Repeated skips are counted, not stored.** A skipped firing (`skipped_gate`,
@@ -2015,7 +2026,8 @@ Key message types:
      review once, needs a passing review before it can be accepted, also after
      a retry.
    - `retry` sends the same step to a new Worker with the feedback appended to
-     its instruction; at most 2 retries per step.
+     its instruction; at most the project's `max_step_retries` (2 unless set)
+     retries per step.
    - `replan` replaces every step that has not started; started steps cannot
      change. The current step counts as verified if its result can be
      accepted, and is dropped (`skipped`) otherwise.
@@ -2224,7 +2236,7 @@ dev proxy, which keeps `Host` and `Origin` on its own port.
 | `/api/schedules/:id/notifications` | GET | The schedule's messages, newest first (`?limit=` as for runs): `notification_id`, `kind`, `run_id`, `channel`, `chat`, `text`, `status`, `error`, `created_at`; 404 |
 | `/api/schedules/preview` | POST | `{cron, timezone?, count?, gated?}` (1–20, default 5; `gated`: checked as a schedule with a gate command, 1 minute apart instead of 5): `valid`, `description`, the `next` fire times and `min_interval_seconds`, or `valid` false with the `error`; 400 only for a malformed body |
 | `/api/tasks` | GET | List the newest tasks; `?project_id=` lists one project's, `?group=` one task group's (400 for an unknown group), `?schedule_id=` one schedule's. Each has its status's `group`, `project_id`, `project_name`, `work_dir`, `schedule_id` and `schedule_name` (null for a task no schedule created) and `cost` (as in the task detail) |
-| `/api/tasks/create` | POST | Create a ready task (`init`) with exactly one of `project_id` (existing) and `project` (`{name, description?, work_dir?, background?}`, created in the same transaction). Its `work_dir` is the one given, else the project's. Optional `profile_overrides`: `{planner?, worker?, reviewer?}` Agent Profile ids for this task's roles (an empty one chooses nothing). 400 with neither project field, for an override of another role, an unknown profile or one that cannot run its role; 404 for an unknown project, 409 for a taken new name |
+| `/api/tasks/create` | POST | Create a ready task (`init`) with exactly one of `project_id` (existing) and `project` (`{name, description?, work_dir?, background?}`, created in the same transaction). Its `work_dir` is the one given, else the project's. Optional `profile_overrides`: `{planner?, worker?, reviewer?}` Agent Profile ids for this task's roles (an empty one chooses nothing). 400 for a requirement over 32,000 characters, with neither project field, for an override of another role, an unknown profile or one that cannot run its role; 404 for an unknown project, 409 for a taken new name |
 | `/api/tasks/:id/project` | PUT | Move a task to `{project_id}`, whatever its status |
 | `/api/tasks/:id` | GET | Task detail with steps, its status's `group`, `project_id`, `project_name`, `schedule_id`, `schedule_name`, `task_budget_usd` (its cap: its own, else its project's) and `own_budget_usd`, `profile_overrides` (`{role: profile}`, `{}` when none), `requirement_versions` (each `{version, text, via, created_at, delivered_at}`, oldest first; none for a requirement never edited), `supplements` (each `{text, via, created_at, delivered_at}`, oldest first), `manager_actions` (what the Manager did to the task or asked to confirm, newest first: `{created_at, channel, tool, arguments, risk, status, confirmation_id}`) and `cost`: `cost_usd` (the sum of its Planner's, Workers' and Reviewers' runs), `runs`, `running`, `unpriced_runs` and `by_role` (`planner`, `worker`, `reviewer`, each `{cost_usd, runs}`) |
 | `/api/tasks/cancel` | POST | Cancel task (permanent) |
@@ -2232,7 +2244,7 @@ dev proxy, which keeps `Host` and `Origin` on its own port.
 | `/api/tasks/start` | POST | Run a stopped, failed or cancelled task again (it also starts a ready one, as before) |
 | `/api/agent/v1/tools` | GET | The Manager's tools (`ops`), for its MCP server; only with the Manager's token (`Authorization: Bearer`), else 401 |
 | `/api/agent/v1/ops/:tool` | POST | Call one of the Manager's tools with the JSON body as its arguments, in the Manager's current turn; answers the tool's `status` object with 200, refusals included; only with the Manager's token |
-| `/api/tasks/:id/requirement` | PUT | Edit the requirement of a task that has not ended to `{requirement}`, kept as a new version (`{task_id, version, requirement}`); a running task's Planner gets it in a `[CHAT]` turn. 400 for an empty or unchanged text, 404 for an unknown task, 409 for one that ended |
+| `/api/tasks/:id/requirement` | PUT | Edit the requirement of a task that has not ended to `{requirement}`, kept as a new version (`{task_id, version, requirement}`); a running task's Planner gets it in a `[CHAT]` turn. 400 for an empty or unchanged text or one over 32,000 characters, 404 for an unknown task, 409 for one that ended |
 | `/api/tasks/:id/start` | POST | Start a ready task (`TASK_START`); it waits for a place in its project like any start. Answers `{started, project_id}`; 400 unless the task is ready, 404 for an unknown task |
 | `/api/tasks/delete` | POST | Delete task (must be stopped first) |
 | `/api/tasks/:id/activity` | GET | Activity events |

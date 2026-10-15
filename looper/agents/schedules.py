@@ -36,12 +36,14 @@ from .agent_settings import AgentType, budget_usd, load_concurrency
 from .channels.allowlist import SENDER_ID_FORMATS, sender_ids
 from .projects import HTTP_400, HTTP_404, HTTP_409, TASK_PROFILE_ROLES, RequestError, _profile_overrides
 from .scheduler import GATE_TIMEOUT_DEFAULT_SECONDS, GATE_TIMEOUT_MAX_SECONDS
+from .system_prompt import TASK_REQUIREMENT_LIMIT
 from .tiers.task import resolve_work_dir
 
 NAME_MAX_CHARS = 80
-# The task requirement in a Planner's prompt is clipped at 8,000 characters (system_prompt.TASK_REQUIREMENT_LIMIT);
-# this leaves room for the run context the scheduler appends.
-REQUIREMENT_MAX_CHARS = 6000
+# A run's task requirement is the schedule's and the run context the scheduler appends (``scheduler.run_context``,
+# fitted into the room left); the schedule's own leaves that much room under the task limit.
+RUN_CONTEXT_RESERVE_CHARS = 2000
+REQUIREMENT_MAX_CHARS = TASK_REQUIREMENT_LIMIT - RUN_CONTEXT_RESERVE_CHARS
 RUN_TIMEOUT_MAX_SECONDS = 30 * 86400
 PREVIEW_COUNT = 5
 PREVIEW_MAX = 20

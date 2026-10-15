@@ -21,9 +21,9 @@ from dataclasses import asdict, dataclass
 from enum import Enum
 from typing import Any
 
+from ..project_execution import DEFAULT_STEP_RETRIES
 from .journal import HANDOFF_MAX_CHARS, LESSONS_MAX_CHARS, kept_text
 
-MAX_RETRIES = 2  # per step
 # A progress note's fields and a final summary's, in the order they are shown, and what each keeps of a field.
 PROGRESS_FIELDS = ("done", "now", "next", "risks", "estimate")
 PROGRESS_FIELD_MAX_CHARS = 500
@@ -208,6 +208,7 @@ class DecisionContext:
     succeeded: bool  # the Worker reported completed / the Reviewer passed
     review_required: bool  # the step needs a passing review before it is accepted
     retries: int
+    max_retries: int = DEFAULT_STEP_RETRIES  # its project's max_step_retries
     # No other step is open: accepting this one, or a replan with no new steps, completes the task.
     last_open: bool = False
 
@@ -223,7 +224,7 @@ class DecisionContext:
             allowed.append(Decision.ACCEPT)
         if self.result is ResultKind.WORK and self.succeeded:
             allowed.append(Decision.REVIEW)
-        if self.retries < MAX_RETRIES:
+        if self.retries < self.max_retries:
             allowed.append(Decision.RETRY)
         allowed += [Decision.REPLAN, Decision.FAIL]
         return tuple(allowed)
@@ -457,7 +458,7 @@ def _progress(data: Mapping[str, Any]) -> ProgressNote | None:
 def _refusal(decision: Decision, context: DecisionContext) -> str:
     allowed = ", ".join(d.value for d in context.allowed())
     if decision is Decision.RETRY:
-        why = f"step {context.step} has used its {MAX_RETRIES} retries"
+        why = f"step {context.step} has used its {context.max_retries} retries"
     elif decision is Decision.ACCEPT and context.result is ResultKind.WORK and context.succeeded:
         why = f"step {context.step} needs a passing review before it can be accepted"
     elif decision is Decision.ACCEPT:
@@ -574,8 +575,8 @@ def _required_text(data: Mapping[str, Any], key: str) -> str:
 
 
 # Appended to the (editable) system prompt on every Planner turn: the replies
-# are parsed by code, so their shape is owned by code too.
-REPLY_CONTRACT = f"""\
+# are parsed by code, so their shape is owned by code too. ``reply_contract`` fills in the retries a step has.
+_REPLY_CONTRACT = """\
 ## Reply contract (required; code parses it)
 Each message you get starts with [PLAN], [DECISION] or [CHAT]. End every reply
 with exactly one ```json fenced block in that message's shape, and nothing
@@ -609,7 +610,7 @@ result. The message lists the decisions allowed now.
 - review: an independent Reviewer checks the step's work; the step then needs
   a passing review before it can be accepted, also after a retry.
 - retry: the step runs again in a new Worker; add "feedback" (required): what
-  to fix. At most {MAX_RETRIES} retries per step.
+  to fix. At most {max_retries} retries per step.
 - replan: "steps" (the PLAN step shape) replaces every step that has not
   started; started steps cannot change. The current step counts as done when
   its result can be accepted, and is dropped otherwise. "steps" may be empty
@@ -661,3 +662,11 @@ ones that need it; leaving a step out is the same as "leave".
   the direction is wrong. You then get a DECISION turn for the stopped step
   (retry it with feedback, replan, or fail the task).
 """
+
+
+def reply_contract(max_retries: int = DEFAULT_STEP_RETRIES) -> str:
+    """The reply contract for a project whose steps may be retried ``max_retries`` times."""
+    return _REPLY_CONTRACT.format(max_retries=max_retries)
+
+
+REPLY_CONTRACT = reply_contract()

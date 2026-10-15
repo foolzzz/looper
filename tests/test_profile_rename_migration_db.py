@@ -51,7 +51,7 @@ ADDED_ROWS = {"llm_providers": {"prov-codex-login"}}
 UNCHANGED = ["agent_runtimes", "llm_providers", "llm_provider_secrets", "projects", "tasks"]
 # Columns a later migration of main adds to those tables, empty on the rows from before.
 NEW_COLUMNS = {"tasks": ("schedule_id", "budget_usd", "chat_id", "original_user_text", "title"),
-               "projects": ("step_workspaces",)}
+               "projects": ("step_workspaces", "max_step_retries")}
 # What the effort's upgrade, a later migration of main, changes: each layer's effort moved onto the profiles its
 # roles ran with it, so these layers and task choices select another profile (by name here; it changes their
 # updated_at), and the profiles they take are added (EFFORT_PROFILES: model, effort).

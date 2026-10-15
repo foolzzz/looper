@@ -457,6 +457,26 @@ class TestDecisions:
         assert final is not None and final.payload["status"] == "failed"
         assert any("Worker's own verdict decides: failed" in line for line in activity(agent_db))
 
+    @pytest.mark.parametrize("retries", [0, 5])
+    def test_a_project_sets_how_many_retries_a_step_has(
+        self, planner_claude: Any, agent_db: Any, retries: int,
+    ) -> None:
+        agent_db.get_task_project.return_value = {**_project(), "max_step_retries": retries}
+        claude = planner_claude(
+            plan(step("s1")),
+            *(decide("retry", feedback=f"try {n}") for n in range(1, retries + 1)),
+            decide("retry", feedback="once more"),  # refused: every retry used
+        )
+        h = drive(claude, always(WORK_FAILED))
+
+        assert [item.payload["attempt"] for item in h.work_items] == list(range(1, retries + 2))
+        texts = [turn["text"] for turn in claude.turns()]
+        allowed = texts[1].split("Allowed decisions now: ")[1].split("\n")[0]
+        assert (f"retry ({retries} left)" in allowed) if retries else ("retry" not in allowed)
+        assert f"retry is not allowed: step s1 has used its {retries} retries" in texts[-1]
+        assert f"At most {retries} retries per step." in claude.prompts()[0]
+        assert h.final().payload["status"] == "failed"  # type: ignore[union-attr]
+
     def test_replan_replaces_a_failed_step(self, planner_claude: Any, agent_db: Any) -> None:
         claude = planner_claude(
             plan(step("s1"), step("s2", "s1")),
@@ -805,6 +825,22 @@ class TestRecommendedRole:
         assert "every change to the project goes to a Worker as a step" in text
         for stale in ("Read, Grep, Glob", "cannot change files", "or run commands"):  # no longer read-only
             assert stale not in text
+
+
+def test_every_ready_step_is_dispatched_at_once(planner_claude: Any, agent_db: Any) -> None:
+    """No per-task cap: six steps that need nothing of each other all go to the worker pool together."""
+    claude = planner_claude(plan(*(step(f"s{i}") for i in range(1, 7))), *(decide("accept") for _ in range(6)))
+
+    async def scenario(h: Harness) -> None:
+        await h.start()
+        await h.until(lambda: len(h.held) == 6)
+        assert len(h.work_items) == 6 and set(h.dispatched_at_turn) == {1}  # all after the PLAN turn
+        for _ in range(6):
+            await h.release(WORK_OK)
+        await h.finished()
+
+    h = drive(claude, lambda envelope: None, scenario)
+    assert h.final().payload["status"] == "completed"  # type: ignore[union-attr]
 
 
 @pytest.mark.usefixtures("agent_db", "planner_row")

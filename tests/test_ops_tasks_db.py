@@ -155,6 +155,7 @@ def test_a_new_project_is_created_only_when_the_next_message_confirms_it(
     ({"project": "x" * 81}, "ask the user which project"),
     ({"project": "calc", "profiles": {"worker": "claude-code/nope"}}, "registered: claude-code/opus"),
     ({"project": "calc", "profiles": {"worker": None}}, "give an Agent Profile"),
+    ({"project": "calc", "requirement": "x" * 32_001}, "requirement has 32001 characters; at most 32000"),
 ])
 def test_a_task_without_what_only_the_user_can_give_is_not_created(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, arguments: dict[str, Any], message: str,

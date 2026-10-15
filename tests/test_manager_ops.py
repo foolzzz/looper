@@ -79,6 +79,7 @@ def _turn(message: str | None, chat: str = "A") -> Turn:
     ({"n": True}, "n must be an integer"),
     ({"n": 0}, "n must be from 1 to 5"),
     ({"n": 1, "s": "  "}, "s must not be empty"),
+    ({"n": 1, "s": "abcdef"}, "s has 6 characters; at most 5 are allowed"),
     ({"n": 1, "s": 3}, "s must be a string"),
     ({"n": 1, "e": "c"}, "e must be one of: a, b"),
     ({"n": 1, "l": ["x", 2]}, "l must be a list of strings"),
@@ -87,7 +88,7 @@ def _turn(message: str | None, chat: str = "A") -> Turn:
 ])
 def test_arguments_are_checked_against_the_schema(arguments: Any, problem: str | None) -> None:
     schema = {"type": "object", "required": ["n"], "properties": {
-        "n": {"type": "integer", "minimum": 1, "maximum": 5}, "s": {"type": "string", "minLength": 1},
+        "n": {"type": "integer", "minimum": 1, "maximum": 5}, "s": {"type": "string", "minLength": 1, "maxLength": 5},
         "e": {"type": "string", "enum": ["a", "b"]}, "l": {"type": "array"},
         "o": {"type": "object", "properties": {"k": {"type": "string"}, "j": {"type": "string"}}}}}
     if problem is None:

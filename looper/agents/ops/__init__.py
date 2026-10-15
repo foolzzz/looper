@@ -116,8 +116,9 @@ _TYPES: dict[str, tuple[type, ...]] = {"string": (str,), "boolean": (bool,), "ob
 
 def check_arguments(schema: Mapping[str, Any], arguments: Any) -> dict[str, Any]:
     """``arguments`` checked against ``schema``: an object with the properties it declares (``type`` string,
-    integer, boolean, object or array of strings, ``enum``, ``minLength``, ``minimum``/``maximum``), its
-    ``required`` ones present, no others. Raises ``OpError(INVALID)`` naming the first problem."""
+    integer, boolean, object or array of strings, ``enum``, ``minLength``, ``minimum``/``maximum``,
+    ``maxLength``), its ``required`` ones present, no others. Raises ``OpError(INVALID)`` naming the first
+    problem."""
     if not isinstance(arguments, dict):
         raise OpError(ErrorCode.INVALID, "the arguments must be a JSON object")
     properties: Mapping[str, Any] = schema.get("properties") or {}
@@ -148,6 +149,9 @@ def _check_value(name: str, spec: Mapping[str, Any], value: Any) -> None:
         raise OpError(ErrorCode.INVALID, f"{name} must be one of: {', '.join(map(str, spec['enum']))}")
     if kind == "string" and len(value.strip()) < int(spec.get("minLength", 0)):
         raise OpError(ErrorCode.INVALID, f"{name} must not be empty")
+    if kind == "string" and "maxLength" in spec and len(value) > spec["maxLength"]:
+        raise OpError(ErrorCode.INVALID, f"{name} has {len(value)} characters; at most {spec['maxLength']} are "
+                                         "allowed")
     if kind == "array" and any(not isinstance(item, str) for item in value):
         raise OpError(ErrorCode.INVALID, f"{name} must be a list of strings")
     if kind == "object":

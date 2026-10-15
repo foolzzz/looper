@@ -213,7 +213,8 @@ class TestProjectEndpoints:
         assert (body["task_count"], body["active_count"]) == (0, 0)
         assert set(body) == {"project_id", "name", "description", "work_dir", "background", "created_at",
                              "updated_at", "task_count", "active_count", "schedule_count", "task_budget_usd", "task_budget_action",
-                             "supervise_interval_seconds", "review_policy", "distill_lessons", "step_workspaces"}
+                             "supervise_interval_seconds", "review_policy", "distill_lessons", "step_workspaces",
+                             "max_step_retries"}
 
     def test_work_dir_is_optional(self, store: _Store) -> None:
         status, body = _call("POST", "/api/projects", {"name": "notes"})
@@ -573,6 +574,7 @@ class TestEditRequirement:
         ("running", {"requirement": "  "}, 400),
         ("running", {}, 400),
         ("running", {"requirement": "r"}, 400),  # unchanged
+        ("running", {"requirement": "x" * 32_001}, 400),  # too long to keep whole
     ])
     def test_rejects(self, store: _Store, task_status: str, body: Any, expected: int) -> None:
         store.add_project("proj-a", "tetris")
@@ -582,6 +584,19 @@ class TestEditRequirement:
 
     def test_an_unknown_task_is_404(self, store: _Store) -> None:
         assert self._call("task-nope", {"requirement": "x"})[0] == 404
+
+    def test_a_requirement_too_long_to_keep_whole_is_refused_where_it_comes_in(self, store: _Store) -> None:
+        store.add_project("proj-a", "tetris")
+        store.add_task("task-1", "proj-a", "init")
+        status, body = _call("PUT", "/api/tasks/task-1/config", {"requirement": "x" * 32_001})
+        assert status == 400 and body["error"] == "the requirement has 32001 characters; at most 32000 are allowed"
+        status, body = _call("POST", "/api/tasks/create", {"requirement": "x" * 32_001, "project_id": "proj-a",
+                                                           "work_dir": "/tmp/t"})
+        assert status == 400 and "at most 32000" in body["error"]
+        assert "task-1" not in store.versions and len(store.tasks) == 1
+        # The longest one is taken whole.
+        assert _call("POST", "/api/tasks/create", {"requirement": "x" * 32_000, "project_id": "proj-a",
+                                                   "work_dir": "/tmp/t"})[0] == 201
 
     def test_the_task_pages_edit_of_a_task_not_started_is_kept_as_a_version_too(self, store: _Store) -> None:
         store.add_project("proj-a", "tetris")

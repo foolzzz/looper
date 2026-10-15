@@ -111,6 +111,26 @@ def test_the_gate_decides_whether_a_run_gets_a_task(monkeypatch: pytest.MonkeyPa
     _run(test, monkeypatch, tmp_path)
 
 
+def test_the_longest_schedule_requirement_and_a_large_input_still_fit_a_tasks_requirement(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    """The schedule's own requirement leaves room under the task limit for the run context, which the gate's output
+    is fitted into: the run's task takes its requirement whole, never clipped."""
+    from looper.agents.schedules import REQUIREMENT_MAX_CHARS
+    from looper.agents.system_prompt import TASK_REQUIREMENT_LIMIT
+
+    async def test(env: _Env) -> None:
+        _setup(env)
+        (tmp_path / "items.txt").write_text("alert-123456789\n" * 10_000)
+        sid = (await env.enabled(requirement="x" * REQUIREMENT_MAX_CHARS, gate_command="cat items.txt"))["schedule_id"]
+        run = await _fire(env, sid)
+        requirement = await _requirement(env, run["task_id"])
+        assert requirement.startswith("x" * REQUIREMENT_MAX_CHARS + "\n\n## 定时运行上下文")
+        assert "alert-123456789" in requirement and len(requirement) <= TASK_REQUIREMENT_LIMIT
+
+    _run(test, monkeypatch, tmp_path)
+
+
 def test_run_now_goes_through_the_gate_and_a_firing_meanwhile_is_an_overlap(monkeypatch: pytest.MonkeyPatch,
                                                                             tmp_path: Path) -> None:
     async def test(env: _Env) -> None:
