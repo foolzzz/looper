@@ -1,7 +1,7 @@
 // What a schedule's row shows the same way wherever it is listed: its project's Schedules tab and the Schedules
 // page.
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { ScheduleRunInfo, ScheduleRunStatus } from "@/lib/api";
+import type { ScheduleNotify, ScheduleRunInfo, ScheduleRunStatus } from "@/lib/api";
 
 /** How long the answer to "Run now" or a note stays beside the row's controls; errors stay. */
 const NOTICE_MS = 10_000;
@@ -24,6 +24,17 @@ export const RUN_STATUS: Record<ScheduleRunStatus, { label: string; variant: Var
   gate_failed: { label: "Gate failed", variant: "destructive" },
   skipped_budget: { label: "Skipped: daily budget", variant: "warning" },
 };
+
+/** What each `notify` choice sends. */
+export const NOTIFY_OPTIONS: { value: ScheduleNotify; label: string; hint: string }[] = [
+  {
+    value: "failures",
+    label: "Failures",
+    hint: "Failed runs, plus the alerts (3 failures in a row, no success for a while) and their recoveries.",
+  },
+  { value: "always", label: "Always", hint: "Every run that ran a task, plus the alerts." },
+  { value: "never", label: "Never", hint: "Nothing is sent; the dashboard still shows failing schedules." },
+];
 
 /** `record` without `key`. */
 export function omit<T>(record: Record<string, T>, key: string): Record<string, T> {

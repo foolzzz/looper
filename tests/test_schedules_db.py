@@ -268,6 +268,56 @@ def test_every_projects_schedules_are_listed_together_the_disabled_ones_too(monk
     _run(test, monkeypatch, tmp_path)
 
 
+def test_a_schedules_runs_page_by_cursor_and_can_leave_out_the_routine_skips(monkeypatch: pytest.MonkeyPatch,
+                                                                           tmp_path: Path) -> None:
+    async def test(env: _Env) -> None:
+        sid = (await env.enabled())["schedule_id"]
+        run = (await env.ok("POST", f"/api/schedules/{sid}/run"))["run"]  # the oldest, with its task
+        await env.pool.execute("UPDATE tasks SET title = 'Look at the new alerts' WHERE id = $1", run["task_id"])
+        start = datetime.now(UTC)
+        statuses = ["skipped_gate", "completed", "skipped_overlap", "skipped_gate", "failed", "skipped_budget"]
+        for i, status in enumerate(statuses):  # oldest first, after the manual run
+            await env.pool.execute(
+                "INSERT INTO schedule_runs (id, schedule_id, scheduled_for, fired_at, trigger, status, created_at) "
+                "VALUES ($1, $2, $3, $3, 'scheduled', $4, $3)",
+                f"srun-test{i:04d}", sid, start + timedelta(minutes=i + 1), status)
+
+        async def page(**query: str) -> dict[str, Any]:
+            status, payload = await env.call("GET", f"/api/schedules/{sid}/runs", query=query)
+            assert status == 200, payload
+            return payload
+
+        everything = await page()
+        assert [r["status"] for r in everything["runs"]] == [*reversed(statuses), "running"]
+        assert everything["next_before"] is None
+        assert everything["routine_skips"] == {"skipped_gate": 2, "skipped_overlap": 1}
+        oldest = everything["runs"][-1]
+        task_status = await env.pool.fetchval("SELECT status FROM tasks WHERE id = $1", run["task_id"])
+        assert (oldest["task_id"], oldest["task_title"], oldest["task_status"]) == (
+            run["task_id"], "Look at the new alerts", task_status)
+
+        # Without the routine skips, two at a time, each page going on from the last one's oldest run.
+        first = await page(skips="hide", limit="2")
+        assert [r["status"] for r in first["runs"]] == ["skipped_budget", "failed"]
+        second = await page(skips="hide", limit="2", before=first["next_before"])
+        assert [r["status"] for r in second["runs"]] == ["completed", "running"] and second["next_before"] is None
+        assert second["routine_skips"] == everything["routine_skips"]  # counted whether shown or not
+        assert [r["status"] for r in (await page(limit="3", before="srun-test0003"))["runs"]] == [
+            "skipped_overlap", "completed", "skipped_gate"]
+
+        for query, says in [({"skips": "some"}, "skips must be one of show, hide"),
+                            ({"before": "srun-nope"}, "before must be a run of schedule"),
+                            ({"limit": "0"}, "limit must be a whole number")]:
+            status, payload = await env.call("GET", f"/api/schedules/{sid}/runs", query=query)
+            assert status == 400 and says in payload["error"], payload
+        other = await env.schedule()
+        status, payload = await env.call("GET", f"/api/schedules/{other['schedule_id']}/runs",
+                                         query={"before": "srun-test0001"})
+        assert status == 400 and "before must be a run of schedule" in payload["error"]
+
+    _run(test, monkeypatch, tmp_path)
+
+
 def test_a_schedule_with_a_gate_may_fire_every_minute(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     async def test(env: _Env) -> None:
         base = {"name": "every minute", "cron": "* * * * *", "timezone": "UTC", "requirement": "Look."}

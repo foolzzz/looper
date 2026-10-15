@@ -3,6 +3,7 @@ import { ArrowRight, Loader2, Play } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
 import { LastRun, NoticeText, ScheduleTime } from "@/components/project-schedules";
+import { ScheduleDetail } from "@/components/schedule-detail";
 import { LABEL, SELECT } from "@/components/registry-ui";
 import { fetchAllSchedules, fetchSchedule, runSchedule, updateSchedule, type ScheduleInfo } from "@/lib/api";
 import { lastFiredAt, omit, runNotice, useNotices, type Notice } from "@/lib/schedules";
@@ -16,7 +17,7 @@ const REFRESH_MS = 10_000;
 const linkClass =
   "rounded-sm hover:underline focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring";
 const projectHref = (projectId: string) => `#projects/${encodeURIComponent(projectId)}/schedules`;
-const scheduleHref = (s: ScheduleInfo) => `${projectHref(s.project_id)}/${encodeURIComponent(s.schedule_id)}`;
+const scheduleHref = (s: ScheduleInfo) => `#schedules/${encodeURIComponent(s.schedule_id)}`;
 
 interface ProjectGroup {
   projectId: string;
@@ -48,8 +49,8 @@ function NextRun({ schedule }: { schedule: ScheduleInfo }) {
   );
 }
 
-/** One schedule: what it is, when it runs, how its last run went, and its switch and "Run now". Its editor and run
- * history are on its project's Schedules tab, which its name opens. */
+/** One schedule: what it is, when it runs, how its last run went, and its switch and "Run now". Its name opens its
+ * detail view (`#schedules/<id>`): its settings and the runs it fired. */
 function ScheduleRow({
   schedule,
   enabled,
@@ -140,11 +141,17 @@ function ScheduleRow({
   );
 }
 
+/** `#schedules`: every schedule; `#schedules/<id>`: one, with the runs it fired. */
+export function SchedulesPage({ sub }: { sub: string }) {
+  const scheduleId = decodeURIComponent(sub.split("/")[0] ?? "");
+  return scheduleId ? <ScheduleDetail key={scheduleId} scheduleId={scheduleId} /> : <ScheduleList />;
+}
+
 /**
  * Every project's schedules, the disabled ones too, by project: each with its switch and "Run now", its name opening
- * it on its project's Schedules tab, where it is edited.
+ * its detail view; it is edited on its project's Schedules tab.
  */
-export function SchedulesPage() {
+function ScheduleList() {
   const id = useId();
   const [schedules, setSchedules] = useState<ScheduleInfo[] | null>(null);
   const [error, setError] = useState("");
@@ -223,7 +230,7 @@ export function SchedulesPage() {
           <p className="mt-1 text-sm text-muted-foreground">
             {total > 0 &&
               `${onCount(schedules ?? [])} of ${total} on, across ${groups.length} ${groups.length === 1 ? "project" : "projects"}. `}
-            Turn a schedule on or off or run it now; open it to edit it on its project.
+            Turn a schedule on or off or run it now; open one to see the runs it fired.
           </p>
         </div>
         {groups.length > 1 && (

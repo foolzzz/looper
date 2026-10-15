@@ -10,7 +10,7 @@ once; every time comes from the caller, so tests can set the clock.
 from __future__ import annotations
 
 import uuid
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from datetime import datetime
 from typing import Any
 
@@ -37,7 +37,7 @@ SKIPPED = ("skipped_gate", *NOTHING_RAN)
 UNFINISHED = ("failed", "timed_out", "gate_failed", "stopped", "cancelled")
 
 _RUN = """
-    SELECT r.*, t.status AS task_status FROM schedule_runs r LEFT JOIN tasks t ON t.id = r.task_id
+    SELECT r.*, t.status AS task_status, t.title AS task_title FROM schedule_runs r LEFT JOIN tasks t ON t.id = r.task_id
 """
 
 Db = asyncpg.Pool | asyncpg.Connection
@@ -226,12 +226,34 @@ async def get_run(run_id: str, *, pool: Db | None = None) -> dict[str, Any] | No
     return dict(row) if row else None
 
 
-async def list_runs(schedule_id: str, *, limit: int, pool: Db | None = None) -> list[dict[str, Any]]:
-    """The schedule's runs, newest first, each with its task's status."""
+async def list_runs(schedule_id: str, *, limit: int, before: str | None = None, without: Sequence[str] = (),
+                    pool: Db | None = None) -> list[dict[str, Any]]:
+    """The schedule's runs, newest first, each with its task's status and title: those older than the run
+    ``before`` when given, and none whose status is in ``without``."""
     db = pool or get_pool()
-    rows = await db.fetch(f"{_RUN} WHERE r.schedule_id = $1 ORDER BY r.created_at DESC, r.id DESC LIMIT $2",
-                          schedule_id, limit)
+    rows = await db.fetch(
+        f"""
+        {_RUN}
+        WHERE r.schedule_id = $1 AND NOT (r.status = ANY($3::text[]))
+          AND ($4::text IS NULL OR (r.created_at, r.id) < (SELECT b.created_at, b.id FROM schedule_runs b
+                                                          WHERE b.id = $4 AND b.schedule_id = $1))
+        ORDER BY r.created_at DESC, r.id DESC LIMIT $2
+        """,
+        schedule_id, limit, list(without), before,
+    )
     return [dict(row) for row in rows]
+
+
+async def run_counts(schedule_id: str, statuses: Sequence[str], *, pool: Db | None = None) -> dict[str, int]:
+    """How many of the schedule's runs have each of ``statuses`` (0 for none)."""
+    db = pool or get_pool()
+    rows = await db.fetch(
+        "SELECT status, count(*) AS n FROM schedule_runs WHERE schedule_id = $1 AND status = ANY($2::text[]) "
+        "GROUP BY status",
+        schedule_id, list(statuses),
+    )
+    counts = {row["status"]: int(row["n"]) for row in rows}
+    return {status: counts.get(status, 0) for status in statuses}
 
 
 async def latest_runs(schedule_ids: list[str], *, pool: Db | None = None) -> dict[str, dict[str, Any]]:
