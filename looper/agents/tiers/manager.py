@@ -174,14 +174,14 @@ PROJECTS_OFFERED = 10
 # The actions Claude's JSON may name.
 ACTIONS = ("task_request", "task_start")
 
-# Where a setting in a task's configuration came from (``agent_settings.Layer``), in the words of the chat.
+# Where a setting in a task's configuration came from (``agent_settings.Layer``), named as the dashboard names it.
 SOURCE_WORDS = {
     Layer.BUILTIN: "内置默认",
     Layer.PROFILE: "Agent Profile 自带",
-    Layer.SYSTEM: "所有角色的默认（Settings → Roles）",
-    Layer.ROLE: "该角色的设置（Settings → Roles）",
+    Layer.SYSTEM: "共用默认（Settings → Roles → Shared defaults）",
+    Layer.ROLE: "角色默认",
     Layer.PROJECT: "本项目",
-    Layer.ROLE_PROJECT: "本项目里的该角色",
+    Layer.ROLE_PROJECT: "本项目里的这个角色",
     Layer.TASK: "本任务",
 }
 START_QUESTION = "现在开始吗？回复「开始」就会启动；也可以稍后在 Tasks 页面点 Start。"
