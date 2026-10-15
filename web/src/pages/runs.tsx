@@ -12,6 +12,7 @@ import {
   type RoleConfig,
 } from "@/lib/api";
 import { AGENT_PROFILE, settingsHref } from "@/lib/settings-pages";
+import { profileName } from "@/lib/use-registry";
 import { historyHref } from "@/pages/agent-history";
 
 function roleBadge(role: string) {
@@ -257,7 +258,7 @@ export function RunsPage({ sub, onNavigate }: RunsPageProps) {
               onSelect={() => {
                 onNavigate?.(cfg.role);
               }}
-              profile={isRole(cfg.role) ? settings?.roles[cfg.role]?.effective.profile.value.name ?? null : null}
+              profile={isRole(cfg.role) && settings?.roles[cfg.role] ? profileName(settings.roles[cfg.role].effective.profile.value) : null}
             />
           ))}
         </div>

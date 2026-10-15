@@ -402,8 +402,8 @@ UNSET = {"harness_prompt": None, "profile_id": None, "env": [], "run_budget_usd"
 
 def _now(profile: AgentProfile, source: str) -> dict[str, Any]:
     """An effective view's profile."""
-    return {"value": {"profile_id": profile.id, "name": profile.name, "model": profile.model, "runtime": "claude-code",
-                      "provider": "claude-subscription"}, "source": source}
+    return {"value": {"profile_id": profile.id, "name": profile.name, "model": profile.model, "effort": profile.effort,
+                      "runtime": "claude-code", "provider": "claude-subscription"}, "source": source}
 
 
 class TestSettingsApi:

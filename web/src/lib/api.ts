@@ -1514,6 +1514,8 @@ export interface EffectiveProfile {
   profile_id: string;
   name: string;
   model: string;
+  /** The profile's effort; null = the runtime's default. */
+  effort: string | null;
   /** The runtime's and the provider's names. */
   runtime: string;
   provider: string;

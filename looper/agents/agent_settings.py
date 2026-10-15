@@ -456,8 +456,8 @@ class AgentSettings:
         return {
             "harness_prompt": harness,
             "profile": {"value": {"profile_id": self.profile.id, "name": self.profile.name,
-                                  "model": self.profile.model, "runtime": self.profile.runtime.name,
-                                  "provider": self.profile.provider.name},
+                                  "model": self.profile.model, "effort": self.profile.effort,
+                                  "runtime": self.profile.runtime.name, "provider": self.profile.provider.name},
                         "source": self.profile_source.value},
             "effort": {"value": self.effort or None, "source": self.effort_source.value},
             "env": [{"key": key, "value": value, "source": sources[key].value} for key, value in self.env],

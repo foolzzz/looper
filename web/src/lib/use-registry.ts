@@ -34,9 +34,14 @@ export function useRegistry() {
   return { registry, error, reload };
 }
 
-/** A profile as a select option names it: "claude-code/sonnet — claude-code · claude-subscription · sonnet · effort
- * high", its effort left out when it has none or its name already ends with it ("claude-code/opus · xhigh"). */
+/** A profile as the dashboard names it: its name, then " · <effort>" when it has an effort its name does not end
+ * with already (the upgrade named the profiles it added "claude-code/opus · xhigh"). */
+export function profileName(profile: { name: string; effort: string | null }) {
+  const suffix = profile.effort ? ` · ${profile.effort}` : "";
+  return suffix && !profile.name.endsWith(suffix) ? `${profile.name}${suffix}` : profile.name;
+}
+
+/** A profile as a select option names it: "claude-code/sonnet · high — claude-code · claude-subscription · sonnet". */
 export function profileLabel(profile: AgentProfile) {
-  const effort = profile.effort && !profile.name.endsWith(` · ${profile.effort}`) ? ` · effort ${profile.effort}` : "";
-  return `${profile.name} — ${profile.runtime_name} · ${profile.provider_name} · ${profile.model}${effort}`;
+  return `${profileName(profile)} — ${profile.runtime_name} · ${profile.provider_name} · ${profile.model}`;
 }

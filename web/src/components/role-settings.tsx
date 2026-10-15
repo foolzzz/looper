@@ -20,6 +20,7 @@ import {
 } from "@/lib/api";
 import { roleLabel } from "@/lib/runtime-catalog";
 import { useCollapsibleRows } from "@/lib/use-collapsible-rows";
+import { profileName } from "@/lib/use-registry";
 import { formatUsd } from "@/lib/usage";
 import { cn } from "@/lib/utils";
 
@@ -266,27 +267,24 @@ function listed(names: string[]) {
   return names.length < 2 ? names.join("") : `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}`;
 }
 
-const effortText = (effort: string | null) => (effort ? `effort ${effort}` : "default effort");
-
 /** The Shared defaults row's line: what every role runs with unless it sets its own. */
 function sharedSummary(effective: EffectiveSettings, roles: number) {
   const budget = effective.run_budget_usd.value;
   return [
     `Applies to all ${count(roles, "role")}`,
-    effective.profile.value.name,
-    effortText(effective.effort.value),
+    profileName(effective.profile.value),
     budget == null ? "no spend cap" : `${formatUsd(budget)} cap per run`,
     effective.env.length ? count(effective.env.length, "environment variable") : "no environment variables",
   ].join(" · ");
 }
 
-/** A role's line: its job, then its Agent Profile and where that comes from, the profile's effort and its concurrency
+/** A role's line: its job, then its Agent Profile (with its effort) and where that comes from, and its concurrency
  * limit. */
 function roleSummary(role: AgentRole, effective: EffectiveSettings | undefined) {
   const parts = [ROLE_JOBS[role]];
   if (effective) {
     const own = effective.profile.source === "role";
-    parts.push(`${effective.profile.value.name} (${own ? "own" : "shared"})`, effortText(effective.effort.value));
+    parts.push(`${profileName(effective.profile.value)} (${own ? "own" : "shared"})`);
     const limit = effective.max_concurrency?.value;
     if (limit != null) {
       parts.push(role === "planner" ? `up to ${count(limit, "task")} per project` : `up to ${limit} per project`);

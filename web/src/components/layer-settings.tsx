@@ -17,6 +17,7 @@ import type {
   Sourced,
 } from "@/lib/api";
 import { formatUsd } from "@/lib/usage";
+import { profileName } from "@/lib/use-registry";
 import { AGENT_PROFILE } from "@/lib/settings-pages";
 import { cn } from "@/lib/utils";
 
@@ -216,7 +217,7 @@ export function LayerSettingsForm({
 
   const harness = effective?.harness_prompt;
   const profileText = (value: EffectiveProfile) =>
-    `${value.name} (${value.runtime} · ${value.provider} · ${value.model} · effort ${effective?.effort.value ?? "runtime default"})`;
+    `${profileName(value)} (${value.runtime} · ${value.provider} · ${value.model})`;
   const budgetText = (value: number | null) => (value == null ? "no cap" : formatUsd(value));
   const concurrencyText = (value: number) => String(value);
 
@@ -232,7 +233,7 @@ export function LayerSettingsForm({
         emptyLabel={isSystem ? `Built-in: ${limits.builtin_profile.name}` : "Inherit"}
         roles={roles}
         describedBy={`${idPrefix}-profile-now ${idPrefix}-profile-hint`}
-        unlistedName={effective?.profile.value.profile_id === draft.profile ? effective.profile.value.name : undefined}
+        unlistedName={effective?.profile.value.profile_id === draft.profile ? profileName(effective.profile.value) : undefined}
       />
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
         <NowValue id={`${idPrefix}-profile-now`} setting={effective?.profile} layer={layer} show={profileText} />
