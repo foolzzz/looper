@@ -134,7 +134,6 @@ function RoleConfigForm({
     display_name: config.display_name,
     max_turns: config.max_turns,
     timeout_seconds: config.timeout_seconds,
-    max_concurrency: config.max_concurrency,
     enabled: config.enabled,
     system_prompt: config.system_prompt,
   });
@@ -144,7 +143,6 @@ function RoleConfigForm({
       display_name: config.display_name,
       max_turns: config.max_turns,
       timeout_seconds: config.timeout_seconds,
-      max_concurrency: config.max_concurrency,
       enabled: config.enabled,
       system_prompt: config.system_prompt,
     });
@@ -161,7 +159,7 @@ function RoleConfigForm({
         />
       </div>
 
-      <div className="grid gap-4 sm:grid-cols-3">
+      <div className="grid gap-4 sm:grid-cols-2">
         <div className="space-y-1.5">
           <label htmlFor={`${id}-turns`} className="text-xs font-medium text-muted-foreground">Max Turns</label>
           <Input
@@ -183,16 +181,6 @@ function RoleConfigForm({
             onChange={(e) => setForm({ ...form, timeout_seconds: Number(e.target.value) })}
           />
           <p className="text-[11px] text-muted-foreground">0 = unlimited</p>
-        </div>
-        <div className="space-y-1.5">
-          <label htmlFor={`${id}-concurrency`} className="text-xs font-medium text-muted-foreground">Concurrency</label>
-          <Input
-            id={`${id}-concurrency`}
-            type="number"
-            min={1}
-            value={form.max_concurrency}
-            onChange={(e) => setForm({ ...form, max_concurrency: Number(e.target.value) })}
-          />
         </div>
       </div>
 
