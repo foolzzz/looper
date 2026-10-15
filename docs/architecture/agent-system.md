@@ -696,13 +696,19 @@ the built-in `claude-code/opus` included (`schema_migrations`
 `agent_profiles_agent_teams_on`), so a profile turned off afterwards stays off.
 The built-in profile is read-only: to run without teams, select a profile with
 them off. Asking for them on another runtime is refused (400). A profile with
-`agent_teams` starts every role's Claude Code (the Manager, Planners, Workers
-and Reviewers alike, so any of them can spawn teammates) with
-`CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` and `--teammate-mode in-process`; a
-profile without them starts it with that variable removed, whatever the
-server's environment (a `looper serve` started from a Claude Code shell
-inherits it), the settings' or the provider's variables say. Turning them on or
-off restarts a resident process (its command changes) and resumes its session:
+`agent_teams` starts the Manager's, the Workers' and the Reviewers' Claude Code
+(so any of them can spawn teammates) with
+`CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` and `--teammate-mode in-process`. A
+Planner never has them (`Launch.agent_teams`, keyed on the Planner's role): its
+plan and each of its decisions are read from the result of its own turn, so a
+turn that waited for a teammate would end without its decision, and the
+teammate's later turns are Claude's own, which the Planner only logs (#26); the
+Planner already runs work in parallel through Looper's Workers, whose steps
+Looper tracks and teammates would bypass. A Planner, and every role of a
+profile without them, starts with that variable removed, whatever the server's
+environment (a `looper serve` started from a Claude Code shell inherits it),
+the settings' or the provider's variables say. Turning them on or off restarts
+the Manager's resident process (its command changes) and resumes its session:
 the runtime and the provider are unchanged. Verified with Claude Code 2.1.285:
 it enables teams only with the variable; under its default teammate mode
 (`auto`) a process inside tmux starts each teammate as a tmux process of its
