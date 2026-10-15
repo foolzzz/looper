@@ -160,6 +160,7 @@ Looper 在 v2.5.0 及以前叫 LoopX。升级不需要手动操作：
 | **TaskRouter** | `looper/agents/tiers/task.py` | 任务生命周期、按项目限制同时运行的任务数（默认 8 个）、排队 |
 | **Planner** | `looper/agents/tiers/planner.py` | 拆解步骤、派发、核验 |
 | **WorkerPool** | `looper/agents/tiers/worker.py` | Claude CLI 子进程池，输出 stream-json |
+| **Scheduler** | `looper/agents/scheduler.py` | 触发各项目的定时任务：每次触发建一个完整任务并直接开始；漏掉的触发只补一次，重叠时跳过或排队，超时的运行被停止 |
 
 各 agent 之间的通信都经过一个带类型的异步 **MessageBus**，按 `MessageEnvelope` 路由。
 
@@ -170,6 +171,7 @@ PostgreSQL 是启动的硬性依赖；`looper serve` 每次启动都会应用 `l
 | 领域 | 表 | 内容 |
 |---|---|---|
 | 项目与任务 | `projects`、`tasks`、`task_steps`、`task_plans`、`task_profile_overrides` | 项目及其默认目录、背景和执行设置；任务、Planner 的计划和步骤，以及任务给某个角色选的 Agent Profile |
+| 定时任务 | `schedules`、`schedule_profile_overrides`、`schedule_runs` | 项目的定时任务（时间规则和时区、任务需求、运行策略、Agent Profile），以及每次触发的运行、它的任务、结果和花费 |
 | 任务记忆与知识 | `task_journal`、`project_documents`、`project_document_drafts` | 任务运行时由代码写入的日志；项目的知识文档和等你审阅的草稿 |
 | Agent 与设置 | `agent_runtimes`、`llm_providers`、`llm_provider_secrets`、`agent_profiles`、`agent_setting_layers`、`role_configs`、`agent_sessions` | 运行时、提供方（API key 单独存放）和 Agent Profile；各设置层；每个角色的 prompt 和限制；Manager 和 Planner 恢复的会话 |
 | 能力目录 | `library_items`、`library_files`、`library_mcp_servers`、`library_installs` | 插件、skill 和 MCP 服务器及其文件或服务器配置，以及各自装在哪里 |
@@ -186,8 +188,8 @@ PostgreSQL 是启动的硬性依赖；`looper serve` 每次启动都会应用 `l
 |---|---|
 | **Dashboard** | 此刻在发生什么：按分组的任务数（点开即按该组筛选的 Tasks 页）、正在运行的 agent、各活跃项目相对上限的并发、今日花费，组件不健康时给出警告 |
 | **Chat** | 与全局 Manager 对话，或与运行中任务的 Planner 对话（每条消息成为该任务的一个新步骤）；SSE 流式输出 |
-| **Tasks** | 任务列表、项目和状态筛选，以及创建、开始、停止、删除操作 |
-| **Project** | 单个项目的概览、知识文档、项目自己的 skill 和安装、各角色在本项目覆盖的 Agent Profile 和其他 agent 设置，以及项目设置 |
+| **Tasks** | 任务列表、项目、状态和定时任务筛选，定时任务建出的任务带 Scheduled 标记，以及创建、开始、停止、删除操作 |
+| **Project** | 单个项目的概览、知识文档、项目自己的 skill 和安装、各角色在本项目覆盖的 Agent Profile 和其他 agent 设置、定时任务（时间规则、接下来的触发时刻、启用、立即运行、运行历史），以及项目设置 |
 | **Task Detail** | 配置编辑（init 状态）、概览、流水线 DAG、会话、对话；Agent Timeline 每行都有 **History** 按钮 |
 | **Runs** | 每个角色的会话和运行记录（Manager 的 `/new` 显示为新会话），每次运行都能打开其历史；不含配置，并链接到 Settings → Roles 里的该角色 |
 | **Agent history** | 单个 agent 的启动命令、完整记录（文本、思考、工具调用及结果）和活动；跟随运行中的 agent，2 分钟没有输出会标出 |
@@ -202,6 +204,7 @@ API 只响应控制台和本机客户端：来自其他网站页面的请求（�
 | 状态 | `GET /api/status`、`GET /api/overview` | 系统健康状态和启动自检（`checks`）；Dashboard 的“此刻在发生什么”总览 |
 | 项目 | `/api/projects`、`/api/projects/:id`、`/api/projects/:id/knowledge/...` | 创建、修改和删除项目；项目的知识文档和草稿 |
 | 任务 | `/api/tasks`、`/api/tasks/create`、`/api/tasks/:id/...`、`/api/tasks/{start,stop,cancel,delete}` | 列出和创建任务（属于某个项目，可带 `profile_overrides`）、查看、开始、停止、取消、删除；活动及其 SSE 流 |
+| 定时任务 | `/api/projects/:id/schedules`、`/api/schedules/:id/...`、`POST /api/schedules/preview` | 创建、修改、启用和删除项目的定时任务；立即运行；运行历史；时间规则接下来的触发时刻 |
 | 能力目录与安装 | `/api/catalog/...`、`/api/installs/...`、`/api/projects/:id/installs`、`/api/projects/:id/skills/...` | 插件、skill 和 MCP 服务器：导入、上传、git、编写、修改、删除；全局安装或装到项目 |
 | Agent 设置 | `/api/agent-settings/...`、`/api/projects/:id/agent-settings/...`、`/api/roles/...` | 各设置层，每个字段的生效值及其来源；每个角色的 prompt 和限制 |
 | 注册表 | `GET /api/registry`、`/api/runtimes/:id/probe`、`/api/providers/...`、`/api/agent-profiles/...` | 运行时类型和内置运行时（Re-detect 重新探测）；注册、修改和删除提供方（API key 打码）和 Agent Profile，并写明各自被谁使用 |
@@ -219,6 +222,7 @@ API 只响应控制台和本机客户端：来自其他网站页面的请求（�
 | 变量 | 必需 | 说明 |
 |---|---|---|
 | `LOOPER_DATABASE_URL` | 是 | PostgreSQL 连接串 |
+| `LOOPER_SCHEDULE_MIN_INTERVAL_SECONDS` | 否 | 只用于测试和验证：定时任务两次触发之间的最小间隔（默认 300 秒），启动时读取 |
 
 `claude` 进程继承服务的环境变量，所以 Claude CLI 的认证方式和你在 shell 里一样：已登录，或按它自己的文档使用 API key。
 
