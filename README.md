@@ -281,7 +281,7 @@ environment variable **names**, not secret values.
 | Channel | Settings fields | Also needed |
 |---|---|---|
 | Telegram | `bot_token_env`: env var holding the bot token (default `LOOPER_TELEGRAM_BOT_TOKEN`). `allowed_user_ids`: the numeric Telegram user IDs that may talk to the bot. | The token in that env var. |
-| Lark | `app_id_env`: env var holding the app ID (default `LARK_APP_ID`). `allowed_open_ids`: the senders' Lark `open_id` (`ou_...`). | `lark-cli` on PATH and signed in; it receives and sends the messages. |
+| Lark (lark-cli) | `profile`: the lark-cli profile, which chooses the app and the bot (empty: lark-cli's active one). `allowed_open_ids`: the senders' Lark `open_id` (`ou_...`) for that app; Settings → Channels finds them by name or email and lists refused senders to allow. Direct messages only. | `lark-cli` on PATH and signed in; it receives and sends the messages, and the channel checks the bot at startup. |
 
 - Every agent runs Claude Code without permission prompts, so the Manager
   can run any command on this machine. Each channel therefore passes on only
@@ -289,9 +289,10 @@ environment variable **names**, not secret values.
   id only) with no reply. A channel with an empty or malformed list does not
   start, and the Settings page says why. `LOOPX_TELEGRAM_ALLOWED_USERS` no
   longer applies.
-- `app_secret_env` is not read, and `app_id_env` only has to be set for the
-  Lark channel to start: `lark-cli` holds the Lark credentials and acts as the
-  app it is configured for (`lark-cli whoami`).
+- `lark-cli` holds the Lark credentials; the channel's `profile` (or
+  lark-cli's active profile) decides which app it acts as (`lark-cli whoami`).
+  Open_ids differ per app, so the allowlist remembers the app it was made for
+  and the channel does not start under another one until it is rebuilt.
 - Send `/new` (the whole message) in the web chat, Lark or Telegram to start a
   new Manager session: the next message, from any channel, starts with a clean
   context. The web chat's **New session** button sends it. Running tasks are

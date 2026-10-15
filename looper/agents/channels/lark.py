@@ -1,20 +1,18 @@
-"""Lark (Feishu) Bot Channel Adapter.
+"""Lark (lark-cli) channel adapter: the Manager in Lark direct messages, through ``lark-cli``.
 
-Bridges Lark Bot messages with the agent Bus through ``lark-cli`` (the
-commands of lark-cli 1.0.97): ``lark-cli event consume im.message.receive_v1
---as bot`` streams the incoming messages, one flat JSON object per line
-(``lark-cli event schema im.message.receive_v1``), and ``lark-cli im
-+messages-send --as bot`` posts the replies to their chat and a schedule's
-messages to a user (``send_command``). lark-cli acts as the app of its own
-configuration (``lark-cli whoami``); ``--app-id`` is no longer a flag of it.
+``lark-cli event consume im.message.receive_v1 --as bot`` streams the
+messages the bot receives, one flat JSON object per line (``lark-cli event
+schema im.message.receive_v1``); ``lark-cli im +messages-send --as bot`` posts
+the replies, as Markdown, to the chat each message came from, and a
+schedule's messages, as text, to a user. Every call carries the channel's
+``--profile`` when it names one (``lark_cli``): the profile chooses the app and
+so the bot.
 
-This adapter is intentionally thin — it translates between Bus
-MessageEnvelopes and those lark-cli calls rather than reimplementing the
-Lark API surface.
-
-Only the senders on its allowlist (their ``open_id``) reach the Manager:
-anyone else is dropped with one log line and gets no reply, and an empty
-list keeps the adapter from starting.
+Only direct messages (``chat_type`` ``p2p``) are handled: a group message is
+logged and ignored, and the bot never answers in a group. Only the senders on
+its allowlist (their ``open_id`` for this app) reach the Manager: anyone else
+is dropped with one log line, recorded as a rejected sender (``on_rejected``)
+and gets no reply, and an empty list keeps the adapter from starting.
 """
 
 from __future__ import annotations
@@ -22,60 +20,25 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
 from ..bus import MessageBus
 from ..message import (
     MANAGER_ADDRESS,
-    AgentAddress,
     MessageEnvelope,
     MessageType,
     channel_address,
 )
 from .allowlist import SenderAllowlist
 from .base import ChannelAdapter, DeliveryReceipt
+from .lark_cli import RECEIVE_EVENT, LarkCliError, consume_command, run, send_command
 
 logger = logging.getLogger(__name__)
 
-
-# The event the adapter consumes: a message sent to the bot.
-RECEIVE_EVENT = "im.message.receive_v1"
-
-
-def consume_command() -> list[str]:
-    """The lark-cli argv that streams the messages the bot receives, one JSON object per line."""
-    return ["lark-cli", "event", "consume", RECEIVE_EVENT, "--as", "bot"]
-
-
-def send_command(text: str, *, chat_id: str | None = None, user_id: str | None = None) -> list[str]:
-    """The lark-cli argv that sends ``text`` as the bot to a chat (``oc_...``) or to a user (an open_id,
-    ``ou_...``), exactly one of them."""
-    if (chat_id is None) == (user_id is None):
-        raise ValueError("send to exactly one of a chat and a user")
-    target = ["--chat-id", chat_id] if chat_id is not None else ["--user-id", user_id]
-    return ["lark-cli", "im", "+messages-send", "--as", "bot", *target, "--text", text]
-
-
-def _failure(stderr: bytes) -> str:
-    """lark-cli's reason for a failed command: its JSON error's message, else the tail of what it printed."""
-    text = stderr.decode("utf-8", errors="replace").strip()
-    try:
-        message = (json.loads(text).get("error") or {}).get("message")
-    except (ValueError, AttributeError):
-        message = None
-    return str(message) if message else text[-300:]
-
-
-async def _run_send(argv: list[str]) -> None:
-    """Run a send command; raises ``RuntimeError`` with lark-cli's reason when it fails."""
-    process = await asyncio.create_subprocess_exec(
-        *argv, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE,
-    )
-    _, stderr = await process.communicate()
-    if process.returncode != 0:
-        raise RuntimeError(f"lark-cli exited {process.returncode}: {_failure(stderr or b'')}")
+# Told the open_id of a sender the allowlist refused (never what they wrote).
+RejectedListener = Callable[[str], Awaitable[None]]
 
 
 def _check_lark_cli_available() -> bool:
@@ -96,11 +59,13 @@ class LarkChannelAdapter(ChannelAdapter):
         self,
         *,
         allowlist: SenderAllowlist,
-        app_id: str | None = None,
+        profile: str = "",
         runtime_root: Path | None = None,
+        on_rejected: RejectedListener | None = None,
     ) -> None:
         self._allowlist = allowlist  # open_ids
-        self._app_id = app_id or os.environ.get("LARK_APP_ID", "")
+        self._profile = profile  # lark-cli's --profile; "" for its active one
+        self._on_rejected = on_rejected
         self._runtime_root = runtime_root or Path.cwd()
         self._bus: MessageBus | None = None
         self._address = channel_address("lark", "channel-lark")
@@ -131,15 +96,11 @@ class LarkChannelAdapter(ChannelAdapter):
             )
             return
 
-        if not self._app_id:
-            logger.warning("LARK_APP_ID not set, lark channel adapter disabled")
-            return
-
         self._bus = bus
         self._running = True
         self._outbound_task = asyncio.create_task(self._outbound_loop())
         self._collector_task = asyncio.create_task(self._event_collector_loop())
-        logger.info("lark channel adapter started (app_id=%s)", self._app_id)
+        logger.info("lark channel adapter started (profile %s)", self._profile or "lark-cli's active one")
 
     async def stop(self) -> None:
         self._running = False
@@ -177,8 +138,8 @@ class LarkChannelAdapter(ChannelAdapter):
     async def notify(self, chat: str, text: str) -> DeliveryReceipt:
         """Send ``text`` as the bot to Lark user ``chat`` (an open_id)."""
         try:
-            await _run_send(send_command(text, user_id=chat))
-        except (OSError, RuntimeError) as exc:
+            await run(send_command(user_id=chat, text=text, profile=self._profile))
+        except LarkCliError as exc:
             logger.warning("lark notification to %s failed: %s", chat, exc)
             return DeliveryReceipt(channel="lark", success=False, error=str(exc))
         return DeliveryReceipt(channel="lark", success=True)
@@ -211,7 +172,7 @@ class LarkChannelAdapter(ChannelAdapter):
     async def _run_event_consumer(self) -> None:
         """Start lark-cli event consume subprocess and read events from stdout."""
         process = await asyncio.create_subprocess_exec(
-            *consume_command(),
+            *consume_command(self._profile),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL,
         )
@@ -244,16 +205,27 @@ class LarkChannelAdapter(ChannelAdapter):
             return
         chat_id = event.get("chat_id", "")
         sender_open_id = event.get("sender_id")
+        if event.get("chat_type") != "p2p":
+            # Direct messages only: the bot never answers in a group.
+            logger.info("channel-lark: ignored a message in a %s chat (%s); only direct messages are handled",
+                        event.get("chat_type") or "unknown", chat_id)
+            return
 
-        # Before anything else: an unlisted sender is logged and never answered.
+        # Before anything else: an unlisted sender is logged, recorded (only who and when) and never answered.
         if not self._allowlist.admits(sender_open_id):
+            if self._on_rejected is not None and isinstance(sender_open_id, str) and sender_open_id:
+                try:
+                    await self._on_rejected(sender_open_id)
+                except Exception:
+                    logger.warning("channel-lark: could not record a rejected sender", exc_info=True)
             return
 
         if event.get("sender_type") == "bot" or event.get("message_type", "") != "text":
             return
 
-        text = event.get("content") or ""
-        if not isinstance(text, str) or not text.strip():
+        content = event.get("content")
+        text = content if isinstance(content, str) else ""
+        if not text.strip():
             return
 
         # Remove bot @mention prefix if present
@@ -295,8 +267,9 @@ class LarkChannelAdapter(ChannelAdapter):
             pass
 
     async def _send_lark_message(self, chat_id: str, text: str) -> None:
-        """Send a text reply to a Lark chat; raises ``RuntimeError`` with lark-cli's reason when it fails."""
-        await _run_send(send_command(text, chat_id=chat_id))
+        """Send a reply to a Lark chat as Markdown (a rich-text post); raises ``LarkCliError`` with lark-cli's
+        reason when it fails."""
+        await run(send_command(chat_id=chat_id, markdown=text, profile=self._profile))
 
     @staticmethod
     def _format_reply(envelope: MessageEnvelope) -> str:

@@ -26,8 +26,8 @@ const DESCRIPTIONS: Record<Exclude<SettingsPageId, "roles">, React.ReactNode> = 
     "Plugins, skills and MCP servers: import, upload, take from git or write them, then install them globally or " +
     "in a project, for the roles that load them.",
   channels:
-    "Connect external messaging platforms. Channels read credentials from environment variables at server " +
-    "startup: restart the server after enabling a channel. Each one passes on only the senders it lists.",
+    "Connect external messaging platforms. Each channel's card says where its credential comes from; saved " +
+    "changes take effect after the server restarts. Each channel passes on only the senders it lists.",
   transfer:
     "One file with the role settings, the providers and Agent Profiles, the catalog with its files and MCP servers, " +
     "global installs and channels.",

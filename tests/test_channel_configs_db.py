@@ -101,7 +101,7 @@ def test_an_allowlist_round_trips_validated(monkeypatch: pytest.MonkeyPatch) -> 
     async def _test(pool: Any) -> None:
         status, lark = await _call("PUT", "/api/channel-configs/channel-lark", {
             "enabled": True,
-            "config": {"app_id_env": "LARK_APP_ID", "allowed_open_ids": [f" {OPEN_ID} ", OPEN_ID, ""]},
+            "config": {"profile": "", "allowed_open_ids": [f" {OPEN_ID} ", OPEN_ID, ""]},
         })
         assert status == 200
         assert lark["enabled"] is True
@@ -143,7 +143,7 @@ def test_an_enabled_channel_with_an_empty_list_is_saved_but_says_it_will_not_sta
 ) -> None:
     async def _test(pool: Any) -> None:
         status, lark = await _call("PUT", "/api/channel-configs/channel-lark",
-                                   {"enabled": True, "config": {"app_id_env": "LARK_APP_ID", "allowed_open_ids": []}})
+                                   {"enabled": True, "config": {"profile": "", "allowed_open_ids": []}})
         assert status == 200 and lark["enabled"] is True
         assert "allowlist is empty" in lark["start_problem"]
         status, _ = await _call("PUT", "/api/channel-configs/channel-none", {"enabled": True})

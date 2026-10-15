@@ -23,7 +23,6 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-import os
 import signal
 from pathlib import Path
 from typing import Any
@@ -198,11 +197,29 @@ def _lark_adapter_from_config(config: dict[str, Any], runtime_root: Path) -> Lar
     allowlist = _sender_allowlist("channel-lark", "lark", config)
     if allowlist is None:
         return None
-    return LarkChannelAdapter(
-        app_id=os.environ.get(config.get("app_id_env") or "LARK_APP_ID", ""),
-        runtime_root=runtime_root,
-        allowlist=allowlist,
-    )
+    from ..db.channel_configs import record_rejected
+
+    async def rejected(sender_id: str) -> None:
+        await record_rejected("channel-lark", sender_id)
+
+    return LarkChannelAdapter(profile=config.get("profile") or "", runtime_root=runtime_root, allowlist=allowlist,
+                              on_rejected=rejected)
+
+
+async def _lark_adapter(config: dict[str, Any], runtime_root: Path) -> LarkChannelAdapter | None:
+    """The Lark adapter, once lark-cli acts as the bot under the channel's profile and the allowlist was made for
+    that app; None (logged) otherwise."""
+    from .channels import lark_cli
+
+    adapter = _lark_adapter_from_config(config, runtime_root)
+    if adapter is None:
+        return None
+    problem, bot = await lark_cli.check(config, fresh=True)
+    if problem or bot is None:
+        logger.error("channel-lark not started: %s", problem)
+        return None
+    logger.info("channel-lark: bot %s (app %s, lark-cli profile %s)", bot.bot_name, bot.app_id, bot.profile)
+    return adapter
 
 
 async def seed_channel_configs(pool: Any = None) -> None:
@@ -223,16 +240,34 @@ async def seed_channel_configs(pool: Any = None) -> None:
         {
             "channel_id": "channel-lark",
             "channel_type": "lark",
-            "display_name": "Lark (飞书) Bot",
+            "display_name": LARK_DISPLAY_NAME,
             "enabled": False,
             "config": {
-                "app_id_env": "LARK_APP_ID",
-                "app_secret_env": "LARK_APP_SECRET",
+                "profile": "",
                 "allowed_open_ids": [],
-                "description": "Lark/Feishu Bot integration via lark-cli",
+                "description": "The Manager in Lark direct messages, through lark-cli",
             },
         },
     ], pool=pool)
+    await _migrate_lark_config(pool)
+
+
+LARK_DISPLAY_NAME = "Lark (lark-cli)"
+
+
+async def _migrate_lark_config(pool: Any = None) -> None:
+    """Lark settings from before lark-cli's profile chose the app: drop ``app_id_env`` and ``app_secret_env``, and
+    give the row its new name when it still has the old default one."""
+    from ..db.channel_configs import drop_config_keys
+    from ..db.connection import get_pool
+    from .channels.lark_cli import LEGACY_KEYS
+
+    db = pool or get_pool()
+    for channel_id in await drop_config_keys("lark", list(LEGACY_KEYS), pool=db):
+        logger.info("%s: dropped app_id_env and app_secret_env from its settings; lark-cli's profile chooses the "
+                    "app now (empty: its active profile)", channel_id)
+    await db.execute("UPDATE channel_configs SET display_name = $1, updated_at = now() "
+                     "WHERE channel_type = 'lark' AND display_name = 'Lark (飞书) Bot'", LARK_DISPLAY_NAME)
 
 
 async def seed_role_configs(pool: Any = None) -> None:
@@ -452,7 +487,7 @@ async def _run_agent_system(
     self_check.log_problems(checks)
 
     if lark_enabled:
-        lark_adapter = _lark_adapter_from_config(lark_cfg.get("config") or {}, runtime_root)
+        lark_adapter = await _lark_adapter(lark_cfg.get("config") or {}, runtime_root)
         if lark_adapter is not None:
             await _register_optional_channel(registry, lark_adapter)
 
