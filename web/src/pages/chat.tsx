@@ -400,7 +400,9 @@ export function ChatPage() {
     };
     setMessages((prev) => [...prev, userMsg]);
 
-    const assistantId = crypto.randomUUID();
+    // The server saves the answer to the chat under this id (`reply_message_id`), even when the page is left before
+    // it comes: the stream's bubble and the saved row are the same message.
+    const assistantId = `${userMsg.id}:reply`;
     const assistantMsg: ChatMessage = {
       id: assistantId,
       role: "assistant",
@@ -435,12 +437,6 @@ export function ChatPage() {
                     : m
                 )
               );
-              saveChatMessage({
-                session_id: sessionIdRef.current,
-                message_id: assistantId,
-                role: "assistant",
-                content: finalText,
-              });
               setSending(false);
               setPhase("");
               break;

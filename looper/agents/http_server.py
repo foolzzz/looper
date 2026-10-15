@@ -621,6 +621,7 @@ class AgentHTTPServer:
             language=data.get("language", "zh"),
             attachments=data.get("attachments"),
             target=target,
+            message_id=message_id or None,
         )
         writer.write(_json_response(HTTP_200, result))
         await writer.drain()

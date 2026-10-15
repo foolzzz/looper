@@ -11,6 +11,7 @@ import asyncio
 import json
 import logging
 import uuid
+from collections import OrderedDict
 from pathlib import Path
 from typing import Any, AsyncGenerator, AsyncIterator
 
@@ -28,6 +29,17 @@ from .base import ChannelAdapter, DeliveryReceipt
 logger = logging.getLogger(__name__)
 
 
+# The messages that end a message's stream with its answer (``_envelope_to_sse_event``'s ``answer.final``).
+_ANSWERS = (MessageType.AGENT_REPLY, MessageType.CLARIFICATION_REQUEST)
+# At most this many messages wait for their answer to be saved; the oldest is forgotten past it.
+AWAITING_MAX = 1000
+
+
+def reply_message_id(message_id: str) -> str:
+    """The chat id of the answer to the chat message ``message_id``; the Chat page streams it under the same id."""
+    return f"{message_id}:reply"
+
+
 class WebChannelAdapter(ChannelAdapter):
     """Bridges Web UI HTTP/SSE with the agent message bus."""
 
@@ -37,6 +49,9 @@ class WebChannelAdapter(ChannelAdapter):
         self._bus: MessageBus | None = None
         self._address = channel_address("web", "channel-web")
         self._sse_queues: dict[str, asyncio.Queue[dict[str, Any]]] = {}
+        # The chat of each message still waiting for its answer, by correlation id: (chat session, message id). The
+        # answer is saved to that chat whether or not a page still reads the message's stream (``deliver``).
+        self._awaiting: OrderedDict[str, tuple[str, str]] = OrderedDict()
         # Open chat pages, keyed by chat session: what reaches a chat outside any message's stream.
         self._chats = Broadcaster()
         self._outbound_task: asyncio.Task[Any] | None = None
@@ -72,10 +87,15 @@ class WebChannelAdapter(ChannelAdapter):
             return await self._add_to_chat(chat_session, envelope)
 
         corr_id = envelope.correlation_id
+        saved: DeliveryReceipt | None = None
+        if envelope.message_type in _ANSWERS and (awaiting := self._awaiting.pop(corr_id, None)):
+            # Saved here, not by the page: a page left before the answer came would lose it.
+            session_id, message_id = awaiting
+            saved = await self._add_to_chat(session_id, envelope, message_id=reply_message_id(message_id))
         sse_q = self._sse_queues.get(corr_id)
 
         if sse_q is None:
-            return DeliveryReceipt(
+            return saved or DeliveryReceipt(
                 channel="web",
                 success=False,
                 error=f"no active SSE stream for correlation {corr_id}",
@@ -90,26 +110,30 @@ class WebChannelAdapter(ChannelAdapter):
                 channel="web", success=False, error="SSE queue full"
             )
 
-    async def _add_to_chat(self, session_id: str, envelope: MessageEnvelope) -> DeliveryReceipt:
-        """Add a reply that answers no message (what the Manager's Claude said on its own) to its chat.
+    async def _add_to_chat(self, session_id: str, envelope: MessageEnvelope, *,
+                           message_id: str | None = None) -> DeliveryReceipt:
+        """Add a reply to its chat: one that answers no message (what the Manager's Claude said on its own), or a
+        message's answer (``message_id`` its ``reply_message_id``).
 
-        A message's stream ends at its answer, so such a reply never goes to
-        one. It is saved with the chat's other messages, then pushed as a
-        ``chat.message`` event to every page that has the chat open
-        (``iter_chat_events``), even when saving failed.
+        A message's stream ends at its answer, so a reply of Claude's own never
+        goes to one. Either is saved with the chat's other messages, then pushed
+        as a ``chat.message`` event to every page that has the chat open
+        (``iter_chat_events``), even when saving failed; a page that streams the
+        answer already shows it under the same id.
         """
         from ...db.chat import save_message
 
         text = str(envelope.payload.get("text") or "")
+        message_id = message_id or envelope.message_id
         receipt = DeliveryReceipt(channel="web", success=True)
         try:
-            await save_message(session_id=session_id, message_id=envelope.message_id, role="assistant", content=text)
+            await save_message(session_id=session_id, message_id=message_id, role="assistant", content=text)
         except Exception as exc:
             logger.warning("web: could not add a reply to chat %s", session_id, exc_info=True)
             receipt = DeliveryReceipt(channel="web", success=False, error=f"could not save to chat: {exc}")
         self._chats.publish(session_id, {
             "kind": "chat.message",
-            "payload": {"message_id": envelope.message_id, "role": "assistant", "content": text,
+            "payload": {"message_id": message_id, "role": "assistant", "content": text,
                         "created_at": envelope.timestamp},
         })
         return receipt
@@ -157,12 +181,19 @@ class WebChannelAdapter(ChannelAdapter):
         language: str = "zh",
         attachments: list[dict[str, Any]] | None = None,
         target: AgentAddress = MANAGER_ADDRESS,
+        message_id: str | None = None,
     ) -> dict[str, str]:
+        """Send a chat message (``message_id``, in the chat ``session_id``) to its agent; its answer is saved to
+        that chat under ``reply_message_id(message_id)``."""
         assert self._bus is not None
         correlation_id = str(uuid.uuid4())
 
         sse_q: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=1000)
         self._sse_queues[correlation_id] = sse_q
+        if session_id and message_id:
+            self._awaiting[correlation_id] = (session_id, message_id)
+            while len(self._awaiting) > AWAITING_MAX:  # answers that never came
+                self._awaiting.popitem(last=False)
 
         envelope = MessageEnvelope.create(
             source=self._address,
