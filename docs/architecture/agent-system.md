@@ -1817,6 +1817,14 @@ check alike.
   asked with; after that turn it lapses. Another chat speaking in between
   changes nothing. Confirmations live in memory: a restart or `/new` drops
   them.
+- **When the tools do not work.** Before a turn that answers a user, the
+  Manager checks its MCP entry: it starts the entry's command as a runtime
+  would and lists the tools through it (a success is trusted for 5 minutes).
+  If the server does not start, or Looper refuses its token, Claude is not
+  run at all. A request the endpoint refuses during a turn marks that turn,
+  and Claude's reply is dropped. Either way the failure is logged as an
+  error, and the user gets 「平台工具不可用，没有执行任何操作：<why>。…」, never
+  a reply that may claim something was done.
 - **The trail.** Every call is a `manager_actions` row: the chat, the
   message, the tool, its arguments (values under a key naming a key, token,
   secret or password masked), the tier, how it ended, the result of a change
