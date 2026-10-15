@@ -145,6 +145,14 @@ def _local(moment: datetime, tz: Any) -> str:
     return moment.astimezone(tz).strftime("%Y-%m-%d %H:%M %Z")
 
 
+def run_title(schedule: Mapping[str, Any], firing: Firing) -> str | None:
+    """A run's task title: the schedule's name and the fire time in its zone (``alarm-triage · 10-15 12:30``), the
+    name clipped so the time fits ``db.tasks.task_title``'s limit."""
+    when = f" · {firing.scheduled_for.astimezone(cron.zone(schedule['timezone'])):%m-%d %H:%M}"
+    name = " ".join(str(schedule["name"]).split())
+    return db_tasks.task_title(f"{name[:db_tasks.TITLE_MAX_CHARS - len(when)]}{when}")
+
+
 def _snippet(text: str | None) -> str:
     flat = " ".join((text or "").split())
     return flat if len(flat) <= SUMMARY_CHARS else f"{flat[:SUMMARY_CHARS]}…"
@@ -482,7 +490,7 @@ class Scheduler:
         await db_tasks.create_task(
             task_id=task_id, requirement=f"{schedule['requirement']}\n\n{context}", project_id=schedule["project_id"],
             work_dir=work_dir, status=db_tasks.READY, schedule_id=schedule["id"],
-            budget_usd=schedule["run_budget_usd"], pool=conn,
+            budget_usd=schedule["run_budget_usd"], title=run_title(schedule, firing), pool=conn,
         )
         if schedule["profile_overrides"]:
             await db_layers.set_profile_overrides(conn, task_id, schedule["profile_overrides"])

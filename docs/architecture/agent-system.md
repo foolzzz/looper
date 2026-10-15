@@ -1383,7 +1383,10 @@ dashboard only). A new schedule is disabled.
   running, or created and about to start) is recorded `skipped_overlap`, or,
   with `overlap` `queue`, waits as the one `queued` run, which starts when that
   task ends. Otherwise it creates the task (`tasks.schedule_id`, its own
-  spend cap, the profile overrides in `task_profile_overrides`) and starts it
+  spend cap, the profile overrides in `task_profile_overrides`, and a title:
+  the schedule's name and the fire time in its zone, such as
+  `alarm-triage · 10-15 12:30`, the name clipped so the time fits the 60
+  characters, which names the task in lists) and starts it
   at once with `TASK_START` (enabling was the approval), so it waits for a
   place under the project's concurrency limit like any start. Its requirement
   is the schedule's followed by a section the code writes, `## 定时运行上下文`:
