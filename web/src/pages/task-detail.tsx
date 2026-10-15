@@ -1371,7 +1371,7 @@ export function TaskDetailPage({ taskId, onBack }: TaskDetailPageProps) {
           </button>
           <div className="min-w-0 flex-1">
             <h1 className="text-lg font-semibold leading-tight truncate">
-              {task?.requirement || taskId}
+              {task?.name || task?.requirement || taskId}
             </h1>
             <div className="flex items-center gap-2 mt-0.5 flex-wrap">
               <span className="text-xs text-muted-foreground">{taskId}</span>

@@ -281,9 +281,9 @@ export function ChatPage() {
 
   const managerConfig = roleConfigs.find((c) => c.role === "manager");
   const targetTitle = (t: ChatTargetInfo) => {
-    if (t.kind === "planner") return `Planner · ${truncate(t.requirement || t.task_id || "", 40)}`;
+    if (t.kind === "planner") return `Planner · ${truncate(t.name || t.requirement || t.task_id || "", 40)}`;
     if (t.kind === "manager") return managerConfig?.display_name || "Manager";
-    return `${stepAgentTitle(t)} · ${truncate(taskGroup?.planner.requirement || t.task_id || "", 32)}`;
+    return `${stepAgentTitle(t)} · ${truncate(taskGroup?.planner.name || taskGroup?.planner.requirement || t.task_id || "", 32)}`;
   };
   const targetSubtitle = (t: ChatTargetInfo) =>
     t.kind === "manager"
@@ -640,7 +640,7 @@ export function ChatPage() {
                         ) : (
                           <ChevronRight className="h-3 w-3 shrink-0 text-muted-foreground" />
                         )}
-                        <span className="min-w-0 flex-1 truncate font-medium">{g.planner.requirement || taskId}</span>
+                        <span className="min-w-0 flex-1 truncate font-medium">{g.planner.name || g.planner.requirement || taskId}</span>
                         <StatusText status={g.planner.status} />
                       </button>
                       {open && (

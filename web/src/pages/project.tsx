@@ -144,7 +144,7 @@ function TasksCard({ project }: { project: Project }) {
                 <Badge variant={STATUS_VARIANT[task.status] ?? "outline"} className="shrink-0 capitalize">
                   {task.status === READY_STATUS ? "ready" : task.status}
                 </Badge>
-                <span className="min-w-0 flex-1 truncate">{task.requirement}</span>
+                <span className="min-w-0 flex-1 truncate">{task.name || task.requirement}</span>
                 {task.cost && task.cost.runs > 0 && (
                   <span className="shrink-0 font-mono text-xs text-muted-foreground">{formatUsd(task.cost.cost_usd)}</span>
                 )}
