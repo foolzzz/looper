@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections import OrderedDict
 from typing import Any
 
 from ... import env
@@ -31,6 +32,18 @@ from .allowlist import SenderAllowlist
 from .base import ChannelAdapter, DeliveryReceipt
 
 logger = logging.getLogger(__name__)
+
+# Cap the correlation→chat_id map so a long-lived bot does not grow without bound; the
+# oldest entries are evicted first. Autonomous replies reuse recent correlations, so losing
+# the oldest is safe. Matches the web channel's bound.
+_CORRELATION_MAX = 1000
+
+# The slash commands published to the Telegram client's menu (setMyCommands).
+_BOT_COMMANDS: list[tuple[str, str]] = [
+    ("status", "查看当前任务进度"),
+    ("new", "开始新的 Manager 会话"),
+    ("help", "显示帮助"),
+]
 
 
 def _check_telegram_available() -> bool:
@@ -57,8 +70,8 @@ class TelegramChannelAdapter(ChannelAdapter):
         self._app: Any = None
         self._outbound_task: asyncio.Task[Any] | None = None
         self._running = False
-        # correlation_id → telegram chat_id for reply routing
-        self._correlation_chat: dict[str, int] = {}
+        # correlation_id → telegram chat_id for reply routing (bounded, oldest evicted first)
+        self._correlation_chat: OrderedDict[str, int] = OrderedDict()
 
     @property
     def channel_type(self) -> str:
@@ -113,6 +126,14 @@ class TelegramChannelAdapter(ChannelAdapter):
         self._outbound_task = asyncio.create_task(self._outbound_loop())
 
         await self._app.initialize()
+        try:
+            from telegram import BotCommand
+
+            await self._app.bot.set_my_commands(
+                [BotCommand(name, desc) for name, desc in _BOT_COMMANDS]
+            )
+        except Exception:
+            logger.warning("telegram set_my_commands failed", exc_info=True)
         await self._app.start()
         await self._app.updater.start_polling(drop_pending_updates=True)  # type: ignore[union-attr]
         logger.info("telegram channel adapter started")
@@ -185,6 +206,12 @@ class TelegramChannelAdapter(ChannelAdapter):
             "active_conversations": len(self._correlation_chat),
         }
 
+    def _remember(self, correlation_id: str, chat_id: int) -> None:
+        """Map a correlation to its chat for reply routing, bounded to the newest ``_CORRELATION_MAX``."""
+        self._correlation_chat[correlation_id] = chat_id
+        while len(self._correlation_chat) > _CORRELATION_MAX:
+            self._correlation_chat.popitem(last=False)
+
     def _admits(self, update: Any) -> bool:
         """Whether the update's sender is on the allowlist; anyone else is logged and gets no reply."""
         user = getattr(update, "effective_user", None)
@@ -210,7 +237,7 @@ class TelegramChannelAdapter(ChannelAdapter):
 
         correlation_id = str(_uuid.uuid4())
         chat_id = update.effective_chat.id
-        self._correlation_chat[correlation_id] = chat_id
+        self._remember(correlation_id, chat_id)
 
         envelope = MessageEnvelope.create(
             source=self._address,
@@ -257,7 +284,7 @@ class TelegramChannelAdapter(ChannelAdapter):
 
         chat_id = update.effective_chat.id
         correlation_id = str(_uuid.uuid4())
-        self._correlation_chat[correlation_id] = chat_id
+        self._remember(correlation_id, chat_id)
 
         envelope = MessageEnvelope.create(
             source=self._address,

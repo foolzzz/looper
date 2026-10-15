@@ -950,3 +950,12 @@ CREATE TABLE IF NOT EXISTS channel_configs (
     created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at   TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- A channel's bot token, kept out of channel_configs.config so it never leaves
+-- the database through the API (which returns the whole config row verbatim).
+-- Only get_bot_token reads it, for the launch that builds the adapter; the API
+-- exposes only has_bot_token. Mirrors llm_provider_secrets.
+CREATE TABLE IF NOT EXISTS channel_secrets (
+    channel_id TEXT PRIMARY KEY REFERENCES channel_configs(channel_id) ON DELETE CASCADE,
+    bot_token  TEXT NOT NULL
+);

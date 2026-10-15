@@ -178,15 +178,19 @@ def _sender_allowlist(channel_id: str, channel_type: str, config: dict[str, Any]
     return allowlist_from_config(channel_id, channel_type, config)
 
 
-def _telegram_adapter_from_config(config: dict[str, Any]) -> TelegramChannelAdapter | None:
-    """Build the Telegram adapter from its Settings-page config; None when its allowlist keeps it from starting."""
+def _telegram_adapter_from_config(
+    config: dict[str, Any], bot_token: str = ""
+) -> TelegramChannelAdapter | None:
+    """Build the Telegram adapter from its Settings-page config; None when its allowlist keeps it from starting.
+
+    The token comes from ``channel_secrets`` (``bot_token``); for a row that predates DB-stored tokens it falls
+    back to the environment variable the old ``bot_token_env`` config key names (default LOOPER_TELEGRAM_BOT_TOKEN).
+    """
     allowlist = _sender_allowlist("channel-telegram", "telegram", config)
     if allowlist is None:
         return None
-    return TelegramChannelAdapter(
-        bot_token=env.get(config.get("bot_token_env") or "LOOPER_TELEGRAM_BOT_TOKEN", ""),
-        allowlist=allowlist,
-    )
+    token = bot_token or env.get(config.get("bot_token_env") or "LOOPER_TELEGRAM_BOT_TOKEN", "")
+    return TelegramChannelAdapter(bot_token=token, allowlist=allowlist)
 
 
 def _lark_adapter_from_config(config: dict[str, Any], runtime_root: Path) -> LarkChannelAdapter | None:
@@ -212,7 +216,6 @@ async def seed_channel_configs(pool: Any = None) -> None:
             "display_name": "Telegram Bot",
             "enabled": False,
             "config": {
-                "bot_token_env": "LOOPER_TELEGRAM_BOT_TOKEN",
                 "allowed_user_ids": [],
                 "description": "Telegram Bot integration via python-telegram-bot",
             },
@@ -429,7 +432,9 @@ async def _run_agent_system(
     # enabled channel without a valid sender allowlist does not start.
     tg_cfg = await get_channel_config("channel-telegram")
     if tg_cfg and tg_cfg.get("enabled"):
-        telegram_adapter = _telegram_adapter_from_config(tg_cfg.get("config") or {})
+        from ..db.channel_configs import get_bot_token
+        tg_token = await get_bot_token("channel-telegram") or ""
+        telegram_adapter = _telegram_adapter_from_config(tg_cfg.get("config") or {}, tg_token)
         if telegram_adapter is not None:
             await _register_optional_channel(registry, telegram_adapter)
 
