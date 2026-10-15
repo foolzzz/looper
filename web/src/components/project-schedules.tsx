@@ -26,12 +26,13 @@ import {
   type ScheduleOverlap,
   type SchedulePreview,
   type ScheduleRunInfo,
+  type ScheduleRunsPage,
   type ScheduleRunStatus,
   type ScheduleUpdate,
   type TaskRole,
 } from "@/lib/api";
 import { roleLabel } from "@/lib/runtime-catalog";
-import { RUN_STATUS, omit, runNotice, useNotices, type Notice } from "@/lib/schedules";
+import { NOTIFY_OPTIONS, RUN_STATUS, omit, runNotice, useNotices, type Notice } from "@/lib/schedules";
 import { AGENT_PROFILE, settingsHref } from "@/lib/settings-pages";
 import { errorText } from "@/lib/use-action";
 import { useCollapsibleRows } from "@/lib/use-collapsible-rows";
@@ -389,16 +390,6 @@ function Choices<T extends string>({
     </fieldset>
   );
 }
-
-const NOTIFY_OPTIONS: { value: ScheduleNotify; label: string; hint: string }[] = [
-  {
-    value: "failures",
-    label: "Failures",
-    hint: "Failed runs, plus the alerts (3 failures in a row, no success for a while) and their recoveries.",
-  },
-  { value: "always", label: "Always", hint: "Every run that ran a task, plus the alerts." },
-  { value: "never", label: "Never", hint: "Nothing is sent; the dashboard still shows failing schedules." },
-];
 
 const linkClass =
   "rounded-sm underline underline-offset-2 hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring";
@@ -960,55 +951,117 @@ function ScheduleForm({
 
 // --- Run history ---
 
-/** A schedule's runs, newest first: loaded when its row first opens, after "Run now" (`version`) and when the
- * newest run changes, and every 10 s while the row is open with a run going. */
-function RunHistory({ schedule, open, version }: { schedule: ScheduleInfo; open: boolean; version: number }) {
-  const [runs, setRuns] = useState<ScheduleRunInfo[] | null>(null);
+/** How many runs a page of the history holds, and the most one request may ask for. */
+const RUNS_PAGE = 20;
+const RUNS_MAX = 200;
+
+/** How long a finished run took: "45 s", "3 min 05 s", "1 h 20 min". */
+function durationText(run: ScheduleRunInfo): string | null {
+  if (!run.fired_at || !run.finished_at) return null;
+  const seconds = Math.max(0, Math.round((Date.parse(run.finished_at) - Date.parse(run.fired_at)) / 1000));
+  if (!Number.isFinite(seconds)) return null;
+  if (seconds < 60) return `${seconds} s`;
+  if (seconds < 3600) return `${Math.floor(seconds / 60)} min ${String(seconds % 60).padStart(2, "0")} s`;
+  return `${Math.floor(seconds / 3600)} h ${Math.floor((seconds % 3600) / 60)} min`;
+}
+
+/**
+ * A schedule's runs, newest first, a page at a time ("Show older runs"), the routine skips (nothing new, busy) left
+ * out unless asked for. Each run: when it was due, how it fired, its status, its task (title, status, link), how long
+ * it took, its cost, its error or summary, and the gate's output. Loaded when shown first, after "Run now"
+ * (`version`) and when the newest run changes, and every 10 s while `open` with a run going.
+ */
+export function RunHistory({ schedule, open, version }: { schedule: ScheduleInfo; open: boolean; version: number }) {
+  const id = useId();
+  const [page, setPage] = useState<ScheduleRunsPage | null>(null);
   const [error, setError] = useState("");
+  const [hideSkips, setHideSkips] = useState(true);
+  const [loadingMore, setLoadingMore] = useState(false);
   const latest = useRef(0);
+  /** How many runs are shown, so a refresh keeps the pages already loaded. */
+  const shown = useRef(RUNS_PAGE);
   const scheduleId = schedule.schedule_id;
   const newest = schedule.last_run ? `${schedule.last_run.run_id}:${schedule.last_run.status}` : "";
+  const skips = hideSkips ? "hide" : "show";
 
   const load = useCallback(() => {
     const mine = ++latest.current;
-    fetchScheduleRuns(scheduleId)
+    fetchScheduleRuns(scheduleId, { limit: Math.min(shown.current, RUNS_MAX), skips })
       .then((next) => {
         if (mine !== latest.current) return;
-        setRuns(next);
+        setPage(next);
         setError("");
       })
       .catch((err) => mine === latest.current && setError(errorText(err)));
-  }, [scheduleId]);
+  }, [scheduleId, skips]);
 
   useEffect(() => load(), [load, version, newest]);
-  const active = !!runs?.some(isActiveRun);
+  const active = !!page?.runs.some(isActiveRun);
   useEffect(() => {
     if (!open || !active) return;
     const timer = setInterval(load, REFRESH_MS);
     return () => clearInterval(timer);
   }, [open, active, load]);
 
+  const showOlder = () => {
+    if (!page?.next_before) return;
+    const mine = ++latest.current;
+    setLoadingMore(true);
+    fetchScheduleRuns(scheduleId, { limit: RUNS_PAGE, before: page.next_before, skips })
+      .then((next) => {
+        if (mine !== latest.current) return;
+        setPage((current) => current && { ...next, runs: [...current.runs, ...next.runs] });
+        shown.current = page.runs.length + next.runs.length;
+        setError("");
+      })
+      .catch((err) => mine === latest.current && setError(errorText(err)))
+      .finally(() => setLoadingMore(false));
+  };
+
+  const skipCount = page ? page.routine_skips.skipped_gate + page.routine_skips.skipped_overlap : 0;
   return (
-    <section aria-labelledby={`${scheduleId}-history`} className="space-y-2 border-t border-border pt-4">
-      <h3 id={`${scheduleId}-history`} className="text-xs font-semibold">Run history</h3>
+    <section aria-labelledby={`${id}-history`} className="space-y-2 border-t border-border pt-4">
+      <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1">
+        <h3 id={`${id}-history`} className="text-xs font-semibold">Run history</h3>
+        <label className="flex min-h-11 cursor-pointer items-center gap-2 text-xs text-muted-foreground sm:min-h-0">
+          <input
+            type="checkbox"
+            checked={hideSkips}
+            onChange={(e) => {
+              shown.current = RUNS_PAGE;
+              setHideSkips(e.target.checked);
+            }}
+            className="h-4 w-4 accent-primary"
+          />
+          Hide routine skips (nothing new, busy)
+          {skipCount > 0 && <span className="tabular-nums">· {skipCount.toLocaleString()} in all</span>}
+        </label>
+      </div>
       {error && <p role="alert" className="text-xs text-destructive">Could not load the runs: {error}</p>}
-      {!runs ? (
+      {!page ? (
         !error && <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" aria-label="Loading" />
-      ) : runs.length === 0 ? (
-        <p className="text-xs text-muted-foreground">No runs yet</p>
+      ) : page.runs.length === 0 ? (
+        <p className="text-xs text-muted-foreground">
+          {hideSkips && skipCount > 0 ? "No runs but routine skips" : "No runs yet"}
+        </p>
       ) : (
         <ul className="divide-y divide-border">
-          {runs.map((run) => {
-            const when = run.fired_at ?? run.scheduled_for;
+          {page.runs.map((run) => {
             const text = run.error ?? run.summary;
+            const took = durationText(run);
             return (
               <li key={run.run_id} className="flex flex-col gap-1 py-2 sm:flex-row sm:flex-wrap sm:items-center sm:gap-x-3">
                 <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs sm:shrink-0">
-                  <time dateTime={when} className="tabular-nums text-foreground">
-                    {formatInZone(when, schedule.timezone)}
+                  <time
+                    dateTime={run.scheduled_for}
+                    title={run.fired_at ? `Fired ${formatInZone(run.fired_at, schedule.timezone)}` : "Not fired yet"}
+                    className="tabular-nums text-foreground"
+                  >
+                    {formatInZone(run.scheduled_for, schedule.timezone)}
                   </time>
                   <span className="text-muted-foreground">{triggerText(run)}</span>
                   <RunStatusBadge status={run.status} />
+                  {took && <span className="tabular-nums text-muted-foreground" title="How long it took">{took}</span>}
                   <span className="font-mono text-muted-foreground" title="What its task spent">
                     {run.cost_usd == null ? "—" : formatUsd(run.cost_usd)}
                   </span>
@@ -1021,10 +1074,11 @@ function RunHistory({ schedule, open, version }: { schedule: ScheduleInfo; open:
                 {run.task_id && (
                   <a
                     href={`#tasks/${encodeURIComponent(run.task_id)}`}
-                    className="inline-flex shrink-0 items-center gap-1 self-start rounded-sm text-xs font-medium text-primary underline-offset-2 hover:underline focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring sm:ml-auto sm:self-auto"
+                    className="inline-flex min-w-0 max-w-full shrink-0 items-center gap-1 self-start rounded-sm text-xs font-medium text-primary underline-offset-2 hover:underline focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring sm:ml-auto sm:max-w-[40%] sm:self-auto"
                   >
-                    Its task
-                    <ArrowRight className="h-3 w-3" aria-hidden="true" />
+                    <span className="truncate">{run.task_title || "Its task"}</span>
+                    {run.task_status && <span className="shrink-0 font-normal text-muted-foreground">· {run.task_status}</span>}
+                    <ArrowRight className="h-3 w-3 shrink-0" aria-hidden="true" />
                   </a>
                 )}
                 {run.carried_from && (
@@ -1044,6 +1098,12 @@ function RunHistory({ schedule, open, version }: { schedule: ScheduleInfo; open:
             );
           })}
         </ul>
+      )}
+      {page?.next_before && (
+        <Button type="button" variant="outline" size="sm" onClick={showOlder} disabled={loadingMore} className="h-11 sm:h-8">
+          {loadingMore && <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />}
+          Show older runs
+        </Button>
       )}
     </section>
   );
