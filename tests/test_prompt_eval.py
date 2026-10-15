@@ -121,6 +121,33 @@ def test_changed_files_are_the_planners_only_while_no_step_ran() -> None:
     assert metrics.planner_changed_files(changes, shifted, clock_offset=50.0) == ["in-plan-turn.txt"]
 
 
+@pytest.mark.parametrize(("depends_on", "pairs"), [
+    ({"s1": [], "s2": [], "s3": ["s1", "s2"], "s4": ["s3"]}, 1),  # s1 and s2 only
+    ({"s1": [], "s2": ["s1"], "s3": ["s2"]}, 0),  # a chain: s3 needs s1 through s2
+    ({"s1": [], "s2": [], "s3": []}, 3),
+], ids=["diamond", "chain", "flat"])
+def test_independent_pairs_count_steps_with_no_dependency_path(depends_on: dict[str, list[str]], pairs: int) -> None:
+    steps = [{"id": step_id, "depends_on": needs} for step_id, needs in depends_on.items()]
+    assert metrics.independent_pairs(steps) == pairs
+
+
+@pytest.mark.parametrize(("depends_on", "pairs"), [
+    ({"api": [], "server": ["api"], "client": ["api"], "check": ["server", "client"]}, 1),
+    ({"api": [], "server": ["api"], "client": ["api"]}, 0),  # no step brings the two together
+    ({"server": [], "client": [], "check": ["server", "client"]}, 0),  # no interface they share
+], ids=["interface first", "no integration", "no interface"])
+def test_bracketed_pairs_need_a_shared_step_before_and_a_step_after(depends_on: dict[str, list[str]],
+                                                                    pairs: int) -> None:
+    steps = [{"id": step_id, "depends_on": needs} for step_id, needs in depends_on.items()]
+    assert metrics.bracketed_pairs(steps) == pairs
+
+
+def test_most_at_once_counts_overlapping_runs_but_not_touching_ones() -> None:
+    assert metrics.most_at_once([(0.0, 10.0), (5.0, 12.0), (11.0, 20.0)]) == 2
+    assert metrics.most_at_once([(0.0, 10.0), (10.0, 20.0)]) == 1
+    assert metrics.most_at_once([]) == 0
+
+
 # --- One task's metrics ---------------------------------------------------------------------------------
 
 
@@ -190,10 +217,10 @@ def test_comparison_marks_what_changed_and_sums_the_run() -> None:
     lines = table.splitlines()
     assert lines[0] == "Prompt eval: real/haiku @ abcdef123 → real/haiku @ abcdef123+local changes"
     # A run from before tokens were read has none: only the new side shows them.
-    assert "| single_step | pass | 1 | 0 | 0 | 0 | 0 | 32k / 2.5k | 0.0200 → **0.0300** |" in lines
-    assert "| chat_correction | pass → **FAIL** | 1 | 0 | 0 | 0 → **2** | 0 | – | 0.0200 |" in lines
-    assert "| **total** | 2/2 → **1/2** | 2 | 0 | 0 | 0 → **2** | 0 | – → **32k / 2.5k** | 0.0400 → **0.0500** |" \
-        in lines
+    assert "| single_step | pass | 1 | – | 0 | 0 | 0 | 0 | 32k / 2.5k | 0.0200 → **0.0300** |" in lines
+    assert "| chat_correction | pass → **FAIL** | 1 | – | 0 | 0 | 0 → **2** | 0 | – | 0.0200 |" in lines
+    assert ("| **total** | 2/2 → **1/2** | 2 | – | 0 | 0 | 0 → **2** | 0 | – → **32k / 2.5k** | 0.0400 → **0.0500** |"
+            in lines)
     assert "- chat_correction: color.txt holds 'red', expected 'blue'" in lines
 
 
@@ -202,8 +229,9 @@ def test_comparison_without_a_base_and_with_skipped_tasks() -> None:
     new.update(stopped_by_cap=True, caps={"total_cap_usd": 0.8})
     lines = compare.markdown(new).splitlines()
     assert lines[0].endswith("(no earlier run to compare with)")
-    assert "| chat_correction | skipped | skipped | skipped | skipped | skipped | skipped | skipped | skipped |" in lines
-    assert "| **total** | 1/1 | 1 | 0 | 0 | 0 | 0 | – | 0.0200 |" in lines
+    assert ("| chat_correction | skipped | skipped | skipped | skipped | skipped | skipped | skipped | skipped "
+            "| skipped |" in lines)
+    assert "| **total** | 1/1 | 1 | – | 0 | 0 | 0 | 0 | – | 0.0200 |" in lines
     assert "- stopped at the spending cap (0.8 USD)" in lines
 
 
@@ -302,9 +330,16 @@ def test_fake_mode_runs_every_task_and_sees_misbehaviour(tmp_path: Path) -> None
         assert by_id[task.id]["planner_modified_files"] == 0
     flow = {t: (by_id[t]["steps"], by_id[t]["retries"], by_id[t]["reviews"], by_id[t]["chat_turns"])
             for t in by_id}
-    assert flow == {"single_step": (1, 0, 0, 0), "dependent_steps": (2, 0, 0, 0), "reviewed_step": (1, 0, 1, 0),
-                    "retry_after_failure": (1, 1, 0, 0), "chat_correction": (1, 0, 0, 1),
-                    "misbehaving": (1, 1, 0, 0)}
+    assert flow == {"single_step": (1, 0, 0, 0), "dependent_steps": (2, 0, 0, 0), "parallel_parts": (3, 0, 0, 0),
+                    "interface_first": (4, 0, 0, 0), "reviewed_step": (1, 0, 1, 0),
+                    "retry_after_failure": (1, 1, 0, 0), "chat_correction": (1, 0, 0, 1), "misbehaving": (1, 1, 0, 0)}
+    # Only the parts that need nothing of each other run side by side; interface_first's sit between its interface
+    # step and its integration step.
+    shape = {t: (by_id[t]["independent_pairs"], by_id[t]["bracketed_pairs"], by_id[t]["parallel_workers"])
+             for t in by_id}
+    assert shape == {"single_step": (0, 0, 1), "dependent_steps": (0, 0, 1), "parallel_parts": (1, 0, 2),
+                     "interface_first": (1, 1, 2), "reviewed_step": (0, 0, 1), "retry_after_failure": (0, 0, 1),
+                     "chat_correction": (0, 0, 1), "misbehaving": (0, 0, 1)}
     assert by_id["chat_correction"]["planner_turns"]["chat"] == 1
     assert all(task["cost_usd"] > 0 for task in result["tasks"])
 

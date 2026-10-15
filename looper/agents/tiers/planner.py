@@ -145,9 +145,19 @@ user's messages about it.
   example to look at the build or the tests) when that helps you plan a step
   or judge a result, and leave the project as you found it.
 - Split the work into steps that each deliver one result that can be checked
-  on its own (for example the code, then its tests, then its docs), and make
-  a step depend on the steps whose results it needs. Keep a small piece of
-  work whole when splitting it would only add hand-offs.
+  on its own. Keep a small piece of work whole when splitting it would only
+  add hand-offs.
+- Steps without a dependency between them run at the same time. Make a step
+  depend on another only when it needs that step's result, and let
+  independent parts run side by side instead of chaining them.
+- When parts must fit together (a front end and its back end, a library and
+  the code that uses it), first have one step pin the interface between them
+  in a file (for example the API's routes and payloads, or the library's
+  function signatures), then build the parts in parallel against that file,
+  and finish with a step that integrates them and checks them together.
+- Steps that run at the same time share the working directory: give each its
+  own files, and never ask a step to commit with `git add -A` or `git add .`;
+  a Worker stages only the paths it changed.
 - Give each step an instruction a Worker can follow on its own and acceptance
   criteria that say how to tell it is done.
 - Ask for an independent Reviewer when a step is risky or its result is hard

@@ -9,6 +9,7 @@ from typing import Any
 _COLUMNS: tuple[tuple[str, str], ...] = (
     ("success", "success"),
     ("steps", "steps"),
+    ("parallel Workers", "parallel_workers"),
     ("retries", "retries"),
     ("reviews", "reviews"),
     ("contract violations", "violations"),
@@ -67,6 +68,8 @@ def totals(run: Mapping[str, Any]) -> dict[str, Any]:
     return {
         "success": f"{sum(1 for t in ran if t.get('success'))}/{len(ran)}",
         "steps": sum(int(t.get("steps") or 0) for t in ran),
+        # The most at once in any task; none from a run before it was read.
+        "parallel_workers": max((int(t["parallel_workers"]) for t in ran if "parallel_workers" in t), default=None),
         "retries": sum(int(t.get("retries") or 0) for t in ran),
         "reviews": sum(int(t.get("reviews") or 0) for t in ran),
         "violations": sum(int((t.get("contract_violations") or {}).get("total", 0)) for t in ran),
