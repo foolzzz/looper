@@ -472,7 +472,7 @@ class ManagerAgent:
         if followup is not None and followup.chat != chat:
             followup = None
 
-        await self._send_status(envelope, "thinking", phase=True)
+        await self._send_status(envelope, "thinking", phase=True, activity="thinking")
 
         try:
             response = await self._invoke_claude(text, envelope, note=followup.note if followup else "")
@@ -480,7 +480,7 @@ class ManagerAgent:
         except Exception as exc:
             # Always answer: the chat stream waits for a final reply.
             logger.exception("manager failed to answer %s", envelope.message_id)
-            await self._send_reply(envelope, f"Manager 出错，没能完成这次回复：{exc}")
+            await self._send_reply(envelope, f"Manager 出错，没能完成这次回复：{exc}", error=str(exc))
             return
 
         if parsed.get("needs_clarification"):
@@ -496,7 +496,7 @@ class ManagerAgent:
                 return
             except Exception as exc:
                 logger.exception("manager failed to place task from %s", envelope.message_id)
-                await self._send_reply(envelope, f"Manager 出错，没能创建任务：{exc}")
+                await self._send_reply(envelope, f"Manager 出错，没能创建任务：{exc}", error=str(exc))
                 return
             task_id = f"task-{uuid.uuid4().hex[:12]}"
             goal_id = str(parsed.get("goal_id") or "")
@@ -821,7 +821,7 @@ class ManagerAgent:
             if event_type == "system":
                 subtype = payload.get("subtype", "")
                 if subtype == "init":
-                    await self._send_status(context_envelope, "thinking", phase=True)
+                    await self._send_status(context_envelope, "thinking", phase=True, activity="thinking")
 
             elif event_type == "stream_event":
                 event = payload.get("event")
@@ -852,9 +852,11 @@ class ManagerAgent:
                                 context_envelope,
                                 f"正在使用工具: {tool_name}",
                                 phase=True,
+                                activity="tool",
+                                tool=str(tool_name),
                             )
                         elif block_type == "thinking":
-                            await self._send_status(context_envelope, "thinking", phase=True)
+                            await self._send_status(context_envelope, "thinking", phase=True, activity="thinking")
 
         try:
             turn_text = await self._build_user_message(message, note)
@@ -955,7 +957,7 @@ class ManagerAgent:
                 # Nothing is dropped: the next message resumes the saved session in a new process.
                 self._session_id, self._session_totals, self._clean_start = previous
                 logger.exception("manager: could not drop its session for /new")
-                await self._send_reply(envelope, f"Manager 出错，没能开始新会话：{exc}")
+                await self._send_reply(envelope, f"Manager 出错，没能开始新会话：{exc}", error=str(exc))
                 return
             self._pending_switch = self._pending_handoff = None
             self._followup = None
@@ -1266,13 +1268,14 @@ class ManagerAgent:
 
         return {"response_text": response}
 
-    async def _send_reply(self, original: MessageEnvelope, text: str) -> None:
+    async def _send_reply(self, original: MessageEnvelope, text: str, *, error: str | None = None) -> None:
+        """Answer ``original``; ``error`` says why the turn failed (a chat channel shows it on its status line)."""
         assert self._bus is not None
         await self._bus.publish(MessageEnvelope.create(
             source=MANAGER_ADDRESS,
             target=original.source,
             message_type=MessageType.AGENT_REPLY,
-            payload={"text": text},
+            payload={"text": text, **({"error": error} if error else {})},
             correlation_id=original.correlation_id,
             reply_to=original.message_id,
             metadata={"origin_channel_id": original.metadata.get("origin_channel_id")},
@@ -1285,13 +1288,18 @@ class ManagerAgent:
         *,
         delta: bool = False,
         phase: bool = False,
+        activity: str | None = None,
+        tool: str | None = None,
     ) -> None:
+        """A status of the turn answering ``original``: streamed text (``delta``), or a phase (``phase``) with what
+        it is (``activity``: ``thinking`` or ``tool``, with the ``tool``'s name)."""
         assert self._bus is not None
+        extra = {key: value for key, value in (("activity", activity), ("tool", tool)) if value}
         await self._bus.publish(MessageEnvelope.create(
             source=MANAGER_ADDRESS,
             target=original.source,
             message_type=MessageType.STATUS_UPDATE,
-            payload={"text": text, "delta": delta, "phase": phase},
+            payload={"text": text, "delta": delta, "phase": phase, **extra},
             correlation_id=original.correlation_id,
             reply_to=original.message_id,
             metadata={"origin_channel_id": original.metadata.get("origin_channel_id")},

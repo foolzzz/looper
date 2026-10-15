@@ -30,6 +30,7 @@ from ..message import (
 )
 from .allowlist import SenderAllowlist
 from .base import ChannelAdapter, DeliveryReceipt
+from .status_line import StatusLines
 
 logger = logging.getLogger(__name__)
 
@@ -72,6 +73,8 @@ class TelegramChannelAdapter(ChannelAdapter):
         self._running = False
         # correlation_id → telegram chat_id for reply routing (bounded, oldest evicted first)
         self._correlation_chat: OrderedDict[str, int] = OrderedDict()
+        # One status message per message answered, edited in place (``status_line``).
+        self._status = StatusLines(channel="channel-telegram", send=self._send_status, edit=self._edit_status)
 
     @property
     def channel_type(self) -> str:
@@ -165,9 +168,8 @@ class TelegramChannelAdapter(ChannelAdapter):
             return DeliveryReceipt(channel="telegram", success=False, error=str(exc))
 
     async def deliver(self, envelope: MessageEnvelope) -> DeliveryReceipt:
-        """Send a message to the Telegram user who started the conversation."""
-        import telegram
-
+        """Show a status on the message's status line, or send the answer to the Telegram user who wrote and close
+        its status line."""
         corr_id = envelope.correlation_id
         chat_id = self._correlation_chat.get(corr_id)
         if chat_id is None:
@@ -177,9 +179,31 @@ class TelegramChannelAdapter(ChannelAdapter):
                 error=f"no chat_id for correlation {corr_id}",
             )
 
+        if envelope.message_type is MessageType.STATUS_UPDATE:
+            await self._status.update(corr_id, str(chat_id), envelope.payload)
+            return DeliveryReceipt(channel="telegram", success=True)
+
         text = self._format_reply(envelope)
         if not text:
             return DeliveryReceipt(channel="telegram", success=True)
+
+        receipt = await self._send_answer(chat_id, text)
+        if not envelope.payload.get("autonomous"):
+            await self._status.finish(corr_id, error=envelope.payload.get("error"))
+        return receipt
+
+    async def _send_status(self, chat_id: str, text: str) -> str | None:
+        if self._app is None:
+            return None
+        message = await self._app.bot.send_message(chat_id=int(chat_id), text=text)
+        return str(message.message_id)
+
+    async def _edit_status(self, chat_id: str, message_id: str, text: str) -> None:
+        await self._app.bot.edit_message_text(chat_id=int(chat_id), message_id=int(message_id), text=text)
+
+    async def _send_answer(self, chat_id: int, text: str) -> DeliveryReceipt:
+        """Send ``text`` as Markdown, or as plain text when Telegram cannot parse it."""
+        import telegram
 
         try:
             bot = self._app.bot
@@ -330,14 +354,10 @@ class TelegramChannelAdapter(ChannelAdapter):
 
     @staticmethod
     def _format_reply(envelope: MessageEnvelope) -> str:
+        """The text of an answer; a status goes to the status line instead (``deliver``)."""
         match envelope.message_type:
             case MessageType.AGENT_REPLY | MessageType.CLARIFICATION_REQUEST:
                 return envelope.payload.get("text", "")
-            case MessageType.STATUS_UPDATE:
-                text = envelope.payload.get("text", "")
-                if envelope.payload.get("delta"):
-                    return ""  # Don't send streaming deltas to Telegram
-                return text
             case _:
                 return ""
 

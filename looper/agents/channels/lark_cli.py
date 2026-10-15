@@ -70,6 +70,23 @@ def send_command(*, chat_id: str | None = None, user_id: str | None = None, text
     return [*_base(profile), "im", "+messages-send", "--as", "bot", *target, *body]
 
 
+def edit_command(message_id: str, *, text: str | None = None, markdown: str | None = None,
+                 profile: str | None = None) -> list[str]:
+    """The lark-cli argv that replaces, as the bot, the content of a message it sent (``om_...``) with ``text`` or
+    ``markdown``. Feishu edits one message at most 20 times."""
+    if (text is None) == (markdown is None):
+        raise ValueError("edit with exactly one of text and markdown")
+    body = ["--text", text] if text is not None else ["--markdown", markdown]
+    return [*_base(profile), "im", "+messages-edit", "--as", "bot", "--message-id", message_id, *body]
+
+
+def sent_message_id(answer: Mapping[str, Any]) -> str | None:
+    """The id of the message ``+messages-send`` sent, from its JSON answer."""
+    data = answer.get("data") if isinstance(answer.get("data"), Mapping) else answer
+    message_id = data.get("message_id") if isinstance(data, Mapping) else None
+    return str(message_id) if message_id else None
+
+
 def whoami_command(profile: str | None = None) -> list[str]:
     return [*_base(profile), "whoami"]
 
