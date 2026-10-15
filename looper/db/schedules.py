@@ -61,17 +61,26 @@ async def _with_overrides(db: Db, rows: list[asyncpg.Record]) -> list[dict[str, 
     return [{**dict(row), "profile_overrides": overrides[row["id"]]} for row in rows]
 
 
+# A schedule's row with its project's name.
+_WITH_PROJECT = "SELECT s.*, p.name AS project_name FROM schedules s JOIN projects p ON p.id = s.project_id"
+
+
 async def get_schedule(schedule_id: str, *, pool: Db | None = None) -> dict[str, Any] | None:
-    """One schedule with its ``profile_overrides`` (role -> profile id)."""
+    """One schedule with its ``project_name`` and ``profile_overrides`` (role -> profile id)."""
     db = pool or get_pool()
-    row = await db.fetchrow("SELECT * FROM schedules WHERE id = $1", schedule_id)
+    row = await db.fetchrow(f"{_WITH_PROJECT} WHERE s.id = $1", schedule_id)
     return (await _with_overrides(db, [row]))[0] if row else None
 
 
-async def list_schedules(project_id: str, *, pool: Db | None = None) -> list[dict[str, Any]]:
-    """A project's schedules by name ignoring case, each with its ``profile_overrides``."""
+async def list_schedules(project_id: str | None = None, *, pool: Db | None = None) -> list[dict[str, Any]]:
+    """A project's schedules (every project's without ``project_id``, by project name) by name ignoring case, each
+    with its ``project_name`` and ``profile_overrides``."""
     db = pool or get_pool()
-    rows = await db.fetch("SELECT * FROM schedules WHERE project_id = $1 ORDER BY lower(name), id", project_id)
+    rows = await db.fetch(
+        f"{_WITH_PROJECT} WHERE $1::text IS NULL OR s.project_id = $1 "
+        "ORDER BY lower(p.name), p.id, lower(s.name), s.id",
+        project_id,
+    )
     return await _with_overrides(db, rows)
 
 
@@ -296,14 +305,21 @@ async def previous_run(conn: Db, schedule_id: str, *, before: str | None = None)
 async def spent_since(conn: Db, schedule_id: str, since: datetime) -> float:
     """What the schedule's runs fired since ``since`` cost: each its recorded cost, a running one its task's so
     far."""
-    return float(await conn.fetchval(
+    return (await spent_since_each(conn, [schedule_id], since))[schedule_id]
+
+
+async def spent_since_each(conn: Db, schedule_ids: list[str], since: datetime) -> dict[str, float]:
+    """``spent_since`` for each of ``schedule_ids``, in one query."""
+    rows = await conn.fetch(
         """
-        SELECT COALESCE(sum(COALESCE(r.cost_usd,
-                   (SELECT sum(l.cost_usd) FROM llm_records l WHERE l.task_id = r.task_id))), 0)
-        FROM schedule_runs r WHERE r.schedule_id = $1 AND r.fired_at >= $2
+        SELECT r.schedule_id, sum(COALESCE(r.cost_usd,
+                   (SELECT sum(l.cost_usd) FROM llm_records l WHERE l.task_id = r.task_id))) AS spent
+        FROM schedule_runs r WHERE r.schedule_id = ANY($1::text[]) AND r.fired_at >= $2 GROUP BY r.schedule_id
         """,
-        schedule_id, since,
-    ))
+        schedule_ids, since,
+    )
+    spent = {row["schedule_id"]: float(row["spent"] or 0) for row in rows}
+    return {schedule_id: spent.get(schedule_id, 0.0) for schedule_id in schedule_ids}
 
 
 async def fail_gating_runs(conn: Db, at: datetime) -> int:

@@ -381,6 +381,8 @@ class AgentHTTPServer:
         elif (m := self._RE_PROJECT_SCHEDULES.match(path)) and method == "POST":
             await self._answer(writer, HTTP_201, lambda: schedules.create_schedule(
                 m.group(1), projects.json_object(body)))
+        elif path == "/api/schedules" and method == "GET":
+            await self._answer(writer, HTTP_200, schedules.list_all_schedules)
         elif path == "/api/schedules/preview" and method == "POST":
             await self._answer(writer, HTTP_200, lambda: self._preview_schedule(body))
         elif (m := self._RE_SCHEDULE.match(path)) and method == "GET":
