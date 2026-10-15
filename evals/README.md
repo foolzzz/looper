@@ -58,8 +58,9 @@ run gets `--max-budget-usd` (default 0.25), and the run stops once its tasks
 have spent `--total-cap-usd` (default 0.80); a task that reaches the cap is
 cancelled and the rest are skipped. `--model` sets the model in the system
 settings layer of the run's database, so every agent uses it. A full run costs
-about $0.33 with haiku (about 3.5 minutes), $0.62 with sonnet and $1.30 with
-opus (about 3 minutes each); give opus a higher `--total-cap-usd`, such as
+about $0.45 with haiku (about 4.5 minutes); before `parallel_parts` was added,
+the other five cost $0.62 with sonnet and $1.30 with opus (about 3 minutes
+each), so give sonnet and opus a higher `--total-cap-usd`, such as 1.00 and
 2.50. Expect some noise between identical runs: cost
 moves by up to about 10%, and an occasional single contract violation that a
 repair turn fixes is not a regression by itself.
