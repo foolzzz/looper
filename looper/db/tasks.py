@@ -49,6 +49,9 @@ STATUS_GROUPS: Mapping[str, TaskGroup] = MappingProxyType({
 })
 
 
+# The statuses a Planner ends its task with (its final GOAL_STATUS); a user's stop or cancel ends it otherwise.
+PLANNER_END_STATUSES = frozenset({"completed", "failed"})
+
 # A task in one of these is queued or running: the sidebar's active count, the guard on deleting, and what a server
 # start resumes (with a live plan) or else marks stopped.
 ACTIVE_STATUSES = tuple(status for status, group in STATUS_GROUPS.items()

@@ -32,7 +32,7 @@ from looper.agents.message import (
     planner_address,
 )
 from looper.agents.schedule_notify import SNIPPET_CHARS
-from looper.agents.task_notice import NotifyChannel, notice_text, notify_chat
+from looper.agents.task_notice import NotifyChannel, ends_task, notice_text, notify_chat
 from looper.agents.tiers.manager import ManagerAgent, ManagerConfig
 from looper.agents.tiers.planner import closing_note
 from looper.agents.tiers.task import Task, TaskRouter
@@ -218,6 +218,16 @@ async def _until(condition: Any, timeout: float = 10.0) -> None:
 def test_the_chat_a_task_records(channel: str | None, sender: str | None, chat: str | None,
                                  expected: str | None) -> None:
     assert notify_chat(channel, sender=sender, chat=chat) == expected
+
+
+@pytest.mark.parametrize(("status", "ends"), [
+    ("completed", True), ("failed", True),
+    # A user's stop or cancel ends a task elsewhere; a Planner never reports them, and nothing else is an end.
+    ("stopped", False), ("cancelled", False), ("executing", False), ("stopping", False), ("unknown", False),
+    ("", False), (None, False),
+])
+def test_only_completed_and_failed_end_a_task(status: str | None, ends: bool) -> None:
+    assert ends_task(status) is ends
 
 
 def test_the_notify_channels_are_the_adapters_that_implement_notify(tmp_path: Path) -> None:

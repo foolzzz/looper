@@ -19,8 +19,6 @@ from .message import channel_address
 from .schedule_notify import snippet
 
 NAME_CHARS = 40
-# The groups of a Planner's final statuses: completed, and failed.
-_ENDED = (db_tasks.TaskGroup.COMPLETED, db_tasks.TaskGroup.ATTENTION)
 
 
 class NotifyChannel(str, Enum):
@@ -52,8 +50,8 @@ def notify_chat(origin_channel_id: str | None, *, sender: str | None, chat: str 
 
 
 def ends_task(status: str | None) -> bool:
-    """Whether a Planner's status is its task's end: completed, or failed."""
-    return db_tasks.task_group(status) in _ENDED
+    """Whether a Planner's status is its task's end: completed, or failed (``db.tasks.PLANNER_END_STATUSES``)."""
+    return isinstance(status, str) and status in db_tasks.PLANNER_END_STATUSES
 
 
 def notice_text(task_id: str, requirement: str, status: str, summary: str | None) -> str:
