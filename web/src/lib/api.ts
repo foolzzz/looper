@@ -113,9 +113,99 @@ export async function fetchStatus(): Promise<SystemStatus> {
   return res.json();
 }
 
-export async function fetchTasks(projectId?: string): Promise<TaskInfo[]> {
-  const qs = projectId ? `?project_id=${encodeURIComponent(projectId)}` : "";
-  const res = await fetch(`${API_BASE}/tasks${qs}`);
+/** What a task's status means at a glance; the server maps each status to one (an unknown one to "other"). */
+export type TaskGroup = "in_progress" | "queued" | "ready" | "attention" | "completed" | "cancelled" | "other";
+
+export const TASK_GROUPS: { id: TaskGroup; label: string }[] = [
+  { id: "in_progress", label: "In progress" },
+  { id: "queued", label: "Queued" },
+  { id: "ready", label: "Ready" },
+  { id: "attention", label: "Needs attention" },
+  { id: "completed", label: "Completed" },
+  { id: "cancelled", label: "Cancelled" },
+  { id: "other", label: "Other" },
+];
+
+export function isTaskGroup(value: string | null): value is TaskGroup {
+  return TASK_GROUPS.some((g) => g.id === value);
+}
+
+/** A Planner running now: one per task in progress. */
+export interface LivePlanner {
+  agent_id: string;
+  task_id: string;
+  project_id: string | null;
+  project_name: string | null;
+  requirement: string;
+}
+
+/** A Worker or Reviewer run now, running or waiting for room under its project's limit. */
+export interface LiveStepRun {
+  agent_id: string;
+  role: "worker" | "reviewer";
+  task_id: string;
+  project_id: string | null;
+  project_name: string | null;
+  /** The Planner's label for the step. */
+  step: string;
+  instruction: string;
+  state: "running" | "waiting";
+  /** How long it has been running, or waiting. */
+  elapsed_seconds: number;
+}
+
+/** How many of one role run (and wait) in a project, against its limit there. */
+export interface RoleLoad {
+  running: number;
+  waiting: number;
+  limit: number;
+}
+
+/** `GET /api/overview`: what is happening now. */
+export interface Overview {
+  tasks: Record<TaskGroup, number> & { total: number; other_statuses: Record<string, number> };
+  agents: {
+    /** null when the server has no Manager to ask. */
+    manager: { agent_id: string; state: "busy" | "idle" } | null;
+    planners: LivePlanner[];
+    workers: LiveStepRun[];
+    reviewers: LiveStepRun[];
+  };
+  /** The projects with a task in progress, queued or ready. */
+  projects: {
+    project_id: string;
+    name: string;
+    tasks: { running: number; queued: number; ready: number; limit: number };
+    workers: RoleLoad;
+    reviewers: RoleLoad;
+  }[];
+  idle_projects: number;
+  /** The runs started since the server's local midnight. */
+  spend_today: {
+    since: string;
+    /** Money: API-key runs at their provider's prices. */
+    provider_priced_usd: number;
+    /** A runtime's own login at API prices: not money spent. */
+    equivalent_usd: number;
+    runs: number;
+    running: number;
+    unpriced_runs: number;
+  };
+  health: { unhealthy: { name: string; restart_count: number; max_restarts: number }[] };
+}
+
+export async function fetchOverview(): Promise<Overview> {
+  const res = await fetch(`${API_BASE}/overview`);
+  if (!res.ok) await failed(res, "overview");
+  return res.json();
+}
+
+export async function fetchTasks(projectId?: string, group?: TaskGroup): Promise<TaskInfo[]> {
+  const params = new URLSearchParams();
+  if (projectId) params.set("project_id", projectId);
+  if (group) params.set("group", group);
+  const qs = params.toString();
+  const res = await fetch(`${API_BASE}/tasks${qs ? `?${qs}` : ""}`);
   if (!res.ok) throw new Error(`tasks ${res.status}`);
   const data = await res.json();
   return data.tasks ?? data;

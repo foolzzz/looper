@@ -12,6 +12,7 @@ import {
   Plus,
   Settings2,
   Folder,
+  X,
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -24,6 +25,9 @@ import {
   createTask,
   READY_LABEL,
   READY_STATUS,
+  isTaskGroup,
+  TASK_GROUPS,
+  type TaskGroup,
   type TaskInfo,
   type TaskRole,
 } from "@/lib/api";
@@ -156,13 +160,26 @@ function TaskProfilesField({ value, onChange }: { value: ProfileChoice; onChange
 
 interface TasksPageProps {
   sub?: string;
-  /** "project=<id>" filters the list by project. */
+  /** "project=<id>" filters the list by project, "group=<group>" by a task group (the Dashboard's counts). */
   query?: string;
   onNavigate?: (sub: string, query?: string) => void;
 }
 
+function filterQuery(project: string, group: TaskGroup | null): string {
+  const query = new URLSearchParams();
+  if (project) query.set("project", project);
+  if (group) query.set("group", group);
+  return query.toString();
+}
+
 export function TasksPage({ sub, query, onNavigate }: TasksPageProps) {
-  const projectFilter = new URLSearchParams(query || "").get("project") || "";
+  const params = new URLSearchParams(query || "");
+  const projectFilter = params.get("project") || "";
+  const groupParam = params.get("group");
+  const groupFilter = isTaskGroup(groupParam) ? groupParam : null;
+  const group = TASK_GROUPS.find((g) => g.id === groupFilter) ?? null;
+  // What the list shows: the server filters by both.
+  const listKey = filterQuery(projectFilter, groupFilter);
   const { projects, reload: reloadProjects } = useProjects();
   const selectedProject = projects?.find((p) => p.project_id === projectFilter) ?? null;
   // A filter for a project the list does not hold yet (just created elsewhere) is
@@ -180,9 +197,9 @@ export function TasksPage({ sub, query, onNavigate }: TasksPageProps) {
     };
   }, [projectMissing, projectFilter, reloadProjects]);
   const [tasks, setTasks] = useState<TaskInfo[]>([]);
-  // The project filter the last finished load was for; anything else is still loading.
+  // The list the last finished load was for; anything else is still loading.
   const [loadedFor, setLoadedFor] = useState<string | null>(null);
-  const loading = loadedFor !== projectFilter;
+  const loading = loadedFor !== listKey;
   const [error, setError] = useState("");
   const [filter, setFilter] = useState<StatusFilter>("all");
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
@@ -205,18 +222,18 @@ export function TasksPage({ sub, query, onNavigate }: TasksPageProps) {
   }, [sub, query]);
   const setSelectedTaskId = (id: string | null) =>
     id ? onNavigate?.(id) : onNavigate?.("", listQuery.current);
-  const setProjectFilter = (id: string) =>
-    onNavigate?.("", id ? `project=${encodeURIComponent(id)}` : "");
+  const setProjectFilter = (id: string) => onNavigate?.("", filterQuery(id, groupFilter));
+  const clearGroup = () => onNavigate?.("", filterQuery(projectFilter, null));
 
   // Drop answers for a filter the page has already left.
-  const currentFilter = useRef(projectFilter);
+  const currentFilter = useRef(listKey);
   useEffect(() => {
-    currentFilter.current = projectFilter;
-  }, [projectFilter]);
+    currentFilter.current = listKey;
+  }, [listKey]);
 
   const load = () => {
-    const requested = projectFilter;
-    fetchTasks(requested || undefined)
+    const requested = listKey;
+    fetchTasks(projectFilter || undefined, groupFilter ?? undefined)
       .then((data) => {
         if (requested !== currentFilter.current) return;
         setTasks(Array.isArray(data) ? data : (data as any).tasks || []);
@@ -234,7 +251,7 @@ export function TasksPage({ sub, query, onNavigate }: TasksPageProps) {
     load();
     const timer = setInterval(load, 3000);
     return () => clearInterval(timer);
-  }, [projectFilter]);
+  }, [listKey]);
 
   const handleStop = async (taskId: string) => {
     try {
@@ -356,7 +373,9 @@ export function TasksPage({ sub, query, onNavigate }: TasksPageProps) {
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <h1 className="text-2xl font-bold">Tasks</h1>
-          <p className="text-sm text-muted-foreground mt-1">{projectTasks.length} total tasks</p>
+          <p className="text-sm text-muted-foreground mt-1">
+            {group ? `${projectTasks.length} tasks · ${group.label}` : `${projectTasks.length} total tasks`}
+          </p>
         </div>
         <div className="flex items-center gap-2">
           <button
@@ -392,6 +411,19 @@ export function TasksPage({ sub, query, onNavigate }: TasksPageProps) {
           ))}
           {projectFilter && !selectedProject && <option value={projectFilter}>{projectFilter}</option>}
         </select>
+        {group && (
+          <span className="inline-flex h-8 items-center gap-1 rounded-md bg-primary/10 pl-3 pr-1 text-xs font-medium text-primary ring-1 ring-inset ring-primary/20">
+            {group.label}
+            <button
+              type="button"
+              onClick={clearGroup}
+              aria-label={`Show all tasks, not only ${group.label.toLowerCase()}`}
+              className="flex h-6 w-6 items-center justify-center rounded-sm hover:bg-primary/20 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+            >
+              <X className="h-3.5 w-3.5" aria-hidden="true" />
+            </button>
+          </span>
+        )}
         <div className="flex items-center gap-1 flex-wrap">
           {STATUS_FILTERS.map((f) => {
             const count = f === "all" ? projectTasks.length : statusCounts[f] || 0;
@@ -460,7 +492,11 @@ export function TasksPage({ sub, query, onNavigate }: TasksPageProps) {
       ) : filtered.length === 0 ? (
         <div className="flex h-64 items-center justify-center">
           <p className="text-sm text-muted-foreground">
-            {filter === "all" ? "No tasks yet" : `No ${filterLabel(filter).toLowerCase()} tasks`}
+            {filter !== "all"
+              ? `No ${filterLabel(filter).toLowerCase()} tasks`
+              : group
+                ? `No tasks · ${group.label}`
+                : "No tasks yet"}
           </p>
         </div>
       ) : (
