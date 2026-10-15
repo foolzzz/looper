@@ -19,7 +19,6 @@ import {
   type ProjectInstalls,
   type ProjectRole,
   type ProjectKnowledge,
-  type TaskInfo,
 } from "@/lib/api";
 import { AGENT_PROFILE } from "@/lib/settings-pages";
 import { useProjects } from "@/lib/use-projects";
@@ -117,10 +116,11 @@ const STATUS_VARIANT: Record<string, "default" | "success" | "warning" | "destru
 };
 
 function TasksCard({ project }: { project: Project }) {
-  const loaded = useLoad(() => fetchTasks(project.project_id), `${project.project_id}:${project.task_count}`);
-  const tasks = loaded?.data
-    ? [...loaded.data].sort((a: TaskInfo, b: TaskInfo) => b.created_at.localeCompare(a.created_at)).slice(0, PREVIEW)
-    : null;
+  const loaded = useLoad(
+    () => fetchTasks({ projectId: project.project_id, limit: PREVIEW }),
+    `${project.project_id}:${project.task_count}`,
+  );
+  const tasks = loaded?.data ? loaded.data.tasks : null;
   return (
     <OverviewCard
       title="Tasks"

@@ -248,16 +248,38 @@ export async function fetchOverview(): Promise<Overview> {
   return res.json();
 }
 
-export async function fetchTasks(projectId?: string, group?: TaskGroup, scheduleId?: string): Promise<TaskInfo[]> {
+/** A page of the Tasks list, newest first. */
+export interface TasksPage {
+  tasks: TaskInfo[];
+  /** Pass as `before` for the next page; null at the end. */
+  next_before: string | null;
+  /** How many tasks each status holds under the project, group and schedule filters (not the status one). */
+  counts: Record<string, number>;
+}
+
+/** A page of tasks: `limit` (default 50, at most 200) of them older than the task `before`, filtered by project,
+ * group, schedule and status. */
+export async function fetchTasks(
+  filters: {
+    projectId?: string;
+    group?: TaskGroup;
+    scheduleId?: string;
+    status?: string;
+    before?: string | null;
+    limit?: number;
+  } = {},
+): Promise<TasksPage> {
   const params = new URLSearchParams();
-  if (projectId) params.set("project_id", projectId);
-  if (group) params.set("group", group);
-  if (scheduleId) params.set("schedule_id", scheduleId);
+  if (filters.projectId) params.set("project_id", filters.projectId);
+  if (filters.group) params.set("group", filters.group);
+  if (filters.scheduleId) params.set("schedule_id", filters.scheduleId);
+  if (filters.status) params.set("status", filters.status);
+  if (filters.before) params.set("before", filters.before);
+  if (filters.limit) params.set("limit", String(filters.limit));
   const qs = params.toString();
   const res = await fetch(`${API_BASE}/tasks${qs ? `?${qs}` : ""}`);
-  if (!res.ok) throw new Error(`tasks ${res.status}`);
-  const data = await res.json();
-  return data.tasks ?? data;
+  if (!res.ok) await failed(res, "tasks");
+  return res.json();
 }
 
 /** Who a chat message goes to: the global Manager or a running task's Planner. */

@@ -176,6 +176,21 @@ function filterQuery(project: string, group: TaskGroup | null, schedule = ""): s
   return query.toString();
 }
 
+/** Whether task `a` comes after `b` in the list (newest first: by creation, then id). */
+function isOlder(a: TaskInfo, b: TaskInfo): boolean {
+  const at = Date.parse(a.created_at);
+  const bt = Date.parse(b.created_at);
+  return at < bt || (at === bt && a.task_id < b.task_id);
+}
+
+/** The newest page read again, then the tasks of the older pages already shown that come after it. */
+function withOlder(newest: TaskInfo[], current: TaskInfo[]): TaskInfo[] {
+  const last = newest[newest.length - 1];
+  if (!last) return newest;
+  const shown = new Set(newest.map((t) => t.task_id));
+  return [...newest, ...current.filter((t) => !shown.has(t.task_id) && isOlder(t, last))];
+}
+
 export function TasksPage({ sub, query, onNavigate }: TasksPageProps) {
   const params = new URLSearchParams(query || "");
   const projectFilter = params.get("project") || "";
@@ -183,8 +198,9 @@ export function TasksPage({ sub, query, onNavigate }: TasksPageProps) {
   const groupFilter = isTaskGroup(groupParam) ? groupParam : null;
   const group = TASK_GROUPS.find((g) => g.id === groupFilter) ?? null;
   const scheduleFilter = params.get("schedule") || "";
-  // What the list shows: the server filters by all three.
-  const listKey = filterQuery(projectFilter, groupFilter, scheduleFilter);
+  const [filter, setFilter] = useState<StatusFilter>("all");
+  // What the list shows: the server filters by all four.
+  const listKey = `${filterQuery(projectFilter, groupFilter, scheduleFilter)}|${filter}`;
   const { projects, reload: reloadProjects } = useProjects();
   const selectedProject = projects?.find((p) => p.project_id === projectFilter) ?? null;
   // A filter for a project the list does not hold yet (just created elsewhere) is
@@ -206,7 +222,12 @@ export function TasksPage({ sub, query, onNavigate }: TasksPageProps) {
   const [loadedFor, setLoadedFor] = useState<string | null>(null);
   const loading = loadedFor !== listKey;
   const [error, setError] = useState("");
-  const [filter, setFilter] = useState<StatusFilter>("all");
+  /** Continues the list (null at its end), and how many tasks each status holds under the URL's filters. */
+  const [nextBefore, setNextBefore] = useState<string | null>(null);
+  const [counts, setCounts] = useState<Record<string, number>>({});
+  const [loadingMore, setLoadingMore] = useState(false);
+  /** Whether older pages were loaded for the list `key`: a refresh then keeps them below the newest page. */
+  const older = useRef({ key: "", loaded: false });
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
   const [showCreate, setShowCreate] = useState(false);
   const [newReq, setNewReq] = useState("");
@@ -238,12 +259,27 @@ export function TasksPage({ sub, query, onNavigate }: TasksPageProps) {
     currentFilter.current = listKey;
   }, [listKey]);
 
+  const filters = {
+    projectId: projectFilter || undefined,
+    group: groupFilter ?? undefined,
+    scheduleId: scheduleFilter || undefined,
+    status: filter === "all" ? undefined : filter,
+  };
+
+  /** Read the newest page again; older pages loaded for this list stay below it. */
   const load = () => {
     const requested = listKey;
-    fetchTasks(projectFilter || undefined, groupFilter ?? undefined, scheduleFilter || undefined)
-      .then((data) => {
+    fetchTasks(filters)
+      .then((page) => {
         if (requested !== currentFilter.current) return;
-        setTasks(Array.isArray(data) ? data : (data as any).tasks || []);
+        setCounts(page.counts);
+        if (older.current.key === requested && older.current.loaded) {
+          setTasks((current) => withOlder(page.tasks, current));
+        } else {
+          older.current = { key: requested, loaded: false };
+          setTasks(page.tasks);
+          setNextBefore(page.next_before);
+        }
         setError("");
       })
       .catch((e) => {
@@ -259,6 +295,26 @@ export function TasksPage({ sub, query, onNavigate }: TasksPageProps) {
     const timer = setInterval(load, 3000);
     return () => clearInterval(timer);
   }, [listKey]);
+
+  const loadMore = () => {
+    if (!nextBefore) return;
+    const requested = listKey;
+    setLoadingMore(true);
+    fetchTasks({ ...filters, before: nextBefore })
+      .then((page) => {
+        if (requested !== currentFilter.current) return;
+        older.current = { key: requested, loaded: true };
+        setTasks((current) => {
+          const shown = new Set(current.map((t) => t.task_id));
+          return [...current, ...page.tasks.filter((t) => !shown.has(t.task_id))];
+        });
+        setNextBefore(page.next_before);
+        setCounts(page.counts);
+        setError("");
+      })
+      .catch((e) => requested === currentFilter.current && setError(e.message))
+      .finally(() => setLoadingMore(false));
+  };
 
   const handleStop = async (taskId: string) => {
     try {
@@ -288,6 +344,7 @@ export function TasksPage({ sub, query, onNavigate }: TasksPageProps) {
     try {
       await deleteTask(taskId);
       setConfirmDelete(null);
+      setTasks((current) => current.filter((t) => t.task_id !== taskId));
       load();
     } catch {
       // ignore
@@ -378,11 +435,9 @@ export function TasksPage({ sub, query, onNavigate }: TasksPageProps) {
     };
   }, [nameKnown, loading, scheduleFilter]);
   const filtered = filter === "all" ? projectTasks : projectTasks.filter((t) => t.status === filter);
-
-  const statusCounts = projectTasks.reduce<Record<string, number>>((acc, t) => {
-    acc[t.status] = (acc[t.status] || 0) + 1;
-    return acc;
-  }, {});
+  // Every task under the URL's filters, not only the pages loaded.
+  const total = Object.values(counts).reduce((sum, n) => sum + n, 0);
+  const shownTotal = filter === "all" ? total : counts[filter] || 0;
 
   if (selectedTaskId) {
     return (
@@ -399,7 +454,7 @@ export function TasksPage({ sub, query, onNavigate }: TasksPageProps) {
         <div>
           <h1 className="text-2xl font-bold">Tasks</h1>
           <p className="text-sm text-muted-foreground mt-1">
-            {group ? `${projectTasks.length} tasks · ${group.label}` : `${projectTasks.length} total tasks`}
+            {group ? `${total} tasks · ${group.label}` : `${total} total tasks`}
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -464,7 +519,7 @@ export function TasksPage({ sub, query, onNavigate }: TasksPageProps) {
         )}
         <div className="flex items-center gap-1 flex-wrap">
           {STATUS_FILTERS.map((f) => {
-            const count = f === "all" ? projectTasks.length : statusCounts[f] || 0;
+            const count = f === "all" ? total : counts[f] || 0;
             return (
               <button
                 key={f}
@@ -645,6 +700,19 @@ export function TasksPage({ sub, query, onNavigate }: TasksPageProps) {
               </div>
             </div>
           ))}
+        </div>
+      )}
+      {!loading && filtered.length > 0 && (nextBefore || filtered.length < shownTotal) && (
+        <div className="flex flex-wrap items-center justify-center gap-3 text-xs text-muted-foreground">
+          <span>
+            Showing {filtered.length} of {shownTotal}
+          </span>
+          {nextBefore && (
+            <Button type="button" variant="outline" size="sm" onClick={loadMore} disabled={loadingMore} className="h-11 sm:h-8">
+              {loadingMore && <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />}
+              Load more
+            </Button>
+          )}
         </div>
       )}
 
