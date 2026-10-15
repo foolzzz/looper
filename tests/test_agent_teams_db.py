@@ -1,4 +1,5 @@
-"""An Agent Profile's agent teams against a real PostgreSQL: what the registry takes and what each role starts with.
+"""An Agent Profile's agent teams against a real PostgreSQL: their default, what the registry takes, the upgrade and
+what each role starts with.
 
 Runs only when LOOPER_TEST_DATABASE_URL points at a disposable database. Each
 test works in a new schema of its own. Runs use stand-in ``claude``
@@ -29,36 +30,68 @@ async def _profile(name: str, **fields: Any) -> tuple[int, Any]:
                                                        **fields})
 
 
-def test_agent_teams_are_off_unless_set_and_only_a_claude_code_profile_takes_them(
+def test_agent_teams_are_on_by_default_for_claude_code_and_only_claude_code_takes_them(
     monkeypatch: pytest.MonkeyPatch, stand_in: str,  # noqa: F811
 ) -> None:
     async def _test(_pool: Any) -> None:
         # An API key provider, which a Claude Code runtime and the stand-in runtime can both run with.
         key = (await _ok("POST", "/api/providers", {"name": "key", "protocols": ["anthropic-messages"],
                                                     "auth": "api_key"}))["provider"]["provider_id"]
-        status, plain = await _profile("cc/plain")
-        assert status == 201 and plain["profile"]["agent_teams"] is False
-        status, teams = await _profile("cc/teams", provider_id=key, agent_teams=True)
-        assert status == 201 and teams["profile"]["agent_teams"] is True
-        listed = {p["name"]: p["agent_teams"] for p in (await _ok("GET", "/api/registry"))["profiles"]}
-        assert listed == {"claude-code/opus": False, "cc/plain": False, "cc/teams": True}
-        teams_id = teams["profile"]["profile_id"]
-        assert (await _ok("PUT", f"/api/agent-profiles/{teams_id}", {"agent_teams": False}))["profile"][
-            "agent_teams"] is False
-        assert (await _ok("PUT", f"/api/agent-profiles/{teams_id}", {"agent_teams": True}))["profile"][
-            "agent_teams"] is True
-
-        # Another runtime type refuses them, at creation and when a profile moves to it with teams on.
         other = await _runtime(stand_in, name="si")
+        created = {name: (await _ok("POST", "/api/agent-profiles", {
+            "name": name, "runtime_id": runtime, "provider_id": key, "model": "sonnet", **fields}))["profile"]
+            for name, runtime, fields in [("cc/default", "rt-claude-code", {}),
+                                          ("cc/off", "rt-claude-code", {"agent_teams": False}),
+                                          ("si/default", other, {})]}
+        listed = {p["name"]: p["agent_teams"] for p in (await _ok("GET", "/api/registry"))["profiles"]}
+        assert listed == {"claude-code/opus": True, "cc/default": True, "cc/off": False, "si/default": False}
+
+        off = created["cc/off"]["profile_id"]
+        assert (await _ok("PUT", f"/api/agent-profiles/{off}", {"agent_teams": True}))["profile"]["agent_teams"]
+        await _ok("PUT", f"/api/agent-profiles/{off}", {"agent_teams": False})
+        assert (await _ok("PUT", f"/api/agent-profiles/{off}", {"model": "opus"}))["profile"]["agent_teams"] is False
+
+        # Another runtime type refuses them when asked; a move that does not say takes the new type's default.
         status, payload = await _profile("si/teams", runtime_id=other, provider_id=key, agent_teams=True)
         assert status == 400 and "agent teams are a Claude Code feature" in payload["error"]
-        status, payload = await _call("PUT", f"/api/agent-profiles/{teams_id}", {"runtime_id": other})
+        on = created["cc/default"]["profile_id"]
+        status, payload = await _call("PUT", f"/api/agent-profiles/{on}", {"runtime_id": other, "agent_teams": True})
         assert status == 400 and "agent teams are a Claude Code feature" in payload["error"]
-        moved = await _ok("PUT", f"/api/agent-profiles/{teams_id}", {"runtime_id": other, "agent_teams": False})
-        assert (moved["profile"]["runtime_type"], moved["profile"]["agent_teams"]) == (stand_in, False)
+        moved = (await _ok("PUT", f"/api/agent-profiles/{on}", {"runtime_id": other}))["profile"]
+        assert (moved["runtime_type"], moved["agent_teams"]) == (stand_in, False)
+        back = (await _ok("PUT", f"/api/agent-profiles/{on}", {"runtime_id": "rt-claude-code"}))["profile"]
+        assert (back["runtime_type"], back["agent_teams"]) == ("claude-code", True)
         for value in ("yes", 1, None):
             status, payload = await _profile("cc/bad", agent_teams=value)
             assert status == 400 and "agent_teams must be true or false" in payload["error"]
+
+    _run(_test, monkeypatch)
+
+
+def test_the_upgrade_turns_agent_teams_on_once_for_every_claude_code_profile(monkeypatch: pytest.MonkeyPatch) -> None:
+    from looper.db.connection import ensure_schema
+
+    async def _test(pool: Any) -> None:
+        await _runtime("codex")
+        await pool.execute("INSERT INTO llm_providers (id, name, protocols, auth) "
+                           "VALUES ('prov-cpa', 'cpa', ARRAY['openai-responses'], 'api_key')")
+        # A database from before agent teams, with a profile on each runtime type.
+        await pool.execute("ALTER TABLE agent_profiles DROP COLUMN agent_teams; "
+                           "DELETE FROM schema_migrations WHERE name = 'agent_profiles_agent_teams_on'")
+        await pool.execute("INSERT INTO agent_profiles (id, name, runtime_id, provider_id, model) VALUES "
+                           "('agent-cc', 'cc/sonnet', 'rt-claude-code', 'prov-claude-subscription', 'sonnet'), "
+                           "('agent-cx', 'codex/gpt', 'rt-codex', 'prov-cpa', 'gpt-5.5')")
+
+        async def teams() -> dict[str, bool]:
+            rows = await pool.fetch("SELECT name, agent_teams FROM agent_profiles")
+            return {r["name"]: r["agent_teams"] for r in rows}
+
+        await ensure_schema(pool)
+        assert await teams() == {"claude-code/opus": True, "cc/sonnet": True, "codex/gpt": False}
+        # Turned off since: a later start leaves it off.
+        await pool.execute("UPDATE agent_profiles SET agent_teams = false WHERE id = 'agent-cc'")
+        await ensure_schema(pool)
+        assert await teams() == {"claude-code/opus": True, "cc/sonnet": False, "codex/gpt": False}
 
     _run(_test, monkeypatch)
 
@@ -83,8 +116,8 @@ def test_every_role_starts_with_agent_teams_only_when_its_profile_has_them(
     monkeypatch.setenv(TEAMS, "1")
 
     async def _test(_pool: Any) -> None:
-        on = (await _profile("cc/teams", agent_teams=True))[1]["profile"]["profile_id"]
-        off = (await _profile("cc/plain"))[1]["profile"]["profile_id"]
+        on = (await _profile("cc/default"))[1]["profile"]["profile_id"]  # on by default
+        off = (await _profile("cc/off", agent_teams=False))[1]["profile"]["profile_id"]
         project = (await _ok("POST", "/api/projects", {"name": "calc"}))["project_id"]
         task = (await _ok("POST", "/api/tasks/create", {"requirement": "r", "project_id": project,
                                                         "work_dir": str(tmp_path / "w")}))["task_id"]

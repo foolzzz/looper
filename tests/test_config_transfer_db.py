@@ -591,15 +591,15 @@ def test_a_runtime_of_the_file_maps_to_the_built_in_runtime_of_its_type_or_is_sk
     asyncio.run(_test())
 
 
-def test_a_profile_without_agent_teams_imports_with_them_off_and_another_runtime_cannot_have_them(
+def test_a_profile_without_agent_teams_imports_with_its_runtimes_default_and_another_runtime_cannot_have_them(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
     async def _test() -> None:
         async with _installation() as (target, target_url):
             _serve(monkeypatch, target)
-            await _ok("POST", "/api/agent-profiles", {"name": "cc/teams", "runtime_id": "rt-claude-code",
+            await _ok("POST", "/api/agent-profiles", {"name": "cc/off", "runtime_id": "rt-claude-code",
                                                       "provider_id": "prov-claude-subscription", "model": "sonnet",
-                                                      "agent_teams": True})
+                                                      "agent_teams": False})
             await target.execute("INSERT INTO agent_runtimes (id, name, type, capabilities, builtin) "
                                  "VALUES ('rt-codex', 'codex', 'codex', $1, true)", ["resident_session", "resume", "run"])
             path = tmp_path / "config.json"
@@ -607,8 +607,10 @@ def test_a_profile_without_agent_teams_imports_with_them_off_and_another_runtime
                 {"name": "cpa", "protocols": ["openai-responses"], "auth": "api_key", "oauth_runtime_type": None,
                  "base_url": "http://127.0.0.1:8317/v1", "models": [], "env": [], "max_concurrency": None,
                  "api_key": None}],
-                "profiles": [{"name": "cc/teams", "runtime": "claude-code", "provider": "claude-subscription",
+                "profiles": [{"name": "cc/off", "runtime": "claude-code", "provider": "claude-subscription",
                               "model": "sonnet", "effort": None},
+                             {"name": "codex/gpt", "runtime": "codex", "provider": "cpa", "model": "gpt-5.5",
+                              "effort": None},
                              {"name": "codex/teams", "runtime": "codex", "provider": "cpa", "model": "gpt-5.5",
                               "effort": None, "agent_teams": True}]}))
 
@@ -616,12 +618,14 @@ def test_a_profile_without_agent_teams_imports_with_them_off_and_another_runtime
 
             assert code == 0, err
             changes = {(c["section"], c["key"]): c for c in _plan(out)["changes"]}
-            assert (changes[("profiles", "cc/teams")]["action"], changes[("profiles", "cc/teams")]["fields"]) == (
+            # Without the field: on for Claude Code, off for Codex.
+            assert (changes[("profiles", "cc/off")]["action"], changes[("profiles", "cc/off")]["fields"]) == (
                 "changed", ["agent_teams"])
+            assert changes[("profiles", "codex/gpt")]["action"] == "added"
             assert changes[("profiles", "codex/teams")]["action"] == "skipped"
             assert "agent teams are a Claude Code feature" in changes[("profiles", "codex/teams")]["reason"]
-            assert await target.fetchval("SELECT agent_teams FROM agent_profiles WHERE name = 'cc/teams'") is False
-            assert await target.fetchval("SELECT count(*) FROM agent_profiles WHERE name = 'codex/teams'") == 0
+            rows = await target.fetch("SELECT name, agent_teams FROM agent_profiles WHERE NOT builtin")
+            assert {r["name"]: r["agent_teams"] for r in rows} == {"cc/off": True, "codex/gpt": False}
 
     asyncio.run(_test())
 
@@ -670,9 +674,9 @@ def test_a_file_exported_by_v2_6_0_imports_and_exports_again_under_the_new_names
                 return {**{("profile" if k == "agent" else k): v for k, v in layer.items()}, "max_concurrency": None}
 
             expected = {k: v for k, v in old.items() if k not in ("exported_at", "agents")}
-            # A file from before agent teams has them off.
+            # A file from before agent teams has them on its Claude Code profiles, which all of its profiles are.
             expected.update(format="looper-config/v2", looper_version=new["looper_version"], runtimes=[],
-                            profiles=[{**a, "agent_teams": False} for a in old["agents"]])
+                            profiles=[{**a, "agent_teams": True} for a in old["agents"]])
             # The runtime registered by hand stays behind: its profile runs on the built-in runtime of its type.
             _by_name(expected["profiles"], "beta/haiku")["runtime"] = "claude-code"
             # The file left the provider's key out, so none is stored here to export.

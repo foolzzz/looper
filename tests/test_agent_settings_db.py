@@ -25,6 +25,8 @@ from typing import Any
 
 import pytest
 
+import agent_launch_parity
+
 DSN = os.environ.get("LOOPER_TEST_DATABASE_URL")
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
@@ -169,7 +171,9 @@ def test_the_upgrade_moves_every_value_into_its_layer_and_each_role_launches_as_
             prompt = build_system_prompt(harness=settings.harness, role_id=role, role="ROLE.", recommended=True,
                                          contract_name="CONTRACT", contract="CONTRACT.", project=project,
                                          task="TASK." if project else "")
-            assert {"args": launch.args(), "env": [list(p) for p in launch.env], "env_sha256": launch.env_sha256,
+            # The fixture predates agent teams, which every role's Claude Code profile now has by default.
+            args = agent_launch_parity.without_agent_teams(launch.args())
+            assert {"args": args, "env": [list(p) for p in launch.env], "env_sha256": launch.env_sha256,
                     "system_prompt": prompt.text} == expected, case
 
     _run(_test, monkeypatch, before=_old_state(scenario))

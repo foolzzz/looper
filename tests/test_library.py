@@ -21,6 +21,7 @@ from library_fixtures import PLUGIN_FILES, fake_claude_home, write
 from looper.agents import library
 from looper.agents.agent_settings import Launch
 from looper.agents.claude_cli import permission_args
+from looper.agents.runtimes.claude_code import TEAMMATE_MODE_ARGS
 from looper.agents.library import (
     SKILLS_PLUGIN,
     AgentLibrary,
@@ -325,6 +326,6 @@ class TestLaunch:
         launch = Launch(library=loaded)
         # One --plugin-dir per directory: the flag takes one value.
         assert launch.args() == [*permission_args(), "--model", "opus",
-                                 "--plugin-dir", "/l/demo", "--plugin-dir", "/l/personal"]
+                                 "--plugin-dir", "/l/demo", "--plugin-dir", "/l/personal", *TEAMMATE_MODE_ARGS]
         assert launch.record()["library"] == loaded.record()
         assert launch.library.sha256 == loaded.sha256 != AgentLibrary().sha256

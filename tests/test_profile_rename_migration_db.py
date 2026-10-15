@@ -25,6 +25,7 @@ from typing import Any
 
 import pytest
 
+import agent_launch_parity
 import profile_rename_parity as parity
 
 DSN = os.environ.get("LOOPER_TEST_DATABASE_URL")
@@ -42,9 +43,10 @@ RENAMED = [
     ("agent_sessions", "agent_sessions", "agent_id", {"session_agent_id": "profile_id"}),
 ]
 DROPPED = {"agent_configs": {"role", "max_concurrency"}}
-# What a later migration of main adds to a v2.6.0 database, not the rename's doing: columns, and a built-in row.
+# What a later migration of main adds to a v2.6.0 database, not the rename's doing: columns (agent teams, on for its
+# profiles, all on Claude Code runtimes), and a built-in row.
 ADDED = {"agent_sessions": {"clean_start": False}, "agent_setting_layers": {"max_concurrency": None},
-         "agents": {"agent_teams": False}}
+         "agents": {"agent_teams": True}}
 ADDED_ROWS = {"llm_providers": {"prov-codex-login"}}
 UNCHANGED = ["agent_runtimes", "llm_providers", "llm_provider_secrets", "projects", "tasks"]
 
@@ -126,7 +128,9 @@ def test_a_v2_6_0_database_keeps_every_row_under_the_new_names_and_every_role_ru
                 root = Path(tmp).resolve()
                 monkeypatch.setenv("HOME", str(root / "home"))
                 monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
-                return await parity.capture(root)
+                monkeypatch.delenv(agent_launch_parity.AGENT_TEAMS, raising=False)
+                # The fixture predates agent teams, which its Claude Code profiles now have by default.
+                return agent_launch_parity.set_aside_agent_teams(await parity.capture(root))
 
     captured = asyncio.run(_main())
     assert sorted(captured) == sorted(MAIN)
