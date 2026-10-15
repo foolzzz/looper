@@ -239,6 +239,16 @@ def environment(raw: Any, *, unset: bool = False) -> dict[str, str | None]:
     return env
 
 
+def agent_teams_env(env: Mapping[str, Any]) -> None:
+    """Refuse Claude Code's agent teams variable in an environment someone enters: each Agent Profile's agent teams
+    switch owns it, and a run removes it from every other source. A stored layer that has it still loads."""
+    from .runtimes.claude_code import AGENT_TEAMS
+
+    if AGENT_TEAMS in env:
+        raise SettingsError(f"{AGENT_TEAMS} is set by each Agent Profile's agent teams switch (Settings → Agent "
+                            "Profiles), which overrides it here; remove it from the environment")
+
+
 def budget_usd(raw: Any, *, field: str = "run_budget_usd") -> float:
     """A spend cap in US dollars: more than 0, at most ``BUDGET_MAX_USD``, at most 4 decimals."""
     if isinstance(raw, bool) or not isinstance(raw, (int, float)) or not math.isfinite(raw):
@@ -346,6 +356,7 @@ def layer_update(data: Any, scope: Layer, role: AgentType | None = None) -> dict
     for name, raw in data.items():
         if name == "env":
             env = environment([] if raw is None else raw, unset=scope is not Layer.SYSTEM)
+            agent_teams_env(env)
             values[name] = [{"key": key, "value": value} for key, value in env.items()]
         elif raw is None or raw == "":
             values[name] = None

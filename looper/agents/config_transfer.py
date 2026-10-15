@@ -963,6 +963,7 @@ class _Importer:
                 raise _Skip(f"role {role!r} is not one of {', '.join(roles)}")
             if scope in ("system", "project") and role is not None:
                 raise _Skip(f"a {scope} layer has no role")
+            raw = self._without_agent_teams_env(raw, section, label)
             values = _layer_values(raw, scope, role)
             profile_id = await self._layer_profile(values["profile"], scope, role)
         except _Skip as exc:
@@ -974,6 +975,18 @@ class _Importer:
             from ..db import config_transfer as db
 
             await db.write_layer(self.conn, scope, role, project_id, {**values, "profile_id": profile_id})
+
+    def _without_agent_teams_env(self, raw: Mapping[str, Any], section: str, label: str) -> Mapping[str, Any]:
+        """The layer without Claude Code's agent teams variable, which an Agent Profile's switch now owns (a file
+        from before it may carry it), with a note; the rest of the layer imports as it is."""
+        from .runtimes.claude_code import AGENT_TEAMS
+
+        env = raw.get("env")
+        if not isinstance(env, list) or not any(isinstance(e, Mapping) and e.get("key") == AGENT_TEAMS for e in env):
+            return raw
+        self.plan.notes.append(f"{section} {label}: {AGENT_TEAMS} was left out of the environment; agent teams are "
+                               "switched on each Agent Profile")
+        return {**raw, "env": [e for e in env if not (isinstance(e, Mapping) and e.get("key") == AGENT_TEAMS)]}
 
     async def role(self, entry: Any) -> None:
         from ..db import config_transfer as db

@@ -630,6 +630,32 @@ def test_a_profile_without_agent_teams_imports_with_its_runtimes_default_and_ano
     asyncio.run(_test())
 
 
+def test_a_layers_agent_teams_variable_is_left_out_with_a_note_and_the_rest_imports(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    async def _test() -> None:
+        async with _installation() as (target, target_url):
+            path = tmp_path / "config.json"
+            path.write_text(json.dumps({"format": "looper-config/v2", "settings": {"layers": [
+                {"scope": "system", "role": None, "harness_prompt": None, "profile": None, "effort": "high",
+                 "env": [{"key": "LANG", "value": "C"}, {"key": "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS", "value": "1"}],
+                 "run_budget_usd": None, "max_concurrency": None}]}}))
+
+            code, out, err = await _looper(monkeypatch, target_url, "config", "import", str(path), "--apply", "--json")
+
+            assert code == 0, err
+            plan = _plan(out)
+            changes = {(c["section"], c["key"]): c["action"] for c in plan["changes"]}
+            assert changes[("settings.layers", "system")] == "added"
+            assert [n for n in plan["notes"] if "AGENT_TEAMS" in n] == [
+                "settings.layers system: CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS was left out of the environment; agent "
+                "teams are switched on each Agent Profile"]
+            row = await target.fetchrow("SELECT effort, env FROM agent_setting_layers WHERE scope = 'system'")
+            assert (row["effort"], json.loads(row["env"])) == ("high", [{"key": "LANG", "value": "C"}])
+
+    asyncio.run(_test())
+
+
 def test_a_file_exported_by_v2_6_0_imports_and_exports_again_under_the_new_names(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
