@@ -307,20 +307,20 @@ function createFields(fields: Required<ScheduleFields>): ScheduleFields {
 
 /** The server's check of a rule in a zone, asked once typing pauses; only the latest request's answer counts. Null
  * while there is no rule or its check has not answered yet. */
-function useRulePreview(cron: string, timezone: string) {
+function useRulePreview(cron: string, timezone: string, gated: boolean) {
   const [state, setState] = useState<{ key: string; preview?: SchedulePreview; error?: string } | null>(null);
   const latest = useRef(0);
-  const key = `${cron}\n${timezone}`;
+  const key = `${cron}\n${timezone}\n${gated}`;
   useEffect(() => {
     const mine = ++latest.current;
     if (!cron) return;
     const timer = setTimeout(() => {
-      previewSchedule({ cron, timezone, count: PREVIEW_COUNT })
+      previewSchedule({ cron, timezone, count: PREVIEW_COUNT, gated })
         .then((preview) => mine === latest.current && setState({ key, preview }))
         .catch((err) => mine === latest.current && setState({ key, error: errorText(err) }));
     }, PREVIEW_DELAY_MS);
     return () => clearTimeout(timer);
-  }, [cron, timezone, key]);
+  }, [cron, timezone, gated, key]);
   return cron && state?.key === key ? state : null;
 }
 
@@ -659,7 +659,7 @@ function ScheduleForm({
   const dirty = Object.keys(changes).length > 0;
   useEffect(() => onDirtyChange?.(dirty), [dirty, onDirtyChange]);
 
-  const check = useRulePreview(fields.cron, fields.timezone);
+  const check = useRulePreview(fields.cron, fields.timezone, Boolean(fields.gate_command));
   const ruleInvalid = check?.preview?.valid === false;
   const missing = [
     !fields.name && "a name",
@@ -766,7 +766,8 @@ function ScheduleForm({
             className="font-mono aria-invalid:border-destructive"
           />
           <p id={id("cron-hint")} className="text-xs text-muted-foreground">
-            Minute, hour, day of month, month, day of week. Fires at least {interval(limits.min_interval_seconds)} apart.
+            Minute, hour, day of month, month, day of week. Fires at least {interval(limits.min_interval_seconds)} apart,
+            or {interval(limits.min_interval_gated_seconds)} with a gate command.
           </p>
         </div>
         <div className="space-y-1">
@@ -1034,6 +1035,14 @@ function RunHistory({ schedule, open, version }: { schedule: ScheduleInfo; open:
                   </time>
                   <span className="text-muted-foreground">{triggerText(run)}</span>
                   <RunStatusBadge status={run.status} />
+                  {run.firings > 1 && (
+                    <span className="tabular-nums text-muted-foreground">
+                      ×{run.firings}, until{" "}
+                      <time dateTime={run.finished_at ?? undefined}>
+                        {run.finished_at ? formatInZone(run.finished_at, schedule.timezone) : "now"}
+                      </time>
+                    </span>
+                  )}
                   <span className="font-mono text-muted-foreground" title="What its task spent">
                     {run.cost_usd == null ? "—" : formatUsd(run.cost_usd)}
                   </span>

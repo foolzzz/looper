@@ -684,6 +684,8 @@ export interface ScheduleRunInfo {
   gate_output: string | null;
   /** The run whose unfinished input this run was given. */
   carried_from: string | null;
+  /** How many firings it stands for: a skip that repeated is one run, from scheduled_for to finished_at. */
+  firings: number;
 }
 
 export interface ScheduleInfo {
@@ -738,6 +740,8 @@ export interface ScheduleLimits {
   requirement_max_chars: number;
   /** Fires closer than this make a rule invalid. */
   min_interval_seconds: number;
+  /** The same for a schedule with a gate command. */
+  min_interval_gated_seconds: number;
   default_timezone: string;
   roles: TaskRole[];
   gate_command_max_chars: number;
@@ -865,7 +869,9 @@ export async function fetchScheduleNotifications(scheduleId: string, limit?: num
 }
 
 /** Check a rule: its description and next `count` fire times (5 by default), or why it is invalid. */
-export function previewSchedule(fields: { cron: string; timezone?: string; count?: number }): Promise<SchedulePreview> {
+export function previewSchedule(
+  fields: { cron: string; timezone?: string; count?: number; gated?: boolean },
+): Promise<SchedulePreview> {
   return scheduleCall("POST", `${API_BASE}/schedules/preview`, "preview", fields);
 }
 
