@@ -1685,8 +1685,10 @@ Key message types:
 3. Dispatch: every step whose `depends_on` steps are all verified goes as
    `WORK_ITEM` to a new Worker, up to 4 running at once per task. Steps
    without a dependency between them run at the same time in the same
-   directory, so they must change different files (the eval's
-   `parallel_parts` task checks that the Planner plans them that way).
+   directory, so they must change different files. The eval's
+   `parallel_parts` and `interface_first` tasks check that the Planner plans
+   independent and coordinated parts that way; with haiku the second still
+   fails (the Planner chains the service, the client and the check).
 4. Decision turn: every `WORK_RESULT` and `VERIFY_RESULT` gets a `[DECISION]`
    turn whose message lists the decisions allowed now:
    - `accept` only when the result can be accepted: the Worker completed and
