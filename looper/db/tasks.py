@@ -141,6 +141,7 @@ async def create_task(
     correlation_id: str = "",
     origin_channel_id: str = "",
     chat_id: str | None = None,
+    original_user_text: str | None = None,
     schedule_id: str | None = None,
     budget_usd: float | None = None,
     pool: asyncpg.Pool | asyncpg.Connection | None = None,
@@ -148,7 +149,8 @@ async def create_task(
     """Insert a task; ``schedule_id`` names the schedule that fired it, ``budget_usd`` its own spend cap.
 
     ``chat_id`` is who to tell when the task ends (``agents.task_notice``): a Telegram chat id or a Lark sender's
-    open_id; None for a task that did not come from either.
+    open_id; None for a task that did not come from either. ``original_user_text`` is what the user wrote when
+    asking for it in a chat, which names the task in that notice.
     """
     pool = pool or get_pool()
     now = datetime.now(timezone.utc)
@@ -156,13 +158,14 @@ async def create_task(
     await pool.execute(
         """
         INSERT INTO tasks (id, requirement, goal_id, work_dir, project_id,
-                           config, status, correlation_id, origin_channel_id, chat_id,
+                           config, status, correlation_id, origin_channel_id, chat_id, original_user_text,
                            created_at, updated_at, schedule_id, budget_usd)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $11, $12, $13)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $12, $13, $14)
         ON CONFLICT (id) DO NOTHING
         """,
         task_id, requirement, goal_id, work_dir, project_id,
-        config_json, status, correlation_id, origin_channel_id, chat_id, now, schedule_id, budget_usd,
+        config_json, status, correlation_id, origin_channel_id, chat_id, original_user_text, now, schedule_id,
+        budget_usd,
     )
     return {"task_id": task_id, "created_at": now.isoformat()}
 

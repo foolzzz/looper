@@ -171,8 +171,15 @@ class TelegramChannelAdapter(ChannelAdapter):
             return DeliveryReceipt(channel="telegram", success=False, error=str(exc))
 
     async def deliver(self, envelope: MessageEnvelope) -> DeliveryReceipt:
-        """Show a phase on the message's status line, send task progress as a message of its own, or send the
-        answer to the Telegram user who wrote and close its status line."""
+        """Show a phase on the message's status line, send task progress or a task's end notice as a message of
+        its own, or send the answer to the Telegram user who wrote and close its status line."""
+        if envelope.message_type is MessageType.CHAT_NOTICE:
+            # A task's end, to the chat it recorded, in order behind its progress; sent like an answer.
+            try:
+                chat = int(envelope.payload.get("chat") or "")
+            except ValueError:
+                return DeliveryReceipt(channel="telegram", success=False, error="a notice without a Telegram chat id")
+            return await self._send_answer(chat, str(envelope.payload.get("text") or ""))
         corr_id = envelope.correlation_id
         chat_id = self._correlation_chat.get(corr_id)
         if chat_id is None:

@@ -155,8 +155,12 @@ class LarkChannelAdapter(ChannelAdapter):
         logger.info("lark channel adapter stopped")
 
     async def deliver(self, envelope: MessageEnvelope) -> DeliveryReceipt:
-        """Show a phase on the message's status line, send task progress as a message of its own, or send the
-        answer to the chat the message came from and close its status line."""
+        """Show a phase on the message's status line, send task progress or a task's end notice as a message of
+        its own, or send the answer to the chat the message came from and close its status line."""
+        if envelope.message_type is MessageType.CHAT_NOTICE:
+            # A task's end, to the user it recorded (an open_id), in order behind its progress.
+            return await self._send_notice(str(envelope.payload.get("chat") or ""),
+                                           str(envelope.payload.get("text") or ""))
         corr_id = envelope.correlation_id
         chat_id = self._correlation_chat.get(corr_id)
         if chat_id is None:
@@ -183,6 +187,15 @@ class LarkChannelAdapter(ChannelAdapter):
         if not envelope.payload.get("autonomous"):
             await self._status.finish(corr_id, error=envelope.payload.get("error"))
         return receipt
+
+    async def _send_notice(self, user_id: str, text: str) -> DeliveryReceipt:
+        """Send a task's end notice as Markdown to Lark user ``user_id``, like an answer."""
+        try:
+            await run(send_command(user_id=user_id, markdown=text, profile=self._profile))
+        except LarkCliError as exc:
+            logger.warning("lark: a task's end notice to %s failed: %s", user_id, exc)
+            return DeliveryReceipt(channel="lark", success=False, error=str(exc))
+        return DeliveryReceipt(channel="lark", success=True)
 
     async def _send_message(self, chat_id: str, text: str) -> DeliveryReceipt:
         try:

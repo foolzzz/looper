@@ -241,16 +241,16 @@ class _Launched:
 
 class Scheduler:
     """Fires due schedules every ``tick_seconds``; started and stopped with the server. ``sender`` sends the
-    schedules' messages (None: they are recorded only); ``day_zone`` is the zone whose midnight starts a day for
-    the daily budget (the server's own by default)."""
+    schedules' messages (None: they are recorded only), their links starting with ``dashboard_url`` (``links``);
+    ``day_zone`` is the zone whose midnight starts a day for the daily budget (the server's own by default)."""
 
     def __init__(self, *, bus: _Bus, clock: Callable[[], datetime] = _utcnow, tick_seconds: float = TICK_SECONDS,
-                 sender: Sender | None = None, day_zone: str | None = None) -> None:
+                 sender: Sender | None = None, day_zone: str | None = None, dashboard_url: str = "") -> None:
         self._bus = bus
         self._clock = clock
         self._tick_seconds = tick_seconds
         self._loop_task: asyncio.Task[None] | None = None
-        self._notifier = Notifier(sender=sender, clock=clock)
+        self._notifier = Notifier(sender=sender, clock=clock, dashboard_url=dashboard_url)
         self._day_zone = cron.zone(day_zone or cron.local_zone_name())
         # Gates and messages under way; stopping cancels them.
         self._background: set[asyncio.Task[Any]] = set()

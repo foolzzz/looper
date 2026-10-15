@@ -38,8 +38,7 @@ from ..message import (
     MessageType,
     planner_address,
 )
-from ..schedule_notify import Sender
-from ..task_notice import NotifyChannel, ends_task, notice_text, notify_channel
+from ..task_notice import Notice, ends_task, notice_text, notify_channel
 from .planner import PlannerAgent, closing_note
 
 logger = logging.getLogger(__name__)
@@ -77,6 +76,7 @@ class Task:
     correlation_id: str = ""
     origin_channel_id: str = ""
     chat_id: str = ""
+    original_user_text: str = ""  # what the user wrote when asking for it, in a chat
     created_at: str = ""
 
     def to_dict(self) -> dict[str, Any]:
@@ -104,13 +104,12 @@ class TaskRouter:
         broadcaster: Broadcaster | None = None,
         claude_bin: str = "claude",
         on_task_end: TaskEndListener | None = None,
-        sender: Sender | None = None,
+        dashboard_url: str = "",
     ) -> None:
         self._runtime_root = runtime_root
         self._on_task_end = on_task_end
-        # Tells the chat a task came from that it ended (the server's channels, ``task_notice``; None: off).
-        self._sender = sender
-        self._notices: set[asyncio.Task[None]] = set()  # notices being sent
+        # Where a task's end notice links to (``links``; empty: relative).
+        self._dashboard_url = dashboard_url
         self._claude_bin = claude_bin  # each task's Planner runs it
         self._bus: MessageBus | None = None
         self._tasks: dict[str, Task] = {}
@@ -146,9 +145,6 @@ class TaskRouter:
                 await self._loop_task
             except asyncio.CancelledError:
                 pass
-        for notice in list(self._notices):
-            notice.cancel()
-        await asyncio.gather(*self._notices, return_exceptions=True)
         for planner in list(self._planners.values()):
             await planner.stop()
         self._planners.clear()
@@ -234,6 +230,7 @@ class TaskRouter:
                 correlation_id=row.get("correlation_id") or "",
                 origin_channel_id=row.get("origin_channel_id") or "",
                 chat_id=row.get("chat_id") or "",
+                original_user_text=row.get("original_user_text") or "",
             )
             self._tasks[task_id] = task
             envelope = MessageEnvelope.create(
@@ -269,6 +266,7 @@ class TaskRouter:
                 correlation_id=envelope.correlation_id,
                 origin_channel_id=envelope.metadata.get("origin_channel_id") or "",
                 chat_id=payload.get("chat_id") or None,
+                original_user_text=payload.get("original_user_text") or None,
             )
         except Exception:
             logger.exception("failed to persist task %s", task_id)
@@ -295,6 +293,7 @@ class TaskRouter:
             correlation_id=row.get("correlation_id") or "",
             origin_channel_id=row.get("origin_channel_id") or "",
             chat_id=row.get("chat_id") or "",
+            original_user_text=row.get("original_user_text") or "",
         )
         self._tasks[task_id] = task
         await self._start_or_queue(task, MessageEnvelope.create(
@@ -389,8 +388,8 @@ class TaskRouter:
         task_id = envelope.payload.get("task_id", "")
         status = envelope.payload.get("status", "")
         task = self._tasks.get(task_id)
-        if not task:
-            return
+        if not task or ends_task(task.status):
+            return  # an ended task's notice is its last message (``task_notice``)
 
         summary = envelope.payload.get("summary") or None
         fail_kind = envelope.payload.get("fail_kind") if status == "failed" else None
@@ -418,11 +417,14 @@ class TaskRouter:
                 "worker": "planner",
             })
 
+        payload = envelope.payload
+        if ends_task(status) and (notice := self._notice(task, status, summary)) is not None:
+            payload = {**payload, "notice": notice.payload()}
         await self._bus.publish(MessageEnvelope.create(
             source=TASK_ROUTER_ADDRESS,
             target=MANAGER_ADDRESS,
             message_type=MessageType.GOAL_STATUS,
-            payload=envelope.payload,
+            payload=payload,
             correlation_id=envelope.correlation_id,
             metadata=envelope.metadata,
         ))
@@ -431,28 +433,16 @@ class TaskRouter:
             task.status = status  # teardown persists this; it would default to "completed"
             await self._teardown_task(task_id)
             await self.recheck()
-            self._tell_chat(task, status, summary)
 
-    def _tell_chat(self, task: Task, status: str, summary: str | None) -> None:
-        """Tell the chat a Telegram or Lark task came from that it ended (``task_notice``), in the background: a
-        slow channel holds up no routing. A web task, or one that recorded no chat, is not told."""
+    def _notice(self, task: Task, status: str, summary: str | None) -> Notice | None:
+        """The end notice of a Telegram or Lark task that recorded who to tell (``task_notice``); None for any
+        other. The Manager sends it behind the task's progress."""
         channel = notify_channel(task.origin_channel_id)
-        if self._sender is None or channel is None or not task.chat_id:
-            return
-        notice = asyncio.ensure_future(self._send_notice(
-            task.task_id, channel, task.chat_id, notice_text(task.task_id, task.requirement, status, summary)))
-        self._notices.add(notice)
-        notice.add_done_callback(self._notices.discard)
-
-    async def _send_notice(self, task_id: str, channel: NotifyChannel, chat: str, text: str) -> None:
-        assert self._sender is not None
-        try:
-            sent, error = await self._sender(channel.value, chat, text)
-        except Exception:  # a channel's failure is the notice's, never the task's
-            logger.exception("task %s: could not tell its %s chat that it ended", task_id, channel.value)
-            return
-        if not sent:
-            logger.warning("task %s: its %s chat was not told that it ended: %s", task_id, channel.value, error)
+        if channel is None or not task.chat_id:
+            return None
+        text = notice_text(task.task_id, task.original_user_text or task.requirement, status, summary,
+                           channel=channel, dashboard_url=self._dashboard_url)
+        return Notice(channel, task.chat_id, text)
 
     async def _handle_cancel(self, envelope: MessageEnvelope) -> None:
         assert self._bus is not None
@@ -567,6 +557,7 @@ class TaskRouter:
             correlation_id=db_row.get("correlation_id", ""),
             origin_channel_id=db_row.get("origin_channel_id", ""),
             chat_id=db_row.get("chat_id") or "",
+            original_user_text=db_row.get("original_user_text") or "",
         )
         self._tasks[task_id] = task
 
