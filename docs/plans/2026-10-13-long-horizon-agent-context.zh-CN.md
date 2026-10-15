@@ -578,6 +578,10 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
 1. **Settings 拆页**（✅ 已交付 looper #75）：侧栏底部 SETTINGS 分组，子页依次为 LLM Providers、Agent Runtimes（只读、自动检测，删除手动注册运行时的界面和 API）、Agent Profiles（可复用的运行时 + provider + 模型 + 默认 effort；provider 可选 API key，也可选运行时自己的 OAuth 登录）、Roles（各角色选 Profile，加 harness、角色 prompt、上限、超时、并发）、Skills & MCP、Channels、Import / Export；顶部 Agents 页改名 Runs，只看运行记录。
 2. **表名与界面统一**（✅ 已交付 looper #76）：单独一个机械改名 PR。`agents` → `agent_profiles`，`agent_configs` → `role_configs`（列 `agent_id` → `role`），`/api/agents` → `/api/agent-profiles`，`/api/agent-configs` → `/api/roles`，分层配置 `agent` → `profile_id`，`task_agent_overrides` → `task_profile_overrides`，代码类名与模块对应改名；"agent" 只指运行中的实例。不保留旧 API 别名，旧导出文件仍可导入；迁移前自动备份。
 3. **Codex 与 OMP 的 OAuth 登录**（✅ 已交付 looper #78）：Agent Profile 里可以选内置 provider `codex-login`（Codex 自己的 ChatGPT 登录）。各隔离目录的 `auth.json` 是指向操作者登录文件的符号链接，不复制、不加锁（锁做不到，刷新在 Codex 进程内）；agent 的 shell 拿到没有登录的 `CODEX_HOME`；每次运行后检查链接，分叉即止损。做法和失效方式见多运行时 RFC 的 P1。OMP 没有自己的登录，不做。
+4. **思考强度只放在 Agent Profile 里**（开发中，2026-10-15 定）：设置各层不再有 effort，强度只随 Profile；迁移把各层已设的强度换成派生 Profile（如 `claude-code/opus · xhigh`），迁移前后每个角色、每个位置实际生效的 Profile 和强度不变。
+5. **定时任务 S1**（2026-10-15 定，设计见[定时任务 RFC](../architecture/rfcs/scheduled-tasks-v0.zh-CN.md)）：数据模型、时间规则解析、进程内调度器（漏跑只补一次、重叠默认跳过、运行超时）、每次触发建一个完整任务并直接开始、跨轮次上下文、运行历史、项目页「定时任务」标签页、任务的「定时」标记、HTTP 接口。
+6. **定时任务 S2**：前置检查、每日花费上限、通知（失败时 / 每次 / 不发）与两条告警（连续失败、长时间没有成功）、总览页的定时任务栏。
+7. **定时任务 S3**：管家入口（创建时确认项目、列出配置、问是否启用），导出与导入（导入后一律停用）。S2 与 S3 可以并行。
 
 ### 5.1 核心缺陷（优先修，穿插在阶段之间）
 
