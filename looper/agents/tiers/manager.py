@@ -15,6 +15,9 @@ The Manager is the only agent that communicates with users. It:
 - Tells Claude, before the next message from that chat, what Looper itself
   said there after Claude's last reply (``_Followup``), since Claude does not
   see Looper's own replies
+- Puts a ``Channel:`` line before each message naming where it came from (the
+  dashboard chat, a Lark or Telegram direct message): the channels share one
+  session, and the recommended prompt has Claude answer only that message
 - Streams Claude Code responses in real-time to the originating channel
 - Records a turn Claude runs on its own (after background work it started
   ends) as a run of its own, and sends what Claude said there as a reply of
@@ -162,6 +165,8 @@ Instead, follow this flow:
 If the user says "不", "取消", "算了", "no", "cancel" or modifies the requirement, do NOT output the JSON. Instead continue the conversation.
 
 ## Rules
+- Answer the message you were just sent. The dashboard chat, Lark and Telegram share this one conversation (the "Channel:" line before each message says where it came from), so do not continue an earlier topic, run checks or volunteer a status report unless this message asks for it
+- A greeting or a short check-in gets a short reply
 - For ambiguous requests, ask clarifying questions before even proposing the task summary
 - Never refuse a reasonable development task
 - Never output task_request JSON without user's explicit confirmation
@@ -203,6 +208,23 @@ NEW_SESSION_REPLY = "已开始新的 Manager 会话，下一条消息从全新�
 
 def is_new_session_command(text: str) -> bool:
     return text.strip().lower() == NEW_SESSION_COMMAND
+
+
+# How the line before each message names the channel it came from (``AgentAddress.channel``). The Lark channel
+# takes direct messages only; Telegram's are told apart by the chat id.
+CHANNEL_NAMES = {"web": "the Looper dashboard chat", "lark": "a Lark direct message"}
+
+
+def channel_line(envelope: MessageEnvelope) -> str:
+    """The line before a message that tells Claude where it came from, and so where its reply goes."""
+    origin = _message_origin(envelope)
+    channel = origin["channel"] or "unknown"
+    if channel == "telegram":
+        # A private chat's id is its user's; a group's or a channel's id is negative.
+        where = "a Telegram group chat" if (origin["chat"] or "").startswith("-") else "a Telegram direct message"
+    else:
+        where = CHANNEL_NAMES.get(channel, f"the {channel} channel")
+    return f"Channel: {where}"
 
 
 def _message_origin(envelope: MessageEnvelope) -> dict[str, str | None]:
@@ -859,7 +881,7 @@ class ManagerAgent:
                             await self._send_status(context_envelope, "thinking", phase=True, activity="thinking")
 
         try:
-            turn_text = await self._build_user_message(message, note)
+            turn_text = await self._build_user_message(message, note, channel=channel_line(context_envelope))
             if brief:
                 turn_text = f"{brief}\n\n{turn_text}"
             # A turn cut off by Claude's exit ends without a result; that Claude
@@ -1169,7 +1191,7 @@ class ManagerAgent:
             command.extend(runtime.resume_args(self._session_id))
         return command
 
-    async def _build_user_message(self, user_message: str, note: str = "") -> str:
+    async def _build_user_message(self, user_message: str, note: str = "", *, channel: str = "") -> str:
         parts = await self._projects_section()
         parts += await self._ready_tasks_section()
 
@@ -1181,6 +1203,8 @@ class ManagerAgent:
 
         if note:
             parts += [note, ""]
+        if channel:
+            parts += [channel, ""]
         parts.append(user_message)
         return "\n".join(parts)
 
