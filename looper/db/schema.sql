@@ -930,6 +930,9 @@ CREATE INDEX IF NOT EXISTS idx_schedule_runs_task ON schedule_runs (task_id);
 -- project's task_budget_usd (a schedule's run_budget_usd, copied when it fires).
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS schedule_id TEXT REFERENCES schedules(id) ON DELETE SET NULL;
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS budget_usd DOUBLE PRECISION CHECK (budget_usd > 0);
+-- The chat that created the task (Telegram chat_id, Lark open_id, web session_id); with origin_channel_id it
+-- names where to push a one-line notice when the task finishes.
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS chat_id TEXT;
 CREATE INDEX IF NOT EXISTS idx_tasks_schedule ON tasks (schedule_id, created_at DESC) WHERE schedule_id IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS llm_records (

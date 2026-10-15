@@ -38,6 +38,7 @@ from ..message import (
     MessageType,
     planner_address,
 )
+from ..schedule_notify import Sender
 from .planner import PlannerAgent, closing_note
 
 logger = logging.getLogger(__name__)
@@ -74,6 +75,7 @@ class Task:
     planner_id: str | None = None
     correlation_id: str = ""
     origin_channel_id: str = ""
+    chat_id: str = ""
     created_at: str = ""
 
     def to_dict(self) -> dict[str, Any]:
@@ -101,9 +103,12 @@ class TaskRouter:
         broadcaster: Broadcaster | None = None,
         claude_bin: str = "claude",
         on_task_end: TaskEndListener | None = None,
+        sender: Sender | None = None,
     ) -> None:
         self._runtime_root = runtime_root
         self._on_task_end = on_task_end
+        # Pushes a one-line notice to the chat a task came from when it finishes (the server's channels; None: off).
+        self._sender = sender
         self._claude_bin = claude_bin  # each task's Planner runs it
         self._bus: MessageBus | None = None
         self._tasks: dict[str, Task] = {}
@@ -223,6 +228,7 @@ class TaskRouter:
                 project_id=row["project_id"],
                 correlation_id=row.get("correlation_id") or "",
                 origin_channel_id=row.get("origin_channel_id") or "",
+                chat_id=row.get("chat_id") or "",
             )
             self._tasks[task_id] = task
             envelope = MessageEnvelope.create(
@@ -257,6 +263,7 @@ class TaskRouter:
                 status=db_tasks.READY,
                 correlation_id=envelope.correlation_id,
                 origin_channel_id=envelope.metadata.get("origin_channel_id") or "",
+                chat_id=payload.get("chat_id") or "",
             )
         except Exception:
             logger.exception("failed to persist task %s", task_id)
@@ -282,6 +289,7 @@ class TaskRouter:
             project_id=row["project_id"],
             correlation_id=row.get("correlation_id") or "",
             origin_channel_id=row.get("origin_channel_id") or "",
+            chat_id=row.get("chat_id") or "",
         )
         self._tasks[task_id] = task
         await self._start_or_queue(task, MessageEnvelope.create(
@@ -416,8 +424,33 @@ class TaskRouter:
 
         if status in ("completed", "failed"):
             task.status = status  # teardown persists this; it would default to "completed"
+            await self._notify_origin_chat(task, status, summary)
             await self._teardown_task(task_id)
             await self.recheck()
+
+    async def _notify_origin_chat(self, task: Task, status: str, summary: str | None) -> None:
+        """Tell the chat a Telegram or Lark task came from that it finished, in one line.
+
+        Web tasks are skipped (the dashboard shows them, and the web channel cannot be sent to); a missing sender
+        (tests), channel or chat skips too. A channel's failure is logged, never raised into task teardown.
+        """
+        if self._sender is None or not task.chat_id:
+            return
+        channel_type = task.origin_channel_id.removeprefix("channel-")
+        if channel_type not in ("telegram", "lark"):
+            return
+        detail = (summary or task.requirement or "").strip()
+        if status == "completed":
+            text = f"✅ 任务完成：{detail}" if detail else "✅ 任务完成"
+        else:
+            text = f"❌ 任务失败：{detail}" if detail else "❌ 任务失败"
+        try:
+            sent, error = await self._sender(channel_type, task.chat_id, text)
+        except Exception:  # a channel's failure is the notice's, never the task's
+            logger.exception("task %s: could not notify its %s chat", task.task_id, channel_type)
+            return
+        if not sent:
+            logger.warning("task %s: the %s notification was not sent: %s", task.task_id, channel_type, error)
 
     async def _handle_cancel(self, envelope: MessageEnvelope) -> None:
         assert self._bus is not None
@@ -531,6 +564,7 @@ class TaskRouter:
             project_id=db_row["project_id"],
             correlation_id=db_row.get("correlation_id", ""),
             origin_channel_id=db_row.get("origin_channel_id", ""),
+            chat_id=db_row.get("chat_id") or "",
         )
         self._tasks[task_id] = task
 

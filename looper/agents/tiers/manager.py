@@ -536,6 +536,8 @@ class ManagerAgent:
                     "project_id": project["id"],
                     "priority": parsed.get("priority", "P2"),
                     "constraints": parsed.get("constraints", []),
+                    # The chat this task came from, so the TaskRouter can tell it when the task finishes.
+                    "chat_id": origin["chat"] or "",
                 },
                 correlation_id=envelope.correlation_id,
                 metadata={"origin_channel_id": envelope.metadata.get("origin_channel_id")},

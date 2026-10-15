@@ -581,7 +581,7 @@ async def _run_agent_system(
     # task ends, to record a scheduled run's outcome.
     scheduler = Scheduler(bus=bus, sender=registry.notify)
     task_router = TaskRouter(runtime_root=runtime_root, broadcaster=broadcaster, claude_bin=claude_bin,
-                             on_task_end=scheduler.task_ended)
+                             on_task_end=scheduler.task_ended, sender=registry.notify)
     supervisor.register(task_router)
 
     worker_config = WorkerConfig(claude_bin=claude_bin)

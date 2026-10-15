@@ -137,24 +137,29 @@ async def create_task(
     status: str = "pending",
     correlation_id: str = "",
     origin_channel_id: str = "",
+    chat_id: str = "",
     schedule_id: str | None = None,
     budget_usd: float | None = None,
     pool: asyncpg.Pool | asyncpg.Connection | None = None,
 ) -> dict[str, Any]:
-    """Insert a task; ``schedule_id`` names the schedule that fired it, ``budget_usd`` its own spend cap."""
+    """Insert a task; ``schedule_id`` names the schedule that fired it, ``budget_usd`` its own spend cap.
+
+    ``chat_id`` is the chat the task came from (with ``origin_channel_id``), so a Telegram or Lark task can be told
+    there when it finishes.
+    """
     pool = pool or get_pool()
     now = datetime.now(timezone.utc)
     config_json = _config_json(config)
     await pool.execute(
         """
         INSERT INTO tasks (id, requirement, goal_id, work_dir, project_id,
-                           config, status, correlation_id, origin_channel_id,
+                           config, status, correlation_id, origin_channel_id, chat_id,
                            created_at, updated_at, schedule_id, budget_usd)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $10, $11, $12)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $11, $12, $13)
         ON CONFLICT (id) DO NOTHING
         """,
         task_id, requirement, goal_id, work_dir, project_id,
-        config_json, status, correlation_id, origin_channel_id, now, schedule_id, budget_usd,
+        config_json, status, correlation_id, origin_channel_id, chat_id, now, schedule_id, budget_usd,
     )
     return {"task_id": task_id, "created_at": now.isoformat()}
 
