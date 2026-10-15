@@ -191,6 +191,58 @@ class TestManagerStreaming:
         assert (reply["deltas"], reply["text"]) == (deltas, text)
 
 
+def _tool_use(name: str = "Read") -> str:
+    event = {"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "toolu_1", "name": name,
+                                                          "input": {}}]}, "parent_tool_use_id": None}
+    return f"print(json.dumps({event!r}), flush=True)\n"
+
+
+def _result(text: str | None) -> str:
+    """The turn's result; Claude Code puts the text of the turn's last assistant message in ``result``."""
+    event = {"type": "result", "subtype": "success", "is_error": False, "session_id": "s-1",
+             **({"result": text} if text is not None else {})}
+    return f"print(json.dumps({event!r}), flush=True)\n"
+
+
+_NARRATION = "正在查看 notes.txt。"
+_ANSWER = "notes.txt 里有三项待办。"
+
+
+@pytest.mark.usefixtures("agent_db")
+class TestManagerFinalAnswer:
+    """The reply is the turn's final answer (its result's text): what Claude wrote before its tool calls streams,
+    but is neither sent as the reply nor recorded as it."""
+
+    def test_narration_before_a_tool_call_streams_but_is_not_the_reply(self, agent_db: Any) -> None:
+        asked = _ask(_message(_NARRATION) + _tool_use() + _message(_ANSWER) + _result(_ANSWER))
+        assert asked["text"] == _ANSWER
+        assert agent_db.finish_record.await_args.kwargs["output_text"] == _ANSWER
+        assert asked["deltas"] == [_NARRATION, _ANSWER]
+
+    @pytest.mark.parametrize(("body", "reply"), [
+        (_message("你好！") + _result("你好！"), "你好！"),
+        # Ended on a tool call, with no final text: what it wrote, so nothing is lost.
+        (_message(_NARRATION) + _tool_use() + _result(None), _NARRATION),
+    ], ids=["one-text-block", "no-final-text"])
+    def test_one_text_block_or_no_final_text(self, body: str, reply: str) -> None:
+        assert _ask(body)["text"] == reply
+
+    def test_with_agent_teams_each_result_answers_its_own_turn(self, agent_db: Any) -> None:
+        """A teammate's later message is a turn of Claude's own with a result of its own (#80): the user's turn
+        is answered with its result, and the turn of its own with its own, each without the narration before it."""
+        init = "print(json.dumps({'type': 'system', 'subtype': 'init', 'session_id': 's-1'}), flush=True)\n"
+        body = (
+            "sys.stdin.readline()\n"
+            + init + _message("先派一个队友去算。") + _tool_use("Agent") + _message("已派出队友。") + _result("已派出队友。")
+            + init + _message("队友回报了，我核对一下。") + _tool_use() + _message("队友算出 42。") + _result("队友算出 42。")
+            + "sys.stdin.readline()\n"
+        )
+        chat = _session_with(agent_db, body, ["算一下 6*7，交给队友"])
+        assert sorted((r.reply_to is None, r.payload["text"]) for r in chat["replies"]) == [
+            (False, "已派出队友。"), (True, "队友算出 42。")]
+        assert sorted(run["output_text"] for run in chat["runs"]) == ["已派出队友。", "队友算出 42。"]
+
+
 def _resident(*, exit_after: int | None = None, die_on: int | None = None, ignore_eof: bool = False) -> str:
     """A fake claude that reads user turns from stdin like the real one.
 

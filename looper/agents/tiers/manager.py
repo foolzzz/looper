@@ -55,6 +55,7 @@ from ..claude_cli import (
     AutonomousRun,
     ClaudeRunRecorder,
     ResidentTurn,
+    answer_text,
     exit_note,
 )
 from ..library import load_installed
@@ -960,8 +961,8 @@ class ManagerAgent:
             return await self._run_turn(message, context_envelope, note=note, retried=True)
 
         result_event = turn.result_event
-        result_text = str((result_event or {}).get("result") or "")
-        final_text = "".join(text_parts) or result_text
+        # The reply is the turn's final answer; what Claude wrote before its tool calls only streamed.
+        final_text = answer_text(result_event, text_parts)
         # A turn cut off by Claude's exit is no reply, even after some text.
         exited = result_event is None
         # A turn stopped at its spend cap is no reply either; the next message starts a new process (a new cap).
@@ -1099,7 +1100,7 @@ class ManagerAgent:
                                   error=f"Manager stopped reading Claude: {type(exc).__name__}")
             raise
         result_event = turn.result_event
-        handoff = kept_text("".join(parts) or str((result_event or {}).get("result") or ""), HANDOFF_MAX_CHARS)
+        handoff = kept_text(answer_text(result_event, parts), HANDOFF_MAX_CHARS)
         succeeded = result_event is not None and not result_event.get("is_error") and bool(handoff)
         if result_event is not None:
             self._session_totals = self._claude.totals
