@@ -6,6 +6,7 @@ import {
   fetchOverview,
   TASK_GROUPS,
   type LiveStepRun,
+  type ComponentHealth,
   type Overview,
   type OverviewSchedules,
   type TaskGroup,
@@ -41,6 +42,18 @@ function Section({ title, meta, children }: { title: string; meta?: React.ReactN
   );
 }
 
+const clockTime = (iso: string) => new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+
+/** What the supervisor is doing about a component that is not running. */
+function healthText(c: ComponentHealth): string {
+  const inARow =
+    c.restart_count === 0 ? "" : c.restart_count === 1 ? "Restarted once. " : `Restarted ${c.restart_count} times in a row. `;
+  if (c.state === "crash_looping" && c.up)
+    return `${inARow}It is up now and counts as stable after 5 minutes without a crash.`;
+  const next = c.next_restart_at ? `It restarts at ${clockTime(c.next_restart_at)}` : "It restarts at the next health check";
+  return `${inARow}${next}; each wait doubles, up to 5 minutes, and it is never given up on.`;
+}
+
 function Health({ unhealthy }: { unhealthy: Overview["health"]["unhealthy"] }) {
   if (unhealthy.length === 0) {
     return (
@@ -56,12 +69,10 @@ function Health({ unhealthy }: { unhealthy: Overview["health"]["unhealthy"] }) {
         <p key={c.name} className="flex gap-2">
           <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-destructive" aria-hidden="true" />
           <span>
-            <span className="font-medium text-destructive">{c.name} is unhealthy.</span>{" "}
-            {c.max_restarts === 0
-              ? "It is not restarted automatically."
-              : c.restart_count >= c.max_restarts
-                ? `Restarted ${c.restart_count} of ${c.max_restarts} times; it is not restarted again until looper serve restarts.`
-                : `Restarted ${c.restart_count} of ${c.max_restarts} times so far.`}
+            <span className="font-medium text-destructive">
+              {c.state === "crash_looping" ? `${c.name} keeps crashing.` : `${c.name} is down.`}
+            </span>{" "}
+            {healthText(c)}
           </span>
         </p>
       ))}
