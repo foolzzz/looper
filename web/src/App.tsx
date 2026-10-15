@@ -157,7 +157,11 @@ function App() {
           )}
           {route.page === "schedules" && (
             <div className="h-full overflow-y-auto">
-              <SchedulesPage sub={route.sub} />
+              <SchedulesPage
+                sub={route.sub}
+                query={route.query}
+                onNavigate={(sub, query) => navigateSub("schedules", sub, query)}
+              />
             </div>
           )}
           {route.page === "history" && (
