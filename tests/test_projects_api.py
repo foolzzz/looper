@@ -110,6 +110,10 @@ class _Store:
         rows = [t for t in self.tasks.values() if project_id is None or t["project_id"] == project_id]
         return [{**t, "project_name": self.projects[t["project_id"]]["name"]} for t in rows]
 
+    async def get_task(self, task_id: str, **_: Any) -> dict[str, Any] | None:
+        row = self.tasks.get(task_id)
+        return dict(row) if row else None
+
     async def get_task_with_steps(self, task_id: str, **_: Any) -> dict[str, Any] | None:
         row = self.tasks.get(task_id)
         if row is None:
@@ -135,7 +139,7 @@ def store(monkeypatch: pytest.MonkeyPatch) -> _Store:
     fake = _Store()
     for name in ("list_projects", "get_project", "create_project", "update_project", "delete_project"):
         monkeypatch.setattr(db_projects, name, getattr(fake, name))
-    for name in ("create_task", "set_task_project", "list_tasks", "get_task_with_steps"):
+    for name in ("create_task", "set_task_project", "list_tasks", "get_task", "get_task_with_steps"):
         monkeypatch.setattr(db_tasks, name, getattr(fake, name))
     monkeypatch.setattr(db_connection, "transaction", fake.transaction)
     monkeypatch.setattr(db_llm_records, "task_costs", fake.task_costs)
@@ -453,3 +457,44 @@ class TestTaskReads:
         store.add_task("task-1", "proj-a")
         status, body = _call("GET", "/api/tasks/task-1")
         assert status == 200 and (body["project_id"], body["project_name"]) == ("proj-a", "tetris")
+
+
+class TestStartReadyTask:
+    """``POST /api/tasks/<id>/start`` starts a ready task through the TaskRouter (``TASK_START``), and only one."""
+
+    @staticmethod
+    def _call(task_id: str) -> tuple[int, Any, list[Any]]:
+        from looper.agents.message import channel_address
+
+        published: list[Any] = []
+
+        async def publish(envelope: Any) -> None:
+            published.append(envelope)
+
+        server = AgentHTTPServer(web_adapter=SimpleNamespace(_address=channel_address("web")),
+                                 task_router=TaskRouter(runtime_root=Path(tempfile.mkdtemp())),
+                                 supervisor=SimpleNamespace(bus=SimpleNamespace(publish=publish)))
+        status, body = _call("POST", f"/api/tasks/{task_id}/start", server=server)
+        return status, body, published
+
+    def test_a_ready_task_is_started_through_the_router(self, store: _Store) -> None:
+        from looper.agents.message import TASK_ROUTER_ADDRESS, MessageType
+
+        store.add_project("proj-a", "tetris")
+        store.add_task("task-1", "proj-a", "init")
+        status, body, (envelope,) = self._call("task-1")
+        assert (status, body) == (200, {"started": "task-1", "project_id": "proj-a"})
+        assert (envelope.message_type, envelope.target, envelope.payload) == (
+            MessageType.TASK_START, TASK_ROUTER_ADDRESS, {"task_id": "task-1"})
+
+    @pytest.mark.parametrize("task_status", ["pending", "running", "stopped", "failed", "cancelled", "completed"])
+    def test_a_task_that_is_not_ready_is_400(self, store: _Store, task_status: str) -> None:
+        store.add_project("proj-a", "tetris")
+        store.add_task("task-1", "proj-a", task_status)
+        status, body, published = self._call("task-1")
+        assert (status, published) == (400, [])
+        assert task_status in body["error"]
+
+    def test_an_unknown_task_is_404(self, store: _Store) -> None:
+        status, _, published = self._call("task-nope")
+        assert (status, published) == (404, [])

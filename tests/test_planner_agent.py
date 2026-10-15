@@ -1257,8 +1257,12 @@ class TestTaskEnd:
                 await router.start(h.bus)
                 await h.bus.publish(MessageEnvelope.create(
                     source=MANAGER_ADDRESS, target=TASK_ROUTER_ADDRESS, message_type=MessageType.TASK_REQUEST,
-                    payload={"goal_id": "g1", "requirement": "build calc", "work_dir": str(h.work_dir),
-                             "project_id": "proj-1"},
+                    payload={"task_id": "task-calc", "goal_id": "g1", "requirement": "build calc",
+                             "work_dir": str(h.work_dir), "project_id": "proj-1"},
+                ))
+                await h.bus.publish(MessageEnvelope.create(
+                    source=MANAGER_ADDRESS, target=TASK_ROUTER_ADDRESS, message_type=MessageType.TASK_START,
+                    payload={"task_id": "task-calc"},
                 ))
                 # Teardown ends the Planner, which ends and reaps its Claude.
                 await h.until(lambda: claude.pids() and not router._planners and not _alive(claude.pids()[0]))
@@ -1283,8 +1287,12 @@ class TestTaskEnd:
                 await router.start(h.bus)
                 await h.bus.publish(MessageEnvelope.create(
                     source=MANAGER_ADDRESS, target=TASK_ROUTER_ADDRESS, message_type=MessageType.TASK_REQUEST,
-                    payload={"goal_id": "g1", "requirement": "build calc", "work_dir": str(h.work_dir),
-                             "project_id": "proj-1"},
+                    payload={"task_id": "task-calc", "goal_id": "g1", "requirement": "build calc",
+                             "work_dir": str(h.work_dir), "project_id": "proj-1"},
+                ))
+                await h.bus.publish(MessageEnvelope.create(
+                    source=MANAGER_ADDRESS, target=TASK_ROUTER_ADDRESS, message_type=MessageType.TASK_START,
+                    payload={"task_id": "task-calc"},
                 ))
                 # The task has ended and its teardown waits for the lingering Claude to exit.
                 await h.until(lambda: router._tasks and not router._planners and claude.pids()

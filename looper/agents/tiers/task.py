@@ -1,7 +1,9 @@
 """Task entity and TaskRouter: per-task Planner lifecycle management.
 
-The TaskRouter receives TASK_REQUESTs from the Manager, creates a dedicated
-PlannerAgent for each task, and manages the Planner lifecycle. When a task
+The TaskRouter receives TASK_REQUESTs from the Manager and creates each task
+ready (``tasks.READY``), without a Planner. A user starts it, from the
+dashboard or through the Manager (TASK_START); the TaskRouter then creates a
+dedicated PlannerAgent for it and manages the Planner lifecycle. When a task
 completes or fails, the TaskRouter tears down the corresponding Planner and
 forwards results to the Manager. Every task belongs to a project
 (``project_id``), which can change while the task runs. At most the Planner's
@@ -178,6 +180,8 @@ class TaskRouter:
         match envelope.message_type:
             case MessageType.TASK_REQUEST:
                 await self._handle_task_request(envelope)
+            case MessageType.TASK_START:
+                await self._handle_start(envelope)
             case MessageType.GOAL_STATUS:
                 await self._handle_planner_status(envelope)
             case MessageType.TASK_ACCEPTED:
@@ -223,7 +227,7 @@ class TaskRouter:
             await self._start_or_queue(task, envelope)
 
     async def _handle_task_request(self, envelope: MessageEnvelope) -> None:
-        assert self._bus is not None
+        """Create the requested task ready, without a Planner; it runs once a user starts it (``TASK_START``)."""
         payload = envelope.payload
         project_id = payload.get("project_id") or ""
         if not project_id:
@@ -231,33 +235,56 @@ class TaskRouter:
             # projects (replayed from the bus journal); creating it would fail.
             logger.error("dropping task request %s: it names no project", envelope.message_id)
             return
-        task_id = f"task-{uuid.uuid4().hex[:12]}"
-
-        task = Task(
-            task_id=task_id,
-            requirement=payload.get("requirement", ""),
-            goal_id=payload.get("goal_id", ""),
-            work_dir=payload.get("work_dir", ""),
-            project_id=project_id,
-            correlation_id=envelope.correlation_id,
-            origin_channel_id=envelope.metadata.get("origin_channel_id", ""),
-        )
-        self._tasks[task_id] = task
-
+        # The Manager names the task, so it can show and start it, and a request replayed from the journal
+        # creates it once.
+        task_id = payload.get("task_id") or f"task-{uuid.uuid4().hex[:12]}"
         try:
             await db_tasks.create_task(
                 task_id=task_id,
-                requirement=task.requirement,
-                goal_id=task.goal_id,
-                work_dir=task.work_dir,
-                project_id=task.project_id,
-                correlation_id=task.correlation_id,
-                origin_channel_id=task.origin_channel_id,
+                requirement=payload.get("requirement", ""),
+                goal_id=payload.get("goal_id", ""),
+                work_dir=payload.get("work_dir", ""),
+                project_id=project_id,
+                status=db_tasks.READY,
+                correlation_id=envelope.correlation_id,
+                origin_channel_id=envelope.metadata.get("origin_channel_id") or "",
             )
         except Exception:
             logger.exception("failed to persist task %s", task_id)
+            return
+        logger.info("task %s created ready in project %s", task_id, project_id)
 
-        await self._start_or_queue(task, envelope)
+    async def _handle_start(self, envelope: MessageEnvelope) -> None:
+        """Start a ready task, once: like a new task, it waits while its project runs as many tasks as its limit."""
+        task_id = envelope.payload.get("task_id", "")
+        try:
+            row = await db_tasks.start_ready_task(task_id)
+        except Exception:
+            logger.exception("failed to start task %s", task_id)
+            return
+        if row is None:
+            logger.warning("task %s is not ready (unknown or started already); not starting it", task_id)
+            return
+        task = Task(
+            task_id=task_id,
+            requirement=row["requirement"],
+            goal_id=row.get("goal_id") or "",
+            work_dir=row.get("work_dir") or "",
+            project_id=row["project_id"],
+            correlation_id=row.get("correlation_id") or "",
+            origin_channel_id=row.get("origin_channel_id") or "",
+        )
+        self._tasks[task_id] = task
+        await self._start_or_queue(task, MessageEnvelope.create(
+            source=TASK_ROUTER_ADDRESS,
+            target=TASK_ROUTER_ADDRESS,
+            message_type=MessageType.TASK_REQUEST,
+            payload={"requirement": task.requirement, "goal_id": task.goal_id, "work_dir": task.work_dir,
+                     "project_id": task.project_id},
+            # A task asked for in a chat reports its plan and its outcome there.
+            correlation_id=task.correlation_id,
+            metadata={"origin_channel_id": task.origin_channel_id},
+        ))
 
     async def _start_or_queue(self, task: Task, envelope: MessageEnvelope) -> None:
         """Queue ``task`` behind its project's waiting tasks, then start every one that has room."""

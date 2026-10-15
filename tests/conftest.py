@@ -36,7 +36,6 @@ from fake_claude import fake_claude  # noqa: E402
 # PostgreSQL writes made by the agent tiers (Manager, Planner, TaskRouter, WorkerPool).
 _AGENT_DB_WRITES = (
     ("projects", "create_project"),
-    ("tasks", "create_task"),
     ("tasks", "update_task_status"),
     ("tasks", "update_task_phase"),
     ("activity", "insert_activity"),
@@ -53,6 +52,7 @@ _AGENT_DB_READS = (
     ("projects", "find_project_by_name", None),
     ("projects", "get_project", None),
     ("projects", "get_task_project", None),
+    ("tasks", "list_tasks", []),
     ("activity", "list_activity", []),
     ("system_settings", "get_settings", {}),
     ("agent_setting_layers", "list_layers", []),
@@ -69,7 +69,8 @@ class _PlanStore:
 
     ``tasks`` holds the task rows a plan is read back with (``requirement``,
     ``goal_id``, ``work_dir``, ``project_id``); a test that restarts a Planner
-    sets its task there.
+    sets its task there. ``ready`` holds the tasks created ready
+    (``create_task``) until one is started (``start_ready_task``).
     """
 
     def __init__(self) -> None:
@@ -78,6 +79,14 @@ class _PlanStore:
         self.sessions: dict[str, dict[str, Any]] = {}
         self.tasks: dict[str, dict[str, Any]] = {}
         self.journal: dict[str, list[dict[str, Any]]] = {}
+        self.ready: dict[str, dict[str, Any]] = {}
+
+    async def create_task(self, *, task_id: str, status: str = "pending", **row: Any) -> None:
+        if status == "init":
+            self.ready[task_id] = {"id": task_id, **{k: v for k, v in row.items() if k != "pool"}, "status": "pending"}
+
+    async def start_ready_task(self, task_id: str, **_: object) -> dict[str, Any] | None:
+        return self.ready.pop(task_id, None)
 
     async def save(self, task_id: str, *, plan: Any = None, steps: Any = (), journal: Any = (), **_: object) -> None:
         if plan is not None:
@@ -303,9 +312,10 @@ def agent_db(monkeypatch: pytest.MonkeyPatch, stub_claude_on_path: Path) -> Simp
     tests would otherwise stop at the first unguarded write. Each write becomes
     an ``AsyncMock`` returning ``None`` (``create_project`` returns the new
     project's row), and each read answers as an empty database. The plans and
-    sessions the agents save are kept in memory (``store``, a ``_PlanStore``)
-    and read back from there: ``save_plan``, ``load_plan``, ``save_session`` and
-    ``get_session`` are mocks around it. The returned namespace exposes them by
+    sessions the agents save, and the tasks created ready, are kept in memory
+    (``store``, a ``_PlanStore``) and read back from there: ``save_plan``,
+    ``load_plan``, ``save_session``, ``get_session``, ``create_task`` and
+    ``start_ready_task`` are mocks around it. The returned namespace exposes them by
     name so a test can assert what was persisted. A bare ``claude`` is a stub
     that never answers (``stub_claude_on_path``).
     """
@@ -327,13 +337,15 @@ def agent_db(monkeypatch: pytest.MonkeyPatch, stub_claude_on_path: Path) -> Simp
         mock = AsyncMock(return_value=value)
         monkeypatch.setattr(importlib.import_module(f"looper.db.{module_name}"), function, mock)
         setattr(db, function, mock)
-    from looper.db import agent_sessions, plans
+    from looper.db import agent_sessions, plans, tasks
 
     db.store = store = _PlanStore()
     for module, name, function, method in (
         (plans, "save_plan", "save", store.save), (plans, "load_plan", "load", store.load),
         (agent_sessions, "save_session", "save_session", store.save_session),
         (agent_sessions, "get_session", "get_session", store.get_session),
+        (tasks, "create_task", "create_task", store.create_task),
+        (tasks, "start_ready_task", "start_ready_task", store.start_ready_task),
     ):
         mock = AsyncMock(side_effect=method)
         monkeypatch.setattr(module, function, mock)

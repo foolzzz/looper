@@ -20,7 +20,10 @@ import {
   deleteTask,
   stopTask,
   startTask,
+  startReadyTask,
   createTask,
+  READY_LABEL,
+  READY_STATUS,
   type TaskInfo,
   type TaskRole,
 } from "@/lib/api";
@@ -48,8 +51,8 @@ function statusBadge(status: string) {
       return <Badge variant="outline">Cancelled</Badge>;
     case "stopped":
       return <Badge variant="warning">Stopped</Badge>;
-    case "init":
-      return <Badge variant="outline">Init</Badge>;
+    case READY_STATUS:
+      return <Badge variant="outline">{READY_LABEL}</Badge>;
     case "executing":
       return <Badge variant="default">Executing</Badge>;
     default:
@@ -71,7 +74,7 @@ function statusIcon(status: string) {
       return <AlertCircle className="h-4 w-4 text-destructive" />;
     case "stopped":
       return <Pause className="h-4 w-4 text-warning" />;
-    case "init":
+    case READY_STATUS:
       return <Settings2 className="h-4 w-4 text-muted-foreground" />;
     default:
       return <Clock className="h-4 w-4 text-muted-foreground" />;
@@ -79,7 +82,13 @@ function statusIcon(status: string) {
 }
 
 const ACTIVE_STATUSES = ["running", "pending", "executing", "assigned"];
-const RESTARTABLE_STATUSES = ["stopped", "failed", "cancelled", "init"];
+const RESTARTABLE_STATUSES = ["stopped", "failed", "cancelled", READY_STATUS];
+
+/** A status filter's name. */
+function filterLabel(filter: string): string {
+  if (filter === READY_STATUS) return "Ready";
+  return filter.charAt(0).toUpperCase() + filter.slice(1);
+}
 
 function formatTime(iso: string | null | undefined): string {
   if (!iso) return "—";
@@ -236,9 +245,10 @@ export function TasksPage({ sub, query, onNavigate }: TasksPageProps) {
     }
   };
 
-  const handleStart = async (taskId: string) => {
+  const handleStart = async (task: TaskInfo) => {
     try {
-      await startTask(taskId);
+      // A ready task is started; a stopped, failed or cancelled one runs again.
+      await (task.status === READY_STATUS ? startReadyTask : startTask)(task.task_id);
       load();
     } catch {
       // ignore
@@ -396,7 +406,7 @@ export function TasksPage({ sub, query, onNavigate }: TasksPageProps) {
                     : "bg-muted text-muted-foreground hover:text-foreground"
                 }`}
               >
-                {f === "all" ? "All" : f.charAt(0).toUpperCase() + f.slice(1)}
+                {f === "all" ? "All" : filterLabel(f)}
                 {count > 0 && <span className="ml-1.5 opacity-70">{count}</span>}
               </button>
             );
@@ -450,7 +460,7 @@ export function TasksPage({ sub, query, onNavigate }: TasksPageProps) {
       ) : filtered.length === 0 ? (
         <div className="flex h-64 items-center justify-center">
           <p className="text-sm text-muted-foreground">
-            {filter === "all" ? "No tasks yet" : `No ${filter} tasks`}
+            {filter === "all" ? "No tasks yet" : `No ${filterLabel(filter).toLowerCase()} tasks`}
           </p>
         </div>
       ) : (
@@ -517,7 +527,7 @@ export function TasksPage({ sub, query, onNavigate }: TasksPageProps) {
                       type="button"
                       onClick={(e) => {
                         e.stopPropagation();
-                        handleStart(task.task_id);
+                        handleStart(task);
                       }}
                       className="flex items-center gap-1 rounded-md px-2 py-1 text-xs text-success hover:bg-success/10 transition-colors"
                     >
@@ -659,7 +669,7 @@ export function TasksPage({ sub, query, onNavigate }: TasksPageProps) {
               </div>
               <TaskProfilesField value={newProfiles} onChange={setNewProfiles} />
               <p className="text-xs text-muted-foreground">
-                Task will be created in <strong>init</strong> status. You can review and edit the configuration before starting.
+                The task is created <strong>ready, not started</strong>: review and edit its configuration, then press Start.
               </p>
               {createError && <p className="text-xs text-destructive">{createError}</p>}
               <div className="flex justify-end gap-2">

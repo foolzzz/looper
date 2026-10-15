@@ -18,6 +18,10 @@ export interface SelfCheck {
   fix: string;
 }
 
+/** A ready task's status: created (from the dashboard or by the Manager) and never started. */
+export const READY_STATUS = "init";
+export const READY_LABEL = "Ready — not started";
+
 export interface TaskInfo {
   task_id: string;
   requirement: string;
@@ -263,6 +267,12 @@ export async function startTask(taskId: string): Promise<void> {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ task_id: taskId }),
   });
+  if (!res.ok) await failed(res, "start");
+}
+
+/** Start a ready task; it waits while its project runs as many tasks as its limit. Fails unless the task is ready. */
+export async function startReadyTask(taskId: string): Promise<void> {
+  const res = await fetch(`${API_BASE}/tasks/${encodeURIComponent(taskId)}/start`, { method: "POST" });
   if (!res.ok) await failed(res, "start");
 }
 

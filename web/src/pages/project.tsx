@@ -12,6 +12,7 @@ import {
   fetchProjectAgentSettings,
   fetchProjectInstalls,
   fetchTasks,
+  READY_STATUS,
   type Project,
   type ProjectAgentSettings,
   type ProjectInstalls,
@@ -138,7 +139,7 @@ function TasksCard({ project }: { project: Project }) {
                 className="flex items-center gap-2 rounded-sm text-sm hover:underline focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
               >
                 <Badge variant={STATUS_VARIANT[task.status] ?? "outline"} className="shrink-0 capitalize">
-                  {task.status}
+                  {task.status === READY_STATUS ? "ready" : task.status}
                 </Badge>
                 <span className="min-w-0 flex-1 truncate">{task.requirement}</span>
                 {task.cost && task.cost.runs > 0 && (

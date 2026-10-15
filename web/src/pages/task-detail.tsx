@@ -44,6 +44,9 @@ import {
   streamTaskActivity,
   stopTask,
   startTask,
+  startReadyTask,
+  READY_LABEL,
+  READY_STATUS,
   updateTaskConfig,
   setTaskProject,
   fetchKnowledgeDrafts,
@@ -102,8 +105,8 @@ function taskStatusBadge(status: string) {
       return <Badge variant="outline" className="text-sm">Cancelled</Badge>;
     case "pending":
       return <Badge variant="warning" className="text-sm">Pending</Badge>;
-    case "init":
-      return <Badge variant="outline" className="text-sm">Init</Badge>;
+    case READY_STATUS:
+      return <Badge variant="outline" className="text-sm">{READY_LABEL}</Badge>;
     default:
       return <Badge variant="outline" className="text-sm">{status}</Badge>;
   }
@@ -1329,7 +1332,7 @@ export function TaskDetailPage({ taskId, onBack }: TaskDetailPageProps) {
           {task && ["stopped", "failed", "cancelled", "init"].includes(task.status) && (
             <button
               type="button"
-              onClick={() => startTask(taskId).then(() => { setStartError(""); setRuns((n) => n + 1); }, (err) => setStartError(err instanceof Error ? err.message : String(err)))}
+              onClick={() => (task.status === READY_STATUS ? startReadyTask : startTask)(taskId).then(() => { setStartError(""); setRuns((n) => n + 1); }, (err) => setStartError(err instanceof Error ? err.message : String(err)))}
               className="flex items-center gap-1.5 rounded-md border border-success/50 px-3 py-1.5 text-xs font-medium text-success hover:bg-success/10 transition-colors"
             >
               <Play className="h-3.5 w-3.5" />

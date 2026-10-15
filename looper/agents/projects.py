@@ -24,6 +24,8 @@ import asyncpg
 
 from ..db import agent_setting_layers as db_layers, connection as db_connection, llm_records as db_llm_records
 from ..db import projects as db_projects, tasks as db_tasks
+from .bus import MessageBus
+from .message import TASK_ROUTER_ADDRESS, AgentAddress, MessageEnvelope, MessageType
 from .project_execution import FIELDS as EXECUTION_FIELDS, ProjectExecution, execution_fields, format_usd
 from .tiers.task import TaskRouter, resolve_work_dir
 
@@ -293,6 +295,22 @@ async def move_task(task_id: str, data: dict[str, Any], task_router: TaskRouter)
         raise RequestError(HTTP_404, "task not found")
     task_router.set_task_project(task_id, project_id)
     return {"task_id": task_id, "project_id": project_id, "project_name": project["name"]}
+
+
+async def start_ready_task(task_id: str, bus: MessageBus, source: AgentAddress) -> dict[str, Any]:
+    """Have the TaskRouter start a ready task (created, never started; ``TASK_START``), from the dashboard or the
+    Manager: 404 for an unknown task, 400 for one that is not ready. Like a new task, it waits while its project
+    runs as many tasks as its limit."""
+    task = await db_tasks.get_task(task_id)
+    if task is None:
+        raise RequestError(HTTP_404, "task not found")
+    if task["status"] != db_tasks.READY:
+        raise RequestError(HTTP_400, f"the task is {task['status']}, not ready: only a task that was created and "
+                                     "never started can be started")
+    await bus.publish(MessageEnvelope.create(
+        source=source, target=TASK_ROUTER_ADDRESS, message_type=MessageType.TASK_START, payload={"task_id": task_id},
+    ))
+    return {"started": task_id, "project_id": task["project_id"]}
 
 
 async def raise_cap_to_continue(task_id: str, data: dict[str, Any]) -> dict[str, Any]:

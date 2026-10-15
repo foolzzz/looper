@@ -15,6 +15,9 @@ from .connection import get_pool
 
 # A task in one of these is queued or running.
 ACTIVE_STATUSES = ("pending", "assigned", "running", "executing")
+# A ready task: created (from the dashboard or by the Manager) and never started. Only a user starts it
+# (``start_ready_task``); a server start never resumes it.
+READY = "init"
 
 # A task row plus its project's name and task spend cap.
 _WITH_PROJECT = ("SELECT t.*, p.name AS project_name, p.task_budget_usd "
@@ -214,6 +217,16 @@ async def reset_task_for_restart(
     return result == "UPDATE 1"
 
 
+async def start_ready_task(task_id: str, *, pool: asyncpg.Pool | None = None) -> dict[str, Any] | None:
+    """Move a ready task to ``pending``, once: its row, or None when there is no such task or it is not ready."""
+    pool = pool or get_pool()
+    row = await pool.fetchrow(
+        "UPDATE tasks SET status = 'pending', updated_at = now() WHERE id = $1 AND status = $2 RETURNING *",
+        task_id, READY,
+    )
+    return _task(row) if row is not None else None
+
+
 async def mark_orphaned_tasks_stopped(
     *,
     keep: list[str] | None = None,
@@ -285,16 +298,18 @@ async def list_tasks(
     limit: int = 50,
     offset: int = 0,
     project_id: str | None = None,
+    status: str | None = None,
     pool: asyncpg.Pool | None = None,
 ) -> list[dict[str, Any]]:
-    """The newest tasks, each with its ``project_name``; only one project's when ``project_id`` is given."""
+    """The newest tasks, each with its ``project_name``; only one project's when ``project_id`` is given, and only
+    those in ``status`` when it is."""
     pool = pool or get_pool()
     rows = await pool.fetch(
         f"""
         {_WITH_PROJECT}
-        WHERE $3::text IS NULL OR t.project_id = $3
+        WHERE ($3::text IS NULL OR t.project_id = $3) AND ($4::text IS NULL OR t.status = $4)
         ORDER BY t.created_at DESC LIMIT $1 OFFSET $2
         """,
-        limit, offset, project_id,
+        limit, offset, project_id, status,
     )
     return [_task(r) for r in rows]

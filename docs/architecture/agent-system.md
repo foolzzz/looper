@@ -14,16 +14,49 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
 - Entry point for all user messages
 - Classifies intent (chat vs task creation)
 - Routes task requests to the TaskRouter via `TASK_REQUEST` messages, each
-  with its project's `project_id`
+  with its project's `project_id` and a `task_id` the Manager chooses; the
+  TaskRouter creates the task ready (`init`), without a Planner
 - Places each confirmed task in a project. Every user turn starts with a
   `Projects` section listing the existing projects (name, default directory or
-  "no default directory", description cut to 80 characters). The code-owned
-  rule appended to the editable system prompt asks for `"project"` and
-  `"work_dir"` in the task JSON. The project is matched by name ignoring case;
-  an unknown name becomes a new project whose default directory is the task's,
-  and the reply says so. The directory is the task's own, else the project's
-  default. Without a project name, or without any directory, the Manager asks
-  instead of creating the task
+  "no default directory", description cut to 80 characters) and, when there
+  are any, a `Ready tasks` section: the 10 newest tasks created but not
+  started (id, project, goal, requirement cut to 80 characters). The
+  code-owned rule appended to the editable system prompt
+  (`TASK_PLACEMENT_RULE`) asks for `"project"` and `"work_dir"` in the task
+  JSON. The project is matched by name ignoring case. The directory is the
+  task's own, else the project's default. Without a project name, or without
+  any directory, the Manager asks instead of creating the task
+- A project that does not exist is never created on Claude's word alone. A
+  task JSON naming one creates nothing: code answers with its own question
+  (the new project's name and default directory, that confirming creates it,
+  and up to 10 existing projects to choose instead) and keeps a typed pending
+  state (`_NewProject`) for that chat. Only the next message, and only from the
+  same chat (channel and chat id), can confirm it: code creates the project
+  when that turn's task JSON has `"new_project": true` (the boolean) and the
+  same name (ignoring case) and directory (none: the asked one). Any other new
+  name or directory, a missing or non-boolean `new_project`, a later message
+  or another chat asks again
+- After it creates a ready task the reply is Claude's acknowledgement, then a
+  configuration block code writes from the settings in effect in the task's
+  project (the resolution behind `GET /api/projects/:id/agent-settings`): the
+  goal and task id, the project (new or existing), the directory; for the
+  Planner, Workers and Reviewers the Agent Profile and effort with the layer
+  each came from, and agent teams for the Workers and Reviewers (never a
+  Planner's); the project's review policy, spend cap per task and what
+  happens at it, lessons setting and the Planner's concurrency limit there.
+  It ends asking whether to start the task now (reply "开始", or press Start
+  on the Tasks page)
+- `{"action": "task_start", "task_id": ...}` in Claude's reply starts a ready
+  task: code checks that the task exists and is ready (as
+  `POST /api/tasks/:id/start` does) and sends `TASK_START` to the TaskRouter,
+  which queues it under the project's concurrency limit; the reply says it
+  started or why not. Declining needs no JSON: the role prompt has Claude
+  remind the user of both ways to start it later
+- Claude never sees what code itself answers in a chat (these questions, the
+  configuration block, a start's result). The next message from that chat,
+  and only that one, starts with a `[Looper]` note saying what code said, so
+  Claude can re-emit the task JSON or name the task to start. The Runs
+  record's input holds the note
 - Maintains chat conversation context per session
 - Runs one resident Claude process through `ResidentClaude`
   (`looper/agents/claude_cli.py`), which each task's Planner uses too, started
@@ -151,17 +184,26 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
   was unavailable (...)` as an `error` activity, and the Planner keeps the
   project it last read and logs a warning.
 
-- Creates/destroys PlannerAgent instances per task
+- A `TASK_REQUEST` creates the task ready (`init`), with the `task_id` it
+  names (a request without one, such as one replayed from before, gets a new
+  id; replaying one with an id creates nothing more), and starts no Planner
+- Creates a PlannerAgent when a task starts and destroys it when the task
+  ends. `TASK_START` (the dashboard's Start on a ready task, or the
+  Manager's `task_start`) moves a ready task to `pending` once
+  (`tasks.start_ready_task`, a conditional update: a task that is not ready
+  is logged and left alone); the started task reports its plan and outcome
+  to the chat it was asked for in
 - Handles task lifecycle: start, stop (pause), restart (resume), cancel
 - At most the Planner's concurrency limit of a project's tasks run at once
   ([Concurrency limits](#concurrency-limits)), read each time a task may
-  start. A new, restarted or resumed task waits in its project's queue, oldest
-  first, and starts when one of the project's tasks ends or the limit is
-  raised; a project at its limit never delays another project's tasks. There
-  is no machine-wide limit
+  start. A started, restarted or resumed task waits in its project's queue,
+  oldest first, and starts when one of the project's tasks ends or the limit
+  is raised; a project at its limit never delays another project's tasks.
+  There is no machine-wide limit
 - At server startup, resumes the tasks the previous server left running whose
   plan is live (`executing` or `verifying`): each gets a new Planner and a
-  `TASK_RESUME`. Any other task left running is marked "stopped"
+  `TASK_RESUME`. Any other task left running is marked "stopped". A ready task
+  is neither: it stays ready until someone starts it
 
 ### Planner (`looper/agents/tiers/planner.py`)
 
@@ -1388,7 +1430,8 @@ Key message types:
 |---|---|---|
 | `USER_MESSAGE` | Channel → Manager, or Web Chat → a task's Planner | User chat message |
 | `AGENT_REPLY` | Manager or Planner → Channel | Reply to the user |
-| `TASK_REQUEST` | Manager → TaskRouter → Planner | Create/dispatch task |
+| `TASK_REQUEST` | Manager → TaskRouter, then TaskRouter → Planner | Create a ready task; then the started task's request to its Planner |
+| `TASK_START` | HTTP or Manager → TaskRouter | Start a ready task |
 | `TASK_ACCEPTED` | Planner → TaskRouter → Manager | Plan made, with its step count |
 | `TASK_CANCEL` | HTTP → TaskRouter → Planner | Terminate task permanently |
 | `TASK_STOP` | HTTP → TaskRouter | Pause task (preserves state) |
@@ -1404,9 +1447,11 @@ Key message types:
 
 ## How a task runs
 
-1. The Manager sends `TASK_REQUEST` to the TaskRouter, which records the task,
-   creates its Planner (or queues the task while its project runs as many
-   tasks as the Planner's limit there) and forwards the request.
+1. The Manager sends `TASK_REQUEST` to the TaskRouter, which records the task
+   ready (the dashboard creates one the same way). When a user starts it
+   (`TASK_START`), the TaskRouter creates its Planner (or queues the task
+   while its project runs as many tasks as the Planner's limit there) and
+   forwards the request.
 2. Plan turn: the Planner creates the task's directory if needed, starts its
    Claude and asks `[PLAN]`. The steps go to `task_steps`, the activity gets
    `Plan created: ...`, and `TASK_ACCEPTED` reports the step count to the
@@ -1453,18 +1498,18 @@ Key message types:
 ## Task Lifecycle
 
 ```
-pending → assigned → running → completed
-                        ↓           ↑
-                     stopped ───────┘  (start)
-                        ↑
-                     failed  ←── running
-                        ↓
-                     (start) → pending → ...
+init (ready) → (start) → pending → assigned → running → completed
+                                                 ↓           ↑
+                                              stopped ───────┘  (start)
+                                                 ↑
+                                              failed  ←── running
+                                                 ↓
+                                              (start) → pending → ...
 
 cancelled ← running  (cancel = permanent termination)
 ```
 
-**Status values**: `pending`, `assigned`, `running`, `executing`, `completed`, `failed`, `cancelled`, `stopped`
+**Status values**: `init` (ready: created from the dashboard or by the Manager, never started; the dashboard labels it "Ready — not started"), `pending` (waiting for a place in its project), `assigned`, `running`, `executing`, `completed`, `failed`, `cancelled`, `stopped`
 
 **Phase values** (finer-grained, set by planner): `pending`, `planning`, `executing`, `verifying`, `completed`, `failed`
 
@@ -1511,7 +1556,7 @@ distinct task directory and assigns those tasks to it. The project is named
 after the directory's last path component (`''` and `/` become `default`);
 the oldest directory keeps the plain name and a later clash, ignoring case,
 gets `-2`, `-3`, .... A task's "active" statuses are `pending`, `assigned`,
-`running` and `executing`.
+`running` and `executing`; a ready task (`init`) is not active.
 
 The names follow the dashboard's, and "agent" names only a running agent:
 the one-time migration `profiles_roles_renamed`, which runs first in
@@ -1552,7 +1597,7 @@ built by `scripts/stage-dashboard.sh` at release time), and it carries
 ### Pages
 
 - **Chat**: Every agent and its messages, finished ones included. The selector lists the global Manager and the 30 most recent tasks; each task shows its one Planner and the Worker (and Reviewer, when reviewed) of each step. You can send to the Manager and to a running task's Planner, which keeps one thread per task; SSE streaming. A selected Planner also shows its Claude runs, one per turn, in a folded list of the latest 10 beside its activity and chat thread, re-read as a reply starts and ends and every 10 s while the task runs. A Worker or Reviewer shows its Claude runs read-only, following a running one live, and points to its task's Planner for sending. The Manager's chat has a "New session" button that sends `/new`.
-- **Tasks**: Task list with project and status filters, time display, each task's cost so far, Start/Stop/Delete controls. `#tasks?project=<id>` filters by a project and shows its name and default directory with a link to its project page. A new task picks an existing project or creates one in the same form; its work directory may stay empty when the project has a default. A task's detail view can move it to another project in any status.
+- **Tasks**: Task list with project and status filters (`Ready` for ready tasks), time display, each task's cost so far, Start/Stop/Delete controls; a ready task is labelled "Ready — not started" and its Start (here and on its detail page) calls `POST /api/tasks/:id/start`. `#tasks?project=<id>` filters by a project and shows its name and default directory with a link to its project page. A new task picks an existing project or creates one in the same form; its work directory may stay empty when the project has a default. A task's detail view can move it to another project in any status.
 - **Projects (sidebar)**: Below the navigation, every project with its task count (or a spinner with its active count); clicking one opens its project page, and `+` creates a project (name, default directory, description, optional background).
 - **Project** (`#projects/<id>`, `#projects/<id>/knowledge|skills|profiles|settings`): a header with the name, description, default directory and task count (a link to the filtered Tasks page), then five tabs, arrow keys moving between them. **Overview**: the 5 latest tasks with status and cost and a link to all of them; the background (three lines, then Show more); the knowledge (document count, stored size, the first 5 titles and summaries, how many referenced files are missing); the skills (count, how many are on, the first 5 names and descriptions); each role's Agent Profile, the per-run caps and which roles this project gives a harness (linking to Agent Profiles); and the execution settings that are set, in words (linking to Settings). **Knowledge**: the documents (title, summary, source, file name or path, size, a Missing badge for a path document whose file is gone) with a readout of documents, stored bytes and index characters against their caps. Opening a row shows its body (a path document's file as it is now); Edit changes the title, summary and content (a text or upload document) or path (a path document); a document is added as Text, Upload or Project file, or by dropping a file on the section; delete asks first. **Skills**: the skills (`project:<name>`, the body's size, `Off` for a disabled one, the description) with a count against the cap. Opening a row shows its `SKILL.md` body; Edit changes the name, description and body; a skill is added by hand or from a `SKILL.md` (Upload SKILL.md, or a drop on the section), whose frontmatter fills the name and description and whose body below it fills the instructions, for review before Add; a switch turns one on or off; delete asks first. Knowledge and skill changes apply at once and a refusal shows the server's reason. **Agent Profiles**: a line saying it overrides the shared defaults in Settings → Roles for the Planner, Workers and Reviewers, and that the Manager is set there, then one collapsible row for the project's layer ("All roles in this project") and one for each role in the project (Planner, Worker, Reviewer), all closed at first. A closed row shows the Agent Profile in effect and where it comes from (shared defaults, role default, this project, or this role in this project; the project's row shows what the roles that do not set it again agree on), the effort, a role's limit of how many run at once, "overridden here" when the row sets anything and "unsaved" over unsaved edits. An open row has the Agent Profile first, with Remove override, then "More overrides": the harness, effort, spend cap, a role's limit (empty or Clear inherits) and environment, where every field of a role's row also says what applies now and from which layer, and one Save. Closing a row keeps its unsaved edits; `#projects/<id>/profiles/<role>` or `/project` opens that row and scrolls to it, and an Agent Profile's "used by" links there. **Settings**: the name, default directory, description, background (`n / 10000`) and execution settings, saved together (Save is disabled over a limit or without a change; Discard changes resets them); then Delete project, offered only while the project has no tasks.
 - **Task Detail**: Overview (status, phase, times, steps and the task's cost with its run count, then "Cost by agent": the Planner's, the Workers' and the Reviewers' runs and cost with each one's share, noting runs still running or without a reported cost; steps, agent timeline, live activity feed), Pipeline DAG (React Flow), Sessions, Conversation
@@ -1605,12 +1650,13 @@ dev proxy, which keeps `Host` and `Origin` on its own port.
 | `/api/projects/:id/skills/:skill_id` | DELETE | Delete a skill the project wrote, from the catalog and every project it is installed in; answers with `deleted` and the installs view; 404 |
 | `/api/projects/:id` | DELETE | Delete a project; 409 while it still has tasks |
 | `/api/tasks` | GET | List the newest tasks; `?project_id=` lists one project's. Each has `project_id`, `project_name`, `work_dir` and `cost` (as in the task detail) |
-| `/api/tasks/create` | POST | Create a task in `init` with exactly one of `project_id` (existing) and `project` (`{name, description?, work_dir?, background?}`, created in the same transaction). Its `work_dir` is the one given, else the project's. Optional `profile_overrides`: `{planner?, worker?, reviewer?}` Agent Profile ids for this task's roles (an empty one chooses nothing). 400 with neither project field, for an override of another role, an unknown profile or one that cannot run its role; 404 for an unknown project, 409 for a taken new name |
+| `/api/tasks/create` | POST | Create a ready task (`init`) with exactly one of `project_id` (existing) and `project` (`{name, description?, work_dir?, background?}`, created in the same transaction). Its `work_dir` is the one given, else the project's. Optional `profile_overrides`: `{planner?, worker?, reviewer?}` Agent Profile ids for this task's roles (an empty one chooses nothing). 400 with neither project field, for an override of another role, an unknown profile or one that cannot run its role; 404 for an unknown project, 409 for a taken new name |
 | `/api/tasks/:id/project` | PUT | Move a task to `{project_id}`, whatever its status |
 | `/api/tasks/:id` | GET | Task detail with steps, `project_id`, `project_name`, `profile_overrides` (`{role: profile}`, `{}` when none) and `cost`: `cost_usd` (the sum of its Planner's, Workers' and Reviewers' runs), `runs`, `running`, `unpriced_runs` and `by_role` (`planner`, `worker`, `reviewer`, each `{cost_usd, runs}`) |
 | `/api/tasks/cancel` | POST | Cancel task (permanent) |
 | `/api/tasks/stop` | POST | Stop/pause task |
-| `/api/tasks/start` | POST | Start/resume task |
+| `/api/tasks/start` | POST | Run a stopped, failed or cancelled task again (it also starts a ready one, as before) |
+| `/api/tasks/:id/start` | POST | Start a ready task (`TASK_START`); it waits for a place in its project like any start. Answers `{started, project_id}`; 400 unless the task is ready, 404 for an unknown task |
 | `/api/tasks/delete` | POST | Delete task (must be stopped first) |
 | `/api/tasks/:id/activity` | GET | Activity events |
 | `/api/tasks/:id/activity/stream` | GET | SSE activity stream |

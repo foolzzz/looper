@@ -187,6 +187,29 @@ def test_project_crud_and_counts() -> None:
     _run(_test)
 
 
+def test_a_ready_task_is_listed_left_alone_at_startup_and_starts_once() -> None:
+    from looper.db import plans, projects, tasks
+
+    async def _test(pool: Any) -> None:
+        project = await projects.create_project(name="tetris", work_dir="/srv/tetris", pool=pool)
+        for task_id, status in (("task-ready", tasks.READY), ("task-run", "running")):
+            await tasks.create_task(task_id=task_id, requirement="r", work_dir="/w", status=status,
+                                    project_id=project["id"], pool=pool)
+        assert [t["id"] for t in await tasks.list_tasks(status=tasks.READY, pool=pool)] == ["task-ready"]
+        # A server start stops what the previous one left running and resumes nothing that is ready.
+        assert await plans.resumable_task_ids(tasks.ACTIVE_STATUSES, pool=pool) == []
+        assert await tasks.mark_orphaned_tasks_stopped(pool=pool) == 1
+        assert (await tasks.get_task("task-ready", pool=pool))["status"] == tasks.READY
+
+        started = await tasks.start_ready_task("task-ready", pool=pool)
+        assert (started["id"], started["status"], started["project_id"]) == ("task-ready", "pending", project["id"])
+        for task_id in ("task-ready", "task-run", "task-nope"):  # started already, not ready, unknown
+            assert await tasks.start_ready_task(task_id, pool=pool) is None
+        assert (await tasks.get_task("task-run", pool=pool))["status"] == "stopped"
+
+    _run(_test)
+
+
 def test_task_with_a_new_project_is_one_transaction(monkeypatch: pytest.MonkeyPatch) -> None:
     from looper.agents import projects as api
     from looper.db import connection, tasks
