@@ -19,7 +19,10 @@ server was down or the computer slept are handled), one pass:
 
 A firing while one of the schedule's tasks is still active is recorded
 ``skipped_overlap``, or, with overlap ``queue``, waits as the one ``queued``
-run. Otherwise it creates the task (the schedule's requirement plus the
+run. With overlap ``parallel`` (reentrant) it starts beside the runs in
+progress, up to ``max_parallel_runs`` at once, but never while a run of the
+schedule checks its gate: only tasks overlap, so a gate can claim what it hands
+to its run (``gate_env`` tells it which run). Otherwise it creates the task (the schedule's requirement plus the
 code-written run context, ``run_context``; its profile overrides; its own
 spend cap) and starts it at once with ``TASK_START``: enabling the schedule was
 the approval (D6), and the TaskRouter's start path applies the project's
@@ -143,6 +146,16 @@ _TRIGGER_WORDS = {Trigger.SCHEDULED: "按时触发", Trigger.CATCH_UP: "补跑",
 
 def _local(moment: datetime, tz: Any) -> str:
     return moment.astimezone(tz).strftime("%Y-%m-%d %H:%M %Z")
+
+
+def gate_env(schedule: Mapping[str, Any], run_id: str, firing: Firing) -> dict[str, str]:
+    """What a gate is told about its run, so it can claim the items it hands to this run (a ``parallel`` schedule's
+    runs overlap): the schedule, the run, its fire time (ISO 8601) and the run timeout in seconds ("" for none),
+    after which a claim may be taken back."""
+    timeout = schedule.get("run_timeout_seconds")
+    return {"LOOPER_SCHEDULE_ID": str(schedule["id"]), "LOOPER_SCHEDULE_RUN_ID": run_id,
+            "LOOPER_SCHEDULE_SCHEDULED_FOR": firing.scheduled_for.isoformat(),
+            "LOOPER_SCHEDULE_RUN_TIMEOUT_SECONDS": "" if timeout is None else str(timeout)}
 
 
 def run_title(schedule: Mapping[str, Any], firing: Firing) -> str | None:
@@ -410,6 +423,14 @@ class Scheduler:
         open_runs = await db_schedules.open_runs(conn, schedule["id"])
         queued = next((run for run in open_runs if run["status"] == db_schedules.QUEUED), None)
         gating = next((run for run in open_runs if run["status"] == db_schedules.GATING), None)
+        if schedule["overlap"] == "parallel":
+            # Runs overlap in their tasks only: a gate never runs beside another, up to max_parallel_runs at once.
+            running = sum(run["status"] == db_schedules.RUNNING for run in open_runs)
+            if gating is None and running < schedule["max_parallel_runs"]:
+                return await self._launch(conn, schedule, firing, now, common=common)
+            reason = ("the previous run is still checking its gate" if gating
+                      else f"{running} runs are in progress, the most this schedule runs at once (max_parallel_runs)")
+            return _Launched(await self._skip(conn, "skipped_overlap", now, common, fired_at=now, error=reason))
         busy = await self._busy_task(conn, schedule["id"])
         if busy or queued or gating:
             if schedule["overlap"] == "queue" and queued is None:
@@ -509,9 +530,10 @@ class Scheduler:
 
     @staticmethod
     async def _carried(conn: asyncpg.Connection, schedule_id: str, *, before: str | None) -> Carried | None:
-        """The previous run's input when it did not finish it: its gate output, if it had one."""
+        """The previous run's input when it did not finish it: its gate output, if it had one, and only for the next
+        run (a ``parallel`` schedule's later runs may start before it ends)."""
         previous = await db_schedules.previous_run(conn, schedule_id, before=before)
-        if previous is None or previous["status"] not in db_schedules.UNFINISHED:
+        if previous is None or previous["status"] not in db_schedules.UNFINISHED or previous["carried_on"]:
             return None
         if not (previous.get("gate_output") or "").strip():
             return None
@@ -530,7 +552,8 @@ class Scheduler:
                 result = GateResult(None, "", "", error="a work directory is required: set one on the schedule or "
                                                         "on its project")
             else:
-                result = await run_gate(schedule["gate_command"], work_dir, timeout, label=f"gate of {run_id}")
+                result = await run_gate(schedule["gate_command"], work_dir, timeout, label=f"gate of {run_id}",
+                                        env=gate_env(schedule, run_id, firing))
             now = self._clock()
             launched: _Launched | None = None
             async with db_connection.transaction() as conn:

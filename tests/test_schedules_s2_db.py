@@ -563,6 +563,127 @@ def test_a_minute_schedule_is_not_stale_while_its_task_runs(monkeypatch: pytest.
     _run(test, monkeypatch, tmp_path)
 
 
+# --- Reentrant schedules: overlap parallel ---
+
+
+def test_a_parallel_schedule_starts_runs_beside_each_other_up_to_its_cap(monkeypatch: pytest.MonkeyPatch,
+                                                                          tmp_path: Path) -> None:
+    async def test(env: _Env) -> None:
+        _setup(env)
+        sid = (await env.enabled(overlap="parallel", max_parallel_runs=2))["schedule_id"]
+        started = []
+        for _ in range(2):
+            run = await _fire(env, sid)
+            assert run["status"] == "running"
+            # As the TaskRouter would start it.
+            await env.pool.execute("UPDATE tasks SET status = 'running' WHERE id = $1", run["task_id"])
+            started.append(run)
+        first, second = started
+        over = await _fire(env, sid)
+        assert over["status"] == "skipped_overlap" and over["task_id"] is None
+        assert over["error"] == "2 runs are in progress, the most this schedule runs at once (max_parallel_runs)"
+        assert env.bus.of("task_start") == [first["task_id"], second["task_id"]]
+        await env.end_task(first["task_id"], "completed", summary="done")
+        third = await _fire(env, sid)
+        assert third["status"] == "running" and third["task_id"] not in (first["task_id"], second["task_id"])
+
+    _run(test, monkeypatch, tmp_path)
+
+
+def test_a_parallel_schedules_gates_never_run_beside_each_other_and_know_their_run(monkeypatch: pytest.MonkeyPatch,
+                                                                                    tmp_path: Path) -> None:
+    async def test(env: _Env) -> None:
+        _setup(env)
+        env.clock.now = NOON
+        gate = ('echo start >> gate.log; sleep 1; echo end >> gate.log; '
+                'echo "$LOOPER_SCHEDULE_ID $LOOPER_SCHEDULE_RUN_ID $LOOPER_SCHEDULE_SCHEDULED_FOR '
+                '[$LOOPER_SCHEDULE_RUN_TIMEOUT_SECONDS]"')
+        sid = (await env.enabled(cron="* * * * *", gate_command=gate, overlap="parallel",
+                                 run_timeout_seconds=1800))["schedule_id"]
+        for _ in range(2):  # a second minute comes while the first gate runs
+            at = (env.clock.now + MINUTE).replace(second=0, microsecond=0)
+            await env.pool.execute("UPDATE schedules SET next_fire_at = $2 WHERE id = $1", sid, at)
+            env.clock.now = at + timedelta(seconds=10)
+            await env.scheduler.tick()
+        skipped, gating = await env.runs(sid)
+        assert (skipped["status"], skipped["error"]) == ("skipped_overlap", "the previous run is still checking its gate")
+        await env.scheduler.idle()
+        [run] = [r for r in await env.runs(sid) if r["run_id"] == gating["run_id"]]
+        assert run["status"] == "running"
+        assert run["gate_output"] == f"{sid} {run['run_id']} {(NOON + MINUTE).isoformat()} [1800]"
+        assert (tmp_path / "gate.log").read_text() == "start\nend\n"
+        # Its task runs; the next minute's gate runs (no other gate is running) and starts a run beside it.
+        await env.pool.execute("UPDATE tasks SET status = 'running' WHERE id = $1", run["task_id"])
+        assert _shape(await _next_minute(env, sid))[:2] == [("running", 1), ("skipped_overlap", 1)]
+
+    _run(test, monkeypatch, tmp_path)
+
+
+def test_a_parallel_schedules_daily_budget_counts_every_run_in_progress(monkeypatch: pytest.MonkeyPatch,
+                                                                         tmp_path: Path) -> None:
+    async def test(env: _Env) -> None:
+        _setup(env)
+        sid = (await env.enabled(overlap="parallel", daily_budget_usd=0.5))["schedule_id"]
+        for cost in (0.3, 0.25):  # two runs still in progress, each having spent this much so far
+            run = await _fire(env, sid)
+            await env.pool.execute("UPDATE tasks SET status = 'running' WHERE id = $1", run["task_id"])
+            await env.pool.execute(
+                "INSERT INTO llm_records (agent_id, task_id, input_text, output_text, status, cost_usd) "
+                "VALUES ($1, $2, '', '', 'completed', $3)", f"planner-{run['task_id']}", run["task_id"], cost)
+        third = await _fire(env, sid)
+        assert third["status"] == "skipped_budget" and "today's runs cost $0.5500" in third["error"]
+
+    _run(test, monkeypatch, tmp_path)
+
+
+def test_a_failed_runs_input_goes_to_the_next_run_only(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    async def test(env: _Env) -> None:
+        _setup(env)
+        env.clock.now = NOON
+        items = tmp_path / "items.txt"
+        items.write_text("alert-1\n")
+        sid = (await env.enabled(cron="* * * * *", gate_command="cat items.txt; : > items.txt",
+                                 overlap="parallel"))["schedule_id"]
+        [failing] = await _next_minute(env, sid)
+        await env.end_task(failing["task_id"], "failed", summary="crashed")
+        # The next run is given its input; while that run is in progress, the one after is not given it again.
+        carrying = (await _next_minute(env, sid))[0]
+        assert (carrying["status"], carrying["carried_from"]) == ("running", failing["run_id"])
+        await env.pool.execute("UPDATE tasks SET status = 'running' WHERE id = $1", carrying["task_id"])
+        assert _shape(await _next_minute(env, sid))[0] == ("skipped_gate", 1)
+
+    _run(test, monkeypatch, tmp_path)
+
+
+def test_a_parallel_schedule_is_validated_and_warned_about_past_its_projects_planner_limit(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    from looper.db import agent_setting_layers
+
+    async def test(env: _Env) -> None:
+        for value in (0, 11, "3", True, 2.5):
+            status, payload = await env.call("POST", f"/api/projects/{env.project_id}/schedules", {
+                "name": f"p-{value}", "cron": "*/5 * * * *", "requirement": "r", "overlap": "parallel",
+                "max_parallel_runs": value})
+            assert status == 400 and "max_parallel_runs must be a whole number from 1 to 10" in payload["error"]
+        plain = await env.schedule()
+        assert (plain["overlap"], plain["max_parallel_runs"]) == ("skip", 3)
+        await agent_setting_layers.put_layer("role_project", "planner", env.project_id, {"max_concurrency": 2},
+                                             pool=env.pool)
+        status, made = await env.call("POST", f"/api/projects/{env.project_id}/schedules", {
+            "name": "parallel", "cron": "*/5 * * * *", "requirement": "r", "overlap": "parallel"})
+        assert status == 201 and made["schedule"]["max_parallel_runs"] == 3
+        [warning] = made["warnings"]
+        assert "max_parallel_runs is 3, but its project runs at most 2 tasks at once" in warning
+        fixed = await env.ok("PUT", f"/api/schedules/{made['schedule']['schedule_id']}", {"max_parallel_runs": 2})
+        assert (fixed["schedule"]["max_parallel_runs"], fixed["warnings"]) == (2, [])
+        assert (await env.ok("PUT", f"/api/schedules/{plain['schedule_id']}", {"name": "renamed"}))["warnings"] == []
+        listed = (await env.ok("GET", f"/api/projects/{env.project_id}/schedules"))["limits"]
+        assert (listed["max_parallel_runs_limit"], listed["planner_limit"]) == (10, 2)
+
+    _run(test, monkeypatch, tmp_path)
+
+
 @pytest.mark.parametrize(("body", "error"), [
     ({"gate_timeout_seconds": 601}, "gate_timeout_seconds must be"),
     ({"gate_command": "x" * 2001}, "at most 2000 characters"),

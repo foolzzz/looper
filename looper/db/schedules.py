@@ -19,9 +19,9 @@ import asyncpg
 from .connection import get_pool
 
 # The schedule fields a request sets (looper/agents/schedules.py validates them).
-FIELDS = ("name", "cron", "timezone", "requirement", "work_dir", "overlap", "catch_up", "run_timeout_seconds",
-          "run_budget_usd", "gate_command", "gate_timeout_seconds", "daily_budget_usd", "notify", "notify_channel",
-          "notify_chat")
+FIELDS = ("name", "cron", "timezone", "requirement", "work_dir", "overlap", "max_parallel_runs", "catch_up",
+          "run_timeout_seconds", "run_budget_usd", "gate_command", "gate_timeout_seconds", "daily_budget_usd", "notify",
+          "notify_channel", "notify_chat")
 
 QUEUED = "queued"
 GATING = "gating"
@@ -341,10 +341,16 @@ async def recent_runs(conn: Db, schedule_id: str, *, limit: int) -> list[dict[st
 
 
 async def previous_run(conn: Db, schedule_id: str, *, before: str | None = None) -> dict[str, Any] | None:
-    """The schedule's latest run that ran something and has ended (not ``before``, the run being started)."""
+    """The schedule's run that ran something and ended last (not ``before``, the run being started), with
+    ``carried_on``: whether a later run was given its input already. Runs of a ``parallel`` schedule end in any
+    order, so the latest to end is the previous one, not the latest to start."""
     row = await conn.fetchrow(
-        f"{_RUN} WHERE r.schedule_id = $1 AND NOT (r.status = ANY($2::text[])) AND r.id IS DISTINCT FROM $3 "
-        "ORDER BY r.created_at DESC, r.id DESC LIMIT 1",
+        """
+        SELECT r.*, EXISTS (SELECT 1 FROM schedule_runs c WHERE c.carried_from = r.id) AS carried_on
+        FROM schedule_runs r
+        WHERE r.schedule_id = $1 AND NOT (r.status = ANY($2::text[])) AND r.id IS DISTINCT FROM $3
+        ORDER BY COALESCE(r.finished_at, r.created_at) DESC, r.created_at DESC, r.id DESC LIMIT 1
+        """,
         schedule_id, [*OPEN_STATUSES, *NOTHING_RAN], before,
     )
     return dict(row) if row else None

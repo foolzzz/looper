@@ -971,6 +971,18 @@ END $$;
 -- When the schedule's rule or zone last changed: the no-success alert counts from it too, so a new rule (such as one
 -- firing more often) is not stale at once. NULL until a change.
 ALTER TABLE schedules ADD COLUMN IF NOT EXISTS rule_changed_at TIMESTAMPTZ;
+-- Reentrant schedules: with overlap 'parallel' a firing starts a run while earlier runs' tasks are in progress, up
+-- to max_parallel_runs at once (their gates never run beside each other).
+ALTER TABLE schedules ADD COLUMN IF NOT EXISTS max_parallel_runs INTEGER NOT NULL DEFAULT 3
+    CHECK (max_parallel_runs BETWEEN 1 AND 10);
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM schema_migrations WHERE name = 'schedules_overlap_parallel') THEN
+        ALTER TABLE schedules DROP CONSTRAINT IF EXISTS schedules_overlap_check;
+        ALTER TABLE schedules ADD CONSTRAINT schedules_overlap_check CHECK (overlap IN ('skip', 'queue', 'parallel'));
+        INSERT INTO schema_migrations (name) VALUES ('schedules_overlap_parallel');
+    END IF;
+END $$;
 DO $$
 BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'schedules_notify_target_check'
@@ -1047,6 +1059,7 @@ CREATE TABLE IF NOT EXISTS schedule_notifications (
 );
 CREATE INDEX IF NOT EXISTS idx_schedule_notifications_schedule ON schedule_notifications (schedule_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_schedule_runs_task ON schedule_runs (task_id);
+CREATE INDEX IF NOT EXISTS idx_schedule_runs_carried ON schedule_runs (carried_from) WHERE carried_from IS NOT NULL;
 -- The schedule that created the task (NULL once the schedule is deleted), and the task's own spend cap over its
 -- project's task_budget_usd (a schedule's run_budget_usd, copied when it fires).
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS schedule_id TEXT REFERENCES schedules(id) ON DELETE SET NULL;
