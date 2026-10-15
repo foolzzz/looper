@@ -39,8 +39,8 @@ Looper 是一个自托管的多 Agent 系统，把一段任务描述变成协同
 - **暂停与恢复**：停止运行中的任务，从 stopped 或 failed 状态重新开始
 - **实时活动流**：基于 SSE，实时显示 worker 进程的事件
 - **多种 agent 运行时和 LLM 提供方**：一个 agent 由运行时（如 Claude Code、Codex）、LLM 提供方（运行时自己的登录，
-  或 Anthropic、OpenAI 兼容接口的 API key，常见厂商有预设）和模型组成；每次运行都记录 token，模型有价格时也记录花费
-- **分层设置**：harness prompt、agent、effort、环境变量和单次运行的花费上限可以按全系统、角色、项目或项目内的角色设置，
+  或 Anthropic、OpenAI 兼容接口的 API key，常见厂商有预设）、模型和思考强度组成；每次运行都记录 token，模型有价格时也记录花费
+- **分层设置**：harness prompt、agent、环境变量和单次运行的花费上限可以按全系统、角色、项目或项目内的角色设置，
   任务还能自选 agent；控制台标出每个值来自哪一层
 - **能力目录**：插件、skill 和 MCP 服务器，可以从本机导入、上传、从 git 获取或在 Looper 里编写，再全局安装或装到某个项目，
   并指定给哪些角色
