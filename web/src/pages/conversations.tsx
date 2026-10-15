@@ -66,7 +66,15 @@ function SessionCard({
   );
 }
 
-function MessageList({ sessionId }: { sessionId: string }) {
+function MessageList({
+  sessionId,
+  messageCount,
+  refreshKey,
+}: {
+  sessionId: string;
+  messageCount: number;
+  refreshKey: number;
+}) {
   const [messages, setMessages] = useState<DbChatMessage[] | null>(null);
 
   useEffect(() => {
@@ -82,7 +90,8 @@ function MessageList({ sessionId }: { sessionId: string }) {
     return () => {
       active = false;
     };
-  }, [sessionId]);
+    // refreshKey re-fetches the same conversation when the user clicks Refresh.
+  }, [sessionId, refreshKey]);
 
   if (messages === null) {
     return (
@@ -98,8 +107,14 @@ function MessageList({ sessionId }: { sessionId: string }) {
       </div>
     );
   }
+  const truncated = messageCount > messages.length;
   return (
     <div className="space-y-4">
+      {truncated && (
+        <p className="rounded-md border border-border bg-muted/40 px-3 py-2 text-center text-xs text-muted-foreground">
+          Showing the oldest {messages.length} of {messageCount} messages. Paging to newer history is a follow-up.
+        </p>
+      )}
       {messages.map((msg) => {
         const isUser = msg.role === "user";
         return (
@@ -145,6 +160,11 @@ export function ConversationsPage() {
   const [sessions, setSessions] = useState<ChatSession[] | null>(null);
   const [error, setError] = useState("");
   const [selected, setSelected] = useState<string | null>(null);
+  const [refreshKey, setRefreshKey] = useState(0);
+
+  const refresh = useCallback(() => {
+    setRefreshKey((k) => k + 1);
+  }, []);
 
   const load = useCallback(() => {
     fetchChatSessions()
@@ -176,7 +196,10 @@ export function ConversationsPage() {
         </div>
         <button
           type="button"
-          onClick={load}
+          onClick={() => {
+            load();
+            refresh();
+          }}
           className="flex items-center gap-2 rounded-lg border border-border px-3 py-2 text-sm text-muted-foreground transition-colors hover:text-foreground"
         >
           <RefreshCw className="h-4 w-4" />
@@ -224,7 +247,11 @@ export function ConversationsPage() {
                 </span>
               </div>
               <div className="p-5">
-                <MessageList sessionId={current.session_id} />
+                <MessageList
+                  sessionId={current.session_id}
+                  messageCount={current.message_count}
+                  refreshKey={refreshKey}
+                />
               </div>
             </div>
           )}
