@@ -291,7 +291,7 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
   current one at startup; an edited prompt is kept.
 - Each event is one user turn; turns run one at a time:
   - `[PLAN]` on `TASK_REQUEST`: Claude may look at the project without changing it, then splits the
-    requirement into 1–8 steps (`MAX_STEPS`), each with `id`, `instruction`,
+    requirement into steps (at least one, no upper limit), each with `id`, `instruction`,
     `acceptance_criteria`, `depends_on` and `review` (whether an independent
     Reviewer must pass it).
   - `[DECISION]` after every Worker result and every Reviewer result:
@@ -323,8 +323,9 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
   project section. Every reply ends with exactly
   one ```` ```json ```` fenced object, parsed into typed dataclasses and enums
   and validated against the current plan: no unknown keys, unique step ids,
-  `depends_on` naming known steps without cycles, at most 8 steps (dropped
-  steps that ran count too), only the decisions allowed for that result, at
+  `depends_on` naming known steps without cycles, at least one step (there is
+  no upper limit: a task's spend cap and timeouts bound its cost), only the
+  decisions allowed for that result, at
   most 2 retries per step, and started steps never changed. An invalid reply
   gets one repair turn that names the error.
 - Failures:

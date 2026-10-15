@@ -209,6 +209,20 @@ TASKS: tuple[EvalTask, ...] = (
         },
     ),
     EvalTask(
+        # More steps than the eight a plan was once limited to: the plan is taken as it is.
+        id="many_steps",
+        requirement="In the working directory, create nine files, f1.txt to f9.txt, each holding only its own "
+                    "number (f1.txt holds 1, f2.txt holds 2, and so on). Make each file a step of its own, each "
+                    "after the one before.",
+        check=_all(*(_equals(f"f{i}.txt", str(i)) for i in range(1, 10))),
+        expect={"min_steps": 9},
+        fake={
+            "plan": [_step(f"s{i}", f"Create f{i}.txt holding {i}.", [f"f{i}.txt holds {i}"],
+                           depends_on=[f"s{i - 1}"] if i > 1 else None) for i in range(1, 10)],
+            "attempts": {f"s{i}": [{"status": "completed", "files": {f"f{i}.txt": f"{i}\n"}}] for i in range(1, 10)},
+        },
+    ),
+    EvalTask(
         # Two parts that need nothing of each other, then one that needs both: the plan should let the two run at
         # the same time.
         id="parallel_parts",
