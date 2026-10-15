@@ -28,6 +28,7 @@ from ..db import projects as db_projects, tasks as db_tasks
 from .bus import MessageBus
 from .message import TASK_ROUTER_ADDRESS, AgentAddress, MessageEnvelope, MessageType, planner_address
 from .project_execution import FIELDS as EXECUTION_FIELDS, ProjectExecution, execution_fields, format_usd
+from .system_prompt import TASK_REQUIREMENT_LIMIT
 from .tiers.task import TaskRouter, resolve_work_dir
 
 logger = logging.getLogger(__name__)
@@ -53,6 +54,15 @@ class RequestError(Exception):
     def __init__(self, status: str, message: str) -> None:
         super().__init__(message)
         self.status = status
+
+
+def check_requirement(text: str) -> str:
+    """``text``, a task requirement, when it is at most ``TASK_REQUIREMENT_LIMIT`` characters; else a 400 that
+    says so (a longer one would be clipped where agents read it)."""
+    if len(text) > TASK_REQUIREMENT_LIMIT:
+        raise RequestError(HTTP_400, f"the requirement has {len(text)} characters; at most "
+                                     f"{TASK_REQUIREMENT_LIMIT} are allowed")
+    return text
 
 
 def project_name(raw: Any) -> str:
@@ -214,6 +224,7 @@ async def create_task(data: dict[str, Any]) -> dict[str, Any]:
     requirement = requirement.strip() if isinstance(requirement, str) else ""
     if not requirement:
         raise RequestError(HTTP_400, "requirement is required")
+    check_requirement(requirement)
 
     project_id = data.get("project_id") or None  # "" counts as absent
     new_project = data.get("project")
@@ -357,6 +368,7 @@ async def edit_requirement(
     requirement = data.get("requirement")
     if not isinstance(requirement, str) or not requirement.strip():
         raise RequestError(HTTP_400, "requirement must be a non-empty string")
+    check_requirement(requirement)
     task = await db_tasks.get_task(task_id)
     if task is None:
         raise RequestError(HTTP_404, "task not found")

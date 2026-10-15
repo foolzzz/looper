@@ -561,6 +561,9 @@ ALTER TABLE projects ADD COLUMN IF NOT EXISTS review_policy TEXT CHECK (review_p
 -- Where a step that runs alongside others works: the task directory ('shared', also when NULL) or, in a git
 -- checkout, a worktree of its own merged back when it is accepted ('worktree').
 ALTER TABLE projects ADD COLUMN IF NOT EXISTS step_workspaces TEXT CHECK (step_workspaces IN ('shared', 'worktree'));
+-- How many times the Planner may retry one step (NULL: 2).
+ALTER TABLE projects ADD COLUMN IF NOT EXISTS max_step_retries INTEGER
+    CHECK (max_step_retries >= 0 AND max_step_retries <= 20);
 -- What a task that completes leaves in the project's knowledge, from one more
 -- Planner turn over the task journal: nothing ('off'), a draft the user
 -- confirms or discards on the project page ('draft'), or a document ('write').

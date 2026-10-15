@@ -1158,6 +1158,36 @@ class TestWorkerConcurrency:
         assert len(waits) == 1 and "2 running, limit 2" in waits[0]
         assert after == {"w2": "running", "w3": "running", "w4": "running", "r1": "running"}
 
+    # A task's Planner starts every ready step: its project's Worker limit alone decides how many run at once
+    # (16 when no layer sets one).
+    @pytest.mark.parametrize(("limit", "running"), [(None, 6), (6, 6), (3, 3)])
+    def test_one_tasks_six_parallel_steps_run_within_the_project_limit(
+        self, agent_db: Any, limit: int | None, running: int,
+    ) -> None:
+        self._projects(agent_db, {"t-a": "proj-a"})
+        if limit is not None:
+            self._limits(agent_db, worker=limit)
+        workers = [f"w{i}" for i in range(1, 7)]
+
+        async def _run() -> dict[str, str]:
+            with tempfile.TemporaryDirectory() as tmp:
+                bus = MessageBus(runtime_root=Path(tmp))
+                pool = WorkerPool(config=WorkerConfig(claude_bin=_fake_claude(Path(tmp), _LISTENING_CLAUDE)),
+                                  runtime_root=Path(tmp))
+                await pool.start(bus)
+                await asyncio.sleep(0)
+                for worker_id in workers:
+                    await bus.publish(_run_item(worker_id, "t-a", Path(tmp)))
+                await self._until_running(pool, *workers[:running])
+                await asyncio.sleep(0.2)  # time for a run over the limit to start, were it allowed
+                statuses = {w: wp.status for w, wp in pool._active.items()}
+                await pool.stop()
+                await bus.shutdown()
+                return statuses
+
+        statuses = asyncio.run(_run())
+        assert sorted(statuses.values()) == ["pending"] * (6 - running) + ["running"] * running
+
     def test_a_raised_limit_starts_a_waiting_run_and_a_lowered_one_stops_none(self, agent_db: Any) -> None:
         self._projects(agent_db, {"t-a": "proj-a"})
         self._limits(agent_db, worker=1)

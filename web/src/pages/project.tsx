@@ -257,6 +257,8 @@ function executionRows(project: Project): [string, string][] {
     ]);
   if (project.step_workspaces === "worktree")
     rows.push(["Steps at the same time", "A git worktree each, merged into the branch when accepted"]);
+  if (project.max_step_retries != null)
+    rows.push(["Retries per step", String(project.max_step_retries)]);
   if (project.distill_lessons !== "off")
     rows.push([
       "Lessons",

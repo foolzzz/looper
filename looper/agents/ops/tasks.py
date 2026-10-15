@@ -23,6 +23,7 @@ from ..agent_settings import resolve_concurrency
 from ..message import MANAGER_ADDRESS, TASK_ROUTER_ADDRESS, MessageEnvelope, MessageType, planner_address
 from ..project_execution import LessonsMode, ProjectExecution, ReviewPolicy, TaskBudgetAction, format_usd
 from ..projects import HTTP_404, HTTP_409, TASK_PROFILE_ROLES, RequestError, edit_requirement, project_name
+from ..system_prompt import TASK_REQUIREMENT_LIMIT
 from ..task_notice import notify_chat
 from ..tiers.journal import SUPPLEMENTS_MAX_CHARS, clip, kept_text
 from ..tiers.task import resolve_work_dir
@@ -502,7 +503,7 @@ TOOLS: tuple[Tool, ...] = (
         schema={
             "type": "object", "required": ["requirement", "title", "project"], "additionalProperties": False,
             "properties": {
-                "requirement": {"type": "string", "minLength": 1,
+                "requirement": {"type": "string", "minLength": 1, "maxLength": TASK_REQUIREMENT_LIMIT,
                                 "description": "The clear requirement, with what the user clarified."},
                 "title": {"type": "string", "minLength": 1,
                           "description": "A few words naming the task, in the user's language."},
@@ -550,7 +551,8 @@ TOOLS: tuple[Tool, ...] = (
             "type": "object", "required": ["task_id"], "additionalProperties": False,
             "properties": {
                 "task_id": _TASK_ID,
-                "requirement": {"type": "string", "minLength": 1, "description": "The whole new requirement."},
+                "requirement": {"type": "string", "minLength": 1, "maxLength": TASK_REQUIREMENT_LIMIT,
+                                "description": "The whole new requirement."},
                 "work_dir": {"type": "string", "minLength": 1, "description": "The new absolute directory."},
                 "profiles": _PROFILES_SCHEMA,
             },

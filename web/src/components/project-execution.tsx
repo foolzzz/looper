@@ -11,8 +11,9 @@ const FIELDS: (keyof ProjectExecution)[] = [
   "review_policy",
   "distill_lessons",
   "step_workspaces",
+  "max_step_retries",
 ];
-const NUMBERS = new Set<keyof ProjectExecution>(["task_budget_usd", "supervise_interval_seconds"]);
+const NUMBERS = new Set<keyof ProjectExecution>(["task_budget_usd", "supervise_interval_seconds", "max_step_retries"]);
 
 export function executionDraft(project: Project): ExecutionDraft {
   return Object.fromEntries(FIELDS.map((f) => [f, project[f] == null ? "" : String(project[f])])) as ExecutionDraft;
@@ -99,6 +100,16 @@ export function ProjectExecutionFields({
             value={draft.supervise_interval_seconds}
             onChange={set("supervise_interval_seconds")}
             placeholder="Inherit (0 = off)"
+          />
+        </div>
+        <div className="space-y-1">
+          {label("max_step_retries", "Retries per step")}
+          <Input
+            id={`${idPrefix}-max_step_retries`}
+            inputMode="numeric"
+            value={draft.max_step_retries}
+            onChange={set("max_step_retries")}
+            placeholder="Inherit: 2 (0–20)"
           />
         </div>
         <div className="space-y-1">

@@ -99,8 +99,6 @@ from ..message import (
 from . import journal
 from .journal import JournalEntry, JournalKind, LearningScope
 from .planner_protocol import (
-    MAX_RETRIES,
-    REPLY_CONTRACT,
     ChatAction,
     ChatReply,
     Decision,
@@ -120,6 +118,7 @@ from .planner_protocol import (
     parse_plan,
     parse_supervise,
     parse_wrap_up,
+    reply_contract,
 )
 
 logger = logging.getLogger(__name__)
@@ -131,7 +130,6 @@ from ...db import tasks as db_tasks
 from ...db.task_changes import TaskChanges
 from ...db.tasks import FailKind, update_task_phase
 
-MAX_CONCURRENT_WORKERS = 4
 # How long to wait for the worker pool to confirm a forwarded user turn.
 WORKER_INPUT_TIMEOUT = 5.0
 # A Planner turn's time limit without a readable ``planner`` config row.
@@ -724,8 +722,8 @@ class PlannerAgent:
         return ", ".join(parts)
 
     async def _dispatch_ready(self, plan: TaskPlan) -> None:
-        running = sum(1 for s in plan.steps if s.status == "dispatched")
-        ready = plan.ready_steps()[: max(0, MAX_CONCURRENT_WORKERS - running)]
+        # Every ready step starts; the worker pool runs them within its project's Worker limit.
+        ready = plan.ready_steps()
         base: _RoundBase | None = None
         if ready and self._execution.isolate_steps:
             ready, base = await self._plan_round(plan, ready)
@@ -890,7 +888,8 @@ class PlannerAgent:
         step.result = result
         await self._activity("error", result["error"][:500], worker=step.worker_id)
         context = DecisionContext(step=step.label, result=ResultKind.WORK, succeeded=False,
-                                  review_required=self._needs_review(step), retries=step.retries)
+                                  review_required=self._needs_review(step), retries=step.retries,
+                                  max_retries=self._execution.step_retries)
         await self._decide(plan, step, context, self._work_report(step, result))
 
     async def _merged(self, plan: TaskPlan, step: PlanStep) -> bool:
@@ -930,7 +929,8 @@ class PlannerAgent:
                        "branch": failed.branch}
         await self._activity("error", error[:500], worker=step.worker_id)
         context = DecisionContext(step=step.label, result=ResultKind.WORK, succeeded=False,
-                                  review_required=self._needs_review(step), retries=step.retries)
+                                  review_required=self._needs_review(step), retries=step.retries,
+                                  max_retries=self._execution.step_retries)
         await self._decide(plan, step, context, self._merge_report(step, failed, outcome.files))
 
     @staticmethod
@@ -1014,6 +1014,7 @@ class PlannerAgent:
         context = DecisionContext(
             step=step.label, result=ResultKind.WORK, succeeded=succeeded,
             review_required=self._needs_review(step), retries=step.retries,
+            max_retries=self._execution.step_retries,
         )
         await self._decide(plan, step, context, self._work_report(step, result))
 
@@ -1074,6 +1075,7 @@ class PlannerAgent:
         context = DecisionContext(
             step=step.label, result=ResultKind.REVIEW, succeeded=passed,
             review_required=self._needs_review(step), retries=step.retries,
+            max_retries=self._execution.step_retries,
         )
         await self._decide(plan, step, context, self._review_report(step, result))
 
@@ -1347,6 +1349,7 @@ class PlannerAgent:
         context = DecisionContext(
             step=step.label, result=kind, succeeded=passed,
             review_required=self._needs_review(step), retries=step.retries,
+            max_retries=self._execution.step_retries,
         )
         await self._decide(plan, step, context, report)
 
@@ -1651,6 +1654,7 @@ class PlannerAgent:
         context = DecisionContext(
             step=step.label, result=ResultKind.WORK, succeeded=False,
             review_required=self._needs_review(step), retries=step.retries,
+            max_retries=self._execution.step_retries,
         )
         await self._decide(plan, step, context, self._work_report(step, result))
 
@@ -2015,7 +2019,7 @@ class PlannerAgent:
                 project_description=_clip(plan.project_description, 300), work_dir=plan.work_dir,
             ),
             contract_name="REPLY_CONTRACT",
-            contract=REPLY_CONTRACT,
+            contract=reply_contract(self._execution.step_retries),
             knowledge=knowledge,
         )
 
@@ -2127,7 +2131,7 @@ class PlannerAgent:
         allowed = []
         for decision in context.allowed():
             if decision is Decision.RETRY:
-                allowed.append(f"retry ({MAX_RETRIES - context.retries} left)")
+                allowed.append(f"retry ({context.max_retries - context.retries} left)")
             else:
                 allowed.append(decision.value)
         lines = [

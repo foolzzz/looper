@@ -34,7 +34,7 @@
 | 提交 | `WORK_CONTRACT` 写着「其他步骤可能同时在这个目录里工作：提交时只 `git add <自己的路径>`，不用 `git add -A`」（#104）；Worker 是否提交由步骤说明决定，提交就落在用户检出的分支上 |
 | Reviewer | `_spawn_reviewer` 同样带 `context.work_dir = plan.work_dir`，在整个任务目录里验收；`REVIEW_CONTRACT` 要求它不改动成果 |
 | 依赖 | 依赖它的步骤只在所依赖的步骤 `verified` 之后才就绪（`ready_steps`），它的 Worker 拿到所依赖步骤的报告摘要 |
-| 并发 | `_dispatch_ready` 一次派出至多 `MAX_CONCURRENT_WORKERS - running` 个就绪步骤；任务级之外还有项目级的 Worker 上限 |
+| 并发 | `_dispatch_ready` 一次派出全部就绪步骤，同时运行多少个只由项目级的 Worker 上限决定（原有每个任务最多 4 个的上限，2026-10-15 取消） |
 | 重启 | `_resume`：正在跑的步骤用同一次尝试重跑，评审中的换新 Reviewer，被打断的决策重做。任务重启分两种：重新规划（删掉步骤和计划）和从计划续跑（保留） |
 
 全程没有任何 git 操作：Looper 不知道任务目录是不是仓库。

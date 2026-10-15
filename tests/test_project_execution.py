@@ -101,6 +101,10 @@ class TestProjectApi:
         ("supervise_interval_seconds", 86_401, "86400"),
         ("distill_lessons", "sometimes", "off, draft, write"),
         ("step_workspaces", "per-step", "shared, worktree"),
+        ("max_step_retries", -1, "from 0 to 20"),
+        ("max_step_retries", 21, "from 0 to 20"),
+        ("max_step_retries", "3", "whole number"),
+        ("max_step_retries", True, "whole number"),
     ])
     def test_an_invalid_setting_is_refused(self, store: _Store, field: str, value: Any, says: str) -> None:
         store.add_project("proj-a", "calc")
@@ -116,6 +120,15 @@ class TestProjectApi:
         store.add_project("proj-a", "calc")
         status, body = _call("PUT", "/api/projects/proj-a", {"distill_lessons": value})
         assert status == 200 and body["distill_lessons"] == mode == store.projects["proj-a"]["distill_lessons"]
+
+    @pytest.mark.parametrize(("value", "retries"), [(None, 2), (0, 0), (5, 5), (20, 20)])
+    def test_retries_per_step_are_two_unless_a_project_sets_them(
+        self, store: _Store, value: int | None, retries: int,
+    ) -> None:
+        store.add_project("proj-a", "calc")
+        status, body = _call("PUT", "/api/projects/proj-a", {"max_step_retries": value})
+        assert status == 200 and body["max_step_retries"] == value
+        assert ProjectExecution.from_row(store.projects["proj-a"]).step_retries == retries
 
     def test_step_workspaces_are_off_until_a_project_turns_them_on(self, store: _Store) -> None:
         store.add_project("proj-a", "calc")
