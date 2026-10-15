@@ -159,7 +159,7 @@ function Agents({ agents }: { agents: Overview["agents"] }) {
               className={cn("block truncate text-xs text-muted-foreground", linkClass)}
             >
               {p.project_name ? `${p.project_name}: ` : ""}
-              {p.requirement.split("\n")[0]}
+              {p.name || p.requirement.split("\n")[0]}
             </a>
           ))}
         </AgentRow>

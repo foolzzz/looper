@@ -25,6 +25,8 @@ export const READY_LABEL = "Ready — not started";
 export interface TaskInfo {
   task_id: string;
   requirement: string;
+  /** What the task is called: its title, else its goal id, else its requirement's first line (server-side). */
+  name: string;
   goal_id: string;
   status: string;
   /** The status's group, from the server's one mapping. */
@@ -149,6 +151,8 @@ export interface LivePlanner {
   project_id: string | null;
   project_name: string | null;
   requirement: string;
+  /** What the task is called (see TaskInfo.name). */
+  name: string;
 }
 
 /** A Worker or Reviewer run now, running or waiting for room under its project's limit. */
@@ -268,6 +272,8 @@ export interface ChatTargetInfo {
   task_id?: string;
   /** Planner: the task's requirement. */
   requirement?: string;
+  /** Planner: what the task is called (see TaskInfo.name). */
+  name?: string;
   /** Planner: the task's status; Worker/Reviewer: its latest run's status. */
   status?: string;
   /** Worker/Reviewer: the step it ran (0-based), when known. */
