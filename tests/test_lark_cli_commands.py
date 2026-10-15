@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -17,7 +18,7 @@ from looper.agents.channels import lark_cli, lark_settings
 from looper.agents.channels.allowlist import SenderAllowlist
 from looper.agents.channels.lark import LarkChannelAdapter
 from looper.agents.channels.lark_cli import (
-    LarkCliError, bot_info_command, consume_command, search_command, send_command, whoami_command,
+    LarkCliError, bot_info_command, consume_command, reaction_command, search_command, send_command, whoami_command,
 )
 from looper.agents.message import MessageEnvelope, MessageType, channel_address
 
@@ -96,6 +97,7 @@ def test_direct_messages_reach_the_manager_and_group_ones_do_not(tmp_path: Path,
         await asyncio.wait_for(adapter._run_event_consumer(), timeout=10)  # the stand-in prints two events, exits
         queue = bus.get_queue("manager")
         messages = [queue.get_nowait() for _ in range(queue.qsize())]
+        await asyncio.wait_for(asyncio.gather(*adapter._reactions._pending), timeout=10)
         await bus.shutdown()
         return messages, dict(adapter._correlation_chat)
 
@@ -104,7 +106,8 @@ def test_direct_messages_reach_the_manager_and_group_ones_do_not(tmp_path: Path,
     assert message.payload["text"] == "status please"
     assert message.payload["channel_context"] == {"chat_id": "oc_dm", "sender_id": OPEN_ID, "message_id": "om_9"}
     assert conversations == {message.correlation_id: "oc_dm"}
-    assert _calls(lark_cli_stand_in) == [consume_command()[1:]]
+    # The direct message got the bot's reaction; the group message nothing.
+    assert _calls(lark_cli_stand_in) == [consume_command()[1:], reaction_command("om_9")[1:]]
 
 
 def test_a_consumer_that_stops_is_started_again_after_a_pause(tmp_path: Path, lark_cli_stand_in: Path,
@@ -125,10 +128,12 @@ def test_a_consumer_that_stops_is_started_again_after_a_pause(tmp_path: Path, la
 
         monkeypatch.setattr(asyncio, "sleep", pause)
         await asyncio.wait_for(adapter._event_collector_loop(), timeout=10)
+        await adapter.stop()  # with the reactions to the messages it got still running
         await adapter._bus.shutdown()
 
     asyncio.run(main())
-    assert pauses == [10, 10] and len(_calls(lark_cli_stand_in)) == 2  # not a tight loop of lark-cli processes
+    consumers = [c for c in _calls(lark_cli_stand_in) if c[:2] == ["event", "consume"]]
+    assert pauses == [10, 10] and len(consumers) == 2  # not a tight loop of lark-cli processes
 
 
 # --- The bot, and why the channel would not start ---
@@ -212,3 +217,23 @@ def test_without_lark_cli_the_check_says_so(monkeypatch: pytest.MonkeyPatch, tmp
     with pytest.raises(LarkCliError):
         asyncio.run(lark_cli.search_people("ada"))
     lark_cli.forget()
+
+
+def test_a_cancelled_call_leaves_no_lark_cli_behind(tmp_path: Path) -> None:
+    from fake_claude import fake_claude
+
+    pid_file = tmp_path / "pid"
+    slow = tmp_path / "lark-cli"
+    fake_claude(slow, f"import os, time\nopen({str(pid_file)!r}, 'w').write(str(os.getpid()))\ntime.sleep(60)\n")
+
+    async def main() -> None:
+        call = asyncio.ensure_future(lark_cli.run([str(slow)]))
+        while not pid_file.exists() or not pid_file.read_text():
+            await asyncio.sleep(0.02)
+        call.cancel()  # what the channel's stop() does to a reaction call still running
+        with pytest.raises(asyncio.CancelledError):
+            await call
+
+    asyncio.run(asyncio.wait_for(main(), timeout=20))
+    with pytest.raises(ProcessLookupError):
+        os.kill(int(pid_file.read_text()), 0)
