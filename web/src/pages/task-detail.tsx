@@ -298,9 +298,6 @@ function parseConfig(text: string): Record<string, unknown> | null {
   }
 }
 
-/** The statuses a task's requirement can be edited in once it has started (one not started edits it above). */
-const EDITABLE_STATUSES = ["pending", "assigned", "running", "executing"];
-
 /** How a change came, in words. */
 function viaLabel(via: string): string {
   if (via === "chat") return "Chat";
@@ -313,7 +310,8 @@ function viaLabel(via: string): string {
 /** A started task's requirement: the current text, its earlier versions, and an edit its Planner gets in a turn. */
 function TaskRequirement({ task }: { task: TaskDetail }) {
   const versions = task.requirement_versions ?? [];
-  const editable = EDITABLE_STATUSES.includes(task.status);
+  // Queued or running, whatever its Planner is doing; one not started edits it above.
+  const editable = isActiveTask(task);
   const [editing, setEditing] = useState(false);
   const [text, setText] = useState(task.requirement);
   const [saving, setSaving] = useState(false);
