@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any
 
 from . import (
-    agent_settings, catalog, catalog_sources, config_imports, config_transfer, knowledge, library, mcp,
+    agent_settings, catalog, catalog_sources, config_imports, config_transfer, knowledge, library, mcp, overview,
     profile_registry, project_skills, projects, request_guard, self_check,
 )
 from .broadcast import Broadcaster
@@ -27,6 +27,7 @@ from .chat_targets import ChatTargetError, list_chat_targets, resolve_chat_targe
 from .project_execution import ProjectExecution
 from .channels.web import WebChannelAdapter
 from .supervisor import AgentSupervisor
+from .tiers.manager import ManagerAgent
 from .tiers.task import TaskRouter
 from .tiers.worker import WorkerPool
 
@@ -103,6 +104,7 @@ class AgentHTTPServer:
         task_router: TaskRouter,
         supervisor: AgentSupervisor,
         worker_pool: WorkerPool | None = None,
+        manager: ManagerAgent | None = None,
         broadcaster: Broadcaster | None = None,
         static_dir: Path | None = None,
         runtime_root: Path | None = None,
@@ -115,6 +117,8 @@ class AgentHTTPServer:
         self._task_router = task_router
         # Told, with the TaskRouter, to start what a raised concurrency limit lets start.
         self._worker_pool = worker_pool
+        # Whether it is in a turn, for the overview.
+        self._manager = manager
         self._supervisor = supervisor
         self._broadcaster = broadcaster or Broadcaster()
         self._static_dir = static_dir or default_static_dir()
@@ -300,6 +304,8 @@ class AgentHTTPServer:
     ) -> None:
         if path == "/api/status" and method == "GET":
             await self._handle_status(writer)
+        elif path == "/api/overview" and method == "GET":
+            await self._handle_overview(writer)
         elif path == "/api/tasks" and method == "GET":
             await self._handle_list_tasks(query, writer)
         elif path == "/api/chat/send" and method == "POST":
@@ -530,19 +536,20 @@ class AgentHTTPServer:
         agents = self._supervisor.agent_status()
         web_health = self._web_adapter.healthcheck()
         try:
-            from ..db.tasks import list_tasks as db_list_tasks
-            tasks = await db_list_tasks(limit=200)
+            from ..db.tasks import status_counts
+            counts = overview.group_counts(await status_counts())
         except Exception:
             logger.exception("DB unavailable for status task counts")
-            tasks = []
+            counts = overview.group_counts([])
         status = {
             "status": "running",
             "agents": agents,
+            # Every task counted; "running" is every task in progress, "pending" the queued ones.
             "tasks": {
-                "total": len(tasks),
-                "running": sum(1 for t in tasks if t.get("status") == "running"),
-                "pending": sum(1 for t in tasks if t.get("status") == "pending"),
-                "completed": sum(1 for t in tasks if t.get("status") == "completed"),
+                "total": counts["total"],
+                "running": counts["in_progress"],
+                "pending": counts["queued"],
+                "completed": counts["completed"],
             },
             "channels": {"web": web_health},
             "checks": await self._checks_now(),
@@ -550,11 +557,31 @@ class AgentHTTPServer:
         writer.write(_json_response(HTTP_200, status))
         await writer.drain()
 
+    async def _handle_overview(self, writer: asyncio.StreamWriter) -> None:
+        try:
+            result = await overview.build_overview(task_router=self._task_router, worker_pool=self._worker_pool,
+                                                   manager=self._manager, supervisor=self._supervisor)
+        except Exception:
+            logger.exception("DB unavailable for the overview")
+            writer.write(_json_response(HTTP_500, {"error": "database unavailable"}))
+            await writer.drain()
+            return
+        writer.write(_json_response(HTTP_200, _serialize(result)))
+        await writer.drain()
+
     async def _handle_list_tasks(self, query: dict[str, str], writer: asyncio.StreamWriter) -> None:
+        from ..db.tasks import TaskGroup
+        try:
+            group = TaskGroup(query["group"]) if query.get("group") else None
+        except ValueError:
+            groups = ", ".join(g.value for g in TaskGroup)
+            writer.write(_json_response(HTTP_400, {"error": f"group must be one of {groups}"}))
+            await writer.drain()
+            return
         try:
             from ..db.llm_records import task_costs
             from ..db.tasks import list_tasks as db_list_tasks
-            tasks = await db_list_tasks(limit=50, project_id=query.get("project_id") or None)
+            tasks = await db_list_tasks(limit=50, project_id=query.get("project_id") or None, group=group)
             costs = await task_costs([t["id"] for t in tasks])
             result = []
             for t in tasks:

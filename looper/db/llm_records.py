@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime
 from typing import Any
 
 import asyncpg
@@ -298,6 +299,31 @@ async def task_costs(
         cost["cost_usd"] += row["cost_usd"]
         cost["by_role"][row["role"]] = {"cost_usd": row["cost_usd"], "runs": row["runs"]}
     return costs
+
+
+async def spend_since(since: datetime, *, pool: asyncpg.Pool | None = None) -> dict[str, Any]:
+    """What every agent's runs started at or after ``since`` cost, the Manager's included, split by basis.
+
+    ``provider_priced_usd`` is money: runs with an API key, at their
+    provider's prices (Claude Code's figure for Anthropic's API, Looper's for
+    any other). ``equivalent_usd`` is not: a runtime's own login (a
+    subscription) at API prices (``EQUIVALENT``). ``runs`` counts every run,
+    ``running`` those still going, ``unpriced_runs`` the finished ones without
+    a cost.
+    """
+    pool = pool or get_pool()
+    row = await pool.fetchrow(
+        f"""
+        SELECT count(*) AS runs,
+               count(*) FILTER (WHERE status = 'running') AS running,
+               count(*) FILTER (WHERE status <> 'running' AND cost_usd IS NULL) AS unpriced_runs,
+               COALESCE(sum(cost_usd) FILTER (WHERE NOT {EQUIVALENT}), 0) AS provider_priced_usd,
+               COALESCE(sum(cost_usd) FILTER (WHERE {EQUIVALENT}), 0) AS equivalent_usd
+        FROM llm_records WHERE created_at >= $1
+        """,
+        since,
+    )
+    return dict(row)
 
 
 async def agent_usage(

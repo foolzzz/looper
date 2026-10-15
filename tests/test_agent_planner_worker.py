@@ -1119,7 +1119,7 @@ class TestWorkerConcurrency:
         self._projects(agent_db, {"t-a": "proj-a", "t-a2": "proj-a", "t-b": "proj-b"})
         self._limits(agent_db, worker=2, reviewer=1)
 
-        async def _run() -> tuple[dict[str, str], list[str], dict[str, str]]:
+        async def _run() -> tuple[dict[str, str], list[str], dict[str, str], dict[str, tuple[Any, ...]]]:
             with tempfile.TemporaryDirectory() as tmp:
                 bus = MessageBus(runtime_root=Path(tmp))
                 pool = WorkerPool(config=WorkerConfig(claude_bin=_fake_claude(Path(tmp), _LISTENING_CLAUDE)),
@@ -1132,6 +1132,9 @@ class TestWorkerConcurrency:
                 await bus.publish(_run_item("r1", "t-a", Path(tmp), review=True))
                 await self._until_running(pool, "w1", "w2", "w4", "r1")
                 before = {w: wp.status for w, wp in pool._active.items()}
+                # What the dashboard shows of them.
+                runs = {r["agent_id"]: (r["role"], r["state"], r["task_id"], r["project_id"], r["instruction"])
+                        for r in pool.runs()}
                 waits = [c.kwargs["summary"] for c in agent_db.insert_activity.await_args_list
                          if "waits for room" in c.kwargs["summary"]]
 
@@ -1140,10 +1143,16 @@ class TestWorkerConcurrency:
                 after = {w: wp.status for w, wp in pool._active.items()}
                 await pool.stop()
                 await bus.shutdown()
-                return before, waits, after
+                return before, waits, after, runs
 
-        before, waits, after = asyncio.run(_run())
+        before, waits, after, runs = asyncio.run(_run())
         assert before == {"w1": "running", "w2": "running", "w3": "pending", "w4": "running", "r1": "running"}
+        parser = "add the parser"
+        assert runs == {"w1": ("worker", "running", "t-a", "proj-a", parser),
+                        "w2": ("worker", "running", "t-a2", "proj-a", parser),
+                        "w3": ("worker", "waiting", "t-a", "proj-a", parser),
+                        "w4": ("worker", "running", "t-b", "proj-b", parser),
+                        "r1": ("reviewer", "running", "t-a", "proj-a", parser)}
         # The task's activity says why the step has not started, once.
         assert len(waits) == 1 and "2 running, limit 2" in waits[0]
         assert after == {"w2": "running", "w3": "running", "w4": "running", "r1": "running"}
