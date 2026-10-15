@@ -29,6 +29,7 @@ from .project_execution import ProjectExecution
 from .channels.web import WebChannelAdapter
 from .scheduler import Scheduler
 from .supervisor import AgentSupervisor
+from .tiers.journal import progress_notes
 from .tiers.manager import ManagerAgent
 from .tiers.task import TaskRouter
 from .tiers.worker import WorkerPool
@@ -1077,6 +1078,8 @@ class AgentHTTPServer:
             "steps": raw.get("steps", []),
             # The task journal, oldest first: an entry per accepted step with its summary and learnings.
             "journal": raw.get("journal", []),
+            # The Planner's progress notes (journal kind progress), newest first: done, now, next, risks, estimate, at.
+            "progress": progress_notes(raw.get("journal", [])),
             # What the task's Planner, Workers and Reviewers spent: the total, by role, and the run count.
             "cost": cost,
         }

@@ -25,6 +25,7 @@ from looper.agents.tiers.worker import WorkerConfig, WorkerPool
 from looper.db import llm_records as db_llm_records
 from tests.test_agent_planner_worker import _fake_claude, _flag, _run_step, _step_envelope, _worker_row
 from tests.test_planner_agent import (
+    FINAL_RESULT,
     REVIEW_PASS,
     WORK_OK,
     Harness,
@@ -254,7 +255,9 @@ class TestPlanner:
         final = h.final()
         assert final is not None and final.payload["status"] == "failed"
         reason = "Task spend cap reached: $0.5 spent of the $0.4 cap (task_budget_usd)"
-        assert final.payload["summary"] == f"任务失败:\n{reason}{wrap_up}"
+        # The closing note: why the task ended, what its steps delivered and what is not done.
+        assert final.payload["summary"] == (f"## Why it ended\n{reason}{wrap_up}\n\n## Done\n- s1: did it\n\n"
+                                            "## Not done\n- s2 (not started)")
         assert final.payload["fail_kind"] == "task_budget"
         assert [w.payload["step_key"] for w in h.work_items] == ["s1"]  # s2 never started
         assert len(claude.turns()) == turns
@@ -289,7 +292,7 @@ class TestPlanner:
                          "project_id": "proj-1", "resume": True},
             ))
             final = await h.finished()
-            assert final.payload["status"] == "completed" and final.payload["summary"] == "done"
+            assert final.payload["status"] == "completed" and final.payload["summary"] == FINAL_RESULT
 
         h = drive(claude, hold_first(), scenario)
         assert [w.payload["step_key"] for w in h.work_items] == ["s1", "s2", "s1"]

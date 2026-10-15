@@ -5,6 +5,11 @@ and Claude ends its reply with exactly one fenced JSON object in that shape.
 This module owns the shapes as typed values, validates a reply strictly
 against the plan it applies to, and holds the contract text that code
 appends to the editable system prompt.
+
+A DECISION or SUPERVISE reply may carry a progress note (``ProgressNote``),
+which code keeps in the task journal for the task page; the decision that
+completes a task must carry its final summary (``FinalSummary``), which
+becomes the task's result.
 """
 
 from __future__ import annotations
@@ -12,7 +17,7 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from enum import Enum
 from typing import Any
 
@@ -20,6 +25,14 @@ from .journal import HANDOFF_MAX_CHARS, LESSONS_MAX_CHARS, kept_text
 
 MAX_STEPS = 8
 MAX_RETRIES = 2  # per step
+# A progress note's fields and a final summary's, in the order they are shown, and what each keeps of a field.
+PROGRESS_FIELDS = ("done", "now", "next", "risks", "estimate")
+PROGRESS_FIELD_MAX_CHARS = 500
+FINAL_FIELDS = ("delivered", "how_to_use", "verification", "open_issues")
+FINAL_FIELD_MAX_CHARS = 4_000
+# How a final summary shows each field: one heading each, in the task's result.
+FINAL_HEADINGS = {"delivered": "Delivered", "how_to_use": "How to use", "verification": "Verification",
+                  "open_issues": "Open issues"}
 
 _STEP_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,31}")
 # A ```json fence opening a line. JSON strings cannot hold a raw newline, so a
@@ -88,12 +101,54 @@ class PlanReply:
 
 
 @dataclass(frozen=True)
+class ProgressNote:
+    """Where the task stands, as a DECISION or SUPERVISE reply says it: each field a short text."""
+
+    done: str  # what the task has delivered so far
+    now: str  # what runs now
+    next: str  # what comes after
+    risks: str  # what may delay or break it
+    estimate: str  # how much longer, roughly
+
+    def to_json(self) -> str:
+        """The note as its journal entry keeps it."""
+        return json.dumps(asdict(self), ensure_ascii=False)
+
+    @classmethod
+    def from_json(cls, text: str) -> ProgressNote | None:
+        """The note a journal entry keeps; None for an entry that does not hold one."""
+        try:
+            value = json.loads(text)
+        except ValueError:
+            return None
+        if not isinstance(value, dict) or not all(isinstance(value.get(name), str) for name in PROGRESS_FIELDS):
+            return None
+        return cls(**{name: value[name] for name in PROGRESS_FIELDS})
+
+
+@dataclass(frozen=True)
+class FinalSummary:
+    """A completed task's summary for the user, as the decision that completes it says it."""
+
+    delivered: str  # what the task delivered
+    how_to_use: str  # how to use it
+    verification: str  # the evidence that it works
+    open_issues: str  # what is left open; "none" when nothing
+
+    def markdown(self) -> str:
+        """The summary as the task's result: one heading per field (``FINAL_HEADINGS``)."""
+        return "\n\n".join(f"## {FINAL_HEADINGS[name]}\n{getattr(self, name)}" for name in FINAL_FIELDS)
+
+
+@dataclass(frozen=True)
 class DecisionReply:
     decision: Decision
     reason: str
     feedback: str  # retry only
     steps: tuple[StepSpec, ...]  # replan only
     summary: str
+    progress: ProgressNote | None = None
+    final: FinalSummary | None = None  # only on the decision that completes the task
 
 
 @dataclass(frozen=True)
@@ -118,6 +173,7 @@ class SuperviseReview:
 @dataclass(frozen=True)
 class SuperviseReply:
     reviews: tuple[SuperviseReview, ...]
+    progress: ProgressNote | None = None
 
 
 @dataclass(frozen=True)
@@ -152,6 +208,8 @@ class DecisionContext:
     succeeded: bool  # the Worker reported completed / the Reviewer passed
     review_required: bool  # the step needs a passing review before it is accepted
     retries: int
+    # No other step is open: accepting this one, or a replan with no new steps, completes the task.
+    last_open: bool = False
 
     @property
     def acceptable(self) -> bool:
@@ -209,7 +267,7 @@ def parse_plan(text: str) -> PlanReply:
 
 def parse_decision(text: str, context: DecisionContext, plan: PlanView) -> DecisionReply:
     data = extract_reply(text)
-    _only_keys(data, {"decision", "reason", "feedback", "steps", "summary"}, "the DECISION reply")
+    _only_keys(data, {"decision", "reason", "feedback", "steps", "summary", "progress", "final"}, "the DECISION reply")
     raw = data.get("decision")
     try:
         decision = Decision(raw)
@@ -238,13 +296,21 @@ def parse_decision(text: str, context: DecisionContext, plan: PlanView) -> Decis
                 f"step {context.step} cannot be accepted, so a replan must list the steps that replace it"
             )
         _check_new_steps(steps, plan if context.acceptable else plan.dropping(context.step), replace_pending=True)
-    return DecisionReply(decision, reason, feedback, steps, summary)
+    progress = _progress(data)
+    final = FinalSummary(**_fields(data["final"], FINAL_FIELDS, "final", FINAL_FIELD_MAX_CHARS)) \
+        if "final" in data else None
+    completes = context.last_open and (decision is Decision.ACCEPT or (decision is Decision.REPLAN and not steps))
+    if completes and final is None:
+        raise ProtocolError('this decision completes the task, so it must carry "final": '
+                            + ", ".join(FINAL_FIELDS))
+    # Only the decision that completes the task keeps a final summary.
+    return DecisionReply(decision, reason, feedback, steps, summary, progress, final if completes else None)
 
 
 def parse_wrap_up(text: str) -> str:
     """The reason of a DECISION reply that may only fail the task (it reached its spend cap)."""
     data = extract_reply(text)
-    _only_keys(data, {"decision", "reason"}, "the DECISION reply")
+    _only_keys(data, {"decision", "reason", "progress"}, "the DECISION reply")
     if data.get("decision") != Decision.FAIL.value:
         raise ProtocolError(f"the only decision allowed now is fail; got {data.get('decision')!r}")
     return _required_text(data, "reason")
@@ -305,7 +371,7 @@ def parse_supervise(text: str, running: frozenset[str]) -> SuperviseReply:
     everything running).
     """
     data = extract_reply(text)
-    _only_keys(data, {"reviews"}, "the SUPERVISE reply")
+    _only_keys(data, {"reviews", "progress"}, "the SUPERVISE reply")
     raw = data.get("reviews")
     if not isinstance(raw, list):
         raise ProtocolError("reviews must be a list")
@@ -340,7 +406,26 @@ def parse_supervise(text: str, running: frozenset[str]) -> SuperviseReply:
         elif action is SuperviseAction.KILL:
             reason = _required_text(item, "reason")
         reviews.append(SuperviseReview(step, action, text_out, reason))
-    return SuperviseReply(tuple(reviews))
+    return SuperviseReply(tuple(reviews), _progress(data))
+
+
+def _fields(value: Any, names: tuple[str, ...], where: str, limit: int) -> dict[str, str]:
+    """``value``, an object with exactly ``names``, each a non-empty string, kept up to ``limit`` characters."""
+    if not isinstance(value, dict):
+        raise ProtocolError(f"{where} must be an object with {', '.join(names)}")
+    _only_keys(value, names, where)
+    missing = [name for name in names if not (isinstance(value.get(name), str) and value[name].strip())]
+    if missing:
+        raise ProtocolError(f"{where} needs {', '.join(missing)}: each a non-empty string (\"none\" when there is "
+                            "nothing to say)")
+    return {name: kept_text(value[name], limit) for name in names}
+
+
+def _progress(data: Mapping[str, Any]) -> ProgressNote | None:
+    """A reply's progress note; None without one."""
+    if "progress" not in data:
+        return None
+    return ProgressNote(**_fields(data["progress"], PROGRESS_FIELDS, "progress", PROGRESS_FIELD_MAX_CHARS))
 
 
 def _refusal(decision: Decision, context: DecisionContext) -> str:
@@ -497,11 +582,9 @@ the project has one.
 [DECISION]: decide what happens to a step after its Worker's or Reviewer's
 result. The message lists the decisions allowed now.
 ```json
-{{"decision": "accept", "reason": "...", "summary": "..."}}
+{{"decision": "accept", "reason": "...", "summary": "...", "progress": {{"done": "...", "now": "...", "next": "...", "risks": "...", "estimate": "..."}}}}
 ```
-- accept: the step is done. summary: what it delivered; when this accept
-  finishes the task (every other step is done), summarize the whole task for
-  the user.
+- accept: the step is done. summary: what it delivered.
 - review: an independent Reviewer checks the step's work; the step then needs
   a passing review before it can be accepted, also after a retry.
 - retry: the step runs again in a new Worker; add "feedback" (required): what
@@ -512,6 +595,18 @@ result. The message lists the decisions allowed now.
   only when the current step can be accepted.
 - fail: the task cannot be done; "reason" (required) says why.
 "reason" is optional for the other decisions.
+- progress (in every DECISION and SUPERVISE reply): where the task stands, for
+  the user's task page, each field a short text ("none" when there is
+  nothing): done (delivered so far), now (running now), next (what comes
+  after), risks (what may delay or break it), estimate (how much longer,
+  roughly).
+- final (required when the message says the step is the task's last open
+  one and your decision completes the task: an accept, or a replan with no
+  new steps): the task's final summary for the user, each field a non-empty
+  text: {{"delivered": "...", "how_to_use": "...", "verification": "...",
+  "open_issues": "..."}}: what the task delivered, how to use it, the evidence
+  that it works (commands run and what they showed), and what is left open
+  ("none" when nothing).
 
 [CHAT]: answer a message from the user about the task.
 ```json
@@ -527,7 +622,7 @@ result. The message lists the decisions allowed now.
 The message lists each running step and its recent activity. Review only the
 ones that need it; leaving a step out is the same as "leave".
 ```json
-{{"reviews": [{{"step": "s1", "action": "leave"}}]}}
+{{"reviews": [{{"step": "s1", "action": "leave"}}], "progress": {{"done": "...", "now": "...", "next": "...", "risks": "...", "estimate": "..."}}}}
 ```
 - leave: let the step keep running (the default; omit the step instead).
 - nudge: pass "text" (required) to the step's Worker as its next turn, to
