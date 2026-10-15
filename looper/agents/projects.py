@@ -105,6 +105,7 @@ def project_view(row: dict[str, Any]) -> dict[str, Any]:
         "updated_at": row["updated_at"],
         "task_count": row.get("task_count", 0),
         "active_count": row.get("active_count", 0),
+        "schedule_count": row.get("schedule_count", 0),
     }
 
 
@@ -180,9 +181,12 @@ async def delete_project(project_id: str) -> dict[str, Any]:
     )
     if project["task_count"]:
         raise still_used
+    if count := project.get("schedule_count"):
+        raise RequestError(HTTP_409, f"project {project['name']!r} still has {count} "
+                                     f"schedule{'s' if count != 1 else ''}; delete them first")
     try:
         await db_projects.delete_project(project_id)
-    except asyncpg.ForeignKeyViolationError:  # a task was added meanwhile
+    except asyncpg.ForeignKeyViolationError:  # a task or a schedule was added meanwhile
         raise still_used from None
     return {"deleted": project_id}
 
@@ -314,11 +318,13 @@ async def start_ready_task(task_id: str, bus: MessageBus, source: AgentAddress) 
 
 
 async def raise_cap_to_continue(task_id: str, data: dict[str, Any]) -> dict[str, Any]:
-    """Raise the project's task spend cap so a task that failed at it can continue; the caller restarts it.
+    """Raise the task's spend cap so a task that failed at it can continue; the caller restarts it.
 
     Only a task that failed at its cap qualifies, and the new ``task_budget_usd``
     must be above what the task has spent, or it would stop again at once.
-    The cap is the project's, so it applies to its other tasks too.
+    The cap is the project's, so it applies to its other tasks too, unless the
+    task has its own (a scheduled run's ``run_budget_usd``): then only that one
+    is raised.
     """
     task = await db_tasks.get_task(task_id)
     if task is None:
@@ -336,6 +342,8 @@ async def raise_cap_to_continue(task_id: str, data: dict[str, Any]) -> dict[str,
     if cap <= spent:
         raise RequestError(HTTP_400, f"task_budget_usd must be above the ${format_usd(spent)} the task has "
                                      f"spent; got {format_usd(cap)}")
-    if not await db_projects.update_project(task["project_id"], execution={"task_budget_usd": cap}):
+    if task.get("budget_usd") is not None:
+        await db_tasks.set_task_budget(task_id, cap)
+    elif not await db_projects.update_project(task["project_id"], execution={"task_budget_usd": cap}):
         raise RequestError(HTTP_404, f"project {task['project_id']!r} not found")
     return {"task_id": task_id, "project_id": task["project_id"], "task_budget_usd": cap, "spent_usd": spent}

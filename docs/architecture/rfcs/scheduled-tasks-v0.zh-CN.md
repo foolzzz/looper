@@ -1,6 +1,6 @@
 # RFC：项目里的定时任务（v0）
 
-- **状态：** 方向已定（第 4 节决策 D1–D4 由维护者在 2026-10-15 拍板），其余为设计提案；待决问题见第 12 节。
+- **状态：** 方向已定（第 4 节决策 D1–D4 由维护者在 2026-10-15 拍板），其余为设计提案；待决问题见第 12 节。S1 已交付（looper #98），与本文的出入记在第 13 节。
 - **开发计划：** [长程 Agent 上下文体系开发计划](../../plans/2026-10-13-long-horizon-agent-context.zh-CN.md) 第 5.0 节的定时任务各项（S1–S3）。
 - **最近更新：** 2026-10-15（新增第 3 节「边界」）
 
@@ -103,7 +103,8 @@ schedules
   daily_budget_usd    这个定时任务每天的花费上限，可空（S2）
   notify              'failures' | 'always' | 'never'，默认 'failures'（S2）
   notify_target       渠道和会话；为空时发到创建它的渠道会话（S2）
-  profile_overrides   按角色的代理配置覆盖，写进每次建出的任务
+  profile_overrides   按角色的代理配置覆盖，写进每次建出的任务（存为表 schedule_profile_overrides，
+                      外键指向 agent_profiles：定时任务选中的 Profile 不能删除）
   enabled             新建时为 false，由用户启用
   next_fire_at, last_fired_at, last_success_at, consecutive_failures
   created_via         'dashboard' | 'manager'
@@ -112,13 +113,16 @@ schedule_runs
   id, schedule_id, scheduled_for（应触发的时刻）, fired_at
   trigger             'scheduled' | 'catch_up' | 'manual'
   missed              这次补跑前漏掉的触发次数
-  status              'skipped_overlap' | 'skipped_gate' | 'skipped_budget' | 'gate_failed'
-                      | 'running' | 'completed' | 'failed' | 'timed_out' | 'stopped'
+  status              'queued'（排队等上一次的任务结束）| 'running'
+                      | 'completed' | 'failed' | 'stopped' | 'cancelled' | 'timed_out'
+                      | 'skipped_overlap' | 'skipped_missed'（补跑策略为跳过时错过的触发）
+                      | 'skipped_gate' | 'skipped_budget' | 'gate_failed'（S2）
   task_id             → tasks，可空（跳过时没有任务）
   gate_output         截断保存（S2）
   summary, cost_usd, error, finished_at
 
-tasks.schedule_id     可空，任务列表据此显示「定时」标记
+tasks.schedule_id     可空，任务列表据此显示「定时」标记；定时任务删除后置空
+tasks.budget_usd      任务自己的花费上限，覆盖项目的单任务上限（触发时从 run_budget_usd 复制）
 ```
 
 状态只在一处推进：`schedule_runs` 的终态由任务结束时的回调写入，`schedules` 上的计数和时间戳同时更新。
@@ -127,9 +131,9 @@ tasks.schedule_id     可空，任务列表据此显示「定时」标记
 
 调度器每 15 秒检查一次 `enabled AND next_fire_at <= now()` 的定时任务（`FOR UPDATE SKIP LOCKED`，即使误开了两个服务也不会重复触发），对每个到期的定时任务：
 
-1. **算漏跑**：从 `last_fired_at` 到现在，按时间规则应触发几次。只有一次（正常到点）时，`trigger='scheduled'`；不止一次时按 `catch_up` 处理：
+1. **算漏跑**：从 `next_fire_at` 到现在，按时间规则应触发几次（启用和改规则时 `next_fire_at` 从当时算起，所以不会回补）。只有一次且距现在不超过 2 分钟（正常到点）时，`trigger='scheduled'`；不止一次，或唯一的一次已过去 2 分钟以上（休眠醒来），都算漏跑，按 `catch_up` 处理：
    - `once`：只跑一次，`trigger='catch_up'`，`missed` 记录漏掉的次数；
-   - `skip`：最近一次应触发的时刻距现在不超过 2 分钟时照常跑，否则记一条跳过，等下一个时间点。
+   - `skip`：最近一次应触发的时刻距现在不超过 2 分钟时照常跑，否则记一条 `skipped_missed`，等下一个时间点。
 2. **重叠**：上一次运行的任务还在进行中或排队，`skip` 记 `skipped_overlap`；`queue` 记下待跑，上一个结束后立刻跑，最多排一个。
 3. **每日花费**（S2）：这个定时任务今天的运行花费已达 `daily_budget_usd`，记 `skipped_budget`。
 4. **前置检查**（S2）：在工作目录里执行，有超时；超时先发终止信号，宽限 10 秒后强杀整个进程组。
@@ -241,6 +245,15 @@ tasks.schedule_id     可空，任务列表据此显示「定时」标记
 
 | 阶段 | 内容 | 依赖 |
 |---|---|---|
-| S1 | 数据模型、时间规则解析、进程内调度器（补跑、重叠、超时）、触发建任务并开始、跨轮次上下文、运行历史、项目页标签页、任务标记、HTTP 接口 | #88（建任务并开始）、#81（并发上限） |
+| S1 ✅ | 数据模型、时间规则解析、进程内调度器（补跑、重叠、超时）、触发建任务并开始、跨轮次上下文、运行历史、项目页标签页、任务标记、HTTP 接口 | #88（建任务并开始）、#81（并发上限） |
 | S2 | 前置检查、失败那一轮的输入交给下一轮、每日花费上限、通知与两条告警、总览页的定时任务栏 | S1 |
 | S3 | **并入[管家平台工具 RFC](manager-platform-tools-v0.zh-CN.md) 的 T3**（2026-10-15）：管家入口改用平台工具实现，导出与导入一起做 | S2、管家平台工具 T2 |
+
+S1 实现与上文的出入：
+
+- 唯一一次到期的触发若已过去 2 分钟以上，也按漏跑处理（`once` 补跑并写明漏了 1 次，`skip` 记 `skipped_missed`），休眠醒来时不会把几小时前的触发当作准点；
+- 运行状态补了 `queued`、`cancelled` 和 `skipped_missed`；用户停止或取消的运行不计失败也不计成功；运行的终态只写一次；
+- 重叠判断看这个定时任务建出的任务里有没有仍在进行（排队、运行，或刚建好待开始）的，所以超时被停、还在收尾的任务也算重叠；
+- 建出的任务先以 `init` 写入，同一事务提交后立即发 `TASK_START`，走 TaskRouter 原有的启动路径（受项目并发上限约束）；若服务恰好在两者之间停止，调度器在任务停在 `init` 超过 1 分钟后重发；
+- 名称重复、项目还有定时任务时删除项目，按现有接口的惯例返回 409（其余校验错误返回 400）；
+- `profile_overrides` 存为表、`run_budget_usd` 落到任务的 `budget_usd` 上，见第 5 节；任务在自己的上限处失败后「提高上限继续」只提高这个任务的上限。

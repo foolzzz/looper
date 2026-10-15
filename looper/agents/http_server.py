@@ -21,12 +21,13 @@ from typing import Any
 from ..db.tasks import TaskGroup, task_group
 from . import (
     agent_settings, catalog, catalog_sources, config_imports, config_transfer, knowledge, library, mcp, overview,
-    profile_registry, project_skills, projects, request_guard, self_check,
+    profile_registry, project_skills, projects, request_guard, schedules, self_check,
 )
 from .broadcast import Broadcaster
 from .chat_targets import ChatTargetError, list_chat_targets, resolve_chat_target
 from .project_execution import ProjectExecution
 from .channels.web import WebChannelAdapter
+from .scheduler import Scheduler
 from .supervisor import AgentSupervisor
 from .tiers.manager import ManagerAgent
 from .tiers.task import TaskRouter
@@ -111,6 +112,7 @@ class AgentHTTPServer:
         runtime_root: Path | None = None,
         self_checks: list[dict[str, str]] | None = None,
         claude_bin: str = "claude",
+        scheduler: Scheduler | None = None,
     ) -> None:
         self._host = host
         self._port = port
@@ -129,6 +131,8 @@ class AgentHTTPServer:
         self._self_checks = self_checks or []
         # The Claude Code the server runs: what a Claude Code runtime without an executable of its own probes.
         self._claude_bin = claude_bin
+        # What "Run now" on a schedule fires through.
+        self._scheduler = scheduler
         # Configuration files uploaded for import, waiting to be applied (under the runtime root).
         self._config_imports = config_imports.ConfigImports(runtime_root) if runtime_root else None
         self._server: asyncio.Server | None = None
@@ -292,6 +296,10 @@ class AgentHTTPServer:
     _RE_PROFILE = re.compile(r"^/api/agent-profiles/(agent-[a-zA-Z0-9-]+)$")
     _RE_PROJECT_SKILLS = re.compile(r"^/api/projects/(proj-[a-zA-Z0-9]+)/skills$")
     _RE_PROJECT_SKILL = re.compile(r"^/api/projects/(proj-[a-zA-Z0-9]+)/skills/(skill-[a-zA-Z0-9]+)$")
+    _RE_PROJECT_SCHEDULES = re.compile(r"^/api/projects/(proj-[a-zA-Z0-9]+)/schedules$")
+    _RE_SCHEDULE = re.compile(r"^/api/schedules/(sched-[a-zA-Z0-9]+)$")
+    _RE_SCHEDULE_RUN = re.compile(r"^/api/schedules/(sched-[a-zA-Z0-9]+)/run$")
+    _RE_SCHEDULE_RUNS = re.compile(r"^/api/schedules/(sched-[a-zA-Z0-9]+)/runs$")
     _RE_CONFIG_IMPORT = re.compile(r"^/api/config/imports/(cfgimp-[0-9a-f]{16})$")
     _RE_CONFIG_IMPORT_APPLY = re.compile(r"^/api/config/imports/(cfgimp-[0-9a-f]{16})/apply$")
 
@@ -358,6 +366,24 @@ class AgentHTTPServer:
                 m.group(1), projects.json_object(body)))
         elif (m := self._RE_PROJECT.match(path)) and method == "DELETE":
             await self._answer(writer, HTTP_200, lambda: projects.delete_project(m.group(1)))
+        elif (m := self._RE_PROJECT_SCHEDULES.match(path)) and method == "GET":
+            await self._answer(writer, HTTP_200, lambda: schedules.list_schedules(m.group(1)))
+        elif (m := self._RE_PROJECT_SCHEDULES.match(path)) and method == "POST":
+            await self._answer(writer, HTTP_201, lambda: schedules.create_schedule(
+                m.group(1), projects.json_object(body)))
+        elif path == "/api/schedules/preview" and method == "POST":
+            await self._answer(writer, HTTP_200, lambda: self._preview_schedule(body))
+        elif (m := self._RE_SCHEDULE.match(path)) and method == "GET":
+            await self._answer(writer, HTTP_200, lambda: schedules.get_schedule(m.group(1)))
+        elif (m := self._RE_SCHEDULE.match(path)) and method == "PUT":
+            await self._answer(writer, HTTP_200, lambda: schedules.update_schedule(
+                m.group(1), projects.json_object(body)))
+        elif (m := self._RE_SCHEDULE.match(path)) and method == "DELETE":
+            await self._answer(writer, HTTP_200, lambda: schedules.delete_schedule(m.group(1)))
+        elif (m := self._RE_SCHEDULE_RUN.match(path)) and method == "POST":
+            await self._answer(writer, HTTP_200, lambda: self._run_schedule_now(m.group(1)))
+        elif (m := self._RE_SCHEDULE_RUNS.match(path)) and method == "GET":
+            await self._answer(writer, HTTP_200, lambda: schedules.list_runs(m.group(1), query))
         elif (m := self._RE_PROJECT_KNOWLEDGE.match(path)) and method == "GET":
             await self._handle_knowledge(writer, HTTP_200, lambda root: knowledge.knowledge_view(m.group(1), root))
         elif (m := self._RE_PROJECT_KNOWLEDGE.match(path)) and method == "POST":
@@ -515,6 +541,14 @@ class AgentHTTPServer:
         writer.write(_json_response(status, _serialize(result)))
         await writer.drain()
 
+    async def _preview_schedule(self, body: bytes) -> dict[str, Any]:
+        return schedules.preview(projects.json_object(body))
+
+    async def _run_schedule_now(self, schedule_id: str) -> dict[str, Any]:
+        if self._scheduler is None:
+            raise projects.RequestError(HTTP_409, "the scheduler is not running in this server")
+        return await schedules.run_now(schedule_id, self._scheduler)
+
     async def _handle_list_projects(self, writer: asyncio.StreamWriter) -> None:
         try:
             result = await projects.list_projects()
@@ -581,7 +615,8 @@ class AgentHTTPServer:
         try:
             from ..db.llm_records import task_costs
             from ..db.tasks import list_tasks as db_list_tasks
-            tasks = await db_list_tasks(limit=50, project_id=query.get("project_id") or None, group=group)
+            tasks = await db_list_tasks(limit=50, project_id=query.get("project_id") or None, group=group,
+                                        schedule_id=query.get("schedule_id") or None)
             costs = await task_costs([t["id"] for t in tasks])
             result = []
             for t in tasks:
@@ -599,6 +634,9 @@ class AgentHTTPServer:
                     "correlation_id": t.get("correlation_id", ""),
                     "created_at": t.get("created_at"),
                     "completed_at": t.get("completed_at"),
+                    # The schedule that created it (null for any other task, or once the schedule is deleted).
+                    "schedule_id": t.get("schedule_id"),
+                    "schedule_name": t.get("schedule_name"),
                     # What the task's Planner, Workers and Reviewers spent so far.
                     "cost": costs.get(t.get("id", "")),
                 })
@@ -1018,9 +1056,13 @@ class AgentHTTPServer:
             "result_summary": raw.get("result_summary"),
             "error": raw.get("error"),
             "fail_kind": raw.get("fail_kind"),  # "task_budget": it failed at its project's task spend cap
-            # The project's task spend cap as the Planner enforces it; null for none.
+            # The task's spend cap as the Planner enforces it (its own, else its project's); null for none.
             "task_budget_usd": ProjectExecution.from_row(
                 {"id": raw.get("project_id"), "task_budget_usd": raw.get("task_budget_usd")}).task_budget_usd,
+            # The task's own cap (a scheduled run's), raised alone when it continues at its cap; null for none.
+            "own_budget_usd": raw.get("budget_usd"),
+            "schedule_id": raw.get("schedule_id"),
+            "schedule_name": raw.get("schedule_name"),
             "created_at": raw.get("created_at"),
             "updated_at": raw.get("updated_at"),
             "completed_at": raw.get("completed_at"),

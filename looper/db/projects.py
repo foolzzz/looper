@@ -36,32 +36,41 @@ def _execution(execution: Mapping[str, Any] | None) -> dict[str, Any]:
 _WITH_COUNTS = """
     SELECT p.*,
            count(t.id) AS task_count,
-           count(t.id) FILTER (WHERE t.status = ANY($1::text[])) AS active_count
+           count(t.id) FILTER (WHERE t.status = ANY($1::text[])) AS active_count,
+           (SELECT count(*) FROM schedules s WHERE s.project_id = p.id) AS schedule_count
     FROM projects p LEFT JOIN tasks t ON t.project_id = p.id
 """
 
 
 async def list_projects(*, pool: asyncpg.Pool | None = None) -> list[dict[str, Any]]:
-    """Every project with its ``task_count`` and ``active_count``, ordered by name ignoring case."""
+    """Every project with its ``task_count``, ``active_count`` and ``schedule_count``, ordered by name ignoring
+    case."""
     pool = pool or get_pool()
     rows = await pool.fetch(_WITH_COUNTS + "GROUP BY p.id ORDER BY lower(p.name)", list(ACTIVE_STATUSES))
     return [dict(r) for r in rows]
 
 
 async def get_project(project_id: str, *, pool: asyncpg.Pool | None = None) -> dict[str, Any] | None:
-    """One project with its ``task_count`` and ``active_count``."""
+    """One project with its ``task_count``, ``active_count`` and ``schedule_count``."""
     pool = pool or get_pool()
     row = await pool.fetchrow(_WITH_COUNTS + "WHERE p.id = $2 GROUP BY p.id", list(ACTIVE_STATUSES), project_id)
     return dict(row) if row else None
 
 
 async def get_task_project(task_id: str, *, pool: asyncpg.Pool | None = None) -> dict[str, Any] | None:
-    """The project task ``task_id`` belongs to now (it can move); None when there is no such task."""
+    """The project task ``task_id`` belongs to now (it can move); None when there is no such task. Its
+    ``task_budget_usd`` is the task's own cap when it has one (a scheduled run's ``run_budget_usd``)."""
     pool = pool or get_pool()
     row = await pool.fetchrow(
-        "SELECT p.* FROM tasks t JOIN projects p ON p.id = t.project_id WHERE t.id = $1", task_id,
+        "SELECT p.*, t.budget_usd AS task_own_budget_usd FROM tasks t JOIN projects p ON p.id = t.project_id "
+        "WHERE t.id = $1", task_id,
     )
-    return dict(row) if row else None
+    if row is None:
+        return None
+    project = dict(row)
+    if (own := project.pop("task_own_budget_usd")) is not None:
+        project["task_budget_usd"] = own
+    return project
 
 
 async def find_project_by_name(name: str, *, pool: asyncpg.Pool | None = None) -> dict[str, Any] | None:
@@ -122,7 +131,7 @@ async def update_project(
 
 
 async def delete_project(project_id: str, *, pool: asyncpg.Pool | None = None) -> bool:
-    """Delete a project; one that still has tasks raises ``asyncpg.ForeignKeyViolationError``."""
+    """Delete a project; one that still has tasks or schedules raises ``asyncpg.ForeignKeyViolationError``."""
     pool = pool or get_pool()
     result = await pool.execute("DELETE FROM projects WHERE id = $1", project_id)
     return result == "DELETE 1"

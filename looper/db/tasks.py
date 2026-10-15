@@ -68,9 +68,11 @@ def _group_filter(group: TaskGroup | None) -> tuple[list[str] | None, bool]:
     return [status for status, of in STATUS_GROUPS.items() if of is group], True
 
 
-# A task row plus its project's name and task spend cap.
-_WITH_PROJECT = ("SELECT t.*, p.name AS project_name, p.task_budget_usd "
-                 "FROM tasks t JOIN projects p ON p.id = t.project_id")
+# A task row plus its project's name, its spend cap (its own, a scheduled run's, over its project's) and the name of
+# the schedule that created it.
+_WITH_PROJECT = ("SELECT t.*, p.name AS project_name, COALESCE(t.budget_usd, p.task_budget_usd) AS task_budget_usd, "
+                 "s.name AS schedule_name "
+                 "FROM tasks t JOIN projects p ON p.id = t.project_id LEFT JOIN schedules s ON s.id = t.schedule_id")
 
 
 def planner_agent_id(task_id: str) -> str:
@@ -135,8 +137,11 @@ async def create_task(
     status: str = "pending",
     correlation_id: str = "",
     origin_channel_id: str = "",
+    schedule_id: str | None = None,
+    budget_usd: float | None = None,
     pool: asyncpg.Pool | asyncpg.Connection | None = None,
 ) -> dict[str, Any]:
+    """Insert a task; ``schedule_id`` names the schedule that fired it, ``budget_usd`` its own spend cap."""
     pool = pool or get_pool()
     now = datetime.now(timezone.utc)
     config_json = _config_json(config)
@@ -144,12 +149,12 @@ async def create_task(
         """
         INSERT INTO tasks (id, requirement, goal_id, work_dir, project_id,
                            config, status, correlation_id, origin_channel_id,
-                           created_at, updated_at)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $10)
+                           created_at, updated_at, schedule_id, budget_usd)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $10, $11, $12)
         ON CONFLICT (id) DO NOTHING
         """,
         task_id, requirement, goal_id, work_dir, project_id,
-        config_json, status, correlation_id, origin_channel_id, now,
+        config_json, status, correlation_id, origin_channel_id, now, schedule_id, budget_usd,
     )
     return {"task_id": task_id, "created_at": now.isoformat()}
 
@@ -327,6 +332,14 @@ async def update_task_config(
     return result == "UPDATE 1"
 
 
+async def set_task_budget(task_id: str, budget_usd: float, *, pool: asyncpg.Pool | None = None) -> bool:
+    """Set the task's own spend cap (over its project's)."""
+    pool = pool or get_pool()
+    result = await pool.execute("UPDATE tasks SET budget_usd = $2, updated_at = now() WHERE id = $1",
+                                task_id, budget_usd)
+    return result == "UPDATE 1"
+
+
 async def set_task_project(
     task_id: str,
     project_id: str,
@@ -349,10 +362,12 @@ async def list_tasks(
     project_id: str | None = None,
     status: str | None = None,
     group: TaskGroup | None = None,
+    schedule_id: str | None = None,
     pool: asyncpg.Pool | None = None,
 ) -> list[dict[str, Any]]:
-    """The newest tasks, each with its ``project_name``; only one project's when ``project_id`` is given, and only
-    those in ``status``, or in ``group``, when it is."""
+    """The newest tasks, each with its ``project_name`` and ``schedule_name``; only one project's when
+    ``project_id`` is given, one schedule's when ``schedule_id`` is, and only those in ``status``, or in ``group``,
+    when it is."""
     pool = pool or get_pool()
     statuses, inside = _group_filter(group)
     rows = await pool.fetch(
@@ -360,9 +375,10 @@ async def list_tasks(
         {_WITH_PROJECT}
         WHERE ($3::text IS NULL OR t.project_id = $3) AND ($4::text IS NULL OR t.status = $4)
           AND ($5::text[] IS NULL OR (t.status = ANY($5::text[])) = $6)
+          AND ($7::text IS NULL OR t.schedule_id = $7)
         ORDER BY t.created_at DESC LIMIT $1 OFFSET $2
         """,
-        limit, offset, project_id, status, statuses, inside,
+        limit, offset, project_id, status, statuses, inside, schedule_id,
     )
     return [_task(r) for r in rows]
 

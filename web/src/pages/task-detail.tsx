@@ -22,6 +22,7 @@ import {
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { ClampedText } from "@/components/clamped-text";
+import { ScheduledBadge } from "@/components/scheduled-badge";
 import { historyHref } from "@/pages/agent-history";
 import { TaskCostBreakdown } from "@/components/task-cost";
 import { ContinueAtCap, TaskSpendMeter } from "@/components/task-budget";
@@ -425,6 +426,7 @@ function OverviewTab({ task, onContinued }: { task: TaskDetail; onContinued: () 
           projectName={task.project_name}
           spent={task.cost?.cost_usd ?? 0}
           cap={task.task_budget_usd}
+          ownCap={task.own_budget_usd != null}
           onContinued={onContinued}
         />
       )}
@@ -1300,6 +1302,7 @@ export function TaskDetailPage({ taskId, onBack }: TaskDetailPageProps) {
             <div className="flex items-center gap-2 mt-0.5 flex-wrap">
               <span className="text-xs text-muted-foreground">{taskId}</span>
               {task && taskStatusBadge(task.status)}
+              {task && <ScheduledBadge task={task} />}
               {task && task.phase && task.phase !== task.status && phaseBadge(task.phase)}
               {task && (
                 <TaskProjectControl

@@ -46,18 +46,21 @@ function suggestedCap(spent: number, cap: number | null): string {
   return String(Math.ceil(value * 100) / 100);
 }
 
-/** For a task that failed at its spend cap: raise the project's cap above the spend and continue from the saved plan. */
+/** For a task that failed at its spend cap: raise the cap above the spend and continue from the saved plan. The cap
+ * is the project's unless the task has its own (`ownCap`, a scheduled run's). */
 export function ContinueAtCap({
   taskId,
   projectName,
   spent,
   cap,
+  ownCap,
   onContinued,
 }: {
   taskId: string;
   projectName: string;
   spent: number;
   cap: number | null;
+  ownCap: boolean;
   onContinued: () => void;
 }) {
   const [value, setValue] = useState(() => suggestedCap(spent, cap));
@@ -90,9 +93,15 @@ export function ContinueAtCap({
       </h3>
       <p className="mt-1 text-sm text-muted-foreground">
         The task spent {formatUsd(spent)}
-        {cap != null && <> of the {formatUsd(cap)} cap per task</>}. Raise the cap to continue from where it
-        stopped: accepted steps are kept and the Planner keeps its plan. The new cap applies to every task in{" "}
-        <span className="text-foreground">{projectName}</span>.
+        {cap != null && <> of the {formatUsd(cap)} cap {ownCap ? "for this run" : "per task"}</>}. Raise the cap to
+        continue from where it stopped: accepted steps are kept and the Planner keeps its plan.{" "}
+        {ownCap ? (
+          <>The new cap applies to this task only; its schedule keeps its own.</>
+        ) : (
+          <>
+            The new cap applies to every task in <span className="text-foreground">{projectName}</span>.
+          </>
+        )}
       </p>
       <form onSubmit={submit} className="mt-3 flex flex-wrap items-end gap-2">
         <div className="space-y-1">

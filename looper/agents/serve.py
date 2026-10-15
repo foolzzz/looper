@@ -8,6 +8,7 @@ Wires up the full three-tier agent system:
     → ManagerAgent
     → TaskRouter
     → WorkerPool
+  Scheduler (fires the projects' schedules)
   AgentHTTPServer (REST API + SSE + static files)
 
 Usage:
@@ -39,6 +40,7 @@ from .channels.telegram import TelegramChannelAdapter
 from .channels.web import WebChannelAdapter
 from . import self_check
 from .http_server import AgentHTTPServer
+from .scheduler import Scheduler
 from .supervisor import AgentSupervisor
 from .tiers.manager import ManagerAgent, ManagerConfig
 from .tiers.task import TaskRouter
@@ -340,6 +342,16 @@ async def _run_agent_system(
     from ..db import init_pool, ensure_schema, close_pool
     from ..db.connection import configured_dsn
 
+    from . import schedules
+    try:
+        min_interval = schedules.configure_min_interval()
+    except ValueError as exc:
+        raise StartupCheckFailed(str(exc)) from None
+    if min_interval != schedules.DEFAULT_MIN_INTERVAL_SECONDS:
+        logger.warning("%s=%d: schedules may fire %d s apart instead of %d s; this setting is for tests and "
+                       "validation only", schedules.MIN_INTERVAL_ENV, min_interval, min_interval,
+                       schedules.DEFAULT_MIN_INTERVAL_SECONDS)
+
     dsn = configured_dsn()
     database_check = await self_check.check_database(dsn)
     if database_check.status != self_check.OK:
@@ -450,7 +462,11 @@ async def _run_agent_system(
     )
     supervisor.register(manager)
 
-    task_router = TaskRouter(runtime_root=runtime_root, broadcaster=broadcaster, claude_bin=claude_bin)
+    # It fires the schedules once the agents and the HTTP server are up, and hears from the TaskRouter when a
+    # task ends, to record a scheduled run's outcome.
+    scheduler = Scheduler(bus=bus)
+    task_router = TaskRouter(runtime_root=runtime_root, broadcaster=broadcaster, claude_bin=claude_bin,
+                             on_task_end=scheduler.task_ended)
     supervisor.register(task_router)
 
     worker_config = WorkerConfig(claude_bin=claude_bin)
@@ -478,8 +494,11 @@ async def _run_agent_system(
         runtime_root=runtime_root,
         self_checks=[check.to_dict() for check in checks],
         claude_bin=claude_bin,
+        scheduler=scheduler,
     )
     await http_server.start()
+    # Its first pass handles the fires missed while the server was down.
+    await scheduler.start()
 
     logger.info(
         "agent system running on http://%s:%d (channels=%s)",
@@ -503,6 +522,7 @@ async def _run_agent_system(
     # --- Shutdown ---
 
     logger.info("shutting down agent system...")
+    await scheduler.stop()
     await http_server.stop()
     await supervisor.stop_all()
     await registry.stop_all()

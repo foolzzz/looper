@@ -798,6 +798,74 @@ BEGIN
     END IF;
 END $$;
 
+-- A project's schedules: a time rule (5-field cron, wall time in an IANA zone)
+-- and the task each firing creates and starts at once (the scheduler in
+-- looper serve, looper/agents/scheduler.py). A project with schedules cannot be
+-- deleted. work_dir '' is the project's default when it fires. A new schedule
+-- is disabled; next_fire_at is the next fire time while it is enabled, NULL
+-- otherwise. Code owns validation (looper/agents/schedules.py).
+CREATE TABLE IF NOT EXISTS schedules (
+    id                   TEXT PRIMARY KEY,
+    project_id           TEXT NOT NULL REFERENCES projects(id),
+    name                 TEXT NOT NULL,
+    cron                 TEXT NOT NULL,
+    timezone             TEXT NOT NULL,
+    requirement          TEXT NOT NULL,
+    work_dir             TEXT NOT NULL DEFAULT '',
+    overlap              TEXT NOT NULL DEFAULT 'skip' CHECK (overlap IN ('skip', 'queue')),
+    catch_up             TEXT NOT NULL DEFAULT 'once' CHECK (catch_up IN ('once', 'skip')),
+    run_timeout_seconds  INTEGER CHECK (run_timeout_seconds > 0),
+    run_budget_usd       DOUBLE PRECISION CHECK (run_budget_usd > 0),
+    enabled              BOOLEAN NOT NULL DEFAULT false,
+    next_fire_at         TIMESTAMPTZ,
+    last_fired_at        TIMESTAMPTZ,
+    last_success_at      TIMESTAMPTZ,
+    consecutive_failures INTEGER NOT NULL DEFAULT 0,
+    created_via          TEXT NOT NULL DEFAULT 'dashboard' CHECK (created_via IN ('dashboard', 'manager')),
+    created_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CHECK (enabled OR next_fire_at IS NULL)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_schedules_project_name ON schedules (project_id, lower(name));
+CREATE INDEX IF NOT EXISTS idx_schedules_due ON schedules (next_fire_at) WHERE enabled;
+-- The Agent Profile a schedule's tasks run for some of their roles, copied into each task's
+-- task_profile_overrides when it fires; a profile a schedule chose cannot be deleted.
+CREATE TABLE IF NOT EXISTS schedule_profile_overrides (
+    schedule_id TEXT NOT NULL REFERENCES schedules(id) ON DELETE CASCADE,
+    role        TEXT NOT NULL CHECK (role IN ('planner', 'worker', 'reviewer')),
+    profile_id  TEXT NOT NULL REFERENCES agent_profiles(id),
+    PRIMARY KEY (schedule_id, role)
+);
+-- One firing of a schedule: on time ('scheduled'), for missed fires ('catch_up', missed = how many it stands in
+-- for) or 'manual'. 'queued' waits for the previous run's task to end (overlap 'queue', at most one); 'running'
+-- has its task; the others are final, written once: the task's outcome when it ends, 'timed_out' when the scheduler
+-- stopped it at run_timeout_seconds, or why the firing was skipped (no task then).
+CREATE TABLE IF NOT EXISTS schedule_runs (
+    id            TEXT PRIMARY KEY,
+    schedule_id   TEXT NOT NULL REFERENCES schedules(id) ON DELETE CASCADE,
+    scheduled_for TIMESTAMPTZ NOT NULL,
+    fired_at      TIMESTAMPTZ,
+    trigger       TEXT NOT NULL CHECK (trigger IN ('scheduled', 'catch_up', 'manual')),
+    missed        INTEGER NOT NULL DEFAULT 0 CHECK (missed >= 0),
+    status        TEXT NOT NULL CHECK (status IN (
+                      'queued', 'running', 'completed', 'failed', 'stopped', 'cancelled', 'timed_out',
+                      'skipped_overlap', 'skipped_missed')),
+    task_id       TEXT REFERENCES tasks(id) ON DELETE SET NULL,
+    summary       TEXT,
+    cost_usd      DOUBLE PRECISION,
+    error         TEXT,
+    finished_at   TIMESTAMPTZ,
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_schedule_runs_schedule ON schedule_runs (schedule_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_schedule_runs_open ON schedule_runs (schedule_id) WHERE status IN ('queued', 'running');
+CREATE INDEX IF NOT EXISTS idx_schedule_runs_task ON schedule_runs (task_id);
+-- The schedule that created the task (NULL once the schedule is deleted), and the task's own spend cap over its
+-- project's task_budget_usd (a schedule's run_budget_usd, copied when it fires).
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS schedule_id TEXT REFERENCES schedules(id) ON DELETE SET NULL;
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS budget_usd DOUBLE PRECISION CHECK (budget_usd > 0);
+CREATE INDEX IF NOT EXISTS idx_tasks_schedule ON tasks (schedule_id, created_at DESC) WHERE schedule_id IS NOT NULL;
+
 CREATE TABLE IF NOT EXISTS llm_records (
     id               BIGSERIAL PRIMARY KEY,
     agent_id         TEXT NOT NULL,
