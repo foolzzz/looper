@@ -714,14 +714,15 @@ class AgentHTTPServer:
         await writer.drain()
 
     async def _handle_chat_sessions(self, writer: asyncio.StreamWriter) -> None:
-        """Every channel's chat sessions, newest first, for the read-only Conversations view."""
+        """The Manager's conversations on every channel, newest first, for the Chat page's conversation list; a
+        failed read is a 500, so the page shows it rather than an empty list."""
         try:
             from ..db.chat import list_sessions
             sessions = await list_sessions()
             writer.write(_json_response(HTTP_200, {"sessions": _serialize(sessions)}))
-        except Exception:
-            logger.debug("failed to list chat sessions", exc_info=True)
-            writer.write(_json_response(HTTP_200, {"sessions": []}))
+        except Exception as exc:
+            logger.warning("failed to list chat sessions", exc_info=True)
+            writer.write(_json_response(HTTP_500, {"error": f"cannot read the conversations: {type(exc).__name__}"}))
         await writer.drain()
 
     async def _handle_chat_messages(

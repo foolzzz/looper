@@ -38,38 +38,20 @@ async def list_messages(
     limit: int = 200,
     pool: asyncpg.Pool | None = None,
 ) -> list[dict[str, Any]]:
+    """The session's newest ``limit`` messages, oldest first: a long conversation shows how it stands now."""
     pool = pool or get_pool()
     rows = await pool.fetch(
         """
-        SELECT message_id, role, content, channel, created_at
-        FROM chat_messages
-        WHERE session_id = $1
+        SELECT message_id, role, content, channel, created_at FROM (
+            SELECT id, message_id, role, content, channel, created_at
+            FROM chat_messages
+            WHERE session_id = $1
+            ORDER BY id DESC
+            LIMIT $2
+        ) newest
         ORDER BY id ASC
-        LIMIT $2
         """,
         session_id, limit,
-    )
-    return [dict(r) for r in rows]
-
-
-async def list_sessions(
-    *,
-    limit: int = 50,
-    pool: asyncpg.Pool | None = None,
-) -> list[dict[str, Any]]:
-    """List recent sessions with message count."""
-    pool = pool or get_pool()
-    rows = await pool.fetch(
-        """
-        SELECT session_id, min(channel) as channel, count(*) as message_count,
-               min(created_at) as first_message_at,
-               max(created_at) as last_message_at
-        FROM chat_messages
-        GROUP BY session_id
-        ORDER BY max(created_at) DESC
-        LIMIT $1
-        """,
-        limit,
     )
     return [dict(r) for r in rows]
 
@@ -77,6 +59,38 @@ async def list_sessions(
 # The web chat keeps each task's Planner thread under that Planner's agent id, ``planner-<task_id>``
 # (web/src/pages/chat.tsx ``sessionFor``); every other chat session is a conversation with the Manager.
 PLANNER_THREAD_PREFIX = "planner-"
+# What a session's listing keeps of its last message.
+LAST_MESSAGE_MAX_CHARS = 200
+
+
+async def list_sessions(
+    *,
+    limit: int = 50,
+    pool: asyncpg.Pool | None = None,
+) -> list[dict[str, Any]]:
+    """The Manager's conversations on every channel, the most recently active first: each session's channel,
+    message count, first and last message times, and its last message's role and start (``last_role``,
+    ``last_content``, up to ``LAST_MESSAGE_MAX_CHARS``). Planner threads are left out."""
+    pool = pool or get_pool()
+    rows = await pool.fetch(
+        """
+        SELECT s.session_id, s.channel, s.message_count, s.first_message_at, s.last_message_at,
+               last.role AS last_role, left(last.content, $3) AS last_content
+        FROM (
+            SELECT session_id, min(channel) AS channel, count(*) AS message_count,
+                   min(created_at) AS first_message_at, max(created_at) AS last_message_at, max(id) AS last_id
+            FROM chat_messages
+            WHERE NOT starts_with(session_id, $2)
+            GROUP BY session_id
+            ORDER BY max(id) DESC
+            LIMIT $1
+        ) s
+        JOIN chat_messages last ON last.id = s.last_id
+        ORDER BY s.last_id DESC
+        """,
+        limit, PLANNER_THREAD_PREFIX, LAST_MESSAGE_MAX_CHARS,
+    )
+    return [dict(r) for r in rows]
 
 
 async def recent_conversations(
