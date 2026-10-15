@@ -35,7 +35,7 @@ const effortText = (effort: string | null) => (effort ? `effort ${effort}` : "de
 const profileText = (effective: EffectiveSettings) =>
   `${effective.profile.value.name} (${SOURCES[effective.profile.source] ?? effective.profile.source})`;
 
-/** A role's line: the Agent Profile in effect and where it comes from, the effort, the limit on how many run. */
+/** A role's line: the Agent Profile in effect and where it comes from, its effort, the limit on how many run. */
 function roleSummary(role: ProjectRole, effective: EffectiveSettings) {
   const limit = effective.max_concurrency?.value;
   return [
@@ -47,18 +47,16 @@ function roleSummary(role: ProjectRole, effective: EffectiveSettings) {
     .join(" · ");
 }
 
-/** The project row's line: what the roles that do not set it again here run with, when they agree. */
+/** The project row's line: the Agent Profile (and its effort) the roles that do not set one here run with, when
+ * they agree. */
 function projectSummary(settings: ProjectAgentSettings) {
-  const agreed = (field: "profile_id" | "effort", show: (effective: EffectiveSettings) => string, what: string) => {
-    const shown = new Set(
-      ROLES.filter((role) => settings.roles[role].values[field] == null).map((role) => show(settings.roles[role].effective)),
-    );
-    return shown.size === 1 ? [...shown][0] : shown.size === 0 ? `${what} set per role` : `${what} varies by role`;
-  };
-  return [
-    agreed("profile_id", profileText, "Agent Profile"),
-    agreed("effort", (effective) => effortText(effective.effort.value), "effort"),
-  ].join(" · ");
+  const shown = new Set(
+    ROLES.filter((role) => settings.roles[role].values.profile_id == null).map((role) => {
+      const effective = settings.roles[role].effective;
+      return `${profileText(effective)} · ${effortText(effective.effort.value)}`;
+    }),
+  );
+  return shown.size === 1 ? [...shown][0] : shown.size === 0 ? "Agent Profile set per role" : "Agent Profile varies by role";
 }
 
 /** Whether a layer sets anything itself. */

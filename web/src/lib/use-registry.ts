@@ -34,7 +34,9 @@ export function useRegistry() {
   return { registry, error, reload };
 }
 
-/** A profile as a select option names it: "claude-code/sonnet — claude-code · claude-subscription · sonnet". */
+/** A profile as a select option names it: "claude-code/sonnet — claude-code · claude-subscription · sonnet · effort
+ * high", its effort left out when it has none or its name already ends with it ("claude-code/opus · xhigh"). */
 export function profileLabel(profile: AgentProfile) {
-  return `${profile.name} — ${profile.runtime_name} · ${profile.provider_name} · ${profile.model}`;
+  const effort = profile.effort && !profile.name.endsWith(` · ${profile.effort}`) ? ` · effort ${profile.effort}` : "";
+  return `${profile.name} — ${profile.runtime_name} · ${profile.provider_name} · ${profile.model}${effort}`;
 }

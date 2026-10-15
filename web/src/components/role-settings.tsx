@@ -280,7 +280,8 @@ function sharedSummary(effective: EffectiveSettings, roles: number) {
   ].join(" · ");
 }
 
-/** A role's line: its job, then its Agent Profile and where that comes from, its effort and its concurrency limit. */
+/** A role's line: its job, then its Agent Profile and where that comes from, the profile's effort and its concurrency
+ * limit. */
 function roleSummary(role: AgentRole, effective: EffectiveSettings | undefined) {
   const parts = [ROLE_JOBS[role]];
   if (effective) {
