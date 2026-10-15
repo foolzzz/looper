@@ -184,7 +184,7 @@ PostgreSQL 是启动的硬性依赖；`looper serve` 每次启动都会应用 `l
 
 | 页面 | 功能 |
 |---|---|
-| **Dashboard** | 系统状态总览 |
+| **Dashboard** | 此刻在发生什么：按分组的任务数（点开即按该组筛选的 Tasks 页）、正在运行的 agent、各活跃项目相对上限的并发、今日花费，组件不健康时给出警告 |
 | **Chat** | 与全局 Manager 对话，或与运行中任务的 Planner 对话（每条消息成为该任务的一个新步骤）；SSE 流式输出 |
 | **Tasks** | 任务列表、项目和状态筛选，以及创建、开始、停止、删除操作 |
 | **Project** | 单个项目的概览、知识文档、项目自己的 skill 和安装、各角色在本项目覆盖的 Agent Profile 和其他 agent 设置，以及项目设置 |
@@ -199,7 +199,7 @@ API 只响应控制台和本机客户端：来自其他网站页面的请求（�
 
 | 分组 | 接口 | 用途 |
 |---|---|---|
-| 状态 | `GET /api/status` | 系统健康状态和启动自检（`checks`） |
+| 状态 | `GET /api/status`、`GET /api/overview` | 系统健康状态和启动自检（`checks`）；Dashboard 的“此刻在发生什么”总览 |
 | 项目 | `/api/projects`、`/api/projects/:id`、`/api/projects/:id/knowledge/...` | 创建、修改和删除项目；项目的知识文档和草稿 |
 | 任务 | `/api/tasks`、`/api/tasks/create`、`/api/tasks/:id/...`、`/api/tasks/{start,stop,cancel,delete}` | 列出和创建任务（属于某个项目，可带 `profile_overrides`）、查看、开始、停止、取消、删除；活动及其 SSE 流 |
 | 能力目录与安装 | `/api/catalog/...`、`/api/installs/...`、`/api/projects/:id/installs`、`/api/projects/:id/skills/...` | 插件、skill 和 MCP 服务器：导入、上传、git、编写、修改、删除；全局安装或装到项目 |
