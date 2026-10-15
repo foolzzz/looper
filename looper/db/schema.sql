@@ -854,6 +854,20 @@ ALTER TABLE schedules ADD COLUMN IF NOT EXISTS notify_chat TEXT;
 ALTER TABLE schedules ADD COLUMN IF NOT EXISTS last_ok_at TIMESTAMPTZ;
 ALTER TABLE schedules ADD COLUMN IF NOT EXISTS failures_alert_at TIMESTAMPTZ;
 ALTER TABLE schedules ADD COLUMN IF NOT EXISTS stale_alert_at TIMESTAMPTZ;
+-- When the schedule was created or last enabled (set when enabled turns true): the no-success alert counts from it
+-- or from last_ok_at, whichever is later, so a schedule enabled again after a pause is not stale at once. A schedule
+-- from before takes its updated_at, which is at or after its last enabling.
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                   WHERE table_schema = current_schema() AND table_name = 'schedules'
+                     AND column_name = 'enabled_at') THEN
+        ALTER TABLE schedules ADD COLUMN enabled_at TIMESTAMPTZ;
+        UPDATE schedules SET enabled_at = updated_at;
+        ALTER TABLE schedules ALTER COLUMN enabled_at SET DEFAULT now();
+        ALTER TABLE schedules ALTER COLUMN enabled_at SET NOT NULL;
+    END IF;
+END $$;
 DO $$
 BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'schedules_notify_target_check'
