@@ -4,6 +4,7 @@ import { Sidebar, SIDEBAR_ID, type Page } from "@/components/sidebar";
 import { ClaudeCheckBanner } from "@/components/claude-check-banner";
 import { DashboardPage } from "@/pages/dashboard";
 import { ChatPage } from "@/pages/chat";
+import { ConversationsPage } from "@/pages/conversations";
 import { TasksPage } from "@/pages/tasks";
 import { RunsPage } from "@/pages/runs";
 import { SettingsPage } from "@/pages/settings";
@@ -11,7 +12,7 @@ import { AgentHistoryPage } from "@/pages/agent-history";
 import { ProjectPage } from "@/pages/project";
 import { DEFAULT_SETTINGS_PAGE, isSettingsPage, type SettingsPageId } from "@/lib/settings-pages";
 
-const PAGES = new Set<Page>(["dashboard", "chat", "tasks", "projects", "runs", "settings", "history"]);
+const PAGES = new Set<Page>(["dashboard", "chat", "conversations", "tasks", "projects", "runs", "settings", "history"]);
 
 interface Route {
   page: Page;
@@ -127,6 +128,9 @@ function App() {
           </div>
           {route.page === "dashboard" && (
             <div className="h-full overflow-y-auto p-6"><DashboardPage /></div>
+          )}
+          {route.page === "conversations" && (
+            <div className="h-full overflow-y-auto"><ConversationsPage /></div>
           )}
           {route.page === "tasks" && (
             <div className="h-full overflow-y-auto">

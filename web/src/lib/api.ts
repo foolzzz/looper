@@ -305,6 +305,8 @@ export interface DbChatMessage {
   message_id: string;
   role: string;
   content: string;
+  /** The channel the turn came in on: "web", "telegram" or "lark". */
+  channel?: string;
   created_at: string;
 }
 
@@ -313,6 +315,23 @@ export async function fetchChatMessages(sessionId: string): Promise<DbChatMessag
   if (!res.ok) return [];
   const data = await res.json();
   return data.messages || [];
+}
+
+/** One stored chat session across any channel, for the read-only Conversations view. */
+export interface ChatSession {
+  session_id: string;
+  /** The channel the session belongs to: "web", "telegram" or "lark". */
+  channel: string;
+  message_count: number;
+  first_message_at: string;
+  last_message_at: string;
+}
+
+export async function fetchChatSessions(): Promise<ChatSession[]> {
+  const res = await fetch(`${API_BASE}/chat/sessions`);
+  if (!res.ok) throw new Error(`chat sessions ${res.status}`);
+  const data = await res.json();
+  return data.sessions ?? [];
 }
 
 /** How long a dropped chat watch waits before it reconnects. */
