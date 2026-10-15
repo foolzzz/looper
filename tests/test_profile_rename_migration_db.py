@@ -42,13 +42,42 @@ RENAMED = [
     ("agent_setting_layers", "agent_setting_layers", "scope, role, project_id", {"agent_id": "profile_id"}),
     ("agent_sessions", "agent_sessions", "agent_id", {"session_agent_id": "profile_id"}),
 ]
-DROPPED = {"agent_configs": {"role", "max_concurrency"}}
+DROPPED = {"agent_configs": {"role", "max_concurrency"}, "agent_setting_layers": {"effort"}}
 # What a later migration of main adds to a v2.6.0 database, not the rename's doing: columns (agent teams, on for its
 # profiles, all on Claude Code runtimes), and a built-in row.
 ADDED = {"agent_sessions": {"clean_start": False}, "agent_setting_layers": {"max_concurrency": None},
          "agents": {"agent_teams": True}}
 ADDED_ROWS = {"llm_providers": {"prov-codex-login"}}
 UNCHANGED = ["agent_runtimes", "llm_providers", "llm_provider_secrets", "projects", "tasks"]
+# What the effort's upgrade, a later migration of main, changes: each layer's effort moved onto the profiles its
+# roles ran with it, so these layers and task choices select another profile (by name here; it changes their
+# updated_at), and the profiles they take are added (EFFORT_PROFILES: model, effort).
+EFFORT_MOVED = {
+    "agent_setting_layers": {("system", None, None): "claude-code/glm/glm-5.3[1m] · high",
+                             ("role", "planner", None): "claude-code/sonnet · high",
+                             ("role", "reviewer", None): "beta/haiku · high",
+                             ("role_project", "worker", parity.PROJECT_A): "claude-code/sonnet · low"},
+    # Task A chose glm for its Workers, which ran with its project's Worker effort, and sonnet for its Reviewers,
+    # which ran with the system's.
+    "task_agent_overrides": {(parity.TASK_A, "worker"): "claude-code/glm/glm-5.3[1m] · low",
+                             (parity.TASK_A, "reviewer"): "claude-code/sonnet · high"},
+}
+EFFORT_PROFILES = {"claude-code/glm/glm-5.3[1m] · high": ("glm-5.3[1m]", "high"),
+                   "claude-code/glm/glm-5.3[1m] · low": ("glm-5.3[1m]", "low"),
+                   "claude-code/sonnet · high": ("sonnet", "high"), "claude-code/sonnet · low": ("sonnet", "low"),
+                   "beta/haiku · high": ("haiku", "high")}
+
+
+def _effort_moved(table: str, rows: list[dict[str, Any]], names: dict[str, str], *, expected: bool,
+                  ) -> list[dict[str, Any]]:
+    """``rows`` of a table the effort's upgrade changes, with each profile by name; ``expected``: as it makes them."""
+    moved = EFFORT_MOVED[table]
+    out = []
+    for row in rows:
+        key = (row["scope"], row["role"], row["project_id"]) if "scope" in row else (row["task_id"], row["role"])
+        name = moved[key] if expected and key in moved else names.get(row["profile_id"])
+        out.append({k: v for k, v in {**row, "profile_id": name}.items() if not (key in moved and k == "updated_at")})
+    return out
 
 
 @asynccontextmanager
@@ -91,7 +120,7 @@ def test_a_v2_6_0_database_keeps_every_row_under_the_new_names_and_every_role_ru
 ) -> None:
     from looper.db import connection
 
-    async def _main() -> dict[str, Any]:
+    async def _main() -> tuple[dict[str, Any], str]:
         async with _schema() as pool:
             await parity.seed_v2_6_0(pool)
             before = {old: await _rows(pool, old, key) for old, _, key, _ in RENAMED}
@@ -99,11 +128,20 @@ def test_a_v2_6_0_database_keeps_every_row_under_the_new_names_and_every_role_ru
 
             await connection.ensure_schema(pool)
 
+            names = {row["id"]: row["name"] for row in await _rows(pool, "agent_profiles", "id")}
             for old, new, key, columns in RENAMED:
                 keyed = ", ".join(columns.get(k.strip(), k.strip()) for k in key.split(","))
                 expected = [{**{columns.get(k, k): v for k, v in row.items() if k not in DROPPED.get(old, ())},
                              **ADDED.get(old, {})} for row in before[old]]
-                assert await _rows(pool, new, keyed) == expected, new
+                after = await _rows(pool, new, keyed)
+                if old == "agents":
+                    added = [row for row in after if row["id"] not in {r["id"] for r in before[old]}]
+                    assert {r["name"]: (r["model"], r["effort"]) for r in added} == EFFORT_PROFILES
+                    after = [row for row in after if row not in added]
+                if old in EFFORT_MOVED:
+                    expected = _effort_moved(old, expected, names, expected=True)
+                    after = _effort_moved(old, after, names, expected=False)
+                assert after == expected, new
                 assert expected, old  # the seed has rows in every renamed table
             # The dropped column only repeated the key.
             assert all(row["role"] == row["agent_id"] for row in before["agent_configs"])
@@ -130,9 +168,15 @@ def test_a_v2_6_0_database_keeps_every_row_under_the_new_names_and_every_role_ru
                 monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
                 monkeypatch.delenv(agent_launch_parity.AGENT_TEAMS, raising=False)
                 # The fixture predates agent teams, which its Claude Code profiles now have by default.
-                return agent_launch_parity.set_aside_agent_teams(await parity.capture(root))
+                captured = agent_launch_parity.set_aside_agent_teams(await parity.capture(root))
+            return captured, await pool.fetchval("SELECT id FROM agent_profiles WHERE name = $1",
+                                                 "claude-code/glm/glm-5.3[1m] · high")
 
-    captured = asyncio.run(_main())
+    captured, glm_high = asyncio.run(_main())
+    # The Manager runs glm with the system's effort high as before, through the profile that has it: the brief of
+    # its new session names that profile's id.
+    captured["manager"]["stdin"] = captured["manager"]["stdin"].replace(f"(agent {glm_high})",
+                                                                        "(agent agent-glm000000001)")
     assert sorted(captured) == sorted(MAIN)
     for case in parity.CASES:
         assert captured[case] == MAIN[case], case

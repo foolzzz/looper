@@ -48,8 +48,8 @@ def _launch(*, executable: str = "codex", library: AgentLibrary | None = None,
             env: tuple[tuple[str, str], ...] = ()) -> Launch:
     profile = AgentProfile("agent-codex", "codex/gpt-5.5",
                            RuntimeSpec("rt-codex", "codex", "codex", executable, CODEX.capabilities),
-                           provider or _provider(), "gpt-5.5")
-    return Launch(AgentSettings(profile=profile, effort=effort, env=env), library or AgentLibrary(),
+                           provider or _provider(), "gpt-5.5", effort or None)
+    return Launch(AgentSettings(profile=profile, env=env), library or AgentLibrary(),
                   knowledge or AgentKnowledge())
 
 

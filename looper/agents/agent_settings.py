@@ -1,9 +1,9 @@
-"""What every agent inherits: the harness prompt, the Agent Profile, the effort, the environment and the per-run cap;
-and how many of a task role run at once in one project.
+"""What every agent inherits: the harness prompt, the Agent Profile, the environment and the per-run cap; and how
+many of a task role run at once in one project.
 
 The harness prompt is an agent's character and stability (working principles,
 boundaries, how it communicates); the role prompt (``role_configs``) says
-what that kind of agent is responsible for. These five settings are resolved
+what that kind of agent is responsible for. These four settings are resolved
 here, and only here, for a role and a project, through four layers, a later
 one winning (``agent_setting_layers``, one row per layer and place):
 
@@ -18,12 +18,13 @@ The Manager spans every project, so it has only the first two. Workers and
 Reviewers are never configured one by one; a task may choose the profile of
 its Planner, Workers or Reviewers, which wins over every layer for that task
 only (``Layer.TASK``, a task's ``profile_overrides``). The **Agent Profile** is a runtime, an LLM
-provider and a model (``profile_registry``): the model comes with it, and its
-default effort applies unless a layer sets one (``Layer.PROFILE``). A field a
-layer leaves unset (NULL) inherits; with no layer setting it, the built-in
-default applies (``Layer.BUILTIN``): ``DEFAULT_HARNESS_PROMPT``,
-``BUILTIN_PROFILE`` (Claude Code, its own login, ``DEFAULT_MODEL``), the
-runtime's own effort, no extra environment and no cap. The environment merges
+provider, a model and an effort (``profile_registry``): a run's model and
+effort are its profile's (``Layer.PROFILE``; no effort is the runtime's own),
+and no layer sets either (``layer_effort`` moved the effort layers set before
+onto profiles). A field a layer leaves unset (NULL) inherits; with no layer
+setting it, the built-in default applies (``Layer.BUILTIN``):
+``DEFAULT_HARNESS_PROMPT``, ``BUILTIN_PROFILE`` (Claude Code, its own login,
+``DEFAULT_MODEL``, the runtime's own effort), no extra environment and no cap. The environment merges
 key by key: a later layer adds or overrides a variable, or unsets one an
 earlier layer set (a null value; the system layer has nothing to unset).
 A Reviewer with no harness of its own at the role or the role-in-project
@@ -115,7 +116,7 @@ MODEL_MAX_CHARS = 200
 BUDGET_MAX_USD = 100_000
 CONCURRENCY_MAX = 64
 
-FIELDS = ("harness_prompt", "profile_id", "effort", "env", "run_budget_usd", "max_concurrency")
+FIELDS = ("harness_prompt", "profile_id", "env", "run_budget_usd", "max_concurrency")
 
 
 class AgentType(str, Enum):
@@ -134,8 +135,8 @@ BUILTIN_CONCURRENCY = {AgentType.PLANNER: 8, AgentType.WORKER: 16, AgentType.REV
 class Layer(str, Enum):
     """Where a setting came from, in resolution order (``BUILTIN`` when no layer sets it).
 
-    ``PROFILE`` is the selected Agent Profile's own default (its effort), under every layer; ``TASK`` is a task's
-    choice of profile, over every layer.
+    ``PROFILE`` is the selected Agent Profile itself (its effort); ``TASK`` is a task's choice of profile, over every
+    layer.
     """
 
     BUILTIN = "builtin"
@@ -202,7 +203,7 @@ def effort_level(raw: Any) -> str:
     if raw is None or raw == "":
         return ""
     if raw not in EFFORT_LEVELS:
-        raise SettingsError(f"effort must be one of {', '.join(EFFORT_LEVELS)}, or empty to inherit")
+        raise SettingsError(f"effort must be one of {', '.join(EFFORT_LEVELS)}, or empty for the runtime's own")
     return str(raw)
 
 
@@ -285,7 +286,6 @@ class LayerValues:
 
     harness_prompt: str | None = None
     profile: AgentProfile | None = None
-    effort: str | None = None
     env: tuple[tuple[str, str | None], ...] = ()
     run_budget_usd: float | None = None
     max_concurrency: int | None = None
@@ -300,7 +300,6 @@ class LayerValues:
         for name, parse in (
             ("harness_prompt", lambda raw: harness_prompt(raw) or None),
             ("profile", _stored_profile),
-            ("effort", lambda raw: effort_level(raw) or None),
             ("env", lambda raw: tuple(environment(raw, unset=row.get("scope") != Layer.SYSTEM.value).items())),
             ("run_budget_usd", budget_usd),
             ("max_concurrency", concurrency),
@@ -318,7 +317,6 @@ class LayerValues:
         return {
             "harness_prompt": self.harness_prompt,
             "profile_id": self.profile.id if self.profile is not None else None,
-            "effort": self.effort,
             "env": [{"key": key, "value": value} for key, value in self.env],
             "run_budget_usd": self.run_budget_usd,
             "max_concurrency": self.max_concurrency,
@@ -347,6 +345,8 @@ def layer_update(data: Any, scope: Layer, role: AgentType | None = None) -> dict
     if "model" in data:
         raise SettingsError("model is part of the Agent Profile: select a profile (\"profile_id\": the id of a "
                             "registered Agent Profile, with its runtime, provider and model)")
+    if "effort" in data:
+        raise SettingsError("effort is part of the Agent Profile: choose or create a profile with the effort you want")
     unknown = sorted(set(data) - set(FIELDS))
     if unknown:
         raise SettingsError(f"unknown field {unknown[0]!r}; the fields are {', '.join(FIELDS)}")
@@ -367,8 +367,6 @@ def layer_update(data: Any, scope: Layer, role: AgentType | None = None) -> dict
             if not isinstance(raw, str):
                 raise SettingsError("profile_id must be the id of a registered Agent Profile, or null to inherit")
             values[name] = raw
-        elif name == "effort":
-            values[name] = effort_level(raw) or None
         elif name == "max_concurrency":
             if scope not in (Layer.ROLE, Layer.ROLE_PROJECT) or role not in TASK_ROLES:
                 raise SettingsError(
@@ -410,8 +408,6 @@ class AgentSettings:
     harness: Harness = Harness(DEFAULT_HARNESS_PROMPT, Layer.BUILTIN)
     profile: AgentProfile = BUILTIN_PROFILE
     profile_source: Layer = Layer.BUILTIN
-    effort: str = ""  # '' = the runtime's own default
-    effort_source: Layer = Layer.BUILTIN
     env: tuple[tuple[str, str], ...] = ()
     env_sources: tuple[tuple[str, Layer], ...] = ()
     max_budget_usd: float | None = None  # --max-budget-usd on each Claude Code process; None for none
@@ -430,6 +426,16 @@ class AgentSettings:
     def model_source(self) -> Layer:
         """Where the model came from: where the profile did."""
         return self.profile_source
+
+    @property
+    def effort(self) -> str:
+        """The profile's effort; '' for the runtime's own default."""
+        return self.profile.effort or ""
+
+    @property
+    def effort_source(self) -> Layer:
+        """``PROFILE`` when the profile has an effort, else ``BUILTIN`` (the runtime's own)."""
+        return Layer.PROFILE if self.profile.effort else Layer.BUILTIN
 
     def sources(self) -> dict[str, Any]:
         """Each setting's layer, for a run's record."""
@@ -499,7 +505,6 @@ def resolve(role: AgentType | str | None, layers: Mapping[Place, LayerValues],
     agent = AgentType(role) if role is not None else None
     harness = BUILTIN_SETTINGS.harness
     chosen, chosen_source = BUILTIN_PROFILE, Layer.BUILTIN
-    effort, effort_source = "", Layer.BUILTIN
     budget, budget_source = None, Layer.BUILTIN
     env: dict[str, tuple[str, Layer]] = {}
     for layer, layer_role in _chain(agent, project_id):
@@ -514,8 +519,6 @@ def resolve(role: AgentType | str | None, layers: Mapping[Place, LayerValues],
             harness = Harness(text, layer, in_project, from_role)
         if values.profile is not None:
             chosen, chosen_source = values.profile, layer
-        if values.effort is not None:
-            effort, effort_source = values.effort, layer
         if values.run_budget_usd is not None:
             budget, budget_source = values.run_budget_usd, layer
         for key, value in values.env:
@@ -523,10 +526,8 @@ def resolve(role: AgentType | str | None, layers: Mapping[Place, LayerValues],
                 env.pop(key, None)
             else:
                 env[key] = (value, layer)
-    if effort_source is Layer.BUILTIN and chosen.effort:
-        effort, effort_source = chosen.effort, Layer.PROFILE  # the profile's default, which any layer overrides
     return AgentSettings(
-        harness, chosen, chosen_source, effort, effort_source,
+        harness, chosen, chosen_source,
         tuple((key, value) for key, (value, _) in env.items()),
         tuple((key, layer) for key, (_, layer) in env.items()),
         budget, budget_source,
@@ -638,8 +639,8 @@ def profile_problem(profile: AgentProfile, role: AgentType) -> str | None:
 
 @dataclass(frozen=True)
 class Launch:
-    """What one agent run starts with besides its prompt: its settings (the Agent Profile, effort, environment
-    and per-run cap), the installed items and, for a task agent, the project knowledge; and, for every
+    """What one agent run starts with besides its prompt: its settings (the Agent Profile with its effort, the
+    environment and per-run cap), the installed items and, for a task agent, the project knowledge; and, for every
     agent alike, its permissions. The profile's runtime lays them out (``runtime``)."""
 
     settings: AgentSettings = BUILTIN_SETTINGS
@@ -756,7 +757,6 @@ def _limits() -> dict[str, Any]:
     return {
         "harness_max_chars": HARNESS_MAX_CHARS,
         "env_max_entries": ENV_MAX_ENTRIES,
-        "effort_levels": list(EFFORT_LEVELS),
         "builtin_harness_prompt": DEFAULT_HARNESS_PROMPT,
         "builtin_model": DEFAULT_MODEL,
         "builtin_profile": {"profile_id": BUILTIN_PROFILE.id, "name": BUILTIN_PROFILE.name},

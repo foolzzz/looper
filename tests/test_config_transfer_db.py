@@ -97,13 +97,13 @@ async def _populate(monkeypatch: pytest.MonkeyPatch, pool: Any, work_dir: Path) 
                                                      "output_usd_per_mtok": 15}]})
     sonnet = (await _ok("POST", "/api/agent-profiles", {"name": "claude-code/sonnet", "runtime_id": "rt-claude-code",
                                                 "provider_id": "prov-claude-subscription",
-                                                        "model": "sonnet", "agent_teams": True}))["profile"][
+                                                        "model": "sonnet", "effort": "high", "agent_teams": True}))["profile"][
         "profile_id"]
     beta_haiku = (await _ok("POST", "/api/agent-profiles", {"name": "beta-haiku", "runtime_id": beta,
                                                     "provider_id": "prov-claude-subscription", "model": "haiku",
                                                             "effort": "low"}))["profile"]["profile_id"]
     await _ok("PUT", "/api/agent-settings/system", {"harness_prompt": "Be careful.", "profile_id": sonnet,
-                                                    "effort": "high", "env": [{"key": "LOOPER_MODE", "value": "a"}]})
+                                                    "env": [{"key": "LOOPER_MODE", "value": "a"}]})
     await _ok("PUT", "/api/agent-settings/roles/worker", {"profile_id": "agent-claude-code-opus", "run_budget_usd": 2.5,
                                                           "env": [{"key": "LOOPER_MODE", "value": None}],
                                                           "max_concurrency": 6})
@@ -527,7 +527,8 @@ def test_the_settings_download_streams_the_same_file(monkeypatch: pytest.MonkeyP
 def test_a_file_from_before_profiles_selects_the_profile_of_each_model(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
-    """A file exported before Agent Profiles, and before the rename to Looper (``loopx-config/v1``), still imports."""
+    """A file exported before Agent Profiles, and before the rename to Looper (``loopx-config/v1``), still imports;
+    its layers' effort moves onto profiles as the upgrade moves it."""
     async def _test() -> None:
         async with _installation(schema=False) as (target, target_url):
             old = tmp_path / "old.json"
@@ -541,14 +542,33 @@ def test_a_file_from_before_profiles_selects_the_profile_of_each_model(
 
             assert code == 0, err
             plan = _plan(out)
+            # The system effort applied to the Manager's opus too: each runs its model with effort low.
             assert [(c["section"], c["key"], c["action"]) for c in plan["changes"]] == [
-                ("profiles", "claude-code/haiku", "added"), ("settings.layers", "system", "added"),
+                ("profiles", "claude-code/haiku", "added"), ("profiles", "claude-code/haiku · low", "added"),
+                ("profiles", "claude-code/opus · low", "added"), ("settings.layers", "system", "added"),
                 ("settings.layers", "role:manager", "added")]
+            assert [n for n in plan["notes"] if "effort" in n] == [
+                "profiles claude-code/haiku · low: added, claude-code/haiku with effort low, for the effort the "
+                "file's layers set (the effort is the Agent Profile's now)",
+                "profiles claude-code/opus · low: added, claude-code/opus with effort low, for the effort the file's "
+                "layers set (the effort is the Agent Profile's now)",
+                "settings.layers system: its effort low is the Agent Profile's now: the layer selects "
+                "claude-code/haiku · low",
+                "settings.layers role:manager: selects claude-code/opus · low, so its roles keep the effort the "
+                "file's layers give them (the effort is the Agent Profile's now)"]
             from looper.db import config_transfer as db
 
             async with target.acquire() as conn:
                 layers = {r["scope"]: r["profile"] for r in await db.read_layers(conn)}
-            assert layers == {"system": "claude-code/haiku", "role": "claude-code/opus"}  # opus: the built-in one
+                profiles = {r["name"]: (r["model"], r["effort"]) for r in await db.read_profiles(conn)}
+            assert layers == {"system": "claude-code/haiku · low", "role": "claude-code/opus · low"}
+            assert profiles == {"claude-code/opus": ("opus", None), "claude-code/haiku": ("haiku", None),
+                                "claude-code/haiku · low": ("haiku", "low"), "claude-code/opus · low": ("opus", "low")}
+
+            # Imported again, the file finds the profiles it took and changes nothing.
+            code, out, err = await _looper(monkeypatch, target_url, "config", "import", str(old), "--json")
+            assert code == 0, err
+            assert _plan(out)["changes"] == []
 
     asyncio.run(_test())
 
@@ -650,8 +670,10 @@ def test_a_layers_agent_teams_variable_is_left_out_with_a_note_and_the_rest_impo
             assert [n for n in plan["notes"] if "AGENT_TEAMS" in n] == [
                 "settings.layers system: CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS was left out of the environment; agent "
                 "teams are switched on each Agent Profile"]
-            row = await target.fetchrow("SELECT effort, env FROM agent_setting_layers WHERE scope = 'system'")
-            assert (row["effort"], json.loads(row["env"])) == ("high", [{"key": "LANG", "value": "C"}])
+            row = await target.fetchrow("SELECT a.name, a.effort, l.env FROM agent_setting_layers l "
+                                        "JOIN agent_profiles a ON a.id = l.profile_id WHERE l.scope = 'system'")
+            assert (row["name"], row["effort"], json.loads(row["env"])) == (
+                "claude-code/opus · high", "high", [{"key": "LANG", "value": "C"}])
 
     asyncio.run(_test())
 
@@ -672,7 +694,9 @@ def test_a_file_exported_by_v2_6_0_imports_and_exports_again_under_the_new_names
             code, out, err = await _looper(monkeypatch, target_url, "config", "import", str(path), "--apply", "--json")
             assert code == 0, err
             plan = _plan(out)
-            assert plan["counts"]["profiles"] == {"added": 3, "changed": 0, "unchanged": 0, "skipped": 0}
+            # Its 3 profiles, and the 4 that keep the effort its layers set (high on the system, low on calc's
+            # Workers), each on the profile it applied to.
+            assert plan["counts"]["profiles"] == {"added": 7, "changed": 0, "unchanged": 0, "skipped": 0}
             assert not [c for c in plan["changes"] if c["action"] == "skipped"], plan
             assert plan["need_secret"] == [{"section": "providers", "key": "glm", "names": ["api_key"]}]
             # Each role's max_concurrency is ignored, and one note says so.
@@ -686,9 +710,9 @@ def test_a_file_exported_by_v2_6_0_imports_and_exports_again_under_the_new_names
             async with target.acquire() as conn:
                 layers = {(r["scope"], r["role"]): r["profile"] for r in await db.read_layers(conn)
                           if r["project_id"] is None}
-            assert layers == {("system", None): "claude-code/glm/glm-5.3[1m]",
-                              ("role", "planner"): "claude-code/sonnet", ("role", "worker"): None,
-                              ("role", "reviewer"): "beta/haiku"}
+            assert layers == {("system", None): "claude-code/glm/glm-5.3[1m] · high",
+                              ("role", "planner"): "claude-code/sonnet · high", ("role", "worker"): None,
+                              ("role", "reviewer"): "beta/haiku · high"}
 
             again = tmp_path / "again.json"
             assert (await _looper(monkeypatch, target_url, "config", "export", str(again),
@@ -696,15 +720,28 @@ def test_a_file_exported_by_v2_6_0_imports_and_exports_again_under_the_new_names
             new = _without_time(again)
             assert new["format"] == "looper-config/v2" and "agents" not in new
 
+            # The layers' effort is on the profiles they select now.
+            moved = {("system", None, "claude-code/glm/glm-5.3[1m]"): "claude-code/glm/glm-5.3[1m] · high",
+                     ("role", "planner", "claude-code/sonnet"): "claude-code/sonnet · high",
+                     ("role", "reviewer", "beta/haiku"): "beta/haiku · high",
+                     ("role_project", "worker", "claude-code/sonnet"): "claude-code/sonnet · low"}
+
             def renamed(layer: dict[str, Any]) -> dict[str, Any]:
-                return {**{("profile" if k == "agent" else k): v for k, v in layer.items()}, "max_concurrency": None}
+                layer = {**{("profile" if k == "agent" else k): v for k, v in layer.items() if k != "effort"},
+                         "max_concurrency": None}
+                return {**layer, "profile": moved.get((layer["scope"], layer.get("role"), layer["profile"]),
+                                                      layer["profile"])}
 
             expected = {k: v for k, v in old.items() if k not in ("exported_at", "agents")}
             # A file from before agent teams has them on its Claude Code profiles, which all of its profiles are.
-            expected.update(format="looper-config/v2", looper_version=new["looper_version"], runtimes=[],
-                            profiles=[{**a, "agent_teams": True} for a in old["agents"]])
+            profiles = [{**a, "agent_teams": True} for a in old["agents"]]
             # The runtime registered by hand stays behind: its profile runs on the built-in runtime of its type.
-            _by_name(expected["profiles"], "beta/haiku")["runtime"] = "claude-code"
+            _by_name(profiles, "beta/haiku")["runtime"] = "claude-code"
+            for base, effort in (("claude-code/glm/glm-5.3[1m]", "high"), ("claude-code/sonnet", "high"),
+                                 ("beta/haiku", "high"), ("claude-code/sonnet", "low")):
+                profiles.append({**_by_name(profiles, base), "name": f"{base} · {effort}", "effort": effort})
+            expected.update(format="looper-config/v2", looper_version=new["looper_version"], runtimes=[],
+                            profiles=sorted(profiles, key=lambda p: p["name"].encode()))
             # The file left the provider's key out, so none is stored here to export.
             expected["providers"] = [{**_by_name(old["providers"], "glm"), "api_key": None}]
             expected["settings"] = {"layers": [renamed(x) for x in old["settings"]["layers"]], "roles": [

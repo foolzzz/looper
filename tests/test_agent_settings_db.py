@@ -107,34 +107,35 @@ def _old_state(scenario: dict[str, Any]) -> Callable[[Any], Awaitable[None]]:
 
 
 _ENV = [{"key": "ZED", "value": "1"}, {"key": "ALPHA", "value": "two words"}]
-# Each scenario's layers after the upgrade: (scope, role, project, harness, agent, effort, env, cap); each model
-# became the agent claude-code/<model> (the agents' upgrade, which follows this one).
+# Each scenario's layers after the upgrade: (scope, role, project, harness, profile, env, cap). Each model became
+# the profile claude-code/<model> (the profiles' upgrade, which follows this one), and the system effort moved onto
+# the profile of every layer that ran with it (the effort's upgrade, last): claude-code/<model> · high.
 _EXPECTED_LAYERS = {
     "configured": [
-        ("project", None, "proj-a", None, "claude-code/opus[1m]", None, [], 0.5),
-        ("role", "manager", None, "Manager harness HM.\n", "claude-code/opus", None, [], None),
-        ("role", "planner", None, None, "claude-code/haiku", None, [], None),
-        ("role", "worker", None, None, "claude-code/claude-sonnet-4-5", None, [], None),
-        ("role_project", "planner", "proj-a", "\nPlan harness PH.", None, None, [], None),
-        ("role_project", "worker", "proj-a", "Work harness WH.  ", None, None, [], None),
-        ("system", None, None, "\n\n  System harness H0.\nSecond line.  \n\n", "claude-code/sonnet", "high", _ENV,
+        ("project", None, "proj-a", None, "claude-code/opus[1m] · high", [], 0.5),
+        ("role", "manager", None, "Manager harness HM.\n", "claude-code/opus · high", [], None),
+        ("role", "planner", None, None, "claude-code/haiku · high", [], None),
+        ("role", "worker", None, None, "claude-code/claude-sonnet-4-5 · high", [], None),
+        ("role_project", "planner", "proj-a", "\nPlan harness PH.", None, [], None),
+        ("role_project", "worker", "proj-a", "Work harness WH.  ", None, [], None),
+        ("system", None, None, "\n\n  System harness H0.\nSecond line.  \n\n", "claude-code/sonnet · high", _ENV,
          None),
     ],
     "builtin_text_and_empty": [
-        ("project", None, "proj-a", None, None, None, [], 0.25),
-        ("role_project", "worker", "proj-a", "Work only.", None, None, [], None),
+        ("project", None, "proj-a", None, None, [], 0.25),
+        ("role_project", "worker", "proj-a", "Work only.", None, [], None),
         ("system", None, None, PARITY["scenarios"]["builtin_text_and_empty"]["system_settings"]["agent.harness_prompt"],
-         None, None, [], None),
+         None, [], None),
     ],
 }
 
 
 async def _layers(pool: Any) -> list[tuple[Any, ...]]:
     rows = await pool.fetch(
-        "SELECT l.scope, l.role, l.project_id, l.harness_prompt, a.name, l.effort, l.env, l.run_budget_usd "
+        "SELECT l.scope, l.role, l.project_id, l.harness_prompt, a.name, l.env, l.run_budget_usd "
         "FROM agent_setting_layers l LEFT JOIN agent_profiles a ON a.id = l.profile_id "
         "ORDER BY l.scope, l.role NULLS FIRST, l.project_id NULLS FIRST")
-    return [(*tuple(r)[:6], json.loads(r["env"]), r["run_budget_usd"]) for r in rows]
+    return [(*tuple(r)[:5], json.loads(r["env"]), r["run_budget_usd"]) for r in rows]
 
 
 @pytest.mark.parametrize("name", sorted(PARITY["scenarios"]))
@@ -199,7 +200,7 @@ def test_a_fresh_database_has_no_layers_and_every_role_runs_with_the_builtin_set
 def test_each_layer_round_trips_and_a_deleted_project_takes_its_layers(monkeypatch: pytest.MonkeyPatch) -> None:
     import asyncpg
 
-    from looper.agents import agent_settings
+    from looper.agents import agent_settings, profile_registry
     from looper.db import agent_setting_layers, projects
 
     async def _test(pool: Any) -> None:
@@ -207,12 +208,15 @@ def test_each_layer_round_trips_and_a_deleted_project_takes_its_layers(monkeypat
         pid = calc["id"]
         await agent_settings.update_system({"profile_id": "agent-claude-code-opus", "env": [
             {"key": "TZ", "value": "UTC"}, {"key": "LANG", "value": "C"}]})
-        await agent_settings.update_role("reviewer", {"effort": "max"})
+        opus_max = (await profile_registry.create_profile({
+            "name": "opus max", "runtime_id": "rt-claude-code", "provider_id": "prov-claude-subscription",
+            "model": "opus", "effort": "max"}))["profile"]["profile_id"]
+        await agent_settings.update_role("reviewer", {"profile_id": opus_max})
         await agent_settings.update_project(pid, {"run_budget_usd": 0.5, "env": [{"key": "TZ", "value": None}]})
         view = await agent_settings.update_project(pid, {"harness_prompt": "W."}, role="worker")
         reviewer = view["roles"]["reviewer"]["effective"]
         assert (reviewer["effort"], reviewer["run_budget_usd"], reviewer["env"]) == (
-            {"value": "max", "source": "role"}, {"value": 0.5, "source": "project"},
+            {"value": "max", "source": "profile"}, {"value": 0.5, "source": "project"},
             [{"key": "LANG", "value": "C", "source": "system"}])
         assert reviewer["harness_prompt"] == {"value": "W.", "source": "role_project", "from_role": "worker"}
         # The order of the variables survives the round trip (the hash of the environment depends on it).
@@ -232,9 +236,9 @@ def test_each_layer_round_trips_and_a_deleted_project_takes_its_layers(monkeypat
         await agent_settings.update_project(pid, {"run_budget_usd": None, "env": []})
         assert await pool.fetchval("SELECT count(*) FROM agent_setting_layers WHERE scope = 'project'") == 0
         with pytest.raises(asyncpg.CheckViolationError):
-            await agent_setting_layers.put_layer("role_project", "manager", pid, {"effort": "low"}, pool=pool)
+            await agent_setting_layers.put_layer("role_project", "manager", pid, {"harness_prompt": "x"}, pool=pool)
         with pytest.raises(asyncpg.CheckViolationError):
-            await agent_setting_layers.put_layer("system", "worker", None, {"effort": "low"}, pool=pool)
+            await agent_setting_layers.put_layer("system", "worker", None, {"harness_prompt": "x"}, pool=pool)
         for scope, role, project_id, limit in (("system", None, None, 2), ("role", "manager", None, 2),
                                                ("project", None, pid, 2), ("role", "worker", None, 65)):
             with pytest.raises(asyncpg.CheckViolationError):

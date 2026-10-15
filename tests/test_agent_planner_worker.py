@@ -657,17 +657,18 @@ class TestWorkerHarnessAndLaunch:
 
     def test_a_role_model_beats_the_system_default(self, agent_db: Any, rows: dict[str, Any]) -> None:
         agent_db.list_layers.return_value = [
-            {"scope": "system", "profile": profile_json("sonnet"), "effort": "high"},
-            {"scope": "role", "role": "reviewer", "profile": profile_json("claude-haiku-4-5")},
+            {"scope": "system", "profile": profile_json("sonnet", effort="high")},
+            {"scope": "role", "role": "reviewer", "profile": profile_json("claude-haiku-4-5", effort="low")},
         ]
         _, work = _run_step()
         work_metadata = agent_db.start_record.await_args.kwargs["metadata"]
         _, review = _run_step(verify=True)
         review_metadata = agent_db.start_record.await_args.kwargs["metadata"]
+        # Each runs its profile's model and effort.
         assert (_flag(work["argv"], "--model"), _flag(work["argv"], "--effort")) == ("sonnet", "high")
-        assert (_flag(review["argv"], "--model"), _flag(review["argv"], "--effort")) == ("claude-haiku-4-5", "high")
+        assert (_flag(review["argv"], "--model"), _flag(review["argv"], "--effort")) == ("claude-haiku-4-5", "low")
         assert work_metadata["model_choice"] == {"model": "sonnet", "source": "system", "effort": "high"}
-        assert review_metadata["model_choice"] == {"model": "claude-haiku-4-5", "source": "role", "effort": "high"}
+        assert review_metadata["model_choice"] == {"model": "claude-haiku-4-5", "source": "role", "effort": "low"}
         assert review_metadata["settings_sources"]["profile"] == "role"
 
     def test_the_settings_environment_reaches_the_subprocess_and_its_names_are_recorded(

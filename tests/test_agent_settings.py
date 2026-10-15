@@ -1,10 +1,10 @@
-"""What every agent inherits: the harness prompt, the agent, the effort, the environment and the per-run cap.
+"""What every agent inherits: the harness prompt, the Agent Profile, the environment and the per-run cap.
 
 Each resolves through system -> role -> project -> role in a project, a later
 layer winning; the Manager has only the first two, and a task's choice of
-agent for one of its roles wins over them all. The environment merges key by
+profile for one of its roles wins over them all. The environment merges key by
 key, and a Reviewer without a harness of its own at a role layer takes the
-Workers' at that layer. An agent's default effort applies under every layer.
+Workers' at that layer. A run's effort is its profile's: no layer sets one.
 """
 
 from __future__ import annotations
@@ -56,7 +56,6 @@ def _profile(model: str, effort: str | None = None) -> AgentProfile:
 VALUES: dict[str, dict[Layer, Any]] = {
     "harness_prompt": {layer: f"HARNESS {layer.value}" for layer in ORDER},
     "profile": {layer: _profile(f"model-{layer.value}") for layer in ORDER},
-    "effort": dict(zip(ORDER, ("low", "medium", "high", "max"))),
     "run_budget_usd": dict(zip(ORDER, (1.0, 2.0, 3.0, 4.0))),
     "env": {layer: (("SHARED", f"from {layer.value}"),) for layer in ORDER},
 }
@@ -67,8 +66,6 @@ def _resolved(settings: agent_settings.AgentSettings, field: str) -> tuple[Any, 
         return settings.harness.text, settings.harness.source
     if field == "profile":
         return settings.profile, settings.profile_source
-    if field == "effort":
-        return settings.effort, settings.effort_source
     if field == "run_budget_usd":
         return settings.max_budget_usd, settings.max_budget_source
     return settings.env, dict(settings.env_sources).get("SHARED", Layer.BUILTIN)
@@ -125,27 +122,29 @@ class TestPrecedence:
 
     @pytest.mark.parametrize("role", TASK_ROLES)
     def test_a_tasks_profile_wins_over_every_layer_for_its_role_only(self, role: str) -> None:
-        layers = {_place(layer, role): LayerValues(profile=_profile(f"model-{layer.value}"), effort="low")
+        layers = {_place(layer, role): LayerValues(profile=_profile(f"model-{layer.value}", effort="low"))
                   for layer in ORDER}
-        layers[(Layer.TASK, AgentType(role))] = LayerValues(profile=_profile("task-model"))
+        layers[(Layer.TASK, AgentType(role))] = LayerValues(profile=_profile("task-model", effort="high"))
         chosen = resolve(role, layers, "proj-a")
-        assert (chosen.model, chosen.profile_source, chosen.effort) == ("task-model", Layer.TASK, "low")
+        assert (chosen.model, chosen.profile_source, chosen.effort) == ("task-model", Layer.TASK, "high")
         for other in set(TASK_ROLES) - {role}:
             assert resolve(other, layers, "proj-a").profile_source is not Layer.TASK
         # The Manager spans every task.
         assert resolve("manager", {(Layer.TASK, AgentType.MANAGER): LayerValues(profile=_profile("x"))}).model == "opus"
 
-    def test_a_profiles_effort_applies_unless_a_layer_sets_one(self) -> None:
-        layers = {(Layer.ROLE, AgentType.WORKER): LayerValues(profile=_profile("sonnet", effort="low"))}
-        worker = resolve("worker", layers)
-        assert (worker.effort, worker.effort_source) == ("low", Layer.PROFILE)
-        layers[(Layer.SYSTEM, None)] = LayerValues(effort="max")  # any layer's effort, even an earlier one
-        assert (resolve("worker", layers).effort, resolve("worker", layers).effort_source) == ("max", Layer.SYSTEM)
+    def test_a_runs_effort_is_its_profiles(self) -> None:
+        layers = {(Layer.SYSTEM, None): LayerValues(profile=_profile("opus", effort="max")),
+                  (Layer.ROLE, AgentType.WORKER): LayerValues(profile=_profile("sonnet", effort="low")),
+                  (Layer.ROLE, AgentType.REVIEWER): LayerValues(profile=_profile("haiku"))}
+        assert (resolve("worker", layers).effort, resolve("worker", layers).effort_source) == ("low", Layer.PROFILE)
+        assert (resolve("planner", layers).effort, resolve("planner", layers).effort_source) == ("max", Layer.PROFILE)
+        # A profile without an effort runs with the runtime's own, whatever the profiles above have.
+        assert (resolve("reviewer", layers).effort, resolve("reviewer", layers).effort_source) == ("", Layer.BUILTIN)
 
     @pytest.mark.parametrize("layer", [Layer.ROLE, Layer.ROLE_PROJECT])
     def test_a_role_layer_reaches_only_its_role(self, layer: Layer) -> None:
-        layers = {_place(layer, "worker"): LayerValues(profile=_profile("worker-only"), effort="max", run_budget_usd=0.5,
-                                                       env=(("ONLY", "w"),))}
+        layers = {_place(layer, "worker"): LayerValues(profile=_profile("worker-only", effort="max"),
+                                                       run_budget_usd=0.5, env=(("ONLY", "w"),))}
         worker = resolve("worker", layers, "proj-a")
         assert (worker.model, worker.effort, worker.max_budget_usd, worker.env) == (
             "worker-only", "max", 0.5, (("ONLY", "w"),))
@@ -226,8 +225,8 @@ class TestReviewerHarness:
 
 class TestRecord:
     def test_a_run_records_each_settings_layer(self) -> None:
-        layers = {(Layer.SYSTEM, None): LayerValues(effort="high", env=(("TZ", "UTC"),)),
-                  (Layer.ROLE, AgentType.WORKER): LayerValues(profile=_profile("sonnet")),
+        layers = {(Layer.SYSTEM, None): LayerValues(env=(("TZ", "UTC"),)),
+                  (Layer.ROLE, AgentType.WORKER): LayerValues(profile=_profile("sonnet", effort="high")),
                   (Layer.PROJECT, None): LayerValues(run_budget_usd=0.5),
                   (Layer.ROLE_PROJECT, AgentType.WORKER): LayerValues(harness_prompt="H", env=(("LANG", "C"),))}
         settings = resolve("worker", layers, "proj-a")
@@ -238,7 +237,7 @@ class TestRecord:
                                      "runtime": {"id": "rt-claude-code", "name": "claude-code", "type": "claude-code"},
                                      "provider": {"id": "prov-claude-subscription", "name": "claude-subscription",
                                                   "auth": "oauth"}, "source": "role"}
-        assert record["settings_sources"] == {"harness": "role_project", "profile": "role", "effort": "system",
+        assert record["settings_sources"] == {"harness": "role_project", "profile": "role", "effort": "profile",
                                               "env": {"TZ": "system", "LANG": "role_project"},
                                               "run_budget_usd": "project"}
         assert record["max_budget_usd"] == 0.5
@@ -263,7 +262,7 @@ class TestStoredRows:
     def test_an_unusable_stored_value_is_ignored(self) -> None:
         values = LayerValues.from_row({
             "scope": "system", "harness_prompt": "\n\n  Mine.\n", "profile": {"id": "agent-x"},
-            "effort": "extreme", "env": [{"key": "lang", "value": "x"}], "run_budget_usd": -1,
+            "env": [{"key": "lang", "value": "x"}], "run_budget_usd": -1,
         })
         assert values == LayerValues(harness_prompt="  Mine.")
 
@@ -328,7 +327,7 @@ class TestValidation:
 
 
 # The registered profiles of the stand-in table, by id.
-PROFILES = {profile.id: profile for profile in (BUILTIN_PROFILE, _profile("sonnet"), _profile("haiku"),
+PROFILES = {profile.id: profile for profile in (BUILTIN_PROFILE, _profile("sonnet", effort="high"), _profile("haiku"),
                                                 _profile("opus[1m]"))}
 
 
@@ -348,8 +347,7 @@ class _Layers:
                         **_: Any) -> None:
         self.writes += 1
         row = self.rows.setdefault((scope, role, project_id), {
-            "harness_prompt": None, "profile_id": None, "effort": None, "env": [], "run_budget_usd": None,
-            "max_concurrency": None})
+            "harness_prompt": None, "profile_id": None, "env": [], "run_budget_usd": None, "max_concurrency": None})
         row.update({k: (list(v or []) if k == "env" else v) for k, v in values.items()})
         if not any(row.values()):
             del self.rows[(scope, role, project_id)]
@@ -399,8 +397,7 @@ def _call(method: str, path: str, body: Any = None, *, router: Any = None, pool:
     return int(head.split()[1]), json.loads(payload)
 
 
-UNSET = {"harness_prompt": None, "profile_id": None, "effort": None, "env": [], "run_budget_usd": None,
-         "max_concurrency": None}
+UNSET = {"harness_prompt": None, "profile_id": None, "env": [], "run_budget_usd": None, "max_concurrency": None}
 
 
 def _now(profile: AgentProfile, source: str) -> dict[str, Any]:
@@ -414,7 +411,6 @@ class TestSettingsApi:
         status, body = _call("GET", "/api/agent-settings")
         assert status == 200
         assert body["limits"]["builtin_harness_prompt"] == DEFAULT_HARNESS_PROMPT
-        assert body["limits"]["effort_levels"] == ["low", "medium", "high", "xhigh", "max"]
         assert body["system"]["values"] == UNSET and set(body["roles"]) == {r.value for r in AgentType}
         for view in (body["system"], *body["roles"].values()):
             effective = view["effective"]
@@ -425,17 +421,18 @@ class TestSettingsApi:
     def test_each_page_edits_its_layer_and_shows_what_applies(self, layers: _Layers) -> None:
         sonnet, haiku, opus_1m = PROFILES["agent-sonnet"], PROFILES["agent-haiku"], PROFILES["agent-opus[1m]"]
         status, body = _call("PUT", "/api/agent-settings/system", {
-            "harness_prompt": "\nBe careful.\n", "profile_id": sonnet.id, "effort": "high",
-            "env": [{"key": "TZ", "value": "UTC"}]})
+            "harness_prompt": "\nBe careful.\n", "profile_id": sonnet.id, "env": [{"key": "TZ", "value": "UTC"}]})
         assert status == 200 and body["system"]["values"] == {
-            "harness_prompt": "Be careful.", "profile_id": sonnet.id, "effort": "high",
-            "env": [{"key": "TZ", "value": "UTC"}], "run_budget_usd": None, "max_concurrency": None}
+            "harness_prompt": "Be careful.", "profile_id": sonnet.id, "env": [{"key": "TZ", "value": "UTC"}],
+            "run_budget_usd": None, "max_concurrency": None}
         status, body = _call("PUT", "/api/agent-settings/roles/worker", {"profile_id": haiku.id, "run_budget_usd": 2})
         assert status == 200
         worker = body["roles"]["worker"]["effective"]
         assert (worker["profile"], worker["run_budget_usd"]) == (_now(haiku, "role"), {"value": 2.0, "source": "role"})
         assert worker["harness_prompt"] == {"value": "Be careful.", "source": "system"}
+        assert worker["effort"] == {"value": None, "source": "builtin"}  # haiku's: none
         assert body["roles"]["planner"]["effective"]["profile"] == _now(sonnet, "system")
+        assert body["roles"]["planner"]["effective"]["effort"] == {"value": "high", "source": "profile"}
 
         status, body = _call("PUT", "/api/projects/proj-a/agent-settings", {"profile_id": opus_1m.id, "env": [
             {"key": "TZ", "value": None}]})
@@ -450,8 +447,8 @@ class TestSettingsApi:
 
     def test_an_empty_value_or_the_builtin_text_unsets(self, layers: _Layers) -> None:
         _call("PUT", "/api/agent-settings/system", {"harness_prompt": "Mine.", "profile_id": "agent-sonnet",
-                                                    "effort": "low"})
-        status, body = _call("PUT", "/api/agent-settings/system", {"profile_id": "", "effort": None,
+                                                    "run_budget_usd": 1})
+        status, body = _call("PUT", "/api/agent-settings/system", {"profile_id": "", "run_budget_usd": None,
                                                                    "harness_prompt": DEFAULT_HARNESS_PROMPT})
         assert status == 200 and body["system"]["values"] == UNSET
         assert layers.rows == {}  # a layer with nothing set has no row
@@ -464,11 +461,16 @@ class TestSettingsApi:
         ("/api/agent-settings/system", {"model": "sonnet"}, 400, "part of the Agent Profile"),
         ("/api/agent-settings/system", {"profile_id": "agent-nowhere"}, 400, "no Agent Profile 'agent-nowhere'"),
         ("/api/agent-settings/system", {"profile_id": 5}, 400, "profile_id must be the id"),
-        ("/api/agent-settings/system", {"effort": "extreme"}, 400, "one of"),
+        # The effort is the Agent Profile's: a layer refuses one, valid or not, with or without a profile.
+        ("/api/agent-settings/system", {"effort": "high"}, 400, "effort is part of the Agent Profile"),
+        ("/api/agent-settings/roles/worker", {"effort": None}, 400, "effort is part of the Agent Profile"),
+        ("/api/projects/proj-a/agent-settings/roles/worker", {"effort": "low"}, 400,
+         "effort is part of the Agent Profile"),
         ("/api/agent-settings/system", {"env": [{"key": "GITHUB_TOKEN", "value": "x"}]}, 400, "secrets"),
         ("/api/agent-settings/system", {"env": [{"key": "TZ", "value": None}]}, 400, "at most 4000"),
         ("/api/agent-settings/system", {"run_budget_usd": 0}, 400, "more than 0"),
-        ("/api/agent-settings/system", {"profile_id": "agent-sonnet", "effort": "extreme"}, 400, "one of"),
+        ("/api/agent-settings/system", {"profile_id": "agent-sonnet", "effort": "high"}, 400,
+         "choose or create a profile with the effort you want"),
         ("/api/agent-settings/system", {"default_model": "sonnet"}, 400, "unknown field"),
         ("/api/agent-settings/system", {}, 400, "at least one"),
         ("/api/agent-settings/system", b"not json", 400, "invalid JSON"),
@@ -521,7 +523,7 @@ class TestConcurrencyLimits:
     @pytest.mark.parametrize(("path", "body", "rechecked"), [
         ("/api/agent-settings/roles/worker", {"max_concurrency": 4}, True),
         ("/api/projects/proj-a/agent-settings/roles/planner", {"max_concurrency": None}, True),
-        ("/api/agent-settings/roles/worker", {"effort": "low"}, False),
+        ("/api/agent-settings/roles/worker", {"run_budget_usd": 1}, False),
         ("/api/agent-settings/roles/worker", {"max_concurrency": 0}, False),  # refused: nothing changed
     ])
     def test_a_changed_limit_tells_the_router_and_the_pool_to_start_what_it_allows(

@@ -889,8 +889,8 @@ class TestSystemPrompt:
 
 
 def _settings(agent_db: Any, **stored: str) -> None:
-    """What the system layer holds: harness, the profile of a model, effort and env (a JSON list)."""
-    names = {"harness": "harness_prompt", "model": "profile", "effort": "effort", "env": "env"}
+    """What the system layer holds: harness, the profile of a model and env (a JSON list)."""
+    names = {"harness": "harness_prompt", "model": "profile", "env": "env"}
     agent_db.list_layers.return_value = [
         {"scope": "system", **{names[k]: json.loads(v) if k == "env" else profile_json(v) if k == "model" else v
                                for k, v in stored.items()}}]
