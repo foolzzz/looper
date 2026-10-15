@@ -63,6 +63,13 @@ if args[:4] == ["im", "+messages-send", "--as", "bot"]:
         refuse("Bot/User can NOT be out of the chat")
     answer({{"ok": True}})
 if args == ["event", "consume", "im.message.receive_v1", "--as", "bot"]:
+    # Like lark-cli 1.0.97: stdin EOF is the signal to stop, so a consumer whose stdin is /dev/null or closed
+    # stops before it delivers anything.
+    import os, select
+    ready, _, _ = select.select([0], [], [], 0.2)
+    if ready and os.read(0, 1) == b"":
+        print("[event] stdin closed — shutting down.", file=sys.stderr, flush=True)
+        sys.exit(0)
     for event in world["events"]:
         print(json.dumps(event), flush=True)
     sys.exit(0)
@@ -100,5 +107,14 @@ def lark_cli_stand_in(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     fake_claude(bin_dir / "lark-cli", _STAND_IN.format(log=str(log), world=str(world)))
     monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
     lark_cli.forget()
-    yield log
-    lark_cli.forget()
+    # The server runs with stdin at /dev/null under launchd; a child that inherits it sees EOF at once.
+    saved_stdin = os.dup(0)
+    devnull = os.open(os.devnull, os.O_RDONLY)
+    os.dup2(devnull, 0)
+    os.close(devnull)
+    try:
+        yield log
+    finally:
+        os.dup2(saved_stdin, 0)
+        os.close(saved_stdin)
+        lark_cli.forget()
