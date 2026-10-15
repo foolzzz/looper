@@ -336,12 +336,13 @@ def _models(raw: Any) -> list[dict[str, Any]]:
 def _provider_env(raw: Any) -> list[dict[str, str]]:
     """A provider's own environment variables, ``[{"key", "value"}]``: like the settings' (no credentials, which
     belong in ``api_key``), and none that a runtime's provider binding owns (``provider_env_owned``)."""
-    from .agent_settings import SettingsError, environment
+    from .agent_settings import SettingsError, agent_teams_env, environment
 
     if raw is None:
         return []
     try:
         env = environment(raw)
+        agent_teams_env(env)
     except SettingsError as exc:
         raise RegistryError(f"env: {exc}") from None
     for adapter in runtimes.ADAPTERS.values():

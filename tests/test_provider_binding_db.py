@@ -187,6 +187,7 @@ def test_a_profile_whose_models_have_no_price_is_registered_with_a_warning(monke
     ([{"key": "ANTHROPIC_BASE_URL", "value": "x"}], "set by the Claude Code binding"),
     ([{"key": "ANTHROPIC_DEFAULT_HAIKU_MODEL", "value": "x"}], "set by the Claude Code binding"),
     ([{"key": "MY_API_TOKEN", "value": "x"}], "looks like a credential"),
+    ([{"key": "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS", "value": "1"}], "Agent Profile's agent teams switch"),
 ])
 def test_a_providers_own_env_cannot_set_what_the_binding_owns_or_hold_a_secret(
     monkeypatch: pytest.MonkeyPatch, env: list[dict[str, str]], error: str,

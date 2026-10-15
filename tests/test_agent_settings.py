@@ -302,6 +302,18 @@ class TestValidation:
         with pytest.raises(SettingsError, match="secrets do not belong"):
             agent_settings.environment([{"key": key, "value": "v"}])
 
+    @pytest.mark.parametrize(("scope", "role"), [(Layer.SYSTEM, None), (Layer.ROLE, AgentType.WORKER),
+                                                 (Layer.PROJECT, None), (Layer.ROLE_PROJECT, AgentType.PLANNER)])
+    def test_the_agent_teams_variable_is_refused_in_every_layer_but_a_stored_one_still_loads(
+        self, scope: Layer, role: AgentType | None,
+    ) -> None:
+        env = [{"key": "LANG", "value": "C"}, {"key": "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS", "value": "1"}]
+        with pytest.raises(SettingsError, match="Agent Profile's agent teams switch"):
+            agent_settings.layer_update({"env": env}, scope, role)
+        # A layer stored before the switch keeps its other variables; a run removes this one (runtimes.claude_code).
+        stored = LayerValues.from_row({"scope": scope.value, "env": env})
+        assert stored.env == (("LANG", "C"), ("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS", "1"))
+
     @pytest.mark.parametrize("raw", [
         {"LANG": "C"}, [["LANG", "C"]], [{"key": "LANG"}], [{"key": "LANG", "value": 1}],
         [{"key": "LANG", "value": "a\x00b"}], [{"key": "LANG", "value": "x", "extra": 1}],
