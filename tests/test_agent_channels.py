@@ -90,6 +90,74 @@ class TestWebChannelAdapter:
 
         asyncio.run(_run())
 
+    @pytest.mark.parametrize("page_left", [False, True])
+    def test_a_messages_answer_is_saved_to_its_chat_under_its_reply_id_even_after_the_page_left(
+        self, monkeypatch: pytest.MonkeyPatch, page_left: bool,
+    ) -> None:
+        """The page used to save the answer when its stream ended: leaving the page before that lost it."""
+        from unittest.mock import AsyncMock
+
+        from looper.db import chat
+
+        save = AsyncMock(return_value=None)
+        monkeypatch.setattr(chat, "save_message", save)
+
+        async def _run() -> None:
+            with tempfile.TemporaryDirectory() as tmp:
+                bus = MessageBus(runtime_root=Path(tmp))
+                adapter = WebChannelAdapter()
+                await adapter.start(bus)
+                reopened = adapter.iter_chat_events("chat-1")
+                correlation_id = (await adapter.handle_user_message(
+                    text="what is a project?", session_id="chat-1", message_id="m1"))["correlation_id"]
+                if page_left:
+                    adapter.close_sse_stream(correlation_id)
+                answer = MessageEnvelope.create(
+                    source=MANAGER_ADDRESS, target=channel_address("web", "channel-web"),
+                    message_type=MessageType.AGENT_REPLY, payload={"text": "a group of tasks"},
+                    correlation_id=correlation_id,
+                )
+                assert (await adapter.deliver(answer)).success
+                save.assert_awaited_once_with(session_id="chat-1", message_id="m1:reply", role="assistant",
+                                              content="a group of tasks")
+                pushed = await asyncio.wait_for(anext(reopened), 1)
+                assert (pushed["kind"], pushed["payload"]["message_id"]) == ("chat.message", "m1:reply")
+                if not page_left:
+                    assert adapter._sse_queues[correlation_id].get_nowait()["kind"] == "answer.final"
+                # Saved once: a later answer to the same message is not saved again.
+                await adapter.deliver(answer)
+                save.assert_awaited_once()
+                await reopened.aclose()
+                await adapter.stop()
+                await bus.shutdown()
+
+        asyncio.run(_run())
+
+    def test_an_answer_to_a_message_outside_any_chat_is_not_saved(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from unittest.mock import AsyncMock
+
+        from looper.db import chat
+
+        save = AsyncMock(return_value=None)
+        monkeypatch.setattr(chat, "save_message", save)
+
+        async def _run() -> None:
+            with tempfile.TemporaryDirectory() as tmp:
+                bus = MessageBus(runtime_root=Path(tmp))
+                adapter = WebChannelAdapter()
+                await adapter.start(bus)
+                correlation_id = (await adapter.handle_user_message(text="hi", session_id="chat-1"))["correlation_id"]
+                answer = MessageEnvelope.create(
+                    source=MANAGER_ADDRESS, target=channel_address("web", "channel-web"),
+                    message_type=MessageType.AGENT_REPLY, payload={"text": "hello"}, correlation_id=correlation_id,
+                )
+                assert (await adapter.deliver(answer)).success
+                save.assert_not_awaited()
+                await adapter.stop()
+                await bus.shutdown()
+
+        asyncio.run(_run())
+
     def test_a_reply_naming_a_chat_session_is_pushed_live_to_that_open_chat_only(
         self, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
