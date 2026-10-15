@@ -968,7 +968,10 @@ function RunHistory({ schedule, open, version }: { schedule: ScheduleInfo; open:
   const [error, setError] = useState("");
   const latest = useRef(0);
   const scheduleId = schedule.schedule_id;
-  const newest = schedule.last_run ? `${schedule.last_run.run_id}:${schedule.last_run.status}` : "";
+  // A run that counts repeated skips changes by its count.
+  const newest = schedule.last_run
+    ? `${schedule.last_run.run_id}:${schedule.last_run.status}:${schedule.last_run.firings}`
+    : "";
 
   const load = useCallback(() => {
     const mine = ++latest.current;
@@ -1091,6 +1094,7 @@ export function LastRun({ schedule }: { schedule: ScheduleInfo }) {
           <>
             Last run
             <RunStatusBadge status={schedule.last_run.status} />
+            {schedule.last_run.firings > 1 && <span className="tabular-nums">×{schedule.last_run.firings}</span>}
           </>
         ) : (
           "No runs yet"
