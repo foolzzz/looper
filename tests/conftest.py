@@ -71,7 +71,11 @@ class _PlanStore:
     ``tasks`` holds the task rows a plan is read back with (``requirement``,
     ``goal_id``, ``work_dir``, ``project_id``); a test that restarts a Planner
     sets its task there. ``ready`` holds the tasks created ready
-    (``create_task``) until one is started (``start_ready_task``).
+    (``create_task``) until one is started (``start_ready_task``). Every
+    journal entry gets an id; a supplement (``add_supplement``) is pending
+    until ``mark_delivered``, and ``requirements`` holds a task's requirement
+    edit not delivered yet (``task_changes.RequirementEdit``), as
+    ``task_changes.pending`` reads them.
     """
 
     def __init__(self) -> None:
@@ -81,6 +85,35 @@ class _PlanStore:
         self.tasks: dict[str, dict[str, Any]] = {}
         self.journal: dict[str, list[dict[str, Any]]] = {}
         self.ready: dict[str, dict[str, Any]] = {}
+        self.requirements: dict[str, Any] = {}
+        self._ids = iter(range(1, 1_000_000))
+
+    async def add_supplement(self, task_id: str, text: str, *, via: str, **_: object) -> int:
+        entry_id = next(self._ids)
+        self.journal.setdefault(task_id, []).append({"id": entry_id, "step_id": "", "kind": "supplement",
+                                                     "summary": text, "learnings": [], "via": via,
+                                                     "delivered": False})
+        return entry_id
+
+    async def pending(self, task_id: str, **_: object) -> Any:
+        from looper.db.task_changes import Supplement, TaskChanges
+
+        return TaskChanges(
+            tuple(Supplement(e["id"], e["summary"], e["via"]) for e in self.journal.get(task_id, [])
+                  if e["kind"] == "supplement" and not e["delivered"]),
+            self.requirements.get(task_id))
+
+    async def mark_delivered(self, task_id: str, changes: Any, **_: object) -> None:
+        delivered = {supplement.id for supplement in changes.supplements}
+        for entry in self.journal.get(task_id, []):
+            if entry.get("id") in delivered:
+                entry["delivered"] = True
+        if changes.requirement is not None:
+            self.requirements.pop(task_id, None)
+
+    async def list_entries(self, task_id: str, **_: object) -> list[dict[str, Any]]:
+        keys = {step["id"]: step["key"] for step in self.steps.get(task_id, {}).values()}
+        return [{**entry, "step_key": keys.get(entry["step_id"], "")} for entry in self.journal.get(task_id, [])]
 
     async def create_task(self, *, task_id: str, status: str = "pending", **row: Any) -> None:
         if status == "init":
@@ -95,7 +128,8 @@ class _PlanStore:
         for step in steps:
             self.steps.setdefault(task_id, {})[step["id"]] = json.loads(json.dumps(dict(step)))
         for entry in journal:
-            self.journal.setdefault(task_id, []).append(json.loads(json.dumps(dict(entry))))
+            self.journal.setdefault(task_id, []).append({"id": next(self._ids), "delivered": True,
+                                                         **json.loads(json.dumps(dict(entry)))})
 
     async def load(self, task_id: str, **_: object) -> dict[str, Any] | None:
         if task_id not in self.plans:
@@ -352,7 +386,7 @@ def agent_db(monkeypatch: pytest.MonkeyPatch, stub_claude_on_path: Path) -> Simp
         mock = AsyncMock(return_value=value)
         monkeypatch.setattr(importlib.import_module(f"looper.db.{module_name}"), function, mock)
         setattr(db, function, mock)
-    from looper.db import agent_sessions, plans, tasks
+    from looper.db import agent_sessions, journal as db_journal, plans, task_changes, tasks
 
     db.store = store = _PlanStore()
     for module, name, function, method in (
@@ -361,6 +395,10 @@ def agent_db(monkeypatch: pytest.MonkeyPatch, stub_claude_on_path: Path) -> Simp
         (agent_sessions, "get_session", "get_session", store.get_session),
         (tasks, "create_task", "create_task", store.create_task),
         (tasks, "start_ready_task", "start_ready_task", store.start_ready_task),
+        (task_changes, "add_supplement", "add_supplement", store.add_supplement),
+        (task_changes, "pending_changes", "pending", store.pending),
+        (task_changes, "mark_delivered", "mark_delivered", store.mark_delivered),
+        (db_journal, "list_entries", "list_entries", store.list_entries),
     ):
         mock = AsyncMock(side_effect=method)
         monkeypatch.setattr(module, function, mock)

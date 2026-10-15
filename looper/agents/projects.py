@@ -16,6 +16,7 @@ effort, environment, per-run cap) are layers of their own (``agent_settings``,
 from __future__ import annotations
 
 import json
+import logging
 import re
 import uuid
 from typing import Any
@@ -25,9 +26,11 @@ import asyncpg
 from ..db import agent_setting_layers as db_layers, connection as db_connection, llm_records as db_llm_records
 from ..db import projects as db_projects, tasks as db_tasks
 from .bus import MessageBus
-from .message import TASK_ROUTER_ADDRESS, AgentAddress, MessageEnvelope, MessageType
+from .message import TASK_ROUTER_ADDRESS, AgentAddress, MessageEnvelope, MessageType, planner_address
 from .project_execution import FIELDS as EXECUTION_FIELDS, ProjectExecution, execution_fields, format_usd
 from .tiers.task import TaskRouter, resolve_work_dir
+
+logger = logging.getLogger(__name__)
 
 HTTP_400 = "400 Bad Request"
 HTTP_404 = "404 Not Found"
@@ -315,6 +318,61 @@ async def start_ready_task(task_id: str, bus: MessageBus, source: AgentAddress) 
         source=source, target=TASK_ROUTER_ADDRESS, message_type=MessageType.TASK_START, payload={"task_id": task_id},
     ))
     return {"started": task_id, "project_id": task["project_id"]}
+
+
+# How a change to a task came: on the task page, or in a message sent to its Planner on the Chat page.
+VIA_TASK_PAGE = "task_page"
+VIA_CHAT = "chat"
+# The statuses a task's requirement can be edited in: not started, waiting for room, or running.
+EDITABLE_STATUSES = (db_tasks.READY, "pending", "assigned", "running", "executing")
+
+
+async def store_chat_supplement(target: AgentAddress, text: str) -> int | None:
+    """Store a chat message sent to a task's Planner as a supplement of the task, before the Planner gets it, so a
+    restart meanwhile does not lose it; its id, or None for a message to another agent (or when it could not be
+    stored: the Planner stores it then)."""
+    if target.agent_type != "planner":
+        return None
+    from ..db import task_changes
+    from .tiers.journal import SUPPLEMENTS_MAX_CHARS, kept_text
+
+    try:
+        return await task_changes.add_supplement(target.agent_id.removeprefix("planner-"),
+                                                 kept_text(text, SUPPLEMENTS_MAX_CHARS), via=VIA_CHAT)
+    except Exception:
+        logger.exception("could not store a chat message to %s as a supplement", target.agent_id)
+        return None
+
+
+async def edit_requirement(
+    task_id: str, data: dict[str, Any], *, task_router: TaskRouter, bus: MessageBus, source: AgentAddress, via: str,
+) -> dict[str, Any]:
+    """Make ``data["requirement"]`` the task's requirement, keeping the old text as a version: 404 for an unknown
+    task, 409 for one that has ended, 400 for an empty or unchanged text. A running task's Planner gets the edit in
+    a turn (``TASK_CHANGE``), and so does one waiting for room, at its PLAN turn; a task not started plans the
+    new text."""
+    from ..db import task_changes
+
+    requirement = data.get("requirement")
+    if not isinstance(requirement, str) or not requirement.strip():
+        raise RequestError(HTTP_400, "requirement must be a non-empty string")
+    task = await db_tasks.get_task(task_id)
+    if task is None:
+        raise RequestError(HTTP_404, "task not found")
+    if task["status"] not in EDITABLE_STATUSES:
+        raise RequestError(HTTP_409, f"the task is {task['status']}: only a task that has not ended can change; "
+                                     "start it again to run the requirement it has")
+    if requirement == task["requirement"]:
+        raise RequestError(HTTP_400, "the requirement is unchanged")
+    not_started = task["status"] == db_tasks.READY
+    version = await task_changes.edit_requirement(task_id, requirement, via=via, delivered=not_started)
+    if version is None:
+        raise RequestError(HTTP_404, "task not found")
+    if task_router.has_planner(task_id):
+        await bus.publish(MessageEnvelope.create(
+            source=source, target=planner_address(task_id), message_type=MessageType.TASK_CHANGE,
+            payload={"task_id": task_id}))
+    return {"task_id": task_id, "version": version, "requirement": requirement}
 
 
 async def raise_cap_to_continue(task_id: str, data: dict[str, Any]) -> dict[str, Any]:

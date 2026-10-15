@@ -37,7 +37,7 @@ def test_every_kind_is_saved_and_read_back_in_order(monkeypatch: pytest.MonkeyPa
 
     async def test(pool: Any) -> None:
         await _task(pool)
-        entries = [{"step_id": "" if kind in ("user_instruction", "session_switch", "handoff") else "step-1",
+        entries = [{"step_id": "" if kind in ("supplement", "session_switch", "handoff") else "step-1",
                     "kind": kind, "summary": f"{kind} happened", "learnings": ["a pitfall"]}
                    for kind in (k.value for k in JournalKind)]
         await plans.save("task-a", journal=entries, pool=pool)

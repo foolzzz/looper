@@ -71,6 +71,7 @@ class ChatAction(str, Enum):
     NONE = "none"
     FORWARD = "forward"
     ADD_STEPS = "add_steps"
+    REPLAN = "replan"
 
 
 class ResultKind(str, Enum):
@@ -157,7 +158,8 @@ class ChatReply:
     action: ChatAction
     step: str  # forward only: the running step whose Worker gets ``text``
     text: str  # forward only
-    steps: tuple[StepSpec, ...]  # add_steps only
+    steps: tuple[StepSpec, ...]  # add_steps, and replan (the steps that replace every step not started)
+    stop: tuple[str, ...] = ()  # replan only: running steps to stop and drop
 
 
 @dataclass(frozen=True)
@@ -192,11 +194,13 @@ class PlanView:
     retired: frozenset[str] = frozenset()
     spent: int = 0
     running: frozenset[str] = frozenset()
+    done: frozenset[str] = frozenset()  # the started steps that are verified
 
     def dropping(self, step: str) -> PlanView:
         """This plan once ``step``, a started step, is dropped."""
         started = {k: v for k, v in self.started.items() if k != step}
-        return PlanView(started, self.pending, self.retired | {step}, self.spent + 1, self.running - {step})
+        return PlanView(started, self.pending, self.retired | {step}, self.spent + 1, self.running - {step},
+                        self.done)
 
 
 @dataclass(frozen=True)
@@ -334,7 +338,7 @@ def parse_handoff(text: str) -> str:
 
 def parse_chat(text: str, plan: PlanView) -> ChatReply:
     data = extract_reply(text)
-    _only_keys(data, {"reply", "action", "step", "text", "steps"}, "the CHAT reply")
+    _only_keys(data, {"reply", "action", "step", "text", "steps", "stop"}, "the CHAT reply")
     reply = _required_text(data, "reply")
     raw = data.get("action")
     try:
@@ -344,11 +348,14 @@ def parse_chat(text: str, plan: PlanView) -> ChatReply:
         raise ProtocolError(f"action must be one of {choices}; got {raw!r}") from None
     if action is not ChatAction.FORWARD and ("step" in data or "text" in data):
         raise ProtocolError("step and text are only for action forward")
-    if action is not ChatAction.ADD_STEPS and "steps" in data:
-        raise ProtocolError("steps is only for action add_steps")
+    if action not in (ChatAction.ADD_STEPS, ChatAction.REPLAN) and "steps" in data:
+        raise ProtocolError("steps is only for actions add_steps and replan")
+    if action is not ChatAction.REPLAN and "stop" in data:
+        raise ProtocolError("stop is only for action replan")
 
     step = text_out = ""
     steps: tuple[StepSpec, ...] = ()
+    stop: tuple[str, ...] = ()
     if action is ChatAction.FORWARD:
         step = _required_text(data, "step")
         if step not in plan.running:
@@ -360,7 +367,30 @@ def parse_chat(text: str, plan: PlanView) -> ChatReply:
         if not steps:
             raise ProtocolError("add_steps must list at least one step")
         _check_new_steps(steps, plan, replace_pending=False)
-    return ChatReply(reply, action, step, text_out, steps)
+    elif action is ChatAction.REPLAN:
+        steps = _step_list(data.get("steps", []), "steps")
+        stop = _stop_list(data.get("stop", []), plan)
+        after = plan
+        for label in stop:
+            after = after.dropping(label)
+        _check_new_steps(steps, after, replace_pending=True)
+        if not steps and not set(after.started) - after.done:
+            raise ProtocolError("after this replan no step would be left to run; list the steps that replace the "
+                                "ones not started (or stop fewer running steps)")
+    return ChatReply(reply, action, step, text_out, steps, stop)
+
+
+def _stop_list(value: Any, plan: PlanView) -> tuple[str, ...]:
+    """A replan's ``stop``: running steps, each once."""
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        raise ProtocolError("stop must be a list of running step ids")
+    if len(set(value)) != len(value):
+        raise ProtocolError("stop lists a step twice")
+    for label in value:
+        if label not in plan.running:
+            running = ", ".join(sorted(plan.running)) or "none"
+            raise ProtocolError(f"stop: step {label!r} has no running Worker (running: {running})")
+    return tuple(value)
 
 
 def parse_supervise(text: str, running: frozenset[str]) -> SuperviseReply:
@@ -608,15 +638,23 @@ result. The message lists the decisions allowed now.
   that it works (commands run and what they showed), and what is left open
   ("none" when nothing).
 
-[CHAT]: answer a message from the user about the task.
+[CHAT]: the task changed: the user added a supplement to it (every message
+the user sends you is one) or edited its requirement. Answer, and decide
+whether the plan still fits the task as it is now.
 ```json
 {{"reply": "...", "action": "none"}}
 ```
 - reply: your answer to the user, in their language.
+- action "none": the plan fits as it is.
 - action "forward": also pass "text" to the Worker running step "step" (a step
   the message lists as running); it reads the text at its next turn.
 - action "add_steps": add "steps" (the PLAN step shape, with new ids) to the
   plan.
+- action "replan": "steps" (the PLAN step shape) replaces every step that has
+  not started; started steps cannot change, and the new steps may depend on
+  them. "stop" (optional): running steps the change makes wrong; their
+  Workers are stopped and the steps dropped. At least one step must be left
+  to run.
 
 [SUPERVISE]: a periodic check on the Workers running now (no result arrived).
 The message lists each running step and its recent activity. Review only the

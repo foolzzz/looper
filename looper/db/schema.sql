@@ -189,8 +189,9 @@ ALTER TABLE agent_sessions ADD COLUMN IF NOT EXISTS clean_start BOOLEAN NOT NULL
 -- A task's journal: what happened in it that a later agent or session needs.
 -- Code writes an entry, never the model, when its event happens: a step
 -- accepted ('step_accepted', in the transaction that settles it), failed or
--- retried, a Planner decision that changes the plan, a user's chat message to
--- the Planner, a new Planner session and the handoff its old session wrote.
+-- retried, a Planner decision that changes the plan, a supplement (what the
+-- user added to the task while it ran), a new Planner session and the handoff
+-- its old session wrote.
 -- step_id is '' for an entry of the whole task. The Planner's turns and a
 -- Worker's first turn get the entries back in bounded sections; code owns the
 -- kinds (looper/agents/tiers/journal.py).
@@ -199,16 +200,33 @@ CREATE TABLE IF NOT EXISTS task_journal (
     task_id     TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
     step_id     TEXT NOT NULL,
     kind        TEXT NOT NULL CONSTRAINT task_journal_kind_check CHECK (kind IN (
-                    'step_accepted', 'step_failed', 'step_retry', 'decision', 'user_instruction',
+                    'step_accepted', 'step_failed', 'step_retry', 'decision', 'supplement',
                     'session_switch', 'handoff', 'progress')),
     summary     TEXT NOT NULL DEFAULT '',
     learnings   TEXT[] NOT NULL DEFAULT '{}',
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+-- A supplement's way in ('chat': sent to the Planner on the Chat page; 'manager:<channel>'; 'task_page') and when
+-- its task's Planner had it in a turn (NULL: not yet; the Planner's next turn gives it). Unused by other kinds.
+ALTER TABLE task_journal ADD COLUMN IF NOT EXISTS via TEXT NOT NULL DEFAULT '';
+ALTER TABLE task_journal ADD COLUMN IF NOT EXISTS delivered_at TIMESTAMPTZ;
 CREATE INDEX IF NOT EXISTS idx_task_journal_task ON task_journal (task_id, id);
 -- A step is accepted once.
 CREATE UNIQUE INDEX IF NOT EXISTS idx_task_journal_accepted ON task_journal (task_id, step_id)
     WHERE kind = 'step_accepted';
+
+-- Every version of a task's requirement once it has been edited (tasks.requirement is always the latest; a task
+-- never edited has none). Version 1 is the text it was created with. delivered_at: when the task's Planner had the
+-- edit in a turn (NULL: not yet; set at once for a task that has no Planner yet, which plans the latest text).
+CREATE TABLE IF NOT EXISTS task_requirement_versions (
+    task_id       TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    version       INTEGER NOT NULL CHECK (version >= 1),
+    text          TEXT NOT NULL,
+    via           TEXT NOT NULL DEFAULT '',
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    delivered_at  TIMESTAMPTZ,
+    PRIMARY KEY (task_id, version)
+);
 
 -- Each role's own settings: its display name, role prompt and timeout (manager, planner, worker, reviewer).
 CREATE TABLE IF NOT EXISTS role_configs (
@@ -411,6 +429,21 @@ BEGIN
             'step_accepted', 'step_failed', 'step_retry', 'decision', 'user_instruction', 'session_switch',
             'handoff', 'progress'));
         INSERT INTO schema_migrations (name) VALUES ('task_journal_kinds_progress');
+    END IF;
+END $$;
+
+-- Once (task changes): every chat message to a Planner is a supplement now. The user instructions from before
+-- become supplements their Planner already had, sent on the Chat page.
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM schema_migrations WHERE name = 'task_journal_supplements') THEN
+        ALTER TABLE task_journal DROP CONSTRAINT IF EXISTS task_journal_kind_check;
+        UPDATE task_journal SET kind = 'supplement', via = 'chat', delivered_at = created_at
+        WHERE kind = 'user_instruction';
+        ALTER TABLE task_journal ADD CONSTRAINT task_journal_kind_check CHECK (kind IN (
+            'step_accepted', 'step_failed', 'step_retry', 'decision', 'supplement', 'session_switch',
+            'handoff', 'progress'));
+        INSERT INTO schema_migrations (name) VALUES ('task_journal_supplements');
     END IF;
 END $$;
 

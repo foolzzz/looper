@@ -42,6 +42,9 @@ class MessageType(str, Enum):
     # Task lifecycle
     # Dashboard or Manager → TaskRouter: start a ready task (created, never started).
     TASK_START = "task_start"
+    # Dashboard or Manager → a task's Planner: the task changed (a supplement, a requirement edit); stored first, so
+    # this only wakes the Planner, which takes every change waiting.
+    TASK_CHANGE = "task_change"
     TASK_CANCEL = "task_cancel"
     TASK_STOP = "task_stop"
     TASK_RESTART = "task_restart"

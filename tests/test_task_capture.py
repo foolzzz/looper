@@ -1,9 +1,9 @@
 """What a task captures as it happens, and what a new session gets back (M7c).
 
 The task journal records failures and retries with their learnings, the
-Planner's decisions with their reasons, the user's instructions and new
+Planner's decisions with their reasons, the supplements and new
 sessions with the handoff before them; the Planner's turns and a Worker's
-first turn carry it back, user instructions first and whole. When the
+first turn carry it back, supplements first and whole. When the
 Planner's or the Manager's agent can no longer resume its session, the old
 session hands over while it runs, and the new session's first turn starts
 with a resume brief; without a usable old session, the brief comes from the
@@ -125,10 +125,10 @@ class TestJournalKinds:
             (plan(step("s1")), chat("Will do.", "add_steps", steps=[step("s2", "s1")]), decide("accept"),
              decide("accept")),
             hold_first(), _chat_while_s1_runs,
-            [("user_instruction", "", [INSTRUCTION], []),
+            [("supplement", "", [INSTRUCTION], []),
              ("decision", "", ["added steps s2 (after s1)", "Will do."], []),
              ("step_accepted", "s1", ["did it"], []), ("step_accepted", "s2", ["did it"], [])],
-            id="user-instruction-and-added-steps"),
+            id="supplement-and-added-steps"),
     ])
     def test_each_kind_is_written_when_its_event_happens(
         self, planner_claude: Any, agent_db: Any, replies: tuple[str, ...], outcome: Any, scenario: Any,
@@ -165,10 +165,10 @@ def _big(key: str) -> dict[str, Any]:
 
 @pytest.mark.usefixtures("agent_db")
 class TestInjection:
-    def test_user_instructions_come_first_and_whole_and_pitfalls_outlive_newer_entries(
+    def test_supplements_come_first_and_whole_and_pitfalls_outlive_newer_entries(
         self, planner_claude: Any,
     ) -> None:
-        """Three big accepted steps overflow the progress cap; a long instruction and an old retry stay."""
+        """Three big accepted steps overflow the progress cap; a long supplement and an old retry stay."""
         instruction = "\n".join(f"line {n}: " + "y" * 240 for n in range(10))  # about 2,500 characters
         claude = planner_claude(
             plan(step("s1"), step("s2", "s1"), step("s3", "s2"), step("s4", "s3")),
@@ -190,8 +190,8 @@ class TestInjection:
         h = drive(claude, outcome, scenario)
         decision_on_s4 = _texts(claude)[-1]
         assert decision_on_s4.startswith("[DECISION] Step s4")
-        # The instruction is whole, every line of it, before the journal, outside its cap.
-        instructions = decision_on_s4[decision_on_s4.index("User instructions"):
+        # The supplement is whole, every line of it, before the journal, outside its cap.
+        instructions = decision_on_s4[decision_on_s4.index("Supplements"):
                                       decision_on_s4.index("Progress and findings")]
         assert "- " + instruction.replace("\n", "\n  ") in instructions
         progress = decision_on_s4[decision_on_s4.index("Progress and findings"):
@@ -203,10 +203,12 @@ class TestInjection:
         assert progress.index("Retried attempts:") < progress.index(PITFALL) < progress.index("Accepted steps:")
         assert progress.index("- s3: s3 done") < progress.index("- s2: s2 done")
         assert "s1-tip" not in progress
-        # A Worker's first turn has the instruction whole too, then its dependency, then the pitfall.
-        findings = next(w for w in h.work_items if w.payload["step_key"] == "s4").payload["findings"]
-        assert findings.index(instruction.replace("\n", "\n  ")) < findings.index("Findings so far")
-        assert findings.index("- s3: s3 done") < findings.index(PITFALL)
+        # A later Worker has the supplement whole in its task section, and its dependency before the pitfall in
+        # its first turn's findings.
+        work_item = next(w for w in h.work_items if w.payload["step_key"] == "s4").payload
+        assert work_item["supplements"] == [instruction]
+        assert "line 0" not in work_item["findings"]
+        assert work_item["findings"].index("- s3: s3 done") < work_item["findings"].index(PITFALL)
 
 
 # --- A new Planner session: the handoff and the resume brief ---
@@ -284,7 +286,7 @@ class TestNewPlannerSession:
         _assert_brief(first_new, handoff=handoff)
         assert not any(text.startswith("[RESUME]") for text in later)
         assert [kind for kind, *_ in _journal(agent_db)] == [
-            "user_instruction", "step_retry", "handoff", "session_switch", "step_accepted", "step_accepted"]
+            "supplement", "step_retry", "handoff", "session_switch", "step_accepted", "step_accepted"]
         assert any("The Planner starts a new session (agent changed" in line for line in activity(agent_db))
 
     @pytest.mark.parametrize("unusable", ["handoff-fails", "process-gone", "session-lost"])
@@ -340,7 +342,7 @@ def _assert_brief(text: str, *, handoff: str | None) -> None:
     else:
         assert "Your previous session wrote no handoff" in brief
     assert "Where the task is: 0 of 2 steps accepted, 1 under way, 0 failed." in brief
-    assert request.index("User instructions") < request.index(INSTRUCTION.splitlines()[0]) \
+    assert request.index("Supplements") < request.index(INSTRUCTION.splitlines()[0]) \
         < request.index("Progress and findings") < request.index(PITFALL)
 
 
