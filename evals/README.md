@@ -6,7 +6,7 @@ Tells you whether a change to a recommended role prompt, a code-owned contract
 (`REPLY_CONTRACT`, `WORK_CONTRACT`, `REVIEW_CONTRACT`) or the way the system
 prompt is put together makes the agents worse.
 
-It runs five small tasks through a disposable `looper serve` (a new
+It runs seven small tasks through a disposable `looper serve` (a new
 PostgreSQL database, a free port, a temporary runtime root and working
 directories), one at a time over the HTTP API:
 
@@ -14,13 +14,18 @@ directories), one at a time over the HTTP API:
 |---|---|
 | `single_step` | one step |
 | `dependent_steps` | two steps, the second depending on the first |
+| `parallel_parts` | two parts that need nothing of each other, then one that needs both: the plan must leave the two independent and their Workers must run at the same time |
+| `interface_first` | a service and its client that must agree on a request format the requirement leaves open: the plan must have a step both parts depend on (the interface), the two parts independent and running at the same time, and a step that depends on both (the integration); the client must work |
 | `reviewed_step` | a step an independent Reviewer must pass |
 | `retry_after_failure` | a step that fails once (a flaky `build.sh`) and is retried |
 | `chat_correction` | a correction sent to the task's Planner mid-task |
 
 For each task it reads back from the API: success (the task completed, its
 files are right and the flow happened, such as the review or the retry), step
-count, retries, reviews, cost (the task cost API), tokens (the runs' records: prompt, uncached
+count, the pairs of steps the plan lets run at the same time
+(`independent_pairs`), those of them with a step both depend on and a step
+that depends on both (`bracketed_pairs`), and the most Workers that ran at once
+(`parallel_workers`, from the runs' records), retries, reviews, cost (the task cost API), tokens (the runs' records: prompt, uncached
 and cached, and output; what a runtime without prices still reports), contract violations
 (replies the Planner's reply parser or the Worker/Reviewer report check
 rejected) and whether the Planner modified files itself (its file-editing tool
@@ -55,9 +60,16 @@ run gets `--max-budget-usd` (default 0.25), and the run stops once its tasks
 have spent `--total-cap-usd` (default 0.80); a task that reaches the cap is
 cancelled and the rest are skipped. `--model` sets the model in the system
 settings layer of the run's database, so every agent uses it. A full run costs
-about $0.33 with haiku (about 3.5 minutes), $0.62 with sonnet and $1.30 with
-opus (about 3 minutes each); give opus a higher `--total-cap-usd`, such as
-2.50. Expect some noise between identical runs: cost
+about $0.61 with haiku (about 6 minutes); before `parallel_parts` and
+`interface_first` were added, the other five cost $0.62 with sonnet and $1.30
+with opus (about 3 minutes each), so give sonnet and opus a higher
+`--total-cap-usd`, such as 1.50 and 3.00 (`interface_first` alone costs about
+$0.87 with opus). With haiku, `interface_first` fails on the plan's shape: its
+Planner chains the service, the client and the check. With opus it passes on
+the Planner prompt from before `interface_first` was added and on the current
+one alike (one run each): the Planner pins the protocol in a file first, builds
+the two parts side by side and checks them together last. Expect some noise
+between identical runs: cost
 moves by up to about 10%, and an occasional single contract violation that a
 repair turn fixes is not a regression by itself.
 

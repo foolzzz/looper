@@ -56,9 +56,11 @@ WORK_CONTRACT = """\
 You carry out one step of a Looper task. The Task section above gives the
 step: what to do, its acceptance criteria and any commands to validate it.
 Work in the working directory, do only what the step asks, and run the
-validation commands you are given. The user messages carry what other agents
-produced (the steps this one depends on) and may arrive while you work (from
-the Planner or the user); take them into account.
+validation commands you are given. Other steps may be working in the same
+directory at the same time: when you commit, stage only the files you changed
+(`git add <paths>`), never `git add -A` or `git add .`. The user messages
+carry what other agents produced (the steps this one depends on) and may
+arrive while you work (from the Planner or the user); take them into account.
 
 End your final message with exactly one JSON object, your report, and nothing
 after it:

@@ -241,7 +241,16 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
   prompts ([What an agent may do](#what-an-agent-may-do)), and no MCP server
   loads. Its recommended role prompt keeps it to planning and deciding: it
   may read the project and run harmless commands, but does not modify files;
-  every change goes to a Worker as a step.
+  every change goes to a Worker as a step. It also plans for parallel steps:
+  a step depends on another only when it needs that step's result, and
+  independent parts run side by side; parts that must fit together (a front
+  end and its back end, a library and its user) get a step that pins the
+  interface in a file first, then the parts in parallel, then an integration
+  step; steps that run together get their own files, and the Worker contract
+  has each Worker stage only the paths it changed when it commits (`git add
+  <paths>`, never `git add -A`). A `planner` row still holding the default
+  from before this (`_PLANNER_PROMPT_BEFORE_PARALLEL` in `serve.py`) gets the
+  current one at startup; an edited prompt is kept.
 - Each event is one user turn; turns run one at a time:
   - `[PLAN]` on `TASK_REQUEST`: Claude may look at the project without changing it, then splits the
     requirement into 1–8 steps (`MAX_STEPS`), each with `id`, `instruction`,
@@ -1684,8 +1693,11 @@ Key message types:
    Manager.
 3. Dispatch: every step whose `depends_on` steps are all verified goes as
    `WORK_ITEM` to a new Worker, up to 4 running at once per task. Steps
-   without a dependency between them may run at the same time in the same
-   directory.
+   without a dependency between them run at the same time in the same
+   directory, so they must change different files. The eval's
+   `parallel_parts` and `interface_first` tasks check that the Planner plans
+   independent and coordinated parts that way; with haiku the second still
+   fails (the Planner chains the service, the client and the check).
 4. Decision turn: every `WORK_RESULT` and `VERIFY_RESULT` gets a `[DECISION]`
    turn whose message lists the decisions allowed now:
    - `accept` only when the result can be accepted: the Worker completed and

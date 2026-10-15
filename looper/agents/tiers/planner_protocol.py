@@ -487,10 +487,10 @@ the project has one.
 {{"steps": [{{"id": "s1", "instruction": "...", "acceptance_criteria": ["..."], "depends_on": [], "review": false}}]}}
 ```
 - 1 to {MAX_STEPS} steps. id: a short unique label (letters, digits, - _ .).
-- depends_on: ids of the steps that must be done before this one starts; no
-  cycles. Steps without a dependency between them may run at the same time in
-  the same directory, so a step that touches another step's files must depend
-  on it.
+- depends_on: ids of the steps whose results this one needs before it starts,
+  and only those; no cycles. Steps without a dependency between them run at
+  the same time in the same directory, so a step that touches another step's
+  files must depend on it.
 - review: true when an independent Reviewer must pass the step before it counts
   as done.
 
