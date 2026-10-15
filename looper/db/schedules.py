@@ -20,11 +20,19 @@ from .connection import get_pool
 
 # The schedule fields a request sets (looper/agents/schedules.py validates them).
 FIELDS = ("name", "cron", "timezone", "requirement", "work_dir", "overlap", "catch_up", "run_timeout_seconds",
-          "run_budget_usd")
+          "run_budget_usd", "gate_command", "gate_timeout_seconds", "daily_budget_usd", "notify", "notify_channel",
+          "notify_chat")
 
 QUEUED = "queued"
+GATING = "gating"
 RUNNING = "running"
-OPEN_STATUSES = (QUEUED, RUNNING)
+OPEN_STATUSES = (QUEUED, GATING, RUNNING)
+# The final statuses that count as a failure.
+FAILURES = ("failed", "timed_out", "gate_failed")
+# Runs that ran nothing: they neither carry an unfinished input nor hide one.
+NOTHING_RAN = ("skipped_overlap", "skipped_missed", "skipped_budget")
+# A run whose input was not done: the next run is given its gate output.
+UNFINISHED = ("failed", "timed_out", "gate_failed", "stopped", "cancelled")
 
 _RUN = """
     SELECT r.*, t.status AS task_status FROM schedule_runs r LEFT JOIN tasks t ON t.id = r.task_id
@@ -150,28 +158,31 @@ async def open_runs(conn: Db, schedule_id: str) -> list[dict[str, Any]]:
 async def insert_run(conn: Db, *, schedule_id: str, scheduled_for: datetime, trigger: str, status: str,
                      missed: int = 0, fired_at: datetime | None = None, task_id: str | None = None,
                      error: str | None = None, finished_at: datetime | None = None,
-                     created_at: datetime | None = None) -> str:
+                     created_at: datetime | None = None, carried_from: str | None = None) -> str:
     run_id = new_run_id()
     await conn.execute(
         """
         INSERT INTO schedule_runs (id, schedule_id, scheduled_for, fired_at, trigger, missed, status, task_id,
-                                   error, finished_at, created_at)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, COALESCE($11, now()))
+                                   error, finished_at, created_at, carried_from)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, COALESCE($11, now()), $12)
         """,
         run_id, schedule_id, scheduled_for, fired_at, trigger, missed, status, task_id, error, finished_at,
-        created_at,
+        created_at, carried_from,
     )
     return run_id
 
 
-async def start_queued_run(conn: Db, run_id: str, *, task_id: str | None, fired_at: datetime,
-                           error: str | None = None) -> None:
-    """A queued run fires now: running with its task, or failed with ``error`` when it has none."""
-    await conn.execute(
-        "UPDATE schedule_runs SET status = $2, task_id = $3, fired_at = $4, error = $5, "
-        "finished_at = CASE WHEN $3::text IS NULL THEN $4::timestamptz END WHERE id = $1",
-        run_id, RUNNING if task_id else "failed", task_id, fired_at, error,
-    )
+_RUN_COLUMNS = ("status", "fired_at", "task_id", "summary", "cost_usd", "error", "finished_at", "gate_output",
+                "carried_from")
+
+
+async def update_run(conn: Db, run_id: str, **fields: Any) -> None:
+    """Set a run's ``fields`` (any of ``_RUN_COLUMNS``)."""
+    unknown = sorted(set(fields) - set(_RUN_COLUMNS))
+    if unknown:
+        raise ValueError(f"not a run column: {unknown[0]}")
+    sets = [f"{name} = ${i}" for i, name in enumerate(fields, start=2)]
+    await conn.execute(f"UPDATE schedule_runs SET {', '.join(sets)} WHERE id = $1", run_id, *fields.values())
 
 
 async def get_run(run_id: str, *, pool: Db | None = None) -> dict[str, Any] | None:
@@ -216,13 +227,21 @@ async def finish_run(conn: Db, run_id: str, *, status: str, at: datetime, summar
     )
     if schedule_id is None:
         return False
+    await count_outcome(conn, schedule_id, status, at)
+    return True
+
+
+async def count_outcome(conn: Db, schedule_id: str, status: str, at: datetime) -> None:
+    """A run's final ``status`` on the schedule's counters: a completed run clears ``consecutive_failures`` and
+    sets ``last_success_at``; a failure adds one; a completed run or a gate that found nothing sets ``last_ok_at``."""
     if status == "completed":
-        await conn.execute("UPDATE schedules SET consecutive_failures = 0, last_success_at = $2 WHERE id = $1",
-                           schedule_id, at)
-    elif status in ("failed", "timed_out"):
+        await conn.execute("UPDATE schedules SET consecutive_failures = 0, last_success_at = $2, last_ok_at = $2 "
+                           "WHERE id = $1", schedule_id, at)
+    elif status in FAILURES:
         await conn.execute("UPDATE schedules SET consecutive_failures = consecutive_failures + 1 WHERE id = $1",
                            schedule_id)
-    return True
+    elif status == "skipped_gate":
+        await conn.execute("UPDATE schedules SET last_ok_at = $2 WHERE id = $1", schedule_id, at)
 
 
 async def running_run_of_task(task_id: str, *, pool: Db | None = None) -> dict[str, Any] | None:
@@ -261,3 +280,105 @@ async def recent_runs(conn: Db, schedule_id: str, *, limit: int) -> list[dict[st
         schedule_id, list(OPEN_STATUSES), limit,
     )
     return [dict(row) for row in rows]
+
+
+async def previous_run(conn: Db, schedule_id: str, *, before: str | None = None) -> dict[str, Any] | None:
+    """The schedule's latest run that ran something and has ended (not ``before``, the run being started)."""
+    row = await conn.fetchrow(
+        f"{_RUN} WHERE r.schedule_id = $1 AND NOT (r.status = ANY($2::text[])) AND r.id IS DISTINCT FROM $3 "
+        "ORDER BY r.created_at DESC, r.id DESC LIMIT 1",
+        schedule_id, [*OPEN_STATUSES, *NOTHING_RAN], before,
+    )
+    return dict(row) if row else None
+
+
+async def spent_since(conn: Db, schedule_id: str, since: datetime) -> float:
+    """What the schedule's runs fired since ``since`` cost: each its recorded cost, a running one its task's so
+    far."""
+    return float(await conn.fetchval(
+        """
+        SELECT COALESCE(sum(COALESCE(r.cost_usd,
+                   (SELECT sum(l.cost_usd) FROM llm_records l WHERE l.task_id = r.task_id))), 0)
+        FROM schedule_runs r WHERE r.schedule_id = $1 AND r.fired_at >= $2
+        """,
+        schedule_id, since,
+    ))
+
+
+async def fail_gating_runs(conn: Db, at: datetime) -> int:
+    """Runs left checking their gate by a server that stopped: gate_failed (a failure each)."""
+    rows = await conn.fetch(
+        "UPDATE schedule_runs SET status = 'gate_failed', finished_at = $1, "
+        "error = 'the server stopped while the gate ran' WHERE status = 'gating' RETURNING schedule_id", at,
+    )
+    for row in rows:
+        await count_outcome(conn, row["schedule_id"], "gate_failed", at)
+    return len(rows)
+
+
+async def set_alert(conn: Db, schedule_id: str, column: str, at: datetime | None) -> bool:
+    """Start (``at``) or end (None) an alert, once: False when it already was in that state."""
+    if column not in ("failures_alert_at", "stale_alert_at"):
+        raise ValueError(f"not an alert column: {column}")
+    condition = f"{column} IS NULL" if at is not None else f"{column} IS NOT NULL"
+    return await conn.execute(f"UPDATE schedules SET {column} = $2 WHERE id = $1 AND {condition}",
+                              schedule_id, at) == "UPDATE 1"
+
+
+async def insert_notification(conn: Db, *, schedule_id: str, run_id: str | None, kind: str, channel: str | None,
+                              chat: str | None, text: str, status: str, error: str | None) -> str:
+    """Record a message; ``created_at`` is the database's clock, so the outbox keeps the order they were sent in."""
+    notification_id = f"note-{uuid.uuid4().hex[:12]}"
+    await conn.execute(
+        "INSERT INTO schedule_notifications (id, schedule_id, run_id, kind, channel, chat, text, status, error, "
+        "created_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, clock_timestamp())",
+        notification_id, schedule_id, run_id, kind, channel, chat, text, status, error,
+    )
+    return notification_id
+
+
+async def list_notifications(schedule_id: str, *, limit: int, pool: Db | None = None) -> list[dict[str, Any]]:
+    db = pool or get_pool()
+    rows = await db.fetch("SELECT * FROM schedule_notifications WHERE schedule_id = $1 "
+                          "ORDER BY created_at DESC, id DESC LIMIT $2", schedule_id, limit)
+    return [dict(row) for row in rows]
+
+
+async def enabled_schedules(*, pool: Db | None = None) -> list[dict[str, Any]]:
+    db = pool or get_pool()
+    return await _with_overrides(db, await db.fetch("SELECT * FROM schedules WHERE enabled"))
+
+
+async def first_run_at(conn: Db, schedule_id: str) -> datetime | None:
+    return await conn.fetchval("SELECT min(scheduled_for) FROM schedule_runs WHERE schedule_id = $1", schedule_id)
+
+
+async def overview(since: datetime, *, pool: Db | None = None) -> dict[str, Any]:
+    """Every project's schedules at a glance: the counts, the next fires, the failing ones and the runs skipped
+    since ``since``, by reason."""
+    db = pool or get_pool()
+    counts = await db.fetchrow("SELECT count(*) AS total, count(*) FILTER (WHERE enabled) AS enabled FROM schedules")
+    upcoming = await db.fetch(
+        "SELECT s.id, s.name, s.project_id, p.name AS project_name, s.next_fire_at, s.timezone "
+        "FROM schedules s JOIN projects p ON p.id = s.project_id WHERE s.enabled AND s.next_fire_at IS NOT NULL "
+        "ORDER BY s.next_fire_at, s.id LIMIT 5",
+    )
+    failing = await db.fetch(
+        """
+        SELECT s.id, s.name, s.project_id, p.name AS project_name, s.timezone, s.consecutive_failures,
+               s.failures_alert_at, s.stale_alert_at, s.last_success_at,
+               (SELECT r.status FROM schedule_runs r WHERE r.schedule_id = s.id AND NOT (r.status = ANY($1::text[]))
+                ORDER BY r.created_at DESC, r.id DESC LIMIT 1) AS last_status
+        FROM schedules s JOIN projects p ON p.id = s.project_id
+        WHERE s.consecutive_failures > 0 OR s.failures_alert_at IS NOT NULL OR s.stale_alert_at IS NOT NULL
+        ORDER BY (s.failures_alert_at IS NULL AND s.stale_alert_at IS NULL), s.consecutive_failures DESC, lower(s.name)
+        """,
+        list(OPEN_STATUSES),
+    )
+    skipped = await db.fetch(
+        "SELECT status, count(*) AS n FROM schedule_runs WHERE created_at >= $1 AND status LIKE 'skipped%' "
+        "GROUP BY status", since,
+    )
+    return {"total": counts["total"], "enabled": counts["enabled"],
+            "upcoming": [dict(row) for row in upcoming], "failing": [dict(row) for row in failing],
+            "skipped": {row["status"]: row["n"] for row in skipped}}

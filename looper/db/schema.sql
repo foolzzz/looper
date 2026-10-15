@@ -826,6 +826,29 @@ CREATE TABLE IF NOT EXISTS schedules (
     updated_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
     CHECK (enabled OR next_fire_at IS NULL)
 );
+-- S2: a gate command run in the work directory before each run (nothing printed: skipped; output: given to the
+-- task; failure: the run fails), a daily spend cap over the schedule's runs, and whom to tell: notify ('failures',
+-- 'always', 'never') to a chat a channel allows (notify_channel and notify_chat, both or neither; none: the
+-- dashboard only). last_ok_at is the last run that completed or whose gate found nothing to do; the two alerts are
+-- active while failures_alert_at (3 failures in a row) or stale_alert_at (no success for a while) is set.
+ALTER TABLE schedules ADD COLUMN IF NOT EXISTS gate_command TEXT;
+ALTER TABLE schedules ADD COLUMN IF NOT EXISTS gate_timeout_seconds INTEGER CHECK (gate_timeout_seconds > 0);
+ALTER TABLE schedules ADD COLUMN IF NOT EXISTS daily_budget_usd DOUBLE PRECISION CHECK (daily_budget_usd > 0);
+ALTER TABLE schedules ADD COLUMN IF NOT EXISTS notify TEXT NOT NULL DEFAULT 'failures'
+    CHECK (notify IN ('failures', 'always', 'never'));
+ALTER TABLE schedules ADD COLUMN IF NOT EXISTS notify_channel TEXT CHECK (notify_channel IN ('telegram', 'lark'));
+ALTER TABLE schedules ADD COLUMN IF NOT EXISTS notify_chat TEXT;
+ALTER TABLE schedules ADD COLUMN IF NOT EXISTS last_ok_at TIMESTAMPTZ;
+ALTER TABLE schedules ADD COLUMN IF NOT EXISTS failures_alert_at TIMESTAMPTZ;
+ALTER TABLE schedules ADD COLUMN IF NOT EXISTS stale_alert_at TIMESTAMPTZ;
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'schedules_notify_target_check'
+                   AND conrelid = to_regclass('schedules')) THEN
+        ALTER TABLE schedules ADD CONSTRAINT schedules_notify_target_check
+            CHECK ((notify_channel IS NULL) = (notify_chat IS NULL));
+    END IF;
+END $$;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_schedules_project_name ON schedules (project_id, lower(name));
 CREATE INDEX IF NOT EXISTS idx_schedules_due ON schedules (next_fire_at) WHERE enabled;
 -- The Agent Profile a schedule's tasks run for some of their roles, copied into each task's
@@ -848,8 +871,8 @@ CREATE TABLE IF NOT EXISTS schedule_runs (
     trigger       TEXT NOT NULL CHECK (trigger IN ('scheduled', 'catch_up', 'manual')),
     missed        INTEGER NOT NULL DEFAULT 0 CHECK (missed >= 0),
     status        TEXT NOT NULL CHECK (status IN (
-                      'queued', 'running', 'completed', 'failed', 'stopped', 'cancelled', 'timed_out',
-                      'skipped_overlap', 'skipped_missed')),
+                      'queued', 'gating', 'running', 'completed', 'failed', 'stopped', 'cancelled', 'timed_out',
+                      'gate_failed', 'skipped_overlap', 'skipped_missed', 'skipped_gate', 'skipped_budget')),
     task_id       TEXT REFERENCES tasks(id) ON DELETE SET NULL,
     summary       TEXT,
     cost_usd      DOUBLE PRECISION,
@@ -857,8 +880,38 @@ CREATE TABLE IF NOT EXISTS schedule_runs (
     finished_at   TIMESTAMPTZ,
     created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+-- S2: what the gate printed (clipped), and the earlier run whose unfinished input this run was given.
+ALTER TABLE schedule_runs ADD COLUMN IF NOT EXISTS gate_output TEXT;
+ALTER TABLE schedule_runs ADD COLUMN IF NOT EXISTS carried_from TEXT REFERENCES schedule_runs(id) ON DELETE SET NULL;
+-- Once (S2): runs from before the gate and the daily budget accept their statuses ('gating' while the gate runs).
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM schema_migrations WHERE name = 'schedule_runs_status_s2') THEN
+        ALTER TABLE schedule_runs DROP CONSTRAINT IF EXISTS schedule_runs_status_check;
+        ALTER TABLE schedule_runs ADD CONSTRAINT schedule_runs_status_check CHECK (status IN (
+            'queued', 'gating', 'running', 'completed', 'failed', 'stopped', 'cancelled', 'timed_out',
+            'gate_failed', 'skipped_overlap', 'skipped_missed', 'skipped_gate', 'skipped_budget'));
+        INSERT INTO schema_migrations (name) VALUES ('schedule_runs_status_s2');
+    END IF;
+END $$;
 CREATE INDEX IF NOT EXISTS idx_schedule_runs_schedule ON schedule_runs (schedule_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_schedule_runs_open ON schedule_runs (schedule_id) WHERE status IN ('queued', 'running');
+-- Every message about a schedule, sent or not: a run's outcome, an alert or its recovery. 'dashboard' when the
+-- schedule names no chat (or notify is 'never' for an alert), 'failed' with the reason when sending failed.
+CREATE TABLE IF NOT EXISTS schedule_notifications (
+    id          TEXT PRIMARY KEY,
+    schedule_id TEXT NOT NULL REFERENCES schedules(id) ON DELETE CASCADE,
+    run_id      TEXT REFERENCES schedule_runs(id) ON DELETE SET NULL,
+    kind        TEXT NOT NULL CHECK (kind IN ('run', 'failures_alert', 'failures_recovered', 'stale_alert',
+                                              'stale_recovered')),
+    channel     TEXT,
+    chat        TEXT,
+    text        TEXT NOT NULL,
+    status      TEXT NOT NULL CHECK (status IN ('sent', 'failed', 'dashboard')),
+    error       TEXT,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_schedule_notifications_schedule ON schedule_notifications (schedule_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_schedule_runs_task ON schedule_runs (task_id);
 -- The schedule that created the task (NULL once the schedule is deleted), and the task's own spend cap over its
 -- project's task_budget_usd (a schedule's run_budget_usd, copied when it fires).

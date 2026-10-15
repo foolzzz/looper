@@ -59,6 +59,11 @@ class ChannelAdapter(ABC):
         """Send a message from the system to the user through this channel."""
         ...
 
+    async def notify(self, chat: str, text: str) -> DeliveryReceipt:
+        """Send ``text``, unprompted, to ``chat`` (a sender its allowlist lets in): a schedule's message."""
+        return DeliveryReceipt(channel=self.channel_type, success=False,
+                               error=f"the {self.channel_type} channel cannot send notifications")
+
     def healthcheck(self) -> dict[str, Any]:
         """Return channel health status. Override for richer diagnostics."""
         return {"channel": self.channel_type, "healthy": True}

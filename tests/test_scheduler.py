@@ -75,3 +75,49 @@ def test_the_run_context_names_the_firing_the_missed_fires_and_the_recent_runs()
 def test_a_first_manual_run_says_so() -> None:
     text = run_context(SCHEDULE, Firing(Trigger.MANUAL, NOW), [], description="Every 30 minutes")
     assert "手动「立即运行」" in text and "这是第一次" in text and "漏" not in text
+
+
+def test_the_gate_output_and_the_previous_unfinished_input_share_the_room() -> None:
+    from looper.agents.scheduler import Carried
+
+    schedule = {**SCHEDULE, "gate_command": "python3 new_alerts.py"}
+    carried = Carried("srun-1", "failed", NOW - 30 * MINUTE, "alert-7\nalert-8")
+    text = run_context(schedule, Firing(Trigger.SCHEDULED, NOW), [], description="Every 30 minutes",
+                       gate_output="alert-9 ```code```\n" + "y" * 2000, carried=carried, room=900)
+    assert "- 前置检查（`python3 new_alerts.py`）的输出就是这一轮的输入：只处理这些，不要再自己运行这条命令或读它的来源去找别的条目：\n````\nalert-9 ```code```" in text
+    assert "[截断：还有 1419 个字符，完整内容见这次运行的记录]" in text  # two thirds of 900 for its own output
+    assert "- 上一轮未完成：2026-10-15 08:30 PDT 的运行失败" in text and "```\nalert-7\nalert-8\n```" in text
+    assert text.index("前置检查（") < text.index("上一轮未完成") < text.index("这是第一次")
+    # Without them the section is as before.
+    assert "前置检查" not in run_context(schedule, Firing(Trigger.SCHEDULED, NOW), [], description="d")
+
+
+@pytest.mark.parametrize(("notify", "status", "sent"), [
+    ("failures", "failed", True), ("failures", "timed_out", True), ("failures", "gate_failed", True),
+    ("failures", "completed", False), ("failures", "stopped", False), ("failures", "skipped_gate", False),
+    ("always", "completed", True), ("always", "stopped", True), ("always", "gate_failed", True),
+    ("always", "skipped_gate", False), ("always", "skipped_budget", False), ("always", "skipped_overlap", False),
+    ("never", "failed", False), ("never", "completed", False),
+])
+def test_which_runs_get_a_message(notify: str, status: str, sent: bool) -> None:
+    from looper.agents.schedule_notify import wants_run_message
+
+    assert wants_run_message(notify, status) is sent
+
+
+@pytest.mark.parametrize(("rule", "last_ok", "first_run", "deadline"), [
+    # Every 30 minutes: 3 periods after the first fire after the last success.
+    ("*/30 * * * *", NOW.replace(second=0), None, NOW.replace(second=0) + 120 * MINUTE),
+    # Daily: 24 hours, shorter than 3 days.
+    ("0 9 * * *", NOW.replace(second=0), None, NOW.replace(second=0) + timedelta(days=2)),
+    # Never a success: counted from the first run.
+    ("*/30 * * * *", None, NOW.replace(second=0), NOW.replace(second=0) + 90 * MINUTE),
+    ("*/30 * * * *", None, None, None),
+])
+def test_when_the_no_success_alert_is_due(rule: str, last_ok: datetime | None, first_run: datetime | None,
+                                          deadline: datetime | None) -> None:
+    from looper.agents import cron
+    from looper.agents.schedule_notify import stale_deadline
+
+    tz = cron.zone("America/Los_Angeles")
+    assert stale_deadline(cron.parse(rule), tz, last_ok=last_ok, first_run=first_run) == deadline
