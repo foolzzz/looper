@@ -31,6 +31,8 @@ OPEN_STATUSES = (QUEUED, GATING, RUNNING)
 FAILURES = ("failed", "timed_out", "gate_failed")
 # Runs that ran nothing: they neither carry an unfinished input nor hide one.
 NOTHING_RAN = ("skipped_overlap", "skipped_missed", "skipped_budget")
+# Firings that created no task; one that repeats the schedule's latest run is counted on it (``count_skip``).
+SKIPPED = ("skipped_gate", *NOTHING_RAN)
 # A run whose input was not done: the next run is given its gate output.
 UNFINISHED = ("failed", "timed_out", "gate_failed", "stopped", "cancelled")
 
@@ -186,6 +188,29 @@ _RUN_COLUMNS = ("status", "fired_at", "task_id", "summary", "cost_usd", "error",
                 "carried_from")
 
 
+async def count_skip(conn: Db, schedule_id: str, *, status: str, at: datetime, since: datetime,
+                     besides: str | None = None) -> str | None:
+    """Count a skipped firing on the schedule's latest run (other than ``besides``, the run being decided) when
+    that run is a skip for the same reason recorded since ``since`` (the day's start): its id, its ``firings`` one
+    more and its ``finished_at`` ``at``. None when it is not: the firing is then recorded as a run of its own."""
+    if status not in SKIPPED:
+        raise ValueError(f"not a skip: {status}")
+    return await conn.fetchval(
+        """
+        UPDATE schedule_runs SET firings = firings + 1, finished_at = $3
+        WHERE id = (SELECT id FROM schedule_runs WHERE schedule_id = $1 AND id IS DISTINCT FROM $5
+                    ORDER BY created_at DESC, id DESC LIMIT 1)
+          AND status = $2 AND created_at >= $4
+        RETURNING id
+        """,
+        schedule_id, status, at, since, besides,
+    )
+
+
+async def delete_run(conn: Db, run_id: str) -> None:
+    await conn.execute("DELETE FROM schedule_runs WHERE id = $1", run_id)
+
+
 async def update_run(conn: Db, run_id: str, **fields: Any) -> None:
     """Set a run's ``fields`` (any of ``_RUN_COLUMNS``)."""
     unknown = sorted(set(fields) - set(_RUN_COLUMNS))
@@ -220,10 +245,11 @@ async def list_runs(schedule_id: str, *, limit: int, before: str | None = None, 
 
 
 async def run_counts(schedule_id: str, statuses: Sequence[str], *, pool: Db | None = None) -> dict[str, int]:
-    """How many of the schedule's runs have each of ``statuses`` (0 for none)."""
+    """How many of the schedule's firings ended with each of ``statuses`` (0 for none): a run that counts repeated
+    skips counts each of its ``firings``."""
     db = pool or get_pool()
     rows = await db.fetch(
-        "SELECT status, count(*) AS n FROM schedule_runs WHERE schedule_id = $1 AND status = ANY($2::text[]) "
+        "SELECT status, sum(firings) AS n FROM schedule_runs WHERE schedule_id = $1 AND status = ANY($2::text[]) "
         "GROUP BY status",
         schedule_id, list(statuses),
     )
@@ -415,8 +441,8 @@ async def overview(since: datetime, *, pool: Db | None = None) -> dict[str, Any]
         list(OPEN_STATUSES),
     )
     skipped = await db.fetch(
-        "SELECT status, count(*) AS n FROM schedule_runs WHERE created_at >= $1 AND status LIKE 'skipped%' "
-        "GROUP BY status", since,
+        "SELECT status, sum(firings) AS n FROM schedule_runs WHERE created_at >= $1 AND status = ANY($2::text[]) "
+        "GROUP BY status", since, list(SKIPPED),
     )
     return {"total": counts["total"], "enabled": counts["enabled"],
             "upcoming": [dict(row) for row in upcoming], "failing": [dict(row) for row in failing],

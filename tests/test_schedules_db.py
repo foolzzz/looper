@@ -318,6 +318,35 @@ def test_a_schedules_runs_page_by_cursor_and_can_leave_out_the_routine_skips(mon
     _run(test, monkeypatch, tmp_path)
 
 
+def test_a_schedule_with_a_gate_may_fire_every_minute(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    async def test(env: _Env) -> None:
+        base = {"name": "every minute", "cron": "* * * * *", "timezone": "UTC", "requirement": "Look."}
+        status, payload = await env.call("POST", f"/api/projects/{env.project_id}/schedules", base)
+        assert status == 400
+        assert "fires 1 minute apart" in payload["error"] and "at least 5 minutes apart" in payload["error"]
+        assert "(a schedule with a gate command may fire every 1 minute)" in payload["error"]
+
+        sid = (await env.ok("POST", f"/api/projects/{env.project_id}/schedules",
+                            {**base, "gate_command": "cat items.txt"}))["schedule"]["schedule_id"]
+        # Its gate cannot go while it fires every minute; with a 5-minute rule in the same change it can.
+        status, payload = await env.call("PUT", f"/api/schedules/{sid}", {"gate_command": None})
+        assert status == 400
+        assert payload["error"].startswith("without its gate command, the rule '* * * * *' fires 1 minute apart")
+        await env.ok("PUT", f"/api/schedules/{sid}", {"gate_command": "", "cron": "*/5 * * * *"})
+        back = await env.ok("PUT", f"/api/schedules/{sid}", {"gate_command": "true", "cron": "* * * * *"})
+        assert (back["schedule"]["cron"], back["schedule"]["gate_command"]) == ("* * * * *", "true")
+
+        for gated, valid, least in ((True, True, 60), (False, False, 300)):
+            preview = await env.ok("POST", "/api/schedules/preview", {"cron": "* * * * *", "gated": gated})
+            assert (preview["valid"], preview["min_interval_seconds"]) == (valid, least)
+        status, payload = await env.call("POST", "/api/schedules/preview", {"cron": "* * * * *", "gated": "yes"})
+        assert status == 400 and "gated must be true or false" in payload["error"]
+        limits = (await env.ok("GET", f"/api/projects/{env.project_id}/schedules"))["limits"]
+        assert (limits["min_interval_seconds"], limits["min_interval_gated_seconds"]) == (300, 60)
+
+    _run(test, monkeypatch, tmp_path)
+
+
 # --- Firing ---
 
 
@@ -376,7 +405,8 @@ def test_two_schedulers_ticking_together_fire_each_firing_once(monkeypatch: pyte
             for sid in schedules:
                 await env.due(sid)
             await asyncio.gather(env.scheduler.tick(), other.tick())
-            counts = [len(await env.runs(sid)) for sid in schedules]
+            # Each firing counted once: the first created a task, the later ones are one repeated skip.
+            counts = [sum(run["firings"] for run in await env.runs(sid)) for sid in schedules]
             assert counts == [round_] * 3, counts
             # As the TaskRouter would: the started tasks run.
             await env.pool.execute("UPDATE tasks SET status = 'running' WHERE status = 'init'")
@@ -436,11 +466,14 @@ def test_a_firing_while_the_previous_task_runs_is_skipped_or_queued_once(monkeyp
         for _ in range(2):
             await env.due(sid)
             await env.scheduler.tick()
-        newest, middle, _ = await env.runs(sid)
         if overlap == "skip":
-            assert [middle["status"], newest["status"]] == ["skipped_overlap", "skipped_overlap"]
-            assert f"the previous run's task ({first['task_id']}) is still in progress" in middle["error"]
+            # The second skip repeats the first: one run that counts both firings.
+            skipped, _ = await env.runs(sid)
+            assert (skipped["status"], skipped["firings"]) == ("skipped_overlap", 2)
+            assert f"the previous run's task ({first['task_id']}) is still in progress" in skipped["error"]
+            assert skipped["finished_at"] > skipped["scheduled_for"]
         else:
+            newest, middle, _ = await env.runs(sid)
             # At most one waits: the second firing behind it is skipped.
             assert [middle["status"], newest["status"]] == ["queued", "skipped_overlap"]
             assert middle["task_id"] is None and middle["fired_at"] is None

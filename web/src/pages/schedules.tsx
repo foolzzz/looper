@@ -6,7 +6,7 @@ import { LastRun, NoticeText, ScheduleTime } from "@/components/project-schedule
 import { ScheduleDetail } from "@/components/schedule-detail";
 import { LABEL, SELECT } from "@/components/registry-ui";
 import { fetchAllSchedules, fetchSchedule, runSchedule, updateSchedule, type ScheduleInfo } from "@/lib/api";
-import { omit, runNotice, useNotices, type Notice } from "@/lib/schedules";
+import { lastFiredAt, omit, runNotice, useNotices, type Notice } from "@/lib/schedules";
 import { errorText } from "@/lib/use-action";
 import { formatUsd } from "@/lib/usage";
 import { cn } from "@/lib/utils";
@@ -94,7 +94,7 @@ function ScheduleRow({
             <LastRun schedule={schedule} />
             {run && (
               <span className="flex items-center gap-1">
-                <ScheduleTime iso={run.fired_at ?? run.scheduled_for} timeZone={schedule.timezone} />
+                <ScheduleTime iso={lastFiredAt(run)} timeZone={schedule.timezone} />
                 {run.task_id && (
                   <>
                     {" · "}

@@ -43,6 +43,11 @@ export function omit<T>(record: Record<string, T>, key: string): Record<string, 
   return next;
 }
 
+/** When a run last fired: a run that counts repeated skips (`firings`) last fired when it was last counted. */
+export function lastFiredAt(run: ScheduleRunInfo): string {
+  return run.firings > 1 && run.finished_at ? run.finished_at : run.fired_at ?? run.scheduled_for;
+}
+
 /** A note beside a schedule's controls. */
 export interface Notice {
   text: string;
