@@ -1,6 +1,6 @@
 """One status message per message answered in Lark and Telegram, edited in place: the status line itself, then
-each channel end to end (Lark through the stand-in lark-cli, Telegram through a stand-in bot). Nothing reaches a
-real chat or user."""
+each channel end to end (Lark through the stand-in lark-cli, Telegram through a stand-in bot); and the reaction
+each channel adds to a message it hands to the Manager. Nothing reaches a real chat or user."""
 
 from __future__ import annotations
 
@@ -13,9 +13,10 @@ from typing import Any
 
 import pytest
 
-from lark_cli_stand_in import OPEN_ID
+from lark_cli_stand_in import OPEN_ID, OTHER
 from looper.agents.channels.allowlist import SenderAllowlist
 from looper.agents.channels.status_line import MAX_PROGRESS_EDITS, StatusLines, phase_label
+from looper.agents.bus import MessageBus
 from looper.agents.message import MANAGER_ADDRESS, MessageEnvelope, MessageType, channel_address
 
 TOOLS = ["Bash", "Read", "Edit", "Grep", "WebFetch"]
@@ -259,8 +260,9 @@ def test_the_edit_command_dry_run_shape() -> None:
 
 
 class _Bot:
-    def __init__(self) -> None:
+    def __init__(self, *, fail_reaction: bool = False) -> None:
         self.calls: list[tuple[str, dict[str, Any]]] = []
+        self.fail_reaction = fail_reaction
 
     async def send_message(self, **kwargs: Any) -> Any:
         self.calls.append(("send", kwargs))
@@ -269,6 +271,12 @@ class _Bot:
     async def edit_message_text(self, **kwargs: Any) -> Any:
         self.calls.append(("edit", kwargs))
         return SimpleNamespace(message_id=kwargs["message_id"])
+
+    async def set_message_reaction(self, **kwargs: Any) -> bool:
+        self.calls.append(("react", kwargs))
+        if self.fail_reaction:
+            raise RuntimeError("Bad Request: reactions are unavailable in this chat")
+        return True
 
 
 def test_telegram_has_the_same_status_line() -> None:
@@ -295,3 +303,167 @@ def test_telegram_has_the_same_status_line() -> None:
     assert answer["text"] == "answer"
     assert (closing["chat_id"], closing["message_id"]) == (7, 101) and closing["text"].startswith("✅ 完成")
     assert own["text"] == "on its own"
+
+
+# --- The reaction to a message handed to the Manager ---
+
+
+def _lark_dm(message_id: str, sender: str = OPEN_ID, **fields: Any) -> dict[str, Any]:
+    return {"type": "im.message.receive_v1", "chat_id": "oc_dm", "chat_type": "p2p", "message_id": message_id,
+            "message_type": "text", "sender_id": sender, "sender_type": "user", "content": "build it", **fields}
+
+
+async def _settled(adapter: Any) -> None:
+    for _ in range(500):
+        if not adapter._reactions._pending:
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError("a reaction call did not finish")
+
+
+def _reactions(log: Path) -> list[list[str]]:
+    return [c for c in _calls(log) if c[c.index("im"):c.index("im") + 3] == ["im", "reactions", "create"]]
+
+
+def _manager_texts(bus: MessageBus) -> list[str]:
+    queue = bus.get_queue("manager")
+    return [queue.get_nowait().payload["text"] for _ in range(queue.qsize())]
+
+
+def test_lark_reacts_get_to_an_admitted_direct_message_without_holding_it(tmp_path: Path,
+                                                                          lark_cli_stand_in: Path) -> None:
+    from looper.agents.channels.lark import LarkChannelAdapter
+
+    async def main() -> tuple[list[str], int]:
+        bus = MessageBus(runtime_root=tmp_path)
+        adapter = LarkChannelAdapter(profile="other", runtime_root=tmp_path,
+                                     allowlist=SenderAllowlist("channel-lark", frozenset({OPEN_ID})))
+        adapter._bus = bus
+        await adapter._handle_lark_event(_lark_dm("om_9"))
+        # The Manager has the message while the reaction call is still running.
+        texts, pending = _manager_texts(bus), len(adapter._reactions._pending)
+        await _settled(adapter)
+        await bus.shutdown()
+        return texts, pending
+
+    texts, pending = asyncio.run(main())
+    assert texts == ["build it"] and pending == 1
+    assert _reactions(lark_cli_stand_in) == [["--profile", "other", "im", "reactions", "create", "--as", "bot",
+                                              "--message-id", "om_9", "--data",
+                                              '{"reaction_type": {"emoji_type": "Get"}}']]
+
+
+def test_lark_a_rejected_sender_or_a_group_message_gets_no_reaction(tmp_path: Path,
+                                                                    lark_cli_stand_in: Path) -> None:
+    from looper.agents.channels.lark import LarkChannelAdapter
+
+    async def main() -> list[str]:
+        bus = MessageBus(runtime_root=tmp_path)
+        adapter = LarkChannelAdapter(runtime_root=tmp_path,
+                                     allowlist=SenderAllowlist("channel-lark", frozenset({OPEN_ID})))
+        adapter._bus = bus
+        await adapter._handle_lark_event(_lark_dm("om_1", sender=OTHER))
+        await adapter._handle_lark_event(_lark_dm("om_2", chat_type="group"))
+        await adapter._handle_lark_event(_lark_dm("om_3", message_type="image", content="[Image]"))
+        await _settled(adapter)
+        texts = _manager_texts(bus)
+        await bus.shutdown()
+        return texts
+
+    assert asyncio.run(main()) == []
+    assert _reactions(lark_cli_stand_in) == []
+
+
+def test_lark_a_failed_reaction_is_logged_once_per_run_and_the_message_still_goes_on(
+    tmp_path: Path, lark_cli_stand_in: Path, caplog: pytest.LogCaptureFixture,
+) -> None:
+    from looper.agents.channels.lark import LarkChannelAdapter
+
+    async def main() -> list[str]:
+        bus = MessageBus(runtime_root=tmp_path)
+        adapter = LarkChannelAdapter(runtime_root=tmp_path,
+                                     allowlist=SenderAllowlist("channel-lark", frozenset({OPEN_ID})))
+        adapter._bus = bus
+        # The stand-in refuses a reaction to a message id ending in "noscope", naming the scope the app lacks.
+        for n in (1, 2):
+            await adapter._handle_lark_event(_lark_dm(f"om_{n}noscope"))
+            await _settled(adapter)
+        await adapter.stop()  # a new run of the channel logs its first failure again
+        await adapter._handle_lark_event(_lark_dm("om_3noscope"))
+        await _settled(adapter)
+        texts = _manager_texts(bus)
+        await bus.shutdown()
+        return texts
+
+    with caplog.at_level(logging.WARNING):
+        texts = asyncio.run(main())
+    assert texts == ["build it"] * 3
+    assert len(_reactions(lark_cli_stand_in)) == 3  # one call per message, none retried
+    lines = [r.getMessage() for r in caplog.records if "could not react" in r.getMessage()]
+    assert len(lines) == 2
+    assert lines[0].startswith("channel-lark: could not react to a message")
+    assert "missing scope: im:message.reactions:write_only" in lines[0]
+    assert not [c for c in _calls(lark_cli_stand_in) if "+messages-send" in c]  # never a chat message
+
+
+def test_the_reaction_command_dry_run_shape() -> None:
+    from looper.agents.channels.lark_cli import reaction_command
+
+    assert reaction_command("om_1", profile="p") == [
+        "lark-cli", "--profile", "p", "im", "reactions", "create", "--as", "bot", "--message-id", "om_1",
+        "--data", '{"reaction_type": {"emoji_type": "Get"}}']
+
+
+@pytest.mark.parametrize(("error", "reason"), [
+    ({"message": "access denied", "missing_scopes": ["im:message.reactions:write_only"]},
+     "access denied (missing scope: im:message.reactions:write_only)"),
+    ({"message": "app has not applied for the required scope(s): im:message.reactions:write_only",
+      "missing_scopes": ["im:message.reactions:write_only"]},
+     "app has not applied for the required scope(s): im:message.reactions:write_only"),
+    ({"message": "permission denied", "required_scope": "im:message"}, "permission denied (missing scope: im:message)"),
+    ({"message": "not logged in"}, "not logged in"),
+])
+def test_a_failure_names_the_scope_lark_cli_reports_missing(error: dict[str, Any], reason: str) -> None:
+    from looper.agents.channels.lark_cli import failure
+
+    assert failure(json.dumps({"ok": False, "error": error})) == reason
+    assert failure("panic: something broke") == "panic: something broke"
+
+
+def _tg_message(user_id: int, chat_type: str = "private") -> Any:
+    return SimpleNamespace(effective_user=SimpleNamespace(id=user_id, username="someone"),
+                           effective_chat=SimpleNamespace(id=7, type=chat_type),
+                           message=SimpleNamespace(message_id=55, text="build it"))
+
+
+def test_telegram_reacts_with_eyes_to_an_admitted_direct_message(caplog: pytest.LogCaptureFixture,
+                                                                 tmp_path: Path) -> None:
+    pytest.importorskip("telegram")
+    from looper.agents.channels.telegram import TelegramChannelAdapter
+
+    async def main(bot: _Bot) -> list[str]:
+        bus = MessageBus(runtime_root=tmp_path)
+        adapter = TelegramChannelAdapter(bot_token="0:not-a-token",
+                                         allowlist=SenderAllowlist("channel-telegram", frozenset({"7"})))
+        adapter._app = SimpleNamespace(bot=bot)
+        adapter._bus = bus
+        await adapter._on_message(_tg_message(7), None)
+        await adapter._on_message(_tg_message(8), None)  # not on the list
+        await adapter._on_message(_tg_message(7, chat_type="group"), None)  # answered, not acknowledged
+        await adapter._cmd_status(_tg_message(7), None)
+        await adapter._on_message(_tg_message(7), None)
+        await _settled(adapter)
+        texts = _manager_texts(bus)
+        await bus.shutdown()
+        return texts
+
+    bot = _Bot()
+    assert asyncio.run(main(bot)) == ["build it", "build it", "当前任务进度怎么样？", "build it"]
+    assert bot.calls == [("react", {"chat_id": 7, "message_id": 55, "reaction": "👀"})] * 3
+
+    failing = _Bot(fail_reaction=True)
+    with caplog.at_level(logging.WARNING):
+        assert len(asyncio.run(main(failing))) == 4
+    assert len(failing.calls) == 3  # one call per message, none retried, nothing sent
+    (line,) = [r.getMessage() for r in caplog.records if "could not react" in r.getMessage()]
+    assert line.startswith("channel-telegram: could not react to a message") and "unavailable" in line

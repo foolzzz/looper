@@ -277,6 +277,7 @@ class TestNewFromLarkAndTelegram:
                 await manager._handle(envelope)
             for envelope in _drain(bus.get_queue(adapter.channel_id)):
                 await adapter.deliver(envelope)
+            await adapter._reactions.stop()  # what the channel's stop() does with a reaction call still running
             await manager.stop()
             await bus.shutdown()
 

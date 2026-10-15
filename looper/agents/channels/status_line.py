@@ -14,6 +14,12 @@ when the turn failed. A failed send or edit is logged once and the line is
 left alone: it never turns into more messages. A reply the Manager sends on
 its own (``autonomous``) has no status message, and a phase that comes after
 its message's answer is ignored. What is tracked is bounded.
+
+Before any of that, the channel acknowledges a message it hands to the
+Manager with a reaction (``Reactions``: Lark's 「Get」, Telegram's 👀). The
+call runs in the background, so it never holds the message up; a failed one
+is not retried and never becomes a chat message, and only the first failure
+of a run is logged.
 """
 
 from __future__ import annotations
@@ -35,10 +41,14 @@ OPEN_MAX = 200  # status messages being edited
 FINISHED_MAX = 1000  # messages answered, whose late phases are ignored
 REASON_MAX_CHARS = 80
 
+REACTIONS_PENDING_MAX = 100  # reaction calls still running
+
 # (chat, text) -> the status message's id, or None when it could not be sent.
 SendStatus = Callable[[str, str], Awaitable[str | None]]
 # (chat, message id, text); raises when the edit fails.
 EditStatus = Callable[[str, str, str], Awaitable[None]]
+# (chat, message id); raises when the reaction could not be added.
+React = Callable[[str, str], Awaitable[None]]
 
 # Claude Code's tools, as a status line names what they do.
 _TOOL_WORDS = {
@@ -189,3 +199,40 @@ class StatusLines:
 
     def tracked(self) -> int:
         return len(self._open)
+
+
+class Reactions:
+    """The reaction a channel adds to each message it hands to the Manager, as soon as it sees the message."""
+
+    def __init__(self, *, channel: str, react: React) -> None:
+        self._channel = channel
+        self._react = react
+        self._pending: set[asyncio.Task[None]] = set()
+        self._failed = False  # a failure was logged in this run
+
+    def add(self, chat: str, message_id: str) -> None:
+        """React to the message in the background; this returns at once."""
+        if not message_id or len(self._pending) >= REACTIONS_PENDING_MAX:
+            return
+        task = asyncio.ensure_future(self._call(chat, message_id))
+        self._pending.add(task)
+        task.add_done_callback(self._pending.discard)
+
+    async def _call(self, chat: str, message_id: str) -> None:
+        try:
+            await self._react(chat, message_id)
+        except Exception as exc:
+            if self._failed:
+                logger.debug("%s: could not react to message %s: %s", self._channel, message_id, exc)
+                return
+            self._failed = True
+            logger.warning("%s: could not react to a message (later failures of this run are not logged): %s",
+                           self._channel, exc)
+
+    async def stop(self) -> None:
+        """Cancel the calls still running; the next run logs its first failure again."""
+        for task in list(self._pending):
+            task.cancel()
+        await asyncio.gather(*self._pending, return_exceptions=True)
+        self._pending.clear()
+        self._failed = False
