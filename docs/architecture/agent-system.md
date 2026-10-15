@@ -127,7 +127,7 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
   are not in the prompt: Claude Code lists them itself.
 
   A project's agent settings (harness, Agent Profile, effort, environment,
-  per-run cap) are two layers of their own: the project's, for all its task agents,
+  per-run cap, and each task role's concurrency limit) are two layers of their own: the project's, for all its task agents,
   and each role's in the project ([Harness, profile and
   environment](#harness-profile-and-environment)). They are read when each run or turn starts.
 
@@ -151,10 +151,14 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
   was unavailable (...)` as an `error` activity, and the Planner keeps the
   project it last read and logs a warning.
 
-- Per-task lifecycle management with concurrency control (`MAX_CONCURRENT_TASKS=3`)
 - Creates/destroys PlannerAgent instances per task
 - Handles task lifecycle: start, stop (pause), restart (resume), cancel
-- Queues tasks when at capacity, auto-dequeues on completion
+- At most the Planner's concurrency limit of a project's tasks run at once
+  ([Concurrency limits](#concurrency-limits)), read each time a task may
+  start. A new, restarted or resumed task waits in its project's queue, oldest
+  first, and starts when one of the project's tasks ends or the limit is
+  raised; a project at its limit never delays another project's tasks. There
+  is no machine-wide limit
 - At server startup, resumes the tasks the previous server left running whose
   plan is live (`executing` or `verifying`): each gets a new Planner and a
   `TASK_RESUME`. Any other task left running is marked "stopped"
@@ -303,6 +307,13 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
 ### WorkerPool (`looper/agents/tiers/worker.py`)
 
 - Manages a pool of Worker processes
+- A Worker or Reviewer run starts once fewer of its role run in its task's
+  project than that role's limit there ([Concurrency limits](#concurrency-limits)),
+  read at that moment. Until then it waits (status `pending`, and one
+  `Worker waits for room in this project (N running, limit L)` activity) and
+  checks again when a run ends or a limit changes; a waiting run can be killed
+  like a running one. Each task's Planner also keeps at most 4 Workers running
+  (`MAX_CONCURRENT_WORKERS`)
 - Each Worker runs Claude CLI as a subprocess with `stream-json` output
 - Real-time event streaming (tool_use, text) captured to activity table
 - Command: `claude --print --verbose --output-format stream-json --include-partial-messages --input-format stream-json --replay-user-messages <isolation flags> --append-system-prompt-file <file> --system-prompt-snapshot off --dangerously-skip-permissions --model M [--effort E] [--plugin-dir <dir> ...] [--mcp-config <file>] [--add-dir <dir> ...]`,
@@ -860,6 +871,26 @@ The same inputs give the same prompt and hash; changing the harness, the role
 prompt, the background, the knowledge index, the task or a contract changes
 it.
 
+### Concurrency limits
+
+A sixth layered field, `max_concurrency` (a whole number from 1 to 64), is set
+only on the `role` and `role_project` layers of the Planner, the Workers and
+the Reviewers; anywhere else the API answers 400 and a check constraint holds
+the table to it. It is how many of the role run at once in one project: the
+Planner's counts the project's tasks (one Planner each), the Workers' and the
+Reviewers' their runs across the project's tasks. Each role has its own limit,
+because one count shared by all three would let resident Planners hold every
+place so that no Worker could start. It resolves built-in (planner 8, worker
+16, reviewer 8) → role → role in the project (`resolve_concurrency`); the
+TaskRouter and the WorkerPool read it each time something may start
+(`load_concurrency`, the built-in value when the layers cannot be read).
+After a successful write that sets it (a role's or a role-in-project PUT, or
+an applied import), the API asks the TaskRouter and the WorkerPool to check
+again, so a raised limit starts what waits at once. A lowered limit stops
+nothing that runs; new starts wait until fewer run than it. There is no
+machine-wide limit. The role configs' `max_concurrency`, which nothing
+enforced, was dropped (`role_configs_max_concurrency_removed`).
+
 ### Project knowledge: documents read on demand
 
 A project can carry reference material too large for a prompt
@@ -1123,8 +1154,9 @@ through one JSON file, `format: looper-config/v2`: `runtimes`, `providers` and
 `profiles` (the registered ones; the built-ins exist everywhere; each names the
 others by name), `settings` (the system and role layers, each naming its Agent
 Profile in `profile`;
-each role's prompt, `null` while it follows the recommended one, its timeout,
-concurrency and enabled flag), `channels`, `installs` (global),
+each role's prompt, `null` while it follows the recommended one, its timeout
+and enabled flag; a role's `max_concurrency` in an older file is ignored, with
+one note), `channels`, `installs` (global),
 `projects` (with `--include-projects`: fields, execution settings, layers,
 knowledge, own skills and installs) and `catalog` (each item with its files,
 or an MCP server's configuration). Catalog files are UTF-8 text, so JSON holds
@@ -1313,8 +1345,8 @@ Key message types:
 ## How a task runs
 
 1. The Manager sends `TASK_REQUEST` to the TaskRouter, which records the task,
-   creates its Planner (or queues the task at `MAX_CONCURRENT_TASKS`) and
-   forwards the request.
+   creates its Planner (or queues the task while its project runs as many
+   tasks as the Planner's limit there) and forwards the request.
 2. Plan turn: the Planner creates the task's directory if needed, starts its
    Claude and asks `[PLAN]`. The steps go to `task_steps`, the activity gets
    `Plan created: ...`, and `TASK_ACCEPTED` reports the step count to the
@@ -1391,8 +1423,8 @@ PostgreSQL is a hard startup dependency. All data paths:
 | `activity` | Execution trace events (SSE streaming to frontend) |
 | `chat_messages` | Chat conversation history; a new Manager session's resume brief reads the recent chats that are not a task's Planner thread (`planner-<task_id>`) |
 | `llm_records` | One row per agent run: input and output text, status, the run's own `cost_usd` and its `cost_source` (`runtime` or `provider_price`), `input_tokens`, `output_tokens`, `cache_read_tokens` and `cache_creation_tokens`, its final `context_tokens` and its `compactions`; `metadata` holds the exact argv (`command`), `cwd`, the appended `system_prompt`, its `system_prompt_sha256`, its `prompt_layers`, the `profile` (`agent` on runs recorded before the rename), the `model_choice`, the Settings `env` names, the `library` items loaded and a task agent's `project_skills` |
-| `role_configs` | Each role's own settings, keyed by `role` (`manager`, `planner`, `worker`, `reviewer`): display name, role prompt and its recommended `default_prompt`, turns, timeout, concurrency, enabled |
-| `agent_setting_layers` | Agent settings by layer: `scope` (`system`, `role`, `project`, `role_project`), `role`, `project_id` (goes with its project), and the nullable `harness_prompt`, `profile_id`, `effort`, `env` (ordered `[{key, value}]`, `null` value = unset) and `run_budget_usd`; one row per layer and place |
+| `role_configs` | Each role's own settings, keyed by `role` (`manager`, `planner`, `worker`, `reviewer`): display name, role prompt and its recommended `default_prompt`, turns, timeout, enabled |
+| `agent_setting_layers` | Agent settings by layer: `scope` (`system`, `role`, `project`, `role_project`), `role`, `project_id` (goes with its project), and the nullable `harness_prompt`, `profile_id`, `effort`, `env` (ordered `[{key, value}]`, `null` value = unset), `run_budget_usd` and `max_concurrency` (a Planner, Worker or Reviewer `role` or `role_project` layer only); one row per layer and place |
 | `agent_runtimes` | Runtimes, built in (one per type found on PATH) or registered by hand before and kept while an Agent Profile uses them (`builtin` false): `name`, `type` (an adapter), `executable` (`''` = the type's default), the probe's `version`, `capabilities`, `probed_at`, `probe_error`, `builtin` |
 | `llm_providers` | LLM providers: `name`, `protocols`, `auth` (`oauth` with `oauth_runtime_type`, or `api_key`), `base_url`, `models` (the catalog, with each model's prices and `background_model`), `env` (its own variables), `max_concurrency` (`NULL` = no limit), `builtin` |
 | `llm_provider_secrets` | A provider's API key, apart from the provider; read only by the launch that will use it |
@@ -1462,11 +1494,11 @@ built by `scripts/stage-dashboard.sh` at release time), and it carries
 - **Chat**: Every agent and its messages, finished ones included. The selector lists the global Manager and the 30 most recent tasks; each task shows its one Planner and the Worker (and Reviewer, when reviewed) of each step. You can send to the Manager and to a running task's Planner, which keeps one thread per task; SSE streaming. A selected Planner also shows its Claude runs, one per turn, in a folded list of the latest 10 beside its activity and chat thread, re-read as a reply starts and ends and every 10 s while the task runs. A Worker or Reviewer shows its Claude runs read-only, following a running one live, and points to its task's Planner for sending. The Manager's chat has a "New session" button that sends `/new`.
 - **Tasks**: Task list with project and status filters, time display, each task's cost so far, Start/Stop/Delete controls. `#tasks?project=<id>` filters by a project and shows its name and default directory with a link to its project page. A new task picks an existing project or creates one in the same form; its work directory may stay empty when the project has a default. A task's detail view can move it to another project in any status.
 - **Projects (sidebar)**: Below the navigation, every project with its task count (or a spinner with its active count); clicking one opens its project page, and `+` creates a project (name, default directory, description, optional background).
-- **Project** (`#projects/<id>`, `#projects/<id>/knowledge|skills|settings`): a header with the name, description, default directory and task count (a link to the filtered Tasks page), then four tabs, arrow keys moving between them. **Overview**: the 5 latest tasks with status and cost and a link to all of them; the background (three lines, then Show more); the knowledge (document count, stored size, the first 5 titles and summaries, how many referenced files are missing); the skills (count, how many are on, the first 5 names and descriptions); and the execution settings that are set, in words, with each role's model, per-run cap and harness from this project. **Knowledge**: the documents (title, summary, source, file name or path, size, a Missing badge for a path document whose file is gone) with a readout of documents, stored bytes and index characters against their caps. Opening a row shows its body (a path document's file as it is now); Edit changes the title, summary and content (a text or upload document) or path (a path document); a document is added as Text, Upload or Project file, or by dropping a file on the section; delete asks first. **Skills**: the skills (`project:<name>`, the body's size, `Off` for a disabled one, the description) with a count against the cap. Opening a row shows its `SKILL.md` body; Edit changes the name, description and body; a skill is added by hand or from a `SKILL.md` (Upload SKILL.md, or a drop on the section), whose frontmatter fills the name and description and whose body below it fills the instructions, for review before Add; a switch turns one on or off; delete asks first. Knowledge and skill changes apply at once and a refusal shows the server's reason. **Settings**: the name, default directory, description, background (`n / 10000`) and execution settings, saved together (Save is disabled over a limit or without a change; Discard changes resets them); then Agent settings: a form for the project's layer ("All agents in this project") and one for each role in the project (Planner, Worker, Reviewer), where every field also says what applies now and from which layer; then Delete project, offered only while the project has no tasks.
+- **Project** (`#projects/<id>`, `#projects/<id>/knowledge|skills|settings`): a header with the name, description, default directory and task count (a link to the filtered Tasks page), then four tabs, arrow keys moving between them. **Overview**: the 5 latest tasks with status and cost and a link to all of them; the background (three lines, then Show more); the knowledge (document count, stored size, the first 5 titles and summaries, how many referenced files are missing); the skills (count, how many are on, the first 5 names and descriptions); and the execution settings that are set, in words, with each role's model, per-run cap and harness from this project. **Knowledge**: the documents (title, summary, source, file name or path, size, a Missing badge for a path document whose file is gone) with a readout of documents, stored bytes and index characters against their caps. Opening a row shows its body (a path document's file as it is now); Edit changes the title, summary and content (a text or upload document) or path (a path document); a document is added as Text, Upload or Project file, or by dropping a file on the section; delete asks first. **Skills**: the skills (`project:<name>`, the body's size, `Off` for a disabled one, the description) with a count against the cap. Opening a row shows its `SKILL.md` body; Edit changes the name, description and body; a skill is added by hand or from a `SKILL.md` (Upload SKILL.md, or a drop on the section), whose frontmatter fills the name and description and whose body below it fills the instructions, for review before Add; a switch turns one on or off; delete asks first. Knowledge and skill changes apply at once and a refusal shows the server's reason. **Settings**: the name, default directory, description, background (`n / 10000`) and execution settings, saved together (Save is disabled over a limit or without a change; Discard changes resets them); then Agent settings: a form for the project's layer ("All agents in this project") and one for each role in the project (Planner, Worker, Reviewer), with that role's limit of how many run at once in the project (empty or Clear inherits), where every field also says what applies now and from which layer; then Delete project, offered only while the project has no tasks.
 - **Task Detail**: Overview (status, phase, times, steps and the task's cost with its run count, then "Cost by agent": the Planner's, the Workers' and the Reviewers' runs and cost with each one's share, noting runs still running or without a reported cost; steps, agent timeline, live activity feed), Pipeline DAG (React Flow), Sessions, Conversation
 - **Runs** (`#runs/<role>`): each role's sessions and run history, and no configuration. A Runs list shows every recorded Claude run of the role (the Manager, every task's Planner, Workers or Reviewers), a Manager `/new` as a `new session` row, and links each to its agent's history; each role links to its section in Settings → Roles.
 - **Agent history** (`#history/<agent-id>?task=<task-id>`): opened from History on an Agent Timeline row, a Runs entry or the Chat page. The Manager's and a Planner's page starts with "Context & cost": the latest context size, the number of compactions, the total cost and the number of turns. Below them is a sparkline of the context at the end of each of the latest 100 turns, scaled between their lowest and highest value, with a dashed marker on each turn that compacted. A list of the compactions follows (turn, time, trigger, context before → after), then a folded table of the turns. The section is re-read every 10 s. For each Claude run it shows status, model, the run's own tokens (uncached input, cache read, cache write, output), its context at the end (`ctx`), a `compacted` badge, its own cost, the launch command (cwd and argv; a long argument such as the system prompt is shown by its length, and Copy copies the exact command), a collapsible System prompt section with what Looper appended (Claude Code's built-in system prompt is not included): its title shows the prompt's size, its short sha256 and an `isolated` badge, and inside one line per layer (harness source and version, role recommended or edited, project and background version, task, contract), the model with its source and effort, and the Settings environment variable names, above the full text; runs recorded before the layers existed show the text only. A collapsible Plugins & skills section shows how many plugins and skills the run loaded from the library, with its hash, and how many project skills (from `metadata.project_skills`), and lists each with its short version hash. Then the full transcript, following a running run every 2 s. A running run shows its last output time from the record's heartbeat and is flagged after 2 minutes with no output. While Claude thinks it shows `thinking · ~N tokens` from Claude's `thinking_tokens` events. Those arrive about once a second, so the recorder keeps one row per thinking phase and updates its count in place. Hooks, background tasks and rate limits are shown as one line each, as are a compaction (`Context compacted (auto) · 25.1k → 1.36k tokens`) and a failed compaction attempt. The result line labels Claude's figure as the `session total`. Any other event type is an expandable line. A `/new` is one line, `new session`, with its channel, sender, chat and the session it ended. For a Planner each run is one of its turns, listed above your chat with it and its activity.
-- **Settings**: a folding group at the bottom of the sidebar, one page each (`#settings/<page>`): **LLM Providers** (`providers`); **Agent Runtimes** (`runtimes`, read-only, as above); **Agent Profiles** (`profiles`: each profile's runtime, provider, model and effort, the roles it can run and where it is used, with a form that picks the runtime, then a provider grouped as the runtime's own login (OAuth; Claude Code's with its `claude auth status` result, Codex's with its `codex login status` result or the forked login a run found, none for OMP) or an API-key provider that speaks its protocols, then a model from the provider's catalog, or any, with the models a Codex login offers suggested); **Roles** (`roles`: the system layer, then per role (`#settings/roles/<role>`) its layer, each field saying what applies now and from which layer, and its own fields: the role prompt (replace or append, reset to the recommended one), timeout, concurrency, and the note that every agent has every tool with `--dangerously-skip-permissions`); **Skills & MCP** (`catalog`: how many of the imported items are loaded and their size, "Import from this machine" or "Re-import", the last import with what it changed and what it left out, a name filter, and the plugins and skills with their version, size and installs; a change applies to each agent's next run); **Channels** (`channels`: the Telegram and Lark channels, each with its sender allowlist, an add and remove list of Telegram user IDs or Lark open_ids, checked as you type, with blanks and repeats flagged, and, for an enabled channel that does not start, the reason); **Import / Export** (`transfer`). Wherever an Agent Profile is chosen (Roles, a project's settings, a new task's roles) it is the same dropdown, whose last entry, "+ New Agent Profile", opens the form in place and selects what it saves.
+- **Settings**: a folding group at the bottom of the sidebar, one page each (`#settings/<page>`): **LLM Providers** (`providers`); **Agent Runtimes** (`runtimes`, read-only, as above); **Agent Profiles** (`profiles`: each profile's runtime, provider, model and effort, the roles it can run and where it is used, with a form that picks the runtime, then a provider grouped as the runtime's own login (OAuth; Claude Code's with its `claude auth status` result, Codex's with its `codex login status` result or the forked login a run found, none for OMP) or an API-key provider that speaks its protocols, then a model from the provider's catalog, or any, with the models a Codex login offers suggested); **Roles** (`roles`: the system layer, then per role (`#settings/roles/<role>`) its layer, each field saying what applies now and from which layer, with the Planner's "Tasks running at once per project", the Workers' "Workers running at once per project" or the Reviewers' "Reviewers running at once per project", and its own fields: the role prompt (replace or append, reset to the recommended one), timeout, and the note that every agent has every tool with `--dangerously-skip-permissions`); **Skills & MCP** (`catalog`: how many of the imported items are loaded and their size, "Import from this machine" or "Re-import", the last import with what it changed and what it left out, a name filter, and the plugins and skills with their version, size and installs; a change applies to each agent's next run); **Channels** (`channels`: the Telegram and Lark channels, each with its sender allowlist, an add and remove list of Telegram user IDs or Lark open_ids, checked as you type, with blanks and repeats flagged, and, for an enabled channel that does not start, the reason); **Import / Export** (`transfer`). Wherever an Agent Profile is chosen (Roles, a project's settings, a new task's roles) it is the same dropdown, whose last entry, "+ New Agent Profile", opens the form in place and selects what it saves.
 
 ### Real-Time Updates
 
@@ -1526,10 +1558,10 @@ dev proxy, which keeps `Host` and `Origin` on its own port.
 | `/api/chat/targets` | GET | The Manager, then per recent task its Planner and step Workers/Reviewers, with `can_send` |
 | `/api/chat/messages` | GET/POST | Chat history |
 | `/api/roles` | GET | List the role configs: `configs`, one per role, each keyed by `role` |
-| `/api/roles/:role` | GET/PUT | One role's config; PUT changes the fields given. `harness_prompt` and `model` are agent settings (400 naming the role's endpoint); `runtime` and `llm_profile_id` were removed (400); 404 for an unknown role |
+| `/api/roles/:role` | GET/PUT | One role's config; PUT changes the fields given. `harness_prompt`, `model` and `max_concurrency` are agent settings (400 naming the role's endpoint); `runtime` and `llm_profile_id` were removed (400); 404 for an unknown role |
 | `/api/roles/:role/reset-prompt` | POST | Reset the role prompt to the recommended one |
-| `/api/agent-settings` | GET | The agent settings outside projects: `system` and `roles` (all four), each with `values` (that layer's own: `harness_prompt`, `profile_id` (an Agent Profile's id), `effort`, `env` as `[{key, value}]`, `run_budget_usd`; `null` = not set) and `effective` (what applies, each field with its `source` layer; the profile as `profile`: `{profile_id, name, model, runtime, provider}`; `effort` may come from the profile, source `profile`), and `limits` (with `builtin_profile`: `{profile_id, name}`) |
-| `/api/agent-settings/system` | PUT | Set the system layer. Each layer's PUT changes the fields given (`null` or `""` unsets one; `env` replaces the layer's list, a `null` value unsetting a variable outside the system layer; the built-in harness text unsets the system harness) and answers with the GET view. 400 for an unknown field, `model` (part of the Agent Profile), an unknown profile or one that cannot run the layer's roles, a harness over 20000 characters, a bad effort or cap, or a bad, credential-like or 51st variable; nothing is stored then |
+| `/api/agent-settings` | GET | The agent settings outside projects: `system` and `roles` (all four), each with `values` (that layer's own: `harness_prompt`, `profile_id` (an Agent Profile's id), `effort`, `env` as `[{key, value}]`, `run_budget_usd`, `max_concurrency`; `null` = not set) and `effective` (what applies, each field with its `source` layer; the profile as `profile`: `{profile_id, name, model, runtime, provider}`; `effort` may come from the profile, source `profile`; the Planner, Workers and Reviewers also `max_concurrency`), and `limits` (with `builtin_profile`: `{profile_id, name}`, and `concurrency_max`) |
+| `/api/agent-settings/system` | PUT | Set the system layer. Each layer's PUT changes the fields given (`null` or `""` unsets one; `env` replaces the layer's list, a `null` value unsetting a variable outside the system layer; the built-in harness text unsets the system harness) and answers with the GET view. 400 for an unknown field, `model` (part of the Agent Profile), an unknown profile or one that cannot run the layer's roles, a harness over 20000 characters, a bad effort or cap, a bad, credential-like or 51st variable, or a `max_concurrency` that is not a whole number from 1 to 64 or is on a layer other than a Planner's, Worker's or Reviewer's role or role-in-project layer; nothing is stored then. A role's or role-in-project PUT that sets `max_concurrency` then has the TaskRouter and the WorkerPool start what the new limit lets start |
 | `/api/registry` | GET | The runtime types this version has (`type`, `label`, `default_executable`, `runtime_id` of its built-in runtime, `protocols`, `capabilities`, `roles`, `auth_kinds`), and every `runtime` (with its `path` on the server's PATH or `null`, and `roles`), `provider` (API key as `***` or `null`; an OAuth one with `suggested_models` and its `login`: `{state, detail}`, `state` one of `chatgpt`, `other_method`, `not_logged_in`, `unknown`, `unavailable`, for Codex's login, else `null`), each counting the profiles that use it (`profile_count`), and every Agent Profile in `profiles` (with its `profile_id`, `roles`, `used_by`: `layers` (`scope`, `role`, `project_id`, `project_name`) and `task_count`, and its `cost`: `source`, `equivalent`, `unpriced` models), the `provider_presets`, the built-in `prices` (`as_of`, `sources`, `models`), with `limits` |
 | `/api/runtimes/:id/probe` | POST | Re-detect: probe again and record the version, capabilities or error; for `rt-<type>` of a type not found yet, look for it on the server's PATH and add its built-in runtime (404 when it is not there). Runtimes are built in: there is no route to register, change or delete one |
 | `/api/providers` | POST | Register `{name, protocols, auth, oauth_runtime_type?, base_url?, models?, env?, max_concurrency?, api_key?}`; 201 with `provider`; 400 with the reason (an `env` name the binding sets, or that reads like a credential, too), 409 for a taken name |
@@ -1560,7 +1592,8 @@ dev proxy, which keeps `Host` and `Origin` on its own port.
 ## Configuration
 
 Agent behavior is configured via the `role_configs` table (Settings → Roles); the harness, Agent Profile,
-effort, environment and per-run cap are agent settings ([Harness, profile and environment](#harness-profile-and-environment)):
+effort, environment and per-run cap are agent settings ([Harness, profile and environment](#harness-profile-and-environment)),
+and so are the [concurrency limits](#concurrency-limits):
 
 - **system_prompt**: The role prompt: what this kind of agent is responsible for
 - **max_turns**: Maximum conversation turns (0 = unlimited)
@@ -1568,7 +1601,6 @@ effort, environment and per-run cap are agent settings ([Harness, profile and en
   run's total time (default 86400, 0 = no limit). Workers read
   `timeout_seconds` and `max_turns` for every run, so an edit applies to the
   next step
-- **max_concurrency**: Worker pool size
 
 The `planner` row configures every task's Planner and is read for every turn.
 `system_prompt` is the editable role prompt; code appends the reply contract
