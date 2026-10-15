@@ -562,19 +562,14 @@ class TestTelegramAllowlist:
         assert "channel-telegram not started" in caplog.text and "allowlist is empty" in caplog.text
 
 
-def _lark_event(open_id: str | None, text: str = "hello") -> dict[str, Any]:
-    import json as _json
-    sender_id = {"user_id": "5d9bdxxx", "union_id": "on_7dab8a3d3cdcc9da365777c7ad535d62"}
+def _lark_event(open_id: str | None, text: str = "hello", **fields: Any) -> dict[str, Any]:
+    """A message event as ``lark-cli event consume im.message.receive_v1`` prints it: flat, the sender's open_id
+    in ``sender_id`` and a text message's text in ``content``."""
+    event = {"type": "im.message.receive_v1", "chat_id": "oc_1", "chat_type": "p2p", "message_id": "om_1",
+             "message_type": "text", "sender_type": "user", "content": text, **fields}
     if open_id is not None:
-        sender_id["open_id"] = open_id
-    return {
-        "type": "im.message.receive_v1",
-        "event": {
-            "sender": {"sender_id": sender_id, "sender_type": "user"},
-            "message": {"chat_id": "oc_1", "message_id": "om_1", "message_type": "text",
-                        "content": _json.dumps({"text": text})},
-        },
-    }
+        event["sender_id"] = open_id
+    return event
 
 
 class TestLarkAllowlist:
@@ -620,9 +615,24 @@ class TestLarkAllowlist:
         assert "channel-lark" in line and OTHER_OPEN_ID in line and "secret plan" not in line
 
     def test_only_the_open_id_counts(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        # The event's other ids name the same user, but the list holds open_ids.
+        # The list holds open_ids; an event without one, or another sender, does not reach the Manager.
         assert self._run(tmp_path, monkeypatch, _lark_event(None), OPEN_ID).messages == []
         assert self._run(tmp_path, monkeypatch, _lark_event(OTHER_OPEN_ID), "5d9bdxxx").messages == []
+
+    @pytest.mark.parametrize("fields", [{"message_type": "image", "content": "[Image]"}, {"sender_type": "bot"},
+                                        {"type": "im.message.reaction.created_v1"}, {"content": "  "}])
+    def test_only_a_users_text_message_reaches_the_manager(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+                                                           fields: dict[str, Any]) -> None:
+        assert self._run(tmp_path, monkeypatch, _lark_event(OPEN_ID, **fields), OPEN_ID).messages == []
+
+    def test_the_reply_goes_back_to_the_chat_the_message_came_from(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        seen = self._run(tmp_path, monkeypatch, _lark_event(OPEN_ID, "hello", chat_id="oc_team"), OPEN_ID)
+        (message,) = seen.messages
+        assert seen.conversations == {message.correlation_id: "oc_team"}
+        assert message.payload["channel_context"] == {"chat_id": "oc_team", "sender_id": OPEN_ID,
+                                                      "message_id": "om_1"}
 
     def test_an_empty_allowlist_keeps_the_channel_from_starting(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,

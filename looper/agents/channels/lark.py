@@ -1,8 +1,12 @@
 """Lark (Feishu) Bot Channel Adapter.
 
-Bridges Lark Bot messages with the agent Bus through ``lark-cli``:
-``lark-cli event consume`` delivers the incoming message events and
-``lark-cli message send`` posts the replies.
+Bridges Lark Bot messages with the agent Bus through ``lark-cli`` (the
+commands of lark-cli 1.0.97): ``lark-cli event consume im.message.receive_v1
+--as bot`` streams the incoming messages, one flat JSON object per line
+(``lark-cli event schema im.message.receive_v1``), and ``lark-cli im
++messages-send --as bot`` posts the replies to their chat and a schedule's
+messages to a user (``send_command``). lark-cli acts as the app of its own
+configuration (``lark-cli whoami``); ``--app-id`` is no longer a flag of it.
 
 This adapter is intentionally thin — it translates between Bus
 MessageEnvelopes and those lark-cli calls rather than reimplementing the
@@ -16,6 +20,7 @@ list keeps the adapter from starting.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 from pathlib import Path
@@ -35,6 +40,44 @@ from .base import ChannelAdapter, DeliveryReceipt
 logger = logging.getLogger(__name__)
 
 
+# The event the adapter consumes: a message sent to the bot.
+RECEIVE_EVENT = "im.message.receive_v1"
+
+
+def consume_command() -> list[str]:
+    """The lark-cli argv that streams the messages the bot receives, one JSON object per line."""
+    return ["lark-cli", "event", "consume", RECEIVE_EVENT, "--as", "bot"]
+
+
+def send_command(text: str, *, chat_id: str | None = None, user_id: str | None = None) -> list[str]:
+    """The lark-cli argv that sends ``text`` as the bot to a chat (``oc_...``) or to a user (an open_id,
+    ``ou_...``), exactly one of them."""
+    if (chat_id is None) == (user_id is None):
+        raise ValueError("send to exactly one of a chat and a user")
+    target = ["--chat-id", chat_id] if chat_id is not None else ["--user-id", user_id]
+    return ["lark-cli", "im", "+messages-send", "--as", "bot", *target, "--text", text]
+
+
+def _failure(stderr: bytes) -> str:
+    """lark-cli's reason for a failed command: its JSON error's message, else the tail of what it printed."""
+    text = stderr.decode("utf-8", errors="replace").strip()
+    try:
+        message = (json.loads(text).get("error") or {}).get("message")
+    except (ValueError, AttributeError):
+        message = None
+    return str(message) if message else text[-300:]
+
+
+async def _run_send(argv: list[str]) -> None:
+    """Run a send command; raises ``RuntimeError`` with lark-cli's reason when it fails."""
+    process = await asyncio.create_subprocess_exec(
+        *argv, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE,
+    )
+    _, stderr = await process.communicate()
+    if process.returncode != 0:
+        raise RuntimeError(f"lark-cli exited {process.returncode}: {_failure(stderr or b'')}")
+
+
 def _check_lark_cli_available() -> bool:
     """Check if lark-cli is available for event collection."""
     import shutil
@@ -44,9 +87,9 @@ def _check_lark_cli_available() -> bool:
 class LarkChannelAdapter(ChannelAdapter):
     """Bridges Lark Bot with the agent message bus.
 
-    Reuses the existing lark-cli subprocess event collection and
-    lark-cli send for outbound delivery. The adapter translates
-    between Lark event JSON and MessageEnvelope format.
+    Collects events with ``lark-cli event consume`` and sends with
+    ``lark-cli im +messages-send``; it translates between lark-cli's event
+    JSON and MessageEnvelope format.
     """
 
     def __init__(
@@ -132,16 +175,12 @@ class LarkChannelAdapter(ChannelAdapter):
             return DeliveryReceipt(channel="lark", success=False, error=str(exc))
 
     async def notify(self, chat: str, text: str) -> DeliveryReceipt:
-        """Send ``text`` as the bot to Lark user ``chat`` (an open_id) with ``lark-cli im +messages-send``."""
-        process = await asyncio.create_subprocess_exec(
-            "lark-cli", "im", "+messages-send", "--as", "bot", "--user-id", chat, "--text", text,
-            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE,
-        )
-        _, stderr = await process.communicate()
-        if process.returncode != 0:
-            error = (stderr or b"").decode("utf-8", errors="replace").strip()[:300]
-            logger.warning("lark notification to %s failed (rc=%s): %s", chat, process.returncode, error)
-            return DeliveryReceipt(channel="lark", success=False, error=f"lark-cli exited {process.returncode}: {error}")
+        """Send ``text`` as the bot to Lark user ``chat`` (an open_id)."""
+        try:
+            await _run_send(send_command(text, user_id=chat))
+        except (OSError, RuntimeError) as exc:
+            logger.warning("lark notification to %s failed: %s", chat, exc)
+            return DeliveryReceipt(channel="lark", success=False, error=str(exc))
         return DeliveryReceipt(channel="lark", success=True)
 
     def healthcheck(self) -> dict[str, Any]:
@@ -155,7 +194,8 @@ class LarkChannelAdapter(ChannelAdapter):
     # --- Inbound: lark-cli events → Bus ---
 
     async def _event_collector_loop(self) -> None:
-        """Run lark-cli event consume as a subprocess and process events."""
+        """Run lark-cli event consume as a subprocess and process events; start it again 10 s after it stops
+        (a consumer that fails at once, such as one not signed in, is not restarted in a tight loop)."""
         while self._running:
             try:
                 await self._run_event_consumer()
@@ -163,18 +203,15 @@ class LarkChannelAdapter(ChannelAdapter):
                 break
             except Exception:
                 logger.exception("lark event collector crashed, restarting in 10s")
-                await asyncio.sleep(10)
+            else:
+                if self._running:
+                    logger.warning("lark event consumer stopped; starting it again in 10s")
+            await asyncio.sleep(10)
 
     async def _run_event_consumer(self) -> None:
         """Start lark-cli event consume subprocess and read events from stdout."""
-        command = [
-            "lark-cli", "event", "consume",
-            "--app-id", self._app_id,
-            "--format", "json",
-        ]
-
         process = await asyncio.create_subprocess_exec(
-            *command,
+            *consume_command(),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL,
         )
@@ -188,42 +225,35 @@ class LarkChannelAdapter(ChannelAdapter):
                 if not line:
                     continue
                 try:
-                    event = __import__("json").loads(line)
+                    event = json.loads(line)
                     await self._handle_lark_event(event)
-                except (__import__("json").JSONDecodeError, Exception):
+                except Exception:
                     logger.debug("skipping non-JSON lark event line")
         finally:
             if process.returncode is None:
                 process.kill()
 
     async def _handle_lark_event(self, event: dict[str, Any]) -> None:
-        """Process a single Lark event and publish to Bus if it's a user message."""
+        """Publish a received text message to the Bus. The event is lark-cli's flat one: ``chat_id``,
+        ``message_id``, ``message_type``, ``sender_id`` (the open_id), ``sender_type`` and ``content``, a text
+        message's text."""
         assert self._bus is not None
         import uuid as _uuid
 
-        event_type = event.get("type", "")
-        if event_type != "im.message.receive_v1":
+        if event.get("type", "") != RECEIVE_EVENT:
             return
-
-        msg = event.get("event", {}).get("message", {})
-        chat_id = msg.get("chat_id", "")
-        msg_type = msg.get("message_type", "")
-        sender = event.get("event", {}).get("sender", {}).get("sender_id", {})
+        chat_id = event.get("chat_id", "")
+        sender_open_id = event.get("sender_id")
 
         # Before anything else: an unlisted sender is logged and never answered.
-        if not self._allowlist.admits(sender.get("open_id")):
+        if not self._allowlist.admits(sender_open_id):
             return
 
-        if msg_type != "text":
+        if event.get("sender_type") == "bot" or event.get("message_type", "") != "text":
             return
 
-        content = msg.get("content", "{}")
-        try:
-            text = __import__("json").loads(content).get("text", "")
-        except (__import__("json").JSONDecodeError, AttributeError):
-            text = content
-
-        if not text.strip():
+        text = event.get("content") or ""
+        if not isinstance(text, str) or not text.strip():
             return
 
         # Remove bot @mention prefix if present
@@ -243,8 +273,8 @@ class LarkChannelAdapter(ChannelAdapter):
                 "language": "zh",
                 "channel_context": {
                     "chat_id": chat_id,
-                    "sender_id": sender.get("open_id", ""),
-                    "message_id": msg.get("message_id", ""),
+                    "sender_id": sender_open_id or "",
+                    "message_id": event.get("message_id", ""),
                 },
             },
             correlation_id=correlation_id,
@@ -265,27 +295,8 @@ class LarkChannelAdapter(ChannelAdapter):
             pass
 
     async def _send_lark_message(self, chat_id: str, text: str) -> None:
-        """Send a text message to a Lark chat using lark-cli."""
-        import json as _json
-
-        content = _json.dumps({"text": text}, ensure_ascii=False)
-        command = [
-            "lark-cli", "message", "send",
-            "--app-id", self._app_id,
-            "--chat-id", chat_id,
-            "--msg-type", "text",
-            "--content", content,
-        ]
-
-        process = await asyncio.create_subprocess_exec(
-            *command,
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        _, stderr = await process.communicate()
-        if process.returncode != 0:
-            err = stderr.decode("utf-8", errors="replace") if stderr else ""
-            raise RuntimeError(f"lark-cli send failed (rc={process.returncode}): {err[:200]}")
+        """Send a text reply to a Lark chat; raises ``RuntimeError`` with lark-cli's reason when it fails."""
+        await _run_send(send_command(text, chat_id=chat_id))
 
     @staticmethod
     def _format_reply(envelope: MessageEnvelope) -> str:
