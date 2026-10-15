@@ -22,7 +22,7 @@ from .tasks import ACTIVE_STATUSES
 # How the project's task agents run; NULL inherits (looper/agents/project_execution.py).
 EXECUTION_COLUMNS = (
     "task_budget_usd", "task_budget_action", "supervise_interval_seconds", "review_policy",
-    "distill_lessons",
+    "distill_lessons", "step_workspaces",
 )
 
 

@@ -81,6 +81,8 @@ class _PlanStore:
         self.tasks: dict[str, dict[str, Any]] = {}
         self.journal: dict[str, list[dict[str, Any]]] = {}
         self.ready: dict[str, dict[str, Any]] = {}
+        self.workspaces: dict[int, dict[str, Any]] = {}  # step_workspaces rows by id
+        self.workspace_ids = 0
 
     async def create_task(self, *, task_id: str, status: str = "pending", **row: Any) -> None:
         if status == "init":
@@ -110,6 +112,20 @@ class _PlanStore:
         keys = {step["id"]: step["key"] for step in self.steps.get(task_id, {}).values()}
         journal = [{**entry, "step_key": keys.get(entry["step_id"], "")} for entry in self.journal.get(task_id, [])]
         return {"plan": plan, "steps": rows, "journal": journal}
+
+    async def next_workspace_id(self, **_: object) -> int:
+        self.workspace_ids += 1
+        return self.workspace_ids
+
+    async def save_workspace(self, row: Any, **_: object) -> None:
+        self.workspaces[int(row["id"])] = dict(row)
+
+    async def list_workspaces(self, task_id: str, **_: object) -> list[dict[str, Any]]:
+        return [dict(row) for _, row in sorted(self.workspaces.items()) if row["task_id"] == task_id]
+
+    async def list_kept_workspaces(self, **_: object) -> list[dict[str, Any]]:
+        return [{**row, "task_status": self.tasks.get(row["task_id"], {}).get("status", "running")}
+                for _, row in sorted(self.workspaces.items()) if row.get("removed_at") is None]
 
     async def save_session(self, agent_id: str, session_id: str | None, totals: Any, *,
                            runtime_type: str | None = None, profile_id: str | None = None,
@@ -327,10 +343,11 @@ def agent_db(monkeypatch: pytest.MonkeyPatch, stub_claude_on_path: Path) -> Simp
     tests would otherwise stop at the first unguarded write. Each write becomes
     an ``AsyncMock`` returning ``None`` (``create_project`` returns the new
     project's row), and each read answers as an empty database. The plans and
-    sessions the agents save, and the tasks created ready, are kept in memory
-    (``store``, a ``_PlanStore``) and read back from there: ``save_plan``,
-    ``load_plan``, ``save_session``, ``get_session``, ``create_task`` and
-    ``start_ready_task`` are mocks around it. The returned namespace exposes them by
+    sessions the agents save, the tasks created ready and the step workspaces
+    are kept in memory (``store``, a ``_PlanStore``) and read back from there:
+    ``save_plan``, ``load_plan``, ``save_session``, ``get_session``,
+    ``create_task``, ``start_ready_task`` and the ``*_workspace*`` ones are
+    mocks around it. The returned namespace exposes them by
     name so a test can assert what was persisted. A bare ``claude`` is a stub
     that never answers (``stub_claude_on_path``).
     """
@@ -352,7 +369,7 @@ def agent_db(monkeypatch: pytest.MonkeyPatch, stub_claude_on_path: Path) -> Simp
         mock = AsyncMock(return_value=value)
         monkeypatch.setattr(importlib.import_module(f"looper.db.{module_name}"), function, mock)
         setattr(db, function, mock)
-    from looper.db import agent_sessions, plans, tasks
+    from looper.db import agent_sessions, plans, step_workspaces, tasks
 
     db.store = store = _PlanStore()
     for module, name, function, method in (
@@ -361,6 +378,10 @@ def agent_db(monkeypatch: pytest.MonkeyPatch, stub_claude_on_path: Path) -> Simp
         (agent_sessions, "get_session", "get_session", store.get_session),
         (tasks, "create_task", "create_task", store.create_task),
         (tasks, "start_ready_task", "start_ready_task", store.start_ready_task),
+        (step_workspaces, "next_workspace_id", "next_id", store.next_workspace_id),
+        (step_workspaces, "save_workspace", "save", store.save_workspace),
+        (step_workspaces, "list_workspaces", "list_for_task", store.list_workspaces),
+        (step_workspaces, "list_kept_workspaces", "list_kept", store.list_kept_workspaces),
     ):
         mock = AsyncMock(side_effect=method)
         monkeypatch.setattr(module, function, mock)

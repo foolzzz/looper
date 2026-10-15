@@ -158,8 +158,10 @@ def work_task_section(
     target_files: Sequence[str] = (),
     feedback: Sequence[str] = (),
     attempt: int = 1,
+    workspace: Mapping[str, Any] | None = None,
 ) -> str:
-    """A Worker's task: its step, after the task the step belongs to (as context)."""
+    """A Worker's task: its step, after the task the step belongs to (as context), and the step's own worktree
+    when it has one (``workspace``, the dispatch's ``context.workspace``)."""
     lines = ["## Task"]
     if requirement.strip():
         lines += ["The whole task, for context (your step is only part of it):", _requirement(requirement), ""]
@@ -173,13 +175,38 @@ def work_task_section(
     if feedback:
         lines += ["", f"This step is being retried (attempt {attempt}). Feedback on the previous attempts:"]
         lines += [f"- {item}" for item in feedback]
+    if workspace:
+        lines += ["", *_worktree_lines(workspace)]
     return "\n".join(lines)
+
+
+def _worktree_lines(workspace: Mapping[str, Any]) -> list[str]:
+    target, branch, base = workspace.get("target_branch"), workspace.get("branch"), str(workspace.get("base_commit"))
+    lines = [
+        f"This step runs in its own git worktree of the repository, on branch {branch}, created from {target} at "
+        f"{base[:12]} when the step started. Steps running at the same time do not see your changes, and you do "
+        "not see theirs.",
+        f"You may commit here. When the step is accepted, Looper commits what you left uncommitted and merges "
+        f"this branch into {target}, keeping your commits. Do not push, do not switch branches, and do not rewrite "
+        "the commits already on this branch.",
+    ]
+    previous = workspace.get("previous_branch")
+    if previous:
+        files = ", ".join(str(f) for f in workspace.get("previous_files") or [])
+        lines.append(
+            f"The previous attempt's commits are on branch {previous}; they could not be merged into {target} "
+            f"({workspace.get('previous_error')}{f': {files}' if files else ''}). This checkout starts from "
+            f"{target} as it is now: bring that work over (for example with `git merge {previous}`) and resolve "
+            "the conflicts.")
+    return lines
 
 
 def review_task_section(
     *, requirement: str, step: str, instruction: str, acceptance_criteria: Sequence[str], work_dir: str,
+    workspace: Mapping[str, Any] | None = None,
 ) -> str:
-    """A Reviewer's task: the step under review, after the task it belongs to (as context)."""
+    """A Reviewer's task: the step under review, after the task it belongs to (as context), and the step's own
+    worktree when it ran in one."""
     lines = ["## Task"]
     if requirement.strip():
         lines += ["The whole task, for context:", _requirement(requirement), ""]
@@ -187,6 +214,10 @@ def review_task_section(
     if work_dir:
         lines.append(f"Working directory: {work_dir}")
     lines += _items("Acceptance criteria to verify:", acceptance_criteria)
+    if workspace:
+        lines += ["", f"This step ran in its own git worktree, on branch {workspace.get('branch')}; your working "
+                      "directory is that checkout. To see the step's changes, including the uncommitted ones: "
+                      f"`git diff {workspace.get('base_commit')}`."]
     return "\n".join(lines)
 
 

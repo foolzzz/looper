@@ -186,7 +186,7 @@ class TestProjectEndpoints:
         assert (body["task_count"], body["active_count"]) == (0, 0)
         assert set(body) == {"project_id", "name", "description", "work_dir", "background", "created_at",
                              "updated_at", "task_count", "active_count", "schedule_count", "task_budget_usd", "task_budget_action",
-                             "supervise_interval_seconds", "review_policy", "distill_lessons"}
+                             "supervise_interval_seconds", "review_policy", "distill_lessons", "step_workspaces"}
 
     def test_work_dir_is_optional(self, store: _Store) -> None:
         status, body = _call("POST", "/api/projects", {"name": "notes"})
