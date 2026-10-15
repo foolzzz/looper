@@ -305,14 +305,38 @@ export interface DbChatMessage {
   message_id: string;
   role: string;
   content: string;
+  /** The channel the turn came in on: "web", "telegram" or "lark". */
+  channel?: string;
   created_at: string;
 }
 
+/** A session's newest messages (up to 200), oldest first. */
 export async function fetchChatMessages(sessionId: string): Promise<DbChatMessage[]> {
   const res = await fetch(`${API_BASE}/chat/messages?session_id=${encodeURIComponent(sessionId)}`);
   if (!res.ok) return [];
   const data = await res.json();
   return data.messages || [];
+}
+
+/** One of the Manager's conversations on any channel, for the Chat page's conversation list (Planner threads are
+ * not listed). */
+export interface ChatSession {
+  session_id: string;
+  /** The channel the session belongs to: "web", "telegram" or "lark". */
+  channel: string;
+  message_count: number;
+  first_message_at: string;
+  last_message_at: string;
+  /** Who sent the last message ("user" or "assistant") and its first 200 characters. */
+  last_role: string;
+  last_content: string;
+}
+
+export async function fetchChatSessions(): Promise<ChatSession[]> {
+  const res = await fetch(`${API_BASE}/chat/sessions`);
+  if (!res.ok) await failed(res, "list conversations");
+  const data = await res.json();
+  return data.sessions ?? [];
 }
 
 /** How long a dropped chat watch waits before it reconnects. */

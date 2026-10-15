@@ -202,6 +202,7 @@ Web 始终开启。Telegram 和 Lark 默认内置，不需要任何启动参数�
 - 左上角列出所有 agent（`GET /api/chat/targets`）：全局唯一的 Manager，以及最近 30 个任务。每个任务下有它固定的一个 Planner，和每个步骤各自独立的 Worker（做了验收的步骤还有 Reviewer）。已经结束的任务和 agent 也列出来，可以查看消息
 - 能发消息的只有 Manager 和运行中任务的 Planner。发给 Planner 的消息由它的 Claude 回复（一个 `[CHAT]` turn），Claude 可以把消息转给正在执行某一步的 Worker，作为它的下一个 user turn，也可以给计划追加步骤；Worker 已经结束的，这条消息留到这一步的决策 turn 给 Claude 看。事件按到达顺序处理，正在跑别的 turn 时发来的消息会排在它后面；任务还没有计划或已经结束时，消息不经过 Claude，直接回复。选中 Planner 时，旁边折叠显示它最近 10 次 Claude 运行。Worker 和 Reviewer 只读，页面显示它的完整运行记录
 - `POST /api/chat/send` 发送消息，`target` 指定对话对象
+- 选中 Manager 时，左侧按渠道（Dashboard chat、Lark、Telegram）列出它的对话（`GET /api/chat/sessions`，不含 Planner 线程），每条显示最后一条消息的开头和时间；选网页对话就接着在那个线程里聊，选 Lark 或 Telegram 的对话只读显示历史，没有输入框。窄屏时列表收进标题栏的按钮里。每个对话只取最新的 200 条消息（`GET /api/chat/messages`），更早的不翻页
 - 任何渠道发来的消息只要正好是 `/new`（去掉首尾空白，不分大小写），就由 Looper 自己处理、不交给 Claude：Manager 停掉常驻 Claude、丢掉保存的会话，下一条消息（不论来自哪个渠道）开新会话，不带续接简报；重置记成一次运行。Manager 聊天顶部的「New session」按钮发的就是 `/new`
 - 花费与上下文的展示：
   - 任务列表的每一行都显示任务目前的花费。
