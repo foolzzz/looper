@@ -131,8 +131,8 @@ def test_the_agents_running_now_and_each_active_projects_limits(monkeypatch: pyt
 
         now = datetime.now(timezone.utc)
         router = SimpleNamespace(running_planners=lambda: [
-            {"task_id": "task-a1", "planner_id": "planner-task-a1", "requirement": "build it", "status": "running",
-             "project_id": a["id"]}])
+            {"task_id": "task-a1", "planner_id": "planner-task-a1", "requirement": "build it", "name": "建解析器",
+             "status": "running", "project_id": a["id"]}])
         run = {"task_id": "task-a1", "step_id": "step-1", "instruction": "write the parser", "project_id": a["id"]}
         pool_runs = [
             {**run, "agent_id": "worker-2", "role": "worker", "step": "tests", "state": "waiting", "since": now},
@@ -150,8 +150,8 @@ def test_the_agents_running_now_and_each_active_projects_limits(monkeypatch: pyt
         assert status == 200
         agents = body["agents"]
         assert agents["manager"] == {"agent_id": "manager", "state": "busy"}
-        assert [(p["agent_id"], p["project_name"], p["requirement"]) for p in agents["planners"]] == [
-            ("planner-task-a1", "alpha", "build it")]
+        assert [(p["agent_id"], p["project_name"], p["requirement"], p["name"]) for p in agents["planners"]] == [
+            ("planner-task-a1", "alpha", "build it", "建解析器")]
         # Running ones first, each with how long it has been in its state.
         assert [(w["agent_id"], w["state"], w["step"]) for w in agents["workers"]] == [
             ("worker-1", "running", "parser"), ("worker-2", "waiting", "tests")]
@@ -235,5 +235,28 @@ def test_a_planning_or_verifying_task_is_active_for_the_sidebar_and_the_delete_g
         await server._route_api("POST", "/api/tasks/delete", {}, json.dumps({"task_id": "planning"}).encode(), writer)
         assert writer.data.startswith(b"HTTP/1.1 400") and b"stop the task before deleting" in writer.data
         assert await pool.fetchval("SELECT count(*) FROM tasks WHERE id = 'planning'") == 1
+
+    _run(test, monkeypatch)
+
+
+def test_a_tasks_name_is_its_title_else_its_goal_else_its_requirement(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def test(pool: Any) -> None:
+        from looper.db import projects, tasks
+
+        project = await projects.create_project(name="alpha", work_dir="/w", pool=pool)
+        await tasks.create_task(task_id="task-titled", requirement="Write hello.py.", goal_id="hello",
+                                project_id=project["id"], title="  写 hello\n脚本 ", pool=pool)
+        await tasks.create_task(task_id="task-goal", requirement="Write hello.py.", goal_id="hello-world",
+                                project_id=project["id"], pool=pool)
+        await tasks.create_task(task_id="task-plain", requirement="  Write hello.py.\nThen test it.",
+                                project_id=project["id"], pool=pool)
+        server = _server()
+        status, body = await _get(server, "/api/tasks")
+        assert status == 200
+        assert {t["task_id"]: t["name"] for t in body["tasks"]} == {
+            "task-titled": "写 hello 脚本", "task-goal": "hello-world", "task-plain": "Write hello.py."}
+        status, detail = await _get(server, "/api/tasks/task-titled")
+        assert (status, detail["name"], detail["requirement"]) == (200, "写 hello 脚本", "Write hello.py.")
+        assert await pool.fetchval("SELECT title FROM tasks WHERE id = 'task-titled'") == "写 hello 脚本"
 
     _run(test, monkeypatch)

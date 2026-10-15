@@ -18,6 +18,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -268,8 +269,12 @@ def test_a_due_schedule_fires_a_started_task_with_its_settings_and_run_context(m
         row = await env.pool.fetchrow("SELECT last_fired_at, next_fire_at FROM schedules WHERE id = $1", sid)
         assert row["last_fired_at"] == due_at and row["next_fire_at"] == due_at + timedelta(minutes=5)
 
+        # Named by the schedule and the fire time in its zone, not by the requirement's first line.
+        when = due_at.astimezone(ZoneInfo("America/Los_Angeles")).strftime("%m-%d %H:%M")
+        assert task["title"] == f"Alert triage · {when}"
         listed = await env.ok("GET", "/api/tasks", None)
         assert listed["tasks"][0]["schedule_id"] == sid and listed["tasks"][0]["schedule_name"] == "Alert triage"
+        assert listed["tasks"][0]["name"] == f"Alert triage · {when}"
         status, filtered = await env.call("GET", "/api/tasks", query={"schedule_id": "sched-000000000000"})
         assert status == 200 and filtered["tasks"] == []
 

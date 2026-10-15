@@ -26,6 +26,13 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
 - Routes task requests to the TaskRouter via `TASK_REQUEST` messages, each
   with its project's `project_id` and a `task_id` the Manager chooses; the
   TaskRouter creates the task ready (`init`), without a Planner
+- Names each task by the task JSON's `title`, which the recommended prompt
+  requires: a few words in the user's language, stored in `tasks.title` (one
+  line, at most 60 characters). The task JSON usually answers the user's
+  「确认」, so no message of the user's names the task. `db.tasks.task_name`
+  is what lists, headings, the Chat page and the end notice show: the title,
+  else the goal id, else the requirement's first line, else the task id (a
+  task from before titles, or a JSON without one)
 - Places each confirmed task in a project. Every user turn starts with a
   `Projects` section listing the existing projects (name, default directory or
   "no default directory", description cut to 80 characters) and, when there
@@ -50,7 +57,7 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
 - After it creates a ready task the reply is Claude's acknowledgement, then a
   configuration block code writes from the settings in effect in the task's
   project (the resolution behind `GET /api/projects/:id/agent-settings`): the
-  goal and task id, the project (new or existing), the directory; for the
+  task's title (else its goal) and id, the project (new or existing), the directory; for the
   Planner, Workers and Reviewers the Agent Profile with its effort and the
   layer it came from, and agent teams for the Workers and Reviewers (never a
   Planner's); the project's review policy, spend cap per task and what
@@ -177,9 +184,7 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
   channels whose adapter implements `notify` (`NotifyChannel`), records who
   to tell in `tasks.chat_id`. The Manager sets it when it creates the task,
   in the form that channel's `notify` takes: the Telegram chat id, or the
-  Lark sender's open_id (Lark's `notify` sends to a user). It also records
-  what the user wrote (`tasks.original_user_text`): the message that asked
-  for the task, before any question Looper asked about it.
+  Lark sender's open_id (Lark's `notify` sends to a user).
   - When the task completes or fails, the TaskRouter adds a `Notice` to the
     final `GOAL_STATUS` it passes to the Manager. Then it tears the Planner
     down and starts what may start; it never waits on a channel, and a status
@@ -191,8 +196,9 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
   - The channel sends it like an answer, to who the task recorded: Lark as
     Markdown (`lark-cli im +messages-send --as bot --user-id ou_… --markdown`),
     Telegram as MarkdownV2, as plain text when Telegram cannot parse it.
-  - The notice reads 「✅ 任务完成 · <the first 40 characters of what the user
-    wrote, else of the requirement, else the task id>」 or 「❌ 任务失败 · …」.
+  - The notice reads 「✅ 任务完成 · <the first 40 characters of the task's
+    name (`task_name`: its title, else its goal id, else its requirement)>」
+    or 「❌ 任务失败 · …」.
     Then the first section of the summary or closing note (what was
     delivered, or why the task ended), its line breaks kept, at most 300
     characters; the full text is on the task's page. Then the absolute link
@@ -1416,7 +1422,10 @@ dashboard only). A new schedule is disabled.
   running, or created and about to start) is recorded `skipped_overlap`, or,
   with `overlap` `queue`, waits as the one `queued` run, which starts when that
   task ends. Otherwise it creates the task (`tasks.schedule_id`, its own
-  spend cap, the profile overrides in `task_profile_overrides`) and starts it
+  spend cap, the profile overrides in `task_profile_overrides`, and a title:
+  the schedule's name and the fire time in its zone, such as
+  `alarm-triage · 10-15 12:30`, the name clipped so the time fits the 60
+  characters, which names the task in lists) and starts it
   at once with `TASK_START` (enabling was the approval), so it waits for a
   place under the project's concurrency limit like any start. Its requirement
   is the schedule's followed by a section the code writes, `## 定时运行上下文`:
@@ -1896,7 +1905,7 @@ PostgreSQL is a hard startup dependency. All data paths:
 | Table | Purpose |
 |---|---|
 | `projects` | Projects: name (unique ignoring case), description, default `work_dir` (`''` = none), `background` for the task agents' system prompt (`''` = none), and the execution settings (`project_execution`) |
-| `tasks` | Task metadata, status, phase, timestamps, `work_dir`, `project_id` (required), `schedule_id` (the schedule that fired it), `budget_usd` (its own spend cap, over its project's), `chat_id` (who is told when it ends: a Telegram chat id or a Lark sender's open_id; NULL for a task asked for elsewhere) and `original_user_text` (what the user wrote when asking for it in a chat; it names the task in that notice) |
+| `tasks` | Task metadata, status, phase, timestamps, `work_dir`, `project_id` (required), `schedule_id` (the schedule that fired it), `budget_usd` (its own spend cap, over its project's), `chat_id` (who is told when it ends: a Telegram chat id or a Lark sender's open_id; NULL for a task asked for elsewhere), `original_user_text` (the user's message the Manager's task JSON answered, often 「确认」; kept as history) and `title` (a few words naming it, from the task JSON; `task_name` falls back to the goal id, then the requirement) |
 | `task_steps` | A task's steps, each with everything its Planner decides with: `step_key` (label), `depends_on` (step ids), `review`, `acceptance_criteria`, `validation_commands`, `status`, `result`, `worker_id`, `reviewer_id`, `retries`, `feedback`, `missed_messages` |
 | `task_plans` | A task's plan, one row per task: `plan_id`, `status` (`planning`, `executing`, `verifying`, `stopping`, `completed`, `failed`), `correlation_id`, `origin_channel_id`, `final_summary`, `fail_reason`; replaced when the task is planned again |
 | `agent_sessions` | The session each resident agent resumes: `manager` or `planner-<task_id>`, its `session_id`, `session_totals`, the `runtime_type` and `provider_id` it belongs to and the `profile_id` that ran it last (`NULL` runtime: before Agent Profiles, Claude Code; `NULL` provider: before providers were recorded, Claude Code's own login), and `clean_start` (the user dropped the session with `/new`: the next one starts without a resume brief) |

@@ -639,6 +639,7 @@ class AgentHTTPServer:
                 result.append({
                     "task_id": t.get("id", ""),
                     "requirement": t.get("requirement", ""),
+                    "name": t.get("name", ""),
                     "goal_id": t.get("goal_id", ""),
                     "project_id": t.get("project_id", ""),
                     "project_name": t.get("project_name", ""),
@@ -1079,6 +1080,7 @@ class AgentHTTPServer:
         result = {
             "task_id": raw.get("id", ""),
             "requirement": raw.get("requirement", ""),
+            "name": raw.get("name", ""),
             # Every version of an edited requirement, oldest first (none for one never edited): version, text, via,
             # created_at, delivered_at (when the Planner had the edit in a turn).
             "requirement_versions": versions,

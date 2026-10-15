@@ -122,10 +122,31 @@ def _read_config(value: Any) -> dict[str, Any]:
     return {}
 
 
+TITLE_MAX_CHARS = 60
+
+
+def task_title(raw: Any) -> str | None:
+    """A task's ``title`` as stored: its words on one line, at most ``TITLE_MAX_CHARS``; None for none."""
+    text = " ".join(raw.split())[:TITLE_MAX_CHARS] if isinstance(raw, str) else ""
+    return text or None
+
+
+def task_name(*, title: str | None, goal_id: str | None, requirement: str | None, task_id: str) -> str:
+    """What a task is called where it is listed or announced: its title (the Manager's, in the user's language),
+    else its goal id, else the first line of its requirement, else its id."""
+    for value in (title, goal_id):
+        if isinstance(value, str) and value.strip():
+            return " ".join(value.split())
+    first = (requirement or "").strip().split("\n", 1)[0].strip()
+    return first or task_id
+
+
 def _task(row: Mapping[str, Any]) -> dict[str, Any]:
     task = dict(row)
     if "config" in task:
         task["config"] = _read_config(task["config"])
+    task["name"] = task_name(title=task.get("title"), goal_id=task.get("goal_id"),
+                             requirement=task.get("requirement"), task_id=str(task.get("id") or ""))
     return task
 
 
@@ -142,6 +163,7 @@ async def create_task(
     origin_channel_id: str = "",
     chat_id: str | None = None,
     original_user_text: str | None = None,
+    title: str | None = None,
     schedule_id: str | None = None,
     budget_usd: float | None = None,
     pool: asyncpg.Pool | asyncpg.Connection | None = None,
@@ -149,8 +171,8 @@ async def create_task(
     """Insert a task; ``schedule_id`` names the schedule that fired it, ``budget_usd`` its own spend cap.
 
     ``chat_id`` is who to tell when the task ends (``agents.task_notice``): a Telegram chat id or a Lark sender's
-    open_id; None for a task that did not come from either. ``original_user_text`` is what the user wrote when
-    asking for it in a chat, which names the task in that notice.
+    open_id; None for a task that did not come from either. ``original_user_text`` is the user's message the
+    Manager's task JSON answered (kept as history); ``title`` the few words the Manager names the task with.
     """
     pool = pool or get_pool()
     now = datetime.now(timezone.utc)
@@ -158,14 +180,14 @@ async def create_task(
     await pool.execute(
         """
         INSERT INTO tasks (id, requirement, goal_id, work_dir, project_id,
-                           config, status, correlation_id, origin_channel_id, chat_id, original_user_text,
+                           config, status, correlation_id, origin_channel_id, chat_id, original_user_text, title,
                            created_at, updated_at, schedule_id, budget_usd)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $12, $13, $14)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $13, $14, $15)
         ON CONFLICT (id) DO NOTHING
         """,
         task_id, requirement, goal_id, work_dir, project_id,
-        config_json, status, correlation_id, origin_channel_id, chat_id, original_user_text, now, schedule_id,
-        budget_usd,
+        config_json, status, correlation_id, origin_channel_id, chat_id, original_user_text, task_title(title), now,
+        schedule_id, budget_usd,
     )
     return {"task_id": task_id, "created_at": now.isoformat()}
 

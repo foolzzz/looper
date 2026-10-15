@@ -980,9 +980,12 @@ ALTER TABLE tasks ADD COLUMN IF NOT EXISTS budget_usd DOUBLE PRECISION CHECK (bu
 -- Who is told when the task ends (agents/task_notice.py), in the form its channel's notify takes: the Telegram
 -- chat id, or the Lark sender's open_id; NULL for a task asked for elsewhere (the web chat, the dashboard).
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS chat_id TEXT;
--- What the user wrote when asking for the task in a chat (the Manager's request may be reworded): it names the
--- task in that end notice. NULL for a task created elsewhere.
+-- The user's message the Manager's task JSON answered (often the confirmation), kept as history. NULL for a task
+-- created elsewhere.
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS original_user_text TEXT;
+-- A few words naming the task in the user's language, from the Manager's task JSON (db/tasks.py task_name falls
+-- back to goal_id, then the requirement). NULL for a task created elsewhere or before.
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS title TEXT;
 CREATE INDEX IF NOT EXISTS idx_tasks_schedule ON tasks (schedule_id, created_at DESC) WHERE schedule_id IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS llm_records (
