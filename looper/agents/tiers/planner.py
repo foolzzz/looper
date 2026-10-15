@@ -956,6 +956,11 @@ class PlannerAgent:
             step.status = "verified"
             await self._step_settled(plan, step)
 
+    async def _drop_workspace(self, step: PlanStep) -> None:
+        """A step dropped from the plan: its worktree and branch go with it."""
+        if step.isolated and step.workspace is not None:
+            step.workspace = await self._discard(step.workspace)
+
     async def _discard(self, workspace: StepWorkspace, *, keep_branch: bool = False) -> StepWorkspace:
         """Drop a workspace without merging it: its directory goes, and its branch unless ``keep_branch``."""
         if StepWorkspaceState.DISCARDED in workspaces.ALLOWED_TRANSITIONS[workspace.state]:
@@ -1152,8 +1157,8 @@ class PlannerAgent:
             return
         elif decision is Decision.REPLAN:
             step.status = "verified" if context.acceptable else "skipped"
-            if step.status == "skipped" and step.isolated and step.workspace is not None:
-                step.workspace = await self._discard(step.workspace)
+            if step.status == "skipped":
+                await self._drop_workspace(step)
             await self._replan(plan, reply.steps, step, reply.reason)
         elif decision is Decision.FAIL:
             step.status = "failed"
@@ -1182,8 +1187,7 @@ class PlannerAgent:
         dropped = [s for s in plan.steps if s.status == "pending" and s.label not in keep]
         for step in dropped:
             step.status = "skipped"
-            if step.isolated and step.workspace is not None:
-                step.workspace = await self._discard(step.workspace)
+            await self._drop_workspace(step)
         steps = self._add_steps(plan, specs)
         summary = f"Plan changed: {self._describe(plan, steps) or 'no new steps'}"
         if dropped:
@@ -1488,10 +1492,12 @@ class PlannerAgent:
             except Exception:
                 logger.debug("planner %s could not stop worker %s", self.agent_id, step.worker_id, exc_info=True)
             step.status = "skipped"
+            await self._drop_workspace(step)
         keep = {spec.id for spec in reply.steps}
         dropped = [s for s in plan.steps if s.status == "pending" and s.label not in keep]
         for step in dropped:
             step.status = "skipped"
+            await self._drop_workspace(step)
         steps = self._add_steps(plan, reply.steps)
         summary = f"Plan changed: {self._describe(plan, steps) or 'no new steps'}"
         if stopped:

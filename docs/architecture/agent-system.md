@@ -1439,7 +1439,9 @@ the [step workspaces RFC](rfcs/step-workdir-isolation-v0.zh-CN.md)):
   and unsigned. No git command Looper runs runs a hook
   (`-c core.hooksPath=/dev/null`), and each has a 120 s limit. The Worker's own
   commits keep the repository's identity, signing and hooks.
-- **Kept and removed.** A completed task's worktrees and branches are removed.
+- **Kept and removed.** A step that a replan drops, from a decision or a change
+  to the task, loses its worktree and branch at once. A completed task's
+  worktrees and branches are removed.
   A failed, stopped or cancelled task keeps its unmerged ones, and its activity
   names their branches, until it is started anew (its steps go) or deleted;
   continuing it from its plan reuses them. A merge that a restart cut off is

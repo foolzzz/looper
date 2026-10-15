@@ -26,6 +26,7 @@ from test_planner_agent import (
     decide,
     drive,
     plan,
+    reply,
     step,
 )
 
@@ -209,6 +210,32 @@ class TestStepWorkspaces:
         assert h.final().payload["status"] == "completed"  # type: ignore[union-attr]
         review = seen["reviews"][0]
         assert review == seen["s1"][0]["context"]  # the step's worktree, and its start for `git diff`
+
+    def test_a_step_a_change_stops_loses_its_worktree(self, planner_claude: Any, agent_db: Any) -> None:
+        agent_db.get_task_project.return_value = project(step_workspaces="worktree")
+        claude = planner_claude(
+            plan(step("s1"), step("s2")),
+            reply({"reply": "Stopping s2.", "action": "replan", "stop": ["s2"], "steps": []}),
+            decide("accept"),  # s1
+        )
+        checks: dict[str, Any] = {}
+
+        async def scenario(h: Harness) -> None:
+            init_repo(h.work_dir)
+            await h.start()
+            await h.until(lambda: len(h.held) == 2)
+            stopped = Path(h.held[1].payload["context"]["work_dir"])
+            assert stopped.is_dir()
+            await h.say("Drop s2, it is not needed.")
+            checks["gone"] = not stopped.exists()
+            checks["branches"] = looper_branches(h.work_dir)
+            await h.release(WORK_OK)
+            await h.finished()
+
+        h = drive(claude, lambda envelope: None, scenario)
+        assert h.final().payload["status"] == "completed"  # type: ignore[union-attr]
+        assert checks["gone"] and checks["branches"] == ["looper/t1/s1-1"]
+        assert [row["state"] for row in agent_db.store.workspaces.values()] == ["merged", "discarded"]
 
     def test_a_merge_cut_off_by_a_restart_is_finished_without_deciding_again(
         self, planner_claude: Any, agent_db: Any,
