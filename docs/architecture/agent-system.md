@@ -2012,6 +2012,18 @@ restart.
   `lark-cli im +messages-edit --as bot --message-id <om_…> --text` (with the
   channel's `--profile`), taking the id from the send's JSON answer; Telegram
   uses `send_message` and `edit_message_text`.
+- **A reaction when the bot sees a message** (`status_line.Reactions`): a
+  direct message from a listed sender that goes to the Manager first gets a
+  reaction from the bot, Lark's 「Get」 (`lark-cli im reactions create --as bot
+  --message-id <om_…> --data '{"reaction_type":{"emoji_type":"Get"}}'`, with
+  the channel's `--profile`; the app needs the
+  `im:message.reactions:write_only` scope) and Telegram's 👀
+  (`set_message_reaction`). The call runs in the background, so the message
+  reaches the Manager without waiting for it. A failed reaction is not
+  retried and never becomes a chat message; the first failure of a run of the
+  channel is logged, naming the missing scope when lark-cli reports one. A
+  rejected sender, a group message and a message that is not handed on (not
+  text, empty) get no reaction.
 - **Telegram**: the token comes from the env var named by `bot_token_env`
   (default `LOOPER_TELEGRAM_BOT_TOKEN`). `allowed_user_ids` lists numeric
   Telegram user IDs (a negative id is a group or channel, not a sender); a
