@@ -144,6 +144,10 @@ class _Store:
         """No task here chose an Agent Profile of its own."""
         return {}
 
+    async def manager_actions(self, task_id: str, **_: Any) -> list[dict[str, Any]]:
+        """The Manager has done nothing to these tasks."""
+        return []
+
     @asynccontextmanager
     async def transaction(self) -> Any:
         self.transactions += 1
@@ -166,6 +170,9 @@ def store(monkeypatch: pytest.MonkeyPatch) -> _Store:
 
     monkeypatch.setattr(task_changes, "requirement_versions", fake.requirement_versions)
     monkeypatch.setattr(task_changes, "edit_requirement", fake.edit_requirement)
+    from looper.db import manager_actions
+
+    monkeypatch.setattr(manager_actions, "for_task", fake.manager_actions)
     return fake
 
 

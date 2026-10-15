@@ -30,6 +30,7 @@ from .channels.web import WebChannelAdapter
 from .scheduler import Scheduler
 from .supervisor import AgentSupervisor
 from .tiers.journal import progress_notes
+from .ops.service import ManagerOps
 from .tiers.manager import ManagerAgent
 from .tiers.task import TaskRouter
 from .tiers.worker import WorkerPool
@@ -61,6 +62,7 @@ def _serialize(obj: Any) -> Any:
 HTTP_200 = "200 OK"
 HTTP_201 = "201 Created"
 HTTP_400 = "400 Bad Request"
+HTTP_401 = "401 Unauthorized"
 HTTP_403 = "403 Forbidden"
 HTTP_404 = "404 Not Found"
 HTTP_405 = "405 Method Not Allowed"
@@ -68,6 +70,9 @@ HTTP_409 = "409 Conflict"
 HTTP_413 = "413 Content Too Large"
 HTTP_500 = "500 Internal Server Error"
 HTTP_502 = "502 Bad Gateway"
+# The Manager's tools (``ops.service``).
+AGENT_API = "/api/agent/v1/"
+_RE_AGENT_OP = re.compile(r"^/api/agent/v1/ops/([a-z_]{1,64})$")
 
 
 # The largest request body the server reads. The largest legitimate one is a
@@ -115,6 +120,7 @@ class AgentHTTPServer:
         self_checks: list[dict[str, str]] | None = None,
         claude_bin: str = "claude",
         scheduler: Scheduler | None = None,
+        manager_ops: ManagerOps | None = None,
     ) -> None:
         self._host = host
         self._port = port
@@ -135,6 +141,8 @@ class AgentHTTPServer:
         self._claude_bin = claude_bin
         # What "Run now" on a schedule fires through.
         self._scheduler = scheduler
+        # The Manager's platform tools, behind /api/agent/v1/ (its token only).
+        self._manager_ops = manager_ops
         # Configuration files uploaded for import, waiting to be applied (under the runtime root).
         self._config_imports = config_imports.ConfigImports(runtime_root) if runtime_root else None
         self._server: asyncio.Server | None = None
@@ -228,7 +236,9 @@ class AgentHTTPServer:
                 writer.close()
                 return
 
-            if path.startswith("/api/"):
+            if path.startswith(AGENT_API):
+                await self._handle_agent_api(method, path, headers, body, writer)
+            elif path.startswith("/api/"):
                 await self._route_api(method, path, query, body, writer)
             else:
                 await self._serve_static(path, writer)
@@ -542,6 +552,28 @@ class AgentHTTPServer:
             await writer.drain()
 
     # --- API handlers ---
+
+    async def _handle_agent_api(
+        self, method: str, path: str, headers: dict[str, str], body: bytes, writer: asyncio.StreamWriter,
+    ) -> None:
+        """The Manager's tools (``ops.service``): ``GET tools`` lists them, ``POST ops/<tool>`` calls one with the
+        JSON body as its arguments and answers the protocol's object, 200 also for a refused call. Only the
+        token of this server's Manager gets in."""
+        ops = self._manager_ops
+        if ops is None or not ops.authorized(headers.get("authorization")):
+            writer.write(_json_response(HTTP_401, {"error": "this endpoint is the Manager's: a valid token is "
+                                                            "required"}))
+        elif path == f"{AGENT_API}tools" and method == "GET":
+            writer.write(_json_response(HTTP_200, {"tools": ops.listing()}))
+        elif (m := _RE_AGENT_OP.match(path)) and method == "POST":
+            try:
+                arguments = json.loads(body.decode("utf-8")) if body.strip() else {}
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                arguments = None
+            writer.write(_json_response(HTTP_200, await ops.call(m.group(1), arguments)))
+        else:
+            writer.write(_json_response(HTTP_404, {"error": f"no {method} {path}"}))
+        await writer.drain()
 
     async def _answer(
         self,
@@ -1061,11 +1093,13 @@ class AgentHTTPServer:
             from ..db.agent_setting_layers import profile_overrides
             from ..db.llm_records import task_costs
             from ..db.tasks import get_task_with_steps
+            from ..db.manager_actions import for_task as manager_actions
             from ..db.task_changes import requirement_versions
             raw = await get_task_with_steps(task_id)
             cost = (await task_costs([task_id]))[task_id] if raw else None
             overrides = await profile_overrides(task_id) if raw else {}
             versions = await requirement_versions(task_id) if raw else []
+            actions = await manager_actions(task_id) if raw else []
         except Exception:
             logger.exception("DB unavailable for task_detail %s", task_id)
             writer.write(_json_response(HTTP_500, {"error": "database unavailable"}))
@@ -1088,6 +1122,8 @@ class AgentHTTPServer:
             "supplements": [{"text": entry["summary"], "via": entry.get("via") or "", "created_at": entry["created_at"],
                              "delivered_at": entry.get("delivered_at")}
                             for entry in raw.get("journal", []) if entry.get("kind") == "supplement"],
+            # What the Manager did to the task through its tools, or asked the user to confirm, newest first.
+            "manager_actions": actions,
             "goal_id": raw.get("goal_id", ""),
             "project_id": raw.get("project_id", ""),
             "project_name": raw.get("project_name", ""),

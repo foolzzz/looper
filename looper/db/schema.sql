@@ -228,6 +228,28 @@ CREATE TABLE IF NOT EXISTS task_requirement_versions (
     PRIMARY KEY (task_id, version)
 );
 
+-- What the Manager did through its platform tools (looper/agents/ops), one row per call: the chat and the message
+-- of the turn it came in (empty for a turn Claude ran on its own), the tool, its arguments (secret values masked),
+-- the risk tier, how it ended (ok, needs_confirmation, error with its code) and its result; a confirmed call has the
+-- confirmation_id of the call that asked. task_id names the task it acted on, without a foreign key, so a deleted
+-- task's trail stays.
+CREATE TABLE IF NOT EXISTS manager_actions (
+    id               BIGSERIAL PRIMARY KEY,
+    created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+    channel          TEXT NOT NULL DEFAULT '',
+    chat             TEXT NOT NULL DEFAULT '',
+    message_id       TEXT NOT NULL DEFAULT '',
+    tool             TEXT NOT NULL,
+    arguments        JSONB NOT NULL DEFAULT '{}',
+    risk             TEXT NOT NULL CHECK (risk IN ('read', 'write', 'high')),
+    status           TEXT NOT NULL CHECK (status IN ('ok', 'needs_confirmation', 'error')),
+    error_code       TEXT,
+    result           JSONB,
+    confirmation_id  TEXT,
+    task_id          TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_manager_actions_task ON manager_actions (task_id, id) WHERE task_id IS NOT NULL;
+
 -- Each role's own settings: its display name, role prompt and timeout (manager, planner, worker, reviewer).
 CREATE TABLE IF NOT EXISTS role_configs (
     role             TEXT PRIMARY KEY,
