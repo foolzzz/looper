@@ -185,7 +185,7 @@ class TestProjectEndpoints:
         assert body["work_dir"] == os.path.join(os.path.expanduser("~"), "tetris")
         assert (body["task_count"], body["active_count"]) == (0, 0)
         assert set(body) == {"project_id", "name", "description", "work_dir", "background", "created_at",
-                             "updated_at", "task_count", "active_count", "task_budget_usd", "task_budget_action",
+                             "updated_at", "task_count", "active_count", "schedule_count", "task_budget_usd", "task_budget_action",
                              "supervise_interval_seconds", "review_policy", "distill_lessons"}
 
     def test_work_dir_is_optional(self, store: _Store) -> None:
