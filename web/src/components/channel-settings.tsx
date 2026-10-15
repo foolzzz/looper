@@ -432,7 +432,6 @@ function LarkPeople({
                   {r.count > 1 ? `${r.count} messages, last ` : ""}
                   {new Date(r.last_at).toLocaleString()}
                 </span>
-                {r.snippet && <span className="min-w-0 max-w-full truncate italic text-muted-foreground">“{r.snippet}”</span>}
                 <Button
                   type="button"
                   variant="ghost"
