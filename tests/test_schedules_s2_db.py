@@ -6,7 +6,7 @@ Runs only when LOOPER_TEST_DATABASE_URL points at a disposable database; it uses
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -303,6 +303,100 @@ def test_the_no_success_alert_goes_out_once_with_one_recovery(monkeypatch: pytes
         await env.end_task(recovered["task_id"], "completed")
         await env.scheduler.idle()
         assert [n["kind"] for n in await _outbox(env, sid)] == ["stale_alert", "stale_recovered"]
+
+    _run(test, monkeypatch, tmp_path)
+
+
+# Noon in Los Angeles, where the scheduler's day (``_setup``) starts at midnight: far from a day's end.
+NOON = datetime(2030, 1, 15, 20, 0, tzinfo=timezone.utc)
+MINUTE = timedelta(minutes=1)
+
+
+async def _next_minute(env: _Env, sid: str) -> list[dict[str, Any]]:
+    """Fire ``sid`` at the next minute (the clock 10 s after it), wait for its gate; its runs, newest first."""
+    at = (env.clock.now + MINUTE).replace(second=0, microsecond=0)
+    await env.pool.execute("UPDATE schedules SET next_fire_at = $2 WHERE id = $1", sid, at)
+    env.clock.now = at + timedelta(seconds=10)
+    await env.scheduler.tick()
+    await env.scheduler.idle()
+    return await env.runs(sid)
+
+
+def _shape(runs: list[dict[str, Any]]) -> list[tuple[str, int]]:
+    return [(run["status"], run["firings"]) for run in runs]
+
+
+def test_a_gated_schedule_every_minute_counts_its_repeated_skips_on_one_run(monkeypatch: pytest.MonkeyPatch,
+                                                                           tmp_path: Path) -> None:
+    from looper.agents.schedules import schedule_overview
+
+    async def test(env: _Env) -> None:
+        _setup(env)
+        env.clock.now = NOON
+        items = tmp_path / "items.txt"
+        items.write_text("")
+        sid = (await env.enabled(cron="* * * * *", gate_command="cat items.txt"))["schedule_id"]
+
+        for n in (1, 2, 3):  # nothing new: one run counts the three firings, each keeping the schedule healthy
+            # As if no success had come for too long: each of these firings, counted or not, ends that alert.
+            await env.pool.execute("UPDATE schedules SET stale_alert_at = $2 WHERE id = $1", sid, NOON)
+            runs = await _next_minute(env, sid)
+            assert _shape(runs) == [("skipped_gate", n)]
+            ok_at = await env.pool.fetchval("SELECT last_ok_at FROM schedules WHERE id = $1", sid)
+            assert ok_at == datetime.fromisoformat(runs[0]["finished_at"]) == env.clock.now
+        assert datetime.fromisoformat(runs[0]["scheduled_for"]) == NOON + MINUTE
+        assert [n["kind"] for n in await _outbox(env, sid)] == ["stale_recovered"] * 3
+
+        items.write_text("alert-1\n")
+        runs = await _next_minute(env, sid)
+        assert _shape(runs) == [("running", 1), ("skipped_gate", 3)]
+        task_id = runs[0]["task_id"]
+        await env.pool.execute("UPDATE tasks SET status = 'running' WHERE id = $1", task_id)
+        for n in (1, 2):  # its task still runs: every minute after is one repeated overlap skip
+            assert _shape(await _next_minute(env, sid))[0] == ("skipped_overlap", n)
+        await env.end_task(task_id, "completed", summary="triaged alert-1")
+        await env.scheduler.idle()
+        items.write_text("")
+        assert _shape(await _next_minute(env, sid)) == [
+            ("skipped_gate", 1), ("skipped_overlap", 2), ("completed", 1), ("skipped_gate", 3)]
+
+        # The dashboard counts every skipped firing of the day, not the runs.
+        skipped = (await schedule_overview(NOON - timedelta(hours=12)))["skipped_today"]
+        assert (skipped["skipped_gate"], skipped["skipped_overlap"]) == (4, 2)
+        assert env.bus.of("task_start") == [task_id]
+
+    _run(test, monkeypatch, tmp_path)
+
+
+def test_a_skip_on_a_new_day_is_a_run_of_its_own(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    async def test(env: _Env) -> None:
+        _setup(env)
+        (tmp_path / "items.txt").write_text("")
+        sid = (await env.enabled(cron="* * * * *", gate_command="cat items.txt"))["schedule_id"]
+        env.clock.now = datetime(2030, 1, 16, 7, 58, 30, tzinfo=timezone.utc)  # 23:58:30 in Los Angeles
+        await _next_minute(env, sid)
+        assert _shape(await _next_minute(env, sid)) == [("skipped_gate", 1), ("skipped_gate", 1)]
+
+    _run(test, monkeypatch, tmp_path)
+
+
+def test_a_slow_gate_never_runs_twice_at_once(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    async def test(env: _Env) -> None:
+        _setup(env)
+        env.clock.now = NOON
+        sid = (await env.enabled(cron="* * * * *",
+                                 gate_command="echo start >> gate.log; sleep 1; echo end >> gate.log"))["schedule_id"]
+        for _ in range(3):  # three minutes come while the first gate runs
+            at = (env.clock.now + MINUTE).replace(second=0, microsecond=0)
+            await env.pool.execute("UPDATE schedules SET next_fire_at = $2 WHERE id = $1", sid, at)
+            env.clock.now = at + timedelta(seconds=10)
+            await env.scheduler.tick()
+        runs = await env.runs(sid)
+        assert _shape(runs) == [("skipped_overlap", 2), ("gating", 1)]
+        assert runs[0]["error"] == "the previous run is still checking its gate"
+        await env.scheduler.idle()
+        assert (tmp_path / "gate.log").read_text() == "start\nend\n"
+        assert _shape(await env.runs(sid)) == [("skipped_overlap", 2), ("skipped_gate", 1)]
 
     _run(test, monkeypatch, tmp_path)
 

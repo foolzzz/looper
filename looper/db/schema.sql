@@ -1000,6 +1000,10 @@ BEGIN
     END IF;
 END $$;
 CREATE INDEX IF NOT EXISTS idx_schedule_runs_schedule ON schedule_runs (schedule_id, created_at DESC);
+-- How many firings a run stands for: a skip that repeats the schedule's latest run (the same reason, the same day)
+-- is counted on that run instead of a row of its own, so a schedule firing every minute does not add a row a
+-- minute while its gate finds nothing new or its task runs.
+ALTER TABLE schedule_runs ADD COLUMN IF NOT EXISTS firings INTEGER NOT NULL DEFAULT 1 CHECK (firings >= 1);
 CREATE INDEX IF NOT EXISTS idx_schedule_runs_open ON schedule_runs (schedule_id) WHERE status IN ('queued', 'running');
 -- Every message about a schedule, sent or not: a run's outcome, an alert or its recovery. 'dashboard' when the
 -- schedule names no chat (or notify is 'never' for an alert), 'failed' with the reason when sending failed.

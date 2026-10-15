@@ -4,10 +4,13 @@ A schedule belongs to a project and fires a full task of it on a time rule
 (``looper/agents/cron.py``); the scheduler (``looper/agents/scheduler.py``)
 does the firing. A new schedule is disabled. Enabling one, or changing the
 rule of an enabled one, sets its next fire time from now, so nothing missed
-before is run. Two fires of a rule are at least ``min_interval_seconds()``
-apart (5 minutes), checked over the next 24 hours when it is saved;
+before is run. Two fires of a rule are at least ``min_interval_seconds``
+apart, checked over the next 24 hours when it is saved: 5 minutes, or 1 minute
+for a schedule with a gate command, whose run ends at its gate when there is
+nothing new (``skipped_gate``: no task, no cost). Removing the gate of a
+schedule that fires more often is refused.
 ``LOOPER_SCHEDULE_MIN_INTERVAL_SECONDS``, read when the server starts, lowers
-it for tests and validation only.
+both for tests and validation only.
 
 S2 adds a gate command (run before each run), a daily spend cap, and whom to
 tell (``notify`` and a ``notify_target``: a chat that a channel's sender
@@ -48,6 +51,8 @@ GATE_COMMAND_MAX_CHARS = 2000
 
 MIN_INTERVAL_ENV = "LOOPER_SCHEDULE_MIN_INTERVAL_SECONDS"
 DEFAULT_MIN_INTERVAL_SECONDS = 300
+# A gated schedule may fire every minute: a run with nothing new ends at its gate, without a task.
+MIN_INTERVAL_GATED_SECONDS = 60
 _min_interval = DEFAULT_MIN_INTERVAL_SECONDS
 
 NO_WORK_DIR = "a work directory is required: set one on the schedule or on its project"
@@ -87,8 +92,10 @@ def configure_min_interval() -> int:
     return _min_interval
 
 
-def min_interval_seconds() -> int:
-    return _min_interval
+def min_interval_seconds(*, gated: bool) -> int:
+    """How close two fires of a schedule may be: a minute with a gate command, else ``DEFAULT_MIN_INTERVAL_SECONDS``
+    (both lowered by ``LOOPER_SCHEDULE_MIN_INTERVAL_SECONDS``)."""
+    return min(MIN_INTERVAL_GATED_SECONDS, _min_interval) if gated else _min_interval
 
 
 def _utcnow() -> datetime:
@@ -102,20 +109,24 @@ def _seconds_text(seconds: int) -> str:
     return f"{seconds} second{'s' if seconds != 1 else ''}"
 
 
-def checked_rule(rule_text: Any, zone_name: Any, *, now: datetime) -> tuple[cron.CronRule, Any]:
-    """The rule and zone, checked: valid, firing at all, and never closer than the minimum interval over the next
-    24 hours. Raises ``ValueError`` saying why not."""
+def checked_rule(rule_text: Any, zone_name: Any, *, now: datetime, gated: bool = False) -> tuple[cron.CronRule, Any]:
+    """The rule and zone, checked: valid, firing at all, and never closer than the minimum interval of a schedule
+    with a gate command (``gated``) or without one over the next 24 hours. Raises ``ValueError`` saying why not."""
     if not isinstance(rule_text, str) or not rule_text.strip():
         raise ValueError("cron is required: a 5-field rule such as '0 9 * * 1-5'")
     rule = cron.parse(rule_text)
     tz = cron.zone(zone_name)
     if cron.next_fire(rule, tz, now) is None:
         raise ValueError(f"the rule {rule.text!r} never fires")
-    if close := cron.too_close(rule, tz, now, _min_interval):
+    least = min_interval_seconds(gated=gated)
+    if close := cron.too_close(rule, tz, now, least):
         first, second = (moment.astimezone(tz).strftime("%Y-%m-%d %H:%M") for moment in close)
         gap = int((close[1] - close[0]).total_seconds())
+        gated_least = min_interval_seconds(gated=True)
+        hint = (f" (a schedule with a gate command may fire every {_seconds_text(gated_least)})"
+                if not gated and gated_least < least else "")
         raise ValueError(f"the rule {rule.text!r} fires {_seconds_text(gap)} apart ({first} and {second}, "
-                         f"{zone_name}); fires must be at least {_seconds_text(_min_interval)} apart")
+                         f"{zone_name}); fires must be at least {_seconds_text(least)} apart{hint}")
     return rule, tz
 
 
@@ -141,6 +152,8 @@ def run_view(row: Mapping[str, Any], cost: Mapping[str, Any] | None = None) -> d
         "summary": row.get("summary"), "cost_usd": cost_usd, "error": row.get("error"),
         "finished_at": row.get("finished_at"), "gate_output": row.get("gate_output"),
         "carried_from": row.get("carried_from"),
+        # A skip that repeated counts every firing it stands for, from scheduled_for to finished_at.
+        "firings": row.get("firings") or 1,
     }
 
 
@@ -205,7 +218,8 @@ async def notify_targets() -> list[dict[str, Any]]:
 async def limits() -> dict[str, Any]:
     return {
         "name_max_chars": NAME_MAX_CHARS, "requirement_max_chars": REQUIREMENT_MAX_CHARS,
-        "min_interval_seconds": _min_interval, "default_timezone": cron.local_zone_name(),
+        "min_interval_seconds": min_interval_seconds(gated=False),
+        "min_interval_gated_seconds": min_interval_seconds(gated=True), "default_timezone": cron.local_zone_name(),
         "run_timeout_max_seconds": RUN_TIMEOUT_MAX_SECONDS, "roles": list(TASK_PROFILE_ROLES),
         "gate_command_max_chars": GATE_COMMAND_MAX_CHARS, "gate_timeout_default_seconds": GATE_TIMEOUT_DEFAULT_SECONDS,
         "gate_timeout_max_seconds": GATE_TIMEOUT_MAX_SECONDS, "notify_targets": await notify_targets(),
@@ -352,11 +366,13 @@ def _name_taken(name: str) -> RequestError:
     return RequestError(HTTP_409, f"this project already has a schedule named {name!r}")
 
 
-def _check_rule(rule_text: Any, zone_name: Any, now: datetime) -> cron.CronRule:
+def _check_rule(rule_text: Any, zone_name: Any, now: datetime, *, gated: bool,
+                removes_gate: bool = False) -> cron.CronRule:
     try:
-        return checked_rule(rule_text, zone_name, now=now)[0]
+        return checked_rule(rule_text, zone_name, now=now, gated=gated)[0]
     except ValueError as exc:
-        raise RequestError(HTTP_400, str(exc)) from None
+        reason = f"without its gate command, {exc}" if removes_gate else str(exc)
+        raise RequestError(HTTP_400, reason) from None
 
 
 # --- Requests ---
@@ -378,7 +394,7 @@ async def create_schedule(project_id: str, data: dict[str, Any], *, created_via:
                           now: datetime | None = None) -> dict[str, Any]:
     project = await _existing_project(project_id)
     fields, profiles = await _fields(data, update=False)
-    _check_rule(fields["cron"], fields["timezone"], now or _utcnow())
+    _check_rule(fields["cron"], fields["timezone"], now or _utcnow(), gated=bool(fields.get("gate_command")))
     fields["cron"] = cron.parse(fields["cron"]).text
     if not fields.get("work_dir") and not project["work_dir"]:
         raise RequestError(HTTP_400, NO_WORK_DIR)
@@ -414,7 +430,9 @@ async def update_schedule(schedule_id: str, data: dict[str, Any], *, now: dateti
             if row is None:
                 raise RequestError(HTTP_404, f"schedule {schedule_id!r} not found")
             rule_text, zone_name = fields.get("cron", row["cron"]), fields.get("timezone", row["timezone"])
-            rule = _check_rule(rule_text, zone_name, now)
+            gated = bool(fields.get("gate_command", row["gate_command"]))
+            rule = _check_rule(rule_text, zone_name, now, gated=gated,
+                               removes_gate=bool(row["gate_command"]) and not gated)
             if "cron" in fields:
                 fields["cron"] = rule.text
             work_dir = fields.get("work_dir", row["work_dir"])
@@ -456,9 +474,12 @@ async def list_runs(schedule_id: str, query: Mapping[str, str]) -> dict[str, Any
 
 
 def preview(data: Mapping[str, Any], *, now: datetime | None = None) -> dict[str, Any]:
-    """Whether a rule and zone are valid, the rule in words and its next fire times; an invalid one is answered
-    with ``valid`` false and the reason."""
+    """Whether a rule and zone are valid, for a schedule with a gate command when ``gated`` is true, the rule in
+    words and its next fire times; an invalid one is answered with ``valid`` false and the reason."""
     rule_text, zone_name, count = data.get("cron"), data.get("timezone"), data.get("count", PREVIEW_COUNT)
+    gated = data.get("gated", False)
+    if not isinstance(gated, bool):
+        raise RequestError(HTTP_400, "gated must be true or false: whether the schedule has a gate command")
     if not isinstance(rule_text, str):
         raise RequestError(HTTP_400, "cron must be a string")
     if zone_name in (None, ""):
@@ -468,9 +489,10 @@ def preview(data: Mapping[str, Any], *, now: datetime | None = None) -> dict[str
     if isinstance(count, bool) or not isinstance(count, int) or not 1 <= count <= PREVIEW_MAX:
         raise RequestError(HTTP_400, f"count must be a whole number from 1 to {PREVIEW_MAX}")
     now = now or _utcnow()
-    answer: dict[str, Any] = {"cron": rule_text, "timezone": zone_name, "min_interval_seconds": _min_interval}
+    answer: dict[str, Any] = {"cron": rule_text, "timezone": zone_name,
+                              "min_interval_seconds": min_interval_seconds(gated=gated)}
     try:
-        rule, tz = checked_rule(rule_text, zone_name, now=now)
+        rule, tz = checked_rule(rule_text, zone_name, now=now, gated=gated)
     except ValueError as exc:
         return {**answer, "valid": False, "description": None, "next": [], "error": str(exc)}
     return {**answer, "valid": True, "cron": rule.text, "description": cron.describe(rule, zone_name),

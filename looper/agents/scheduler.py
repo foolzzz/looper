@@ -362,9 +362,10 @@ class Scheduler:
         firing = decision.firing
         await db_schedules.set_fired(conn, schedule["id"], last_fired_at=firing.scheduled_for, next_fire_at=next_at)
         if decision.action is Action.SKIP:
-            await db_schedules.insert_run(
-                conn, schedule_id=schedule["id"], scheduled_for=firing.scheduled_for, trigger=firing.trigger.value,
-                missed=firing.missed, status="skipped_missed", finished_at=now, created_at=now,
+            await self._skip(
+                conn, "skipped_missed", now,
+                {"schedule_id": schedule["id"], "scheduled_for": firing.scheduled_for,
+                 "trigger": firing.trigger.value, "missed": firing.missed, "created_at": now},
                 error=f"{firing.missed} fires were missed since {_local(firing.missed_since or now, tz)}; the latest, "
                       f"at {_local(firing.scheduled_for, tz)}, was more than {int(GRACE.total_seconds() // 60)} "
                       "minutes ago (catch-up: skip)",
@@ -416,9 +417,16 @@ class Scheduler:
             reason = ("a run is already waiting for the previous run's task" if queued
                       else "the previous run is still checking its gate" if gating
                       else f"the previous run's task ({busy}) is still in progress")
-            return _Launched(await db_schedules.insert_run(conn, status="skipped_overlap", fired_at=now,
-                                                           finished_at=now, error=reason, **common))
+            return _Launched(await self._skip(conn, "skipped_overlap", now, common, fired_at=now, error=reason))
         return await self._launch(conn, schedule, firing, now, common=common)
+
+    async def _skip(self, conn: asyncpg.Connection, status: str, now: datetime, common: Mapping[str, Any],
+                    **fields: Any) -> str:
+        """Record a skipped firing: on the schedule's latest run when that is the same skip today
+        (``count_skip``), else as a run of its own."""
+        merged = await db_schedules.count_skip(conn, common["schedule_id"], status=status, at=now,
+                                               since=self.day_start(now))
+        return merged or await db_schedules.insert_run(conn, status=status, finished_at=now, **common, **fields)
 
     async def _put(self, conn: asyncpg.Connection, run_id: str | None, common: Mapping[str, Any] | None,
                    **fields: Any) -> str:
@@ -441,9 +449,12 @@ class Scheduler:
         if budget is not None:
             spent = await db_schedules.spent_since(conn, schedule["id"], self.day_start(now))
             if spent >= budget:
-                return _Launched(await self._put(
-                    conn, run_id, common, status="skipped_budget", fired_at=now, finished_at=now,
-                    error=f"today's runs cost ${spent:.4f}, the daily budget is ${budget:g}"))
+                error = f"today's runs cost ${spent:.4f}, the daily budget is ${budget:g}"
+                if run_id is None:
+                    assert common is not None
+                    return _Launched(await self._skip(conn, "skipped_budget", now, common, fired_at=now, error=error))
+                return _Launched(await self._put(conn, run_id, None, status="skipped_budget", fired_at=now,
+                                                 finished_at=now, error=error))
         if schedule["gate_command"]:
             return _Launched(await self._put(conn, run_id, common, status=db_schedules.GATING, fired_at=now),
                              gate=firing)
@@ -538,9 +549,15 @@ class Scheduler:
                     if output:
                         await db_schedules.update_run(conn, run_id, gate_output=output)
                     if not output and carried is None:
-                        await db_schedules.update_run(conn, run_id, status="skipped_gate", finished_at=now)
+                        # Nothing new: counted on the latest run when that is a skipped_gate of today too.
+                        merged = await db_schedules.count_skip(conn, schedule_id, status="skipped_gate", at=now,
+                                                               since=self.day_start(now), besides=run_id)
+                        if merged:
+                            await db_schedules.delete_run(conn, run_id)
+                        else:
+                            await db_schedules.update_run(conn, run_id, status="skipped_gate", finished_at=now)
                         await db_schedules.count_outcome(conn, schedule_id, "skipped_gate", now)
-                        launched = _Launched(run_id, ended=True)
+                        launched = _Launched(merged or run_id, ended=True)
                     else:
                         launched = await self._create_run(conn, schedule, firing, now, run_id=run_id,
                                                           gate_output=output or None, carried=carried,
