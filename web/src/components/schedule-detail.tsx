@@ -249,7 +249,11 @@ export function ScheduleDetail({ scheduleId }: { scheduleId: string }) {
             {schedule.run_timeout_seconds != null ? seconds(schedule.run_timeout_seconds) : "None"}
           </Field>
           <Field label="When a run is still going">
-            {schedule.overlap === "queue" ? "The next one waits (at most one)" : "The next one is skipped"}
+            {schedule.overlap === "queue"
+              ? "The next one waits (at most one)"
+              : schedule.overlap === "parallel"
+                ? `The next one starts beside it, up to ${schedule.max_parallel_runs} at once (reentrant)`
+                : "The next one is skipped"}
             {" · after downtime: "}
             {schedule.catch_up === "once" ? "run once" : "skip what was missed"}
           </Field>

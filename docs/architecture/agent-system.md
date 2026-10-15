@@ -1422,7 +1422,8 @@ A project's schedules fire a full task of the project on a time rule
 Manager's actions and export come with the Manager platform tools). A schedule has a `name` (unique in the project ignoring case),
 a `cron` rule and an IANA `timezone` (default: the server's own zone), the
 `requirement` each run's task gets, a `work_dir` (`''`: the project's default
-when it fires), `overlap` (`skip` or `queue`), `catch_up` (`once` or `skip`),
+when it fires), `overlap` (`skip`, `queue` or `parallel`, with
+`max_parallel_runs` 1–10, default 3), `catch_up` (`once` or `skip`),
 an optional `run_timeout_seconds` and `run_budget_usd`, and `profile_overrides`
 for the Planner, Workers or Reviewers (a profile a schedule chose cannot be
 deleted); and, from S2, an optional `gate_command` with `gate_timeout_seconds`
@@ -1463,7 +1464,15 @@ dashboard only). A new schedule is disabled.
 - **A firing** while one of the schedule's tasks is still active (queued,
   running, or created and about to start) is recorded `skipped_overlap`, or,
   with `overlap` `queue`, waits as the one `queued` run, which starts when that
-  task ends. Otherwise it creates the task (`tasks.schedule_id`, its own
+  task ends. With `overlap` `parallel` (reentrant, such as an incremental
+  check every minute whose runs take longer) it starts beside the runs in
+  progress, up to `max_parallel_runs` running at once, but never while a run
+  of the schedule checks its gate: only the tasks overlap. Past the cap, or
+  during a gate, the firing is `skipped_overlap`. A parallel run whose task
+  waits under the project's Planner limit (`pending`) counts its run timeout
+  all the same; saving a parallel schedule whose `max_parallel_runs` is above
+  that limit answers with a warning, and the project tab says so beside the
+  field. Otherwise it creates the task (`tasks.schedule_id`, its own
   spend cap, the profile overrides in `task_profile_overrides`, and a title:
   the schedule's name and the fire time in its zone, such as
   `alarm-triage · 10-15 12:30`, the name clipped so the time fits the 60
@@ -1484,7 +1493,12 @@ dashboard only). A new schedule is disabled.
   records `skipped_budget`. A schedule with a gate records the run `gating`
   (an open run: another firing meanwhile overlaps) and runs the gate in the
   background (`looper/agents/schedule_gate.py`): `/bin/sh -c` in the work
-  directory, started through `proc_tree.spawn`, with no stdin; past its
+  directory, started through `proc_tree.spawn`, with no stdin and its run in
+  its environment (`scheduler.gate_env`: `LOOPER_SCHEDULE_ID`,
+  `LOOPER_SCHEDULE_RUN_ID`, `LOOPER_SCHEDULE_SCHEDULED_FOR` in ISO 8601 and
+  `LOOPER_SCHEDULE_RUN_TIMEOUT_SECONDS`, empty without a timeout), so a gate
+  of a parallel schedule can claim what it hands to its run until the run
+  times out; past its
   timeout, or when the server stops, its process tree is ended like an
   agent's (`proc_tree.end`), and what it leaves in its own group after it
   exits is killed. Its stdout is kept up to 8000 characters (stored on the run
@@ -1492,12 +1506,15 @@ dashboard only). A new schedule is disabled.
   timeout is `gate_failed` (a failure, the reason and stderr's tail in
   `error`); nothing printed is `skipped_gate`; otherwise the task is created
   with the output in its context ("the gate's output is this run's input:
-  only these"). The previous run that ran something hands on its gate output,
-  labelled 「上一轮未完成」, when it failed, timed out, was stopped or
-  cancelled, or its gate failed: only that one run, and then even a gate that
-  prints nothing gets a task (`carried_from` names the run). The outputs
+  only these"). Each run that failed, timed out, was stopped or cancelled, or
+  whose gate failed hands its gate output on to the next run, labelled
+  「上一轮未完成」, once (`schedule_runs.carried_on`): all of them when several
+  runs of a parallel schedule ended so before it, oldest first, one block
+  each, and then even a gate that prints nothing gets a task (`carried_from`
+  names the latest of them). The outputs
   share what is left of the 8,000 characters a task requirement keeps
-  (at least 600), each clipped with a marker. A run left `gating` by a server
+  (at least 600), each clipped with a marker; earlier runs' inputs that do not
+  fit at 300 characters each are left out, the oldest first, and counted. A run left `gating` by a server
   that stopped is `gate_failed` at the next start. A gate never runs twice at
   once: a firing while the schedule's run is `gating` is `skipped_overlap`.
 - **Repeated skips are counted, not stored.** A skipped firing (`skipped_gate`,
@@ -2050,9 +2067,9 @@ PostgreSQL is a hard startup dependency. All data paths:
 | `llm_provider_secrets` | A provider's API key, apart from the provider; read only by the launch that will use it |
 | `agent_profiles` | Agent Profiles: `name`, `runtime_id`, `provider_id`, `model`, `effort` (its runs'; null: the runtime's own), `agent_teams` (Claude Code's agent teams: on by default for Claude Code profiles, set by the registry and once by the upgrade; the column's default, false, is for other runtimes), `builtin`; a provider still used by one is not deleted |
 | `task_profile_overrides` | A task's Agent Profile per role (`planner`, `worker`, `reviewer`): `profile_id`, going with its task; a profile a task chose is not deleted |
-| `schedules` | A project's schedules: `name` (unique in the project ignoring case), `cron`, `timezone`, `requirement`, `work_dir` (`''`: the project's default), `overlap`, `catch_up`, `run_timeout_seconds`, `run_budget_usd`, `gate_command`, `gate_timeout_seconds`, `daily_budget_usd`, `notify`, `notify_channel` and `notify_chat` (both or neither), `enabled` (false when created), `enabled_at` (when it was created or last enabled) and `rule_changed_at` (when its rule or zone last changed; the no-success alert counts from the later of them), `next_fire_at` (null while disabled), `last_fired_at`, `last_success_at`, `last_ok_at`, `consecutive_failures`, `failures_alert_at` and `stale_alert_at` (set while that alert is active), `created_via`; a project with schedules is not deleted |
+| `schedules` | A project's schedules: `name` (unique in the project ignoring case), `cron`, `timezone`, `requirement`, `work_dir` (`''`: the project's default), `overlap` (`skip`, `queue`, `parallel`), `max_parallel_runs` (1–10, default 3: a parallel schedule's runs at once), `catch_up`, `run_timeout_seconds`, `run_budget_usd`, `gate_command`, `gate_timeout_seconds`, `daily_budget_usd`, `notify`, `notify_channel` and `notify_chat` (both or neither), `enabled` (false when created), `enabled_at` (when it was created or last enabled) and `rule_changed_at` (when its rule or zone last changed; the no-success alert counts from the later of them), `next_fire_at` (null while disabled), `last_fired_at`, `last_success_at`, `last_ok_at`, `consecutive_failures`, `failures_alert_at` and `stale_alert_at` (set while that alert is active), `created_via`; a project with schedules is not deleted |
 | `schedule_profile_overrides` | A schedule's Agent Profile per task role, copied into each task it fires; a profile a schedule chose is not deleted |
-| `schedule_runs` | Each firing of a schedule: `scheduled_for`, `fired_at`, `trigger` (`scheduled`, `catch_up`, `manual`), `missed`, `status` (`queued`, `gating`, `running`, then once `completed`, `failed`, `stopped`, `cancelled`, `timed_out`, `gate_failed`, or `skipped_overlap`, `skipped_missed`, `skipped_gate`, `skipped_budget`), `task_id` (null when skipped, or once the task is deleted), `summary`, `cost_usd`, `error`, `gate_output`, `carried_from` (the run whose unfinished input it was given), `finished_at`, `firings` (how many firings it stands for: a repeated skip is counted on one run, from `scheduled_for` to `finished_at`); going with its schedule |
+| `schedule_runs` | Each firing of a schedule: `scheduled_for`, `fired_at`, `trigger` (`scheduled`, `catch_up`, `manual`), `missed`, `status` (`queued`, `gating`, `running`, then once `completed`, `failed`, `stopped`, `cancelled`, `timed_out`, `gate_failed`, or `skipped_overlap`, `skipped_missed`, `skipped_gate`, `skipped_budget`), `task_id` (null when skipped, or once the task is deleted), `summary`, `cost_usd`, `error`, `gate_output`, `carried_from` (the latest run whose unfinished input it was given), `carried_on` (its own unfinished input was handed on to a later run), `finished_at`, `firings` (how many firings it stands for: a repeated skip is counted on one run, from `scheduled_for` to `finished_at`); going with its schedule |
 | `schedule_notifications` | Every message about a schedule: `run_id`, `kind` (`run`, `failures_alert`, `failures_recovered`, `stale_alert`, `stale_recovered`), `channel`, `chat`, `text`, `status` (`sent`, `failed`, `dashboard`), `error`; going with its schedule |
 | `system_settings` | Settings shared by the whole system, one value per key (no row = the built-in default), such as the last library import's report |
 | `library_items` | The capability catalog: kind, name, `origin` (`machine`, `upload`, `git`, `ui` or `project`), `modified`, `owner_project_id` (a project-authored item; goes with its project), `description`, source label, declared version, `sha256` of the files, size, file count, `imported_at` |
@@ -2176,10 +2193,10 @@ dev proxy, which keeps `Host` and `Origin` on its own port.
 | `/api/projects/:id/skills/:skill_id` | PUT | Change any of `name`, `description` and `content` (its switch is on the install: `PUT /api/installs/:id`); answers with the `skill` and the installs view; 400 and 409 as above (a new name must be free in every project the skill is installed in), 404 for an unknown project or a skill another project wrote |
 | `/api/projects/:id/skills/:skill_id` | DELETE | Delete a skill the project wrote, from the catalog and every project it is installed in; answers with `deleted` and the installs view; 404 |
 | `/api/projects/:id` | DELETE | Delete a project; 409 while it still has tasks or schedules |
-| `/api/projects/:id/schedules` | GET | The project's schedules by name, each with `project_name`, `description` (the rule in words), its fields, `enabled`, `next_fire_at`, `last_fired_at`, `last_success_at`, `consecutive_failures`, the S2 fields, `spent_today_usd`, `alerts` (`failures_since`, `stale_since`) and `last_run`; and `limits` (`name_max_chars`, `requirement_max_chars` 6000, `min_interval_seconds`, `default_timezone`, `run_timeout_max_seconds`, `roles`, `gate_command_max_chars`, `gate_timeout_default_seconds`, `gate_timeout_max_seconds`, `notify_targets`: the chats the channels' sender allowlists allow, each with `channel_enabled`); 404 for an unknown project |
-| `/api/projects/:id/schedules` | POST | Create a schedule, disabled, from `name`, `cron`, `requirement` and optionally `timezone`, `work_dir`, `overlap`, `catch_up`, `run_timeout_seconds`, `run_budget_usd`, `profile_overrides`, `gate_command` (at most 2000 characters), `gate_timeout_seconds`, `daily_budget_usd`, `notify`, `notify_target` (`{channel, chat}` among `notify_targets`, or null); 201 with `schedule`. 400 with the reason for a bad field (an invalid rule or zone, a rule that never fires or fires closer than the minimum interval, no work directory here or on the project, a chat no allowlist allows, `enabled`, an unknown field), 409 for a name the project has, 404 for an unknown project |
+| `/api/projects/:id/schedules` | GET | The project's schedules by name, each with `project_name`, `description` (the rule in words), its fields, `enabled`, `next_fire_at`, `last_fired_at`, `last_success_at`, `consecutive_failures`, the S2 fields, `spent_today_usd`, `alerts` (`failures_since`, `stale_since`) and `last_run`; and `limits` (`name_max_chars`, `requirement_max_chars` 6000, `min_interval_seconds`, `default_timezone`, `run_timeout_max_seconds`, `roles`, `gate_command_max_chars`, `gate_timeout_default_seconds`, `gate_timeout_max_seconds`, `max_parallel_runs_limit`, `planner_limit` (this project's Planner limit), `notify_targets`: the chats the channels' sender allowlists allow, each with `channel_enabled`); 404 for an unknown project |
+| `/api/projects/:id/schedules` | POST | Create a schedule, disabled, from `name`, `cron`, `requirement` and optionally `timezone`, `work_dir`, `overlap`, `max_parallel_runs` (1–10, default 3), `catch_up`, `run_timeout_seconds`, `run_budget_usd`, `profile_overrides`, `gate_command` (at most 2000 characters), `gate_timeout_seconds`, `daily_budget_usd`, `notify`, `notify_target` (`{channel, chat}` among `notify_targets`, or null); 201 with `schedule` and `warnings` (what deserves a look, such as a parallel schedule allowed more runs at once than its project's Planner limit). 400 with the reason for a bad field (an invalid rule or zone, a rule that never fires or fires closer than the minimum interval, no work directory here or on the project, a chat no allowlist allows, `enabled`, an unknown field), 409 for a name the project has, 404 for an unknown project |
 | `/api/schedules` | GET | Every project's schedules, the disabled ones too, by project name and then name, ignoring case: `schedules`, each as a project's list gives it (with `project_id` and `project_name`); the Schedules page reads it |
-| `/api/schedules/:id` | GET/PUT/DELETE | Read one schedule; PUT changes the fields given and `enabled` (enabling, or a new rule or zone while enabled, sets `next_fire_at` from now; disabling clears it), 400 and 409 as for POST; DELETE deletes it and its runs, keeping its tasks; 404 |
+| `/api/schedules/:id` | GET/PUT/DELETE | Read one schedule; PUT changes the fields given and `enabled` (enabling, or a new rule or zone while enabled, sets `next_fire_at` from now; disabling clears it), answering with `schedule` and `warnings` as POST does, 400 and 409 as for POST; DELETE deletes it and its runs, keeping its tasks; 404 |
 | `/api/schedules/:id/run` | POST | Run now: fire it with `trigger` `manual` (also while disabled) through the same overlap check; answers with the `run` (`running`, `gating` while its gate runs, `queued`, `skipped_overlap`, `skipped_budget`, or `failed` with `error`); `next_fire_at` stays; 404 |
 | `/api/schedules/:id/runs` | GET | A page of the runs, newest first: `?limit=` (default 50, at most 200), `?before=<run_id>` (the runs older than that run of this schedule) and `?skips=hide` (leave out the routine skips, `skipped_gate` and `skipped_overlap`; default `show`). `runs`, each with `run_id`, `scheduled_for`, `fired_at`, `trigger`, `missed`, `status`, `task_id`, `task_status`, `task_title`, `summary`, `cost_usd` (the task's so far while it runs), `error`, `gate_output`, `carried_from`, `finished_at`, `firings` (a repeated skip's count, from `scheduled_for` to `finished_at`); `next_before` (the cursor for the next page, null at the end); `routine_skips` (`skipped_gate`, `skipped_overlap`: how many firings the schedule has had in all, a repeated skip's each counted, shown or not). 400 for a bad `limit`, `skips` or `before`; 404 |
 | `/api/schedules/:id/notifications` | GET | The schedule's messages, newest first (`?limit=` as for runs): `notification_id`, `kind`, `run_id`, `channel`, `chat`, `text`, `status`, `error`, `created_at`; 404 |
