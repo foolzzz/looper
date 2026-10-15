@@ -465,6 +465,7 @@ async def _run_agent_system(
         task_router=task_router,
         supervisor=supervisor,
         worker_pool=worker_pool,
+        manager=manager,
         broadcaster=broadcaster,
         runtime_root=runtime_root,
         self_checks=[check.to_dict() for check in checks],

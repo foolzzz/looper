@@ -151,6 +151,7 @@ class TaskRouter:
                 "planner_id": planner.agent_id,
                 "requirement": task.requirement if task else "",
                 "status": task.status if task else "running",
+                "project_id": task.project_id if task else None,
             })
         return planners
 

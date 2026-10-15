@@ -188,6 +188,9 @@ class TestProjectConcurrency:
                 await _ask_and_start(bus, "proj-b", "b1")
                 await _until(self._placed(router, 5))
                 before = self._statuses(router)
+                # The dashboard counts the running ones by project.
+                assert {p["requirement"]: p["project_id"] for p in router.running_planners()} == {
+                    "a1": "proj-a", "a2": "proj-a", "b1": "proj-b"}
 
                 await bus.publish(_ended(self._id(router, "a1")))
                 await _until(lambda: self._statuses(router)["a3"] == "running")

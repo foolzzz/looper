@@ -220,7 +220,7 @@ release wheel serves the copy packaged with it.
 
 | Page | Features |
 |---|---|
-| **Dashboard** | System status overview |
+| **Dashboard** | What is happening now: task counts by group (each opening the filtered Tasks page), the agents running now, each active project's concurrency against its limits, today's spend, and a warning when a component is unhealthy |
 | **Chat** | Talk to the global Manager, or to a running task's Planner (each message becomes a new step of that task); SSE streaming |
 | **Tasks** | Task list, project and status filters, create/start/stop/delete controls |
 | **Project** | One project's overview, knowledge documents, its own skills and installs, the Agent Profiles and other agent settings its roles override, and its settings |
@@ -236,7 +236,7 @@ site's page (its `Origin`) is refused. The main route groups:
 
 | Group | Endpoints | Purpose |
 |---|---|---|
-| Status | `GET /api/status` | System health and the startup self-check (`checks`) |
+| Status | `GET /api/status`, `GET /api/overview` | System health and the startup self-check (`checks`); the Dashboard's overview of what is happening now |
 | Projects | `/api/projects`, `/api/projects/:id`, `/api/projects/:id/knowledge/...` | Create, edit and delete projects; their knowledge documents and drafts |
 | Tasks | `/api/tasks`, `/api/tasks/create`, `/api/tasks/:id/...`, `/api/tasks/{start,stop,cancel,delete}` | List and create tasks (in a project, with optional `profile_overrides`), read one, start, stop, cancel, delete; activity and its SSE stream |
 | Catalog and installs | `/api/catalog/...`, `/api/installs/...`, `/api/projects/:id/installs`, `/api/projects/:id/skills/...` | Plugins, skills and MCP servers: import, upload, git, write, edit, delete; install them globally or in a project |

@@ -30,6 +30,7 @@ import logging
 import shutil
 import uuid
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -259,6 +260,12 @@ class WorkerProcess:
     process: asyncio.subprocess.Process | None = None
     status: str = "pending"  # "pending" (waiting for room in its project) | "running" | "completed" | "failed"
     result: dict[str, Any] | None = None
+    role: AgentType = AgentType.WORKER  # or REVIEWER
+    parent_task_id: str = ""  # the task whose step this is (task_id is the step's)
+    step: str = ""  # the Planner's label for the step
+    instruction: str = ""
+    project_id: str | None = None  # whose limit it counts against, once read
+    since: datetime = field(default_factory=lambda: datetime.now(timezone.utc))  # when it began to wait, then to run
 
 
 class WorkerPool:
@@ -458,10 +465,11 @@ class WorkerPool:
         """Let every run waiting for room in its project check its limit again (a limit changed)."""
         self._wake_slot_waiters()
 
-    async def _take_slot(self, worker_id: str, agent: AgentType, task_id: str) -> None:
-        """Wait until fewer of ``agent`` run in the task's project than its limit, read each time, then take a
+    async def _take_slot(self, wp: WorkerProcess) -> None:
+        """Wait until fewer of the run's role run in its task's project than its limit, read each time, then take a
         place. A run whose project cannot be read counts outside any project, under the role's limit."""
-        project_id = await self._project_id(task_id)
+        worker_id, agent, task_id = wp.worker_id, wp.role, wp.parent_task_id
+        project_id = wp.project_id = await self._project_id(task_id)
         waiting = False
         while True:
             async with self._slot_lock:
@@ -503,18 +511,22 @@ class WorkerPool:
         task_id = payload.get("task_id", "")
         plan_id = payload.get("plan_id", "")
 
+        is_verify = envelope.message_type == MessageType.VERIFY_REQUEST
+        parent_task_id = payload.get("parent_task_id", "")
+
         wp = WorkerProcess(
             worker_id=worker_id,
             task_id=task_id,
             plan_id=plan_id,
+            role=AgentType.REVIEWER if is_verify else AgentType.WORKER,
+            parent_task_id=parent_task_id,
+            step=str(payload.get("step_key") or ""),
+            instruction=str(payload.get("instruction") or ""),
         )
         self._active[worker_id] = wp
 
-        is_verify = envelope.message_type == MessageType.VERIFY_REQUEST
-
-        parent_task_id = payload.get("parent_task_id", "")
-        await self._take_slot(worker_id, AgentType.REVIEWER if is_verify else AgentType.WORKER, parent_task_id)
-        wp.status = "running"
+        await self._take_slot(wp)
+        wp.status, wp.since = "running", datetime.now(timezone.utc)
         if parent_task_id:
             try:
                 label = "Reviewer" if is_verify else "Worker"
@@ -947,3 +959,14 @@ class WorkerPool:
                 for wid, wp in self._active.items()
             },
         }
+
+    def runs(self) -> list[dict[str, Any]]:
+        """The Worker and Reviewer runs now, each ``running`` or ``waiting`` (for room under its project's limit),
+        with its role, task, step, project (None until it is read) and ``since``: when it began that state."""
+        states = {"pending": "waiting", "running": "running"}  # a finished run is reporting its result
+        return [
+            {"agent_id": wp.worker_id, "role": wp.role.value, "task_id": wp.parent_task_id, "step_id": wp.task_id,
+             "step": wp.step, "instruction": wp.instruction, "project_id": wp.project_id,
+             "state": states[wp.status], "since": wp.since}
+            for wp in self._active.values() if wp.status in states
+        ]

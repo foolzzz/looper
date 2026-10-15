@@ -6,6 +6,7 @@ import json
 from collections.abc import Mapping
 from datetime import datetime, timezone
 from enum import Enum
+from types import MappingProxyType
 from typing import Any
 
 import asyncpg
@@ -13,11 +14,59 @@ import asyncpg
 from . import journal as db_journal
 from .connection import get_pool
 
-# A task in one of these is queued or running.
-ACTIVE_STATUSES = ("pending", "assigned", "running", "executing")
 # A ready task: created (from the dashboard or by the Manager) and never started. Only a user starts it
 # (``start_ready_task``); a server start never resumes it.
 READY = "init"
+
+
+class TaskGroup(str, Enum):
+    """What a task's status means at a glance: the dashboard counts tasks by group, the Tasks page filters by one."""
+
+    IN_PROGRESS = "in_progress"  # its Planner runs
+    QUEUED = "queued"  # waiting for room under its project's Planner limit
+    READY = "ready"  # created, never started
+    ATTENTION = "attention"  # failed or stopped: it needs a look, a restart or a continue
+    COMPLETED = "completed"
+    CANCELLED = "cancelled"
+    OTHER = "other"  # a status this mapping does not know: counted and listed, never dropped
+
+
+# Every status a task row can hold, and its group; the only place that groups them.
+STATUS_GROUPS: Mapping[str, TaskGroup] = MappingProxyType({
+    "assigned": TaskGroup.IN_PROGRESS,
+    "running": TaskGroup.IN_PROGRESS,
+    # The Planner's own statuses, which the TaskRouter stores as the task's ("stopping": winding down at its cap).
+    "planning": TaskGroup.IN_PROGRESS,
+    "executing": TaskGroup.IN_PROGRESS,
+    "verifying": TaskGroup.IN_PROGRESS,
+    "stopping": TaskGroup.IN_PROGRESS,
+    "pending": TaskGroup.QUEUED,
+    READY: TaskGroup.READY,
+    "failed": TaskGroup.ATTENTION,
+    "stopped": TaskGroup.ATTENTION,
+    "completed": TaskGroup.COMPLETED,
+    "cancelled": TaskGroup.CANCELLED,
+})
+
+
+# A task in one of these is queued or running: the sidebar's active count, the guard on deleting, and what a server
+# start resumes (with a live plan) or else marks stopped.
+ACTIVE_STATUSES = tuple(status for status, group in STATUS_GROUPS.items()
+                        if group in (TaskGroup.IN_PROGRESS, TaskGroup.QUEUED))
+
+
+def task_group(status: str | None) -> TaskGroup:
+    return STATUS_GROUPS.get(status or "", TaskGroup.OTHER)
+
+
+def _group_filter(group: TaskGroup | None) -> tuple[list[str] | None, bool]:
+    """``group`` as the statuses a row's status must be in (True) or, for ``OTHER``, not in (False)."""
+    if group is None:
+        return None, True
+    if group is TaskGroup.OTHER:
+        return list(STATUS_GROUPS), False
+    return [status for status, of in STATUS_GROUPS.items() if of is group], True
+
 
 # A task row plus its project's name and task spend cap.
 _WITH_PROJECT = ("SELECT t.*, p.name AS project_name, p.task_budget_usd "
@@ -299,17 +348,35 @@ async def list_tasks(
     offset: int = 0,
     project_id: str | None = None,
     status: str | None = None,
+    group: TaskGroup | None = None,
     pool: asyncpg.Pool | None = None,
 ) -> list[dict[str, Any]]:
     """The newest tasks, each with its ``project_name``; only one project's when ``project_id`` is given, and only
-    those in ``status`` when it is."""
+    those in ``status``, or in ``group``, when it is."""
     pool = pool or get_pool()
+    statuses, inside = _group_filter(group)
     rows = await pool.fetch(
         f"""
         {_WITH_PROJECT}
         WHERE ($3::text IS NULL OR t.project_id = $3) AND ($4::text IS NULL OR t.status = $4)
+          AND ($5::text[] IS NULL OR (t.status = ANY($5::text[])) = $6)
         ORDER BY t.created_at DESC LIMIT $1 OFFSET $2
         """,
-        limit, offset, project_id, status,
+        limit, offset, project_id, status, statuses, inside,
     )
     return [_task(r) for r in rows]
+
+
+async def status_counts(*, pool: asyncpg.Pool | None = None) -> list[dict[str, Any]]:
+    """How many tasks are in each status, every task counted: one row per project and status
+    (``project_id``, ``project_name``, ``status``, ``count``). A project without tasks has one row with
+    ``status`` None and ``count`` 0; tasks of no project have ``project_id`` None."""
+    pool = pool or get_pool()
+    rows = await pool.fetch(
+        """
+        SELECT p.id AS project_id, p.name AS project_name, t.status, count(t.id) AS count
+        FROM projects p FULL JOIN tasks t ON t.project_id = p.id
+        GROUP BY p.id, p.name, t.status
+        """,
+    )
+    return [dict(r) for r in rows]

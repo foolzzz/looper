@@ -200,9 +200,10 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
   oldest first, and starts when one of the project's tasks ends or the limit
   is raised; a project at its limit never delays another project's tasks.
   There is no machine-wide limit
-- At server startup, resumes the tasks the previous server left running whose
-  plan is live (`executing` or `verifying`): each gets a new Planner and a
-  `TASK_RESUME`. Any other task left running is marked "stopped". A ready task
+- At server startup, resumes the tasks the previous server left active
+  (`ACTIVE_STATUSES`) whose plan is live (`executing` or `verifying`): each
+  gets a new Planner and a `TASK_RESUME`. Any other task left active is
+  marked "stopped". A ready task
   is neither: it stays ready until someone starts it
 
 ### Planner (`looper/agents/tiers/planner.py`)
@@ -1509,7 +1510,7 @@ init (ready) → (start) → pending → assigned → running → completed
 cancelled ← running  (cancel = permanent termination)
 ```
 
-**Status values**: `init` (ready: created from the dashboard or by the Manager, never started; the dashboard labels it "Ready — not started"), `pending` (waiting for a place in its project), `assigned`, `running`, `executing`, `completed`, `failed`, `cancelled`, `stopped`
+**Status values**, by group (`looper/db/tasks.py` `STATUS_GROUPS`, the one place that groups them): in progress `assigned`, `running`, and the Planner's own `planning`, `executing`, `verifying` and `stopping`, which the TaskRouter stores; queued `pending` (waiting for a place in its project); ready `init` (created from the dashboard or by the Manager, never started; the dashboard labels it "Ready — not started"); needs attention `failed` and `stopped`; `completed`; `cancelled`. A status no group knows counts as `other`, on the Dashboard and in `GET /api/tasks?group=other`, never dropped.
 
 **Phase values** (finer-grained, set by planner): `pending`, `planning`, `executing`, `verifying`, `completed`, `failed`
 
@@ -1555,8 +1556,12 @@ added, the one-time migration `tasks_project_backfill` creates one project per
 distinct task directory and assigns those tasks to it. The project is named
 after the directory's last path component (`''` and `/` become `default`);
 the oldest directory keeps the plain name and a later clash, ignoring case,
-gets `-2`, `-3`, .... A task's "active" statuses are `pending`, `assigned`,
-`running` and `executing`; a ready task (`init`) is not active.
+gets `-2`, `-3`, .... A task's "active" statuses (`ACTIVE_STATUSES`) are those of
+the in progress and queued groups (see the status values above), the
+Planner's own `planning`, `verifying` and `stopping` included: they count in
+a project's `active_count`, a task in one cannot be deleted before it is
+stopped, and a server start resumes or stops it. A ready task (`init`) is not
+active.
 
 The names follow the dashboard's, and "agent" names only a running agent:
 the one-time migration `profiles_roles_renamed`, which runs first in
@@ -1596,8 +1601,9 @@ built by `scripts/stage-dashboard.sh` at release time), and it carries
 
 ### Pages
 
+- **Dashboard**: what is happening now, read from `GET /api/overview` every 5 s. A warning names each supervisor component that is unhealthy with its restart count, else one muted "All components healthy" line. Task counts by group (In progress, Queued, Ready, Needs attention, Completed, and Cancelled or Other when they hold a task), each opening the Tasks page on that group (`#tasks?group=<group>`). "Agents running now": the Manager busy or idle, each running Planner with its project and task, and each Worker and Reviewer with its step and how long it has run, or "waiting" for room under its project's limit, each linking to its agent history. "Concurrency by project": for each project with a task in progress, queued or ready, its running tasks, Workers and Reviewers against each role's limit there, with the queued and waiting ones, then how many projects are idle. "Today's spend": the runs started since the server's local midnight, provider-priced (money) apart from the subscription equivalent (not billed), and the runs that ended without a cost.
 - **Chat**: Every agent and its messages, finished ones included. The selector lists the global Manager and the 30 most recent tasks; each task shows its one Planner and the Worker (and Reviewer, when reviewed) of each step. You can send to the Manager and to a running task's Planner, which keeps one thread per task; SSE streaming. A selected Planner also shows its Claude runs, one per turn, in a folded list of the latest 10 beside its activity and chat thread, re-read as a reply starts and ends and every 10 s while the task runs. A Worker or Reviewer shows its Claude runs read-only, following a running one live, and points to its task's Planner for sending. The Manager's chat has a "New session" button that sends `/new`.
-- **Tasks**: Task list with project and status filters (`Ready` for ready tasks), time display, each task's cost so far, Start/Stop/Delete controls; a ready task is labelled "Ready — not started" and its Start (here and on its detail page) calls `POST /api/tasks/:id/start`. `#tasks?project=<id>` filters by a project and shows its name and default directory with a link to its project page. A new task picks an existing project or creates one in the same form; its work directory may stay empty when the project has a default. A task's detail view can move it to another project in any status.
+- **Tasks**: Task list with project and status filters (`Ready` for ready tasks), time display, each task's cost so far, Start/Stop/Delete controls; a ready task is labelled "Ready — not started" and its Start (here and on its detail page) calls `POST /api/tasks/:id/start`. `#tasks?project=<id>` filters by a project and shows its name and default directory with a link to its project page; `#tasks?group=<group>` lists one task group, shown as a chip that clears it, and the two combine. A new task picks an existing project or creates one in the same form; its work directory may stay empty when the project has a default. A task's detail view can move it to another project in any status.
 - **Projects (sidebar)**: Below the navigation, every project with its task count (or a spinner with its active count); clicking one opens its project page, and `+` creates a project (name, default directory, description, optional background).
 - **Project** (`#projects/<id>`, `#projects/<id>/knowledge|skills|profiles|settings`): a header with the name, description, default directory and task count (a link to the filtered Tasks page), then five tabs, arrow keys moving between them. **Overview**: the 5 latest tasks with status and cost and a link to all of them; the background (three lines, then Show more); the knowledge (document count, stored size, the first 5 titles and summaries, how many referenced files are missing); the skills (count, how many are on, the first 5 names and descriptions); each role's Agent Profile, the per-run caps and which roles this project gives a harness (linking to Agent Profiles); and the execution settings that are set, in words (linking to Settings). **Knowledge**: the documents (title, summary, source, file name or path, size, a Missing badge for a path document whose file is gone) with a readout of documents, stored bytes and index characters against their caps. Opening a row shows its body (a path document's file as it is now); Edit changes the title, summary and content (a text or upload document) or path (a path document); a document is added as Text, Upload or Project file, or by dropping a file on the section; delete asks first. **Skills**: the skills (`project:<name>`, the body's size, `Off` for a disabled one, the description) with a count against the cap. Opening a row shows its `SKILL.md` body; Edit changes the name, description and body; a skill is added by hand or from a `SKILL.md` (Upload SKILL.md, or a drop on the section), whose frontmatter fills the name and description and whose body below it fills the instructions, for review before Add; a switch turns one on or off; delete asks first. Knowledge and skill changes apply at once and a refusal shows the server's reason. **Agent Profiles**: a line saying it overrides the shared defaults in Settings → Roles for the Planner, Workers and Reviewers, and that the Manager is set there, then one collapsible row for the project's layer ("All roles in this project") and one for each role in the project (Planner, Worker, Reviewer), all closed at first. A closed row shows the Agent Profile in effect and where it comes from (shared defaults, role default, this project, or this role in this project; the project's row shows what the roles that do not set it again agree on), the effort, a role's limit of how many run at once, "overridden here" when the row sets anything and "unsaved" over unsaved edits. An open row has the Agent Profile first, with Remove override, then "More overrides": the harness, effort, spend cap, a role's limit (empty or Clear inherits) and environment, where every field of a role's row also says what applies now and from which layer, and one Save. Closing a row keeps its unsaved edits; `#projects/<id>/profiles/<role>` or `/project` opens that row and scrolls to it, and an Agent Profile's "used by" links there. **Settings**: the name, default directory, description, background (`n / 10000`) and execution settings, saved together (Save is disabled over a limit or without a change; Discard changes resets them); then Delete project, offered only while the project has no tasks.
 - **Task Detail**: Overview (status, phase, times, steps and the task's cost with its run count, then "Cost by agent": the Planner's, the Workers' and the Reviewers' runs and cost with each one's share, noting runs still running or without a reported cost; steps, agent timeline, live activity feed), Pipeline DAG (React Flow), Sessions, Conversation
@@ -1614,7 +1620,7 @@ built by `scripts/stage-dashboard.sh` at release time), and it carries
 ### Hash Routing
 
 SPA uses `#page/sub` format for deep linking that survives browser refresh:
-- `#tasks/task-id` → task detail
+- `#tasks/task-id` → task detail; `#tasks?project=<id>&group=<group>` → the list, filtered
 - `#projects/project-id/tab` → one project (`overview` when the tab is left out)
 - `#runs/agent-id` → the role's runs (`#agents/...`, the page's name before, redirects here)
 - `#settings/page[/sub]` → one Settings page (`#settings` and `#settings/defaults` redirect to `#settings/roles`)
@@ -1632,7 +1638,8 @@ dev proxy, which keeps `Host` and `Origin` on its own port.
 
 | Endpoint | Method | Purpose |
 |---|---|---|
-| `/api/status` | GET | System health, with `checks`: the startup self-check (`looper doctor`'s), the `codex_login` one read on each request |
+| `/api/status` | GET | System health, with `checks`: the startup self-check (`looper doctor`'s), the `codex_login` one read on each request; `tasks` counts every task: `total`, `running` (in progress), `pending` (queued), `completed` |
+| `/api/overview` | GET | The Dashboard's one read. `tasks`: the count per group (`in_progress`, `queued`, `ready`, `attention`, `completed`, `cancelled`, `other`), `total` and `other_statuses` (each status no group knows, with its count); `agents`: `manager` (`state` `busy` or `idle`), `planners`, `workers` and `reviewers` (each with its task, project, `step`, `instruction`, `state` `running` or `waiting` and `elapsed_seconds`); `projects`: each project with a task in progress, queued or ready, with `tasks` (`running`, `queued`, `ready`, `limit`), `workers` and `reviewers` (`running`, `waiting`, `limit`); `idle_projects`; `spend_today` (`since`, `provider_priced_usd`, `equivalent_usd`, `runs`, `running`, `unpriced_runs`); `health.unhealthy` (`name`, `restart_count`, `max_restarts`). 500 when the database cannot be read |
 | `/api/projects` | GET | Projects ordered by name ignoring case, each with `task_count` and `active_count` |
 | `/api/projects` | POST | Create a project from `name` (trimmed, 1–80 characters), optional `description`, `work_dir` (absolute), `background` (stored without the blank lines around it; 400 over 10000 characters) and execution settings; 409 when the name exists ignoring case; 400 naming the agent-settings endpoint for `planner_harness_prompt`, `worker_harness_prompt`, `model` or `run_budget_usd` |
 | `/api/projects/:id` | PUT | Update any of `name`, `description`, `work_dir`, `background` (`""` clears it) and the execution settings; 400 (as for POST), 404, 409 |
@@ -1649,10 +1656,10 @@ dev proxy, which keeps `Host` and `Origin` on its own port.
 | `/api/projects/:id/skills/:skill_id` | PUT | Change any of `name`, `description` and `content` (its switch is on the install: `PUT /api/installs/:id`); answers with the `skill` and the installs view; 400 and 409 as above (a new name must be free in every project the skill is installed in), 404 for an unknown project or a skill another project wrote |
 | `/api/projects/:id/skills/:skill_id` | DELETE | Delete a skill the project wrote, from the catalog and every project it is installed in; answers with `deleted` and the installs view; 404 |
 | `/api/projects/:id` | DELETE | Delete a project; 409 while it still has tasks |
-| `/api/tasks` | GET | List the newest tasks; `?project_id=` lists one project's. Each has `project_id`, `project_name`, `work_dir` and `cost` (as in the task detail) |
+| `/api/tasks` | GET | List the newest tasks; `?project_id=` lists one project's, `?group=` one task group's (400 for an unknown group). Each has its status's `group`, `project_id`, `project_name`, `work_dir` and `cost` (as in the task detail) |
 | `/api/tasks/create` | POST | Create a ready task (`init`) with exactly one of `project_id` (existing) and `project` (`{name, description?, work_dir?, background?}`, created in the same transaction). Its `work_dir` is the one given, else the project's. Optional `profile_overrides`: `{planner?, worker?, reviewer?}` Agent Profile ids for this task's roles (an empty one chooses nothing). 400 with neither project field, for an override of another role, an unknown profile or one that cannot run its role; 404 for an unknown project, 409 for a taken new name |
 | `/api/tasks/:id/project` | PUT | Move a task to `{project_id}`, whatever its status |
-| `/api/tasks/:id` | GET | Task detail with steps, `project_id`, `project_name`, `profile_overrides` (`{role: profile}`, `{}` when none) and `cost`: `cost_usd` (the sum of its Planner's, Workers' and Reviewers' runs), `runs`, `running`, `unpriced_runs` and `by_role` (`planner`, `worker`, `reviewer`, each `{cost_usd, runs}`) |
+| `/api/tasks/:id` | GET | Task detail with steps, its status's `group`, `project_id`, `project_name`, `profile_overrides` (`{role: profile}`, `{}` when none) and `cost`: `cost_usd` (the sum of its Planner's, Workers' and Reviewers' runs), `runs`, `running`, `unpriced_runs` and `by_role` (`planner`, `worker`, `reviewer`, each `{cost_usd, runs}`) |
 | `/api/tasks/cancel` | POST | Cancel task (permanent) |
 | `/api/tasks/stop` | POST | Stop/pause task |
 | `/api/tasks/start` | POST | Run a stopped, failed or cancelled task again (it also starts a ready one, as before) |

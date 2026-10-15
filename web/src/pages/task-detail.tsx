@@ -43,6 +43,7 @@ import {
   fetchTaskConversation,
   streamTaskActivity,
   stopTask,
+  isActiveTask,
   startTask,
   startReadyTask,
   READY_LABEL,
@@ -414,7 +415,7 @@ function OverviewTab({ task, onContinued }: { task: TaskDetail; onContinued: () 
   const steps = task.steps || [];
   const done = steps.filter((s) => s.status === "completed").length;
   const total = steps.length;
-  const isActive = task.status === "running" || task.status === "pending";
+  const isActive = isActiveTask(task);
 
   return (
     <div className="space-y-6 p-5">
@@ -1319,7 +1320,7 @@ export function TaskDetailPage({ taskId, onBack }: TaskDetailPageProps) {
               )}
             </div>
           </div>
-          {task && ["running", "pending", "executing", "assigned"].includes(task.status) && (
+          {task && isActiveTask(task) && (
             <button
               type="button"
               onClick={() => stopTask(taskId).then(() => {})}

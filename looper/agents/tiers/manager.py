@@ -426,6 +426,12 @@ class ManagerAgent:
     def is_healthy(self) -> bool:
         return self._running and bool(shutil.which(self._config.claude_bin))
 
+    @property
+    def busy(self) -> bool:
+        """Whether a turn is in progress: Claude answers a message, or the session is being reset. A turn Claude
+        runs on its own does not count."""
+        return self._turn_lock.locked()
+
     async def _message_loop(self) -> None:
         assert self._bus is not None
         try:
