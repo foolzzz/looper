@@ -254,7 +254,7 @@ Web 始终开启。Telegram 和 Lark 默认内置，不需要任何启动参数�
 
 - 统一管理所有 Agent 的启动/停止
 - 健康检查循环（30s 间隔）
-- 静态 Agent（Manager、TaskRouter、WorkerPool）：指数退避重启，最多 3 次
+- 常驻 Agent（Manager、TaskRouter、WorkerPool）：不健康就重启，不放弃；每次连续重启的等待翻倍，从 1 秒到最多 5 分钟，连续 5 分钟没有崩溃就重新从 1 秒算；连续重启 3 次算作反复崩溃（`crash_looping`），总览页和 `/api/status` 显示，Manager 收到 `crash_looping` 和恢复后的 `recovered` 事件
 - 动态 Agent（Planner）：由 TaskRouter 管理生命周期，不参与自动重启
 
 ### MessageBus

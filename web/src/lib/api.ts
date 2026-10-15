@@ -183,6 +183,21 @@ export interface RoleLoad {
 }
 
 /** `GET /api/overview`: what is happening now. */
+/** A supervisor component that is not simply running: down and waiting to be restarted ("restarting"), or restarted
+ * three times in a row without staying up 5 minutes ("crash_looping", up or down now). It is restarted for as long as
+ * the server runs, each wait twice the last, from 1 s up to 5 minutes. */
+export interface ComponentHealth {
+  name: string;
+  state: "restarting" | "crash_looping";
+  /** Running now (a crash-looping one between crashes). */
+  up: boolean;
+  /** Restarts in a row since it last stayed up 5 minutes. */
+  restart_count: number;
+  last_crash_at: string | null;
+  /** While it waits to start again. */
+  next_restart_at: string | null;
+}
+
 export interface Overview {
   tasks: Record<TaskGroup, number> & { total: number; other_statuses: Record<string, number> };
   agents: {
@@ -212,7 +227,8 @@ export interface Overview {
     running: number;
     unpriced_runs: number;
   };
-  health: { unhealthy: { name: string; restart_count: number; max_restarts: number }[] };
+  /** The supervisor's components that are not simply running. */
+  health: { unhealthy: ComponentHealth[] };
   schedules: OverviewSchedules;
 }
 

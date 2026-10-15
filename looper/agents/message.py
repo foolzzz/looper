@@ -220,7 +220,9 @@ class VerifyResultPayload(TypedDict, total=False):
 class AgentLifecyclePayload(TypedDict, total=False):
     agent_id: str
     agent_type: str
-    event: str  # "started" | "stopped" | "crashed" | "max_restarts_exceeded"
+    # "started" | "start_failed" | "crashed" | "crash_looping" (restarted supervisor.CRASH_LOOP_RESTARTS times in a
+    # row; it is still restarted) | "recovered" (stable again after crash-looping)
+    event: str
     detail: str
 
 
