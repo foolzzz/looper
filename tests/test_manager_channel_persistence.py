@@ -104,3 +104,53 @@ def test_a_followup_survives_another_chats_message() -> None:
 
     kept = asyncio.run(_go())
     assert kept is not None and kept.note == "pending for A"
+
+
+@pytest.mark.usefixtures("agent_db")
+class TestPrivateChatsOnly:
+    """Only private chats are stored: a Telegram group's id is negative, and nothing from it reaches chat_messages,
+    neither the message, nor the Manager's reply to it, nor a reply Claude sends on its own afterwards."""
+
+    @staticmethod
+    def _stored(chat_id: str) -> list[dict[str, Any]]:
+        saved: list[dict[str, Any]] = []
+
+        async def _save(**kwargs: Any) -> None:
+            saved.append(kwargs)
+
+        async def _go() -> None:
+            with tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                mgr = ManagerAgent(config=ManagerConfig(claude_bin=_reply_claude(root), work_dir=root),
+                                   runtime_root=root)
+                mgr._bus = MessageBus(runtime_root=root)
+                envelope = _user(TELEGRAM, "hello", chat_id=chat_id)
+                with pytest.MonkeyPatch.context() as mp:
+                    mp.setattr(manager_mod.db_chat, "save_message", AsyncMock(side_effect=_save))
+                    await mgr._handle(envelope)
+                    await mgr._send_own_reply(envelope, "done on my own")  # a reply Claude sends on its own
+                await mgr.stop()
+                await mgr._bus.shutdown()
+
+        asyncio.run(_go())
+        return saved
+
+    def test_a_group_message_and_every_reply_to_it_are_not_stored(self) -> None:
+        assert self._stored("-1001234567890") == []
+
+    def test_a_direct_message_and_every_reply_to_it_are_stored(self) -> None:
+        saved = self._stored("12345")
+        assert [(s["session_id"], s["role"], s["content"]) for s in saved] == [
+            ("telegram:12345", "user", "hello"), ("telegram:12345", "assistant", "ok"),
+            ("telegram:12345", "assistant", "done on my own")]
+
+
+def test_followups_are_kept_for_at_most_so_many_chats_the_oldest_dropped_first() -> None:
+    mgr = ManagerAgent(config=ManagerConfig(), runtime_root=Path(tempfile.mkdtemp()))
+    chats = [("telegram", str(n)) for n in range(manager_mod.FOLLOWUP_CHATS + 1)]
+    for chat in chats:
+        mgr._keep_followup(_Followup(chat, f"note {chat[1]}"))
+    mgr._keep_followup(_Followup(chats[1], "newer note"))  # a chat's newer note replaces its older one
+    assert len(mgr._followup) == manager_mod.FOLLOWUP_CHATS
+    assert chats[0] not in mgr._followup
+    assert list(mgr._followup)[-1] == chats[1] and mgr._followup[chats[1]].note == "newer note"
