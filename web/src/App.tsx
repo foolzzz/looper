@@ -157,7 +157,7 @@ function App() {
           )}
           {route.page === "schedules" && (
             <div className="h-full overflow-y-auto">
-              <SchedulesPage />
+              <SchedulesPage sub={route.sub} />
             </div>
           )}
           {route.page === "history" && (

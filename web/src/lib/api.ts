@@ -673,6 +673,8 @@ export interface ScheduleRunInfo {
   /** Null for a skipped run, and while queued. */
   task_id: string | null;
   task_status: string | null;
+  /** The task's title, when it has one. */
+  task_title: string | null;
   /** The task's result or error, set when the run ends. */
   summary: string | null;
   /** The task's cost, live while it runs. */
@@ -838,10 +840,30 @@ export async function runSchedule(scheduleId: string): Promise<ScheduleRunInfo> 
 }
 
 /** A schedule's runs, newest first. */
-export async function fetchScheduleRuns(scheduleId: string, limit?: number): Promise<ScheduleRunInfo[]> {
-  const qs = limit ? `?limit=${limit}` : "";
-  return (await scheduleCall<{ runs: ScheduleRunInfo[] }>("GET", `${scheduleUrl(scheduleId)}/runs${qs}`, "schedule runs"))
-    .runs;
+/** Runs that only say there was nothing to do: the gate found nothing new, or the previous run was still going. */
+export type RoutineSkip = "skipped_gate" | "skipped_overlap";
+
+/** A page of a schedule's runs, newest first. */
+export interface ScheduleRunsPage {
+  runs: ScheduleRunInfo[];
+  /** Pass as `before` for the next page; null at the end. */
+  next_before: string | null;
+  /** How many routine skips the schedule has had in all, shown or not. */
+  routine_skips: Record<RoutineSkip, number>;
+}
+
+/** A page of a schedule's runs: `limit` (default 50, at most 200), older than the run `before`, and without the
+ * routine skips when `skips` is "hide". */
+export function fetchScheduleRuns(
+  scheduleId: string,
+  options: { limit?: number; before?: string | null; skips?: "show" | "hide" } = {},
+): Promise<ScheduleRunsPage> {
+  const query = new URLSearchParams();
+  if (options.limit) query.set("limit", String(options.limit));
+  if (options.before) query.set("before", options.before);
+  if (options.skips) query.set("skips", options.skips);
+  const qs = query.toString();
+  return scheduleCall("GET", `${scheduleUrl(scheduleId)}/runs${qs ? `?${qs}` : ""}`, "schedule runs");
 }
 
 /** A message about a schedule: a run's result, or an alert or its recovery. */
