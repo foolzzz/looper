@@ -42,10 +42,10 @@ User ─→ Chat / Lark / Telegram
 - **Multiple agent runtimes and LLM providers**: An agent is a runtime (such as
   Claude Code or Codex), an LLM provider (the runtime's own login, or an API
   key for an Anthropic- or OpenAI-compatible endpoint, with presets for common
-  vendors) and a model; every run records its tokens and, when its model has
-  a price, its cost
-- **Layered settings**: Set the harness prompt, agent, effort, environment and
-  per-run spend cap for the whole system, a role, a project or a role in a
+  vendors), a model and a thinking effort; every run records its tokens and,
+  when its model has a price, its cost
+- **Layered settings**: Set the harness prompt, agent, environment and per-run
+  spend cap for the whole system, a role, a project or a role in a
   project, and let a task choose its own agents; the dashboard shows which
   layer each value comes from
 - **Capability catalog**: Plugins, skills and MCP servers, imported from this
