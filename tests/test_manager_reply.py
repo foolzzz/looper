@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import json
 import os
+import signal
 import tempfile
 from pathlib import Path
 from types import SimpleNamespace
@@ -492,18 +493,18 @@ class TestManagerResidentClaude:
         assert _flag(argv, "--resume") == resumed
         assert chat["saved_runtime"] == "claude-code"  # the session now belongs to the agent's runtime
 
-    @pytest.mark.parametrize(("ignore_eof", "returncode"), [(False, 0), (True, -9)])
+    @pytest.mark.parametrize(("ignore_eof", "returncode"), [(False, 0), (True, -signal.SIGTERM)])
     def test_stop_ends_and_reaps_claude(
         self, monkeypatch: pytest.MonkeyPatch, ignore_eof: bool, returncode: int,
     ) -> None:
         from looper.agents import claude_cli
 
-        if ignore_eof:  # it is killed only once the grace period is over: keep that short
+        if ignore_eof:  # it is ended only once the grace period is over: keep that short
             monkeypatch.setattr(claude_cli, "STOP_GRACE_SEC", 0.05)
         chat = _converse(monkeypatch, _resident(ignore_eof=ignore_eof), ["hello"])
         ((_, process),) = chat["spawned"]
         assert chat["running"] == [True]
-        # Closing stdin ends Claude; one that keeps running is killed after the grace period.
+        # Closing stdin ends Claude; one that keeps running is ended after the grace period.
         assert process.returncode == returncode
 
 
