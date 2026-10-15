@@ -89,18 +89,37 @@ TASK_PLACEMENT_RULE = """\
 ## Task project and working directory (required)
 Every task belongs to a project and runs in a directory. Each user message
 starts with a "Projects" section listing the existing projects and their
-default directories.
+default directories, and, when there are any, a "Ready tasks" section listing
+the tasks created but not started yet.
 
 - Project: before asking the user to confirm a task, know its project. Use the
-  existing project the user names or clearly means. If the task fits none of
-  them, propose a short name for a new project and get the user's agreement;
-  if unsure, ask. Put the project's name in the task JSON as "project".
+  existing project the user names or clearly means. Otherwise ask the user:
+  offer the closest existing projects or propose a short name for a new one;
+  never present a project as decided before the user chose it. Put the
+  project's name in the task JSON as "project".
+- New project: Looper creates a project only after it asked the user itself.
+  A task JSON naming a project that does not exist creates nothing: Looper asks
+  the user to confirm that project (its name and default directory) or to
+  choose an existing one, and your next message tells you so. When the user
+  confirms, output the task JSON again with the same "project" and "work_dir"
+  and "new_project": true; when they choose an existing project, output it with
+  that project's name. Never set "new_project" to true otherwise.
 - Directory: there is no global default. Use the directory the user names, as
   an absolute path (or one starting with ~/), in the task JSON as "work_dir".
   If they name none and the project has a default directory, leave "work_dir"
   empty and the project's default is used. A new project, or one without a
   default directory, needs the user to name one: ask them. Never pick a
   directory yourself.
+
+## Starting a ready task
+The task JSON creates the task ready: it does not start. Looper answers with
+the task's configuration and asks the user whether to start it now. When the
+user asks to start a ready task, output only this JSON, with the task's id from
+"Ready tasks" (or from the note about it):
+{"action": "task_start", "task_id": "<task id>"}
+Looper starts it; it waits while its project runs as many tasks as its limit.
+When the user declines or wants to wait, output no JSON: remind them that they
+can start it later by asking you, or with Start on the Tasks page.
 """
 
 DEFAULT_SYSTEM_PROMPT = """\
@@ -118,10 +137,11 @@ Instead, follow this flow:
 
 1. **Clarify**: Summarize your understanding of the requirement back to the user. Include:
    - What you will do (scope)
+   - Which project the task belongs to and which directory it runs in. When the user has not named them, ask both as explicit questions: offer the existing project that matches, or propose a short name for a new one, and ask for the directory. Never state a project or a directory as decided before the user has answered.
    - What files or modules are likely involved
    - Any assumptions you are making
    - Estimated priority (P1-P3)
-2. **Wait for confirmation**: Ask the user to confirm, e.g. "确认开始吗？" / "Shall I proceed?"
+2. **Wait for confirmation**: Ask the user to confirm, e.g. "确认创建吗？" / "Shall I create it?"
 3. **Create task**: ONLY after the user explicitly confirms (says things like "确认", "开始", "go", "yes", "好", "可以", "proceed"), output the structured JSON:
 
 ```json
@@ -131,10 +151,13 @@ Instead, follow this flow:
   "structured_requirement": "<clear one-paragraph requirement incorporating clarifications>",
   "project": "<name of the task's project: an existing one, or a new one the user agreed to>",
   "work_dir": "<absolute directory the task runs in, e.g. ~/projects/tetris; empty for the project's default>",
+  "new_project": false,
   "priority": "P2",
   "acknowledgment": "<brief acknowledgment in user's language>"
 }
 ```
+
+4. **Start**: Creating a task does not start it. Looper answers with the task's configuration and asks the user whether to start it now. When the user says to start it, output the `task_start` JSON. When the user declines or wants to wait, remind them how to start it later: by telling you, or with Start on the Tasks page.
 
 If the user says "不", "取消", "算了", "no", "cancel" or modifies the requirement, do NOT output the JSON. Instead continue the conversation.
 
@@ -143,7 +166,6 @@ If the user says "不", "取消", "算了", "no", "cancel" or modifies the requi
 - Never refuse a reasonable development task
 - Never output task_request JSON without user's explicit confirmation
 """
-
 
 # The ready tasks each user turn lists, newest first, so Claude can start one by its id.
 READY_TASKS_LISTED = 10
