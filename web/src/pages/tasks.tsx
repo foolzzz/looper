@@ -551,7 +551,7 @@ export function TasksPage({ sub, query, onNavigate }: TasksPageProps) {
                 <div className="flex items-start gap-3 min-w-0">
                   {statusIcon(task.status)}
                   <div className="min-w-0">
-                    <p className="text-sm font-medium truncate">{task.requirement}</p>
+                    <p className="text-sm font-medium truncate">{task.name || task.requirement}</p>
                     <div className="mt-1.5 flex items-center gap-2 flex-wrap">
                       {statusBadge(task.status)}
                       <ScheduledBadge task={task} />

@@ -169,6 +169,7 @@ class UserMessagePayload(TypedDict, total=False):
 
 class TaskRequestPayload(TypedDict, total=False):
     goal_id: str
+    title: str  # a few words naming the task, in the user's language
     requirement: str
     original_user_text: str
     user_language: str

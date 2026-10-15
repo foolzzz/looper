@@ -53,9 +53,10 @@ def _status(task_id: str, status: str, summary: str) -> MessageEnvelope:
     )
 
 
-def _task(router: TaskRouter, *, channel: str, chat_id: str, said: str = "帮我给 calc 加上除法") -> Task:
-    task = Task(task_id="task-n1", requirement="Add division to calc.", goal_id="g", work_dir="/w",
-                project_id="proj-1", origin_channel_id=channel, chat_id=chat_id, original_user_text=said)
+def _task(router: TaskRouter, *, channel: str, chat_id: str, title: str = "给 calc 加上除法",
+          goal_id: str = "calc-division") -> Task:
+    task = Task(task_id="task-n1", requirement="Add division to calc.\nKeep add.", goal_id=goal_id, work_dir="/w",
+                project_id="proj-1", origin_channel_id=channel, chat_id=chat_id, title=title)
     router._tasks[task.task_id] = task
     return task
 
@@ -73,7 +74,7 @@ class TestTheNotice:
         _task(router, channel="channel-telegram", chat_id="1000001")
         (passed,) = _passed_on(router, _status("task-n1", "completed", FINAL_RESULT))
         assert Notice.from_payload(passed["notice"]) == Notice(NotifyChannel.TELEGRAM, "1000001", (
-            "✅ 任务完成 · 帮我给 calc 加上除法\n## Delivered\ncalc.py with add and its tests\n"
+            "✅ 任务完成 · 给 calc 加上除法\n## Delivered\ncalc.py with add and its tests\n"
             f"{DASHBOARD}/#tasks/task-n1"))
 
     def test_a_failed_lark_task_says_why_once_with_a_markdown_link(self, tmp_path: Path) -> None:
@@ -84,18 +85,19 @@ class TestTheNotice:
         notice = Notice.from_payload(passed["notice"])
         assert notice is not None and (notice.channel, notice.chat) == (NotifyChannel.LARK, OPEN_ID)
         link = f"{DASHBOARD}/#tasks/task-n1"
-        assert notice.text == ("❌ 任务失败 · 帮我给 calc 加上除法\n## Why it ended\n"
+        assert notice.text == ("❌ 任务失败 · 给 calc 加上除法\n## Why it ended\n"
                                f"A step failed and the Planner could not go on.\n[{link}]({link})")
         assert notice.text.count("任务失败") == 1 and "## Done" not in notice.text
 
-    @pytest.mark.parametrize(("said", "name"), [
-        ("帮我给 calc 加上除法", "帮我给 calc 加上除法"),
-        ("", "Add division to calc."),  # no text of the user's: the requirement
-        ("给计算器加上除法，" * 6, f"{'给计算器加上除法，' * 6}"[:40] + "…"),
+    @pytest.mark.parametrize(("title", "goal_id", "name"), [
+        ("给 calc 加上除法", "calc-division", "给 calc 加上除法"),
+        ("", "calc-division", "calc-division"),  # no title (a task from before titles): the goal id
+        ("", "", "Add division to calc."),  # nor a goal id: the requirement's first line
+        ("给计算器加上除法，" * 6, "", f"{'给计算器加上除法，' * 6}"[:40] + "…"),
     ])
-    def test_the_name_is_what_the_user_wrote(self, tmp_path: Path, said: str, name: str) -> None:
+    def test_the_name_is_the_title(self, tmp_path: Path, title: str, goal_id: str, name: str) -> None:
         router = _router(tmp_path)
-        _task(router, channel="channel-telegram", chat_id="1000001", said=said)
+        _task(router, channel="channel-telegram", chat_id="1000001", title=title, goal_id=goal_id)
         (passed,) = _passed_on(router, _status("task-n1", "completed", "done"))
         assert passed["notice"]["text"].split("\n")[0] == f"✅ 任务完成 · {name}"
 
@@ -213,12 +215,21 @@ def test_the_manager_sends_the_notice_instead_of_the_end(tmp_path: Path, origin:
 
 
 @pytest.mark.usefixtures("agent_db")
-def test_a_task_asked_about_first_is_named_by_the_message_that_asked_for_it(agent_db: Any) -> None:
+@pytest.mark.parametrize(("title", "stored", "named"), [
+    ("  俄罗斯方块\n小游戏 ", "俄罗斯方块 小游戏", "俄罗斯方块 小游戏"),
+    (None, None, "g"),  # no title in the task JSON: the goal id names it
+    (["not", "text"], None, "g"),
+])
+def test_the_confirm_flow_names_the_task_by_its_title(agent_db: Any, title: Any, stored: str | None,
+                                                      named: str) -> None:
     agent_db.find_project_by_name.return_value = _project("tetris", "/srv/tetris")
-    # No project named: Looper asks which one; the answer's task JSON then creates the task.
-    chat = _task_chat([_answer(), _answer(project="tetris")], ["帮我写个俄罗斯方块", "tetris"])
+    # Claude restates the task and asks to confirm; the user's 「确认」 carries the task JSON.
+    fields = {"project": "tetris", **({"title": title} if title is not None else {})}
+    chat = _task_chat(["我会在 tetris 项目里写个俄罗斯方块小游戏。回「确认」就创建。", _answer(**fields)],
+                      ["帮我写个俄罗斯方块", "确认"])
     (request,) = chat.requests
-    assert request.payload["original_user_text"] == "帮我写个俄罗斯方块"
+    assert request.payload["title"] == stored and request.payload["original_user_text"] == "确认"
+    assert f"- 任务：{named}（{request.payload['task_id']}）" in chat.replies[1]
 
 
 # --- The channels: the notice like an answer, to who the task recorded ---
@@ -294,7 +305,8 @@ def _run_a_task(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, planner_claude:
     from looper.db import tasks as db_tasks
 
     claude = planner_claude(plan(step("s1")), decide("accept"))
-    manager_claude = _scripted(_answer(project="calc"), json.dumps({"action": "task_start", "task_id": "<task id>"}))
+    manager_claude = _scripted(_answer(project="calc", title="给 calc 加上加法"),
+                               json.dumps({"action": "task_start", "task_id": "<task id>"}))
     # The Manager checks that the task it starts is ready.
     monkeypatch.setattr(db_tasks, "get_task", AsyncMock(side_effect=lambda task_id: (
         {**agent_db.store.ready[task_id], "status": db_tasks.READY} if task_id in agent_db.store.ready else None)))
@@ -364,7 +376,7 @@ def test_a_lark_task_ends_with_one_markdown_notice_after_its_progress(
     link = f"{DASHBOARD}/#tasks/{task_id}"
     # The notice is the task's last message, after every progress message, sent once and as Markdown.
     assert sends[-1][-4:] == ["--user-id", OPEN_ID, "--markdown",
-                              f"✅ 任务完成 · build calc\n## Delivered\ncalc.py with add and its tests\n[{link}]({link})"]
+                              f"✅ 任务完成 · 给 calc 加上加法\n## Delivered\ncalc.py with add and its tests\n[{link}]({link})"]
     progress = [i for i, argv in enumerate(sends) if argv[-1].startswith("进度更新")]
     assert progress and all(argv[-1] != sends[-1][-1] for argv in sends[:-1])
     assert any(argv[-1].startswith("任务已分解为 1 个步骤") for argv in sends if "--chat-id" in argv)
@@ -387,7 +399,7 @@ def test_a_telegram_task_ends_with_one_notice_after_its_progress(tmp_path: Path,
     ((task_id, chat),) = _run_a_task(tmp_path, monkeypatch, planner_claude, agent_db, telegram, say).items()
     assert chat == "7"
     texts = [sent["text"] for sent in bot.sent]
-    assert texts[-1] == f"✅ 任务完成 · build calc\n## Delivered\ncalc.py with add and its tests\n{DASHBOARD}/#tasks/{task_id}"
+    assert texts[-1] == f"✅ 任务完成 · 给 calc 加上加法\n## Delivered\ncalc.py with add and its tests\n{DASHBOARD}/#tasks/{task_id}"
     assert bot.sent[-1]["chat_id"] == 7 and bot.sent[-1]["parse_mode"] == "MarkdownV2"
     assert any(text.startswith("进度更新") for text in texts[:-1])
     assert sum("Delivered" in text for text in texts) == 1

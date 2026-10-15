@@ -77,7 +77,7 @@ class Task:
     correlation_id: str = ""
     origin_channel_id: str = ""
     chat_id: str = ""
-    original_user_text: str = ""  # what the user wrote when asking for it, in a chat
+    title: str = ""  # the Manager's few words naming it (``db.tasks.task_name``)
     created_at: str = ""
 
     def to_dict(self) -> dict[str, Any]:
@@ -165,6 +165,8 @@ class TaskRouter:
                 "task_id": task_id,
                 "planner_id": planner.agent_id,
                 "requirement": task.requirement if task else "",
+                "name": db_tasks.task_name(title=task.title, goal_id=task.goal_id, requirement=task.requirement,
+                                           task_id=task_id) if task else task_id,
                 "status": task.status if task else "running",
                 "project_id": task.project_id if task else None,
             })
@@ -231,7 +233,7 @@ class TaskRouter:
                 correlation_id=row.get("correlation_id") or "",
                 origin_channel_id=row.get("origin_channel_id") or "",
                 chat_id=row.get("chat_id") or "",
-                original_user_text=row.get("original_user_text") or "",
+                title=row.get("title") or "",
             )
             self._tasks[task_id] = task
             envelope = MessageEnvelope.create(
@@ -268,6 +270,7 @@ class TaskRouter:
                 origin_channel_id=envelope.metadata.get("origin_channel_id") or "",
                 chat_id=payload.get("chat_id") or None,
                 original_user_text=payload.get("original_user_text") or None,
+                title=payload.get("title"),
             )
         except Exception:
             logger.exception("failed to persist task %s", task_id)
@@ -294,7 +297,7 @@ class TaskRouter:
             correlation_id=row.get("correlation_id") or "",
             origin_channel_id=row.get("origin_channel_id") or "",
             chat_id=row.get("chat_id") or "",
-            original_user_text=row.get("original_user_text") or "",
+            title=row.get("title") or "",
         )
         self._tasks[task_id] = task
         await self._start_or_queue(task, MessageEnvelope.create(
@@ -441,8 +444,9 @@ class TaskRouter:
         channel = notify_channel(task.origin_channel_id)
         if channel is None or not task.chat_id:
             return None
-        text = notice_text(task.task_id, task.original_user_text or task.requirement, status, summary,
-                           channel=channel, dashboard_url=self._dashboard_url)
+        name = db_tasks.task_name(title=task.title, goal_id=task.goal_id, requirement=task.requirement,
+                                  task_id=task.task_id)
+        text = notice_text(task.task_id, name, status, summary, channel=channel, dashboard_url=self._dashboard_url)
         return Notice(channel, task.chat_id, text)
 
     async def _handle_cancel(self, envelope: MessageEnvelope) -> None:
@@ -564,7 +568,7 @@ class TaskRouter:
             correlation_id=db_row.get("correlation_id", ""),
             origin_channel_id=db_row.get("origin_channel_id", ""),
             chat_id=db_row.get("chat_id") or "",
-            original_user_text=db_row.get("original_user_text") or "",
+            title=db_row.get("title") or "",
         )
         self._tasks[task_id] = task
 

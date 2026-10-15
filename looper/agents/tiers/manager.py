@@ -155,6 +155,7 @@ Instead, follow this flow:
 {
   "action": "task_request",
   "goal_id": "<short-kebab-id>",
+  "title": "<required: a few words naming the task, in the user's language>",
   "structured_requirement": "<clear one-paragraph requirement incorporating clarifications>",
   "project": "<name of the task's project: an existing one, or a new one the user agreed to>",
   "work_dir": "<absolute directory the task runs in, e.g. ~/projects/tetris; empty for the project's default>",
@@ -353,8 +354,6 @@ class _Followup:
     chat: tuple[str | None, str | None]  # the channel and the chat (``_message_origin``)
     note: str
     new_project: _NewProject | None = None
-    # The message that asked for the task Looper then asked a question about: its text names the task.
-    asked_for: str = ""
 
 
 @dataclass(frozen=True)
@@ -582,8 +581,7 @@ class ManagerAgent:
                 project, work_dir, created = await self._place_task(
                     parsed, followup.new_project if followup else None)
             except _AskUser as ask:
-                self._keep_followup(_Followup(chat, ask.note(), ask.new_project,
-                                              (followup.asked_for if followup else "") or text))
+                self._keep_followup(_Followup(chat, ask.note(), ask.new_project))
                 await self._send_reply(envelope, str(ask))
                 return
             except Exception as exc:
@@ -592,6 +590,7 @@ class ManagerAgent:
                 return
             task_id = f"task-{uuid.uuid4().hex[:12]}"
             goal_id = str(parsed.get("goal_id") or "")
+            title = db_tasks.task_title(parsed.get("title"))
             await self._bus.publish(MessageEnvelope.create(
                 source=MANAGER_ADDRESS,
                 target=TASK_ROUTER_ADDRESS,
@@ -599,9 +598,10 @@ class ManagerAgent:
                 payload={
                     "task_id": task_id,
                     "goal_id": goal_id,
+                    # What the task is called in lists and in its end notice (``db.tasks.task_name``).
+                    "title": title,
                     "requirement": parsed.get("structured_requirement", text),
-                    # What the user wrote when asking for it, before any question Looper asked about it.
-                    "original_user_text": (followup.asked_for if followup else "") or text,
+                    "original_user_text": text,
                     "user_language": envelope.payload.get("language", "zh"),
                     "work_dir": work_dir,
                     "project_id": project["id"],
@@ -615,7 +615,7 @@ class ManagerAgent:
                 metadata={"origin_channel_id": envelope.metadata.get("origin_channel_id")},
             ))
             ack_text = parsed.get("acknowledgment", f"收到，已创建任务: {text[:100]}")
-            block = await self._configuration_block(task_id, goal_id, project, work_dir, created)
+            block = await self._configuration_block(task_id, title or goal_id, project, work_dir, created)
             self._keep_followup(_Followup(chat, (
                 f'[Looper] Looper created the task of your last task JSON in this chat as {task_id}, ready and not '
                 "started, showed "
@@ -699,14 +699,14 @@ class ManagerAgent:
         return "\n".join(lines)
 
     async def _configuration_block(
-        self, task_id: str, goal_id: str, project: dict[str, Any], work_dir: str, created: bool,
+        self, task_id: str, name: str | None, project: dict[str, Any], work_dir: str, created: bool,
     ) -> str:
         """The new ready task's configuration, from the settings in effect in its project (resolved as the project's
         agent settings view resolves them), ending with the question whether to start it."""
         project_id = project["id"]
         lines = [
             "任务已创建，还没有开始（Ready — not started）：",
-            f"- 任务：{goal_id}（{task_id}）" if goal_id else f"- 任务：{task_id}",
+            f"- 任务：{name}（{task_id}）" if name else f"- 任务：{task_id}",
             f"- 项目：{project['name']}（{'新建' if created else '已有'}）",
             f"- 目录：{work_dir}",
         ]

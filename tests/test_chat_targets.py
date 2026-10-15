@@ -19,7 +19,7 @@ T0 = datetime(2026, 10, 12, 8, 0, tzinfo=timezone.utc)
 
 
 def _task(task_id: str, minutes: int, status: str = "completed") -> dict[str, Any]:
-    return {"id": task_id, "requirement": f"do {task_id}", "status": status,
+    return {"id": task_id, "requirement": f"do {task_id}", "name": f"{task_id} title", "status": status,
             "created_at": T0 + timedelta(minutes=minutes)}
 
 
@@ -50,14 +50,15 @@ class TestBuildChatTargets:
         targets = build_chat_targets(
             tasks=[_task("t1", 0, "running"), _task("t2", 5, "stopped")],
             live_planners=[{"task_id": "t1", "planner_id": "planner-t1",
-                            "requirement": "do t1", "status": "running"}],
+                            "requirement": "do t1", "name": "t1 title", "status": "running"}],
             steps=[], runs=[],
         )
         planners = {t["task_id"]: t for t in targets if t["kind"] == "planner"}
         assert planners["t1"]["can_send"] is True
         assert planners["t2"]["can_send"] is False
         assert planners["t2"] == {"kind": "planner", "id": "planner-t2", "task_id": "t2",
-                                  "requirement": "do t2", "status": "stopped", "can_send": False}
+                                  "requirement": "do t2", "name": "t2 title", "status": "stopped",
+                                  "can_send": False}
 
     def test_each_step_lists_its_own_worker_and_reviewer(self) -> None:
         targets = build_chat_targets(
@@ -155,4 +156,5 @@ class TestListChatTargets:
 
         assert _ids(targets) == ["manager", "planner-t1"]
         assert targets[1]["can_send"] is True
-        assert (targets[1]["requirement"], targets[1]["status"]) == ("build it", "running")
+        assert (targets[1]["requirement"], targets[1]["name"], targets[1]["status"]) == ("build it", "build it",
+                                                                                         "running")

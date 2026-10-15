@@ -87,7 +87,7 @@ async def build_overview(
     now = datetime.now(timezone.utc)
     planners = [
         {"agent_id": p["planner_id"], "task_id": p["task_id"], "project_id": p["project_id"],
-         "project_name": names.get(p["project_id"]), "requirement": p["requirement"]}
+         "project_name": names.get(p["project_id"]), "requirement": p["requirement"], "name": p["name"]}
         for p in task_router.running_planners()
     ]
     runs = sorted(worker_pool.runs() if worker_pool else [], key=lambda r: (r["state"] != "running", r["since"]))

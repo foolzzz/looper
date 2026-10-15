@@ -634,6 +634,7 @@ class AgentHTTPServer:
                 result.append({
                     "task_id": t.get("id", ""),
                     "requirement": t.get("requirement", ""),
+                    "name": t.get("name", ""),
                     "goal_id": t.get("goal_id", ""),
                     "project_id": t.get("project_id", ""),
                     "project_name": t.get("project_name", ""),
@@ -1069,6 +1070,7 @@ class AgentHTTPServer:
         result = {
             "task_id": raw.get("id", ""),
             "requirement": raw.get("requirement", ""),
+            "name": raw.get("name", ""),
             "goal_id": raw.get("goal_id", ""),
             "project_id": raw.get("project_id", ""),
             "project_name": raw.get("project_name", ""),
