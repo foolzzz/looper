@@ -13,8 +13,8 @@ import {
   type SettingsPageId,
 } from "@/lib/settings-pages";
 
-/** What each Settings page is for, under its title. */
-const DESCRIPTIONS: Record<SettingsPageId, React.ReactNode> = {
+/** What each Settings page is for, under its title; the Roles page writes its own, as it names the roles. */
+const DESCRIPTIONS: Record<Exclude<SettingsPageId, "roles">, React.ReactNode> = {
   providers:
     "Where agents' requests go: each provider's protocols, endpoint, sign-in (a runtime's own login, or an API key " +
     "stored masked), model catalog with prices, extra environment and concurrency limit.",
@@ -22,9 +22,6 @@ const DESCRIPTIONS: Record<SettingsPageId, React.ReactNode> = {
     "The agent runtimes this version can run, as found on the server's PATH. A runtime's capabilities decide the " +
     "roles it can run. Runtimes are built in; a different binary comes from the server's PATH.",
   [AGENT_PROFILE.slug]: AGENT_PROFILE.help,
-  roles:
-    `What every role inherits, then each role: its ${AGENT_PROFILE.name}, harness, effort, environment and spend cap ` +
-    "per run, its role prompt, timeout and concurrency. Each field shows what applies now and where it comes from.",
   catalog:
     "Plugins, skills and MCP servers: import, upload, take from git or write them, then install them globally or " +
     "in a project, for the roles that load them.",
@@ -37,7 +34,7 @@ const DESCRIPTIONS: Record<SettingsPageId, React.ReactNode> = {
 };
 
 /** One Settings page (#settings/<page>[/<sub>]); the sidebar's Settings group lists them. */
-export function SettingsPage({ sub, onNavigate }: { sub: string; onNavigate: (sub: string) => void }) {
+export function SettingsPage({ sub }: { sub: string }) {
   const [first, ...rest] = sub.split("/");
   const page: SettingsPageId = isSettingsPage(first) ? first : DEFAULT_SETTINGS_PAGE;
   const inner = rest.join("/");
@@ -46,12 +43,12 @@ export function SettingsPage({ sub, onNavigate }: { sub: string; onNavigate: (su
     <div className="space-y-6 p-6">
       <div>
         <h1 className="text-2xl font-bold">{settingsPageLabel(page)}</h1>
-        <p className="mt-1 max-w-3xl text-sm text-muted-foreground">{DESCRIPTIONS[page]}</p>
+        {page !== "roles" && <p className="mt-1 max-w-3xl text-sm text-muted-foreground">{DESCRIPTIONS[page]}</p>}
       </div>
       {page === "providers" && <ProvidersSection adding={inner === "new"} />}
       {page === "runtimes" && <RuntimesSection />}
       {page === AGENT_PROFILE.slug && <AgentProfilesSection />}
-      {page === "roles" && <RolesSection sub={inner} onNavigate={(role) => onNavigate(`roles/${role}`)} />}
+      {page === "roles" && <RolesSection sub={inner} />}
       {page === "catalog" && <CatalogCard />}
       {page === "channels" && <ChannelsSection />}
       {page === "transfer" && <ConfigTransferCard />}

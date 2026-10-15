@@ -358,7 +358,7 @@ function usedByPlaces(used: ProfileUsedBy): { text: string; href?: string }[] {
     const role = layer.role ? roleLabel(layer.role) : "";
     switch (layer.scope) {
       case "system":
-        return { text: "every role (defaults)", href: settingsHref("roles") };
+        return { text: "the shared defaults", href: settingsHref("roles", "shared") };
       case "role":
         return { text: `the ${role}`, href: settingsHref("roles", layer.role ?? "") };
       case "project":
