@@ -590,7 +590,10 @@ function TaskProgress({ task }: { task: TaskDetail }) {
               <ending.Icon className="h-3.5 w-3.5" />
               {ending.title}
             </p>
-            <Markdown>{endingText}</Markdown>
+            {/* One heading per field, kept below the section's own heading. */}
+            <div className="[&_h2]:mb-1 [&_h2]:mt-4 [&_h2]:text-sm [&_h2]:font-semibold">
+              <Markdown>{endingText}</Markdown>
+            </div>
           </div>
         )}
         {latest && (
