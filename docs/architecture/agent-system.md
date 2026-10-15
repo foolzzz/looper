@@ -2020,7 +2020,13 @@ restart.
   sends it as text with `lark-cli im +messages-send` and edits it with
   `lark-cli im +messages-edit --as bot --message-id <om_…> --text` (with the
   channel's `--profile`), taking the id from the send's JSON answer; Telegram
-  uses `send_message` and `edit_message_text`.
+  uses `send_message` and `edit_message_text`. Only phases go to the status
+  message (`status_kind`): a `STATUS_UPDATE` that is neither a phase nor
+  streamed text is the Manager's task progress (「任务已分解为 N 个步骤，开始执行...」
+  when the task is accepted, then the Planner's progress and summary), and it
+  is sent as a message of its own, like an answer, without touching the
+  status message or counting as one of its edits; a status without text is
+  not sent.
 - **A reaction when the bot sees a message** (`status_line.Reactions`): a
   direct message from a listed sender that goes to the Manager first gets a
   reaction from the bot, Lark's 「Get」 (`lark-cli im reactions create --as bot
