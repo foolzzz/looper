@@ -111,6 +111,43 @@ def test_every_earlier_unfinished_input_gets_its_own_block_the_oldest_left_out_w
     assert "alert-1" not in tight and "alert-2" in tight and "alert-3" in tight
 
 
+@pytest.mark.parametrize("carried_runs", [0, 1, 3, 10])
+@pytest.mark.parametrize("with_gate_output", [False, True])
+def test_a_runs_requirement_fits_the_task_limit_however_long_its_parts(carried_runs: int,
+                                                                       with_gate_output: bool) -> None:
+    """The longest schedule requirement, name and gate command, missed fires, the latest runs' outcomes, a large gate
+    output and many earlier runs' inputs: the run's task requirement keeps the schedule's whole and fits the limit, so
+    nothing the agents read is clipped."""
+    from looper.agents.scheduler import CONTEXT_RUNS, Carried, run_requirement
+    from looper.agents.schedules import GATE_COMMAND_MAX_CHARS, NAME_MAX_CHARS, REQUIREMENT_MAX_CHARS
+    from looper.agents.system_prompt import TASK_REQUIREMENT_LIMIT
+
+    schedule = {**SCHEDULE, "name": "n" * NAME_MAX_CHARS, "gate_command": "g" * GATE_COMMAND_MAX_CHARS,
+                "requirement": "r" * REQUIREMENT_MAX_CHARS}
+    firing = Firing(Trigger.CATCH_UP, NOW, missed=9_999, missed_since=NOW - 5_000 * MINUTE)
+    recent = [{"status": "failed", "trigger": "manual", "fired_at": NOW - n * 30 * MINUTE, "scheduled_for": NOW,
+               "summary": "s" * 1_000} for n in range(1, CONTEXT_RUNS + 1)]
+    carried = [Carried(f"srun-{n}", "timed_out", NOW - n * MINUTE, "```" + "c" * 50_000) for n in range(carried_runs)]
+    requirement = run_requirement(schedule, firing, recent, description="Every 30 minutes",
+                                  gate_output="```" + "o" * 100_000 if with_gate_output else None, carried=carried)
+    assert requirement.startswith(schedule["requirement"] + "\n\n## 定时运行上下文")
+    assert len(requirement) <= TASK_REQUIREMENT_LIMIT
+    assert requirement.rstrip().endswith("并把假设写进结果。")  # the context is whole, down to its last line
+    if with_gate_output:
+        assert "o" * 500 in requirement  # the current input keeps its share
+    if carried_runs:
+        assert "- 上一轮未完成：" in requirement
+
+
+def test_a_short_schedule_gets_its_whole_gate_output() -> None:
+    from looper.agents.scheduler import run_requirement
+
+    schedule = {**SCHEDULE, "gate_command": "cat alerts.txt", "requirement": "Triage the new alerts."}
+    output = "\n".join(f"alert-{n}" for n in range(2_000))
+    requirement = run_requirement(schedule, Firing(Trigger.SCHEDULED, NOW), [], description="d", gate_output=output)
+    assert output in requirement and "截断" not in requirement
+
+
 @pytest.mark.parametrize(("notify", "status", "sent"), [
     ("failures", "failed", True), ("failures", "timed_out", True), ("failures", "gate_failed", True),
     ("failures", "completed", False), ("failures", "stopped", False), ("failures", "skipped_gate", False),

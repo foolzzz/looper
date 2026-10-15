@@ -40,9 +40,12 @@ from .system_prompt import TASK_REQUIREMENT_LIMIT
 from .tiers.task import resolve_work_dir
 
 NAME_MAX_CHARS = 80
-# A run's task requirement is the schedule's and the run context the scheduler appends (``scheduler.run_context``,
-# fitted into the room left); the schedule's own leaves that much room under the task limit.
-RUN_CONTEXT_RESERVE_CHARS = 2000
+# A run's task requirement is the schedule's and the run context the scheduler appends (``scheduler.run_requirement``).
+# The schedule's own leaves this much under the task limit, enough for the longest context: its fixed lines (the
+# name, the rule, missed fires, the latest runs' outcomes: under 2,000), the gate's line with its command (up to
+# 2,000) and the least room for the outputs with their labels (``scheduler.GATE_CONTEXT_MIN_CHARS`` and a few
+# hundred more).
+RUN_CONTEXT_RESERVE_CHARS = 5000
 REQUIREMENT_MAX_CHARS = TASK_REQUIREMENT_LIMIT - RUN_CONTEXT_RESERVE_CHARS
 RUN_TIMEOUT_MAX_SECONDS = 30 * 86400
 PREVIEW_COUNT = 5
