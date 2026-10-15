@@ -68,13 +68,14 @@ from ..session_switch import SessionSwitch
 from ..system_prompt import SystemPrompt, build_system_prompt, is_recommended
 from .journal import HANDOFF_MAX_CHARS, clip, kept_text
 from .task import resolve_work_dir
-from ..task_notice import ends_task, notify_channel, notify_chat
+from ..task_notice import Notice, notify_chat
 from ..message import (
     MANAGER_ADDRESS,
     TASK_ROUTER_ADDRESS,
     AgentAddress,
     MessageEnvelope,
     MessageType,
+    channel_address,
 )
 
 logger = logging.getLogger(__name__)
@@ -322,6 +323,8 @@ class _Followup:
     chat: tuple[str | None, str | None]  # the channel and the chat (``_message_origin``)
     note: str
     new_project: _NewProject | None = None
+    # The message that asked for the task Looper then asked a question about: its text names the task.
+    asked_for: str = ""
 
 
 @dataclass(frozen=True)
@@ -542,7 +545,8 @@ class ManagerAgent:
                 project, work_dir, created = await self._place_task(
                     parsed, followup.new_project if followup else None)
             except _AskUser as ask:
-                self._keep_followup(_Followup(chat, ask.note(), ask.new_project))
+                self._keep_followup(_Followup(chat, ask.note(), ask.new_project,
+                                              (followup.asked_for if followup else "") or text))
                 await self._send_reply(envelope, str(ask))
                 return
             except Exception as exc:
@@ -559,7 +563,8 @@ class ManagerAgent:
                     "task_id": task_id,
                     "goal_id": goal_id,
                     "requirement": parsed.get("structured_requirement", text),
-                    "original_user_text": text,
+                    # What the user wrote when asking for it, before any question Looper asked about it.
+                    "original_user_text": (followup.asked_for if followup else "") or text,
                     "user_language": envelope.payload.get("language", "zh"),
                     "work_dir": work_dir,
                     "project_id": project["id"],
@@ -723,9 +728,19 @@ class ManagerAgent:
             self._goal_snapshots[goal_id] = snapshot
 
         origin = envelope.metadata.get("origin_channel_id")
-        # The TaskRouter tells a Telegram or Lark chat that its task ended (``task_notice``): only the web chat
-        # gets the end from here, so it arrives once.
-        if origin and not (ends_task(envelope.payload.get("status")) and notify_channel(origin)):
+        notice = Notice.from_payload(envelope.payload.get("notice"))
+        if notice is not None:
+            # A Telegram or Lark task's end goes to who it recorded, instead of its final summary, behind the
+            # progress sent before it (``task_notice``).
+            await self._bus.publish(MessageEnvelope.create(
+                source=MANAGER_ADDRESS,
+                target=channel_address(notice.channel.value),
+                message_type=MessageType.CHAT_NOTICE,
+                payload=notice.payload(),
+                correlation_id=envelope.correlation_id,
+                metadata={"origin_channel_id": origin},
+            ))
+        elif origin:
             progress_text = envelope.payload.get("summary", "")
             if progress_text:
                 await self._bus.publish(MessageEnvelope.create(

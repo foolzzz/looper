@@ -18,7 +18,7 @@ Alerts and recoveries follow ``notify`` too, except that ``never`` sends
 none. Every message is recorded in ``schedule_notifications`` (the outbox):
 ``sent``, ``failed`` with the reason, or ``dashboard`` when the schedule names
 no chat or ``notify`` is ``never``. The text is code-written: the schedule,
-the run's status, a summary snippet, its cost and the link path to the task.
+the run's status, a summary snippet, its cost and the link to the task (``links``).
 """
 
 from __future__ import annotations
@@ -31,6 +31,7 @@ from typing import Any
 
 from ..db import connection as db_connection, projects as db_projects, schedules as db_schedules
 from . import cron
+from .links import schedule_link, task_link
 from .project_execution import format_usd
 
 logger = logging.getLogger(__name__)
@@ -91,23 +92,20 @@ def _local(moment: datetime, zone_name: str) -> str:
     return moment.astimezone(cron.zone(zone_name)).strftime("%Y-%m-%d %H:%M %Z")
 
 
-def schedule_link(schedule: Mapping[str, Any]) -> str:
-    return f"/#projects/{schedule['project_id']}/schedules/{schedule['id']}"
-
-
-def run_text(schedule: Mapping[str, Any], project_name: str, run: Mapping[str, Any]) -> str:
+def run_text(schedule: Mapping[str, Any], project_name: str, run: Mapping[str, Any], *, base: str = "") -> str:
     when = _local(run.get("fired_at") or run["scheduled_for"], schedule["timezone"])
     lines = [f"定时任务「{schedule['name']}」（项目 {project_name}）{when} 的运行："
              f"{STATUS_WORDS.get(run['status'], run['status'])}"]
     if text := snippet(run.get("summary") or run.get("error")):
         lines.append(text)
     cost = f"花费 ${format_usd(float(run['cost_usd']))}" if run.get("cost_usd") is not None else "无花费"
-    link = f"/#tasks/{run['task_id']}" if run.get("task_id") else schedule_link(schedule)
+    link = task_link(base, run["task_id"]) if run.get("task_id") else schedule_link(base, schedule)
     lines.append(f"{cost} · {link}")
     return "\n".join(lines)
 
 
-def failures_alert_text(schedule: Mapping[str, Any], project_name: str, run: Mapping[str, Any] | None) -> str:
+def failures_alert_text(schedule: Mapping[str, Any], project_name: str, run: Mapping[str, Any] | None, *,
+                        base: str = "") -> str:
     last = ""
     if run is not None:
         last = f"最近一次：{STATUS_WORDS.get(run['status'], run['status'])}"
@@ -115,28 +113,32 @@ def failures_alert_text(schedule: Mapping[str, Any], project_name: str, run: Map
             last += f" · {text}"
         last += "\n"
     return (f"告警：定时任务「{schedule['name']}」（项目 {project_name}）已连续失败 "
-            f"{schedule['consecutive_failures']} 次。\n{last}{schedule_link(schedule)}")
+            f"{schedule['consecutive_failures']} 次。\n{last}{schedule_link(base, schedule)}")
 
 
-def stale_alert_text(schedule: Mapping[str, Any], project_name: str, deadline: datetime) -> str:
+def stale_alert_text(schedule: Mapping[str, Any], project_name: str, deadline: datetime, *, base: str = "") -> str:
     since = (f"上次成功：{_local(schedule['last_ok_at'], schedule['timezone'])}" if schedule.get("last_ok_at")
              else "还没有成功过")
     return (f"告警：定时任务「{schedule['name']}」（项目 {project_name}）到 {_local(deadline, schedule['timezone'])} "
-            f"仍没有成功运行（{since}）。\n{schedule_link(schedule)}")
+            f"仍没有成功运行（{since}）。\n{schedule_link(base, schedule)}")
 
 
-def recovered_text(schedule: Mapping[str, Any], project_name: str, run: Mapping[str, Any], kind: Kind) -> str:
+def recovered_text(schedule: Mapping[str, Any], project_name: str, run: Mapping[str, Any], kind: Kind, *,
+                   base: str = "") -> str:
     what = "不再连续失败" if kind is Kind.FAILURES_RECOVERED else "又有成功的运行"
     when = _local(run.get("finished_at") or run["scheduled_for"], schedule["timezone"])
-    return f"恢复：定时任务「{schedule['name']}」（项目 {project_name}）{what}（{when}）。\n{schedule_link(schedule)}"
+    return (f"恢复：定时任务「{schedule['name']}」（项目 {project_name}）{what}（{when}）。\n"
+            f"{schedule_link(base, schedule)}")
 
 
 class Notifier:
-    """Sends a schedule's messages through ``sender`` (the server's channels; None: record them only)."""
+    """Sends a schedule's messages through ``sender`` (the server's channels; None: record them only), their links
+    starting with ``dashboard_url`` (``links``; empty: relative)."""
 
-    def __init__(self, *, sender: Sender | None, clock: Callable[[], datetime]) -> None:
+    def __init__(self, *, sender: Sender | None, clock: Callable[[], datetime], dashboard_url: str = "") -> None:
         self._sender = sender
         self._clock = clock
+        self._base = dashboard_url
 
     async def run_ended(self, run_id: str) -> None:
         """A run reached its final status: its message, then the failures alert or the recoveries it causes."""
@@ -150,18 +152,21 @@ class Notifier:
         project_name = (project or {}).get("name") or schedule["project_id"]
         status = run["status"]
         if wants_run_message(schedule["notify"], status):
-            await self._deliver(schedule, Kind.RUN, run_text(schedule, project_name, run), run_id=run_id)
+            await self._deliver(schedule, Kind.RUN, run_text(schedule, project_name, run, base=self._base),
+                                run_id=run_id)
         now = self._clock()
         if status in db_schedules.FAILURES and schedule["consecutive_failures"] >= FAILURES_ALERT_AT:
             if await self._switch(schedule["id"], "failures_alert_at", now):
-                await self._deliver(schedule, Kind.FAILURES_ALERT, failures_alert_text(schedule, project_name, run),
-                                    run_id=run_id)
+                await self._deliver(schedule, Kind.FAILURES_ALERT,
+                                    failures_alert_text(schedule, project_name, run, base=self._base), run_id=run_id)
         if status == "completed" and await self._switch(schedule["id"], "failures_alert_at", None):
             await self._deliver(schedule, Kind.FAILURES_RECOVERED,
-                                recovered_text(schedule, project_name, run, Kind.FAILURES_RECOVERED), run_id=run_id)
+                                recovered_text(schedule, project_name, run, Kind.FAILURES_RECOVERED, base=self._base),
+                                run_id=run_id)
         if status in ("completed", "skipped_gate") and await self._switch(schedule["id"], "stale_alert_at", None):
             await self._deliver(schedule, Kind.STALE_RECOVERED,
-                                recovered_text(schedule, project_name, run, Kind.STALE_RECOVERED), run_id=run_id)
+                                recovered_text(schedule, project_name, run, Kind.STALE_RECOVERED, base=self._base),
+                                run_id=run_id)
 
     async def check_stale(self, now: datetime) -> None:
         """Start the stale alert of each enabled schedule past its deadline."""
@@ -177,7 +182,8 @@ class Notifier:
                     continue
                 project = await db_projects.get_project(schedule["project_id"])
                 await self._deliver(schedule, Kind.STALE_ALERT,
-                                    stale_alert_text(schedule, (project or {}).get("name") or "", deadline))
+                                    stale_alert_text(schedule, (project or {}).get("name") or "", deadline,
+                                                     base=self._base))
             except Exception:
                 logger.exception("could not check whether schedule %s has gone without a success", schedule["id"])
 
