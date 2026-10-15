@@ -199,8 +199,8 @@ def _lark_adapter_from_config(config: dict[str, Any], runtime_root: Path) -> Lar
         return None
     from ..db.channel_configs import record_rejected
 
-    async def rejected(sender_id: str, snippet: str) -> None:
-        await record_rejected("channel-lark", sender_id, snippet)
+    async def rejected(sender_id: str) -> None:
+        await record_rejected("channel-lark", sender_id)
 
     return LarkChannelAdapter(profile=config.get("profile") or "", runtime_root=runtime_root, allowlist=allowlist,
                               on_rejected=rejected)

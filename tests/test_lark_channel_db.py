@@ -103,9 +103,9 @@ def test_saving_binds_the_allowlist_and_the_status_names_people(monkeypatch: pyt
         assert status == 200, view
         assert view["config"]["allowlist_app_id"] == "cli_main" and "app_id_env" not in view["config"]
 
-        await record_rejected("channel-lark", OTHER, "hello there")
-        await record_rejected("channel-lark", OTHER, "are you there?")
-        await record_rejected("channel-lark", OPEN_ID, "listed meanwhile")  # on the allowlist: not shown
+        await record_rejected("channel-lark", OTHER)
+        await record_rejected("channel-lark", OTHER)
+        await record_rejected("channel-lark", OPEN_ID)  # on the allowlist meanwhile: not shown
         status, lark = await _call("GET", "/api/channels/lark/status")
         assert status == 200
         assert lark["bot"] == {"name": "HelperBot", "app_id": "cli_main", "open_id": "ou_bot0000001",
@@ -113,8 +113,8 @@ def test_saving_binds_the_allowlist_and_the_status_names_people(monkeypatch: pyt
         assert lark["problem"] is None
         assert lark["names"] == {OPEN_ID: "Ada Lovelace", OTHER: "Alan Turing"}
         [rejected] = lark["rejected"]
-        assert (rejected["open_id"], rejected["name"], rejected["snippet"], rejected["count"]) == (
-            OTHER, "Alan Turing", "are you there?", 2)
+        assert (rejected["open_id"], rejected["name"], rejected["count"]) == (OTHER, "Alan Turing", 2)
+        assert set(rejected) == {"open_id", "name", "count", "last_at"}  # never what they wrote
 
         # Another app's profile, the allowlist unchanged: it does not start, and says why.
         status, view = await _call("PUT", "/api/channel-configs/channel-lark", {
@@ -139,8 +139,25 @@ def test_only_the_newest_refused_senders_are_kept(monkeypatch: pytest.MonkeyPatc
 
     async def test(pool: Any) -> None:
         for n in range(REJECTED_KEPT + 5):
-            await record_rejected("channel-lark", f"ou_sender{n:06d}", f"message {n}")
+            await record_rejected("channel-lark", f"ou_sender{n:06d}")
         kept = await rejected_senders("channel-lark")
         assert len(kept) == REJECTED_KEPT and kept[0]["sender_id"] == f"ou_sender{REJECTED_KEPT + 4:06d}"
+
+    _run(test, monkeypatch)
+
+
+def test_a_table_from_before_loses_what_refused_senders_wrote(monkeypatch: pytest.MonkeyPatch) -> None:
+    from looper.db import connection
+    from looper.db.channel_configs import rejected_senders
+
+    async def test(pool: Any) -> None:
+        await pool.execute("ALTER TABLE channel_rejected_senders ADD COLUMN snippet TEXT NOT NULL DEFAULT ''")
+        await pool.execute("INSERT INTO channel_rejected_senders (channel_id, sender_id, snippet) "
+                           "VALUES ('channel-lark', $1, 'what they wrote')", OTHER)
+        await connection.ensure_schema(pool)
+        assert await pool.fetchval("SELECT count(*) FROM information_schema.columns WHERE table_schema = "
+                                   "current_schema() AND table_name = 'channel_rejected_senders' "
+                                   "AND column_name = 'snippet'") == 0
+        assert [r["sender_id"] for r in await rejected_senders("channel-lark")] == [OTHER]
 
     _run(test, monkeypatch)

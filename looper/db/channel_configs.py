@@ -139,18 +139,18 @@ async def seed_defaults(
 REJECTED_KEPT = 20
 
 
-async def record_rejected(channel_id: str, sender_id: str, snippet: str, *,
-                          pool: asyncpg.Pool | None = None) -> None:
-    """Record a message the channel's allowlist refused; the channel keeps its ``REJECTED_KEPT`` newest senders."""
+async def record_rejected(channel_id: str, sender_id: str, *, pool: asyncpg.Pool | None = None) -> None:
+    """Record that the channel's allowlist refused a message from ``sender_id`` (never what it said); the channel
+    keeps its ``REJECTED_KEPT`` newest senders."""
     pool = pool or get_pool()
     async with pool.acquire() as conn, conn.transaction():
         await conn.execute(
             """
-            INSERT INTO channel_rejected_senders (channel_id, sender_id, snippet) VALUES ($1, $2, $3)
+            INSERT INTO channel_rejected_senders (channel_id, sender_id) VALUES ($1, $2)
             ON CONFLICT (channel_id, sender_id)
-            DO UPDATE SET snippet = EXCLUDED.snippet, count = channel_rejected_senders.count + 1, last_at = now()
+            DO UPDATE SET count = channel_rejected_senders.count + 1, last_at = now()
             """,
-            channel_id, sender_id, snippet,
+            channel_id, sender_id,
         )
         await conn.execute(
             """
@@ -166,7 +166,7 @@ async def rejected_senders(channel_id: str, *, pool: asyncpg.Pool | None = None)
     """The channel's latest refused senders, newest first."""
     pool = pool or get_pool()
     rows = await pool.fetch(
-        "SELECT sender_id, snippet, count, last_at FROM channel_rejected_senders WHERE channel_id = $1 "
+        "SELECT sender_id, count, last_at FROM channel_rejected_senders WHERE channel_id = $1 "
         "ORDER BY last_at DESC LIMIT $2", channel_id, REJECTED_KEPT,
     )
     return [dict(r) for r in rows]

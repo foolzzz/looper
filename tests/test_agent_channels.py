@@ -585,8 +585,8 @@ class TestLarkAllowlist:
         async def _send(self: Any, chat_id: str, text: str) -> None:
             sent.append((chat_id, text))
 
-        async def _rejected(sender_id: str, snippet: str) -> None:
-            rejected.append((sender_id, snippet))
+        async def _rejected(sender_id: str) -> None:
+            rejected.append(sender_id)
 
         monkeypatch.setattr(LarkChannelAdapter, "_send_lark_message", _send)
 
@@ -615,8 +615,8 @@ class TestLarkAllowlist:
         with caplog.at_level("WARNING"):
             seen = self._run(tmp_path, monkeypatch, _lark_event(OTHER_OPEN_ID, "the secret plan"), OPEN_ID)
         assert seen.messages == [] and seen.sent == [] and seen.conversations == {}
-        # Recorded, with the start of the message, so Settings → Channels can name the sender and let them in.
-        assert seen.rejected == [(OTHER_OPEN_ID, "the secret plan")]
+        # Recorded, never what they wrote, so Settings → Channels can name the sender and let them in.
+        assert seen.rejected == [OTHER_OPEN_ID]
         (line,) = [r.getMessage() for r in caplog.records if "allowlist" in r.getMessage()]
         assert "channel-lark" in line and OTHER_OPEN_ID in line and "secret plan" not in line
 

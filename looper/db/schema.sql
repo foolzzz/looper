@@ -1014,13 +1014,14 @@ CREATE TABLE IF NOT EXISTS channel_secrets (
 );
 
 -- The latest senders a channel's allowlist refused (the Lark channel records them), so Settings → Channels can
--- name them and let one in: one row per channel and sender, with the start of their latest message and how
--- often they wrote; the channel keeps its 20 newest.
+-- name them and let one in: one row per channel and sender, with how often they wrote and when last; never what
+-- they wrote. The channel keeps its 20 newest.
 CREATE TABLE IF NOT EXISTS channel_rejected_senders (
     channel_id  TEXT NOT NULL,
     sender_id   TEXT NOT NULL,
-    snippet     TEXT NOT NULL DEFAULT '',
     count       INTEGER NOT NULL DEFAULT 1,
     last_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (channel_id, sender_id)
 );
+-- A table from before kept the start of each refused message: dropped, with what it held.
+ALTER TABLE channel_rejected_senders DROP COLUMN IF EXISTS snippet;

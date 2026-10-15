@@ -37,10 +37,8 @@ from .lark_cli import RECEIVE_EVENT, LarkCliError, consume_command, run, send_co
 
 logger = logging.getLogger(__name__)
 
-# The text of a rejected message kept to recognize its sender by.
-REJECTED_SNIPPET_CHARS = 60
-# (sender's open_id, the start of their message) of a message the allowlist refused.
-RejectedListener = Callable[[str, str], Awaitable[None]]
+# Told the open_id of a sender the allowlist refused (never what they wrote).
+RejectedListener = Callable[[str], Awaitable[None]]
 
 
 def _check_lark_cli_available() -> bool:
@@ -213,13 +211,11 @@ class LarkChannelAdapter(ChannelAdapter):
                         event.get("chat_type") or "unknown", chat_id)
             return
 
-        content = event.get("content")
-        text = content if isinstance(content, str) else ""
-        # Before anything else: an unlisted sender is logged, recorded and never answered.
+        # Before anything else: an unlisted sender is logged, recorded (only who and when) and never answered.
         if not self._allowlist.admits(sender_open_id):
             if self._on_rejected is not None and isinstance(sender_open_id, str) and sender_open_id:
                 try:
-                    await self._on_rejected(sender_open_id, " ".join(text.split())[:REJECTED_SNIPPET_CHARS])
+                    await self._on_rejected(sender_open_id)
                 except Exception:
                     logger.warning("channel-lark: could not record a rejected sender", exc_info=True)
             return
@@ -227,6 +223,8 @@ class LarkChannelAdapter(ChannelAdapter):
         if event.get("sender_type") == "bot" or event.get("message_type", "") != "text":
             return
 
+        content = event.get("content")
+        text = content if isinstance(content, str) else ""
         if not text.strip():
             return
 
