@@ -1059,7 +1059,26 @@ CREATE TABLE IF NOT EXISTS schedule_notifications (
 );
 CREATE INDEX IF NOT EXISTS idx_schedule_notifications_schedule ON schedule_notifications (schedule_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_schedule_runs_task ON schedule_runs (task_id);
-CREATE INDEX IF NOT EXISTS idx_schedule_runs_carried ON schedule_runs (carried_from) WHERE carried_from IS NOT NULL;
+-- Whether a run's unfinished input (an UNFINISHED run's gate output) was handed on to a later run: each goes to the
+-- next run only, all of them when several runs of a parallel schedule failed before it. Once, for runs from before:
+-- only the run that ran something and ended last in each schedule may still hand its input on, as the rule was then.
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                   WHERE table_schema = current_schema() AND table_name = 'schedule_runs'
+                     AND column_name = 'carried_on') THEN
+        ALTER TABLE schedule_runs ADD COLUMN carried_on BOOLEAN NOT NULL DEFAULT false;
+        UPDATE schedule_runs r SET carried_on = true
+        WHERE r.finished_at IS NOT NULL AND (
+            EXISTS (SELECT 1 FROM schedule_runs c WHERE c.carried_from = r.id)
+            OR r.id IS DISTINCT FROM (
+                SELECT l.id FROM schedule_runs l
+                WHERE l.schedule_id = r.schedule_id AND l.finished_at IS NOT NULL
+                  AND l.status NOT IN ('queued', 'gating', 'running', 'skipped_overlap', 'skipped_missed',
+                                       'skipped_budget')
+                ORDER BY l.finished_at DESC, l.id DESC LIMIT 1));
+    END IF;
+END $$;
 -- The schedule that created the task (NULL once the schedule is deleted), and the task's own spend cap over its
 -- project's task_budget_usd (a schedule's run_budget_usd, copied when it fires).
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS schedule_id TEXT REFERENCES schedules(id) ON DELETE SET NULL;

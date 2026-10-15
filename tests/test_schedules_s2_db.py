@@ -655,6 +655,63 @@ def test_a_failed_runs_input_goes_to_the_next_run_only(monkeypatch: pytest.Monke
     _run(test, monkeypatch, tmp_path)
 
 
+def test_two_parallel_runs_that_fail_before_the_next_gate_both_hand_their_input_on_once(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    async def test(env: _Env) -> None:
+        _setup(env)
+        env.clock.now = NOON
+        items = tmp_path / "items.txt"
+        sid = (await env.enabled(cron="* * * * *", gate_command="cat items.txt; : > items.txt",
+                                 overlap="parallel"))["schedule_id"]
+        failing = []
+        for n in (1, 2):  # two runs beside each other, each with its own alert
+            items.write_text(f"alert-{n}\n")
+            run = (await _next_minute(env, sid))[0]
+            await env.pool.execute("UPDATE tasks SET status = 'running' WHERE id = $1", run["task_id"])
+            failing.append(run)
+        for run in failing:  # both fail before the next gate runs, the first one first
+            env.clock.now += timedelta(seconds=1)
+            await env.end_task(run["task_id"], "failed", summary="crashed")
+        carrying = (await _next_minute(env, sid))[0]
+        assert (carrying["status"], carrying["gate_output"]) == ("running", None)
+        assert carrying["carried_from"] == failing[1]["run_id"]  # the latest of them
+        requirement = await _requirement(env, carrying["task_id"])
+        assert requirement.count("- 上一轮未完成：") == 2
+        assert requirement.index("```\nalert-1\n```") < requirement.index("```\nalert-2\n```")
+        assert await env.pool.fetchval("SELECT bool_and(carried_on) FROM schedule_runs WHERE id = ANY($1::text[])",
+                                       [run["run_id"] for run in failing])
+        # Handed on once: while that run is in progress, the next gate finds nothing new and nothing is carried.
+        await env.pool.execute("UPDATE tasks SET status = 'running' WHERE id = $1", carrying["task_id"])
+        assert _shape(await _next_minute(env, sid))[0] == ("skipped_gate", 1)
+
+    _run(test, monkeypatch, tmp_path)
+
+
+def test_runs_from_before_hand_on_only_what_the_old_rule_would_have(monkeypatch: pytest.MonkeyPatch,
+                                                                     tmp_path: Path) -> None:
+    from looper.db import connection
+
+    async def test(env: _Env) -> None:
+        sid = (await env.enabled(gate_command="cat items.txt"))["schedule_id"]
+        rows = [("srun-old0000001", "failed", 3, None), ("srun-old0000002", "running", 2, "srun-old0000001"),
+                ("srun-old0000003", "failed", 1, None), ("srun-old0000004", "skipped_overlap", 0, None)]
+        for run_id, status, minutes_ago, carried_from in rows:
+            ended = status not in ("running",)
+            await env.pool.execute(
+                "INSERT INTO schedule_runs (id, schedule_id, scheduled_for, fired_at, trigger, status, gate_output, "
+                "finished_at, carried_from, created_at) VALUES ($1, $2, now() - $3::interval, now() - $3::interval, "
+                "'scheduled', $4, 'alert', CASE WHEN $5 THEN now() - $3::interval END, $6, now() - $3::interval)",
+                run_id, sid, timedelta(minutes=minutes_ago), status, ended, carried_from)
+        await env.pool.execute("ALTER TABLE schedule_runs DROP COLUMN carried_on")
+        await connection.ensure_schema(env.pool)
+        handed = dict(await env.pool.fetch("SELECT id, carried_on FROM schedule_runs WHERE schedule_id = $1", sid))
+        # The one carried on already is; the latest to end that ran something may still hand its input on.
+        assert (handed["srun-old0000001"], handed["srun-old0000003"]) == (True, False)
+
+    _run(test, monkeypatch, tmp_path)
+
+
 def test_a_parallel_schedule_is_validated_and_warned_about_past_its_projects_planner_limit(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
