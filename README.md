@@ -227,7 +227,7 @@ release wheel serves the copy packaged with it.
 | **Task Detail** | Config editor (init status), overview, pipeline DAG, sessions, conversation; each Agent Timeline row has a **History** button |
 | **Runs** | Each role's sessions and run history (a Manager `/new` shows as a new session), each run opening its history; no configuration, a link to the role in Settings → Roles |
 | **Agent history** | One agent's launch command, full transcript (text, thinking, tool calls and results) and activity; follows a running agent and flags one with no output for 2 minutes |
-| **Settings** | A folding group at the bottom of the sidebar, one page each: **LLM Providers**; **Agent Runtimes** (read-only: each runtime type, found on the server's PATH or not, with Re-detect, and the planned ones); **Agent Profiles** (runtime, provider and model, the roles each can run and where it is used); **Roles** (every role's defaults, then each role's Agent Profile, layer, prompt and limits); **Skills & MCP**; **Channels**; **Import / Export** |
+| **Settings** | A folding group at the bottom of the sidebar, one page each: **LLM Providers**; **Agent Runtimes** (read-only: each runtime type, found on the server's PATH or not, with Re-detect, and the planned ones); **Agent Profiles** (runtime, provider and model, the roles each can run and where it is used); **Roles** (one collapsible row for the shared defaults, then one per role with its overrides, prompt and limits); **Skills & MCP**; **Channels**; **Import / Export** |
 
 ### HTTP API
 
@@ -315,8 +315,8 @@ layers, a later layer winning:
 
 | Layer | Edited in | Applies to |
 |---|---|---|
-| System | Settings → Roles, every role | Every agent |
-| Role | Settings → Roles, per role | One role everywhere: the Manager, the Planner, Workers or Reviewers |
+| System | Settings → Roles, Shared defaults | Every agent |
+| Role | Settings → Roles, a role's overrides | One role everywhere: the Manager, the Planner, Workers or Reviewers |
 | Project | The project's Settings tab | The project's Planner, Workers and Reviewers |
 | Role in project | The same tab, per role | One of those roles in one project |
 

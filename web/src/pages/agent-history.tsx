@@ -221,7 +221,7 @@ const SETTING_SOURCES: Record<string, string> = {
   profile: `the ${AGENT_PROFILE.name}'s default`,
   // Runs recorded before Agent Profiles were named.
   agent: `the ${AGENT_PROFILE.name}'s default`,
-  system: "every role (Settings → Roles)",
+  system: "shared defaults (Settings → Roles)",
   role: "role (Settings → Roles)",
   project: "project",
   role_project: "role in project",

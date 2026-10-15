@@ -161,7 +161,7 @@ function App() {
           )}
           {route.page === "settings" && (
             <div className="h-full overflow-y-auto">
-              <SettingsPage sub={route.sub} onNavigate={(sub) => navigateSub("settings", sub)} />
+              <SettingsPage sub={route.sub} />
             </div>
           )}
         </main>

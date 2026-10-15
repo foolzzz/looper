@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useId, useRef, useState } from "react";
-import { History, Loader2, Power, PowerOff, RotateCcw, Save } from "lucide-react";
+import { ChevronDown, History, Loader2, Power, PowerOff, RotateCcw, Save } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -14,10 +14,11 @@ import {
   updateSystemSettings,
   type AgentRole,
   type AgentSettings,
+  type EffectiveSettings,
   type RoleConfig,
 } from "@/lib/api";
 import { roleLabel } from "@/lib/runtime-catalog";
-import { AGENT_PROFILE } from "@/lib/settings-pages";
+import { formatUsd } from "@/lib/usage";
 import { cn } from "@/lib/utils";
 
 const ROLES: readonly AgentRole[] = ["manager", "planner", "worker", "reviewer"];
@@ -118,35 +119,40 @@ function RolePromptEditor({ id, value, onChange }: { id: string; value: string; 
 
 // --- A role's own fields (role_configs) ---
 
-function RoleConfigForm({
-  config,
-  onSave,
-  onResetPrompt,
-  saving,
-}: {
-  config: RoleConfig;
-  onSave: (fields: Partial<RoleConfig>) => void;
-  onResetPrompt: () => void;
-  saving: boolean;
-}) {
-  const id = useId();
-  const [form, setForm] = useState({
+/** The fields the form edits, as saved. */
+function fieldsOf(config: RoleConfig) {
+  return {
     display_name: config.display_name,
     max_turns: config.max_turns,
     timeout_seconds: config.timeout_seconds,
     enabled: config.enabled,
     system_prompt: config.system_prompt,
-  });
+  };
+}
+
+function RoleConfigForm({
+  config,
+  onSave,
+  onResetPrompt,
+  onDirtyChange,
+  saving,
+}: {
+  config: RoleConfig;
+  onSave: (fields: Partial<RoleConfig>) => void;
+  onResetPrompt: () => void;
+  /** Told whether the form holds unsaved edits. */
+  onDirtyChange: (dirty: boolean) => void;
+  saving: boolean;
+}) {
+  const id = useId();
+  const [form, setForm] = useState(() => fieldsOf(config));
 
   useEffect(() => {
-    setForm({
-      display_name: config.display_name,
-      max_turns: config.max_turns,
-      timeout_seconds: config.timeout_seconds,
-      enabled: config.enabled,
-      system_prompt: config.system_prompt,
-    });
+    setForm(fieldsOf(config));
   }, [config]);
+
+  const dirty = JSON.stringify(form) !== JSON.stringify(fieldsOf(config));
+  useEffect(() => onDirtyChange(dirty), [dirty, onDirtyChange]);
 
   return (
     <div className="space-y-5">
@@ -232,7 +238,7 @@ function RoleConfigForm({
 
       <Button onClick={() => onSave(form)} disabled={saving} className="w-full">
         {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
-        Save Config
+        Save prompt and limits
       </Button>
     </div>
   );
@@ -240,54 +246,186 @@ function RoleConfigForm({
 
 // --- The page ---
 
+/** What each role does, in a few words, on its row. */
+const ROLE_JOBS: Record<AgentRole, string> = {
+  manager: "talks with you and creates tasks",
+  planner: "plans each task and decides every step",
+  worker: "carries out one step",
+  reviewer: "checks a step's result",
+};
+
+/** The Shared defaults row (the system layer): its id, and its link #settings/roles/shared. */
+const SHARED = "shared";
+
+const count = (n: number, one: string) => `${n} ${one}${n === 1 ? "" : "s"}`;
+
+/** "Manager, Planner, Worker and Reviewer". */
+function listed(names: string[]) {
+  return names.length < 2 ? names.join("") : `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}`;
+}
+
+const effortText = (effort: string | null) => (effort ? `effort ${effort}` : "default effort");
+
+/** The Shared defaults row's line: what every role runs with unless it sets its own. */
+function sharedSummary(effective: EffectiveSettings, roles: number) {
+  const budget = effective.run_budget_usd.value;
+  return [
+    `Applies to all ${count(roles, "role")}`,
+    effective.profile.value.name,
+    effortText(effective.effort.value),
+    budget == null ? "no spend cap" : `${formatUsd(budget)} cap per run`,
+    effective.env.length ? count(effective.env.length, "environment variable") : "no environment variables",
+  ].join(" · ");
+}
+
+/** A role's line: its job, then its Agent Profile and where that comes from, its effort and its concurrency limit. */
+function roleSummary(role: AgentRole, effective: EffectiveSettings | undefined) {
+  const parts = [ROLE_JOBS[role]];
+  if (effective) {
+    const own = effective.profile.source === "role";
+    parts.push(`${effective.profile.value.name} (${own ? "own" : "shared"})`, effortText(effective.effort.value));
+    const limit = effective.max_concurrency?.value;
+    if (limit != null) {
+      parts.push(role === "planner" ? `up to ${count(limit, "task")} per project` : `up to ${limit} per project`);
+    }
+  }
+  return parts.join(" · ");
+}
+
+/** A row that has been opened: its content mounts the first time it opens and stays mounted, hidden while the row
+ * is closed, so closing a row keeps its unsaved edits. */
+type RowState = "open" | "closed";
+
+/** Where a row's forms say whether they hold unsaved edits. */
+interface DirtyMarks {
+  layer: (dirty: boolean) => void;
+  config: (dirty: boolean) => void;
+}
+
+/** One row of the Roles page: a one-line summary that opens and closes the row's settings. */
+function RoleRow({
+  id,
+  name,
+  detail,
+  summary,
+  disabled = false,
+  state,
+  onToggle,
+  rowRef,
+  children,
+}: {
+  id: string;
+  name: string;
+  /** The role's display name, when it differs from its name. */
+  detail?: string;
+  summary: string;
+  disabled?: boolean;
+  /** Undefined until the row first opens. */
+  state: RowState | undefined;
+  onToggle: () => void;
+  rowRef: (element: HTMLElement | null) => void;
+  children: (marks: DirtyMarks) => React.ReactNode;
+}) {
+  // State setters are stable, so the forms can report through them from an effect.
+  const [layerDirty, setLayerDirty] = useState(false);
+  const [configDirty, setConfigDirty] = useState(false);
+  const open = state === "open";
+  const buttonId = `roles-${id}-button`;
+  const panelId = `roles-${id}-panel`;
+
+  return (
+    <section ref={rowRef} className="scroll-mt-4 rounded-lg border border-border bg-card">
+      <h2>
+        <button
+          id={buttonId}
+          type="button"
+          aria-expanded={open}
+          aria-controls={panelId}
+          onClick={onToggle}
+          className="flex min-h-11 w-full items-center gap-3 rounded-lg px-5 py-2.5 text-left transition-colors hover:bg-accent/50 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+        >
+          <ChevronDown
+            aria-hidden="true"
+            className={cn(
+              "h-4 w-4 shrink-0 text-muted-foreground transition-transform duration-150 motion-reduce:transition-none",
+              !open && "-rotate-90",
+            )}
+          />
+          <span className="min-w-0 flex-1 truncate">
+            <span className="text-sm font-semibold">{name}</span>
+            {detail && <span className="text-sm text-muted-foreground"> · {detail}</span>}
+            {summary && <span className="text-xs text-muted-foreground"> · {summary}</span>}
+          </span>
+          {!open && (layerDirty || configDirty) && (
+            <Badge variant="warning" className="shrink-0">unsaved</Badge>
+          )}
+          {disabled && <Badge variant="outline" className="shrink-0">Disabled</Badge>}
+        </button>
+      </h2>
+      <div
+        id={panelId}
+        role="region"
+        aria-labelledby={buttonId}
+        hidden={!open}
+        className="space-y-5 border-t border-border px-5 py-4"
+      >
+        {state && children({ layer: setLayerDirty, config: setConfigDirty })}
+      </div>
+    </section>
+  );
+}
+
 /**
- * Settings → Roles: the defaults every role inherits (the system layer), then each role: its layer (Agent
- * Profile, harness, effort, environment, per-run cap) and its own prompt and limits. `sub` names the role shown
- * (#settings/roles/<role>), which a link scrolls into view.
+ * Settings → Roles: a row for the shared defaults (the system layer), then one per role with its overrides of them
+ * (its layer) and its own prompt and limits. Every row starts closed and any number can be open; `sub`
+ * (#settings/roles/<role>, or /shared) opens one and scrolls it into view.
  */
-export function RolesSection({ sub, onNavigate }: { sub: string; onNavigate: (sub: string) => void }) {
+export function RolesSection({ sub }: { sub: string }) {
   const [configs, setConfigs] = useState<RoleConfig[]>([]);
   const [settings, setSettings] = useState<AgentSettings | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
-  const [toast, setToast] = useState("");
-  const roleRef = useRef<HTMLElement>(null);
+  const [toast, setToast] = useState<{ role: string; text: string } | null>(null);
+  const linked = sub.split("/")[0];
+  const [rows, setRows] = useState<Record<string, RowState>>(() => (linked ? { [linked]: "open" } : {}));
+  const [linkedRow, setLinkedRow] = useState(linked);
+  const rowRefs = useRef<Record<string, HTMLElement | null>>({});
+
+  // A link to a row (from Runs or an Agent Profile's "used by") opens it, also while the page is showing.
+  if (linked !== linkedRow) {
+    setLinkedRow(linked);
+    if (linked) setRows((current) => ({ ...current, [linked]: "open" }));
+  }
 
   useEffect(() => {
-    fetchRoleConfigs()
-      .then((rows) => {
-        setConfigs([...rows].sort((a, b) => rank(a.role) - rank(b.role)));
-        setError("");
-      })
-      .catch((e) => setError(e.message))
-      .finally(() => setLoading(false));
-    fetchAgentSettings().then(setSettings).catch((e) => setError(e.message));
+    const roles = fetchRoleConfigs().then((list) => setConfigs([...list].sort((a, b) => rank(a.role) - rank(b.role))));
+    // Both, so that a linked row is scrolled to once the rows above it are there.
+    Promise.allSettled([roles, fetchAgentSettings().then(setSettings)]).then((results) => {
+      const failed = results.find((result): result is PromiseRejectedResult => result.status === "rejected");
+      if (failed) setError((failed.reason as Error).message);
+      setLoading(false);
+    });
   }, []);
 
-  const selectedId = sub.split("/")[0] || configs[0]?.role || "";
-  const selected = configs.find((c) => c.role === selectedId) ?? null;
-
-  // A link to a role (from Runs or an Agent Profile's "used by") shows its section.
-  const linked = !!sub;
   useEffect(() => {
     if (!linked || loading) return;
     const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-    roleRef.current?.scrollIntoView({ block: "start", behavior: reduce ? "auto" : "smooth" });
-  }, [linked, loading, selectedId]);
+    rowRefs.current[linked]?.scrollIntoView({ block: "start", behavior: reduce ? "auto" : "smooth" });
+  }, [linked, loading]);
 
-  const flash = (text: string) => {
-    setToast(text);
-    setTimeout(() => setToast(""), text.startsWith("Error") ? 3000 : 2000);
+  const flash = (role: string, text: string) => {
+    setToast({ role, text });
+    setTimeout(() => setToast(null), text.startsWith("Error") ? 3000 : 2000);
   };
-  const run = useCallback(async (action: () => Promise<RoleConfig>, done: string) => {
+  const run = useCallback(async (role: string, action: () => Promise<RoleConfig>, done: string) => {
     setSaving(true);
     try {
       const updated = await action();
       setConfigs((prev) => prev.map((c) => (c.role === updated.role ? updated : c)));
-      flash(done);
+      flash(role, done);
     } catch (e) {
-      flash(`Error: ${(e as Error).message}`);
+      flash(role, `Error: ${(e as Error).message}`);
     } finally {
       setSaving(false);
     }
@@ -301,151 +439,158 @@ export function RolesSection({ sub, onNavigate }: { sub: string; onNavigate: (su
     );
   }
 
+  const rowProps = (id: string) => ({
+    id,
+    state: rows[id],
+    onToggle: () => setRows((current) => ({ ...current, [id]: current[id] === "open" ? "closed" : "open" })),
+    rowRef: (element: HTMLElement | null) => {
+      rowRefs.current[id] = element;
+    },
+  });
+  const nameOf = (config: RoleConfig) => (isRole(config.role) ? roleLabel(config.role) : config.display_name || config.role);
+
   return (
     <div className="space-y-6">
+      {configs.length > 0 && (
+        // In the place of the page's description, right under its title: it names the roles the server has.
+        <p className="-mt-5 max-w-3xl text-sm text-muted-foreground">
+          Looper has {count(configs.length, "role")}: {listed(configs.map(nameOf))}. Each runs with the shared
+          defaults unless it sets its own value. A project can override both in its settings.
+        </p>
+      )}
+
       {error && (
         <div role="alert" className="rounded-lg border border-destructive/50 bg-destructive/10 px-5 py-4 text-sm text-destructive">
           {error}
         </div>
       )}
 
-      {settings && (
-        <section aria-labelledby="roles-defaults" className="space-y-3">
-          <div>
-            <h2 id="roles-defaults" className="text-sm font-semibold">Every role</h2>
-            <p className="mt-1 text-xs text-muted-foreground">
-              What every role inherits. A role below sets its own, and a project&apos;s Settings tab sets them for its
-              agents and for each role in it; the most specific one wins.
-            </p>
-          </div>
-          <div className="rounded-lg border border-border bg-card px-5 py-4">
-            <LayerSettingsForm
-              idPrefix="roles-system"
-              layer="system"
-              roles={[...ROLES]}
-              values={settings.system.values}
-              effective={settings.system.effective}
-              limits={settings.limits}
-              onSave={async (changes) => {
-                const next = await updateSystemSettings(changes);
-                setSettings(next);
-                return next.system.values;
-              }}
-              harnessHint={
-                <>
-                  Every agent&apos;s working principles, boundaries and tone, placed before its role prompt. Empty: the
-                  built-in harness.
-                </>
-              }
-            />
-          </div>
-        </section>
+      {!error && configs.length === 0 && (
+        <p className="text-sm text-muted-foreground">
+          No roles configured. Start the server with a database connection to seed defaults.
+        </p>
       )}
 
-      <section ref={roleRef} aria-labelledby="roles-role" className="scroll-mt-4 space-y-3">
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <h2 id="roles-role" className="text-sm font-semibold">Each role</h2>
-          <div role="group" aria-label="Role" className="flex flex-wrap rounded-md border border-border p-0.5">
-            {configs.map((c) => (
-              <button
-                key={c.role}
-                type="button"
-                aria-pressed={c.role === selectedId}
-                onClick={() => onNavigate(c.role)}
-                className={cn(
-                  "rounded px-3 py-1.5 text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
-                  c.role === selectedId ? "bg-primary/10 text-primary" : "text-muted-foreground hover:text-foreground",
-                )}
-              >
-                {isRole(c.role) ? roleLabel(c.role) : c.display_name || c.role}
-              </button>
-            ))}
-          </div>
-        </div>
-
-        {toast && (
-          <div
-            role="status"
-            className={cn(
-              "rounded-lg border px-4 py-2.5 text-sm",
-              toast.startsWith("Error")
-                ? "border-destructive/50 bg-destructive/10 text-destructive"
-                : "border-success/50 bg-success/10 text-success",
-            )}
-          >
-            {toast}
-          </div>
-        )}
-
-        {!error && configs.length === 0 && (
-          <p className="text-sm text-muted-foreground">
-            No roles configured. Start the server with a database connection to seed defaults.
-          </p>
-        )}
-
-        {selected && (
-          <div className="space-y-5 rounded-lg border border-border bg-card px-5 py-4">
-            <div className="flex flex-wrap items-center gap-2">
-              <h3 className="text-sm font-semibold">{selected.display_name || selected.role}</h3>
-              <Badge variant="outline">{selected.role || "—"}</Badge>
-              <a
-                href={`#runs/${encodeURIComponent(selected.role)}`}
-                className="ml-auto flex items-center gap-1 text-xs text-primary underline-offset-2 hover:underline"
-              >
-                <History className="h-3.5 w-3.5" aria-hidden="true" />
-                Its runs
-              </a>
-            </div>
-
-            {settings && isRole(selected.role) && (
-              <section aria-labelledby={`role-layer-${selected.role}`} className="space-y-3">
-                <div>
-                  <h4 id={`role-layer-${selected.role}`} className="text-xs font-semibold">
-                    {AGENT_PROFILE.name}, harness and environment
-                  </h4>
-                  <p className="mt-1 text-xs text-muted-foreground">
-                    {selected.role === "manager"
-                      ? "The Manager's own settings over every role's. Empty fields inherit."
-                      : "This role's settings in every project, over every role's. A project's Settings tab can " +
-                        "override them for all its agents or for this role. Empty fields inherit."}
-                  </p>
-                </div>
-                <LayerSettingsForm
-                  key={selected.role}
-                  idPrefix={`role-${selected.role}`}
-                  layer="role"
-                  roles={[selected.role]}
-                  values={settings.roles[selected.role].values}
-                  effective={settings.roles[selected.role].effective}
-                  limits={settings.limits}
-                  onSave={async (changes) => {
-                    const role = selected.role as AgentRole;
-                    const next = await updateRoleSettings(role, changes);
-                    setSettings(next);
-                    return next.roles[role].values;
-                  }}
-                  harnessHint={
-                    selected.role === "reviewer"
-                      ? "Empty: the Worker's harness at this layer, else the default."
-                      : "Working principles, boundaries and tone, placed before the role prompt."
-                  }
-                />
-              </section>
-            )}
-
-            <section aria-labelledby={`role-config-${selected.role}`} className="space-y-3 border-t border-border pt-5">
-              <h4 id={`role-config-${selected.role}`} className="text-xs font-semibold">Role prompt and limits</h4>
-              <RoleConfigForm
-                key={selected.role}
-                config={selected}
-                saving={saving}
-                onSave={(fields) => run(() => updateRoleConfig(selected.role, fields), "Saved")}
-                onResetPrompt={() => run(() => resetRolePrompt(selected.role), "Reset to recommended prompt")}
+      <div className="space-y-2">
+        {settings && (
+          <RoleRow {...rowProps(SHARED)} name="Shared defaults" summary={sharedSummary(settings.system.effective, configs.length)}>
+            {(marks) => (
+              <LayerSettingsForm
+                idPrefix="roles-system"
+                layer="system"
+                roles={[...ROLES]}
+                values={settings.system.values}
+                effective={settings.system.effective}
+                limits={settings.limits}
+                onDirtyChange={marks.layer}
+                onSave={async (changes) => {
+                  const next = await updateSystemSettings(changes);
+                  setSettings(next);
+                  return next.system.values;
+                }}
+                harnessHint={
+                  <>
+                    Every agent&apos;s working principles, boundaries and tone, placed before its role prompt. Empty: the
+                    built-in harness.
+                  </>
+                }
               />
-            </section>
-          </div>
+            )}
+          </RoleRow>
         )}
-      </section>
+
+        {configs.map((config) => {
+          const role = isRole(config.role) ? config.role : null;
+          const name = nameOf(config);
+          const runs = (
+            <a
+              href={`#runs/${encodeURIComponent(config.role)}`}
+              className="flex shrink-0 items-center gap-1 text-xs text-primary underline-offset-2 hover:underline"
+            >
+              <History className="h-3.5 w-3.5" aria-hidden="true" />
+              Its runs
+            </a>
+          );
+          return (
+            <RoleRow
+              key={config.role}
+              {...rowProps(config.role)}
+              name={name}
+              detail={config.display_name && config.display_name !== name ? config.display_name : undefined}
+              summary={role ? roleSummary(role, settings?.roles[role].effective) : ""}
+              disabled={!config.enabled}
+            >
+              {(marks) => (
+                <>
+                  {settings && role && (
+                    <section aria-labelledby={`role-layer-${role}`} className="space-y-3">
+                      <div className="flex flex-wrap items-start justify-between gap-2">
+                        <div>
+                          <h3 id={`role-layer-${role}`} className="text-xs font-semibold">Overrides for this role</h3>
+                          <p className="mt-1 text-xs text-muted-foreground">Empty fields use the shared defaults.</p>
+                        </div>
+                        {runs}
+                      </div>
+                      <LayerSettingsForm
+                        idPrefix={`role-${role}`}
+                        layer="role"
+                        roles={[role]}
+                        values={settings.roles[role].values}
+                        effective={settings.roles[role].effective}
+                        limits={settings.limits}
+                        submitLabel="Save overrides"
+                        onDirtyChange={marks.layer}
+                        onSave={async (changes) => {
+                          const next = await updateRoleSettings(role, changes);
+                          setSettings(next);
+                          return next.roles[role].values;
+                        }}
+                        harnessHint={
+                          role === "reviewer"
+                            ? "Empty: the Worker's harness at this layer, else the shared defaults."
+                            : "Working principles, boundaries and tone, placed before the role prompt."
+                        }
+                      />
+                    </section>
+                  )}
+
+                  <section
+                    aria-labelledby={`role-config-${config.role}`}
+                    className={cn("space-y-3", settings && role && "border-t border-border pt-5")}
+                  >
+                    <div className="flex flex-wrap items-start justify-between gap-2">
+                      <h3 id={`role-config-${config.role}`} className="text-xs font-semibold">Role prompt and limits</h3>
+                      {!(settings && role) && runs}
+                    </div>
+                    <RoleConfigForm
+                      config={config}
+                      saving={saving}
+                      onDirtyChange={marks.config}
+                      onSave={(fields) => run(config.role, () => updateRoleConfig(config.role, fields), "Saved")}
+                      onResetPrompt={() =>
+                        run(config.role, () => resetRolePrompt(config.role), "Reset to recommended prompt")
+                      }
+                    />
+                    {toast?.role === config.role && (
+                      <div
+                        role="status"
+                        className={cn(
+                          "rounded-lg border px-4 py-2.5 text-sm",
+                          toast.text.startsWith("Error")
+                            ? "border-destructive/50 bg-destructive/10 text-destructive"
+                            : "border-success/50 bg-success/10 text-success",
+                        )}
+                      >
+                        {toast.text}
+                      </div>
+                    )}
+                  </section>
+                </>
+              )}
+            </RoleRow>
+          );
+        })}
+      </div>
     </div>
   );
 }

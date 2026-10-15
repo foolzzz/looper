@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { CheckCircle2, Loader2, Plus, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -24,7 +24,7 @@ import { cn } from "@/lib/utils";
 const LAYER_LABELS: Record<SettingSource, string> = {
   builtin: "built-in default",
   profile: `the ${AGENT_PROFILE.name}`,
-  system: "every role's defaults (Settings → Roles)",
+  system: "the shared defaults (Settings → Roles)",
   role: "the role (Settings → Roles)",
   project: "this project",
   role_project: "this role in the project",
@@ -112,7 +112,7 @@ function sourceText(source: SettingSource, layer: SettingLayer, fromRole?: strin
 /** What an empty harness at each layer inherits. */
 const HARNESS_INHERITS: Record<Exclude<SettingLayer, "builtin">, string> = {
   system: "the built-in harness",
-  role: "every role's defaults",
+  role: "the shared defaults",
   project: "Settings → Roles",
   role_project: "the project or Settings → Roles",
 };
@@ -161,6 +161,8 @@ export function LayerSettingsForm({
   onSave,
   harnessHint,
   roles,
+  submitLabel = "Save",
+  onDirtyChange,
 }: {
   idPrefix: string;
   layer: Exclude<SettingLayer, "builtin">;
@@ -173,6 +175,9 @@ export function LayerSettingsForm({
   harnessHint?: React.ReactNode;
   /** The roles this layer selects an Agent Profile for; one that cannot run them all is disabled. */
   roles: AgentRole[];
+  submitLabel?: string;
+  /** Told whether the form holds unsaved edits. */
+  onDirtyChange?: (dirty: boolean) => void;
 }) {
   const [draft, setDraft] = useState<Draft>(() => draftOf(values));
   const [busy, setBusy] = useState(false);
@@ -192,6 +197,7 @@ export function LayerSettingsForm({
 
   const changes = changesOf(draft, values);
   const dirty = Object.keys(changes).length > 0;
+  useEffect(() => onDirtyChange?.(dirty), [dirty, onDirtyChange]);
   const envProblems = draft.env.map((entry) => envNameProblem(entry.key));
   const invalid = draft.harness.length > limits.harness_max_chars || envProblems.some(Boolean);
 
@@ -441,7 +447,7 @@ export function LayerSettingsForm({
         </Button>
         <Button type="submit" size="sm" disabled={!dirty || busy || invalid} className={cn(busy && "cursor-wait")}>
           {busy && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
-          Save
+          {submitLabel}
         </Button>
       </div>
     </form>
