@@ -19,7 +19,7 @@ import {
   User,
   Wrench,
 } from "lucide-react";
-import ReactMarkdown from "react-markdown";
+import { Markdown } from "@/components/markdown";
 import { Badge } from "@/components/ui/badge";
 import { ContextUsagePanel } from "@/components/context-usage";
 import { AGENT_PROFILE } from "@/lib/settings-pages";
@@ -628,9 +628,7 @@ function EventView({ item, startedAt, live }: { item: LlmRecordEvent; startedAt?
             if (block.type === "text") {
               return (
                 <div key={i} className="rounded-lg bg-muted px-3 py-2 text-sm">
-                  <div className="prose prose-invert prose-sm max-w-none [&>*:first-child]:mt-0 [&>*:last-child]:mb-0">
-                    <ReactMarkdown>{String(block.text ?? "")}</ReactMarkdown>
-                  </div>
+                  <Markdown>{String(block.text ?? "")}</Markdown>
                 </div>
               );
             }
