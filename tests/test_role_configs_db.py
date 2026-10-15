@@ -115,12 +115,14 @@ def test_worker_rows_move_to_the_new_recommended_prompt() -> None:
 @pytest.mark.parametrize(("role", "before"), [
     ("manager", "_MANAGER_PROMPT_BEFORE_READY_TASKS"),
     ("manager", "_MANAGER_PROMPT_BEFORE_CURRENT_MESSAGE"),
+    ("manager", "_MANAGER_PROMPT_BEFORE_TITLE"),
     ("planner", "_PLANNER_PROMPT_BEFORE_PARALLEL"),
 ])
 def test_a_row_moves_from_a_previous_default(role: str, before: str) -> None:
     """Startup (``seed_role_configs``) gives a row still holding one of its role's previous defaults (the Manager's
-    from before ready tasks or before it answered only the current message, the Planner's from before parallel
-    steps) the current one, whether that default was tracked or not; an edited prompt is kept."""
+    from before ready tasks, before it answered only the current message or before the task JSON's title, the
+    Planner's from before parallel steps) the current one, whether that default was tracked or not; an edited prompt
+    is kept."""
     import asyncpg
 
     from looper.agents import serve

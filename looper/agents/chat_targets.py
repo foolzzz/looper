@@ -63,7 +63,8 @@ def build_chat_targets(
     known = {t["id"] for t in tasks}
     # A task that has only just started may not be among the recent rows yet.
     rows = [
-        {"id": p["task_id"], "requirement": p["requirement"], "status": p["status"], "created_at": None}
+        {"id": p["task_id"], "requirement": p["requirement"], "name": p["name"], "status": p["status"],
+         "created_at": None}
         for p in live_planners if p["task_id"] not in known
     ]
     rows += sorted(tasks, key=lambda t: t["created_at"], reverse=True)
@@ -97,6 +98,7 @@ def build_chat_targets(
             "id": planner["planner_id"] if planner else planner_address(task_id).agent_id,
             "task_id": task_id,
             "requirement": row["requirement"],
+            "name": row["name"],
             "status": planner["status"] if planner else row["status"],
             "can_send": planner is not None,
         })
