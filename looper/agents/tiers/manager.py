@@ -5,16 +5,12 @@ The Manager is the only agent that communicates with users. It:
   chat message is one user turn on its stdin, and a restarted process resumes
   the session saved in PostgreSQL (``agent_sessions``)
 - Receives user messages from all channels via the Bus
-- Classifies intent (direct answer, clarification, task request)
-- Places each confirmed task in a project and forwards it to the TaskRouter,
-  which creates it ready, not started. A project that does not exist is created
-  only after Looper itself asked the user to confirm it (``_NewProject``). The
-  reply ends with the task's configuration, written by code from the effective
-  settings, and asks whether to start it; the user's word to start it is a
-  ``task_start`` action, which code checks and passes to the TaskRouter
-- Tells Claude, before the next message from that chat, what Looper itself
-  said there after Claude's last reply (``_Followup``), since Claude does not
-  see Looper's own replies
+- Acts on Looper only through its platform tools (``ops``): the MCP server
+  ``looper`` is added to every launch, and each turn tells ``ops`` which chat
+  and message the calls belong to. What Looper writes to the user itself (a
+  new task's configuration, what an operation needing confirmation does)
+  follows Claude's words in the reply; a note before the user's next message
+  names a confirmation waiting in that chat
 - Puts a ``Channel:`` line before each message naming where it came from (the
   dashboard chat, a Lark or Telegram direct message): the channels share one
   session, and the recommended prompt has Claude answer only that message
@@ -35,21 +31,16 @@ The Manager is the only agent that communicates with users. It:
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
-import re
 import shutil
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from ..broadcast import Broadcaster
 from ..bus import MessageBus
-from ..agent_settings import (
-    TASK_ROLES, AgentSettings, AgentType, Launch, Layer, index_layers, load_agent_settings, load_concurrency, resolve,
-    resolve_concurrency,
-)
+from ..agent_settings import AgentSettings, AgentType, Launch, load_agent_settings
 from ..claude_cli import (
     AUTONOMOUS_INPUT,
     AutonomousHandler,
@@ -60,29 +51,28 @@ from ..claude_cli import (
     exit_note,
 )
 from ..library import load_installed
-from ..project_execution import LessonsMode, ProjectExecution, ReviewPolicy, TaskBudgetAction, format_usd
-from ..projects import RequestError, project_name, start_ready_task
 from ..run_usage import Usage
 from .. import session_switch
 from ..runtimes import CLAUDE_CODE
 from ..session_switch import SessionSwitch
 from ..system_prompt import SystemPrompt, build_system_prompt, is_recommended
 from .journal import HANDOFF_MAX_CHARS, clip, kept_text
-from .task import resolve_work_dir
-from ..task_notice import Notice, notify_chat
+from ..ops import Turn
+from ..task_notice import Notice
 from ..message import (
     MANAGER_ADDRESS,
-    TASK_ROUTER_ADDRESS,
     AgentAddress,
     MessageEnvelope,
     MessageType,
     channel_address,
 )
 
+if TYPE_CHECKING:
+    from ..ops.service import ManagerOps
+
 logger = logging.getLogger(__name__)
 
 from ...db import activity as db_activity
-from ...db import agent_setting_layers as db_layers
 from ...db import role_configs as db_role_configs
 from ...db import tasks as db_tasks
 from ...db import chat as db_chat
@@ -90,43 +80,41 @@ from ...db import agent_sessions as db_agent_sessions
 from ...db import llm_records as db_llm_records
 from ...db import projects as db_projects
 
-# Appended to the (editable) system prompt on every call: the task JSON is
-# parsed by code, so its required fields are owned by code too.
-TASK_PLACEMENT_RULE = """\
-## Task project and working directory (required)
-Every task belongs to a project and runs in a directory. Each user message
-starts with a "Projects" section listing the existing projects and their
-default directories, and, when there are any, a "Ready tasks" section listing
-the tasks created but not started yet.
+# Appended to the (editable) system prompt on every call: Looper's tools are code's, so is how to use them.
+TOOLS_CONTRACT = """\
+## Looper's tools (required)
+You act on Looper only through its tools (looper_*); never through its HTTP API
+or files. Each tool answers JSON: "status" is "ok", "needs_confirmation" or
+"error", and "error.message" says what to change. Each user message starts with
+"Projects" (the existing projects and their default directories) and, when there
+are any, "Ready tasks" (created, not started).
 
-- Project: before asking the user to confirm a task, know its project. Use the
-  existing project the user names or clearly means. Otherwise ask the user:
-  offer the closest existing projects or propose a short name for a new one;
-  never present a project as decided before the user chose it. Put the
-  project's name in the task JSON as "project".
-- New project: Looper creates a project only after it asked the user itself.
-  A task JSON naming a project that does not exist creates nothing: Looper asks
-  the user to confirm that project (its name and default directory) or to
-  choose an existing one, and your next message tells you so. When the user
-  confirms, output the task JSON again with the same "project" and "work_dir"
-  and "new_project": true; when they choose an existing project, output it with
-  that project's name. Never set "new_project" to true otherwise.
-- Directory: there is no global default. Use the directory the user names, as
-  an absolute path (or one starting with ~/), in the task JSON as "work_dir".
-  If they name none and the project has a default directory, leave "work_dir"
-  empty and the project's default is used. A new project, or one without a
-  default directory, needs the user to name one: ask them. Never pick a
-  directory yourself.
-
-## Starting a ready task
-The task JSON creates the task ready: it does not start. Looper answers with
-the task's configuration and asks the user whether to start it now. When the
-user asks to start a ready task, output only this JSON, with the task's id from
-"Ready tasks" (or from the note about it):
-{"action": "task_start", "task_id": "<task id>"}
-Looper starts it; it waits while its project runs as many tasks as its limit.
-When the user declines or wants to wait, output no JSON: remind them that they
-can start it later by asking you, or with Start on the Tasks page.
+- Reading: looper_overview and looper_tasks, whenever the message needs them.
+- Changing anything (creating, starting, stopping, restarting or cancelling a
+  task, adding to it, editing it) only when the user's message asks for it, in
+  the turn answering it. A turn you run on your own can only read.
+- Before looper_task_create: the user confirmed the task, and you know its
+  project and directory. Project: the existing project the user names or
+  clearly means; otherwise ask, offering the closest existing projects or a
+  short name for a new one, and never present a project as decided before the
+  user chose it. Directory: the one the user names (absolute, or starting with
+  ~/); when they name none, leave work_dir out and the project's default is
+  used. A new project, or one without a default, needs the user to name one:
+  ask. Never pick a directory yourself. The task is created ready, not
+  started; start it with looper_task_control only when the user says so.
+- A task under way: what the user adds for it goes to looper_task_instruct (its
+  Planner decides whether to change the plan); a different requirement goes to
+  looper_task_update. A task not started changes with looper_task_update.
+- Looper writes some things to the user itself, after your reply: a new
+  task's configuration with the question whether to start it, and what an
+  operation needing confirmation does. Do not repeat them; refer to them.
+- Besides a new task (the user confirms the task first, as above), do not ask
+  the user to confirm an operation they asked for: call its tool. Looper asks
+  them itself where it must: "needs_confirmation" (a new project, cancelling
+  a task) means it did not run; say so and wait. When the next message starts
+  with a [Looper] note naming the confirmation and the user confirms, call
+  looper_confirm with its confirmation_id; otherwise do not.
+- Never say an operation ran unless its answer was "ok".
 """
 
 DEFAULT_SYSTEM_PROMPT = """\
@@ -136,7 +124,7 @@ You are the Manager Agent (管家) for Looper, an autonomous multi-agent program
 1. Understand user intent and respond naturally
 2. For simple questions or conversation, answer directly
 3. For task requests (development, testing, analysis, refactoring), first clarify and confirm with the user before creating a task
-4. For status queries, report current progress from the goal portfolio
+4. For status queries, look the tasks up with your tools and report what they say
 
 ## Task Creation Flow (IMPORTANT)
 When a user describes something that sounds like a task, DO NOT immediately create it.
@@ -147,61 +135,22 @@ Instead, follow this flow:
    - Which project the task belongs to and which directory it runs in. When the user has not named them, ask both as explicit questions: offer the existing project that matches, or propose a short name for a new one, and ask for the directory. Never state a project or a directory as decided before the user has answered.
    - What files or modules are likely involved
    - Any assumptions you are making
-   - Estimated priority (P1-P3)
 2. **Wait for confirmation**: Ask the user to confirm, e.g. "确认创建吗？" / "Shall I create it?"
-3. **Create task**: ONLY after the user explicitly confirms (says things like "确认", "开始", "go", "yes", "好", "可以", "proceed"), output the structured JSON:
+3. **Create task**: ONLY after the user explicitly confirms (says things like "确认", "开始", "go", "yes", "好", "可以", "proceed"), call looper_task_create with a clear one-paragraph requirement that includes the clarifications, a title of a few words in the user's language, the project, and the directory when the user named one.
+4. **Start**: Creating a task does not start it. Looper adds the task's configuration to your reply and asks the user whether to start it now. When the user says to start it, call looper_task_control with action start. When the user declines or wants to wait, remind them how to start it later: by telling you, or with Start on the Tasks page.
 
-```json
-{
-  "action": "task_request",
-  "goal_id": "<short-kebab-id>",
-  "title": "<required: a few words naming the task, in the user's language>",
-  "structured_requirement": "<clear one-paragraph requirement incorporating clarifications>",
-  "project": "<name of the task's project: an existing one, or a new one the user agreed to>",
-  "work_dir": "<absolute directory the task runs in, e.g. ~/projects/tetris; empty for the project's default>",
-  "new_project": false,
-  "priority": "P2",
-  "acknowledgment": "<brief acknowledgment in user's language>"
-}
-```
-
-4. **Start**: Creating a task does not start it. Looper answers with the task's configuration and asks the user whether to start it now. When the user says to start it, output the `task_start` JSON. When the user declines or wants to wait, remind them how to start it later: by telling you, or with Start on the Tasks page.
-
-If the user says "不", "取消", "算了", "no", "cancel" or modifies the requirement, do NOT output the JSON. Instead continue the conversation.
+If the user says "不", "取消", "算了", "no", "cancel" or modifies the requirement, do NOT create the task. Instead continue the conversation.
 
 ## Rules
 - Answer the message you were just sent. The dashboard chat, Lark and Telegram share this one conversation (the "Channel:" line before each message says where it came from), so do not continue an earlier topic, run checks or volunteer a status report unless this message asks for it
 - A greeting or a short check-in gets a short reply
 - For ambiguous requests, ask clarifying questions before even proposing the task summary
 - Never refuse a reasonable development task
-- Never output task_request JSON without user's explicit confirmation
+- Never create a task without the user's explicit confirmation
 """
 
 # The ready tasks each user turn lists, newest first, so Claude can start one by its id.
 READY_TASKS_LISTED = 10
-# The existing projects a new-project question offers instead.
-PROJECTS_OFFERED = 10
-# The most chats that keep what Looper said after Claude's last reply there (``_Followup``) at once.
-FOLLOWUP_CHATS = 50
-# The actions Claude's JSON may name.
-ACTIONS = ("task_request", "task_start")
-# An action named as a JSON field, found in a reply whose action object could not be read: nothing was run, so the
-# reply, which may claim it was, is not sent.
-ACTION_FIELD = re.compile(r'"action"\s*:\s*"(' + "|".join(map(re.escape, ACTIONS)) + r')"')
-# Prose before the action object longer than this is Claude still talking to the user: the action is not run.
-PROSE_BEFORE_ACTION_CHARS = 20
-
-# Where a setting in a task's configuration came from (``agent_settings.Layer``), named as the dashboard names it.
-SOURCE_WORDS = {
-    Layer.BUILTIN: "内置默认",
-    Layer.SYSTEM: "共用默认（Settings → Roles → Shared defaults）",
-    Layer.ROLE: "角色默认",
-    Layer.PROJECT: "本项目",
-    Layer.ROLE_PROJECT: "本项目里的这个角色",
-    Layer.TASK: "本任务",
-}
-START_QUESTION = "现在开始吗？回复「开始」就会启动；也可以稍后在 Tasks 页面点 Start。"
-
 
 # A new session's resume brief: the recent conversation of the most recently active chats, from the stored
 # chat messages, each message clipped, all of it in at most CONVERSATION_MAX_CHARS.
@@ -272,88 +221,9 @@ def _session_key(envelope: MessageEnvelope) -> str | None:
     return None
 
 
-@dataclass(frozen=True)
-class _NewProject:
-    """A project that does not exist, which Looper asked the user to confirm creating, with its default directory."""
-
-    name: str
-    work_dir: str
-
-    def same(self, other: _NewProject) -> bool:
-        return self.name.casefold() == other.name.casefold() and self.work_dir == other.work_dir
-
-
-def action_object(text: str) -> tuple[dict[str, Any], int] | None:
-    """The action object a reply carries and where it starts: an object naming one of ``ACTIONS``, decoded with
-    ``raw_decode`` (so text after it is allowed) in the first ```` ```json ```` fence, else at the first ``{``. The
-    start is the fence's for a fenced object. None when neither is one."""
-    decoder = json.JSONDecoder()
-    candidates: list[tuple[int, int]] = []  # (where the object starts, where the action starts)
-    fence = text.find("```json")
-    if fence >= 0:
-        brace = text.find("{", fence)
-        if brace >= 0 and not text[fence + len("```json"):brace].strip():
-            candidates.append((brace, fence))
-    first = text.find("{")
-    if first >= 0:
-        candidates.append((first, first))
-    for brace, start in candidates:
-        try:
-            data, _ = decoder.raw_decode(text, brace)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(data, dict) and data.get("action") in ACTIONS:
-            return data, start
-    return None
-
-
-def _role_line(role: AgentType, settings: AgentSettings) -> str:
-    """One task role's line in a task's configuration: its Agent Profile with the profile's effort and where the
-    profile came from, and, but for the Planner (which never has them), whether it has agent teams."""
-    effort = f"effort {settings.effort}" if settings.effort else "effort 默认"
-    line = (f"- {role.value.capitalize()}：{settings.profile.name}"
-            f"（{effort}，来源：{SOURCE_WORDS[settings.profile_source]}）")
-    if role is not AgentType.PLANNER:
-        line += f"，agent teams {'开' if settings.profile.agent_teams else '关'}"
-    return line
-
-
-class _AskUser(Exception):
-    """A confirmed task lacks something only the user can give; the message asks for it. With ``new_project``, it
-    asks the user to confirm creating that project."""
-
-    def __init__(self, question: str, new_project: _NewProject | None = None) -> None:
-        super().__init__(question)
-        self.new_project = new_project
-
-    def note(self) -> str:
-        """What Claude is told about the question before the user's answer."""
-        if self.new_project is None:
-            return (f"[Looper] Looper did not create the task of your last task JSON in this chat; it asked the user "
-                    f"instead: {self}")
-        name, work_dir = self.new_project.name, self.new_project.work_dir
-        return (
-            f'[Looper] Looper did not create the task of your last task JSON in this chat: its project "{name}" does not '
-            "exist. "
-            f"Looper asked the user to confirm creating that project, with default directory {work_dir}, or to "
-            "choose an existing project. If the message below confirms, output the task JSON again with "
-            f'"project": "{name}", "work_dir": "{work_dir}" and "new_project": true; if it names an existing project, '
-            "output the task JSON with that project instead."
-        )
-
-
-@dataclass(frozen=True)
-class _Followup:
-    """What Looper itself said in a chat after Claude's last reply there; Claude does not see Looper's own replies.
-
-    Only the next message, and only one from that chat, carries it: Claude
-    gets ``note`` before the message, and the project the user was asked to
-    confirm (``new_project``) may be created by that message's task JSON.
-    """
-
-    chat: tuple[str | None, str | None]  # the channel and the chat (``_message_origin``)
-    note: str
-    new_project: _NewProject | None = None
+def _with_blocks(text: str, blocks: list[str]) -> str:
+    """A reply: Claude's words, then what Looper itself writes to the user (``Turn.blocks``)."""
+    return "\n\n".join(part for part in (text.strip(), *blocks) if part)
 
 
 @dataclass(frozen=True)
@@ -427,9 +297,8 @@ class ManagerAgent:
         # The user dropped the session (/new): the next one starts without a resume brief. Saved with the session,
         # so a restart before the next message keeps it; cleared once the new session has started.
         self._clean_start = False
-        # What Looper said after Claude's last reply, for the next message only.
-        # At most FOLLOWUP_CHATS chats keep one; past it, the oldest is dropped (``_keep_followup``).
-        self._followup: dict[tuple[str | None, str | None], _Followup] = {}
+        # Looper's platform tools (set by ``serve``): what Claude's calls in a turn act through.
+        self.ops: ManagerOps | None = None
 
     @property
     def agent_id(self) -> str:
@@ -549,211 +418,20 @@ class ManagerAgent:
             await self._start_new_session(envelope)
             return
         origin = _message_origin(envelope)
-        chat = (origin["channel"], origin["chat"])
         await self._persist_chat(envelope, "user", text, envelope.message_id)
-        # What Looper said after Claude's last reply applies to the next message only, from that chat only.
-        # Each chat keeps its own pending followup, so another chat speaking does not drop it.
-        followup = self._followup.pop(chat, None)
-
         await self._send_status(envelope, "thinking", phase=True, activity="thinking")
-
+        # The calls Claude makes while answering belong to this message and its chat.
+        turn = Turn(channel=origin["channel"], chat=origin["chat"], message_id=envelope.message_id,
+                    envelope=envelope, sender=origin["sender"])
         try:
-            response = await self._invoke_claude(text, envelope, note=followup.note if followup else "")
-            parsed = self._parse_response(response)
+            response = await self._invoke_claude(text, envelope, turn=turn)
         except Exception as exc:
-            # Always answer: the chat stream waits for a final reply.
+            # Always answer: the chat stream waits for a final reply. What a tool did before is still shown.
             logger.exception("manager failed to answer %s", envelope.message_id)
-            await self._send_reply(envelope, f"Manager 出错，没能完成这次回复：{exc}", error=str(exc))
+            await self._send_reply(envelope, _with_blocks(f"Manager 出错，没能完成这次回复：{exc}", turn.blocks),
+                                   error=str(exc))
             return
-
-        if parsed.get("needs_clarification"):
-            clarification = parsed.get("clarification_text", "")
-            await self._send_reply(envelope, clarification)
-        elif unread := parsed.get("unread_action"):
-            # Never pass on a reply that names an action Looper did not run: it may say the action was done.
-            self._keep_followup(_Followup(chat, (
-                f"[Looper] Looper could not read the {unread} JSON in your last reply in this chat, so it ran "
-                "nothing and told the user so. Output the action JSON as one object, first in your reply."
-            )))
-            await self._send_reply(envelope, f"没有执行：这次回复里的 {unread} 操作没能读出来，所以什么都没做。请再说一次。")
-        elif parsed.get("action") == "task_request":
-            try:
-                project, work_dir, created = await self._place_task(
-                    parsed, followup.new_project if followup else None)
-            except _AskUser as ask:
-                self._keep_followup(_Followup(chat, ask.note(), ask.new_project))
-                await self._send_reply(envelope, str(ask))
-                return
-            except Exception as exc:
-                logger.exception("manager failed to place task from %s", envelope.message_id)
-                await self._send_reply(envelope, f"Manager 出错，没能创建任务：{exc}", error=str(exc))
-                return
-            task_id = f"task-{uuid.uuid4().hex[:12]}"
-            goal_id = str(parsed.get("goal_id") or "")
-            title = db_tasks.task_title(parsed.get("title"))
-            await self._bus.publish(MessageEnvelope.create(
-                source=MANAGER_ADDRESS,
-                target=TASK_ROUTER_ADDRESS,
-                message_type=MessageType.TASK_REQUEST,
-                payload={
-                    "task_id": task_id,
-                    "goal_id": goal_id,
-                    # What the task is called in lists and in its end notice (``db.tasks.task_name``).
-                    "title": title,
-                    "requirement": parsed.get("structured_requirement", text),
-                    "original_user_text": text,
-                    "user_language": envelope.payload.get("language", "zh"),
-                    "work_dir": work_dir,
-                    "project_id": project["id"],
-                    "priority": parsed.get("priority", "P2"),
-                    "constraints": parsed.get("constraints", []),
-                    # Who the TaskRouter tells when the task ends: in Telegram the chat, in Lark the sender.
-                    "chat_id": notify_chat(envelope.metadata.get("origin_channel_id"), sender=origin["sender"],
-                                           chat=origin["chat"]),
-                },
-                correlation_id=envelope.correlation_id,
-                metadata={"origin_channel_id": envelope.metadata.get("origin_channel_id")},
-            ))
-            ack_text = parsed.get("acknowledgment", f"收到，已创建任务: {text[:100]}")
-            block = await self._configuration_block(task_id, title or goal_id, project, work_dir, created)
-            self._keep_followup(_Followup(chat, (
-                f'[Looper] Looper created the task of your last task JSON in this chat as {task_id}, ready and not '
-                "started, showed "
-                "the user its configuration and asked whether to start it now. If the message below says to start "
-                f'it, output {{"action": "task_start", "task_id": "{task_id}"}}; if it declines, remind the user how '
-                "to start it later."
-            )))
-            await self._send_reply(envelope, f"{ack_text}\n\n{block}")
-        elif parsed.get("action") == "task_start":
-            reply, note = await self._start_task(parsed)
-            self._keep_followup(_Followup(chat, note))
-            await self._send_reply(envelope, reply)
-        else:
-            reply_text = parsed.get("response_text", response)
-            await self._send_reply(envelope, reply_text)
-
-    def _keep_followup(self, followup: _Followup) -> None:
-        """Keep ``followup`` for its chat's next message, newest last; past ``FOLLOWUP_CHATS`` chats the oldest one's
-        is dropped (that chat's next message then gets no note, and a new project it was asked about is asked
-        again)."""
-        self._followup.pop(followup.chat, None)
-        self._followup[followup.chat] = followup
-        while len(self._followup) > FOLLOWUP_CHATS:
-            self._followup.pop(next(iter(self._followup)))
-
-    async def _place_task(
-        self, parsed: dict[str, Any], confirmed: _NewProject | None,
-    ) -> tuple[dict[str, Any], str, bool]:
-        """The confirmed task's project, its work directory, and whether the project is new.
-
-        The project is matched by name ignoring case. The directory is the
-        task's own, else the project's default. A project that does not exist
-        is created only when the user confirmed it in answer to Looper's own
-        question in the exchange before (``confirmed``): the task JSON says
-        ``"new_project": true`` and names that project and directory (no
-        directory: the confirmed one). Raises ``_AskUser`` when the project or
-        the directory is missing, and to ask that question about any other new
-        project.
-        """
-        try:
-            name = project_name(parsed.get("project"))
-        except ValueError as exc:
-            raise _AskUser(f"这个任务属于哪个项目？请告诉我项目名，可以是已有项目，也可以新建一个。（{exc}）") from None
-        project = await db_projects.find_project_by_name(name)
-        explicit = parsed.get("work_dir")
-        explicit = explicit.strip() if isinstance(explicit, str) else ""
-        if project and project["work_dir"] and not explicit:
-            return project, project["work_dir"], False
-        if project is None and not explicit and confirmed is not None and confirmed.name.casefold() == name.casefold():
-            explicit = confirmed.work_dir
-        try:
-            work_dir = resolve_work_dir(explicit)
-        except ValueError as exc:
-            # No default directory: ask instead of creating the task.
-            raise _AskUser(f"这个任务要在哪个目录里做？请告诉我完整路径（例如 ~/projects/xxx）。（{exc}）") from None
-        if project:
-            return project, work_dir, False
-        asked = _NewProject(name, work_dir)
-        if parsed.get("new_project") is True and confirmed is not None and confirmed.same(asked):
-            return await db_projects.create_project(name=confirmed.name, work_dir=work_dir), work_dir, True
-        raise _AskUser(await self._new_project_question(asked), asked)
-
-    async def _new_project_question(self, asked: _NewProject) -> str:
-        """Ask the user to confirm creating ``asked``, or to choose one of the existing projects instead."""
-        lines = [
-            f"项目「{asked.name}」还不存在，任务还没有创建。要新建这个项目吗？它的默认目录会是 {asked.work_dir}。",
-            "- 回复「确认」：新建这个项目，并在里面创建任务；",
-        ]
-        try:
-            projects = await db_projects.list_projects()
-        except Exception:
-            logger.warning("manager could not list projects for a new-project question", exc_info=True)
-            lines.append("- 也可以告诉我改用哪个已有项目（项目列表暂时读不到）。")
-            return "\n".join(lines)
-        if not projects:
-            lines.append("- 目前还没有其他项目；也可以告诉我换一个名字或目录。")
-            return "\n".join(lines)
-        offered = "、".join(f"{p['name']}（{p['work_dir'] or '没有默认目录'}）" for p in projects[:PROJECTS_OFFERED])
-        more = f"，共 {len(projects)} 个" if len(projects) > PROJECTS_OFFERED else ""
-        lines.append(f"- 或者告诉我改用哪个已有项目：{offered}{more}。")
-        return "\n".join(lines)
-
-    async def _configuration_block(
-        self, task_id: str, name: str | None, project: dict[str, Any], work_dir: str, created: bool,
-    ) -> str:
-        """The new ready task's configuration, from the settings in effect in its project (resolved as the project's
-        agent settings view resolves them), ending with the question whether to start it."""
-        project_id = project["id"]
-        lines = [
-            "任务已创建，还没有开始（Ready — not started）：",
-            f"- 任务：{name}（{task_id}）" if name else f"- 任务：{task_id}",
-            f"- 项目：{project['name']}（{'新建' if created else '已有'}）",
-            f"- 目录：{work_dir}",
-        ]
-        limit: int | None = None
-        try:
-            layers = index_layers(await db_layers.list_layers(project_id), project_id)
-        except Exception as exc:
-            logger.warning("manager could not read the agent settings of project %s", project_id, exc_info=True)
-            lines.append(f"- Agent 设置：暂时读不到（{type(exc).__name__}），可以在项目的 Settings 页查看")
-        else:
-            lines += [_role_line(role, resolve(role, layers, project_id)) for role in TASK_ROLES]
-            limit = resolve_concurrency(AgentType.PLANNER, layers, project_id).value
-        execution = ProjectExecution.from_row(project)
-        lines.append("- 评审：每一步都要 Reviewer 评审通过" if execution.review_policy is ReviewPolicy.ALL
-                     else "- 评审：由 Planner 决定哪些步骤要 Reviewer 评审")
-        if execution.task_budget_usd is None:
-            lines.append("- 每个任务的花费上限：不限")
-        else:
-            at_cap = ("再让 Planner 总结一轮后结束" if execution.on_task_budget is TaskBudgetAction.WRAP_UP
-                      else "立即失败")
-            lines.append(f"- 每个任务的花费上限：${format_usd(execution.task_budget_usd)}，达到时{at_cap}")
-        lines.append({
-            LessonsMode.OFF: "- 经验沉淀：关",
-            LessonsMode.DRAFT: "- 经验沉淀：任务完成后生成草稿，由你确认后写入项目知识",
-            LessonsMode.WRITE: "- 经验沉淀：任务完成后直接写入项目知识",
-        }[execution.distill_lessons])
-        if limit is not None:
-            lines.append(f"- 并发：这个项目同时最多运行 {limit} 个任务")
-        return "\n".join([*lines, "", START_QUESTION])
-
-    async def _start_task(self, parsed: dict[str, Any]) -> tuple[str, str]:
-        """Start the ready task Claude names (``task_start``) through the TaskRouter; the reply, and the note that
-        tells Claude what happened."""
-        assert self._bus is not None
-        task_id = parsed.get("task_id")
-        task_id = task_id.strip() if isinstance(task_id, str) else ""
-        if not task_id:
-            return ("要开始哪个任务？没有拿到任务 id，没有开始任何任务。",
-                    "[Looper] Your task_start JSON named no task_id; Looper started nothing.")
-        try:
-            started = await start_ready_task(task_id, self._bus, MANAGER_ADDRESS)
-        except RequestError as exc:
-            return (f"没能开始任务 {task_id}：{exc}",
-                    f"[Looper] Looper did not start {task_id}: {exc}. It told the user so.")
-        limit = await load_concurrency(AgentType.PLANNER, started["project_id"])
-        return (f"已开始任务 {task_id}。它的项目同时最多运行 {limit} 个任务，已满时它会排队，等有任务结束再开始。",
-                f"[Looper] Looper started {task_id}; it waits while its project runs {limit} tasks.")
+        await self._send_reply(envelope, _with_blocks(response, turn.blocks))
 
     async def _handle_goal_status(self, envelope: MessageEnvelope) -> None:
         goal_id = envelope.payload.get("goal_id", "")
@@ -821,16 +499,21 @@ class ManagerAgent:
         if event == "max_restarts_exceeded":
             logger.error("agent %s has exceeded max restarts", agent_id)
 
-    async def _invoke_claude(self, message: str, context_envelope: MessageEnvelope, *, note: str = "") -> str:
-        """Send the message to the resident Claude as one user turn, after ``note`` (what Looper said in the chat
-        after Claude's last reply); return its reply.
+    async def _invoke_claude(self, message: str, context_envelope: MessageEnvelope, *, turn: Turn) -> str:
+        """Send the message to the resident Claude as one user turn and return its reply; the tools Claude calls
+        meanwhile act in ``turn``, and the message starts with the note on a confirmation waiting in its chat.
 
         Claude starts on the first message and is restarted, resuming the
         saved session, after it exits or when the system prompt changes.
         Turns run one at a time.
         """
         async with self._turn_lock:
-            return await self._run_turn(message, context_envelope, note=note)
+            note = self.ops.begin_turn(turn) if self.ops is not None else ""
+            try:
+                return await self._run_turn(message, context_envelope, note=note)
+            finally:
+                if self.ops is not None:
+                    self.ops.end_turn(turn)
 
     async def _load_agent_settings(self) -> AgentSettings:
         """The Manager's agent settings (system and role layers), read now; the last ones read when they
@@ -842,11 +525,11 @@ class ManagerAgent:
         return agent_settings
 
     def _composed_prompt(self, agent_settings: AgentSettings) -> SystemPrompt:
-        """The Manager's harness, its role prompt, then the task placement rule (no project, no task)."""
+        """The Manager's harness, its role prompt, then how to use Looper's tools (no project, no task)."""
         return build_system_prompt(
             harness=agent_settings.harness,
             role_id="manager", role=self._system_prompt, recommended=self._prompt_recommended,
-            contract_name="TASK_PLACEMENT_RULE", contract=TASK_PLACEMENT_RULE,
+            contract_name="TOOLS_CONTRACT", contract=TOOLS_CONTRACT,
         )
 
     async def _run_turn(self, message: str, context_envelope: MessageEnvelope, *, note: str = "",
@@ -858,8 +541,10 @@ class ManagerAgent:
         if agent_settings.profile_error:
             raise RuntimeError(agent_settings.profile_error)  # answered as an error; never another profile
         system_prompt = self._composed_prompt(agent_settings)
-        launch = Launch(agent_settings, await load_installed(self._runtime_root, AgentType.MANAGER.value),
-                        role=AgentType.MANAGER)
+        library = await load_installed(self._runtime_root, AgentType.MANAGER.value)
+        if self.ops is not None:
+            library = await self.ops.library_with_server(library, self._runtime_root)
+        launch = Launch(agent_settings, library, role=AgentType.MANAGER)
         try:
             prompt_file = system_prompt.write_file(self._runtime_root)
         except OSError as exc:
@@ -1078,7 +763,8 @@ class ManagerAgent:
                 await self._send_reply(envelope, f"Manager 出错，没能开始新会话：{exc}", error=str(exc))
                 return
             self._pending_switch = self._pending_handoff = None
-            self._followup = {}
+            if self.ops is not None:
+                self.ops.forget_confirmations()
             await self._record_new_session(envelope, origin, previous[0])
         logger.info("manager: a new session on /new from %s (sender %s); the previous one was %s",
                     origin["channel"], origin["sender"] or "-", previous[0] or "none")
@@ -1231,6 +917,11 @@ class ManagerAgent:
         """
 
         async def begin(after: Any) -> AutonomousRun:
+            last = after if isinstance(after, MessageEnvelope) else None
+            origin = _message_origin(last) if last is not None else {"channel": None, "chat": None}
+            turn = Turn(channel=origin["channel"], chat=origin["chat"])  # it answers no message: it only reads
+            if self.ops is not None:
+                self.ops.begin_turn(turn)
             recorder = ClaudeRunRecorder(
                 agent_id="manager",
                 task_id=None,
@@ -1244,12 +935,14 @@ class ManagerAgent:
             )
             await recorder.start()
 
-            async def on_end(text: str, turn: ResidentTurn) -> None:
-                if turn.result_event is not None:
+            async def on_end(text: str, resident: ResidentTurn) -> None:
+                if self.ops is not None:
+                    self.ops.end_turn(turn)
+                if resident.result_event is not None:
                     self._session_totals = self._claude.totals  # it spent too: a restart resumes from here
                     await self._save_session_state()
                 if text:
-                    await self._send_own_reply(after if isinstance(after, MessageEnvelope) else None, text)
+                    await self._send_own_reply(last, text)
 
             return AutonomousRun(recorder, on_end)
 
@@ -1339,30 +1032,6 @@ class ManagerAgent:
             lines.append(f"  - {task['id']} (project {task['project_name']}{goal}): {clip(task['requirement'], 80)}")
         lines.append("")
         return lines
-
-    def _parse_response(self, response: str) -> dict[str, Any]:
-        """Claude's reply as the action it asks for, or as text to send.
-
-        The action object (``action_object``) is run, and the text after it
-        dropped: the reply the user gets is the one code writes for the action.
-        Prose of more than ``PROSE_BEFORE_ACTION_CHARS`` before it is Claude
-        still talking: only that prose is sent (``needs_clarification``). A
-        reply that names an action in JSON Looper could not read is never sent
-        (``unread_action``).
-        """
-        response = response.strip()
-        found = action_object(response)
-        if found is not None:
-            action, start = found
-            prose_before = response[:start].strip()
-            if len(prose_before) > PROSE_BEFORE_ACTION_CHARS:
-                return {**action, "needs_clarification": True, "clarification_text": prose_before}
-            return action
-        if named := ACTION_FIELD.search(response):
-            logger.warning("manager: Claude's reply names the %s action in JSON Looper could not read; nothing ran",
-                           named.group(1))
-            return {"unread_action": named.group(1)}
-        return {"response_text": response}
 
     async def _persist_chat(
         self, env: MessageEnvelope, role: str, content: str, message_id: str

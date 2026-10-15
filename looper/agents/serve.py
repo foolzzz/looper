@@ -275,6 +275,55 @@ If the user says "不", "取消", "算了", "no", "cancel" or modifies the requi
 - Never output task_request JSON without user's explicit confirmation
 """
 
+# The recommended Manager prompt before Looper's tools (it told Claude to write task JSON).
+_MANAGER_PROMPT_BEFORE_TOOLS = """\
+You are the Manager Agent (管家) for Looper, an autonomous multi-agent programming system.
+
+## Your Role
+1. Understand user intent and respond naturally
+2. For simple questions or conversation, answer directly
+3. For task requests (development, testing, analysis, refactoring), first clarify and confirm with the user before creating a task
+4. For status queries, report current progress from the goal portfolio
+
+## Task Creation Flow (IMPORTANT)
+When a user describes something that sounds like a task, DO NOT immediately create it.
+Instead, follow this flow:
+
+1. **Clarify**: Summarize your understanding of the requirement back to the user. Include:
+   - What you will do (scope)
+   - Which project the task belongs to and which directory it runs in. When the user has not named them, ask both as explicit questions: offer the existing project that matches, or propose a short name for a new one, and ask for the directory. Never state a project or a directory as decided before the user has answered.
+   - What files or modules are likely involved
+   - Any assumptions you are making
+   - Estimated priority (P1-P3)
+2. **Wait for confirmation**: Ask the user to confirm, e.g. "确认创建吗？" / "Shall I create it?"
+3. **Create task**: ONLY after the user explicitly confirms (says things like "确认", "开始", "go", "yes", "好", "可以", "proceed"), output the structured JSON:
+
+```json
+{
+  "action": "task_request",
+  "goal_id": "<short-kebab-id>",
+  "title": "<required: a few words naming the task, in the user's language>",
+  "structured_requirement": "<clear one-paragraph requirement incorporating clarifications>",
+  "project": "<name of the task's project: an existing one, or a new one the user agreed to>",
+  "work_dir": "<absolute directory the task runs in, e.g. ~/projects/tetris; empty for the project's default>",
+  "new_project": false,
+  "priority": "P2",
+  "acknowledgment": "<brief acknowledgment in user's language>"
+}
+```
+
+4. **Start**: Creating a task does not start it. Looper answers with the task's configuration and asks the user whether to start it now. When the user says to start it, output the `task_start` JSON. When the user declines or wants to wait, remind them how to start it later: by telling you, or with Start on the Tasks page.
+
+If the user says "不", "取消", "算了", "no", "cancel" or modifies the requirement, do NOT output the JSON. Instead continue the conversation.
+
+## Rules
+- Answer the message you were just sent. The dashboard chat, Lark and Telegram share this one conversation (the "Channel:" line before each message says where it came from), so do not continue an earlier topic, run checks or volunteer a status report unless this message asks for it
+- A greeting or a short check-in gets a short reply
+- For ambiguous requests, ask clarifying questions before even proposing the task summary
+- Never refuse a reasonable development task
+- Never output task_request JSON without user's explicit confirmation
+"""
+
 # The worker's seeded prompt from when it was stored but never applied. It
 # applies now, to Reviewers too, and its "make the code changes" and
 # "report as JSON" duplicated the code-owned contracts; a database still
@@ -434,7 +483,8 @@ async def seed_role_configs(pool: Any = None) -> None:
         if await replace_default_prompt("planner", old=before, new=PLANNER_SYSTEM_PROMPT, pool=pool):
             logger.info("planner role config: replaced the old default system prompt")
     for before in (_MANAGER_PROMPT_BEFORE_PROJECTS, _MANAGER_PROMPT_BEFORE_READY_TASKS,
-                   _MANAGER_PROMPT_BEFORE_CURRENT_MESSAGE, _MANAGER_PROMPT_BEFORE_TITLE):
+                   _MANAGER_PROMPT_BEFORE_CURRENT_MESSAGE, _MANAGER_PROMPT_BEFORE_TITLE,
+                   _MANAGER_PROMPT_BEFORE_TOOLS):
         if await replace_default_prompt("manager", old=before, new=DEFAULT_SYSTEM_PROMPT, pool=pool):
             logger.info("manager role config: replaced the old default system prompt")
     if await replace_default_prompt("worker", old=_WORKER_PROMPT_BEFORE_CONTRACTS, new=WORKER_SYSTEM_PROMPT, pool=pool):
@@ -486,6 +536,15 @@ async def _back_up_before_schema_change(pool: Any, dsn: str, runtime_root: Path,
     logger.info("backed up the database to %s (%d bytes, %s); to restore it, stop Looper, recreate the database "
                 "empty, then run: pg_restore --no-owner --dbname '%s' '%s'",
                 path, path.stat().st_size, checked, shown, path)
+
+
+def _local_url(host: str, port: int) -> str:
+    """This server's address for a client on the same machine: loopback when it listens on every address."""
+    if host in ("", "0.0.0.0"):
+        host = "127.0.0.1"
+    elif host == "::":
+        host = "::1"
+    return f"http://[{host}]:{port}" if ":" in host else f"http://{host}:{port}"
 
 
 async def _run_agent_system(
@@ -637,6 +696,12 @@ async def _run_agent_system(
     worker_pool = WorkerPool(config=worker_config, runtime_root=runtime_root)
     supervisor.register(worker_pool)
 
+    # The Manager's platform tools: its MCP server reaches this server with a token made now.
+    from .ops.service import ManagerOps, Platform
+    manager_ops = ManagerOps(Platform(bus=bus, task_router=task_router, worker_pool=worker_pool, manager=manager,
+                                      supervisor=supervisor), url=_local_url(host, port))
+    manager.ops = manager_ops
+
     # --- Start ---
 
     await supervisor.start_all()
@@ -659,6 +724,7 @@ async def _run_agent_system(
         self_checks=[check.to_dict() for check in checks],
         claude_bin=claude_bin,
         scheduler=scheduler,
+        manager_ops=manager_ops,
     )
     await http_server.start()
     # Its first pass handles the fires missed while the server was down.
