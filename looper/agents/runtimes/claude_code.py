@@ -73,7 +73,9 @@ from urllib.parse import urlsplit
 from .. import claude_cli
 from . import (
     ApiProtocol, AuthKind, Capability, CostSource, Probe, ProviderBinding, RunCost, RuntimeAdapter, RuntimeUnsupported,
+    instructions,
 )
+from .instructions import InstructionFile
 
 if TYPE_CHECKING:
     from ..profile_registry import ProviderSpec
@@ -268,6 +270,12 @@ class ClaudeCodeRuntime(RuntimeAdapter):
             pattern = tool_input.get("pattern", tool_input.get("query", ""))
             return f"{tool_name}: {pattern[:60]}"
         return f"Tool: {tool_name}"
+
+    def instruction_files(self, cwd: str | Path) -> tuple[InstructionFile, ...]:
+        """Every ``CLAUDE.md`` of the project, else every ``AGENTS.md``: Claude Code reads them itself (``claude_cli``'s
+        notes)."""
+        own = instructions.named(cwd, instructions.CLAUDE_MD)
+        return tuple(map(InstructionFile, own or instructions.named(cwd, instructions.AGENTS_MD)))
 
     def cost_source(self, provider: ProviderSpec) -> CostSource:
         """Claude Code prices every model at Claude's prices: right for its own login (an "equivalent" cost) and

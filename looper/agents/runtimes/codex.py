@@ -19,6 +19,9 @@ Verified against Codex CLI 0.162.0 (the multi-runtime RFC, section 6):
   turns off Codex's own skill list, which always includes
   ``$HOME/.agents/skills`` (the operator's personal skills), and its plugin
   sync, which clones a plugin marketplace into every new home.
+- **The project's instruction files**: Codex reads a project's ``AGENTS.md``
+  files, and its ``CLAUDE.md`` in a directory without one
+  (``project_doc_fallback_filenames``, ``FALLBACK_NAMES``; ``instructions``).
 - **The system prompt** is the home's ``AGENTS.md``: Codex puts it in the
   conversation as a user message, before the project's own ``AGENTS.md``,
   and when it changes between turns of a session it sends the new text,
@@ -69,8 +72,9 @@ from typing import TYPE_CHECKING, Any, ClassVar
 from ..run_usage import Usage, reported_totals, run_usage
 from . import (
     ApiProtocol, AuthKind, Capability, Probe, ProviderBinding, RunCost, RuntimeAdapter, RuntimeUnsupported,
-    codex_login,
+    codex_login, instructions,
 )
+from .instructions import InstructionFile
 from .per_turn import PerTurnSession, session_dir_name
 from .pricing import usage_event
 
@@ -87,6 +91,8 @@ KEY_ENV = "LOOPER_PROVIDER_API_KEY"
 DEFAULT_BASE_URL = "https://api.openai.com/v1"
 # Names the layout of a generated home in each run's record; change it when the layout changes.
 HOME_LAYOUT_ID = "codex-home/v1"
+# What Codex reads in a directory without AGENTS.md (project_doc_fallback_filenames): a project's CLAUDE.md.
+FALLBACK_NAMES = (instructions.CLAUDE_MD,)
 # The parts of a Claude Code plugin Codex cannot load.
 _PLUGIN_PARTS_LEFT_OUT = ("commands", "agents", "hooks", ".mcp.json", "output-styles")
 _DESCRIPTION_MAX_CHARS = 300
@@ -243,6 +249,12 @@ class CodexRuntime(RuntimeAdapter):
                                            codex_login.login_file())
         return [await codex_login.record_problems(problems)] if problems else []
 
+    def instruction_files(self, cwd: str | Path) -> tuple[InstructionFile, ...]:
+        """One file a directory of the project, ``AGENTS.md`` else ``CLAUDE.md`` (``FALLBACK_NAMES``), which Codex
+        reads itself."""
+        names = (instructions.AGENTS_MD, *FALLBACK_NAMES)
+        return tuple(map(InstructionFile, instructions.first_per_directory(cwd, names)))
+
     def launch_record(self, launch: Launch) -> dict[str, Any]:
         """The skills given as documents and what Codex could not load, when there are any (RFC P9)."""
         catalog = materialize(launch.library)
@@ -314,8 +326,9 @@ def mcp_servers(library: AgentLibrary) -> tuple[list[tuple[str, dict[str, Any]]]
 
 
 def config_toml(launch: Launch, *, shell_home: Path | None = None) -> str:
-    """The ``config.toml`` of a run's home: isolation, the provider, and the MCP servers. With Codex's own login
-    (``shell_home``, the ``CODEX_HOME`` the agent's shell commands get), see ``_login_config``."""
+    """The ``config.toml`` of a run's home: isolation, the project's CLAUDE.md where it has no AGENTS.md, the
+    provider, and the MCP servers. With Codex's own login (``shell_home``, the ``CODEX_HOME`` the agent's shell
+    commands get), see ``_login_config``."""
     if launch.profile.provider.auth is AuthKind.OAUTH:
         assert shell_home is not None
         return _with_mcp(_login_config(shell_home), launch)
@@ -323,6 +336,7 @@ def config_toml(launch: Launch, *, shell_home: Path | None = None) -> str:
     lines = [
         "# Written by Looper for its Codex runs. Only this file and AGENTS.md come from Looper.",
         f"model_provider = {_toml_value(PROVIDER_ID)}",
+        *_instruction_lines(),
         "",
         "# Codex's own skill list always includes $HOME/.agents/skills; Looper lists the run's skills itself.",
         "[skills]",
@@ -353,6 +367,7 @@ def _login_config(shell_home: Path) -> list[str]:
         "# Written by Looper for its Codex runs. Only this file, AGENTS.md and the auth.json link come from Looper.",
         "# Codex's own login: auth.json here links to the operator's login file, never a copy.",
         codex_login.CONFIG_MARKER,
+        *_instruction_lines(),
         "",
         "# Codex's own skill list always includes $HOME/.agents/skills; Looper lists the run's skills itself.",
         "[skills]",
@@ -368,6 +383,12 @@ def _login_config(shell_home: Path) -> list[str]:
         "[shell_environment_policy]",
         f"set = {_toml_value({'CODEX_HOME': str(shell_home)})}",
     ]
+
+
+def _instruction_lines() -> list[str]:
+    """A project's CLAUDE.md is read where it has no AGENTS.md (``instructions``)."""
+    return ["# A directory of the project without AGENTS.md: its CLAUDE.md instead.",
+            f"project_doc_fallback_filenames = {_toml_value(list(FALLBACK_NAMES))}"]
 
 
 def _with_mcp(lines: list[str], launch: Launch) -> str:
