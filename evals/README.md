@@ -6,7 +6,7 @@ Tells you whether a change to a recommended role prompt, a code-owned contract
 (`REPLY_CONTRACT`, `WORK_CONTRACT`, `REVIEW_CONTRACT`) or the way the system
 prompt is put together makes the agents worse.
 
-It runs ten small tasks through a disposable `looper serve` (a new
+It runs eleven small tasks through a disposable `looper serve` (a new
 PostgreSQL database, a free port, a temporary runtime root and working
 directories), one at a time over the HTTP API:
 
@@ -14,6 +14,7 @@ directories), one at a time over the HTTP API:
 |---|---|
 | `single_step` | one step |
 | `dependent_steps` | two steps, the second depending on the first |
+| `many_steps` | nine files, one step each, each after the one before: a plan longer than the eight steps it was once limited to |
 | `parallel_parts` | two parts that need nothing of each other, then one that needs both: the plan must leave the two independent and their Workers must run at the same time |
 | `interface_first` | a service and its client that must agree on a request format the requirement leaves open: the plan must have a step both parts depend on (the interface), the two parts independent and running at the same time, and a step that depends on both (the integration); the client must work |
 | `reviewed_step` | a step an independent Reviewer must pass |

@@ -343,7 +343,8 @@ def test_fake_mode_runs_every_task_and_sees_misbehaviour(tmp_path: Path) -> None
         assert by_id[task.id]["planner_modified_files"] == 0
     flow = {t: (by_id[t]["steps"], by_id[t]["retries"], by_id[t]["reviews"], by_id[t]["chat_turns"])
             for t in by_id}
-    assert flow == {"single_step": (1, 0, 0, 0), "dependent_steps": (2, 0, 0, 0), "parallel_parts": (3, 0, 0, 0),
+    assert flow == {"single_step": (1, 0, 0, 0), "dependent_steps": (2, 0, 0, 0), "many_steps": (9, 0, 0, 0),
+                    "parallel_parts": (3, 0, 0, 0),
                     "interface_first": (4, 0, 0, 0), "reviewed_step": (1, 0, 1, 0),
                     "retry_after_failure": (1, 1, 0, 0), "chat_correction": (1, 0, 0, 1), "misbehaving": (1, 1, 0, 0),
                     # The change to the second step replaced it: s1, the dropped s2, and its replacement.
@@ -353,7 +354,8 @@ def test_fake_mode_runs_every_task_and_sees_misbehaviour(tmp_path: Path) -> None
     # step and its integration step.
     shape = {t: (by_id[t]["independent_pairs"], by_id[t]["bracketed_pairs"], by_id[t]["parallel_workers"])
              for t in by_id}
-    assert shape == {"single_step": (0, 0, 1), "dependent_steps": (0, 0, 1), "parallel_parts": (1, 0, 2),
+    assert shape == {"single_step": (0, 0, 1), "dependent_steps": (0, 0, 1), "many_steps": (0, 0, 1),
+                     "parallel_parts": (1, 0, 2),
                      "interface_first": (1, 1, 2), "reviewed_step": (0, 0, 1), "retry_after_failure": (0, 0, 1),
                      "chat_correction": (0, 0, 1), "misbehaving": (0, 0, 1),
                      # The dropped second step and its replacement both depend on s1 alone.
