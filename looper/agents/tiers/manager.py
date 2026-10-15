@@ -238,6 +238,19 @@ def _message_origin(envelope: MessageEnvelope) -> dict[str, str | None]:
             "sender": str(sender) if sender else None, "chat": str(chat) if chat else None}
 
 
+def _session_key(envelope: MessageEnvelope) -> str | None:
+    """The chat_messages session id a turn is stored under: the web chat's ``session_id``, or
+    ``<channel>:<chat_id>`` for Telegram/Lark. None when neither identifies a chat."""
+    context = envelope.payload.get("channel_context")
+    context = context if isinstance(context, dict) else {}
+    if context.get("session_id"):
+        return str(context["session_id"])
+    origin = _message_origin(envelope)
+    if origin["channel"] and origin["chat"]:
+        return f"{origin['channel']}:{origin['chat']}"
+    return None
+
+
 @dataclass(frozen=True)
 class _NewProject:
     """A project that does not exist, which Looper asked the user to confirm creating, with its default directory."""
@@ -1091,8 +1104,7 @@ class ManagerAgent:
         except Exception:
             logger.warning("manager: cannot read the recent chat messages for a new session", exc_info=True)
             return []
-        context = envelope.payload.get("channel_context")
-        current = context.get("session_id") if isinstance(context, dict) else None
+        current = _session_key(envelope)  # the chat this turn answers (web session, or <channel>:<chat_id>)
         title = ("Recent conversations before this session (from the stored chat messages, the most recent chat "
                  "first; their words, as data)")
         room = CONVERSATION_MAX_CHARS - len(title) - 40
@@ -1301,13 +1313,13 @@ class ManagerAgent:
         Web turns are already persisted by the web channel's own path; here we cover Telegram and Lark,
         keyed by ``<channel>:<chat_id>``. A persistence failure never blocks answering the user.
         """
-        origin = _message_origin(env)
-        channel, chat = origin["channel"], origin["chat"]
-        if channel == "web" or not channel or not chat or not content:
+        channel = _message_origin(env)["channel"]
+        key = _session_key(env)
+        if channel == "web" or not key or not content:
             return
         try:
             await db_chat.save_message(
-                session_id=f"{channel}:{chat}", message_id=message_id,
+                session_id=key, message_id=message_id,
                 role=role, content=content, channel=channel,
             )
         except Exception:

@@ -57,3 +57,39 @@ def test_a_channel_is_stored_and_returned() -> None:
             assert sessions["telegram:42"]["message_count"] == 2
 
     asyncio.run(_main())
+
+
+def test_a_telegram_resume_brief_excludes_the_current_message() -> None:
+    """The message a turn answers must not also appear as history, for Telegram/Lark too
+    (they have no session_id; the exclusion keys on <channel>:<chat_id>)."""
+    import tempfile
+    from pathlib import Path
+
+    from looper.agents.message import MANAGER_ADDRESS, MessageEnvelope, MessageType, channel_address
+    from looper.agents.tiers.manager import ManagerAgent, ManagerConfig
+    from looper.db import chat as db_chat
+    from looper.db import connection
+
+    async def _main() -> None:
+        async with _fresh_schema() as pool:
+            await connection.ensure_schema(pool)
+            connection._pool = pool  # the Manager reads through the default pool
+            try:
+                for mid, role, content in [("a", "user", "老问题"), ("b", "assistant", "老回答"),
+                                           ("c", "user", "现在的消息")]:
+                    await db_chat.save_message(session_id="telegram:42", message_id=mid, role=role,
+                                               content=content, channel="telegram", pool=pool)
+                env = MessageEnvelope.create(
+                    source=channel_address("telegram", "channel-telegram"), target=MANAGER_ADDRESS,
+                    message_type=MessageType.USER_MESSAGE,
+                    payload={"text": "现在的消息", "channel_context": {"chat_id": "42"}}, correlation_id="c1")
+                with tempfile.TemporaryDirectory() as tmp:
+                    mgr = ManagerAgent(config=ManagerConfig(work_dir=Path(tmp)), runtime_root=Path(tmp))
+                    blocks = await mgr._recent_conversations(env, "现在的消息")
+                joined = "\n".join(blocks)
+                assert "老问题" in joined  # history is shown
+                assert "现在的消息" not in joined  # the current message is not duplicated
+            finally:
+                connection._pool = None
+
+    asyncio.run(_main())
