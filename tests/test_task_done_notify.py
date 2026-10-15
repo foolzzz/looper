@@ -1,7 +1,7 @@
 """The task-done notice: when a task completes or fails, the chat it came from is told, in one line.
 
 The TaskRouter pushes the notice through its ``sender`` (the server's ``ChannelRegistry.notify`` in production, a
-recorder here) for Telegram and Lark only. Web is skipped (the dashboard shows it), an empty chat is skipped, and a
+recorder here) for Telegram only (Lark is a follow-up). Web is skipped (the dashboard shows it), an empty chat is skipped, and a
 sender that fails never breaks task teardown.
 """
 
@@ -72,13 +72,25 @@ class TestTaskDoneNotify:
 
         asyncio.run(_run())
 
-    def test_failed_task_notifies_its_lark_chat(self) -> None:
+    def test_failed_task_notifies_its_telegram_chat(self) -> None:
         async def _run() -> None:
             sender = _Sender()
             router = _router(sender)
-            _task(router, channel="channel-lark", chat_id="ou_abcdefgh12")
+            _task(router, channel="channel-telegram", chat_id="1000001")
             await router._handle_planner_status(_status("task-n1", "failed", "boom"))
-            assert sender.calls == [("lark", "ou_abcdefgh12", "❌ 任务失败：boom")]
+            assert sender.calls == [("telegram", "1000001", "❌ 任务失败：boom")]
+
+        asyncio.run(_run())
+
+    def test_lark_task_is_not_notified_yet(self) -> None:
+        # A Lark task stores a conversation chat id (oc_...) but notify sends to a user open id (ou_...);
+        # a chat-targeted Lark send is a follow-up, so Lark is skipped for now.
+        async def _run() -> None:
+            sender = _Sender()
+            router = _router(sender)
+            _task(router, channel="channel-lark", chat_id="oc_abcdefgh12")
+            await router._handle_planner_status(_status("task-n1", "completed", "done"))
+            assert sender.calls == []
 
         asyncio.run(_run())
 

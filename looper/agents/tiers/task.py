@@ -429,15 +429,19 @@ class TaskRouter:
             await self.recheck()
 
     async def _notify_origin_chat(self, task: Task, status: str, summary: str | None) -> None:
-        """Tell the chat a Telegram or Lark task came from that it finished, in one line.
+        """Tell the Telegram chat a task came from that it finished, in one line.
 
         Web tasks are skipped (the dashboard shows them, and the web channel cannot be sent to); a missing sender
         (tests), channel or chat skips too. A channel's failure is logged, never raised into task teardown.
+
+        Lark is deferred: the chat id a Lark task stores is its conversation (``oc_...``), but the notify path
+        sends to a user open id (``ou_...``), so a Lark notice would target the wrong recipient. A chat-targeted
+        Lark send is a follow-up.
         """
         if self._sender is None or not task.chat_id:
             return
         channel_type = task.origin_channel_id.removeprefix("channel-")
-        if channel_type not in ("telegram", "lark"):
+        if channel_type != "telegram":
             return
         detail = (summary or task.requirement or "").strip()
         if status == "completed":
