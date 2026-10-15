@@ -1,5 +1,5 @@
-"""Role configs: each role's own settings (``role_configs``), keyed by the role: its display name, role prompt,
-timeout and concurrency."""
+"""Role configs: each role's own settings (``role_configs``), keyed by the role: its display name, role prompt and
+timeout."""
 
 from __future__ import annotations
 
@@ -16,7 +16,6 @@ _UPDATABLE_FIELDS = (
     "system_prompt",
     "max_turns",
     "timeout_seconds",
-    "max_concurrency",
     "extra_args",
     "metadata",
 )
@@ -142,14 +141,13 @@ async def seed_defaults(
         system_prompt = cfg.get("system_prompt", "")
         max_turns = cfg.get("max_turns", 0)
         timeout_seconds = cfg.get("timeout_seconds", 1200)
-        max_concurrency = cfg.get("max_concurrency", 1)
 
         await pool.execute(
             """
             INSERT INTO role_configs
                 (role, display_name, system_prompt, default_prompt,
-                 max_turns, timeout_seconds, max_concurrency)
-            VALUES ($1, $2, $3, $3, $4, $5, $6)
+                 max_turns, timeout_seconds)
+            VALUES ($1, $2, $3, $3, $4, $5)
             ON CONFLICT (role) DO UPDATE SET
                 display_name = CASE WHEN role_configs.display_name = '' THEN EXCLUDED.display_name ELSE role_configs.display_name END,
                 -- An unedited row (its prompt still equals the recommended one) follows
@@ -166,5 +164,4 @@ async def seed_defaults(
             system_prompt,
             max_turns,
             timeout_seconds,
-            max_concurrency,
         )

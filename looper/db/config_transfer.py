@@ -34,7 +34,8 @@ async def read_layers(conn: asyncpg.Connection) -> list[dict[str, Any]]:
     """Every layer, its Agent Profile by name (``profile``)."""
     rows = await conn.fetch(
         "SELECT l.scope, l.role, l.project_id, l.harness_prompt, l.profile_id, a.name AS profile, l.effort, l.env, "
-        "l.run_budget_usd FROM agent_setting_layers l LEFT JOIN agent_profiles a ON a.id = l.profile_id "
+        "l.run_budget_usd, l.max_concurrency "
+        "FROM agent_setting_layers l LEFT JOIN agent_profiles a ON a.id = l.profile_id "
         "ORDER BY l.project_id NULLS FIRST, l.scope, l.role NULLS FIRST"
     )
     return [{**dict(row), "env": _json(row["env"])} for row in rows]
@@ -69,7 +70,7 @@ async def read_profiles(conn: asyncpg.Connection) -> list[dict[str, Any]]:
 
 async def read_roles(conn: asyncpg.Connection) -> list[dict[str, Any]]:
     rows = await conn.fetch(
-        "SELECT role, system_prompt, default_prompt, timeout_seconds, max_concurrency, enabled FROM role_configs "
+        "SELECT role, system_prompt, default_prompt, timeout_seconds, enabled FROM role_configs "
         "WHERE role = ANY($1::text[]) ORDER BY role", list(ROLES),
     )
     return [dict(row) for row in rows]
@@ -208,15 +209,16 @@ async def write_layer(
     conn: asyncpg.Connection, scope: str, role: str | None, project_id: str | None, values: Mapping[str, Any],
 ) -> None:
     """Make one layer exactly ``values`` (``harness_prompt``, ``profile_id``, ``effort``, ``env``,
-    ``run_budget_usd``)."""
+    ``run_budget_usd``, ``max_concurrency``)."""
     await conn.execute(
         "INSERT INTO agent_setting_layers (scope, role, project_id, harness_prompt, profile_id, effort, env, "
-        "run_budget_usd) VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8) "
+        "run_budget_usd, max_concurrency) VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9) "
         "ON CONFLICT (scope, (COALESCE(role, '')), (COALESCE(project_id, ''))) DO UPDATE SET "
         "harness_prompt = EXCLUDED.harness_prompt, profile_id = EXCLUDED.profile_id, effort = EXCLUDED.effort, "
-        "env = EXCLUDED.env, run_budget_usd = EXCLUDED.run_budget_usd, updated_at = now()",
+        "env = EXCLUDED.env, run_budget_usd = EXCLUDED.run_budget_usd, max_concurrency = EXCLUDED.max_concurrency, "
+        "updated_at = now()",
         scope, role, project_id, values["harness_prompt"], values["profile_id"], values["effort"],
-        json.dumps(list(values["env"]), ensure_ascii=False), values["run_budget_usd"],
+        json.dumps(list(values["env"]), ensure_ascii=False), values["run_budget_usd"], values["max_concurrency"],
     )
 
 
@@ -254,7 +256,7 @@ async def write_profile(conn: asyncpg.Connection, profile_id: str | None, values
 
 
 async def write_role(conn: asyncpg.Connection, role: str, values: Mapping[str, Any], *, exists: bool) -> None:
-    """Set a role's prompt (None: its recommended one), timeout, concurrency and enabled flag.
+    """Set a role's prompt (None: its recommended one), timeout and enabled flag.
 
     A role without a row gets one; serve's seeding then fills in its name and
     recommended prompt and keeps an edited one.
@@ -262,15 +264,14 @@ async def write_role(conn: asyncpg.Connection, role: str, values: Mapping[str, A
     prompt = values["prompt"]
     if not exists:
         await conn.execute(
-            "INSERT INTO role_configs (role, system_prompt, timeout_seconds, max_concurrency, enabled) "
-            "VALUES ($1, $2, $3, $4, $5)",
-            role, prompt or "", values["timeout_seconds"], values["max_concurrency"], values["enabled"],
+            "INSERT INTO role_configs (role, system_prompt, timeout_seconds, enabled) VALUES ($1, $2, $3, $4)",
+            role, prompt or "", values["timeout_seconds"], values["enabled"],
         )
         return
     await conn.execute(
         "UPDATE role_configs SET system_prompt = COALESCE($2, default_prompt), timeout_seconds = $3, "
-        "max_concurrency = $4, enabled = $5, updated_at = now() WHERE role = $1",
-        role, prompt, values["timeout_seconds"], values["max_concurrency"], values["enabled"],
+        "enabled = $4, updated_at = now() WHERE role = $1",
+        role, prompt, values["timeout_seconds"], values["enabled"],
     )
 
 

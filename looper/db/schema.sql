@@ -210,8 +210,7 @@ CREATE INDEX IF NOT EXISTS idx_task_journal_task ON task_journal (task_id, id);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_task_journal_accepted ON task_journal (task_id, step_id)
     WHERE kind = 'step_accepted';
 
--- Each role's own settings: its display name, role prompt, timeout and concurrency (manager, planner, worker,
--- reviewer).
+-- Each role's own settings: its display name, role prompt and timeout (manager, planner, worker, reviewer).
 CREATE TABLE IF NOT EXISTS role_configs (
     role             TEXT PRIMARY KEY,
     display_name     TEXT NOT NULL DEFAULT '',
@@ -219,7 +218,6 @@ CREATE TABLE IF NOT EXISTS role_configs (
     system_prompt    TEXT NOT NULL DEFAULT '',
     max_turns        INTEGER NOT NULL DEFAULT 0,
     timeout_seconds  INTEGER NOT NULL DEFAULT 1200,
-    max_concurrency  INTEGER NOT NULL DEFAULT 1,
     extra_args       JSONB,
     metadata         JSONB,
     created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -232,6 +230,15 @@ ALTER TABLE role_configs ADD COLUMN IF NOT EXISTS default_prompt TEXT NOT NULL D
 -- permission_mode was never applied: every agent runs with
 -- --dangerously-skip-permissions (claude_cli.permission_args).
 ALTER TABLE role_configs DROP COLUMN IF EXISTS permission_mode;
+-- Once: max_concurrency was never enforced. How many of a role run at once in
+-- a project is its layer's max_concurrency (agent_setting_layers, below).
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM schema_migrations WHERE name = 'role_configs_max_concurrency_removed') THEN
+        ALTER TABLE role_configs DROP COLUMN IF EXISTS max_concurrency;
+        INSERT INTO schema_migrations (name) VALUES ('role_configs_max_concurrency_removed');
+    END IF;
+END $$;
 
 -- Agent Profiles (RFC decision 10): a profile is a runtime, an LLM provider and
 -- a model. A runtime is a runtime type, which code provides (an adapter,
@@ -600,6 +607,9 @@ CREATE TABLE IF NOT EXISTS agent_setting_layers (
     effort          TEXT,
     env             JSONB NOT NULL DEFAULT '[]'::jsonb CHECK (jsonb_typeof(env) = 'array'),
     run_budget_usd  DOUBLE PRECISION CHECK (run_budget_usd > 0),
+    max_concurrency INTEGER CONSTRAINT agent_setting_layers_max_concurrency_check CHECK (max_concurrency IS NULL
+                        OR (max_concurrency BETWEEN 1 AND 64 AND scope IN ('role', 'role_project')
+                            AND role <> 'manager')),
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
     CHECK ((role IS NOT NULL) = (scope IN ('role', 'role_project'))),
     CHECK ((project_id IS NOT NULL) = (scope IN ('project', 'role_project'))),
@@ -701,6 +711,11 @@ BEGIN
         INSERT INTO schema_migrations (name) VALUES ('agent_setting_layers_agent');
     END IF;
 END $$;
+-- How many of a task role run at once in one project (agent_settings.resolve_concurrency): set only on a
+-- planner, worker or reviewer role layer, or on that role's layer in a project.
+ALTER TABLE agent_setting_layers ADD COLUMN IF NOT EXISTS max_concurrency INTEGER
+    CONSTRAINT agent_setting_layers_max_concurrency_check CHECK (max_concurrency IS NULL
+        OR (max_concurrency BETWEEN 1 AND 64 AND scope IN ('role', 'role_project') AND role <> 'manager'));
 
 -- MCP servers are catalog items too (kind 'mcp'), installed the same way. How
 -- Claude Code starts or reaches one is in library_mcp_servers, one row per
