@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Send, Loader2, Bot, User, Plus, ChevronDown, ChevronRight, RotateCcw } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import {
@@ -230,7 +230,7 @@ export function ChatPage() {
   const [taskOpen, setTaskOpen] = useState<Record<string, boolean>>({});
   const [plannerActivity, setPlannerActivity] = useState<ActivityEvent[]>([]);
   const scrollRef = useRef<HTMLDivElement>(null);
-  const inputRef = useRef<HTMLInputElement>(null);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
   const cleanupRef = useRef<(() => void) | null>(null);
   const messagesRef = useRef(messages);
   messagesRef.current = messages;
@@ -303,6 +303,14 @@ export function ChatPage() {
   useEffect(() => {
     if (!sending) inputRef.current?.focus();
   }, [sending]);
+
+  // The message box grows with its lines, up to its max height, and shrinks back once sent.
+  useLayoutEffect(() => {
+    const box = inputRef.current;
+    if (!box) return;
+    box.style.height = "auto";
+    box.style.height = `${box.scrollHeight}px`;
+  }, [input]);
 
   // Load messages from DB on mount (or session change)
   useEffect(() => {
@@ -742,15 +750,23 @@ export function ChatPage() {
             e.preventDefault();
             handleSend();
           }}
-          className="flex items-center gap-2"
+          className="flex items-end gap-2"
         >
-          <input
+          <textarea
             ref={inputRef}
-            type="text"
+            rows={1}
             value={input}
             onChange={(e) => setInput(e.target.value)}
-            placeholder="Type a message..."
-            className="flex-1 rounded-lg border border-input bg-background px-4 py-2.5 text-sm text-foreground placeholder:text-muted-foreground outline-none focus:ring-2 focus:ring-ring"
+            onKeyDown={(e) => {
+              // Enter sends and Shift+Enter starts a new line; an input method's Enter only picks its candidate
+              // (Safari reports that keydown with keyCode 229 rather than isComposing).
+              if (e.key !== "Enter" || e.shiftKey || e.nativeEvent.isComposing || e.keyCode === 229) return;
+              e.preventDefault();
+              e.currentTarget.form?.requestSubmit();
+            }}
+            placeholder="Type a message... (Shift+Enter for a new line)"
+            aria-label="Message"
+            className="max-h-40 min-h-10 flex-1 resize-none overflow-y-auto rounded-lg border border-input bg-background px-4 py-2.5 text-sm leading-5 text-foreground placeholder:text-muted-foreground outline-none focus:ring-2 focus:ring-ring"
             autoFocus
           />
           <button
