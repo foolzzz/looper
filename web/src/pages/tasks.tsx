@@ -25,6 +25,7 @@ import {
   createTask,
   READY_LABEL,
   READY_STATUS,
+  isActiveTask,
   isTaskGroup,
   TASK_GROUPS,
   type TaskGroup,
@@ -85,7 +86,6 @@ function statusIcon(status: string) {
   }
 }
 
-const ACTIVE_STATUSES = ["running", "pending", "executing", "assigned"];
 const RESTARTABLE_STATUSES = ["stopped", "failed", "cancelled", READY_STATUS];
 
 /** A status filter's name. */
@@ -274,7 +274,7 @@ export function TasksPage({ sub, query, onNavigate }: TasksPageProps) {
 
   const handleDelete = async (taskId: string) => {
     const task = tasks.find((t) => t.task_id === taskId);
-    if (task && ACTIVE_STATUSES.includes(task.status)) {
+    if (task && isActiveTask(task)) {
       await handleStop(taskId);
       await new Promise((r) => setTimeout(r, 500));
     }
@@ -545,7 +545,7 @@ export function TasksPage({ sub, query, onNavigate }: TasksPageProps) {
                   </div>
                 </div>
                 <div className="shrink-0 flex items-center gap-1">
-                  {ACTIVE_STATUSES.includes(task.status) && (
+                  {isActiveTask(task) && (
                     <button
                       type="button"
                       onClick={(e) => {

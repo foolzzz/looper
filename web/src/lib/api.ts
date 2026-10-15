@@ -27,6 +27,8 @@ export interface TaskInfo {
   requirement: string;
   goal_id: string;
   status: string;
+  /** The status's group, from the server's one mapping. */
+  group: TaskGroup;
   phase: string;
   planner_id: string | null;
   correlation_id: string;
@@ -128,6 +130,11 @@ export const TASK_GROUPS: { id: TaskGroup; label: string }[] = [
 
 export function isTaskGroup(value: string | null): value is TaskGroup {
   return TASK_GROUPS.some((g) => g.id === value);
+}
+
+/** A task whose Planner runs or waits for room: it can be stopped, and must be before it is deleted. */
+export function isActiveTask(task: Pick<TaskInfo, "group">): boolean {
+  return task.group === "in_progress" || task.group === "queued";
 }
 
 /** A Planner running now: one per task in progress. */
