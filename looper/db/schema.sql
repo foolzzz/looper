@@ -215,6 +215,48 @@ CREATE INDEX IF NOT EXISTS idx_task_journal_task ON task_journal (task_id, id);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_task_journal_accepted ON task_journal (task_id, step_id)
     WHERE kind = 'step_accepted';
 
+-- A step's git worktree in a project with step_workspaces = 'worktree': a step
+-- that runs alongside others works in one, on a branch of its own, merged into
+-- the task directory's branch (target_branch) when it is accepted. A retry
+-- reuses it; a retry after a failed merge gets a new one. Code owns the states
+-- and their transitions (looper/agents/step_workspaces.py). removed_at: its
+-- directory and branch are gone; the commits of a merged one stay on the branch.
+CREATE TABLE IF NOT EXISTS step_workspaces (
+    id             BIGSERIAL PRIMARY KEY,
+    task_id        TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    step_id        TEXT NOT NULL REFERENCES task_steps(id) ON DELETE CASCADE,
+    repo_dir       TEXT NOT NULL,
+    subdir         TEXT NOT NULL DEFAULT '',
+    target_branch  TEXT NOT NULL,
+    path           TEXT NOT NULL,
+    branch         TEXT NOT NULL,
+    base_commit    TEXT NOT NULL,
+    checkpoint     BOOLEAN NOT NULL DEFAULT false,
+    result_commit  TEXT,
+    merge_commit   TEXT,
+    state          TEXT NOT NULL DEFAULT 'active'
+        CHECK (state IN ('active', 'merging', 'merged', 'unmerged', 'discarded')),
+    merge_error    TEXT CHECK (merge_error IN ('conflict', 'local_changes', 'branch_changed', 'step_branch_changed',
+                                               'git_failed')),
+    detail         TEXT NOT NULL DEFAULT '',
+    removed_at     TIMESTAMPTZ,
+    created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+    -- An unmerged workspace says why; one that is in use or merged has no merge error.
+    CONSTRAINT step_workspaces_unmerged_reason_check CHECK (
+        CASE WHEN state = 'unmerged' THEN merge_error IS NOT NULL
+             WHEN state IN ('active', 'merging', 'merged') THEN merge_error IS NULL
+             ELSE true END)
+);
+CREATE INDEX IF NOT EXISTS idx_step_workspaces_task ON step_workspaces (task_id, id);
+-- A step has one workspace in use at a time.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_step_workspaces_open ON step_workspaces (step_id)
+    WHERE state IN ('active', 'merging');
+-- Where the task's branch was when it dispatched its first step, in a project with step workspaces: going back
+-- there undoes the task's commits ('' when not recorded).
+ALTER TABLE task_plans ADD COLUMN IF NOT EXISTS start_branch TEXT NOT NULL DEFAULT '';
+ALTER TABLE task_plans ADD COLUMN IF NOT EXISTS start_commit TEXT NOT NULL DEFAULT '';
+
 -- Every version of a task's requirement once it has been edited (tasks.requirement is always the latest; a task
 -- never edited has none). Version 1 is the text it was created with. delivered_at: when the task's Planner had the
 -- edit in a turn (NULL: not yet; set at once for a task that has no Planner yet, which plans the latest text).
@@ -494,6 +536,9 @@ ALTER TABLE projects ADD COLUMN IF NOT EXISTS task_budget_action TEXT
 ALTER TABLE projects ADD COLUMN IF NOT EXISTS supervise_interval_seconds INTEGER
     CHECK (supervise_interval_seconds >= 0);
 ALTER TABLE projects ADD COLUMN IF NOT EXISTS review_policy TEXT CHECK (review_policy IN ('planner', 'all'));
+-- Where a step that runs alongside others works: the task directory ('shared', also when NULL) or, in a git
+-- checkout, a worktree of its own merged back when it is accepted ('worktree').
+ALTER TABLE projects ADD COLUMN IF NOT EXISTS step_workspaces TEXT CHECK (step_workspaces IN ('shared', 'worktree'));
 -- What a task that completes leaves in the project's knowledge, from one more
 -- Planner turn over the task journal: nothing ('off'), a draft the user
 -- confirms or discards on the project page ('draft'), or a document ('write').

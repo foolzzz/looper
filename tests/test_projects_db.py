@@ -305,7 +305,7 @@ def test_execution_settings_are_stored_through_the_task_and_cleared() -> None:
         calc = await projects.create_project(name="calc", execution=settings, pool=pool)
         await tasks.create_task(task_id="task-1", requirement="r", work_dir="/w", project_id=calc["id"], pool=pool)
         assert ProjectExecution.from_row(await projects.get_task_project("task-1", pool=pool)).view() == {
-            **settings, "task_budget_usd": 2.0}
+            **settings, "task_budget_usd": 2.0, "step_workspaces": None}
 
         assert await projects.update_project(calc["id"], execution={"task_budget_usd": None,
                                                                     "supervise_interval_seconds": 60}, pool=pool)

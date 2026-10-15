@@ -27,6 +27,7 @@ from looper.agents.system_prompt import (
     compose_system_prompt,
     plan_task_section,
     prompt_layers,
+    review_task_section,
     work_task_section,
 )
 from looper.agents.tiers.worker import extract_report, judge_result
@@ -144,6 +145,29 @@ def test_the_work_task_carries_the_step_and_the_task_as_context() -> None:
     assert "retried" not in section
     # The step comes after the task it belongs to.
     assert section.index("Build a calculator.") < section.index("Add tests for add().")
+
+
+def test_a_step_in_a_worktree_of_its_own_is_told_how_it_is_merged() -> None:
+    workspace = {"path": "/rt/worktrees/t1/s2-3", "branch": "looper/t1/s2-3", "base_commit": "a" * 40,
+                 "target_branch": "main"}
+    section = work_task_section(requirement="", step="s2", instruction="Add it.", acceptance_criteria=[],
+                                validation_commands=[], work_dir="/rt/worktrees/t1/s2-3", workspace=workspace)
+    assert "own git worktree of the repository, on branch looper/t1/s2-3, created from main at aaaaaaaaaaaa" in section
+    assert "merges this branch into main, keeping your commits. Do not push" in section
+    assert "previous attempt" not in section
+    retried = work_task_section(requirement="", step="s2", instruction="Add it.", acceptance_criteria=[],
+                                validation_commands=[], work_dir="/w", workspace={
+                                    **workspace, "previous_branch": "looper/t1/s2-2", "previous_error": "conflict",
+                                    "previous_files": ["a.py"]})
+    assert ("The previous attempt's commits are on branch looper/t1/s2-2; they could not be merged into main "
+            "(conflict: a.py)") in retried and "`git merge looper/t1/s2-2`" in retried
+    review = review_task_section(requirement="", step="s2", instruction="Add it.", acceptance_criteria=[],
+                                 work_dir="/rt/worktrees/t1/s2-3", workspace=workspace)
+    assert f"`git diff {'a' * 40}`" in review
+    plain = work_task_section(requirement="", step="s2", instruction="Add it.", acceptance_criteria=[],
+                              validation_commands=[], work_dir="/w")
+    assert "worktree" not in plain and "worktree" not in review_task_section(
+        requirement="", step="s2", instruction="Add it.", acceptance_criteria=[], work_dir="/w")
 
 
 @pytest.mark.parametrize("verify", [False, True], ids=["worker", "reviewer"])

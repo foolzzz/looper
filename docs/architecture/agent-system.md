@@ -1374,12 +1374,85 @@ error; `supervise_interval_seconds` over the `planner` config; and
 `review_policy` `all`, under which no step is accepted without a passing review;
 and `distill_lessons` (`off`, `draft` or `write`, never null), whether a task
 that completes leaves a lessons draft or document in the project's knowledge
-(see the Planner).
+(see the Planner); and `step_workspaces` (`shared`, also when null, or
+`worktree`), where a step that runs alongside others works ([Step
+workspaces](#step-workspaces)).
 
 A task can also have a spend cap of its own (`tasks.budget_usd`, a scheduled
 run's `run_budget_usd`), which replaces its project's `task_budget_usd` for it
 (`get_task_project` reads it in its place). Continuing such a task at its cap
 raises only its own cap.
+
+### Step workspaces
+
+A project with `step_workspaces` `worktree` runs a step in a git worktree of its
+own when other steps of the task are in flight (running, awaiting a decision or
+in review) or start in the same round, so parallel Workers no longer see or
+overwrite each other's files (`looper/agents/step_workspaces.py`; the design is
+the [step workspaces RFC](rfcs/step-workdir-isolation-v0.zh-CN.md)):
+
+- **When.** The Planner decides at dispatch (`plan_round`). A step that starts
+  alone while nothing else is in flight works in the task directory, and while
+  one does, the ready steps wait. The task directory must be in git 2.40 or
+  later, on a branch with a commit, with no merge, rebase, cherry-pick, revert
+  or bisect in progress. Outside git the steps share the directory as without
+  the setting; a checkout that fails another condition runs them one at a time,
+  with the reason in the activity.
+- **Where it starts.** The first time, the Planner records the branch and its
+  tip (`task_plans.start_branch`, `start_commit`, and the activity):
+  `git reset <start_commit>` there undoes the task's commits and keeps its
+  changes. Before a round's new worktrees, every pending change in the task
+  directory (tracked and untracked, not ignored, the user's own included;
+  nothing outside the task directory) is committed on the branch as a
+  checkpoint, and the round's worktrees start from it, or from the tip when
+  nothing is pending.
+- **The worktree** is `<runtime_root>/worktrees/<task_id>/<key>-<id>` on branch
+  `looper/<task_id>/<key>-<id>`. The Worker and the Reviewer run at the task
+  directory's place in it (`context.work_dir`) and get `context.workspace`
+  (`path`, `branch`, `base_commit`, `target_branch`). Their task sections say
+  that the step works on a branch of its own, may commit, and must not push,
+  switch branches or rewrite its commits; the Reviewer's gives
+  `git diff <base_commit>` to see the step's changes. Ignored files, such as
+  `.env` or `.venv`, are not in it.
+- **Accepted.** Before an accepted step counts as verified (an `accept`, an
+  acceptable `replan`, or its own verdict when the Planner cannot decide),
+  Looper commits what the Worker left uncommitted, computes the merge with the
+  branch in memory (`git merge-tree --write-tree`), writes a merge commit
+  (`commit-tree`, recorded before the branch moves) and moves the branch, its
+  index and working tree with `git merge --ff-only`; the steps that depend on
+  it start after that. Every merged step has a merge commit of its own, so
+  `git revert -m 1 <merge>` undoes one step; a step that changed nothing has
+  none. The worktree and its branch are removed once merged; the commits stay
+  on the branch.
+- **A merge that cannot be made** leaves the task directory's branch, index
+  and working tree as they were, and fails the attempt with a typed
+  `merge_error`: `conflict` (with the files), `local_changes` (uncommitted
+  changes in the task directory are in the way), `branch_changed` (the task
+  directory left the branch, the branch lost the step's start, or it kept
+  moving through three tries), `step_branch_changed` (the step's checkout left
+  its branch, or its commits were rewritten) or `git_failed`. The Planner gets
+  a decision turn on it. A retry gets a new worktree from the branch as it is
+  now, and its Worker is told the old branch, which stays until the task ends.
+  A worktree that cannot be created fails the attempt the same way.
+- **Looper's commits** (checkpoint, leftovers, merge) are by
+  `Looper <looper@localhost>`, with `Looper-Task` and `Looper-Step` trailers,
+  and unsigned. No git command Looper runs runs a hook
+  (`-c core.hooksPath=/dev/null`), and each has a 120 s limit. The Worker's own
+  commits keep the repository's identity, signing and hooks.
+- **Kept and removed.** A step that a replan drops, from a decision or a change
+  to the task, loses its worktree and branch at once. A completed task's
+  worktrees and branches are removed.
+  A failed, stopped or cancelled task keeps its unmerged ones, and its activity
+  names their branches, until it is started anew (its steps go) or deleted;
+  continuing it from its plan reuses them. A merge that a restart cut off is
+  finished without a new decision. At startup the server removes what no task
+  keeps: the worktrees of a completed task, the directory of a merged or
+  dropped one, and directories no row knows.
+- `step_workspaces` rows record each one: `active` → `merging` → `merged` or
+  `unmerged`, and `discarded`, along `ALLOWED_TRANSITIONS`.
+
+The eval's `--step-workspaces worktree` runs its tasks in git repositories with
+the setting.
 
 ### Schedules: tasks on a time rule
 
@@ -1835,16 +1908,18 @@ Key message types:
 3. Dispatch: every step whose `depends_on` steps are all verified goes as
    `WORK_ITEM` to a new Worker, up to 4 running at once per task. Steps
    without a dependency between them run at the same time in the same
-   directory, so they must change different files. The eval's
+   directory, so they must change different files, unless the project has
+   [step workspaces](#step-workspaces): then each runs in a worktree of its
+   own and is merged when it is accepted. The eval's
    `parallel_parts` and `interface_first` tasks check that the Planner plans
    independent and coordinated parts that way; with haiku the second still
    fails (the Planner chains the service, the client and the check).
 4. Decision turn: every `WORK_RESULT` and `VERIFY_RESULT` gets a `[DECISION]`
    turn whose message lists the decisions allowed now:
    - `accept` only when the result can be accepted: the Worker completed and
-     the step needs no review, or the Reviewer passed. The step is verified,
-     and its `summary` becomes the task's result unless a later accept
-     replaces it.
+     the step needs no review, or the Reviewer passed. The step is verified
+     (in a worktree of its own, once it is merged), and its `summary` becomes
+     the task's result unless a later accept replaces it.
    - `review` only after a successful Worker result. A new Reviewer gets
      `VERIFY_REQUEST` with the step's instruction, the Worker's result and the
      acceptance criteria. A step with `review` set in the plan, or sent to
@@ -1909,7 +1984,8 @@ PostgreSQL is a hard startup dependency. All data paths:
 | `projects` | Projects: name (unique ignoring case), description, default `work_dir` (`''` = none), `background` for the task agents' system prompt (`''` = none), and the execution settings (`project_execution`) |
 | `tasks` | Task metadata, status, phase, timestamps, `work_dir`, `project_id` (required), `schedule_id` (the schedule that fired it), `budget_usd` (its own spend cap, over its project's), `chat_id` (who is told when it ends: a Telegram chat id or a Lark sender's open_id; NULL for a task asked for elsewhere), `original_user_text` (the user's message the Manager's task JSON answered, often 「确认」; kept as history) and `title` (a few words naming it, from the task JSON; `task_name` falls back to the goal id, then the requirement) |
 | `task_steps` | A task's steps, each with everything its Planner decides with: `step_key` (label), `depends_on` (step ids), `review`, `acceptance_criteria`, `validation_commands`, `status`, `result`, `worker_id`, `reviewer_id`, `retries`, `feedback`, `missed_messages` |
-| `task_plans` | A task's plan, one row per task: `plan_id`, `status` (`planning`, `executing`, `verifying`, `stopping`, `completed`, `failed`), `correlation_id`, `origin_channel_id`, `final_summary`, `fail_reason`; replaced when the task is planned again |
+| `task_plans` | A task's plan, one row per task: `plan_id`, `status` (`planning`, `executing`, `verifying`, `stopping`, `completed`, `failed`), `correlation_id`, `origin_channel_id`, `final_summary`, `fail_reason`, and with step workspaces `start_branch` and `start_commit` (where the branch was when the task dispatched its first step; `''` otherwise); replaced when the task is planned again |
+| `step_workspaces` | A step's git worktree ([Step workspaces](#step-workspaces)): `task_id`, `step_id` (both going with the task or step), `repo_dir` and `subdir` (the task directory in it), `target_branch`, `path`, `branch`, `base_commit`, `checkpoint`, `result_commit`, `merge_commit`, `state` (`active`, `merging`, `merged`, `unmerged`, `discarded`), `merge_error` (required when `unmerged`), `detail`, `removed_at` (its directory and branch are gone); one in use (`active` or `merging`) per step |
 | `agent_sessions` | The session each resident agent resumes: `manager` or `planner-<task_id>`, its `session_id`, `session_totals`, the `runtime_type` and `provider_id` it belongs to and the `profile_id` that ran it last (`NULL` runtime: before Agent Profiles, Claude Code; `NULL` provider: before providers were recorded, Claude Code's own login), and `clean_start` (the user dropped the session with `/new`: the next one starts without a resume brief) |
 | `task_journal` | A task's journal, written by code as things happen: `step_accepted`, `step_failed`, `step_retry`, `decision`, `supplement`, `session_switch`, `handoff` and `progress` entries, each with its `step_id` (`''` for the whole task), `summary` and `learnings`, and for a supplement its `via` and `delivered_at`; `GET /api/tasks/<id>` returns it as `journal` (and the progress notes, parsed and newest first, as `progress`); the task page lists the entries as Findings, each with its kind, and the progress notes in its Progress section |
 | `task_requirement_versions` | Every version of an edited task requirement: `task_id`, `version` (1 is the text the task was created with, written at its first edit), `text`, `via` (`created`, `task_page`, or the Manager's), `created_at` and `delivered_at` (when the Planner had it in a turn; `tasks.requirement` is the newest) |

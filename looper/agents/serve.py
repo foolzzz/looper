@@ -557,6 +557,14 @@ async def _run_agent_system(
     if orphan_count:
         logger.info("marked %d orphaned task(s) as stopped", orphan_count)
 
+    # The step worktrees no task keeps any more (after the orphaned tasks stopped: those keep their unmerged ones).
+    from . import step_workspaces
+    try:
+        if swept := await step_workspaces.sweep(runtime_root):
+            logger.info("removed %d step worktree(s) no task keeps", swept)
+    except Exception:
+        logger.exception("could not sweep the step worktrees")
+
     # A Codex login that forked in a run the previous server did not see end (before the session directories
     # it may be in are reclaimed).
     from .runtimes import codex_login

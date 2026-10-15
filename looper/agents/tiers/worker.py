@@ -866,10 +866,12 @@ class WorkerPool:
         step = str(payload.get("step_key") or payload.get("task_id") or "")
         instruction = str(payload.get("instruction") or "")
         acceptance = [str(c) for c in payload.get("acceptance_criteria") or []]
+        workspace = (payload.get("context") or {}).get("workspace")
         supplements = [str(text) for text in payload.get("supplements") or []]
         if is_verify:
             return review_task_section(requirement=requirement, step=step, instruction=instruction,
-                                       acceptance_criteria=acceptance, work_dir=work_dir, supplements=supplements)
+                                       acceptance_criteria=acceptance, work_dir=work_dir, supplements=supplements,
+                                       workspace=workspace)
         return work_task_section(
             requirement=requirement, step=step, instruction=instruction, acceptance_criteria=acceptance,
             supplements=supplements,
@@ -878,6 +880,7 @@ class WorkerPool:
             feedback=[str(f) for f in payload.get("feedback") or []],
             attempt=int(payload.get("attempt") or 1),
             work_dir=work_dir,
+            workspace=workspace,
         )
 
     def _build_work_prompt(self, payload: dict[str, Any]) -> str:

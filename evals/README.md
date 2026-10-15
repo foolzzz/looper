@@ -102,7 +102,11 @@ provider's key is read from the variable `api_key_env` names, never from the
 file; `"provider": {"provider_id": "prov-codex-login"}` uses the built-in Codex
 login instead, the operator's own ChatGPT login on this machine), `--tasks
 single_step,chat_correction`, `--max-budget-usd`, `--total-cap-usd`,
-`--baseline <run.json>` (compare with this run instead), `--keep-work-dirs`. To print a comparison again:
+`--baseline <run.json>` (compare with this run instead), `--keep-work-dirs`,
+`--step-workspaces shared|worktree` (each working directory becomes a git
+repository on `main` with one commit, the task's project gets that setting, and
+each task reports the merge and checkpoint commits it added as
+`looper_commits`). To print a comparison again:
 
 ```bash
 uv run python -m evals.prompt_regression compare evals/runs/<new>.json [evals/runs/<base>.json]

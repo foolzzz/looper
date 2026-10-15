@@ -20,6 +20,7 @@ import pytest
 from agent_fixtures import profile_json
 
 from looper.agents.message import TASK_ROUTER_ADDRESS, MessageEnvelope, MessageType
+from looper.agents.project_execution import ProjectExecution
 from looper.agents.tiers.planner import PlannerAgent
 from looper.agents.tiers.worker import WorkerConfig, WorkerPool
 from looper.db import llm_records as db_llm_records
@@ -99,6 +100,7 @@ class TestProjectApi:
         ("supervise_interval_seconds", 1.5, "whole number"),
         ("supervise_interval_seconds", 86_401, "86400"),
         ("distill_lessons", "sometimes", "off, draft, write"),
+        ("step_workspaces", "per-step", "shared, worktree"),
     ])
     def test_an_invalid_setting_is_refused(self, store: _Store, field: str, value: Any, says: str) -> None:
         store.add_project("proj-a", "calc")
@@ -114,6 +116,18 @@ class TestProjectApi:
         store.add_project("proj-a", "calc")
         status, body = _call("PUT", "/api/projects/proj-a", {"distill_lessons": value})
         assert status == 200 and body["distill_lessons"] == mode == store.projects["proj-a"]["distill_lessons"]
+
+    def test_step_workspaces_are_off_until_a_project_turns_them_on(self, store: _Store) -> None:
+        store.add_project("proj-a", "calc")
+        assert _call("GET", "/api/projects")[1]["projects"][0]["step_workspaces"] is None
+        assert not ProjectExecution.from_row(store.projects["proj-a"]).isolate_steps
+        status, body = _call("PUT", "/api/projects/proj-a", {"step_workspaces": "worktree"})
+        assert status == 200 and body["step_workspaces"] == "worktree"
+        assert ProjectExecution.from_row(store.projects["proj-a"]).isolate_steps
+        status, body = _call("PUT", "/api/projects/proj-a", {"step_workspaces": "shared"})
+        assert status == 200 and not ProjectExecution.from_row(store.projects["proj-a"]).isolate_steps
+        status, body = _call("PUT", "/api/projects/proj-a", {"step_workspaces": None})
+        assert status == 200 and body["step_workspaces"] is None
 
 
 # --- Workers and Reviewers ---

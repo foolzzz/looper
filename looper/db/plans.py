@@ -26,12 +26,14 @@ LIVE_STATUSES = ("executing", "verifying")
 _DONE_STEP_STATUSES = ("completed", "verified", "failed", "skipped")
 
 _SAVE_PLAN = """
-INSERT INTO task_plans (task_id, plan_id, status, correlation_id, origin_channel_id, final_summary, fail_reason)
-VALUES ($1, $2, $3, $4, $5, $6, $7)
+INSERT INTO task_plans (task_id, plan_id, status, correlation_id, origin_channel_id, final_summary, fail_reason,
+                        start_branch, start_commit)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 ON CONFLICT (task_id) DO UPDATE
 SET plan_id = EXCLUDED.plan_id, status = EXCLUDED.status, correlation_id = EXCLUDED.correlation_id,
     origin_channel_id = EXCLUDED.origin_channel_id, final_summary = EXCLUDED.final_summary,
-    fail_reason = EXCLUDED.fail_reason, updated_at = now()
+    fail_reason = EXCLUDED.fail_reason, start_branch = EXCLUDED.start_branch, start_commit = EXCLUDED.start_commit,
+    updated_at = now()
 """
 
 _SAVE_STEP = f"""
@@ -75,7 +77,8 @@ async def save(
     """Write the plan's own row (when given), ``steps``' rows and ``journal``'s entries, in one transaction.
 
     ``plan`` has ``plan_id``, ``status``, ``correlation_id``,
-    ``origin_channel_id``, ``final_summary`` and ``fail_reason``; each step
+    ``origin_channel_id``, ``final_summary`` and ``fail_reason``, and may have
+    ``start_branch`` and ``start_commit``; each step
     has ``id``, ``index``, ``key``, ``instruction``, ``status`` and the rest of
     a step's columns, a missing one written as empty; each journal entry has
     ``step_id``, ``kind``, ``summary`` and ``learnings`` (``journal.insert``).
@@ -100,6 +103,7 @@ async def write(
         await conn.execute(
             _SAVE_PLAN, task_id, plan["plan_id"], plan["status"], plan.get("correlation_id") or "",
             plan.get("origin_channel_id") or "", plan.get("final_summary") or "", plan.get("fail_reason") or "",
+            plan.get("start_branch") or "", plan.get("start_commit") or "",
         )
     if steps:
         await conn.executemany(_SAVE_STEP, [_step_args(task_id, step) for step in steps])

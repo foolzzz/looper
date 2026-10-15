@@ -10,6 +10,7 @@ const FIELDS: (keyof ProjectExecution)[] = [
   "supervise_interval_seconds",
   "review_policy",
   "distill_lessons",
+  "step_workspaces",
 ];
 const NUMBERS = new Set<keyof ProjectExecution>(["task_budget_usd", "supervise_interval_seconds"]);
 
@@ -116,6 +117,24 @@ export function ProjectExecutionFields({
           <p id={`${idPrefix}-distill_lessons-help`} className="text-xs text-muted-foreground">
             The Planner turns the task&apos;s findings into a lessons document. Agents see a draft only after you
             confirm it on the Knowledge tab.
+          </p>
+        </div>
+        <div className="space-y-1">
+          {label("step_workspaces", "Steps that run at the same time")}
+          <select
+            id={`${idPrefix}-step_workspaces`}
+            value={draft.step_workspaces}
+            onChange={set("step_workspaces")}
+            aria-describedby={`${idPrefix}-step_workspaces-help`}
+            className={SELECT}
+          >
+            <option value="">Inherit: share the task directory</option>
+            <option value="shared">Share the task directory</option>
+            <option value="worktree">A git worktree each</option>
+          </select>
+          <p id={`${idPrefix}-step_workspaces-help`} className="text-xs text-muted-foreground">
+            In a git checkout on a branch, each such step works on a branch of its own. Accepted, it is merged into
+            the task directory&apos;s branch with a merge commit, after its leftovers are committed.
           </p>
         </div>
       </div>
