@@ -527,15 +527,31 @@ started is still found after it has exited and its children have been
 re-parented. Each stop logs one line:
 `<agent>: ended the process tree of pid N: F found, T exited on SIGTERM, K killed`.
 
+The agents no longer share the server's process group. So when the server
+itself is killed with SIGKILL or crashes, launchd's clean-up of the job's
+group does not reach them (systemd still ends the whole cgroup). Each agent
+process is therefore started through `proc_tree.spawn`, which records it in
+`<runtime root>/.local/agent-processes/<pid>.json` until the process is
+reaped: its pid, its start time (`ps -o lstart=`, in UTC) and the pid and
+start time of the server that started it. At startup, before any task
+resumes, `proc_tree.sweep` reads every record:
+
+- a pid that still runs with the recorded start time is the same agent,
+  orphaned, and its tree is ended as above;
+- a pid that no longer runs, or now belongs to another process, is left
+  alone;
+- either way the record is removed, except one whose server still runs
+  (another server on the same runtime root): that record and its agent are
+  left alone.
+
 Two cases are not covered:
 
 - a process that left the tree before the stop, such as a command that
   daemonized itself (`nohup … &` whose shell exited). It has already been
   re-parented, with nothing linking it to the agent;
-- what remains after the server itself is killed with SIGKILL or crashes.
-  The agents no longer share the server's process group, so launchd's clean-up
-  of the job's group does not reach them (systemd still ends the whole
-  cgroup), and nothing sweeps them at the next start (plan §5.2).
+- after a crash, what an agent that had already exited left behind. Its
+  children were re-parented, and only the agent itself is recorded
+  (plan §5.2).
 
 ### Runtimes, LLM providers and Agent Profiles
 
