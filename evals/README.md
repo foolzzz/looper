@@ -115,3 +115,36 @@ description. Update the model's committed baseline
 (`baselines/real-haiku.json`, `real-sonnet.json` or `real-opus.json`) when an
 intended change moves the numbers; it holds numbers only, never transcripts or
 local paths.
+
+### The Manager's dialogs
+
+`dialogs` talks to the Manager instead: short conversations on the dashboard
+chat, each reply checked against what Looper did (the API, and the Manager's
+tool calls in the run's `manager_actions`). Same setup as `run`: a new
+database, a disposable `looper serve`, and fake or real mode.
+
+| dialog | what it checks |
+|---|---|
+| `ask_project` | a task without a project: the Manager asks, and creates and changes nothing |
+| `create_start_stop` | a confirmed task is created ready in the named project with its configuration in the reply; "start" starts it, "stop" stops it |
+| `change_running_task` | for a running task: a supplement (or a requirement edit) reaches its Planner in a turn; an edited requirement is a new version; the Reviewer's Agent Profile changes |
+| `cancel_confirmation` | cancelling waits for the user's word: a refusal leaves the task running, a confirmation in the next message cancels it |
+| `status` | a status question is answered by reading through the tools (run it alone to try a runtime) |
+
+The dialogs that need a running task start a slow one first (`sleep 300`)
+and stop whatever is still running at their end. Fake mode plays the Manager
+with the stand-in, which makes each message's scripted calls over MCP; it
+takes about 20 seconds. Real mode costs about $0.30 with haiku and stops at
+`--total-cap-usd` (default 0.50):
+
+```bash
+uv run --extra test python -m evals.prompt_regression dialogs --mode real \
+  --pg-url postgresql://postgres:postgres@127.0.0.1:5432/postgres
+```
+
+Options: `--dialogs status,ask_project`, `--model`, `--agent`,
+`--register-agent SPEC.json` (as for `run`; `--dialogs status` with a Codex or
+OMP agent checks that runtime's tool calls), `--max-budget-usd`,
+`--total-cap-usd`, `--timeout` (seconds for each reply and each check),
+`--keep-work-dirs`. The run's JSON and server log go to `evals/runs/`; the
+table shows each dialog's outcome, its tool calls per turn and its cost.
