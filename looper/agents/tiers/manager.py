@@ -67,6 +67,7 @@ from ..session_switch import SessionSwitch
 from ..system_prompt import SystemPrompt, build_system_prompt, is_recommended
 from .journal import HANDOFF_MAX_CHARS, clip, kept_text
 from .task import resolve_work_dir
+from ..task_notice import ends_task, notify_channel, notify_chat
 from ..message import (
     MANAGER_ADDRESS,
     TASK_ROUTER_ADDRESS,
@@ -563,6 +564,9 @@ class ManagerAgent:
                     "project_id": project["id"],
                     "priority": parsed.get("priority", "P2"),
                     "constraints": parsed.get("constraints", []),
+                    # Who the TaskRouter tells when the task ends: in Telegram the chat, in Lark the sender.
+                    "chat_id": notify_chat(envelope.metadata.get("origin_channel_id"), sender=origin["sender"],
+                                           chat=origin["chat"]),
                 },
                 correlation_id=envelope.correlation_id,
                 metadata={"origin_channel_id": envelope.metadata.get("origin_channel_id")},
@@ -718,7 +722,9 @@ class ManagerAgent:
             self._goal_snapshots[goal_id] = snapshot
 
         origin = envelope.metadata.get("origin_channel_id")
-        if origin:
+        # The TaskRouter tells a Telegram or Lark chat that its task ended (``task_notice``): only the web chat
+        # gets the end from here, so it arrives once.
+        if origin and not (ends_task(envelope.payload.get("status")) and notify_channel(origin)):
             progress_text = envelope.payload.get("summary", "")
             if progress_text:
                 await self._bus.publish(MessageEnvelope.create(
