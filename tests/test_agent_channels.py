@@ -233,6 +233,24 @@ class TestServeChannelWiring:
         assert adapter._bot_token == "token-from-env"
         assert adapter._allowlist.ids == {"7", "8"}
 
+    def test_telegram_correlation_map_is_bounded(self) -> None:
+        # A long-lived bot must not grow the correlation→chat map without bound; oldest evicted first.
+        from looper.agents.channels.telegram import _CORRELATION_MAX, TelegramChannelAdapter
+        from looper.agents.channels.allowlist import SenderAllowlist
+        adapter = TelegramChannelAdapter(allowlist=SenderAllowlist(channel_id="channel-telegram", ids=frozenset({"7"})), bot_token="t")
+        for i in range(_CORRELATION_MAX + 5):
+            adapter._remember(f"c{i}", i)
+        assert len(adapter._correlation_chat) == _CORRELATION_MAX
+        assert "c0" not in adapter._correlation_chat  # oldest gone
+        assert adapter._correlation_chat[f"c{_CORRELATION_MAX + 4}"] == _CORRELATION_MAX + 4  # newest kept
+
+    def test_telegram_prefers_the_db_token_over_the_env_fallback(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # The token now comes from channel_secrets (passed in); the env var is only a fallback.
+        from looper.agents.serve import _telegram_adapter_from_config
+        monkeypatch.setenv("LOOPER_TELEGRAM_BOT_TOKEN", "env-token")
+        adapter = _telegram_adapter_from_config({"allowed_user_ids": ["7"]}, "db-token")
+        assert adapter is not None and adapter._bot_token == "db-token"
+
     def test_telegram_keeps_reading_a_comma_separated_list(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # How the setting was stored before it became a list.
         from looper.agents.serve import _telegram_adapter_from_config
