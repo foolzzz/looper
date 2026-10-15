@@ -51,10 +51,12 @@ import {
   READY_LABEL,
   READY_STATUS,
   updateTaskConfig,
+  editTaskRequirement,
   setTaskProject,
   fetchKnowledgeDrafts,
   type KnowledgeDraft,
   type TaskDetail,
+  type Supplement,
   type TaskStep,
   type JournalEntry,
   type ProgressNote,
@@ -296,6 +298,127 @@ function parseConfig(text: string): Record<string, unknown> | null {
   }
 }
 
+/** The statuses a task's requirement can be edited in once it has started (one not started edits it above). */
+const EDITABLE_STATUSES = ["pending", "assigned", "running", "executing"];
+
+/** How a change came, in words. */
+function viaLabel(via: string): string {
+  if (via === "chat") return "Chat";
+  if (via === "task_page") return "task page";
+  if (via === "created") return "created";
+  if (via.startsWith("manager:")) return `Manager (${via.slice("manager:".length)})`;
+  return via || "—";
+}
+
+/** A started task's requirement: the current text, its earlier versions, and an edit its Planner gets in a turn. */
+function TaskRequirement({ task }: { task: TaskDetail }) {
+  const versions = task.requirement_versions ?? [];
+  const editable = EDITABLE_STATUSES.includes(task.status);
+  const [editing, setEditing] = useState(false);
+  const [text, setText] = useState(task.requirement);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+
+  const save = async () => {
+    setSaving(true);
+    setError("");
+    try {
+      await editTaskRequirement(task.task_id, text);
+      setEditing(false);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="mt-1 space-y-2">
+      {editing ? (
+        <>
+          <textarea
+            value={text}
+            onChange={(e) => setText(e.target.value)}
+            rows={4}
+            aria-label="Requirement"
+            className="w-full rounded-lg border border-border bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary/50"
+          />
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={save}
+              disabled={saving || !text.trim() || text === task.requirement}
+              className="flex items-center gap-1.5 rounded-md bg-primary px-3 py-1 text-xs text-primary-foreground hover:bg-primary/90 transition-colors disabled:opacity-50"
+            >
+              {saving ? <Loader2 className="h-3 w-3 animate-spin" /> : <Save className="h-3 w-3" />}
+              Save
+            </button>
+            <button
+              type="button"
+              onClick={() => { setEditing(false); setText(task.requirement); setError(""); }}
+              className="rounded-md border border-border px-3 py-1 text-xs text-muted-foreground hover:text-foreground"
+            >
+              Cancel
+            </button>
+            <span className="text-xs text-muted-foreground">The Planner gets the change and decides whether to re-plan.</span>
+          </div>
+        </>
+      ) : (
+        <div className="flex items-start justify-between gap-3">
+          <p className="text-sm whitespace-pre-wrap">{task.requirement}</p>
+          {editable && (
+            <button
+              type="button"
+              onClick={() => { setText(task.requirement); setEditing(true); }}
+              className="shrink-0 rounded-md border border-border px-2 py-0.5 text-xs text-muted-foreground hover:text-foreground"
+            >
+              Edit
+            </button>
+          )}
+        </div>
+      )}
+      {error && <p role="alert" className="text-xs text-destructive">{error}</p>}
+      {versions.length > 1 && (
+        <details className="text-xs">
+          <summary className="cursor-pointer text-muted-foreground">History ({versions.length} versions)</summary>
+          <ol className="mt-2 space-y-2">
+            {[...versions].reverse().map((v) => (
+              <li key={v.version} className="rounded-md border border-border px-3 py-2">
+                <p className="text-muted-foreground">
+                  Version {v.version} · {viaLabel(v.via)} · {new Date(v.created_at).toLocaleString()}
+                  {v.version > 1 && !v.delivered_at && " · not yet seen by the Planner"}
+                </p>
+                <p className="mt-1 whitespace-pre-wrap text-foreground">{v.text}</p>
+              </li>
+            ))}
+          </ol>
+        </details>
+      )}
+    </div>
+  );
+}
+
+/** What the user added to the task while it ran, oldest first; every later Worker and Reviewer sees them. */
+function TaskSupplements({ supplements }: { supplements: Supplement[] }) {
+  if (!supplements.length) return null;
+  return (
+    <div>
+      <label className="text-xs font-medium text-muted-foreground">Supplements ({supplements.length})</label>
+      <ol className="mt-1 space-y-2">
+        {supplements.map((s, i) => (
+          <li key={`${s.created_at}-${i}`} className="rounded-md border border-border px-3 py-2 text-sm">
+            <p className="whitespace-pre-wrap">{s.text}</p>
+            <p className="mt-1 text-xs text-muted-foreground">
+              {viaLabel(s.via)} · {new Date(s.created_at).toLocaleString()}
+              {!s.delivered_at && " · not yet seen by the Planner"}
+            </p>
+          </li>
+        ))}
+      </ol>
+    </div>
+  );
+}
+
 function TaskConfigSection({ task }: { task: TaskDetail }) {
   const isInit = task.status === "init";
   const [editReq, setEditReq] = useState(task.requirement);
@@ -368,9 +491,10 @@ function TaskConfigSection({ task }: { task: TaskDetail }) {
               className="mt-1 w-full rounded-lg border border-border bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary/50 resize-none"
             />
           ) : (
-            <p className="mt-1 text-sm whitespace-pre-wrap">{task.requirement}</p>
+            <TaskRequirement task={task} />
           )}
         </div>
+        <TaskSupplements supplements={task.supplements ?? []} />
         <div>
           <label className="text-xs font-medium text-muted-foreground flex items-center gap-1">
             <FolderOpen className="h-3 w-3" />
@@ -659,14 +783,14 @@ const JOURNAL_KINDS: Record<JournalEntry["kind"], { label: string; variant: Badg
   step_failed: { label: "Failed", variant: "destructive" },
   step_retry: { label: "Retry", variant: "warning" },
   decision: { label: "Decision", variant: "default" },
-  user_instruction: { label: "User", variant: "default" },
+  supplement: { label: "Supplement", variant: "default" },
   session_switch: { label: "New session", variant: "outline" },
   handoff: { label: "Handoff", variant: "outline" },
   progress: { label: "Progress", variant: "outline" },
 };
 
 /** The task journal, newest first: steps accepted, failed or retried with what their Worker and Reviewer
- * learned, the Planner's decisions, the user's instructions, and new Planner sessions with their handoffs. */
+ * learned, the Planner's decisions, the supplements, and new Planner sessions with their handoffs. */
 function TaskFindings({ entries: all }: { entries: JournalEntry[] }) {
   // The progress notes have a section of their own (TaskProgress).
   const entries = all.filter((entry) => entry.kind !== "progress");
