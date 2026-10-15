@@ -494,7 +494,9 @@ in a failed turn or before a restart is not lost. `TASK_CHANGE` only wakes
 the Planner. A task waiting for room gets its changes in its `[PLAN]` turn,
 and an edit of a task not started is delivered at once, since it plans the
 new text. The reply to a chat message is the reply of the turn that
-delivered it.
+delivered it; the activity keeps every answer with the action chosen
+("Planner answered a change to the task (replan): ..."), which is where the
+answer to an edit on the task page goes.
 
 ### WorkerPool (`looper/agents/tiers/worker.py`)
 
