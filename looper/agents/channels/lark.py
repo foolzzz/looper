@@ -40,7 +40,7 @@ from .lark_cli import (
     RECEIVE_EVENT, LarkCliError, consume_command, edit_command, reaction_command, run, run_json, send_command,
     sent_message_id,
 )
-from .status_line import Reactions, StatusLines
+from .status_line import Reactions, StatusKind, StatusLines, status_kind
 
 logger = logging.getLogger(__name__)
 
@@ -155,8 +155,8 @@ class LarkChannelAdapter(ChannelAdapter):
         logger.info("lark channel adapter stopped")
 
     async def deliver(self, envelope: MessageEnvelope) -> DeliveryReceipt:
-        """Show a status on the message's status line, or send the answer to the chat the message came from and
-        close its status line."""
+        """Show a phase on the message's status line, send task progress as a message of its own, or send the
+        answer to the chat the message came from and close its status line."""
         corr_id = envelope.correlation_id
         chat_id = self._correlation_chat.get(corr_id)
         if chat_id is None:
@@ -167,22 +167,30 @@ class LarkChannelAdapter(ChannelAdapter):
             )
 
         if envelope.message_type is MessageType.STATUS_UPDATE:
-            await self._status.update(corr_id, chat_id, envelope.payload)
+            match status_kind(envelope.payload):
+                case StatusKind.PHASE:
+                    await self._status.update(corr_id, chat_id, envelope.payload)
+                case StatusKind.PROGRESS:
+                    # Task progress leaves the status line alone.
+                    return await self._send_message(chat_id, str(envelope.payload["text"]))
             return DeliveryReceipt(channel="lark", success=True)
 
         text = self._format_reply(envelope)
         if not text:
             return DeliveryReceipt(channel="lark", success=True)
 
-        try:
-            await self._send_lark_message(chat_id, text)
-            receipt = DeliveryReceipt(channel="lark", success=True)
-        except Exception as exc:
-            logger.warning("lark delivery failed: %s", exc)
-            receipt = DeliveryReceipt(channel="lark", success=False, error=str(exc))
+        receipt = await self._send_message(chat_id, text)
         if not envelope.payload.get("autonomous"):
             await self._status.finish(corr_id, error=envelope.payload.get("error"))
         return receipt
+
+    async def _send_message(self, chat_id: str, text: str) -> DeliveryReceipt:
+        try:
+            await self._send_lark_message(chat_id, text)
+            return DeliveryReceipt(channel="lark", success=True)
+        except Exception as exc:
+            logger.warning("lark delivery failed: %s", exc)
+            return DeliveryReceipt(channel="lark", success=False, error=str(exc))
 
     async def _send_status(self, chat_id: str, text: str) -> str | None:
         return sent_message_id(await run_json(send_command(chat_id=chat_id, text=text, profile=self._profile)))
@@ -356,7 +364,7 @@ class LarkChannelAdapter(ChannelAdapter):
 
     @staticmethod
     def _format_reply(envelope: MessageEnvelope) -> str:
-        """The text of an answer; a status goes to the status line instead (``deliver``)."""
+        """The text of an answer; a status is handled by ``deliver``."""
         match envelope.message_type:
             case MessageType.AGENT_REPLY | MessageType.CLARIFICATION_REQUEST:
                 return envelope.payload.get("text", "")
