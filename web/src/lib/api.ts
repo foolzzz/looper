@@ -686,6 +686,8 @@ export interface ScheduleRunInfo {
   gate_output: string | null;
   /** The run whose unfinished input this run was given. */
   carried_from: string | null;
+  /** How many firings it stands for: a skip that repeated is one run, from scheduled_for to finished_at. */
+  firings: number;
 }
 
 export interface ScheduleInfo {
@@ -848,7 +850,7 @@ export interface ScheduleRunsPage {
   runs: ScheduleRunInfo[];
   /** Pass as `before` for the next page; null at the end. */
   next_before: string | null;
-  /** How many routine skips the schedule has had in all, shown or not. */
+  /** How many routine skips the schedule has had in all (their firings), shown or not. */
   routine_skips: Record<RoutineSkip, number>;
 }
 

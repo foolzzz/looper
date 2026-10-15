@@ -281,6 +281,9 @@ def test_a_schedules_runs_page_by_cursor_and_can_leave_out_the_routine_skips(mon
                 "INSERT INTO schedule_runs (id, schedule_id, scheduled_for, fired_at, trigger, status, created_at) "
                 "VALUES ($1, $2, $3, $3, 'scheduled', $4, $3)",
                 f"srun-test{i:04d}", sid, start + timedelta(minutes=i + 1), status)
+        # A skip that repeated is one run standing for its firings.
+        await env.pool.execute("UPDATE schedule_runs SET firings = 5, finished_at = $1 WHERE id = 'srun-test0003'",
+                               start + timedelta(minutes=9))
 
         async def page(**query: str) -> dict[str, Any]:
             status, payload = await env.call("GET", f"/api/schedules/{sid}/runs", query=query)
@@ -290,7 +293,8 @@ def test_a_schedules_runs_page_by_cursor_and_can_leave_out_the_routine_skips(mon
         everything = await page()
         assert [r["status"] for r in everything["runs"]] == [*reversed(statuses), "running"]
         assert everything["next_before"] is None
-        assert everything["routine_skips"] == {"skipped_gate": 2, "skipped_overlap": 1}
+        assert everything["routine_skips"] == {"skipped_gate": 6, "skipped_overlap": 1}  # firings, not rows
+        assert [r["firings"] for r in everything["runs"]] == [1, 1, 5, 1, 1, 1, 1]
         oldest = everything["runs"][-1]
         task_status = await env.pool.fetchval("SELECT status FROM tasks WHERE id = $1", run["task_id"])
         assert (oldest["task_id"], oldest["task_title"], oldest["task_status"]) == (

@@ -153,6 +153,8 @@ def run_view(row: Mapping[str, Any], cost: Mapping[str, Any] | None = None) -> d
         "summary": row.get("summary"), "cost_usd": cost_usd, "error": row.get("error"),
         "finished_at": row.get("finished_at"), "gate_output": row.get("gate_output"),
         "carried_from": row.get("carried_from"),
+        # A skip that repeated counts every firing it stands for, from scheduled_for to finished_at.
+        "firings": row.get("firings") or 1,
     }
 
 
@@ -471,7 +473,8 @@ async def delete_schedule(schedule_id: str) -> dict[str, Any]:
 async def list_runs(schedule_id: str, query: Mapping[str, str]) -> dict[str, Any]:
     """A page of the schedule's runs, newest first: ``limit`` of them, older than the run ``before`` when given,
     without the routine skips when ``skips`` is ``hide``. ``next_before`` continues the list (None at its end), and
-    ``routine_skips`` counts those skips over the schedule's whole history, shown or not."""
+    ``routine_skips`` counts the firings of those skips over the schedule's whole history, shown or not (a skip that
+    repeated is one run standing for its ``firings``)."""
     raw = query.get("limit") or str(RUNS_DEFAULT)
     if not raw.isdigit() or not 1 <= int(raw) <= RUNS_MAX:
         raise RequestError(HTTP_400, f"limit must be a whole number from 1 to {RUNS_MAX}")
