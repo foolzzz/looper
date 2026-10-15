@@ -223,7 +223,7 @@ release wheel serves the copy packaged with it.
 | **Dashboard** | System status overview |
 | **Chat** | Talk to the global Manager, or to a running task's Planner (each message becomes a new step of that task); SSE streaming |
 | **Tasks** | Task list, project and status filters, create/start/stop/delete controls |
-| **Project** | One project's overview, knowledge documents, its own skills and installs, and its settings, including its agent settings layers |
+| **Project** | One project's overview, knowledge documents, its own skills and installs, the Agent Profiles and other agent settings its roles override, and its settings |
 | **Task Detail** | Config editor (init status), overview, pipeline DAG, sessions, conversation; each Agent Timeline row has a **History** button |
 | **Runs** | Each role's sessions and run history (a Manager `/new` shows as a new session), each run opening its history; no configuration, a link to the role in Settings → Roles |
 | **Agent history** | One agent's launch command, full transcript (text, thinking, tool calls and results) and activity; follows a running agent and flags one with no output for 2 minutes |
@@ -317,8 +317,8 @@ layers, a later layer winning:
 |---|---|---|
 | System | Settings → Roles, Shared defaults | Every agent |
 | Role | Settings → Roles, a role's overrides | One role everywhere: the Manager, the Planner, Workers or Reviewers |
-| Project | The project's Settings tab | The project's Planner, Workers and Reviewers |
-| Role in project | The same tab, per role | One of those roles in one project |
+| Project | The project's Agent Profiles tab, All roles in this project | The project's Planner, Workers and Reviewers |
+| Role in project | The same tab, the role's row | One of those roles in one project |
 
 The Manager spans every project, so only the first two layers apply to it. A
 task can also choose the Agent Profile of its Planner, Workers or Reviewers when

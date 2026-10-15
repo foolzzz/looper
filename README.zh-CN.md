@@ -187,7 +187,7 @@ PostgreSQL 是启动的硬性依赖；`looper serve` 每次启动都会应用 `l
 | **Dashboard** | 系统状态总览 |
 | **Chat** | 与全局 Manager 对话，或与运行中任务的 Planner 对话（每条消息成为该任务的一个新步骤）；SSE 流式输出 |
 | **Tasks** | 任务列表、项目和状态筛选，以及创建、开始、停止、删除操作 |
-| **Project** | 单个项目的概览、知识文档、项目自己的 skill 和安装，以及项目设置（含该项目的 agent 设置层） |
+| **Project** | 单个项目的概览、知识文档、项目自己的 skill 和安装、各角色在本项目覆盖的 Agent Profile 和其他 agent 设置，以及项目设置 |
 | **Task Detail** | 配置编辑（init 状态）、概览、流水线 DAG、会话、对话；Agent Timeline 每行都有 **History** 按钮 |
 | **Runs** | 每个角色的会话和运行记录（Manager 的 `/new` 显示为新会话），每次运行都能打开其历史；不含配置，并链接到 Settings → Roles 里的该角色 |
 | **Agent history** | 单个 agent 的启动命令、完整记录（文本、思考、工具调用及结果）和活动；跟随运行中的 agent，2 分钟没有输出会标出 |
@@ -253,8 +253,8 @@ API 只响应控制台和本机客户端：来自其他网站页面的请求（�
 |---|---|---|
 | 系统 | Settings → Roles 的 Shared defaults | 所有 agent |
 | 角色 | Settings → Roles，该角色的覆盖项 | 一个角色，不分项目：Manager、Planner、Worker 或 Reviewer |
-| 项目 | 项目的 Settings 标签页 | 该项目的 Planner、Worker 和 Reviewer |
-| 项目内角色 | 同一标签页，按角色 | 某个项目里的其中一个角色 |
+| 项目 | 项目的 Agent Profiles 标签页，All roles in this project | 该项目的 Planner、Worker 和 Reviewer |
+| 项目内角色 | 同一标签页，该角色的一行 | 某个项目里的其中一个角色 |
 
 Manager 横跨所有项目，所以只有前两层。任务创建时还可以给它的 Planner、Worker 或 Reviewer 选 Agent Profile（`profile_overrides`），
 这一选择优先于所有层，只对该任务生效。没有任何一层设置的字段用内置默认值，控制台会显示每个字段的值及其来源层。
