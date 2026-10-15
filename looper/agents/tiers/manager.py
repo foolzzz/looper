@@ -368,7 +368,7 @@ class ManagerAgent:
         # so a restart before the next message keeps it; cleared once the new session has started.
         self._clean_start = False
         # What Looper said after Claude's last reply, for the next message only.
-        self._followup: _Followup | None = None
+        self._followup: dict[tuple[str | None, str | None], _Followup] = {}
 
     @property
     def agent_id(self) -> str:
@@ -489,10 +489,10 @@ class ManagerAgent:
             return
         origin = _message_origin(envelope)
         chat = (origin["channel"], origin["chat"])
+        await self._persist_chat(envelope, "user", text, envelope.message_id)
         # What Looper said after Claude's last reply applies to the next message only, from that chat only.
-        followup, self._followup = self._followup, None
-        if followup is not None and followup.chat != chat:
-            followup = None
+        # Each chat keeps its own pending followup, so another chat speaking does not drop it.
+        followup = self._followup.pop(chat, None)
 
         await self._send_status(envelope, "thinking", phase=True, activity="thinking")
 
@@ -513,7 +513,7 @@ class ManagerAgent:
                 project, work_dir, created = await self._place_task(
                     parsed, followup.new_project if followup else None)
             except _AskUser as ask:
-                self._followup = _Followup(chat, ask.note(), ask.new_project)
+                self._followup[chat] = _Followup(chat, ask.note(), ask.new_project)
                 await self._send_reply(envelope, str(ask))
                 return
             except Exception as exc:
@@ -542,7 +542,7 @@ class ManagerAgent:
             ))
             ack_text = parsed.get("acknowledgment", f"收到，已创建任务: {text[:100]}")
             block = await self._configuration_block(task_id, goal_id, project, work_dir, created)
-            self._followup = _Followup(chat, (
+            self._followup[chat] = _Followup(chat, (
                 f'[Looper] Looper created the task of your last task JSON as {task_id}, ready and not started, showed '
                 "the user its configuration and asked whether to start it now. If the message below says to start "
                 f'it, output {{"action": "task_start", "task_id": "{task_id}"}}; if it declines, remind the user how '
@@ -551,7 +551,7 @@ class ManagerAgent:
             await self._send_reply(envelope, f"{ack_text}\n\n{block}")
         elif parsed.get("action") == "task_start":
             reply, note = await self._start_task(parsed)
-            self._followup = _Followup(chat, note)
+            self._followup[chat] = _Followup(chat, note)
             await self._send_reply(envelope, reply)
         else:
             reply_text = parsed.get("response_text", response)
@@ -982,7 +982,7 @@ class ManagerAgent:
                 await self._send_reply(envelope, f"Manager 出错，没能开始新会话：{exc}", error=str(exc))
                 return
             self._pending_switch = self._pending_handoff = None
-            self._followup = None
+            self._followup = {}
             await self._record_new_session(envelope, origin, previous[0])
         logger.info("manager: a new session on /new from %s (sender %s); the previous one was %s",
                     origin["channel"], origin["sender"] or "-", previous[0] or "none")
@@ -1181,6 +1181,7 @@ class ManagerAgent:
             correlation_id=last.correlation_id,
             metadata={"origin_channel_id": last.metadata.get("origin_channel_id")},
         ))
+        await self._persist_chat(last, "assistant", text, f"auto-{uuid.uuid4().hex[:12]}")
 
     def _claude_command(self, prompt_file: Path, launch: Launch, *, resume: bool = True) -> list[str]:
         """The resident process's command (``RuntimeAdapter.resident_command``), resuming the saved session."""
@@ -1292,6 +1293,26 @@ class ManagerAgent:
 
         return {"response_text": response}
 
+    async def _persist_chat(
+        self, env: MessageEnvelope, role: str, content: str, message_id: str
+    ) -> None:
+        """Record a non-web turn in chat_messages so the console shows every channel's conversation.
+
+        Web turns are already persisted by the web channel's own path; here we cover Telegram and Lark,
+        keyed by ``<channel>:<chat_id>``. A persistence failure never blocks answering the user.
+        """
+        origin = _message_origin(env)
+        channel, chat = origin["channel"], origin["chat"]
+        if channel == "web" or not channel or not chat or not content:
+            return
+        try:
+            await db_chat.save_message(
+                session_id=f"{channel}:{chat}", message_id=message_id,
+                role=role, content=content, channel=channel,
+            )
+        except Exception:
+            logger.warning("manager: could not persist a %s chat turn", channel, exc_info=True)
+
     async def _send_reply(self, original: MessageEnvelope, text: str, *, error: str | None = None) -> None:
         """Answer ``original``; ``error`` says why the turn failed (a chat channel shows it on its status line)."""
         assert self._bus is not None
@@ -1304,6 +1325,7 @@ class ManagerAgent:
             reply_to=original.message_id,
             metadata={"origin_channel_id": original.metadata.get("origin_channel_id")},
         ))
+        await self._persist_chat(original, "assistant", text, f"{original.message_id}:reply")
 
     async def _send_status(
         self,
