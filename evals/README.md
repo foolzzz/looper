@@ -63,8 +63,13 @@ settings layer of the run's database, so every agent uses it. A full run costs
 about $0.61 with haiku (about 6 minutes); before `parallel_parts` and
 `interface_first` were added, the other five cost $0.62 with sonnet and $1.30
 with opus (about 3 minutes each), so give sonnet and opus a higher
-`--total-cap-usd`, such as 1.50 and 3.00. With haiku, `interface_first` fails
-on the plan's shape: its Planner chains the service, the client and the check. Expect some noise between identical runs: cost
+`--total-cap-usd`, such as 1.50 and 3.00 (`interface_first` alone costs about
+$0.87 with opus). With haiku, `interface_first` fails on the plan's shape: its
+Planner chains the service, the client and the check. With opus it passes on
+the Planner prompt from before `interface_first` was added and on the current
+one alike (one run each): the Planner pins the protocol in a file first, builds
+the two parts side by side and checks them together last. Expect some noise
+between identical runs: cost
 moves by up to about 10%, and an occasional single contract violation that a
 repair turn fixes is not a regression by itself.
 
