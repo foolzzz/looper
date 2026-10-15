@@ -1558,17 +1558,21 @@ class AgentHTTPServer:
 
         try:
             from ..db.channel_configs import get_config, set_bot_token, set_config
+            from ..db.connection import get_pool
             current = await get_config(channel_id)
             if current is None:
                 writer.write(_json_response(HTTP_404, {"error": f"channel '{channel_id}' not found"}))
                 await writer.drain()
                 return
-            if token != SECRET_MASK:
-                await set_bot_token(channel_id, None if token in (None, "") else token)
             if "config" in data:
-                # The sender allowlist is validated before anything is written.
+                # The sender allowlist is validated before anything is written: a rejected
+                # request (AllowlistError -> 400) must not change the stored token or config.
                 data = {**data, "config": normalized_config(str(current.get("channel_type") or ""), data["config"])}
-            updated = await set_config(channel_id, data)
+            # Apply the token and the config in one transaction so a failure leaves neither changed.
+            async with get_pool().acquire() as conn, conn.transaction():
+                if token != SECRET_MASK:
+                    await set_bot_token(channel_id, None if token in (None, "") else token, pool=conn)
+                updated = await set_config(channel_id, data, pool=conn)
         except AllowlistError as exc:
             writer.write(_json_response(HTTP_400, {"error": str(exc)}))
             await writer.drain()

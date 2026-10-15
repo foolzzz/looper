@@ -190,3 +190,24 @@ def test_bot_token_is_stored_masked_and_never_returned(monkeypatch: pytest.Monke
         assert status == 400
 
     _run(_test, monkeypatch)
+
+
+def test_a_rejected_update_does_not_change_the_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A PUT whose allowlist is invalid returns 400 and leaves the stored token untouched."""
+    from looper.db.channel_configs import get_bot_token
+
+    async def _test(pool: Any) -> None:
+        status, _ = await _call("PUT", "/api/channel-configs/channel-telegram", {"bot_token": "keep:me"})
+        assert status == 200 and await get_bot_token("channel-telegram") == "keep:me"
+        # Change the token and break the allowlist in the same request.
+        status, _ = await _call("PUT", "/api/channel-configs/channel-telegram",
+                                 {"bot_token": "new:token", "config": {"allowed_user_ids": "12,abc"}})
+        assert status == 400
+        assert await get_bot_token("channel-telegram") == "keep:me"  # unchanged
+        # Clearing the token with a bad allowlist must not delete it either.
+        status, _ = await _call("PUT", "/api/channel-configs/channel-telegram",
+                                 {"bot_token": "", "config": {"allowed_user_ids": "12,abc"}})
+        assert status == 400
+        assert await get_bot_token("channel-telegram") == "keep:me"  # still there
+
+    _run(_test, monkeypatch)
