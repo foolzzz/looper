@@ -31,6 +31,7 @@ import {
   type TaskRole,
 } from "@/lib/api";
 import { roleLabel } from "@/lib/runtime-catalog";
+import { RUN_STATUS, omit, runNotice, useNotices, type Notice } from "@/lib/schedules";
 import { AGENT_PROFILE, settingsHref } from "@/lib/settings-pages";
 import { errorText } from "@/lib/use-action";
 import { useCollapsibleRows } from "@/lib/use-collapsible-rows";
@@ -39,32 +40,12 @@ import { cn } from "@/lib/utils";
 
 /** How often the list (next run, last result) and the history of an open row with a run going refresh. */
 const REFRESH_MS = 10_000;
-/** How long the answer to "Run now" or a note stays beside the row's controls; errors stay. */
-const NOTICE_MS = 10_000;
 /** How long the rule waits for typing to pause before the server checks it. */
 const PREVIEW_DELAY_MS = 300;
 const PREVIEW_COUNT = 5;
 const ROLES: TaskRole[] = ["planner", "worker", "reviewer"];
 const TEXTAREA =
   "w-full resize-y rounded-md border border-input bg-transparent px-3 py-2 text-sm text-foreground shadow-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring aria-invalid:border-destructive";
-
-type Variant = "default" | "success" | "warning" | "destructive" | "outline";
-
-const RUN_STATUS: Record<ScheduleRunStatus, { label: string; variant: Variant }> = {
-  queued: { label: "Queued", variant: "warning" },
-  gating: { label: "Checking", variant: "default" },
-  running: { label: "Running", variant: "default" },
-  completed: { label: "Completed", variant: "success" },
-  failed: { label: "Failed", variant: "destructive" },
-  stopped: { label: "Stopped", variant: "warning" },
-  cancelled: { label: "Cancelled", variant: "outline" },
-  timed_out: { label: "Timed out", variant: "destructive" },
-  skipped_overlap: { label: "Skipped: busy", variant: "outline" },
-  skipped_missed: { label: "Skipped: missed", variant: "outline" },
-  skipped_gate: { label: "Skipped: nothing new", variant: "outline" },
-  gate_failed: { label: "Gate failed", variant: "destructive" },
-  skipped_budget: { label: "Skipped: daily budget", variant: "warning" },
-};
 
 const isActiveRun = (run: ScheduleRunInfo) =>
   run.status === "running" || run.status === "queued" || run.status === "gating";
@@ -135,12 +116,6 @@ function timeZones(): string[] {
     }
   }
   return zoneList;
-}
-
-function omit<T>(record: Record<string, T>, key: string): Record<string, T> {
-  const next = { ...record };
-  delete next[key];
-  return next;
 }
 
 const byName = (a: ScheduleInfo, b: ScheduleInfo) => {
@@ -1076,57 +1051,8 @@ function RunHistory({ schedule, open, version }: { schedule: ScheduleInfo; open:
 
 // --- The tab ---
 
-interface Notice {
-  text: string;
-  tone: "ok" | "warn" | "error";
-}
-
-/** What "Run now" answered, in words. */
-function runNotice(run: ScheduleRunInfo): Notice {
-  switch (run.status) {
-    case "running":
-      return { text: "Started", tone: "ok" };
-    case "queued":
-      return { text: "Queued behind the running task", tone: "ok" };
-    case "gating":
-      return { text: "Checking: the gate is running", tone: "ok" };
-    case "skipped_overlap":
-      return { text: "Skipped: the previous run is still in progress", tone: "warn" };
-    case "skipped_budget":
-      return { text: "Skipped: today's spend reached the daily budget", tone: "warn" };
-    case "skipped_gate":
-      return { text: "Skipped: the gate printed nothing, so there is nothing new", tone: "warn" };
-    case "gate_failed":
-      return { text: run.error ? `Gate failed: ${run.error}` : "Gate failed", tone: "error" };
-    default:
-      return {
-        text: run.error ? `Not started: ${run.error}` : RUN_STATUS[run.status]?.label ?? run.status,
-        tone: run.status === "failed" || run.status === "timed_out" ? "error" : "warn",
-      };
-  }
-}
-
-/** A message per schedule beside its controls; all but errors go after a while. */
-function useNotices() {
-  const [notices, setNotices] = useState<Record<string, Notice>>({});
-  const timers = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
-  useEffect(() => {
-    const pending = timers.current;
-    return () => Object.values(pending).forEach(clearTimeout);
-  }, []);
-  const notify = useCallback((scheduleId: string, notice: Notice | null) => {
-    clearTimeout(timers.current[scheduleId]);
-    setNotices((current) => (notice ? { ...current, [scheduleId]: notice } : omit(current, scheduleId)));
-    if (notice && notice.tone !== "error")
-      timers.current[scheduleId] = setTimeout(
-        () => setNotices((current) => (current[scheduleId] === notice ? omit(current, scheduleId) : current)),
-        NOTICE_MS,
-      );
-  }, []);
-  return { notices, notify };
-}
-
-function NoticeText({ notice }: { notice: Notice }) {
+/** A schedule's note: what "Run now" answered, or why a change failed. */
+export function NoticeText({ notice }: { notice: Notice }) {
   const Icon = notice.tone === "ok" ? CheckCircle2 : AlertCircle;
   return (
     <p
@@ -1143,7 +1069,7 @@ function NoticeText({ notice }: { notice: Notice }) {
 }
 
 /** The last run's result, the failures in a row and the active alerts, as a schedule's row shows them. */
-function LastRun({ schedule }: { schedule: ScheduleInfo }) {
+export function LastRun({ schedule }: { schedule: ScheduleInfo }) {
   const failures = schedule.consecutive_failures;
   const { failures_since: failing, stale_since: stale } = schedule.alerts;
   const at = (iso: string) => formatInZone(iso, schedule.timezone);
