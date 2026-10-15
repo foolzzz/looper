@@ -329,7 +329,7 @@ class TestWorkerSubprocess:
                 return started, bus
 
         (process,), bus = asyncio.run(_run())
-        assert process.returncode == -signal.SIGKILL  # killed and reaped
+        assert process.returncode == -signal.SIGTERM  # ended and reaped
         # The limit is the step's failure reason the Planner reads.
         reply = bus.get_queue("planner-t1").get_nowait()
         assert reply.payload["status"] == "failed"

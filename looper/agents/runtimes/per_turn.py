@@ -33,6 +33,7 @@ from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import TYPE_CHECKING, Any, ClassVar, Protocol
 
+from .. import proc_tree
 from ..run_usage import Usage
 
 if TYPE_CHECKING:
@@ -165,7 +166,7 @@ class PerTurnSession(ABC):
         assert self.started
         argv = await asyncio.to_thread(self._turn_argv)
         resuming = self._session
-        process = await asyncio.create_subprocess_exec(
+        process = await proc_tree.spawn(
             *argv, cwd=self._cwd, env=self._env,
             stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
         )
@@ -191,15 +192,13 @@ class PerTurnSession(ABC):
                     self._session = stream.session_id or self._session
                 await on_event(event)
                 if stop is not None and (capped := stop()) is not None:
-                    process.kill()
+                    await proc_tree.end(process, label=self._label)
                     break
                 if event.get("type") == "result":
                     result = event
             await process.wait()
         except BaseException:
-            if process.returncode is None:
-                process.kill()
-            await process.wait()
+            await proc_tree.end(process, label=self._label)
             stderr.cancel()
             self._process, self._ended = None, True
             raise
@@ -221,7 +220,6 @@ class PerTurnSession(ABC):
         """Forget the session's command and the session; a turn still running is killed."""
         process, self._process = self._process, None
         self._command, self._signature, self._session, self._ended = [], None, None, False
-        if process is not None and process.returncode is None:
-            process.kill()
-            await process.wait()
+        if process is not None:
+            await proc_tree.end(process, label=self._label)
         logger.info("%s stopped its %s session", self._label, self.runtime_label)

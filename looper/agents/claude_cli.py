@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
 from uuid import uuid4
 
+from . import proc_tree
 from .run_usage import Price, Usage, compaction, reported_totals, request_context, request_tokens, run_usage
 
 if TYPE_CHECKING:
@@ -326,7 +327,7 @@ async def write_user_turn(stdin: asyncio.StreamWriter, text: str, *, uuid: str |
     await stdin.drain()
 
 
-# How long a stopping resident Claude may take to exit after its stdin closes before it is killed.
+# How long a stopping resident Claude may take to exit after its stdin closes before it is ended.
 STOP_GRACE_SEC = 5.0
 # How long the rest of an exited Claude's output may take to be read.
 _DRAIN_SEC = 2.0
@@ -655,7 +656,7 @@ class ResidentClaude:
         provider's prices (``Launch.price``); without it, their cost is
         Claude Code's ``total_cost_usd``.
         """
-        process = await asyncio.create_subprocess_exec(
+        process = await proc_tree.spawn(
             *command,
             cwd=cwd,
             env=env,
@@ -710,8 +711,7 @@ class ResidentClaude:
                 # Claude closed its stdin, so it is exiting; what it already wrote decides the turn.
                 logger.warning("%s: Claude closed stdin before the turn was sent", self._label)
                 input_lost = True
-                if process.returncode is None:
-                    process.kill()
+                await proc_tree.end(process, label=self._label)
             result_event = await turn.done
         except BaseException:
             await self.stop(kill=True)
@@ -740,11 +740,12 @@ class ResidentClaude:
     async def stop(self, *, kill: bool = False) -> None:
         """End the process, if any, and forget it.
 
-        Its stdin is closed, which ends a healthy Claude; one still running
-        after ``STOP_GRACE_SEC`` (at once with ``kill``) is killed. The
-        process is always reaped, and what it wrote meanwhile is still read:
-        a turn of Claude's own that ends then is handled; one that does not is
-        closed without a result.
+        Its stdin is closed, which ends a healthy Claude; then Claude, if it
+        is still running after ``STOP_GRACE_SEC`` (at once with ``kill``),
+        and whatever it started are ended (``proc_tree.end``). The process is
+        always reaped, and what it wrote meanwhile is still read: a turn of
+        Claude's own that ends then is handled; one that does not is closed
+        without a result.
         """
         process, output = self._process, self._output
         self._process, self._output, self._command, self._signature = None, None, [], None
@@ -752,6 +753,8 @@ class ResidentClaude:
             return
         if output is not None:
             output.drop_turn()
+        # Taken while Claude runs: what it started is re-parented once it exits.
+        known = None if kill else proc_tree.tree_of(process)
         if process.stdin is not None and not process.stdin.is_closing():
             process.stdin.close()
         try:
@@ -762,9 +765,7 @@ class ResidentClaude:
                     pass
         finally:
             # Also when the wait is cancelled: the process is forgotten already.
-            if process.returncode is None:
-                process.kill()
-            await process.wait()
+            await proc_tree.end(process, label=self._label, known=known)
             if output is not None:
                 await output.finish()
         logger.info("%s stopped Claude Code (pid=%s, exit code %s)", self._label, process.pid, process.returncode)

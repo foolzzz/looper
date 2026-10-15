@@ -84,7 +84,8 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
   Manager's system prompt, model, effort, environment or installed
   plugins and skills change, the next message starts a new process that
   resumes the saved session with `--resume`. Stopping the Manager closes
-  Claude's stdin and kills it if it is still running after 5 s
+  Claude's stdin, ends Claude if it is still running after 5 s, and ends
+  whatever it started ([How an agent is stopped](#how-an-agent-is-stopped))
 - A new session ([New sessions: handoff and resume brief](#new-sessions-handoff-and-resume-brief)):
   when its agent can no longer resume the saved session, the old session, while
   its Claude runs, first writes a handoff in a `[HANDOFF]` turn (a Runs record,
@@ -500,6 +501,62 @@ Because the Manager can now run any command on this machine, Telegram and
 Lark pass on only the senders they list, and a channel without such a list
 does not start ([Channels](#channels)). The web dashboard stays local-only
 ([HTTP API](#http-api)).
+
+### How an agent is stopped
+
+Looper starts every agent process in a session of its own: each Worker and
+Reviewer run, the resident Claude Code of the Manager and of each Planner,
+and each Codex or OMP turn. The processes an agent starts share its process
+group. Some start one of their own: Codex and Claude Code run each shell
+command in a new session (seen on the real path with Codex 0.162.0 and
+Claude Code 2.1.285).
+
+Every way Looper ends an agent goes through `looper/agents/proc_tree.py`:
+
+- a task's step killed or its task stopped or cancelled;
+- `timeout_seconds`;
+- the per-run spend cap;
+- a resident session stopped or replaced;
+- server shutdown.
+
+Before it sends any signal, `proc_tree.end` reads the agent's tree from one
+`ps -A -o pid=,ppid=,pgid=,stat=` snapshot: the agent, every process whose
+parent is in the tree, and every member of a group the agent or one of them
+leads. It sends SIGTERM to those groups and to the tree's processes outside
+them, waits up to `TERM_GRACE_SEC` (3 s), then sends SIGKILL to what is
+left. It never signals the server's own process or group.
+
+A resident Claude Code that is asked to exit (its stdin closed, then
+`STOP_GRACE_SEC`) has its tree read before its stdin closes, so what it
+started is still found after it has exited and its children have been
+re-parented. Each stop logs one line:
+`<agent>: ended the process tree of pid N: F found, T exited on SIGTERM, K killed`.
+
+The agents no longer share the server's process group. So when the server
+itself is killed with SIGKILL or crashes, launchd's clean-up of the job's
+group does not reach them (systemd still ends the whole cgroup). Each agent
+process is therefore started through `proc_tree.spawn`, which records it in
+`<runtime root>/.local/agent-processes/<pid>.json` until the process is
+reaped: its pid, its start time (`ps -o lstart=`, in UTC) and the pid and
+start time of the server that started it. At startup, before any task
+resumes, `proc_tree.sweep` reads every record:
+
+- a pid that still runs with the recorded start time is the same agent,
+  orphaned, and its tree is ended as above;
+- a pid that no longer runs, or now belongs to another process, is left
+  alone;
+- either way the record is removed, except one whose server still runs
+  (another server on the same runtime root): that record and its agent are
+  left alone.
+
+Two cases are not covered:
+
+- a process that left the tree before the stop, such as a command that
+  daemonized itself (`nohup … &` whose shell exited). It has already been
+  re-parented, with nothing linking it to the agent;
+- after a crash, what an agent that had already exited left behind. Its
+  children were re-parented, and only the agent itself is recorded
+  (plan §5.2).
 
 ### Runtimes, LLM providers and Agent Profiles
 

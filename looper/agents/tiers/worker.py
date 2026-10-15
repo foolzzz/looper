@@ -37,6 +37,7 @@ from typing import Any
 from ..agent_settings import AgentType, Launch, load_agent_settings, load_concurrency
 from ..bus import MessageBus
 from ..claude_cli import ClaudeRunRecorder, budget_error
+from .. import proc_tree
 from ..run_usage import run_usage
 from ..knowledge import documents_label, load_knowledge
 from ..library import items_label, load_installed
@@ -323,9 +324,8 @@ class WorkerPool:
             await asyncio.gather(*self._tasks.values(), return_exceptions=True)
         self._tasks.clear()
 
-        for wp in self._active.values():
-            if wp.process and wp.process.returncode is None:
-                wp.process.kill()
+        await asyncio.gather(*(proc_tree.end(wp.process, label=f"worker {wp.worker_id}")
+                               for wp in self._active.values() if wp.process and wp.process.returncode is None))
         self._active.clear()
 
     def is_healthy(self) -> bool:
@@ -391,10 +391,10 @@ class WorkerPool:
         ))
 
     async def kill(self, worker_id: str) -> bool:
-        """Stop a running worker mid-run, or one waiting for room in its project. Cancelling its task kills its
-        Claude subprocess (``_execute`` kills the process when the read is cancelled) and runs the done-callback
-        that frees its place. Returns whether a worker was running or waiting; a finished or unknown worker returns
-        False. A killed worker publishes no result."""
+        """Stop a running worker mid-run, or one waiting for room in its project. Cancelling its task ends its
+        process and everything it started (``_execute`` ends the tree when the read is cancelled) and runs the
+        done-callback that frees its place. Returns whether a worker was running or waiting; a finished or unknown
+        worker returns False. A killed worker publishes no result."""
         task = self._tasks.get(worker_id)
         if task is None or task.done():
             return False
@@ -691,7 +691,7 @@ class WorkerPool:
 
         logger.info("worker %s starting subprocess: %s (cwd=%s)", worker_id, command[0], work_dir)
         try:
-            process = await asyncio.create_subprocess_exec(
+            process = await proc_tree.spawn(
                 *command,
                 cwd=work_dir,
                 env=launch.environment(),
@@ -734,8 +734,7 @@ class WorkerPool:
                     # Over its per-run cap at the provider's prices: stopped now, ending with the cap's result.
                     result_event = capped.result_event
                     _end_input()
-                    if process.returncode is None:
-                        process.kill()
+                    await proc_tree.end(process, label=f"worker {worker_id}")
                     return
 
                 event_type = event.get("type", "")
@@ -813,10 +812,8 @@ class WorkerPool:
             await process.wait()
         except BaseException as exc:
             _end_input()
-            # Never leave Claude running unsupervised once the worker gives up.
-            if process.returncode is None:
-                process.kill()
-                await process.wait()
+            # Never leave Claude, or anything it started, running unsupervised once the worker gives up.
+            await proc_tree.end(process, label=f"worker {worker_id}")
             timed_out = isinstance(exc, asyncio.TimeoutError)
             error = (
                 f"Claude ran longer than the {run_timeout} s limit (timeout_seconds)" if timed_out
