@@ -72,44 +72,6 @@ class TestTaskRouter:
 
         asyncio.run(_run())
 
-    def test_exceeding_concurrency_queues_task(self) -> None:
-        async def _run() -> None:
-            with tempfile.TemporaryDirectory() as tmp:
-                bus = MessageBus(runtime_root=Path(tmp))
-                router = TaskRouter(runtime_root=Path(tmp))
-                await router.start(bus)
-
-                # Send 4 tasks (max concurrent = 3)
-                for i in range(4):
-                    envelope = MessageEnvelope.create(
-                        source=MANAGER_ADDRESS,
-                        target=TASK_ROUTER_ADDRESS,
-                        message_type=MessageType.TASK_REQUEST,
-                        payload={
-                            "goal_id": f"g{i}",
-                            "requirement": f"task {i}",
-                            "work_dir": "/tmp",
-                            "project_id": "proj-1",
-                        },
-                        metadata={"origin_channel_id": "channel-web"},
-                    )
-                    await bus.publish(envelope)
-
-                # Every request has been placed: given a Planner or queued.
-                await _until(lambda: len(router._tasks) == 4
-                             and len(router._planners) + router._pending_queue.qsize() == 4)
-
-                running = sum(1 for t in router._tasks.values() if t.status == "running")
-                pending = sum(1 for t in router._tasks.values() if t.status == "pending")
-                assert running == 3
-                assert pending == 1
-                assert len(router._planners) == 3
-
-                await router.stop()
-                await bus.shutdown()
-
-        asyncio.run(_run())
-
     def test_forwards_status_to_manager(self, planner_claude: Any) -> None:
         from tests.test_planner_agent import plan, step
 
@@ -153,6 +115,159 @@ class TestTaskRouter:
                 await bus.shutdown()
 
         asyncio.run(_run())
+
+
+def _planner_limits(agent_db: Any, *, role: int | None = None, projects: dict[str, int] | None = None) -> None:
+    """Store the Planner's concurrency limit on its role layer and on its layer in some projects."""
+    rows = [{"scope": "role", "role": "planner", "project_id": None, "max_concurrency": role}] if role else []
+    rows += [{"scope": "role_project", "role": "planner", "project_id": project_id, "max_concurrency": limit}
+             for project_id, limit in (projects or {}).items()]
+    agent_db.list_layers.return_value = rows
+
+
+def _request(project_id: str, requirement: str) -> MessageEnvelope:
+    return MessageEnvelope.create(
+        source=MANAGER_ADDRESS, target=TASK_ROUTER_ADDRESS, message_type=MessageType.TASK_REQUEST,
+        payload={"goal_id": "g", "requirement": requirement, "work_dir": "/tmp", "project_id": project_id},
+        metadata={"origin_channel_id": "channel-web"},
+    )
+
+
+def _ended(task_id: str) -> MessageEnvelope:
+    """The task's Planner reporting it completed."""
+    return MessageEnvelope.create(
+        source=planner_address(task_id), target=TASK_ROUTER_ADDRESS, message_type=MessageType.GOAL_STATUS,
+        payload={"task_id": task_id, "status": "completed", "summary": "done"},
+    )
+
+
+class TestProjectConcurrency:
+    """At most the Planner's limit of a project's tasks run at once; the rest wait, oldest first, and never hold
+    up another project's."""
+
+    @staticmethod
+    def _statuses(router: TaskRouter) -> dict[str, str]:
+        return {task.requirement: task.status for task in router._tasks.values()}
+
+    @staticmethod
+    def _id(router: TaskRouter, requirement: str) -> str:
+        return next(task.task_id for task in router._tasks.values() if task.requirement == requirement)
+
+    @staticmethod
+    def _placed(router: TaskRouter, count: int) -> Any:
+        return lambda: len(router._tasks) == count and len(router._planners) + len(router._pending) == count
+
+    def test_a_project_at_its_limit_queues_its_tasks_without_delaying_another(self, agent_db: Any) -> None:
+        _planner_limits(agent_db, role=2)
+
+        async def _run() -> tuple[dict[str, str], dict[str, str]]:
+            with tempfile.TemporaryDirectory() as tmp:
+                bus = MessageBus(runtime_root=Path(tmp))
+                router = TaskRouter(runtime_root=Path(tmp))
+                await router.start(bus)
+                for requirement in ("a1", "a2", "a3", "a4"):
+                    await bus.publish(_request("proj-a", requirement))
+                await bus.publish(_request("proj-b", "b1"))
+                await _until(self._placed(router, 5))
+                before = self._statuses(router)
+
+                await bus.publish(_ended(self._id(router, "a1")))
+                await _until(lambda: self._statuses(router)["a3"] == "running")
+                after = self._statuses(router)
+                await router.stop()
+                await bus.shutdown()
+                return before, after
+
+        before, after = asyncio.run(_run())
+        assert before == {"a1": "running", "a2": "running", "a3": "pending", "a4": "pending", "b1": "running"}
+        # The oldest waiting task of the project takes the place its ended task left.
+        assert after == {**before, "a1": "completed", "a3": "running"}
+
+    def test_a_raised_limit_starts_waiting_tasks_and_a_lowered_one_stops_none(self, agent_db: Any) -> None:
+        _planner_limits(agent_db, role=3, projects={"proj-a": 1})
+
+        async def _run() -> list[dict[str, str]]:
+            with tempfile.TemporaryDirectory() as tmp:
+                bus = MessageBus(runtime_root=Path(tmp))
+                router = TaskRouter(runtime_root=Path(tmp))
+                await router.start(bus)
+                for requirement in ("a1", "a2", "a3"):
+                    await bus.publish(_request("proj-a", requirement))
+                await _until(self._placed(router, 3))
+                seen = [self._statuses(router)]
+
+                _planner_limits(agent_db, role=3, projects={"proj-a": 2})
+                await router.recheck()
+                seen.append(self._statuses(router))
+
+                _planner_limits(agent_db, role=3)  # the project's override cleared: the role's 3
+                await router.recheck()
+                seen.append(self._statuses(router))
+
+                _planner_limits(agent_db, role=1)
+                await router.recheck()
+                await bus.publish(_request("proj-a", "a4"))
+                await _until(self._placed(router, 4))
+                seen.append(self._statuses(router))
+                await router.stop()
+                await bus.shutdown()
+                return seen
+
+        first, raised, cleared, lowered = asyncio.run(_run())
+        assert first == {"a1": "running", "a2": "pending", "a3": "pending"}
+        assert raised == {"a1": "running", "a2": "running", "a3": "pending"}
+        assert cleared == {"a1": "running", "a2": "running", "a3": "running"}
+        # Lowering a limit stops nothing that runs; a new task waits until fewer run than it.
+        assert lowered == {**cleared, "a4": "pending"}
+
+    @pytest.mark.parametrize("arrival", ["request", "restart", "resume"])
+    def test_a_new_restarted_or_resumed_task_waits_for_room(
+        self, agent_db: Any, monkeypatch: pytest.MonkeyPatch, arrival: str,
+    ) -> None:
+        from looper.db import tasks as db_tasks
+
+        _planner_limits(agent_db, projects={"proj-a": 1})
+        row = {"id": "task-old", "requirement": "a2", "goal_id": "g", "work_dir": "/tmp", "project_id": "proj-a",
+               "status": "stopped" if arrival == "restart" else "executing", "correlation_id": "c-old",
+               "origin_channel_id": ""}
+        monkeypatch.setattr(db_tasks, "get_task", AsyncMock(return_value=row))
+        monkeypatch.setattr(db_tasks, "reset_task_for_restart", AsyncMock(return_value=True))
+
+        async def _run() -> tuple[list[str], str, list[str]]:
+            with tempfile.TemporaryDirectory() as tmp:
+                bus = MessageBus(runtime_root=Path(tmp))
+                router = TaskRouter(runtime_root=Path(tmp))
+                assigned: list[str] = []
+                assign = router._assign_task
+
+                async def recording(task: Task, envelope: MessageEnvelope) -> None:
+                    assigned.append(task.requirement)
+                    await assign(task, envelope)
+
+                router._assign_task = recording  # type: ignore[method-assign]
+                await router.start(bus)
+                await bus.publish(_request("proj-a", "a1"))
+                await _until(self._placed(router, 1))
+                if arrival == "request":
+                    await bus.publish(_request("proj-a", "a2"))
+                elif arrival == "restart":
+                    await bus.publish(MessageEnvelope.create(
+                        source=MANAGER_ADDRESS, target=TASK_ROUTER_ADDRESS, message_type=MessageType.TASK_RESTART,
+                        payload={"task_id": "task-old"}))
+                else:
+                    await router.resume_tasks(["task-old"])
+                await _until(self._placed(router, 2))
+                waiting, status = list(assigned), self._statuses(router)["a2"]
+
+                await bus.publish(_ended(self._id(router, "a1")))
+                await _until(lambda: len(assigned) == 2)
+                await router.stop()
+                await bus.shutdown()
+                return waiting, status, assigned
+
+        waiting, status, assigned = asyncio.run(_run())
+        assert (waiting, status) == (["a1"], "pending")
+        assert assigned == ["a1", "a2"]
 
 
 class TestPlannerOutcome:

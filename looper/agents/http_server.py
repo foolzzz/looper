@@ -28,6 +28,7 @@ from .project_execution import ProjectExecution
 from .channels.web import WebChannelAdapter
 from .supervisor import AgentSupervisor
 from .tiers.task import TaskRouter
+from .tiers.worker import WorkerPool
 
 logger = logging.getLogger(__name__)
 
@@ -101,6 +102,7 @@ class AgentHTTPServer:
         web_adapter: WebChannelAdapter,
         task_router: TaskRouter,
         supervisor: AgentSupervisor,
+        worker_pool: WorkerPool | None = None,
         broadcaster: Broadcaster | None = None,
         static_dir: Path | None = None,
         runtime_root: Path | None = None,
@@ -111,6 +113,8 @@ class AgentHTTPServer:
         self._port = port
         self._web_adapter = web_adapter
         self._task_router = task_router
+        # Told, with the TaskRouter, to start what a raised concurrency limit lets start.
+        self._worker_pool = worker_pool
         self._supervisor = supervisor
         self._broadcaster = broadcaster or Broadcaster()
         self._static_dir = static_dir or default_static_dir()
@@ -425,20 +429,20 @@ class AgentHTTPServer:
         elif path == "/api/agent-settings/system" and method == "PUT":
             await self._handle_agent_settings(writer, lambda: agent_settings.update_system(projects.json_object(body)))
         elif (m := self._RE_ROLE_SETTINGS.match(path)) and method == "PUT":
-            await self._handle_agent_settings(writer, lambda: agent_settings.update_role(
-                m.group(1), projects.json_object(body)))
+            await self._handle_agent_settings(writer, lambda: self._write_layer(
+                body, lambda data: agent_settings.update_role(m.group(1), data)))
         elif (m := self._RE_PROJECT_AGENT_SETTINGS.match(path)) and method == "GET":
             await self._handle_agent_settings(writer, lambda: agent_settings.project_settings_view(m.group(1)))
         elif (m := self._RE_PROJECT_AGENT_SETTINGS.match(path)) and method == "PUT":
             await self._handle_agent_settings(writer, lambda: agent_settings.update_project(
                 m.group(1), projects.json_object(body)))
         elif (m := self._RE_PROJECT_ROLE_SETTINGS.match(path)) and method == "PUT":
-            await self._handle_agent_settings(writer, lambda: agent_settings.update_project(
-                m.group(1), projects.json_object(body), role=m.group(2)))
+            await self._handle_agent_settings(writer, lambda: self._write_layer(
+                body, lambda data: agent_settings.update_project(m.group(1), data, role=m.group(2))))
         elif path == "/api/config/export" and method == "GET":
             await self._handle_config_export(query, writer)
         elif (m := self._RE_CONFIG_IMPORT_APPLY.match(path)) and method == "POST":
-            await self._handle_config_import(writer, HTTP_200, lambda imports: imports.apply(m.group(1)))
+            await self._handle_config_import(writer, HTTP_200, lambda imports: self._apply_import(imports, m.group(1)))
         elif (m := self._RE_CONFIG_IMPORT.match(path)) and method == "DELETE":
             await self._handle_config_import(writer, HTTP_200, lambda imports: imports.cancel(m.group(1)))
         elif path == "/api/catalog" and method == "GET":
@@ -1178,6 +1182,32 @@ class AgentHTTPServer:
         await writer.drain()
 
     # --- Agent settings (the defaults every agent inherits) ---
+
+    async def _write_layer(
+        self, body: bytes, update: Callable[[dict[str, Any]], Awaitable[dict[str, Any]]],
+    ) -> dict[str, Any]:
+        """``update`` a role's layer with the body; when it set a concurrency limit, start what it lets start."""
+        data = projects.json_object(body)
+        result = await update(data)
+        if "max_concurrency" in data:
+            await self._recheck_concurrency()
+        return result
+
+    async def _apply_import(self, imports: config_imports.ConfigImports, import_id: str) -> Any:
+        """Apply an import; its layers may raise a concurrency limit."""
+        result = await imports.apply(import_id)
+        await self._recheck_concurrency()
+        return result
+
+    async def _recheck_concurrency(self) -> None:
+        """Start the tasks and runs that wait for room a raised limit now gives; a lowered limit stops nothing."""
+        try:
+            await self._task_router.recheck()
+            if self._worker_pool is not None:
+                await self._worker_pool.recheck()
+        except Exception:
+            # The write stands; what waits starts when a task or run ends.
+            logger.exception("re-checking the concurrency limits failed")
 
     async def _handle_agent_settings(
         self, writer: asyncio.StreamWriter, request: Callable[[], Awaitable[dict[str, Any]]],

@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback } from "react";
-import { Bot, Loader2, RefreshCw, PowerOff, Clock, Cpu, Settings2, Zap } from "lucide-react";
+import { Bot, Loader2, RefreshCw, PowerOff, Clock, Cpu, Settings2 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
 import {
@@ -96,10 +96,6 @@ function AgentCard({
                 <span className="truncate">{profile}</span>
               </span>
             )}
-            <span className="flex items-center gap-1">
-              <Zap className="h-3 w-3" />
-              x{config.max_concurrency}
-            </span>
             {config.timeout_seconds > 0 && (
               <span className="flex items-center gap-1">
                 <Clock className="h-3 w-3" />

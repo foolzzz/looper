@@ -123,7 +123,7 @@ export function ProjectAgentSettingsSection({ projectId }: { projectId: string }
         <p className="mt-1 text-xs text-muted-foreground">
           Harness, {AGENT_PROFILE.name}, effort, environment and spend cap per run. Each resolves Settings → Roles
           (every role, then the role) → this project → the role in this project; the most specific one set wins, and
-          empty fields inherit.
+          empty fields inherit. Each role in this project can also have its own limit on how many run at once here.
         </p>
       </div>
       {body}

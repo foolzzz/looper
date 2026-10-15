@@ -878,7 +878,6 @@ export interface RoleConfig {
   default_prompt: string;
   max_turns: number;
   timeout_seconds: number;
-  max_concurrency: number;
   extra_args: Record<string, unknown> | null;
   metadata: Record<string, unknown> | null;
   created_at: string;
@@ -1393,6 +1392,9 @@ export interface LayerValues {
   env: LayerEnvEntry[];
   /** `--max-budget-usd` on each Claude Code process. */
   run_budget_usd: number | null;
+  /** How many of the role run at once in one project (the Planner: its tasks); only a Planner, Worker or Reviewer
+   * role layer, or that role's layer in a project, sets it. */
+  max_concurrency: number | null;
 }
 
 export interface Sourced<T> {
@@ -1420,6 +1422,8 @@ export interface EffectiveSettings {
   env: ({ key: string } & Sourced<string>)[];
   /** null = no cap. */
   run_budget_usd: Sourced<number | null>;
+  /** The Planner's, Workers' and Reviewers' limit per project; absent for the Manager and the system layer. */
+  max_concurrency?: Sourced<number>;
 }
 
 export interface SettingLimits {
@@ -1431,6 +1435,7 @@ export interface SettingLimits {
   /** The Agent Profile every role runs with when no layer selects one. */
   builtin_profile: { profile_id: string; name: string };
   budget_max_usd: number;
+  concurrency_max: number;
 }
 
 export interface LayerState {

@@ -14,7 +14,8 @@ sections:
   profiles still use; an import never adds or changes a runtime (see below);
 - ``settings``: the system and role layers of the agent settings (a layer
   names its Agent Profile, ``profile``), and each role's prompt (``null`` while
-  it follows the recommended one), timeout, concurrency and enabled flag;
+  it follows the recommended one), timeout and enabled flag. A role's
+  ``max_concurrency`` from before the layers held it is ignored, with a note;
 - ``channels``: each chat channel's configuration;
 - ``installs``: the global installs, naming their item by kind and name;
 - ``projects`` (``--include-projects``): each project's fields, execution
@@ -75,8 +76,8 @@ _CHANNEL_PUBLIC_KEYS = {
     "telegram": frozenset({"allowed_user_ids", "bot_token_env", "description"}),
     "lark": frozenset({"allowed_open_ids", "app_id_env", "app_secret_env", "description"}),
 }
-_ROLE_FIELDS = ("prompt", "timeout_seconds", "max_concurrency", "enabled")
-_LAYER_FIELDS = ("harness_prompt", "profile", "effort", "env", "run_budget_usd")
+_ROLE_FIELDS = ("prompt", "timeout_seconds", "enabled")
+_LAYER_FIELDS = ("harness_prompt", "profile", "effort", "env", "run_budget_usd", "max_concurrency")
 _PROVIDER_FIELDS = ("protocols", "auth", "oauth_runtime_type", "base_url", "models", "env", "max_concurrency")
 _ITEM_FIELDS = ("origin", "source", "version", "description", "modified")
 _DOCUMENT_FIELDS = ("summary", "source_kind", "filename", "path", "sha256", "size_bytes")
@@ -85,7 +86,6 @@ _ITEM_NAME_MAX = 255
 _PATH_MAX = 1024
 _PROMPT_MAX_CHARS = 100_000
 _TIMEOUT_MAX_SECONDS = 365 * 86400
-_CONCURRENCY_MAX = 64
 
 
 class ConfigFileError(ValueError):
@@ -218,8 +218,7 @@ def role_entry(row: Mapping[str, Any]) -> dict[str, Any]:
     prompt = row["system_prompt"]
     edited = prompt not in ("", row["default_prompt"])
     return {"role": row["role"], "prompt": prompt if edited else None,
-            "timeout_seconds": row["timeout_seconds"], "max_concurrency": row["max_concurrency"],
-            "enabled": row["enabled"]}
+            "timeout_seconds": row["timeout_seconds"], "enabled": row["enabled"]}
 
 
 def _secret(value: Any, include_secrets: bool) -> Any:
@@ -509,10 +508,10 @@ def _item_name(kind: str, raw: Any) -> str:
     return name
 
 
-def _layer_values(entry: Mapping[str, Any], scope: str) -> dict[str, Any]:
+def _layer_values(entry: Mapping[str, Any], scope: str, role: str | None) -> dict[str, Any]:
     """A layer's values, its Agent Profile by name (``None`` for none). A file from before Agent Profiles gives a
     ``model``: that is the profile ``claude-code/<model>``, as the upgrade made it."""
-    from .agent_settings import Layer, SettingsError, layer_update, model_name
+    from .agent_settings import AgentType, Layer, SettingsError, layer_update, model_name
 
     unknown = sorted(set(entry) - {"scope", "role", "model", *_LAYER_FIELDS})
     if unknown:
@@ -520,7 +519,7 @@ def _layer_values(entry: Mapping[str, Any], scope: str) -> dict[str, Any]:
     profile = entry.get("profile")
     try:
         values = layer_update({name: entry.get(name) for name in _LAYER_FIELDS if name != "profile"},
-                              Layer(scope))
+                              Layer(scope), AgentType(role) if role else None)
         if "model" in entry and "profile" not in entry:
             model = model_name(entry["model"])
             profile = f"{_MODEL_PROFILE_PREFIX}{model}" if model else None
@@ -955,7 +954,7 @@ class _Importer:
                 raise _Skip(f"role {role!r} is not one of {', '.join(roles)}")
             if scope in ("system", "project") and role is not None:
                 raise _Skip(f"a {scope} layer has no role")
-            values = _layer_values(raw, scope)
+            values = _layer_values(raw, scope, role)
             profile_id = await self._layer_profile(values["profile"], scope, role)
         except _Skip as exc:
             self.record(section, label, Action.SKIPPED, reason=str(exc))
@@ -980,7 +979,6 @@ class _Importer:
             values = {
                 "prompt": None if prompt is None else _string(prompt, "prompt", max_chars=_PROMPT_MAX_CHARS),
                 "timeout_seconds": _whole(entry.get("timeout_seconds"), "timeout_seconds", 0, _TIMEOUT_MAX_SECONDS),
-                "max_concurrency": _whole(entry.get("max_concurrency"), "max_concurrency", 1, _CONCURRENCY_MAX),
                 "enabled": _boolean(entry.get("enabled"), "enabled"),
             }
         except _Skip as exc:
@@ -1214,6 +1212,11 @@ async def import_config(conn: Any, data: Mapping[str, Any], *, apply: bool) -> P
         await importer.layer(entry, None)
     for entry in settings.get("roles", []):
         await importer.role(entry)
+    if any(isinstance(entry, Mapping) and "max_concurrency" in entry for entry in settings.get("roles", [])):
+        importer.plan.notes.append(
+            "settings.roles: a role's max_concurrency is no longer a role setting and was ignored; how many "
+            "Planners (tasks), Workers and Reviewers run at once in a project is the max_concurrency of their "
+            "role layers")
     for entry in data.get("channels", []):
         await importer.channel(entry)
     for entry in data.get("catalog", []):

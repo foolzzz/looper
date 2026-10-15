@@ -2,7 +2,11 @@
 
 Each Worker runs as a subprocess (Claude Code, Codex or OMP) with limited
 permissions. The WorkerPool manages lifecycle, concurrency, and result
-collection, reporting back to the Planner via the Bus.
+collection, reporting back to the Planner via the Bus. A run starts once
+fewer Workers (or Reviewers) run in its task's project than that role's
+concurrency limit there (``agent_settings.load_concurrency``, read each time
+it checks); until then it waits, and it checks again whenever a run ends or a
+limit changes (``recheck``).
 
 A Worker's or Reviewer's system prompt is the harness (its project's Worker
 harness, else the default in Settings), its role prompt (the ``worker`` or
@@ -29,7 +33,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from ..agent_settings import AgentType, Launch, load_agent_settings
+from ..agent_settings import AgentType, Launch, load_agent_settings, load_concurrency
 from ..bus import MessageBus
 from ..claude_cli import ClaudeRunRecorder, budget_error
 from ..run_usage import run_usage
@@ -58,7 +62,6 @@ from ...db import projects as db_projects
 
 logger = logging.getLogger(__name__)
 
-MAX_POOL_SIZE = 4
 DEFAULT_RUN_TIMEOUT_SEC = 86400
 
 # The Worker's role prompt when the ``worker`` config row has none; serve
@@ -244,7 +247,6 @@ def judge_result(
 class WorkerConfig:
     claude_bin: str = "claude"
     sandbox: str = "workspace-write"
-    max_workers: int = MAX_POOL_SIZE
 
 
 @dataclass
@@ -255,7 +257,7 @@ class WorkerProcess:
     task_id: str
     plan_id: str
     process: asyncio.subprocess.Process | None = None
-    status: str = "pending"  # "pending" | "running" | "completed" | "failed"
+    status: str = "pending"  # "pending" (waiting for room in its project) | "running" | "completed" | "failed"
     result: dict[str, Any] | None = None
 
 
@@ -271,8 +273,13 @@ class WorkerPool:
         self._runtime_root = runtime_root
         self._bus: MessageBus | None = None
         self._active: dict[str, WorkerProcess] = {}
-        self._semaphore = asyncio.Semaphore(config.max_workers)
         self._tasks: dict[str, asyncio.Task[Any]] = {}
+        # The runs counted against their project's limit: worker id -> (role, project id).
+        self._slots: dict[str, tuple[AgentType, str | None]] = {}
+        # Held to check a limit and take a place, so two runs cannot both take a project's last one.
+        self._slot_lock = asyncio.Lock()
+        # The runs waiting for a place, woken to check again when a run ends or a limit changes.
+        self._slot_waiters: set[asyncio.Future[None]] = set()
         self._listener_task: asyncio.Task[Any] | None = None
         self._running = False
         self._workers_dir = runtime_root / ".local" / "workers"
@@ -292,7 +299,7 @@ class WorkerPool:
         self._bus = bus
         self._running = True
         self._listener_task = asyncio.create_task(self._listen_loop())
-        logger.info("worker pool started (max %d concurrent)", self._config.max_workers)
+        logger.info("worker pool started")
 
     async def stop(self) -> None:
         self._running = False
@@ -377,11 +384,10 @@ class WorkerPool:
         ))
 
     async def kill(self, worker_id: str) -> bool:
-        """Stop a running worker mid-run. Cancelling its task kills its Claude
-        subprocess (``_execute`` kills the process when the read is cancelled)
-        and runs the done-callback that frees the slot. Returns whether a
-        worker was running; a finished or unknown worker returns False and
-        publishes no result for it."""
+        """Stop a running worker mid-run, or one waiting for room in its project. Cancelling its task kills its
+        Claude subprocess (``_execute`` kills the process when the read is cancelled) and runs the done-callback
+        that frees its place. Returns whether a worker was running or waiting; a finished or unknown worker returns
+        False. A killed worker publishes no result."""
         task = self._tasks.get(worker_id)
         if task is None or task.done():
             return False
@@ -427,12 +433,11 @@ class WorkerPool:
 
     async def _dispatch(self, envelope: MessageEnvelope) -> None:
         worker_id = envelope.target.agent_id
-        if worker_id in self._active:
+        if worker_id in self._active or worker_id in self._tasks:
             logger.debug("worker %s already active, skipping", worker_id)
             return
 
         logger.info("dispatching worker %s (active=%d)", worker_id, len(self._active))
-        await self._semaphore.acquire()
         task = asyncio.create_task(self._run_worker(envelope))
         self._tasks[worker_id] = task
         task.add_done_callback(lambda t: self._cleanup_worker(worker_id))
@@ -440,7 +445,56 @@ class WorkerPool:
     def _cleanup_worker(self, worker_id: str) -> None:
         self._tasks.pop(worker_id, None)
         self._active.pop(worker_id, None)
-        self._semaphore.release()
+        if self._slots.pop(worker_id, None) is not None:
+            self._wake_slot_waiters()
+
+    def _wake_slot_waiters(self) -> None:
+        for waiter in self._slot_waiters:
+            if not waiter.done():
+                waiter.set_result(None)
+        self._slot_waiters.clear()
+
+    async def recheck(self) -> None:
+        """Let every run waiting for room in its project check its limit again (a limit changed)."""
+        self._wake_slot_waiters()
+
+    async def _take_slot(self, worker_id: str, agent: AgentType, task_id: str) -> None:
+        """Wait until fewer of ``agent`` run in the task's project than its limit, read each time, then take a
+        place. A run whose project cannot be read counts outside any project, under the role's limit."""
+        project_id = await self._project_id(task_id)
+        waiting = False
+        while True:
+            async with self._slot_lock:
+                limit = await load_concurrency(agent, project_id)
+                running = sum(1 for held in self._slots.values() if held == (agent, project_id))
+                if running < limit:
+                    self._slots[worker_id] = (agent, project_id)
+                    return
+                waiter = asyncio.get_running_loop().create_future()
+                self._slot_waiters.add(waiter)
+            if not waiting:
+                waiting = True
+                label = "Reviewer" if agent is AgentType.REVIEWER else "Worker"
+                logger.info("worker %s waits: %d %ss run in project %s, its limit %d", worker_id, running,
+                            agent.value, project_id, limit)
+                if task_id:
+                    await self._activity(task_id, worker_id, "phase",
+                                         f"{label} waits for room in this project ({running} running, limit {limit})")
+            try:
+                await waiter
+            finally:
+                self._slot_waiters.discard(waiter)
+
+    @staticmethod
+    async def _project_id(task_id: str) -> str | None:
+        """The task's project, for the concurrency limit; None when it cannot be read (the run says why)."""
+        if not task_id:
+            return None
+        try:
+            project = await db_projects.get_task_project(task_id)
+        except Exception:
+            return None
+        return str(project["id"]) if project else None
 
     async def _run_worker(self, envelope: MessageEnvelope) -> None:
         assert self._bus is not None
@@ -453,13 +507,14 @@ class WorkerPool:
             worker_id=worker_id,
             task_id=task_id,
             plan_id=plan_id,
-            status="running",
         )
         self._active[worker_id] = wp
 
         is_verify = envelope.message_type == MessageType.VERIFY_REQUEST
 
         parent_task_id = payload.get("parent_task_id", "")
+        await self._take_slot(worker_id, AgentType.REVIEWER if is_verify else AgentType.WORKER, parent_task_id)
+        wp.status = "running"
         if parent_task_id:
             try:
                 label = "Reviewer" if is_verify else "Worker"
@@ -878,7 +933,6 @@ class WorkerPool:
 
     def status(self) -> dict[str, Any]:
         return {
-            "pool_size": self._config.max_workers,
             "active": self.active_count(),
             "workers": {
                 wid: {"task_id": wp.task_id, "status": wp.status}

@@ -213,7 +213,6 @@ async def seed_role_configs(pool: Any = None) -> None:
         {
             "role": "worker",
             "display_name": "Worker",
-            "max_concurrency": 3,
             "timeout_seconds": 86400,
             # The role prompt of every Worker (the report contract follows it).
             "system_prompt": WORKER_SYSTEM_PROMPT,
@@ -420,6 +419,7 @@ async def _run_agent_system(
         web_adapter=web_adapter,
         task_router=task_router,
         supervisor=supervisor,
+        worker_pool=worker_pool,
         broadcaster=broadcaster,
         runtime_root=runtime_root,
         self_checks=[check.to_dict() for check in checks],

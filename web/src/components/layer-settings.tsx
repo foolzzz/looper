@@ -10,6 +10,7 @@ import type {
   EffectiveSettings,
   LayerUpdate,
   LayerValues,
+  ProjectRole,
   SettingLayer,
   SettingLimits,
   SettingSource,
@@ -28,6 +29,13 @@ const LAYER_LABELS: Record<SettingSource, string> = {
   project: "this project",
   role_project: "this role in the project",
   task: "this task",
+};
+
+/** What a task role's concurrency limit counts, in one project. */
+const CONCURRENCY_LABELS: Record<ProjectRole, string> = {
+  planner: "Tasks running at once per project",
+  worker: "Workers running at once per project",
+  reviewer: "Reviewers running at once per project",
 };
 
 const ENV_NAME = /^[A-Z_][A-Z0-9_]*$/;
@@ -56,6 +64,7 @@ interface Draft {
   effort: string;
   env: EnvRow[];
   budget: string;
+  concurrency: string;
 }
 
 function draftOf(values: LayerValues): Draft {
@@ -65,7 +74,14 @@ function draftOf(values: LayerValues): Draft {
     effort: values.effort ?? "",
     env: values.env.map((e) => ({ key: e.key, value: e.value ?? "", unset: e.value === null })),
     budget: values.run_budget_usd == null ? "" : String(values.run_budget_usd),
+    concurrency: values.max_concurrency == null ? "" : String(values.max_concurrency),
   };
+}
+
+/** A number field's change as the API takes it: "" is null; a value that does not parse goes as typed. */
+function numberOrTyped(text: string) {
+  const number = Number(text);
+  return text === "" ? null : Number.isFinite(number) ? number : text;
 }
 
 /** The fields that changed, as the API takes them: "" is null; a cap that does not parse goes as typed. */
@@ -78,10 +94,9 @@ function changesOf(draft: Draft, values: LayerValues): LayerUpdate {
   if (JSON.stringify(draft.env) !== JSON.stringify(before.env))
     changes.env = draft.env.map((e) => ({ key: e.key, value: e.unset ? null : e.value }));
   const budget = draft.budget.trim();
-  if (budget !== before.budget) {
-    const number = Number(budget);
-    changes.run_budget_usd = budget === "" ? null : Number.isFinite(number) ? number : budget;
-  }
+  if (budget !== before.budget) changes.run_budget_usd = numberOrTyped(budget);
+  const concurrency = draft.concurrency.trim();
+  if (concurrency !== before.concurrency) changes.max_concurrency = numberOrTyped(concurrency);
   return changes;
 }
 
@@ -132,8 +147,10 @@ function NowValue<T>({
 const SELECT = "flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm text-foreground";
 
 /**
- * One settings layer's harness, Agent Profile, effort, environment and per-run cap. An empty field is not set here and
- * inherits; with `effective`, each field also says what applies now and where it comes from.
+ * One settings layer's harness, Agent Profile, effort, environment and per-run cap; a Planner's, Worker's or
+ * Reviewer's role layer (in Settings → Roles or in a project) also has the role's concurrency limit per project. An
+ * empty field is not set here and inherits; with `effective`, each field also says what applies now and where it
+ * comes from.
  */
 export function LayerSettingsForm({
   idPrefix,
@@ -162,6 +179,9 @@ export function LayerSettingsForm({
   const [error, setError] = useState("");
   const [saved, setSaved] = useState(false);
   const isSystem = layer === "system";
+  const [only] = roles;
+  const concurrencyRole: ProjectRole | null =
+    (layer === "role" || layer === "role_project") && roles.length === 1 && only !== "manager" ? only : null;
 
   const set = (fields: Partial<Draft>) => {
     setDraft((d) => ({ ...d, ...fields }));
@@ -194,6 +214,7 @@ export function LayerSettingsForm({
   const effortText = (value: string | null) => value || "runtime default";
   const profileText = (value: EffectiveProfile) => `${value.name} (${value.runtime} · ${value.provider} · ${value.model})`;
   const budgetText = (value: number | null) => (value == null ? "no cap" : formatUsd(value));
+  const concurrencyText = (value: number) => String(value);
 
   return (
     <form onSubmit={save} className="space-y-4">
@@ -280,6 +301,41 @@ export function LayerSettingsForm({
           />
           <NowValue id={`${idPrefix}-budget-now`} setting={effective?.run_budget_usd} layer={layer} show={budgetText} />
         </div>
+        {concurrencyRole && (
+          <div className="space-y-1">
+            <label htmlFor={`${idPrefix}-concurrency`} className="text-xs font-medium text-muted-foreground">
+              {CONCURRENCY_LABELS[concurrencyRole]}
+            </label>
+            <Input
+              id={`${idPrefix}-concurrency`}
+              inputMode="numeric"
+              value={draft.concurrency}
+              onChange={(e) => set({ concurrency: e.target.value })}
+              placeholder="Inherit"
+              aria-describedby={`${idPrefix}-concurrency-now ${idPrefix}-concurrency-hint`}
+            />
+            <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+              <NowValue
+                id={`${idPrefix}-concurrency-now`}
+                setting={effective?.max_concurrency}
+                layer={layer}
+                show={concurrencyText}
+              />
+              {draft.concurrency && (
+                <button
+                  type="button"
+                  onClick={() => set({ concurrency: "" })}
+                  className="text-[11px] text-primary underline-offset-2 hover:underline focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                >
+                  Clear
+                </button>
+              )}
+            </div>
+            <p id={`${idPrefix}-concurrency-hint`} className="text-[11px] text-muted-foreground">
+              1–{limits.concurrency_max}. More wait their turn; lowering it stops nothing already running.
+            </p>
+          </div>
+        )}
       </div>
 
       <div className="space-y-2">

@@ -4,9 +4,12 @@ The TaskRouter receives TASK_REQUESTs from the Manager, creates a dedicated
 PlannerAgent for each task, and manages the Planner lifecycle. When a task
 completes or fails, the TaskRouter tears down the corresponding Planner and
 forwards results to the Manager. Every task belongs to a project
-(``project_id``), which can change while the task runs. At server start it
-resumes the tasks the previous server was running, from their plans in the
-database (``resume_tasks``).
+(``project_id``), which can change while the task runs. At most the Planner's
+concurrency limit of a project's tasks run at once (``agent_settings.load_concurrency``,
+read each time one may start); the others wait, oldest first, without
+holding up another project's. At server start it resumes the tasks the
+previous server was running, from their plans in the database
+(``resume_tasks``).
 """
 
 from __future__ import annotations
@@ -19,6 +22,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from ..agent_settings import AgentType, load_concurrency
 from ..broadcast import Broadcaster
 from ..bus import MessageBus
 from ..message import (
@@ -34,8 +38,6 @@ from .planner import PlannerAgent
 logger = logging.getLogger(__name__)
 
 from ...db import activity as db_activity, tasks as db_tasks
-
-MAX_CONCURRENT_TASKS = 3
 
 
 def resolve_work_dir(raw: str | None) -> str:
@@ -96,10 +98,13 @@ class TaskRouter:
         self._bus: MessageBus | None = None
         self._tasks: dict[str, Task] = {}
         self._planners: dict[str, PlannerAgent] = {}
-        self._semaphore = asyncio.Semaphore(MAX_CONCURRENT_TASKS)
         self._loop_task: asyncio.Task[Any] | None = None
         self._running = False
-        self._pending_queue: asyncio.Queue[MessageEnvelope] = asyncio.Queue()
+        # The tasks waiting for room in their project, oldest first, each with the message that starts it.
+        self._pending: list[tuple[str, MessageEnvelope]] = []
+        # Held to change the waiting tasks, and for a whole pass over them (``recheck``), so two passes cannot
+        # both take a project's last place.
+        self._admitting = asyncio.Lock()
         self._broadcaster = broadcaster
 
     @property
@@ -114,7 +119,7 @@ class TaskRouter:
         self._bus = bus
         self._running = True
         self._loop_task = asyncio.create_task(self._message_loop())
-        logger.info("task router started (max_concurrent=%d)", MAX_CONCURRENT_TASKS)
+        logger.info("task router started")
 
     async def stop(self) -> None:
         self._running = False
@@ -187,7 +192,7 @@ class TaskRouter:
     async def resume_tasks(self, task_ids: list[str]) -> None:
         """Give each task the previous server was running a new Planner that carries on with its saved plan.
 
-        Like a new task, one waits while ``MAX_CONCURRENT_TASKS`` run.
+        Like a new task, one waits while its project runs as many tasks as its limit.
         """
         for task_id in task_ids:
             try:
@@ -215,12 +220,7 @@ class TaskRouter:
                 correlation_id=task.correlation_id,
                 metadata={"origin_channel_id": task.origin_channel_id},
             )
-            if self._semaphore.locked():
-                self._pending_queue.put_nowait(envelope)
-                logger.info("task %s waits to resume (at capacity)", task_id)
-                continue
-            await self._assign_task(task, envelope)
-            logger.info("task %s resumed", task_id)
+            await self._start_or_queue(task, envelope)
 
     async def _handle_task_request(self, envelope: MessageEnvelope) -> None:
         assert self._bus is not None
@@ -257,18 +257,46 @@ class TaskRouter:
         except Exception:
             logger.exception("failed to persist task %s", task_id)
 
-        if self._semaphore.locked():
-            task.status = "pending"
-            self._pending_queue.put_nowait(envelope)
-            logger.info("task %s queued (at capacity)", task_id)
-            return
+        await self._start_or_queue(task, envelope)
 
-        await self._assign_task(task, envelope)
+    async def _start_or_queue(self, task: Task, envelope: MessageEnvelope) -> None:
+        """Queue ``task`` behind its project's waiting tasks, then start every one that has room."""
+        async with self._admitting:
+            task.status = "pending"
+            self._pending = [(tid, env) for tid, env in self._pending if tid != task.task_id]
+            self._pending.append((task.task_id, envelope))
+        await self.recheck()
+        if task.status == "pending":
+            logger.info("task %s queued: project %s runs as many tasks as its limit", task.task_id, task.project_id)
+
+    def _running_in(self, project_id: str) -> int:
+        """The project's tasks with a Planner; a moved task counts in its new project."""
+        return sum(1 for task_id in self._planners
+                   if (task := self._tasks.get(task_id)) is not None and task.project_id == project_id)
+
+    async def recheck(self) -> None:
+        """Start the waiting tasks whose project has room under its limit, read now, oldest first in each project.
+
+        Runs when a task arrives or ends, and when a limit changes: a raised limit starts waiting tasks at
+        once, a lowered one stops nothing that runs.
+        """
+        async with self._admitting:
+            limits: dict[str, int] = {}
+            for task_id, envelope in list(self._pending):
+                task = self._tasks.get(task_id)
+                if task is None or task.status != "pending" or task_id in self._planners:
+                    self._pending.remove((task_id, envelope))  # stopped or cancelled while it waited
+                    continue
+                project_id = task.project_id
+                if project_id not in limits:
+                    limits[project_id] = await load_concurrency(AgentType.PLANNER, project_id)
+                if self._running_in(project_id) >= limits[project_id]:
+                    continue
+                self._pending.remove((task_id, envelope))
+                await self._assign_task(task, envelope)
 
     async def _assign_task(self, task: Task, envelope: MessageEnvelope) -> None:
         assert self._bus is not None
-        await self._semaphore.acquire()
-
         task.status = "assigned"
         planner = PlannerAgent(task_id=task.task_id, runtime_root=self._runtime_root, claude_bin=self._claude_bin)
         task.planner_id = planner.agent_id
@@ -353,7 +381,7 @@ class TaskRouter:
         if status in ("completed", "failed"):
             task.status = status  # teardown persists this; it would default to "completed"
             await self._teardown_task(task_id)
-            await self._try_dequeue()
+            await self.recheck()
 
     async def _handle_cancel(self, envelope: MessageEnvelope) -> None:
         assert self._bus is not None
@@ -373,7 +401,7 @@ class TaskRouter:
                 correlation_id=task.correlation_id,
             ))
             await self._teardown_task(task_id)
-            await self._try_dequeue()
+            await self.recheck()
 
     async def _handle_stop(self, envelope: MessageEnvelope) -> None:
         assert self._bus is not None
@@ -406,12 +434,11 @@ class TaskRouter:
             plnr = self._planners.pop(task_id, None)
             if plnr:
                 await plnr.stop()
-                self._semaphore.release()
         if self._broadcaster:
             self._broadcaster.close_task(task_id)
 
         logger.info("task %s stopped", task_id)
-        await self._try_dequeue()
+        await self.recheck()
 
     async def _handle_restart(self, envelope: MessageEnvelope) -> None:
         """Run a task again: planned anew, or, with ``resume``, continued from its saved plan and steps."""
@@ -469,21 +496,12 @@ class TaskRouter:
             },
             correlation_id=task.correlation_id,
         )
-
-        if self._semaphore.locked():
-            task.status = "pending"
-            self._pending_queue.put_nowait(restart_envelope)
-            logger.info("task %s requeued (at capacity)", task_id)
-            return
-
-        await self._assign_task(task, restart_envelope)
-        logger.info("task %s restarted", task_id)
+        await self._start_or_queue(task, restart_envelope)
 
     async def _teardown_task(self, task_id: str) -> None:
         planner = self._planners.pop(task_id, None)
         if planner:
             await planner.stop()
-            self._semaphore.release()
             logger.info("task %s planner torn down", task_id)
 
         task = self._tasks.get(task_id)
@@ -498,15 +516,3 @@ class TaskRouter:
 
         if self._broadcaster:
             self._broadcaster.close_task(task_id)
-
-    async def _try_dequeue(self) -> None:
-        if self._pending_queue.empty():
-            return
-        envelope = self._pending_queue.get_nowait()
-        if envelope.message_type is MessageType.TASK_RESUME:
-            task_id = envelope.payload.get("task_id")
-        else:
-            task_id = next((tid for tid, t in self._tasks.items()
-                            if t.status == "pending" and t.correlation_id == envelope.correlation_id), None)
-        if task_id in self._tasks:
-            await self._assign_task(self._tasks[task_id], envelope)

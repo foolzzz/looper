@@ -1,4 +1,5 @@
-"""What every agent inherits: the harness prompt, the Agent Profile, the effort, the environment and the per-run cap.
+"""What every agent inherits: the harness prompt, the Agent Profile, the effort, the environment and the per-run cap;
+and how many of a task role run at once in one project.
 
 The harness prompt is an agent's character and stability (working principles,
 boundaries, how it communicates); the role prompt (``role_configs``) says
@@ -29,6 +30,13 @@ A Reviewer with no harness of its own at the role or the role-in-project
 layer uses the Workers' harness at that same layer (``Harness.from_role``).
 A stored value that no longer validates is ignored with a warning, as if
 unset.
+
+The concurrency limit (``max_concurrency``) is set only on the role and the
+role-in-a-project layers of the Planner, the Workers and the Reviewers: at
+most that many of the role run at once in one project (for the Planner, its
+tasks, one Planner each). It resolves built-in (``BUILTIN_CONCURRENCY``) →
+role → role in the project (``resolve_concurrency``); the TaskRouter and the
+WorkerPool read it each time they start one (``load_concurrency``).
 
 Every run records each setting's value and the layer it came from (the
 harness in ``prompt_layers.harness``, the profile in ``profile``, its model in
@@ -105,8 +113,9 @@ ENV_MAX_ENTRIES = 50
 ENV_VALUE_MAX_CHARS = 4_000
 MODEL_MAX_CHARS = 200
 BUDGET_MAX_USD = 100_000
+CONCURRENCY_MAX = 64
 
-FIELDS = ("harness_prompt", "profile_id", "effort", "env", "run_budget_usd")
+FIELDS = ("harness_prompt", "profile_id", "effort", "env", "run_budget_usd", "max_concurrency")
 
 
 class AgentType(str, Enum):
@@ -117,6 +126,9 @@ class AgentType(str, Enum):
 
 
 TASK_ROLES = (AgentType.PLANNER, AgentType.WORKER, AgentType.REVIEWER)
+# At most this many of each task role run at once in one project when no layer sets max_concurrency. Each role has
+# its own limit: a count shared by all three would let resident Planners hold every slot, and no Worker could start.
+BUILTIN_CONCURRENCY = {AgentType.PLANNER: 8, AgentType.WORKER: 16, AgentType.REVIEWER: 8}
 
 
 class Layer(str, Enum):
@@ -238,6 +250,14 @@ def budget_usd(raw: Any, *, field: str = "run_budget_usd") -> float:
     return amount
 
 
+def concurrency(raw: Any) -> int:
+    """A concurrency limit: a whole number from 1 to ``CONCURRENCY_MAX``."""
+    if isinstance(raw, bool) or not isinstance(raw, int) or not 1 <= raw <= CONCURRENCY_MAX:
+        raise SettingsError(f"max_concurrency must be a whole number from 1 to {CONCURRENCY_MAX}, or null to "
+                            f"inherit; got {raw!r}")
+    return raw
+
+
 # The built-in harness as it read before the rename (LoopX): a system layer that stored it still follows the built-in.
 _BUILTIN_HARNESS_BEFORE_RENAME = DEFAULT_HARNESS_PROMPT.replace("the agents Looper runs", "the agents LoopX runs")
 
@@ -258,6 +278,7 @@ class LayerValues:
     effort: str | None = None
     env: tuple[tuple[str, str | None], ...] = ()
     run_budget_usd: float | None = None
+    max_concurrency: int | None = None
 
     @classmethod
     def from_row(cls, row: Mapping[str, Any] | None) -> LayerValues:
@@ -272,6 +293,7 @@ class LayerValues:
             ("effort", lambda raw: effort_level(raw) or None),
             ("env", lambda raw: tuple(environment(raw, unset=row.get("scope") != Layer.SYSTEM.value).items())),
             ("run_budget_usd", budget_usd),
+            ("max_concurrency", concurrency),
         ):
             raw = row.get(name)
             if raw is None:
@@ -289,6 +311,7 @@ class LayerValues:
             "effort": self.effort,
             "env": [{"key": key, "value": value} for key, value in self.env],
             "run_budget_usd": self.run_budget_usd,
+            "max_concurrency": self.max_concurrency,
         }
 
 
@@ -304,10 +327,11 @@ def _stored_profile(raw: Any) -> AgentProfile:
         raise SettingsError(f"not an Agent Profile: {str(raw)[:80]}") from None
 
 
-def layer_update(data: Any, scope: Layer) -> dict[str, Any]:
+def layer_update(data: Any, scope: Layer, role: AgentType | None = None) -> dict[str, Any]:
     """The fields of a layer update, validated, as stored: ``None`` (or ``""``) unsets one. Raises
     ``SettingsError``; every field is checked before anything is written. Whether the profile exists and can run
-    the layer's roles is ``_check_profile``'s."""
+    the layer's roles is ``_check_profile``'s. ``max_concurrency`` is set only on a task role's role or
+    role-in-a-project layer (``role``)."""
     if not isinstance(data, dict):
         raise SettingsError("body must be a JSON object")
     if "model" in data:
@@ -334,6 +358,13 @@ def layer_update(data: Any, scope: Layer) -> dict[str, Any]:
             values[name] = raw
         elif name == "effort":
             values[name] = effort_level(raw) or None
+        elif name == "max_concurrency":
+            if scope not in (Layer.ROLE, Layer.ROLE_PROJECT) or role not in TASK_ROLES:
+                raise SettingsError(
+                    "max_concurrency is how many Planners (tasks), Workers or Reviewers run at once in one project: "
+                    "set it on the planner, worker or reviewer role layer (Settings → Roles), or on that role in a "
+                    "project")
+            values[name] = concurrency(raw)
         else:
             values[name] = budget_usd(raw)
     return values
@@ -489,6 +520,43 @@ def resolve(role: AgentType | str | None, layers: Mapping[Place, LayerValues],
         tuple((key, layer) for key, (_, layer) in env.items()),
         budget, budget_source,
     )
+
+
+@dataclass(frozen=True)
+class Concurrency:
+    """How many of a task role run at once in one project, and the layer it came from."""
+
+    value: int
+    source: Layer = Layer.BUILTIN
+
+    def view(self) -> dict[str, Any]:
+        return {"value": self.value, "source": self.source.value}
+
+
+def resolve_concurrency(role: AgentType, layers: Mapping[Place, LayerValues],
+                        project_id: str | None = None) -> Concurrency:
+    """The concurrency limit of task role ``role`` (in ``project_id``, if any): built-in → role → role in the
+    project."""
+    limit = Concurrency(BUILTIN_CONCURRENCY[role])
+    for layer in (Layer.ROLE, Layer.ROLE_PROJECT) if project_id else (Layer.ROLE,):
+        value = layers.get((layer, role), EMPTY_LAYER).max_concurrency
+        if value is not None:
+            limit = Concurrency(value, layer)
+    return limit
+
+
+async def load_concurrency(role: AgentType, project_id: str | None) -> int:
+    """At most this many of ``role`` may run at once in ``project_id``, read now; the built-in limit when the
+    layers cannot be read."""
+    from ..db import agent_setting_layers
+
+    try:
+        rows = await agent_setting_layers.list_layers(project_id)
+    except Exception:
+        logger.warning("cannot read the agent settings; the %s limit is the built-in %d", role.value,
+                       BUILTIN_CONCURRENCY[role], exc_info=True)
+        return BUILTIN_CONCURRENCY[role]
+    return resolve_concurrency(role, index_layers(rows, project_id), project_id).value
 
 
 async def load_agent_settings(
@@ -673,7 +741,17 @@ def _limits() -> dict[str, Any]:
         "builtin_model": DEFAULT_MODEL,
         "builtin_profile": {"profile_id": BUILTIN_PROFILE.id, "name": BUILTIN_PROFILE.name},
         "budget_max_usd": BUDGET_MAX_USD,
+        "concurrency_max": CONCURRENCY_MAX,
     }
+
+
+def _effective(role: AgentType, layers: Mapping[Place, LayerValues], project_id: str | None = None,
+               ) -> dict[str, Any]:
+    """What applies to ``role``, with a task role's concurrency limit."""
+    view = resolve(role, layers, project_id).view()
+    if role in TASK_ROLES:
+        view["max_concurrency"] = resolve_concurrency(role, layers, project_id).view()
+    return view
 
 
 def _role(raw: str, roles: Iterable[AgentType] = tuple(AgentType)) -> AgentType:
@@ -697,7 +775,7 @@ async def settings_view() -> dict[str, Any]:
                    "effective": resolve(None, layers).view()},
         "roles": {
             role.value: {"values": layers.get((Layer.ROLE, role), EMPTY_LAYER).view(),
-                         "effective": resolve(role, layers).view()}
+                         "effective": _effective(role, layers)}
             for role in AgentType
         },
     }
@@ -722,7 +800,7 @@ async def project_settings_view(project_id: str) -> dict[str, Any]:
         "project": {"values": layers.get((Layer.PROJECT, None), EMPTY_LAYER).view()},
         "roles": {
             role.value: {"values": layers.get((Layer.ROLE_PROJECT, role), EMPTY_LAYER).view(),
-                         "effective": resolve(role, layers, project_id).view()}
+                         "effective": _effective(role, layers, project_id)}
             for role in TASK_ROLES
         },
     }
@@ -752,7 +830,7 @@ async def update_role(role: str, data: Any) -> dict[str, Any]:
     from ..db import agent_setting_layers
 
     agent = _role(role)
-    values = layer_update(data, Layer.ROLE)
+    values = layer_update(data, Layer.ROLE, agent)
     await _check_profile(values, [agent])
     await agent_setting_layers.put_layer(Layer.ROLE.value, agent.value, None, values)
     return await settings_view()
@@ -766,7 +844,7 @@ async def update_project(project_id: str, data: Any, role: str | None = None) ->
 
     agent = _role(role, TASK_ROLES) if role is not None else None
     scope = Layer.ROLE_PROJECT if agent else Layer.PROJECT
-    values = layer_update(data, scope)
+    values = layer_update(data, scope, agent)
     await _existing_project(project_id)
     await _check_profile(values, [agent] if agent else TASK_ROLES)
     try:
@@ -776,7 +854,7 @@ async def update_project(project_id: str, data: Any, role: str | None = None) ->
     return await project_settings_view(project_id)
 
 
-_MOVED_ROLE_FIELDS = ("harness_prompt", "model")
+_MOVED_ROLE_FIELDS = ("harness_prompt", "model", "max_concurrency")
 
 
 # Fields role configs held before Agent Profiles (RFC decision 10), never used by a launch.

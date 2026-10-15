@@ -330,7 +330,8 @@ class _Layers:
                         **_: Any) -> None:
         self.writes += 1
         row = self.rows.setdefault((scope, role, project_id), {
-            "harness_prompt": None, "profile_id": None, "effort": None, "env": [], "run_budget_usd": None})
+            "harness_prompt": None, "profile_id": None, "effort": None, "env": [], "run_budget_usd": None,
+            "max_concurrency": None})
         row.update({k: (list(v or []) if k == "env" else v) for k, v in values.items()})
         if not any(row.values()):
             del self.rows[(scope, role, project_id)]
@@ -367,12 +368,12 @@ class _Writer:
         pass
 
 
-def _call(method: str, path: str, body: Any = None) -> tuple[int, Any]:
+def _call(method: str, path: str, body: Any = None, *, router: Any = None, pool: Any = None) -> tuple[int, Any]:
     import tempfile
     from pathlib import Path
 
     server = AgentHTTPServer(web_adapter=SimpleNamespace(), supervisor=SimpleNamespace(),
-                             task_router=TaskRouter(runtime_root=Path(tempfile.mkdtemp())))
+                             task_router=router or TaskRouter(runtime_root=Path(tempfile.mkdtemp())), worker_pool=pool)
     raw = body if isinstance(body, bytes) else (b"" if body is None else json.dumps(body).encode())
     writer = _Writer()
     asyncio.run(server._route_api(method, path, {}, raw, writer))
@@ -380,7 +381,8 @@ def _call(method: str, path: str, body: Any = None) -> tuple[int, Any]:
     return int(head.split()[1]), json.loads(payload)
 
 
-UNSET = {"harness_prompt": None, "profile_id": None, "effort": None, "env": [], "run_budget_usd": None}
+UNSET = {"harness_prompt": None, "profile_id": None, "effort": None, "env": [], "run_budget_usd": None,
+         "max_concurrency": None}
 
 
 def _now(profile: AgentProfile, source: str) -> dict[str, Any]:
@@ -409,7 +411,7 @@ class TestSettingsApi:
             "env": [{"key": "TZ", "value": "UTC"}]})
         assert status == 200 and body["system"]["values"] == {
             "harness_prompt": "Be careful.", "profile_id": sonnet.id, "effort": "high",
-            "env": [{"key": "TZ", "value": "UTC"}], "run_budget_usd": None}
+            "env": [{"key": "TZ", "value": "UTC"}], "run_budget_usd": None, "max_concurrency": None}
         status, body = _call("PUT", "/api/agent-settings/roles/worker", {"profile_id": haiku.id, "run_budget_usd": 2})
         assert status == 200
         worker = body["roles"]["worker"]["effective"]
@@ -455,6 +457,15 @@ class TestSettingsApi:
         ("/api/agent-settings/roles/boss", {"profile_id": "agent-sonnet"}, 404, "no role"),
         ("/api/projects/proj-a/agent-settings/roles/manager", {"profile_id": "agent-sonnet"}, 400, "spans every project"),
         ("/api/projects/proj-zzz/agent-settings", {"profile_id": "agent-sonnet"}, 404, "not found"),
+        ("/api/agent-settings/system", {"max_concurrency": 2}, 400, "planner, worker or reviewer role layer"),
+        ("/api/agent-settings/roles/manager", {"max_concurrency": 2}, 400, "planner, worker or reviewer role layer"),
+        ("/api/projects/proj-a/agent-settings", {"max_concurrency": 2}, 400, "planner, worker or reviewer role layer"),
+        ("/api/agent-settings/roles/worker", {"max_concurrency": 0}, 400, "from 1 to 64"),
+        ("/api/agent-settings/roles/worker", {"max_concurrency": 65}, 400, "from 1 to 64"),
+        ("/api/agent-settings/roles/worker", {"max_concurrency": 2.5}, 400, "from 1 to 64"),
+        ("/api/agent-settings/roles/worker", {"max_concurrency": "3"}, 400, "from 1 to 64"),
+        ("/api/agent-settings/roles/worker", {"max_concurrency": True}, 400, "from 1 to 64"),
+        ("/api/projects/proj-a/agent-settings/roles/planner", {"max_concurrency": 99}, 400, "from 1 to 64"),
     ])
     def test_refused_updates_change_nothing(
         self, layers: _Layers, path: str, body: Any, status: int, message: str,
@@ -465,8 +476,48 @@ class TestSettingsApi:
         assert _call("GET", "/api/projects/proj-zzz/agent-settings")[0] == 404
 
 
+class TestConcurrencyLimits:
+    """``max_concurrency``: how many of a task role run at once in one project, per role and per role in a
+    project."""
+
+    def test_each_task_role_has_a_builtin_limit_a_role_and_a_project_override_it(self, layers: _Layers) -> None:
+        body = _call("GET", "/api/agent-settings")[1]
+        assert {role: body["roles"][role]["effective"]["max_concurrency"] for role in TASK_ROLES} == {
+            "planner": {"value": 8, "source": "builtin"}, "worker": {"value": 16, "source": "builtin"},
+            "reviewer": {"value": 8, "source": "builtin"}}
+        assert "max_concurrency" not in body["roles"]["manager"]["effective"]
+        assert "max_concurrency" not in body["system"]["effective"]
+
+        status, body = _call("PUT", "/api/agent-settings/roles/worker", {"max_concurrency": 3})
+        assert status == 200 and body["roles"]["worker"]["values"]["max_concurrency"] == 3
+        assert body["roles"]["worker"]["effective"]["max_concurrency"] == {"value": 3, "source": "role"}
+        status, body = _call("PUT", "/api/projects/proj-a/agent-settings/roles/worker", {"max_concurrency": 5})
+        assert status == 200 and body["roles"]["worker"]["effective"]["max_concurrency"] == {
+            "value": 5, "source": "role_project"}
+        assert body["roles"]["reviewer"]["effective"]["max_concurrency"] == {"value": 8, "source": "builtin"}
+        # Cleared, the project follows the role layer again.
+        body = _call("PUT", "/api/projects/proj-a/agent-settings/roles/worker", {"max_concurrency": None})[1]
+        assert body["roles"]["worker"]["effective"]["max_concurrency"] == {"value": 3, "source": "role"}
+        assert ("role_project", "worker", "proj-a") not in layers.rows
+
+    @pytest.mark.parametrize(("path", "body", "rechecked"), [
+        ("/api/agent-settings/roles/worker", {"max_concurrency": 4}, True),
+        ("/api/projects/proj-a/agent-settings/roles/planner", {"max_concurrency": None}, True),
+        ("/api/agent-settings/roles/worker", {"effort": "low"}, False),
+        ("/api/agent-settings/roles/worker", {"max_concurrency": 0}, False),  # refused: nothing changed
+    ])
+    def test_a_changed_limit_tells_the_router_and_the_pool_to_start_what_it_allows(
+        self, layers: _Layers, path: str, body: dict[str, Any], rechecked: bool,
+    ) -> None:
+        from unittest.mock import AsyncMock
+
+        router, pool = SimpleNamespace(recheck=AsyncMock()), SimpleNamespace(recheck=AsyncMock())
+        _call("PUT", path, body, router=router, pool=pool)
+        assert (router.recheck.await_count, pool.recheck.await_count) == ((1, 1) if rechecked else (0, 0))
+
+
 class TestMovedFields:
-    @pytest.mark.parametrize("field", ["harness_prompt", "model"])
+    @pytest.mark.parametrize("field", ["harness_prompt", "model", "max_concurrency"])
     def test_a_role_config_refuses_its_old_settings(self, monkeypatch: pytest.MonkeyPatch, field: str) -> None:
         from looper.db import role_configs
 

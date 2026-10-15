@@ -273,8 +273,9 @@ Telegram 和 Lark 不需要启动参数，见「接入渠道」。
 
 ## 并发模型
 
-- **Task 级并发**：TaskRouter 通过 Semaphore 控制最多 3 个 Task 并行
-- **Worker 级并发**：WorkerPool 通过 Semaphore 控制最多 4 个 Worker 子进程并行
+- **按项目限并发**：Planner、Worker、Reviewer 各有一个"每个项目同时运行多少个"的上限（默认 8、16、8），在 Settings → Roles 按角色设置，在项目设置里按项目覆盖，改了立即生效；没有全机上限
+- **Task 级并发**：TaskRouter 按项目排队，同一项目内先到先跑，一个项目满了不耽误别的项目
+- **Worker 级并发**：WorkerPool 按项目和角色计数，满了的运行等待；每个 Task 的 Planner 另外最多同时派出 4 个 Worker
 - **Task 隔离**：每个 Task 有独立的 Planner、Plan、状态持久化目录和 Planner 的 Claude 会话
 - **Worker 隔离**：每个 Worker 在独立子进程中运行 `claude --print`
 

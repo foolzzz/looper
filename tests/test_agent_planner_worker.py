@@ -83,9 +83,7 @@ class TestWorkerPool:
                 await pool.start(bus)
                 assert pool.is_healthy()
                 assert pool.active_count() == 0
-                status = pool.status()
-                assert status["pool_size"] == 4
-                assert status["active"] == 0
+                assert pool.status()["active"] == 0
 
                 await pool.stop()
                 await bus.shutdown()
@@ -1050,3 +1048,110 @@ class TestWorkerKill:
         assert result["active"] == 0  # the slot is freed
         assert result["accepts_input"] is False
         assert result["published"] is False  # a killed worker publishes no WORK_RESULT
+
+
+def _run_item(worker_id: str, task_id: str, work_dir: Path, *, review: bool = False) -> MessageEnvelope:
+    """A WORK_ITEM (or, with ``review``, a VERIFY_REQUEST) of task ``task_id``'s Planner."""
+    return MessageEnvelope.create(
+        source=planner_address(task_id), target=worker_address(worker_id),
+        message_type=MessageType.VERIFY_REQUEST if review else MessageType.WORK_ITEM,
+        payload={"task_id": f"step-{worker_id}", "parent_task_id": task_id, "instruction": "add the parser",
+                 "context": {"work_dir": str(work_dir)}},
+    )
+
+
+class TestWorkerConcurrency:
+    """A Worker or Reviewer run starts once fewer of its role run in its task's project than that role's limit
+    there, read each time it checks."""
+
+    @staticmethod
+    def _projects(agent_db: Any, projects: dict[str, str]) -> None:
+        """Put each task (task id -> project id) in its project."""
+        agent_db.get_task_project.side_effect = lambda task_id, **_: {"id": projects[task_id]}
+
+    @staticmethod
+    def _limits(agent_db: Any, **roles: int) -> None:
+        """Store each role's limit on its role layer."""
+        agent_db.list_layers.return_value = [
+            {"scope": "role", "role": role, "project_id": None, "max_concurrency": limit} for role, limit in roles.items()]
+
+    @staticmethod
+    async def _until_running(pool: WorkerPool, *worker_ids: str) -> None:
+        for _ in range(500):
+            if all(pool.accepts_input(w) for w in worker_ids):
+                return
+            await asyncio.sleep(0.02)
+        raise AssertionError(f"not all of {worker_ids} started: {pool.status()}")
+
+    def test_runs_wait_for_room_in_their_project_and_role(self, agent_db: Any) -> None:
+        self._projects(agent_db, {"t-a": "proj-a", "t-a2": "proj-a", "t-b": "proj-b"})
+        self._limits(agent_db, worker=2, reviewer=1)
+
+        async def _run() -> tuple[dict[str, str], list[str], dict[str, str]]:
+            with tempfile.TemporaryDirectory() as tmp:
+                bus = MessageBus(runtime_root=Path(tmp))
+                pool = WorkerPool(config=WorkerConfig(claude_bin=_fake_claude(Path(tmp), _LISTENING_CLAUDE)),
+                                  runtime_root=Path(tmp))
+                await pool.start(bus)
+                await asyncio.sleep(0)
+                # Three Workers in proj-a (two tasks), one in proj-b, and a Reviewer in proj-a.
+                for worker_id, task_id in (("w1", "t-a"), ("w2", "t-a2"), ("w3", "t-a"), ("w4", "t-b")):
+                    await bus.publish(_run_item(worker_id, task_id, Path(tmp)))
+                await bus.publish(_run_item("r1", "t-a", Path(tmp), review=True))
+                await self._until_running(pool, "w1", "w2", "w4", "r1")
+                before = {w: wp.status for w, wp in pool._active.items()}
+                waits = [c.kwargs["summary"] for c in agent_db.insert_activity.await_args_list
+                         if "waits for room" in c.kwargs["summary"]]
+
+                assert await pool.send_input("w1", "finish")  # w1 ends, which leaves room for w3
+                await self._until_running(pool, "w3")
+                after = {w: wp.status for w, wp in pool._active.items()}
+                await pool.stop()
+                await bus.shutdown()
+                return before, waits, after
+
+        before, waits, after = asyncio.run(_run())
+        assert before == {"w1": "running", "w2": "running", "w3": "pending", "w4": "running", "r1": "running"}
+        # The task's activity says why the step has not started, once.
+        assert len(waits) == 1 and "2 running, limit 2" in waits[0]
+        assert after == {"w2": "running", "w3": "running", "w4": "running", "r1": "running"}
+
+    def test_a_raised_limit_starts_a_waiting_run_and_a_lowered_one_stops_none(self, agent_db: Any) -> None:
+        self._projects(agent_db, {"t-a": "proj-a"})
+        self._limits(agent_db, worker=1)
+
+        async def _run() -> list[dict[str, str]]:
+            with tempfile.TemporaryDirectory() as tmp:
+                bus = MessageBus(runtime_root=Path(tmp))
+                pool = WorkerPool(config=WorkerConfig(claude_bin=_fake_claude(Path(tmp), _LISTENING_CLAUDE)),
+                                  runtime_root=Path(tmp))
+                await pool.start(bus)
+                await asyncio.sleep(0)
+                for worker_id in ("w1", "w2"):
+                    await bus.publish(_run_item(worker_id, "t-a", Path(tmp)))
+                await self._until_running(pool, "w1")
+                seen = [{w: wp.status for w, wp in pool._active.items()}]
+
+                self._limits(agent_db, worker=2)
+                await pool.recheck()
+                await self._until_running(pool, "w2")
+
+                self._limits(agent_db, worker=1)
+                await pool.recheck()
+                await bus.publish(_run_item("w3", "t-a", Path(tmp)))
+                for _ in range(50):  # w3 has checked its limit and waits
+                    if pool._slot_waiters:
+                        break
+                    await asyncio.sleep(0.02)
+                seen.append({w: wp.status for w, wp in pool._active.items()})
+                # A waiting run can be stopped like a running one, and publishes no result.
+                seen.append({"killed": str(await pool.kill("w3")), "published": str(
+                    not bus.get_queue("planner-t-a").empty())})
+                await pool.stop()
+                await bus.shutdown()
+                return seen
+
+        first, lowered, killed = asyncio.run(_run())
+        assert first == {"w1": "running", "w2": "pending"}
+        assert lowered == {"w1": "running", "w2": "running", "w3": "pending"}
+        assert killed == {"killed": "True", "published": "False"}
