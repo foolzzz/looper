@@ -49,10 +49,11 @@ TaskRouter（任务路由器）
 Task 是系统的一等实体，代表一个完整的用户需求。
 
 ```
-状态流转: pending → assigned → running → completed / failed / cancelled
+状态流转: init（ready）→ pending → assigned → running → completed / failed / cancelled
 ```
 
-- 每个 Task 自动分配独立的 Planner 实例
+- 新建的 Task 处于 ready（`init`，界面显示「Ready — not started」），不自动开始：用户在聊天里让 Manager 开始，或在 Tasks 页面点 Start 之后才进入 `pending`
+- 每个开始了的 Task 分配独立的 Planner 实例
 - Task 结束（完成、失败、停止、取消）时 TaskRouter 停掉 Planner，连同它的 Claude 进程
 - 最多 3 个 Task 并发执行，超出排队
 - Task 的花费是它的 Planner、Worker、Reviewer 各次运行自身花费之和，按角色分开计，并附运行次数（见下文「花费与上下文」）；Manager 不计入。默认不设花费上限（RFC 决策 2），上限留给 M5 的项目执行配置
@@ -147,8 +148,11 @@ Task 是系统的一等实体，代表一个完整的用户需求。
 1. 用户发消息 → Channel Adapter
 2. Adapter 转换为 USER_MESSAGE → Bus → Manager
 3. Manager 调用 Claude Code 理解意图
-4. Manager 发 TASK_REQUEST → Bus → TaskRouter
-5. TaskRouter 创建 Task + Planner 实例
+4. Manager 发 TASK_REQUEST → Bus → TaskRouter，TaskRouter 创建 ready 的 Task；
+   任务的项目还不存在时，先由代码问用户确认新建，确认后才建项目和任务。
+   Manager 的回复附上代码生成的任务配置，并问是否现在开始
+5. 用户开始任务（聊天里说「开始」，Manager 输出 `task_start`；或在 Tasks 页面点 Start）→ TASK_START →
+   TaskRouter 按项目并发上限创建 Planner 实例
 6. Planner 启动常驻 Claude，[PLAN] turn 拆出步骤，发 TASK_ACCEPTED
 7. Planner 按依赖顺序发 WORK_ITEM → Bus → WorkerPool（每个任务最多 4 个并行）
 8. Worker 子进程执行，返回 WORK_RESULT
@@ -166,7 +170,8 @@ Task 是系统的一等实体，代表一个完整的用户需求。
 |------|------|------|
 | `USER_MESSAGE` | Channel → Manager / Planner | 用户输入；发给 Planner 的消息由它的 Claude 回复，可以转给正在执行的 Worker 或追加步骤 |
 | `AGENT_REPLY` | Manager / Planner → Channel | 回复用户 |
-| `TASK_REQUEST` | Manager → TaskRouter | 创建任务 |
+| `TASK_REQUEST` | Manager → TaskRouter | 创建 ready 任务 |
+| `TASK_START` | HTTP / Manager → TaskRouter | 开始 ready 任务 |
 | `TASK_ACCEPTED` | Planner → TaskRouter → Manager | 任务已接受 |
 | `TASK_CANCEL` | Manager → TaskRouter → Planner | 取消任务 |
 | `GOAL_STATUS` | Planner → TaskRouter → Manager | 进度/结果 |
