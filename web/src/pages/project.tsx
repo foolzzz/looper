@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/button";
 import { ClampedText } from "@/components/clamped-text";
 import { ProjectAgentSettingsSection } from "@/components/project-agent-settings";
 import { ProjectKnowledgeSection } from "@/components/project-knowledge";
+import { ProjectSchedulesSection } from "@/components/project-schedules";
 import { ProjectSkillsSection } from "@/components/project-skills";
 import { ProjectSettingsForm } from "@/components/project-settings";
 import {
@@ -31,6 +32,7 @@ const TABS = [
   { id: "knowledge", label: "Knowledge" },
   { id: "skills", label: "Skills" },
   { id: AGENT_PROFILE.slug, label: AGENT_PROFILE.plural },
+  { id: "schedules", label: "Schedules" },
   { id: "settings", label: "Settings" },
 ] as const;
 type Tab = (typeof TABS)[number]["id"];
@@ -353,13 +355,13 @@ function Overview({ project, onTab }: { project: Project; onTab: (tab: Tab) => v
 
 interface ProjectPageProps {
   /** "<project id>", "<project id>/<tab>", "<project id>/knowledge/<draft id>" to open one draft, or
-   * "<project id>/profiles/<role or project>" to open one row. */
+   * "<project id>/profiles/<role or project>" or "<project id>/schedules/<schedule id>" to open one row. */
   sub: string;
   onNavigate: (sub: string) => void;
 }
 
-/** One project: an overview, its knowledge, its skills, its Agent Profiles and its settings, each a tab with its own
- * address. */
+/** One project: an overview, its knowledge, its skills, its Agent Profiles, its schedules and its settings, each a tab
+ * with its own address. */
 export function ProjectPage({ sub, onNavigate }: ProjectPageProps) {
   const [projectId, tabPart, focus] = sub.split("/");
   const tab: Tab = TABS.some((t) => t.id === tabPart) ? (tabPart as Tab) : "overview";
@@ -460,6 +462,14 @@ export function ProjectPage({ sub, onNavigate }: ProjectPageProps) {
         {tab === "skills" && <ProjectSkillsSection projectId={project.project_id} />}
         {tab === AGENT_PROFILE.slug && (
           <ProjectAgentSettingsSection key={project.project_id} projectId={project.project_id} linked={focus ?? ""} />
+        )}
+        {tab === "schedules" && (
+          <ProjectSchedulesSection
+            key={project.project_id}
+            project={project}
+            linked={focus ?? ""}
+            onLink={(scheduleId) => onNavigate(`${projectId}/schedules${scheduleId ? `/${scheduleId}` : ""}`)}
+          />
         )}
         {tab === "settings" && (
           <ProjectSettingsForm

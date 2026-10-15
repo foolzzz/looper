@@ -17,6 +17,7 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
+  fetchSchedule,
   fetchTasks,
   deleteTask,
   stopTask,
@@ -34,6 +35,7 @@ import {
 } from "@/lib/api";
 import { useProjects } from "@/lib/use-projects";
 import { AgentProfileSelect } from "@/components/agent-profiles";
+import { ScheduledBadge } from "@/components/scheduled-badge";
 import { AGENT_PROFILE } from "@/lib/settings-pages";
 import { formatUsd } from "@/lib/usage";
 import { ProjectBackgroundField, backgroundTooLong } from "@/components/project-background-field";
@@ -160,15 +162,17 @@ function TaskProfilesField({ value, onChange }: { value: ProfileChoice; onChange
 
 interface TasksPageProps {
   sub?: string;
-  /** "project=<id>" filters the list by project, "group=<group>" by a task group (the Dashboard's counts). */
+  /** "project=<id>" filters the list by project, "group=<group>" by a task group (the Dashboard's counts),
+   * "schedule=<id>" by the schedule that created the tasks. */
   query?: string;
   onNavigate?: (sub: string, query?: string) => void;
 }
 
-function filterQuery(project: string, group: TaskGroup | null): string {
+function filterQuery(project: string, group: TaskGroup | null, schedule = ""): string {
   const query = new URLSearchParams();
   if (project) query.set("project", project);
   if (group) query.set("group", group);
+  if (schedule) query.set("schedule", schedule);
   return query.toString();
 }
 
@@ -178,8 +182,9 @@ export function TasksPage({ sub, query, onNavigate }: TasksPageProps) {
   const groupParam = params.get("group");
   const groupFilter = isTaskGroup(groupParam) ? groupParam : null;
   const group = TASK_GROUPS.find((g) => g.id === groupFilter) ?? null;
-  // What the list shows: the server filters by both.
-  const listKey = filterQuery(projectFilter, groupFilter);
+  const scheduleFilter = params.get("schedule") || "";
+  // What the list shows: the server filters by all three.
+  const listKey = filterQuery(projectFilter, groupFilter, scheduleFilter);
   const { projects, reload: reloadProjects } = useProjects();
   const selectedProject = projects?.find((p) => p.project_id === projectFilter) ?? null;
   // A filter for a project the list does not hold yet (just created elsewhere) is
@@ -214,6 +219,7 @@ export function TasksPage({ sub, query, onNavigate }: TasksPageProps) {
   const [newProfiles, setNewProfiles] = useState<ProfileChoice>({});
   const [creating, setCreating] = useState(false);
   const [createError, setCreateError] = useState("");
+  const [scheduleNames, setScheduleNames] = useState<Record<string, string>>({});
   const selectedTaskId = sub || null;
   // The list's filter, so leaving a task's detail returns to the list it was opened from.
   const listQuery = useRef("");
@@ -222,8 +228,9 @@ export function TasksPage({ sub, query, onNavigate }: TasksPageProps) {
   }, [sub, query]);
   const setSelectedTaskId = (id: string | null) =>
     id ? onNavigate?.(id) : onNavigate?.("", listQuery.current);
-  const setProjectFilter = (id: string) => onNavigate?.("", filterQuery(id, groupFilter));
-  const clearGroup = () => onNavigate?.("", filterQuery(projectFilter, null));
+  const setProjectFilter = (id: string) => onNavigate?.("", filterQuery(id, groupFilter, scheduleFilter));
+  const clearGroup = () => onNavigate?.("", filterQuery(projectFilter, null, scheduleFilter));
+  const clearSchedule = () => onNavigate?.("", filterQuery(projectFilter, groupFilter));
 
   // Drop answers for a filter the page has already left.
   const currentFilter = useRef(listKey);
@@ -233,7 +240,7 @@ export function TasksPage({ sub, query, onNavigate }: TasksPageProps) {
 
   const load = () => {
     const requested = listKey;
-    fetchTasks(projectFilter || undefined, groupFilter ?? undefined)
+    fetchTasks(projectFilter || undefined, groupFilter ?? undefined, scheduleFilter || undefined)
       .then((data) => {
         if (requested !== currentFilter.current) return;
         setTasks(Array.isArray(data) ? data : (data as any).tasks || []);
@@ -350,8 +357,26 @@ export function TasksPage({ sub, query, onNavigate }: TasksPageProps) {
     }
   };
 
-  // The server filters by project too; this keeps the list right while a new filter loads.
-  const projectTasks = projectFilter ? tasks.filter((t) => t.project_id === projectFilter) : tasks;
+  // The server filters by project and schedule too; this keeps the list right while a new filter loads.
+  const projectTasks = tasks.filter(
+    (t) => (!projectFilter || t.project_id === projectFilter) && (!scheduleFilter || t.schedule_id === scheduleFilter),
+  );
+  // The schedule filter's name: from its tasks, else asked once (an unknown schedule shows its id).
+  const scheduleName = scheduleFilter
+    ? projectTasks.find((t) => t.schedule_name)?.schedule_name || scheduleNames[scheduleFilter] || scheduleFilter
+    : "";
+  const nameKnown = !scheduleFilter || projectTasks.some((t) => t.schedule_name) || scheduleFilter in scheduleNames;
+  useEffect(() => {
+    if (nameKnown || loading) return;
+    let alive = true;
+    const asked = scheduleFilter;
+    fetchSchedule(asked)
+      .then((schedule) => alive && setScheduleNames((names) => ({ ...names, [asked]: schedule.name })))
+      .catch(() => alive && setScheduleNames((names) => ({ ...names, [asked]: "" })));
+    return () => {
+      alive = false;
+    };
+  }, [nameKnown, loading, scheduleFilter]);
   const filtered = filter === "all" ? projectTasks : projectTasks.filter((t) => t.status === filter);
 
   const statusCounts = projectTasks.reduce<Record<string, number>>((acc, t) => {
@@ -419,6 +444,19 @@ export function TasksPage({ sub, query, onNavigate }: TasksPageProps) {
               onClick={clearGroup}
               aria-label={`Show all tasks, not only ${group.label.toLowerCase()}`}
               className="flex h-6 w-6 items-center justify-center rounded-sm hover:bg-primary/20 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+            >
+              <X className="h-3.5 w-3.5" aria-hidden="true" />
+            </button>
+          </span>
+        )}
+        {scheduleFilter && (
+          <span className="inline-flex h-8 max-w-full items-center gap-1 rounded-md bg-primary/10 pl-3 pr-1 text-xs font-medium text-primary ring-1 ring-inset ring-primary/20">
+            <span className="truncate">Schedule: {scheduleName}</span>
+            <button
+              type="button"
+              onClick={clearSchedule}
+              aria-label={`Show all tasks, not only those of the schedule ${scheduleName}`}
+              className="flex h-6 w-6 shrink-0 items-center justify-center rounded-sm hover:bg-primary/20 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
             >
               <X className="h-3.5 w-3.5" aria-hidden="true" />
             </button>
@@ -496,7 +534,9 @@ export function TasksPage({ sub, query, onNavigate }: TasksPageProps) {
               ? `No ${filterLabel(filter).toLowerCase()} tasks`
               : group
                 ? `No tasks · ${group.label}`
-                : "No tasks yet"}
+                : scheduleFilter
+                  ? "No tasks from this schedule"
+                  : "No tasks yet"}
           </p>
         </div>
       ) : (
@@ -514,6 +554,7 @@ export function TasksPage({ sub, query, onNavigate }: TasksPageProps) {
                     <p className="text-sm font-medium truncate">{task.requirement}</p>
                     <div className="mt-1.5 flex items-center gap-2 flex-wrap">
                       {statusBadge(task.status)}
+                      <ScheduledBadge task={task} />
                       {!projectFilter && task.project_name && (
                         <span className="flex items-center gap-1 text-xs text-muted-foreground">
                           <Folder className="h-3 w-3" />
