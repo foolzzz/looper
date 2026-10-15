@@ -78,3 +78,24 @@ def test_user_instructions_from_before_become_delivered_supplements(monkeypatch:
         assert (await task_changes.pending("task-a", pool=pool)).empty
 
     _run(test, monkeypatch)
+
+
+@pytest.mark.parametrize("status", ["planning", "verifying", "stopping", "pending"])
+def test_the_requirement_of_a_task_in_any_running_status_can_be_edited(monkeypatch: pytest.MonkeyPatch,
+                                                                       tmp_path: Any, status: str) -> None:
+    """Whatever its Planner is doing (the statuses it stores as the task's), a task under way takes an edit."""
+    from types import SimpleNamespace
+
+    from looper.agents import projects
+    from looper.agents.bus import MessageBus
+    from looper.agents.message import channel_address
+
+    async def test(pool: Any) -> None:
+        await _task(pool)
+        await pool.execute("UPDATE tasks SET status = $1 WHERE id = 'task-a'", status)
+        edited = await projects.edit_requirement(
+            "task-a", {"requirement": "build calc v2"}, bus=MessageBus(runtime_root=tmp_path),
+            source=channel_address("web"), via="task_page", task_router=SimpleNamespace(has_planner=lambda _: False))
+        assert edited["version"] == 2
+
+    _run(test, monkeypatch)

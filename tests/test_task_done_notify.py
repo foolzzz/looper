@@ -19,6 +19,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from lark_cli_stand_in import OPEN_ID
+from manager_mcp_stand_in import manager_endpoint, mcp_manager_claude
 from looper.agents.bus import MessageBus
 from looper.agents.channels.allowlist import SenderAllowlist
 from looper.agents.channels.base import ChannelAdapter
@@ -34,7 +35,6 @@ from looper.agents.task_notice import LEAD_CHARS, Notice, NotifyChannel, ends_ta
 from looper.agents.tiers.manager import ManagerAgent, ManagerConfig
 from looper.agents.tiers.planner import closing_note
 from looper.agents.tiers.task import Task, TaskRouter
-from tests.test_manager_reply import _answer, _fake_claude, _project, _scripted, _task_chat
 from tests.test_planner_agent import FINAL_RESULT, WORK_OK, Harness, always, decide, plan, step
 
 DASHBOARD = "http://looper.test:8767"
@@ -214,24 +214,6 @@ def test_the_manager_sends_the_notice_instead_of_the_end(tmp_path: Path, origin:
         assert out[0][2] == notice.payload()
 
 
-@pytest.mark.usefixtures("agent_db")
-@pytest.mark.parametrize(("title", "stored", "named"), [
-    ("  俄罗斯方块\n小游戏 ", "俄罗斯方块 小游戏", "俄罗斯方块 小游戏"),
-    (None, None, "g"),  # no title in the task JSON: the goal id names it
-    (["not", "text"], None, "g"),
-])
-def test_the_confirm_flow_names_the_task_by_its_title(agent_db: Any, title: Any, stored: str | None,
-                                                      named: str) -> None:
-    agent_db.find_project_by_name.return_value = _project("tetris", "/srv/tetris")
-    # Claude restates the task and asks to confirm; the user's 「确认」 carries the task JSON.
-    fields = {"project": "tetris", **({"title": title} if title is not None else {})}
-    chat = _task_chat(["我会在 tetris 项目里写个俄罗斯方块小游戏。回「确认」就创建。", _answer(**fields)],
-                      ["帮我写个俄罗斯方块", "确认"])
-    (request,) = chat.requests
-    assert request.payload["title"] == stored and request.payload["original_user_text"] == "确认"
-    assert f"- 任务：{named}（{request.payload['task_id']}）" in chat.replies[1]
-
-
 # --- The channels: the notice like an answer, to who the task recorded ---
 
 
@@ -305,9 +287,12 @@ def _run_a_task(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, planner_claude:
     from looper.db import tasks as db_tasks
 
     claude = planner_claude(plan(step("s1")), decide("accept"))
-    manager_claude = _scripted(_answer(project="calc", title="给 calc 加上加法"),
-                               json.dumps({"action": "task_start", "task_id": "<task id>"}))
-    # The Manager checks that the task it starts is ready.
+    manager_claude = mcp_manager_claude(tmp_path, [
+        [("looper_task_create", {"requirement": "add addition to calc", "title": "给 calc 加上加法",
+                                 "project": "calc"})],
+        [("looper_task_control", {"task_id": "<task id>", "action": "start"})],
+    ])
+    # The Manager's tools check that the task they start is ready.
     monkeypatch.setattr(db_tasks, "get_task", AsyncMock(side_effect=lambda task_id: (
         {**agent_db.store.ready[task_id], "status": db_tasks.READY} if task_id in agent_db.store.ready else None)))
 
@@ -321,9 +306,11 @@ def _run_a_task(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, planner_claude:
         outbound = asyncio.ensure_future(channel._outbound_loop())  # what start() runs, without polling
         router = TaskRouter(runtime_root=tmp_path, claude_bin=claude.bin, dashboard_url=DASHBOARD)
         await router.start(bus)
-        manager = ManagerAgent(config=ManagerConfig(claude_bin=_fake_claude(tmp_path, manager_claude),
-                                                    work_dir=tmp_path), runtime_root=tmp_path)
+        manager = ManagerAgent(config=ManagerConfig(claude_bin=manager_claude, work_dir=tmp_path),
+                               runtime_root=tmp_path)
         manager._bus = bus
+        endpoint = manager_endpoint(manager, bus, router, tmp_path)
+        await endpoint.__aenter__()
 
         async def pump() -> None:  # the Manager's own loop, without the rest of its start()
             queue = bus.get_queue("manager")
@@ -344,6 +331,7 @@ def _run_a_task(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, planner_claude:
         await asyncio.gather(pumping, outbound, return_exceptions=True)
         await router.stop()
         await manager.stop()
+        await endpoint.__aexit__(None, None, None)
         await channel._reactions.stop()  # what the channel's stop() does, without its bot or lark-cli consumer
         await bus.shutdown()
         return chats

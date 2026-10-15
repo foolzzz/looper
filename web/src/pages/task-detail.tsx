@@ -57,6 +57,7 @@ import {
   type KnowledgeDraft,
   type TaskDetail,
   type Supplement,
+  type ManagerAction,
   type TaskStep,
   type JournalEntry,
   type ProgressNote,
@@ -298,9 +299,6 @@ function parseConfig(text: string): Record<string, unknown> | null {
   }
 }
 
-/** The statuses a task's requirement can be edited in once it has started (one not started edits it above). */
-const EDITABLE_STATUSES = ["pending", "assigned", "running", "executing"];
-
 /** How a change came, in words. */
 function viaLabel(via: string): string {
   if (via === "chat") return "Chat";
@@ -313,7 +311,8 @@ function viaLabel(via: string): string {
 /** A started task's requirement: the current text, its earlier versions, and an edit its Planner gets in a turn. */
 function TaskRequirement({ task }: { task: TaskDetail }) {
   const versions = task.requirement_versions ?? [];
-  const editable = EDITABLE_STATUSES.includes(task.status);
+  // Queued or running, whatever its Planner is doing; one not started edits it above.
+  const editable = isActiveTask(task);
   const [editing, setEditing] = useState(false);
   const [text, setText] = useState(task.requirement);
   const [saving, setSaving] = useState(false);
@@ -419,6 +418,38 @@ function TaskSupplements({ supplements }: { supplements: Supplement[] }) {
   );
 }
 
+/** What a Manager action did, in a few words: its tool's action, or the tool. */
+function managerActionLabel(action: ManagerAction): string {
+  const tool = action.tool.replace(/^looper_/, "").replace(/_/g, " ");
+  const verb = typeof action.arguments.action === "string" ? `: ${action.arguments.action}` : "";
+  return `${tool}${verb}`;
+}
+
+/** What the Manager did to the task through its tools, newest first ("由管家操作"). */
+function TaskManagerActions({ actions }: { actions: ManagerAction[] }) {
+  if (!actions.length) return null;
+  return (
+    <div>
+      <label className="text-xs font-medium text-muted-foreground">By the Manager (由管家操作)</label>
+      <ul className="mt-1 space-y-1 text-xs">
+        {actions.map((a, i) => (
+          <li key={`${a.created_at}-${i}`} className="flex flex-wrap items-center gap-x-2 text-muted-foreground">
+            <span className="text-foreground">{managerActionLabel(a)}</span>
+            {a.status === "needs_confirmation" ? (
+              <Badge variant="outline">asked to confirm</Badge>
+            ) : a.confirmation_id ? (
+              <Badge variant="outline">confirmed</Badge>
+            ) : null}
+            <span>
+              {a.channel || "—"} · {new Date(a.created_at).toLocaleString()}
+            </span>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
 function TaskConfigSection({ task }: { task: TaskDetail }) {
   const isInit = task.status === "init";
   const [editReq, setEditReq] = useState(task.requirement);
@@ -495,6 +526,7 @@ function TaskConfigSection({ task }: { task: TaskDetail }) {
           )}
         </div>
         <TaskSupplements supplements={task.supplements ?? []} />
+        <TaskManagerActions actions={task.manager_actions ?? []} />
         <div>
           <label className="text-xs font-medium text-muted-foreground flex items-center gap-1">
             <FolderOpen className="h-3 w-3" />

@@ -323,8 +323,9 @@ async def start_ready_task(task_id: str, bus: MessageBus, source: AgentAddress) 
 # How a change to a task came: on the task page, or in a message sent to its Planner on the Chat page.
 VIA_TASK_PAGE = "task_page"
 VIA_CHAT = "chat"
-# The statuses a task's requirement can be edited in: not started, waiting for room, or running.
-EDITABLE_STATUSES = (db_tasks.READY, "pending", "assigned", "running", "executing")
+# The statuses a task's requirement can be edited in: not started, waiting for room, or running (whatever its
+# Planner is doing).
+EDITABLE_STATUSES = (db_tasks.READY, *db_tasks.ACTIVE_STATUSES)
 
 
 async def store_chat_supplement(target: AgentAddress, text: str) -> int | None:

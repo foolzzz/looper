@@ -1165,6 +1165,20 @@ export interface Supplement {
   delivered_at: string | null;
 }
 
+/** Something the Manager did to a task through its tools (its audit trail), or asked the user to confirm. */
+export interface ManagerAction {
+  created_at: string;
+  /** The chat's channel: "web", "lark", "telegram". */
+  channel: string;
+  /** The tool, e.g. "looper_task_control". */
+  tool: string;
+  arguments: Record<string, unknown>;
+  risk: "read" | "write" | "high";
+  /** "ok", or "needs_confirmation" while it waited for the user's word. */
+  status: "ok" | "needs_confirmation";
+  confirmation_id: string | null;
+}
+
 /** Edit the requirement of a task that has not ended; its Planner, if it runs, gets the edit in a turn. */
 export async function editTaskRequirement(taskId: string, requirement: string): Promise<void> {
   const res = await fetch(`${API_BASE}/tasks/${encodeURIComponent(taskId)}/requirement`, {
@@ -1201,6 +1215,8 @@ export interface TaskDetail extends TaskInfo {
   requirement_versions?: RequirementVersion[];
   /** What the user added to the task while it ran, oldest first. */
   supplements?: Supplement[];
+  /** What the Manager did to the task through its tools, newest first. */
+  manager_actions?: ManagerAction[];
 }
 
 /** What a task journal entry records; code writes each when its event happens. */
