@@ -60,6 +60,12 @@ function fittingModel(provider: Provider | undefined, current: string): string {
   return suggested.length && !suggested.includes(current) ? suggested[0] : current;
 }
 
+/** Agent teams for a profile on `runtime` that does not say: on for Claude Code, whose feature they are, off for
+ * any other runtime. The server decides the same way for a profile saved without them. */
+function defaultTeams(registry: Registry, runtime: Runtime | undefined): boolean {
+  return runtimeType(registry, runtime)?.type === "claude-code";
+}
+
 function runtimeTitle(runtime: Runtime): string {
   if (!runtime.builtin) return `${runtime.name} (custom, legacy)`;
   return RUNTIME_TYPES[runtime.type]?.title ?? runtime.type_label;
@@ -157,6 +163,7 @@ export function AgentProfileForm({
       provider_id: providerId,
       model: profile?.model ?? fittingModel(provider, ""),
       effort: profile?.effort ?? "",
+      agent_teams: profile?.agent_teams ?? defaultTeams(registry, runtime),
     };
   });
   const action = useAction();
@@ -170,13 +177,20 @@ export function AgentProfileForm({
   const ownLogins = fitting.filter((p) => p.auth === "oauth");
   const keyProviders = fitting.filter((p) => p.auth === "api_key");
   const typeLabel = type?.label ?? runtime?.type_label ?? "";
+  // Agent teams are a Claude Code feature: the server refuses them on another runtime.
+  const teams = type?.type === "claude-code";
   const undetected = registry.runtime_types.filter((t) => !registry.runtimes.some((r) => r.builtin && r.type === t.type));
 
   const chooseRuntime = (runtimeId: string) => {
     const next = registry.runtimes.find((r) => r.runtime_id === runtimeId);
     const providerId = firstProvider(registry, next);
+    const nextType = runtimeType(registry, next)?.type;
+    // Another runtime type takes its default (on for Claude Code); back on the profile's own type, its saved setting.
+    const agentTeams = nextType === type?.type ? draft.agent_teams
+      : profile && profile.runtime_type === nextType ? profile.agent_teams : defaultTeams(registry, next);
     set({ runtime_id: runtimeId, provider_id: providerId,
-          model: fittingModel(registry.providers.find((p) => p.provider_id === providerId), draft.model) });
+          model: fittingModel(registry.providers.find((p) => p.provider_id === providerId), draft.model),
+          agent_teams: agentTeams });
   };
   const chooseProvider = (providerId: string) => {
     if (providerId === NEW_PROVIDER) {
@@ -189,7 +203,8 @@ export function AgentProfileForm({
 
   const save = async (e?: React.FormEvent) => {
     e?.preventDefault();
-    const body = { ...draft, name: draft.name.trim(), model: draft.model.trim(), effort: draft.effort || null };
+    const body = { ...draft, name: draft.name.trim(), model: draft.model.trim(), effort: draft.effort || null,
+                   agent_teams: teams && draft.agent_teams };
     let answer: { profile: AgentProfile; warnings: string[] } | null = null;
     const done = await action.run(async () => {
       answer = await (profile ? updateAgentProfile(profile.profile_id, body) : createAgentProfile(body));
@@ -278,6 +293,20 @@ export function AgentProfileForm({
             ))}
           </select>
         </div>
+        {teams && (
+          <div className="space-y-1 sm:col-span-2">
+            <label className="flex items-center gap-1.5 text-xs">
+              <input type="checkbox" className="h-4 w-4 accent-primary" checked={draft.agent_teams} onChange={(e) => set({ agent_teams: e.target.checked })} aria-describedby={`${id}-teams-hint`} />
+              Agent teams
+            </label>
+            <p id={`${id}-teams-hint`} className="text-[11px] text-muted-foreground">
+              On by default for the Manager, Workers and Reviewers: they can start teammates that work beside them
+              (Claude Code&apos;s experimental agent teams), whose cost is counted in the run&apos;s once it ends.
+              Planners always run without them, since a Planner&apos;s decisions come from its own turn. Untick it to
+              run this profile without teammates.
+            </p>
+          </div>
+        )}
       </div>
       <div id={`${id}-provider-hint`} className="space-y-0.5 text-[11px] text-muted-foreground">
         {provider?.auth === "oauth" && (provider.login || type?.type === "claude-code") && (
@@ -415,6 +444,7 @@ function AgentProfileRow({ profile, registry }: { profile: AgentProfile; registr
       <p className="break-words text-xs text-muted-foreground">
         {runtime ? runtimeTitle(runtime) : profile.runtime_name} · {profile.provider_name} · model{" "}
         <span className="font-mono text-foreground/80">{profile.model}</span> · effort {profile.effort ?? "runtime default"}
+        {profile.agent_teams && <> · <span className="text-foreground">agent teams on</span></>}
         {costBasisText(profile) && ` · ${costBasisText(profile)}`}
       </p>
       <p className="text-xs text-muted-foreground">

@@ -606,7 +606,7 @@ class WorkerPool:
                 return {"passed": False, "findings": [agent_settings.profile_error],
                         "summary": agent_settings.profile_error}
             return {"status": "failed", "error": agent_settings.profile_error}
-        launch = Launch(agent_settings, library, knowledge)
+        launch = Launch(agent_settings, library, knowledge, role=AgentType.REVIEWER if is_verify else AgentType.WORKER)
         background = str((project or {}).get("background") or "")
         system_prompt = build_system_prompt(
             harness=agent_settings.harness,
@@ -711,9 +711,10 @@ class WorkerPool:
                 process.stdin.close()
 
         result_event: dict[str, Any] | None = None
+        finished: dict[str, Any] | None = None  # the last result Claude wrote (result_event, unless capped)
 
         async def _read_stream() -> None:
-            nonlocal result_event
+            nonlocal result_event, finished
             assert process.stdout is not None
             async for event in runtime.parse(process.stdout, model=launch.model):
                 await recorder.record(event)
@@ -763,31 +764,36 @@ class WorkerPool:
                                         logger.debug("failed to insert text activity", exc_info=True)
 
                 elif event_type == "result":
-                    result_event = event
+                    # Background work (an agent team's teammates) can end in turns of Claude's own after this
+                    # one, each with a result of its own, also once stdin is closed: the run's last result is
+                    # its outcome.
+                    result_event = finished = event
                     _end_input()
-                    # The run's cost as recorded: Claude Code's figure, or its tokens at the provider's prices.
-                    cost = run_usage(event, price=launch.price).cost_usd if launch.price is not None \
-                        else event.get("total_cost_usd", event.get("cost_usd"))
-                    duration_ms = event.get("duration_ms")
-                    if parent_task_id:
-                        try:
-                            parts = ["Worker finished"]
-                            if cost is not None:
-                                parts[0] = f"Worker finished (cost: ${cost:.4f})"
-                            meta: dict[str, Any] = {}
-                            if cost is not None:
-                                meta["cost_usd"] = cost
-                            if duration_ms is not None:
-                                meta["duration_ms"] = duration_ms
-                            await db_activity.insert_activity(
-                                task_id=parent_task_id,
-                                worker=worker_id,
-                                kind="phase",
-                                summary=parts[0],
-                                metadata=meta or None,
-                            )
-                        except Exception:
-                            logger.debug("failed to insert result activity", exc_info=True)
+
+        async def _report_finished(event: dict[str, Any]) -> None:
+            # The run's cost as recorded: Claude Code's figure, or its tokens at the provider's prices.
+            cost = run_usage(event, price=launch.price).cost_usd if launch.price is not None \
+                else event.get("total_cost_usd", event.get("cost_usd"))
+            duration_ms = event.get("duration_ms")
+            if parent_task_id:
+                try:
+                    parts = ["Worker finished"]
+                    if cost is not None:
+                        parts[0] = f"Worker finished (cost: ${cost:.4f})"
+                    meta: dict[str, Any] = {}
+                    if cost is not None:
+                        meta["cost_usd"] = cost
+                    if duration_ms is not None:
+                        meta["duration_ms"] = duration_ms
+                    await db_activity.insert_activity(
+                        task_id=parent_task_id,
+                        worker=worker_id,
+                        kind="phase",
+                        summary=parts[0],
+                        metadata=meta or None,
+                    )
+                except Exception:
+                    logger.debug("failed to insert result activity", exc_info=True)
 
         try:
             await asyncio.wait_for(_read_stream(), timeout=run_timeout if run_timeout > 0 else None)
@@ -808,6 +814,8 @@ class WorkerPool:
             if timed_out:
                 raise asyncio.TimeoutError(error) from exc
             raise
+        if finished is not None and finished is result_event:
+            await _report_finished(finished)
 
         final_text = str((result_event or {}).get("result") or "") or None
         return_code = process.returncode or 0

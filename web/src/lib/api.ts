@@ -1241,6 +1241,8 @@ export interface AgentProfile {
   model: string;
   /** null = the runtime's default. */
   effort: string | null;
+  /** Claude Code's agent teams in its runs (Claude Code runtimes only). */
+  agent_teams: boolean;
   runtime_id: string;
   runtime_name: string;
   runtime_type: string;
@@ -1299,6 +1301,7 @@ export interface ProfileFields {
   provider_id?: string;
   model?: string;
   effort?: string | null;
+  agent_teams?: boolean;
 }
 
 /** Window event fired after this dashboard changes the registry, so profile selectors reload at once. */

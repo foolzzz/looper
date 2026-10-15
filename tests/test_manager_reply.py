@@ -387,7 +387,7 @@ class TestManagerResidentClaude:
         assert {"--print", "--verbose", "--include-partial-messages", "--replay-user-messages"} <= set(argv)
         takes_value = {"--input-format", "--output-format", "--append-system-prompt-file", "--system-prompt-snapshot",
                        "--setting-sources", "--settings", "--resume", "--model", "--effort", "--allowedTools",
-                       "--plugin-dir"}
+                       "--plugin-dir", "--teammate-mode"}
         positional = [arg for i, arg in enumerate(argv) if not arg.startswith("--") and argv[i - 1] not in takes_value]
         assert positional == []
         assert _flag(argv, "--resume") is None  # no session yet

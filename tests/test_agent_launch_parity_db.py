@@ -74,8 +74,10 @@ def test_each_role_starts_its_runtime_as_main_did(monkeypatch: pytest.MonkeyPatc
                 root = Path(tmp).resolve()
                 monkeypatch.setenv("HOME", str(root / "home"))
                 monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+                monkeypatch.delenv(parity.AGENT_TEAMS, raising=False)
                 await parity.seed_rest(scenario, root)
-                return await parity.capture(root, scenario)
+                # The fixture predates agent teams, which the scenarios' Claude Code profiles now have by default.
+                return parity.set_aside_agent_teams(await parity.capture(root, scenario))
         finally:
             await pool.close()
             await admin.execute(f'DROP SCHEMA "{schema}" CASCADE')

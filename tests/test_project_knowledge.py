@@ -39,6 +39,7 @@ from looper.agents.knowledge import (
     load_knowledge,
     safe_filename,
 )
+from looper.agents.runtimes.claude_code import TEAMMATE_MODE_ARGS
 from looper.agents.tiers.task import TaskRouter
 from looper.db import project_documents as db_documents, projects as db_projects
 
@@ -561,6 +562,6 @@ class TestLaunchArgs:
     def test_each_directory_is_one_add_dir_after_the_library(self) -> None:
         loaded = AgentKnowledge(index="## Project knowledge", documents=2, add_dirs=("/k", "/p"))
         args = Launch(knowledge=loaded).args()
-        assert args[-4:] == ["--add-dir", "/k", "--add-dir", "/p"]
+        assert args[-6:] == ["--add-dir", "/k", "--add-dir", "/p", *TEAMMATE_MODE_ARGS]  # the built-in profile's
         assert "--add-dir" not in Launch().args()  # nothing without knowledge
 

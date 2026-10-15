@@ -204,7 +204,7 @@ def provider_entry(row: Mapping[str, Any], include_secrets: bool) -> dict[str, A
 
 
 def profile_entry(row: Mapping[str, Any]) -> dict[str, Any]:
-    return {name: row[name] for name in ("name", "runtime", "provider", "model", "effort")}
+    return {name: row[name] for name in ("name", "runtime", "provider", "model", "effort", "agent_teams")}
 
 
 def layer_entry(row: Mapping[str, Any]) -> dict[str, Any]:
@@ -766,13 +766,15 @@ class _Importer:
         for name, row in target.profiles.items():
             if row["runtime"] in self.runtimes and row["provider"] in self.providers:
                 self.profiles[name] = (row["id"], self._profile_spec(row["id"], name, row["runtime"],
-                                                                     row["provider"], row["model"], row["effort"]))
+                                                                     row["provider"], row["model"], row["effort"],
+                                                                     row["agent_teams"]))
 
     def _profile_spec(self, profile_id: str, name: str, runtime: str, provider: str, model: str,
-                      effort: str | None) -> Any:
+                      effort: str | None, agent_teams: bool) -> Any:
         from .profile_registry import AgentProfile
 
-        return AgentProfile(profile_id, name, self.runtimes[runtime][1], self.providers[provider][1], model, effort)
+        return AgentProfile(profile_id, name, self.runtimes[runtime][1], self.providers[provider][1], model, effort,
+                            agent_teams)
 
     def record(self, section: str, key: str, action: Action, fields: Sequence[str] = (), reason: str = "") -> None:
         self.plan.changes.append(Change(section, key, action, tuple(fields), reason))
@@ -865,33 +867,38 @@ class _Importer:
         self.providers[name] = (provider_id, provider_spec({**fields, "id": provider_id}))
 
     async def profile(self, entry: Any) -> None:
-        from .profile_registry import RegistryError, _effort, _model, check_pairing, entry_name
+        from .profile_registry import RegistryError, _agent_teams, _effort, _model, check_agent_teams, check_pairing, \
+            default_agent_teams, entry_name
 
         raw = entry if isinstance(entry, Mapping) else {}
         label = str(raw.get("name"))
         try:
             entry = _mapping(entry, "an Agent Profile")
-            unknown = sorted(set(entry) - {"name", "runtime", "provider", "model", "effort"})
+            unknown = sorted(set(entry) - {"name", "runtime", "provider", "model", "effort", "agent_teams"})
             if unknown:
                 raise _Skip(f"unknown field {unknown[0]!r}")
             try:
                 name = label = entry_name(entry.get("name"), "agent")
                 values = {"runtime": entry.get("runtime"), "provider": entry.get("provider"),
-                          "model": _model(entry.get("model")), "effort": _effort(entry.get("effort"))}
+                          "model": _model(entry.get("model")), "effort": _effort(entry.get("effort")),
+                          "agent_teams": _agent_teams(entry["agent_teams"]) if "agent_teams" in entry else None}
             except RegistryError as exc:
                 raise _Skip(str(exc)) from None
             if values["runtime"] not in self.runtimes:
                 raise _Skip(f"no runtime {values['runtime']!r} here or in the file")
             values["runtime"] = self.runtimes[values["runtime"]][1].name  # the one it runs on here
+            if values["agent_teams"] is None:  # a file from before agent teams: the default of the runtime here
+                values["agent_teams"] = default_agent_teams(self.runtimes[values["runtime"]][1])
             if values["provider"] not in self.providers:
                 raise _Skip(f"no provider {values['provider']!r} here or in the file")
             row = self.target.profiles.get(name)
             if row is not None and row["builtin"]:
                 raise _Skip("a built-in Agent Profile has this name here")
             spec = self._profile_spec(row["id"] if row else f"new:{name}", name, values["runtime"],
-                                      values["provider"], values["model"], values["effort"])
+                                      values["provider"], values["model"], values["effort"], values["agent_teams"])
             try:
                 check_pairing(spec.runtime, spec.provider, spec.model)
+                check_agent_teams(spec.runtime, spec.agent_teams)
             except RegistryError as exc:
                 raise _Skip(str(exc)) from None
         except _Skip as exc:
@@ -909,19 +916,21 @@ class _Importer:
 
         return await db.write_profile(self.conn, profile_id, {
             "name": name, "runtime_id": spec.runtime.id, "provider_id": spec.provider.id, "model": spec.model,
-            "effort": spec.effort})
+            "effort": spec.effort, "agent_teams": spec.agent_teams})
 
     async def _layer_profile(self, name: str | None, scope: str, role: str | None) -> str | None:
         """The id of the layer's Agent Profile (``new:...`` in a preview); a model's profile from a file before
         Agent Profiles is added like the upgrade adds it."""
-        from .profile_registry import BUILTIN_PROVIDER, BUILTIN_RUNTIME, AgentProfile, RegistryError, check_roles
+        from .profile_registry import BUILTIN_PROVIDER, BUILTIN_RUNTIME, AgentProfile, RegistryError, check_roles, \
+            default_agent_teams
 
         if name is None:
             return None
         if name not in self.profiles and name.startswith(_MODEL_PROFILE_PREFIX) \
                 and BUILTIN_RUNTIME.name in self.runtimes and BUILTIN_PROVIDER.name in self.providers:
             runtime, provider = self.runtimes[BUILTIN_RUNTIME.name], self.providers[BUILTIN_PROVIDER.name]
-            spec = AgentProfile(f"new:{name}", name, runtime[1], provider[1], name[len(_MODEL_PROFILE_PREFIX):])
+            spec = AgentProfile(f"new:{name}", name, runtime[1], provider[1], name[len(_MODEL_PROFILE_PREFIX):],
+                                agent_teams=default_agent_teams(runtime[1]))
             self.record("profiles", name, Action.ADDED)
             profile_id = await self._write_profile(None, name, spec) if self.apply else spec.id
             self.profiles[name] = (profile_id, spec)

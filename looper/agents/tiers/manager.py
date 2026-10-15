@@ -512,7 +512,8 @@ class ManagerAgent:
         if agent_settings.profile_error:
             raise RuntimeError(agent_settings.profile_error)  # answered as an error; never another profile
         system_prompt = self._composed_prompt(agent_settings)
-        launch = Launch(agent_settings, await load_installed(self._runtime_root, AgentType.MANAGER.value))
+        launch = Launch(agent_settings, await load_installed(self._runtime_root, AgentType.MANAGER.value),
+                        role=AgentType.MANAGER)
         try:
             prompt_file = system_prompt.write_file(self._runtime_root)
         except OSError as exc:

@@ -225,6 +225,38 @@ class TestWorkerSubprocess:
             {"trigger": "auto", "pre_tokens": 90000, "post_tokens": 2000, "duration_ms": 900},
         ]
 
+    def test_the_outcome_is_the_last_result_once_background_teammates_end(self, agent_db: Any) -> None:
+        # A Worker of a profile with agent teams, recorded with Claude Code 2.1.285 (DeepSeek, trimmed): its turn
+        # ends with WAITING; once stdin is closed the teammate's message and its end each bring a turn and a result
+        # of their own, and only then does Claude exit.
+        fixture = Path(__file__).parent / "fixtures" / "claude_stream" / "agent_team_worker.jsonl"
+        results = [e for e in map(json.loads, fixture.read_text().splitlines()) if e["type"] == "result"]
+        assert [r["result"] for r in results][0] == "WAITING" and len(results) == 3
+
+        async def _run() -> dict[str, Any]:
+            with tempfile.TemporaryDirectory() as tmp:
+                claude = _fake_claude(Path(tmp), (
+                    "sys.stdin.readline()\n"
+                    f"lines = open({str(fixture)!r}).read().splitlines()\n"
+                    "first = next(i for i, line in enumerate(lines) if json.loads(line)['type'] == 'result')\n"
+                    "print('\\n'.join(lines[:first + 1]), flush=True)\n"
+                    "sys.stdin.read()\n"
+                    "print('\\n'.join(lines[first + 1:]), flush=True)\n"
+                ))
+                pool = WorkerPool(config=WorkerConfig(claude_bin=claude), runtime_root=Path(tmp))
+                envelope = _work_item(Path(tmp))
+                envelope.payload["parent_task_id"] = "task-1"
+                return await pool._execute(envelope)
+
+        outcome = asyncio.run(_run())
+        assert outcome["status"] == "completed" and "KUMQUAT-7" in outcome["summary"]
+        finish = agent_db.finish_record.await_args.kwargs
+        assert finish["output_text"] == results[-1]["result"]
+        assert finish["cost_usd"] == results[-1]["total_cost_usd"]  # the lead's requests and the teammate's
+        finished = [call.kwargs["summary"] for call in agent_db.insert_activity.await_args_list
+                    if call.kwargs["summary"].startswith("Worker finished")]
+        assert finished == [f"Worker finished (cost: ${results[-1]['total_cost_usd']:.4f})"]
+
     def test_missing_work_directory_fails_without_running_claude(self) -> None:
         async def _run() -> tuple[dict[str, Any], bool]:
             with tempfile.TemporaryDirectory() as tmp:

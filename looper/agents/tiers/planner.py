@@ -1290,7 +1290,7 @@ class PlannerAgent:
             # The task fails with the reason rather than run another agent.
             raise PlannerTurnError(agent_settings.profile_error)
         system_prompt = self._system_prompt(plan, settings, knowledge, agent_settings.harness)
-        launch = Launch(agent_settings, library, knowledge)
+        launch = Launch(agent_settings, library, knowledge, role=AgentType.PLANNER)  # never with agent teams
         await self._note_background(plan.project_background)
         try:
             prompt_file = system_prompt.write_file(self._runtime_root)

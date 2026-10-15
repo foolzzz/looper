@@ -32,6 +32,7 @@ from looper.agents.agent_settings import (
     resolve,
 )
 from looper.agents.http_server import AgentHTTPServer
+from looper.agents.runtimes.claude_code import AGENT_TEAMS, TEAMMATE_MODE_ARGS
 from looper.agents.tiers.task import TaskRouter
 
 ORDER = (Layer.SYSTEM, Layer.ROLE, Layer.PROJECT, Layer.ROLE_PROJECT)
@@ -190,7 +191,12 @@ class TestEnvironment:
         record = launch.record()
         assert record["env"] == {"sha256": launch.env_sha256, "keys": {"TZ": _sha("UTC"), "LANG": _sha("C.UTF-8")}}
         assert "C.UTF-8" not in json.dumps(record)
-        assert Launch().environment() is None and Launch().env_sha256 is None
+        # Nothing to change for a profile without agent teams, on a server without their variable; the built-in
+        # profile has them.
+        monkeypatch.delenv(AGENT_TEAMS, raising=False)
+        plain = Launch(resolve("worker", {(Layer.SYSTEM, None): LayerValues(profile=_profile("opus"))}))
+        assert plain.environment() is None and plain.env_sha256 is None
+        assert Launch().environment() == {**os.environ, AGENT_TEAMS: "1"}
 
 
 class TestReviewerHarness:
@@ -244,7 +250,7 @@ class TestRecord:
     def test_the_builtin_launch(self) -> None:
         from looper.agents.claude_cli import permission_args
 
-        assert Launch().args() == [*permission_args(), "--model", "opus"]
+        assert Launch().args() == [*permission_args(), "--model", "opus", *TEAMMATE_MODE_ARGS]  # it has agent teams
         assert Launch().record() == {
             "profile": {**BUILTIN_PROFILE.record(), "source": "builtin"},
             "model_choice": {"model": "opus", "source": "builtin", "effort": None},
