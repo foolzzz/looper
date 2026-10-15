@@ -879,6 +879,62 @@ class TestManagerTaskPlacement:
         assert "database is down" in result.reply
 
 
+_START = '{"action": "task_start", "task_id": "task-aaaaaaaaaaaa"}'
+_CLAIM = "测试任务已经启动，预计 1–2 分钟完成。**下一步：** 等它跑完。"
+
+
+@pytest.mark.usefixtures("agent_db")
+class TestManagerActionReplies:
+    """An action JSON in Claude's reply is run whatever text follows it, and the user gets the reply code writes
+    for it; a reply that names an action Looper could not read is never sent, since it may claim the action ran."""
+
+    @staticmethod
+    def _start(answer: str, monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
+        from looper.db import tasks as db_tasks
+
+        monkeypatch.setattr(db_tasks, "get_task", AsyncMock(
+            return_value={"id": "task-aaaaaaaaaaaa", "status": "init", "project_id": "proj-111111111111"}))
+        return _task_chat([answer], ["开始"])
+
+    @pytest.mark.parametrize("answer", [
+        f"{_START}  {_CLAIM}",  # the JSON first, then prose
+        f"好的，开始：{_START}\n\n{_CLAIM}",  # short prose before it
+        f"```json\n{_START}\n```\n{_CLAIM}",  # fenced, with text after the fence
+    ], ids=["json-then-prose", "short-prose-first", "fenced-then-prose"])
+    def test_an_action_is_run_and_only_code_answers(self, answer: str, monkeypatch: pytest.MonkeyPatch) -> None:
+        chat = self._start(answer, monkeypatch)
+        assert [start.payload for start in chat.starts] == [{"task_id": "task-aaaaaaaaaaaa"}]
+        (reply,) = chat.replies
+        assert reply.startswith("已开始任务 task-aaaaaaaaaaaa")
+        assert '"action"' not in reply and _CLAIM not in reply
+
+    def test_long_prose_before_an_action_is_sent_and_the_action_is_not_run(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        prose = "在开始之前我想先确认一下：这个任务会改动你的工作目录，你确定现在就开始吗？"
+        chat = self._start(f"{prose}\n{_START}", monkeypatch)
+        assert (chat.starts, chat.replies) == ([], [prose])
+
+    @pytest.mark.parametrize("answer", [
+        '{"action": "task_start", "task_id": "task-aaaaaaaaaaaa"  ' + _CLAIM,  # not valid JSON
+        '示例 {"step": 1} 之后：' + _START + " " + _CLAIM,  # an action object that is not the first one
+    ], ids=["invalid-json", "not-the-first-object"])
+    def test_a_reply_naming_an_action_that_was_not_run_never_claims_it_ran(
+        self, answer: str, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        with caplog.at_level("WARNING", logger="looper.agents.tiers.manager"):
+            chat = self._start(answer, monkeypatch)
+        assert chat.starts == []
+        (reply,) = chat.replies
+        assert reply.startswith("没有执行") and _CLAIM not in reply and '"action"' not in reply
+        assert any("task_start" in record.getMessage() for record in caplog.records)
+
+    def test_json_that_names_no_action_stays_text(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        answer = '配置是这样的：{"name": "demo", "port": 8080}，改好了告诉我。'
+        chat = self._start(answer, monkeypatch)
+        assert (chat.starts, chat.replies) == ([], [answer])
+
+
 LARK = channel_address("lark", "channel-lark")
 TELEGRAM = channel_address("telegram", "channel-telegram")
 
