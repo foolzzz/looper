@@ -17,7 +17,10 @@ and one task per variant, each in a project of its own:
   into the task's branch, ``b`` works in a worktree of its own when the task
   stops;
 - ``noplan``: the user stops the task during its [PLAN] turn, before it has
-  steps.
+  steps;
+- ``agents``: the failed task of ``none`` gets a Worker profile and a Worker
+  limit of 1 of its own before its restart, whose [RESTART] turn adds ``e``
+  and ``f``, ready with ``c``.
 
 Runs only when LOOPER_TEST_DATABASE_URL points at a disposable database (the
 run creates and drops a database beside it).
@@ -43,7 +46,7 @@ from evals.prompt_regression.runner import Api, EvalError, fresh_database, init_
 DSN = os.environ.get("LOOPER_TEST_DATABASE_URL")
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
-VARIANTS = ("none", "replan", "add", "startover", "stop", "worktree", "noplan")
+VARIANTS = ("none", "replan", "add", "startover", "stop", "worktree", "noplan", "agents")
 FAIL_REASON = "c cannot parse the input"
 
 # The stand-in. Every run finds its task's variant in its system prompt (the requirement says ``variant=<name>``)
@@ -89,7 +92,12 @@ if step:
     label = step.group(1)
     earlier = [r for r in logged("runs.jsonl") if r["variant"] == variant and r["step"] == label]
     partial = os.path.exists(f"{label}.txt")
-    log("runs.jsonl", {"step": label, "cwd": os.getcwd(), "partial": partial})
+    started = time.time()
+    if variant == "agents":
+        time.sleep(0.5)  # long enough that runs a limit lets overlap do overlap
+    model = args[args.index("--model") + 1] if "--model" in args else ""
+    log("runs.jsonl", {"step": label, "cwd": os.getcwd(), "partial": partial, "model": model, "start": started,
+                       "end": time.time()})
     changed = {}
     if variant == "worktree":
         open(f"{label}.txt", "w").write("partial\n" if label == "b" and not earlier else f"{label} done\n")
@@ -101,7 +109,7 @@ if step:
         report = {"status": "failed", "changed_files": {}, "deleted_files": [], "summary": "c cannot parse the input"}
     answer("fake-worker", "Done.\n" + json.dumps(report))
 else:
-    log("planner_argv.jsonl", {"argv": args})
+    log("planner_argv.jsonl", {"argv": args, "prompt": prompt})
     for line in sys.stdin:
         if not line.strip():
             continue
@@ -127,6 +135,8 @@ else:
                      "steps": [spec("c", ["a", "b"], "do c another way")]}
         elif text.startswith("[RESTART]") and variant == "add":
             reply = {"reply": "e checks c", "action": "add_steps", "steps": [spec("e", ["c"])]}
+        elif text.startswith("[RESTART]") and variant == "agents":
+            reply = {"reply": "e and f too", "action": "add_steps", "steps": [spec("e", []), spec("f", [])]}
         elif text.startswith("[RESTART]") or text.startswith("[CHAT]"):
             reply = {"reply": "Carrying on with the plan.", "action": "none"}
         else:
@@ -222,15 +232,22 @@ def restarted(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Any]:
             before = _wait(api, ids, _ended)
             merged_a = _git(work["worktree"], "log", "--format=%H", "--grep=^looper: merge step a")
             (state / "release-plan").touch()
+            # The failed task's Workers run on another profile, and one at a time, from its restart on.
+            api.post("/api/agent-profiles", {"name": "claude-code/sonnet", "runtime_id": "rt-claude-code",
+                                             "provider_id": "prov-claude-subscription", "model": "sonnet"})
+            agents = api.put(f"/api/tasks/{ids['agents']}/agents", {"profiles": {"worker": "claude-code/sonnet"},
+                                                                     "concurrency": {"worker": 1}})["agents"]
 
             for variant in VARIANTS:
                 api.post("/api/tasks/start", {"task_id": ids[variant], "start_over": variant == "startover"})
             after = _wait(api, ids, lambda variant, detail: detail["status"] == "completed")
+            with pytest.raises(EvalError, match="answered 409: .*the task is completed"):
+                api.put(f"/api/tasks/{ids['agents']}/agents", {"concurrency": {"worker": 2}})
             activity = {variant: [row["summary"] for row in api.get(f"/api/tasks/{task_id}/activity", limit=500)[
                 "activity"]] for variant, task_id in ids.items()}
 
     return {"before": before, "after": after, "activity": activity, "state": state, "work": work,
-            "merged_a": merged_a, "ids": ids, "log": (root / "serve.log").read_text()}
+            "merged_a": merged_a, "ids": ids, "agents": agents, "log": (root / "serve.log").read_text()}
 
 
 def _turns(restarted: dict[str, Any], variant: str, kind: str) -> list[str]:
@@ -266,6 +283,9 @@ def test_a_failed_task_restarts_from_its_plan_without_running_its_accepted_steps
     assert len(_turns(restarted, variant, "[PLAN]")) == 1
     (restart,) = _turns(restarted, variant, "[RESTART]")
     assert restart.startswith(f"[RESTART] The task failed: {FAIL_REASON}. The user restarted it")
+    assert "The restart does not reset retries: a step back to not started keeps the retries it used (at most 2 " \
+           "per step; a replan that keeps its id keeps them too), so one that had used them all gets this one " \
+           "attempt and no retry; a step under a new id (add_steps or replan) starts with none used." in restart
     assert "- a [verified] do a" in restart and "  summary: a done" in restart and "  summary: b done" in restart
     assert "- c [pending] do c" in restart and "- d [pending] do d" in restart
     assert "attempt 1: failed (last result: failed: c cannot parse the input) when the task ended" in restart
@@ -275,6 +295,38 @@ def test_a_failed_task_restarts_from_its_plan_without_running_its_accepted_steps
                for line in restarted["activity"][variant])
     instruction = {s["step_key"]: s["instruction"] for s in after["steps"]}["c"]
     assert instruction == ("do c another way" if variant == "replan" else "do c")
+
+
+def test_a_failed_tasks_new_worker_profile_and_limit_run_its_restart(restarted: dict[str, Any]) -> None:
+    before, after = restarted["before"]["agents"], restarted["after"]["agents"]
+    assert (before["status"], before["agents"]["editable"]) == ("failed", True)
+    assert (after["status"], after["agents"]["editable"]) == ("completed", False)
+    worker = restarted["agents"]["roles"]["worker"]
+    assert (worker["profile"]["value"]["name"], worker["profile"]["source"]) == ("claude-code/sonnet", "task")
+    assert (worker["concurrency"]["value"], worker["concurrency"]["source"]) == (1, "task")
+    assert _statuses(after) == {step: "verified" for step in "abcdef"}
+    runs = _log(restarted["state"], "runs.jsonl", "agents")
+    # Before the change the built-in profile ran a, b and c's first attempt; after it, every run is on the new one.
+    assert sorted((r["step"], r["model"]) for r in runs[:3]) == [("a", "opus"), ("b", "opus"), ("c", "opus")]
+    assert sorted((r["step"], r["model"]) for r in runs[3:]) == [
+        ("c", "sonnet"), ("d", "sonnet"), ("e", "sonnet"), ("f", "sonnet")]
+    # c, e and f were ready at once, and ran one at a time.
+    rerun = sorted(runs[3:], key=lambda r: r["start"])
+    assert all(later["start"] >= earlier["end"] for earlier, later in zip(rerun, rerun[1:])), rerun
+    assert "Worker waits for room in this task (1 running, limit 1)" in restarted["activity"]["agents"]
+
+
+def test_the_planners_prompt_says_once_that_a_replan_builds_on_what_is_done(restarted: dict[str, Any]) -> None:
+    # Every Planner session (its DECISION, CHAT and RESTART turns and their replans) has the rule from the
+    # recommended role prompt a new database seeds, and the reply contract does not repeat it.
+    state = restarted["state"]
+    prompts = [" ".join(row["prompt"].split()) for variant in VARIANTS
+               for row in _log(state, "planner_argv.jsonl", variant)]
+    assert len(prompts) >= len(VARIANTS)
+    for prompt in prompts:
+        assert prompt.count("A replan builds on what is done") == 1
+        # The DECISION and the CHAT replan alike.
+        assert prompt.count("started steps cannot change, and the new steps may depend on them") == 2
 
 
 def test_a_stopped_task_runs_its_running_step_again_and_not_its_accepted_one(restarted: dict[str, Any]) -> None:
