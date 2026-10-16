@@ -283,6 +283,9 @@ def test_a_failed_task_restarts_from_its_plan_without_running_its_accepted_steps
     assert len(_turns(restarted, variant, "[PLAN]")) == 1
     (restart,) = _turns(restarted, variant, "[RESTART]")
     assert restart.startswith(f"[RESTART] The task failed: {FAIL_REASON}. The user restarted it")
+    assert "The restart does not reset retries: a step back to not started keeps the retries it used (at most 2 " \
+           "per step; a replan that keeps its id keeps them too), so one that had used them all gets this one " \
+           "attempt and no retry; a step under a new id (add_steps or replan) starts with none used." in restart
     assert "- a [verified] do a" in restart and "  summary: a done" in restart and "  summary: b done" in restart
     assert "- c [pending] do c" in restart and "- d [pending] do d" in restart
     assert "attempt 1: failed (last result: failed: c cannot parse the input) when the task ended" in restart
