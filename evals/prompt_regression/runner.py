@@ -35,7 +35,7 @@ from pathlib import Path
 from typing import Any
 
 from . import metrics
-from .tasks import EvalTask
+from .tasks import CHOSEN_PROFILE, EvalTask
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 FAKE_CLAUDE = Path(__file__).resolve().with_name("fake_claude.py")
@@ -281,12 +281,14 @@ def run_task(
     clock_offset: float = 0.0,
     settle: float = 15.0,
     step_workspaces: str | None = None,
+    chosen_profile_id: str | None = None,
 ) -> dict[str, Any]:
     """Create and start ``task`` in ``work_dir``, wait until it ends, and read back what it shows.
 
     The task is cancelled when its cost reaches ``cap_left`` or it runs longer
     than ``timeout`` seconds. With ``step_workspaces``, ``work_dir`` is a git
-    repository and the task's project has that setting.
+    repository and the task's project has that setting. A task whose Planner may
+    choose a profile gets ``chosen_profile_id`` on its project's list first.
     """
     work_dir.mkdir(parents=True, exist_ok=True)
     for name, content in task.files.items():
@@ -299,6 +301,10 @@ def run_task(
     started = time.monotonic()
     created = api.post("/api/tasks/create", {"requirement": task.requirement, "project": project})
     task_id = created["task_id"]
+    if task.planner_may_choose:
+        if chosen_profile_id is None:
+            raise EvalError(f"{task.id} needs the profile its Planner may choose")
+        api.put(f"/api/projects/{created['project_id']}/allowed-profiles", {"profile_ids": [chosen_profile_id]})
     api.post("/api/tasks/start", {"task_id": task_id})
 
     chat_pending = task.chat is not None
@@ -471,11 +477,17 @@ def run(
             if register is not None:
                 api.put("/api/agent-settings/system", {"profile_id": chosen["profile_id"],
                                                        "run_budget_usd": max_budget_usd})
+            chosen_profile_id = None
+            if any(task.planner_may_choose for task in tasks):
+                chosen_profile_id = api.post("/api/agent-profiles", {
+                    "name": CHOSEN_PROFILE, **{key: chosen[key] for key in ("runtime_id", "provider_id", "model",
+                                                                             "effort")}})["profile"]["profile_id"]
             results, stopped = run_suite(
                 tasks,
                 lambda task, cap_left: run_task(api, task, work_dirs[task.id], timeout=timeout, poll=poll,
                                                 cap_left=cap_left, clock_offset=clock_offset,
-                                                step_workspaces=step_workspaces),
+                                                step_workspaces=step_workspaces,
+                                                chosen_profile_id=chosen_profile_id),
                 total_cap_usd=total_cap_usd,
             )
     finally:

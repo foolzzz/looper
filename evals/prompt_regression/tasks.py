@@ -28,10 +28,19 @@ class EvalTask:
     files: dict[str, str] = field(default_factory=dict)  # seeded into the working directory
     chat: str | None = None  # sent to the task's Planner once its plan exists (a supplement to the task)
     edit_requirement: str | None = None  # the requirement is edited to this once the plan exists
+    # The task's project lets its Planner choose CHOSEN_PROFILE for its Workers and Reviewers (its list is empty
+    # otherwise).
+    planner_may_choose: bool = False
     # min_steps, min_reviews, min_retries, min_chat_turns, min_independent_pairs, min_bracketed_pairs,
-    # min_parallel_workers, min_progress_notes, min_final_summary, min_plan_changes; max_plan_changes
+    # min_parallel_workers, min_progress_notes, min_final_summary, min_plan_changes, min_planner_profile_runs;
+    # max_plan_changes
     expect: dict[str, int] = field(default_factory=dict)
     fake: dict[str, Any] = field(default_factory=dict)  # the stand-in Claude's script
+
+
+# The profile a task's project may let its Planner choose: the run's own profile under another name, so a run on
+# it costs what any other does.
+CHOSEN_PROFILE = "eval/chosen"
 
 
 def _read(work_dir: Path, name: str) -> str | None:
@@ -355,6 +364,21 @@ TASKS: tuple[EvalTask, ...] = (
         check=_all(_equals("part1.txt", "one"), _equals("part2.txt", "two")),
         expect={"min_steps": 2, "min_chat_turns": 1, "max_plan_changes": 0},
         fake=_two_steps_fake(None),
+    ),
+    EvalTask(
+        # The Planner chooses its Workers' profile with its own tool, from the project's list, before the step runs.
+        id="profile_choice",
+        requirement=("Create greeting.txt in the working directory whose whole content is `hello`. Run this task's "
+                     f"Workers on the Agent Profile {CHOSEN_PROFILE}, which this task's project lets you choose."),
+        planner_may_choose=True,
+        check=_equals("greeting.txt", "hello"),
+        expect={"min_steps": 1, "min_planner_profile_runs": 1},
+        fake={
+            "plan": [_step("s1", "Create greeting.txt containing hello.", ["greeting.txt holds hello"])],
+            "attempts": {"s1": [{"status": "completed", "files": {"greeting.txt": "hello\n"}}]},
+            "planner_calls": {"PLAN": [["looper_task_profile_set", {
+                "role": "worker", "profile_id": CHOSEN_PROFILE, "reason": "the requirement asks for it"}]]},
+        },
     ),
 )
 

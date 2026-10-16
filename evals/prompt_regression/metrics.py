@@ -92,6 +92,13 @@ def result_text(events: Iterable[Mapping[str, Any]]) -> str | None:
     return str(result.get("result") or "")
 
 
+def planner_profile_runs(records: Iterable[Mapping[str, Any]]) -> int:
+    """Worker and Reviewer runs on a profile the task's Planner chose (for the rest of the task or a step)."""
+    return sum(1 for record in records if role(record) in ("worker", "reviewer")
+               and ((record.get("metadata") or {}).get("profile") or {}).get("source") in ("planner_task",
+                                                                                          "planner_step"))
+
+
 def turn_kinds(records: Iterable[Mapping[str, Any]]) -> dict[str, int]:
     """The Planner's turns by kind (``plan``, ``decision``, ``chat``, ``supervise``, ``repair``)."""
     kinds: dict[str, int] = {}
@@ -304,6 +311,8 @@ def task_metrics(
         # The Planner's progress notes kept in the task journal, and whether the task ended with a final summary.
         "progress_notes": sum(1 for entry in detail.get("journal") or [] if entry.get("kind") == "progress"),
         "final_summary": final_summary(detail),
+        # The runs on a profile the Planner chose with its tool.
+        "planner_profile_runs": planner_profile_runs(records),
     }
     status = str(detail.get("status") or "")
     problems = []
