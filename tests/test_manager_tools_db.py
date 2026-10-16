@@ -72,7 +72,9 @@ def test_the_managers_calls_create_a_new_project_only_after_the_next_message_con
                                           [("looper_confirm", {"confirmation_id": "<confirmation>"})]],
                                ["建一个俄罗斯方块任务，放在新项目 Tetris 里，目录 /srv/tetris，确认", "确认"])
         assert chat.tools == ["looper_overview", "looper_tasks", "looper_task_create", "looper_task_control",
-                              "looper_task_instruct", "looper_task_update", "looper_concurrency", "looper_confirm"]
+                              "looper_task_instruct", "looper_task_update", "looper_concurrency", "looper_projects",
+                              "looper_agent_profiles", "looper_providers", "looper_catalog", "looper_costs",
+                              "looper_settings", "looper_confirm"]
         assert "--strict-mcp-config" in chat.argv and "--mcp-config" in chat.argv
         asked, created = chat.replies
         # Claude's words come first, then what Looper writes itself.

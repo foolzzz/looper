@@ -301,8 +301,27 @@ async def task_costs(
     return costs
 
 
-async def spend_since(since: datetime, *, pool: asyncpg.Pool | None = None) -> dict[str, Any]:
-    """What every agent's runs started at or after ``since`` cost, the Manager's included, split by basis.
+# ``_TASK_ROLE`` and ``EQUIVALENT`` of the runs ``r`` of a query that joins their tasks ``t``.
+_RUN_TASK_ROLE = _TASK_ROLE.replace("agent_id", "r.agent_id")
+_RUN_EQUIVALENT = EQUIVALENT.replace("metadata", "r.metadata")
+# The runs started in [$1, $2) (a NULL bound is none) and, with $3, those of the tasks of project $3 that make up their
+# cost (``task_costs``).
+_IN_RANGE = (
+    "($1::timestamptz IS NULL OR r.created_at >= $1) AND ($2::timestamptz IS NULL OR r.created_at < $2) "
+    f"AND ($3::text IS NULL OR (t.project_id = $3 AND {_RUN_TASK_ROLE} IS NOT NULL))"
+)
+_SPEND = f"""count(*) AS runs,
+               count(*) FILTER (WHERE r.status = 'running') AS running,
+               count(*) FILTER (WHERE r.status <> 'running' AND r.cost_usd IS NULL) AS unpriced_runs,
+               COALESCE(sum(r.cost_usd) FILTER (WHERE NOT {_RUN_EQUIVALENT}), 0) AS provider_priced_usd,
+               COALESCE(sum(r.cost_usd) FILTER (WHERE {_RUN_EQUIVALENT}), 0) AS equivalent_usd"""
+
+
+async def spend_since(since: datetime | None, *, until: datetime | None = None, project_id: str | None = None,
+                      pool: asyncpg.Pool | None = None) -> dict[str, Any]:
+    """What every agent's runs started at or after ``since`` (and before ``until``; None for no bound) cost, the
+    Manager's included, split by basis; with ``project_id``, only the runs of that project's tasks that make up
+    their cost (their Planners', Workers' and Reviewers', as ``task_costs`` counts them).
 
     ``provider_priced_usd`` is money: runs with an API key, at their
     provider's prices (Claude Code's figure for Anthropic's API, Looper's for
@@ -313,17 +332,35 @@ async def spend_since(since: datetime, *, pool: asyncpg.Pool | None = None) -> d
     """
     pool = pool or get_pool()
     row = await pool.fetchrow(
-        f"""
-        SELECT count(*) AS runs,
-               count(*) FILTER (WHERE status = 'running') AS running,
-               count(*) FILTER (WHERE status <> 'running' AND cost_usd IS NULL) AS unpriced_runs,
-               COALESCE(sum(cost_usd) FILTER (WHERE NOT {EQUIVALENT}), 0) AS provider_priced_usd,
-               COALESCE(sum(cost_usd) FILTER (WHERE {EQUIVALENT}), 0) AS equivalent_usd
-        FROM llm_records WHERE created_at >= $1
-        """,
-        since,
+        f"SELECT {_SPEND} FROM llm_records r LEFT JOIN tasks t ON t.id = r.task_id WHERE {_IN_RANGE}",
+        since, until, project_id,
     )
     return dict(row)
+
+
+async def task_spend(since: datetime | None, until: datetime | None = None, *, project_id: str | None = None,
+                     pool: asyncpg.Pool | None = None) -> list[dict[str, Any]]:
+    """What each task's runs started in [``since``, ``until``) cost (None for no bound), split by basis as
+    ``spend_since`` splits it, most first: the runs that make up a task's cost (``task_costs``), of the tasks of
+    ``project_id`` only when it is given. Each row has the task's ``name`` and its ``project_id`` and
+    ``project_name`` now."""
+    from .tasks import task_name
+
+    pool = pool or get_pool()
+    rows = await pool.fetch(
+        f"""
+        SELECT r.task_id, t.title, t.goal_id, t.requirement, t.project_id, p.name AS project_name, {_SPEND}
+        FROM llm_records r JOIN tasks t ON t.id = r.task_id LEFT JOIN projects p ON p.id = t.project_id
+        WHERE {_IN_RANGE} AND {_RUN_TASK_ROLE} IS NOT NULL
+        GROUP BY r.task_id, t.title, t.goal_id, t.requirement, t.project_id, p.name
+        ORDER BY sum(r.cost_usd) DESC NULLS LAST, r.task_id
+        """,
+        since, until, project_id,
+    )
+    return [{"task_id": row["task_id"], "name": task_name(title=row["title"], goal_id=row["goal_id"],
+                                                          requirement=row["requirement"], task_id=row["task_id"]),
+             **{key: row[key] for key in row.keys() if key not in ("task_id", "title", "goal_id", "requirement")}}
+            for row in rows]
 
 
 async def agent_usage(

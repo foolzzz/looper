@@ -92,7 +92,8 @@ class Call:
 class Tool:
     """One catalog entry: an MCP tool of the Manager.
 
-    ``risk`` is the tier of its calls; ``escalate``, when given, makes one call
+    ``risk`` is the tier of its calls, but for those whose ``action`` is one of
+    ``read_actions``, which only read; ``escalate``, when given, makes one call
     ``high``: it returns what the user is asked to confirm (code's words), or
     None for a call of the tool's own tier. It may refuse the call
     (``OpError``) before anything is asked.
@@ -106,6 +107,11 @@ class Tool:
     escalate: Callable[[Call], Awaitable[str | None]] | None = None
     # The task a call acts on, for the audit trail and the task page; None for none.
     task_id: Callable[[Mapping[str, Any]], str | None] = lambda arguments: None
+    read_actions: frozenset[str] = frozenset()
+
+    def risk_of(self, arguments: Mapping[str, Any]) -> Risk:
+        """The tier of a call with these (checked) arguments, before ``escalate``."""
+        return Risk.READ if arguments.get("action") in self.read_actions else self.risk
 
     def listing(self) -> dict[str, Any]:
         """The tool as MCP's ``tools/list`` names it."""
@@ -119,11 +125,17 @@ def check_arguments(schema: Mapping[str, Any], arguments: Any) -> dict[str, Any]
     """``arguments`` checked against ``schema``: an object with the properties it declares (``type`` string,
     integer, boolean, object or array of strings, ``enum``, ``minLength``, ``minimum``/``maximum``,
     ``maxLength``), its ``required`` ones present, no others. Raises ``OpError(INVALID)`` naming the first
-    problem."""
+    problem, or ``OpError(FORBIDDEN)`` for an argument named like a secret, which no tool takes."""
+    from ...db.manager_actions import SECRET_KEY
+
     if not isinstance(arguments, dict):
         raise OpError(ErrorCode.INVALID, "the arguments must be a JSON object")
     properties: Mapping[str, Any] = schema.get("properties") or {}
     unknown = sorted(set(arguments) - set(properties))
+    if secret := next((name for name in unknown if SECRET_KEY.search(str(name))), None):
+        raise OpError(ErrorCode.FORBIDDEN, f"{secret}: Looper's tools never take a key, token or password, and you "
+                                           "must not ask for one in chat. The user enters it on the dashboard (an "
+                                           "LLM provider's API key: Settings → LLM Providers → the provider)")
     if unknown:
         raise OpError(ErrorCode.INVALID, f"unknown argument {unknown[0]!r}; the arguments are: "
                                          f"{', '.join(properties) or 'none'}")
