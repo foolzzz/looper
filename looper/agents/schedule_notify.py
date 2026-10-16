@@ -7,7 +7,8 @@ default) the failed ones (``failed``, ``timed_out``, ``gate_failed``),
 streak, each with one recovery message:
 
 - **failures**: ``consecutive_failures`` reaches ``FAILURES_ALERT_AT`` (3);
-  it recovers with the next completed run;
+  it recovers with the next ok run (``db.schedules.OK``): a completed run,
+  or a gate that found nothing to do;
 - **stale**: no run completed, and no gate found nothing to do, for 3
   periods of the rule, at least 15 minutes and at most 24 hours, counted
   from the first fire after the latest of that run, the schedule's last
@@ -166,11 +167,11 @@ class Notifier:
             if await self._switch(schedule["id"], "failures_alert_at", now):
                 await self._deliver(schedule, Kind.FAILURES_ALERT,
                                     failures_alert_text(schedule, project_name, run, base=self._base), run_id=run_id)
-        if status == "completed" and await self._switch(schedule["id"], "failures_alert_at", None):
+        if status in db_schedules.OK and await self._switch(schedule["id"], "failures_alert_at", None):
             await self._deliver(schedule, Kind.FAILURES_RECOVERED,
                                 recovered_text(schedule, project_name, run, Kind.FAILURES_RECOVERED, base=self._base),
                                 run_id=run_id)
-        if status in ("completed", "skipped_gate") and await self._switch(schedule["id"], "stale_alert_at", None):
+        if status in db_schedules.OK and await self._switch(schedule["id"], "stale_alert_at", None):
             await self._deliver(schedule, Kind.STALE_RECOVERED,
                                 recovered_text(schedule, project_name, run, Kind.STALE_RECOVERED, base=self._base),
                                 run_id=run_id)
