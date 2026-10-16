@@ -944,7 +944,7 @@ CREATE TABLE IF NOT EXISTS schedules (
 );
 -- S2: a gate command run in the work directory before each run (nothing printed: skipped; output: given to the
 -- task; failure: the run fails), a daily spend cap over the schedule's runs, and whom to tell: notify ('failures',
--- 'always', 'never') to a chat a channel allows (notify_channel and notify_chat, both or neither; none: the
+-- 'alerts', 'always', 'never'; see the block after these) to a chat a channel allows (notify_channel and notify_chat, both or neither; none: the
 -- dashboard only). last_ok_at is the last run that completed or whose gate found nothing to do; the two alerts are
 -- active while failures_alert_at (3 failures in a row) or stale_alert_at (no success for a while) is set.
 ALTER TABLE schedules ADD COLUMN IF NOT EXISTS gate_command TEXT;
@@ -957,6 +957,16 @@ ALTER TABLE schedules ADD COLUMN IF NOT EXISTS notify_chat TEXT;
 ALTER TABLE schedules ADD COLUMN IF NOT EXISTS last_ok_at TIMESTAMPTZ;
 ALTER TABLE schedules ADD COLUMN IF NOT EXISTS failures_alert_at TIMESTAMPTZ;
 ALTER TABLE schedules ADD COLUMN IF NOT EXISTS stale_alert_at TIMESTAMPTZ;
+-- Once: notify 'alerts' (the two alerts and their recoveries, no run's own message) joins the choices.
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM schema_migrations WHERE name = 'schedules_notify_alerts') THEN
+        ALTER TABLE schedules DROP CONSTRAINT IF EXISTS schedules_notify_check;
+        ALTER TABLE schedules ADD CONSTRAINT schedules_notify_check
+            CHECK (notify IN ('failures', 'alerts', 'always', 'never'));
+        INSERT INTO schema_migrations (name) VALUES ('schedules_notify_alerts');
+    END IF;
+END $$;
 -- When the schedule was created or last enabled (set when enabled turns true): the no-success alert counts from it
 -- or from last_ok_at, whichever is later, so a schedule enabled again after a pause is not stale at once. A schedule
 -- from before takes its updated_at, which is at or after its last enabling.

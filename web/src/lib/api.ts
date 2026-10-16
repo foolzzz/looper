@@ -683,9 +683,9 @@ export type ScheduleRunStatus =
   | "skipped_gate"
   | "gate_failed"
   | "skipped_budget";
-/** "failures": failed runs and the two alerts with their recoveries; "always": every run that ran a task, and the
- * alerts; "never": nothing is sent. */
-export type ScheduleNotify = "failures" | "always" | "never";
+/** "failures": failed runs and the two alerts with their recoveries; "alerts": the alerts and their recoveries
+ * only; "always": every run that ran a task, and the alerts; "never": nothing is sent. */
+export type ScheduleNotify = "failures" | "alerts" | "always" | "never";
 
 /** A chat of a channel the notifications go to. */
 export interface ScheduleNotifyTarget {

@@ -32,6 +32,11 @@ export const NOTIFY_OPTIONS: { value: ScheduleNotify; label: string; hint: strin
     label: "Failures",
     hint: "Failed runs, plus the alerts (3 failures in a row, no success for a while) and their recoveries.",
   },
+  {
+    value: "alerts",
+    label: "Alerts only",
+    hint: "Only the alerts (3 failures in a row, no success for a while) and their recoveries; no message per run.",
+  },
   { value: "always", label: "Always", hint: "Every run that ran a task, plus the alerts." },
   { value: "never", label: "Never", hint: "Nothing is sent; the dashboard still shows failing schedules." },
 ];
