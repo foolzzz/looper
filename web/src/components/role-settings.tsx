@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useId, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useState } from "react";
 import { History, Loader2, Power, PowerOff, RotateCcw, Save } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -35,87 +35,32 @@ function rank(role: string) {
 
 // --- The role prompt ---
 
-type PromptMode = "replace" | "append";
-
+/** The role prompt: one text, the role layer of the agent's system prompt. */
 function RolePromptEditor({ id, value, onChange }: { id: string; value: string; onChange: (v: string) => void }) {
-  const [mode, setMode] = useState<PromptMode>("replace");
-  const [appendText, setAppendText] = useState("");
-  const textareaRef = useRef<HTMLTextAreaElement>(null);
-
   const lineCount = value.split("\n").length;
-
-  const handleApply = () => {
-    if (mode === "append" && appendText.trim()) {
-      onChange(value ? value + "\n\n" + appendText : appendText);
-      setAppendText("");
-    }
-  };
 
   return (
     <div className="space-y-2">
       <div className="flex items-center justify-between">
         <label htmlFor={id} className="text-xs font-medium text-muted-foreground">Role prompt</label>
-        <div className="flex items-center gap-2">
-          <span className="text-[10px] text-muted-foreground">
-            {value.length} chars · {lineCount} lines
-          </span>
-          <div className="flex rounded-md border border-border overflow-hidden">
-            {(["replace", "append"] as PromptMode[]).map((m) => (
-              <button
-                key={m}
-                type="button"
-                onClick={() => setMode(m)}
-                aria-pressed={mode === m}
-                className={cn(
-                  "px-2 py-0.5 text-[10px] font-medium transition-colors",
-                  mode === m
-                    ? "bg-primary text-primary-foreground"
-                    : "text-muted-foreground hover:text-foreground",
-                )}
-              >
-                {m === "replace" ? "Replace" : "Append"}
-              </button>
-            ))}
-          </div>
-        </div>
+        <span className="text-[10px] text-muted-foreground">
+          {value.length} chars · {lineCount} lines
+        </span>
       </div>
-
-      {mode === "replace" ? (
-        <textarea
-          id={id}
-          ref={textareaRef}
-          value={value}
-          onChange={(e) => onChange(e.target.value)}
-          rows={Math.max(12, Math.min(lineCount + 2, 40))}
-          className="w-full resize-y rounded-md border border-input bg-transparent p-3 text-sm text-foreground font-mono leading-relaxed placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-          placeholder="What this kind of agent is responsible for..."
-        />
-      ) : (
-        <div className="space-y-2">
-          <div className="rounded-md border border-border bg-muted/20 p-3 max-h-[300px] overflow-y-auto">
-            <pre className="text-xs text-muted-foreground font-mono whitespace-pre-wrap">
-              {value || "(empty)"}
-            </pre>
-          </div>
-          <textarea
-            id={id}
-            value={appendText}
-            onChange={(e) => setAppendText(e.target.value)}
-            rows={6}
-            className="w-full resize-y rounded-md border border-input bg-transparent p-3 text-sm text-foreground font-mono leading-relaxed placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-            placeholder="Text to append..."
-          />
-          <Button
-            size="sm"
-            variant="outline"
-            onClick={handleApply}
-            disabled={!appendText.trim()}
-            className="w-full"
-          >
-            Append to Prompt
-          </Button>
-        </div>
-      )}
+      <p id={`${id}-hint`} className="text-[11px] text-muted-foreground">
+        This text is the role layer. At launch Looper combines it with the harness, the project, the task and the
+        reply format into the agent&apos;s system prompt, added to the runtime&apos;s own; a run&apos;s history page
+        (from Runs) shows that whole prompt.
+      </p>
+      <textarea
+        id={id}
+        aria-describedby={`${id}-hint`}
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        rows={Math.max(12, Math.min(lineCount + 2, 40))}
+        className="w-full resize-y rounded-md border border-input bg-transparent p-3 text-sm text-foreground font-mono leading-relaxed placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+        placeholder="What this kind of agent is responsible for..."
+      />
     </div>
   );
 }
