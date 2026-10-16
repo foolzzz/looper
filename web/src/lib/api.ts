@@ -466,11 +466,13 @@ async function failed(res: Response, label: string): Promise<never> {
   throw new Error(data.error || `${label} ${res.status}`);
 }
 
-export async function startTask(taskId: string): Promise<void> {
+/** Run a stopped, failed or cancelled task again: from its saved plan, or, with `startOver`, planned anew (its steps,
+ * plan and Planner session are deleted). */
+export async function startTask(taskId: string, { startOver = false }: { startOver?: boolean } = {}): Promise<void> {
   const res = await fetch(`${API_BASE}/tasks/start`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ task_id: taskId }),
+    body: JSON.stringify({ task_id: taskId, start_over: startOver }),
   });
   if (!res.ok) await failed(res, "start");
 }
