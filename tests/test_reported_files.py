@@ -92,7 +92,8 @@ def _commit_in_worktree_then_remove(repo: Path, tmp_path: Path) -> str:
     worktree = tmp_path / "wt"
     git(repo, "worktree", "add", "-q", "-b", "feature", str(worktree))
     (worktree / "new.py").write_text("x\n")
-    git(worktree, "add", "new.py")
+    (worktree / "pkg" / "new.py").write_text("x\n")
+    git(worktree, "add", "new.py", "pkg/new.py")
     git(worktree, "commit", "-qm", "add new.py")
     sha = git(worktree, "rev-parse", "HEAD")
     git(repo, "worktree", "remove", str(worktree))
@@ -131,12 +132,24 @@ def test_a_file_committed_during_the_run_counts_when_it_is_no_longer_on_disk(
     repo = _repo(tmp_path / "repo")
     started = _now()
     sha = make(repo, tmp_path)
-    reported = str(tmp_path / "wt" / "new.py") if absolute else "new.py"
+    reported = str(tmp_path / "wt" / "pkg" / "new.py") if absolute else "new.py"
     assert not (repo / "new.py").exists() and not (tmp_path / "wt").exists()
 
     judged = _judge(repo, {reported: "added"}, started_at=started)
     assert judged["status"] == "completed"
     assert judged["found_elsewhere"] == {reported: f"in commit {sha[:12]}"}
+
+
+@pytest.mark.parametrize("reported", ["new.py", "pkg/new.py"])
+def test_an_absolute_path_is_not_matched_by_its_file_name_alone(tmp_path: Path, reported: str) -> None:
+    # The run committed new.py at the top level; a report of new.py in a directory that is gone is another file.
+    repo = _repo(tmp_path / "repo")
+    started = _now()
+    _commit_then_switch_away(repo, tmp_path)
+
+    judged = _judge(repo, {str(tmp_path / "gone" / reported): "added"}, started_at=started)
+    assert judged["status"] == "failed"
+    assert f"changed files not found: {tmp_path / 'gone' / reported}" in judged["error"]
 
 
 def test_a_file_found_nowhere_fails_and_says_where_it_looked(tmp_path: Path) -> None:
