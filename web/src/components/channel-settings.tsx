@@ -35,7 +35,7 @@ const SENDER_ALLOWLISTS: Record<string, { field: string; label: string; pattern:
     label: "Lark open_ids",
     pattern: /^ou_[0-9A-Za-z]{8,64}$/,
     placeholder: "ou_…",
-    hint: "Each sender's open_id for this bot's app, starting with ou_ (not a union_id or a user_id); open_ids differ per app. Only direct messages to the bot are handled.",
+    hint: "Each sender's open_id for this bot's app, starting with ou_ (not a union_id or a user_id); open_ids differ per app. Direct messages to the bot are handled, and in a group only the messages that @-mention it.",
   },
 };
 const MAX_SENDERS = 100;
@@ -431,6 +431,7 @@ function LarkPeople({
                 <span className="text-muted-foreground">
                   {r.count > 1 ? `${r.count} messages, last ` : ""}
                   {new Date(r.last_at).toLocaleString()}
+                  {r.chat_id ? `, in group chat ${shortId(r.chat_id)}` : ""}
                 </span>
                 <Button
                   type="button"

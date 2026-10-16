@@ -2485,8 +2485,9 @@ export interface LarkStatus {
   allowlist_app_id: string | null;
   /** Names of the allowlist's and the refused senders' open_ids, where lark-cli knows them. */
   names: Record<string, string>;
-  /** The latest senders the allowlist refused, newest first, not on the saved allowlist. */
-  rejected: { open_id: string; name: string | null; count: number; last_at: string }[];
+  /** The latest senders the allowlist refused, newest first, not on the saved allowlist; `chat_id` is the group
+   * chat they last @-mentioned the bot in, null for a direct message. */
+  rejected: { open_id: string; name: string | null; count: number; last_at: string; chat_id: string | null }[];
 }
 
 /** A person the people search found: their open_id for the channel's app. */
