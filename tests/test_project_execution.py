@@ -316,7 +316,7 @@ class TestPlanner:
             await h.bus.publish(MessageEnvelope.create(
                 source=TASK_ROUTER_ADDRESS, target=h.planner.agent_address, message_type=MessageType.TASK_REQUEST,
                 payload={"requirement": "build the calc package", "work_dir": str(h.work_dir),
-                         "project_id": "proj-1", "resume": True},
+                         "project_id": "proj-1", "restart": "at_cap"},
             ))
             final = await h.finished()
             assert final.payload["status"] == "completed" and final.payload["summary"] == FINAL_RESULT
@@ -352,7 +352,7 @@ class TestPlanner:
             await h.bus.publish(MessageEnvelope.create(
                 source=TASK_ROUTER_ADDRESS, target=h.planner.agent_address, message_type=MessageType.TASK_REQUEST,
                 payload={"requirement": "build the calc package", "work_dir": str(h.work_dir),
-                         "project_id": "proj-1", "resume": True},
+                         "project_id": "proj-1", "restart": "at_cap"},
             ))
             assert (await h.finished()).payload["status"] == "completed"
 

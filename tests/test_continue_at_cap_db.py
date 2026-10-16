@@ -86,7 +86,7 @@ def test_a_task_that_failed_at_its_cap_continues_from_its_plan_with_a_higher_cap
         assert (await projects.get_project(project_id, pool=pool))["task_budget_usd"] == 1.25
         (restart,) = published
         assert restart.message_type is MessageType.TASK_RESTART
-        assert restart.payload == {"task_id": "task-a", "resume": True}
+        assert restart.payload == {"task_id": "task-a", "mode": "at_cap"}
 
         # The router runs it again from its plan: the steps stay, the failure is cleared.
         assign = AsyncMock()
@@ -94,7 +94,7 @@ def test_a_task_that_failed_at_its_cap_continues_from_its_plan_with_a_higher_cap
         del router._tasks["task-a"]
         await router._handle_restart(restart)
         _, request = assign.await_args.args
-        assert request.payload["resume"] is True
+        assert request.payload["restart"] == "at_cap"
         row = await tasks.get_task("task-a", pool=pool)
         assert (row["status"], row["error"], row["fail_kind"]) == ("pending", None, None)
         assert [s["id"] for s in await steps.list_steps("task-a", pool=pool)] == ["step-1", "step-2"]
