@@ -230,6 +230,6 @@ def test_a_manager_session_dropped_with_new_stays_clean_after_a_restart(
         (reset,) = await llm_records.list_records(agent_id="manager", pool=pool)
         assert (reset["session_id"], reset["status"], reset["cost_usd"]) == ("sess-old", "completed", 0.0)
         assert reset["metadata"]["session_reset"] == {"channel": "web", "sender": None, "chat": "session-a",
-                                                      "previous_session_id": "sess-old"}
+                                                      "group": False, "previous_session_id": "sess-old"}
 
     _run(test, monkeypatch)

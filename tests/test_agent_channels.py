@@ -561,6 +561,12 @@ class TestTelegramAllowlist:
         assert "channel-telegram not started" in caplog.text and "allowlist is empty" in caplog.text
 
 
+BOT_OPEN_ID = "ou_b0b0b0b0b0b0"
+# How lark-cli shows a message that @-mentions the bot: the mention in ``mentions``, by open_id, and as ``@name``
+# in the text.
+BOT_MENTION = {"id": BOT_OPEN_ID, "key": "@_user_1", "name": "HelperBot"}
+
+
 def _lark_event(open_id: str | None, text: str = "hello", **fields: Any) -> dict[str, Any]:
     """A message event as ``lark-cli event consume im.message.receive_v1`` prints it: flat, the sender's open_id
     in ``sender_id`` and a text message's text in ``content``."""
@@ -574,50 +580,71 @@ def _lark_event(open_id: str | None, text: str = "hello", **fields: Any) -> dict
 class TestLarkAllowlist:
     """At the adapter's event handler: only a listed open_id reaches the Manager."""
 
-    def _run(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, event: dict[str, Any], *ids: str) -> Any:
+    def _run(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, event: dict[str, Any], *ids: str,
+             bot_open_id: str = BOT_OPEN_ID) -> Any:
         from types import SimpleNamespace
 
+        from looper.agents.channels import lark_cli
         from looper.agents.channels.lark import LarkChannelAdapter
 
         sent: list[tuple[str, str]] = []
-        rejected: list[tuple[str, str]] = []
+        rejected: list[tuple[str, str | None]] = []
+        reacted: list[str] = []
 
         async def _send(self: Any, chat_id: str, text: str) -> None:
             sent.append((chat_id, text))
 
-        async def _rejected(sender_id: str) -> None:
-            rejected.append(sender_id)
+        async def _react(self: Any, chat_id: str, message_id: str) -> None:
+            reacted.append(message_id)
+
+        async def _rejected(sender_id: str, chat_id: str | None) -> None:
+            rejected.append((sender_id, chat_id))
+
+        async def _names(open_ids: Any, profile: str | None = None) -> dict[str, str]:
+            return {OPEN_ID: "Ada Lovelace"}
 
         monkeypatch.setattr(LarkChannelAdapter, "_send_lark_message", _send)
+        monkeypatch.setattr(LarkChannelAdapter, "_react", _react)
+        monkeypatch.setattr(lark_cli, "names", _names)
 
         async def _main() -> Any:
             bus = MessageBus(runtime_root=tmp_path)
             adapter = LarkChannelAdapter(runtime_root=tmp_path, allowlist=_allowlist("channel-lark", *ids),
-                                         on_rejected=_rejected)
+                                         on_rejected=_rejected, bot_open_id=bot_open_id)
             adapter._bus = bus  # what start() sets, without running lark-cli
             await adapter._handle_lark_event(event)
             messages = _manager_messages(bus)
-            await adapter.stop()  # with its reaction call still running
+            await asyncio.gather(*adapter._reactions._pending)
+            await adapter.stop()
             await bus.shutdown()
             return SimpleNamespace(messages=messages, sent=sent, conversations=dict(adapter._correlation_chat),
-                                   rejected=rejected)
+                                   rejected=rejected, reacted=reacted, replies_to=dict(adapter._group_message))
 
         return asyncio.run(_main())
 
-    def test_a_listed_sender_reaches_the_manager(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        seen = self._run(tmp_path, monkeypatch, _lark_event(OPEN_ID, "@bot build it"), OPEN_ID)
-        (message,) = seen.messages
-        assert message.payload["text"] == "build it"
+    @pytest.mark.parametrize(("text", "mentions", "seen"), [
+        ("@HelperBot build it", [BOT_MENTION], "build it"),
+        ("@_user_1 build it", [BOT_MENTION], "build it"),  # the placeholder, where lark-cli left it
+        # Without the bot's mention, a word starting with @ is the sender's.
+        ("@Alan build it", [], "@Alan build it"),
+        ("mail me at ada@example.test", [], "mail me at ada@example.test"),
+    ])
+    def test_a_listed_sender_reaches_the_manager(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, text: str,
+                                                 mentions: list[dict[str, str]], seen: str) -> None:
+        got = self._run(tmp_path, monkeypatch, _lark_event(OPEN_ID, text, mentions=mentions), OPEN_ID)
+        (message,) = got.messages
+        assert message.payload["text"] == seen
         assert message.payload["channel_context"]["sender_id"] == OPEN_ID
+        assert got.reacted == ["om_1"] and got.replies_to == {}
 
     def test_an_unlisted_sender_is_dropped_without_a_reply(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
     ) -> None:
         with caplog.at_level("WARNING"):
             seen = self._run(tmp_path, monkeypatch, _lark_event(OTHER_OPEN_ID, "the secret plan"), OPEN_ID)
-        assert seen.messages == [] and seen.sent == [] and seen.conversations == {}
+        assert seen.messages == [] and seen.sent == [] and seen.conversations == {} and seen.reacted == []
         # Recorded, never what they wrote, so Settings → Channels can name the sender and let them in.
-        assert seen.rejected == [OTHER_OPEN_ID]
+        assert seen.rejected == [(OTHER_OPEN_ID, None)]
         (line,) = [r.getMessage() for r in caplog.records if "allowlist" in r.getMessage()]
         assert "channel-lark" in line and OTHER_OPEN_ID in line and "secret plan" not in line
 
@@ -632,14 +659,47 @@ class TestLarkAllowlist:
                                                            fields: dict[str, Any]) -> None:
         assert self._run(tmp_path, monkeypatch, _lark_event(OPEN_ID, **fields), OPEN_ID).messages == []
 
-    def test_a_group_message_is_ignored_and_never_answered(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+    @pytest.mark.parametrize("sender", [OPEN_ID, OTHER_OPEN_ID])
+    @pytest.mark.parametrize(("text", "mentions", "bot_open_id"), [
+        ("hi all", [], BOT_OPEN_ID),
+        ("@Alan look", [{"id": OTHER_OPEN_ID, "key": "@_user_1", "name": "Alan"}], BOT_OPEN_ID),
+        # Only the bot's open_id counts, never its name in the text.
+        ("@HelperBot hi", [{"id": OTHER_OPEN_ID, "key": "@_user_1", "name": "HelperBot"}], BOT_OPEN_ID),
+        ("@HelperBot hi", [], BOT_OPEN_ID),
+        # An adapter that does not know its bot's open_id takes no group message.
+        ("@HelperBot hi", [BOT_MENTION], ""),
+    ])
+    def test_a_group_message_that_does_not_mention_the_bot_is_ignored_entirely(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, sender: str, text: str, mentions: list[Any],
+        bot_open_id: str,
     ) -> None:
-        with caplog.at_level("INFO"):
-            for sender in (OPEN_ID, OTHER_OPEN_ID):
-                seen = self._run(tmp_path, monkeypatch, _lark_event(sender, "hi all", chat_type="group"), OPEN_ID)
-                assert (seen.messages, seen.conversations, seen.rejected) == ([], {}, [])
-        assert "only direct messages are handled" in caplog.text
+        event = _lark_event(sender, text, chat_type="group", chat_id="oc_team", mentions=mentions)
+        seen = self._run(tmp_path, monkeypatch, event, OPEN_ID, bot_open_id=bot_open_id)
+        # No reaction, nothing for the Manager (so nothing stored), no record of who wrote, no reply.
+        assert (seen.messages, seen.conversations, seen.rejected, seen.reacted, seen.sent) == ([], {}, [], [], [])
+
+    def test_a_listed_senders_mention_in_a_group_reaches_the_manager(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        event = _lark_event(OPEN_ID, "@HelperBot what runs now?", chat_type="group", chat_id="oc_team",
+                            mentions=[BOT_MENTION], message_id="om_7")
+        seen = self._run(tmp_path, monkeypatch, event, OPEN_ID)
+        (message,) = seen.messages
+        assert message.payload["text"] == "what runs now?"
+        assert message.payload["channel_context"] == {"chat_id": "oc_team", "chat_type": "group",
+                                                      "sender_id": OPEN_ID, "message_id": "om_7",
+                                                      "sender_name": "Ada Lovelace"}
+        # Seen at once; its answer replies to it in the group.
+        assert seen.reacted == ["om_7"] and seen.replies_to == {message.correlation_id: "om_7"}
+
+    def test_an_unlisted_senders_mention_in_a_group_is_recorded_with_its_chat(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        event = _lark_event(OTHER_OPEN_ID, "@HelperBot the secret plan", chat_type="group", chat_id="oc_team",
+                            mentions=[BOT_MENTION])
+        seen = self._run(tmp_path, monkeypatch, event, OPEN_ID)
+        assert (seen.messages, seen.conversations, seen.reacted, seen.sent) == ([], {}, [], [])
+        assert seen.rejected == [(OTHER_OPEN_ID, "oc_team")]
 
     def test_the_reply_goes_back_to_the_chat_the_message_came_from(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
@@ -647,8 +707,8 @@ class TestLarkAllowlist:
         seen = self._run(tmp_path, monkeypatch, _lark_event(OPEN_ID, "hello", chat_id="oc_team"), OPEN_ID)
         (message,) = seen.messages
         assert seen.conversations == {message.correlation_id: "oc_team"}
-        assert message.payload["channel_context"] == {"chat_id": "oc_team", "sender_id": OPEN_ID,
-                                                      "message_id": "om_1"}
+        assert message.payload["channel_context"] == {"chat_id": "oc_team", "chat_type": "p2p",
+                                                      "sender_id": OPEN_ID, "message_id": "om_1"}
 
     def test_an_empty_allowlist_keeps_the_channel_from_starting(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,

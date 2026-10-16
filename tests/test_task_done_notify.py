@@ -18,7 +18,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from lark_cli_stand_in import OPEN_ID
+from lark_cli_stand_in import BOT_MENTION, BOT_OPEN_ID, OPEN_ID
 from manager_mcp_stand_in import manager_endpoint, mcp_manager_claude
 from looper.agents.bus import MessageBus
 from looper.agents.channels.allowlist import SenderAllowlist
@@ -31,7 +31,9 @@ from looper.agents.message import (
     channel_address,
     planner_address,
 )
-from looper.agents.task_notice import LEAD_CHARS, Notice, NotifyChannel, ends_task, lead, notice_text, notify_chat
+from looper.agents.task_notice import (
+    LEAD_CHARS, Notice, NotifyChannel, NotifyTarget, TargetKind, ends_task, lead, notice_text, notify_target,
+)
 from looper.agents.tiers.manager import ManagerAgent, ManagerConfig
 from looper.agents.tiers.planner import closing_note
 from looper.agents.tiers.task import Task, TaskRouter
@@ -53,10 +55,15 @@ def _status(task_id: str, status: str, summary: str) -> MessageEnvelope:
     )
 
 
-def _task(router: TaskRouter, *, channel: str, chat_id: str, title: str = "给 calc 加上除法",
+TELEGRAM_CHAT = NotifyTarget(TargetKind.CHAT, "1000001")
+LARK_USER = NotifyTarget(TargetKind.USER, OPEN_ID)
+LARK_GROUP = NotifyTarget(TargetKind.CHAT, "oc_team", mention=OPEN_ID)
+
+
+def _task(router: TaskRouter, *, channel: str, notify: NotifyTarget | None, title: str = "给 calc 加上除法",
           goal_id: str = "calc-division") -> Task:
     task = Task(task_id="task-n1", requirement="Add division to calc.\nKeep add.", goal_id=goal_id, work_dir="/w",
-                project_id="proj-1", origin_channel_id=channel, chat_id=chat_id, title=title)
+                project_id="proj-1", origin_channel_id=channel, notify=notify, title=title)
     router._tasks[task.task_id] = task
     return task
 
@@ -71,19 +78,21 @@ def _passed_on(router: TaskRouter, envelope: MessageEnvelope) -> list[dict[str, 
 class TestTheNotice:
     def test_a_completed_telegram_task(self, tmp_path: Path) -> None:
         router = _router(tmp_path)
-        _task(router, channel="channel-telegram", chat_id="1000001")
+        _task(router, channel="channel-telegram", notify=TELEGRAM_CHAT)
         (passed,) = _passed_on(router, _status("task-n1", "completed", FINAL_RESULT))
-        assert Notice.from_payload(passed["notice"]) == Notice(NotifyChannel.TELEGRAM, "1000001", (
+        assert Notice.from_payload(passed["notice"]) == Notice(NotifyChannel.TELEGRAM, TELEGRAM_CHAT, (
             "✅ 任务完成 · 给 calc 加上除法\n## Delivered\ncalc.py with add and its tests\n"
             f"{DASHBOARD}/#tasks/task-n1"))
 
-    def test_a_failed_lark_task_says_why_once_with_a_markdown_link(self, tmp_path: Path) -> None:
+    @pytest.mark.parametrize("target", [LARK_USER, LARK_GROUP])
+    def test_a_failed_lark_task_says_why_once_with_a_markdown_link(self, tmp_path: Path,
+                                                                   target: NotifyTarget) -> None:
         router = _router(tmp_path)
-        _task(router, channel="channel-lark", chat_id=OPEN_ID)
+        _task(router, channel="channel-lark", notify=target)
         note = closing_note("A step failed and the Planner could not go on.", [("s1", "failed", None)])
         (passed,) = _passed_on(router, _status("task-n1", "failed", note))
         notice = Notice.from_payload(passed["notice"])
-        assert notice is not None and (notice.channel, notice.chat) == (NotifyChannel.LARK, OPEN_ID)
+        assert notice is not None and (notice.channel, notice.target) == (NotifyChannel.LARK, target)
         link = f"{DASHBOARD}/#tasks/task-n1"
         assert notice.text == ("❌ 任务失败 · 给 calc 加上除法\n## Why it ended\n"
                                f"A step failed and the Planner could not go on.\n[{link}]({link})")
@@ -97,22 +106,22 @@ class TestTheNotice:
     ])
     def test_the_name_is_the_title(self, tmp_path: Path, title: str, goal_id: str, name: str) -> None:
         router = _router(tmp_path)
-        _task(router, channel="channel-telegram", chat_id="1000001", title=title, goal_id=goal_id)
+        _task(router, channel="channel-telegram", notify=TELEGRAM_CHAT, title=title, goal_id=goal_id)
         (passed,) = _passed_on(router, _status("task-n1", "completed", "done"))
         assert passed["notice"]["text"].split("\n")[0] == f"✅ 任务完成 · {name}"
 
-    @pytest.mark.parametrize(("channel", "chat_id"), [("channel-web", "sess-1"), ("channel-telegram", ""),
-                                                      ("", "1000001")])
+    @pytest.mark.parametrize(("channel", "notify"), [("channel-web", NotifyTarget(TargetKind.CHAT, "sess-1")),
+                                                     ("channel-telegram", None), ("", TELEGRAM_CHAT)])
     def test_a_web_task_or_one_without_a_chat_has_no_notice(self, tmp_path: Path, channel: str,
-                                                            chat_id: str) -> None:
+                                                            notify: NotifyTarget | None) -> None:
         router = _router(tmp_path)
-        _task(router, channel=channel, chat_id=chat_id)
+        _task(router, channel=channel, notify=notify)
         (passed,) = _passed_on(router, _status("task-n1", "completed", "done"))
         assert "notice" not in passed
 
     def test_progress_has_no_notice_and_nothing_comes_after_the_end(self, tmp_path: Path) -> None:
         router = _router(tmp_path)
-        _task(router, channel="channel-telegram", chat_id="1000001")
+        _task(router, channel="channel-telegram", notify=TELEGRAM_CHAT)
         (progress,) = _passed_on(router, _status("task-n1", "executing", "进度更新: 0/1 完成"))
         assert "notice" not in progress
         asyncio.run(router._handle_planner_status(_status("task-n1", "completed", "done")))
@@ -139,15 +148,26 @@ def test_the_notice_links_relative_without_a_dashboard_address() -> None:
     assert text == "❌ 任务失败 · task-n1\n/#tasks/task-n1"
 
 
-@pytest.mark.parametrize(("channel", "sender", "chat", "expected"), [
-    ("channel-lark", OPEN_ID, "oc_dm", OPEN_ID),  # Lark's notify sends to a user
-    ("channel-telegram", "7", "-1001234", "-1001234"),  # Telegram's to a chat
-    ("channel-web", None, "sess-1", None),
-    (None, None, None, None),
+@pytest.mark.parametrize(("channel", "sender", "chat", "group", "expected"), [
+    ("channel-lark", OPEN_ID, "oc_dm", False, LARK_USER),  # a Lark direct message: the user
+    ("channel-lark", OPEN_ID, "oc_team", True, LARK_GROUP),  # a Lark group: the group, @-mentioning the requester
+    ("channel-telegram", "7", "-1001234", True, NotifyTarget(TargetKind.CHAT, "-1001234")),  # Telegram: the chat
+    ("channel-telegram", "7", "7", False, NotifyTarget(TargetKind.CHAT, "7")),
+    ("channel-web", None, "sess-1", False, None),
+    (None, None, None, False, None),
 ])
-def test_the_chat_a_task_records(channel: str | None, sender: str | None, chat: str | None,
-                                 expected: str | None) -> None:
-    assert notify_chat(channel, sender=sender, chat=chat) == expected
+def test_the_target_a_task_records(channel: str | None, sender: str | None, chat: str | None, group: bool,
+                                   expected: NotifyTarget | None) -> None:
+    target = notify_target(channel, sender=sender, chat=chat, group=group)
+    assert target == expected
+    if target is not None:  # kept in the tasks table, and read back from it
+        assert NotifyTarget.from_columns(target.columns()) == target
+
+
+@pytest.mark.parametrize("row", [{}, {"chat_id": "1000001"}, {"chat_id": "1000001", "chat_kind": "bot"},
+                                 {"chat_id": "", "chat_kind": "chat"}])
+def test_a_task_without_a_whole_target_has_none(row: dict[str, Any]) -> None:
+    assert NotifyTarget.from_columns(row) is None
 
 
 @pytest.mark.parametrize(("status", "ends"), [
@@ -175,7 +195,7 @@ def test_the_notify_channels_are_the_adapters_that_implement_notify(tmp_path: Pa
 # --- The Manager: the notice instead of the final summary, on the progress' path ---
 
 
-_NOTICE = Notice(NotifyChannel.TELEGRAM, "1000001", "✅ 任务完成 · x\n/#tasks/t1")
+_NOTICE = Notice(NotifyChannel.TELEGRAM, TELEGRAM_CHAT, "✅ 任务完成 · x\n/#tasks/t1")
 
 
 @pytest.mark.usefixtures("agent_db")
@@ -217,19 +237,25 @@ def test_the_manager_sends_the_notice_instead_of_the_end(tmp_path: Path, origin:
 # --- The channels: the notice like an answer, to who the task recorded ---
 
 
-def test_lark_sends_the_notice_as_markdown_to_the_user(tmp_path: Path, lark_cli_stand_in: Path) -> None:
+@pytest.mark.parametrize(("target", "sent"), [
+    (LARK_USER, ["--user-id", OPEN_ID, "--markdown", "✅ 任务完成 · x\n## Delivered\ncalc"]),
+    # A group: the requester @-mentioned before the notice.
+    (LARK_GROUP, ["--chat-id", "oc_team", "--markdown",
+                  f'<at user_id="{OPEN_ID}"></at> ✅ 任务完成 · x\n## Delivered\ncalc']),
+])
+def test_lark_sends_the_notice_as_markdown_to_who_the_task_recorded(tmp_path: Path, lark_cli_stand_in: Path,
+                                                                    target: NotifyTarget, sent: list[str]) -> None:
     from looper.agents.channels.lark import LarkChannelAdapter
 
     lark = LarkChannelAdapter(profile="other", runtime_root=tmp_path,
                               allowlist=SenderAllowlist("channel-lark", frozenset({OPEN_ID})))
-    notice = Notice(NotifyChannel.LARK, OPEN_ID, "✅ 任务完成 · x\n## Delivered\ncalc")
+    notice = Notice(NotifyChannel.LARK, target, "✅ 任务完成 · x\n## Delivered\ncalc")
     receipt = asyncio.run(lark.deliver(MessageEnvelope.create(
         source=MANAGER_ADDRESS, target=channel_address("lark"), message_type=MessageType.CHAT_NOTICE,
         payload=notice.payload(), correlation_id="never-seen")))
     assert receipt.success
     (argv,) = [json.loads(line) for line in lark_cli_stand_in.read_text().splitlines()]
-    assert argv == ["--profile", "other", "im", "+messages-send", "--as", "bot", "--user-id", OPEN_ID,
-                    "--markdown", notice.text]
+    assert argv == ["--profile", "other", "im", "+messages-send", "--as", "bot", *sent]
 
 
 def test_telegram_sends_the_notice_like_an_answer() -> None:
@@ -280,10 +306,17 @@ def _lark_event(text: str, message_id: str) -> dict[str, Any]:
             "message_type": "text", "sender_id": OPEN_ID, "sender_type": "user", "content": text}
 
 
+def _lark_group_event(text: str, message_id: str) -> dict[str, Any]:
+    """A listed sender's message in group oc_team, @-mentioning the bot."""
+    return {"type": "im.message.receive_v1", "chat_id": "oc_team", "chat_type": "group", "message_id": message_id,
+            "message_type": "text", "sender_id": OPEN_ID, "sender_type": "user", "content": f"@HelperBot {text}",
+            "mentions": [BOT_MENTION]}
+
+
 def _run_a_task(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, planner_claude: Any, agent_db: Any,
-                channel: ChannelAdapter, say: Any) -> dict[str, str]:
+                channel: ChannelAdapter, say: Any) -> dict[str, NotifyTarget | None]:
     """Ask for a task in ``channel`` (``say(text, n)`` sends its n-th message there), start it, and let it
-    complete, the channel delivering on its own outbound loop; each task's id and the chat it recorded."""
+    complete, the channel delivering on its own outbound loop; each task's id and who it recorded to tell."""
     from looper.db import tasks as db_tasks
 
     claude = planner_claude(plan(step("s1")), decide("accept"))
@@ -296,7 +329,7 @@ def _run_a_task(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, planner_claude:
     monkeypatch.setattr(db_tasks, "get_task", AsyncMock(side_effect=lambda task_id: (
         {**agent_db.store.ready[task_id], "status": db_tasks.READY} if task_id in agent_db.store.ready else None)))
 
-    async def main() -> dict[str, str]:
+    async def main() -> dict[str, NotifyTarget | None]:
         h = Harness(tmp_path, claude, always(WORK_OK))
         agent_db.find_project_by_name.return_value = {"id": "proj-1", "name": "calc", "description": "",
                                                        "work_dir": str(h.work_dir)}
@@ -323,7 +356,7 @@ def _run_a_task(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, planner_claude:
         await say("开始", 2)
         await h.until(lambda: router._tasks and not router._planners
                       and next(iter(router._tasks.values())).status == "completed", timeout=30)
-        chats = {task.task_id: task.chat_id for task in router._tasks.values()}
+        chats = {task.task_id: task.notify for task in router._tasks.values()}
         await h.until(lambda: bus.get_queue("manager").empty() and bus.get_queue(channel.channel_id).empty())
         await asyncio.sleep(1.0)  # a slow progress send under way finishes
         for running in (pumping, outbound):
@@ -359,7 +392,7 @@ def test_a_lark_task_ends_with_one_markdown_notice_after_its_progress(
         await lark._handle_lark_event(_lark_event(text, f"om_in{n}"))
 
     ((task_id, chat),) = _run_a_task(tmp_path, monkeypatch, planner_claude, agent_db, lark, say).items()
-    assert chat == OPEN_ID
+    assert chat == LARK_USER
     sends = [json.loads(line) for line in lark_cli_stand_in.read_text().splitlines() if "+messages-send" in line]
     link = f"{DASHBOARD}/#tasks/{task_id}"
     # The notice is the task's last message, after every progress message, sent once and as Markdown.
@@ -369,6 +402,43 @@ def test_a_lark_task_ends_with_one_markdown_notice_after_its_progress(
     assert progress and all(argv[-1] != sends[-1][-1] for argv in sends[:-1])
     assert any(argv[-1].startswith("任务已分解为 1 个步骤") for argv in sends if "--chat-id" in argv)
     assert sum("Delivered" in argv[-1] for argv in sends) == 1
+
+
+@pytest.mark.usefixtures("agent_db")
+def test_a_lark_group_task_is_answered_and_told_in_the_group(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, lark_cli_stand_in: Path, planner_claude: Any, agent_db: Any,
+) -> None:
+    from looper.agents.channels.lark import LarkChannelAdapter
+    from looper.agents.tiers import manager as manager_mod
+
+    stored = AsyncMock()
+    monkeypatch.setattr(manager_mod.db_chat, "save_message", stored)
+    lark = LarkChannelAdapter(runtime_root=tmp_path, allowlist=SenderAllowlist("channel-lark", frozenset({OPEN_ID})),
+                              bot_open_id=BOT_OPEN_ID)
+
+    async def say(text: str, n: int) -> None:
+        await lark._handle_lark_event(_lark_group_event(text, f"om_in{n}"))
+
+    ((task_id, target),) = _run_a_task(tmp_path, monkeypatch, planner_claude, agent_db, lark, say).items()
+    assert target == LARK_GROUP
+    calls = [json.loads(line) for line in lark_cli_stand_in.read_text().splitlines()]
+    # Each message was seen at once, and its status message and answer reply to it.
+    assert sorted(argv[6] for argv in calls if argv[:3] == ["im", "reactions", "create"]) == ["om_in1", "om_in2"]
+    replies = [argv for argv in calls if "+messages-reply" in argv]
+    assert {argv[5] for argv in replies} == {"om_in1", "om_in2"}
+    assert [argv[6] for argv in replies] == ["--text", "--markdown", "--text", "--markdown"]
+    # Everything else the bot posts goes to the group: the task's progress, then its end, @-mentioning the requester.
+    sends = [argv for argv in calls if "+messages-send" in argv]
+    assert sends and all(argv[4:6] == ["--chat-id", "oc_team"] for argv in sends)
+    assert any(argv[-1].startswith("进度更新") for argv in sends[:-1])
+    link = f"{DASHBOARD}/#tasks/{task_id}"
+    assert sends[-1][-1] == (f'<at user_id="{OPEN_ID}"></at> ✅ 任务完成 · 给 calc 加上加法\n## Delivered\n'
+                             f"calc.py with add and its tests\n[{link}]({link})")
+    # The group's turns are stored, under the group, without the @-mention.
+    turns = [(call.kwargs["session_id"], call.kwargs["role"], call.kwargs["content"])
+             for call in stored.await_args_list]
+    assert {session for session, _, _ in turns} == {"lark:oc_team"}
+    assert [content for _, role, content in turns if role == "user"] == ["build calc", "开始"]
 
 
 @pytest.mark.usefixtures("agent_db")
@@ -385,7 +455,7 @@ def test_a_telegram_task_ends_with_one_notice_after_its_progress(tmp_path: Path,
         await telegram._on_message(_tg_update(text, n), None)
 
     ((task_id, chat),) = _run_a_task(tmp_path, monkeypatch, planner_claude, agent_db, telegram, say).items()
-    assert chat == "7"
+    assert chat == NotifyTarget(TargetKind.CHAT, "7")
     texts = [sent["text"] for sent in bot.sent]
     assert texts[-1] == f"✅ 任务完成 · 给 calc 加上加法\n## Delivered\ncalc.py with add and its tests\n{DASHBOARD}/#tasks/{task_id}"
     assert bot.sent[-1]["chat_id"] == 7 and bot.sent[-1]["parse_mode"] == "MarkdownV2"

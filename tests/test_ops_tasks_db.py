@@ -29,7 +29,8 @@ LARK = channel_address("lark", "channel-lark")
 class _Chat:
     """One Lark chat with the Manager: each ``say`` is a turn in which the given calls run."""
 
-    def __init__(self, tmp: Path, planners: set[str] | None = None) -> None:
+    def __init__(self, tmp: Path, planners: set[str] | None = None, *, group: bool = False) -> None:
+        self.group = group  # a Lark group chat, where the sender @-mentioned the bot
         self.bus = MessageBus(runtime_root=tmp)
         self.planners = planners if planners is not None else set()
         router = SimpleNamespace(has_planner=lambda task_id: task_id in self.planners)
@@ -40,10 +41,12 @@ class _Chat:
     async def say(self, text: str, *calls: tuple[str, dict[str, Any]]) -> list[dict[str, Any]]:
         envelope = MessageEnvelope.create(
             source=LARK, target=LARK, message_type=MessageType.USER_MESSAGE,
-            payload={"text": text, "channel_context": {"chat_id": "oc_1", "sender_id": "ou_1"}},
+            payload={"text": text, "channel_context": {"chat_id": "oc_1", "sender_id": "ou_1",
+                                                       "chat_type": "group" if self.group else "p2p"}},
             correlation_id=f"corr-{len(self.turns)}", metadata={"origin_channel_id": "channel-lark"},
         )
-        turn = Turn(channel="lark", chat="oc_1", message_id=envelope.message_id, envelope=envelope, sender="ou_1")
+        turn = Turn(channel="lark", chat="oc_1", message_id=envelope.message_id, envelope=envelope, sender="ou_1",
+                    group=self.group)
         self.turns.append(turn)
         self.notes.append(self.ops.begin_turn(turn))
         try:
@@ -99,8 +102,9 @@ def test_a_task_is_created_ready_in_its_project_and_its_configuration_shown(
         assert (row["status"], row["requirement"], row["title"], row["work_dir"], row["project_id"]) == (
             "init", "build a calculator", "计算器", "/w", project["id"])
         # The end notice goes to the Lark sender; progress to the chat the task was asked for in.
-        assert (row["chat_id"], row["origin_channel_id"], row["correlation_id"], row["original_user_text"]) == (
-            "ou_1", "channel-lark", "corr-0", "确认")
+        assert (row["chat_id"], row["chat_kind"], row["chat_mention"]) == ("ou_1", "user", None)
+        assert (row["origin_channel_id"], row["correlation_id"], row["original_user_text"]) == (
+            "channel-lark", "corr-0", "确认")
         assert (await agent_setting_layers.profile_overrides(task_id, pool=pool))["worker"]["id"] == "agent-sonnet"
         # Looper shows the configuration itself, after Claude's words; nothing is started.
         (block,) = chat.turns[0].blocks
@@ -117,6 +121,47 @@ def test_a_task_is_created_ready_in_its_project_and_its_configuration_shown(
         status, detail = await _get(f"/api/tasks/{task_id}")
         assert status == 200
         assert [(a["tool"], a["status"]) for a in detail["manager_actions"]] == [("looper_task_create", "ok")]
+
+    _run(test, monkeypatch)
+
+
+def test_a_task_asked_for_in_a_lark_group_tells_the_group_and_its_requester(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    from looper.agents.task_notice import NotifyTarget, TargetKind
+    from looper.db import tasks
+
+    async def test(pool: Any) -> None:
+        await _project(pool)
+        chat = _Chat(tmp_path, group=True)
+        (answer,) = await chat.say("确认", ("looper_task_create", {"requirement": "build a calculator",
+                                                                  "title": "计算器", "project": "calc"}))
+        row = await tasks.get_task(answer["result"]["task_id"], pool=pool)
+        assert (row["chat_id"], row["chat_kind"], row["chat_mention"]) == ("oc_1", "chat", "ou_1")
+        assert NotifyTarget.from_columns(row) == NotifyTarget(TargetKind.CHAT, "oc_1", mention="ou_1")
+
+    _run(test, monkeypatch)
+
+
+def test_the_tasks_from_before_groups_keep_who_they_tell(monkeypatch: pytest.MonkeyPatch) -> None:
+    from looper.agents.task_notice import NotifyTarget, TargetKind
+    from looper.db import connection, tasks
+
+    async def test(pool: Any) -> None:
+        project = await _project(pool)
+        for task_id, channel, chat in (("task-lark0000001", "channel-lark", "ou_1"),
+                                       ("task-tele0000001", "channel-telegram", "-1001234"),
+                                       ("task-web00000001", "channel-web", None)):
+            await tasks.create_task(task_id=task_id, requirement="r", project_id=project["id"], pool=pool,
+                                    origin_channel_id=channel, chat_id=chat)
+        await pool.execute("ALTER TABLE tasks DROP COLUMN chat_kind")
+        await connection.ensure_schema(pool)
+        targets = {task_id: NotifyTarget.from_columns(await tasks.get_task(task_id, pool=pool))
+                   for task_id in ("task-lark0000001", "task-tele0000001", "task-web00000001")}
+        # A Lark task told its sender, a Telegram task its chat; a web task, nobody.
+        assert targets == {"task-lark0000001": NotifyTarget(TargetKind.USER, "ou_1"),
+                           "task-tele0000001": NotifyTarget(TargetKind.CHAT, "-1001234"),
+                           "task-web00000001": None}
 
     _run(test, monkeypatch)
 

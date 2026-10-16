@@ -172,46 +172,59 @@ def is_new_session_command(text: str) -> bool:
     return text.strip().lower() == NEW_SESSION_COMMAND
 
 
-# How the line before each message names the channel it came from (``AgentAddress.channel``). The Lark channel
-# takes direct messages only; Telegram's are told apart by the chat id.
-CHANNEL_NAMES = {"web": "the Looper dashboard chat", "lark": "a Lark direct message"}
+# How the line before each message names the channel it came from (``AgentAddress.channel``); for Telegram and
+# Lark, whether it is a direct message or a group chat (``_message_origin``).
+CHANNEL_NAMES = {"web": "the Looper dashboard chat"}
+CHAT_CHANNEL_NAMES = {"telegram": "Telegram", "lark": "Lark"}
 
 
 def channel_line(envelope: MessageEnvelope) -> str:
-    """The line before a message that tells Claude where it came from, and so where its reply goes."""
+    """The line before a message that tells Claude where it came from, and so where its reply goes; in a group
+    chat, who wrote it, when the channel names them (Lark: the sender's name, else their open_id)."""
     origin = _message_origin(envelope)
     channel = origin["channel"] or "unknown"
-    if channel == "telegram":
-        where = "a Telegram direct message" if _private_chat(origin) else "a Telegram group chat"
+    if channel in CHAT_CHANNEL_NAMES:
+        where = f"a {CHAT_CHANNEL_NAMES[channel]} {'group chat' if origin['group'] else 'direct message'}"
+        context = envelope.payload.get("channel_context")
+        name = context.get("sender_name") if origin["group"] and isinstance(context, dict) else None
+        if name:
+            where += f", from {name}"
     else:
         where = CHANNEL_NAMES.get(channel, f"the {channel} channel")
     return f"Channel: {where}"
 
 
-def _message_origin(envelope: MessageEnvelope) -> dict[str, str | None]:
-    """The channel a message came from, its sender (Lark's open_id, Telegram's user id; the web chat names none)
-    and its chat (the Lark or Telegram chat, the web chat session)."""
+def _message_origin(envelope: MessageEnvelope) -> dict[str, Any]:
+    """The channel a message came from, its sender (Lark's open_id, Telegram's user id; the web chat names none),
+    its chat (the Lark or Telegram chat, the web chat session) and whether that is a group chat: a Lark chat says
+    so (``chat_type``), and a Telegram chat's id is negative for a group or a channel."""
     context = envelope.payload.get("channel_context")
     context = context if isinstance(context, dict) else {}
+    channel = envelope.source.channel or envelope.source.agent_id
     sender = context.get("sender_id") or context.get("user_id")
-    chat = context.get("chat_id") or context.get("session_id")
-    return {"channel": envelope.source.channel or envelope.source.agent_id,
-            "sender": str(sender) if sender else None, "chat": str(chat) if chat else None}
+    chat = str(context.get("chat_id") or context.get("session_id") or "") or None
+    match channel:
+        case "lark":
+            group = context.get("chat_type") == "group"
+        case "telegram":
+            group = (chat or "").startswith("-")
+        case _:
+            group = False
+    return {"channel": channel, "sender": str(sender) if sender else None, "chat": chat, "group": group}
 
 
-def _private_chat(origin: dict[str, str | None]) -> bool:
-    """Whether a message (``_message_origin``) came from a private chat: the web chat and a Lark direct message
-    always (the Lark channel takes nothing else), a Telegram chat when its id is its user's, since a group's or a
-    channel's id is negative. Only private chats are stored (``_session_key``)."""
-    return not (origin["channel"] == "telegram" and (origin["chat"] or "").startswith("-"))
+def _stored_chat(origin: dict[str, Any]) -> bool:
+    """Whether a chat's turns are stored (``_session_key``): the web chat's, Lark's direct messages and group chats
+    (where only what @-mentions the bot comes in) and Telegram's direct messages; not a Telegram group's."""
+    return not (origin["channel"] == "telegram" and origin["group"])
 
 
 def _session_key(envelope: MessageEnvelope) -> str | None:
     """The chat_messages session id a turn is stored under: the web chat's ``session_id``, or
-    ``<channel>:<chat_id>`` for Telegram/Lark. None when neither identifies a chat, and for a chat that is not
-    private (a Telegram group), whose turns are never stored."""
+    ``<channel>:<chat_id>`` for Telegram/Lark. None when neither identifies a chat, and for a chat whose turns are
+    not stored (``_stored_chat``)."""
     origin = _message_origin(envelope)
-    if not _private_chat(origin):
+    if not _stored_chat(origin):
         return None
     context = envelope.payload.get("channel_context")
     context = context if isinstance(context, dict) else {}
@@ -430,7 +443,7 @@ class ManagerAgent:
             return
         # The calls Claude makes while answering belong to this message and its chat.
         turn = Turn(channel=origin["channel"], chat=origin["chat"], message_id=envelope.message_id,
-                    envelope=envelope, sender=origin["sender"])
+                    envelope=envelope, sender=origin["sender"], group=origin["group"])
         try:
             response = await self._invoke_claude(text, envelope, turn=turn)
         except Exception as exc:
@@ -790,7 +803,7 @@ class ManagerAgent:
                     origin["channel"], origin["sender"] or "-", previous[0] or "none")
         await self._send_reply(envelope, NEW_SESSION_REPLY)
 
-    async def _record_new_session(self, envelope: MessageEnvelope, origin: dict[str, str | None],
+    async def _record_new_session(self, envelope: MessageEnvelope, origin: dict[str, Any],
                                   previous: str | None) -> None:
         """The reset as one of the Manager's runs, under the session it ended (``metadata.session_reset``: who
         asked, from which channel and chat); a database error is logged, as for any run."""

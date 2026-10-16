@@ -12,13 +12,14 @@ from typing import Any
 
 import pytest
 
-from lark_cli_stand_in import OPEN_ID, OTHER
+from lark_cli_stand_in import BOT_OPEN_ID, OPEN_ID, OTHER
 from looper.agents.bus import MessageBus
 from looper.agents.channels import lark_cli, lark_settings
 from looper.agents.channels.allowlist import SenderAllowlist
 from looper.agents.channels.lark import LarkChannelAdapter
 from looper.agents.channels.lark_cli import (
-    LarkCliError, bot_info_command, consume_command, reaction_command, search_command, send_command, whoami_command,
+    LarkCliError, bot_info_command, consume_command, reaction_command, reply_command, search_command, send_command,
+    whoami_command,
 )
 from looper.agents.message import MessageEnvelope, MessageType, channel_address
 
@@ -27,9 +28,9 @@ def _calls(log: Path) -> list[list[str]]:
     return [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
 
 
-def _adapter(tmp_path: Path, profile: str = "") -> LarkChannelAdapter:
-    return LarkChannelAdapter(profile=profile, runtime_root=tmp_path,
-                              allowlist=SenderAllowlist("channel-lark", frozenset({OPEN_ID})))
+def _adapter(tmp_path: Path, profile: str = "", **kwargs: Any) -> LarkChannelAdapter:
+    return LarkChannelAdapter(profile=profile, runtime_root=tmp_path, bot_open_id=BOT_OPEN_ID,
+                              allowlist=SenderAllowlist("channel-lark", frozenset({OPEN_ID})), **kwargs)
 
 
 @pytest.mark.parametrize("profile", ["", "work"])
@@ -39,6 +40,8 @@ def test_every_command_carries_the_profile_when_there_is_one(profile: str) -> No
         *head, "im", "+messages-send", "--as", "bot", "--chat-id", "oc_1", "--markdown", "**hi**"]
     assert send_command(user_id=OPEN_ID, text="hi", profile=profile)[len(head) + 4:] == [
         "--user-id", OPEN_ID, "--text", "hi"]
+    assert reply_command("om_1", markdown="**hi**", profile=profile) == [
+        *head, "im", "+messages-reply", "--as", "bot", "--message-id", "om_1", "--markdown", "**hi**"]
     assert consume_command(profile) == [*head, "event", "consume", "im.message.receive_v1", "--as", "bot"]
     assert whoami_command(profile) == [*head, "whoami"]
     assert bot_info_command(profile) == [*head, "api", "GET", "/open-apis/bot/v3/info", "--as", "bot"]
@@ -88,26 +91,71 @@ def test_a_failed_send_says_why(tmp_path: Path, lark_cli_stand_in: Path) -> None
     assert (notified.success, notified.error) == (False, "lark-cli exited 2: Bot/User can NOT be out of the chat")
 
 
-def test_direct_messages_reach_the_manager_and_group_ones_do_not(tmp_path: Path, lark_cli_stand_in: Path) -> None:
+def test_direct_messages_and_group_mentions_of_the_bot_reach_the_manager(tmp_path: Path,
+                                                                         lark_cli_stand_in: Path) -> None:
+    rejected: list[tuple[str, str | None]] = []
+
+    async def on_rejected(sender_id: str, chat_id: str | None) -> None:
+        rejected.append((sender_id, chat_id))
+
     async def main() -> Any:
         bus = MessageBus(runtime_root=tmp_path)
-        adapter = _adapter(tmp_path)
+        adapter = _adapter(tmp_path, on_rejected=on_rejected)
         adapter._bus = bus  # what start() sets
         adapter._running = True
-        await asyncio.wait_for(adapter._run_event_consumer(), timeout=10)  # the stand-in prints two events, exits
+        await asyncio.wait_for(adapter._run_event_consumer(), timeout=10)  # the stand-in prints its events, exits
         queue = bus.get_queue("manager")
         messages = [queue.get_nowait() for _ in range(queue.qsize())]
         await asyncio.wait_for(asyncio.gather(*adapter._reactions._pending), timeout=10)
         await bus.shutdown()
-        return messages, dict(adapter._correlation_chat)
+        return messages, dict(adapter._correlation_chat), dict(adapter._group_message)
 
-    messages, conversations = asyncio.run(main())
-    (message,) = messages
-    assert message.payload["text"] == "status please"
-    assert message.payload["channel_context"] == {"chat_id": "oc_dm", "sender_id": OPEN_ID, "message_id": "om_9"}
-    assert conversations == {message.correlation_id: "oc_dm"}
-    # The direct message got the bot's reaction; the group message nothing.
-    assert _calls(lark_cli_stand_in) == [consume_command()[1:], reaction_command("om_9")[1:]]
+    messages, conversations, replies_to = asyncio.run(main())
+    direct, group = messages
+    assert direct.payload["text"] == "status please"
+    assert direct.payload["channel_context"] == {"chat_id": "oc_dm", "chat_type": "p2p", "sender_id": OPEN_ID,
+                                                 "message_id": "om_9"}
+    # The @-mention is taken out; the Manager is told who wrote, by the name the contact search finds.
+    assert group.payload["text"] == "what runs now?"
+    assert group.payload["channel_context"] == {"chat_id": "oc_group", "chat_type": "group", "sender_id": OPEN_ID,
+                                                "message_id": "om_11", "sender_name": "Ada Lovelace"}
+    assert conversations == {direct.correlation_id: "oc_dm", group.correlation_id: "oc_group"}
+    assert replies_to == {group.correlation_id: "om_11"}
+    # The unlisted sender's @-mention: who and in which chat, never what; the other group messages: nothing.
+    assert rejected == [(OTHER, "oc_group")]
+    calls = _calls(lark_cli_stand_in)
+    assert calls[0] == consume_command()[1:]
+    assert sorted(calls[1:]) == sorted([reaction_command("om_9")[1:], reaction_command("om_11")[1:],
+                                        ["contact", "+search-user", "--as", "user", "--user-ids", OPEN_ID]])
+
+
+def _group_envelope(kind: MessageType, payload: dict[str, Any]) -> MessageEnvelope:
+    return MessageEnvelope.create(source=channel_address("lark"), target=channel_address("lark"), message_type=kind,
+                                  payload=payload, correlation_id="c1")
+
+
+def test_in_a_group_the_status_and_the_answer_reply_to_the_message_and_progress_goes_to_the_chat(
+    tmp_path: Path, lark_cli_stand_in: Path,
+) -> None:
+    async def main() -> list[bool]:
+        adapter = _adapter(tmp_path)
+        adapter._correlation_chat["c1"] = "oc_group"
+        adapter._group_message["c1"] = "om_11"
+        phase = {"text": "thinking", "phase": True, "activity": "thinking"}
+        return [(await adapter.deliver(_group_envelope(kind, payload))).success for kind, payload in (
+            (MessageType.STATUS_UPDATE, phase),
+            (MessageType.AGENT_REPLY, {"text": "任务已创建：**calc**"}),
+            (MessageType.STATUS_UPDATE, {"text": "进度更新: 0/1 完成", "task_id": "t1", "status": "executing"}),
+        )]
+
+    assert asyncio.run(main()) == [True, True, True]
+    calls = _calls(lark_cli_stand_in)
+    status, answer, closing, progress = calls
+    assert status[:-1] == reply_command("om_11", text="")[1:-1] and status[-1].startswith("⏳ 处理中")
+    assert answer == reply_command("om_11", markdown="任务已创建：**calc**")[1:]
+    # The status message the reply sent is edited in place.
+    assert closing[:6] == ["im", "+messages-edit", "--as", "bot", "--message-id", "om_r0001"]
+    assert progress == send_command(chat_id="oc_group", markdown="进度更新: 0/1 完成")[1:]
 
 
 def test_a_consumer_that_stops_is_started_again_after_a_pause(tmp_path: Path, lark_cli_stand_in: Path,

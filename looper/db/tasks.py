@@ -162,6 +162,8 @@ async def create_task(
     correlation_id: str = "",
     origin_channel_id: str = "",
     chat_id: str | None = None,
+    chat_kind: str | None = None,
+    chat_mention: str | None = None,
     original_user_text: str | None = None,
     title: str | None = None,
     schedule_id: str | None = None,
@@ -170,8 +172,9 @@ async def create_task(
 ) -> dict[str, Any]:
     """Insert a task; ``schedule_id`` names the schedule that fired it, ``budget_usd`` its own spend cap.
 
-    ``chat_id`` is who to tell when the task ends (``agents.task_notice``): a Telegram chat id or a Lark sender's
-    open_id; None for a task that did not come from either. ``original_user_text`` is the user's message the
+    ``chat_id``, ``chat_kind`` and ``chat_mention`` are who to tell when the task ends (``agents.task_notice``): a
+    Telegram chat, a Lark sender's open_id, or a Lark group and the sender to @-mention there; None for a task that
+    did not come from either. ``original_user_text`` is the user's message the
     Manager's task JSON answered (kept as history); ``title`` the few words the Manager names the task with.
     """
     pool = pool or get_pool()
@@ -181,13 +184,13 @@ async def create_task(
         """
         INSERT INTO tasks (id, requirement, goal_id, work_dir, project_id,
                            config, status, correlation_id, origin_channel_id, chat_id, original_user_text, title,
-                           created_at, updated_at, schedule_id, budget_usd)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $13, $14, $15)
+                           created_at, updated_at, schedule_id, budget_usd, chat_kind, chat_mention)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $13, $14, $15, $16, $17)
         ON CONFLICT (id) DO NOTHING
         """,
         task_id, requirement, goal_id, work_dir, project_id,
         config_json, status, correlation_id, origin_channel_id, chat_id, original_user_text, task_title(title), now,
-        schedule_id, budget_usd,
+        schedule_id, budget_usd, chat_kind, chat_mention,
     )
     return {"task_id": task_id, "created_at": now.isoformat()}
 
