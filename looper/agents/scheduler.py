@@ -248,6 +248,26 @@ def run_context(schedule: Mapping[str, Any], firing: Firing, recent: list[Mappin
     return "\n".join(lines)
 
 
+def run_requirement(schedule: Mapping[str, Any], firing: Firing, recent: list[Mapping[str, Any]], *,
+                    description: str, gate_output: str | None = None, carried: Sequence[Carried] = ()) -> str:
+    """A run's task requirement: the schedule's, then its run context, the gate outputs fitted into the room the
+    task limit (``TASK_REQUIREMENT_LIMIT``) leaves after the rest. The lines around the outputs (the gate's, each
+    earlier run's label, the clipping notes) are measured once and the outputs shrunk by what they took, so the
+    requirement fits whenever the schedule's own requirement leaves ``schedules.RUN_CONTEXT_RESERVE_CHARS``."""
+    head = f"{schedule['requirement']}\n\n"
+    bare = run_context(schedule, firing, recent, description=description)
+    room = TASK_REQUIREMENT_LIMIT - len(head) - len(bare)
+    context = ""
+    for _ in range(3):
+        context = run_context(schedule, firing, recent, description=description, gate_output=gate_output,
+                              carried=carried, room=room)
+        excess = len(head) + len(context) - TASK_REQUIREMENT_LIMIT
+        if excess <= 0:
+            break
+        room -= excess + 50  # a shorter output's clipping note can grow by a digit
+    return head + context
+
+
 # --- The scheduler ---
 
 
@@ -526,13 +546,11 @@ class Scheduler:
             return None, "a work directory is required: set one on the schedule or on its project"
         recent = await db_schedules.recent_runs(conn, schedule["id"], limit=CONTEXT_RUNS)
         description = cron.describe(cron.parse(schedule["cron"]), schedule["timezone"])
-        bare = run_context(schedule, firing, recent, description=description)
-        room = TASK_REQUIREMENT_LIMIT - len(schedule["requirement"]) - len(bare) - 400
-        context = run_context(schedule, firing, recent, description=description, gate_output=gate_output,
-                              carried=carried, room=room)
+        requirement = run_requirement(schedule, firing, recent, description=description, gate_output=gate_output,
+                                      carried=carried)
         task_id = f"task-{uuid.uuid4().hex[:12]}"
         await db_tasks.create_task(
-            task_id=task_id, requirement=f"{schedule['requirement']}\n\n{context}", project_id=schedule["project_id"],
+            task_id=task_id, requirement=requirement, project_id=schedule["project_id"],
             work_dir=work_dir, status=db_tasks.READY, schedule_id=schedule["id"],
             budget_usd=schedule["run_budget_usd"], title=run_title(schedule, firing), pool=conn,
         )
