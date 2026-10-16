@@ -1265,6 +1265,45 @@ export async function editTaskRequirement(taskId: string, requirement: string): 
   if (!res.ok) await failed(res, "edit requirement");
 }
 
+/** The roles a task can limit for itself; how many of a project's tasks run at once (the Planner's) is the project's. */
+export type TaskLimitRole = "worker" | "reviewer";
+
+/** A Worker's or Reviewer's limit in one task: what applies (`value`, `source`), the task's own (null: none) and the
+ * project's. The lower of the task's own and the project's applies. */
+export interface TaskRoleConcurrency extends Sourced<number> {
+  task: number | null;
+  project: Sourced<number>;
+}
+
+/** How many of each task role run at once for one task. */
+export interface TaskConcurrency {
+  /** The most a limit may be. */
+  max: number;
+  /** False once the task has ended: its limits are shown, not changed. */
+  editable: boolean;
+  roles: {
+    /** The project's: how many of its tasks run at once. */
+    planner: Sourced<number>;
+    worker: TaskRoleConcurrency;
+    reviewer: TaskRoleConcurrency;
+  };
+}
+
+/** Set the task's own Worker or Reviewer limit (null clears it, and the project's applies); a value that is not a
+ * number goes as typed, so the server's reason shows. Resolves to the task's concurrency as saved. */
+export async function setTaskConcurrency(
+  taskId: string,
+  limits: Partial<Record<TaskLimitRole, number | string | null>>,
+): Promise<TaskConcurrency> {
+  const res = await fetch(`${API_BASE}/tasks/${encodeURIComponent(taskId)}/concurrency`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(limits),
+  });
+  if (!res.ok) await failed(res, "set concurrency");
+  return (await res.json()).concurrency;
+}
+
 export interface TaskDetail extends TaskInfo {
   work_dir: string;
   config: Record<string, unknown>;
@@ -1293,6 +1332,8 @@ export interface TaskDetail extends TaskInfo {
   supplements?: Supplement[];
   /** What the Manager did to the task through its tools, newest first. */
   manager_actions?: ManagerAction[];
+  /** How many of each role run at once for the task; null when it cannot be read. */
+  concurrency: TaskConcurrency | null;
 }
 
 /** What a task journal entry records; code writes each when its event happens. */

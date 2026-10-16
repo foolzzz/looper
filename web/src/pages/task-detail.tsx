@@ -27,6 +27,7 @@ import { ScheduledBadge } from "@/components/scheduled-badge";
 import { historyHref } from "@/pages/agent-history";
 import { TaskCostBreakdown } from "@/components/task-cost";
 import { ContinueAtCap, TaskSpendMeter } from "@/components/task-budget";
+import { TaskConcurrencySection } from "@/components/task-concurrency";
 import { AGENT_PROFILE } from "@/lib/settings-pages";
 import { costBasis, costCaveats, formatUsd } from "@/lib/usage";
 import { cn } from "@/lib/utils";
@@ -55,6 +56,7 @@ import {
   setTaskProject,
   fetchKnowledgeDrafts,
   type KnowledgeDraft,
+  type TaskConcurrency,
   type TaskDetail,
   type Supplement,
   type ManagerAction,
@@ -570,7 +572,15 @@ function TaskConfigSection({ task }: { task: TaskDetail }) {
   );
 }
 
-function OverviewTab({ task, onContinued }: { task: TaskDetail; onContinued: () => void }) {
+function OverviewTab({
+  task,
+  onContinued,
+  onConcurrency,
+}: {
+  task: TaskDetail;
+  onContinued: () => void;
+  onConcurrency: (concurrency: TaskConcurrency) => void;
+}) {
   const steps = task.steps || [];
   const done = steps.filter((s) => s.status === "completed").length;
   const total = steps.length;
@@ -635,6 +645,15 @@ function OverviewTab({ task, onContinued }: { task: TaskDetail; onContinued: () 
       {task.cost && task.cost.runs > 0 && <TaskCostBreakdown cost={task.cost} />}
 
       <TaskConfigSection task={task} />
+
+      {task.concurrency && (
+        <TaskConcurrencySection
+          taskId={task.task_id}
+          projectId={task.project_id}
+          concurrency={task.concurrency}
+          onSaved={onConcurrency}
+        />
+      )}
 
       {steps.length > 0 && (
         <div>
@@ -1611,7 +1630,13 @@ export function TaskDetailPage({ taskId, onBack }: TaskDetailPageProps) {
           </div>
         )}
 
-        {task && tab === "overview" && <OverviewTab task={task} onContinued={() => setRuns((n) => n + 1)} />}
+        {task && tab === "overview" && (
+          <OverviewTab
+            task={task}
+            onContinued={() => setRuns((n) => n + 1)}
+            onConcurrency={(concurrency) => setTask((t) => (t ? { ...t, concurrency } : t))}
+          />
+        )}
         {task && tab === "pipeline" && <PipelineTab task={task} />}
         {task && tab === "sessions" && <SessionsTab taskId={taskId} />}
         {task && tab === "conversation" && <ConversationTab taskId={taskId} />}
