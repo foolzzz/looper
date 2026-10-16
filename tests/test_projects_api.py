@@ -111,6 +111,16 @@ class _Store:
         rows = [t for t in self.tasks.values() if project_id is None or t["project_id"] == project_id]
         return [{**t, "project_name": self.projects[t["project_id"]]["name"]} for t in rows]
 
+    async def count_by_status(self, *, project_id: str | None = None, **_: Any) -> dict[str, int]:
+        counts: dict[str, int] = {}
+        for t in self.tasks.values():
+            if project_id is None or t["project_id"] == project_id:
+                counts[t.get("status", "pending")] = counts.get(t.get("status", "pending"), 0) + 1
+        return counts
+
+    async def task_exists(self, task_id: str, **_: Any) -> bool:
+        return task_id in self.tasks
+
     async def get_task(self, task_id: str, **_: Any) -> dict[str, Any] | None:
         row = self.tasks.get(task_id)
         return dict(row) if row else None
@@ -159,7 +169,8 @@ def store(monkeypatch: pytest.MonkeyPatch) -> _Store:
     fake = _Store()
     for name in ("list_projects", "get_project", "create_project", "update_project", "delete_project"):
         monkeypatch.setattr(db_projects, name, getattr(fake, name))
-    for name in ("create_task", "set_task_project", "list_tasks", "get_task", "get_task_with_steps"):
+    for name in ("create_task", "set_task_project", "list_tasks", "count_by_status", "task_exists", "get_task",
+                 "get_task_with_steps"):
         monkeypatch.setattr(db_tasks, name, getattr(fake, name))
     monkeypatch.setattr(db_connection, "transaction", fake.transaction)
     monkeypatch.setattr(db_llm_records, "task_costs", fake.task_costs)
@@ -473,12 +484,12 @@ class TestTaskReads:
         store.add_task("task-2", "proj-b")
         status, body = _call("GET", "/api/tasks", query={"project_id": "proj-b"})
         assert status == 200
-        assert store.list_calls == [{"limit": 50, "project_id": "proj-b"}]
+        assert store.list_calls == [{"limit": 51, "project_id": "proj-b"}]  # one more: is there a next page?
         (task,) = body["tasks"]
         assert (task["task_id"], task["project_id"], task["project_name"], task["work_dir"]) == (
             "task-2", "proj-b", "notes", "/w")
         assert len(_call("GET", "/api/tasks")[1]["tasks"]) == 2  # without a filter, every project's
-        assert store.list_calls[-1] == {"limit": 50, "project_id": None}
+        assert store.list_calls[-1] == {"limit": 51, "project_id": None}
 
     def test_detail_shows_the_project(self, store: _Store) -> None:
         store.add_project("proj-a", "tetris")

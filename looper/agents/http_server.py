@@ -82,6 +82,9 @@ _RE_AGENT_OP = re.compile(r"^/api/agent/v1/ops/([a-z_]{1,64})$")
 # exception is a configuration import (CONFIG_IMPORTS_PATH), which streams its
 # body to a file and takes up to config_imports.UPLOAD_MAX_BYTES.
 REQUEST_BODY_MAX_BYTES = 4 * knowledge.DOCUMENT_MAX_BYTES
+# The Tasks list's page: how many tasks GET /api/tasks returns by default, and at most.
+TASKS_PAGE = 50
+TASKS_PAGE_MAX = 200
 CONFIG_IMPORTS_PATH = "/api/config/imports"
 
 
@@ -657,18 +660,40 @@ class AgentHTTPServer:
         await writer.drain()
 
     async def _handle_list_tasks(self, query: dict[str, str], writer: asyncio.StreamWriter) -> None:
+        """A page of tasks, newest first, filtered by project, schedule, group and status: ``limit`` of them
+        (``TASKS_PAGE`` by default, at most ``TASKS_PAGE_MAX``) older than the task ``before``; ``next_before``
+        continues the list (null at its end) and ``counts`` has how many tasks each status holds under the other
+        filters."""
+        from ..db import tasks as db_tasks
+
+        async def refuse(error: str) -> None:
+            writer.write(_json_response(HTTP_400, {"error": error}))
+            await writer.drain()
+
         try:
             group = TaskGroup(query["group"]) if query.get("group") else None
         except ValueError:
-            groups = ", ".join(g.value for g in TaskGroup)
-            writer.write(_json_response(HTTP_400, {"error": f"group must be one of {groups}"}))
-            await writer.drain()
+            await refuse(f"group must be one of {', '.join(g.value for g in TaskGroup)}")
             return
+        status = query.get("status") or None
+        if status is not None and status not in db_tasks.STATUS_GROUPS:
+            await refuse(f"status must be one of {', '.join(db_tasks.STATUS_GROUPS)}")
+            return
+        raw = query.get("limit") or str(TASKS_PAGE)
+        if not raw.isdigit() or not 1 <= int(raw) <= TASKS_PAGE_MAX:
+            await refuse(f"limit must be a whole number from 1 to {TASKS_PAGE_MAX}")
+            return
+        limit, before = int(raw), query.get("before") or None
+        filters = {"project_id": query.get("project_id") or None, "group": group,
+                   "schedule_id": query.get("schedule_id") or None}
         try:
             from ..db.llm_records import task_costs
-            from ..db.tasks import list_tasks as db_list_tasks
-            tasks = await db_list_tasks(limit=50, project_id=query.get("project_id") or None, group=group,
-                                        schedule_id=query.get("schedule_id") or None)
+            if before is not None and not await db_tasks.task_exists(before):
+                await refuse(f"before must be a task id; {before!r} is not one")
+                return
+            page = await db_tasks.list_tasks(limit=limit + 1, status=status, before=before, **filters)
+            tasks = page[:limit]
+            counts = await db_tasks.count_by_status(**filters)
             costs = await task_costs([t["id"] for t in tasks])
             result = []
             for t in tasks:
@@ -698,7 +723,10 @@ class AgentHTTPServer:
             writer.write(_json_response(HTTP_500, {"error": "database unavailable"}))
             await writer.drain()
             return
-        writer.write(_json_response(HTTP_200, {"tasks": _serialize(result)}))
+        writer.write(_json_response(HTTP_200, {
+            "tasks": _serialize(result), "next_before": tasks[-1]["id"] if len(page) > limit else None,
+            "counts": counts,
+        }))
         await writer.drain()
 
     async def _handle_chat_send(
