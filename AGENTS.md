@@ -41,8 +41,6 @@ start:
 - Stage explicit paths only, never `git add .`, and do not commit a generated
   `uv.lock`. Split commits by what a reviewer checks: behavior, docs,
   validation or cleanup.
-- Sign off every commit (`git commit -s`, the Developer Certificate of
-  Origin).
 - Changes reach `main` only through a pull request. The description has
   Goal, Changes and Validation sections. It lists behavior changes
   explicitly, and contains no private context.
