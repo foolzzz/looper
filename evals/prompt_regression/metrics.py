@@ -223,16 +223,17 @@ def planner_changed_files(
     Reviewer ran.
 
     ``clock_offset`` is the database clock minus the local clock, measured when
-    the run starts; a file written within ``tolerance`` seconds of a step run
-    (what that measurement may be off by) is left to the step.
+    the run starts, and ``tolerance`` what that measurement may be off by: a
+    file written within ``tolerance`` seconds of a Planner turn is the
+    Planner's (no one else writes then), unless it is that close to a step run
+    too, which it is left to.
     """
-    def inside(moment: float, spans: Iterable[tuple[float, float]], slack: float) -> bool:
-        return any(start - clock_offset - slack <= moment <= end - clock_offset + slack for start, end in spans)
+    def near(moment: float, spans: Iterable[tuple[float, float]]) -> bool:
+        return any(start - clock_offset - tolerance <= moment <= end - clock_offset + tolerance for start, end in spans)
 
     steps = [*windows.get("worker", []), *windows.get("reviewer", [])]
     return sorted(
-        path for path, mtime in changes.items()
-        if inside(mtime, windows.get("planner", []), 0.0) and not inside(mtime, steps, tolerance)
+        path for path, mtime in changes.items() if near(mtime, windows.get("planner", [])) and not near(mtime, steps)
     )
 
 
