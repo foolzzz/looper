@@ -99,6 +99,15 @@ def test_arguments_are_checked_against_the_schema(arguments: Any, problem: str |
     assert raised.value.code is ErrorCode.INVALID and str(raised.value).startswith(problem)
 
 
+@pytest.mark.parametrize("name", ["api_key", "OPENAI_KEY", "token", "password", "client_secret", "credential"])
+def test_an_argument_named_like_a_secret_is_refused_and_its_value_never_named(name: str) -> None:
+    with pytest.raises(OpError) as raised:
+        check_arguments({"type": "object", "properties": {"n": {"type": "integer"}}}, {"n": 1, name: "sk-x"})
+    assert raised.value.code is ErrorCode.FORBIDDEN
+    assert str(raised.value).startswith(f"{name}: Looper's tools never take a key") and "sk-x" not in str(raised.value)
+    assert "Settings → LLM Providers" in str(raised.value)
+
+
 @pytest.mark.parametrize(("header", "allowed"), [
     ("Bearer tok", True), ("bearer tok", True), ("Bearer  tok ", True),
     ("Bearer other", False), ("tok", False), ("Basic tok", False), ("", False), (None, False),
@@ -126,6 +135,26 @@ def test_outside_a_turn_answering_the_user_only_reads(recorded: list[dict[str, A
     assert [(r["tool"], r["risk"], r["status"], r["result"]) for r in recorded] == [
         ("t_read", "read", "ok", None),
         ("t_write", "write", "error", {"message": answer["error"]["message"]})]
+
+
+def test_a_tools_read_actions_run_in_any_turn_and_its_others_only_answering_the_user(
+    recorded: list[dict[str, Any]],
+) -> None:
+    async def run(call: Call) -> dict[str, Any]:
+        return {"rows": [1, 2]}
+
+    schema = {"type": "object", "properties": {"action": {"type": "string", "enum": ["list", "create"]}}}
+    tool = Tool("t_mixed", "lists and creates", schema, Risk.WRITE, run, read_actions=frozenset({"list"}))
+    ops = ManagerOps(Platform(bus=None, task_router=None), url="http://127.0.0.1:9/", token="tok", tools=(tool,))
+    ops.begin_turn(_turn(None))
+    assert asyncio.run(ops.call("t_mixed", {"action": "list"}))["status"] == "ok"
+    assert asyncio.run(ops.call("t_mixed", {"action": "create"}))["error"]["code"] == "needs_user_turn"
+    ops.begin_turn(_turn("m1"))
+    assert asyncio.run(ops.call("t_mixed", {"action": "create"}))["status"] == "ok"
+    # A read's result is not kept, a change's is.
+    assert [(r["risk"], r["status"], r["result"]) for r in recorded] == [
+        ("read", "ok", None), ("write", "error", {"message": recorded[1]["result"]["message"]}),
+        ("write", "ok", {"rows": [1, 2]})]
 
 
 def test_a_write_runs_in_the_turn_answering_the_user(recorded: list[dict[str, Any]]) -> None:
@@ -258,6 +287,7 @@ def test_a_trail_that_cannot_be_written_does_not_fail_the_call(monkeypatch: pyte
     ({"api_key": "x", "nested": {"token": "y", "name": "n"}, "list": [{"password": "z"}]},
      {"api_key": "***", "nested": {"token": "***", "name": "n"}, "list": [{"password": "***"}]}),
     ({"secret": None}, {"secret": None}),
+    ({"credential": "c", "env": {"MY_CREDENTIALS": "d"}}, {"credential": "***", "env": {"MY_CREDENTIALS": "***"}}),
 ])
 def test_secret_values_are_masked(value: Mapping[str, Any], expected: Mapping[str, Any]) -> None:
     assert manager_actions.masked(value) == expected

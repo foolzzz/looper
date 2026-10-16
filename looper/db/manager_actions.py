@@ -15,7 +15,7 @@ import asyncpg
 
 from .connection import get_pool
 
-SECRET_KEY = re.compile(r"key|token|secret|password", re.IGNORECASE)
+SECRET_KEY = re.compile(r"key|token|secret|password|credential", re.IGNORECASE)
 MASK = "***"
 
 

@@ -187,6 +187,7 @@ class ManagerOps:
         arguments: dict[str, Any] = raw if isinstance(raw, dict) else {}
         try:
             arguments = check_arguments(tool.schema, raw)
+            risk = tool.risk_of(arguments)
             if tool.name == CONFIRM_TOOL:
                 return await self._confirm(arguments["confirmation_id"], turn)
             if risk is not Risk.READ and turn.autonomous:
