@@ -585,7 +585,24 @@ answer to an edit on the task page goes.
     `{status, changed_files, deleted_files, summary, learnings}`, with `status`
     set to `completed`;
   - every file in `changed_files` exists, and every file in `deleted_files` is
-    gone.
+    gone (`looper/agents/reported_files.py`). Each file is looked for in this
+    order: where the report says (the work directory, or the absolute path);
+    for a relative path, at the same place in another worktree of the work
+    directory's repository (a deleted file must also be in that worktree's
+    `HEAD`); in a commit made since the run started (the `WorkerProcess`'s
+    `since`, less 60 s) on any branch, tag or remote-tracking branch, that
+    added or modified the changed file or deleted the deleted one (an absolute
+    path in no worktree of the repository, its worktree removed, matches by
+    its last two or more components, never by its file name alone). Git is
+    asked only when the disk does not account for every file: at most four
+    read-only commands of 10 s each, over at most 64 worktrees and the latest
+    500 commits. A work directory outside git is checked on disk only. In a
+    shared work directory, a commit made during the run by a step running in
+    parallel counts as evidence too: the check catches misreports; it does
+    not attribute work. The failure lists the files and where the check
+    looked; files found outside the work directory are listed in the result's
+    `found_elsewhere` and in the task's activity. In a project with step
+    workspaces the work directory is the step's worktree.
 - A reviewer must return a boolean `passed`; prose without the verdict is not a
   pass.
 - `learnings` is optional in both the report and the verdict: up to 5 short

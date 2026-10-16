@@ -39,7 +39,7 @@ from typing import Any
 from ..agent_settings import AgentType, Launch, load_agent_settings, load_task_limits
 from ..bus import MessageBus
 from ..claude_cli import ClaudeRunRecorder, budget_error
-from .. import proc_tree
+from .. import proc_tree, reported_files
 from ..run_usage import run_usage
 from ..knowledge import documents_label, load_knowledge
 from ..library import items_label, load_installed
@@ -183,11 +183,15 @@ def judge_result(
     *,
     work_dir: Path,
     is_verify: bool,
+    started_at: datetime | None = None,
 ) -> dict[str, Any]:
     """Decide a step's outcome from Claude's stream-json ``result`` event.
 
     Fails closed: the run must succeed, the final message must carry the JSON
-    report, and a "completed" work report must match the files on disk.
+    report, and a "completed" work report must match the files: on disk, in
+    another worktree of the work directory's repository, or in a commit made
+    since ``started_at``, the run's start (``reported_files``). It may run git,
+    so the pool calls it off the event loop.
     """
     failed = _verify_failed if is_verify else _work_failed
     if result_event is None:
@@ -225,25 +229,23 @@ def judge_result(
         return _work_failed(summary or "Worker reported failure", summary=summary, changed_files=changed,
                             learnings=learnings)
 
-    def on_disk(path: Any) -> bool:
-        candidate = Path(str(path))
-        return (candidate if candidate.is_absolute() else work_dir / candidate).exists()
-
-    missing = [str(path) for path in changed if not on_disk(path)]
-    still_present = [str(path) for path in deleted if on_disk(path)]
+    files = reported_files.check(list(changed), deleted, work_dir=work_dir, since=started_at)
+    missing, still_present = files.missing(deleted=False), files.missing(deleted=True)
     if missing or still_present:
         problems = []
         if missing:
             problems.append(f"changed files not found: {', '.join(missing)}")
         if still_present:
             problems.append(f"deleted files still present: {', '.join(still_present)}")
-        return _work_failed("Worker report does not match the files: " + "; ".join(problems))
+        looked = f" ({files.looked})" if files.looked else ""
+        return _work_failed("Worker report does not match the files: " + "; ".join(problems) + looked)
     return {
         "status": "completed",
         "changed_files": changed,
         "deleted_files": deleted,
         "summary": summary,
         "learnings": learnings,
+        **({"found_elsewhere": elsewhere} if (elsewhere := files.elsewhere()) else {}),
     }
 
 
@@ -548,7 +550,7 @@ class WorkerPool:
                 pass
 
         try:
-            result = await self._execute(envelope, is_verify=is_verify)
+            result = await self._execute(envelope, is_verify=is_verify, started_at=wp.since)
             wp.status = "completed"
             wp.result = result
         except asyncio.TimeoutError as exc:
@@ -580,8 +582,11 @@ class WorkerPool:
         envelope: MessageEnvelope,
         *,
         is_verify: bool = False,
+        started_at: datetime | None = None,
     ) -> dict[str, Any]:
-        """Run Claude Code as a subprocess with streaming progress."""
+        """Run Claude Code as a subprocess with streaming progress; ``started_at`` is the run's start (now without
+        one): commits made since count as its work (``judge_result``)."""
+        started_at = started_at or datetime.now(timezone.utc)
         payload = envelope.payload
         worker_id = envelope.target.agent_id
         parent_task_id = payload.get("parent_task_id", "")
@@ -862,7 +867,12 @@ class WorkerPool:
                 worker_id, return_code,
             )
 
-        outcome = judge_result(result_event, work_dir=Path(work_dir), is_verify=is_verify)
+        outcome = await asyncio.to_thread(judge_result, result_event, work_dir=Path(work_dir), is_verify=is_verify,
+                                          started_at=started_at)
+        if (elsewhere := outcome.get("found_elsewhere")) and parent_task_id:
+            await self._activity(parent_task_id, worker_id, "phase",
+                                 ("Reported files found outside the working directory: "
+                                  + "; ".join(f"{path} {where}" for path, where in elsewhere.items()))[:500])
         # A review that says "not passed" is still a successful run; only work
         # failures are the run's error.
         error = outcome.get("error") if not is_verify and outcome.get("status") == "failed" else None
