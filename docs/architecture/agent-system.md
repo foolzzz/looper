@@ -2462,8 +2462,15 @@ restart.
   rejected sender, a Lark group message that does not @-mention the bot, a
   Telegram group message and a message that is not handed on (not text,
   empty) get no reaction.
-- **Telegram**: the token comes from the env var named by `bot_token_env`
-  (default `LOOPER_TELEGRAM_BOT_TOKEN`). `allowed_user_ids` lists numeric
+- **Telegram**: the token is the one saved in Settings → Channels
+  (`channel_secrets`; the API only says whether one is set), else the env var
+  named by `bot_token_env` (default `LOOPER_TELEGRAM_BOT_TOKEN`). The Bot API
+  puts it in every request URL, and it never reaches the log: httpx and
+  httpcore, which log each request URL, log only from WARNING unless
+  `looper serve --verbose`, and every log line, tracebacks included, is
+  masked (`looper/agents/log_redaction.py`): a token in a `bot<token>` URL
+  path becomes `bot***`, the configured token anywhere `***`, and a failed
+  send's error is masked the same way. `allowed_user_ids` lists numeric
   Telegram user IDs (a negative id is a group or channel, not a sender); a
   comma-separated string from before is still read.
   `LOOPX_TELEGRAM_ALLOWED_USERS` no longer applies. `/new` (without

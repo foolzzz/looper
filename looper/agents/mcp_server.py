@@ -27,6 +27,7 @@ import urllib.request
 from typing import Any, BinaryIO, Protocol
 
 from looper import __version__
+from looper.agents.log_redaction import log_to_stderr
 
 logger = logging.getLogger(__name__)
 
@@ -197,7 +198,7 @@ def serve(client: Client, stdin: BinaryIO, stdout: BinaryIO) -> int:
 
 def main() -> int:
     """Serve the Manager on stdin/stdout until EOF; 2 when LOOPER_AGENT_URL or LOOPER_AGENT_TOKEN is not usable."""
-    logging.basicConfig(level=logging.INFO, stream=sys.stderr, format="looper mcp-server %(levelname)s %(message)s")
+    log_to_stderr(logging.INFO, "looper mcp-server %(levelname)s %(message)s")
     url = os.environ.get("LOOPER_AGENT_URL", "").strip()
     token = os.environ.get("LOOPER_AGENT_TOKEN", "").strip()
     missing = [name for name, value in (("LOOPER_AGENT_URL", url), ("LOOPER_AGENT_TOKEN", token)) if not value]
