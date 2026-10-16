@@ -433,7 +433,10 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
     its Workers' or Reviewers' Agent Profile, or changed its task's or its
     project's concurrency limits, with its own tools, and why
     ([A task's Planner's tools](#a-tasks-planners-tools)); for the task page
-    only.
+    only;
+  - `role_defined`: the Planner defined a role for its steps, or a new version
+    of one ([Roles a task's Planner defines](#roles-a-tasks-planner-defines));
+    for the task page only.
 
   An entry of the whole task has the step id `''`. Every `[PLAN]`,
   `[DECISION]`, `[SUPERVISE]`, `[CHAT]` and `[RESTART]` turn (and the
@@ -547,7 +550,10 @@ answer to an edit on the task page goes.
     row's prompt is empty or unreadable), the project section, the task
     section, then the code-owned contract, last:
     `WORK_CONTRACT` (the step's rules and the report format below) or
-    `REVIEW_CONTRACT` (the review's rules and the verdict format). A Worker's
+    `REVIEW_CONTRACT` (the review's rules and the verdict format); a run as a
+    role its task's Planner defined puts the role's working style and prompt
+    in the first two places and the boundaries before the contract ([Roles a
+    task's Planner defines](#roles-a-tasks-planner-defines)). A Worker's
     task section has the whole task's requirement as context, then the
     step's label, instruction, working directory, target files, acceptance
     criteria, validation commands and, on a retry, the attempt number and the
@@ -1249,7 +1255,14 @@ Every run records the prompt in `llm_records.metadata`:
     (the Manager);
   - `contract`: `{name, sha256}` (`REPLY_CONTRACT`, `WORK_CONTRACT`,
     `REVIEW_CONTRACT` or `TOOLS_CONTRACT`);
-  - `isolation`: `ISOLATION_ID`.
+  - `isolation`: `ISOLATION_ID`;
+  - on a run of a role a task's Planner defined only: `task_role` (`{id, kind,
+    version, sha256, harness_sha256}`, the role prompt's and the role
+    harness's hashes) and `boundaries` (`{source: builtin | system, sha256}`);
+    its `harness` is `{source: task_role, sha256}` for the role's own harness,
+    else the applying harness's entry, with `part: working_style` and that
+    part's hash when it is the built-in one; its `role` keeps the `config_id`
+    of its kind's row and adds `task_role`.
 - `profile`: `{id, name, model, runtime: {id, name, type}, provider: {id, name,
   auth}, source}`, the Agent Profile the run used (`id` is its profile id) and
   where it was selected; runs recorded before the rename to Agent Profiles have
@@ -1476,10 +1489,14 @@ and `distill_lessons` (`off`, `draft` or `write`, never null), whether a task
 that completes leaves a lessons draft or document in the project's knowledge
 (see the Planner); `step_workspaces` (`shared`, also when null, or
 `worktree`), where a step that runs alongside others works ([Step
-workspaces](#step-workspaces)); and `max_step_retries` (0 to 20, null for 2),
+workspaces](#step-workspaces)); `max_step_retries` (0 to 20, null for 2),
 how many times the Planner may retry one step: its reply contract and each
 decision turn's allowed decisions say how many are left, and a retry past it is
-refused.
+refused; and `planner_roles` (`off`, also when null, or `on`) with
+`role_text_max_chars` (500 to 20,000, null for 8,000), whether the project's
+Planners may define the roles their steps run as and how long a role's prompt
+and its harness may each be ([Roles a task's Planner
+defines](#roles-a-tasks-planner-defines)).
 
 A task can also have a spend cap of its own (`tasks.budget_usd`, a scheduled
 run's `run_budget_usd`), which replaces its project's `task_budget_usd` for it
@@ -2066,7 +2083,8 @@ items to the catalog.
 
 Each task's Planner has four MCP tools of its own, which act on its task
 only (`looper/agents/ops/planner.py`, [Manager tools RFC](rfcs/manager-platform-tools-v0.zh-CN.md)
-section 8.3, decisions 9 and 10).
+section 8.3, decisions 9 and 10), and two more for its roles where its project
+lets it define them ([Roles a task's Planner defines](#roles-a-tasks-planner-defines)).
 
 - **Reaching Looper.** `looper serve` makes one `PlannerOps`. A Planner gets a
   token for its task when it starts (`planner.` and 43 random characters,
@@ -2122,6 +2140,94 @@ Agent Profiles tab (row "Profiles the Planner may choose",
 `GET`/`PUT /api/projects/:id/allowed-profiles`). A pricier profile needs no
 confirmation: the list is the consent, and the task's spend cap still holds.
 A profile on a list cannot be deleted (its usage names the project).
+
+### Roles a task's Planner defines
+
+In a project with `planner_roles` `on`, a task's Planner may define the roles
+its steps run as ([Planner-defined roles RFC](rfcs/planner-defined-roles-v0.zh-CN.md),
+R1; `looper/agents/task_roles.py`). A role is an `id` (unique in the task, not
+a built-in role's name), a `kind`, a `role_prompt`, an optional `harness` and
+an optional Agent Profile from the project's list. Nothing changes in a
+project that has the switch off (the default): its Planner's tools, reply
+contract and tools guide are as before, and a step that names a role is
+refused with that reason.
+
+- **Defining them.** Two more Planner tools, listed only where the switch is
+  on (`PlannerOps.listing` is per token; elsewhere a call is `forbidden`):
+  `looper_task_roles` (read: each role's current version and the steps that
+  name it, the profiles the project allows with the kinds each can run, the
+  project's `role_text_max_chars`, and whether the user chose the task's
+  Worker or Reviewer profile) and `looper_task_role_set` (write: `{id, kind,
+  role_prompt, harness?, profile_id?, reason?}`, the whole definition each
+  time). Each call that changes a role adds a version (`task_roles`, one row
+  per version) with a `role_defined` journal entry in one transaction; the
+  same definition again adds none. Refused, with what to fix: a reserved or
+  malformed id, a kind other than the role's own, an empty prompt, a prompt
+  or harness over the project's limit (`invalid`); a profile when the list is
+  empty or does not hold it, or when the user chose that kind's profile for
+  the task (`forbidden`); a profile that cannot run the kind (`invalid`).
+  Writes only in a turn Looper sent the Planner, as for its other tools.
+- **Naming them.** With the switch on, the step shape (PLAN, a DECISION's
+  `replan`, CHAT's `add_steps` and `replan`) takes `role`, a work role its
+  Worker runs as, and `review_role`, a review role, which needs `"review":
+  true`; `reply_contract(roles=True)` says so and `_check_new_steps` checks
+  them against the roles read after the reply arrives, so a role defined in
+  the same turn counts. A started step keeps its roles, like the rest of it.
+  The plan lines and results in the Planner's turns name a step's roles.
+- **A run as a role.** `kind` `work` takes the built-in Worker's place, `review`
+  reviews after the built-in Reviewer; each keeps its kind's row (timeout,
+  turns), installs, concurrency and contract (`WORK_CONTRACT`,
+  `REVIEW_CONTRACT`). Its system prompt (`system_prompt.build_role_prompt`)
+  is its working style (its own harness; else the built-in harness's How you
+  work and Communication, `WORKING_STYLE`, or a layer's harness whole, which
+  is the operator's), its role prompt in place of the row's, the project, the
+  task section, then the boundaries (a code-owned lead saying they hold over
+  everything above, then the shared defaults' `boundaries`, else the built-in
+  `HARNESS_BOUNDARIES`), then the contract: nothing the Planner or the user
+  wrote follows them. The built-in harness is those three parts joined, the
+  same text as before; a step without a role is prompted exactly as before.
+  `boundaries` is set on the shared defaults only (Settings → Roles, Shared
+  defaults; the Manager's `looper_settings`; exported with the configuration);
+  another layer's API refuses it.
+- **Its profile.** The user's choice for the task (`task`), then the role's
+  profile while the project allows it (`Layer.TASK_ROLE`, `task_role`), then
+  what the step's built-in role of that kind would get (the Planner's choice
+  for the step, for the rest of the task, the layers). Read when the run
+  starts.
+- **Versions.** An attempt (a Worker run, or a review role's run) reads the
+  role's current version when it starts and the step keeps it
+  (`role_version`, `review_role_version`); the dispatch carries that version
+  (`task_role`). A run that started keeps its own, a server restart runs the
+  same attempt with the version it had, and a retry or a new step reads the
+  current one.
+- **The review gate.** The built-in Reviewer is the gate wherever a step needs
+  review; a review role only adds a review. A step with a `review_role` is
+  reviewed by the built-in Reviewer first (`review_stage` `builtin`); only when
+  it passes does code start the review role's Reviewer (`role`), with no
+  decision turn between, and the step can be accepted only once both passed
+  in that attempt. A failed built-in review goes to the decision turn at once;
+  the decision turn after the role's review lists both verdicts; without a
+  decision the chain's verdict decides. A restart dispatches the review the
+  step waits for; a retry clears both verdicts.
+- **Restarts.** Going on from the plan keeps the roles; planning the task anew
+  (`start_over`) deletes them, with the Planner's profile choices. Turning the
+  switch off leaves the steps that name a role running as it; no role is
+  defined or named after that.
+- **What is seen.** `GET /api/tasks/:id` gives `roles` (each role's current
+  version, its versions, the steps that name it and its `stats`: runs, cost,
+  steps accepted and failed, retries, contract violations and their rate,
+  reviews passed and not and the pass rate) and `builtin_role_stats` (the same
+  for the built-in Worker and Reviewer), from the run records' `outcome` and
+  `prompt_layers.task_role` (`llm_records.role_runs`) and the steps. The task
+  page shows a Roles section, a step's roles in Steps and the Pipeline, and
+  `role_defined` entries in Findings; the project's Execution tab has the
+  switch and the limit. The Manager's `looper_tasks get` adds the task's
+  `roles` (id, kind, version) and each step's `role` and `review_role` when
+  there are any. Telegram, Lark and the CLI show nothing new.
+
+The two tools add 1.9 KB to the Planner's `tools/list`, their guide (after
+`TOOLS_GUIDE`) 1.0 KB and the contract's role rules 0.4 KB, in a project with
+the switch on only.
 
 ### Turns Claude runs on its own
 
@@ -2305,12 +2411,12 @@ PostgreSQL is a hard startup dependency. All data paths:
 | `task_plans` | A task's plan, one row per task: `plan_id`, `status` (`planning`, `executing`, `verifying`, `stopping`, `completed`, `failed`), `correlation_id`, `origin_channel_id`, `final_summary`, `fail_reason`, and with step workspaces `start_branch` and `start_commit` (where the branch was when the task dispatched its first step; `''` otherwise); replaced when the task is planned again |
 | `step_workspaces` | A step's git worktree ([Step workspaces](#step-workspaces)): `task_id`, `step_id` (both going with the task or step), `repo_dir` and `subdir` (the task directory in it), `target_branch`, `path`, `branch`, `base_commit`, `checkpoint`, `result_commit`, `merge_commit`, `state` (`active`, `merging`, `merged`, `unmerged`, `discarded`), `merge_error` (required when `unmerged`), `detail`, `removed_at` (its directory and branch are gone); one in use (`active` or `merging`) per step |
 | `agent_sessions` | The session each resident agent resumes: `manager` or `planner-<task_id>`, its `session_id`, `session_totals`, the `runtime_type` and `provider_id` it belongs to and the `profile_id` that ran it last (`NULL` runtime: before Agent Profiles, Claude Code; `NULL` provider: before providers were recorded, Claude Code's own login), and `clean_start` (the user dropped the session with `/new`: the next one starts without a resume brief) |
-| `task_journal` | A task's journal, written by code as things happen: `step_accepted`, `step_failed`, `step_retry`, `decision`, `supplement`, `session_switch`, `handoff`, `progress`, `profile_choice` and `concurrency_change` entries, each with its `step_id` (`''` for the whole task), `summary` and `learnings`, and for a supplement its `via` and `delivered_at`; `GET /api/tasks/<id>` returns it as `journal` (and the progress notes, parsed and newest first, as `progress`); the task page lists the entries as Findings, each with its kind, and the progress notes in its Progress section |
+| `task_journal` | A task's journal, written by code as things happen: `step_accepted`, `step_failed`, `step_retry`, `decision`, `supplement`, `session_switch`, `handoff`, `progress`, `profile_choice`, `concurrency_change` and `role_defined` entries, each with its `step_id` (`''` for the whole task), `summary` and `learnings`, and for a supplement its `via` and `delivered_at`; `GET /api/tasks/<id>` returns it as `journal` (and the progress notes, parsed and newest first, as `progress`); the task page lists the entries as Findings, each with its kind, and the progress notes in its Progress section |
 | `task_requirement_versions` | Every version of an edited task requirement: `task_id`, `version` (1 is the text the task was created with, written at its first edit), `text`, `via` (`created`, `task_page`, or the Manager's), `created_at` and `delivered_at` (when the Planner had it in a turn; `tasks.requirement` is the newest) |
 | `manager_actions` | The Manager's tool calls (`looper/agents/ops`), one row each: `channel`, `chat` and `message_id` of the turn (empty for a turn Claude ran on its own), `tool`, `arguments` (secret values masked), `risk` (`read`, `write`, `high`), `status` (`ok`, `needs_confirmation`, `error` with `error_code`), `result` (of a change; a read's is not kept), `confirmation_id` (the call that asked, on a confirmed one) and `task_id` (the task it acted on, no foreign key) |
 | `activity` | Execution trace events (SSE streaming to frontend) |
 | `chat_messages` | Chat conversation history of every channel: `session_id` (the web chat's session, or `<channel>:<chat_id>` for Telegram and Lark; not Telegram groups), `message_id`, `role`, `content`, `channel` (`web`, `telegram` or `lark`; rows from before it read `web`); a new Manager session's resume brief reads the recent chats that are not a task's Planner thread (`planner-<task_id>`) |
-| `llm_records` | One row per agent run: input and output text, status, the run's own `cost_usd` and its `cost_source` (`runtime` or `provider_price`), `input_tokens`, `output_tokens`, `cache_read_tokens` and `cache_creation_tokens`, its final `context_tokens` and its `compactions`; `metadata` holds the exact argv (`command`), `cwd`, the appended `system_prompt`, its `system_prompt_sha256`, its `prompt_layers`, the `profile` (`agent` on runs recorded before the rename), the `model_choice`, the Settings `env` names, the `library` items loaded, the `project_instructions` the runtime was given and a task agent's `project_skills` |
+| `llm_records` | One row per agent run: input and output text, status, the run's own `cost_usd` and its `cost_source` (`runtime` or `provider_price`), `input_tokens`, `output_tokens`, `cache_read_tokens` and `cache_creation_tokens`, its final `context_tokens` and its `compactions`; `metadata` holds the exact argv (`command`), `cwd`, the appended `system_prompt`, its `system_prompt_sha256`, its `prompt_layers`, the `profile` (`agent` on runs recorded before the rename), the `model_choice`, the Settings `env` names, the `library` items loaded, the `project_instructions` the runtime was given and a task agent's `project_skills`, and for a Worker's or Reviewer's run its `outcome` (`completed`, `reported_failed`, `files_mismatch`, `passed`, `not_passed`, `contract`, `run_failed`; `worker.RunOutcome`) |
 | `role_configs` | Each role's own settings, keyed by `role` (`manager`, `planner`, `worker`, `reviewer`): display name, role prompt and its recommended `default_prompt`, turns, timeout, enabled |
 | `agent_setting_layers` | Agent settings by layer: `scope` (`system`, `role`, `project`, `role_project`), `role`, `project_id` (goes with its project), and the nullable `harness_prompt`, `profile_id` (the effort is the profile's), `env` (ordered `[{key, value}]`, `null` value = unset), `run_budget_usd` and `max_concurrency` (a Planner, Worker or Reviewer `role` or `role_project` layer only); one row per layer and place |
 | `agent_runtimes` | Runtimes, built in (one per type found on PATH) or registered by hand before and kept while an Agent Profile uses them (`builtin` false): `name`, `type` (an adapter), `executable` (`''` = the type's default), the probe's `version`, `capabilities`, `probed_at`, `probe_error`, `builtin` |
