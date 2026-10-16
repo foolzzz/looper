@@ -1275,33 +1275,48 @@ export interface TaskRoleConcurrency extends Sourced<number> {
   project: Sourced<number>;
 }
 
-/** How many of each task role run at once for one task. */
-export interface TaskConcurrency {
-  /** The most a limit may be. */
-  max: number;
-  /** False once the task has ended: its limits are shown, not changed. */
+/** One task role's Agent Profile (source "task": the task chose it) and how many run at once. */
+export interface TaskRoleAgents<C extends Sourced<number> = Sourced<number>> {
+  profile: Sourced<EffectiveProfile>;
+  concurrency: C;
+}
+
+/** Each task role's Agent Profile and concurrency for one task, with where each comes from. */
+export interface TaskAgents {
+  /** The most a concurrency limit may be. */
+  concurrency_max: number;
+  /** False once the task has ended: its choices are shown, not changed. */
   editable: boolean;
   roles: {
-    /** The project's: how many of its tasks run at once. */
-    planner: Sourced<number>;
-    worker: TaskRoleConcurrency;
-    reviewer: TaskRoleConcurrency;
+    /** Its concurrency is the project's: how many of its tasks run at once. */
+    planner: TaskRoleAgents;
+    worker: TaskRoleAgents<TaskRoleConcurrency>;
+    reviewer: TaskRoleAgents<TaskRoleConcurrency>;
   };
 }
 
-/** Set the task's own Worker or Reviewer limit (null clears it, and the project's applies); a value that is not a
- * number goes as typed, so the server's reason shows. Resolves to the task's concurrency as saved. */
-export async function setTaskConcurrency(
+/** The task's own choices to change; null drops one, and the settings layers apply again. */
+export interface TaskAgentsUpdate {
+  /** An Agent Profile's profile_id (or name) per role. */
+  profiles?: Partial<Record<TaskRole, string | null>>;
+  /** A value that is not a number goes as typed, so the server's reason shows. */
+  concurrency?: Partial<Record<TaskLimitRole, number | string | null>>;
+}
+
+/** Change the task's own Agent Profiles or Worker and Reviewer limits. Resolves to its agents as saved, and, after a
+ * profile change, when the new profile applies. */
+export async function setTaskAgents(
   taskId: string,
-  limits: Partial<Record<TaskLimitRole, number | string | null>>,
-): Promise<TaskConcurrency> {
-  const res = await fetch(`${API_BASE}/tasks/${encodeURIComponent(taskId)}/concurrency`, {
+  changes: TaskAgentsUpdate,
+): Promise<{ agents: TaskAgents; note?: string }> {
+  const res = await fetch(`${API_BASE}/tasks/${encodeURIComponent(taskId)}/agents`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(limits),
+    body: JSON.stringify(changes),
   });
-  if (!res.ok) await failed(res, "set concurrency");
-  return (await res.json()).concurrency;
+  if (!res.ok) await failed(res, "change agents");
+  const data = await res.json();
+  return { agents: data.agents, note: data.note };
 }
 
 export interface TaskDetail extends TaskInfo {
@@ -1332,8 +1347,8 @@ export interface TaskDetail extends TaskInfo {
   supplements?: Supplement[];
   /** What the Manager did to the task through its tools, newest first. */
   manager_actions?: ManagerAction[];
-  /** How many of each role run at once for the task; null when it cannot be read. */
-  concurrency: TaskConcurrency | null;
+  /** Each task role's Agent Profile and concurrency, with where each comes from; null when it cannot be read. */
+  agents: TaskAgents | null;
 }
 
 /** What a task journal entry records; code writes each when its event happens. */
