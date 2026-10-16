@@ -45,8 +45,15 @@ function limitText(limit: TaskRoleConcurrency) {
   return projectLimit(limit.project);
 }
 
+/** A role's Agent Profile chosen in the task rather than by a settings layer: by the user, or by its Planner. */
+const CHOSEN: Partial<Record<SettingSource, string>> = {
+  task: "chosen for this task",
+  planner_task: "chosen by the Planner for the rest of the task",
+  planner_step: "chosen by the Planner for this step",
+};
+
 const profileText = (profile: Sourced<EffectiveProfile>) =>
-  profile.source === "task" ? "chosen for this task" : `from ${PROFILE_SOURCES[profile.source] ?? profile.source}`;
+  CHOSEN[profile.source] ?? `from ${PROFILE_SOURCES[profile.source] ?? profile.source}`;
 
 /** A number field's value as the API takes it: "" is null; a value that does not parse goes as typed. */
 function numberOrTyped(text: string) {
@@ -159,7 +166,11 @@ function ProfileField({
           id={`${id}-profile`}
           value={pending ?? own}
           onChange={choose}
-          emptyLabel={own ? "From settings" : `From settings: ${profileName(profile.value)}`}
+          emptyLabel={
+            own
+              ? "From settings"
+              : `${profile.source === "planner_task" ? "The Planner's choice" : "From settings"}: ${profileName(profile.value)}`
+          }
           roles={[role]}
           describedBy={`${id}-now${error ? ` ${id}-error` : ""}`}
           unlistedName={own ? profileName(profile.value) : undefined}

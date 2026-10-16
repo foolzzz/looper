@@ -848,10 +848,13 @@ const JOURNAL_KINDS: Record<JournalEntry["kind"], { label: string; variant: Badg
   session_switch: { label: "New session", variant: "outline" },
   handoff: { label: "Handoff", variant: "outline" },
   progress: { label: "Progress", variant: "outline" },
+  profile_choice: { label: "Profile choice", variant: "outline" },
+  concurrency_change: { label: "Concurrency", variant: "outline" },
 };
 
 /** The task journal, newest first: steps accepted, failed or retried with what their Worker and Reviewer
- * learned, the Planner's decisions, the supplements, and new Planner sessions with their handoffs. */
+ * learned, the Planner's decisions and its choices of profile and concurrency, the supplements, and new Planner
+ * sessions with their handoffs. */
 function TaskFindings({ entries: all }: { entries: JournalEntry[] }) {
   // The progress notes have a section of their own (TaskProgress).
   const entries = all.filter((entry) => entry.kind !== "progress");

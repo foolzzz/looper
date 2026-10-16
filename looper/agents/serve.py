@@ -706,11 +706,16 @@ async def _run_agent_system(
     worker_pool = WorkerPool(config=worker_config, runtime_root=runtime_root)
     supervisor.register(worker_pool)
 
-    # The Manager's platform tools: its MCP server reaches this server with a token made now.
+    # The Manager's platform tools: its MCP server reaches this server with a token made now. Each task's Planner
+    # has its own, with a token for its task made when it starts.
+    from .ops.planner import PlannerOps
     from .ops.service import ManagerOps, Platform
-    manager_ops = ManagerOps(Platform(bus=bus, task_router=task_router, worker_pool=worker_pool, manager=manager,
-                                      supervisor=supervisor), url=_local_url(host, port))
+    platform = Platform(bus=bus, task_router=task_router, worker_pool=worker_pool, manager=manager,
+                        supervisor=supervisor)
+    manager_ops = ManagerOps(platform, url=_local_url(host, port))
     manager.ops = manager_ops
+    planner_ops = PlannerOps(platform, url=_local_url(host, port), dashboard_url=dashboard_url)
+    task_router.planner_ops = planner_ops
 
     # --- Start ---
 
@@ -735,6 +740,7 @@ async def _run_agent_system(
         claude_bin=claude_bin,
         scheduler=scheduler,
         manager_ops=manager_ops,
+        planner_ops=planner_ops,
     )
     await http_server.start()
     # Its first pass handles the fires missed while the server was down.

@@ -30,6 +30,8 @@ const LAYER_LABELS: Record<SettingSource, string> = {
   project: "this project",
   role_project: "this role in the project",
   task: "this task",
+  planner_task: "the Planner, for the rest of the task",
+  planner_step: "the Planner, for one step",
 };
 
 /** What a task role's concurrency limit counts, in one project. */

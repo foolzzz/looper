@@ -359,7 +359,8 @@ function Overview({ project, onTab }: { project: Project; onTab: (tab: Tab) => v
 
 interface ProjectPageProps {
   /** "<project id>", "<project id>/<tab>", "<project id>/knowledge/<draft id>" to open one draft, or
-   * "<project id>/profiles/<role or project>" or "<project id>/schedules/<schedule id>" to open one row. */
+   * "<project id>/profiles/<role, project or planner-choices>" or "<project id>/schedules/<schedule id>" to open one
+   * row. */
   sub: string;
   onNavigate: (sub: string) => void;
 }

@@ -48,6 +48,8 @@ SOURCE_WORDS = {
     Layer.ROLE: "角色默认",
     Layer.PROJECT: "本项目",
     Layer.ROLE_PROJECT: "本项目里的这个角色",
+    Layer.PLANNER_TASK: "规划者为本任务剩下的步骤所选",
+    Layer.PLANNER_STEP: "规划者为这一步所选",
     Layer.TASK: "本任务",
 }
 START_QUESTION = "现在开始吗？回复「开始」就会启动；也可以稍后在 Tasks 页面点 Start。"

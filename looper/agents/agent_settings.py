@@ -17,7 +17,10 @@ one winning (``agent_setting_layers``, one row per layer and place):
 The Manager spans every project, so it has only the first two. Workers and
 Reviewers are never configured one by one; a task may choose the profile of
 its Planner, Workers or Reviewers, which wins over every layer for that task
-only (``Layer.TASK``, a task's ``profile_overrides``). The **Agent Profile** is a runtime, an LLM
+only (``Layer.TASK``, a task's ``profile_overrides``). Under it, over every layer, comes the task's
+Planner's choice for its Workers or Reviewers, made with its tool from the project's allowed list
+(``ops.planner``): for one step (``Layer.PLANNER_STEP``) over one for the rest of the task
+(``Layer.PLANNER_TASK``). The **Agent Profile** is a runtime, an LLM
 provider, a model and an effort (``profile_registry``): a run's model and
 effort are its profile's (``Layer.PROFILE``; no effort is the runtime's own),
 and no layer sets either (``layer_effort`` moved the effort layers set before
@@ -133,6 +136,8 @@ class AgentType(str, Enum):
 TASK_ROLES = (AgentType.PLANNER, AgentType.WORKER, AgentType.REVIEWER)
 # The roles a task may limit the concurrency of: one Planner runs a task.
 TASK_LIMIT_ROLES = (AgentType.WORKER, AgentType.REVIEWER)
+# The roles a task's Planner may choose the Agent Profile of: never its own.
+PLANNER_CHOICE_ROLES = (AgentType.WORKER, AgentType.REVIEWER)
 # At most this many of each task role run at once in one project when no layer sets max_concurrency. Each role has
 # its own limit: a count shared by all three would let resident Planners hold every slot, and no Worker could start.
 BUILTIN_CONCURRENCY = {AgentType.PLANNER: 8, AgentType.WORKER: 16, AgentType.REVIEWER: 8}
@@ -142,7 +147,8 @@ class Layer(str, Enum):
     """Where a setting came from, in resolution order (``BUILTIN`` when no layer sets it).
 
     ``PROFILE`` is the selected Agent Profile itself (its effort); ``TASK`` is a task's choice of profile, over every
-    layer.
+    layer; ``PLANNER_TASK`` and ``PLANNER_STEP`` are its Planner's choice for its Workers or Reviewers, for the rest
+    of the task or for one step, under the task's own.
     """
 
     BUILTIN = "builtin"
@@ -151,6 +157,8 @@ class Layer(str, Enum):
     ROLE = "role"
     PROJECT = "project"
     ROLE_PROJECT = "role_project"
+    PLANNER_TASK = "planner_task"
+    PLANNER_STEP = "planner_step"
     TASK = "task"
 
 
@@ -477,13 +485,15 @@ Place = tuple[Layer, AgentType | None]  # a layer and its role, within one proje
 
 
 def _chain(role: AgentType | None, project_id: str | None) -> list[Place]:
-    """The layers that apply to ``role`` (None: the system layer alone), first to last; a task's choice of
-    profile, when there is one, comes last."""
+    """The layers that apply to ``role`` (None: the system layer alone), first to last; a Worker's or Reviewer's
+    Planner's choices, then a task's own choice of profile, when there are any, come last."""
     if role is None:
         return [(Layer.SYSTEM, None)]
     chain: list[Place] = [(Layer.SYSTEM, None), (Layer.ROLE, role)]
     if project_id and role is not AgentType.MANAGER:
         chain += [(Layer.PROJECT, None), (Layer.ROLE_PROJECT, role)]
+    if role in PLANNER_CHOICE_ROLES:
+        chain += [(Layer.PLANNER_TASK, role), (Layer.PLANNER_STEP, role)]
     if role is not AgentType.MANAGER:
         chain.append((Layer.TASK, role))
     return chain
@@ -611,14 +621,15 @@ async def load_task_limits(role: AgentType, project_id: str | None, task_id: str
 
 
 async def load_agent_settings(
-    role: AgentType | str, project_id: str | None = None, task_id: str | None = None,
+    role: AgentType | str, project_id: str | None = None, task_id: str | None = None, step_id: str | None = None,
 ) -> AgentSettings:
     """``role``'s settings in ``project_id`` (or outside any project) and, with ``task_id``, the profile that task
-    chose for it, read now; the built-in defaults, with ``error`` set, when the layers cannot be read."""
+    and its Planner chose for it (with ``step_id``, the Planner's choice for that step too), read now; the built-in
+    defaults, with ``error`` set, when the layers cannot be read."""
     from ..db import agent_setting_layers
 
     try:
-        rows = await agent_setting_layers.list_layers(project_id, task_id=task_id)
+        rows = await agent_setting_layers.list_layers(project_id, task_id=task_id, step_id=step_id)
     except Exception as exc:
         logger.warning("cannot read the agent settings; using the built-in defaults", exc_info=True)
         return AgentSettings(error=f"cannot read the agent settings ({type(exc).__name__})")

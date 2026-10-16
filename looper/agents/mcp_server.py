@@ -1,8 +1,9 @@
-"""``looper mcp-server``: Looper's platform tools for the Manager, as an MCP server on stdin/stdout.
+"""``looper mcp-server``: Looper's platform tools for the Manager, or for one task's Planner, as an MCP server on
+stdin/stdout.
 
-The Manager's runtime starts this process with ``LOOPER_AGENT_URL`` (the ``looper serve`` that runs the Manager)
-and ``LOOPER_AGENT_TOKEN``. It only forwards: every validation, confirmation and execution happens in
-``looper serve``.
+The agent's runtime starts this process with ``LOOPER_AGENT_URL`` (the ``looper serve`` that runs the agent) and
+``LOOPER_AGENT_TOKEN``: the Manager's token, or a Planner's for its task, which decides the tools it lists. It only
+forwards: every validation, confirmation and execution happens in ``looper serve``.
 
 - **Transport.** MCP stdio: one JSON-RPC 2.0 message per line on stdin, one compact JSON line per response on
   stdout. Nothing else is written to stdout; logs go to stderr. EOF on stdin ends the process with 0.

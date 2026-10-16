@@ -30,6 +30,7 @@ from .channels.web import WebChannelAdapter
 from .scheduler import Scheduler
 from .supervisor import AgentSupervisor
 from .tiers.journal import progress_notes
+from .ops.planner import PlannerOps
 from .ops.service import ManagerOps
 from .tiers.manager import ManagerAgent
 from .tiers.task import TaskRouter, recheck_limits
@@ -124,6 +125,7 @@ class AgentHTTPServer:
         claude_bin: str = "claude",
         scheduler: Scheduler | None = None,
         manager_ops: ManagerOps | None = None,
+        planner_ops: PlannerOps | None = None,
     ) -> None:
         self._host = host
         self._port = port
@@ -144,8 +146,9 @@ class AgentHTTPServer:
         self._claude_bin = claude_bin
         # What "Run now" on a schedule fires through.
         self._scheduler = scheduler
-        # The Manager's platform tools, behind /api/agent/v1/ (its token only).
+        # The Manager's platform tools, behind /api/agent/v1/ (its token only), and each task's Planner's (its own).
         self._manager_ops = manager_ops
+        self._planner_ops = planner_ops
         # Configuration files uploaded for import, waiting to be applied (under the runtime root).
         self._config_imports = config_imports.ConfigImports(runtime_root) if runtime_root else None
         self._server: asyncio.Server | None = None
@@ -306,6 +309,7 @@ class AgentHTTPServer:
     _RE_PROJECT_INSTALLS = re.compile(r"^/api/projects/(proj-[a-zA-Z0-9]+)/installs$")
     _RE_PROJECT_AGENT_SETTINGS = re.compile(r"^/api/projects/(proj-[a-zA-Z0-9]+)/agent-settings$")
     _RE_PROJECT_ROLE_SETTINGS = re.compile(r"^/api/projects/(proj-[a-zA-Z0-9]+)/agent-settings/roles/([a-zA-Z0-9_-]+)$")
+    _RE_PROJECT_ALLOWED_PROFILES = re.compile(r"^/api/projects/(proj-[a-zA-Z0-9]+)/allowed-profiles$")
     _RE_ROLE_SETTINGS = re.compile(r"^/api/agent-settings/roles/([a-zA-Z0-9_-]+)$")
     _RE_RUNTIME_PROBE = re.compile(r"^/api/runtimes/(rt-[a-zA-Z0-9-]+)/probe$")
     _RE_PROVIDER = re.compile(r"^/api/providers/(prov-[a-zA-Z0-9-]+)$")
@@ -503,6 +507,10 @@ class AgentHTTPServer:
         elif (m := self._RE_PROJECT_AGENT_SETTINGS.match(path)) and method == "PUT":
             await self._handle_agent_settings(writer, lambda: agent_settings.update_project(
                 m.group(1), projects.json_object(body)))
+        elif (m := self._RE_PROJECT_ALLOWED_PROFILES.match(path)) and method == "GET":
+            await self._answer(writer, HTTP_200, lambda: projects.allowed_profiles_view(m.group(1)))
+        elif (m := self._RE_PROJECT_ALLOWED_PROFILES.match(path)) and method == "PUT":
+            await self._answer(writer, HTTP_200, lambda: projects.set_allowed_profiles(m.group(1), body))
         elif (m := self._RE_PROJECT_ROLE_SETTINGS.match(path)) and method == "PUT":
             await self._handle_agent_settings(writer, lambda: self._write_layer(
                 body, lambda data: agent_settings.update_project(m.group(1), data, role=m.group(2))))
@@ -566,7 +574,11 @@ class AgentHTTPServer:
     ) -> None:
         """The Manager's tools (``ops.service``): ``GET tools`` lists them, ``POST ops/<tool>`` calls one with the
         JSON body as its arguments and answers the protocol's object, 200 also for a refused call. Only the
-        token of this server's Manager gets in."""
+        token of this server's Manager gets in, or a Planner's token, for that Planner's own tools
+        (``ops.planner``)."""
+        if self._planner_ops is not None and self._planner_ops.claims(headers.get("authorization")):
+            await self._handle_planner_api(method, path, headers, body, writer)
+            return
         ops = self._manager_ops
         if ops is None or not ops.authorized(headers.get("authorization")):
             if ops is not None:
@@ -581,6 +593,28 @@ class AgentHTTPServer:
             except (json.JSONDecodeError, UnicodeDecodeError):
                 arguments = None
             writer.write(_json_response(HTTP_200, await ops.call(m.group(1), arguments)))
+        else:
+            writer.write(_json_response(HTTP_404, {"error": f"no {method} {path}"}))
+        await writer.drain()
+
+    async def _handle_planner_api(
+        self, method: str, path: str, headers: dict[str, str], body: bytes, writer: asyncio.StreamWriter,
+    ) -> None:
+        """A task's Planner's tools, as ``_handle_agent_api`` serves the Manager's: only with a Planner's token that
+        still works (its Planner runs), for that task."""
+        ops, header = self._planner_ops, headers.get("authorization")
+        assert ops is not None
+        if not ops.authorized(header):
+            writer.write(_json_response(HTTP_401, {"error": "this Planner's token no longer works: its task ended or "
+                                                            "a new Planner took over"}))
+        elif path == f"{AGENT_API}tools" and method == "GET":
+            writer.write(_json_response(HTTP_200, {"tools": ops.listing()}))
+        elif (m := _RE_AGENT_OP.match(path)) and method == "POST":
+            try:
+                arguments = json.loads(body.decode("utf-8")) if body.strip() else {}
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                arguments = None
+            writer.write(_json_response(HTTP_200, await ops.call(header, m.group(1), arguments)))
         else:
             writer.write(_json_response(HTTP_404, {"error": f"no {method} {path}"}))
         await writer.drain()

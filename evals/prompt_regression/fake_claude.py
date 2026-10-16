@@ -13,7 +13,9 @@ agent system started it in:
   with a progress note, and an accept with the task's final summary;
   [CHAT] (a change to the task) with the script's ``change_replan`` steps
   when it gives them, else by forwarding the new supplements to the running
-  step, if any; [SUPERVISE] with no review and a progress note;
+  step, if any; [SUPERVISE] with no review and a progress note. With
+  ``planner_calls`` (``{"PLAN": [[tool, arguments], ...]}``), it first makes
+  that turn kind's calls over its ``looper`` MCP server;
 - a Worker (its task section says "Your step:") writes the files its step's
   scripted attempt lists and reports that attempt's status, after the
   attempt's ``seconds`` when it gives them; with ``wait_for_input`` it first
@@ -139,14 +141,36 @@ def _chat(script: dict[str, Any], message: str) -> dict[str, Any]:
     return {"reply": "Noted.", "action": "none"}
 
 
-def _planner(script: dict[str, Any], stdin: _Stdin) -> None:
+def _mcp(args: list[str]) -> Any:
+    """A call of a tool on the ``looper`` MCP server of the ``--mcp-config`` in ``args``: ``rpc(method, params)``."""
+    config = json.load(open(args[args.index("--mcp-config") + 1], encoding="utf-8"))["mcpServers"]["looper"]
+    server = subprocess.Popen([config["command"], *config["args"]], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                              env={**os.environ, **config.get("env", {})}, text=True)
+    ids = iter(range(1, 1_000_000))
+
+    def rpc(method: str, params: dict[str, Any]) -> dict[str, Any]:
+        assert server.stdin is not None and server.stdout is not None
+        server.stdin.write(json.dumps({"jsonrpc": "2.0", "id": next(ids), "method": method, "params": params}) + "\n")
+        server.stdin.flush()
+        return json.loads(server.stdout.readline())
+
+    rpc("initialize", {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "fake"}})
+    return rpc
+
+
+def _planner(script: dict[str, Any], args: list[str], stdin: _Stdin) -> None:
     cost = 0.0
     broken = 0
+    calls = script.get("planner_calls") or {}
+    rpc = _mcp(args) if calls else None
     while (line := stdin.readline()) is not None:
         if not line.strip():
             continue
         message = _user_text(line)
         writes = None
+        kind = re.match(r"\[(\w+)\]", message)
+        for name, arguments in calls.get(kind.group(1) if kind else "", []):
+            rpc("tools/call", {"name": name, "arguments": arguments})
         if message.startswith("[PLAN]") and broken < int(script.get("break_first_plan", 0)):
             broken += 1
             cost += PLANNER_TURN_COST
@@ -208,18 +232,7 @@ def _main_checkout() -> str:
 
 
 def _manager(scenarios_path: str, args: list[str], stdin: _Stdin) -> None:
-    config = json.load(open(args[args.index("--mcp-config") + 1], encoding="utf-8"))["mcpServers"]["looper"]
-    server = subprocess.Popen([config["command"], *config["args"]], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                              env={**os.environ, **config.get("env", {})}, text=True)
-    ids = iter(range(1, 1_000_000))
-
-    def rpc(method: str, params: dict[str, Any]) -> dict[str, Any]:
-        assert server.stdin is not None and server.stdout is not None
-        server.stdin.write(json.dumps({"jsonrpc": "2.0", "id": next(ids), "method": method, "params": params}) + "\n")
-        server.stdin.flush()
-        return json.loads(server.stdout.readline())
-
-    rpc("initialize", {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "fake"}})
+    rpc = _mcp(args)
     cost, last_task = 0.0, ""
     while (line := stdin.readline()) is not None:
         if not line.strip():
@@ -262,7 +275,7 @@ def main(argv: list[str]) -> int:
     elif re.search(r"^Your step:", system_prompt, re.MULTILINE):
         _worker(script, system_prompt, stdin)
     else:
-        _planner(script, stdin)
+        _planner(script, args, stdin)
     return 0
 
 
