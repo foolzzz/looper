@@ -579,7 +579,7 @@ async def remove_orphan(path: Path) -> None:
 
 async def remove_task(task_id: str) -> int:
     """Remove every workspace of the task still there, branches included: the task completed, is deleted or is
-    planned anew. Returns how many."""
+    started over. Returns how many."""
     from ..db import step_workspaces as db_step_workspaces
 
     removed = 0
@@ -597,7 +597,7 @@ async def remove_task(task_id: str) -> int:
 
 async def sweep(runtime_root: Path) -> int:
     """At startup: remove the workspaces no task keeps. A completed task keeps none; a running, stopped or failed
-    one keeps those not merged (until it is restarted or deleted); a directory no row knows goes. Returns how many
+    one keeps those not merged (until it is started over or deleted); a directory no row knows goes. Returns how many
     were removed."""
     from ..db import step_workspaces as db_step_workspaces
 

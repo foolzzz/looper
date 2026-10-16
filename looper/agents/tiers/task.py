@@ -37,6 +37,7 @@ from ..message import (
     AgentAddress,
     MessageEnvelope,
     MessageType,
+    RestartMode,
     planner_address,
 )
 from ..task_notice import Notice, NotifyTarget, ends_task, notice_text, notify_channel
@@ -527,10 +528,15 @@ class TaskRouter:
                                   for s in steps))
 
     async def _handle_restart(self, envelope: MessageEnvelope) -> None:
-        """Run a task again: planned anew, or, with ``resume``, continued from its saved plan and steps."""
+        """Run a task again as its ``RestartMode`` says: continued from its saved plan (the default), planned anew,
+        or continued at a raised spend cap."""
         assert self._bus is not None
         task_id = envelope.payload.get("task_id", "")
-        resume = bool(envelope.payload.get("resume"))
+        try:
+            mode = RestartMode(envelope.payload.get("mode") or RestartMode.CONTINUE)
+        except ValueError:
+            logger.warning("task %s: unknown restart mode %r, not restarting it", task_id, envelope.payload.get("mode"))
+            return
 
         existing = self._tasks.get(task_id)
         if existing and existing.status in ("running", "assigned"):
@@ -552,14 +558,15 @@ class TaskRouter:
             logger.warning("task %s status=%s not restartable", task_id, db_row["status"])
             return
 
-        if not resume:
+        start_over = mode is RestartMode.START_OVER
+        if start_over:
             # Planned anew: the steps go, and so do their worktrees and branches.
             try:
                 await step_workspaces.remove_task(task_id)
             except Exception:
                 logger.warning("could not remove the step worktrees of task %s", task_id, exc_info=True)
         try:
-            await db_tasks.reset_task_for_restart(task_id, keep_steps=resume)
+            await db_tasks.reset_task_for_restart(task_id, keep_steps=not start_over)
         except Exception:
             logger.exception("failed to reset task %s for restart", task_id)
             return
@@ -577,6 +584,9 @@ class TaskRouter:
         )
         self._tasks[task_id] = task
 
+        # The Planner plans the request, unless it carries on with the plan (``restart``) of a task that ran before
+        # and ended as ``ended`` says.
+        carry_on = not start_over and db_row["status"] != db_tasks.READY
         restart_envelope = MessageEnvelope.create(
             source=TASK_ROUTER_ADDRESS,
             target=TASK_ROUTER_ADDRESS,
@@ -586,7 +596,7 @@ class TaskRouter:
                 "goal_id": task.goal_id,
                 "work_dir": task.work_dir,
                 "project_id": task.project_id,
-                **({"resume": True} if resume else {}),
+                **({"restart": mode.value, "ended": db_row["status"]} if carry_on else {}),
             },
             correlation_id=task.correlation_id,
         )

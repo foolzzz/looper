@@ -17,10 +17,10 @@ from typing import Any
 import asyncpg
 
 from ...db import agent_setting_layers as db_layers, connection as db_connection, projects as db_projects
-from ...db import profile_registry as db_profiles, task_changes as db_changes, tasks as db_tasks
+from ...db import profile_registry as db_profiles, steps as db_steps, task_changes as db_changes, tasks as db_tasks
 from ..agent_settings import TASK_ROLES, AgentSettings, AgentType, Layer, index_layers, load_concurrency, resolve
 from ..agent_settings import resolve_concurrency
-from ..message import MANAGER_ADDRESS, TASK_ROUTER_ADDRESS, MessageEnvelope, MessageType, planner_address
+from ..message import MANAGER_ADDRESS, TASK_ROUTER_ADDRESS, MessageEnvelope, MessageType, RestartMode, planner_address
 from ..project_execution import LessonsMode, ProjectExecution, ReviewPolicy, TaskBudgetAction, format_usd
 from ..projects import HTTP_404, HTTP_409, TASK_PROFILE_ROLES, RequestError, edit_requirement, project_name
 from ..system_prompt import TASK_REQUIREMENT_LIMIT
@@ -36,7 +36,8 @@ TASKS_LISTED = 20
 TASKS_SEARCHED = 200
 # The existing projects a new-project confirmation offers instead.
 PROJECTS_OFFERED = 10
-# The statuses a task can be run again from with "restart" (planned anew, as Start on the Tasks page does).
+# The statuses a task can be run again from: "restart" goes on from its saved plan, as Start on the Tasks page does;
+# "start_over" plans it anew.
 RESTARTABLE = ("stopped", "failed", "cancelled")
 
 # Where a setting in a task's configuration came from (``agent_settings.Layer``), named as the dashboard names it.
@@ -335,13 +336,21 @@ async def _profile_choices(raw: Any, *, clearing: bool) -> dict[str, str | None]
 # --- looper_task_control ---
 
 
-async def _cancelling(call: Call) -> str | None:
-    """What cancelling a task does, for the user to confirm; None for the other actions (``write``)."""
-    if call.arguments["action"] != "cancel":
+async def _confirming(call: Call) -> str | None:
+    """What cancelling a task or starting it over does, for the user to confirm; None for the other actions
+    (``write``)."""
+    action = call.arguments["action"]
+    if action == "cancel":
+        task = await _cancellable(call.arguments["task_id"])
+        return (f"要取消任务「{task['name']}」（{task['id']}，现在 {task['status']}）吗？它的 Planner 和正在运行的 "
+                "Worker、Reviewer 会被停止，任务记为已取消；已经改过的文件留在原处。取消后还可以重启，从保存的计划接着做。")
+    if action != "start_over":
         return None
-    task = await _cancellable(call.arguments["task_id"])
-    return (f"要取消任务「{task['name']}」（{task['id']}，现在 {task['status']}）吗？它的 Planner 和正在运行的 Worker、"
-            "Reviewer 会被停止，任务记为已取消；已经改过的文件留在原处。取消后不能继续，只能从头规划再跑一次。")
+    task = await _restartable(call.arguments["task_id"])
+    done = sum(1 for step in await db_steps.list_steps(task["id"]) if step.get("status") == "verified")
+    return (f"要从头重新开始任务「{task['name']}」（{task['id']}，现在 {task['status']}）吗？它的计划、{done} 个已完成的"
+            "步骤、Planner 的会话和各步骤的 worktree 都会删除，然后按现在的需求从头规划，已完成的步骤会重新执行；"
+            "已经改过的文件和已合并的提交留在原处。只想接着做的话，用 restart。")
 
 
 async def _cancellable(task_id: str) -> dict[str, Any]:
@@ -349,6 +358,16 @@ async def _cancellable(task_id: str) -> dict[str, Any]:
     if _group(task) is not db_tasks.TaskGroup.IN_PROGRESS:
         raise OpError(ErrorCode.CONFLICT, f"task {task_id} is {task['status']}: only a running task can be "
                                           "cancelled (stop a queued one)")
+    return task
+
+
+async def _restartable(task_id: str) -> dict[str, Any]:
+    task = await _task(task_id)
+    if task["status"] not in RESTARTABLE:
+        raise OpError(ErrorCode.CONFLICT, f"task {task_id} is {task['status']}: restart and start_over run a stopped, "
+                                          "failed or cancelled task again (a ready one starts with action start)")
+    if not (task.get("work_dir") or "").strip():
+        raise OpError(ErrorCode.INVALID, f"task {task_id} has no directory: set one with looper_task_update first")
     return task
 
 
@@ -377,13 +396,16 @@ async def _control(call: Call) -> dict[str, Any]:
         await _publish(call, MessageType.TASK_STOP, task_id)
         return {"task_id": task_id, "stopped": True}
     if action == "restart":
-        if status not in RESTARTABLE:
-            raise OpError(ErrorCode.CONFLICT, f"task {task_id} is {status}: restart runs a stopped, failed or "
-                                              "cancelled task again (a ready one starts with action start)")
-        if not (task.get("work_dir") or "").strip():
-            raise OpError(ErrorCode.INVALID, f"task {task_id} has no directory: set one with looper_task_update first")
-        await _publish(call, MessageType.TASK_RESTART, task_id)
-        return {"task_id": task_id, "restarted": True, "note": "it plans anew from its current requirement"}
+        await _restartable(task_id)
+        await _publish(call, MessageType.TASK_RESTART, task_id, mode=RestartMode.CONTINUE.value)
+        return {"task_id": task_id, "restarted": True,
+                "note": "it goes on from its saved plan: its accepted steps are kept and do not run again, and its "
+                        "Planner decides how the steps that did not finish go on"}
+    if action == "start_over":
+        await _restartable(task_id)
+        await _publish(call, MessageType.TASK_RESTART, task_id, mode=RestartMode.START_OVER.value)
+        return {"task_id": task_id, "started_over": True,
+                "note": "its steps, plan and Planner session were deleted; it plans anew from its current requirement"}
     await _cancellable(task_id)
     await _publish(call, MessageType.TASK_CANCEL, task_id)
     return {"task_id": task_id, "cancelled": True}
@@ -522,13 +544,16 @@ TOOLS: tuple[Tool, ...] = (
     Tool(
         name="looper_task_control",
         description="start a ready task; stop a queued or running one; restart a stopped, failed or cancelled one "
-                    "(it plans anew); cancel a running one (the user confirms it first).",
+                    "(it goes on from its saved plan: accepted steps are kept and not run again); start_over one "
+                    "instead only when the user asks to start from scratch (its steps and plan are deleted and it "
+                    "plans anew; the user confirms it first); cancel a running one (the user confirms it first).",
         schema={
             "type": "object", "required": ["task_id", "action"], "additionalProperties": False,
             "properties": {"task_id": _TASK_ID,
-                           "action": {"type": "string", "enum": ["start", "stop", "restart", "cancel"]}},
+                           "action": {"type": "string",
+                                      "enum": ["start", "stop", "restart", "start_over", "cancel"]}},
         },
-        risk=Risk.WRITE, run=_control, escalate=_cancelling, task_id=_task_argument,
+        risk=Risk.WRITE, run=_control, escalate=_confirming, task_id=_task_argument,
     ),
     Tool(
         name="looper_task_instruct",
