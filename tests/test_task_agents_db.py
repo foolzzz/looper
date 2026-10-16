@@ -249,21 +249,23 @@ def test_a_bad_choice_is_refused_and_nothing_is_stored(
 
 
 @pytest.mark.parametrize("body", [{"concurrency": {"worker": 2}}, {"profiles": {"worker": "claude-code/sonnet"}}])
-def test_only_a_task_that_has_not_ended_changes_its_choices(monkeypatch: pytest.MonkeyPatch, body: Any) -> None:
+def test_every_task_but_a_completed_one_changes_its_choices(monkeypatch: pytest.MonkeyPatch, body: Any) -> None:
     async def test(pool: Any) -> None:
         project = await _project(pool)
         await _profiles(pool)
         status, answer = await _call("PUT", "/api/tasks/task-nope/agents", body)
         assert (status, answer) == (404, {"error": "task not found"})
-        for ended in ("completed", "failed", "stopped", "cancelled"):
-            await _task(pool, f"task-{ended}", ended, project)
-            status, answer = await _call("PUT", f"/api/tasks/task-{ended}/agents", body)
-            assert status == 409 and f"the task is {ended}" in answer["error"]
-        for live in ("init", "pending", "running", "executing"):
-            await _task(pool, f"task-{live}", live, project)
-            assert (await _call("PUT", f"/api/tasks/task-{live}/agents", body))[0] == 200
+        await _task(pool, "task-completed", "completed", project)
+        status, answer = await _call("PUT", "/api/tasks/task-completed/agents", body)
+        assert status == 409 and "the task is completed" in answer["error"]
+        # A failed, stopped or cancelled task changes too: its restart runs with the new choices.
+        can_run = ("init", "pending", "running", "executing", "failed", "stopped", "cancelled")
+        for state in can_run:
+            await _task(pool, f"task-{state}", state, project)
+            status, answer = await _call("PUT", f"/api/tasks/task-{state}/agents", body)
+            assert (status, answer["agents"]["editable"]) == (200, True), (state, answer)
         assert await pool.fetchval("SELECT count(*) FROM task_concurrency_limits") + await pool.fetchval(
-            "SELECT count(*) FROM task_profile_overrides") == 4
+            "SELECT count(*) FROM task_profile_overrides") == len(can_run)
 
     _run(test, monkeypatch)
 
@@ -466,6 +468,38 @@ def test_a_tasks_limit_changes_at_once_and_reads_back(monkeypatch: pytest.Monkey
         (overview,) = await chat.say("现在怎么样", ("looper_overview", {}))
         assert overview["result"]["running_tasks"] == [
             {"task_id": "task-a", "name": "a", "project": "calc", "concurrency": {"reviewer": 5, "worker": 1}}]
+
+    _run(test, monkeypatch)
+
+
+@pytest.mark.parametrize("ended", ["failed", "stopped", "cancelled"])
+def test_the_manager_changes_the_agents_of_a_task_that_ended_but_not_its_requirement(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, ended: str,
+) -> None:
+    async def test(pool: Any) -> None:
+        project = await _project(pool)
+        await _profiles(pool)
+        await _task(pool, "task-a", ended, project)
+        await _task(pool, "task-done", "completed", project)
+        chat = _concurrency_chat(tmp_path)
+        profile, limit, requirement, completed = await chat.say(
+            "失败的任务换成 sonnet、Worker 并发 1，再重启",
+            ("looper_task_update", {"task_id": "task-a", "profiles": {"worker": "claude-code/sonnet"}}),
+            ("looper_concurrency", {"task_id": "task-a", "limits": {"worker": 1}}),
+            # One refused part refuses the whole call: its profile is not stored either.
+            ("looper_task_update", {"task_id": "task-a", "requirement": "build calc v2",
+                                    "profiles": {"reviewer": "claude-code/sonnet"}}),
+            ("looper_task_update", {"task_id": "task-done", "profiles": {"worker": "claude-code/sonnet"}}))
+        assert profile["status"] == "ok" and profile["result"]["changed"] == ["profiles"], profile
+        assert limit["status"] == "ok" and limit["result"]["changes"][0]["after"] == {"value": 1, "source": "task"}
+        assert _error(requirement) == "conflict" and "requirement and directory do not change" in \
+            requirement["error"]["message"]
+        assert _error(completed) == "conflict" and "the task is completed" in completed["error"]["message"]
+        assert [tuple(r) for r in await pool.fetch("SELECT task_id, role, profile_id FROM task_profile_overrides")] \
+            == [("task-a", "worker", "agent-sonnet")]
+        assert [tuple(r) for r in await pool.fetch("SELECT task_id, role, max_concurrency FROM "
+                                                   "task_concurrency_limits")] == [("task-a", "worker", 1)]
+        assert await pool.fetchval("SELECT requirement FROM tasks WHERE id = 'task-a'") == "build calc"
 
     _run(test, monkeypatch)
 

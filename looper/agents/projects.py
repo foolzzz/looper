@@ -10,10 +10,11 @@ Workers, Reviewers), read afresh when each prompt is built. Its execution
 settings (``project_execution``) are top-level fields of the project too,
 ``null`` to inherit. Its agent settings (harness, Agent Profile with its model and
 effort, environment, per-run cap) are layers of their own (``agent_settings``,
-``/api/projects/<id>/agent-settings``). A task that has not ended may change
-its own choices per role (``set_task_agents``): the Agent Profile of its roles,
-and how many of its Workers or Reviewers run at once, within its project's
-limit.
+``/api/projects/<id>/agent-settings``). A task that can still run (any but a
+completed one: a restart runs a failed, stopped or cancelled task again) may
+change its own choices per role (``set_task_agents``): the Agent Profile of its
+roles, and how many of its Workers or Reviewers run at once, within its
+project's limit.
 """
 
 from __future__ import annotations
@@ -342,6 +343,9 @@ VIA_CHAT = "chat"
 # The statuses a task's requirement can be edited in: not started, waiting for room, or running (whatever its
 # Planner is doing).
 EDITABLE_STATUSES = (db_tasks.READY, *db_tasks.ACTIVE_STATUSES)
+# The statuses a task's own agents can change in: those its requirement can, and those of a task that ended without
+# completing, which a restart runs again with its new agents. Only a completed task's agents are final.
+AGENTS_EDITABLE_STATUSES = (*EDITABLE_STATUSES, *db_tasks.RESTARTABLE_STATUSES)
 
 
 async def store_chat_supplement(target: AgentAddress, text: str) -> int | None:
@@ -402,11 +406,11 @@ PROFILES_NOTE = ("a Worker or Reviewer uses its new profile from its next step o
 async def agents_view(task: dict[str, Any]) -> dict[str, Any]:
     """Task ``task``'s agents, read now: each task role's Agent Profile and concurrency with their sources
     (``agent_settings.task_agents_view``), the most a limit may be, and whether the task can change its own
-    choices (it has not ended)."""
+    choices (it has not completed)."""
     project_id = task.get("project_id")
     layers = index_layers(await db_layers.list_layers(project_id, task_id=task["id"]), project_id)
     return {"roles": task_agents_view(layers, project_id), "concurrency_max": CONCURRENCY_MAX,
-            "editable": task.get("status") in EDITABLE_STATUSES}
+            "editable": task.get("status") in AGENTS_EDITABLE_STATUSES}
 
 
 async def profile_choices(raw: Any, *, clearing: bool) -> dict[str, str | None]:
@@ -470,8 +474,9 @@ async def set_task_agents(task_id: str, data: dict[str, Any]) -> dict[str, Any]:
     """Change the task's own choices per role, together: ``profiles`` (an Agent Profile, by id or name, for its
     Planner, Workers or Reviewers) and ``concurrency`` (how many of its Workers or Reviewers run at once, within its
     project's limit); null drops the task's choice of that role, and its layers apply. 400 for a bad field, role or
-    value, 404 for an unknown task, 409 for one that has ended. Answers the task's agents as they are then (and when
-    a new profile applies). The caller lets waiting runs check again; a lowered limit stops nothing that runs."""
+    value, 404 for an unknown task, 409 for a completed one (a failed, stopped or cancelled task changes too, and its
+    restart runs with them). Answers the task's agents as they are then (and when a new profile applies). The caller
+    lets waiting runs check again; a lowered limit stops nothing that runs."""
     unknown = sorted(set(data) - set(TASK_AGENT_FIELDS))
     if unknown:
         raise RequestError(HTTP_400, f"unknown field {unknown[0]!r}; the fields are {', '.join(TASK_AGENT_FIELDS)}")
@@ -481,9 +486,9 @@ async def set_task_agents(task_id: str, data: dict[str, Any]) -> dict[str, Any]:
     task = await db_tasks.get_task(task_id)
     if task is None:
         raise RequestError(HTTP_404, "task not found")
-    if task["status"] not in EDITABLE_STATUSES:
-        raise RequestError(HTTP_409, f"the task is {task['status']}: only a task that has not ended can change its "
-                                     "agents")
+    if task["status"] not in AGENTS_EDITABLE_STATUSES:
+        raise RequestError(HTTP_409, f"the task is {task['status']}: only a task that can still run, or run again "
+                                     "after a restart, can change its agents")
     profiles = await profile_choices(data.get("profiles"), clearing=True)
     try:
         await db_layers.set_task_layer(task_id, profiles=profiles, limits=limits)
