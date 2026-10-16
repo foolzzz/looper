@@ -138,7 +138,7 @@ looper mcp-server（子进程，薄客户端）
 | `looper_settings` | 查看和修改角色层、项目层的设置，含项目的可选 Agent Profile 列表；改共用默认 | write；共用默认 high | T2 |
 | `looper_catalog` | 列出技能和 MCP，按项目、角色安装或卸载 | write | T2 |
 | `looper_costs` | 按任务、项目、时间段查花费 | read | T2 |
-| `looper_schedules` | 列出、查看（含最近的运行）、启用、停用；删除（✅ 已实现，looper #PRNUM）；新建（停用）、修改、立即运行（未做） | 列出、查看 read；write；删除 high | T3 |
+| `looper_schedules` | 列出、查看（含最近的运行）、启用、停用；删除（✅ 已实现，looper #160）；新建（停用）、修改、立即运行（未做） | 列出、查看 read；write；删除 high | T3 |
 | `looper_config_export` | 导出配置到文件 | read | T3 |
 
 提高花费上限（项目的单任务上限、定时任务的每日上限）一律算 high。T2 里还有：`looper_settings` 改并发上限（项目里的角色，或所有项目里的角色）、提高或取消每次运行的花费上限（按各层解析后、该层任一角色的运行会拿到更高的上限或没有上限）算 high。一个工具里只列出、查看的动作（`list`、`get`、`view`）算 read，自主轮里也能调用。任何工具都不接受名字像密钥的参数（key、token、secret、password、credential），返回 `forbidden` 并说明去界面填。
