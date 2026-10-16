@@ -10,6 +10,7 @@ import {
   Play,
   Pause,
   Plus,
+  RotateCcw,
   Settings2,
   Folder,
   X,
@@ -229,6 +230,8 @@ export function TasksPage({ sub, query, onNavigate }: TasksPageProps) {
   /** Whether older pages were loaded for the list `key`: a refresh then keeps them below the newest page. */
   const older = useRef({ key: "", loaded: false });
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
+  /** The task whose Start over waits for its confirmation: it deletes the task's steps and plan. */
+  const [confirmStartOver, setConfirmStartOver] = useState<string | null>(null);
   const [showCreate, setShowCreate] = useState(false);
   const [newReq, setNewReq] = useState("");
   const [newWorkDir, setNewWorkDir] = useState("");
@@ -325,10 +328,11 @@ export function TasksPage({ sub, query, onNavigate }: TasksPageProps) {
     }
   };
 
-  const handleStart = async (task: TaskInfo) => {
+  const handleStart = async (task: TaskInfo, startOver = false) => {
     try {
-      // A ready task is started; a stopped, failed or cancelled one runs again.
-      await (task.status === READY_STATUS ? startReadyTask : startTask)(task.task_id);
+      // A ready task is started; a stopped, failed or cancelled one goes on from its saved plan, or is planned anew.
+      await (task.status === READY_STATUS ? startReadyTask(task.task_id) : startTask(task.task_id, { startOver }));
+      setConfirmStartOver(null);
       load();
     } catch {
       // ignore
@@ -654,20 +658,60 @@ export function TasksPage({ sub, query, onNavigate }: TasksPageProps) {
                       Stop
                     </button>
                   )}
-                  {RESTARTABLE_STATUSES.includes(task.status) && (
-                    <button
-                      type="button"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        handleStart(task);
-                      }}
-                      className="flex items-center gap-1 rounded-md px-2 py-1 text-xs text-success hover:bg-success/10 transition-colors"
-                    >
-                      <Play className="h-3.5 w-3.5" />
-                      Start
-                    </button>
+                  {confirmStartOver === task.task_id ? (
+                    <div className="flex items-center gap-1" onClick={(e) => e.stopPropagation()}>
+                      <span className="text-xs text-muted-foreground">Delete its steps?</span>
+                      <button
+                        type="button"
+                        onClick={() => handleStart(task, true)}
+                        title="Delete the task's steps, plan and Planner session, then plan it anew from its requirement"
+                        className="rounded-md px-2 py-1 text-xs bg-destructive text-destructive-foreground hover:bg-destructive/90 transition-colors"
+                      >
+                        Start over
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setConfirmStartOver(null)}
+                        className="rounded-md px-2 py-1 text-xs text-muted-foreground hover:text-foreground transition-colors"
+                      >
+                        No
+                      </button>
+                    </div>
+                  ) : (
+                    RESTARTABLE_STATUSES.includes(task.status) && (
+                      <>
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleStart(task);
+                          }}
+                          title={task.status === READY_STATUS ? undefined : "Continue from the saved plan: accepted steps are kept"}
+                          className="flex items-center gap-1 rounded-md px-2 py-1 text-xs text-success hover:bg-success/10 transition-colors"
+                        >
+                          <Play className="h-3.5 w-3.5" />
+                          Start
+                        </button>
+                        {task.status !== READY_STATUS && (
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setConfirmDelete(null);
+                              setConfirmStartOver(task.task_id);
+                            }}
+                            aria-label="Start over"
+                            title="Start over: delete its steps and plan it anew"
+                            className="flex items-center gap-1 rounded-md px-2 py-1 text-xs text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
+                          >
+                            <RotateCcw className="h-3.5 w-3.5" />
+                            <span className="hidden sm:inline">Start over</span>
+                          </button>
+                        )}
+                      </>
+                    )
                   )}
-                  {confirmDelete === task.task_id ? (
+                  {confirmStartOver === task.task_id ? null : confirmDelete === task.task_id ? (
                     <div className="flex items-center gap-1" onClick={(e) => e.stopPropagation()}>
                       <button
                         type="button"
@@ -689,6 +733,7 @@ export function TasksPage({ sub, query, onNavigate }: TasksPageProps) {
                       type="button"
                       onClick={(e) => {
                         e.stopPropagation();
+                        setConfirmStartOver(null);
                         setConfirmDelete(task.task_id);
                       }}
                       className="flex items-center gap-1 rounded-md px-2 py-1 text-xs text-muted-foreground hover:text-destructive hover:bg-destructive/10 transition-colors"

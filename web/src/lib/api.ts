@@ -466,11 +466,13 @@ async function failed(res: Response, label: string): Promise<never> {
   throw new Error(data.error || `${label} ${res.status}`);
 }
 
-export async function startTask(taskId: string): Promise<void> {
+/** Run a stopped, failed or cancelled task again: from its saved plan, or, with `startOver`, planned anew (its steps,
+ * plan and Planner session are deleted). */
+export async function startTask(taskId: string, { startOver = false }: { startOver?: boolean } = {}): Promise<void> {
   const res = await fetch(`${API_BASE}/tasks/start`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ task_id: taskId }),
+    body: JSON.stringify({ task_id: taskId, start_over: startOver }),
   });
   if (!res.ok) await failed(res, "start");
 }
@@ -1335,10 +1337,19 @@ export interface TaskStep {
   id: string;
   task_id: string;
   step_index: number;
+  /** The Planner's label for the step, unique within the task. */
+  step_key: string;
   instruction: string;
   target_files: string[];
+  /** The ids of the steps it needs before it starts. */
+  depends_on: string[];
+  /** pending, dispatched, deciding, completed (in review), verified, failed or skipped (dropped by a replan). */
   status: string;
+  /** Whether a Reviewer must pass it. */
+  review: boolean;
+  retries: number;
   worker_id: string | null;
+  reviewer_id: string | null;
   result: Record<string, unknown> | null;
   created_at: string;
   updated_at: string;

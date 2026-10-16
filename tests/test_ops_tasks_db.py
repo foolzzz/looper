@@ -217,17 +217,24 @@ def test_a_task_without_what_only_the_user_can_give_is_not_created(
     _run(test, monkeypatch)
 
 
+_CONTINUE = {"mode": "continue"}
+
+
 @pytest.mark.parametrize(("status", "action", "outcome"), [
-    ("init", "start", MessageType.TASK_START),
+    ("init", "start", (MessageType.TASK_START, {})),
     ("running", "start", "conflict"),
     ("stopped", "start", "conflict"),
-    ("running", "stop", MessageType.TASK_STOP),
-    ("pending", "stop", MessageType.TASK_STOP),
+    ("running", "stop", (MessageType.TASK_STOP, {})),
+    ("pending", "stop", (MessageType.TASK_STOP, {})),
     ("init", "stop", "conflict"),
-    ("stopped", "restart", MessageType.TASK_RESTART),
-    ("failed", "restart", MessageType.TASK_RESTART),
+    # A restart goes on from the saved plan, and runs at once.
+    ("stopped", "restart", (MessageType.TASK_RESTART, _CONTINUE)),
+    ("failed", "restart", (MessageType.TASK_RESTART, _CONTINUE)),
+    ("cancelled", "restart", (MessageType.TASK_RESTART, _CONTINUE)),
     ("verifying", "restart", "conflict"),
     ("completed", "restart", "conflict"),
+    ("verifying", "start_over", "conflict"),  # refused before the user is asked
+    ("init", "start_over", "conflict"),
 ])
 def test_task_control_follows_the_tasks_status(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, status: str, action: str, outcome: Any,
@@ -236,9 +243,11 @@ def test_task_control_follows_the_tasks_status(
         await _task(pool, "task-a", status, await _project(pool))
         chat = _Chat(tmp_path)
         (answer,) = await chat.say("go", ("looper_task_control", {"task_id": "task-a", "action": action}))
-        if isinstance(outcome, MessageType):
+        if isinstance(outcome, tuple):
+            message_type, payload = outcome
             assert answer["status"] == "ok"
-            assert [(e.message_type, e.payload) for e in chat.sent()] == [(outcome, {"task_id": "task-a"})]
+            assert [(e.message_type, e.payload) for e in chat.sent()] == [(message_type, {"task_id": "task-a",
+                                                                                          **payload})]
         else:
             assert _error(answer) == outcome and chat.sent() == []
 
@@ -259,6 +268,34 @@ def test_cancelling_asks_first_and_only_a_running_task(monkeypatch: pytest.Monke
         (done,) = await chat.say("确认", ("looper_confirm", {"confirmation_id": asked["confirmation_id"]}))
         assert done["status"] == "ok"
         assert [(e.message_type, e.payload) for e in chat.sent()] == [(MessageType.TASK_CANCEL, {"task_id": "task-a"})]
+
+    _run(test, monkeypatch)
+
+
+def test_starting_over_asks_first(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """It deletes the task's finished steps, so the user confirms it; a plain restart keeps them and asks nothing."""
+    from looper.db import plans
+
+    async def test(pool: Any) -> None:
+        await _task(pool, "task-a", "failed", await _project(pool))
+        await plans.save("task-a", plan={"plan_id": "plan-a", "status": "failed"}, steps=[
+            {"id": "step-1", "index": 0, "key": "s1", "instruction": "do s1", "status": "verified"},
+            {"id": "step-2", "index": 1, "key": "s2", "instruction": "do s2", "status": "verified"},
+            {"id": "step-3", "index": 2, "key": "s3", "instruction": "do s3", "status": "failed"}], pool=pool)
+        chat = _Chat(tmp_path)
+        (asked,) = await chat.say("从头再来", ("looper_task_control", {"task_id": "task-a", "action": "start_over"}))
+        assert asked["status"] == "needs_confirmation" and chat.sent() == []
+        assert ("要从头重新开始任务「build calc」（task-a，现在 failed）吗？它的计划、2 个已完成的步骤、Planner 的会话"
+                in chat.turns[0].blocks[0])
+        (done,) = await chat.say("确认", ("looper_confirm", {"confirmation_id": asked["confirmation_id"]}))
+        assert done["status"] == "ok" and done["result"]["started_over"] is True
+        assert [(e.message_type, e.payload) for e in chat.sent()] == [
+            (MessageType.TASK_RESTART, {"task_id": "task-a", "mode": "start_over"})]
+
+        (restarted,) = await chat.say("接着做", ("looper_task_control", {"task_id": "task-a", "action": "restart"}))
+        assert restarted["status"] == "ok" and chat.turns[2].blocks == []
+        assert [(e.message_type, e.payload) for e in chat.sent()] == [
+            (MessageType.TASK_RESTART, {"task_id": "task-a", "mode": "continue"})]
 
     _run(test, monkeypatch)
 

@@ -47,6 +47,7 @@ class MessageType(str, Enum):
     TASK_CHANGE = "task_change"
     TASK_CANCEL = "task_cancel"
     TASK_STOP = "task_stop"
+    # Dashboard or Manager → TaskRouter: run a stopped, failed or cancelled task again, as its ``RestartMode`` says.
     TASK_RESTART = "task_restart"
     # TaskRouter → a task's new Planner: carry on with the plan saved before the server stopped.
     TASK_RESUME = "task_resume"
@@ -59,6 +60,18 @@ class MessageType(str, Enum):
     HEARTBEAT = "heartbeat"
     AGENT_LIFECYCLE = "agent_lifecycle"
     SYSTEM_EVENT = "system_event"
+
+
+class RestartMode(str, Enum):
+    """How a ``TASK_RESTART`` runs a stopped, failed or cancelled task again (its payload's ``mode``)."""
+
+    # From its saved plan: accepted steps stay done, the others are back to not started, and the Planner gets one
+    # [RESTART] turn on how the task goes on. The default.
+    CONTINUE = "continue"
+    # Planned anew: its steps, its plan, its Planner's session and its step worktrees are deleted.
+    START_OVER = "start_over"
+    # A task that failed at its spend cap, the cap raised (``/continue``): its plan goes on without a turn.
+    AT_CAP = "at_cap"
 
 
 @dataclass(frozen=True)
