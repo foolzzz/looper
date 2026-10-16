@@ -8,11 +8,11 @@ writes the operator's ~/.claude.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import io
 import json
 import os
-import shlex
 import shutil
 import stat
 import subprocess
@@ -480,20 +480,28 @@ def test_a_clone_over_its_size_or_time_is_stopped_and_removed(
         assert status == 400 and "when cloned; the clone was stopped" in body["error"], body
         assert _clones(scratch) == []
         monkeypatch.setattr(catalog_sources, "GIT_CLONE_MAX_BYTES", 64 * 1024 * 1024)
-        # A git that never finishes; each run writes down its pid, which is its process group's (git runs in a
-        # session of its own), before it becomes the sleep.
+        # A git that never finishes. Each process the preview starts is noted as it is started (on a loaded
+        # machine the timeout can stop it before it runs a line); its pid is its process group's (git runs in a
+        # session of its own).
         slow = tmp_path / "bin"
         slow.mkdir()
-        pids = tmp_path / "git.pids"
-        (slow / "git").write_text(f"#!/bin/sh\necho $$ >> {shlex.quote(str(pids))}\nexec sleep 30\n")
+        (slow / "git").write_text("#!/bin/sh\nexec sleep 30\n")
         (slow / "git").chmod(0o755)
         monkeypatch.setenv("PATH", f"{slow}{os.pathsep}{os.environ['PATH']}")
         monkeypatch.setattr(catalog_sources, "GIT_CLONE_TIMEOUT_SECONDS", 1)
+        started: list[int] = []
+        spawn = asyncio.create_subprocess_exec
+
+        async def noted(*args: Any, **kwargs: Any) -> asyncio.subprocess.Process:
+            process = await spawn(*args, **kwargs)
+            started.append(process.pid)
+            return process
+
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", noted)
         status, body = await _call("POST", "/api/catalog/git/preview", {"url": repo.as_uri()})
         assert status == 400 and "took more than 1 seconds and was stopped" in body["error"], body
         assert _clones(scratch) == []
         # Nothing of the stopped git's process group is left; another process on the machine does not count.
-        started = [int(pid) for pid in pids.read_text().split()]
         assert started
         for pid in started:
             with pytest.raises(ProcessLookupError):

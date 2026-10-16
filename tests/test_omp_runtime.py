@@ -455,6 +455,8 @@ emit({'type': 'message_end', 'message': {'role': 'assistant', 'stopReason': 'too
 emit({'type': 'message_end', 'message': {'role': 'toolResult', 'toolCallId': 'call_1', 'toolName': 'bash',
       'isError': False, 'content': [{'type': 'text', 'text': ''}]}})
 time.sleep(float(os.environ.get('FAKE_OMP_PAUSE') or 0))
+if os.environ.get('FAKE_OMP_SECOND'):  # the turn's second request starts
+    open(os.environ['FAKE_OMP_SECOND'], 'w').close()
 emit({'type': 'message_end', 'message': {'role': 'assistant', 'stopReason': 'stop', 'model': 'gpt-5.5', 'usage': usage,
       'content': [{'type': 'text', 'text': f'{prompt} | {message} | turn {turns}'}]}})
 emit({'type': 'agent_end', 'messages': [], 'isTerminal': True, 'yielded': True})
@@ -567,13 +569,15 @@ def test_a_resident_turn_is_priced_and_stops_at_the_soft_cap_between_requests(tm
     root = tmp_path / "runtime"
     omp = fake_claude(tmp_path / "omp", _FAKE_OMP)
     provider = _provider()
+    second = tmp_path / "second-request"
     # gpt-5.5 at the built-in prices: each request's 60 uncached and 40 cached input tokens and 5 output tokens.
     request_cost = (60 * 5.00 + 40 * 0.50 + 5 * 30.00) / 1_000_000
 
     async def _run() -> tuple[Any, Usage, list[str]]:
         session = OMP.resident_session("planner-task-2")
         await session.start(_resident_command(root, omp, "prompt"), cwd=str(tmp_path), signature="s",
-                            env={**_launch().environment(), "FAKE_OMP_PAUSE": "5"}, price=pricer(provider))
+                            env={**_launch().environment(), "FAKE_OMP_PAUSE": "30", "FAKE_OMP_SECOND": str(second)},
+                            price=pricer(provider))
         kinds: list[str] = []
         spend = RunSpend(provider, "gpt-5.5", cap=request_cost / 2)  # capped below one request
 
@@ -586,9 +590,10 @@ def test_a_resident_turn_is_priced_and_stops_at_the_soft_cap_between_requests(tm
                 return None
             return CapStop(soft_cap_result(spend.usage.cost_usd or 0.0, spend.cap or 0.0), spend.usage)
 
-        started = time.monotonic()
         capped = await session.run_turn("two", on_event, stop=stop)
-        assert time.monotonic() - started < 4  # stopped before the turn's second request
+        # Stopped during the pause after the first request (30 s, far longer than stopping takes on a slow
+        # machine): the second request never started.
+        assert not second.exists()
         return capped, session.totals, kinds
 
     capped, totals, kinds = asyncio.run(_run())

@@ -119,12 +119,14 @@ def test_edit_tool_paths_are_relative_and_never_local_paths(tmp_path: Path) -> N
 def test_changed_files_are_the_planners_only_while_no_step_ran() -> None:
     windows = {"planner": [(100.0, 110.0), (130.0, 140.0)], "worker": [(110.05, 129.0)],
                "reviewer": [(141.0, 150.0)]}
-    changes = {"in-plan-turn.txt": 105.0, "by-worker.txt": 120.0, "near-worker-start.txt": 109.98,
-               "after-all.txt": 160.0}
-    assert metrics.planner_changed_files(changes, windows) == ["in-plan-turn.txt"]
+    # Written as a Planner turn starts, which the measured clock offset may put up to the tolerance before it.
+    changes = {"in-plan-turn.txt": 105.0, "at-plan-turn-start.txt": 129.95, "before-plan-turn.txt": 129.85,
+               "by-worker.txt": 120.0, "near-worker-start.txt": 109.98, "after-all.txt": 160.0}
+    assert metrics.planner_changed_files(changes, windows) == ["at-plan-turn-start.txt", "in-plan-turn.txt"]
     # The database clock runs 50 s ahead of the local one: the windows move back by 50 s.
     shifted = {name: [(a + 50, b + 50) for a, b in spans] for name, spans in windows.items()}
-    assert metrics.planner_changed_files(changes, shifted, clock_offset=50.0) == ["in-plan-turn.txt"]
+    assert metrics.planner_changed_files(changes, shifted, clock_offset=50.0) == [
+        "at-plan-turn-start.txt", "in-plan-turn.txt"]
 
 
 @pytest.mark.parametrize(("depends_on", "pairs"), [

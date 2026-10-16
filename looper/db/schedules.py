@@ -141,12 +141,14 @@ async def lock_schedule(conn: asyncpg.Connection, schedule_id: str) -> dict[str,
 
 async def lock_next_due(conn: asyncpg.Connection, now: datetime, *, skip: list[str]) -> dict[str, Any] | None:
     """An enabled schedule due at ``now`` (not one in ``skip``), its row locked; another transaction's locked rows
-    are passed over, so a second scheduler never handles the same firing."""
+    are passed over, so a second scheduler never handles the same firing. The lock is the one an update takes
+    (``FOR NO KEY UPDATE``): a row held only by a foreign key check, such as a message about its last run being
+    recorded, is not passed over."""
     row = await conn.fetchrow(
         """
         SELECT * FROM schedules
         WHERE enabled AND next_fire_at <= $1 AND NOT (id = ANY($2::text[]))
-        ORDER BY next_fire_at, id LIMIT 1 FOR UPDATE SKIP LOCKED
+        ORDER BY next_fire_at, id LIMIT 1 FOR NO KEY UPDATE SKIP LOCKED
         """,
         now, skip,
     )
