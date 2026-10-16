@@ -179,7 +179,8 @@ class Notifier:
     async def check_stale(self, now: datetime) -> None:
         """Start the stale alert of each enabled schedule past its deadline. A schedule whose run is in progress
         (queued, checking its gate, or its task running: within its run timeout, as the pass before this one stops
-        a run past it) is not stale; neither are the firings it makes skip."""
+        a run past it) is not stale; neither are the firings it makes skip, nor is a schedule whose run went well
+        after the pass read it (``start_stale_alert``)."""
         pool = db_connection.get_pool()
         for schedule in await db_schedules.enabled_schedules():
             if schedule["stale_alert_at"] is not None:
@@ -192,7 +193,8 @@ class Notifier:
                 deadline = stale_deadline(rule, tz, last_ok=schedule["last_ok_at"], first_run=first_run,
                                           enabled_at=schedule["enabled_at"],
                                           rule_changed_at=schedule.get("rule_changed_at"))
-                if deadline is None or now < deadline or not await self._switch(schedule["id"], "stale_alert_at", now):
+                if deadline is None or now < deadline or not await db_schedules.start_stale_alert(
+                        pool, schedule["id"], now, last_ok_at=schedule["last_ok_at"]):
                     continue
                 project = await db_projects.get_project(schedule["project_id"])
                 await self._deliver(schedule, Kind.STALE_ALERT,
