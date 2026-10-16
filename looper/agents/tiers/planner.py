@@ -186,6 +186,11 @@ user's messages about it.
 - Accept a step only when its result meets the acceptance criteria. Retry with
   specific feedback when a Worker can fix what is wrong; replan when the
   approach must change; fail when the task cannot be done.
+- A replan builds on what is done: the accepted steps stay, and new steps
+  depend on the ones whose results they need instead of doing their work
+  again. It replaces only work that is not done: the steps not started, a
+  step whose result cannot be accepted and, when the task changes, the
+  running steps the change makes wrong.
 """
 
 T = TypeVar("T")
@@ -2268,6 +2273,10 @@ class PlannerAgent:
             f"[RESTART] The task {why}. The user restarted it, and it goes on from its plan: the accepted steps "
             "stay done and do not run again; the steps that did not finish are back to not started (the journal "
             "below says how their last attempt ended).",
+            f"The restart does not reset retries: a step back to not started keeps the retries it used (at most "
+            f"{self._execution.step_retries} per step; a replan that keeps its id keeps them too), so one that had "
+            "used them all gets this one attempt and no retry; a step under a new id (add_steps or replan) starts "
+            "with none used.",
             *lines,
             "",
             *self._plan_lines(plan),

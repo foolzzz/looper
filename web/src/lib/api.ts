@@ -1287,7 +1287,8 @@ export interface TaskRoleAgents<C extends Sourced<number> = Sourced<number>> {
 export interface TaskAgents {
   /** The most a concurrency limit may be. */
   concurrency_max: number;
-  /** False once the task has ended: its choices are shown, not changed. */
+  /** False once the task has completed: its choices are shown, not changed. A failed, stopped or cancelled task
+   * still changes them, and its restart runs with them. */
   editable: boolean;
   roles: {
     /** Its concurrency is the project's: how many of its tasks run at once. */
