@@ -987,18 +987,27 @@ async def update_profile(profile_id: str, data: Any) -> dict[str, Any]:
     return await _profile_answer(profile_id)
 
 
-async def delete_profile(profile_id: str) -> dict[str, Any]:
-    import asyncpg
-
+async def deletable_profile(profile_id: str) -> dict[str, Any]:
+    """The profile, when nothing keeps it from being deleted: not built in, and selected nowhere
+    (``RegistryConflict`` says where it is)."""
     from ..db import profile_registry as db
 
     row = await _existing_profile(profile_id)
     _not_builtin(row, "profile")
     used_by = (await db.profile_usage(profile_id)).get(profile_id)
+    if used_by:
+        raise RegistryConflict(f"Agent Profile {row['name']!r} is selected by {usage_text(used_by)}: select "
+                               "another profile there first")
+    return row
+
+
+async def delete_profile(profile_id: str) -> dict[str, Any]:
+    import asyncpg
+
+    from ..db import profile_registry as db
+
+    row = await deletable_profile(profile_id)
     try:
-        if used_by:
-            raise RegistryConflict(f"Agent Profile {row['name']!r} is selected by {usage_text(used_by)}: select "
-                                   "another profile there first")
         await db.delete_profile(profile_id)
     except asyncpg.ForeignKeyViolationError:  # selected since it was checked
         raise RegistryConflict(f"Agent Profile {row['name']!r} is still selected: select another profile there "

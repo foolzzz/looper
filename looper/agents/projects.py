@@ -193,20 +193,28 @@ async def update_project(project_id: str, data: dict[str, Any]) -> dict[str, Any
     return project_view(await _existing_project(project_id))
 
 
-async def delete_project(project_id: str) -> dict[str, Any]:
+def _still_used(project: dict[str, Any]) -> RequestError:
+    return RequestError(HTTP_409, f"project {project['name']!r} still has tasks; move or delete them first")
+
+
+async def deletable_project(project_id: str) -> dict[str, Any]:
+    """The project, when nothing keeps it from being deleted: 404 for an unknown one, 409 while it has tasks or
+    schedules."""
     project = await _existing_project(project_id)
-    still_used = RequestError(
-        HTTP_409, f"project {project['name']!r} still has tasks; move or delete them first",
-    )
     if project["task_count"]:
-        raise still_used
+        raise _still_used(project)
     if count := project.get("schedule_count"):
         raise RequestError(HTTP_409, f"project {project['name']!r} still has {count} "
                                      f"schedule{'s' if count != 1 else ''}; delete them first")
+    return project
+
+
+async def delete_project(project_id: str) -> dict[str, Any]:
+    project = await deletable_project(project_id)
     try:
         await db_projects.delete_project(project_id)
     except asyncpg.ForeignKeyViolationError:  # a task or a schedule was added meanwhile
-        raise still_used from None
+        raise _still_used(project) from None
     return {"deleted": project_id}
 
 
@@ -478,7 +486,7 @@ async def allowed_profiles_view(project_id: str) -> dict[str, Any]:
             "profiles": [allowed_profile_view(row) for row in await db_projects.allowed_profiles(project_id)]}
 
 
-async def set_allowed_profiles(project_id: str, body: bytes) -> dict[str, Any]:
+async def set_allowed_profiles(project_id: str, data: dict[str, Any]) -> dict[str, Any]:
     """Make ``profile_ids`` (ids or names) the whole list of the Agent Profiles project ``project_id``'s Planners may
     choose; ``[]`` empties it, and its tasks' Planners' choices of a profile it drops go with it. Each profile must
     be registered and able to run the Worker or the Reviewer. 400 otherwise, and nothing changes; 404 for an
@@ -486,7 +494,6 @@ async def set_allowed_profiles(project_id: str, body: bytes) -> dict[str, Any]:
     from ..db import profile_registry as db_profiles
     from .profile_registry import AgentProfile, servable_roles
 
-    data = json_object(body)
     unknown = sorted(set(data) - {"profile_ids"})
     if unknown or "profile_ids" not in data:
         raise RequestError(HTTP_400, 'give {"profile_ids": [...]}: the whole list, by id or name ([] empties it)')

@@ -510,7 +510,8 @@ class AgentHTTPServer:
         elif (m := self._RE_PROJECT_ALLOWED_PROFILES.match(path)) and method == "GET":
             await self._answer(writer, HTTP_200, lambda: projects.allowed_profiles_view(m.group(1)))
         elif (m := self._RE_PROJECT_ALLOWED_PROFILES.match(path)) and method == "PUT":
-            await self._answer(writer, HTTP_200, lambda: projects.set_allowed_profiles(m.group(1), body))
+            await self._answer(writer, HTTP_200, lambda: projects.set_allowed_profiles(
+                m.group(1), projects.json_object(body)))
         elif (m := self._RE_PROJECT_ROLE_SETTINGS.match(path)) and method == "PUT":
             await self._handle_agent_settings(writer, lambda: self._write_layer(
                 body, lambda data: agent_settings.update_project(m.group(1), data, role=m.group(2))))
