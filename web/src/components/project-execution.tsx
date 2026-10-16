@@ -12,8 +12,15 @@ const FIELDS: (keyof ProjectExecution)[] = [
   "distill_lessons",
   "step_workspaces",
   "max_step_retries",
+  "planner_roles",
+  "role_text_max_chars",
 ];
-const NUMBERS = new Set<keyof ProjectExecution>(["task_budget_usd", "supervise_interval_seconds", "max_step_retries"]);
+const NUMBERS = new Set<keyof ProjectExecution>([
+  "task_budget_usd",
+  "supervise_interval_seconds",
+  "max_step_retries",
+  "role_text_max_chars",
+]);
 
 export function executionDraft(project: Project): ExecutionDraft {
   return Object.fromEntries(FIELDS.map((f) => [f, project[f] == null ? "" : String(project[f])])) as ExecutionDraft;
@@ -146,6 +153,39 @@ export function ProjectExecutionFields({
           <p id={`${idPrefix}-step_workspaces-help`} className="text-xs text-muted-foreground">
             In a git checkout on a branch, each such step works on a branch of its own. Accepted, it is merged into
             the task directory&apos;s branch with a merge commit, after its leftovers are committed.
+          </p>
+        </div>
+        <div className="space-y-1">
+          {label("planner_roles", "Planner roles")}
+          {/* Not set is off; there is no layer to inherit from. */}
+          <select
+            id={`${idPrefix}-planner_roles`}
+            value={draft.planner_roles || "off"}
+            onChange={set("planner_roles")}
+            aria-describedby={`${idPrefix}-planner_roles-help`}
+            className={SELECT}
+          >
+            <option value="off">Off</option>
+            <option value="on">On</option>
+          </select>
+          <p id={`${idPrefix}-planner_roles-help`} className="text-xs text-muted-foreground">
+            When on, the project&apos;s Planners may define roles for their steps: an Agent Profile from the
+            project&apos;s allowed list, a role prompt and a harness. A review role adds a review after the built-in
+            Reviewer and never replaces it.
+          </p>
+        </div>
+        <div className="space-y-1">
+          {label("role_text_max_chars", "Role text limit (characters)")}
+          <Input
+            id={`${idPrefix}-role_text_max_chars`}
+            inputMode="numeric"
+            value={draft.role_text_max_chars}
+            onChange={set("role_text_max_chars")}
+            aria-describedby={`${idPrefix}-role_text_max_chars-help`}
+            placeholder="8,000 (500–20,000)"
+          />
+          <p id={`${idPrefix}-role_text_max_chars-help`} className="text-xs text-muted-foreground">
+            The most characters a role&apos;s prompt and its harness may each have.
           </p>
         </div>
       </div>

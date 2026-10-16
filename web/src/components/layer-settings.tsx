@@ -67,6 +67,8 @@ interface Draft {
   env: EnvRow[];
   budget: string;
   concurrency: string;
+  /** The system layer's only. */
+  boundaries: string;
 }
 
 function draftOf(values: LayerValues): Draft {
@@ -76,6 +78,7 @@ function draftOf(values: LayerValues): Draft {
     env: values.env.map((e) => ({ key: e.key, value: e.value ?? "", unset: e.value === null })),
     budget: values.run_budget_usd == null ? "" : String(values.run_budget_usd),
     concurrency: values.max_concurrency == null ? "" : String(values.max_concurrency),
+    boundaries: values.boundaries ?? "",
   };
 }
 
@@ -97,6 +100,7 @@ function changesOf(draft: Draft, values: LayerValues): LayerUpdate {
   if (budget !== before.budget) changes.run_budget_usd = numberOrTyped(budget);
   const concurrency = draft.concurrency.trim();
   if (concurrency !== before.concurrency) changes.max_concurrency = numberOrTyped(concurrency);
+  if (draft.boundaries !== before.boundaries) changes.boundaries = draft.boundaries.trim() ? draft.boundaries : null;
   return changes;
 }
 
@@ -147,9 +151,9 @@ function NowValue<T>({
 /**
  * One settings layer's harness, Agent Profile (which brings its model and effort), environment and per-run cap; a
  * Planner's, Worker's or Reviewer's role layer (in Settings → Roles or in a project) also has the role's concurrency
- * limit per project. An empty field is not set here and inherits; with `effective`, each field also says what applies
- * now and where it comes from. `profileFirst` puts the Agent Profile above the other fields, which follow as "More
- * overrides".
+ * limit per project, and the system layer the boundaries of the roles a task's Planner defines. An empty field is not
+ * set here and inherits; with `effective`, each field also says what applies now and where it comes from.
+ * `profileFirst` puts the Agent Profile above the other fields, which follow as "More overrides".
  */
 export function LayerSettingsForm({
   idPrefix,
@@ -200,7 +204,10 @@ export function LayerSettingsForm({
   const dirty = Object.keys(changes).length > 0;
   useEffect(() => onDirtyChange?.(dirty), [dirty, onDirtyChange]);
   const envProblems = draft.env.map((entry) => envNameProblem(entry.key));
-  const invalid = draft.harness.length > limits.harness_max_chars || envProblems.some(Boolean);
+  const invalid =
+    draft.harness.length > limits.harness_max_chars ||
+    draft.boundaries.length > limits.harness_max_chars ||
+    envProblems.some(Boolean);
 
   const save = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -298,6 +305,29 @@ export function LayerSettingsForm({
           </button>
         )}
       </div>
+
+      {isSystem && (
+        <div className="space-y-1">
+          <HarnessField
+            id={`${idPrefix}-boundaries`}
+            label="Boundaries for Planner-defined roles"
+            value={draft.boundaries}
+            onChange={(boundaries) => set({ boundaries })}
+            inherits="the built-in boundaries"
+            rows={draft.boundaries.trim() ? 8 : 3}
+            hint="Every run of a role a task's Planner defines ends with these; the built-in roles' harness carries its own."
+          />
+          {!draft.boundaries.trim() && (
+            <button
+              type="button"
+              onClick={() => set({ boundaries: limits.builtin_boundaries })}
+              className="text-[11px] text-primary underline-offset-2 hover:underline focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+            >
+              Start from the built-in text
+            </button>
+          )}
+        </div>
+      )}
 
       <div className="grid gap-4 sm:grid-cols-2">
         {!profileFirst && profileField}

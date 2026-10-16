@@ -91,6 +91,10 @@ export interface ProjectExecution {
   step_workspaces: "shared" | "worktree" | null;
   /** How many times the Planner may retry one step, 0 to 20; null = 2. */
   max_step_retries: number | null;
+  /** Whether the project's Planners may define the roles their steps run as; null = "off". */
+  planner_roles: "off" | "on" | null;
+  /** How long such a role's prompt and its harness may each be, 500 to 20,000 characters; null = 8,000. */
+  role_text_max_chars: number | null;
 }
 
 /** A group of tasks with an optional default work directory and background. */
@@ -1352,6 +1356,50 @@ export interface TaskDetail extends TaskInfo {
   manager_actions?: ManagerAction[];
   /** Each task role's Agent Profile and concurrency, with where each comes from; null when it cannot be read. */
   agents: TaskAgents | null;
+  /** The roles the task's Planner defined for its steps, in the order it first defined them. */
+  roles: PlannerRole[];
+  /** The built-in Worker's and Reviewer's numbers in the task, beside the roles'. */
+  builtin_role_stats: { worker: RoleStats; reviewer: RoleStats };
+}
+
+/** One role's numbers in a task: its runs, the live steps it ran (a review role: reviewed), and the reviews of its
+ * work (a review role's: its own). A rate is null before there is anything to count. */
+export interface RoleStats {
+  runs: number;
+  running: number;
+  cost_usd: number;
+  /** Finished runs whose reply broke the reply contract, and their share of the finished runs. */
+  contract_violations: number;
+  contract_violation_rate: number | null;
+  steps: number;
+  accepted: number;
+  failed: number;
+  retries: number;
+  reviews: { passed: number; not_passed: number };
+  review_pass_rate: number | null;
+}
+
+/** A role a task's Planner defined: "work" runs a step in the built-in Worker's place; "review" reviews a step
+ * after the built-in Reviewer passed it, and both must pass. */
+export interface PlannerRole {
+  /** Unique in the task. */
+  id: string;
+  kind: "work" | "review";
+  /** Its current version; each new definition is one more. */
+  version: number;
+  /** null: the profile the step's built-in role of its kind would get. One the project no longer allows
+   * (allowed false) counts as none. */
+  profile: { profile_id: string; name: string; allowed: boolean } | null;
+  role_prompt: string;
+  /** null: the working-style part of the harness that applies. */
+  harness: string | null;
+  reason: string;
+  created_at: string;
+  /** Every version, oldest first. */
+  versions: { version: number; created_at: string; reason: string; sha256: string }[];
+  /** The labels of the live steps that name it. */
+  steps: string[];
+  stats: RoleStats;
 }
 
 /** What a task journal entry records; code writes each when its event happens. */
@@ -1365,7 +1413,8 @@ export type JournalKind =
   | "handoff"
   | "progress"
   | "profile_choice"
-  | "concurrency_change";
+  | "concurrency_change"
+  | "role_defined";
 
 /** Where a task stood, as its Planner said with a decision or a periodic check. */
 export interface ProgressNote {
@@ -1406,6 +1455,15 @@ export interface TaskStep {
   status: string;
   /** Whether a Reviewer must pass it. */
   review: boolean;
+  /** The role its Worker runs as; null: the built-in Worker. */
+  role_key: string | null;
+  /** The role that reviews it after the built-in Reviewer passed it; null: none. */
+  review_role_key: string | null;
+  /** The versions of those roles its latest attempt ran with; null before it ran as one. */
+  role_version: number | null;
+  review_role_version: number | null;
+  /** Which review a step in review waits for: the built-in Reviewer's or its review role's. */
+  review_stage: "builtin" | "role" | null;
   retries: number;
   worker_id: string | null;
   reviewer_id: string | null;
@@ -2056,6 +2114,9 @@ export interface LayerValues {
   /** How many of the role run at once in one project (the Planner: its tasks); only a Planner, Worker or Reviewer
    * role layer, or that role's layer in a project, sets it. */
   max_concurrency: number | null;
+  /** What every run of a role a task's Planner defines ends with; only the system layer sets it (null: the
+   * built-in boundaries). */
+  boundaries: string | null;
 }
 
 export interface Sourced<T> {
@@ -2093,6 +2154,8 @@ export interface SettingLimits {
   harness_max_chars: number;
   env_max_entries: number;
   builtin_harness_prompt: string;
+  /** The boundaries a run of a role a task's Planner defines ends with when the shared defaults set none. */
+  builtin_boundaries: string;
   builtin_model: string;
   /** The Agent Profile every role runs with when no layer selects one. */
   builtin_profile: { profile_id: string; name: string };
@@ -2108,7 +2171,8 @@ export interface LayerState {
 /** Settings (the system layer) and each role's layer, with what applies to each role outside any project. */
 export interface AgentSettings {
   limits: SettingLimits;
-  system: LayerState;
+  /** `boundaries`: what the runs of roles a task's Planner defines end with, and where it comes from. */
+  system: LayerState & { boundaries: { value: string; source: "builtin" | "system" } };
   roles: Record<AgentRole, LayerState>;
 }
 

@@ -2,6 +2,7 @@ import { type CSSProperties, useCallback, useEffect, useMemo, useRef, useState }
 import {
   ArrowLeft,
   CheckCircle2,
+  ChevronDown,
   Clock,
   AlertCircle,
   Loader2,
@@ -62,6 +63,8 @@ import {
   type Supplement,
   type ManagerAction,
   type TaskStep,
+  type PlannerRole,
+  type RoleStats,
   type JournalEntry,
   type ProgressNote,
   type ActivityEvent,
@@ -665,6 +668,8 @@ function OverviewTab({
         <TaskAgentsSection taskId={task.task_id} projectId={task.project_id} agents={task.agents} onSaved={onAgents} />
       )}
 
+      <TaskRoles task={task} />
+
       {steps.length > 0 && (
         <div>
           <h3 className="text-sm font-semibold mb-2">Steps</h3>
@@ -674,7 +679,7 @@ function OverviewTab({
                 <div className="flex items-start gap-3">
                   {stepStatusIcon(step.status)}
                   <div className="min-w-0 flex-1">
-                    <div className="flex items-center gap-2">
+                    <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
                       <span className="text-xs text-muted-foreground">#{step.step_index + 1}</span>
                       {stepStatusBadge(step.status)}
                       {step.worker_id && (
@@ -685,6 +690,13 @@ function OverviewTab({
                         >
                           {step.worker_id}
                         </a>
+                      )}
+                      {stepRoles(step) && <span className="font-mono text-xs text-muted-foreground">{stepRoles(step)}</span>}
+                      {step.status === "completed" && step.review_stage && (
+                        <span className="text-xs text-muted-foreground">
+                          Waiting for{" "}
+                          {step.review_stage === "role" ? `review: ${step.review_role_key}` : "the built-in review"}
+                        </span>
                       )}
                     </div>
                     <p className="mt-1 text-sm">{step.instruction}</p>
@@ -835,6 +847,142 @@ function LessonsDraftNote({ taskId, projectId }: { taskId: string; projectId: st
   );
 }
 
+// --- Roles: the roles the task's Planner defined for its steps ---
+
+/** The roles a step runs and is reviewed as, e.g. "as tester v2 + review: security"; "" for the built-in ones. */
+function stepRoles(step: TaskStep, versions = true) {
+  const version = (v: number | null) => (versions && v != null ? ` v${v}` : "");
+  return [
+    step.role_key && `as ${step.role_key}${version(step.role_version)}`,
+    step.review_role_key && `+ review: ${step.review_role_key}${version(step.review_role_version)}`,
+  ].filter(Boolean).join(" ");
+}
+
+const percent = (rate: number | null) => (rate == null ? "—" : `${Math.round(rate * 100)}%`);
+
+/** A role's numbers on one wrapping line, the same for the built-in Worker and Reviewer, so they compare. */
+function RoleStatsLine({ stats }: { stats: RoleStats }) {
+  const reviews = stats.reviews.passed + stats.reviews.not_passed;
+  const items: [string, string][] = [
+    ["Runs", stats.running ? `${stats.runs} (${stats.running} running)` : String(stats.runs)],
+    ["Cost", formatUsd(stats.cost_usd)],
+    ["Steps", `${stats.accepted}/${stats.steps} accepted, ${stats.failed} failed`],
+    ["Retries", String(stats.retries)],
+    ["Contract violations", String(stats.contract_violations)],
+    ["Review pass rate", reviews ? `${percent(stats.review_pass_rate)} of ${reviews}` : "—"],
+  ];
+  return (
+    <span className="flex flex-wrap gap-x-4 gap-y-0.5 text-xs">
+      {items.map(([label, value]) => (
+        <span key={label}>
+          <span className="text-muted-foreground">{label}</span> <span className="font-mono tabular-nums">{value}</span>
+        </span>
+      ))}
+    </span>
+  );
+}
+
+const ROLE_TEXT = "mt-1 max-h-64 overflow-y-auto whitespace-pre-wrap break-words rounded-md bg-muted px-3 py-2 font-mono text-xs";
+
+/** A role's line (kind, version, profile, the steps that name it, its numbers), opening on its prompt, harness and
+ * versions. */
+function RoleRow({ role }: { role: PlannerRole }) {
+  const builtin = role.kind === "work" ? "Worker" : "Reviewer";
+  return (
+    <li>
+      <details className="group">
+        <summary className="flex min-h-11 cursor-pointer list-none items-start gap-2 px-4 py-3 hover:bg-accent/50 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring [&::-webkit-details-marker]:hidden">
+          <ChevronDown
+            aria-hidden="true"
+            className="mt-0.5 h-4 w-4 shrink-0 -rotate-90 text-muted-foreground transition-transform duration-150 group-open:rotate-0 motion-reduce:transition-none"
+          />
+          <span className="min-w-0 flex-1 space-y-1">
+            <span className="flex flex-wrap items-center gap-x-2 gap-y-1">
+              <span className="break-all font-mono text-sm font-semibold">{role.id}</span>
+              <Badge variant="outline">{role.kind === "work" ? "Work" : "Review"}</Badge>
+              <span className="font-mono text-xs text-muted-foreground">v{role.version}</span>
+              <span className="text-xs">
+                <span className="text-muted-foreground">Profile</span>{" "}
+                {role.profile ? role.profile.name : `as the built-in ${builtin}`}
+              </span>
+              {role.profile && !role.profile.allowed && (
+                <Badge variant="warning" title={`The project no longer allows this profile: it runs as the built-in ${builtin}'s`}>
+                  not allowed now
+                </Badge>
+              )}
+            </span>
+            <span className="block text-xs">
+              <span className="text-muted-foreground">Steps</span>{" "}
+              {role.steps.length ? <span className="font-mono">{role.steps.join(", ")}</span> : "none yet"}
+            </span>
+            <RoleStatsLine stats={role.stats} />
+          </span>
+        </summary>
+        <div className="space-y-3 border-t border-border py-3 pl-10 pr-4 text-xs">
+          <div>
+            <p className="font-medium text-muted-foreground">Role prompt</p>
+            <pre className={ROLE_TEXT}>{role.role_prompt}</pre>
+          </div>
+          <div>
+            <p className="font-medium text-muted-foreground">Harness</p>
+            {role.harness ? (
+              <pre className={ROLE_TEXT}>{role.harness}</pre>
+            ) : (
+              <p className="mt-1">None of its own: the working style that applies.</p>
+            )}
+          </div>
+          <div>
+            <p className="font-medium text-muted-foreground">Versions and reasons</p>
+            <ol className="mt-1 space-y-1">
+              {[...role.versions].reverse().map((v) => (
+                <li key={v.version} className="whitespace-pre-wrap break-words">
+                  <span className="font-mono">v{v.version}</span>
+                  <span className="text-muted-foreground"> · {formatTime(v.created_at)}</span>
+                  {v.reason && ` · ${v.reason}`}
+                </li>
+              ))}
+            </ol>
+          </div>
+        </div>
+      </details>
+    </li>
+  );
+}
+
+/** The roles the task's Planner defined, then the built-in Worker's and Reviewer's numbers to compare them with;
+ * nothing while it defined none. */
+function TaskRoles({ task }: { task: TaskDetail }) {
+  if (!task.roles?.length) return null;
+  const builtin = task.builtin_role_stats;
+  const builtinRows: [string, string, RoleStats][] = builtin
+    ? [
+        ["Built-in Worker", "the steps no work role runs", builtin.worker],
+        ["Built-in Reviewer", "every reviewed step", builtin.reviewer],
+      ]
+    : [];
+  return (
+    <section aria-labelledby="task-roles-title">
+      <h3 id="task-roles-title" className="mb-2 text-sm font-semibold">
+        Roles
+      </h3>
+      <ul className="divide-y divide-border rounded-lg border border-border bg-card">
+        {task.roles.map((role) => (
+          <RoleRow key={role.id} role={role} />
+        ))}
+        {builtinRows.map(([name, detail, stats]) => (
+          <li key={name} className="space-y-1 py-3 pl-10 pr-4">
+            <p className="text-xs">
+              <span className="text-sm font-semibold">{name}</span>
+              <span className="text-muted-foreground"> · for comparison: {detail}</span>
+            </p>
+            <RoleStatsLine stats={stats} />
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
+}
+
 // --- Findings: the task journal ---
 
 type BadgeVariant = "default" | "success" | "warning" | "destructive" | "outline";
@@ -850,11 +998,12 @@ const JOURNAL_KINDS: Record<JournalEntry["kind"], { label: string; variant: Badg
   progress: { label: "Progress", variant: "outline" },
   profile_choice: { label: "Profile choice", variant: "outline" },
   concurrency_change: { label: "Concurrency", variant: "outline" },
+  role_defined: { label: "Role", variant: "outline" },
 };
 
 /** The task journal, newest first: steps accepted, failed or retried with what their Worker and Reviewer
- * learned, the Planner's decisions and its choices of profile and concurrency, the supplements, and new Planner
- * sessions with their handoffs. */
+ * learned, the Planner's decisions, its choices of profile and concurrency and the roles it defines, the
+ * supplements, and new Planner sessions with their handoffs. */
 function TaskFindings({ entries: all }: { entries: JournalEntry[] }) {
   // The progress notes have a section of their own (TaskProgress).
   const entries = all.filter((entry) => entry.kind !== "progress");
@@ -1320,10 +1469,24 @@ function nodeStyle(look: NodeLook) {
   };
 }
 
-function NodeLabel({ title, name, look, note }: { title: string; name: string; look: NodeLook; note?: string }) {
+function NodeLabel({
+  title,
+  name,
+  look,
+  note,
+  role,
+}: {
+  title: string;
+  name: string;
+  look: NodeLook;
+  note?: string;
+  /** The roles a step runs and is reviewed as. */
+  role?: string;
+}) {
   return (
     <div title={title} className="flex h-full w-full flex-col items-center justify-center overflow-hidden px-2 leading-tight">
       <span className={cn("max-w-full truncate font-mono text-xs font-semibold", look.muted && "line-through")}>{name}</span>
+      {role && <span className="mt-0.5 max-w-full truncate font-mono text-[10px]">{role}</span>}
       <span className="mt-1 max-w-full truncate text-[10px]">{look.label}{note ? ` · ${note}` : ""}</span>
     </div>
   );
@@ -1397,12 +1560,16 @@ function PipelineTab({ task }: { task: TaskDetail }) {
         step.reviewer_id ? `Reviewer: ${step.reviewer_id}` : "",
         step.retries ? `Retries: ${step.retries}` : "",
         step.review ? "Needs a passing review" : "",
+        stepRoles(step),
+        step.status === "completed" && step.review_stage
+          ? `Waiting for ${step.review_stage === "role" ? `review: ${step.review_role_key}` : "the built-in review"}`
+          : "",
         step.status === "skipped" ? `Skipped: ${why.get(step.id) || "dropped from the plan by a replan"}` : "",
       ].filter(Boolean).join("\n");
       ns.push({
         id: step.id,
         position: { x: (x.get(step.id) ?? 0) - NODE_W / 2, y: ROW_H * (1 + (levels.get(step.id) ?? 0)) },
-        data: { label: <NodeLabel title={title} name={name} look={look}
+        data: { label: <NodeLabel title={title} name={name} look={look} role={stepRoles(step, false) || undefined}
                                   note={step.retries ? `retry ${step.retries}` : undefined} /> },
         style: nodeStyle(look), sourcePosition: Position.Bottom, targetPosition: Position.Top,
       });
