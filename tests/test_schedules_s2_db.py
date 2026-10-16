@@ -869,7 +869,7 @@ def test_a_parallel_schedule_is_validated_and_warned_about_past_its_projects_pla
     ({"gate_timeout_seconds": 601}, "gate_timeout_seconds must be"),
     ({"gate_command": "x" * 2001}, "at most 2000 characters"),
     ({"daily_budget_usd": 0}, "daily_budget_usd must be"),
-    ({"notify": "sometimes"}, "notify must be one of failures, always, never"),
+    ({"notify": "sometimes"}, "notify must be one of failures, alerts, always, never"),
     ({"notify_target": {"channel": "telegram", "chat": "999"}}, "is not one the channel allows"),
     ({"notify_target": "telegram"}, "notify_target must be"),
 ])
