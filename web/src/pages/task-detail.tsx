@@ -19,6 +19,7 @@ import {
   FolderOpen,
   Folder,
   History,
+  RotateCcw,
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { ClampedText } from "@/components/clamped-text";
@@ -1527,6 +1528,8 @@ export function TaskDetailPage({ taskId, onBack }: TaskDetailPageProps) {
   const [task, setTask] = useState<TaskDetail | null>(null);
   const [error, setError] = useState("");
   const [startError, setStartError] = useState("");
+  /** Start over waits for its confirmation: it deletes the task's steps and plan. */
+  const [confirmStartOver, setConfirmStartOver] = useState(false);
   const [tab, setTab] = useState<Tab>("overview");
   // Bumped when the task runs again, so the page polls it again.
   const [runs, setRuns] = useState(0);
@@ -1549,6 +1552,13 @@ export function TaskDetailPage({ taskId, onBack }: TaskDetailPageProps) {
     timer = setInterval(load, 2000);
     return () => { stopped = true; clearInterval(timer); };
   }, [taskId, runs]);
+
+  // A ready task is started; a stopped, failed or cancelled one goes on from its saved plan, or is planned anew.
+  const start = (startOver: boolean) =>
+    (task?.status === READY_STATUS ? startReadyTask(taskId) : startTask(taskId, { startOver })).then(
+      () => { setStartError(""); setConfirmStartOver(false); setRuns((n) => n + 1); },
+      (err) => setStartError(err instanceof Error ? err.message : String(err)),
+    );
 
   const tabs: { id: Tab; label: string; icon: React.ElementType }[] = [
     { id: "overview", label: "Overview", icon: Activity },
@@ -1609,15 +1619,50 @@ export function TaskDetailPage({ taskId, onBack }: TaskDetailPageProps) {
               Stop
             </button>
           )}
-          {task && ["stopped", "failed", "cancelled", "init"].includes(task.status) && (
-            <button
-              type="button"
-              onClick={() => (task.status === READY_STATUS ? startReadyTask : startTask)(taskId).then(() => { setStartError(""); setRuns((n) => n + 1); }, (err) => setStartError(err instanceof Error ? err.message : String(err)))}
-              className="flex items-center gap-1.5 rounded-md border border-success/50 px-3 py-1.5 text-xs font-medium text-success hover:bg-success/10 transition-colors"
-            >
-              <Play className="h-3.5 w-3.5" />
-              Start
-            </button>
+          {task && confirmStartOver && (
+            <div className="flex shrink-0 items-center gap-1.5">
+              <span className="text-xs text-muted-foreground">Delete its steps?</span>
+              <button
+                type="button"
+                onClick={() => start(true)}
+                title="Delete the task's steps, plan and Planner session, then plan it anew from its requirement"
+                className="rounded-md px-3 py-1.5 text-xs font-medium bg-destructive text-destructive-foreground hover:bg-destructive/90 transition-colors"
+              >
+                Start over
+              </button>
+              <button
+                type="button"
+                onClick={() => setConfirmStartOver(false)}
+                className="rounded-md px-2 py-1.5 text-xs text-muted-foreground hover:text-foreground transition-colors"
+              >
+                No
+              </button>
+            </div>
+          )}
+          {task && !confirmStartOver && ["stopped", "failed", "cancelled", "init"].includes(task.status) && (
+            <>
+              <button
+                type="button"
+                onClick={() => start(false)}
+                title={task.status === READY_STATUS ? undefined : "Continue from the saved plan: accepted steps are kept"}
+                className="flex items-center gap-1.5 rounded-md border border-success/50 px-3 py-1.5 text-xs font-medium text-success hover:bg-success/10 transition-colors"
+              >
+                <Play className="h-3.5 w-3.5" />
+                Start
+              </button>
+              {task.status !== READY_STATUS && (
+                <button
+                  type="button"
+                  onClick={() => setConfirmStartOver(true)}
+                  aria-label="Start over"
+                  title="Start over: delete its steps and plan it anew"
+                  className="flex items-center gap-1.5 rounded-md border border-border px-3 py-1.5 text-xs font-medium text-muted-foreground hover:bg-accent hover:text-foreground transition-colors"
+                >
+                  <RotateCcw className="h-3.5 w-3.5" />
+                  <span className="hidden sm:inline">Start over</span>
+                </button>
+              )}
+            </>
           )}
         </div>
         {startError && <p className="mt-1 text-xs text-destructive">{startError}</p>}
