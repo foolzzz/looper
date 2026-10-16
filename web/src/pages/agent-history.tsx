@@ -227,6 +227,8 @@ const SETTING_SOURCES: Record<string, string> = {
   project: "project",
   role_project: "role in project",
   task: "task override",
+  planner_task: "Planner's choice for the rest of the task",
+  planner_step: "Planner's choice for this step",
   builtin_default: "built-in default",
   system_default: "Settings default",
   manager_override: "Manager override",
