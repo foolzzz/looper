@@ -16,7 +16,8 @@ task section (the step, with the task it belongs to) and the code-owned
 report contract, last (``system_prompt``). The first user turn on stdin
 carries only what other agents produced: the reports of the steps this one
 depends on, or the Worker's report under review. Each run reads its row, the
-Settings defaults (model, effort, environment), its project's knowledge (the
+Settings defaults (model, effort, environment), the Agent Profile its task or
+its task's Planner chose for it (for its step, or the rest of the task), its project's knowledge (the
 documents' directories are mounted with ``--add-dir``), the catalog items
 installed for its role, globally or in its project (each plugin and generated
 skill plugin a ``--plugin-dir``) and its project's execution settings
@@ -614,8 +615,10 @@ class WorkerPool:
         knowledge = await load_knowledge(self._runtime_root, project, work_dir)
         project_id = str((project or {}).get("id") or "") or None
         library = await load_installed(self._runtime_root, agent.value, project_id)
-        # The task's own choice of Agent Profile for this role wins over the layers.
-        agent_settings = await load_agent_settings(agent, project_id, parent_task_id or None)
+        # The task's own choice of Agent Profile for this role wins over the layers, then its Planner's for this step,
+        # then its Planner's for the rest of the task.
+        agent_settings = await load_agent_settings(agent, project_id, parent_task_id or None,
+                                                   step_id=payload.get("task_id") or None)
         if agent_settings.profile_error:
             # The step fails with the reason rather than run another agent.
             logger.error("worker %s: %s", worker_id, agent_settings.profile_error)

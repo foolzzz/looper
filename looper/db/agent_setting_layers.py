@@ -6,8 +6,10 @@ or ``role_project`` (with both). A NULL field is not set at its layer;
 ``profile_id`` is the Agent Profile its roles run (its model and effort with it); ``max_concurrency`` (a task
 role's role or role-in-a-project layer only) how many of the role run at once in one project. A task may choose
 the profile of some of its roles (``task_profile_overrides``) and how many of its Workers or Reviewers run at once
-(``task_concurrency_limits``): together, its task layer. Code owns the fields' types, validation and resolution
-(``looper.agents.agent_settings``); this module only stores rows.
+(``task_concurrency_limits``): together, its task layer. Its Planner may choose the profile of its Workers or
+Reviewers, for the rest of the task or for one step (``task_planner_profiles``), under the task layer; a choice
+counts only while its profile is on the list of the task's project (``project_allowed_profiles``). Code owns the
+fields' types, validation and resolution (``looper.agents.agent_settings``); this module only stores rows.
 """
 
 from __future__ import annotations
@@ -23,6 +25,12 @@ from .connection import get_pool
 
 FIELDS = ("harness_prompt", "profile_id", "env", "run_budget_usd", "max_concurrency")
 
+# A task's Planner's choices that count: those whose profile its project allows now.
+_PLANNER_CHOICES = (
+    "FROM task_planner_profiles c JOIN tasks k ON k.id = c.task_id "
+    "JOIN project_allowed_profiles l ON l.project_id = k.project_id AND l.profile_id = c.profile_id "
+)
+
 
 def _row(row: asyncpg.Record) -> dict[str, Any]:
     data = dict(row)
@@ -33,11 +41,14 @@ def _row(row: asyncpg.Record) -> dict[str, Any]:
 
 
 async def list_layers(
-    project_id: str | None = None, *, task_id: str | None = None, pool: asyncpg.Pool | None = None,
+    project_id: str | None = None, *, task_id: str | None = None, step_id: str | None = None,
+    pool: asyncpg.Pool | None = None,
 ) -> list[dict[str, Any]]:
     """Every row outside projects (system and role layers), and ``project_id``'s rows when given, each with its
     ``profile`` (``profile_registry.PROFILE_JSON``, or None); with ``task_id``, also a ``task`` row per role the task
-    chose a profile or a concurrency limit for."""
+    chose a profile or a concurrency limit for, and a ``planner_task`` row per role its Planner chose a profile for
+    the rest of the task (one its project allows); with ``step_id`` too, a ``planner_step`` row per role its
+    Planner chose one for that step."""
     pool = pool or get_pool()
     rows = await pool.fetch(
         f"SELECT l.scope, l.role, l.project_id, l.harness_prompt, l.profile_id, l.env, l.run_budget_usd, "
@@ -55,6 +66,13 @@ async def list_layers(
             "FULL JOIN (SELECT * FROM task_concurrency_limits WHERE task_id = $1) c ON c.role = t.role", task_id,
         )
         layers += [{"scope": "task", "task_id": task_id, **_row(r)} for r in overrides]
+        chosen = await pool.fetch(
+            f"SELECT CASE WHEN c.step_id IS NULL THEN 'planner_task' ELSE 'planner_step' END AS scope, c.role, "
+            f"c.profile_id, (SELECT {PROFILE_JSON} FROM {PROFILE_JOIN} WHERE a.id = c.profile_id) AS profile "
+            f"{_PLANNER_CHOICES} WHERE c.task_id = $1 AND (c.step_id IS NULL OR c.step_id = $2)",
+            task_id, step_id,
+        )
+        layers += [{"task_id": task_id, **_row(r)} for r in chosen]
     return layers
 
 
@@ -148,11 +166,42 @@ async def profile_overrides(task_id: str, *, pool: asyncpg.Pool | None = None) -
 
 async def selected_roles(profile_id: str, *, pool: asyncpg.Pool | None = None) -> list[tuple[str, str | None]]:
     """Where Agent Profile ``profile_id`` is selected: (scope, role) of each layer, ('task', role) of each task's
-    choice and ('schedule', role) of each schedule's."""
+    or task's Planner's choice and ('schedule', role) of each schedule's."""
     pool = pool or get_pool()
     rows = await pool.fetch(
         "SELECT scope, role FROM agent_setting_layers WHERE profile_id = $1 "
         "UNION SELECT 'task', role FROM task_profile_overrides WHERE profile_id = $1 "
+        "UNION SELECT 'task', role FROM task_planner_profiles WHERE profile_id = $1 "
         "UNION SELECT 'schedule', role FROM schedule_profile_overrides WHERE profile_id = $1", profile_id,
     )
     return [(r["scope"], r["role"]) for r in rows]
+
+
+async def planner_profiles(task_id: str, *, pool: asyncpg.Pool | None = None) -> list[dict[str, Any]]:
+    """The Agent Profiles task ``task_id``'s Planner chose that its project allows, each ``{role, step_id,
+    step_key, profile}`` (``step_id`` None for the rest of the task), the rest of the task first, then by step."""
+    pool = pool or get_pool()
+    rows = await pool.fetch(
+        f"SELECT c.role, c.step_id, COALESCE(s.step_key, '') AS step_key, "
+        f"(SELECT {PROFILE_JSON} FROM {PROFILE_JOIN} WHERE a.id = c.profile_id) AS profile "
+        f"{_PLANNER_CHOICES} LEFT JOIN task_steps s ON s.id = c.step_id WHERE c.task_id = $1 "
+        "ORDER BY c.step_id IS NOT NULL, s.step_index, c.role", task_id,
+    )
+    return [_row(r) for r in rows]
+
+
+async def set_planner_profile(task_id: str, role: str, step_id: str | None, profile_id: str | None,
+                              entry: Mapping[str, Any], *, pool: asyncpg.Pool | None = None) -> None:
+    """Give task ``task_id``'s ``role`` the Agent Profile its Planner chose, for one step or (``step_id`` None) the
+    rest of the task; ``profile_id`` None drops that choice. The journal ``entry`` (``journal.insert``) is added in
+    the same transaction. Raises ``asyncpg.ForeignKeyViolationError`` for an unknown task, step or profile."""
+    from . import journal
+
+    pool = pool or get_pool()
+    async with pool.acquire() as conn, conn.transaction():
+        await conn.execute("DELETE FROM task_planner_profiles WHERE task_id = $1 AND role = $2 "
+                           "AND step_id IS NOT DISTINCT FROM $3", task_id, role, step_id)
+        if profile_id is not None:
+            await conn.execute("INSERT INTO task_planner_profiles (task_id, role, step_id, profile_id) "
+                               "VALUES ($1, $2, $3, $4)", task_id, role, step_id, profile_id)
+        await journal.insert(conn, task_id, [entry])

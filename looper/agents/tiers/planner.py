@@ -54,6 +54,14 @@ invalid reply gets one repair turn. Planning that
 still fails fails the task; a decision that still fails falls back to the
 step's own verdict. When the task completes or fails, the Planner signals the
 TaskRouter, which tears it down and ends its Claude.
+
+Under ``looper serve`` the Planner also has platform tools of its own
+(``ops.planner``): Looper's MCP server, with a token for this task that it
+gets when it starts and that stops working when it stops. With them it
+chooses its Workers' and Reviewers' Agent Profiles from its project's list
+and changes its task's or its project's concurrency; they change things only
+in a turn Looper sends it, and its system prompt says how to use them after
+the reply contract.
 """
 
 from __future__ import annotations
@@ -489,10 +497,14 @@ class _NoWorkspace(Exception):
 class PlannerAgent:
     """Per-task Planner: one instance and one resident Claude per task."""
 
-    def __init__(self, *, task_id: str, runtime_root: Path, claude_bin: str = "claude") -> None:
+    def __init__(self, *, task_id: str, runtime_root: Path, claude_bin: str = "claude", ops: Any = None) -> None:
         self._task_id = task_id
         self._runtime_root = runtime_root
         self._claude_bin = claude_bin
+        # The Planner's own platform tools (``ops.planner.PlannerOps``), and the token they know it by while it runs;
+        # without them it has none.
+        self._ops = ops
+        self._token: str | None = None
         self._bus: MessageBus | None = None
         self._plan: TaskPlan | None = None
         self._loop_task: asyncio.Task[Any] | None = None
@@ -538,6 +550,8 @@ class PlannerAgent:
         self._bus = bus
         self._replies: dict[int, str] = {}  # a supplement's journal id → the reply of the turn that delivered it
         self._running = True
+        if self._ops is not None:
+            self._token = self._ops.issue(self._task_id)  # the task's earlier Planner's stops working
         await self._load_plan()
         self._loop_task = asyncio.create_task(self._message_loop())
         self._supervise_task = asyncio.create_task(self._supervise_loop())
@@ -546,6 +560,8 @@ class PlannerAgent:
     async def stop(self) -> None:
         """Stop handling messages and end the Planner's Claude."""
         self._running = False
+        if self._ops is not None and self._token is not None:
+            self._ops.revoke(self._token)
         supervise_task, self._supervise_task = self._supervise_task, None
         if supervise_task:
             supervise_task.cancel()
@@ -1823,6 +1839,8 @@ class PlannerAgent:
         settings = await load_settings()
         knowledge = await self._load_knowledge(plan)
         library = await self._load_installed(plan)
+        if self._ops is not None and self._token is not None:
+            library = await self._ops.library_with_server(library, self._runtime_root, self._token)
         agent_settings = await self._load_agent_settings(plan)
         if agent_settings.profile_error:
             # The task fails with the reason rather than run another agent.
@@ -1930,6 +1948,8 @@ class PlannerAgent:
                 # The new session has its resume brief.
                 self._pending_switch = self._pending_handoff = None
 
+        if self._ops is not None and self._token is not None:
+            self._ops.begin_turn(self._token)  # its tools may change things in this turn only
         try:
             turn = await asyncio.wait_for(self._claude.run_turn(text, on_event, stop=lambda: recorder.cap_stop),
                                           limit if limit > 0 else None)
@@ -1946,6 +1966,9 @@ class PlannerAgent:
             await recorder.finish(output_text=None, result_event=None,
                                   error=f"Planner stopped reading Claude: {type(exc).__name__}")
             raise
+        finally:
+            if self._ops is not None and self._token is not None:
+                self._ops.end_turn(self._token)
 
         if resuming and not turn.session_started:
             error = f"session {resuming} could not be resumed{exit_note(turn.exit_code)}; retried in a new session"
@@ -2107,7 +2130,8 @@ class PlannerAgent:
                 project_description=_clip(plan.project_description, 300), work_dir=plan.work_dir,
             ),
             contract_name="REPLY_CONTRACT",
-            contract=reply_contract(self._execution.step_retries),
+            # With its platform tools, how to use them follows the reply contract.
+            contract=reply_contract(self._execution.step_retries) + (f"\n{self._ops.guide}" if self._ops else ""),
             knowledge=knowledge,
         )
 

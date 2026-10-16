@@ -124,6 +124,8 @@ class TaskRouter:
         # both take a project's last place.
         self._admitting = asyncio.Lock()
         self._broadcaster = broadcaster
+        # Each Planner's own platform tools (``ops.planner.PlannerOps``; set by ``looper serve``); None: it has none.
+        self.planner_ops: Any = None
 
     @property
     def agent_id(self) -> str:
@@ -351,7 +353,8 @@ class TaskRouter:
     async def _assign_task(self, task: Task, envelope: MessageEnvelope) -> None:
         assert self._bus is not None
         task.status = "assigned"
-        planner = PlannerAgent(task_id=task.task_id, runtime_root=self._runtime_root, claude_bin=self._claude_bin)
+        planner = PlannerAgent(task_id=task.task_id, runtime_root=self._runtime_root, claude_bin=self._claude_bin,
+                               ops=self.planner_ops)
         task.planner_id = planner.agent_id
         self._planners[task.task_id] = planner
         # What an earlier Planner of the task left unread is not for this one: the cancel of a stop that came

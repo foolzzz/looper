@@ -6,7 +6,9 @@ Settings tab writes them (``agent_settings.update_project``): the user
 confirms them first (``high``). A task's are its own, set as the task page
 sets them (``projects.set_task_agents``) and bounded by its project's,
 so they take effect at once (``write``). Either way a raised limit starts
-what waits at once, and a lowered one stops nothing that runs.
+what waits at once, and a lowered one stops nothing that runs. A task's
+Planner changes its task's and its project's limits through the same code
+(``set_project_limits``, ``set_task_limits``), at once (``ops.planner``).
 """
 
 from __future__ import annotations
@@ -30,7 +32,8 @@ NOTE = ("Lowering a limit stops nothing that runs: what is over it finishes, and
         "raised limit starts what waits at once.")
 
 
-def _limits(call: Call) -> dict[AgentType, int | None]:
+def limits_argument(call: Any) -> dict[AgentType, int | None]:
+    """The ``limits`` a call of the Manager's or the Planner's tool asks for, by role; refuses none."""
     limits = call.arguments["limits"]
     if not limits:
         raise OpError(ErrorCode.INVALID, "limits: give at least one role's limit, or null to clear it")
@@ -68,48 +71,57 @@ async def _project_changes(project: Mapping[str, Any], limits: Mapping[AgentType
     return changes
 
 
-def _shown(limit: Mapping[str, Any]) -> str:
+def shown(limit: Mapping[str, Any]) -> str:
+    """A limit as the user is shown it: its value, and where it comes from."""
     return f"{limit['value']}（{SOURCE_WORDS[Layer(limit['source'])]}）"
 
 
 async def _confirming(call: Call) -> str | None:
     """What changing a project's limits does, for the user to confirm; None for a task's (``write``)."""
-    limits = _limits(call)
+    limits = limits_argument(call)
     project = await _project(call)
     if project is None:
         return None
     lines = [f"要修改项目「{project['name']}」的并发上限吗？"]
     for change in await _project_changes(project, limits):
         role = AgentType(change["role"])
-        lines.append(f"- {role.value.capitalize()}（{COUNTS[role]}）：{_shown(change['before'])} → "
-                     f"{_shown(change['after'])}")
+        lines.append(f"- {role.value.capitalize()}（{COUNTS[role]}）：{shown(change['before'])} → "
+                     f"{shown(change['after'])}")
     lines.append("调低不会停止正在运行的工作：超出的运行完为止，新的会等待；调高后排队的会立即开始。")
     return "\n".join(lines)
 
 
 async def _set(call: Call) -> dict[str, Any]:
-    limits = _limits(call)
+    limits = limits_argument(call)
     project = await _project(call)
     if project is None:
-        result = await _set_task(call.arguments["task_id"], limits)
+        result = await set_task_limits(call.arguments["task_id"], limits)
     else:
-        changes = await _project_changes(project, limits)
-        try:
-            for role, value in limits.items():
-                view = await update_project(project["id"], {"max_concurrency": value}, role=role.value)
-        except SettingsNotFound as exc:
-            raise OpError(ErrorCode.NOT_FOUND, str(exc)) from None
-        except SettingsError as exc:
-            raise OpError(ErrorCode.INVALID, str(exc)) from None
-        for change in changes:
-            change["after"] = view["roles"][change["role"]]["effective"]["max_concurrency"]
-        result = {"scope": "project", "project": project["name"], "changes": changes,
-                  "note": f"planner is how many of the project's tasks run at once. {NOTE}"}
+        result = await set_project_limits(project, limits)
     await recheck_limits(call.platform.task_router, call.platform.worker_pool)
     return result
 
 
-async def _set_task(task_id: str, limits: Mapping[AgentType, int | None]) -> dict[str, Any]:
+async def set_project_limits(project: Mapping[str, Any], limits: Mapping[AgentType, int | None]) -> dict[str, Any]:
+    """Set ``project``'s limits of the roles in ``limits`` (None clears one); each role's before and after. The
+    caller lets what waits check again."""
+    changes = await _project_changes(project, limits)
+    try:
+        for role, value in limits.items():
+            view = await update_project(project["id"], {"max_concurrency": value}, role=role.value)
+    except SettingsNotFound as exc:
+        raise OpError(ErrorCode.NOT_FOUND, str(exc)) from None
+    except SettingsError as exc:
+        raise OpError(ErrorCode.INVALID, str(exc)) from None
+    for change in changes:
+        change["after"] = view["roles"][change["role"]]["effective"]["max_concurrency"]
+    return {"scope": "project", "project": project["name"], "changes": changes,
+            "note": f"planner is how many of the project's tasks run at once. {NOTE}"}
+
+
+async def set_task_limits(task_id: str, limits: Mapping[AgentType, int | None]) -> dict[str, Any]:
+    """Set task ``task_id``'s own limits of the roles in ``limits`` (None clears one), as the task page does; each
+    role's before and after. The caller lets what waits check again."""
     task = await _task(task_id)
     before = (await agents_view(task))["roles"]
     try:

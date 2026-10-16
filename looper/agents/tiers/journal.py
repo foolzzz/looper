@@ -25,6 +25,12 @@ change it records (``db.plans.save``); the model never writes one. The kinds
 - ``progress``: the progress note a DECISION or SUPERVISE reply carried
   (``planner_protocol.ProgressNote``, as JSON), for the task page only: no
   agent's section shows it (``progress_notes``).
+- ``profile_choice``: the Planner chose (or cleared) the Agent Profile of the
+  task's Workers or Reviewers with its tool, for the rest of the task or for
+  one step (``ops.planner``), and why; for the task page only;
+- ``concurrency_change``: the Planner changed its task's or its project's
+  concurrency limits with its tool: each role's limit before and after, and
+  why; for the task page only.
 
 The entries come back as bounded sections:
 
@@ -84,6 +90,8 @@ class JournalKind(str, Enum):
     SESSION_SWITCH = "session_switch"
     HANDOFF = "handoff"
     PROGRESS = "progress"
+    PROFILE_CHOICE = "profile_choice"
+    CONCURRENCY_CHANGE = "concurrency_change"
 
 
 # How a section heads each kind, in the order the Planner's section shows them: pitfalls first.
