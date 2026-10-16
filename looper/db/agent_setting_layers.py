@@ -5,8 +5,9 @@ or ``role_project`` (with both). A NULL field is not set at its layer;
 ``env`` is a JSON list of ``{"key", "value"}`` (a null value unsets a key);
 ``profile_id`` is the Agent Profile its roles run (its model and effort with it); ``max_concurrency`` (a task
 role's role or role-in-a-project layer only) how many of the role run at once in one project. A task may choose
-the profile of some of its roles (``task_profile_overrides``). Code owns the fields' types, validation and
-resolution (``looper.agents.agent_settings``); this module only stores rows.
+the profile of some of its roles (``task_profile_overrides``) and how many of its Workers or Reviewers run at once
+(``task_concurrency_limits``): together, its task layer. Code owns the fields' types, validation and resolution
+(``looper.agents.agent_settings``); this module only stores rows.
 """
 
 from __future__ import annotations
@@ -36,7 +37,7 @@ async def list_layers(
 ) -> list[dict[str, Any]]:
     """Every row outside projects (system and role layers), and ``project_id``'s rows when given, each with its
     ``profile`` (``profile_registry.PROFILE_JSON``, or None); with ``task_id``, also a ``task`` row per role the task
-    chose a profile for."""
+    chose a profile or a concurrency limit for."""
     pool = pool or get_pool()
     rows = await pool.fetch(
         f"SELECT l.scope, l.role, l.project_id, l.harness_prompt, l.profile_id, l.env, l.run_budget_usd, "
@@ -48,8 +49,10 @@ async def list_layers(
     layers = [_row(r) for r in rows]
     if task_id:
         overrides = await pool.fetch(
-            f"SELECT t.role, t.profile_id, (SELECT {PROFILE_JSON} FROM {PROFILE_JOIN} WHERE a.id = t.profile_id) "
-            "AS profile FROM task_profile_overrides t WHERE t.task_id = $1", task_id,
+            f"SELECT COALESCE(t.role, c.role) AS role, t.profile_id, (SELECT {PROFILE_JSON} FROM {PROFILE_JOIN} "
+            "WHERE a.id = t.profile_id) AS profile, c.max_concurrency "
+            "FROM (SELECT * FROM task_profile_overrides WHERE task_id = $1) t "
+            "FULL JOIN (SELECT * FROM task_concurrency_limits WHERE task_id = $1) c ON c.role = t.role", task_id,
         )
         layers += [{"scope": "task", "task_id": task_id, **_row(r)} for r in overrides]
     return layers
@@ -103,22 +106,34 @@ async def set_profile_overrides(conn: asyncpg.Connection, task_id: str, profiles
     )
 
 
-async def set_task_profiles(task_id: str, profiles: Mapping[str, str | None], *,
-                            pool: asyncpg.Pool | None = None) -> None:
-    """Change task ``task_id``'s choice of Agent Profile for each role in ``profiles`` (role -> profile id; None
-    drops the task's choice of that role), in one transaction. Raises ``asyncpg.ForeignKeyViolationError`` for an
-    unknown task or profile."""
+async def set_task_layer(task_id: str, *, profiles: Mapping[str, str | None] | None = None,
+                         limits: Mapping[str, int | None] | None = None, pool: asyncpg.Pool | None = None) -> None:
+    """Change task ``task_id``'s own choices, in one transaction: its Agent Profile of each role in ``profiles``
+    (role -> profile id) and its concurrency limit of each role in ``limits`` (role -> limit); None drops the task's
+    choice of that role. Raises ``asyncpg.ForeignKeyViolationError`` for an unknown task or profile."""
     pool = pool or get_pool()
     async with pool.acquire() as conn, conn.transaction():
-        for role, profile_id in profiles.items():
-            if profile_id is None:
-                await conn.execute("DELETE FROM task_profile_overrides WHERE task_id = $1 AND role = $2",
-                                   task_id, role)
-            else:
-                await conn.execute(
-                    "INSERT INTO task_profile_overrides (task_id, role, profile_id) VALUES ($1, $2, $3) "
-                    "ON CONFLICT (task_id, role) DO UPDATE SET profile_id = EXCLUDED.profile_id",
-                    task_id, role, profile_id)
+        for table, column, values in (("task_profile_overrides", "profile_id", profiles or {}),
+                                      ("task_concurrency_limits", "max_concurrency", limits or {})):
+            for role, value in values.items():
+                if value is None:
+                    await conn.execute(f"DELETE FROM {table} WHERE task_id = $1 AND role = $2", task_id, role)
+                else:
+                    await conn.execute(
+                        f"INSERT INTO {table} (task_id, role, {column}) VALUES ($1, $2, $3) "
+                        f"ON CONFLICT (task_id, role) DO UPDATE SET {column} = EXCLUDED.{column}",
+                        task_id, role, value)
+
+
+async def task_concurrency(task_ids: list[str], *, pool: asyncpg.Pool | None = None) -> dict[str, dict[str, int]]:
+    """The concurrency limits each of ``task_ids`` set of its own, by role; a task without one is left out."""
+    pool = pool or get_pool()
+    rows = await pool.fetch("SELECT task_id, role, max_concurrency FROM task_concurrency_limits "
+                            "WHERE task_id = ANY($1::text[]) ORDER BY task_id, role", task_ids)
+    limits: dict[str, dict[str, int]] = {}
+    for row in rows:
+        limits.setdefault(row["task_id"], {})[row["role"]] = row["max_concurrency"]
+    return limits
 
 
 async def profile_overrides(task_id: str, *, pool: asyncpg.Pool | None = None) -> dict[str, dict[str, Any]]:

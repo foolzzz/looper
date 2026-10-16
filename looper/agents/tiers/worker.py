@@ -4,9 +4,10 @@ Each Worker runs as a subprocess (Claude Code, Codex or OMP) with limited
 permissions. The WorkerPool manages lifecycle, concurrency, and result
 collection, reporting back to the Planner via the Bus. A run starts once
 fewer Workers (or Reviewers) run in its task's project than that role's
-concurrency limit there (``agent_settings.load_concurrency``, read each time
-it checks); until then it waits, and it checks again whenever a run ends or a
-limit changes (``recheck``).
+concurrency limit there, and fewer in its task than the task's own limit when
+it has one (``agent_settings.load_task_limits``, read each time it checks);
+until then it waits, and it checks again whenever a run ends or a limit
+changes (``recheck``).
 
 A Worker's or Reviewer's system prompt is the harness (its project's Worker
 harness, else the default in Settings), its role prompt (the ``worker`` or
@@ -34,7 +35,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from ..agent_settings import AgentType, Launch, load_agent_settings, load_concurrency
+from ..agent_settings import AgentType, Launch, load_agent_settings, load_task_limits
 from ..bus import MessageBus
 from ..claude_cli import ClaudeRunRecorder, budget_error
 from .. import proc_tree
@@ -259,7 +260,7 @@ class WorkerProcess:
     task_id: str
     plan_id: str
     process: asyncio.subprocess.Process | None = None
-    status: str = "pending"  # "pending" (waiting for room in its project) | "running" | "completed" | "failed"
+    status: str = "pending"  # "pending" (waiting for room in its project or task) | "running" | "completed" | "failed"
     result: dict[str, Any] | None = None
     role: AgentType = AgentType.WORKER  # or REVIEWER
     parent_task_id: str = ""  # the task whose step this is (task_id is the step's)
@@ -282,9 +283,9 @@ class WorkerPool:
         self._bus: MessageBus | None = None
         self._active: dict[str, WorkerProcess] = {}
         self._tasks: dict[str, asyncio.Task[Any]] = {}
-        # The runs counted against their project's limit: worker id -> (role, project id).
-        self._slots: dict[str, tuple[AgentType, str | None]] = {}
-        # Held to check a limit and take a place, so two runs cannot both take a project's last one.
+        # The runs counted against their project's and their task's limits: worker id -> (role, project id, task id).
+        self._slots: dict[str, tuple[AgentType, str | None, str]] = {}
+        # Held to check a limit and take a place, so two runs cannot both take a project's (or a task's) last one.
         self._slot_lock = asyncio.Lock()
         # The runs waiting for a place, woken to check again when a run ends or a limit changes.
         self._slot_waiters: set[asyncio.Future[None]] = set()
@@ -462,32 +463,38 @@ class WorkerPool:
         self._slot_waiters.clear()
 
     async def recheck(self) -> None:
-        """Let every run waiting for room in its project check its limit again (a limit changed)."""
+        """Let every run waiting for room in its project or task check its limits again (a limit changed)."""
         self._wake_slot_waiters()
 
     async def _take_slot(self, wp: WorkerProcess) -> None:
-        """Wait until fewer of the run's role run in its task's project than its limit, read each time, then take a
-        place. A run whose project cannot be read counts outside any project, under the role's limit."""
+        """Wait until fewer of the run's role run in its task's project than its limit, and fewer in its task than
+        the task's own limit when it has one, both read each time, then take a place. A run whose project cannot be
+        read counts outside any project, under the role's limit."""
         worker_id, agent, task_id = wp.worker_id, wp.role, wp.parent_task_id
         project_id = wp.project_id = await self._project_id(task_id)
         waiting = False
         while True:
             async with self._slot_lock:
-                limit = await load_concurrency(agent, project_id)
-                running = sum(1 for held in self._slots.values() if held == (agent, project_id))
-                if running < limit:
-                    self._slots[worker_id] = (agent, project_id)
+                limit, task_limit = await load_task_limits(agent, project_id, task_id or None)
+                running = sum(1 for held in self._slots.values() if held[:2] == (agent, project_id))
+                in_task = sum(1 for held in self._slots.values() if held[0] is agent and held[2] == task_id)
+                if running < limit and (task_limit is None or in_task < task_limit):
+                    self._slots[worker_id] = (agent, project_id, task_id)
                     return
                 waiter = asyncio.get_running_loop().create_future()
                 self._slot_waiters.add(waiter)
             if not waiting:
                 waiting = True
                 label = "Reviewer" if agent is AgentType.REVIEWER else "Worker"
-                logger.info("worker %s waits: %d %ss run in project %s, its limit %d", worker_id, running,
-                            agent.value, project_id, limit)
+                if running < limit:  # the task's own limit holds it
+                    where, running, limit = "this task", in_task, task_limit
+                else:
+                    where = "this project"
+                logger.info("worker %s waits: %d %ss run in %s (task %s, project %s), its limit %d", worker_id,
+                            running, agent.value, where, task_id, project_id, limit)
                 if task_id:
                     await self._activity(task_id, worker_id, "phase",
-                                         f"{label} waits for room in this project ({running} running, limit {limit})")
+                                         f"{label} waits for room in {where} ({running} running, limit {limit})")
             try:
                 await waiter
             finally:
@@ -963,8 +970,9 @@ class WorkerPool:
         }
 
     def runs(self) -> list[dict[str, Any]]:
-        """The Worker and Reviewer runs now, each ``running`` or ``waiting`` (for room under its project's limit),
-        with its role, task, step, project (None until it is read) and ``since``: when it began that state."""
+        """The Worker and Reviewer runs now, each ``running`` or ``waiting`` (for room under its project's or its
+        task's limit), with its role, task, step, project (None until it is read) and ``since``: when it began that
+        state."""
         states = {"pending": "waiting", "running": "running"}  # a finished run is reporting its result
         return [
             {"agent_id": wp.worker_id, "role": wp.role.value, "task_id": wp.parent_task_id, "step_id": wp.task_id,

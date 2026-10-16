@@ -202,6 +202,36 @@ def _cancelled_on_confirmation(look: Look) -> str | None:
     return None if confirmed else "the task ended without a confirmed cancel"
 
 
+def _project_worker_limit(look: Look) -> int:
+    project = next(p for p in look.api.get("/api/projects")["projects"] if p["name"] == PROJECT)
+    roles = look.api.get(f"/api/projects/{project['project_id']}/agent-settings")["roles"]
+    return int(roles["worker"]["effective"]["max_concurrency"]["value"])
+
+
+def _limit_asked(look: Look) -> str | None:
+    if not _writes(look, status="needs_confirmation", tool="looper_concurrency"):
+        return "no change of the project's concurrency waits for the user's confirmation"
+    limit = _project_worker_limit(look)
+    return None if limit != 2 else "the project's Worker limit is 2 before the user confirmed"
+
+
+def _limit_confirmed(look: Look) -> str | None:
+    confirmed = [a for a in _writes(look, status="ok", tool="looper_concurrency") if a["confirmation_id"]]
+    if not confirmed:
+        return "no confirmed change of the project's concurrency"
+    limit = _project_worker_limit(look)
+    return None if limit == 2 else f"the project's Worker limit is {limit}, not 2"
+
+
+def _task_limit_set(look: Look) -> str | None:
+    worker = look.detail()["agents"]["roles"]["worker"]["concurrency"]
+    if (worker["task"], worker["source"]) != (1, "task"):
+        return f"the task's Worker limit is {worker}, not its own 1"
+    direct = [a for a in _writes(look, status="ok", tool="looper_concurrency")
+              if a["task_id"] == look.task and not a["confirmation_id"]]
+    return None if direct else "the task's limit did not change in the turn that asked for it"
+
+
 def _answered_by_reading(look: Look) -> str | None:
     reads = [a for a in look.actions() if a["risk"] == "read" and a["status"] == "ok"]
     if not reads:
@@ -246,6 +276,13 @@ DIALOGS: tuple[Dialog, ...] = (
         Say("还是取消任务 <task> 吧。", _asked_to_confirm,
             (("looper_task_control", {"task_id": "<task>", "action": "cancel"}),)),
         Say("确认。", _cancelled_on_confirmation, (("looper_confirm", {"confirmation_id": "<confirmation>"}),)),
+    ), running_task=True),
+    Dialog("concurrency", (
+        Say(f"把项目 {PROJECT} 的 Worker 并发改成 2。", _limit_asked,
+            (("looper_concurrency", {"project": PROJECT, "limits": {"worker": 2}}),)),
+        Say("确认。", _limit_confirmed, (("looper_confirm", {"confirmation_id": "<confirmation>"}),)),
+        Say("把任务 <task> 的 Worker 并发改成 1。", _task_limit_set,
+            (("looper_concurrency", {"task_id": "<task>", "limits": {"worker": 1}}),)),
     ), running_task=True),
     Dialog("status", (
         Say("现在有哪些任务？简单列一下。", _answered_by_reading, (("looper_tasks", {"action": "list"}),)),

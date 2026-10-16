@@ -32,7 +32,7 @@ from .supervisor import AgentSupervisor
 from .tiers.journal import progress_notes
 from .ops.service import ManagerOps
 from .tiers.manager import ManagerAgent
-from .tiers.task import TaskRouter
+from .tiers.task import TaskRouter, recheck_limits
 from .tiers.worker import WorkerPool
 
 logger = logging.getLogger(__name__)
@@ -295,6 +295,7 @@ class AgentHTTPServer:
     _RE_TASK_CONTINUE = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)/continue$")
     _RE_TASK_START = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)/start$")
     _RE_TASK_REQUIREMENT = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)/requirement$")
+    _RE_TASK_AGENTS = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)/agents$")
     _RE_PROJECT = re.compile(r"^/api/projects/(proj-[a-zA-Z0-9]+)$")
     _RE_PROJECT_KNOWLEDGE = re.compile(r"^/api/projects/(proj-[a-zA-Z0-9]+)/knowledge$")
     _RE_PROJECT_DOCUMENT = re.compile(r"^/api/projects/(proj-[a-zA-Z0-9]+)/knowledge/(doc-[a-zA-Z0-9]+)$")
@@ -375,6 +376,8 @@ class AgentHTTPServer:
             await self._answer(writer, HTTP_200, lambda: projects.edit_requirement(
                 m.group(1), projects.json_object(body), task_router=self._task_router, bus=self._supervisor.bus,
                 source=self._web_adapter._address, via=projects.VIA_TASK_PAGE))
+        elif (m := self._RE_TASK_AGENTS.match(path)) and method == "PUT":
+            await self._answer(writer, HTTP_200, lambda: self._set_task_agents(m.group(1), body))
         elif (m := self._RE_TASK_START.match(path)) and method == "POST":
             await self._answer(writer, HTTP_200, lambda: projects.start_ready_task(
                 m.group(1), self._supervisor.bus, self._web_adapter._address))
@@ -1151,6 +1154,7 @@ class AgentHTTPServer:
             overrides = await profile_overrides(task_id) if raw else {}
             versions = await requirement_versions(task_id) if raw else []
             actions = await manager_actions(task_id) if raw else []
+            agents = await projects.agents_view(raw) if raw else None
         except Exception:
             logger.exception("DB unavailable for task_detail %s", task_id)
             writer.write(_json_response(HTTP_500, {"error": "database unavailable"}))
@@ -1187,6 +1191,9 @@ class AgentHTTPServer:
             "config": raw.get("config", {}),
             # The Agent Profile the task chose for some of its roles, over the layers (agent_settings.Layer.TASK).
             "profile_overrides": {role: profile_registry.profile_view(profile) for role, profile in overrides.items()},
+            # Each task role's Agent Profile and concurrency for the task, with where each comes from; the task's
+            # own choices are source "task" (projects.agents_view).
+            "agents": agents,
             "origin_channel_id": raw.get("origin_channel_id", ""),
             "result_summary": raw.get("result_summary"),
             "error": raw.get("error"),
@@ -1414,13 +1421,15 @@ class AgentHTTPServer:
 
     async def _recheck_concurrency(self) -> None:
         """Start the tasks and runs that wait for room a raised limit now gives; a lowered limit stops nothing."""
-        try:
-            await self._task_router.recheck()
-            if self._worker_pool is not None:
-                await self._worker_pool.recheck()
-        except Exception:
-            # The write stands; what waits starts when a task or run ends.
-            logger.exception("re-checking the concurrency limits failed")
+        await recheck_limits(self._task_router, self._worker_pool)
+
+    async def _set_task_agents(self, task_id: str, body: bytes) -> dict[str, Any]:
+        """Change the task's own profiles or concurrency per role; when it set a limit, start what it lets start."""
+        data = projects.json_object(body)
+        result = await projects.set_task_agents(task_id, data)
+        if data.get("concurrency"):
+            await self._recheck_concurrency()
+        return result
 
     async def _handle_agent_settings(
         self, writer: asyncio.StreamWriter, request: Callable[[], Awaitable[dict[str, Any]]],

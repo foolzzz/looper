@@ -28,7 +28,7 @@ import { ScheduledBadge } from "@/components/scheduled-badge";
 import { historyHref } from "@/pages/agent-history";
 import { TaskCostBreakdown } from "@/components/task-cost";
 import { ContinueAtCap, TaskSpendMeter } from "@/components/task-budget";
-import { AGENT_PROFILE } from "@/lib/settings-pages";
+import { TaskAgentsSection } from "@/components/task-agents";
 import { costBasis, costCaveats, formatUsd } from "@/lib/usage";
 import { cn } from "@/lib/utils";
 import {
@@ -57,6 +57,7 @@ import {
   setTaskProject,
   fetchKnowledgeDrafts,
   type KnowledgeDraft,
+  type TaskAgents,
   type TaskDetail,
   type Supplement,
   type ManagerAction,
@@ -572,7 +573,15 @@ function TaskConfigSection({ task }: { task: TaskDetail }) {
   );
 }
 
-function OverviewTab({ task, onContinued }: { task: TaskDetail; onContinued: () => void }) {
+function OverviewTab({
+  task,
+  onContinued,
+  onAgents,
+}: {
+  task: TaskDetail;
+  onContinued: () => void;
+  onAgents: (agents: TaskAgents) => void;
+}) {
   const steps = task.steps || [];
   const done = steps.filter((s) => s.status === "completed").length;
   const total = steps.length;
@@ -637,6 +646,10 @@ function OverviewTab({ task, onContinued }: { task: TaskDetail; onContinued: () 
       {task.cost && task.cost.runs > 0 && <TaskCostBreakdown cost={task.cost} />}
 
       <TaskConfigSection task={task} />
+
+      {task.agents && (
+        <TaskAgentsSection taskId={task.task_id} projectId={task.project_id} agents={task.agents} onSaved={onAgents} />
+      )}
 
       {steps.length > 0 && (
         <div>
@@ -1598,15 +1611,6 @@ export function TaskDetailPage({ taskId, onBack }: TaskDetailPageProps) {
                   }
                 />
               )}
-              {task && Object.keys(task.profile_overrides ?? {}).length > 0 && (
-                <span className="text-xs text-muted-foreground">
-                  {AGENT_PROFILE.plural}:{" "}
-                  {(["planner", "worker", "reviewer"] as const)
-                    .filter((role) => task.profile_overrides?.[role])
-                    .map((role) => `${role} → ${task.profile_overrides?.[role]?.name}`)
-                    .join(", ")}
-                </span>
-              )}
             </div>
           </div>
           {task && isActiveTask(task) && (
@@ -1702,7 +1706,13 @@ export function TaskDetailPage({ taskId, onBack }: TaskDetailPageProps) {
           </div>
         )}
 
-        {task && tab === "overview" && <OverviewTab task={task} onContinued={() => setRuns((n) => n + 1)} />}
+        {task && tab === "overview" && (
+          <OverviewTab
+            task={task}
+            onContinued={() => setRuns((n) => n + 1)}
+            onAgents={(agents) => setTask((t) => (t ? { ...t, agents } : t))}
+          />
+        )}
         {task && tab === "pipeline" && <PipelineTab task={task} />}
         {task && tab === "sessions" && <SessionsTab taskId={taskId} />}
         {task && tab === "conversation" && <ConversationTab taskId={taskId} />}

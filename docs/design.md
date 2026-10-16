@@ -284,7 +284,7 @@ Telegram 和 Lark 不需要启动参数，见「接入渠道」。
 
 - **按项目限并发**：Planner、Worker、Reviewer 各有一个"每个项目同时运行多少个"的上限（默认 8、16、8），在 Settings → Roles 按角色设置，在项目设置里按项目覆盖，改了立即生效；没有全机上限
 - **Task 级并发**：TaskRouter 按项目排队，同一项目内先到先跑，一个项目满了不耽误别的项目
-- **Worker 级并发**：WorkerPool 按项目和角色计数，满了的运行等待；每个 Task 的 Planner 另外最多同时派出 4 个 Worker
+- **Worker 级并发**：WorkerPool 按项目和角色计数，满了的运行等待；Planner 把就绪的步骤都派出去，由这些上限决定同时跑几个。没结束的 Task 还可以给自己的 Worker、Reviewer 各设一个上限，在项目上限之内生效，在任务页或通过管家修改；不设时与以前相同
 - **Task 隔离**：每个 Task 有独立的 Planner、Plan、状态持久化目录和 Planner 的 Claude 会话
 - **Worker 隔离**：每个 Worker 在独立子进程中运行 `claude --print`
 - **并行步骤的工作目录**：默认共用任务目录。项目设置 `step_workspaces` 为 `worktree` 时，任务目录是 git 检出、在分支上，和别的步骤同时跑的步骤各在自己的 git worktree 和分支上做；步骤被接受时，代码把它合并进任务目录的分支（每步一个合并提交），再派出依赖它的步骤，合不进去就交给 Planner 决定。设计见[并行步骤的工作目录隔离 RFC](architecture/rfcs/step-workdir-isolation-v0.zh-CN.md)，实现见 [Agent 系统架构](architecture/agent-system.md#step-workspaces)

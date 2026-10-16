@@ -17,12 +17,13 @@ from typing import Any
 import asyncpg
 
 from ...db import agent_setting_layers as db_layers, connection as db_connection, projects as db_projects
-from ...db import profile_registry as db_profiles, steps as db_steps, task_changes as db_changes, tasks as db_tasks
+from ...db import steps as db_steps, task_changes as db_changes, tasks as db_tasks
 from ..agent_settings import TASK_ROLES, AgentSettings, AgentType, Layer, index_layers, load_concurrency, resolve
 from ..agent_settings import resolve_concurrency
 from ..message import MANAGER_ADDRESS, TASK_ROUTER_ADDRESS, MessageEnvelope, MessageType, RestartMode, planner_address
 from ..project_execution import LessonsMode, ProjectExecution, ReviewPolicy, TaskBudgetAction, format_usd
-from ..projects import HTTP_404, HTTP_409, TASK_PROFILE_ROLES, RequestError, edit_requirement, project_name
+from ..projects import HTTP_404, HTTP_409, PROFILES_NOTE, TASK_PROFILE_ROLES, RequestError, agents_view
+from ..projects import edit_requirement, profile_choices, project_name, set_task_agents
 from ..system_prompt import TASK_REQUIREMENT_LIMIT
 from ..task_notice import notify_target
 from ..tiers.journal import SUPPLEMENTS_MAX_CHARS, clip, kept_text
@@ -101,9 +102,12 @@ async def _overview(call: Call) -> dict[str, Any]:
     view = await build_overview(task_router=platform.task_router, worker_pool=platform.worker_pool,
                                 manager=platform.manager, supervisor=platform.supervisor)
     agents = view["agents"]
+    own = await db_layers.task_concurrency([p["task_id"] for p in agents["planners"]])
     return {
         "tasks": view["tasks"],
-        "running_tasks": [{"task_id": p["task_id"], "name": p["name"], "project": p["project_name"]}
+        # A running task's own Worker or Reviewer limit, when it has one (looper_concurrency).
+        "running_tasks": [{"task_id": p["task_id"], "name": p["name"], "project": p["project_name"],
+                           **({"concurrency": own[p["task_id"]]} if p["task_id"] in own else {})}
                           for p in agents["planners"]],
         "step_runs": [{"task_id": r["task_id"], "role": r["role"], "step": r["step"], "state": r["state"],
                        "elapsed_seconds": r["elapsed_seconds"]} for r in agents["workers"] + agents["reviewers"]],
@@ -166,6 +170,8 @@ async def _task_view(task_id: str) -> dict[str, Any]:
         "latest_progress": progress[-1]["summary"] if progress else None,
         "result": clip(task.get("result_summary") or task.get("error") or "", 1_000) or None,
         "cost_usd": ((await task_costs([task_id])).get(task_id) or {}).get("cost_usd"),
+        # How many of each role run at once for it, with the source; its own Worker and Reviewer limits (task).
+        "concurrency": {role: view["concurrency"] for role, view in (await agents_view(task))["roles"].items()},
     }
 
 
@@ -304,33 +310,11 @@ async def configuration_block(
 
 
 async def _profile_choices(raw: Any, *, clearing: bool) -> dict[str, str | None]:
-    """``profiles`` as role -> Agent Profile id (None: clear the task's choice, only when ``clearing``), each one
-    registered, found by id or name, and able to run its role."""
-    from ..profile_registry import RegistryError, check_selection
-
-    if not raw:
-        return {}
-    registered: list[dict[str, Any]] | None = None
-    chosen: dict[str, str | None] = {}
-    for role, wanted in raw.items():
-        if wanted is None:
-            if not clearing:
-                raise OpError(ErrorCode.INVALID, f"profiles.{role}: give an Agent Profile, or leave the role out")
-            chosen[role] = None
-            continue
-        if registered is None:
-            registered = await db_profiles.list_profiles()
-        match = next((p for p in registered if p["id"] == wanted), None) or next(
-            (p for p in registered if str(p["name"]).casefold() == wanted.strip().casefold()), None)
-        if match is None:
-            names = ", ".join(str(p["name"]) for p in registered[:20])
-            raise OpError(ErrorCode.INVALID, f"profiles.{role}: no Agent Profile {wanted!r}; registered: {names}")
-        try:
-            await check_selection(match["id"], [role])
-        except RegistryError as exc:
-            raise OpError(ErrorCode.INVALID, f"profiles.{role}: {exc}") from None
-        chosen[role] = match["id"]
-    return chosen
+    """``profiles`` as role -> Agent Profile id, checked as the task API checks them (``projects.profile_choices``)."""
+    try:
+        return await profile_choices(raw, clearing=clearing)
+    except RequestError as exc:
+        raise _request_error(exc) from None
 
 
 # --- looper_task_control ---
@@ -447,7 +431,6 @@ async def _update(call: Call) -> dict[str, Any]:
     if _ended(task):
         raise OpError(ErrorCode.CONFLICT, f"task {task_id} is {task['status']}: an ended task does not change "
                                           "(restart it to run its requirement again)")
-    profiles = await _profile_choices(arguments.get("profiles"), clearing=True)
     if work_dir is not None:
         if task["status"] != db_tasks.READY:
             raise OpError(ErrorCode.CONFLICT, f"task {task_id} has started: only a task not started can change its "
@@ -457,8 +440,12 @@ async def _update(call: Call) -> dict[str, Any]:
         except ValueError as exc:
             raise OpError(ErrorCode.INVALID, f"work_dir: {exc}") from None
     changed: list[str] = []
-    if profiles:
-        await db_layers.set_task_profiles(task_id, profiles)
+    if arguments.get("profiles"):
+        # As the task page sets them: one check and one write (projects.set_task_agents).
+        try:
+            await set_task_agents(task_id, {"profiles": arguments["profiles"]})
+        except RequestError as exc:
+            raise _request_error(exc) from None
         changed.append("profiles")
     if work_dir is not None:
         if not await db_tasks.update_task_config(task_id, work_dir=work_dir):
@@ -476,8 +463,7 @@ async def _update(call: Call) -> dict[str, Any]:
         changed.append("requirement")
     result["changed"] = changed
     if "profiles" in changed:
-        result["profiles_note"] = ("a Worker or Reviewer uses its new profile from its next step on; the Planner "
-                                   "moves to its new profile at its next turn, after a handoff")
+        result["profiles_note"] = PROFILES_NOTE
     if "requirement" in changed and task["status"] != db_tasks.READY:
         result["requirement_note"] = "the task's Planner gets the edit in its next turn and decides whether to replan"
     return result
@@ -493,15 +479,16 @@ _TASK_ID = {"type": "string", "minLength": 1, "description": "The task's id (tas
 TOOLS: tuple[Tool, ...] = (
     Tool(
         name="looper_overview",
-        description="What is happening now: task counts by group, the running tasks and step runs, each active "
-                    "project's load against its limits, today's spend, unhealthy components.",
+        description="What is happening now: task counts by group, the running tasks (with their own concurrency "
+                    "limits) and step runs, each active project's load against its limits, today's spend, unhealthy "
+                    "components.",
         schema={"type": "object", "properties": {}, "additionalProperties": False},
         risk=Risk.READ, run=_overview,
     ),
     Tool(
         name="looper_tasks",
         description="List or search tasks (newest first), or get one task with its steps, supplements, latest "
-                    "progress note, result and cost.",
+                    "progress note, result, cost and concurrency limits.",
         schema={
             "type": "object", "required": ["action"], "additionalProperties": False,
             "properties": {
