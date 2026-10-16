@@ -1551,9 +1551,9 @@ a `cron` rule and an IANA `timezone` (default: the server's own zone), the
 when it fires), `overlap` (`skip`, `queue` or `parallel`, with
 `max_parallel_runs` 1–10, default 3), `catch_up` (`once` or `skip`),
 an optional `run_timeout_seconds` and `run_budget_usd`, and `profile_overrides`
-for the Planner, Workers or Reviewers (a profile a schedule chose cannot be
-deleted); and, from S2, an optional `gate_command` with `gate_timeout_seconds`
-(1–600, default 60), an optional `daily_budget_usd`, `notify` (`failures`,
+for the Planner, Workers or Reviewers (by id or name, as a new task takes them;
+a profile a schedule chose cannot be deleted); and, from S2, an optional
+`gate_command` with `gate_timeout_seconds` (1–600, default 60), an optional `daily_budget_usd`, `notify` (`failures`,
 `alerts`, `always`, `never`) and a `notify_target` (a channel and chat; none: the
 dashboard only). A new schedule is disabled.
 
@@ -1691,7 +1691,9 @@ dashboard only). A new schedule is disabled.
   at once (`stale_alert_at`, checked on every pass while enabled; a disabled
   schedule is never stale, and neither is one whose run is in progress:
   queued, checking its gate or its task running within its run timeout, nor
-  the busy skips it causes), recovered the same way. The text is code-written (the schedule, the run's status, a
+  the busy skips it causes; the alert starts only while `last_ok_at` is still
+  the one its deadline came from, so a run that goes well while the pass looks
+  raises none), recovered the same way. The text is code-written (the schedule, the run's status, a
   summary snippet, its cost and the link to the task, absolute (`links`)). It goes through
   the channel registry to the running Telegram or Lark channel
   (`ChannelAdapter.notify`: Telegram's bot to the user's private chat, Lark's
@@ -2416,7 +2418,7 @@ dev proxy, which keeps `Host` and `Origin` on its own port.
 | `/api/schedules/:id/notifications` | GET | The schedule's messages, newest first (`?limit=` as for runs): `notification_id`, `kind`, `run_id`, `channel`, `chat`, `text`, `status`, `error`, `created_at`; 404 |
 | `/api/schedules/preview` | POST | `{cron, timezone?, count?, gated?}` (1–20, default 5; `gated`: checked as a schedule with a gate command, 1 minute apart instead of 5): `valid`, `description`, the `next` fire times and `min_interval_seconds`, or `valid` false with the `error`; 400 only for a malformed body |
 | `/api/tasks` | GET | A page of the tasks, newest first (by creation, then id): `?limit=` (default 50, at most 200) of them, older than the task `?before=` when given; `?project_id=` lists one project's, `?group=` one task group's (400 for an unknown group), `?schedule_id=` one schedule's, `?status=` one status's (400 for an unknown one), and they combine. Answers `tasks`, `next_before` (the cursor for the next page, null at the end) and `counts` (how many tasks each status holds under the project, group and schedule filters, every page included); 400 for a bad `limit` or an unknown `before`. Each task has its status's `group`, `project_id`, `project_name`, `work_dir`, `schedule_id` and `schedule_name` (null for a task no schedule created) and `cost` (as in the task detail) |
-| `/api/tasks/create` | POST | Create a ready task (`init`) with exactly one of `project_id` (existing) and `project` (`{name, description?, work_dir?, background?}`, created in the same transaction). Its `work_dir` is the one given, else the project's. Optional `profile_overrides`: `{planner?, worker?, reviewer?}` Agent Profile ids for this task's roles (an empty one chooses nothing). 400 for a requirement over 32,000 characters, with neither project field, for an override of another role, an unknown profile or one that cannot run its role; 404 for an unknown project, 409 for a taken new name |
+| `/api/tasks/create` | POST | Create a ready task (`init`) with exactly one of `project_id` (existing) and `project` (`{name, description?, work_dir?, background?}`, created in the same transaction). Its `work_dir` is the one given, else the project's. Optional `profile_overrides`: `{planner?, worker?, reviewer?}`, an Agent Profile by id or name for this task's roles, checked as `PUT /api/tasks/:id/agents` checks `profiles` (an empty one chooses nothing). 400 for a requirement over 32,000 characters, with neither project field, for an override of another role, an unknown profile or one that cannot run its role; 404 for an unknown project, 409 for a taken new name |
 | `/api/tasks/:id/project` | PUT | Move a task to `{project_id}`, whatever its status |
 | `/api/tasks/:id` | GET | Task detail with steps, its status's `group`, `project_id`, `project_name`, `schedule_id`, `schedule_name`, `task_budget_usd` (its cap: its own, else its project's) and `own_budget_usd`, `profile_overrides` (`{role: profile}`, `{}` when none), `requirement_versions` (each `{version, text, via, created_at, delivered_at}`, oldest first; none for a requirement never edited), `supplements` (each `{text, via, created_at, delivered_at}`, oldest first), `manager_actions` (what the Manager did to the task or asked to confirm, newest first: `{created_at, channel, tool, arguments, risk, status, confirmation_id}`), `agents` (`{concurrency_max, editable, roles}`; each of `roles.planner`, `roles.worker` and `roles.reviewer` has the `profile` it runs, `{value: {profile_id, name, model, effort, runtime, provider}, source}` with source `task` for the task's own choice, and its `concurrency`: the Planner's is the project's `{value, source}`, how many of its tasks run at once; a Worker's or Reviewer's is what applies to the task, `{value, source, task, project}`, with the task's own limit `task` (null for none) and the project's `project`; `editable` is false once the task has completed: a failed, stopped or cancelled task still changes them, and its restart runs with them) and `cost`: `cost_usd` (the sum of its Planner's, Workers' and Reviewers' runs), `runs`, `running`, `unpriced_runs` and `by_role` (`planner`, `worker`, `reviewer`, each `{cost_usd, runs}`) |
 | `/api/tasks/cancel` | POST | Cancel task (permanent) |
