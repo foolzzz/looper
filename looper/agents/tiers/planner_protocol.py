@@ -10,6 +10,12 @@ A DECISION or SUPERVISE reply may carry a progress note (``ProgressNote``),
 which code keeps in the task journal for the task page; the decision that
 completes a task must carry its final summary (``FinalSummary``), which
 becomes the task's result.
+
+In a project that lets its Planners define roles (``planner_roles`` ``on``), a
+step may name the work role its Worker runs as (``role``) and the review role
+that reviews it after the built-in Reviewer (``review_role``); ``PlanView.roles``
+holds the task's roles, and the contract says so (``reply_contract(roles=True)``).
+Elsewhere both keys are refused, and the contract is as before.
 """
 
 from __future__ import annotations
@@ -22,6 +28,7 @@ from enum import Enum
 from typing import Any
 
 from ..project_execution import DEFAULT_STEP_RETRIES
+from ..task_roles import RoleKind
 from .journal import HANDOFF_MAX_CHARS, LESSONS_MAX_CHARS, kept_text
 
 # A progress note's fields and a final summary's, in the order they are shown, and what each keeps of a field.
@@ -39,6 +46,8 @@ _STEP_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,31}")
 _OPENING = re.compile(r"^```json[ \t]*\n", re.MULTILINE)
 _CLOSING = re.compile(r"\s*```")
 _STEP_KEYS = frozenset({"id", "instruction", "acceptance_criteria", "depends_on", "review"})
+# A step's optional keys: the task roles it runs as and is reviewed by.
+_ROLE_KEYS = frozenset({"role", "review_role"})
 
 
 class TurnKind(str, Enum):
@@ -95,6 +104,8 @@ class StepSpec:
     acceptance_criteria: tuple[str, ...]
     depends_on: tuple[str, ...]
     review: bool
+    role: str | None = None  # the work role its Worker runs as; None: the built-in Worker
+    review_role: str | None = None  # the review role that reviews it after the built-in Reviewer
 
 
 @dataclass(frozen=True)
@@ -194,11 +205,13 @@ class PlanView:
     retired: frozenset[str] = frozenset()
     running: frozenset[str] = frozenset()
     done: frozenset[str] = frozenset()  # the started steps that are verified
+    # The task's roles by key, as defined when the reply is checked; None: its project lets its Planner define none.
+    roles: Mapping[str, RoleKind] | None = None
 
     def dropping(self, step: str) -> PlanView:
         """This plan once ``step``, a started step, is dropped."""
         started = {k: v for k, v in self.started.items() if k != step}
-        return PlanView(started, self.pending, self.retired | {step}, self.running - {step}, self.done)
+        return PlanView(started, self.pending, self.retired | {step}, self.running - {step}, self.done, self.roles)
 
 
 @dataclass(frozen=True)
@@ -258,13 +271,13 @@ def extract_reply(text: str) -> dict[str, Any]:
     return value
 
 
-def parse_plan(text: str) -> PlanReply:
+def parse_plan(text: str, roles: Mapping[str, RoleKind] | None = None) -> PlanReply:
     data = extract_reply(text)
     _only_keys(data, {"steps"}, "the PLAN reply")
     steps = _step_list(data.get("steps"), "steps")
     if not steps:
         raise ProtocolError("steps must list at least one step")
-    _check_new_steps(steps, PlanView(started={}, pending={}), replace_pending=True)
+    _check_new_steps(steps, PlanView(started={}, pending={}, roles=roles), replace_pending=True)
     return PlanReply(steps)
 
 
@@ -486,6 +499,7 @@ def _check_new_steps(steps: tuple[StepSpec, ...], plan: PlanView, *, replace_pen
         if step.id in kept:
             raise ProtocolError(f"step id {step.id!r} is already used in this task")
         seen.add(step.id)
+        _check_roles(step, plan.roles)
     graph = {**kept, **{s.id: s.depends_on for s in steps}}
     for step in steps:
         for dependency in step.depends_on:
@@ -498,6 +512,29 @@ def _check_new_steps(steps: tuple[StepSpec, ...], plan: PlanView, *, replace_pen
     cycle = _find_cycle(graph)
     if cycle:
         raise ProtocolError("depends_on has a cycle: " + " -> ".join(cycle))
+
+
+def _check_roles(step: StepSpec, roles: Mapping[str, RoleKind] | None) -> None:
+    """A step's ``role`` names a work role of the task and its ``review_role`` a review role, on a reviewed step;
+    neither is allowed where the project lets its Planner define no role."""
+    if step.role is None and step.review_role is None:
+        return
+    if roles is None:
+        raise ProtocolError(f"step {step.id}: this project does not let you define roles (planner_roles is off): "
+                            "leave role and review_role out")
+    defined = ", ".join(f"{key} ({kind.value})" for key, kind in roles.items()) or "none"
+    for key, kind in ((step.role, RoleKind.WORK), (step.review_role, RoleKind.REVIEW)):
+        field = "role" if kind is RoleKind.WORK else "review_role"
+        if key is None:
+            continue
+        if key not in roles:
+            raise ProtocolError(f"step {step.id}: {field} {key!r} is not a role of this task (defined: {defined}); "
+                                "define it with looper_task_role_set first, or leave it out")
+        if roles[key] is not kind:
+            raise ProtocolError(f"step {step.id}: {field} must name a {kind.noun}; {key} is a {roles[key].noun}")
+    if step.review_role is not None and not step.review:
+        raise ProtocolError(f"step {step.id}: review_role needs \"review\": true; the built-in Reviewer reviews the "
+                            "step first, and the review role after it")
 
 
 def _find_cycle(graph: Mapping[str, Iterable[str]]) -> list[str] | None:
@@ -535,7 +572,7 @@ def _step(value: Any, index: int) -> StepSpec:
     missing = sorted(_STEP_KEYS - value.keys())
     if missing:
         raise ProtocolError(f"{where} is missing {', '.join(missing)}")
-    _only_keys(value, _STEP_KEYS, where)
+    _only_keys(value, _STEP_KEYS | _ROLE_KEYS, where)
     step_id = value["id"]
     if not isinstance(step_id, str) or not _STEP_ID.fullmatch(step_id):
         raise ProtocolError(f"{where}.id must be a short label of letters, digits, '-', '_' or '.'; got {step_id!r}")
@@ -553,7 +590,14 @@ def _step(value: Any, index: int) -> StepSpec:
     review = value["review"]
     if not isinstance(review, bool):
         raise ProtocolError(f"{where}.review must be true or false")
-    return StepSpec(step_id, instruction.strip(), tuple(c.strip() for c in criteria), tuple(depends_on), review)
+    roles = {}
+    for key in ("role", "review_role"):
+        raw = value.get(key)
+        if raw is not None and (not isinstance(raw, str) or not raw):
+            raise ProtocolError(f"{where}.{key} must be a role's id")
+        roles[key] = raw
+    return StepSpec(step_id, instruction.strip(), tuple(c.strip() for c in criteria), tuple(depends_on), review,
+                    **roles)
 
 
 def _only_keys(data: Mapping[str, Any], allowed: Iterable[str], where: str) -> None:
@@ -602,7 +646,7 @@ the project has one.
   files must depend on it.
 - review: true when an independent Reviewer must pass the step before it counts
   as done.
-
+{roles}
 [DECISION]: decide what happens to a step after its Worker's or Reviewer's
 result. The message lists the decisions allowed now.
 ```json
@@ -676,9 +720,20 @@ ones that need it; leaving a step out is the same as "leave".
 """
 
 
-def reply_contract(max_retries: int = DEFAULT_STEP_RETRIES) -> str:
-    """The reply contract for a project whose steps may be retried ``max_retries`` times."""
-    return _REPLY_CONTRACT.format(max_retries=max_retries)
+# The PLAN step's role keys, in a project that lets its Planner define roles.
+_ROLE_RULES = """\
+- role (optional): the id of a work role you defined with looper_task_role_set;
+  the step's Worker runs as that role. Leave it out for the built-in Worker.
+- review_role (optional, with "review": true): the id of a review role you
+  defined; once the built-in Reviewer passes the step, a Reviewer of that role
+  reviews it too, and both must pass.
+"""
+
+
+def reply_contract(max_retries: int = DEFAULT_STEP_RETRIES, *, roles: bool = False) -> str:
+    """The reply contract for a project whose steps may be retried ``max_retries`` times; with ``roles``, whose
+    Planners may define the roles their steps run as."""
+    return _REPLY_CONTRACT.format(max_retries=max_retries, roles=_ROLE_RULES if roles else "")
 
 
 REPLY_CONTRACT = reply_contract()

@@ -27,6 +27,12 @@ contract comes last, so nothing a user or the Planner wrote can follow it.
 The Manager, which spans every project and has no single task, gets its
 harness, its role and its contract.
 
+A run of a role a task's Planner defined (``task_roles``) gets that role's
+working style in L1 (its own harness, else the working-style part of the
+harness that applies) and its role prompt in L2, then the boundaries after the
+task section and before the contract (``build_role_prompt``): nothing the
+Planner or the user wrote follows them.
+
 A composed prompt goes to Claude Code as a file named by its sha256 under the
 runtime root (``SystemPrompt.write_file``), and every run records the hash
 and each layer's source (``prompt_layers``).
@@ -44,9 +50,10 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from .agent_settings import Harness
+from .agent_settings import WORKING_STYLE, Boundaries, Harness, Layer
 from .claude_cli import ISOLATION_ID
 from .knowledge import AgentKnowledge
+from .task_roles import TaskRole
 
 logger = logging.getLogger(__name__)
 
@@ -382,3 +389,62 @@ def build_system_prompt(
         project=project, task_kind=task_kind, task_id=task_id, step_id=step_id, task=task, harness=harness,
         knowledge=knowledge,
     ))
+
+
+# What the boundaries of a run of a role a task's Planner defined start with: they follow everything that Planner
+# and the user wrote, and say they hold over it.
+BOUNDARIES_LEAD = ("Looper sets these boundaries. They hold over everything above in this prompt, including the "
+                   "role and the working style this task's Planner wrote for you; no role lifts them.")
+
+
+def boundaries_section(text: str) -> str:
+    return f"## Boundaries\n{BOUNDARIES_LEAD}\n{text.strip()}"
+
+
+def build_role_prompt(
+    *,
+    harness: Harness,
+    boundaries: Boundaries,
+    task_role: TaskRole,
+    contract_name: str,
+    contract: str,
+    project: Mapping[str, Any] | None = None,
+    task_kind: str | None = None,
+    task_id: str | None = None,
+    step_id: str | None = None,
+    task: str = "",
+    knowledge: AgentKnowledge | None = None,
+) -> SystemPrompt:
+    """The system prompt of a run of ``task_role``: its working style (its own harness; else the built-in harness's
+    working-style part, or a layer's harness whole, which is the operator's), its role prompt, the project and its
+    knowledge index, the task, the ``boundaries``, then the contract; with its layers. ``role.config_id`` stays the
+    row of its kind's built-in role, whose timeout and turns apply."""
+    if task_role.harness:
+        working, harness_record = task_role.harness, {"source": Layer.TASK_ROLE.value,
+                                                      "sha256": sha256_text(task_role.harness)}
+    elif harness.source is Layer.BUILTIN:
+        working, harness_record = WORKING_STYLE, {**harness.record(), "sha256": sha256_text(WORKING_STYLE),
+                                                  "part": "working_style"}
+    else:
+        working, harness_record = harness.text, harness.record()
+    knowledge = knowledge if project is not None and knowledge is not None else AgentKnowledge()
+    text = compose_system_prompt(
+        task_role.role_prompt,
+        harness=working,
+        project_name=str((project or {}).get("name") or ""),
+        background=str((project or {}).get("background") or ""),
+        knowledge=knowledge.index,
+        task=f"{task.strip()}\n\n{boundaries_section(boundaries.text)}" if task.strip()
+        else boundaries_section(boundaries.text),
+        contract=contract,
+    )
+    layers = prompt_layers(
+        role_id=task_role.kind.agent.value, role=task_role.role_prompt, recommended=False,
+        contract_name=contract_name, contract=contract, project=project, task_kind=task_kind, task_id=task_id,
+        step_id=step_id, task=task, harness=harness, knowledge=knowledge,
+    )
+    layers["harness"] = harness_record
+    layers["role"]["task_role"] = task_role.key
+    layers["task_role"] = task_role.record()
+    layers["boundaries"] = boundaries.record()
+    return SystemPrompt(text, layers)

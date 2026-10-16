@@ -609,7 +609,7 @@ class AgentHTTPServer:
             writer.write(_json_response(HTTP_401, {"error": "this Planner's token no longer works: its task ended or "
                                                             "a new Planner took over"}))
         elif path == f"{AGENT_API}tools" and method == "GET":
-            writer.write(_json_response(HTTP_200, {"tools": ops.listing()}))
+            writer.write(_json_response(HTTP_200, {"tools": await ops.listing(header)}))
         elif (m := _RE_AGENT_OP.match(path)) and method == "POST":
             try:
                 arguments = json.loads(body.decode("utf-8")) if body.strip() else {}
@@ -1184,12 +1184,14 @@ class AgentHTTPServer:
             from ..db.tasks import get_task_with_steps
             from ..db.manager_actions import for_task as manager_actions
             from ..db.task_changes import requirement_versions
+            from .task_roles import roles_view
             raw = await get_task_with_steps(task_id)
             cost = (await task_costs([task_id]))[task_id] if raw else None
             overrides = await profile_overrides(task_id) if raw else {}
             versions = await requirement_versions(task_id) if raw else []
             actions = await manager_actions(task_id) if raw else []
             agents = await projects.agents_view(raw) if raw else None
+            roles = await roles_view(task_id, raw.get("steps", [])) if raw else None
         except Exception:
             logger.exception("DB unavailable for task_detail %s", task_id)
             writer.write(_json_response(HTTP_500, {"error": "database unavailable"}))
@@ -1229,6 +1231,10 @@ class AgentHTTPServer:
             # Each task role's Agent Profile and concurrency for the task, with where each comes from; the task's
             # own choices are source "task" (projects.agents_view).
             "agents": agents,
+            # The roles the task's Planner defined for its steps (current version, earlier versions, the steps that
+            # name each, its numbers), and the built-in Worker's and Reviewer's numbers (task_roles.roles_view).
+            "roles": roles["roles"],
+            "builtin_role_stats": roles["builtin"],
             "origin_channel_id": raw.get("origin_channel_id", ""),
             "result_summary": raw.get("result_summary"),
             "error": raw.get("error"),

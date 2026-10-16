@@ -34,7 +34,7 @@ async def read_layers(conn: asyncpg.Connection) -> list[dict[str, Any]]:
     """Every layer, its Agent Profile by name (``profile``)."""
     rows = await conn.fetch(
         "SELECT l.scope, l.role, l.project_id, l.harness_prompt, l.profile_id, a.name AS profile, l.env, "
-        "l.run_budget_usd, l.max_concurrency "
+        "l.run_budget_usd, l.max_concurrency, l.boundaries "
         "FROM agent_setting_layers l LEFT JOIN agent_profiles a ON a.id = l.profile_id "
         "ORDER BY l.project_id NULLS FIRST, l.scope, l.role NULLS FIRST"
     )
@@ -209,16 +209,17 @@ async def write_layer(
     conn: asyncpg.Connection, scope: str, role: str | None, project_id: str | None, values: Mapping[str, Any],
 ) -> None:
     """Make one layer exactly ``values`` (``harness_prompt``, ``profile_id``, ``env``, ``run_budget_usd``,
-    ``max_concurrency``)."""
+    ``max_concurrency``, ``boundaries``)."""
     await conn.execute(
         "INSERT INTO agent_setting_layers (scope, role, project_id, harness_prompt, profile_id, env, "
-        "run_budget_usd, max_concurrency) VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8) "
+        "run_budget_usd, max_concurrency, boundaries) VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8, $9) "
         "ON CONFLICT (scope, (COALESCE(role, '')), (COALESCE(project_id, ''))) DO UPDATE SET "
         "harness_prompt = EXCLUDED.harness_prompt, profile_id = EXCLUDED.profile_id, "
         "env = EXCLUDED.env, run_budget_usd = EXCLUDED.run_budget_usd, max_concurrency = EXCLUDED.max_concurrency, "
-        "updated_at = now()",
+        "boundaries = EXCLUDED.boundaries, updated_at = now()",
         scope, role, project_id, values["harness_prompt"], values["profile_id"],
         json.dumps(list(values["env"]), ensure_ascii=False), values["run_budget_usd"], values["max_concurrency"],
+        values.get("boundaries"),
     )
 
 

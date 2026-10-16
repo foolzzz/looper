@@ -21,7 +21,12 @@ Every field is optional, and ``None`` inherits today's behavior:
   a git checkout on a branch, a worktree of its own that is merged into the
   branch when the step is accepted (``worktree``, ``step_workspaces``);
 - ``max_step_retries``: how many times the Planner may retry one step, 0 to
-  ``STEP_RETRIES_MAX`` (``DEFAULT_STEP_RETRIES`` when unset).
+  ``STEP_RETRIES_MAX`` (``DEFAULT_STEP_RETRIES`` when unset);
+- ``planner_roles``: whether the project's Planners may define the roles their
+  steps run as (``on``) or not (``off``, also when unset; ``task_roles``);
+- ``role_text_max_chars``: how long such a role's prompt and its harness may
+  each be, ``ROLE_TEXT_MIN_CHARS`` to ``ROLE_TEXT_MAX_CHARS``
+  (``DEFAULT_ROLE_TEXT_CHARS`` when unset).
 
 The columns live on ``projects`` (``db.projects.EXECUTION_COLUMNS``); this
 module owns their types and validation. Agents read them when a run or turn
@@ -47,6 +52,9 @@ FIELDS = EXECUTION_COLUMNS
 SUPERVISE_MAX_SECONDS = 86_400
 DEFAULT_STEP_RETRIES = 2
 STEP_RETRIES_MAX = 20
+DEFAULT_ROLE_TEXT_CHARS = 8_000
+ROLE_TEXT_MIN_CHARS = 500
+ROLE_TEXT_MAX_CHARS = 20_000
 
 
 class ReviewPolicy(str, Enum):
@@ -64,6 +72,11 @@ class StepWorkspaces(str, Enum):
     WORKTREE = "worktree"
 
 
+class PlannerRoles(str, Enum):
+    OFF = "off"
+    ON = "on"
+
+
 class LessonsMode(str, Enum):
     OFF = "off"
     DRAFT = "draft"
@@ -79,6 +92,8 @@ class ProjectExecution:
     distill_lessons: LessonsMode = LessonsMode.OFF
     step_workspaces: StepWorkspaces | None = None
     max_step_retries: int | None = None
+    planner_roles: PlannerRoles | None = None
+    role_text_max_chars: int | None = None
 
     @property
     def review_all(self) -> bool:
@@ -97,6 +112,16 @@ class ProjectExecution:
     def step_retries(self) -> int:
         """How many times the Planner may retry one step."""
         return DEFAULT_STEP_RETRIES if self.max_step_retries is None else self.max_step_retries
+
+    @property
+    def roles_on(self) -> bool:
+        """Whether the project's Planners may define the roles their steps run as."""
+        return self.planner_roles is PlannerRoles.ON
+
+    @property
+    def role_text_limit(self) -> int:
+        """How long a role's prompt and its harness may each be."""
+        return DEFAULT_ROLE_TEXT_CHARS if self.role_text_max_chars is None else self.role_text_max_chars
 
     @property
     def on_task_budget(self) -> TaskBudgetAction:
@@ -151,6 +176,13 @@ def _parse(field: str, raw: Any) -> Any:
         return _choice(field, raw, ReviewPolicy)
     if field == "step_workspaces":
         return _choice(field, raw, StepWorkspaces)
+    if field == "planner_roles":
+        return _choice(field, raw, PlannerRoles)
+    if field == "role_text_max_chars":
+        if isinstance(raw, bool) or not isinstance(raw, int) or not ROLE_TEXT_MIN_CHARS <= raw <= ROLE_TEXT_MAX_CHARS:
+            raise ValueError(f"role_text_max_chars must be a whole number from {ROLE_TEXT_MIN_CHARS} to "
+                             f"{ROLE_TEXT_MAX_CHARS}, or null for {DEFAULT_ROLE_TEXT_CHARS}")
+        return raw
     if field == "max_step_retries":
         if isinstance(raw, bool) or not isinstance(raw, int) or not 0 <= raw <= STEP_RETRIES_MAX:
             raise ValueError(f"max_step_retries must be a whole number from 0 to {STEP_RETRIES_MAX}, or null for "

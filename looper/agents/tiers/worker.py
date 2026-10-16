@@ -22,6 +22,15 @@ documents' directories are mounted with ``--add-dir``), the catalog items
 installed for its role, globally or in its project (each plugin and generated
 skill plugin a ``--plugin-dir``) and its project's execution settings
 (``project_execution``: the model and ``--max-budget-usd``) as it starts.
+
+A run whose dispatch names a role its task's Planner defined (``task_role``,
+``task_roles.TaskRole``) runs as that version of the role: its working style
+and role prompt in place of the harness's working style and the row's role
+prompt, the boundaries after the task section (``system_prompt.build_role_prompt``),
+and the role's profile under the task's own choice
+(``agent_settings.Layer.TASK_ROLE``); its kind's row, installs and contract
+otherwise. Every run records how its report or verdict read
+(``RunOutcome``, ``metadata.outcome``).
 """
 
 from __future__ import annotations
@@ -33,6 +42,7 @@ import shutil
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from enum import Enum
 from pathlib import Path
 from typing import Any
 
@@ -44,6 +54,7 @@ from ..run_usage import run_usage
 from ..knowledge import documents_label, load_knowledge
 from ..library import items_label, load_installed
 from ..runtimes import RuntimeAdapter
+from ..task_roles import TaskRole
 from ..message import (
     AgentAddress,
     MessageEnvelope,
@@ -54,6 +65,7 @@ from . import journal
 from ..system_prompt import (
     REVIEW_CONTRACT,
     WORK_CONTRACT,
+    build_role_prompt,
     build_system_prompt,
     is_recommended,
     review_task_section,
@@ -168,6 +180,38 @@ def extract_report(text: str, key: str) -> dict[str, Any] | None:
             found = obj
         i = text.find("{", end)
     return found
+
+
+class RunOutcome(str, Enum):
+    """How a Worker's or Reviewer's run ended, as ``run_outcome`` reads it; kept in its record."""
+
+    COMPLETED = "completed"  # the report says completed and matches the files
+    REPORTED_FAILED = "reported_failed"  # the report says failed
+    FILES_MISMATCH = "files_mismatch"  # a completed report the files do not bear out
+    PASSED = "passed"  # the verdict passes the step
+    NOT_PASSED = "not_passed"  # the verdict does not
+    CONTRACT = "contract"  # no report or verdict, or one that does not read: a contract violation
+    RUN_FAILED = "run_failed"  # the run itself did not succeed (no result, an error, a cap)
+
+
+def run_outcome(result_event: dict[str, Any] | None, judged: dict[str, Any], *, is_verify: bool) -> RunOutcome:
+    """How a run whose ``result_event`` ``judge_result`` judged ``judged`` ended, read the same way."""
+    if result_event is None or result_event.get("is_error") or result_event.get("subtype") != "success":
+        return RunOutcome.RUN_FAILED
+    text = str(result_event.get("result") or "")
+    if is_verify:
+        verdict = extract_report(text, "passed")
+        if verdict is None or not isinstance(verdict.get("passed"), bool):
+            return RunOutcome.CONTRACT
+        return RunOutcome.PASSED if verdict["passed"] else RunOutcome.NOT_PASSED
+    report = extract_report(text, "status")
+    if report is None or report.get("status") not in ("completed", "failed") \
+            or not isinstance(report.get("changed_files", {}), dict) or not isinstance(report.get("deleted_files", []),
+                                                                                  list):
+        return RunOutcome.CONTRACT
+    if report["status"] == "failed":
+        return RunOutcome.REPORTED_FAILED
+    return RunOutcome.COMPLETED if judged.get("status") == "completed" else RunOutcome.FILES_MISMATCH
 
 
 def _work_failed(error: str, **extra: Any) -> dict[str, Any]:
@@ -613,6 +657,14 @@ class WorkerPool:
             prompt = self._build_work_prompt(payload)
 
         agent = AgentType.REVIEWER if is_verify else AgentType.WORKER
+        # The role its task's Planner defined that the run runs as, when its dispatch names one.
+        task_role = TaskRole.from_payload(payload.get("task_role"))
+        if payload.get("task_role") is not None and (task_role is None or task_role.kind.agent is not agent):
+            problem = f"The dispatch names a role this {agent.value} cannot run as: {payload.get('task_role')!r}"[:500]
+            logger.error("worker %s: %s", worker_id, problem)
+            if is_verify:
+                return {"passed": False, "findings": [problem], "summary": problem}
+            return {"status": "failed", "error": problem}
         settings = await _load_settings(agent)
         run_timeout, max_turns = settings.timeout_seconds, settings.max_turns
         # Read as the run starts: a later change reaches the next run, not this one.
@@ -622,8 +674,9 @@ class WorkerPool:
         library = await load_installed(self._runtime_root, agent.value, project_id)
         # The task's own choice of Agent Profile for this role wins over the layers, then its Planner's for this step,
         # then its Planner's for the rest of the task.
-        agent_settings = await load_agent_settings(agent, project_id, parent_task_id or None,
-                                                   step_id=payload.get("task_id") or None)
+        agent_settings = await load_agent_settings(
+            agent, project_id, parent_task_id or None, step_id=payload.get("task_id") or None,
+            task_role=(task_role.key, task_role.version) if task_role is not None and parent_task_id else None)
         if agent_settings.profile_error:
             # The step fails with the reason rather than run another agent.
             logger.error("worker %s: %s", worker_id, agent_settings.profile_error)
@@ -635,20 +688,39 @@ class WorkerPool:
             return {"status": "failed", "error": agent_settings.profile_error}
         launch = Launch(agent_settings, library, knowledge, role=AgentType.REVIEWER if is_verify else AgentType.WORKER)
         background = str((project or {}).get("background") or "")
-        system_prompt = build_system_prompt(
-            harness=agent_settings.harness,
-            role_id=agent.value,
-            role=settings.system_prompt,
-            recommended=settings.recommended,
-            project=project,
-            task_kind="review" if is_verify else "work",
-            task_id=parent_task_id or None,
-            step_id=payload.get("task_id") or None,
-            task=self._task_section(payload, work_dir, is_verify=is_verify),
-            contract_name="REVIEW_CONTRACT" if is_verify else "WORK_CONTRACT",
-            contract=REVIEW_CONTRACT if is_verify else WORK_CONTRACT,
-            knowledge=knowledge,
-        )
+        if task_role is None:
+            system_prompt = build_system_prompt(
+                harness=agent_settings.harness,
+                role_id=agent.value,
+                role=settings.system_prompt,
+                recommended=settings.recommended,
+                project=project,
+                task_kind="review" if is_verify else "work",
+                task_id=parent_task_id or None,
+                step_id=payload.get("task_id") or None,
+                task=self._task_section(payload, work_dir, is_verify=is_verify),
+                contract_name="REVIEW_CONTRACT" if is_verify else "WORK_CONTRACT",
+                contract=REVIEW_CONTRACT if is_verify else WORK_CONTRACT,
+                knowledge=knowledge,
+            )
+        else:
+            system_prompt = build_role_prompt(
+                harness=agent_settings.harness,
+                boundaries=agent_settings.boundaries,
+                task_role=task_role,
+                project=project,
+                task_kind="review" if is_verify else "work",
+                task_id=parent_task_id or None,
+                step_id=payload.get("task_id") or None,
+                task=self._task_section(payload, work_dir, is_verify=is_verify),
+                contract_name="REVIEW_CONTRACT" if is_verify else "WORK_CONTRACT",
+                contract=REVIEW_CONTRACT if is_verify else WORK_CONTRACT,
+                knowledge=knowledge,
+            )
+            if parent_task_id:
+                await self._activity(parent_task_id, worker_id, "phase",
+                                     f"Runs as role {task_role.label} ({task_role.kind.value}; profile "
+                                     f"{agent_settings.profile.name}, from {agent_settings.profile_source.value})")
         if background.strip() and parent_task_id:
             await self._activity(parent_task_id, worker_id, "phase",
                                  f"Project background applied ({len(background)} chars)")
@@ -721,7 +793,7 @@ class WorkerPool:
         except OSError as exc:
             logger.error("worker %s failed to start subprocess: %s", worker_id, exc)
             error = f"Cannot start Claude Code: {exc}"
-            await recorder.finish(output_text=None, result_event=None, error=error)
+            await recorder.finish(output_text=None, result_event=None, error=error, outcome=RunOutcome.RUN_FAILED.value)
             return {"status": "failed", "error": error}
 
         assert process.stdin is not None
@@ -834,7 +906,8 @@ class WorkerPool:
                 f"Claude ran longer than the {run_timeout} s limit (timeout_seconds)" if timed_out
                 else f"worker stopped reading Claude: {type(exc).__name__}"
             )
-            await recorder.finish(output_text=None, result_event=result_event, error=error)
+            await recorder.finish(output_text=None, result_event=result_event, error=error,
+                                  outcome=RunOutcome.RUN_FAILED.value)
             if timed_out:
                 raise asyncio.TimeoutError(error) from exc
             raise
@@ -859,7 +932,8 @@ class WorkerPool:
                 stderr_bytes = await process.stderr.read()
                 stderr = stderr_bytes.decode("utf-8", errors="replace") if stderr_bytes else ""
             error = f"Claude Code exited with code {return_code}"
-            await recorder.finish(output_text=final_text, result_event=result_event, error=error)
+            await recorder.finish(output_text=final_text, result_event=result_event, error=error,
+                                  outcome=RunOutcome.RUN_FAILED.value)
             return {"status": "failed", "error": error, "stderr": stderr[:500]}
         if return_code != 0:
             logger.warning(
@@ -876,7 +950,8 @@ class WorkerPool:
         # A review that says "not passed" is still a successful run; only work
         # failures are the run's error.
         error = outcome.get("error") if not is_verify and outcome.get("status") == "failed" else None
-        await recorder.finish(output_text=final_text, result_event=result_event, error=error)
+        await recorder.finish(output_text=final_text, result_event=result_event, error=error,
+                              outcome=run_outcome(result_event, outcome, is_verify=is_verify).value)
         return outcome
 
     @staticmethod

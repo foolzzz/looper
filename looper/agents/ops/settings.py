@@ -33,7 +33,8 @@ from .config import answered, by_id_or_name, project_named
 # A role's timeout per turn or run, at most (as a configuration import takes it).
 TIMEOUT_MAX_SECONDS = 365 * 86400
 FIELD_WORDS = {"harness_prompt": "Harness prompt", "profile_id": "Agent Profile", "env": "环境变量",
-               "run_budget_usd": "每次运行的花费上限", "max_concurrency": "并发上限", "timeout_seconds": "超时"}
+               "run_budget_usd": "每次运行的花费上限", "max_concurrency": "并发上限", "timeout_seconds": "超时",
+               "boundaries": "规划者定义的角色的边界"}
 LIMIT_NOTE = "调低不会停止正在运行的工作：超出的运行完为止，新的会等待；调高后排队的会立即开始。"
 
 
@@ -140,7 +141,7 @@ def _shown_value(name: str, value: Any, profiles: Mapping[str, str]) -> str:
     """A layer's own value as the user is shown it."""
     if value in (None, [], ""):
         return "未设置（继承上一层）"
-    if name == "harness_prompt":
+    if name in ("harness_prompt", "boundaries"):
         return f"自定义（{len(value)} 字：{clip(' '.join(value.split()), 40)}）"
     if name == "profile_id":
         return profiles.get(value, value)
@@ -341,6 +342,8 @@ TOOLS: tuple[Tool, ...] = (
                                             "description": "Per project (planner: tasks); with role."},
                         "timeout_seconds": {"type": "integer", "minimum": 0, "maximum": TIMEOUT_MAX_SECONDS,
                                             "description": "With role, no project; 0: none."},
+                        "boundaries": {"type": "string", "description": "Shared defaults only: what every run of "
+                                                                        "a role a task's Planner defines ends with."},
                     },
                 },
                 "add": {"type": "array", "description": "allowed_profiles: profile ids or names."},

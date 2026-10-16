@@ -201,7 +201,8 @@ CREATE TABLE IF NOT EXISTS task_journal (
     step_id     TEXT NOT NULL,
     kind        TEXT NOT NULL CONSTRAINT task_journal_kind_check CHECK (kind IN (
                     'step_accepted', 'step_failed', 'step_retry', 'decision', 'supplement',
-                    'session_switch', 'handoff', 'progress', 'profile_choice', 'concurrency_change')),
+                    'session_switch', 'handoff', 'progress', 'profile_choice', 'concurrency_change',
+                    'role_defined')),
     summary     TEXT NOT NULL DEFAULT '',
     learnings   TEXT[] NOT NULL DEFAULT '{}',
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -523,6 +524,18 @@ BEGIN
     END IF;
 END $$;
 
+-- Once (roles a task's Planner defines): each new version of a role joins the journal kinds.
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM schema_migrations WHERE name = 'task_journal_kinds_task_roles') THEN
+        ALTER TABLE task_journal DROP CONSTRAINT IF EXISTS task_journal_kind_check;
+        ALTER TABLE task_journal ADD CONSTRAINT task_journal_kind_check CHECK (kind IN (
+            'step_accepted', 'step_failed', 'step_retry', 'decision', 'supplement', 'session_switch',
+            'handoff', 'progress', 'profile_choice', 'concurrency_change', 'role_defined'));
+        INSERT INTO schema_migrations (name) VALUES ('task_journal_kinds_task_roles');
+    END IF;
+END $$;
+
 -- Once (Agent Profiles replace LLM profiles): llm_profiles and the role
 -- configs' runtime and llm_profile_id were never on any agent's launch path;
 -- runtimes, providers and Agent Profiles replace them.
@@ -576,6 +589,11 @@ ALTER TABLE projects ADD COLUMN IF NOT EXISTS step_workspaces TEXT CHECK (step_w
 -- How many times the Planner may retry one step (NULL: 2).
 ALTER TABLE projects ADD COLUMN IF NOT EXISTS max_step_retries INTEGER
     CHECK (max_step_retries >= 0 AND max_step_retries <= 20);
+-- Whether the project's Planners may define the roles their steps run as ('on'; 'off', also when NULL), and how
+-- long a role's prompt and its harness may each be (NULL: 8,000 characters).
+ALTER TABLE projects ADD COLUMN IF NOT EXISTS planner_roles TEXT CHECK (planner_roles IN ('off', 'on'));
+ALTER TABLE projects ADD COLUMN IF NOT EXISTS role_text_max_chars INTEGER
+    CHECK (role_text_max_chars >= 500 AND role_text_max_chars <= 20000);
 -- What a task that completes leaves in the project's knowledge, from one more
 -- Planner turn over the task journal: nothing ('off'), a draft the user
 -- confirms or discards on the project page ('draft'), or a document ('write').
@@ -749,6 +767,11 @@ CREATE TABLE IF NOT EXISTS agent_setting_layers (
 CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_setting_layers_place
     ON agent_setting_layers (scope, COALESCE(role, ''), COALESCE(project_id, ''));
 
+-- The boundaries every run of a role a task's Planner defines ends with (agent_settings.BOUNDARIES; NULL: the
+-- built-in ones): set on the shared defaults only.
+ALTER TABLE agent_setting_layers ADD COLUMN IF NOT EXISTS boundaries TEXT
+    CONSTRAINT agent_setting_layers_boundaries_check CHECK (boundaries IS NULL OR scope = 'system');
+
 -- Once (layered settings): the values that lived in four places move into
 -- their layer, unchanged; the old columns and keys are dropped. The Settings
 -- defaults (system_settings agent.*) become the system layer; each role's
@@ -881,6 +904,38 @@ CREATE TABLE IF NOT EXISTS task_planner_profiles (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_task_planner_profiles_place
     ON task_planner_profiles (task_id, role, (COALESCE(step_id, '')));
+-- The roles a task's Planner defines for its steps (looper/agents/task_roles.py; ops/planner.py,
+-- looper_task_role_set): one row per version of a role, the newest its current one. kind 'work' runs a step in
+-- the built-in Worker's place, 'review' reviews a step after the built-in Reviewer passed it. profile_id NULL:
+-- the profile the step's built-in role of that kind would get; one its project no longer allows counts as none.
+-- harness NULL: the working-style part of the harness that applies. Planning the task anew drops them.
+CREATE TABLE IF NOT EXISTS task_roles (
+    task_id      TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    role_key     TEXT NOT NULL,
+    version      INTEGER NOT NULL CHECK (version >= 1),
+    kind         TEXT NOT NULL CHECK (kind IN ('work', 'review')),
+    profile_id   TEXT REFERENCES agent_profiles(id) ON DELETE SET NULL,
+    role_prompt  TEXT NOT NULL CHECK (role_prompt <> ''),
+    harness      TEXT,
+    reason       TEXT NOT NULL DEFAULT '',
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (task_id, role_key, version)
+);
+-- A step's roles: the work role its Worker runs as (NULL: the built-in Worker) and the review role that reviews
+-- it after the built-in Reviewer (NULL: none; only on a reviewed step), the versions its latest attempt and its
+-- latest role review ran with, and which review a step in review waits for ('builtin' or 'role').
+ALTER TABLE task_steps ADD COLUMN IF NOT EXISTS role_key TEXT;
+ALTER TABLE task_steps ADD COLUMN IF NOT EXISTS review_role_key TEXT;
+ALTER TABLE task_steps ADD COLUMN IF NOT EXISTS role_version INTEGER;
+ALTER TABLE task_steps ADD COLUMN IF NOT EXISTS review_role_version INTEGER;
+ALTER TABLE task_steps ADD COLUMN IF NOT EXISTS review_stage TEXT CHECK (review_stage IN ('builtin', 'role'));
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'task_steps_review_role_reviewed') THEN
+        ALTER TABLE task_steps ADD CONSTRAINT task_steps_review_role_reviewed
+            CHECK (review_role_key IS NULL OR review);
+    END IF;
+END $$;
 
 -- Once (agent teams are on by default for Claude Code profiles): every profile on a Claude Code runtime, the
 -- built-in one and those the migrations above added included, gets them. Only once, so a profile the user turns

@@ -61,7 +61,10 @@ gets when it starts and that stops working when it stops. With them it
 chooses its Workers' and Reviewers' Agent Profiles from its project's list
 and changes its task's or its project's concurrency; they change things only
 in a turn Looper sends it, and its system prompt says how to use them after
-the reply contract.
+the reply contract. Where its project lets it (``planner_roles`` ``on``), it also
+defines roles for its steps (``task_roles``): a step's Worker may run as a work
+role, and a reviewed step may have a review role that reviews it once the
+built-in Reviewer passed it (``ReviewStage``); both must pass.
 """
 
 from __future__ import annotations
@@ -72,6 +75,7 @@ import time
 import uuid
 from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
+from enum import Enum
 from pathlib import Path
 from typing import Any, TypeVar
 
@@ -95,6 +99,7 @@ from ..run_usage import Usage
 from ..runtimes import CLAUDE_CODE
 from ..session_switch import SessionSwitch
 from ..step_workspaces import MergeError, MergeResult, Repo, StepWorkspace, StepWorkspaceState, Unusable
+from ..task_roles import RoleKind, TaskRole
 from ..system_prompt import SystemPrompt, build_system_prompt, is_recommended, plan_task_section
 from ..message import (
     TASK_ROUTER_ADDRESS,
@@ -135,7 +140,7 @@ logger = logging.getLogger(__name__)
 from ...db import activity as db_activity, role_configs as db_role_configs, llm_records as db_llm_records
 from ...db import agent_sessions as db_agent_sessions, plans as db_plans, projects as db_projects
 from ...db import journal as db_journal, step_workspaces as db_step_workspaces, task_changes as db_changes
-from ...db import tasks as db_tasks
+from ...db import task_roles as db_roles, tasks as db_tasks
 from ...db.task_changes import TaskChanges
 from ...db.tasks import FailKind, update_task_phase
 
@@ -255,6 +260,13 @@ class _Process:
     launch: Launch
 
 
+class ReviewStage(str, Enum):
+    """Which review a step in review waits for: the built-in Reviewer's, or then its review role's."""
+
+    BUILTIN = "builtin"
+    ROLE = "role"
+
+
 @dataclass
 class PlanStep:
     step_id: str  # unique across tasks: the task_steps row id
@@ -277,6 +289,13 @@ class PlanStep:
     missed_messages: list[str] = field(default_factory=list)
     # Its latest worktree, in a project with step workspaces (step_workspaces rows, not the step's).
     workspace: StepWorkspace | None = None
+    # The roles its task's Planner defined that it runs as (None: the built-in Worker) and that reviews it after the
+    # built-in Reviewer (None: none), and the versions its latest attempt and its latest role review ran with.
+    role: str | None = None
+    review_role: str | None = None
+    role_version: int | None = None
+    review_role_version: int | None = None
+    review_stage: ReviewStage | None = None  # in review: which review it waits for
 
     @property
     def label(self) -> str:
@@ -418,6 +437,11 @@ def _step_row(step: PlanStep) -> dict[str, Any]:
         "retries": step.retries,
         "feedback": step.feedback,
         "missed_messages": step.missed_messages,
+        "role_key": step.role,
+        "review_role_key": step.review_role,
+        "role_version": step.role_version,
+        "review_role_version": step.review_role_version,
+        "review_stage": step.review_stage.value if step.review_stage else None,
     }
 
 
@@ -433,6 +457,11 @@ def _sentence(text: str) -> str:
 
 def result_outcome(result: Mapping[str, Any]) -> str:
     """What a step's last result was, in a line: what a retry, a failure or an unfinished step is about."""
+    role_review = result.get("role_review")
+    if isinstance(role_review, Mapping) and role_review.get("passed") is not True:
+        findings = "; ".join(_clip(f, 200) for f in role_review.get("findings") or [] if str(f).strip())
+        return (f"review by role {role_review.get('role')} failed: "
+                f"{findings or _clip(role_review.get('summary'), 300) or 'no reason given'}")
     if "verify_passed" in result and result.get("verify_passed") is not True:
         findings = "; ".join(_clip(f, 200) for f in result.get("verify_findings") or [] if str(f).strip())
         return f"review failed: {findings or _clip(result.get('verify_summary'), 300) or 'no reason given'}"
@@ -549,6 +578,9 @@ class PlannerAgent:
         self._drafted: set[str] = set()
         # Why the last round of steps started fewer than were ready (step workspaces), noted once.
         self._round_note = ""
+        # The task's roles by key as last read (after each reply, before it is checked); None while its project lets
+        # its Planner define none.
+        self._roles: dict[str, RoleKind] | None = None
 
     @property
     def agent_id(self) -> str:
@@ -686,7 +718,8 @@ class PlannerAgent:
             await self._fail_plan(plan, reason=f"Planning failed: {problem}")
             return
         try:
-            reply = await self._ask(TurnKind.PLAN, self._plan_message(plan), parse_plan)
+            reply = await self._ask(TurnKind.PLAN, self._plan_message(plan),
+                                    lambda text: parse_plan(text, self._roles))
         except PlannerTurnError as exc:
             await self._fail_plan(plan, reason=f"Planning failed: {exc}")
             return
@@ -737,6 +770,7 @@ class PlannerAgent:
             step.instruction = spec.instruction
             step.acceptance_criteria = list(spec.acceptance_criteria)
             step.review = spec.review or self._execution.review_all
+            step.role, step.review_role = spec.role, spec.review_role
             changed.append(step)
         for spec, step in zip(specs, changed):
             step.depends_on = [by_label[label].step_id for label in spec.depends_on]
@@ -750,7 +784,9 @@ class PlannerAgent:
             if step.depends_on:
                 notes.append("after " + "+".join(labels.get(d, d) for d in step.depends_on))
             if step.review:
-                notes.append("review")
+                notes.append("review" + (f" + {step.review_role}" if step.review_role else ""))
+            if step.role:
+                notes.append(f"as {step.role}")
             parts.append(step.label + (f" ({', '.join(notes)})" if notes else ""))
         return ", ".join(parts)
 
@@ -766,9 +802,11 @@ class PlannerAgent:
             if step.status == "pending":  # a decision on an earlier step of the round may have started it
                 await self._dispatch_step(plan, step, base=base)
 
-    async def _dispatch_step(self, plan: TaskPlan, step: PlanStep, *, base: _RoundBase | None = None) -> None:
+    async def _dispatch_step(self, plan: TaskPlan, step: PlanStep, *, base: _RoundBase | None = None,
+                             same_attempt: bool = False) -> None:
         """Start ``step``'s Worker: in the step's worktree when it has one or ``base`` gives it one (a retry after
-        a merge that failed gets a new one), else in the task directory."""
+        a merge that failed gets a new one), else in the task directory; as the current version of its role when
+        it has one (the version it ran with, for the ``same_attempt`` a restart runs again)."""
         assert self._bus is not None
         if not await self._within_budget(plan):
             return
@@ -776,6 +814,15 @@ class PlannerAgent:
         step.status = "dispatched"
         step.worker_id = worker_id
         previous = (step.result or {}) if (step.result or {}).get("status") == "unmerged" else {}
+        task_role: TaskRole | None = None
+        if step.role is not None:
+            task_role = await self._role(step.role, step.role_version if same_attempt else None)
+            if task_role is None:
+                await self._save(plan, step)
+                await self._attempt_failed(plan, step, f"Cannot read role {step.role} of step {step.label}, which its "
+                                                       "Worker runs as")
+                return
+            step.role_version = task_role.version
         try:
             await self._open_workspace(plan, step, base)
         except _NoWorkspace as exc:
@@ -783,7 +830,8 @@ class PlannerAgent:
             await self._workspace_failed(plan, step, str(exc))
             return
         await self._save(plan, step)
-        await self._activity("phase", f"Worker dispatched: {step.instruction[:80]}", worker=worker_id)
+        await self._activity("phase", f"Worker dispatched{f' as {task_role.label}' if task_role else ''}: "
+                                      f"{step.instruction[:80]}", worker=worker_id)
         context: dict[str, Any] = {"work_dir": plan.work_dir}
         if step.isolated and step.workspace is not None:
             context = {"work_dir": step.workspace.work_dir, "workspace": step.workspace.context()}
@@ -815,6 +863,8 @@ class PlannerAgent:
                 "dependencies": self._dependency_reports(plan, step),
                 "findings": journal.worker_section(plan.journal, step.depends_on),
                 "context": context,
+                # The version of the role its Worker runs as, when it has one.
+                **({"task_role": task_role.payload()} if task_role is not None else {}),
             },
             correlation_id=plan.correlation_id,
             metadata={"origin_channel_id": plan.origin_channel_id},
@@ -917,7 +967,11 @@ class PlannerAgent:
 
     async def _workspace_failed(self, plan: TaskPlan, step: PlanStep, problem: str) -> None:
         """A step that needed a worktree got none: the attempt failed, and the Planner decides what follows."""
-        result = {"status": "failed", "error": f"Cannot create a worktree for step {step.label}: {problem}"}
+        await self._attempt_failed(plan, step, f"Cannot create a worktree for step {step.label}: {problem}")
+
+    async def _attempt_failed(self, plan: TaskPlan, step: PlanStep, error: str) -> None:
+        """A step's attempt could not start (``error`` says why): it failed, and the Planner decides what follows."""
+        result = {"status": "failed", "error": error}
         step.result = result
         await self._activity("error", result["error"][:500], worker=step.worker_id)
         context = DecisionContext(step=step.label, result=ResultKind.WORK, succeeded=False,
@@ -1053,14 +1107,27 @@ class PlannerAgent:
         )
         await self._decide(plan, step, context, self._work_report(step, result))
 
-    async def _spawn_reviewer(self, plan: TaskPlan, step: PlanStep) -> None:
+    async def _spawn_reviewer(self, plan: TaskPlan, step: PlanStep, *, same_attempt: bool = False) -> None:
+        """Start the review ``step`` waits for (``review_stage``): the built-in Reviewer's, or its review role's (the
+        version it ran with, for the ``same_attempt`` a restart runs again)."""
         assert self._bus is not None
         if not await self._within_budget(plan):
             return
+        task_role: TaskRole | None = None
+        if step.review_stage is ReviewStage.ROLE and step.review_role is not None:
+            task_role = await self._role(step.review_role, step.review_role_version if same_attempt else None)
+            if task_role is None:
+                await self._role_review_failed(plan, step, f"Cannot read role {step.review_role}, which reviews step "
+                                                           f"{step.label}")
+                return
+            step.review_role_version = task_role.version
+        elif step.review_stage is None:
+            step.review_stage = ReviewStage.BUILTIN
         reviewer_id = f"reviewer-{uuid.uuid4().hex[:12]}"
         step.reviewer_id = reviewer_id
         await self._save(plan, step)
-        await self._activity("phase", f"Reviewer dispatched for step {step.index + 1} ({step.label})", worker=reviewer_id)
+        await self._activity("phase", f"Reviewer dispatched for step {step.index + 1} ({step.label})"
+                                      + (f" as {task_role.label}" if task_role else ""), worker=reviewer_id)
         context: dict[str, Any] = {"work_dir": plan.work_dir}
         if step.isolated and step.workspace is not None:
             # It reviews the step's own result, in the step's worktree.
@@ -1081,6 +1148,8 @@ class PlannerAgent:
                 "work_result": step.result or {},
                 "acceptance_criteria": step.acceptance_criteria,
                 "context": context,
+                # The version of the review role that reviews the step now, when that is the review it waits for.
+                **({"task_role": task_role.payload()} if task_role is not None else {}),
             },
             correlation_id=plan.correlation_id,
             metadata={"origin_channel_id": plan.origin_channel_id},
@@ -1099,20 +1168,48 @@ class PlannerAgent:
         passed = result.get("passed") is True
         findings = result.get("findings") or []
         await self._capture_project_learnings(plan, step, result.get("learnings"), "Reviewer")
-        step.result = {**(step.result or {}), "verify_passed": passed, "verify_findings": findings,
-                       "verify_summary": result.get("summary", ""),
-                       "verify_learnings": journal.reported_learnings(result.get("learnings"))}
-        await self._activity(
-            "text" if passed else "error",
-            f"Verify {'passed' if passed else 'failed'}: {str(result.get('summary') or '')[:150]}",
-            worker=step.reviewer_id,
-        )
+        if step.review_stage is ReviewStage.ROLE:
+            step.result = {**(step.result or {}), "role_review": {
+                "role": step.review_role, "version": step.review_role_version, "passed": passed,
+                "findings": findings, "summary": result.get("summary", ""),
+                "learnings": journal.reported_learnings(result.get("learnings"))}}
+            await self._activity(
+                "text" if passed else "error",
+                f"Review by role {step.review_role} v{step.review_role_version} {'passed' if passed else 'failed'}: "
+                f"{str(result.get('summary') or '')[:150]}", worker=step.reviewer_id,
+            )
+        else:
+            step.result = {**(step.result or {}), "verify_passed": passed, "verify_findings": findings,
+                           "verify_summary": result.get("summary", ""),
+                           "verify_learnings": journal.reported_learnings(result.get("learnings"))}
+            await self._activity(
+                "text" if passed else "error",
+                f"Verify {'passed' if passed else 'failed'}: {str(result.get('summary') or '')[:150]}",
+                worker=step.reviewer_id,
+            )
+            if passed and step.review_role is not None:
+                # The built-in Reviewer passed it: its review role reviews it too, before any decision.
+                step.review_stage = ReviewStage.ROLE
+                await self._spawn_reviewer(plan, step)
+                return
         context = DecisionContext(
             step=step.label, result=ResultKind.REVIEW, succeeded=passed,
             review_required=self._needs_review(step), retries=step.retries,
             max_retries=self._execution.step_retries,
         )
         await self._decide(plan, step, context, self._review_report(step, result))
+
+    async def _role_review_failed(self, plan: TaskPlan, step: PlanStep, problem: str) -> None:
+        """The review role's review of ``step`` could not start: the review fails, and the Planner decides."""
+        verdict = {"passed": False, "findings": [problem], "summary": problem}
+        step.result = {**(step.result or {}), "role_review": {"role": step.review_role, "version": None,
+                                                              **verdict, "learnings": []}}
+        await self._save(plan, step)
+        await self._activity("error", problem[:500])
+        context = DecisionContext(step=step.label, result=ResultKind.REVIEW, succeeded=False,
+                                  review_required=self._needs_review(step), retries=step.retries,
+                                  max_retries=self._execution.step_retries)
+        await self._decide(plan, step, context, self._review_report(step, verdict))
 
     async def _decide(self, plan: TaskPlan, step: PlanStep, context: DecisionContext, report: list[str]) -> None:
         """Ask the Planner's Claude what to do with ``step``'s result, then do it.
@@ -1129,7 +1226,7 @@ class PlannerAgent:
         step.missed_messages.clear()
         try:
             reply = await self._ask(
-                TurnKind.DECISION, message, lambda text: parse_decision(text, context, view),
+                TurnKind.DECISION, message, lambda text: parse_decision(text, context, self._with_roles(view)),
             )
         except PlannerTurnError as exc:
             if self._execution.review_all and context.result is ResultKind.WORK and context.succeeded:
@@ -1185,7 +1282,7 @@ class PlannerAgent:
                                               f"Retry: {reply.feedback}")
             step.retries += 1
             step.feedback.append(reply.feedback)
-            step.reviewer_id = None
+            step.reviewer_id, step.review_stage = None, None
             await self._save(plan, step, entries=[retried])
             await self._dispatch_step(plan, step)
             await self._report_progress(plan)
@@ -1205,6 +1302,7 @@ class PlannerAgent:
     async def _send_to_review(self, plan: TaskPlan, step: PlanStep) -> None:
         step.review = True
         step.status = "completed"
+        step.review_stage = ReviewStage.BUILTIN
         await self._save(plan, step)
         await update_task_phase(self._task_id, "verifying")
         await self._spawn_reviewer(plan, step)
@@ -1347,9 +1445,9 @@ class PlannerAgent:
             if step.status != status:
                 continue
             if status == "dispatched":
-                await self._dispatch_step(plan, step)
+                await self._dispatch_step(plan, step, same_attempt=True)
             elif status == "completed":
-                await self._spawn_reviewer(plan, step)
+                await self._spawn_reviewer(plan, step, same_attempt=True)
         for step, status in cut_off:
             if plan.status not in _LIVE:
                 return
@@ -1371,7 +1469,12 @@ class PlannerAgent:
     async def _decide_again(self, plan: TaskPlan, step: PlanStep) -> None:
         """Take the decision on ``step`` that a restart cut off, from the result saved with it."""
         result = step.result or {}
-        if "verify_passed" in result:  # a Reviewer's verdict, added to the Worker's result
+        role_review = result.get("role_review")
+        if isinstance(role_review, Mapping):  # the review role's verdict, after the built-in Reviewer passed
+            passed = role_review.get("passed") is True
+            kind = ResultKind.REVIEW
+            report = self._review_report(step, role_review)
+        elif "verify_passed" in result:  # a Reviewer's verdict, added to the Worker's result
             passed = result.get("verify_passed") is True
             kind = ResultKind.REVIEW
             report = self._review_report(step, {"passed": passed, "summary": result.get("verify_summary"),
@@ -1423,7 +1526,7 @@ class PlannerAgent:
         entries += [self._restart_entry(step) for step in unfinished]
         again = [s for s in plan.steps if s.status not in ("verified", "skipped") and (s.status != "pending" or s.started)]
         for step in again:
-            step.status, step.worker_id, step.reviewer_id = "pending", None, None
+            step.status, step.worker_id, step.reviewer_id, step.review_stage = "pending", None, None, None
         await self._save(plan, *merged, *again, plan_row=True, entries=entries)
         await update_task_phase(self._task_id, "executing")
         kept = sum(1 for s in plan.steps if s.status == "verified")
@@ -1438,7 +1541,7 @@ class PlannerAgent:
         view = plan.view()
         try:
             reply: ChatReply | None = await self._ask(TurnKind.RESTART, self._restart_message(plan, why, changes),
-                                                      lambda answer: parse_chat(answer, view))
+                                                      lambda answer: parse_chat(answer, self._with_roles(view)))
         except PlannerTurnError as exc:
             await self._activity("error", f"Warning: the Planner could not take the restart: {exc}. The steps not "
                                           "started run as they are."[:500])
@@ -1560,7 +1663,7 @@ class PlannerAgent:
         view = plan.view()
         message = self._change_message(plan, changes)
         try:
-            reply = await self._ask(TurnKind.CHAT, message, lambda answer: parse_chat(answer, view))
+            reply = await self._ask(TurnKind.CHAT, message, lambda answer: parse_chat(answer, self._with_roles(view)))
         except PlannerTurnError as exc:
             await self._activity("error", f"Planner could not take a change to the task: {exc}"[:500])
             return f"Planner 出错，没能处理这次变更（会在下一轮重试）：{exc}"
@@ -1818,6 +1921,7 @@ class PlannerAgent:
         """
         run = run or self._turn
         reply = await run(message)
+        await self._read_roles()  # a role the turn defined counts for its reply
         try:
             return parse(reply)
         except ProtocolError as first:
@@ -1826,10 +1930,40 @@ class PlannerAgent:
                 f"[{kind.value}] Your last reply broke the reply contract: {first}\n"
                 f"Answer the same request again. End with exactly one ```json block in the {kind.value} shape."
             )
+            await self._read_roles()
             try:
                 return parse(reply)
             except ProtocolError as second:
                 raise PlannerTurnError(f"invalid reply after a repair turn: {second}") from None
+
+    async def _read_roles(self) -> None:
+        """Read the task's roles by key (``self._roles``) where its project lets its Planner define them; a failed
+        read keeps the last ones read."""
+        if not self._execution.roles_on:
+            self._roles = None
+            return
+        try:
+            rows = await db_roles.current(self._task_id)
+        except Exception:
+            logger.warning("planner %s cannot read its task's roles; keeping the last ones read", self.agent_id,
+                           exc_info=True)
+            self._roles = self._roles or {}
+            return
+        self._roles = {row["role_key"]: RoleKind(row["kind"]) for row in rows}
+
+    def _with_roles(self, view: PlanView) -> PlanView:
+        """``view`` with the task's roles as last read, for checking a reply."""
+        return replace(view, roles=self._roles)
+
+    async def _role(self, key: str, version: int | None = None) -> TaskRole | None:
+        """Version ``version`` of the task's role ``key`` (its current one without a version); None when it cannot
+        be read."""
+        try:
+            row = await db_roles.get(self._task_id, key, version)
+        except Exception:
+            logger.warning("planner %s cannot read role %s", self.agent_id, key, exc_info=True)
+            return None
+        return TaskRole.from_row(row) if row else None
 
     async def _turn(self, message: str) -> str:
         async with self._turn_lock:
@@ -2146,7 +2280,8 @@ class PlannerAgent:
             ),
             contract_name="REPLY_CONTRACT",
             # With its platform tools, how to use them follows the reply contract.
-            contract=reply_contract(self._execution.step_retries) + (f"\n{self._ops.guide}" if self._ops else ""),
+            contract=reply_contract(self._execution.step_retries, roles=self._execution.roles_on)
+            + (f"\n{self._ops.guide_for(roles=self._execution.roles_on)}" if self._ops else ""),
             knowledge=knowledge,
         )
 
@@ -2157,9 +2292,11 @@ class PlannerAgent:
         lines = ["Plan:"]
         for step in plan.steps:
             deps = ", ".join(labels.get(d, d) for d in step.depends_on) or "none"
+            roles = (f"; role: {step.role}" if step.role else "") + \
+                (f"; review role: {step.review_role}" if step.review_role else "")
             lines.append(
                 f"- {step.label} [{step.status}] {_clip(step.instruction, 200)} "
-                f"(depends on: {deps}; review: {'yes' if step.review else 'no'}; retries: {step.retries})"
+                f"(depends on: {deps}; review: {'yes' if step.review else 'no'}; retries: {step.retries}{roles})"
             )
             summary = _clip((step.result or {}).get("summary"), 200) if step.status == "verified" else ""
             if summary:
@@ -2185,8 +2322,9 @@ class PlannerAgent:
         ])
 
     def _work_report(self, step: PlanStep, result: dict[str, Any]) -> list[str]:
+        role = f" (as role {step.role} v{step.role_version})" if step.role and step.role_version else ""
         lines = [
-            f"Result of step {step.label} from {step.worker_id}:",
+            f"Result of step {step.label} from {step.worker_id}{role}:",
             f"- status: {result.get('status') or 'unknown'}",
         ]
         if result.get("summary"):
@@ -2205,9 +2343,17 @@ class PlannerAgent:
             lines.append(f"- the Worker's final message: {_clip(result['final_message'], 300)}")
         return lines + _learning_lines(result.get("learnings"))
 
-    def _review_report(self, step: PlanStep, result: dict[str, Any]) -> list[str]:
-        lines = [
-            f"Review of step {step.label} by {step.reviewer_id}:",
+    def _review_report(self, step: PlanStep, result: Mapping[str, Any]) -> list[str]:
+        lines = []
+        by = step.reviewer_id
+        if step.review_stage is ReviewStage.ROLE:
+            # The review role reviews only a step the built-in Reviewer passed.
+            summary = _clip((step.result or {}).get("verify_summary"), 300)
+            lines.append(f"The built-in Reviewer passed step {step.label}" + (f": {summary}" if summary else "."))
+            by = f"{step.reviewer_id} (review role {step.review_role} v{step.review_role_version}; both reviews must " \
+                 "pass)"
+        lines += [
+            f"Review of step {step.label} by {by}:",
             f"- passed: {'yes' if result.get('passed') is True else 'no'}",
         ]
         if result.get("summary"):
@@ -2795,6 +2941,11 @@ class PlannerAgent:
                 retries=int(sd.get("retries") or 0),
                 feedback=list(sd.get("feedback") or []),
                 missed_messages=list(sd.get("missed_messages") or []),
+                role=sd.get("role_key"),
+                review_role=sd.get("review_role_key"),
+                role_version=sd.get("role_version"),
+                review_role_version=sd.get("review_role_version"),
+                review_stage=ReviewStage(sd["review_stage"]) if sd.get("review_stage") else None,
             ))
         plan.journal = [JournalEntry.from_row(row) for row in stored.get("journal") or []]
         try:
