@@ -3,7 +3,7 @@ import { ArrowLeft, ArrowRight, Loader2, Play } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
-import { LastRun, NoticeText, RunHistory, ScheduleTime } from "@/components/project-schedules";
+import { DeleteSchedule, LastRun, NoticeText, RunHistory, ScheduleTime } from "@/components/project-schedules";
 import { fetchSchedule, runSchedule, updateSchedule, type ScheduleInfo, type TaskRole } from "@/lib/api";
 import { roleLabel } from "@/lib/runtime-catalog";
 import { NOTIFY_OPTIONS, runNotice, useNotices } from "@/lib/schedules";
@@ -36,10 +36,11 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
 }
 
 /**
- * One schedule (`#schedules/<id>`): its settings, its alerts and today's spend, its switch and "Run now", and the runs
- * it fired with their tasks. It is edited on its project's Schedules tab, which "Edit" opens.
+ * One schedule (`#schedules/<id>`): its settings, its alerts and today's spend, its switch, "Run now" and "Delete
+ * schedule", and the runs it fired with their tasks. It is edited on its project's Schedules tab, which "Edit" opens.
+ * `onDeleted` runs once it is deleted (back to the list).
  */
-export function ScheduleDetail({ scheduleId }: { scheduleId: string }) {
+export function ScheduleDetail({ scheduleId, onDeleted }: { scheduleId: string; onDeleted: () => void }) {
   const [schedule, setSchedule] = useState<ScheduleInfo | null>(null);
   const [error, setError] = useState("");
   /** The enabled value being saved. */
@@ -179,6 +180,7 @@ export function ScheduleDetail({ scheduleId }: { scheduleId: string }) {
             Edit on the project
             <ArrowRight className="h-3.5 w-3.5" aria-hidden="true" />
           </a>
+          <DeleteSchedule schedule={schedule} onDeleted={onDeleted} />
         </div>
         {notices[scheduleId] && <NoticeText notice={notices[scheduleId]} />}
       </header>
