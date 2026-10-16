@@ -224,7 +224,7 @@ def _limit_confirmed(look: Look) -> str | None:
 
 
 def _task_limit_set(look: Look) -> str | None:
-    worker = look.detail()["concurrency"]["roles"]["worker"]
+    worker = look.detail()["agents"]["roles"]["worker"]["concurrency"]
     if (worker["task"], worker["source"]) != (1, "task"):
         return f"the task's Worker limit is {worker}, not its own 1"
     direct = [a for a in _writes(look, status="ok", tool="looper_concurrency")

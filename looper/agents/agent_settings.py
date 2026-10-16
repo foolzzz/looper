@@ -572,15 +572,18 @@ def resolve_task_concurrency(role: AgentType, layers: Mapping[Place, LayerValues
     return Concurrency(own, Layer.TASK) if own is not None and own <= limit.value else limit
 
 
-def task_concurrency_view(layers: Mapping[Place, LayerValues], project_id: str | None) -> dict[str, Any]:
-    """Each task role's concurrency for one task (``layers`` read with its task): the Planner's is its project's,
-    how many of the project's tasks run at once; a Worker's or Reviewer's is what applies to the task, with the
-    task's own limit (``task``, None for none) and its project's."""
-    view: dict[str, Any] = {AgentType.PLANNER.value: resolve_concurrency(AgentType.PLANNER, layers, project_id).view()}
-    for role in TASK_LIMIT_ROLES:
-        view[role.value] = {**resolve_task_concurrency(role, layers, project_id).view(),
-                            "task": layers.get((Layer.TASK, role), EMPTY_LAYER).max_concurrency,
-                            "project": resolve_concurrency(role, layers, project_id).view()}
+def task_agents_view(layers: Mapping[Place, LayerValues], project_id: str | None) -> dict[str, Any]:
+    """Each task role's Agent Profile and concurrency for one task (``layers`` read with its task), each with where
+    it comes from (``task`` for the task's own choice). The Planner's concurrency is its project's, how many of the
+    project's tasks run at once; a Worker's or Reviewer's is what applies to the task, with the task's own limit
+    (``task``, None for none) and its project's."""
+    view: dict[str, Any] = {}
+    for role in TASK_ROLES:
+        concurrency = resolve_concurrency(role, layers, project_id).view()
+        if role in TASK_LIMIT_ROLES:
+            concurrency = {**resolve_task_concurrency(role, layers, project_id).view(),
+                           "task": layers.get((Layer.TASK, role), EMPTY_LAYER).max_concurrency, "project": concurrency}
+        view[role.value] = {"profile": resolve(role, layers, project_id).view()["profile"], "concurrency": concurrency}
     return view
 
 

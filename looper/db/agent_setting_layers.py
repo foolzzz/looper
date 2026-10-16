@@ -106,39 +106,23 @@ async def set_profile_overrides(conn: asyncpg.Connection, task_id: str, profiles
     )
 
 
-async def set_task_profiles(task_id: str, profiles: Mapping[str, str | None], *,
-                            pool: asyncpg.Pool | None = None) -> None:
-    """Change task ``task_id``'s choice of Agent Profile for each role in ``profiles`` (role -> profile id; None
-    drops the task's choice of that role), in one transaction. Raises ``asyncpg.ForeignKeyViolationError`` for an
-    unknown task or profile."""
+async def set_task_layer(task_id: str, *, profiles: Mapping[str, str | None] | None = None,
+                         limits: Mapping[str, int | None] | None = None, pool: asyncpg.Pool | None = None) -> None:
+    """Change task ``task_id``'s own choices, in one transaction: its Agent Profile of each role in ``profiles``
+    (role -> profile id) and its concurrency limit of each role in ``limits`` (role -> limit); None drops the task's
+    choice of that role. Raises ``asyncpg.ForeignKeyViolationError`` for an unknown task or profile."""
     pool = pool or get_pool()
     async with pool.acquire() as conn, conn.transaction():
-        for role, profile_id in profiles.items():
-            if profile_id is None:
-                await conn.execute("DELETE FROM task_profile_overrides WHERE task_id = $1 AND role = $2",
-                                   task_id, role)
-            else:
-                await conn.execute(
-                    "INSERT INTO task_profile_overrides (task_id, role, profile_id) VALUES ($1, $2, $3) "
-                    "ON CONFLICT (task_id, role) DO UPDATE SET profile_id = EXCLUDED.profile_id",
-                    task_id, role, profile_id)
-
-
-async def set_task_concurrency(task_id: str, limits: Mapping[str, int | None], *,
-                               pool: asyncpg.Pool | None = None) -> None:
-    """Set task ``task_id``'s concurrency limit of each role in ``limits`` (role -> limit; None drops the task's own
-    limit of that role), in one transaction. Raises ``asyncpg.ForeignKeyViolationError`` for an unknown task."""
-    pool = pool or get_pool()
-    async with pool.acquire() as conn, conn.transaction():
-        for role, limit in limits.items():
-            if limit is None:
-                await conn.execute("DELETE FROM task_concurrency_limits WHERE task_id = $1 AND role = $2",
-                                   task_id, role)
-            else:
-                await conn.execute(
-                    "INSERT INTO task_concurrency_limits (task_id, role, max_concurrency) VALUES ($1, $2, $3) "
-                    "ON CONFLICT (task_id, role) DO UPDATE SET max_concurrency = EXCLUDED.max_concurrency",
-                    task_id, role, limit)
+        for table, column, values in (("task_profile_overrides", "profile_id", profiles or {}),
+                                      ("task_concurrency_limits", "max_concurrency", limits or {})):
+            for role, value in values.items():
+                if value is None:
+                    await conn.execute(f"DELETE FROM {table} WHERE task_id = $1 AND role = $2", task_id, role)
+                else:
+                    await conn.execute(
+                        f"INSERT INTO {table} (task_id, role, {column}) VALUES ($1, $2, $3) "
+                        f"ON CONFLICT (task_id, role) DO UPDATE SET {column} = EXCLUDED.{column}",
+                        task_id, role, value)
 
 
 async def task_concurrency(task_ids: list[str], *, pool: asyncpg.Pool | None = None) -> dict[str, dict[str, int]]:

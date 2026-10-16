@@ -10,9 +10,10 @@ Workers, Reviewers), read afresh when each prompt is built. Its execution
 settings (``project_execution``) are top-level fields of the project too,
 ``null`` to inherit. Its agent settings (harness, Agent Profile with its model and
 effort, environment, per-run cap) are layers of their own (``agent_settings``,
-``/api/projects/<id>/agent-settings``). A task that has not ended may limit how
-many of its Workers or Reviewers run at once, within its project's limit
-(``set_task_concurrency``).
+``/api/projects/<id>/agent-settings``). A task that has not ended may change
+its own choices per role (``set_task_agents``): the Agent Profile of its roles,
+and how many of its Workers or Reviewers run at once, within its project's
+limit.
 """
 
 from __future__ import annotations
@@ -28,7 +29,7 @@ import asyncpg
 from ..db import agent_setting_layers as db_layers, connection as db_connection, llm_records as db_llm_records
 from ..db import projects as db_projects, tasks as db_tasks
 from .agent_settings import CONCURRENCY_MAX, TASK_LIMIT_ROLES, AgentType, SettingsError, concurrency, index_layers
-from .agent_settings import task_concurrency_view
+from .agent_settings import task_agents_view
 from .bus import MessageBus
 from .message import TASK_ROUTER_ADDRESS, AgentAddress, MessageEnvelope, MessageType, planner_address
 from .project_execution import FIELDS as EXECUTION_FIELDS, ProjectExecution, execution_fields, format_usd
@@ -392,44 +393,103 @@ async def edit_requirement(
     return {"task_id": task_id, "version": version, "requirement": requirement}
 
 
-async def concurrency_view(task: dict[str, Any]) -> dict[str, Any]:
-    """Task ``task``'s concurrency, read now: each task role's (``agent_settings.task_concurrency_view``), the most
-    a limit may be, and whether the task can change its own (it has not ended)."""
+# What a task's own choices per role are (``set_task_agents``), and when a new profile applies.
+TASK_AGENT_FIELDS = ("profiles", "concurrency")
+PROFILES_NOTE = ("a Worker or Reviewer uses its new profile from its next step on; the Planner moves to its new "
+                 "profile at its next turn, after a handoff")
+
+
+async def agents_view(task: dict[str, Any]) -> dict[str, Any]:
+    """Task ``task``'s agents, read now: each task role's Agent Profile and concurrency with their sources
+    (``agent_settings.task_agents_view``), the most a limit may be, and whether the task can change its own
+    choices (it has not ended)."""
     project_id = task.get("project_id")
     layers = index_layers(await db_layers.list_layers(project_id, task_id=task["id"]), project_id)
-    return {"roles": task_concurrency_view(layers, project_id), "max": CONCURRENCY_MAX,
+    return {"roles": task_agents_view(layers, project_id), "concurrency_max": CONCURRENCY_MAX,
             "editable": task.get("status") in EDITABLE_STATUSES}
 
 
-async def set_task_concurrency(task_id: str, data: dict[str, Any]) -> dict[str, Any]:
-    """Set how many of the task's Workers or Reviewers run at once (``{"worker": 2, "reviewer": null}``; null drops
-    the task's own limit, and its project's applies): 400 for a bad role or value, 404 for an unknown task, 409 for
-    one that has ended. The caller lets waiting runs check again; a lowered limit stops nothing that runs."""
+async def profile_choices(raw: Any, *, clearing: bool) -> dict[str, str | None]:
+    """``profiles``, a task's choice of Agent Profile per role (by id or name), as role -> profile id (None: drop the
+    task's choice, only when ``clearing``); each one registered and able to run its role. 400 otherwise."""
+    from ..db import profile_registry as db_profiles
+    from .profile_registry import RegistryError, check_selection
+
+    if not raw:
+        return {}
+    if not isinstance(raw, dict):
+        raise RequestError(HTTP_400, 'profiles must be an object: {"planner" | "worker" | "reviewer": profile}')
+    registered: list[dict[str, Any]] | None = None
+    chosen: dict[str, str | None] = {}
+    for role, wanted in raw.items():
+        if role not in TASK_PROFILE_ROLES:
+            raise RequestError(HTTP_400, f"profiles: a task chooses the Agent Profile of its "
+                                         f"{', '.join(TASK_PROFILE_ROLES)} only, not {role!r}")
+        if wanted is None:
+            if not clearing:
+                raise RequestError(HTTP_400, f"profiles.{role}: give an Agent Profile, or leave the role out")
+            chosen[role] = None
+            continue
+        if not isinstance(wanted, str):
+            raise RequestError(HTTP_400, f"profiles.{role}: give an Agent Profile's id or name, or null")
+        if registered is None:
+            registered = await db_profiles.list_profiles()
+        match = next((p for p in registered if p["id"] == wanted), None) or next(
+            (p for p in registered if str(p["name"]).casefold() == wanted.strip().casefold()), None)
+        if match is None:
+            names = ", ".join(str(p["name"]) for p in registered[:20])
+            raise RequestError(HTTP_400, f"profiles.{role}: no Agent Profile {wanted!r}; registered: {names}")
+        try:
+            await check_selection(match["id"], [role])
+        except RegistryError as exc:
+            raise RequestError(HTTP_400, f"profiles.{role}: {exc}") from None
+        chosen[role] = match["id"]
+    return chosen
+
+
+def _concurrency_limits(raw: Any) -> dict[str, int | None]:
+    """``concurrency``, how many of a task's Workers or Reviewers run at once (null drops the task's own)."""
     roles = [role.value for role in TASK_LIMIT_ROLES]
-    if not data:
-        raise RequestError(HTTP_400, f"give the limit of at least one of {', '.join(roles)}")
+    if not isinstance(raw, dict):
+        raise RequestError(HTTP_400, 'concurrency must be an object: {"worker" | "reviewer": limit}')
     limits: dict[str, int | None] = {}
-    for role, raw in data.items():
+    for role, value in raw.items():
         if role == AgentType.PLANNER.value:
             raise RequestError(HTTP_400, "one Planner runs a task, so a task has no Planner limit; how many of a "
                                          "project's tasks run at once is the project's planner limit")
         if role not in roles:
             raise RequestError(HTTP_400, f"unknown role {role!r}; a task limits its {' and '.join(roles)}")
         try:
-            limits[role] = None if raw is None else concurrency(raw)
+            limits[role] = None if value is None else concurrency(value)
         except SettingsError as exc:
-            raise RequestError(HTTP_400, f"{role}: {exc}") from None
+            raise RequestError(HTTP_400, f"concurrency.{role}: {exc}") from None
+    return limits
+
+
+async def set_task_agents(task_id: str, data: dict[str, Any]) -> dict[str, Any]:
+    """Change the task's own choices per role, together: ``profiles`` (an Agent Profile, by id or name, for its
+    Planner, Workers or Reviewers) and ``concurrency`` (how many of its Workers or Reviewers run at once, within its
+    project's limit); null drops the task's choice of that role, and its layers apply. 400 for a bad field, role or
+    value, 404 for an unknown task, 409 for one that has ended. Answers the task's agents as they are then (and when
+    a new profile applies). The caller lets waiting runs check again; a lowered limit stops nothing that runs."""
+    unknown = sorted(set(data) - set(TASK_AGENT_FIELDS))
+    if unknown:
+        raise RequestError(HTTP_400, f"unknown field {unknown[0]!r}; the fields are {', '.join(TASK_AGENT_FIELDS)}")
+    if not data.get("profiles") and not data.get("concurrency"):
+        raise RequestError(HTTP_400, "give at least one role's profiles or concurrency")
+    limits = _concurrency_limits(data["concurrency"]) if data.get("concurrency") else {}
     task = await db_tasks.get_task(task_id)
     if task is None:
         raise RequestError(HTTP_404, "task not found")
     if task["status"] not in EDITABLE_STATUSES:
         raise RequestError(HTTP_409, f"the task is {task['status']}: only a task that has not ended can change its "
-                                     "concurrency")
+                                     "agents")
+    profiles = await profile_choices(data.get("profiles"), clearing=True)
     try:
-        await db_layers.set_task_concurrency(task_id, limits)
-    except asyncpg.ForeignKeyViolationError:  # deleted meanwhile
-        raise RequestError(HTTP_404, "task not found") from None
-    return {"task_id": task_id, "concurrency": await concurrency_view(task)}
+        await db_layers.set_task_layer(task_id, profiles=profiles, limits=limits)
+    except asyncpg.ForeignKeyViolationError:
+        raise RequestError(HTTP_404, "the task, or an Agent Profile it chose, was removed meanwhile") from None
+    return {"task_id": task_id, "agents": await agents_view(task), **({"note": PROFILES_NOTE} if profiles else {})}
 
 
 async def raise_cap_to_continue(task_id: str, data: dict[str, Any]) -> dict[str, Any]:

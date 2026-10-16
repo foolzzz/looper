@@ -4,7 +4,7 @@ task's Workers and Reviewers.
 A project's limits are its roles' layers in the project, written as its
 Settings tab writes them (``agent_settings.update_project``): the user
 confirms them first (``high``). A task's are its own, set as the task page
-sets them (``projects.set_task_concurrency``) and bounded by its project's,
+sets them (``projects.set_task_agents``) and bounded by its project's,
 so they take effect at once (``write``). Either way a raised limit starts
 what waits at once, and a lowered one stops nothing that runs.
 """
@@ -18,7 +18,7 @@ from typing import Any
 from ...db import agent_setting_layers as db_layers, projects as db_projects
 from ..agent_settings import CONCURRENCY_MAX, EMPTY_LAYER, TASK_ROLES, AgentType, Layer, SettingsError
 from ..agent_settings import SettingsNotFound, index_layers, resolve_concurrency, update_project
-from ..projects import RequestError, concurrency_view, project_name, set_task_concurrency
+from ..projects import RequestError, agents_view, project_name, set_task_agents
 from ..tiers.task import recheck_limits
 from . import Call, ErrorCode, OpError, Risk, Tool
 from .tasks import _TASK_ID, SOURCE_WORDS, _request_error, _task, _task_argument
@@ -111,15 +111,15 @@ async def _set(call: Call) -> dict[str, Any]:
 
 async def _set_task(task_id: str, limits: Mapping[AgentType, int | None]) -> dict[str, Any]:
     task = await _task(task_id)
-    before = (await concurrency_view(task))["roles"]
+    before = (await agents_view(task))["roles"]
     try:
-        after = await set_task_concurrency(task_id, {role.value: value for role, value in limits.items()})
+        after = await set_task_agents(task_id, {"concurrency": {role.value: value for role, value in limits.items()}})
     except RequestError as exc:
         raise _request_error(exc) from None
     changes = []
     for role in limits:
-        now = after["concurrency"]["roles"][role.value]
-        changes.append({"role": role.value, "before": _value(before[role.value]), "after": _value(now),
+        now = after["agents"]["roles"][role.value]["concurrency"]
+        changes.append({"role": role.value, "before": _value(before[role.value]["concurrency"]), "after": _value(now),
                         "task_limit": now["task"], "project_limit": now["project"]})
     capped = [c["role"] for c in changes if c["task_limit"] is not None and c["after"]["source"] != Layer.TASK.value]
     note = NOTE + (f" The project's own limit is lower than the task's for {', '.join(capped)}, so it applies."
