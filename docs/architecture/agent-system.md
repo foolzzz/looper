@@ -255,7 +255,16 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
   (`tasks.start_ready_task`, a conditional update: a task that is not ready
   is logged and left alone); the started task reports its plan and outcome
   to the chat it was asked for in
-- Handles task lifecycle: start, stop (pause), restart (resume), cancel
+- Handles task lifecycle: start, stop (pause), restart, cancel. A
+  `TASK_RESTART` runs a stopped, failed or cancelled task again as its `mode`
+  (`RestartMode`) says: `continue` (the default) goes on from the saved plan
+  ([Planner](#planner-looperagentstiersplannerpy), `[RESTART]`); `start_over`
+  plans it anew, deleting its steps, its plan, its Planner's session and its
+  step worktrees and branches first; `at_cap` continues a task that failed at
+  its spend cap once the cap is raised (`POST /api/tasks/:id/continue`). A
+  ready task started this way is simply planned. A new Planner drops whatever
+  an earlier Planner of the task left unread on the bus (a stop's cancel that
+  came during its turn would otherwise end it at once)
 - At most the Planner's concurrency limit of a project's tasks run at once
   ([Concurrency limits](#concurrency-limits)), read each time a task may
   start. A started, restarted or resumed task waits in its project's queue,
@@ -332,6 +341,26 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
     so a change made during another turn waits for it; one made before the
     task has a plan reaches the `[PLAN]` turn, and a message after the task
     ended is answered without a turn.
+  - `[RESTART]` when a stopped, failed or cancelled task is restarted
+    (`TASK_RESTART` `continue`): the Planner reads its plan back (in whatever
+    status the task left it) and goes on from it, in its saved session when
+    it can be resumed (else a new one, with the resume brief). Accepted steps
+    stay done and never run again, with their merged work; an accepted step
+    whose merge the end cut off is merged first. Every other step that did not
+    finish (failed, running, in review, awaiting a decision) goes back to not
+    started with its retries, feedback, last result and worktree, as a retry
+    keeps them, and a `step_retry` entry on how its last attempt ended; a
+    skipped step stays as history. The turn gives why the task ended (the
+    failure's reason, or that it was stopped or cancelled), the changes made
+    while it was ended, the plan with each step's status and summary, and the
+    journal, and is answered in the `[CHAT]` shape: `none` runs the steps not
+    started as they are, `add_steps` and `replan` change them first (there is
+    no `forward` or `stop`: nothing runs). A turn that fails leaves the steps
+    as they are and runs them, with a warning in the activity; a task whose
+    spend cap is spent fails at it again before the turn. A task without a
+    plan with steps (stopped during its `[PLAN]` turn) is planned anew, with
+    `Restarted without a saved plan to continue from: planning anew` in the
+    activity.
 - Reply contract (`looper/agents/tiers/planner_protocol.py`): `REPLY_CONTRACT`
   comes last in the system prompt, after the editable role prompt and the
   project section. Every reply ends with exactly
@@ -376,7 +405,8 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
     the reason, the learnings;
   - `step_retry`: the Planner retries a step: what went wrong with the
     attempt, the Planner's feedback, the learnings (a retry is this one entry,
-    not also a `decision`);
+    not also a `decision`); and a restart puts a step that did not finish back
+    to not started: how its last attempt ended;
   - `decision`: a replan (reason, steps added and dropped, and the decided
     step's outcome and learnings when its attempt is dropped), steps added
     from a chat message, the task stopped at its spend cap (with the
@@ -395,8 +425,8 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
     `{done, now, next, risks, estimate, at}`).
 
   An entry of the whole task has the step id `''`. Every `[PLAN]`,
-  `[DECISION]`, `[SUPERVISE]` and `[CHAT]` turn (and the spend-cap wrap-up)
-  carries the supplements, every one whole and oldest first, in a budget of
+  `[DECISION]`, `[SUPERVISE]`, `[CHAT]` and `[RESTART]` turn (and the
+  spend-cap wrap-up) carries the supplements, every one whole and oldest first, in a budget of
   their own (8,000 characters, which no other entry uses; only past it are the
   oldest left out and counted), then "Progress and findings": the newest entry
   of each kind first, then the other failures and retries, then the rest
@@ -1445,11 +1475,13 @@ the [step workspaces RFC](rfcs/step-workdir-isolation-v0.zh-CN.md)):
   to the task, loses its worktree and branch at once. A completed task's
   worktrees and branches are removed.
   A failed, stopped or cancelled task keeps its unmerged ones, and its activity
-  names their branches, until it is started anew (its steps go) or deleted;
-  continuing it from its plan reuses them. A merge that a restart cut off is
-  finished without a new decision. At startup the server removes what no task
-  keeps: the worktrees of a completed task, the directory of a merged or
-  dropped one, and directories no row knows.
+  names their branches, until it is started over (its steps go) or deleted;
+  restarting it, or continuing it at a raised cap, goes on with them: a step
+  that did not finish runs again in its worktree, and one whose merge failed
+  starts from the branch as it is now, told the old branch. A merge that a
+  restart cut off is finished without a new decision. At startup the server
+  removes what no task keeps: the worktrees of a completed task, the
+  directory of a merged or dropped one, and directories no row knows.
 - `step_workspaces` rows record each one: `active` → `merging` → `merged` or
   `unmerged`, and `discarded`, along `ALLOWED_TRANSITIONS`.
 
@@ -1925,7 +1957,7 @@ check alike.
 | `looper_overview` | Task counts by group, the running tasks and step runs, each active project's load against its limits, today's spend, unhealthy components | read |
 | `looper_tasks` | `list` (newest first; by `query` words in the id, name, requirement or project, by `group`, by `project`; at most `limit`) or `get` one task: status, phase, directory, requirement, steps, supplements (delivered or not), latest progress note, result, cost | read |
 | `looper_task_create` | Create a ready task: `requirement`, `title`, `project` (matched by name ignoring case), `work_dir` (else the project's default; a new project, or one without a default, needs one), `goal_id`, `profiles` (an Agent Profile by id or name for some roles). The task records the chat it came from (its progress, and in Telegram or Lark its end notice). Looper adds the configuration block (the settings in effect for the task, with the layer each came from, the project's review policy, spend cap, lessons setting and concurrency limit) and the start question | write; a new project is high |
-| `looper_task_control` | `start` a ready task (`TASK_START`); `stop` a queued or running one; `restart` a stopped, failed or cancelled one, planned anew; `cancel` a running one | write; cancel is high |
+| `looper_task_control` | `start` a ready task (`TASK_START`); `stop` a queued or running one; `restart` a stopped, failed or cancelled one, going on from its saved plan (`TASK_RESTART` `continue`); `start_over` one, planned anew with its steps, plan and Planner session deleted (`start_over`; the confirmation says how many accepted steps it deletes); `cancel` a running one | write; start_over and cancel are high |
 | `looper_task_instruct` | Add the user's words to a queued or running task as a supplement (`via` `manager:<channel>`), delivered to its Planner like any ([Changes to a task](#changes-to-a-task)) | write |
 | `looper_task_update` | Change a task that has not ended: its `requirement` (a new version, as on the task page), its `work_dir` (a task not started only), its `profiles` (a profile per role, `null` to drop the task's choice; a Worker or Reviewer uses it from its next step, the Planner at its next turn after a handoff) | write |
 | `looper_confirm` | Run the call waiting for confirmation in this chat | — |
@@ -1999,7 +2031,7 @@ Key message types:
 | `TASK_ACCEPTED` | Planner → TaskRouter → Manager | Plan made, with its step count |
 | `TASK_CANCEL` | HTTP → TaskRouter → Planner | Terminate task permanently |
 | `TASK_STOP` | HTTP → TaskRouter | Pause task (preserves state) |
-| `TASK_RESTART` | HTTP → TaskRouter | Resume stopped/failed task |
+| `TASK_RESTART` | HTTP or Manager → TaskRouter | Run a stopped, failed or cancelled task again: `mode` `continue` (from its saved plan, the default), `start_over` or `at_cap` |
 | `TASK_RESUME` | TaskRouter → a resumed task's new Planner | Carry on with the saved plan after a server restart |
 | `TASK_CHANGE` | HTTP → a task's Planner | The task changed (its stored changes are what count; this only wakes the Planner) |
 | `GOAL_STATUS` | Planner → TaskRouter → Manager | Report progress/completion; the end of a Telegram or Lark task carries its `notice` |
@@ -2072,8 +2104,9 @@ Key message types:
    chat gets it from the Manager and a Telegram or Lark chat the notice, and
    the Planner is stopped the same way.
    A task the user stops gets the same kind of note in `tasks.result_summary`,
-   from its saved plan (it is not sent to a channel). Starting a stopped or
-   failed task again clears both and plans it anew in a new Planner session.
+   from its saved plan (it is not sent to a channel). Starting a stopped,
+   failed or cancelled task again clears both and goes on from its plan in a
+   `[RESTART]` turn; starting it over plans it anew in a new Planner session.
 
 ## Task Lifecycle
 
@@ -2086,8 +2119,14 @@ init (ready) → (start) → pending → assigned → running → completed
                                                  ↓
                                               (start) → pending → ...
 
-cancelled ← running  (cancel = permanent termination)
+cancelled ← running  (cancel; (start) runs it again too)
 ```
+
+A start of a stopped, failed or cancelled task goes on from its saved plan:
+its accepted steps stay done, the others are back to not started, and its
+Planner decides in a `[RESTART]` turn how the task goes on. Starting it over
+(`start_over`) plans it anew instead, with its steps, plan and Planner session
+deleted.
 
 **Status values**, by group (`looper/db/tasks.py` `STATUS_GROUPS`, the one place that groups them): in progress `assigned`, `running`, and the Planner's own `planning`, `executing`, `verifying` and `stopping`, which the TaskRouter stores; queued `pending` (waiting for a place in its project); ready `init` (created from the dashboard or by the Manager, never started; the dashboard labels it "Ready — not started"); needs attention `failed` and `stopped`; `completed`; `cancelled`. A status no group knows counts as `other`, on the Dashboard and in `GET /api/tasks?group=other`, never dropped.
 
@@ -2258,7 +2297,7 @@ dev proxy, which keeps `Host` and `Origin` on its own port.
 | `/api/tasks/:id` | GET | Task detail with steps, its status's `group`, `project_id`, `project_name`, `schedule_id`, `schedule_name`, `task_budget_usd` (its cap: its own, else its project's) and `own_budget_usd`, `profile_overrides` (`{role: profile}`, `{}` when none), `requirement_versions` (each `{version, text, via, created_at, delivered_at}`, oldest first; none for a requirement never edited), `supplements` (each `{text, via, created_at, delivered_at}`, oldest first), `manager_actions` (what the Manager did to the task or asked to confirm, newest first: `{created_at, channel, tool, arguments, risk, status, confirmation_id}`) and `cost`: `cost_usd` (the sum of its Planner's, Workers' and Reviewers' runs), `runs`, `running`, `unpriced_runs` and `by_role` (`planner`, `worker`, `reviewer`, each `{cost_usd, runs}`) |
 | `/api/tasks/cancel` | POST | Cancel task (permanent) |
 | `/api/tasks/stop` | POST | Stop/pause task |
-| `/api/tasks/start` | POST | Run a stopped, failed or cancelled task again (it also starts a ready one, as before) |
+| `/api/tasks/start` | POST | Run a stopped, failed or cancelled task again from its saved plan (`TASK_RESTART` `continue`), or, with `"start_over": true`, plan it anew, its steps, plan and Planner session deleted; 400 when `start_over` is not a boolean. It also starts a ready one, as before |
 | `/api/agent/v1/tools` | GET | The Manager's tools (`ops`), for its MCP server; only with the Manager's token (`Authorization: Bearer`), else 401 |
 | `/api/agent/v1/ops/:tool` | POST | Call one of the Manager's tools with the JSON body as its arguments, in the Manager's current turn; answers the tool's `status` object with 200, refusals included; only with the Manager's token |
 | `/api/tasks/:id/requirement` | PUT | Edit the requirement of a task that has not ended to `{requirement}`, kept as a new version (`{task_id, version, requirement}`); a running task's Planner gets it in a `[CHAT]` turn. 400 for an empty or unchanged text or one over 32,000 characters, 404 for an unknown task, 409 for one that ended |
