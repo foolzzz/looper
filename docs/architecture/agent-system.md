@@ -22,7 +22,8 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
   tasks created but not started (id, project, goal, requirement cut to 80
   characters). The code-owned `TOOLS_CONTRACT`, appended to the editable
   system prompt, says how to use the tools: read freely; change things only
-  when the user's message asks, in the turn answering it; before creating a
+  when the user's message asks, in the turn answering it; never ask for, take
+  or repeat a key, token or password; before creating a
   task, know its project (never presented as decided before the user chose
   it) and its directory (never picked by Claude); a task under way gets what
   the user adds as a supplement; refer to what Looper writes itself instead
@@ -1958,10 +1959,14 @@ So:
 
 The Manager acts on Looper through MCP tools, one catalog in
 `looper/agents/ops/` ([Manager tools RFC](rfcs/manager-platform-tools-v0.zh-CN.md),
-T1). Each tool has a name, a description, a JSON Schema for its arguments, a
-risk tier and the code that runs it; the code is what the dashboard's API
-calls (`projects`, the TaskRouter's messages, `db.task_changes`), so both
-check alike.
+T1 and T2). Each tool has a name, a description, a JSON Schema for its
+arguments, a risk tier and the code that runs it; the code is what the
+dashboard's API calls (`projects`, the TaskRouter's messages,
+`db.task_changes`, `agent_settings`, `profile_registry`, `catalog`,
+`db.llm_records`), so both check alike and a refusal carries the dashboard's
+own message (`ops.config.answered`: its 404 is `not_found`, its 409
+`conflict`, its 400 `invalid`). The definitions of the 14 tools take 12.6 KB
+of the Manager's context (the JSON of `tools/list`), the contract 2.7 KB.
 
 - **Reaching Looper.** `looper serve` makes one `ManagerOps`
   (`ops/service.py`) with a random token at start. Every launch of the
@@ -1985,7 +1990,9 @@ check alike.
   the user can give is missing), `needs_user_turn`, `forbidden`, `conflict`
   (the task's status does not allow it), `expired` and `unavailable` (the
   database failed; it may work later).
-- **Tiers.** `read` runs in any turn. `write` runs only in a turn that
+- **Tiers.** `read` runs in any turn; so do the actions of a tool that only
+  list, get or view (`Tool.read_actions`), whose result the trail does not
+  keep either. `write` runs only in a turn that
   answers a user's message. `high` runs only after the user confirms: the
   call is registered for its chat (one per chat, a new one replacing it; at
   most 50 chats), Looper adds what it does and 「回复「确认」就执行」 to the
@@ -2003,9 +2010,16 @@ check alike.
   and Claude's reply is dropped. Either way the failure is logged as an
   error, and the user gets 「平台工具不可用，没有执行任何操作：<why>。…」, never
   a reply that may claim something was done.
+- **No secrets.** No tool takes an argument named like a secret (a key,
+  token, secret, password or credential): the call is refused with
+  `forbidden`, the answer never repeats the value and says the user enters it
+  on the dashboard (a provider's API key in Settings → LLM Providers). A
+  provider is registered without its key; settings environments refuse
+  credential-like names as the dashboard does, and MCP servers' values are
+  listed masked.
 - **The trail.** Every call is a `manager_actions` row: the chat, the
   message, the tool, its arguments (values under a key naming a key, token,
-  secret or password masked), the tier, how it ended, the result of a change
+  secret, password or credential masked), the tier, how it ended, the result of a change
   and the `confirmation_id`. `GET /api/tasks/:id` lists a task's
   (`manager_actions`), and the task page shows them under "By the Manager".
 
@@ -2018,10 +2032,18 @@ check alike.
 | `looper_task_instruct` | Add the user's words to a queued or running task as a supplement (`via` `manager:<channel>`), delivered to its Planner like any ([Changes to a task](#changes-to-a-task)) | write |
 | `looper_task_update` | Change a task: its `requirement` while it has not ended (a new version, as on the task page), its `work_dir` (a task not started only), its `profiles` in any task but a completed one (a profile per role, `null` to drop the task's choice, checked and written as `PUT /api/tasks/:id/agents` does; a Worker or Reviewer uses it from its next step, the Planner at its next turn after a handoff; a stopped, failed or cancelled task's restart runs with it) | write |
 | `looper_concurrency` | Change concurrency limits, `limits` per role (1–64, `null` clears one to what it inherits): with `project` (by name), that project's `planner` (how many of its tasks run at once), `worker` and `reviewer` limits, its role-in-project layers; with `task_id`, that task's own `worker` and `reviewer` limits, within its project's (any task but a completed one; `planner` is refused). Then the TaskRouter and the WorkerPool check again. The answer gives each role's limit before and after with its source, and says that lowering stops nothing that runs; a project's change is shown to the user as before → after | write; a project's is high |
+| `looper_projects` | `list` (name, default directory, task, active task and schedule counts, background cut to 200 characters), `get` one (as `GET /api/projects` lists it), `create` (`name`, `work_dir`, `background`), `update` its `name`, `work_dir` or `background` (`projects.create_project`, `update_project`), `delete` one without tasks or schedules (`projects.deletable_project` refuses before anything is asked; the confirmation says its settings, allowed list, installs, knowledge and own skills go with it, and its directory's files stay) | list and get read; write; delete is high |
+| `looper_agent_profiles` | `list` the profiles (runtime, provider, model, effort, agent teams, the roles it can run, where it is used), the runtimes and the providers with their models; `create` (`name`, `runtime` by id, name or type, `provider` by id or name, `model`, `effort`, `agent_teams`), `update` (a null `effort` clears it), `delete` one nothing selects (`profile_registry.deletable_profile` names where it is used, before anything is asked) | list reads; write; delete is high |
+| `looper_providers` | `list` (auth, protocols, base URL, models, whether an API key is set, profile count); `register` an API-key provider (`name`, `protocols`, `base_url`, `models` by name, `env`) without its key, as `POST /api/providers` does; the answer tells the user where to enter the key | list reads; write |
+| `looper_catalog` | `list` the items (kind, qualified name, description) with their installs, or with `project` the installs that reach it (`catalog.project_view`); `install` an item (by id or qualified name) globally or in a project for `roles`, `update` an install's `roles` or `enabled`, `uninstall` (`catalog.install`, `update_install`, `uninstall`) | list reads; write |
+| `looper_costs` | One task's cost (`task_id`: `GET /api/tasks/:id`'s `cost`), or what the runs started in a range cost (`period` `today`, `this_week` or `this_month` from the server's local midnight, or `since` and `until`, a day or an ISO date-time, a day as `until` counting whole; all time by default), money and subscription equivalent apart as the overview's today: by project (their tasks' runs; the total also counts the Manager's), or with `project` its total and its 10 costliest tasks (`llm_records.spend_since`, `task_spend`) | read |
+| `looper_settings` | `view` the shared defaults and each role's layer, what applies to each role with its source and its timeout, or with `project` its layer, its roles' layers and its allowed profiles; `set` `values` on one layer (neither `role` nor `project`: the shared defaults; `role`; `project`; both: the role in the project): `profile` by id or name, `harness_prompt`, `env` (the layer's whole `{NAME: value}`), `run_budget_usd`, `max_concurrency` (a role or a role in a project), `timeout_seconds` (a role alone, as Settings → Roles saves it), null clearing one, written by `agent_settings.update_system`, `update_role` or `update_project` and letting what waits check again after a limit; `allowed_profiles`: `add` profiles to a project's list or `remove` some (one not on it is refused), then the whole list is set by `projects.set_allowed_profiles`, which checks each. The answer gives each value before and after and what now applies | view reads; write; the shared defaults, any concurrency limit and a higher or removed spend cap (any run of the layer's roles, resolved through the layers) are high, shown before → after |
 | `looper_confirm` | Run the call waiting for confirmation in this chat | — |
 
 Continuing a task that failed at its spend cap needs a higher cap, which is
-not one of these tools yet.
+not one of these tools yet; nor are a project's execution settings, a role's
+prompt, name, turns and switch, changing or removing a provider, or adding
+items to the catalog.
 
 ### A task's Planner's tools
 
@@ -2397,7 +2419,7 @@ dev proxy, which keeps `Host` and `Origin` on its own port.
 | `/api/projects/:id` | PUT | Update any of `name`, `description`, `work_dir`, `background` (`""` clears it) and the execution settings; 400 (as for POST), 404, 409 |
 | `/api/projects/:id/agent-settings` | GET/PUT | GET: `project.values` (the project layer), `roles` (`planner`, `worker`, `reviewer`, each with `values`, its role-in-project layer, and `effective`: every field's `value` and `source` layer, the harness with `from_role` when a Reviewer takes the Workers'), and `limits`. PUT sets the project layer; 404 for an unknown project |
 | `/api/projects/:id/agent-settings/roles/:role` | PUT | Set one role's layer in the project (`planner`, `worker` or `reviewer`; 400 for `manager`) |
-| `/api/projects/:id/allowed-profiles` | GET/PUT | The Agent Profiles the project's Planners may choose for their tasks' Workers and Reviewers, by name: `{project_id, profiles: [{profile_id, name, runtime, model, effort, roles, usd_per_million_tokens: {input, output}}]}`, empty by default. PUT `{"profile_ids": [...]}` (ids or names) makes it the whole list (`[]` empties it) and drops the project's Planners' choices of a profile it removes; 400 for an unknown profile or one that can run neither the worker nor the reviewer, and nothing changes; 404 for an unknown project |
+| `/api/projects/:id/allowed-profiles` | GET/PUT | The Agent Profiles the project's Planners may choose for their tasks' Workers and Reviewers, by name: `{project_id, profiles: [{profile_id, name, runtime, model, effort, roles, usd_per_million_tokens: {input, output}}]}`, empty by default. PUT `{"profile_ids": [...]}` (ids or names) makes it the whole list (`[]` empties it) and drops the project's Planners' choices of a profile it removes; 400 for an unknown profile or one that can run neither the worker nor the reviewer, and nothing changes; 404 for an unknown project. The Manager's `looper_settings` `allowed_profiles` sets it with the same code |
 | `/api/projects/:id/knowledge` | GET | The project's knowledge: `documents` (`document_id`, `title`, `summary`, `source_kind`, `filename`, `path`, `read_path`, `missing`, `size_bytes`, `sha256`, timestamps; no content), `count`, `stored_bytes`, the `index` agents get and its `index_chars`, and `caps`; 404 for an unknown project |
 | `/api/projects/:id/knowledge` | POST | Add a document: `source_kind`, `title`, `summary`, then `content` (text), `filename` and `content_base64` (upload) or `path` (path). Answers 201 with the new `document` and the knowledge view; 400 with the reason for a bad field, a binary file, a path outside the project's default directory, or a cap; 404 for an unknown project |
 | `/api/projects/:id/knowledge/:doc_id` | GET | One document: `document` (as in the list) and its `content`: stored for text and upload, the file as it is now for a path document; `content` is `null` with a `content_error` when that file is missing or not text; 404 for an unknown project or a document of another project |
