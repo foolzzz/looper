@@ -1556,8 +1556,10 @@ dashboard only). A new schedule is disabled.
 - **The scheduler** (`looper/agents/scheduler.py`) runs inside `looper serve`,
   started after the HTTP server and stopped first. Every 15 s, and at once when
   it starts, it handles each enabled schedule whose `next_fire_at` has come, in
-  a transaction that locks its row (`FOR UPDATE SKIP LOCKED`), so two servers
-  on one database fire it once. It counts the fires due since `next_fire_at`:
+  a transaction that locks its row (`FOR NO KEY UPDATE SKIP LOCKED`), so two
+  servers on one database fire it once; a foreign key check on the row (a
+  message about its last run being recorded) does not hold it up. It counts
+  the fires due since `next_fire_at`:
   one within 2 minutes fires on time (`scheduled`); otherwise they were missed
   (the server was down or the computer slept), and `catch_up` `once` fires one
   `catch_up` run that says how many it stands in for (`missed`), while `skip`
