@@ -1337,10 +1337,19 @@ export interface TaskStep {
   id: string;
   task_id: string;
   step_index: number;
+  /** The Planner's label for the step, unique within the task. */
+  step_key: string;
   instruction: string;
   target_files: string[];
+  /** The ids of the steps it needs before it starts. */
+  depends_on: string[];
+  /** pending, dispatched, deciding, completed (in review), verified, failed or skipped (dropped by a replan). */
   status: string;
+  /** Whether a Reviewer must pass it. */
+  review: boolean;
+  retries: number;
   worker_id: string | null;
+  reviewer_id: string | null;
   result: Record<string, unknown> | null;
   created_at: string;
   updated_at: string;
