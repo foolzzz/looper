@@ -505,6 +505,8 @@ class PlannerAgent:
         # without them it has none.
         self._ops = ops
         self._token: str | None = None
+        # The MCP configuration files that carry the token, removed when the Planner stops.
+        self._token_files: set[str] = set()
         self._bus: MessageBus | None = None
         self._plan: TaskPlan | None = None
         self._loop_task: asyncio.Task[Any] | None = None
@@ -585,6 +587,8 @@ class PlannerAgent:
             # A turn the loop was in has already killed Claude; an idle one
             # ends when its stdin closes. Never leave it running.
             await self._claude.stop(kill=cancelled)
+            for path in self._token_files:  # the token in them no longer works
+                Path(path).unlink(missing_ok=True)
 
     def is_healthy(self) -> bool:
         return self._running
@@ -1841,6 +1845,7 @@ class PlannerAgent:
         library = await self._load_installed(plan)
         if self._ops is not None and self._token is not None:
             library = await self._ops.library_with_server(library, self._runtime_root, self._token)
+            self._token_files.add(library.mcp_config)
         agent_settings = await self._load_agent_settings(plan)
         if agent_settings.profile_error:
             # The task fails with the reason rather than run another agent.

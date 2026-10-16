@@ -102,7 +102,7 @@ for line in sys.stdin:
     if text.startswith("[PLAN]"):
         call("looper_task_profiles", {})
         if variant == "concurrency":
-            call("looper_concurrency", {"scope": "task", "limits": {"worker": 1}, "reason": "one shared database"})
+            call("looper_task_concurrency", {"limits": {"worker": 1}, "reason": "one shared database"})
             reply = {"steps": [spec("a"), spec("b")]}
         else:
             call("looper_task_profile_set", {"role": "worker", "profile_id": "claude-code/sonnet",
@@ -181,24 +181,27 @@ def ran(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Any]:
                 time.sleep(0.2)
             tokens = {variant: _log(state, "planner.jsonl", variant)[0]["token"] for variant in VARIANTS}
             after_end = {variant: _tools(api.base_url, token) for variant, token in tokens.items()}
+    files = "".join(path.read_text(errors="replace") for path in runtime.rglob("*.json") if path.is_file())
     return {"details": details, "state": state, "after_end": after_end, "tokens": tokens,
-            "log": (root / "serve.log").read_text()}
+            "log": (root / "serve.log").read_text(), "files": files}
 
 
 def _calls(ran: dict[str, Any], variant: str) -> dict[str, dict[str, Any]]:
     return {row["tool"]: row["answer"] for row in _log(ran["state"], "calls.jsonl", variant)}
 
 
-def test_the_planner_gets_its_three_tools_and_how_to_use_them(ran: dict[str, Any]) -> None:
+def test_the_planner_gets_its_own_tools_and_how_to_use_them(ran: dict[str, Any]) -> None:
     for variant in VARIANTS:
         assert ran["details"][variant]["status"] == "completed", (variant, ran["log"][-3000:])
         started, listed = _log(ran["state"], "planner.jsonl", variant)
         assert started["guide"] is True and started["token"].startswith("planner.")
-        assert listed["tools"] == ["looper_task_profiles", "looper_task_profile_set", "looper_concurrency"]
-    # One token per task; none works once its task has ended, and none is in the server's log.
+        assert listed["tools"] == ["looper_task_profiles", "looper_task_profile_set", "looper_task_concurrency",
+                                   "looper_project_concurrency"]
+    # One token per task; none works once its task has ended, and none is in the server's log or left on disk.
     assert len(set(ran["tokens"].values())) == len(VARIANTS)
     assert ran["after_end"] == {variant: 401 for variant in VARIANTS}
     assert not any(token in ran["log"] for token in ran["tokens"].values())
+    assert not any(token in ran["files"] for token in ran["tokens"].values())
 
 
 def test_a_profile_the_planner_chooses_in_its_plan_turn_runs_the_step_it_dispatches(ran: dict[str, Any]) -> None:
@@ -217,7 +220,7 @@ def test_a_profile_the_planner_chooses_in_its_plan_turn_runs_the_step_it_dispatc
 
 
 def test_a_task_limit_the_planner_lowers_in_its_plan_turn_holds_the_steps_it_dispatches(ran: dict[str, Any]) -> None:
-    answer = _calls(ran, "concurrency")["looper_concurrency"]
+    answer = _calls(ran, "concurrency")["looper_task_concurrency"]
     assert answer["status"] == "ok" and answer["result"]["changes"][0]["after"] == {"value": 1, "source": "task"}
     runs = sorted(_log(ran["state"], "runs.jsonl", "concurrency"), key=lambda r: r["started"])
     assert [r["step"] for r in runs] in (["a", "b"], ["b", "a"])

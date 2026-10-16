@@ -25,11 +25,13 @@ logged.
   for the task (``agent_settings.Layer.PLANNER_TASK``, ``PLANNER_STEP``), and
   only while the profile is on the task's project's list. No confirmation: the
   list is the maintainer's consent in advance.
-- **Concurrency.** ``looper_concurrency`` changes the task's own Worker and
-  Reviewer limits, or its project's, through the Manager's code
-  (``concurrency.set_task_limits``, ``set_project_limits``), at once; each
-  change is a ``concurrency_change`` journal entry, and a task asked for in
-  Telegram or Lark tells that chat (``task_notice``).
+- **Concurrency.** ``looper_task_concurrency`` changes the task's own Worker
+  and Reviewer limits and ``looper_project_concurrency`` its project's,
+  through the Manager's code (``concurrency.set_task_limits``,
+  ``set_project_limits``), at once; each change is a ``concurrency_change``
+  journal entry, and a task asked for in Telegram or Lark tells that chat
+  (``task_notice``). Two tools, not one with a scope: each lists only the
+  roles it takes.
 """
 
 from __future__ import annotations
@@ -88,14 +90,15 @@ steps.
   chosen; a step not started yet can be chosen in a later turn. You never
   choose the Planner's own profile, and a profile the user chose for this
   task wins over yours.
-- looper_concurrency: how many of this task's Workers or Reviewers run at once
-  (scope "task", within the project's limits), or the project's own limits
-  (scope "project": its tasks, Workers and Reviewers, shared with its other
-  tasks; only when the requirement or the user asks for them). It applies at
-  once and the user is told. Lower it when steps that run at the same time
-  would get in each other's way (one build, one database, one port) or when
-  the requirement or the user asks; raise it only when independent steps wait
-  for room.
+- looper_task_concurrency: how many of this task's Workers or Reviewers run
+  at once, within the project's limits. Lower it when steps that run at the
+  same time would get in each other's way (one build, one database, one port)
+  or when the requirement or the user asks; raise it only when independent
+  steps wait for room.
+- looper_project_concurrency: the project's own limits (how many of its
+  tasks, Workers and Reviewers run at once), which its other tasks share: only
+  when the requirement or the user asks for the project's limits.
+Both apply at once, and the user is told.
 Give "reason" with every change: the task page shows it.
 """
 
@@ -372,7 +375,7 @@ async def _profile_set(call: PlannerCall) -> dict[str, Any]:
                     "started keeps its own"}
 
 
-# --- looper_concurrency ---
+# --- looper_task_concurrency and looper_project_concurrency ---
 
 
 # What each role's limit counts, as the journal names it.
@@ -394,19 +397,24 @@ def _notice_lines(result: Mapping[str, Any]) -> list[str]:
             f"{shown(c['before'])} → {shown(c['after'])}" for c in result["changes"]]
 
 
-async def _concurrency(call: PlannerCall) -> dict[str, Any]:
+async def _task_concurrency(call: PlannerCall) -> dict[str, Any]:
     limits = limits_argument(call)
-    if call.arguments["scope"] == "task" and AgentType.PLANNER in limits:
-        raise OpError(ErrorCode.INVALID, 'scope "task" takes worker and reviewer only (one Planner runs a task): '
-                                         'call again without "planner" in limits')
     task = await _task(call.task_id)
-    if call.arguments["scope"] == "project":
-        project = await db_projects.get_project(task["project_id"]) if task.get("project_id") else None
-        if project is None:
-            raise OpError(ErrorCode.NOT_FOUND, "this task has no project")
-        result = await set_project_limits(project, limits)
-    else:
-        result = await set_task_limits(call.task_id, limits)
+    return await _changed(call, task, await set_task_limits(call.task_id, limits))
+
+
+async def _project_concurrency(call: PlannerCall) -> dict[str, Any]:
+    limits = limits_argument(call)
+    task = await _task(call.task_id)
+    project = await db_projects.get_project(task["project_id"]) if task.get("project_id") else None
+    if project is None:
+        raise OpError(ErrorCode.NOT_FOUND, "this task has no project")
+    return await _changed(call, task, await set_project_limits(project, limits))
+
+
+async def _changed(call: PlannerCall, task: Mapping[str, Any], result: dict[str, Any]) -> dict[str, Any]:
+    """After a limit changed: what waits checks again, the journal and the activity record it, and the task's chat is
+    told."""
     await recheck_limits(call.platform.task_router, call.platform.worker_pool)
     reason = _reason(call)
     summary = _journal_summary(result, reason)
@@ -449,6 +457,12 @@ _ROLE = {"type": "string", "enum": [role.value for role in PLANNER_CHOICE_ROLES]
          "description": "worker or reviewer; never the Planner's own profile."}
 _LIMIT = {"type": "integer", "minimum": 1, "maximum": CONCURRENCY_MAX}
 
+
+def _limits(names: str, roles: Sequence[AgentType]) -> dict[str, Any]:
+    return {"type": "object", "properties": {role.value: _LIMIT for role in roles},
+            "description": f"The new limit of each role to change ({names}), from 1 to {CONCURRENCY_MAX}; null clears "
+                           "it."}
+
 TOOLS: tuple[Tool, ...] = (
     Tool(
         name="looper_task_profiles",
@@ -478,20 +492,28 @@ TOOLS: tuple[Tool, ...] = (
         risk=Risk.WRITE, run=_profile_set,
     ),
     Tool(
-        name="looper_concurrency",
-        description="Change how many run at once; it applies at once and the user is told. scope task: this task's "
-                    "own worker or reviewer limit (no planner), within its project's. scope project: the project's "
-                    "limits (planner: how many of its tasks run at once; worker, reviewer), which its other tasks "
-                    "share. A null limit clears it to what it inherits; lowering one stops nothing that runs.",
-        schema={"type": "object", "required": ["scope", "limits"], "additionalProperties": False, "properties": {
-            "scope": {"type": "string", "enum": ["task", "project"]},
-            "limits": {"type": "object",
-                       "description": f"The new limit of each role to change, from 1 to {CONCURRENCY_MAX}; null "
-                                      "clears it. scope task takes worker and reviewer only.",
-                       "properties": {role.value: _LIMIT for role in (AgentType.PLANNER, *PLANNER_CHOICE_ROLES)}},
+        name="looper_task_concurrency",
+        description="Change how many of this task's Workers or Reviewers run at once, within its project's limits; "
+                    "it applies at once and the user is told. A null limit clears the task's own, so the project's "
+                    "applies; lowering one stops nothing that runs.",
+        schema={"type": "object", "required": ["limits"], "additionalProperties": False, "properties": {
+            "limits": _limits("worker, reviewer", PLANNER_CHOICE_ROLES),
             "reason": _REASON,
             "task_id": _TASK_ID,
         }},
-        risk=Risk.WRITE, run=_concurrency,
+        risk=Risk.WRITE, run=_task_concurrency,
+    ),
+    Tool(
+        name="looper_project_concurrency",
+        description="Change this task's project's limits, which its other tasks share: planner (how many of its "
+                    "tasks run at once), worker, reviewer. Only when the requirement or the user asks for the "
+                    "project's limits; it applies at once and the user is told. A null limit clears it to what it "
+                    "inherits; lowering one stops nothing that runs.",
+        schema={"type": "object", "required": ["limits"], "additionalProperties": False, "properties": {
+            "limits": _limits("planner, worker, reviewer", (AgentType.PLANNER, *PLANNER_CHOICE_ROLES)),
+            "reason": _REASON,
+            "task_id": _TASK_ID,
+        }},
+        risk=Risk.WRITE, run=_project_concurrency,
     ),
 )

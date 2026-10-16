@@ -108,7 +108,7 @@ def test_a_planners_token_works_for_its_own_task_and_its_own_tools_only(
         # Each token lists its own agent's tools.
         status, listed = await _endpoint(server, token, "GET", "tools")
         assert status == 200 and [t["name"] for t in listed["tools"]] == [
-            "looper_task_profiles", "looper_task_profile_set", "looper_concurrency"]
+            "looper_task_profiles", "looper_task_profile_set", "looper_task_concurrency", "looper_project_concurrency"]
         status, listed = await _endpoint(server, "manager-tok", "GET", "tools")
         assert status == 200 and "looper_task_profiles" not in {t["name"] for t in listed["tools"]}
 
@@ -124,8 +124,8 @@ def test_a_planners_token_works_for_its_own_task_and_its_own_tools_only(
         assert _error(answer) == "forbidden" and "a tool of a task's Planner" in answer["error"]["message"]
 
         # Outside a turn Looper sent it, the Planner reads but changes nothing.
-        status, answer = await _endpoint(server, token, "POST", "ops/looper_concurrency",
-                                         {"scope": "task", "limits": {"worker": 1}})
+        status, answer = await _endpoint(server, token, "POST", "ops/looper_task_concurrency",
+                                         {"limits": {"worker": 1}})
         assert _error(answer) == "needs_user_turn"
         assert await pool.fetchval("SELECT count(*) FROM task_concurrency_limits") == 0
 
@@ -388,7 +388,7 @@ def test_the_planners_choice_counts_only_while_the_tasks_project_allows_it(monke
     _run(test, monkeypatch)
 
 
-# --- looper_concurrency ---
+# --- looper_task_concurrency and looper_project_concurrency ---
 
 
 async def _project_limits(pool: Any, project_id: str) -> dict[str, int]:
@@ -423,13 +423,12 @@ def test_the_planner_changes_its_tasks_and_its_projects_limits_at_once_and_the_c
         ops = _ops(bus, task_router=router, worker_pool=workers)
         planner = _Planner(ops, "task-a")
 
-        answer = (await planner("looper_concurrency", {"scope": "task", "limits": {"worker": 1},
-                                                       "reason": "one database"}))["result"]
+        answer = (await planner("looper_task_concurrency", {"limits": {"worker": 1}, "reason": "one database"}))[
+            "result"]
         assert answer["changes"][0]["before"] == {"value": 16, "source": "builtin"}
         assert answer["changes"][0]["after"] == {"value": 1, "source": "task"} and answer["user_told"] is True
         assert await pool.fetchval("SELECT max_concurrency FROM task_concurrency_limits WHERE task_id = 'task-a'") == 1
-        answer = (await planner("looper_concurrency", {"scope": "project", "limits": {"worker": 3, "planner": 2}}))[
-            "result"]
+        answer = (await planner("looper_project_concurrency", {"limits": {"worker": 3, "planner": 2}}))["result"]
         assert (answer["scope"], answer["project"]) == ("project", "calc")
         # No confirmation: the project's limits are set at once.
         assert await _project_limits(pool, project["id"]) == {"worker": 3, "planner": 2}
@@ -447,7 +446,7 @@ def test_the_planner_changes_its_tasks_and_its_projects_limits_at_once_and_the_c
 
         # A task from the web chat has no chat to tell: the journal records it all the same.
         web = _Planner(ops, "task-web")
-        answer = (await web("looper_concurrency", {"scope": "task", "limits": {"reviewer": 2}}))["result"]
+        answer = (await web("looper_task_concurrency", {"limits": {"reviewer": 2}}))["result"]
         assert answer["user_told"] is False and "the user is told" not in answer["note"]
         assert len(await _journal(pool, "task-web", "concurrency_change")) == 1
         assert _notices(bus, "lark") == [] and _notices(bus, "web") == []
@@ -463,11 +462,11 @@ def test_a_limit_the_planner_raises_starts_the_waiting_runs_at_once(
         await _task(pool, "task-a", "running", await _project(pool))
         async with _Pool(tmp_path) as runs:
             planner = _Planner(_ops(runs.bus, worker_pool=runs.pool), "task-a")
-            await planner("looper_concurrency", {"scope": "task", "limits": {"worker": 1}})
+            await planner("looper_task_concurrency", {"limits": {"worker": 1}})
             for worker_id in ("w1", "w2", "w3"):
                 await runs.send(worker_id, "task-a")
             await runs.settled(1, 2)
-            await planner("looper_concurrency", {"scope": "task", "limits": {"worker": 3}})
+            await planner("looper_task_concurrency", {"limits": {"worker": 3}})
             running, _ = await runs.settled(3, 0)
             assert running == {"w1", "w2", "w3"}
             for worker_id in running:
@@ -476,22 +475,24 @@ def test_a_limit_the_planner_raises_starts_the_waiting_runs_at_once(
     _run(test, monkeypatch)
 
 
-@pytest.mark.parametrize(("arguments", "message"), [
-    ({"scope": "task", "limits": {"planner": 2, "worker": 1}}, 'call again without "planner" in limits'),
-    ({"scope": "task", "limits": {"worker": 0}}, "limits.worker must be from 1 to 64"),
-    ({"scope": "project", "limits": {"reviewer": 65}}, "limits.reviewer must be from 1 to 64"),
-    ({"scope": "project", "limits": {}}, "give at least one role's limit"),
-    ({"scope": "everything", "limits": {"worker": 2}}, "scope must be one of: task, project"),
-    ({"limits": {"worker": 2}}, "scope is required"),
-    ({"scope": "task", "limits": {"manager": 1}}, "limits has an unknown key 'manager'"),
+@pytest.mark.parametrize(("tool", "arguments", "message"), [
+    # A task's tool lists no planner: one Planner runs a task.
+    ("looper_task_concurrency", {"limits": {"planner": 2, "worker": 1}},
+     "limits has an unknown key 'planner'; its keys are: worker, reviewer"),
+    ("looper_task_concurrency", {"limits": {"worker": 0}}, "limits.worker must be from 1 to 64"),
+    ("looper_project_concurrency", {"limits": {"reviewer": 65}}, "limits.reviewer must be from 1 to 64"),
+    ("looper_project_concurrency", {"limits": {}}, "give at least one role's limit"),
+    ("looper_task_concurrency", {"reason": "x"}, "limits is required"),
+    ("looper_project_concurrency", {"limits": {"manager": 1}}, "limits has an unknown key 'manager'"),
+    ("looper_task_concurrency", {"scope": "task", "limits": {"worker": 1}}, "unknown argument 'scope'"),
 ])
 def test_a_limit_the_planner_may_not_set_is_refused_and_nothing_changes(
-    monkeypatch: pytest.MonkeyPatch, arguments: dict[str, Any], message: str,
+    monkeypatch: pytest.MonkeyPatch, tool: str, arguments: dict[str, Any], message: str,
 ) -> None:
     async def test(pool: Any) -> None:
         project = await _project(pool)
         await _task(pool, "task-a", "running", project)
-        answer = await _Planner(_ops(), "task-a")("looper_concurrency", arguments)
+        answer = await _Planner(_ops(), "task-a")(tool, arguments)
         assert _error(answer) == "invalid" and message in answer["error"]["message"], answer
         assert await pool.fetchval("SELECT count(*) FROM task_concurrency_limits") == 0
         assert await _project_limits(pool, project["id"]) == {}
