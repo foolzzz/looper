@@ -1469,7 +1469,7 @@ an optional `run_timeout_seconds` and `run_budget_usd`, and `profile_overrides`
 for the Planner, Workers or Reviewers (a profile a schedule chose cannot be
 deleted); and, from S2, an optional `gate_command` with `gate_timeout_seconds`
 (1–600, default 60), an optional `daily_budget_usd`, `notify` (`failures`,
-`always`, `never`) and a `notify_target` (a channel and chat; none: the
+`alerts`, `always`, `never`) and a `notify_target` (a channel and chat; none: the
 dashboard only). A new schedule is disabled.
 
 - **Time rules** (`looper/agents/cron.py`, no dependency): five fields
@@ -1590,8 +1590,9 @@ dashboard only). A new schedule is disabled.
 - **Messages and alerts** (S2, `looper/agents/schedule_notify.py`). Every
   run that ends goes to the notifier, in the background. `notify` `failures`
   sends a message for each failed run (`failed`, `timed_out`, `gate_failed`),
-  `always` for each run that ran something, `never` none; skipped runs never
-  do. Two alerts go out once per streak, each with one recovery message: 3
+  `always` for each run that ran something, `alerts` and `never` none; skipped
+  runs never do. Two alerts go out once per streak, each with one recovery
+  message, under every `notify` but `never` (`alerts` sends only them): 3
   failures in a row (`failures_alert_at`), recovered by the next ok run, so a
   gate that finds nothing new ends the streak without waiting for a task; and
   no run completed and no gate found nothing to do for 3 periods of the rule,
