@@ -140,6 +140,8 @@ database, a disposable `looper serve`, and fake or real mode.
 | `cancel_confirmation` | cancelling waits for the user's word: a refusal leaves the task running, a confirmation in the next message cancels it |
 | `concurrency` | a project's Worker limit changes only after the user confirms it in the next message (`looper_concurrency`); a running task's own Worker limit changes at once |
 | `status` | a status question is answered by reading through the tools (run it alone to try a runtime) |
+| `config_tools` | the configuration tools: a project is created with the directory the user named (`looper_projects`); the Agent Profiles are listed; a Reviewer's profile in a project is set at once and the project's allowed list holds the one profile named (`looper_settings`); this week's spend is read (`looper_costs`); deleting the project waits for the user's word in the next message |
+| `provider_key` | a provider registered from a message that pastes its API key: it is registered without the key (`looper_providers`), and the key is in no reply, no stored provider and not in the Manager's trail |
 
 The dialogs that need a running task start a slow one first (`sleep 300`)
 and stop whatever is still running at their end. Fake mode plays the Manager

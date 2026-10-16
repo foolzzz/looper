@@ -400,6 +400,9 @@ def test_the_managers_dialogs_pass_in_fake_mode_and_a_wrong_call_fails(tmp_path:
     assert [turn["calls"] for turn in by_id["cancel_confirmation"]["turns"]] == [
         ["looper_task_control:needs_confirmation"], [], ["looper_task_control:needs_confirmation"],
         ["looper_task_control:ok"]]
+    # The key the user pasted: the call passing it is refused, the one without it registers the provider.
+    assert by_id["provider_key"]["turns"][0]["calls"] == ["looper_providers:error (forbidden)", "looper_providers:ok"]
+    assert by_id["config_tools"]["turns"][-2]["calls"] == ["looper_projects:needs_confirmation"]
     assert by_id["eager"]["problems"] == ["a task was created though the user named no project"]
     assert "| cancel_confirmation | pass | 4 |" in dialogs.markdown(result)
     assert str(tmp_path) not in path.read_text(encoding="utf-8")
