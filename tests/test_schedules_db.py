@@ -416,6 +416,25 @@ def test_two_schedulers_ticking_together_fire_each_firing_once(monkeypatch: pyte
     _run(test, monkeypatch, tmp_path)
 
 
+def test_a_message_being_recorded_about_a_schedule_does_not_hold_up_its_firing(monkeypatch: pytest.MonkeyPatch,
+                                                                              tmp_path: Path) -> None:
+    from looper.db import schedules as db_schedules
+
+    async def test(env: _Env) -> None:
+        sid = (await env.enabled())["schedule_id"]
+        await env.due(sid)
+        # The Notifier records a message about an earlier run while the pass looks for due schedules: until it
+        # commits, the insert's foreign key check holds the schedule's row (FOR KEY SHARE).
+        async with env.pool.acquire() as conn, conn.transaction():
+            await db_schedules.insert_notification(conn, schedule_id=sid, run_id=None, kind="run", channel=None,
+                                                   chat=None, text="an earlier run failed", status="dashboard",
+                                                   error=None)
+            await env.scheduler.tick()
+        assert [run["status"] for run in await env.runs(sid)] == ["running"]
+
+    _run(test, monkeypatch, tmp_path)
+
+
 def test_a_schedule_that_cannot_fire_holds_up_no_other(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     async def test(env: _Env) -> None:
         broken, working = (await env.enabled())["schedule_id"], (await env.enabled())["schedule_id"]
