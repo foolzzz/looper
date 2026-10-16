@@ -39,8 +39,10 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
 - The dashboard chat, Lark and Telegram share the Manager's one session, so
   every message ends with a code-written line saying where it came from, just
   before the message: `Channel: the Looper dashboard chat`, `Channel: a Lark
-  direct message`, or for Telegram `a Telegram direct message` (a group's chat
-  id is negative: `a Telegram group chat`), from the message's source channel.
+  direct message`, `Channel: a Lark group chat, from <sender>` (the name the
+  allowlist resolves, else the open_id), or for Telegram `a Telegram direct
+  message` (a group's chat id is negative: `a Telegram group chat`), from the
+  message's source channel and chat (`_message_origin`).
   The recommended role prompt has Claude answer only the message it was just
   sent: no earlier topic, check or status report unless that message asks for
   one, and a short reply to a greeting or a check-in. A manager row still
@@ -98,10 +100,12 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
   Claude is called, as `<message_id>`; the reply when the Manager publishes
   it, as `<message_id>:reply`, so a reply the channel then fails to send is
   still recorded; a reply Claude sends on its own as `auto-<id>`. Each is
-  stored under the session `<channel>:<chat_id>` with its `channel`. Private
-  chats only (`_private_chat`): a Telegram chat whose id is negative is a
-  group or a channel, and nothing from it is stored (Lark takes direct
-  messages only). A failed store is logged and never blocks the reply
+  stored under the session `<channel>:<chat_id>` with its `channel`. Every
+  chat is stored but a Telegram group's (`_stored_chat`): a Telegram chat
+  whose id is negative is a group or a channel, and nothing from it is
+  stored. A Lark group chat is stored under `lark:<chat_id>`: only the
+  messages that @-mention the bot, and the replies to them, come in from one.
+  A failed store is logged and never blocks the reply
 - `/new`, a chat message that is exactly that (trimmed, any case) from the web
   chat, Lark or Telegram (the sender allowlists apply), is answered by Looper,
   never by Claude. After any turn under way, the Manager stops its Claude and
@@ -109,7 +113,8 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
   message, from any channel, starts a new session without `--resume` and
   without a `[RESUME]` brief, also after a restart; the projects and goals
   every turn carries still come. The reset is a Runs record of its own
-  (`metadata.session_reset`: channel, sender, chat and the session it ended)
+  (`metadata.session_reset`: channel, sender, chat, whether it is a group
+  chat, and the session it ended)
   and the chat gets a confirmation. Tasks and their Planners are untouched.
   Any other text, `/new foo` and `/news` included, is handled as before: a
   message for Claude (in Telegram, an unknown command)
@@ -140,9 +145,12 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
 - **Telling the chat a task came from that it ended**
   (`looper/agents/task_notice.py`). A task asked for in Telegram or Lark, the
   channels whose adapter implements `notify` (`NotifyChannel`), records who
-  to tell in `tasks.chat_id`. The Manager sets it when it creates the task,
-  in the form that channel's `notify` takes: the Telegram chat id, or the
-  Lark sender's open_id (Lark's `notify` sends to a user).
+  to tell (`NotifyTarget`) in `tasks.chat_id`, `chat_kind` and
+  `chat_mention`. The Manager sets it when it creates the task: in Telegram
+  the chat (`chat`, its id); in Lark the sender (`user`, the open_id) for a
+  direct message, and for a group chat the group (`chat`, `oc_…`) with the
+  sender to @-mention (`chat_mention`). A task from before groups reads as it
+  was sent then: a Lark task tells its sender, a Telegram task its chat.
   - When the task completes or fails, the TaskRouter adds a `Notice` to the
     final `GOAL_STATUS` it passes to the Manager. Then it tears the Planner
     down and starts what may start; it never waits on a channel, and a status
@@ -152,8 +160,10 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
     delivers its messages one at a time, so the notice is the task's last
     message in that chat.
   - The channel sends it like an answer, to who the task recorded: Lark as
-    Markdown (`lark-cli im +messages-send --as bot --user-id ou_… --markdown`),
-    Telegram as MarkdownV2, as plain text when Telegram cannot parse it.
+    Markdown (`lark-cli im +messages-send --as bot --user-id ou_… --markdown`,
+    or to a group `--chat-id oc_… --markdown '<at user_id="ou_…"></at> …'`,
+    which @-mentions the requester), Telegram as MarkdownV2, as plain text
+    when Telegram cannot parse it.
   - The notice reads 「✅ 任务完成 · <the first 40 characters of the task's
     name (`task_name`: its title, else its goal id, else its requirement)>」
     or 「❌ 任务失败 · …」.
@@ -2087,7 +2097,7 @@ PostgreSQL is a hard startup dependency. All data paths:
 | Table | Purpose |
 |---|---|
 | `projects` | Projects: name (unique ignoring case), description, default `work_dir` (`''` = none), `background` for the task agents' system prompt (`''` = none), and the execution settings (`project_execution`) |
-| `tasks` | Task metadata, status, phase, timestamps, `work_dir`, `project_id` (required), `schedule_id` (the schedule that fired it), `budget_usd` (its own spend cap, over its project's), `chat_id` (who is told when it ends: a Telegram chat id or a Lark sender's open_id; NULL for a task asked for elsewhere), `original_user_text` (the user's message the Manager's task JSON answered, often 「确认」; kept as history) and `title` (a few words naming it, from the task JSON; `task_name` falls back to the goal id, then the requirement) |
+| `tasks` | Task metadata, status, phase, timestamps, `work_dir`, `project_id` (required), `schedule_id` (the schedule that fired it), `budget_usd` (its own spend cap, over its project's), `chat_id`, `chat_kind` and `chat_mention` (who is told when it ends: a Telegram chat id, a Lark sender's open_id, or a Lark group's id and the requester it @-mentions; `chat_kind` is `user` or `chat`; NULL for a task asked for elsewhere), `original_user_text` (the user's message the Manager's task JSON answered, often 「确认」; kept as history) and `title` (a few words naming it, from the task JSON; `task_name` falls back to the goal id, then the requirement) |
 | `task_steps` | A task's steps, each with everything its Planner decides with: `step_key` (label), `depends_on` (step ids), `review`, `acceptance_criteria`, `validation_commands`, `status`, `result`, `worker_id`, `reviewer_id`, `retries`, `feedback`, `missed_messages` |
 | `task_plans` | A task's plan, one row per task: `plan_id`, `status` (`planning`, `executing`, `verifying`, `stopping`, `completed`, `failed`), `correlation_id`, `origin_channel_id`, `final_summary`, `fail_reason`, and with step workspaces `start_branch` and `start_commit` (where the branch was when the task dispatched its first step; `''` otherwise); replaced when the task is planned again |
 | `step_workspaces` | A step's git worktree ([Step workspaces](#step-workspaces)): `task_id`, `step_id` (both going with the task or step), `repo_dir` and `subdir` (the task directory in it), `target_branch`, `path`, `branch`, `base_commit`, `checkpoint`, `result_commit`, `merge_commit`, `state` (`active`, `merging`, `merged`, `unmerged`, `discarded`), `merge_error` (required when `unmerged`), `detail`, `removed_at` (its directory and branch are gone); one in use (`active` or `merging`) per step |
@@ -2096,7 +2106,7 @@ PostgreSQL is a hard startup dependency. All data paths:
 | `task_requirement_versions` | Every version of an edited task requirement: `task_id`, `version` (1 is the text the task was created with, written at its first edit), `text`, `via` (`created`, `task_page`, or the Manager's), `created_at` and `delivered_at` (when the Planner had it in a turn; `tasks.requirement` is the newest) |
 | `manager_actions` | The Manager's tool calls (`looper/agents/ops`), one row each: `channel`, `chat` and `message_id` of the turn (empty for a turn Claude ran on its own), `tool`, `arguments` (secret values masked), `risk` (`read`, `write`, `high`), `status` (`ok`, `needs_confirmation`, `error` with `error_code`), `result` (of a change; a read's is not kept), `confirmation_id` (the call that asked, on a confirmed one) and `task_id` (the task it acted on, no foreign key) |
 | `activity` | Execution trace events (SSE streaming to frontend) |
-| `chat_messages` | Chat conversation history of every channel: `session_id` (the web chat's session, or `<channel>:<chat_id>` for Telegram and Lark, private chats only), `message_id`, `role`, `content`, `channel` (`web`, `telegram` or `lark`; rows from before it read `web`); a new Manager session's resume brief reads the recent chats that are not a task's Planner thread (`planner-<task_id>`) |
+| `chat_messages` | Chat conversation history of every channel: `session_id` (the web chat's session, or `<channel>:<chat_id>` for Telegram and Lark; not Telegram groups), `message_id`, `role`, `content`, `channel` (`web`, `telegram` or `lark`; rows from before it read `web`); a new Manager session's resume brief reads the recent chats that are not a task's Planner thread (`planner-<task_id>`) |
 | `llm_records` | One row per agent run: input and output text, status, the run's own `cost_usd` and its `cost_source` (`runtime` or `provider_price`), `input_tokens`, `output_tokens`, `cache_read_tokens` and `cache_creation_tokens`, its final `context_tokens` and its `compactions`; `metadata` holds the exact argv (`command`), `cwd`, the appended `system_prompt`, its `system_prompt_sha256`, its `prompt_layers`, the `profile` (`agent` on runs recorded before the rename), the `model_choice`, the Settings `env` names, the `library` items loaded, the `project_instructions` the runtime was given and a task agent's `project_skills` |
 | `role_configs` | Each role's own settings, keyed by `role` (`manager`, `planner`, `worker`, `reviewer`): display name, role prompt and its recommended `default_prompt`, turns, timeout, enabled |
 | `agent_setting_layers` | Agent settings by layer: `scope` (`system`, `role`, `project`, `role_project`), `role`, `project_id` (goes with its project), and the nullable `harness_prompt`, `profile_id` (the effort is the profile's), `env` (ordered `[{key, value}]`, `null` value = unset), `run_budget_usd` and `max_concurrency` (a Planner, Worker or Reviewer `role` or `role_project` layer only); one row per layer and place |
@@ -2115,7 +2125,7 @@ PostgreSQL is a hard startup dependency. All data paths:
 | `library_installs` | Where an item loads: `scope` (`global` or `project`), `project_id`, `roles` (a non-empty subset of `manager`, `planner`, `worker`, `reviewer`; never `manager` in a project), `enabled`; one per item and place, going with its item and its project |
 | `project_documents` | A project's knowledge: title, one-line summary, `source_kind` (`text`, `upload` or `path`), `filename` and `content` (text and upload) or `path` (relative to the project's default directory), `size_bytes`, `sha256`; a CHECK keeps each kind's columns consistent and the rows go with their project |
 | `channel_configs` | Telegram/Lark settings (enabled flag, Telegram's token env var name, Lark's lark-cli `profile`, the sender allowlist, and for Lark the app it was made for) |
-| `channel_rejected_senders` | The latest senders a channel's allowlist refused (the Lark channel records them): `sender_id`, `count` and `last_at`, never what they wrote; the 20 newest per channel |
+| `channel_rejected_senders` | The latest senders a channel's allowlist refused (the Lark channel records them): `sender_id`, `count`, `last_at` and `chat_id` (the group chat of the latest one; NULL for a direct message), never what they wrote; the 20 newest per channel |
 
 Plans and sessions used to be files (`.local/planner/planner-<task_id>/*.json`,
 `.local/manager/session.json`). The first start with the database holding
@@ -2287,7 +2297,7 @@ dev proxy, which keeps `Host` and `Origin` on its own port.
 | `/api/llm-records/:id/events?after=N` | GET | The run's stream-json events after seq N |
 | `/api/agents/:id/usage?turns=N` | GET | One agent's (`manager`, `planner-<task_id>`, ...) spending and context: `total` (`cost_usd`, `runs`, `running`, `unpriced_runs`, `compactions`), `by_session` and `by_day` (UTC; each `cost_usd`, `runs`), its latest N turns (default 100, at most 1000) oldest first with `context_tokens`, `cost_usd` and `compactions`, and `latest_context_tokens`; 400 for a bad `turns` |
 | `/api/channel-configs` | GET | List channels, each with `start_problem`: why it does not start as configured (an empty or invalid sender allowlist), else null |
-| `/api/channels/lark/status` | GET | The Lark (lark-cli) channel as lark-cli sees its saved settings: `bot` (`name`, `app_id`, `open_id`, `profile`; null when lark-cli cannot act as it), `problem` (why it would not start: lark-cli, or the allowlist made for another app), `allowlist_app_id`, `names` (open_id to name, for the allowlist and the refused senders) and `rejected` (`open_id`, `name`, `count`, `last_at`, newest first, not on the allowlist; never what they wrote) |
+| `/api/channels/lark/status` | GET | The Lark (lark-cli) channel as lark-cli sees its saved settings: `bot` (`name`, `app_id`, `open_id`, `profile`; null when lark-cli cannot act as it), `problem` (why it would not start: lark-cli, or the allowlist made for another app), `allowlist_app_id`, `names` (open_id to name, for the allowlist and the refused senders) and `rejected` (`open_id`, `name`, `count`, `last_at`, `chat_id` (the group chat, null for a direct message), newest first, not on the allowlist; never what they wrote) |
 | `/api/channels/lark/people` | GET | `?q=` a name or an email (1–50 characters): `people`, each `open_id` (for the channel's app), `name`, `email`, `department`; 400 for a bad query, 502 when lark-cli cannot search |
 | `/api/channel-configs/:id` | GET/PUT | Channel config. PUT validates the sender allowlist (`allowed_user_ids` for Telegram, `allowed_open_ids` for Lark) and stores it as a list; 400 naming the first bad id, and nothing is stored then; 404 for an unknown channel |
 
@@ -2355,7 +2365,8 @@ restart.
   A reply the Manager sends on its own (`autonomous`) has no status message,
   and a phase after its message's answer is ignored; at most 200 status
   messages are open and 1000 answered messages remembered per channel. Lark
-  sends it as text with `lark-cli im +messages-send` and edits it with
+  sends it as text with `lark-cli im +messages-send` (in a group, as a reply
+  to the message, `+messages-reply`, like the answer) and edits it with
   `lark-cli im +messages-edit --as bot --message-id <om_…> --text` (with the
   channel's `--profile`), taking the id from the send's JSON answer; Telegram
   uses `send_message` and `edit_message_text`. Only phases go to the status
@@ -2367,7 +2378,7 @@ restart.
   task's end comes as its notice instead (`CHAT_NOTICE`, see the
   TaskRouter), after its progress.
 - **A reaction when the bot sees a message** (`status_line.Reactions`): a
-  direct message from a listed sender that goes to the Manager first gets a
+  message from a listed sender that goes to the Manager first gets a
   reaction from the bot, Lark's 「Get」 (`lark-cli im reactions create --as bot
   --message-id <om_…> --data '{"reaction_type":{"emoji_type":"Get"}}'`, with
   the channel's `--profile`; the app needs the
@@ -2376,8 +2387,9 @@ restart.
   reaches the Manager without waiting for it. A failed reaction is not
   retried and never becomes a chat message; the first failure of a run of the
   channel is logged, naming the missing scope when lark-cli reports one. A
-  rejected sender, a group message and a message that is not handed on (not
-  text, empty) get no reaction.
+  rejected sender, a Lark group message that does not @-mention the bot, a
+  Telegram group message and a message that is not handed on (not text,
+  empty) get no reaction.
 - **Telegram**: the token comes from the env var named by `bot_token_env`
   (default `LOOPER_TELEGRAM_BOT_TOKEN`). `allowed_user_ids` lists numeric
   Telegram user IDs (a negative id is a group or channel, not a sender); a
@@ -2386,19 +2398,30 @@ restart.
   arguments) goes to the Manager as `/new`. `/start`, `/status`, `/new` and
   `/help` from an unlisted sender get no answer either.
 - **Lark (lark-cli)** (`looper/agents/channels/lark.py`, `lark_cli.py`,
-  `lark_settings.py`): the Manager in Lark direct messages, through `lark-cli`
+  `lark_settings.py`): the Manager in Lark direct messages and group chats,
+  through `lark-cli`
   on PATH and signed in (the commands of lark-cli 1.0.97). A lark-cli profile
   chooses the app and so the bot: the channel's optional `profile` is passed
   as `--profile` on every call, and empty means lark-cli's active profile
   (`app_id_env` and `app_secret_env`, from before, are dropped from the row at
   startup, and from an imported file). It receives with `lark-cli event
-  consume im.message.receive_v1 --as bot`, one flat JSON event per line, and
-  handles direct messages only (`chat_type` `p2p`): a group message is logged
-  and ignored, and the bot never answers in a group; other message types and
-  bots' messages are ignored too. It sends with `lark-cli im +messages-send
-  --as bot`: a reply as Markdown (`--markdown`, a rich-text post) to the chat
-  its message came from, a schedule's message as text to a user
-  (`--user-id`); a failed send carries lark-cli's reason. A consumer that
+  consume im.message.receive_v1 --as bot`, one flat JSON event per line. It
+  handles direct messages (`chat_type` `p2p`) and, in a group chat (`group`),
+  only a message that @-mentions the bot: one whose `mentions` hold the bot's
+  own open_id (from the bot's info at startup; never a match on names).
+  Every other group message is ignored entirely: no reaction, nothing stored,
+  no Manager turn, no record of who wrote. The bot's mention is taken out of
+  the text (`@name` as lark-cli shows it, else its `@_user_N` placeholder),
+  and the Manager is told the sender's name (`contact +search-user`, the
+  name the allowlist resolves, else the open_id after 5 s). Other message
+  types and bots' messages are ignored too. It sends with `lark-cli im
+  +messages-send --as bot`: a reply as Markdown (`--markdown`, a rich-text
+  post) to the chat its message came from, a schedule's message as text to a
+  user (`--user-id`); a failed send carries lark-cli's reason. In a group the
+  status message and the answer reply to the message (`lark-cli im
+  +messages-reply --as bot --message-id om_…`), while the task's progress
+  and end notice go to the group (`--chat-id`): the bot posts in a group only
+  to answer an allowlisted @-mention and for the task it started. A consumer that
   stops is started again after 10 s. At startup the channel runs `lark-cli
   whoami` and `lark-cli api GET /open-apis/bot/v3/info --as bot` with its
   profile and does not start when lark-cli is missing, the profile is
@@ -2407,12 +2430,14 @@ restart.
   differ per app: the server binds the list to the app it was made for
   (`allowlist_app_id`, set when the list changes, kept when only the profile
   does), and the channel does not start under a profile of another app until
-  the list is rebuilt. A refused sender is also recorded: who, how often
-  and when, never what they wrote (`channel_rejected_senders`, the 20 newest). Settings →
+  the list is rebuilt. A refused sender is also recorded: who, how often,
+  when and in which group chat (an @-mention of the bot there), never what
+  they wrote (`channel_rejected_senders`, the 20 newest). Settings →
   Channels shows the bot ("Bot: HBDataBot (cli_…, profile …)") or why it would
   not start, the senders' names next to their ids, a search by name or email
   that adds a sender (`contact +search-user --as user`, as the user lark-cli
-  is signed in as), and the recently refused senders with Allow. A Lark
+  is signed in as), and the recently refused senders with Allow (and the
+  group chat, for one refused in a group). A Lark
   channel with its own bot token, without lark-cli, is a later channel type.
 - **Web**: unaffected, it has no list: the HTTP API answers only local
   requests ([HTTP API](#http-api)).
