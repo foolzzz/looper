@@ -689,12 +689,18 @@ class TestManagerChannelLine:
             (LARK, {"chat_id": "oc_1", "sender_id": "ou_1"}, "hi"),
             (TELEGRAM, {"chat_id": 42, "user_id": 42}, "hi again"),
             (TELEGRAM, {"chat_id": -100123, "user_id": 42}, "hi all"),
+            (LARK, {"chat_id": "oc_team", "chat_type": "group", "sender_id": "ou_1", "sender_name": "Ada Lovelace"},
+             "what runs now?"),
+            (LARK, {"chat_id": "oc_team", "chat_type": "group", "sender_id": "ou_2", "sender_name": "ou_2"}, "and?"),
         ])
         assert [turn.split("\n\n")[-2:] for turn in turns] == [
             ["Channel: the Looper dashboard chat", "the dashboard asks"],
             ["Channel: a Lark direct message", "hi"],
             ["Channel: a Telegram direct message", "hi again"],
             ["Channel: a Telegram group chat", "hi all"],
+            # A Lark group names who wrote: the allowlist's name for them, else their open_id.
+            ["Channel: a Lark group chat, from Ada Lovelace", "what runs now?"],
+            ["Channel: a Lark group chat, from ou_2", "and?"],
         ]
 
 

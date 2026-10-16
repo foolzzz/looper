@@ -1086,9 +1086,23 @@ END $$;
 -- project's task_budget_usd (a schedule's run_budget_usd, copied when it fires).
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS schedule_id TEXT REFERENCES schedules(id) ON DELETE SET NULL;
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS budget_usd DOUBLE PRECISION CHECK (budget_usd > 0);
--- Who is told when the task ends (agents/task_notice.py), in the form its channel's notify takes: the Telegram
--- chat id, or the Lark sender's open_id; NULL for a task asked for elsewhere (the web chat, the dashboard).
+-- Who is told when the task ends (agents/task_notice.py): chat_id, the Telegram chat id, the Lark sender's open_id
+-- or the Lark group's id; NULL for a task asked for elsewhere (the web chat, the dashboard). chat_kind says which:
+-- 'user', a person, told in a direct message, or 'chat', a chat; chat_mention is who the notice @-mentions there
+-- (in a Lark group, the requester's open_id). Once, for tasks from before groups: a Lark task told its sender, a
+-- Telegram task its chat.
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS chat_id TEXT;
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                   WHERE table_schema = current_schema() AND table_name = 'tasks'
+                     AND column_name = 'chat_kind') THEN
+        ALTER TABLE tasks ADD COLUMN chat_kind TEXT CHECK (chat_kind IN ('user', 'chat'));
+        UPDATE tasks SET chat_kind = CASE WHEN origin_channel_id = 'channel-lark' THEN 'user' ELSE 'chat' END
+        WHERE chat_id IS NOT NULL;
+    END IF;
+END $$;
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS chat_mention TEXT;
 -- The user's message the Manager's task JSON answered (often the confirmation), kept as history. NULL for a task
 -- created elsewhere.
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS original_user_text TEXT;
@@ -1196,8 +1210,9 @@ CREATE TABLE IF NOT EXISTS channel_secrets (
 );
 
 -- The latest senders a channel's allowlist refused (the Lark channel records them), so Settings → Channels can
--- name them and let one in: one row per channel and sender, with how often they wrote and when last; never what
--- they wrote. The channel keeps its 20 newest.
+-- name them and let one in: one row per channel and sender, with how often they wrote, when last and where
+-- (chat_id: the group chat that message @-mentioned the bot in; NULL for a direct message); never what they
+-- wrote. The channel keeps its 20 newest.
 CREATE TABLE IF NOT EXISTS channel_rejected_senders (
     channel_id  TEXT NOT NULL,
     sender_id   TEXT NOT NULL,
@@ -1207,3 +1222,4 @@ CREATE TABLE IF NOT EXISTS channel_rejected_senders (
 );
 -- A table from before kept the start of each refused message: dropped, with what it held.
 ALTER TABLE channel_rejected_senders DROP COLUMN IF EXISTS snippet;
+ALTER TABLE channel_rejected_senders ADD COLUMN IF NOT EXISTS chat_id TEXT;

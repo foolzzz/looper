@@ -104,7 +104,7 @@ def test_saving_binds_the_allowlist_and_the_status_names_people(monkeypatch: pyt
         assert view["config"]["allowlist_app_id"] == "cli_main" and "app_id_env" not in view["config"]
 
         await record_rejected("channel-lark", OTHER)
-        await record_rejected("channel-lark", OTHER)
+        await record_rejected("channel-lark", OTHER, chat_id="oc_team")  # an @-mention of the bot in a group
         await record_rejected("channel-lark", OPEN_ID)  # on the allowlist meanwhile: not shown
         status, lark = await _call("GET", "/api/channels/lark/status")
         assert status == 200
@@ -113,8 +113,9 @@ def test_saving_binds_the_allowlist_and_the_status_names_people(monkeypatch: pyt
         assert lark["problem"] is None
         assert lark["names"] == {OPEN_ID: "Ada Lovelace", OTHER: "Alan Turing"}
         [rejected] = lark["rejected"]
-        assert (rejected["open_id"], rejected["name"], rejected["count"]) == (OTHER, "Alan Turing", 2)
-        assert set(rejected) == {"open_id", "name", "count", "last_at"}  # never what they wrote
+        assert (rejected["open_id"], rejected["name"], rejected["count"], rejected["chat_id"]) == (
+            OTHER, "Alan Turing", 2, "oc_team")
+        assert set(rejected) == {"open_id", "name", "count", "last_at", "chat_id"}  # never what they wrote
 
         # Another app's profile, the allowlist unchanged: it does not start, and says why.
         status, view = await _call("PUT", "/api/channel-configs/channel-lark", {

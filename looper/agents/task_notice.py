@@ -3,12 +3,14 @@
 Telegram and Lark can send a message unprompted (``ChannelAdapter.notify``),
 so a task asked for in one of them is told of its end there, once: when it
 completes or fails, the TaskRouter adds a ``Notice`` to the final status it
-passes to the Manager, for who the task recorded when the Manager created it
-(``tasks.chat_id``, in the form that channel's ``notify`` takes). The Manager
-sends the notice to the channel instead of the final summary, on the same
-path as the task's progress, so it is the task's last message in that chat.
-A task without a notice (the web chat, or one that recorded no chat) gets
-its final status from the Manager as before; the dashboard shows the task.
+passes to the Manager, for the ``NotifyTarget`` the task recorded when the
+Manager created it (``tasks.chat_id``, ``chat_kind`` and ``chat_mention``): a
+Telegram chat, a Lark user (a direct message), or a Lark group with the
+requester to @-mention. The Manager sends the notice to the channel instead of
+the final summary, on the same path as the task's progress, so it is the
+task's last message in that chat. A task without a notice (the web chat, or
+one that recorded no chat) gets its final status from the Manager as before;
+the dashboard shows the task.
 """
 
 from __future__ import annotations
@@ -40,16 +42,52 @@ class NotifyChannel(str, Enum):
 _BY_CHANNEL_ID = {channel_address(channel.value).agent_id: channel for channel in NotifyChannel}
 
 
+class TargetKind(str, Enum):
+    """What a notice is sent to (``tasks.chat_kind``)."""
+
+    USER = "user"  # a person, by the id the channel sends to (a Lark open_id): a direct message
+    CHAT = "chat"  # a chat, by its id: a Telegram chat, a Lark group (oc_...)
+
+
+@dataclass(frozen=True)
+class NotifyTarget:
+    """Who is told of a task's end: a user or a chat, and in a Lark group the requester the notice @-mentions."""
+
+    kind: TargetKind
+    id: str
+    mention: str | None = None  # an open_id
+
+    def columns(self) -> dict[str, str | None]:
+        """The target as the tasks table keeps it."""
+        return {"chat_id": self.id, "chat_kind": self.kind.value, "chat_mention": self.mention}
+
+    @classmethod
+    def from_columns(cls, row: Mapping[str, Any]) -> NotifyTarget | None:
+        """The target a task recorded; None for none (or a malformed one)."""
+        return cls._read(row.get("chat_kind"), row.get("chat_id"), row.get("chat_mention"))
+
+    @classmethod
+    def _read(cls, kind: Any, chat: Any, mention: Any) -> NotifyTarget | None:
+        try:
+            kind = TargetKind(kind)
+        except ValueError:
+            return None
+        if not (isinstance(chat, str) and chat):
+            return None
+        return cls(kind, chat, mention if isinstance(mention, str) and mention else None)
+
+
 @dataclass(frozen=True)
 class Notice:
     """A task's end for the chat it came from: the channel, who to tell there, and the Markdown text."""
 
     channel: NotifyChannel
-    chat: str
+    target: NotifyTarget
     text: str
 
-    def payload(self) -> dict[str, str]:
-        return {"channel": self.channel.value, "chat": self.chat, "text": self.text}
+    def payload(self) -> dict[str, str | None]:
+        return {"channel": self.channel.value, "chat": self.target.id, "kind": self.target.kind.value,
+                "mention": self.target.mention, "text": self.text}
 
     @classmethod
     def from_payload(cls, raw: Any) -> Notice | None:
@@ -60,10 +98,10 @@ class Notice:
             channel = NotifyChannel(raw.get("channel"))
         except ValueError:
             return None
-        chat, text = raw.get("chat"), raw.get("text")
-        if not (isinstance(chat, str) and chat and isinstance(text, str) and text):
+        target, text = NotifyTarget._read(raw.get("kind"), raw.get("chat"), raw.get("mention")), raw.get("text")
+        if target is None or not (isinstance(text, str) and text):
             return None
-        return cls(channel, chat, text)
+        return cls(channel, target, text)
 
 
 def notify_channel(origin_channel_id: str | None) -> NotifyChannel | None:
@@ -71,15 +109,18 @@ def notify_channel(origin_channel_id: str | None) -> NotifyChannel | None:
     return _BY_CHANNEL_ID.get(origin_channel_id or "")
 
 
-def notify_chat(origin_channel_id: str | None, *, sender: str | None, chat: str | None) -> str | None:
-    """Who is told of the end of a task asked for by ``sender`` in ``chat``, in the form the channel's ``notify``
-    takes: Lark's sends to a user (the sender's open_id), Telegram's to a chat (its id). None for a channel that
-    cannot be told."""
+def notify_target(origin_channel_id: str | None, *, sender: str | None, chat: str | None,
+                  group: bool) -> NotifyTarget | None:
+    """Who is told of the end of a task asked for by ``sender`` in ``chat`` (a group chat when ``group``): in
+    Telegram the chat; in Lark the sender in a direct message, else the group, @-mentioning the sender. None for a
+    channel that cannot be told."""
     match notify_channel(origin_channel_id):
+        case NotifyChannel.LARK if group:
+            return NotifyTarget(TargetKind.CHAT, chat, mention=sender or None) if chat else None
         case NotifyChannel.LARK:
-            return sender or None
+            return NotifyTarget(TargetKind.USER, sender) if sender else None
         case NotifyChannel.TELEGRAM:
-            return chat or None
+            return NotifyTarget(TargetKind.CHAT, chat) if chat else None
     return None
 
 

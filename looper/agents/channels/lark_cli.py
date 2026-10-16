@@ -6,7 +6,7 @@ every call, and without one lark-cli's active profile is used. Open_ids are
 per app, so the sender allowlist records the app it was made for
 (``allowlist_app_id``) and the channel does not start under another one.
 
-Only read calls run here besides the adapter's receive, send and reaction: ``whoami``,
+Only read calls run here besides the adapter's receive, send, reply and reaction: ``whoami``,
 the bot's info (``api GET /open-apis/bot/v3/info --as bot``) and
 ``contact +search-user --as user``; nothing reads lark-cli's configuration
 file, which holds the app secret.
@@ -71,6 +71,21 @@ def send_command(*, chat_id: str | None = None, user_id: str | None = None, text
     return [*_base(profile), "im", "+messages-send", "--as", "bot", *target, *body]
 
 
+def reply_command(message_id: str, *, text: str | None = None, markdown: str | None = None,
+                  profile: str | None = None) -> list[str]:
+    """The lark-cli argv that answers, as the bot, a message (``om_...``) with ``text`` or ``markdown``: a message in
+    the same chat that quotes it."""
+    if (text is None) == (markdown is None):
+        raise ValueError("reply with exactly one of text and markdown")
+    body = ["--text", text] if text is not None else ["--markdown", markdown]
+    return [*_base(profile), "im", "+messages-reply", "--as", "bot", "--message-id", message_id, *body]
+
+
+def mention(open_id: str) -> str:
+    """How a Markdown message @-mentions the user ``open_id``: Lark shows their name."""
+    return f'<at user_id="{open_id}"></at>'
+
+
 def edit_command(message_id: str, *, text: str | None = None, markdown: str | None = None,
                  profile: str | None = None) -> list[str]:
     """The lark-cli argv that replaces, as the bot, the content of a message it sent (``om_...``) with ``text`` or
@@ -89,7 +104,7 @@ def reaction_command(message_id: str, emoji: str = "Get", *, profile: str | None
 
 
 def sent_message_id(answer: Mapping[str, Any]) -> str | None:
-    """The id of the message ``+messages-send`` sent, from its JSON answer."""
+    """The id of the message ``+messages-send`` or ``+messages-reply`` sent, from its JSON answer."""
     data = answer.get("data") if isinstance(answer.get("data"), Mapping) else answer
     message_id = data.get("message_id") if isinstance(data, Mapping) else None
     return str(message_id) if message_id else None

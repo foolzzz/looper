@@ -17,6 +17,10 @@ from looper.agents.channels import lark_cli
 
 OPEN_ID = "ou_abcdefgh12"
 OTHER = "ou_zyxwvut987"
+BOT_OPEN_ID = "ou_bot0000001"  # every profile's bot, as its info says
+# A message's @-mention of the bot, as lark-cli 1.0.97 shows it: in ``mentions`` by open_id, and as ``@name`` in the
+# text.
+BOT_MENTION = {"id": BOT_OPEN_ID, "key": "@_user_1", "name": "HelperBot"}
 
 _STAND_IN = """\
 import json, sys
@@ -42,7 +46,7 @@ if args == ["whoami"]:
 if args == ["api", "GET", "/open-apis/bot/v3/info", "--as", "bot"]:
     if not profile["signed_in"]:
         refuse("not logged in")
-    answer({{"ok": True, "identity": "bot", "data": {{"app_name": profile["bot"], "open_id": "ou_bot0000001",
+    answer({{"ok": True, "identity": "bot", "data": {{"app_name": profile["bot"], "open_id": {bot!r},
                                                     "activate_status": 2}}}})
 if args[:4] == ["contact", "+search-user", "--as", "user"]:
     rest = dict(zip(args[4::2], args[5::2]))
@@ -64,6 +68,14 @@ if args[:4] == ["im", "+messages-send", "--as", "bot"]:
     with open({log!r}) as sent:
         count = sum(1 for line in sent if "+messages-send" in line)
     answer({{"ok": True, "identity": "bot", "data": {{"message_id": "om_%04d" % count, "chat_id": rest[1]}}}})
+if args[:5] == ["im", "+messages-reply", "--as", "bot", "--message-id"] and len(args) == 8:
+    if args[6] not in ("--text", "--markdown"):
+        refuse("specify one of --text, --markdown or --content")
+    if args[5].endswith("gone"):
+        refuse("the message was recalled")
+    with open({log!r}) as sent:
+        count = sum(1 for line in sent if "+messages-reply" in line)
+    answer({{"ok": True, "identity": "bot", "data": {{"message_id": "om_r%04d" % count, "chat_id": "oc_group"}}}})
 if args[:5] == ["im", "+messages-edit", "--as", "bot", "--message-id"] and len(args) == 8:
     if args[6] not in ("--text", "--markdown"):
         refuse("specify one of --text, --markdown or --content")
@@ -110,8 +122,19 @@ WORLD: dict[str, Any] = {
     "events": [
         {"type": "im.message.receive_v1", "chat_id": "oc_dm", "chat_type": "p2p", "message_id": "om_9",
          "message_type": "text", "sender_id": OPEN_ID, "sender_type": "user", "content": "status please"},
+        # In a group: a message that names the bot without @-mentioning it, a listed sender's @-mention, an unlisted
+        # sender's, and a message that @-mentions someone else.
         {"type": "im.message.receive_v1", "chat_id": "oc_group", "chat_type": "group", "message_id": "om_10",
          "message_type": "text", "sender_id": OPEN_ID, "sender_type": "user", "content": "@HelperBot hi all"},
+        {"type": "im.message.receive_v1", "chat_id": "oc_group", "chat_type": "group", "message_id": "om_11",
+         "message_type": "text", "sender_id": OPEN_ID, "sender_type": "user", "content": "@HelperBot what runs now?",
+         "mentions": [BOT_MENTION]},
+        {"type": "im.message.receive_v1", "chat_id": "oc_group", "chat_type": "group", "message_id": "om_12",
+         "message_type": "text", "sender_id": OTHER, "sender_type": "user", "content": "@HelperBot the secret plan",
+         "mentions": [BOT_MENTION]},
+        {"type": "im.message.receive_v1", "chat_id": "oc_group", "chat_type": "group", "message_id": "om_13",
+         "message_type": "text", "sender_id": OPEN_ID, "sender_type": "user", "content": "@Alan Turing look",
+         "mentions": [{"id": OTHER, "key": "@_user_1", "name": "Alan Turing"}]},
     ],
 }
 
@@ -124,7 +147,7 @@ def lark_cli_stand_in(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     world.write_text(json.dumps(WORLD))
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
-    fake_claude(bin_dir / "lark-cli", _STAND_IN.format(log=str(log), world=str(world)))
+    fake_claude(bin_dir / "lark-cli", _STAND_IN.format(log=str(log), world=str(world), bot=BOT_OPEN_ID))
     monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
     lark_cli.forget()
     # The server runs with stdin at /dev/null under launchd; a child that inherits it sees EOF at once.

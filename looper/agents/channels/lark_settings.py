@@ -30,7 +30,8 @@ async def status() -> dict[str, Any]:
     when lark-cli cannot act as it), ``problem`` (why the channel would not start, from lark-cli or the allowlist's
     app; null otherwise), ``allowlist_app_id``, ``names`` (open_id -> name, for the allowlist and the refused
     senders) and ``rejected`` (the latest refused senders not on the allowlist: ``open_id``, ``name``,
-    ``count``, ``last_at``; never what they wrote)."""
+    ``count``, ``last_at``, and ``chat_id``, the group chat they last wrote in, null for a direct message; never
+    what they wrote)."""
     row = await db_channel_configs.get_config(CHANNEL_ID)
     config = dict((row or {}).get("config") or {})
     problem, bot = await lark_cli.check(config)
@@ -49,7 +50,7 @@ async def status() -> dict[str, Any]:
         "allowlist_app_id": config.get("allowlist_app_id"),
         "names": names,
         "rejected": [{"open_id": r["sender_id"], "name": names.get(r["sender_id"]), "count": r["count"],
-                      "last_at": r["last_at"]} for r in rejected],
+                      "last_at": r["last_at"], "chat_id": r.get("chat_id")} for r in rejected],
     }
 
 

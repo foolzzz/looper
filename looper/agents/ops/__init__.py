@@ -64,6 +64,7 @@ class Turn:
     chat: str | None
     message_id: str | None = None  # the user's message it answers; None for a turn Claude runs on its own
     sender: str | None = None  # who sent it (Lark's open_id, Telegram's user id; the web chat names none)
+    group: bool = False  # the chat is a group chat
     envelope: MessageEnvelope | None = None
     blocks: list[str] = field(default_factory=list)
     # Looper refused a call of this turn for its token: the tools did not work, whatever Claude says.

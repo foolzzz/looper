@@ -39,7 +39,7 @@ from ..message import (
     MessageType,
     planner_address,
 )
-from ..task_notice import Notice, ends_task, notice_text, notify_channel
+from ..task_notice import Notice, NotifyTarget, ends_task, notice_text, notify_channel
 from .planner import PlannerAgent, closing_note
 
 logger = logging.getLogger(__name__)
@@ -76,7 +76,7 @@ class Task:
     planner_id: str | None = None
     correlation_id: str = ""
     origin_channel_id: str = ""
-    chat_id: str = ""
+    notify: NotifyTarget | None = None  # who is told when it ends (``task_notice``)
     title: str = ""  # the Manager's few words naming it (``db.tasks.task_name``)
     created_at: str = ""
 
@@ -232,7 +232,7 @@ class TaskRouter:
                 project_id=row["project_id"],
                 correlation_id=row.get("correlation_id") or "",
                 origin_channel_id=row.get("origin_channel_id") or "",
-                chat_id=row.get("chat_id") or "",
+                notify=NotifyTarget.from_columns(row),
                 title=row.get("title") or "",
             )
             self._tasks[task_id] = task
@@ -296,7 +296,7 @@ class TaskRouter:
             project_id=row["project_id"],
             correlation_id=row.get("correlation_id") or "",
             origin_channel_id=row.get("origin_channel_id") or "",
-            chat_id=row.get("chat_id") or "",
+            notify=NotifyTarget.from_columns(row),
             title=row.get("title") or "",
         )
         self._tasks[task_id] = task
@@ -442,12 +442,12 @@ class TaskRouter:
         """The end notice of a Telegram or Lark task that recorded who to tell (``task_notice``); None for any
         other. The Manager sends it behind the task's progress."""
         channel = notify_channel(task.origin_channel_id)
-        if channel is None or not task.chat_id:
+        if channel is None or task.notify is None:
             return None
         name = db_tasks.task_name(title=task.title, goal_id=task.goal_id, requirement=task.requirement,
                                   task_id=task.task_id)
         text = notice_text(task.task_id, name, status, summary, channel=channel, dashboard_url=self._dashboard_url)
-        return Notice(channel, task.chat_id, text)
+        return Notice(channel, task.notify, text)
 
     async def _handle_cancel(self, envelope: MessageEnvelope) -> None:
         assert self._bus is not None
@@ -567,7 +567,7 @@ class TaskRouter:
             project_id=db_row["project_id"],
             correlation_id=db_row.get("correlation_id", ""),
             origin_channel_id=db_row.get("origin_channel_id", ""),
-            chat_id=db_row.get("chat_id") or "",
+            notify=NotifyTarget.from_columns(db_row),
             title=db_row.get("title") or "",
         )
         self._tasks[task_id] = task

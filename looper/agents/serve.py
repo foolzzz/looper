@@ -362,18 +362,20 @@ def _telegram_adapter_from_config(
     return TelegramChannelAdapter(bot_token=token, allowlist=allowlist)
 
 
-def _lark_adapter_from_config(config: dict[str, Any], runtime_root: Path) -> LarkChannelAdapter | None:
-    """Build the Lark adapter from its Settings-page config; None when its allowlist keeps it from starting."""
+def _lark_adapter_from_config(config: dict[str, Any], runtime_root: Path, *,
+                              bot_open_id: str = "") -> LarkChannelAdapter | None:
+    """Build the Lark adapter from its Settings-page config; None when its allowlist keeps it from starting.
+    ``bot_open_id`` is the bot's own open_id, which tells a group message that @-mentions it."""
     allowlist = _sender_allowlist("channel-lark", "lark", config)
     if allowlist is None:
         return None
     from ..db.channel_configs import record_rejected
 
-    async def rejected(sender_id: str) -> None:
-        await record_rejected("channel-lark", sender_id)
+    async def rejected(sender_id: str, chat_id: str | None) -> None:
+        await record_rejected("channel-lark", sender_id, chat_id=chat_id)
 
     return LarkChannelAdapter(profile=config.get("profile") or "", runtime_root=runtime_root, allowlist=allowlist,
-                              on_rejected=rejected)
+                              on_rejected=rejected, bot_open_id=bot_open_id)
 
 
 async def _lark_adapter(config: dict[str, Any], runtime_root: Path) -> LarkChannelAdapter | None:
@@ -381,15 +383,14 @@ async def _lark_adapter(config: dict[str, Any], runtime_root: Path) -> LarkChann
     that app; None (logged) otherwise."""
     from .channels import lark_cli
 
-    adapter = _lark_adapter_from_config(config, runtime_root)
-    if adapter is None:
+    if _sender_allowlist("channel-lark", "lark", config) is None:
         return None
     problem, bot = await lark_cli.check(config, fresh=True)
     if problem or bot is None:
         logger.error("channel-lark not started: %s", problem)
         return None
     logger.info("channel-lark: bot %s (app %s, lark-cli profile %s)", bot.bot_name, bot.app_id, bot.profile)
-    return adapter
+    return _lark_adapter_from_config(config, runtime_root, bot_open_id=bot.bot_open_id)
 
 
 async def seed_channel_configs(pool: Any = None) -> None:
@@ -415,7 +416,7 @@ async def seed_channel_configs(pool: Any = None) -> None:
             "config": {
                 "profile": "",
                 "allowed_open_ids": [],
-                "description": "The Manager in Lark direct messages, through lark-cli",
+                "description": "The Manager in Lark direct messages and group @-mentions, through lark-cli",
             },
         },
     ], pool=pool)

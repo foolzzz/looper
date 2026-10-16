@@ -80,13 +80,17 @@ class TestChannelPersistence:
         assert saved == []
 
 
+LARK = channel_address("lark", "channel-lark")
+
+
 @pytest.mark.usefixtures("agent_db")
-class TestPrivateChatsOnly:
-    """Only private chats are stored: a Telegram group's id is negative, and nothing from it reaches chat_messages,
-    neither the message, nor the Manager's reply to it, nor a reply Claude sends on its own afterwards."""
+class TestStoredChats:
+    """Every chat is stored but a Telegram group (its id is negative): nothing from one reaches chat_messages, neither
+    the message, nor the Manager's reply to it, nor a reply Claude sends on its own afterwards. A Lark group is, under
+    ``lark:<chat_id>``: only the messages that @-mention the bot come in from one."""
 
     @staticmethod
-    def _stored(chat_id: str) -> list[dict[str, Any]]:
+    def _stored(source: Any, context: dict[str, Any]) -> list[dict[str, Any]]:
         saved: list[dict[str, Any]] = []
 
         async def _save(**kwargs: Any) -> None:
@@ -98,7 +102,9 @@ class TestPrivateChatsOnly:
                 mgr = ManagerAgent(config=ManagerConfig(claude_bin=_reply_claude(root), work_dir=root),
                                    runtime_root=root)
                 mgr._bus = MessageBus(runtime_root=root)
-                envelope = _user(TELEGRAM, "hello", chat_id=chat_id)
+                envelope = MessageEnvelope.create(
+                    source=source, target=MANAGER_ADDRESS, message_type=MessageType.USER_MESSAGE,
+                    payload={"text": "hello", "channel_context": context}, correlation_id="c1")
                 with pytest.MonkeyPatch.context() as mp:
                     mp.setattr(manager_mod.db_chat, "save_message", AsyncMock(side_effect=_save))
                     await mgr._handle(envelope)
@@ -109,12 +115,17 @@ class TestPrivateChatsOnly:
         asyncio.run(_go())
         return saved
 
-    def test_a_group_message_and_every_reply_to_it_are_not_stored(self) -> None:
-        assert self._stored("-1001234567890") == []
+    def test_a_telegram_group_message_and_every_reply_to_it_are_not_stored(self) -> None:
+        assert self._stored(TELEGRAM, {"chat_id": "-1001234567890"}) == []
 
-    def test_a_direct_message_and_every_reply_to_it_are_stored(self) -> None:
-        saved = self._stored("12345")
+    @pytest.mark.parametrize(("source", "context", "session"), [
+        (TELEGRAM, {"chat_id": "12345"}, "telegram:12345"),
+        (LARK, {"chat_id": "oc_dm", "chat_type": "p2p", "sender_id": "ou_1"}, "lark:oc_dm"),
+        (LARK, {"chat_id": "oc_team", "chat_type": "group", "sender_id": "ou_1", "sender_name": "Ada"},
+         "lark:oc_team"),
+    ])
+    def test_a_message_and_every_reply_to_it_are_stored(self, source: Any, context: dict[str, Any],
+                                                        session: str) -> None:
+        saved = self._stored(source, context)
         assert [(s["session_id"], s["role"], s["content"]) for s in saved] == [
-            ("telegram:12345", "user", "hello"), ("telegram:12345", "assistant", "ok"),
-            ("telegram:12345", "assistant", "done on my own")]
-
+            (session, "user", "hello"), (session, "assistant", "ok"), (session, "assistant", "done on my own")]

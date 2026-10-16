@@ -24,7 +24,7 @@ from ..message import MANAGER_ADDRESS, TASK_ROUTER_ADDRESS, MessageEnvelope, Mes
 from ..project_execution import LessonsMode, ProjectExecution, ReviewPolicy, TaskBudgetAction, format_usd
 from ..projects import HTTP_404, HTTP_409, TASK_PROFILE_ROLES, RequestError, edit_requirement, project_name
 from ..system_prompt import TASK_REQUIREMENT_LIMIT
-from ..task_notice import notify_chat
+from ..task_notice import notify_target
 from ..tiers.journal import SUPPLEMENTS_MAX_CHARS, clip, kept_text
 from ..tiers.task import resolve_work_dir
 from . import Call, ErrorCode, OpError, Risk, Tool, Turn
@@ -220,12 +220,13 @@ async def _create(call: Call) -> dict[str, Any]:
     task_id = f"task-{uuid.uuid4().hex[:12]}"
     title = db_tasks.task_title(arguments.get("title"))
     created = project is None
+    target = notify_target(origin, sender=turn.sender, chat=turn.chat, group=turn.group)
     row = {
         "task_id": task_id, "requirement": arguments["requirement"].strip(), "goal_id": arguments.get("goal_id") or "",
         "work_dir": work_dir, "status": db_tasks.READY,
         "correlation_id": envelope.correlation_id if envelope is not None else "", "origin_channel_id": origin or "",
-        # Who the TaskRouter tells when the task ends: in Telegram the chat, in Lark the sender.
-        "chat_id": notify_chat(origin, sender=turn.sender, chat=turn.chat),
+        # Who the TaskRouter tells when the task ends: in Telegram the chat, in Lark the sender or the group.
+        **(target.columns() if target is not None else {}),
         "original_user_text": (str(envelope.payload.get("text") or "") or None) if envelope is not None else None,
         "title": title,
     }
