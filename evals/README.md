@@ -6,7 +6,7 @@ Tells you whether a change to a recommended role prompt, a code-owned contract
 (`REPLY_CONTRACT`, `WORK_CONTRACT`, `REVIEW_CONTRACT`) or the way the system
 prompt is put together makes the agents worse.
 
-It runs eleven small tasks through a disposable `looper serve` (a new
+It runs twelve small tasks through a disposable `looper serve` (a new
 PostgreSQL database, a free port, a temporary runtime root and working
 directories), one at a time over the HTTP API:
 
@@ -23,6 +23,7 @@ directories), one at a time over the HTTP API:
 | `supplement_replan` | a message to the task's Planner, while its first step runs, that changes what the second step writes: the Planner must change the plan (`add_steps` or `replan`), not leave it to the Worker |
 | `requirement_edit` | the same change as an edit of the requirement |
 | `supplement_no_change` | a message that changes nothing: the plan must stay as it is |
+| `profile_choice` | the task's project lets its Planner choose one more Agent Profile (`eval/chosen`, the run's own profile under another name, so it costs the same) and the requirement asks for it: the Planner must choose it with its own tool (`looper_task_profile_set`) before the step runs, and the Worker run on it |
 
 For each task it reads back from the API: success (the task completed, its
 files are right and the flow happened, such as the review or the retry), step
@@ -30,7 +31,8 @@ count, the pairs of steps the plan lets run at the same time
 (`independent_pairs`), those of them with a step both depend on and a step
 that depends on both (`bracketed_pairs`), and the most Workers that ran at once
 (`parallel_workers`, from the runs' records), the changes to the task the
-Planner answered by changing the plan (`plan_changes`), retries, reviews, cost (the task cost API), tokens (the runs' records: prompt, uncached
+Planner answered by changing the plan (`plan_changes`), the Worker and Reviewer
+runs on a profile the Planner chose (`planner_profile_runs`), retries, reviews, cost (the task cost API), tokens (the runs' records: prompt, uncached
 and cached, and output; what a runtime without prices still reports), contract violations
 (replies the Planner's reply parser or the Worker/Reviewer report check
 rejected) and whether the Planner modified files itself (its file-editing tool
@@ -138,6 +140,8 @@ database, a disposable `looper serve`, and fake or real mode.
 | `cancel_confirmation` | cancelling waits for the user's word: a refusal leaves the task running, a confirmation in the next message cancels it |
 | `concurrency` | a project's Worker limit changes only after the user confirms it in the next message (`looper_concurrency`); a running task's own Worker limit changes at once |
 | `status` | a status question is answered by reading through the tools (run it alone to try a runtime) |
+| `config_tools` | the configuration tools: a project is created with the directory the user named (`looper_projects`); the Agent Profiles are listed; a Reviewer's profile in a project is set at once and the project's allowed list holds the one profile named (`looper_settings`); this week's spend is read (`looper_costs`); deleting the project waits for the user's word in the next message |
+| `provider_key` | a provider registered from a message that pastes its API key: it is registered without the key (`looper_providers`), and the key is in no reply, no stored provider and not in the Manager's trail |
 
 The dialogs that need a running task start a slow one first (`sleep 300`)
 and stop whatever is still running at their end. Fake mode plays the Manager

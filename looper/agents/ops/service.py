@@ -47,6 +47,8 @@ from typing import Any
 from ...db import manager_actions as db_actions
 from . import Call, ErrorCode, OpError, Risk, Tool, Turn, check_arguments
 from .concurrency import TOOLS as CONCURRENCY_TOOLS
+from .config import TOOLS as CONFIG_TOOLS
+from .settings import TOOLS as SETTINGS_TOOLS
 from .tasks import TOOLS as TASK_TOOLS
 
 logger = logging.getLogger(__name__)
@@ -102,9 +104,13 @@ class _Pending:
     answer_turn: str | None = None  # the message of the turn that may confirm it, once it started
 
 
+# The Manager's tools (a task's Planner has its own, ``ops.planner``).
+MANAGER_TOOLS: tuple[Tool, ...] = (*TASK_TOOLS, *CONCURRENCY_TOOLS, *CONFIG_TOOLS, *SETTINGS_TOOLS, CONFIRM)
+
+
 class ManagerOps:
     def __init__(self, platform: Platform, *, url: str, token: str | None = None,
-                 tools: Sequence[Tool] = (*TASK_TOOLS, *CONCURRENCY_TOOLS, CONFIRM),
+                 tools: Sequence[Tool] = MANAGER_TOOLS,
                  clock: Callable[[], float] = time.monotonic) -> None:
         self._platform = platform
         self._url = url.rstrip("/")
@@ -172,12 +178,18 @@ class ManagerOps:
         """Run one tool call in the current turn; the protocol's answer."""
         tool = self._tools.get(name)
         if tool is None:
+            from .planner import TOOLS as PLANNER_TOOLS
+
+            if name in {t.name for t in PLANNER_TOOLS}:
+                return _error(ErrorCode.FORBIDDEN, f"{name} is a tool of a task's Planner, for its own task; the "
+                                                   f"Manager's tools are: {', '.join(self._tools)}")
             return _error(ErrorCode.INVALID, f"no tool {name!r}; the tools are: {', '.join(self._tools)}")
         turn = self._turn or Turn(channel=None, chat=None)
         risk = tool.risk
         arguments: dict[str, Any] = raw if isinstance(raw, dict) else {}
         try:
             arguments = check_arguments(tool.schema, raw)
+            risk = tool.risk_of(arguments)
             if tool.name == CONFIRM_TOOL:
                 return await self._confirm(arguments["confirmation_id"], turn)
             if risk is not Risk.READ and turn.autonomous:
@@ -295,28 +307,39 @@ class ManagerOps:
     # --- The Manager's MCP entry ---
 
     def server_config(self) -> dict[str, Any]:
-        return {"command": sys.executable, "args": ["-m", "looper.cli", "mcp-server"],
-                "env": {URL_ENV: self._url, TOKEN_ENV: self._token}}
+        return server_config(self._url, self._token)
 
     async def library_with_server(self, library: Any, runtime_root: Path) -> Any:
         """``library`` (``AgentLibrary``) with Looper's own MCP server added: always there for the Manager, and
         over a catalog server of the same name."""
-        import asyncio
+        return await library_with_server(library, runtime_root, self.server_config(), who="the Manager")
 
-        from ..library import ItemKind, LoadedItem
-        from ..mcp import write_config
 
-        servers: dict[str, Any] = {}
-        if library.mcp_config:
-            servers = dict(json.loads(Path(library.mcp_config).read_text(encoding="utf-8")).get("mcpServers") or {})
-        if SERVER_NAME in servers:
-            logger.warning("the catalog's MCP server %r is replaced by Looper's own for the Manager", SERVER_NAME)
-        servers[SERVER_NAME] = self.server_config()
-        path = await asyncio.to_thread(write_config, runtime_root, sorted(servers.items()))
-        sha = hashlib.sha256(json.dumps(servers[SERVER_NAME], sort_keys=True).encode("utf-8")).hexdigest()
-        items = tuple(item for item in library.items if not (item.kind is ItemKind.MCP and item.name == SERVER_NAME))
-        own = LoadedItem(ItemKind.MCP, SERVER_NAME, sha, plugin="", scope="builtin")
-        return replace(library, items=(*items, own), mcp_config=str(path))
+def server_config(url: str, token: str) -> dict[str, Any]:
+    """Looper's MCP entry for an agent with ``token``: ``looper mcp-server``, reaching the server at ``url``."""
+    return {"command": sys.executable, "args": ["-m", "looper.cli", "mcp-server"],
+            "env": {URL_ENV: url, TOKEN_ENV: token}}
+
+
+async def library_with_server(library: Any, runtime_root: Path, config: Mapping[str, Any], *, who: str) -> Any:
+    """``library`` (``AgentLibrary``) with Looper's own MCP server ``config`` added (``server_config``), over a
+    catalog server of the same name; ``who`` is the agent it is for, as a warning names it."""
+    import asyncio
+
+    from ..library import ItemKind, LoadedItem
+    from ..mcp import write_config
+
+    servers: dict[str, Any] = {}
+    if library.mcp_config:
+        servers = dict(json.loads(Path(library.mcp_config).read_text(encoding="utf-8")).get("mcpServers") or {})
+    if SERVER_NAME in servers:
+        logger.warning("the catalog's MCP server %r is replaced by Looper's own for %s", SERVER_NAME, who)
+    servers[SERVER_NAME] = dict(config)
+    path = await asyncio.to_thread(write_config, runtime_root, sorted(servers.items()))
+    sha = hashlib.sha256(json.dumps(servers[SERVER_NAME], sort_keys=True).encode("utf-8")).hexdigest()
+    items = tuple(item for item in library.items if not (item.kind is ItemKind.MCP and item.name == SERVER_NAME))
+    own = LoadedItem(ItemKind.MCP, SERVER_NAME, sha, plugin="", scope="builtin")
+    return replace(library, items=(*items, own), mcp_config=str(path))
 
 
 class _Recorded(OpError):

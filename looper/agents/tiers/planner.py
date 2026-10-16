@@ -54,6 +54,14 @@ invalid reply gets one repair turn. Planning that
 still fails fails the task; a decision that still fails falls back to the
 step's own verdict. When the task completes or fails, the Planner signals the
 TaskRouter, which tears it down and ends its Claude.
+
+Under ``looper serve`` the Planner also has platform tools of its own
+(``ops.planner``): Looper's MCP server, with a token for this task that it
+gets when it starts and that stops working when it stops. With them it
+chooses its Workers' and Reviewers' Agent Profiles from its project's list
+and changes its task's or its project's concurrency; they change things only
+in a turn Looper sends it, and its system prompt says how to use them after
+the reply contract.
 """
 
 from __future__ import annotations
@@ -418,6 +426,11 @@ def _clip(text: Any, limit: int) -> str:
     return flat if len(flat) <= limit else flat[: limit - 1] + "…"
 
 
+def _sentence(text: str) -> str:
+    """``text`` with a period at its end, unless it already ends a sentence."""
+    return text if text.endswith((".", "!", "?", "…")) else text + "."
+
+
 def result_outcome(result: Mapping[str, Any]) -> str:
     """What a step's last result was, in a line: what a retry, a failure or an unfinished step is about."""
     if "verify_passed" in result and result.get("verify_passed") is not True:
@@ -494,10 +507,16 @@ class _NoWorkspace(Exception):
 class PlannerAgent:
     """Per-task Planner: one instance and one resident Claude per task."""
 
-    def __init__(self, *, task_id: str, runtime_root: Path, claude_bin: str = "claude") -> None:
+    def __init__(self, *, task_id: str, runtime_root: Path, claude_bin: str = "claude", ops: Any = None) -> None:
         self._task_id = task_id
         self._runtime_root = runtime_root
         self._claude_bin = claude_bin
+        # The Planner's own platform tools (``ops.planner.PlannerOps``), and the token they know it by while it runs;
+        # without them it has none.
+        self._ops = ops
+        self._token: str | None = None
+        # The MCP configuration files that carry the token, removed when the Planner stops.
+        self._token_files: set[str] = set()
         self._bus: MessageBus | None = None
         self._plan: TaskPlan | None = None
         self._loop_task: asyncio.Task[Any] | None = None
@@ -543,6 +562,8 @@ class PlannerAgent:
         self._bus = bus
         self._replies: dict[int, str] = {}  # a supplement's journal id → the reply of the turn that delivered it
         self._running = True
+        if self._ops is not None:
+            self._token = self._ops.issue(self._task_id)  # the task's earlier Planner's stops working
         await self._load_plan()
         self._loop_task = asyncio.create_task(self._message_loop())
         self._supervise_task = asyncio.create_task(self._supervise_loop())
@@ -551,6 +572,8 @@ class PlannerAgent:
     async def stop(self) -> None:
         """Stop handling messages and end the Planner's Claude."""
         self._running = False
+        if self._ops is not None and self._token is not None:
+            self._ops.revoke(self._token)
         supervise_task, self._supervise_task = self._supervise_task, None
         if supervise_task:
             supervise_task.cancel()
@@ -574,6 +597,8 @@ class PlannerAgent:
             # A turn the loop was in has already killed Claude; an idle one
             # ends when its stdin closes. Never leave it running.
             await self._claude.stop(kill=cancelled)
+            for path in self._token_files:  # the token in them no longer works
+                Path(path).unlink(missing_ok=True)
 
     def is_healthy(self) -> bool:
         return self._running
@@ -1828,6 +1853,9 @@ class PlannerAgent:
         settings = await load_settings()
         knowledge = await self._load_knowledge(plan)
         library = await self._load_installed(plan)
+        if self._ops is not None and self._token is not None:
+            library = await self._ops.library_with_server(library, self._runtime_root, self._token)
+            self._token_files.add(library.mcp_config)
         agent_settings = await self._load_agent_settings(plan)
         if agent_settings.profile_error:
             # The task fails with the reason rather than run another agent.
@@ -1935,6 +1963,8 @@ class PlannerAgent:
                 # The new session has its resume brief.
                 self._pending_switch = self._pending_handoff = None
 
+        if self._ops is not None and self._token is not None:
+            self._ops.begin_turn(self._token)  # its tools may change things in this turn only
         try:
             turn = await asyncio.wait_for(self._claude.run_turn(text, on_event, stop=lambda: recorder.cap_stop),
                                           limit if limit > 0 else None)
@@ -1951,6 +1981,9 @@ class PlannerAgent:
             await recorder.finish(output_text=None, result_event=None,
                                   error=f"Planner stopped reading Claude: {type(exc).__name__}")
             raise
+        finally:
+            if self._ops is not None and self._token is not None:
+                self._ops.end_turn(self._token)
 
         if resuming and not turn.session_started:
             error = f"session {resuming} could not be resumed{exit_note(turn.exit_code)}; retried in a new session"
@@ -2112,7 +2145,8 @@ class PlannerAgent:
                 project_description=_clip(plan.project_description, 300), work_dir=plan.work_dir,
             ),
             contract_name="REPLY_CONTRACT",
-            contract=reply_contract(self._execution.step_retries),
+            # With its platform tools, how to use them follows the reply contract.
+            contract=reply_contract(self._execution.step_retries) + (f"\n{self._ops.guide}" if self._ops else ""),
             knowledge=knowledge,
         )
 
@@ -2270,9 +2304,9 @@ class PlannerAgent:
         it is now and the journal."""
         lines, section = self._change_lines(plan, changes)
         return "\n".join([
-            f"[RESTART] The task {why}. The user restarted it, and it goes on from its plan: the accepted steps "
-            "stay done and do not run again; the steps that did not finish are back to not started (the journal "
-            "below says how their last attempt ended).",
+            f"[RESTART] {_sentence(f'The task {why}')} The user restarted it, and it goes on from its plan: the "
+            "accepted steps stay done and do not run again; the steps that did not finish are back to not started "
+            "(the journal below says how their last attempt ended).",
             f"The restart does not reset retries: a step back to not started keeps the retries it used (at most "
             f"{self._execution.step_retries} per step; a replan that keeps its id keeps them too), so one that had "
             "used them all gets this one attempt and no retry; a step under a new id (add_steps or replan) starts "

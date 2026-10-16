@@ -1356,6 +1356,26 @@ class TestTaskEnd:
         assert took < 2  # well inside the 5 s stop grace
         assert not alive
 
+    @pytest.mark.parametrize(("status", "fail_reason", "opening"), [
+        ("failed", "c cannot parse the input", "The task failed: c cannot parse the input. The user restarted it"),
+        # A reason that already ends its sentence gets no second period.
+        ("failed", "c cannot parse the input; replanning.",
+         "The task failed: c cannot parse the input; replanning. The user restarted it"),
+        ("failed", "Can c parse the input?", "The task failed: Can c parse the input? The user restarted it"),
+        ("stopped", "", "The task was stopped. The user restarted it"),
+    ])
+    def test_the_restart_turn_says_how_the_task_ended_in_one_sentence(
+        self, tmp_path: Path, status: str, fail_reason: str, opening: str,
+    ) -> None:
+        from looper.agents.tiers.planner import PlanStep, TaskPlan
+        from looper.db.task_changes import TaskChanges
+
+        planner = PlannerAgent(task_id="t1", runtime_root=tmp_path)
+        task_plan = TaskPlan(plan_id="p1", goal_id="", requirement="build it", work_dir=str(tmp_path))
+        task_plan.steps = [PlanStep(step_id="c", index=0, instruction="do c")]
+        message = planner._restart_message(task_plan, planner._ended(status, fail_reason), TaskChanges())
+        assert message.startswith(f"[RESTART] {opening}, and it goes on from its plan")
+
 
 @pytest.mark.usefixtures("agent_db")
 class TestTaskJournal:

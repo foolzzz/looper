@@ -1,4 +1,5 @@
-"""Telling the chat a task came from that the task ended.
+"""Telling the chat a task came from that the task ended (or that its Planner changed a concurrency limit,
+``ops.planner``).
 
 Telegram and Lark can send a message unprompted (``ChannelAdapter.notify``),
 so a task asked for in one of them is told of its end there, once: when it
@@ -146,7 +147,11 @@ def notice_text(task_id: str, name: str, status: str, summary: str | None, *, ch
     lines = [f"{head} · {shown}"]
     if text := lead(summary):
         lines.append(text)
-    link = task_link(dashboard_url, task_id)
-    # Lark's Markdown links only a link written as one; a Telegram client links a bare URL.
-    lines.append(f"[{link}]({link})" if channel is NotifyChannel.LARK else link)
+    lines.append(link_line(task_link(dashboard_url, task_id), channel))
     return "\n".join(lines)
+
+
+def link_line(link: str, channel: NotifyChannel) -> str:
+    """``link`` as a line of a message to ``channel``: Lark's Markdown links only a link written as one; a Telegram
+    client links a bare URL."""
+    return f"[{link}]({link})" if channel is NotifyChannel.LARK else link

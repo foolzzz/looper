@@ -92,6 +92,13 @@ def result_text(events: Iterable[Mapping[str, Any]]) -> str | None:
     return str(result.get("result") or "")
 
 
+def planner_profile_runs(records: Iterable[Mapping[str, Any]]) -> int:
+    """Worker and Reviewer runs on a profile the task's Planner chose (for the rest of the task or a step)."""
+    return sum(1 for record in records if role(record) in ("worker", "reviewer")
+               and ((record.get("metadata") or {}).get("profile") or {}).get("source") in ("planner_task",
+                                                                                          "planner_step"))
+
+
 def turn_kinds(records: Iterable[Mapping[str, Any]]) -> dict[str, int]:
     """The Planner's turns by kind (``plan``, ``decision``, ``chat``, ``supervise``, ``repair``)."""
     kinds: dict[str, int] = {}
@@ -223,16 +230,17 @@ def planner_changed_files(
     Reviewer ran.
 
     ``clock_offset`` is the database clock minus the local clock, measured when
-    the run starts; a file written within ``tolerance`` seconds of a step run
-    (what that measurement may be off by) is left to the step.
+    the run starts, and ``tolerance`` what that measurement may be off by: a
+    file written within ``tolerance`` seconds of a Planner turn is the
+    Planner's (no one else writes then), unless it is that close to a step run
+    too, which it is left to.
     """
-    def inside(moment: float, spans: Iterable[tuple[float, float]], slack: float) -> bool:
-        return any(start - clock_offset - slack <= moment <= end - clock_offset + slack for start, end in spans)
+    def near(moment: float, spans: Iterable[tuple[float, float]]) -> bool:
+        return any(start - clock_offset - tolerance <= moment <= end - clock_offset + tolerance for start, end in spans)
 
     steps = [*windows.get("worker", []), *windows.get("reviewer", [])]
     return sorted(
-        path for path, mtime in changes.items()
-        if inside(mtime, windows.get("planner", []), 0.0) and not inside(mtime, steps, tolerance)
+        path for path, mtime in changes.items() if near(mtime, windows.get("planner", [])) and not near(mtime, steps)
     )
 
 
@@ -304,6 +312,8 @@ def task_metrics(
         # The Planner's progress notes kept in the task journal, and whether the task ended with a final summary.
         "progress_notes": sum(1 for entry in detail.get("journal") or [] if entry.get("kind") == "progress"),
         "final_summary": final_summary(detail),
+        # The runs on a profile the Planner chose with its tool.
+        "planner_profile_runs": planner_profile_runs(records),
     }
     status = str(detail.get("status") or "")
     problems = []

@@ -119,12 +119,14 @@ def test_edit_tool_paths_are_relative_and_never_local_paths(tmp_path: Path) -> N
 def test_changed_files_are_the_planners_only_while_no_step_ran() -> None:
     windows = {"planner": [(100.0, 110.0), (130.0, 140.0)], "worker": [(110.05, 129.0)],
                "reviewer": [(141.0, 150.0)]}
-    changes = {"in-plan-turn.txt": 105.0, "by-worker.txt": 120.0, "near-worker-start.txt": 109.98,
-               "after-all.txt": 160.0}
-    assert metrics.planner_changed_files(changes, windows) == ["in-plan-turn.txt"]
+    # Written as a Planner turn starts, which the measured clock offset may put up to the tolerance before it.
+    changes = {"in-plan-turn.txt": 105.0, "at-plan-turn-start.txt": 129.95, "before-plan-turn.txt": 129.85,
+               "by-worker.txt": 120.0, "near-worker-start.txt": 109.98, "after-all.txt": 160.0}
+    assert metrics.planner_changed_files(changes, windows) == ["at-plan-turn-start.txt", "in-plan-turn.txt"]
     # The database clock runs 50 s ahead of the local one: the windows move back by 50 s.
     shifted = {name: [(a + 50, b + 50) for a, b in spans] for name, spans in windows.items()}
-    assert metrics.planner_changed_files(changes, shifted, clock_offset=50.0) == ["in-plan-turn.txt"]
+    assert metrics.planner_changed_files(changes, shifted, clock_offset=50.0) == [
+        "at-plan-turn-start.txt", "in-plan-turn.txt"]
 
 
 @pytest.mark.parametrize(("depends_on", "pairs"), [
@@ -349,7 +351,7 @@ def test_fake_mode_runs_every_task_and_sees_misbehaviour(tmp_path: Path) -> None
                     "retry_after_failure": (1, 1, 0, 0), "chat_correction": (1, 0, 0, 1), "misbehaving": (1, 1, 0, 0),
                     # The change to the second step replaced it: s1, the dropped s2, and its replacement.
                     "supplement_replan": (3, 0, 0, 1), "requirement_edit": (3, 0, 0, 1),
-                    "supplement_no_change": (2, 0, 0, 1)}
+                    "supplement_no_change": (2, 0, 0, 1), "profile_choice": (1, 0, 0, 0)}
     # Only the parts that need nothing of each other run side by side; interface_first's sit between its interface
     # step and its integration step.
     shape = {t: (by_id[t]["independent_pairs"], by_id[t]["bracketed_pairs"], by_id[t]["parallel_workers"])
@@ -360,8 +362,11 @@ def test_fake_mode_runs_every_task_and_sees_misbehaviour(tmp_path: Path) -> None
                      "chat_correction": (0, 0, 1), "misbehaving": (0, 0, 1),
                      # The dropped second step and its replacement both depend on s1 alone.
                      "supplement_replan": (1, 0, 1), "requirement_edit": (1, 0, 1),
-                     "supplement_no_change": (0, 0, 1)}
+                     "supplement_no_change": (0, 0, 1), "profile_choice": (0, 0, 1)}
     assert by_id["chat_correction"]["planner_turns"]["chat"] == 1
+    # Only the task whose project lets its Planner choose a profile runs a Worker on the one it chose.
+    assert {t: by_id[t]["planner_profile_runs"] for t in by_id if by_id[t]["planner_profile_runs"]} == {
+        "profile_choice": 1}
     # Only the two changes that make the second step wrong change the plan.
     assert {t: by_id[t]["plan_changes"] for t in by_id if by_id[t]["plan_changes"]} == {
         "supplement_replan": 1, "requirement_edit": 1}
@@ -395,6 +400,9 @@ def test_the_managers_dialogs_pass_in_fake_mode_and_a_wrong_call_fails(tmp_path:
     assert [turn["calls"] for turn in by_id["cancel_confirmation"]["turns"]] == [
         ["looper_task_control:needs_confirmation"], [], ["looper_task_control:needs_confirmation"],
         ["looper_task_control:ok"]]
+    # The key the user pasted: the call passing it is refused, the one without it registers the provider.
+    assert by_id["provider_key"]["turns"][0]["calls"] == ["looper_providers:error (forbidden)", "looper_providers:ok"]
+    assert by_id["config_tools"]["turns"][-2]["calls"] == ["looper_projects:needs_confirmation"]
     assert by_id["eager"]["problems"] == ["a task was created though the user named no project"]
     assert "| cancel_confirmation | pass | 4 |" in dialogs.markdown(result)
     assert str(tmp_path) not in path.read_text(encoding="utf-8")

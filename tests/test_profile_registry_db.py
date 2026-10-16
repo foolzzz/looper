@@ -636,10 +636,11 @@ def test_where_a_profile_is_selected_is_read_back_and_keeps_it_from_being_delete
             {"scope": "system", "role": None, "project_id": None, "project_name": None},
             {"scope": "role", "role": "worker", "project_id": None, "project_name": None},
             {"scope": "project", "role": None, "project_id": calc, "project_name": "calc"},
-        ], "task_count": 2, "schedule_count": 0}
+        ], "task_count": 2, "schedule_count": 0, "allowed_in": []}
         assert profiles["si/sonnet"]["used_by"]["layers"] == [
             {"scope": "role_project", "role": "reviewer", "project_id": calc, "project_name": "calc"}]
-        assert profiles["claude-code/haiku"]["used_by"] == {"layers": [], "task_count": 0, "schedule_count": 0}
+        assert profiles["claude-code/haiku"]["used_by"] == {"layers": [], "task_count": 0, "schedule_count": 0,
+                                                            "allowed_in": []}
         # What its runtime can run: the stand-in keeps no resident session.
         assert (profiles["claude-code/sonnet"]["roles"], profiles["si/sonnet"]["roles"]) == (
             ["manager", "planner", "worker", "reviewer"], ["worker", "reviewer"])
@@ -653,6 +654,15 @@ def test_where_a_profile_is_selected_is_read_back_and_keeps_it_from_being_delete
             "'calc', 2 tasks: select another profile there first")
         status, payload = await _call("DELETE", f"/api/agent-profiles/{one_off}")
         assert status == 409 and "the reviewer in project 'calc'" in payload["error"]
+        # On a project's list for its Planners, a profile stays until the list drops it.
+        await _ok("PUT", f"/api/projects/{calc}/allowed-profiles", {"profile_ids": [haiku]})
+        used = {p["name"]: p["used_by"] for p in (await _registry())["profiles"]}
+        assert used["claude-code/haiku"]["allowed_in"] == ["calc"]
+        status, payload = await _call("DELETE", f"/api/agent-profiles/{haiku}")
+        assert status == 409 and payload["error"] == (
+            "Agent Profile 'claude-code/haiku' is selected by the profiles the Planners of project 'calc' may choose: "
+            "select another profile there first")
+        await _ok("PUT", f"/api/projects/{calc}/allowed-profiles", {"profile_ids": []})
         await _ok("DELETE", f"/api/agent-profiles/{haiku}")  # nothing selects it
 
     _run(_test, monkeypatch)

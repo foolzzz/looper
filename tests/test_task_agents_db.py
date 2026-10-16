@@ -248,6 +248,31 @@ def test_a_bad_choice_is_refused_and_nothing_is_stored(
     _run(test, monkeypatch)
 
 
+def test_a_new_task_chooses_its_profiles_by_id_or_name_as_the_agents_endpoint_does(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def test(pool: Any) -> None:
+        project = await _project(pool)
+        await _task(pool, "task-a", "running", project)
+        await _profiles(pool)
+
+        async def create(profiles: dict[str, Any]) -> tuple[int, Any]:
+            return await _call("POST", "/api/tasks/create", {"requirement": "r", "project_id": project["id"],
+                                                             "profile_overrides": profiles})
+
+        status, answer = await create({"worker": "Claude-Code/Sonnet", "planner": "agent-sonnet", "reviewer": None})
+        assert status == 201, answer
+        assert dict(await pool.fetch("SELECT role, profile_id FROM task_profile_overrides WHERE task_id = $1",
+                                     answer["task_id"])) == {"worker": "agent-sonnet", "planner": "agent-sonnet"}
+        # An unknown profile is refused as the agents endpoint refuses it, under the field the request named.
+        status, created = await create({"worker": "nope"})
+        refused = (await _call("PUT", "/api/tasks/task-a/agents", {"profiles": {"worker": "nope"}}))[1]["error"]
+        assert (status, created["error"]) == (400, "profile_overrides." + refused.removeprefix("profiles."))
+        assert await pool.fetchval("SELECT count(*) FROM tasks") == 2
+
+    _run(test, monkeypatch)
+
+
 @pytest.mark.parametrize("body", [{"concurrency": {"worker": 2}}, {"profiles": {"worker": "claude-code/sonnet"}}])
 def test_every_task_but_a_completed_one_changes_its_choices(monkeypatch: pytest.MonkeyPatch, body: Any) -> None:
     async def test(pool: Any) -> None:

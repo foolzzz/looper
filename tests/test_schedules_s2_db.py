@@ -350,6 +350,9 @@ def test_the_no_success_alert_goes_out_once_with_one_recovery(monkeypatch: pytes
         sid = (await env.enabled())["schedule_id"]
         ok = await _fire(env, sid)
         await env.end_task(ok["task_id"], "completed")
+        # That run's end is reported (its recoveries, none here) before the clock moves on: otherwise its recovery
+        # check could find the stale alert raised below and end it.
+        await env.scheduler.idle()
         last_ok = await env.pool.fetchval("SELECT last_ok_at FROM schedules WHERE id = $1", sid)
         # Every 5 minutes: due 3 periods after the first fire after the last success.
         first_chance = cron.next_fire(cron.parse("*/5 * * * *"), LA, last_ok)
@@ -657,6 +660,45 @@ def test_changing_the_rule_to_every_minute_raises_no_alert_at_once(monkeypatch: 
         env.clock.now = due - timedelta(seconds=1)
         assert await _stale(env, sid) == []
         env.clock.now = due
+        assert await _stale(env, sid) == ["stale_alert"]
+
+    _run(test, monkeypatch, tmp_path)
+
+
+def test_a_run_that_succeeds_while_the_pass_looks_raises_no_stale_alert(monkeypatch: pytest.MonkeyPatch,
+                                                                        tmp_path: Path) -> None:
+    from looper.db import schedules as db_schedules
+
+    async def test(env: _Env) -> None:
+        _setup(env)
+        sid = (await env.enabled())["schedule_id"]
+        ok = await _fire(env, sid)
+        await env.end_task(ok["task_id"], "completed")
+        await env.scheduler.idle()
+        long_run = await _fire(env, sid)
+        await env.pool.execute("UPDATE schedules SET next_fire_at = $2 WHERE id = $1", sid,
+                               env.clock.now + timedelta(days=1))
+        last_ok = await env.pool.fetchval("SELECT last_ok_at FROM schedules WHERE id = $1", sid)
+        env.clock.now = cron.next_fire(EVERY_5, LA, last_ok) + timedelta(minutes=15)
+        assert await _stale(env, sid) == []  # past its deadline, but its run is in progress
+
+        # The pass has read the schedule when the long run succeeds, before it looks for the runs in progress.
+        real_open_runs = db_schedules.open_runs
+
+        async def succeeding_first(conn: Any, schedule_id: str) -> list[dict[str, Any]]:
+            if schedule_id == sid and not ended:
+                ended.append(long_run["task_id"])
+                await env.end_task(long_run["task_id"], "completed")
+                await env.scheduler.idle()  # its end is reported: no alert to recover from yet
+            return await real_open_runs(conn, schedule_id)
+
+        ended: list[str] = []
+        monkeypatch.setattr(db_schedules, "open_runs", succeeding_first)
+        assert await _stale(env, sid) == []
+        assert ended == [long_run["task_id"]]
+        assert await env.pool.fetchval("SELECT last_ok_at FROM schedules WHERE id = $1", sid) == env.clock.now
+        # The deadline counts from that success now.
+        env.clock.now += timedelta(minutes=20)
         assert await _stale(env, sid) == ["stale_alert"]
 
     _run(test, monkeypatch, tmp_path)

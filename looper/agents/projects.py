@@ -29,8 +29,8 @@ import asyncpg
 
 from ..db import agent_setting_layers as db_layers, connection as db_connection, llm_records as db_llm_records
 from ..db import projects as db_projects, tasks as db_tasks
-from .agent_settings import CONCURRENCY_MAX, TASK_LIMIT_ROLES, AgentType, SettingsError, concurrency, index_layers
-from .agent_settings import task_agents_view
+from .agent_settings import CONCURRENCY_MAX, PLANNER_CHOICE_ROLES, TASK_LIMIT_ROLES, AgentType, SettingsError
+from .agent_settings import concurrency, index_layers, task_agents_view
 from .bus import MessageBus
 from .message import TASK_ROUTER_ADDRESS, AgentAddress, MessageEnvelope, MessageType, planner_address
 from .project_execution import FIELDS as EXECUTION_FIELDS, ProjectExecution, execution_fields, format_usd
@@ -193,20 +193,28 @@ async def update_project(project_id: str, data: dict[str, Any]) -> dict[str, Any
     return project_view(await _existing_project(project_id))
 
 
-async def delete_project(project_id: str) -> dict[str, Any]:
+def _still_used(project: dict[str, Any]) -> RequestError:
+    return RequestError(HTTP_409, f"project {project['name']!r} still has tasks; move or delete them first")
+
+
+async def deletable_project(project_id: str) -> dict[str, Any]:
+    """The project, when nothing keeps it from being deleted: 404 for an unknown one, 409 while it has tasks or
+    schedules."""
     project = await _existing_project(project_id)
-    still_used = RequestError(
-        HTTP_409, f"project {project['name']!r} still has tasks; move or delete them first",
-    )
     if project["task_count"]:
-        raise still_used
+        raise _still_used(project)
     if count := project.get("schedule_count"):
         raise RequestError(HTTP_409, f"project {project['name']!r} still has {count} "
                                      f"schedule{'s' if count != 1 else ''}; delete them first")
+    return project
+
+
+async def delete_project(project_id: str) -> dict[str, Any]:
+    project = await deletable_project(project_id)
     try:
         await db_projects.delete_project(project_id)
     except asyncpg.ForeignKeyViolationError:  # a task or a schedule was added meanwhile
-        raise still_used from None
+        raise _still_used(project) from None
     return {"deleted": project_id}
 
 
@@ -285,28 +293,13 @@ async def create_task(data: dict[str, Any]) -> dict[str, Any]:
 
 
 async def _profile_overrides(raw: Any) -> dict[str, str]:
-    """A new task's choice of Agent Profile per role (``{"planner"|"worker"|"reviewer": profile_id}``), each
-    registered and able to run its role; an empty or null entry chooses nothing."""
-    from .profile_registry import RegistryError, check_selection
-
-    if raw is None:
-        return {}
-    if not isinstance(raw, dict):
-        raise RequestError(HTTP_400, 'profile_overrides must be an object: {"planner" | "worker" | "reviewer": '
-                                     'profile_id}')
-    profiles: dict[str, str] = {}
-    for role, profile_id in raw.items():
-        if role not in TASK_PROFILE_ROLES:
-            raise RequestError(HTTP_400, f"a task chooses the Agent Profile of its {', '.join(TASK_PROFILE_ROLES)} "
-                                         f"only, not {role!r}")
-        if profile_id in (None, ""):
-            continue
-        try:
-            await check_selection(profile_id, [role])
-        except RegistryError as exc:
-            raise RequestError(HTTP_400, f"{role}: {exc}") from None
-        profiles[role] = profile_id
-    return profiles
+    """``profile_overrides``, a new task's (or a schedule's) choice of Agent Profile per role, checked as
+    ``profile_choices`` checks a task's choice (by id or name), as role -> profile id; an empty or null entry
+    chooses nothing."""
+    if isinstance(raw, dict):
+        raw = {role: None if profile == "" else profile for role, profile in raw.items()}
+    chosen = await profile_choices(raw, clearing=True, field="profile_overrides")
+    return {role: profile_id for role, profile_id in chosen.items() if profile_id is not None}
 
 
 async def move_task(task_id: str, data: dict[str, Any], task_router: TaskRouter) -> dict[str, Any]:
@@ -413,42 +406,106 @@ async def agents_view(task: dict[str, Any]) -> dict[str, Any]:
             "editable": task.get("status") in AGENTS_EDITABLE_STATUSES}
 
 
-async def profile_choices(raw: Any, *, clearing: bool) -> dict[str, str | None]:
-    """``profiles``, a task's choice of Agent Profile per role (by id or name), as role -> profile id (None: drop the
-    task's choice, only when ``clearing``); each one registered and able to run its role. 400 otherwise."""
+async def profile_choices(raw: Any, *, clearing: bool, field: str = "profiles") -> dict[str, str | None]:
+    """``profiles`` (the request's ``field``), a task's choice of Agent Profile per role (by id or name), as role ->
+    profile id (None: drop the task's choice, only when ``clearing``); each one registered and able to run its role.
+    400 otherwise."""
     from ..db import profile_registry as db_profiles
     from .profile_registry import RegistryError, check_selection
 
     if not raw:
         return {}
     if not isinstance(raw, dict):
-        raise RequestError(HTTP_400, 'profiles must be an object: {"planner" | "worker" | "reviewer": profile}')
+        raise RequestError(HTTP_400, f'{field} must be an object: {{"planner" | "worker" | "reviewer": profile}}')
     registered: list[dict[str, Any]] | None = None
     chosen: dict[str, str | None] = {}
     for role, wanted in raw.items():
         if role not in TASK_PROFILE_ROLES:
-            raise RequestError(HTTP_400, f"profiles: a task chooses the Agent Profile of its "
+            raise RequestError(HTTP_400, f"{field}: a task chooses the Agent Profile of its "
                                          f"{', '.join(TASK_PROFILE_ROLES)} only, not {role!r}")
         if wanted is None:
             if not clearing:
-                raise RequestError(HTTP_400, f"profiles.{role}: give an Agent Profile, or leave the role out")
+                raise RequestError(HTTP_400, f"{field}.{role}: give an Agent Profile, or leave the role out")
             chosen[role] = None
             continue
         if not isinstance(wanted, str):
-            raise RequestError(HTTP_400, f"profiles.{role}: give an Agent Profile's id or name, or null")
+            raise RequestError(HTTP_400, f"{field}.{role}: give an Agent Profile's id or name, or null")
         if registered is None:
             registered = await db_profiles.list_profiles()
         match = next((p for p in registered if p["id"] == wanted), None) or next(
             (p for p in registered if str(p["name"]).casefold() == wanted.strip().casefold()), None)
         if match is None:
             names = ", ".join(str(p["name"]) for p in registered[:20])
-            raise RequestError(HTTP_400, f"profiles.{role}: no Agent Profile {wanted!r}; registered: {names}")
+            raise RequestError(HTTP_400, f"{field}.{role}: no Agent Profile {wanted!r}; registered: {names}")
         try:
             await check_selection(match["id"], [role])
         except RegistryError as exc:
-            raise RequestError(HTTP_400, f"profiles.{role}: {exc}") from None
+            raise RequestError(HTTP_400, f"{field}.{role}: {exc}") from None
         chosen[role] = match["id"]
     return chosen
+
+
+# The roles whose Agent Profile a task's Planner may choose, from its project's list (``ops.planner``).
+_CHOOSABLE = tuple(role.value for role in PLANNER_CHOICE_ROLES)
+
+
+def allowed_profile_view(row: dict[str, Any]) -> dict[str, Any]:
+    """A profile on a project's list (``profile_registry.PROFILE_JSON``) as the list shows it: what it runs, which of
+    the Worker and Reviewer it can run, and its input and output price per million tokens (None where unknown)."""
+    from .profile_registry import AgentProfile, servable_roles
+    from .runtimes.pricing import model_price
+
+    profile = AgentProfile.from_row(row)
+    price = model_price(profile.provider, profile.model)
+    return {"profile_id": profile.id, "name": profile.name, "runtime": profile.runtime.type, "model": profile.model,
+            "effort": profile.effort or None,
+            "roles": [role for role in servable_roles(profile.runtime.capabilities) if role in _CHOOSABLE],
+            "usd_per_million_tokens": {"input": price.input_usd_per_mtok, "output": price.output_usd_per_mtok}}
+
+
+async def allowed_profiles_view(project_id: str) -> dict[str, Any]:
+    """The Agent Profiles project ``project_id``'s Planners may choose for their tasks' Workers and Reviewers, by
+    name; empty by default. 404 for an unknown project."""
+    if await db_projects.get_project(project_id) is None:
+        raise RequestError(HTTP_404, f"project {project_id!r} not found")
+    return {"project_id": project_id,
+            "profiles": [allowed_profile_view(row) for row in await db_projects.allowed_profiles(project_id)]}
+
+
+async def set_allowed_profiles(project_id: str, data: dict[str, Any]) -> dict[str, Any]:
+    """Make ``profile_ids`` (ids or names) the whole list of the Agent Profiles project ``project_id``'s Planners may
+    choose; ``[]`` empties it, and its tasks' Planners' choices of a profile it drops go with it. Each profile must
+    be registered and able to run the Worker or the Reviewer. 400 otherwise, and nothing changes; 404 for an
+    unknown project. Answers the list as it is then."""
+    from ..db import profile_registry as db_profiles
+    from .profile_registry import AgentProfile, servable_roles
+
+    unknown = sorted(set(data) - {"profile_ids"})
+    if unknown or "profile_ids" not in data:
+        raise RequestError(HTTP_400, 'give {"profile_ids": [...]}: the whole list, by id or name ([] empties it)')
+    wanted = data["profile_ids"]
+    if not isinstance(wanted, list) or any(not isinstance(item, str) for item in wanted):
+        raise RequestError(HTTP_400, "profile_ids must be a list of Agent Profile ids or names")
+    if await db_projects.get_project(project_id) is None:
+        raise RequestError(HTTP_404, f"project {project_id!r} not found")
+    registered = await db_profiles.list_profiles() if wanted else []
+    ids: list[str] = []
+    for item in wanted:
+        match = next((p for p in registered if p["id"] == item), None) or next(
+            (p for p in registered if str(p["name"]).casefold() == item.strip().casefold()), None)
+        if match is None:
+            names = ", ".join(str(p["name"]) for p in registered[:20])
+            raise RequestError(HTTP_400, f"profile_ids: no Agent Profile {item!r}; registered: {names}")
+        if not set(servable_roles(AgentProfile.from_row(match).runtime.capabilities)) & set(_CHOOSABLE):
+            raise RequestError(HTTP_400, f"profile_ids: Agent Profile {match['name']!r} can run neither the worker "
+                                         "nor the reviewer, so a Planner could never choose it")
+        if match["id"] not in ids:
+            ids.append(match["id"])
+    try:
+        await db_projects.set_allowed_profiles(project_id, ids)
+    except asyncpg.ForeignKeyViolationError:
+        raise RequestError(HTTP_404, "the project, or an Agent Profile on the list, was removed meanwhile") from None
+    return await allowed_profiles_view(project_id)
 
 
 def _concurrency_limits(raw: Any) -> dict[str, int | None]:

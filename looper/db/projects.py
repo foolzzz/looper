@@ -5,11 +5,13 @@ none) and a ``background`` its task agents get in their system prompt; ``''``
 is none. Names are unique ignoring case; a taken name raises
 ``asyncpg.UniqueViolationError``. Its execution settings (``EXECUTION_COLUMNS``,
 typed and validated by ``looper.agents.project_execution``) are NULL to inherit.
-Its agent settings are layers of their own (``agent_setting_layers``).
+Its agent settings are layers of their own (``agent_setting_layers``). The Agent Profiles its tasks' Planners may
+choose for their Workers and Reviewers are a list of their own (``project_allowed_profiles``), empty by default.
 """
 
 from __future__ import annotations
 
+import json
 import uuid
 from collections.abc import Mapping
 from typing import Any
@@ -135,3 +137,30 @@ async def delete_project(project_id: str, *, pool: asyncpg.Pool | None = None) -
     pool = pool or get_pool()
     result = await pool.execute("DELETE FROM projects WHERE id = $1", project_id)
     return result == "DELETE 1"
+
+
+async def allowed_profiles(project_id: str, *, pool: asyncpg.Pool | asyncpg.Connection | None = None,
+                           ) -> list[dict[str, Any]]:
+    """The Agent Profiles the project's Planners may choose (``profile_registry.PROFILE_JSON``), by name."""
+    from .profile_registry import PROFILE_JOIN, PROFILE_JSON
+
+    pool = pool or get_pool()
+    rows = await pool.fetch(
+        f"SELECT {PROFILE_JSON} AS profile FROM project_allowed_profiles l JOIN {PROFILE_JOIN} ON a.id = l.profile_id "
+        "WHERE l.project_id = $1 ORDER BY a.name", project_id,
+    )
+    return [json.loads(r["profile"]) if isinstance(r["profile"], str) else r["profile"] for r in rows]
+
+
+async def set_allowed_profiles(project_id: str, profile_ids: list[str], *, pool: asyncpg.Pool | None = None) -> None:
+    """Make ``profile_ids`` the whole list of the profiles the project's Planners may choose; what its tasks'
+    Planners chose of a profile it drops goes with it. Raises ``asyncpg.ForeignKeyViolationError`` for an unknown
+    project or profile."""
+    pool = pool or get_pool()
+    async with pool.acquire() as conn, conn.transaction():
+        await conn.execute("DELETE FROM project_allowed_profiles WHERE project_id = $1 AND NOT profile_id = ANY($2)",
+                           project_id, profile_ids)
+        await conn.execute("DELETE FROM task_planner_profiles c USING tasks k WHERE k.id = c.task_id "
+                           "AND k.project_id = $1 AND NOT c.profile_id = ANY($2)", project_id, profile_ids)
+        await conn.executemany("INSERT INTO project_allowed_profiles (project_id, profile_id) VALUES ($1, $2) "
+                               "ON CONFLICT DO NOTHING", [(project_id, profile_id) for profile_id in profile_ids])

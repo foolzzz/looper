@@ -18,7 +18,7 @@ from .connection import get_pool
 
 # Every kind an entry can have (task_journal.kind; agents.tiers.journal.JournalKind).
 KINDS = ("step_accepted", "step_failed", "step_retry", "decision", "supplement", "session_switch", "handoff",
-         "progress")
+         "progress", "profile_choice", "concurrency_change")
 
 _INSERT = """
 INSERT INTO task_journal (task_id, step_id, kind, summary, learnings)

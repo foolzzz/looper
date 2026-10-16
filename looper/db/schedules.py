@@ -141,12 +141,14 @@ async def lock_schedule(conn: asyncpg.Connection, schedule_id: str) -> dict[str,
 
 async def lock_next_due(conn: asyncpg.Connection, now: datetime, *, skip: list[str]) -> dict[str, Any] | None:
     """An enabled schedule due at ``now`` (not one in ``skip``), its row locked; another transaction's locked rows
-    are passed over, so a second scheduler never handles the same firing."""
+    are passed over, so a second scheduler never handles the same firing. The lock is the one an update takes
+    (``FOR NO KEY UPDATE``): a row held only by a foreign key check, such as a message about its last run being
+    recorded, is not passed over."""
     row = await conn.fetchrow(
         """
         SELECT * FROM schedules
         WHERE enabled AND next_fire_at <= $1 AND NOT (id = ANY($2::text[]))
-        ORDER BY next_fire_at, id LIMIT 1 FOR UPDATE SKIP LOCKED
+        ORDER BY next_fire_at, id LIMIT 1 FOR NO KEY UPDATE SKIP LOCKED
         """,
         now, skip,
     )
@@ -404,6 +406,15 @@ async def set_alert(conn: Db, schedule_id: str, column: str, at: datetime | None
     condition = f"{column} IS NULL" if at is not None else f"{column} IS NOT NULL"
     return await conn.execute(f"UPDATE schedules SET {column} = $2 WHERE id = $1 AND {condition}",
                               schedule_id, at) == "UPDATE 1"
+
+
+async def start_stale_alert(conn: Db, schedule_id: str, at: datetime, *, last_ok_at: datetime | None) -> bool:
+    """Start the stale alert, once, while the schedule's latest ok run is still ``last_ok_at``, the one its deadline
+    was found from: False when it already started, or when a run went well since (a long run that succeeded after
+    the pass read the schedule), which leaves it not stale."""
+    return await conn.execute(
+        "UPDATE schedules SET stale_alert_at = $2 WHERE id = $1 AND stale_alert_at IS NULL "
+        "AND last_ok_at IS NOT DISTINCT FROM $3", schedule_id, at, last_ok_at) == "UPDATE 1"
 
 
 async def insert_notification(conn: Db, *, schedule_id: str, run_id: str | None, kind: str, channel: str | None,

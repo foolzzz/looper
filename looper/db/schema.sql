@@ -201,7 +201,7 @@ CREATE TABLE IF NOT EXISTS task_journal (
     step_id     TEXT NOT NULL,
     kind        TEXT NOT NULL CONSTRAINT task_journal_kind_check CHECK (kind IN (
                     'step_accepted', 'step_failed', 'step_retry', 'decision', 'supplement',
-                    'session_switch', 'handoff', 'progress')),
+                    'session_switch', 'handoff', 'progress', 'profile_choice', 'concurrency_change')),
     summary     TEXT NOT NULL DEFAULT '',
     learnings   TEXT[] NOT NULL DEFAULT '{}',
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -508,6 +508,18 @@ BEGIN
             'step_accepted', 'step_failed', 'step_retry', 'decision', 'supplement', 'session_switch',
             'handoff', 'progress'));
         INSERT INTO schema_migrations (name) VALUES ('task_journal_supplements');
+    END IF;
+END $$;
+
+-- Once (the Planner's tools): its choices of Agent Profile and its changes of concurrency join the journal kinds.
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM schema_migrations WHERE name = 'task_journal_kinds_planner_tools') THEN
+        ALTER TABLE task_journal DROP CONSTRAINT IF EXISTS task_journal_kind_check;
+        ALTER TABLE task_journal ADD CONSTRAINT task_journal_kind_check CHECK (kind IN (
+            'step_accepted', 'step_failed', 'step_retry', 'decision', 'supplement', 'session_switch',
+            'handoff', 'progress', 'profile_choice', 'concurrency_change'));
+        INSERT INTO schema_migrations (name) VALUES ('task_journal_kinds_planner_tools');
     END IF;
 END $$;
 
@@ -846,6 +858,29 @@ CREATE TABLE IF NOT EXISTS task_concurrency_limits (
     max_concurrency  INTEGER NOT NULL CHECK (max_concurrency BETWEEN 1 AND 64),
     PRIMARY KEY (task_id, role)
 );
+-- The Agent Profiles a project's Planners may choose for their tasks' Workers and Reviewers
+-- (ops/planner.py, looper_task_profile_set); none by default, so a Planner chooses nothing. Whether a profile can
+-- run the role is checked when it is chosen. A profile on a list cannot be deleted; dropping one from a list drops
+-- what the project's Planners chose of it.
+CREATE TABLE IF NOT EXISTS project_allowed_profiles (
+    project_id  TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    profile_id  TEXT NOT NULL REFERENCES agent_profiles(id),
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (project_id, profile_id)
+);
+-- A task's Planner's choice of Agent Profile for its Workers or Reviewers: for the rest of the task (step_id NULL)
+-- or for one step, each of its attempts. Over every layer and under the task's own choice
+-- (agent_settings.Layer.PLANNER_TASK, PLANNER_STEP), while the task's project allows the profile; read when a run
+-- starts. Planning the task anew drops them.
+CREATE TABLE IF NOT EXISTS task_planner_profiles (
+    task_id     TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    role        TEXT NOT NULL CHECK (role IN ('worker', 'reviewer')),
+    step_id     TEXT REFERENCES task_steps(id) ON DELETE CASCADE,
+    profile_id  TEXT NOT NULL REFERENCES agent_profiles(id) ON DELETE CASCADE,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_task_planner_profiles_place
+    ON task_planner_profiles (task_id, role, (COALESCE(step_id, '')));
 
 -- Once (agent teams are on by default for Claude Code profiles): every profile on a Claude Code runtime, the
 -- built-in one and those the migrations above added included, gets them. Only once, so a profile the user turns

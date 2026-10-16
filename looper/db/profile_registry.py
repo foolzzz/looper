@@ -232,8 +232,9 @@ async def profile_usage(profile_id: str | None = None, *, pool: asyncpg.Pool | a
                         ) -> dict[str, dict[str, Any]]:
     """Where each Agent Profile (or ``profile_id``) is selected, by profile id: ``layers``, each ``{scope, role,
     project_id, project_name}`` (system, then roles, then projects by name), ``task_count``, how many tasks
-    chose it for one of their roles, and ``schedule_count``, how many schedules did. A profile nothing selects is
-    not in the result."""
+    chose it for one of their roles, ``schedule_count``, how many schedules did, and ``allowed_in``, the names of
+    the projects whose Planners may choose it (a Planner's choice counts only while its project allows it, so it is
+    not counted). A profile nothing selects is not in the result."""
     pool = pool or get_pool()
     layers = await pool.fetch(
         "SELECT l.profile_id, l.scope, l.role, l.project_id, p.name AS project_name FROM agent_setting_layers l "
@@ -246,6 +247,10 @@ async def profile_usage(profile_id: str | None = None, *, pool: asyncpg.Pool | a
         "SELECT profile_id, count(DISTINCT task_id) AS n FROM task_profile_overrides "
         "WHERE $1::text IS NULL OR profile_id = $1 GROUP BY profile_id", profile_id,
     )
+    allowed = await pool.fetch(
+        "SELECT l.profile_id, p.name FROM project_allowed_profiles l JOIN projects p ON p.id = l.project_id "
+        "WHERE $1::text IS NULL OR l.profile_id = $1 ORDER BY p.name", profile_id,
+    )
     schedules = await pool.fetch(
         "SELECT profile_id, count(DISTINCT schedule_id) AS n FROM schedule_profile_overrides "
         "WHERE $1::text IS NULL OR profile_id = $1 GROUP BY profile_id", profile_id,
@@ -253,7 +258,7 @@ async def profile_usage(profile_id: str | None = None, *, pool: asyncpg.Pool | a
     uses: dict[str, dict[str, Any]] = {}
 
     def use(profile: str) -> dict[str, Any]:
-        return uses.setdefault(profile, {"layers": [], "task_count": 0, "schedule_count": 0})
+        return uses.setdefault(profile, {"layers": [], "task_count": 0, "schedule_count": 0, "allowed_in": []})
 
     for row in layers:
         use(row["profile_id"])["layers"].append({k: row[k] for k in ("scope", "role", "project_id", "project_name")})
@@ -261,6 +266,8 @@ async def profile_usage(profile_id: str | None = None, *, pool: asyncpg.Pool | a
         use(row["profile_id"])["task_count"] = row["n"]
     for row in schedules:
         use(row["profile_id"])["schedule_count"] = row["n"]
+    for row in allowed:
+        use(row["profile_id"])["allowed_in"].append(row["name"])
     return uses
 
 

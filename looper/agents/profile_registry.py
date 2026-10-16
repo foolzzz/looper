@@ -593,12 +593,13 @@ def cost_warnings(profile: AgentProfile) -> list[str]:
 
 
 # Where nothing selects a profile.
-NOT_USED: Mapping[str, Any] = {"layers": [], "task_count": 0, "schedule_count": 0}
+NOT_USED: Mapping[str, Any] = {"layers": [], "task_count": 0, "schedule_count": 0, "allowed_in": []}
 
 
 def profile_view(row: Mapping[str, Any], used_by: Mapping[str, Any] = NOT_USED) -> dict[str, Any]:
     """An Agent Profile, the roles its runtime can run and where it is selected (``used_by``: the layers, each
-    ``{scope, role, project_id, project_name}``, and how many tasks and schedules chose it; ``db.profile_usage``)."""
+    ``{scope, role, project_id, project_name}``, how many tasks and schedules chose it, and the projects whose
+    Planners may choose it; ``db.profile_usage``)."""
     spec = AgentProfile.from_row(row)
     return {
         "profile_id": row["id"], "name": row["name"], "model": row["model"], "effort": row.get("effort"),
@@ -620,6 +621,7 @@ def usage_text(used_by: Mapping[str, Any]) -> str:
         parts.append(f"{count} {'task' if count == 1 else 'tasks'}")
     if count := used_by.get("schedule_count"):
         parts.append(f"{count} {'schedule' if count == 1 else 'schedules'}")
+    parts += [f"the profiles the Planners of project {name!r} may choose" for name in used_by.get("allowed_in") or ()]
     return ", ".join(parts)
 
 
@@ -985,18 +987,27 @@ async def update_profile(profile_id: str, data: Any) -> dict[str, Any]:
     return await _profile_answer(profile_id)
 
 
-async def delete_profile(profile_id: str) -> dict[str, Any]:
-    import asyncpg
-
+async def deletable_profile(profile_id: str) -> dict[str, Any]:
+    """The profile, when nothing keeps it from being deleted: not built in, and selected nowhere
+    (``RegistryConflict`` says where it is)."""
     from ..db import profile_registry as db
 
     row = await _existing_profile(profile_id)
     _not_builtin(row, "profile")
     used_by = (await db.profile_usage(profile_id)).get(profile_id)
+    if used_by:
+        raise RegistryConflict(f"Agent Profile {row['name']!r} is selected by {usage_text(used_by)}: select "
+                               "another profile there first")
+    return row
+
+
+async def delete_profile(profile_id: str) -> dict[str, Any]:
+    import asyncpg
+
+    from ..db import profile_registry as db
+
+    row = await deletable_profile(profile_id)
     try:
-        if used_by:
-            raise RegistryConflict(f"Agent Profile {row['name']!r} is selected by {usage_text(used_by)}: select "
-                                   "another profile there first")
         await db.delete_profile(profile_id)
     except asyncpg.ForeignKeyViolationError:  # selected since it was checked
         raise RegistryConflict(f"Agent Profile {row['name']!r} is still selected: select another profile there "

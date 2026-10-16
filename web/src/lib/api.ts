@@ -1363,7 +1363,9 @@ export type JournalKind =
   | "supplement"
   | "session_switch"
   | "handoff"
-  | "progress";
+  | "progress"
+  | "profile_choice"
+  | "concurrency_change";
 
 /** Where a task stood, as its Planner said with a decision or a periodic check. */
 export interface ProgressNote {
@@ -1883,10 +1885,13 @@ export interface ProfileCostBasis {
   unpriced: string[];
 }
 
-/** Where a profile is selected: the settings layers (a project's with its name) and how many tasks chose it. */
+/** Where a profile is selected: the settings layers (a project's with its name), how many tasks chose it, and the
+ * projects whose Planners may choose it. */
 export interface ProfileUsedBy {
   layers: { scope: SettingLayer; role: AgentRole | null; project_id: string | null; project_name: string | null }[];
   task_count: number;
+  /** The names of the projects whose list of profiles the Planner may choose holds it. */
+  allowed_in: string[];
 }
 
 /** An Agent Profile: a runtime, a provider and a model, with an optional effort, which its runs use. */
@@ -2028,8 +2033,9 @@ export function deleteAgentProfile(profileId: string): Promise<{ deleted: string
  * Settings → Roles), a project (all its agents), a role in a project. A later layer wins; the Manager has only the
  * first three. */
 export type SettingLayer = "builtin" | "system" | "role" | "project" | "role_project";
-/** Where a value came from: a layer, the selected profile itself (its effort), or a task's choice of profile. */
-export type SettingSource = SettingLayer | "profile" | "task";
+/** Where a value came from: a layer, the selected profile itself (its effort), a task's choice of profile, or its
+ * Planner's choice of its Workers' or Reviewers' profile, for the rest of the task or for one step. */
+export type SettingSource = SettingLayer | "profile" | "task" | "planner_task" | "planner_step";
 /** The roles a project's agents have: the Manager spans every project. */
 export type ProjectRole = Exclude<AgentRole, "manager">;
 
@@ -2165,6 +2171,42 @@ export function updateProjectRoleSettings(
     `/projects/${encodeURIComponent(projectId)}/agent-settings/roles/${encodeURIComponent(role)}`,
     fields,
     "update project agent settings",
+  );
+}
+
+/** An Agent Profile a project's Planners may choose for their task's Workers or Reviewers. */
+export interface AllowedProfile {
+  profile_id: string;
+  name: string;
+  /** The runtime's type. */
+  runtime: string;
+  model: string;
+  effort: string | null;
+  /** Which of the Worker and the Reviewer it can run. */
+  roles: ("worker" | "reviewer")[];
+  /** null where the price is unknown. */
+  usd_per_million_tokens: { input: number | null; output: number | null };
+}
+
+/** The profiles a project's Planners may choose, by name; empty by default. */
+export interface AllowedProfiles {
+  project_id: string;
+  profiles: AllowedProfile[];
+}
+
+export async function fetchAllowedProfiles(projectId: string): Promise<AllowedProfiles> {
+  const res = await fetch(`${API_BASE}/projects/${encodeURIComponent(projectId)}/allowed-profiles`);
+  if (!res.ok) await failed(res, "allowed profiles");
+  return res.json();
+}
+
+/** Make `profileIds` the whole list ([] empties it); a profile it drops takes the Planners' choices of it along.
+ * Resolves to the list as saved. */
+export function setAllowedProfiles(projectId: string, profileIds: string[]): Promise<AllowedProfiles> {
+  return putJson(
+    `/projects/${encodeURIComponent(projectId)}/allowed-profiles`,
+    { profile_ids: profileIds },
+    "update allowed profiles",
   );
 }
 

@@ -184,11 +184,12 @@ def test_a_new_schedule_is_disabled_named_once_per_project_and_previewed(monkeyp
                                                                        tmp_path: Path) -> None:
     async def test(env: _Env) -> None:
         schedule = await env.schedule(name="Triage", cron="0  9 * * 1-5", profile_overrides={
-            "planner": "agent-claude-code-opus"})
+            "planner": "agent-claude-code-opus", "worker": "claude-code/opus"})  # by id or by name
         assert (schedule["enabled"], schedule["next_fire_at"], schedule["last_run"]) == (False, None, None)
         assert schedule["cron"] == "0 9 * * 1-5"
         assert schedule["description"] == "Weekdays at 09:00 (America/Los_Angeles)"
-        assert schedule["profile_overrides"] == {"planner": "agent-claude-code-opus"}
+        assert schedule["profile_overrides"] == {"planner": "agent-claude-code-opus",
+                                                 "worker": "agent-claude-code-opus"}
 
         status, payload = await env.call("POST", f"/api/projects/{env.project_id}/schedules", {
             "name": "triage", "cron": "*/5 * * * *", "requirement": "r"})
@@ -412,6 +413,25 @@ def test_two_schedulers_ticking_together_fire_each_firing_once(monkeypatch: pyte
             await env.pool.execute("UPDATE tasks SET status = 'running' WHERE status = 'init'")
         # Each schedule's first run created a task; the later ones found it still in progress.
         assert len(env.bus.of("task_start")) == 3
+
+    _run(test, monkeypatch, tmp_path)
+
+
+def test_a_message_being_recorded_about_a_schedule_does_not_hold_up_its_firing(monkeypatch: pytest.MonkeyPatch,
+                                                                              tmp_path: Path) -> None:
+    from looper.db import schedules as db_schedules
+
+    async def test(env: _Env) -> None:
+        sid = (await env.enabled())["schedule_id"]
+        await env.due(sid)
+        # The Notifier records a message about an earlier run while the pass looks for due schedules: until it
+        # commits, the insert's foreign key check holds the schedule's row (FOR KEY SHARE).
+        async with env.pool.acquire() as conn, conn.transaction():
+            await db_schedules.insert_notification(conn, schedule_id=sid, run_id=None, kind="run", channel=None,
+                                                   chat=None, text="an earlier run failed", status="dashboard",
+                                                   error=None)
+            await env.scheduler.tick()
+        assert [run["status"] for run in await env.runs(sid)] == ["running"]
 
     _run(test, monkeypatch, tmp_path)
 

@@ -18,7 +18,11 @@ otherwise.
 
 A model is looked up by the name its runtime reports (Claude Code's
 ``modelUsage`` keys), without a context-window suffix (``glm-5.3[1m]``) or a
-date suffix (``claude-haiku-4-5-20251001``).
+date suffix (``claude-haiku-4-5-20251001``). With Claude Code's own login a
+profile names a Claude Code alias (``opus``, ``sonnet[1m]``), which is looked
+up as the model it runs (``CLAUDE_CODE_ALIASES``); with any other provider an
+alias stays unpriced, since the provider's environment may map it to a model
+of its own.
 
 A runtime reports a run's tokens as internal ``usage`` events (``usage_event``):
 the tokens of one model request (Claude Code) or of one turn (a runtime that
@@ -36,7 +40,7 @@ from dataclasses import dataclass, fields, replace
 from typing import TYPE_CHECKING, Any
 
 from ..run_usage import Price, Usage
-from . import CostSource, RunCost
+from . import AuthKind, CostSource, RunCost
 
 if TYPE_CHECKING:
     from ..profile_registry import ProviderSpec
@@ -128,6 +132,15 @@ BUILTIN_PRICES: Mapping[str, ModelPrice] = {
     "kimi-k2.6": _p(0.95, 4.00, 0.16, 0.95),
 }
 
+# The model each of Claude Code's aliases runs with Claude Code's own login, as of PRICES_AS_OF (what its runs
+# report).
+CLAUDE_CODE_ALIASES: Mapping[str, str] = {
+    "opus": "claude-opus-5-5",
+    "sonnet": "claude-sonnet-5-5",
+    "haiku": "claude-haiku-4-5",
+}
+_CLAUDE_CODE = "claude-code"  # the Claude Code runtime's type, whose own login a provider may be
+
 _SUFFIX = re.compile(r"\[[^\]]*\]$")
 _DATE = re.compile(r"-\d{8}$")
 
@@ -141,6 +154,8 @@ def model_price(provider: ProviderSpec, model: str) -> ModelPrice:
     """``model``'s prices with ``provider``: each from the provider's catalog when it gives one, else from the
     built-in table."""
     base = base_model(model)
+    if provider.auth is AuthKind.OAUTH and provider.oauth_runtime_type == _CLAUDE_CODE:
+        base = CLAUDE_CODE_ALIASES.get(base, base)
     builtin = BUILTIN_PRICES.get(base, ModelPrice())
     entry = provider.catalog_model(model) or next((m for m in provider.catalog if base_model(m.name) == base), None)
     if entry is None:

@@ -9,8 +9,10 @@ server was down or the computer slept are handled), one pass:
    past its schedule's ``run_timeout_seconds`` is recorded ``timed_out`` and
    its task stopped. A queued run whose previous task has ended starts.
 2. Each enabled schedule whose ``next_fire_at`` has come is handled in a
-   transaction that locks its row (``FOR UPDATE SKIP LOCKED``), so two servers
-   on one database fire it once. The fires due since ``next_fire_at`` decide
+   transaction that locks its row (``FOR NO KEY UPDATE SKIP LOCKED``), so two
+   servers on one database fire it once; a foreign key check on the row (a
+   message about its last run being recorded) does not hold it up. The fires
+   due since ``next_fire_at`` decide
    (``decide``): one on time fires as ``scheduled``; missed ones fire once as
    ``catch_up`` (``missed`` says how many) or, with catch-up ``skip``, fire
    only when the latest was within ``GRACE`` and are recorded

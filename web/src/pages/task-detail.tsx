@@ -848,10 +848,13 @@ const JOURNAL_KINDS: Record<JournalEntry["kind"], { label: string; variant: Badg
   session_switch: { label: "New session", variant: "outline" },
   handoff: { label: "Handoff", variant: "outline" },
   progress: { label: "Progress", variant: "outline" },
+  profile_choice: { label: "Profile choice", variant: "outline" },
+  concurrency_change: { label: "Concurrency", variant: "outline" },
 };
 
 /** The task journal, newest first: steps accepted, failed or retried with what their Worker and Reviewer
- * learned, the Planner's decisions, the supplements, and new Planner sessions with their handoffs. */
+ * learned, the Planner's decisions and its choices of profile and concurrency, the supplements, and new Planner
+ * sessions with their handoffs. */
 function TaskFindings({ entries: all }: { entries: JournalEntry[] }) {
   // The progress notes have a section of their own (TaskProgress).
   const entries = all.filter((entry) => entry.kind !== "progress");
@@ -945,7 +948,7 @@ function AgentTimeline({ taskId }: { taskId: string }) {
 
           return (
             <div key={agent} className={cn("rounded-lg border overflow-hidden", colors)}>
-              <div className="flex items-start">
+              <div className="flex flex-col sm:flex-row sm:items-start">
               <button
                 type="button"
                 onClick={() => toggle(agent)}
@@ -953,21 +956,21 @@ function AgentTimeline({ taskId }: { taskId: string }) {
                 title="单击展开/折叠，双击打开该 agent 的运行详情（启动命令、输入 prompt、stream-json 事件）"
                 className="min-w-0 flex-1 text-left px-4 py-3 hover:brightness-110 transition-all"
               >
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-2">
+                <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1">
+                  <div className="flex min-w-0 items-center gap-2">
                     <span
                       className="font-mono text-xs tabular-nums opacity-70"
                       title={formatTime(first.created_at)}
                     >
                       {formatClock(first.created_at)}
                     </span>
-                    <Bot className="h-4 w-4" />
-                    <span className="text-sm font-medium">{agent}</span>
+                    <Bot className="h-4 w-4 shrink-0" />
+                    <span className="min-w-0 break-all text-sm font-medium">{agent}</span>
                     <Badge variant="outline" className="text-[10px] py-0 h-4">
                       {agentRole(agent)}
                     </Badge>
                   </div>
-                  <div className="flex items-center gap-3 text-xs opacity-70">
+                  <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs opacity-70">
                     <span>{agentEvents.length} events</span>
                     {toolUses > 0 && <span>{toolUses} tools</span>}
                     {errors > 0 && <span className="text-destructive">{errors} errors</span>}
@@ -999,7 +1002,7 @@ function AgentTimeline({ taskId }: { taskId: string }) {
               </button>
               <a
                 href={historyHref(agent, taskId)}
-                className="m-2.5 flex shrink-0 items-center gap-1 rounded-md border border-current/30 px-2 py-1 text-xs opacity-80 hover:opacity-100 hover:bg-white/5"
+                className="mx-4 mb-3 flex shrink-0 items-center gap-1 self-start rounded-md border border-current/30 px-2 py-1 text-xs opacity-80 hover:opacity-100 hover:bg-white/5 sm:m-2.5"
                 title={`Open ${agent}'s session history: launch command, full transcript and activity`}
               >
                 <History className="h-3.5 w-3.5" />
