@@ -1452,7 +1452,7 @@ A project's schedules fire a full task of the project on a time rule
 ([scheduled-tasks RFC](rfcs/scheduled-tasks-v0.zh-CN.md), S1 and S2; the
 Manager's actions and export come with the Manager platform tools). A schedule has a `name` (unique in the project ignoring case),
 a `cron` rule and an IANA `timezone` (default: the server's own zone), the
-`requirement` each run's task gets (at most 30,000 characters), a `work_dir` (`''`: the project's default
+`requirement` each run's task gets (at most 27,000 characters), a `work_dir` (`''`: the project's default
 when it fires), `overlap` (`skip`, `queue` or `parallel`, with
 `max_parallel_runs` 1–10, default 3), `catch_up` (`once` or `skip`),
 an optional `run_timeout_seconds` and `run_budget_usd`, and `profile_overrides`
@@ -1545,9 +1545,13 @@ dashboard only). A new schedule is disabled.
   names the latest of them). The outputs
   share what is left of the 32,000 characters a task requirement may have
   (at least 600), each clipped with a marker; earlier runs' inputs that do not
-  fit at 300 characters each are left out, the oldest first, and counted; a
-  schedule's own requirement has at most 30,000 characters, so the run
-  context always has room. A run left `gating` by a server
+  fit at 300 characters each are left out, the oldest first, and counted.
+  The lines around the outputs (the gate's, with its command; each earlier
+  run's label; the clipping notes) are measured and the outputs shrunk by what
+  they take (`scheduler.run_requirement`), and a schedule's own requirement has
+  at most 27,000 characters, which leaves room for the longest context, so a
+  run's task requirement is never longer than the task limit and nothing in it
+  is clipped where the agents read it. A run left `gating` by a server
   that stopped is `gate_failed` at the next start. A gate never runs twice at
   once: a firing while the schedule's run is `gating` is `skipped_overlap`.
 - **Repeated skips are counted, not stored.** A skipped firing (`skipped_gate`,
