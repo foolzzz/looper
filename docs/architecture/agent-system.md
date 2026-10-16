@@ -478,13 +478,15 @@ answer to an edit on the task page goes.
 
 - Manages a pool of Worker processes
 - A Worker or Reviewer run starts once fewer of its role run in its task's
-  project than that role's limit there ([Concurrency limits](#concurrency-limits)),
+  project than that role's limit there, and fewer in its task than the task's
+  own limit when it has one ([Concurrency limits](#concurrency-limits)), both
   read at that moment. Until then it waits (status `pending`, and one
-  `Worker waits for room in this project (N running, limit L)` activity) and
-  checks again when a run ends or a limit changes; a waiting run can be killed
-  like a running one. A task's Planner sends every step that is ready at once;
-  this limit alone decides how many run (16 Workers per project unless a layer
-  sets one)
+  `Worker waits for room in this project (N running, limit L)` activity, or
+  `... in this task ...` when the task's own limit holds it) and checks again
+  when a run ends or a limit changes; a waiting run can be killed like a
+  running one. A task's Planner sends every step that is ready at once; these
+  limits alone decide how many run (16 Workers per project unless a layer
+  sets one, and no task limit unless the task sets one)
 - Each Worker runs Claude CLI as a subprocess with `stream-json` output
 - Real-time event streaming (tool_use, text) captured to activity table
 - Command: `claude --print --verbose --output-format stream-json --include-partial-messages --input-format stream-json --replay-user-messages <isolation flags> --append-system-prompt-file <file> --system-prompt-snapshot off --dangerously-skip-permissions --model M [--effort E] [--plugin-dir <dir> ...] [--mcp-config <file>] [--add-dir <dir> ...]`,
@@ -1062,9 +1064,10 @@ Five settings resolve through four layers (`agent_setting_layers`, one row per
 layer and place), a later layer winning (RFC decision 9). The smallest unit is
 a role in a project; Workers and Reviewers are never configured one by one. A
 task may override the Agent Profile of its Planner, Workers and Reviewers
-(`profile_overrides` at creation, stored in `task_profile_overrides`); that is
-the only task-level setting, and it wins over every layer for that task only
-(source `task`).
+(`profile_overrides` at creation, stored in `task_profile_overrides`), which
+wins over every layer for that task only (source `task`). The only other
+task-level setting is its own Worker and Reviewer concurrency limit
+([Concurrency limits](#concurrency-limits)).
 
 | Layer | Edited in | Applies to |
 | --- | --- | --- |
@@ -1233,6 +1236,21 @@ again, so a raised limit starts what waits at once. A lowered limit stops
 nothing that runs; new starts wait until fewer run than it. There is no
 machine-wide limit. The role configs' `max_concurrency`, which nothing
 enforced, was dropped (`role_configs_max_concurrency_removed`).
+
+A task that has not ended (ready, queued or running) may also limit its own
+Workers and Reviewers (`task_concurrency_limits`, one row per task and role,
+1 to 64; read with its profile overrides as the task layer, `Layer.TASK`). A
+run then starts only while fewer of its role run in its task than that limit
+and fewer in its project than the project's (`load_task_limits`), so the
+project's limit still binds when it is lower; what applies to the task is the
+lower of the two (`resolve_task_concurrency`, source `task` when the task's
+own is the lower or equal one). A task without a limit of its own runs as
+before. The Planner has none: one Planner runs a task, and how many tasks of a
+project run at once is the project's planner limit. `PUT
+/api/tasks/:id/concurrency` sets it (`{"worker": 2, "reviewer": null}`, null
+drops the task's own), and the WorkerPool checks again after each write, the
+same as for a layer; the task page and the Manager's `looper_concurrency`
+use it.
 
 ### Project knowledge: documents read on demand
 
@@ -1922,12 +1940,13 @@ check alike.
 
 | Tool | Does | Tier |
 |---|---|---|
-| `looper_overview` | Task counts by group, the running tasks and step runs, each active project's load against its limits, today's spend, unhealthy components | read |
-| `looper_tasks` | `list` (newest first; by `query` words in the id, name, requirement or project, by `group`, by `project`; at most `limit`) or `get` one task: status, phase, directory, requirement, steps, supplements (delivered or not), latest progress note, result, cost | read |
+| `looper_overview` | Task counts by group, the running tasks (with their own Worker and Reviewer limits, when set) and step runs, each active project's load against its limits, today's spend, unhealthy components | read |
+| `looper_tasks` | `list` (newest first; by `query` words in the id, name, requirement or project, by `group`, by `project`; at most `limit`) or `get` one task: status, phase, directory, requirement, steps, supplements (delivered or not), latest progress note, result, cost, and each role's concurrency limit with its source (as `GET /api/tasks/:id` gives it) | read |
 | `looper_task_create` | Create a ready task: `requirement`, `title`, `project` (matched by name ignoring case), `work_dir` (else the project's default; a new project, or one without a default, needs one), `goal_id`, `profiles` (an Agent Profile by id or name for some roles). The task records the chat it came from (its progress, and in Telegram or Lark its end notice). Looper adds the configuration block (the settings in effect for the task, with the layer each came from, the project's review policy, spend cap, lessons setting and concurrency limit) and the start question | write; a new project is high |
 | `looper_task_control` | `start` a ready task (`TASK_START`); `stop` a queued or running one; `restart` a stopped, failed or cancelled one, planned anew; `cancel` a running one | write; cancel is high |
 | `looper_task_instruct` | Add the user's words to a queued or running task as a supplement (`via` `manager:<channel>`), delivered to its Planner like any ([Changes to a task](#changes-to-a-task)) | write |
 | `looper_task_update` | Change a task that has not ended: its `requirement` (a new version, as on the task page), its `work_dir` (a task not started only), its `profiles` (a profile per role, `null` to drop the task's choice; a Worker or Reviewer uses it from its next step, the Planner at its next turn after a handoff) | write |
+| `looper_concurrency` | Change concurrency limits, `limits` per role (1–64, `null` clears one to what it inherits): with `project` (by name), that project's `planner` (how many of its tasks run at once), `worker` and `reviewer` limits, its role-in-project layers; with `task_id`, that task's own `worker` and `reviewer` limits, within its project's (a task that has not ended; `planner` is refused). Then the TaskRouter and the WorkerPool check again. The answer gives each role's limit before and after with its source, and says that lowering stops nothing that runs; a project's change is shown to the user as before → after | write; a project's is high |
 | `looper_confirm` | Run the call waiting for confirmation in this chat | — |
 
 Continuing a task that failed at its spend cap needs a higher cap, which is
@@ -2118,6 +2137,7 @@ PostgreSQL is a hard startup dependency. All data paths:
 | `llm_provider_secrets` | A provider's API key, apart from the provider; read only by the launch that will use it |
 | `agent_profiles` | Agent Profiles: `name`, `runtime_id`, `provider_id`, `model`, `effort` (its runs'; null: the runtime's own), `agent_teams` (Claude Code's agent teams: on by default for Claude Code profiles, set by the registry and once by the upgrade; the column's default, false, is for other runtimes), `builtin`; a provider still used by one is not deleted |
 | `task_profile_overrides` | A task's Agent Profile per role (`planner`, `worker`, `reviewer`): `profile_id`, going with its task; a profile a task chose is not deleted |
+| `task_concurrency_limits` | A task's own concurrency limit per role (`worker`, `reviewer`): `max_concurrency` (1–64), going with its task |
 | `schedules` | A project's schedules: `name` (unique in the project ignoring case), `cron`, `timezone`, `requirement`, `work_dir` (`''`: the project's default), `overlap` (`skip`, `queue`, `parallel`), `max_parallel_runs` (1–10, default 3: a parallel schedule's runs at once), `catch_up`, `run_timeout_seconds`, `run_budget_usd`, `gate_command`, `gate_timeout_seconds`, `daily_budget_usd`, `notify`, `notify_channel` and `notify_chat` (both or neither), `enabled` (false when created), `enabled_at` (when it was created or last enabled) and `rule_changed_at` (when its rule or zone last changed; the no-success alert counts from the later of them), `next_fire_at` (null while disabled), `last_fired_at`, `last_success_at`, `last_ok_at`, `consecutive_failures`, `failures_alert_at` and `stale_alert_at` (set while that alert is active), `created_via`; a project with schedules is not deleted |
 | `schedule_profile_overrides` | A schedule's Agent Profile per task role, copied into each task it fires; a profile a schedule chose is not deleted |
 | `schedule_runs` | Each firing of a schedule: `scheduled_for`, `fired_at`, `trigger` (`scheduled`, `catch_up`, `manual`), `missed`, `status` (`queued`, `gating`, `running`, then once `completed`, `failed`, `stopped`, `cancelled`, `timed_out`, `gate_failed`, or `skipped_overlap`, `skipped_missed`, `skipped_gate`, `skipped_budget`), `task_id` (null when skipped, or once the task is deleted), `summary`, `cost_usd`, `error`, `gate_output`, `carried_from` (the latest run whose unfinished input it was given), `carried_on` (its own unfinished input was handed on to a later run), `finished_at`, `firings` (how many firings it stands for: a repeated skip is counted on one run, from `scheduled_for` to `finished_at`); going with its schedule |
@@ -2255,13 +2275,14 @@ dev proxy, which keeps `Host` and `Origin` on its own port.
 | `/api/tasks` | GET | A page of the tasks, newest first (by creation, then id): `?limit=` (default 50, at most 200) of them, older than the task `?before=` when given; `?project_id=` lists one project's, `?group=` one task group's (400 for an unknown group), `?schedule_id=` one schedule's, `?status=` one status's (400 for an unknown one), and they combine. Answers `tasks`, `next_before` (the cursor for the next page, null at the end) and `counts` (how many tasks each status holds under the project, group and schedule filters, every page included); 400 for a bad `limit` or an unknown `before`. Each task has its status's `group`, `project_id`, `project_name`, `work_dir`, `schedule_id` and `schedule_name` (null for a task no schedule created) and `cost` (as in the task detail) |
 | `/api/tasks/create` | POST | Create a ready task (`init`) with exactly one of `project_id` (existing) and `project` (`{name, description?, work_dir?, background?}`, created in the same transaction). Its `work_dir` is the one given, else the project's. Optional `profile_overrides`: `{planner?, worker?, reviewer?}` Agent Profile ids for this task's roles (an empty one chooses nothing). 400 for a requirement over 32,000 characters, with neither project field, for an override of another role, an unknown profile or one that cannot run its role; 404 for an unknown project, 409 for a taken new name |
 | `/api/tasks/:id/project` | PUT | Move a task to `{project_id}`, whatever its status |
-| `/api/tasks/:id` | GET | Task detail with steps, its status's `group`, `project_id`, `project_name`, `schedule_id`, `schedule_name`, `task_budget_usd` (its cap: its own, else its project's) and `own_budget_usd`, `profile_overrides` (`{role: profile}`, `{}` when none), `requirement_versions` (each `{version, text, via, created_at, delivered_at}`, oldest first; none for a requirement never edited), `supplements` (each `{text, via, created_at, delivered_at}`, oldest first), `manager_actions` (what the Manager did to the task or asked to confirm, newest first: `{created_at, channel, tool, arguments, risk, status, confirmation_id}`) and `cost`: `cost_usd` (the sum of its Planner's, Workers' and Reviewers' runs), `runs`, `running`, `unpriced_runs` and `by_role` (`planner`, `worker`, `reviewer`, each `{cost_usd, runs}`) |
+| `/api/tasks/:id` | GET | Task detail with steps, its status's `group`, `project_id`, `project_name`, `schedule_id`, `schedule_name`, `task_budget_usd` (its cap: its own, else its project's) and `own_budget_usd`, `profile_overrides` (`{role: profile}`, `{}` when none), `requirement_versions` (each `{version, text, via, created_at, delivered_at}`, oldest first; none for a requirement never edited), `supplements` (each `{text, via, created_at, delivered_at}`, oldest first), `manager_actions` (what the Manager did to the task or asked to confirm, newest first: `{created_at, channel, tool, arguments, risk, status, confirmation_id}`), `concurrency` (`{max, editable, roles}`: `roles.planner` is the project's `{value, source}`, how many of its tasks run at once; `roles.worker` and `roles.reviewer` are what applies to the task, `{value, source, task, project}`, with the task's own limit `task` (null for none) and the project's `project`; `editable` is false once the task has ended) and `cost`: `cost_usd` (the sum of its Planner's, Workers' and Reviewers' runs), `runs`, `running`, `unpriced_runs` and `by_role` (`planner`, `worker`, `reviewer`, each `{cost_usd, runs}`) |
 | `/api/tasks/cancel` | POST | Cancel task (permanent) |
 | `/api/tasks/stop` | POST | Stop/pause task |
 | `/api/tasks/start` | POST | Run a stopped, failed or cancelled task again (it also starts a ready one, as before) |
 | `/api/agent/v1/tools` | GET | The Manager's tools (`ops`), for its MCP server; only with the Manager's token (`Authorization: Bearer`), else 401 |
 | `/api/agent/v1/ops/:tool` | POST | Call one of the Manager's tools with the JSON body as its arguments, in the Manager's current turn; answers the tool's `status` object with 200, refusals included; only with the Manager's token |
 | `/api/tasks/:id/requirement` | PUT | Edit the requirement of a task that has not ended to `{requirement}`, kept as a new version (`{task_id, version, requirement}`); a running task's Planner gets it in a `[CHAT]` turn. 400 for an empty or unchanged text or one over 32,000 characters, 404 for an unknown task, 409 for one that ended |
+| `/api/tasks/:id/concurrency` | PUT | Set the task's own Worker or Reviewer limit, `{"worker": 2, "reviewer": null}` (null drops it, and the project's applies); answers `{task_id, concurrency}` (as `GET /api/tasks/:id`) and lets waiting runs check again. 400 for a value other than a whole number from 1 to 64, the `planner` (one Planner runs a task) or another role, or an empty body; 404 for an unknown task; 409 for a task that has ended |
 | `/api/tasks/:id/start` | POST | Start a ready task (`TASK_START`); it waits for a place in its project like any start. Answers `{started, project_id}`; 400 unless the task is ready, 404 for an unknown task |
 | `/api/tasks/delete` | POST | Delete task (must be stopped first) |
 | `/api/tasks/:id/activity` | GET | Activity events |
