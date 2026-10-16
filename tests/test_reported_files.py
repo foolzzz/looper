@@ -140,16 +140,26 @@ def test_a_file_committed_during_the_run_counts_when_it_is_no_longer_on_disk(
     assert judged["found_elsewhere"] == {reported: f"in commit {sha[:12]}"}
 
 
-@pytest.mark.parametrize("reported", ["new.py", "pkg/new.py"])
-def test_an_absolute_path_is_not_matched_by_its_file_name_alone(tmp_path: Path, reported: str) -> None:
-    # The run committed new.py at the top level; a report of new.py in a directory that is gone is another file.
+@pytest.mark.parametrize(("committed", "reported"), [
+    ("README.md", "README.md"),
+    ("README.md", "pkg/README.md"),
+    ("docs/README.md", "README.md"),
+])
+def test_an_absolute_path_is_not_matched_by_its_file_name_alone(tmp_path: Path, committed: str, reported: str) -> None:
+    # The run committed an unrelated file of the same name; the reported one, in a worktree that is gone, is not it.
     repo = _repo(tmp_path / "repo")
     started = _now()
-    _commit_then_switch_away(repo, tmp_path)
+    git(repo, "switch", "-q", "-c", "docs")
+    (repo / committed).parent.mkdir(parents=True, exist_ok=True)
+    (repo / committed).write_text("readme\n")
+    git(repo, "add", committed)
+    git(repo, "commit", "-qm", f"add {committed}")
+    git(repo, "switch", "-q", "main")
+    gone = tmp_path / "gone-worktree" / reported
 
-    judged = _judge(repo, {str(tmp_path / "gone" / reported): "added"}, started_at=started)
+    judged = _judge(repo, {str(gone): "added"}, started_at=started)
     assert judged["status"] == "failed"
-    assert f"changed files not found: {tmp_path / 'gone' / reported}" in judged["error"]
+    assert f"changed files not found: {gone}" in judged["error"]
 
 
 def test_a_file_found_nowhere_fails_and_says_where_it_looked(tmp_path: Path) -> None:
