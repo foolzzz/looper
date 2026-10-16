@@ -93,6 +93,7 @@ from ..message import (
     AgentAddress,
     MessageEnvelope,
     MessageType,
+    RestartMode,
     planner_address,
     worker_address,
 )
@@ -596,8 +597,10 @@ class PlannerAgent:
             # Steps this event dispatches see every change stored so far; Claude gets them in a turn below.
             await self._read_changes(self._plan, await self._pending_changes())
         match envelope.message_type:
-            case MessageType.TASK_REQUEST if envelope.payload.get("resume"):
+            case MessageType.TASK_REQUEST if envelope.payload.get("restart") == RestartMode.AT_CAP:
                 await self._continue_plan(envelope)
+            case MessageType.TASK_REQUEST if envelope.payload.get("restart") == RestartMode.CONTINUE:
+                await self._restart_plan(envelope)
             case MessageType.TASK_REQUEST:
                 await self._plan_and_dispatch(envelope)
             case MessageType.TASK_RESUME:
@@ -892,10 +895,10 @@ class PlannerAgent:
                                   max_retries=self._execution.step_retries)
         await self._decide(plan, step, context, self._work_report(step, result))
 
-    async def _merged(self, plan: TaskPlan, step: PlanStep) -> bool:
+    async def _merged(self, plan: TaskPlan, step: PlanStep, *, decide: bool = True) -> bool:
         """Merge the worktree of ``step``, just accepted, into the task directory's branch; True when it has
         none or the merge landed. A merge that failed leaves the task directory as it was and goes to the
-        Planner's decision instead (False)."""
+        Planner's decision instead (False); without ``decide`` it only leaves the step's result unmerged."""
         current = step.workspace
         if current is None or current.state not in (StepWorkspaceState.ACTIVE, StepWorkspaceState.MERGING):
             return True
@@ -906,7 +909,7 @@ class PlannerAgent:
             await self._activity("phase", f"Step {step.label} left changes uncommitted: committed on its branch as "
                                           f"{outcome.leftovers[:12]}")
         if merged.state is not StepWorkspaceState.MERGED:
-            await self._merge_failed(plan, step, outcome)
+            await self._merge_failed(plan, step, outcome, decide=decide)
             return False
         if merged.merge_commit and outcome.files:
             note = f"Step {step.label} merged into {merged.target} as {merged.merge_commit[:12]}: " \
@@ -919,7 +922,7 @@ class PlannerAgent:
         step.workspace = await self._remove_workspace(merged)  # its commits are on the branch now
         return True
 
-    async def _merge_failed(self, plan: TaskPlan, step: PlanStep, outcome: MergeResult) -> None:
+    async def _merge_failed(self, plan: TaskPlan, step: PlanStep, outcome: MergeResult, *, decide: bool = True) -> None:
         failed = outcome.workspace
         assert failed.merge_error is not None
         error = (f"Step {step.label} was accepted, but its branch could not be merged into {failed.target} "
@@ -928,6 +931,8 @@ class PlannerAgent:
                        "merge_error": failed.merge_error.value, "merge_files": list(outcome.files[:50]),
                        "branch": failed.branch}
         await self._activity("error", error[:500], worker=step.worker_id)
+        if not decide:
+            return
         context = DecisionContext(step=step.label, result=ResultKind.WORK, succeeded=False,
                                   review_required=self._needs_review(step), retries=step.retries,
                                   max_retries=self._execution.step_retries)
@@ -1353,6 +1358,87 @@ class PlannerAgent:
         )
         await self._decide(plan, step, context, report)
 
+    # --- Restarting a task that ended: stopped, failed or cancelled ---
+
+    async def _restart_plan(self, envelope: MessageEnvelope) -> None:
+        """Run a task that ended again from its saved plan (``RestartMode.CONTINUE``), building on what is done.
+
+        The accepted steps stay done and never run again (one whose merge the end cut off is merged now). Every
+        other step that did not finish (failed, running, in review, awaiting a decision) goes back to not
+        started, with its retries, feedback, last result and worktree, as a retry keeps them, and a journal
+        entry on how its last attempt ended. Then one [RESTART] turn, answered in the CHAT shape: ``none`` runs
+        the steps not started as they are, ``add_steps`` and ``replan`` change them first; a turn that fails
+        leaves them as they are. A task without a plan to go on from is planned anew.
+        """
+        self._plan = None
+        await self._load_plan(db_plans.STATUSES)
+        plan = self._plan
+        if plan is None or not plan.steps:
+            await self._activity("phase", "Restarted without a saved plan to continue from: planning anew")
+            await self._plan_and_dispatch(envelope)
+            return
+        await self._refresh_project(plan)
+        why = self._ended(str(envelope.payload.get("ended") or ""), plan.fail_reason)
+        plan.status, plan.fail_reason = "executing", ""
+        if not await self._within_budget(plan):
+            return  # its spend cap is still spent, so it failed at it again: ``/continue`` raises the cap
+        merged: list[PlanStep] = []
+        for step in plan.steps:
+            if step.status == "deciding" and step.workspace is not None and \
+                    step.workspace.state is StepWorkspaceState.MERGING and await self._merged(plan, step, decide=False):
+                step.status = "verified"  # it was accepted: only its merge was cut off
+                merged.append(step)
+        unfinished = [s for s in plan.steps if s.status in ("failed", *_IN_FLIGHT)]
+        entries = [entry for step in merged if (entry := self._accepted_entry(plan, step)) is not None]
+        entries += [self._restart_entry(step) for step in unfinished]
+        again = [s for s in plan.steps if s.status not in ("verified", "skipped") and (s.status != "pending" or s.started)]
+        for step in again:
+            step.status, step.worker_id, step.reviewer_id = "pending", None, None
+        await self._save(plan, *merged, *again, plan_row=True, entries=entries)
+        await update_task_phase(self._task_id, "executing")
+        kept = sum(1 for s in plan.steps if s.status == "verified")
+        await self._activity("phase", f"Task restarted from its plan: {kept} accepted step(s) kept"
+                                      + (f"; back to not started: {', '.join(s.label for s in unfinished)}"
+                                         if unfinished else ""))
+        if plan.is_complete:
+            await self._complete_plan(plan)
+            return
+        changes = await self._pending_changes()
+        await self._read_changes(plan, changes)
+        view = plan.view()
+        try:
+            reply: ChatReply | None = await self._ask(TurnKind.RESTART, self._restart_message(plan, why, changes),
+                                                      lambda answer: parse_chat(answer, view))
+        except PlannerTurnError as exc:
+            await self._activity("error", f"Warning: the Planner could not take the restart: {exc}. The steps not "
+                                          "started run as they are."[:500])
+            reply = None
+        if reply is None or reply.action is ChatAction.NONE:
+            await self._report_progress(plan)
+            await self._dispatch_ready(plan)
+        else:
+            await self._apply_chat(plan, reply, None, at="the restart")
+        if reply is not None:
+            await self._activity("phase", f"Planner answered the restart ({reply.action.value}): {reply.reply}"[:300])
+            await self._mark_delivered(changes)
+
+    @staticmethod
+    def _ended(status: str, fail_reason: str) -> str:
+        """How a task being restarted ended (its status before the restart), for the [RESTART] turn."""
+        if status == "failed":
+            return f"failed: {_clip(fail_reason, 1000) or 'a step failed and the Planner could not go on'}"
+        return "was cancelled" if status == "cancelled" else "was stopped"
+
+    @staticmethod
+    def _restart_entry(step: PlanStep) -> JournalEntry:
+        """The journal entry of a step a restart puts back to not started: how its last attempt ended."""
+        ended = _NOT_DONE[step.status]
+        if step.result and step.status != "dispatched":  # a running step's result is its previous attempt's
+            ended += f" (last result: {result_outcome(step.result)})"
+        return JournalEntry(step.step_id, step.label, journal.clip(
+            f"attempt {step.retries + 1}: {ended} when the task ended; the restart put it back to not started",
+            journal.SUMMARY_MAX_CHARS), kind=JournalKind.STEP_RETRY)
+
     # --- Chat ---
 
     async def _handle_cancel(self, envelope: MessageEnvelope) -> None:
@@ -1457,8 +1543,10 @@ class PlannerAgent:
             self._replies[supplement.id] = text
         return text
 
-    async def _apply_chat(self, plan: TaskPlan, reply: ChatReply, envelope: MessageEnvelope | None) -> str:
-        """Do what a CHAT reply decided; the answer for the user."""
+    async def _apply_chat(self, plan: TaskPlan, reply: ChatReply, envelope: MessageEnvelope | None, *,
+                          at: str = "a change to the task") -> str:
+        """Do what a CHAT reply decided, ``at`` what the journal and the activity say it answered; the answer for
+        the user."""
         if reply.action is ChatAction.FORWARD:
             step = next(s for s in plan.steps if s.label == reply.step and s.status == "dispatched")
             correlation = envelope.correlation_id if envelope is not None else plan.correlation_id
@@ -1474,17 +1562,17 @@ class PlannerAgent:
             steps = self._add_steps(plan, reply.steps)
             added = self._describe(plan, steps)
             await self._save(plan, *steps, entries=[JournalEntry(
-                "", "", journal.clip(f"added steps {added} at a change to the task: {reply.reply}",
+                "", "", journal.clip(f"added steps {added} at {at}: {reply.reply}",
                                      journal.SUMMARY_MAX_CHARS), kind=JournalKind.DECISION)])
-            await self._activity("phase", f"Steps added at a change to the task: {added}")
+            await self._activity("phase", f"Steps added at {at}: {added}")
             await self._report_progress(plan)
             await self._dispatch_ready(plan)
             return reply.reply
         if reply.action is ChatAction.REPLAN:
-            await self._chat_replan(plan, reply)
+            await self._chat_replan(plan, reply, at)
         return reply.reply
 
-    async def _chat_replan(self, plan: TaskPlan, reply: ChatReply) -> None:
+    async def _chat_replan(self, plan: TaskPlan, reply: ChatReply, at: str) -> None:
         """Stop and drop the running steps the change makes wrong, replace every step not started, then go on."""
         stopped = [s for s in plan.steps if s.label in reply.stop and s.status == "dispatched"]
         for step in stopped:
@@ -1505,7 +1593,7 @@ class PlannerAgent:
             summary += f"; stopped {', '.join(s.label for s in stopped)}"
         if dropped:
             summary += f"; dropped {', '.join(s.label for s in dropped)}"
-        entry = JournalEntry("", "", journal.clip(f"replan at a change to the task: {reply.reply}. {summary}",
+        entry = JournalEntry("", "", journal.clip(f"replan at {at}: {reply.reply}. {summary}",
                                                   journal.SUMMARY_MAX_CHARS), kind=JournalKind.DECISION)
         await self._save(plan, *stopped, *dropped, *steps, entries=[entry])
         await self._activity("phase", summary)
@@ -2158,20 +2246,9 @@ class PlannerAgent:
         running = [s for s in plan.steps if s.status == "dispatched"]
         running_text = ", ".join(f"{s.label} ({s.worker_id})" for s in running) or "none"
         actions = ["none", "add_steps", "replan"] + (["forward (to a running step)"] if running else [])
-        new = {supplement.id for supplement in changes.supplements}
-        lines = ["[CHAT] The task changed."]
-        if changes.supplements:
-            lines += ["", "The user added to the task (new supplements, oldest first; every message the user sends "
-                          "you is one):"]
-            lines += ["- " + supplement.text.strip().replace("\n", "\n  ") for supplement in changes.supplements]
-        if changes.requirement is not None:
-            edit = changes.requirement
-            lines += ["", f"The requirement was edited (version {edit.before_version} -> {edit.version}); the Task "
-                          "section of your instructions has the new text. What changed:", _requirement_diff(edit)]
-        # The supplements given before, and the rest of the journal.
-        earlier = [entry for entry in plan.journal if entry.id is None or entry.id not in new]
-        section = journal.planner_section(earlier)
+        lines, section = self._change_lines(plan, changes)
         return "\n".join([
+            "[CHAT] The task changed.",
             *lines,
             "",
             *self._plan_lines(plan),
@@ -2182,6 +2259,41 @@ class PlannerAgent:
             f"Allowed actions: {', '.join(actions)}.",
             "Reply with the CHAT JSON.",
         ])
+
+    def _restart_message(self, plan: TaskPlan, why: str, changes: TaskChanges) -> str:
+        """A RESTART turn's message: why the task ended, the task's changes the Planner has not had, the plan as
+        it is now and the journal."""
+        lines, section = self._change_lines(plan, changes)
+        return "\n".join([
+            f"[RESTART] The task {why}. The user restarted it, and it goes on from its plan: the accepted steps "
+            "stay done and do not run again; the steps that did not finish are back to not started (the journal "
+            "below says how their last attempt ended).",
+            *lines,
+            "",
+            *self._plan_lines(plan),
+            *(["", *section] if section else []),
+            "",
+            "Build on what is done: decide whether the steps not started still fit the task as it is now.",
+            "Allowed actions: none (run the steps not started as they are), add_steps, replan.",
+            "Reply with the CHAT JSON.",
+        ])
+
+    @staticmethod
+    def _change_lines(plan: TaskPlan, changes: TaskChanges) -> tuple[list[str], list[str]]:
+        """The task's changes the Planner has not had, after a blank line each, and the journal's section without
+        them (the supplements given before, and the rest of the journal)."""
+        new = {supplement.id for supplement in changes.supplements}
+        lines: list[str] = []
+        if changes.supplements:
+            lines += ["", "The user added to the task (new supplements, oldest first; every message the user sends "
+                          "you is one):"]
+            lines += ["- " + supplement.text.strip().replace("\n", "\n  ") for supplement in changes.supplements]
+        if changes.requirement is not None:
+            edit = changes.requirement
+            lines += ["", f"The requirement was edited (version {edit.before_version} -> {edit.version}); the Task "
+                          "section of your instructions has the new text. What changed:", _requirement_diff(edit)]
+        earlier = [entry for entry in plan.journal if entry.id is None or entry.id not in new]
+        return lines, journal.planner_section(earlier)
 
     # --- Endings ---
 
@@ -2295,8 +2407,8 @@ class PlannerAgent:
         await self._activity("error", f"Task failed: {plan.fail_reason or 'see step details'}"[:500])
         kept = [s.workspace.branch for s in plan.steps if s.isolated and s.workspace is not None]
         if kept:
-            await self._activity("phase", f"Kept {len(kept)} step worktree(s) with work not merged, until the task "
-                                          f"is restarted or deleted: {', '.join(kept)}"[:500])
+            await self._activity("phase", f"Kept {len(kept)} step worktree(s) with work not merged, for a restart, "
+                                          f"until the task is started over or deleted: {', '.join(kept)}"[:500])
 
         await self._bus.publish(MessageEnvelope.create(
             source=self.agent_address,

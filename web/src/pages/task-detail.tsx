@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { type CSSProperties, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowLeft,
   CheckCircle2,
@@ -19,6 +19,7 @@ import {
   FolderOpen,
   Folder,
   History,
+  RotateCcw,
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { ClampedText } from "@/components/clamped-text";
@@ -35,6 +36,7 @@ import {
   Background,
   type Node,
   type Edge,
+  Controls,
   Position,
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
@@ -1196,194 +1198,239 @@ function ConversationTab({ taskId }: { taskId: string }) {
 
 // --- Pipeline DAG Tab ---
 
-const STATUS_COLORS: Record<string, { bg: string; border: string; text: string }> = {
-  pending:   { bg: "#1a1a2e", border: "#3b3b5c", text: "#9ca3af" },
-  assigned:  { bg: "#1a1a2e", border: "#6366f1", text: "#a5b4fc" },
-  running:   { bg: "#0c1a3a", border: "#3b82f6", text: "#93c5fd" },
-  executing: { bg: "#0c1a3a", border: "#3b82f6", text: "#93c5fd" },
-  dispatched:{ bg: "#0c1a3a", border: "#3b82f6", text: "#93c5fd" },
-  completed: { bg: "#052e16", border: "#22c55e", text: "#86efac" },
-  verified:  { bg: "#052e16", border: "#22c55e", text: "#86efac" },
-  failed:    { bg: "#2a0a0a", border: "#ef4444", text: "#fca5a5" },
-  cancelled: { bg: "#1a1a2e", border: "#6b7280", text: "#9ca3af" },
-};
-
-function statusColor(status: string) {
-  return STATUS_COLORS[status] ?? STATUS_COLORS.pending;
+/** How a node of the pipeline shows a status: a word (color is never the only signal) and a look built from the
+ * theme's tokens. */
+interface NodeLook {
+  label: string;
+  border: string;
+  borderStyle: "solid" | "dashed";
+  background: string;
+  color: string;
+  muted?: boolean;
 }
 
-function PipelineTab({ task }: { task: TaskDetail }) {
-  const steps = task.steps || [];
+const tint = (token: string, percent: number) => `color-mix(in srgb, var(${token}) ${percent}%, var(--color-card))`;
 
-  const { nodes, edges } = useMemo(() => {
+/** One look per step status (task_steps.status); "completed" is a step awaiting its review. */
+const STEP_LOOKS: Record<string, NodeLook> = {
+  pending: { label: "Not started", border: "var(--color-border)", borderStyle: "solid", background: "var(--color-card)",
+             color: "var(--color-muted-foreground)" },
+  dispatched: { label: "Running", border: "var(--color-primary)", borderStyle: "solid",
+                background: tint("--color-primary", 16), color: "var(--color-foreground)" },
+  deciding: { label: "Awaiting decision", border: "var(--color-warning)", borderStyle: "solid",
+              background: tint("--color-warning", 12), color: "var(--color-foreground)" },
+  completed: { label: "In review", border: "var(--color-primary)", borderStyle: "dashed",
+               background: tint("--color-primary", 8), color: "var(--color-foreground)" },
+  verified: { label: "Done", border: "var(--color-success)", borderStyle: "solid",
+              background: tint("--color-success", 12), color: "var(--color-foreground)" },
+  failed: { label: "Failed", border: "var(--color-destructive)", borderStyle: "solid",
+            background: tint("--color-destructive", 12), color: "var(--color-foreground)" },
+  skipped: { label: "Skipped", border: "var(--color-muted-foreground)", borderStyle: "dashed",
+             background: "var(--color-background)", color: "var(--color-muted-foreground)", muted: true },
+};
+
+function stepLook(status: string): NodeLook {
+  return STEP_LOOKS[status] ?? { ...STEP_LOOKS.pending, label: status };
+}
+
+/** The Planner's and the result node's look, from the task's status. */
+function taskLook(status: string, live: string): NodeLook {
+  if (status === "completed") return { ...STEP_LOOKS.verified, label: "Completed" };
+  if (status === "failed") return { ...STEP_LOOKS.failed, label: "Failed" };
+  const quiet: Record<string, string> = { stopped: "Stopped", cancelled: "Cancelled", pending: "Queued",
+                                         [READY_STATUS]: READY_LABEL };
+  return status in quiet ? { ...STEP_LOOKS.pending, label: quiet[status] } : { ...STEP_LOOKS.dispatched, label: live };
+}
+
+/** Why each dropped step was dropped, from the journal: the decision that dropped it (a replan names the steps it
+ * dropped or stopped; a decided step that a replan dropped has an entry of its own). */
+function droppedBecause(journal: JournalEntry[], steps: TaskStep[]): Map<string, string> {
+  const byKey = new Map(steps.filter((s) => s.status === "skipped" && s.step_key).map((s) => [s.step_key, s.id]));
+  const why = new Map<string, string>();
+  for (const entry of journal) {
+    if (entry.kind !== "decision") continue;
+    if (entry.step_id && entry.summary.includes("The step was dropped")) why.set(entry.step_id, entry.summary);
+    for (const match of entry.summary.matchAll(/(?:dropped|stopped) ([\w.-]+(?:, [\w.-]+)*)/g)) {
+      for (const name of match[1].split(", ")) {
+        const id = byKey.get(name.replace(/\.$/, ""));
+        if (id && !why.has(id)) why.set(id, entry.summary);
+      }
+    }
+  }
+  return why;
+}
+
+/** Each step's depth in the plan's dependency graph: 0 without dependencies, else one more than its deepest. */
+function stepLevels(steps: TaskStep[]): Map<string, number> {
+  const byId = new Map(steps.map((s) => [s.id, s]));
+  const levels = new Map<string, number>();
+  const visiting = new Set<string>();
+  const level = (id: string): number => {
+    const known = levels.get(id);
+    if (known !== undefined) return known;
+    if (visiting.has(id)) return 0; // a cycle the plan's checks never let through
+    visiting.add(id);
+    const deps = (byId.get(id)?.depends_on ?? []).filter((d) => byId.has(d));
+    const value = deps.length ? 1 + Math.max(...deps.map(level)) : 0;
+    visiting.delete(id);
+    levels.set(id, value);
+    return value;
+  };
+  steps.forEach((s) => level(s.id));
+  return levels;
+}
+
+// xyflow's dark mode, in the theme's tokens.
+const PIPELINE_THEME = {
+  "--xy-background-color": "var(--color-background)",
+  "--xy-controls-button-background-color": "var(--color-muted)",
+  "--xy-controls-button-background-color-hover": "var(--color-accent)",
+  "--xy-controls-button-color": "var(--color-foreground)",
+  "--xy-controls-button-border-color": "var(--color-border)",
+} as CSSProperties;
+
+const NODE_W = 180;
+const NODE_H = 60;
+const GAP_X = 36;
+const ROW_H = 110;
+
+function nodeStyle(look: NodeLook) {
+  return {
+    width: NODE_W, height: NODE_H, padding: 0, borderRadius: 12,
+    background: look.background, color: look.color,
+    border: `2px ${look.borderStyle} ${look.border}`,
+    opacity: look.muted ? 0.8 : 1,
+  };
+}
+
+function NodeLabel({ title, name, look, note }: { title: string; name: string; look: NodeLook; note?: string }) {
+  return (
+    <div title={title} className="flex h-full w-full flex-col items-center justify-center overflow-hidden px-2 leading-tight">
+      <span className={cn("max-w-full truncate font-mono text-xs font-semibold", look.muted && "line-through")}>{name}</span>
+      <span className="mt-1 max-w-full truncate text-[10px]">{look.label}{note ? ` · ${note}` : ""}</span>
+    </div>
+  );
+}
+
+/** The plan as its dependency graph: each step a node under the steps it depends on (steps without dependencies
+ * under the Planner), the steps nothing live depends on leading to the result. Done steps keep their place and
+ * edges when the plan changes; dropped ones stay, dashed and muted, as history. */
+function PipelineTab({ task }: { task: TaskDetail }) {
+  const { nodes, edges, rows } = useMemo(() => {
+    const steps = task.steps || [];
     const ns: Node[] = [];
     const es: Edge[] = [];
-    const nodeW = 200;
-    const nodeH = 60;
-    const gapY = 90;
-    const centerX = 300;
-
-    const managerColor = statusColor("completed");
-    ns.push({
-      id: "manager",
-      position: { x: centerX - nodeW / 2, y: 0 },
-      data: { label: "Manager" },
-      style: {
-        width: nodeW, height: nodeH,
-        background: managerColor.bg, border: `2px solid ${managerColor.border}`,
-        color: managerColor.text, borderRadius: 12,
-        display: "flex", alignItems: "center", justifyContent: "center",
-        fontSize: 13, fontWeight: 600,
-      },
-      sourcePosition: Position.Bottom,
-      targetPosition: Position.Top,
+    const edgeStyle = (live: boolean, running = false) => ({
+      stroke: running ? "var(--color-primary)" : live ? "var(--color-muted-foreground)" : "var(--color-border)",
+      strokeWidth: 2, strokeDasharray: live ? undefined : "6 4",
     });
-
-    const plannerStatus = task.status === "completed" || task.status === "failed" ? task.status : "running";
-    const plannerColor = statusColor(plannerStatus);
+    const plannerLook = taskLook(task.status, "Planning and deciding");
     ns.push({
-      id: "planner",
-      position: { x: centerX - nodeW / 2, y: gapY },
-      data: { label: <span title={task.planner_id || "Planner"}>{`Planner ${task.planner_id ? `(${task.planner_id.slice(0, 20)})` : ""}`}</span> },
-      style: {
-        width: nodeW, height: nodeH,
-        background: plannerColor.bg, border: `2px solid ${plannerColor.border}`,
-        color: plannerColor.text, borderRadius: 12,
-        display: "flex", alignItems: "center", justifyContent: "center",
-        fontSize: 13, fontWeight: 600,
-      },
-      sourcePosition: Position.Bottom,
-      targetPosition: Position.Top,
+      id: "planner", position: { x: -NODE_W / 2, y: 0 },
+      data: { label: <NodeLabel title={task.planner_id || "Planner"} name="Planner" look={plannerLook} /> },
+      style: nodeStyle(plannerLook), sourcePosition: Position.Bottom, targetPosition: Position.Top,
     });
-    es.push({ id: "e-manager-planner", source: "manager", target: "planner", animated: plannerStatus === "running" });
 
     if (steps.length === 0) {
-      const waitColor = statusColor("pending");
+      const look = { ...STEP_LOOKS.pending, borderStyle: "dashed" as const, label: "Waiting for the plan" };
       ns.push({
-        id: "waiting",
-        position: { x: centerX - nodeW / 2, y: gapY * 2 },
-        data: { label: "Waiting for steps..." },
-        style: {
-          width: nodeW, height: nodeH,
-          background: waitColor.bg, border: `2px dashed ${waitColor.border}`,
-          color: waitColor.text, borderRadius: 12,
-          display: "flex", alignItems: "center", justifyContent: "center",
-          fontSize: 12, fontStyle: "italic",
-        },
-        sourcePosition: Position.Bottom,
-        targetPosition: Position.Top,
+        id: "waiting", position: { x: -NODE_W / 2, y: ROW_H },
+        data: { label: <NodeLabel title="The Planner has not planned the steps yet" name="Steps" look={look} /> },
+        style: nodeStyle(look), sourcePosition: Position.Bottom, targetPosition: Position.Top,
       });
-      es.push({ id: "e-planner-wait", source: "planner", target: "waiting", animated: true });
-    } else {
-      const totalWidth = steps.length * (nodeW + 40) - 40;
-      const startX = centerX - totalWidth / 2;
-
-      steps.forEach((step, i) => {
-        const stepId = `step-${i}`;
-        const sc = statusColor(step.status);
-        const x = startX + i * (nodeW + 40);
-        const y = gapY * 2;
-
-        ns.push({
-          id: stepId,
-          position: { x, y },
-          data: {
-            label: (
-              <span title={step.instruction} className="block h-full w-full overflow-hidden">
-                {`Step ${i + 1}: ${step.instruction.slice(0, 30)}${step.instruction.length > 30 ? "…" : ""}`}
-              </span>
-            ),
-          },
-          style: {
-            width: nodeW, height: nodeH,
-            background: sc.bg, border: `2px solid ${sc.border}`,
-            color: sc.text, borderRadius: 12,
-            display: "flex", alignItems: "center", justifyContent: "center",
-            fontSize: 11, fontWeight: 500,
-            padding: "0 8px", textAlign: "center" as const,
-          },
-          sourcePosition: Position.Bottom,
-          targetPosition: Position.Top,
-        });
-        es.push({
-          id: `e-planner-${stepId}`,
-          source: "planner",
-          target: stepId,
-          animated: step.status === "dispatched" || step.status === "running",
-        });
-
-        if (step.worker_id) {
-          const workerId = `worker-${i}`;
-          const wc = statusColor(step.status === "verified" || step.status === "completed" ? "completed" : step.status);
-          ns.push({
-            id: workerId,
-            position: { x, y: gapY * 3 },
-            data: { label: <span title={step.worker_id}>{step.worker_id.slice(0, 20)}</span> },
-            style: {
-              width: nodeW, height: 44,
-              background: wc.bg, border: `1px solid ${wc.border}`,
-              color: wc.text, borderRadius: 8,
-              display: "flex", alignItems: "center", justifyContent: "center",
-              fontSize: 10,
-            },
-            sourcePosition: Position.Bottom,
-            targetPosition: Position.Top,
-          });
-          es.push({
-            id: `e-${stepId}-${workerId}`,
-            source: stepId,
-            target: workerId,
-            animated: step.status === "dispatched",
-          });
-        }
-      });
-
-      const resultY = gapY * (steps.some(s => s.worker_id) ? 4 : 3);
-      const resultStatus = task.status === "completed" ? "completed" : task.status === "failed" ? "failed" : "pending";
-      const rc = statusColor(resultStatus);
-      ns.push({
-        id: "result",
-        position: { x: centerX - nodeW / 2, y: resultY },
-        data: { label: task.status === "completed" ? "Task Complete" : task.status === "failed" ? "Task Failed" : "In Progress..." },
-        style: {
-          width: nodeW, height: nodeH,
-          background: rc.bg, border: `2px solid ${rc.border}`,
-          color: rc.text, borderRadius: 12,
-          display: "flex", alignItems: "center", justifyContent: "center",
-          fontSize: 13, fontWeight: 600,
-        },
-        targetPosition: Position.Top,
-      });
-
-      steps.forEach((step, i) => {
-        const sourceId = step.worker_id ? `worker-${i}` : `step-${i}`;
-        es.push({
-          id: `e-${sourceId}-result`,
-          source: sourceId,
-          target: "result",
-        });
-      });
+      es.push({ id: "e-planner-waiting", source: "planner", target: "waiting", animated: true, style: edgeStyle(true) });
+      return { nodes: ns, edges: es, rows: 2 };
     }
 
-    return { nodes: ns, edges: es };
-  }, [task, steps]);
+    const byId = new Map(steps.map((s) => [s.id, s]));
+    const levels = stepLevels(steps);
+    const why = droppedBecause(task.journal || [], steps);
+    // Rows by depth; within a row, under the mean place of the steps each depends on, then in plan order. The live
+    // steps are centred and the dropped ones follow on their right, so no live edge runs behind a dropped step.
+    const x = new Map<string, number>();
+    const depth = Math.max(...levels.values());
+    const stepX = NODE_W + GAP_X;
+    for (let row = 0; row <= depth; row++) {
+      const placed = steps
+        .filter((s) => levels.get(s.id) === row)
+        .map((s) => {
+          const parents = (s.depends_on ?? []).map((d) => x.get(d)).filter((v): v is number => v !== undefined);
+          return { s, at: parents.length ? parents.reduce((a, b) => a + b, 0) / parents.length : 0 };
+        })
+        .sort((a, b) => a.at - b.at || a.s.step_index - b.s.step_index);
+      const live = placed.filter(({ s }) => s.status !== "skipped");
+      const dropped = placed.filter(({ s }) => s.status === "skipped");
+      const left = -((live.length - 1) * stepX) / 2;
+      live.forEach(({ s }, i) => x.set(s.id, left + i * stepX));
+      const after = live.length ? left + live.length * stepX : stepX;
+      dropped.forEach(({ s }, i) => x.set(s.id, after + i * stepX));
+    }
+
+    const dependedOn = new Set(steps.filter((s) => s.status !== "skipped").flatMap((s) => s.depends_on ?? []));
+    const ends = steps.filter((s) => s.status !== "skipped" && !dependedOn.has(s.id));
+    for (const step of steps) {
+      const look = stepLook(step.status);
+      const name = step.step_key || `step ${step.step_index + 1}`;
+      const deps = (step.depends_on ?? []).filter((d) => byId.has(d));
+      const title = [
+        `${name} — ${look.label}`,
+        step.instruction,
+        `Depends on: ${deps.map((d) => byId.get(d)?.step_key || d).join(", ") || "nothing"}`,
+        step.worker_id ? `Worker: ${step.worker_id}` : "",
+        step.reviewer_id ? `Reviewer: ${step.reviewer_id}` : "",
+        step.retries ? `Retries: ${step.retries}` : "",
+        step.review ? "Needs a passing review" : "",
+        step.status === "skipped" ? `Skipped: ${why.get(step.id) || "dropped from the plan by a replan"}` : "",
+      ].filter(Boolean).join("\n");
+      ns.push({
+        id: step.id,
+        position: { x: (x.get(step.id) ?? 0) - NODE_W / 2, y: ROW_H * (1 + (levels.get(step.id) ?? 0)) },
+        data: { label: <NodeLabel title={title} name={name} look={look}
+                                  note={step.retries ? `retry ${step.retries}` : undefined} /> },
+        style: nodeStyle(look), sourcePosition: Position.Bottom, targetPosition: Position.Top,
+      });
+      const live = step.status !== "skipped";
+      const running = step.status === "dispatched";
+      for (const source of deps.length ? deps : ["planner"]) {
+        const fromLive = source === "planner" || byId.get(source)?.status !== "skipped";
+        es.push({ id: `dep:${source}->${step.id}`, source, target: step.id, animated: running,
+                  style: edgeStyle(live && fromLive, running) });
+      }
+    }
+
+    // The result sits under the steps that lead to it, so its edges do not cross the dropped steps above it.
+    const resultX = ends.length ? ends.reduce((sum, s) => sum + (x.get(s.id) ?? 0), 0) / ends.length : 0;
+    const resultLook = taskLook(task.status, "In progress");
+    ns.push({
+      id: "result", position: { x: resultX - NODE_W / 2, y: ROW_H * (2 + depth) },
+      data: { label: <NodeLabel title={task.result_summary || task.error || "The task's result"} name="Result" look={resultLook} /> },
+      style: nodeStyle(resultLook), targetPosition: Position.Top,
+    });
+    for (const step of ends) {
+      es.push({ id: `end:${step.id}`, source: step.id, target: "result", style: edgeStyle(true) });
+    }
+    return { nodes: ns, edges: es, rows: depth + 3 };
+  }, [task]);
 
   return (
-    <div className="h-[500px] w-full">
+    // Taller for a deeper plan, so its labels stay readable before any zoom.
+    <div className="w-full" style={{ height: Math.min(860, Math.max(420, rows * 90)) }}>
       <ReactFlow
+        style={PIPELINE_THEME}
         nodes={nodes}
         edges={edges}
         fitView
+        fitViewOptions={{ padding: 0.12 }}
+        minZoom={0.15}
+        colorMode="dark"
         proOptions={{ hideAttribution: true }}
         nodesDraggable={false}
         nodesConnectable={false}
         elementsSelectable={false}
-        defaultEdgeOptions={{
-          type: "smoothstep",
-          style: { stroke: "#4b5563", strokeWidth: 2 },
-        }}
+        defaultEdgeOptions={{ type: "smoothstep" }}
       >
-        <Background color="#1f2937" gap={20} />
+        <Background color="var(--color-border)" gap={20} />
+        <Controls showInteractive={false} />
       </ReactFlow>
     </div>
   );
@@ -1494,6 +1541,8 @@ export function TaskDetailPage({ taskId, onBack }: TaskDetailPageProps) {
   const [task, setTask] = useState<TaskDetail | null>(null);
   const [error, setError] = useState("");
   const [startError, setStartError] = useState("");
+  /** Start over waits for its confirmation: it deletes the task's steps and plan. */
+  const [confirmStartOver, setConfirmStartOver] = useState(false);
   const [tab, setTab] = useState<Tab>("overview");
   // Bumped when the task runs again, so the page polls it again.
   const [runs, setRuns] = useState(0);
@@ -1516,6 +1565,13 @@ export function TaskDetailPage({ taskId, onBack }: TaskDetailPageProps) {
     timer = setInterval(load, 2000);
     return () => { stopped = true; clearInterval(timer); };
   }, [taskId, runs]);
+
+  // A ready task is started; a stopped, failed or cancelled one goes on from its saved plan, or is planned anew.
+  const start = (startOver: boolean) =>
+    (task?.status === READY_STATUS ? startReadyTask(taskId) : startTask(taskId, { startOver })).then(
+      () => { setStartError(""); setConfirmStartOver(false); setRuns((n) => n + 1); },
+      (err) => setStartError(err instanceof Error ? err.message : String(err)),
+    );
 
   const tabs: { id: Tab; label: string; icon: React.ElementType }[] = [
     { id: "overview", label: "Overview", icon: Activity },
@@ -1567,15 +1623,50 @@ export function TaskDetailPage({ taskId, onBack }: TaskDetailPageProps) {
               Stop
             </button>
           )}
-          {task && ["stopped", "failed", "cancelled", "init"].includes(task.status) && (
-            <button
-              type="button"
-              onClick={() => (task.status === READY_STATUS ? startReadyTask : startTask)(taskId).then(() => { setStartError(""); setRuns((n) => n + 1); }, (err) => setStartError(err instanceof Error ? err.message : String(err)))}
-              className="flex items-center gap-1.5 rounded-md border border-success/50 px-3 py-1.5 text-xs font-medium text-success hover:bg-success/10 transition-colors"
-            >
-              <Play className="h-3.5 w-3.5" />
-              Start
-            </button>
+          {task && confirmStartOver && (
+            <div className="flex shrink-0 items-center gap-1.5">
+              <span className="text-xs text-muted-foreground">Delete its steps?</span>
+              <button
+                type="button"
+                onClick={() => start(true)}
+                title="Delete the task's steps, plan and Planner session, then plan it anew from its requirement"
+                className="rounded-md px-3 py-1.5 text-xs font-medium bg-destructive text-destructive-foreground hover:bg-destructive/90 transition-colors"
+              >
+                Start over
+              </button>
+              <button
+                type="button"
+                onClick={() => setConfirmStartOver(false)}
+                className="rounded-md px-2 py-1.5 text-xs text-muted-foreground hover:text-foreground transition-colors"
+              >
+                No
+              </button>
+            </div>
+          )}
+          {task && !confirmStartOver && ["stopped", "failed", "cancelled", "init"].includes(task.status) && (
+            <>
+              <button
+                type="button"
+                onClick={() => start(false)}
+                title={task.status === READY_STATUS ? undefined : "Continue from the saved plan: accepted steps are kept"}
+                className="flex items-center gap-1.5 rounded-md border border-success/50 px-3 py-1.5 text-xs font-medium text-success hover:bg-success/10 transition-colors"
+              >
+                <Play className="h-3.5 w-3.5" />
+                Start
+              </button>
+              {task.status !== READY_STATUS && (
+                <button
+                  type="button"
+                  onClick={() => setConfirmStartOver(true)}
+                  aria-label="Start over"
+                  title="Start over: delete its steps and plan it anew"
+                  className="flex items-center gap-1.5 rounded-md border border-border px-3 py-1.5 text-xs font-medium text-muted-foreground hover:bg-accent hover:text-foreground transition-colors"
+                >
+                  <RotateCcw className="h-3.5 w-3.5" />
+                  <span className="hidden sm:inline">Start over</span>
+                </button>
+              )}
+            </>
           )}
         </div>
         {startError && <p className="mt-1 text-xs text-destructive">{startError}</p>}

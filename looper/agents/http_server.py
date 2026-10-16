@@ -1052,9 +1052,15 @@ class AgentHTTPServer:
             writer.write(_json_response(HTTP_400, {"error": "task_id is required"}))
             await writer.drain()
             return
+        # A stopped, failed or cancelled task goes on from its saved plan; only an explicit start_over plans anew.
+        start_over = data.get("start_over", False)
+        if not isinstance(start_over, bool):
+            writer.write(_json_response(HTTP_400, {"error": "start_over must be true or false"}))
+            await writer.drain()
+            return
 
         from ..db.tasks import get_task
-        from .message import TASK_ROUTER_ADDRESS, MessageEnvelope, MessageType
+        from .message import TASK_ROUTER_ADDRESS, MessageEnvelope, MessageType, RestartMode
 
         task = await get_task(task_id)
         if task is None:
@@ -1072,7 +1078,8 @@ class AgentHTTPServer:
             source=self._web_adapter._address,
             target=TASK_ROUTER_ADDRESS,
             message_type=MessageType.TASK_RESTART,
-            payload={"task_id": task_id},
+            payload={"task_id": task_id,
+                     "mode": (RestartMode.START_OVER if start_over else RestartMode.CONTINUE).value},
         )
         await bus.publish(envelope)
         writer.write(_json_response(HTTP_200, {"started": task_id}))
@@ -1080,14 +1087,14 @@ class AgentHTTPServer:
 
     async def _continue_at_cap(self, task_id: str, body: bytes) -> dict[str, Any]:
         """Raise the cap of a task that failed at it, then restart it from its saved plan."""
-        from .message import TASK_ROUTER_ADDRESS, MessageEnvelope, MessageType
+        from .message import TASK_ROUTER_ADDRESS, MessageEnvelope, MessageType, RestartMode
 
         result = await projects.raise_cap_to_continue(task_id, projects.json_object(body))
         await self._supervisor.bus.publish(MessageEnvelope.create(
             source=self._web_adapter._address,
             target=TASK_ROUTER_ADDRESS,
             message_type=MessageType.TASK_RESTART,
-            payload={"task_id": task_id, "resume": True},
+            payload={"task_id": task_id, "mode": RestartMode.AT_CAP.value},
         ))
         return {**result, "continued": task_id}
 

@@ -46,6 +46,8 @@ class TurnKind(str, Enum):
     DECISION = "DECISION"
     CHAT = "CHAT"
     SUPERVISE = "SUPERVISE"
+    # A task that ended is restarted from its plan: how it goes on, answered in the CHAT shape.
+    RESTART = "RESTART"
     # The extra turn of a completed task whose project distills lessons; its message gives its own shape.
     LESSONS = "LESSONS"
     # The last turn of a session the next agent cannot resume: what it hands over; its message gives its shape.
@@ -578,12 +580,12 @@ def _required_text(data: Mapping[str, Any], key: str) -> str:
 # are parsed by code, so their shape is owned by code too. ``reply_contract`` fills in the retries a step has.
 _REPLY_CONTRACT = """\
 ## Reply contract (required; code parses it)
-Each message you get starts with [PLAN], [DECISION] or [CHAT]. End every reply
-with exactly one ```json fenced block in that message's shape, and nothing
-after it. Use only the keys shown. Text before the block is kept in the run's
-history only. The first message of a new session for a task under way starts
-with a [RESUME] brief on what your earlier session left; the request follows
-it, and you answer the request.
+Each message you get starts with [PLAN], [DECISION], [CHAT] or [RESTART]. End
+every reply with exactly one ```json fenced block in that message's shape, and
+nothing after it. Use only the keys shown. Text before the block is kept in the
+run's history only. The first message of a new session for a task under way
+starts with a [RESUME] brief on what your earlier session left; the request
+follows it, and you answer the request.
 
 [PLAN]: split the task into steps. Each step runs in its own Worker, a fresh
 Claude Code session with full tools in the working directory that sees the
@@ -647,6 +649,15 @@ whether the plan still fits the task as it is now.
   them. "stop" (optional): running steps the change makes wrong; their
   Workers are stopped and the steps dropped. At least one step must be left
   to run.
+
+[RESTART]: the task ended before it was done (it failed, or the user stopped
+or cancelled it) and the user restarted it. It goes on from its plan:
+accepted steps stay done and never run again; the steps that did not finish
+are back to not started, and the journal says how their last attempt ended.
+Reply in the [CHAT] shape. "reply" tells the user how the task goes on;
+action "none" runs the steps not started as they are; "add_steps" and
+"replan" change them first. No step runs yet, so there is no "forward" and
+no "stop".
 
 [SUPERVISE]: a periodic check on the Workers running now (no result arrived).
 The message lists each running step and its recent activity. Review only the
