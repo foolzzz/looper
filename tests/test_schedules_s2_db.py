@@ -350,6 +350,9 @@ def test_the_no_success_alert_goes_out_once_with_one_recovery(monkeypatch: pytes
         sid = (await env.enabled())["schedule_id"]
         ok = await _fire(env, sid)
         await env.end_task(ok["task_id"], "completed")
+        # That run's end is reported (its recoveries, none here) before the clock moves on: otherwise its recovery
+        # check could find the stale alert raised below and end it.
+        await env.scheduler.idle()
         last_ok = await env.pool.fetchval("SELECT last_ok_at FROM schedules WHERE id = $1", sid)
         # Every 5 minutes: due 3 periods after the first fire after the last success.
         first_chance = cron.next_fire(cron.parse("*/5 * * * *"), LA, last_ok)
