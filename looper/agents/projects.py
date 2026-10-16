@@ -10,7 +10,9 @@ Workers, Reviewers), read afresh when each prompt is built. Its execution
 settings (``project_execution``) are top-level fields of the project too,
 ``null`` to inherit. Its agent settings (harness, Agent Profile with its model and
 effort, environment, per-run cap) are layers of their own (``agent_settings``,
-``/api/projects/<id>/agent-settings``).
+``/api/projects/<id>/agent-settings``). A task that has not ended may limit how
+many of its Workers or Reviewers run at once, within its project's limit
+(``set_task_concurrency``).
 """
 
 from __future__ import annotations
@@ -25,6 +27,8 @@ import asyncpg
 
 from ..db import agent_setting_layers as db_layers, connection as db_connection, llm_records as db_llm_records
 from ..db import projects as db_projects, tasks as db_tasks
+from .agent_settings import CONCURRENCY_MAX, TASK_LIMIT_ROLES, AgentType, SettingsError, concurrency, index_layers
+from .agent_settings import task_concurrency_view
 from .bus import MessageBus
 from .message import TASK_ROUTER_ADDRESS, AgentAddress, MessageEnvelope, MessageType, planner_address
 from .project_execution import FIELDS as EXECUTION_FIELDS, ProjectExecution, execution_fields, format_usd
@@ -386,6 +390,46 @@ async def edit_requirement(
             source=source, target=planner_address(task_id), message_type=MessageType.TASK_CHANGE,
             payload={"task_id": task_id}))
     return {"task_id": task_id, "version": version, "requirement": requirement}
+
+
+async def concurrency_view(task: dict[str, Any]) -> dict[str, Any]:
+    """Task ``task``'s concurrency, read now: each task role's (``agent_settings.task_concurrency_view``), the most
+    a limit may be, and whether the task can change its own (it has not ended)."""
+    project_id = task.get("project_id")
+    layers = index_layers(await db_layers.list_layers(project_id, task_id=task["id"]), project_id)
+    return {"roles": task_concurrency_view(layers, project_id), "max": CONCURRENCY_MAX,
+            "editable": task.get("status") in EDITABLE_STATUSES}
+
+
+async def set_task_concurrency(task_id: str, data: dict[str, Any]) -> dict[str, Any]:
+    """Set how many of the task's Workers or Reviewers run at once (``{"worker": 2, "reviewer": null}``; null drops
+    the task's own limit, and its project's applies): 400 for a bad role or value, 404 for an unknown task, 409 for
+    one that has ended. The caller lets waiting runs check again; a lowered limit stops nothing that runs."""
+    roles = [role.value for role in TASK_LIMIT_ROLES]
+    if not data:
+        raise RequestError(HTTP_400, f"give the limit of at least one of {', '.join(roles)}")
+    limits: dict[str, int | None] = {}
+    for role, raw in data.items():
+        if role == AgentType.PLANNER.value:
+            raise RequestError(HTTP_400, "one Planner runs a task, so a task has no Planner limit; how many of a "
+                                         "project's tasks run at once is the project's planner limit")
+        if role not in roles:
+            raise RequestError(HTTP_400, f"unknown role {role!r}; a task limits its {' and '.join(roles)}")
+        try:
+            limits[role] = None if raw is None else concurrency(raw)
+        except SettingsError as exc:
+            raise RequestError(HTTP_400, f"{role}: {exc}") from None
+    task = await db_tasks.get_task(task_id)
+    if task is None:
+        raise RequestError(HTTP_404, "task not found")
+    if task["status"] not in EDITABLE_STATUSES:
+        raise RequestError(HTTP_409, f"the task is {task['status']}: only a task that has not ended can change its "
+                                     "concurrency")
+    try:
+        await db_layers.set_task_concurrency(task_id, limits)
+    except asyncpg.ForeignKeyViolationError:  # deleted meanwhile
+        raise RequestError(HTTP_404, "task not found") from None
+    return {"task_id": task_id, "concurrency": await concurrency_view(task)}
 
 
 async def raise_cap_to_continue(task_id: str, data: dict[str, Any]) -> dict[str, Any]:

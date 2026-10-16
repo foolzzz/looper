@@ -158,6 +158,10 @@ class _Store:
         """The Manager has done nothing to these tasks."""
         return []
 
+    async def list_layers(self, project_id: str | None = None, **_: Any) -> list[dict[str, Any]]:
+        """No agent settings layer is set: every limit is the built-in one."""
+        return []
+
     @asynccontextmanager
     async def transaction(self) -> Any:
         self.transactions += 1
@@ -177,6 +181,7 @@ def store(monkeypatch: pytest.MonkeyPatch) -> _Store:
     from looper.db import agent_setting_layers
 
     monkeypatch.setattr(agent_setting_layers, "profile_overrides", fake.profile_overrides)
+    monkeypatch.setattr(agent_setting_layers, "list_layers", fake.list_layers)
     from looper.db import task_changes
 
     monkeypatch.setattr(task_changes, "requirement_versions", fake.requirement_versions)

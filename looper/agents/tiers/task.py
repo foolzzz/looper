@@ -614,3 +614,15 @@ class TaskRouter:
             await self._on_task_end(task_id, status)
         except Exception:
             logger.exception("the task-end listener failed for task %s", task_id)
+
+
+async def recheck_limits(task_router: TaskRouter, worker_pool: Any) -> None:
+    """After a concurrency limit changed: start the tasks and runs that wait for room a raised limit now gives; a
+    lowered limit stops nothing. A failure is logged: the limit stands, and what waits starts when a task or run
+    ends."""
+    try:
+        await task_router.recheck()
+        if worker_pool is not None:
+            await worker_pool.recheck()
+    except Exception:
+        logger.exception("re-checking the concurrency limits failed")

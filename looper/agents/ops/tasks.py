@@ -22,7 +22,8 @@ from ..agent_settings import TASK_ROLES, AgentSettings, AgentType, Layer, index_
 from ..agent_settings import resolve_concurrency
 from ..message import MANAGER_ADDRESS, TASK_ROUTER_ADDRESS, MessageEnvelope, MessageType, planner_address
 from ..project_execution import LessonsMode, ProjectExecution, ReviewPolicy, TaskBudgetAction, format_usd
-from ..projects import HTTP_404, HTTP_409, TASK_PROFILE_ROLES, RequestError, edit_requirement, project_name
+from ..projects import HTTP_404, HTTP_409, TASK_PROFILE_ROLES, RequestError, concurrency_view, edit_requirement
+from ..projects import project_name
 from ..system_prompt import TASK_REQUIREMENT_LIMIT
 from ..task_notice import notify_target
 from ..tiers.journal import SUPPLEMENTS_MAX_CHARS, clip, kept_text
@@ -100,9 +101,12 @@ async def _overview(call: Call) -> dict[str, Any]:
     view = await build_overview(task_router=platform.task_router, worker_pool=platform.worker_pool,
                                 manager=platform.manager, supervisor=platform.supervisor)
     agents = view["agents"]
+    own = await db_layers.task_concurrency([p["task_id"] for p in agents["planners"]])
     return {
         "tasks": view["tasks"],
-        "running_tasks": [{"task_id": p["task_id"], "name": p["name"], "project": p["project_name"]}
+        # A running task's own Worker or Reviewer limit, when it has one (looper_concurrency).
+        "running_tasks": [{"task_id": p["task_id"], "name": p["name"], "project": p["project_name"],
+                           **({"concurrency": own[p["task_id"]]} if p["task_id"] in own else {})}
                           for p in agents["planners"]],
         "step_runs": [{"task_id": r["task_id"], "role": r["role"], "step": r["step"], "state": r["state"],
                        "elapsed_seconds": r["elapsed_seconds"]} for r in agents["workers"] + agents["reviewers"]],
@@ -165,6 +169,8 @@ async def _task_view(task_id: str) -> dict[str, Any]:
         "latest_progress": progress[-1]["summary"] if progress else None,
         "result": clip(task.get("result_summary") or task.get("error") or "", 1_000) or None,
         "cost_usd": ((await task_costs([task_id])).get(task_id) or {}).get("cost_usd"),
+        # How many of each role run at once for it, with the source; its own Worker and Reviewer limits (task).
+        "concurrency": (await concurrency_view(task))["roles"],
     }
 
 
@@ -471,15 +477,16 @@ _TASK_ID = {"type": "string", "minLength": 1, "description": "The task's id (tas
 TOOLS: tuple[Tool, ...] = (
     Tool(
         name="looper_overview",
-        description="What is happening now: task counts by group, the running tasks and step runs, each active "
-                    "project's load against its limits, today's spend, unhealthy components.",
+        description="What is happening now: task counts by group, the running tasks (with their own concurrency "
+                    "limits) and step runs, each active project's load against its limits, today's spend, unhealthy "
+                    "components.",
         schema={"type": "object", "properties": {}, "additionalProperties": False},
         risk=Risk.READ, run=_overview,
     ),
     Tool(
         name="looper_tasks",
         description="List or search tasks (newest first), or get one task with its steps, supplements, latest "
-                    "progress note, result and cost.",
+                    "progress note, result, cost and concurrency limits.",
         schema={
             "type": "object", "required": ["action"], "additionalProperties": False,
             "properties": {

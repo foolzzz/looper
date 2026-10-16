@@ -837,6 +837,15 @@ END $$;
 ALTER TABLE agent_setting_layers ADD COLUMN IF NOT EXISTS max_concurrency INTEGER
     CONSTRAINT agent_setting_layers_max_concurrency_check CHECK (max_concurrency IS NULL
         OR (max_concurrency BETWEEN 1 AND 64 AND scope IN ('role', 'role_project') AND role <> 'manager'));
+-- A task's own concurrency limit: at most this many of its Workers or Reviewers run at once, within its project's
+-- limit (agent_settings.resolve_task_concurrency). One Planner runs a task, so the Planner has none. With the
+-- task's profile overrides it is the task layer (agent_setting_layers.list_layers).
+CREATE TABLE IF NOT EXISTS task_concurrency_limits (
+    task_id          TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    role             TEXT NOT NULL CHECK (role IN ('worker', 'reviewer')),
+    max_concurrency  INTEGER NOT NULL CHECK (max_concurrency BETWEEN 1 AND 64),
+    PRIMARY KEY (task_id, role)
+);
 
 -- Once (agent teams are on by default for Claude Code profiles): every profile on a Claude Code runtime, the
 -- built-in one and those the migrations above added included, gets them. Only once, so a profile the user turns

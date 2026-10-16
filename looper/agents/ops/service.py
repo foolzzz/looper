@@ -46,6 +46,7 @@ from typing import Any
 
 from ...db import manager_actions as db_actions
 from . import Call, ErrorCode, OpError, Risk, Tool, Turn, check_arguments
+from .concurrency import TOOLS as CONCURRENCY_TOOLS
 from .tasks import TOOLS as TASK_TOOLS
 
 logger = logging.getLogger(__name__)
@@ -103,7 +104,8 @@ class _Pending:
 
 class ManagerOps:
     def __init__(self, platform: Platform, *, url: str, token: str | None = None,
-                 tools: Sequence[Tool] = (*TASK_TOOLS, CONFIRM), clock: Callable[[], float] = time.monotonic) -> None:
+                 tools: Sequence[Tool] = (*TASK_TOOLS, *CONCURRENCY_TOOLS, CONFIRM),
+                 clock: Callable[[], float] = time.monotonic) -> None:
         self._platform = platform
         self._url = url.rstrip("/")
         self._token = token or secrets.token_urlsafe(32)
