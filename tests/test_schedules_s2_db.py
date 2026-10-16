@@ -373,6 +373,64 @@ def test_the_no_success_alert_goes_out_once_with_one_recovery(monkeypatch: pytes
     _run(test, monkeypatch, tmp_path)
 
 
+def test_notify_alerts_sends_the_alerts_and_their_recoveries_and_no_run_message(monkeypatch: pytest.MonkeyPatch,
+                                                                                tmp_path: Path) -> None:
+    async def test(env: _Env) -> None:
+        sender = _setup(env)
+        await _allow_telegram(env)
+        sid = (await env.enabled(gate_command="exit 3", notify="alerts",
+                                 notify_target={"channel": "telegram", "chat": TELEGRAM_CHAT}))["schedule_id"]
+        assert (await env.ok("GET", f"/api/schedules/{sid}"))["schedule"]["notify"] == "alerts"
+
+        async def sent() -> list[tuple[str, str]]:
+            return [(n["kind"], n["status"]) for n in await _outbox(env, sid)]
+
+        for _ in range(3):
+            await _fire(env, sid)
+        assert await sent() == [("failures_alert", "sent")]  # no 「前置检查失败」 message per run
+        await env.ok("PUT", f"/api/schedules/{sid}", {"gate_command": "true"})
+        assert (await _fire(env, sid))["status"] == "skipped_gate"
+        assert await sent() == [("failures_alert", "sent"), ("failures_recovered", "sent")]
+
+        await env.ok("PUT", f"/api/schedules/{sid}", {"gate_command": "echo item"})
+        done = await _fire(env, sid)
+        await env.end_task(done["task_id"], "completed")
+        await env.scheduler.idle()
+        assert len(await sent()) == 2  # a completed run says nothing either
+
+        # No success for 3 periods: the stale alert, then its recovery, still go out.
+        last_ok = await env.pool.fetchval("SELECT last_ok_at FROM schedules WHERE id = $1", sid)
+        later = cron.next_fire(cron.parse("*/5 * * * *"), LA, last_ok) + timedelta(minutes=15)
+        await env.pool.execute("UPDATE schedules SET next_fire_at = $2 WHERE id = $1", sid, later + timedelta(days=1))
+        env.clock.now = later
+        await env.scheduler.tick()
+        await env.scheduler.idle()
+        await env.ok("PUT", f"/api/schedules/{sid}", {"gate_command": "true"})
+        await _fire(env, sid)
+        assert [kind for kind, _ in await sent()][2:] == ["stale_alert", "stale_recovered"]
+        assert len(sender.sent) == 4 and all(status == "sent" for _, status in await sent())
+
+    _run(test, monkeypatch, tmp_path)
+
+
+def test_a_database_from_before_takes_notify_alerts(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    from looper.db import connection
+
+    async def test(env: _Env) -> None:
+        _setup(env)
+        sid = (await env.enabled())["schedule_id"]
+        await env.pool.execute("ALTER TABLE schedules DROP CONSTRAINT schedules_notify_check")
+        await env.pool.execute("ALTER TABLE schedules ADD CONSTRAINT schedules_notify_check "
+                               "CHECK (notify IN ('failures', 'always', 'never'))")
+        await env.pool.execute("DELETE FROM schema_migrations WHERE name = 'schedules_notify_alerts'")
+        await connection.ensure_schema(env.pool)
+        assert (await env.ok("PUT", f"/api/schedules/{sid}", {"notify": "alerts"}))["schedule"]["notify"] == "alerts"
+        status, answer = await env.call("PUT", f"/api/schedules/{sid}", {"notify": "quiet"})
+        assert status == 400 and "notify" in answer["error"]
+
+    _run(test, monkeypatch, tmp_path)
+
+
 # Noon in Los Angeles, where the scheduler's day (``_setup``) starts at midnight: far from a day's end.
 NOON = datetime(2030, 1, 15, 20, 0, tzinfo=timezone.utc)
 MINUTE = timedelta(minutes=1)

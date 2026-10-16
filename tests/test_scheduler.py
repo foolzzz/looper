@@ -154,6 +154,8 @@ def test_a_short_schedule_gets_its_whole_gate_output() -> None:
     ("always", "completed", True), ("always", "stopped", True), ("always", "gate_failed", True),
     ("always", "skipped_gate", False), ("always", "skipped_budget", False), ("always", "skipped_overlap", False),
     ("never", "failed", False), ("never", "completed", False),
+    # Only the alerts and their recoveries: no run has a message of its own.
+    ("alerts", "failed", False), ("alerts", "gate_failed", False), ("alerts", "completed", False),
 ])
 def test_which_runs_get_a_message(notify: str, status: str, sent: bool) -> None:
     from looper.agents.schedule_notify import wants_run_message

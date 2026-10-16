@@ -88,6 +88,7 @@ ROUTINE_SKIPS = ("skipped_gate", "skipped_overlap")
 
 class Notify(str, Enum):
     FAILURES = "failures"  # failed runs, the alerts and their recoveries
+    ALERTS = "alerts"  # the alerts and their recoveries only, no run's own message
     ALWAYS = "always"  # every run that ran something, the alerts and their recoveries
     NEVER = "never"  # nothing is sent; the dashboard still shows the alerts
 

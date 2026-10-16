@@ -3,8 +3,8 @@
 A schedule's ``notify`` decides which runs get a message: ``failures`` (the
 default) the failed ones (``failed``, ``timed_out``, ``gate_failed``),
 ``always`` every run that ran something (a task's outcome, or a failed gate),
-``never`` none. Runs that were skipped never do. Two alerts go out once per
-streak, each with one recovery message:
+``alerts`` and ``never`` none. Runs that were skipped never do. Two alerts go
+out once per streak, each with one recovery message:
 
 - **failures**: ``consecutive_failures`` reaches ``FAILURES_ALERT_AT`` (3);
   it recovers with the next ok run (``db.schedules.OK``): a completed run,
@@ -16,8 +16,8 @@ streak, each with one recovery message:
   scheduler pass while the schedule is enabled and no run of it is in
   progress, it recovers the same way.
 
-Alerts and recoveries follow ``notify`` too, except that ``never`` sends
-none. Every message is recorded in ``schedule_notifications`` (the outbox):
+Alerts and recoveries are sent under every ``notify`` but ``never``, which
+sends none; ``alerts`` sends nothing else. Every message is recorded in ``schedule_notifications`` (the outbox):
 ``sent``, ``failed`` with the reason, or ``dashboard`` when the schedule names
 no chat or ``notify`` is ``never``. The text is code-written: the schedule,
 the run's status, a summary snippet, its cost and the link to the task (``links``).
