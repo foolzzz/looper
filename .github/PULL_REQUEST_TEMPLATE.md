@@ -23,7 +23,6 @@ browser were exercised when the change touches them. -->
 
 ## Checklist
 
-- [ ] Every commit is signed off (`git commit -s`).
 - [ ] No credentials, local paths, raw logs, runtime state or private context in the diff, the description or attachments.
 - [ ] Docs and the plan are updated where behavior or a todo changed.
 - [ ] A change to the first screen of `README.md` or `README.zh-CN.md` was previewed and approved before this commit.

@@ -37,9 +37,6 @@ change needs is described in section 1 of the development plan.
 
 - Work on a branch, keep the pull request to one purpose, and leave unrelated
   formatting and refactors out.
-- Sign off every commit with `git commit -s`. That certifies the
-  [Developer Certificate of Origin](https://developercertificate.org/) for
-  your contribution.
 - Describe the pull request with **Goal**, **Changes** and **Validation**,
   and list any behavior change explicitly. The
   [template](.github/PULL_REQUEST_TEMPLATE.md) has the outline.
