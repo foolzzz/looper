@@ -266,6 +266,52 @@ def test_the_failures_alert_goes_out_once_per_streak_with_one_recovery(monkeypat
     _run(test, monkeypatch, tmp_path)
 
 
+def test_a_gate_that_finds_nothing_ends_the_failure_streak_and_a_skip_that_ran_nothing_does_not(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    """A clean gate with nothing new is an ok run, as for the no-success alert (``last_ok_at``): the streak ends
+    there with its recovery message, not at the next completed task, which for a gated schedule can be hours
+    away. A firing that ran nothing (busy, over budget, missed) says nothing about the schedule's health."""
+    from looper.db import schedules as db_schedules
+
+    async def test(env: _Env) -> None:
+        _setup(env)
+        await _allow_telegram(env)
+        sid = (await env.enabled(gate_command="exit 3",
+                                 notify_target={"channel": "telegram", "chat": TELEGRAM_CHAT}))["schedule_id"]
+
+        async def state() -> tuple[int, bool, list[str]]:
+            schedule = (await env.ok("GET", f"/api/schedules/{sid}"))["schedule"]
+            kinds = [n["kind"] for n in await _outbox(env, sid) if n["kind"].startswith("failures")]
+            return schedule["consecutive_failures"], bool(schedule["alerts"]["failures_since"]), kinds
+
+        for _ in range(3):
+            await _fire(env, sid)
+        assert await state() == (3, True, ["failures_alert"])
+
+        # A firing while the gate runs is skipped as busy: the streak goes on.
+        await env.ok("PUT", f"/api/schedules/{sid}", {"gate_command": "sleep 1; exit 3"})
+        assert (await env.ok("POST", f"/api/schedules/{sid}/run"))["run"]["status"] == "gating"
+        assert (await env.ok("POST", f"/api/schedules/{sid}/run"))["run"]["status"] == "skipped_overlap"
+        assert await state() == (3, True, ["failures_alert"])
+        await env.scheduler.idle()
+        assert await state() == (4, True, ["failures_alert"])
+        for status in db_schedules.NOTHING_RAN:  # nor does a skip for the budget or a missed firing
+            await db_schedules.count_outcome(env.pool, sid, status, env.clock.now)
+        assert await state() == (4, True, ["failures_alert"])
+
+        await env.ok("PUT", f"/api/schedules/{sid}", {"gate_command": "true"})
+        assert (await _fire(env, sid))["status"] == "skipped_gate"
+        assert await state() == (0, False, ["failures_alert", "failures_recovered"])
+        # An ok run, not a success: no task completed.
+        success, ok = await env.pool.fetchrow("SELECT last_success_at, last_ok_at FROM schedules WHERE id = $1", sid)
+        assert success is None and ok is not None
+        assert (await _fire(env, sid))["firings"] == 2  # the next one is counted on it, and recovers nothing more
+        assert await state() == (0, False, ["failures_alert", "failures_recovered"])
+
+    _run(test, monkeypatch, tmp_path)
+
+
 def test_without_a_target_messages_stay_on_the_dashboard(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     async def test(env: _Env) -> None:
         sender = _setup(env)

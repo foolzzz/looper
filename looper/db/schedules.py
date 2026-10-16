@@ -29,6 +29,9 @@ RUNNING = "running"
 OPEN_STATUSES = (QUEUED, GATING, RUNNING)
 # The final statuses that count as a failure.
 FAILURES = ("failed", "timed_out", "gate_failed")
+# The final statuses of a run that went well: its task completed, or its gate found nothing to do. Either ends a
+# failure streak and is the schedule's latest ok run (``last_ok_at``); only a completed one is a success.
+OK = ("completed", "skipped_gate")
 # Runs that ran nothing: they neither carry an unfinished input nor hide one.
 NOTHING_RAN = ("skipped_overlap", "skipped_missed", "skipped_budget")
 # Firings that created no task; one that repeats the schedule's latest run is counted on it (``count_skip``).
@@ -273,9 +276,8 @@ async def latest_runs(schedule_ids: list[str], *, pool: Db | None = None) -> dic
 
 async def finish_run(conn: Db, run_id: str, *, status: str, at: datetime, summary: str | None = None,
                      cost_usd: float | None = None, error: str | None = None) -> bool:
-    """Write a running run's final status, once, and the schedule's counters with it: a completed run clears
-    ``consecutive_failures`` and sets ``last_success_at``, a failed or timed-out one adds a failure. False when
-    the run is not running (it was finished already)."""
+    """Write a running run's final status, once, and the schedule's counters with it (``count_outcome``). False
+    when the run is not running (it was finished already)."""
     schedule_id = await conn.fetchval(
         """
         UPDATE schedule_runs SET status = $2, summary = $3, cost_usd = $4, error = $5, finished_at = $6
@@ -290,16 +292,18 @@ async def finish_run(conn: Db, run_id: str, *, status: str, at: datetime, summar
 
 
 async def count_outcome(conn: Db, schedule_id: str, status: str, at: datetime) -> None:
-    """A run's final ``status`` on the schedule's counters: a completed run clears ``consecutive_failures`` and
-    sets ``last_success_at``; a failure adds one; a completed run or a gate that found nothing sets ``last_ok_at``."""
-    if status == "completed":
-        await conn.execute("UPDATE schedules SET consecutive_failures = 0, last_success_at = $2, last_ok_at = $2 "
-                           "WHERE id = $1", schedule_id, at)
+    """A run's final ``status`` on the schedule's counters: an ok run (``OK``) clears ``consecutive_failures`` and
+    sets ``last_ok_at``, and a completed one ``last_success_at`` too; a failure adds one; anything else (a stopped
+    or cancelled run, a skip that ran nothing) changes neither."""
+    if status in OK:
+        await conn.execute(
+            "UPDATE schedules SET consecutive_failures = 0, last_ok_at = $2, "
+            "last_success_at = CASE WHEN $3 THEN $2 ELSE last_success_at END WHERE id = $1",
+            schedule_id, at, status == "completed",
+        )
     elif status in FAILURES:
         await conn.execute("UPDATE schedules SET consecutive_failures = consecutive_failures + 1 WHERE id = $1",
                            schedule_id)
-    elif status == "skipped_gate":
-        await conn.execute("UPDATE schedules SET last_ok_at = $2 WHERE id = $1", schedule_id, at)
 
 
 async def running_run_of_task(task_id: str, *, pool: Db | None = None) -> dict[str, Any] | None:
