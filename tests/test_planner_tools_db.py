@@ -477,7 +477,7 @@ def test_a_limit_the_planner_raises_starts_the_waiting_runs_at_once(
 
 
 @pytest.mark.parametrize(("arguments", "message"), [
-    ({"scope": "task", "limits": {"planner": 2}}, "one Planner runs a task"),
+    ({"scope": "task", "limits": {"planner": 2, "worker": 1}}, 'call again without "planner" in limits'),
     ({"scope": "task", "limits": {"worker": 0}}, "limits.worker must be from 1 to 64"),
     ({"scope": "project", "limits": {"reviewer": 65}}, "limits.reviewer must be from 1 to 64"),
     ({"scope": "project", "limits": {}}, "give at least one role's limit"),

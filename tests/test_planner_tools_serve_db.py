@@ -77,7 +77,7 @@ if step:
     sys.exit(0)
 
 config = json.load(open(args[args.index("--mcp-config") + 1]))["mcpServers"]["looper"]
-log("planner.jsonl", {"token": config["env"]["LOOPER_AGENT_TOKEN"], "guide": "## Looper's tools" in prompt})
+log("planner.jsonl", {"token": config["env"]["LOOPER_AGENT_TOKEN"], "guide": "## Your tools (Looper's MCP server" in prompt})
 server = subprocess.Popen([config["command"], *config["args"]], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                           env={**os.environ, **config["env"]}, text=True)
 ids = iter(range(1, 10000))

@@ -69,29 +69,33 @@ REASON_MAX_CHARS = 500
 
 # How the Planner uses its tools: after its reply contract, in every Planner's system prompt that has them.
 TOOLS_GUIDE = """\
-## Looper's tools (required reading; they act on this task only)
-Looper gives you three MCP tools. They change settings, never the plan: your
-replies' JSON still decides the steps.
+## Your tools (Looper's MCP server; they act on this task only)
+They change settings, never the plan: your replies' JSON still decides the
+steps.
 - looper_task_profiles: the Agent Profiles this task's project lets you choose
   for its Workers and Reviewers (model, price per million tokens), and what
   each role runs now. The list may be empty; then you cannot choose one, and
   the Workers and Reviewers run what the settings give them.
-- looper_task_profile_set: run the Workers or the Reviewers on one of those
-  profiles, for the rest of the task or (with "step") for one step and each of
-  its retries; profile_id null clears your choice. Use it when the requirement
+- looper_task_profile_set: run the Workers or the Reviewers ("role") on one
+  of those profiles ("profile_id"): without "step" for the rest of the task,
+  with "step" (a step's id in your plan) for that step and each of its
+  retries; profile_id null clears your choice. Use it when the requirement
   or the user asks for it, when a step needs a stronger model (a hard step, or
   one that failed for lack of skill), or a cheaper one for routine steps. It
   applies to the runs that start after the call: call it before the reply that
   dispatches the step (the plan, a retry, a replan); a run already started
-  keeps its own. You never choose the Planner's own profile, and a profile the
-  user chose for this task wins over yours.
+  keeps its own. Before your plan exists only the rest of the task can be
+  chosen; a step not started yet can be chosen in a later turn. You never
+  choose the Planner's own profile, and a profile the user chose for this
+  task wins over yours.
 - looper_concurrency: how many of this task's Workers or Reviewers run at once
   (scope "task", within the project's limits), or the project's own limits
   (scope "project": its tasks, Workers and Reviewers, shared with its other
-  tasks). It applies at once and the user is told. Lower it when steps that
-  run at the same time would get in each other's way (one build, one database,
-  one port) or when the requirement or the user asks; raise it only when
-  independent steps wait for room.
+  tasks; only when the requirement or the user asks for them). It applies at
+  once and the user is told. Lower it when steps that run at the same time
+  would get in each other's way (one build, one database, one port) or when
+  the requirement or the user asks; raise it only when independent steps wait
+  for room.
 Give "reason" with every change: the task page shows it.
 """
 
@@ -392,6 +396,9 @@ def _notice_lines(result: Mapping[str, Any]) -> list[str]:
 
 async def _concurrency(call: PlannerCall) -> dict[str, Any]:
     limits = limits_argument(call)
+    if call.arguments["scope"] == "task" and AgentType.PLANNER in limits:
+        raise OpError(ErrorCode.INVALID, 'scope "task" takes worker and reviewer only (one Planner runs a task): '
+                                         'call again without "planner" in limits')
     task = await _task(call.task_id)
     if call.arguments["scope"] == "project":
         project = await db_projects.get_project(task["project_id"]) if task.get("project_id") else None
@@ -473,9 +480,9 @@ TOOLS: tuple[Tool, ...] = (
     Tool(
         name="looper_concurrency",
         description="Change how many run at once; it applies at once and the user is told. scope task: this task's "
-                    "own worker or reviewer limit, within its project's. scope project: the project's limits "
-                    "(planner: how many of its tasks run at once; worker, reviewer), which its other tasks share. "
-                    "A null limit clears it to what it inherits; lowering one stops nothing that runs.",
+                    "own worker or reviewer limit (no planner), within its project's. scope project: the project's "
+                    "limits (planner: how many of its tasks run at once; worker, reviewer), which its other tasks "
+                    "share. A null limit clears it to what it inherits; lowering one stops nothing that runs.",
         schema={"type": "object", "required": ["scope", "limits"], "additionalProperties": False, "properties": {
             "scope": {"type": "string", "enum": ["task", "project"]},
             "limits": {"type": "object",
