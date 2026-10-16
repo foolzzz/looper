@@ -1578,20 +1578,22 @@ dashboard only). A new schedule is disabled.
   (`on_task_end`, from its teardown and its stop); the scheduler writes the
   run's final status (`completed`, `failed`, `stopped`, `cancelled`), its
   summary (the task's result or error) and cost, once, then starts the
-  schedule's queued run. A completed run clears `consecutive_failures` and
-  sets `last_success_at`; a failed or timed-out one adds a failure; a stopped
-  or cancelled one changes neither. A run past `run_timeout_seconds` (from when
+  schedule's queued run. An ok run (`OK`: a completed run, or a gate that
+  found nothing to do) clears `consecutive_failures` and sets `last_ok_at`,
+  and a completed one `last_success_at`; a failed or timed-out run, or a
+  failed gate, adds a failure; a stopped or cancelled run, and a skip that ran
+  nothing (busy, over budget, missed), changes neither. A run past `run_timeout_seconds` (from when
   it fired) is recorded `timed_out` and its task stopped through the usual
   `TASK_STOP`. Each pass also settles what that report missed: a run whose task
   a server start stopped or that was deleted, and a task created but never
   started (the server stopped in between), which is started a minute later.
-  A completed run, and a gate that found nothing, set `last_ok_at`.
 - **Messages and alerts** (S2, `looper/agents/schedule_notify.py`). Every
   run that ends goes to the notifier, in the background. `notify` `failures`
   sends a message for each failed run (`failed`, `timed_out`, `gate_failed`),
   `always` for each run that ran something, `never` none; skipped runs never
   do. Two alerts go out once per streak, each with one recovery message: 3
-  failures in a row (`failures_alert_at`), recovered by a completed run; and
+  failures in a row (`failures_alert_at`), recovered by the next ok run, so a
+  gate that finds nothing new ends the streak without waiting for a task; and
   no run completed and no gate found nothing to do for 3 periods of the rule,
   at least 15 minutes (`STALE_FLOOR`: three fires of the shortest rule without
   a gate; a gated schedule may fire every minute, where 3 periods are noise)
