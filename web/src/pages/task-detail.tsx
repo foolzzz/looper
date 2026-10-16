@@ -75,8 +75,11 @@ function stepStatusIcon(status: string) {
     case "running":
       return <Loader2 className="h-4 w-4 animate-spin text-primary" />;
     case "verified":
-    case "completed":
       return <CheckCircle2 className="h-4 w-4 text-success" />;
+    case "completed":
+      return <Clock className="h-4 w-4 text-primary" />;
+    case "deciding":
+      return <Clock className="h-4 w-4 text-warning" />;
     case "failed":
       return <AlertCircle className="h-4 w-4 text-destructive" />;
     default:
@@ -93,7 +96,10 @@ function stepStatusBadge(status: string) {
     case "verified":
       return <Badge variant="success">Verified</Badge>;
     case "completed":
-      return <Badge variant="success">Completed</Badge>;
+      // The Worker finished; the step is done only once it is accepted (verified).
+      return <Badge variant="default">In review</Badge>;
+    case "deciding":
+      return <Badge variant="warning">Awaiting decision</Badge>;
     case "failed":
       return <Badge variant="destructive">Failed</Badge>;
     case "skipped":
@@ -583,8 +589,11 @@ function OverviewTab({
   onAgents: (agents: TaskAgents) => void;
 }) {
   const steps = task.steps || [];
-  const done = steps.filter((s) => s.status === "completed").length;
-  const total = steps.length;
+  // Done means accepted (verified); a step in review is not done yet, and a dropped (skipped) one is not counted.
+  const planned = steps.filter((s) => s.status !== "skipped");
+  const done = planned.filter((s) => s.status === "verified").length;
+  const inReview = planned.filter((s) => s.status === "completed").length;
+  const dropped = steps.length - planned.length;
   const isActive = isActiveTask(task);
 
   return (
@@ -621,8 +630,13 @@ function OverviewTab({
         <div className="rounded-lg border border-border bg-card p-4">
           <p className="text-xs text-muted-foreground">Steps</p>
           <p className="mt-1 text-sm font-medium">
-            {total > 0 ? `${done}/${total}` : "No steps yet"}
+            {steps.length > 0 ? `${done}/${planned.length} done` : "No steps yet"}
           </p>
+          {(inReview > 0 || dropped > 0) && (
+            <p className="mt-0.5 text-xs text-muted-foreground">
+              {[inReview > 0 && `${inReview} in review`, dropped > 0 && `${dropped} skipped`].filter(Boolean).join(" · ")}
+            </p>
+          )}
         </div>
         <div className="rounded-lg border border-border bg-card p-4">
           <p className="text-xs text-muted-foreground">Cost</p>

@@ -111,7 +111,7 @@ function ErrorLine({ id, error }: { id: string; error: string }) {
   ) : null;
 }
 
-/** The role's Agent Profile: what runs it and where that comes from; a task that has not ended chooses its own. */
+/** The role's Agent Profile: what runs it and where that comes from; a task that has not completed chooses its own. */
 function ProfileField({
   taskId,
   role,
@@ -196,7 +196,7 @@ function ProfileField({
   );
 }
 
-/** A Worker's or Reviewer's limit in the task: what applies and why; a task that has not ended sets its own. */
+/** A Worker's or Reviewer's limit in the task: what applies and why; a task that has not completed sets its own. */
 function LimitField({
   taskId,
   role,
@@ -277,8 +277,9 @@ function LimitField({
 
 /**
  * The task's agents, one row per role: the Agent Profile that runs it and how many run at once, each with where it
- * comes from. A task that has not ended chooses its own profile per role and its own Worker and Reviewer limits,
- * within the project's; the Planner's limit (how many of the project's tasks run at once) is the project's.
+ * comes from. A task that has not completed (a restart runs a failed, stopped or cancelled one with them) chooses its
+ * own profile per role and its own Worker and Reviewer limits, within the project's; the Planner's limit (how many
+ * of the project's tasks run at once) is the project's.
  */
 export function TaskAgentsSection({
   taskId,
@@ -341,7 +342,7 @@ export function TaskAgentsSection({
         <p id={hintId} className="px-4 py-3 text-[11px] text-muted-foreground">
           {editable
             ? `A chosen ${AGENT_PROFILE.name} runs that role for this task only. Limits: 1–${agents.concurrency_max}. Within the project's limit; lowering it stops nothing already running.`
-            : `The task has ended: its ${AGENT_PROFILE.plural} and limits are shown, not changed.`}
+            : `The task has completed: its ${AGENT_PROFILE.plural} and limits are shown, not changed.`}
         </p>
       </div>
     </section>

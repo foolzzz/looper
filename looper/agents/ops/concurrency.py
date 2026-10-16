@@ -151,7 +151,8 @@ TOOLS: tuple[Tool, ...] = (
         description="Change how many run at once; a null limit clears it to what it inherits. With project: that "
                     "project's limits (planner: how many of its tasks run at once; worker, reviewer: how many of its "
                     "Workers, Reviewers), and the user confirms first. With task_id: that task's own worker or "
-                    "reviewer limit, within its project's; it applies at once. Lowering a limit stops nothing that "
+                    "reviewer limit, within its project's, in any task but a completed one (a stopped, failed or "
+                    "cancelled task's restart runs with it); it applies at once. Lowering a limit stops nothing that "
                     "runs. looper_tasks get and looper_overview show the limits now.",
         schema={
             "type": "object", "required": ["limits"], "additionalProperties": False,

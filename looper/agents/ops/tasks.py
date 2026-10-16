@@ -39,7 +39,7 @@ TASKS_SEARCHED = 200
 PROJECTS_OFFERED = 10
 # The statuses a task can be run again from: "restart" goes on from its saved plan, as Start on the Tasks page does;
 # "start_over" plans it anew.
-RESTARTABLE = ("stopped", "failed", "cancelled")
+RESTARTABLE = db_tasks.RESTARTABLE_STATUSES
 
 # Where a setting in a task's configuration came from (``agent_settings.Layer``), named as the dashboard names it.
 SOURCE_WORDS = {
@@ -430,9 +430,10 @@ async def _update(call: Call) -> dict[str, Any]:
     if requirement is None and work_dir is None and not arguments.get("profiles"):
         raise OpError(ErrorCode.INVALID, "give at least one of requirement, work_dir and profiles")
     task = await _task(task_id)
-    if _ended(task):
-        raise OpError(ErrorCode.CONFLICT, f"task {task_id} is {task['status']}: an ended task does not change "
-                                          "(restart it to run its requirement again)")
+    if _ended(task) and (requirement is not None or work_dir is not None):
+        # Its profiles still change (set_task_agents says which tasks can), so that a restart runs with them.
+        raise OpError(ErrorCode.CONFLICT, f"task {task_id} is {task['status']}: an ended task's requirement and "
+                                          "directory do not change (restart it to run its requirement again)")
     if work_dir is not None:
         if task["status"] != db_tasks.READY:
             raise OpError(ErrorCode.CONFLICT, f"task {task_id} has started: only a task not started can change its "
@@ -559,9 +560,10 @@ TOOLS: tuple[Tool, ...] = (
     ),
     Tool(
         name="looper_task_update",
-        description="Change a task that has not ended: its requirement (kept as a new version; a running task's "
-                    "Planner gets the edit in a turn), its directory (a task not started only), or the Agent "
-                    "Profile of some of its roles (a Worker or Reviewer from its next step on).",
+        description="Change a task: its requirement while it has not ended (kept as a new version; a running "
+                    "task's Planner gets the edit in a turn), its directory (a task not started only), or the Agent "
+                    "Profile of some of its roles in any task but a completed one (a Worker or Reviewer from its "
+                    "next step on; a stopped, failed or cancelled task's restart runs with it).",
         schema={
             "type": "object", "required": ["task_id"], "additionalProperties": False,
             "properties": {

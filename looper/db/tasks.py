@@ -57,6 +57,11 @@ PLANNER_END_STATUSES = frozenset({"completed", "failed"})
 ACTIVE_STATUSES = tuple(status for status, group in STATUS_GROUPS.items()
                         if group in (TaskGroup.IN_PROGRESS, TaskGroup.QUEUED))
 
+# A task in one of these ended without completing (failed, stopped or cancelled): a restart runs it again, from its
+# saved plan or planned anew.
+RESTARTABLE_STATUSES = tuple(status for status, group in STATUS_GROUPS.items()
+                             if group in (TaskGroup.ATTENTION, TaskGroup.CANCELLED))
+
 
 def task_group(status: str | None) -> TaskGroup:
     return STATUS_GROUPS.get(status or "", TaskGroup.OTHER)
