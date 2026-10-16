@@ -39,6 +39,7 @@ from .channels.telegram import TelegramChannelAdapter
 from .channels.web import WebChannelAdapter
 from . import self_check
 from .http_server import AgentHTTPServer
+from .log_redaction import log_to_stderr
 from .scheduler import Scheduler
 from .supervisor import AgentSupervisor
 from .tiers.manager import ManagerAgent, ManagerConfig
@@ -776,6 +777,15 @@ async def _run_agent_system(
     logger.info("agent system stopped")
 
 
+def _configure_logging(verbose: bool) -> None:
+    """Log to stderr with secrets masked (``log_redaction``). httpx and httpcore log every request URL, and a
+    Telegram one holds the bot token: they log only from WARNING unless ``verbose``."""
+    log_to_stderr(logging.DEBUG if verbose else logging.INFO, "%(asctime)s %(name)s %(levelname)s %(message)s")
+    if not verbose:
+        for name in ("httpx", "httpcore"):
+            logging.getLogger(name).setLevel(logging.WARNING)
+
+
 def serve_agent(
     *,
     host: str = "127.0.0.1",
@@ -787,10 +797,7 @@ def serve_agent(
     skip_backup: bool = False,
 ) -> None:
     """Synchronous entry point for the agent system."""
-    logging.basicConfig(
-        level=logging.DEBUG if verbose else logging.INFO,
-        format="%(asctime)s %(name)s %(levelname)s %(message)s",
-    )
+    _configure_logging(verbose)
 
     resolved_root = runtime_root or Path.cwd()
     settled = settle_runtime_root(resolved_root)  # ~/.loopx from before the rename becomes ~/.looper

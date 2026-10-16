@@ -22,6 +22,7 @@ from typing import Any
 
 from ... import env
 from ..bus import MessageBus
+from ..log_redaction import add_secret, redact
 from ..message import (
     MANAGER_ADDRESS,
     AgentAddress,
@@ -113,6 +114,7 @@ class TelegramChannelAdapter(ChannelAdapter):
         self._bus = bus
         self._running = True
 
+        add_secret(self._bot_token)  # python-telegram-bot puts it in every request URL and in the Bot's repr
         self._app = (
             Application.builder()
             .token(self._bot_token)
@@ -168,7 +170,7 @@ class TelegramChannelAdapter(ChannelAdapter):
             return DeliveryReceipt(channel="telegram", success=True, external_id=str(msg.message_id))
         except Exception as exc:
             logger.warning("telegram notification to %s failed: %s", chat, exc)
-            return DeliveryReceipt(channel="telegram", success=False, error=str(exc))
+            return DeliveryReceipt(channel="telegram", success=False, error=redact(str(exc)))
 
     async def deliver(self, envelope: MessageEnvelope) -> DeliveryReceipt:
         """Show a phase on the message's status line, send task progress or a task's end notice as a message of
@@ -250,7 +252,7 @@ class TelegramChannelAdapter(ChannelAdapter):
             except Exception as inner:
                 logger.warning("telegram delivery failed: %s", inner)
                 return DeliveryReceipt(
-                    channel="telegram", success=False, error=str(inner)
+                    channel="telegram", success=False, error=redact(str(inner))
                 )
 
     def healthcheck(self) -> dict[str, Any]:
