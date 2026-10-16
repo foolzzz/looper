@@ -11,7 +11,7 @@ checked in this order, and the first check that holds is its evidence (``Evidenc
 3. ``committed``: a commit made during the run, on any branch, tag or remote-tracking branch (``git log
    --all``), added or modified the changed file, or deleted the deleted one. A path is the repository path at
    the same place, and an absolute changed path in no worktree of the repository (its worktree was removed)
-   is matched by its last components.
+   is matched by its last two or more components, never by its file name alone.
 
 A file none of these accounts for is ``missing``: the step fails, and the failure says where the check looked.
 Git is asked only when the disk does not account for every file: at most four commands, each with
@@ -150,7 +150,8 @@ def _commit_names(prefix: str, path: str, gone: bool, roots: Sequence[Path]) -> 
     if gone:  # still present where reported, so not in a removed worktree
         return set()
     parts = resolved.parts[1:]
-    return {"/".join(parts[i:]) for i in range(len(parts))}
+    # At least a directory and the file: a file name alone would match any file of that name the run committed.
+    return {"/".join(parts[i:]) for i in range(len(parts) - 1)}
 
 
 def _worktrees(work_dir: Path, toplevel: Path) -> tuple[list[_Worktree], str]:
