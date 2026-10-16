@@ -585,10 +585,13 @@ answer to an edit on the task page goes.
     `since`, less 60 s) on any branch, tag or remote-tracking branch, that
     added or modified the changed file or deleted the deleted one (an absolute
     path in no worktree of the repository, its worktree removed, matches by
-    its last components). Git is asked only when the disk does not account
-    for every file: at most four read-only commands of 10 s each, over at most
-    64 worktrees and the latest 500 commits. A work directory outside git is
-    checked on disk only. The failure lists the files and where the check
+    its last two or more components, never by its file name alone). Git is
+    asked only when the disk does not account for every file: at most four
+    read-only commands of 10 s each, over at most 64 worktrees and the latest
+    500 commits. A work directory outside git is checked on disk only. In a
+    shared work directory, a commit made during the run by a step running in
+    parallel counts as evidence too: the check catches misreports; it does
+    not attribute work. The failure lists the files and where the check
     looked; files found outside the work directory are listed in the result's
     `found_elsewhere` and in the task's activity. In a project with step
     workspaces the work directory is the step's worktree.
