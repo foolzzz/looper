@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import AsyncMock
 
 import asyncpg
 import pytest
@@ -189,6 +190,10 @@ def store(monkeypatch: pytest.MonkeyPatch) -> _Store:
     from looper.db import manager_actions
 
     monkeypatch.setattr(manager_actions, "for_task", fake.manager_actions)
+    from looper.db import task_roles
+
+    monkeypatch.setattr(task_roles, "versions", AsyncMock(return_value=[]))
+    monkeypatch.setattr(db_llm_records, "role_runs", AsyncMock(return_value=[]))
     return fake
 
 
@@ -230,7 +235,7 @@ class TestProjectEndpoints:
         assert set(body) == {"project_id", "name", "description", "work_dir", "background", "created_at",
                              "updated_at", "task_count", "active_count", "schedule_count", "task_budget_usd", "task_budget_action",
                              "supervise_interval_seconds", "review_policy", "distill_lessons", "step_workspaces",
-                             "max_step_retries"}
+                             "max_step_retries", "planner_roles", "role_text_max_chars"}
 
     def test_work_dir_is_optional(self, store: _Store) -> None:
         status, body = _call("POST", "/api/projects", {"name": "notes"})

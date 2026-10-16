@@ -301,7 +301,8 @@ def test_execution_settings_are_stored_through_the_task_and_cleared() -> None:
 
     async def _test(pool: Any) -> None:
         settings = execution_fields({"task_budget_usd": 2, "task_budget_action": "wrap_up", "supervise_interval_seconds": 0,
-                                     "review_policy": "all", "distill_lessons": "draft"})
+                                     "review_policy": "all", "distill_lessons": "draft", "planner_roles": "on",
+                                     "role_text_max_chars": 600})
         calc = await projects.create_project(name="calc", execution=settings, pool=pool)
         await tasks.create_task(task_id="task-1", requirement="r", work_dir="/w", project_id=calc["id"], pool=pool)
         assert ProjectExecution.from_row(await projects.get_task_project("task-1", pool=pool)).view() == {
