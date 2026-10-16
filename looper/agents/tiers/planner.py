@@ -186,6 +186,11 @@ user's messages about it.
 - Accept a step only when its result meets the acceptance criteria. Retry with
   specific feedback when a Worker can fix what is wrong; replan when the
   approach must change; fail when the task cannot be done.
+- A replan builds on what is done: the accepted steps stay, and new steps
+  depend on the ones whose results they need instead of doing their work
+  again. It replaces only work that is not done: the steps not started, a
+  step whose result cannot be accepted and, when the task changes, the
+  running steps the change makes wrong.
 """
 
 T = TypeVar("T")

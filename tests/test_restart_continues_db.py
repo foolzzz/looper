@@ -109,7 +109,7 @@ if step:
         report = {"status": "failed", "changed_files": {}, "deleted_files": [], "summary": "c cannot parse the input"}
     answer("fake-worker", "Done.\n" + json.dumps(report))
 else:
-    log("planner_argv.jsonl", {"argv": args})
+    log("planner_argv.jsonl", {"argv": args, "prompt": prompt})
     for line in sys.stdin:
         if not line.strip():
             continue
@@ -314,6 +314,19 @@ def test_a_failed_tasks_new_worker_profile_and_limit_run_its_restart(restarted: 
     rerun = sorted(runs[3:], key=lambda r: r["start"])
     assert all(later["start"] >= earlier["end"] for earlier, later in zip(rerun, rerun[1:])), rerun
     assert "Worker waits for room in this task (1 running, limit 1)" in restarted["activity"]["agents"]
+
+
+def test_the_planners_prompt_says_once_that_a_replan_builds_on_what_is_done(restarted: dict[str, Any]) -> None:
+    # Every Planner session (its DECISION, CHAT and RESTART turns and their replans) has the rule from the
+    # recommended role prompt a new database seeds, and the reply contract does not repeat it.
+    state = restarted["state"]
+    prompts = [" ".join(row["prompt"].split()) for variant in VARIANTS
+               for row in _log(state, "planner_argv.jsonl", variant)]
+    assert len(prompts) >= len(VARIANTS)
+    for prompt in prompts:
+        assert prompt.count("A replan builds on what is done") == 1
+        # The DECISION and the CHAT replan alike.
+        assert prompt.count("started steps cannot change, and the new steps may depend on them") == 2
 
 
 def test_a_stopped_task_runs_its_running_step_again_and_not_its_accepted_one(restarted: dict[str, Any]) -> None:

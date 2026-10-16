@@ -614,9 +614,10 @@ result. The message lists the decisions allowed now.
 - retry: the step runs again in a new Worker; add "feedback" (required): what
   to fix. At most {max_retries} retries per step.
 - replan: "steps" (the PLAN step shape) replaces every step that has not
-  started; started steps cannot change. The current step counts as done when
-  its result can be accepted, and is dropped otherwise. "steps" may be empty
-  only when the current step can be accepted.
+  started; started steps cannot change, and the new steps may depend on them.
+  The current step counts as done when its result can be accepted, and is
+  dropped otherwise. "steps" may be empty only when the current step can be
+  accepted.
 - fail: the task cannot be done; "reason" (required) says why.
 "reason" is optional for the other decisions.
 - progress (in every DECISION and SUPERVISE reply): where the task stands, for
