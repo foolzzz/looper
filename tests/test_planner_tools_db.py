@@ -188,6 +188,9 @@ def test_the_projects_list_is_set_whole_by_id_or_name_and_read_back(monkeypatch:
             ("agent-haiku", ["worker", "reviewer"]), ("agent-sonnet", ["worker", "reviewer"])]
         assert set(answer["profiles"][0]) == {"profile_id", "name", "runtime", "model", "effort", "roles",
                                               "usd_per_million_tokens"}
+        # Claude Code's own login runs an alias as Anthropic's model, at its price.
+        assert [p["usd_per_million_tokens"] for p in answer["profiles"]] == [
+            {"input": 1.0, "output": 5.0}, {"input": 2.0, "output": 10.0}]
         assert await _call("GET", path) == (200, answer)
 
         # A bad list changes nothing.

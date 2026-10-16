@@ -292,6 +292,7 @@ async def _profiles(call: PlannerCall) -> dict[str, Any]:
         "note": ("runs.source: task is the user's choice for this task, which yours cannot change; planner_task "
                  "(yours for the rest of the task) and planner_step (yours for one step) are yours; the others "
                  "are the settings. A step's choice wins over the rest of the task's.")
+                + " A price of null means Looper does not know it, not that it is free."
                 + ("" if allowed else " The project lets you choose no profile: its list is empty."),
     }
 

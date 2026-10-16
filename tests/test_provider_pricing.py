@@ -46,6 +46,24 @@ def test_a_catalog_price_wins_and_an_unknown_one_comes_from_the_builtin_table() 
     assert model_price(_provider(), "claude-haiku-4-5-20251001") == model_price(_provider(), "claude-haiku-4-5")
 
 
+@pytest.mark.parametrize(("auth", "model", "priced_as"), [
+    # With Claude Code's own login, an alias is the model it runs (its runs report claude-opus-5-5 for opus).
+    (AuthKind.OAUTH, "opus", "claude-opus-5-5"),
+    (AuthKind.OAUTH, "sonnet[1m]", "claude-sonnet-5-5"),
+    (AuthKind.OAUTH, "haiku", "claude-haiku-4-5"),
+    # With another provider, its environment may map an alias to a model of its own: unpriced.
+    (AuthKind.API_KEY, "sonnet", None),
+])
+def test_a_claude_code_alias_is_priced_as_its_model_only_with_claude_codes_own_login(
+    auth: AuthKind, model: str, priced_as: str | None,
+) -> None:
+    provider = ProviderSpec("prov-c", "c", auth, frozenset({ApiProtocol.ANTHROPIC_MESSAGES}),
+                            oauth_runtime_type="claude-code" if auth is AuthKind.OAUTH else None)
+    price = model_price(provider, model)
+    assert price == (model_price(provider, priced_as) if priced_as else model_price(_provider(), "no-such-model"))
+    assert price.complete is (priced_as is not None)
+
+
 @pytest.mark.parametrize("usage", [
     Usage(input_tokens=10, output_tokens=5),
     Usage(input_tokens=10, cache_read_tokens=3),  # a kind the model has no price for

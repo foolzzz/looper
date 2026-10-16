@@ -926,7 +926,12 @@ registry, its checks and its API are `looper/agents/profile_registry.py`.
   exported), and a run whose API-key provider has none fails with the reason.
   A catalog price left `null` comes from the built-in price table
   (`runtimes.pricing.BUILTIN_PRICES`: Claude, GPT, GLM, DeepSeek and Kimi
-  models at the vendors' USD list prices, with the date and sources).
+  models at the vendors' USD list prices, with the date and sources). With
+  Claude Code's own login, a model named by Claude Code's alias (`opus`,
+  `sonnet[1m]`, `haiku`) is priced as the model it runs
+  (`CLAUDE_CODE_ALIASES`, as its runs report it); with another provider an
+  alias stays unpriced, since the provider's environment may map it to a
+  model of its own.
   Presets (`provider_presets.py`: GLM on BigModel and on Z.ai, DeepSeek, Kimi
   on Moonshot China and international, and the local CLIProxyAPI) fill a new
   provider from one of a vendor's APIs (Anthropic-format for Claude Code, or
