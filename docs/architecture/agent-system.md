@@ -1302,9 +1302,9 @@ project run at once is the project's planner limit. `PUT
 /api/tasks/:id/agents` sets it (`{"concurrency": {"worker": 2, "reviewer":
 null}}`, null drops the task's own), and the WorkerPool checks again after
 each write that sets one, the same as for a layer; the task page, the
-Manager's `looper_concurrency` and the task's Planner's own
-`looper_concurrency` use it. The Planner may also set its project's limits, at
-once ([A task's Planner's tools](#a-tasks-planners-tools)).
+Manager's `looper_concurrency` and the task's Planner's
+`looper_task_concurrency` use it. The Planner may also set its project's
+limits, at once (`looper_project_concurrency`, [A task's Planner's tools](#a-tasks-planners-tools)).
 
 ### Project knowledge: documents read on demand
 
@@ -2010,7 +2010,7 @@ not one of these tools yet.
 
 ### A task's Planner's tools
 
-Each task's Planner has three MCP tools of its own, which act on its task
+Each task's Planner has four MCP tools of its own, which act on its task
 only (`looper/agents/ops/planner.py`, [Manager tools RFC](rfcs/manager-platform-tools-v0.zh-CN.md)
 section 8.3, decisions 9 and 10).
 
@@ -2020,7 +2020,8 @@ section 8.3, decisions 9 and 10).
   `looper mcp-server` with `LOOPER_AGENT_URL` and that token, on all three
   runtimes the same way. The token stops working when that Planner stops (its
   task ended, or a new Planner of the task replaced it) and once its task has
-  ended; the endpoint answers 401 then. The same `/api/agent/v1/` endpoint
+  ended; the endpoint answers 401 then, and the Planner removes the MCP
+  configuration files that carried it. The same `/api/agent/v1/` endpoint
   serves it: a `planner.` token lists and calls the Planner's tools only. A
   call naming another task, a Manager tool called with a Planner's token, or a
   Planner tool with the Manager's, is `forbidden`.
@@ -2036,7 +2037,17 @@ section 8.3, decisions 9 and 10).
 |---|---|---|
 | `looper_task_profiles` | The profiles its project allows (id, name, runtime, model, effort, which of the Worker and Reviewer each can run, the input and output price per million tokens, `null` where Looper does not know it), what the Workers and the Reviewers run now with its source, the user's choice for the task, and the Planner's own choices, per step too | read |
 | `looper_task_profile_set` | `{role: worker \| reviewer, profile_id: id or name \| null, step?, reason?}`: run that role on a profile from the project's list, for the rest of the task or for one step that has not ended (each attempt of it); `null` clears its choice. Refused with an empty list or a profile not on it (`forbidden`), when the user chose that role's profile for the task (`forbidden`: theirs stands), for the Planner role, an ended or unknown step, or a profile that cannot run the role, with the reason the dashboard gives (`invalid`). Each change is a `profile_choice` journal entry and an activity line | write |
-| `looper_concurrency` | `{scope: task \| project, limits, reason?}`: the task's own Worker and Reviewer limits (as `PUT /api/tasks/:id/agents` sets them), or its project's planner, worker and reviewer limits (as the project's Agent Profiles tab sets them), through the Manager's code, at once; then the TaskRouter and the WorkerPool check again. Each change is a `concurrency_change` journal entry (each role's limit before and after, and why), and a task asked for in Telegram or Lark tells that chat (`CHAT_NOTICE`, to its `NotifyTarget`); a task from the web chat is only journaled | write |
+| `looper_task_concurrency` | `{limits: {worker?, reviewer?}, reason?}`: the task's own Worker and Reviewer limits, as `PUT /api/tasks/:id/agents` sets them | write |
+| `looper_project_concurrency` | `{limits: {planner?, worker?, reviewer?}, reason?}`: its project's limits, as the project's Agent Profiles tab sets them; the guide keeps it to when the requirement or the user asks | write |
+
+Both concurrency tools go through the Manager's code (`set_task_limits`,
+`set_project_limits`) and apply at once; then the TaskRouter and the WorkerPool
+check again. Each change is a `concurrency_change` journal entry (each role's
+limit before and after, and why), and a task asked for in Telegram or Lark
+tells that chat (`CHAT_NOTICE`, to its `NotifyTarget`); a task from the web
+chat is only journaled. They are two tools, not one with a scope, so each
+lists only the roles it takes: a model that fills every listed role cannot
+send a task a planner limit.
 
 A Worker's or Reviewer's run reads the Planner's choice when it starts
 (`load_agent_settings(..., step_id=...)`): a call that returns before the
