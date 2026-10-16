@@ -285,28 +285,13 @@ async def create_task(data: dict[str, Any]) -> dict[str, Any]:
 
 
 async def _profile_overrides(raw: Any) -> dict[str, str]:
-    """A new task's choice of Agent Profile per role (``{"planner"|"worker"|"reviewer": profile_id}``), each
-    registered and able to run its role; an empty or null entry chooses nothing."""
-    from .profile_registry import RegistryError, check_selection
-
-    if raw is None:
-        return {}
-    if not isinstance(raw, dict):
-        raise RequestError(HTTP_400, 'profile_overrides must be an object: {"planner" | "worker" | "reviewer": '
-                                     'profile_id}')
-    profiles: dict[str, str] = {}
-    for role, profile_id in raw.items():
-        if role not in TASK_PROFILE_ROLES:
-            raise RequestError(HTTP_400, f"a task chooses the Agent Profile of its {', '.join(TASK_PROFILE_ROLES)} "
-                                         f"only, not {role!r}")
-        if profile_id in (None, ""):
-            continue
-        try:
-            await check_selection(profile_id, [role])
-        except RegistryError as exc:
-            raise RequestError(HTTP_400, f"{role}: {exc}") from None
-        profiles[role] = profile_id
-    return profiles
+    """``profile_overrides``, a new task's (or a schedule's) choice of Agent Profile per role, checked as
+    ``profile_choices`` checks a task's choice (by id or name), as role -> profile id; an empty or null entry
+    chooses nothing."""
+    if isinstance(raw, dict):
+        raw = {role: None if profile == "" else profile for role, profile in raw.items()}
+    chosen = await profile_choices(raw, clearing=True, field="profile_overrides")
+    return {role: profile_id for role, profile_id in chosen.items() if profile_id is not None}
 
 
 async def move_task(task_id: str, data: dict[str, Any], task_router: TaskRouter) -> dict[str, Any]:
@@ -413,40 +398,41 @@ async def agents_view(task: dict[str, Any]) -> dict[str, Any]:
             "editable": task.get("status") in AGENTS_EDITABLE_STATUSES}
 
 
-async def profile_choices(raw: Any, *, clearing: bool) -> dict[str, str | None]:
-    """``profiles``, a task's choice of Agent Profile per role (by id or name), as role -> profile id (None: drop the
-    task's choice, only when ``clearing``); each one registered and able to run its role. 400 otherwise."""
+async def profile_choices(raw: Any, *, clearing: bool, field: str = "profiles") -> dict[str, str | None]:
+    """``profiles`` (the request's ``field``), a task's choice of Agent Profile per role (by id or name), as role ->
+    profile id (None: drop the task's choice, only when ``clearing``); each one registered and able to run its role.
+    400 otherwise."""
     from ..db import profile_registry as db_profiles
     from .profile_registry import RegistryError, check_selection
 
     if not raw:
         return {}
     if not isinstance(raw, dict):
-        raise RequestError(HTTP_400, 'profiles must be an object: {"planner" | "worker" | "reviewer": profile}')
+        raise RequestError(HTTP_400, f'{field} must be an object: {{"planner" | "worker" | "reviewer": profile}}')
     registered: list[dict[str, Any]] | None = None
     chosen: dict[str, str | None] = {}
     for role, wanted in raw.items():
         if role not in TASK_PROFILE_ROLES:
-            raise RequestError(HTTP_400, f"profiles: a task chooses the Agent Profile of its "
+            raise RequestError(HTTP_400, f"{field}: a task chooses the Agent Profile of its "
                                          f"{', '.join(TASK_PROFILE_ROLES)} only, not {role!r}")
         if wanted is None:
             if not clearing:
-                raise RequestError(HTTP_400, f"profiles.{role}: give an Agent Profile, or leave the role out")
+                raise RequestError(HTTP_400, f"{field}.{role}: give an Agent Profile, or leave the role out")
             chosen[role] = None
             continue
         if not isinstance(wanted, str):
-            raise RequestError(HTTP_400, f"profiles.{role}: give an Agent Profile's id or name, or null")
+            raise RequestError(HTTP_400, f"{field}.{role}: give an Agent Profile's id or name, or null")
         if registered is None:
             registered = await db_profiles.list_profiles()
         match = next((p for p in registered if p["id"] == wanted), None) or next(
             (p for p in registered if str(p["name"]).casefold() == wanted.strip().casefold()), None)
         if match is None:
             names = ", ".join(str(p["name"]) for p in registered[:20])
-            raise RequestError(HTTP_400, f"profiles.{role}: no Agent Profile {wanted!r}; registered: {names}")
+            raise RequestError(HTTP_400, f"{field}.{role}: no Agent Profile {wanted!r}; registered: {names}")
         try:
             await check_selection(match["id"], [role])
         except RegistryError as exc:
-            raise RequestError(HTTP_400, f"profiles.{role}: {exc}") from None
+            raise RequestError(HTTP_400, f"{field}.{role}: {exc}") from None
         chosen[role] = match["id"]
     return chosen
 

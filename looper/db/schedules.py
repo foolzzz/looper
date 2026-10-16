@@ -408,6 +408,15 @@ async def set_alert(conn: Db, schedule_id: str, column: str, at: datetime | None
                               schedule_id, at) == "UPDATE 1"
 
 
+async def start_stale_alert(conn: Db, schedule_id: str, at: datetime, *, last_ok_at: datetime | None) -> bool:
+    """Start the stale alert, once, while the schedule's latest ok run is still ``last_ok_at``, the one its deadline
+    was found from: False when it already started, or when a run went well since (a long run that succeeded after
+    the pass read the schedule), which leaves it not stale."""
+    return await conn.execute(
+        "UPDATE schedules SET stale_alert_at = $2 WHERE id = $1 AND stale_alert_at IS NULL "
+        "AND last_ok_at IS NOT DISTINCT FROM $3", schedule_id, at, last_ok_at) == "UPDATE 1"
+
+
 async def insert_notification(conn: Db, *, schedule_id: str, run_id: str | None, kind: str, channel: str | None,
                               chat: str | None, text: str, status: str, error: str | None) -> str:
     """Record a message; ``created_at`` is the database's clock, so the outbox keeps the order they were sent in."""

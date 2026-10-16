@@ -184,11 +184,12 @@ def test_a_new_schedule_is_disabled_named_once_per_project_and_previewed(monkeyp
                                                                        tmp_path: Path) -> None:
     async def test(env: _Env) -> None:
         schedule = await env.schedule(name="Triage", cron="0  9 * * 1-5", profile_overrides={
-            "planner": "agent-claude-code-opus"})
+            "planner": "agent-claude-code-opus", "worker": "claude-code/opus"})  # by id or by name
         assert (schedule["enabled"], schedule["next_fire_at"], schedule["last_run"]) == (False, None, None)
         assert schedule["cron"] == "0 9 * * 1-5"
         assert schedule["description"] == "Weekdays at 09:00 (America/Los_Angeles)"
-        assert schedule["profile_overrides"] == {"planner": "agent-claude-code-opus"}
+        assert schedule["profile_overrides"] == {"planner": "agent-claude-code-opus",
+                                                 "worker": "agent-claude-code-opus"}
 
         status, payload = await env.call("POST", f"/api/projects/{env.project_id}/schedules", {
             "name": "triage", "cron": "*/5 * * * *", "requirement": "r"})

@@ -426,6 +426,11 @@ def _clip(text: Any, limit: int) -> str:
     return flat if len(flat) <= limit else flat[: limit - 1] + "…"
 
 
+def _sentence(text: str) -> str:
+    """``text`` with a period at its end, unless it already ends a sentence."""
+    return text if text.endswith((".", "!", "?", "…")) else text + "."
+
+
 def result_outcome(result: Mapping[str, Any]) -> str:
     """What a step's last result was, in a line: what a retry, a failure or an unfinished step is about."""
     if "verify_passed" in result and result.get("verify_passed") is not True:
@@ -2299,9 +2304,9 @@ class PlannerAgent:
         it is now and the journal."""
         lines, section = self._change_lines(plan, changes)
         return "\n".join([
-            f"[RESTART] The task {why}. The user restarted it, and it goes on from its plan: the accepted steps "
-            "stay done and do not run again; the steps that did not finish are back to not started (the journal "
-            "below says how their last attempt ended).",
+            f"[RESTART] {_sentence(f'The task {why}')} The user restarted it, and it goes on from its plan: the "
+            "accepted steps stay done and do not run again; the steps that did not finish are back to not started "
+            "(the journal below says how their last attempt ended).",
             f"The restart does not reset retries: a step back to not started keeps the retries it used (at most "
             f"{self._execution.step_retries} per step; a replan that keeps its id keeps them too), so one that had "
             "used them all gets this one attempt and no retry; a step under a new id (add_steps or replan) starts "
