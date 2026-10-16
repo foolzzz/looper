@@ -353,6 +353,11 @@ class TaskRouter:
         planner = PlannerAgent(task_id=task.task_id, runtime_root=self._runtime_root, claude_bin=self._claude_bin)
         task.planner_id = planner.agent_id
         self._planners[task.task_id] = planner
+        # What an earlier Planner of the task left unread is not for this one: the cancel of a stop that came
+        # during its turn would end this Planner at once, and a late result answers no step it runs.
+        stale = await self._bus.drain_queue(planner.agent_id)
+        if stale:
+            logger.info("task %s: dropped %d message(s) its earlier Planner left unread", task.task_id, len(stale))
 
         await planner.start(self._bus)
         task.status = "running"
