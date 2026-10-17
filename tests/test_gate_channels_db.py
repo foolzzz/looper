@@ -235,6 +235,23 @@ def test_a_failed_post_is_tried_again_and_the_gates_later_messages_wait_behind_i
     _run(test, monkeypatch)
 
 
+def test_a_gates_message_behind_one_that_failed_waits_in_the_same_pass(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def test(pool: Any) -> None:
+        from looper.agents.gate_courier import GateCourier
+
+        await _task_with_gate(pool, origin="channel-telegram", chat=TELEGRAM_CHAT, kind="chat")
+        await _say("task-a", "step-g1", "reminder", "Still waiting")  # in the same pass as the card
+        poster = _Poster()
+        poster.fail = 1
+        assert await GateCourier(poster).run_once() == 2
+        assert [p["text"].splitlines()[0] for p in poster.posts] == ["⏸ 需要你决定 · settings file"]
+        states = [tuple(r) for r in await pool.fetch("SELECT kind, post_state, post_attempts FROM "
+                                                     "task_user_gate_messages ORDER BY id")]
+        assert states == [("opened", None, 1), ("reminder", None, 0)]
+
+    _run(test, monkeypatch)
+
+
 def test_what_asks_for_an_answer_is_not_posted_once_the_gate_stopped_waiting(monkeypatch: pytest.MonkeyPatch,
                                                                              ) -> None:
     async def test(pool: Any) -> None:
