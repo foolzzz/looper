@@ -23,7 +23,7 @@ import {
   type DbChatMessage,
   type LlmRecord,
 } from "@/lib/api";
-import { RunCard, activityBelongsTo, historyHref } from "@/pages/agent-history";
+import { RunCard, activityBelongsTo, historyHref, runRoleLabel } from "@/pages/agent-history";
 import { cn } from "@/lib/utils";
 
 interface ChatMessage {
@@ -63,7 +63,7 @@ function groupByTask(targets: ChatTargetInfo[]): TaskGroup[] {
 }
 
 function stepAgentTitle(t: ChatTargetInfo): string {
-  const role = t.kind === "reviewer" ? "Reviewer" : "Worker";
+  const role = t.task_role ? runRoleLabel(t.task_role) : t.kind === "reviewer" ? "Reviewer" : "Worker";
   return t.step_index == null ? role : `Step ${t.step_index + 1} · ${role}`;
 }
 

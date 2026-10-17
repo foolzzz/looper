@@ -19,6 +19,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .metrics import Discipline
+
 
 @dataclass(frozen=True)
 class EvalTask:
@@ -33,11 +35,14 @@ class EvalTask:
     planner_may_choose: bool = False
     # The task's project lets its Planner define the roles its steps run as (planner_roles on).
     roles_on: bool = False
+    # The disciplines its work spans, each of which should get a role of its own (discipline_roles).
+    disciplines: tuple[Discipline, ...] = ()
     # min_steps, min_reviews, min_retries, min_chat_turns, min_independent_pairs, min_bracketed_pairs,
     # min_parallel_workers, min_progress_notes, min_final_summary, min_plan_changes, min_planner_profile_runs,
-    # min_roles_defined, min_role_runs, min_role_profile_runs, min_role_reviews, min_advisory_role_fails;
-    # max_plan_changes, max_steps,
-    # max_roles_defined, max_role_prompt_mismatches, max_role_boundary_misses, max_gate_breaches
+    # min_roles_defined, min_role_runs, min_role_profile_runs, min_role_reviews, min_advisory_role_fails,
+    # min_discipline_roles, min_interface_dependents; max_plan_changes, max_steps,
+    # max_roles_defined, max_role_prompt_mismatches, max_role_boundary_misses, max_gate_breaches,
+    # max_contract_violations
     expect: dict[str, int] = field(default_factory=dict)
     fake: dict[str, Any] = field(default_factory=dict)  # the stand-in Claude's script
 
@@ -443,6 +448,90 @@ _FAKE_GREET = ("import subprocess\nimport sys\n\n\ndef greet(name):\n"
                "capture_output=True, text=True, check=True).stdout.strip()\n\n\nif __name__ == '__main__':\n"
                "    print(greet(sys.argv[1]))\n")
 
+# The tips the multi-platform task's back end serves, one for each day of the week.
+_TIPS = {str(day): tip for day, tip in enumerate((
+    "Drink a glass of water first thing.", "Take the stairs once today.", "Write down three things you finished.",
+    "Call someone you have not talked to in a while.", "Stand up and stretch every hour.",
+    "Read ten pages of a book.", "Plan tomorrow before you sleep."), start=1)}
+_CLIENTS = ("web/tip.js", "android/TipClient.kt", "ios/TipClient.swift")
+# What the back end's handle() answers for each request path given on the command line, as JSON.
+_HANDLE = ("import json, sys; sys.path.insert(0, 'backend'); import tips; "
+           "print(json.dumps([tips.handle(path) for path in sys.argv[1:]]))")
+
+
+def _tip_feature(work_dir: Path) -> str | None:
+    raw = _read(work_dir, "api/tip_api.json")
+    if raw is None:
+        return "api/tip_api.json is missing"
+    try:
+        api = json.loads(raw)
+    except ValueError:
+        return "api/tip_api.json is not JSON"
+    path, query, fields = (api.get(key) for key in ("path", "query", "fields")) if isinstance(api, dict) else [None] * 3
+    if isinstance(fields, dict):  # the fields with their types: their names are what counts
+        fields = list(fields)
+    if not (isinstance(path, str) and path.startswith("/") and isinstance(query, str) and query
+            and isinstance(fields, list) and fields and all(isinstance(f, str) and f for f in fields)):
+        return "api/tip_api.json does not give a path, a query parameter and the response fields"
+    if not (work_dir / "backend" / "tips.py").is_file():
+        return "backend/tips.py is missing"
+    try:
+        done = subprocess.run([sys.executable, "-c", _HANDLE, f"{path}?{query}=3", f"{path}?{query}=9"], cwd=work_dir,
+                              capture_output=True, text=True, timeout=30, check=False)
+    except subprocess.TimeoutExpired:
+        return "backend/tips.py did not answer in 30 s"
+    try:
+        (status, body), (refused, _) = json.loads(done.stdout)
+    except (ValueError, TypeError):
+        return f"handle() did not return (status, body): {' '.join(done.stderr.split())[-200:]!r}"
+    if status != 200 or not isinstance(body, dict) or set(fields) - set(body):
+        return f"handle({path}?{query}=3) answered {status} with {sorted(body) if isinstance(body, dict) else body!r}"
+    if _TIPS["3"] not in json.dumps(body):
+        return "the back end does not serve day 3's tip from backend/tips.json"
+    if not (isinstance(refused, int) and 400 <= refused < 500):
+        return f"handle({path}?{query}=9) answered {refused}, not a 4xx"
+    for client in _CLIENTS:
+        source = _read(work_dir, client)
+        if source is None:
+            return f"{client} is missing"
+        if missing := [word for word in (path, query, *fields) if word not in source]:
+            return f"{client} does not use {', '.join(missing)} of api/tip_api.json"
+    return None
+
+
+# The disciplines of the multi-platform task, and what a role prompt that knows each one's conventions names.
+_PLATFORMS = (
+    Discipline("backend", ("backend", "be", "server", "back"),
+               ("status code", "http", "validat", "standard library", "stdlib", "pep 8", "pep8", "type hint",
+                "4xx", "400", "404", "query string", "parse_qs", "urllib", "unit test")),
+    Discipline("web", ("web", "fe", "frontend", "front"),
+               ("es module", "esm", "fetch", "dom", "textcontent", "escap", "xss", "accessib", "aria", "semantic",
+                "async", "await", "promise", "export")),
+    Discipline("android", ("android",),
+               ("kotlin", "data class", "coroutine", "suspend", "null safety", "nullable", "retrofit", "okhttp",
+                "viewmodel", "jetpack", "gradle", "sealed")),
+    Discipline("ios", ("ios",),
+               ("swift", "codable", "decodable", "urlsession", "async", "await", "struct", "optional", "guard",
+                "swiftui", "throws", "result type")),
+)
+_FAKE_TIP_API = '{"path": "/api/tip", "query": "day", "fields": ["day", "tip"]}\n'
+_FAKE_TIPS_PY = ('import json\nimport os\nfrom urllib.parse import parse_qs, urlsplit\n\n'
+                 'TIPS = json.load(open(os.path.join(os.path.dirname(__file__), "tips.json")))\n\n\n'
+                 'def handle(path):\n    url = urlsplit(path)\n    day = parse_qs(url.query).get("day", [""])[0]\n'
+                 '    if url.path != "/api/tip" or day not in TIPS:\n        return 404, {"error": "no such day"}\n'
+                 '    return 200, {"day": int(day), "tip": TIPS[day]}\n')
+_FAKE_CLIENTS = {
+    "web/tip.js": ('export async function showTip(day, element) {\n'
+                   '  const answer = await fetch(`/api/tip?day=${day}`);\n'
+                   '  const { tip } = await answer.json();\n  element.textContent = tip;\n}\n'),
+    "android/TipClient.kt": ('data class Tip(val day: Int, val tip: String)\n\n'
+                             'class TipClient(private val get: suspend (String) -> Tip) {\n'
+                             '    suspend fun tip(day: Int): Tip = get("/api/tip?day=$day")\n}\n'),
+    "ios/TipClient.swift": ('struct Tip: Codable { let day: Int; let tip: String }\n\n'
+                            'struct TipClient {\n    let get: (String) async throws -> Tip\n'
+                            '    func tip(day: Int) async throws -> Tip { try await get("/api/tip?day=\\(day)") }\n}\n'),
+}
+
 ROLE_TASKS: tuple[EvalTask, ...] = (
     EvalTask(
         # Work that needs other roles than the built-in Worker: a tester (on a profile the project allows) and a
@@ -531,6 +620,59 @@ ROLE_TASKS: tuple[EvalTask, ...] = (
                                           "role_prompt": "DOCS-REVIEW: you fail the step whenever the working "
                                                          "directory has no CHANGELOG.md.",
                                           "reason": "the requirement asks for an advisory docs review"}]]},
+        },
+    ),
+    EvalTask(
+        # One feature across four platforms, where the Planner may define roles and the requirement asks for none:
+        # it defines a role per discipline whose prompt knows that platform's conventions, pins the interface in a
+        # step every platform step depends on, and runs the platform steps side by side.
+        id="roles_multi_platform",
+        requirement=("Add a tip-of-the-day feature for four platforms in the working directory: a back end, a web "
+                     "front end, an Android client and an iOS client, each in its own folder. The back end is "
+                     "backend/tips.py (Python, standard library only): handle(path) takes a request path with its "
+                     "query string and returns (status, body), body a dict; for a day from 1 to 7 it answers with "
+                     "that day's tip from backend/tips.json, and with a 4xx status for any other day. The web front "
+                     "end is web/tip.js (a browser module that requests a day's tip and shows it in the page), the "
+                     "Android client android/TipClient.kt and the iOS client ios/TipClient.swift (each fetches a "
+                     "day's tip and gives it to its caller); they need no build, SDK or project files. How a tip is "
+                     "requested and what comes back is yours to choose, but all four must agree on it: write it in "
+                     "api/tip_api.json as {\"path\": the request path without the query, \"query\": the query "
+                     "parameter that takes the day, \"fields\": the response body's fields}."),
+        files={"backend/tips.json": json.dumps(_TIPS, indent=2) + "\n"},
+        roles_on=True,
+        disciplines=_PLATFORMS,
+        check=_tip_feature,
+        expect={"min_roles_defined": 4, "min_discipline_roles": 4, "min_interface_dependents": 4,
+                "min_parallel_workers": 2, "max_role_prompt_mismatches": 0, "max_role_boundary_misses": 0,
+                "max_contract_violations": 0},
+        fake={
+            "plan": [
+                _step("s1", "Write api/tip_api.json.", ["api/tip_api.json gives path, query and fields"]),
+                {**_step("s2", "Write backend/tips.py.", ["handle() serves the tips"], depends_on=["s1"]),
+                 "role": "backend_rd"},
+                {**_step("s3", "Write web/tip.js.", ["it uses the interface"], depends_on=["s1"]), "role": "fe_rd"},
+                {**_step("s4", "Write android/TipClient.kt.", ["it uses the interface"], depends_on=["s1"]),
+                 "role": "android_rd"},
+                {**_step("s5", "Write ios/TipClient.swift.", ["it uses the interface"], depends_on=["s1"]),
+                 "role": "ios_rd"},
+                _step("s6", "Check the four parts against api/tip_api.json.", ["they agree"],
+                      depends_on=["s2", "s3", "s4", "s5"]),
+            ],
+            "attempts": {"s1": [{"status": "completed", "files": {"api/tip_api.json": _FAKE_TIP_API}}],
+                         "s2": [{"status": "completed", "seconds": 2, "files": {"backend/tips.py": _FAKE_TIPS_PY}}],
+                         **{f"s{index}": [{"status": "completed", "seconds": 2, "files": {client: _FAKE_CLIENTS[client]}}]
+                            for index, client in enumerate(_CLIENTS, start=3)},
+                         "s6": [{"status": "completed", "files": {}}]},
+            "planner_calls": {"PLAN": [
+                ["looper_task_role_set", {"id": role_id, "kind": "work", "role_prompt": prompt,
+                                          "reason": "the feature spans four platforms"}]
+                for role_id, prompt in (
+                    ("backend_rd", "You own backend/: Python standard library only, validate the query string, "
+                                   "answer a 4xx status code for a bad day."),
+                    ("fe_rd", "You own web/: an ES module that uses fetch with async/await and sets textContent."),
+                    ("android_rd", "You own android/: idiomatic Kotlin, a data class for the tip, suspend "
+                                   "functions."),
+                    ("ios_rd", "You own ios/: Swift with a Codable struct and async throws functions."))]},
         },
     ),
     EvalTask(

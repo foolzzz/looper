@@ -29,9 +29,9 @@ def _step(task_id: str, index: int, worker_id: str | None) -> dict[str, Any]:
 
 
 def _run(agent_id: str, task_id: str, minutes: int, status: str = "completed",
-         step_id: str | None = None) -> dict[str, Any]:
+         step_id: str | None = None, task_role: dict[str, Any] | None = None) -> dict[str, Any]:
     return {"agent_id": agent_id, "task_id": task_id, "status": status,
-            "created_at": T0 + timedelta(minutes=minutes), "step_id": step_id}
+            "created_at": T0 + timedelta(minutes=minutes), "step_id": step_id, "task_role": task_role}
 
 
 def _ids(targets: list[dict[str, Any]]) -> list[str]:
@@ -96,6 +96,16 @@ class TestBuildChatTargets:
         assert [(w["id"], w["step_index"], w["status"]) for w in workers] == [
             ("worker-old", 0, "failed"), ("worker-new", 0, "completed"),
         ]
+
+    def test_a_step_agent_that_ran_as_a_role_names_it_and_a_built_in_one_is_as_before(self) -> None:
+        recorded = {"id": "fe_rd", "kind": "work", "version": 2, "sha256": "ab", "harness_sha256": None}
+        targets = build_chat_targets(
+            tasks=[_task("t1", 0)], live_planners=[], steps=[_step("t1", 0, "worker-a"), _step("t1", 1, "worker-b")],
+            runs=[_run("worker-a", "t1", 1, task_role=recorded), _run("worker-b", "t1", 2)],
+        )
+        by_id = {t["id"]: t for t in targets}
+        assert by_id["worker-a"]["task_role"] == {"id": "fe_rd", "kind": "work", "version": 2}
+        assert "task_role" not in by_id["worker-b"]
 
     def test_agent_with_several_runs_is_listed_once_with_its_latest_status(self) -> None:
         targets = build_chat_targets(

@@ -6,7 +6,7 @@ Tells you whether a change to a recommended role prompt, a code-owned contract
 (`REPLY_CONTRACT`, `WORK_CONTRACT`, `REVIEW_CONTRACT`) or the way the system
 prompt is put together makes the agents worse.
 
-It runs sixteen small tasks through a disposable `looper serve` (a new
+It runs seventeen small tasks through a disposable `looper serve` (a new
 PostgreSQL database, a free port, a temporary runtime root and working
 directories), one at a time over the HTTP API:
 
@@ -27,6 +27,7 @@ directories), one at a time over the HTTP API:
 | `roles_tester_docs` | the task's project lets its Planner define roles (`planner_roles` on) and choose `eval/chosen`; a module, its tests and its usage notes, the tests by a tester role on `eval/chosen` and the notes by a doc-writer role: at least two work roles, their steps run as them on the version defined, the tester on its profile, each role run with the boundaries before its contract |
 | `roles_security_review` | the same switch; a script that must not run a shell, reviewed by the built-in Reviewer and by a security review role: the role reviews after the built-in Reviewer, and the step is accepted only with both reviews passed |
 | `roles_advisory_review` | the same switch; a greeting script reviewed by the built-in Reviewer and by an advisory review role (`review_role_required` false) that wants a CHANGELOG.md the task turns down: the role does not pass the step, the built-in Reviewer does, and the Planner decides (accept, or retry with the role's findings) |
+| `roles_multi_platform` | the same switch, and a requirement that asks for no role: one tip-of-the-day feature across a back end (`backend/tips.py`, run by the check), a web front end, an Android and an iOS client (`web/tip.js`, `android/TipClient.kt`, `ios/TipClient.swift`, no build), which must agree on an interface recorded in `api/tip_api.json`: a work role per discipline whose prompt names at least two of that platform's conventions, at least four role steps built on one interface step, at least two Workers at once, the role runs on a version defined with the boundaries before the contract, and no contract violation |
 | `roles_not_needed` | the same switch on a one-file task: the Planner defines no role and plans at most two steps |
 
 For each task it reads back from the API: success (the task completed, its
@@ -41,7 +42,9 @@ and the runs as one (`role_runs`; on the role's own profile, `role_profile_runs`
 `role_reviews`; on a prompt that is no version it defined, `role_prompt_mismatches`; without the boundaries after
 the task section, `role_boundary_misses`), the accepted steps with a review role that lack a passing built-in or
 role review where the role is required (`gate_breaches`), the reviews by an advisory review role that did not pass
-(`advisory_role_fails`), retries, reviews, cost (the task cost API), tokens (the runs' records: prompt, uncached
+(`advisory_role_fails`), the disciplines of a task that names them with a work role of their own whose prompt
+names at least two of the discipline's conventions (`discipline_roles`), the most steps run as a work role that
+depend on one same step (`interface_dependents`), retries, reviews, cost (the task cost API), tokens (the runs' records: prompt, uncached
 and cached, and output; what a runtime without prices still reports), contract violations
 (replies the Planner's reply parser or the Worker/Reviewer report check
 rejected; the JSON keeps why the parser rejected each Planner reply,

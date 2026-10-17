@@ -13,6 +13,7 @@ from typing import Any
 
 from ..db import llm_records, steps as db_steps, tasks as db_tasks
 from .message import MANAGER_ADDRESS, AgentAddress, planner_address
+from .task_roles import run_role
 from .tiers.task import TaskRouter
 
 logger = logging.getLogger(__name__)
@@ -55,7 +56,8 @@ def build_chat_targets(
 
     ``tasks`` are task rows, ``live_planners`` is ``TaskRouter.running_planners()``,
     ``steps`` are task_steps rows and ``runs`` are Worker/Reviewer llm_records
-    rows (with the run's ``step_id``), oldest first.
+    rows (with the run's ``step_id`` and ``task_role``), oldest first. A step
+    agent that ran as a role its task's Planner defined names it (``task_role``).
     """
     targets: list[dict[str, Any]] = [{"kind": "manager", "id": MANAGER_ADDRESS.agent_id, "can_send": True}]
 
@@ -86,6 +88,7 @@ def build_chat_targets(
                 "instruction": step["instruction"] if step else "",
                 "started_at": run["created_at"],
                 "can_send": False,
+                **({"task_role": role} if (role := run_role(run.get("task_role"))) else {}),
             }
         else:
             agent["status"] = run["status"]

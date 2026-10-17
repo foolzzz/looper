@@ -13,7 +13,7 @@ import {
 } from "@/lib/api";
 import { AGENT_PROFILE, settingsHref } from "@/lib/settings-pages";
 import { profileName } from "@/lib/use-registry";
-import { historyHref } from "@/pages/agent-history";
+import { historyHref, runRoleLabel } from "@/pages/agent-history";
 
 function roleBadge(role: string) {
   switch (role) {
@@ -153,6 +153,11 @@ function RunsTab({ agentId }: { agentId: string }) {
               {run.status}
             </Badge>
             <span className="font-mono text-foreground">{run.agent_id}</span>
+            {run.task_role && (
+              <Badge variant="outline" className="font-mono">
+                {runRoleLabel(run.task_role)}
+              </Badge>
+            )}
             {run.metadata?.session_reset && <Badge variant="outline">new session</Badge>}
             {run.task_id && <span>{run.task_id}</span>}
             {run.duration_ms != null && <span>{Math.round(run.duration_ms / 1000)}s</span>}

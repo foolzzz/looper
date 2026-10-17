@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Iterable, Mapping
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -155,6 +156,44 @@ def role_metrics(detail: Mapping[str, Any], records: Iterable[Mapping[str, Any]]
         "advisory_role_reviews": len(advisory),
         "advisory_role_fails": sum(1 for r in advisory if r["metadata"].get("outcome") == "not_passed"),
     }
+
+
+@dataclass(frozen=True)
+class Discipline:
+    """A discipline a task's work spans: the words of a role id that name it (``fe`` in ``fe_rd``) and terms of its
+    conventions (lower case), at least ``CONVENTION_TERMS`` of which the prompt of its role names."""
+
+    name: str
+    ids: tuple[str, ...]
+    conventions: tuple[str, ...]
+
+
+CONVENTION_TERMS = 2
+
+
+def discipline_roles(roles: Iterable[Mapping[str, Any]], disciplines: Iterable[Discipline]) -> int:
+    """The ``disciplines`` that have a work role of their own (its id names that discipline and no other) whose
+    prompt names at least ``CONVENTION_TERMS`` of the discipline's conventions."""
+    disciplines = list(disciplines)
+
+    def named(role_id: str) -> set[str]:
+        words = set(re.split(r"[_.-]", role_id.lower()))
+        return {d.name for d in disciplines if words & set(d.ids)}
+
+    work = [r for r in roles if r.get("kind") == "work"]
+    return sum(1 for d in disciplines if any(
+        named(str(r.get("id") or "")) == {d.name}
+        and sum(term in str(r.get("role_prompt") or "").lower() for term in d.conventions) >= CONVENTION_TERMS
+        for r in work))
+
+
+def interface_dependents(steps: Iterable[Mapping[str, Any]]) -> int:
+    """The most steps run as a work role that depend, directly or through other steps, on one same step: the
+    platform steps built on one interface."""
+    steps = list(steps)
+    before = _before(steps)
+    role_steps = [str(s.get("id")) for s in steps if s.get("role_key") and s.get("status") != "skipped"]
+    return max((sum(1 for step_id in role_steps if shared in before[step_id]) for shared in before), default=0)
 
 
 def turn_kinds(records: Iterable[Mapping[str, Any]]) -> dict[str, int]:
@@ -331,11 +370,12 @@ def task_metrics(
     work_dir: Path,
     check_problem: str | None,
     expect: Mapping[str, int],
+    disciplines: Iterable[Discipline] = (),
     clock_offset: float = 0.0,
     now: float,
 ) -> dict[str, Any]:
     """One task's result: success and why not, the flow counts, cost, contract violations and the Planner's
-    file changes."""
+    file changes. ``expect`` may bound ``contract_violations`` (their total) too."""
     by_role: dict[str, list[Mapping[str, Any]]] = {}
     for record in records:
         by_role.setdefault(role(record), []).append(record)
@@ -374,7 +414,13 @@ def task_metrics(
         "planner_profile_runs": planner_profile_runs(records),
         # The roles the Planner defined for its steps, and how their runs went.
         **role_metrics(detail, records),
+        # The disciplines with a role of their own that knows their conventions, and the most role steps built on
+        # one interface step.
+        "discipline_roles": discipline_roles(detail.get("roles") or [], disciplines),
+        "interface_dependents": interface_dependents(detail.get("steps") or []),
     }
+    violations = {"planner": planner_violations(activity), "worker": worker_violations,
+                  "reviewer": reviewer_violations}
     status = str(detail.get("status") or "")
     problems = []
     if status != "completed":
@@ -382,14 +428,12 @@ def task_metrics(
         problems.append(f"task {status or 'unknown'}" + (f": {error}" if error else ""))
     if check_problem:
         problems.append(check_problem)
-    problems += flow_problems(expect, observed)
+    problems += flow_problems(expect, {**observed, "contract_violations": sum(violations.values())})
 
     cost = detail.get("cost") or {}
     # Tokens are what every runtime reports, priced or not (a subscription, a provider without prices).
     tokens = {name: sum(int(r.get(f"{name}_tokens") or 0) for r in records)
               for name in ("input", "output", "cache_read", "cache_creation")}
-    violations = {"planner": planner_violations(activity), "worker": worker_violations,
-                  "reviewer": reviewer_violations}
     return {
         "status": status,
         "success": not problems,

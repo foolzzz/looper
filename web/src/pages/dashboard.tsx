@@ -120,6 +120,8 @@ function AgentRow({ role, count, children }: { role: string; count?: React.React
 function StepRuns({ runs }: { runs: LiveStepRun[] }) {
   return runs.map((run) => (
     <p key={run.agent_id} className="flex min-w-0 items-baseline gap-2 text-xs">
+      {/* Listed under Workers or Reviewers, a run as a role its task's Planner defined shows the role's id. */}
+      {run.task_role && <span className="shrink-0 font-mono text-foreground">{run.task_role.id}</span>}
       <a
         href={historyHref(run.agent_id, run.task_id)}
         title={[run.project_name, run.step].filter(Boolean).join(" · ") || undefined}

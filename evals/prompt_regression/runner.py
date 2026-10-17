@@ -339,6 +339,7 @@ def run_task(
     """
     work_dir.mkdir(parents=True, exist_ok=True)
     for name, content in task.files.items():
+        (work_dir / name).parent.mkdir(parents=True, exist_ok=True)
         (work_dir / name).write_text(content, encoding="utf-8")
     project: dict[str, Any] = {"name": f"eval-{task.id}-{uuid.uuid4().hex[:6]}", "work_dir": str(work_dir)}
     if step_workspaces:
@@ -403,6 +404,7 @@ def run_task(
             work_dir=work_dir,
             check_problem=task.check(work_dir),
             expect=task.expect,
+            disciplines=task.disciplines,
             clock_offset=clock_offset,
             now=time.time() + clock_offset,
         )
