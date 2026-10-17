@@ -1459,6 +1459,8 @@ export interface TaskStep {
   role_key: string | null;
   /** The role that reviews it after the built-in Reviewer passed it; null: none. */
   review_role_key: string | null;
+  /** Whether that role's verdict blocks the step (true) or only advises the Planner (false). */
+  review_role_required: boolean;
   /** The versions of those roles its latest attempt ran with; null before it ran as one. */
   role_version: number | null;
   review_role_version: number | null;

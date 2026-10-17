@@ -849,12 +849,14 @@ function LessonsDraftNote({ taskId, projectId }: { taskId: string; projectId: st
 
 // --- Roles: the roles the task's Planner defined for its steps ---
 
-/** The roles a step runs and is reviewed as, e.g. "as tester v2 + review: security"; "" for the built-in ones. */
+/** The roles a step runs and is reviewed as, e.g. "as tester v2 + review: security (advisory)"; "" for the
+ * built-in ones. */
 function stepRoles(step: TaskStep, versions = true) {
   const version = (v: number | null) => (versions && v != null ? ` v${v}` : "");
+  const advisory = step.review_role_required === false ? " (advisory)" : "";
   return [
     step.role_key && `as ${step.role_key}${version(step.role_version)}`,
-    step.review_role_key && `+ review: ${step.review_role_key}${version(step.review_role_version)}`,
+    step.review_role_key && `+ review: ${step.review_role_key}${version(step.review_role_version)}${advisory}`,
   ].filter(Boolean).join(" ");
 }
 
