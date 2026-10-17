@@ -489,13 +489,17 @@ def _manager_messages(bus: MessageBus) -> list[MessageEnvelope]:
     return messages
 
 
-def _tg_update(user_id: int | None, text: str = "hello", chat_id: int = 99) -> Any:
+def _tg_update(user_id: int | None, text: str = "hello", chat_id: int = 99, *, message_id: int = 41,
+               replies_to: int | None = None) -> Any:
+    """A Telegram update as python-telegram-bot gives it: the message ``message_id``, replying to the message
+    ``replies_to`` when given."""
     from types import SimpleNamespace
     from unittest.mock import AsyncMock
+    replied = None if replies_to is None else SimpleNamespace(message_id=replies_to)
     return SimpleNamespace(
         effective_user=None if user_id is None else SimpleNamespace(id=user_id, username="someone"),
         effective_chat=SimpleNamespace(id=chat_id),
-        message=SimpleNamespace(text=text, reply_text=AsyncMock()),
+        message=SimpleNamespace(text=text, reply_text=AsyncMock(), message_id=message_id, reply_to_message=replied),
     )
 
 
@@ -532,6 +536,25 @@ class TestTelegramAllowlist:
         update.message.reply_text.assert_not_awaited()
         (line,) = [r.getMessage() for r in caplog.records if "allowlist" in r.getMessage()]
         assert "channel-telegram" in line and "'8'" in line and "secret plan" not in line
+
+    @pytest.mark.parametrize("handler", ["_on_message", "_cmd_new"])
+    @pytest.mark.parametrize(("replies_to", "refs"), [(None, {}), (17, {"reply_to_message_id": "17"})])
+    def test_a_messages_id_and_the_one_it_replies_to_reach_the_manager(
+        self, tmp_path: Path, handler: str, replies_to: int | None, refs: dict[str, str],
+    ) -> None:
+        (message,) = self._run(tmp_path, handler, _tg_update(7, "选 A", message_id=41, replies_to=replies_to), "7")
+        assert message.payload["channel_context"] == {"chat_id": 99, "user_id": 7, "username": "someone",
+                                                      "message_id": "41", **refs}
+
+    def test_an_edited_new_has_no_message_to_name(self, tmp_path: Path) -> None:
+        update = _tg_update(7, "/new")
+        update.message = None  # how python-telegram-bot gives an edited message: as edited_message
+        (message,) = self._run(tmp_path, "_cmd_new", update, "7")
+        assert message.payload["channel_context"] == {"chat_id": 99, "user_id": 7, "username": "someone"}
+
+    def test_status_names_only_its_chat(self, tmp_path: Path) -> None:
+        (message,) = self._run(tmp_path, "_cmd_status", _tg_update(7, "/status", replies_to=17), "7")
+        assert message.payload["channel_context"] == {"chat_id": 99}
 
     def test_a_message_without_a_sender_is_dropped(self, tmp_path: Path) -> None:
         assert self._run(tmp_path, "_on_message", _tg_update(None), "7") == []
@@ -691,6 +714,26 @@ class TestLarkAllowlist:
                                                       "sender_name": "Ada Lovelace"}
         # Seen at once; its answer replies to it in the group.
         assert seen.reacted == ["om_7"] and seen.replies_to == {message.correlation_id: "om_7"}
+
+    @pytest.mark.parametrize(("refs", "seen"), [
+        ({"reply_to": "om_card", "root_id": "om_card"}, {"reply_to": "om_card", "root_id": "om_card"}),
+        # A reply further down a thread: the message it answers, and the thread's first.
+        ({"reply_to": "om_answer", "root_id": "om_card"}, {"reply_to": "om_answer", "root_id": "om_card"}),
+        ({}, {}),
+        # Empty, or not a message id: no reference.
+        ({"reply_to": "", "root_id": None}, {}),
+        ({"reply_to": 7, "root_id": ["om_card"]}, {}),
+    ])
+    @pytest.mark.parametrize("group", [False, True])
+    def test_a_replys_references_reach_the_manager(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+                                                  refs: dict[str, Any], seen: dict[str, str], group: bool) -> None:
+        where = {"chat_type": "group", "mentions": [BOT_MENTION]} if group else {}
+        event = _lark_event(OPEN_ID, "@HelperBot 选 A" if group else "选 A", message_id="om_7", **where, **refs)
+        (message,) = self._run(tmp_path, monkeypatch, event, OPEN_ID).messages
+        assert message.payload["text"] == "选 A"
+        assert message.payload["channel_context"] == {
+            "chat_id": "oc_1", "chat_type": "group" if group else "p2p", "sender_id": OPEN_ID, "message_id": "om_7",
+            **({"sender_name": "Ada Lovelace"} if group else {}), **seen}
 
     def test_an_unlisted_senders_mention_in_a_group_is_recorded_with_its_chat(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
