@@ -232,7 +232,8 @@ Web 始终开启。Telegram 和 Lark 默认内置，不需要任何启动参数�
 - 支持 `/start`、`/status`、`/new`、`/help` 命令；`/new`（不带参数）开始新的 Manager 会话
 - 消息自动分段（4000 字符限制）
 - Settings 配置项：
-  - `bot_token_env`：存放 Bot token 的环境变量名，默认 `LOOPER_TELEGRAM_BOT_TOKEN`
+  - **Bot token**：BotFather 给的 token，存在与配置分开的 `channel_secrets` 表里，接口只返回是否已保存（`has_bot_token`），导出时不包含
+  - `bot_token_env`：没有保存 token 时读取的环境变量名，默认 `LOOPER_TELEGRAM_BOT_TOKEN`
   - `allowed_user_ids`：发送者白名单，Telegram 的数字用户 ID（负数是群或频道，不是发送者）；以前存的逗号分隔字符串仍然能读。`LOOPX_TELEGRAM_ALLOWED_USERS` 不再生效
 - 名单外的发送者发 `/start`、`/status`、`/new`、`/help` 也得不到回复
 
