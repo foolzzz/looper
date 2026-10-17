@@ -683,7 +683,8 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
 - **规划者工具的后续（looper #155）**：项目的可选 Agent Profile 列表还不在配置导出、导入里（`config_transfer`）；规划者为某一步选的 Profile 只在任务页的 Findings 里列出，Agents 一栏只显示剩下步骤的选择，Pipeline 的步骤上没有标出；任务异常退出（服务被 SIGKILL）时，带已失效令牌的 MCP 配置文件会留在 runtime root 的 `.local/mcp/` 下，下次启动不清扫。
 - **渠道对话的存储挪到渠道层（looper #106 的后续）**：Telegram、飞书的回复现在是 Manager 发出时就记下的，渠道之后发送失败也算已回复；应改成渠道发送成功后再记。另外两点：用户发的 `/new` 本身不存（它的回复会存），以及缺少「存储失败不影响回复」的测试。
 - **评审者和规划者不知道文件在别处（looper #151 的后续）**：结果检查接受在其他 worktree 或运行期间的提交里找到的文件（`found_elsewhere`），但 Reviewer 仍在工作目录里评审，规划者看到的步骤报告也不说文件在哪，改动只在别的分支上的步骤能通过检查、却可能在评审时失败。告诉它们属于模型可见的改动，要跑真实模式评测。
-- **步骤没有开始时间（looper #172 发现）**：`task_steps` 只有规划时间（`created_at`）和第一次进入评审或结束的时间（`completed_at`），Pipeline 卡片因此给不出一步跑了多久；要显示用时得在派发时记下开始时间。
+- **`test_fake_mode_runs_every_task_and_sees_misbehaviour` 在高负载下偶尔失败（2026-10-17 多条线并行时观察到）**：`tests/test_prompt_eval.py` 里替身模式的 `bad` 任务预期 `planner_changed_files == ["planner-notes.txt"]`，机器很忙时偶尔得到 `[]`。这个指标按文件的 mtime 和运行记录的时间窗把改动归给 Planner（`metrics.planner_changed_files`，计入本机与数据库的时钟差和 0.1 秒容差）；推测是负载高时写文件的时刻落到了记录的时间窗之外，未验证，也还没改。全量测试里遇到时先单独重跑这一项，通过即不是本次改动造成的。
+- **Manager 在回复里复述用户贴的 API key（looper #176 的基线里观察到）**：管家对话评测 `provider_key` 在 haiku 下 3 次有 2 次失败，Manager 把用户贴进来的 key 原样写进了回复；工具调用本身是干净的（登记的 provider 和 Manager 的记录里都没有这个 key），opus·xhigh 下 3 次都通过。维护者决定暂不在代码里给回复打码，先作为观察到的行为记在这里；之后可以改 Manager 的 prompt，或在回复发出前打码。
 
 ### 5.3 非核心待办（M6 之后统一做）
 
