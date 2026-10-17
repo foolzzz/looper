@@ -612,9 +612,9 @@ function showGate(step: TaskStep) {
   target?.focus({ preventScroll: true });
 }
 
-/** How long a step took to finish first, or has run (`stepSpan`); nothing before it started. */
-function StepSpan({ step }: { step: TaskStep }) {
-  const span = stepSpan(step);
+/** How long a step took, or has run while its task runs (`stepSpan`); nothing before it started. */
+function StepSpan({ step, active }: { step: TaskStep; active: boolean }) {
+  const span = stepSpan(step, active);
   return span && <span className="text-xs tabular-nums text-muted-foreground">{span.label} {span.text}</span>;
 }
 
@@ -757,7 +757,7 @@ function OverviewTab({
                         </a>
                       )}
                       {stepRoles(step) && <span className="font-mono text-xs text-muted-foreground">{stepRoles(step)}</span>}
-                      <StepSpan step={step} />
+                      <StepSpan step={step} active={isActive} />
                       {step.status === "completed" && step.review_stage && (
                         <span className="text-xs text-muted-foreground">
                           Waiting for{" "}
@@ -1718,7 +1718,7 @@ function PipelineTab({ task, onOpenGate }: { task: TaskDetail; onOpenGate: (step
                                   detail={step.instruction} note={step.retries ? `retry ${step.retries}` : undefined} /> },
         style: nodeStyle(look), sourcePosition: Position.Bottom, targetPosition: Position.Top,
       });
-      cards[step.id] = stepCard(step, { taskId: task.task_id, look, lookOf, stepsById: allById,
+      cards[step.id] = stepCard(step, { taskId: task.task_id, active, look, lookOf, stepsById: allById,
                                         skippedBecause: why.get(step.id) });
     }
 

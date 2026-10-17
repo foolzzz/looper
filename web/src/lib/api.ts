@@ -1638,10 +1638,10 @@ export interface TaskStep {
   result: Record<string, unknown> | null;
   created_at: string;
   updated_at: string;
-  /** The first time it went to review or ended. */
+  /** The last time it went to review or ended; a step running again keeps it. */
   completed_at: string | null;
-  /** When its first attempt was dispatched, kept through retries and restarts; null before it started, and for a
-   * step from before starts were kept. */
+  /** When its run was first dispatched, kept through its retries and reviews; null while it is not started (again,
+   * after a restart), and for a step from before starts were kept. */
   started_at: string | null;
 }
 

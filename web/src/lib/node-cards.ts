@@ -64,18 +64,22 @@ function formatSpan(start: string, end: string) {
   return formatSeconds((new Date(end).getTime() - new Date(start).getTime()) / 1000);
 }
 
-/** How long a step has run, from its first attempt's dispatch: until the first time it went to review or ended
- * ("took"; "ran for" when it was dropped), or until `now` while its attempt runs or awaits a decision ("running
- * for"). Null before it started, while it waits to start again (restarted), and for a step from before starts were
+/** How long a step has run, from the first dispatch of its run, by its status: while it runs or awaits a decision,
+ * until `now` ("running for"), and only while its task runs (`active`: a stopped task's step does not run on);
+ * once in review or ended, until the last time it went to review or ended ("took", retries and reviews included;
+ * "ran for" when it was dropped). Null while it is not started (again), and for a step from before starts were
  * kept. */
 export function stepSpan(
   step: Pick<TaskStep, "started_at" | "completed_at" | "status">,
+  active: boolean,
   now: number = Date.now(),
 ): { label: "took" | "ran for" | "running for"; text: string } | null {
   if (!step.started_at) return null;
-  if (step.completed_at) return { label: step.status === "skipped" ? "ran for" : "took", text: formatSpan(step.started_at, step.completed_at) };
-  if (step.status !== "dispatched" && step.status !== "deciding") return null;
-  return { label: "running for", text: formatSeconds((now - new Date(step.started_at).getTime()) / 1000) };
+  if (step.status === "dispatched" || step.status === "deciding") {
+    return active ? { label: "running for", text: formatSeconds((now - new Date(step.started_at).getTime()) / 1000) } : null;
+  }
+  if (step.status === "pending" || !step.completed_at) return null;
+  return { label: step.status === "skipped" ? "ran for" : "took", text: formatSpan(step.started_at, step.completed_at) };
 }
 
 interface TextOptions {
@@ -131,6 +135,8 @@ function stepResult(step: TaskStep): CardSection[] {
 
 export interface StepCardContext {
   taskId: string;
+  /** Whether the step's task runs: a step shows how long it has been running only then. */
+  active: boolean;
   look: CardLook;
   /** The look of each step it depends on, by id. */
   lookOf: (step: TaskStep) => CardLook;
@@ -140,11 +146,12 @@ export interface StepCardContext {
 }
 
 /** A step's card: what it does, how it is checked, what it waits for, who ran it and what came of it. */
-export function stepCard(step: TaskStep, { taskId, look, lookOf, stepsById, skippedBecause }: StepCardContext): NodeCard {
+export function stepCard(step: TaskStep, { taskId, active, look, lookOf, stepsById, skippedBecause }: StepCardContext): NodeCard {
   const deps = (step.depends_on ?? []).map((id) => stepsById.get(id)).filter((s): s is TaskStep => !!s);
-  const span = stepSpan(step);
-  // completed_at is kept from the first time the step went to review or ended, so a retried step's may be earlier.
-  const finished = step.completed_at && (step.status === "skipped" ? "Dropped" : step.retries ? "First finished" : "Finished");
+  const span = stepSpan(step, active);
+  // completed_at is the last time the step went to review or ended; a step running again still has it.
+  const finished = step.completed_at && !["pending", "dispatched", "deciding"].includes(step.status) &&
+    (step.status === "skipped" ? "Dropped" : "Finished");
   return {
     name: step.step_key || `step ${step.step_index + 1}`,
     look,

@@ -344,7 +344,8 @@ class PlanStep:
     review_stage: ReviewStage | None = None  # in review: which review it waits for
     # A gate step's gate (``user_gates``): its instruction is its topic, and no Worker runs it.
     gate: Gate | None = None
-    # When its first attempt was dispatched; kept through its retries and restarts (task_steps.started_at).
+    # When its run was first dispatched; kept through its retries and reviews, gone when it is sent back to not
+    # started (task_steps.started_at).
     started_at: datetime | None = None
 
     @property
@@ -1979,6 +1980,7 @@ class PlannerAgent:
                  and (s.status != "pending" or s.started)]
         for step in again:
             step.status, step.worker_id, step.reviewer_id, step.review_stage = "pending", None, None, None
+            step.started_at = None  # its next dispatch starts it again: the time the task was stopped does not count
         waiting = plan.waiting_gates()
         for step in waiting:
             assert step.gate is not None
@@ -3328,7 +3330,7 @@ class PlannerAgent:
                     step.workspace.state is StepWorkspaceState.MERGING:
                 merging.append(step)  # accepted: only its merge was cut off
             elif step.status in ("dispatched", "deciding"):
-                step.status = "pending"
+                step.status, step.started_at = "pending", None  # started again when dispatched again
                 again.append(step)
             elif step.status == "completed":
                 review.append(step)

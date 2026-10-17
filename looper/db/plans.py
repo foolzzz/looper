@@ -58,7 +58,8 @@ SET step_index = EXCLUDED.step_index, step_key = EXCLUDED.step_key, instruction 
     review_role_version = EXCLUDED.review_role_version, review_stage = EXCLUDED.review_stage,
     review_role_required = EXCLUDED.review_role_required, kind = EXCLUDED.kind, updated_at = now(),
     completed_at = COALESCE(EXCLUDED.completed_at, task_steps.completed_at),
-    started_at = COALESCE(task_steps.started_at, EXCLUDED.started_at)
+    started_at = CASE WHEN EXCLUDED.status = 'pending' THEN NULL
+                      ELSE COALESCE(task_steps.started_at, EXCLUDED.started_at) END
 """
 
 
