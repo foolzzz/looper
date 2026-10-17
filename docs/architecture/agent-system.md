@@ -2266,9 +2266,11 @@ refused with that reason.
 
 The two tools add 1.9 KB to the Planner's `tools/list`, their guide (after
 `TOOLS_GUIDE`, `ROLES_GUIDE`) 1.8 KB and the contract's role rules 0.4 KB, in
-a project with the switch on only. The guide has the Planner define one work
-role per discipline when the work spans disciplines or platforms (none for a
-task of one, unless asked), pin the interface the platforms share in a first
+a project with the switch on only. The guide opens with the rule that a role
+is defined with `looper_task_role_set` before any step names it, then has the
+Planner define one work role per discipline when the work spans disciplines
+or platforms (none for a task of one, unless asked), pin the interface the
+platforms share in a first
 step, run the platform steps side by side and integrate last, and write each
 role prompt as a brief: the expertise, the platform's conventions and quality
 bar, what the role owns and must not touch, how it hands off, and the checks
