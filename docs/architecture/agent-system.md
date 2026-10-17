@@ -523,7 +523,7 @@ journal. They are marked delivered only once that turn's reply is applied; a
 failed turn leaves them for the turn after the next event, and a restarted
 Planner gives them after its first event, so a change made during a turn,
 in a failed turn or before a restart is not lost. `TASK_CHANGE` only wakes
-the Planner. A task waiting for room gets its changes in its `[PLAN]` turn,
+the Planner. A task whose Planner is starting gets its changes in its `[PLAN]` turn,
 and an edit of a task not started is delivered at once, since it plans the
 new text. The reply to a chat message is the reply of the turn that
 delivered it; the activity keeps every answer with the action chosen
@@ -1365,7 +1365,30 @@ of its schedules that has none; its Planner limit caps each of its parallel
 schedules' `max_parallel_runs` (still 1 to 10); then `max_concurrency` is
 cleared from every role-in-project layer and from the Planner's role layer
 (a layer left with nothing set goes) and the constraint narrowed. A task
-created by hand in such a project runs with the per-task defaults.
+created by hand in such a project runs with the per-task defaults. Some things
+change meaning without being converted: a Worker or Reviewer role layer's
+value, and the built-in 16 and 8, counted a project's runs and now count one
+task's; the tasks there are at the upgrade (running, ready or pending) lose
+their project's limits and run with the per-task defaults, as the migration
+writes only schedules; and a task held back as `pending` for a restart at a
+raised spend cap starts as a continued restart at the next server start (one
+more `[RESTART]` turn, at the upgrade only). An earlier Looper run on the
+database after the upgrade keeps the narrowed constraint, so its project page
+cannot store a project's limit (the write fails).
+
+What bounds the load is now each task's limits and how many tasks start.
+Before, an unconfigured project ran at most 8 Planners, 16 Workers and 8
+Reviewers at once whatever its tasks; now N running tasks run N Planners and
+up to 16N Workers and 8N Reviewers, and nothing caps the total (an LLM
+provider's `max_concurrency` is stored, not enforced). The converted alarm-like
+project (Planner 3, Worker 8, Reviewer 3) moves from at most 8 Workers and 3
+Reviewers across the project to its parallel schedule's 3 runs × (8, 3): 24
+Workers and 9 Reviewers. Bursts come from several schedules firing in the same
+minute, a catch-up firing after downtime, and every task resumed at a server
+start, and they reach the provider's rate limits, the machine's processes and
+memory, and the spend at once. The knobs that bound it: a schedule's
+`max_parallel_runs` and `task_limits`, the role defaults in Settings → Roles,
+and a task's own limits.
 
 ### Project knowledge: documents read on demand
 
@@ -2157,8 +2180,8 @@ journaled. There is no project limit to change: concurrency is per task
 A Worker's or Reviewer's run reads the Planner's choice when it starts
 (`load_agent_settings(..., step_id=...)`): a call that returns before the
 reply that dispatches a step (a plan, a retry, a replan) applies to it, a run
-that started keeps its profile, and one still waiting for room in its project
-or task uses the choice in effect when it starts. The precedence, highest
+that started keeps its profile, and one still waiting for room in its task
+uses the choice in effect when it starts. The precedence, highest
 first: the user's choice for the task, the Planner's for the step, the
 Planner's for the rest of the task, then the setting layers. A choice counts
 only while its profile is on the task's project's list: dropping a profile
