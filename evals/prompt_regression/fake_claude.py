@@ -23,7 +23,10 @@ agent system started it in:
 - a Worker (its task section says "Your step:") writes the files its step's
   scripted attempt lists and reports that attempt's status, after the
   attempt's ``seconds`` when it gives them; with ``wait_for_input`` it first
-  waits for a forwarded user turn and then writes the files given there;
+  waits for a forwarded user turn and then writes the files given there; with
+  ``room_calls`` (``{label: [[tool, arguments], ...]}``) it first makes those
+  calls of the room's tools over its ``looper`` MCP server (and answers a
+  [ROOM] turn of the Planner's with ``room_reply``, or "Noted.");
 - a Reviewer ("The step under review:") passes the step, unless its system
   prompt holds one of the script's ``failing_reviews`` (a review role's
   marker): then it fails it;
@@ -214,6 +217,8 @@ def _planner(script: dict[str, Any], args: list[str], stdin: _Stdin) -> None:
             reply = {**_decide(script, message), "progress": PROGRESS}
         elif message.startswith("[GATE]"):
             reply = _gate(script, message)
+        elif message.startswith("[ROOM]"):
+            reply = {"reply": script.get("room_reply", "Noted."), "action": "none"}
         elif message.startswith("[CHAT]"):
             reply = _chat(script, message)
         else:
@@ -230,10 +235,16 @@ def _write(work_dir: str, files: dict[str, str]) -> None:
             handle.write(content)
 
 
-def _worker(script: dict[str, Any], system_prompt: str, stdin: _Stdin) -> None:
+def _worker(script: dict[str, Any], system_prompt: str, stdin: _Stdin, args: list[str]) -> None:
     stdin.readline()  # the start cue
     step = re.search(r"^Your step: (\S+)$", system_prompt, re.MULTILINE)
     label = step.group(1) if step else ""
+    calls = (script.get("room_calls") or {}).get(label) or []
+    rpc = _mcp(args) if calls else None
+    for name, arguments in calls:
+        _emit({"type": "assistant", "session_id": "fake-worker", "message": {"role": "assistant", "content": [
+            {"type": "tool_use", "id": f"toolu_{name}", "name": f"mcp__looper__{name}", "input": arguments}]}})
+        rpc("tools/call", {"name": name, "arguments": arguments})
     retried = re.search(r"being retried \(attempt (\d+)\)", system_prompt)
     attempt_no = int(retried.group(1)) if retried else 1
     attempts = script.get("attempts", {}).get(label) or [{"status": "completed", "files": {}}]
@@ -313,7 +324,7 @@ def main(argv: list[str]) -> int:
     elif re.search(r"^The step under review:", system_prompt, re.MULTILINE):
         _reviewer(script, system_prompt, stdin)
     elif re.search(r"^Your step:", system_prompt, re.MULTILINE):
-        _worker(script, system_prompt, stdin)
+        _worker(script, system_prompt, stdin, args)
     else:
         _planner(script, args, stdin)
     return 0

@@ -51,13 +51,17 @@ class EvalTask:
     gate_reply_after_s: float = 0.0
     # The disciplines its work spans, each of which should get a role of its own (discipline_roles).
     disciplines: tuple[Discipline, ...] = ()
+    # Where its steps that run side by side work (``step_workspaces``), over the run's ``--step-workspaces``: with
+    # ``worktree`` the working directory is a git repository and each such step has a checkout of its own.
+    step_workspaces: str | None = None
     # min_steps, min_reviews, min_retries, min_chat_turns, min_independent_pairs, min_bracketed_pairs,
     # min_parallel_workers, min_progress_notes, min_final_summary, min_plan_changes, min_planner_profile_runs,
     # min_roles_defined, min_role_runs, min_role_profile_runs, min_role_reviews, min_advisory_role_fails,
     # min_discipline_roles, min_interface_dependents; max_plan_changes, max_steps,
     # max_roles_defined, max_role_prompt_mismatches, max_role_boundary_misses, max_gate_breaches,
     # max_contract_violations; min_gates_opened, min_gates_passed, min_gates_ended_by_user, min_assumptions_stated,
-    # min_gate_parallel_runs, min_conclusion_reads; max_gates_opened, max_gate_asks_beyond_script
+    # min_gate_parallel_runs, min_conclusion_reads; max_gates_opened, max_gate_asks_beyond_script; min_room_messages,
+    # max_room_messages, max_room_unanswered
     expect: dict[str, int] = field(default_factory=dict)
     fake: dict[str, Any] = field(default_factory=dict)  # the stand-in Claude's script
 
@@ -854,6 +858,123 @@ GATE_TASKS: tuple[EvalTask, ...] = (
     ),
 )
 TASKS = TASKS + GATE_TASKS
+
+
+# --- The agent room: its agents use it when the work needs them to, and leave it alone when it does not ---
+
+
+_ROOM_CHECK = """\
+import contextlib, io, sys
+sys.path.insert(0, ".")
+import store, cli
+out = io.StringIO()
+with contextlib.redirect_stdout(out):
+    cli.main(["widget", "3"])
+assert out.getvalue().strip() == "1", f"cli printed {out.getvalue()!r}, not the id 1"
+assert len(store.RECORDS) == 1, f"store.RECORDS has {len(store.RECORDS)} records after one add"
+values = list(store.RECORDS[0].values())
+assert "widget" in values and 3 in values, f"the stored record {store.RECORDS[0]!r} lacks the name or the count 3"
+try:
+    store.add_item({})
+except KeyError:
+    pass
+else:
+    raise AssertionError("store.add_item({}) did not raise KeyError")
+"""
+
+
+def _store_and_cli(work_dir: Path) -> str | None:
+    """store.py and cli.py agree: the record cli.py builds is one store.py takes."""
+    missing = [name for name in ("store.py", "cli.py") if _read(work_dir, name) is None]
+    if missing:
+        return f"missing {', '.join(missing)}"
+    done = subprocess.run([sys.executable, "-c", _ROOM_CHECK], cwd=work_dir, capture_output=True, text=True,
+                          timeout=30, check=False)
+    if done.returncode != 0:
+        return "store.py and cli.py do not work together: " + " ".join(
+            (done.stderr.strip().splitlines() or ["(no output)"])[-1:])[:300]
+    return None
+
+
+_FAKE_STORE = """\
+RECORDS = []
+
+
+def add_item(record):
+    stored = {"name": record["name"], "count": record["count"], "id": len(RECORDS) + 1}
+    RECORDS.append(stored)
+    return stored["id"]
+"""
+_FAKE_CLI = """\
+import sys
+
+import store
+
+
+def main(argv):
+    name, count = argv
+    print(store.add_item({"name": name, "count": int(count)}))
+
+
+if __name__ == "__main__":
+    main(sys.argv[1:])
+"""
+
+ROOM_TASKS: tuple[EvalTask, ...] = (
+    EvalTask(
+        # Two parts built side by side, each in a checkout of its own, that must agree on something only one of
+        # them decides while it works: the other has to learn it from its colleague.
+        id="room_interface",
+        requirement="Build a small inventory tool in the working directory, as two parts that two steps build at "
+                    "the same time (neither step depends on the other). store.py: add_item(record) takes a dict "
+                    "with an item's name and its count, under field names the store's author picks while writing "
+                    "it (they are not given here). It raises KeyError when one of those fields is missing, "
+                    "appends the record with an \"id\" (1 for the first, then 2, and so on) to the module-level "
+                    "list RECORDS, and returns that id. cli.py: main(argv) takes [NAME, COUNT], builds the record "
+                    "with exactly the store's field names (COUNT as an int), calls store.add_item and prints the "
+                    "id it returns; `python cli.py NAME COUNT` calls main(sys.argv[1:]). When both are done, check "
+                    "them together: `python cli.py widget 3` prints 1.",
+        check=_store_and_cli,
+        step_workspaces="worktree",
+        expect={"min_parallel_workers": 2, "min_room_messages": 1},
+        fake={
+            "plan": [
+                _step("s1", "Write store.py; pick the record's field names and tell the client's step.",
+                      ["store.py stores records"]),
+                _step("s2", "Write cli.py with the field names store.py uses.", ["cli.py calls store.add_item"]),
+                _step("s3", "Run python cli.py widget 3.", ["it prints 1"], depends_on=["s1", "s2"]),
+            ],
+            "attempts": {
+                "s1": [{"status": "completed", "seconds": 1, "files": {"store.py": _FAKE_STORE}}],
+                # Long enough for the Planner's [ROOM] turn (after its 30 s batch) to answer while it runs.
+                "s2": [{"status": "completed", "seconds": 40, "files": {"cli.py": _FAKE_CLI}}],
+                "s3": [{"status": "completed", "files": {}}],
+            },
+            # The store's Worker posts its interface; the client's asks the Planner something and waits for the
+            # interface in its inbox.
+            "room_calls": {
+                "s1": [["looper_room_post", {"to": ["all"], "kind": "interface", "files": ["store.py"],
+                                             "body": 'add_item takes {"name": str, "count": int}'}]],
+                "s2": [["looper_room_post", {"to": ["planner"], "kind": "question",
+                                             "body": "Should cli.py print only the id?"}],
+                       ["looper_room_inbox", {"wait_seconds": 30}]],
+            },
+            "room_reply": "Yes: only the id.",
+        },
+    ),
+    EvalTask(
+        # A task with nothing to coordinate: the room stays quiet.
+        id="room_quiet",
+        requirement="Create note.txt in the working directory whose whole content is `room quiet`.",
+        check=_equals("note.txt", "room quiet"),
+        expect={"max_steps": 1, "max_room_messages": 0},
+        fake={
+            "plan": [_step("s1", "Create note.txt containing room quiet.", ["note.txt holds room quiet"])],
+            "attempts": {"s1": [{"status": "completed", "files": {"note.txt": "room quiet\n"}}]},
+        },
+    ),
+)
+TASKS = TASKS + ROOM_TASKS
 
 
 def select(ids: list[str] | None) -> tuple[EvalTask, ...]:

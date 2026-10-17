@@ -347,6 +347,7 @@ def run_task(
         (work_dir / name).parent.mkdir(parents=True, exist_ok=True)
         (work_dir / name).write_text(content, encoding="utf-8")
     project: dict[str, Any] = {"name": f"eval-{task.id}-{uuid.uuid4().hex[:6]}", "work_dir": str(work_dir)}
+    step_workspaces = task.step_workspaces or step_workspaces
     if step_workspaces:
         init_repository(work_dir)
         project["step_workspaces"] = step_workspaces
@@ -494,7 +495,7 @@ TASK_SETS: dict[str, tuple[str, ...]] = {
     # The tasks whose pass or fail turns on the Planner's judgment: the opus tier (evals/README.md).
     "planner": ("dependent_steps", "parallel_parts", "interface_first", "supplement_replan", "supplement_no_change",
                 "requirement_edit", "roles_tester_docs", "roles_not_needed", "roles_multi_platform", "gate_ambiguous",
-                "gate_not_needed", "gate_parallel_branch", "gate_discoverable"),
+                "gate_not_needed", "gate_parallel_branch", "gate_discoverable", "room_interface"),
 }
 
 

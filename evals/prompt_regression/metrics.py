@@ -44,7 +44,7 @@ _BROKE_CONTRACT = re.compile(r"^Planner reply broke the (PLAN|DECISION|CHAT|SUPE
 _REPAIR_REJECTED = "invalid reply after a repair turn"
 # The Planner's answer to a change to the task, with the action it chose.
 _CHANGE_ANSWERED = re.compile(r"^Planner answered a change to the task \((\w+)\)")
-_TURN_KIND = re.compile(r"^\[(PLAN|DECISION|CHAT|SUPERVISE|GATE)\]( Your last reply broke the reply contract)?")
+_TURN_KIND = re.compile(r"^\[(PLAN|DECISION|CHAT|SUPERVISE|GATE|ROOM)\]( Your last reply broke the reply contract)?")
 
 
 def planner_violations(activity: Iterable[Mapping[str, Any]]) -> int:
@@ -162,6 +162,43 @@ def role_metrics(detail: Mapping[str, Any], records: Iterable[Mapping[str, Any]]
 _CONCLUSION = "Settled with the user at gate "
 
 
+# The agent room's tools as a run's tool calls name them (``mcp__looper__<tool>``; another runtime may drop the
+# prefix).
+ROOM_TOOL_PREFIX = "looper_room_"
+
+
+def room_metrics(detail: Mapping[str, Any], activity: Iterable[Mapping[str, Any]],
+                 events: Mapping[int, list[Mapping[str, Any]]]) -> dict[str, int]:
+    """What the task's agents did in its room: the messages they posted (``room_messages``, Looper's notices and
+    escalations apart), of them the questions (``room_questions``), the ones nobody answered (``room_unanswered``)
+    and the interface posts (``room_interface``); Looper's escalations to the Planner (``room_escalations``); the
+    reminders Claude Code runs got (``room_reminders``); the posts the room refused (``room_refused``); and the runs'
+    calls of the room's tools (``room_tool_calls``, reads included)."""
+    room = detail.get("room") or {}
+    by_kind = (room.get("counts") or {}).get("by_kind") or {}
+    rows = list(activity)
+    calls = 0
+    for record_events in events.values():
+        for row in record_events:
+            event = row.get("event", row)
+            if not isinstance(event, Mapping) or event.get("type") != "assistant":
+                continue
+            calls += sum(1 for block in (event.get("message") or {}).get("content") or []
+                         if isinstance(block, Mapping) and block.get("type") == "tool_use"
+                         and ROOM_TOOL_PREFIX in str(block.get("name") or ""))
+    return {
+        "room_messages": sum(n for kind, n in by_kind.items() if kind not in ("notice", "escalation")),
+        "room_questions": int(by_kind.get("question", 0)),
+        "room_unanswered": int((room.get("counts") or {}).get("unanswered") or 0),
+        "room_interface": int(by_kind.get("interface", 0)),
+        "room_escalations": int(by_kind.get("escalation", 0)),
+        "room_reminders": sum(1 for r in rows if r.get("summary") == "Room reminder sent"),
+        "room_refused": sum(1 for r in rows if str(r.get("summary") or "").startswith("Room: ")
+                            and "refused" in str(r.get("summary") or "")),
+        "room_tool_calls": calls,
+    }
+
+
 def gate_metrics(detail: Mapping[str, Any], records: Iterable[Mapping[str, Any]], *, now: float) -> dict[str, int]:
     """The task's user gates and how they went: how many opened (``gates_opened``), the [GATE] turns whose reply was
     taken (``gate_turns``), how they closed (``gates_passed``, of them ``gates_ended_by_user``; ``gates_cancelled``),
@@ -228,7 +265,7 @@ def interface_dependents(steps: Iterable[Mapping[str, Any]]) -> int:
 
 
 def turn_kinds(records: Iterable[Mapping[str, Any]]) -> dict[str, int]:
-    """The Planner's turns by kind (``plan``, ``decision``, ``chat``, ``supervise``, ``gate``, ``repair``)."""
+    """The Planner's turns by kind (``plan``, ``decision``, ``chat``, ``supervise``, ``gate``, ``room``, ``repair``)."""
     kinds: dict[str, int] = {}
     for record in records:
         if role(record) != "planner":
@@ -454,6 +491,8 @@ def task_metrics(
         # The user gates the Planner opened, and how they went.
         **gate_metrics(detail, records, now=now),
         "gate_asks_beyond_script": gate_asks_beyond_script,
+        # What the task's agents did in its room.
+        **room_metrics(detail, activity, events),
     }
     violations = {"planner": planner_violations(activity), "worker": worker_violations,
                   "reviewer": reviewer_violations}

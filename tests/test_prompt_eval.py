@@ -699,7 +699,8 @@ def test_fake_mode_runs_every_task_and_sees_misbehaviour(tmp_path: Path) -> None
                     "roles_not_needed": (1, 0, 0, 0),
                     # A gate is a step; the steps its closing turn added follow it.
                     "gate_ambiguous": (2, 0, 0, 0), "gate_not_needed": (1, 0, 0, 0), "gate_end_early": (2, 0, 0, 0),
-                    "gate_parallel_branch": (3, 0, 0, 0), "gate_discoverable": (2, 0, 0, 0)}
+                    "gate_parallel_branch": (3, 0, 0, 0), "gate_discoverable": (2, 0, 0, 0),
+                    "room_interface": (3, 0, 0, 0), "room_quiet": (1, 0, 0, 0)}
     # Only the parts that need nothing of each other run side by side; interface_first's sit between its interface
     # step and its integration step.
     shape = {t: (by_id[t]["independent_pairs"], by_id[t]["bracketed_pairs"], by_id[t]["parallel_workers"])
@@ -717,7 +718,8 @@ def test_fake_mode_runs_every_task_and_sees_misbehaviour(tmp_path: Path) -> None
                      "roles_multi_platform": (6, 6, 4),
                      "gate_ambiguous": (0, 0, 1), "gate_not_needed": (0, 0, 1), "gate_end_early": (0, 0, 1),
                      # The clear part runs beside the gate and then beside the step the gate's answer planned.
-                     "gate_parallel_branch": (2, 0, 2), "gate_discoverable": (0, 0, 1)}
+                     "gate_parallel_branch": (2, 0, 2), "gate_discoverable": (0, 0, 1),
+                     "room_interface": (1, 1, 2), "room_quiet": (0, 0, 1)}
     assert by_id["chat_correction"]["planner_turns"]["chat"] == 1
     # Only the task whose project lets its Planner choose a profile runs a Worker on the one it chose.
     assert {t: by_id[t]["planner_profile_runs"] for t in by_id if by_id[t]["planner_profile_runs"]} == {
@@ -750,6 +752,13 @@ def test_fake_mode_runs_every_task_and_sees_misbehaviour(tmp_path: Path) -> None
     assert by_id["gate_discoverable"]["gates_opened"] == 0
     assert all(by_id[t]["gate_asks_beyond_script"] == 0 for t in by_id)
     assert by_id["gate_ambiguous"]["planner_turns"]["gate"] == 1
+    # Only room_interface's agents use the room: the store's interface, the client's question to the Planner, and the
+    # Planner's answer in a [ROOM] turn, so nothing is left unanswered; every other task's room stays quiet.
+    room = {t: tuple(by_id[t][k] for k in ("room_messages", "room_questions", "room_unanswered", "room_interface",
+                                            "room_refused", "room_tool_calls"))
+            for t in by_id if by_id[t]["room_messages"] or by_id[t]["room_tool_calls"]}
+    assert room == {"room_interface": (3, 1, 0, 1, 0, 3)}
+    assert by_id["room_interface"]["planner_turns"]["room"] == 1
     # Only the two changes that make the second step wrong change the plan.
     assert {t: by_id[t]["plan_changes"] for t in by_id if by_id[t]["plan_changes"]} == {
         "supplement_replan": 1, "requirement_edit": 1}
