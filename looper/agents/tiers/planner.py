@@ -1226,6 +1226,9 @@ class PlannerAgent:
         step.status = "dispatched"
         step.worker_id = worker_id
         previous = (step.result or {}) if (step.result or {}).get("status") == "unmerged" else {}
+        if previous and step.workspace is not None and \
+                not await workspaces.branch_exists(step.workspace.repo_dir, str(previous.get("branch") or "")):
+            previous = {}  # the user discarded the attempt's branch: nothing to bring over
         task_role: TaskRole | None = None
         if step.role is not None:
             task_role = await self._role(step.role, step.role_version if same_attempt else None)
@@ -1374,8 +1377,18 @@ class PlannerAgent:
         except workspaces.GitError as exc:
             step.workspace = await self._discard(workspace)
             raise _NoWorkspace(str(exc)) from None
+        skipped: list[str] = []
+        if self._execution.workspace_links:
+            workspace, skipped = workspaces.link(workspace, self._execution.workspace_links)
+            step.workspace = workspace
+            await self._save_workspace(workspace)
+        linked = f"; linked to the task directory's: {', '.join(workspace.links)}" if workspace.links else ""
         await self._activity("phase", f"Step {step.label} works in a worktree of its own: branch {workspace.branch}, "
-                                      f"from {workspace.target} at {workspace.base_commit[:12]}", worker=step.worker_id)
+                                      f"from {workspace.target} at {workspace.base_commit[:12]}{linked}"[:500],
+                             worker=step.worker_id)
+        if skipped:
+            await self._activity("phase", f"Step {step.label}'s worktree did not link {'; '.join(skipped)}"[:500],
+                                 worker=step.worker_id)
 
     async def _workspace_failed(self, plan: TaskPlan, step: PlanStep, problem: str) -> None:
         """A step that needed a worktree got none: the attempt failed, and the Planner decides what follows."""

@@ -333,3 +333,100 @@ class TestStepWorkspaces:
         assert [w.payload["context"] for w in h.work_items] == [{"work_dir": str(h.work_dir)}] * 2
         notes = activity(agent_db)
         assert notes.count("Steps run one at a time: the task directory's HEAD is detached") == 1
+
+    def test_a_project_s_links_reach_each_worktree_and_never_its_result(
+        self, planner_claude: Any, agent_db: Any,
+    ) -> None:
+        agent_db.get_task_project.return_value = project(
+            step_workspaces="worktree", step_workspace_links=[".venv", "node_modules", "missing"])
+        claude = planner_claude(plan(step("s1"), step("s2")), decide("accept"), decide("accept"))
+        seen: dict[str, Any] = {}
+        checks: dict[str, Any] = {}
+
+        def outcome(envelope: MessageEnvelope) -> dict[str, Any] | None:
+            key, where = envelope.payload["step_key"], Path(envelope.payload["context"]["work_dir"])
+            seen[key] = {"venv": (where / ".venv" / "pyvenv.cfg").read_text(), "link": (where / ".venv").is_symlink()}
+            (where / f"{key}.txt").write_text(f"{key}\n")
+            git(where, "add", "-A")  # node_modules/ does not match a link: this commits it
+            git(where, "commit", "-qm", f"worker: {key}")
+            return {**WORK_OK, "changed_files": {f"{key}.txt": "written"}}
+
+        async def scenario(h: Harness) -> None:
+            init_repo(h.work_dir)
+            (h.work_dir / ".gitignore").write_text(".venv\nnode_modules/\n")
+            git(h.work_dir, "add", "-A")
+            git(h.work_dir, "commit", "-qm", "ignore")
+            (h.work_dir / ".venv").mkdir()
+            (h.work_dir / ".venv" / "pyvenv.cfg").write_text("home = /usr\n")
+            (h.work_dir / "node_modules" / "pkg").mkdir(parents=True)
+            (h.work_dir / "node_modules" / "pkg" / "index.js").write_text("module\n")
+            await h.start()
+            await h.finished()
+            checks["tree"] = git(h.work_dir, "ls-tree", "--name-only", "HEAD").split()
+            checks["modules"] = (h.work_dir / "node_modules" / "pkg" / "index.js").read_text()
+
+        h = drive(claude, outcome, scenario)
+        assert h.final().payload["status"] == "completed"  # type: ignore[union-attr]
+        assert seen == {key: {"venv": "home = /usr\n", "link": True} for key in ("s1", "s2")}
+        assert checks["tree"] == [".gitignore", "s1.txt", "s2.txt", "shared.txt"]
+        assert checks["modules"] == "module\n"  # the task directory's own, not a link to itself
+        assert [row["links"] for row in agent_db.store.workspaces.values()] == [[".venv", "node_modules"]] * 2
+        notes = activity(agent_db)
+        assert sum(n.endswith("; linked to the task directory's: .venv, node_modules") for n in notes) == 2
+        assert notes.count("Step s1's worktree did not link missing: the task directory has none") == 1
+
+    def test_a_checkout_over_the_size_limit_runs_the_steps_one_at_a_time(
+        self, planner_claude: Any, agent_db: Any, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        agent_db.get_task_project.return_value = project(step_workspaces="worktree")
+        monkeypatch.setattr(ws, "CHECKOUT_LIMIT_BYTES", 4)
+        claude = planner_claude(plan(step("s1"), step("s2")), decide("accept"), decide("accept"))
+
+        async def scenario(h: Harness) -> None:
+            init_repo(h.work_dir)  # shared.txt: 6 bytes
+            await h.start()
+            await h.finished()
+
+        h = drive(claude, writes({}), scenario)
+        assert h.final().payload["status"] == "completed"  # type: ignore[union-attr]
+        assert h.dispatched_at_turn == [1, 2]
+        assert [w.payload["context"] for w in h.work_items] == [{"work_dir": str(h.work_dir)}] * 2
+        assert activity(agent_db).count(
+            "Steps run one at a time: the checkout is 6 B, over the 4 B limit for step worktrees") == 1
+        assert agent_db.store.workspaces == {}
+
+    def test_a_retry_is_not_told_of_an_earlier_branch_that_was_discarded(
+        self, planner_claude: Any, agent_db: Any, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        agent_db.get_task_project.return_value = project(step_workspaces="worktree")
+        claude = planner_claude(plan(step("s1"), step("s2")), decide("accept"), decide("accept"),
+                                decide("retry", reason="merge conflict", feedback="redo it on main"), decide("accept"))
+        asked: list[tuple[str, str]] = []
+
+        async def discarded(repo_dir: str, branch: str) -> bool:
+            asked.append((repo_dir, branch))
+            return False  # as if the user discarded it from the task page
+
+        monkeypatch.setattr(ws, "branch_exists", discarded)
+        seen: dict[str, list[Any]] = {}
+
+        def outcome(envelope: MessageEnvelope) -> dict[str, Any] | None:
+            key, context = envelope.payload["step_key"], envelope.payload["context"]
+            seen.setdefault(key, []).append(context)
+            if key == "s2" and len(seen["s2"]) == 1:
+                (Path(context["work_dir"]) / "shared.txt").write_text("a\nfrom s2\nc\n")
+                return None  # held until s1 is merged
+            (Path(context["work_dir"]) / "shared.txt").write_text(f"a\nfrom {key}\nc\n")
+            return WORK_OK
+
+        async def scenario(h: Harness) -> None:
+            init_repo(h.work_dir)
+            await h.start()
+            await h.until(lambda: len(h.held) == 1 and any("s1 merged into main" in n for n in activity(agent_db)))
+            await h.release(WORK_OK)
+            await h.finished()
+
+        h = drive(claude, outcome, scenario)
+        assert h.final().payload["status"] == "completed"  # type: ignore[union-attr]
+        assert asked == [(str(h.work_dir.resolve()), "looper/t1/s2-2")]  # the repository's top level
+        assert "previous_branch" not in seen["s2"][1]["workspace"]

@@ -196,6 +196,9 @@ def store(monkeypatch: pytest.MonkeyPatch) -> _Store:
     from looper.db import user_gates
 
     monkeypatch.setattr(user_gates, "list_for_task", AsyncMock(return_value=[]))
+    from looper.db import step_workspaces
+
+    monkeypatch.setattr(step_workspaces, "list_for_task", AsyncMock(return_value=[]))
     monkeypatch.setattr(db_llm_records, "role_runs", AsyncMock(return_value=[]))
     monkeypatch.setattr(db_llm_records, "list_task_runs", AsyncMock(return_value=[]))
     return fake
@@ -239,8 +242,8 @@ class TestProjectEndpoints:
         assert set(body) == {"project_id", "name", "description", "work_dir", "background", "created_at",
                              "updated_at", "task_count", "active_count", "schedule_count", "task_budget_usd", "task_budget_action",
                              "supervise_interval_seconds", "review_policy", "distill_lessons", "step_workspaces",
-                             "max_step_retries", "planner_roles", "role_text_max_chars", "user_gates",
-                             "gate_reminder_hours"}
+                             "step_workspace_links", "max_step_retries", "planner_roles", "role_text_max_chars",
+                             "user_gates", "gate_reminder_hours"}
 
     def test_work_dir_is_optional(self, store: _Store) -> None:
         status, body = _call("POST", "/api/projects", {"name": "notes"})
