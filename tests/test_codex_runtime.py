@@ -610,3 +610,26 @@ def test_a_run_that_keeps_its_session_has_a_home_of_its_own_and_is_not_ephemeral
     for name in ("config.toml", "AGENTS.md"):  # the run home's, as a resident session gets them
         assert (keep / name).read_text() == (run_home / name).read_text()
     assert kept[4:-1] == plain[4:-2]
+
+
+def test_a_consult_resumes_a_copy_of_the_runs_session_in_the_read_only_sandbox(tmp_path: Path) -> None:
+    from dataclasses import replace
+
+    from looper.agents.runtimes import RuntimeUnsupported
+
+    root = tmp_path / "runtime"
+    kept = root / ".local" / "codex" / "run-sessions" / "task-1" / "worker-1"
+    (kept / "sessions").mkdir(parents=True)
+    (kept / "sessions" / "rollout.jsonl").write_text("{}\n")
+    fork = root / ".local" / "codex" / "consult-sessions" / "task-1" / "consult-1"
+    launch = replace(_launch(), read_only=True)
+    command = CODEX.consult_command("codex", cwd=tmp_path, prompt_file=_prompt_file(root), launch=launch,
+                                    session_id="thread-1", session_dir=kept, fork_dir=fork)
+    assert command[:4] == ["env", f"CODEX_HOME={fork}", "codex", "exec"] and command[-3:] == ["resume", "thread-1", "-"]
+    assert "--dangerously-bypass-approvals-and-sandbox" not in command
+    assert command[command.index('sandbox_mode="read-only"') - 1] == "-c"
+    assert (fork / "sessions" / "rollout.jsonl").is_file() and (fork / "config.toml").is_file()
+    assert (kept / "sessions" / "rollout.jsonl").is_file()  # the run's own session stays
+    with pytest.raises(RuntimeUnsupported):
+        CODEX.consult_command("codex", cwd=tmp_path, prompt_file=_prompt_file(root), launch=launch,
+                              session_id="thread-1", session_dir=None, fork_dir=fork)

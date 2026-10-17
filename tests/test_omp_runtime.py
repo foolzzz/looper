@@ -631,3 +631,20 @@ def test_a_run_that_keeps_its_session_names_its_directory_instead_of_no_session(
     kept = OMP.run_command("omp", cwd=work, prompt_file=_prompt_file(tmp_path), launch=_launch(), session_dir=keep)
     assert plain[-1] == "--no-session" and "--no-session" not in kept
     assert kept[-2:] == ["--session-dir", str(keep)] and keep.is_dir() and kept[:-2] == plain[:-1]
+
+
+def test_a_consult_resumes_a_copy_of_the_runs_session_with_only_the_reading_tools(tmp_path: Path) -> None:
+    from dataclasses import replace
+
+    work = tmp_path / "work"
+    (work / ".git").mkdir(parents=True)
+    kept = tmp_path / "runtime" / ".local" / "omp" / "run-sessions" / "task-1" / "worker-1"
+    kept.mkdir(parents=True)
+    (kept / "session.jsonl").write_text("{}\n")
+    fork = tmp_path / "runtime" / ".local" / "omp" / "consult-sessions" / "task-1" / "consult-1"
+    command = OMP.consult_command("omp", cwd=work, prompt_file=_prompt_file(tmp_path),
+                                  launch=replace(_launch(), read_only=True), session_id="s-1", session_dir=kept,
+                                  fork_dir=fork)
+    assert _flag(command, "--tools") == ["read,glob,grep"]
+    assert command[-4:] == ["--session-dir", str(fork), "--resume", "s-1"] and (fork / "session.jsonl").is_file()
+    assert "--tools" not in OMP.run_command("omp", cwd=work, prompt_file=_prompt_file(tmp_path), launch=_launch())
