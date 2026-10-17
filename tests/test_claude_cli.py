@@ -187,6 +187,19 @@ class TestClaudeRunRecorder:
         assert (finish["input_tokens"], finish["output_tokens"]) == (100_000, 10_000)
         assert finish["cost_usd"] == (pytest.approx(cost) if cost is not None else None)
 
+    def test_a_close_the_database_refuses_is_tried_once_more(self, agent_db: Any) -> None:
+        agent_db.finish_record.side_effect = [ConnectionResetError("connection lost"), None]
+        recorder = self._recorder()
+
+        async def _run() -> None:
+            await recorder.start()
+            await recorder.finish(output_text="hi", result_event={"type": "result", "subtype": "success",
+                                                                  "is_error": False, "total_cost_usd": 0.5})
+
+        asyncio.run(_run())
+        assert [(call.kwargs["status"], call.kwargs["cost_usd"]) for call in agent_db.finish_record.await_args_list] \
+            == [("completed", 0.5)] * 2
+
     def test_a_stop_during_the_close_does_not_cut_the_write_short_and_a_hung_write_is_given_up(
         self, agent_db: Any, monkeypatch: pytest.MonkeyPatch,
     ) -> None:

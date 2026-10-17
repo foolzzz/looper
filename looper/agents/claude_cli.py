@@ -816,9 +816,12 @@ class AutonomousRun:
 
 # How often a running record's heartbeat (last_output_at) is written.
 _HEARTBEAT_INTERVAL = 10.0
-# How long closing a run's record may take. A caller cancelled meanwhile (its run being stopped) does not stop the
-# write; the limit keeps a stopping server from waiting on a database that does not answer.
+# How long closing a run's record may take, a second try after a database error included. A caller cancelled
+# meanwhile (its run being stopped) does not stop the write; the limit keeps a stopping server from waiting on a
+# database that does not answer.
 CLOSE_TIMEOUT_SEC = 5.0
+# How long the close waits before it tries the database again.
+_CLOSE_RETRY_SEC = 0.5
 # The record writes under way, held until each ends.
 _closing: set[asyncio.Task[None]] = set()
 
@@ -888,9 +891,13 @@ class ClaudeRunRecorder:
         system_prompt: SystemPrompt | None = None,
         launch: Launch | None = None,
         autonomous: bool = False,
+        whole_process: bool = False,
     ) -> None:
         self._agent_id = agent_id
         self._autonomous = autonomous
+        # The run is a whole process (a Worker's or Reviewer's): its last result reports the run's own usage.
+        self._whole_process = whole_process
+        self._result: dict[str, Any] | None = None  # that result, once it came
         self._launch = launch
         self._task_id = task_id or None
         self._command = command
@@ -970,6 +977,8 @@ class ClaudeRunRecorder:
             return
         if event.get("type") == "stream_event":
             return
+        if self._whole_process and event.get("type") == "result":
+            self._result = event
         if event.get("type") == "system" and event.get("subtype") == "init":
             self._model = event.get("model") or self._model
             self._session_id = event.get("session_id") or self._session_id
@@ -1094,14 +1103,21 @@ class ClaudeRunRecorder:
 
     async def end_left_open(self, exc: BaseException | None = None) -> None:
         """Close the record if the run left it open, ended as ``ended_by(exc)`` says, with what the run's usage
-        events added up to; nothing for a record closed already."""
+        events added up to, or, for a whole process whose result came, what that result reports; nothing for a
+        record closed already."""
         if isinstance(exc, Exception):
             why = f"Looper stopped following the run after an error: {type(exc).__name__}: {exc}"
         elif exc is not None:
             why = "the run was stopped before it ended: it was killed, or its task or the server stopped"
         else:
             why = "the run ended without its outcome recorded"
-        await self._close(ended_by(exc), output_text=None, session_id=None, usage=self._usage_so_far, error=why)
+        usage = self._usage_so_far
+        if self._result is not None:
+            why += "; it had ended with its result, which Looper had not finished handling"
+            usage = run_usage(self._result, price=self._launch.price if self._launch is not None else None) \
+                .filled_from(usage)
+        await self._close(ended_by(exc), output_text=None, session_id=(self._result or {}).get("session_id"),
+                          usage=usage, error=why)
 
     async def _close(self, status: RecordStatus, *, output_text: str | None, session_id: str | None, usage: Usage,
                      error: str | None, outcome: str | None = None) -> None:
@@ -1113,32 +1129,45 @@ class ClaudeRunRecorder:
         if self._record_id is None or self._closed:
             return
         self._closed = True
-        from ..db import llm_records
-
-        cost = self._runtime().cost(usage, self._provider())
-        usage = cost.usage
-        write = asyncio.ensure_future(asyncio.wait_for(llm_records.finish_record(
-            self._record_id,
-            status=status.value,
-            output_text=output_text,
-            session_id=session_id or self._session_id,
-            input_tokens=usage.input_tokens,
-            output_tokens=usage.output_tokens,
-            cache_read_tokens=usage.cache_read_tokens,
-            cache_creation_tokens=usage.cache_creation_tokens,
-            cost_usd=usage.cost_usd,
-            cost_source=cost.source.value,
-            context_tokens=self._context_tokens,
-            compactions=self._compactions,
-            duration_ms=int((_clock() - self._started) * 1000),
-            model=self._model,
-            error=error,
-            outcome=outcome,
-        ), CLOSE_TIMEOUT_SEC))
+        try:
+            cost = self._runtime().cost(usage, self._provider())
+            usage = cost.usage
+            fields = {
+                "status": status.value,
+                "output_text": output_text,
+                "session_id": session_id or self._session_id,
+                "input_tokens": usage.input_tokens,
+                "output_tokens": usage.output_tokens,
+                "cache_read_tokens": usage.cache_read_tokens,
+                "cache_creation_tokens": usage.cache_creation_tokens,
+                "cost_usd": usage.cost_usd,
+                "cost_source": cost.source.value,
+                "context_tokens": self._context_tokens,
+                "compactions": self._compactions,
+                "duration_ms": int((_clock() - self._started) * 1000),
+                "model": self._model,
+                "error": error,
+                "outcome": outcome,
+            }
+            write = asyncio.ensure_future(asyncio.wait_for(self._write_end(fields), CLOSE_TIMEOUT_SEC))
+        except Exception:  # recording never fails the run; the next start ends the record
+            logger.warning("could not close llm record for %s", self._agent_id, exc_info=True)
+            return
         _closing.add(write)
         write.add_done_callback(self._closed_write)
         with contextlib.suppress(Exception):  # logged once the write ends (_closed_write)
             await asyncio.shield(write)
+
+    async def _write_end(self, fields: dict[str, Any]) -> None:
+        """``finish_record``, tried once more after a database error."""
+        from ..db import llm_records
+
+        try:
+            await llm_records.finish_record(self._record_id, **fields)
+        except Exception:
+            logger.warning("could not close llm record for %s; trying again", self._agent_id, exc_info=True)
+            await asyncio.sleep(_CLOSE_RETRY_SEC)
+            await llm_records.finish_record(self._record_id, **fields)
 
     def _closed_write(self, write: asyncio.Task[None]) -> None:
         _closing.discard(write)

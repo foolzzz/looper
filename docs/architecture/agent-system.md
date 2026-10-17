@@ -2045,12 +2045,16 @@ So:
   cancellation arrives meanwhile, for at most `CLOSE_TIMEOUT_SEC` (5 s). A
   run that ends without a result keeps what its usage events added up to: its
   tokens, and their cost when Looper prices the run; with Claude Code's own
-  pricing its cost is not known. At startup, before anything runs, `serve`
-  ends every record still `running` as `interrupted`
-  (`llm_records.end_unfinished_records`, logged with the count): each is a run
-  a previous server that was killed, crashed or stopped did not see end, and
-  its usage, held in memory until a run ends, is not known. A second start
-  changes nothing.
+  pricing its cost is not known. A Worker's or Reviewer's run that Looper
+  stops after its result came keeps what that result reports, and a turn of
+  the Planner or the Manager is recorded before its session is saved. A
+  close that hits a database error is tried once more. At startup, before
+  anything runs, `serve` ends every record still `running` as `interrupted`
+  (`llm_records.end_unfinished_records`, logged with the count), with
+  `finished_at` its last output (its start without one): each is a run a
+  previous server that was killed, crashed or stopped did not see end, and its
+  usage, held in memory until a run ends, is not known. A second start changes
+  nothing.
 - **A task's cost** (`llm_records.task_costs`) is the sum of its Planner's,
   Workers' and Reviewers' runs, in total and by role, with the run count. It
   also counts `running` runs (cost not known yet) and `unpriced_runs`

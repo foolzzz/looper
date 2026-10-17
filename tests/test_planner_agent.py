@@ -556,15 +556,19 @@ class TestResidentClaude:
         assert [call.kwargs["cost_usd"] for call in agent_db.finish_record.await_args_list] == [0.25, None, 0.25]
         assert h.planner._plan.session_totals == Usage(cost_usd=0.5)  # type: ignore[union-attr]
 
-    @pytest.mark.parametrize(("ends", "status"), [("claude_killed", "failed"), ("stopped_while_saving", "interrupted")])
+    @pytest.mark.parametrize(("ends", "status", "cost"), [
+        ("claude_killed", "failed", None), ("stopped_mid_turn", "interrupted", None),
+        ("stopped_while_saving", "completed", 0.25),
+    ])
     def test_a_turn_ends_its_record_however_the_turn_ends(
-        self, planner_claude: Any, agent_db: Any, ends: str, status: str,
+        self, planner_claude: Any, agent_db: Any, ends: str, status: str, cost: float | None,
     ) -> None:
-        """A turn whose Claude is killed mid-turn ends ``failed``; one cut off by its task's stop after Claude
-        answered, while the Planner saves its session, ends ``interrupted``. No record is left ``running``."""
+        """A turn whose Claude is killed mid-turn ends ``failed``; one its task's stop cuts off mid-turn ends
+        ``interrupted``; one stopped after Claude answered, while the Planner saves its session, is recorded
+        already, with its cost. No record is left ``running``."""
         import signal
 
-        claude = planner_claude("<hang>" if ends == "claude_killed" else plan(step("s1")))
+        claude = planner_claude(plan(step("s1")) if ends == "stopped_while_saving" else "<hang>")
         saving = asyncio.Event()
         save = agent_db.save_session.side_effect
 
@@ -582,13 +586,15 @@ class TestResidentClaude:
                 await h.until(lambda: claude.turns())
                 os.kill(claude.pids()[0], signal.SIGKILL)
                 await h.until(lambda: agent_db.finish_record.await_count)
+            elif ends == "stopped_mid_turn":
+                await h.until(lambda: claude.turns())  # then the task stops
             else:
                 await h.until(saving.is_set)  # then the task stops
 
         drive(claude, lambda envelope: None, scenario)
         finishes = agent_db.finish_record.await_args_list
         assert agent_db.start_record.await_count == len(finishes)
-        assert finishes[0].kwargs["status"] == status
+        assert (finishes[0].kwargs["status"], finishes[0].kwargs["cost_usd"]) == (status, cost)
         if ends == "claude_killed":
             assert "exit code -9" in finishes[0].kwargs["error"]
 

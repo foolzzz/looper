@@ -777,6 +777,7 @@ class WorkerPool:
             step_id=payload.get("task_id") or None,
             system_prompt=system_prompt,
             launch=launch,
+            whole_process=True,
         )
         async with recorder:  # whatever ends the run (a kill, its task or the server stopping) ends its record
             logger.info("worker %s starting subprocess: %s (cwd=%s)", worker_id, command[0], work_dir)

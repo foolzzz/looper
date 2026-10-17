@@ -2605,26 +2605,30 @@ class PlannerAgent:
             result_event = turn.result_event
             final_text = str((result_event or {}).get("result") or "")
             error: str | None = None
+            over_cap = process.launch.runtime.budget_error(result_event)
             if result_event is None:
                 error = f"Claude Code exited before finishing the turn (exit code {turn.exit_code})"
-            elif process.launch.runtime.budget_error(result_event):
-                # The process answers every later turn the same way at once: the next turn starts a new one,
-                # with a new cap, that resumes the session.
-                error = process.launch.runtime.budget_error(result_event)
-                await self._claude.stop()
+            elif over_cap:
+                error = over_cap
             elif result_event.get("is_error") or result_event.get("subtype") != "success":
                 error = f"Claude Code turn did not succeed ({result_event.get('subtype') or 'error'})"
             elif not final_text.strip():
                 error = "Claude Code returned an empty reply"
-            if result_event is not None:
-                plan.session_totals = self._claude.totals
-                await self._save_session(plan)
+            # The turn is over: recorded first, so a stop that comes while Claude stops or the session is saved
+            # keeps what it spent.
             await recorder.finish(
                 output_text=final_text or None,
                 result_event=result_event,
                 error=error,
                 usage=turn.usage,
             )
+            if over_cap:
+                # The process answers every later turn the same way at once: the next turn starts a new one,
+                # with a new cap, that resumes the session.
+                await self._claude.stop()
+            if result_event is not None:
+                plan.session_totals = self._claude.totals
+                await self._save_session(plan)
             if error:
                 raise PlannerTurnError(error)
             return final_text

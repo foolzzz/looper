@@ -64,16 +64,18 @@ async def start_record(
 
 
 async def end_unfinished_records(*, pool: asyncpg.Pool | None = None) -> int:
-    """End every record still ``running`` as ``interrupted``, now; returns how many.
+    """End every record still ``running`` as ``interrupted``; returns how many.
 
     Called at startup before any agent runs, when each such record is a run the
     previous server did not see end: it was killed, crashed or stopped first.
-    What the run had recorded stays; its usage, kept in memory until a run
-    ends, is not known. Running it again changes nothing.
+    It ended at its last output as far as anyone knows (its start without
+    one). What the run had recorded stays; its usage, kept in memory until a
+    run ends, is not known. Running it again changes nothing.
     """
     pool = pool or get_pool()
     result = await pool.execute(
-        "UPDATE llm_records SET status = $1, finished_at = now(), error = COALESCE(error, $2) WHERE status = $3",
+        "UPDATE llm_records SET status = $1, finished_at = COALESCE(last_output_at, created_at), "
+        "error = COALESCE(error, $2) WHERE status = $3",
         RecordStatus.INTERRUPTED.value, UNFINISHED_AT_START, RecordStatus.RUNNING.value,
     )
     return int(result.split()[-1])

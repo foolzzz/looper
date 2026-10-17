@@ -259,13 +259,15 @@ def test_runs_a_previous_server_left_running_end_at_startup_and_count_as_ended(
         await run("planner-task-a", "completed", 0.25)
         await run("worker-1", "interrupted", 0.1)  # stopped mid-run, with what its requests cost
         left = [await run("worker-2", "running"), await run("planner-task-a", "running")]  # the server was killed
+        await llm_records.touch_record(left[0], pool=pool)  # it wrote output; the other never did
         server = _server()
         assert (await _get(server, "/api/tasks/task-a"))[1]["cost"]["running"] == 2
 
         assert await llm_records.end_unfinished_records(pool=pool) == 2
         ended = [await llm_records.get_record(record_id, pool=pool) for record_id in left]
-        assert [(r["status"], bool(r["finished_at"]), bool(r["error"])) for r in ended] \
-            == [("interrupted", True, True)] * 2
+        assert [(r["status"], bool(r["error"])) for r in ended] == [("interrupted", True)] * 2
+        # Each ended at its last output, as far as is known, or at its start without one.
+        assert [r["finished_at"] for r in ended] == [ended[0]["last_output_at"], ended[1]["created_at"]]
         assert await llm_records.end_unfinished_records(pool=pool) == 0
         assert [await llm_records.get_record(record_id, pool=pool) for record_id in left] == ended
 
