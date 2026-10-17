@@ -279,14 +279,15 @@ function WaitingGate({
   const active = isActiveTask(task);
   // A completed task's gates take no message (409); a stopped, failed or cancelled one keeps them for its restart.
   const takes = task.group !== "completed";
-  // The Planner answers: a message of the user's waits for it, or its automatic retry of a failed turn is due.
-  const answering = gate.waiting_on === "planner";
+  // The Planner answers: a message of the user's waits for it, or its automatic retry of a failed turn is due; only
+  // while the task runs (a stopped one keeps the message for its restart).
+  const answering = active && gate.waiting_on === "planner";
   // Otherwise, the user's messages a failed Planner turn had.
   const notDelivered = answering ? 0 : gate.not_delivered;
   // While it is the user's turn, the thread changes only with the gate, which the task page reads again anyway.
   const thread = useGateThread(task.task_id, gate.step, {
     enabled: true,
-    follow: active && answering,
+    follow: answering,
     signature: JSON.stringify(gate),
   });
   // The task status a message was kept in (its Planner was not running): the note holds until the status changes.
