@@ -17,7 +17,7 @@
   "reps": 3,
   "stopped_by_cap": false,
   "aborted": null,
-  "total_cost_usd": 3.485641,
+  "total_cost_usd": 3.47801,
   "dialogs": [
     {
       "id": "ask_project",
@@ -206,9 +206,9 @@
       "outcome": "pass",
       "success": true,
       "problems": [],
-      "calls": 3,
-      "duration_s": 25.0,
-      "cost_usd": 0.132902,
+      "calls": 1,
+      "duration_s": 22.8,
+      "cost_usd": 0.132976,
       "models": {
         "manager": [
           "claude-opus-5-5"
@@ -223,20 +223,12 @@
       "turns": [
         {
           "calls": [
-            "looper_concurrency:needs_confirmation"
-          ],
-          "problem": null
-        },
-        {
-          "calls": [
             "looper_concurrency:ok"
           ],
           "problem": null
         },
         {
-          "calls": [
-            "looper_concurrency:ok"
-          ],
+          "calls": [],
           "problem": null
         }
       ]
@@ -574,9 +566,9 @@
       "outcome": "pass",
       "success": true,
       "problems": [],
-      "calls": 3,
-      "duration_s": 30.1,
-      "cost_usd": 0.133723,
+      "calls": 2,
+      "duration_s": 31.9,
+      "cost_usd": 0.136585,
       "models": {
         "manager": [
           "claude-opus-5-5"
@@ -591,19 +583,13 @@
       "turns": [
         {
           "calls": [
-            "looper_concurrency:needs_confirmation"
-          ],
-          "problem": null
-        },
-        {
-          "calls": [
             "looper_concurrency:ok"
           ],
           "problem": null
         },
         {
           "calls": [
-            "looper_concurrency:ok"
+            "looper_tasks:ok"
           ],
           "problem": null
         }
@@ -942,9 +928,9 @@
       "outcome": "pass",
       "success": true,
       "problems": [],
-      "calls": 3,
-      "duration_s": 24.0,
-      "cost_usd": 0.140754,
+      "calls": 2,
+      "duration_s": 24.8,
+      "cost_usd": 0.130187,
       "models": {
         "manager": [
           "claude-opus-5-5"
@@ -959,19 +945,13 @@
       "turns": [
         {
           "calls": [
-            "looper_concurrency:needs_confirmation"
-          ],
-          "problem": null
-        },
-        {
-          "calls": [
             "looper_concurrency:ok"
           ],
           "problem": null
         },
         {
           "calls": [
-            "looper_concurrency:ok"
+            "looper_tasks:ok"
           ],
           "problem": null
         }

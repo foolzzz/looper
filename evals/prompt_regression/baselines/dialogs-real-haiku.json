@@ -17,7 +17,7 @@
   "reps": 3,
   "stopped_by_cap": false,
   "aborted": null,
-  "total_cost_usd": 1.540366,
+  "total_cost_usd": 1.508555,
   "dialogs": [
     {
       "id": "ask_project",
@@ -206,9 +206,9 @@
       "outcome": "pass",
       "success": true,
       "problems": [],
-      "calls": 3,
-      "duration_s": 28.0,
-      "cost_usd": 0.07149,
+      "calls": 1,
+      "duration_s": 26.7,
+      "cost_usd": 0.049552,
       "models": {
         "manager": [
           "claude-haiku-4-5-20251001"
@@ -223,20 +223,12 @@
       "turns": [
         {
           "calls": [
-            "looper_concurrency:needs_confirmation"
-          ],
-          "problem": null
-        },
-        {
-          "calls": [
             "looper_concurrency:ok"
           ],
           "problem": null
         },
         {
-          "calls": [
-            "looper_concurrency:ok"
-          ],
+          "calls": [],
           "problem": null
         }
       ]
@@ -577,9 +569,9 @@
       "outcome": "pass",
       "success": true,
       "problems": [],
-      "calls": 3,
-      "duration_s": 28.1,
-      "cost_usd": 0.072832,
+      "calls": 1,
+      "duration_s": 27.8,
+      "cost_usd": 0.070058,
       "models": {
         "manager": [
           "claude-haiku-4-5-20251001"
@@ -594,20 +586,12 @@
       "turns": [
         {
           "calls": [
-            "looper_concurrency:needs_confirmation"
-          ],
-          "problem": null
-        },
-        {
-          "calls": [
             "looper_concurrency:ok"
           ],
           "problem": null
         },
         {
-          "calls": [
-            "looper_concurrency:ok"
-          ],
+          "calls": [],
           "problem": null
         }
       ]
@@ -945,9 +929,9 @@
       "outcome": "pass",
       "success": true,
       "problems": [],
-      "calls": 3,
-      "duration_s": 28.0,
-      "cost_usd": 0.076166,
+      "calls": 1,
+      "duration_s": 24.7,
+      "cost_usd": 0.069067,
       "models": {
         "manager": [
           "claude-haiku-4-5-20251001"
@@ -962,20 +946,12 @@
       "turns": [
         {
           "calls": [
-            "looper_concurrency:needs_confirmation"
-          ],
-          "problem": null
-        },
-        {
-          "calls": [
             "looper_concurrency:ok"
           ],
           "problem": null
         },
         {
-          "calls": [
-            "looper_concurrency:ok"
-          ],
+          "calls": [],
           "problem": null
         }
       ]
