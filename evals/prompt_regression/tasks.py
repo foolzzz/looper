@@ -468,6 +468,8 @@ def _tip_feature(work_dir: Path) -> str | None:
     except ValueError:
         return "api/tip_api.json is not JSON"
     path, query, fields = (api.get(key) for key in ("path", "query", "fields")) if isinstance(api, dict) else [None] * 3
+    if isinstance(fields, dict):  # the fields with their types: their names are what counts
+        fields = list(fields)
     if not (isinstance(path, str) and path.startswith("/") and isinstance(query, str) and query
             and isinstance(fields, list) and fields and all(isinstance(f, str) and f for f in fields)):
         return "api/tip_api.json does not give a path, a query parameter and the response fields"

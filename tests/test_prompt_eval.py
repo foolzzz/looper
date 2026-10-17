@@ -182,6 +182,24 @@ def test_a_discipline_counts_once_it_has_a_role_of_its_own_that_names_its_conven
     assert metrics.discipline_roles(strong, ()) == 0
 
 
+def test_the_multi_platform_check_reads_the_interface_the_parts_must_agree_on(tmp_path: Path) -> None:
+    from evals.prompt_regression.tasks import TASKS
+
+    task = next(t for t in TASKS if t.id == "roles_multi_platform")
+    for name, content in {**task.files, **{n: c for a in task.fake["attempts"].values() for n, c in a[0]["files"].items()}
+                          }.items():
+        (tmp_path / name).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / name).write_text(content, encoding="utf-8")
+    assert task.check(tmp_path) is None
+    interface = tmp_path / "api" / "tip_api.json"
+    interface.write_text('{"path": "/api/tip", "query": "day", "fields": {"day": "int", "tip": "string"}}')
+    assert task.check(tmp_path) is None  # the fields with their types
+    interface.write_text('{"path": "/api/tip", "query": "day", "fields": ["day", "tip", "author"]}')
+    assert task.check(tmp_path) == "handle(/api/tip?day=3) answered 200 with ['day', 'tip']"
+    interface.write_text('{"path": "/api/tip", "query": "d", "fields": ["day", "tip"]}')
+    assert "answered 404" in task.check(tmp_path)
+
+
 def test_a_final_summary_needs_every_field_heading() -> None:
     full = "## Delivered\na\n\n## How to use\nb\n\n## Verification\nc\n\n## Open issues\nnone"
     assert metrics.final_summary({"result_summary": full}) == 1
