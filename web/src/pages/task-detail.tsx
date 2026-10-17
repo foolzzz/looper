@@ -31,7 +31,7 @@ import { ScheduledBadge } from "@/components/scheduled-badge";
 import { historyHref } from "@/pages/agent-history";
 import { TaskCostBreakdown } from "@/components/task-cost";
 import { ContinueAtCap, TaskSpendMeter } from "@/components/task-budget";
-import { TaskAgentsSection } from "@/components/task-agents";
+import { RoleProfile, TaskAgentsSummary, TaskAgentsTab } from "@/components/task-agents-tab";
 import { GateBadge, TaskGates } from "@/components/task-gates";
 import { GATE_STATES, gateAnchor, stepAnchor } from "@/lib/gates";
 import { costBasis, costCaveats, formatUsd } from "@/lib/usage";
@@ -64,7 +64,6 @@ import {
   setTaskProject,
   fetchKnowledgeDrafts,
   type KnowledgeDraft,
-  type TaskAgents,
   type TaskDetail,
   type Supplement,
   type ManagerAction,
@@ -78,7 +77,7 @@ import {
   type UserGate,
 } from "@/lib/api";
 
-type Tab = "overview" | "pipeline" | "sessions" | "conversation";
+type Tab = "overview" | "pipeline" | "agents" | "sessions" | "conversation";
 
 function stepStatusIcon(status: string) {
   switch (status) {
@@ -610,14 +609,14 @@ function showGate(step: TaskStep) {
 function OverviewTab({
   task,
   onContinued,
-  onAgents,
+  onOpenAgents,
   onGateChanged,
   gateFocus,
   onGateShown,
 }: {
   task: TaskDetail;
   onContinued: () => void;
-  onAgents: (agents: TaskAgents) => void;
+  onOpenAgents: () => void;
   /** After the user wrote in a gate or ended its discussion, with the gate as the server answered. */
   onGateChanged: (gate: UserGate) => void;
   /** The gate step the Pipeline asked to show, until it is shown. */
@@ -710,9 +709,7 @@ function OverviewTab({
 
       <TaskConfigSection task={task} />
 
-      {task.agents && (
-        <TaskAgentsSection taskId={task.task_id} projectId={task.project_id} agents={task.agents} onSaved={onAgents} />
-      )}
+      {task.agents && <TaskAgentsSummary agents={task.agents} onOpen={onOpenAgents} />}
 
       <TaskRoles task={task} />
 
@@ -936,7 +933,6 @@ const ROLE_TEXT = "mt-1 max-h-64 overflow-y-auto whitespace-pre-wrap break-words
 /** A role's line (kind, version, profile, the steps that name it, its numbers), opening on its prompt, harness and
  * versions. */
 function RoleRow({ role }: { role: PlannerRole }) {
-  const builtin = role.kind === "work" ? "Worker" : "Reviewer";
   return (
     <li>
       <details className="group">
@@ -950,15 +946,7 @@ function RoleRow({ role }: { role: PlannerRole }) {
               <span className="break-all font-mono text-sm font-semibold">{role.id}</span>
               <Badge variant="outline">{role.kind === "work" ? "Work" : "Review"}</Badge>
               <span className="font-mono text-xs text-muted-foreground">v{role.version}</span>
-              <span className="text-xs">
-                <span className="text-muted-foreground">Profile</span>{" "}
-                {role.profile ? role.profile.name : `as the built-in ${builtin}`}
-              </span>
-              {role.profile && !role.profile.allowed && (
-                <Badge variant="warning" title={`The project no longer allows this profile: it runs as the built-in ${builtin}'s`}>
-                  not allowed now
-                </Badge>
-              )}
+              <RoleProfile role={role} />
             </span>
             <span className="block text-xs">
               <span className="text-muted-foreground">Steps</span>{" "}
@@ -1909,6 +1897,7 @@ export function TaskDetailPage({ taskId, onBack }: TaskDetailPageProps) {
   const tabs: { id: Tab; label: string; icon: React.ElementType }[] = [
     { id: "overview", label: "Overview", icon: Activity },
     { id: "pipeline", label: "Pipeline", icon: GitBranch },
+    { id: "agents", label: "Agents", icon: Bot },
     { id: "sessions", label: "Sessions", icon: Terminal },
     { id: "conversation", label: "Conversation", icon: MessageSquare },
   ];
@@ -2043,7 +2032,7 @@ export function TaskDetailPage({ taskId, onBack }: TaskDetailPageProps) {
           <OverviewTab
             task={task}
             onContinued={() => setRuns((n) => n + 1)}
-            onAgents={(agents) => setTask((t) => (t ? { ...t, agents } : t))}
+            onOpenAgents={() => setTab("agents")}
             onGateChanged={(gate) => {
               // Show whom the gate waits for now, then read the whole task again.
               setTask((t) => (t ? { ...t, gates: t.gates.map((g) => (g.step_id === gate.step_id ? gate : g)) } : t));
@@ -2054,6 +2043,9 @@ export function TaskDetailPage({ taskId, onBack }: TaskDetailPageProps) {
           />
         )}
         {task && tab === "pipeline" && <PipelineTab task={task} onOpenGate={openGate} />}
+        {task && tab === "agents" && (
+          <TaskAgentsTab task={task} onAgents={(agents) => setTask((t) => (t ? { ...t, agents } : t))} />
+        )}
         {task && tab === "sessions" && <SessionsTab taskId={taskId} />}
         {task && tab === "conversation" && <ConversationTab taskId={taskId} />}
       </div>

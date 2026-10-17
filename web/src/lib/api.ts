@@ -1743,8 +1743,9 @@ export type ModelSource =
   | "system_default"
   | "agent_override"
   | "project_override";
-/** Where a run's setting came from: runs recorded before Agent Profiles were named say "agent" for "profile". */
-export type RunSettingSource = SettingSource | "agent";
+/** Where a run's setting came from: "task_role" is the profile of the role its task's Planner defined that it ran as;
+ * runs recorded before Agent Profiles were named say "agent" for "profile". */
+export type RunSettingSource = SettingSource | "task_role" | "agent";
 /** The Agent Profile a run used and where it was selected. */
 export interface RunProfile {
   id: string;
@@ -1763,6 +1764,8 @@ export interface PromptLayers {
   project?: { id: string; background_sha256: string | null; updated_at: string | null } | null;
   task?: { kind: "plan" | "work" | "review"; task_id: string | null; step_id: string | null; sha256: string } | null;
   contract?: { name: string; sha256: string };
+  /** A run as a role its task's Planner defined: that role, at the version the run started with. */
+  task_role?: { id: string; kind: "work" | "review"; version: number };
   /** The flag set that kept the operator's personal Claude Code configuration out of the run. */
   isolation?: string;
 }
@@ -1809,6 +1812,8 @@ export interface LlmRecord {
   metadata: {
     command?: string[];
     cwd?: string;
+    /** The task step a Worker or Reviewer ran. */
+    step_id?: string;
     /** What Looper appended to Claude Code's system prompt (its built-in prompt is not included). */
     system_prompt?: string;
     system_prompt_sha256?: string;
