@@ -72,8 +72,6 @@ LOOPER = "looper"
 EVERYONE = "all"
 ROOM_ADDRESS = AgentAddress(agent_type="room", agent_id="room")
 _COMMIT = re.compile(r"[0-9a-fA-F]{4,40}")
-# Task statuses whose room still takes messages.
-_LIVE_TASK = ("pending", "running", "waiting_user")
 
 
 class MemberKind(str, Enum):
@@ -319,6 +317,11 @@ def check_scope(sender: Seat, kind: MessageKind, *, everyone: bool, targets: Seq
                                                "asked you, with reply_to")
 
 
+def _ends_wait(message: Mapping[str, Any], seat: Seat) -> bool:
+    """Whether ``message`` ends ``seat``'s inbox wait: it names the seat, or it is an interface post."""
+    return addressed(message, seat) or message["kind"] == MessageKind.INTERFACE.value
+
+
 def unread_counts(messages: Iterable[Mapping[str, Any]], seat: Seat, last_read: int) -> dict[str, int]:
     """``seat``'s unread messages: those addressed to it, the interface posts, and the rest it sees."""
     counts = {"for_you": 0, "interface": 0, "room": 0}
@@ -430,7 +433,7 @@ class RoomService:
         execution = ProjectExecution.from_row(project)
         if not execution.room_on:
             raise OpError(ErrorCode.FORBIDDEN, "this task's project has turned its agent room off")
-        if live and task.get("status") not in _LIVE_TASK:
+        if live and task.get("status") not in db_tasks.ACTIVE_STATUSES:
             raise OpError(ErrorCode.FORBIDDEN, f"task {task_id} has ended ({task.get('status')}): its room takes no "
                                                "more messages")
         steps = await db_steps.list_steps(task_id)
@@ -689,7 +692,8 @@ class RoomService:
     async def inbox(self, task_id: str, seat: Seat, *, wait_seconds: int = 0, peek: bool = False) -> dict[str, Any]:
         """``seat``'s unread messages, oldest first, at most ``INBOX_MAX_MESSAGES`` and ``INBOX_MAX_CHARS``; read
         unless ``peek``. With ``wait_seconds`` and nothing for it yet, waits (up to the project's
-        ``room_wait_max_seconds``) for a message addressed to it."""
+        ``room_wait_max_seconds``) for a message addressed to it or an interface post (what a colleague builds
+        against); other posts to everyone do not end the wait."""
         context = await self._context(task_id, live=False)
         wait = max(0, min(int(wait_seconds or 0), context.limits.wait_max_seconds))
         loop = asyncio.get_running_loop()
@@ -700,7 +704,7 @@ class RoomService:
             rows = await db_room.messages(task_id, after=last)
             unread = [r for r in rows if r["sender_seat"] != seat.key and visible(r, seat)]
             remaining = deadline - loop.time()
-            if any(addressed(r, seat) for r in unread) or remaining <= 0:
+            if any(_ends_wait(r, seat) for r in unread) or remaining <= 0:
                 break
             waited = True
             event = self._events.setdefault(task_id, asyncio.Event())
@@ -1052,17 +1056,20 @@ async def task_view(task_id: str, *, runs: Mapping[str, tuple[str, datetime]] | 
     rows = await db_room.messages(task_id)
     answered = {r["reply_to"] for r in rows if r["kind"] == MessageKind.ANSWER.value}
     by_step: dict[str, dict[str, int]] = {}
-    for member in seats:
-        stats = by_step.setdefault(member.step_key, {"sent": 0, "received": 0, "unanswered": 0})
+    for step_key in dict.fromkeys(m.step_key for m in seats):
+        mine = [m for m in seats if m.step_key == step_key]
+        keys, roles = {m.seat for m in mine}, {m.role for m in mine}
+        stats = {"sent": 0, "received": 0, "unanswered": 0}
+        # Each message once per step: sent by one of its seats, else received when it names one of them.
         for row in rows:
-            to_it = member.seat in (row.get("audience") or ()) or member.role in (row.get("audience") or ())
-            if row["sender_seat"] == member.seat:
-                stats["sent"] += 1
-            elif to_it:
-                stats["received"] += 1
-            if row["kind"] == MessageKind.QUESTION.value and row["id"] not in answered and (
-                    row["sender_seat"] == member.seat or to_it):
+            audience = set(row.get("audience") or ())
+            sent = row["sender_seat"] in keys
+            received = not sent and bool(audience & (keys | roles))
+            stats["sent"] += sent
+            stats["received"] += received
+            if row["kind"] == MessageKind.QUESTION.value and row["id"] not in answered and (sent or received):
                 stats["unanswered"] += 1
+        by_step[step_key] = stats
     shown = rows
     if unanswered:
         shown = [r for r in shown if r["kind"] == MessageKind.QUESTION.value and r["id"] not in answered]

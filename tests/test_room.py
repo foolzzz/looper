@@ -203,3 +203,31 @@ def test_the_reply_contract_and_the_prompts_are_unchanged_with_the_room_off() ->
     assert build_system_prompt(**arguments, room="").text == off.text and "room" not in off.layers
     assert on.text.index("## The task room") > on.text.index("## Task") and "room" in on.layers
     assert on.text.index("## The task room") < on.text.index("## Your step and its report")
+
+
+def test_a_reminder_waits_for_a_tool_call_and_comes_at_most_once_a_minute(tmp_path: Any) -> None:
+    import asyncio
+
+    from looper.agents.tiers.worker import WorkerConfig, WorkerPool, _Reminders
+
+    async def run() -> None:
+        pool = WorkerPool(config=WorkerConfig(), runtime_root=tmp_path)
+        written: list[tuple[str, str | None]] = []
+
+        class Runtime:
+            async def write_turn(self, stdin: Any, text: str, *, uuid: str | None = None) -> None:
+                written.append((text, uuid))
+
+        pool._inputs["w1"] = (object(), Runtime())  # type: ignore[assignment]
+        pool._reminders["w1"] = state = _Reminders()
+        assert not await pool.remind("w1", "one")  # no tool call runs: it waits
+        state.tools_running = 1
+        assert await pool._flush_reminder("w1")
+        assert written[0][0] == "one" and str(written[0][1]).startswith("looper-reminder-")
+        assert not await pool.remind("w1", "two")  # within the minute: it waits
+        state.last_at -= 61
+        assert await pool.remind("w1", "three")  # the newest replaced the one waiting
+        assert [text for text, _ in written] == ["one", "three"] and state.uuids == {u for _, u in written}
+        assert not await pool.remind("w2", "a run without a room")
+
+    asyncio.run(run())

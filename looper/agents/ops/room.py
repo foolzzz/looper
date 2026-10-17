@@ -73,7 +73,8 @@ TOOLS: tuple[Tool, ...] = (
     Tool(
         name=INBOX,
         description="Your unread room messages, oldest first (for_you: addressed to you); reading marks them read. "
-                    "wait_seconds: when nothing is for you yet, wait up to that long for something that is.",
+                    "wait_seconds: when nothing is for you yet, wait up to that long for a message for you or an "
+                    "interface post.",
         schema={"type": "object", "additionalProperties": False, "properties": {
             "wait_seconds": {"type": "integer", "minimum": 0, "maximum": 120},
             "peek": {"type": "boolean", "description": "Read without marking them read."},

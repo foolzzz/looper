@@ -258,6 +258,11 @@ def test_an_inbox_wait_ends_when_a_message_for_the_seat_comes_and_otherwise_at_i
         await room.post("task-r", BACKEND, kind="question", body="for you", to=["fe_rd@s2"])
         answered = await asyncio.wait_for(waiting, 5)
         assert loop.time() - started < 3 and [m["body"] for m in answered["messages"]] == ["for everyone", "for you"]
+        # An interface post ends a wait too: it is what a colleague builds against.
+        waiting = asyncio.create_task(room.inbox("task-r", FE, wait_seconds=30))
+        await asyncio.sleep(0.2)
+        await room.post("task-r", BACKEND, kind="interface", body="qty is an int", to=["all"])
+        assert [m["body"] for m in (await asyncio.wait_for(waiting, 5))["messages"]] == ["qty is an int"]
 
     _run(test, monkeypatch)
 
@@ -318,6 +323,10 @@ def test_a_room_turned_off_or_a_task_ended_takes_no_messages(monkeypatch: pytest
         assert await _refused(room.post("task-r", BACKEND, kind="info", body="x", to=["all"])) is ErrorCode.FORBIDDEN
         await pool.execute("UPDATE projects SET agent_room = NULL")
         await room.post("task-r", BACKEND, kind="info", body="x", to=["all"])
+        for status in ("executing", "verifying", "waiting_user"):  # the Planner's statuses for a running task
+            await pool.execute("UPDATE tasks SET status = $1", status)
+            await room.inbox("task-r", BACKEND)
+            await room.watch("task-r", FE, kind="announce")
         await pool.execute("UPDATE tasks SET status = 'completed'")
         assert await _refused(room.post("task-r", BACKEND, kind="info", body="y", to=["all"])) is ErrorCode.FORBIDDEN
         assert len((await room.read("task-r", FE))["messages"]) == 1  # its history still reads
@@ -460,6 +469,10 @@ def test_the_task_page_reads_the_room(monkeypatch: pytest.MonkeyPatch) -> None:
         assert status == 400
         status, detail = await get("/api/tasks/task-r", {})
         assert detail["room"]["counts"]["messages"] == 2
+        # A message between two seats of one step counts once for it.
+        await room.post("task-r", REVIEWER, kind="question", body="where are the tests?", to=["backend_rd@s1"])
+        status, view = await get("/api/tasks/task-r/room", {})
+        assert view["by_step"]["s1"] == {"sent": 2, "received": 1, "unanswered": 1}
 
     _run(test, monkeypatch)
 
