@@ -2184,7 +2184,8 @@ refused with that reason.
 - **Naming them.** With the switch on, the step shape (PLAN, a DECISION's
   `replan`, CHAT's `add_steps` and `replan`) takes `role`, a work role its
   Worker runs as, and `review_role`, a review role, which needs `"review":
-  true`; `reply_contract(roles=True)` says so and `_check_new_steps` checks
+  true`, with `review_role_required` (true when left out; only with a
+  `review_role`): false makes that review advisory; `reply_contract(roles=True)` says so and `_check_new_steps` checks
   them against the roles read after the reply arrives, so a role defined in
   the same turn counts. A started step keeps its roles, like the rest of it.
   The plan lines and results in the Planner's turns name a step's roles.
@@ -2215,13 +2216,19 @@ refused with that reason.
   same attempt with the version it had, and a retry or a new step reads the
   current one.
 - **The review gate.** The built-in Reviewer is the gate wherever a step needs
-  review; a review role only adds a review. A step with a `review_role` is
-  reviewed by the built-in Reviewer first (`review_stage` `builtin`); only when
-  it passes does code start the review role's Reviewer (`role`), with no
-  decision turn between, and the step can be accepted only once both passed
-  in that attempt. A failed built-in review goes to the decision turn at once;
-  the decision turn after the role's review lists both verdicts; without a
-  decision the chain's verdict decides. A restart dispatches the review the
+  review; a review role only adds a review, and never replaces it. A step with
+  a `review_role` is reviewed by the built-in Reviewer first (`review_stage`
+  `builtin`); only when it passes does code start the review role's Reviewer
+  (`role`), with no decision turn between. A required review role
+  (`task_steps.review_role_required`, the default) blocks: the step can be
+  accepted only once both passed in that attempt. An advisory one does not:
+  when it does not pass, the decision turn still allows accept, says the review
+  is advisory and lists its verdict and findings, and the Planner accepts,
+  retries with feedback or replans; an accept over it says so in the
+  `step_accepted` entry, and the task page labels the review role
+  "advisory". A failed built-in review goes to the decision turn at once; the
+  decision turn after the role's review lists both verdicts; without a decision
+  the chain's verdict decides (an advisory role's failure accepts the step). A restart dispatches the review the
   step waits for; a retry clears both verdicts.
 - **Restarts.** Going on from the plan keeps the roles; planning the task anew
   (`start_over`) deletes them, with the Planner's profile choices. Turning the
