@@ -2064,10 +2064,10 @@ export interface ProviderEnvEntry {
 }
 
 /** A runtime's own login as the server last read it: "chatgpt" (Codex's ChatGPT login, what its login provider
- * runs with), "other_method", "not_logged_in", "unknown", or "unavailable" while a forked login a run found is
- * not cleared. */
+ * runs with), "logged_in" (Grok's login file is there), "other_method", "not_logged_in", "unknown", or
+ * "unavailable" while a forked login a run found is not cleared. */
 export interface ProviderLogin {
-  state: "chatgpt" | "other_method" | "not_logged_in" | "unknown" | "unavailable";
+  state: "chatgpt" | "logged_in" | "other_method" | "not_logged_in" | "unknown" | "unavailable";
   detail: string;
 }
 
@@ -2085,7 +2085,7 @@ export interface Provider {
   models: ProviderModel[];
   /** The models its runtime's own login offers, to suggest (an OAuth provider; any model is taken). */
   suggested_models: string[];
-  /** The login's state, for an OAuth provider whose runtime reports one (Codex); null otherwise. */
+  /** The login's state, for an OAuth provider whose runtime reports one (Codex, Grok); null otherwise. */
   login: ProviderLogin | null;
   /** Its own environment variables for the runs that use it. */
   env: ProviderEnvEntry[];
@@ -2236,7 +2236,7 @@ export function deleteProvider(providerId: string): Promise<{ deleted: string }>
   return registryCall("DELETE", `/providers/${encodeURIComponent(providerId)}`, undefined, "delete provider");
 }
 
-/** After checking `codex login status` on the machine: let runs use the Codex login again after a run found it
+/** After checking a runtime's own login on the machine (Codex's, Grok's): let runs use it again after a run found it
  * forked. */
 export function clearLoginProblem(providerId: string): Promise<{ provider: Provider }> {
   return registryCall("DELETE", `/providers/${encodeURIComponent(providerId)}/login-problem`, undefined,

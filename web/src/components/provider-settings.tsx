@@ -26,6 +26,7 @@ import {
   type ProviderPreset,
   type Registry,
 } from "@/lib/api";
+import { LOGIN_HELP, loginUsable } from "@/lib/runtime-catalog";
 import { AGENT_PROFILE } from "@/lib/settings-pages";
 import { useAction } from "@/lib/use-action";
 import { formatUsd } from "@/lib/usage";
@@ -412,13 +413,15 @@ function ProviderForm({ provider, registry, onDone }: { provider: Provider | nul
 
 /** An OAuth provider's login as the server reads it; after a run found it forked, what to check and the way to
  * let runs use it again. */
-function LoginLine({ provider }: { provider: Provider }) {
+function LoginLine({ provider, label }: { provider: Provider; label: string }) {
   const action = useAction();
   const login = provider.login;
   if (!login) return null;
-  if (login.state === "chatgpt") return <p className="text-xs text-muted-foreground">Login: {login.detail}</p>;
+  if (loginUsable(login.state)) return <p className="text-xs text-muted-foreground">Login: {login.detail}</p>;
+  const help = LOGIN_HELP[provider.oauth_runtime_type ?? ""] ?? { signIn: "" };
   const reuse = () => {
-    if (confirm("Use the Codex login again? Check `codex login status` on the server's machine first.")) {
+    const check = help.check ? `\`${help.check}\`` : "the login";
+    if (confirm(`Use the ${label} login again? Check ${check} on the server's machine first.`)) {
       action.run(() => clearLoginProblem(provider.provider_id));
     }
   };
@@ -429,10 +432,12 @@ function LoginLine({ provider }: { provider: Provider }) {
         <span>
           {login.state === "unavailable" ? `Login unavailable ${login.detail}` : `Login not usable: ${login.detail}`}.{" "}
           {login.state === "unavailable" ? (
-            <>Runs with it do not start. Check <code className="font-mono">codex login status</code> on the server&apos;s
-              machine (<code className="font-mono">codex login</code> if it is not logged in), then use it again.</>
+            <>Runs with it do not start. Check {help.check ? <code className="font-mono">{help.check}</code> : "the login"} on
+              the server&apos;s machine (<code className="font-mono">{help.signIn}</code> if it is not logged in), then use it
+              again.</>
           ) : (
-            <>Run <code className="font-mono">codex login</code> with ChatGPT on the server&apos;s machine.</>
+            <>Run <code className="font-mono">{help.signIn}</code>{help.how ? ` ${help.how}` : ""} on the server&apos;s
+              machine.</>
           )}
         </span>
       </p>
@@ -484,7 +489,7 @@ function ProviderRow({ provider, registry }: { provider: Provider; registry: Reg
       }
     >
       <p className="break-words text-xs text-muted-foreground">{details.join(" · ")}</p>
-      {provider.login && <LoginLine provider={provider} />}
+      {provider.login && <LoginLine provider={provider} label={oauthLabel ?? "runtime"} />}
       <ModelTable models={provider.models} registry={registry} />
     </Row>
   );

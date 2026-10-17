@@ -2,10 +2,13 @@ import { useEffect, useState } from "react";
 import { AlertTriangle } from "lucide-react";
 import { fetchStatus, type SelfCheck } from "@/lib/api";
 
-const shown = (c: SelfCheck) => (c.id.startsWith("claude_") || c.id === "codex_login") && c.status === "fail";
+/** The checks of the runtimes' own logins Agent Profiles may use. */
+const LOGIN_CHECKS = ["codex_login", "grok_login"];
 
-/** Says, on every page, when the server started without the Claude Code CLI or its login, or when the Codex login
- * an Agent Profile uses cannot run (not logged in, or forked in a run). */
+const shown = (c: SelfCheck) => (c.id.startsWith("claude_") || LOGIN_CHECKS.includes(c.id)) && c.status === "fail";
+
+/** Says, on every page, when the server started without the Claude Code CLI or its login, or when the Codex or Grok
+ * login an Agent Profile uses cannot run (not logged in, or forked in a run). */
 export function ClaudeCheckBanner() {
   const [problems, setProblems] = useState<SelfCheck[]>([]);
 
@@ -25,8 +28,8 @@ export function ClaudeCheckBanner() {
             <span className="font-medium text-destructive">
               {c.label}: {c.detail}.
             </span>{" "}
-            {c.id === "codex_login" ? (
-              <>Agent Profiles with the Codex login cannot run until this is fixed. To fix: {c.fix}.</>
+            {LOGIN_CHECKS.includes(c.id) ? (
+              <>Agent Profiles with the {c.label} cannot run until this is fixed. To fix: {c.fix}.</>
             ) : (
               <>
                 Agents cannot run until this is fixed. To fix: {c.fix}; then restart{" "}
