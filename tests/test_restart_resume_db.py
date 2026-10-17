@@ -187,6 +187,11 @@ def test_a_task_carries_on_after_the_server_restarts(tmp_path: Path) -> None:
     steps = _steps(after)
     assert {k: s["status"] for k, s in steps.items()} == {k: "verified" for k in "abcd"}
     assert (steps["b"]["retries"], steps["b"]["feedback"]) == (1, ["fix the parser"])  # kept across the restart
+    # A resume runs b's attempt again as the same attempt: every step keeps its start (the time the server was down
+    # counts; a restart of the task, which sends a step back to not started, starts it again).
+    first = _steps(before)
+    assert all(first[k]["started_at"] for k in "abc")
+    assert [steps[k]["started_at"] for k in "abc"] == [first[k]["started_at"] for k in "abc"]
 
     # Planned once; the restarted Planner resumed its session.
     turns = _log(state, "planner_turns.jsonl")

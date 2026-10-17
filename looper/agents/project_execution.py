@@ -20,6 +20,9 @@ Every field is optional, and ``None`` inherits today's behavior:
   task directory (``shared``, also when unset) or, when the task directory is
   a git checkout on a branch, a worktree of its own that is merged into the
   branch when the step is accepted (``worktree``, ``step_workspaces``);
+- ``step_workspace_links``: the paths, relative to the task directory, that
+  such a worktree links back to the task directory's (its ignored local
+  state, such as ``.venv`` or ``.env``); none when unset;
 - ``max_step_retries``: how many times the Planner may retry one step, 0 to
   ``STEP_RETRIES_MAX`` (``DEFAULT_STEP_RETRIES`` when unset);
 - ``planner_roles``: whether the project's Planners may define the roles their
@@ -56,6 +59,7 @@ import logging
 from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import Enum
+from pathlib import PurePosixPath
 from typing import Any
 
 from ..db.projects import EXECUTION_COLUMNS
@@ -72,6 +76,8 @@ ROLE_TEXT_MIN_CHARS = 500
 ROLE_TEXT_MAX_CHARS = 20_000
 DEFAULT_GATE_REMINDER_HOURS = 24
 GATE_REMINDER_MAX_HOURS = 168
+WORKSPACE_LINKS_MAX = 20
+WORKSPACE_LINK_MAX_CHARS = 255
 # Each room limit's range and its default (the agent room RFC, section 11), and what it counts.
 ROOM_LIMITS: dict[str, tuple[int, int, int, str]] = {
     "room_post_per_minute": (1, 60, 6, "messages a run may post in a minute"),
@@ -139,6 +145,7 @@ class ProjectExecution:
     review_policy: ReviewPolicy | None = None
     distill_lessons: LessonsMode = LessonsMode.OFF
     step_workspaces: StepWorkspaces | None = None
+    step_workspace_links: tuple[str, ...] | None = None
     max_step_retries: int | None = None
     planner_roles: PlannerRoles | None = None
     role_text_max_chars: int | None = None
@@ -164,6 +171,11 @@ class ProjectExecution:
     def isolate_steps(self) -> bool:
         """Whether steps that run alongside others get worktrees of their own."""
         return self.step_workspaces is StepWorkspaces.WORKTREE
+
+    @property
+    def workspace_links(self) -> tuple[str, ...]:
+        """The paths a step's worktree links back to the task directory's."""
+        return self.step_workspace_links or ()
 
     @property
     def step_retries(self) -> int:
@@ -232,6 +244,8 @@ def execution_fields(data: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _stored(value: Any) -> Any:
+    if isinstance(value, tuple):
+        return list(value)
     return value.value if isinstance(value, Enum) else value
 
 
@@ -253,6 +267,8 @@ def _parse(field: str, raw: Any) -> Any:
         return _choice(field, raw, ReviewPolicy)
     if field == "step_workspaces":
         return _choice(field, raw, StepWorkspaces)
+    if field == "step_workspace_links":
+        return _links(raw)
     if field == "planner_roles":
         return _choice(field, raw, PlannerRoles)
     if field == "user_gates":
@@ -297,6 +313,37 @@ def _lessons_mode(raw: Any) -> LessonsMode:
         return LessonsMode(raw)
     except ValueError:
         raise ValueError("distill_lessons must be one of off, draft, write, or null for off") from None
+
+
+def _links(raw: Any) -> tuple[str, ...] | None:
+    """``step_workspace_links``: distinct relative paths in the task directory, none inside another; [] is none."""
+    if not isinstance(raw, (list, tuple)) or not all(isinstance(item, str) for item in raw):
+        raise ValueError("step_workspace_links must be a list of paths relative to the task directory, or null")
+    if len(raw) > WORKSPACE_LINKS_MAX:
+        raise ValueError(f"step_workspace_links may have at most {WORKSPACE_LINKS_MAX} paths, not {len(raw)}")
+    paths: list[str] = []
+    for item in raw:
+        text = item.strip()
+        parts = text.split("/")
+        if not text or len(text) > WORKSPACE_LINK_MAX_CHARS or any(c in text for c in "\0\n\r\\"):
+            problem = "must be 1 to 255 characters, without line breaks or backslashes"
+        elif text.startswith("/"):
+            problem = "must be relative to the task directory"
+        elif any(part in ("", ".", "..") for part in parts):
+            problem = "must not have empty, . or .. parts"
+        elif ".git" in parts:
+            problem = "must not be or be in .git"
+        elif text in paths:
+            problem = "is listed twice"
+        else:
+            nested = next((other for other in paths if PurePosixPath(text).is_relative_to(other)
+                           or PurePosixPath(other).is_relative_to(text)), None)
+            if nested is None:
+                paths.append(text)
+                continue
+            problem = f"overlaps {nested!r}: a link cannot be inside another"
+        raise ValueError(f"step_workspace_links: {item!r} {problem}")
+    return tuple(paths) or None
 
 
 def _choice(field: str, raw: Any, kind: type[Enum]) -> Any:

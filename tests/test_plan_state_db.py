@@ -10,6 +10,7 @@ LOOPER_TEST_DATABASE_URL points at a disposable database.
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -41,7 +42,8 @@ def _plan() -> TaskPlan:
                                                                                 "summary": "did s1"}),
         PlanStep(step_id="step-2", index=1, instruction="do s2", key="s2", status="dispatched", review=True,
                  depends_on=["step-1"], worker_id="worker-3", retries=1, feedback=["fix the parser"],
-                 missed_messages=["also add tests"], target_files=["calc.py"]),
+                 missed_messages=["also add tests"], target_files=["calc.py"],
+                 started_at=datetime(2026, 10, 17, 8, 0, 5, 123456, tzinfo=timezone.utc)),
     ]
     return plan
 
