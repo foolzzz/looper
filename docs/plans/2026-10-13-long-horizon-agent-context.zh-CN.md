@@ -683,6 +683,7 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
 ### 5.3 非核心待办（M6 之后统一做）
 
 - **任务页「What each step ran on」改读精简的运行记录**：这张表现在用 `GET /api/llm-records?task_id=&role=worker|reviewer&limit=500` 读两个角色的完整记录（`list_records` 是 `SELECT *`，替身 Claude 下每条 12–13 KB，真实 prompt 更大），每当步骤变化就重读一次，长任务一次刷新可能有几 MB。改成只取表格要用的字段：`id`、`agent_id`、`status`、`created_at`、`metadata.step_id`、Profile 及其来源（含 effort）、`prompt_layers.task_role`（新参数或新接口均可，带测试），表格和测试相应改用它。
+- **定时任务的每日花费额度按各自时区清零**：每日额度（`daily_budget_usd`）现在在服务器时区的午夜清零，不看定时任务自己的 `timezone`；要按各定时任务的时区清零另做（2026-10-17 维护者决定暂不改）。
 
 ### 5.4 验证缺口
 
