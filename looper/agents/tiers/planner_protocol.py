@@ -722,8 +722,9 @@ ones that need it; leaving a step out is the same as "leave".
 
 # The PLAN step's role keys, in a project that lets its Planner define roles.
 _ROLE_RULES = """\
-- role (optional): the id of a work role you defined with looper_task_role_set;
-  the step's Worker runs as that role. Leave it out for the built-in Worker.
+- role (optional, like review_role; every key above stays required): the id
+  of a work role you defined with looper_task_role_set; the step's Worker runs
+  as that role. Leave it out for the built-in Worker.
 - review_role (optional, with "review": true): the id of a review role you
   defined; once the built-in Reviewer passes the step, a Reviewer of that role
   reviews it too, and both must pass.
