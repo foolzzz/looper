@@ -227,6 +227,13 @@ def interface_dependents(steps: Iterable[Mapping[str, Any]]) -> int:
     return max((sum(1 for step_id in role_steps if shared in before[step_id]) for shared in before), default=0)
 
 
+def planner_denials(records: Iterable[Mapping[str, Any]]) -> int:
+    """The tool calls the Planner's runtime refused it, all turns together (its runs' ``permission_denials``): what
+    it tried that would have changed files, or that the runtime could not tell would not."""
+    return sum(len((record.get("metadata") or {}).get("permission_denials") or []) for record in records
+               if role(record) == "planner")
+
+
 def turn_kinds(records: Iterable[Mapping[str, Any]]) -> dict[str, int]:
     """The Planner's turns by kind (``plan``, ``decision``, ``chat``, ``supervise``, ``gate``, ``repair``)."""
     kinds: dict[str, int] = {}
@@ -407,8 +414,9 @@ def task_metrics(
     now: float,
 ) -> dict[str, Any]:
     """One task's result: success and why not, the flow counts, cost, contract violations and the Planner's
-    file changes. ``expect`` may bound ``contract_violations`` (their total) too, and the gates the scripted user
-    ended because the Planner asked after its script ran out (``gate_asks_beyond_script``, the runner's count)."""
+    file changes. ``expect`` may bound ``contract_violations`` (their total) and ``planner_modified_files`` too, and
+    the gates the scripted user ended because the Planner asked after its script ran out
+    (``gate_asks_beyond_script``, the runner's count)."""
     by_role: dict[str, list[Mapping[str, Any]]] = {}
     for record in records:
         by_role.setdefault(role(record), []).append(record)
@@ -454,6 +462,8 @@ def task_metrics(
         # The user gates the Planner opened, and how they went.
         **gate_metrics(detail, records, now=now),
         "gate_asks_beyond_script": gate_asks_beyond_script,
+        # What its runtime refused the read-only Planner.
+        "planner_denials": planner_denials(records),
     }
     violations = {"planner": planner_violations(activity), "worker": worker_violations,
                   "reviewer": reviewer_violations}
@@ -464,7 +474,8 @@ def task_metrics(
         problems.append(f"task {status or 'unknown'}" + (f": {error}" if error else ""))
     if check_problem:
         problems.append(check_problem)
-    problems += flow_problems(expect, {**observed, "contract_violations": sum(violations.values())})
+    problems += flow_problems(expect, {**observed, "contract_violations": sum(violations.values()),
+                                       "planner_modified_files": len(set(planner_edits) | set(changed_by_planner))})
 
     cost = detail.get("cost") or {}
     # Tokens are what every runtime reports, priced or not (a subscription, a provider without prices).

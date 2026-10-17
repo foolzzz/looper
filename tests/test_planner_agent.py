@@ -11,6 +11,7 @@ import asyncio
 import hashlib
 import json
 import os
+import subprocess
 import tempfile
 from collections.abc import Awaitable, Callable
 from pathlib import Path
@@ -279,14 +280,13 @@ def _flag(argv: list[str], name: str) -> str | None:
     return argv[argv.index(name) + 1] if name in argv else None
 
 
-def _assert_unrestricted(argv: list[str]) -> None:
-    """The shared permission flags, once, and nothing that narrows the tools or the permissions again."""
-    from looper.agents.claude_cli import permission_args
-
-    flags = permission_args()
-    assert any(argv[i:i + len(flags)] == flags for i in range(len(argv)))
-    assert argv.count("--dangerously-skip-permissions") == 1
-    assert not {"--tools", "--allowedTools", "--disallowedTools", "--permission-mode"} & set(argv)
+def _assert_read_only(argv: list[str]) -> None:
+    """A Planner's read-only flags, once: Claude Code's default permission mode, without the file-editing tools,
+    with its skills and web reads (and its MCP servers) allowed; nothing that skips the permissions."""
+    assert "--dangerously-skip-permissions" not in argv and "--permission-mode" not in argv and "--tools" not in argv
+    assert argv.count("--disallowedTools") == 1 and _flag(argv, "--disallowedTools") == "Edit,Write,NotebookEdit"
+    assert argv.count("--allowedTools") == 1
+    assert str(_flag(argv, "--allowedTools")).startswith("Skill,WebFetch,WebSearch")
 
 
 def _sha(text: str) -> str:
@@ -411,6 +411,7 @@ class TestDecisions:
         assert review.payload["parent_task_id"] == "t1"
         assert review.payload["context"] == {"work_dir": str(h.work_dir)}
         assert review.payload["acceptance_criteria"] == ["s1 works"]
+        assert "feedback" not in review.payload  # a first attempt: no retry notes
         assert review.payload["work_result"]["changed_files"] == {"calc.py": "added"}
         assert (review.payload["requirement"], review.payload["step_key"]) == ("build the calc package", "s1")
         texts = [turn["text"] for turn in claude.turns()]
@@ -420,6 +421,26 @@ class TestDecisions:
         final = h.final()
         assert final is not None and final.payload["status"] == "completed"
         assert final.payload["summary"] == FINAL_RESULT
+
+    def test_a_retried_steps_reviewer_gets_the_notes_it_was_retried_with(self, planner_claude: Any) -> None:
+        claude = planner_claude(
+            plan(step("s1", review=True)),
+            decide("retry", feedback="sales.csv has five regions: write all five"),
+            decide("review"),
+            decide("retry", feedback="keep the order of first appearance"),
+            decide("review"),
+            decide("accept", summary="done"),
+        )
+        reviews = iter([REVIEW_FAIL, REVIEW_PASS])
+        works = iter([WORK_FAILED, WORK_OK, WORK_OK])
+        h = drive(claude, lambda e: next(reviews) if e.message_type == MessageType.VERIFY_REQUEST else next(works))
+
+        # Each review has every note its attempt's Worker had, oldest first.
+        assert [r.payload["feedback"] for r in h.reviews] == [
+            ["sales.csv has five regions: write all five"],
+            ["sales.csv has five regions: write all five", "keep the order of first appearance"]]
+        final = h.final()
+        assert final is not None and final.payload["status"] == "completed"
 
     def test_failed_review_cannot_be_accepted(self, planner_claude: Any, agent_db: Any) -> None:
         claude = planner_claude(plan(step("s1", review=True)), decide("review"), decide("accept"))
@@ -536,6 +557,85 @@ class TestDecisions:
 
 
 # --- The resident Claude ---
+
+
+@pytest.mark.usefixtures("agent_db")
+class TestReadOnly:
+    """A Planner runs read-only: its runtime refuses what would change files and reports it, or, where the runtime
+    cannot, the Planner checks its task directory after each turn."""
+
+    def test_the_calls_claude_code_refused_are_kept_with_the_turn_and_said_in_the_activity(
+        self, planner_claude: Any, agent_db: Any,
+    ) -> None:
+        refused = [{"tool_name": "Bash", "tool_use_id": "t1", "tool_input": {"command": "echo plan > PLAN.md"}}]
+        claude = planner_claude(plan(step("s1")), decide("accept"), denied={1: refused})
+        h = drive(claude, always(WORK_OK))
+
+        assert h.final() is not None and h.final().payload["status"] == "completed"
+        notes = [c.kwargs.get("metadata") for c in agent_db.finish_record.await_args_list]
+        assert notes.count({"permission_denials": [{"tool": "Bash", "input": "echo plan > PLAN.md"}]}) == 1
+        assert ("The Planner runs read-only: Looper refused 1 of its tool calls (Bash: echo plan > PLAN.md)"
+                in activity(agent_db))
+
+    @pytest.mark.parametrize("enforced", [False, True], ids=["check", "permissions"])
+    def test_where_the_runtime_cannot_refuse_a_change_the_turn_that_made_it_is_reported(
+        self, planner_claude: Any, agent_db: Any, monkeypatch: pytest.MonkeyPatch, enforced: bool,
+    ) -> None:
+        from looper.agents.runtimes import ReadOnly
+        from looper.agents.runtimes.claude_code import ClaudeCodeRuntime
+
+        if not enforced:
+            monkeypatch.setattr(ClaudeCodeRuntime, "read_only", ReadOnly.CHECK)
+        claude = planner_claude(plan(step("s1")), decide("accept"), writes={1: {"notes.md": "my plan\n"}})
+
+        async def scenario(h: Harness) -> None:
+            h.work_dir.mkdir(parents=True, exist_ok=True)
+            identity = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAME": "t",
+                        "GIT_COMMITTER_EMAIL": "t@t"}
+            for args in (["init", "-q"], ["commit", "-q", "--allow-empty", "-m", "start"]):
+                subprocess.run(["git", *args], cwd=h.work_dir, check=True, env=identity)
+            await h.start()
+            await h.finished()
+
+        drive(claude, always(WORK_OK), scenario)
+        reported = [line for line in activity(agent_db) if "changed files in its turn" in line]
+        notes = [c.kwargs.get("metadata") for c in agent_db.finish_record.await_args_list]
+        if enforced:
+            # Claude Code refuses such a change itself: the Planner does not look.
+            assert reported == [] and not any(notes)
+            return
+        # The plan turn wrote the file; the decision turn changed nothing (s1's Worker had finished by then).
+        assert reported == ["The Planner changed files in its turn, which it leaves to Workers: notes.md. Its "
+                            "runtime cannot refuse this; the files are left as they are"]
+        assert [n for n in notes if n] == [{"planner_changed_files": ["notes.md"]}]
+
+    def test_a_turn_while_a_worker_runs_in_the_task_directory_is_not_checked(
+        self, planner_claude: Any, agent_db: Any, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from looper.agents.runtimes import ReadOnly
+        from looper.agents.runtimes.claude_code import ClaudeCodeRuntime
+
+        monkeypatch.setattr(ClaudeCodeRuntime, "read_only", ReadOnly.CHECK)
+        # s2's decision turn writes a file while s1's Worker still runs in the directory: whose change it is
+        # cannot be told, so the turn is not checked.
+        claude = planner_claude(plan(step("s1"), step("s2")), decide("accept"), decide("accept"),
+                                writes={2: {"notes.md": "my plan\n"}})
+
+        async def scenario(h: Harness) -> None:
+            h.work_dir.mkdir(parents=True, exist_ok=True)
+            identity = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAME": "t",
+                        "GIT_COMMITTER_EMAIL": "t@t"}
+            for args in (["init", "-q"], ["commit", "-q", "--allow-empty", "-m", "start"]):
+                subprocess.run(["git", *args], cwd=h.work_dir, check=True, env=identity)
+            await h.start()
+            await h.until(lambda: len(claude.turns()) >= 2 and h.held)  # s2's decision turn has started
+            await h.release(WORK_OK)
+            await h.finished()
+
+        h = drive(claude, lambda e: None if e.payload["step_key"] == "s1" else WORK_OK, scenario)
+        assert h.final() is not None and h.final().payload["status"] == "completed"
+        assert not [line for line in activity(agent_db) if "changed files in its turn" in line]
+        assert not any(c.kwargs.get("metadata") for c in agent_db.finish_record.await_args_list)
 
 
 @pytest.mark.usefixtures("agent_db")
@@ -668,7 +768,7 @@ class TestResidentClaude:
 
         assert asyncio.run(_run()) == (True, True, True)
 
-    def test_claude_runs_unrestricted_in_the_task_directory(
+    def test_claude_runs_read_only_in_the_task_directory(
         self, planner_claude: Any, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         from looper.db import role_configs
@@ -685,8 +785,9 @@ class TestResidentClaude:
         h = drive(claude, always(WORK_OK))
 
         (argv,) = claude.argvs()
-        # Every tool, no permission prompts: the role prompt, not the command, keeps it to planning.
-        _assert_unrestricted(argv)
+        # Read-only: the role prompt keeps it to planning, and Claude Code refuses what would change files.
+        _assert_read_only(argv)
+        assert _flag(argv, "--allowedTools") == "Skill,WebFetch,WebSearch"  # no MCP server: no Planner tools here
         assert _flag(argv, "--input-format") == "stream-json"
         assert _flag(argv, "--output-format") == "stream-json"
         assert (_flag(argv, "--model"), _flag(argv, "--max-turns")) == ("claude-test", "9")
@@ -704,7 +805,7 @@ class TestResidentClaude:
         # Every turn arrives on stdin; the command line carries no prompt.
         takes_value = {"--input-format", "--output-format",
                        "--append-system-prompt-file", "--system-prompt-snapshot", "--setting-sources",
-                       "--settings", "--model", "--max-turns"}
+                       "--settings", "--model", "--max-turns", "--disallowedTools", "--allowedTools"}
         assert [a for i, a in enumerate(argv) if not a.startswith("--") and argv[i - 1] not in takes_value] == []
 
     def test_each_turn_is_recorded_with_its_own_cost(self, planner_claude: Any, agent_db: Any) -> None:
@@ -1093,7 +1194,7 @@ class TestLibrary:
         plugin, skills = plugin_dirs(argv)
         assert plugin.endswith(f"/.local/library/{demo['sha256']}/demo") and skills.endswith("/personal")
         # Every tool, Skill included, so that the library's skills reach the Planner too.
-        _assert_unrestricted(argv)
+        _assert_read_only(argv)
         assert all(s["metadata"]["library"]["items"] == [
             {"kind": "plugin", "name": "demo@market", "sha256": demo["sha256"], "plugin": "demo", "scope": "global"},
             {"kind": "skill", "name": "alpha", "sha256": alpha["sha256"], "plugin": "personal", "scope": "global"}]
@@ -1146,7 +1247,7 @@ class TestKnowledge:
         # The stored documents' set directory, and the project's since the task runs in its own directory.
         assert Path(set_dir).parent == h.work_dir.parent / ".local" / "projects" / "proj-1" / "knowledge"
         assert mounted_project == str(project_dir)
-        _assert_unrestricted(argv)
+        _assert_read_only(argv)
         (prompt,) = claude.prompts()
         _in_order(prompt, "## Project: calc\nUse uv.\n\n", "## Project knowledge\n",
                   f"In {set_dir}:\n- Glossary: Terms the code uses (Glossary.md)\n",
@@ -1247,7 +1348,7 @@ class TestProjectSkills:
         assert plugin.startswith(f"{h.work_dir.parent}/.local/library/")
         assert found[plugin] == {"deploy-check": (
             "---\nname: deploy-check\ndescription: \"Use before a deploy.\"\n---\n\nReply DEPLOY-OK.\n")}
-        _assert_unrestricted(argv)
+        _assert_read_only(argv)
         for start in _starts(agent_db):
             library = start["metadata"]["library"]
             assert (library["role"], library["project_id"]) == ("planner", "proj-1")

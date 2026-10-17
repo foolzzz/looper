@@ -113,7 +113,7 @@ from ..knowledge import AgentKnowledge, documents_label, load_knowledge
 from ..library import AgentLibrary, items_label, load_installed
 from ..project_execution import LessonsMode, ProjectExecution, TaskBudgetAction, format_usd
 from ..run_usage import Usage
-from ..runtimes import CLAUDE_CODE
+from ..runtimes import CLAUDE_CODE, ReadOnly
 from ..session_switch import SessionSwitch
 from ..step_workspaces import MergeError, MergeResult, Repo, StepWorkspace, StepWorkspaceState, Unusable
 from ..task_roles import RoleKind, TaskRole
@@ -210,8 +210,8 @@ _MERGE_REASONS = {
     MergeError.GIT_FAILED: "a git command failed",
 }
 
-# The Planner has every tool, like every agent; this recommended role prompt
-# is what keeps it to planning and deciding.
+# The Planner runs read-only (``Launch.read_only``); this recommended role
+# prompt is what keeps it to planning and deciding.
 DEFAULT_SYSTEM_PROMPT = """\
 You are the Planner of one Looper task. You live as long as the task: you plan
 its steps, decide what happens after each step's result, and answer the
@@ -220,9 +220,10 @@ user's messages about it.
 - You plan and decide; Workers do the work. Each step runs in a fresh Claude
   Code session that sees only its step. Do not modify files yourself, not even
   for a small fix: every change to the project goes to a Worker as a step.
-- You have every tool. Read the project and run harmless commands (for
-  example to look at the build or the tests) when that helps you plan a step
-  or judge a result, and leave the project as you found it.
+- You run read-only: read the project and run commands that change nothing
+  (listing, reading and searching files; git status, log, diff and show)
+  when that helps you plan a step or judge a result. Looper refuses or
+  reports the tool calls that would change files.
 - Split the work into steps that each deliver one result that can be checked
   on its own. Keep a small piece of work whole when splitting it would only
   add hand-offs.
@@ -1559,6 +1560,8 @@ class PlannerAgent:
                 "instruction": step.instruction,
                 "work_result": step.result or {},
                 "acceptance_criteria": step.acceptance_criteria,
+                # The notes the step was retried with: the Planner's changes to it, which its Worker had too.
+                **({"feedback": list(step.feedback)} if step.feedback else {}),
                 "context": context,
                 # The version of the review role that reviews the step now, when that is the review it waits for.
                 **({"task_role": task_role.payload()} if task_role is not None else {}),
@@ -2563,6 +2566,8 @@ class PlannerAgent:
         assert plan is not None
         recorder = self._recorder(plan, text, process)
         await recorder.start()
+        # Where the runtime cannot keep the Planner from changing files, the task directory as the turn starts.
+        watched = await self._watched_files(plan, process.launch)
 
         async def on_event(event: dict[str, Any]) -> None:
             await recorder.record(event)
@@ -2617,15 +2622,55 @@ class PlannerAgent:
         if result_event is not None:
             plan.session_totals = self._claude.totals
             await self._save_session(plan)
+        changed = await self._changed_files(plan, watched)
         await recorder.finish(
             output_text=final_text or None,
             result_event=result_event,
             error=error,
             usage=turn.usage,
+            changed_files=changed,
         )
+        await self._report_read_only(process.launch.runtime.permission_denials(result_event), changed)
         if error:
             raise PlannerTurnError(error)
         return final_text
+
+    # --- The Planner changes no file ---
+
+    async def _watched_files(self, plan: TaskPlan, launch: Launch) -> dict[str, str] | None:
+        """The task directory's state as a read-only turn starts (``step_workspaces.tree_state``), where the turn's
+        runtime cannot refuse what would change files (``ReadOnly.CHECK``) and a change in it during the turn could
+        only be the Planner's; None otherwise, and outside a git checkout."""
+        if not launch.read_only or launch.runtime.read_only is not ReadOnly.CHECK or not self._only_planner(plan):
+            return None
+        return await workspaces.tree_state(plan.work_dir)
+
+    @staticmethod
+    def _only_planner(plan: TaskPlan) -> bool:
+        """Whether no Worker or Reviewer of the task runs in the task directory now: a step in a worktree of its own
+        runs elsewhere."""
+        return not any(step.status in ("dispatched", "completed") and not step.isolated for step in plan.steps)
+
+    async def _changed_files(self, plan: TaskPlan, watched: dict[str, str] | None) -> list[str] | None:
+        """What changed in the task directory during the turn that started at ``watched``, when only the Planner ran
+        in it all along; None when nothing did or it cannot be told."""
+        if watched is None or not self._only_planner(plan):
+            return None
+        now = await workspaces.tree_state(plan.work_dir)
+        return (workspaces.changed_between(watched, now) or None) if now is not None else None
+
+    async def _report_read_only(self, denials: list[dict[str, str]], changed: list[str] | None) -> None:
+        """Say in the task's activity what the read-only Planner's turn was refused, or changed all the same."""
+        if denials:
+            refused = "; ".join(f"{d['tool']}: {d['input']}" for d in denials[:5])
+            more = f" and {len(denials) - 5} more" if len(denials) > 5 else ""
+            await self._activity("phase", f"The Planner runs read-only: Looper refused {len(denials)} of its tool "
+                                          f"calls ({refused}{more})"[:500])
+        if changed:
+            shown = ", ".join(changed[:10]) + (f" and {len(changed) - 10} more" if len(changed) > 10 else "")
+            await self._activity("error", f"The Planner changed files in its turn, which it leaves to Workers: "
+                                          f"{shown}. Its runtime cannot refuse this; the files are left as they are"
+                                          [:500])
 
     # --- A new session: the handoff before it and the resume brief that starts it ---
 

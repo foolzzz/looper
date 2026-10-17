@@ -969,7 +969,8 @@ class WorkerPool:
             task_role = TaskRole.from_payload(payload.get("task_role"))
             return review_task_section(requirement=requirement, step=step, instruction=instruction,
                                        acceptance_criteria=acceptance, work_dir=work_dir, supplements=supplements,
-                                       workspace=workspace, review_role=task_role.key if task_role else "")
+                                       workspace=workspace, review_role=task_role.key if task_role else "",
+                                       retry_notes=[str(f) for f in payload.get("feedback") or []])
         return work_task_section(
             requirement=requirement, step=step, instruction=instruction, acceptance_criteria=acceptance,
             supplements=supplements,

@@ -10,7 +10,8 @@ scenario works in a new schema of its own, dropped afterwards.
 derived from the code under test. Here each scenario is stored the way that
 code stored it (a layer's ``model``), this code's schema upgrades it (each
 model becomes an agent), and every role then runs through this code's tiers
-and must match the fixture byte for byte.
+and must match the fixture byte for byte, but for what a Planner's read-only
+run changed on purpose (``agent_launch_parity.read_only_planner``).
 """
 
 from __future__ import annotations
@@ -85,5 +86,6 @@ def test_each_role_starts_its_runtime_as_main_did(monkeypatch: pytest.MonkeyPatc
 
     captured = asyncio.run(_main())
     assert sorted(captured) == sorted(MAIN[scenario])
-    for case, expected in MAIN[scenario].items():
+    # The fixture predates the Planner's read-only run; every other role's launch is as it was.
+    for case, expected in parity.read_only_planner(MAIN[scenario]).items():
         assert captured[case] == expected, case

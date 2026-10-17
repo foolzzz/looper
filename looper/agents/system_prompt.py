@@ -225,10 +225,12 @@ def review_task_section(
     supplements: Sequence[str] = (),
     workspace: Mapping[str, Any] | None = None,
     review_role: str = "",
+    retry_notes: Sequence[str] = (),
 ) -> str:
     """A Reviewer's task: the step under review, after the task it belongs to (as context) and its supplements,
-    and the step's own worktree when it ran in one; for a review role's Reviewer (``review_role``), that what its
-    role asks decides its verdict too."""
+    with the notes the Planner retried it with (``retry_notes``, oldest first: the Planner's changes to the step,
+    which its Worker had too), and the step's own worktree when it ran in one; for a review role's Reviewer
+    (``review_role``), that what its role asks decides its verdict too."""
     lines = ["## Task"]
     if requirement.strip():
         lines += ["The whole task, for context:", _requirement(requirement), *_supplements(supplements), ""]
@@ -236,6 +238,11 @@ def review_task_section(
     if work_dir:
         lines.append(f"Working directory: {work_dir}")
     lines += _items("Acceptance criteria to verify:", acceptance_criteria)
+    if retry_notes:
+        lines += ["", "The Planner retried this step with these notes to its Worker, oldest first. They are the "
+                      "Planner's changes to the step: where a note changes the instruction or the acceptance criteria "
+                      "above, review against the note; every criterion that no note changes still holds."]
+        lines += [f"- {note}" for note in retry_notes]
     if review_role:
         lines += [f"You review it as the role {review_role}: besides these criteria, what your role above asks you "
                   "to check decides your verdict too, so passed is false when the work fails either."]
