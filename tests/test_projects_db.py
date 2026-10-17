@@ -306,7 +306,8 @@ def test_execution_settings_are_stored_through_the_task_and_cleared() -> None:
         calc = await projects.create_project(name="calc", execution=settings, pool=pool)
         await tasks.create_task(task_id="task-1", requirement="r", work_dir="/w", project_id=calc["id"], pool=pool)
         assert ProjectExecution.from_row(await projects.get_task_project("task-1", pool=pool)).view() == {
-            **settings, "task_budget_usd": 2.0, "step_workspaces": None, "max_step_retries": None}
+            **settings, "task_budget_usd": 2.0, "step_workspaces": None, "max_step_retries": None,
+            "agent_room": None, "room_post_per_minute": None, "room_broadcasts_per_run": None, "room_message_max_chars": None, "room_messages_per_task": None, "room_ping_pong_rounds": None, "room_wait_max_seconds": None}
 
         assert await projects.update_project(calc["id"], execution={"task_budget_usd": None,
                                                                     "supervise_interval_seconds": 60}, pool=pool)
