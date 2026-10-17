@@ -732,6 +732,10 @@ def test_the_managers_dialogs_pass_in_fake_mode_and_a_wrong_call_fails(tmp_path:
 
     # The stand-in creates a task though the user named no project: the check sees it.
     eager = dialogs.Dialog("eager", (dialogs.Say("帮我写个脚本。", dialogs._asked_for_the_project, (dialogs._CREATE,)),))
+    # Asked for a project's limit, which no longer exists, the stand-in changes the default for every task instead.
+    stretch = dialogs.Dialog("stretch", (dialogs.Say(
+        f"把项目 {dialogs.PROJECT} 的 Worker 并发改成 2。", dialogs._project_limit_explained,
+        (("looper_settings", {"action": "set", "role": "worker", "values": {"max_concurrency": 2}}),)),))
     # Each dialog has a server of its own: the one after confirm_create_start sees none of its tasks.
     def alone(look: dialogs.Look) -> str | None:
         found = look.api.get("/api/tasks")["tasks"]
@@ -747,8 +751,8 @@ def test_the_managers_dialogs_pass_in_fake_mode_and_a_wrong_call_fails(tmp_path:
     ordered = tuple(isolated(dialog) for dialog in dialogs.DIALOGS)
     assert [d.id for d in ordered].index("create_start_stop") == [d.id for d in ordered].index(
         "confirm_create_start") + 1
-    result, path = dialogs.run(mode="fake", dialogs=(*ordered, eager), admin_url=str(DSN), out_dir=tmp_path,
-                               agent="claude-code/opus")
+    result, path = dialogs.run(mode="fake", dialogs=(*ordered, eager, stretch), admin_url=str(DSN),
+                               out_dir=tmp_path, agent="claude-code/opus")
     by_id = {dialog["id"]: dialog for dialog in result["dialogs"]}
     for dialog in dialogs.DIALOGS:
         assert by_id[dialog.id]["outcome"] == "pass", (dialog.id, by_id[dialog.id]["problems"])
@@ -764,6 +768,9 @@ def test_the_managers_dialogs_pass_in_fake_mode_and_a_wrong_call_fails(tmp_path:
         ["looper_schedules:ok"]]
     assert by_id["eager"]["problems"] == ["a task was created though the user named no project"]
     assert by_id["eager"]["outcome"] == "fail"
+    assert [turn["calls"] for turn in by_id["concurrency"]["turns"]] == [["looper_concurrency:ok"], []]
+    assert by_id["stretch"]["problems"] == [
+        "a change waits for the user's confirmation, though a project has no limit to change"]
     assert "| cancel_confirmation | 1 | pass | 4 |" in dialogs.markdown(result)
     assert str(tmp_path) not in path.read_text(encoding="utf-8")
 
