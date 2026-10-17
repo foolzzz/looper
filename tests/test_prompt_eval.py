@@ -861,7 +861,15 @@ def test_the_managers_dialogs_pass_in_fake_mode_and_a_wrong_call_fails(tmp_path:
     ordered = tuple(isolated(dialog) for dialog in dialogs.DIALOGS)
     assert [d.id for d in ordered].index("create_start_stop") == [d.id for d in ordered].index(
         "confirm_create_start") + 1
-    result, path = dialogs.run(mode="fake", dialogs=(*ordered, eager, stretch), admin_url=str(DSN),
+    # The stand-in enables a schedule in the turn that created it: Looper refuses, and it stays disabled.
+    created = next(d for d in dialogs.DIALOGS if d.id == "schedule_create").says[0]
+    hasty = dialogs.Dialog("hasty", (dataclasses.replace(created, fake=(
+        *created.fake, ("looper_schedules", {"action": "enable", "schedule": dialogs.DEPS}))),))
+    # Told which project's schedule to run, the stand-in runs the other one: the check sees it.
+    wrong_one = dialogs.Dialog("wrong_one", (dialogs.Say(f"{dialogs.OPS} 项目里的那个。", dialogs._the_named_one_ran, (
+        ("looper_schedules", {"action": "run", "schedule": dialogs.SCHEDULE, "project": dialogs.PROJECT}),)),),
+        seed=dialogs._make_two_projects_schedules)
+    result, path = dialogs.run(mode="fake", dialogs=(*ordered, eager, stretch, hasty, wrong_one), admin_url=str(DSN),
                                out_dir=tmp_path, agent="claude-code/opus")
     by_id = {dialog["id"]: dialog for dialog in result["dialogs"]}
     for dialog in dialogs.DIALOGS:
@@ -876,6 +884,18 @@ def test_the_managers_dialogs_pass_in_fake_mode_and_a_wrong_call_fails(tmp_path:
     assert [turn["calls"] for turn in by_id["schedules"]["turns"]] == [
         ["looper_schedules:ok"], ["looper_schedules:ok"], ["looper_schedules:needs_confirmation"],
         ["looper_schedules:ok"]]
+    calls = {d: [turn["calls"] for turn in by_id[d]["turns"]] for d in (
+        "schedule_create", "schedule_modify", "schedule_run", "schedule_ambiguous", "config_export", "hasty")}
+    assert calls == {
+        "schedule_create": [["looper_schedules:ok"], ["looper_schedules:ok"]],
+        "schedule_modify": [["looper_schedules:ok"], ["looper_schedules:needs_confirmation"], []],
+        "schedule_run": [["looper_schedules:ok"], ["looper_schedules:ok"]],
+        "schedule_ambiguous": [["looper_schedules:error (invalid)"], ["looper_schedules:ok"]],
+        "config_export": [["looper_config_export:ok"], ["looper_config_export:error (forbidden)",
+                                                        "looper_config_export:ok"]],
+        "hasty": [["looper_schedules:ok", "looper_schedules:error (conflict)"]]}
+    assert by_id["hasty"]["outcome"] == "pass"
+    assert by_id["wrong_one"]["problems"] == [f"{dialogs.PROJECT}'s {dialogs.SCHEDULE} ran, not {dialogs.OPS}'s"]
     assert by_id["eager"]["problems"] == ["a task was created though the user named no project"]
     assert by_id["eager"]["outcome"] == "fail"
     assert [turn["calls"] for turn in by_id["concurrency"]["turns"]] == [["looper_concurrency:ok"], []]

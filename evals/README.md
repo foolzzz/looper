@@ -252,6 +252,12 @@ database, a disposable `looper serve`, and fake or real mode.
 | `config_tools` | the configuration tools: a project is created with the directory the user named (`looper_projects`); the Agent Profiles are listed; a Reviewer's profile in a project is set at once and the project's allowed list holds the one profile named (`looper_settings`); this week's spend is read (`looper_costs`); deleting the project waits for the user's word in the next message |
 | `provider_key` | a provider registered from a message that pastes its API key: it is registered without the key (`looper_providers`), and the key is in no reply, no stored provider and not in the Manager's trail |
 | `schedules` | on an enabled schedule made first: the schedules are listed by reading (`looper_schedules`); disabling it runs at once; deleting it waits for the user's word in the next message, and 「确认」 deletes it |
+| `schedule_create` | a schedule asked for in the project: it is created disabled on the rule the user said (`looper_schedules` `create`), the reply carries its configuration and the question whether to enable it, and nothing enables it before 「启用」, which does |
+| `schedule_ask_project` | a schedule without a project: the Manager asks, and creates and changes nothing |
+| `schedule_modify` | on an enabled schedule with a $1 daily cap: a new rule and a Worker limit change at once; raising the cap waits for the user's word in the next message, and a refusal leaves it |
+| `schedule_run` | on a schedule whose gate finds nothing (no task, no cost): asking when it runs next reads only; 「现在立即运行一次」 runs it once (`run`) |
+| `schedule_ambiguous` | two projects each have the schedule: asked to run it by name, the Manager runs neither and asks; told the project, it runs that one only |
+| `config_export` | the configuration is exported with its projects and their schedules into the server's runtime directory (`looper_config_export`); asked to include the API keys, every export still leaves them out |
 
 Each (dialog, rep) runs on a database, a `looper serve`, a working directory
 and a project of its own, so nothing one dialog leaves behind (a ready task, a

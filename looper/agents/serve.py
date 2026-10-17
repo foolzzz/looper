@@ -745,7 +745,7 @@ async def _run_agent_system(
     from .ops.planner import PlannerOps
     from .ops.service import ManagerOps, Platform
     platform = Platform(bus=bus, task_router=task_router, worker_pool=worker_pool, manager=manager,
-                        supervisor=supervisor)
+                        supervisor=supervisor, scheduler=scheduler, runtime_root=runtime_root)
     manager_ops = ManagerOps(platform, url=_local_url(host, port))
     manager.ops = manager_ops
     planner_ops = PlannerOps(platform, url=_local_url(host, port), dashboard_url=dashboard_url)
