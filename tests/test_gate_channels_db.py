@@ -30,18 +30,22 @@ TELEGRAM_CHAT = "4242"
 
 class _Poster:
     """``ChannelRegistry.post`` as the courier calls it: each post gets the next message id; ``fail`` fails the next
-    posts (with ``reply_to`` only, when ``replies``)."""
+    posts, ``gone`` the next replies as replies to a message that is gone."""
 
     def __init__(self) -> None:
         self.posts: list[dict[str, Any]] = []
         self.next_id = 100
         self.fail = 0
-        self.replies = False
+        self.gone = 0
 
-    async def __call__(self, channel: str, target: NotifyTarget, text: str, *, reply_to: str | None = None
-                       ) -> PostReceipt:
-        self.posts.append({"channel": channel, "target": target, "text": text, "reply_to": reply_to})
-        if self.fail and (reply_to is not None or not self.replies):
+    async def __call__(self, channel: str, target: NotifyTarget, text: str, *, reply_to: str | None = None,
+                       idempotency_key: str | None = None) -> PostReceipt:
+        self.posts.append({"channel": channel, "target": target, "text": text, "reply_to": reply_to,
+                           "key": idempotency_key})
+        if self.gone and reply_to is not None:
+            self.gone -= 1
+            return PostReceipt(False, error="lark-cli exited 2: the message was recalled", parent_gone=True)
+        if self.fail:
             self.fail -= 1
             return PostReceipt(False, error="the bot was removed from the chat")
         self.next_id += 1
@@ -58,12 +62,12 @@ class _Bus:
 
 async def _task_with_gate(pool: Any, task_id: str = "task-a", *, origin: str = "", chat: str | None = None,
                           kind: str | None = None, mention: str | None = None, status: str = "waiting_user",
-                          state: str = "open", step_id: str = "step-g1") -> None:
+                          state: str = "open", step_id: str = "step-g1", project_name: str = "calc") -> None:
     from datetime import datetime, timezone
 
     from looper.db import plans, tasks
 
-    project = await _project(pool)
+    project = await _project(pool, project_name)
     await tasks.create_task(task_id=task_id, requirement="write the settings file", project_id=project["id"],
                             work_dir="/w", status=status, origin_channel_id=origin, chat_id=chat, chat_kind=kind,
                             chat_mention=mention, title="settings file", pool=pool)
@@ -83,8 +87,8 @@ async def _say(task_id: str, step_id: str, kind: str, text: str, role: str = "lo
 
 
 def _lark_reply(text: str, *, reply_to: str | None = None, root_id: str | None = None, chat: str = "oc_dm",
-                group: bool = False, message_id: str = "om_user_1") -> MessageEnvelope:
-    context: dict[str, Any] = {"chat_id": chat, "chat_type": "group" if group else "p2p", "sender_id": LARK_USER,
+                group: bool = False, message_id: str = "om_user_1", sender: str = LARK_USER) -> MessageEnvelope:
+    context: dict[str, Any] = {"chat_id": chat, "chat_type": "group" if group else "p2p", "sender_id": sender,
                                "message_id": message_id}
     if reply_to:
         context["reply_to"] = reply_to
@@ -116,8 +120,9 @@ def test_a_lark_tasks_gate_posts_its_card_and_the_rest_under_it(monkeypatch: pyt
         assert await courier.run_once() == 0  # handled once
 
         # The user answers in Lark (under the card), the Planner replies: under the user's message.
+        # As routing records a direct message: in the chat its sender's open_id names (``origin_chat``).
         await user_gates.add_user_message("task-a", "g1", {"kind": "message", "text": "PostgreSQL", "via": "lark",
-                                                           "channel": "lark", "chat": "oc_dm",
+                                                           "channel": "lark", "chat": LARK_USER,
                                                            "external_id": "om_user_1"})
         assert await user_gates.unposted() == []  # the user's own messages are never posted
         await _say("task-a", "step-g1", "reply", "Which version?", role="planner", state="discussing")
@@ -134,6 +139,8 @@ def test_a_lark_tasks_gate_posts_its_card_and_the_rest_under_it(monkeypatch: pyt
         posts = await pool.fetch("SELECT channel, chat, external_id FROM task_user_gate_posts ORDER BY id")
         assert [tuple(p) for p in posts] == [("lark", LARK_USER, "om_101"), ("lark", LARK_USER, "om_102"),
                                              ("lark", LARK_USER, "om_103")]
+        # Each post is keyed by its message, so Lark sends it once however often it is tried.
+        assert [p["key"] for p in poster.posts] == [f"gate-{m['id']}" for m in thread if m["post_state"] == "sent"]
         (gate,) = (await _api("GET", "/api/tasks/task-a"))[1]["gates"]
         assert gate["channel_posts"] == {"channel": "lark", "target": f"Lark {LARK_USER}", "sent": 3, "failed": 0,
                                          "last_error": None}
@@ -163,39 +170,90 @@ def test_a_lark_groups_messages_that_wait_for_an_answer_say_to_mention_the_bot(m
     _run(test, monkeypatch)
 
 
-def test_a_failed_post_is_noted_and_a_reply_to_a_gone_message_is_posted_on_its_own(
+def test_a_failed_post_is_tried_again_and_the_gates_later_messages_wait_behind_it(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async def test(pool: Any) -> None:
-        from looper.agents.gate_courier import GateCourier
+        from looper.agents.gate_courier import POST_ATTEMPTS, POST_RETRY_SEC, GateCourier
 
         await _task_with_gate(pool, origin="channel-telegram", chat=TELEGRAM_CHAT, kind="chat")
         poster = _Poster()
-        poster.fail = 1
         courier = GateCourier(poster)
-        await courier.run_once()  # the card fails
+
+        async def due() -> None:  # the next try of every post that waits for one is due now
+            await pool.execute("UPDATE task_user_gate_messages SET post_retry_at = now() - interval '1 second' "
+                               "WHERE post_retry_at IS NOT NULL AND post_state IS NULL")
+
+        async def posts() -> list[tuple[Any, ...]]:
+            return [tuple(r) for r in await pool.fetch(
+                "SELECT kind, post_state, post_attempts, post_retry_at IS NOT NULL FROM task_user_gate_messages "
+                "ORDER BY id")]
+
+        poster.fail = 1
+        await courier.run_once()  # the card fails once: it is tried again in POST_RETRY_SEC[0]
+        retry_in = await pool.fetchval("SELECT extract(epoch FROM post_retry_at - now()) FROM "
+                                       "task_user_gate_messages WHERE kind = 'opened'")
+        assert POST_RETRY_SEC[0] - 5 < retry_in <= POST_RETRY_SEC[0]
+        assert await posts() == [("opened", None, 1, True)]
         (gate,) = (await _api("GET", "/api/tasks/task-a"))[1]["gates"]
-        assert gate["channel_posts"] == {"channel": "telegram", "target": f"Telegram {TELEGRAM_CHAT}", "sent": 0,
+        assert gate["channel_posts"]["failed"] == 0  # not failed yet
+        # The reminder written meanwhile waits behind the card, so the chat gets them in order.
+        await _say("task-a", "step-g1", "reminder", "Still waiting")
+        await courier.run_once()
+        assert len(poster.posts) == 1
+        await due()
+        await courier.run_once()
+        card, reminder = poster.posts[1:]
+        assert card["key"] == poster.posts[0]["key"] and card["text"].startswith("⏸ 需要你决定")
+        assert reminder["reply_to"] == "om_101" and reminder["text"].startswith("⏰ 还在等你 · 已等 0 小时")
+        assert await posts() == [("opened", "sent", 2, False), ("reminder", "sent", 1, False)]
+
+        # POST_ATTEMPTS tries in all, then it failed: the task page and the activity say so.
+        poster.fail = POST_ATTEMPTS
+        await _say("task-a", "step-g1", "updated", "the service runs 15", state="open")
+        for _ in range(POST_ATTEMPTS):
+            await courier.run_once()
+            await due()
+        assert await posts() == [("opened", "sent", 2, False), ("reminder", "sent", 1, False),
+                                 ("updated", "failed", POST_ATTEMPTS, False)]
+        (gate,) = (await _api("GET", "/api/tasks/task-a"))[1]["gates"]
+        assert gate["channel_posts"] == {"channel": "telegram", "target": f"Telegram {TELEGRAM_CHAT}", "sent": 2,
                                          "failed": 1, "last_error": "the bot was removed from the chat"}
         activity = [r["summary"] for r in await pool.fetch("SELECT summary FROM activity WHERE kind = 'error'")]
         assert activity == [f"Gate g1: could not send to Telegram {TELEGRAM_CHAT}: the bot was removed from the chat"]
 
-        # The reminder carries the card's questions; with no card it is a message of its own.
-        await _say("task-a", "step-g1", "reminder", "Still waiting")
-        await courier.run_once()
-        reminder = poster.posts[-1]
-        assert reminder["reply_to"] is None and "1. Which database?" in reminder["text"]
-        assert reminder["text"].startswith("⏰ 还在等你 · 已等 0 小时 · settings file")
-
-        # A reply under a message that is gone is posted on its own.
-        poster.fail, poster.replies = 1, True
+        # A reply under a message that is gone is posted on its own, under a key of its own; a reply that failed
+        # otherwise was tried again under its message (above), as it may have arrived.
+        poster.gone = 1
         await _say("task-a", "step-g1", "cancelled", "No answer needed", state="cancelled", resolution="s1 found it")
         await courier.run_once()
-        assert [(p["reply_to"], p["text"]) for p in poster.posts[-2:]] == [("om_101", "✅ 不用回答了：s1 found it"),
-                                                                         (None, "✅ 不用回答了：s1 found it")]
-        states = [r["post_state"] for r in await pool.fetch("SELECT post_state FROM task_user_gate_messages "
-                                                            "ORDER BY id")]
-        assert states == ["failed", "sent", "sent"]
+        (under, alone) = poster.posts[-2:]
+        assert (under["reply_to"], alone["reply_to"], alone["text"]) == ("om_101", None, "✅ 不用回答了：s1 found it")
+        assert alone["key"] == f"{under['key']}-own"
+        assert (await posts())[-1] == ("cancelled", "sent", 1, False)
+
+    _run(test, monkeypatch)
+
+
+def test_what_asks_for_an_answer_is_not_posted_once_the_gate_stopped_waiting(monkeypatch: pytest.MonkeyPatch,
+                                                                             ) -> None:
+    async def test(pool: Any) -> None:
+        from looper.agents.gate_courier import GateCourier
+
+        await _task_with_gate(pool, origin="channel-telegram", chat=TELEGRAM_CHAT, kind="chat")
+        # A backlog: the gate opened, was reminded, updated and closed before any of it was posted.
+        await _say("task-a", "step-g1", "reminder", "Still waiting")
+        await _say("task-a", "step-g1", "updated", "the service runs 15")
+        await _say("task-a", "step-g1", "resumed", "")
+        await _say("task-a", "step-g1", "reply", "PostgreSQL then.", role="planner")
+        await _say("task-a", "step-g1", "closed", "Settled", state="passed",
+                   summary={"decisions": ["PostgreSQL"], "assumptions": [], "open": []})
+        poster = _Poster()
+        await GateCourier(poster).run_once()
+        assert [p["text"].splitlines()[0] for p in poster.posts] == ["PostgreSQL then.", "✅ 讨论结束 · storage"]
+        states = [tuple(r) for r in await pool.fetch("SELECT kind, post_state FROM task_user_gate_messages ORDER BY id")]
+        assert states == [("opened", "none"), ("reminder", "none"), ("updated", "none"), ("resumed", "none"),
+                          ("reply", "sent"), ("closed", "sent")]
 
     _run(test, monkeypatch)
 
@@ -236,8 +294,27 @@ def test_a_web_tasks_gates_go_to_the_chat_the_setting_names(monkeypatch: pytest.
         await courier.run_once()
         (reminder,) = poster.posts
         assert reminder["target"] == NotifyTarget(TargetKind.CHAT, TELEGRAM_CHAT)
+
+        # The chat leaves the allowlist: its replies would be dropped, so the gates go to the task page only.
+        await pool.execute("UPDATE channel_configs SET config = $1::jsonb WHERE channel_id = 'channel-telegram'",
+                           json.dumps({"allowed_user_ids": ["5151"]}))
+        await _say("task-a", "step-g1", "reminder", "Still waiting")
+        await courier.run_once()
+        assert len(poster.posts) == 1
+        assert await pool.fetchval("SELECT post_state FROM task_user_gate_messages ORDER BY id DESC LIMIT 1") == "none"
+        status, settings, _ = await _api("GET", "/api/gate-settings")
+        assert settings["dashboard_target"] == {"channel": "telegram", "chat": TELEGRAM_CHAT}
+        assert settings["dashboard_target_problem"] == (
+            f"Telegram {TELEGRAM_CHAT} is no longer on the Telegram channel's sender allowlist: the gates of dashboard "
+            "tasks go to the task page only")
+        # A chat on a channel that is off cannot be chosen.
+        await pool.execute("UPDATE channel_configs SET enabled = false WHERE channel_id = 'channel-telegram'")
+        status, refused, _ = await _api("PUT", "/api/gate-settings",
+                                        {"dashboard_target": {"channel": "telegram", "chat": "5151"}})
+        assert status == 400 and refused["error"] == ("the Telegram channel is off: turn it on in Settings → Channels "
+                                                      "first")
         status, cleared, _ = await _api("PUT", "/api/gate-settings", {"dashboard_target": None})
-        assert status == 200 and cleared["dashboard_target"] is None
+        assert status == 200 and cleared["dashboard_target"] is None and cleared["dashboard_target_problem"] is None
 
     _run(test, monkeypatch)
 
@@ -263,14 +340,19 @@ def test_a_reply_to_a_gates_message_goes_to_the_gate_before_the_manager(monkeypa
         assert woken.message_type is MessageType.GATE_MESSAGE and woken.target.agent_id == "planner-task-a"
         (message,) = [m for m in await user_gates.thread("step-g1", pool=pool) if m["role"] == "user"]
         assert (message["text"], message["via"], message["channel"], message["chat"], message["external_id"],
-                message["author"]) == ("PostgreSQL", "lark", "lark", "oc_dm", "om_user_1", None)
+                message["author"]) == ("PostgreSQL", "lark", "lark", LARK_USER, "om_user_1", None)
 
-        # A reply further down the thread is found by its root; in a group the discussion names who wrote.
-        found = await routed(_lark_reply("16, please", reply_to="om_555", root_id="om_101", group=True,
-                                         chat=LARK_GROUP, message_id="om_user_2"))
+        # A message in the card's thread that names only its root is found by it; in a group the discussion names
+        # who wrote, and the chat is the group.
+        found = await routed(_lark_reply("16, please", root_id="om_101", group=True, chat=LARK_GROUP,
+                                         message_id="om_user_2"))
         assert found.kind is RouteKind.DELIVERED
-        authors = [m["author"] for m in await user_gates.thread("step-g1", pool=pool) if m["role"] == "user"]
-        assert authors == [None, "张三"]
+        users = [m for m in await user_gates.thread("step-g1", pool=pool) if m["role"] == "user"]
+        assert [(m["author"], m["chat"]) for m in users] == [(None, LARK_USER), ("张三", LARK_GROUP)]
+        # A reply to a message in the thread that is no gate's (the Manager's own answer there, such as its notice
+        # that a reply was kept) is the Manager's, whatever its root.
+        assert (await routed(_lark_reply("continue the task", reply_to="om_kept_notice", root_id="om_101",
+                                         message_id="om_user_x"))).kind is RouteKind.NONE
         # A reply to the user's own message there is about the gate too.
         assert (await routed(_lark_reply("and 90 days", reply_to="om_user_2", message_id="om_user_3"))).kind \
             is RouteKind.DELIVERED
@@ -280,7 +362,9 @@ def test_a_reply_to_a_gates_message_goes_to_the_gate_before_the_manager(monkeypa
         kept = await routed(_lark_reply("SQLite after all", reply_to="om_101", message_id="om_user_4"), live=False)
         assert kept.kind is RouteKind.KEPT and kept.reply.startswith("任务已停止")
         refused = await routed(_lark_reply("x" * 8001, reply_to="om_101", message_id="om_user_5"), live=False)
-        assert refused.kind is RouteKind.REFUSED and "8001" in refused.reply
+        assert (refused.kind, refused.reply) == (RouteKind.REFUSED, "这条回答太长（最多 8000 个字），没能交给关卡：请分几条回复。")
+        empty = await routed(_lark_reply("  ", reply_to="om_101", message_id="om_user_7"), live=False)
+        assert (empty.kind, empty.reply) == (RouteKind.REFUSED, "这条回复没有文字，没能交给关卡：请写下你的回答再回复一次。")
 
         # A gate that no longer waits: the Manager hears the message, with a note.
         await pool.execute("UPDATE tasks SET status = 'waiting_user'")
@@ -377,40 +461,87 @@ async def _relay(turn: Any, arguments: dict[str, Any], planners: set[str]) -> tu
         ops.end_turn(turn)
 
 
-def test_the_manager_relays_the_users_words_to_a_waiting_gate(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_the_manager_relays_the_users_own_message_to_a_waiting_gate(monkeypatch: pytest.MonkeyPatch) -> None:
     async def test(pool: Any) -> None:
-        from looper.agents.tiers.manager import ManagerAgent
+        from looper.agents.gate_courier import GateCourier
         from looper.db import user_gates
 
         await _task_with_gate(pool, origin="channel-lark", chat=LARK_GROUP, kind="chat", mention=LARK_USER)
-        answer, bus = await _relay(_tool_turn("Use PostgreSQL", group=True),
-                                   {"task_id": "task-a", "gate": "g1", "text": "Use PostgreSQL"}, {"task-a"})
+        poster = _Poster()
+        await GateCourier(poster).run_once()  # the card in the group is om_101
+        # The user's message itself goes, whatever the model would say.
+        answer, bus = await _relay(_tool_turn("Use PostgreSQL", group=True), {"task_id": "task-a", "gate": "g1"},
+                                   {"task-a"})
         assert answer["status"] == "ok" and answer["result"]["delivered"] == "queued", answer
         (woken,) = bus.published
         assert woken.message_type is MessageType.GATE_MESSAGE
         (message,) = [m for m in await user_gates.thread("step-g1", pool=pool) if m["role"] == "user"]
-        assert (message["via"], message["author"], message["channel"], message["chat"], message["external_id"]) == (
-            "manager:lark", "张三", "lark", LARK_GROUP, "om_turn")
+        assert (message["text"], message["via"], message["author"], message["channel"], message["chat"],
+                message["external_id"]) == ("Use PostgreSQL", "manager:lark", "张三", "lark", LARK_GROUP, "om_turn")
 
-        # From the dashboard chat: no channel message; the user ends the discussion.
-        answer, _ = await _relay(_tool_turn("go on", channel="web"),
-                                 {"task_id": "task-a", "gate": "g1", "text": "", "end": True}, set())
+        # Only part of it, copied word for word; an excerpt that is not in the message is refused.
+        turn = _tool_turn("Thanks! On the storage question: PostgreSQL 16. Also, how much did today cost?")
+        answer, _ = await _relay(turn, {"task_id": "task-a", "gate": "g1", "excerpt": "PostgreSQL   16."}, {"task-a"})
+        assert answer["status"] == "ok"
+        assert [m["text"] for m in await user_gates.thread("step-g1", pool=pool) if m["role"] == "user"][-1] == \
+            "PostgreSQL   16."
+        answer, _ = await _relay(turn, {"task_id": "task-a", "gate": "g1", "excerpt": "PostgreSQL 15"}, {"task-a"})
+        assert answer["status"] == "error" and "word for word" in answer["error"]["message"]
+
+        # Answered from the user's direct chat with the bot: the Planner's reply goes to the gate's group, under
+        # the card, not under a message the group cannot see.
+        await _say("task-a", "step-g1", "reply", "16 it is.", role="planner", state="discussing")
+        await GateCourier(poster).run_once()
+        assert (poster.posts[-1]["target"].id, poster.posts[-1]["reply_to"]) == (LARK_GROUP, "om_101")
+
+        # From the dashboard chat: no channel message; the user ends the discussion with their message.
+        answer, _ = await _relay(_tool_turn("go on", channel="web"), {"task_id": "task-a", "gate": "g1", "end": True},
+                                 set())
         assert answer["status"] == "ok" and answer["result"]["delivered"] == "kept"
         last = (await user_gates.thread("step-g1", pool=pool))[-1]
-        assert (last["kind"], last["via"], last["channel"], last["external_id"]) == ("end", "manager:web", None, None)
-
-        # The Manager sees the gate before each message, and in the task.
-        section = await ManagerAgent._open_gates_section(None)  # type: ignore[arg-type]
-        assert section[0] == "Open gates (waiting for the user's answer; newest first):"
-        assert section[1].startswith('  - task task-a (project calc), gate g1 "storage": open for 0 min, waiting for ')
-        assert section[1].endswith("open questions: q1 Which database?")
+        assert (last["kind"], last["text"], last["via"], last["channel"], last["external_id"]) == (
+            "end", "go on", "manager:web", None, None)
 
         await pool.execute("UPDATE task_user_gates SET state = 'passed', summary = '{\"decisions\": [], "
                            "\"assumptions\": [], \"open\": []}'")
-        answer, _ = await _relay(_tool_turn("one more thing"), {"task_id": "task-a", "gate": "g1", "text": "x"},
-                                 {"task-a"})
+        answer, _ = await _relay(_tool_turn("one more thing"), {"task_id": "task-a", "gate": "g1"}, {"task-a"})
         assert answer["status"] == "error" and answer["error"]["code"] == "conflict"
         assert "gate g1 is passed" in answer["error"]["message"]
-        assert await ManagerAgent._open_gates_section(None) == []  # type: ignore[arg-type]
+
+    _run(test, monkeypatch)
+
+
+def test_the_manager_sees_the_open_gates_of_the_chat_it_answers(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def test(pool: Any) -> None:
+        from looper.agents.tiers.manager import ManagerAgent
+
+        await _task_with_gate(pool, origin="channel-lark", chat=LARK_GROUP, kind="chat", mention=LARK_USER)
+        # Another user's task, from their direct chat with the bot.
+        await _task_with_gate(pool, "task-b", origin="channel-lark", chat="ou_other", kind="user", step_id="step-b1",
+                              project_name="notes")
+
+        async def section(envelope: MessageEnvelope | None) -> list[str]:
+            return await ManagerAgent._open_gates_section(None, envelope)  # type: ignore[arg-type]
+
+        web = await section(_tool_turn("hi", channel="web").envelope)
+        assert web[0] == "Open gates (waiting for the user's answer; newest first):"
+        assert sorted(line.split(",")[0] for line in web[1:3]) == ["  - task task-a (project calc)",
+                                                                   "  - task task-b (project notes)"]
+        assert any(f"waiting for the user; chat: Lark group {LARK_GROUP}; open questions: q1 Which database?" in line
+                   for line in web)
+        assert any("chat: Lark ou_other;" in line for line in web)
+
+        group = await section(_lark_reply("hi", chat=LARK_GROUP, group=True))
+        assert group[0] == "Open gates of this chat (waiting for the user's answer; newest first):"
+        assert len(group) == 3 and group[1].startswith('  - task task-a (project calc), gate g1 "storage": open for ')
+        assert "chat:" not in group[1] and group[1].endswith("open questions: q1 Which database?")
+        # The other user's direct chat sees only its own gate; this user's direct chat none of these.
+        other = await section(_lark_reply("hi", chat="oc_other_dm", sender="ou_other"))
+        assert len(other) == 3 and other[1].startswith("  - task task-b")
+        assert await section(_lark_reply("hi")) == []
+
+        await pool.execute("UPDATE task_user_gates SET state = 'passed', summary = '{\"decisions\": [], "
+                           "\"assumptions\": [], \"open\": []}'")
+        assert await section(None) == []
 
     _run(test, monkeypatch)

@@ -1043,6 +1043,10 @@ END $$;
 ALTER TABLE task_user_gate_messages ADD COLUMN IF NOT EXISTS post_state TEXT
     CHECK (post_state IN ('sent', 'failed', 'none'));
 ALTER TABLE task_user_gate_messages ADD COLUMN IF NOT EXISTS post_error TEXT;
+-- A post that failed is tried again: post_attempts so far, and when the next is due (post_retry_at; NULL: now).
+-- While one waits, the gate's later messages wait behind it, so the chat gets them in order.
+ALTER TABLE task_user_gate_messages ADD COLUMN IF NOT EXISTS post_attempts INT NOT NULL DEFAULT 0;
+ALTER TABLE task_user_gate_messages ADD COLUMN IF NOT EXISTS post_retry_at TIMESTAMPTZ;
 DO $$
 BEGIN
     IF NOT EXISTS (SELECT 1 FROM schema_migrations WHERE name = 'task_user_gate_messages_posted_before_channels') THEN

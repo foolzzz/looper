@@ -21,7 +21,7 @@ from ...db import steps as db_steps, task_changes as db_changes, task_roles as d
 from ...db import user_gates as db_user_gates
 from ..agent_settings import TASK_LIMIT_ROLES, TASK_ROLES, AgentSettings, AgentType, Layer, index_layers, resolve
 from ..agent_settings import resolve_task_concurrency
-from ..gate_service import post_message as post_gate_message
+from ..gate_service import origin_chat, post_message as post_gate_message
 from ..message import MANAGER_ADDRESS, TASK_ROUTER_ADDRESS, MessageEnvelope, MessageType, RestartMode, planner_address
 from ..project_execution import LessonsMode, ProjectExecution, ReviewPolicy, TaskBudgetAction, format_usd
 from ..projects import HTTP_404, HTTP_409, PROFILES_NOTE, TASK_PROFILE_ROLES, RequestError, agents_view
@@ -510,20 +510,40 @@ async def _update(call: Call) -> dict[str, Any]:
 # --- looper_task_gate_reply ---
 
 
+def _relayed_text(turn: Turn, excerpt: Any) -> str:
+    """What goes into the gate: the user's message this turn answers, or the ``excerpt`` of it the model names,
+    which must be in it word for word (spaces aside). The model's own words never go."""
+    message = str(turn.envelope.payload.get("text") or "") if turn.envelope is not None else ""
+    if not message.strip():
+        raise OpError(ErrorCode.NEEDS_USER_TURN, "this turn answers no user message: there is nothing of the "
+                                                 "user's to pass on")
+    if excerpt is None:
+        return message
+    if not isinstance(excerpt, str) or not excerpt.strip():
+        raise OpError(ErrorCode.INVALID, "excerpt is a non-empty part of the user's message")
+    if " ".join(excerpt.split()) not in " ".join(message.split()):
+        raise OpError(ErrorCode.INVALID, "excerpt must be copied word for word from the user's message; leave it "
+                                         "out to pass on the whole message")
+    return excerpt
+
+
 async def _gate_reply(call: Call) -> dict[str, Any]:
-    """The user's words, as they said them, into the discussion of a gate that waits for them (as the task page
-    adds them, ``gate_service.post_message``); the channel message they are, so the Planner's reply goes under it."""
+    """The user's message (or the excerpt of it the model names) into the discussion of a gate that waits for them,
+    as the task page adds it (``gate_service.post_message``); the channel message it is, so the Planner's reply goes
+    under it when it came from the gate's chat."""
     arguments, turn = call.arguments, call.turn
     task_id, label = arguments["task_id"], arguments["gate"]
+    text = _relayed_text(turn, arguments.get("excerpt"))
     context = (turn.envelope.payload.get("channel_context") if turn.envelope is not None else None) or {}
     origin = None
     if turn.channel in ("lark", "telegram"):
         origin = {"author": (context.get("sender_name") or turn.sender) if turn.group else None,
-                  "channel": turn.channel, "chat": turn.chat,
+                  "channel": turn.channel,
+                  "chat": origin_chat(turn.channel, turn.chat or "", group=turn.group, sender=turn.sender or ""),
                   "external_id": str(context.get("message_id") or "") or None}
     has_planner = call.platform.task_router.has_planner(task_id)
     try:
-        posted = await post_gate_message(task_id, label, {"text": arguments.get("text") or ""},
+        posted = await post_gate_message(task_id, label, {"text": text},
                                          has_planner=has_planner, bus=call.platform.bus, source=MANAGER_ADDRESS,
                                          via=_via(turn), end=bool(arguments.get("end")), origin=origin)
     except RequestError as exc:
@@ -531,8 +551,8 @@ async def _gate_reply(call: Call) -> dict[str, Any]:
     kept = posted["delivered"] == "kept"
     return {"task_id": task_id, "gate": label, "delivered": posted["delivered"],
             "note": "the task is not running: its Planner gets it when the task continues" if kept else
-                    "its Planner answers in the gate's discussion: in this chat for a Lark or Telegram chat, on the "
-                    "task page for the dashboard chat"}
+                    "its Planner answers in the gate's discussion: on the task page, and in the gate's Lark or "
+                    "Telegram chat when it has one"}
 
 
 def _task_argument(arguments: Mapping[str, Any]) -> str | None:
@@ -623,15 +643,18 @@ TOOLS: tuple[Tool, ...] = (
     ),
     Tool(
         name="looper_task_gate_reply",
-        description="Pass the user's words, as they said them, to a user gate waiting for their answer (\"Open "
-                    "gates\"): they go into the gate's discussion and its Planner answers there. end: true when the "
-                    "user wants the Planner to go on with the conclusions so far (text may then be empty).",
+        description="Pass the user's message to a user gate waiting for their answer (\"Open gates\"): Looper "
+                    "puts the message itself into the gate's discussion, and its Planner answers there. excerpt: "
+                    "only when part of the message is about the gate, that part, copied word for word. end: true "
+                    "when the user wants the Planner to go on with the conclusions so far.",
         schema={
-            "type": "object", "required": ["task_id", "gate", "text"], "additionalProperties": False,
+            "type": "object", "required": ["task_id", "gate"], "additionalProperties": False,
             "properties": {
                 "task_id": _TASK_ID,
                 "gate": {"type": "string", "minLength": 1, "description": "The gate's id in its task (g1, ...)."},
-                "text": {"type": "string", "description": "The user's words for the gate, as they said them."},
+                "excerpt": {"type": "string", "description": "The part of the user's message that is about the "
+                                                             "gate, copied word for word; leave it out to pass on "
+                                                             "the whole message."},
                 "end": {"type": "boolean", "description": "The user ends the discussion: the Planner closes the gate "
                                                           "on what is settled and states its assumptions."},
             },

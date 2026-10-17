@@ -179,10 +179,12 @@ class TelegramChannelAdapter(ChannelAdapter):
             logger.warning("telegram notification to %s failed: %s", chat, exc)
             return DeliveryReceipt(channel="telegram", success=False, error=redact(str(exc)))
 
-    async def post(self, target: NotifyTarget, text: str, *, reply_to: str | None = None) -> PostReceipt:
+    async def post(self, target: NotifyTarget, text: str, *, reply_to: str | None = None,
+                   idempotency_key: str | None = None) -> PostReceipt:
         """Send ``text`` as plain text to the Telegram chat ``target.id``, in messages of at most 4,000 characters,
-        the first a reply to the message ``reply_to`` when given. The ids of the messages sent are kept when a later
-        one fails, so replies to them still route."""
+        the first a reply to the message ``reply_to`` when given (sent on its own when that message is gone). The
+        ids of the messages sent are kept when a later one fails, so replies to them still route. Telegram has no
+        idempotency key: a post retried after a lost answer may be sent twice."""
         if self._app is None:
             return PostReceipt(False, error="the Telegram bot is not started")
         try:
@@ -196,7 +198,8 @@ class TelegramChannelAdapter(ChannelAdapter):
         sent: list[str] = []
         try:
             for chunk in self._split_message(text, max_len=4000):
-                extra = {"reply_to_message_id": reply} if reply is not None and not sent else {}
+                extra = ({"reply_to_message_id": reply, "allow_sending_without_reply": True}
+                         if reply is not None and not sent else {})
                 message = await self._app.bot.send_message(chat_id=chat, text=chunk, **extra)
                 sent.append(str(message.message_id))
         except Exception as exc:

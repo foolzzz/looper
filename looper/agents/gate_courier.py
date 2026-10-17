@@ -9,10 +9,18 @@ a reply to any of them is about the gate, ``gate_routing``), why it failed
 (the task page shows it, and the activity), or that the gate has no chat. The
 card (the gate opened) is a message of its own; every later message replies
 under it, but a Planner's reply goes under the user's message it answers when
-that came from the same chat. The texts are code's, in Chinese like a task's
+that came from the gate's chat. The texts are code's, in Chinese like a task's
 end notice; a Planner's reply goes as it wrote it. In a Lark group a reply
 reaches the bot only when it @-mentions it, so what waits for an answer there
 says so.
+
+A post that sent nothing is tried again, after ``POST_RETRY_SEC``, up to
+``POST_ATTEMPTS`` in all, and the gate's later messages wait behind it; only
+then is it ``failed``. Each post carries an idempotency key of its message
+(Lark sends one message per key; Telegram has none, so a post retried after a
+lost answer may arrive twice), and a reply whose message is gone is posted on
+its own. A card, reminder, update or "still waits" message whose gate no longer
+waits by the time it is posted (after a backlog) is not posted.
 """
 
 from __future__ import annotations
@@ -20,7 +28,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from ..db import activity as db_activity, tasks as db_tasks, user_gates as db_user_gates
@@ -40,6 +48,11 @@ FINDINGS_CHARS = 300
 QUESTION_CHARS = 200
 ANSWER_LINE = "直接回复这条消息作答。"
 GROUP_LINE = "在群里回复请 @机器人。"
+# Tries of a post that sends nothing, and the waits between them: about ten minutes in all.
+POST_ATTEMPTS = 3
+POST_RETRY_SEC = (120.0, 480.0)
+# The kinds that ask for an answer: not posted once the gate no longer waits.
+WHILE_WAITING = frozenset({MessageKind.OPENED, MessageKind.UPDATED, MessageKind.REMINDER, MessageKind.RESUMED})
 
 # Posts ``text`` to ``target`` in the channel named (a reply to ``reply_to`` when given): ``ChannelRegistry.post``.
 Poster = Callable[..., Awaitable[PostReceipt]]
@@ -178,21 +191,34 @@ class GateCourier:
         if not rows:
             return 0
         dashboard = await dashboard_target()
+        held: set[str] = set()  # gates whose message waits for its next try: their later messages wait too
         for row in rows:
-            await self._handle(row, dashboard)
+            if row["step_id"] in held:
+                continue
+            if not await self._handle(row, dashboard):
+                held.add(row["step_id"])
         return len(rows)
 
-    async def _handle(self, row: Mapping[str, Any], dashboard: GateChat | None) -> None:
+    async def _handle(self, row: Mapping[str, Any], dashboard: GateChat | None) -> bool:
+        """Post one message and note what that did; False when it waits for its next try."""
         chat = gate_chat(_task_columns(row), dashboard)
         text = message_text(row, chat, dashboard_url=self._dashboard_url) if chat is not None else None
-        if chat is None or text is None:
+        stale = text is not None and MessageKind(row["kind"]) in WHILE_WAITING and not GateState(row["state"]).waiting
+        if chat is None or text is None or stale:
             await db_user_gates.record_post(row["id"], row["task_id"], "none")
-            return
+            return True
         reply_to = await self._reply_to(row, chat)
-        receipt = await self._post(chat.channel.value, chat.target, text, reply_to=reply_to)
-        if not receipt.success and reply_to is not None and not receipt.external_ids:
-            # The message replied to may be gone: post it on its own.
-            receipt = await self._post(chat.channel.value, chat.target, text, reply_to=None)
+        key = f"gate-{row['id']}"
+        receipt = await self._post(chat.channel.value, chat.target, text, reply_to=reply_to, idempotency_key=key)
+        if receipt.parent_gone:
+            # The message it replies to was recalled or deleted: post it on its own.
+            receipt = await self._post(chat.channel.value, chat.target, text, reply_to=None,
+                                       idempotency_key=f"{key}-own")
+        attempt = int(row.get("post_attempts") or 0) + 1
+        if not receipt.success and not receipt.external_ids and attempt < POST_ATTEMPTS:
+            await db_user_gates.record_retry(row["id"], receipt.error or "not sent", datetime.now(timezone.utc)
+                                             + timedelta(seconds=POST_RETRY_SEC[attempt - 1]))
+            return False
         await db_user_gates.record_post(row["id"], row["task_id"], "sent" if receipt.success else "failed",
                                         error=None if receipt.success else receipt.error or "not sent",
                                         channel=chat.channel.value, chat=chat.target.id,
@@ -201,12 +227,13 @@ class GateCourier:
             await db_activity.insert_activity(
                 task_id=row["task_id"], worker="planner", kind="error",
                 summary=f"Gate {row['step_key']}: could not send to {chat.label()}: {receipt.error}"[:500])
+        return True
 
     @staticmethod
     async def _reply_to(row: Mapping[str, Any], chat: GateChat) -> str | None:
         """What the message replies to in ``chat``: nothing for the card; the user's message a Planner's reply (or
-        a note on that message) answers, when it came from this chat; else the gate's first message there (its
-        card)."""
+        a note on that message) answers, when it came from this chat (one the user sent the Manager from another
+        chat is not there); else the gate's first message there (its card)."""
         if row["kind"] == MessageKind.OPENED.value:
             return None
         if row["kind"] in (MessageKind.REPLY.value, MessageKind.ERROR.value, MessageKind.LATE.value):
@@ -217,9 +244,6 @@ class GateCourier:
 
 
 def _same_chat(message: Mapping[str, Any], channel: str, target: NotifyTarget) -> bool:
-    """Whether the user's ``message`` came from the chat posted to: a Lark message id is valid in any chat of the
-    app (a direct message is posted to the user's open_id and answered from their chat with the bot); a Telegram
-    one only in its chat."""
-    if message.get("channel") != channel:
-        return False
-    return channel == "lark" or str(message.get("chat") or "") == target.id
+    """Whether the user's ``message`` came from the chat posted to, as ``gate_service.origin_chat`` names it (a
+    Lark direct message by its sender's open_id): a reply goes into the chat of the message it replies to."""
+    return message.get("channel") == channel and str(message.get("chat") or "") == target.id

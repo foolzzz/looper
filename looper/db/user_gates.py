@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping, Sequence
+from datetime import datetime
 from typing import Any
 
 import asyncpg
@@ -268,14 +269,17 @@ FROM task_user_gate_messages m
 JOIN task_user_gates g ON g.step_id = m.step_id
 JOIN task_steps s ON s.id = m.step_id
 JOIN tasks t ON t.id = m.task_id
-WHERE m.post_state IS NULL
+WHERE m.post_state IS NULL AND (m.post_retry_at IS NULL OR m.post_retry_at <= now())
+  AND NOT EXISTS (SELECT 1 FROM task_user_gate_messages e WHERE e.step_id = m.step_id AND e.post_state IS NULL
+                  AND e.id < m.id AND e.post_retry_at > now())
 ORDER BY m.id
 LIMIT $1
 """
 
 
 async def unposted(limit: int = 50, *, pool: asyncpg.Pool | None = None) -> list[dict[str, Any]]:
-    """The Planner's and Looper's messages no courier pass has handled, oldest first, with their gate and task."""
+    """The Planner's and Looper's messages no courier pass has handled, oldest first, with their gate and task: those
+    whose next try is due, and none of a gate behind one of its messages that waits for its next try."""
     pool = pool or get_pool()
     return [_gate(row) for row in await pool.fetch(_UNPOSTED, limit)]
 
@@ -293,8 +297,17 @@ async def record_post(message_id: int, task_id: str, state: str, *, error: str |
                 "INSERT INTO task_user_gate_posts (message_id, task_id, channel, chat, external_id) "
                 "VALUES ($1, $2, $3, $4, $5) ON CONFLICT (channel, chat, external_id) DO NOTHING",
                 [(message_id, task_id, channel, chat, external_id) for external_id in external_ids])
-        await conn.execute("UPDATE task_user_gate_messages SET post_state = $2, post_error = $3 WHERE id = $1",
+        await conn.execute("UPDATE task_user_gate_messages SET post_state = $2, post_error = $3, "
+                           "post_attempts = post_attempts + 1, post_retry_at = NULL WHERE id = $1",
                            message_id, state, error)
+
+
+async def record_retry(message_id: int, error: str, retry_at: datetime, *,
+                       pool: asyncpg.Pool | None = None) -> None:
+    """Note a post of the message ``message_id`` that sent nothing and is tried again at ``retry_at``."""
+    pool = pool or get_pool()
+    await pool.execute("UPDATE task_user_gate_messages SET post_error = $2, post_attempts = post_attempts + 1, "
+                       "post_retry_at = $3 WHERE id = $1 AND post_state IS NULL", message_id, error, retry_at)
 
 
 async def first_post(step_id: str, channel: str, chat: str, *, pool: asyncpg.Pool | None = None) -> str | None:
@@ -343,11 +356,13 @@ async def find_reference(channel: str, chat: str, external_ids: Sequence[str], *
 
 async def open_gates(limit: int, *, pool: asyncpg.Pool | None = None) -> list[dict[str, Any]]:
     """The gates that wait for the user in the tasks that run, the latest opened first, at most ``limit``, each with
-    its step's label, its task's project and ``waiting_for_planner``."""
+    its step's label, its task's project, the chat its task came from (``origin_channel_id``, ``chat_id``,
+    ``chat_kind``, ``chat_mention``, ``schedule_id``: ``gate_service.gate_chat``) and ``waiting_for_planner``."""
     pool = pool or get_pool()
     rows = await pool.fetch(
         _GATES.replace("FROM task_user_gates g JOIN task_steps s ON s.id = g.step_id",
-                       ", p.name AS project_name FROM task_user_gates g JOIN task_steps s ON s.id = g.step_id "
+                       ", p.name AS project_name, t.origin_channel_id, t.chat_id, t.chat_kind, t.chat_mention, "
+                       "t.schedule_id FROM task_user_gates g JOIN task_steps s ON s.id = g.step_id "
                        "JOIN tasks t ON t.id = g.task_id LEFT JOIN projects p ON p.id = t.project_id")
         + " WHERE g.state = ANY($1::text[]) AND t.status = ANY($2::text[]) ORDER BY g.opened_at DESC NULLS LAST "
           "LIMIT $3", list(WAITING), list(ACTIVE_STATUSES), limit)

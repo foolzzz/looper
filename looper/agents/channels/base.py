@@ -37,11 +37,13 @@ class DeliveryReceipt:
 @dataclass(frozen=True)
 class PostReceipt:
     """What posting a message to a chat did: the ids of the channel messages sent (several when it was split), or
-    why it failed."""
+    why it failed, and whether that was because the message it replies to is gone (``parent_gone``: posting it on
+    its own may work)."""
 
     success: bool
     external_ids: tuple[str, ...] = ()
     error: str | None = None
+    parent_gone: bool = False
 
 
 class ChannelAdapter(ABC):
@@ -84,10 +86,12 @@ class ChannelAdapter(ABC):
         return DeliveryReceipt(channel=self.channel_type, success=False,
                                error=f"the {self.channel_type} channel cannot send notifications")
 
-    async def post(self, target: NotifyTarget, text: str, *, reply_to: str | None = None) -> PostReceipt:
+    async def post(self, target: NotifyTarget, text: str, *, reply_to: str | None = None,
+                   idempotency_key: str | None = None) -> PostReceipt:
         """Send ``text``, unprompted, to ``target`` (a reply to the channel message ``reply_to`` when given) and return
         the ids of the messages sent, so replies to them can be routed back: a user gate's messages
-        (``gate_courier``)."""
+        (``gate_courier``). A channel that can uses ``idempotency_key`` to send one message for it, however often it
+        is asked."""
         return PostReceipt(False, error=f"the {self.channel_type} channel cannot post messages")
 
     def healthcheck(self) -> dict[str, Any]:

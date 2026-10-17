@@ -52,13 +52,13 @@ class ChannelRegistry:
         return receipt.success, receipt.error
 
     async def post(self, channel_type: str, target: NotifyTarget, text: str, *,
-                   reply_to: str | None = None) -> PostReceipt:
+                   reply_to: str | None = None, idempotency_key: str | None = None) -> PostReceipt:
         """Post ``text`` to ``target`` through the running ``channel_type`` channel (``ChannelAdapter.post``)."""
         adapter = self._channels.get(f"channel-{channel_type}")
         if adapter is None:
             return PostReceipt(False, error=f"the {channel_type} channel is not running: enable it in Settings → "
                                             "Channels")
-        return await adapter.post(target, text, reply_to=reply_to)
+        return await adapter.post(target, text, reply_to=reply_to, idempotency_key=idempotency_key)
 
     def list_channels(self) -> list[dict[str, Any]]:
         return [

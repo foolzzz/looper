@@ -78,8 +78,30 @@ def test_a_lark_post_that_lark_cli_refuses_says_why(
 ) -> None:
     with caplog.at_level("WARNING"):
         receipt = asyncio.run(_lark(tmp_path).post(target, CARD, reply_to=reply_to))
-    assert receipt == PostReceipt(False, error=error)
+    # Only a reply whose message is gone (the API's code for a recalled one) may be posted on its own.
+    assert receipt == PostReceipt(False, error=error, parent_gone=reply_to == "om_gone")
     assert f"lark: a post to {target.id} failed: {error}" in caplog.text
+
+
+@pytest.mark.parametrize(("target", "reply_to", "command"), [
+    (LARK_USER, None, ["+messages-send", "--as", "bot", "--user-id", OPEN_ID, "--markdown", CARD]),
+    (LARK_GROUP, None, ["+messages-send", "--as", "bot", "--chat-id", "oc_group", "--markdown",
+                        f'<at user_id="{OPEN_ID}"></at> {CARD}']),
+    (LARK_GROUP, "om_card", ["+messages-reply", "--as", "bot", "--message-id", "om_card", "--markdown", CARD]),
+])
+def test_a_lark_post_carries_its_idempotency_key(tmp_path: Path, lark_cli_stand_in: Path, target: NotifyTarget,
+                                                 reply_to: str | None, command: list[str]) -> None:
+    receipt = asyncio.run(_lark(tmp_path).post(target, CARD, reply_to=reply_to, idempotency_key="gate-42"))
+    assert receipt.success
+    assert _calls(lark_cli_stand_in) == [["--profile", "other", "im", *command, "--idempotency-key", "gate-42"]]
+
+
+def test_a_lark_error_code_is_kept_and_an_idempotency_key_is_at_most_50_characters() -> None:
+    assert lark_cli.failure_code(b'{"ok": false, "error": {"code": 230011, "message": "recalled"}}') == 230011
+    assert lark_cli.failure_code(b'{"ok": false, "error": {"message": "no code"}}') is None
+    assert lark_cli.failure_code(b"not json") is None
+    with pytest.raises(ValueError, match="1 to 50"):
+        lark_cli.reply_command("om_1", text="x", idempotency_key="k" * 51)
 
 
 @pytest.mark.parametrize(("printed", "error"), [
@@ -122,7 +144,9 @@ def _telegram(bot: _Bot | None) -> TelegramChannelAdapter:
     return adapter
 
 
-@pytest.mark.parametrize(("reply_to", "extra"), [(None, {}), ("", {}), ("55", {"reply_to_message_id": 55})])
+# A reply is sent on its own when the message it answers is gone (Telegram's allow_sending_without_reply).
+@pytest.mark.parametrize(("reply_to", "extra"), [
+    (None, {}), ("", {}), ("55", {"reply_to_message_id": 55, "allow_sending_without_reply": True})])
 def test_telegram_posts_plain_text_to_the_chat(reply_to: str | None, extra: dict[str, int]) -> None:
     bot = _Bot()
     receipt = asyncio.run(_telegram(bot).post(TELEGRAM_GROUP, "*not* Markdown", reply_to=reply_to))
@@ -137,7 +161,8 @@ def test_a_long_telegram_post_is_split_and_only_its_first_message_is_the_reply()
     assert receipt == PostReceipt(True, external_ids=("101", "102", "103"))
     assert [len(sent["text"]) for sent in bot.sent] == [4_000, 4_000, 1_000]
     assert [sent.get("reply_to_message_id") for sent in bot.sent] == [55, None, None]
-    assert all(set(sent) <= {"chat_id", "text", "reply_to_message_id"} for sent in bot.sent)
+    assert all(set(sent) <= {"chat_id", "text", "reply_to_message_id", "allow_sending_without_reply"}
+               for sent in bot.sent)
 
 
 def test_a_telegram_post_that_fails_part_way_keeps_the_ids_sent_and_hides_the_token(
@@ -191,8 +216,9 @@ class _Channel(ChannelAdapter):
     async def deliver(self, envelope: MessageEnvelope) -> DeliveryReceipt:
         return DeliveryReceipt(channel="lark", success=True)
 
-    async def post(self, target: NotifyTarget, text: str, *, reply_to: str | None = None) -> PostReceipt:
-        self.posts.append((target, text, reply_to))
+    async def post(self, target: NotifyTarget, text: str, *, reply_to: str | None = None,
+                   idempotency_key: str | None = None) -> PostReceipt:
+        self.posts.append((target, text, reply_to, idempotency_key))
         return PostReceipt(True, external_ids=("om_1",))
 
 
@@ -201,13 +227,13 @@ def test_the_registry_posts_through_the_running_channel_or_says_it_is_not_runnin
         registry = ChannelRegistry(bus=SimpleNamespace())
         channel = _Channel()
         await registry.register(channel)
-        posted = await registry.post("lark", LARK_GROUP, CARD, reply_to="om_card")
+        posted = await registry.post("lark", LARK_GROUP, CARD, reply_to="om_card", idempotency_key="gate-7")
         missing = await registry.post("telegram", TELEGRAM_GROUP, CARD)
         return posted, missing, channel.posts
 
     posted, missing, posts = asyncio.run(main())
     assert posted == PostReceipt(True, external_ids=("om_1",))
-    assert posts == [(LARK_GROUP, CARD, "om_card")]
+    assert posts == [(LARK_GROUP, CARD, "om_card", "gate-7")]
     assert missing == PostReceipt(False, error="the telegram channel is not running: enable it in Settings → Channels")
 
 

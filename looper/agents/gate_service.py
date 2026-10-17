@@ -63,6 +63,13 @@ class GateChat:
         return f"{_CHANNEL_WORDS[self.channel]}{group} {self.target.id}"
 
 
+def origin_chat(channel: str, chat: str, *, group: bool, sender: str) -> str:
+    """The chat a user's Lark or Telegram message is in, as a gate's chat names it (``GateChat.target.id``): a Lark
+    direct message is its sender's open_id (Looper posts to the open_id; the message comes from their chat with the
+    bot), anything else its chat id. A gate's Planner replies under the user's message only in the gate's chat."""
+    return sender if channel == NotifyChannel.LARK.value and not group and sender else chat
+
+
 def gate_chat(task: Mapping[str, Any], dashboard: GateChat | None) -> GateChat | None:
     """Where the gates of ``task`` (its row) post: the Lark or Telegram chat it came from (its recorded
     ``NotifyTarget``), else ``dashboard``, the system setting; None for a task a schedule started (it opens no
@@ -90,21 +97,38 @@ def _dashboard_chat(raw: Any) -> GateChat | None:
     return GateChat(channel, NotifyTarget(kind, chat))
 
 
-async def dashboard_target() -> GateChat | None:
-    """Where the gates of the tasks asked for on the dashboard (or the web chat) post, besides the task page: the
-    system setting, None when unset or unreadable."""
+async def _stored_dashboard_chat() -> GateChat | None:
     stored = await db_settings.get_settings([DASHBOARD_TARGET_KEY])
     return _dashboard_chat(stored.get(DASHBOARD_TARGET_KEY))
 
 
-async def gate_settings() -> dict[str, Any]:
-    """The setting and the chats it may name: those a channel's sender allowlist already lets in (as a schedule's
-    notify target)."""
+def _offered(chat: GateChat, targets: list[dict[str, Any]]) -> bool:
+    return any((t["channel"], t["chat"]) == (chat.channel.value, chat.target.id) for t in targets)
+
+
+async def dashboard_target() -> GateChat | None:
+    """Where the gates of the tasks asked for on the dashboard (or the web chat) post, besides the task page: the
+    system setting, while a channel's sender allowlist still lets that chat in; None when unset, unreadable, or
+    no longer let in (its replies would be dropped)."""
     from .schedules import notify_targets
 
-    chat = await dashboard_target()
+    chat = await _stored_dashboard_chat()
+    return chat if chat is not None and _offered(chat, await notify_targets()) else None
+
+
+async def gate_settings() -> dict[str, Any]:
+    """The setting, the chats it may name (those a channel's sender allowlist already lets in, as a schedule's
+    notify target; one on a channel that is off cannot be chosen), and ``dashboard_target_problem`` when the saved
+    chat is no longer let in, so the gates go to the task page only."""
+    from .schedules import notify_targets
+
+    chat, targets = await _stored_dashboard_chat(), await notify_targets()
+    problem = None
+    if chat is not None and not _offered(chat, targets):
+        problem = (f"{chat.label()} is no longer on the {_CHANNEL_WORDS[chat.channel]} channel's sender allowlist: "
+                   "the gates of dashboard tasks go to the task page only")
     return {"dashboard_target": {"channel": chat.channel.value, "chat": chat.target.id} if chat else None,
-            "targets": await notify_targets()}
+            "dashboard_target_problem": problem, "targets": targets}
 
 
 async def update_gate_settings(body: Mapping[str, Any]) -> dict[str, Any]:
@@ -120,10 +144,14 @@ async def update_gate_settings(body: Mapping[str, Any]) -> dict[str, Any]:
         return await gate_settings()
     if not isinstance(raw, Mapping) or set(raw) != {"channel", "chat"}:
         raise RequestError(HTTP_400, "dashboard_target is null or {\"channel\", \"chat\"}")
-    offered = {(t["channel"], t["chat"]) for t in await notify_targets()}
-    if (raw.get("channel"), raw.get("chat")) not in offered:
+    offered = next((t for t in await notify_targets() if (t["channel"], t["chat"]) == (raw.get("channel"),
+                                                                                       raw.get("chat"))), None)
+    if offered is None:
         raise RequestError(HTTP_400, "dashboard_target must be a chat a channel's sender allowlist lets in (Settings "
                                      "→ Channels)")
+    if not offered["channel_enabled"]:
+        raise RequestError(HTTP_400, f"the {_CHANNEL_WORDS[NotifyChannel(offered['channel'])]} channel is off: turn "
+                                     "it on in Settings → Channels first")
     await db_settings.put_settings({DASHBOARD_TARGET_KEY: json.dumps(
         {"channel": raw["channel"], "chat": raw["chat"]})})
     return await gate_settings()

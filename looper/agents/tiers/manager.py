@@ -53,6 +53,7 @@ from ..claude_cli import (
     exit_note,
 )
 from ..gate_routing import NOT_A_REPLY, Route, RouteKind, route as route_to_gate
+from ..gate_service import dashboard_target as gate_dashboard_target, gate_chat as gate_chat_of, origin_chat
 from ..library import load_installed
 from ..run_usage import Usage
 from .. import session_switch
@@ -117,10 +118,11 @@ task's Planner waits for the user to answer).
   Planner decides whether to change the plan); a different requirement goes to
   looper_task_update. A task not started changes with looper_task_update.
 - An open gate: when the user answers or discusses the questions of one of the
-  "Open gates", pass their words as they said them with looper_task_gate_reply
-  (end: true when they want its Planner to go on with the conclusions so far);
-  when it could be more than one gate, ask which first. Never answer a gate's
-  questions yourself, and do not pass on a message that is not about one.
+  "Open gates", pass their message on with looper_task_gate_reply (Looper
+  sends their own words; excerpt only when part of the message is about the
+  gate; end: true when they want its Planner to go on with the conclusions so
+  far); when it could be more than one gate, ask which first. Never answer a
+  gate's questions yourself, and do not pass on a message that is not about one.
 - Looper writes some things to the user itself, after your reply: a new
   task's configuration with the question whether to start it, and what an
   operation needing confirmation does. Do not repeat them; refer to them.
@@ -169,8 +171,9 @@ If the user says "不", "取消", "算了", "no", "cancel" or modifies the requi
 
 # The ready tasks each user turn lists, newest first, so Claude can start one by its id.
 READY_TASKS_LISTED = 10
-# The most user gates waiting for the user listed before each message ("Open gates").
+# The most user gates waiting for the user listed before each message ("Open gates"), of the newest read.
 OPEN_GATES_LISTED = 10
+OPEN_GATES_SCANNED = 50
 
 
 def _waited(moment: Any) -> str:
@@ -745,7 +748,8 @@ class ManagerAgent:
                             await self._send_status(context_envelope, "thinking", phase=True, activity="thinking")
 
         try:
-            turn_text = await self._build_user_message(message, note, channel=channel_line(context_envelope))
+            turn_text = await self._build_user_message(message, note, channel=channel_line(context_envelope),
+                                                       envelope=context_envelope)
             if brief:
                 turn_text = f"{brief}\n\n{turn_text}"
             # A turn cut off by Claude's exit ends without a result; that Claude
@@ -1063,10 +1067,11 @@ class ManagerAgent:
             command.extend(runtime.resume_args(self._session_id))
         return command
 
-    async def _build_user_message(self, user_message: str, note: str = "", *, channel: str = "") -> str:
+    async def _build_user_message(self, user_message: str, note: str = "", *, channel: str = "",
+                                  envelope: MessageEnvelope | None = None) -> str:
         parts = await self._projects_section()
         parts += await self._ready_tasks_section()
-        parts += await self._open_gates_section()
+        parts += await self._open_gates_section(envelope)
 
         if self._goal_snapshots:
             parts.append("当前活跃目标:")
@@ -1117,24 +1122,39 @@ class ManagerAgent:
         lines.append("")
         return lines
 
-    async def _open_gates_section(self) -> list[str]:
+    async def _open_gates_section(self, envelope: MessageEnvelope | None) -> list[str]:
         """The user gates that wait for the user in the running tasks, the latest opened first, so Claude can pass
-        the user's answer on (``looper_task_gate_reply``); none, no section."""
+        the user's answer on (``looper_task_gate_reply``): in a Lark or Telegram chat only the gates whose messages
+        go to that chat (``gate_service.gate_chat``), so no other chat's gate shows in it; in the dashboard chat all,
+        each with its chat. None, no section."""
+        origin = _message_origin(envelope) if envelope is not None else {"channel": "web"}
         try:
-            gates = await db_user_gates.open_gates(OPEN_GATES_LISTED)
+            gates = await db_user_gates.open_gates(OPEN_GATES_SCANNED)
+            dashboard = await gate_dashboard_target() if gates else None
         except Exception:
             logger.warning("manager could not list the open gates", exc_info=True)
             return ["Open gates: (could not be read)", ""]
-        if not gates:
-            return []
-        lines = ["Open gates (waiting for the user's answer; newest first):"]
+        here = origin["channel"] in ("lark", "telegram")
+        if here:
+            chat = origin_chat(origin["channel"], origin["chat"] or "", group=origin["group"],
+                               sender=origin["sender"] or "")
+        listed: list[tuple[dict[str, Any], str]] = []
         for gate in gates:
+            gate_chat = gate_chat_of(gate, dashboard)
+            if here and (gate_chat is None or (gate_chat.channel.value, gate_chat.target.id) !=
+                         (origin["channel"], chat)):
+                continue
+            listed.append((gate, "" if here else f"; chat: {gate_chat.label() if gate_chat else 'the task page only'}"))
+        if not listed:
+            return []
+        lines = [f"Open gates{' of this chat' if here else ''} (waiting for the user's answer; newest first):"]
+        for gate, where in listed[:OPEN_GATES_LISTED]:
             waits = "the Planner, which is answering" if gate.get("waiting_for_planner") else "the user"
             questions = "; ".join(f"{item.get('id')} {clip(str(item.get('question') or ''), 80)}"
                                   for item in gate.get("agenda") or [] if item.get("status") in (None, "open"))
             lines.append(f"  - task {gate['task_id']} (project {gate.get('project_name') or '?'}), gate "
                          f"{gate['step_key']} \"{clip(gate['topic'], 80)}\": open for {_waited(gate.get('opened_at'))},"
-                         f" waiting for {waits}; open questions: {questions or 'none'}")
+                         f" waiting for {waits}{where}; open questions: {questions or 'none'}")
         lines.append("")
         return lines
 

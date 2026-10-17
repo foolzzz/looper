@@ -4,8 +4,10 @@
 The adapters put what a message replies to in its ``channel_context``: Lark's
 ``reply_to`` and ``root_id`` (the thread's first message), Telegram's
 ``reply_to_message_id``, with the message's own ``message_id``. ``route`` looks
-them up among the messages Looper posted for gates and the user's messages in
-gates (``db.user_gates.find_reference``):
+up the message it answers directly (in Lark ``root_id`` only when it names
+none: a reply to the Manager's own answer in a gate's thread is the Manager's)
+among the messages Looper posted for gates and the user's messages in gates
+(``db.user_gates.find_reference``):
 
 - a gate that waits for the user, in a task that has not completed: the message
   is added to it (``gate_service.post_message``: its Planner is woken, or, when
@@ -29,15 +31,19 @@ from typing import Any
 
 from ..db import user_gates as db_user_gates
 from .bus import MessageBus
-from .gate_service import HTTP_409, post_message
+from .gate_service import HTTP_409, origin_chat, post_message
 from .message import AgentAddress, MessageEnvelope
 from .projects import RequestError
-from .user_gates import GateState
+from .user_gates import MESSAGE_MAX_CHARS, GateState
 
 logger = logging.getLogger(__name__)
 
 # What the user is told when they answer a gate of a task that is not running.
 KEPT_REPLY = "任务已停止，你的回答已保存，任务继续后交给规划者。"
+# What the user is told when the gate cannot take their reply as it is.
+EMPTY_REPLY = "这条回复没有文字，没能交给关卡：请写下你的回答再回复一次。"
+TOO_LONG_REPLY = f"这条回答太长（最多 {MESSAGE_MAX_CHARS} 个字），没能交给关卡：请分几条回复。"
+REFUSED_REPLY = "这条回答没能交给关卡，请到任务页查看。"
 
 
 class RouteKind(str, Enum):
@@ -58,29 +64,42 @@ class Route:
 NOT_A_REPLY = Route(RouteKind.NONE)
 
 
-def references(envelope: MessageEnvelope) -> tuple[str, str, list[str], dict[str, Any]] | None:
-    """The channel, the chat and the channel messages a Lark or Telegram message replies to, with its context; None
-    for a message from elsewhere, or one that replies to nothing."""
+def references(envelope: MessageEnvelope) -> tuple[str, str, str, dict[str, Any]] | None:
+    """The channel, the chat and the channel message a Lark or Telegram message replies to, with its context: the
+    one it answers directly, and in Lark the first of its thread only when it names none; None for a message from
+    elsewhere, or one that replies to nothing."""
     channel = envelope.source.channel or ""
     context = envelope.payload.get("channel_context")
     if channel not in ("lark", "telegram") or not isinstance(context, dict):
         return None
     keys = ("reply_to", "root_id") if channel == "lark" else ("reply_to_message_id",)
-    refs = [str(context[key]) for key in keys if context.get(key)]
+    ref = next((str(context[key]) for key in keys if context.get(key)), None)
     chat = str(context.get("chat_id") or "")
-    if not refs or not chat:
+    if ref is None or not chat:
         return None
-    return channel, chat, refs, context
+    return channel, chat, ref, context
+
+
+def _group(channel: str, context: dict[str, Any]) -> bool:
+    if channel == "lark":
+        return context.get("chat_type") == "group"
+    return str(context.get("chat_id") or "").startswith("-")
 
 
 def _author(channel: str, context: dict[str, Any]) -> str | None:
     """Who wrote it, for the discussion: in a Lark group the sender's name, in a Telegram group their username;
     None in a direct message."""
-    if channel == "lark":
-        group, name = context.get("chat_type") == "group", context.get("sender_name")
-    else:
-        group, name = str(context.get("chat_id") or "").startswith("-"), context.get("username") or context.get("user_id")
-    return str(name) if group and name else None
+    name = context.get("sender_name") if channel == "lark" else context.get("username") or context.get("user_id")
+    return str(name) if _group(channel, context) and name else None
+
+
+def _refused(text: str) -> Route:
+    """Why the gate cannot take ``text``, in the user's words."""
+    if not text:
+        return Route(RouteKind.REFUSED, reply=EMPTY_REPLY)
+    if len(text) > MESSAGE_MAX_CHARS:
+        return Route(RouteKind.REFUSED, reply=TOO_LONG_REPLY)
+    return Route(RouteKind.REFUSED, reply=REFUSED_REPLY)
 
 
 async def route(envelope: MessageEnvelope, *, has_planner: Any, bus: MessageBus, source: AgentAddress) -> Route:
@@ -89,9 +108,9 @@ async def route(envelope: MessageEnvelope, *, has_planner: Any, bus: MessageBus,
     found_refs = references(envelope)
     if found_refs is None:
         return NOT_A_REPLY
-    channel, chat, refs, context = found_refs
+    channel, chat, ref, context = found_refs
     try:
-        gate = await db_user_gates.find_reference(channel, chat, refs)
+        gate = await db_user_gates.find_reference(channel, chat, [ref])
     except Exception:
         logger.warning("could not look up the gate a %s message replies to", channel, exc_info=True)
         return NOT_A_REPLY
@@ -100,14 +119,17 @@ async def route(envelope: MessageEnvelope, *, has_planner: Any, bus: MessageBus,
     task_id, label = gate["task_id"], gate["step_key"]
     text = str(envelope.payload.get("text") or "").strip()
     if GateState(gate["state"]).waiting:
-        origin = {"author": _author(channel, context), "channel": channel, "chat": chat,
+        origin = {"author": _author(channel, context), "channel": channel,
+                  "chat": origin_chat(channel, chat, group=_group(channel, context),
+                                      sender=str(context.get("sender_id") or "")),
                   "external_id": str(context.get("message_id") or "") or None}
         try:
             posted = await post_message(task_id, label, {"text": text}, has_planner=has_planner(task_id), bus=bus,
                                         source=source, via=channel, origin=origin)
         except RequestError as exc:
             if exc.status != HTTP_409:
-                return Route(RouteKind.REFUSED, reply=f"这条回答没能交给关卡：{exc}")
+                logger.info("a %s reply to gate %s of task %s was refused: %s", channel, label, task_id, exc)
+                return _refused(text)
             # It stopped waiting meanwhile, or the task completed: the Manager hears it as a closed gate's.
             return _closed(task_id, label, str(exc))
         if posted["delivered"] == "kept":
