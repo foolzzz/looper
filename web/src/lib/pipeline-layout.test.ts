@@ -1,5 +1,13 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { shownSteps, stepColumns, stepLevels, storeHideSkipped, storedHideSkipped } from "@/lib/pipeline-layout";
+import {
+  FIT_PADDING,
+  fitPadding,
+  shownSteps,
+  stepColumns,
+  stepLevels,
+  storeHideSkipped,
+  storedHideSkipped,
+} from "@/lib/pipeline-layout";
 import type { TaskStep } from "@/lib/api";
 
 const step = (id: string, index: number, status: string, depends_on: string[] = []) =>
@@ -78,5 +86,25 @@ describe("the viewer's choice", () => {
     vi.stubGlobal("window", { get localStorage(): Storage { throw new DOMException("denied", "SecurityError"); } });
     expect(storedHideSkipped()).toBe(true);
     expect(() => storeHideSkipped(false)).not.toThrow();
+  });
+});
+
+describe("fitPadding", () => {
+  const frame = { top: 257, height: 450 };
+
+  it("leaves the toolbar's room at the bottom by default", () => {
+    expect(FIT_PADDING).toEqual({ x: 0.12, top: 0.12, bottom: "80px" });
+    expect(fitPadding(frame, [])).toEqual(FIT_PADDING);
+  });
+
+  it("leaves more when the measured toolbar reaches higher (it wrapped)", () => {
+    expect(fitPadding(frame, [{ top: 257 + 450 - 15 - 100, height: 100 }]))
+      .toEqual({ ...FIT_PADDING, bottom: "123px" });
+    expect(fitPadding(frame, [{ top: 257 + 450 - 15 - 54, height: 54 }])).toEqual(FIT_PADDING); // a touch screen's
+  });
+
+  it("leaves room under full screen's way out at the top", () => {
+    expect(fitPadding({ top: 0, height: 844 }, [{ top: 15, height: 52 }, { top: 765, height: 64 }]))
+      .toEqual({ x: 0.12, top: "75px", bottom: "87px" });
   });
 });

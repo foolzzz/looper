@@ -7,6 +7,8 @@ import {
   TAP_MS,
   TAP_SLOP_PX,
   cardKey,
+  cardRoom,
+  fullHeight,
   hoverCard,
   hovers,
   intersect,
@@ -257,5 +259,43 @@ describe("cardKey", () => {
     expect(cardKey("Enter", state({ focusedNode: null }))).toBeNull(); // on a node's button, or elsewhere
     expect(cardKey("Enter", state({ focusedNode: "s1", focusInCard: true }))).toBeNull(); // the card's own controls
     expect(cardKey("a", state({ focusedNode: "s1" }))).toBeNull();
+  });
+});
+
+describe("cardRoom", () => {
+  const box = (left: number, top: number, width: number, height: number) => ({ left, top, width, height });
+  const VIEW = box(0, 0, 390, 844);
+  const frame = box(0, 300, 390, 450); // the graph, under the task header
+
+  it("is the graph in the window, in the graph's frame", () => {
+    expect(cardRoom(frame, VIEW, [], [])).toEqual(box(0, 0, 390, 450));
+    expect(cardRoom(box(0, 600, 390, 450), VIEW, [], [])).toEqual(box(0, 0, 390, 244)); // below the fold
+  });
+
+  it("is cut by an ancestor that clips: the page scrolled the graph under its header", () => {
+    const scroller = { clips: true, fixed: false, box: box(0, 257, 390, 343) };
+    const scrolled = box(0, 77, 390, 450); // 180 px up
+    expect(cardRoom(scrolled, VIEW, [scroller], [])).toEqual(box(0, 180, 390, 270));
+    expect(cardRoom(scrolled, VIEW, [{ ...scroller, clips: false }], [])).toEqual(box(0, 0, 390, 450));
+  });
+
+  it("stops at a fixed ancestor: the ones above a full-screen overlay do not clip it", () => {
+    const overlay = { clips: false, fixed: true, box: VIEW };
+    const scroller = { clips: true, fixed: false, box: box(0, 257, 390, 343) };
+    expect(cardRoom(VIEW, VIEW, [overlay, scroller], [])).toEqual(box(0, 0, 390, 844));
+  });
+
+  it("keeps clear of the graph's panels: above the toolbar, under full screen's way out", () => {
+    const toolbar = box(67, 371, 308, 64); // its bottom right, in the lower half
+    const exit = box(244, 15, 131, 52); // its top right
+    expect(cardRoom(frame, VIEW, [], [box(67, 671, 308, 64)])).toEqual(box(0, 0, 390, 371));
+    expect(cardRoom(box(0, 0, 390, 844), VIEW, [], [exit, { ...toolbar, top: 765 }])).toEqual(box(0, 67, 390, 698));
+  });
+});
+
+describe("fullHeight", () => {
+  it("is what the card scrolls, with its borders, whatever its max-height cuts", () => {
+    expect(fullHeight({ scrollHeight: 660, offsetHeight: 204, clientHeight: 202 })).toBe(662);
+    expect(fullHeight({ scrollHeight: 300, offsetHeight: 302, clientHeight: 300 })).toBe(302);
   });
 });
