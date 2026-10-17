@@ -111,6 +111,17 @@ def test_the_notes_stay_within_their_limit(tmp_path: Path, _env: Path) -> None:
     assert found.files[0] == "MEMORY.md" and found.omitted and set(found.files[1:]).isdisjoint(found.omitted)
 
 
+def test_a_note_that_fits_only_without_its_heading_is_left_out(tmp_path: Path, _env: Path) -> None:
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    index = "- [A](a.md)"
+    used = len("\n".join([notes.HEADING, notes.LEAD, "", f"### {notes.INDEX}", index]).encode("utf-8"))
+    memory(_env, os.path.realpath(plain), {"MEMORY.md": index, "a.md": "y" * (NOTES_MAX_BYTES - used)})
+    found = read_notes(str(plain))
+    assert found.files == ("MEMORY.md",) and found.omitted == ("a.md",)
+    assert len(found.text.split("\nNot included")[0].encode("utf-8")) <= NOTES_MAX_BYTES
+
+
 def test_a_directory_without_notes_has_none(tmp_path: Path, _env: Path) -> None:
     plain = tmp_path / "plain"
     plain.mkdir()

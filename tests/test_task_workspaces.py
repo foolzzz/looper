@@ -190,6 +190,14 @@ def test_other_tasks_on_the_same_repository_are_named(repo: Path, store: Store, 
     assert run(tw.check(str(repo), mode=mode, besides="task-a"))["warnings"] == []
 
 
+def test_a_task_in_place_beside_one_in_a_worktree_is_no_overwrite_risk(repo: Path, store: Store) -> None:
+    store.active = [{"id": "task-a", "name": "fix login", "status": "running", "workspace": str(repo),
+                     "workspace_mode": "worktree"}]
+    [shared] = run(tw.check(str(repo), mode=IN_PLACE))["warnings"]
+    assert shared["tasks"][0]["mode"] == "worktree" and "overwrite" not in shared["text"]
+    assert "may conflict when you merge" in shared["text"]
+
+
 # --- The worktree, from the first start to the end ---
 
 
