@@ -317,6 +317,55 @@ def test_a_review_role_that_cannot_be_read_fails_its_review_and_the_chain_goes_o
     assert "Cannot read role gone, which reviews step s1" in claude.turns()[2]["text"]
 
 
+def test_a_step_continued_in_the_middle_of_its_review_roles_is_reviewed_again_with_one_verdict_each(
+    planner_claude: Any, agent_db: Any, roles: _Roles,
+) -> None:
+    """The task fails at its spend cap while style reviews the step, after the built-in Reviewer and security passed
+    it; continued, the step goes back to review from the built-in Reviewer, and each role's new verdict replaces its
+    old one."""
+    roles.add("style", "review", "You check the style.")
+    claude = planner_claude(plan(TWO_REVIEWS), decide("review"), decide("accept", summary="done"))
+    styles: list[MessageEnvelope] = []
+    builtin: list[Any] = []  # the review roles' verdicts the step holds as each built-in review starts
+
+    def outcome(envelope: MessageEnvelope) -> dict[str, Any] | None:
+        if envelope.message_type == MessageType.WORK_ITEM:
+            return WORK_OK
+        role = _role(envelope)
+        if role and role[0] == "style":
+            styles.append(envelope)
+            return None if len(styles) == 1 else REVIEW_PASS  # the first style review runs until the task stops
+        if role is None:
+            (row,) = agent_db.store.steps["t1"].values()
+            builtin.append([r["role"] for r in (row["result"] or {}).get("role_reviews") or []])
+        return REVIEW_PASS
+
+    async def scenario(h: Any) -> None:
+        await h.start()
+        await h.until(lambda: h.held)
+        await h.planner.stop()
+        agent_db.store.plans["t1"]["status"] = "failed"  # as the spend cap left it
+        agent_db.store.tasks["t1"] = {"requirement": "build the calc package", "work_dir": str(h.work_dir)}
+        h.planner = PlannerAgent(task_id="t1", runtime_root=h.work_dir.parent, claude_bin=claude.bin)
+        await h.planner.start(h.bus)
+        await h.bus.publish(MessageEnvelope.create(
+            source=TASK_ROUTER_ADDRESS, target=h.planner.agent_address, message_type=MessageType.TASK_REQUEST,
+            payload={"requirement": "build the calc package", "work_dir": str(h.work_dir), "project_id": "proj-1",
+                     "restart": RestartMode.AT_CAP.value}))
+        await h.finished()
+
+    h = drive(claude, outcome, scenario)
+
+    assert h.final().payload["status"] == "completed"  # type: ignore[union-attr]
+    assert _flow(h)[-3:] == [("review", None), ("review", ("security", 1)), ("review", ("style", 1))]
+    assert builtin == [[], []]  # the new chain starts with none of the old verdicts
+    decision = claude.turns()[-1]["text"]
+    assert decision.count("by review role security") == 1 and decision.count("by review role style") == 1
+    assert "other review role(s) did not review it" not in decision
+    (row,) = agent_db.store.steps["t1"].values()
+    assert [(r["role"], r["passed"]) for r in row["result"]["role_reviews"]] == [("security", True), ("style", True)]
+
+
 def test_a_step_that_names_an_unknown_role_gets_a_repair_turn(planner_claude: Any, agent_db: Any,
                                                              roles: _Roles) -> None:
     claude = planner_claude(plan({**step("s1"), "role": "doc"}), plan(step("s1")), decide("accept"))

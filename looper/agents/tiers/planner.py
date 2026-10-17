@@ -1781,6 +1781,8 @@ class PlannerAgent:
         step.review = True
         step.status = "completed"
         step.review_stage, step.review_position = ReviewStage.BUILTIN, None
+        # A new review chain: the review roles' verdicts on this result from before (a restart) no longer stand.
+        step.result = {k: v for k, v in (step.result or {}).items() if k != "role_reviews"} if step.result else None
         await self._save(plan, step)
         await update_task_phase(self._task_id, "verifying")
         await self._spawn_reviewer(plan, step)
