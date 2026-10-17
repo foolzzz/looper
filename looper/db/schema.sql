@@ -931,7 +931,8 @@ ALTER TABLE task_steps ADD COLUMN IF NOT EXISTS review_role_version INTEGER;
 ALTER TABLE task_steps ADD COLUMN IF NOT EXISTS review_stage TEXT CHECK (review_stage IN ('builtin', 'role'));
 DO $$
 BEGIN
-    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'task_steps_review_role_reviewed') THEN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'task_steps_review_role_reviewed'
+                   AND conrelid = to_regclass('task_steps')) THEN
         ALTER TABLE task_steps ADD CONSTRAINT task_steps_review_role_reviewed
             CHECK (review_role_key IS NULL OR review);
     END IF;

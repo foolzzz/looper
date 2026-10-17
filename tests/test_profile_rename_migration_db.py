@@ -205,3 +205,32 @@ def test_a_migrated_v2_6_0_database_is_shaped_like_a_new_one() -> None:
     tables = {column[0] for column in fresh["columns"]}
     assert {"role_configs", "agent_profiles", "task_profile_overrides"} <= tables
     assert not {"agent_configs", "agents", "task_agent_overrides"} & tables
+
+
+def test_a_database_migrated_beside_other_schemas_is_shaped_like_a_database_of_its_own() -> None:
+    """A schema check that looks in the whole database (``pg_constraint`` by name alone) skips what another schema
+    of it already has. Next to a schema the schema was applied to, a v2.6.0 schema migrates to the shape a new
+    database of its own gets, whatever else the shared test database holds."""
+    import asyncpg
+
+    from evals.prompt_regression.runner import fresh_database
+    from looper.db.connection import ensure_schema
+
+    async def _alone(url: str) -> dict[str, Any]:
+        pool = await asyncpg.create_pool(url, min_size=1, max_size=2)
+        try:
+            await ensure_schema(pool)
+            return await _structure(pool)
+        finally:
+            await pool.close()
+
+    async def _beside() -> dict[str, Any]:
+        async with _schema() as neighbour, _schema() as migrated:
+            await ensure_schema(neighbour)
+            await parity.seed_v2_6_0(migrated)
+            await ensure_schema(migrated)
+            return await _structure(migrated)
+
+    with fresh_database(str(DSN)) as (url, _):
+        alone = asyncio.run(_alone(url))
+    assert asyncio.run(_beside()) == alone
