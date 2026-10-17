@@ -41,8 +41,10 @@ class LarkCliError(RuntimeError):
         self.code = code
 
 
-# The Lark API's codes for a message that cannot be replied to because it is gone: recalled, or deleted.
-MESSAGE_GONE_CODES = frozenset({230011, 230110})
+# The Lark API's code for a message that cannot be replied to because it is gone: 230011 "The message is recalled."
+# (a message deleted through the API counts as recalled), from the reply API's error table:
+# https://open.larksuite.com/document/server-docs/im-v1/message/reply
+MESSAGE_GONE_CODES = frozenset({230011})
 
 
 def profile_name(raw: Any) -> str:

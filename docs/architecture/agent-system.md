@@ -2479,7 +2479,7 @@ refused with the reason and what to do instead.
   the idempotency key `gate-<message id>` (Lark sends one message per key
   within an hour; Telegram has none, so a post retried after a lost answer may
   arrive twice); a reply whose message is gone is posted on its own (Lark: the
-  API's codes for a recalled or deleted message; Telegram:
+  reply API's 230011, a recalled message, which a deleted one counts as; Telegram:
   `allow_sending_without_reply`). A card, update, reminder or "still waits"
   message whose gate no longer waits when it is posted (after a backlog) is
   not posted. The texts are code's, in Chinese; a Planner's reply goes as

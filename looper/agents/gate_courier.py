@@ -211,7 +211,7 @@ class GateCourier:
         key = f"gate-{row['id']}"
         receipt = await self._post(chat.channel.value, chat.target, text, reply_to=reply_to, idempotency_key=key)
         if receipt.parent_gone:
-            # The message it replies to was recalled or deleted: post it on its own.
+            # The message it replies to was recalled (or deleted, which Lark counts as recalled): post it on its own.
             receipt = await self._post(chat.channel.value, chat.target, text, reply_to=None,
                                        idempotency_key=f"{key}-own")
         attempt = int(row.get("post_attempts") or 0) + 1
