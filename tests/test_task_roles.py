@@ -194,8 +194,10 @@ ROLES_TWO = {**ROLES, "style": RoleKind.REVIEW, "perf": RoleKind.REVIEW}
      "review_roles names a role twice"),
     # The one review role of before is refused with what to write instead.
     ({"review": True, "review_role": "security"}, ROLES,
-     'review_role: a step lists its review roles in "review_roles"'),
-    ({"review": True, "review_role_required": False}, ROLES, "review_role_required: a step lists its review roles"),
+     'gives review_role: a step lists its review roles in "review_roles"'),
+    ({"review": True, "review_role_required": False}, ROLES, "gives review_role_required: a step lists its"),
+    ({"review": True, "review_role": "security", "review_role_required": False}, ROLES,
+     "gives review_role and review_role_required: a step lists"),
 ])
 def test_a_step_naming_a_role_it_may_not_is_refused(extra: dict[str, Any], roles: Any, error: str) -> None:
     pattern = error if "\\" in error else error.replace("(", r"\(").replace(")", r"\)")

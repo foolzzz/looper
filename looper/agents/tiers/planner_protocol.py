@@ -759,8 +759,8 @@ def _step(value: Any, index: int) -> StepSpec:
     if missing:
         raise ProtocolError(f"{where} is missing {', '.join(missing)}")
     if old := [key for key in _SINGLE_REVIEW_ROLE_KEYS if key in value]:
-        raise ProtocolError(f'{where}.{old[0]}: a step lists its review roles in "review_roles" now, each a role\'s id '
-                            'or {"role": "<id>", "required": false}')
+        raise ProtocolError(f'{where} gives {" and ".join(old)}: a step lists its review roles in "review_roles" now, '
+                            'each a role\'s id or {"role": "<id>", "required": false}')
     _only_keys(value, _STEP_KEYS | _ROLE_KEYS | {"kind"}, where)
     step_id = value["id"]
     if not isinstance(step_id, str) or not _STEP_ID.fullmatch(step_id):
