@@ -202,7 +202,7 @@ CREATE TABLE IF NOT EXISTS task_journal (
     kind        TEXT NOT NULL CONSTRAINT task_journal_kind_check CHECK (kind IN (
                     'step_accepted', 'step_failed', 'step_retry', 'decision', 'supplement',
                     'session_switch', 'handoff', 'progress', 'profile_choice', 'concurrency_change',
-                    'role_defined')),
+                    'role_defined', 'gate_opened', 'gate_updated', 'gate_cancelled', 'gate_closed')),
     summary     TEXT NOT NULL DEFAULT '',
     learnings   TEXT[] NOT NULL DEFAULT '{}',
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -536,6 +536,19 @@ BEGIN
     END IF;
 END $$;
 
+-- Once (user gates): a gate opening, changing, being cancelled and closing join the journal kinds.
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM schema_migrations WHERE name = 'task_journal_kinds_user_gates') THEN
+        ALTER TABLE task_journal DROP CONSTRAINT IF EXISTS task_journal_kind_check;
+        ALTER TABLE task_journal ADD CONSTRAINT task_journal_kind_check CHECK (kind IN (
+            'step_accepted', 'step_failed', 'step_retry', 'decision', 'supplement', 'session_switch',
+            'handoff', 'progress', 'profile_choice', 'concurrency_change', 'role_defined', 'gate_opened',
+            'gate_updated', 'gate_cancelled', 'gate_closed'));
+        INSERT INTO schema_migrations (name) VALUES ('task_journal_kinds_user_gates');
+    END IF;
+END $$;
+
 -- Once (Agent Profiles replace LLM profiles): llm_profiles and the role
 -- configs' runtime and llm_profile_id were never on any agent's launch path;
 -- runtimes, providers and Agent Profiles replace them.
@@ -594,6 +607,11 @@ ALTER TABLE projects ADD COLUMN IF NOT EXISTS max_step_retries INTEGER
 ALTER TABLE projects ADD COLUMN IF NOT EXISTS planner_roles TEXT CHECK (planner_roles IN ('off', 'on'));
 ALTER TABLE projects ADD COLUMN IF NOT EXISTS role_text_max_chars INTEGER
     CHECK (role_text_max_chars >= 500 AND role_text_max_chars <= 20000);
+-- Whether the project's Planners may open user gates ('on'; 'off', also when NULL), and how many hours a gate
+-- waits for the user between reminders (NULL: 24; 0: no reminders).
+ALTER TABLE projects ADD COLUMN IF NOT EXISTS user_gates TEXT CHECK (user_gates IN ('off', 'on'));
+ALTER TABLE projects ADD COLUMN IF NOT EXISTS gate_reminder_hours INTEGER
+    CHECK (gate_reminder_hours >= 0 AND gate_reminder_hours <= 168);
 -- What a task that completes leaves in the project's knowledge, from one more
 -- Planner turn over the task journal: nothing ('off'), a draft the user
 -- confirms or discards on the project page ('draft'), or a document ('write').
@@ -937,6 +955,84 @@ BEGIN
                    AND conrelid = to_regclass('task_steps')) THEN
         ALTER TABLE task_steps ADD CONSTRAINT task_steps_review_role_reviewed
             CHECK (review_role_key IS NULL OR review);
+    END IF;
+END $$;
+
+-- A step's kind: 'work', which a Worker runs, or 'gate', where the user and the task's Planner discuss what only
+-- the user can decide before the steps that depend on it run (looper/agents/user_gates.py).
+ALTER TABLE task_steps ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'work' CHECK (kind IN ('work', 'gate'));
+-- A gate step's gate. The Planner writes all but first_reply_at, which the user's first message sets with the
+-- state's move from 'open' to 'discussing', and the reminders' columns; a closed gate ('passed', 'cancelled',
+-- 'skipped') stays closed. agenda: [{id, question, options, status, answer}]. summary: what a gate that passed
+-- closed with ({decisions, assumptions, open}). delivered_through: the last of the user's messages a turn of the
+-- Planner had; the close turns those after it into supplements of the task. failures, failed_through, failed_at:
+-- the [GATE] turns in a row that failed, the last of the user's messages the latest of them had, and when.
+-- plan_change: the steps the turn that closed it added, dropped and stopped.
+CREATE TABLE IF NOT EXISTS task_user_gates (
+    step_id            TEXT PRIMARY KEY REFERENCES task_steps(id) ON DELETE CASCADE,
+    task_id            TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    topic              TEXT NOT NULL CHECK (topic <> ''),
+    agenda             JSONB NOT NULL DEFAULT '[]',
+    findings           TEXT NOT NULL DEFAULT '',
+    state              TEXT NOT NULL DEFAULT 'pending'
+                       CHECK (state IN ('pending', 'open', 'discussing', 'passed', 'cancelled', 'skipped')),
+    summary            JSONB,
+    resolution         TEXT NOT NULL DEFAULT '',
+    ended_by_user      BOOLEAN NOT NULL DEFAULT false,
+    plan_change        JSONB,
+    delivered_through  BIGINT NOT NULL DEFAULT 0,
+    turns              INTEGER NOT NULL DEFAULT 0,
+    failures           INTEGER NOT NULL DEFAULT 0,
+    failed_through     BIGINT NOT NULL DEFAULT 0,
+    failed_at          TIMESTAMPTZ,
+    reminders          INTEGER NOT NULL DEFAULT 0,
+    opened_at          TIMESTAMPTZ,
+    first_reply_at     TIMESTAMPTZ,
+    closed_at          TIMESTAMPTZ,
+    last_reminded_at   TIMESTAMPTZ,
+    created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT task_user_gates_summary_passed CHECK ((summary IS NOT NULL) = (state = 'passed'))
+);
+CREATE INDEX IF NOT EXISTS idx_task_user_gates_task ON task_user_gates (task_id);
+CREATE INDEX IF NOT EXISTS idx_task_user_gates_waiting ON task_user_gates (task_id)
+    WHERE state IN ('open', 'discussing');
+-- A gate's discussion, oldest first: the user's messages ('message', 'end': the user ended the discussion), the
+-- Planner's replies, and code's own ('opened', 'updated', 'reminder', 'cancelled', 'closed', 'resumed', 'error',
+-- 'late': the user's message reached the gate as it closed and became a supplement of the task).
+-- author: who wrote it in a group chat. via: 'dashboard', 'lark', 'telegram' or 'manager:<channel>'.
+-- agenda_item and option: the option the user chose with a button. channel, chat and external_id: the channel
+-- message a user's message is (a reply to it answers there).
+CREATE TABLE IF NOT EXISTS task_user_gate_messages (
+    id           BIGSERIAL PRIMARY KEY,
+    step_id      TEXT NOT NULL REFERENCES task_user_gates(step_id) ON DELETE CASCADE,
+    task_id      TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    role         TEXT NOT NULL CHECK (role IN ('user', 'planner', 'looper')),
+    kind         TEXT NOT NULL CHECK (kind IN ('message', 'end', 'reply', 'opened', 'updated', 'reminder',
+                                               'cancelled', 'closed', 'resumed', 'error', 'late')),
+    text         TEXT NOT NULL DEFAULT '',
+    author       TEXT,
+    via          TEXT NOT NULL DEFAULT '',
+    agenda_item  TEXT,
+    option       TEXT,
+    channel      TEXT,
+    chat         TEXT,
+    external_id  TEXT,
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_task_user_gate_messages_step ON task_user_gate_messages (step_id, id);
+-- Gate tables made by an earlier build of this schema: the columns of failed turns and the late kind.
+ALTER TABLE task_user_gates ADD COLUMN IF NOT EXISTS failures INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE task_user_gates ADD COLUMN IF NOT EXISTS failed_through BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE task_user_gates ADD COLUMN IF NOT EXISTS failed_at TIMESTAMPTZ;
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM schema_migrations WHERE name = 'task_user_gate_messages_kind_late') THEN
+        ALTER TABLE task_user_gate_messages DROP CONSTRAINT IF EXISTS task_user_gate_messages_kind_check;
+        ALTER TABLE task_user_gate_messages ADD CONSTRAINT task_user_gate_messages_kind_check CHECK (kind IN (
+            'message', 'end', 'reply', 'opened', 'updated', 'reminder', 'cancelled', 'closed', 'resumed', 'error',
+            'late'));
+        INSERT INTO schema_migrations (name) VALUES ('task_user_gate_messages_kind_late');
     END IF;
 END $$;
 

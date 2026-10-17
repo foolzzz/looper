@@ -111,6 +111,7 @@ const STATUS_VARIANT: Record<string, "default" | "success" | "warning" | "destru
   assigned: "default",
   pending: "warning",
   stopped: "warning",
+  waiting_user: "warning",
   completed: "success",
   failed: "destructive",
 };
@@ -141,8 +142,12 @@ function TasksCard({ project }: { project: Project }) {
                 href={`#tasks/${encodeURIComponent(task.task_id)}`}
                 className="flex items-center gap-2 rounded-sm text-sm hover:underline focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
               >
-                <Badge variant={STATUS_VARIANT[task.status] ?? "outline"} className="shrink-0 capitalize">
-                  {task.status === READY_STATUS ? "ready" : task.status}
+                {/* A status is one word, shown capitalized; "Waiting for you" is shown as written. */}
+                <Badge
+                  variant={STATUS_VARIANT[task.status] ?? "outline"}
+                  className={task.status === "waiting_user" ? "shrink-0" : "shrink-0 capitalize"}
+                >
+                  {task.status === READY_STATUS ? "ready" : task.status === "waiting_user" ? "Waiting for you" : task.status}
                 </Badge>
                 <span className="min-w-0 flex-1 truncate">{task.name || task.requirement}</span>
                 {task.cost && task.cost.runs > 0 && (
@@ -262,6 +267,12 @@ function executionRows(project: Project): [string, string][] {
   if (project.planner_roles === "on") rows.push(["Planner roles", "On"]);
   if (project.role_text_max_chars != null)
     rows.push(["Role text limit", `${project.role_text_max_chars.toLocaleString()} characters`]);
+  if (project.user_gates === "on") rows.push(["User gates", "On"]);
+  if (project.user_gates === "on" && project.gate_reminder_hours != null)
+    rows.push([
+      "Gate reminders",
+      project.gate_reminder_hours === 0 ? "None" : `Every ${project.gate_reminder_hours} h`,
+    ]);
   if (project.distill_lessons !== "off")
     rows.push([
       "Lessons",

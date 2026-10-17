@@ -18,21 +18,24 @@ from .connection import get_pool
 
 # Every kind an entry can have (task_journal.kind; agents.tiers.journal.JournalKind).
 KINDS = ("step_accepted", "step_failed", "step_retry", "decision", "supplement", "session_switch", "handoff",
-         "progress", "profile_choice", "concurrency_change")
+         "progress", "profile_choice", "concurrency_change", "role_defined", "gate_opened", "gate_updated",
+         "gate_cancelled", "gate_closed")
 
 _INSERT = """
-INSERT INTO task_journal (task_id, step_id, kind, summary, learnings)
-VALUES ($1, $2, $3, $4, $5)
+INSERT INTO task_journal (task_id, step_id, kind, summary, learnings, via, delivered_at)
+VALUES ($1, $2, $3, $4, $5, $6, CASE WHEN $7 THEN now() END)
 ON CONFLICT (task_id, step_id) WHERE kind = 'step_accepted' DO NOTHING
 """
 
 
 async def insert(conn: asyncpg.Connection, task_id: str, entries: Sequence[Mapping[str, Any]]) -> None:
-    """Add ``entries`` (``step_id``, '' for the whole task; ``kind``, ``summary``, ``learnings``) on ``conn``, in
+    """Add ``entries`` (``step_id``, '' for the whole task; ``kind``, ``summary``, ``learnings``; a supplement
+    written with its delivery, such as a user gate's conclusion, also ``via`` and ``delivered``) on ``conn``, in
     the caller's transaction, in their order; a step accepted before keeps its first ``step_accepted`` entry."""
     if entries:
         await conn.executemany(_INSERT, [
-            (task_id, entry["step_id"], entry["kind"], entry.get("summary") or "", list(entry.get("learnings") or []))
+            (task_id, entry["step_id"], entry["kind"], entry.get("summary") or "", list(entry.get("learnings") or []),
+             entry.get("via") or "", bool(entry.get("delivered")))
             for entry in entries
         ])
 

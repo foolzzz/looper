@@ -15,7 +15,7 @@ import { historyHref } from "@/pages/agent-history";
 import { formatUsd } from "@/lib/usage";
 import { cn } from "@/lib/utils";
 
-/** The groups always counted; "Cancelled" and "Other" show only when they hold a task. */
+/** The groups always counted; "Needs you", "Cancelled" and "Other" show only when they hold a task. */
 const ALWAYS_SHOWN: TaskGroup[] = ["in_progress", "queued", "ready", "attention", "completed"];
 
 const linkClass =
@@ -88,7 +88,13 @@ function TaskCounts({ tasks }: { tasks: Overview["tasks"] }) {
       {shown.map((g) => {
         const count = tasks[g.id];
         const tone =
-          count === 0 ? "" : g.id === "in_progress" ? "text-primary" : g.id === "attention" ? "text-warning" : "";
+          count === 0
+            ? ""
+            : g.id === "in_progress"
+              ? "text-primary"
+              : g.id === "attention" || g.id === "needs_you"
+                ? "text-warning"
+                : "";
         return (
           <a
             key={g.id}

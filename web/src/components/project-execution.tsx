@@ -14,12 +14,15 @@ const FIELDS: (keyof ProjectExecution)[] = [
   "max_step_retries",
   "planner_roles",
   "role_text_max_chars",
+  "user_gates",
+  "gate_reminder_hours",
 ];
 const NUMBERS = new Set<keyof ProjectExecution>([
   "task_budget_usd",
   "supervise_interval_seconds",
   "max_step_retries",
   "role_text_max_chars",
+  "gate_reminder_hours",
 ]);
 
 export function executionDraft(project: Project): ExecutionDraft {
@@ -186,6 +189,38 @@ export function ProjectExecutionFields({
           />
           <p id={`${idPrefix}-role_text_max_chars-help`} className="text-xs text-muted-foreground">
             The most characters a role&apos;s prompt and its harness may each have.
+          </p>
+        </div>
+        <div className="space-y-1">
+          {label("user_gates", "User gates")}
+          {/* Not set is off in this release; there is no layer to inherit from. */}
+          <select
+            id={`${idPrefix}-user_gates`}
+            value={draft.user_gates || "off"}
+            onChange={set("user_gates")}
+            aria-describedby={`${idPrefix}-user_gates-help`}
+            className={SELECT}
+          >
+            <option value="off">Off</option>
+            <option value="on">On</option>
+          </select>
+          <p id={`${idPrefix}-user_gates-help`} className="text-xs text-muted-foreground">
+            When on, the project&apos;s Planners may stop part of the plan to ask you what only you can decide; the
+            rest of the plan goes on. Tasks a schedule starts never do.
+          </p>
+        </div>
+        <div className="space-y-1">
+          {label("gate_reminder_hours", "Gate reminders (hours)")}
+          <Input
+            id={`${idPrefix}-gate_reminder_hours`}
+            inputMode="numeric"
+            value={draft.gate_reminder_hours}
+            onChange={set("gate_reminder_hours")}
+            aria-describedby={`${idPrefix}-gate_reminder_hours-help`}
+            placeholder="24 (0 = none, at most 168)"
+          />
+          <p id={`${idPrefix}-gate_reminder_hours-help`} className="text-xs text-muted-foreground">
+            Hours between the reminders of a gate that waits for you, noted in its discussion.
           </p>
         </div>
       </div>

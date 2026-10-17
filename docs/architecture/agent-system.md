@@ -367,6 +367,12 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
     plan with steps (stopped during its `[PLAN]` turn) is planned anew, with
     `Restarted without a saved plan to continue from: planning anew` in the
     activity.
+  - `[GATE]` when the user wrote in one of the plan's user gates, or ended
+    its discussion ([User gates](#user-gates)): the gate's agenda, the user's
+    new messages and the plan, answered in the `[CHAT]` shape plus the whole
+    `agenda`, `gate` (`continue` or `close`) and, to close, `summary`. Only
+    where the task may open gates, or still has one not closed, does the
+    contract say anything of gates; elsewhere it is byte for byte as before.
 - Reply contract (`looper/agents/tiers/planner_protocol.py`): `REPLY_CONTRACT`
   comes last in the system prompt, after the editable role prompt and the
   project section. Every reply ends with exactly
@@ -436,7 +442,12 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
     only;
   - `role_defined`: the Planner defined a role for its steps, or a new version
     of one ([Roles a task's Planner defines](#roles-a-tasks-planner-defines));
-    for the task page only.
+    for the task page only;
+  - `gate_opened`, `gate_updated`, `gate_cancelled` and `gate_closed`: a user
+    gate of the plan opened, the Planner changed it, cancelled it or closed it
+    ([User gates](#user-gates)); for the task page and the `[LESSONS]` turn
+    (closed and cancelled ones). A gate that passed also leaves its conclusion
+    as a `supplement` with `via` `gate`, written delivered.
 
   An entry of the whole task has the step id `''`. Every `[PLAN]`,
   `[DECISION]`, `[SUPERVISE]`, `[CHAT]` and `[RESTART]` turn (and the
@@ -1496,7 +1507,10 @@ refused; and `planner_roles` (`off`, also when null, or `on`) with
 `role_text_max_chars` (500 to 20,000, null for 8,000), whether the project's
 Planners may define the roles their steps run as and how long a role's prompt
 and its harness may each be ([Roles a task's Planner
-defines](#roles-a-tasks-planner-defines)).
+defines](#roles-a-tasks-planner-defines)); and `user_gates` (`off`, also when
+null, or `on`) with `gate_reminder_hours` (0 to 168, null for 24, 0 for none),
+whether the project's Planners may open user gates and how often a gate that
+waits for the user is noted as still waiting ([User gates](#user-gates)).
 
 A task can also have a spend cap of its own (`tasks.budget_usd`, a scheduled
 run's `run_budget_usd`), which replaces its project's `task_budget_usd` for it
@@ -2276,6 +2290,80 @@ role prompt as a brief: the expertise, the platform's conventions and quality
 bar, what the role owns and must not touch, how it hands off, and the checks
 it runs before it reports.
 
+### User gates
+
+In a project with `user_gates` `on`, a task's Planner may make a step of its
+plan a gate, where it discusses with the user what only the user can decide
+([User gates RFC](rfcs/user-gate-v0.zh-CN.md), G1; `looper/agents/user_gates.py`).
+A task a schedule started never may (it runs unattended: `GatePolicy`), and
+nothing changes where gates are off (the default in this phase): the reply
+contract is byte for byte as before, and a gate step is refused with the
+reason and what to do instead.
+
+- **The step.** `{"id", "kind": "gate", "topic", "agenda": [{"question",
+  "options"?}], "depends_on", "findings"?}` in a `[PLAN]` reply or any
+  `add_steps` or `replan`; agenda items are numbered `q1`, `q2`, … by code.
+  The step (`task_steps.kind` `gate`, its instruction the topic) has its
+  gate in `task_user_gates`: `pending` until the steps it depends on are done,
+  then `open` (the step `waiting_user`), `discussing` from the user's first
+  message, and `passed` or `cancelled` (the step `verified`, so the steps
+  that depend on it start) or `skipped` (replanned away before it opened).
+  An open gate counts as started: a replan keeps it.
+- **While it waits.** The steps that depend on it wait; the rest of the plan
+  runs. The Planner reports the task as `waiting_user` (group `needs_you`;
+  the plan's own status stays `executing`). Once the task only waits for the
+  user (no step in flight) and no turn came for 15 minutes
+  (`GATE_IDLE_STOP_SEC`), its resident Claude stops; the next turn resumes
+  its session, and a new session's resume brief carries each waiting gate's
+  discussion so far. It keeps its place under the project's Planner limit.
+- **The discussion.** The user's messages (`task_user_gate_messages`, from
+  the dashboard: `POST /api/tasks/:id/gates/:step/messages`, or `/end` to end
+  the discussion) are stored first; `GATE_MESSAGE` only wakes the Planner,
+  which gives a gate's undelivered ones (after its `delivered_through`)
+  together in one `[GATE]` turn after the event it is in. The reply lists
+  the whole agenda (each item `open`, `resolved` with its answer, or
+  `dropped`), `gate` `continue` or `close`, and may change the plan as a
+  `[CHAT]` reply does. Closing needs `summary` (`decisions`, `assumptions`,
+  `open`) and every item resolved or dropped; after the user ended the
+  discussion it must close, with an assumption for each item still open;
+  closing the last open step without new steps needs `final`. The summary
+  is kept, in the transaction that closes the gate, as a delivered
+  supplement (`via` `gate`, at most 3,000 characters) that every later
+  Worker and Reviewer reads; steps an `add_steps` adds are saved with it. A
+  turn that fails notes the error in the discussion and leaves the messages
+  undelivered (`failures`, `failed_through`): the gate then waits for the user
+  (`waiting_on` `user`, `not_delivered` counts them, reminders come again)
+  until the Planner's automatic retry is due (`retry_at`: 1, then 5 minutes
+  after a failure, `RETRY_WAIT_SEC`); after the second the user's next message
+  sends them with it. A message written while a `continue` turn runs reaches
+  the next one; one written while the turn that closes or cancels the gate
+  runs becomes, in the close's transaction, a supplement (`via` `gate_late`)
+  that the next `[CHAT]` turn gives the Planner, with a `late` note in the
+  discussion. When that close would complete the task, the `[CHAT]` turn comes
+  first, and its reply may add steps instead.
+- **Changing a gate.** A `[DECISION]` or `[CHAT]` reply may carry `gates`:
+  `{"id", "action": "update", "topic"?, "agenda"?, "findings"?, "note"}`
+  (the note, for the user, is required for an open gate) or `{"id",
+  "action": "cancel", "resolution"}`, applied before its decision or action;
+  a reply that cancels the other open gates and so completes the task (a
+  decision, or a `[CHAT]` or `[RESTART]` reply that adds no step) needs
+  `final`.
+- **Restarts.** A server restart reads the gates back. Going on from the plan
+  keeps a waiting gate waiting, with a `resumed` note, and gives it the
+  messages the user wrote while the task was stopped (they are kept:
+  `delivered` `kept`); starting over drops the gates and their discussions,
+  and keeps the conclusions already written, like every supplement.
+- **Reminders.** Every 5 minutes `GateReminders` notes each gate that has
+  waited for the user for its project's `gate_reminder_hours` since its
+  opening, the last message the user or the Planner wrote in it and its last
+  reminder: a `reminder` note in its discussion and a line in the task's
+  activity (no channel message in this phase).
+- **The dashboard.** `GET /api/tasks/:id` lists the gates (`gates`); the
+  Overview shows a waiting gate's panel at the top (its agenda, the
+  discussion, option buttons, a message box and "End discussion"), a
+  conclusion card once it passed; the Pipeline draws a gate as a node of its
+  own; the Dashboard and the Tasks page have the Needs you group.
+
 ### Turns Claude runs on its own
 
 A resident Claude (Manager, Planner) also runs turns that answer no message.
@@ -2442,7 +2530,7 @@ Planner decides in a `[RESTART]` turn how the task goes on. Starting it over
 (`start_over`) plans it anew instead, with its steps, plan and Planner session
 deleted.
 
-**Status values**, by group (`looper/db/tasks.py` `STATUS_GROUPS`, the one place that groups them): in progress `assigned`, `running`, and the Planner's own `planning`, `executing`, `verifying` and `stopping`, which the TaskRouter stores; queued `pending` (waiting for a place in its project); ready `init` (created from the dashboard or by the Manager, never started; the dashboard labels it "Ready — not started"); needs attention `failed` and `stopped`; `completed`; `cancelled`. A status no group knows counts as `other`, on the Dashboard and in `GET /api/tasks?group=other`, never dropped.
+**Status values**, by group (`looper/db/tasks.py` `STATUS_GROUPS`, the one place that groups them): needs you `waiting_user` (the Planner reports it while a user gate of the plan waits for the user, whatever else runs; [User gates](#user-gates)); in progress `assigned`, `running`, and the Planner's own `planning`, `executing`, `verifying` and `stopping`, which the TaskRouter stores; queued `pending` (waiting for a place in its project); ready `init` (created from the dashboard or by the Manager, never started; the dashboard labels it "Ready — not started"); needs attention `failed` and `stopped`; `completed`; `cancelled`. A status no group knows counts as `other`, on the Dashboard and in `GET /api/tasks?group=other`, never dropped.
 
 **Phase values** (finer-grained, set by planner): `pending`, `planning`, `executing`, `verifying`, `completed`, `failed`
 
@@ -2454,11 +2542,13 @@ PostgreSQL is a hard startup dependency. All data paths:
 |---|---|
 | `projects` | Projects: name (unique ignoring case), description, default `work_dir` (`''` = none), `background` for the task agents' system prompt (`''` = none), and the execution settings (`project_execution`) |
 | `tasks` | Task metadata, status, phase, timestamps, `work_dir`, `project_id` (required), `schedule_id` (the schedule that fired it), `budget_usd` (its own spend cap, over its project's), `chat_id`, `chat_kind` and `chat_mention` (who is told when it ends: a Telegram chat id, a Lark sender's open_id, or a Lark group's id and the requester it @-mentions; `chat_kind` is `user` or `chat`; NULL for a task asked for elsewhere), `original_user_text` (the user's message the Manager's task JSON answered, often 「确认」; kept as history) and `title` (a few words naming it, from the task JSON; `task_name` falls back to the goal id, then the requirement) |
-| `task_steps` | A task's steps, each with everything its Planner decides with: `step_key` (label), `depends_on` (step ids), `review`, `acceptance_criteria`, `validation_commands`, `status`, `result`, `worker_id`, `reviewer_id`, `retries`, `feedback`, `missed_messages` |
+| `task_steps` | A task's steps, each with everything its Planner decides with: `step_key` (label), `kind` (`work` or `gate`), `depends_on` (step ids), `review`, `acceptance_criteria`, `validation_commands`, `status`, `result`, `worker_id`, `reviewer_id`, `retries`, `feedback`, `missed_messages` |
+| `task_user_gates` | A gate step's gate ([User gates](#user-gates)): `topic`, `agenda`, `findings`, `state`, `summary` (only once passed), `resolution`, `ended_by_user`, `plan_change`, `delivered_through`, `turns`, `reminders` and its times; the Planner writes all but `first_reply_at` and the reminders' columns, and a closed gate stays as it closed |
+| `task_user_gate_messages` | A gate's discussion, oldest first: the user's messages (`message`, `end`), the Planner's replies and code's notes (`opened`, `updated`, `reminder`, `cancelled`, `closed`, `resumed`, `error`), with `via`, the option a button chose, and in a group chat the author |
 | `task_plans` | A task's plan, one row per task: `plan_id`, `status` (`planning`, `executing`, `verifying`, `stopping`, `completed`, `failed`), `correlation_id`, `origin_channel_id`, `final_summary`, `fail_reason`, and with step workspaces `start_branch` and `start_commit` (where the branch was when the task dispatched its first step; `''` otherwise); replaced when the task is planned again |
 | `step_workspaces` | A step's git worktree ([Step workspaces](#step-workspaces)): `task_id`, `step_id` (both going with the task or step), `repo_dir` and `subdir` (the task directory in it), `target_branch`, `path`, `branch`, `base_commit`, `checkpoint`, `result_commit`, `merge_commit`, `state` (`active`, `merging`, `merged`, `unmerged`, `discarded`), `merge_error` (required when `unmerged`), `detail`, `removed_at` (its directory and branch are gone); one in use (`active` or `merging`) per step |
 | `agent_sessions` | The session each resident agent resumes: `manager` or `planner-<task_id>`, its `session_id`, `session_totals`, the `runtime_type` and `provider_id` it belongs to and the `profile_id` that ran it last (`NULL` runtime: before Agent Profiles, Claude Code; `NULL` provider: before providers were recorded, Claude Code's own login), and `clean_start` (the user dropped the session with `/new`: the next one starts without a resume brief) |
-| `task_journal` | A task's journal, written by code as things happen: `step_accepted`, `step_failed`, `step_retry`, `decision`, `supplement`, `session_switch`, `handoff`, `progress`, `profile_choice`, `concurrency_change` and `role_defined` entries, each with its `step_id` (`''` for the whole task), `summary` and `learnings`, and for a supplement its `via` and `delivered_at`; `GET /api/tasks/<id>` returns it as `journal` (and the progress notes, parsed and newest first, as `progress`); the task page lists the entries as Findings, each with its kind, and the progress notes in its Progress section |
+| `task_journal` | A task's journal, written by code as things happen: `step_accepted`, `step_failed`, `step_retry`, `decision`, `supplement`, `session_switch`, `handoff`, `progress`, `profile_choice`, `concurrency_change`, `role_defined`, `gate_opened`, `gate_updated`, `gate_cancelled` and `gate_closed` entries, each with its `step_id` (`''` for the whole task), `summary` and `learnings`, and for a supplement its `via` and `delivered_at`; `GET /api/tasks/<id>` returns it as `journal` (and the progress notes, parsed and newest first, as `progress`); the task page lists the entries as Findings, each with its kind, and the progress notes in its Progress section |
 | `task_requirement_versions` | Every version of an edited task requirement: `task_id`, `version` (1 is the text the task was created with, written at its first edit), `text`, `via` (`created`, `task_page`, or the Manager's), `created_at` and `delivered_at` (when the Planner had it in a turn; `tasks.requirement` is the newest) |
 | `manager_actions` | The Manager's tool calls (`looper/agents/ops`), one row each: `channel`, `chat` and `message_id` of the turn (empty for a turn Claude ran on its own), `tool`, `arguments` (secret values masked), `risk` (`read`, `write`, `high`), `status` (`ok`, `needs_confirmation`, `error` with `error_code`), `result` (of a change; a read's is not kept), `confirmation_id` (the call that asked, on a confirmed one) and `task_id` (the task it acted on, no foreign key) |
 | `activity` | Execution trace events (SSE streaming to frontend) |
@@ -2612,13 +2702,16 @@ dev proxy, which keeps `Host` and `Origin` on its own port.
 | `/api/tasks` | GET | A page of the tasks, newest first (by creation, then id): `?limit=` (default 50, at most 200) of them, older than the task `?before=` when given; `?project_id=` lists one project's, `?group=` one task group's (400 for an unknown group), `?schedule_id=` one schedule's, `?status=` one status's (400 for an unknown one), and they combine. Answers `tasks`, `next_before` (the cursor for the next page, null at the end) and `counts` (how many tasks each status holds under the project, group and schedule filters, every page included); 400 for a bad `limit` or an unknown `before`. Each task has its status's `group`, `project_id`, `project_name`, `work_dir`, `schedule_id` and `schedule_name` (null for a task no schedule created) and `cost` (as in the task detail) |
 | `/api/tasks/create` | POST | Create a ready task (`init`) with exactly one of `project_id` (existing) and `project` (`{name, description?, work_dir?, background?}`, created in the same transaction). Its `work_dir` is the one given, else the project's. Optional `profile_overrides`: `{planner?, worker?, reviewer?}`, an Agent Profile by id or name for this task's roles, checked as `PUT /api/tasks/:id/agents` checks `profiles` (an empty one chooses nothing). 400 for a requirement over 32,000 characters, with neither project field, for an override of another role, an unknown profile or one that cannot run its role; 404 for an unknown project, 409 for a taken new name |
 | `/api/tasks/:id/project` | PUT | Move a task to `{project_id}`, whatever its status |
-| `/api/tasks/:id` | GET | Task detail with steps, its status's `group`, `project_id`, `project_name`, `schedule_id`, `schedule_name`, `task_budget_usd` (its cap: its own, else its project's) and `own_budget_usd`, `profile_overrides` (`{role: profile}`, `{}` when none), `requirement_versions` (each `{version, text, via, created_at, delivered_at}`, oldest first; none for a requirement never edited), `supplements` (each `{text, via, created_at, delivered_at}`, oldest first), `manager_actions` (what the Manager did to the task or asked to confirm, newest first: `{created_at, channel, tool, arguments, risk, status, confirmation_id}`), `agents` (`{concurrency_max, editable, roles}`; each of `roles.planner`, `roles.worker` and `roles.reviewer` has the `profile` it runs, `{value: {profile_id, name, model, effort, runtime, provider}, source}` with source `task` for the task's own choice, and its `concurrency`: the Planner's is the project's `{value, source}`, how many of its tasks run at once; a Worker's or Reviewer's is what applies to the task, `{value, source, task, project}`, with the task's own limit `task` (null for none) and the project's `project`; `editable` is false once the task has completed: a failed, stopped or cancelled task still changes them, and its restart runs with them) and `cost`: `cost_usd` (the sum of its Planner's, Workers' and Reviewers' runs), `runs`, `running`, `unpriced_runs` and `by_role` (`planner`, `worker`, `reviewer`, each `{cost_usd, runs}`); `roles`, `builtin_role_stats` and, in a task with runs as a role, `run_roles` ([Roles a task's Planner defines](#roles-a-tasks-planner-defines)) |
+| `/api/tasks/:id` | GET | Task detail with steps, its status's `group`, `project_id`, `project_name`, `schedule_id`, `schedule_name`, `task_budget_usd` (its cap: its own, else its project's) and `own_budget_usd`, `profile_overrides` (`{role: profile}`, `{}` when none), `requirement_versions` (each `{version, text, via, created_at, delivered_at}`, oldest first; none for a requirement never edited), `supplements` (each `{text, via, created_at, delivered_at}`, oldest first), `manager_actions` (what the Manager did to the task or asked to confirm, newest first: `{created_at, channel, tool, arguments, risk, status, confirmation_id}`), `agents` (`{concurrency_max, editable, roles}`; each of `roles.planner`, `roles.worker` and `roles.reviewer` has the `profile` it runs, `{value: {profile_id, name, model, effort, runtime, provider}, source}` with source `task` for the task's own choice, and its `concurrency`: the Planner's is the project's `{value, source}`, how many of its tasks run at once; a Worker's or Reviewer's is what applies to the task, `{value, source, task, project}`, with the task's own limit `task` (null for none) and the project's `project`; `editable` is false once the task has completed: a failed, stopped or cancelled task still changes them, and its restart runs with them) and `cost`: `cost_usd` (the sum of its Planner's, Workers' and Reviewers' runs), `runs`, `running`, `unpriced_runs` and `by_role` (`planner`, `worker`, `reviewer`, each `{cost_usd, runs}`); `roles`, `builtin_role_stats` and, in a task with runs as a role, `run_roles` ([Roles a task's Planner defines](#roles-a-tasks-planner-defines)); and `gates`, the plan's user gates in plan order (each `{step, step_id, state, topic, agenda, findings, summary, resolution, ended_by_user, plan_change, depends_on, waiting_on, not_delivered, retry_at, turns, reminders, opened_at, first_reply_at, closed_at}`; `waiting_on` is `user`, `planner` while a message of the user's is undelivered and no turn failed on it or a failed turn's automatic retry is due, or null; `not_delivered` counts the user's messages a failed turn had and none has taken since, `retry_at` is when the Planner tries them again on its own, null when no retry is left) |
 | `/api/tasks/cancel` | POST | Cancel task (permanent) |
 | `/api/tasks/stop` | POST | Stop/pause task |
 | `/api/tasks/start` | POST | Run a stopped, failed or cancelled task again from its saved plan (`TASK_RESTART` `continue`), or, with `"start_over": true`, plan it anew, its steps, plan and Planner session deleted; 400 when `start_over` is not a boolean. It also starts a ready one, as before |
 | `/api/agent/v1/tools` | GET | The Manager's tools (`ops`), for its MCP server; only with the Manager's token (`Authorization: Bearer`), else 401. With a task's Planner's token (`planner.…`), that Planner's own tools, while it runs (401 once it stopped or its task ended) |
 | `/api/agent/v1/ops/:tool` | POST | Call one of the Manager's tools with the JSON body as its arguments, in the Manager's current turn; answers the tool's `status` object with 200, refusals included; only with the Manager's token. With a Planner's token, one of that Planner's tools, for its own task ([A task's Planner's tools](#a-tasks-planners-tools)) |
 | `/api/tasks/:id/requirement` | PUT | Edit the requirement of a task that has not ended to `{requirement}`, kept as a new version (`{task_id, version, requirement}`); a running task's Planner gets it in a `[CHAT]` turn. 400 for an empty or unchanged text or one over 32,000 characters, 404 for an unknown task, 409 for one that ended |
+| `/api/tasks/:id/gates/:step/messages` | GET | A user gate's discussion, oldest first: `{task_id, gate, messages}` (each `{id, role, kind, text, author, via, agenda_item, option, created_at}`); 404 for no such gate |
+| `/api/tasks/:id/gates/:step/messages` | POST | The user writes `{text, agenda_item?, option?}` in the gate (an option of an agenda item, with the item's id), only while it waits for the user: an open gate becomes `discussing`, and the task's Planner is woken. Answers `{task_id, gate, message, delivered}`: `queued` (its Planner takes it next) or `kept` (the task is not running; going on from its plan gives it). 400 for an empty text or one over 8,000 characters, or an option the item does not have; 404 for no such task or gate; 409 for a gate that does not wait for the user or a completed task |
+| `/api/tasks/:id/gates/:step/end` | POST | The user ends the gate's discussion (`{text?}`): the next `[GATE]` turn closes it with the current conclusions. As the POST above |
 | `/api/tasks/:id/agents` | PUT | Change the task's own choices per role, together: `profiles` (an Agent Profile by id or name for its `planner`, `worker` or `reviewer`) and `concurrency` (how many of its Workers or Reviewers run at once, 1–64), `null` dropping the task's choice of that role; e.g. `{"profiles": {"worker": "claude-code/sonnet"}, "concurrency": {"worker": 2}}`. The same check and write as the Manager's `looper_task_update` and `looper_concurrency` (`projects.set_task_agents`), in one transaction. Answers `{task_id, agents}` (as `GET /api/tasks/:id`), with a `note` on when a new profile applies; a limit it sets lets waiting runs check again. 400 for an unknown field, role, profile or a profile that cannot run its role, a limit other than a whole number from 1 to 64, a `planner` limit (one Planner runs a task) or an empty body, and nothing is stored then; 404 for an unknown task; 409 for a completed task (a failed, stopped or cancelled one changes, and its restart runs with the new choices) |
 | `/api/tasks/:id/start` | POST | Start a ready task (`TASK_START`); it waits for a place in its project like any start. Answers `{started, project_id}`; 400 unless the task is ready, 404 for an unknown task |
 | `/api/tasks/delete` | POST | Delete task (must be stopped first) |
