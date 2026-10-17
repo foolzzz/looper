@@ -1,4 +1,4 @@
-"""The ``project_role_templates`` table: the role templates of a project (``looper.agents.role_templates``).
+"""The ``project_role_templates`` table: the role templates of a project (``looper.agents.role_api``).
 
 A template is checked like a task role before it is stored; its tasks' Planners copy it as a task role
 (``ops.planner``, ``looper_task_role_set``'s ``template``). Deleting a project deletes its templates.

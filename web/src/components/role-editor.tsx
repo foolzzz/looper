@@ -421,7 +421,7 @@ export function ProjectRoleTemplates({ projectId, rolesOn }: { projectId: string
       )}
       <RegistryList
         title="Role templates"
-        hint="Roles a task's Planner copies when a step fits one; its copy is the task's own role from then on."
+        hint="A task's Planner copies one when a step fits it."
         addLabel="New template"
         form={(close) => (
           <TemplateForm
