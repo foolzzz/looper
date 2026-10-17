@@ -3,7 +3,7 @@
 
 What each runtime reads itself was found with Claude Code 2.1.285, Codex
 0.162.0 and omp 18.4.3 under Looper's isolation (the multi-runtime RFC,
-section 9); these tests check Looper's side: the files each runtime is said to
+section 9), and with Grok 1.0.62 (the Grok runtime RFC, section 2); these tests check Looper's side: the files each runtime is said to
 be given, the Codex config that makes it read CLAUDE.md, the text Looper adds
 to omp's system prompt, and the run's record of them.
 """
@@ -67,11 +67,14 @@ def _omp_prompt(cwd: Path, root: Path) -> str:
 
 
 @pytest.mark.parametrize("files, expected", [
-    ({"CLAUDE.md": "c"}, {"claude-code": ["CLAUDE.md"], "codex": ["CLAUDE.md"], "omp": ["CLAUDE.md"]}),
-    ({"AGENTS.md": "a"}, {"claude-code": ["AGENTS.md"], "codex": ["AGENTS.md"], "omp": ["AGENTS.md"]}),
+    ({"CLAUDE.md": "c"},
+     {"claude-code": ["CLAUDE.md"], "codex": ["CLAUDE.md"], "omp": ["CLAUDE.md"], "grok": ["CLAUDE.md"]}),
+    ({"AGENTS.md": "a"},
+     {"claude-code": ["AGENTS.md"], "codex": ["AGENTS.md"], "omp": ["AGENTS.md"], "grok": ["AGENTS.md"]}),
+    # Grok reads every name it knows in a directory: both.
     ({"CLAUDE.md": "c", "AGENTS.md": "a"},
-     {"claude-code": ["CLAUDE.md"], "codex": ["AGENTS.md"], "omp": ["AGENTS.md"]}),
-    ({}, {"claude-code": [], "codex": [], "omp": []}),
+     {"claude-code": ["CLAUDE.md"], "codex": ["AGENTS.md"], "omp": ["AGENTS.md"], "grok": ["CLAUDE.md", "AGENTS.md"]}),
+    ({}, {"claude-code": [], "codex": [], "omp": [], "grok": []}),
 ], ids=["only CLAUDE.md", "only AGENTS.md", "both", "neither"])
 def test_each_runtime_is_given_one_file_of_the_repository_read_by_itself(
     tmp_path: Path, files: dict[str, str], expected: dict[str, list[str]],
@@ -89,7 +92,8 @@ def test_below_the_root_claude_code_reads_the_projects_claude_md_and_the_others_
     (repo / "pkg" / "AGENTS.md").write_text("pkg\n")
     assert _given(repo / "pkg") == {"claude-code": _native("../CLAUDE.md"),
                                     "codex": _native("../CLAUDE.md", "AGENTS.md"),
-                                    "omp": _native("../CLAUDE.md", "AGENTS.md")}
+                                    "omp": _native("../CLAUDE.md", "AGENTS.md"),
+                                    "grok": _native("../CLAUDE.md", "AGENTS.md")}
 
 
 def test_codex_reads_claude_md_where_a_directory_has_no_agents_md(
@@ -144,6 +148,7 @@ def test_outside_a_repository_omp_gets_the_work_directorys_file_in_its_system_pr
     entries = _given(work)
     assert entries["claude-code"] == _native("CLAUDE.md" if "CLAUDE.md" in files else "AGENTS.md")
     assert entries["codex"] == _native(given)
+    assert entries["grok"] == _native(*(name for name in ("CLAUDE.md", "AGENTS.md") if name in files))
     (omp,) = entries["omp"]
     text = files[given].strip()
     assert omp == {"path": given, "delivery": "injected", "sha256": hashlib.sha256(text.encode()).hexdigest(),
