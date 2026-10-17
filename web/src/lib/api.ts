@@ -1629,6 +1629,19 @@ export interface JournalEntry {
   created_at: string;
 }
 
+/** A review role a step names. */
+export interface StepReviewRole {
+  role: string;
+  required: boolean;
+  version: number | null;
+}
+
+/** The review role a step in review waits for; null while it waits for the built-in Reviewer, or is not in review. */
+export function reviewingRole(step: TaskStep): StepReviewRole | null {
+  if (step.review_stage !== "role" || step.review_position == null) return null;
+  return step.review_roles[step.review_position] ?? null;
+}
+
 export interface TaskStep {
   id: string;
   task_id: string;
@@ -1650,15 +1663,15 @@ export interface TaskStep {
   review: boolean;
   /** The role its Worker runs as; null: the built-in Worker. */
   role_key: string | null;
-  /** The role that reviews it after the built-in Reviewer passed it; null: none. */
-  review_role_key: string | null;
-  /** Whether that role's verdict blocks the step (true) or only advises the Planner (false). */
-  review_role_required: boolean;
-  /** The versions of those roles its latest attempt ran with; null before it ran as one. */
+  /** The version of that role its latest attempt ran with; null before it ran as one. */
   role_version: number | null;
-  review_role_version: number | null;
-  /** Which review a step in review waits for: the built-in Reviewer's or its review role's. */
+  /** The roles that review it after the built-in Reviewer passed it, in order; each blocks the step (required) or
+   * only advises the Planner, and version is the one its latest review ran with (null before one ran). */
+  review_roles: StepReviewRole[];
+  /** Which review a step in review waits for: the built-in Reviewer's or a review role's, the one at
+   * review_position in review_roles. */
   review_stage: "builtin" | "role" | null;
+  review_position: number | null;
   retries: number;
   worker_id: string | null;
   reviewer_id: string | null;

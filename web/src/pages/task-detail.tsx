@@ -61,6 +61,7 @@ import {
   streamTaskActivity,
   stopTask,
   isActiveTask,
+  reviewingRole,
   startTask,
   startReadyTask,
   READY_LABEL,
@@ -758,7 +759,7 @@ function OverviewTab({
                       {step.status === "completed" && step.review_stage && (
                         <span className="text-xs text-muted-foreground">
                           Waiting for{" "}
-                          {step.review_stage === "role" ? `review: ${step.review_role_key}` : "the built-in review"}
+                          {reviewingRole(step) ? `review: ${reviewingRole(step)?.role}` : "the built-in review"}
                         </span>
                       )}
                     </div>
@@ -912,14 +913,16 @@ function LessonsDraftNote({ taskId, projectId }: { taskId: string; projectId: st
 
 // --- Roles: the roles the task's Planner defined for its steps ---
 
-/** The roles a step runs and is reviewed as, e.g. "as tester v2 + review: security (advisory)"; "" for the
+/** The roles a step runs and is reviewed as, e.g. "as tester v2 + review: security, docs (advisory)"; "" for the
  * built-in ones. */
 function stepRoles(step: TaskStep, versions = true) {
   const version = (v: number | null) => (versions && v != null ? ` v${v}` : "");
-  const advisory = step.review_role_required === false ? " (advisory)" : "";
+  const reviews = (step.review_roles ?? []).map(
+    (item) => `${item.role}${version(item.version)}${item.required ? "" : " (advisory)"}`,
+  );
   return [
     step.role_key && `as ${step.role_key}${version(step.role_version)}`,
-    step.review_role_key && `+ review: ${step.review_role_key}${version(step.review_role_version)}${advisory}`,
+    reviews.length > 0 && `+ review: ${reviews.join(", ")}`,
   ].filter(Boolean).join(" ");
 }
 
