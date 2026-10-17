@@ -209,6 +209,12 @@ async def _shared(workspace: str, besides: str | None) -> list[dict[str, Any]]:
     return shared
 
 
+def overwrites(mode: TaskWorkspaces | str, shared: Sequence[Mapping[str, Any]]) -> bool:
+    """Whether a task running as ``mode`` works in the same files as one of the ``shared`` tasks: both in place."""
+    return TaskWorkspaces(mode) is TaskWorkspaces.IN_PLACE and any(
+        task.get("mode") == TaskWorkspaces.IN_PLACE.value for task in shared)
+
+
 async def check(workspace: str, *, mode: TaskWorkspaces, base: str = "", besides: str | None = None,
                 asked: bool = True) -> dict[str, Any]:
     """What a task in ``workspace`` would run in, and the warnings (the RFC's W5); outside git a worktree task runs
@@ -243,12 +249,12 @@ async def check(workspace: str, *, mode: TaskWorkspaces, base: str = "", besides
     shared = await _shared(workspace, besides)
     if shared:
         names = ", ".join(f"{task['name']} ({task['status']})" for task in shared[:5])
-        if effective is TaskWorkspaces.WORKTREE:
-            text = (f"Also in progress on this repository: {names}. Each task works on a branch of its own, so "
-                    "they do not get in each other's way; their branches may conflict when you merge them.")
-        else:
+        if overwrites(effective, shared):
             text = (f"Also in progress on this repository: {names}. Tasks in place work in the same files and "
                     "may overwrite each other's changes.")
+        else:
+            text = (f"Also in progress on this repository: {names}. A task in a worktree works on a branch of its "
+                    "own, so they do not get in each other's way; their work may conflict when you merge it.")
         warnings.append({"kind": WarningKind.SHARED.value, "tasks": shared, "text": text})
     return {"workspace": workspace, "mode": effective.value, "requested_mode": mode.value, "git": git,
             "warnings": warnings, "notes": await asyncio.to_thread(notes_view, workspace)}

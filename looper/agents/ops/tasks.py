@@ -26,7 +26,7 @@ from ..project_execution import format_usd
 from ..projects import HTTP_404, HTTP_409, PROFILES_NOTE, TASK_PROFILE_ROLES, RequestError, agents_view
 from ..projects import edit_requirement, profile_choices, project_name, set_task_agents, task_workspace
 from ..step_workspaces import _size_text as size_text
-from ..task_workspaces import WarningKind, task_branch
+from ..task_workspaces import WarningKind, overwrites, task_branch
 from ..system_prompt import TASK_REQUIREMENT_LIMIT
 from ..task_notice import notify_target
 from ..tiers.journal import SUPPLEMENTS_MAX_CHARS, clip, kept_text
@@ -307,8 +307,8 @@ def _workspace_lines(task_id: str, check: Mapping[str, Any]) -> list[str]:
                          f"（{files}），任务需要的话先提交")
         elif kind == WarningKind.SHARED.value:
             names = "、".join(f"{t['name']}（{t['status']}）" for t in (warning.get("tasks") or [])[:5])
-            effect = ("各自在自己的分支上，不会互相干扰，合并时可能冲突" if check.get("mode") == TaskWorkspaces.WORKTREE.value
-                      else "原地运行的任务会互相覆盖文件")
+            effect = ("原地运行的任务会互相覆盖文件" if overwrites(check.get("mode") or "in_place", warning.get("tasks") or ())
+                      else "worktree 里的任务各在自己的分支上，不会互相干扰，合并时可能冲突")
             lines.append(f"- 提醒：这个仓库上还有进行中的任务：{names}；{effect}")
         elif kind == WarningKind.LARGE_CHECKOUT.value:
             lines.append(f"- 提醒：仓库检出有 {size_text(int(warning.get('bytes') or 0))}，任务的 worktree 是它的一份完整拷贝")

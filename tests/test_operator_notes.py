@@ -149,3 +149,55 @@ def test_the_notes_come_with_the_knowledge_only_when_the_project_gives_them(tmp_
     assert off == AgentKnowledge() and off.prompt_section == ""
     assert on.notes is not None and on.prompt_section == on.notes.text and "59322" in on.prompt_section
     assert asyncio.run(load_knowledge(tmp_path, None, str(plain), notes=True)) == AgentKnowledge()
+
+
+# --- The agents get them only from a project that gives them ---
+
+NOTES = OperatorNotes(text=f"{notes.HEADING}\nNOTE-MARK-59322", files=("MEMORY.md",))
+
+
+@pytest.fixture
+def asked(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """The directories the notes were read for; every read answers ``NOTES``."""
+    from looper.agents import knowledge
+
+    seen: list[str] = []
+
+    async def load(work_dir: str) -> OperatorNotes:
+        seen.append(work_dir)
+        return NOTES
+
+    monkeypatch.setattr(knowledge, "load_notes", load)
+    return seen
+
+
+@pytest.mark.usefixtures("agent_db")
+@pytest.mark.parametrize(("setting", "given"), [("on", True), ("off", False), (None, False)])
+def test_the_planner_gets_them_only_when_its_project_gives_them(planner_claude: object, agent_db: object,
+                                                              asked: list[str], setting: str | None,
+                                                              given: bool) -> None:
+    from test_planner_agent import WORK_OK, decide, drive, plan, step
+
+    agent_db.get_task_project.return_value = {  # type: ignore[attr-defined]
+        "id": "proj-1", "name": "calc", "description": "", "work_dir": "/srv/calc", "background": "",
+        "operator_notes": setting}
+    claude = planner_claude(plan(step("s1")), decide("accept"))  # type: ignore[operator]
+    drive(claude, lambda envelope: WORK_OK)
+    prompts = claude.prompts()
+    assert prompts and all(("NOTE-MARK-59322" in prompt) is given for prompt in prompts)
+    assert bool(asked) is given
+
+
+@pytest.mark.usefixtures("agent_db")
+@pytest.mark.parametrize(("setting", "given"), [("on", True), (None, False)])
+def test_a_worker_gets_them_only_when_its_project_gives_them(agent_db: object, asked: list[str],
+                                                            monkeypatch: pytest.MonkeyPatch, setting: str | None,
+                                                            given: bool) -> None:
+    from tests.test_agent_planner_worker import _run_step, _worker_row
+
+    _worker_row(monkeypatch, {"system_prompt": "ROLE\n", "timeout_seconds": 0, "max_turns": 0})
+    agent_db.get_task_project.return_value = {  # type: ignore[attr-defined]
+        "id": "proj-1", "name": "calc", "background": "", "operator_notes": setting}
+    result, seen = _run_step()
+    assert result["status"] == "completed"
+    assert ("NOTE-MARK-59322" in seen["prompt"]) is given and (asked == [seen["work_dir"]]) is given
