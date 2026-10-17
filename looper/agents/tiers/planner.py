@@ -2368,22 +2368,23 @@ class PlannerAgent:
         return bool(ack.payload.get("killed"))
 
     async def _kill_running_workers(self) -> None:
-        """Stop every Worker and Reviewer this task still runs (on task stop/cancel)."""
+        """Stop every Worker and Reviewer this task still runs (on task stop/cancel, at its spend cap), all at once:
+        each stop waits for its run's processes to end."""
         plan = self._plan
         if plan is None or self._bus is None:
             return
+        runs: list[tuple[PlanStep, str | None]] = []
         for step in plan.steps:
             if step.status == "dispatched" and step.worker_id:
-                run_id = None
+                runs.append((step, None))
             elif step.status == "completed" and step.reviewer_id:
-                run_id = step.reviewer_id  # in review
-            else:
-                continue
-            try:
-                await self._kill_worker(step, run_id)
-            except Exception:
+                runs.append((step, step.reviewer_id))  # in review
+        stopped = await asyncio.gather(*(self._kill_worker(step, run_id) for step, run_id in runs),
+                                       return_exceptions=True)
+        for (step, run_id), outcome in zip(runs, stopped):
+            if isinstance(outcome, Exception):
                 logger.debug("planner %s could not stop run %s", self.agent_id, run_id or step.worker_id,
-                             exc_info=True)
+                             exc_info=outcome)
 
     # --- Turns on the Planner's Claude ---
 
@@ -3279,11 +3280,7 @@ class PlannerAgent:
         plan.status = "stopping"  # no result is taken and nothing starts while it winds down
         await self._save(plan, plan_row=True)
         await self._activity("error", reason)
-        for step in plan.steps:
-            if step.status == "dispatched" and step.worker_id:
-                await self._kill_worker(step)
-            elif step.status == "completed" and step.reviewer_id:
-                await self._kill_worker(step, step.reviewer_id)
+        await self._kill_running_workers()
         if self._execution.on_task_budget is TaskBudgetAction.WRAP_UP:
             try:
                 summary = await self._ask(TurnKind.DECISION, self._wrap_up_message(plan, reason), parse_wrap_up)

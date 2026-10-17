@@ -421,7 +421,9 @@ class WorkerPool:
         return True
 
     def _on_kill_work_topic(self, envelope: MessageEnvelope) -> bool:
-        if not self._running or envelope.target.agent_type != "worker":
+        # Answered after the pool's stop too (which ended every run): a Planner that stops later gets its reply at
+        # once instead of waiting it out.
+        if envelope.target.agent_type != "worker":
             return False
         asyncio.get_event_loop().create_task(self._deliver_kill(envelope))
         return True

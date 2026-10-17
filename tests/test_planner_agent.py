@@ -1406,6 +1406,89 @@ class TestTaskEnd:
         s2 = next(item for item in h.work_items if item.payload["instruction"] == "do s2")
         assert {envelope.target for envelope in h.killed} == {s2.target, h.reviews[0].target}
 
+    @staticmethod
+    async def _running_steps(root: Path, claude: Any, tasks: int, *, worker: str) -> tuple[Any, Any, MessageBus]:
+        """A worker pool and a TaskRouter on one bus, with ``tasks`` tasks started whose 4 steps each run a Worker
+        (``worker``, its Python body); returns once every Worker's process runs."""
+        from fake_claude import fake_claude
+
+        from looper.agents.tiers.worker import WorkerConfig, WorkerPool
+
+        bus = MessageBus(runtime_root=root)
+        pool = WorkerPool(config=WorkerConfig(claude_bin=str(fake_claude(root / "worker-claude", worker))),
+                          runtime_root=root)
+        router = TaskRouter(runtime_root=root, claude_bin=claude.bin)
+        await pool.start(bus)
+        await router.start(bus)
+        await asyncio.sleep(0)  # both subscribe
+        for n in range(tasks):
+            (root / f"work-{n}").mkdir()
+            for message_type, payload in (
+                (MessageType.TASK_REQUEST, {"task_id": f"task-{n}", "goal_id": f"g{n}", "requirement": "build",
+                                            "work_dir": str(root / f"work-{n}"), "project_id": "proj-1"}),
+                (MessageType.TASK_START, {"task_id": f"task-{n}"}),
+            ):
+                await bus.publish(MessageEnvelope.create(source=MANAGER_ADDRESS, target=TASK_ROUTER_ADDRESS,
+                                                         message_type=message_type, payload=payload))
+        deadline = asyncio.get_running_loop().time() + 30
+        while sum(1 for wp in pool._active.values() if wp.process and wp.process.returncode is None) < 4 * tasks:
+            assert asyncio.get_running_loop().time() < deadline, "the Workers did not start"
+            await asyncio.sleep(0.05)
+        return pool, router, bus
+
+    def test_a_server_stop_with_many_running_steps_ends_in_seconds(self, planner_claude: Any, agent_db: Any) -> None:
+        """The server stops its worker pool, then the TaskRouter and its Planners (``AgentSupervisor.stop_all``):
+        with 12 steps running in 3 tasks, and Planners' Claudes that take their 5 s to exit, it is done well inside
+        launchd's 20 s grace, every run ``interrupted``."""
+        claude = planner_claude(plan(*(step(f"s{i}") for i in range(1, 5))), linger=True)
+        answers: list[MessageEnvelope] = []
+
+        async def _run() -> float:
+            with tempfile.TemporaryDirectory() as tmp:
+                pool, router, bus = await self._running_steps(
+                    Path(tmp), claude, 3, worker="import sys, time\nsys.stdin.readline()\ntime.sleep(60)\n")
+                bus.subscribe_topic(MessageType.KILL_WORK_RESULT, answers.append)
+                began = asyncio.get_running_loop().time()
+                await pool.stop()
+                await router.stop()
+                took = asyncio.get_running_loop().time() - began
+                await bus.shutdown()
+                return took
+
+        took = asyncio.run(_run())
+        # The stopped pool answered each Planner's stop of a step at once, none waiting out its reply.
+        assert [answer.payload["killed"] for answer in answers] == [False] * 12
+        assert took < 10
+        statuses = [call.kwargs["status"] for call in agent_db.finish_record.await_args_list]
+        assert statuses.count("interrupted") == 12
+
+    def test_a_stopped_task_ends_its_running_steps_at_once(self, planner_claude: Any, agent_db: Any) -> None:
+        """A task's stop ends its 4 running Workers together: each takes its 3 s SIGTERM grace, not one after the
+        other."""
+        claude = planner_claude(plan(*(step(f"s{i}") for i in range(1, 5))))
+        stubborn = ("import signal, sys, time\nsignal.signal(signal.SIGTERM, signal.SIG_IGN)\nsys.stdin.readline()\n"
+                    "time.sleep(60)\n")
+
+        async def _run() -> float:
+            with tempfile.TemporaryDirectory() as tmp:
+                pool, router, bus = await self._running_steps(Path(tmp), claude, 1, worker=stubborn)
+                processes = [wp.process for wp in pool._active.values()]
+                began = asyncio.get_running_loop().time()
+                await bus.publish(MessageEnvelope.create(source=MANAGER_ADDRESS, target=TASK_ROUTER_ADDRESS,
+                                                         message_type=MessageType.TASK_STOP,
+                                                         payload={"task_id": "task-0"}))
+                while router.has_planner("task-0") or any(p.returncode is None for p in processes):
+                    assert asyncio.get_running_loop().time() - began < 30, "the task did not stop"
+                    await asyncio.sleep(0.05)
+                took = asyncio.get_running_loop().time() - began
+                await router.stop()
+                await pool.stop()
+                await bus.shutdown()
+                return took
+
+        took = asyncio.run(_run())
+        assert took < 8  # one after the other: 4 x 3 s at least
+
     def test_server_stop_during_a_teardown_still_reaps_claude(self, planner_claude: Any) -> None:
         """Stopping the router while it ends a Planner neither hangs nor leaves Claude running."""
         claude = planner_claude(plan(step("s1")), decide("accept"), linger=True)  # outlives its stdin
