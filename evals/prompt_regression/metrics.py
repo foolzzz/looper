@@ -34,7 +34,8 @@ from looper.agents.tiers.planner_protocol import FINAL_HEADINGS
 from looper.agents.tiers.worker import extract_report
 
 TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled", "stopped"})
-# The status a run's record ends with when the run failed (``llm_records.status``: running, completed or failed).
+# The status a run's record ends with when the run failed (``llm_records.RecordStatus``; one Looper stopped is
+# ``interrupted`` instead).
 RECORD_FAILED = "failed"
 # Claude Code's file-editing tools, each naming one file; Codex's patches (``runtimes.codex``), naming each file
 # they change; and OMP's (``runtimes.omp.edited_paths``).

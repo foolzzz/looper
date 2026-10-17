@@ -383,3 +383,44 @@ def test_doctor_fails_without_a_usable_pg_dump_when_the_schema_is_about_to_chang
     if status == "fail":
         assert "the database schema is about to change" in line
 
+
+
+@pytest.mark.skipif(not os.environ.get("LOOPER_TEST_DATABASE_URL"), reason="LOOPER_TEST_DATABASE_URL is not set")
+def test_doctor_checks_git_and_the_directories_of_projects_with_step_worktrees(tmp_path: Path) -> None:
+    """A warning, not a failure: a project whose directory cannot have step worktrees runs its steps one at a time."""
+    import asyncio
+    import subprocess
+
+    import asyncpg
+
+    from evals.prompt_regression.runner import fresh_database
+    from looper.db.connection import ensure_schema
+
+    checkout = tmp_path / "alarm"
+    checkout.mkdir()
+    git = {**os.environ, "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1"}
+    subprocess.run(["git", "init", "-q", "-b", "main"], cwd=checkout, env=git, check=True)
+    (checkout / "report.md").write_text("# report\n")
+    subprocess.run(["git", "add", "-A"], cwd=checkout, env=git, check=True)
+    subprocess.run(["git", "-c", "user.name=U", "-c", "user.email=u@x", "commit", "-qm", "init"], cwd=checkout,
+                   env=git, check=True)
+    (checkout / ".venv").mkdir()
+
+    async def set_up(url: str) -> None:
+        conn = await asyncpg.connect(url)
+        try:
+            await ensure_schema(conn)
+            await conn.execute("INSERT INTO projects (id, name, work_dir, step_workspaces, step_workspace_links) "
+                               "VALUES ('proj-a', 'alarm', $1, 'worktree', $2)", str(checkout), [".venv", ".env"])
+        finally:
+            await conn.close()
+
+    with fresh_database(os.environ["LOOPER_TEST_DATABASE_URL"]) as (database_url, _):
+        asyncio.run(set_up(database_url))
+        env = _doctor_env(tmp_path, claude="logged_in", database_url=database_url)
+        result, output, stderr = _run_looper("doctor", cwd=tmp_path, env=env)
+
+    assert result["code"] == 0, output + stderr
+    lines = {line[6:].split("  ")[0].strip(): line for line in output.splitlines() if line[:5].strip()}
+    assert lines["git"].startswith("ok") and "git version 2." in lines["git"], output
+    assert lines["Step worktrees"] == ("warn  Step worktrees   alarm: main, 9 B checkout, nothing to link at .env"), output
