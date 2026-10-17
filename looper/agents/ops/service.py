@@ -48,6 +48,7 @@ from ...db import manager_actions as db_actions
 from . import Call, ErrorCode, OpError, Risk, Tool, Turn, check_arguments
 from .concurrency import TOOLS as CONCURRENCY_TOOLS
 from .config import TOOLS as CONFIG_TOOLS
+from .schedules import TOOLS as SCHEDULE_TOOLS
 from .settings import TOOLS as SETTINGS_TOOLS
 from .tasks import TOOLS as TASK_TOOLS
 
@@ -105,7 +106,8 @@ class _Pending:
 
 
 # The Manager's tools (a task's Planner has its own, ``ops.planner``).
-MANAGER_TOOLS: tuple[Tool, ...] = (*TASK_TOOLS, *CONCURRENCY_TOOLS, *CONFIG_TOOLS, *SETTINGS_TOOLS, CONFIRM)
+MANAGER_TOOLS: tuple[Tool, ...] = (*TASK_TOOLS, *CONCURRENCY_TOOLS, *CONFIG_TOOLS, *SETTINGS_TOOLS, *SCHEDULE_TOOLS,
+                                   CONFIRM)
 
 
 class ManagerOps:

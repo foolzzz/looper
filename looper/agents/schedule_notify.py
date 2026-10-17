@@ -31,6 +31,8 @@ from datetime import datetime, timedelta
 from enum import Enum
 from typing import Any
 
+import asyncpg
+
 from ..db import connection as db_connection, projects as db_projects, schedules as db_schedules
 from . import cron
 from .links import schedule_link, task_link
@@ -222,7 +224,11 @@ class Notifier:
             if status == "failed":
                 logger.warning("schedule %s: the %s message to %s could not be sent: %s", schedule["id"],
                                kind.value, channel, error)
-        await db_schedules.insert_notification(
-            db_connection.get_pool(), schedule_id=schedule["id"], run_id=run_id, kind=kind.value, channel=channel,
-            chat=chat, text=text, status=status, error=error,
-        )
+        try:
+            await db_schedules.insert_notification(
+                db_connection.get_pool(), schedule_id=schedule["id"], run_id=run_id, kind=kind.value, channel=channel,
+                chat=chat, text=text, status=status, error=error,
+            )
+        except asyncpg.ForeignKeyViolationError:
+            # Deleted since the message was written: its outbox went with it.
+            logger.info("schedule %s was deleted: its %s message is not recorded", schedule["id"], kind.value)

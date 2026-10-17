@@ -2,7 +2,7 @@ import { useCallback, useEffect, useId, useRef, useState } from "react";
 import { ArrowRight, Loader2, Play } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
-import { LastRun, NoticeText, ScheduleTime } from "@/components/project-schedules";
+import { DeleteSchedule, LastRun, NoticeText, ScheduleTime } from "@/components/project-schedules";
 import { ScheduleDetail } from "@/components/schedule-detail";
 import { LABEL, SELECT } from "@/components/registry-ui";
 import { fetchAllSchedules, fetchSchedule, runSchedule, updateSchedule, type ScheduleInfo } from "@/lib/api";
@@ -69,8 +69,8 @@ function NextRun({ schedule }: { schedule: ScheduleInfo }) {
   );
 }
 
-/** One schedule: what it is, when it runs, how its last run went, and its switch and "Run now". Its name opens its
- * detail view (`#schedules/<id>`): its settings and the runs it fired. */
+/** One schedule: what it is, when it runs, how its last run went, and its switch, "Run now" and "Delete schedule". Its
+ * name opens its detail view (`#schedules/<id>`): its settings and the runs it fired. */
 function ScheduleRow({
   schedule,
   enabled,
@@ -79,6 +79,7 @@ function ScheduleRow({
   notice,
   onToggle,
   onRunNow,
+  onDeleted,
 }: {
   schedule: ScheduleInfo;
   /** What the switch shows: the value being saved while it is. */
@@ -88,6 +89,7 @@ function ScheduleRow({
   notice: Notice | undefined;
   onToggle: (on: boolean) => void;
   onRunNow: () => void;
+  onDeleted: () => void;
 }) {
   const run = schedule.last_run;
   const off = !schedule.enabled;
@@ -133,7 +135,7 @@ function ScheduleRow({
             )}
           </div>
         </div>
-        <div className="ml-auto flex items-center gap-2">
+        <div className="ml-auto flex flex-wrap items-center justify-end gap-2">
           <label className="flex h-11 cursor-pointer items-center gap-2 text-xs text-muted-foreground sm:h-9">
             <Switch checked={enabled} onChange={onToggle} disabled={switching} label={`Enable ${schedule.name}`} />
             <span className="w-6" aria-hidden="true">{enabled ? "On" : "Off"}</span>
@@ -154,6 +156,7 @@ function ScheduleRow({
             )}
             Run now
           </Button>
+          <DeleteSchedule schedule={schedule} onDeleted={onDeleted} />
         </div>
         {notice && <NoticeText notice={notice} />}
       </div>
@@ -174,16 +177,16 @@ export function SchedulesPage({
 }) {
   const scheduleId = decodeURIComponent(sub.split("/")[0] ?? "");
   return scheduleId ? (
-    <ScheduleDetail key={scheduleId} scheduleId={scheduleId} />
+    <ScheduleDetail key={scheduleId} scheduleId={scheduleId} onDeleted={() => onNavigate("")} />
   ) : (
     <ScheduleList query={query} onFilter={(next) => onNavigate("", next)} />
   );
 }
 
 /**
- * Every project's schedules, the disabled ones too, by project: each with its switch and "Run now", its name opening
- * its detail view; it is edited on its project's Schedules tab. A project and a status filter, kept in the address
- * (`query`), narrow the list; `onFilter` sets them.
+ * Every project's schedules, the disabled ones too, by project: each with its switch, "Run now" and "Delete schedule",
+ * its name opening its detail view; it is edited on its project's Schedules tab. A project and a status filter, kept
+ * in the address (`query`), narrow the list; `onFilter` sets them.
  */
 function ScheduleList({ query, onFilter }: { query: string; onFilter: (query: string) => void }) {
   const id = useId();
@@ -233,6 +236,12 @@ function ScheduleList({ query, onFilter }: { query: string; onFilter: (query: st
     } finally {
       setSwitching((s) => omit(s, sid));
     }
+  };
+
+  /** Take a deleted schedule out of the list; a poll already on its way cannot bring it back. */
+  const drop = (sid: string) => {
+    latest.current++;
+    setSchedules((list) => list && list.filter((s) => s.schedule_id !== sid));
   };
 
   const runNow = async (schedule: ScheduleInfo) => {
@@ -387,6 +396,7 @@ function ScheduleList({ query, onFilter }: { query: string; onFilter: (query: st
                       notice={notices[sid]}
                       onToggle={(on) => toggle(schedule, on)}
                       onRunNow={() => runNow(schedule)}
+                      onDeleted={() => drop(sid)}
                     />
                   );
                 })}

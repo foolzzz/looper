@@ -279,7 +279,12 @@ async def latest_runs(schedule_ids: list[str], *, pool: Db | None = None) -> dic
 async def finish_run(conn: Db, run_id: str, *, status: str, at: datetime, summary: str | None = None,
                      cost_usd: float | None = None, error: str | None = None) -> bool:
     """Write a running run's final status, once, and the schedule's counters with it (``count_outcome``). False
-    when the run is not running (it was finished already)."""
+    when the run is not running (it was finished already), or its schedule was deleted. The schedule's row is
+    locked first, as every other writer of a schedule and its runs locks them: a delete, which locks the schedule
+    and then its runs, waits for this instead of deadlocking with it."""
+    if await conn.fetchval("SELECT s.id FROM schedules s JOIN schedule_runs r ON r.schedule_id = s.id WHERE r.id = $1 "
+                           "FOR NO KEY UPDATE OF s", run_id) is None:
+        return False
     schedule_id = await conn.fetchval(
         """
         UPDATE schedule_runs SET status = $2, summary = $3, cost_usd = $4, error = $5, finished_at = $6
