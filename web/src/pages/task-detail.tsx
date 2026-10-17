@@ -31,7 +31,10 @@ import { TaskCostBreakdown } from "@/components/task-cost";
 import { ContinueAtCap, TaskSpendMeter } from "@/components/task-budget";
 import { RoleProfile, TaskAgentsSummary, TaskAgentsTab } from "@/components/task-agents-tab";
 import { NodeCards } from "@/components/pipeline-node-card";
+import { PipelineToolbar } from "@/components/pipeline-toolbar";
 import { type NodeCard, plannerCard, resultCard, stepCard } from "@/lib/node-cards";
+import { shownSteps, stepColumns, stepLevels, storeHideSkipped, storedHideSkipped } from "@/lib/pipeline-layout";
+import { useFullScreen } from "@/lib/full-screen";
 import { costBasis, costCaveats, formatUsd } from "@/lib/usage";
 import { cn } from "@/lib/utils";
 import {
@@ -1423,26 +1426,6 @@ function droppedBecause(journal: JournalEntry[], steps: TaskStep[]): Map<string,
   return why;
 }
 
-/** Each step's depth in the plan's dependency graph: 0 without dependencies, else one more than its deepest. */
-function stepLevels(steps: TaskStep[]): Map<string, number> {
-  const byId = new Map(steps.map((s) => [s.id, s]));
-  const levels = new Map<string, number>();
-  const visiting = new Set<string>();
-  const level = (id: string): number => {
-    const known = levels.get(id);
-    if (known !== undefined) return known;
-    if (visiting.has(id)) return 0; // a cycle the plan's checks never let through
-    visiting.add(id);
-    const deps = (byId.get(id)?.depends_on ?? []).filter((d) => byId.has(d));
-    const value = deps.length ? 1 + Math.max(...deps.map(level)) : 0;
-    visiting.delete(id);
-    levels.set(id, value);
-    return value;
-  };
-  steps.forEach((s) => level(s.id));
-  return levels;
-}
-
 // xyflow's dark mode, in the theme's tokens.
 const PIPELINE_THEME = {
   "--xy-background-color": "var(--color-background)",
@@ -1499,10 +1482,16 @@ function NodeLabel({
 /** The plan as its dependency graph: each step a node under the steps it depends on (steps without dependencies
  * under the Planner), the steps nothing live depends on leading to the result. Done steps keep their place and
  * edges when the plan changes; dropped ones stay, dashed and muted, as history. Each node has a card of its
- * details (`NodeCards`). */
+ * details (`NodeCards`); the dropped steps are hidden unless the viewer shows them, and the graph can go full screen
+ * (`PipelineToolbar`). */
 function PipelineTab({ task }: { task: TaskDetail }) {
-  const { nodes, edges, rows, cards } = useMemo(() => {
-    const steps = task.steps || [];
+  const [hideSkipped, setHideSkipped] = useState(storedHideSkipped);
+  const container = useRef<HTMLDivElement>(null);
+  const [full, toggleFull] = useFullScreen(container);
+  const { nodes, edges, rows, cards, skipped } = useMemo(() => {
+    const all = task.steps || [];
+    const skipped = all.filter((s) => s.status === "skipped").length;
+    const { steps } = shownSteps(all, hideSkipped);
     const ns: Node[] = [];
     const es: Edge[] = [];
     const cards: Record<string, NodeCard> = {};
@@ -1518,7 +1507,7 @@ function PipelineTab({ task }: { task: TaskDetail }) {
     });
     cards.planner = plannerCard(task, plannerLook);
 
-    if (steps.length === 0) {
+    if (all.length === 0) {
       const look = { ...STEP_LOOKS.pending, borderStyle: "dashed" as const, label: "Waiting for the plan" };
       ns.push({
         id: "waiting", position: { x: -NODE_W / 2, y: ROW_H },
@@ -1528,32 +1517,16 @@ function PipelineTab({ task }: { task: TaskDetail }) {
       cards.waiting = { name: "Steps", look, roles: [],
                         sections: [{ kind: "text", title: "Plan", text: "The Planner has not planned the steps yet." }] };
       es.push({ id: "e-planner-waiting", source: "planner", target: "waiting", animated: true, style: edgeStyle(true) });
-      return { nodes: ns, edges: es, rows: 2, cards };
+      return { nodes: ns, edges: es, rows: 2, cards, skipped };
     }
 
+    // The steps drawn, laid out without the hidden ones; a card still names every step it depends on.
     const byId = new Map(steps.map((s) => [s.id, s]));
+    const allById = new Map(all.map((s) => [s.id, s]));
     const levels = stepLevels(steps);
-    const why = droppedBecause(task.journal || [], steps);
-    // Rows by depth; within a row, under the mean place of the steps each depends on, then in plan order. The live
-    // steps are centred and the dropped ones follow on their right, so no live edge runs behind a dropped step.
-    const x = new Map<string, number>();
-    const depth = Math.max(...levels.values());
-    const stepX = NODE_W + GAP_X;
-    for (let row = 0; row <= depth; row++) {
-      const placed = steps
-        .filter((s) => levels.get(s.id) === row)
-        .map((s) => {
-          const parents = (s.depends_on ?? []).map((d) => x.get(d)).filter((v): v is number => v !== undefined);
-          return { s, at: parents.length ? parents.reduce((a, b) => a + b, 0) / parents.length : 0 };
-        })
-        .sort((a, b) => a.at - b.at || a.s.step_index - b.s.step_index);
-      const live = placed.filter(({ s }) => s.status !== "skipped");
-      const dropped = placed.filter(({ s }) => s.status === "skipped");
-      const left = -((live.length - 1) * stepX) / 2;
-      live.forEach(({ s }, i) => x.set(s.id, left + i * stepX));
-      const after = live.length ? left + live.length * stepX : stepX;
-      dropped.forEach(({ s }, i) => x.set(s.id, after + i * stepX));
-    }
+    const why = droppedBecause(task.journal || [], all);
+    const x = stepColumns(steps, levels, NODE_W + GAP_X);
+    const depth = steps.length ? Math.max(...levels.values()) : -1;
 
     const dependedOn = new Set(steps.filter((s) => s.status !== "skipped").flatMap((s) => s.depends_on ?? []));
     const ends = steps.filter((s) => s.status !== "skipped" && !dependedOn.has(s.id));
@@ -1568,7 +1541,7 @@ function PipelineTab({ task }: { task: TaskDetail }) {
                                   detail={step.instruction} note={step.retries ? `retry ${step.retries}` : undefined} /> },
         style: nodeStyle(look), sourcePosition: Position.Bottom, targetPosition: Position.Top,
       });
-      cards[step.id] = stepCard(step, { taskId: task.task_id, look, lookOf: (s) => stepLook(s.status), stepsById: byId,
+      cards[step.id] = stepCard(step, { taskId: task.task_id, look, lookOf: (s) => stepLook(s.status), stepsById: allById,
                                         skippedBecause: why.get(step.id) });
       const live = step.status !== "skipped";
       const running = step.status === "dispatched";
@@ -1591,12 +1564,21 @@ function PipelineTab({ task }: { task: TaskDetail }) {
     for (const step of ends) {
       es.push({ id: `end:${step.id}`, source: step.id, target: "result", style: edgeStyle(true) });
     }
-    return { nodes: ns, edges: es, rows: depth + 3, cards };
-  }, [task]);
+    return { nodes: ns, edges: es, rows: depth + 3, cards, skipped };
+  }, [task, hideSkipped]);
+  const changeHideSkipped = (hide: boolean) => {
+    setHideSkipped(hide);
+    storeHideSkipped(hide);
+  };
 
   return (
-    // Taller for a deeper plan, so its labels stay readable before any zoom.
-    <div className="w-full" style={{ height: Math.min(860, Math.max(420, rows * 90)) }}>
+    // Taller for a deeper plan, so its labels stay readable before any zoom; full screen, the whole screen (the
+    // browser's, or a fixed overlay where the browser has none).
+    <div
+      ref={container}
+      className={cn("w-full bg-background", full === "overlay" && "fixed inset-0 z-50")}
+      style={full === "off" ? { height: Math.min(860, Math.max(420, rows * 90)) } : undefined}
+    >
       <ReactFlow
         style={PIPELINE_THEME}
         nodes={nodes}
@@ -1614,6 +1596,8 @@ function PipelineTab({ task }: { task: TaskDetail }) {
         <Background color="var(--color-border)" gap={20} />
         <Controls showInteractive={false} />
         <NodeCards cards={cards} />
+        <PipelineToolbar skipped={skipped} hideSkipped={hideSkipped} onHideSkipped={changeHideSkipped}
+                         full={full !== "off"} onToggleFull={toggleFull} />
       </ReactFlow>
     </div>
   );
