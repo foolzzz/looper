@@ -493,8 +493,7 @@ DIALOGS: tuple[Dialog, ...] = (
     )),
     Dialog("gate_relay", (
         Say("关于那个任务在等我回答的问题：存储就用 PostgreSQL。", _relayed_to_the_gate,
-            (("looper_task_gate_reply", {"task_id": "<task>", "gate": GATE_LABEL,
-                                         "text": "存储就用 PostgreSQL。"}),)),
+            (("looper_task_gate_reply", {"task_id": "<task>", "gate": GATE_LABEL}),)),
     ), running_task=True, gate=True),
     Dialog("gate_unrelated", (
         Say("现在有哪些任务？简单列一下。", _not_relayed, (("looper_tasks", {"action": "list"}),)),

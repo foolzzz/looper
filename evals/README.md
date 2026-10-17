@@ -192,9 +192,13 @@ repository on `main` with one commit, the task's project gets that setting, and
 each task reports the merge and checkpoint commits it added as
 `looper_commits`), `--user-gates on|off` (every task's project but a gate
 task's gets that `user_gates` setting; a gate task always has gates on, so
-`--tasks planner` runs its gate tasks as they are meant to: `on` runs the
-other tasks with the gate contract, so `gates_opened` there shows how often
-the Planner asks when it need not). The runner plays the user in a task's
+`--tasks planner` runs its gate tasks as they are meant to; unset is on, as
+in Looper, so every task runs with the gate contract and `gates_opened` shows
+how often the Planner asks when it need not, and `off` runs the other tasks
+without it). Each row records the `user_gates` its Planner had (`on` or
+`off`), and the comparison lists the tasks whose setting differs from the
+base's, or that a base from before user gates G2 (unset was off then) does
+not record. The runner plays the user in a task's
 gates: when one waits for the user it posts the task's `gate_script` in turn
 (`<end>` ends the discussion; a task without one answers "No preference:
 decide yourself and state your assumptions." and then ends it). When the
