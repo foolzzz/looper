@@ -142,7 +142,7 @@ for line in sys.stdin:
         if variant == "roles":
             call("looper_task_role_set", {"id": "security", "kind": "review", "role_prompt": SECURITY})
             call("looper_task_roles", {})
-            reply = {"steps": [spec("a", True, role="tester", review_role="security"), spec("b", True)]}
+            reply = {"steps": [spec("a", True, role="tester", review_roles=["security"]), spec("b", True)]}
         else:
             reply = {"steps": [spec("a", role="tester")]}
     elif text.startswith("[RESTART]"):
@@ -263,7 +263,7 @@ def test_the_planner_defines_roles_with_its_tools_and_a_refused_definition_chang
     listed = _log(ran["state"], "planner.jsonl", "roles")[0]
     assert listed["tools"][-2:] == ["looper_task_roles", "looper_task_role_set"]
     assert "looper_task_role_set" in listed["prompt"] and ROLES_GUIDE in listed["prompt"]
-    assert "\"review_role_required\": false makes the" in listed["prompt"]
+    assert '{"role": "<id>", "required": false} (its verdict is advice to\n  you)' in listed["prompt"]
     answers = [(c["arguments"].get("id"), c["answer"]["status"]) for c in _calls(ran, "roles")
                if c["tool"] == "looper_task_role_set"]
     assert answers == [("worker", "error"), ("tester", "ok"), ("security", "ok"), ("tester", "ok")]
@@ -344,7 +344,7 @@ def test_where_the_switch_is_off_the_planner_has_no_role_tools_and_no_step_runs_
     detail = ran["first"]["off"]
     assert detail["status"] == "completed" and detail["roles"] == []
     listed = _log(ran["state"], "planner.jsonl", "off")[0]
-    assert "looper_task_role_set" not in listed["tools"] and "review_role" not in listed["prompt"]
+    assert "looper_task_role_set" not in listed["tools"] and "review_roles" not in listed["prompt"]
     assert "define one work role per discipline" not in listed["prompt"]  # the roles guide: only with roles on
     (refused,) = _calls(ran, "off")
     assert refused["answer"]["error"]["code"] == "forbidden"

@@ -63,7 +63,7 @@ from ..message import MessageEnvelope, MessageType, channel_address, planner_add
 from ..project_execution import ProjectExecution
 from ..projects import EDITABLE_STATUSES, allowed_profile_view
 from ..task_roles import RoleError, RoleForbidden, RoleKind, TaskRole, Via, allowed_profile, check_definition
-from ..task_roles import role_key
+from ..task_roles import review_role_keys, role_key
 from ..task_notice import Notice, NotifyTarget, link_line, notify_channel
 from ..tiers.journal import SUMMARY_MAX_CHARS, JournalKind, clip
 from ..tiers.worker import recheck_limits
@@ -130,7 +130,8 @@ names a role not defined yet is refused); looper_task_roles reads them.
   before it reports (build, tests, lint).
 - kind "work": a step's Worker runs as the role ("role" in the step). kind
   "review": the role reviews a step after the built-in Reviewer, which still
-  has to pass it ("review_role" in a step with "review": true).
+  has to pass it ("review_roles" in a step with "review": true; several
+  review it one after another).
 - harness (optional): only how it works and communicates; Looper adds the
   boundaries, which you neither write nor change. profile_id (optional): one
   from the project's list; without it the role runs what the built-in role
@@ -509,7 +510,7 @@ async def _notify(call: PlannerCall, task: Mapping[str, Any], lines: list[str], 
 def _naming(steps: Sequence[Mapping[str, Any]], key: str) -> list[str]:
     """The steps of the plan (not dropped) that name role ``key``, by their id in the plan."""
     return [s.get("step_key") or s["id"] for s in steps if s["status"] != "skipped"
-            and key in (s.get("role_key"), s.get("review_role_key"))]
+            and (key == s.get("role_key") or key in review_role_keys(s))]
 
 
 def _role_view(row: Mapping[str, Any], steps: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
@@ -642,7 +643,7 @@ async def _role_set(call: PlannerCall) -> dict[str, Any]:
     return {"id": key, "kind": kind.value, "version": version, "changed": True, "steps": _naming(steps, key),
             **({"template": template_key} if template_key else {}),
             "note": "attempts that start from now on run this version; a run already started keeps its own. Name "
-                    f"it in a step's {'role' if kind is RoleKind.WORK else 'review_role'}." + dropped}
+                    f"it in a step's {'role' if kind is RoleKind.WORK else 'review_roles'}." + dropped}
 
 
 _TASK_ID = {"type": "string", "minLength": 1, "description": "Your task's id; leave it out. Another task's is refused."}
@@ -717,7 +718,7 @@ ROLE_TOOLS: tuple[Tool, ...] = (
                     "its role prompt, optionally its harness (how it works and communicates; Looper adds the "
                     "boundaries) and a profile from the project's list. Give the whole definition each time, or a "
                     "project role template to copy (the fields you give replace the template's). Name the role in "
-                    "a step's role or review_role.",
+                    "a step's role or review_roles.",
         schema={"type": "object", "required": [], "additionalProperties": False,
                 "properties": {
                     "id": {"type": "string", "minLength": 1, "maxLength": 32,

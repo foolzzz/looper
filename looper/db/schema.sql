@@ -960,22 +960,38 @@ CREATE TABLE IF NOT EXISTS project_role_templates (
     updated_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (project_id, template_key)
 );
--- A step's roles: the work role its Worker runs as (NULL: the built-in Worker) and the review role that reviews
--- it after the built-in Reviewer (NULL: none; only on a reviewed step) and whether that review blocks the step
--- (review_role_required) or only advises the Planner, the versions its latest attempt and its latest role review
--- ran with, and which review a step in review waits for ('builtin' or 'role').
+-- A step's roles: the work role its Worker runs as (NULL: the built-in Worker) and the version its latest attempt
+-- ran with; the review roles that review it after the built-in Reviewer, in order (review_roles, only on a
+-- reviewed step: each {role, required, version}, required false for one that only advises the Planner, version
+-- the one its latest review ran with); and which review a step in review waits for ('builtin' or 'role', then
+-- review_position, the index in review_roles).
 ALTER TABLE task_steps ADD COLUMN IF NOT EXISTS role_key TEXT;
-ALTER TABLE task_steps ADD COLUMN IF NOT EXISTS review_role_key TEXT;
-ALTER TABLE task_steps ADD COLUMN IF NOT EXISTS review_role_required BOOLEAN NOT NULL DEFAULT true;
 ALTER TABLE task_steps ADD COLUMN IF NOT EXISTS role_version INTEGER;
-ALTER TABLE task_steps ADD COLUMN IF NOT EXISTS review_role_version INTEGER;
 ALTER TABLE task_steps ADD COLUMN IF NOT EXISTS review_stage TEXT CHECK (review_stage IN ('builtin', 'role'));
+ALTER TABLE task_steps ADD COLUMN IF NOT EXISTS review_roles JSONB NOT NULL DEFAULT '[]'::jsonb;
+ALTER TABLE task_steps ADD COLUMN IF NOT EXISTS review_position INTEGER;
+-- Before a step had a list (v2.7.0), it had one review role: review_role_key, review_role_required and
+-- review_role_version, and its result one verdict (role_review). They become a list of one, and go.
 DO $$
 BEGIN
-    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'task_steps_review_role_reviewed'
+    IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = current_schema()
+               AND table_name = 'task_steps' AND column_name = 'review_role_key') THEN
+        UPDATE task_steps SET review_roles = jsonb_build_array(jsonb_build_object(
+                'role', review_role_key, 'required', review_role_required, 'version', review_role_version)),
+            review_position = CASE WHEN review_stage = 'role' THEN 0 END
+            WHERE review_role_key IS NOT NULL;
+        UPDATE task_steps SET result = (result - 'role_review') || jsonb_build_object('role_reviews',
+                jsonb_build_array((result -> 'role_review') || jsonb_build_object('required', review_role_required)))
+            WHERE jsonb_typeof(result -> 'role_review') = 'object';
+        ALTER TABLE task_steps DROP CONSTRAINT IF EXISTS task_steps_review_role_reviewed;
+        ALTER TABLE task_steps DROP COLUMN review_role_key;
+        ALTER TABLE task_steps DROP COLUMN review_role_required;
+        ALTER TABLE task_steps DROP COLUMN review_role_version;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'task_steps_review_roles_reviewed'
                    AND conrelid = to_regclass('task_steps')) THEN
-        ALTER TABLE task_steps ADD CONSTRAINT task_steps_review_role_reviewed
-            CHECK (review_role_key IS NULL OR review);
+        ALTER TABLE task_steps ADD CONSTRAINT task_steps_review_roles_reviewed
+            CHECK (jsonb_typeof(review_roles) = 'array' AND (jsonb_array_length(review_roles) = 0 OR review));
     END IF;
 END $$;
 

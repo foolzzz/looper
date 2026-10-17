@@ -202,15 +202,29 @@ def record_role(record: Mapping[str, Any]) -> dict[str, Any] | None:
     return run_role(((record.get("metadata") or {}).get("prompt_layers") or {}).get("task_role"))
 
 
+def review_role_keys(step: Mapping[str, Any]) -> list[str]:
+    """The review roles a ``task_steps`` row names, in order."""
+    return [str(item["role"]) for item in step.get("review_roles") or [] if isinstance(item, Mapping)]
+
+
+def _reviewing(step: Mapping[str, Any]) -> Mapping[str, Any] | None:
+    """The review role item whose review a ``task_steps`` row waits for; None while it waits for no role's."""
+    items, position = step.get("review_roles") or [], step.get("review_position")
+    if step.get("review_stage") != "role" or not isinstance(position, int) or not 0 <= position < len(items):
+        return None
+    return items[position]
+
+
 def run_roles(runs: list[Mapping[str, Any]], steps: list[Mapping[str, Any]]) -> dict[str, dict[str, Any]]:
     """The role each of a task's Worker and Reviewer runs ran as, by agent id, for the runs that ran as one: from
     their records (``llm_records.list_task_runs``), else, for a step's attempt not recorded yet (waiting for room),
     from the versions its step took when it was dispatched."""
     roles: dict[str, dict[str, Any]] = {}
     for step in steps:
+        reviewing = _reviewing(step) or {}
         snapshots = ((step.get("worker_id"), step.get("role_key"), RoleKind.WORK, step.get("role_version")),
-                     (step.get("reviewer_id") if step.get("review_stage") == "role" else None,
-                      step.get("review_role_key"), RoleKind.REVIEW, step.get("review_role_version")))
+                     (step.get("reviewer_id") if reviewing else None, reviewing.get("role"), RoleKind.REVIEW,
+                      reviewing.get("version")))
         for agent_id, key, kind, version in snapshots:
             if agent_id and key and (role := run_role({"id": key, "kind": kind.value, "version": version})):
                 roles[agent_id] = role
@@ -278,7 +292,7 @@ async def roles_view(task_id: str, steps: list[Mapping[str, Any]]) -> dict[str, 
             own, named = runs_of(AgentType.WORKER, key), [s for s in steps if s.get("role_key") == key]
             reviews = builtin_reviews(key)
         else:
-            own, named = runs_of(AgentType.REVIEWER, key), [s for s in steps if s.get("review_role_key") == key]
+            own, named = runs_of(AgentType.REVIEWER, key), [s for s in steps if key in review_role_keys(s)]
             reviews = own
         roles.append({
             "id": key, "kind": kind.value, "version": current["version"],

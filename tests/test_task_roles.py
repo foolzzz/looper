@@ -28,6 +28,7 @@ from looper.agents.tiers.planner_protocol import (
     REPLY_CONTRACT,
     PlanView,
     ProtocolError,
+    ReviewRoleSpec,
     parse_chat,
     parse_plan,
     reply_contract,
@@ -60,7 +61,7 @@ def test_the_built_in_harness_and_the_reply_contract_are_as_before() -> None:
     assert DEFAULT_HARNESS_PROMPT == WORKING_STYLE.replace(
         "\n\n## Communication", f"\n\n## Boundaries\n{HARNESS_BOUNDARIES}\n\n## Communication")
     assert _sha(REPLY_CONTRACT) == _sha(reply_contract(roles=False)) == MAIN_REPLY_CONTRACT_SHA256
-    assert "review_role" not in REPLY_CONTRACT and "review_role" in reply_contract(roles=True)
+    assert "review_roles" not in REPLY_CONTRACT and "review_roles" in reply_contract(roles=True)
 
 
 def test_a_role_run_ends_with_the_boundaries_after_the_task_and_before_the_contract() -> None:
@@ -155,51 +156,56 @@ def _plan(*steps: dict[str, Any], roles: Any = ROLES) -> Any:
     return parse_plan(plan(*steps), roles)
 
 
-def test_a_step_names_a_work_role_and_a_reviewed_step_a_review_role() -> None:
-    reply_ = _plan({**step("s1", review=True), "role": "tester", "review_role": "security"}, step("s2", "s1"))
+def test_a_step_names_a_work_role_and_a_reviewed_step_its_review_roles_in_order() -> None:
+    reply_ = _plan({**step("s1", review=True), "role": "tester",
+                    "review_roles": ["security", {"role": "style", "required": False}, {"role": "perf"}]},
+                   step("s2", "s1"), roles=ROLES_TWO)
     first, second = reply_.steps
-    assert (first.role, first.review_role, second.role, second.review_role) == ("tester", "security", None, None)
+    assert (first.role, first.review_roles) == ("tester", (ReviewRoleSpec("security"), ReviewRoleSpec("style", False),
+                                                           ReviewRoleSpec("perf")))
+    assert (second.role, second.review_roles) == (None, ())
+    # An empty list or null is the built-in Reviewer alone.
+    for empty in ([], None):
+        assert _plan({**step("s1", review=True), "review_roles": empty}).steps[0].review_roles == ()
+
+
+ROLES_TWO = {**ROLES, "style": RoleKind.REVIEW, "perf": RoleKind.REVIEW}
 
 
 @pytest.mark.parametrize(("extra", "roles", "error"), [
     ({"role": "tester"}, None, "does not let you define roles (planner_roles is off)"),
-    ({"review": True, "review_role": "security"}, None, "planner_roles is off"),
+    ({"review": True, "review_roles": ["security"]}, None, "planner_roles is off"),
     ({"role": "doc"}, ROLES, "role 'doc' is not a role of this task (defined: tester (work), security (review))"),
     ({"role": "security"}, ROLES, "role must name a work role; security is a review role"),
-    ({"review": True, "review_role": "tester"}, ROLES, "review_role must name a review role; tester is a work role"),
-    ({"review_role": "security"}, ROLES, 'review_role needs "review": true'),
+    ({"review": True, "review_roles": ["tester"]}, ROLES,
+     "review_roles must name a review role; tester is a work role"),
+    ({"review": True, "review_roles": ["security", "nope"]}, ROLES, "review_roles 'nope' is not a role of this task"),
+    ({"review_roles": ["security"]}, ROLES, 'review_roles needs "review": true'),
     ({"role": ""}, ROLES, "role must be a role's id"),
     ({"role": 3}, ROLES, "role must be a role's id"),
+    ({"review": True, "review_roles": "security"}, ROLES, "review_roles must be a list of review roles"),
+    ({"review": True, "review_roles": [""]}, ROLES, r"review_roles\[0\] must be a review role's id"),
+    ({"review": True, "review_roles": [3]}, ROLES, r"review_roles\[0\] must be a review role's id"),
+    ({"review": True, "review_roles": [{"required": False}]}, ROLES, r"review_roles\[0\].role must be"),
+    ({"review": True, "review_roles": [{"role": "security", "required": "no"}]}, ROLES,
+     r"review_roles\[0\].required must be true or false"),
+    ({"review": True, "review_roles": [{"role": "security", "blocking": True}]}, ROLES, "unknown keys: blocking"),
+    ({"review": True, "review_roles": ["security", {"role": "security", "required": False}]}, ROLES,
+     "review_roles names a role twice"),
+    # The one review role of before is refused with what to write instead.
+    ({"review": True, "review_role": "security"}, ROLES,
+     'review_role: a step lists its review roles in "review_roles"'),
+    ({"review": True, "review_role_required": False}, ROLES, "review_role_required: a step lists its review roles"),
 ])
 def test_a_step_naming_a_role_it_may_not_is_refused(extra: dict[str, Any], roles: Any, error: str) -> None:
-    with pytest.raises(ProtocolError, match=error.replace("(", r"\(").replace(")", r"\)")):
+    pattern = error if "\\" in error else error.replace("(", r"\(").replace(")", r"\)")
+    with pytest.raises(ProtocolError, match=pattern):
         _plan({**step("s1"), **extra}, roles=roles)
 
 
-@pytest.mark.parametrize(("extra", "required"), [
-    ({}, True), ({"review_role_required": True}, True), ({"review_role_required": False}, False),
-])
-def test_a_review_role_blocks_its_step_unless_the_step_makes_it_advisory(extra: dict[str, Any], required: bool) -> None:
-    (spec,) = _plan({**step("s1", review=True), "review_role": "security", **extra}).steps
-    assert (spec.review_role, spec.review_role_required) == ("security", required)
-
-
-@pytest.mark.parametrize(("extra", "error"), [
-    ({"review_role_required": False}, "review_role_required is only for a step with a review_role"),
-    ({"review_role_required": True}, "review_role_required is only for a step with a review_role"),
-    ({"review_role": "security", "review_role_required": "no"}, "review_role_required must be true or false"),
-    ({"review": False, "review_role": "security", "review_role_required": False}, 'review_role needs "review": true'),
-])
-def test_review_role_required_comes_only_with_a_review_role_on_a_reviewed_step(
-    extra: dict[str, Any], error: str,
-) -> None:
-    with pytest.raises(ProtocolError, match=error):
-        _plan({**step("s1", review=True), **extra})
-
-
-def test_the_contract_says_how_to_make_a_review_role_advisory_only_where_roles_are_on() -> None:
-    line = '"review_role_required": false makes the\n  review role\'s verdict advice to you'
-    assert line in reply_contract(roles=True) and "review_role_required" not in reply_contract(roles=False)
+def test_the_contract_says_how_to_list_review_roles_and_make_one_advisory_only_where_roles_are_on() -> None:
+    line = 'each item is a role\'s id (its review must\n  pass too) or {"role": "<id>", "required": false}'
+    assert line in reply_contract(roles=True) and "review_roles" not in reply_contract(roles=False)
 
 
 def test_a_chat_replan_and_add_steps_check_the_roles_too() -> None:
@@ -251,20 +257,22 @@ def test_a_run_names_the_role_it_recorded_or_its_dispatch_carries_and_a_built_in
 
 
 def test_a_tasks_runs_are_named_by_their_records_and_an_attempt_not_recorded_yet_by_its_step() -> None:
+    security, style = {"role": "security", "required": True, "version": 1}, {"role": "style", "required": False,
+                                                                           "version": 3}
     steps = [
         # Retried as tester v2: its first Worker is recorded, its second waits for room, not recorded yet.
         {"worker_id": "worker-2", "role_key": "tester", "role_version": 2, "reviewer_id": None,
-         "review_role_key": None, "review_role_version": None, "review_stage": None},
-        # In its review role's review, after the built-in Reviewer passed it.
+         "review_roles": [], "review_stage": None, "review_position": None},
+        # In its second review role's review, after the built-in Reviewer and the first passed it.
         {"worker_id": "worker-3", "role_key": None, "role_version": None, "reviewer_id": "reviewer-4",
-         "review_role_key": "security", "review_role_version": 1, "review_stage": "role"},
-        # Retried, and in the built-in review again: its review role (v1 last attempt) has not started.
+         "review_roles": [security, style], "review_stage": "role", "review_position": 1},
+        # Retried, and in the built-in review again: its review roles (from its last attempt) have not started.
         {"worker_id": "worker-5", "role_key": None, "role_version": None, "reviewer_id": "reviewer-6",
-         "review_role_key": "security", "review_role_version": 1, "review_stage": "builtin"},
+         "review_roles": [security], "review_stage": "builtin", "review_position": None},
     ]
     runs = [{"agent_id": "worker-1", "task_role": TESTER.record() | {"version": 1}},
             {"agent_id": "worker-3", "task_role": None}, {"agent_id": "reviewer-6", "task_role": None}]
     assert run_roles(runs, steps) == {"worker-1": {"id": "tester", "kind": "work", "version": 1},
                                       "worker-2": {"id": "tester", "kind": "work", "version": 2},
-                                      "reviewer-4": {"id": "security", "kind": "review", "version": 1}}
+                                      "reviewer-4": {"id": "style", "kind": "review", "version": 3}}
     assert run_roles([{"agent_id": "worker-1", "task_role": None}], [{"worker_id": "worker-1"}]) == {}

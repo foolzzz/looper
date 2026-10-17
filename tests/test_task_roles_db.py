@@ -246,7 +246,8 @@ def test_the_task_page_lists_each_roles_versions_steps_and_numbers(monkeypatch: 
         await _steps(pool, "task-a", s1="verified", s2="failed", s3="verified")
         await pool.execute("UPDATE task_steps SET role_key = 'tester', review = true, retries = 1 "
                            "WHERE id IN ('step-s1', 'step-s2')")
-        await pool.execute("UPDATE task_steps SET review = true, review_role_key = 'security' WHERE id = 'step-s1'")
+        await pool.execute("UPDATE task_steps SET review = true, review_roles = '[{\"role\": \"security\", "
+                           "\"required\": true, \"version\": 1}]' WHERE id = 'step-s1'")
         await _roles_on(pool, project)
         planner = _Planner(_ops(), "task-a")
         await planner("looper_task_role_set", TESTER)
@@ -287,9 +288,9 @@ def test_the_task_page_lists_each_roles_versions_steps_and_numbers(monkeypatch: 
         view = await _task_view("task-a")
         assert view["roles"] == [{"id": "tester", "kind": "work", "version": 2},
                                  {"id": "security", "kind": "review", "version": 1}]
-        assert [{k: s.get(k) for k in ("step", "role", "review_role")} for s in view["steps"]] == [
-            {"step": "s1", "role": "tester", "review_role": "security"},
-            {"step": "s2", "role": "tester", "review_role": None}, {"step": "s3", "role": None, "review_role": None}]
+        assert [{k: s.get(k) for k in ("step", "role", "review_roles")} for s in view["steps"]] == [
+            {"step": "s1", "role": "tester", "review_roles": ["security"]},
+            {"step": "s2", "role": "tester", "review_roles": None}, {"step": "s3", "role": None, "review_roles": None}]
         assert "role" not in view["steps"][2]
         await _task(pool, "task-b", "running", project)
         assert "roles" not in await _task_view("task-b")
@@ -297,27 +298,80 @@ def test_the_task_page_lists_each_roles_versions_steps_and_numbers(monkeypatch: 
     _run(test, monkeypatch)
 
 
-def test_a_steps_roles_and_whether_its_review_role_blocks_are_saved_and_read_back(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_a_steps_roles_and_its_review_roles_are_saved_and_read_back(monkeypatch: pytest.MonkeyPatch) -> None:
     from looper.db import plans
 
     async def test(pool: Any) -> None:
         project = await _project(pool)
         await _task(pool, "task-a", "running", project)
+        review_roles = [{"role": "security", "required": True, "version": 3},
+                        {"role": "style", "required": False, "version": 1}]
         step = {"id": "step-s1", "index": 0, "key": "s1", "instruction": "do it", "review": True,
-                "role_key": "tester", "review_role_key": "style", "review_role_required": False, "role_version": 2,
-                "review_role_version": 1, "review_stage": "role"}
+                "role_key": "tester", "role_version": 2, "review_roles": review_roles, "review_stage": "role",
+                "review_position": 1}
         plain = {"id": "step-s2", "index": 1, "key": "s2", "instruction": "do it"}
         await plans.save("task-a", plan={"plan_id": "p", "status": "executing"}, steps=[step, plain], pool=pool)
         rows = {s["step_key"]: s for s in (await plans.load("task-a", pool=pool))["steps"]}
-        assert {k: rows["s1"][k] for k in ("role_key", "review_role_key", "review_role_required", "role_version",
-                                            "review_role_version", "review_stage")} == {
-            "role_key": "tester", "review_role_key": "style", "review_role_required": False, "role_version": 2,
-            "review_role_version": 1, "review_stage": "role"}
-        assert rows["s2"]["review_role_required"] is True and rows["s2"]["review_role_key"] is None
-        # A review role needs a reviewed step, in the table too.
-        with pytest.raises(Exception, match="task_steps_review_role_reviewed"):
+        assert {k: rows["s1"][k] for k in ("role_key", "role_version", "review_roles", "review_stage",
+                                            "review_position")} == {
+            "role_key": "tester", "role_version": 2, "review_roles": review_roles, "review_stage": "role",
+            "review_position": 1}
+        assert (rows["s2"]["review_roles"], rows["s2"]["review_position"]) == ([], None)
+        # Review roles need a reviewed step, in the table too.
+        with pytest.raises(Exception, match="task_steps_review_roles_reviewed"):
             await plans.save("task-a", steps=[{**step, "review": False}], pool=pool)
+
+    _run(test, monkeypatch)
+
+
+def test_a_v2_7_0_steps_one_review_role_becomes_a_list_of_one_and_its_columns_go(monkeypatch: pytest.MonkeyPatch,
+                                                                                 ) -> None:
+    """A step of a v2.7.0 database had one review role (``review_role_key``, ``review_role_required``,
+    ``review_role_version``) and its result one verdict (``role_review``): the schema makes each a list of one, keeps
+    which review a step in review waits for, and drops the columns and their constraint."""
+    from looper.db import steps
+    from looper.db.connection import ensure_schema
+
+    async def test(pool: Any) -> None:
+        project = await _project(pool)
+        await _task(pool, "task-a", "running", project)
+        await pool.execute("ALTER TABLE task_steps DROP CONSTRAINT task_steps_review_roles_reviewed, "
+                           "DROP COLUMN review_roles, DROP COLUMN review_position, "
+                           "ADD COLUMN review_role_key TEXT, "
+                           "ADD COLUMN review_role_required BOOLEAN NOT NULL DEFAULT true, "
+                           "ADD COLUMN review_role_version INTEGER, "
+                           "ADD CONSTRAINT task_steps_review_role_reviewed CHECK (review_role_key IS NULL OR review)")
+        verdict = {"role": "style", "version": 1, "passed": False, "findings": ["no docstring"], "summary": "no",
+                   "learnings": []}
+        for step_id, index, review_role, required, stage, result in (
+                ("step-a", 0, "style", False, "role", {"status": "completed", "role_review": verdict}),
+                ("step-b", 1, "security", True, "builtin", {"status": "completed"}),
+                ("step-c", 2, None, True, None, None)):
+            await pool.execute(
+                "INSERT INTO task_steps (id, task_id, step_index, step_key, instruction, review, status, result, "
+                "review_role_key, review_role_required, review_role_version, review_stage) VALUES ($1, 'task-a', $2, "
+                "$1, 'do it', $3, 'completed', $4::jsonb, $5, $6, $7, $8)", step_id, index, review_role is not None,
+                None if result is None else json.dumps(result), review_role, required,
+                1 if review_role else None, stage)
+
+        await ensure_schema(pool)
+
+        rows = {s["id"]: s for s in await steps.list_steps("task-a", pool=pool)}
+        assert (rows["step-a"]["review_roles"], rows["step-a"]["review_position"]) == (
+            [{"role": "style", "required": False, "version": 1}], 0)
+        assert rows["step-a"]["result"] == {"status": "completed", "role_reviews": [{**verdict, "required": False}]}
+        assert (rows["step-b"]["review_roles"], rows["step-b"]["review_position"]) == (
+            [{"role": "security", "required": True, "version": 1}], None)
+        assert rows["step-b"]["result"] == {"status": "completed"}
+        assert (rows["step-c"]["review_roles"], rows["step-c"]["result"]) == ([], None)
+        columns = {r["column_name"] for r in await pool.fetch(
+            "SELECT column_name FROM information_schema.columns WHERE table_schema = current_schema() "
+            "AND table_name = 'task_steps'")}
+        assert not columns & {"review_role_key", "review_role_required", "review_role_version"}
+        constraints = {r["conname"] for r in await pool.fetch(
+            "SELECT conname FROM pg_constraint WHERE conrelid = to_regclass('task_steps')")}
+        assert "task_steps_review_roles_reviewed" in constraints
+        assert "task_steps_review_role_reviewed" not in constraints
+        await ensure_schema(pool)  # and again, a no-op
 
     _run(test, monkeypatch)
