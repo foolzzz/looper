@@ -1436,6 +1436,11 @@ CREATE TABLE IF NOT EXISTS chat_messages (
 -- Which channel the turn came from (web, telegram, lark): so the console shows every channel's
 -- conversation, each labelled. A non-web session id is "<channel>:<chat_id>".
 ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS channel TEXT NOT NULL DEFAULT 'web';
+-- A Telegram or Lark answer is stored once its channel has tried to send it (channels/chat_history.py): one it could
+-- not send has why (channels.base.DeliveryFailure) and the channel's error. NULL for everything else.
+ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS delivery_failure TEXT
+    CHECK (delivery_failure IN ('no_chat', 'send_failed'));
+ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS delivery_error TEXT;
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_chat_msg_unique ON chat_messages(session_id, message_id);
 CREATE INDEX IF NOT EXISTS idx_chat_session ON chat_messages(session_id, id);

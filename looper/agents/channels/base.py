@@ -8,11 +8,19 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from enum import StrEnum
 from typing import Any, Awaitable, Callable
 
 from ..bus import MessageBus
 from ..message import MessageEnvelope
 from ..task_notice import NotifyTarget
+
+
+class DeliveryFailure(StrEnum):
+    """Why a channel did not deliver an answer; stored with it (``chat_history.record_reply``)."""
+
+    NO_CHAT = "no_chat"  # the channel does not know the chat the message came from (it restarted meanwhile)
+    SEND_FAILED = "send_failed"  # the channel tried and could not send it
 
 
 @dataclass
@@ -23,6 +31,7 @@ class DeliveryReceipt:
     success: bool
     external_id: str | None = None
     error: str | None = None
+    failure: DeliveryFailure | None = None  # when not ``success``: why, if not SEND_FAILED
 
 
 @dataclass(frozen=True)

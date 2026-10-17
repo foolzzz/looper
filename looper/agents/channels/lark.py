@@ -52,7 +52,8 @@ from ..message import (
 from ..task_notice import Notice, NotifyTarget, TargetKind
 from . import lark_cli
 from .allowlist import SenderAllowlist
-from .base import ChannelAdapter, DeliveryReceipt, PostReceipt
+from .base import ChannelAdapter, DeliveryFailure, DeliveryReceipt, PostReceipt
+from .chat_history import record_reply
 from .lark_cli import (
     RECEIVE_EVENT, LarkCliError, consume_command, edit_command, mention, reaction_command, reply_command, run,
     run_json, send_command, sent_message_id,
@@ -197,6 +198,7 @@ class LarkChannelAdapter(ChannelAdapter):
                 channel="lark",
                 success=False,
                 error=f"no chat_id for correlation {corr_id}",
+                failure=DeliveryFailure.NO_CHAT,
             )
 
         if envelope.message_type is MessageType.STATUS_UPDATE:
@@ -454,7 +456,8 @@ class LarkChannelAdapter(ChannelAdapter):
             async for envelope in self._bus.subscribe(self.channel_id):
                 if not self._running:
                     break
-                await self.deliver(envelope)
+                # An answer is stored once it was sent, or as not delivered (the Manager names its record).
+                await record_reply(self.channel_type, envelope, await self.deliver(envelope))
         except asyncio.CancelledError:
             pass
 

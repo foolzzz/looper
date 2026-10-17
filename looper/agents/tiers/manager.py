@@ -41,6 +41,7 @@ from typing import TYPE_CHECKING, Any
 
 from ..broadcast import Broadcaster
 from ..bus import MessageBus
+from ..channels.chat_history import CHAT_RECORD, chat_record
 from ..agent_settings import AgentSettings, AgentType, Launch, load_agent_settings
 from ..claude_cli import (
     AUTONOMOUS_INPUT,
@@ -263,6 +264,16 @@ def _session_key(envelope: MessageEnvelope) -> str | None:
     return None
 
 
+def _chat_record(envelope: MessageEnvelope, message_id: str) -> dict[str, Any]:
+    """The metadata that has a Telegram or Lark channel store an answer to ``envelope`` as ``message_id`` once it
+    has tried to send it (``channels.chat_history``); nothing for the web chat, which stores its own, and for a chat
+    whose turns are not stored."""
+    key = _session_key(envelope)
+    if _message_origin(envelope)["channel"] == "web" or not key:
+        return {}
+    return {CHAT_RECORD: chat_record(key, message_id)}
+
+
 def _with_blocks(text: str, blocks: list[str]) -> str:
     """A reply: Claude's words, then what Looper itself writes to the user (``Turn.blocks``)."""
     return "\n\n".join(part for part in (text.strip(), *blocks) if part)
@@ -457,6 +468,7 @@ class ManagerAgent:
         if not text.strip():
             return
         if is_new_session_command(text):
+            await self._persist_chat(envelope, "user", text, envelope.message_id)
             await self._start_new_session(envelope)
             return
         # A reply to a user gate's message goes to the gate, before the model; the discussion keeps it.
@@ -956,8 +968,8 @@ class ManagerAgent:
             if chat["session_id"] == current and last and last["role"] == "user" \
                     and str(last["content"]).strip() == message.strip():
                 messages.pop()  # the message this turn answers
-            lines = [f"- {item['role']}: {clip(item['content'], CONVERSATION_MESSAGE_CHARS)}"
-                     for item in messages[-CONVERSATION_MESSAGES:]]
+            lines = [f"- {item['role']}{' (not delivered)' if item.get('delivery_failure') else ''}: "
+                     f"{clip(item['content'], CONVERSATION_MESSAGE_CHARS)}" for item in messages[-CONVERSATION_MESSAGES:]]
             if not lines:
                 continue
             when = messages[-1]["created_at"]
@@ -1038,9 +1050,9 @@ class ManagerAgent:
             message_type=MessageType.AGENT_REPLY,
             payload=payload,
             correlation_id=last.correlation_id,
-            metadata={"origin_channel_id": last.metadata.get("origin_channel_id")},
+            metadata={"origin_channel_id": last.metadata.get("origin_channel_id"),
+                      **_chat_record(last, f"auto-{uuid.uuid4().hex[:12]}")},
         ))
-        await self._persist_chat(last, "assistant", text, f"auto-{uuid.uuid4().hex[:12]}")
 
     def _claude_command(self, prompt_file: Path, launch: Launch, *, resume: bool = True) -> list[str]:
         """The resident process's command (``RuntimeAdapter.resident_command``), resuming the saved session."""
@@ -1129,10 +1141,10 @@ class ManagerAgent:
     async def _persist_chat(
         self, env: MessageEnvelope, role: str, content: str, message_id: str
     ) -> None:
-        """Record a non-web turn in chat_messages so the console shows every channel's conversation.
-
-        Web turns are already persisted by the web channel's own path; here we cover Telegram and Lark,
-        keyed by ``<channel>:<chat_id>``. A persistence failure never blocks answering the user.
+        """Record the user's Telegram or Lark message in chat_messages so the console shows every channel's
+        conversation, keyed by ``<channel>:<chat_id>``; its answer is stored by the channel once it was sent
+        (``_chat_record``). Web turns are persisted by the web channel's own path. A persistence failure never
+        blocks answering the user.
         """
         channel = _message_origin(env)["channel"]
         key = _session_key(env)
@@ -1149,9 +1161,10 @@ class ManagerAgent:
     async def _send_reply(self, original: MessageEnvelope, text: str, *, error: str | None = None,
                           persist: bool = True) -> None:
         """Answer ``original``; ``error`` says why the turn failed (a chat channel shows it on its status line).
-        Without ``persist`` the answer is not kept in the chat's history (one about a user gate, whose discussion
-        keeps the message)."""
+        The channel keeps the answer in the chat's history once it has sent it; without ``persist`` it is not kept
+        (one about a user gate, whose discussion keeps the message)."""
         assert self._bus is not None
+        record = _chat_record(original, f"{original.message_id}:reply") if persist else {}
         await self._bus.publish(MessageEnvelope.create(
             source=MANAGER_ADDRESS,
             target=original.source,
@@ -1159,10 +1172,8 @@ class ManagerAgent:
             payload={"text": text, **({"error": error} if error else {})},
             correlation_id=original.correlation_id,
             reply_to=original.message_id,
-            metadata={"origin_channel_id": original.metadata.get("origin_channel_id")},
+            metadata={"origin_channel_id": original.metadata.get("origin_channel_id"), **record},
         ))
-        if persist:
-            await self._persist_chat(original, "assistant", text, f"{original.message_id}:reply")
 
     async def _route_to_gate(self, envelope: MessageEnvelope) -> Route:
         """Where a reply to a user gate's message goes (``gate_routing``); any other message is the Manager's."""
