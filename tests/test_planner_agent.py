@@ -35,10 +35,12 @@ from looper.agents.message import (
     planner_address,
 )
 from looper.agents.tiers.planner import PlannerAgent
-from looper.agents.tiers.planner_protocol import REPLY_CONTRACT
+from looper.agents.tiers.planner_protocol import DEFAULT_STEP_RETRIES, reply_contract
 from looper.agents.tiers.task import TaskRouter
 
 WEB = channel_address("web")
+# The reply contract of a task whose project never set user_gates: gates on, by default.
+DEFAULT_CONTRACT = reply_contract(DEFAULT_STEP_RETRIES, gates=True)
 
 WORK_OK = {"status": "completed", "summary": "did it", "changed_files": {"calc.py": "added"}}
 WORK_FAILED = {"status": "failed", "error": "tests fail", "summary": "tests fail"}
@@ -699,8 +701,8 @@ class TestResidentClaude:
         assert _flag(argv, "--system-prompt-snapshot") == "off"
         (prompt,) = claude.prompts()
         assert Path(_flag(argv, "--append-system-prompt-file") or "").name == f"{_sha(prompt)}.md"
-        _in_order(prompt, "You plan carefully.\n\n## Task\n", "build the calc package", REPLY_CONTRACT)
-        assert prompt.endswith(REPLY_CONTRACT)
+        _in_order(prompt, "You plan carefully.\n\n## Task\n", "build the calc package", DEFAULT_CONTRACT)
+        assert prompt.endswith(DEFAULT_CONTRACT)
         # Every turn arrives on stdin; the command line carries no prompt.
         takes_value = {"--input-format", "--output-format",
                        "--append-system-prompt-file", "--system-prompt-snapshot", "--setting-sources",
@@ -885,9 +887,10 @@ class TestSystemPrompt:
 
         (prompt,) = claude.prompts()
         _in_order(prompt, f"{DEFAULT_HARNESS_PROMPT}\n\n", "You plan carefully.\n\n",
-                  "## Project: calc\nUse uv.\nPython 3.12.\n\n", "## Task\n", "build the calc package", REPLY_CONTRACT)
+                  "## Project: calc\nUse uv.\nPython 3.12.\n\n", "## Task\n", "build the calc package",
+                  DEFAULT_CONTRACT)
         assert prompt.startswith(f"{DEFAULT_HARNESS_PROMPT}\n\nYou plan carefully.\n\n")
-        assert prompt.endswith(REPLY_CONTRACT)
+        assert prompt.endswith(DEFAULT_CONTRACT)
         agent_db.get_task_project.assert_awaited_with("t1")  # the task's project as it is now
         # Every turn records the system prompt it ran with, its hash and its layers.
         starts = _starts(agent_db)
@@ -899,9 +902,9 @@ class TestSystemPrompt:
         assert layers["project"] == {"id": "proj-1", "background_sha256": _sha("Use uv.\nPython 3.12."),
                                      "updated_at": "2026-10-13T12:00:00+00:00", "knowledge_sha256": None,
                                      "knowledge_documents": 0}
-        task = prompt[prompt.index("## Task"):prompt.index(REPLY_CONTRACT)].rstrip("\n")
+        task = prompt[prompt.index("## Task"):prompt.index(DEFAULT_CONTRACT)].rstrip("\n")
         assert layers["task"] == {"kind": "plan", "task_id": "t1", "step_id": None, "sha256": _sha(task)}
-        assert layers["contract"] == {"name": "REPLY_CONTRACT", "sha256": _sha(REPLY_CONTRACT)}
+        assert layers["contract"] == {"name": "REPLY_CONTRACT", "sha256": _sha(DEFAULT_CONTRACT)}
         assert layers["isolation"] == ISOLATION_ID
         assert str(h.work_dir) in task
         assert [line for line in activity(agent_db) if "background" in line] == [
@@ -932,7 +935,7 @@ class TestSystemPrompt:
         assert "## Project: calc\nv1\n\n## Task" in first_prompt
         expected = f"## Project: calc\n{new_background}\n\n## Task" if new_background else "carefully.\n\n## Task"
         assert expected in second_prompt
-        assert second_prompt.endswith(REPLY_CONTRACT)
+        assert second_prompt.endswith(DEFAULT_CONTRACT)
         # A changed prompt is a new file with a new hash; the restarted process resumes the session.
         assert _flag(first, "--append-system-prompt-file") != _flag(second, "--append-system-prompt-file")
         assert Path(_flag(second, "--append-system-prompt-file") or "").name == f"{_sha(second_prompt)}.md"
@@ -1151,7 +1154,7 @@ class TestKnowledge:
         _in_order(prompt, "## Project: calc\nUse uv.\n\n", "## Project knowledge\n",
                   f"In {set_dir}:\n- Glossary: Terms the code uses (Glossary.md)\n",
                   f"In {project_dir}:\n- Runbook: How to deploy (docs/runbook.md)\n\n## Task\n",
-                  REPLY_CONTRACT)
+                  DEFAULT_CONTRACT)
         index = prompt[prompt.index("## Project knowledge"):prompt.index("\n\n## Task")]
         for start in _starts(agent_db):
             project = start["metadata"]["prompt_layers"]["project"]
