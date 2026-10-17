@@ -4,7 +4,8 @@ A run has a row per (task, rep), or per (dialog, rep) for the Manager's dialogs.
 success is ``k/n``, the passes over the scored reps (a pass or a fail; an error or a skipped rep is not scored),
 with the errors beside it; every number is the mean over the scored reps. The total row has the passes over
 all scored rows with their Wilson 95% interval, the errors by class, and the tasks' means added up (one pass
-through the set). A cell that changed shows ``base → new``.
+through the set); against a base, it is over the tasks both runs have, and a second row gives the new run's own
+total when it has tasks the base lacks. A cell that changed shows ``base → new``.
 """
 
 from __future__ import annotations
@@ -231,6 +232,10 @@ def _notes(new: Mapping[str, Any], base: Mapping[str, Any] | None) -> list[str]:
     return lines
 
 
+def _count(n: int, noun: str) -> str:
+    return f"{n} {noun}{'' if n == 1 else 's'}"
+
+
 def markdown(new: Mapping[str, Any], base: Mapping[str, Any] | None = None) -> str:
     """A row per task (or dialog) and a total row; a cell that changed shows ``base → new``."""
     dialogs = "dialogs" in new
@@ -238,15 +243,27 @@ def markdown(new: Mapping[str, Any], base: Mapping[str, Any] | None = None) -> s
     title = "Manager dialogs" if dialogs else "Prompt eval"
     lines = [f"{title}: {_label(new)} (no earlier run to compare with)" if base is None
              else f"{title}: {_label(base)} → {_label(new)}", ""]
-    lines.append(f"| {'dialog' if dialogs else 'task'} | " + " | ".join(name for name, _ in columns) + " |")
+    kind = "dialog" if dialogs else "task"
+    lines.append(f"| {kind} | " + " | ".join(name for name, _ in columns) + " |")
     lines.append("|---" * (len(columns) + 1) + "|")
     new_groups = _by_id(new)
     base_groups = _by_id(base) if base is not None else {}
     for task_id, group in new_groups.items():
         cells = _changed(_cells(base_groups.get(task_id), columns), _cells(group, columns) or [])
         lines.append(f"| {task_id} | " + " | ".join(cells) + " |")
-    total = _changed(_total(base_groups, columns) if base is not None else None, _total(new_groups, columns))
-    lines.append("| **total** | " + " | ".join(total) + " |")
+    if base is None:
+        lines.append("| **total** | " + " | ".join(_total(new_groups, columns)) + " |")
+    else:
+        # Both totals over the same tasks, so the row never puts one set of tasks next to another.
+        shared = [task_id for task_id in new_groups if task_id in base_groups]
+        total = _changed(_total({i: base_groups[i] for i in shared}, columns),
+                         _total({i: new_groups[i] for i in shared}, columns))
+        label = ("**total**" if len(shared) == len(new_groups) == len(base_groups)
+                 else f"**total ({_count(len(shared), 'shared ' + kind)})**")
+        lines.append(f"| {label} | " + " | ".join(total) + " |")
+        if len(shared) < len(new_groups):
+            lines.append(f"| **total (all {_count(len(new_groups), kind)} of the new run)** | "
+                         + " | ".join(_total(new_groups, columns)) + " |")
     if notes := _notes(new, base):
         lines += ["", *notes]
     if problems := _problems(new):
