@@ -314,7 +314,7 @@ async def reset_task_for_restart(
         await pool.execute("DELETE FROM task_planner_profiles WHERE task_id = $1", task_id)
         await pool.execute("DELETE FROM task_roles WHERE task_id = $1", task_id)
         # Its room goes with the plan: what its agents agreed on was for the steps planned anew.
-        for table in ("room_watches", "room_reads", "room_messages"):
+        for table in ("room_consults", "room_watches", "room_reads", "room_messages"):
             await pool.execute(f"DELETE FROM {table} WHERE task_id = $1", task_id)
         await pool.execute("DELETE FROM task_steps WHERE task_id = $1", task_id)
         await pool.execute("DELETE FROM task_plans WHERE task_id = $1", task_id)

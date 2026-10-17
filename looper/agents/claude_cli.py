@@ -265,6 +265,20 @@ def permission_args() -> list[str]:
     return ["--dangerously-skip-permissions"]
 
 
+# The tools a read-only run has not at all (an agent room consult).
+READ_ONLY_DENIED_TOOLS = ("Edit", "Write", "NotebookEdit")
+
+
+def read_only_args() -> list[str]:
+    """The flags of a run that must not change anything, in place of ``permission_args``: Claude Code's default
+    permission mode, in which ``--print`` refuses every tool call that needs approval (verified with 2.1.285: read
+    commands such as ``ls``, ``cat``, ``git status``, ``git log`` and ``git show`` run; a redirection into a file,
+    ``touch``, a script that writes and ``git commit`` are refused and listed in the result's
+    ``permission_denials``), and no file-writing tools. Plan mode is not used: it only asks the model not to write,
+    and it would have it write a plan file into the operator's configuration."""
+    return ["--disallowedTools", *READ_ONLY_DENIED_TOOLS]
+
+
 def system_prompt_args(prompt_file: Path) -> list[str]:
     """Append the system prompt in ``prompt_file`` (``SystemPrompt.write_file``).
 

@@ -729,6 +729,9 @@ class Launch:
     library: AgentLibrary = EMPTY_LIBRARY
     knowledge: AgentKnowledge = EMPTY_KNOWLEDGE
     role: AgentType | None = None  # the role the run is for; None: one that follows its profile in everything
+    # A run that must not change anything (an agent room consult): its runtime's read-only mode in place of every
+    # permission (RFC decision 8's one exception), and no agent teams.
+    read_only: bool = False
 
     @property
     def agent_teams(self) -> bool:
@@ -736,7 +739,7 @@ class Launch:
         each of its decisions are read from the result of its own turn, so a turn that waits for a teammate ends
         without its decision, and the teammate's later turns are Claude's own, only logged (#26); the Planner runs
         work in parallel through Looper's Workers, whose steps Looper tracks, which teammates would bypass."""
-        return self.profile.agent_teams and self.role is not AgentType.PLANNER
+        return self.profile.agent_teams and self.role is not AgentType.PLANNER and not self.read_only
 
     @property
     def model(self) -> str:

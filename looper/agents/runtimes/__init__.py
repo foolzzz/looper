@@ -237,6 +237,13 @@ class RuntimeAdapter(ABC):
         that keeps no session for a run (``--ephemeral``, ``--no-session``) keeps it there, so it can be resumed
         later (the agent room's consults); Claude Code keeps every run's session in its own place."""
 
+    def consult_command(self, executable: str, *, cwd: str | Path, prompt_file: Path, launch: Launch,
+                        session_id: str, session_dir: Path | None, fork_dir: Path, max_turns: int = 0) -> list[str]:
+        """A run (a ``read_only`` launch) that resumes a fork of a finished run's session ``session_id``, which the
+        run kept in ``session_dir`` (a runtime that keeps sessions itself has none), into ``fork_dir``, so the
+        original stays as it was; its prompt comes on stdin. Raises ``RuntimeUnsupported`` when it cannot."""
+        raise RuntimeUnsupported(f"a {self.label} run cannot resume another run's session")
+
     # --- Sessions and the stream ---
 
     @abstractmethod

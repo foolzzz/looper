@@ -35,11 +35,13 @@ otherwise. Every run records how its report or verdict read
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import shutil
 import time
 import uuid
+from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
@@ -553,6 +555,18 @@ class WorkerPool:
         if wp is not None and wp.parent_task_id:
             await self._activity(wp.parent_task_id, worker_id, "phase", "Room reminder sent")
         return True
+
+    @contextlib.asynccontextmanager
+    async def slot_for(self, wp: WorkerProcess) -> AsyncIterator[None]:
+        """A place under ``wp``'s task's limit of its role for a run of Looper's own (an agent room consult): it
+        waits like any run, shows among the runs, and frees its place when it ends."""
+        self._active[wp.worker_id] = wp
+        try:
+            await self._take_slot(wp)
+            wp.status, wp.since = "running", datetime.now(timezone.utc)
+            yield
+        finally:
+            self._cleanup_worker(wp.worker_id)
 
     async def _dispatch(self, envelope: MessageEnvelope) -> None:
         worker_id = envelope.target.agent_id

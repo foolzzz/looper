@@ -1330,7 +1330,8 @@ class AgentHTTPServer:
             "gates": gates,
             # Its agent room in numbers: whether its project has it on, its messages by kind and its unanswered
             # questions, and each step's (sent, received, unanswered); the messages are at .../room.
-            "room": {key: room[key] for key in ("enabled", "counts", "by_step")} if room else None,
+            "room": {**{key: room[key] for key in ("enabled", "counts", "by_step")},
+                     "consults": {k: v for k, v in room["consults"].items() if k != "list"}} if room else None,
             # The role each Worker and Reviewer run that ran as one ran as, by agent id (task_roles.run_roles); only
             # in a task with such runs.
             **({"run_roles": ran_as} if ran_as else {}),

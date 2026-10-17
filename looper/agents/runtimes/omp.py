@@ -128,6 +128,12 @@ _PLUGIN_PARTS_LEFT_OUT = ("hooks", "output-styles")
 IDLE_SEC = 24 * 3600
 
 
+# The built-in tools a read-only run has (``--tools``): those that read. omp 18.4.3 lists its tools as read, glob,
+# grep, bash, edit, ast_edit, write, task, todo and web_search; whether ``--tools`` keeps the others away is not
+# verified on a real run yet, so a read-only OMP run also works in a checkout that is thrown away after it.
+READ_ONLY_TOOLS = ("read", "glob", "grep")
+
+
 class OmpRuntime(RuntimeAdapter):
     type = "omp"
     label = "OMP"
@@ -187,6 +193,8 @@ class OmpRuntime(RuntimeAdapter):
         binding = self.bind_provider(launch.profile.provider, launch.model, launch.effort)
         return [
             "-p", "--mode", "json", "--no-title",
+            # A read-only run (an agent room consult) has only the tools that read.
+            *(["--tools", ",".join(READ_ONLY_TOOLS)] if launch.read_only else []),
             *binding.args,
             *(arg for directory in launch.library.plugin_dirs for arg in ("--plugin-dir", directory)),
         ]
@@ -231,6 +239,16 @@ class OmpRuntime(RuntimeAdapter):
         session_dir.mkdir(parents=True, exist_ok=True)
         os.chmod(session_dir, 0o700)
         return [*self._command(executable, cwd, prompt_file, launch), "--session-dir", str(session_dir)]
+
+    def consult_command(self, executable: str, *, cwd: str | Path, prompt_file: Path, launch: Launch,
+                        session_id: str, session_dir: Path | None, fork_dir: Path, max_turns: int = 0) -> list[str]:
+        """A run that resumes a fork of a finished run's session: the directory the run kept it in (``session_dir``)
+        copied to ``fork_dir`` and resumed there."""
+        if session_dir is None or not session_dir.is_dir():
+            raise RuntimeUnsupported("the run kept no session to resume")
+        shutil.copytree(session_dir, fork_dir, symlinks=True, dirs_exist_ok=False)
+        return [*self._command(executable, cwd, prompt_file, launch), "--session-dir", str(fork_dir),
+                "--resume", session_id]
 
     def resident_session(self, label: str) -> ResidentOmp:
         return ResidentOmp(label=label)

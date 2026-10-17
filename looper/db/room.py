@@ -166,3 +166,78 @@ async def tasks_keeping_sessions(*, days: int, pool: asyncpg.Pool | None = None)
     rows = await pool.fetch("SELECT id FROM tasks WHERE completed_at IS NULL "
                             "OR completed_at > now() - make_interval(days => $1)", days)
     return [row["id"] for row in rows]
+
+
+# --- Consults ---
+
+
+async def add_consult(task_id: str, *, seat: str, question: int, source_run: str | None, runtime: str | None,
+                      pool: asyncpg.Pool | None = None) -> tuple[dict[str, Any], bool]:
+    """``question`` for ``seat``'s consult: added to its queued one, else a new one; the row, and whether it is new."""
+    pool = pool or get_pool()
+    async with pool.acquire() as conn, conn.transaction():
+        queued = await conn.fetchrow("SELECT * FROM room_consults WHERE task_id = $1 AND seat = $2 AND state = 'queued' "
+                                     "ORDER BY id DESC LIMIT 1 FOR UPDATE", task_id, seat)
+        if queued is not None:
+            row = await conn.fetchrow("UPDATE room_consults SET questions = array_append(questions, $2) WHERE id = $1 "
+                                      "RETURNING *", queued["id"], question)
+            return dict(row), False
+        row = await conn.fetchrow("INSERT INTO room_consults (task_id, seat, questions, source_run, runtime) "
+                                  "VALUES ($1, $2, ARRAY[$3::bigint], $4, $5) RETURNING *",
+                                  task_id, seat, question, source_run, runtime)
+        return dict(row), True
+
+
+async def consults(task_id: str, *, pool: asyncpg.Pool | None = None) -> list[dict[str, Any]]:
+    pool = pool or get_pool()
+    return [dict(r) for r in await pool.fetch("SELECT * FROM room_consults WHERE task_id = $1 ORDER BY id", task_id)]
+
+
+async def consult_count(task_id: str, *, pool: asyncpg.Pool | None = None) -> int:
+    pool = pool or get_pool()
+    return int(await pool.fetchval("SELECT count(*) FROM room_consults WHERE task_id = $1", task_id))
+
+
+async def move_consult(consult_id: int, state: str, *, expect: Sequence[str], pool: asyncpg.Pool | None = None,
+                       **columns: Any) -> dict[str, Any] | None:
+    """Move consult ``consult_id`` to ``state`` (and set ``columns``) when it is in one of ``expect``; the row, or None
+    when it was not (another moved it first)."""
+    pool = pool or get_pool()
+    names = list(columns)
+    sets = ", ".join(f"{name} = ${i}" for i, name in enumerate(names, 4))
+    ended = ", finished_at = now()" if state in ("answered", "fallback", "failed") else ""
+    row = await pool.fetchrow(
+        f"UPDATE room_consults SET state = $2{', ' + sets if sets else ''}{ended} "
+        f"WHERE id = $1 AND state = ANY($3::text[]) RETURNING *",
+        consult_id, state, list(expect), *(columns[name] for name in names))
+    return dict(row) if row is not None else None
+
+
+async def latest_run(task_id: str, agent_id: str, *, pool: asyncpg.Pool | None = None) -> dict[str, Any] | None:
+    """The newest record of run ``agent_id`` in ``task_id``: its session, status, metadata and output."""
+    pool = pool or get_pool()
+    row = await pool.fetchrow("SELECT id, agent_id, session_id, status, metadata, output_text FROM llm_records "
+                              "WHERE task_id = $1 AND agent_id = $2 ORDER BY id DESC LIMIT 1", task_id, agent_id)
+    if row is None:
+        return None
+    record = dict(row)
+    if isinstance(record.get("metadata"), str):
+        record["metadata"] = json.loads(record["metadata"])
+    return record
+
+
+async def get_consult(consult_id: int, *, pool: asyncpg.Pool | None = None) -> dict[str, Any] | None:
+    pool = pool or get_pool()
+    row = await pool.fetchrow("SELECT * FROM room_consults WHERE id = $1", consult_id)
+    return dict(row) if row is not None else None
+
+
+async def unfinished_consults(*, pool: asyncpg.Pool | None = None) -> list[dict[str, Any]]:
+    """The consults of running tasks left queued or running."""
+    pool = pool or get_pool()
+    from .tasks import ACTIVE_STATUSES
+
+    rows = await pool.fetch("SELECT c.* FROM room_consults c JOIN tasks t ON t.id = c.task_id "
+                            "WHERE c.state IN ('queued', 'running') AND t.status = ANY($1::text[]) ORDER BY c.id",
+                            list(ACTIVE_STATUSES))
+    return [dict(row) for row in rows]
