@@ -577,6 +577,10 @@ class AgentHTTPServer:
             await self._answer(writer, HTTP_200, self._lark_status)
         elif path == "/api/channels/lark/people" and method == "GET":
             await self._answer(writer, HTTP_200, lambda: self._lark_people(query.get("q", "")))
+        elif path == "/api/gate-settings" and method == "GET":
+            await self._answer(writer, HTTP_200, gate_service.gate_settings)
+        elif path == "/api/gate-settings" and method == "PUT":
+            await self._answer(writer, HTTP_200, lambda: gate_service.update_gate_settings(projects.json_object(body)))
         elif path == "/api/channel-configs" and method == "GET":
             await self._handle_list_channel_configs(writer)
         elif (m := self._RE_CHANNEL_CONFIG.match(path)) and method == "GET":

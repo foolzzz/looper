@@ -35,6 +35,7 @@ import logging
 import shutil
 import uuid
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -50,6 +51,7 @@ from ..claude_cli import (
     answer_text,
     exit_note,
 )
+from ..gate_routing import NOT_A_REPLY, Route, RouteKind, route as route_to_gate
 from ..library import load_installed
 from ..run_usage import Usage
 from .. import session_switch
@@ -80,6 +82,7 @@ from ...db import chat as db_chat
 from ...db import agent_sessions as db_agent_sessions
 from ...db import llm_records as db_llm_records
 from ...db import projects as db_projects
+from ...db import user_gates as db_user_gates
 
 # Appended to the (editable) system prompt on every call: Looper's tools are code's, so is how to use them.
 TOOLS_CONTRACT = """\
@@ -88,7 +91,8 @@ You act on Looper only through its tools (looper_*); never through its HTTP API
 or files. Each tool answers JSON: "status" is "ok", "needs_confirmation" or
 "error", and "error.message" says what to change. Each user message starts with
 "Projects" (the existing projects and their default directories) and, when there
-are any, "Ready tasks" (created, not started).
+are any, "Ready tasks" (created, not started) and "Open gates" (questions a
+task's Planner waits for the user to answer).
 
 - Reading: looper_overview, looper_tasks, looper_costs and the list, get and
   view actions of the other tools, whenever the message needs them.
@@ -111,6 +115,11 @@ are any, "Ready tasks" (created, not started).
 - A task under way: what the user adds for it goes to looper_task_instruct (its
   Planner decides whether to change the plan); a different requirement goes to
   looper_task_update. A task not started changes with looper_task_update.
+- An open gate: when the user answers or discusses the questions of one of the
+  "Open gates", pass their words as they said them with looper_task_gate_reply
+  (end: true when they want its Planner to go on with the conclusions so far);
+  when it could be more than one gate, ask which first. Never answer a gate's
+  questions yourself, and do not pass on a message that is not about one.
 - Looper writes some things to the user itself, after your reply: a new
   task's configuration with the question whether to start it, and what an
   operation needing confirmation does. Do not repeat them; refer to them.
@@ -159,6 +168,18 @@ If the user says "不", "取消", "算了", "no", "cancel" or modifies the requi
 
 # The ready tasks each user turn lists, newest first, so Claude can start one by its id.
 READY_TASKS_LISTED = 10
+# The most user gates waiting for the user listed before each message ("Open gates").
+OPEN_GATES_LISTED = 10
+
+
+def _waited(moment: Any) -> str:
+    """How long since ``moment`` (a gate opened), for Claude: 45 min, 3 h, 2 d."""
+    if not isinstance(moment, datetime):
+        return "a while"
+    seconds = max(0.0, (datetime.now(timezone.utc) - moment).total_seconds())
+    if seconds < 3600:
+        return f"{int(seconds // 60)} min"
+    return f"{int(seconds // 3600)} h" if seconds < 172_800 else f"{int(seconds // 86_400)} d"
 
 # A new session's resume brief: the recent conversation of the most recently active chats, from the stored
 # chat messages, each message clipped, all of it in at most CONVERSATION_MAX_CHARS.
@@ -438,6 +459,13 @@ class ManagerAgent:
         if is_new_session_command(text):
             await self._start_new_session(envelope)
             return
+        # A reply to a user gate's message goes to the gate, before the model; the discussion keeps it.
+        gate = await self._route_to_gate(envelope)
+        if gate.kind is RouteKind.DELIVERED:
+            return
+        if gate.kind in (RouteKind.KEPT, RouteKind.REFUSED):
+            await self._send_reply(envelope, gate.reply, persist=False)
+            return
         origin = _message_origin(envelope)
         await self._persist_chat(envelope, "user", text, envelope.message_id)
         await self._send_status(envelope, "thinking", phase=True, activity="thinking")
@@ -452,7 +480,7 @@ class ManagerAgent:
         turn = Turn(channel=origin["channel"], chat=origin["chat"], message_id=envelope.message_id,
                     envelope=envelope, sender=origin["sender"], group=origin["group"])
         try:
-            response = await self._invoke_claude(text, envelope, turn=turn)
+            response = await self._invoke_claude(text, envelope, turn=turn, note=gate.note)
         except Exception as exc:
             if turn.refused:
                 response = ""  # answered below: the tools did not work
@@ -539,18 +567,21 @@ class ManagerAgent:
         elif event == "recovered":
             logger.info("agent %s is stable again after crash-looping", agent_id)
 
-    async def _invoke_claude(self, message: str, context_envelope: MessageEnvelope, *, turn: Turn) -> str:
+    async def _invoke_claude(self, message: str, context_envelope: MessageEnvelope, *, turn: Turn,
+                             note: str = "") -> str:
         """Send the message to the resident Claude as one user turn and return its reply; the tools Claude calls
-        meanwhile act in ``turn``, and the message starts with the note on a confirmation waiting in its chat.
+        meanwhile act in ``turn``, and the message starts with the note on a confirmation waiting in its chat, and
+        ``note`` (a gate the message replies to that no longer waits).
 
         Claude starts on the first message and is restarted, resuming the
         saved session, after it exits or when the system prompt changes.
         Turns run one at a time.
         """
         async with self._turn_lock:
-            note = self.ops.begin_turn(turn) if self.ops is not None else ""
+            waiting = self.ops.begin_turn(turn) if self.ops is not None else ""
             try:
-                return await self._run_turn(message, context_envelope, note=note)
+                return await self._run_turn(message, context_envelope,
+                                            note="\n".join(part for part in (waiting, note) if part))
             finally:
                 if self.ops is not None:
                     self.ops.end_turn(turn)
@@ -1023,6 +1054,7 @@ class ManagerAgent:
     async def _build_user_message(self, user_message: str, note: str = "", *, channel: str = "") -> str:
         parts = await self._projects_section()
         parts += await self._ready_tasks_section()
+        parts += await self._open_gates_section()
 
         if self._goal_snapshots:
             parts.append("当前活跃目标:")
@@ -1073,6 +1105,27 @@ class ManagerAgent:
         lines.append("")
         return lines
 
+    async def _open_gates_section(self) -> list[str]:
+        """The user gates that wait for the user in the running tasks, the latest opened first, so Claude can pass
+        the user's answer on (``looper_task_gate_reply``); none, no section."""
+        try:
+            gates = await db_user_gates.open_gates(OPEN_GATES_LISTED)
+        except Exception:
+            logger.warning("manager could not list the open gates", exc_info=True)
+            return ["Open gates: (could not be read)", ""]
+        if not gates:
+            return []
+        lines = ["Open gates (waiting for the user's answer; newest first):"]
+        for gate in gates:
+            waits = "the Planner, which is answering" if gate.get("waiting_for_planner") else "the user"
+            questions = "; ".join(f"{item.get('id')} {clip(str(item.get('question') or ''), 80)}"
+                                  for item in gate.get("agenda") or [] if item.get("status") in (None, "open"))
+            lines.append(f"  - task {gate['task_id']} (project {gate.get('project_name') or '?'}), gate "
+                         f"{gate['step_key']} \"{clip(gate['topic'], 80)}\": open for {_waited(gate.get('opened_at'))},"
+                         f" waiting for {waits}; open questions: {questions or 'none'}")
+        lines.append("")
+        return lines
+
     async def _persist_chat(
         self, env: MessageEnvelope, role: str, content: str, message_id: str
     ) -> None:
@@ -1093,8 +1146,11 @@ class ManagerAgent:
         except Exception:
             logger.warning("manager: could not persist a %s chat turn", channel, exc_info=True)
 
-    async def _send_reply(self, original: MessageEnvelope, text: str, *, error: str | None = None) -> None:
-        """Answer ``original``; ``error`` says why the turn failed (a chat channel shows it on its status line)."""
+    async def _send_reply(self, original: MessageEnvelope, text: str, *, error: str | None = None,
+                          persist: bool = True) -> None:
+        """Answer ``original``; ``error`` says why the turn failed (a chat channel shows it on its status line).
+        Without ``persist`` the answer is not kept in the chat's history (one about a user gate, whose discussion
+        keeps the message)."""
         assert self._bus is not None
         await self._bus.publish(MessageEnvelope.create(
             source=MANAGER_ADDRESS,
@@ -1105,7 +1161,20 @@ class ManagerAgent:
             reply_to=original.message_id,
             metadata={"origin_channel_id": original.metadata.get("origin_channel_id")},
         ))
-        await self._persist_chat(original, "assistant", text, f"{original.message_id}:reply")
+        if persist:
+            await self._persist_chat(original, "assistant", text, f"{original.message_id}:reply")
+
+    async def _route_to_gate(self, envelope: MessageEnvelope) -> Route:
+        """Where a reply to a user gate's message goes (``gate_routing``); any other message is the Manager's."""
+        if self._bus is None or self.ops is None:
+            return NOT_A_REPLY
+        router = self.ops.platform.task_router
+        try:
+            return await route_to_gate(envelope, has_planner=router.has_planner, bus=self._bus,
+                                       source=MANAGER_ADDRESS)
+        except Exception:
+            logger.warning("manager: could not route %s to a gate; answering it", envelope.message_id, exc_info=True)
+            return NOT_A_REPLY
 
     async def _send_status(
         self,
