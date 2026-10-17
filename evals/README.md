@@ -6,7 +6,7 @@ Tells you whether a change to a recommended role prompt, a code-owned contract
 (`REPLY_CONTRACT`, `WORK_CONTRACT`, `REVIEW_CONTRACT`) or the way the system
 prompt is put together makes the agents worse.
 
-It runs twenty-four small tasks through a disposable `looper serve` (a new
+It runs twenty-five small tasks through a disposable `looper serve` (a new
 PostgreSQL database, a free port, a temporary runtime root and working
 directories), one at a time over the HTTP API:
 
@@ -35,6 +35,7 @@ directories), one at a time over the HTTP API:
 | `gate_parallel_branch` | a clear part (a 20-second step) and the settings part: the gate holds back only the second, and a Worker runs while it waits |
 | `gate_discoverable` | the port is what a step's `probe.sh` prints and the user cannot answer: the Planner must not ask (`gates_opened` 0; a gate that waits on the step and is cancelled before it opens never asked). The scripted user ends a gate that opens after 120 s, so the task fails fast instead of timing out |
 | `room_interface` | two parts built at the same time, each in a worktree of its own (`step_workspaces` `worktree` for this task), where the store's author picks the record's field names while writing it and the client must use them: the agents must coordinate in the task's agent room (`room_messages` at least 1), and `python cli.py widget 3` works against the store |
+| `room_consult` | two steps, the second after the first: the first picks a 6-digit number and keeps it out of every file and its report (only its SHA-256 goes to `code.sha256`), the second writes it to `code.txt`; only the first step's session knows it, so the second must ask that seat in the room, and a consult of its ended run's session answers (`room_consults` at least 1) |
 | `room_quiet` | a one-file task with the agent room on, as every task now has it: no room message at all (`room_messages` 0), one step |
 
 For each task it reads back from the API: success (the task completed, its
@@ -58,7 +59,8 @@ assumptions their summaries stated, `assumptions_stated`; the steps the closing 
 gate's conclusion, `conclusion_reads`), what the agents did in the task's agent room (`room_messages`, Looper's notices
 and escalations apart; of them `room_questions`, `room_unanswered` and `room_interface`; `room_escalations`;
 `room_reminders`, the reminders Claude Code runs got; `room_refused`, the posts the room refused; and
-`room_tool_calls`, the runs' calls of the room's tools, reads included), retries, reviews, cost (the task cost API), tokens (the runs' records: prompt, uncached
+`room_tool_calls`, the runs' calls of the room's tools, reads included; `room_consults`, the consults of seats whose run
+had ended, of them answered `room_consults_answered`), retries, reviews, cost (the task cost API), tokens (the runs' records: prompt, uncached
 and cached, and output; what a runtime without prices still reports), contract violations
 (replies the Planner's reply parser or the Worker/Reviewer report check
 rejected; the JSON keeps why the parser rejected each Planner reply,
@@ -186,7 +188,7 @@ whose pass or fail turns on the Planner's judgment, `dependent_steps`,
 `parallel_parts`, `interface_first`, `supplement_replan`,
 `supplement_no_change`, `requirement_edit`, `roles_tester_docs`,
 `roles_not_needed`, `roles_multi_platform`, `gate_ambiguous`,
-`gate_not_needed`, `gate_parallel_branch`, `gate_discoverable` and `room_interface`; a set is
+`gate_not_needed`, `gate_parallel_branch`, `gate_discoverable`, `room_interface` and `room_consult`; a set is
 resolved against the
 tasks there are, so a task it names that does not exist yet is left out until
 it is added; sets and ids mix, as in `--tasks planner,single_step`), `--reps`,

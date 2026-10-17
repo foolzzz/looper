@@ -196,6 +196,9 @@ def room_metrics(detail: Mapping[str, Any], activity: Iterable[Mapping[str, Any]
         "room_refused": sum(1 for r in rows if str(r.get("summary") or "").startswith("Room: ")
                             and "refused" in str(r.get("summary") or "")),
         "room_tool_calls": calls,
+        # The consults of seats whose run had ended, and those that answered.
+        "room_consults": int(room.get("consults", {}).get("total") or 0),
+        "room_consults_answered": int(room.get("consults", {}).get("answered") or 0),
     }
 
 

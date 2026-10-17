@@ -61,7 +61,7 @@ class EvalTask:
     # max_roles_defined, max_role_prompt_mismatches, max_role_boundary_misses, max_gate_breaches,
     # max_contract_violations; min_gates_opened, min_gates_passed, min_gates_ended_by_user, min_assumptions_stated,
     # min_gate_parallel_runs, min_conclusion_reads; max_gates_opened, max_gate_asks_beyond_script; min_room_messages,
-    # max_room_messages, max_room_unanswered
+    # max_room_messages, max_room_unanswered, min_room_consults
     expect: dict[str, int] = field(default_factory=dict)
     fake: dict[str, Any] = field(default_factory=dict)  # the stand-in Claude's script
 
@@ -920,6 +920,25 @@ if __name__ == "__main__":
     main(sys.argv[1:])
 """
 
+_FAKE_CODE = "482913"
+_FAKE_CODE_SHA = __import__("hashlib").sha256(_FAKE_CODE.encode()).hexdigest()
+
+
+def _code_matches(work_dir: Path) -> str | None:
+    """code.txt holds six digits whose SHA-256 is what code.sha256 holds."""
+    import hashlib
+
+    digest, code = _read(work_dir, "code.sha256"), _read(work_dir, "code.txt")
+    if digest is None or code is None:
+        return f"missing {'code.sha256' if digest is None else 'code.txt'}"
+    code = code.strip()
+    if len(code) != 6 or not code.isdigit():
+        return f"code.txt holds {code[:20]!r}, not six digits"
+    if hashlib.sha256(code.encode()).hexdigest() != digest.strip().lower():
+        return "code.txt's number is not the one whose SHA-256 is in code.sha256"
+    return None
+
+
 ROOM_TASKS: tuple[EvalTask, ...] = (
     EvalTask(
         # Two parts built side by side, each in a checkout of its own, that must agree on something only one of
@@ -960,6 +979,32 @@ ROOM_TASKS: tuple[EvalTask, ...] = (
                        ["looper_room_inbox", {"wait_seconds": 30}]],
             },
             "room_reply": "Yes: only the id.",
+        },
+    ),
+    EvalTask(
+        # A second step needs what only the first step's session knows, and the first has ended: the second asks it
+        # in the room, and a consult of its session answers.
+        id="room_consult",
+        requirement="Do this as two steps, the second after the first. The first step picks a random 6-digit "
+                    "number (pick it yourself; do not derive it from anything), writes only its SHA-256 hex "
+                    "digest (of the six digits, no newline) to code.sha256, and keeps the number itself out of "
+                    "every file, commit and its report. The second step writes that number, the six digits only, "
+                    "to code.txt.",
+        check=_code_matches,
+        expect={"min_room_consults": 1},
+        fake={
+            "plan": [_step("s1", "Pick a 6-digit number; write its SHA-256 to code.sha256.", ["code.sha256 exists"]),
+                     _step("s2", "Write the number s1 picked to code.txt.", ["code.txt holds it"],
+                           depends_on=["s1"])],
+            "attempts": {
+                "s1": [{"status": "completed", "files": {"code.sha256": _FAKE_CODE_SHA}}],
+                "s2": [{"status": "completed", "files": {"code.txt": _FAKE_CODE + "\n"}}],
+            },
+            # The second step's Worker asks the first's seat, which has ended: a consult answers in its inbox.
+            "room_calls": {"s2": [["looper_room_post", {"to": ["worker@s1"], "kind": "question",
+                                                        "body": "Which number did you pick?"}],
+                                  ["looper_room_inbox", {"wait_seconds": 60}]]},
+            "consult_answer": _FAKE_CODE,
         },
     ),
     EvalTask(

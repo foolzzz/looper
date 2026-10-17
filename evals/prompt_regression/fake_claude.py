@@ -26,7 +26,8 @@ agent system started it in:
   waits for a forwarded user turn and then writes the files given there; with
   ``room_calls`` (``{label: [[tool, arguments], ...]}``) it first makes those
   calls of the room's tools over its ``looper`` MCP server (and answers a
-  [ROOM] turn of the Planner's with ``room_reply``, or "Noted.");
+  [ROOM] turn of the Planner's with ``room_reply``, or "Noted."); a consult
+  of a run's session answers its questions with ``consult_answer``;
 - a Reviewer ("The step under review:") passes the step, unless its system
   prompt holds one of the script's ``failing_reviews`` (a review role's
   marker): then it fails it;
@@ -262,6 +263,14 @@ def _worker(script: dict[str, Any], system_prompt: str, stdin: _Stdin, args: lis
     _answer("fake-worker", attempt.get("raw") or "Done.\n" + json.dumps(report), WORKER_RUN_COST)
 
 
+def _consult(script: dict[str, Any], stdin: _Stdin) -> None:
+    """A consult of a run's session: answer every question its prompt names with the script's ``consult_answer``."""
+    prompt = _user_text(stdin.readline() or "{}")
+    ids = [int(i) for i in re.findall(r"^- #(\d+) from", prompt, re.MULTILINE)]
+    reply = {"answers": [{"reply_to": i, "body": script.get("consult_answer", "I do not know.")} for i in ids]}
+    _answer("fake-consult", "Here.\n" + json.dumps(reply), REVIEWER_RUN_COST)
+
+
 def _reviewer(script: dict[str, Any], system_prompt: str, stdin: _Stdin) -> None:
     stdin.readline()  # the Worker's report
     if any(marker in system_prompt for marker in script.get("failing_reviews") or []):
@@ -321,6 +330,8 @@ def main(argv: list[str]) -> int:
     # Manager's prompt ends with Looper's tools contract.
     if "## Looper's tools (required)" in system_prompt:
         _manager(scenarios_path, args, stdin)
+    elif "## Your answer (required; code reads it)" in system_prompt:  # a consult of a run's session
+        _consult(script, stdin)
     elif re.search(r"^The step under review:", system_prompt, re.MULTILINE):
         _reviewer(script, system_prompt, stdin)
     elif re.search(r"^Your step:", system_prompt, re.MULTILINE):

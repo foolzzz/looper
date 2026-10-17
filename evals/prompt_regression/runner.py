@@ -495,7 +495,7 @@ TASK_SETS: dict[str, tuple[str, ...]] = {
     # The tasks whose pass or fail turns on the Planner's judgment: the opus tier (evals/README.md).
     "planner": ("dependent_steps", "parallel_parts", "interface_first", "supplement_replan", "supplement_no_change",
                 "requirement_edit", "roles_tester_docs", "roles_not_needed", "roles_multi_platform", "gate_ambiguous",
-                "gate_not_needed", "gate_parallel_branch", "gate_discoverable", "room_interface"),
+                "gate_not_needed", "gate_parallel_branch", "gate_discoverable", "room_interface", "room_consult"),
 }
 
 
