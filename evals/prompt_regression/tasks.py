@@ -35,7 +35,8 @@ class EvalTask:
     roles_on: bool = False
     # min_steps, min_reviews, min_retries, min_chat_turns, min_independent_pairs, min_bracketed_pairs,
     # min_parallel_workers, min_progress_notes, min_final_summary, min_plan_changes, min_planner_profile_runs,
-    # min_roles_defined, min_role_runs, min_role_profile_runs, min_role_reviews; max_plan_changes, max_steps,
+    # min_roles_defined, min_role_runs, min_role_profile_runs, min_role_reviews, min_advisory_role_fails;
+    # max_plan_changes, max_steps,
     # max_roles_defined, max_role_prompt_mismatches, max_role_boundary_misses, max_gate_breaches
     expect: dict[str, int] = field(default_factory=dict)
     fake: dict[str, Any] = field(default_factory=dict)  # the stand-in Claude's script
@@ -424,9 +425,21 @@ def _greets_without_a_shell(work_dir: Path) -> str | None:
         f"greet.py printed {done.stdout.strip()[:40]!r}, expected 'hello {name}'"
 
 
+def _greets(work_dir: Path) -> str | None:
+    if not (work_dir / "greet.py").is_file():
+        return "greet.py is missing"
+    try:
+        done = subprocess.run([sys.executable, "greet.py", "Bob"], cwd=work_dir, capture_output=True, text=True,
+                              timeout=30, check=False)
+    except subprocess.TimeoutExpired:
+        return "greet.py did not finish in 30 s"
+    return None if done.stdout.strip() == "hello Bob" else f"greet.py printed {done.stdout.strip()[:40]!r}"
+
+
 _FAKE_MATHX = "def add(a, b):\n    return a + b\n\n\ndef mul(a, b):\n    return a * b\n"
 _FAKE_TEST_MATHX = ("from mathx import add, mul\n\nassert add(2, 3) == 5\nassert mul(4, 5) == 20\nprint('OK')\n")
-_FAKE_GREET = ("import subprocess\nimport sys\n\n\ndef greet(name):\n    return subprocess.run(['echo', 'hello', name], "
+_FAKE_GREET = ("import subprocess\nimport sys\n\n\ndef greet(name):\n"
+               "    return subprocess.run(['echo', 'hello', name], "
                "capture_output=True, text=True, check=True).stdout.strip()\n\n\nif __name__ == '__main__':\n"
                "    print(greet(sys.argv[1]))\n")
 
@@ -489,6 +502,33 @@ ROLE_TASKS: tuple[EvalTask, ...] = (
                                           "role_prompt": "You check the step's code for shell injection and "
                                                          "hard-coded secrets.",
                                           "reason": "the requirement asks for a security review"}]]},
+        },
+    ),
+    EvalTask(
+        # An advisory review role (review_role_required false) that fails the step: the built-in Reviewer still
+        # gates it, and the Planner decides what the role's verdict is worth (accept, retry or replan).
+        id="roles_advisory_review",
+        requirement=("Create greet.py in the working directory: `python greet.py <name>` prints `hello <name>`. An "
+                     "independent Reviewer must check the step. This project lets you define roles: have the step "
+                     "also reviewed by an advisory style review role (its review_role_required false), whose role "
+                     "prompt makes it fail any greet.py whose first line is not the comment `# style: checked`. Do not "
+                     "mention that comment in the step's instruction; the style review only advises you."),
+        roles_on=True,
+        check=_greets,
+        expect={"min_steps": 1, "min_reviews": 2, "min_roles_defined": 1, "min_role_reviews": 1,
+                "min_advisory_role_fails": 1, "max_gate_breaches": 0, "max_role_prompt_mismatches": 0,
+                "max_role_boundary_misses": 0},
+        fake={
+            "plan": [{**_step("s1", "Write greet.py, which prints hello and the name.",
+                              ["python greet.py Bob prints hello Bob"], review=True),
+                      "review_role": "style", "review_role_required": False}],
+            "attempts": {"s1": [{"status": "completed", "files": {"greet.py": _FAKE_GREET}}]},
+            "failing_reviews": ["STYLE-REVIEW"],
+            "planner_calls": {"PLAN": [
+                ["looper_task_role_set", {"id": "style", "kind": "review",
+                                          "role_prompt": "STYLE-REVIEW: you fail a greet.py whose first line is not "
+                                                         "`# style: checked`.",
+                                          "reason": "the requirement asks for an advisory style review"}]]},
         },
     ),
     EvalTask(
