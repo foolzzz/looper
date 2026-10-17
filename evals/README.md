@@ -172,10 +172,11 @@ every role on it, with Looper's per-run cap: `{"runtime": {"name"?, "type"},
 "provider": {"name", "protocols", "auth", "base_url"?, "api_key_env"?},
 "agent": {"name", "model", "effort"?}}`, its `agent` being the profile;
 runtimes are built in, so the profile runs on the runtime of that name or the
-built-in one of that type, such as `codex` or `omp` when on PATH, and the
-provider's key is read from the variable `api_key_env` names, never from the
-file; `"provider": {"provider_id": "prov-codex-login"}` uses the built-in Codex
-login instead, the operator's own ChatGPT login on this machine), `--tasks
+built-in one of that type, such as `codex`, `omp` or `grok` when on PATH, and
+the provider's key is read from the variable `api_key_env` names, never from
+the file; `"provider": {"provider_id": "prov-codex-login"}` uses the built-in
+Codex login instead, the operator's own ChatGPT login on this machine, and
+`"provider": {"provider_id": "prov-grok-login"}` Grok's own login), `--tasks
 single_step,chat_correction` (task ids, or a named set: `planner`, the tasks
 whose pass or fail turns on the Planner's judgment, `dependent_steps`,
 `parallel_parts`, `interface_first`, `supplement_replan`,
@@ -279,8 +280,8 @@ model, the other roles on `--model`; all ten dialogs at `--reps 3` cost $3.49
 in about 16 minutes, about $1.16 a rep, the costliest single dialog
 `config_tools` at about $0.22; give it `--max-budget-usd 3.0` and a
 `--total-cap-usd` such as 6),
-`--register-agent SPEC.json` (as for `run`; `--dialogs status` with a Codex or
-OMP agent checks that runtime's tool calls), `--reps` (as for `run`),
+`--register-agent SPEC.json` (as for `run`; `--dialogs status` with a Codex,
+OMP or Grok agent checks that runtime's tool calls), `--reps` (as for `run`),
 `--baseline <run.json>|previous` (the default is
 `baselines/dialogs-real-<model>.json` by the Manager's model: `haiku`, and
 `opus` for the run with the Manager on opus at xhigh), `--max-budget-usd`,
