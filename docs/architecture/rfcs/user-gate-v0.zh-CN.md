@@ -352,6 +352,7 @@ task_user_gate_posts           Looper 发到渠道的关卡消息：路由表，
 |---|---|
 | 规划者定义的角色（#161） | 没有语义上的冲突：关卡不跑执行者和评审者，`role`、`review_role` 在关卡上一律拒绝，`_check_roles` 跳过关卡；`reply_contract(max_retries, *, roles, gates)` 两节各自可选、互不影响；按角色的统计不计关卡。文本上重叠：`planner_protocol.py` 的 `StepSpec`、`_step`、`_check_new_steps` 和约定，`planner.py` 的 `PlanStep`、`_step_row`、`_add_steps`，`db/plans.py`，`schema.sql` 里日志类型的约束（各自一个迁移），`task-detail.tsx` 的 Pipeline。所以在 #161 合入之后再开工 |
 | 并行步骤的目录隔离 | 关卡不进 `_plan_round`，没有工作区；依赖关卡的步骤在关卡通过后照常开 worktree |
+| Agent 讨论室（另一份 RFC，起草中） | 关卡是用户和规划者之间的讨论，讨论室是 agent 之间的。执行者需要用户决定时在讨论室里升级给规划者，由规划者决定是否开关卡；执行者自己不能开关卡，也不在运行中等关卡（它的步骤要么按假设做完，要么被规划者停掉、放到关卡之后）。两边的名字不重叠（`[GATE]` 与 `[ROOM]`，`task_user_gate*` 与 `room_*`） |
 | 管家平台工具（任务变更、CHAT 的 `replan`） | CHAT（含变更回合和 RESTART）多 `gates`；结论是补充说明，沿用 `supplement` 的存储和它在规划者、执行者、评审者、任务页的出现位置；`looper_task_instruct` 不变 |
 | 定时任务 | 定时任务建出的任务不能开关卡（D2），prompt 不变；运行上下文里「不要等用户回答」的约定和代码的拒绝一致。定时任务删除后 `schedule_id` 置空，剩下那次运行此后算有人值守，可以开关卡；这种情况少，按现有字段判断，不另加列 |
 | 花费上限 | 讨论回合计入任务的花费；讨论中达到上限的任务照旧停下 |
