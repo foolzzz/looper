@@ -123,13 +123,13 @@ class ManagerOps:
         self._pending: dict[tuple[str | None, str | None], _Pending] = {}
         self._working_at: float | None = None  # when the MCP entry last listed the tools
 
-    # --- The endpoint ---
-
-
     @property
     def platform(self) -> Platform:
         """What the tools act on (the Manager routes a reply to a user gate through it before its model)."""
         return self._platform
+
+    # --- The endpoint ---
+
     def authorized(self, header: str | None) -> bool:
         """Whether an ``Authorization`` header carries this server's token."""
         scheme, _, value = (header or "").partition(" ")
