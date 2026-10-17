@@ -35,7 +35,7 @@ import { RoleProfile, TaskAgentsSummary, TaskAgentsTab } from "@/components/task
 import { NodeCards } from "@/components/pipeline-node-card";
 import { PipelineToolbar } from "@/components/pipeline-toolbar";
 import { GateBadge, TaskGates } from "@/components/task-gates";
-import { TaskWorkspaces, WorktreeMarker } from "@/components/task-workspaces";
+import { TaskWorkspaceCard, TaskWorkspaces, WorktreeMarker } from "@/components/task-workspaces";
 import { GATE_STATES, GATE_TURNS, gateAnchor, gateLook, gateTurn, stepAnchor } from "@/lib/gates";
 import { type NodeCard, gateCard, nodeCardId, plannerCard, resultCard, stepCard } from "@/lib/node-cards";
 import { FIT_PADDING, shownSteps, stepColumns, stepLevels, storeHideSkipped, storedHideSkipped } from "@/lib/pipeline-layout";
@@ -724,6 +724,8 @@ function OverviewTab({
       <TaskProgress task={task} />
 
       {task.cost && task.cost.runs > 0 && <TaskCostBreakdown cost={task.cost} />}
+
+      <TaskWorkspaceCard task={task} />
 
       <TaskConfigSection task={task} />
 

@@ -11,12 +11,14 @@ const FIELDS: (keyof ProjectExecution)[] = [
   "review_policy",
   "distill_lessons",
   "step_workspaces",
-  "step_workspace_links",
+  "workspace_links",
   "max_step_retries",
   "planner_roles",
   "role_text_max_chars",
   "user_gates",
   "gate_reminder_hours",
+  "task_workspaces",
+  "operator_notes",
 ];
 const NUMBERS = new Set<keyof ProjectExecution>([
   "task_budget_usd",
@@ -26,7 +28,7 @@ const NUMBERS = new Set<keyof ProjectExecution>([
   "gate_reminder_hours",
 ]);
 
-const LISTS = new Set<keyof ProjectExecution>(["step_workspace_links"]);
+const LISTS = new Set<keyof ProjectExecution>(["workspace_links"]);
 
 export function executionDraft(project: Project): ExecutionDraft {
   const text = (value: unknown) => (value == null ? "" : Array.isArray(value) ? value.join("\n") : String(value));
@@ -170,20 +172,57 @@ export function ProjectExecutionFields({
           </p>
         </div>
         <div className="space-y-1">
-          {label("step_workspace_links", "Linked into step worktrees")}
+          {label("workspace_links", "Linked into Looper's worktrees")}
           <textarea
-            id={`${idPrefix}-step_workspace_links`}
-            value={draft.step_workspace_links}
-            onChange={set("step_workspace_links")}
-            aria-describedby={`${idPrefix}-step_workspace_links-help`}
+            id={`${idPrefix}-workspace_links`}
+            value={draft.workspace_links}
+            onChange={set("workspace_links")}
+            aria-describedby={`${idPrefix}-workspace_links-help`}
             placeholder={".venv\n.env"}
             rows={3}
             spellCheck={false}
             className="flex w-full rounded-md border border-input bg-transparent px-3 py-1.5 font-mono text-sm text-foreground"
           />
-          <p id={`${idPrefix}-step_workspace_links-help`} className="text-xs text-muted-foreground">
-            One path per line, relative to the task directory: ignored local state a worktree would lack. Each is a
-            link to the task directory&apos;s own, shared by every step, and never committed.
+          <p id={`${idPrefix}-workspace_links-help`} className="text-xs text-muted-foreground">
+            One path per line, relative to the directory: ignored local state a worktree would lack. In a task&apos;s
+            worktree each is a link to the workspace&apos;s own, in a step&apos;s to the task directory&apos;s; shared,
+            and never committed.
+          </p>
+        </div>
+        <div className="space-y-1">
+          {label("task_workspaces", "Where tasks run")}
+          <select
+            id={`${idPrefix}-task_workspaces`}
+            value={draft.task_workspaces}
+            onChange={set("task_workspaces")}
+            aria-describedby={`${idPrefix}-task_workspaces-help`}
+            className={SELECT}
+          >
+            <option value="">Inherit: in the directory itself</option>
+            <option value="in_place">In the directory itself</option>
+            <option value="worktree">In a git worktree of it</option>
+          </select>
+          <p id={`${idPrefix}-task_workspaces-help`} className="text-xs text-muted-foreground">
+            For tasks that name no directory of their own. In a worktree a task works on a branch of its own, which it
+            leaves to you to merge; your checkout is untouched.
+          </p>
+        </div>
+        <div className="space-y-1">
+          {label("operator_notes", "Operator's notes")}
+          {/* Not set is off; there is no layer to inherit from. */}
+          <select
+            id={`${idPrefix}-operator_notes`}
+            value={draft.operator_notes || "off"}
+            onChange={set("operator_notes")}
+            aria-describedby={`${idPrefix}-operator_notes-help`}
+            className={SELECT}
+          >
+            <option value="off">Off</option>
+            <option value="on">On</option>
+          </select>
+          <p id={`${idPrefix}-operator_notes-help`} className="text-xs text-muted-foreground">
+            When on, the project&apos;s Planners, Workers and Reviewers get a read-only copy of your Claude Code notes
+            (its auto memory) for the directory they work in. Looper never changes them.
           </p>
         </div>
         <div className="space-y-1">
