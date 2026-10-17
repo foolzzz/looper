@@ -40,6 +40,7 @@ from typing import TYPE_CHECKING, Any
 
 from ..broadcast import Broadcaster
 from ..bus import MessageBus
+from ..supervisor import cancel_and_wait
 from ..agent_settings import AgentSettings, AgentType, Launch, load_agent_settings
 from ..claude_cli import (
     AUTONOMOUS_INPUT,
@@ -387,11 +388,7 @@ class ManagerAgent:
     async def stop(self) -> None:
         self._running = False
         if self._task:
-            self._task.cancel()
-            try:
-                await self._task
-            except asyncio.CancelledError:
-                pass
+            await cancel_and_wait(self._task)
             self._task = None
         async with self._turn_lock:
             await self._claude.stop()
