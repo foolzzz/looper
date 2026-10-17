@@ -222,7 +222,7 @@ release wheel serves the copy packaged with it.
 
 | Page | Features |
 |---|---|
-| **Dashboard** | What is happening now: task counts by group (each opening the filtered Tasks page), the agents running now, each active project's concurrency against its limits, the schedules (next fires, failing ones, today's skips), today's spend, and a warning when a component is unhealthy |
+| **Dashboard** | What is happening now: task counts by group (each opening the filtered Tasks page), the agents running now, each active project's running tasks, Workers and Reviewers, the schedules (next fires, failing ones, today's skips), today's spend, and a warning when a component is unhealthy |
 | **Chat** | Talk to the global Manager, or to a running task's Planner (a message reaches it as a supplement to the task); with the Manager selected, its conversations by channel (dashboard chat, Lark, Telegram), the Lark and Telegram ones read-only; SSE streaming |
 | **Tasks** | Task list, project, status and schedule filters, a Scheduled badge on the tasks a schedule created, create/start/stop/delete controls |
 | **Project** | One project's overview, knowledge documents, its own skills and installs, the Agent Profiles and other agent settings its roles override, its schedules (rule, next fire times, enable, Run now, run history) and its settings |
