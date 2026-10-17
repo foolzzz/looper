@@ -32,7 +32,7 @@ directories), one at a time over the HTTP API:
 | `gate_not_needed` | the same switch on a one-file task: no gate, at most two steps |
 | `gate_end_early` | the settings task again, but the user ends the discussion at once: the Planner closes the gate on stated assumptions and writes a settings file anyway |
 | `gate_parallel_branch` | a clear part (a 20-second step) and the settings part: the gate holds back only the second, and a Worker runs while it waits |
-| `gate_explore_cancel` | the port is what a step's `probe.sh` prints and the user cannot answer (the scripted user only ends a gate after 120 s): an observation of whether the Planner opens a gate and cancels it once the step reports; only the file counts |
+| `gate_discoverable` | the port is what a step's `probe.sh` prints and the user cannot answer: the Planner must not ask (`gates_opened` 0; a gate that waits on the step and is cancelled before it opens never asked). The scripted user ends a gate that opens after 120 s, so the task fails fast instead of timing out |
 
 For each task it reads back from the API: success (the task completed, its
 files are right and the flow happened, such as the review or the retry), step
@@ -172,7 +172,9 @@ single_step,chat_correction` (task ids, or a named set: `planner`, the tasks
 whose pass or fail turns on the Planner's judgment, `dependent_steps`,
 `parallel_parts`, `interface_first`, `supplement_replan`,
 `supplement_no_change`, `requirement_edit`, `roles_tester_docs`,
-`roles_not_needed` and `roles_multi_platform`; a set is resolved against the
+`roles_not_needed`, `roles_multi_platform`, `gate_ambiguous`,
+`gate_not_needed`, `gate_parallel_branch` and `gate_discoverable`; a set is
+resolved against the
 tasks there are, so a task it names that does not exist yet is left out until
 it is added; sets and ids mix, as in `--tasks planner,single_step`), `--reps`,
 `--max-budget-usd`, `--total-cap-usd` (for all the reps), `--baseline
@@ -180,13 +182,18 @@ it is added; sets and ids mix, as in `--tasks planner,single_step`), `--reps`,
 `--step-workspaces shared|worktree` (each working directory becomes a git
 repository on `main` with one commit, the task's project gets that setting, and
 each task reports the merge and checkpoint commits it added as
-`looper_commits`), `--user-gates on|off` (every task's project gets that
-`user_gates` setting, over the task's own: `on` runs the other tasks with the
-gate contract, so `gates_opened` there shows how often the Planner asks when
-it need not). The runner plays the user in a task's gates: when one waits for
-the user it posts the task's `gate_script` in turn (`<end>` ends the
-discussion; a task without one answers "No preference: decide yourself and
-state your assumptions." and then ends it). To print a comparison again:
+`looper_commits`), `--user-gates on|off` (every task's project but a gate
+task's gets that `user_gates` setting; a gate task always has gates on, so
+`--tasks planner` runs its gate tasks as they are meant to: `on` runs the
+other tasks with the gate contract, so `gates_opened` there shows how often
+the Planner asks when it need not). The runner plays the user in a task's
+gates: when one waits for the user it posts the task's `gate_script` in turn
+(`<end>` ends the discussion; a task without one answers "No preference:
+decide yourself and state your assumptions." and then ends it). When the
+Planner asks again after a script has run out, the runner ends the discussion,
+so the gate closes on the Planner's assumptions instead of waiting for the
+task's timeout; `gate_asks_beyond_script` counts those gates. To print a
+comparison again:
 
 ```bash
 uv run python -m evals.prompt_regression compare evals/runs/<new>.json [evals/runs/<base>.json]

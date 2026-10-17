@@ -392,6 +392,47 @@ def test_a_task_set_is_resolved_against_the_tasks_there_are(monkeypatch: pytest.
         runner.select_tasks(["empty"])
 
 
+class _Poster:
+    """The API as ``answer_gates`` uses it: what it posted."""
+
+    def __init__(self) -> None:
+        self.posted: list[tuple[str, Any]] = []
+
+    def post(self, path: str, body: Any) -> dict[str, Any]:
+        self.posted.append((path, body))
+        return {}
+
+
+def test_the_scripted_user_ends_a_gate_that_asks_again_after_its_script_ran_out() -> None:
+    task = next(t for t in TASKS if t.id == "gate_ambiguous")
+    api, answered = _Poster(), {}
+    waiting = {"gates": [{"step": "g1", "waiting_on": "user", "opened_at": None}]}
+    for _ in range(4):
+        runner.answer_gates(api, task, "t1", waiting, answered, now=0.0)
+    assert api.posted == [("/api/tasks/t1/gates/g1/messages", {"text": task.gate_script[0]}),
+                          ("/api/tasks/t1/gates/g1/end", {})]
+    # A script that ends the discussion itself gets no second end.
+    ends = next(t for t in TASKS if t.id == "gate_end_early")
+    api, answered = _Poster(), {}
+    for _ in range(3):
+        runner.answer_gates(api, ends, "t1", waiting, answered, now=0.0)
+    assert api.posted == [("/api/tasks/t1/gates/g1/end", {})]
+    # Nothing while the gate waits for the Planner.
+    api = _Poster()
+    runner.answer_gates(api, task, "t1", {"gates": [{"step": "g1", "waiting_on": "planner"}]}, {}, now=0.0)
+    assert api.posted == []
+
+
+@pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
+def test_a_gate_task_has_gates_on_whatever_user_gates_says(tmp_path: Path) -> None:
+    tasks = runner.select_tasks(["gate_ambiguous"])
+    assert {"gate_ambiguous", "gate_not_needed", "gate_parallel_branch", "gate_discoverable"} <= \
+        set(runner.TASK_SETS["planner"])
+    result, _ = runner.run(mode="fake", tasks=tasks, admin_url=str(DSN), out_dir=tmp_path, user_gates="off")
+    (row,) = result["tasks"]
+    assert row["outcome"] == "pass" and row["gates_opened"] == 1, row["problems"]
+
+
 def test_the_base_is_the_committed_baseline_unless_another_is_named(tmp_path: Path,
                                                                     monkeypatch: pytest.MonkeyPatch) -> None:
     baselines, runs = tmp_path / "baselines", tmp_path / "runs"
@@ -571,7 +612,7 @@ def test_fake_mode_runs_every_task_and_sees_misbehaviour(tmp_path: Path) -> None
                     "roles_advisory_review": (1, 0, 2, 0), "roles_not_needed": (1, 0, 0, 0),
                     # A gate is a step; the steps its closing turn added follow it.
                     "gate_ambiguous": (2, 0, 0, 0), "gate_not_needed": (1, 0, 0, 0), "gate_end_early": (2, 0, 0, 0),
-                    "gate_parallel_branch": (3, 0, 0, 0), "gate_explore_cancel": (2, 0, 0, 0)}
+                    "gate_parallel_branch": (3, 0, 0, 0), "gate_discoverable": (2, 0, 0, 0)}
     # Only the parts that need nothing of each other run side by side; interface_first's sit between its interface
     # step and its integration step.
     shape = {t: (by_id[t]["independent_pairs"], by_id[t]["bracketed_pairs"], by_id[t]["parallel_workers"])
@@ -587,7 +628,7 @@ def test_fake_mode_runs_every_task_and_sees_misbehaviour(tmp_path: Path) -> None
                      "roles_advisory_review": (0, 0, 1), "roles_not_needed": (0, 0, 1),
                      "gate_ambiguous": (0, 0, 1), "gate_not_needed": (0, 0, 1), "gate_end_early": (0, 0, 1),
                      # The clear part runs beside the gate and then beside the step the gate's answer planned.
-                     "gate_parallel_branch": (2, 0, 2), "gate_explore_cancel": (1, 0, 1)}
+                     "gate_parallel_branch": (2, 0, 2), "gate_discoverable": (0, 0, 1)}
     assert by_id["chat_correction"]["planner_turns"]["chat"] == 1
     # Only the task whose project lets its Planner choose a profile runs a Worker on the one it chose.
     assert {t: by_id[t]["planner_profile_runs"] for t in by_id if by_id[t]["planner_profile_runs"]} == {
@@ -602,14 +643,16 @@ def test_fake_mode_runs_every_task_and_sees_misbehaviour(tmp_path: Path) -> None
     assert roles == {"roles_tester_docs": (2, 2, 1, 0, 0, 0, 0, 0), "roles_security_review": (1, 1, 0, 1, 0, 0, 0, 0),
                      "roles_advisory_review": (1, 1, 0, 1, 0, 0, 0, 1)}
     # Only the gate tasks open gates. The scripted user answers (or ends the discussion), the gate passes on what was
-    # settled (or assumed), and the step it planned reads the conclusion; the step that finds the port cancels its
-    # gate while it waits.
+    # settled (or assumed), and the step it planned reads the conclusion; the step that finds the port cancels the
+    # gate that waits on it before it opens, so no gate asked.
     gates = {t: tuple(by_id[t][k] for k in ("gates_opened", "gate_turns", "gates_passed", "gates_ended_by_user",
                                              "gates_cancelled", "assumptions_stated", "gate_parallel_runs",
                                              "conclusion_reads"))
              for t in by_id if by_id[t]["gates_opened"]}
     assert gates == {"gate_ambiguous": (1, 1, 1, 0, 0, 0, 0, 1), "gate_end_early": (1, 1, 1, 1, 0, 1, 0, 1),
-                     "gate_parallel_branch": (1, 1, 1, 0, 0, 0, 1, 1), "gate_explore_cancel": (1, 0, 0, 0, 1, 0, 1, 0)}
+                     "gate_parallel_branch": (1, 1, 1, 0, 0, 0, 1, 1)}
+    assert by_id["gate_discoverable"]["gates_opened"] == 0
+    assert all(by_id[t]["gate_asks_beyond_script"] == 0 for t in by_id)
     assert by_id["gate_ambiguous"]["planner_turns"]["gate"] == 1
     # Only the two changes that make the second step wrong change the plan.
     assert {t: by_id[t]["plan_changes"] for t in by_id if by_id[t]["plan_changes"]} == {

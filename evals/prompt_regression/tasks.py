@@ -12,7 +12,9 @@ Where a task's project lets its Planner open user gates (``user_gates``, or
 the run's ``--user-gates on``), the runner plays the user: each time a gate
 waits for the user it posts the next entry of the task's ``gate_script`` (a
 message, or ``END_DISCUSSION``), after ``gate_reply_after_s`` seconds; a task
-without a script answers ``DEFAULT_GATE_SCRIPT``.
+without a script answers ``DEFAULT_GATE_SCRIPT``. Once a script has run out
+the runner ends the discussion, so a Planner that keeps asking closes on its
+assumptions (``gate_asks_beyond_script`` counts those gates).
 """
 
 from __future__ import annotations
@@ -687,9 +689,10 @@ GATE_TASKS: tuple[EvalTask, ...] = (
         },
     ),
     EvalTask(
-        # What only a step's work can find out: no one can answer a gate about it in time, so a Planner that opens one
-        # should cancel it once the step reports. An observation, not a pass or fail on the gate.
-        id="gate_explore_cancel",
+        # What only a step's work can find out: the contract says never to ask in a gate what can be found out, so
+        # no gate opens. A gate that waits on the step and is cancelled before it opens never asked the user; one
+        # that opens fails the task, and the scripted user ends it after two minutes so that fails fast.
+        id="gate_discoverable",
         requirement=("Create port.txt in the working directory holding only the port number the service must use. "
                      "Nobody knows it offhand, the user included: `sh probe.sh` prints it, and only a step's Worker "
                      "may run probe.sh. The user cannot answer a question about the port."),
@@ -698,10 +701,10 @@ GATE_TASKS: tuple[EvalTask, ...] = (
         gate_script=(END_DISCUSSION,),
         gate_reply_after_s=120.0,
         check=_equals("port.txt", "8125"),
-        expect={"min_steps": 1},
+        expect={"min_steps": 1, "max_gates_opened": 0},
         fake={
             "plan": [_step("s1", "Run sh probe.sh and write what it prints to port.txt.", ["port.txt holds the port"]),
-                     {**_SETTINGS_GATE, "topic": "the port",
+                     {**_SETTINGS_GATE, "topic": "the port", "depends_on": ["s1"],
                       "agenda": [{"question": "Which port must the service use?"}]}],
             "decision_gates": {"s1": [{"id": "g1", "action": "cancel", "resolution": "probe.sh printed 8125"}]},
             "attempts": {"s1": [{"status": "completed", "files": {"port.txt": "8125\n"}}]},
