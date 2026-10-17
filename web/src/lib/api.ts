@@ -100,6 +100,16 @@ export interface ProjectExecution {
   user_gates: "off" | "on" | null;
   /** Hours between the reminders of a gate that waits for the user, 0 to 168; 0 = none, null = 24. */
   gate_reminder_hours: number | null;
+  /** Whether the agents of the project's tasks share a room they message each other in; null = "on" (unlike the
+   * other switches). */
+  agent_room: "off" | "on" | null;
+  /** The room's limits (`ROOM_LIMITS` in lib/room has each one's range and default); null = the default. */
+  room_post_per_minute: number | null;
+  room_broadcasts_per_run: number | null;
+  room_message_max_chars: number | null;
+  room_messages_per_task: number | null;
+  room_ping_pong_rounds: number | null;
+  room_wait_max_seconds: number | null;
 }
 
 /** A group of tasks with an optional default work directory and background. */
@@ -1385,6 +1395,97 @@ export interface TaskDetail extends TaskInfo {
   gates: UserGate[];
   /** The role each Worker and Reviewer run that ran as one ran as, by agent id; absent in a task without such runs. */
   run_roles?: Record<string, RunRole>;
+  /** Its agent room in numbers; null when it cannot be read. The messages are at `fetchTaskRoom`. */
+  room?: RoomSummary | null;
+}
+
+// --- A task's agent room: the messages its Planner and its steps' seats send each other (read only here) ---
+
+/** Whether a seat has a run now ("online", or "waiting" for room in its task), had one ("offline"), has not started
+ * ("planned") or was dropped with its step before it ran. */
+export type RoomPresence = "online" | "waiting" | "offline" | "planned" | "dropped";
+
+/** What members post (info, question, answer, interface, announce); Looper writes notices (to a seat) and
+ * escalations (to the Planner). */
+export type RoomMessageKind = "info" | "question" | "answer" | "interface" | "announce" | "notice" | "escalation";
+
+/** Why Looper wrote a notice or an escalation. */
+export type RoomReason = "ping_pong" | "consult_fallback" | "interface_changed" | "room_full" | "watch";
+
+/** A step's seat: `<role>@<step key>` (worker@s2, backend_rd@s2, reviewer@s2). Gates have none; the Planner is not
+ * listed. */
+export interface RoomSeat {
+  seat: string;
+  role: string;
+  kind: "work" | "review";
+  step: string;
+  step_status: string;
+  presence: RoomPresence;
+  /** Since when its run is online or waiting. */
+  since?: string;
+}
+
+export interface RoomMessage {
+  id: number;
+  /** A seat, "planner" or "looper". */
+  from: string;
+  /** "all", or the seats, roles and "planner" it is for. */
+  to: "all" | string[];
+  kind: RoomMessageKind;
+  body: string;
+  /** The message it answers or follows up. */
+  reply_to?: number;
+  files?: string[];
+  commits?: string[];
+  reason?: RoomReason;
+  /** How it came other than posted by its sender's run: the Planner's reply in a [ROOM] turn, Looper's own, or a
+   * consult of an offline seat. */
+  via?: "planner_reply" | "looper" | "consult";
+  at: string;
+  /** A Reviewer's question or answer, which the Planner sees too. */
+  cc_planner: boolean;
+  /** A question with an answer. */
+  answered: boolean;
+}
+
+export interface RoomCounts {
+  messages: number;
+  by_kind: Partial<Record<RoomMessageKind, number>>;
+  questions: number;
+  unanswered: number;
+}
+
+/** A step's messages: those its seats sent, those addressed to them, and the questions they asked or were asked that
+ * have no answer. */
+export interface RoomStepCounts {
+  sent: number;
+  received: number;
+  unanswered: number;
+}
+
+/** A task's room in numbers, as the task detail has it. */
+export interface RoomSummary {
+  /** Its project has the room on (the default). */
+  enabled: boolean;
+  counts: RoomCounts;
+  /** By step key; only the steps with any. */
+  by_step: Record<string, RoomStepCounts>;
+}
+
+export interface RoomView extends RoomSummary {
+  seats: RoomSeat[];
+  /** Oldest first: the newest `limit` (500 at most), or with `after` the newer ones only. */
+  messages: RoomMessage[];
+  /** Older messages than these are not in it (with `after`: more newer ones than `limit`). */
+  more: boolean;
+}
+
+/** The task's room: its seats, its numbers and its messages; with `after` (a message id) only the newer ones. */
+export async function fetchTaskRoom(taskId: string, { after = 0 }: { after?: number } = {}): Promise<RoomView> {
+  const query = after > 0 ? `?after=${after}` : "";
+  const res = await fetch(`${API_BASE}/tasks/${encodeURIComponent(taskId)}/room${query}`);
+  if (!res.ok) await failed(res, "room");
+  return res.json();
 }
 
 /** Where a user gate stands: "pending" until its dependencies are done, "open" (waiting for the user's first word),

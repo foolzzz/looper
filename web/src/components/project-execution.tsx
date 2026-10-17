@@ -1,5 +1,6 @@
 import type { Project, ProjectExecution, ProjectUpdate } from "@/lib/api";
 import { Input } from "@/components/ui/input";
+import { ROOM_LIMITS } from "@/lib/room";
 
 /** The execution settings as the editor holds them: text, "" = inherit. */
 export type ExecutionDraft = Record<keyof ProjectExecution, string>;
@@ -16,6 +17,8 @@ const FIELDS: (keyof ProjectExecution)[] = [
   "role_text_max_chars",
   "user_gates",
   "gate_reminder_hours",
+  "agent_room",
+  ...ROOM_LIMITS.map((limit) => limit.field),
 ];
 const NUMBERS = new Set<keyof ProjectExecution>([
   "task_budget_usd",
@@ -23,6 +26,7 @@ const NUMBERS = new Set<keyof ProjectExecution>([
   "max_step_retries",
   "role_text_max_chars",
   "gate_reminder_hours",
+  ...ROOM_LIMITS.map((limit) => limit.field),
 ]);
 
 export function executionDraft(project: Project): ExecutionDraft {
@@ -223,6 +227,44 @@ export function ProjectExecutionFields({
             Hours between the reminders of a gate that waits for you, noted in its discussion.
           </p>
         </div>
+        <div className="space-y-1">
+          {label("agent_room", "Agent room")}
+          {/* Not set is on: the one switch here that is on by default. */}
+          <select
+            id={`${idPrefix}-agent_room`}
+            value={draft.agent_room || "on"}
+            onChange={set("agent_room")}
+            aria-describedby={`${idPrefix}-agent_room-help`}
+            className={SELECT}
+          >
+            <option value="on">On</option>
+            <option value="off">Off</option>
+          </select>
+          <p id={`${idPrefix}-agent_room-help`} className="text-xs text-muted-foreground">
+            Lets the task&apos;s agents message each other through Looper&apos;s room tools; on by default.
+          </p>
+        </div>
+        <fieldset className="rounded-md border border-border px-3 py-3 sm:col-span-2">
+          <legend className="px-1 text-xs font-medium text-muted-foreground">Agent room limits</legend>
+          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+            {ROOM_LIMITS.map(({ field, label: text, help, min, max, fallback }) => (
+              <div key={field} className="space-y-1">
+                {label(field, text)}
+                <Input
+                  id={`${idPrefix}-${field}`}
+                  inputMode="numeric"
+                  value={draft[field]}
+                  onChange={set(field)}
+                  aria-describedby={`${idPrefix}-${field}-help`}
+                  placeholder={`${fallback.toLocaleString()} (${min.toLocaleString()}–${max.toLocaleString()})`}
+                />
+                <p id={`${idPrefix}-${field}-help`} className="text-xs text-muted-foreground">
+                  {help} {min.toLocaleString()}–{max.toLocaleString()}; default {fallback.toLocaleString()}.
+                </p>
+              </div>
+            ))}
+          </div>
+        </fieldset>
       </div>
     </fieldset>
   );

@@ -2,7 +2,7 @@
  * `components/pipeline-node-card`. */
 import { historyHref } from "@/pages/agent-history";
 import { gateWaitsOn } from "@/lib/gates";
-import type { GateAgendaItem, TaskDetail, TaskStep, UserGate } from "@/lib/api";
+import type { GateAgendaItem, RoomStepCounts, TaskDetail, TaskStep, UserGate } from "@/lib/api";
 
 /** A node's status as the Pipeline draws it: a word and the node's colors. */
 export interface CardLook {
@@ -116,10 +116,12 @@ export interface StepCardContext {
   stepsById: Map<string, TaskStep>;
   /** Why a dropped step was dropped. */
   skippedBecause?: string;
+  /** Its seats' messages in the task's room, when they have any. */
+  room?: RoomStepCounts;
 }
 
 /** A step's card: what it does, how it is checked, what it waits for, who ran it and what came of it. */
-export function stepCard(step: TaskStep, { taskId, look, lookOf, stepsById, skippedBecause }: StepCardContext): NodeCard {
+export function stepCard(step: TaskStep, { taskId, look, lookOf, stepsById, skippedBecause, room }: StepCardContext): NodeCard {
   const deps = (step.depends_on ?? []).map((id) => stepsById.get(id)).filter((s): s is TaskStep => !!s);
   // completed_at is kept from the first time the step went to review or ended, so a retried step's may be earlier.
   const finished = step.completed_at && (step.status === "skipped" ? "Dropped" : step.retries ? "First finished" : "Finished");
@@ -142,6 +144,13 @@ export function stepCard(step: TaskStep, { taskId, look, lookOf, stepsById, skip
         step.status === "completed" && step.review_stage && {
           label: "Now",
           value: `Waiting for ${step.review_stage === "role" ? `review: ${step.review_role_key}` : "the built-in review"}`,
+        },
+      ]),
+      ...facts("Room", [
+        room && { label: "Messages", value: `${room.sent} sent, ${room.received} received` },
+        room && room.unanswered > 0 && {
+          label: "Unanswered",
+          value: `${room.unanswered} question${room.unanswered === 1 ? "" : "s"}`,
         },
       ]),
       ...stepResult(step),
