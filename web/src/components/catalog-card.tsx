@@ -8,11 +8,13 @@ import { Input } from "@/components/ui/input";
 import {
   deleteCatalogItem,
   fetchCatalog,
+  defaultInstallRoles,
+  installRoleLabel,
   importCatalog,
   installItem,
   uninstall,
   updateInstall,
-  type AgentRole,
+  type InstallRole,
   type Catalog,
   type CatalogItem,
   type Install,
@@ -38,7 +40,7 @@ function installSummary(installs: Install[]) {
   );
   return ordered.map(
     (install) =>
-      `${install.scope === "global" ? "Global" : (install.project_name ?? install.project_id)}: ${install.roles.join(", ")}${
+      `${install.scope === "global" ? "Global" : (install.project_name ?? install.project_id)}: ${install.roles.map(installRoleLabel).join(", ")}${
         install.enabled ? "" : " (off)"
       }`,
   );
@@ -59,7 +61,7 @@ function ItemRow({
   onRemove,
 }: {
   item: CatalogItem;
-  roles: AgentRole[];
+  roles: InstallRole[];
   busy: boolean;
   error: string | undefined;
   fileMaxBytes: number;
@@ -147,7 +149,9 @@ function ItemRow({
           variant="outline"
           size="sm"
           disabled={busy}
-          onClick={() => onChange(() => installItem({ item_id: item.item_id, scope: "global", roles }))}
+          onClick={() =>
+            onChange(() => installItem({ item_id: item.item_id, scope: "global", roles: defaultInstallRoles(roles) }))
+          }
           aria-label={`Install ${item.qualified_name} globally`}
         >
           {busy && <Loader2 className="h-3.5 w-3.5 animate-spin" />}

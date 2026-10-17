@@ -1540,6 +1540,15 @@ export interface RunRole {
  * role whose current version is the user's). */
 export type RoleVia = "planner" | "user";
 
+/** A catalog item a role or a template names; its runs load it besides the built-in role's installs while it is
+ * installed for roles (an install's "task_role"). kind and name are null for one the catalog no longer has. */
+export interface RoleItem {
+  id: string;
+  kind: LibraryKind | null;
+  name: string | null;
+  description?: string;
+}
+
 /** A role a task's Planner defined: "work" runs a step in the built-in Worker's place; "review" reviews a step
  * after the built-in Reviewer passed it, and both must pass. */
 export interface PlannerRole {
@@ -1560,6 +1569,8 @@ export interface PlannerRole {
   via: RoleVia;
   /** The project role template the current version was copied from, by key. */
   template: string | null;
+  /** The catalog items the current version names. */
+  items: RoleItem[];
   /** Every version, oldest first. */
   versions: { version: number; created_at: string; reason: string; via: RoleVia; template: string | null; sha256: string }[];
   /** The labels of the live steps that name it. */
@@ -1574,6 +1585,8 @@ export interface TaskRoleEdit {
   harness: string | null;
   /** One on the project's list of Agent Profiles that can run the kind. */
   profile_id: string | null;
+  /** Item ids, each installed for roles in the project; left out keeps the current ones. */
+  items?: string[];
 }
 
 /** Write `fields` as a new version of the task's role `key`, by the user; its Planner hears of it. Fails for a
@@ -2502,6 +2515,8 @@ export interface RoleTemplate {
   harness: string | null;
   /** One the project no longer allows (allowed false) is left out of a copy. */
   profile: { profile_id: string; name: string; allowed: boolean } | null;
+  /** One no longer installed for roles here is left out of a copy. */
+  items: RoleItem[];
   updated_at: string;
 }
 
@@ -2510,11 +2525,29 @@ export interface RoleTemplates {
   /** How long a template's role prompt and harness may each be. */
   role_text_max_chars: number;
   templates: RoleTemplate[];
+  /** The catalog items installed for roles here, which a role or a template may name. */
+  role_items: RoleItem[];
 }
 
 export type RoleTemplateFields = Pick<RoleTemplate, "kind" | "description" | "role_prompt" | "harness"> & {
   profile_id: string | null;
+  items: string[];
 };
+
+/** The roles a project's Planners defined, summed by id across the project's tasks with roles; one id may be
+ * another definition in each task. builtin: the built-in Worker's and Reviewer's numbers in the same tasks. */
+export interface ProjectRoleStats {
+  project_id: string;
+  tasks: number;
+  roles: { id: string; kinds: ("work" | "review")[]; tasks: number; templates: string[]; stats: RoleStats }[];
+  builtin: { worker: RoleStats; reviewer: RoleStats };
+}
+
+export async function fetchProjectRoleStats(projectId: string): Promise<ProjectRoleStats> {
+  const res = await fetch(`${API_BASE}/projects/${encodeURIComponent(projectId)}/role-stats`);
+  if (!res.ok) await failed(res, "role numbers");
+  return res.json();
+}
 
 const roleTemplatesPath = (projectId: string) => `/projects/${encodeURIComponent(projectId)}/role-templates`;
 
@@ -2545,6 +2578,14 @@ export type LibraryKind = "plugin" | "skill" | "mcp";
  * or an MCP server) or in a project. */
 export type ItemOrigin = "machine" | "upload" | "git" | "ui" | "project";
 export type AgentRole = "manager" | "planner" | "worker" | "reviewer";
+/** An install's roles: the built-in ones, and "task_role", the roles a task's Planner defines: such an install loads
+ * only for a run of a role that names its item. */
+export type InstallRole = AgentRole | "task_role";
+export const TASK_ROLE: InstallRole = "task_role";
+/** An install's role in words: a built-in role's name, or what TASK_ROLE means. */
+export const installRoleLabel = (role: InstallRole) => (role === TASK_ROLE ? "roles naming it" : role);
+/** The roles a new install names unless the user picks: the built-in ones, never TASK_ROLE. */
+export const defaultInstallRoles = (roles: InstallRole[]) => roles.filter((role) => role !== TASK_ROLE);
 export type InstallScope = "global" | "project";
 
 /** An item installed on a scope for some roles; a project install never names the manager. */
@@ -2554,7 +2595,7 @@ export interface Install {
   scope: InstallScope;
   project_id: string | null;
   project_name: string | null;
-  roles: AgentRole[];
+  roles: InstallRole[];
   /** A disabled install loads nowhere, from the next run on. */
   enabled: boolean;
   created_at: string;
@@ -2642,8 +2683,8 @@ export interface Catalog {
   total_bytes: number;
   last_import: LibraryImport | null;
   last_mcp_import: McpImport | null;
-  roles: AgentRole[];
-  task_roles: AgentRole[];
+  roles: InstallRole[];
+  task_roles: InstallRole[];
   caps: {
     file_max_bytes: number;
     item_max_bytes: number;
@@ -2676,7 +2717,7 @@ export interface ProjectInstalls {
   installs: ProjectInstall[];
   /** How many skills the project wrote. */
   owned_count: number;
-  task_roles: AgentRole[];
+  task_roles: InstallRole[];
   skill_caps: SkillCaps;
 }
 
@@ -2768,7 +2809,7 @@ export async function installItem(install: {
   item_id: string;
   scope: InstallScope;
   project_id?: string;
-  roles?: AgentRole[];
+  roles?: InstallRole[];
   enabled?: boolean;
 }): Promise<InstallChange> {
   const res = await fetch(`${API_BASE}/installs`, {
@@ -2782,7 +2823,7 @@ export async function installItem(install: {
 
 export async function updateInstall(
   installId: string,
-  fields: { roles?: AgentRole[]; enabled?: boolean },
+  fields: { roles?: InstallRole[]; enabled?: boolean },
 ): Promise<InstallChange> {
   const res = await fetch(`${API_BASE}/installs/${encodeURIComponent(installId)}`, {
     method: "PUT",

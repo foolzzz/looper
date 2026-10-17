@@ -1,5 +1,5 @@
 import { Badge } from "@/components/ui/badge";
-import type { AgentRole, CatalogItem } from "@/lib/api";
+import { TASK_ROLE, installRoleLabel, type CatalogItem, type InstallRole } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
 /**
@@ -15,9 +15,9 @@ export function RoleChecks({
   lastHint,
 }: {
   /** The roles the scope allows, in order. */
-  roles: AgentRole[];
-  value: AgentRole[];
-  onChange: (roles: AgentRole[]) => void;
+  roles: InstallRole[];
+  value: InstallRole[];
+  onChange: (roles: InstallRole[]) => void;
   disabled?: boolean;
   /** The group's accessible name, e.g. "Global roles of alpha". */
   label: string;
@@ -46,7 +46,13 @@ export function RoleChecks({
               title={last ? lastHint : undefined}
               onChange={(e) => onChange(roles.filter((r) => (r === role ? e.target.checked : checked.has(r))))}
             />
-            {role}
+            {role === TASK_ROLE ? (
+              <span title="Loads only for a run of a Planner-defined role that names this item">
+                {installRoleLabel(role)}
+              </span>
+            ) : (
+              role
+            )}
           </label>
         );
       })}

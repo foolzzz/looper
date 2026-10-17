@@ -32,6 +32,7 @@ import { historyHref, runRoleLabel } from "@/pages/agent-history";
 import { TaskCostBreakdown } from "@/components/task-cost";
 import { ContinueAtCap, TaskSpendMeter } from "@/components/task-budget";
 import { TaskRoleEditor } from "@/components/role-editor";
+import { RoleStatsLine } from "@/components/role-stats";
 import { RoleProfile, TaskAgentsSummary, TaskAgentsTab } from "@/components/task-agents-tab";
 import { NodeCards } from "@/components/pipeline-node-card";
 import { PipelineToolbar } from "@/components/pipeline-toolbar";
@@ -926,30 +927,6 @@ function stepRoles(step: TaskStep, versions = true) {
   ].filter(Boolean).join(" ");
 }
 
-const percent = (rate: number | null) => (rate == null ? "—" : `${Math.round(rate * 100)}%`);
-
-/** A role's numbers on one wrapping line, the same for the built-in Worker and Reviewer, so they compare. */
-function RoleStatsLine({ stats }: { stats: RoleStats }) {
-  const reviews = stats.reviews.passed + stats.reviews.not_passed;
-  const items: [string, string][] = [
-    ["Runs", stats.running ? `${stats.runs} (${stats.running} running)` : String(stats.runs)],
-    ["Cost", formatUsd(stats.cost_usd)],
-    ["Steps", `${stats.accepted}/${stats.steps} accepted, ${stats.failed} failed`],
-    ["Retries", String(stats.retries)],
-    ["Contract violations", String(stats.contract_violations)],
-    ["Review pass rate", reviews ? `${percent(stats.review_pass_rate)} of ${reviews}` : "—"],
-  ];
-  return (
-    <span className="flex flex-wrap gap-x-4 gap-y-0.5 text-xs">
-      {items.map(([label, value]) => (
-        <span key={label}>
-          <span className="text-muted-foreground">{label}</span> <span className="font-mono tabular-nums">{value}</span>
-        </span>
-      ))}
-    </span>
-  );
-}
-
 const ROLE_TEXT = "mt-1 max-h-64 overflow-y-auto whitespace-pre-wrap break-words rounded-md bg-muted px-3 py-2 font-mono text-xs";
 
 /** Who wrote a version, and the template it was copied from. */
@@ -1003,6 +980,14 @@ function RoleRow({ role, task, onEdited }: { role: PlannerRole; task: TaskDetail
               <p className="mt-1">None of its own: the working style that applies.</p>
             )}
           </div>
+          {role.items.length > 0 && (
+            <div>
+              <p className="font-medium text-muted-foreground">Items</p>
+              <p className="mt-1">
+                {role.items.map((item) => (item.name ? `${item.name} (${item.kind})` : item.id)).join(", ")}
+              </p>
+            </div>
+          )}
           <div>
             <p className="font-medium text-muted-foreground">Versions and reasons</p>
             <ol className="mt-1 space-y-1">
