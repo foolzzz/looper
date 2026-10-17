@@ -28,7 +28,9 @@ agent system started it in:
   makes the calls ``scenarios.json``'s ``manager`` lists for that message's
   text (re-read every turn), replying with each call's tool and status. In the
   calls, ``<task id>`` is the last task id an answer gave and
-  ``<confirmation>`` the confirmation id the note before the message names.
+  ``<confirmation>`` the confirmation id the note before the message names;
+  a call of ``sleep`` (``{"seconds": n}``), no tool, makes the reply that much
+  later.
 
 To show that the eval notices misbehaviour, a script may also make the
 Planner write files with the Write tool during [PLAN] (``planner_writes``),
@@ -251,14 +253,17 @@ def _manager(scenarios_path: str, args: list[str], stdin: _Stdin) -> None:
             calls = (json.load(handle).get("manager") or {}).get(message.strip(), [])
         answers = []
         for name, arguments in calls:
+            if name == "sleep":
+                time.sleep(float(arguments["seconds"]))
+                continue
             text = json.dumps(arguments).replace("<confirmation>", named.group(1) if named else "")
             result = rpc("tools/call", {"name": name, "arguments": json.loads(text.replace("<task id>", last_task))})
             answer = json.loads(result["result"]["content"][0]["text"])
             created = answer.get("result") if isinstance(answer.get("result"), dict) else {}
             last_task = created.get("task_id") or last_task
-            answers.append(answer)
+            answers.append((name, answer))
         cost += MANAGER_TURN_COST
-        done = "；".join(f"{name}：{answer.get('status')}" for (name, _), answer in zip(calls, answers))
+        done = "；".join(f"{name}：{answer.get('status')}" for name, answer in answers)
         _answer("fake-manager", f"已处理（{done}）。" if answers else "放在哪个项目、哪个目录？", cost)
 
 
