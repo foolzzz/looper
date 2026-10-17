@@ -429,8 +429,9 @@ LARK_DISPLAY_NAME = "Lark (lark-cli)"
 
 
 async def _migrate_lark_config(pool: Any = None) -> None:
-    """Lark settings from before lark-cli's profile chose the app: drop ``app_id_env`` and ``app_secret_env``, and
-    give the row its new name when it still has the old default one."""
+    """Lark settings from before lark-cli's profile chose the app: drop ``app_id_env`` and ``app_secret_env``, add
+    the empty ``profile`` a new row has (Settings → Channels shows the fields a row holds), and give the row its new
+    name when it still has the old default one."""
     from ..db.channel_configs import drop_config_keys
     from ..db.connection import get_pool
     from .channels.lark_cli import LEGACY_KEYS
@@ -439,6 +440,8 @@ async def _migrate_lark_config(pool: Any = None) -> None:
     for channel_id in await drop_config_keys("lark", list(LEGACY_KEYS), pool=db):
         logger.info("%s: dropped app_id_env and app_secret_env from its settings; lark-cli's profile chooses the "
                     "app now (empty: its active profile)", channel_id)
+    await db.execute("UPDATE channel_configs SET config = config || '{\"profile\": \"\"}'::jsonb, updated_at = now() "
+                     "WHERE channel_type = 'lark' AND NOT config ? 'profile'")
     await db.execute("UPDATE channel_configs SET display_name = $1, updated_at = now() "
                      "WHERE channel_type = 'lark' AND display_name = 'Lark (飞书) Bot'", LARK_DISPLAY_NAME)
 

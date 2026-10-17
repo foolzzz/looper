@@ -223,11 +223,12 @@ release wheel serves the copy packaged with it.
 | Page | Features |
 |---|---|
 | **Dashboard** | What is happening now: task counts by group (each opening the filtered Tasks page), the agents running now, each active project's concurrency against its limits, the schedules (next fires, failing ones, today's skips), today's spend, and a warning when a component is unhealthy |
-| **Chat** | Talk to the global Manager, or to a running task's Planner (each message becomes a new step of that task); SSE streaming |
+| **Chat** | Talk to the global Manager, or to a running task's Planner (a message reaches it as a supplement to the task); with the Manager selected, its conversations by channel (dashboard chat, Lark, Telegram), the Lark and Telegram ones read-only; SSE streaming |
 | **Tasks** | Task list, project, status and schedule filters, a Scheduled badge on the tasks a schedule created, create/start/stop/delete controls |
 | **Project** | One project's overview, knowledge documents, its own skills and installs, the Agent Profiles and other agent settings its roles override, its schedules (rule, next fire times, enable, Run now, run history) and its settings |
 | **Task Detail** | Config editor (init status), overview, pipeline DAG, sessions, conversation; each Agent Timeline row has a **History** button |
 | **Runs** | Each role's sessions and run history (a Manager `/new` shows as a new session), each run opening its history; no configuration, a link to the role in Settings → Roles |
+| **Schedules** | Every project's schedules, filtered by project and status, each with its switch, Run now and Delete; a schedule's page shows its settings, alerts, today's spend and its run history. New schedules and edits are on the project's Schedules tab |
 | **Agent history** | One agent's launch command, full transcript (text, thinking, tool calls and results) and activity; follows a running agent and flags one with no output for 2 minutes |
 | **Settings** | A folding group at the bottom of the sidebar, one page each: **LLM Providers**; **Agent Runtimes** (read-only: each runtime type, found on the server's PATH or not, with Re-detect, and the planned ones); **Agent Profiles** (runtime, provider and model, the roles each can run and where it is used); **Roles** (one collapsible row for the shared defaults, then one per role with its overrides, prompt and limits); **Skills & MCP**; **Channels**; **Import / Export** |
 
@@ -241,14 +242,14 @@ site's page (its `Origin`) is refused. The main route groups:
 | Status | `GET /api/status`, `GET /api/overview` | System health and the startup self-check (`checks`); the Dashboard's overview of what is happening now |
 | Projects | `/api/projects`, `/api/projects/:id`, `/api/projects/:id/knowledge/...` | Create, edit and delete projects; their knowledge documents and drafts |
 | Tasks | `/api/tasks`, `/api/tasks/create`, `/api/tasks/:id/...`, `/api/tasks/{start,stop,cancel,delete}` | List and create tasks (in a project, with optional `profile_overrides`), read one, start, stop, cancel, delete; activity and its SSE stream |
-| Schedules | `/api/projects/:id/schedules`, `/api/schedules/:id/...`, `POST /api/schedules/preview` | Create, edit, enable and delete a project's schedules; run one now; its run history and messages; a rule's next fire times |
+| Schedules | `/api/projects/:id/schedules`, `GET /api/schedules`, `/api/schedules/:id/...`, `POST /api/schedules/preview` | Create, edit, enable and delete a project's schedules; list every project's; run one now; its run history and messages; a rule's next fire times |
 | Catalog and installs | `/api/catalog/...`, `/api/installs/...`, `/api/projects/:id/installs`, `/api/projects/:id/skills/...` | Plugins, skills and MCP servers: import, upload, git, write, edit, delete; install them globally or in a project |
 | Agent settings | `/api/agent-settings/...`, `/api/projects/:id/agent-settings/...`, `/api/roles/...` | The settings layers, each field with its effective value and source; each role's prompt and limits |
 | Registry | `GET /api/registry`, `/api/runtimes/:id/probe`, `/api/providers/...`, `/api/agent-profiles/...` | Runtime types and the built-in runtimes (Re-detect probes one); register, edit and delete providers (API keys masked) and Agent Profiles, each with where it is used |
 | Configuration transfer | `GET /api/config/export`, `/api/config/imports/...` | Download the configuration file; upload one, preview it, then apply or cancel |
-| Chat | `/api/chat/send`, `/api/chat/targets`, `/api/chat/messages`, `/api/chat/events` | Talk to the Manager or a running task's Planner; history and SSE stream |
+| Chat | `/api/chat/send`, `/api/chat/targets`, `/api/chat/sessions`, `/api/chat/messages`, `/api/chat/events` | Talk to the Manager or a running task's Planner; the Manager's conversations by channel; history and SSE stream |
 | Runs | `/api/llm-records/...`, `/api/agents/:id/usage` | Every agent run with its launch command, usage, cost and events; one agent's spending and context |
-| Channels | `/api/channel-configs/...` | Telegram and Lark settings and sender allowlists |
+| Channels | `/api/channel-configs/...`, `/api/channels/lark/...` | Telegram and Lark settings, the Telegram bot token (never returned) and sender allowlists; the Lark bot's status, refused senders and people search |
 
 The [HTTP API reference](docs/architecture/agent-system.md#http-api) describes
 the endpoints with their fields and errors.
@@ -260,28 +261,30 @@ the endpoints with their fields and errors.
 | Variable | Required | Description |
 |---|---|---|
 | `LOOPER_DATABASE_URL` | Yes | PostgreSQL connection string |
+| `LOOPER_PUBLIC_URL` | No | The dashboard's address as people open it (for example `https://looper.example.com`), for the links that task-end notices and schedule messages send to Telegram and Lark; unset, the server's own `http://<host>:<port>`. An invalid value stops `looper serve` from starting |
 | `LOOPER_SCHEDULE_MIN_INTERVAL_SECONDS` | No | For tests and validation only: the least time between two fires of a schedule (default 300), read at startup |
 
 The `claude` processes inherit the server's environment, so the Claude CLI
 authenticates as it does in your shell: signed in, or with an API key as its
 own documentation describes.
 
-Channel credentials are also environment variables; the Settings page decides
-which ones (see [Channels](#channels)). Store secrets in `.env` (gitignored,
+Channel credentials stay out of the source: the Telegram bot token is entered
+in Settings or kept in an environment variable, and Lark's credentials stay in
+`lark-cli` (see [Channels](#channels)). Store secrets in `.env` (gitignored,
 read from the repository root), never in source.
 
 ### Channels
 
 The web chat is always on. Telegram and Lark are built in and need no
 command-line flags: enable and configure them on the dashboard **Settings**
-page. Settings are saved in the `channel_configs` table and read when the
-server starts, so restart `looper serve` after changing them. The table stores
-environment variable **names**, not secret values.
+page. Settings are saved in the database and read when the server starts, so
+restart `looper serve` after changing them. The Telegram bot token is stored
+apart from the settings and never returned by the API or exported.
 
 | Channel | Settings fields | Also needed |
 |---|---|---|
-| Telegram | `bot_token_env`: env var holding the bot token (default `LOOPER_TELEGRAM_BOT_TOKEN`). `allowed_user_ids`: the numeric Telegram user IDs that may talk to the bot. | The token in that env var. |
-| Lark (lark-cli) | `profile`: the lark-cli profile, which chooses the app and the bot (empty: lark-cli's active one). `allowed_open_ids`: the senders' Lark `open_id` (`ou_...`) for that app; Settings → Channels finds them by name or email and lists refused senders to allow. Direct messages only. | `lark-cli` on PATH and signed in; it receives and sends the messages, and the channel checks the bot at startup. |
+| Telegram | **Bot token**: the token from BotFather, stored apart and shown only as saved. `bot_token_env`: the env var read when no token is saved (default `LOOPER_TELEGRAM_BOT_TOKEN`). `allowed_user_ids`: the numeric Telegram user IDs that may talk to the bot. | Nothing else, or the token in that env var. |
+| Lark (lark-cli) | `profile`: the lark-cli profile, which chooses the app and the bot (empty: lark-cli's active one). `allowed_open_ids`: the senders' Lark `open_id` (`ou_...`) for that app; Settings → Channels finds them by name or email and lists refused senders to allow. Direct messages, and in group chats only messages that @-mention the bot. | `lark-cli` on PATH and signed in; it receives and sends the messages, and the channel checks the bot at startup. |
 
 - Every agent runs Claude Code without permission prompts, so the Manager
   can run any command on this machine. Each channel therefore passes on only
@@ -293,6 +296,17 @@ environment variable **names**, not secret values.
   lark-cli's active profile) decides which app it acts as (`lark-cli whoami`).
   Open_ids differ per app, so the allowlist remembers the app it was made for
   and the channel does not start under another one until it is rebuilt.
+- While the Manager works on a message from a listed sender, the bot reacts to
+  it (👀 in a Telegram private chat, 「Get」 in Lark) and shows one status
+  message that it edits in place; the answer and the task's progress come as
+  messages of their own.
+- In a Lark group, the bot answers only an @-mention from a listed sender,
+  replying to that message, and sends the task's progress and its end notice
+  to the group, @-mentioning the requester. Other group messages are ignored.
+- A task asked for in Telegram or Lark tells that chat when it completes or
+  fails, with a link to the task (see `LOOPER_PUBLIC_URL`). Telegram private
+  chats and Lark conversations are stored, shown read-only on the Chat page and
+  included in a new Manager session's resume brief.
 - Send `/new` (the whole message) in the web chat, Lark or Telegram to start a
   new Manager session: the next message, from any channel, starts with a clean
   context. The web chat's **New session** button sends it. Running tasks are

@@ -18,6 +18,11 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.7.0] - 2026-10-16
+
+Covers `v2.6.0` to `v2.7.0`: pull requests #72 to #166 in
+[foolzzz/looper](https://github.com/foolzzz/looper/pulls).
+
 ### Added
 
 - **Agent Profiles can run Codex with its own ChatGPT login.** A built-in
@@ -54,6 +59,349 @@ How the agent system works today is described in
   (without arguments) as a command, and the web chat has a "New session"
   button. Any other text, `/new foo` or `/news` included, is handled as
   before: a message for Claude (in Telegram, an unknown command).
+- **The Manager acts on Looper through typed platform tools.** Every Manager
+  launch (Claude Code, Codex or OMP) gets Looper's own MCP server `looper`,
+  over any catalog server of that name: `looper mcp-server`, a stdio forwarder
+  to `GET /api/agent/v1/tools` and `POST /api/agent/v1/ops/<tool>`, which take
+  only the random token `looper serve` makes at each start (401 otherwise).
+  The 15 tools are `looper_overview`, `looper_tasks`, `looper_task_create`,
+  `looper_task_control` (`start`, `stop`, `restart`, `start_over`, `cancel`),
+  `looper_task_instruct`, `looper_task_update`, `looper_concurrency`,
+  `looper_projects`, `looper_agent_profiles`, `looper_providers`,
+  `looper_settings`, `looper_catalog`, `looper_costs`, `looper_schedules` and
+  `looper_confirm`. Each runs the code the dashboard's API runs, so a refusal
+  carries the dashboard's message, and answers `ok`, `needs_confirmation` or
+  `error` (`not_found`, `invalid`, `needs_user_turn`, `forbidden`, `conflict`,
+  `expired`, `unavailable`). Reads run in any turn, changes only in a turn
+  that answers a user's message. A `high` call (a new project, cancelling or
+  starting a task over, deleting a project, an Agent Profile or a schedule,
+  changing the shared defaults, any concurrency limit of a project or role, a
+  higher or removed spend cap) is shown to the user in a block Looper writes
+  and runs only through `looper_confirm` in the turn answering that chat's
+  next message, within 10 minutes; `/new` and a restart drop it. No tool takes
+  an argument named like a key, token, secret, password or credential
+  (`forbidden`), and a provider is registered without its key. Every call is a
+  row of the new `manager_actions` table, secret-looking values masked; `GET
+  /api/tasks/:id` returns a task's as `manager_actions`, and the task page
+  lists them under "By the Manager". Before a turn that answers a user, the
+  Manager checks that its MCP server starts and lists the tools (a success is
+  trusted for 5 minutes); when it does not, or Looper refuses its token during
+  the turn, the user gets 「平台工具不可用，没有执行任何操作：…」 instead of Claude's reply, and
+  the server logs an error.
+- **A task can change while it runs, and its Planner hears of every change.**
+  A message sent to a task's Planner on the Chat page is stored when it is
+  sent, as a `supplement` journal entry with `via` and `delivered_at`. `PUT
+  /api/tasks/:id/requirement` (`{"requirement": "..."}`) edits the requirement
+  of a task that has not ended (400 for an empty, unchanged or over-long text,
+  404 for an unknown task, 409 once it has ended), and every version is kept
+  in `task_requirement_versions`, version 1 being the text the task was
+  created with. A change is stored as undelivered first; the Planner gets all
+  waiting changes in one `[CHAT]` turn that starts "The task changed.", with
+  the new supplements and a diff of the requirement, and they are marked
+  delivered only after that turn's reply is applied, so a failed turn or a
+  restart does not lose them; a queued task gets them at `[PLAN]`. The
+  `[CHAT]` reply gains `replan`, which replaces the steps not started, and its
+  optional `stop` list stops named running steps and drops them. Every later
+  Worker and Reviewer lists the supplements after the requirement in its task
+  section. The task page has Edit and "History (N versions)" for the
+  requirement and lists the supplements, each marked "not yet seen by the
+  Planner" until it is delivered. The journal kind `user_instruction` becomes
+  `supplement`: existing rows are converted once, as delivered chat
+  supplements (`schema_migrations` `task_journal_supplements`).
+- **A task page says where the task stands and what it delivered.** Each
+  `[DECISION]` and `[SUPERVISE]` reply may carry `progress` (`done`, `now`,
+  `next`, `risks`, `estimate`, each up to 500 characters), and the contract
+  asks for it every time; a note is a `progress` journal entry
+  (`task_journal_kinds_progress`), and `GET /api/tasks/:id` returns the notes
+  newest first as `progress`. The decision that completes a task must carry
+  `final` (`delivered`, `how_to_use`, `verification`, `open_issues`), or it
+  gets a repair turn, and `result_summary` becomes that summary with one
+  heading per field. A failed task's `error` and a stopped task's
+  `result_summary` are now a closing note written by code (why it ended, what
+  is done, what is not); a task that fails before it has a plan keeps its
+  one-line error. On the task page's Overview, a Progress section replaces the
+  Result and Error boxes.
+- **Parallel steps can work in git worktrees of their own (opt-in).** A
+  project execution setting, `step_workspaces`, is `shared` (the default, also
+  when null) or `worktree` (Project → Settings → Execution, "Steps that run at
+  the same time"). With `worktree`, when the task directory is a git checkout
+  on a branch with a commit, git is 2.40 or later and no merge, rebase,
+  cherry-pick, revert or bisect is in progress, a step dispatched while other
+  steps of its task are in flight runs in `<runtime
+  root>/worktrees/<task_id>/<key>-<id>` on branch
+  `looper/<task_id>/<key>-<id>`; a checkout that fails these conditions runs
+  its steps one at a time, and outside git nothing changes. Before such a
+  round, Looper commits the task directory's pending changes as a checkpoint,
+  the user's own uncommitted work included. When a step is accepted, Looper
+  commits what the Worker left uncommitted, computes the merge in memory and
+  lands one merge commit per step with a fast-forward; a merge that cannot be
+  made leaves the task directory untouched and fails the attempt with a
+  `merge_error` (`conflict`, `local_changes`, `branch_changed`,
+  `step_branch_changed` or `git_failed`) for the Planner to decide on.
+  Looper's commits are by `Looper <looper@localhost>` with `Looper-Task` and
+  `Looper-Step` trailers, unsigned and without hooks; Looper never pushes,
+  switches branches or rewrites commits. The task's start is recorded
+  (`task_plans.start_branch`, `start_commit`) and named in the activity, so
+  `git reset <start>` undoes the task's commits and `git revert -m 1 <merge>`
+  one step. A completed task's worktrees and branches are removed; a failed,
+  stopped or cancelled task keeps its unmerged ones until it is started over
+  or deleted, and a restart reuses them; the server removes leftovers at
+  startup.
+- **A task has its own Agent Profile and concurrency per role.** `PUT
+  /api/tasks/:id/agents` takes `{"profiles": {"planner" | "worker" |
+  "reviewer": id or name | null}, "concurrency": {"worker" | "reviewer": 1–64
+  | null}}` (null drops the task's choice), both written in one transaction.
+  Any task but a completed one (409) can change them, so a failed, stopped or
+  cancelled task's restart runs with them. A task's own limit
+  (`task_concurrency_limits`) caps its Workers and Reviewers within its
+  project's limit; lowering it stops nothing that runs, raising it starts
+  waiting runs at once. A new profile applies to a Worker or Reviewer from its
+  next step, and to the Planner at its next turn, after a handoff. `GET
+  /api/tasks/:id` adds `agents` (each role's effective `profile` and
+  `concurrency` with their sources, `concurrency_max`, `editable`), and the
+  task page's Overview has an Agents block with a profile picker and a limit
+  per role, replacing the profile line in its header. The Manager's
+  `looper_task_update` (`profiles`) and `looper_concurrency` at task scope go
+  through the same check. Task choices are not exported.
+- **A task's Planner can choose its Workers' Agent Profile and change
+  concurrency.** Every Planner `looper serve` starts, on Claude Code, Codex
+  and OMP, gets Looper's MCP server with a token that works for its own task
+  only and stops working when that Planner stops or the task ends (the MCP
+  configuration files that carry it are deleted as it is revoked, before the
+  stop waits for the Planner to exit), and a code-owned tools section after
+  its reply contract. Its four tools (two more for roles, below) are
+  `looper_task_profiles` (read), `looper_task_profile_set`,
+  `looper_task_concurrency` and `looper_project_concurrency`; the three that
+  write work only in a turn Looper sent the Planner. `looper_task_profile_set`
+  picks the Workers' or Reviewers' profile, for the rest of the task or one
+  step, from the project's list of profiles the Planner may choose
+  (`project_allowed_profiles`), which is empty by default and is filled on the
+  project's Agent Profiles tab ("Profiles the Planner may choose") or with
+  `GET`/`PUT /api/projects/:id/allowed-profiles` (`{"profile_ids": [...]}`).
+  Precedence, highest first: the user's choice for the task, the Planner's
+  choice for the step, its choice for the rest of the task, then the settings
+  layers; a run reads it when it starts. Taking a profile off the list drops
+  what the Planners chose of it, `start_over` drops a task's choices, and a
+  listed profile cannot be deleted (`GET /api/registry` names its projects in
+  `used_by.allowed_in`). The concurrency tools change the task's own Worker
+  and Reviewer limits and the project's `planner`, `worker` and `reviewer`
+  limits, at once and without asking. Each change is a `profile_choice` or
+  `concurrency_change` journal entry (`task_journal_kinds_planner_tools`) and
+  an activity line on the task page, and a concurrency change of a task from
+  Telegram or Lark is also told in that chat.
+- **A task's Planner can define the roles its steps run as (opt-in per
+  project).** A project execution setting, `planner_roles`, is `off` (the
+  default, also when null) or `on` (Project → Settings → Execution, "Planner
+  roles"), with `role_text_max_chars` (500 to 20,000, null for 8,000) for how
+  long a role's prompt and its harness may each be. With it on, the Planner
+  gets two more tools, `looper_task_roles` (read) and `looper_task_role_set`
+  (`{id, kind, role_prompt, harness?, profile_id?, reason?}`), where `kind` is
+  `work` (a step's Worker runs as it) or `review` (it reviews a step after the
+  built-in Reviewer); each change adds a version in the new `task_roles` table
+  with a `role_defined` journal entry (`task_journal_kinds_task_roles`). A
+  role's profile must be on the project's allowed list, and is refused when
+  the user chose that kind's profile for the task. Steps take `role`,
+  `review_role` (it needs `"review": true`) and `review_role_required` (true
+  when left out). A run as a role gets its working style (its harness, else
+  the built-in harness's How you work and Communication), its role prompt, the
+  project, the task section, then the boundaries and the contract, so nothing
+  the Planner wrote follows the boundaries: a code-owned lead line, then the
+  shared defaults' new `boundaries` field (Settings → Roles → Shared defaults,
+  "Boundaries for Planner-defined roles"; the Manager's `looper_settings`; the
+  configuration export; refused on any other layer), else the built-in ones.
+  Its profile comes after the user's choice for the task and before the
+  Planner's per-step and rest-of-task choices. An attempt keeps the role
+  version it started with: a restart reruns it with that version, a retry
+  reads the current one. The built-in Reviewer stays the gate: a review role
+  runs only after it passes and blocks the step until it passes too, unless
+  the step makes it advisory (`"review_role_required": false`), when the
+  Planner may accept over it, the `step_accepted` entry says so and the task
+  page labels it advisory. Continuing a task keeps its roles; starting over
+  deletes them. `GET /api/tasks/:id` adds `roles` (versions, steps and stats:
+  runs, cost, accepted and failed steps, retries, contract violations, review
+  pass rate) and `builtin_role_stats`; the task page gets a Roles section and
+  role labels in Steps and the Pipeline; every Worker and Reviewer run records
+  a typed `metadata.outcome` (`completed`, `reported_failed`,
+  `files_mismatch`, `passed`, `not_passed`, `contract`, `run_failed`). With
+  the switch off, the Planner's tools, its tools guide, its reply contract and
+  every Worker's and Reviewer's prompt are as before, and a step naming a role
+  is refused with that reason. The prompt eval adds `roles_tester_docs`,
+  `roles_security_review`, `roles_advisory_review` and `roles_not_needed`.
+- **Projects can run a full task on a time rule.** A schedule belongs to a
+  project and has a `name` (at most 80 characters, unique in the project
+  ignoring case), a 5-field `cron` rule (minute, hour, day of the month,
+  month, day of the week; `*`, numbers, ranges, steps and lists; 0 and 7 are
+  Sunday; when both day fields are restricted a day matches either), an IANA
+  `timezone` (default: the server's; a time a DST change skips fires at the
+  first valid time after it, a repeated one once), the `requirement` of each
+  run's task (at most 27,000 characters), a `work_dir` (empty: the project's
+  default), `overlap` (`skip`, the default; `queue`, one run waiting for the
+  running task; or `parallel`, runs beside each other up to
+  `max_parallel_runs`, 1–10, default 3), `catch_up` (`once`, the default:
+  fires missed while the server was down or the computer slept run once, told
+  how many; or `skip`), an optional `run_timeout_seconds` (up to 30 days; a
+  run past it is `timed_out`, a failure, and its task is stopped),
+  `run_budget_usd` (the task's own spend cap; without it the project's
+  per-task cap applies) and `profile_overrides` for the Planner, Workers and
+  Reviewers, by id or name. Two fires must be at least 5 minutes apart over
+  the next 24 hours when the rule is saved, or 1 minute for a schedule with a
+  gate command (removing the gate of a more frequent schedule is refused). A
+  schedule is created disabled; enabling it, or changing the rule or zone of
+  an enabled one, sets `next_fire_at` from now, so nothing missed before runs.
+  The scheduler in `looper serve` looks every 15 s and once at start, claims
+  each due schedule's row (`FOR NO KEY UPDATE SKIP LOCKED`, so two servers on
+  one database fire it once), creates the task, titled `<name> · MM-DD HH:MM`
+  in the schedule's zone, and starts it at once under the project's
+  concurrency limit: enabling the schedule is the approval. The task's
+  requirement ends with a code-written `## 定时运行上下文` section: the rule, this
+  fire time, how it fired, the fires it stands for, the latest 3 runs, and
+  that nobody is there to answer. "Run now" fires once with `trigger`
+  `manual`, also while the schedule is disabled, through the same overlap
+  check.
+- **A schedule can check for new work before each run, hand on unfinished
+  input and cap its daily spend.** A `gate_command` (at most 2,000 characters)
+  runs before each run with `/bin/sh -c` in the run's work directory, as the
+  server's user, with the server's environment plus `LOOPER_SCHEDULE_ID`,
+  `LOOPER_SCHEDULE_RUN_ID`, `LOOPER_SCHEDULE_SCHEDULED_FOR` and
+  `LOOPER_SCHEDULE_RUN_TIMEOUT_SECONDS` and no stdin, for at most
+  `gate_timeout_seconds` (1–600, default 60), after which its process tree is
+  ended. Meanwhile the run is `gating` and another firing is
+  `skipped_overlap`, so gates never overlap, also under `parallel`. A non-zero
+  exit or a timeout is `gate_failed` (a failure, with the tail of stderr);
+  printing nothing is `skipped_gate` (no task, no cost); otherwise its stdout,
+  kept up to 8,000 characters, is the task's input. The gate output of each
+  run that failed, timed out, was stopped or cancelled, or whose gate failed
+  goes to the next run once, labelled 「上一轮未完成」, and the composed requirement
+  always fits the task limit. With `daily_budget_usd`, a firing once the
+  schedule's runs fired since the server's local midnight cost that much is
+  `skipped_budget`. A skip that repeats the latest run (same reason, same day)
+  is counted on it (`schedule_runs.firings`, shown as `×N`), so a gate firing
+  every minute adds a row only when the outcome changes.
+- **Schedules report to Telegram or Lark, with two alerts.** `notify` is
+  `failures` (the default: a message for each `failed`, `timed_out` or
+  `gate_failed` run, and the alerts), `alerts` (only the alerts and their
+  recoveries), `always` (every run that ran something, and the alerts) or
+  `never` (nothing is sent; the dashboard still shows the alerts); a skip
+  never sends one. `notify_target` (`{"channel": "telegram" | "lark", "chat":
+  "<id>"}`) must be a person a channel's sender allowlist already lets in;
+  null, the default, keeps messages on the dashboard. The failures alert goes
+  out when `consecutive_failures` reaches 3; the no-success alert when no run
+  was ok for 3 periods of the rule, at least 15 minutes and at most 24 hours,
+  counted from the first fire after the latest of the last ok run,
+  `enabled_at` and `rule_changed_at`, and not while the schedule is disabled
+  or one of its runs is in progress. An ok run is a completed run or a gate
+  that found nothing new: it ends the failure streak and recovers both alerts.
+  Each alert goes out once per streak, with one recovery, and every message is
+  recorded in `schedule_notifications` as `sent`, `failed` (with the reason)
+  or `dashboard`.
+- **The dashboard manages schedules.** A project's **Schedules** tab
+  (`#projects/<id>/schedules`) shows one row per schedule (the rule in words,
+  the next run in the schedule's zone, the last run, "Failing" or "No success
+  lately", an enable switch and Run now); an open row edits every field,
+  previews the next 5 fire times as the rule is typed, and deletes after an
+  inline confirmation. A **Schedules** page below Runs (`#schedules`) lists
+  every project's schedules, filtered by project and status in the address
+  (`#schedules?project=<id>&enabled=true|false`), each with its switch, Run
+  now and Delete. A schedule's page (`#schedules/<id>`) shows its settings,
+  alerts, today's spend against the daily budget and its run history, 20 runs
+  at a time, with the routine skips (nothing new, busy) hidden by default and
+  a repeated skip shown as `×N, until <time>`. The Dashboard gets a Schedules
+  section (next fires, failing schedules, today's skips) once a schedule
+  exists, and the Tasks list a **Scheduled** badge and a
+  `#tasks?schedule=<id>` filter.
+- **Schedules have an HTTP API, and deleting one is safe mid-run.**
+  `GET`/`POST /api/projects/:id/schedules` (create answers 201 with `schedule`
+  and `warnings`, such as a parallel schedule allowing more runs than the
+  project's Planner limit), `GET /api/schedules` (every project's),
+  `GET`/`PUT`/`DELETE /api/schedules/:id`, `POST /api/schedules/:id/run`, `GET
+  /api/schedules/:id/runs` (`limit` up to 200, `before`, `skips=hide`;
+  `next_before`, `routine_skips`), `GET /api/schedules/:id/notifications` and
+  `POST /api/schedules/preview` (`cron`, `timezone`, `count`, `gated`). A bad
+  field is a 400 with the reason, and `enabled` on create is refused. `GET
+  /api/tasks` takes `schedule_id`; tasks carry `schedule_id`, `schedule_name`
+  and `own_budget_usd`, projects `schedule_count`, and `GET /api/overview`
+  `schedules`. Deleting a schedule removes its runs and messages, also while a
+  run is in progress: its task goes on and ends as any task does, a queued run
+  never starts, a gate that ends afterwards starts no task, and its tasks
+  stay. A project with schedules is not deleted (409), nor is an Agent Profile
+  a schedule chose. The schema adds `schedules`, `schedule_profile_overrides`,
+  `schedule_runs`, `schedule_notifications`, `tasks.schedule_id` and
+  `tasks.budget_usd` (`schema_migrations` `schedule_runs_status_s2`,
+  `schedules_notify_alerts`, `schedules_overlap_parallel`). Schedules are
+  created and edited on the dashboard or through the API; the Manager's
+  `looper_schedules` lists, reads, enables, disables and deletes them, and the
+  configuration export leaves them out.
+- **Telegram and Lark conversations are stored and shown on the Chat page.**
+  Turns from Telegram direct messages and from Lark (direct messages and group
+  @-mentions) go into `chat_messages` under the session `<channel>:<chat_id>`,
+  with a new `channel` column (`web` for older rows): the user's message, the
+  Manager's reply and replies Claude sends on its own. A Telegram group or
+  channel stores nothing. A new Manager session's `[RESUME]` brief includes
+  these chats. With the Manager selected, the Chat page lists its
+  conversations by channel (Dashboard chat, Lark, Telegram), most recently
+  active first; a Lark or Telegram one opens read-only at its newest messages.
+  `GET /api/chat/sessions` serves the list (the 50 most recently active,
+  Planner threads left out, 500 when it cannot be read).
+- **A task asked for in Telegram or Lark reports its end in that chat.** When
+  it completes or fails, the chat gets one notice, after the task's progress:
+  「✅ 任务完成 · <name>」 or 「❌ 任务失败 · <name>」, the first section of the summary or
+  closing note (line breaks kept, at most 300 characters) and an absolute link
+  to the task. Lark sends it as Markdown to the requester in a direct message,
+  or to the group @-mentioning them; Telegram sends it to the chat as
+  MarkdownV2, falling back to plain text. The task records whom to tell
+  (`tasks.chat_id`, `chat_kind`, `chat_mention`). A task from the web chat, or
+  one that recorded no chat, gets the Manager's final summary as before.
+- **Lark answers @-mentions of the bot in group chats.** A group message is
+  handled only when its `mentions` hold the bot's own open_id, read from the
+  bot's info at start; every other group message is ignored: no reaction, no
+  storage, no Manager turn. The sender allowlist still applies per person, and
+  a refused sender's record carries the group. The status message and the
+  answer reply to the triggering message (`lark-cli im +messages-reply`),
+  progress goes to the group, the Manager reads `Channel: a Lark group chat,
+  from <name>`, and a task started there tells the group when it ends,
+  @-mentioning the requester (existing tasks are backfilled). In a direct
+  message only the bot's own mention is stripped now, not the first `@word`.
+- **Chat messages link to the dashboard with absolute URLs.**
+  `LOOPER_PUBLIC_URL` is the dashboard's address as people open it, such as
+  `https://looper.example.com` (a path is kept, a trailing slash dropped);
+  unset, links use the server's `http://<host>:<port>`, with `127.0.0.1` for
+  one bound to every address. Task end notices and schedule messages use it.
+  `looper serve` refuses to start when the value is not an http or https URL
+  with a host, or has a user, a query, a fragment or a bad port.
+- **Tasks have a title.** `looper_task_create` requires a `title`, a few words
+  in the user's language, stored in `tasks.title` (one line, at most 60
+  characters). A task's `name` is its title, else its goal id, else its
+  requirement's first line, else its id: `GET /api/tasks`, `GET
+  /api/tasks/:id`, the overview and the Chat page's targets return it, and the
+  dashboard's task lists, the task heading and the end notice show it.
+  `tasks.original_user_text` keeps the message the task came from.
+- **Claude Code agent teams, on by default for Claude Code profiles.** An
+  Agent Profile has `agent_teams`, allowed only on a Claude Code runtime (400
+  otherwise); left out, it is on for a Claude Code profile and off for any
+  other. The upgrade turns it on once for every Claude Code profile, the
+  read-only built-in `claude-code/opus` included (`schema_migrations`
+  `agent_profiles_agent_teams_on`); a profile turned off later stays off. With
+  it on, the Manager's, Workers' and Reviewers' Claude Code starts with
+  `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` and `--teammate-mode in-process`,
+  so it can spawn teammates in its own process, whose tokens count in the
+  run's cost once a result reports them. A Planner never gets them: its
+  decisions come from its own turn. Every other run starts with that variable
+  removed, also when `looper serve` inherited it; entering it in a settings
+  layer's or a provider's `env` is refused (400), a layer stored before still
+  loads, and an import drops it from a layer with a note. Settings → Agent
+  Profiles has an "Agent teams" checkbox (Claude Code only, checked on a new
+  profile); `looper config export` carries the field, and a file without it
+  imports with the runtime's default. A Worker's outcome comes from its last
+  result, which with teammates may come after the first. To run without teams,
+  untick it on a profile (`PUT /api/agent-profiles/<id>` with `"agent_teams":
+  false`) or, instead of the built-in profile, select one that has them off.
+- **More prompt-eval tasks, and the Manager's dialogs.** The prompt regression
+  eval adds the tasks `many_steps`, `parallel_parts`, `interface_first`,
+  `supplement_replan`, `requirement_edit`, `supplement_no_change` and
+  `profile_choice` and a "parallel Workers" column, with refreshed haiku
+  baselines. `python -m evals.prompt_regression dialogs` (fake and real modes)
+  runs ten Manager conversations through a disposable `looper serve` and
+  checks what Looper did after each reply.
 
 ### Changed
 
@@ -62,21 +410,21 @@ How the agent system works today is described in
   the bottom of the sidebar, each at `#settings/<page>`: **LLM Providers**,
   **Agent Runtimes**, **Agent Profiles**, **Roles**, **Skills & MCP**,
   **Channels** and **Import / Export**. An **Agent Profile** is what the
-  dashboard now calls a registered agent (a row of `agent_profiles`, served
-  at `/api/agent-profiles`): its list shows each profile's runtime, provider,
-  model and default effort, the roles it can run and where it is used, and a
-  profile in use cannot be deleted. Its form picks a runtime, then a provider grouped as
-  the runtime's own login (Claude Code's and Codex's with their login state)
-  or an API-key provider that speaks its protocols, then a
-  model from the provider's catalog. **Roles** holds the defaults every role
-  inherits and, per role, its layer and its prompt, timeout and concurrency,
-  which were on the Agents page. Everywhere an Agent Profile is chosen (Roles,
-  a project's settings, a new task's roles) the same dropdown ends with
-  "+ New Agent Profile", which opens the form in place. The top-level Agents
-  page becomes **Runs** (`#runs/<role>`), with each role's runs only and a
-  link to its settings. `#settings` and `#settings/defaults` open Roles,
-  `#agents/...` opens Runs, and the import's links to a provider, MCP server
-  or channel open its page.
+  dashboard now calls a registered agent (a row of `agent_profiles`, served at
+  `/api/agent-profiles`): its list shows each profile's runtime, provider,
+  model and effort, the roles it can run and where it is used, and a profile
+  in use cannot be deleted. Its form picks a runtime, then a provider grouped
+  as the runtime's own login (Claude Code's and Codex's with their login
+  state) or an API-key provider that speaks its protocols, then a model from
+  the provider's catalog. **Roles** holds the shared defaults every role
+  inherits and, per role, its overrides of them and its prompt, max turns and
+  timeout, which were on the Agents page. Everywhere an Agent Profile is
+  chosen (Roles, a project's Agent Profiles tab, a new task's roles) the same
+  dropdown ends with "+ New Agent Profile", which opens the form in place. The
+  top-level Agents page becomes **Runs** (`#runs/<role>`), with each role's
+  runs only and a link to its settings. `#settings` and `#settings/defaults`
+  open Roles, `#agents/...` opens Runs, and the import's links to a provider,
+  MCP server or channel open its page.
 - **Runtimes are built in.** Settings → Agent Runtimes is read-only: one card
   per runtime type (Claude Code, Codex and OMP, and the planned Claude Code
   SDK, OpenAI Agents SDK and norma) with whether it is found on the server's
@@ -94,31 +442,306 @@ How the agent system works today is described in
   `task_profile_overrides`, and the `agent_id` of a settings layer and of a
   task's choice, and a saved session's `session_agent_id`, to `profile_id`;
   foreign keys follow and constraints take a new database's names. A v2.6.0
-  database keeps every row, and every role starts as before; as for any
-  schema change, `looper serve` backs the database up first. The API follows
-  with **no old routes or field names kept** (the dashboard is the only
-  client, so anything that calls the API directly must change):
+  database keeps every row, and the renames alone change no role's launch; as
+  for any schema change, `looper serve` backs the database up first. The API
+  follows with **no old routes or field names kept** (the dashboard is the
+  only client, so anything that calls the API directly must change):
   `/api/agent-configs` is `/api/roles` (`/api/roles/:role`,
-  `/api/roles/:role/reset-prompt`); `POST /api/agents` and
-  `PUT`/`DELETE /api/agents/:id` are `/api/agent-profiles`, answering with
-  `profile` (its `profile_id`); the registry lists `profiles` and counts
-  `profile_count`; a settings layer's `agent` is `profile_id`, its effective
-  `agent` is `profile`, `limits.builtin_agent` is `builtin_profile` and the
-  source of a profile's own default effort is `profile`; a task's
-  `agent_overrides` is `profile_overrides`. `/api/agents/:id/usage` and
-  `/api/agent-settings` keep their names: they are about running agents and
-  their settings. A run's record names its profile in `metadata.profile` and
-  `settings_sources.profile`; runs recorded before keep `metadata.agent`,
-  which the dashboard still reads. `looper config export` writes
-  `looper-config/v2` (`profiles`, and a layer's `profile`); `looper-config/v1`
-  and `loopx-config/v1` files still import. In code, `AgentSpec` is
-  `AgentProfile`, and `looper.agents.agent_registry`, `looper.db.agent_registry`
-  and `looper.db.agent_configs` are `profile_registry` and `role_configs`.
+  `/api/roles/:role/reset-prompt`); `POST /api/agents` and `PUT`/`DELETE
+  /api/agents/:id` are `/api/agent-profiles`, answering with `profile` (its
+  `profile_id`); the registry lists `profiles` and counts `profile_count`; a
+  settings layer's `agent` is `profile_id`, its effective `agent` is
+  `profile`, `limits.builtin_agent` is `builtin_profile` and an effort's
+  source is `profile`; a task's `agent_overrides` is `profile_overrides`.
+  `/api/agents/:id/usage` and `/api/agent-settings` keep their names: they are
+  about running agents and their settings. A run's record names its profile in
+  `metadata.profile` and `settings_sources.profile`; runs recorded before keep
+  `metadata.agent`, which the dashboard still reads. `looper config export`
+  writes `looper-config/v2` (`profiles`, and a layer's `profile`);
+  `looper-config/v1` and `loopx-config/v1` files still import. In code,
+  `AgentSpec` is `AgentProfile`, and `looper.agents.agent_registry`,
+  `looper.db.agent_registry` and `looper.db.agent_configs` are
+  `profile_registry` and `role_configs`.
 - **The dashboard calls a profile an Agent Profile everywhere.** A run's
   prompt layers (the profile row, its source, a profile's default), a task's
-  header, the config import preview, a project's Execution card and a
+  header, the config import preview, a project's Overview cards and a
   provider's model note said "Agent(s)" or "agent" for a profile; they now
   say "Agent Profile(s)".
+- **Tasks the Manager creates are ready, not started.** A new task has status
+  `init` ("Ready — not started" on the Tasks and task pages) and no Planner.
+  Looper adds a configuration block to the reply (title, project and
+  directory; each task role's Agent Profile, effort and where they come from,
+  agent teams; the review policy, spend cap per task, lessons setting and how
+  many tasks the project runs at once) and asks whether to start it. It starts
+  when the user tells the Manager, with Start on the Tasks or task page, or
+  with the new `POST /api/tasks/<id>/start` (400 unless ready, 404 for an
+  unknown task), then waits under the project's limit like any start; a server
+  restart neither resumes nor stops it. A task in a project that does not
+  exist is created only after the user confirms the new project in the next
+  message of that chat.
+- **The Manager answers the message it was just sent, and is told where it
+  came from.** Code puts a `Channel:` line before each message: `the Looper
+  dashboard chat`, `a Lark direct message`, `a Lark group chat, from <name>`,
+  `a Telegram direct message` or `a Telegram group chat`. The recommended
+  prompt has it answer only that message, without continuing an earlier topic,
+  running checks or volunteering a status report unless asked. A Manager role
+  prompt still at a previous recommended text moves to the new one at startup;
+  an edited one is kept.
+- **Restarting a task goes on from its plan; starting over is explicit.**
+  Start on the Tasks page and the task page, `POST /api/tasks/start` with
+  `{"task_id": ...}` and the Manager's `restart` now continue a stopped,
+  failed or cancelled task from its saved plan (`TASK_RESTART` `mode`
+  `continue`, the default). Accepted steps stay done with their merged work
+  and never run again; every step that did not finish goes back to not
+  started, keeping its retries, feedback and worktree (retry budgets are not
+  reset); skipped steps stay as history. The Planner gets one `[RESTART]`
+  turn, in its saved session when it can resume, and answers in the `[CHAT]`
+  shape: `none`, `add_steps` or `replan`. A task stopped before it had a plan
+  is planned anew. In v2.6.0 every restart deleted the steps, the plan, the
+  Planner's session and the worktrees and planned the task anew; that is now
+  an explicit start over: **Start over**, with an inline "Delete its steps?"
+  confirmation on the Tasks list and in the task page's header, `POST
+  /api/tasks/start` with `"start_over": true`, or the Manager's `start_over`,
+  which asks the user first.
+- **The task page's Pipeline tab draws the plan's dependency graph.** Each
+  step is a node with its key and status, under the steps in its `depends_on`,
+  in rows by depth. Dropped (`skipped`) steps stay as dashed, muted history,
+  with the decision that dropped them in their tooltip. Every step status has
+  its own label, and the Manager node is gone.
+- **The Planner plans independent parts in parallel and builds on what is
+  done.** Its recommended role prompt makes a step depend only on the steps
+  whose results it needs, has parts that must fit together pin their interface
+  in a file first and then be built in parallel, and keeps accepted steps on a
+  replan, replacing only work that is not done. The plan contract's
+  `depends_on` says the same, and the Worker contract tells a Worker that
+  commits to stage only its own paths (`git add <paths>`, never `git add -A`
+  or `git add .`). A `planner` row on an earlier recommended prompt moves to
+  the new one at startup; an edited prompt is kept.
+- **The Planner's fixed limits are gone or set per project.** A plan or replan
+  may have any number of steps (the limit was 8). A task's Planner sends every
+  ready step to the worker pool at once, and the project's Worker limit (16 by
+  default) and the task's own limit decide how many run together; before, at
+  most 4 ran per task. Retries per step are a project execution setting,
+  `max_step_retries` (0 to 20, null for the previous 2; Project → Settings →
+  Execution, "Retries per step"), and the reply contract and each decision
+  turn say how many are left. A task requirement may have 32,000 characters
+  (8,000 before) and reaches the agents whole; a longer one is refused instead
+  of clipped, with a 400 at `POST /api/tasks/create`, `PUT
+  /api/tasks/:id/config` and `PUT /api/tasks/:id/requirement` and `invalid`
+  from the Manager's tools.
+- **Concurrency limits are per project, and the machine-wide caps are gone.**
+  A layered setting `max_concurrency` (1 to 64) on the role and
+  role-in-project layers of the Planner, Workers and Reviewers says how many
+  tasks (one Planner each), Workers and Reviewers run at once in one project;
+  with no layer setting it, 8, 16 and 8. It is refused (400) on the system and
+  project layers and for the Manager. A project at its task limit queues its
+  tasks in arrival order without delaying other projects' (new, restarted and
+  resumed tasks alike); a Worker or Reviewer past its project's limit waits as
+  `pending` and can be stopped while it waits. The limit is read at every
+  start: raising one starts what waits at once, lowering one stops nothing.
+  The v2.6.0 caps of 3 tasks and 4 Worker and Reviewer runs for the whole
+  machine are removed, so on default settings many more agents can run at
+  once. The role config's `max_concurrency`, shown but never enforced, is
+  dropped (`schema_migrations` `role_configs_max_concurrency_removed`): `PUT
+  /api/roles/<role>` with it answers 400, and a file's value is ignored on
+  import with a note. Settings → Roles and a project's Agent Profiles tab show
+  the value in effect for each role and its layer.
+- **The effort is the Agent Profile's.** Settings layers no longer have an
+  effort: a run's effort is its resolved profile's (none: the runtime's own),
+  and a layer `PUT` with `effort` answers 400. The effective `effort` has the
+  source `profile` or `builtin`, and `/api/agent-settings` no longer lists
+  `limits.effort_levels`. The upgrade (`schema_migrations`
+  `layer_effort_on_profiles`) keeps the profile and effort of every role at
+  every place: each layer, and each task's profile override, selects a profile
+  with the effort it had, an equal one already registered or a new, ordinary
+  profile named `<profile> · <effort>` (for example `claude-code/opus ·
+  xhigh`), adding role-in-project layers where a project's roles need
+  different ones; it logs each change and drops `agent_setting_layers.effort`.
+  Export leaves effort off the layers, and importing an older file whose
+  layers carry one converts it the same way, with a note for each change. The
+  layer forms lose their Effort field, and every Agent Profile dropdown and
+  row summary shows the profile's effort.
+- **Settings → Roles and a project's new Agent Profiles tab are lists of
+  collapsible rows.** Roles has a row for the shared defaults (the system
+  layer, which the dashboard now calls "shared defaults" wherever it names a
+  value's source) and one per role, all closed at first; a closed row sums up
+  its Agent Profile and where it comes from, its effort, its limit per project
+  and "Disabled" or "unsaved", and an open role has "Overrides for this role"
+  and "Role prompt and limits". A project's agent settings move from its
+  Settings tab to an Agent Profiles tab (`#projects/<id>/profiles`) with rows
+  for all roles in the project and for the Planner, Worker and Reviewer.
+  Closing a row keeps its unsaved edits, and `#settings/roles/<role>`,
+  `#settings/roles/shared` and `#projects/<id>/profiles/<role>` open and
+  scroll to a row. The API is unchanged.
+- **The Dashboard shows what is happening now.** It reads the new `GET
+  /api/overview` every 5 s: task counts by group (In progress, Queued, Ready,
+  Needs attention, Completed, and Cancelled or Other when they hold one) over
+  every task, each opening `#tasks?group=<group>` (served by `GET
+  /api/tasks?group=`); the Manager, busy or idle, and every live Planner,
+  Worker and Reviewer, running or waiting, with its task and step; each active
+  project's running tasks, Workers and Reviewers against its limits; today's
+  spend since the server's local midnight, money at provider prices apart from
+  the subscription equivalent; and the unhealthy components. The hard-coded
+  "System Status" card and the "Agents 3/3" list are gone. One mapping groups
+  the task statuses, and the Planner's `planning`, `verifying` and `stopping`
+  now count as active: in a project's `active_count`, in the rule that a task
+  must be stopped before it is deleted, and at startup, which resumes such a
+  task with a live plan or marks it stopped. Task payloads carry `group`. `GET
+  /api/status` keeps its fields, but `tasks` now counts every task (`running`:
+  in progress, `pending`: queued).
+- **Every runtime sees the repository's `CLAUDE.md` or `AGENTS.md`.** Codex's
+  generated `config.toml` sets `project_doc_fallback_filenames =
+  ["CLAUDE.md"]`, so a Codex agent reads `CLAUDE.md` in a directory without
+  `AGENTS.md`. An OMP agent outside a git repository gets the work directory's
+  `AGENTS.md`, else its `CLAUDE.md` (at most 32 KiB), at the start of its
+  system prompt. Claude Code already falls back to `AGENTS.md`; its isolation
+  now also excludes an `AGENTS.md` above the repository root
+  (`personal-config-off/v2`), which reached its agents before. Each run
+  records `metadata.project_instructions`, shown as "Instructions" in a run's
+  system prompt. The changed Codex config and Claude Code flags restart a
+  resident Manager's or Planner's process, with `--resume`, at its first turn
+  after the upgrade.
+- **The Telegram bot token is entered in Settings → Channels.** The Telegram
+  card has a password **Bot token** field. The token is kept in the new
+  `channel_secrets` table and never returned: the API shows `has_bot_token`,
+  and `PUT /api/channel-configs/channel-telegram` takes `bot_token` (`***`
+  keeps it, `""` or `null` removes it). Without a saved token, the variable
+  named by `bot_token_env` (default `LOOPER_TELEGRAM_BOT_TOKEN`) is read as
+  before. The bot publishes its command menu (`/status`, `/new`, `/help`) at
+  start. `looper config export` leaves the token out and the import lists it
+  as a secret to fill in.
+- **Lark is the "Lark (lark-cli)" channel: a lark-cli profile chooses the
+  bot.** The optional `profile` replaces `app_id_env` and `app_secret_env` and
+  is passed as `--profile` on every lark-cli call; empty means lark-cli's
+  active profile, and `LARK_APP_ID` is no longer read. At startup `looper
+  serve` runs `lark-cli whoami` and reads the bot's info; the channel does not
+  start when lark-cli is missing, the profile is unknown, lark-cli is not
+  signed in, the app has no bot, or the sender allowlist was made for another
+  app (open_ids differ per app, so the server binds the list to its app,
+  `allowlist_app_id`). Settings → Channels shows the bot or why it does not
+  start, the senders' names, a search by name or email that adds a sender
+  (`GET /api/channels/lark/people?q=`, run as the signed-in lark-cli user),
+  and the 20 most recently refused senders with Allow (`GET
+  /api/channels/lark/status`; the new `channel_rejected_senders` table keeps
+  who, how often, when and in which group, never what they wrote). Replies are
+  Markdown posts. On upgrade, `app_id_env` and `app_secret_env` are dropped
+  from the row at startup (one log line) and from an imported file, a row
+  without `profile` gets an empty one, so Settings → Channels shows the field,
+  and a row still named "Lark (飞书) Bot" is renamed.
+- **Telegram and Lark show one status message per message, and react when the
+  bot sees it.** A message from a listed sender that goes to the Manager first
+  gets the bot's reaction, in the background: Lark's 「Get」 (the app needs
+  `im:message.reactions:write_only`) or Telegram's 👀 in a private chat. The
+  Manager's phases no longer arrive as a message each: the first sends 「⏳
+  处理中：思考中 · 0s」, later ones edit it in place (only when its text changed, at
+  most every 3 s, at most 18 times), and after the answer, sent as a new
+  message, it reads 「✅ 完成 · 用时 Ns · 工具 N 次」 or 「❌ 出错：<reason>」. A failed send,
+  edit or reaction is logged once and never becomes more messages. The
+  Manager's task progress still comes as messages of its own.
+- **Chat input and Markdown.** The message box grows with its lines: Enter
+  sends, Shift+Enter adds a line (it used to send), and an input method's
+  Enter only confirms its candidate. Long lines, paths and code blocks wrap
+  inside a bubble. Agents' replies in the chat and on an agent's history page
+  render tables, task lists, lists and headings (GitHub-flavoured Markdown),
+  and a wide table scrolls inside its message.
+- **Creating a task or a schedule takes an Agent Profile by id or name.**
+  `profile_overrides` on `POST /api/tasks/create` and on the schedule
+  endpoints goes through the same check as `PUT /api/tasks/:id/agents`; a name
+  is matched without regard to case, and errors read
+  `profile_overrides.<role>: ...`.
+- **Commits no longer need a sign-off.** `CONTRIBUTING.md`, `AGENTS.md` and
+  the pull request template no longer ask for `git commit -s` (the Developer
+  Certificate of Origin).
+
+### Fixed
+
+- **Stopping an agent ends every process it started.** Each agent process (a
+  Worker or Reviewer run, the Manager's and each Planner's resident Claude
+  Code, each Codex or OMP turn) starts in a session of its own. Every stop (a
+  task stop, a Planner's kill, `timeout_seconds`, the per-run cap, a cancelled
+  turn, the server's shutdown) takes the agent's whole tree from one `ps`
+  snapshot, including the commands Codex and Claude Code run in sessions of
+  their own, sends it SIGTERM and, after 3 s, SIGKILL to what is left. Before,
+  only the agent's own process got SIGKILL, and its commands kept running. A
+  stopped agent now usually exits with `-SIGTERM`, and a Ctrl-C in the
+  terminal reaches only the server, which ends every agent as it shuts down.
+  Each running agent is recorded under `<runtime
+  root>/.local/agent-processes/`; after the server crashed or was killed, the
+  next start, before resuming tasks, ends the tree of each recorded agent
+  still running.
+- **A crashed resident agent is restarted for as long as the server runs.**
+  The supervisor gave up on the Manager, the TaskRouter or the WorkerPool
+  after 3 restarts. Each restart in a row now waits twice as long as the last,
+  from 1 s up to 5 minutes, back to 1 s once the agent has stayed up 5
+  minutes; a failed start is retried the same way, and after 3 restarts in a
+  row the agent is `crash_looping` until it is stable again. `/api/status`
+  gives each agent `state` (`running`, `restarting` or `crash_looping`), `up`,
+  `restart_count` (in a row), `last_crash_at` and `next_restart_at`, no longer
+  `max_restarts`, and `healthy` is false while it crash-loops. The Dashboard
+  says when one restarts or keeps crashing, and the Manager is told `crashed`,
+  `crash_looping` and `recovered` instead of `max_restarts_exceeded`.
+- **Every task is reachable from the Tasks page.** `GET /api/tasks` returned
+  the newest 50 tasks only. It now takes `limit` (50 by default, at most 200),
+  `before` (a task id: the tasks created before it) and a `status` filter
+  beside `project_id`, `group` and `schedule_id`, and adds `next_before` (null
+  at the end) and `counts` (the tasks of each status under the filters); a bad
+  `limit`, an unknown `status` or an unknown `before` is a 400. The Tasks page
+  loads 50 at a time with Load more and "Showing N of M", and its status chips
+  filter on the server and count every task.
+- **A chat answer is kept when you leave the Chat page.** The page saved an
+  answer when its stream ended, so one that came after the user left the page
+  never reached the history. The web channel now saves each answer under
+  `<message id>:reply` when it arrives and pushes it to the chat's open pages,
+  once per message.
+- **Long chat histories open on their newest messages.** `GET
+  /api/chat/messages` returns a session's newest 200 messages, oldest first;
+  it returned the oldest 200, so a long thread stopped showing new ones.
+- **The Manager's reply is the turn's final answer.** What Claude wrote before
+  its tool calls ("checking the logs now…") was joined to the front of the
+  reply, the stored chat message and the run's output. The reply is now the
+  result's `result`, also for replies Claude sends on its own and for the
+  handoff; the narration still streams, and a turn that ended without final
+  text keeps all of it.
+- **The Lark channel receives and answers with lark-cli 1.0.97.** It ran
+  commands lark-cli no longer has, so every reply failed and the event
+  consumer restarted in a tight loop. It now receives with `lark-cli event
+  consume im.message.receive_v1 --as bot` (bots' messages ignored) and keeps
+  the consumer's stdin open, since lark-cli stops at stdin EOF, which a
+  background service gave at once; it starts the consumer again 10 s after it
+  stops. It sends with `lark-cli im +messages-send --as bot`, and a failed
+  call carries lark-cli's reason, with the scopes lark-cli reports missing.
+- **The Telegram bot token no longer reaches the log.** httpx logged every Bot
+  API URL, token included, at INFO. Without `looper serve --verbose`, `httpx`
+  and `httpcore` now log only warnings and errors, and every line `looper
+  serve` and `looper mcp-server` log, tracebacks included, is masked:
+  `bot<id>:<secret>` becomes `bot***` and the configured token `***`; a failed
+  send's error, kept with a schedule's notifications, is masked too. If you
+  ran the Telegram channel before, treat the token as exposed: revoke it in
+  BotFather, save the new one, restart and delete the old `serve.log` under
+  the runtime root's `logs/`.
+- **A step is no longer failed when its Worker's reported files are in another
+  worktree or a commit.** When the files are not where the report says, the
+  check now also looks at the same path in the repository's other worktrees
+  and at commits made since the run started (less 60 s of clock slack) on any
+  branch, tag or remote-tracking branch, read-only and bounded (at most 64
+  worktrees, the latest 500 commits, 10 s per git command). Before, the step
+  failed with "changed files not found" and used a retry. Such files are
+  listed in the result's `found_elsewhere` and named in the activity; a
+  failure in a git work directory now says where the check looked, and outside
+  git nothing changes.
+- **A restarted task no longer ends at once with nothing running.** A stop
+  during a Planner turn left its cancel queued, and the task's next Planner
+  read it first. A new Planner now drops whatever an earlier one left unread.
+- **Agent Profiles on Claude Code's own login show their prices.** A profile
+  that names an alias (`opus`, `sonnet`, `haiku`) is priced as the model it
+  runs (`CLAUDE_CODE_ALIASES`); recorded run costs do not change.
+- **Smaller fixes.** The task Overview's Steps tile counts only accepted steps
+  as done, then those in review and those skipped, and step badges read `In
+  review` and `Awaiting decision`; at narrow widths the Agent Timeline's
+  History button no longer covers a row's counts; the `[RESTART]` turn no
+  longer doubles a period; Settings → Roles drops the Replace / Append toggle
+  next to the role prompt, which was only an editing mode, and says how the
+  role prompt is combined into the agent's system prompt.
 
 ### Removed
 
@@ -132,6 +755,12 @@ How the agent system works today is described in
   the built-in runtime of its type (the preview says so), else it is skipped
   with the reason. `--register-agent` in the prompt eval uses the built-in
   runtime of its type.
+- **The Manager's JSON actions.** It no longer reads `task_request` or
+  `task_start` JSON from its replies, nor the `"new_project": true`
+  confirmation: it acts only through its tools, and JSON it writes anyway is
+  sent to the user as text. A Manager role prompt still at a recommended text
+  is migrated at startup; an edited prompt that asks for task JSON creates
+  nothing until it is changed (Settings → Roles).
 
 ## [2.6.0] - 2026-10-14
 
