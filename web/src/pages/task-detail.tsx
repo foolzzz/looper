@@ -32,8 +32,13 @@ import { historyHref, runRoleLabel } from "@/pages/agent-history";
 import { TaskCostBreakdown } from "@/components/task-cost";
 import { ContinueAtCap, TaskSpendMeter } from "@/components/task-budget";
 import { RoleProfile, TaskAgentsSummary, TaskAgentsTab } from "@/components/task-agents-tab";
+import { NodeCards } from "@/components/pipeline-node-card";
+import { PipelineToolbar } from "@/components/pipeline-toolbar";
 import { GateBadge, TaskGates } from "@/components/task-gates";
 import { GATE_STATES, GATE_TURNS, gateAnchor, gateLook, gateTurn, stepAnchor } from "@/lib/gates";
+import { type NodeCard, gateCard, nodeCardId, plannerCard, resultCard, stepCard } from "@/lib/node-cards";
+import { FIT_PADDING, shownSteps, stepColumns, stepLevels, storeHideSkipped, storedHideSkipped } from "@/lib/pipeline-layout";
+import { useFullScreen } from "@/lib/full-screen";
 import { costBasis, costCaveats, formatUsd } from "@/lib/usage";
 import { cn } from "@/lib/utils";
 import {
@@ -634,9 +639,9 @@ function OverviewTab({
   const gates = new Map((task.gates ?? []).map((gate) => [gate.step_id, gate]));
   const gateOf = (step: TaskStep) => (step.kind === "gate" ? gates.get(step.id) : undefined);
   const stepIcon = (step: TaskStep, gate = gateOf(step)) =>
-    gate ? <CirclePause className={cn("h-4 w-4", gateLook(gate).tone)} aria-hidden="true" /> : stepStatusIcon(step.status);
+    gate ? <CirclePause className={cn("h-4 w-4", gateLook(gate, isActive).tone)} aria-hidden="true" /> : stepStatusIcon(step.status);
   const stepBadge = (step: TaskStep, gate = gateOf(step)) =>
-    gate ? <GateBadge gate={gate} /> : stepStatusBadge(step.status);
+    gate ? <GateBadge gate={gate} active={isActive} /> : stepStatusBadge(step.status);
   // Done means accepted (verified); a step in review is not done yet. A dropped (skipped) step is not counted, nor is
   // a cancelled gate (its step is verified, but nothing was settled).
   const cancelledGate = (s: TaskStep) => gateOf(s)?.state === "cancelled";
@@ -1508,26 +1513,6 @@ function droppedBecause(journal: JournalEntry[], steps: TaskStep[]): Map<string,
   return why;
 }
 
-/** Each step's depth in the plan's dependency graph: 0 without dependencies, else one more than its deepest. */
-function stepLevels(steps: TaskStep[]): Map<string, number> {
-  const byId = new Map(steps.map((s) => [s.id, s]));
-  const levels = new Map<string, number>();
-  const visiting = new Set<string>();
-  const level = (id: string): number => {
-    const known = levels.get(id);
-    if (known !== undefined) return known;
-    if (visiting.has(id)) return 0; // a cycle the plan's checks never let through
-    visiting.add(id);
-    const deps = (byId.get(id)?.depends_on ?? []).filter((d) => byId.has(d));
-    const value = deps.length ? 1 + Math.max(...deps.map(level)) : 0;
-    visiting.delete(id);
-    levels.set(id, value);
-    return value;
-  };
-  steps.forEach((s) => level(s.id));
-  return levels;
-}
-
 // xyflow's dark mode, in the theme's tokens.
 const PIPELINE_THEME = {
   "--xy-background-color": "var(--color-background)",
@@ -1548,27 +1533,39 @@ function nodeStyle(look: NodeLook) {
     background: look.background, color: look.color,
     border: `2px ${look.borderStyle} ${look.border}`,
     opacity: look.muted ? 0.8 : 1,
+    // React Flow leaves a node that is neither selectable nor draggable without pointer events; its card needs them.
+    pointerEvents: "all" as const,
   };
 }
 
+/** Nodes that name their card (`NodeCards`) for assistive technology, where focus lands: on the node, or on a gate's
+ * button (`GateNode`). */
+const described = (nodes: Node[]): Node[] =>
+  nodes.map((node) => (node.type === "gate" ? node : { ...node, domAttributes: { "aria-details": nodeCardId(node.id) } }));
+
 function NodeLabel({
-  title,
   name,
   look,
   note,
   role,
+  detail,
 }: {
-  title: string;
   name: string;
   look: NodeLook;
   note?: string;
   /** The roles a step runs and is reviewed as. */
   role?: string;
+  /** A line of what the step does, shown when there is no role line (the node fits one of the two). */
+  detail?: string;
 }) {
   return (
-    <div title={title} className="flex h-full w-full flex-col items-center justify-center overflow-hidden px-2 leading-tight">
+    <div className="flex h-full w-full flex-col items-center justify-center overflow-hidden px-2 leading-tight">
       <span className={cn("max-w-full truncate font-mono text-xs font-semibold", look.muted && "line-through")}>{name}</span>
-      {role && <span className="mt-0.5 max-w-full truncate font-mono text-[10px]">{role}</span>}
+      {role ? (
+        <span className="mt-0.5 max-w-full truncate font-mono text-[10px]">{role}</span>
+      ) : (
+        detail && <span className="mt-0.5 max-w-full truncate text-[10px] opacity-80">{detail}</span>
+      )}
       <span className="mt-1 max-w-full truncate text-[10px]">{look.label}{note ? ` · ${note}` : ""}</span>
     </div>
   );
@@ -1578,7 +1575,6 @@ interface GateNodeData extends Record<string, unknown> {
   name: string;
   topic: string;
   look: NodeLook;
-  title: string;
   onOpen: () => void;
 }
 
@@ -1590,7 +1586,7 @@ const HEXAGON = [
 
 /** A user gate in the pipeline: a hexagon with a pause icon, its label and its state in words; a button that takes
  * the user to the gate on the Overview tab. */
-function GateNode({ data }: NodeProps<Node<GateNodeData, "gate">>) {
+function GateNode({ id, data }: NodeProps<Node<GateNodeData, "gate">>) {
   const { look } = data;
   return (
     <>
@@ -1607,7 +1603,7 @@ function GateNode({ data }: NodeProps<Node<GateNodeData, "gate">>) {
       <button
         type="button"
         onClick={data.onOpen}
-        title={data.title}
+        aria-details={nodeCardId(id)}
         style={{ color: look.color, opacity: look.muted ? 0.8 : 1 }}
         className="nodrag nopan pointer-events-auto relative flex h-full w-full cursor-pointer flex-col items-center justify-center rounded-md px-6 leading-tight focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
       >
@@ -1628,12 +1624,19 @@ const NODE_TYPES = { gate: GateNode };
 /** The plan as its dependency graph: each step a node under the steps it depends on (steps without dependencies
  * under the Planner), the steps nothing live depends on leading to the result; a user gate is a hexagon that opens
  * it on the Overview tab (`onOpenGate`). Done steps keep their place and edges when the plan changes; dropped ones
- * stay, dashed and muted, as history. */
+ * stay, dashed and muted, as history. Each node has a card of its details (`NodeCards`); the dropped steps are
+ * hidden unless the viewer shows them, and the graph can go full screen (`PipelineToolbar`). */
 function PipelineTab({ task, onOpenGate }: { task: TaskDetail; onOpenGate: (step: TaskStep) => void }) {
-  const { nodes, edges, rows } = useMemo(() => {
-    const steps = task.steps || [];
+  const [hideSkipped, setHideSkipped] = useState(storedHideSkipped);
+  const container = useRef<HTMLDivElement>(null);
+  const [full, toggleFull] = useFullScreen(container);
+  const { nodes, edges, rows, cards, skipped } = useMemo(() => {
+    const all = task.steps || [];
+    const skipped = all.filter((s) => s.status === "skipped").length;
+    const { steps } = shownSteps(all, hideSkipped);
     const ns: Node[] = [];
     const es: Edge[] = [];
+    const cards: Record<string, NodeCard> = {};
     const edgeStyle = (live: boolean, running = false) => ({
       stroke: running ? "var(--color-primary)" : live ? "var(--color-muted-foreground)" : "var(--color-border)",
       strokeWidth: 2, strokeDasharray: live ? undefined : "6 4",
@@ -1641,45 +1644,41 @@ function PipelineTab({ task, onOpenGate }: { task: TaskDetail; onOpenGate: (step
     const plannerLook = taskLook(task.status, "Planning and deciding");
     ns.push({
       id: "planner", position: { x: -NODE_W / 2, y: 0 },
-      data: { label: <NodeLabel title={task.planner_id || "Planner"} name="Planner" look={plannerLook} /> },
+      data: { label: <NodeLabel name="Planner" look={plannerLook} /> },
       style: nodeStyle(plannerLook), sourcePosition: Position.Bottom, targetPosition: Position.Top,
     });
+    cards.planner = plannerCard(task, plannerLook);
 
-    if (steps.length === 0) {
+    if (all.length === 0) {
       const look = { ...STEP_LOOKS.pending, borderStyle: "dashed" as const, label: "Waiting for the plan" };
       ns.push({
         id: "waiting", position: { x: -NODE_W / 2, y: ROW_H },
-        data: { label: <NodeLabel title="The Planner has not planned the steps yet" name="Steps" look={look} /> },
+        data: { label: <NodeLabel name="Steps" look={look} /> },
         style: nodeStyle(look), sourcePosition: Position.Bottom, targetPosition: Position.Top,
       });
+      cards.waiting = { name: "Steps", look, roles: [],
+                        sections: [{ kind: "text", title: "Plan", text: "The Planner has not planned the steps yet." }] };
       es.push({ id: "e-planner-waiting", source: "planner", target: "waiting", animated: true, style: edgeStyle(true) });
-      return { nodes: ns, edges: es, rows: 2 };
+      return { nodes: described(ns), edges: es, rows: 2, cards, skipped };
     }
 
+    // The steps drawn, laid out without the hidden ones; a card still names every step it depends on.
     const byId = new Map(steps.map((s) => [s.id, s]));
+    const allById = new Map(all.map((s) => [s.id, s]));
     const gates = new Map((task.gates ?? []).map((gate) => [gate.step_id, gate]));
+    const active = isActiveTask(task);
+    // Each step's look as its node draws it: a gate's by its gate (whose turn it is while it is discussed, the
+    // Planner's only while the task runs, as the gate's panel says).
+    const lookOf = (step: TaskStep): NodeLook => {
+      if (step.kind !== "gate") return stepLook(step.status);
+      const gate = gates.get(step.id);
+      const turn = gate && gateTurn(gate, active);
+      return turn ? GATE_TURN_LOOKS[turn] : GATE_LOOKS[gateState(step, gate)];
+    };
     const levels = stepLevels(steps);
-    const why = droppedBecause(task.journal || [], steps);
-    // Rows by depth; within a row, under the mean place of the steps each depends on, then in plan order. The live
-    // steps are centred and the dropped ones follow on their right, so no live edge runs behind a dropped step.
-    const x = new Map<string, number>();
-    const depth = Math.max(...levels.values());
-    const stepX = NODE_W + GAP_X;
-    for (let row = 0; row <= depth; row++) {
-      const placed = steps
-        .filter((s) => levels.get(s.id) === row)
-        .map((s) => {
-          const parents = (s.depends_on ?? []).map((d) => x.get(d)).filter((v): v is number => v !== undefined);
-          return { s, at: parents.length ? parents.reduce((a, b) => a + b, 0) / parents.length : 0 };
-        })
-        .sort((a, b) => a.at - b.at || a.s.step_index - b.s.step_index);
-      const live = placed.filter(({ s }) => s.status !== "skipped");
-      const dropped = placed.filter(({ s }) => s.status === "skipped");
-      const left = -((live.length - 1) * stepX) / 2;
-      live.forEach(({ s }, i) => x.set(s.id, left + i * stepX));
-      const after = live.length ? left + live.length * stepX : stepX;
-      dropped.forEach(({ s }, i) => x.set(s.id, after + i * stepX));
-    }
+    const why = droppedBecause(task.journal || [], all);
+    const x = stepColumns(steps, levels, NODE_W + GAP_X);
+    const depth = steps.length ? Math.max(...levels.values()) : -1;
 
     const dependedOn = new Set(steps.filter((s) => s.status !== "skipped").flatMap((s) => s.depends_on ?? []));
     const ends = steps.filter((s) => s.status !== "skipped" && !dependedOn.has(s.id));
@@ -1689,19 +1688,13 @@ function PipelineTab({ task, onOpenGate }: { task: TaskDetail; onOpenGate: (step
       const position = { x: (x.get(step.id) ?? 0) - NODE_W / 2, y: ROW_H * (1 + (levels.get(step.id) ?? 0)) };
       const live = step.status !== "skipped";
       if (step.kind === "gate") {
-        const gate = gates.get(step.id);
-        const turn = gate && gateTurn(gate);
-        const look = turn ? GATE_TURN_LOOKS[turn] : GATE_LOOKS[gateState(step, gate)];
-        const title = [
-          `Gate ${name} — ${look.label}`,
-          step.instruction,
-          `Depends on: ${deps.map((d) => byId.get(d)?.step_key || d).join(", ") || "nothing"}`,
-        ].join("\n");
+        const look = lookOf(step);
         ns.push({
           id: step.id, type: "gate", position, focusable: false,
-          data: { name, topic: step.instruction, look, title, onOpen: () => onOpenGate(step) },
+          data: { name, topic: step.instruction, look, onOpen: () => onOpenGate(step) },
           style: { width: NODE_W, height: NODE_H, padding: 0, background: "transparent", border: "none" },
         });
+        cards[step.id] = gateCard(step, gates.get(step.id), { look, lookOf, stepsById: allById, active });
       }
       for (const source of deps.length ? deps : ["planner"]) {
         const fromLive = source === "planner" || byId.get(source)?.status !== "skipped";
@@ -1711,27 +1704,15 @@ function PipelineTab({ task, onOpenGate }: { task: TaskDetail; onOpenGate: (step
       }
       if (step.kind === "gate") continue;
       const look = stepLook(step.status);
-      const title = [
-        `${name} — ${look.label}`,
-        step.instruction,
-        `Depends on: ${deps.map((d) => byId.get(d)?.step_key || d).join(", ") || "nothing"}`,
-        step.worker_id ? `Worker: ${step.worker_id}` : "",
-        step.reviewer_id ? `Reviewer: ${step.reviewer_id}` : "",
-        step.retries ? `Retries: ${step.retries}` : "",
-        step.review ? "Needs a passing review" : "",
-        stepRoles(step),
-        step.status === "completed" && step.review_stage
-          ? `Waiting for ${step.review_stage === "role" ? `review: ${step.review_role_key}` : "the built-in review"}`
-          : "",
-        step.status === "skipped" ? `Skipped: ${why.get(step.id) || "dropped from the plan by a replan"}` : "",
-      ].filter(Boolean).join("\n");
       ns.push({
         id: step.id,
         position,
-        data: { label: <NodeLabel title={title} name={name} look={look} role={stepRoles(step, false) || undefined}
-                                  note={step.retries ? `retry ${step.retries}` : undefined} /> },
+        data: { label: <NodeLabel name={name} look={look} role={stepRoles(step, false) || undefined}
+                                  detail={step.instruction} note={step.retries ? `retry ${step.retries}` : undefined} /> },
         style: nodeStyle(look), sourcePosition: Position.Bottom, targetPosition: Position.Top,
       });
+      cards[step.id] = stepCard(step, { taskId: task.task_id, look, lookOf, stepsById: allById,
+                                        skippedBecause: why.get(step.id) });
     }
 
     // The result sits under the steps that lead to it, so its edges do not cross the dropped steps above it.
@@ -1739,35 +1720,50 @@ function PipelineTab({ task, onOpenGate }: { task: TaskDetail; onOpenGate: (step
     const resultLook = taskLook(task.status, "In progress");
     ns.push({
       id: "result", position: { x: resultX - NODE_W / 2, y: ROW_H * (2 + depth) },
-      data: { label: <NodeLabel title={task.result_summary || task.error || "The task's result"} name="Result" look={resultLook} /> },
+      data: { label: <NodeLabel name="Result" look={resultLook} /> },
       style: nodeStyle(resultLook), targetPosition: Position.Top,
     });
+    cards.result = resultCard(task, resultLook);
     for (const step of ends) {
       es.push({ id: `end:${step.id}`, source: step.id, target: "result", style: edgeStyle(true) });
     }
-    return { nodes: ns, edges: es, rows: depth + 3 };
-  }, [task, onOpenGate]);
+    return { nodes: described(ns), edges: es, rows: depth + 3, cards, skipped };
+  }, [task, hideSkipped, onOpenGate]);
+  const changeHideSkipped = (hide: boolean) => {
+    setHideSkipped(hide);
+    storeHideSkipped(hide);
+  };
 
   return (
-    // Taller for a deeper plan, so its labels stay readable before any zoom.
-    <div className="w-full" style={{ height: Math.min(860, Math.max(420, rows * 90)) }}>
+    // Taller for a deeper plan, so its labels stay readable before any zoom; full screen, the whole screen (the
+    // browser's, or a fixed overlay where the browser has none).
+    <div
+      ref={container}
+      className={cn("w-full bg-background", full === "overlay" && "fixed inset-0 z-50")}
+      style={full === "off" ? { height: Math.min(860, Math.max(420, rows * 90)) } : undefined}
+    >
       <ReactFlow
         style={PIPELINE_THEME}
         nodes={nodes}
         edges={edges}
         nodeTypes={NODE_TYPES}
         fitView
-        fitViewOptions={{ padding: 0.12 }}
+        fitViewOptions={{ padding: FIT_PADDING }}
         minZoom={0.15}
         colorMode="dark"
         proOptions={{ hideAttribution: true }}
         nodesDraggable={false}
         nodesConnectable={false}
         elementsSelectable={false}
+        // A quick second tap on a node closes its card; it does not zoom too.
+        zoomOnDoubleClick={false}
         defaultEdgeOptions={{ type: "smoothstep" }}
       >
         <Background color="var(--color-border)" gap={20} />
         <Controls showInteractive={false} />
+        <NodeCards cards={cards} />
+        <PipelineToolbar skipped={skipped} hideSkipped={hideSkipped} onHideSkipped={changeHideSkipped}
+                         full={full !== "off"} onToggleFull={toggleFull} />
       </ReactFlow>
     </div>
   );

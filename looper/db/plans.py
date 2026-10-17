@@ -19,6 +19,7 @@ import asyncpg
 
 from . import journal as db_journal, user_gates as db_user_gates
 from .connection import get_pool
+from .tasks import step_row
 
 # Every status a plan can have (task_plans.status).
 STATUSES = ("planning", "executing", "verifying", "stopping", "completed", "failed")
@@ -127,16 +128,6 @@ async def write(
     await db_user_gates.write(conn, task_id, gates, gate_messages)
 
 
-def _step(row: Mapping[str, Any]) -> dict[str, Any]:
-    step = dict(row)
-    if isinstance(step.get("result"), str):
-        step["result"] = json.loads(step["result"])
-    for name in ("target_files", "validation_commands", "acceptance_criteria", "depends_on", "feedback",
-                 "missed_messages"):
-        step[name] = list(step.get(name) or [])
-    return step
-
-
 async def load(task_id: str, *, pool: asyncpg.Pool | None = None) -> dict[str, Any] | None:
     """The task's plan, or None when it has none.
 
@@ -157,7 +148,7 @@ async def load(task_id: str, *, pool: asyncpg.Pool | None = None) -> dict[str, A
     if row is None:
         return None
     steps = await pool.fetch("SELECT * FROM task_steps WHERE task_id = $1 ORDER BY step_index, created_at", task_id)
-    return {"plan": dict(row), "steps": [_step(step) for step in steps],
+    return {"plan": dict(row), "steps": [step_row(step) for step in steps],
             "journal": await db_journal.list_entries(task_id, pool=pool),
             "gates": {gate["step_id"]: gate for gate in await db_user_gates.list_for_task(task_id, pool=pool)}}
 

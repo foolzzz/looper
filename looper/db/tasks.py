@@ -256,6 +256,17 @@ async def get_task(task_id: str, *, pool: asyncpg.Pool | None = None) -> dict[st
     return _task(row)
 
 
+def step_row(row: Mapping[str, Any]) -> dict[str, Any]:
+    """A ``task_steps`` row as the plan and the task page read it: ``result`` decoded, the array columns as lists."""
+    step = dict(row)
+    if isinstance(step.get("result"), str):
+        step["result"] = json.loads(step["result"])
+    for name in ("target_files", "validation_commands", "acceptance_criteria", "depends_on", "feedback",
+                 "missed_messages"):
+        step[name] = list(step.get(name) or [])
+    return step
+
+
 async def get_task_with_steps(task_id: str, *, pool: asyncpg.Pool | None = None) -> dict[str, Any] | None:
     pool = pool or get_pool()
     task_row = await pool.fetchrow(f"{_WITH_PROJECT} WHERE t.id = $1", task_id)
@@ -267,7 +278,7 @@ async def get_task_with_steps(task_id: str, *, pool: asyncpg.Pool | None = None)
         task_id,
     )
     result = _task(task_row)
-    result["steps"] = [dict(r) for r in step_rows]
+    result["steps"] = [step_row(r) for r in step_rows]
     result["journal"] = await db_journal.list_entries(task_id, pool=pool)
     return result
 
