@@ -1,5 +1,16 @@
 import { describe, expect, it } from "vitest";
-import { type CardLook, type CardSection, clipText, formatWhen, gateCard, plannerCard, resultCard, stepCard } from "@/lib/node-cards";
+import {
+  type CardLook,
+  type CardSection,
+  clipText,
+  formatSeconds,
+  formatWhen,
+  gateCard,
+  plannerCard,
+  resultCard,
+  stepCard,
+  stepSpan,
+} from "@/lib/node-cards";
 import type { TaskDetail, TaskStep, UserGate } from "@/lib/api";
 
 const look = (label: string): CardLook => ({ label, border: "b", borderStyle: "solid", background: "bg", color: "c" });
@@ -10,7 +21,7 @@ function step(id: string, extra: Partial<TaskStep> = {}): TaskStep {
     id, task_id: "t1", step_index: 0, step_key: id, kind: "work", instruction: "", acceptance_criteria: [], target_files: [],
     depends_on: [], status: "pending", review: false, role_key: null, review_role_key: null, review_role_required: true,
     role_version: null, review_role_version: null, review_stage: null, retries: 0, worker_id: null, reviewer_id: null,
-    result: null, created_at: "2026-10-17T08:00:00Z", updated_at: "2026-10-17T08:00:00Z", completed_at: null,
+    result: null, created_at: "2026-10-17T08:00:00Z", updated_at: "2026-10-17T08:00:00Z", completed_at: null, started_at: null,
     ...extra,
   };
 }
@@ -31,7 +42,7 @@ describe("stepCard", () => {
       status: "verified", instruction: "Write test_greet.py.\nRun it.", acceptance_criteria: ["the test passes"],
       target_files: ["test_greet.py"], depends_on: ["s1"], role_key: "tester", role_version: 2,
       review_role_key: "security", review_role_version: 1, review_role_required: false, review: true, retries: 1,
-      worker_id: "worker-a", reviewer_id: "reviewer-b", completed_at: "2026-10-17T08:05:00Z",
+      worker_id: "worker-a", reviewer_id: "reviewer-b", started_at: "2026-10-17T08:01:00Z", completed_at: "2026-10-17T08:05:00Z",
       result: { status: "completed", summary: "Wrote the test; it passes." },
     });
     const card = cardOf(s2, [s1, s2]);
@@ -51,7 +62,9 @@ describe("stepCard", () => {
     expect(section(card.sections, "Result")).toMatchObject({ text: "Wrote the test; it passes.", preview: undefined });
     expect(section(card.sections, "Timing")).toMatchObject({ facts: [
       { label: "Planned", value: formatWhen("2026-10-17T08:00:00Z") },
+      { label: "Started", value: formatWhen("2026-10-17T08:01:00Z") },
       { label: "First finished", value: formatWhen("2026-10-17T08:05:00Z") },
+      { label: "Took", value: "4m 0s" },
     ] });
   });
 
@@ -103,6 +116,37 @@ describe("stepCard", () => {
     const dropped = cardOf(step("s4", { status: "skipped", completed_at: "2026-10-17T08:05:00Z" }));
     expect(section(dropped.sections, "Skipped")).toMatchObject({ text: "Dropped from the plan by a replan" });
     expect(section(dropped.sections, "Timing")).toMatchObject({ facts: [{ label: "Planned" }, { label: "Dropped" }] });
+  });
+});
+
+describe("stepSpan", () => {
+  const at = (iso: string) => new Date(iso).getTime();
+  const span = (extra: Partial<TaskStep>, now = at("2026-10-17T08:10:00Z")) => stepSpan(step("s1", extra), now);
+
+  it("is how long the step took to finish first, from its first attempt's start", () => {
+    expect(span({ status: "verified", started_at: "2026-10-17T08:00:00Z", completed_at: "2026-10-17T08:03:12Z" }))
+      .toEqual({ label: "took", text: "3m 12s" });
+    // In review: the Worker finished; the review is not counted.
+    expect(span({ status: "completed", started_at: "2026-10-17T08:00:00Z", completed_at: "2026-10-17T08:00:45Z" }))
+      .toEqual({ label: "took", text: "45s" });
+    expect(span({ status: "skipped", started_at: "2026-10-17T08:00:00Z", completed_at: "2026-10-17T08:02:00Z" }))
+      .toEqual({ label: "ran for", text: "2m 0s" });
+  });
+
+  it("is how long it has run, while its attempt runs or awaits a decision", () => {
+    expect(span({ status: "dispatched", started_at: "2026-10-17T08:09:20Z" })).toEqual({ label: "running for", text: "40s" });
+    expect(span({ status: "deciding", started_at: "2026-10-17T06:00:00Z" })).toEqual({ label: "running for", text: "2h 10m" });
+  });
+
+  it("is nothing before the step started, while it waits to start again, or for a step from before starts were kept", () => {
+    expect(span({ status: "pending" })).toBeNull();
+    expect(span({ status: "pending", started_at: "2026-10-17T08:00:00Z" })).toBeNull(); // restarted, not run yet
+    expect(span({ status: "verified", completed_at: "2026-10-17T08:03:00Z" })).toBeNull(); // no start recorded
+  });
+
+  it("formats spans for people", () => {
+    expect([formatSeconds(0), formatSeconds(59.9), formatSeconds(60), formatSeconds(3599), formatSeconds(3600), formatSeconds(-5)])
+      .toEqual(["0s", "59s", "1m 0s", "59m 59s", "1h 0m", "0s"]);
   });
 });
 
