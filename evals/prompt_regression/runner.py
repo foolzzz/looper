@@ -416,13 +416,13 @@ def run_task(
             check_problem=task.check(work_dir),
             expect=task.expect,
             disciplines=task.disciplines,
+            # The gates the runner ended because the Planner asked again after the script ran out.
+            gate_asks_beyond_script=sum(1 for done in answered.values() if done > len(_script(task))),
             clock_offset=clock_offset,
             now=time.time() + clock_offset,
         )
         if step_workspaces:
             result["looper_commits"] = looper_commits(work_dir, task_id)
-        # The gates the runner ended because the Planner asked again after the script ran out.
-        result["gate_asks_beyond_script"] = sum(1 for done in answered.values() if done > len(_script(task)))
     except Exception as exc:
         raise TaskError(f"{type(exc).__name__}: {exc}", cost_usd=_cancel_after_error(api, task_id)) from exc
     if stopped_by_cap:

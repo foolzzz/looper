@@ -195,7 +195,8 @@ gates: when one waits for the user it posts the task's `gate_script` in turn
 decide yourself and state your assumptions." and then ends it). When the
 Planner asks again after a script has run out, the runner ends the discussion,
 so the gate closes on the Planner's assumptions instead of waiting for the
-task's timeout; `gate_asks_beyond_script` counts those gates. To print a
+task's timeout; `gate_asks_beyond_script` counts those gates, and
+`gate_ambiguous`, whose script answers all it asks, fails on one. To print a
 comparison again:
 
 ```bash

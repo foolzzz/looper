@@ -402,11 +402,13 @@ def task_metrics(
     check_problem: str | None,
     expect: Mapping[str, int],
     disciplines: Iterable[Discipline] = (),
+    gate_asks_beyond_script: int = 0,
     clock_offset: float = 0.0,
     now: float,
 ) -> dict[str, Any]:
     """One task's result: success and why not, the flow counts, cost, contract violations and the Planner's
-    file changes. ``expect`` may bound ``contract_violations`` (their total) too."""
+    file changes. ``expect`` may bound ``contract_violations`` (their total) too, and the gates the scripted user
+    ended because the Planner asked after its script ran out (``gate_asks_beyond_script``, the runner's count)."""
     by_role: dict[str, list[Mapping[str, Any]]] = {}
     for record in records:
         by_role.setdefault(role(record), []).append(record)
@@ -451,6 +453,7 @@ def task_metrics(
         "interface_dependents": interface_dependents(detail.get("steps") or []),
         # The user gates the Planner opened, and how they went.
         **gate_metrics(detail, records, now=now),
+        "gate_asks_beyond_script": gate_asks_beyond_script,
     }
     violations = {"planner": planner_violations(activity), "worker": worker_violations,
                   "reviewer": reviewer_violations}

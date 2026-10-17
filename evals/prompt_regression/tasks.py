@@ -57,7 +57,7 @@ class EvalTask:
     # min_discipline_roles, min_interface_dependents; max_plan_changes, max_steps,
     # max_roles_defined, max_role_prompt_mismatches, max_role_boundary_misses, max_gate_breaches,
     # max_contract_violations; min_gates_opened, min_gates_passed, min_gates_ended_by_user, min_assumptions_stated,
-    # min_gate_parallel_runs, min_conclusion_reads; max_gates_opened
+    # min_gate_parallel_runs, min_conclusion_reads; max_gates_opened, max_gate_asks_beyond_script
     expect: dict[str, int] = field(default_factory=dict)
     fake: dict[str, Any] = field(default_factory=dict)  # the stand-in Claude's script
 
@@ -774,7 +774,8 @@ GATE_TASKS: tuple[EvalTask, ...] = (
         user_gates=True,
         gate_script=(_TOML_ANSWER,),
         check=_settings_as_decided,
-        expect={"min_gates_opened": 1, "min_gates_passed": 1, "min_conclusion_reads": 1},
+        expect={"min_gates_opened": 1, "min_gates_passed": 1, "min_conclusion_reads": 1,
+                "max_gate_asks_beyond_script": 0},
         fake={
             "plan": [_SETTINGS_GATE],
             "gate_close_steps": [_write_settings(["g1"])],

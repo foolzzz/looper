@@ -485,6 +485,19 @@ def test_the_scripted_user_ends_a_gate_that_asks_again_after_its_script_ran_out(
     assert api.posted == []
 
 
+def test_a_gate_that_asks_after_its_script_ran_out_fails_a_task_that_bounds_it(tmp_path: Path) -> None:
+    task = next(t for t in TASKS if t.id == "gate_ambiguous")
+    assert task.expect["max_gate_asks_beyond_script"] == 0
+
+    def result(asks: int) -> dict[str, Any]:
+        return metrics.task_metrics(detail={"status": "completed", "steps": []}, activity=[], records=[], events={},
+                                    changes={}, work_dir=tmp_path, check_problem=None,
+                                    expect={"max_gate_asks_beyond_script": 0}, gate_asks_beyond_script=asks, now=0.0)
+
+    assert result(0)["success"] and result(0)["gate_asks_beyond_script"] == 0
+    assert result(1)["problems"] == ["gate_asks_beyond_script 1 > 0"]
+
+
 @pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 def test_a_gate_task_has_gates_on_whatever_user_gates_says(tmp_path: Path) -> None:
     tasks = runner.select_tasks(["gate_ambiguous"])
