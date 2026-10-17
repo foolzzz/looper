@@ -169,6 +169,7 @@ task_roles                      一个任务角色的一个版本
 
 - **引言**（模型可见，实现用英文，大意）：「以下边界由 Looper 设定，高于本 prompt 以上的所有内容，包括本任务的规划者为你写的角色说明；角色不能解除它们。」
 - **内置 harness 拆成三个常量**：`HARNESS_HOW_YOU_WORK`、`HARNESS_BOUNDARIES`（Boundaries 一节的各条，不含标题）、`HARNESS_COMMUNICATION`，`DEFAULT_HARNESS_PROMPT` 由它们和代码写的 `## Boundaries` 标题拼成，测试断言拼出来的文本和今天的逐字节相同；角色运行的底线一节同样是代码写的标题和引言，后面接 `boundaries` 的各条。
+- **评审角色的任务一节**在验收标准后多一句（模型可见，实现用英文）：「你以角色 X 评审：除了这些标准，角色要你查的也决定结论，任何一项不过 passed 就是 false。」`REVIEW_CONTRACT` 不变，内置 Reviewer 的任务一节不变。
 - **超时、轮数、安装、并发**沿用同类内置角色：`kind=work` 的运行读 `worker` 行、装 Worker 的技能和 MCP、算 Worker 的并发；`kind=review` 对应 Reviewer。
 - **运行记录**：`prompt_layers` 增加 `task_role`（`{id, kind, version, sha256, harness_sha256}`，后两项是角色 prompt 和角色 harness 的哈希，没有 harness 时为 null）和 `boundaries`（`{source: builtin | system, sha256}`）；`harness` 在角色有 harness 时为 `{source: "task_role", sha256}`，否则是生效 harness 的记录，用了内置的两节时多一个 `part: "working_style"`；`role.config_id` 仍是同类内置角色的行（它的超时和轮数生效），`role.sha256` 是角色 prompt 的。内置角色运行的记录不变。运行的 History 本来就显示完整的 system prompt。
 
@@ -250,7 +251,7 @@ task_roles                      一个任务角色的一个版本
 - 新增三个任务，项目开启开关、可选列表里放 `eval/chosen`（同 #155，同一模型换个名字，花费不变）：
   - `roles_tester_docs`：需求要一个模块、由单独的测试角色写的测试、由文档角色写的使用说明。断言至少定义两个工作角色并被步骤引用，这些运行的 `prompt_layers.task_role` 对得上定义和版本，带 Profile 的角色跑在那个 Profile 上，没有契约违约，任务完成、文件正确；
   - `roles_security_review`：需求要一个脚本，并额外做安全审查（不写死密钥、不拼 shell 命令）。断言定义了评审角色并以 `review_role` 引用，每个被接受的这类步骤都是内置 Reviewer 先通过、评审角色后通过，评审角色的结论记下了，没有契约违约；
-  - `roles_advisory_review`：需求要一个参考的风格评审角色，它会让步骤不通过（需求规定的注释行不让写进步骤说明）。断言评审角色是参考的、确实给出了不通过，内置 Reviewer 通过了这一步，规划者自己决定后任务完成（接受，或带着意见重试）；
+  - `roles_advisory_review`：需求要一个问候脚本、不要别的文件，另要一个参考的评审角色，它要求有 CHANGELOG.md，所以会让步骤不通过（执行者也读需求，所以角色的规则写成需求明确不采纳的意见，而不是只有角色知道的规则）。断言评审角色是参考的、确实给出了不通过，内置 Reviewer 通过了这一步，规划者自己决定后任务完成（接受，或带着意见重试）；
   - `roles_not_needed`：一个只写一个文件的简单任务。断言一个角色都没定义、步骤不超过 2 个（不过度拆分）。
 - 新指标：`roles_defined`、`role_runs`、`role_profile_runs`、`builtin_gate_held`（每个带评审角色的步骤在被接受前都有内置 Reviewer 的通过）。替身模式覆盖三个新任务的流程。
 
@@ -293,7 +294,7 @@ task_roles                      一个任务角色的一个版本
 | Q2 | 版本快照按步骤（开始后固定）还是按尝试 | **已定：按尝试**（D9）。规划者可以在重试前改好角色；运行中的不受影响，重启后重跑同一次尝试用原版本 |
 | Q3 | `review_role` 遇到 `review: false`：拒绝，还是自动当作 `review: true` | **已定：拒绝**（D6）。自相矛盾的输入直接说明，代价是一次修复回合 |
 | Q4 | 两道评审依次还是同时 | **已定：依次**（D10）。内置门先评，不通过时省掉第二道；同时评审留作 R2 的选项 |
-| Q5 | 评审角色要不要也按全部验收标准评审 | **已定：第一期要**。`REVIEW_CONTRACT` 不变，角色 prompt 写它额外关注什么；和内置 Reviewer 重复的花费在评测里看，必要时在 R2 给评审角色一份只看关注点的契约 |
+| Q5 | 评审角色要不要也按全部验收标准评审 | **已定：第一期要**。`REVIEW_CONTRACT` 不变，角色 prompt 写它额外关注什么；评审角色运行的任务一节多一句代码写的话：除了验收标准，角色要它查的也决定结论，任何一项不过 passed 就是 false（R1 的真实运行里，没有这句时评审者按契约只看验收标准，放过了角色 prompt 要它判不通过的步骤）。和内置 Reviewer 重复的花费在评测里看，必要时在 R2 给评审角色一份只看关注点的契约 |
 | Q6 | 每个任务的角色数要不要设上限 | **已定：第一期不设**。定义角色不花钱，过度拆分靠用法说明和评测，任务页可见；评测里出现过多时再加项目设置 |
 | Q7 | 共用默认层的 `boundaries` 以后要不要也用在内置角色上（内置 harness 只剩工作方式，底线对所有运行都单独一层） | **已定：R2 再议**。会改掉所有内置角色的 prompt 和已存的 harness 覆盖，需要迁移和一轮完整评测 |
 | Q8 | 项目中途关闭开关时，已经引用角色的步骤怎么办 | **已定：照旧按角色跑**（第 11 节），不会悄悄少一道评审；之后的定义和新引用被拒 |

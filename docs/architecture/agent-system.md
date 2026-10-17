@@ -2199,7 +2199,9 @@ refused with that reason.
   task section, then the boundaries (a code-owned lead saying they hold over
   everything above, then the shared defaults' `boundaries`, else the built-in
   `HARNESS_BOUNDARIES`), then the contract: nothing the Planner or the user
-  wrote follows them. The built-in harness is those three parts joined, the
+  wrote follows them. A review role's task section adds, after the acceptance
+  criteria, that what its role asks decides its verdict too (`passed` is false
+  when the work fails either); `REVIEW_CONTRACT` is unchanged. The built-in harness is those three parts joined, the
   same text as before; a step without a role is prompted exactly as before.
   `boundaries` is set on the shared defaults only (Settings → Roles, Shared
   defaults; the Manager's `looper_settings`; exported with the configuration);
