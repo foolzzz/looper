@@ -64,6 +64,7 @@ from ..db import agent_setting_layers as db_layers, connection as db_connection,
 from ..db import projects as db_projects, schedules as db_schedules, tasks as db_tasks
 from . import cron
 from .message import TASK_ROUTER_ADDRESS, AgentAddress, MessageEnvelope, MessageType
+from .project_execution import ProjectExecution
 from .schedule_gate import GateResult, run_gate
 from .schedule_notify import Notifier, Sender
 from .system_prompt import TASK_REQUIREMENT_LIMIT
@@ -550,10 +551,13 @@ class Scheduler:
         requirement = run_requirement(schedule, firing, recent, description=description, gate_output=gate_output,
                                       carried=carried)
         task_id = f"task-{uuid.uuid4().hex[:12]}"
+        # A run runs as its project's tasks do (task_workspaces), in place or in a worktree of the directory.
+        project = await db_projects.get_project(schedule["project_id"], pool=conn)
         await db_tasks.create_task(
             task_id=task_id, requirement=requirement, project_id=schedule["project_id"],
             work_dir=work_dir, status=db_tasks.READY, schedule_id=schedule["id"],
             budget_usd=schedule["run_budget_usd"], title=run_title(schedule, firing), pool=conn,
+            workspace_dir=work_dir, workspace_mode=ProjectExecution.from_row(project).task_mode.value,
         )
         if schedule["profile_overrides"]:
             await db_layers.set_profile_overrides(conn, task_id, schedule["profile_overrides"])

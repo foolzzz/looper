@@ -16,6 +16,11 @@ The Planner, the Workers and the Reviewers get the same layout::
     - <title>: <summary> (<path>)  with its path relative to it (knowledge.py);
                                  agents read a document when they need it
 
+    ## The operator's notes  L3: only in a project with operator_notes on,
+    for this directory           when the directory has some: a read-only copy
+    ...                          of the operator's Claude Code auto memory
+                                 (operator_notes.py)
+
     ## Task                  L4: what this session is for (the Planner's task,
     ...                          a Worker's or Reviewer's step)
 
@@ -309,6 +314,8 @@ def prompt_layers(
             "knowledge_sha256": knowledge.sha256,
             "knowledge_documents": knowledge.documents,
             **({"knowledge_error": knowledge.error} if knowledge.error else {}),
+            # Only in a project that gives its agents the operator's notes (``operator_notes``).
+            **({"operator_notes": knowledge.notes.record()} if knowledge.notes is not None else {}),
         },
         "task": None if task_kind is None else {
             "kind": task_kind, "task_id": task_id, "step_id": step_id, "sha256": sha256_text(task.strip()),
@@ -385,7 +392,7 @@ def build_system_prompt(
         harness=harness.text,
         project_name=str((project or {}).get("name") or ""),
         background=str((project or {}).get("background") or ""),
-        knowledge=knowledge.index,
+        knowledge=knowledge.prompt_section,
         task=task,
         contract=contract,
     )
@@ -438,7 +445,7 @@ def build_role_prompt(
         harness=working,
         project_name=str((project or {}).get("name") or ""),
         background=str((project or {}).get("background") or ""),
-        knowledge=knowledge.index,
+        knowledge=knowledge.prompt_section,
         task=f"{task.strip()}\n\n{boundaries_section(boundaries.text)}" if task.strip()
         else boundaries_section(boundaries.text),
         contract=contract,

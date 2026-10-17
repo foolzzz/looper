@@ -469,12 +469,17 @@ def _in_worktree(workspace: StepWorkspace, relative: str) -> str:
 
 def _link_one(workspace: StepWorkspace, relative: str) -> str:
     """Link ``relative`` in the worktree to the task directory's; '' when linked, else why not."""
-    source = Path(workspace.task_dir) / relative
-    target = Path(workspace.work_dir) / relative
+    return link_path(Path(workspace.task_dir) / relative, Path(workspace.work_dir) / relative, Path(workspace.path),
+                     missing="the task directory has none")
+
+
+def link_path(source: Path, target: Path, top: Path, *, missing: str) -> str:
+    """Link ``target``, in the worktree whose top level is ``top``, to ``source``; '' when linked, else why not
+    (``missing`` when there is no ``source``)."""
     if not os.path.lexists(source):
-        return "the task directory has none"
+        return missing
     parent = target.parent
-    if not parent.resolve().is_relative_to(Path(workspace.path).resolve()):
+    if not parent.resolve().is_relative_to(top.resolve()):
         return "its directory is outside the worktree"  # through a link the repository tracks
     if os.path.lexists(target):
         if target.is_symlink() and os.readlink(target) == str(source):
@@ -562,6 +567,24 @@ async def merge(workspace: StepWorkspace, *, step_key: str, title: str,
     return MergeResult(workspace, files, leftovers, replaced)
 
 
+async def commit_pending(path: Path, links: Sequence[str], message: str) -> str | None:
+    """Commit everything pending in the checkout at ``path`` as Looper, but ``links`` (relative to its top level:
+    the linked paths that are still links); the commit, or None when nothing was pending."""
+    await _git(path, "add", "-A")
+    if links:
+        # A link is the local state of the directory it points to, never part of a result: not even one the Worker
+        # committed (a directory-only ignore rule, such as node_modules/, does not match a link). One the Worker
+        # replaced with files of its own is its change.
+        await _git(path, "rm", "-r", "-q", "--cached", "--ignore-unmatch", "--", *(f":(literal){p}" for p in links))
+    staged = await _git(path, "diff", "--cached", "--quiet", check=False)
+    if staged.returncode not in (0, 1):
+        raise GitError(f"git diff --cached failed: {staged.stderr.decode('utf-8', 'replace').strip()[:500]}")
+    if staged.returncode == 0:
+        return None
+    await _git(path, "commit", "-q", "--no-verify", "--no-gpg-sign", "-m", message, identity=True)
+    return await _rev(path, "HEAD")
+
+
 async def _close_step_branch(workspace: StepWorkspace, step_key: str,
                              links: Sequence[str]) -> tuple[StepWorkspace, str | None]:
     """Commit what the step's Worker left uncommitted, without ``links`` (the linked paths that are still links); the
@@ -573,21 +596,9 @@ async def _close_step_branch(workspace: StepWorkspace, step_key: str,
         if head.text != f"refs/heads/{workspace.branch}":
             raise _Unmerged(MergeError.STEP_BRANCH_CHANGED,
                             f"the step's checkout is no longer on its branch {workspace.branch}")
-        await _git(path, "add", "-A")
-        if links:
-            # A link is the task directory's local state, never part of the step's result: not even one the Worker
-            # committed (a directory-only ignore rule, such as node_modules/, does not match a link). One the Worker
-            # replaced with files of its own is its change.
-            await _git(path, "rm", "-r", "-q", "--cached", "--ignore-unmatch", "--",
-                       *(f":(literal){_in_worktree(workspace, p)}" for p in links))
-        staged = await _git(path, "diff", "--cached", "--quiet", check=False)
-        if staged.returncode not in (0, 1):
-            raise GitError(f"git diff --cached failed: {staged.stderr.decode('utf-8', 'replace').strip()[:500]}")
-        if staged.returncode == 1:
-            await _git(path, "commit", "-q", "--no-verify", "--no-gpg-sign", "-m",
-                       f"looper: commit what step {step_key} left uncommitted"
-                       + _trailers(workspace.task_id, step_key), identity=True)
-            leftovers = await _rev(path, "HEAD")
+        leftovers = await commit_pending(path, [_in_worktree(workspace, p) for p in links],
+                                         f"looper: commit what step {step_key} left uncommitted"
+                                         + _trailers(workspace.task_id, step_key))
     tip = await _git(workspace.repo_dir, "rev-parse", "--verify", "-q", f"refs/heads/{workspace.branch}^{{commit}}",
                      check=False)
     if tip.returncode != 0:
@@ -658,7 +669,7 @@ async def remove(workspace: StepWorkspace, *, keep_branch: bool = False) -> Step
     """
     path = Path(workspace.path)
     if Path(workspace.repo_dir).is_dir():
-        await _forget_worktree(workspace.repo_dir, path)
+        await forget_worktree(workspace.repo_dir, path)
         if not keep_branch:
             await _git(workspace.repo_dir, "branch", "-D", workspace.branch, check=False)
     if path.exists():
@@ -728,7 +739,7 @@ def task_view(task_id: str, rows: Sequence[Mapping[str, Any]], *, start_branch: 
     }
 
 
-async def _forget_worktree(repo: str, path: Path) -> None:
+async def forget_worktree(repo: str, path: Path) -> None:
     """Remove the worktree at ``path`` and the repository's record of it, even when its directory is already gone;
     not with ``git worktree prune``, which would also drop the records of the user's own worktrees whose
     directories are missing."""
@@ -745,15 +756,16 @@ def _remove_empty(directory: Path) -> None:
         pass
 
 
-async def remove_orphan(path: Path) -> None:
-    """Delete a worktree directory no workspace row knows: through its repository when git still knows it."""
+async def remove_orphan(path: Path, *, keep_branch: bool = False) -> None:
+    """Delete a worktree directory no row knows: through its repository when git still knows it, with its
+    ``looper/`` branch unless ``keep_branch``."""
     if (path / ".git").is_file():
         common = await _git(path, "rev-parse", "--path-format=absolute", "--git-common-dir", check=False)
         branch = await _git(path, "symbolic-ref", "-q", "HEAD", check=False)
         if common.returncode == 0:
             repo = str(Path(common.text).parent)
-            await _forget_worktree(repo, path)
-            if branch.returncode == 0 and branch.text.startswith("refs/heads/looper/"):
+            await forget_worktree(repo, path)
+            if not keep_branch and branch.returncode == 0 and branch.text.startswith("refs/heads/looper/"):
                 await _git(repo, "branch", "-D", short_branch(branch.text), check=False)
     if path.exists():
         shutil.rmtree(path, ignore_errors=True)

@@ -125,11 +125,11 @@ def test_the_step_worktrees_check_reads_each_project_s_directory(tmp_path: Path)
 
     assert check(None) == ("skip", "not checked: the projects are stored in PostgreSQL, which is unreachable")
     assert check([]) == ("skip", "no project runs its parallel steps in worktrees")
-    assert check([{"name": "alarm", "work_dir": str(ready), "step_workspace_links": [".venv"]},
+    assert check([{"name": "alarm", "work_dir": str(ready), "workspace_links": [".venv"]},
                   {"name": "inbox", "work_dir": ""}]) == (
         "ok", "alarm: main, 0 B checkout; inbox: no default directory, each task's is checked when it runs")
     status, detail = check([
-        {"name": "alarm", "work_dir": str(ready), "step_workspace_links": [".venv", ".env"]},
+        {"name": "alarm", "work_dir": str(ready), "workspace_links": [".venv", ".env"]},
         {"name": "web", "work_dir": str(detached)}, {"name": "notes", "work_dir": str(plain)}])
     assert status == "warn"
     assert detail.split("; ") == [

@@ -265,11 +265,11 @@ def test_doctor_reads_the_projects_whose_steps_work_in_worktrees(tmp_path: Path,
 
     async def test(pool: Any) -> None:
         await projects.create_project(name="beta", work_dir="/b", pool=pool,
-                                      execution={"step_workspaces": "worktree", "step_workspace_links": [".venv"]})
+                                      execution={"step_workspaces": "worktree", "workspace_links": [".venv"]})
         await projects.create_project(name="alpha", work_dir="/a", pool=pool, execution={"step_workspaces": "worktree"})
         await projects.create_project(name="shared", work_dir="/s", pool=pool, execution={"step_workspaces": "shared"})
         await projects.create_project(name="plain", work_dir="/p", pool=pool)
-        assert [(p["name"], p["work_dir"], p["step_workspace_links"]) for p in await projects.worktree_projects()] == [
+        assert [(p["name"], p["work_dir"], p["workspace_links"]) for p in await projects.worktree_projects()] == [
             ("alpha", "/a", None), ("beta", "/b", [".venv"])]
 
     _run(test, monkeypatch)

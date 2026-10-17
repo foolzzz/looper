@@ -338,7 +338,7 @@ class TestStepWorkspaces:
         self, planner_claude: Any, agent_db: Any,
     ) -> None:
         agent_db.get_task_project.return_value = project(
-            step_workspaces="worktree", step_workspace_links=[".venv", "node_modules", "missing"])
+            step_workspaces="worktree", workspace_links=[".venv", "node_modules", "missing"])
         claude = planner_claude(plan(step("s1"), step("s2")), decide("accept"), decide("accept"))
         seen: dict[str, Any] = {}
         checks: dict[str, Any] = {}

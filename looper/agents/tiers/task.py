@@ -13,7 +13,10 @@ start it resumes the tasks the previous server was running, from their plans
 in the database (``resume_tasks``), and starts those it had not given a
 Planner yet (``start_tasks``). Each task that ends (completed, failed, cancelled or
 stopped) is reported to ``on_task_end``: the scheduler records a scheduled
-run's outcome there.
+run's outcome there. Before a task's Planner starts, its workspace is made
+ready (``task_workspaces.prepare``: a worktree task gets its git worktree);
+when it completes, its worktree goes and its branch stays
+(``task_workspaces.finish``).
 """
 
 from __future__ import annotations
@@ -23,11 +26,11 @@ import logging
 import os
 import uuid
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
-from .. import step_workspaces
+from .. import step_workspaces, task_workspaces
 from ..broadcast import Broadcaster
 from ..bus import MessageBus
 from ..message import (
@@ -79,6 +82,28 @@ class Task:
     notify: NotifyTarget | None = None  # who is told when it ends (``task_notice``)
     title: str = ""  # the Manager's few words naming it (``db.tasks.task_name``)
     created_at: str = ""
+    # Its workspace and how it runs there (``task_workspaces``); '' and None for a task from before them.
+    workspace_dir: str = ""
+    workspace_mode: str | None = None
+    workspace_base: str = ""
+
+    @classmethod
+    def from_row(cls, task_id: str, row: dict[str, Any]) -> Task:
+        """The task as its ``tasks`` row has it."""
+        return cls(
+            task_id=task_id,
+            requirement=row["requirement"],
+            goal_id=row.get("goal_id") or "",
+            work_dir=row.get("work_dir") or "",
+            project_id=row["project_id"],
+            correlation_id=row.get("correlation_id") or "",
+            origin_channel_id=row.get("origin_channel_id") or "",
+            notify=NotifyTarget.from_columns(row),
+            title=row.get("title") or "",
+            workspace_dir=row.get("workspace_dir") or "",
+            workspace_mode=row.get("workspace_mode"),
+            workspace_base=row.get("workspace_base") or "",
+        )
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -218,17 +243,7 @@ class TaskRouter:
                 continue
             if row is None:
                 continue
-            task = Task(
-                task_id=task_id,
-                requirement=row["requirement"],
-                goal_id=row.get("goal_id") or "",
-                work_dir=row.get("work_dir") or "",
-                project_id=row["project_id"],
-                correlation_id=row.get("correlation_id") or "",
-                origin_channel_id=row.get("origin_channel_id") or "",
-                notify=NotifyTarget.from_columns(row),
-                title=row.get("title") or "",
-            )
+            task = Task.from_row(task_id, row)
             self._tasks[task_id] = task
             envelope = MessageEnvelope.create(
                 source=TASK_ROUTER_ADDRESS,
@@ -253,17 +268,7 @@ class TaskRouter:
                 continue
             if row is None:
                 continue
-            task = Task(
-                task_id=task_id,
-                requirement=row["requirement"],
-                goal_id=row.get("goal_id") or "",
-                work_dir=row.get("work_dir") or "",
-                project_id=row["project_id"],
-                correlation_id=row.get("correlation_id") or "",
-                origin_channel_id=row.get("origin_channel_id") or "",
-                notify=NotifyTarget.from_columns(row),
-                title=row.get("title") or "",
-            )
+            task = Task.from_row(task_id, row)
             self._tasks[task_id] = task
             carry_on = bool(saved and saved.get("steps"))
             await self._start(task, MessageEnvelope.create(
@@ -320,17 +325,7 @@ class TaskRouter:
         if row is None:
             logger.warning("task %s is not ready (unknown or started already); not starting it", task_id)
             return
-        task = Task(
-            task_id=task_id,
-            requirement=row["requirement"],
-            goal_id=row.get("goal_id") or "",
-            work_dir=row.get("work_dir") or "",
-            project_id=row["project_id"],
-            correlation_id=row.get("correlation_id") or "",
-            origin_channel_id=row.get("origin_channel_id") or "",
-            notify=NotifyTarget.from_columns(row),
-            title=row.get("title") or "",
-        )
+        task = Task.from_row(task_id, row)
         self._tasks[task_id] = task
         await self._start(task, MessageEnvelope.create(
             source=TASK_ROUTER_ADDRESS,
@@ -352,6 +347,15 @@ class TaskRouter:
 
     async def _assign_task(self, task: Task, envelope: MessageEnvelope) -> None:
         assert self._bus is not None
+        try:
+            work_dir = await self._prepare_workspace(task)
+        except task_workspaces.TaskWorkspaceError as exc:
+            await self._workspace_failed(task, envelope, str(exc))
+            return
+        if work_dir != task.work_dir:
+            task.work_dir = work_dir
+            if "work_dir" in envelope.payload:
+                envelope = replace(envelope, payload={**envelope.payload, "work_dir": work_dir})
         task.status = "assigned"
         planner = PlannerAgent(task_id=task.task_id, runtime_root=self._runtime_root, claude_bin=self._claude_bin,
                                ops=self.planner_ops)
@@ -385,6 +389,34 @@ class TaskRouter:
         ))
         logger.info("task %s assigned to %s", task.task_id, planner.agent_id)
 
+    async def _prepare_workspace(self, task: Task) -> str:
+        """Where the task runs from now on: its worktree for a worktree task (``task_workspaces.prepare``)."""
+        from ...db import projects as db_projects
+        from ..project_execution import ProjectExecution, TaskWorkspaces
+
+        if task.workspace_mode != TaskWorkspaces.WORKTREE.value:
+            return task.work_dir
+        project = await db_projects.get_task_project(task.task_id)
+
+        async def note(kind: str, text: str) -> None:
+            await db_activity.insert_activity(task_id=task.task_id, worker="planner", kind=kind, summary=text[:500])
+
+        row = {"id": task.task_id, "work_dir": task.work_dir, "workspace_dir": task.workspace_dir,
+               "workspace_mode": task.workspace_mode, "workspace_base": task.workspace_base}
+        return await task_workspaces.prepare(row, runtime_root=self._runtime_root,
+                                             links=ProjectExecution.from_row(project).link_paths, note=note)
+
+    async def _workspace_failed(self, task: Task, envelope: MessageEnvelope, problem: str) -> None:
+        """The task's worktree could not be made or used: the task fails with why, before any Planner runs."""
+        logger.warning("task %s cannot start: %s", task.task_id, problem)
+        task.status = "running"  # so the status below is taken, and ends it
+        await self._handle_planner_status(MessageEnvelope.create(
+            source=TASK_ROUTER_ADDRESS, target=TASK_ROUTER_ADDRESS, message_type=MessageType.GOAL_STATUS,
+            payload={"task_id": task.task_id, "goal_id": task.goal_id, "status": "failed",
+                     "summary": f"The task could not start: {problem}"},
+            correlation_id=envelope.correlation_id, metadata=envelope.metadata,
+        ))
+
     async def _handle_task_accepted(self, envelope: MessageEnvelope) -> None:
         assert self._bus is not None
         await self._bus.publish(MessageEnvelope.create(
@@ -405,6 +437,7 @@ class TaskRouter:
             return  # an ended task's notice is its last message (``task_notice``)
 
         summary = envelope.payload.get("summary") or None
+        branch_line = await self._finish_workspace(task) if status == "completed" else None
         fail_kind = envelope.payload.get("fail_kind") if status == "failed" else None
         try:
             # The Planner's final summary is the task's result, or its error.
@@ -431,7 +464,7 @@ class TaskRouter:
             })
 
         payload = envelope.payload
-        if ends_task(status) and (notice := self._notice(task, status, summary)) is not None:
+        if ends_task(status) and (notice := self._notice(task, status, summary, branch_line)) is not None:
             payload = {**payload, "notice": notice.payload()}
         await self._bus.publish(MessageEnvelope.create(
             source=TASK_ROUTER_ADDRESS,
@@ -446,16 +479,42 @@ class TaskRouter:
             task.status = status  # teardown persists this; it would default to "completed"
             await self._teardown_task(task_id)
 
-    def _notice(self, task: Task, status: str, summary: str | None) -> Notice | None:
+    def _notice(self, task: Task, status: str, summary: str | None, branch_line: str | None = None) -> Notice | None:
         """The end notice of a Telegram or Lark task that recorded who to tell (``task_notice``); None for any
-        other. The Manager sends it behind the task's progress."""
+        other. The Manager sends it behind the task's progress. ``branch_line``: where a worktree task's work is."""
         channel = notify_channel(task.origin_channel_id)
         if channel is None or task.notify is None:
             return None
         name = db_tasks.task_name(title=task.title, goal_id=task.goal_id, requirement=task.requirement,
                                   task_id=task.task_id)
-        text = notice_text(task.task_id, name, status, summary, channel=channel, dashboard_url=self._dashboard_url)
+        text = notice_text(task.task_id, name, status, summary, channel=channel, dashboard_url=self._dashboard_url,
+                           extra=branch_line)
         return Notice(channel, task.notify, text)
+
+    async def _finish_workspace(self, task: Task) -> str | None:
+        """A completed task's worktree goes, its branch stays: the notice's line about the branch, None without one."""
+        from ..project_execution import TaskWorkspaces
+
+        if task.workspace_mode != TaskWorkspaces.WORKTREE.value:
+            return None
+        task_id = task.task_id
+        try:
+            worktree = await task_workspaces.finish(task_id, completed=True)
+        except task_workspaces.TaskWorkspaceError as exc:
+            await db_activity.insert_activity(task_id=task_id, worker="planner", kind="error",
+                                              summary=f"Warning: {exc}"[:500])
+            return None
+        except Exception:
+            logger.exception("cannot finish the worktree of task %s", task_id)
+            return None
+        if worktree is None or worktree.state is not task_workspaces.WorktreeState.REMOVED:
+            return None
+        await db_activity.insert_activity(
+            task_id=task_id, worker="planner", kind="phase",
+            summary=f"The task's work is on branch {worktree.branch} of {worktree.repo_dir}, "
+                    f"at {(worktree.result_commit or '')[:12]}; its worktree is removed. Merge the branch "
+                    "when you are ready: Looper does not"[:500])
+        return task_workspaces.notice_line(worktree)
 
     async def _handle_cancel(self, envelope: MessageEnvelope) -> None:
         assert self._bus is not None
@@ -572,17 +631,7 @@ class TaskRouter:
             logger.exception("failed to reset task %s for restart", task_id)
             return
 
-        task = Task(
-            task_id=task_id,
-            requirement=db_row["requirement"],
-            goal_id=db_row.get("goal_id", ""),
-            work_dir=db_row.get("work_dir", ""),
-            project_id=db_row["project_id"],
-            correlation_id=db_row.get("correlation_id", ""),
-            origin_channel_id=db_row.get("origin_channel_id", ""),
-            notify=NotifyTarget.from_columns(db_row),
-            title=db_row.get("title") or "",
-        )
+        task = Task.from_row(task_id, db_row)
         self._tasks[task_id] = task
 
         # The Planner plans the request, unless it carries on with the plan (``restart``) of a task that ran before

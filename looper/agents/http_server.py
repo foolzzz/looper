@@ -409,6 +409,8 @@ class AgentHTTPServer:
                 m.group(1), self._supervisor.bus, self._web_adapter._address))
         elif (m := self._RE_TASK_DETAIL.match(path)) and method == "GET":
             await self._handle_task_detail(m.group(1), writer)
+        elif path == "/api/workspaces/check" and method == "GET":
+            await self._answer(writer, HTTP_200, lambda: projects.check_workspace(query))
         elif path == "/api/projects" and method == "GET":
             await self._handle_list_projects(writer)
         elif path == "/api/projects" and method == "POST":
@@ -1217,11 +1219,18 @@ class AgentHTTPServer:
             await writer.drain()
             return
 
-        from . import step_workspaces
+        from . import step_workspaces, task_workspaces
         try:
             await step_workspaces.remove_task(task_id)
         except Exception:
             logger.warning("could not remove the step worktrees of task %s", task_id, exc_info=True)
+        try:
+            # After the steps' worktrees, which are of the task's: what it left goes onto its branch, which stays.
+            await task_workspaces.finish(task_id, deleted=True)
+        except task_workspaces.TaskWorkspaceError as exc:
+            writer.write(_json_response(HTTP_409, {"error": f"the task's worktree was kept, so nothing is lost: {exc}"}))
+            await writer.drain()
+            return
         await delete_task(task_id)
         writer.write(_json_response(HTTP_200, {"deleted": task_id}))
         await writer.drain()
@@ -1247,7 +1256,10 @@ class AgentHTTPServer:
             agents = await projects.agents_view(raw) if raw else None
             roles = await roles_view(task_id, raw.get("steps", [])) if raw else None
             gates = await gate_service.gates_view(task_id) if raw else []
-            workspaces = await self._task_workspaces(task_id, raw.get("steps", [])) if raw else None
+            task_workspace = await self._task_workspace(raw) if raw else None
+            workspaces = await self._task_workspaces(task_id, raw.get("steps", []),
+                                                     in_worktree=bool(task_workspace and task_workspace["worktree"]),
+                                                     ) if raw else None
         except Exception:
             logger.exception("DB unavailable for task_detail %s", task_id)
             writer.write(_json_response(HTTP_500, {"error": "database unavailable"}))
@@ -1294,8 +1306,12 @@ class AgentHTTPServer:
             # The user gates of its plan, in plan order: state, agenda, findings, how each closed, and whom each
             # waiting one waits for (gate_service.gate_view); their discussions are at .../gates/<step>/messages.
             "gates": gates,
+            # Its workspace: the directory it names, how it runs there, and the worktree it runs in (its branch,
+            # where it started, the commands that take the work over), null for none (task_workspaces).
+            "task_workspace": task_workspace,
             # Its steps' worktrees, in a project with step workspaces (null when it had none): where its branch
-            # started, each worktree oldest first, and the commands that undo the task's commits.
+            # started, each worktree oldest first, and the commands that undo the task's commits (none for a task
+            # in a worktree of its own: they would change its branch, not the user's).
             "step_workspaces": workspaces,
             # The role each Worker and Reviewer run that ran as one ran as, by agent id (task_roles.run_roles); only
             # in a task with such runs.
@@ -1326,7 +1342,18 @@ class AgentHTTPServer:
         await writer.drain()
 
     @staticmethod
-    async def _task_workspaces(task_id: str, steps: list[dict[str, Any]]) -> dict[str, Any] | None:
+    async def _task_workspace(task: dict[str, Any]) -> dict[str, Any]:
+        from ..db import task_worktrees as db_task_worktrees
+        from .task_workspaces import TaskWorktree
+
+        row = await db_task_worktrees.get(str(task["id"]))
+        return {"workspace_dir": task.get("workspace_dir") or task.get("work_dir") or "",
+                "mode": task.get("workspace_mode") or "in_place", "base": task.get("workspace_base") or "",
+                "worktree": TaskWorktree.from_row(row).view() if row is not None else None}
+
+    @staticmethod
+    async def _task_workspaces(task_id: str, steps: list[dict[str, Any]], *,
+                               in_worktree: bool = False) -> dict[str, Any] | None:
         from ..db import step_workspaces as db_step_workspaces
         from . import step_workspaces
 
@@ -1334,8 +1361,9 @@ class AgentHTTPServer:
         if not rows:
             return None
         start = await db_step_workspaces.task_start(task_id)
-        return step_workspaces.task_view(task_id, rows, start_branch=start[0], start_commit=start[1],
+        view = step_workspaces.task_view(task_id, rows, start_branch=start[0], start_commit=start[1],
                                          step_keys={str(s["id"]): str(s.get("step_key") or "") for s in steps})
+        return {**view, "undo": []} if in_worktree else view
 
     async def _handle_task_activity(
         self, task_id: str, query: dict[str, str], writer: asyncio.StreamWriter,

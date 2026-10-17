@@ -240,3 +240,26 @@ def test_layers_name_each_source_by_its_hash() -> None:
     blank = prompt_layers(role_id="planner", role="P.", recommended=True, project=_project_row(""),
                           contract_name="REPLY_CONTRACT", contract="C")
     assert blank["project"]["background_sha256"] is None
+
+
+def test_the_operators_notes_follow_the_knowledge_only_in_a_project_that_gives_them() -> None:
+    from looper.agents.knowledge import AgentKnowledge
+    from looper.agents.operator_notes import OperatorNotes
+    from looper.agents.system_prompt import build_system_prompt
+
+    notes = OperatorNotes(text="## The operator's notes for this directory\nStaging listens on 59322.",
+                          files=("MEMORY.md",))
+
+    def build(knowledge: AgentKnowledge):
+        return build_system_prompt(harness=HARNESS, role_id="worker", role="Role.", recommended=False,
+                                   contract_name="WORK_CONTRACT", contract="CONTRACT", project=_project_row(),
+                                   task_kind="work", task="## Task\nGo.", knowledge=knowledge)
+
+    off, without, on = (build(k) for k in (AgentKnowledge(index=INDEX, documents=1),
+                                           AgentKnowledge(index=INDEX, documents=1, notes=OperatorNotes()),
+                                           AgentKnowledge(index=INDEX, documents=1, notes=notes)))
+    assert without.text == off.text  # on, but the directory has none: the same prompt
+    assert on.text == off.text.replace(INDEX, f"{INDEX}\n\n{notes.text}")
+    assert on.text.index("Use uv.") < on.text.index(INDEX) < on.text.index("59322") < on.text.index("## Task")
+    assert "operator_notes" not in off.layers["project"]
+    assert on.layers["project"]["operator_notes"] == {"sha256": notes.sha256, "files": ["MEMORY.md"], "omitted": []}

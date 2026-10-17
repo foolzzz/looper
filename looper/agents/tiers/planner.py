@@ -110,6 +110,7 @@ from .. import knowledge as project_knowledge
 from .. import session_switch
 from .. import step_workspaces as workspaces
 from ..knowledge import AgentKnowledge, documents_label, load_knowledge
+from ..operator_notes import notes_note
 from ..library import AgentLibrary, items_label, load_installed
 from ..project_execution import LessonsMode, ProjectExecution, TaskBudgetAction, format_usd
 from ..run_usage import Usage
@@ -1378,8 +1379,8 @@ class PlannerAgent:
             step.workspace = await self._discard(workspace)
             raise _NoWorkspace(str(exc)) from None
         skipped: list[str] = []
-        if self._execution.workspace_links:
-            workspace, skipped = workspaces.link(workspace, self._execution.workspace_links)
+        if self._execution.link_paths:
+            workspace, skipped = workspaces.link(workspace, self._execution.link_paths)
             step.workspace = workspace
             await self._save_workspace(workspace)
         linked = f"; linked to the task directory's: {', '.join(workspace.links)}" if workspace.links else ""
@@ -3390,7 +3391,7 @@ class PlannerAgent:
         starts, changes or ends.
         """
         project = {"id": plan.project_id, "work_dir": plan.project_work_dir} if plan.project_id else None
-        knowledge = await load_knowledge(self._runtime_root, project, plan.work_dir)
+        knowledge = await load_knowledge(self._runtime_root, project, plan.work_dir, notes=self._execution.notes_on)
         previous = self._knowledge
         if knowledge.error is not None:
             await self._activity("error", f"Warning: {knowledge.error}"[:500])
@@ -3404,6 +3405,13 @@ class PlannerAgent:
             else:
                 verb = "changed" if before else "applied"
                 await self._activity("phase", f"Project knowledge {verb} ({documents_label(knowledge.documents)})")
+        notes_before = previous.notes.sha256 if previous is not None and previous.notes is not None else None
+        notes_now = knowledge.notes.sha256 if knowledge.notes is not None else None
+        if knowledge.notes is not None and knowledge.notes.error:
+            await self._activity("error", notes_note(knowledge.notes))
+        elif notes_now != notes_before:
+            await self._activity("phase", notes_note(knowledge.notes) if knowledge.notes is not None and notes_now
+                                 else "The operator's notes for this directory removed")
         return knowledge
 
     async def _load_agent_settings(self, plan: TaskPlan) -> AgentSettings:

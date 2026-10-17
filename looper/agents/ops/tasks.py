@@ -21,9 +21,12 @@ from ...db import steps as db_steps, task_changes as db_changes, task_roles as d
 from ..agent_settings import TASK_LIMIT_ROLES, TASK_ROLES, AgentSettings, AgentType, Layer, index_layers, resolve
 from ..agent_settings import resolve_task_concurrency
 from ..message import MANAGER_ADDRESS, TASK_ROUTER_ADDRESS, MessageEnvelope, MessageType, RestartMode, planner_address
-from ..project_execution import LessonsMode, ProjectExecution, ReviewPolicy, TaskBudgetAction, format_usd
+from ..project_execution import LessonsMode, ProjectExecution, ReviewPolicy, TaskBudgetAction, TaskWorkspaces
+from ..project_execution import format_usd
 from ..projects import HTTP_404, HTTP_409, PROFILES_NOTE, TASK_PROFILE_ROLES, RequestError, agents_view
-from ..projects import edit_requirement, profile_choices, project_name, set_task_agents
+from ..projects import edit_requirement, profile_choices, project_name, set_task_agents, task_workspace
+from ..step_workspaces import _size_text as size_text
+from ..task_workspaces import WarningKind, task_branch
 from ..system_prompt import TASK_REQUIREMENT_LIMIT
 from ..task_notice import notify_target
 from ..tiers.journal import SUPPLEMENTS_MAX_CHARS, clip, kept_text
@@ -242,6 +245,15 @@ async def _create(call: Call) -> dict[str, Any]:
     title = db_tasks.task_title(arguments.get("title"))
     created = project is None
     target = notify_target(origin, sender=turn.sender, chat=turn.chat, group=turn.group)
+    named = bool(str(arguments.get("work_dir") or "").strip())
+    project_mode = (ProjectExecution.from_row(project).task_mode if project is not None
+                    else TaskWorkspaces.WORKTREE)  # what a new project gets
+    try:
+        workspace = await task_workspace(arguments, work_dir=work_dir, named=named,
+                                         project_dir=project["work_dir"] if project is not None else work_dir,
+                                         project_mode=project_mode)
+    except RequestError as exc:
+        raise OpError(ErrorCode.INVALID, str(exc)) from None
     row = {
         "task_id": task_id, "requirement": arguments["requirement"].strip(), "goal_id": arguments.get("goal_id") or "",
         "work_dir": work_dir, "status": db_tasks.READY,
@@ -250,6 +262,7 @@ async def _create(call: Call) -> dict[str, Any]:
         **(target.columns() if target is not None else {}),
         "original_user_text": (str(envelope.payload.get("text") or "") or None) if envelope is not None else None,
         "title": title,
+        "workspace_dir": work_dir, "workspace_mode": workspace["mode"], "workspace_base": workspace["base"],
     }
     if project is not None and not profiles:
         await db_tasks.create_task(**row, project_id=project["id"])
@@ -257,7 +270,9 @@ async def _create(call: Call) -> dict[str, Any]:
         try:
             async with db_connection.transaction() as conn:
                 if project is None:
-                    project = await db_projects.create_project(name=name, work_dir=work_dir, pool=conn)
+                    project = await db_projects.create_project(
+                        name=name, work_dir=work_dir, pool=conn,
+                        execution={"task_workspaces": TaskWorkspaces.WORKTREE.value})
                 await db_tasks.create_task(**row, project_id=project["id"], pool=conn)
                 if profiles:
                     await db_layers.set_profile_overrides(conn, task_id, profiles)
@@ -265,11 +280,39 @@ async def _create(call: Call) -> dict[str, Any]:
             raise OpError(ErrorCode.CONFLICT, f"a project named {name!r} was created meanwhile: call again to use "
                                               "it") from None
     shown = title or arguments.get("goal_id") or task_id
-    turn.blocks.append(await configuration_block(task_id, shown, project, work_dir, created))
+    turn.blocks.append(await configuration_block(task_id, shown, project, work_dir, created,
+                                                 workspace=workspace["check"]))
     return {"task_id": task_id, "name": shown, "status": "ready", "project": project["name"],
-            "project_created": created, "work_dir": work_dir,
+            "project_created": created, "work_dir": work_dir, "workspace_mode": workspace["check"]["mode"],
             "shown_to_user": "Looper adds the task's configuration and the question whether to start it now after "
                              "your reply; do not repeat them."}
+
+
+def _workspace_lines(task_id: str, check: Mapping[str, Any]) -> list[str]:
+    """How the task runs in its directory, and each warning, in the user's words (the RFC's W5)."""
+    git = check.get("git") or {}
+    if check.get("mode") == TaskWorkspaces.WORKTREE.value:
+        start = str(git.get("base_commit") or "")[:12]
+        lines = [f"- 运行方式：在这个目录所在仓库的 git worktree 里，开始时建分支 {task_branch(task_id)}"
+                 f"（从 {git.get('branch') or 'HEAD'} 的 {start} 开始）；做完分支留给你，Looper 不合并"]
+    else:
+        lines = ["- 运行方式：直接在这个目录里（原地）"]
+    for warning in check.get("warnings") or ():
+        kind = warning.get("kind")
+        if kind == WarningKind.NOT_GIT.value:
+            lines.append("- 提醒：目录不在 git 仓库里（或仓库还没有提交），任务会直接在目录里运行")
+        elif kind == WarningKind.UNCOMMITTED.value:
+            files = "、".join(str(f) for f in (warning.get("files") or [])[:5])
+            lines.append(f"- 提醒：目录里有 {len(warning.get('files') or [])} 个未提交的改动不会进入任务的 worktree"
+                         f"（{files}），任务需要的话先提交")
+        elif kind == WarningKind.SHARED.value:
+            names = "、".join(f"{t['name']}（{t['status']}）" for t in (warning.get("tasks") or [])[:5])
+            effect = ("各自在自己的分支上，不会互相干扰，合并时可能冲突" if check.get("mode") == TaskWorkspaces.WORKTREE.value
+                      else "原地运行的任务会互相覆盖文件")
+            lines.append(f"- 提醒：这个仓库上还有进行中的任务：{names}；{effect}")
+        elif kind == WarningKind.LARGE_CHECKOUT.value:
+            lines.append(f"- 提醒：仓库检出有 {size_text(int(warning.get('bytes') or 0))}，任务的 worktree 是它的一份完整拷贝")
+    return lines
 
 
 def _role_line(role: AgentType, settings: AgentSettings) -> str:
@@ -284,10 +327,12 @@ def _role_line(role: AgentType, settings: AgentSettings) -> str:
 
 
 async def configuration_block(
-    task_id: str, name: str | None, project: Mapping[str, Any], work_dir: str, created: bool,
+    task_id: str, name: str | None, project: Mapping[str, Any], work_dir: str, created: bool, *,
+    workspace: Mapping[str, Any] | None = None,
 ) -> str:
     """The new ready task's configuration, from the settings in effect for it (resolved as the project's agent
-    settings view resolves them, with the task's own choices), ending with the question whether to start it."""
+    settings view resolves them, with the task's own choices), with how it runs in its directory and what to know
+    about it (``workspace``: ``task_workspaces.check``), ending with the question whether to start it."""
     project_id = project["id"]
     lines = [
         "任务已创建，还没有开始（Ready — not started）：",
@@ -295,6 +340,8 @@ async def configuration_block(
         f"- 项目：{project['name']}（{'新建' if created else '已有'}）",
         f"- 目录：{work_dir}",
     ]
+    if workspace is not None:
+        lines += _workspace_lines(task_id, workspace)
     limits: list[int] = []
     try:
         layers = index_layers(await db_layers.list_layers(project_id, task_id=task_id), project_id)
@@ -533,6 +580,14 @@ TOOLS: tuple[Tool, ...] = (
                             "description": "The project's name: an existing one, or a new one the user named."},
                 "work_dir": {"type": "string", "description": "The absolute directory the user named; leave it out "
                                                               "for the project's default. A new project needs one."},
+                "workspace_mode": {"type": "string", "enum": ["worktree", "in_place"],
+                                   "description": "Only when the user said so: worktree (a git worktree of the "
+                                                  "directory, on a branch of the task's own, left to the user to "
+                                                  "merge) or in_place (in the directory itself). Leave it out for "
+                                                  "the default."},
+                "base": {"type": "string", "description": "Only when the user named one: the branch, tag or "
+                                                          "commit a worktree task starts from (default: what the "
+                                                          "directory has checked out)."},
                 "goal_id": {"type": "string", "description": "A short kebab-case id for the task's goal."},
                 "profiles": {**_PROFILES_SCHEMA, "description": "An Agent Profile (id or name) the user chose for "
                                                                 "some of the task's roles."},
