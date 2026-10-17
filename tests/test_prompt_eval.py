@@ -286,9 +286,12 @@ def test_comparison_of_repeated_runs_counts_the_scored_reps_and_keeps_errors_apa
     assert ("| dependent_steps | 0/0 · 1 err → **1/2 · 1 err** | – → **1.5** | – | – → **0.0** | – → **0.0** "
             "| – → **0.0** | – → **0.0** | – | – → **0.0300** |" in lines)
     assert "| interface_first | 1/1 · 1 err | 1.0 | – | 0.0 | 0.0 | 0.0 | 0.0 | – | 0.0200 |" in lines
-    # The total adds up the tasks' means: one pass through the set.
-    assert ("| **total** | 2/2 (100%, 34–100%) · 1 timeout → **5/6 (83%, 44–97%) · 1 harness, 1 timeout** "
-            "| 2.0 → **3.5** | – | 0.0 | 0.0 | 0.0 | 0.0 | – | 0.0400 → **0.0700** |" in lines)
+    # The total adds up the tasks' means (one pass through the set), over the tasks both runs have; the new run's
+    # own total follows, as it has a task the base lacks.
+    assert ("| **total (2 shared tasks)** | 1/1 (100%, 21–100%) · 1 timeout → **4/5 (80%, 38–96%) · 1 timeout** "
+            "| 1.0 → **2.5** | – | 0.0 | 0.0 | 0.0 | 0.0 | – | 0.0200 → **0.0500** |" in lines)
+    assert ("| **total (all 3 tasks of the new run)** | 5/6 (83%, 44–97%) · 1 harness, 1 timeout | 3.5 | – | 0.0 "
+            "| 0.0 | 0.0 | 0.0 | – | 0.0700 |" in lines)
     assert "- pass rate changed: dependent_steps 0/0 → 1/2" in lines
     assert "- the base ran each case once: a pass or fail per case is a single sample" in lines
     assert "- no baseline: interface_first" in lines
@@ -296,6 +299,18 @@ def test_comparison_of_repeated_runs_counts_the_scored_reps_and_keeps_errors_apa
     assert "- dependent_steps (rep 2): sum.txt is missing" in lines
     assert "- dependent_steps (rep 3): error (timeout): cancelled after 900 s" in lines
     assert "- interface_first (rep 3): error (harness): EvalError: GET /api/tasks/t answered 500" in lines
+
+
+def test_against_a_base_of_more_tasks_the_total_is_over_the_shared_ones() -> None:
+    # A base of seven tasks, six passed; the new run has one of them, twice.
+    base = _run(**{f"task_{i}": _OK if i < 6 else {**_OK, "success": False} for i in range(7)})
+    base["tasks"][0]["id"] = "single_step"
+    new = {**_run(), "tasks": _reps("single_step", _PASS, {**_PASS, "cost_usd": 0.04})}
+    lines = compare.markdown(new, base).splitlines()
+    assert ("| **total (1 shared task)** | 1/1 (100%, 21–100%) → **2/2 (100%, 34–100%)** | 1.0 | – | 0.0 | 0.0 | 0.0 "
+            "| 0.0 | – | 0.0200 → **0.0300** |" in lines)
+    assert not any(line.startswith("| **total (all") for line in lines)  # the new run has no task of its own
+    assert "- in the base, not in the new run: task_1, task_2, task_3, task_4, task_5, task_6" in lines
 
 
 def test_comparison_of_dialogs_shows_success_and_cost() -> None:
