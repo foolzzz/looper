@@ -1,4 +1,4 @@
-import { useEffect, useId, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { Pencil } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -56,12 +56,15 @@ function DefinitionFields({
   draft,
   onChange,
   limit,
+  autoFocus = false,
 }: {
   projectId: string | null;
   kind: Kind;
   draft: Definition;
   onChange: (draft: Definition) => void;
   limit?: number;
+  /** Focus the role prompt when the form opens. */
+  autoFocus?: boolean;
 }) {
   const id = useId();
   const profiles = useAllowedProfiles(projectId, kind);
@@ -82,6 +85,7 @@ function DefinitionFields({
           rows={8}
           maxLength={limit}
           required
+          autoFocus={autoFocus}
           className={TEXTAREA}
         />
       </div>
@@ -150,6 +154,13 @@ export function TaskRoleEditor({
   const [draft, setDraft] = useState<Definition>({ role_prompt: "", harness: "", profile_id: "" });
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+  // Closing the form gives the focus back to Edit.
+  const editRef = useRef<HTMLButtonElement>(null);
+  const wasOpen = useRef(false);
+  useEffect(() => {
+    if (!open && wasOpen.current) editRef.current?.focus();
+    wasOpen.current = open;
+  }, [open]);
   const start = () => {
     setDraft({ role_prompt: role.role_prompt, harness: role.harness ?? "", profile_id: role.profile?.profile_id ?? "" });
     setError("");
@@ -174,14 +185,14 @@ export function TaskRoleEditor({
   };
   if (!open) {
     return (
-      <Button type="button" variant="outline" size="sm" onClick={start} aria-label={`Edit role ${role.id}`}>
+      <Button ref={editRef} type="button" variant="outline" size="sm" onClick={start} aria-label={`Edit role ${role.id}`}>
         <Pencil className="h-3.5 w-3.5" /> Edit
       </Button>
     );
   }
   return (
     <form onSubmit={save} className={`${EDIT_BOX} space-y-3`} aria-label={`Edit role ${role.id}`}>
-      <DefinitionFields projectId={projectId} kind={role.kind} draft={draft} onChange={setDraft} />
+      <DefinitionFields projectId={projectId} kind={role.kind} draft={draft} onChange={setDraft} autoFocus />
       <p className="text-xs text-muted-foreground">
         Saving writes v{role.version + 1} by you. The steps that start from then on run it; the task&apos;s Planner is
         told, and cannot change this role afterwards.
@@ -250,6 +261,7 @@ function TemplateForm({
             value={draft.key}
             onChange={(e) => setDraft({ ...draft, key: e.target.value })}
             disabled={!!template}
+            autoFocus={!template}
             required
             maxLength={32}
             placeholder="e.g. security-review"
@@ -297,6 +309,7 @@ function TemplateForm({
         draft={draft}
         onChange={(d) => setDraft({ ...draft, ...d })}
         limit={limit}
+        autoFocus={!!template}
       />
       <FormFooter error={error} busy={busy} submit={template ? "Save" : "Add template"} onCancel={onCancel} />
     </form>
