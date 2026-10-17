@@ -836,6 +836,51 @@ def test_a_reply_claiming_a_change_is_told_from_an_explanation(reply: str, claim
     assert dialogs.claims_change(reply) is claims
 
 
+@pytest.mark.parametrize(("reply", "model", "named"), [
+    ("claude-haiku-4-5-20251001: $0.02", "claude-haiku-4-5-20251001", True),
+    ("_HAIKU_RUNS: $0.02", "claude-haiku-4-5-20251001", True),
+    ("Claude Sonnet: $0.02", "claude-haiku-4-5-20251001", False),
+    ("DeepSeek: $0.02", "deepseek-flash", True),
+])
+def test_a_models_id_or_family_is_named_in_the_reply(reply: str, model: str, named: bool) -> None:
+    from evals.prompt_regression.dialogs import _model_named
+
+    assert _model_named(reply, model) is named
+
+
+_HAIKU_RUNS = {"model": "claude-haiku-4-5", "runs": 2, "running": 1}
+
+
+@pytest.mark.parametrize(("task_id", "status", "by_model", "write_status", "fake", "reply", "problem"), [
+    ("other", "ok", [_HAIKU_RUNS], None, False, "Haiku", "looper_costs did not read the task's cost"),
+    ("task-a", "error", [_HAIKU_RUNS], None, False, "Haiku", "looper_costs did not read the task's cost"),
+    ("task-a", "ok", [_HAIKU_RUNS], "ok", False, "Haiku", "something changed: looper_settings"),
+    ("task-a", "ok", [_HAIKU_RUNS], "needs_confirmation", False, "Haiku", "something changed: looper_settings"),
+    ("task-a", "ok", [{"model": None, "runs": 1, "running": 0}], None, False, "Haiku",
+     "the task's cost has no model to name"),
+    ("task-a", "ok", [_HAIKU_RUNS], None, False, "Sonnet", "the reply does not name claude-haiku-4-5"),
+    ("task-a", "ok", [_HAIKU_RUNS], None, True, "ok", None),
+    ("task-a", "ok", [_HAIKU_RUNS, {"model": "deepseek-flash", "runs": 1, "running": 0}], None, False,
+     "Haiku and DeepSeek", None),
+    # A model whose runs are all still running came after the Manager's read: the reply need not name it.
+    ("task-a", "ok", [_HAIKU_RUNS, {"model": "claude-opus-4-1", "runs": 1, "running": 1}], None, False, "Haiku", None),
+])
+def test_a_tasks_cost_is_read_and_told_without_changes(
+    monkeypatch: pytest.MonkeyPatch, task_id: str, status: str, by_model: list[dict[str, Any]],
+    write_status: str | None, fake: bool, reply: str, problem: str | None,
+) -> None:
+    from evals.prompt_regression import dialogs
+
+    actions = [{"tool": "looper_costs", "status": status, "risk": "read", "arguments": {"task_id": task_id},
+                "result": None}]
+    if write_status:
+        actions.append({"tool": "looper_settings", "status": write_status, "risk": "write"})
+    monkeypatch.setattr(dialogs, "_trail", lambda *_: actions)
+    monkeypatch.setattr(dialogs.Look, "detail", lambda self, task_id=None: {"cost": {"by_model": by_model}})
+    look = dialogs.Look(None, "task-a", reply, "", 0, frozenset(), fake)
+    assert dialogs._cost_by_model_told(look) == problem
+
+
 @pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 def test_the_managers_dialogs_pass_in_fake_mode_and_a_wrong_call_fails(tmp_path: Path) -> None:
     from evals.prompt_regression import dialogs

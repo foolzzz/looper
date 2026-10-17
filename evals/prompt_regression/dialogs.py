@@ -24,7 +24,8 @@ exists, explained and nothing changed (``concurrency``); and, for any
 runtime, a read-only status question (``status``). The configuration tools:
 a project created, a role's Agent Profile in a project, the project's
 allowed list, this week's spend and a project deleted only on the user's word
-(``config_tools``); a provider registered without the key the user pasted
+(``config_tools``); a running task's cost read and told by model, nothing
+changed (``task_cost``); a provider registered without the key the user pasted
 (``provider_key``). The schedules tool: a schedule listed, disabled, and
 deleted only on the user's word (``schedules``, on a schedule made first).
 """
@@ -70,7 +71,7 @@ ACTIVE = ("pending", "assigned", "running", "planning", "executing", "verifying"
 @dataclass
 class Look:
     """What a check reads: the dialog's task, the reply, the API, and the Manager's calls since the dialog
-    started."""
+    started, and whether the run is fake (status-only replies)."""
 
     api: Api
     task: str | None
@@ -78,6 +79,7 @@ class Look:
     database_url: str
     since: int  # the trail's last id before the dialog
     known: frozenset[str]  # the tasks there were before the dialog's messages
+    fake: bool
 
     def actions(self) -> list[dict[str, Any]]:
         return _trail(self.database_url, self.since)
@@ -322,6 +324,31 @@ def _week_spend_read(look: Look) -> str | None:
     return None if look.reply.strip() else "no reply"
 
 
+def _model_named(reply: str, model: str) -> bool:
+    reply, model = reply.lower(), model.lower()
+    return model in reply or any(part in reply for part in re.split(r"[^a-z]+", model)
+                                 if len(part) >= 4 and part != "claude")
+
+
+def _cost_by_model_told(look: Look) -> str | None:
+    """A task's cost by model: read for that task (looper_costs with its task_id), nothing changed, and the
+    reply names each model of the task's cost (the trail keeps no read's answer: the models are the task page's
+    whose runs had ended, which the Manager's read had too)."""
+    read = [a for a in look.actions() if a["tool"] == "looper_costs" and a["status"] == "ok"
+            and a["arguments"].get("task_id") == look.task]
+    if not read:
+        return "looper_costs did not read the task's cost"
+    changed = _writes(look, status="ok") + _writes(look, status="needs_confirmation")
+    if changed:
+        return f"something changed: {', '.join(a['tool'] for a in changed)}"
+    models = [row["model"] for row in look.detail()["cost"]["by_model"]
+              if row["model"] is not None and row["runs"] > row["running"]]
+    if not models:
+        return "the task's cost has no model to name"
+    missing = [model for model in models if not _model_named(look.reply, model)] if not look.fake else []
+    return f"the reply does not name {', '.join(missing)}" if missing else None
+
+
 def _delete_asked(look: Look) -> str | None:
     if not _writes(look, status="needs_confirmation", tool="looper_projects"):
         return "no deletion waits for the user's confirmation"
@@ -448,6 +475,10 @@ DIALOGS: tuple[Dialog, ...] = (
             (("looper_projects", {"action": "delete", "project": SCRATCH}),)),
         Say("确认。", _deleted_on_confirmation, (("looper_confirm", {"confirmation_id": "<confirmation>"}),)),
     )),
+    Dialog("task_cost", (
+        Say("任务 <task> 到现在花了多少？按模型分开说，包括 token。", _cost_by_model_told,
+            (("looper_costs", {"task_id": "<task>"}),)),
+    ), running_task=True),
     Dialog("provider_key", (
         Say("登记一个 LLM provider：名字 eval-deepseek，协议 anthropic-messages，地址 "
             f"https://api.deepseek.com/anthropic，模型 deepseek-flash。它的 API key 是 {FAKE_KEY}。",
@@ -590,7 +621,7 @@ def run_dialog(api: Api, dialog: Dialog, *, database_url: str, project_id: str, 
                 scenarios.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
             before = _last_action(database_url)
             reply = _ask(api, session, text, timeout=timeout)
-            problem = say.check(Look(api, task, reply, database_url, since, known))
+            problem = say.check(Look(api, task, reply, database_url, since, known, mode == "fake"))
             trail = _trail(database_url, before)
             calls = [f"{a['tool']}:{a['status']}" + (f" ({a['error_code']})" if a["error_code"] else "")
                      for a in trail]
