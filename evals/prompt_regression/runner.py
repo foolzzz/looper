@@ -213,13 +213,17 @@ def install_claude(bin_dir: Path, *, mode: str, scenarios: Path | None = None,
 
 @contextmanager
 def running_server(*, database_url: str, runtime_root: Path, bin_dir: Path, log_path: Path,
-                   home: Path | None = None, startup_timeout: float = 90.0) -> Iterator[Api]:
-    """``looper serve`` on a free port; stopped with SIGINT, as the operator would."""
+                   home: Path | None = None, notes_root: Path | None = None,
+                   startup_timeout: float = 90.0) -> Iterator[Api]:
+    """``looper serve`` on a free port; stopped with SIGINT, as the operator would. ``notes_root`` stands in for the
+    operator's ``~/.claude/projects`` (the operator's notes)."""
     port = free_port()
     manager_dir = runtime_root / "manager"
     manager_dir.mkdir(parents=True, exist_ok=True)
     env = {**os.environ, "LOOPER_DATABASE_URL": database_url, "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
            "PYTHONPATH": os.pathsep.join(filter(None, [str(REPO_ROOT), os.environ.get("PYTHONPATH")]))}
+    if notes_root is not None:
+        env["LOOPER_OPERATOR_NOTES_ROOT"] = str(notes_root)
     if home is not None:
         env["HOME"] = str(home)
     log = log_path.open("w", encoding="utf-8")
@@ -253,6 +257,18 @@ def running_server(*, database_url: str, runtime_root: Path, bin_dir: Path, log_
 
 
 # --- Working directories ------------------------------------------------------------------------------
+
+
+def write_notes(notes_root: Path, work_dir: Path, files: dict[str, str]) -> Path:
+    """The operator's notes for ``work_dir`` where Looper reads them (``operator_notes.notes_dir``) under the stand-in
+    for ``~/.claude/projects``."""
+    from looper.agents.operator_notes import directory_name, notes_key
+
+    directory = notes_root / directory_name(notes_key(str(work_dir))) / "memory"
+    directory.mkdir(parents=True, exist_ok=True)
+    for name, text in files.items():
+        (directory / name).write_text(text, encoding="utf-8")
+    return directory
 
 
 def snapshot(work_dir: Path) -> dict[str, tuple[float, str]]:
@@ -330,6 +346,7 @@ def run_task(
     step_workspaces: str | None = None,
     chosen_profile_id: str | None = None,
     user_gates: str | None = None,
+    notes_root: Path | None = None,
 ) -> dict[str, Any]:
     """Create and start ``task`` in ``work_dir``, wait until it ends, and read back what it shows.
 
@@ -346,10 +363,17 @@ def run_task(
     for name, content in task.files.items():
         (work_dir / name).parent.mkdir(parents=True, exist_ok=True)
         (work_dir / name).write_text(content, encoding="utf-8")
-    project: dict[str, Any] = {"name": f"eval-{task.id}-{uuid.uuid4().hex[:6]}", "work_dir": str(work_dir)}
+    # In place, as every task ran before a new project's tasks ran in worktrees: the checks read work_dir.
+    project: dict[str, Any] = {"name": f"eval-{task.id}-{uuid.uuid4().hex[:6]}", "work_dir": str(work_dir),
+                               "task_workspaces": "in_place"}
     if step_workspaces:
         init_repository(work_dir)
         project["step_workspaces"] = step_workspaces
+    if task.operator_notes:
+        if notes_root is None:
+            raise EvalError(f"{task.id} needs the operator's notes, and the server has no notes root")
+        write_notes(notes_root, work_dir, task.operator_notes)
+        project["operator_notes"] = "on"
     before = snapshot(work_dir)
     started = time.monotonic()
     created = api.post("/api/tasks/create", {"requirement": task.requirement, "project": project})
@@ -494,7 +518,8 @@ TASK_SETS: dict[str, tuple[str, ...]] = {
     # The tasks whose pass or fail turns on the Planner's judgment: the opus tier (evals/README.md).
     "planner": ("dependent_steps", "parallel_parts", "interface_first", "supplement_replan", "supplement_no_change",
                 "requirement_edit", "roles_tester_docs", "roles_not_needed", "roles_multi_platform", "gate_ambiguous",
-                "gate_not_needed", "gate_parallel_branch", "gate_discoverable"),
+                "gate_not_needed", "gate_parallel_branch", "gate_discoverable", "operator_notes",
+                "operator_notes_stale"),
 }
 
 
@@ -655,9 +680,10 @@ def run(
         home = root / "home" if mode == "fake" else None
         if home is not None:
             home.mkdir()
+        notes_root = root / "operator-notes"
         with fresh_database(admin_url) as (database_url, clock_offset), running_server(
             database_url=database_url, runtime_root=root / "runtime", bin_dir=root / "bin", log_path=log_path,
-            home=home,
+            home=home, notes_root=notes_root,
         ) as api:
             if register is not None:
                 agent = register_agent(api, register)["name"]
@@ -675,7 +701,8 @@ def run(
                 lambda task, rep, cap_left: run_task(api, task, work_dirs[task.id, rep], timeout=timeout, poll=poll,
                                                      cap_left=cap_left, clock_offset=clock_offset,
                                                      step_workspaces=step_workspaces,
-                                                     chosen_profile_id=chosen_profile_id, user_gates=user_gates),
+                                                     chosen_profile_id=chosen_profile_id, user_gates=user_gates,
+                                                     notes_root=notes_root),
                 total_cap_usd=total_cap_usd,
                 reps=reps,
                 results=results,

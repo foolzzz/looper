@@ -699,7 +699,8 @@ def test_fake_mode_runs_every_task_and_sees_misbehaviour(tmp_path: Path) -> None
                     "roles_not_needed": (1, 0, 0, 0),
                     # A gate is a step; the steps its closing turn added follow it.
                     "gate_ambiguous": (2, 0, 0, 0), "gate_not_needed": (1, 0, 0, 0), "gate_end_early": (2, 0, 0, 0),
-                    "gate_parallel_branch": (3, 0, 0, 0), "gate_discoverable": (2, 0, 0, 0)}
+                    "gate_parallel_branch": (3, 0, 0, 0), "gate_discoverable": (2, 0, 0, 0),
+                    "operator_notes": (1, 0, 0, 0), "operator_notes_stale": (1, 0, 0, 0)}
     # Only the parts that need nothing of each other run side by side; interface_first's sit between its interface
     # step and its integration step.
     shape = {t: (by_id[t]["independent_pairs"], by_id[t]["bracketed_pairs"], by_id[t]["parallel_workers"])
@@ -717,7 +718,8 @@ def test_fake_mode_runs_every_task_and_sees_misbehaviour(tmp_path: Path) -> None
                      "roles_multi_platform": (6, 6, 4),
                      "gate_ambiguous": (0, 0, 1), "gate_not_needed": (0, 0, 1), "gate_end_early": (0, 0, 1),
                      # The clear part runs beside the gate and then beside the step the gate's answer planned.
-                     "gate_parallel_branch": (2, 0, 2), "gate_discoverable": (0, 0, 1)}
+                     "gate_parallel_branch": (2, 0, 2), "gate_discoverable": (0, 0, 1),
+                     "operator_notes": (0, 0, 1), "operator_notes_stale": (0, 0, 1)}
     assert by_id["chat_correction"]["planner_turns"]["chat"] == 1
     # Only the task whose project lets its Planner choose a profile runs a Worker on the one it chose.
     assert {t: by_id[t]["planner_profile_runs"] for t in by_id if by_id[t]["planner_profile_runs"]} == {

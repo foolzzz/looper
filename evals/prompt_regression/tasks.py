@@ -60,6 +60,9 @@ class EvalTask:
     # min_gate_parallel_runs, min_conclusion_reads; max_gates_opened, max_gate_asks_beyond_script
     expect: dict[str, int] = field(default_factory=dict)
     fake: dict[str, Any] = field(default_factory=dict)  # the stand-in Claude's script
+    # The operator's Claude Code notes for its working directory (file name -> text, MEMORY.md the index); the
+    # task's project gives them to its agents (operator_notes on).
+    operator_notes: dict[str, str] = field(default_factory=dict)
 
 
 # The profile a task's project may let its Planner choose: the run's own profile under another name, so a run on
@@ -854,6 +857,46 @@ GATE_TASKS: tuple[EvalTask, ...] = (
     ),
 )
 TASKS = TASKS + GATE_TASKS
+
+# The operator's notes for the directory (operator_notes): a fact only they hold decides the answer; a stale one
+# yields to what the files say now.
+NOTES_TASKS: tuple[EvalTask, ...] = (
+    EvalTask(
+        id="operator_notes",
+        requirement="Write the TCP port the staging server of this service listens on into port.txt, digits only.",
+        check=_equals("port.txt", "59322"),
+        files={"README.md": "# calc\n\nA calculator service. Deployed to staging and production.\n"},
+        operator_notes={
+            "MEMORY.md": "- [Staging](staging.md) — where staging runs and on which port\n",
+            "staging.md": "---\nname: staging\n---\nThe staging server of calc listens on port 59322; the port is "
+                          "set on the host, not in this repository.\n",
+        },
+        expect={"min_steps": 1},
+        fake={
+            "plan": [_step("s1", "Write the staging port, 59322 per the operator's notes, into port.txt.",
+                           ["port.txt holds 59322"])],
+            "attempts": {"s1": [{"status": "completed", "files": {"port.txt": "59322\n"}}]},
+        },
+    ),
+    EvalTask(
+        id="operator_notes_stale",
+        requirement="Write the TCP port the production server of this service listens on into port.txt, digits only.",
+        check=_equals("port.txt", "8443"),
+        files={"README.md": "# calc\n\nA calculator service.\n",
+               "config/production.toml": "[server]\nhost = \"0.0.0.0\"\nport = 8443\n"},
+        operator_notes={
+            "MEMORY.md": "- [Production](production.md) — the production server\n",
+            "production.md": "The production server of calc listens on port 9090.\n",
+        },
+        expect={"min_steps": 1},
+        fake={
+            "plan": [_step("s1", "Write the production port from config/production.toml into port.txt.",
+                           ["port.txt holds 8443"])],
+            "attempts": {"s1": [{"status": "completed", "files": {"port.txt": "8443\n"}}]},
+        },
+    ),
+)
+TASKS = TASKS + NOTES_TASKS
 
 
 def select(ids: list[str] | None) -> tuple[EvalTask, ...]:
