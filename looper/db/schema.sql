@@ -406,8 +406,8 @@ CREATE TABLE IF NOT EXISTS task_profile_overrides (
     PRIMARY KEY (task_id, role)
 );
 -- The built-ins, on every start: the Claude Code runtime (the server's claude),
--- its own login as a provider, Codex's own login as a provider
--- (looper/agents/runtimes/codex_login.py), and the profile every role runs when nothing
+-- its own login as a provider, Codex's and Grok's own logins as providers
+-- (looper/agents/runtimes/codex_login.py, grok_login.py), and the profile every role runs when nothing
 -- selects another (looper/agents/profile_registry.py BUILTIN_*). A missing one comes back.
 INSERT INTO agent_runtimes (id, name, type, executable, capabilities, builtin)
 VALUES ('rt-claude-code', 'claude-code', 'claude-code', '',
@@ -419,6 +419,9 @@ VALUES ('prov-claude-subscription', 'claude-subscription', ARRAY['anthropic-mess
 ON CONFLICT DO NOTHING;
 INSERT INTO llm_providers (id, name, protocols, auth, oauth_runtime_type, builtin)
 VALUES ('prov-codex-login', 'codex-login', ARRAY['openai-responses'], 'oauth', 'codex', true)
+ON CONFLICT DO NOTHING;
+INSERT INTO llm_providers (id, name, protocols, auth, oauth_runtime_type, builtin)
+VALUES ('prov-grok-login', 'grok-login', ARRAY['openai-responses'], 'oauth', 'grok', true)
 ON CONFLICT DO NOTHING;
 INSERT INTO agent_profiles (id, name, runtime_id, provider_id, model, builtin, agent_teams)
 VALUES ('agent-claude-code-opus', 'claude-code/opus', 'rt-claude-code', 'prov-claude-subscription', 'opus', true, true)
