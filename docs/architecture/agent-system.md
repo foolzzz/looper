@@ -569,7 +569,11 @@ answer to an edit on the task page goes.
     step's label, instruction, working directory, target files, acceptance
     criteria, validation commands and, on a retry, the attempt number and the
     feedback on the previous attempts. A Reviewer's has the requirement, then
-    the reviewed step's instruction and acceptance criteria. Both list the
+    the reviewed step's instruction and acceptance criteria and, on a retry,
+    the notes the Planner retried it with (the same feedback, oldest first),
+    marked as the Planner's changes to the step: where one changes the
+    instruction or a criterion the Reviewer reviews against it, and every
+    criterion no note changes still holds. Both list the
     task's supplements after the requirement (`WORK_ITEM` and
     `VERIFY_REQUEST` `supplements`: whole, oldest first, in their own 8,000
     characters), as they were when the step was dispatched;
@@ -584,7 +588,7 @@ answer to an edit on the task page goes.
 - `WORK_ITEM` carries the step's fields apart: `requirement`, `step_key`,
   `instruction` (the step's own, without feedback), `feedback` (a list) and
   `attempt`, `dependencies`, `findings`; `VERIFY_REQUEST` adds `requirement` and
-  `step_key`.
+  `step_key`, and `feedback` once the step was retried.
 - Each run is one `llm_records` row with `metadata.command` (the exact
   argv), the system prompt's record (`system_prompt`, `system_prompt_sha256`,
   `prompt_layers`), `metadata.step_id`, and the process's cost, tokens, final
@@ -683,25 +687,53 @@ where they are installed (below), never from `~/.claude` itself.
 
 ### What an agent may do
 
-Every agent (Manager, Planner, Worker, Reviewer) has every tool and runs
-without permission prompts (RFC decision 8). `permission_args()` in
+The Manager, the Workers and the Reviewers have every tool and run without
+permission prompts (RFC decision 8): `permission_args()` in
 `looper/agents/claude_cli.py` is `--dangerously-skip-permissions`, and
-`agent_settings.Launch.args` puts it in front of every agent's launch flags,
-beside the installed plugins', so the four commands cannot diverge. No command
-carries `--tools`, `--allowedTools` or `--permission-mode`. What an agent is
-for is the job of its role prompt and its code-owned contract: the
-Planner's recommended role prompt says it plans and decides, does not modify
-files and gives every change to a Worker.
+`agent_settings.Launch.args` puts it in front of their launch flags, beside
+the installed plugins'. Verified with Claude Code 2.1.285 in `--print` mode
+with the isolation flags and a `--plugin-dir`: the init event reports
+`permissionMode: bypassPermissions`, and Bash, Write and a plugin skill that
+declares `allowed-tools: Bash` all ran without a permission denial. The
+isolation `--settings` (`claudeMdExcludes`, `autoMemoryEnabled`) leave
+permissions alone. Not checked: managed (admin policy) settings that deny
+tools or turn bypass mode off.
 
-Verified with Claude Code 2.1.285 in `--print` mode with the isolation flags
-and a `--plugin-dir`: the init event reports `permissionMode:
-bypassPermissions`, and Bash, Write and a plugin skill that declares
-`allowed-tools: Bash` all ran without a permission denial. Without the flag
-the same run had the Write and the skill denied (`date` alone is allowed
-either way, as a read-only command). The isolation `--settings`
-(`claudeMdExcludes`, `autoMemoryEnabled`) leave permissions alone. Not
-checked: a project's own `.claude/settings.json` (which still loads) or
-managed settings that deny tools or turn bypass mode off.
+A Planner runs read-only (`Launch.read_only`; [Planner read-only
+RFC](rfcs/planner-read-only-v0.zh-CN.md)): it plans and decides, and every
+change goes to a Worker. How its runtime keeps it from changing files is the
+adapter's `read_only`, recorded in each of its runs as `metadata.read_only`:
+
+- **`permissions`** (Claude Code): `read_only_args` in place of
+  `permission_args`. Claude Code's default permission mode refuses, in
+  `--print` mode, every tool call it would ask about; `--disallowedTools
+  Edit,Write,NotebookEdit` leaves out the file-editing tools, and
+  `--allowedTools` lets through what the Planner may use without asking: its
+  skills (`Skill`), web reads (`WebFetch`, `WebSearch`) and each of its MCP
+  servers (`mcp__looper`, its own tools, and those installed for it). Bash
+  runs `ls`, `cat`, `grep` and `git status`, `log`, `diff` and `show`, and
+  refuses a redirect, `touch`, a script that writes or `git commit`
+  (verified with Claude Code 2.1.285 and haiku). Each refused call is in the
+  turn's `result.permission_denials`: the run record keeps it as
+  `metadata.permission_denials` (`[{tool, input}]`, the input cut to 200
+  characters) and the task's activity says "The Planner runs read-only:
+  Looper refused N of its tool calls (...)". Not covered: a project's own
+  `.claude/settings.json`, which still loads and may allow more, an MCP
+  server installed for the Planner that writes files, and the tools a skill's
+  `allowed-tools` grants while it runs.
+- **`check`** (Codex and OMP, whose read-only modes are not verified yet):
+  the command is unchanged, and the Planner compares its task directory's git
+  checkout before and after each turn (`step_workspaces.tree_state`: `HEAD`
+  and each path `git status` lists with its status, size and modification
+  time, read with `--no-optional-locks`). A change is recorded as the turn's
+  `metadata.planner_changed_files` and an activity error ("The Planner
+  changed files in its turn, which it leaves to Workers: ..."); the files are
+  left as they are. It compares only when no Worker or Reviewer of the task
+  runs in the task directory at the start and the end of the turn (a step in
+  a worktree of its own runs elsewhere), and only in a git checkout.
+
+The Planner's recommended role prompt says it runs read-only and which
+commands it may run.
 
 Because the Manager can now run any command on this machine, Telegram and
 Lark pass on only the senders they list, and a channel without such a list
@@ -2496,8 +2528,8 @@ Key message types:
      (in a worktree of its own, once it is merged), and its `summary` becomes
      the task's result unless a later accept replaces it.
    - `review` only after a successful Worker result. A new Reviewer gets
-     `VERIFY_REQUEST` with the step's instruction, the Worker's result and the
-     acceptance criteria. A step with `review` set in the plan, or sent to
+     `VERIFY_REQUEST` with the step's instruction, the Worker's result, the
+     acceptance criteria and the retry notes, if any. A step with `review` set in the plan, or sent to
      review once, needs a passing review before it can be accepted, also after
      a retry.
    - `retry` sends the same step to a new Worker with the feedback appended to
