@@ -767,13 +767,19 @@ resumes, `proc_tree.sweep` reads every record:
 - a pid that no longer runs, or now belongs to another process, is left
   alone;
 - while `proc_tree.end` ends an agent's tree, the record also lists that
-  tree's processes with their start times, until the end is done: each of
-  them that still runs with its recorded start time is ended too, so a
+  tree's processes with their start times, until the end is done. A stop
+  that first asks the agent to exit on its own (a resident Claude's stdin
+  closed) records the tree before it asks (`begin_end`). Each listed
+  process that still runs with its recorded start time is ended too, so a
   server that exited during an end (its shutdown deadline, a second signal)
   has the rest ended now, the agent's children that outlived it included;
-- either way the record is removed, except one whose server still runs
-  (another server on the same runtime root): that record and its agent are
-  left alone.
+- a pid is signalled only while it still has the recorded start time, checked
+  again right before its SIGTERM and its SIGKILL: what is left is the one
+  `ps` call between that check and the signal;
+- a record is removed once what it names has been ended, except one whose
+  server still runs (another server on the same runtime root), which is
+  left alone with its agent, and one whose start times could not be read,
+  which is kept for the next start.
 
 Two cases are not covered:
 
