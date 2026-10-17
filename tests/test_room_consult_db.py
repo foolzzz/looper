@@ -251,3 +251,26 @@ def test_a_throwaway_checkout_shows_what_the_consult_changed_and_goes(tmp_path: 
     assert "consult-1" not in subprocess.run(["git", "worktree", "list"], cwd=repo, capture_output=True,
                                              text=True).stdout
     assert _snapshot(tmp_path / "plain", tmp_path / "consults" / "consult-2") is None
+
+
+def test_a_consult_whose_task_ended_while_it_waited_does_not_start(monkeypatch: pytest.MonkeyPatch,
+                                                                    tmp_path: Path) -> None:
+    seen = tmp_path / "seen.jsonl"
+    monkeypatch.setenv("SEEN", str(seen))
+
+    async def test(pool: Any) -> None:
+        await _room_task(pool)
+        await _ran(pool, tmp_path / "work")
+        room = RoomService(batch_seconds=0)
+        service = _service(tmp_path, room, _Pool({"worker-2": "running"}))
+        start = service._start
+        held: list[int] = []
+        service._start = held.append  # type: ignore[method-assign]
+        await room.post("task-r", FE, kind="question", body="qty?", to=["backend_rd@s1"])
+        await pool.execute("UPDATE tasks SET status = 'stopped'")
+        start(held[0])
+        consult = await _settled(pool)
+        assert (consult["state"], consult["detail"]) == ("failed", "its task ended first")
+        assert not seen.exists()  # nothing ran
+
+    _run(test, monkeypatch)
