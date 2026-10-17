@@ -35,10 +35,12 @@ import { RoleProfile, TaskAgentsSummary, TaskAgentsTab } from "@/components/task
 import { NodeCards } from "@/components/pipeline-node-card";
 import { PipelineToolbar } from "@/components/pipeline-toolbar";
 import { GateBadge, TaskGates } from "@/components/task-gates";
+import { TaskWorkspaces, WorktreeMarker } from "@/components/task-workspaces";
 import { GATE_STATES, GATE_TURNS, gateAnchor, gateLook, gateTurn, stepAnchor } from "@/lib/gates";
 import { type NodeCard, gateCard, nodeCardId, plannerCard, resultCard, stepCard, stepSpan } from "@/lib/node-cards";
 import { FIT_PADDING, shownSteps, stepColumns, stepLevels, storeHideSkipped, storedHideSkipped } from "@/lib/pipeline-layout";
 import { useFullScreen } from "@/lib/full-screen";
+import { workspacesByStep } from "@/lib/workspaces";
 import { costBasis, costCaveats, formatUsd } from "@/lib/usage";
 import { cn } from "@/lib/utils";
 import {
@@ -657,6 +659,7 @@ function OverviewTab({
   const dropped = steps.filter((s) => s.status === "skipped").length;
   const cancelledGates = steps.filter(cancelledGate).length;
   const isActive = isActiveTask(task);
+  const worktrees = workspacesByStep(task);
 
   return (
     <div className="space-y-6 p-5">
@@ -758,6 +761,7 @@ function OverviewTab({
                       )}
                       {stepRoles(step) && <span className="font-mono text-xs text-muted-foreground">{stepRoles(step)}</span>}
                       <StepSpan step={step} active={isActive} />
+                      <WorktreeMarker workspaces={worktrees.get(step.id)} />
                       {step.status === "completed" && step.review_stage && (
                         <span className="text-xs text-muted-foreground">
                           Waiting for{" "}
@@ -786,6 +790,8 @@ function OverviewTab({
           </div>
         </div>
       )}
+
+      <TaskWorkspaces task={task} onChanged={onContinued} />
 
       {task.status === "completed" && task.project_id && (
         <LessonsDraftNote taskId={task.task_id} projectId={task.project_id} />
@@ -1684,6 +1690,7 @@ function PipelineTab({ task, onOpenGate }: { task: TaskDetail; onOpenGate: (step
     };
     const levels = stepLevels(steps);
     const why = droppedBecause(task.journal || [], all);
+    const worktrees = workspacesByStep(task);
     const x = stepColumns(steps, levels, NODE_W + GAP_X);
     const depth = steps.length ? Math.max(...levels.values()) : -1;
 
@@ -1719,7 +1726,7 @@ function PipelineTab({ task, onOpenGate }: { task: TaskDetail; onOpenGate: (step
         style: nodeStyle(look), sourcePosition: Position.Bottom, targetPosition: Position.Top,
       });
       cards[step.id] = stepCard(step, { taskId: task.task_id, active, look, lookOf, stepsById: allById,
-                                        skippedBecause: why.get(step.id) });
+                                        skippedBecause: why.get(step.id), workspaces: worktrees.get(step.id) });
     }
 
     // The result sits under the steps that lead to it, so its edges do not cross the dropped steps above it.

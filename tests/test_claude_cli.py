@@ -19,6 +19,19 @@ from fake_claude import fake_claude
 from looper.agents.claude_cli import isolation_args, iter_lines, system_prompt_args
 
 
+def _priced_launch() -> Any:
+    """A Claude Code launch with a provider Looper prices: m-main at $2 input and $10 output per million tokens."""
+    from looper.agents.agent_settings import AgentSettings, Launch
+    from looper.agents.profile_registry import AgentProfile, CatalogModel, ProviderSpec, RuntimeSpec
+    from looper.agents.runtimes import ApiProtocol, AuthKind, adapter
+
+    provider = ProviderSpec("prov-x", "x", AuthKind.API_KEY, frozenset({ApiProtocol.ANTHROPIC_MESSAGES}),
+                            base_url="https://example.invalid/anthropic",
+                            catalog=(CatalogModel("m-main", input_usd_per_mtok=2.0, output_usd_per_mtok=10.0),))
+    runtime = RuntimeSpec("rt-claude-code", "claude-code", "claude-code", "", adapter("claude-code").capabilities)
+    return Launch(AgentSettings(profile=AgentProfile("agent-x", "claude-code/m-main", runtime, provider, "m-main")))
+
+
 def _lines(*chunks: bytes) -> list[bytes]:
     async def _run() -> list[bytes]:
         reader = asyncio.StreamReader()
@@ -119,6 +132,107 @@ class TestClaudeRunRecorder:
         asyncio.run(_run())
         agent_db.append_events.assert_not_awaited()
         agent_db.finish_record.assert_not_awaited()
+
+    @pytest.mark.parametrize(
+        ("ends", "priced", "status", "error", "cost"),
+        [
+            ("cancelled", True, "interrupted", "stopped before it ended", 0.3),
+            ("cancelled", False, "interrupted", "stopped before it ended", None),
+            ("error", True, "failed", "ValueError: judging failed", 0.3),
+            ("finished", True, "completed", None, 0.3),
+        ],
+    )
+    def test_a_run_given_up_before_it_ends_closes_its_record_once_with_what_it_spent(
+        self, agent_db: Any, ends: str, priced: bool, status: str, error: str | None, cost: float | None,
+    ) -> None:
+        """A run Looper stops (a kill, its task or the server stopping) ends ``interrupted``, one it stops following
+        after an error ``failed``, with the tokens its requests used and their cost when Looper prices the run; a
+        record the run closed itself is not closed again."""
+        from looper.agents.claude_cli import ClaudeRunRecorder
+        from looper.agents.run_usage import Usage
+        from looper.agents.runtimes.pricing import usage_event
+
+        recorder = ClaudeRunRecorder(agent_id="worker-1", task_id="task-1", command=["claude"], cwd="/tmp/proj",
+                                     input_text="go", launch=_priced_launch() if priced else None)
+
+        async def _run() -> asyncio.Task[None]:
+            requested = asyncio.Event()
+
+            async def run() -> None:
+                async with recorder:
+                    # $0.20 + $0.10 at the provider's prices
+                    await recorder.record(usage_event("m-main", Usage(input_tokens=100_000, output_tokens=10_000)))
+                    requested.set()
+                    if ends == "finished":
+                        await recorder.finish(output_text="done", result_event={
+                            "type": "result", "subtype": "success", "is_error": False, "total_cost_usd": 0.5,
+                            "modelUsage": {"m-main": {"inputTokens": 100_000, "outputTokens": 10_000}}})
+                    if ends == "cancelled":
+                        await asyncio.sleep(60)
+                    raise ValueError("judging failed")
+
+            task = asyncio.create_task(run())
+            await asyncio.wait_for(requested.wait(), 10)
+            if ends == "cancelled":
+                task.cancel()
+            await asyncio.wait([task])
+            return task
+
+        task = asyncio.run(_run())
+        assert task.cancelled() if ends == "cancelled" else isinstance(task.exception(), ValueError)
+        (call,) = agent_db.finish_record.await_args_list
+        finish = call.kwargs
+        assert finish["status"] == status
+        assert (error in finish["error"]) if error else finish["error"] is None
+        assert (finish["input_tokens"], finish["output_tokens"]) == (100_000, 10_000)
+        assert finish["cost_usd"] == (pytest.approx(cost) if cost is not None else None)
+
+    def test_a_close_the_database_refuses_is_tried_once_more(self, agent_db: Any) -> None:
+        agent_db.finish_record.side_effect = [ConnectionResetError("connection lost"), None]
+        recorder = self._recorder()
+
+        async def _run() -> None:
+            await recorder.start()
+            await recorder.finish(output_text="hi", result_event={"type": "result", "subtype": "success",
+                                                                  "is_error": False, "total_cost_usd": 0.5})
+
+        asyncio.run(_run())
+        assert [(call.kwargs["status"], call.kwargs["cost_usd"]) for call in agent_db.finish_record.await_args_list] \
+            == [("completed", 0.5)] * 2
+
+    def test_a_stop_during_the_close_does_not_cut_the_write_short_and_a_hung_write_is_given_up(
+        self, agent_db: Any, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from looper.agents import claude_cli
+
+        written: list[str] = []
+
+        async def slow_write(record_id: int, **fields: Any) -> None:
+            await asyncio.sleep(0.3 if not written else 60)
+            written.append(fields["status"])
+
+        agent_db.finish_record.side_effect = slow_write
+        monkeypatch.setattr(claude_cli, "CLOSE_TIMEOUT_SEC", 1.0)
+        success = {"type": "result", "subtype": "success", "is_error": False, "total_cost_usd": 0.5}
+
+        async def _run() -> tuple[bool, list[str], float]:
+            recorder = self._recorder()
+            await recorder.start()
+            closing = asyncio.create_task(recorder.finish(output_text="hi", result_event=success))
+            await asyncio.sleep(0.05)
+            closing.cancel()  # the task stops while its record is being closed
+            await asyncio.wait([closing])
+            await asyncio.sleep(0.5)
+            after_cancel = list(written)
+            hung = self._recorder()
+            await hung.start()
+            began = asyncio.get_running_loop().time()
+            await hung.finish(output_text=None, result_event=None)  # the database hangs: given up, never raised
+            return closing.cancelled(), after_cancel, asyncio.get_running_loop().time() - began
+
+        cancelled, after_cancel, waited = asyncio.run(_run())
+        assert cancelled and after_cancel == ["completed"]
+        assert 0.9 < waited < 5
 
 
 def test_heartbeat_counts_partial_deltas_and_is_throttled(agent_db: Any, monkeypatch: pytest.MonkeyPatch) -> None:

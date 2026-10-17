@@ -2,7 +2,8 @@
  * `components/pipeline-node-card`. */
 import { historyHref } from "@/pages/agent-history";
 import { gateWaitsOn } from "@/lib/gates";
-import type { GateAgendaItem, TaskDetail, TaskStep, UserGate } from "@/lib/api";
+import { MERGE_ERRORS, shortCommit, workspaceState } from "@/lib/workspaces";
+import type { GateAgendaItem, StepWorkspace, TaskDetail, TaskStep, UserGate } from "@/lib/api";
 
 /** A node's status as the Pipeline draws it: a word and the node's colors. */
 export interface CardLook {
@@ -133,6 +134,24 @@ function stepResult(step: TaskStep): CardSection[] {
   ];
 }
 
+/** Where the step worked, when it had a worktree of its own: the latest one's branch, state and start, why it could not
+ * be merged and the files in the way, its links, and how many earlier ones it had. */
+function stepWorktree(workspaces: StepWorkspace[] | undefined): CardSection[] {
+  const latest = workspaces?.[workspaces.length - 1];
+  if (!workspaces || !latest) return [];
+  return [
+    ...facts("Worktree", [
+      { label: "Branch", value: latest.branch },
+      { label: "State", value: workspaceState(latest) },
+      { label: "From", value: `${latest.target_branch} at ${shortCommit(latest.base_commit)}${latest.checkpoint ? " (checkpoint)" : ""}` },
+      latest.merge_error && { label: "Why", value: MERGE_ERRORS[latest.merge_error] },
+      latest.links.length > 0 && { label: "Linked", value: latest.links.join(", ") },
+      workspaces.length > 1 && { label: "Earlier", value: `${workspaces.length - 1} worktree${workspaces.length > 2 ? "s" : ""}` },
+    ]),
+    ...list("Files in the way of the merge", latest.merge_files, true),
+  ];
+}
+
 export interface StepCardContext {
   taskId: string;
   /** Whether the step's task runs: a step shows how long it has been running only then. */
@@ -143,10 +162,14 @@ export interface StepCardContext {
   stepsById: Map<string, TaskStep>;
   /** Why a dropped step was dropped. */
   skippedBecause?: string;
+  /** The step's worktrees, oldest first, when it had any. */
+  workspaces?: StepWorkspace[];
 }
 
 /** A step's card: what it does, how it is checked, what it waits for, who ran it and what came of it. */
-export function stepCard(step: TaskStep, { taskId, active, look, lookOf, stepsById, skippedBecause }: StepCardContext): NodeCard {
+export function stepCard(
+  step: TaskStep, { taskId, active, look, lookOf, stepsById, skippedBecause, workspaces }: StepCardContext,
+): NodeCard {
   const deps = (step.depends_on ?? []).map((id) => stepsById.get(id)).filter((s): s is TaskStep => !!s);
   const span = stepSpan(step, active);
   // completed_at is the last time the step went to review or ended; a step running again still has it.
@@ -173,6 +196,7 @@ export function stepCard(step: TaskStep, { taskId, active, look, lookOf, stepsBy
           value: `Waiting for ${step.review_stage === "role" ? `review: ${step.review_role_key}` : "the built-in review"}`,
         },
       ]),
+      ...stepWorktree(workspaces),
       ...stepResult(step),
       ...(step.status === "skipped" ? text("Skipped", skippedBecause || "Dropped from the plan by a replan") : []),
       ...facts("Timing", [
