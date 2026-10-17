@@ -38,6 +38,7 @@ from .channels.registry import ChannelRegistry
 from .channels.telegram import TelegramChannelAdapter
 from .channels.web import WebChannelAdapter
 from . import self_check
+from .gate_service import GateReminders
 from .http_server import AgentHTTPServer
 from .log_redaction import log_to_stderr
 from .scheduler import Scheduler
@@ -701,6 +702,8 @@ async def _run_agent_system(
     # It fires the schedules once the agents and the HTTP server are up, and hears from the TaskRouter when a
     # task ends, to record a scheduled run's outcome.
     scheduler = Scheduler(bus=bus, sender=registry.notify, dashboard_url=dashboard_url)
+    # It notes the user gates that have waited for the user for their project's reminder interval.
+    gate_reminders = GateReminders()
     task_router = TaskRouter(runtime_root=runtime_root, broadcaster=broadcaster, claude_bin=claude_bin,
                              on_task_end=scheduler.task_ended, dashboard_url=dashboard_url)
     supervisor.register(task_router)
@@ -748,6 +751,7 @@ async def _run_agent_system(
     await http_server.start()
     # Its first pass handles the fires missed while the server was down.
     await scheduler.start()
+    await gate_reminders.start()
 
     logger.info(
         "agent system running on http://%s:%d (channels=%s)",
@@ -771,6 +775,7 @@ async def _run_agent_system(
     # --- Shutdown ---
 
     logger.info("shutting down agent system...")
+    await gate_reminders.stop()
     await scheduler.stop()
     await http_server.stop()
     await supervisor.stop_all()

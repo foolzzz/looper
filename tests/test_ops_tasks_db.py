@@ -226,6 +226,8 @@ _CONTINUE = {"mode": "continue"}
     ("stopped", "start", "conflict"),
     ("running", "stop", (MessageType.TASK_STOP, {})),
     ("pending", "stop", (MessageType.TASK_STOP, {})),
+    ("waiting_user", "stop", (MessageType.TASK_STOP, {})),  # a user gate waits: the task still runs
+    ("waiting_user", "restart", "conflict"),
     ("init", "stop", "conflict"),
     # A restart goes on from the saved plan, and runs at once.
     ("stopped", "restart", (MessageType.TASK_RESTART, _CONTINUE)),
@@ -268,6 +270,10 @@ def test_cancelling_asks_first_and_only_a_running_task(monkeypatch: pytest.Monke
         (done,) = await chat.say("确认", ("looper_confirm", {"confirmation_id": asked["confirmation_id"]}))
         assert done["status"] == "ok"
         assert [(e.message_type, e.payload) for e in chat.sent()] == [(MessageType.TASK_CANCEL, {"task_id": "task-a"})]
+        # A task whose user gate waits still runs, so it can be cancelled too.
+        await pool.execute("UPDATE tasks SET status = 'waiting_user' WHERE id = 'task-q'")
+        (waiting,) = await chat.say("也取消它", ("looper_task_control", {"task_id": "task-q", "action": "cancel"}))
+        assert waiting["status"] == "needs_confirmation"
 
     _run(test, monkeypatch)
 

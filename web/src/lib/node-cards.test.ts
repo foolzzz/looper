@@ -7,7 +7,7 @@ const LOOKS: Record<string, CardLook> = { verified: look("Done"), failed: look("
 
 function step(id: string, extra: Partial<TaskStep> = {}): TaskStep {
   return {
-    id, task_id: "t1", step_index: 0, step_key: id, instruction: "", acceptance_criteria: [], target_files: [],
+    id, task_id: "t1", step_index: 0, step_key: id, kind: "work", instruction: "", acceptance_criteria: [], target_files: [],
     depends_on: [], status: "pending", review: false, role_key: null, review_role_key: null, review_role_required: true,
     role_version: null, review_role_version: null, review_stage: null, retries: 0, worker_id: null, reviewer_id: null,
     result: null, created_at: "2026-10-17T08:00:00Z", updated_at: "2026-10-17T08:00:00Z", completed_at: null,

@@ -746,10 +746,12 @@ def test_a_file_exported_by_v2_6_0_imports_and_exports_again_under_the_new_names
             expected["providers"] = [{**_by_name(old["providers"], "glm"), "api_key": None}]
             expected["settings"] = {"layers": [renamed(x) for x in old["settings"]["layers"]], "roles": [
                 {k: v for k, v in role.items() if k != "max_concurrency"} for role in old["settings"]["roles"]]}
-            # A file from before step workspaces, per-project retries and Planner roles leaves them unset.
+            # A file from before step workspaces, per-project retries, Planner roles and user gates leaves them
+            # unset.
             expected["projects"] = [{**p, "execution": {**p["execution"], "step_workspaces": None,
                                                         "max_step_retries": None, "planner_roles": None,
-                                                        "role_text_max_chars": None},
+                                                        "role_text_max_chars": None, "user_gates": None,
+                                                        "gate_reminder_hours": None},
                                      "layers": [renamed(x) for x in p["layers"]]} for p in old["projects"]]
             assert new == expected
 

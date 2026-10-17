@@ -40,11 +40,11 @@ RECORD_FAILED = "failed"
 # they change; and OMP's (``runtimes.omp.edited_paths``).
 FILE_EDIT_TOOLS = frozenset({"Write", "Edit", "MultiEdit", "NotebookEdit", "apply_patch", *OMP_EDIT_TOOLS})
 
-_BROKE_CONTRACT = re.compile(r"^Planner reply broke the (PLAN|DECISION|CHAT|SUPERVISE) contract \(")
+_BROKE_CONTRACT = re.compile(r"^Planner reply broke the (PLAN|DECISION|CHAT|SUPERVISE|GATE) contract \(")
 _REPAIR_REJECTED = "invalid reply after a repair turn"
 # The Planner's answer to a change to the task, with the action it chose.
 _CHANGE_ANSWERED = re.compile(r"^Planner answered a change to the task \((\w+)\)")
-_TURN_KIND = re.compile(r"^\[(PLAN|DECISION|CHAT|SUPERVISE)\]( Your last reply broke the reply contract)?")
+_TURN_KIND = re.compile(r"^\[(PLAN|DECISION|CHAT|SUPERVISE|GATE)\]( Your last reply broke the reply contract)?")
 
 
 def planner_violations(activity: Iterable[Mapping[str, Any]]) -> int:
@@ -158,6 +158,37 @@ def role_metrics(detail: Mapping[str, Any], records: Iterable[Mapping[str, Any]]
     }
 
 
+# What a supplement a user gate left reads like in a Worker's or Reviewer's task section (``user_gates.conclusion_text``).
+_CONCLUSION = "Settled with the user at gate "
+
+
+def gate_metrics(detail: Mapping[str, Any], records: Iterable[Mapping[str, Any]], *, now: float) -> dict[str, int]:
+    """The task's user gates and how they went: how many opened (``gates_opened``), the [GATE] turns whose reply was
+    taken (``gate_turns``), how they closed (``gates_passed``, of them ``gates_ended_by_user``; ``gates_cancelled``),
+    the assumptions their summaries stated (``assumptions_stated``), the steps the turns that closed them added,
+    dropped and stopped (``gate_plan_changes``), the Worker runs while a gate waited (``gate_parallel_runs``), and the
+    Worker and Reviewer runs whose task section carried a gate's conclusion (``conclusion_reads``)."""
+    gates = [g for g in detail.get("gates") or [] if g.get("opened_at")]
+    windows = [(timestamp(g["opened_at"]) or now, timestamp(g.get("closed_at")) or now) for g in gates]
+    step_runs = [r for r in records if role(r) in ("worker", "reviewer")]
+    workers = [(timestamp(r.get("created_at")), timestamp(r.get("finished_at")) or now) for r in step_runs
+               if role(r) == "worker" and r.get("created_at")]
+    return {
+        "gates_opened": len(gates),
+        "gate_turns": sum(int(g.get("turns") or 0) for g in gates),
+        "gates_passed": sum(1 for g in gates if g.get("state") == "passed"),
+        "gates_ended_by_user": sum(1 for g in gates if g.get("state") == "passed" and g.get("ended_by_user")),
+        "gates_cancelled": sum(1 for g in gates if g.get("state") == "cancelled"),
+        "assumptions_stated": sum(len((g.get("summary") or {}).get("assumptions") or []) for g in gates),
+        "gate_plan_changes": sum(len(labels) for g in gates for labels in (g.get("plan_change") or {}).values()),
+        "gate_parallel_runs": sum(1 for start, end in workers
+                                  if start is not None and any(start < closed and end > opened
+                                                               for opened, closed in windows)),
+        "conclusion_reads": sum(1 for r in step_runs
+                                if _CONCLUSION in str((r.get("metadata") or {}).get("system_prompt") or "")),
+    }
+
+
 @dataclass(frozen=True)
 class Discipline:
     """A discipline a task's work spans: the words of a role id that name it (``fe`` in ``fe_rd``) and terms of its
@@ -197,7 +228,7 @@ def interface_dependents(steps: Iterable[Mapping[str, Any]]) -> int:
 
 
 def turn_kinds(records: Iterable[Mapping[str, Any]]) -> dict[str, int]:
-    """The Planner's turns by kind (``plan``, ``decision``, ``chat``, ``supervise``, ``repair``)."""
+    """The Planner's turns by kind (``plan``, ``decision``, ``chat``, ``supervise``, ``gate``, ``repair``)."""
     kinds: dict[str, int] = {}
     for record in records:
         if role(record) != "planner":
@@ -371,11 +402,13 @@ def task_metrics(
     check_problem: str | None,
     expect: Mapping[str, int],
     disciplines: Iterable[Discipline] = (),
+    gate_asks_beyond_script: int = 0,
     clock_offset: float = 0.0,
     now: float,
 ) -> dict[str, Any]:
     """One task's result: success and why not, the flow counts, cost, contract violations and the Planner's
-    file changes. ``expect`` may bound ``contract_violations`` (their total) too."""
+    file changes. ``expect`` may bound ``contract_violations`` (their total) too, and the gates the scripted user
+    ended because the Planner asked after its script ran out (``gate_asks_beyond_script``, the runner's count)."""
     by_role: dict[str, list[Mapping[str, Any]]] = {}
     for record in records:
         by_role.setdefault(role(record), []).append(record)
@@ -418,6 +451,9 @@ def task_metrics(
         # one interface step.
         "discipline_roles": discipline_roles(detail.get("roles") or [], disciplines),
         "interface_dependents": interface_dependents(detail.get("steps") or []),
+        # The user gates the Planner opened, and how they went.
+        **gate_metrics(detail, records, now=now),
+        "gate_asks_beyond_script": gate_asks_beyond_script,
     }
     violations = {"planner": planner_violations(activity), "worker": worker_violations,
                   "reviewer": reviewer_violations}

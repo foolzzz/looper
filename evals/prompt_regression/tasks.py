@@ -7,6 +7,14 @@ a check of the delivered files, and the flow it must show (at least so many
 steps, reviews, retries or chat turns). ``fake`` scripts what
 the stand-in Claude (``fake_claude.py``) does for it, so fake mode exercises
 the same flow without a model.
+
+Where a task's project lets its Planner open user gates (``user_gates``, or
+the run's ``--user-gates on``), the runner plays the user: each time a gate
+waits for the user it posts the next entry of the task's ``gate_script`` (a
+message, or ``END_DISCUSSION``), after ``gate_reply_after_s`` seconds; a task
+without a script answers ``DEFAULT_GATE_SCRIPT``. Once a script has run out
+the runner ends the discussion, so a Planner that keeps asking closes on its
+assumptions (``gate_asks_beyond_script`` counts those gates).
 """
 
 from __future__ import annotations
@@ -14,6 +22,7 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+import tomllib
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -35,6 +44,11 @@ class EvalTask:
     planner_may_choose: bool = False
     # The task's project lets its Planner define the roles its steps run as (planner_roles on).
     roles_on: bool = False
+    # The task's project lets its Planner open user gates (user_gates on); what the user answers in them, in turn
+    # (END_DISCUSSION ends the discussion), and how long a gate waits before each answer.
+    user_gates: bool = False
+    gate_script: tuple[str, ...] = ()
+    gate_reply_after_s: float = 0.0
     # The disciplines its work spans, each of which should get a role of its own (discipline_roles).
     disciplines: tuple[Discipline, ...] = ()
     # min_steps, min_reviews, min_retries, min_chat_turns, min_independent_pairs, min_bracketed_pairs,
@@ -42,7 +56,8 @@ class EvalTask:
     # min_roles_defined, min_role_runs, min_role_profile_runs, min_role_reviews, min_advisory_role_fails,
     # min_discipline_roles, min_interface_dependents; max_plan_changes, max_steps,
     # max_roles_defined, max_role_prompt_mismatches, max_role_boundary_misses, max_gate_breaches,
-    # max_contract_violations
+    # max_contract_violations; min_gates_opened, min_gates_passed, min_gates_ended_by_user, min_assumptions_stated,
+    # min_gate_parallel_runs, min_conclusion_reads; max_gates_opened, max_gate_asks_beyond_script
     expect: dict[str, int] = field(default_factory=dict)
     fake: dict[str, Any] = field(default_factory=dict)  # the stand-in Claude's script
 
@@ -50,6 +65,9 @@ class EvalTask:
 # The profile a task's project may let its Planner choose: the run's own profile under another name, so a run on
 # it costs what any other does.
 CHOSEN_PROFILE = "eval/chosen"
+# What the user posts in a gate to end its discussion, and what a task without a script answers in a gate.
+END_DISCUSSION = "<end>"
+DEFAULT_GATE_SCRIPT = ("No preference: decide yourself and state your assumptions.", END_DISCUSSION)
 
 
 def _read(work_dir: Path, name: str) -> str | None:
@@ -690,6 +708,152 @@ ROLE_TASKS: tuple[EvalTask, ...] = (
     ),
 )
 TASKS = TASKS + ROLE_TASKS
+
+
+def _settings(work_dir: Path, *, names: tuple[str, ...]) -> dict[str, Any] | None:
+    """The settings of the first of ``names`` in ``work_dir`` that parses as JSON or TOML; None for none."""
+    for name in names:
+        text = _read(work_dir, name)
+        if text is None:
+            continue
+        try:
+            return tomllib.loads(text) if name.endswith(".toml") else json.loads(text)
+        except (ValueError, tomllib.TOMLDecodeError):
+            return {}
+    return None
+
+
+def _demo_service(data: Any) -> bool:
+    """Whether ``data`` holds name demo and port 8080, at the top or under one key."""
+    if not isinstance(data, dict):
+        return False
+    if data.get("name") == "demo" and data.get("port") == 8080:
+        return True
+    return any(isinstance(v, dict) and v.get("name") == "demo" and v.get("port") == 8080 for v in data.values())
+
+
+def _settings_as_decided(work_dir: Path) -> str | None:
+    data = _settings(work_dir, names=("settings.toml",))
+    if data is None:
+        return "settings.toml is missing (the user asked for TOML in settings.toml)"
+    service = data.get("service")
+    if not isinstance(service, dict) or service.get("name") != "demo" or service.get("port") != 8080:
+        return "settings.toml does not hold name demo and port 8080 under [service]"
+    return None
+
+
+def _settings_somehow(work_dir: Path) -> str | None:
+    names = tuple(f"{stem}.{ext}" for stem in ("settings", "config", "demo") for ext in ("json", "toml"))
+    data = _settings(work_dir, names=names)
+    if data is None:
+        return f"no settings file ({', '.join(names)})"
+    return None if _demo_service(data) else "the settings file does not hold name demo and port 8080"
+
+
+# The user decided where the settings go and wrote it down nowhere: a Planner that may open gates should ask.
+_SETTINGS = ("Write the settings file of a small service whose name is `demo` and whose port is 8080, in the "
+             "working directory. The user decided which file format (JSON or TOML), which file name and which "
+             "top-level key hold these settings, and wrote it down nowhere: the file must follow what they "
+             "decided.")
+_TOML_ANSWER = "TOML: a file named settings.toml, with name and port under a top-level table named `service`."
+_SETTINGS_GATE = {"id": "g1", "kind": "gate", "topic": "the settings file",
+                  "agenda": [{"question": "Which format, file name and top-level key?",
+                              "options": ["JSON", "TOML"]}], "depends_on": []}
+
+
+def _write_settings(depends_on: list[str]) -> dict[str, Any]:
+    return _step("s1", "Write settings.toml with name demo and port 8080 under [service].",
+                 ["settings.toml holds them under [service]"], depends_on=depends_on)
+
+
+GATE_TASKS: tuple[EvalTask, ...] = (
+    EvalTask(
+        # What only the user knows decides the file: the Planner asks at a gate, and the file follows the answer.
+        id="gate_ambiguous",
+        requirement=_SETTINGS,
+        user_gates=True,
+        gate_script=(_TOML_ANSWER,),
+        check=_settings_as_decided,
+        expect={"min_gates_opened": 1, "min_gates_passed": 1, "min_conclusion_reads": 1,
+                "max_gate_asks_beyond_script": 0},
+        fake={
+            "plan": [_SETTINGS_GATE],
+            "gate_close_steps": [_write_settings(["g1"])],
+            "attempts": {"s1": [{"status": "completed",
+                                 "files": {"settings.toml": '[service]\nname = "demo"\nport = 8080\n'}}]},
+        },
+    ),
+    EvalTask(
+        # A clear task in a project that allows gates: no gate, a small plan.
+        id="gate_not_needed",
+        requirement="Create a file named memo.txt in the working directory whose whole content is the line "
+                    "`nothing to ask`.",
+        user_gates=True,
+        check=_equals("memo.txt", "nothing to ask"),
+        expect={"min_steps": 1, "max_steps": 2, "max_gates_opened": 0},
+        fake={
+            "plan": [_step("s1", "Create memo.txt containing `nothing to ask`.", ["memo.txt holds it"])],
+            "attempts": {"s1": [{"status": "completed", "files": {"memo.txt": "nothing to ask\n"}}]},
+        },
+    ),
+    EvalTask(
+        # The user ends the discussion at once: the Planner goes on with what it assumes, and says so.
+        id="gate_end_early",
+        requirement=_SETTINGS,
+        user_gates=True,
+        gate_script=(END_DISCUSSION,),
+        check=_settings_somehow,
+        expect={"min_gates_opened": 1, "min_gates_ended_by_user": 1, "min_assumptions_stated": 1},
+        fake={
+            "plan": [_SETTINGS_GATE],
+            "gate_close_steps": [_step("s1", "Write settings.json with name demo and port 8080.",
+                                       ["settings.json holds them"], depends_on=["g1"])],
+            "attempts": {"s1": [{"status": "completed",
+                                 "files": {"settings.json": '{"name": "demo", "port": 8080}\n'}}]},
+        },
+    ),
+    EvalTask(
+        # A clear part and one the user decides: the gate holds back only the second, and the first runs meanwhile.
+        id="gate_parallel_branch",
+        requirement=("Two independent parts, each a step of its own. Part A: run `sleep 20`, then create readme.txt "
+                     "in the working directory whose whole content is `hello`. Part B: " + _SETTINGS),
+        user_gates=True,
+        gate_script=(_TOML_ANSWER,),
+        check=_all(_equals("readme.txt", "hello"), _settings_as_decided),
+        expect={"min_gates_opened": 1, "min_gate_parallel_runs": 1},
+        fake={
+            "plan": [_step("sA", "Run sleep 20, then create readme.txt containing hello.", ["readme.txt holds hello"]),
+                     _SETTINGS_GATE],
+            "gate_close_steps": [_write_settings(["g1"])],
+            "attempts": {"sA": [{"status": "completed", "seconds": 3, "files": {"readme.txt": "hello\n"}}],
+                         "s1": [{"status": "completed",
+                                 "files": {"settings.toml": '[service]\nname = "demo"\nport = 8080\n'}}]},
+        },
+    ),
+    EvalTask(
+        # What only a step's work can find out: the contract says never to ask in a gate what can be found out, so
+        # no gate opens. A gate that waits on the step and is cancelled before it opens never asked the user; one
+        # that opens fails the task, and the scripted user ends it after two minutes so that fails fast.
+        id="gate_discoverable",
+        requirement=("Create port.txt in the working directory holding only the port number the service must use. "
+                     "Nobody knows it offhand, the user included: `sh probe.sh` prints it, and only a step's Worker "
+                     "may run probe.sh. The user cannot answer a question about the port."),
+        files={"probe.sh": "#!/bin/sh\necho 8125\n"},
+        user_gates=True,
+        gate_script=(END_DISCUSSION,),
+        gate_reply_after_s=120.0,
+        check=_equals("port.txt", "8125"),
+        expect={"min_steps": 1, "max_gates_opened": 0},
+        fake={
+            "plan": [_step("s1", "Run sh probe.sh and write what it prints to port.txt.", ["port.txt holds the port"]),
+                     {**_SETTINGS_GATE, "topic": "the port", "depends_on": ["s1"],
+                      "agenda": [{"question": "Which port must the service use?"}]}],
+            "decision_gates": {"s1": [{"id": "g1", "action": "cancel", "resolution": "probe.sh printed 8125"}]},
+            "attempts": {"s1": [{"status": "completed", "files": {"port.txt": "8125\n"}}]},
+        },
+    ),
+)
+TASKS = TASKS + GATE_TASKS
 
 
 def select(ids: list[str] | None) -> tuple[EvalTask, ...]:

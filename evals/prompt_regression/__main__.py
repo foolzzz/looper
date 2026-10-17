@@ -67,6 +67,9 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("--step-workspaces", choices=("shared", "worktree"),
                      help="make each working directory a git repository and give the task's project this "
                           "step_workspaces setting")
+    run.add_argument("--user-gates", choices=("on", "off"),
+                     help="give every task's project this user_gates setting, over the task's own (gate tasks "
+                          "turn it on)")
 
     talk = sub.add_parser("dialogs", help="Run the Manager's dialogs and check what Looper did after each reply.")
     talk.add_argument("--mode", choices=("fake", "real"), default="fake")
@@ -149,6 +152,7 @@ def main(argv: list[str] | None = None) -> int:
             keep_work_dirs=args.keep_work_dirs,
             step_workspaces=args.step_workspaces,
             reps=args.reps,
+            user_gates=args.user_gates,
         )
     except (ValueError, runner.EvalError) as exc:
         print(f"error: {exc}", file=sys.stderr)
