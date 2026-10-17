@@ -734,7 +734,8 @@ Claude Code 2.1.285).
 
 Every way Looper ends an agent goes through `looper/agents/proc_tree.py`:
 
-- a task's step killed or its task stopped or cancelled;
+- a task's step killed or its task stopped or cancelled (a stopped task ends
+  its running Workers and the Reviewers of its steps in review);
 - `timeout_seconds`;
 - the per-run spend cap;
 - a resident session stopped or replaced;
@@ -1545,7 +1546,9 @@ error; `supervise_interval_seconds` over the `planner` config; and
 and `distill_lessons` (`off`, `draft` or `write`, never null), whether a task
 that completes leaves a lessons draft or document in the project's knowledge
 (see the Planner); `step_workspaces` (`shared`, also when null, or
-`worktree`), where a step that runs alongside others works ([Step
+`worktree`), where a step that runs alongside others works, with
+`step_workspace_links` (up to 20 paths relative to the task directory, null
+for none), what such a worktree links back to the task directory's ([Step
 workspaces](#step-workspaces)); `max_step_retries` (0 to 20, null for 2),
 how many times the Planner may retry one step: its reply contract and each
 decision turn's allowed decisions say how many are left, and a retry past it is
@@ -1573,11 +1576,13 @@ the [step workspaces RFC](rfcs/step-workdir-isolation-v0.zh-CN.md)):
 
 - **When.** The Planner decides at dispatch (`plan_round`). A step that starts
   alone while nothing else is in flight works in the task directory, and while
-  one does, the ready steps wait. The task directory must be in git 2.40 or
-  later, on a branch with a commit, with no merge, rebase, cherry-pick, revert
-  or bisect in progress. Outside git the steps share the directory as without
-  the setting; a checkout that fails another condition runs them one at a time,
-  with the reason in the activity.
+  one does, the ready steps wait. Gate steps never get a worktree, and an open
+  gate is not in flight. The task directory must be in git 2.40 or later, on a
+  branch with a commit, with no merge, rebase, cherry-pick, revert or bisect in
+  progress, and its files at `HEAD` must take at most 1 GiB
+  (`CHECKOUT_LIMIT_BYTES`: each worktree is a copy). Outside git the steps
+  share the directory as without the setting; a checkout that fails another
+  condition runs them one at a time, with the reason in the activity.
 - **Where it starts.** The first time, the Planner records the branch and its
   tip (`task_plans.start_branch`, `start_commit`, and the activity):
   `git reset <start_commit>` there undoes the task's commits and keeps its
@@ -1593,10 +1598,19 @@ the [step workspaces RFC](rfcs/step-workdir-isolation-v0.zh-CN.md)):
   that the step works on a branch of its own, may commit, and must not push,
   switch branches or rewrite its commits; the Reviewer's gives
   `git diff <base_commit>` to see the step's changes. Ignored files, such as
-  `.env` or `.venv`, are not in it.
+  `.env` or `.venv`, are not in it, except the project's
+  `step_workspace_links`: each listed path the task directory has and the
+  worktree does not (a checked-out file is never replaced) is a symlink to the
+  task directory's, shared by every step (`link`); the ones linked are kept
+  on the workspace (`links`) and linked again if the worktree is re-created,
+  and the activity names the ones it could not link.
 - **Accepted.** Before an accepted step counts as verified (an `accept`, an
   acceptable `replan`, or its own verdict when the Planner cannot decide),
-  Looper commits what the Worker left uncommitted, computes the merge with the
+  Looper commits what the Worker left uncommitted (never a link: the paths
+  that are still links are taken out of the index even when the Worker
+  committed one, so the merge cannot replace the task directory's own
+  `node_modules` with a link to itself; a link the Worker replaced with files
+  of its own is its change, noted in the activity), computes the merge with the
   branch in memory (`git merge-tree --write-tree`), writes a merge commit
   (`commit-tree`, recorded before the branch moves) and moves the branch, its
   index and working tree with `git merge --ff-only`; the steps that depend on
@@ -1623,7 +1637,8 @@ the [step workspaces RFC](rfcs/step-workdir-isolation-v0.zh-CN.md)):
   to the task, loses its worktree and branch at once. A completed task's
   worktrees and branches are removed.
   A failed, stopped or cancelled task keeps its unmerged ones, and its activity
-  names their branches, until it is started over (its steps go) or deleted;
+  names their branches, until it is started over (its steps go) or deleted,
+  or the user discards one from the task page;
   restarting it, or continuing it at a raised cap, goes on with them: a step
   that did not finish runs again in its worktree, and one whose merge failed
   starts from the branch as it is now, told the old branch. A merge that a
@@ -1631,7 +1646,28 @@ the [step workspaces RFC](rfcs/step-workdir-isolation-v0.zh-CN.md)):
   removes what no task keeps: the worktrees of a completed task, the
   directory of a merged or dropped one, and directories no row knows.
 - `step_workspaces` rows record each one: `active` → `merging` → `merged` or
-  `unmerged`, and `discarded`, along `ALLOWED_TRANSITIONS`.
+  `unmerged`, and `discarded`, along `ALLOWED_TRANSITIONS`; an unmerged one
+  keeps the files in the way (`merge_files`).
+- **The task page.** `GET /api/tasks/:id` gives `step_workspaces` (null for a
+  task that had none): `start` (the branch and commit where the task started),
+  every workspace oldest first with its step's label, and `undo`, the commands
+  that undo the task's commits (`undo_commands`: list them by their
+  `Looper-Task` trailer, `git revert -m 1` one step's merge, `git reset` to the
+  start keeping or dropping the changes, or move them to a branch
+  `<branch>-<task_id>`; each that changes the branch switches to it first, and
+  names are quoted for the shell). The Overview's Steps list
+  marks each step's latest worktree, the Pipeline's step card has a Worktree
+  section, and a Step worktrees section lists them, with the undo commands,
+  and a Discard for each one still there while the task is not running
+  (`POST /api/tasks/:id/workspaces/:wid/discard`: its directory and branch
+  go, with the task's row locked so a restart waits for it; a restarted
+  step's Worker is told of an earlier branch only while it exists). Removing a
+  worktree drops only its own record in the repository (`git worktree remove
+  --force`, never `prune`, which would drop the user's stale ones too).
+- **`looper doctor`** warns when git is missing or older than 2.40 (`looper
+  serve` too, in `/api/status`'s `checks`), and checks the default directory
+  of each project set to `worktree` as the Planner would, with the paths it
+  links.
 
 The eval's `--step-workspaces worktree` runs its tasks in git repositories with
 the setting.
@@ -2048,11 +2084,31 @@ So:
 - **Compactions** (`compactions`) lists each `compact_boundary` as
   `{trigger, pre_tokens, post_tokens, duration_ms}`. It is `[]` when there
   were none, and null for runs recorded before M2.
+- **How a run's record ends** (`llm_records.status`, `RecordStatus`): it
+  opens `running` and ends `completed` (a successful result), `failed` (an
+  error, no result, the time limit or a spend cap) or `interrupted`: Looper
+  stopped the run before it ended (a kill, its task stopped or cancelled, the
+  server stopping), or the server running it died. Every run runs inside its
+  recorder (`async with ClaudeRunRecorder`), which closes a record the run
+  left open however the run ended: `interrupted` when it was cancelled,
+  `failed` after an error in Looper's handling of it. A close goes on when a
+  cancellation arrives meanwhile, for at most `CLOSE_TIMEOUT_SEC` (5 s). A
+  run that ends without a result keeps what its usage events added up to: its
+  tokens, and their cost when Looper prices the run; with Claude Code's own
+  pricing its cost is not known. A Worker's or Reviewer's run that Looper
+  stops after its result came keeps what that result reports, and a turn of
+  the Planner or the Manager is recorded before its session is saved. A
+  close that hits a database error is tried once more. At startup, before
+  anything runs, `serve` ends every record still `running` as `interrupted`
+  (`llm_records.end_unfinished_records`, logged with the count), with
+  `finished_at` its last output (its start without one): each is a run a
+  previous server that was killed, crashed or stopped did not see end, and its
+  usage, held in memory until a run ends, is not known. A second start changes
+  nothing.
 - **A task's cost** (`llm_records.task_costs`) is the sum of its Planner's,
   Workers' and Reviewers' runs, in total and by role, with the run count. It
   also counts `running` runs (cost not known yet) and `unpriced_runs`
-  (finished without a reported cost). A Manager turn about the task is not
-  part of it.
+  (ended without a cost). A Manager turn about the task is not part of it.
 - **An agent's usage** (`llm_records.agent_usage`, `GET
   /api/agents/:id/usage`) gives its total cost, runs and compactions, its cost
   by session and by UTC day, and its latest turns (oldest first) with each
@@ -2642,14 +2698,14 @@ PostgreSQL is a hard startup dependency. All data paths:
 | `task_user_gates` | A gate step's gate ([User gates](#user-gates)): `topic`, `agenda`, `findings`, `state`, `summary` (only once passed), `resolution`, `ended_by_user`, `plan_change`, `delivered_through`, `turns`, `reminders` and its times; the Planner writes all but `first_reply_at` and the reminders' columns, and a closed gate stays as it closed |
 | `task_user_gate_messages` | A gate's discussion, oldest first: the user's messages (`message`, `end`), the Planner's replies and code's notes (`opened`, `updated`, `reminder`, `cancelled`, `closed`, `resumed`, `error`), with `via`, the option a button chose, and in a group chat the author |
 | `task_plans` | A task's plan, one row per task: `plan_id`, `status` (`planning`, `executing`, `verifying`, `stopping`, `completed`, `failed`), `correlation_id`, `origin_channel_id`, `final_summary`, `fail_reason`, and with step workspaces `start_branch` and `start_commit` (where the branch was when the task dispatched its first step; `''` otherwise); replaced when the task is planned again |
-| `step_workspaces` | A step's git worktree ([Step workspaces](#step-workspaces)): `task_id`, `step_id` (both going with the task or step), `repo_dir` and `subdir` (the task directory in it), `target_branch`, `path`, `branch`, `base_commit`, `checkpoint`, `result_commit`, `merge_commit`, `state` (`active`, `merging`, `merged`, `unmerged`, `discarded`), `merge_error` (required when `unmerged`), `detail`, `removed_at` (its directory and branch are gone); one in use (`active` or `merging`) per step |
+| `step_workspaces` | A step's git worktree ([Step workspaces](#step-workspaces)): `task_id`, `step_id` (both going with the task or step), `repo_dir` and `subdir` (the task directory in it), `target_branch`, `path`, `branch`, `base_commit`, `checkpoint`, `result_commit`, `merge_commit`, `state` (`active`, `merging`, `merged`, `unmerged`, `discarded`), `merge_error` (required when `unmerged`) with `merge_files`, `detail`, `links` (the paths linked back to the task directory's), `removed_at` (its directory and branch are gone); one in use (`active` or `merging`) per step |
 | `agent_sessions` | The session each resident agent resumes: `manager` or `planner-<task_id>`, its `session_id`, `session_totals`, the `runtime_type` and `provider_id` it belongs to and the `profile_id` that ran it last (`NULL` runtime: before Agent Profiles, Claude Code; `NULL` provider: before providers were recorded, Claude Code's own login), and `clean_start` (the user dropped the session with `/new`: the next one starts without a resume brief) |
 | `task_journal` | A task's journal, written by code as things happen: `step_accepted`, `step_failed`, `step_retry`, `decision`, `supplement`, `session_switch`, `handoff`, `progress`, `profile_choice`, `concurrency_change`, `role_defined`, `gate_opened`, `gate_updated`, `gate_cancelled` and `gate_closed` entries, each with its `step_id` (`''` for the whole task), `summary` and `learnings`, and for a supplement its `via` and `delivered_at`; `GET /api/tasks/<id>` returns it as `journal` (and the progress notes, parsed and newest first, as `progress`); the task page lists the entries as Findings, each with its kind, and the progress notes in its Progress section |
 | `task_requirement_versions` | Every version of an edited task requirement: `task_id`, `version` (1 is the text the task was created with, written at its first edit), `text`, `via` (`created`, `task_page`, or the Manager's), `created_at` and `delivered_at` (when the Planner had it in a turn; `tasks.requirement` is the newest) |
 | `manager_actions` | The Manager's tool calls (`looper/agents/ops`), one row each: `channel`, `chat` and `message_id` of the turn (empty for a turn Claude ran on its own), `tool`, `arguments` (secret values masked), `risk` (`read`, `write`, `high`), `status` (`ok`, `needs_confirmation`, `error` with `error_code`), `result` (of a change; a read's is not kept), `confirmation_id` (the call that asked, on a confirmed one) and `task_id` (the task it acted on, no foreign key) |
 | `activity` | Execution trace events (SSE streaming to frontend) |
 | `chat_messages` | Chat conversation history of every channel: `session_id` (the web chat's session, or `<channel>:<chat_id>` for Telegram and Lark; not Telegram groups), `message_id`, `role`, `content`, `channel` (`web`, `telegram` or `lark`; rows from before it read `web`), `delivery_failure` and `delivery_error` (a Lark or Telegram answer its channel did not deliver: `no_chat` or `send_failed`, and the channel's error; NULL otherwise); a new Manager session's resume brief reads the recent chats that are not a task's Planner thread (`planner-<task_id>`) |
-| `llm_records` | One row per agent run: input and output text, status, the run's own `cost_usd` and its `cost_source` (`runtime` or `provider_price`), `input_tokens`, `output_tokens`, `cache_read_tokens` and `cache_creation_tokens`, its final `context_tokens` and its `compactions`; `metadata` holds the exact argv (`command`), `cwd`, the appended `system_prompt`, its `system_prompt_sha256`, its `prompt_layers`, the `profile` (`agent` on runs recorded before the rename), the `model_choice`, the Settings `env` names, the `library` items loaded, the `project_instructions` the runtime was given and a task agent's `project_skills`, and for a Worker's or Reviewer's run its `outcome` (`completed`, `reported_failed`, `files_mismatch`, `passed`, `not_passed`, `contract`, `run_failed`; `worker.RunOutcome`) |
+| `llm_records` | One row per agent run: input and output text, status (`running`, `completed`, `failed`, `interrupted`), the run's own `cost_usd` and its `cost_source` (`runtime` or `provider_price`), `input_tokens`, `output_tokens`, `cache_read_tokens` and `cache_creation_tokens`, its final `context_tokens` and its `compactions`; `metadata` holds the exact argv (`command`), `cwd`, the appended `system_prompt`, its `system_prompt_sha256`, its `prompt_layers`, the `profile` (`agent` on runs recorded before the rename), the `model_choice`, the Settings `env` names, the `library` items loaded, the `project_instructions` the runtime was given and a task agent's `project_skills`, and for a Worker's or Reviewer's run its `outcome` (`completed`, `reported_failed`, `files_mismatch`, `passed`, `not_passed`, `contract`, `run_failed`; `worker.RunOutcome`) |
 | `role_configs` | Each role's own settings, keyed by `role` (`manager`, `planner`, `worker`, `reviewer`): display name, role prompt and its recommended `default_prompt`, turns, timeout, enabled |
 | `agent_setting_layers` | Agent settings by layer: `scope` (`system`, `role`, `project`, `role_project`), `role`, `project_id` (goes with its project), and the nullable `harness_prompt`, `profile_id` (the effort is the profile's), `env` (ordered `[{key, value}]`, `null` value = unset), `run_budget_usd` and `max_concurrency` (the `worker` or `reviewer` `role` layer only: the default for every task); one row per layer and place |
 | `agent_runtimes` | Runtimes, built in (one per type found on PATH) or registered by hand before and kept while an Agent Profile uses them (`builtin` false): `name`, `type` (an adapter), `executable` (`''` = the type's default), the probe's `version`, `capabilities`, `probed_at`, `probe_error`, `builtin` |
@@ -2799,7 +2855,7 @@ dev proxy, which keeps `Host` and `Origin` on its own port.
 | `/api/tasks` | GET | A page of the tasks, newest first (by creation, then id): `?limit=` (default 50, at most 200) of them, older than the task `?before=` when given; `?project_id=` lists one project's, `?group=` one task group's (400 for an unknown group), `?schedule_id=` one schedule's, `?status=` one status's (400 for an unknown one), and they combine. Answers `tasks`, `next_before` (the cursor for the next page, null at the end) and `counts` (how many tasks each status holds under the project, group and schedule filters, every page included); 400 for a bad `limit` or an unknown `before`. Each task has its status's `group`, `project_id`, `project_name`, `work_dir`, `schedule_id` and `schedule_name` (null for a task no schedule created) and `cost` (as in the task detail) |
 | `/api/tasks/create` | POST | Create a ready task (`init`) with exactly one of `project_id` (existing) and `project` (`{name, description?, work_dir?, background?}`, created in the same transaction). Its `work_dir` is the one given, else the project's. Optional `profile_overrides`: `{planner?, worker?, reviewer?}`, an Agent Profile by id or name for this task's roles, checked as `PUT /api/tasks/:id/agents` checks `profiles` (an empty one chooses nothing). 400 for a requirement over 32,000 characters, with neither project field, for an override of another role, an unknown profile or one that cannot run its role; 404 for an unknown project, 409 for a taken new name |
 | `/api/tasks/:id/project` | PUT | Move a task to `{project_id}`, whatever its status |
-| `/api/tasks/:id` | GET | Task detail with steps, its status's `group`, `project_id`, `project_name`, `schedule_id`, `schedule_name`, `task_budget_usd` (its cap: its own, else its project's) and `own_budget_usd`, `profile_overrides` (`{role: profile}`, `{}` when none), `requirement_versions` (each `{version, text, via, created_at, delivered_at}`, oldest first; none for a requirement never edited), `supplements` (each `{text, via, created_at, delivered_at}`, oldest first), `manager_actions` (what the Manager did to the task or asked to confirm, newest first: `{created_at, channel, tool, arguments, risk, status, confirmation_id}`), `agents` (`{concurrency_max, editable, roles}`; each of `roles.planner`, `roles.worker` and `roles.reviewer` has the `profile` it runs, `{value: {profile_id, name, model, effort, runtime, provider}, source}` with source `task` for the task's own choice, and a Worker's or Reviewer's its `concurrency`: what applies to the task, `{value, source, task, default}` (source `task`, `role` or `builtin`), with the task's own limit `task` (null for none) and the `default` it has without one (`{value, source}`, the role layer's or the built-in); the Planner has none; `editable` is false once the task has completed: a failed, stopped or cancelled task still changes them, and its restart runs with them) and `cost`: `cost_usd` (the sum of its Planner's, Workers' and Reviewers' runs), `runs`, `running`, `unpriced_runs` and `by_role` (`planner`, `worker`, `reviewer`, each `{cost_usd, runs}`); `roles`, `builtin_role_stats` and, in a task with runs as a role, `run_roles` ([Roles a task's Planner defines](#roles-a-tasks-planner-defines)); and `gates`, the plan's user gates in plan order (each `{step, step_id, state, topic, agenda, findings, summary, resolution, ended_by_user, plan_change, depends_on, waiting_on, not_delivered, retry_at, turns, reminders, opened_at, first_reply_at, closed_at}`; `waiting_on` is `user`, `planner` while a message of the user's is undelivered and no turn failed on it or a failed turn's automatic retry is due, or null; `not_delivered` counts the user's messages a failed turn had and none has taken since, `retry_at` is when the Planner tries them again on its own, null when no retry is left) |
+| `/api/tasks/:id` | GET | Task detail with steps, its status's `group`, `project_id`, `project_name`, `schedule_id`, `schedule_name`, `task_budget_usd` (its cap: its own, else its project's) and `own_budget_usd`, `profile_overrides` (`{role: profile}`, `{}` when none), `requirement_versions` (each `{version, text, via, created_at, delivered_at}`, oldest first; none for a requirement never edited), `supplements` (each `{text, via, created_at, delivered_at}`, oldest first), `manager_actions` (what the Manager did to the task or asked to confirm, newest first: `{created_at, channel, tool, arguments, risk, status, confirmation_id}`), `agents` (`{concurrency_max, editable, roles}`; each of `roles.planner`, `roles.worker` and `roles.reviewer` has the `profile` it runs, `{value: {profile_id, name, model, effort, runtime, provider}, source}` with source `task` for the task's own choice, and a Worker's or Reviewer's its `concurrency`: what applies to the task, `{value, source, task, default}` (source `task`, `role` or `builtin`), with the task's own limit `task` (null for none) and the `default` it has without one (`{value, source}`, the role layer's or the built-in); the Planner has none; `editable` is false once the task has completed: a failed, stopped or cancelled task still changes them, and its restart runs with them) and `cost`: `cost_usd` (the sum of its Planner's, Workers' and Reviewers' runs), `runs`, `running`, `unpriced_runs` and `by_role` (`planner`, `worker`, `reviewer`, each `{cost_usd, runs}`); `roles`, `builtin_role_stats` and, in a task with runs as a role, `run_roles` ([Roles a task's Planner defines](#roles-a-tasks-planner-defines)); and `gates`, the plan's user gates in plan order (each `{step, step_id, state, topic, agenda, findings, summary, resolution, ended_by_user, plan_change, depends_on, waiting_on, not_delivered, retry_at, turns, reminders, opened_at, first_reply_at, closed_at}`; `waiting_on` is `user`, `planner` while a message of the user's is undelivered and no turn failed on it or a failed turn's automatic retry is due, or null; `not_delivered` counts the user's messages a failed turn had and none has taken since, `retry_at` is when the Planner tries them again on its own, null when no retry is left); `step_workspaces` (null for a task that had none: [Step workspaces](#step-workspaces)) |
 | `/api/tasks/cancel` | POST | Cancel task (permanent) |
 | `/api/tasks/stop` | POST | Stop/pause task |
 | `/api/tasks/start` | POST | Run a stopped, failed or cancelled task again from its saved plan (`TASK_RESTART` `continue`), or, with `"start_over": true`, plan it anew, its steps, plan and Planner session deleted; 400 when `start_over` is not a boolean. It also starts a ready one, as before |
@@ -2811,6 +2867,7 @@ dev proxy, which keeps `Host` and `Origin` on its own port.
 | `/api/tasks/:id/gates/:step/end` | POST | The user ends the gate's discussion (`{text?}`): the next `[GATE]` turn closes it with the current conclusions. As the POST above |
 | `/api/tasks/:id/agents` | PUT | Change the task's own choices per role, together: `profiles` (an Agent Profile by id or name for its `planner`, `worker` or `reviewer`) and `concurrency` (how many of its Workers or Reviewers run at once, 1–64), `null` dropping the task's choice of that role; e.g. `{"profiles": {"worker": "claude-code/sonnet"}, "concurrency": {"worker": 2}}`. The same check and write as the Manager's `looper_task_update` and `looper_concurrency` (`projects.set_task_agents`), in one transaction. Answers `{task_id, agents}` (as `GET /api/tasks/:id`), with a `note` on when a new profile applies; a limit it sets lets waiting runs check again. 400 for an unknown field, role, profile or a profile that cannot run its role, a limit other than a whole number from 1 to 64, a `planner` limit (one Planner runs a task, and nothing limits how many tasks run) or an empty body, and nothing is stored then; 404 for an unknown task; 409 for a completed task (a failed, stopped or cancelled one changes, and its restart runs with the new choices) |
 | `/api/tasks/:id/start` | POST | Start a ready task (`TASK_START`); it gets its Planner at once, like any start. Answers `{started, project_id}`; 400 unless the task is ready, 404 for an unknown task |
+| `/api/tasks/:id/workspaces/:wid/discard` | POST | Discard a step worktree the task keeps (`active`, `unmerged`, or `discarded` with its branch kept): its directory and branch are deleted, and the activity says so. Answers `{workspace}` (as in `GET /api/tasks/:id`'s `step_workspaces`); 404 for no such worktree in the task, 409 while the task is running or for one that is merging, merged or gone ([Step workspaces](#step-workspaces)) |
 | `/api/tasks/delete` | POST | Delete task (must be stopped first) |
 | `/api/tasks/:id/activity` | GET | Activity events |
 | `/api/tasks/:id/activity/stream` | GET | SSE activity stream |

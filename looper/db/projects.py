@@ -24,8 +24,8 @@ from .tasks import ACTIVE_STATUSES
 # How the project's task agents run; NULL inherits (looper/agents/project_execution.py).
 EXECUTION_COLUMNS = (
     "task_budget_usd", "task_budget_action", "supervise_interval_seconds", "review_policy",
-    "distill_lessons", "step_workspaces", "max_step_retries", "planner_roles", "role_text_max_chars",
-    "user_gates", "gate_reminder_hours",
+    "distill_lessons", "step_workspaces", "step_workspace_links", "max_step_retries", "planner_roles",
+    "role_text_max_chars", "user_gates", "gate_reminder_hours",
 )
 
 
@@ -132,6 +132,14 @@ async def update_project(
         project_id, name, description, work_dir, background, *settings.values(),
     )
     return result == "UPDATE 1"
+
+
+async def worktree_projects(*, pool: asyncpg.Pool | asyncpg.Connection | None = None) -> list[dict[str, Any]]:
+    """The projects whose parallel steps work in worktrees of their own, by name: their default directory and links."""
+    pool = pool or get_pool()
+    rows = await pool.fetch("SELECT id, name, work_dir, step_workspace_links FROM projects "
+                            "WHERE step_workspaces = 'worktree' ORDER BY name")
+    return [dict(row) for row in rows]
 
 
 async def delete_project(project_id: str, *, pool: asyncpg.Pool | None = None) -> bool:

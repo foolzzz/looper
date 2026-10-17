@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { type CardLook, type CardSection, clipText, formatWhen, gateCard, plannerCard, resultCard, stepCard } from "@/lib/node-cards";
-import type { TaskDetail, TaskStep, UserGate } from "@/lib/api";
+import type { StepWorkspace, TaskDetail, TaskStep, UserGate } from "@/lib/api";
 
 const look = (label: string): CardLook => ({ label, border: "b", borderStyle: "solid", background: "bg", color: "c" });
 const LOOKS: Record<string, CardLook> = { verified: look("Done"), failed: look("Failed"), pending: look("Not started") };
@@ -17,14 +17,45 @@ function step(id: string, extra: Partial<TaskStep> = {}): TaskStep {
 
 const LONG = Array.from({ length: 12 }, (_, i) => `line ${i + 1} of what the Worker did`).join("\n");
 
-function cardOf(s: TaskStep, steps: TaskStep[] = [s], skippedBecause?: string) {
+function cardOf(s: TaskStep, steps: TaskStep[] = [s], skippedBecause?: string, workspaces?: StepWorkspace[]) {
   return stepCard(s, { taskId: "t1", look: LOOKS[s.status] ?? look(s.status), lookOf: (d) => LOOKS[d.status],
-                       stepsById: new Map(steps.map((d) => [d.id, d])), skippedBecause });
+                       stepsById: new Map(steps.map((d) => [d.id, d])), skippedBecause, workspaces });
 }
 const titles = (sections: CardSection[]) => sections.map((section) => section.title);
 const section = (sections: CardSection[], title: string) => sections.find((s) => s.title === title);
 
+function worktree(id: number, extra: Partial<StepWorkspace> = {}): StepWorkspace {
+  return {
+    id, step_id: "s1", step_key: "s1", branch: `looper/t1/s1-${id}`, target_branch: "main", base_commit: "b".repeat(40),
+    checkpoint: false, result_commit: null, merge_commit: null, state: "active", merge_error: null, merge_files: [],
+    detail: "", links: [], path: "/w", removed_at: null, discardable: true, ...extra,
+  };
+}
+
 describe("stepCard", () => {
+  it("shows the step's latest worktree after its runs", () => {
+    const earlier = worktree(2, { state: "discarded" });
+    const latest = worktree(3, { state: "unmerged", merge_error: "local_changes", merge_files: ["base.txt"],
+                                 checkpoint: true, links: [".venv", ".env"] });
+    const card = cardOf(step("s1", { status: "failed", worker_id: "worker-a" }), undefined, undefined, [earlier, latest]);
+    expect(titles(card.sections)).toEqual(["Runs", "Worktree", "Files in the way of the merge", "Timing"]);
+    expect(section(card.sections, "Worktree")).toEqual({ kind: "facts", title: "Worktree", facts: [
+      { label: "Branch", value: "looper/t1/s1-3" },
+      { label: "State", value: "Not merged: local_changes" },
+      { label: "From", value: "main at bbbbbbbbbbbb (checkpoint)" },
+      { label: "Why", value: "Uncommitted changes in the task directory were in the way" },
+      { label: "Linked", value: ".venv, .env" },
+      { label: "Earlier", value: "1 worktree" },
+    ] });
+    expect(section(card.sections, "Files in the way of the merge")).toMatchObject({ items: ["base.txt"], mono: true });
+    const merged = cardOf(step("s1", { status: "verified" }), undefined, undefined,
+                          [worktree(1, { state: "merged", merge_commit: "c".repeat(40) })]);
+    expect(section(merged.sections, "Worktree")).toMatchObject({ facts: [
+      { label: "Branch", value: "looper/t1/s1-1" }, { label: "State", value: "Merged as cccccccccccc" },
+      { label: "From", value: "main at bbbbbbbbbbbb" }] });
+    expect(titles(cardOf(step("s1")).sections)).not.toContain("Worktree");
+  });
+
   it("shows every part of a done step in order", () => {
     const s1 = step("s1", { status: "verified" });
     const s2 = step("s2", {
