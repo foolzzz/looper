@@ -28,7 +28,7 @@ import { Badge } from "@/components/ui/badge";
 import { ClampedText } from "@/components/clamped-text";
 import { Markdown } from "@/components/markdown";
 import { ScheduledBadge } from "@/components/scheduled-badge";
-import { historyHref } from "@/pages/agent-history";
+import { historyHref, runRoleLabel } from "@/pages/agent-history";
 import { TaskCostBreakdown } from "@/components/task-cost";
 import { ContinueAtCap, TaskSpendMeter } from "@/components/task-budget";
 import { RoleProfile, TaskAgentsSummary, TaskAgentsTab } from "@/components/task-agents-tab";
@@ -75,6 +75,7 @@ import {
   type ActivityEvent,
   type GateState,
   type UserGate,
+  type RunRole,
 } from "@/lib/api";
 
 type Tab = "overview" | "pipeline" | "agents" | "sessions" | "conversation";
@@ -780,7 +781,7 @@ function OverviewTab({
 
       <TaskFindings entries={task.journal || []} />
 
-      <AgentTimeline taskId={task.task_id} />
+      <AgentTimeline taskId={task.task_id} runRoles={task.run_roles} />
 
       <LiveActivityFeed taskId={task.task_id} isActive={isActive} />
     </div>
@@ -1091,7 +1092,8 @@ function TaskFindings({ entries: all }: { entries: JournalEntry[] }) {
 
 // --- Agent Timeline ---
 
-function AgentTimeline({ taskId }: { taskId: string }) {
+/** Each agent's events; a run as a role its task's Planner defined is named by it (`runRoles`, by agent id). */
+function AgentTimeline({ taskId, runRoles }: { taskId: string; runRoles?: Record<string, RunRole> }) {
   const [events, setEvents] = useState<ActivityEvent[]>([]);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
 
@@ -1111,8 +1113,11 @@ function AgentTimeline({ taskId }: { taskId: string }) {
   }
 
   const agentRole = (name: string) => {
+    const runRole = runRoles?.[name];
+    if (runRole) return runRoleLabel(runRole);
     if (name.startsWith("planner")) return "Planner";
     if (name.startsWith("worker")) return "Worker";
+    if (name.startsWith("reviewer")) return "Reviewer";
     if (name === "system") return "System";
     return "Agent";
   };
@@ -1165,7 +1170,7 @@ function AgentTimeline({ taskId }: { taskId: string }) {
                     </span>
                     <Bot className="h-4 w-4 shrink-0" />
                     <span className="min-w-0 break-all text-sm font-medium">{agent}</span>
-                    <Badge variant="outline" className="text-[10px] py-0 h-4">
+                    <Badge variant="outline" className={cn("text-[10px] py-0 h-4 shrink-0", runRoles?.[agent] && "font-mono")}>
                       {agentRole(agent)}
                     </Badge>
                   </div>

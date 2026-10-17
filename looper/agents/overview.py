@@ -4,7 +4,8 @@
   counted, an unknown status under ``other`` with its name.
 - **Agents running now**: whether the Manager is in a turn, the live
   Planners (TaskRouter) and the Worker and Reviewer runs, running or waiting
-  for room under their project's limit (WorkerPool).
+  for room under their project's limit (WorkerPool), each with the role its
+  task's Planner defined that it runs as, when it runs as one.
 - **Concurrency**: for each project with a task in progress, queued or
   ready, its running tasks, Workers and Reviewers against each role's limit
   there, read now (``agent_settings.load_concurrency``).
@@ -27,6 +28,7 @@ from ..db.tasks import TaskGroup
 from .agent_settings import AgentType, load_concurrency
 from .schedules import schedule_overview
 from .supervisor import AgentSupervisor
+from .task_roles import run_role
 from .tiers.manager import ManagerAgent
 from .tiers.task import TaskRouter
 from .tiers.worker import WorkerPool
@@ -94,7 +96,9 @@ async def build_overview(
     step_runs = [
         {"agent_id": r["agent_id"], "role": r["role"], "task_id": r["task_id"], "project_id": r["project_id"],
          "project_name": names.get(r["project_id"]), "step": r["step"], "instruction": r["instruction"],
-         "state": r["state"], "elapsed_seconds": max(0, int((now - r["since"]).total_seconds()))}
+         "state": r["state"], "elapsed_seconds": max(0, int((now - r["since"]).total_seconds())),
+         # The role its task's Planner defined that it runs as; a built-in role's run has none.
+         **({"task_role": role} if (role := run_role(r.get("task_role"))) else {})}
         for r in runs
     ]
 

@@ -6,7 +6,7 @@ Tells you whether a change to a recommended role prompt, a code-owned contract
 (`REPLY_CONTRACT`, `WORK_CONTRACT`, `REVIEW_CONTRACT`) or the way the system
 prompt is put together makes the agents worse.
 
-It runs twenty-one small tasks through a disposable `looper serve` (a new
+It runs twenty-two small tasks through a disposable `looper serve` (a new
 PostgreSQL database, a free port, a temporary runtime root and working
 directories), one at a time over the HTTP API:
 
@@ -27,6 +27,7 @@ directories), one at a time over the HTTP API:
 | `roles_tester_docs` | the task's project lets its Planner define roles (`planner_roles` on) and choose `eval/chosen`; a module, its tests and its usage notes, the tests by a tester role on `eval/chosen` and the notes by a doc-writer role: at least two work roles, their steps run as them on the version defined, the tester on its profile, each role run with the boundaries before its contract |
 | `roles_security_review` | the same switch; a script that must not run a shell, reviewed by the built-in Reviewer and by a security review role: the role reviews after the built-in Reviewer, and the step is accepted only with both reviews passed |
 | `roles_advisory_review` | the same switch; a greeting script reviewed by the built-in Reviewer and by an advisory review role (`review_role_required` false) that wants a CHANGELOG.md the task turns down: the role does not pass the step, the built-in Reviewer does, and the Planner decides (accept, or retry with the role's findings) |
+| `roles_multi_platform` | the same switch, and a requirement that asks for no role: one tip-of-the-day feature across a back end (`backend/tips.py`, run by the check), a web front end, an Android and an iOS client (`web/tip.js`, `android/TipClient.kt`, `ios/TipClient.swift`, no build), which must agree on an interface recorded in `api/tip_api.json`: a work role per discipline whose prompt names at least two of that platform's conventions, at least four role steps built on one interface step, at least two Workers at once, the role runs on a version defined with the boundaries before the contract, and no contract violation |
 | `roles_not_needed` | the same switch on a one-file task: the Planner defines no role and plans at most two steps |
 | `gate_ambiguous` | the task's project lets its Planner open user gates (`user_gates` on); the settings file's format, name and key are the user's choice, written down nowhere: the Planner asks at a gate, the scripted user answers (TOML, `settings.toml`, `[service]`), the gate passes, a Worker reads the conclusion and the file follows the answer |
 | `gate_not_needed` | the same switch on a one-file task: no gate, at most two steps |
@@ -46,7 +47,9 @@ and the runs as one (`role_runs`; on the role's own profile, `role_profile_runs`
 `role_reviews`; on a prompt that is no version it defined, `role_prompt_mismatches`; without the boundaries after
 the task section, `role_boundary_misses`), the accepted steps with a review role that lack a passing built-in or
 role review where the role is required (`gate_breaches`), the reviews by an advisory review role that did not pass
-(`advisory_role_fails`), the user gates the Planner opened (`gates_opened`; their [GATE] turns, `gate_turns`;
+(`advisory_role_fails`), the disciplines of a task that names them with a work role of their own whose prompt
+names at least two of the discipline's conventions (`discipline_roles`), the most steps run as a work role that
+depend on one same step (`interface_dependents`), the user gates the Planner opened (`gates_opened`; their [GATE] turns, `gate_turns`;
 passed, `gates_passed`, of them ended by the user, `gates_ended_by_user`; cancelled, `gates_cancelled`; the
 assumptions their summaries stated, `assumptions_stated`; the steps the closing turns added, dropped or stopped,
 `gate_plan_changes`; Worker runs while a gate waited, `gate_parallel_runs`; Worker and Reviewer runs that read a

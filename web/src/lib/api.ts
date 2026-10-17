@@ -193,6 +193,8 @@ export interface LiveStepRun {
   state: "running" | "waiting";
   /** How long it has been running, or waiting. */
   elapsed_seconds: number;
+  /** The role its task's Planner defined that it runs as; absent for a built-in role's run. */
+  task_role?: RunRole;
 }
 
 /** How many of one role run (and wait) in a project, against its limit there. */
@@ -343,6 +345,8 @@ export interface ChatTargetInfo {
   step_index?: number | null;
   instruction?: string;
   started_at?: string;
+  /** Worker/Reviewer: the role its task's Planner defined that it ran as; absent for a built-in role's run. */
+  task_role?: RunRole;
 }
 
 export async function fetchChatTargets(): Promise<ChatTargetInfo[]> {
@@ -1378,6 +1382,8 @@ export interface TaskDetail extends TaskInfo {
   builtin_role_stats: { worker: RoleStats; reviewer: RoleStats };
   /** The user gates of its plan, in plan order; their discussions are at `fetchGateThread`. */
   gates: UserGate[];
+  /** The role each Worker and Reviewer run that ran as one ran as, by agent id; absent in a task without such runs. */
+  run_roles?: Record<string, RunRole>;
 }
 
 /** Where a user gate stands: "pending" until its dependencies are done, "open" (waiting for the user's first word),
@@ -1518,6 +1524,13 @@ export interface RoleStats {
   retries: number;
   reviews: { passed: number; not_passed: number };
   review_pass_rate: number | null;
+}
+
+/** The role a Worker or Reviewer run ran as: one its task's Planner defined, at the version the run started with. */
+export interface RunRole {
+  id: string;
+  kind: "work" | "review";
+  version: number;
 }
 
 /** A role a task's Planner defined: "work" runs a step in the built-in Worker's place; "review" reviews a step
@@ -1771,7 +1784,7 @@ export interface PromptLayers {
   task?: { kind: "plan" | "work" | "review"; task_id: string | null; step_id: string | null; sha256: string } | null;
   contract?: { name: string; sha256: string };
   /** A run as a role its task's Planner defined: that role, at the version the run started with. */
-  task_role?: { id: string; kind: "work" | "review"; version: number };
+  task_role?: RunRole;
   /** The flag set that kept the operator's personal Claude Code configuration out of the run. */
   isolation?: string;
 }
@@ -1860,6 +1873,8 @@ export interface LlmRecord {
   finished_at: string | null;
   /** Heartbeat: last time the run produced any output. */
   last_output_at: string | null;
+  /** A Worker or Reviewer run as a role its task's Planner defined; absent for a built-in role's run. */
+  task_role?: RunRole;
 }
 
 /** The Agent Profile a run used: `metadata.profile`, or `metadata.agent` on a run recorded before Agent Profiles were

@@ -197,6 +197,7 @@ def store(monkeypatch: pytest.MonkeyPatch) -> _Store:
 
     monkeypatch.setattr(user_gates, "list_for_task", AsyncMock(return_value=[]))
     monkeypatch.setattr(db_llm_records, "role_runs", AsyncMock(return_value=[]))
+    monkeypatch.setattr(db_llm_records, "list_task_runs", AsyncMock(return_value=[]))
     return fake
 
 

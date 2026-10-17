@@ -1083,13 +1083,15 @@ class TestWorkerKill:
         assert result["published"] is False  # a killed worker publishes no WORK_RESULT
 
 
-def _run_item(worker_id: str, task_id: str, work_dir: Path, *, review: bool = False) -> MessageEnvelope:
-    """A WORK_ITEM (or, with ``review``, a VERIFY_REQUEST) of task ``task_id``'s Planner."""
+def _run_item(worker_id: str, task_id: str, work_dir: Path, *, review: bool = False,
+              task_role: dict[str, Any] | None = None) -> MessageEnvelope:
+    """A WORK_ITEM (or, with ``review``, a VERIFY_REQUEST) of task ``task_id``'s Planner; with ``task_role``, of a
+    step that runs as that role."""
     return MessageEnvelope.create(
         source=planner_address(task_id), target=worker_address(worker_id),
         message_type=MessageType.VERIFY_REQUEST if review else MessageType.WORK_ITEM,
         payload={"task_id": f"step-{worker_id}", "parent_task_id": task_id, "instruction": "add the parser",
-                 "context": {"work_dir": str(work_dir)}},
+                 "context": {"work_dir": str(work_dir)}, **({"task_role": task_role} if task_role else {})},
     )
 
 
@@ -1187,6 +1189,34 @@ class TestWorkerConcurrency:
 
         statuses = asyncio.run(_run())
         assert sorted(statuses.values()) == ["pending"] * (6 - running) + ["running"] * running
+
+    def test_a_run_as_a_role_names_it_while_it_waits_and_a_built_in_run_names_none(self, agent_db: Any) -> None:
+        self._projects(agent_db, {"t-a": "proj-a"})
+        self._limits(agent_db, worker=1)
+        role = {"id": "fe_rd", "kind": "work", "version": 2, "role_prompt": "You build the web front end.",
+                "harness": None, "profile_id": None}
+
+        async def _run() -> dict[str, tuple[str, Any]]:
+            with tempfile.TemporaryDirectory() as tmp:
+                bus = MessageBus(runtime_root=Path(tmp))
+                pool = WorkerPool(config=WorkerConfig(claude_bin=_fake_claude(Path(tmp), _LISTENING_CLAUDE)),
+                                  runtime_root=Path(tmp))
+                await pool.start(bus)
+                await asyncio.sleep(0)
+                await bus.publish(_run_item("w1", "t-a", Path(tmp)))
+                await self._until_running(pool, "w1")
+                await bus.publish(_run_item("w2", "t-a", Path(tmp), task_role=role))
+                for _ in range(50):  # w2 has checked its limit and waits
+                    if pool._slot_waiters:
+                        break
+                    await asyncio.sleep(0.02)
+                runs = {r["agent_id"]: (r["state"], r["task_role"]) for r in pool.runs()}
+                await pool.stop()
+                await bus.shutdown()
+                return runs
+
+        assert asyncio.run(_run()) == {"w1": ("running", None),
+                                       "w2": ("waiting", {"id": "fe_rd", "kind": "work", "version": 2})}
 
     def test_a_raised_limit_starts_a_waiting_run_and_a_lowered_one_stops_none(self, agent_db: Any) -> None:
         self._projects(agent_db, {"t-a": "proj-a"})

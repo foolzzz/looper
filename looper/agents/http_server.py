@@ -29,6 +29,7 @@ from .project_execution import ProjectExecution
 from .channels.web import WebChannelAdapter
 from .scheduler import Scheduler
 from .supervisor import AgentSupervisor
+from .task_roles import record_role, run_roles
 from .tiers.journal import progress_notes
 from .ops.planner import PlannerOps
 from .ops.service import ManagerOps
@@ -103,6 +104,13 @@ def _json_response(status: str, body: Any) -> bytes:
 def _no_content() -> bytes:
     # Same-origin requests never preflight, so an allowed OPTIONS gets no CORS headers.
     return b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n"
+
+
+def _with_run_role(record: dict[str, Any]) -> dict[str, Any]:
+    """An ``llm_records`` row with ``task_role`` (``{id, kind, version}``) when its run ran as a role its task's
+    Planner defined; a built-in role's run is as it was."""
+    role = record_role(record)
+    return {**record, "task_role": role} if role else record
 
 
 class AgentHTTPServer:
@@ -1198,13 +1206,14 @@ class AgentHTTPServer:
     ) -> None:
         try:
             from ..db.agent_setting_layers import profile_overrides
-            from ..db.llm_records import task_costs
+            from ..db.llm_records import list_task_runs, task_costs
             from ..db.tasks import get_task_with_steps
             from ..db.manager_actions import for_task as manager_actions
             from ..db.task_changes import requirement_versions
             from .task_roles import roles_view
             raw = await get_task_with_steps(task_id)
             cost = (await task_costs([task_id]))[task_id] if raw else None
+            ran_as = run_roles(await list_task_runs([task_id]), raw.get("steps", [])) if raw else {}
             overrides = await profile_overrides(task_id) if raw else {}
             versions = await requirement_versions(task_id) if raw else []
             actions = await manager_actions(task_id) if raw else []
@@ -1257,6 +1266,9 @@ class AgentHTTPServer:
             # The user gates of its plan, in plan order: state, agenda, findings, how each closed, and whom each
             # waiting one waits for (gate_service.gate_view); their discussions are at .../gates/<step>/messages.
             "gates": gates,
+            # The role each Worker and Reviewer run that ran as one ran as, by agent id (task_roles.run_roles); only
+            # in a task with such runs.
+            **({"run_roles": ran_as} if ran_as else {}),
             "origin_channel_id": raw.get("origin_channel_id", ""),
             "result_summary": raw.get("result_summary"),
             "error": raw.get("error"),
@@ -1588,7 +1600,7 @@ class AgentHTTPServer:
         if record is None:
             writer.write(_json_response(HTTP_404, {"error": f"llm record {record_id} not found"}))
         else:
-            writer.write(_json_response(HTTP_200, {"record": record}))
+            writer.write(_json_response(HTTP_200, {"record": _with_run_role(record)}))
         await writer.drain()
 
     async def _handle_llm_record_events(
@@ -1648,7 +1660,7 @@ class AgentHTTPServer:
             )
         except Exception:
             records = []
-        writer.write(_json_response(HTTP_200, {"records": records}))
+        writer.write(_json_response(HTTP_200, {"records": [_with_run_role(record) for record in records]}))
         await writer.drain()
 
     # --- Configuration export ---

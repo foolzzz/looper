@@ -111,8 +111,11 @@ async def _overview(call: Call) -> dict[str, Any]:
         "running_tasks": [{"task_id": p["task_id"], "name": p["name"], "project": p["project_name"],
                            **({"concurrency": own[p["task_id"]]} if p["task_id"] in own else {})}
                           for p in agents["planners"]],
-        "step_runs": [{"task_id": r["task_id"], "role": r["role"], "step": r["step"], "state": r["state"],
-                       "elapsed_seconds": r["elapsed_seconds"]} for r in agents["workers"] + agents["reviewers"]],
+        # A run as a role its task's Planner defined names it (task_role, the role's id).
+        "step_runs": [{"task_id": r["task_id"], "role": r["role"],
+                       **({"task_role": r["task_role"]["id"]} if r.get("task_role") else {}), "step": r["step"],
+                       "state": r["state"], "elapsed_seconds": r["elapsed_seconds"]}
+                      for r in agents["workers"] + agents["reviewers"]],
         "projects": view["projects"],
         "spend_today": view["spend_today"],
         "unhealthy": view["health"]["unhealthy"],

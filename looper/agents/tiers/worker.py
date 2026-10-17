@@ -54,7 +54,7 @@ from ..run_usage import run_usage
 from ..knowledge import documents_label, load_knowledge
 from ..library import items_label, load_installed
 from ..runtimes import RuntimeAdapter
-from ..task_roles import TaskRole
+from ..task_roles import TaskRole, run_role
 from ..message import (
     AgentAddress,
     MessageEnvelope,
@@ -315,6 +315,7 @@ class WorkerProcess:
     instruction: str = ""
     project_id: str | None = None  # whose limit it counts against, once read
     since: datetime = field(default_factory=lambda: datetime.now(timezone.utc))  # when it began to wait, then to run
+    task_role: dict[str, Any] | None = None  # the role its dispatch names (``task_roles.run_role``); None: built-in
 
 
 class WorkerPool:
@@ -576,6 +577,7 @@ class WorkerPool:
             parent_task_id=parent_task_id,
             step=str(payload.get("step_key") or ""),
             instruction=str(payload.get("instruction") or ""),
+            task_role=run_role(payload.get("task_role")),
         )
         self._active[worker_id] = wp
 
@@ -1060,12 +1062,12 @@ class WorkerPool:
 
     def runs(self) -> list[dict[str, Any]]:
         """The Worker and Reviewer runs now, each ``running`` or ``waiting`` (for room under its project's or its
-        task's limit), with its role, task, step, project (None until it is read) and ``since``: when it began that
-        state."""
+        task's limit), with its role (and ``task_role``, the role its task's Planner defined that it runs as, or
+        None), task, step, project (None until it is read) and ``since``: when it began that state."""
         states = {"pending": "waiting", "running": "running"}  # a finished run is reporting its result
         return [
-            {"agent_id": wp.worker_id, "role": wp.role.value, "task_id": wp.parent_task_id, "step_id": wp.task_id,
-             "step": wp.step, "instruction": wp.instruction, "project_id": wp.project_id,
+            {"agent_id": wp.worker_id, "role": wp.role.value, "task_role": wp.task_role, "task_id": wp.parent_task_id,
+             "step_id": wp.task_id, "step": wp.step, "instruction": wp.instruction, "project_id": wp.project_id,
              "state": states[wp.status], "since": wp.since}
             for wp in self._active.values() if wp.status in states
         ]

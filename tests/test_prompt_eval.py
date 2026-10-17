@@ -153,6 +153,68 @@ def test_bracketed_pairs_need_a_shared_step_before_and_a_step_after(depends_on: 
     assert metrics.bracketed_pairs(steps) == pairs
 
 
+@pytest.mark.parametrize(("steps", "dependents"), [
+    # An interface step every platform step (each as its role) depends on, and an integration after them.
+    ({"api": ([], None), "be": (["api"], "backend_rd"), "web": (["api"], "fe_rd"), "and": (["api"], "android_rd"),
+      "check": (["be", "web", "and"], None)}, 3),
+    # The back end pins the interface itself: the clients depend on it, the back end on nothing.
+    ({"be": ([], "backend_rd"), "web": (["be"], "fe_rd"), "and": (["be"], "android_rd")}, 2),
+    ({"be": ([], "backend_rd"), "web": ([], "fe_rd")}, 0),  # nothing shared
+    ({"api": ([], None), "be": (["api"], None), "web": (["api"], None)}, 0),  # no step runs as a role
+], ids=["interface step", "back end first", "flat", "no roles"])
+def test_interface_dependents_count_the_role_steps_built_on_one_step(steps: dict[str, Any], dependents: int) -> None:
+    rows = [{"id": step_id, "depends_on": needs, "role_key": role, "status": "verified"}
+            for step_id, (needs, role) in steps.items()]
+    assert metrics.interface_dependents(rows) == dependents
+    assert metrics.interface_dependents([{**row, "status": "skipped"} for row in rows]) == 0
+
+
+def test_a_discipline_counts_once_it_has_a_role_of_its_own_that_names_its_conventions() -> None:
+    web = metrics.Discipline("web", ("web", "fe"), ("fetch", "dom", "es module"))
+    ios = metrics.Discipline("ios", ("ios",), ("swift", "codable", "struct"))
+
+    def role(role_id: str, prompt: str, kind: str = "work") -> dict[str, str]:
+        return {"id": role_id, "kind": kind, "role_prompt": prompt}
+
+    strong = [role("fe_rd", "An ES module that uses fetch."), role("ios_rd", "Swift: a Codable struct.")]
+    assert metrics.discipline_roles(strong, (web, ios)) == 2
+    assert metrics.discipline_roles([role("fe_rd", "Write the web client.")], (web, ios)) == 0  # no convention
+    assert metrics.discipline_roles([role("fe_rd", "Uses fetch.")], (web,)) == 0  # one is not enough
+    assert metrics.discipline_roles([role("fe_ios_rd", "fetch, the DOM; Swift, Codable")], (web, ios)) == 0
+    assert metrics.discipline_roles([role("fe_review", "fetch and the DOM", "review")], (web,)) == 0
+    assert metrics.discipline_roles(strong, ()) == 0
+
+
+def test_the_multi_platform_check_reads_the_interface_the_parts_must_agree_on(tmp_path: Path) -> None:
+    from evals.prompt_regression.tasks import TASKS
+
+    task = next(t for t in TASKS if t.id == "roles_multi_platform")
+    for name, content in {**task.files, **{n: c for a in task.fake["attempts"].values() for n, c in a[0]["files"].items()}
+                          }.items():
+        (tmp_path / name).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / name).write_text(content, encoding="utf-8")
+    assert task.check(tmp_path) is None
+    interface = tmp_path / "api" / "tip_api.json"
+    interface.write_text('{"path": "/api/tip", "query": "day", "fields": {"day": "int", "tip": "string"}}')
+    assert task.check(tmp_path) is None  # the fields with their types
+    # A contract without its path, its query parameter or its fields fails, in either form of the fields.
+    lacking = "api/tip_api.json does not give a path, a query parameter and the response fields"
+    for fields in (["day", "tip"], {"day": "int", "tip": "string"}):
+        for drop in ("path", "query", "fields"):
+            contract = {key: value for key, value in {"path": "/api/tip", "query": "day", "fields": fields}.items()
+                        if key != drop}
+            interface.write_text(json.dumps(contract))
+            assert task.check(tmp_path) == lacking, (fields, drop)
+        for empty in ("path", "query", "fields"):
+            interface.write_text(json.dumps({"path": "/api/tip", "query": "day", "fields": fields,
+                                             empty: type({"path": "", "query": "", "fields": fields}[empty])()}))
+            assert task.check(tmp_path) == lacking, (fields, empty)
+    interface.write_text('{"path": "/api/tip", "query": "day", "fields": ["day", "tip", "author"]}')
+    assert task.check(tmp_path) == "handle(/api/tip?day=3) answered 200 with ['day', 'tip']"
+    interface.write_text('{"path": "/api/tip", "query": "d", "fields": ["day", "tip"]}')
+    assert "answered 404" in task.check(tmp_path)
+
+
 def test_a_final_summary_needs_every_field_heading() -> None:
     full = "## Delivered\na\n\n## How to use\nb\n\n## Verification\nc\n\n## Open issues\nnone"
     assert metrics.final_summary({"result_summary": full}) == 1
@@ -201,10 +263,10 @@ def test_task_metrics_read_the_flow_cost_and_violations(tmp_path: Path) -> None:
                                              "fenced block); asking again"}]
     result = metrics.task_metrics(
         detail=detail, activity=activity, records=records, events=events, changes={}, work_dir=tmp_path,
-        check_problem=None, expect={"min_retries": 1, "min_reviews": 2}, now=0.0,
+        check_problem=None, expect={"min_retries": 1, "min_reviews": 2, "max_contract_violations": 1}, now=0.0,
     )
     assert result["success"] is False
-    assert result["problems"] == ["reviews 1 < 2"]
+    assert result["problems"] == ["reviews 1 < 2", "contract_violations 2 > 1"]
     assert (result["steps"], result["retries"], result["reviews"], result["chat_turns"]) == (1, 1, 1, 1)
     assert result["planner_turns"] == {"plan": 1, "repair": 1, "decision": 1, "chat": 1}
     assert result["contract_violations"] == {"planner": 1, "worker": 1, "reviewer": 0, "total": 2}
@@ -609,7 +671,8 @@ def test_fake_mode_runs_every_task_and_sees_misbehaviour(tmp_path: Path) -> None
                     "supplement_no_change": (2, 0, 0, 1), "profile_choice": (1, 0, 0, 0),
                     # The security review role reviews its step after the built-in Reviewer.
                     "roles_tester_docs": (3, 0, 0, 0), "roles_security_review": (1, 0, 2, 0),
-                    "roles_advisory_review": (1, 0, 2, 0), "roles_not_needed": (1, 0, 0, 0),
+                    "roles_advisory_review": (1, 0, 2, 0), "roles_multi_platform": (6, 0, 0, 0),
+                    "roles_not_needed": (1, 0, 0, 0),
                     # A gate is a step; the steps its closing turn added follow it.
                     "gate_ambiguous": (2, 0, 0, 0), "gate_not_needed": (1, 0, 0, 0), "gate_end_early": (2, 0, 0, 0),
                     "gate_parallel_branch": (3, 0, 0, 0), "gate_discoverable": (2, 0, 0, 0)}
@@ -626,6 +689,8 @@ def test_fake_mode_runs_every_task_and_sees_misbehaviour(tmp_path: Path) -> None
                      "supplement_no_change": (0, 0, 1), "profile_choice": (0, 0, 1),
                      "roles_tester_docs": (1, 0, 2), "roles_security_review": (0, 0, 1),
                      "roles_advisory_review": (0, 0, 1), "roles_not_needed": (0, 0, 1),
+                     # Its four platform steps run side by side between the interface step and the check.
+                     "roles_multi_platform": (6, 6, 4),
                      "gate_ambiguous": (0, 0, 1), "gate_not_needed": (0, 0, 1), "gate_end_early": (0, 0, 1),
                      # The clear part runs beside the gate and then beside the step the gate's answer planned.
                      "gate_parallel_branch": (2, 0, 2), "gate_discoverable": (0, 0, 1)}
@@ -641,7 +706,14 @@ def test_fake_mode_runs_every_task_and_sees_misbehaviour(tmp_path: Path) -> None
                                              "advisory_role_fails"))
              for t in by_id if by_id[t]["roles_defined"] or by_id[t]["role_runs"]}
     assert roles == {"roles_tester_docs": (2, 2, 1, 0, 0, 0, 0, 0), "roles_security_review": (1, 1, 0, 1, 0, 0, 0, 0),
-                     "roles_advisory_review": (1, 1, 0, 1, 0, 0, 0, 1)}
+                     "roles_advisory_review": (1, 1, 0, 1, 0, 0, 0, 1),
+                     "roles_multi_platform": (4, 4, 0, 0, 0, 0, 0, 0)}
+    # Only the multi-platform task's disciplines each get a role that names their conventions, and its four
+    # platform steps are built on its interface step (the tester's and the doc writer's on the module).
+    assert {t: by_id[t]["discipline_roles"] for t in by_id if by_id[t]["discipline_roles"]} == {
+        "roles_multi_platform": 4}
+    assert {t: by_id[t]["interface_dependents"] for t in by_id if by_id[t]["interface_dependents"]} == {
+        "roles_tester_docs": 2, "roles_multi_platform": 4}
     # Only the gate tasks open gates. The scripted user answers (or ends the discussion), the gate passes on what was
     # settled (or assumed), and the step it planned reads the conclusion; the step that finds the port cancels the
     # gate that waits on it before it opens, so no gate asked.
