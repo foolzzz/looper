@@ -132,11 +132,10 @@ export async function fetchStatus(): Promise<SystemStatus> {
 }
 
 /** What a task's status means at a glance; the server maps each status to one (an unknown one to "other"). */
-export type TaskGroup = "in_progress" | "queued" | "ready" | "attention" | "completed" | "cancelled" | "other";
+export type TaskGroup = "in_progress" | "ready" | "attention" | "completed" | "cancelled" | "other";
 
 export const TASK_GROUPS: { id: TaskGroup; label: string }[] = [
   { id: "in_progress", label: "In progress" },
-  { id: "queued", label: "Queued" },
   { id: "ready", label: "Ready" },
   { id: "attention", label: "Needs attention" },
   { id: "completed", label: "Completed" },
@@ -148,9 +147,9 @@ export function isTaskGroup(value: string | null): value is TaskGroup {
   return TASK_GROUPS.some((g) => g.id === value);
 }
 
-/** A task whose Planner runs or waits for room: it can be stopped, and must be before it is deleted. */
+/** A task whose Planner runs or is starting: it can be stopped, and must be before it is deleted. */
 export function isActiveTask(task: Pick<TaskInfo, "group">): boolean {
-  return task.group === "in_progress" || task.group === "queued";
+  return task.group === "in_progress";
 }
 
 /** A Planner running now: one per task in progress. */
@@ -164,7 +163,7 @@ export interface LivePlanner {
   name: string;
 }
 
-/** A Worker or Reviewer run now, running or waiting for room under its project's limit. */
+/** A Worker or Reviewer run now, running or waiting for room under its task's limit. */
 export interface LiveStepRun {
   agent_id: string;
   role: "worker" | "reviewer";
@@ -181,11 +180,10 @@ export interface LiveStepRun {
   task_role?: RunRole;
 }
 
-/** How many of one role run (and wait) in a project, against its limit there. */
+/** How many of one role run in a project, and how many wait for their task's limit. */
 export interface RoleLoad {
   running: number;
   waiting: number;
-  limit: number;
 }
 
 /** `GET /api/overview`: what is happening now. */
@@ -213,11 +211,11 @@ export interface Overview {
     workers: LiveStepRun[];
     reviewers: LiveStepRun[];
   };
-  /** The projects with a task in progress, queued or ready. */
+  /** The projects with a task in progress or ready. */
   projects: {
     project_id: string;
     name: string;
-    tasks: { running: number; queued: number; ready: number; limit: number };
+    tasks: { running: number; ready: number };
     workers: RoleLoad;
     reviewers: RoleLoad;
   }[];
@@ -485,7 +483,7 @@ export async function startTask(taskId: string, { startOver = false }: { startOv
   if (!res.ok) await failed(res, "start");
 }
 
-/** Start a ready task; it waits while its project runs as many tasks as its limit. Fails unless the task is ready. */
+/** Start a ready task; it runs at once. Fails unless the task is ready. */
 export async function startReadyTask(taskId: string): Promise<void> {
   const res = await fetch(`${API_BASE}/tasks/${encodeURIComponent(taskId)}/start`, { method: "POST" });
   if (!res.ok) await failed(res, "start");
@@ -764,6 +762,8 @@ export interface ScheduleInfo {
   run_budget_usd: number | null;
   /** The Agent Profile of some of a run's roles; {} = none. */
   profile_overrides: Partial<Record<TaskRole, string>>;
+  /** The Worker and Reviewer limits each run's task gets as its own. */
+  task_limits: ScheduleTaskLimits;
   /** A new schedule starts disabled. */
   enabled: boolean;
   /** Null while disabled. */
@@ -791,6 +791,9 @@ export interface ScheduleInfo {
   alerts: { failures_since: string | null; stale_since: string | null };
 }
 
+/** How many Workers and Reviewers run at once in each task a schedule creates; null = the default (Settings → Roles). */
+export type ScheduleTaskLimits = Record<TaskLimitRole, number | null>;
+
 export interface ScheduleLimits {
   name_max_chars: number;
   requirement_max_chars: number;
@@ -805,8 +808,8 @@ export interface ScheduleLimits {
   gate_timeout_max_seconds: number;
   /** The most runs of a parallel schedule in progress at once. */
   max_parallel_runs_limit: number;
-  /** In a project's listing: how many tasks its Planner limit runs at once; a parallel schedule's runs past it wait. */
-  planner_limit?: number;
+  /** The most a task limit (`task_limits`) may be. */
+  concurrency_max: number;
   /** Empty: no channel has a sender to send to. */
   notify_targets: ScheduleNotifyTargetOption[];
 }
@@ -834,6 +837,8 @@ export interface ScheduleFields {
   run_timeout_seconds?: number | null;
   run_budget_usd?: number | null;
   profile_overrides?: Partial<Record<TaskRole, string>>;
+  /** Replaces the schedule's limits, a role left out being null; null clears both. */
+  task_limits?: Partial<ScheduleTaskLimits> | null;
   /** "" or null clears it. */
   gate_command?: string | null;
   gate_timeout_seconds?: number | null;
@@ -1275,34 +1280,37 @@ export async function editTaskRequirement(taskId: string, requirement: string): 
   if (!res.ok) await failed(res, "edit requirement");
 }
 
-/** The roles a task can limit for itself; how many of a project's tasks run at once (the Planner's) is the project's. */
+/** The roles with a limit in each task: how many of them run at once there. */
 export type TaskLimitRole = "worker" | "reviewer";
 
-/** A Worker's or Reviewer's limit in one task: what applies (`value`, `source`), the task's own (null: none) and the
- * project's. The lower of the task's own and the project's applies. */
+/** A Worker's or Reviewer's limit in one task: what applies (`value`; `source` "task", "role" or "builtin"), the
+ * task's own (null: none) and the default that applies without it (Settings → Roles, else built-in). */
 export interface TaskRoleConcurrency extends Sourced<number> {
   task: number | null;
-  project: Sourced<number>;
+  default: Sourced<number>;
 }
 
-/** One task role's Agent Profile (source "task": the task chose it) and how many run at once. */
-export interface TaskRoleAgents<C extends Sourced<number> = Sourced<number>> {
+/** One task role's Agent Profile (source "task": the task chose it). */
+export interface TaskRoleAgents {
   profile: Sourced<EffectiveProfile>;
-  concurrency: C;
 }
 
-/** Each task role's Agent Profile and concurrency for one task, with where each comes from. */
+/** A Worker's or Reviewer's: also how many run at once in the task. */
+export interface TaskLimitedRoleAgents extends TaskRoleAgents {
+  concurrency: TaskRoleConcurrency;
+}
+
+/** Each task role's Agent Profile, and the Worker's and Reviewer's limits, for one task, with where each comes from. */
 export interface TaskAgents {
-  /** The most a concurrency limit may be. */
+  /** The most the task's own limit may be (it is not capped by anything else). */
   concurrency_max: number;
   /** False once the task has completed: its choices are shown, not changed. A failed, stopped or cancelled task
    * still changes them, and its restart runs with them. */
   editable: boolean;
   roles: {
-    /** Its concurrency is the project's: how many of its tasks run at once. */
     planner: TaskRoleAgents;
-    worker: TaskRoleAgents<TaskRoleConcurrency>;
-    reviewer: TaskRoleAgents<TaskRoleConcurrency>;
+    worker: TaskLimitedRoleAgents;
+    reviewer: TaskLimitedRoleAgents;
   };
 }
 
@@ -1358,7 +1366,8 @@ export interface TaskDetail extends TaskInfo {
   supplements?: Supplement[];
   /** What the Manager did to the task through its tools, newest first. */
   manager_actions?: ManagerAction[];
-  /** Each task role's Agent Profile and concurrency, with where each comes from; null when it cannot be read. */
+  /** Each task role's Agent Profile, and the Worker's and Reviewer's limits, with where each comes from; null when it
+   * cannot be read. */
   agents: TaskAgents | null;
   /** The roles the task's Planner defined for its steps, in the order it first defined them. */
   roles: PlannerRole[];
@@ -2133,8 +2142,8 @@ export interface LayerValues {
   env: LayerEnvEntry[];
   /** `--max-budget-usd` on each Claude Code process. */
   run_budget_usd: number | null;
-  /** How many of the role run at once in one project (the Planner: its tasks); only a Planner, Worker or Reviewer
-   * role layer, or that role's layer in a project, sets it. */
+  /** How many of the role run at once in each task that sets none of its own; only the Worker's and the Reviewer's
+   * layer in Settings → Roles sets it (null at every other layer). */
   max_concurrency: number | null;
   /** What every run of a role a task's Planner defines ends with; only the system layer sets it (null: the
    * built-in boundaries). */
@@ -2168,7 +2177,8 @@ export interface EffectiveSettings {
   env: ({ key: string } & Sourced<string>)[];
   /** null = no cap. */
   run_budget_usd: Sourced<number | null>;
-  /** The Planner's, Workers' and Reviewers' limit per project; absent for the Manager and the system layer. */
+  /** The Workers' and Reviewers' default limit per task (source "role" or "builtin"), in Settings → Roles only;
+   * absent for the other roles, the system layer and in a project. */
   max_concurrency?: Sourced<number>;
 }
 

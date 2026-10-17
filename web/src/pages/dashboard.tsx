@@ -16,7 +16,7 @@ import { formatUsd } from "@/lib/usage";
 import { cn } from "@/lib/utils";
 
 /** The groups always counted; "Cancelled" and "Other" show only when they hold a task. */
-const ALWAYS_SHOWN: TaskGroup[] = ["in_progress", "queued", "ready", "attention", "completed"];
+const ALWAYS_SHOWN: TaskGroup[] = ["in_progress", "ready", "attention", "completed"];
 
 const linkClass =
   "rounded-sm hover:text-primary hover:underline underline-offset-2 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring";
@@ -189,23 +189,19 @@ function Agents({ agents }: { agents: Overview["agents"] }) {
 
 function Load({
   label,
-  load,
-  waiting,
+  running,
+  waiting = 0,
   extra,
 }: {
   label: string;
-  load: { running: number; limit: number };
-  waiting: number;
+  running: number;
+  waiting?: number;
   extra?: string;
 }) {
-  const full = load.running >= load.limit;
   return (
     <span className="whitespace-nowrap tabular-nums">
       <span className="text-muted-foreground">{label} </span>
-      <span className={cn(full && "text-warning")}>
-        {load.running}/{load.limit}
-      </span>
-      {full && <span className="text-warning"> full</span>}
+      {running}
       {waiting > 0 && <span className="text-muted-foreground"> · {waiting} waiting</span>}
       {extra && <span className="text-muted-foreground"> · {extra}</span>}
     </span>
@@ -214,9 +210,9 @@ function Load({
 
 function Concurrency({ projects, idle }: { projects: Overview["projects"]; idle: number }) {
   return (
-    <Section title="Concurrency by project" meta="running / limit">
+    <Section title="Running by project" meta="running now">
       {projects.length === 0 ? (
-        <p className="text-sm text-muted-foreground">No project has a task in progress, queued or ready.</p>
+        <p className="text-sm text-muted-foreground">No project has a task in progress or ready.</p>
       ) : (
         <ul className="divide-y divide-border">
           {projects.map((p) => (
@@ -224,9 +220,9 @@ function Concurrency({ projects, idle }: { projects: Overview["projects"]; idle:
               <a href={`#projects/${encodeURIComponent(p.project_id)}`} className={cn("min-w-0 max-w-full truncate font-medium sm:w-40", linkClass)}>
                 {p.name}
               </a>
-              <Load label="tasks" load={p.tasks} waiting={p.tasks.queued} extra={p.tasks.ready ? `${p.tasks.ready} ready` : undefined} />
-              <Load label="workers" load={p.workers} waiting={p.workers.waiting} />
-              <Load label="reviewers" load={p.reviewers} waiting={p.reviewers.waiting} />
+              <Load label="tasks" running={p.tasks.running} extra={p.tasks.ready ? `${p.tasks.ready} ready` : undefined} />
+              <Load label="workers" running={p.workers.running} waiting={p.workers.waiting} />
+              <Load label="reviewers" running={p.reviewers.running} waiting={p.reviewers.waiting} />
             </li>
           ))}
         </ul>

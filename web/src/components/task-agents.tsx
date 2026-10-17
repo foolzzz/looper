@@ -29,21 +29,14 @@ const PROFILE_SOURCES: Partial<Record<SettingSource, string>> = {
   role_project: "this role in the project",
 };
 
-/** Where a project's limit comes from, in words. */
-const PROJECT_SOURCES: Partial<Record<SettingSource, string>> = {
+/** Where a Worker's or Reviewer's limit in the task comes from, in words: its own, else the default. */
+const LIMIT_SOURCES: Partial<Record<SettingSource, string>> = {
+  task: "this task",
+  role: "Settings → Roles default",
   builtin: "built-in default",
-  role: "the role in Settings → Roles",
-  role_project: "set in the project",
 };
 
-const projectLimit = (limit: Sourced<number>) => `the project's limit (${PROJECT_SOURCES[limit.source] ?? limit.source})`;
-
-/** Why this limit applies to the task: its own, the project's, or the project's lower one over the task's own. */
-function limitText(limit: TaskRoleConcurrency) {
-  if (limit.source === "task") return "this task's own limit";
-  if (limit.task != null) return `${projectLimit(limit.project)} applies: the task's own ${limit.task} is higher`;
-  return projectLimit(limit.project);
-}
+const limitText = (limit: TaskRoleConcurrency) => LIMIT_SOURCES[limit.source] ?? limit.source;
 
 /** A role's Agent Profile chosen in the task rather than by a settings layer: by the user, or by its Planner. */
 const CHOSEN: Partial<Record<SettingSource, string>> = {
@@ -255,7 +248,7 @@ function LimitField({
           inputMode="numeric"
           value={text}
           onChange={(e) => setDraft(e.target.value)}
-          placeholder={`Project's: ${limit.project.value}`}
+          placeholder={`Default: ${limit.default.value}`}
           aria-invalid={!!error}
           aria-describedby={`${id}-now ${hintId}${error ? ` ${id}-error` : ""}`}
           className="h-11 w-36 sm:h-9"
@@ -276,19 +269,16 @@ function LimitField({
 }
 
 /**
- * The task's agents, one row per role: the Agent Profile that runs it and how many run at once, each with where it
- * comes from. A task that has not completed (a restart runs a failed, stopped or cancelled one with them) chooses its
- * own profile per role and its own Worker and Reviewer limits, within the project's; the Planner's limit (how many
- * of the project's tasks run at once) is the project's.
+ * The task's agents, one row per role: the Agent Profile that runs it and, for the Worker and the Reviewer, how many
+ * run at once in the task, each with where it comes from. A task that has not completed (a restart runs a failed,
+ * stopped or cancelled one with them) chooses its own profile per role and its own Worker and Reviewer limits.
  */
 export function TaskAgentsSection({
   taskId,
-  projectId,
   agents,
   onSaved,
 }: {
   taskId: string;
-  projectId: string;
   agents: TaskAgents;
   onSaved: (agents: TaskAgents) => void;
 }) {
@@ -312,21 +302,7 @@ export function TaskAgentsSection({
                 editable={editable}
                 onSaved={onSaved}
               />
-              {role === "planner" ? (
-                <div className="space-y-1">
-                  <p className={LABEL}>Tasks at once in this project</p>
-                  <Now>
-                    <Value>{roles.planner.concurrency.value}</Value> · {projectLimit(roles.planner.concurrency)}
-                  </Now>
-                  <p className="text-[11px] text-muted-foreground">
-                    A task cannot set it; change it in the project's{" "}
-                    <a href={`#projects/${encodeURIComponent(projectId)}/${AGENT_PROFILE.slug}/planner`} className={LINK}>
-                      {AGENT_PROFILE.plural} → Planner
-                    </a>
-                    .
-                  </p>
-                </div>
-              ) : (
+              {role !== "planner" && (
                 <LimitField
                   taskId={taskId}
                   role={role}
@@ -341,7 +317,7 @@ export function TaskAgentsSection({
         ))}
         <p id={hintId} className="px-4 py-3 text-[11px] text-muted-foreground">
           {editable
-            ? `A chosen ${AGENT_PROFILE.name} runs that role for this task only. Limits: 1–${agents.concurrency_max}. Within the project's limit; lowering it stops nothing already running.`
+            ? `A chosen ${AGENT_PROFILE.name} runs that role for this task only. Limits: 1–${agents.concurrency_max}; lowering one stops nothing already running.`
             : `The task has completed: its ${AGENT_PROFILE.plural} and limits are shown, not changed.`}
         </p>
       </div>

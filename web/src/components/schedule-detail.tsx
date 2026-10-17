@@ -6,7 +6,7 @@ import { Switch } from "@/components/ui/switch";
 import { DeleteSchedule, LastRun, NoticeText, RunHistory, ScheduleTime } from "@/components/project-schedules";
 import { fetchSchedule, runSchedule, updateSchedule, type ScheduleInfo, type TaskRole } from "@/lib/api";
 import { roleLabel } from "@/lib/runtime-catalog";
-import { NOTIFY_OPTIONS, runNotice, useNotices } from "@/lib/schedules";
+import { NOTIFY_OPTIONS, TASK_LIMIT_ROLES, runNotice, useNotices } from "@/lib/schedules";
 import { errorText } from "@/lib/use-action";
 import { profileName, useRegistry } from "@/lib/use-registry";
 import { formatUsd } from "@/lib/usage";
@@ -131,6 +131,7 @@ export function ScheduleDetail({ scheduleId, onDeleted }: { scheduleId: string; 
   const enabled = switching ?? schedule.enabled;
   const editHref = `#projects/${encodeURIComponent(schedule.project_id)}/schedules/${encodeURIComponent(schedule.schedule_id)}`;
   const profiles = ROLES.filter((role) => schedule.profile_overrides[role]);
+  const limited = TASK_LIMIT_ROLES.some((role) => schedule.task_limits[role] != null);
   const notifyOption = NOTIFY_OPTIONS.find((option) => option.value === schedule.notify);
   const profileLabel = (profileId: string) => {
     const profile = registry?.profiles.find((p) => p.profile_id === profileId);
@@ -268,6 +269,15 @@ export function ScheduleDetail({ scheduleId, onDeleted }: { scheduleId: string; 
                   </span>
                 ))}
           </Field>
+          {limited && (
+            <Field label="At once in each run's task">
+              {TASK_LIMIT_ROLES.map((role) => (
+                <span key={role} className="block">
+                  {roleLabel(role)}s: {schedule.task_limits[role] ?? "the default (Settings → Roles)"}
+                </span>
+              ))}
+            </Field>
+          )}
         </dl>
         <details className="mt-4 text-sm">
           <summary className="w-fit cursor-pointer rounded-sm text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring">
