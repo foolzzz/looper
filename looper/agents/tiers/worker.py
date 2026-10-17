@@ -334,8 +334,9 @@ class WorkerPool:
         self._slots: dict[str, tuple[AgentType, str]] = {}
         # Held to check a limit and take a place, so two runs cannot both take a task's last one.
         self._slot_lock = asyncio.Lock()
-        # The runs waiting for a place, woken to check again when a run ends or a limit changes.
-        self._slot_waiters: set[asyncio.Future[None]] = set()
+        # The runs waiting for a place, by (role, task id): woken to check again when a run of theirs ends, and all of
+        # them when a limit changes.
+        self._slot_waiters: dict[tuple[AgentType, str], set[asyncio.Future[None]]] = {}
         self._listener_task: asyncio.Task[Any] | None = None
         self._running = False
         self._workers_dir = runtime_root / ".local" / "workers"
@@ -500,14 +501,16 @@ class WorkerPool:
     def _cleanup_worker(self, worker_id: str) -> None:
         self._tasks.pop(worker_id, None)
         self._active.pop(worker_id, None)
-        if self._slots.pop(worker_id, None) is not None:
-            self._wake_slot_waiters()
+        held = self._slots.pop(worker_id, None)
+        if held is not None:
+            self._wake_slot_waiters(held)
 
-    def _wake_slot_waiters(self) -> None:
-        for waiter in self._slot_waiters:
-            if not waiter.done():
-                waiter.set_result(None)
-        self._slot_waiters.clear()
+    def _wake_slot_waiters(self, place: tuple[AgentType, str] | None = None) -> None:
+        """Wake the runs waiting for a place of ``place`` (a role in a task), or every waiting run."""
+        for key in [place] if place is not None else list(self._slot_waiters):
+            for waiter in self._slot_waiters.pop(key, ()):
+                if not waiter.done():
+                    waiter.set_result(None)
 
     async def recheck(self) -> None:
         """Let every run waiting for room in its task check its task's limit again (a limit changed)."""
@@ -527,7 +530,7 @@ class WorkerPool:
                     self._slots[worker_id] = (agent, task_id)
                     return
                 waiter = asyncio.get_running_loop().create_future()
-                self._slot_waiters.add(waiter)
+                self._slot_waiters.setdefault((agent, task_id), set()).add(waiter)
             if not waiting:
                 waiting = True
                 label = "Reviewer" if agent is AgentType.REVIEWER else "Worker"
@@ -539,7 +542,11 @@ class WorkerPool:
             try:
                 await waiter
             finally:
-                self._slot_waiters.discard(waiter)
+                waiters = self._slot_waiters.get((agent, task_id))
+                if waiters is not None:
+                    waiters.discard(waiter)
+                    if not waiters:
+                        del self._slot_waiters[(agent, task_id)]
 
     @staticmethod
     async def _project_id(task_id: str) -> str | None:

@@ -28,22 +28,27 @@ ALTER TABLE agent_setting_layers ADD CONSTRAINT agent_setting_layers_max_concurr
 
 # alarm: the live case (Planner 3, Worker 8, Reviewer 3), with its parallel schedule and a disabled one, and one
 # schedule that has task limits of its own already. big: its Planner limit only, under a parallel schedule's runs.
-# plain: no limits of its own, so the Planner's role layer (or the old built-in 8) caps its parallel schedule.
+# plain: no limits of its own, so the Planner's role layer (or the old built-in 8) caps its parallel schedule. huge: a
+# Planner limit above the most runs a schedule takes, which leaves it as it is. bare: limits and no schedule.
 _BEFORE = """
-INSERT INTO projects (id, name) VALUES ('proj-alarm', 'alarm'), ('proj-big', 'big'), ('proj-plain', 'plain');
+INSERT INTO projects (id, name) VALUES ('proj-alarm', 'alarm'), ('proj-big', 'big'), ('proj-plain', 'plain'),
+    ('proj-huge', 'huge'), ('proj-bare', 'bare');
 INSERT INTO agent_setting_layers (scope, role, project_id, harness_prompt, max_concurrency) VALUES
     ('role', 'worker', NULL, NULL, 5),
     ('role_project', 'planner', 'proj-alarm', NULL, 3),
     ('role_project', 'worker', 'proj-alarm', 'Alarm workers.', 8),
     ('role_project', 'reviewer', 'proj-alarm', NULL, 3),
-    ('role_project', 'planner', 'proj-big', NULL, 2);
+    ('role_project', 'planner', 'proj-big', NULL, 2),
+    ('role_project', 'planner', 'proj-huge', NULL, 20),
+    ('role_project', 'worker', 'proj-bare', NULL, 4);
 INSERT INTO schedules (id, project_id, name, cron, timezone, requirement, overlap, max_parallel_runs, enabled,
                        next_fire_at) VALUES
     ('sched-triage', 'proj-alarm', 'alarm-triage', '* * * * *', 'UTC', 'triage', 'parallel', 3, true, now()),
     ('sched-warning', 'proj-alarm', 'alarm-triage-warning', '* * * * *', 'UTC', 'warn', 'skip', 3, false, NULL),
     ('sched-own', 'proj-alarm', 'alarm-own', '0 * * * *', 'UTC', 'own', 'skip', 3, false, NULL),
     ('sched-big', 'proj-big', 'big-runs', '* * * * *', 'UTC', 'big', 'parallel', 5, false, NULL),
-    ('sched-plain', 'proj-plain', 'plain-runs', '* * * * *', 'UTC', 'plain', 'parallel', 10, false, NULL);
+    ('sched-plain', 'proj-plain', 'plain-runs', '* * * * *', 'UTC', 'plain', 'parallel', 10, false, NULL),
+    ('sched-huge', 'proj-huge', 'huge-runs', '* * * * *', 'UTC', 'huge', 'parallel', 7, false, NULL);
 INSERT INTO schedule_task_limits (schedule_id, role, max_concurrency) VALUES ('sched-own', 'reviewer', 1);
 """
 
@@ -88,7 +93,7 @@ def test_the_upgrade_converts_a_projects_limits_clears_them_and_a_second_run_cha
             }
             # A parallel schedule runs no more at once than its project's Planner limit let run.
             assert converted["max_parallel_runs"] == {"sched-triage": 3, "sched-warning": 3, "sched-own": 3,
-                                                      "sched-big": 2, "sched-plain": plain_cap}
+                                                      "sched-big": 2, "sched-plain": plain_cap, "sched-huge": 7}
             # Only the Workers' role layer keeps a limit; a layer left with nothing else set is gone.
             assert converted["layers"] == {("role", "worker", None): (None, 5),
                                            ("role_project", "worker", "proj-alarm"): ("Alarm workers.", None)}
@@ -98,8 +103,10 @@ def test_the_upgrade_converts_a_projects_limits_clears_them_and_a_second_run_cha
             assert "concurrency is per task now: schedule 'big-runs' of project 'big' runs at most 2 at once " \
                    "(max_parallel_runs 5), the project's Planner limit" in logged
             assert "concurrency is per task now: cleared max_concurrency 3 of the planner in project 'alarm'" in logged
-            # Two schedules' task limits, two caps, and each layer cleared (the Planner's role layer when it had one).
-            assert len(logged) == 2 + 2 + 4 + (1 if planner_role else 0)
+            # Two schedules' task limits, two caps, and each layer cleared (the Planner's role layer when it had one);
+            # bare's Worker limit, with no schedule to take it, is only cleared.
+            assert "concurrency is per task now: cleared max_concurrency 4 of the worker in project 'bare'" in logged
+            assert len(logged) == 2 + 2 + 6 + (1 if planner_role else 0)
 
             # The schedule views carry them, both roles named.
             answer = await _view(pool, "sched-triage")

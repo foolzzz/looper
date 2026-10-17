@@ -1218,6 +1218,36 @@ class TestWorkerConcurrency:
         assert asyncio.run(_run()) == {"w1": ("running", None),
                                        "w2": ("waiting", {"id": "fe_rd", "kind": "work", "version": 2})}
 
+    def test_a_runs_end_wakes_only_its_own_tasks_waiting_runs(self, agent_db: Any) -> None:
+        # With any number of tasks, a run's end makes only its task's waiting runs read their limit again.
+        self._projects(agent_db, {"t-a": "proj-a", "t-b": "proj-a"})
+        self._limits(agent_db, worker=1)
+
+        async def _run() -> list[str | None]:
+            with tempfile.TemporaryDirectory() as tmp:
+                bus = MessageBus(runtime_root=Path(tmp))
+                pool = WorkerPool(config=WorkerConfig(claude_bin=_fake_claude(Path(tmp), _LISTENING_CLAUDE)),
+                                  runtime_root=Path(tmp))
+                await pool.start(bus)
+                await asyncio.sleep(0)
+                for worker_id, task_id in (("a1", "t-a"), ("b1", "t-b"), ("a2", "t-a"), ("b2", "t-b")):
+                    await bus.publish(_run_item(worker_id, task_id, Path(tmp)))
+                await self._until_running(pool, "a1", "b1")
+                for _ in range(100):  # a2 and b2 have checked their limit and wait
+                    if sum(map(len, pool._slot_waiters.values())) == 2:
+                        break
+                    await asyncio.sleep(0.02)
+                reads = len(agent_db.list_layers.await_args_list)
+                assert await pool.send_input("a1", "finish")
+                await self._until_running(pool, "a2")
+                woken = [c.kwargs.get("task_id") for c in agent_db.list_layers.await_args_list[reads:]]
+                await pool.stop()
+                await bus.shutdown()
+                return woken
+
+        woken = asyncio.run(_run())
+        assert "t-a" in woken and "t-b" not in woken
+
     def test_a_raised_limit_starts_a_waiting_run_and_a_lowered_one_stops_none(self, agent_db: Any) -> None:
         self._projects(agent_db, {"t-a": "proj-a"})
         self._limits(agent_db, worker=1)

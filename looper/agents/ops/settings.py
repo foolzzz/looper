@@ -341,7 +341,8 @@ TOOLS: tuple[Tool, ...] = (
                         "run_budget_usd": {"type": "number", "description": "Each run's spend cap."},
                         "max_concurrency": {"type": "integer", "minimum": 1, "maximum": CONCURRENCY_MAX,
                                             "description": "Role worker or reviewer, no project: how many of "
-                                                           "each task's run at once when the task sets none."},
+                                                           "each task's Workers or Reviewers run at once when the "
+                                                           "task sets none."},
                         "timeout_seconds": {"type": "integer", "minimum": 0, "maximum": TIMEOUT_MAX_SECONDS,
                                             "description": "With role, no project; 0: none."},
                         "boundaries": {"type": "string", "description": "Shared defaults only: what every run of "

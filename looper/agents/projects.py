@@ -360,8 +360,8 @@ async def edit_requirement(
 ) -> dict[str, Any]:
     """Make ``data["requirement"]`` the task's requirement, keeping the old text as a version: 404 for an unknown
     task, 409 for one that has ended, 400 for an empty or unchanged text. A running task's Planner gets the edit in
-    a turn (``TASK_CHANGE``), and so does one waiting for room, at its PLAN turn; a task not started plans the
-    new text."""
+    a turn (``TASK_CHANGE``), and so does one whose Planner is starting, at its PLAN turn; a task not started
+    plans the new text."""
     from ..db import task_changes
 
     requirement = data.get("requirement")
