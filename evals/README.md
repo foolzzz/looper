@@ -83,11 +83,17 @@ cancelled at its timeout or at the cap is an error.
 
 In the table, success is `k/n`, the passes over the scored reps, with ` · e
 err` when some reps are errors; the other columns are means over the scored
-reps. The total row has the passes over all scored rows with their Wilson 95%
-interval, such as `41/48 (85%, 73–93%)`, the errors by class, and the tasks'
-means added up (one pass through the set). Below it: the tasks whose pass rate
-changed, a note for a side that ran each task once, the tasks with no
-baseline, and the tasks of the base the new run lacks. The exit code is 0 only
+reps, so the cost column leaves out what the errored reps cost (the run's
+`total_cost_usd` has every row). The total row has the passes over all scored
+rows with their Wilson 95% interval, such as `41/48 (85%, 73–93%)`, the errors
+by class, and the tasks' means added up (one pass through the set). Against a
+base, the total row covers only the tasks both runs have (`total (7 shared
+tasks)` when the sets differ), and a second row gives the new run's own total
+when it has tasks the base lacks. Below it: the tasks whose pass rate changed,
+a note for a side that ran each task once, the tasks with no baseline, and the
+tasks of the base the new run lacks. Read the errors as well as `k/n`: a task
+that never finishes is a `timeout` error, not a fail, so a change that makes
+the Planner loop shows up as more timeouts. The exit code is 0 only
 when every row ran and passed, 1 when a row failed, is an error or was
 skipped, and 2 when the run could not start or stopped midway.
 
