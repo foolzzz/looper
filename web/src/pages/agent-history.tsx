@@ -229,13 +229,14 @@ const SETTING_SOURCES: Record<string, string> = {
   task: "task override",
   planner_task: "Planner's choice for the rest of the task",
   planner_step: "Planner's choice for this step",
+  task_role: "role the Planner defined",
   builtin_default: "built-in default",
   system_default: "Settings default",
   manager_override: "Manager override",
   agent_override: "agent override",
   project_override: "project override",
 };
-const sourceName = (source: string) => SETTING_SOURCES[source] ?? source;
+export const sourceName = (source: string) => SETTING_SOURCES[source] ?? source;
 
 /** One of the repository's instruction files the run was given, and how. */
 function instructionFile(file: ProjectInstructionFile) {

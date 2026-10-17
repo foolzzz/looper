@@ -623,6 +623,7 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
 | 2026-10-17 | 用户关卡 RFC v0（looper #162）：维护者定下四条——规划者是讨论的对方、管家只转达，默认对所有项目开启（定时任务建出的任务由代码拒绝），等的时候继续探索、默认不超时、按项目设置的间隔提醒，计划确认模式、超时后按假设继续和统计页放第二期；其余（关卡是 `kind: "gate"` 的步骤、`[GATE]` 讨论回合、DECISION 和 CHAT 里类型化的 `gates` 更新与取消、按渠道消息编号路由、任务状态 `waiting_user` 和 Needs you 分组、结论为已送达的补充说明、讨论记录的类型化表、分 G1 和 G2 两期且 G2 才默认开启）为提案，同日全部按建议定下（含和原写法不同的几处）；飞书群里回复关卡要 @机器人由维护者确认（Q4）。 |
 | 2026-10-17 | Agent 办公台 RFC v0（looper #163）：维护者定下七条——一个任务一个办公台；拉取为主、被点名时只提醒一句，规划者攒批后以 `[ROOM]` 回合唤醒；问离线的同事在第一期就做唤醒咨询，续接不了时转给规划者；Reviewer 能读能问、Worker 不能主动找 Reviewer；默认对所有项目开启、可按项目关闭，关闭时逐字节不变；第一期用户只读；项目级角色模板不在本 RFC。其余（按次运行的令牌和服务端盖章、范围矩阵、类型化的只追加消息、Codex 和 OMP 在开启时保留会话、咨询分叉与三层只读、限额为项目设置、管家只读）为提案，同日全部按建议定下，第 19 节的 14 个问题也按建议定下（R1 分办公台、咨询两个 PR，一起发布）。 |
 | 2026-10-17 | 评测结果可信（looper #167，第一期）：`run` 和 `dialogs` 加 `--reps N`（按轮次交错，每个任务每轮一个工作目录和项目，总花费上限覆盖所有轮），每行有 `outcome`（`pass`、`fail`、`error`；超时、花费上限和评测自身出错是带类型的 `error`，不算模型失败），中途停下也写出 JSON；每个管家对话的每一轮用自己的数据库和服务，前一个对话留下的任务不再影响后一个。对比表显示 `k/n` 和均值、总计带 Wilson 95% 区间，默认基线改为同模式同模型的已提交基线（本地上一次要用 `--baseline previous`），新增 `--tasks planner` 任务集和各档该跑哪些的说明；第二期用真实模型刷新已提交基线。 |
+| 2026-10-17 | 任务页的 Agents 标签页（looper #169）：任务用哪些 agent 原来散在三处——Overview 中间的 Agents 一栏、更下面 Roles 里各角色的 Profile、每次运行的历史页；现在 Pipeline 和 Sessions 之间新增 Agents 标签页：先是原样搬来的 Agents 一栏（各角色的 Agent Profile、Worker 和 Reviewer 上限及来源，任务完成前可改，完成后只读），再是 Planner 定义的角色（类型、Profile，项目不再允许的 Profile 标 not allowed now，与 Roles 共用一个组件），最后是每一步的每次运行实际用的 Profile（步骤、角色或定义的角色、Profile、来源、状态、链接到运行历史），数据取自现有的 `GET /api/llm-records`，不改后端，步骤变化时才重新读；Overview 换成一行摘要，点开即此标签页；运行历史给 `task_role` 来源配上文字。dashboard 新增 Vitest（`npm test`，CI 的 Dashboard tests 也跑）；表格读成全量记录的问题记入第 5.3 节。验证：Vitest 10 个测试，8 处逐条故意改坏都能测出；一次性 `looper serve` 上用替身 Claude 跑出内置 Worker、Reviewer、工作角色、评审角色和规划者按步选的 Profile，无头 Chrome 在 1280 和 390 宽 57 项检查通过并截图；裸 pytest 2177 通过。 |
 
 ## 5. 不属于本 RFC 的待办
 
@@ -677,7 +678,7 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
 
 ### 5.3 非核心待办（M6 之后统一做）
 
-（暂无。已完成的见第 4 节进度台账。）
+- **任务页「What each step ran on」改读精简的运行记录**：这张表现在用 `GET /api/llm-records?task_id=&role=worker|reviewer&limit=500` 读两个角色的完整记录（`list_records` 是 `SELECT *`，替身 Claude 下每条 12–13 KB，真实 prompt 更大），每当步骤变化就重读一次，长任务一次刷新可能有几 MB。改成只取表格要用的字段：`id`、`agent_id`、`status`、`created_at`、`metadata.step_id`、Profile 及其来源（含 effort）、`prompt_layers.task_role`（新参数或新接口均可，带测试），表格和测试相应改用它。
 
 ### 5.4 验证缺口
 

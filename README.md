@@ -226,7 +226,7 @@ release wheel serves the copy packaged with it.
 | **Chat** | Talk to the global Manager, or to a running task's Planner (a message reaches it as a supplement to the task); with the Manager selected, its conversations by channel (dashboard chat, Lark, Telegram), the Lark and Telegram ones read-only; SSE streaming |
 | **Tasks** | Task list, project, status and schedule filters, a Scheduled badge on the tasks a schedule created, create/start/stop/delete controls |
 | **Project** | One project's overview, knowledge documents, its own skills and installs, the Agent Profiles and other agent settings its roles override, its schedules (rule, next fire times, enable, Run now, run history) and its settings |
-| **Task Detail** | Config editor (init status), overview, pipeline DAG, sessions, conversation; each Agent Timeline row has a **History** button |
+| **Task Detail** | Config editor (init status), overview, pipeline DAG, agents (each role's Agent Profile and limits, the Planner's roles, what each step ran on), sessions, conversation; each Agent Timeline row has a **History** button |
 | **Runs** | Each role's sessions and run history (a Manager `/new` shows as a new session), each run opening its history; no configuration, a link to the role in Settings → Roles |
 | **Schedules** | Every project's schedules, filtered by project and status, each with its switch, Run now and Delete; a schedule's page shows its settings, alerts, today's spend and its run history. New schedules and edits are on the project's Schedules tab |
 | **Agent history** | One agent's launch command, full transcript (text, thinking, tool calls and results) and activity; follows a running agent and flags one with no output for 2 minutes |

@@ -33,6 +33,10 @@ disposable database; they create and drop their own schemas. CI runs the same
 command against a PostgreSQL service on every pull request. Which tests a
 change needs is described in section 1 of the development plan.
 
+The dashboard's tests (`web/src/**/*.test.tsx`, run by Vitest) render
+components without a browser; run them with `cd web && npm test`. CI runs
+them on every pull request too.
+
 ## Pull Requests
 
 - Work on a branch, keep the pull request to one purpose, and leave unrelated
