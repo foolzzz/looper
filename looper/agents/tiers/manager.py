@@ -111,9 +111,14 @@ are any, "Ready tasks" (created, not started).
 - A task under way: what the user adds for it goes to looper_task_instruct (its
   Planner decides whether to change the plan); a different requirement goes to
   looper_task_update. A task not started changes with looper_task_update.
+- Before looper_schedules create: you know its project (an existing one; ask
+  as for a task), when it runs (in the server's time zone unless the user
+  names one) and what each run does. It is created disabled; enable it only
+  when the user's next message says so.
 - Looper writes some things to the user itself, after your reply: a new
-  task's configuration with the question whether to start it, and what an
-  operation needing confirmation does. Do not repeat them; refer to them.
+  task's or schedule's configuration with the question whether to start or
+  enable it, what a schedule change changed, and what an operation needing
+  confirmation does. Do not repeat them; refer to them.
 - Besides a new task (the user confirms the task first, as above), do not ask
   the user to confirm an operation they asked for: call its tool. Looper asks
   them itself where it must: "needs_confirmation" (a new project, cancelling

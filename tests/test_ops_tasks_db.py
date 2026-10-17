@@ -29,8 +29,10 @@ LARK = channel_address("lark", "channel-lark")
 class _Chat:
     """One Lark chat with the Manager: each ``say`` is a turn in which the given calls run."""
 
-    def __init__(self, tmp: Path, planners: set[str] | None = None, *, group: bool = False) -> None:
+    def __init__(self, tmp: Path, planners: set[str] | None = None, *, group: bool = False,
+                 sender: str = "ou_1") -> None:
         self.group = group  # a Lark group chat, where the sender @-mentioned the bot
+        self.sender = sender
         self.bus = MessageBus(runtime_root=tmp)
         self.planners = planners if planners is not None else set()
         router = SimpleNamespace(has_planner=lambda task_id: task_id in self.planners)
@@ -41,11 +43,11 @@ class _Chat:
     async def say(self, text: str, *calls: tuple[str, dict[str, Any]]) -> list[dict[str, Any]]:
         envelope = MessageEnvelope.create(
             source=LARK, target=LARK, message_type=MessageType.USER_MESSAGE,
-            payload={"text": text, "channel_context": {"chat_id": "oc_1", "sender_id": "ou_1",
+            payload={"text": text, "channel_context": {"chat_id": "oc_1", "sender_id": self.sender,
                                                        "chat_type": "group" if self.group else "p2p"}},
             correlation_id=f"corr-{len(self.turns)}", metadata={"origin_channel_id": "channel-lark"},
         )
-        turn = Turn(channel="lark", chat="oc_1", message_id=envelope.message_id, envelope=envelope, sender="ou_1",
+        turn = Turn(channel="lark", chat="oc_1", message_id=envelope.message_id, envelope=envelope, sender=self.sender,
                     group=self.group)
         self.turns.append(turn)
         self.notes.append(self.ops.begin_turn(turn))

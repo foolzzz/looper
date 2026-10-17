@@ -90,6 +90,8 @@ class Platform:
     worker_pool: Any = None
     manager: Any = None
     supervisor: Any = None
+    scheduler: Any = None  # a schedule's Run now
+    runtime_root: Path | None = None  # where a configuration export is written (``exports/``)
 
 
 @dataclass
