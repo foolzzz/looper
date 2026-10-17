@@ -2071,7 +2071,7 @@ messages, `db.task_changes`, `agent_settings`, `profile_registry`, `catalog`,
 dashboard's own message (`ops.config.answered`: its 404 is `not_found`, its
 409 `conflict`, its 400 `invalid`). The definitions of the 16 tools take
 15.0 KB of the Manager's context (the JSON of `tools/list`, 14,988 bytes), the
-contract 3.1 KB.
+contract 3.3 KB.
 
 - **Reaching Looper.** `looper serve` makes one `ManagerOps`
   (`ops/service.py`) with a random token at start. Every launch of the
