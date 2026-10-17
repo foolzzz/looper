@@ -196,6 +196,11 @@ class ConsultService:
 
     async def _run_queued(self, row: Mapping[str, Any]) -> None:
         consult_id, task_id, seat_name = row["id"], row["task_id"], row["seat"]
+        task = await db_tasks.get_task(task_id)
+        if task is None or task.get("status") not in db_tasks.ACTIVE_STATUSES:
+            # Its task ended while it waited: nobody is left to read the answer.
+            await db_room.move_consult(consult_id, "failed", expect=("queued",), detail="its task ended first")
+            return
         role, _, step_key = seat_name.partition("@")
         steps = await db_steps.list_steps(task_id)
         step = next((s for s in steps if (s.get("step_key") or s["id"]) == step_key), None)
