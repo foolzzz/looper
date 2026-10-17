@@ -1,5 +1,6 @@
-"""The Planner's platform tools: one task's Planner chooses its Workers' and Reviewers' Agent Profiles and changes
-its task's or its project's concurrency (Manager tools RFC, section 8.3, decisions 9 and 10).
+"""The Planner's platform tools: one task's Planner chooses its Workers' and Reviewers' Agent Profiles, changes
+its task's or its project's concurrency (Manager tools RFC, section 8.3, decisions 9 and 10) and, where its project
+lets it, defines the roles its steps run as (Planner-defined roles RFC).
 
 ``looper serve`` makes one ``PlannerOps``. A Planner gets a token of its own
 when it starts (``issue``), good for its task only, and its MCP entry carries
@@ -32,6 +33,12 @@ logged.
   journal entry, and a task asked for in Telegram or Lark tells that chat
   (``task_notice``). Two tools, not one with a scope: each lists only the
   roles it takes.
+- **Roles.** With its project's ``planner_roles`` ``on``, ``looper_task_roles``
+  and ``looper_task_role_set`` are listed too (``ROLE_TOOLS``; elsewhere they
+  are refused): a role is a kind, a role prompt, a harness and a profile from
+  the project's list (``task_roles``). Each change is a new version, with a
+  ``role_defined`` journal entry; a step's attempt runs the version current
+  when it starts.
 """
 
 from __future__ import annotations
@@ -48,12 +55,14 @@ from typing import Any
 import asyncpg
 
 from ...db import activity as db_activity, agent_setting_layers as db_layers, plans as db_plans
-from ...db import projects as db_projects, steps as db_steps, tasks as db_tasks
+from ...db import projects as db_projects, steps as db_steps, task_roles as db_roles, tasks as db_tasks
 from ..agent_settings import CONCURRENCY_MAX, EMPTY_LAYER, PLANNER_CHOICE_ROLES, AgentType, Layer, index_layers
 from ..agent_settings import resolve
 from ..links import task_link
 from ..message import MessageEnvelope, MessageType, channel_address, planner_address
+from ..project_execution import ProjectExecution
 from ..projects import EDITABLE_STATUSES, allowed_profile_view
+from ..task_roles import RoleError, RoleKind, TaskRole, role_key, role_text
 from ..task_notice import Notice, NotifyTarget, link_line, notify_channel
 from ..tiers.journal import SUMMARY_MAX_CHARS, JournalKind, clip
 from ..tiers.task import recheck_limits
@@ -102,6 +111,24 @@ Both apply at once, and the user is told.
 Give "reason" with every change: the task page shows it.
 """
 
+# How the Planner uses its role tools: after ``TOOLS_GUIDE``, in a project that lets its Planners define roles.
+ROLES_GUIDE = """\
+This project also lets you define roles for your steps (looper_task_roles
+reads them, looper_task_role_set defines one, or a new version of one):
+- Define a role only for a step that needs another expertise, focus or model
+  than the built-in Worker and Reviewer; most tasks need none.
+- kind "work": a step's Worker runs as the role ("role" in the step). kind
+  "review": the role reviews a step after the built-in Reviewer, which still
+  has to pass it ("review_role" in a step with "review": true).
+- role_prompt: what the role is responsible for and how it does it. harness
+  (optional): only how it works and communicates; Looper adds the boundaries,
+  which you neither write nor change. profile_id (optional): one from the
+  project's list; without it the role runs what the built-in role would.
+- Define a role before the reply that names it. Setting a role again makes a
+  new version: attempts that start afterwards use it, a run already started
+  keeps its own.
+"""
+
 
 def _digest(token: str) -> str:
     return hashlib.sha256(token.encode()).hexdigest()
@@ -136,7 +163,7 @@ class PlannerOps:
         self._platform = platform
         self._url = url.rstrip("/")
         self._dashboard_url = dashboard_url
-        self._tools = {tool.name: tool for tool in (TOOLS if tools is None else tools)}
+        self._tools = {tool.name: tool for tool in ((*TOOLS, *ROLE_TOOLS) if tools is None else tools)}
         self._grants: dict[str, _Grant] = {}  # a token's hash -> what it is good for
 
     # --- Tokens ---
@@ -182,8 +209,12 @@ class PlannerOps:
 
     # --- The endpoint ---
 
-    def listing(self) -> list[dict[str, Any]]:
-        return [tool.listing() for tool in self._tools.values()]
+    async def listing(self, header: str | None = None) -> list[dict[str, Any]]:
+        """The tools of the Planner whose token ``header`` carries: the role tools only where its project lets it
+        define roles."""
+        grant = self._grant(header)
+        roles_on = grant is not None and await _roles_on(grant.task_id)
+        return [tool.listing() for tool in self._tools.values() if roles_on or tool.name not in _ROLE_TOOL_NAMES]
 
     async def call(self, header: str | None, name: str, raw: Any) -> dict[str, Any]:
         """Run one tool call of the Planner whose token ``header`` carries; the protocol's answer."""
@@ -197,7 +228,7 @@ class PlannerOps:
             manager = name in {t.name for t in MANAGER_TOOLS}
             return _error(ErrorCode.FORBIDDEN if manager else ErrorCode.INVALID,
                           f"{name} {'is a tool of the Manager' if manager else 'is not a tool'}; your tools are: "
-                          f"{', '.join(self._tools)}")
+                          f"{', '.join(tool['name'] for tool in await self.listing(header))}")
         try:
             arguments = check_arguments(tool.schema, raw)
             named = arguments.pop("task_id", None)
@@ -207,6 +238,10 @@ class PlannerOps:
             if task is None or task["status"] not in EDITABLE_STATUSES:
                 self._drop(task_id)
                 raise OpError(ErrorCode.FORBIDDEN, f"task {task_id} has ended: its Planner's tools no longer work")
+            if tool.name in _ROLE_TOOL_NAMES and not await _roles_on(task_id):
+                raise OpError(ErrorCode.FORBIDDEN, "this task's project does not let its Planner define roles "
+                                                   "(planner_roles is off): its steps run as the built-in Worker "
+                                                   "and Reviewer")
             if tool.risk is not Risk.READ and not grant.in_turn:
                 raise OpError(ErrorCode.NEEDS_USER_TURN, "Looper changes things only in a turn it sent you, not in a "
                                                          "turn you run on your own; do it in your next turn")
@@ -228,6 +263,10 @@ class PlannerOps:
         """How the Planner uses its tools, for its system prompt."""
         return TOOLS_GUIDE
 
+    def guide_for(self, *, roles: bool) -> str:
+        """How the Planner uses its tools, with the role tools where its project lets it define roles."""
+        return f"{TOOLS_GUIDE}\n{ROLES_GUIDE}" if roles else TOOLS_GUIDE
+
     async def library_with_server(self, library: Any, runtime_root: Path, token: str) -> Any:
         """``library`` with Looper's MCP server for the Planner holding ``token``."""
         return await library_with_server(library, runtime_root, server_config(self._url, token), who="a Planner")
@@ -243,6 +282,18 @@ async def _activity(task_id: str, summary: str) -> None:
                                           summary=clip(summary, 500))
     except Exception:
         logger.warning("task %s: could not record the Planner's tool call", task_id, exc_info=True)
+
+
+async def _execution(task: Mapping[str, Any]) -> ProjectExecution:
+    """The execution settings of ``task``'s project, read now."""
+    project = await db_projects.get_project(task["project_id"]) if task.get("project_id") else None
+    return ProjectExecution.from_row(project)
+
+
+async def _roles_on(task_id: str) -> bool:
+    """Whether task ``task_id``'s project lets its Planner define roles, read now."""
+    task = await db_tasks.get_task(task_id)
+    return task is not None and (await _execution(task)).roles_on
 
 
 async def _task(task_id: str) -> dict[str, Any]:
@@ -451,6 +502,115 @@ async def _notify(call: PlannerCall, task: Mapping[str, Any], lines: list[str], 
     return True
 
 
+# --- looper_task_roles and looper_task_role_set ---
+
+
+def _naming(steps: Sequence[Mapping[str, Any]], key: str) -> list[str]:
+    """The steps of the plan (not dropped) that name role ``key``, by their id in the plan."""
+    return [s.get("step_key") or s["id"] for s in steps if s["status"] != "skipped"
+            and key in (s.get("role_key"), s.get("review_role_key"))]
+
+
+def _role_view(row: Mapping[str, Any], steps: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    """A role's current version as the Planner reads it, with the steps that name it."""
+    key = row["role_key"]
+    return {
+        "id": key, "kind": row["kind"], "version": row["version"],
+        "profile": row["profile_name"] if row["profile_id"] and row["profile_allowed"] else None,
+        **({"profile_not_allowed": row["profile_name"]} if row["profile_id"] and not row["profile_allowed"] else {}),
+        "role_prompt": row["role_prompt"], "harness": row["harness"], "reason": row["reason"],
+        "steps": _naming(steps, key),
+    }
+
+
+async def _roles(call: PlannerCall) -> dict[str, Any]:
+    task = await _task(call.task_id)
+    project_id = task.get("project_id")
+    allowed = await db_projects.allowed_profiles(project_id) if project_id else []
+    steps = await db_steps.list_steps(call.task_id)
+    users = await db_layers.profile_overrides(call.task_id)
+    profiles = [allowed_profile_view(row) for row in allowed]
+    return {
+        "roles": [_role_view(row, steps) for row in await db_roles.current(call.task_id)],
+        "allowed_profiles": [{"profile_id": p["profile_id"], "name": p["name"], "model": p["model"],
+                              "kinds": [kind.value for kind in RoleKind if kind.agent.value in p["roles"]]}
+                             for p in profiles],
+        "role_text_max_chars": (await _execution(task)).role_text_limit,
+        "user_choice": {role.value: users[role.value]["name"] if role.value in users else None
+                        for role in PLANNER_CHOICE_ROLES},
+        "note": "A role without a profile runs what the step's built-in Worker or Reviewer would. A profile the user "
+                "chose for this task's Workers or Reviewers (user_choice) wins over a role's; prices are in "
+                "looper_task_profiles." + ("" if profiles else " The project's list is empty: define roles without "
+                                                               "profile_id."),
+    }
+
+
+async def _role_set(call: PlannerCall) -> dict[str, Any]:
+    from ..profile_registry import RegistryError, check_selection
+
+    arguments = call.arguments
+    task = await _task(call.task_id)
+    execution = await _execution(task)
+    try:
+        key = role_key(arguments["id"])
+        kind = RoleKind(arguments["kind"])
+        prompt = role_text(arguments["role_prompt"], "role_prompt", execution.role_text_limit)
+        harness = role_text(arguments.get("harness") or "", "harness", execution.role_text_limit) or None
+    except RoleError as exc:
+        raise OpError(ErrorCode.INVALID, str(exc)) from None
+    if not prompt:
+        raise OpError(ErrorCode.INVALID, "role_prompt is required: what the role is responsible for and how it works")
+    current = await db_roles.get(call.task_id, key)
+    if current is not None and current["kind"] != kind.value:
+        raise OpError(ErrorCode.INVALID, f"{key} is a {RoleKind(current['kind']).noun}; a role keeps its kind: give "
+                                         f"the {kind.noun} another id")
+    profile: Mapping[str, Any] | None = None
+    if (wanted := arguments.get("profile_id")) is not None:
+        project_id = task.get("project_id")
+        allowed = await db_projects.allowed_profiles(project_id) if project_id else []
+        if not allowed:
+            raise OpError(ErrorCode.FORBIDDEN, "this task's project lets its Planner choose no Agent Profile (its list "
+                                               "is empty): define the role without profile_id")
+        users = await db_layers.profile_overrides(call.task_id)
+        if kind.agent.value in users:
+            raise OpError(ErrorCode.FORBIDDEN, f"the user chose {users[kind.agent.value]['name']} for this task's "
+                                               f"{_label(kind.agent)}; their choice stands: define the role without "
+                                               "profile_id")
+        profile = _match(allowed, wanted)
+        if profile is None:
+            raise OpError(ErrorCode.FORBIDDEN, f"{wanted!r} is not on the project's list; you may choose: "
+                                               f"{', '.join(p['name'] for p in allowed)}")
+        try:
+            await check_selection(profile["id"], [kind.agent.value])
+        except RegistryError as exc:
+            raise OpError(ErrorCode.INVALID, str(exc)) from None
+    profile_id = profile["id"] if profile is not None else None
+    steps = await db_steps.list_steps(call.task_id)
+    if current is not None and TaskRole.from_row(current).defines(kind, prompt, harness, profile_id):
+        return {"id": key, "kind": kind.value, "version": current["version"], "changed": False,
+                "steps": _naming(steps, key), "note": "the role already reads so: no new version"}
+    reason = _reason(call)
+    summary = (f"Role {key} ({kind.value}) v{(current['version'] + 1) if current else 1}: "
+               f"profile {profile['name'] if profile else 'as the built-in ' + kind.agent.value.capitalize()}; "
+               f"harness {'its own' if harness else 'the working style that applies'}; role prompt {len(prompt)} "
+               "characters" + (f". Reason: {reason}" if reason else ""))
+    entry = {"step_id": "", "kind": JournalKind.ROLE_DEFINED.value, "summary": clip(summary, SUMMARY_MAX_CHARS),
+             "learnings": []}
+    try:
+        version = await db_roles.add_version(call.task_id, key, {"kind": kind.value, "profile_id": profile_id,
+                                                                 "role_prompt": prompt, "harness": harness,
+                                                                 "reason": reason}, entry)
+    except asyncpg.UniqueViolationError:
+        raise OpError(ErrorCode.CONFLICT, f"role {key} changed meanwhile; look again") from None
+    except asyncpg.ForeignKeyViolationError:
+        raise OpError(ErrorCode.CONFLICT, "the profile was removed meanwhile; look again") from None
+    await _activity(call.task_id, f"Planner defined role {key} v{version} ({kind.value}"
+                                  f"{', profile ' + profile['name'] if profile else ''})")
+    return {"id": key, "kind": kind.value, "version": version, "changed": True, "steps": _naming(steps, key),
+            "note": "attempts that start from now on run this version; a run already started keeps its own. Name "
+                    f"it in a step's {'role' if kind is RoleKind.WORK else 'review_role'}."}
+
+
 _TASK_ID = {"type": "string", "minLength": 1, "description": "Your task's id; leave it out. Another task's is refused."}
 _REASON = {"type": "string", "maxLength": REASON_MAX_CHARS,
            "description": "Why, in a sentence; the task page shows it."}
@@ -518,3 +678,41 @@ TOOLS: tuple[Tool, ...] = (
         risk=Risk.WRITE, run=_project_concurrency,
     ),
 )
+
+# Listed and run only where the task's project lets its Planner define roles (``planner_roles`` ``on``).
+ROLE_TOOLS: tuple[Tool, ...] = (
+    Tool(
+        name="looper_task_roles",
+        description="The roles you defined for this task's steps (each one's current version), the profiles the "
+                    "project lets a role run on, the longest role prompt and harness it takes, and whether the user "
+                    "chose this task's Worker or Reviewer profile.",
+        schema={"type": "object", "additionalProperties": False, "properties": {"task_id": _TASK_ID}},
+        risk=Risk.READ, run=_roles,
+    ),
+    Tool(
+        name="looper_task_role_set",
+        description="Define a role for this task's steps, or a new version of one: kind work (a step's Worker runs "
+                    "as it) or review (it reviews a step after the built-in Reviewer, which still has to pass it), "
+                    "its role prompt, optionally its harness (how it works and communicates; Looper adds the "
+                    "boundaries) and a profile from the project's list. Give the whole definition each time. Name "
+                    "the role in a step's role or review_role.",
+        schema={"type": "object", "required": ["id", "kind", "role_prompt"], "additionalProperties": False,
+                "properties": {
+                    "id": {"type": "string", "minLength": 1, "maxLength": 32,
+                           "description": "The role's id in this task: letters, digits, - _ ."},
+                    "kind": {"type": "string", "enum": [kind.value for kind in RoleKind]},
+                    "role_prompt": {"type": "string", "minLength": 1,
+                                    "description": "What the role is responsible for and how it does it."},
+                    "harness": {"type": "string",
+                                "description": "How it works and communicates, in place of the built-in working "
+                                               "style; leave it out to keep that."},
+                    "profile_id": {"type": "string", "minLength": 1,
+                                   "description": "An allowed profile's id or name; leave it out for what the "
+                                                  "built-in role would run."},
+                    "reason": _REASON,
+                    "task_id": _TASK_ID,
+                }},
+        risk=Risk.WRITE, run=_role_set,
+    ),
+)
+_ROLE_TOOL_NAMES = frozenset(tool.name for tool in ROLE_TOOLS)

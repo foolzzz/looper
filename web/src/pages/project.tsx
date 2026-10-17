@@ -259,6 +259,9 @@ function executionRows(project: Project): [string, string][] {
     rows.push(["Steps at the same time", "A git worktree each, merged into the branch when accepted"]);
   if (project.max_step_retries != null)
     rows.push(["Retries per step", String(project.max_step_retries)]);
+  if (project.planner_roles === "on") rows.push(["Planner roles", "On"]);
+  if (project.role_text_max_chars != null)
+    rows.push(["Role text limit", `${project.role_text_max_chars.toLocaleString()} characters`]);
   if (project.distill_lessons !== "off")
     rows.push([
       "Lessons",

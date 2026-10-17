@@ -17,7 +17,7 @@ from typing import Any
 import asyncpg
 
 from ...db import agent_setting_layers as db_layers, connection as db_connection, projects as db_projects
-from ...db import steps as db_steps, task_changes as db_changes, tasks as db_tasks
+from ...db import steps as db_steps, task_changes as db_changes, task_roles as db_roles, tasks as db_tasks
 from ..agent_settings import TASK_ROLES, AgentSettings, AgentType, Layer, index_layers, load_concurrency, resolve
 from ..agent_settings import resolve_concurrency
 from ..message import MANAGER_ADDRESS, TASK_ROUTER_ADDRESS, MessageEnvelope, MessageType, RestartMode, planner_address
@@ -165,8 +165,16 @@ async def _task_view(task_id: str) -> dict[str, Any]:
         "work_dir": task.get("work_dir"),
         "requirement": task.get("requirement"),
         "steps": [{"step": s.get("step_key") or s.get("id"), "status": s.get("status"),
-                   "instruction": clip(s.get("instruction") or "", 200)}
+                   "instruction": clip(s.get("instruction") or "", 200),
+                   # The roles its Planner defined that the step runs as and is reviewed by, when it has them.
+                   **{key: s[column] for key, column in (("role", "role_key"), ("review_role", "review_role_key"))
+                      if s.get(column)},
+                   **({"review_role_required": False} if s.get("review_role_key")
+                      and s.get("review_role_required") is False else {})}
                   for s in task.get("steps") or []],
+        # The roles the task's Planner defined, when it has any (task_roles).
+        **({"roles": roles} if (roles := [{"id": r["role_key"], "kind": r["kind"], "version": r["version"]}
+                                          for r in await db_roles.current(task_id)]) else {}),
         "supplements": [{"text": clip(entry["summary"], 300), "delivered": entry.get("delivered_at") is not None}
                         for entry in supplements],
         "latest_progress": progress[-1]["summary"] if progress else None,

@@ -101,10 +101,12 @@ async def finish_record(
     model: str | None = None,
     error: str | None = None,
     cost_source: str | None = None,
+    outcome: str | None = None,
     pool: asyncpg.Pool | None = None,
 ) -> None:
     """Close a record with the run's outcome, its own usage and cost (and where the cost comes from), its final
-    context and its compactions."""
+    context and its compactions; a Worker's or Reviewer's run also keeps how its report or verdict read
+    (``metadata.outcome``, ``worker.RunOutcome``)."""
     pool = pool or get_pool()
     await pool.execute(
         """
@@ -124,6 +126,8 @@ async def finish_record(
             context_tokens = $14,
             compactions = $15::jsonb,
             cost_source = $16,
+            metadata = CASE WHEN $17::text IS NULL THEN metadata
+                            ELSE COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('outcome', $17::text) END,
             finished_at = now(),
             last_output_at = COALESCE(last_output_at, now())
         WHERE id = $1
@@ -131,7 +135,7 @@ async def finish_record(
         record_id, status, output_text, output_text[:500] if output_text else None,
         session_id, input_tokens, output_tokens, cost_usd, duration_ms, model, error,
         cache_read_tokens, cache_creation_tokens, context_tokens,
-        json.dumps(compactions) if compactions is not None else None, cost_source,
+        json.dumps(compactions) if compactions is not None else None, cost_source, outcome,
     )
 
 
@@ -299,6 +303,25 @@ async def task_costs(
         cost["cost_usd"] += row["cost_usd"]
         cost["by_role"][row["role"]] = {"cost_usd": row["cost_usd"], "runs": row["runs"]}
     return costs
+
+
+async def role_runs(task_id: str, *, pool: asyncpg.Pool | None = None) -> list[dict[str, Any]]:
+    """Task ``task_id``'s Worker and Reviewer runs, counted by ``role`` (``worker`` or ``reviewer``), ``task_role``
+    (the key of the role its Planner defined that the run ran as, '' for the built-in one), ``step_id`` and
+    ``outcome`` (``metadata.outcome``, None before it was recorded or while it runs): ``runs``, ``running`` and
+    ``cost_usd``."""
+    pool = pool or get_pool()
+    rows = await pool.fetch(
+        f"""
+        SELECT {_TASK_ROLE} AS role, COALESCE(metadata->'prompt_layers'->'task_role'->>'id', '') AS task_role,
+               metadata->>'step_id' AS step_id, metadata->>'outcome' AS outcome, count(*) AS runs,
+               count(*) FILTER (WHERE status = 'running') AS running, COALESCE(sum(cost_usd), 0) AS cost_usd
+        FROM llm_records WHERE task_id = $1 AND {_STEP_RUNS}
+        GROUP BY 1, 2, 3, 4
+        """,
+        task_id,
+    )
+    return [dict(row) for row in rows]
 
 
 # ``_TASK_ROLE`` and ``EQUIVALENT`` of the runs ``r`` of a query that joins their tasks ``t``.

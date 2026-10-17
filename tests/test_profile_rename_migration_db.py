@@ -45,14 +45,14 @@ RENAMED = [
 DROPPED = {"agent_configs": {"role", "max_concurrency"}, "agent_setting_layers": {"effort"}}
 # What a later migration of main adds to a v2.6.0 database, not the rename's doing: columns (agent teams, on for its
 # profiles, all on Claude Code runtimes), and a built-in row.
-ADDED = {"agent_sessions": {"clean_start": False}, "agent_setting_layers": {"max_concurrency": None},
+ADDED = {"agent_sessions": {"clean_start": False}, "agent_setting_layers": {"max_concurrency": None, "boundaries": None},
          "agents": {"agent_teams": True}}
 ADDED_ROWS = {"llm_providers": {"prov-codex-login"}}
 UNCHANGED = ["agent_runtimes", "llm_providers", "llm_provider_secrets", "projects", "tasks"]
 # Columns a later migration of main adds to those tables, empty on the rows from before.
 NEW_COLUMNS = {"tasks": ("schedule_id", "budget_usd", "chat_id", "original_user_text", "title", "chat_kind",
                          "chat_mention"),
-               "projects": ("step_workspaces", "max_step_retries")}
+               "projects": ("step_workspaces", "max_step_retries", "planner_roles", "role_text_max_chars")}
 # What the effort's upgrade, a later migration of main, changes: each layer's effort moved onto the profiles its
 # roles ran with it, so these layers and task choices select another profile (by name here; it changes their
 # updated_at), and the profiles they take are added (EFFORT_PROFILES: model, effort).
@@ -205,3 +205,32 @@ def test_a_migrated_v2_6_0_database_is_shaped_like_a_new_one() -> None:
     tables = {column[0] for column in fresh["columns"]}
     assert {"role_configs", "agent_profiles", "task_profile_overrides"} <= tables
     assert not {"agent_configs", "agents", "task_agent_overrides"} & tables
+
+
+def test_a_database_migrated_beside_other_schemas_is_shaped_like_a_database_of_its_own() -> None:
+    """A schema check that looks in the whole database (``pg_constraint`` by name alone) skips what another schema
+    of it already has. Next to a schema the schema was applied to, a v2.6.0 schema migrates to the shape a new
+    database of its own gets, whatever else the shared test database holds."""
+    import asyncpg
+
+    from evals.prompt_regression.runner import fresh_database
+    from looper.db.connection import ensure_schema
+
+    async def _alone(url: str) -> dict[str, Any]:
+        pool = await asyncpg.create_pool(url, min_size=1, max_size=2)
+        try:
+            await ensure_schema(pool)
+            return await _structure(pool)
+        finally:
+            await pool.close()
+
+    async def _beside() -> dict[str, Any]:
+        async with _schema() as neighbour, _schema() as migrated:
+            await ensure_schema(neighbour)
+            await parity.seed_v2_6_0(migrated)
+            await ensure_schema(migrated)
+            return await _structure(migrated)
+
+    with fresh_database(str(DSN)) as (url, _):
+        alone = asyncio.run(_alone(url))
+    assert asyncio.run(_beside()) == alone

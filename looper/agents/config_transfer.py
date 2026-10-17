@@ -92,7 +92,7 @@ _CHANNEL_PUBLIC_KEYS = {
 # carried in the file, so an import of an enabled such channel still needs it set on this machine.
 _CHANNEL_TOKEN_SECRET = {"telegram": "bot token (Settings → Channels)"}
 _ROLE_FIELDS = ("prompt", "timeout_seconds", "enabled")
-_LAYER_FIELDS = ("harness_prompt", "profile", "env", "run_budget_usd", "max_concurrency")
+_LAYER_FIELDS = ("harness_prompt", "profile", "env", "run_budget_usd", "max_concurrency", "boundaries")
 _PROVIDER_FIELDS = ("protocols", "auth", "oauth_runtime_type", "base_url", "models", "env", "max_concurrency")
 _ITEM_FIELDS = ("origin", "source", "version", "description", "modified")
 _DOCUMENT_FIELDS = ("summary", "source_kind", "filename", "path", "sha256", "size_bytes")
@@ -226,7 +226,10 @@ def layer_entry(row: Mapping[str, Any]) -> dict[str, Any]:
     entry = {"scope": row["scope"]}
     if row.get("role"):
         entry["role"] = row["role"]
-    return {**entry, **{name: row.get(name) for name in _LAYER_FIELDS}, "env": list(row.get("env") or [])}
+    entry = {**entry, **{name: row.get(name) for name in _LAYER_FIELDS}, "env": list(row.get("env") or [])}
+    if entry["boundaries"] is None:  # only the shared defaults may hold them; a file without them has none
+        del entry["boundaries"]
+    return entry
 
 
 def role_entry(row: Mapping[str, Any]) -> dict[str, Any]:
@@ -1043,7 +1046,8 @@ class _Importer:
             label = f"{self.project_labels.get(project_id or '', '')}{scope}" + (f":{role}" if role else "")
             current = _stored_layer(self.target.layers.get((scope, role, project_id)))
             profile_id, name = selected(choice)
-            empty = {"harness_prompt": None, "env": [], "run_budget_usd": None, "max_concurrency": None}
+            empty = {"harness_prompt": None, "env": [], "run_budget_usd": None, "max_concurrency": None,
+                     "boundaries": None}
             self._effort_note(section, label, None, name, current["profile"] if current else None)
             await self._write_layer(section, label, (scope, role, project_id), current,
                                     {**(current or empty), "profile": name}, profile_id)

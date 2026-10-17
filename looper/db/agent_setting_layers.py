@@ -8,8 +8,10 @@ role's role or role-in-a-project layer only) how many of the role run at once in
 the profile of some of its roles (``task_profile_overrides``) and how many of its Workers or Reviewers run at once
 (``task_concurrency_limits``): together, its task layer. Its Planner may choose the profile of its Workers or
 Reviewers, for the rest of the task or for one step (``task_planner_profiles``), under the task layer; a choice
-counts only while its profile is on the list of the task's project (``project_allowed_profiles``). Code owns the
-fields' types, validation and resolution (``looper.agents.agent_settings``); this module only stores rows.
+counts only while its profile is on the list of the task's project (``project_allowed_profiles``); so does the
+profile of a role its Planner defined (``task_roles``), for a run of that role. The system layer alone may hold
+``boundaries``. Code owns the fields' types, validation and resolution (``looper.agents.agent_settings``); this module
+only stores rows.
 """
 
 from __future__ import annotations
@@ -23,7 +25,7 @@ import asyncpg
 from .profile_registry import PROFILE_JOIN, PROFILE_JSON
 from .connection import get_pool
 
-FIELDS = ("harness_prompt", "profile_id", "env", "run_budget_usd", "max_concurrency")
+FIELDS = ("harness_prompt", "profile_id", "env", "run_budget_usd", "max_concurrency", "boundaries")
 
 # A task's Planner's choices that count: those whose profile its project allows now.
 _PLANNER_CHOICES = (
@@ -42,17 +44,18 @@ def _row(row: asyncpg.Record) -> dict[str, Any]:
 
 async def list_layers(
     project_id: str | None = None, *, task_id: str | None = None, step_id: str | None = None,
-    pool: asyncpg.Pool | None = None,
+    task_role: tuple[str, int] | None = None, pool: asyncpg.Pool | None = None,
 ) -> list[dict[str, Any]]:
     """Every row outside projects (system and role layers), and ``project_id``'s rows when given, each with its
     ``profile`` (``profile_registry.PROFILE_JSON``, or None); with ``task_id``, also a ``task`` row per role the task
     chose a profile or a concurrency limit for, and a ``planner_task`` row per role its Planner chose a profile for
     the rest of the task (one its project allows); with ``step_id`` too, a ``planner_step`` row per role its
-    Planner chose one for that step."""
+    Planner chose one for that step; with ``task_role`` too (a role's key and version), a ``task_role`` row for the
+    role's kind when that version of the role has a profile its project allows."""
     pool = pool or get_pool()
     rows = await pool.fetch(
         f"SELECT l.scope, l.role, l.project_id, l.harness_prompt, l.profile_id, l.env, l.run_budget_usd, "
-        f"l.max_concurrency, "
+        f"l.max_concurrency, l.boundaries, "
         f"(SELECT {PROFILE_JSON} FROM {PROFILE_JOIN} WHERE a.id = l.profile_id) AS profile "
         "FROM agent_setting_layers l WHERE l.project_id IS NULL OR l.project_id = $1",
         project_id,
@@ -73,6 +76,16 @@ async def list_layers(
             task_id, step_id,
         )
         layers += [{"task_id": task_id, **_row(r)} for r in chosen]
+        if task_role is not None:
+            role = await pool.fetch(
+                f"SELECT 'task_role' AS scope, CASE tr.kind WHEN 'work' THEN 'worker' ELSE 'reviewer' END AS role, "
+                f"tr.profile_id, (SELECT {PROFILE_JSON} FROM {PROFILE_JOIN} WHERE a.id = tr.profile_id) AS profile "
+                "FROM task_roles tr JOIN tasks k ON k.id = tr.task_id "
+                "JOIN project_allowed_profiles l ON l.project_id = k.project_id AND l.profile_id = tr.profile_id "
+                "WHERE tr.task_id = $1 AND tr.role_key = $2 AND tr.version = $3",
+                task_id, task_role[0], task_role[1],
+            )
+            layers += [{"task_id": task_id, **_row(r)} for r in role]
     return layers
 
 
@@ -111,7 +124,7 @@ async def put_layer(
         await conn.execute(
             "DELETE FROM agent_setting_layers WHERE scope = $1 AND role IS NOT DISTINCT FROM $2 "
             "AND project_id IS NOT DISTINCT FROM $3 AND harness_prompt IS NULL AND profile_id IS NULL "
-            "AND env = '[]'::jsonb AND run_budget_usd IS NULL AND max_concurrency IS NULL",
+            "AND env = '[]'::jsonb AND run_budget_usd IS NULL AND max_concurrency IS NULL AND boundaries IS NULL",
             scope, role, project_id,
         )
 

@@ -291,12 +291,14 @@ async def reset_task_for_restart(
 ) -> bool:
     """Clear the task's outcome before it runs again.
 
-    Planned anew, its steps, its plan, its Planner's session and its Planner's
-    choices of Agent Profile go; continuing its plan (``keep_steps``), they stay.
+    Planned anew, its steps, its plan, its Planner's session, its Planner's
+    choices of Agent Profile and the roles its Planner defined go; continuing its
+    plan (``keep_steps``), they stay.
     """
     pool = pool or get_pool()
     if not keep_steps:
         await pool.execute("DELETE FROM task_planner_profiles WHERE task_id = $1", task_id)
+        await pool.execute("DELETE FROM task_roles WHERE task_id = $1", task_id)
         await pool.execute("DELETE FROM task_steps WHERE task_id = $1", task_id)
         await pool.execute("DELETE FROM task_plans WHERE task_id = $1", task_id)
         await pool.execute("DELETE FROM agent_sessions WHERE agent_id = $1", planner_agent_id(task_id))
