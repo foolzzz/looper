@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import time
 from collections import deque
 from collections.abc import AsyncIterator, Awaitable, Callable
@@ -265,7 +266,11 @@ def permission_args() -> list[str]:
     return ["--dangerously-skip-permissions"]
 
 
-# The tools a run that must not change files does not have (``read_only_args``).
+# The permission mode of a run that must not change files (``read_only_args``): Claude Code 2.1.285's name for its
+# default mode, pinned so that a project's settings (``permissions.defaultMode``) cannot loosen it, and with no one to
+# answer its permission prompts, so that whatever would prompt is refused.
+READ_ONLY_MODE = ("--permission-mode", "manual", "--permission-prompts", "none")
+# The tools such a run does not have.
 WRITE_TOOLS = ("Edit", "Write", "NotebookEdit")
 # The tools it may use although Claude Code's default permission mode would ask first; none of them changes a file.
 READ_ONLY_ALLOWED = ("Skill", "WebFetch", "WebSearch")
@@ -273,11 +278,20 @@ READ_ONLY_ALLOWED = ("Skill", "WebFetch", "WebSearch")
 DENIAL_INPUT_CHARS = 200
 
 
+def mcp_rule(server: str) -> str:
+    """The permission rule that allows every tool of the MCP server ``server``: Claude Code names its tools
+    ``mcp__<server>__<tool>``, with each character of the server's name that is not a letter, a digit, ``_`` or
+    ``-`` replaced by ``_``."""
+    return "mcp__" + re.sub(r"[^A-Za-z0-9_-]", "_", server)
+
+
 def read_only_args(library: AgentLibrary) -> list[str]:
     """The flags of a run that must not change files (a Planner's, ``Launch.read_only``), in place of
-    ``permission_args``: Claude Code's default permission mode, which in ``--print`` mode refuses every tool call it
-    would ask about, without the file-editing tools (``WRITE_TOOLS``), and with what the run may use without
-    asking: its skills, web reads and the MCP servers installed for it, Looper's own among them.
+    ``permission_args``: Claude Code's default permission mode, pinned and with no one to answer its prompts
+    (``READ_ONLY_MODE``), so that in ``--print`` mode it refuses every tool call it would ask about; without the
+    file-editing tools (``WRITE_TOOLS``); and with what the run may use without asking: its skills, web reads and the
+    MCP servers installed for it, Looper's own among them (``mcp_rule``). A plugin's own MCP servers never load
+    (``--strict-mcp-config``), so none needs a rule.
 
     Verified against Claude Code 2.1.285 in ``--print`` stream-json mode with the isolation flags: Bash runs
     ``ls``, ``cat``, ``git status``, ``git log`` and ``git show`` and refuses a redirect, ``touch``, a ``python3``
@@ -286,13 +300,14 @@ def read_only_args(library: AgentLibrary) -> list[str]:
     """
     from .library import ItemKind
 
-    servers = [f"mcp__{item.name}" for item in library.items if item.kind is ItemKind.MCP]
-    return ["--disallowedTools", ",".join(WRITE_TOOLS), "--allowedTools", ",".join((*READ_ONLY_ALLOWED, *servers))]
+    servers = [mcp_rule(item.name) for item in library.items if item.kind is ItemKind.MCP]
+    return [*READ_ONLY_MODE, "--disallowedTools", ",".join(WRITE_TOOLS),
+            "--allowedTools", ",".join((*READ_ONLY_ALLOWED, *servers))]
 
 
 def permission_denials(result_event: dict[str, Any] | None) -> list[dict[str, str]]:
-    """The tool calls Claude Code refused in a run, from its result's ``permission_denials``: each one's tool and
-    its input (a Bash call's command), shortened to ``DENIAL_INPUT_CHARS``."""
+    """The tool calls Claude Code refused in a run, from its result's ``permission_denials``: each one's tool, its
+    input (a Bash call's command), shortened to ``DENIAL_INPUT_CHARS``, and the id of its ``tool_use``."""
     denials = []
     for raw in (result_event or {}).get("permission_denials") or []:
         if not isinstance(raw, dict):
@@ -300,7 +315,8 @@ def permission_denials(result_event: dict[str, Any] | None) -> list[dict[str, st
         tool_input = raw.get("tool_input") if isinstance(raw.get("tool_input"), dict) else {}
         shown = tool_input.get("command") if isinstance(tool_input.get("command"), str) else json.dumps(
             tool_input, ensure_ascii=False)
-        denials.append({"tool": str(raw.get("tool_name") or "?"), "input": shown[:DENIAL_INPUT_CHARS]})
+        denials.append({"tool": str(raw.get("tool_name") or "?"), "input": shown[:DENIAL_INPUT_CHARS],
+                        "id": str(raw.get("tool_use_id") or "")})
     return denials
 
 
@@ -1065,12 +1081,12 @@ class ClaudeRunRecorder:
         error: str | None = None,
         usage: Usage | None = None,
         outcome: str | None = None,
-        changed_files: list[str] | None = None,
+        metadata: dict[str, Any] | None = None,
     ) -> None:
         """Close the record with the run's own ``usage``; without one, all the result reports is the run's.
         ``outcome`` is how a Worker's report or a Reviewer's verdict read (``worker.RunOutcome``); the tool calls
-        the runtime refused (``RuntimeAdapter.permission_denials``) and the files a read-only Planner's turn changed
-        (``changed_files``) are kept as ``permission_denials`` and ``planner_changed_files``.
+        the runtime refused (``RuntimeAdapter.permission_denials``) are kept as ``permission_denials``, and
+        ``metadata``'s keys beside them (how a read-only Planner's turn was checked).
 
         Claude reports the running totals of its session, so a run that is
         one turn of a longer-lived session passes its own share
@@ -1092,11 +1108,9 @@ class ClaudeRunRecorder:
             usage = usage.filled_from(self._spend.usage)
         cost = self._runtime().cost(usage, self._provider())
         usage = cost.usage
-        notes: dict[str, Any] = {}
+        notes: dict[str, Any] = dict(metadata or {})
         if denials := self._runtime().permission_denials(result_event):
             notes["permission_denials"] = denials
-        if changed_files:
-            notes["planner_changed_files"] = changed_files
         try:
             await llm_records.finish_record(
                 self._record_id,

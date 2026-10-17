@@ -147,6 +147,12 @@ def _items(title: str, items: Sequence[str], *, prefix: str = "- ") -> list[str]
     return [title, *(f"{prefix}{item}" for item in items)] if items else []
 
 
+def _note(text: str) -> str:
+    """One of the Planner's retry notes as a list item: its further lines indented under it, so a note with a heading
+    or a list of its own stays one item."""
+    return "- " + text.strip().replace("\n", "\n  ")
+
+
 def plan_task_section(
     *, task_id: str, requirement: str, project_name: str, work_dir: str, project_description: str = "",
 ) -> str:
@@ -193,7 +199,7 @@ def work_task_section(
     lines += _items("Validation commands, to run after making changes:", validation_commands, prefix="$ ")
     if feedback:
         lines += ["", f"This step is being retried (attempt {attempt}). Feedback on the previous attempts:"]
-        lines += [f"- {item}" for item in feedback]
+        lines += [_note(item) for item in feedback]
     if workspace:
         lines += ["", *_worktree_lines(workspace)]
     return "\n".join(lines)
@@ -242,7 +248,7 @@ def review_task_section(
         lines += ["", "The Planner retried this step with these notes to its Worker, oldest first. They are the "
                       "Planner's changes to the step: where a note changes the instruction or the acceptance criteria "
                       "above, review against the note; every criterion that no note changes still holds."]
-        lines += [f"- {note}" for note in retry_notes]
+        lines += [_note(note) for note in retry_notes]
     if review_role:
         lines += [f"You review it as the role {review_role}: besides these criteria, what your role above asks you "
                   "to check decides your verdict too, so passed is false when the work fails either."]

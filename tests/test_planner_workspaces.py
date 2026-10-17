@@ -133,6 +133,11 @@ class TestStepWorkspaces:
         notes = activity(agent_db)
         assert any(n.startswith("Checkpoint ") and "1 pending file(s)" in n for n in notes)
         assert sum("merged into main as" in n for n in notes) == 2
+        # The decision on a step in its own worktree says where it is: outside what the read-only Planner reads.
+        decisions = [t["text"] for t in claude.turns() if t["text"].startswith("[DECISION]")]
+        base = one["workspace"]["base_commit"][:12]
+        assert sum(f"- worktree: {one['work_dir']}, on branch looper/t1/s1-1 from {base}" in d for d in decisions) == 1
+        assert not any("- worktree:" in d for d in decisions if d.startswith("[DECISION] Step s3"))
         states = [row["state"] for row in agent_db.store.workspaces.values()]
         assert states == ["merged", "merged"]
 

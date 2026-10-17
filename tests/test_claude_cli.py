@@ -89,7 +89,7 @@ class TestClaudeRunRecorder:
         assert finish["error"] is None
         assert finish["metadata"] is None  # nothing refused, nothing changed: the record's metadata is as it was
 
-    def test_the_calls_a_run_was_refused_and_the_files_a_turn_changed_are_kept(self, agent_db: Any) -> None:
+    def test_the_calls_a_run_was_refused_and_how_a_turn_was_checked_are_kept(self, agent_db: Any) -> None:
         recorder = self._recorder()
 
         async def _run() -> None:
@@ -97,12 +97,12 @@ class TestClaudeRunRecorder:
             await recorder.finish(output_text="ok", result_event={
                 "type": "result", "subtype": "success", "is_error": False, "permission_denials": [
                     {"tool_name": "Bash", "tool_use_id": "t", "tool_input": {"command": "touch made.txt"}}]},
-                changed_files=["notes.md"])
+                metadata={"read_only_check": "compared", "planner_changed_files": ["notes.md"]})
 
         asyncio.run(_run())
         assert agent_db.finish_record.await_args.kwargs["metadata"] == {
-            "permission_denials": [{"tool": "Bash", "input": "touch made.txt"}],
-            "planner_changed_files": ["notes.md"]}
+            "read_only_check": "compared", "planner_changed_files": ["notes.md"],
+            "permission_denials": [{"tool": "Bash", "input": "touch made.txt", "id": "t"}]}
 
     @pytest.mark.parametrize(
         ("result_event", "error", "expected"),
@@ -292,13 +292,23 @@ class TestPermissionArgs:
                                mcp_config=str(tmp_path / "mcp.json"))
         launch = Launch(library=library, role=AgentType.PLANNER)
         args = launch.args()
-        # Claude Code's default permission mode refuses what it would ask about; no file-editing tools.
-        assert "--dangerously-skip-permissions" not in args and "--permission-mode" not in args
-        assert args[:4] == ["--disallowedTools", "Edit,Write,NotebookEdit",
+        # Claude Code's default permission mode, pinned against a project's own settings, with no one to answer its
+        # prompts, so that what it would ask about is refused; no file-editing tools.
+        assert "--dangerously-skip-permissions" not in args
+        assert args[:8] == ["--permission-mode", "manual", "--permission-prompts", "none",
+                            "--disallowedTools", "Edit,Write,NotebookEdit",
                             "--allowedTools", "Skill,WebFetch,WebSearch,mcp__looper,mcp__docs"]
         assert launch.record()["read_only"] == "permissions"
-        assert Launch(role=AgentType.PLANNER).args()[:4] == [
-            "--disallowedTools", "Edit,Write,NotebookEdit", "--allowedTools", "Skill,WebFetch,WebSearch"]
+        assert Launch(role=AgentType.PLANNER).args()[6:8] == ["--allowedTools", "Skill,WebFetch,WebSearch"]
+
+    @pytest.mark.parametrize(("server", "rule"), [
+        ("looper", "mcp__looper"), ("probe.v2", "mcp__probe_v2"), ("my server+x", "mcp__my_server_x"),
+        ("a-b_c9", "mcp__a-b_c9"),
+    ])
+    def test_an_mcp_servers_rule_names_it_as_claude_code_names_its_tools(self, server: str, rule: str) -> None:
+        from looper.agents.claude_cli import mcp_rule
+
+        assert mcp_rule(server) == rule
 
     def test_a_refused_tool_call_is_read_from_the_result(self) -> None:
         from looper.agents.claude_cli import DENIAL_INPUT_CHARS, permission_denials
@@ -310,7 +320,7 @@ class TestPermissionArgs:
             "not a denial",
         ]}
         denials = permission_denials(result)
-        assert denials[0] == {"tool": "Bash", "input": "echo hi > made.txt"}
+        assert denials[0] == {"tool": "Bash", "input": "echo hi > made.txt", "id": "t1"}
         assert denials[1]["tool"] == "mcp__x__write" and len(denials[1]["input"]) == DENIAL_INPUT_CHARS
         assert len(denials) == 2
         assert permission_denials({"type": "result"}) == permission_denials(None) == []

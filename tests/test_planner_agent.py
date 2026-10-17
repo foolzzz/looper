@@ -281,9 +281,12 @@ def _flag(argv: list[str], name: str) -> str | None:
 
 
 def _assert_read_only(argv: list[str]) -> None:
-    """A Planner's read-only flags, once: Claude Code's default permission mode, without the file-editing tools,
-    with its skills and web reads (and its MCP servers) allowed; nothing that skips the permissions."""
-    assert "--dangerously-skip-permissions" not in argv and "--permission-mode" not in argv and "--tools" not in argv
+    """A Planner's read-only flags, once: Claude Code's default permission mode, pinned and with no one to answer its
+    prompts, without the file-editing tools, with its skills and web reads (and its MCP servers) allowed; nothing
+    that skips the permissions."""
+    assert "--dangerously-skip-permissions" not in argv and "--tools" not in argv
+    assert argv.count("--permission-mode") == 1 and _flag(argv, "--permission-mode") == "manual"
+    assert argv.count("--permission-prompts") == 1 and _flag(argv, "--permission-prompts") == "none"
     assert argv.count("--disallowedTools") == 1 and _flag(argv, "--disallowedTools") == "Edit,Write,NotebookEdit"
     assert argv.count("--allowedTools") == 1
     assert str(_flag(argv, "--allowedTools")).startswith("Skill,WebFetch,WebSearch")
@@ -565,17 +568,28 @@ class TestReadOnly:
     cannot, the Planner checks its task directory after each turn."""
 
     def test_the_calls_claude_code_refused_are_kept_with_the_turn_and_said_in_the_activity(
-        self, planner_claude: Any, agent_db: Any,
+        self, planner_claude: Any, agent_db: Any, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        refused = [{"tool_name": "Bash", "tool_use_id": "t1", "tool_input": {"command": "echo plan > PLAN.md"}}]
+        from looper.agents import log_redaction
+
+        monkeypatch.setattr(log_redaction, "_secrets", ("sk-live-secret-123",))
+        token = "curl -H 'Authorization: sk-live-secret-123' https://example.com/" + "x" * 200
+        refused = [{"tool_name": "Bash", "tool_use_id": "t1", "tool_input": {"command": "echo plan > PLAN.md"}},
+                   {"tool_name": "Bash", "tool_use_id": "t2", "tool_input": {"command": token}}]
         claude = planner_claude(plan(step("s1")), decide("accept"), denied={1: refused})
         h = drive(claude, always(WORK_OK))
 
         assert h.final() is not None and h.final().payload["status"] == "completed"
         notes = [c.kwargs.get("metadata") for c in agent_db.finish_record.await_args_list]
-        assert notes.count({"permission_denials": [{"tool": "Bash", "input": "echo plan > PLAN.md"}]}) == 1
-        assert ("The Planner runs read-only: Looper refused 1 of its tool calls (Bash: echo plan > PLAN.md)"
-                in activity(agent_db))
+        # The plan turn's record keeps both calls; on Claude Code no turn needs a directory check.
+        (kept,) = [n for n in notes if n]
+        assert list(kept) == ["permission_denials"]
+        assert [(d["tool"], d["id"]) for d in kept["permission_denials"]] == [("Bash", "t1"), ("Bash", "t2")]
+        # The activity shows each call shortened, a known secret masked.
+        (line,) = [a for a in activity(agent_db) if a.startswith("The Planner runs read-only")]
+        assert line.startswith("The Planner runs read-only: Looper refused 2 of its tool calls (Bash: echo plan > "
+                               "PLAN.md; Bash: curl -H 'Authorization: ")
+        assert "sk-live-secret-123" not in line and len(line) < 200
 
     @pytest.mark.parametrize("enforced", [False, True], ids=["check", "permissions"])
     def test_where_the_runtime_cannot_refuse_a_change_the_turn_that_made_it_is_reported(
@@ -598,16 +612,18 @@ class TestReadOnly:
             await h.finished()
 
         drive(claude, always(WORK_OK), scenario)
-        reported = [line for line in activity(agent_db) if "changed files in its turn" in line]
+        reported = [line for line in activity(agent_db) if "files changed in the task directory" in line]
         notes = [c.kwargs.get("metadata") for c in agent_db.finish_record.await_args_list]
         if enforced:
             # Claude Code refuses such a change itself: the Planner does not look.
             assert reported == [] and not any(notes)
             return
         # The plan turn wrote the file; the decision turn changed nothing (s1's Worker had finished by then).
-        assert reported == ["The Planner changed files in its turn, which it leaves to Workers: notes.md. Its "
-                            "runtime cannot refuse this; the files are left as they are"]
-        assert [n for n in notes if n] == [{"planner_changed_files": ["notes.md"]}]
+        assert reported == ["Warning: files changed in the task directory during a Planner turn, while no Worker, "
+                            "Reviewer or other task ran there (its runtime cannot refuse writes): notes.md. They are "
+                            "left as they are"]
+        assert notes == [{"read_only_check": "compared", "planner_changed_files": ["notes.md"]},
+                         {"read_only_check": "compared"}]
 
     def test_a_turn_while_a_worker_runs_in_the_task_directory_is_not_checked(
         self, planner_claude: Any, agent_db: Any, monkeypatch: pytest.MonkeyPatch,
@@ -634,8 +650,39 @@ class TestReadOnly:
 
         h = drive(claude, lambda e: None if e.payload["step_key"] == "s1" else WORK_OK, scenario)
         assert h.final() is not None and h.final().payload["status"] == "completed"
-        assert not [line for line in activity(agent_db) if "changed files in its turn" in line]
-        assert not any(c.kwargs.get("metadata") for c in agent_db.finish_record.await_args_list)
+        assert not [line for line in activity(agent_db) if "files changed in the task directory" in line]
+        assert [c.kwargs.get("metadata") for c in agent_db.finish_record.await_args_list] == [
+            {"read_only_check": "compared"}, {"read_only_check": "shared"}, {"read_only_check": "compared"}]
+
+    @pytest.mark.parametrize("where", ["another task runs there", "the other tasks cannot be read", "no git checkout"])
+    def test_a_turn_whose_change_cannot_be_told_apart_is_recorded_as_not_compared(
+        self, planner_claude: Any, agent_db: Any, monkeypatch: pytest.MonkeyPatch, where: str,
+    ) -> None:
+        from looper.agents.runtimes import ReadOnly
+        from looper.agents.runtimes.claude_code import ClaudeCodeRuntime
+
+        monkeypatch.setattr(ClaudeCodeRuntime, "read_only", ReadOnly.CHECK)
+        shared = where != "no git checkout"
+        agent_db.others_active_in.return_value = where == "another task runs there"
+        if where == "the other tasks cannot be read":
+            agent_db.others_active_in.side_effect = RuntimeError("database pool not initialised")
+        claude = planner_claude(plan(step("s1")), decide("accept"), writes={1: {"notes.md": "my plan\n"}})
+
+        async def scenario(h: Harness) -> None:
+            h.work_dir.mkdir(parents=True, exist_ok=True)
+            if shared:  # a checkout another task's agents may change files in too
+                identity = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+                            "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+                for args in (["init", "-q"], ["commit", "-q", "--allow-empty", "-m", "start"]):
+                    subprocess.run(["git", *args], cwd=h.work_dir, check=True, env=identity)
+            await h.start()
+            await h.finished()
+
+        drive(claude, always(WORK_OK), scenario)
+        assert not [line for line in activity(agent_db) if "files changed in the task directory" in line]
+        check = "shared" if shared else "no_checkout"
+        assert [c.kwargs.get("metadata") for c in agent_db.finish_record.await_args_list] == [
+            {"read_only_check": check}] * 2
 
 
 @pytest.mark.usefixtures("agent_db")
@@ -805,7 +852,8 @@ class TestResidentClaude:
         # Every turn arrives on stdin; the command line carries no prompt.
         takes_value = {"--input-format", "--output-format",
                        "--append-system-prompt-file", "--system-prompt-snapshot", "--setting-sources",
-                       "--settings", "--model", "--max-turns", "--disallowedTools", "--allowedTools"}
+                       "--settings", "--model", "--max-turns", "--disallowedTools", "--allowedTools",
+                       "--permission-mode", "--permission-prompts"}
         assert [a for i, a in enumerate(argv) if not a.startswith("--") and argv[i - 1] not in takes_value] == []
 
     def test_each_turn_is_recorded_with_its_own_cost(self, planner_claude: Any, agent_db: Any) -> None:

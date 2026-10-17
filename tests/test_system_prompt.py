@@ -198,6 +198,11 @@ def test_a_reviewer_reviews_against_the_notes_its_step_was_retried_with() -> Non
     assert retried == plain.replace("- summary.txt has 4 lines", f"- summary.txt has 4 lines\n\n{notes}")
     assert "retried" not in plain and plain == WorkerPool._task_section({**payload, "feedback": []}, "/w",
                                                                         is_verify=True)
+    # A note of several lines stays one item, its further lines under it; for the Worker as for the Reviewer.
+    long = {**payload, "feedback": ["Write all five:\n## Regions\n- central too"], "attempt": 2}
+    for verify in (True, False):
+        assert "- Write all five:\n  ## Regions\n  - central too" in WorkerPool._task_section(long, "/w",
+                                                                                            is_verify=verify)
 
 
 def test_a_long_requirement_is_clipped_with_a_visible_marker() -> None:

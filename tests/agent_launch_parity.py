@@ -212,7 +212,8 @@ def without_agent_teams(argv: list[str]) -> list[str]:
 # A Planner runs read-only since the fixture was made (the Planner read-only RFC): its permission flag, and the line of
 # its recommended role prompt that said it had every tool, then and now.
 _PLANNER_PERMISSIONS = (["--dangerously-skip-permissions"],
-                        ["--disallowedTools", "Edit,Write,NotebookEdit", "--allowedTools", "Skill,WebFetch,WebSearch"])
+                        ["--permission-mode", "manual", "--permission-prompts", "none",
+                         "--disallowedTools", "Edit,Write,NotebookEdit", "--allowedTools", "Skill,WebFetch,WebSearch"])
 _PLANNER_TOOLS_LINE = (
     "- You have every tool. Read the project and run harmless commands (for\n  example to look at the build or the "
     "tests) when that helps you plan a step\n  or judge a result, and leave the project as you found it.\n",

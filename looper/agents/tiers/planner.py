@@ -111,6 +111,7 @@ from .. import session_switch
 from .. import step_workspaces as workspaces
 from ..knowledge import AgentKnowledge, documents_label, load_knowledge
 from ..library import AgentLibrary, items_label, load_installed
+from ..log_redaction import redact
 from ..project_execution import LessonsMode, ProjectExecution, TaskBudgetAction, format_usd
 from ..run_usage import Usage
 from ..runtimes import CLAUDE_CODE, ReadOnly
@@ -201,6 +202,8 @@ GATE_IDLE_CHECK_SEC = 60
 # A [GATE] turn that failed is tried again on its own once for each wait (``user_gates.RETRY_WAIT_SEC``), checked
 # every ``GATE_IDLE_CHECK_SEC``; after the last, the user's next message sends the messages again.
 GATE_RETRY_WAIT_SEC = RETRY_WAIT_SEC
+# How much of a refused call's input the task's activity shows (the run's record keeps more).
+DENIAL_SHOWN_CHARS = 80
 # Why an accepted step's branch could not be merged, for the decision turn.
 _MERGE_REASONS = {
     MergeError.CONFLICT: "its changes conflict with what the branch has now",
@@ -253,6 +256,23 @@ user's messages about it.
 """
 
 T = TypeVar("T")
+
+
+class FilesCheck(str, Enum):
+    """How a read-only Planner's turn was checked where its runtime cannot refuse writes (``ReadOnly.CHECK``): the
+    run's ``metadata.read_only_check``."""
+
+    COMPARED = "compared"  # the task directory's git checkout before and after the turn
+    NO_CHECKOUT = "no_checkout"  # the task directory is in no git checkout: not checked
+    SHARED = "shared"  # a Worker, a Reviewer or another task may change files there too: whose change it is is unknown
+
+
+@dataclass(frozen=True)
+class _Watched:
+    """A turn's check as it starts: the task directory's state (``step_workspaces.tree_state``) and how it is checked."""
+
+    state: dict[str, str] | None
+    check: FilesCheck
 
 
 @dataclass(frozen=True)
@@ -2567,7 +2587,7 @@ class PlannerAgent:
         recorder = self._recorder(plan, text, process)
         await recorder.start()
         # Where the runtime cannot keep the Planner from changing files, the task directory as the turn starts.
-        watched = await self._watched_files(plan, process.launch)
+        watched = await self._watch_files(plan, process.launch)
 
         async def on_event(event: dict[str, Any]) -> None:
             await recorder.record(event)
@@ -2622,13 +2642,14 @@ class PlannerAgent:
         if result_event is not None:
             plan.session_totals = self._claude.totals
             await self._save_session(plan)
-        changed = await self._changed_files(plan, watched)
+        changed, check = await self._changed_files(plan, watched)
         await recorder.finish(
             output_text=final_text or None,
             result_event=result_event,
             error=error,
             usage=turn.usage,
-            changed_files=changed,
+            metadata={"read_only_check": check.value, **({"planner_changed_files": changed} if changed else {})}
+            if check is not None else None,
         )
         await self._report_read_only(process.launch.runtime.permission_denials(result_event), changed)
         if error:
@@ -2637,40 +2658,54 @@ class PlannerAgent:
 
     # --- The Planner changes no file ---
 
-    async def _watched_files(self, plan: TaskPlan, launch: Launch) -> dict[str, str] | None:
-        """The task directory's state as a read-only turn starts (``step_workspaces.tree_state``), where the turn's
-        runtime cannot refuse what would change files (``ReadOnly.CHECK``) and a change in it during the turn could
-        only be the Planner's; None otherwise, and outside a git checkout."""
-        if not launch.read_only or launch.runtime.read_only is not ReadOnly.CHECK or not self._only_planner(plan):
+    async def _watch_files(self, plan: TaskPlan, launch: Launch) -> _Watched | None:
+        """How a read-only turn whose runtime cannot refuse what would change files (``ReadOnly.CHECK``) is checked,
+        and the task directory's state as it starts; None for a turn that needs no check."""
+        if not launch.read_only or launch.runtime.read_only is not ReadOnly.CHECK:
             return None
-        return await workspaces.tree_state(plan.work_dir)
+        if await self._shared(plan):
+            return _Watched(None, FilesCheck.SHARED)
+        state = await workspaces.tree_state(plan.work_dir)
+        return _Watched(state, FilesCheck.COMPARED if state is not None else FilesCheck.NO_CHECKOUT)
 
-    @staticmethod
-    def _only_planner(plan: TaskPlan) -> bool:
-        """Whether no Worker or Reviewer of the task runs in the task directory now: a step in a worktree of its own
-        runs elsewhere."""
-        return not any(step.status in ("dispatched", "completed") and not step.isolated for step in plan.steps)
+    async def _shared(self, plan: TaskPlan) -> bool:
+        """Whether something besides the Planner may change files in the task directory now: a Worker or Reviewer of
+        this task that runs in it (a step in a worktree of its own runs elsewhere), or another task that is running
+        or starting in the same directory; True when that cannot be read."""
+        if any(step.status in ("dispatched", "completed") and not step.isolated for step in plan.steps):
+            return True
+        try:
+            return await db_tasks.others_active_in(plan.work_dir, self._task_id)
+        except Exception:
+            logger.warning("planner %s cannot read the other tasks in its directory", self.agent_id, exc_info=True)
+            return True
 
-    async def _changed_files(self, plan: TaskPlan, watched: dict[str, str] | None) -> list[str] | None:
-        """What changed in the task directory during the turn that started at ``watched``, when only the Planner ran
-        in it all along; None when nothing did or it cannot be told."""
-        if watched is None or not self._only_planner(plan):
-            return None
+    async def _changed_files(self, plan: TaskPlan, watched: _Watched | None) -> tuple[list[str] | None,
+                                                                                      FilesCheck | None]:
+        """What changed in the task directory during the turn that started at ``watched``, when only the Planner
+        could have changed it all along (None when nothing did), and how the turn was checked (None: no check)."""
+        if watched is None or watched.state is None:
+            return None, watched.check if watched is not None else None
+        if await self._shared(plan):
+            return None, FilesCheck.SHARED
         now = await workspaces.tree_state(plan.work_dir)
-        return (workspaces.changed_between(watched, now) or None) if now is not None else None
+        if now is None:
+            return None, FilesCheck.NO_CHECKOUT
+        return workspaces.changed_between(watched.state, now) or None, FilesCheck.COMPARED
 
     async def _report_read_only(self, denials: list[dict[str, str]], changed: list[str] | None) -> None:
-        """Say in the task's activity what the read-only Planner's turn was refused, or changed all the same."""
+        """Say in the task's activity what the read-only Planner's turn was refused (each call's input masked and
+        shortened to ``DENIAL_SHOWN_CHARS``), or which files changed in the task directory during it."""
         if denials:
-            refused = "; ".join(f"{d['tool']}: {d['input']}" for d in denials[:5])
+            refused = "; ".join(f"{d['tool']}: {redact(d['input'])[:DENIAL_SHOWN_CHARS]}" for d in denials[:5])
             more = f" and {len(denials) - 5} more" if len(denials) > 5 else ""
             await self._activity("phase", f"The Planner runs read-only: Looper refused {len(denials)} of its tool "
                                           f"calls ({refused}{more})"[:500])
         if changed:
             shown = ", ".join(changed[:10]) + (f" and {len(changed) - 10} more" if len(changed) > 10 else "")
-            await self._activity("error", f"The Planner changed files in its turn, which it leaves to Workers: "
-                                          f"{shown}. Its runtime cannot refuse this; the files are left as they are"
-                                          [:500])
+            await self._activity("error", f"Warning: files changed in the task directory during a Planner turn, "
+                                          f"while no Worker, Reviewer or other task ran there (its runtime cannot "
+                                          f"refuse writes): {shown}. They are left as they are"[:500])
 
     # --- A new session: the handoff before it and the resume brief that starts it ---
 
@@ -2902,6 +2937,11 @@ class PlannerAgent:
         deleted = result.get("deleted_files")
         if isinstance(deleted, list) and deleted:
             lines.append(f"- deleted files: {', '.join(str(p) for p in deleted[:20])}")
+        if step.isolated and step.workspace is not None:
+            # Outside the directories the read-only Planner reads; git still shows its committed changes.
+            workspace = step.workspace
+            lines.append(f"- worktree: {workspace.path}, on branch {workspaces.short_branch(workspace.branch)} from "
+                         f"{workspace.base_commit[:12]}")
         if result.get("error") and result.get("error") != result.get("summary"):
             lines.append(f"- error: {_clip(result['error'], 500)}")
         if result.get("final_message"):
