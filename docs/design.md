@@ -238,8 +238,8 @@ Web 始终开启。Telegram 和 Lark 默认内置，不需要任何启动参数�
 
 ### Lark（lark-cli）
 
-- 需要 `lark-cli` 在 PATH 上且已登录，收发消息都通过它；只处理私聊（`p2p`），群消息记一行日志后忽略，机器人从不在群里回复
-- Settings 配置项 `profile`：lark-cli 的 profile，决定用哪个应用（也就是哪个机器人），为空时用 lark-cli 当前的 profile；每次调用都带 `--profile`。旧的 `app_id_env`、`app_secret_env` 启动时删除
+- 需要 `lark-cli` 在 PATH 上且已登录，收发消息都通过它；处理私聊（`p2p`），群聊（`group`）里只处理 @ 机器人的消息（按事件 `mentions` 里有没有机器人自己的 open_id 判断），其余群消息完全忽略：不加表情、不存储、不交给 Manager；群里的状态消息和回答回复触发它的那条消息（`lark-cli im +messages-reply`），在群里发起的任务结束时通知发回该群并 @ 发起人
+- Settings 配置项 `profile`：lark-cli 的 profile，决定用哪个应用（也就是哪个机器人），为空时用 lark-cli 当前的 profile；每次调用都带 `--profile`。旧的 `app_id_env`、`app_secret_env` 启动时删除，没有 `profile` 的配置补上空的 `profile`，Settings 里才有这一项
 - Settings 配置项 `allowed_open_ids`：发送者白名单，飞书用户在这个应用下的 `open_id`（`ou_` 开头）；open_id 因应用而异，名单记下它是为哪个应用建的，换成别的应用的 profile 后不启动，直到重建名单
 - 启动前用 `lark-cli whoami` 和机器人信息核对能否以机器人身份收发，不行就不启动，Settings → Channels 显示原因；能就显示「Bot: 名字（app_id，profile）」
 - Settings → Channels 可按姓名或邮箱搜索并添加发送者（以 lark-cli 登录的用户身份查），名单旁显示姓名，并列出最近被拒的发送者，可一键允许
