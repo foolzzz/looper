@@ -31,7 +31,8 @@ function setup(api: "grants" | "refuses" | "missing" | "disabled" = "grants") {
   return { host, target, modes, control, listeners, leaveInBrowser };
 }
 
-const escape = () => ({ key: "Escape", preventDefault: vi.fn(), stopImmediatePropagation: vi.fn() });
+const escape = (defaultPrevented = false) =>
+  ({ key: "Escape", defaultPrevented, preventDefault: vi.fn(), stopImmediatePropagation: vi.fn() });
 
 describe("fullScreen", () => {
   it("enters through the browser's Fullscreen API, and leaves through it", async () => {
@@ -84,6 +85,16 @@ describe("fullScreen", () => {
     control.key(other);
     expect(other.stopImmediatePropagation).not.toHaveBeenCalled();
     expect(control.mode()).toBe("api");
+  });
+
+  it("leaves an Esc a node's card took (it closed the card) to the card, and stays", async () => {
+    const { control } = setup("missing");
+    await control.enter();
+    const taken = escape(true);
+    control.key(taken);
+    await Promise.resolve();
+    expect(control.mode()).toBe("overlay");
+    expect(taken.stopImmediatePropagation).not.toHaveBeenCalled();
   });
 
   it("stops listening, and leaves the browser's full screen, when disposed", async () => {

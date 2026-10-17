@@ -1,5 +1,18 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { CARD_GAP, CLOSE_DELAY_MS, OPEN_DELAY_MS, hoverCard, intersect, placeCard } from "@/lib/hover-card";
+import {
+  CARD_GAP,
+  CLOSE_DELAY_MS,
+  OPEN_DELAY_MS,
+  type PointerAt,
+  TAP_MS,
+  TAP_SLOP_PX,
+  cardKey,
+  hoverCard,
+  hovers,
+  intersect,
+  placeCard,
+  tapOn,
+} from "@/lib/hover-card";
 
 describe("hoverCard", () => {
   let changes: (string | null)[];
@@ -129,6 +142,13 @@ describe("hoverCard", () => {
     expect(card.shown()).toBeNull();
   });
 
+  it("opens nothing once disposed (the graph went away)", () => {
+    card.enter("s1");
+    card.dispose();
+    vi.advanceTimersByTime(OPEN_DELAY_MS * 2);
+    expect(changes).toEqual([]);
+  });
+
   it("does not let a blur hide a card the mouse opened", () => {
     card.enter("s1");
     vi.advanceTimersByTime(OPEN_DELAY_MS);
@@ -190,5 +210,52 @@ describe("intersect", () => {
     expect(intersect({ left: 0, top: 0, width: 100, height: 100 }, { left: 50, top: 20, width: 100, height: 50 }))
       .toEqual({ left: 50, top: 20, width: 50, height: 50 });
     expect(intersect({ left: 0, top: 0, width: 10, height: 10 }, { left: 50, top: 50, width: 10, height: 10 }).width).toBe(0);
+  });
+});
+
+describe("tapOn", () => {
+  const press = (extra: Partial<PointerAt> = {}): PointerAt =>
+    ({ node: "s1", onButton: false, x: 100, y: 100, at: 1000, pointerType: "touch", ...extra });
+
+  it("is a tap on the node a touch or a pen went down and up on, soon and without moving", () => {
+    expect(tapOn(press(), press({ x: 100 + TAP_SLOP_PX - 1, at: 1000 + TAP_MS - 1 }))).toBe("s1");
+    expect(tapOn(press({ pointerType: "pen" }), press({ pointerType: "pen" }))).toBe("s1");
+  });
+
+  it("is no tap when the pointer moved, stayed down, left the node, or hovers", () => {
+    expect(tapOn(press(), press({ x: 100 + TAP_SLOP_PX }))).toBeNull(); // a drag: it pans
+    expect(tapOn(press(), press({ y: 100 - TAP_SLOP_PX }))).toBeNull();
+    expect(tapOn(press(), press({ at: 1000 + TAP_MS }))).toBeNull(); // a long press
+    expect(tapOn(press(), press({ node: "s2" }))).toBeNull();
+    expect(tapOn(press({ node: null }), press({ node: null }))).toBeNull(); // on the pane
+    expect(tapOn(press({ pointerType: "mouse" }), press({ pointerType: "mouse" }))).toBeNull(); // the mouse hovers
+    expect(tapOn(null, press())).toBeNull();
+  });
+
+  it("leaves a tap on a node's own button (a gate's) to the button", () => {
+    expect(tapOn(press({ onButton: true }), press({ onButton: true }))).toBeNull();
+  });
+
+  it("knows which pointers hover", () => {
+    expect([hovers("mouse"), hovers("touch"), hovers("pen")]).toEqual([true, false, false]);
+  });
+});
+
+describe("cardKey", () => {
+  const state = (extra: Partial<Parameters<typeof cardKey>[1]> = {}) =>
+    ({ shown: "s1", focusInCard: false, focusedNode: null, ...extra });
+
+  it("closes the shown card on Esc wherever focus is, focus going back to the node from the card", () => {
+    expect(cardKey("Escape", state())).toBe("close");
+    expect(cardKey("Escape", state({ focusInCard: true }))).toBe("close-to-node");
+    expect(cardKey("Escape", state({ shown: null }))).toBeNull(); // nothing to close: the key goes on
+  });
+
+  it("takes focus into the card on Enter or Space on a focused node", () => {
+    expect(cardKey("Enter", state({ focusedNode: "s1" }))).toBe("into-card");
+    expect(cardKey(" ", state({ shown: null, focusedNode: "s2" }))).toBe("into-card");
+    expect(cardKey("Enter", state({ focusedNode: null }))).toBeNull(); // on a node's button, or elsewhere
+    expect(cardKey("Enter", state({ focusedNode: "s1", focusInCard: true }))).toBeNull(); // the card's own controls
+    expect(cardKey("a", state({ focusedNode: "s1" }))).toBeNull();
   });
 });
