@@ -1,6 +1,6 @@
-"""When a task's step started, on a real PostgreSQL: the start of its first attempt is kept through later saves
-(its retries and restarts), a step that never started has none, a step from before the column keeps none (no start
-is guessed), and the task detail gives it.
+"""When a task's step started, on a real PostgreSQL: the first start of its run is kept through later saves (its
+retries and reviews), a step sent back to not started (a restart) has none until it starts again, a step that never
+started has none, a step from before the column keeps none (no start is guessed), and the task detail gives it.
 
 Runs only when LOOPER_TEST_DATABASE_URL points at a disposable database.
 """
@@ -41,10 +41,26 @@ def test_a_step_keeps_the_start_of_its_first_attempt(monkeypatch: pytest.MonkeyP
 
         await plans.save("task-a", steps=[_row("s1", "dispatched", FIRST)], pool=pool)
         assert await _started(pool, "s1") == FIRST
-        # A retry, a review, a restart: later saves keep it, with a later start or none.
+        # A retry, a review: later saves keep it, with a later start or none.
         await plans.save("task-a", steps=[_row("s1", "dispatched", FIRST + timedelta(minutes=5))], pool=pool)
         await plans.save("task-a", steps=[_row("s1", "verified", None)], pool=pool)
         assert await _started(pool, "s1") == FIRST
+
+    _run(test, monkeypatch)
+
+
+def test_a_step_sent_back_to_not_started_starts_again(monkeypatch: pytest.MonkeyPatch) -> None:
+    from looper.db import plans
+
+    async def test(pool: Any) -> None:
+        await _task(pool, "task-a", "running", await _project(pool))
+        await plans.save("task-a", steps=[_row("s1", "failed", FIRST)], pool=pool)
+        # A restart sends it back to not started: the time the task was stopped does not count.
+        await plans.save("task-a", steps=[_row("s1", "pending", FIRST)], pool=pool)
+        assert await _started(pool, "s1") is None
+        again = FIRST + timedelta(days=2)
+        await plans.save("task-a", steps=[_row("s1", "dispatched", again)], pool=pool)
+        assert await _started(pool, "s1") == again
 
     _run(test, monkeypatch)
 

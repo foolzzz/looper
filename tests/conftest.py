@@ -135,8 +135,8 @@ class _PlanStore:
         for step in steps:
             kept = self.steps.setdefault(task_id, {}).get(step["id"], {}).get("started_at")
             row = json.loads(json.dumps({k: v for k, v in dict(step).items() if k != "started_at"}))
-            # As task_steps keeps it: the first attempt's start, a datetime.
-            row["started_at"] = kept or step.get("started_at")
+            # As task_steps keeps it: the run's first start, a datetime; none for a step not started (again).
+            row["started_at"] = None if row.get("status") == "pending" else kept or step.get("started_at")
             self.steps[task_id][step["id"]] = row
         for entry in journal:
             self.journal.setdefault(task_id, []).append({"id": next(self._ids), "delivered": True,

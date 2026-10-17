@@ -28,8 +28,8 @@ function step(id: string, extra: Partial<TaskStep> = {}): TaskStep {
 
 const LONG = Array.from({ length: 12 }, (_, i) => `line ${i + 1} of what the Worker did`).join("\n");
 
-function cardOf(s: TaskStep, steps: TaskStep[] = [s], skippedBecause?: string) {
-  return stepCard(s, { taskId: "t1", look: LOOKS[s.status] ?? look(s.status), lookOf: (d) => LOOKS[d.status],
+function cardOf(s: TaskStep, steps: TaskStep[] = [s], skippedBecause?: string, active = true) {
+  return stepCard(s, { taskId: "t1", active, look: LOOKS[s.status] ?? look(s.status), lookOf: (d) => LOOKS[d.status],
                        stepsById: new Map(steps.map((d) => [d.id, d])), skippedBecause });
 }
 const titles = (sections: CardSection[]) => sections.map((section) => section.title);
@@ -63,9 +63,18 @@ describe("stepCard", () => {
     expect(section(card.sections, "Timing")).toMatchObject({ facts: [
       { label: "Planned", value: formatWhen("2026-10-17T08:00:00Z") },
       { label: "Started", value: formatWhen("2026-10-17T08:01:00Z") },
-      { label: "First finished", value: formatWhen("2026-10-17T08:05:00Z") },
+      { label: "Finished", value: formatWhen("2026-10-17T08:05:00Z") },
       { label: "Took", value: "4m 0s" },
     ] });
+  });
+
+  it("shows a step running again as running, without the finish of its earlier attempt", () => {
+    const retried = cardOf(step("s1", { status: "dispatched", retries: 1, started_at: "2026-10-17T08:00:00Z",
+                                        completed_at: "2026-10-17T08:05:00Z" }));
+    expect(section(retried.sections, "Timing")).toMatchObject({ facts: [
+      { label: "Planned" }, { label: "Started" }, { label: "Running for" }] });
+    const stopped = cardOf(step("s1", { status: "dispatched", started_at: "2026-10-17T08:00:00Z" }), undefined, undefined, false);
+    expect(section(stopped.sections, "Timing")).toMatchObject({ facts: [{ label: "Planned" }, { label: "Started" }] });
   });
 
   it("leaves out the empty parts", () => {
@@ -121,26 +130,39 @@ describe("stepCard", () => {
 
 describe("stepSpan", () => {
   const at = (iso: string) => new Date(iso).getTime();
-  const span = (extra: Partial<TaskStep>, now = at("2026-10-17T08:10:00Z")) => stepSpan(step("s1", extra), now);
+  const span = (extra: Partial<TaskStep>, active = true, now = at("2026-10-17T08:10:00Z")) =>
+    stepSpan(step("s1", extra), active, now);
+  const START = "2026-10-17T08:00:00Z";
+  const EARLIER_FINISH = "2026-10-17T08:05:00Z"; // a step running again keeps its last finish
 
-  it("is how long the step took to finish first, from its first attempt's start", () => {
-    expect(span({ status: "verified", started_at: "2026-10-17T08:00:00Z", completed_at: "2026-10-17T08:03:12Z" }))
+  it("is how long the step took, until the last time it went to review or ended, retries and reviews included", () => {
+    expect(span({ status: "verified", started_at: START, completed_at: "2026-10-17T08:03:12Z" }))
       .toEqual({ label: "took", text: "3m 12s" });
-    // In review: the Worker finished; the review is not counted.
-    expect(span({ status: "completed", started_at: "2026-10-17T08:00:00Z", completed_at: "2026-10-17T08:00:45Z" }))
+    expect(span({ status: "completed", started_at: START, completed_at: "2026-10-17T08:00:45Z" })) // in review
       .toEqual({ label: "took", text: "45s" });
-    expect(span({ status: "skipped", started_at: "2026-10-17T08:00:00Z", completed_at: "2026-10-17T08:02:00Z" }))
+    expect(span({ status: "failed", started_at: START, completed_at: "2026-10-17T08:07:00Z" }))
+      .toEqual({ label: "took", text: "7m 0s" });
+    expect(span({ status: "skipped", started_at: START, completed_at: "2026-10-17T08:02:00Z" }))
       .toEqual({ label: "ran for", text: "2m 0s" });
   });
 
-  it("is how long it has run, while its attempt runs or awaits a decision", () => {
+  it("is how long it has run while its attempt runs or awaits a decision, whatever finish it had before", () => {
     expect(span({ status: "dispatched", started_at: "2026-10-17T08:09:20Z" })).toEqual({ label: "running for", text: "40s" });
     expect(span({ status: "deciding", started_at: "2026-10-17T06:00:00Z" })).toEqual({ label: "running for", text: "2h 10m" });
+    // A retry after a failed review, and a decision after it: running, not "took" from the earlier finish.
+    expect(span({ status: "dispatched", started_at: START, completed_at: EARLIER_FINISH })).toEqual({ label: "running for", text: "10m 0s" });
+    expect(span({ status: "deciding", started_at: START, completed_at: EARLIER_FINISH })).toEqual({ label: "running for", text: "10m 0s" });
+  });
+
+  it("is nothing for a running step of a task that does not run (stopped, or the server went away)", () => {
+    expect(span({ status: "dispatched", started_at: START }, false)).toBeNull();
+    expect(span({ status: "deciding", started_at: START, completed_at: EARLIER_FINISH }, false)).toBeNull();
+    expect(span({ status: "verified", started_at: START, completed_at: EARLIER_FINISH }, false)).toEqual({ label: "took", text: "5m 0s" });
   });
 
   it("is nothing before the step started, while it waits to start again, or for a step from before starts were kept", () => {
     expect(span({ status: "pending" })).toBeNull();
-    expect(span({ status: "pending", started_at: "2026-10-17T08:00:00Z" })).toBeNull(); // restarted, not run yet
+    expect(span({ status: "pending", started_at: START, completed_at: EARLIER_FINISH })).toBeNull(); // restarted
     expect(span({ status: "verified", completed_at: "2026-10-17T08:03:00Z" })).toBeNull(); // no start recorded
   });
 
