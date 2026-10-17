@@ -27,8 +27,8 @@ allowed list, this week's spend and a project deleted only on the user's word
 (``config_tools``); a provider registered without the key the user pasted
 (``provider_key``). The schedules tool: a schedule listed, disabled, and
 deleted only on the user's word (``schedules``, on a schedule made first);
-one created disabled and enabled only on the user's word
-(``schedule_create``), none created without a project (``schedule_ask_project``),
+one restated before it is created, created disabled on 「确认」 and enabled
+only on 「启用」 (``schedule_create``), none created without a project (``schedule_ask_project``),
 one changed at once but its spend cap raised only on the user's word
 (``schedule_modify``), one read without running it, then run now
 (``schedule_run``), and a name two projects have run only once the user says
@@ -410,6 +410,12 @@ def _manual_runs(look: Look, schedule: dict[str, Any]) -> list[dict[str, Any]]:
             if r["trigger"] == "manual"]
 
 
+def _schedule_restated(look: Look) -> str | None:
+    if _named(look, DEPS) is not None:
+        return f"{DEPS} was created before the user confirmed it"
+    return _raw_json(look.reply) or _asked_for_the_project(look)
+
+
 def _schedule_created_disabled(look: Look) -> str | None:
     schedule = _named(look, DEPS)
     if schedule is None:
@@ -612,7 +618,8 @@ DIALOGS: tuple[Dialog, ...] = (
     ), seed=lambda api, project_id: _make_schedule(api, project_id)),
     Dialog("schedule_create", (
         Say(f"在 {PROJECT} 项目里建一个定时任务 {DEPS}：每个工作日早上 9 点（Asia/Shanghai 时区）检查依赖有没有新版本，"
-            "把结果写进 deps.md。目录用项目默认的。", _schedule_created_disabled,
+            "把结果写进 deps.md。目录用项目默认的。", _schedule_restated),
+        Say("确认。", _schedule_created_disabled,
             (("looper_schedules", {"action": "create", "project": PROJECT, "fields": {
                 "name": DEPS, "cron": "0 9 * * 1-5", "timezone": "Asia/Shanghai",
                 "requirement": "检查依赖有没有新版本，把结果写进 deps.md。"}}),)),

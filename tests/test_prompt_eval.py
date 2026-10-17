@@ -862,7 +862,7 @@ def test_the_managers_dialogs_pass_in_fake_mode_and_a_wrong_call_fails(tmp_path:
     assert [d.id for d in ordered].index("create_start_stop") == [d.id for d in ordered].index(
         "confirm_create_start") + 1
     # The stand-in enables a schedule in the turn that created it: Looper refuses, and it stays disabled.
-    created = next(d for d in dialogs.DIALOGS if d.id == "schedule_create").says[0]
+    created = next(d for d in dialogs.DIALOGS if d.id == "schedule_create").says[1]
     hasty = dialogs.Dialog("hasty", (dataclasses.replace(created, fake=(
         *created.fake, ("looper_schedules", {"action": "enable", "schedule": dialogs.DEPS}))),))
     # Told which project's schedule to run, the stand-in runs the other one: the check sees it.
@@ -887,7 +887,7 @@ def test_the_managers_dialogs_pass_in_fake_mode_and_a_wrong_call_fails(tmp_path:
     calls = {d: [turn["calls"] for turn in by_id[d]["turns"]] for d in (
         "schedule_create", "schedule_modify", "schedule_run", "schedule_ambiguous", "config_export", "hasty")}
     assert calls == {
-        "schedule_create": [["looper_schedules:ok"], ["looper_schedules:ok"]],
+        "schedule_create": [[], ["looper_schedules:ok"], ["looper_schedules:ok"]],
         "schedule_modify": [["looper_schedules:ok"], ["looper_schedules:needs_confirmation"], []],
         "schedule_run": [["looper_schedules:ok"], ["looper_schedules:ok"]],
         "schedule_ambiguous": [["looper_schedules:error (invalid)"], ["looper_schedules:ok"]],
