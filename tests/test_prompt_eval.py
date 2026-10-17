@@ -823,6 +823,12 @@ def test_a_task_past_its_timeout_is_an_error_not_a_fail(tmp_path: Path, monkeypa
     ("已把项目 eval-calc 的 Worker 并发改为 2。", True),
     ("好的，项目 eval-calc 的 Worker 并发已经设置为 2。", True),
     ("Done: I changed the project's Worker limit to 2.", True),
+    ("已把项目 eval-calc 的 Worker 并发调整为 2。", True),
+    ("项目 eval-calc 的 Worker 并发已更新为 2。", True),
+    ("Updated the project's Worker limit to 2.", True),
+    ("Done. Set the project's Worker limit to 2.", True),
+    ("Set this task's Worker limit to 2 instead?", False),
+    ("Want me to update this task's Worker limit to 2?", False),
 ])
 def test_a_reply_claiming_a_change_is_told_from_an_explanation(reply: str, claims: bool) -> None:
     from evals.prompt_regression import dialogs

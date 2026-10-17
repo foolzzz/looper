@@ -231,11 +231,12 @@ def _task_limit_set(look: Look) -> str | None:
     return None if direct else "the task's limit did not change in the turn that asked for it"
 
 
-# A reply that says the limit was set to 2: "已改为 2", "已经把……设成 2", "changed it to 2". Offering to change it ("可以改成 2")
-# says nothing was done.
+# A reply that says the limit was set to 2: "已改为 2", "已经把……调整为 2", "已更新为 2", "changed it to 2", "Updated … to 2".
+# Offering to change it ("可以改成 2", "Want me to set it to 2?") says nothing was done.
 _CLAIMED_CHANGE = re.compile(
-    r"已(经)?[^。\n？?，,；;：:]{0,40}(改|设|调)(置)?(成|为|到)\s*2"
-    r"|\b(I|I've|I have|has been|have been|was|is now)\s+(changed|set|updated|lowered)\b[^.\n?]{0,30}\bto 2\b",
+    r"已(经)?[^。\n？?，,；;：:]{0,40}(改|设置?|调整?|更新)(成|为|到)\s*2"
+    r"|(\b(I|I've|I have|has been|have been|was|is now)\s+|(^|[.!:]\s+|\n\s*))(changed|set|updated|lowered)\b"
+    r"[^.\n?]{0,30}\bto 2\b[^.!?\n]*(?:[.!\n]|$)",  # the sentence ends as a statement, not a question
     re.IGNORECASE)
 
 
