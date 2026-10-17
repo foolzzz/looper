@@ -157,7 +157,7 @@ Looper 在 v2.5.0 及以前叫 LoopX。升级不需要手动操作：
 | 层级 | 模块 | 职责 |
 |---|---|---|
 | **Manager** | `looper/agents/tiers/manager.py` | 面向用户的管家：识别意图、对话 |
-| **TaskRouter** | `looper/agents/tiers/task.py` | 任务生命周期、按项目限制同时运行的任务数（默认 8 个）、排队 |
+| **TaskRouter** | `looper/agents/tiers/task.py` | 任务生命周期：任务一开始就有自己的 Planner，同时运行的任务数不设上限 |
 | **Planner** | `looper/agents/tiers/planner.py` | 拆解步骤、派发、核验 |
 | **WorkerPool** | `looper/agents/tiers/worker.py` | Claude CLI 子进程池，输出 stream-json |
 | **Scheduler** | `looper/agents/scheduler.py` | 触发各项目的定时任务：每次触发建一个完整任务并直接开始；漏掉的触发只补一次，重叠时跳过或排队，超时的运行被停止；前置检查决定这次值不值得建任务，失败那一轮的输入交给下一轮，每日花费上限，以及发到 Telegram 或飞书的通知和两条告警 |
@@ -276,7 +276,7 @@ Manager 横跨所有项目，所以只有前两层。任务创建时还可以给
 - **max_turns**：对话轮数上限（0 表示不限）
 - **timeout_seconds**：一次运行或一轮的时长上限（0 表示不限）。对 worker 来说，它是一次运行的总时长（默认 86400），有输出也不会延长；worker 从下一个步骤起应用这两个限制
 
-每个项目同时运行多少个 Planner（每个任务一个）、Worker 和 Reviewer（默认 8、16、8）也属于分层设置：在 Settings → Roles 按角色设置，在项目的 Agent Profiles 标签页按项目里的角色覆盖。
+并发只按任务算：同时运行的任务数不设上限，每个任务同时最多运行多少个 Worker 和 Reviewer（默认 16、8）。所有任务的默认值在 Settings → Roles 按角色设置，任务可以在自己的 Agents 标签页另设，定时任务也可以给它建出的任务设定。
 
 ## 任务生命周期
 

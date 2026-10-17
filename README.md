@@ -189,7 +189,7 @@ Looper was called LoopX up to v2.5.0. The upgrade needs no manual step:
 | Tier | Module | Role |
 |---|---|---|
 | **Manager** | `looper/agents/tiers/manager.py` | User-facing steward, intent classification, chat |
-| **TaskRouter** | `looper/agents/tiers/task.py` | Task lifecycle, a limit of running tasks per project (8 by default), queue |
+| **TaskRouter** | `looper/agents/tiers/task.py` | Task lifecycle: a started task gets its Planner at once, with no limit on how many run |
 | **Planner** | `looper/agents/tiers/planner.py` | Step decomposition, dispatch, verification |
 | **WorkerPool** | `looper/agents/tiers/worker.py` | Claude CLI subprocess pool with stream-json output |
 | **Scheduler** | `looper/agents/scheduler.py` | Fires each project's schedules: a full task per firing, started at once; missed fires run once, an overlapping firing is skipped or queued, a run past its timeout is stopped; a gate command decides whether a run is worth a task, a failed run's input goes to the next, a daily budget, and messages with two alerts to Telegram or Lark |
@@ -363,9 +363,10 @@ for the details.
   Workers it is one run's total time (default 86400); output does not extend
   it. Workers apply both limits from the next step on
 
-How many Planners (one per task), Workers and Reviewers run at once in a
-project (8, 16 and 8 by default) is a layered setting too: per role in
-Settings → Roles, and per role in a project on its Agent Profiles tab.
+Concurrency is per task: nothing limits how many tasks run, and a task runs at
+most so many of its Workers and Reviewers at once (16 and 8 by default). The
+default for every task is set per role in Settings → Roles; a task sets its own
+on its Agents tab, and a schedule gives the tasks it creates theirs.
 
 ## Task Lifecycle
 
