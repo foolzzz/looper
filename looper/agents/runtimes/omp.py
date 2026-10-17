@@ -223,9 +223,14 @@ class OmpRuntime(RuntimeAdapter):
         return ["--resume", session_id]
 
     def run_command(self, executable: str, *, cwd: str | Path, prompt_file: Path, launch: Launch,
-                    max_turns: int = 0) -> list[str]:
-        """One run: no session kept (``--no-session``), the prompt read from stdin."""
-        return [*self._command(executable, cwd, prompt_file, launch), "--no-session"]
+                    max_turns: int = 0, session_dir: Path | None = None) -> list[str]:
+        """One run: no session kept (``--no-session``), the prompt read from stdin; with ``session_dir`` the run keeps
+        its session there instead."""
+        if session_dir is None:
+            return [*self._command(executable, cwd, prompt_file, launch), "--no-session"]
+        session_dir.mkdir(parents=True, exist_ok=True)
+        os.chmod(session_dir, 0o700)
+        return [*self._command(executable, cwd, prompt_file, launch), "--session-dir", str(session_dir)]
 
     def resident_session(self, label: str) -> ResidentOmp:
         return ResidentOmp(label=label)

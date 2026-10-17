@@ -190,9 +190,15 @@ class CodexRuntime(RuntimeAdapter):
         return ["resume", session_id]
 
     def run_command(self, executable: str, *, cwd: str | Path, prompt_file: Path, launch: Launch,
-                    max_turns: int = 0) -> list[str]:
-        """One run: no session kept (``--ephemeral``), the prompt read from stdin (``-``)."""
-        return [*self._command(executable, prompt_file, launch), "--ephemeral", "-"]
+                    max_turns: int = 0, session_dir: Path | None = None) -> list[str]:
+        """One run: no session kept (``--ephemeral``), the prompt read from stdin (``-``). With ``session_dir`` the
+        run keeps its session there instead: that directory is its home, given the run home's configuration, its
+        instructions and its login link as a resident session's is (``_sync_home``)."""
+        command = self._command(executable, prompt_file, launch)
+        if session_dir is None:
+            return [*command, "--ephemeral", "-"]
+        _sync_home(Path(command[1].removeprefix("CODEX_HOME=")), session_dir)
+        return ["env", f"CODEX_HOME={session_dir}", *command[2:], "-"]
 
     def resident_session(self, label: str) -> ResidentCodex:
         return ResidentCodex(label=label)

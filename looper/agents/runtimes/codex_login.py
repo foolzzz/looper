@@ -156,13 +156,22 @@ class LinkProblem:
         return f"auth.json in {self.home} was not the link to the Codex login; it was replaced by the link"
 
 
+# Where the runs that keep their sessions (the agent room's, ``codex.run_command``'s ``session_dir``) have their
+# homes: one directory per task, one home per run.
+RUN_SESSIONS = "run-sessions"
+
+
 def inspect_homes(codex_dir: Path, target: Path) -> list[LinkProblem]:
-    """Every home under ``codex_dir`` (``runs/<sha256>``, ``sessions/<agent>``) whose ``auth.json`` is not the
-    link to ``target``: a copy or another entry in its place, or a login home whose link is gone. Each is put
-    right (the entry removed, the link put back), so it is reported once. An API key home without a link is
-    fine."""
+    """Every home under ``codex_dir`` (``runs/<sha256>``, ``sessions/<agent>``, ``run-sessions/<task>/<run>``)
+    whose ``auth.json`` is not the link to ``target``: a copy or another entry in its place, or a login home whose
+    link is gone. Each is put right (the entry removed, the link put back), so it is reported once. An API key home
+    without a link is fine."""
     problems: list[LinkProblem] = []
-    for parent in (Path(codex_dir) / "runs", Path(codex_dir) / "sessions"):
+    run_sessions = Path(codex_dir) / RUN_SESSIONS
+    parents = [Path(codex_dir) / "runs", Path(codex_dir) / "sessions",
+               *(sorted(p for p in run_sessions.iterdir() if p.is_dir() and not p.is_symlink())
+                 if run_sessions.is_dir() else [])]
+    for parent in parents:
         for home in sorted(parent.iterdir()) if parent.is_dir() else []:
             if home.name.startswith(".") or home.is_symlink() or not home.is_dir():
                 continue  # a home being built, or not one of Looper's

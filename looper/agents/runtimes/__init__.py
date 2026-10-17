@@ -90,7 +90,8 @@ class AuthKind(str, Enum):
 class Capability(str, Enum):
     """What a runtime can do; ``ROLE_CAPABILITIES`` says which of these each role needs."""
 
-    RUN = "run"  # one run of a prompt, which takes more user turns while it runs (a Worker, a Reviewer)
+    RUN = "run"  # one run of a prompt (a Worker, a Reviewer)
+    RUN_INPUT = "run_input"  # a run takes more user turns while it runs (a forwarded message, a room reminder)
     RESIDENT_SESSION = "resident_session"  # a process that stays up between user turns (the Manager, a Planner)
     RESUME = "resume"  # a new process continues a saved session (the Manager, a Planner)
     STRUCTURED_OUTPUT = "structured_output"  # the runtime enforces a reply schema itself
@@ -231,8 +232,10 @@ class RuntimeAdapter(ABC):
 
     @abstractmethod
     def run_command(self, executable: str, *, cwd: str | Path, prompt_file: Path, launch: Launch,
-                    max_turns: int = 0) -> list[str]:
-        """A one-off run's command; its prompt and later user turns come on stdin."""
+                    max_turns: int = 0, session_dir: Path | None = None) -> list[str]:
+        """A one-off run's command; its prompt and later user turns come on stdin. With ``session_dir`` a runtime
+        that keeps no session for a run (``--ephemeral``, ``--no-session``) keeps it there, so it can be resumed
+        later (the agent room's consults); Claude Code keeps every run's session in its own place."""
 
     # --- Sessions and the stream ---
 

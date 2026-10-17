@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import Any
 
 from .. import step_workspaces
+from ..room import remove_run_sessions
 from ..broadcast import Broadcaster
 from ..bus import MessageBus
 from ..message import (
@@ -566,6 +567,8 @@ class TaskRouter:
                 await step_workspaces.remove_task(task_id)
             except Exception:
                 logger.warning("could not remove the step worktrees of task %s", task_id, exc_info=True)
+            # And the sessions its runs kept for the room (its room goes with the steps).
+            remove_run_sessions(self._runtime_root, task_id)
         try:
             await db_tasks.reset_task_for_restart(task_id, keep_steps=not start_over)
         except Exception:

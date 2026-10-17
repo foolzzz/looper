@@ -224,7 +224,8 @@ class ClaudeCodeRuntime(RuntimeAdapter):
         return ["--resume", session_id]
 
     def run_command(self, executable: str, *, cwd: str | Path, prompt_file: Path, launch: Launch,
-                    max_turns: int = 0) -> list[str]:
+                    max_turns: int = 0, session_dir: Path | None = None) -> list[str]:
+        # Claude Code keeps every run's session (in its own configuration directory): ``session_dir`` is not used.
         return [
             executable,
             "--print",

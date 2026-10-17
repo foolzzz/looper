@@ -32,7 +32,16 @@ Every field is optional, and ``None`` inherits today's behavior:
   (``off``, also when unset; ``user_gates``);
 - ``gate_reminder_hours``: how many hours a gate waits for the user between
   reminders, 0 (none) to ``GATE_REMINDER_MAX_HOURS``
-  (``DEFAULT_GATE_REMINDER_HOURS`` when unset).
+  (``DEFAULT_GATE_REMINDER_HOURS`` when unset);
+- ``agent_room``: whether the agents of the project's tasks share a room, where
+  they message each other (``on``, also when unset: on by default, the agent
+  room RFC's D5), or not (``off``; ``room``);
+- the room's limits, each a whole number in ``ROOM_LIMITS``' range (its
+  default when unset): ``room_post_per_minute`` (messages a run may post in a
+  minute), ``room_broadcasts_per_run`` (messages to everyone a run may post),
+  ``room_message_max_chars``, ``room_messages_per_task``,
+  ``room_ping_pong_rounds`` (messages two seats may trade before the Planner is
+  told) and ``room_wait_max_seconds`` (how long an inbox call may wait).
 
 The columns live on ``projects`` (``db.projects.EXECUTION_COLUMNS``); this
 module owns their types and validation. Agents read them when a run or turn
@@ -63,6 +72,15 @@ ROLE_TEXT_MIN_CHARS = 500
 ROLE_TEXT_MAX_CHARS = 20_000
 DEFAULT_GATE_REMINDER_HOURS = 24
 GATE_REMINDER_MAX_HOURS = 168
+# Each room limit's range and its default (the agent room RFC, section 11), and what it counts.
+ROOM_LIMITS: dict[str, tuple[int, int, int, str]] = {
+    "room_post_per_minute": (1, 60, 6, "messages a run may post in a minute"),
+    "room_broadcasts_per_run": (0, 50, 5, "messages to everyone a run may post"),
+    "room_message_max_chars": (500, 20_000, 4_000, "characters a message may have"),
+    "room_messages_per_task": (20, 5_000, 300, "messages a task's room may hold"),
+    "room_ping_pong_rounds": (2, 50, 6, "messages two seats may trade before the Planner is told"),
+    "room_wait_max_seconds": (0, 120, 60, "seconds an inbox call may wait"),
+}
 
 
 class ReviewPolicy(str, Enum):
@@ -90,6 +108,23 @@ class UserGates(str, Enum):
     ON = "on"
 
 
+class AgentRoom(str, Enum):
+    OFF = "off"
+    ON = "on"
+
+
+@dataclass(frozen=True)
+class RoomLimits:
+    """A project's room limits, each set or its default."""
+
+    post_per_minute: int = ROOM_LIMITS["room_post_per_minute"][2]
+    broadcasts_per_run: int = ROOM_LIMITS["room_broadcasts_per_run"][2]
+    message_max_chars: int = ROOM_LIMITS["room_message_max_chars"][2]
+    messages_per_task: int = ROOM_LIMITS["room_messages_per_task"][2]
+    ping_pong_rounds: int = ROOM_LIMITS["room_ping_pong_rounds"][2]
+    wait_max_seconds: int = ROOM_LIMITS["room_wait_max_seconds"][2]
+
+
 class LessonsMode(str, Enum):
     OFF = "off"
     DRAFT = "draft"
@@ -109,6 +144,13 @@ class ProjectExecution:
     role_text_max_chars: int | None = None
     user_gates: UserGates | None = None
     gate_reminder_hours: int | None = None
+    agent_room: AgentRoom | None = None
+    room_post_per_minute: int | None = None
+    room_broadcasts_per_run: int | None = None
+    room_message_max_chars: int | None = None
+    room_messages_per_task: int | None = None
+    room_ping_pong_rounds: int | None = None
+    room_wait_max_seconds: int | None = None
 
     @property
     def review_all(self) -> bool:
@@ -147,6 +189,16 @@ class ProjectExecution:
     def gate_reminder_interval_hours(self) -> int:
         """How many hours a gate waits for the user between reminders (0: none)."""
         return DEFAULT_GATE_REMINDER_HOURS if self.gate_reminder_hours is None else self.gate_reminder_hours
+
+    @property
+    def room_on(self) -> bool:
+        """Whether the agents of the project's tasks share a room: on unless the project turned it off."""
+        return self.agent_room is not AgentRoom.OFF
+
+    @property
+    def room_limits(self) -> RoomLimits:
+        return RoomLimits(**{field.removeprefix("room_"): value for field in ROOM_LIMITS
+                             if (value := getattr(self, field)) is not None})
 
     @property
     def on_task_budget(self) -> TaskBudgetAction:
@@ -205,6 +257,13 @@ def _parse(field: str, raw: Any) -> Any:
         return _choice(field, raw, PlannerRoles)
     if field == "user_gates":
         return _choice(field, raw, UserGates)
+    if field == "agent_room":
+        return _choice(field, raw, AgentRoom)
+    if field in ROOM_LIMITS:
+        low, high, default, what = ROOM_LIMITS[field]
+        if isinstance(raw, bool) or not isinstance(raw, int) or not low <= raw <= high:
+            raise ValueError(f"{field} ({what}) must be a whole number from {low} to {high}, or null for {default}")
+        return raw
     if field == "gate_reminder_hours":
         if isinstance(raw, bool) or not isinstance(raw, int) or not 0 <= raw <= GATE_REMINDER_MAX_HOURS:
             raise ValueError(f"gate_reminder_hours must be a whole number of hours from 0 (no reminders) to "

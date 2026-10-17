@@ -613,6 +613,23 @@ ALTER TABLE projects ADD COLUMN IF NOT EXISTS role_text_max_chars INTEGER
 ALTER TABLE projects ADD COLUMN IF NOT EXISTS user_gates TEXT CHECK (user_gates IN ('off', 'on'));
 ALTER TABLE projects ADD COLUMN IF NOT EXISTS gate_reminder_hours INTEGER
     CHECK (gate_reminder_hours >= 0 AND gate_reminder_hours <= 168);
+-- The agent room of each of the project's tasks (looper/agents/room.py): on ('on', also when NULL: on by default) or
+-- off; and its limits (NULL: the defaults of looper/agents/project_execution.py): how many messages a run may post a
+-- minute and how many to everyone, how long one may be, how many a task holds, how many rounds two seats may trade
+-- before the Planner is told, and how long an inbox may wait.
+ALTER TABLE projects ADD COLUMN IF NOT EXISTS agent_room TEXT CHECK (agent_room IN ('off', 'on'));
+ALTER TABLE projects ADD COLUMN IF NOT EXISTS room_post_per_minute INTEGER
+    CHECK (room_post_per_minute >= 1 AND room_post_per_minute <= 60);
+ALTER TABLE projects ADD COLUMN IF NOT EXISTS room_broadcasts_per_run INTEGER
+    CHECK (room_broadcasts_per_run >= 0 AND room_broadcasts_per_run <= 50);
+ALTER TABLE projects ADD COLUMN IF NOT EXISTS room_message_max_chars INTEGER
+    CHECK (room_message_max_chars >= 500 AND room_message_max_chars <= 20000);
+ALTER TABLE projects ADD COLUMN IF NOT EXISTS room_messages_per_task INTEGER
+    CHECK (room_messages_per_task >= 20 AND room_messages_per_task <= 5000);
+ALTER TABLE projects ADD COLUMN IF NOT EXISTS room_ping_pong_rounds INTEGER
+    CHECK (room_ping_pong_rounds >= 2 AND room_ping_pong_rounds <= 50);
+ALTER TABLE projects ADD COLUMN IF NOT EXISTS room_wait_max_seconds INTEGER
+    CHECK (room_wait_max_seconds >= 0 AND room_wait_max_seconds <= 120);
 -- What a task that completes leaves in the project's knowledge, from one more
 -- Planner turn over the task journal: nothing ('off'), a draft the user
 -- confirms or discards on the project page ('draft'), or a document ('write').
@@ -1037,6 +1054,63 @@ BEGIN
         INSERT INTO schema_migrations (name) VALUES ('task_user_gate_messages_kind_late');
     END IF;
 END $$;
+
+-- A task's agent room (looper/agents/room.py): the messages its Planner and its steps' seats send each other, only
+-- ever added. A seat is '<role>@<step key>' (worker@s2, backend_rd@s2, reviewer@s2); the sender comes from the
+-- token of the run that posted it, never from what the run wrote. audience: the roles, seats or 'planner' it is for,
+-- empty when it is for everyone (audience_all). cc_planner: a Reviewer's question or answer, which the Planner sees
+-- too. reason: why Looper wrote a notice or an escalation. refs: [{file, work_dir} | {commit, resolved}].
+-- planner_pending: it wakes the Planner, which has not had it in a [ROOM] turn yet.
+CREATE TABLE IF NOT EXISTS room_messages (
+    id               BIGSERIAL PRIMARY KEY,
+    task_id          TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    sender_seat      TEXT NOT NULL CHECK (sender_seat <> ''),
+    sender_kind      TEXT NOT NULL CHECK (sender_kind IN ('planner', 'work', 'review', 'looper')),
+    sender_step      TEXT REFERENCES task_steps(id) ON DELETE SET NULL,
+    sender_run       TEXT,
+    via              TEXT NOT NULL DEFAULT 'agent' CHECK (via IN ('agent', 'consult', 'planner_reply', 'looper')),
+    audience_all     BOOLEAN NOT NULL DEFAULT false,
+    audience         TEXT[] NOT NULL DEFAULT '{}',
+    cc_planner       BOOLEAN NOT NULL DEFAULT false,
+    kind             TEXT NOT NULL CHECK (kind IN ('info', 'question', 'answer', 'interface', 'announce', 'notice',
+                                                   'escalation')),
+    reason           TEXT,
+    reply_to         BIGINT REFERENCES room_messages(id) ON DELETE SET NULL,
+    refs             JSONB NOT NULL DEFAULT '[]',
+    body             TEXT NOT NULL CHECK (body <> ''),
+    planner_pending  BOOLEAN NOT NULL DEFAULT false,
+    created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT room_messages_answer_replies CHECK (kind <> 'answer' OR reply_to IS NOT NULL),
+    CONSTRAINT room_messages_audience CHECK (audience_all OR cardinality(audience) > 0)
+);
+CREATE INDEX IF NOT EXISTS idx_room_messages_task ON room_messages (task_id, id);
+CREATE INDEX IF NOT EXISTS idx_room_messages_planner ON room_messages (task_id, id) WHERE planner_pending;
+-- How far each seat of a task has read its room (the ids up to last_read_id); a retry of a step reads on.
+CREATE TABLE IF NOT EXISTS room_reads (
+    task_id       TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    seat          TEXT NOT NULL,
+    last_read_id  BIGINT NOT NULL DEFAULT 0,
+    updated_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (task_id, seat)
+);
+-- What a run waits for in its room: a seat or a role coming online or going offline (presence, state), or a kind
+-- of message (kind, from_seat). It fires a notice to the seat; 'first' ends it then, 'run_end' when the run ends.
+CREATE TABLE IF NOT EXISTS room_watches (
+    id          BIGSERIAL PRIMARY KEY,
+    task_id     TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    seat        TEXT NOT NULL,
+    run         TEXT NOT NULL,
+    presence    TEXT,
+    state       TEXT CHECK (state IN ('online', 'offline')),
+    kind        TEXT CHECK (kind IN ('interface', 'announce')),
+    from_seat   TEXT,
+    until       TEXT NOT NULL DEFAULT 'first' CHECK (until IN ('first', 'run_end')),
+    fired_at    TIMESTAMPTZ,
+    ended_at    TIMESTAMPTZ,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT room_watches_what CHECK ((presence IS NULL) <> (kind IS NULL))
+);
+CREATE INDEX IF NOT EXISTS idx_room_watches_open ON room_watches (task_id) WHERE ended_at IS NULL;
 
 -- Once (agent teams are on by default for Claude Code profiles): every profile on a Claude Code runtime, the
 -- built-in one and those the migrations above added included, gets them. Only once, so a profile the user turns

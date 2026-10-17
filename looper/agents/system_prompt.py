@@ -374,8 +374,10 @@ def build_system_prompt(
     step_id: str | None = None,
     task: str = "",
     knowledge: AgentKnowledge | None = None,
+    room: str = "",
 ) -> SystemPrompt:
-    """An agent's system prompt (harness, role, project and its knowledge index, task, contract) with its layers.
+    """An agent's system prompt (harness, role, project and its knowledge index, task, contract) with its layers;
+    ``room``, a run's agent room section (``room.room_section``), follows the task.
 
     The Manager passes neither a project nor a task, so it has no knowledge.
     """
@@ -386,14 +388,26 @@ def build_system_prompt(
         project_name=str((project or {}).get("name") or ""),
         background=str((project or {}).get("background") or ""),
         knowledge=knowledge.index,
-        task=task,
+        task=_with_room(task, room),
         contract=contract,
     )
-    return SystemPrompt(text, prompt_layers(
+    layers = prompt_layers(
         role_id=role_id, role=role, recommended=recommended, contract_name=contract_name, contract=contract,
         project=project, task_kind=task_kind, task_id=task_id, step_id=step_id, task=task, harness=harness,
         knowledge=knowledge,
-    ))
+    )
+    return SystemPrompt(text, _room_layer(layers, room))
+
+
+def _with_room(task: str, room: str) -> str:
+    """The task section followed by a run's room section, when it has one."""
+    return f"{task.strip()}\n\n{room.strip()}" if room.strip() else task
+
+
+def _room_layer(layers: dict[str, Any], room: str) -> dict[str, Any]:
+    if room.strip():
+        layers["room"] = {"sha256": sha256_text(room.strip())}
+    return layers
 
 
 # What the boundaries of a run of a role a task's Planner defined start with: they follow everything that Planner
@@ -419,6 +433,7 @@ def build_role_prompt(
     step_id: str | None = None,
     task: str = "",
     knowledge: AgentKnowledge | None = None,
+    room: str = "",
 ) -> SystemPrompt:
     """The system prompt of a run of ``task_role``: its working style (its own harness; else the built-in harness's
     working-style part, or a layer's harness whole, which is the operator's), its role prompt, the project and its
@@ -439,7 +454,7 @@ def build_role_prompt(
         project_name=str((project or {}).get("name") or ""),
         background=str((project or {}).get("background") or ""),
         knowledge=knowledge.index,
-        task=f"{task.strip()}\n\n{boundaries_section(boundaries.text)}" if task.strip()
+        task=f"{_with_room(task, room).strip()}\n\n{boundaries_section(boundaries.text)}" if task.strip()
         else boundaries_section(boundaries.text),
         contract=contract,
     )
@@ -452,4 +467,4 @@ def build_role_prompt(
     layers["role"]["task_role"] = task_role.key
     layers["task_role"] = task_role.record()
     layers["boundaries"] = boundaries.record()
-    return SystemPrompt(text, layers)
+    return SystemPrompt(text, _room_layer(layers, room))
