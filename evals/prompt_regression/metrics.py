@@ -266,15 +266,18 @@ def _relative(path: str, work_dir: Path) -> str:
         return f"<outside the working directory>/{candidate.name}"
 
 
-def edit_tool_paths(events: Iterable[Mapping[str, Any]], work_dir: Path) -> list[str]:
-    """The files a run's file-editing tool calls named, relative to ``work_dir`` (only a name outside it)."""
+def edit_tool_paths(events: Iterable[Mapping[str, Any]], work_dir: Path, refused: Iterable[str] = ()) -> list[str]:
+    """The files a run's file-editing tool calls named, relative to ``work_dir`` (only a name outside it), but for
+    the calls its runtime refused (``refused``, their ``tool_use`` ids): those changed nothing."""
+    refused = {tool_use_id for tool_use_id in refused if tool_use_id}
     paths = []
     for row in events:
         event = row.get("event", row)
         if not isinstance(event, Mapping) or event.get("type") != "assistant":
             continue
         for block in (event.get("message") or {}).get("content") or []:
-            if isinstance(block, Mapping) and block.get("type") == "tool_use" and block.get("name") in FILE_EDIT_TOOLS:
+            if (isinstance(block, Mapping) and block.get("type") == "tool_use" and block.get("name") in FILE_EDIT_TOOLS
+                    and block.get("id") not in refused):
                 tool_input = block.get("input") or {}
                 named = [tool_input.get("file_path") or tool_input.get("notebook_path"),
                          *(c.get("path") for c in tool_input.get("changes") or [] if isinstance(c, Mapping)),
@@ -431,8 +434,9 @@ def task_metrics(
                 else:
                     reviewer_violations += 1
     planner_edits = sorted({
-        path for record in by_role.get("planner", []) for path in edit_tool_paths(events.get(int(record["id"]), []),
-                                                                                  work_dir)
+        path for record in by_role.get("planner", []) for path in edit_tool_paths(
+            events.get(int(record["id"]), []), work_dir,
+            refused=(d.get("id") for d in (record.get("metadata") or {}).get("permission_denials") or []))
     })
     windows = run_windows(records, now=now)
     changed_by_planner = planner_changed_files(changes, windows, clock_offset=clock_offset)

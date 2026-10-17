@@ -54,7 +54,7 @@ class EvalTask:
     # min_steps, min_reviews, min_retries, min_chat_turns, min_independent_pairs, min_bracketed_pairs,
     # min_parallel_workers, min_progress_notes, min_final_summary, min_plan_changes, min_planner_profile_runs,
     # min_roles_defined, min_role_runs, min_role_profile_runs, min_role_reviews, min_advisory_role_fails,
-    # min_discipline_roles, min_interface_dependents; max_plan_changes, max_steps,
+    # min_discipline_roles, min_interface_dependents; max_plan_changes, max_steps, max_reviews, max_retries,
     # max_roles_defined, max_role_prompt_mismatches, max_role_boundary_misses, max_gate_breaches,
     # max_contract_violations; min_gates_opened, min_gates_passed, min_gates_ended_by_user, min_assumptions_stated,
     # min_gate_parallel_runs, min_conclusion_reads; max_gates_opened, max_gate_asks_beyond_script;
@@ -891,6 +891,11 @@ def _summary(work_dir: Path) -> str | None:
 
 _SUMMARY_STEP = "Write summary.txt: one line `<region> <total>` per region of sales.csv, in the order the regions " \
                 "first appear."
+# Which regions the summary covers is the step's to say: the requirement leaves it open, so only the retry note can
+# settle a step whose criteria name the wrong ones.
+_SUMMARY_REQUIREMENT = ("Write summary.txt in the working directory: one line `<region> <total>` for each region the "
+                        "team reports on, from sales.csv, in the order the regions first appear there. An independent "
+                        "Reviewer must check it.")
 
 READ_ONLY_TASKS: tuple[EvalTask, ...] = (
     EvalTask(
@@ -914,11 +919,11 @@ READ_ONLY_TASKS: tuple[EvalTask, ...] = (
         # The plan miscounted the regions; the Planner's retry note corrects the step, and the (real) Reviewer, who
         # sees the note, passes the corrected work. Only the Reviewer is Claude Code in real mode.
         id="reviewer_retry_note",
-        requirement="Write summary.txt in the working directory: one line `<region> <total>` per region of "
-                    "sales.csv, in the order the regions first appear. An independent Reviewer must check it.",
+        requirement=_SUMMARY_REQUIREMENT,
         files={"sales.csv": _sales_csv(",")},
         check=_summary,
-        expect={"min_reviews": 1, "min_retries": 1},
+        # One review: a second would mean the Reviewer failed the corrected work and a scripted retry got it through.
+        expect={"min_reviews": 1, "max_reviews": 1, "min_retries": 1, "max_retries": 1},
         fake={
             "real_reviewer": True,
             "plan": [_step("s1", f"{_SUMMARY_STEP[:-1]} (north, south, east, west).",
@@ -935,11 +940,10 @@ READ_ONLY_TASKS: tuple[EvalTask, ...] = (
         # The reverse: the retry note concerns something else, and the work it leads to still lacks a region; the
         # (real) Reviewer must not pass it, and passes the next attempt, which has it.
         id="reviewer_unrelated_note",
-        requirement="Write summary.txt in the working directory: one line `<region> <total>` per region of "
-                    "sales.csv, in the order the regions first appear. An independent Reviewer must check it.",
+        requirement=_SUMMARY_REQUIREMENT,
         files={"sales.csv": _sales_csv(";")},
         check=_summary,
-        expect={"min_reviews": 2, "min_retries": 2},
+        expect={"min_reviews": 2, "max_reviews": 2, "min_retries": 2, "max_retries": 2},
         fake={
             "real_reviewer": True,
             "plan": [_step("s1", _SUMMARY_STEP,
