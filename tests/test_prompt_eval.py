@@ -303,10 +303,10 @@ def test_comparison_marks_what_changed_and_sums_the_run() -> None:
     assert lines[0] == "Prompt eval: real/haiku @ abcdef123 (1 rep) → real/haiku @ abcdef123+local changes (1 rep)"
     # A run from before tokens were read has none: only the new side shows them.
     # A run from before gates were counted has none either.
-    assert ("| single_step | 1/1 | 1.0 | – | 0.0 | 0.0 | – | 0.0 | 0.0 | – → **32k / 2.5k** | 0.0200 → **0.0300** |"
+    assert ("| single_step | 1/1 | 1.0 | – | 0.0 | 0.0 | – | – | 0.0 | 0.0 | – → **32k / 2.5k** | 0.0200 → **0.0300** |"
             in lines)
-    assert "| chat_correction | 1/1 → **0/1** | 1.0 | – | 0.0 | 0.0 | – | 0.0 → **2.0** | 0.0 | – | 0.0200 |" in lines
-    assert ("| **total** | 2/2 (100%, 34–100%) → **1/2 (50%, 9–91%)** | 2.0 | – | 0.0 | 0.0 | – | 0.0 → **2.0** "
+    assert "| chat_correction | 1/1 → **0/1** | 1.0 | – | 0.0 | 0.0 | – | – | 0.0 → **2.0** | 0.0 | – | 0.0200 |" in lines
+    assert ("| **total** | 2/2 (100%, 34–100%) → **1/2 (50%, 9–91%)** | 2.0 | – | 0.0 | 0.0 | – | – | 0.0 → **2.0** "
             "| 0.0 | – → **32k / 2.5k** | 0.0400 → **0.0500** |" in lines)
     assert "- pass rate changed: chat_correction 1/1 → 0/1" in lines
     assert "- the base and the new run ran each case once: a pass or fail per case is a single sample" in lines
@@ -319,8 +319,8 @@ def test_comparison_without_a_base_and_with_skipped_tasks() -> None:
     lines = compare.markdown(new).splitlines()
     assert lines[0].endswith("(no earlier run to compare with)")
     assert ("| chat_correction | skipped | skipped | skipped | skipped | skipped | skipped | skipped | skipped "
-            "| skipped | skipped |" in lines)
-    assert "| **total** | 1/1 (100%, 21–100%) | 1.0 | – | 0.0 | 0.0 | – | 0.0 | 0.0 | – | 0.0200 |" in lines
+            "| skipped | skipped | skipped |" in lines)
+    assert "| **total** | 1/1 (100%, 21–100%) | 1.0 | – | 0.0 | 0.0 | – | – | 0.0 | 0.0 | – | 0.0200 |" in lines
     assert "- stopped at the spending cap (0.8 USD)" in lines
 
 
@@ -345,17 +345,17 @@ def test_comparison_of_repeated_runs_counts_the_scored_reps_and_keeps_errors_apa
                                        "error": "EvalError: GET /api/tasks/t answered 500"})]}
     lines = compare.markdown(new, base).splitlines()
     assert lines[0] == "Prompt eval: real/haiku @ abcdef123 (1 rep) → real/haiku @ abcdef123 (3 reps)"
-    assert "| single_step | 1/1 → **3/3** | 1.0 | – | 0.0 | 0.0 | – | 0.0 | 0.0 | – | 0.0200 |" in lines
+    assert "| single_step | 1/1 → **3/3** | 1.0 | – | 0.0 | 0.0 | – | – | 0.0 | 0.0 | – | 0.0200 |" in lines
     # The mean is over the scored reps: the pass and the fail, not the error.
     assert ("| dependent_steps | 0/0 · 1 err → **1/2 · 1 err** | – → **1.5** | – | – → **0.0** | – → **0.0** "
-            "| – | – → **0.0** | – → **0.0** | – | – → **0.0300** |" in lines)
-    assert "| interface_first | 1/1 · 1 err | 1.0 | – | 0.0 | 0.0 | – | 0.0 | 0.0 | – | 0.0200 |" in lines
+            "| – | – | – → **0.0** | – → **0.0** | – | – → **0.0300** |" in lines)
+    assert "| interface_first | 1/1 · 1 err | 1.0 | – | 0.0 | 0.0 | – | – | 0.0 | 0.0 | – | 0.0200 |" in lines
     # The total adds up the tasks' means (one pass through the set), over the tasks both runs have; the new run's
     # own total follows, as it has a task the base lacks.
     assert ("| **total (2 shared tasks)** | 1/1 (100%, 21–100%) · 1 timeout → **4/5 (80%, 38–96%) · 1 timeout** "
-            "| 1.0 → **2.5** | – | 0.0 | 0.0 | – | 0.0 | 0.0 | – | 0.0200 → **0.0500** |" in lines)
+            "| 1.0 → **2.5** | – | 0.0 | 0.0 | – | – | 0.0 | 0.0 | – | 0.0200 → **0.0500** |" in lines)
     assert ("| **total (all 3 tasks of the new run)** | 5/6 (83%, 44–97%) · 1 harness, 1 timeout | 3.5 | – | 0.0 "
-            "| 0.0 | – | 0.0 | 0.0 | – | 0.0700 |" in lines)
+            "| 0.0 | – | – | 0.0 | 0.0 | – | 0.0700 |" in lines)
     assert "- pass rate changed: dependent_steps 0/0 → 1/2" in lines
     assert "- the base ran each case once: a pass or fail per case is a single sample" in lines
     assert "- no baseline: interface_first" in lines
@@ -371,7 +371,7 @@ def test_against_a_base_of_more_tasks_the_total_is_over_the_shared_ones() -> Non
     base["tasks"][0]["id"] = "single_step"
     new = {**_run(), "tasks": _reps("single_step", _PASS, {**_PASS, "cost_usd": 0.04})}
     lines = compare.markdown(new, base).splitlines()
-    assert ("| **total (1 shared task)** | 1/1 (100%, 21–100%) → **2/2 (100%, 34–100%)** | 1.0 | – | 0.0 | 0.0 | – "
+    assert ("| **total (1 shared task)** | 1/1 (100%, 21–100%) → **2/2 (100%, 34–100%)** | 1.0 | – | 0.0 | 0.0 | – | – "
             "| 0.0 | 0.0 | – | 0.0200 → **0.0300** |" in lines)
     assert not any(line.startswith("| **total (all") for line in lines)  # the new run has no task of its own
     assert "- in the base, not in the new run: task_1, task_2, task_3, task_4, task_5, task_6" in lines
@@ -382,7 +382,7 @@ def test_against_a_base_of_other_tasks_there_is_no_shared_total() -> None:
     new = {**_run(), "tasks": _reps("single_step", _PASS, _PASS)}
     lines = compare.markdown(new, base).splitlines()
     assert not any(line.startswith("| **total (0 shared") for line in lines)
-    assert ("| **total (all 1 task of the new run)** | 2/2 (100%, 34–100%) | 1.0 | – | 0.0 | 0.0 | – | 0.0 | 0.0 | – "
+    assert ("| **total (all 1 task of the new run)** | 2/2 (100%, 34–100%) | 1.0 | – | 0.0 | 0.0 | – | – | 0.0 | 0.0 | – "
             "| 0.0200 |" in lines)
     assert "- no baseline: single_step" in lines
     assert "- in the base, not in the new run: dependent_steps, chat_correction" in lines
@@ -719,7 +719,7 @@ def test_fake_mode_runs_every_task_and_sees_misbehaviour(tmp_path: Path) -> None
                      "gate_ambiguous": (0, 0, 1), "gate_not_needed": (0, 0, 1), "gate_end_early": (0, 0, 1),
                      # The clear part runs beside the gate and then beside the step the gate's answer planned.
                      "gate_parallel_branch": (2, 0, 2), "gate_discoverable": (0, 0, 1),
-                     "room_interface": (1, 1, 2), "room_quiet": (0, 0, 1)}
+                     "room_interface": (1, 0, 2), "room_quiet": (0, 0, 1)}
     assert by_id["chat_correction"]["planner_turns"]["chat"] == 1
     # Only the task whose project lets its Planner choose a profile runs a Worker on the one it chose.
     assert {t: by_id[t]["planner_profile_runs"] for t in by_id if by_id[t]["planner_profile_runs"]} == {
