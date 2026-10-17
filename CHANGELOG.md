@@ -20,7 +20,7 @@ How the agent system works today is described in
 
 ## [2.7.0] - 2026-10-16
 
-Covers `v2.6.0` to `v2.7.0`: pull requests #72 to #160, #162 and #163 in
+Covers `v2.6.0` to `v2.7.0`: pull requests #72 to #163 in
 [foolzzz/looper](https://github.com/foolzzz/looper/pulls).
 
 ### Added
@@ -166,8 +166,10 @@ Covers `v2.6.0` to `v2.7.0`: pull requests #72 to #160, #162 and #163 in
 - **A task's Planner can choose its Workers' Agent Profile and change
   concurrency.** Every Planner `looper serve` starts, on Claude Code, Codex
   and OMP, gets Looper's MCP server with a token that works for its own task
-  only and stops working when that Planner stops or the task ends, and a
-  code-owned tools section after its reply contract. Its four tools are
+  only and stops working when that Planner stops or the task ends (the MCP
+  configuration files that carry it are deleted as it is revoked, before the
+  stop waits for the Planner to exit), and a code-owned tools section after
+  its reply contract. Its four tools (two more for roles, below) are
   `looper_task_profiles` (read), `looper_task_profile_set`,
   `looper_task_concurrency` and `looper_project_concurrency`; the three that
   write work only in a turn Looper sent the Planner. `looper_task_profile_set`
@@ -187,6 +189,44 @@ Covers `v2.6.0` to `v2.7.0`: pull requests #72 to #160, #162 and #163 in
   `concurrency_change` journal entry (`task_journal_kinds_planner_tools`) and
   an activity line on the task page, and a concurrency change of a task from
   Telegram or Lark is also told in that chat.
+- **A task's Planner can define the roles its steps run as (opt-in per
+  project).** A project execution setting, `planner_roles`, is `off` (the
+  default, also when null) or `on` (Project → Settings → Execution, "Planner
+  roles"), with `role_text_max_chars` (500 to 20,000, null for 8,000) for how
+  long a role's prompt and its harness may each be. With it on, the Planner
+  gets two more tools, `looper_task_roles` (read) and `looper_task_role_set`
+  (`{id, kind, role_prompt, harness?, profile_id?, reason?}`), where `kind` is
+  `work` (a step's Worker runs as it) or `review` (it reviews a step after the
+  built-in Reviewer); each change adds a version in the new `task_roles` table
+  with a `role_defined` journal entry (`task_journal_kinds_task_roles`). A
+  role's profile must be on the project's allowed list, and is refused when
+  the user chose that kind's profile for the task. Steps take `role`,
+  `review_role` (it needs `"review": true`) and `review_role_required` (true
+  when left out). A run as a role gets its working style (its harness, else
+  the built-in harness's How you work and Communication), its role prompt, the
+  project, the task section, then the boundaries and the contract, so nothing
+  the Planner wrote follows the boundaries: a code-owned lead line, then the
+  shared defaults' new `boundaries` field (Settings → Roles → Shared defaults,
+  "Boundaries for Planner-defined roles"; the Manager's `looper_settings`; the
+  configuration export; refused on any other layer), else the built-in ones.
+  Its profile comes after the user's choice for the task and before the
+  Planner's per-step and rest-of-task choices. An attempt keeps the role
+  version it started with: a restart reruns it with that version, a retry
+  reads the current one. The built-in Reviewer stays the gate: a review role
+  runs only after it passes and blocks the step until it passes too, unless
+  the step makes it advisory (`"review_role_required": false`), when the
+  Planner may accept over it, the `step_accepted` entry says so and the task
+  page labels it advisory. Continuing a task keeps its roles; starting over
+  deletes them. `GET /api/tasks/:id` adds `roles` (versions, steps and stats:
+  runs, cost, accepted and failed steps, retries, contract violations, review
+  pass rate) and `builtin_role_stats`; the task page gets a Roles section and
+  role labels in Steps and the Pipeline; every Worker and Reviewer run records
+  a typed `metadata.outcome` (`completed`, `reported_failed`,
+  `files_mismatch`, `passed`, `not_passed`, `contract`, `run_failed`). With
+  the switch off, the Planner's tools, its tools guide, its reply contract and
+  every Worker's and Reviewer's prompt are as before, and a step naming a role
+  is refused with that reason. The prompt eval adds `roles_tester_docs`,
+  `roles_security_review`, `roles_advisory_review` and `roles_not_needed`.
 - **Projects can run a full task on a time rule.** A schedule belongs to a
   project and has a `name` (at most 80 characters, unique in the project
   ignoring case), a 5-field `cron` rule (minute, hour, day of the month,
@@ -370,21 +410,21 @@ Covers `v2.6.0` to `v2.7.0`: pull requests #72 to #160, #162 and #163 in
   the bottom of the sidebar, each at `#settings/<page>`: **LLM Providers**,
   **Agent Runtimes**, **Agent Profiles**, **Roles**, **Skills & MCP**,
   **Channels** and **Import / Export**. An **Agent Profile** is what the
-  dashboard now calls a registered agent (a row of `agent_profiles`, served
-  at `/api/agent-profiles`): its list shows each profile's runtime, provider,
-  model and effort, the roles it can run and where it is used, and a
-  profile in use cannot be deleted. Its form picks a runtime, then a provider grouped as
-  the runtime's own login (Claude Code's and Codex's with their login state)
-  or an API-key provider that speaks its protocols, then a
-  model from the provider's catalog. **Roles** holds the shared defaults every
-  role inherits and, per role, its overrides of them and its prompt, max turns
-  and timeout, which were on the Agents page. Everywhere an Agent Profile is
+  dashboard now calls a registered agent (a row of `agent_profiles`, served at
+  `/api/agent-profiles`): its list shows each profile's runtime, provider,
+  model and effort, the roles it can run and where it is used, and a profile
+  in use cannot be deleted. Its form picks a runtime, then a provider grouped
+  as the runtime's own login (Claude Code's and Codex's with their login
+  state) or an API-key provider that speaks its protocols, then a model from
+  the provider's catalog. **Roles** holds the shared defaults every role
+  inherits and, per role, its overrides of them and its prompt, max turns and
+  timeout, which were on the Agents page. Everywhere an Agent Profile is
   chosen (Roles, a project's Agent Profiles tab, a new task's roles) the same
-  dropdown ends with "+ New Agent Profile", which opens the form in place.
-  The top-level Agents page becomes **Runs** (`#runs/<role>`), with each
-  role's runs only and a link to its settings. `#settings` and `#settings/defaults` open Roles,
-  `#agents/...` opens Runs, and the import's links to a provider, MCP server
-  or channel open its page.
+  dropdown ends with "+ New Agent Profile", which opens the form in place. The
+  top-level Agents page becomes **Runs** (`#runs/<role>`), with each role's
+  runs only and a link to its settings. `#settings` and `#settings/defaults`
+  open Roles, `#agents/...` opens Runs, and the import's links to a provider,
+  MCP server or channel open its page.
 - **Runtimes are built in.** Settings → Agent Runtimes is read-only: one card
   per runtime type (Claude Code, Codex and OMP, and the planned Claude Code
   SDK, OpenAI Agents SDK and norma) with whether it is found on the server's
@@ -402,26 +442,26 @@ Covers `v2.6.0` to `v2.7.0`: pull requests #72 to #160, #162 and #163 in
   `task_profile_overrides`, and the `agent_id` of a settings layer and of a
   task's choice, and a saved session's `session_agent_id`, to `profile_id`;
   foreign keys follow and constraints take a new database's names. A v2.6.0
-  database keeps every row, and the renames alone change no role's launch;
-  as for any schema change, `looper serve` backs the database up first. The API follows
-  with **no old routes or field names kept** (the dashboard is the only
-  client, so anything that calls the API directly must change):
+  database keeps every row, and the renames alone change no role's launch; as
+  for any schema change, `looper serve` backs the database up first. The API
+  follows with **no old routes or field names kept** (the dashboard is the
+  only client, so anything that calls the API directly must change):
   `/api/agent-configs` is `/api/roles` (`/api/roles/:role`,
-  `/api/roles/:role/reset-prompt`); `POST /api/agents` and
-  `PUT`/`DELETE /api/agents/:id` are `/api/agent-profiles`, answering with
-  `profile` (its `profile_id`); the registry lists `profiles` and counts
-  `profile_count`; a settings layer's `agent` is `profile_id`, its effective
-  `agent` is `profile`, `limits.builtin_agent` is `builtin_profile` and an
-  effort's source is `profile`; a task's
-  `agent_overrides` is `profile_overrides`. `/api/agents/:id/usage` and
-  `/api/agent-settings` keep their names: they are about running agents and
-  their settings. A run's record names its profile in `metadata.profile` and
-  `settings_sources.profile`; runs recorded before keep `metadata.agent`,
-  which the dashboard still reads. `looper config export` writes
-  `looper-config/v2` (`profiles`, and a layer's `profile`); `looper-config/v1`
-  and `loopx-config/v1` files still import. In code, `AgentSpec` is
-  `AgentProfile`, and `looper.agents.agent_registry`, `looper.db.agent_registry`
-  and `looper.db.agent_configs` are `profile_registry` and `role_configs`.
+  `/api/roles/:role/reset-prompt`); `POST /api/agents` and `PUT`/`DELETE
+  /api/agents/:id` are `/api/agent-profiles`, answering with `profile` (its
+  `profile_id`); the registry lists `profiles` and counts `profile_count`; a
+  settings layer's `agent` is `profile_id`, its effective `agent` is
+  `profile`, `limits.builtin_agent` is `builtin_profile` and an effort's
+  source is `profile`; a task's `agent_overrides` is `profile_overrides`.
+  `/api/agents/:id/usage` and `/api/agent-settings` keep their names: they are
+  about running agents and their settings. A run's record names its profile in
+  `metadata.profile` and `settings_sources.profile`; runs recorded before keep
+  `metadata.agent`, which the dashboard still reads. `looper config export`
+  writes `looper-config/v2` (`profiles`, and a layer's `profile`);
+  `looper-config/v1` and `loopx-config/v1` files still import. In code,
+  `AgentSpec` is `AgentProfile`, and `looper.agents.agent_registry`,
+  `looper.db.agent_registry` and `looper.db.agent_configs` are
+  `profile_registry` and `role_configs`.
 - **The dashboard calls a profile an Agent Profile everywhere.** A run's
   prompt layers (the profile row, its source, a profile's default), a task's
   header, the config import preview, a project's Overview cards and a
