@@ -104,17 +104,24 @@ class TestClaudeRunRecorder:
 
     def test_the_calls_a_run_was_refused_and_how_a_turn_was_checked_are_kept(self, agent_db: Any) -> None:
         recorder = self._recorder()
+        metadata = {"read_only_check": "compared", "planner_changed_files": ["notes.md"]}
 
         async def _run() -> None:
+            await recorder.annotate(metadata)  # no record yet
+            agent_db.add_metadata.assert_not_awaited()
             await recorder.start()
             await recorder.finish(output_text="ok", result_event={
                 "type": "result", "subtype": "success", "is_error": False, "permission_denials": [
-                    {"tool_name": "Bash", "tool_use_id": "t", "tool_input": {"command": "touch made.txt"}}]},
-                metadata={"read_only_check": "compared", "planner_changed_files": ["notes.md"]})
+                    {"tool_name": "Bash", "tool_use_id": "t", "tool_input": {"command": "touch made.txt"}}]})
+            await recorder.annotate({})
+            agent_db.add_metadata.assert_not_awaited()
+            await recorder.annotate(metadata)
+            agent_db.add_metadata.assert_awaited_once_with(agent_db.start_record.return_value, metadata)
+            agent_db.add_metadata.side_effect = RuntimeError("database pool not initialised")
+            await recorder.annotate(metadata)  # a database error never fails the run
 
         asyncio.run(_run())
         assert agent_db.finish_record.await_args.kwargs["metadata"] == {
-            "read_only_check": "compared", "planner_changed_files": ["notes.md"],
             "permission_denials": [{"tool": "Bash", "input": "touch made.txt", "id": "t"}]}
 
     @pytest.mark.parametrize(

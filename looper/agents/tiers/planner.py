@@ -2658,15 +2658,16 @@ class PlannerAgent:
                 error = "Claude Code returned an empty reply"
             # The turn is over: recorded first, so a stop that comes while Claude stops or the session is saved
             # keeps what it spent.
-            changed, check = await self._changed_files(plan, watched)
             await recorder.finish(
                 output_text=final_text or None,
                 result_event=result_event,
                 error=error,
                 usage=turn.usage,
-                metadata={"read_only_check": check.value, **({"planner_changed_files": changed} if changed else {})}
-                if check is not None else None,
             )
+            changed, check = await self._changed_files(plan, watched)
+            if check is not None:
+                await recorder.annotate({"read_only_check": check.value,
+                                         **({"planner_changed_files": changed} if changed else {})})
             await self._report_read_only(process.launch.runtime.permission_denials(result_event), changed)
             if over_cap:
                 # The process answers every later turn the same way at once: the next turn starts a new one,

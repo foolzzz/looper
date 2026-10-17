@@ -142,7 +142,7 @@ async def finish_record(
     """Close a record with the run's outcome, its own usage and cost (and where the cost comes from), its final
     context and its compactions; a Worker's or Reviewer's run also keeps how its report or verdict read
     (``metadata.outcome``, ``worker.RunOutcome``), and ``metadata``'s keys are added to the record's (a run's
-    refused tool calls, ``permission_denials``; the files a Planner's turn changed, ``planner_changed_files``)."""
+    refused tool calls, ``permission_denials``)."""
     pool = pool or get_pool()
     await pool.execute(
         """
@@ -176,6 +176,15 @@ async def finish_record(
         cache_read_tokens, cache_creation_tokens, context_tokens,
         json.dumps(compactions) if compactions is not None else None, cost_source, outcome,
         json.dumps(metadata, ensure_ascii=False) if metadata else None,
+    )
+
+
+async def add_metadata(record_id: int, metadata: dict[str, Any], *, pool: asyncpg.Pool | None = None) -> None:
+    """Add ``metadata``'s keys to a record's metadata, after it ended: how a read-only Planner's turn was checked."""
+    pool = pool or get_pool()
+    await pool.execute(
+        "UPDATE llm_records SET metadata = COALESCE(metadata, '{}'::jsonb) || $2::jsonb WHERE id = $1",
+        record_id, json.dumps(metadata, ensure_ascii=False),
     )
 
 

@@ -63,6 +63,12 @@ def test_run_is_recorded_end_to_end() -> None:
                                             metadata={"permission_denials": denials}, pool=pool)
             refused = await llm_records.get_record(refused_id, pool=pool)
             assert refused["metadata"] == {"cwd": "/tmp/p", "outcome": "passed", "permission_denials": denials}
+            await llm_records.add_metadata(refused_id, {"read_only_check": "compared",
+                                                       "planner_changed_files": ["笔记.md"]}, pool=pool)
+            annotated = await llm_records.get_record(refused_id, pool=pool)
+            assert annotated["metadata"] == {**refused["metadata"], "read_only_check": "compared",
+                                              "planner_changed_files": ["笔记.md"]}
+            assert (annotated["status"], annotated["finished_at"]) == (refused["status"], refused["finished_at"])
             await pool.execute("DELETE FROM llm_records WHERE id = $1", refused_id)
             events = await llm_records.list_events(record_id, pool=pool)
             assert events[0]["event"]["message"]["content"][0]["text"] == "你好"

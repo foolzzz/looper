@@ -624,7 +624,9 @@ class TestReadOnly:
 
         drive(claude, always(WORK_OK), scenario)
         reported = [line for line in activity(agent_db) if "files changed in the task directory" in line]
-        notes = [c.kwargs.get("metadata") for c in agent_db.finish_record.await_args_list]
+        notes = [c.args[1] for c in agent_db.add_metadata.await_args_list]
+        assert all("read_only_check" not in c.kwargs.get("metadata", {})
+                   for c in agent_db.finish_record.await_args_list)
         if enforced:
             # Claude Code refuses such a change itself: the Planner does not look.
             assert reported == [] and not any(notes)  # no metadata passed at all
@@ -662,7 +664,9 @@ class TestReadOnly:
         h = drive(claude, lambda e: None if e.payload["step_key"] == "s1" else WORK_OK, scenario)
         assert h.final() is not None and h.final().payload["status"] == "completed"
         assert not [line for line in activity(agent_db) if "files changed in the task directory" in line]
-        assert [c.kwargs.get("metadata") for c in agent_db.finish_record.await_args_list] == [
+        assert all("read_only_check" not in c.kwargs.get("metadata", {})
+                   for c in agent_db.finish_record.await_args_list)
+        assert [c.args[1] for c in agent_db.add_metadata.await_args_list] == [
             {"read_only_check": "compared"}, {"read_only_check": "shared"}, {"read_only_check": "compared"}]
 
     @pytest.mark.parametrize("where", ["another task runs there", "the other tasks cannot be read", "no git checkout"])
@@ -692,8 +696,48 @@ class TestReadOnly:
         drive(claude, always(WORK_OK), scenario)
         assert not [line for line in activity(agent_db) if "files changed in the task directory" in line]
         check = "shared" if shared else "no_checkout"
-        assert [c.kwargs.get("metadata") for c in agent_db.finish_record.await_args_list] == [
+        assert all("read_only_check" not in c.kwargs.get("metadata", {})
+                   for c in agent_db.finish_record.await_args_list)
+        assert [c.args[1] for c in agent_db.add_metadata.await_args_list] == [
             {"read_only_check": check}] * 2
+
+    def test_a_turn_stopped_while_checking_files_keeps_its_outcome_and_cost(
+        self, planner_claude: Any, agent_db: Any, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from looper.agents import step_workspaces
+        from looper.agents.runtimes import ReadOnly
+        from looper.agents.runtimes.claude_code import ClaudeCodeRuntime
+
+        monkeypatch.setattr(ClaudeCodeRuntime, "read_only", ReadOnly.CHECK)
+        claude = planner_claude(plan(step("s1")))
+        checking = asyncio.Event()
+        tree_state = step_workspaces.tree_state
+        calls = 0
+
+        async def check_tree(work_dir: str) -> Any:
+            nonlocal calls
+            calls += 1
+            if calls == 2:  # the audit after Claude answered, then the task stops
+                checking.set()
+                await asyncio.sleep(60)
+            return await tree_state(work_dir)
+
+        monkeypatch.setattr(step_workspaces, "tree_state", check_tree)
+
+        async def scenario(h: Harness) -> None:
+            h.work_dir.mkdir(parents=True, exist_ok=True)
+            identity = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAME": "t",
+                        "GIT_COMMITTER_EMAIL": "t@t"}
+            for args in (["init", "-q"], ["commit", "-q", "--allow-empty", "-m", "start"]):
+                subprocess.run(["git", *args], cwd=h.work_dir, check=True, env=identity)
+            await h.start()
+            await h.until(checking.is_set)
+
+        drive(claude, lambda envelope: None, scenario)
+        finishes = agent_db.finish_record.await_args_list
+        assert (finishes[0].kwargs["status"], finishes[0].kwargs["cost_usd"]) == ("completed", 0.25)
+        assert agent_db.start_record.await_count == len(finishes)
+        agent_db.add_metadata.assert_not_awaited()
 
 
 @pytest.mark.usefixtures("agent_db")

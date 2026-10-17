@@ -1128,13 +1128,11 @@ class ClaudeRunRecorder:
         usage: Usage | None = None,
         outcome: str | None = None,
         status: RecordStatus | None = None,
-        metadata: dict[str, Any] | None = None,
     ) -> None:
         """Close the record with the run's own ``usage``; without one, all the result reports is the run's.
         ``outcome`` is how a Worker's report or a Reviewer's verdict read (``worker.RunOutcome``); ``status``,
         when given, replaces the one its result gives (``ended_by``, for a run that was stopped). The tool calls
-        the runtime refused (``RuntimeAdapter.permission_denials``) are kept as ``permission_denials``, and
-        ``metadata``'s keys beside them (how a read-only Planner's turn was checked).
+        the runtime refused (``RuntimeAdapter.permission_denials``) are kept as ``permission_denials``.
 
         Claude reports the running totals of its session, so a run that is
         one turn of a longer-lived session passes its own share
@@ -1152,7 +1150,7 @@ class ClaudeRunRecorder:
         if result_event is None or result.get(SOFT_CAP):
             # No result reported the run's spend: what its usage events add up to is what is known.
             usage = usage.filled_from(self._usage_so_far)
-        notes: dict[str, Any] = dict(metadata or {})
+        notes: dict[str, Any] = {}
         if denials := self._runtime().permission_denials(result_event):
             notes["permission_denials"] = denials
         await self._close(
@@ -1161,6 +1159,18 @@ class ClaudeRunRecorder:
             error=error or (None if succeeded else f"Claude run ended: {result.get('subtype') or 'no result'}"),
             outcome=outcome, metadata=notes,
         )
+
+    async def annotate(self, metadata: dict[str, Any]) -> None:
+        """Add ``metadata``'s keys to the run's record once it ended; a database error is logged and never fails
+        the run."""
+        if self._record_id is None or not metadata:
+            return
+        from ..db import llm_records
+
+        try:
+            await llm_records.add_metadata(self._record_id, metadata)
+        except Exception:
+            logger.warning("could not annotate llm record for %s", self._agent_id, exc_info=True)
 
     async def end_left_open(self, exc: BaseException | None = None) -> None:
         """Close the record if the run left it open, ended as ``ended_by(exc)`` says, with what the run's usage
