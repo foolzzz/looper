@@ -1138,6 +1138,8 @@ class TestWorkerKill:
         assert finish["status"] == "interrupted"
         assert (finish["input_tokens"], finish["output_tokens"], finish["cache_read_tokens"]) == (900, 40, 5000)
         assert finish["cost_usd"] == cost
+        if killed == "reporting":
+            assert finish["error"] == "the run had ended with its result; Looper was stopped while it handled the result"
 
 
 def _run_item(worker_id: str, task_id: str, work_dir: Path, *, review: bool = False,
