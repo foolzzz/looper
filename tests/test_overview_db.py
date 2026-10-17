@@ -240,6 +240,49 @@ def test_todays_spend_keeps_money_apart_from_the_subscription_equivalent(monkeyp
     _run(test, monkeypatch)
 
 
+def test_runs_a_previous_server_left_running_end_at_startup_and_count_as_ended(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """At startup every record a previous server left ``running`` ends ``interrupted``, once: a second start changes
+    nothing. The task's cost and today's spend then count no run as running, keep what an interrupted run cost and
+    count the ones without a cost as unpriced."""
+    from looper.db import llm_records, projects, tasks
+
+    async def test(pool: Any) -> None:
+        project = await projects.create_project(name="alpha", pool=pool)
+        await tasks.create_task(task_id="task-a", requirement="build it", project_id=project["id"], pool=pool)
+
+        async def run(agent_id: str, status: str, cost: float | None = None) -> int:
+            record_id = await llm_records.start_record(agent_id=agent_id, task_id="task-a", pool=pool)
+            if status != "running":
+                await llm_records.finish_record(record_id, status=status, cost_usd=cost, pool=pool)
+            return record_id
+
+        await run("planner-task-a", "completed", 0.25)
+        await run("worker-1", "interrupted", 0.1)  # stopped mid-run, with what its requests cost
+        left = [await run("worker-2", "running"), await run("planner-task-a", "running")]  # the server was killed
+        server = _server()
+        assert (await _get(server, "/api/tasks/task-a"))[1]["cost"]["running"] == 2
+
+        assert await llm_records.end_unfinished_records(pool=pool) == 2
+        ended = [await llm_records.get_record(record_id, pool=pool) for record_id in left]
+        assert [(r["status"], bool(r["finished_at"]), bool(r["error"])) for r in ended] \
+            == [("interrupted", True, True)] * 2
+        assert await llm_records.end_unfinished_records(pool=pool) == 0
+        assert [await llm_records.get_record(record_id, pool=pool) for record_id in left] == ended
+
+        status, detail = await _get(server, "/api/tasks/task-a")
+        cost = detail["cost"]
+        assert (status, cost["runs"], cost["running"], cost["unpriced_runs"]) == (200, 4, 0, 2)
+        assert cost["cost_usd"] == pytest.approx(0.35)
+        status, body = await _get(server, "/api/overview")
+        spend = body["spend_today"]
+        assert (status, spend["runs"], spend["running"], spend["unpriced_runs"]) == (200, 4, 0, 2)
+        assert spend["provider_priced_usd"] + spend["equivalent_usd"] == pytest.approx(0.35)
+
+    _run(test, monkeypatch)
+
+
 def test_a_planning_or_verifying_task_is_active_for_the_sidebar_and_the_delete_guard(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

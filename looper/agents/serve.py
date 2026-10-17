@@ -621,6 +621,10 @@ async def _run_agent_system(
     orphan_count = await mark_orphaned_tasks_stopped(keep=resumable, pool=pool)
     if orphan_count:
         logger.info("marked %d orphaned task(s) as stopped", orphan_count)
+    # The runs the previous server did not see end: nothing runs yet, so every record still running is one.
+    from ..db.llm_records import end_unfinished_records
+    if unfinished := await end_unfinished_records(pool=pool):
+        logger.info("ended %d run record(s) a previous server left running as interrupted", unfinished)
 
     # The step worktrees no task keeps any more (after the orphaned tasks stopped: those keep their unmerged ones).
     from . import step_workspaces
