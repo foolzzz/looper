@@ -33,6 +33,8 @@ from looper.agents.tiers.planner_protocol import FINAL_HEADINGS
 from looper.agents.tiers.worker import extract_report
 
 TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled", "stopped"})
+# The status a run's record ends with when the run failed (``llm_records.status``: running, completed or failed).
+RECORD_FAILED = "failed"
 # Claude Code's file-editing tools, each naming one file; Codex's patches (``runtimes.codex``), naming each file
 # they change; and OMP's (``runtimes.omp.edited_paths``).
 FILE_EDIT_TOOLS = frozenset({"Write", "Edit", "MultiEdit", "NotebookEdit", "apply_patch", *OMP_EDIT_TOOLS})
@@ -398,6 +400,9 @@ def task_metrics(
         "cost_by_role": {name: round(float((value or {}).get("cost_usd") or 0.0), 6)
                          for name, value in (cost.get("by_role") or {}).items()},
         "runs": int(cost.get("runs") or len(records)),
+        # The runs that ended in an error (their record's status), and the models each role's runs reported.
+        "run_errors": sum(1 for r in records if r.get("status") == RECORD_FAILED),
+        "models": {name: sorted({str(r["model"]) for r in rows if r.get("model")}) for name, rows in by_role.items()},
         "tokens": tokens,
         # How the runs were priced: a runtime's own login (an equivalent, Claude Code's figure or Codex's tokens at
         # the built-in prices), by Looper at an API key provider's prices, or not at all (tokens only).

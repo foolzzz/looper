@@ -1,12 +1,24 @@
-"""Compare two eval runs as a short Markdown table, ready to paste into a PR."""
+"""Compare two eval runs as a short Markdown table, ready to paste into a PR.
+
+A run has a row per (task, rep), or per (dialog, rep) for the Manager's dialogs. The table has a line per task:
+success is ``k/n``, the passes over the scored reps (a pass or a fail; an error or a skipped rep is not scored),
+with the errors beside it; every number is the mean over the scored reps. The total row has the passes over
+all scored rows with their Wilson 95% interval, the errors by class, and the tasks' means added up (one pass
+through the set). A cell that changed shows ``base → new``.
+"""
 
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping
 from typing import Any
 
-# (column, how to read it from a task result); each cell shows "base → new" when the runs differ.
-_COLUMNS: tuple[tuple[str, str], ...] = (
+from .runner import ErrorClass, Outcome
+
+SKIPPED = "skipped"  # a row past the spending cap: it never ran
+
+# (column, how to read it from a row); each cell shows "base → new" when the runs differ.
+_TASK_COLUMNS: tuple[tuple[str, str], ...] = (
     ("success", "success"),
     ("steps", "steps"),
     ("parallel Workers", "parallel_workers"),
@@ -17,103 +29,226 @@ _COLUMNS: tuple[tuple[str, str], ...] = (
     ("tokens (prompt / output)", "tokens"),
     ("cost (USD)", "cost_usd"),
 )
+_DIALOG_COLUMNS: tuple[tuple[str, str], ...] = (("success", "success"), ("cost (USD)", "cost_usd"))
+_Z95 = 1.959963984540054  # the standard normal's 97.5% quantile
 
 
-def _value(task: Mapping[str, Any] | None, key: str) -> Any:
-    if task is None:
+def outcome(row: Mapping[str, Any]) -> str:
+    """``pass``, ``fail``, ``error`` or ``skipped``. A row from before outcomes (schema v1) is read from its typed
+    fields: cancelled at the cap or after its timeout is an error, else ``success`` says."""
+    if row.get("skipped"):
+        return SKIPPED
+    if "outcome" in row:
+        return str(row["outcome"])
+    if row.get("stopped_by_cap") or row.get("timed_out"):
+        return Outcome.ERROR.value
+    return (Outcome.PASS if row.get("success") else Outcome.FAIL).value
+
+
+def error_class(row: Mapping[str, Any]) -> str | None:
+    """The class of an error row (a v1 row's from ``stopped_by_cap``), else None."""
+    if outcome(row) != Outcome.ERROR:
         return None
-    if task.get("skipped"):
-        return "skipped"
+    if "error_class" in row:
+        return str(row["error_class"])
+    return (ErrorClass.SPENDING_CAP if row.get("stopped_by_cap") else ErrorClass.TIMEOUT).value
+
+
+def wilson(passes: int, scored: int) -> tuple[float, float] | None:
+    """The Wilson score 95% interval of ``passes`` out of ``scored``; None without any scored."""
+    if scored <= 0:
+        return None
+    p, z2 = passes / scored, _Z95 ** 2
+    centre = (p + z2 / (2 * scored)) / (1 + z2 / scored)
+    half = _Z95 * math.sqrt(p * (1 - p) / scored + z2 / (4 * scored ** 2)) / (1 + z2 / scored)
+    return max(0.0, centre - half), min(1.0, centre + half)
+
+
+def rows(run: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+    """The run's rows: its dialogs' for a run of the Manager's dialogs, else its tasks'."""
+    return list(run["dialogs"] if "dialogs" in run else run.get("tasks", []))
+
+
+def _by_id(run: Mapping[str, Any]) -> dict[str, list[Mapping[str, Any]]]:
+    grouped: dict[str, list[Mapping[str, Any]]] = {}
+    for row in rows(run):
+        grouped.setdefault(str(row["id"]), []).append(row)
+    return grouped
+
+
+def reps(run: Mapping[str, Any]) -> int:
+    """The most rows any task (or dialog) has in the run: its reps."""
+    return max((len(group) for group in _by_id(run).values()), default=0)
+
+
+def _tally(group: list[Mapping[str, Any]]) -> tuple[int, int, dict[str, int]]:
+    """(passes, scored, errors by class) of a task's rows."""
+    outcomes = [outcome(row) for row in group]
+    errors: dict[str, int] = {}
+    for row in group:
+        if (found := error_class(row)) is not None:
+            errors[found] = errors.get(found, 0) + 1
+    scored = sum(1 for o in outcomes if o in (Outcome.PASS, Outcome.FAIL))
+    return outcomes.count(Outcome.PASS.value), scored, errors
+
+
+def _tokens(row: Mapping[str, Any]) -> tuple[int, int] | None:
+    """A row's prompt tokens (uncached, read from and written to the cache) and output tokens; None for a row
+    from before they were read."""
+    counted = row.get("tokens")
+    if not isinstance(counted, Mapping):
+        return None
+    prompt = sum(int(counted.get(k) or 0) for k in ("input", "cache_read", "cache_creation"))
+    return prompt, int(counted.get("output") or 0)
+
+
+def _number(row: Mapping[str, Any], key: str) -> Any:
     if key == "violations":
-        return (task.get("contract_violations") or {}).get("total", 0)
+        return (row.get("contract_violations") or {}).get("total", 0)
     if key == "tokens":
-        return _tokens([task])
-    return task.get(key)
+        return _tokens(row)
+    return row.get(key)
 
 
-def _tokens(tasks: list[Mapping[str, Any]]) -> tuple[int, int] | None:
-    """The tasks' prompt tokens (uncached, read from and written to the cache) and output tokens; None when no
-    task has them (a run from before they were read)."""
-    counted = [t["tokens"] for t in tasks if isinstance(t.get("tokens"), Mapping)]
-    if not counted:
+def _mean(group: list[Mapping[str, Any]], key: str) -> Any:
+    """The mean of ``key`` over the scored rows that have it (a pair for tokens); None when none has it."""
+    values = [v for row in group if outcome(row) in (Outcome.PASS, Outcome.FAIL)
+              if (v := _number(row, key)) is not None]
+    if not values:
         return None
-    prompt = sum(int(c.get(k) or 0) for c in counted for k in ("input", "cache_read", "cache_creation"))
-    return prompt, sum(int(c.get("output") or 0) for c in counted)
+    if key == "tokens":
+        return tuple(sum(v[i] for v in values) / len(values) for i in (0, 1))
+    return sum(float(v) for v in values) / len(values)
+
+
+def _success(passes: int, scored: int, errors: Mapping[str, int]) -> str:
+    text = f"{passes}/{scored}"
+    return text + (f" · {sum(errors.values())} err" if errors else "")
 
 
 def _text(value: Any, key: str) -> str:
     if value is None:
         return "–"
-    if value == "skipped":
-        return "skipped"
-    if key == "success":
-        return "pass" if value else "FAIL"
     if key == "cost_usd":
-        return f"{float(value):.4f}"
+        return f"{value:.4f}"
     if key == "tokens":
         prompt, output = value
         return f"{prompt / 1000:.0f}k / {output / 1000:.1f}k"
-    return str(value)
+    return f"{value:.1f}"
 
 
-def _cell(base: Any, new: Any, key: str) -> str:
-    if base is None or _text(base, key) == _text(new, key):
-        return _text(new, key)
-    return f"{_text(base, key)} → **{_text(new, key)}**"
+def _cells(group: list[Mapping[str, Any]] | None, columns: tuple[tuple[str, str], ...]) -> list[str] | None:
+    """A task's cells, or None when the run does not have it."""
+    if group is None:
+        return None
+    if all(outcome(row) == SKIPPED for row in group):
+        return [SKIPPED] * len(columns)
+    return [_success(*_tally(group)) if key == "success" else _text(_mean(group, key), key) for _, key in columns]
 
 
-def totals(run: Mapping[str, Any]) -> dict[str, Any]:
-    """The run's sums over the tasks that ran; success is "passed/ran"."""
-    ran = [t for t in run.get("tasks", []) if not t.get("skipped")]
-    return {
-        "success": f"{sum(1 for t in ran if t.get('success'))}/{len(ran)}",
-        "steps": sum(int(t.get("steps") or 0) for t in ran),
-        # The most at once in any task; none from a run before it was read.
-        "parallel_workers": max((int(t["parallel_workers"]) for t in ran if "parallel_workers" in t), default=None),
-        "retries": sum(int(t.get("retries") or 0) for t in ran),
-        "reviews": sum(int(t.get("reviews") or 0) for t in ran),
-        "violations": sum(int((t.get("contract_violations") or {}).get("total", 0)) for t in ran),
-        "planner_modified_files": sum(int(t.get("planner_modified_files") or 0) for t in ran),
-        "tokens": _tokens(ran),
-        "cost_usd": round(sum(float(t.get("cost_usd") or 0.0) for t in ran), 6),
-    }
+def _changed(old: list[str] | None, new: list[str]) -> list[str]:
+    if old is None:
+        return new
+    return [n if o == n else f"{o} → **{n}**" for o, n in zip(old, new)]
+
+
+def _total(groups: dict[str, list[Mapping[str, Any]]], columns: tuple[tuple[str, str], ...]) -> list[str]:
+    passes = scored = 0
+    errors: dict[str, int] = {}
+    for group in groups.values():
+        p, s, e = _tally(group)
+        passes, scored = passes + p, scored + s
+        for name, count in e.items():
+            errors[name] = errors.get(name, 0) + count
+    cells = []
+    for _, key in columns:
+        if key == "success":
+            text = f"{passes}/{scored}"
+            if (interval := wilson(passes, scored)) is not None:
+                low, high = interval
+                text += f" ({passes / scored:.0%}, {low * 100:.0f}–{high * 100:.0f}%)"
+            if errors:
+                text += " · " + ", ".join(f"{count} {name}" for name, count in sorted(errors.items()))
+            cells.append(text)
+            continue
+        means = [m for group in groups.values() if (m := _mean(group, key)) is not None]
+        if not means:
+            cells.append(_text(None, key))
+        elif key == "tokens":
+            cells.append(_text((sum(m[0] for m in means), sum(m[1] for m in means)), key))
+        elif key == "parallel_workers":  # the most at once in any task
+            cells.append(_text(max(means), key))
+        else:
+            cells.append(_text(sum(means), key))
+    return cells
 
 
 def _label(run: Mapping[str, Any]) -> str:
     commit = str((run.get("git") or {}).get("commit") or "")[:9] or "?"
     dirty = "+local changes" if (run.get("git") or {}).get("dirty") else ""
-    return f"{run.get('mode', '?')}/{run.get('model') or '-'} @ {commit}{dirty}"
+    who = (run.get("manager_agent") or run.get("agent")) if "dialogs" in run else run.get("model")
+    count = reps(run)
+    return f"{run.get('mode', '?')}/{who or '-'} @ {commit}{dirty} ({count} rep{'' if count == 1 else 's'})"
+
+
+def _problems(run: Mapping[str, Any]) -> list[str]:
+    several = reps(run) > 1
+    lines = []
+    for row in rows(run):
+        name = f"{row['id']} (rep {row.get('rep', 1)})" if several else str(row["id"])
+        if (found := error_class(row)) is not None:
+            lines.append(f"- {name}: error ({found}): {' '.join(str(row.get('error') or '').split())}")
+        elif row.get("problems") and outcome(row) == Outcome.FAIL:
+            lines.append(f"- {name}: {' '.join('; '.join(row['problems']).split())}")
+    if run.get("stopped_by_cap"):
+        lines.append(f"- stopped at the spending cap ({run.get('caps', {}).get('total_cap_usd')} USD)")
+    if run.get("aborted"):
+        lines.append(f"- the run stopped midway: {run['aborted']}")
+    return lines
+
+
+def _notes(new: Mapping[str, Any], base: Mapping[str, Any] | None) -> list[str]:
+    """What the table alone does not say: the tasks whose pass rate moved, the single samples, the tasks one side
+    lacks."""
+    new_groups, base_groups = _by_id(new), _by_id(base) if base is not None else {}
+    lines = []
+    moved = []
+    for task_id, group in new_groups.items():
+        if task_id not in base_groups:
+            continue
+        (bp, bs, _), (np_, ns, _) = _tally(base_groups[task_id]), _tally(group)
+        if (bs == 0) != (ns == 0) or bp * ns != np_ * bs:
+            moved.append(f"{task_id} {bp}/{bs} → {np_}/{ns}")
+    if moved:
+        lines.append("- pass rate changed: " + ", ".join(moved))
+    once = [side for side, run in (("the base", base), ("the new run", new)) if run is not None and reps(run) == 1]
+    if once:
+        lines.append(f"- {' and '.join(once)} ran each case once: a pass or fail per case is a single sample")
+    if base is not None and (missing := [task_id for task_id in new_groups if task_id not in base_groups]):
+        lines.append("- no baseline: " + ", ".join(missing))
+    if gone := [task_id for task_id in base_groups if task_id not in new_groups]:
+        lines.append("- in the base, not in the new run: " + ", ".join(gone))
+    return lines
 
 
 def markdown(new: Mapping[str, Any], base: Mapping[str, Any] | None = None) -> str:
-    """One row per task and a total row; a cell that changed shows ``base → new``."""
-    lines = []
-    if base is None:
-        lines.append(f"Prompt eval: {_label(new)} (no earlier run to compare with)")
-    else:
-        lines.append(f"Prompt eval: {_label(base)} → {_label(new)}")
-    lines.append("")
-    lines.append("| task | " + " | ".join(name for name, _ in _COLUMNS) + " |")
-    lines.append("|---" * (len(_COLUMNS) + 1) + "|")
-    base_tasks = {t["id"]: t for t in (base or {}).get("tasks", [])}
-    for task in new.get("tasks", []):
-        old = base_tasks.get(task["id"]) if base is not None else None
-        cells = [_cell(_value(old, key) if base is not None else None, _value(task, key), key)
-                 for _, key in _COLUMNS]
-        lines.append(f"| {task['id']} | " + " | ".join(cells) + " |")
-    new_totals = totals(new)
-    base_totals = totals(base) if base is not None else None
-    cells = []
-    for _, key in _COLUMNS:
-        value = new_totals[key]
-        shown = value if key == "success" else _text(value, key)
-        old = None if base_totals is None else (base_totals[key] if key == "success" else _text(base_totals[key], key))
-        cells.append(str(shown) if old is None or old == shown else f"{old} → **{shown}**")
-    lines.append("| **total** | " + " | ".join(cells) + " |")
-    problems = [f"- {t['id']}: {' '.join('; '.join(t.get('problems') or []).split())}" for t in new.get("tasks", [])
-                if t.get("problems")]
-    if new.get("stopped_by_cap"):
-        problems.append(f"- stopped at the spending cap ({new.get('caps', {}).get('total_cap_usd')} USD)")
-    if problems:
+    """A row per task (or dialog) and a total row; a cell that changed shows ``base → new``."""
+    dialogs = "dialogs" in new
+    columns = _DIALOG_COLUMNS if dialogs else _TASK_COLUMNS
+    title = "Manager dialogs" if dialogs else "Prompt eval"
+    lines = [f"{title}: {_label(new)} (no earlier run to compare with)" if base is None
+             else f"{title}: {_label(base)} → {_label(new)}", ""]
+    lines.append(f"| {'dialog' if dialogs else 'task'} | " + " | ".join(name for name, _ in columns) + " |")
+    lines.append("|---" * (len(columns) + 1) + "|")
+    new_groups = _by_id(new)
+    base_groups = _by_id(base) if base is not None else {}
+    for task_id, group in new_groups.items():
+        cells = _changed(_cells(base_groups.get(task_id), columns), _cells(group, columns) or [])
+        lines.append(f"| {task_id} | " + " | ".join(cells) + " |")
+    total = _changed(_total(base_groups, columns) if base is not None else None, _total(new_groups, columns))
+    lines.append("| **total** | " + " | ".join(total) + " |")
+    if notes := _notes(new, base):
+        lines += ["", *notes]
+    if problems := _problems(new):
         lines += ["", "Problems in the new run:", *problems]
     return "\n".join(lines)
