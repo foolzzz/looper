@@ -103,11 +103,19 @@ def test_a_gate_is_refused_where_the_task_may_not_open_one_with_what_to_do_inste
     ({"agenda": [{"question": "?", "status": "open"}]}, "steps[0].agenda[0] has unknown keys: status"),
     ({"agenda": [{"question": "?", "options": ["a"] * 7}]}, "steps[0].agenda[0].options has 7 options; at most 6"),
     ({"topic": ""}, "steps[0].topic must be a non-empty string"),
-    ({"kind": "review"}, 'steps[0].kind must be "gate" (leave it out for a work step)'),
+    ({"kind": "review"}, 'steps[0].kind must be "gate" or "work" (or left out for a work step); got \'review\''),
 ])
 def test_a_gate_step_of_the_wrong_shape_is_refused(change: dict[str, Any], error: str) -> None:
     with pytest.raises(ProtocolError, match=re.escape(error)):
         parse_plan(_reply({"steps": [{**_gate(), **change}]}), gate_policy=GatePolicy.ALLOWED)
+
+
+def test_a_work_step_may_say_its_kind() -> None:
+    plan = parse_plan(_reply({"steps": [{**_step("s1"), "kind": "work"}, _gate("g1", "s1")]}),
+                      gate_policy=GatePolicy.ALLOWED)
+    assert [(s.id, s.gate is None) for s in plan.steps] == [("s1", True), ("g1", False)]
+    with pytest.raises(ProtocolError, match=re.escape("steps[0] has unknown keys: topic")):
+        parse_plan(_reply({"steps": [{**_step("s1"), "kind": "work", "topic": "x"}]}), gate_policy=GatePolicy.ALLOWED)
 
 
 def test_an_open_gate_is_started_so_a_replan_keeps_it_and_cannot_change_it() -> None:
@@ -182,6 +190,13 @@ def test_when_the_user_ends_the_discussion_the_reply_closes_with_an_assumption_f
     reply = parse_gate(_gate_reply("close", summary={**SUMMARY, "assumptions": ["SQLite is fine for now"]}), ended,
                        OPEN)
     assert reply.summary is not None and reply.summary.assumptions == ("SQLite is fine for now",)
+    # One assumption for each item still open.
+    both = [_item("q1", "open"), _item("q2", "open")]
+    with pytest.raises(ProtocolError, match=re.escape("agenda items q1, q2 are still open: state your assumption for "
+                                                      "each in summary.assumptions (2 needed, 1 given)")):
+        parse_gate(_gate_reply("close", both, summary={**SUMMARY, "assumptions": ["SQLite"]}), ended, OPEN)
+    assumed = {**SUMMARY, "assumptions": ["SQLite", "90 days"]}
+    assert parse_gate(_gate_reply("close", both, summary=assumed), ended, OPEN).summary is not None
 
 
 FINAL = {"delivered": "x", "how_to_use": "y", "verification": "z", "open_issues": "none"}
@@ -262,6 +277,23 @@ def test_cancelling_the_other_open_gates_makes_the_decision_complete_the_task() 
     assert _decision(context, plan).decision is Decision.ACCEPT
 
 
+def test_a_chat_reply_whose_cancels_leave_no_step_open_completes_the_task_so_it_carries_final() -> None:
+    cancel = {"reply": "SQLite, as you said.", "action": "none",
+              "gates": [{"id": "g1", "action": "cancel", "resolution": "the user said SQLite in chat"}]}
+    with pytest.raises(ProtocolError, match=re.escape(
+            "these cancels leave no step open, so the reply completes the task: add the steps the answer decides, "
+            'or carry "final": delivered, how_to_use, verification, open_issues')):
+        parse_chat(_reply(cancel), LAST)
+
+    assert parse_chat(_reply({**cancel, "final": FINAL}), LAST).final is not None
+    # Steps added in the same reply follow the gate, and a cancel with a step still open completes nothing.
+    added = parse_chat(_reply({**cancel, "action": "add_steps", "steps": [_step("s9", "g1")], "final": FINAL}), LAST)
+    assert added.final is None and [s.id for s in added.steps] == ["s9"]
+    assert parse_chat(_reply({**cancel, "final": FINAL}), OPEN).final is None
+    with pytest.raises(ProtocolError, match="final must be an object"):
+        parse_chat(_reply({**cancel, "final": "done"}), LAST)
+
+
 def test_a_chat_reply_may_cancel_a_gate_and_depend_on_it_in_a_replan() -> None:
     reply = parse_chat(_reply({"reply": "s1 answered it", "action": "replan", "steps": [_step("s3", "g1")],
                                "gates": [{"id": "g1", "action": "cancel", "resolution": "answered by s1"}]}), OPEN)
@@ -290,6 +322,8 @@ def test_the_contract_with_gates_says_how_to_open_discuss_change_and_close_them(
     assert '- gates (optional, also in [CHAT]): change gates not closed yet' in text
     assert "[GATE]: the user wrote in a gate's discussion, or ended it." in text
     assert "What the user writes in a gate's\n  discussion comes as [GATE], not as a supplement." in text
+    assert 'A reply whose cancels\n  leave no step open completes the task: add the steps the answer decides, or\n  ' \
+           'carry "final" as in [DECISION].' in text
     assert text.index("[RESTART]:") < text.index("[GATE]: the user") < text.index("[SUPERVISE]:")
 
 

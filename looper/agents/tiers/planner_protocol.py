@@ -84,6 +84,7 @@ _NEW_ITEM_KEYS = frozenset({"question", "options"})
 _ITEM_KEYS = frozenset({"id", "question", "options", "status", "answer"})
 _GATE_CHANGE_KEYS = frozenset({"id", "action", "topic", "agenda", "findings", "note", "resolution"})
 GATE_KIND = "gate"
+WORK_KIND = "work"  # the default: a step without ``kind``
 
 
 class TurnKind(str, Enum):
@@ -238,6 +239,7 @@ class ChatReply:
     steps: tuple[StepSpec, ...]  # add_steps, and replan (the steps that replace every step not started)
     stop: tuple[str, ...] = ()  # replan only: running steps to stop and drop
     gates: tuple[GateChange, ...] = ()  # applied before the action
+    final: FinalSummary | None = None  # only when its cancels leave no step open and it adds none
 
 
 @dataclass(frozen=True)
@@ -449,10 +451,23 @@ def parse_handoff(text: str) -> str:
 
 
 def parse_chat(text: str, plan: PlanView) -> ChatReply:
+    """A CHAT (or RESTART) reply: its gate changes, then its action on the plan they leave. One whose cancels leave
+    no step open and that adds none completes the task, so it must carry ``final``."""
     data = extract_reply(text)
-    _only_keys(data, {"reply", "action", "step", "text", "steps", "stop", "gates"}, "the CHAT reply")
+    _only_keys(data, {"reply", "action", "step", "text", "steps", "stop", "gates", "final"}, "the CHAT reply")
     gates = _gate_changes(data, plan)
-    return replace(_chat_action(data, _after_gates(plan, gates)), gates=gates)
+    after = _after_gates(plan, gates)
+    chat = _chat_action(data, after)
+    final = FinalSummary(**_fields(data["final"], FINAL_FIELDS, "final", FINAL_FIELD_MAX_CHARS)) \
+        if "final" in data else None
+    cancels = any(change.action is GateAction.CANCEL for change in gates)
+    adds = chat.action is ChatAction.ADD_STEPS or (chat.action is ChatAction.REPLAN and bool(chat.steps))
+    completes = cancels and not adds and not (set(after.started) - after.done) and not after.pending
+    if completes and final is None:
+        raise ProtocolError("these cancels leave no step open, so the reply completes the task: add the steps the "
+                            'answer decides, or carry "final": ' + ", ".join(FINAL_FIELDS))
+    # Only the reply that completes the task keeps a final summary.
+    return replace(chat, gates=gates, final=final if completes else None)
 
 
 def parse_gate(text: str, context: GateContext, plan: PlanView) -> GateReply:
@@ -480,9 +495,10 @@ def parse_gate(text: str, context: GateContext, plan: PlanView) -> GateReply:
         if still_open and not context.forced:
             raise ProtocolError(f"agenda items {', '.join(still_open)} are still open: resolve or drop each before "
                                 'closing, or ask with "gate": "continue"')
-        if still_open and not summary.assumptions:
+        if len(summary.assumptions) < len(still_open):
             raise ProtocolError(f"agenda items {', '.join(still_open)} are still open: state your assumption for "
-                                "each in summary.assumptions")
+                                f"each in summary.assumptions ({len(still_open)} needed, "
+                                f"{len(summary.assumptions)} given)")
     elif "summary" in data:
         raise ProtocolError('summary is only for "gate": "close"')
     chat = _chat_action(data, plan)
@@ -723,14 +739,15 @@ def _step(value: Any, index: int) -> StepSpec:
     where = f"steps[{index}]"
     if not isinstance(value, dict):
         raise ProtocolError(f"{where} must be an object")
-    if "kind" in value:
-        if value["kind"] != GATE_KIND:
-            raise ProtocolError(f'{where}.kind must be "gate" (leave it out for a work step); got {value["kind"]!r}')
+    kind = value.get("kind", WORK_KIND)
+    if kind == GATE_KIND:
         return _gate_step(value, where)
+    if kind != WORK_KIND:
+        raise ProtocolError(f'{where}.kind must be "gate" or "work" (or left out for a work step); got {kind!r}')
     missing = sorted(_STEP_KEYS - value.keys())
     if missing:
         raise ProtocolError(f"{where} is missing {', '.join(missing)}")
-    _only_keys(value, _STEP_KEYS | _ROLE_KEYS, where)
+    _only_keys(value, _STEP_KEYS | _ROLE_KEYS | {"kind"}, where)
     step_id = value["id"]
     if not isinstance(step_id, str) or not _STEP_ID.fullmatch(step_id):
         raise ProtocolError(f"{where}.id must be a short label of letters, digits, '-', '_' or '.'; got {step_id!r}")
@@ -1087,7 +1104,9 @@ _GATE_CHANGES = """\
 """
 _CHAT_GATES = """\
 - gates (optional): as in [DECISION]. What the user writes in a gate's
-  discussion comes as [GATE], not as a supplement.
+  discussion comes as [GATE], not as a supplement. A reply whose cancels
+  leave no step open completes the task: add the steps the answer decides, or
+  carry "final" as in [DECISION].
 """
 _GATE_SECTION = """\
 [GATE]: the user wrote in a gate's discussion, or ended it. Answer them, and
