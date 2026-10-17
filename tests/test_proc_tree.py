@@ -390,6 +390,107 @@ def test_an_end_cut_short_leaves_the_rest_of_the_tree_for_the_next_start(
     asyncio.run(_run())
 
 
+def test_a_graceful_stop_records_the_tree_before_the_agent_exits(
+    tmp_path: Path, runtime_root: Path, trees: list[dict[str, int]], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    claude = fake_claude(tmp_path / "claude", _RESIDENT_AGENT)
+
+    async def _run() -> None:
+        await proc_tree.sweep(runtime_root)
+        session = ResidentClaude(label="manager")
+        await session.start([claude], cwd=str(tmp_path), signature=None, env={**os.environ, "TRAP_TERM": "1"})
+
+        async def on_event(event: dict[str, Any]) -> None:
+            pass
+
+        await session.run_turn("hello", on_event)
+        tree = await _started(tmp_path, trees)
+        record = runtime_root / proc_tree.RECORDS_DIR / f"{tree['agent']}.json"
+        monkeypatch.setattr(proc_tree, "TERM_GRACE_SEC", 10)
+        stopping = asyncio.create_task(session.stop())
+        try:
+            for _ in range(300):
+                if not _running([tree["agent"]], settle=0):
+                    break
+                await asyncio.sleep(0.01)
+            assert _running([tree["agent"]], settle=0) == []
+            await asyncio.sleep(0.05)  # the reaper has had time to forget the agent
+            assert record.exists()
+            saved = json.loads(record.read_text())
+            assert tree["child"] in {entry["pid"] for entry in saved["tree"]}
+            saved["server_pid"], saved["server_started"] = _exited()
+            record.write_text(json.dumps(saved))
+            monkeypatch.setattr(proc_tree, "TERM_GRACE_SEC", 0.5)
+            await proc_tree.sweep(runtime_root)
+            assert _running([tree["child"]], settle=3) == []
+            assert not record.exists()
+        finally:
+            stopping.cancel()
+            await asyncio.gather(stopping, return_exceptions=True)
+
+    asyncio.run(_run())
+
+
+def test_the_sweep_keeps_the_record_until_its_process_has_ended(runtime_root: Path) -> None:
+    process = subprocess.Popen(["/bin/sh", "-c", 'trap "" TERM; exec sleep 30'], start_new_session=True)
+    try:
+        time.sleep(0.1)  # the shell has installed its trap
+        started = proc_tree._start_time(process.pid)
+        assert started is not None
+        record = _record(runtime_root, process.pid, started, _exited())
+
+        async def _run() -> None:
+            sweeping = asyncio.create_task(proc_tree.sweep(runtime_root))
+            try:
+                await asyncio.sleep(0.2)
+                assert not sweeping.done()
+                assert record.exists()
+                await sweeping
+                assert not record.exists()
+                assert _running([process.pid]) == []
+            finally:
+                sweeping.cancel()
+                await asyncio.gather(sweeping, return_exceptions=True)
+
+        asyncio.run(_run())
+    finally:
+        process.kill()
+        process.wait()
+
+
+def test_the_sweep_keeps_a_tree_when_its_start_times_cannot_be_read(
+    runtime_root: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    process = subprocess.Popen(["/bin/sleep", "30"], start_new_session=True)
+    try:
+        started = proc_tree._start_time(process.pid)
+        assert started is not None
+        pid, agent_started = _exited()
+        record = _record(runtime_root, pid, agent_started, _exited())
+        saved = json.loads(record.read_text())
+        saved["tree"] = [{"pid": process.pid, "started": started}]
+        record.write_text(json.dumps(saved))
+        monkeypatch.setattr(proc_tree, "_start_times", lambda pids: None)
+        asyncio.run(proc_tree.sweep(runtime_root))
+        assert record.exists()
+        assert json.loads(record.read_text()) == saved
+        assert _running([process.pid], settle=0) == [process.pid]
+    finally:
+        process.kill()
+        process.wait()
+
+
+def test_ending_an_orphan_rechecks_its_start_time() -> None:
+    process = subprocess.Popen(["/bin/sleep", "30"], start_new_session=True)
+    try:
+        asyncio.run(proc_tree._end(
+            proc_tree._Orphan(process.pid, started="Thu Jan 1 00:00:00 1970"), label="x", known={}))
+        assert _running([process.pid], settle=0) == [process.pid]
+    finally:
+        process.kill()
+        process.wait()
+
+
 def test_a_record_lists_the_tree_only_while_an_end_is_ending_it(
     tmp_path: Path, runtime_root: Path, trees: list[dict[str, int]],
 ) -> None:

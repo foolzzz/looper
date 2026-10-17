@@ -700,6 +700,39 @@ class TestResidentClaude:
 
         asyncio.run(_run())
 
+    def test_a_second_stop_cancellation_still_waits_for_claude_to_end(self) -> None:
+        async def _run() -> None:
+            with tempfile.TemporaryDirectory() as tmp:
+                planner = PlannerAgent(task_id="t1", runtime_root=Path(tmp))
+                loop_task = planner._loop_task = asyncio.create_task(asyncio.sleep(60))
+                killing, stopping = asyncio.Event(), asyncio.Event()
+                finished = False
+
+                async def kill_workers_slowly() -> None:
+                    killing.set()
+                    await asyncio.sleep(60)
+
+                async def claude_exiting_slowly(*, kill: bool = False) -> None:
+                    nonlocal finished
+                    assert kill
+                    stopping.set()
+                    await asyncio.sleep(0.3)
+                    finished = True
+
+                planner._kill_running_workers = kill_workers_slowly  # type: ignore[method-assign]
+                planner._claude.stop = claude_exiting_slowly  # type: ignore[method-assign]
+                stopper = asyncio.create_task(planner.stop())
+                await killing.wait()
+                stopper.cancel()
+                await stopping.wait()
+                stopper.cancel()
+                await asyncio.wait([stopper])
+                assert stopper.cancelled()
+                assert loop_task.done() and loop_task.cancelled()
+                assert finished
+
+        asyncio.run(_run())
+
     def test_a_stopping_planners_token_files_are_gone_once_its_token_no_longer_works(self) -> None:
         """The MCP configuration that carries the Planner's token is deleted with the token, before stop() waits for
         its Claude to end: a stop the server's shutdown cuts off then leaves no token on disk."""

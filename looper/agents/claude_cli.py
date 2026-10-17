@@ -755,11 +755,13 @@ class ResidentClaude:
             return
         if output is not None:
             output.drop_turn()
-        # Taken while Claude runs: what it started is re-parented once it exits.
-        known = None if kill else proc_tree.tree_of(process)
-        if process.stdin is not None and not process.stdin.is_closing():
-            process.stdin.close()
+        known: proc_tree.Tree | None = None
         try:
+            if not kill:
+                # Taken and recorded while Claude runs: what it started is re-parented once it exits.
+                known = await proc_tree.begin_end(process)
+            if process.stdin is not None and not process.stdin.is_closing():
+                process.stdin.close()
             if process.returncode is None and not kill:
                 try:
                     await asyncio.wait_for(process.wait(), STOP_GRACE_SEC)

@@ -747,13 +747,25 @@ class PlannerAgent:
             cancelled = True
             raise
         finally:
-            for task in (supervise_task, loop_task):
-                if task is not None and not task.done():
-                    await cancel_and_wait(task)
-            # A turn the loop was in has already killed Claude; an idle one
-            # ends when its stdin closes. Never leave it running.
-            await self._claude.stop(kill=cancelled)
-            self._remove_token_files()  # and one a turn wrote meanwhile
+            async def cleanup() -> None:
+                for task in (supervise_task, loop_task):
+                    if task is not None and not task.done():
+                        await cancel_and_wait(task)
+                # A turn the loop was in has already killed Claude; an idle one
+                # ends when its stdin closes. Never leave it running.
+                await self._claude.stop(kill=cancelled)
+                self._remove_token_files()  # and one a turn wrote meanwhile
+
+            cleaning = asyncio.create_task(cleanup())
+            interrupted = False
+            while not cleaning.done():
+                try:
+                    await asyncio.shield(cleaning)
+                except asyncio.CancelledError:
+                    interrupted = True
+            cleaning.result()
+            if interrupted:
+                raise asyncio.CancelledError
 
     def _remove_token_files(self) -> None:
         """Delete the MCP configuration files that carry this Planner's token, which no longer works."""
