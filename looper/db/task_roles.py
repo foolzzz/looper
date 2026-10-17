@@ -1,13 +1,16 @@
 """The ``task_roles`` table: every version of the roles a task's Planner defines (``looper.agents.task_roles``).
 
 A role's current version is its newest; a new one is added with its
-``role_defined`` journal entry, in one transaction. Planning the task anew
-deletes them (``tasks.reset_task_for_restart``).
+``role_defined`` journal entry (and, for one the user wrote, the supplement
+that tells the Planner), in one transaction. A version records who wrote it
+(``via``: ``planner`` or ``user``) and the project role template it was
+copied from (``template_key``). Planning the task anew deletes them
+(``tasks.reset_task_for_restart``).
 """
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 import asyncpg
@@ -18,7 +21,7 @@ from .connection import get_pool
 # A role's version with its profile's name, and whether its task's project allows that profile now.
 _VERSION = (
     "SELECT r.task_id, r.role_key, r.version, r.kind, r.profile_id, r.role_prompt, r.harness, r.reason, "
-    "r.created_at, a.name AS profile_name, (l.profile_id IS NOT NULL) AS profile_allowed "
+    "r.via, r.template_key, r.created_at, a.name AS profile_name, (l.profile_id IS NOT NULL) AS profile_allowed "
     "FROM task_roles r JOIN tasks k ON k.id = r.task_id LEFT JOIN agent_profiles a ON a.id = r.profile_id "
     "LEFT JOIN project_allowed_profiles l ON l.project_id = k.project_id AND l.profile_id = r.profile_id "
 )
@@ -58,19 +61,27 @@ async def get(task_id: str, key: str, version: int | None = None, *,
 
 
 async def add_version(
-    task_id: str, key: str, values: Mapping[str, Any], entry: Mapping[str, Any], *,
-    pool: asyncpg.Pool | None = None,
-) -> int:
-    """Add the next version of task ``task_id``'s role ``key`` (``kind``, ``profile_id``, ``role_prompt``,
-    ``harness``, ``reason``) with its journal ``entry``, in one transaction; its version."""
+    task_id: str, key: str, values: Mapping[str, Any], entry: Mapping[str, Any] | Sequence[Mapping[str, Any]], *,
+    after: int, pool: asyncpg.Pool | None = None,
+) -> int | None:
+    """Add version ``after`` + 1 of task ``task_id``'s role ``key`` (``kind``, ``profile_id``, ``role_prompt``,
+    ``harness``, ``reason``, ``via``, ``template_key``) with its journal ``entry`` (or entries), in one transaction;
+    its version. ``after`` is the version the writer read (0 for a new role): None, and nothing written, when the
+    role's newest version is another by now. Raises ``asyncpg.UniqueViolationError`` when a concurrent writer took
+    the same version."""
     pool = pool or get_pool()
+    entries = [entry] if isinstance(entry, Mapping) else list(entry)
     async with pool.acquire() as conn, conn.transaction():
         version = await conn.fetchval(
-            "INSERT INTO task_roles (task_id, role_key, version, kind, profile_id, role_prompt, harness, reason) "
-            "SELECT $1, $2, COALESCE(max(version), 0) + 1, $3, $4, $5, $6, $7 FROM task_roles "
-            "WHERE task_id = $1 AND role_key = $2 RETURNING version",
+            "INSERT INTO task_roles (task_id, role_key, version, kind, profile_id, role_prompt, harness, reason, "
+            "via, template_key) "
+            "SELECT $1, $2, $10::int + 1, $3, $4, $5, $6, $7, $8, $9 "
+            "WHERE (SELECT COALESCE(max(version), 0) FROM task_roles WHERE task_id = $1 AND role_key = $2) = $10 "
+            "RETURNING version",
             task_id, key, values["kind"], values.get("profile_id"), values["role_prompt"], values.get("harness"),
-            values.get("reason") or "",
+            values.get("reason") or "", values.get("via") or "planner", values.get("template_key"), after,
         )
-        await db_journal.insert(conn, task_id, [entry])
+        if version is None:
+            return None
+        await db_journal.insert(conn, task_id, entries)
     return int(version)
