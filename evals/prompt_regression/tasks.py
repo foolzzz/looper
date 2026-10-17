@@ -629,7 +629,7 @@ ROLE_TASKS: tuple[EvalTask, ...] = (
         },
     ),
     EvalTask(
-        # An advisory review role (review_role_required false) that wants a file the task does not, so it fails the
+        # An advisory review role (required false in review_roles) that wants a file the task does not, so it fails the
         # step: the built-in Reviewer still gates it, and the Planner decides what the verdict is worth. (Every
         # Worker reads the requirement, so the role's rule is one the requirement turns down, not a secret.)
         id="roles_advisory_review",
