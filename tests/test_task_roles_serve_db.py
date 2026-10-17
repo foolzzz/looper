@@ -295,6 +295,9 @@ def test_every_role_run_ends_with_the_boundaries_and_a_built_in_run_is_as_before
         assert prompt.endswith(contract)
     assert tester[1].startswith(TESTER_HARNESS) and WORKING_STYLE not in tester[1]
     assert prompts[("review", "a", "security")].startswith(WORKING_STYLE)
+    # Its role's checks decide the review role's verdict too; the built-in Reviewer is told nothing of the kind.
+    assert "You review it as the role security:" in prompts[("review", "a", "security")]
+    assert "You review it as the role" not in prompts[("review", "a", "builtin")]
     for key in (("work", "b", "builtin"), ("review", "b", "builtin")):
         assert prompts[key].startswith("## How you work") and BOUNDARIES_LEAD not in prompts[key]
     # Each run records the role and the version it ran as, and where its boundaries came from.

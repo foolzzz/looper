@@ -103,6 +103,18 @@ def test_a_role_without_a_harness_takes_an_operators_harness_whole_and_the_share
     assert prompt.layers["boundaries"]["source"] == "system"
 
 
+def test_a_review_roles_reviewer_is_told_its_roles_checks_decide_its_verdict_and_a_built_in_one_is_not() -> None:
+    from looper.agents.system_prompt import review_task_section
+
+    fields = {"requirement": "r", "step": "s1", "instruction": "do it", "acceptance_criteria": ["it works"],
+              "work_dir": "/w"}
+    as_role = review_task_section(**fields, review_role="security")
+    line = ("You review it as the role security: besides these criteria, what your role above asks you to check "
+            "decides your verdict too, so passed is false when the work fails either.")
+    assert as_role.endswith(f"- it works\n{line}")
+    assert review_task_section(**fields) == as_role.removesuffix(f"\n{line}")
+
+
 def test_the_boundaries_are_set_on_the_shared_defaults_only() -> None:
     assert layer_update({"boundaries": "\n- Never touch prod.\n"}, Layer.SYSTEM) == {
         "boundaries": "- Never touch prod."}
