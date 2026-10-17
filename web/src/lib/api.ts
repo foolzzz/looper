@@ -1434,6 +1434,8 @@ export interface UserGate {
    * waits for the Planner, `waiting_on` is then "user": an automatic retry may still deliver them, and the user's
    * next message sends them again. */
   not_delivered: number;
+  /** When the Planner tries those messages again on its own; null when no retry is left (or none failed). */
+  retry_at: string | null;
   turns: number;
   reminders: number;
   opened_at: string | null;

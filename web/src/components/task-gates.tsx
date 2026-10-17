@@ -279,10 +279,14 @@ function WaitingGate({
   const active = isActiveTask(task);
   // A completed task's gates take no message (409); a stopped, failed or cancelled one keeps them for its restart.
   const takes = task.group !== "completed";
+  // The Planner answers: a message of the user's waits for it, or its automatic retry of a failed turn is due.
+  const answering = gate.waiting_on === "planner";
+  // Otherwise, the user's messages a failed Planner turn had.
+  const notDelivered = answering ? 0 : gate.not_delivered;
   // While it is the user's turn, the thread changes only with the gate, which the task page reads again anyway.
   const thread = useGateThread(task.task_id, gate.step, {
     enabled: true,
-    follow: active && gate.waiting_on === "planner",
+    follow: active && answering,
     signature: JSON.stringify(gate),
   });
   // The task status a message was kept in (its Planner was not running): the note holds until the status changes.
@@ -291,8 +295,6 @@ function WaitingGate({
   const { busy, error, run } = useAction();
   const anchor = gateAnchor(gate.step);
   const input = useRef<HTMLTextAreaElement>(null);
-  // The user's messages a failed Planner turn had, while no newer one waits for the Planner.
-  const notDelivered = gate.waiting_on === "planner" ? 0 : gate.not_delivered;
 
   const send = async (post: () => ReturnType<typeof postGateMessage>, clear: boolean) => {
     await run(async () => {
@@ -333,10 +335,12 @@ function WaitingGate({
           <span
             role="status"
             className={
-              notDelivered > 0 ? "flex basis-full flex-wrap items-center gap-x-2 gap-y-1 text-destructive" : "ml-auto"
+              notDelivered > 0 && !answering
+                ? "flex basis-full flex-wrap items-center gap-x-2 gap-y-1 text-destructive"
+                : "ml-auto"
             }
           >
-            {gate.waiting_on === "planner" ? (
+            {answering ? (
               <span className="flex items-center gap-1.5 text-primary">
                 <Loader2 className="h-3.5 w-3.5 animate-spin motion-reduce:animate-none" aria-hidden="true" />
                 The Planner is answering
@@ -346,8 +350,16 @@ function WaitingGate({
                 <Badge variant="destructive">Not delivered</Badge>
                 <span>
                   {notDelivered === 1
-                    ? "The Planner could not take your last message. Your next message sends it again."
-                    : `The Planner could not take your last ${notDelivered} messages. Your next message sends them again.`}
+                    ? "The Planner could not take your last message."
+                    : `The Planner could not take your last ${notDelivered} messages.`}{" "}
+                  {gate.retry_at && active ? (
+                    <>
+                      It tries again at <When iso={gate.retry_at} />, and your next message sends{" "}
+                      {notDelivered === 1 ? "it" : "them"} too.
+                    </>
+                  ) : (
+                    `Your next message sends ${notDelivered === 1 ? "it" : "them"} again.`
+                  )}
                 </span>
               </>
             ) : (

@@ -532,6 +532,8 @@ export function TasksPage({ sub, query, onNavigate }: TasksPageProps) {
         <div className="flex items-center gap-1 flex-wrap">
           {STATUS_FILTERS.map((f) => {
             const count = f === "all" ? total : counts[f] || 0;
+            // Only a project with user gates has tasks that wait for the user.
+            if (f === "waiting_user" && count === 0 && filter !== f) return null;
             return (
               <button
                 key={f}
