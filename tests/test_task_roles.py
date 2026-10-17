@@ -1,5 +1,6 @@
 """The roles a task's Planner defines: how a run of one is prompted, which steps may name one, how a run's outcome is
-read, and that nothing changes for the built-in roles or where a project lets its Planner define none."""
+read, how a run names the role it ran as, and that nothing changes for the built-in roles or where a project lets its
+Planner define none."""
 
 from __future__ import annotations
 
@@ -22,7 +23,7 @@ from looper.agents.agent_settings import (
     resolve,
 )
 from looper.agents.system_prompt import BOUNDARIES_LEAD, REVIEW_CONTRACT, WORK_CONTRACT, build_role_prompt
-from looper.agents.task_roles import RoleError, RoleKind, TaskRole, role_key, role_text
+from looper.agents.task_roles import RoleError, RoleKind, TaskRole, role_key, role_text, run_role, run_roles
 from looper.agents.tiers.planner_protocol import (
     REPLY_CONTRACT,
     PlanView,
@@ -239,3 +240,31 @@ def test_a_runs_outcome_is_read_as_judge_result_reads_its_report(
 ) -> None:
     judged = judge_result(event, work_dir=tmp_path, is_verify=is_verify)
     assert run_outcome(event, judged, is_verify=is_verify) is outcome
+
+
+def test_a_run_names_the_role_it_recorded_or_its_dispatch_carries_and_a_built_in_run_none() -> None:
+    named = {"id": "tester", "kind": "work", "version": 2}
+    assert run_role(TESTER.record()) == run_role(TESTER.payload()) == named
+    for raw in (None, {}, "tester", {"id": "tester", "kind": "plan", "version": 1},
+                {"id": "tester", "kind": "work", "version": None}):
+        assert run_role(raw) is None
+
+
+def test_a_tasks_runs_are_named_by_their_records_and_an_attempt_not_recorded_yet_by_its_step() -> None:
+    steps = [
+        # Retried as tester v2: its first Worker is recorded, its second waits for room, not recorded yet.
+        {"worker_id": "worker-2", "role_key": "tester", "role_version": 2, "reviewer_id": None,
+         "review_role_key": None, "review_role_version": None, "review_stage": None},
+        # In its review role's review, after the built-in Reviewer passed it.
+        {"worker_id": "worker-3", "role_key": None, "role_version": None, "reviewer_id": "reviewer-4",
+         "review_role_key": "security", "review_role_version": 1, "review_stage": "role"},
+        # In the built-in review: its review role has not started.
+        {"worker_id": "worker-5", "role_key": None, "role_version": None, "reviewer_id": "reviewer-6",
+         "review_role_key": "security", "review_role_version": None, "review_stage": "builtin"},
+    ]
+    runs = [{"agent_id": "worker-1", "task_role": TESTER.record() | {"version": 1}},
+            {"agent_id": "worker-3", "task_role": None}, {"agent_id": "reviewer-6", "task_role": None}]
+    assert run_roles(runs, steps) == {"worker-1": {"id": "tester", "kind": "work", "version": 1},
+                                      "worker-2": {"id": "tester", "kind": "work", "version": 2},
+                                      "reviewer-4": {"id": "security", "kind": "review", "version": 1}}
+    assert run_roles([{"agent_id": "worker-1", "task_role": None}], [{"worker_id": "worker-1"}]) == {}

@@ -186,17 +186,19 @@ async def list_task_runs(
     *,
     pool: asyncpg.Pool | None = None,
 ) -> list[dict[str, Any]]:
-    """Worker and Reviewer runs of several tasks, oldest first, with the step each ran."""
+    """Worker and Reviewer runs of several tasks, oldest first, with the step each ran and the role its task's
+    Planner defined that it ran as (``task_role``, its ``prompt_layers`` entry; None for the built-in role)."""
     if not task_ids:
         return []
     pool = pool or get_pool()
     rows = await pool.fetch(
-        "SELECT agent_id, task_id, status, created_at, metadata->>'step_id' AS step_id "
+        "SELECT agent_id, task_id, status, created_at, metadata->>'step_id' AS step_id, "
+        "metadata->'prompt_layers'->'task_role' AS task_role "
         f"FROM llm_records WHERE task_id = ANY($1::text[]) AND {_STEP_RUNS} "
         "ORDER BY created_at, id",
         task_ids,
     )
-    return [dict(r) for r in rows]
+    return [{**dict(r), "task_role": json.loads(r["task_role"]) if r["task_role"] else None} for r in rows]
 
 
 async def list_records(

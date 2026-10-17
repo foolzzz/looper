@@ -134,11 +134,15 @@ def test_the_agents_running_now_and_each_active_projects_limits(monkeypatch: pyt
             {"task_id": "task-a1", "planner_id": "planner-task-a1", "requirement": "build it", "name": "建解析器",
              "status": "running", "project_id": a["id"]}])
         run = {"task_id": "task-a1", "step_id": "step-1", "instruction": "write the parser", "project_id": a["id"]}
+        # worker-2 and reviewer-1 run as roles the task's Planner defined (WorkerPool.runs gives what the dispatch
+        # carried); worker-1 is a built-in Worker.
         pool_runs = [
-            {**run, "agent_id": "worker-2", "role": "worker", "step": "tests", "state": "waiting", "since": now},
+            {**run, "agent_id": "worker-2", "role": "worker", "step": "tests", "state": "waiting", "since": now,
+             "task_role": {"id": "fe_rd", "kind": "work", "version": 1, "role_prompt": "You build the web front end."}},
             {**run, "agent_id": "worker-1", "role": "worker", "step": "parser", "state": "running",
-             "since": now - timedelta(minutes=12)},
-            {**run, "agent_id": "reviewer-1", "role": "reviewer", "step": "parser", "state": "running", "since": now},
+             "since": now - timedelta(minutes=12), "task_role": None},
+            {**run, "agent_id": "reviewer-1", "role": "reviewer", "step": "parser", "state": "running", "since": now,
+             "task_role": {"id": "security_review", "kind": "review", "version": 3, "role_prompt": "You check it."}},
         ]
         down = {"healthy": False, "state": "restarting", "up": False, "restart_count": 2,
                 "last_crash_at": "2026-10-15T12:00:00+00:00", "next_restart_at": "2026-10-15T12:00:04+00:00",
@@ -163,6 +167,10 @@ def test_the_agents_running_now_and_each_active_projects_limits(monkeypatch: pyt
             ("worker-1", "running", "parser"), ("worker-2", "waiting", "tests")]
         assert 720 <= agents["workers"][0]["elapsed_seconds"] < 780
         assert [r["agent_id"] for r in agents["reviewers"]] == ["reviewer-1"]
+        # A run as a role names it; a built-in run is as before.
+        assert agents["workers"][1]["task_role"] == {"id": "fe_rd", "kind": "work", "version": 1}
+        assert agents["reviewers"][0]["task_role"] == {"id": "security_review", "kind": "review", "version": 3}
+        assert "task_role" not in agents["workers"][0]
         # Only the projects with a task in progress, queued or ready, each against its limits read now.
         assert body["projects"] == [
             {"project_id": a["id"], "name": "alpha", "tasks": {"running": 1, "queued": 2, "ready": 0, "limit": 3},
@@ -173,6 +181,14 @@ def test_the_agents_running_now_and_each_active_projects_limits(monkeypatch: pyt
              "reviewers": {"running": 0, "waiting": 0, "limit": 8}},
         ]
         assert body["idle_projects"] == 2
+        # The Manager's looper_overview, which it answers a chat's "what is running" from, names the role too.
+        from looper.agents.ops import Call, Turn
+        from looper.agents.ops.tasks import _overview
+        view = await _overview(Call({}, Turn(None, None), SimpleNamespace(
+            task_router=router, worker_pool=SimpleNamespace(runs=lambda: pool_runs), manager=None,
+            supervisor=supervisor)))
+        assert [(r["role"], r.get("task_role"), r["step"]) for r in view["step_runs"]] == [
+            ("worker", None, "parser"), ("worker", "fe_rd", "tests"), ("reviewer", "security_review", "parser")]
         # The components not simply running: one waiting to restart, one crash-looping though up now.
         assert body["health"] == {"unhealthy": [
             {"name": "worker-pool", **{k: down[k] for k in ("state", "up", "restart_count", "last_crash_at",

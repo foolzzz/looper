@@ -39,6 +39,7 @@ import {
   type LlmRecordEvent,
   type ProjectInstructionFile,
   type PromptLayers,
+  type RunRole,
 } from "@/lib/api";
 
 // A run with no output for this long is flagged as possibly stuck.
@@ -94,6 +95,11 @@ export function activityBelongsTo(ev: ActivityEvent, agentId: string) {
 
 export function historyHref(agentId: string, taskId?: string | null) {
   return `#history/${encodeURIComponent(agentId)}${taskId ? `?task=${encodeURIComponent(taskId)}` : ""}`;
+}
+
+/** How a run as a role its task's Planner defined is named wherever runs are listed: e.g. "fe_rd · work". */
+export function runRoleLabel(role: RunRole) {
+  return `${role.id} · ${role.kind}`;
 }
 
 function CopyButton({ text, label }: { text: string; label: string }) {
@@ -975,6 +981,8 @@ export function AgentHistoryPage({ sub }: { sub: string }) {
   const [chat, setChat] = useState<DbChatMessage[]>([]);
 
   const taskId = routeTaskId ?? runs?.find((r) => r.task_id)?.task_id ?? (agentId.startsWith("planner-") ? agentId.slice("planner-".length) : null);
+  // A Worker or Reviewer that ran as a role its task's Planner defined is named by it.
+  const runRole = runs?.find((r) => r.task_role)?.task_role;
 
   useEffect(() => {
     setRuns(null);
@@ -993,7 +1001,7 @@ export function AgentHistoryPage({ sub }: { sub: string }) {
 
   return (
     <div className="mx-auto max-w-5xl space-y-5 p-6">
-      <div className="flex items-center gap-3">
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
         <button
           type="button"
           onClick={() => window.history.back()}
@@ -1003,8 +1011,10 @@ export function AgentHistoryPage({ sub }: { sub: string }) {
           <ArrowLeft className="h-4 w-4" />
         </button>
         <Bot className="h-5 w-5 text-primary" />
-        <h1 className="text-lg font-semibold">{agentId}</h1>
-        <Badge variant="outline">{role}</Badge>
+        <h1 className="min-w-0 break-all text-lg font-semibold">{agentId}</h1>
+        <Badge variant="outline" className={cn("shrink-0", runRole && "font-mono")}>
+          {runRole ? runRoleLabel(runRole) : role}
+        </Badge>
         {taskId && (
           <a href={`#tasks/${taskId}`} className="text-xs text-muted-foreground hover:text-foreground">
             task {taskId}

@@ -127,6 +127,44 @@ class TaskRole:
                 "harness_sha256": sha256_text(self.harness) if self.harness else None}
 
 
+# --- A run's role, wherever a run is shown ---
+
+
+def run_role(raw: Any) -> dict[str, Any] | None:
+    """The role a Worker or Reviewer run runs as, as the API shows it (``{id, kind, version}``): read from what the
+    run recorded (its record's ``prompt_layers.task_role``, ``TaskRole.record``) or what its dispatch carries
+    (``TaskRole.payload``); None for a run of the built-in role."""
+    if not isinstance(raw, Mapping):
+        return None
+    try:
+        return {"id": str(raw["id"]), "kind": RoleKind(raw["kind"]).value, "version": int(raw["version"])}
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def record_role(record: Mapping[str, Any]) -> dict[str, Any] | None:
+    """``run_role`` of an ``llm_records`` row."""
+    return run_role(((record.get("metadata") or {}).get("prompt_layers") or {}).get("task_role"))
+
+
+def run_roles(runs: list[Mapping[str, Any]], steps: list[Mapping[str, Any]]) -> dict[str, dict[str, Any]]:
+    """The role each of a task's Worker and Reviewer runs ran as, by agent id, for the runs that ran as one: from
+    their records (``llm_records.list_task_runs``), else, for a step's attempt not recorded yet (waiting for room),
+    from the versions its step took when it was dispatched."""
+    roles: dict[str, dict[str, Any]] = {}
+    for step in steps:
+        snapshots = ((step.get("worker_id"), step.get("role_key"), RoleKind.WORK, step.get("role_version")),
+                     (step.get("reviewer_id") if step.get("review_stage") == "role" else None,
+                      step.get("review_role_key"), RoleKind.REVIEW, step.get("review_role_version")))
+        for agent_id, key, kind, version in snapshots:
+            if agent_id and key and (role := run_role({"id": key, "kind": kind.value, "version": version})):
+                roles[agent_id] = role
+    for run in runs:
+        if (role := run_role(run.get("task_role"))) is not None:
+            roles[run["agent_id"]] = role
+    return roles
+
+
 # --- The task page's view ---
 
 

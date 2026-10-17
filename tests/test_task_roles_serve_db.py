@@ -235,13 +235,17 @@ def ran(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Any]:
                 api.post("/api/tasks/start", {"task_id": ids[variant]})
             first = _wait(api, ids, VARIANTS, ("completed", "failed", "stopped", "cancelled"))
             before = {variant: first[variant]["roles"] for variant in ("restart", "startover")}
+            # Where the dashboard lists runs: the Runs page and a History page (their records), and the Chat page.
+            listed = {"records": {variant: api.get("/api/llm-records", task_id=ids[variant], limit=500)["records"]
+                                  for variant in ("roles", "off")},
+                      "targets": api.get("/api/chat/targets")["targets"]}
             api.post("/api/tasks/start", {"task_id": ids["restart"]})
             api.post("/api/tasks/start", {"task_id": ids["startover"], "start_over": True})
             time.sleep(0.5)
             again = _wait(api, ids, ("restart", "startover"), ("completed", "failed", "stopped", "cancelled"))
         layers = asyncio.run(_layers(database_url, list(ids.values())))
     return {"first": first, "again": again, "before": before, "ids": ids, "state": state, "layers": layers,
-            "log": (root / "serve.log").read_text()}
+            "listed": listed, "log": (root / "serve.log").read_text()}
 
 
 def _calls(ran: dict[str, Any], variant: str) -> list[dict[str, Any]]:
@@ -308,6 +312,31 @@ def test_every_role_run_ends_with_the_boundaries_and_a_built_in_run_is_as_before
     role_runs = [m for m in ran["layers"] if m["task_id"] == roles_task and m["prompt_layers"].get("task_role")]
     assert {m["prompt_layers"]["boundaries"]["source"] for m in role_runs} == {"builtin"}
     assert {m["outcome"] for m in ran["layers"] if m["task_id"] == roles_task} == {"completed", "passed", "not_passed"}
+
+
+def test_a_run_as_a_role_is_named_by_it_wherever_runs_are_listed_and_a_built_in_run_as_before(
+    ran: dict[str, Any],
+) -> None:
+    records = ran["listed"]["records"]["roles"]
+    step_runs = [r for r in records if r["agent_id"].startswith(("worker-", "reviewer-"))]
+    recorded = {r["agent_id"]: r["metadata"]["prompt_layers"].get("task_role") for r in step_runs}
+    named = {r["agent_id"]: r["task_role"] for r in step_runs if "task_role" in r}
+    # Each run as a role names the role and the version it recorded; tester ran twice (v1, then v2), security
+    # reviewed twice, and the built-in runs (Planner, Worker, Reviewer) have no task_role at all.
+    assert named == {agent: {key: role[key] for key in ("id", "kind", "version")}
+                     for agent, role in recorded.items() if role}
+    assert sorted((r["id"], r["kind"], r["version"]) for r in named.values()) == [
+        ("security", "review", 1), ("security", "review", 1), ("tester", "work", 1), ("tester", "work", 2)]
+    assert len(step_runs) > len(named) and all("task_role" not in r for r in records if r["agent_id"] not in named)
+    # The task page's Agent Timeline reads the same names by agent id; a task without role runs gets none.
+    assert ran["first"]["roles"]["run_roles"] == named
+    assert "run_roles" not in ran["first"]["off"]
+    assert all("task_role" not in r for r in ran["listed"]["records"]["off"])
+    # The Chat page's step agents: a role run names its role, a built-in one is as before.
+    targets = {t["id"]: t for t in ran["listed"]["targets"] if t.get("task_id") in (ran["ids"]["roles"],
+                                                                                   ran["ids"]["off"])}
+    assert {agent: t["task_role"] for agent, t in targets.items() if "task_role" in t} == named
+    assert {t["kind"] for t in targets.values() if "task_role" not in t} == {"planner", "worker", "reviewer"}
 
 
 def test_where_the_switch_is_off_the_planner_has_no_role_tools_and_no_step_runs_as_a_role(ran: dict[str, Any]) -> None:
