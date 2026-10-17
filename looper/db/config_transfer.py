@@ -136,6 +136,16 @@ async def read_documents(conn: asyncpg.Connection, *, content: bool) -> list[dic
     return [dict(row) for row in rows]
 
 
+async def read_role_templates(conn: asyncpg.Connection) -> list[dict[str, Any]]:
+    """Every project's role templates by key, each with its profile's name (``profile``) and its items' ids."""
+    rows = await conn.fetch(
+        "SELECT t.project_id, t.template_key, t.kind, t.description, t.role_prompt, t.harness, t.profile_id, "
+        "t.items, a.name AS profile FROM project_role_templates t LEFT JOIN agent_profiles a ON a.id = t.profile_id "
+        "ORDER BY t.project_id, t.template_key"
+    )
+    return [dict(row) for row in rows]
+
+
 # --- Writing (inside the import's transaction) ---
 
 

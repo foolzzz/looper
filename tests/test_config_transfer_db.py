@@ -150,7 +150,12 @@ async def _populate(monkeypatch: pytest.MonkeyPatch, pool: Any, work_dir: Path) 
     await _ok("POST", "/api/installs", {"item_id": own_id, "scope": "project", "project_id": docs,
                                         "roles": ["worker"]})
     await _ok("POST", "/api/installs", {"item_id": web["item_id"], "scope": "project", "project_id": calc,
-                                        "roles": ["planner", "reviewer"]})
+                                        "roles": ["planner", "reviewer", "task_role"]})
+    await _ok("PUT", f"/api/projects/{calc}/allowed-profiles", {"profile_ids": [sonnet]})
+    await _ok("PUT", f"/api/projects/{calc}/role-templates/security", {
+        "kind": "review", "description": "Steps that touch auth.", "role_prompt": "Check for security problems.",
+        "harness": "## How you work\nRead first.", "profile_id": sonnet, "items": [web["item_id"]]})
+    await _ok("PUT", f"/api/projects/{calc}/role-templates/tester", {"kind": "work", "role_prompt": "Write tests."})
     return {"calc": calc, "docs": docs, "mcp": mcp["item_id"], "web": web["item_id"], "skill": skill["item_id"]}
 
 
@@ -195,6 +200,8 @@ async def _state(pool: Any) -> dict[str, Any]:
                 **{k: row[k] for k in ("origin", "description", "version", "modified", "sha256", "size_bytes")},
                 "files": files, "server": server}
         documents = await db.read_documents(conn, content=True)
+        templates = await db.read_role_templates(conn)
+        item_names = {row["id"]: (row["kind"], row["name"]) for row in items}
         in_projects = {p: await agent_setting_layers.list_layers(p, pool=pool) for p in names}
         return {
             "settings": {role: _without_ids(resolve(role, index_layers(layers, None)).view()) for role in ROLES},
@@ -217,6 +224,9 @@ async def _state(pool: Any) -> dict[str, Any]:
                          for p in projects},
             "knowledge": sorted((names[d["project_id"]], d["title"], d["summary"], d["source_kind"], d["filename"],
                                  d["path"], d["sha256"], d["content"]) for d in documents),
+            "role_templates": sorted((names[t["project_id"]], t["template_key"], t["kind"], t["description"],
+                                      t["role_prompt"], t["harness"] or "", t["profile"] or "",
+                                      tuple(item_names[i] for i in t["items"])) for t in templates),
         }
 
 
@@ -224,7 +234,7 @@ async def _rows(pool: Any) -> dict[str, list[Any]]:
     """Every row of the tables an import writes, to tell that nothing changed."""
     tables = ("agent_setting_layers", "role_configs", "channel_configs", "library_items", "library_files",
               "library_mcp_servers", "library_installs", "projects", "project_documents", "agent_runtimes",
-              "llm_providers", "llm_provider_secrets", "agent_profiles")
+              "llm_providers", "llm_provider_secrets", "agent_profiles", "project_role_templates")
     async with pool.acquire() as conn:
         if not await conn.fetchval("SELECT to_regclass('library_installs') IS NOT NULL"):
             return {}
@@ -799,5 +809,72 @@ def test_a_file_exported_by_v2_6_0_imports_and_exports_again_under_the_new_names
                                                         "gate_reminder_hours": None},
                                      "layers": [renamed(x) for x in p["layers"]]} for p in old["projects"]]
             assert new == expected
+
+    asyncio.run(_test())
+
+
+def test_a_projects_role_templates_import_checked_and_the_ones_the_file_does_not_give_stay(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    """A template is checked as the dashboard checks one: a bad one is skipped with the reason, a profile that is
+    not here is left out with a note, a template already here is changed in place, and one the file does not give
+    stays. A project without templates exports none."""
+    async def _test() -> None:
+        async with _installation() as (target, target_url):
+            _serve(monkeypatch, target)
+            calc = (await _ok("POST", "/api/projects", {"name": "calc"}))["project_id"]
+            await _ok("PUT", f"/api/projects/{calc}/role-templates/mine", {"kind": "work", "role_prompt": "Mine."})
+            await _ok("PUT", f"/api/projects/{calc}/role-templates/tester", {"kind": "work", "role_prompt": "Old."})
+            path = tmp_path / "config.json"
+            good = {"kind": "review", "description": "Auth steps.", "role_prompt": "Check security."}
+            path.write_text(json.dumps({"format": "looper-config/v2", "projects": [
+                {"name": "calc", "description": "", "background": "", "execution": {"role_text_max_chars": 500},
+                 "role_templates": [
+                     {**good, "key": "security", "profile": "claude-code/nowhere",
+                      "items": [{"kind": "skill", "name": "nowhere"}]},
+                     {"key": "tester", "kind": "work", "role_prompt": "Write tests.", "harness": "## How\nTDD."},
+                     {**good, "key": "security"},
+                     {**good, "key": "Worker"},
+                     {**good, "key": "long", "role_prompt": "x" * 501},
+                     {**good, "key": "plan", "kind": "plan"},
+                     {**good, "key": "empty", "role_prompt": ""},
+                     {**good, "key": "wordy", "description": "x" * 301},
+                     "not an object",
+                 ]},
+                {"name": "docs", "description": "", "background": "", "execution": {}, "role_templates": {"security": good}},
+            ]}))
+
+            code, out, err = await _looper(monkeypatch, target_url, "config", "import", str(path), "--apply", "--json")
+
+            assert code == 0, err
+            plan = _plan(out)
+            changes = [c for c in plan["changes"] if c["section"] == "project.role_templates"]
+            assert [(c["key"], c["action"], c.get("fields", [])) for c in changes if c["action"] != "skipped"] == [
+                ("calc / security", "added", []), ("calc / tester", "changed", ["role_prompt", "harness"])]
+            skipped = {c["key"]: c["reason"] for c in changes if c["action"] == "skipped"}
+            assert skipped["calc / security"] == "the file gives this template twice"
+            assert "names a built-in role" in skipped["calc / Worker"]
+            assert "this project allows at most 500" in skipped["calc / long"]
+            assert "kind must be one of" in skipped["calc / plan"]
+            assert "role_prompt is required" in skipped["calc / empty"]
+            assert "description is over 300 characters" in skipped["calc / wordy"]
+            assert "is not a JSON object" in skipped["calc / None"]
+            assert skipped["docs / role_templates"] == "role_templates is not a list"
+            assert [n for n in plan["notes"] if "role template" in n] == [
+                "calc / role template security: no item skill:nowhere here or in the file; imported without it",
+                "calc / role template security: no Agent Profile 'claude-code/nowhere' here or in the file; imported "
+                "without one"]
+            rows = {r["template_key"]: (r["kind"], r["role_prompt"], r["harness"], r["profile_id"]) for r in
+                    await target.fetch("SELECT * FROM project_role_templates")}
+            assert rows == {"mine": ("work", "Mine.", None, None), "security": ("review", "Check security.", None, None),
+                            "tester": ("work", "Write tests.", "## How\nTDD.", None)}
+
+            exported = tmp_path / "out.json"
+            assert (await _looper(monkeypatch, target_url, "config", "export", str(exported),
+                                 "--include-projects"))[0] == 0
+            new = {p["name"]: p for p in _without_time(exported)["projects"]}
+            assert [t["key"] for t in new["calc"]["role_templates"]] == ["mine", "security", "tester"]
+            assert new["calc"]["role_templates"][1] == {**good, "key": "security"}
+            assert "role_templates" not in new["docs"]
 
     asyncio.run(_test())

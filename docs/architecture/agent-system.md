@@ -2201,9 +2201,10 @@ A profile on a list cannot be deleted (its usage names the project).
 
 In a project with `planner_roles` `on`, a task's Planner may define the roles
 its steps run as ([Planner-defined roles RFC](rfcs/planner-defined-roles-v0.zh-CN.md),
-R1; `looper/agents/task_roles.py`). A role is an `id` (unique in the task, not
-a built-in role's name), a `kind`, a `role_prompt`, an optional `harness` and
-an optional Agent Profile from the project's list. Nothing changes in a
+R1 and R2; `looper/agents/task_roles.py`, `looper/agents/role_api.py`). A role is an `id` (unique in the task, not
+a built-in role's name), a `kind`, a `role_prompt`, an optional `harness`,
+an optional Agent Profile from the project's list and optional catalog items
+its runs load (`items`). Nothing changes in a
 project that has the switch off (the default): its Planner's tools, reply
 contract and tools guide are as before, and a step that names a role is
 refused with that reason.
@@ -2211,25 +2212,63 @@ refused with that reason.
 - **Defining them.** Two more Planner tools, listed only where the switch is
   on (`PlannerOps.listing` is per token; elsewhere a call is `forbidden`):
   `looper_task_roles` (read: each role's current version and the steps that
-  name it, the profiles the project allows with the kinds each can run, the
-  project's `role_text_max_chars`, and whether the user chose the task's
-  Worker or Reviewer profile) and `looper_task_role_set` (write: `{id, kind,
-  role_prompt, harness?, profile_id?, reason?}`, the whole definition each
-  time). Each call that changes a role adds a version (`task_roles`, one row
-  per version) with a `role_defined` journal entry in one transaction; the
-  same definition again adds none. Refused, with what to fix: a reserved or
+  name it, whether the user wrote it (`edited_by_user`) and the template it
+  came from, the project's role templates, the profiles the project allows
+  with the kinds each can run, the project's `role_text_max_chars`, and
+  whether the user chose the task's Worker or Reviewer profile) and
+  `looper_task_role_set` (write: `{id, kind, role_prompt, harness?,
+  profile_id?, template?, reason?}`, the whole definition each time). Each
+  call that changes a role adds a version (`task_roles`, one row per version,
+  with who wrote it, `via` `planner` or `user`, and the template it was
+  copied from, `template_key`) with a `role_defined` journal entry in one
+  transaction; the same definition again adds none. A version is written only
+  on top of the one its writer read (`task_roles.add_version`'s `after`), so
+  two writers never pass each other: the later gets `conflict` (409 on the
+  dashboard) and reads again. Refused, with what to fix: a reserved or
   malformed id, a kind other than the role's own, an empty prompt, a prompt
-  or harness over the project's limit (`invalid`); a profile when the list is
-  empty or does not hold it, or when the user chose that kind's profile for
-  the task (`forbidden`); a profile that cannot run the kind (`invalid`).
-  Writes only in a turn Looper sent the Planner, as for its other tools.
+  or harness over the project's limit, an unknown template or one of another
+  kind (`invalid`); a profile when the list is empty or does not hold it, or
+  when the user chose that kind's profile for the task, or a role whose
+  current version the user wrote (`forbidden`); a profile that cannot run the
+  kind (`invalid`). Writes only in a turn Looper sent the Planner, as for its
+  other tools.
+- **Templates.** A project keeps role templates (`project_role_templates`:
+  `{key, kind, description, role_prompt, harness?, profile_id?}`), written on
+  its Roles tab (`GET /api/projects/:id/role-templates`, `PUT` and `DELETE
+  /api/projects/:id/role-templates/:key`) and checked as a task role is
+  (`check_definition`, `allowed_profile`), whatever the switch. With the
+  switch on, its tasks' [PLAN] and [RESTART] messages list them, one line
+  each (`key (kind): description`), and `looper_task_role_set` with
+  `template` copies one as a task role: the id defaults to the key, the
+  fields the call gives override the template's, and the template's profile
+  comes along while the project still allows it (otherwise it is left out
+  and the answer says so). A copy is the task's own role from then on: a
+  later change of the template changes no task. The configuration file
+  carries a project's templates (`role_templates`, the profile by name, only
+  for a project that has some); an import adds and changes them, keeps the
+  ones the file does not give, skips an invalid one with the reason, and
+  leaves out a profile that is not here, with a note.
+- **The user's edit.** On the task page, the user edits a role while the task
+  has not completed (`PUT /api/tasks/:id/roles/:key`, `{role_prompt,
+  harness, profile_id}`: the whole definition; the kind stays; a profile
+  from the project's list). It adds a version by the user (`via` `user`) with
+  its `role_defined` entry and a supplement (via `task_page`) that tells the
+  Planner, in one transaction; a Planner that runs gets it in a turn at once
+  (`TASK_CHANGE`), a stopped task's at its restart. From then on the Planner
+  cannot change that role (`forbidden`, naming the version): it names the
+  role as it is or defines another under a new id. The attempts that start
+  afterwards run the new version. Refused: an unknown task or role (404), a
+  completed task (409), a definition a task role would be refused or one
+  that changes nothing (400).
 - **Naming them.** With the switch on, the step shape (PLAN, a DECISION's
   `replan`, CHAT's `add_steps` and `replan`) takes `role`, a work role its
-  Worker runs as, and `review_role`, a review role, which needs `"review":
-  true`, with `review_role_required` (true when left out; only with a
-  `review_role`): false makes that review advisory; `reply_contract(roles=True)` says so and `_check_new_steps` checks
-  them against the roles read after the reply arrives, so a role defined in
-  the same turn counts. A started step keeps its roles, like the rest of it.
+  Worker runs as, and `review_roles`, the review roles that review it in
+  that order, which need `"review": true`: each item is a review role's id
+  (required) or `{"role": <id>, "required": false}` (advisory), no role
+  twice. The single `review_role` and `review_role_required` of v2.7.0 are
+  refused with what to write instead. `reply_contract(roles=True)` says so
+  and `_check_new_steps` checks them against the roles read after the reply
+  arrives, so a role defined in the same turn counts. A started step keeps its roles, like the rest of it.
   The plan lines and results in the Planner's turns name a step's roles.
 - **A run as a role.** `kind` `work` takes the built-in Worker's place, `review`
   reviews after the built-in Reviewer; each keeps its kind's row (timeout,
@@ -2253,27 +2292,45 @@ refused with that reason.
   what the step's built-in role of that kind would get (the Planner's choice
   for the step, for the rest of the task, the layers). Read when the run
   starts.
+- **Its items.** A run as a role loads its kind's built-in role's installs
+  and the catalog items the role names (`items`, ids;
+  `library.load_installed`), each only while it has an enabled install for
+  the roles a task's Planner defines (`library_installs.roles` includes
+  `task_role`, `catalog.TASK_ROLE`), global or in the project: the
+  operator's consent, as the profile list is. Such an install loads for no
+  built-in role; no install names `task_role` unless asked to (the API's
+  and the dashboard's defaults are the built-in roles). The Planner names
+  items by id or name from `looper_task_roles`' `role_items`; at most 20,
+  each once; another is `forbidden` with the list. The run's record lists
+  what it loaded (`library`).
 - **Versions.** An attempt (a Worker run, or a review role's run) reads the
   role's current version when it starts and the step keeps it
-  (`role_version`, `review_role_version`); the dispatch carries that version
-  (`task_role`). A run that started keeps its own, a server restart runs the
+  (`role_version`, each `review_roles` item's `version`); the dispatch
+  carries that version (`task_role`). A run that started keeps its own, a server restart runs the
   same attempt with the version it had, and a retry or a new step reads the
   current one.
 - **The review gate.** The built-in Reviewer is the gate wherever a step needs
   review; a review role only adds a review, and never replaces it. A step with
-  a `review_role` is reviewed by the built-in Reviewer first (`review_stage`
-  `builtin`); only when it passes does code start the review role's Reviewer
-  (`role`), with no decision turn between. A required review role
-  (`task_steps.review_role_required`, the default) blocks: the step can be
-  accepted only once both passed in that attempt. An advisory one does not:
-  when it does not pass, the decision turn still allows accept, says the review
-  is advisory and lists its verdict and findings, and the Planner accepts,
-  retries with feedback or replans; an accept over it says so in the
-  `step_accepted` entry, and the task page labels the review role
-  "advisory". A failed built-in review goes to the decision turn at once; the
-  decision turn after the role's review lists both verdicts; without a decision
-  the chain's verdict decides (an advisory role's failure accepts the step). A restart dispatches the review the
-  step waits for; a retry clears both verdicts.
+  `review_roles` is reviewed by the built-in Reviewer first (`review_stage`
+  `builtin`); only when it passes does code start the first review role's
+  Reviewer (`role`, `review_position` 0), then each next one, with no
+  decision turn between. Each verdict is kept in order (the step result's
+  `role_reviews`). A required review role (the default) blocks: when it does
+  not pass, the ones after it do not run, and the decision turn does not
+  allow accept. An advisory one does not: when it does not pass, the next
+  one still reviews; the decision turn after the last allows accept as long
+  as every required one passed, lists every verdict in order and says which
+  are advisory, and the Planner accepts, retries with feedback or replans; an
+  accept over an advisory failure says so in the `step_accepted` entry, and
+  the task page labels the role "advisory". A failed built-in review goes to
+  the decision turn at once. Without a decision the chain decides: accepted
+  only when the built-in Reviewer and every required review role passed. A
+  review role that cannot be read fails its review, as a verdict would. A
+  restart dispatches the review the step waits for (`review_position`, with
+  the version that item ran); a retry clears every verdict. A v2.7.0
+  database's steps (`review_role_key`, `review_role_required`,
+  `review_role_version`, a result's `role_review`) become lists of one, and
+  those columns go (`schema.sql`).
 - **Restarts.** Going on from the plan keeps the roles; planning the task anew
   (`start_over`) deletes them, with the Planner's profile choices. Turning the
   switch off leaves the steps that name a role running as it; no role is
@@ -2284,11 +2341,19 @@ refused with that reason.
   reviews passed and not and the pass rate) and `builtin_role_stats` (the same
   for the built-in Worker and Reviewer), from the run records' `outcome` and
   `prompt_layers.task_role` (`llm_records.role_runs`) and the steps. The task
-  page shows a Roles section, a step's roles in Steps and the Pipeline, and
-  `role_defined` entries in Findings; the project's Execution tab has the
-  switch and the limit. The Manager's `looper_tasks get` adds the task's
-  `roles` (id, kind, version) and each step's `role` and `review_role` when
-  there are any.
+  page shows a Roles section (each version says when the user wrote it or
+  which template it came from, and Edit opens the user's edit), a step's
+  roles in Steps and the Pipeline, and `role_defined` entries in Findings;
+  the project's Execution tab has the switch and the limit, and its Roles
+  tab the templates and the roles across its tasks (`GET
+  /api/projects/:id/role-stats[?since=YYYY-MM-DD]`: each role id's numbers
+  summed over the project's tasks with roles, with how many tasks it is in
+  and the templates it came from, one id possibly another definition in each
+  task; and the built-in Worker's and Reviewer's in the same tasks). The
+  Manager's `looper_tasks get` adds the task's `roles` (id, kind, version)
+  and each step's `role` and `review_roles` when there are any; its
+  `looper_catalog` is not told of `task_role` installs (the dashboard
+  makes them).
 - **A run's name.** Wherever a run is listed or named, a run as a role names
   the role: `task_roles.run_role` reads `{id, kind, version}` from what the run
   recorded (`prompt_layers.task_role`) or its dispatch carries, and the API
@@ -2306,9 +2371,10 @@ refused with that reason.
   runs names it too; the task's progress and end notices there name no run.
   The CLI lists no runs.
 
-The two tools add 1.9 KB to the Planner's `tools/list`, their guide (after
-`TOOLS_GUIDE`, `ROLES_GUIDE`) 1.8 KB and the contract's role rules 0.4 KB, in
-a project with the switch on only. The guide opens with the rule that a role
+The two tools add 2.5 KB to the Planner's `tools/list`, their guide (after
+`TOOLS_GUIDE`, `ROLES_GUIDE`) 2.4 KB and the contract's role rules 0.5 KB, in
+a project with the switch on only; a project's templates add a line each to
+its [PLAN] and [RESTART] messages. The guide opens with the rule that a role
 is defined with `looper_task_role_set` before any step names it, then has the
 Planner define one work role per discipline when the work spans disciplines
 or platforms (none for a task of one, unless asked), pin the interface the
@@ -2708,12 +2774,15 @@ dev proxy, which keeps `Host` and `Origin` on its own port.
 | `/api/projects/:id/agent-settings` | GET/PUT | GET: `project.values` (the project layer), `roles` (`planner`, `worker`, `reviewer`, each with `values`, its role-in-project layer, and `effective`: every field's `value` and `source` layer, the harness with `from_role` when a Reviewer takes the Workers'), and `limits`. PUT sets the project layer; 404 for an unknown project |
 | `/api/projects/:id/agent-settings/roles/:role` | PUT | Set one role's layer in the project (`planner`, `worker` or `reviewer`; 400 for `manager`) |
 | `/api/projects/:id/allowed-profiles` | GET/PUT | The Agent Profiles the project's Planners may choose for their tasks' Workers and Reviewers, by name: `{project_id, profiles: [{profile_id, name, runtime, model, effort, roles, usd_per_million_tokens: {input, output}}]}`, empty by default. PUT `{"profile_ids": [...]}` (ids or names) makes it the whole list (`[]` empties it) and drops the project's Planners' choices of a profile it removes; 400 for an unknown profile or one that can run neither the worker nor the reviewer, and nothing changes; 404 for an unknown project. The Manager's `looper_settings` `allowed_profiles` sets it with the same code |
+| `/api/projects/:id/role-templates` | GET | The project's role templates by key (each `{key, kind, description, role_prompt, harness, profile, items, updated_at}`, `profile` `{profile_id, name, allowed}` or null, `items` each `{id, kind, name}`), its `role_text_max_chars` and `role_items` (the catalog items installed for roles here, which a role or a template may name); 404 for an unknown project |
+| `/api/projects/:id/role-templates/:key` | PUT/DELETE | PUT creates the template or replaces it whole with `{kind, role_prompt, description?, harness?, profile_id?, items?}`, checked as a task role is (a profile from the project's list, items installed for roles); DELETE removes it (task roles copied from it keep their versions). Both answer the project's templates. 400 for a definition a task role would be refused or an unknown field, 404 for an unknown project or template |
 | `/api/projects/:id/knowledge` | GET | The project's knowledge: `documents` (`document_id`, `title`, `summary`, `source_kind`, `filename`, `path`, `read_path`, `missing`, `size_bytes`, `sha256`, timestamps; no content), `count`, `stored_bytes`, the `index` agents get and its `index_chars`, and `caps`; 404 for an unknown project |
 | `/api/projects/:id/knowledge` | POST | Add a document: `source_kind`, `title`, `summary`, then `content` (text), `filename` and `content_base64` (upload) or `path` (path). Answers 201 with the new `document` and the knowledge view; 400 with the reason for a bad field, a binary file, a path outside the project's default directory, or a cap; 404 for an unknown project |
 | `/api/projects/:id/knowledge/:doc_id` | GET | One document: `document` (as in the list) and its `content`: stored for text and upload, the file as it is now for a path document; `content` is `null` with a `content_error` when that file is missing or not text; 404 for an unknown project or a document of another project |
 | `/api/projects/:id/knowledge/:doc_id` | PUT | Change `title`, `summary` or the source's own fields; the kind cannot change. Answers with the `document` and the view; 400 as above, 404 |
 | `/api/projects/:id/knowledge/:doc_id` | DELETE | Delete a document; answers with `deleted` and the view; 404 |
 | `/api/projects/:id/installs` | GET | What applies to the project: `installs`, its own installs then the global ones that reach its task roles, each an install (`install_id`, `scope`, `project_id`, `project_name`, `roles`, `enabled`) with `inherited` and its `item` (as in the catalog); `owned_count` (skills written in it), `task_roles` and `skill_caps`; 404 for an unknown project |
+| `/api/projects/:id/role-stats` | GET | The roles the project's Planners defined, summed by id across its tasks with roles (`since`: those created on or after a day, YYYY-MM-DD): `tasks`, `roles` (each `{id, kinds, tasks, templates, stats}`, `stats` as a task's role has) and `builtin` (`worker`, `reviewer`) in the same tasks; 400 for a `since` that is no day, 404 for an unknown project |
 | `/api/projects/:id/skills` | POST | Write a skill: `name`, `description`, `content`, optionally `enabled` (default true): a catalog item installed in the project for the Planner, Workers and Reviewers. Answers 201 with the new `skill` (`skill_id`, `name`, `qualified_name` (`project:<name>`), `description`, `size_bytes`, timestamps) and the project's installs view; 400 with the reason for a bad field or the count cap, 409 for a name the project already has or that another project skill installed there has, 404 for an unknown project |
 | `/api/projects/:id/skills/:skill_id` | GET | One skill the project wrote: `skill` and its `content`, the `SKILL.md` body; 404 for an unknown project or a skill another project wrote |
 | `/api/projects/:id/skills/:skill_id` | PUT | Change any of `name`, `description` and `content` (its switch is on the install: `PUT /api/installs/:id`); answers with the `skill` and the installs view; 400 and 409 as above (a new name must be free in every project the skill is installed in), 404 for an unknown project or a skill another project wrote |
@@ -2741,6 +2810,7 @@ dev proxy, which keeps `Host` and `Origin` on its own port.
 | `/api/tasks/:id/gates/:step/messages` | POST | The user writes `{text, agenda_item?, option?}` in the gate (an option of an agenda item, with the item's id), only while it waits for the user: an open gate becomes `discussing`, and the task's Planner is woken. Answers `{task_id, gate, message, delivered}`: `queued` (its Planner takes it next) or `kept` (the task is not running; going on from its plan gives it). 400 for an empty text or one over 8,000 characters, or an option the item does not have; 404 for no such task or gate; 409 for a gate that does not wait for the user or a completed task |
 | `/api/tasks/:id/gates/:step/end` | POST | The user ends the gate's discussion (`{text?}`): the next `[GATE]` turn closes it with the current conclusions. As the POST above |
 | `/api/tasks/:id/agents` | PUT | Change the task's own choices per role, together: `profiles` (an Agent Profile by id or name for its `planner`, `worker` or `reviewer`) and `concurrency` (how many of its Workers or Reviewers run at once, 1–64), `null` dropping the task's choice of that role; e.g. `{"profiles": {"worker": "claude-code/sonnet"}, "concurrency": {"worker": 2}}`. The same check and write as the Manager's `looper_task_update` and `looper_concurrency` (`projects.set_task_agents`), in one transaction. Answers `{task_id, agents}` (as `GET /api/tasks/:id`), with a `note` on when a new profile applies; a limit it sets lets waiting runs check again. 400 for an unknown field, role, profile or a profile that cannot run its role, a limit other than a whole number from 1 to 64, a `planner` limit (one Planner runs a task, and nothing limits how many tasks run) or an empty body, and nothing is stored then; 404 for an unknown task; 409 for a completed task (a failed, stopped or cancelled one changes, and its restart runs with the new choices) |
+| `/api/tasks/:id/roles/:key` | PUT | The user's edit of a role of the task: `{role_prompt, harness, profile_id, items?}`, the whole definition (the kind stays; `items` left out keeps the current ones), written as a new version by the user with a supplement that tells the Planner (a running one gets it at once); afterwards the Planner cannot change that role. Answers `{task_id, id, kind, version, via, changed}`. 400 for a definition a task role would be refused or one that changes nothing, 404 for an unknown task or role, 409 for a completed task or a role that changed meanwhile |
 | `/api/tasks/:id/start` | POST | Start a ready task (`TASK_START`); it gets its Planner at once, like any start. Answers `{started, project_id}`; 400 unless the task is ready, 404 for an unknown task |
 | `/api/tasks/delete` | POST | Delete task (must be stopped first) |
 | `/api/tasks/:id/activity` | GET | Activity events |
@@ -2762,7 +2832,7 @@ dev proxy, which keeps `Host` and `Origin` on its own port.
 | `/api/agent-profiles` | POST | Register an Agent Profile `{name, runtime_id, provider_id, model, effort?, agent_teams?}` (`agent_teams` a boolean; left out, on for a Claude Code runtime and off for another); 201 with `profile` and `warnings` (a model without a price); 400 when the runtime and provider cannot run together, the provider does not list the model, or `agent_teams` is on with a runtime other than Claude Code |
 | `/api/agent-profiles/:id` | PUT/DELETE | Change a profile (checked like a new one, and for every role it is selected for; answers with `profile` and `warnings`); delete (409 while a layer or a task selects it, naming where). 400 for the built-in one |
 | `/api/agent-settings/roles/:role` | PUT | Set one role's layer (`manager`, `planner`, `worker`, `reviewer`; 404 for another) |
-| `/api/catalog` | GET | The catalog: `items` (`item_id`, `kind`, `name`, `qualified_name` (how agents name it), `origin`, `owner_project_id`, `owner_project_name`, `description`, `source`, `version`, `sha256`, `size_bytes`, `file_count`, timestamps and `installs`), `installed_count`, `total_bytes`, `last_import` (counts, `added`, `updated`, `removed`, `unchanged`, `skipped`), `roles`, `task_roles` and `caps` |
+| `/api/catalog` | GET | The catalog: `items` (`item_id`, `kind`, `name`, `qualified_name` (how agents name it), `origin`, `owner_project_id`, `owner_project_name`, `description`, `source`, `version`, `sha256`, `size_bytes`, `file_count`, timestamps and `installs`), `installed_count`, `total_bytes`, `last_import` (counts, `added`, `updated`, `removed`, `unchanged`, `skipped`), `roles`, `task_roles` (the roles an install may name, each ending with `task_role`) and `caps` |
 | `/api/catalog/:id` | GET | One item: `item` (as in the list), `files` (`path`, `size_bytes`, `executable`; no content) and, for a skill, `skill_md`; 404 for an unknown item |
 | `/api/catalog/import` | POST | Import or re-import this machine's enabled plugins and personal skills (read-only towards `~/.claude`); new items are installed nowhere. Answers with the catalog. 400 without a Claude Code configuration, with an unreadable `settings.json` or over the 128 MiB cap (nothing changes then) |
 | `/api/catalog/upload` | POST | Add an uploaded `SKILL.md` or zip: `{filename, content_base64, name?}` (`name` renames it). Answers 201 with `item` and `skipped` (binary files left out); 400 with the reason for an unsafe or invalid zip or `SKILL.md`, 409 for a name taken outside projects |
@@ -2771,7 +2841,7 @@ dev proxy, which keeps `Host` and `Origin` on its own port.
 | `/api/catalog/skills` | POST | Write a skill in Settings: `{name, description, content}` (origin `ui`); 201 with `item`, 400, 409 |
 | `/api/catalog/:id` | PUT | Change an MCP server, or a Settings, uploaded or git skill (`name`, `description`, `content`); answers with `item`; 400 for a machine or project item or a plugin, 409 for a taken name |
 | `/api/catalog/:id` | DELETE | Delete an item and its installs (not a project's own skill) |
-| `/api/installs` | POST | Install an item: `{item_id, scope: "global"\|"project", project_id (a project scope), roles?, enabled?}`; `roles` defaults to every role the scope allows. Answers 201 with `install` and `item`. 400 for a bad field, `manager` in a project install or a project-authored item installed globally; 404 for an unknown item or project; 409 when the item is installed there already or a project skill of its name is |
+| `/api/installs` | POST | Install an item: `{item_id, scope: "global"\|"project", project_id (a project scope), roles?, enabled?}`; `roles` defaults to every built-in role the scope allows; `task_role` (the roles a task's Planner defines: the install loads only for a run of a role that names the item) only when given. Answers 201 with `install` and `item`. 400 for a bad field, `manager` in a project install or a project-authored item installed globally; 404 for an unknown item or project; 409 when the item is installed there already or a project skill of its name is |
 | `/api/installs/:id` | PUT | Change an install's `roles` or `enabled`; answers with `install` and `item`; 400 as above, 404 for an unknown install |
 | `/api/installs/:id` | DELETE | Uninstall; the item stays in the catalog. Answers with `deleted` and `item`; 404 |
 | `/api/llm-records` | GET | Claude runs; filter by `agent_id`, `task_id` or `role` (`manager`, `planner`, `worker`, `reviewer`); a run as a role its task's Planner defined has `task_role` (`{id, kind, version}`) |
