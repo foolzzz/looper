@@ -766,6 +766,11 @@ resumes, `proc_tree.sweep` reads every record:
   orphaned, and its tree is ended as above;
 - a pid that no longer runs, or now belongs to another process, is left
   alone;
+- while `proc_tree.end` ends an agent's tree, the record also lists that
+  tree's processes with their start times, until the end is done: each of
+  them that still runs with its recorded start time is ended too, so a
+  server that exited during an end (its shutdown deadline, a second signal)
+  has the rest ended now, the agent's children that outlived it included;
 - either way the record is removed, except one whose server still runs
   (another server on the same runtime root): that record and its agent are
   left alone.
@@ -775,9 +780,9 @@ Two cases are not covered:
 - a process that left the tree before the stop, such as a command that
   daemonized itself (`nohup … &` whose shell exited). It has already been
   re-parented, with nothing linking it to the agent;
-- after a crash, what an agent that had already exited left behind. Its
-  children were re-parented, and only the agent itself is recorded
-  (plan §5.2).
+- after a crash, what an agent that had exited on its own, not during an
+  end, left behind. Its children were re-parented, and the record lists no
+  tree (plan §5.2).
 
 ### The supervisor: restarting resident agents
 
