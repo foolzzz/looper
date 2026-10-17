@@ -1,4 +1,5 @@
-"""Schedules and their runs (``schedules``, ``schedule_profile_overrides``, ``schedule_runs``).
+"""Schedules and their runs (``schedules``, ``schedule_profile_overrides``, ``schedule_task_limits``,
+``schedule_runs``).
 
 A schedule belongs to a project; its name is unique there ignoring case (a
 taken one raises ``asyncpg.UniqueViolationError``). The scheduler
@@ -61,9 +62,22 @@ async def _overrides(db: Db, schedule_ids: list[str]) -> dict[str, dict[str, str
     return overrides
 
 
+async def _task_limits(db: Db, schedule_ids: list[str]) -> dict[str, dict[str, int]]:
+    rows = await db.fetch(
+        "SELECT schedule_id, role, max_concurrency FROM schedule_task_limits WHERE schedule_id = ANY($1::text[]) "
+        "ORDER BY role", schedule_ids,
+    )
+    limits: dict[str, dict[str, int]] = {schedule_id: {} for schedule_id in schedule_ids}
+    for row in rows:
+        limits[row["schedule_id"]][row["role"]] = row["max_concurrency"]
+    return limits
+
+
 async def _with_overrides(db: Db, rows: list[asyncpg.Record]) -> list[dict[str, Any]]:
-    overrides = await _overrides(db, [row["id"] for row in rows])
-    return [{**dict(row), "profile_overrides": overrides[row["id"]]} for row in rows]
+    ids = [row["id"] for row in rows]
+    overrides, limits = await _overrides(db, ids), await _task_limits(db, ids)
+    return [{**dict(row), "profile_overrides": overrides[row["id"]], "task_limits": limits[row["id"]]}
+            for row in rows]
 
 
 # A schedule's row with its project's name.
@@ -71,7 +85,8 @@ _WITH_PROJECT = "SELECT s.*, p.name AS project_name FROM schedules s JOIN projec
 
 
 async def get_schedule(schedule_id: str, *, pool: Db | None = None) -> dict[str, Any] | None:
-    """One schedule with its ``project_name`` and ``profile_overrides`` (role -> profile id)."""
+    """One schedule with its ``project_name``, ``profile_overrides`` (role -> profile id) and ``task_limits`` (role ->
+    how many of its tasks' Workers or Reviewers run at once; the roles it sets)."""
     db = pool or get_pool()
     row = await db.fetchrow(f"{_WITH_PROJECT} WHERE s.id = $1", schedule_id)
     return (await _with_overrides(db, [row]))[0] if row else None
@@ -79,7 +94,7 @@ async def get_schedule(schedule_id: str, *, pool: Db | None = None) -> dict[str,
 
 async def list_schedules(project_id: str | None = None, *, pool: Db | None = None) -> list[dict[str, Any]]:
     """A project's schedules (every project's without ``project_id``, by project name) by name ignoring case, each
-    with its ``project_name`` and ``profile_overrides``."""
+    with its ``project_name``, ``profile_overrides`` and ``task_limits``."""
     db = pool or get_pool()
     rows = await db.fetch(
         f"{_WITH_PROJECT} WHERE $1::text IS NULL OR s.project_id = $1 "
@@ -97,8 +112,17 @@ async def _set_overrides(conn: asyncpg.Connection, schedule_id: str, profiles: M
     )
 
 
+async def _set_task_limits(conn: asyncpg.Connection, schedule_id: str, limits: Mapping[str, int]) -> None:
+    await conn.execute("DELETE FROM schedule_task_limits WHERE schedule_id = $1", schedule_id)
+    await conn.executemany(
+        "INSERT INTO schedule_task_limits (schedule_id, role, max_concurrency) VALUES ($1, $2, $3)",
+        [(schedule_id, role, limit) for role, limit in limits.items()],
+    )
+
+
 async def create_schedule(conn: asyncpg.Connection, *, project_id: str, fields: Mapping[str, Any],
-                          profiles: Mapping[str, str], created_via: str = "dashboard") -> str:
+                          profiles: Mapping[str, str], task_limits: Mapping[str, int] | None = None,
+                          created_via: str = "dashboard") -> str:
     """A new schedule, disabled; its id."""
     schedule_id = f"sched-{uuid.uuid4().hex[:12]}"
     columns = [name for name in FIELDS if name in fields]
@@ -110,13 +134,15 @@ async def create_schedule(conn: asyncpg.Connection, *, project_id: str, fields: 
         schedule_id, project_id, created_via, *values,
     )
     await _set_overrides(conn, schedule_id, profiles)
+    await _set_task_limits(conn, schedule_id, task_limits or {})
     return schedule_id
 
 
 async def update_schedule(conn: asyncpg.Connection, schedule_id: str, fields: Mapping[str, Any], *,
-                          profiles: Mapping[str, str] | None = None) -> None:
+                          profiles: Mapping[str, str] | None = None,
+                          task_limits: Mapping[str, int] | None = None) -> None:
     """Set ``fields`` (any of ``FIELDS``, ``enabled``, ``enabled_at``, ``rule_changed_at`` and ``next_fire_at``),
-    and the profile overrides when given."""
+    and the profile overrides and the task limits when given (each replaces what the schedule had)."""
     columns = [name for name in (*FIELDS, "enabled", "enabled_at", "rule_changed_at", "next_fire_at") if name in fields]
     sets = [f"{name} = ${i}" for i, name in enumerate(columns, start=2)]
     await conn.execute(
@@ -125,6 +151,8 @@ async def update_schedule(conn: asyncpg.Connection, schedule_id: str, fields: Ma
     )
     if profiles is not None:
         await _set_overrides(conn, schedule_id, profiles)
+    if task_limits is not None:
+        await _set_task_limits(conn, schedule_id, task_limits)
 
 
 async def delete_schedule(schedule_id: str, *, pool: Db | None = None) -> bool:

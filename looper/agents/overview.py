@@ -4,11 +4,12 @@
   counted, an unknown status under ``other`` with its name.
 - **Agents running now**: whether the Manager is in a turn, the live
   Planners (TaskRouter) and the Worker and Reviewer runs, running or waiting
-  for room under their project's limit (WorkerPool), each with the role its
+  for room under their task's limit (WorkerPool), each with the role its
   task's Planner defined that it runs as, when it runs as one.
-- **Concurrency**: for each project with a task in progress, queued or
-  ready, its running tasks, Workers and Reviewers against each role's limit
-  there, read now (``agent_settings.load_concurrency``).
+- **Projects**: for each project with a task in progress or ready, or an
+  agent running, its running and ready tasks and its running and waiting
+  Workers and Reviewers. A project limits none of them: a task limits its own
+  Workers and Reviewers.
 - **Today's spend**: what the runs started since the server's local midnight
   cost, money and subscription equivalent apart (``llm_records.spend_since``).
 - **Health**: the supervisor's components that are unhealthy.
@@ -19,13 +20,12 @@
 
 from __future__ import annotations
 
-import asyncio
 from datetime import date, datetime, time, timezone
 from typing import Any
 
 from ..db import llm_records as db_llm_records, tasks as db_tasks
 from ..db.tasks import TaskGroup
-from .agent_settings import AgentType, load_concurrency
+from .agent_settings import AgentType
 from .schedules import schedule_overview
 from .supervisor import AgentSupervisor
 from .task_roles import run_role
@@ -33,8 +33,8 @@ from .tiers.manager import ManagerAgent
 from .tiers.task import TaskRouter
 from .tiers.worker import WorkerPool
 
-# A project with a task in one of these groups is shown with its limits; the others are idle.
-_ACTIVE_GROUPS = (TaskGroup.IN_PROGRESS, TaskGroup.QUEUED, TaskGroup.READY)
+# A project with a task in one of these groups is shown; the others are idle.
+_ACTIVE_GROUPS = (TaskGroup.IN_PROGRESS, TaskGroup.READY)
 
 
 def group_counts(rows: list[dict[str, Any]]) -> dict[str, Any]:
@@ -59,11 +59,11 @@ def local_midnight() -> datetime:
     return datetime.combine(date.today(), time.min).astimezone()
 
 
-def _runs_in(runs: list[dict[str, Any]], role: AgentType, project_id: str, limit: int) -> dict[str, int]:
-    """How many of ``role``'s runs in the project run and wait, against its ``limit`` there."""
+def _runs_in(runs: list[dict[str, Any]], role: AgentType, project_id: str) -> dict[str, int]:
+    """How many of ``role``'s runs in the project run and wait (for room under their task's limit)."""
     mine = [r for r in runs if r["role"] == role.value and r["project_id"] == project_id]
     return {"running": sum(r["state"] == "running" for r in mine),
-            "waiting": sum(r["state"] == "waiting" for r in mine), "limit": limit}
+            "waiting": sum(r["state"] == "waiting" for r in mine)}
 
 
 async def build_overview(
@@ -106,21 +106,14 @@ async def build_overview(
     active |= {p["project_id"] for p in planners if p["project_id"]}
     active |= {r["project_id"] for r in step_runs if r["project_id"]}
     shown = sorted(active, key=lambda project_id: (names.get(project_id) or project_id).lower())
-    roles = (AgentType.PLANNER, AgentType.WORKER, AgentType.REVIEWER)
-    limits = await asyncio.gather(*(load_concurrency(role, project_id) for project_id in shown for role in roles))
-    projects = []
-    for index, project_id in enumerate(shown):
-        planner_limit, worker_limit, reviewer_limit = limits[index * 3:index * 3 + 3]
-        groups = by_project.get(project_id, {})
-        projects.append({
-            "project_id": project_id,
-            "name": names.get(project_id) or project_id,
-            "tasks": {"running": sum(p["project_id"] == project_id for p in planners),
-                      "queued": groups.get(TaskGroup.QUEUED, 0), "ready": groups.get(TaskGroup.READY, 0),
-                      "limit": planner_limit},
-            "workers": _runs_in(step_runs, AgentType.WORKER, project_id, worker_limit),
-            "reviewers": _runs_in(step_runs, AgentType.REVIEWER, project_id, reviewer_limit),
-        })
+    projects = [{
+        "project_id": project_id,
+        "name": names.get(project_id) or project_id,
+        "tasks": {"running": sum(p["project_id"] == project_id for p in planners),
+                  "ready": by_project.get(project_id, {}).get(TaskGroup.READY, 0)},
+        "workers": _runs_in(step_runs, AgentType.WORKER, project_id),
+        "reviewers": _runs_in(step_runs, AgentType.REVIEWER, project_id),
+    } for project_id in shown]
 
     return {
         "tasks": group_counts(rows),

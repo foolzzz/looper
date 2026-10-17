@@ -137,8 +137,7 @@ async def _populate(monkeypatch: pytest.MonkeyPatch, pool: Any, work_dir: Path) 
                                                 "distill_lessons": True}))["project_id"]
     docs = (await _ok("POST", "/api/projects", {"name": "docs"}))["project_id"]
     await _ok("PUT", f"/api/projects/{calc}/agent-settings", {"profile_id": beta_haiku})
-    await _ok("PUT", f"/api/projects/{calc}/agent-settings/roles/worker", {"harness_prompt": "Test first.",
-                                                                           "max_concurrency": 2})
+    await _ok("PUT", f"/api/projects/{calc}/agent-settings/roles/worker", {"harness_prompt": "Test first."})
     from looper.agents.knowledge import add_document
 
     runtime_root = work_dir.parent / "runtime"
@@ -178,7 +177,7 @@ def _without_ids(view: dict[str, Any]) -> dict[str, Any]:
 
 async def _state(pool: Any) -> dict[str, Any]:
     """An installation's configuration as agents and the dashboard see it, without ids or times."""
-    from looper.agents.agent_settings import TASK_ROLES, index_layers, resolve, resolve_concurrency
+    from looper.agents.agent_settings import TASK_LIMIT_ROLES, TASK_ROLES, default_concurrency, index_layers, resolve
     from looper.agents.config_transfer import role_entry
     from looper.db import agent_setting_layers
     from looper.db import config_transfer as db
@@ -202,8 +201,8 @@ async def _state(pool: Any) -> dict[str, Any]:
             "project_settings": {(names[p], role.value): _without_ids(resolve(role, index_layers(in_projects[p], p),
                                                                               p).view())
                                  for p in names for role in TASK_ROLES},
-            "concurrency": {(names.get(p), role.value): resolve_concurrency(role, index_layers(rows, p), p).view()
-                            for p, rows in [(None, layers), *in_projects.items()] for role in TASK_ROLES},
+            "concurrency": {role.value: default_concurrency(role, index_layers(layers, None)).view()
+                            for role in TASK_LIMIT_ROLES},
             "runtimes": [{k: r[k] for k in ("name", "type", "executable", "capabilities")}
                          for r in await db.read_runtimes(conn)],
             "providers": [{k: v for k, v in r.items() if k != "id"} for r in await db.read_providers(conn)],
@@ -678,6 +677,53 @@ def test_a_layers_agent_teams_variable_is_left_out_with_a_note_and_the_rest_impo
     asyncio.run(_test())
 
 
+def test_a_files_project_and_planner_limits_are_ignored_with_a_note_and_the_rest_imports(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    """A file from before concurrency was per task may give a project's, a role's in a project or the Planner's
+    max_concurrency: each is ignored with a note, the rest of its layer imports, a layer that set nothing else is
+    skipped, and the Workers' and the Reviewers' role layers keep theirs. The export then has none of them."""
+    async def _test() -> None:
+        async with _installation() as (target, target_url):
+            path = tmp_path / "config.json"
+            layer = {"harness_prompt": None, "profile": None, "env": [], "run_budget_usd": None}
+            path.write_text(json.dumps({"format": "looper-config/v2", "settings": {"layers": [
+                {"scope": "role", "role": "planner", **layer, "max_concurrency": 3},
+                {"scope": "role", "role": "worker", **layer, "max_concurrency": 6},
+            ]}, "projects": [{"name": "alarm", "description": "", "background": "", "execution": {}, "layers": [
+                {"scope": "role_project", "role": "planner", **layer, "max_concurrency": 3},
+                {"scope": "role_project", "role": "worker", **layer, "harness_prompt": "Triage.", "max_concurrency": 8},
+            ]}]}))
+
+            code, out, err = await _looper(monkeypatch, target_url, "config", "import", str(path), "--apply", "--json")
+
+            assert code == 0, err
+            plan = _plan(out)
+            changes = {(c["section"], c["key"]): c for c in plan["changes"]}
+            assert changes[("settings.layers", "role:worker")]["action"] == "added"
+            assert changes[("project.layers", "alarm / role_project:worker")]["action"] == "added"
+            for key in (("settings.layers", "role:planner"), ("project.layers", "alarm / role_project:planner")):
+                assert changes[key]["action"] == "skipped" and "nothing but a max_concurrency" in changes[key]["reason"]
+            notes = [n for n in plan["notes"] if "max_concurrency" in n]
+            assert [n.split(":")[0] for n in notes] == ["settings.layers role", "project.layers alarm / role_project",
+                                                       "project.layers alarm / role_project"]
+            assert all("was ignored: concurrency is per task" in n for n in notes)
+            rows = {(r["scope"], r["role"]): (r["harness_prompt"], r["max_concurrency"]) for r in await target.fetch(
+                "SELECT scope, role, harness_prompt, max_concurrency FROM agent_setting_layers")}
+            assert rows == {("role", "worker"): (None, 6), ("role_project", "worker"): ("Triage.", None)}
+
+            exported = tmp_path / "out.json"
+            assert (await _looper(monkeypatch, target_url, "config", "export", str(exported),
+                                 "--include-projects"))[0] == 0
+            new = _without_time(exported)
+            assert new["settings"]["layers"] == [{"scope": "role", "role": "worker", **layer, "max_concurrency": 6}]
+            [alarm] = [p for p in new["projects"] if p["name"] == "alarm"]
+            assert alarm["layers"] == [{"scope": "role_project", "role": "worker", **layer,
+                                        "harness_prompt": "Triage."}]
+
+    asyncio.run(_test())
+
+
 def test_a_file_exported_by_v2_6_0_imports_and_exports_again_under_the_new_names(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
@@ -701,8 +747,8 @@ def test_a_file_exported_by_v2_6_0_imports_and_exports_again_under_the_new_names
             assert plan["need_secret"] == [{"section": "providers", "key": "glm", "names": ["api_key"]}]
             # Each role's max_concurrency is ignored, and one note says so.
             assert [n for n in plan["notes"] if "max_concurrency" in n] == [
-                "settings.roles: a role's max_concurrency is no longer a role setting and was ignored; how many "
-                "Planners (tasks), Workers and Reviewers run at once in a project is the max_concurrency of their "
+                "settings.roles: a role's max_concurrency is no longer a role setting and was ignored; how many of a "
+                "task's Workers and Reviewers run at once is the task's own limit, else the max_concurrency of their "
                 "role layers"]
 
             from looper.db import config_transfer as db
@@ -727,8 +773,7 @@ def test_a_file_exported_by_v2_6_0_imports_and_exports_again_under_the_new_names
                      ("role_project", "worker", "claude-code/sonnet"): "claude-code/sonnet · low"}
 
             def renamed(layer: dict[str, Any]) -> dict[str, Any]:
-                layer = {**{("profile" if k == "agent" else k): v for k, v in layer.items() if k != "effort"},
-                         "max_concurrency": None}
+                layer = {("profile" if k == "agent" else k): v for k, v in layer.items() if k != "effort"}
                 return {**layer, "profile": moved.get((layer["scope"], layer.get("role"), layer["profile"]),
                                                       layer["profile"])}
 

@@ -103,15 +103,17 @@ _SCHEMA_LOCK = 0x6C6F6F70  # "loop"
 
 async def ensure_schema(pool: asyncpg.Pool | asyncpg.Connection | None = None) -> None:
     from ..agents import layer_effort
+    from . import task_concurrency
 
     pool = pool or get_pool()
     sql = SCHEMA_PATH.read_text(encoding="utf-8")
     # One transaction: the lock is held throughout, the migrations written in Python (layer_effort, which computes
-    # how the layers resolved) run after the file's, and the fingerprint is recorded only together with the schema
-    # it names.
+    # how the layers resolved; task_concurrency, which logs what it converts) run after the file's, and the
+    # fingerprint is recorded only together with the schema it names.
     async with _connection(pool) as conn, conn.transaction():
         await conn.execute(f"SELECT pg_advisory_xact_lock({_SCHEMA_LOCK});\n{sql}")
         await layer_effort.migrate(conn)
+        await task_concurrency.migrate(conn)
         await conn.execute(_RECORD_FINGERPRINT.format(sha256=schema_fingerprint(sql)))
     logger.info("schema ensured")
 

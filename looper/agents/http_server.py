@@ -34,7 +34,8 @@ from .tiers.journal import progress_notes
 from .ops.planner import PlannerOps
 from .ops.service import ManagerOps
 from .tiers.manager import ManagerAgent
-from .tiers.task import TaskRouter, recheck_limits
+from .tiers.task import TaskRouter
+from .tiers.worker import recheck_limits
 from .tiers.worker import WorkerPool
 
 logger = logging.getLogger(__name__)
@@ -139,7 +140,7 @@ class AgentHTTPServer:
         self._port = port
         self._web_adapter = web_adapter
         self._task_router = task_router
-        # Told, with the TaskRouter, to start what a raised concurrency limit lets start.
+        # Told to start the runs a raised concurrency limit lets start.
         self._worker_pool = worker_pool
         # Whether it is in a turn, for the overview.
         self._manager = manager
@@ -680,11 +681,10 @@ class AgentHTTPServer:
         status = {
             "status": "running",
             "agents": agents,
-            # Every task counted; "running" is every task in progress, "pending" the queued ones.
+            # Every task counted; "running" is every task in progress.
             "tasks": {
                 "total": counts["total"],
                 "running": counts["in_progress"],
-                "pending": counts["queued"],
                 "completed": counts["completed"],
             },
             "channels": {"web": web_health},
@@ -1237,8 +1237,8 @@ class AgentHTTPServer:
             "config": raw.get("config", {}),
             # The Agent Profile the task chose for some of its roles, over the layers (agent_settings.Layer.TASK).
             "profile_overrides": {role: profile_registry.profile_view(profile) for role, profile in overrides.items()},
-            # Each task role's Agent Profile and concurrency for the task, with where each comes from; the task's
-            # own choices are source "task" (projects.agents_view).
+            # Each task role's Agent Profile, and its Workers' and Reviewers' concurrency, with where each comes from;
+            # the task's own choices are source "task" (projects.agents_view).
             "agents": agents,
             # The roles the task's Planner defined for its steps (current version, earlier versions, the steps that
             # name each, its numbers), and the built-in Worker's and Reviewer's numbers (task_roles.roles_view).
@@ -1473,8 +1473,8 @@ class AgentHTTPServer:
         return result
 
     async def _recheck_concurrency(self) -> None:
-        """Start the tasks and runs that wait for room a raised limit now gives; a lowered limit stops nothing."""
-        await recheck_limits(self._task_router, self._worker_pool)
+        """Start the runs that wait for room a raised limit now gives; a lowered limit stops nothing."""
+        await recheck_limits(self._worker_pool)
 
     async def _set_task_agents(self, task_id: str, body: bytes) -> dict[str, Any]:
         """Change the task's own profiles or concurrency per role; when it set a limit, start what it lets start."""

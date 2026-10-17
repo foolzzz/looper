@@ -613,11 +613,13 @@ async def _run_agent_system(
         logger.exception("could not sweep the agents a previous server left running")
 
     # The tasks the previous server was running: those with a live plan carry
-    # on once the agents are up; the others are stopped.
+    # on once the agents are up, and those it had started without a Planner yet
+    # start then; the others are stopped.
     from ..db.plans import resumable_task_ids
-    from ..db.tasks import ACTIVE_STATUSES, mark_orphaned_tasks_stopped
+    from ..db.tasks import ACTIVE_STATUSES, mark_orphaned_tasks_stopped, started_task_ids
     resumable = await resumable_task_ids(ACTIVE_STATUSES, pool=pool)
-    orphan_count = await mark_orphaned_tasks_stopped(keep=resumable, pool=pool)
+    starting = await started_task_ids(besides=resumable, pool=pool)
+    orphan_count = await mark_orphaned_tasks_stopped(keep=resumable + starting, pool=pool)
     if orphan_count:
         logger.info("marked %d orphaned task(s) as stopped", orphan_count)
 
@@ -726,6 +728,9 @@ async def _run_agent_system(
     if resumable:
         logger.info("resuming %d task(s) from their saved plans", len(resumable))
         await task_router.resume_tasks(resumable)
+    if starting:
+        logger.info("starting %d task(s) the previous server had not given a Planner yet", len(starting))
+        await task_router.start_tasks(starting)
 
     # --- HTTP Server ---
 

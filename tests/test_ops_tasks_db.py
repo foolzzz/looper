@@ -112,6 +112,8 @@ def test_a_task_is_created_ready_in_its_project_and_its_configuration_shown(
         assert lines[:4] == ["任务已创建，还没有开始（Ready — not started）：", f"- 任务：计算器（{task_id}）",
                              "- 项目：calc（已有）", "- 目录：/w"]
         assert "- Worker：claude-code/sonnet（effort 默认，来源：本任务），agent teams 关" in lines
+        # Concurrency is the task's own: how many of its Workers and Reviewers run at once, not its project's tasks.
+        assert "- 并发：这个任务同时最多运行 16 个 Worker、8 个 Reviewer" in lines
         assert lines[-1] == START_QUESTION
         assert chat.sent() == []
         (trail,) = await manager_actions.for_task(task_id, pool=pool)
@@ -258,10 +260,10 @@ def test_cancelling_asks_first_and_only_a_running_task(monkeypatch: pytest.Monke
     async def test(pool: Any) -> None:
         project = await _project(pool)
         await _task(pool, "task-a", "executing", project)
-        await _task(pool, "task-q", "pending", project)
+        await _task(pool, "task-r", "init", project)
         chat = _Chat(tmp_path)
-        (queued,) = await chat.say("取消排队的", ("looper_task_control", {"task_id": "task-q", "action": "cancel"}))
-        assert _error(queued) == "conflict" and chat.turns[0].blocks == []
+        (ready,) = await chat.say("取消还没开始的", ("looper_task_control", {"task_id": "task-r", "action": "cancel"}))
+        assert _error(ready) == "conflict" and chat.turns[0].blocks == []
         (asked,) = await chat.say("取消它", ("looper_task_control", {"task_id": "task-a", "action": "cancel"}))
         assert asked["status"] == "needs_confirmation" and chat.sent() == []
         assert "要取消任务「build calc」（task-a，现在 executing）吗？" in chat.turns[1].blocks[0]

@@ -45,8 +45,7 @@ def test_the_role_tools_are_listed_and_work_only_where_the_project_lets_its_plan
         ops = _ops()
         planner = _Planner(ops, "task-a")
         header = f"Bearer {planner.token}"
-        base = ["looper_task_profiles", "looper_task_profile_set", "looper_task_concurrency",
-                "looper_project_concurrency"]
+        base = ["looper_task_profiles", "looper_task_profile_set", "looper_task_concurrency"]
 
         # Off by default: the tools are not listed, a call is refused and writes nothing, and the guide is as before.
         assert [t["name"] for t in await ops.listing(header)] == base

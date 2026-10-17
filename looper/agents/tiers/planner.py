@@ -59,7 +59,7 @@ Under ``looper serve`` the Planner also has platform tools of its own
 (``ops.planner``): Looper's MCP server, with a token for this task that it
 gets when it starts and that stops working when it stops. With them it
 chooses its Workers' and Reviewers' Agent Profiles from its project's list
-and changes its task's or its project's concurrency; they change things only
+and changes its task's concurrency; they change things only
 in a turn Looper sends it, and its system prompt says how to use them after
 the reply contract. Where its project lets it (``planner_roles`` ``on``), it also
 defines roles for its steps (``task_roles``): a step's Worker may run as a work

@@ -108,7 +108,7 @@ def test_a_planners_token_works_for_its_own_task_and_its_own_tools_only(
         # Each token lists its own agent's tools.
         status, listed = await _endpoint(server, token, "GET", "tools")
         assert status == 200 and [t["name"] for t in listed["tools"]] == [
-            "looper_task_profiles", "looper_task_profile_set", "looper_task_concurrency", "looper_project_concurrency"]
+            "looper_task_profiles", "looper_task_profile_set", "looper_task_concurrency"]
         status, listed = await _endpoint(server, "manager-tok", "GET", "tools")
         assert status == 200 and "looper_task_profiles" not in {t["name"] for t in listed["tools"]}
 
@@ -391,13 +391,7 @@ def test_the_planners_choice_counts_only_while_the_tasks_project_allows_it(monke
     _run(test, monkeypatch)
 
 
-# --- looper_task_concurrency and looper_project_concurrency ---
-
-
-async def _project_limits(pool: Any, project_id: str) -> dict[str, int]:
-    return {r["role"]: r["max_concurrency"] for r in await pool.fetch(
-        "SELECT role, max_concurrency FROM agent_setting_layers WHERE scope = 'role_project' AND project_id = $1 "
-        "AND max_concurrency IS NOT NULL", project_id)}
+# --- looper_task_concurrency ---
 
 
 def _notices(bus: MessageBus, channel: str) -> list[dict[str, Any]]:
@@ -410,7 +404,7 @@ def _notices(bus: MessageBus, channel: str) -> list[dict[str, Any]]:
     return notices
 
 
-def test_the_planner_changes_its_tasks_and_its_projects_limits_at_once_and_the_chat_is_told(
+def test_the_planner_changes_its_tasks_limits_at_once_and_the_chat_is_told(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
     from looper.db import tasks
@@ -431,21 +425,20 @@ def test_the_planner_changes_its_tasks_and_its_projects_limits_at_once_and_the_c
         assert answer["changes"][0]["before"] == {"value": 16, "source": "builtin"}
         assert answer["changes"][0]["after"] == {"value": 1, "source": "task"} and answer["user_told"] is True
         assert await pool.fetchval("SELECT max_concurrency FROM task_concurrency_limits WHERE task_id = 'task-a'") == 1
-        answer = (await planner("looper_project_concurrency", {"limits": {"worker": 3, "planner": 2}}))["result"]
-        assert (answer["scope"], answer["project"]) == ("project", "calc")
-        # No confirmation: the project's limits are set at once.
-        assert await _project_limits(pool, project["id"]) == {"worker": 3, "planner": 2}
-        assert (router.rechecks, workers.rechecks) == (2, 2)
+        answer = (await planner("looper_task_concurrency", {"limits": {"worker": 3, "reviewer": 2}}))["result"]
+        assert [(c["role"], c["after"]) for c in answer["changes"]] == [
+            ("worker", {"value": 3, "source": "task"}), ("reviewer", {"value": 2, "source": "task"})]
+        assert (router.rechecks, workers.rechecks) == (0, 2)
         assert await _journal(pool, "task-a", "concurrency_change") == [
             ("", "Workers at once in this task: 16 → 1. Reason: one database"),
-            ("", "Workers at once in project calc: 16 → 3; tasks at once in project calc: 8 → 2"),
+            ("", "Workers at once in this task: 1 → 3; Reviewers at once in this task: 8 → 2"),
         ]
         notices = _notices(bus, "lark")
         assert [(n["chat"], n["kind"]) for n in notices] == [("ou_1", "user"), ("ou_1", "user")]
         assert notices[0]["text"] == (
-            "⚙️ 规划者调整了并发上限 · 计算器\n- 本任务：Worker（同时运行的 Worker 数）16（内置默认） → 1（本任务）\n"
+            "⚙️ 规划者调整了并发上限 · 计算器\n- 本任务：Worker（每个任务同时运行的 Worker 数）16（内置默认） → 1（本任务）\n"
             "理由：one database\n[http://looper.test/#tasks/task-a](http://looper.test/#tasks/task-a)")
-        assert "项目「calc」：Planner（同时运行的任务数）8（内置默认） → 2（本项目里的这个角色）" in notices[1]["text"]
+        assert "- 本任务：Reviewer（每个任务同时运行的 Reviewer 数）8（内置默认） → 2（本任务）" in notices[1]["text"]
 
         # A task from the web chat has no chat to tell: the journal records it all the same.
         web = _Planner(ops, "task-web")
@@ -483,11 +476,13 @@ def test_a_limit_the_planner_raises_starts_the_waiting_runs_at_once(
     ("looper_task_concurrency", {"limits": {"planner": 2, "worker": 1}},
      "limits has an unknown key 'planner'; its keys are: worker, reviewer"),
     ("looper_task_concurrency", {"limits": {"worker": 0}}, "limits.worker must be from 1 to 64"),
-    ("looper_project_concurrency", {"limits": {"reviewer": 65}}, "limits.reviewer must be from 1 to 64"),
-    ("looper_project_concurrency", {"limits": {}}, "give at least one role's limit"),
+    ("looper_task_concurrency", {"limits": {"reviewer": 65}}, "limits.reviewer must be from 1 to 64"),
+    ("looper_task_concurrency", {"limits": {}}, "give at least one role's limit"),
     ("looper_task_concurrency", {"reason": "x"}, "limits is required"),
-    ("looper_project_concurrency", {"limits": {"manager": 1}}, "limits has an unknown key 'manager'"),
+    ("looper_task_concurrency", {"limits": {"manager": 1}}, "limits has an unknown key 'manager'"),
     ("looper_task_concurrency", {"scope": "task", "limits": {"worker": 1}}, "unknown argument 'scope'"),
+    # A project has no limits: the tool that changed them is gone.
+    ("looper_project_concurrency", {"limits": {"worker": 3}}, "looper_project_concurrency is not a tool"),
 ])
 def test_a_limit_the_planner_may_not_set_is_refused_and_nothing_changes(
     monkeypatch: pytest.MonkeyPatch, tool: str, arguments: dict[str, Any], message: str,
@@ -498,7 +493,7 @@ def test_a_limit_the_planner_may_not_set_is_refused_and_nothing_changes(
         answer = await _Planner(_ops(), "task-a")(tool, arguments)
         assert _error(answer) == "invalid" and message in answer["error"]["message"], answer
         assert await pool.fetchval("SELECT count(*) FROM task_concurrency_limits") == 0
-        assert await _project_limits(pool, project["id"]) == {}
+        assert await pool.fetchval("SELECT count(*) FROM agent_setting_layers WHERE max_concurrency IS NOT NULL") == 0
         assert await _journal(pool, "task-a", "concurrency_change") == []
 
     _run(test, monkeypatch)

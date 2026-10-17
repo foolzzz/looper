@@ -13,8 +13,7 @@ effort, environment, per-run cap) are layers of their own (``agent_settings``,
 ``/api/projects/<id>/agent-settings``). A task that can still run (any but a
 completed one: a restart runs a failed, stopped or cancelled task again) may
 change its own choices per role (``set_task_agents``): the Agent Profile of its
-roles, and how many of its Workers or Reviewers run at once, within its
-project's limit.
+roles, and how many of its Workers or Reviewers run at once.
 """
 
 from __future__ import annotations
@@ -316,8 +315,7 @@ async def move_task(task_id: str, data: dict[str, Any], task_router: TaskRouter)
 
 async def start_ready_task(task_id: str, bus: MessageBus, source: AgentAddress) -> dict[str, Any]:
     """Have the TaskRouter start a ready task (created, never started; ``TASK_START``), from the dashboard or the
-    Manager: 404 for an unknown task, 400 for one that is not ready. Like a new task, it waits while its project
-    runs as many tasks as its limit."""
+    Manager: 404 for an unknown task, 400 for one that is not ready. It runs at once."""
     task = await db_tasks.get_task(task_id)
     if task is None:
         raise RequestError(HTTP_404, "task not found")
@@ -333,8 +331,7 @@ async def start_ready_task(task_id: str, bus: MessageBus, source: AgentAddress) 
 # How a change to a task came: on the task page, or in a message sent to its Planner on the Chat page.
 VIA_TASK_PAGE = "task_page"
 VIA_CHAT = "chat"
-# The statuses a task's requirement can be edited in: not started, waiting for room, or running (whatever its
-# Planner is doing).
+# The statuses a task's requirement can be edited in: not started, or started (whatever its Planner is doing).
 EDITABLE_STATUSES = (db_tasks.READY, *db_tasks.ACTIVE_STATUSES)
 # The statuses a task's own agents can change in: those its requirement can, and those of a task that ended without
 # completing, which a restart runs again with its new agents. Only a completed task's agents are final.
@@ -508,29 +505,30 @@ async def set_allowed_profiles(project_id: str, data: dict[str, Any]) -> dict[st
     return await allowed_profiles_view(project_id)
 
 
-def _concurrency_limits(raw: Any) -> dict[str, int | None]:
-    """``concurrency``, how many of a task's Workers or Reviewers run at once (null drops the task's own)."""
+def _concurrency_limits(raw: Any, *, field: str = "concurrency") -> dict[str, int | None]:
+    """``concurrency`` (the request's ``field``), how many of a task's Workers or Reviewers run at once (null drops
+    the task's own)."""
     roles = [role.value for role in TASK_LIMIT_ROLES]
     if not isinstance(raw, dict):
-        raise RequestError(HTTP_400, 'concurrency must be an object: {"worker" | "reviewer": limit}')
+        raise RequestError(HTTP_400, f'{field} must be an object: {{"worker" | "reviewer": limit}}')
     limits: dict[str, int | None] = {}
     for role, value in raw.items():
         if role == AgentType.PLANNER.value:
-            raise RequestError(HTTP_400, "one Planner runs a task, so a task has no Planner limit; how many of a "
-                                         "project's tasks run at once is the project's planner limit")
+            raise RequestError(HTTP_400, f"{field}: one Planner runs a task, so a task has no Planner limit, and "
+                                         "nothing limits how many tasks run at once")
         if role not in roles:
-            raise RequestError(HTTP_400, f"unknown role {role!r}; a task limits its {' and '.join(roles)}")
+            raise RequestError(HTTP_400, f"{field}: unknown role {role!r}; a task limits its {' and '.join(roles)}")
         try:
             limits[role] = None if value is None else concurrency(value)
         except SettingsError as exc:
-            raise RequestError(HTTP_400, f"concurrency.{role}: {exc}") from None
+            raise RequestError(HTTP_400, f"{field}.{role}: {exc}") from None
     return limits
 
 
 async def set_task_agents(task_id: str, data: dict[str, Any]) -> dict[str, Any]:
     """Change the task's own choices per role, together: ``profiles`` (an Agent Profile, by id or name, for its
-    Planner, Workers or Reviewers) and ``concurrency`` (how many of its Workers or Reviewers run at once, within its
-    project's limit); null drops the task's choice of that role, and its layers apply. 400 for a bad field, role or
+    Planner, Workers or Reviewers) and ``concurrency`` (how many of its Workers or Reviewers run at once); null drops
+    the task's choice of that role, and its layers apply. 400 for a bad field, role or
     value, 404 for an unknown task, 409 for a completed one (a failed, stopped or cancelled task changes too, and its
     restart runs with them). Answers the task's agents as they are then (and when a new profile applies). The caller
     lets waiting runs check again; a lowered limit stops nothing that runs."""

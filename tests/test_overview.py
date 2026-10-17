@@ -10,9 +10,9 @@ from looper.db.tasks import TaskGroup, task_group
 
 
 @pytest.mark.parametrize(("status", "group"), [
-    *[(status, TaskGroup.IN_PROGRESS) for status in ("assigned", "running", "planning", "executing", "verifying",
-                                                      "stopping")],
-    ("pending", TaskGroup.QUEUED),
+    # "pending": started, its Planner starting (nothing waits for room under a project's limit any more).
+    *[(status, TaskGroup.IN_PROGRESS) for status in ("pending", "assigned", "running", "planning", "executing",
+                                                      "verifying", "stopping")],
     ("init", TaskGroup.READY),
     ("failed", TaskGroup.ATTENTION),
     ("stopped", TaskGroup.ATTENTION),

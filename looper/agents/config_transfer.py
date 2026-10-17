@@ -15,9 +15,12 @@ sections:
 - ``settings``: the system and role layers of the agent settings (a layer
   names its Agent Profile, ``profile``), and each role's prompt (``null`` while
   it follows the recommended one), timeout and enabled flag. A role's
-  ``max_concurrency`` from before the layers held it is ignored, with a note;
-  a layer's ``effort`` from before the effort was the Agent Profile's moves
-  onto profiles as the upgrade moved it (``layer_effort``; see **Import**);
+  ``max_concurrency`` from before the layers held it is ignored, with a note,
+  and so is a layer's from before concurrency was per task (any but the
+  Workers' or the Reviewers' role layer: a project's, a role's in a project or
+  the Planner's); a layer's ``effort`` from before the effort was the Agent
+  Profile's moves onto profiles as the upgrade moved it (``layer_effort``; see
+  **Import**);
 - ``channels``: each chat channel's configuration;
 - ``installs``: the global installs, naming their item by kind and name;
 - ``projects`` (``--include-projects``): each project's fields, execution
@@ -93,6 +96,8 @@ _CHANNEL_PUBLIC_KEYS = {
 _CHANNEL_TOKEN_SECRET = {"telegram": "bot token (Settings → Channels)"}
 _ROLE_FIELDS = ("prompt", "timeout_seconds", "enabled")
 _LAYER_FIELDS = ("harness_prompt", "profile", "env", "run_budget_usd", "max_concurrency", "boundaries")
+# The roles whose role layer takes a concurrency limit: the default for every task.
+_LIMIT_ROLES = ("worker", "reviewer")
 _PROVIDER_FIELDS = ("protocols", "auth", "oauth_runtime_type", "base_url", "models", "env", "max_concurrency")
 _ITEM_FIELDS = ("origin", "source", "version", "description", "modified")
 _DOCUMENT_FIELDS = ("summary", "source_kind", "filename", "path", "sha256", "size_bytes")
@@ -227,8 +232,11 @@ def layer_entry(row: Mapping[str, Any]) -> dict[str, Any]:
     if row.get("role"):
         entry["role"] = row["role"]
     entry = {**entry, **{name: row.get(name) for name in _LAYER_FIELDS}, "env": list(row.get("env") or [])}
-    if entry["boundaries"] is None:  # only the shared defaults may hold them; a file without them has none
-        del entry["boundaries"]
+    # Only the shared defaults may hold boundaries, and only the Workers' and the Reviewers' role layers a
+    # concurrency limit; a file without one has none.
+    for name in ("boundaries", "max_concurrency"):
+        if entry[name] is None:
+            del entry[name]
     return entry
 
 
@@ -1007,6 +1015,7 @@ class _Importer:
             if scope in ("system", "project") and role is not None:
                 raise _Skip(f"a {scope} layer has no role")
             raw = self._without_agent_teams_env(raw, section, label)
+            raw = self._without_project_concurrency(raw, section, label)
             values, effort = _layer_values(raw, scope, role)
             profile_id = await self._layer_profile(values["profile"], scope, role)
         except _Skip as exc:
@@ -1111,6 +1120,21 @@ class _Importer:
         self.plan.notes.append(f"{section} {label}: {AGENT_TEAMS} was left out of the environment; agent teams are "
                                "switched on each Agent Profile")
         return {**raw, "env": [e for e in env if not (isinstance(e, Mapping) and e.get("key") == AGENT_TEAMS)]}
+
+    def _without_project_concurrency(self, raw: Mapping[str, Any], section: str, label: str) -> Mapping[str, Any]:
+        """The layer without a ``max_concurrency`` that only the Workers' and the Reviewers' role layers take now (a
+        file from before concurrency was per task may give a project's, a role's in a project or the Planner's), with
+        a note; the rest of the layer imports as it is."""
+        if raw.get("max_concurrency") is None or (raw.get("scope") == "role" and raw.get("role") in _LIMIT_ROLES):
+            return raw
+        self.plan.notes.append(
+            f"{section} {label}: its max_concurrency {raw['max_concurrency']} was ignored: concurrency is per task, so "
+            "nothing limits how many tasks run and a project has no limits; set the default for every task on the "
+            "worker or reviewer role (Settings → Roles), or a task's own limit")
+        rest = {name: value for name, value in raw.items() if name != "max_concurrency"}
+        if all(rest.get(name) in (None, [], "") for name in (*_LAYER_FIELDS, "model", "effort")):
+            raise _Skip("it sets nothing but a max_concurrency, which is ignored (see the notes)")
+        return rest
 
     async def role(self, entry: Any) -> None:
         from ..db import config_transfer as db
@@ -1369,8 +1393,8 @@ async def import_config(conn: Any, data: Mapping[str, Any], *, apply: bool) -> P
         await importer.role(entry)
     if any(isinstance(entry, Mapping) and "max_concurrency" in entry for entry in settings.get("roles", [])):
         importer.plan.notes.append(
-            "settings.roles: a role's max_concurrency is no longer a role setting and was ignored; how many "
-            "Planners (tasks), Workers and Reviewers run at once in a project is the max_concurrency of their "
+            "settings.roles: a role's max_concurrency is no longer a role setting and was ignored; how many of a "
+            "task's Workers and Reviewers run at once is the task's own limit, else the max_concurrency of their "
             "role layers")
     for entry in data.get("channels", []):
         await importer.channel(entry)
