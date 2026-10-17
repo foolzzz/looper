@@ -14,9 +14,10 @@ from typing import Any
 
 import pytest
 
-from looper.agents.message import MessageEnvelope, MessageType, planner_address
+from looper.agents.message import TASK_ROUTER_ADDRESS, MessageEnvelope, MessageType, RestartMode, planner_address
 from looper.agents.tiers import planner as planner_module
-from looper.agents.tiers.planner_protocol import reply_contract
+from looper.agents.tiers.planner import PlannerAgent
+from looper.agents.tiers.planner_protocol import TurnKind, reply_contract
 from tests.test_planner_agent import (
     FINAL,
     WEB,
@@ -400,3 +401,251 @@ def test_the_plan_lines_show_a_gate_with_its_state_and_agenda(planner_claude: An
     assert '- g1 [gate: open, waited 0 min] "storage" (depends on: none; agenda: 0 of 1 resolved)' in decision
     reviewed = {row["key"]: row["review"] for row in agent_db.store.steps["t1"].values()}
     assert reviewed == {"s1": True, "g1": False}
+
+
+def _while_turn(monkeypatch: pytest.MonkeyPatch, kind: TurnKind, agent_db: Any, text: str) -> list[Any]:
+    """The user writes ``text`` in gate g1 while the first ``kind`` turn runs, once Claude answered it and before
+    the Planner does what the reply says (as the dashboard does: stored, then the Planner is woken)."""
+    original = planner_module.PlannerAgent._ask
+    written: list[Any] = []
+
+    async def ask(self: Any, turn: TurnKind, message: str, parse: Any, *args: Any, **kwargs: Any) -> Any:
+        result = await original(self, turn, message, parse, *args, **kwargs)
+        if turn is kind and not written:
+            gate, added = await agent_db.store.add_gate_message(
+                "t1", "g1", {"kind": "message", "text": text, "via": "dashboard"})
+            assert added is not None, f"the gate does not wait for the user: {gate}"
+            written.append(added)
+            await self._bus.publish(MessageEnvelope.create(source=WEB, target=planner_address("t1"),
+                                                           message_type=MessageType.GATE_MESSAGE,
+                                                           payload={"task_id": "t1", "gate": "g1"}))
+        return result
+
+    monkeypatch.setattr(planner_module.PlannerAgent, "_ask", ask)
+    return written
+
+
+def _late(agent_db: Any) -> list[dict[str, Any]]:
+    return [e for e in agent_db.store.journal["t1"] if e["kind"] == "supplement" and e.get("via") == "gate_late"]
+
+
+def test_a_message_that_reaches_the_gate_as_it_closes_is_a_supplement_the_planner_gets_next(
+    planner_claude: Any, agent_db: Any, gates_on: None, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    written = _while_turn(monkeypatch, TurnKind.GATE, agent_db, "wait, actually SQLite")
+    claude = planner_claude(
+        plan(GATE),
+        gate_reply("PostgreSQL then.", "close", SETTLED, summary=SUMMARY, action="add_steps", steps=[step("s1", "g1")]),
+        reply({"reply": "Noted: SQLite after all; s1 will use it.", "action": "none"}),
+        decide("accept"),
+    )
+
+    async def scenario(h: Any) -> None:
+        await h.start()
+        await h.until(lambda: (_gate(agent_db) or {}).get("state") == "open")
+        await _write(h, agent_db, "PostgreSQL")
+        await h.finished()
+
+    h = drive(claude, always(WORK_OK), scenario)
+
+    assert h.final().payload["status"] == "completed"  # type: ignore[union-attr]
+    texts = [turn["text"] for turn in claude.turns()]
+    assert "wait, actually" not in texts[1]
+    # The next turn is the CHAT turn of the task's changes, with the late message as a supplement.
+    assert texts[2].startswith("[CHAT] The task changed.")
+    assert "- Written in gate g1 as it closed: wait, actually SQLite" in texts[2]
+    (late,) = _late(agent_db)
+    assert late["delivered"] is True and late["step_id"] == _gate(agent_db)["step_id"]  # type: ignore[index]
+    gate = _gate(agent_db)
+    assert gate is not None and gate["state"] == "passed" and gate["delivered_through"] == written[0]["id"]
+    assert _messages(agent_db)[-3:] == [("planner", "reply"), ("looper", "closed"), ("looper", "late")]
+
+
+def test_a_message_that_reaches_the_gate_as_a_decision_cancels_it_is_a_supplement_the_planner_gets_next(
+    planner_claude: Any, agent_db: Any, gates_on: None, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    written = _while_turn(monkeypatch, TurnKind.DECISION, agent_db, "PostgreSQL please")
+    claude = planner_claude(
+        plan(step("s1"), GATE, step("s2", "g1")),
+        decide("accept", summary="found PostgreSQL in use",
+               gates=[{"id": "g1", "action": "cancel", "resolution": "db/schema.sql already uses PostgreSQL"}]),
+        reply({"reply": "PostgreSQL it is, as s1 found.", "action": "none"}),
+        decide("accept"),
+    )
+    h = drive(claude, always(WORK_OK))
+
+    assert h.final().payload["status"] == "completed"  # type: ignore[union-attr]
+    texts = [turn["text"] for turn in claude.turns()]
+    assert not any(text.startswith("[GATE]") for text in texts)
+    chat = next(text for text in texts if text.startswith("[CHAT]"))
+    assert "- Written in gate g1 as it closed: PostgreSQL please" in chat
+    gate = _gate(agent_db)
+    assert gate is not None and gate["state"] == "cancelled" and gate["delivered_through"] == written[0]["id"]
+    assert _messages(agent_db) == [("looper", "opened"), ("user", "message"), ("looper", "cancelled"),
+                                   ("looper", "late")]
+    assert [e["delivered"] for e in _late(agent_db)] == [True]
+
+
+def test_a_chat_reply_that_cancels_the_last_open_gate_must_add_steps_or_carry_final(
+    planner_claude: Any, agent_db: Any, gates_on: None,
+) -> None:
+    cancel = {"reply": "Fine, SQLite then.", "action": "none",
+              "gates": [{"id": "g1", "action": "cancel", "resolution": "the user said SQLite in chat"}]}
+    claude = planner_claude(plan(GATE), reply(cancel), reply({**cancel, "final": FINAL}))
+
+    async def scenario(h: Any) -> None:
+        await h.start()
+        await h.until(lambda: (_gate(agent_db) or {}).get("state") == "open")
+        await agent_db.store.add_supplement("t1", "Use SQLite, skip the question", via="chat")
+        await h.bus.publish(MessageEnvelope.create(source=WEB, target=planner_address("t1"),
+                                                   message_type=MessageType.TASK_CHANGE, payload={"task_id": "t1"}))
+        await h.finished()
+
+    h = drive(claude, always(WORK_OK), scenario)
+
+    final = h.final()
+    assert final is not None and final.payload["status"] == "completed" and "## Delivered" in final.payload["summary"]
+    assert "these cancels leave no step open, so the reply completes the task: add the steps the answer decides, " \
+           'or carry "final"' in claude.turns()[2]["text"]
+
+
+def test_a_restart_reply_that_cancels_the_last_open_gate_must_add_steps_or_carry_final(
+    planner_claude: Any, agent_db: Any, gates_on: None,
+) -> None:
+    cancel = {"reply": "Going on without asking: SQLite.", "action": "none",
+              "gates": [{"id": "g1", "action": "cancel", "resolution": "the requirement says SQLite now"}]}
+    claude = planner_claude(plan(GATE), reply(cancel), reply({**cancel, "final": FINAL}))
+
+    async def scenario(h: Any) -> None:
+        await h.start()
+        await h.until(lambda: (_gate(agent_db) or {}).get("state") == "open")
+        await h.planner.stop()  # the task stops while the gate waits
+        agent_db.store.tasks["t1"] = {"requirement": "build the calc package", "work_dir": str(h.work_dir)}
+        h.planner = PlannerAgent(task_id="t1", runtime_root=h.work_dir.parent, claude_bin=claude.bin)
+        await h.planner.start(h.bus)
+        await h.bus.publish(MessageEnvelope.create(
+            source=TASK_ROUTER_ADDRESS, target=h.planner.agent_address, message_type=MessageType.TASK_REQUEST,
+            payload={"requirement": "build the calc package", "goal_id": "g1", "work_dir": str(h.work_dir),
+                     "project_id": "proj-1", "restart": RestartMode.CONTINUE.value, "ended": "stopped"},
+            correlation_id="corr-1"))
+        await h.finished()
+
+    h = drive(claude, always(WORK_OK), scenario)
+
+    final = h.final()
+    assert final is not None and final.payload["status"] == "completed" and "## Delivered" in final.payload["summary"]
+    texts = [turn["text"] for turn in claude.turns()]
+    assert "[RESTART]" in texts[1] and "these cancels leave no step open" in texts[2]
+
+
+def test_a_failed_gate_turn_is_retried_twice_on_its_own_then_waits_for_the_users_next_message(
+    planner_claude: Any, agent_db: Any, gates_on: None, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(planner_module, "GATE_IDLE_STOP_SEC", 0.2)
+    monkeypatch.setattr(planner_module, "GATE_IDLE_CHECK_SEC", 0.05)
+    monkeypatch.setattr(planner_module, "GATE_RETRY_WAIT_SEC", (0.1, 0.2))
+    broken = reply({"reply": "hmm", "gate": "continue", "action": "none"})  # no agenda: always refused
+    claude = planner_claude(
+        plan(GATE),
+        *[broken] * 6,  # the turn and its two retries, each with its repair turn
+        gate_reply("PostgreSQL then.", "close", SETTLED, summary=SUMMARY, action="add_steps", steps=[step("s1", "g1")]),
+        decide("accept"),
+    )
+    seen: dict[str, Any] = {}
+
+    async def scenario(h: Any) -> None:
+        await h.start()
+        await h.until(lambda: (_gate(agent_db) or {}).get("state") == "open")
+        await _write(h, agent_db, "PostgreSQL")
+        await h.until(lambda: sum(1 for m in agent_db.store.gate_messages if m["kind"] == "error") == 3)
+        await asyncio.sleep(1.0)  # many idle checks, more than the retries' waits and the idle stop
+        seen["turns"], seen["gate"] = len(claude.turns()), await agent_db.store.get_gate("t1", "g1")
+        await _write(h, agent_db, "PostgreSQL, really")
+        await h.finished()
+
+    h = drive(claude, always(WORK_OK), scenario)
+
+    assert h.final().payload["status"] == "completed"  # type: ignore[union-attr]
+    # One user message: the turn and two automatic retries (each with its repair turn), then nothing.
+    assert seen["turns"] == 1 + 6
+    gate = seen["gate"]
+    assert (gate["failures"], gate["waiting_for_planner"], gate["not_delivered"]) == (3, False, 1)
+    errors = [m["text"] for m in agent_db.store.gate_messages if m["kind"] == "error"]
+    assert "it tries again in 1 min, and your next message sends it again too." in errors[0]
+    assert errors[2].endswith("your message is kept, and your next message sends it again.")
+    # The user's next message sends both again.
+    assert "- (dashboard) PostgreSQL\n- (dashboard) PostgreSQL, really" in claude.turns()[7]["text"]
+    assert _gate(agent_db)["failures"] == 0  # type: ignore[index]
+
+
+def test_a_new_session_after_a_lost_resume_gets_the_gates_discussion_in_its_brief(
+    planner_claude: Any, agent_db: Any, gates_on: None, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(planner_module, "GATE_IDLE_STOP_SEC", 0.3)
+    monkeypatch.setattr(planner_module, "GATE_IDLE_CHECK_SEC", 0.05)
+    claude = planner_claude(
+        plan(GATE),
+        gate_reply("Which version of PostgreSQL?"),
+        gate_reply("16 it is.", "close", SETTLED, summary=SUMMARY, action="add_steps", steps=[step("s1", "g1")]),
+        decide("accept"),
+        forget_sessions=True,
+    )
+    stopped = "Planner Claude Code stopped while the task waits for the user"
+
+    async def scenario(h: Any) -> None:
+        await h.start()
+        await h.until(lambda: (_gate(agent_db) or {}).get("state") == "open")
+        await _write(h, agent_db, "PostgreSQL")
+        await h.until(lambda: len(claude.turns()) >= 2)
+        await h.until(lambda: any(stopped in line for line in activity(agent_db)))
+        await _write(h, agent_db, "16")
+        await h.finished()
+
+    drive(claude, always(WORK_OK), scenario)
+
+    last = [t["text"] for t in claude.turns() if "[GATE]" in t["text"]][-1]
+    assert last.startswith("[RESUME]")
+    brief, request = last.split("[GATE]", 1)
+    assert 'The discussion so far in gate g1 "storage" (your earlier session had it; oldest first):' in brief
+    # Each line by its author: the user's with where it came from, the Planner's and Looper's without.
+    assert "- (dashboard) PostgreSQL" in brief and "- (you) Which version of PostgreSQL?" in brief
+    assert "- (Looper) Gate opened: storage" in brief and "16" not in brief
+    new = request.split("New messages from the user (oldest first):")[1].split("\n\n")[0]
+    assert "- (dashboard) 16" in new and "PostgreSQL" not in new
+
+
+def test_a_gate_turn_whose_save_failed_does_not_give_its_messages_again(
+    planner_claude: Any, agent_db: Any, gates_on: None, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from looper.db import plans
+
+    claude = planner_claude(
+        plan(GATE),
+        gate_reply("Which version?"),
+        gate_reply("PostgreSQL 16.", "close", SETTLED, summary=SUMMARY, action="add_steps", steps=[step("s1", "g1")]),
+        decide("accept"),
+    )
+    save = plans.save
+    failed: list[bool] = []
+
+    async def flaky(task_id: str, **kwargs: Any) -> None:
+        if any(m.get("role") == "planner" for m in kwargs.get("gate_messages") or ()) and not failed:
+            failed.append(True)
+            raise OSError("the database is gone for a moment")
+        await save(task_id, **kwargs)
+
+    monkeypatch.setattr(plans, "save", flaky)
+
+    async def scenario(h: Any) -> None:
+        await h.start()
+        await h.until(lambda: (_gate(agent_db) or {}).get("state") == "open")
+        await _write(h, agent_db, "PostgreSQL")
+        await h.until(lambda: failed and len(claude.turns()) >= 2)
+        await _write(h, agent_db, "16")
+        await h.finished()
+
+    drive(claude, always(WORK_OK), scenario)
+
+    second = claude.turns()[2]["text"]
+    new = second.split("New messages from the user (oldest first):")[1].split("\n\n")[0]
+    assert "- (dashboard) 16" in new and "PostgreSQL" not in new

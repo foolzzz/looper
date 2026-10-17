@@ -128,6 +128,106 @@ def test_a_gates_conclusion_is_a_supplement_delivered_with_it(monkeypatch: pytes
     _run(test, monkeypatch)
 
 
+@pytest.mark.parametrize("closed", ["passed", "cancelled"])
+def test_a_message_that_reaches_a_gate_as_it_closes_becomes_a_supplement_and_a_later_one_is_refused(
+    monkeypatch: pytest.MonkeyPatch, closed: str,
+) -> None:
+    async def test(pool: Any) -> None:
+        from looper.db import plans, task_changes, user_gates
+
+        project = await _project(pool)
+        await _task(pool, "task-a", "waiting_user", project)
+        await _plan_with_gate(pool, state="open")
+        _, first = await _user("task-a", "PostgreSQL")
+        # The closing turn had the first message; these reach the gate while it runs: an option the user picked,
+        # and an end of the discussion with nothing to say.
+        await _user("task-a", "SQLite", agenda_item="q1", option="SQLite")
+        _, end = await user_gates.add_user_message("task-a", "g1", {"kind": "end", "text": "", "via": "dashboard"})
+        how = ({"summary": {"decisions": ["PostgreSQL"], "assumptions": [], "open": []}} if closed == "passed"
+               else {"resolution": "s1 found it"})
+        gate = _gate(state=closed, delivered_through=first["id"], turns=1, **how)
+        await plans.save("task-a", gates=[gate], gate_messages=[
+            {"step_id": "step-g1", "role": "looper", "kind": closed if closed == "cancelled" else "closed",
+             "text": "done"}], pool=pool)
+
+        (row,) = await user_gates.list_for_task("task-a", pool=pool)
+        assert (row["state"], row["delivered_through"], row["waiting_for_planner"]) == (closed, end["id"], False)
+        changes = await task_changes.pending("task-a", pool=pool)
+        assert [(s.text, s.via) for s in changes.supplements] == [
+            ('Written in gate g1 as it closed: chose "SQLite" for q1', "gate_late")]
+        thread = await user_gates.thread("step-g1", pool=pool)
+        assert (thread[-1]["role"], thread[-1]["kind"]) == ("looper", "late")
+        assert thread[-1]["text"].startswith("1 message(s) reached this gate as it closed")
+        # Once closed it takes no message, and writing it again makes no second supplement.
+        _, refused = await _user("task-a", "one more thing")
+        assert refused is None
+        await plans.save("task-a", gates=[gate], pool=pool)
+        assert len((await task_changes.pending("task-a", pool=pool)).supplements) == 1
+
+    _run(test, monkeypatch)
+
+
+def test_a_message_racing_the_close_is_either_refused_or_kept_as_a_supplement(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def test(pool: Any) -> None:
+        import asyncio
+
+        from looper.db import plans, task_changes, user_gates
+
+        project = await _project(pool)
+        # Either order happens in 30 rounds (measured: about two in three messages land before the close).
+        for n in range(30):
+            task_id, step_id = f"task-{n}", f"step-g1-{n}"
+            await _task(pool, task_id, "waiting_user", project)
+            await plans.save(task_id, plan={"plan_id": f"plan-{n}", "status": "executing"},
+                             steps=[{**_gate_step(step_id), "status": "waiting_user"}],
+                             gates=[_gate(step_id, state="open")], pool=pool)
+            summary = {"decisions": ["PostgreSQL"], "assumptions": [], "open": []}
+            close = plans.save(task_id, gates=[_gate(step_id, state="passed", summary=summary, turns=1)], pool=pool)
+            write = user_gates.add_user_message(task_id, "g1", {"kind": "message", "text": f"late {n}",
+                                                                "via": "dashboard"})
+            _, (_, added) = await asyncio.gather(close, write)
+            kept = [s.text for s in (await task_changes.pending(task_id, pool=pool)).supplements]
+            assert kept == ([f"Written in gate g1 as it closed: late {n}"] if added else []), (n, added, kept)
+
+    _run(test, monkeypatch)
+
+
+def test_a_message_a_turn_failed_on_waits_for_the_user_and_reminders_come_again(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def test(pool: Any) -> None:
+        from datetime import datetime, timedelta, timezone
+
+        from looper.agents.gate_service import gate_view
+        from looper.db import plans, user_gates
+
+        project = await _project(pool)
+        await _task(pool, "task-a", "waiting_user", project)
+        long_ago = datetime.now(timezone.utc) - timedelta(hours=25)
+        await _plan_with_gate(pool, state="open", opened_at=long_ago)
+        _, message = await _user("task-a", "PostgreSQL")
+        await pool.execute("UPDATE task_user_gate_messages SET created_at = $1", long_ago)
+        assert await user_gates.due_reminders(pool=pool) == []  # it waits for the Planner
+
+        # The turn on it failed: the gate waits for the user, the message counted as not delivered.
+        await plans.save("task-a", gates=[_gate(state="discussing", opened_at=long_ago, failures=1,
+                                                failed_through=message["id"], failed_at=long_ago)], pool=pool)
+        (row,) = await user_gates.list_for_task("task-a", pool=pool)
+        assert (row["waiting_for_planner"], row["not_delivered"], row["failures"]) == (False, 1, 1)
+        view = gate_view(row)
+        assert (view["waiting_on"], view["not_delivered"]) == ("user", 1)
+        assert [r["step_id"] for r in await user_gates.due_reminders(pool=pool)] == ["step-g1"]
+        assert [m["text"] for m in await user_gates.pending("task-a", pool=pool)] == ["PostgreSQL"]
+
+        # The user's next message waits for the Planner again, with the one not delivered.
+        await _user("task-a", "and keep 90 days")
+        (row,) = await user_gates.list_for_task("task-a", pool=pool)
+        assert (gate_view(row)["waiting_on"], row["not_delivered"]) == ("planner", 1)
+        assert await user_gates.due_reminders(pool=pool) == []
+
+    _run(test, monkeypatch)
+
+
 def test_reminders_come_at_the_projects_interval_while_the_gate_waits_for_the_user(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

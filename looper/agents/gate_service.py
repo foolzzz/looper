@@ -36,9 +36,10 @@ REMINDER_CHECK_SEC = 300
 
 
 def gate_view(row: Mapping[str, Any]) -> dict[str, Any]:
-    """A gate as the API shows it: its step's label, state, agenda and how it closed, and whom it waits for
-    (``waiting_on``: ``user``, ``planner`` while one of the user's messages is undelivered, None once closed or
-    before it opens)."""
+    """A gate as the API shows it: its step's label, state, agenda and how it closed, whom it waits for
+    (``waiting_on``: ``user``, ``planner`` while one of the user's messages is undelivered and no turn failed on it,
+    None once closed or before it opens), and how many of the user's messages a turn failed on and none has taken
+    since (``not_delivered``: the user's next message sends them again)."""
     state = GateState(row["state"])
     waiting_on = None
     if state.waiting:
@@ -49,6 +50,7 @@ def gate_view(row: Mapping[str, Any]) -> dict[str, Any]:
         "summary": row.get("summary"), "resolution": row.get("resolution") or "",
         "ended_by_user": bool(row.get("ended_by_user")), "plan_change": row.get("plan_change"),
         "depends_on": list(row.get("depends_on") or []), "waiting_on": waiting_on, "turns": row.get("turns") or 0,
+        "not_delivered": int(row.get("not_delivered") or 0) if state.waiting else 0,
         "reminders": row.get("reminders") or 0, "opened_at": row.get("opened_at"),
         "first_reply_at": row.get("first_reply_at"), "closed_at": row.get("closed_at"),
     }

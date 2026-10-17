@@ -965,7 +965,9 @@ ALTER TABLE task_steps ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'work
 -- state's move from 'open' to 'discussing', and the reminders' columns; a closed gate ('passed', 'cancelled',
 -- 'skipped') stays closed. agenda: [{id, question, options, status, answer}]. summary: what a gate that passed
 -- closed with ({decisions, assumptions, open}). delivered_through: the last of the user's messages a turn of the
--- Planner had. plan_change: the steps the turn that closed it added, dropped and stopped.
+-- Planner had; the close turns those after it into supplements of the task. failures, failed_through, failed_at:
+-- the [GATE] turns in a row that failed, the last of the user's messages the latest of them had, and when.
+-- plan_change: the steps the turn that closed it added, dropped and stopped.
 CREATE TABLE IF NOT EXISTS task_user_gates (
     step_id            TEXT PRIMARY KEY REFERENCES task_steps(id) ON DELETE CASCADE,
     task_id            TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
@@ -980,6 +982,9 @@ CREATE TABLE IF NOT EXISTS task_user_gates (
     plan_change        JSONB,
     delivered_through  BIGINT NOT NULL DEFAULT 0,
     turns              INTEGER NOT NULL DEFAULT 0,
+    failures           INTEGER NOT NULL DEFAULT 0,
+    failed_through     BIGINT NOT NULL DEFAULT 0,
+    failed_at          TIMESTAMPTZ,
     reminders          INTEGER NOT NULL DEFAULT 0,
     opened_at          TIMESTAMPTZ,
     first_reply_at     TIMESTAMPTZ,
@@ -993,7 +998,8 @@ CREATE INDEX IF NOT EXISTS idx_task_user_gates_task ON task_user_gates (task_id)
 CREATE INDEX IF NOT EXISTS idx_task_user_gates_waiting ON task_user_gates (task_id)
     WHERE state IN ('open', 'discussing');
 -- A gate's discussion, oldest first: the user's messages ('message', 'end': the user ended the discussion), the
--- Planner's replies, and code's own ('opened', 'updated', 'reminder', 'cancelled', 'closed', 'resumed', 'error').
+-- Planner's replies, and code's own ('opened', 'updated', 'reminder', 'cancelled', 'closed', 'resumed', 'error',
+-- 'late': the user's message reached the gate as it closed and became a supplement of the task).
 -- author: who wrote it in a group chat. via: 'dashboard', 'lark', 'telegram' or 'manager:<channel>'.
 -- agenda_item and option: the option the user chose with a button. channel, chat and external_id: the channel
 -- message a user's message is (a reply to it answers there).
@@ -1003,7 +1009,7 @@ CREATE TABLE IF NOT EXISTS task_user_gate_messages (
     task_id      TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
     role         TEXT NOT NULL CHECK (role IN ('user', 'planner', 'looper')),
     kind         TEXT NOT NULL CHECK (kind IN ('message', 'end', 'reply', 'opened', 'updated', 'reminder',
-                                               'cancelled', 'closed', 'resumed', 'error')),
+                                               'cancelled', 'closed', 'resumed', 'error', 'late')),
     text         TEXT NOT NULL DEFAULT '',
     author       TEXT,
     via          TEXT NOT NULL DEFAULT '',

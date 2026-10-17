@@ -151,13 +151,36 @@ class _PlanStore:
         for message in gate_messages:
             self.gate_messages.append({"id": next(self._ids), "task_id": task_id, "author": None, "via": "",
                                        "agenda_item": None, "option": None, "created_at": None, **dict(message)})
+        for gate in gates:
+            row = self.gates[task_id][gate["step_id"]]
+            late = [m for m in self.gate_messages if m["step_id"] == row["step_id"] and m["role"] == "user"
+                    and m["id"] > row["delivered_through"]]
+            if row["state"] in ("passed", "cancelled", "skipped") and late:
+                # As ``user_gates._keep_late``: what reached the gate as it closed becomes a supplement.
+                from looper.db.user_gates import LATE_VIA, late_text
+
+                label = self.steps.get(task_id, {}).get(row["step_id"], {}).get("key", "")
+                texts = [text for m in late if (text := late_text(label, m))]
+                for text in texts:
+                    self.journal.setdefault(task_id, []).append({
+                        "id": next(self._ids), "step_id": row["step_id"], "kind": "supplement", "summary": text,
+                        "learnings": [], "via": LATE_VIA, "delivered": False})
+                if texts:
+                    self.gate_messages.append({
+                        "id": next(self._ids), "task_id": task_id, "step_id": row["step_id"], "role": "looper",
+                        "kind": "late", "text": f"{len(texts)} message(s) reached this gate as it closed",
+                        "author": None, "via": "", "agenda_item": None, "option": None, "created_at": None})
+                row["delivered_through"] = max(m["id"] for m in late)
 
     def _gate_row(self, task_id: str, row: dict[str, Any]) -> dict[str, Any]:
         step = self.steps.get(task_id, {}).get(row["step_id"], {})
-        waiting = any(m["step_id"] == row["step_id"] and m["role"] == "user" and m["id"] > row["delivered_through"]
-                      for m in self.gate_messages)
+        undelivered = [m["id"] for m in self.gate_messages if m["step_id"] == row["step_id"] and m["role"] == "user"
+                       and m["id"] > row["delivered_through"]]
+        failed_through = row.get("failed_through") or 0
         return {**row, "step_key": step.get("key", ""), "step_index": step.get("index", 0),
-                "depends_on": list(step.get("depends_on") or []), "waiting_for_planner": waiting}
+                "depends_on": list(step.get("depends_on") or []),
+                "waiting_for_planner": any(i > failed_through for i in undelivered),
+                "not_delivered": sum(1 for i in undelivered if i <= failed_through)}
 
     async def list_gates(self, task_id: str, **_: object) -> list[dict[str, Any]]:
         rows = [self._gate_row(task_id, row) for row in self.gates.get(task_id, {}).values()]

@@ -74,11 +74,13 @@ user's messages in it (``db.user_gates``, stored first; ``GATE_MESSAGE`` only
 wakes the Planner) reach Claude after each event, a gate's waiting ones
 together, in a [GATE] turn, whose reply updates the agenda and either goes on
 or closes the gate, the summary kept as a supplement (``via`` ``gate``) in the
-same transaction, and may change the plan as a CHAT reply does. A DECISION or
-CHAT reply may update a gate or cancel it (``gates``). While a gate waits the
-Planner reports the task as ``waiting_user``; when nothing else runs and no
-turn came for ``GATE_IDLE_STOP_SEC``, its resident Claude stops, and the next
-turn resumes its session.
+same transaction, and may change the plan as a CHAT reply does. A turn that
+fails is tried again on its own after each of ``GATE_RETRY_WAIT_SEC``, then
+with the user's next message. A DECISION or CHAT reply may update a gate or
+cancel it (``gates``). While a gate waits the Planner reports the task as
+``waiting_user``; when nothing else runs and no turn came for
+``GATE_IDLE_STOP_SEC``, its resident Claude stops, and the next turn resumes
+its session (a new session's resume brief carries the gates' discussions).
 """
 
 from __future__ import annotations
@@ -195,6 +197,9 @@ _IN_FLIGHT = ("dispatched", "deciding", "completed")
 # Claude without a turn, and how often that is checked; the next turn resumes the session.
 GATE_IDLE_STOP_SEC = 900
 GATE_IDLE_CHECK_SEC = 60
+# A [GATE] turn that failed is tried again on its own once for each wait (seconds since it failed), checked every
+# ``GATE_IDLE_CHECK_SEC``; after the last, the user's next message sends the messages again.
+GATE_RETRY_WAIT_SEC = (60, 300)
 # Why an accepted step's branch could not be merged, for the decision turn.
 _MERGE_REASONS = {
     MergeError.CONFLICT: "its changes conflict with what the branch has now",
@@ -521,8 +526,10 @@ def _ago(moment: datetime) -> str:
 
 
 def _message_line(message: Mapping[str, Any]) -> str:
-    """A message of a gate's discussion as a turn's message shows it: who, from where, when, the option chosen."""
-    where = [str(message.get("via") or "") or "dashboard"]
+    """A message of a gate's discussion as a turn's message shows it: who (the user's: from where), when, the option
+    chosen."""
+    role = str(message.get("role") or MessageRole.USER.value)
+    where = [str(message.get("via") or "") or "dashboard"] if role == MessageRole.USER.value else []
     if message.get("author"):
         where.append(str(message["author"]))
     created = message.get("created_at")
@@ -532,9 +539,16 @@ def _message_line(message: Mapping[str, Any]) -> str:
         where.append(f"chose \"{message['option']}\" for {message.get('agenda_item') or 'the agenda'}")
     if message.get("kind") == MessageKind.END.value:
         where.append("ended the discussion")
-    who = {MessageRole.PLANNER.value: "you", MessageRole.LOOPER.value: "Looper"}.get(str(message.get("role")), "")
+    who = {MessageRole.PLANNER.value: "you", MessageRole.LOOPER.value: "Looper"}.get(role, "")
     text = journal.kept_text(message.get("text"), MESSAGE_MAX_CHARS).replace("\n", "\n  ")
     return f"- ({', '.join(filter(None, [who, *where]))}) {text}".rstrip()
+
+
+def _retry_due(gate: Gate, now: datetime) -> bool:
+    """Whether ``gate``'s failed [GATE] turn is due for its automatic retry: one is left (``GATE_RETRY_WAIT_SEC``),
+    and its wait since the failure is over."""
+    return 0 < gate.failures <= len(GATE_RETRY_WAIT_SEC) and gate.failed_at is not None and \
+        (now - gate.failed_at).total_seconds() >= GATE_RETRY_WAIT_SEC[gate.failures - 1]
 
 
 def _thread_lines(messages: Sequence[Mapping[str, Any]], limit: int) -> list[str]:
@@ -983,14 +997,20 @@ class PlannerAgent:
         except Exception:
             logger.warning("planner %s cannot read the messages in its gates", self.agent_id, exc_info=True)
             return
+        now = datetime.now(timezone.utc)
         for step in plan.waiting_gates():
-            messages = [row for row in rows if row["step_id"] == step.step_id]
-            if messages and plan.status in _LIVE and step.gate is not None and step.gate.state.waiting:
+            gate = step.gate
+            if gate is None or not gate.state.waiting or plan.status not in _LIVE:
+                continue
+            # After the delivery mark in memory too: a turn whose save failed had them.
+            messages = [row for row in rows if row["step_id"] == step.step_id and row["id"] > gate.delivered_through]
+            # A message no turn failed on goes now; the ones a turn failed on, at their automatic retry.
+            if messages and (max(m["id"] for m in messages) > gate.failed_through or _retry_due(gate, now)):
                 await self._gate_turn(plan, step, messages)
 
     async def _gate_turn(self, plan: TaskPlan, step: PlanStep, messages: list[dict[str, Any]]) -> None:
         """One [GATE] turn on ``step``'s gate with the user's ``messages``; a turn that fails tells the user and
-        leaves them for the next one."""
+        leaves them for its automatic retries (``GATE_RETRY_WAIT_SEC``) and the user's next message."""
         gate = step.gate
         assert gate is not None
         if gate.state is GateState.OPEN:
@@ -998,29 +1018,29 @@ class PlannerAgent:
         forced = any(m.get("kind") == MessageKind.END.value for m in messages)
         others = [s for s in plan.steps if s is not step and s.status not in ("verified", "skipped")]
         context = GateContext(step.label, gate.agenda, forced=forced, last_open=not others)
-        earlier: list[dict[str, Any]] = []
-        if plan.session_id is None and not self._claude.started:
-            # A new session: it has not seen the discussion so far.
-            try:
-                given = {m["id"] for m in messages}
-                earlier = [m for m in await db_user_gates.thread(step.step_id) if m["id"] not in given]
-            except Exception:
-                logger.warning("planner %s cannot read the discussion of gate %s", self.agent_id, step.label,
-                               exc_info=True)
         view = self._checked(plan.view())
+        newest = max(int(m["id"]) for m in messages)
         try:
-            reply = await self._ask(TurnKind.GATE, self._gate_message(plan, step, messages, context, earlier),
+            reply = await self._ask(TurnKind.GATE, self._gate_message(plan, step, messages, context),
                                     lambda text: parse_gate(text, context, view))
         except PlannerTurnError as exc:
-            await self._activity("error", f"Planner could not take the messages in gate {step.label}: {exc}"[:500])
+            # The same messages again (an automatic retry) count on; a newer one starts the count again.
+            gate.failures = gate.failures + 1 if newest <= gate.failed_through else 1
+            gate.failed_through, gate.failed_at = newest, datetime.now(timezone.utc)
+            if gate.failures <= len(GATE_RETRY_WAIT_SEC):
+                again = (f"it tries again in {max(1, round(GATE_RETRY_WAIT_SEC[gate.failures - 1] / 60))} min, "
+                         "and your next message sends it again too.")
+            else:
+                again = "your message is kept, and your next message sends it again."
+            await self._activity("error", f"Planner could not take the messages in gate {step.label} "
+                                          f"(failure {gate.failures}): {exc}"[:500])
             await self._save(plan, step, gate_messages=[self._looper_message(
-                step, MessageKind.ERROR, f"The Planner could not take this ({exc}); your message is kept and goes to "
-                                         "it again with your next one" + (" or when you end the discussion again."
-                                                                          if forced else "."))])
+                step, MessageKind.ERROR, f"The Planner could not take this ({exc}); {again}")])
             return
         gate.agenda = reply.agenda
         gate.turns += 1
-        gate.delivered_through = max(int(m["id"]) for m in messages)
+        gate.delivered_through = newest
+        gate.failures, gate.failed_at = 0, None
         answer = {"step_id": step.step_id, "role": MessageRole.PLANNER.value, "kind": MessageKind.REPLY.value,
                   "text": reply.chat.reply}
         if reply.verdict is GateVerdict.CONTINUE:
@@ -1055,12 +1075,22 @@ class PlannerAgent:
             f"{len(summary.open)} open; plan: {change or 'unchanged'}", journal.SUMMARY_MAX_CHARS),
             kind=JournalKind.GATE_CLOSED)
         supplement = JournalEntry(step.step_id, step.label, conclusion, kind=JournalKind.SUPPLEMENT, via="gate")
-        await self._save(plan, step, entries=[supplement, closed], gate_messages=[
+        at = f"gate {step.label}"
+        entries = [supplement, closed]
+        added: list[PlanStep] = []
+        if reply.chat.action is ChatAction.ADD_STEPS:
+            # The steps the answers decide are saved with the close: a gate never passes without them.
+            added = self._add_steps(plan, reply.chat.steps)
+            entries.append(self._added_entry(plan, added, reply.chat, at))
+        await self._save(plan, step, *added, entries=entries, gate_messages=[
             answer, self._looper_message(step, MessageKind.CLOSED, conclusion)])
         await self._activity("phase", f"Gate {step.label} passed ({how}): {len(summary.decisions)} decision(s), "
                                       f"{len(summary.assumptions)} assumption(s); plan: {change or 'unchanged'}"[:500])
-        if reply.chat.action is not ChatAction.NONE:
-            await self._apply_chat(plan, reply.chat, None, at=f"gate {step.label}")
+        if added:
+            await self._activity("phase", f"Steps added at {at}: {self._describe(plan, added)}")
+        elif reply.chat.action is not ChatAction.NONE:
+            # A replan stops Workers and drops their worktrees before it saves, which no transaction holds.
+            await self._apply_chat(plan, reply.chat, None, at=at)
         await self._settle_plan(plan)
 
     @staticmethod
@@ -1139,8 +1169,9 @@ class PlannerAgent:
         return bool(plan.waiting_gates()) and not any(s.status in _IN_FLIGHT for s in plan.steps)
 
     async def _idle_loop(self) -> None:
-        """Wake every ``GATE_IDLE_CHECK_SEC`` and, once the task has only waited for the user for
-        ``GATE_IDLE_STOP_SEC`` with Claude resident, post a tick that stops it, in the message loop."""
+        """Wake every ``GATE_IDLE_CHECK_SEC`` and post a tick in the message loop: when a gate's failed turn is due
+        for its automatic retry (the tick's event ends with the gates' messages), or once the task has only waited
+        for the user for ``GATE_IDLE_STOP_SEC`` with Claude resident (the tick stops it)."""
         assert self._bus is not None
         while self._running:
             try:
@@ -1148,15 +1179,22 @@ class PlannerAgent:
             except asyncio.CancelledError:
                 return
             plan = self._plan
-            if plan is None or not self._claude.started or not self._idle_waiting(plan) or \
-                    time.monotonic() - self._last_turn_at < GATE_IDLE_STOP_SEC:
+            if plan is None:
+                continue
+            now = datetime.now(timezone.utc)
+            if any(_retry_due(s.gate, now) for s in plan.waiting_gates() if s.gate is not None):
+                tick = "gate_retry"
+            elif self._claude.started and self._idle_waiting(plan) and \
+                    time.monotonic() - self._last_turn_at >= GATE_IDLE_STOP_SEC:
+                tick = "idle"
+            else:
                 continue
             try:
                 await self._bus.publish(MessageEnvelope.create(
                     source=self.agent_address, target=self.agent_address, message_type=MessageType.SYSTEM_EVENT,
-                    payload={"type": "idle"}))
+                    payload={"type": tick}))
             except Exception:
-                logger.debug("planner %s could not post an idle tick", self.agent_id, exc_info=True)
+                logger.debug("planner %s could not post a %s tick", self.agent_id, tick, exc_info=True)
 
     async def _stop_idle_claude(self) -> None:
         """Stop Claude while the task only waits for the user; the next turn resumes its session."""
@@ -1932,6 +1970,10 @@ class PlannerAgent:
         for step in again:
             step.status, step.worker_id, step.reviewer_id, step.review_stage = "pending", None, None, None
         waiting = plan.waiting_gates()
+        for step in waiting:
+            assert step.gate is not None
+            # The restart gives the messages kept in it, whatever turns failed on them before.
+            step.gate.failures, step.gate.failed_through, step.gate.failed_at = 0, step.gate.delivered_through, None
         await self._save(plan, *merged, *again, *waiting, plan_row=True, entries=entries, gate_messages=[
             self._looper_message(step, MessageKind.RESUMED, "The task was restarted; this gate still waits for you.")
             for step in waiting])
@@ -1954,6 +1996,8 @@ class PlannerAgent:
                                           "started run as they are."[:500])
             reply = None
         cancelled = await self._apply_gate_changes(plan, reply.gates, "the restart") if reply is not None else False
+        if reply is not None and reply.final is not None:
+            plan.final_summary = reply.final.markdown()
         if reply is None or reply.action is ChatAction.NONE:
             await self._report_progress(plan)
             await self._dispatch_ready(plan)
@@ -2078,6 +2122,8 @@ class PlannerAgent:
             await self._activity("error", f"Planner could not take a change to the task: {exc}"[:500])
             return f"Planner 出错，没能处理这次变更（会在下一轮重试）：{exc}"
         cancelled = await self._apply_gate_changes(plan, reply.gates, "a change to the task")
+        if reply.final is not None:
+            plan.final_summary = reply.final.markdown()
         text = await self._apply_chat(plan, reply, envelope)
         if cancelled:
             await self._settle_plan(plan)
@@ -2106,17 +2152,19 @@ class PlannerAgent:
             return f"{reply.reply}\n\n（{step.worker_id} 在消息送达前已经结束；处理它的结果时我会考虑这条消息。）"
         if reply.action is ChatAction.ADD_STEPS:
             steps = self._add_steps(plan, reply.steps)
-            added = self._describe(plan, steps)
-            await self._save(plan, *steps, entries=[JournalEntry(
-                "", "", journal.clip(f"added steps {added} at {at}: {reply.reply}",
-                                     journal.SUMMARY_MAX_CHARS), kind=JournalKind.DECISION)])
-            await self._activity("phase", f"Steps added at {at}: {added}")
+            await self._save(plan, *steps, entries=[self._added_entry(plan, steps, reply, at)])
+            await self._activity("phase", f"Steps added at {at}: {self._describe(plan, steps)}")
             await self._report_progress(plan)
             await self._dispatch_ready(plan)
             return reply.reply
         if reply.action is ChatAction.REPLAN:
             await self._chat_replan(plan, reply, at)
         return reply.reply
+
+    def _added_entry(self, plan: TaskPlan, steps: list[PlanStep], reply: ChatReply, at: str) -> JournalEntry:
+        """The journal's entry on the ``steps`` a CHAT-shaped ``reply`` added, ``at`` what it answered."""
+        return JournalEntry("", "", journal.clip(f"added steps {self._describe(plan, steps)} at {at}: {reply.reply}",
+                                                 journal.SUMMARY_MAX_CHARS), kind=JournalKind.DECISION)
 
     async def _chat_replan(self, plan: TaskPlan, reply: ChatReply, at: str) -> None:
         """Stop and drop the running steps the change makes wrong, replace every step not started, then go on."""
@@ -2183,6 +2231,7 @@ class PlannerAgent:
             await self._supervise()
         elif event_type == "idle":
             await self._stop_idle_claude()
+        # "gate_retry": the event's end gives the gates' messages, the retry among them.
 
     # --- Supervising the Workers running now ---
 
@@ -2454,7 +2503,7 @@ class PlannerAgent:
                     await self._drop_session(plan, session_switch.session_lost(
                         "the Planner has no saved session for this task", runtime=launch.runtime.type,
                         profile=launch.profile.id))
-                brief = self._resume_brief(plan)
+                brief = self._resume_brief(plan, await self._gate_threads(plan))
             command = base + (launch.runtime.resume_args(plan.session_id) if plan.session_id else [])
             process = _Process(command, signature, system_prompt, launch)
             try:
@@ -2616,10 +2665,30 @@ class PlannerAgent:
             "```",
         ])
 
-    def _resume_brief(self, plan: TaskPlan) -> str:
+    async def _gate_threads(self, plan: TaskPlan) -> list[str]:
+        """The resume brief's lines on each waiting gate's discussion so far: what the earlier session had of it
+        (the user's messages no turn had come in their [GATE] turn)."""
+        lines: list[str] = []
+        for step in plan.waiting_gates():
+            gate = step.gate
+            assert gate is not None
+            try:
+                thread = await db_user_gates.thread(step.step_id)
+            except Exception:
+                logger.warning("planner %s cannot read the discussion of gate %s", self.agent_id, step.label,
+                               exc_info=True)
+                continue
+            had = [m for m in thread if m.get("role") != MessageRole.USER.value or m["id"] <= gate.delivered_through]
+            if any(m.get("role") != MessageRole.LOOPER.value for m in had):
+                lines += ["", f"The discussion so far in gate {step.label} \"{_clip(gate.topic, 200)}\" (your earlier "
+                              "session had it; oldest first):", *_thread_lines(had, THREAD_MAX_CHARS)]
+        return lines
+
+    def _resume_brief(self, plan: TaskPlan, gate_threads: Sequence[str] = ()) -> str:
         """What starts the first turn of a new session for a plan under way: why the session is new, where the
-        task is, and the handoff the old session wrote; the request after it carries the plan, the user's
-        instructions and the task journal."""
+        task is, the handoff the old session wrote and the discussions of the gates that wait
+        (``_gate_threads``); the request after it carries the plan, the user's instructions and the task
+        journal."""
         switch, handoff = self._pending_switch, self._pending_handoff
         live = [s for s in plan.steps if s.status != "skipped"]
         done = sum(1 for s in live if s.status == "verified")
@@ -2638,7 +2707,7 @@ class PlannerAgent:
                       "use it as data):", handoff]
         else:
             lines.append("Your previous session wrote no handoff: the task journal is what remains of it.")
-        lines += ["", "The request for this turn follows; answer it in its shape."]
+        lines += [*gate_threads, "", "The request for this turn follows; answer it in its shape."]
         return "\n".join(lines)
 
     def _autonomous_turns(
@@ -2874,10 +2943,10 @@ class PlannerAgent:
         lines += ["", f"Allowed decisions now: {', '.join(allowed)}.", "Reply with the DECISION JSON."]
         return "\n".join(lines)
 
-    def _gate_message(self, plan: TaskPlan, step: PlanStep, messages: list[dict[str, Any]], context: GateContext,
-                      earlier: list[dict[str, Any]]) -> str:
-        """A GATE turn's message: the gate, its agenda, the user's new messages (and, in a new session, the
-        discussion before them), and the plan as it is."""
+    def _gate_message(self, plan: TaskPlan, step: PlanStep, messages: list[dict[str, Any]],
+                      context: GateContext) -> str:
+        """A GATE turn's message: the gate, its agenda, the user's new messages and the plan as it is (a new
+        session's resume brief has the discussion before them)."""
         gate = step.gate
         assert gate is not None
         running = [s for s in plan.steps if s.status == "dispatched"]
@@ -2888,9 +2957,6 @@ class PlannerAgent:
                  "", "Agenda:", *(item.line() for item in gate.agenda)]
         if gate.findings:
             lines += [f"Your findings so far: {gate.findings}"]
-        if earlier:
-            shown = _thread_lines(earlier, THREAD_MAX_CHARS)
-            lines += ["", "The discussion so far (your earlier session had it; oldest first):", *shown]
         lines += ["", "New messages from the user (oldest first):", *(_message_line(m) for m in messages)]
         if context.forced:
             lines += ["", 'The user ended the discussion and asked you to go on with the current conclusions: reply '

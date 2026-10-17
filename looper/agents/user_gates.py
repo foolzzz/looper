@@ -43,7 +43,7 @@ SUMMARY_ITEM_MAX_CHARS = 500
 MESSAGE_MAX_CHARS = 8_000
 # The conclusion a gate that passed leaves as a supplement.
 CONCLUSION_MAX_CHARS = 3_000
-# What a new session's first [GATE] turn and its resume brief get of a gate's discussion so far.
+# What a new session's resume brief gets of each waiting gate's discussion so far.
 THREAD_MAX_CHARS = 8_000
 
 
@@ -219,7 +219,7 @@ def conclusion_text(label: str, topic: str, summary: GateSummary) -> str:
 class MessageRole(str, Enum):
     USER = "user"
     PLANNER = "planner"
-    LOOPER = "looper"  # code's own: the gate opened, changed, was cancelled, closed, a reminder, an error
+    LOOPER = "looper"  # code's own: the gate opened, changed, was cancelled, closed, a reminder, an error, a late message
 
 
 class MessageKind(str, Enum):
@@ -233,6 +233,7 @@ class MessageKind(str, Enum):
     CLOSED = "closed"
     RESUMED = "resumed"  # the task was restarted while the gate waits
     ERROR = "error"  # the Planner could not take the user's messages
+    LATE = "late"  # the user's message reached the gate as it closed: it became a supplement of the task
 
 
 @dataclass
@@ -248,6 +249,10 @@ class Gate:
     ended_by_user: bool = False  # it passed because the user ended the discussion
     delivered_through: int = 0  # the last user message (task_user_gate_messages.id) a turn of the Planner had
     turns: int = 0  # [GATE] turns whose reply was taken
+    # The [GATE] turns in a row that failed, the last user message the latest of them had, and when it failed.
+    failures: int = 0
+    failed_through: int = 0
+    failed_at: datetime | None = None
     plan_change: dict[str, list[str]] | None = None  # the steps the turn that closed it added, dropped and stopped
     opened_at: datetime | None = None
     closed_at: datetime | None = None
@@ -260,7 +265,8 @@ class Gate:
                 "findings": self.findings, "state": self.state.value,
                 "summary": self.summary.view() if self.summary else None, "resolution": self.resolution,
                 "ended_by_user": self.ended_by_user, "delivered_through": self.delivered_through,
-                "turns": self.turns, "plan_change": self.plan_change, "opened_at": self.opened_at,
+                "turns": self.turns, "failures": self.failures, "failed_through": self.failed_through,
+                "failed_at": self.failed_at, "plan_change": self.plan_change, "opened_at": self.opened_at,
                 "closed_at": self.closed_at}
 
     @classmethod
@@ -275,6 +281,9 @@ class Gate:
             ended_by_user=bool(row.get("ended_by_user")),
             delivered_through=int(row.get("delivered_through") or 0),
             turns=int(row.get("turns") or 0),
+            failures=int(row.get("failures") or 0),
+            failed_through=int(row.get("failed_through") or 0),
+            failed_at=row.get("failed_at"),
             plan_change=row.get("plan_change"),
             opened_at=row.get("opened_at"),
             closed_at=row.get("closed_at"),
