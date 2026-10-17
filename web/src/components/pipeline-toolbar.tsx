@@ -35,12 +35,13 @@ export function PipelineToolbar({
 
   const button =
     "flex h-9 items-center gap-1.5 rounded-md px-2 text-muted-foreground pointer-coarse:h-11 pointer-coarse:min-w-11 hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring";
-  // Over a node's card (z-10), so the controls and the way out of full screen are never covered.
+  // Cards keep clear of these (data-card-avoid), and they sit over a card (z-10) all the same, so the controls and
+  // the way out of full screen are never covered.
   const panel = "flex items-center rounded-md border border-border bg-card text-xs";
   return (
     <>
       {(skipped > 0 || !full) && (
-        <Panel position="bottom-right" style={{ zIndex: 20 }}
+        <Panel position="bottom-right" style={{ zIndex: 20 }} data-card-avoid=""
                className={`${panel} max-w-[calc(100%-5rem)] flex-wrap justify-end gap-x-3 px-2 py-1`}>
           {skipped > 0 && (
             <span className="flex flex-wrap items-center gap-x-2">
@@ -68,7 +69,7 @@ export function PipelineToolbar({
         </Panel>
       )}
       {full && (
-        <Panel position="top-right" style={{ zIndex: 20 }} className={`${panel} p-1`}>
+        <Panel position="top-right" style={{ zIndex: 20 }} data-card-avoid="" className={`${panel} p-1`}>
           <button type="button" onClick={onToggleFull} className={button}>
             <Minimize2 className="h-4 w-4" aria-hidden="true" />
             Exit full screen

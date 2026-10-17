@@ -79,7 +79,7 @@ function CardBody({ section }: { section: CardSection }) {
       );
     case "facts":
       return (
-        <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-0.5 text-xs">
+        <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-0.5 text-xs pointer-coarse:items-center">
           {section.facts.map((fact) => (
             <div key={fact.label} className="contents">
               <dt className="text-muted-foreground">{fact.label}</dt>
@@ -240,7 +240,15 @@ export function NodeCards({ cards }: { cards: Record<string, NodeCard> }) {
     }
     const frame = root.getBoundingClientRect();
     const local = (r: Box): Box => ({ left: r.left - frame.left, top: r.top - frame.top, width: r.width, height: r.height });
-    const area = local(intersect(frame, sight));
+    let area = local(intersect(frame, sight));
+    // Clear of the graph's own controls that ask for it (data-card-avoid): above one in its lower half, under one
+    // in its upper half.
+    for (const control of root.querySelectorAll("[data-card-avoid]")) {
+      const r = local(control.getBoundingClientRect());
+      const bottom = area.top + area.height;
+      if (r.top > area.top + area.height / 2) area = { ...area, height: Math.max(0, Math.min(bottom, r.top) - area.top) };
+      else area = { ...area, top: Math.max(area.top, r.top + r.height), height: Math.max(0, bottom - Math.max(area.top, r.top + r.height)) };
+    }
     const at = local(node.getBoundingClientRect());
     const seen = intersect(at, area);
     if (!seen.width || !seen.height) {
