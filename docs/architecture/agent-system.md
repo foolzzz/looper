@@ -23,15 +23,17 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
   characters), and an `Open gates` section: the 10 user gates opened last
   that wait for the user in a running task (task, project, gate and topic, how
   long it is open, whom it waits for, its open questions cut to 80
-  characters; [User gates](#user-gates)). The code-owned `TOOLS_CONTRACT`, appended to the editable
+  characters; [User gates](#user-gates)); in a Lark or Telegram chat only the
+  gates whose messages go to that chat ("Open gates of this chat"), in the
+  dashboard chat all, each with its chat. The code-owned `TOOLS_CONTRACT`, appended to the editable
   system prompt, says how to use the tools: read freely; change things only
   when the user's message asks, in the turn answering it; never ask for, take
   or repeat a key, token or password; before creating a
   task, know its project (never presented as decided before the user chose
   it) and its directory (never picked by Claude); a task under way gets what
-  the user adds as a supplement; the user's answer to an open gate goes to it,
-  as they said it, with `looper_task_gate_reply` (asking first which gate
-  when it could be more than one), and nothing else does; refer to what Looper writes itself instead
+  the user adds as a supplement; the user's answer to an open gate goes to it
+  with `looper_task_gate_reply`, which sends the user's own message (asking
+  first which gate when it could be more than one), and nothing else does; refer to what Looper writes itself instead
   of repeating it; and never say an operation ran unless its answer was `ok`
 - The reply is Claude's words, then what Looper itself writes to the user in
   that turn (`Turn.blocks`): a new task's configuration with the question
@@ -2133,7 +2135,7 @@ dashboard's own message (`ops.config.answered`: its 404 is `not_found`, its
 | `looper_task_create` | Create a ready task: `requirement`, `title`, `project` (matched by name ignoring case), `work_dir` (else the project's default; a new project, or one without a default, needs one), `goal_id`, `profiles` (an Agent Profile by id or name for some roles). The task records the chat it came from (its progress, and in Telegram or Lark its end notice). Looper adds the configuration block (the settings in effect for the task, with the layer each came from, the project's review policy, spend cap, lessons setting and the task's Worker and Reviewer limits) and the start question | write; a new project is high |
 | `looper_task_control` | `start` a ready task (`TASK_START`); `stop` a running one; `restart` a stopped, failed or cancelled one, going on from its saved plan (`TASK_RESTART` `continue`); `start_over` one, planned anew with its steps, plan and Planner session deleted (`start_over`; the confirmation says how many accepted steps it deletes); `cancel` a running one | write; start_over and cancel are high |
 | `looper_task_instruct` | Add the user's words to a running task as a supplement (`via` `manager:<channel>`), delivered to its Planner like any ([Changes to a task](#changes-to-a-task)) | write |
-| `looper_task_gate_reply` | Add the user's words, as they said them, to a user gate waiting for them (`task_id`, `gate`, `text`, `end` to end the discussion), as the task page does; the channel message they are is kept, so the Planner's reply goes under it ([User gates](#user-gates)) | write |
+| `looper_task_gate_reply` | Add the user's message this turn answers to a user gate waiting for them (`task_id`, `gate`, `end` to end the discussion), as the task page does: Looper sends the message itself, or the `excerpt` of it the model names, which must be in it word for word; a turn that answers no message is refused. The channel message it is is kept, so the Planner's reply goes under it when it came from the gate's chat ([User gates](#user-gates)) | write |
 | `looper_task_update` | Change a task: its `requirement` while it has not ended (a new version, as on the task page), its `work_dir` (a task not started only), its `profiles` in any task but a completed one (a profile per role, `null` to drop the task's choice, checked and written as `PUT /api/tasks/:id/agents` does; a Worker or Reviewer uses it from its next step, the Planner at its next turn after a handoff; a stopped, failed or cancelled task's restart runs with it) | write |
 | `looper_concurrency` | Change one task's (`task_id`) own `worker` and `reviewer` limits, `limits` per role (1–64, `null` clears one to the default), in any task but a completed one; `planner` is refused. There are no project limits: the description tells the Manager to say so, and a call naming `project` is refused (`invalid`, an unknown argument) and changes nothing. Then the WorkerPool checks again. The answer gives each role's limit before and after with its source, the task's own and the default, and says that lowering stops nothing that runs | write |
 | `looper_projects` | `list` (name, default directory, task, active task and schedule counts, background cut to 200 characters), `get` one (as `GET /api/projects` lists it), `create` (`name`, `work_dir`, `background`), `update` its `name`, `work_dir` or `background` (`projects.create_project`, `update_project`), `delete` one without tasks or schedules (`projects.deletable_project` refuses before anything is asked; the confirmation says its settings, allowed list, installs, knowledge and own skills go with it, and its directory's files stay) | list and get read; write; delete is high |
@@ -2405,31 +2407,48 @@ refused with the reason and what to do instead.
   Telegram chat its task came from, else, for a task asked for on the
   dashboard or in the web chat, the chat the system setting
   `user_gates.dashboard_target` names (`GET`/`PUT /api/gate-settings`, Settings
-  → Channels; one a channel's sender allowlist lets in; unset, the task page
-  only). `GateCourier` posts every 2 seconds the Planner's and Looper's
-  messages of a discussion no pass has handled (`post_state`), oldest first,
-  through the channel's `post`, and records the channel messages each became
-  (`task_user_gate_posts`) or why it failed (the gate's `channel_posts`, and
-  an error in the activity): the card is a message of its own, every later
-  message replies under it, a Planner's reply under the user's message it
-  answers when that came from the same chat. The texts are code's, in
-  Chinese; a Planner's reply goes as written; Telegram gets plain text; in a
-  Lark group what waits for an answer says to @-mention the bot. Messages
-  written before this are never posted (the migration marks them `none`).
+  → Channels; one a channel's sender allowlist lets in, on a channel that is
+  on; it counts only while the allowlist still lets it in, and Settings says
+  when it no longer does; unset, the task page only). `GateCourier` posts
+  every 2 seconds the Planner's and Looper's messages of a discussion no pass
+  has handled (`post_state`), oldest first, through the channel's `post`, and
+  records the channel messages each became (`task_user_gate_posts`) or why it
+  failed (the gate's `channel_posts`, and an error in the activity): the card
+  is a message of its own, every later message replies under it, a Planner's
+  reply under the user's message it answers when that came from the gate's
+  chat (a Lark direct message counts as its sender's open_id, the chat Looper
+  posts to). A post that sent nothing is tried again after 2 and 8 minutes
+  (`post_attempts`, `post_retry_at`; three tries in all) before it is
+  `failed`, and the gate's later messages wait behind it. Each post carries
+  the idempotency key `gate-<message id>` (Lark sends one message per key
+  within an hour; Telegram has none, so a post retried after a lost answer may
+  arrive twice); a reply whose message is gone is posted on its own (Lark: the
+  API's codes for a recalled or deleted message; Telegram:
+  `allow_sending_without_reply`). A card, update, reminder or "still waits"
+  message whose gate no longer waits when it is posted (after a backlog) is
+  not posted. The texts are code's, in Chinese; a Planner's reply goes as
+  written; Telegram gets plain text; in a Lark group what waits for an answer
+  says to @-mention the bot. Messages written before this are never posted
+  (the migration marks them `none`).
 - **Replies in a channel.** The Lark adapter puts a message's `reply_to` and
   `root_id` in its `channel_context`, the Telegram one its `message_id` and
-  `reply_to_message_id`. Before the Manager's model, `gate_routing` looks them
-  up among the posted messages and the user's messages of gates (a Lark
-  message id in any chat, a Telegram one within its chat): a reply about a gate
-  that waits goes into its discussion (`via` the channel, the group sender as
-  its author, the channel message kept so the Planner's reply goes under it)
-  and wakes its Planner, the model never sees it and the chat's history keeps
-  nothing; for a task that is not running it is kept, and code tells the user;
-  a reply about a gate that no longer waits reaches the Manager with a note
-  saying so. In a Lark group only a message that @-mentions the bot comes in at
-  all.
-- **The Manager.** Its `Open gates` section lists the waiting gates;
-  `looper_task_gate_reply` adds the user's words to one (`via`
+  `reply_to_message_id`. Before the Manager's model, `gate_routing` looks up
+  the message a reply answers directly (in Lark `root_id` only when it names
+  none, so a reply to the Manager's own answer in a gate's thread stays the
+  Manager's) among the posted messages and the user's messages of gates (a
+  Lark message id in any chat, a Telegram one within its chat): a reply about
+  a gate that waits goes into its discussion (`via` the channel, the group
+  sender as its author, the channel message kept so the Planner's reply goes
+  under it) and wakes its Planner, the model never sees it and the chat's
+  history keeps nothing; for a task that is not running it is kept, and code
+  tells the user; one the gate cannot take (empty, too long) gets code's reason
+  in Chinese; a reply about a gate that no longer waits reaches the Manager
+  with a note saying so. In a Lark group only a message that @-mentions the bot
+  comes in at all. The Manager takes one message at a time, so a reply to a
+  gate waits behind a Manager turn under way before it is routed.
+- **The Manager.** Its `Open gates` section lists the waiting gates of the
+  chat it answers (all of them in the dashboard chat);
+  `looper_task_gate_reply` adds the user's own message to one (`via`
   `manager:<channel>`, the same check as the task page: 409 for a gate that
   does not wait or a completed task, kept for a stopped one); `looper_tasks`
   `get` shows a task's gates and `looper_overview` the number waiting.
@@ -2828,7 +2847,7 @@ dev proxy, which keeps `Host` and `Origin` on its own port.
 | `/api/llm-records/:id` | GET | One run (status, usage, cost, launch command, heartbeat) |
 | `/api/llm-records/:id/events?after=N` | GET | The run's stream-json events after seq N |
 | `/api/agents/:id/usage?turns=N` | GET | One agent's (`manager`, `planner-<task_id>`, ...) spending and context: `total` (`cost_usd`, `runs`, `running`, `unpriced_runs`, `compactions`), `by_session` and `by_day` (UTC; each `cost_usd`, `runs`), its latest N turns (default 100, at most 1000) oldest first with `context_tokens`, `cost_usd` and `compactions`, and `latest_context_tokens`; 400 for a bad `turns` |
-| `/api/gate-settings` | GET/PUT | Where the user gates of a task asked for on the dashboard or in the web chat go besides the task page: `{dashboard_target: {channel, chat} \| null, targets}`, `targets` the chats a channel's sender allowlist lets in (as a schedule's notify target). PUT `{dashboard_target}`; 400 for a chat that is not one of them ([User gates](#user-gates)) |
+| `/api/gate-settings` | GET/PUT | Where the user gates of a task asked for on the dashboard or in the web chat go besides the task page: `{dashboard_target: {channel, chat} \| null, targets}`, `targets` the chats a channel's sender allowlist lets in (as a schedule's notify target), and `dashboard_target_problem` when the saved chat no longer is one (the gates then go to the task page only). PUT `{dashboard_target}`; 400 for a chat that is not one of them, or on a channel that is off ([User gates](#user-gates)) |
 | `/api/channel-configs` | GET | List channels, each with `start_problem`: why it does not start as configured (an empty or invalid sender allowlist), else null |
 | `/api/channels/lark/status` | GET | The Lark (lark-cli) channel as lark-cli sees its saved settings: `bot` (`name`, `app_id`, `open_id`, `profile`; null when lark-cli cannot act as it), `problem` (why it would not start: lark-cli, or the allowlist made for another app), `allowlist_app_id`, `names` (open_id to name, for the allowlist and the refused senders) and `rejected` (`open_id`, `name`, `count`, `last_at`, `chat_id` (the group chat, null for a direct message), newest first, not on the allowlist; never what they wrote) |
 | `/api/channels/lark/people` | GET | `?q=` a name or an email (1–50 characters): `people`, each `open_id` (for the channel's app), `name`, `email`, `department`; 400 for a bad query, 502 when lark-cli cannot search |
