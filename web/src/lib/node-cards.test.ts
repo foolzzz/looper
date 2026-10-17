@@ -151,7 +151,8 @@ function gate(extra: Partial<UserGate> = {}): UserGate {
   return {
     step: "g1", step_id: "g1", state: "discussing", topic: "Pick the database", agenda: [], findings: "", summary: null,
     resolution: "", ended_by_user: false, plan_change: null, depends_on: ["s1"], waiting_on: null, not_delivered: 0,
-    retry_at: null, turns: 0, reminders: 0, opened_at: null, first_reply_at: null, closed_at: null, ...extra,
+    retry_at: null, turns: 0, reminders: 0, opened_at: null, first_reply_at: null, closed_at: null,
+    channel_posts: null, ...extra,
   };
 }
 

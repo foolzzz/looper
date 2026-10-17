@@ -1442,6 +1442,23 @@ export interface UserGate {
   opened_at: string | null;
   first_reply_at: string | null;
   closed_at: string | null;
+  /** The chat the gate's messages go to besides its task page; null when they go to no chat (a dashboard task with
+   * no gate target in Settings → Channels). */
+  channel_posts: GateChannelPosts | null;
+}
+
+/** A channel gate messages can go to. */
+export type GateChannel = "lark" | "telegram";
+
+/** How the gate's own messages fared in its chat. */
+export interface GateChannelPosts {
+  channel: GateChannel;
+  /** The chat in words, e.g. "Lark group oc_123". */
+  target: string;
+  sent: number;
+  failed: number;
+  /** Why the latest message that failed could not be sent; null when none failed. */
+  last_error: string | null;
 }
 
 /** One message of a gate's discussion: the user's, the Planner's, or Looper's own note. */
@@ -2884,6 +2901,41 @@ export async function updateChannelConfig(
     body: JSON.stringify(fields),
   });
   if (!res.ok) await failed(res, "update channel-config");
+  return res.json();
+}
+
+/** A chat of a channel: where a dashboard task's gate messages also go. */
+export interface GateTarget {
+  channel: GateChannel;
+  chat: string;
+}
+
+/** A chat a channel's sender allowlist lets in (the same list as a schedule's notify targets). */
+export interface GateTargetOption extends GateTarget {
+  label: string;
+  channel_enabled: boolean;
+}
+
+/** Where the gate messages of tasks started on the dashboard go besides the task page; null: only the task page. */
+export interface GateSettings {
+  dashboard_target: GateTarget | null;
+  targets: GateTargetOption[];
+}
+
+export async function fetchGateSettings(): Promise<GateSettings> {
+  const res = await fetch(`${API_BASE}/gate-settings`);
+  if (!res.ok) await failed(res, "gate settings");
+  return res.json();
+}
+
+/** Store the dashboard tasks' gate target; 400 for a chat that is not one of `targets`. */
+export async function updateGateSettings(dashboardTarget: GateTarget | null): Promise<GateSettings> {
+  const res = await fetch(`${API_BASE}/gate-settings`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ dashboard_target: dashboardTarget }),
+  });
+  if (!res.ok) await failed(res, "save gate settings");
   return res.json();
 }
 

@@ -1,5 +1,16 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { Send, Loader2, Bot, User, Plus, ChevronDown, ChevronRight, RotateCcw, MessagesSquare } from "lucide-react";
+import {
+  Send,
+  Loader2,
+  Bot,
+  User,
+  Plus,
+  ChevronDown,
+  ChevronRight,
+  RotateCcw,
+  MessagesSquare,
+  MessageCircleQuestionMark,
+} from "lucide-react";
 import { Markdown } from "@/components/markdown";
 import { ChannelBadge, ConversationList } from "@/components/chat-conversations";
 import { channelLabel } from "@/lib/chat-channels";
@@ -10,6 +21,7 @@ import {
   fetchChatSessions,
   fetchChatTargets,
   fetchTaskActivity,
+  fetchTaskDetail,
   streamSSE,
   fetchRoleConfigs,
   fetchLlmRecords,
@@ -22,7 +34,9 @@ import {
   type ChatSession,
   type DbChatMessage,
   type LlmRecord,
+  type UserGate,
 } from "@/lib/api";
+import { isGateWaiting } from "@/lib/gates";
 import { RunCard, activityBelongsTo, historyHref, runRoleLabel } from "@/pages/agent-history";
 import { cn } from "@/lib/utils";
 
@@ -303,6 +317,30 @@ export function ChatPage() {
     const timer = setInterval(load, 5000);
     return () => clearInterval(timer);
   }, [target]);
+
+  // The gates of an open Planner's task that wait for the user, re-read on the targets cadence: answers go on the task
+  // page, as what is written in this thread stays a supplement.
+  const [waitingGates, setWaitingGates] = useState<{ taskId: string; gates: UserGate[] } | null>(null);
+  const plannerTaskId = target.kind === "planner" ? target.task_id : undefined;
+  useEffect(() => {
+    if (!plannerTaskId) return;
+    let alive = true;
+    const load = () =>
+      fetchTaskDetail(plannerTaskId)
+        .then((task) => {
+          // A completed task's gates take no more answers (the task page says so).
+          const gates = task.group === "completed" ? [] : (task.gates ?? []).filter(isGateWaiting);
+          if (alive) setWaitingGates({ taskId: plannerTaskId, gates });
+        })
+        .catch(() => {});
+    load();
+    const timer = setInterval(load, TARGETS_POLL_MS);
+    return () => {
+      alive = false;
+      clearInterval(timer);
+    };
+  }, [plannerTaskId]);
+  const gatesWaiting = plannerTaskId && waitingGates?.taskId === plannerTaskId ? waitingGates.gates : [];
 
   // The conversation list, while the Manager is shown: re-read on the targets cadence and after each answer.
   useEffect(() => {
@@ -729,6 +767,35 @@ export function ChatPage() {
           </p>
         )}
       </div>
+
+      {plannerTaskId && gatesWaiting.length > 0 && (
+        <div className="border-b border-border px-5 py-3">
+          <div
+            role="status"
+            className="flex flex-wrap items-center gap-x-3 gap-y-2 rounded-md border border-warning/50 bg-warning/10 px-3 py-2 text-xs text-foreground"
+          >
+            <MessageCircleQuestionMark className="h-4 w-4 shrink-0 text-warning" aria-hidden="true" />
+            <p className="min-w-0 flex-1 basis-60 [overflow-wrap:anywhere]">
+              {gatesWaiting.map((gate) => (
+                <span key={gate.step_id} className="block">
+                  This task waits for your answer at gate <span className="font-mono">{gate.step}</span>: {gate.topic}
+                  {/[.?!。？！]$/.test(gate.topic.trim()) ? "" : "."}
+                </span>
+              ))}
+              <span className="block">
+                Answer {gatesWaiting.length > 1 ? "them" : "it"} on the task page
+                {current.can_send ? "; what you write here goes to the Planner as a supplement." : "."}
+              </span>
+            </p>
+            <a
+              href={`#tasks/${encodeURIComponent(plannerTaskId)}`}
+              className="inline-flex min-h-11 shrink-0 items-center rounded-md border border-border bg-background px-3 text-xs font-medium text-foreground transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            >
+              Open the task page
+            </a>
+          </div>
+        </div>
+      )}
 
       {managerView && listOpen && <div className="min-h-0 flex-1 md:hidden">{conversationList}</div>}
 
