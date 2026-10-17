@@ -97,6 +97,7 @@ from pathlib import Path
 from typing import Any, TypeVar
 
 from ..bus import MessageBus
+from ..supervisor import cancel_and_wait
 from ..agent_settings import AgentSettings, AgentType, Harness, Launch, load_agent_settings
 from ..claude_cli import (
     AUTONOMOUS_INPUT,
@@ -729,8 +730,6 @@ class PlannerAgent:
         # shutdown cuts off would leave them behind.
         self._remove_token_files()
         supervise_task, self._supervise_task = self._supervise_task, None
-        if supervise_task:
-            supervise_task.cancel()
         idle_task, self._idle_task = self._idle_task, None
         if idle_task:
             idle_task.cancel()
@@ -738,15 +737,12 @@ class PlannerAgent:
         cancelled = False
         try:
             if supervise_task:
-                await asyncio.wait([supervise_task])
+                await cancel_and_wait(supervise_task)
             # Stop the Workers this task still runs; otherwise they keep
             # changing files after the task is gone.
             await self._kill_running_workers()
             if loop_task:
-                loop_task.cancel()
-                # Unlike awaiting the task, this does not mistake its
-                # cancellation for ours: a cancelled stop() still propagates.
-                await asyncio.wait([loop_task])
+                await cancel_and_wait(loop_task)
         except asyncio.CancelledError:
             cancelled = True
             raise
