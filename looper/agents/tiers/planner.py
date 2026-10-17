@@ -606,6 +606,9 @@ class PlannerAgent:
         self._running = False
         if self._ops is not None and self._token is not None:
             self._ops.revoke(self._token)
+        # The files that carry the token go with it, before this stop waits for anything: a stop the server's
+        # shutdown cuts off would leave them behind.
+        self._remove_token_files()
         supervise_task, self._supervise_task = self._supervise_task, None
         if supervise_task:
             supervise_task.cancel()
@@ -629,8 +632,13 @@ class PlannerAgent:
             # A turn the loop was in has already killed Claude; an idle one
             # ends when its stdin closes. Never leave it running.
             await self._claude.stop(kill=cancelled)
-            for path in self._token_files:  # the token in them no longer works
-                Path(path).unlink(missing_ok=True)
+            self._remove_token_files()  # and one a turn wrote meanwhile
+
+    def _remove_token_files(self) -> None:
+        """Delete the MCP configuration files that carry this Planner's token, which no longer works."""
+        for path in list(self._token_files):
+            Path(path).unlink(missing_ok=True)
+        self._token_files.clear()
 
     def is_healthy(self) -> bool:
         return self._running
