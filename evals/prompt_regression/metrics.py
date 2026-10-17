@@ -115,7 +115,8 @@ def role_metrics(detail: Mapping[str, Any], records: Iterable[Mapping[str, Any]]
     (``role_reviews``); role runs whose prompt is not a version the Planner defined (``role_prompt_mismatches``) or
     whose system prompt lacks the boundaries before its contract (``role_boundary_misses``); the accepted steps with a
     review role that lack a passing built-in review, or a passing review by their role where it is required
-    (``gate_breaches``); and the reviews by an advisory review role that did not pass (``advisory_role_fails``)."""
+    (``gate_breaches``); and the reviews by an advisory review role (``advisory_role_reviews``) and those of them that
+    did not pass (``advisory_role_fails``)."""
     defined = {(role_["id"], version["version"]): version["sha256"] for role_ in detail.get("roles") or []
                for version in role_.get("versions") or []}
     step_runs = [r for r in records if role(r) in ("worker", "reviewer")]
@@ -134,6 +135,9 @@ def role_metrics(detail: Mapping[str, Any], records: Iterable[Mapping[str, Any]]
 
     def required(step: Mapping[str, Any]) -> bool:
         return step.get("review_role_required") is not False
+
+    advisory = [r for s in steps if s.get("review_role_key") and not required(s) for r in role_runs
+                if role(r) == "reviewer" and r["metadata"].get("step_id") == s["id"]]
     return {
         "roles_defined": len(detail.get("roles") or []),
         "role_runs": len(role_runs),
@@ -146,10 +150,8 @@ def role_metrics(detail: Mapping[str, Any], records: Iterable[Mapping[str, Any]]
                                     or text.rfind(_BOUNDARIES_LEAD) < text.rfind("## Task")),
         "gate_breaches": sum(1 for s in steps if s.get("review_role_key") and s.get("status") == "verified"
                              and not (passed(s["id"], False) and (passed(s["id"], True) or not required(s)))),
-        "advisory_role_fails": sum(1 for s in steps if s.get("review_role_key") and not required(s)
-                                   for r in role_runs if role(r) == "reviewer"
-                                   and r["metadata"].get("step_id") == s["id"]
-                                   and r["metadata"].get("outcome") == "not_passed"),
+        "advisory_role_reviews": len(advisory),
+        "advisory_role_fails": sum(1 for r in advisory if r["metadata"].get("outcome") == "not_passed"),
     }
 
 

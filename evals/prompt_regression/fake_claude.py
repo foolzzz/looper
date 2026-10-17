@@ -223,8 +223,8 @@ def _worker(script: dict[str, Any], system_prompt: str, stdin: _Stdin) -> None:
 def _reviewer(script: dict[str, Any], system_prompt: str, stdin: _Stdin) -> None:
     stdin.readline()  # the Worker's report
     if any(marker in system_prompt for marker in script.get("failing_reviews") or []):
-        verdict = {"passed": False, "findings": ["the file does not start with the style line"],
-                   "summary": "Not to the style."}
+        verdict = {"passed": False, "findings": ["the greeting is not what this role asks for"],
+                   "summary": "Not to this role's liking."}
     else:
         verdict = {"passed": True, "findings": [], "summary": "Meets the criteria."}
     _answer("fake-reviewer", json.dumps(verdict), REVIEWER_RUN_COST)

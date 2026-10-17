@@ -433,7 +433,7 @@ def _greets(work_dir: Path) -> str | None:
                               timeout=30, check=False)
     except subprocess.TimeoutExpired:
         return "greet.py did not finish in 30 s"
-    return None if done.stdout.strip() == "hello Bob" else f"greet.py printed {done.stdout.strip()[:40]!r}"
+    return None if done.stdout.strip().lower() == "hello bob" else f"greet.py printed {done.stdout.strip()[:40]!r}"
 
 
 _FAKE_MATHX = "def add(a, b):\n    return a + b\n\n\ndef mul(a, b):\n    return a * b\n"
@@ -505,14 +505,16 @@ ROLE_TASKS: tuple[EvalTask, ...] = (
         },
     ),
     EvalTask(
-        # An advisory review role (review_role_required false) that fails the step: the built-in Reviewer still
-        # gates it, and the Planner decides what the role's verdict is worth (accept, retry or replan).
+        # An advisory review role (review_role_required false) that wants a file the task does not, so it fails the
+        # step: the built-in Reviewer still gates it, and the Planner decides what the verdict is worth. (Every
+        # Worker reads the requirement, so the role's rule is one the requirement turns down, not a secret.)
         id="roles_advisory_review",
-        requirement=("Create greet.py in the working directory: `python greet.py <name>` prints `hello <name>`. An "
-                     "independent Reviewer must check the step. This project lets you define roles: have the step "
-                     "also reviewed by an advisory style review role (its review_role_required false), whose role "
-                     "prompt makes it fail any greet.py whose first line is not the comment `# style: checked`. Do not "
-                     "mention that comment in the step's instruction; the style review only advises you."),
+        requirement=("Create greet.py in the working directory: `python greet.py <name>` prints `hello <name>`. Do "
+                     "not create any other file. An independent Reviewer must check the step. This project lets you "
+                     "define roles: have the step also reviewed by an advisory review role named docs (its "
+                     "review_role_required false), whose role prompt tells it to fail the step whenever the working "
+                     "directory has no CHANGELOG.md, whatever the step asks. Its verdict is advice only: this task "
+                     "wants no CHANGELOG.md."),
         roles_on=True,
         check=_greets,
         expect={"min_steps": 1, "min_reviews": 2, "min_roles_defined": 1, "min_role_reviews": 1,
@@ -521,14 +523,14 @@ ROLE_TASKS: tuple[EvalTask, ...] = (
         fake={
             "plan": [{**_step("s1", "Write greet.py, which prints hello and the name.",
                               ["python greet.py Bob prints hello Bob"], review=True),
-                      "review_role": "style", "review_role_required": False}],
+                      "review_role": "docs", "review_role_required": False}],
             "attempts": {"s1": [{"status": "completed", "files": {"greet.py": _FAKE_GREET}}]},
-            "failing_reviews": ["STYLE-REVIEW"],
+            "failing_reviews": ["DOCS-REVIEW"],
             "planner_calls": {"PLAN": [
-                ["looper_task_role_set", {"id": "style", "kind": "review",
-                                          "role_prompt": "STYLE-REVIEW: you fail a greet.py whose first line is not "
-                                                         "`# style: checked`.",
-                                          "reason": "the requirement asks for an advisory style review"}]]},
+                ["looper_task_role_set", {"id": "docs", "kind": "review",
+                                          "role_prompt": "DOCS-REVIEW: you fail the step whenever the working "
+                                                         "directory has no CHANGELOG.md.",
+                                          "reason": "the requirement asks for an advisory docs review"}]]},
         },
     ),
     EvalTask(
