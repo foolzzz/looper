@@ -1559,6 +1559,8 @@ class PlannerAgent:
                 "instruction": step.instruction,
                 "work_result": step.result or {},
                 "acceptance_criteria": step.acceptance_criteria,
+                # The notes the step was retried with: the Planner's changes to it, which its Worker had too.
+                **({"feedback": list(step.feedback)} if step.feedback else {}),
                 "context": context,
                 # The version of the review role that reviews the step now, when that is the review it waits for.
                 **({"task_role": task_role.payload()} if task_role is not None else {}),

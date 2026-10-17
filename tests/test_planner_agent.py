@@ -411,6 +411,7 @@ class TestDecisions:
         assert review.payload["parent_task_id"] == "t1"
         assert review.payload["context"] == {"work_dir": str(h.work_dir)}
         assert review.payload["acceptance_criteria"] == ["s1 works"]
+        assert "feedback" not in review.payload  # a first attempt: no retry notes
         assert review.payload["work_result"]["changed_files"] == {"calc.py": "added"}
         assert (review.payload["requirement"], review.payload["step_key"]) == ("build the calc package", "s1")
         texts = [turn["text"] for turn in claude.turns()]
@@ -420,6 +421,26 @@ class TestDecisions:
         final = h.final()
         assert final is not None and final.payload["status"] == "completed"
         assert final.payload["summary"] == FINAL_RESULT
+
+    def test_a_retried_steps_reviewer_gets_the_notes_it_was_retried_with(self, planner_claude: Any) -> None:
+        claude = planner_claude(
+            plan(step("s1", review=True)),
+            decide("retry", feedback="sales.csv has five regions: write all five"),
+            decide("review"),
+            decide("retry", feedback="keep the order of first appearance"),
+            decide("review"),
+            decide("accept", summary="done"),
+        )
+        reviews = iter([REVIEW_FAIL, REVIEW_PASS])
+        works = iter([WORK_FAILED, WORK_OK, WORK_OK])
+        h = drive(claude, lambda e: next(reviews) if e.message_type == MessageType.VERIFY_REQUEST else next(works))
+
+        # Each review has every note its attempt's Worker had, oldest first.
+        assert [r.payload["feedback"] for r in h.reviews] == [
+            ["sales.csv has five regions: write all five"],
+            ["sales.csv has five regions: write all five", "keep the order of first appearance"]]
+        final = h.final()
+        assert final is not None and final.payload["status"] == "completed"
 
     def test_failed_review_cannot_be_accepted(self, planner_claude: Any, agent_db: Any) -> None:
         claude = planner_claude(plan(step("s1", review=True)), decide("review"), decide("accept"))
