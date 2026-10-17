@@ -47,7 +47,7 @@ export function RoleChecks({
               onChange={(e) => onChange(roles.filter((r) => (r === role ? e.target.checked : checked.has(r))))}
             />
             {role === TASK_ROLE ? (
-              <span title="Loads only for a run of a Planner-defined role that names this item">
+              <span className="normal-case" title="Loads only for a run of a Planner-defined role that names this item">
                 {installRoleLabel(role)}
               </span>
             ) : (
