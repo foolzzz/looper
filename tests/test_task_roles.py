@@ -258,9 +258,9 @@ def test_a_tasks_runs_are_named_by_their_records_and_an_attempt_not_recorded_yet
         # In its review role's review, after the built-in Reviewer passed it.
         {"worker_id": "worker-3", "role_key": None, "role_version": None, "reviewer_id": "reviewer-4",
          "review_role_key": "security", "review_role_version": 1, "review_stage": "role"},
-        # In the built-in review: its review role has not started.
+        # Retried, and in the built-in review again: its review role (v1 last attempt) has not started.
         {"worker_id": "worker-5", "role_key": None, "role_version": None, "reviewer_id": "reviewer-6",
-         "review_role_key": "security", "review_role_version": None, "review_stage": "builtin"},
+         "review_role_key": "security", "review_role_version": 1, "review_stage": "builtin"},
     ]
     runs = [{"agent_id": "worker-1", "task_role": TESTER.record() | {"version": 1}},
             {"agent_id": "worker-3", "task_role": None}, {"agent_id": "reviewer-6", "task_role": None}]
