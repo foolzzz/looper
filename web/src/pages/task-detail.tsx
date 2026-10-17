@@ -21,6 +21,8 @@ import {
   Folder,
   History,
   RotateCcw,
+  CirclePause,
+  MessageCircleQuestionMark,
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { ClampedText } from "@/components/clamped-text";
@@ -30,14 +32,18 @@ import { historyHref } from "@/pages/agent-history";
 import { TaskCostBreakdown } from "@/components/task-cost";
 import { ContinueAtCap, TaskSpendMeter } from "@/components/task-budget";
 import { TaskAgentsSection } from "@/components/task-agents";
+import { GateBadge, TaskGates } from "@/components/task-gates";
+import { GATE_STATES, gateAnchor, stepAnchor } from "@/lib/gates";
 import { costBasis, costCaveats, formatUsd } from "@/lib/usage";
 import { cn } from "@/lib/utils";
 import {
   ReactFlow,
   Background,
   type Node,
+  type NodeProps,
   type Edge,
   Controls,
+  Handle,
   Position,
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
@@ -68,6 +74,8 @@ import {
   type JournalEntry,
   type ProgressNote,
   type ActivityEvent,
+  type GateState,
+  type UserGate,
 } from "@/lib/api";
 
 type Tab = "overview" | "pipeline" | "sessions" | "conversation";
@@ -83,6 +91,8 @@ function stepStatusIcon(status: string) {
       return <Clock className="h-4 w-4 text-primary" />;
     case "deciding":
       return <Clock className="h-4 w-4 text-warning" />;
+    case "waiting_user":
+      return <MessageCircleQuestionMark className="h-4 w-4 text-warning" />;
     case "failed":
       return <AlertCircle className="h-4 w-4 text-destructive" />;
     default:
@@ -103,6 +113,8 @@ function stepStatusBadge(status: string) {
       return <Badge variant="default">In review</Badge>;
     case "deciding":
       return <Badge variant="warning">Awaiting decision</Badge>;
+    case "waiting_user":
+      return <Badge variant="warning">Waiting for you</Badge>;
     case "failed":
       return <Badge variant="destructive">Failed</Badge>;
     case "skipped":
@@ -124,6 +136,8 @@ function taskStatusBadge(status: string) {
       return <Badge variant="outline" className="text-sm">Cancelled</Badge>;
     case "pending":
       return <Badge variant="warning" className="text-sm">Pending</Badge>;
+    case "waiting_user":
+      return <Badge variant="warning" className="text-sm">Waiting for you</Badge>;
     case READY_STATUS:
       return <Badge variant="outline" className="text-sm">{READY_LABEL}</Badge>;
     default:
@@ -316,6 +330,7 @@ function viaLabel(via: string): string {
   if (via === "chat") return "Chat";
   if (via === "task_page") return "task page";
   if (via === "created") return "created";
+  if (via === "gate") return "gate conclusion";
   if (via.startsWith("manager:")) return `Manager (${via.slice("manager:".length)})`;
   return via || "—";
 }
@@ -582,16 +597,46 @@ function TaskConfigSection({ task }: { task: TaskDetail }) {
   );
 }
 
+/** Take the user to a gate's place on the Overview: its panel or closed line (opened), else its row in Steps. */
+function showGate(step: TaskStep) {
+  const place = document.getElementById(gateAnchor(step.step_key)) ?? document.getElementById(stepAnchor(step.id));
+  if (!place) return;
+  if (place instanceof HTMLDetailsElement) place.open = true;
+  place.scrollIntoView({ block: "start" });
+  const target = place instanceof HTMLDetailsElement ? place.querySelector("summary") : place;
+  target?.focus({ preventScroll: true });
+}
+
 function OverviewTab({
   task,
   onContinued,
   onAgents,
+  onGateChanged,
+  gateFocus,
+  onGateShown,
 }: {
   task: TaskDetail;
   onContinued: () => void;
   onAgents: (agents: TaskAgents) => void;
+  /** After the user wrote in a gate or ended its discussion, with the gate as the server answered. */
+  onGateChanged: (gate: UserGate) => void;
+  /** The gate step the Pipeline asked to show, until it is shown. */
+  gateFocus: TaskStep | null;
+  onGateShown: () => void;
 }) {
+  useEffect(() => {
+    if (!gateFocus) return;
+    showGate(gateFocus);
+    onGateShown();
+  }, [gateFocus, onGateShown]);
   const steps = task.steps || [];
+  // A gate step shows its gate's state.
+  const gates = new Map((task.gates ?? []).map((gate) => [gate.step_id, gate]));
+  const gateOf = (step: TaskStep) => (step.kind === "gate" ? gates.get(step.id) : undefined);
+  const stepIcon = (step: TaskStep, gate = gateOf(step)) =>
+    gate ? <CirclePause className={cn("h-4 w-4", GATE_STATES[gate.state].tone)} aria-hidden="true" /> : stepStatusIcon(step.status);
+  const stepBadge = (step: TaskStep, gate = gateOf(step)) =>
+    gate ? <GateBadge state={gate.state} /> : stepStatusBadge(step.status);
   // Done means accepted (verified); a step in review is not done yet, and a dropped (skipped) one is not counted.
   const planned = steps.filter((s) => s.status !== "skipped");
   const done = planned.filter((s) => s.status === "verified").length;
@@ -601,6 +646,7 @@ function OverviewTab({
 
   return (
     <div className="space-y-6 p-5">
+      <TaskGates task={task} onChanged={onGateChanged} />
       {task.status === "failed" && task.fail_kind === "task_budget" && (
         <ContinueAtCap
           taskId={task.task_id}
@@ -675,13 +721,14 @@ function OverviewTab({
           <h3 className="text-sm font-semibold mb-2">Steps</h3>
           <div className="rounded-lg border border-border bg-card divide-y divide-border">
             {steps.map((step: TaskStep) => (
-              <div key={step.id} className="px-4 py-3">
+              <div key={step.id} id={stepAnchor(step.id)} tabIndex={-1} className="px-4 py-3 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring">
                 <div className="flex items-start gap-3">
-                  {stepStatusIcon(step.status)}
+                  {stepIcon(step)}
                   <div className="min-w-0 flex-1">
                     <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
                       <span className="text-xs text-muted-foreground">#{step.step_index + 1}</span>
-                      {stepStatusBadge(step.status)}
+                      {step.kind === "gate" && <span className="font-mono text-xs text-muted-foreground">gate {step.step_key}</span>}
+                      {stepBadge(step)}
                       {step.worker_id && (
                         <a
                           href={historyHref(step.worker_id, task.task_id)}
@@ -1001,6 +1048,10 @@ const JOURNAL_KINDS: Record<JournalEntry["kind"], { label: string; variant: Badg
   profile_choice: { label: "Profile choice", variant: "outline" },
   concurrency_change: { label: "Concurrency", variant: "outline" },
   role_defined: { label: "Role", variant: "outline" },
+  gate_opened: { label: "Gate opened", variant: "warning" },
+  gate_updated: { label: "Gate updated", variant: "outline" },
+  gate_cancelled: { label: "Gate cancelled", variant: "outline" },
+  gate_closed: { label: "Gate passed", variant: "success" },
 };
 
 /** The task journal, newest first: steps accepted, failed or retried with what their Worker and Reviewer
@@ -1401,6 +1452,26 @@ function stepLook(status: string): NodeLook {
   return STEP_LOOKS[status] ?? { ...STEP_LOOKS.pending, label: status };
 }
 
+/** One look per gate state, in the steps' tokens; the gate's shape (a hexagon with a pause icon) sets it apart. */
+const GATE_LOOKS: Record<GateState, NodeLook> = {
+  pending: { ...STEP_LOOKS.pending, label: GATE_STATES.pending.label },
+  open: { label: GATE_STATES.open.label, border: "var(--color-warning)", borderStyle: "solid",
+          background: tint("--color-warning", 14), color: "var(--color-foreground)" },
+  discussing: { ...STEP_LOOKS.dispatched, label: GATE_STATES.discussing.label },
+  passed: { ...STEP_LOOKS.verified, label: GATE_STATES.passed.label },
+  cancelled: { label: GATE_STATES.cancelled.label, border: "var(--color-muted-foreground)", borderStyle: "dashed",
+               background: "var(--color-background)", color: "var(--color-muted-foreground)" },
+  skipped: { ...STEP_LOOKS.skipped, label: GATE_STATES.skipped.label },
+};
+
+/** A gate step's state: its gate's, else what its step status says. */
+function gateState(step: TaskStep, gate: UserGate | undefined): GateState {
+  if (gate) return gate.state;
+  if (step.status === "waiting_user") return "open";
+  if (step.status === "verified") return "passed";
+  return step.status === "skipped" ? "skipped" : "pending";
+}
+
 /** The Planner's and the result node's look, from the task's status. */
 function taskLook(status: string, live: string): NodeLook {
   if (status === "completed") return { ...STEP_LOOKS.verified, label: "Completed" };
@@ -1494,10 +1565,62 @@ function NodeLabel({
   );
 }
 
+interface GateNodeData extends Record<string, unknown> {
+  name: string;
+  topic: string;
+  look: NodeLook;
+  title: string;
+  onOpen: () => void;
+}
+
+const HEXAGON_INSET = 18;
+const HEXAGON = [
+  [HEXAGON_INSET, 1], [NODE_W - HEXAGON_INSET, 1], [NODE_W - 1, NODE_H / 2],
+  [NODE_W - HEXAGON_INSET, NODE_H - 1], [HEXAGON_INSET, NODE_H - 1], [1, NODE_H / 2],
+].map((point) => point.join(",")).join(" ");
+
+/** A user gate in the pipeline: a hexagon with a pause icon, its label and its state in words; a button that takes
+ * the user to the gate on the Overview tab. */
+function GateNode({ data }: NodeProps<Node<GateNodeData, "gate">>) {
+  const { look } = data;
+  return (
+    <>
+      <Handle type="target" position={Position.Top} />
+      <svg width={NODE_W} height={NODE_H} className="absolute inset-0" aria-hidden="true">
+        <polygon
+          points={HEXAGON}
+          fill={look.background}
+          stroke={look.border}
+          strokeWidth={2}
+          strokeDasharray={look.borderStyle === "dashed" ? "6 4" : undefined}
+        />
+      </svg>
+      <button
+        type="button"
+        onClick={data.onOpen}
+        title={data.title}
+        style={{ color: look.color, opacity: look.muted ? 0.8 : 1 }}
+        className="nodrag nopan pointer-events-auto relative flex h-full w-full cursor-pointer flex-col items-center justify-center rounded-md px-6 leading-tight focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+      >
+        <span className={cn("flex max-w-full items-center gap-1 font-mono text-xs font-semibold", look.muted && "line-through")}>
+          <CirclePause className="h-3 w-3 shrink-0" aria-hidden="true" />
+          <span className="truncate">{data.name}</span>
+        </span>
+        <span className="mt-1 max-w-full truncate text-[10px]">{look.label}</span>
+        <span className="sr-only">: {data.topic}. Show this gate on the Overview tab</span>
+      </button>
+      <Handle type="source" position={Position.Bottom} />
+    </>
+  );
+}
+
+const NODE_TYPES = { gate: GateNode };
+
 /** The plan as its dependency graph: each step a node under the steps it depends on (steps without dependencies
- * under the Planner), the steps nothing live depends on leading to the result. Done steps keep their place and
- * edges when the plan changes; dropped ones stay, dashed and muted, as history. */
-function PipelineTab({ task }: { task: TaskDetail }) {
+ * under the Planner), the steps nothing live depends on leading to the result; a user gate is a hexagon that opens
+ * it on the Overview tab (`onOpenGate`). Done steps keep their place and edges when the plan changes; dropped ones
+ * stay, dashed and muted, as history. */
+function PipelineTab({ task, onOpenGate }: { task: TaskDetail; onOpenGate: (step: TaskStep) => void }) {
   const { nodes, edges, rows } = useMemo(() => {
     const steps = task.steps || [];
     const ns: Node[] = [];
@@ -1525,6 +1648,7 @@ function PipelineTab({ task }: { task: TaskDetail }) {
     }
 
     const byId = new Map(steps.map((s) => [s.id, s]));
+    const gates = new Map((task.gates ?? []).map((gate) => [gate.step_id, gate]));
     const levels = stepLevels(steps);
     const why = droppedBecause(task.journal || [], steps);
     // Rows by depth; within a row, under the mean place of the steps each depends on, then in plan order. The live
@@ -1551,9 +1675,31 @@ function PipelineTab({ task }: { task: TaskDetail }) {
     const dependedOn = new Set(steps.filter((s) => s.status !== "skipped").flatMap((s) => s.depends_on ?? []));
     const ends = steps.filter((s) => s.status !== "skipped" && !dependedOn.has(s.id));
     for (const step of steps) {
-      const look = stepLook(step.status);
       const name = step.step_key || `step ${step.step_index + 1}`;
       const deps = (step.depends_on ?? []).filter((d) => byId.has(d));
+      const position = { x: (x.get(step.id) ?? 0) - NODE_W / 2, y: ROW_H * (1 + (levels.get(step.id) ?? 0)) };
+      const live = step.status !== "skipped";
+      if (step.kind === "gate") {
+        const look = GATE_LOOKS[gateState(step, gates.get(step.id))];
+        const title = [
+          `Gate ${name} — ${look.label}`,
+          step.instruction,
+          `Depends on: ${deps.map((d) => byId.get(d)?.step_key || d).join(", ") || "nothing"}`,
+        ].join("\n");
+        ns.push({
+          id: step.id, type: "gate", position, focusable: false,
+          data: { name, topic: step.instruction, look, title, onOpen: () => onOpenGate(step) },
+          style: { width: NODE_W, height: NODE_H, padding: 0, background: "transparent", border: "none" },
+        });
+      }
+      for (const source of deps.length ? deps : ["planner"]) {
+        const fromLive = source === "planner" || byId.get(source)?.status !== "skipped";
+        const running = step.status === "dispatched";
+        es.push({ id: `dep:${source}->${step.id}`, source, target: step.id, animated: running,
+                  style: edgeStyle(live && fromLive, running) });
+      }
+      if (step.kind === "gate") continue;
+      const look = stepLook(step.status);
       const title = [
         `${name} — ${look.label}`,
         step.instruction,
@@ -1570,18 +1716,11 @@ function PipelineTab({ task }: { task: TaskDetail }) {
       ].filter(Boolean).join("\n");
       ns.push({
         id: step.id,
-        position: { x: (x.get(step.id) ?? 0) - NODE_W / 2, y: ROW_H * (1 + (levels.get(step.id) ?? 0)) },
+        position,
         data: { label: <NodeLabel title={title} name={name} look={look} role={stepRoles(step, false) || undefined}
                                   note={step.retries ? `retry ${step.retries}` : undefined} /> },
         style: nodeStyle(look), sourcePosition: Position.Bottom, targetPosition: Position.Top,
       });
-      const live = step.status !== "skipped";
-      const running = step.status === "dispatched";
-      for (const source of deps.length ? deps : ["planner"]) {
-        const fromLive = source === "planner" || byId.get(source)?.status !== "skipped";
-        es.push({ id: `dep:${source}->${step.id}`, source, target: step.id, animated: running,
-                  style: edgeStyle(live && fromLive, running) });
-      }
     }
 
     // The result sits under the steps that lead to it, so its edges do not cross the dropped steps above it.
@@ -1596,7 +1735,7 @@ function PipelineTab({ task }: { task: TaskDetail }) {
       es.push({ id: `end:${step.id}`, source: step.id, target: "result", style: edgeStyle(true) });
     }
     return { nodes: ns, edges: es, rows: depth + 3 };
-  }, [task]);
+  }, [task, onOpenGate]);
 
   return (
     // Taller for a deeper plan, so its labels stay readable before any zoom.
@@ -1605,6 +1744,7 @@ function PipelineTab({ task }: { task: TaskDetail }) {
         style={PIPELINE_THEME}
         nodes={nodes}
         edges={edges}
+        nodeTypes={NODE_TYPES}
         fitView
         fitViewOptions={{ padding: 0.12 }}
         minZoom={0.15}
@@ -1732,6 +1872,13 @@ export function TaskDetailPage({ taskId, onBack }: TaskDetailPageProps) {
   const [tab, setTab] = useState<Tab>("overview");
   // Bumped when the task runs again, so the page polls it again.
   const [runs, setRuns] = useState(0);
+  // The gate step a Pipeline node asked to show on the Overview tab, until it is shown.
+  const [gateFocus, setGateFocus] = useState<TaskStep | null>(null);
+  const openGate = useCallback((step: TaskStep) => {
+    setGateFocus(step);
+    setTab("overview");
+  }, []);
+  const gateShown = useCallback(() => setGateFocus(null), []);
 
   useEffect(() => {
     let timer: ReturnType<typeof setInterval>;
@@ -1858,7 +2005,7 @@ export function TaskDetailPage({ taskId, onBack }: TaskDetailPageProps) {
         {startError && <p className="mt-1 text-xs text-destructive">{startError}</p>}
 
         {/* Tabs */}
-        <div className="flex gap-1 mt-3">
+        <div className="flex flex-wrap gap-1 mt-3">
           {tabs.map(({ id, label, icon: Icon }) => (
             <button
               key={id}
@@ -1897,9 +2044,16 @@ export function TaskDetailPage({ taskId, onBack }: TaskDetailPageProps) {
             task={task}
             onContinued={() => setRuns((n) => n + 1)}
             onAgents={(agents) => setTask((t) => (t ? { ...t, agents } : t))}
+            onGateChanged={(gate) => {
+              // Show whom the gate waits for now, then read the whole task again.
+              setTask((t) => (t ? { ...t, gates: t.gates.map((g) => (g.step_id === gate.step_id ? gate : g)) } : t));
+              setRuns((n) => n + 1);
+            }}
+            gateFocus={gateFocus}
+            onGateShown={gateShown}
           />
         )}
-        {task && tab === "pipeline" && <PipelineTab task={task} />}
+        {task && tab === "pipeline" && <PipelineTab task={task} onOpenGate={openGate} />}
         {task && tab === "sessions" && <SessionsTab taskId={taskId} />}
         {task && tab === "conversation" && <ConversationTab taskId={taskId} />}
       </div>

@@ -13,6 +13,7 @@ import {
   RotateCcw,
   Settings2,
   Folder,
+  MessageCircleQuestionMark,
   X,
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
@@ -63,6 +64,8 @@ function statusBadge(status: string) {
       return <Badge variant="outline">{READY_LABEL}</Badge>;
     case "executing":
       return <Badge variant="default">Executing</Badge>;
+    case "waiting_user":
+      return <Badge variant="warning">Waiting for you</Badge>;
     default:
       return <Badge variant="outline">{status}</Badge>;
   }
@@ -82,6 +85,8 @@ function statusIcon(status: string) {
       return <AlertCircle className="h-4 w-4 text-destructive" />;
     case "stopped":
       return <Pause className="h-4 w-4 text-warning" />;
+    case "waiting_user":
+      return <MessageCircleQuestionMark className="h-4 w-4 text-warning" />;
     case READY_STATUS:
       return <Settings2 className="h-4 w-4 text-muted-foreground" />;
     default:
