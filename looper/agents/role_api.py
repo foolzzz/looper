@@ -4,6 +4,7 @@
 - **Templates** (``project_role_templates``): checked as a task role is (``task_roles.check_definition``,
   ``allowed_profile``), whatever the project's ``planner_roles``; its tasks' Planners copy one as a task role
   (``ops.planner``, ``looper_task_role_set``'s ``template``).
+- **The summary**: the roles' numbers summed by id across the project's tasks (``role_stats``).
 - **Editing a task's role**: a new version written by the user (``Via.USER``), with its ``role_defined`` entry and a
   supplement that tells the task's Planner, in one transaction; a running Planner hears of it at once
   (``TASK_CHANGE``). Its Planner may not change a role whose current version is the user's.
@@ -12,6 +13,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from datetime import date, datetime
 from typing import Any
 
 import asyncpg
@@ -29,22 +31,27 @@ from .task_roles import (
     Via,
     allowed_profile,
     check_definition,
+    check_items,
+    named_items,
+    project_role_stats,
+    role_items,
     role_key,
 )
 from .tiers.journal import SUMMARY_MAX_CHARS, JournalKind, clip
 from .tiers.task import TaskRouter
 
-TEMPLATE_FIELDS = ("kind", "description", "role_prompt", "harness", "profile_id")
-EDIT_FIELDS = ("role_prompt", "harness", "profile_id")
+TEMPLATE_FIELDS = ("kind", "description", "role_prompt", "harness", "profile_id", "items")
+EDIT_FIELDS = ("role_prompt", "harness", "profile_id", "items")
 
 
-def template_view(row: Mapping[str, Any]) -> dict[str, Any]:
-    """A template as the API shows it: its profile with whether the project allows it now."""
+async def template_view(row: Mapping[str, Any]) -> dict[str, Any]:
+    """A template as the API shows it: its profile with whether the project allows it now, and its items."""
     return {
         "key": row["template_key"], "kind": row["kind"], "description": row["description"],
         "role_prompt": row["role_prompt"], "harness": row["harness"],
         "profile": ({"profile_id": row["profile_id"], "name": row["profile_name"],
                      "allowed": bool(row["profile_allowed"])} if row["profile_id"] else None),
+        "items": await named_items(row.get("items") or ()),
         "updated_at": row["updated_at"],
     }
 
@@ -60,7 +67,9 @@ async def templates_view(project_id: str) -> dict[str, Any]:
     """Project ``project_id``'s role templates, by key; 404 for an unknown project."""
     project = await _project(project_id)
     return {"project_id": project_id, "role_text_max_chars": ProjectExecution.from_row(project).role_text_limit,
-            "templates": [template_view(row) for row in await db_templates.list_templates(project_id)]}
+            "templates": [await template_view(row) for row in await db_templates.list_templates(project_id)],
+            # What a role or a template may name in items: the catalog items installed for roles here.
+            "role_items": await role_items(project_id)}
 
 
 def _fields(data: Mapping[str, Any], allowed: tuple[str, ...]) -> None:
@@ -81,10 +90,18 @@ async def _profile_id(project_id: str | None, wanted: Any, kind: RoleKind) -> st
         raise RequestError(HTTP_400, f"profile_id: {exc}") from None
 
 
+async def _items(project_id: str | None, raw: Any) -> tuple[str, ...]:
+    """The items a template or an edit names, as ids, each installed for roles in the project."""
+    try:
+        return await check_items(project_id, raw)
+    except RoleError as exc:
+        raise RequestError(HTTP_400, f"items: {exc}") from None
+
+
 async def put_template(project_id: str, key: str, data: Mapping[str, Any]) -> dict[str, Any]:
     """Create template ``key`` of project ``project_id`` or replace it whole with ``data`` (``kind``,
-    ``role_prompt``, and optionally ``description``, ``harness``, ``profile_id``); 400 for a definition a task role
-    would be refused, 404 for an unknown project. Answers the project's templates."""
+    ``role_prompt``, and optionally ``description``, ``harness``, ``profile_id``, ``items``); 400 for a definition a
+    task role would be refused, 404 for an unknown project. Answers the project's templates."""
     _fields(data, TEMPLATE_FIELDS)
     project = await _project(project_id)
     limit = ProjectExecution.from_row(project).role_text_limit
@@ -97,13 +114,28 @@ async def put_template(project_id: str, key: str, data: Mapping[str, Any]) -> di
     if not isinstance(description, str) or len(" ".join(description.split())) > DESCRIPTION_MAX_CHARS:
         raise RequestError(HTTP_400, f"description must be a line of at most {DESCRIPTION_MAX_CHARS} characters")
     profile_id = await _profile_id(project_id, data.get("profile_id"), kind)
+    items = await _items(project_id, data.get("items"))
     try:
         await db_templates.put_template(project_id, checked_key, {
             "kind": kind.value, "description": " ".join(description.split()), "role_prompt": prompt,
-            "harness": harness, "profile_id": profile_id})
+            "harness": harness, "profile_id": profile_id, "items": items})
     except asyncpg.ForeignKeyViolationError:
         raise RequestError(HTTP_409, "the project or the profile was removed meanwhile") from None
     return await templates_view(project_id)
+
+
+async def role_stats(project_id: str, since: str | None = None) -> dict[str, Any]:
+    """The numbers of the roles project ``project_id``'s Planners defined, summed by role id across its tasks
+    (``task_roles.project_role_stats``), of the tasks created on or after day ``since`` (YYYY-MM-DD) when given; 404
+    for an unknown project, 400 for a day that does not read as one."""
+    await _project(project_id)
+    start = None
+    if since:
+        try:
+            start = datetime.combine(date.fromisoformat(since), datetime.min.time()).astimezone()
+        except ValueError:
+            raise RequestError(HTTP_400, f"since must be a day (YYYY-MM-DD), not {since[:40]!r}") from None
+    return await project_role_stats(project_id, start)
 
 
 async def delete_template(project_id: str, key: str) -> dict[str, Any]:
@@ -115,19 +147,22 @@ async def delete_template(project_id: str, key: str) -> dict[str, Any]:
     return await templates_view(project_id)
 
 
-def _changed(before: TaskRole, prompt: str, harness: str | None, profile_id: str | None) -> list[str]:
+def _changed(before: TaskRole, prompt: str, harness: str | None, profile_id: str | None,
+             items: tuple[str, ...]) -> list[str]:
     return [name for name, changed in (("role prompt", prompt != before.role_prompt),
                                        ("harness", harness != before.harness),
-                                       ("profile", profile_id != before.profile_id)) if changed]
+                                       ("profile", profile_id != before.profile_id),
+                                       ("items", items != before.items)) if changed]
 
 
 async def edit_task_role(
     task_id: str, key: str, data: Mapping[str, Any], *, task_router: TaskRouter, bus: MessageBus, source: AgentAddress,
 ) -> dict[str, Any]:
-    """Write ``data`` (``role_prompt``, ``harness``, ``profile_id``: the whole definition; the kind stays) as a new
-    version of task ``task_id``'s role ``key``, by the user: 404 for an unknown task or role, 409 for a task that
-    completed, 400 for a definition a task role would be refused or one that changes nothing. Its Planner gets a
-    supplement that says so, in a turn when it runs. Answers the version."""
+    """Write ``data`` (``role_prompt``, ``harness``, ``profile_id``: the whole definition, and ``items``, the
+    current ones when left out; the kind stays) as a new version of task ``task_id``'s role ``key``, by the user:
+    404 for an unknown task or role, 409 for a task that completed, 400 for a definition a task role would be
+    refused or one that changes nothing. Its Planner gets a supplement that says so, in a turn when it runs. Answers
+    the version."""
     _fields(data, EDIT_FIELDS)
     task = await db_tasks.get_task(task_id)
     if task is None:
@@ -145,7 +180,8 @@ async def edit_task_role(
     except RoleError as exc:
         raise RequestError(HTTP_400, str(exc)) from None
     profile_id = await _profile_id(task.get("project_id"), data.get("profile_id"), kind)
-    changed = _changed(before, prompt, harness, profile_id)
+    items = await _items(task.get("project_id"), data["items"]) if "items" in data else before.items
+    changed = _changed(before, prompt, harness, profile_id, items)
     if not changed:
         raise RequestError(HTTP_400, f"role {key} already reads so: nothing to change")
     version = before.version + 1
@@ -159,7 +195,8 @@ async def edit_task_role(
     try:
         version = await db_roles.add_version(task_id, key, {
             "kind": kind.value, "profile_id": profile_id, "role_prompt": prompt, "harness": harness,
-            "via": Via.USER.value, "template_key": current.get("template_key")}, entries, after=before.version)
+            "via": Via.USER.value, "template_key": current.get("template_key"), "items": items}, entries,
+            after=before.version)
     except asyncpg.UniqueViolationError:
         version = None
     except asyncpg.ForeignKeyViolationError:

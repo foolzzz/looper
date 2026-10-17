@@ -698,21 +698,34 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_library_items_project_name ON library_item
 
 -- Where a catalog item is installed: everywhere ('global') or in one project,
 -- for some roles. Every agent run loads the enabled global installs and its
--- project's that name its role. A project install never names the Manager,
--- which spans every project. One install per item and place.
+-- project's that name its role. 'task_role' is the roles a task's Planner
+-- defines: such an install loads only for a run of a role that names its item
+-- (task_roles.items). A project install never names the Manager, which spans
+-- every project. One install per item and place.
 CREATE TABLE IF NOT EXISTS library_installs (
     id          TEXT PRIMARY KEY,
     item_id     TEXT NOT NULL REFERENCES library_items(id) ON DELETE CASCADE,
     scope       TEXT NOT NULL CHECK (scope IN ('global', 'project')),
     project_id  TEXT REFERENCES projects(id) ON DELETE CASCADE,
     roles       TEXT[] NOT NULL CHECK (cardinality(roles) > 0
-                                       AND roles <@ ARRAY['manager', 'planner', 'worker', 'reviewer']),
+                                       AND roles <@ ARRAY['manager', 'planner', 'worker', 'reviewer', 'task_role']),
     enabled     BOOLEAN NOT NULL DEFAULT true,
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
     CHECK ((scope = 'project') = (project_id IS NOT NULL)),
     CHECK (scope = 'global' OR NOT 'manager' = ANY (roles))
 );
+-- Before 'task_role' (v2.7.0), the roles were the four built-in ones.
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'library_installs_roles_check'
+                   AND conrelid = to_regclass('library_installs')
+                   AND pg_get_constraintdef(oid) LIKE '%task_role%') THEN
+        ALTER TABLE library_installs DROP CONSTRAINT IF EXISTS library_installs_roles_check;
+        ALTER TABLE library_installs ADD CONSTRAINT library_installs_roles_check CHECK (cardinality(roles) > 0
+            AND roles <@ ARRAY['manager', 'planner', 'worker', 'reviewer', 'task_role']);
+    END IF;
+END $$;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_library_installs_place
     ON library_installs (item_id, scope, COALESCE(project_id, ''));
 CREATE INDEX IF NOT EXISTS idx_library_installs_project ON library_installs (project_id)
@@ -946,9 +959,12 @@ CREATE TABLE IF NOT EXISTS task_roles (
 ALTER TABLE task_roles ADD COLUMN IF NOT EXISTS via TEXT NOT NULL DEFAULT 'planner'
     CONSTRAINT task_roles_via_check CHECK (via IN ('planner', 'user'));
 ALTER TABLE task_roles ADD COLUMN IF NOT EXISTS template_key TEXT;
+-- The catalog items a version loads besides its kind's built-in role's installs: item ids, each installed for
+-- 'task_role' (library_installs) globally or in the task's project.
+ALTER TABLE task_roles ADD COLUMN IF NOT EXISTS items TEXT[] NOT NULL DEFAULT '{}';
 -- A project's role templates: roles its tasks' Planners copy as task roles (looper_task_role_set's template), the
--- copy a version of the task role of its own. Checked like a task role (looper/agents/role_templates.py); its
--- profile counts only while the project allows it.
+-- copy a version of the task role of its own. Checked like a task role (looper/agents/role_api.py); its
+-- profile counts only while the project allows it, and its items (as a task role's) only while installed so.
 CREATE TABLE IF NOT EXISTS project_role_templates (
     project_id    TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
     template_key  TEXT NOT NULL,
@@ -960,6 +976,7 @@ CREATE TABLE IF NOT EXISTS project_role_templates (
     updated_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (project_id, template_key)
 );
+ALTER TABLE project_role_templates ADD COLUMN IF NOT EXISTS items TEXT[] NOT NULL DEFAULT '{}';
 -- A step's roles: the work role its Worker runs as (NULL: the built-in Worker) and the version its latest attempt
 -- ran with; the review roles that review it after the built-in Reviewer, in order (review_roles, only on a
 -- reviewed step: each {role, required, version}, required false for one that only advises the Planner, version

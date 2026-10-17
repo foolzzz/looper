@@ -63,7 +63,7 @@ from ..message import MessageEnvelope, MessageType, channel_address, planner_add
 from ..project_execution import ProjectExecution
 from ..projects import EDITABLE_STATUSES, allowed_profile_view
 from ..task_roles import RoleError, RoleForbidden, RoleKind, TaskRole, Via, allowed_profile, check_definition
-from ..task_roles import review_role_keys, role_key
+from ..task_roles import ITEMS_MAX, check_items, review_role_keys, role_items, role_key
 from ..task_notice import Notice, NotifyTarget, link_line, notify_channel
 from ..tiers.journal import SUMMARY_MAX_CHARS, JournalKind, clip
 from ..tiers.worker import recheck_limits
@@ -135,7 +135,8 @@ names a role not defined yet is refused); looper_task_roles reads them.
 - harness (optional): only how it works and communicates; Looper adds the
   boundaries, which you neither write nor change. profile_id (optional): one
   from the project's list; without it the role runs what the built-in role
-  would.
+  would. items (optional): skills or MCP servers its runs load besides the
+  built-in role's, from role_items in looper_task_roles.
 - Setting a role again makes a new version: attempts that start afterwards
   use it, a run already started keeps its own.
 - The project's role templates (your [PLAN] and [RESTART] messages list
@@ -523,6 +524,7 @@ def _role_view(row: Mapping[str, Any], steps: Sequence[Mapping[str, Any]]) -> di
         "role_prompt": row["role_prompt"], "harness": row["harness"], "reason": row["reason"],
         **({"edited_by_user": True} if row.get("via") == Via.USER.value else {}),
         **({"template": row["template_key"]} if row.get("template_key") else {}),
+        **({"items": list(row["items"])} if row.get("items") else {}),
         "steps": _naming(steps, key),
     }
 
@@ -533,6 +535,7 @@ def _template_view(row: Mapping[str, Any]) -> dict[str, Any]:
         "id": row["template_key"], "kind": row["kind"], "description": row["description"],
         "profile": row["profile_name"] if row["profile_id"] and row["profile_allowed"] else None,
         "role_prompt": row["role_prompt"], "harness": row["harness"],
+        **({"items": list(row["items"])} if row.get("items") else {}),
     }
 
 
@@ -551,6 +554,8 @@ async def _roles(call: PlannerCall) -> dict[str, Any]:
                               "kinds": [kind.value for kind in RoleKind if kind.agent.value in p["roles"]]}
                              for p in profiles],
         "role_text_max_chars": (await _execution(task)).role_text_limit,
+        # What a role may name in items: installed for such roles, global or in the project.
+        "role_items": await role_items(project_id),
         "user_choice": {role.value: users[role.value]["name"] if role.value in users else None
                         for role in PLANNER_CHOICE_ROLES},
         "note": "A role without a profile runs what the step's built-in Worker or Reviewer would. A profile the user "
@@ -612,9 +617,24 @@ async def _role_set(call: PlannerCall) -> dict[str, Any]:
             dropped = (f" The template's profile {template['profile_name']} is not on the project's list any more: the "
                        "role runs what the built-in role would.")
     profile_id = profile["id"] if profile is not None else None
+    if "items" in arguments:
+        try:
+            items = await check_items(project_id, arguments["items"])
+        except RoleForbidden as exc:
+            raise OpError(ErrorCode.FORBIDDEN, str(exc)) from None
+        except RoleError as exc:
+            raise OpError(ErrorCode.INVALID, str(exc)) from None
+    else:
+        # A template's items come with it while they are installed for roles here.
+        named = list((template or {}).get("items") or ())
+        available = {item["id"] for item in await role_items(project_id)} if named else set()
+        items = tuple(item for item in named if item in available)
+        if len(items) < len(named):
+            dropped += (f" The template's items {', '.join(i for i in named if i not in available)} are not installed "
+                        "for roles here any more: the role runs without them.")
     steps = await db_steps.list_steps(call.task_id)
     template_key = template["template_key"] if template else None
-    if current is not None and TaskRole.from_row(current).defines(kind, prompt, harness, profile_id) and \
+    if current is not None and TaskRole.from_row(current).defines(kind, prompt, harness, profile_id, items) and \
             current.get("template_key") == template_key:
         return {"id": key, "kind": kind.value, "version": current["version"], "changed": False,
                 "steps": _naming(steps, key), "note": "the role already reads so: no new version" + dropped}
@@ -623,13 +643,14 @@ async def _role_set(call: PlannerCall) -> dict[str, Any]:
                f"{f' from template {template_key}' if template_key else ''}: "
                f"profile {profile['name'] if profile else 'as the built-in ' + kind.agent.value.capitalize()}; "
                f"harness {'its own' if harness else 'the working style that applies'}; role prompt {len(prompt)} "
-               "characters" + (f". Reason: {reason}" if reason else ""))
+               "characters" + (f"; {len(items)} item(s) of its own" if items else "")
+               + (f". Reason: {reason}" if reason else ""))
     entry = {"step_id": "", "kind": JournalKind.ROLE_DEFINED.value, "summary": clip(summary, SUMMARY_MAX_CHARS),
              "learnings": []}
     try:
         version = await db_roles.add_version(call.task_id, key, {
             "kind": kind.value, "profile_id": profile_id, "role_prompt": prompt, "harness": harness, "reason": reason,
-            "via": Via.PLANNER.value, "template_key": template_key}, entry,
+            "via": Via.PLANNER.value, "template_key": template_key, "items": items}, entry,
             after=current["version"] if current else 0)
     except asyncpg.UniqueViolationError:
         version = None
@@ -738,6 +759,10 @@ ROLE_TOOLS: tuple[Tool, ...] = (
                     "profile_id": {"type": "string", "minLength": 1,
                                    "description": "An allowed profile's id or name; leave it out for what the "
                                                   "built-in role would run."},
+                    "items": {"type": "array", "items": {"type": "string", "minLength": 1}, "maxItems": ITEMS_MAX,
+                              "description": "Skills or MCP servers its runs load besides the built-in role's, "
+                                             "from role_items in looper_task_roles (id or name); leave it out for "
+                                             "none (with template, the template's)."},
                     "reason": _REASON,
                     "task_id": _TASK_ID,
                 }},

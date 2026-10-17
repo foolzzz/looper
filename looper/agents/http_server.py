@@ -325,6 +325,7 @@ class AgentHTTPServer:
     _RE_PROJECT_ROLE_SETTINGS = re.compile(r"^/api/projects/(proj-[a-zA-Z0-9]+)/agent-settings/roles/([a-zA-Z0-9_-]+)$")
     _RE_PROJECT_ALLOWED_PROFILES = re.compile(r"^/api/projects/(proj-[a-zA-Z0-9]+)/allowed-profiles$")
     _RE_PROJECT_ROLE_TEMPLATES = re.compile(r"^/api/projects/(proj-[a-zA-Z0-9]+)/role-templates$")
+    _RE_PROJECT_ROLE_STATS = re.compile(r"^/api/projects/(proj-[a-zA-Z0-9]+)/role-stats$")
     _RE_PROJECT_ROLE_TEMPLATE = re.compile(
         r"^/api/projects/(proj-[a-zA-Z0-9]+)/role-templates/([A-Za-z0-9][A-Za-z0-9_.-]{0,31})$")
     _RE_ROLE_SETTINGS = re.compile(r"^/api/agent-settings/roles/([a-zA-Z0-9_-]+)$")
@@ -539,6 +540,8 @@ class AgentHTTPServer:
         elif (m := self._RE_PROJECT_ALLOWED_PROFILES.match(path)) and method == "PUT":
             await self._answer(writer, HTTP_200, lambda: projects.set_allowed_profiles(
                 m.group(1), projects.json_object(body)))
+        elif (m := self._RE_PROJECT_ROLE_STATS.match(path)) and method == "GET":
+            await self._answer(writer, HTTP_200, lambda: role_api.role_stats(m.group(1), query.get("since")))
         elif (m := self._RE_PROJECT_ROLE_TEMPLATES.match(path)) and method == "GET":
             await self._answer(writer, HTTP_200, lambda: role_api.templates_view(m.group(1)))
         elif (m := self._RE_PROJECT_ROLE_TEMPLATE.match(path)) and method == "PUT":

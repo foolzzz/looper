@@ -11,6 +11,7 @@ copied from (``template_key``). Planning the task anew deletes them
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from datetime import datetime
 from typing import Any
 
 import asyncpg
@@ -21,10 +22,23 @@ from .connection import get_pool
 # A role's version with its profile's name, and whether its task's project allows that profile now.
 _VERSION = (
     "SELECT r.task_id, r.role_key, r.version, r.kind, r.profile_id, r.role_prompt, r.harness, r.reason, "
-    "r.via, r.template_key, r.created_at, a.name AS profile_name, (l.profile_id IS NOT NULL) AS profile_allowed "
+    "r.via, r.template_key, r.items, r.created_at, a.name AS profile_name, "
+    "(l.profile_id IS NOT NULL) AS profile_allowed "
     "FROM task_roles r JOIN tasks k ON k.id = r.task_id LEFT JOIN agent_profiles a ON a.id = r.profile_id "
     "LEFT JOIN project_allowed_profiles l ON l.project_id = k.project_id AND l.profile_id = r.profile_id "
 )
+
+
+async def project_tasks(project_id: str, since: datetime | None = None, *, pool: asyncpg.Pool | None = None,
+                        ) -> list[str]:
+    """The tasks of project ``project_id`` whose Planner defined a role, oldest first; those created ``since``
+    when given."""
+    pool = pool or get_pool()
+    rows = await pool.fetch(
+        "SELECT t.id FROM tasks t WHERE t.project_id = $1 AND ($2::timestamptz IS NULL OR t.created_at >= $2) "
+        "AND EXISTS (SELECT 1 FROM task_roles r WHERE r.task_id = t.id) ORDER BY t.created_at, t.id",
+        project_id, since)
+    return [row["id"] for row in rows]
 
 
 async def versions(task_id: str, *, pool: asyncpg.Pool | None = None) -> list[dict[str, Any]]:
@@ -65,7 +79,8 @@ async def add_version(
     after: int, pool: asyncpg.Pool | None = None,
 ) -> int | None:
     """Add version ``after`` + 1 of task ``task_id``'s role ``key`` (``kind``, ``profile_id``, ``role_prompt``,
-    ``harness``, ``reason``, ``via``, ``template_key``) with its journal ``entry`` (or entries), in one transaction;
+    ``harness``, ``reason``, ``via``, ``template_key``, ``items``) with its journal ``entry`` (or entries), in one
+    transaction;
     its version. ``after`` is the version the writer read (0 for a new role): None, and nothing written, when the
     role's newest version is another by now. Raises ``asyncpg.UniqueViolationError`` when a concurrent writer took
     the same version."""
@@ -74,12 +89,13 @@ async def add_version(
     async with pool.acquire() as conn, conn.transaction():
         version = await conn.fetchval(
             "INSERT INTO task_roles (task_id, role_key, version, kind, profile_id, role_prompt, harness, reason, "
-            "via, template_key) "
-            "SELECT $1, $2, $10::int + 1, $3, $4, $5, $6, $7, $8, $9 "
+            "via, template_key, items) "
+            "SELECT $1, $2, $10::int + 1, $3, $4, $5, $6, $7, $8, $9, $11 "
             "WHERE (SELECT COALESCE(max(version), 0) FROM task_roles WHERE task_id = $1 AND role_key = $2) = $10 "
             "RETURNING version",
             task_id, key, values["kind"], values.get("profile_id"), values["role_prompt"], values.get("harness"),
             values.get("reason") or "", values.get("via") or "planner", values.get("template_key"), after,
+            list(values.get("items") or ()),
         )
         if version is None:
             return None
