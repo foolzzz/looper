@@ -42,7 +42,8 @@ the task section, `role_boundary_misses`), the accepted steps with a review role
 role review (`gate_breaches`), retries, reviews, cost (the task cost API), tokens (the runs' records: prompt, uncached
 and cached, and output; what a runtime without prices still reports), contract violations
 (replies the Planner's reply parser or the Worker/Reviewer report check
-rejected) and whether the Planner modified files itself (its file-editing tool
+rejected; the JSON keeps why the parser rejected each Planner reply,
+`planner_violation_reasons`) and whether the Planner modified files itself (its file-editing tool
 calls, and files changed while only a Planner turn ran).
 
 Each run writes a JSON file and the server log to `evals/runs/` (ignored by

@@ -56,6 +56,12 @@ def planner_violations(activity: Iterable[Mapping[str, Any]]) -> int:
     return count
 
 
+def planner_violation_reasons(activity: Iterable[Mapping[str, Any]]) -> list[str]:
+    """Why the parser rejected each Planner reply ``planner_violations`` counts, as the activity says it."""
+    return [str(row.get("summary") or "")[:300] for row in activity if row.get("kind") == "error"
+            and (_BROKE_CONTRACT.match(str(row.get("summary") or "")) or _REPAIR_REJECTED in str(row.get("summary")))]
+
+
 def report_violation(text: str, *, is_verify: bool) -> bool:
     """Whether a Worker's (or a Reviewer's) final message breaks its report (verdict) contract, read as
     ``worker.judge_result`` reads it."""
@@ -387,6 +393,7 @@ def task_metrics(
         "cost_basis": {name: int(cost.get(f"{name}_runs") or 0) for name in ("equivalent", "provider_price",
                                                                             "unpriced")},
         "contract_violations": {**violations, "total": sum(violations.values())},
+        "planner_violation_reasons": planner_violation_reasons(activity),
         "planner_edit_tool_paths": planner_edits,
         "planner_changed_files": changed_by_planner,
         "planner_modified_files": len(set(planner_edits) | set(changed_by_planner)),

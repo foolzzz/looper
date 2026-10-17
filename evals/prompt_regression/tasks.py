@@ -443,7 +443,8 @@ ROLE_TASKS: tuple[EvalTask, ...] = (
         planner_may_choose=True,
         roles_on=True,
         check=_module_tests_and_usage,
-        expect={"min_steps": 3, "min_roles_defined": 2, "min_role_runs": 2, "min_role_profile_runs": 1,
+        # The module may come with its tests; what counts is that the tests and the notes run as their roles.
+        expect={"min_steps": 2, "min_roles_defined": 2, "min_role_runs": 2, "min_role_profile_runs": 1,
                 "max_role_prompt_mismatches": 0, "max_role_boundary_misses": 0},
         fake={
             "plan": [
