@@ -147,6 +147,14 @@ ALTER TABLE task_steps ADD COLUMN IF NOT EXISTS feedback TEXT[] NOT NULL DEFAULT
 ALTER TABLE task_steps ADD COLUMN IF NOT EXISTS reviewer_id TEXT;
 ALTER TABLE task_steps ADD COLUMN IF NOT EXISTS missed_messages TEXT[] NOT NULL DEFAULT '{}';
 
+-- When the step's run was first dispatched (its first Worker started), kept through its retries and reviews, and
+-- through a server restart (its attempt runs again as the same attempt). A step sent back to not started (a
+-- restart of the task, or its continue at the spend cap) has none, and gets a new one when it is dispatched again,
+-- so the time the task was stopped does not count. Null until then, and for the steps of a server before this
+-- column: no start is guessed for them. With completed_at (the last time it went to review or ended) it gives how
+-- long the step took.
+ALTER TABLE task_steps ADD COLUMN IF NOT EXISTS started_at TIMESTAMPTZ;
+
 -- A task's plan beside its steps: one row per task, replaced when the task
 -- is planned again. The task's requirement, directory and project stay on
 -- tasks; the project itself is read again before every Planner turn.
@@ -253,6 +261,10 @@ CREATE INDEX IF NOT EXISTS idx_step_workspaces_task ON step_workspaces (task_id,
 -- A step has one workspace in use at a time.
 CREATE UNIQUE INDEX IF NOT EXISTS idx_step_workspaces_open ON step_workspaces (step_id)
     WHERE state IN ('active', 'merging');
+-- links: the paths linked back to the task directory in it; merge_files: the files that kept an unmerged one from
+-- merging (the conflicting or blocking ones).
+ALTER TABLE step_workspaces ADD COLUMN IF NOT EXISTS links TEXT[] NOT NULL DEFAULT '{}';
+ALTER TABLE step_workspaces ADD COLUMN IF NOT EXISTS merge_files TEXT[] NOT NULL DEFAULT '{}';
 -- Where the task's branch was when it dispatched its first step, in a project with step workspaces: going back
 -- there undoes the task's commits ('' when not recorded).
 ALTER TABLE task_plans ADD COLUMN IF NOT EXISTS start_branch TEXT NOT NULL DEFAULT '';
@@ -600,6 +612,9 @@ ALTER TABLE projects ADD COLUMN IF NOT EXISTS review_policy TEXT CHECK (review_p
 -- Where a step that runs alongside others works: the task directory ('shared', also when NULL) or, in a git
 -- checkout, a worktree of its own merged back when it is accepted ('worktree').
 ALTER TABLE projects ADD COLUMN IF NOT EXISTS step_workspaces TEXT CHECK (step_workspaces IN ('shared', 'worktree'));
+-- The paths, relative to the task directory, that such a worktree links back to the task directory's (NULL: none).
+ALTER TABLE projects ADD COLUMN IF NOT EXISTS step_workspace_links TEXT[]
+    CHECK (cardinality(step_workspace_links) <= 20);
 -- How many times the Planner may retry one step (NULL: 2).
 ALTER TABLE projects ADD COLUMN IF NOT EXISTS max_step_retries INTEGER
     CHECK (max_step_retries >= 0 AND max_step_retries <= 20);

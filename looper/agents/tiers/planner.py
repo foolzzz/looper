@@ -348,6 +348,9 @@ class PlanStep:
     review_stage: ReviewStage | None = None  # in review: which review it waits for
     # A gate step's gate (``user_gates``): its instruction is its topic, and no Worker runs it.
     gate: Gate | None = None
+    # When its run was first dispatched; kept through its retries and reviews, gone when it is sent back to not
+    # started (task_steps.started_at).
+    started_at: datetime | None = None
 
     @property
     def label(self) -> str:
@@ -507,6 +510,7 @@ def _step_row(step: PlanStep) -> dict[str, Any]:
         "review_role_version": step.review_role_version,
         "review_stage": step.review_stage.value if step.review_stage else None,
         "kind": "gate" if step.gate is not None else "work",
+        "started_at": step.started_at,
     }
 
 
@@ -1233,7 +1237,11 @@ class PlannerAgent:
         worker_id = f"worker-{uuid.uuid4().hex[:12]}"
         step.status = "dispatched"
         step.worker_id = worker_id
+        step.started_at = step.started_at or datetime.now(timezone.utc)
         previous = (step.result or {}) if (step.result or {}).get("status") == "unmerged" else {}
+        if previous and step.workspace is not None and \
+                not await workspaces.branch_exists(step.workspace.repo_dir, str(previous.get("branch") or "")):
+            previous = {}  # the user discarded the attempt's branch: nothing to bring over
         task_role: TaskRole | None = None
         if step.role is not None:
             task_role = await self._role(step.role, step.role_version if same_attempt else None)
@@ -1382,8 +1390,18 @@ class PlannerAgent:
         except workspaces.GitError as exc:
             step.workspace = await self._discard(workspace)
             raise _NoWorkspace(str(exc)) from None
+        skipped: list[str] = []
+        if self._execution.workspace_links:
+            workspace, skipped = workspaces.link(workspace, self._execution.workspace_links)
+            step.workspace = workspace
+            await self._save_workspace(workspace)
+        linked = f"; linked to the task directory's: {', '.join(workspace.links)}" if workspace.links else ""
         await self._activity("phase", f"Step {step.label} works in a worktree of its own: branch {workspace.branch}, "
-                                      f"from {workspace.target} at {workspace.base_commit[:12]}", worker=step.worker_id)
+                                      f"from {workspace.target} at {workspace.base_commit[:12]}{linked}"[:500],
+                             worker=step.worker_id)
+        if skipped:
+            await self._activity("phase", f"Step {step.label}'s worktree did not link {'; '.join(skipped)}"[:500],
+                                 worker=step.worker_id)
 
     async def _workspace_failed(self, plan: TaskPlan, step: PlanStep, problem: str) -> None:
         """A step that needed a worktree got none: the attempt failed, and the Planner decides what follows."""
@@ -1412,6 +1430,10 @@ class PlannerAgent:
         if outcome.leftovers:
             await self._activity("phase", f"Step {step.label} left changes uncommitted: committed on its branch as "
                                           f"{outcome.leftovers[:12]}")
+        if outcome.replaced_links:
+            replaced = ", ".join(outcome.replaced_links)
+            await self._activity("phase", f"Step {step.label} replaced links to the task directory with files of its "
+                                          f"own, which are part of its result: {replaced}"[:500])
         if merged.state is not StepWorkspaceState.MERGED:
             await self._merge_failed(plan, step, outcome, decide=decide)
             return False
@@ -1984,6 +2006,7 @@ class PlannerAgent:
                  and (s.status != "pending" or s.started)]
         for step in again:
             step.status, step.worker_id, step.reviewer_id, step.review_stage = "pending", None, None, None
+            step.started_at = None  # its next dispatch starts it again: the time the task was stopped does not count
         waiting = plan.waiting_gates()
         for step in waiting:
             assert step.gate is not None
@@ -3431,7 +3454,7 @@ class PlannerAgent:
                     step.workspace.state is StepWorkspaceState.MERGING:
                 merging.append(step)  # accepted: only its merge was cut off
             elif step.status in ("dispatched", "deciding"):
-                step.status = "pending"
+                step.status, step.started_at = "pending", None  # started again when dispatched again
                 again.append(step)
             elif step.status == "completed":
                 review.append(step)
@@ -3634,6 +3657,7 @@ class PlannerAgent:
                 review_role_version=sd.get("review_role_version"),
                 review_stage=ReviewStage(sd["review_stage"]) if sd.get("review_stage") else None,
                 gate=self._stored_gate(sd, stored.get("gates") or {}),
+                started_at=sd.get("started_at"),
             ))
         plan.journal = [JournalEntry.from_row(row) for row in stored.get("journal") or []]
         try:

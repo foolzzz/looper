@@ -2,7 +2,7 @@ import type { Project, ProjectExecution, ProjectUpdate } from "@/lib/api";
 import { Input } from "@/components/ui/input";
 import { ROOM_LIMITS } from "@/lib/room";
 
-/** The execution settings as the editor holds them: text, "" = inherit. */
+/** The execution settings as the editor holds them: text, "" = inherit; a list is one item per line. */
 export type ExecutionDraft = Record<keyof ProjectExecution, string>;
 
 const FIELDS: (keyof ProjectExecution)[] = [
@@ -12,6 +12,7 @@ const FIELDS: (keyof ProjectExecution)[] = [
   "review_policy",
   "distill_lessons",
   "step_workspaces",
+  "step_workspace_links",
   "max_step_retries",
   "planner_roles",
   "role_text_max_chars",
@@ -29,9 +30,18 @@ const NUMBERS = new Set<keyof ProjectExecution>([
   ...ROOM_LIMITS.map((limit) => limit.field),
 ]);
 
+const LISTS = new Set<keyof ProjectExecution>(["step_workspace_links"]);
+
 export function executionDraft(project: Project): ExecutionDraft {
-  return Object.fromEntries(FIELDS.map((f) => [f, project[f] == null ? "" : String(project[f])])) as ExecutionDraft;
+  const text = (value: unknown) => (value == null ? "" : Array.isArray(value) ? value.join("\n") : String(value));
+  return Object.fromEntries(FIELDS.map((f) => [f, text(project[f])])) as ExecutionDraft;
 }
+
+/** A list field's lines, without blank ones; null when there are none. */
+const lines = (value: string) => {
+  const items = value.split("\n").map((line) => line.trim()).filter(Boolean);
+  return items.length ? items : null;
+};
 
 /** The settings that changed, as the API takes them: "" is null; a number that does not parse is sent as
  * typed, so the server's 400 explains it. */
@@ -42,8 +52,9 @@ export function executionChanges(draft: ExecutionDraft, project: Project): Proje
     const value = draft[field].trim();
     if (value === before[field]) continue;
     const number = Number(value);
-    (changes as Record<string, unknown>)[field] =
-      value === "" ? null : NUMBERS.has(field) && Number.isFinite(number) ? number : value;
+    (changes as Record<string, unknown>)[field] = LISTS.has(field)
+      ? lines(value)
+      : value === "" ? null : NUMBERS.has(field) && Number.isFinite(number) ? number : value;
   }
   return changes;
 }
@@ -160,6 +171,23 @@ export function ProjectExecutionFields({
           <p id={`${idPrefix}-step_workspaces-help`} className="text-xs text-muted-foreground">
             In a git checkout on a branch, each such step works on a branch of its own. Accepted, it is merged into
             the task directory&apos;s branch with a merge commit, after its leftovers are committed.
+          </p>
+        </div>
+        <div className="space-y-1">
+          {label("step_workspace_links", "Linked into step worktrees")}
+          <textarea
+            id={`${idPrefix}-step_workspace_links`}
+            value={draft.step_workspace_links}
+            onChange={set("step_workspace_links")}
+            aria-describedby={`${idPrefix}-step_workspace_links-help`}
+            placeholder={".venv\n.env"}
+            rows={3}
+            spellCheck={false}
+            className="flex w-full rounded-md border border-input bg-transparent px-3 py-1.5 font-mono text-sm text-foreground"
+          />
+          <p id={`${idPrefix}-step_workspace_links-help`} className="text-xs text-muted-foreground">
+            One path per line, relative to the task directory: ignored local state a worktree would lack. Each is a
+            link to the task directory&apos;s own, shared by every step, and never committed.
           </p>
         </div>
         <div className="space-y-1">

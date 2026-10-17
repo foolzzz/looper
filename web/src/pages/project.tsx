@@ -263,6 +263,8 @@ function executionRows(project: Project): [string, string][] {
     ]);
   if (project.step_workspaces === "worktree")
     rows.push(["Steps at the same time", "A git worktree each, merged into the branch when accepted"]);
+  if (project.step_workspaces === "worktree" && project.step_workspace_links?.length)
+    rows.push(["Linked into step worktrees", project.step_workspace_links.join(", ")]);
   if (project.max_step_retries != null)
     rows.push(["Retries per step", String(project.max_step_retries)]);
   if (project.planner_roles === "on") rows.push(["Planner roles", "On"]);

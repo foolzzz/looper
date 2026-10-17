@@ -794,7 +794,7 @@ def test_a_file_exported_by_v2_6_0_imports_and_exports_again_under_the_new_names
             # A file from before step workspaces, per-project retries, Planner roles, user gates and the agent room
             # leaves them unset.
             expected["projects"] = [{**p, "execution": {**p["execution"], "step_workspaces": None,
-                                                        "max_step_retries": None, "planner_roles": None,
+                                                        "step_workspace_links": None, "max_step_retries": None, "planner_roles": None,
                                                         "role_text_max_chars": None, "user_gates": None,
                                                         "gate_reminder_hours": None, "agent_room": None, "room_post_per_minute": None, "room_broadcasts_per_run": None, "room_message_max_chars": None, "room_messages_per_task": None, "room_ping_pong_rounds": None, "room_wait_max_seconds": None, "room_consult_budget_usd": None, "room_consult_timeout_seconds": None, "room_consults_per_task": None},
                                      "layers": [renamed(x) for x in p["layers"]]} for p in old["projects"]]

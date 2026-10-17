@@ -36,11 +36,13 @@ import { RoleProfile, TaskAgentsSummary, TaskAgentsTab } from "@/components/task
 import { NodeCards } from "@/components/pipeline-node-card";
 import { PipelineToolbar } from "@/components/pipeline-toolbar";
 import { GateBadge, TaskGates } from "@/components/task-gates";
+import { TaskWorkspaces, WorktreeMarker } from "@/components/task-workspaces";
 import { TaskRoomTab } from "@/components/task-room";
 import { GATE_STATES, GATE_TURNS, gateAnchor, gateLook, gateTurn, stepAnchor } from "@/lib/gates";
-import { type NodeCard, gateCard, nodeCardId, plannerCard, resultCard, stepCard } from "@/lib/node-cards";
+import { type NodeCard, gateCard, nodeCardId, plannerCard, resultCard, stepCard, stepSpan } from "@/lib/node-cards";
 import { FIT_PADDING, shownSteps, stepColumns, stepLevels, storeHideSkipped, storedHideSkipped } from "@/lib/pipeline-layout";
 import { useFullScreen } from "@/lib/full-screen";
+import { workspacesByStep } from "@/lib/workspaces";
 import { roomNote } from "@/lib/room";
 import { costBasis, costCaveats, formatUsd } from "@/lib/usage";
 import { cn } from "@/lib/utils";
@@ -615,6 +617,12 @@ function showGate(step: TaskStep) {
   target?.focus({ preventScroll: true });
 }
 
+/** How long a step took, or has run while its task runs (`stepSpan`); nothing before it started. */
+function StepSpan({ step, active }: { step: TaskStep; active: boolean }) {
+  const span = stepSpan(step, active);
+  return span && <span className="text-xs tabular-nums text-muted-foreground">{span.label} {span.text}</span>;
+}
+
 function OverviewTab({
   task,
   onContinued,
@@ -654,6 +662,7 @@ function OverviewTab({
   const dropped = steps.filter((s) => s.status === "skipped").length;
   const cancelledGates = steps.filter(cancelledGate).length;
   const isActive = isActiveTask(task);
+  const worktrees = workspacesByStep(task);
 
   return (
     <div className="space-y-6 p-5">
@@ -754,6 +763,8 @@ function OverviewTab({
                         </a>
                       )}
                       {stepRoles(step) && <span className="font-mono text-xs text-muted-foreground">{stepRoles(step)}</span>}
+                      <StepSpan step={step} active={isActive} />
+                      <WorktreeMarker workspaces={worktrees.get(step.id)} />
                       {step.status === "completed" && step.review_stage && (
                         <span className="text-xs text-muted-foreground">
                           Waiting for{" "}
@@ -782,6 +793,8 @@ function OverviewTab({
           </div>
         </div>
       )}
+
+      <TaskWorkspaces task={task} onChanged={onContinued} />
 
       {task.status === "completed" && task.project_id && (
         <LessonsDraftNote taskId={task.task_id} projectId={task.project_id} />
@@ -1680,6 +1693,7 @@ function PipelineTab({ task, onOpenGate }: { task: TaskDetail; onOpenGate: (step
     };
     const levels = stepLevels(steps);
     const why = droppedBecause(task.journal || [], all);
+    const worktrees = workspacesByStep(task);
     const x = stepColumns(steps, levels, NODE_W + GAP_X);
     const depth = steps.length ? Math.max(...levels.values()) : -1;
 
@@ -1717,8 +1731,8 @@ function PipelineTab({ task, onOpenGate }: { task: TaskDetail; onOpenGate: (step
                                   detail={step.instruction} note={note || undefined} /> },
         style: nodeStyle(look), sourcePosition: Position.Bottom, targetPosition: Position.Top,
       });
-      cards[step.id] = stepCard(step, { taskId: task.task_id, look, lookOf, stepsById: allById,
-                                        skippedBecause: why.get(step.id), room });
+      cards[step.id] = stepCard(step, { taskId: task.task_id, active, look, lookOf, stepsById: allById,
+                                        skippedBecause: why.get(step.id), workspaces: worktrees.get(step.id), room });
     }
 
     // The result sits under the steps that lead to it, so its edges do not cross the dropped steps above it.
@@ -1876,7 +1890,13 @@ interface TaskDetailPageProps {
   onBack: () => void;
 }
 
-export function TaskDetailPage({ taskId, onBack }: TaskDetailPageProps) {
+/** A task's page, new for each task: when the hash moves to another task, its page opens as a fresh load opens it,
+ * on its Overview, without the previous task's data, tab, start error or open confirmation. */
+export function TaskDetailRoute(props: TaskDetailPageProps) {
+  return <TaskDetailPage key={props.taskId} {...props} />;
+}
+
+function TaskDetailPage({ taskId, onBack }: TaskDetailPageProps) {
   const [task, setTask] = useState<TaskDetail | null>(null);
   const [error, setError] = useState("");
   const [startError, setStartError] = useState("");
