@@ -735,6 +735,44 @@ class TestResidentClaude:
 
         asyncio.run(_run())
 
+    def test_a_hurried_cleanup_still_cancels_the_loop_it_had_not_reached(self) -> None:
+        """The supervise loop loses the stop's cancellation and the cleanup's, so the cleanup is still waiting on it
+        when a second cancellation of the stop hurries it: the message loop is cancelled all the same."""
+
+        async def _run() -> None:
+            with tempfile.TemporaryDirectory() as tmp:
+                planner = PlannerAgent(task_id="t1", runtime_root=Path(tmp))
+                lost: list[int] = []
+                lost_twice = asyncio.Event()
+
+                async def supervise_losing_cancels() -> None:
+                    while len(lost) < 2:
+                        try:
+                            await asyncio.sleep(60)
+                        except asyncio.CancelledError:
+                            lost.append(1)  # lost, as asyncio.wait_for can lose a cancellation
+                    lost_twice.set()
+                    await asyncio.sleep(60)
+
+                supervise_task = planner._supervise_task = asyncio.create_task(supervise_losing_cancels())
+                loop_task = planner._loop_task = asyncio.create_task(asyncio.sleep(60))
+                planner._kill_running_workers = AsyncMock()  # type: ignore[method-assign]
+                planner._claude.stop = AsyncMock()  # type: ignore[method-assign]
+                await asyncio.sleep(0)
+                stopper = asyncio.create_task(planner.stop())
+                while not lost:
+                    await asyncio.sleep(0.01)
+                stopper.cancel()  # the stop is cut short; its cleanup waits on the supervise loop in turn
+                await lost_twice.wait()
+                stopper.cancel()  # and hurried
+                await asyncio.wait([stopper])
+                assert stopper.cancelled()
+                assert loop_task.cancelled()
+                planner._claude.stop.assert_awaited_with(kill=True)
+                await asyncio.wait([supervise_task])
+
+        asyncio.run(_run())
+
     def test_a_stopping_planners_token_files_are_gone_once_its_token_no_longer_works(self) -> None:
         """The MCP configuration that carries the Planner's token is deleted with the token, before stop() waits for
         its Claude to end: a stop the server's shutdown cuts off then leaves no token on disk."""

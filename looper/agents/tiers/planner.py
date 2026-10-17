@@ -757,7 +757,10 @@ class PlannerAgent:
                         if task is not None and not task.done():
                             await cancel_and_wait(task)
                 except asyncio.CancelledError:
-                    kill = True  # hurried: Claude is ended at once
+                    kill = True  # hurried: Claude is ended at once, and the loops not waited for yet are cancelled
+                    for task in (supervise_task, loop_task):
+                        if task is not None and not task.done():
+                            task.cancel()
                     raise
                 finally:
                     # A turn the loop was in has already killed Claude; an idle one
