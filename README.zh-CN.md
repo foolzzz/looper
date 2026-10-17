@@ -187,11 +187,12 @@ PostgreSQL 是启动的硬性依赖；`looper serve` 每次启动都会应用 `l
 | 页面 | 功能 |
 |---|---|
 | **Dashboard** | 此刻在发生什么：按分组的任务数（点开即按该组筛选的 Tasks 页）、正在运行的 agent、各活跃项目相对上限的并发、定时任务（接下来的触发、正在失败的、今天跳过的）、今日花费，组件不健康时给出警告 |
-| **Chat** | 与全局 Manager 对话，或与运行中任务的 Planner 对话（每条消息成为该任务的一个新步骤）；SSE 流式输出 |
+| **Chat** | 与全局 Manager 对话，或与运行中任务的 Planner 对话（消息作为该任务的补充说明交给 Planner）；选中 Manager 时按渠道（网页对话、飞书、Telegram）列出它的对话，飞书和 Telegram 的只读；SSE 流式输出 |
 | **Tasks** | 任务列表、项目、状态和定时任务筛选，定时任务建出的任务带 Scheduled 标记，以及创建、开始、停止、删除操作 |
 | **Project** | 单个项目的概览、知识文档、项目自己的 skill 和安装、各角色在本项目覆盖的 Agent Profile 和其他 agent 设置、定时任务（时间规则、接下来的触发时刻、启用、立即运行、运行历史），以及项目设置 |
 | **Task Detail** | 配置编辑（init 状态）、概览、流水线 DAG、会话、对话；Agent Timeline 每行都有 **History** 按钮 |
 | **Runs** | 每个角色的会话和运行记录（Manager 的 `/new` 显示为新会话），每次运行都能打开其历史；不含配置，并链接到 Settings → Roles 里的该角色 |
+| **Schedules** | 所有项目的定时任务，可按项目和状态筛选，每行有启用开关、立即运行和删除；单个定时任务的页面显示设置、告警、今日花费和运行历史。新建和修改在项目的 Schedules 标签页 |
 | **Agent history** | 单个 agent 的启动命令、完整记录（文本、思考、工具调用及结果）和活动；跟随运行中的 agent，2 分钟没有输出会标出 |
 | **Settings** | 侧栏底部可折叠的分组，每项一页：**LLM Providers**；**Agent Runtimes**（只读：每种运行时类型，在服务的 PATH 上找到与否，可 Re-detect，以及规划中的类型）；**Agent Profiles**（运行时、提供方和模型，各自能跑的角色和被谁使用）；**Roles**（可折叠的列表：先是共享默认值 Shared defaults，再是每个角色一行，含它的覆盖项、prompt 和限制）；**Skills & MCP**；**Channels**；**Import / Export** |
 
@@ -204,14 +205,14 @@ API 只响应控制台和本机客户端：来自其他网站页面的请求（�
 | 状态 | `GET /api/status`、`GET /api/overview` | 系统健康状态和启动自检（`checks`）；Dashboard 的“此刻在发生什么”总览 |
 | 项目 | `/api/projects`、`/api/projects/:id`、`/api/projects/:id/knowledge/...` | 创建、修改和删除项目；项目的知识文档和草稿 |
 | 任务 | `/api/tasks`、`/api/tasks/create`、`/api/tasks/:id/...`、`/api/tasks/{start,stop,cancel,delete}` | 列出和创建任务（属于某个项目，可带 `profile_overrides`）、查看、开始、停止、取消、删除；活动及其 SSE 流 |
-| 定时任务 | `/api/projects/:id/schedules`、`/api/schedules/:id/...`、`POST /api/schedules/preview` | 创建、修改、启用和删除项目的定时任务；立即运行；运行历史和通知；时间规则接下来的触发时刻 |
+| 定时任务 | `/api/projects/:id/schedules`、`GET /api/schedules`、`/api/schedules/:id/...`、`POST /api/schedules/preview` | 创建、修改、启用和删除项目的定时任务；列出所有项目的定时任务；立即运行；运行历史和通知；时间规则接下来的触发时刻 |
 | 能力目录与安装 | `/api/catalog/...`、`/api/installs/...`、`/api/projects/:id/installs`、`/api/projects/:id/skills/...` | 插件、skill 和 MCP 服务器：导入、上传、git、编写、修改、删除；全局安装或装到项目 |
 | Agent 设置 | `/api/agent-settings/...`、`/api/projects/:id/agent-settings/...`、`/api/roles/...` | 各设置层，每个字段的生效值及其来源；每个角色的 prompt 和限制 |
 | 注册表 | `GET /api/registry`、`/api/runtimes/:id/probe`、`/api/providers/...`、`/api/agent-profiles/...` | 运行时类型和内置运行时（Re-detect 重新探测）；注册、修改和删除提供方（API key 打码）和 Agent Profile，并写明各自被谁使用 |
 | 配置迁移 | `GET /api/config/export`、`/api/config/imports/...` | 下载配置文件；上传配置文件、预览，再应用或取消 |
-| 对话 | `/api/chat/send`、`/api/chat/targets`、`/api/chat/messages`、`/api/chat/events` | 与 Manager 或运行中任务的 Planner 对话；历史和 SSE 流 |
+| 对话 | `/api/chat/send`、`/api/chat/targets`、`/api/chat/sessions`、`/api/chat/messages`、`/api/chat/events` | 与 Manager 或运行中任务的 Planner 对话；按渠道列出 Manager 的对话；历史和 SSE 流 |
 | 运行记录 | `/api/llm-records/...`、`/api/agents/:id/usage` | 每次 agent 运行的启动命令、用量、花费和事件；单个 agent 的花费和上下文 |
-| 渠道 | `/api/channel-configs/...` | Telegram 和飞书的设置及发送者名单 |
+| 渠道 | `/api/channel-configs/...`、`/api/channels/lark/...` | Telegram 和飞书的设置、Telegram bot token（接口不返回）和发送者名单；飞书机器人的状态、被拒的发送者和按人搜索 |
 
 各接口的字段和错误说明见 [HTTP API 参考](docs/architecture/agent-system.md#http-api)。
 
@@ -222,23 +223,27 @@ API 只响应控制台和本机客户端：来自其他网站页面的请求（�
 | 变量 | 必需 | 说明 |
 |---|---|---|
 | `LOOPER_DATABASE_URL` | 是 | PostgreSQL 连接串 |
+| `LOOPER_PUBLIC_URL` | 否 | 用户打开控制台时用的地址（例如 `https://looper.example.com`），用于任务结束通知和定时任务消息发到 Telegram、飞书里的链接；不设置时用服务自己的 `http://<host>:<port>`。值无效时 `looper serve` 不会启动 |
 | `LOOPER_SCHEDULE_MIN_INTERVAL_SECONDS` | 否 | 只用于测试和验证：定时任务两次触发之间的最小间隔（默认 300 秒），启动时读取 |
 
 `claude` 进程继承服务的环境变量，所以 Claude CLI 的认证方式和你在 shell 里一样：已登录，或按它自己的文档使用 API key。
 
-渠道凭据也通过环境变量提供，具体用哪些由 Settings 页决定（见[渠道](#渠道)）。密钥放在 `.env` 里（已被 git 忽略，从仓库根目录读取），不要写进源码。
+渠道凭据不写进源码：Telegram 的 bot token 在 Settings 里填写或放在环境变量里，飞书凭据由 `lark-cli` 保管（见[渠道](#渠道)）。密钥放在 `.env` 里（已被 git 忽略，从仓库根目录读取），不要写进源码。
 
 ### 渠道
 
-网页对话始终开启。Telegram 和飞书是内置渠道，不需要命令行参数：在控制台的 **Settings** 页开启并配置。设置保存在 `channel_configs` 表里，服务启动时读取，所以改动后要重启 `looper serve`。表里保存的是环境变量的**名字**，不是密钥本身。
+网页对话始终开启。Telegram 和飞书是内置渠道，不需要命令行参数：在控制台的 **Settings** 页开启并配置。设置保存在数据库里，服务启动时读取，所以改动后要重启 `looper serve`。Telegram 的 bot token 与设置分开保存，接口不返回，导出也不包含。
 
 | 渠道 | Settings 字段 | 另外需要 |
 |---|---|---|
-| Telegram | `bot_token_env`：存放 bot token 的环境变量（默认 `LOOPER_TELEGRAM_BOT_TOKEN`）。`allowed_user_ids`：允许和 bot 对话的 Telegram 数字用户 ID。 | 该环境变量里的 token。 |
-| 飞书（lark-cli） | `profile`：lark-cli 的 profile，决定用哪个应用和机器人（为空用 lark-cli 当前的）。`allowed_open_ids`：发送者在该应用下的飞书 `open_id`（`ou_...`）；Settings → Channels 可按姓名或邮箱查找，并列出被拒的发送者以便允许。只处理私聊。 | `PATH` 上有 `lark-cli` 并已登录；消息由它收发，启动时核对机器人身份。 |
+| Telegram | **Bot token**：BotFather 给的 token，单独保存，只显示是否已保存。`bot_token_env`：没有保存 token 时读取的环境变量（默认 `LOOPER_TELEGRAM_BOT_TOKEN`）。`allowed_user_ids`：允许和 bot 对话的 Telegram 数字用户 ID。 | 无，或者该环境变量里的 token。 |
+| 飞书（lark-cli） | `profile`：lark-cli 的 profile，决定用哪个应用和机器人（为空用 lark-cli 当前的）。`allowed_open_ids`：发送者在该应用下的飞书 `open_id`（`ou_...`）；Settings → Channels 可按姓名或邮箱查找，并列出被拒的发送者以便允许。处理私聊，群聊里只处理 @ 机器人的消息。 | `PATH` 上有 `lark-cli` 并已登录；消息由它收发，启动时核对机器人身份。 |
 
 - 每个 agent 运行 Claude Code 时都不弹权限确认，所以 Manager 能在这台机器上执行任何命令。因此每个渠道只转发名单上的发送者：其他人的消息会被丢弃并记一行日志（只记发送者 ID），不回复。名单为空或格式不对的渠道不会启动，Settings 页会写明原因。`LOOPX_TELEGRAM_ALLOWED_USERS` 已不再生效。
 - 飞书凭据由 `lark-cli` 保管；渠道的 `profile`（或 lark-cli 当前的 profile）决定以哪个应用的身份收发（`lark-cli whoami`）。open_id 因应用而异，所以白名单记下它是为哪个应用建的，换到别的应用后不启动，直到重建名单。
+- Manager 处理名单上发送者的消息时，机器人先给这条消息加一个表情（Telegram 私聊里是 👀，飞书里是「Get」），再用一条原地编辑的状态消息显示进展；回答和任务进度各自单独发消息。
+- 在飞书群里，机器人只回答名单上的发送者 @ 它的消息，回复那条消息，并把任务进度和结束通知发到群里、@ 发起人。其他群消息一律忽略。
+- 在 Telegram 或飞书里发起的任务完成或失败时，会在同一个聊天里通知，并附任务链接（见 `LOOPER_PUBLIC_URL`）。Telegram 私聊和飞书的对话会入库，在 Chat 页只读显示，并带进 Manager 新会话的续接简报。
 - 在网页对话、飞书或 Telegram 里单独发送 `/new`，Manager 就开始新会话：下一条消息（不论来自哪个渠道）从全新的上下文开始。网页对话的 **New session** 按钮发的就是它。运行中的任务不受影响。
 - 渠道启动失败会记日志，控制台照常运行。
 
