@@ -245,3 +245,16 @@ def test_the_codex_login_check_is_skipped_without_a_profile_and_fails_on_a_fork(
     assert bool(probed) == (bool(profiles) and problem is None)  # `codex login status` only when it matters
     if problem is not None:
         assert "a copy" in check.detail and "codex login status" in check.fix
+
+
+def test_the_homes_of_runs_that_keep_their_sessions_are_inspected_too(tmp_path: Path) -> None:
+    from looper.agents.runtimes import codex_login
+
+    target = tmp_path / "auth.json"
+    target.write_text("{}")
+    home = tmp_path / "codex" / codex_login.RUN_SESSIONS / "task-1" / "worker-1"
+    home.mkdir(parents=True)
+    (home / codex_login.LOGIN_FILE).write_text("{}")  # a copy in place of the link
+    problems = codex_login.inspect_homes(tmp_path / "codex", target)
+    assert [p.home for p in problems] == [home]
+    assert (home / codex_login.LOGIN_FILE).is_symlink()

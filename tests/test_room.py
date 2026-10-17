@@ -231,3 +231,19 @@ def test_a_reminder_waits_for_a_tool_call_and_comes_at_most_once_a_minute(tmp_pa
         assert not await pool.remind("w2", "a run without a room")
 
     asyncio.run(run())
+
+
+def test_kept_run_sessions_go_with_their_task(tmp_path: Any) -> None:
+    from looper.agents.room import remove_run_sessions, run_session_dir, sweep_run_sessions
+
+    assert run_session_dir(tmp_path, "claude-code", "task-a", "worker-1") is None  # it keeps its own
+    dirs = {(kind, task): run_session_dir(tmp_path, kind, task, "worker-1")
+            for kind in ("codex", "omp") for task in ("task-a", "task-b", "task-c")}
+    for directory in dirs.values():
+        assert directory is not None
+        directory.mkdir(parents=True)
+    remove_run_sessions(tmp_path, "task-a")
+    assert not any(dirs[(kind, "task-a")].exists() for kind in ("codex", "omp"))
+    removed = sweep_run_sessions(tmp_path, keep=["task-b"])
+    assert sorted(p.name for p in removed) == ["task-c", "task-c"]
+    assert all(dirs[(kind, "task-b")].exists() for kind in ("codex", "omp"))
