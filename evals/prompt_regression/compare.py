@@ -257,12 +257,13 @@ def markdown(new: Mapping[str, Any], base: Mapping[str, Any] | None = None) -> s
     else:
         # Both totals over the same tasks, so the row never puts one set of tasks next to another.
         shared = [task_id for task_id in new_groups if task_id in base_groups]
-        total = _changed(_total({i: base_groups[i] for i in shared}, columns),
-                         _total({i: new_groups[i] for i in shared}, columns))
-        label = ("**total**" if len(shared) == len(new_groups) == len(base_groups)
-                 else f"**total ({_count(len(shared), 'shared ' + kind)})**")
-        lines.append(f"| {label} | " + " | ".join(total) + " |")
-        if len(shared) < len(new_groups):
+        if shared:  # with none shared there is nothing to compare: the new run's own total and the notes say it
+            total = _changed(_total({i: base_groups[i] for i in shared}, columns),
+                             _total({i: new_groups[i] for i in shared}, columns))
+            label = ("**total**" if len(shared) == len(new_groups) == len(base_groups)
+                     else f"**total ({_count(len(shared), 'shared ' + kind)})**")
+            lines.append(f"| {label} | " + " | ".join(total) + " |")
+        if not shared or len(shared) < len(new_groups):
             lines.append(f"| **total (all {_count(len(new_groups), kind)} of the new run)** | "
                          + " | ".join(_total(new_groups, columns)) + " |")
     if notes := _notes(new, base):
