@@ -1129,7 +1129,7 @@ class ClaudeRunRecorder:
                 model=self._model,
                 error=error or (None if succeeded else f"Claude run ended: {result.get('subtype') or 'no result'}"),
                 outcome=outcome,
-                metadata=notes or None,
+                **({"metadata": notes} if notes else {}),
             )
         except Exception:
             logger.warning("could not close llm record for %s", self._agent_id, exc_info=True)

@@ -280,6 +280,17 @@ def _flag(argv: list[str], name: str) -> str | None:
     return argv[argv.index(name) + 1] if name in argv else None
 
 
+def _assert_unrestricted(argv: list[str]) -> None:
+    """The shared permission flags, once, and nothing that narrows the tools or the permissions again (every role but
+    the Planner)."""
+    from looper.agents.claude_cli import permission_args
+
+    flags = permission_args()
+    assert any(argv[i:i + len(flags)] == flags for i in range(len(argv)))
+    assert argv.count("--dangerously-skip-permissions") == 1
+    assert not {"--tools", "--allowedTools", "--disallowedTools", "--permission-mode"} & set(argv)
+
+
 def _assert_read_only(argv: list[str]) -> None:
     """A Planner's read-only flags, once: Claude Code's default permission mode, pinned and with no one to answer its
     prompts, without the file-editing tools, with its skills and web reads (and its MCP servers) allowed; nothing
@@ -616,7 +627,7 @@ class TestReadOnly:
         notes = [c.kwargs.get("metadata") for c in agent_db.finish_record.await_args_list]
         if enforced:
             # Claude Code refuses such a change itself: the Planner does not look.
-            assert reported == [] and not any(notes)
+            assert reported == [] and not any(notes)  # no metadata passed at all
             return
         # The plan turn wrote the file; the decision turn changed nothing (s1's Worker had finished by then).
         assert reported == ["Warning: files changed in the task directory during a Planner turn, while no Worker, "

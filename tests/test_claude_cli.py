@@ -87,7 +87,7 @@ class TestClaudeRunRecorder:
             "completed", "hi", "claude-x", "s-1")
         assert (finish["input_tokens"], finish["output_tokens"], finish["cost_usd"]) == (12, 3, 0.5)
         assert finish["error"] is None
-        assert finish["metadata"] is None  # nothing refused, nothing changed: the record's metadata is as it was
+        assert "metadata" not in finish  # nothing refused, nothing checked: the record's metadata is as it was
 
     def test_the_calls_a_run_was_refused_and_how_a_turn_was_checked_are_kept(self, agent_db: Any) -> None:
         recorder = self._recorder()

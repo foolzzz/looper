@@ -222,16 +222,17 @@ _PLANNER_TOOLS_LINE = (
     "or\n  reports the tool calls that would change files.\n")
 
 
-def read_only_planner(expected: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
-    """The fixture's captures with each Planner's read-only flags in place of its permission flag and its role
-    prompt's line on its tools as it reads now; the other roles' as they were."""
+def read_only_planner(expected: dict[str, dict[str, Any]], *, recommended: bool = True) -> dict[str, dict[str, Any]]:
+    """The fixture's captures with each Planner's read-only flags in place of its permission flag and, when it ran the
+    recommended role prompt (``recommended``), that prompt's line on its tools as it reads now; the other roles' as
+    they were."""
     then, now = _PLANNER_PERMISSIONS
     result = {}
     for case, seen in expected.items():
         if case.partition("@")[0] == "planner":
             at = seen["argv"].index(then[0])
             prompt = seen["system_prompt"]
-            assert prompt.count(_PLANNER_TOOLS_LINE[0]) == 1, case
+            assert prompt.count(_PLANNER_TOOLS_LINE[0]) == int(recommended), case
             seen = {**seen, "argv": [*seen["argv"][:at], *now, *seen["argv"][at + len(then):]],
                     "system_prompt": prompt.replace(*_PLANNER_TOOLS_LINE)}
         result[case] = seen
