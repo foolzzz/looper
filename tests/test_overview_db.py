@@ -95,8 +95,9 @@ def test_every_task_is_counted_by_group_and_the_tasks_page_lists_a_group(monkeyp
 
         status, body = await _get(_server(), "/api/overview")
         assert status == 200
-        assert body["tasks"] == {"in_progress": 5, "queued": 2, "ready": 3, "attention": 2, "completed": 205,
-                                 "cancelled": 1, "other": 1, "total": total, "other_statuses": {"archived": 1}}
+        assert body["tasks"] == {"needs_you": 0, "in_progress": 5, "queued": 2, "ready": 3, "attention": 2,
+                                 "completed": 205, "cancelled": 1, "other": 1, "total": total,
+                                 "other_statuses": {"archived": 1}}
         # The CLI's status line reads the same counts.
         status, body = await _get(_server(), "/api/status")
         assert body["tasks"] == {"total": total, "running": 5, "pending": 2, "completed": 205}
