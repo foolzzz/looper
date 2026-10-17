@@ -261,7 +261,9 @@ def test_the_planner_defines_roles_with_its_tools_and_a_refused_definition_chang
     detail = ran["first"]["roles"]
     assert detail["status"] == "completed", ran["log"][-3000:]
     listed = _log(ran["state"], "planner.jsonl", "roles")[0]
-    assert listed["tools"][-2:] == ["looper_task_roles", "looper_task_role_set"]
+    # The role tools, then the agent room's (on by default).
+    assert listed["tools"][-6:-4] == ["looper_task_roles", "looper_task_role_set"]
+    assert listed["tools"][-4:] == ["looper_room_roster", "looper_room_post", "looper_room_inbox", "looper_room_read"]
     assert "looper_task_role_set" in listed["prompt"] and ROLES_GUIDE in listed["prompt"]
     assert "\"review_role_required\": false makes the" in listed["prompt"]
     answers = [(c["arguments"].get("id"), c["answer"]["status"]) for c in _calls(ran, "roles")

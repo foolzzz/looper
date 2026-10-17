@@ -110,6 +110,7 @@ class ClaudeCodeRuntime(RuntimeAdapter):
     # Verified against Claude Code 2.1.285 (claude_cli); its replies follow Looper's contracts by prompt, so no
     # structured_output.
     capabilities = frozenset(set(Capability) - {Capability.STRUCTURED_OUTPUT})
+    run_input = True  # stdin stays open until the run's first result
     protocols = frozenset({ApiProtocol.ANTHROPIC_MESSAGES})
     # Its own login (the Claude subscription), and an API key for Anthropic's API or an Anthropic-format endpoint.
     auth_kinds = frozenset({AuthKind.OAUTH, AuthKind.API_KEY})
