@@ -34,7 +34,7 @@ from .tiers.task import TaskRouter
 from .tiers.worker import WorkerPool
 
 # A project with a task in one of these groups is shown; the others are idle.
-_ACTIVE_GROUPS = (TaskGroup.IN_PROGRESS, TaskGroup.READY)
+_ACTIVE_GROUPS = (TaskGroup.NEEDS_YOU, TaskGroup.IN_PROGRESS, TaskGroup.READY)
 
 
 def group_counts(rows: list[dict[str, Any]]) -> dict[str, Any]:

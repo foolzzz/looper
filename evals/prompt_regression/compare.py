@@ -25,6 +25,7 @@ _TASK_COLUMNS: tuple[tuple[str, str], ...] = (
     ("parallel Workers", "parallel_workers"),
     ("retries", "retries"),
     ("reviews", "reviews"),
+    ("gates", "gates_opened"),
     ("contract violations", "violations"),
     ("Planner file edits", "planner_modified_files"),
     ("tokens (prompt / output)", "tokens"),

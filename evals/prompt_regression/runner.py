@@ -45,7 +45,7 @@ from typing import Any
 
 from . import metrics
 from . import tasks as task_list
-from .tasks import CHOSEN_PROFILE, EvalTask
+from .tasks import CHOSEN_PROFILE, DEFAULT_GATE_SCRIPT, END_DISCUSSION, EvalTask
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 FAKE_CLAUDE = Path(__file__).resolve().with_name("fake_claude.py")
@@ -329,13 +329,18 @@ def run_task(
     settle: float = 15.0,
     step_workspaces: str | None = None,
     chosen_profile_id: str | None = None,
+    user_gates: str | None = None,
 ) -> dict[str, Any]:
     """Create and start ``task`` in ``work_dir``, wait until it ends, and read back what it shows.
 
     The task is cancelled when its cost reaches ``cap_left`` or it runs longer
     than ``timeout`` seconds. With ``step_workspaces``, ``work_dir`` is a git
     repository and the task's project has that setting. A task whose Planner may
-    choose a profile gets ``chosen_profile_id`` on its project's list first.
+    choose a profile gets ``chosen_profile_id`` on its project's list first. A
+    task that asks for gates has them on in its project, whatever ``user_gates``
+    says; another task's project has ``user_gates`` (``on`` or ``off``) when
+    given. While one of its gates waits for the user, the runner answers it from
+    the task's script (``answer_gates``).
     """
     work_dir.mkdir(parents=True, exist_ok=True)
     for name, content in task.files.items():
@@ -356,7 +361,11 @@ def run_task(
             api.put(f"/api/projects/{created['project_id']}/allowed-profiles", {"profile_ids": [chosen_profile_id]})
         if task.roles_on:
             api.put(f"/api/projects/{created['project_id']}", {"planner_roles": "on"})
+        gates = "on" if task.user_gates else user_gates
+        if gates is not None:
+            api.put(f"/api/projects/{created['project_id']}", {"user_gates": gates})
         api.post("/api/tasks/start", {"task_id": task_id})
+        answered: dict[str, int] = {}  # each gate's script entries posted so far
 
         chat_pending = task.chat is not None
         edit_pending = task.edit_requirement is not None
@@ -373,6 +382,8 @@ def run_task(
             elif time.monotonic() - started > timeout and not timed_out:
                 timed_out = True
                 api.post("/api/tasks/cancel", {"task_id": task_id})
+            elif answer_gates(api, task, task_id, detail, answered, now=time.time() + clock_offset):
+                pass  # the user answered a gate; look again at the next poll
             elif chat_pending and detail.get("steps") and detail.get("phase") in ("executing", "verifying"):
                 try:
                     api.post("/api/chat/send", {"text": task.chat, "target": {"kind": "planner", "task_id": task_id}})
@@ -405,6 +416,8 @@ def run_task(
             check_problem=task.check(work_dir),
             expect=task.expect,
             disciplines=task.disciplines,
+            # The gates the runner ended because the Planner asked again after the script ran out.
+            gate_asks_beyond_script=sum(1 for done in answered.values() if done > len(_script(task))),
             clock_offset=clock_offset,
             now=time.time() + clock_offset,
         )
@@ -424,6 +437,40 @@ def run_task(
     if timed_out:
         return {**row, **error_row(ErrorClass.TIMEOUT, f"cancelled after {timeout:g} s")}
     return {**row, "outcome": (Outcome.PASS if result["success"] else Outcome.FAIL).value}
+
+
+def _script(task: EvalTask) -> tuple[str, ...]:
+    """What the user answers in ``task``'s gates, in turn (``DEFAULT_GATE_SCRIPT`` without a script)."""
+    return task.gate_script or DEFAULT_GATE_SCRIPT
+
+
+def answer_gates(api: Api, task: EvalTask, task_id: str, detail: dict[str, Any], answered: dict[str, int], *,
+                 now: float) -> bool:
+    """Play the user: post the next entry of ``task``'s gate script (``_script``) in each of the task's gates that
+    waits for the user, once it has waited ``gate_reply_after_s`` since it opened; ``END_DISCUSSION`` ends the
+    discussion, and so does a gate that asks again after the script ran out (so the task ends instead of waiting
+    for its timeout). Whether anything was posted."""
+    script = _script(task)
+    posted = False
+    for gate in detail.get("gates") or []:
+        label, done = gate.get("step"), answered.get(gate.get("step"), 0)
+        if gate.get("waiting_on") != "user" or done > len(script) or (done == len(script) and
+                                                                     script[-1] == END_DISCUSSION):
+            continue
+        opened = metrics.timestamp(gate.get("opened_at")) or now
+        if now - opened < task.gate_reply_after_s:
+            continue
+        entry = script[done] if done < len(script) else END_DISCUSSION
+        try:
+            if entry == END_DISCUSSION:
+                api.post(f"/api/tasks/{task_id}/gates/{label}/end", {})
+            else:
+                api.post(f"/api/tasks/{task_id}/gates/{label}/messages", {"text": entry})
+        except EvalError:
+            continue  # it stopped waiting meanwhile; look again at the next poll
+        answered[label] = done + 1
+        posted = True
+    return posted
 
 
 def _cancel_after_error(api: Api, task_id: str) -> float:
@@ -446,7 +493,8 @@ def _cancel_after_error(api: Api, task_id: str) -> float:
 TASK_SETS: dict[str, tuple[str, ...]] = {
     # The tasks whose pass or fail turns on the Planner's judgment: the opus tier (evals/README.md).
     "planner": ("dependent_steps", "parallel_parts", "interface_first", "supplement_replan", "supplement_no_change",
-                "requirement_edit", "roles_tester_docs", "roles_not_needed", "roles_multi_platform"),
+                "requirement_edit", "roles_tester_docs", "roles_not_needed", "roles_multi_platform", "gate_ambiguous",
+                "gate_not_needed", "gate_parallel_branch", "gate_discoverable"),
 }
 
 
@@ -561,6 +609,7 @@ def run(
     keep_work_dirs: bool = False,
     step_workspaces: str | None = None,
     reps: int = 1,
+    user_gates: str | None = None,
 ) -> tuple[dict[str, Any], Path]:
     """Run ``tasks`` ``reps`` times each in ``mode`` (``fake`` or ``real``); returns the run and the JSON file
     written to ``out_dir``. Each (task, rep) runs in a working directory of its own, ``<root>/work/<task>/<rep>``.
@@ -572,6 +621,7 @@ def run(
     agent. ``register`` registers an agent first (``register_agent``), which every role then runs. With a
     provider or a registered agent, Looper prices the runs at its prices, so ``max_budget_usd`` is the per-run
     cap Looper keeps (the system layer's ``run_budget_usd``) instead of Claude Code's ``--max-budget-usd``.
+    ``user_gates`` (``on`` or ``off``) is the setting of every task's project but a gate task's, which has them on.
     """
     if mode not in ("fake", "real"):
         raise EvalError(f"mode must be fake or real, not {mode!r}")
@@ -625,7 +675,7 @@ def run(
                 lambda task, rep, cap_left: run_task(api, task, work_dirs[task.id, rep], timeout=timeout, poll=poll,
                                                      cap_left=cap_left, clock_offset=clock_offset,
                                                      step_workspaces=step_workspaces,
-                                                     chosen_profile_id=chosen_profile_id),
+                                                     chosen_profile_id=chosen_profile_id, user_gates=user_gates),
                 total_cap_usd=total_cap_usd,
                 reps=reps,
                 results=results,
@@ -648,6 +698,7 @@ def run(
             "git": git,
             "caps": {"max_budget_usd": max_budget_usd, "total_cap_usd": total_cap_usd},
             "step_workspaces": step_workspaces,
+            "user_gates": user_gates,
             "reps": reps,
             "stopped_by_cap": stopped,
             "aborted": aborted,

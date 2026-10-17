@@ -75,7 +75,9 @@ class _PlanStore:
     journal entry gets an id; a supplement (``add_supplement``) is pending
     until ``mark_delivered``, and ``requirements`` holds a task's requirement
     edit not delivered yet (``task_changes.RequirementEdit``), as
-    ``task_changes.pending`` reads them.
+    ``task_changes.pending`` reads them. ``gates`` holds each task's user gates
+    by step id and ``gate_messages`` their discussions, written and read the
+    way ``user_gates`` writes and reads them.
     """
 
     def __init__(self) -> None:
@@ -88,6 +90,8 @@ class _PlanStore:
         self.workspaces: dict[int, dict[str, Any]] = {}  # step_workspaces rows by id
         self.workspace_ids = 0
         self.requirements: dict[str, Any] = {}
+        self.gates: dict[str, dict[str, dict[str, Any]]] = {}
+        self.gate_messages: list[dict[str, Any]] = []
         self._ids = iter(range(1, 1_000_000))
 
     async def add_supplement(self, task_id: str, text: str, *, via: str, **_: object) -> int:
@@ -124,14 +128,91 @@ class _PlanStore:
     async def start_ready_task(self, task_id: str, **_: object) -> dict[str, Any] | None:
         return self.ready.pop(task_id, None)
 
-    async def save(self, task_id: str, *, plan: Any = None, steps: Any = (), journal: Any = (), **_: object) -> None:
+    async def save(self, task_id: str, *, plan: Any = None, steps: Any = (), journal: Any = (), gates: Any = (),
+                   gate_messages: Any = (), **_: object) -> None:
         if plan is not None:
             self.plans[task_id] = json.loads(json.dumps(dict(plan)))
         for step in steps:
             self.steps.setdefault(task_id, {})[step["id"]] = json.loads(json.dumps(dict(step)))
         for entry in journal:
             self.journal.setdefault(task_id, []).append({"id": next(self._ids), "delivered": True,
-                                                         **json.loads(json.dumps(dict(entry)))})
+                                                         **json.loads(json.dumps(dict(entry), default=str))})
+        for gate in gates:
+            stored = self.gates.setdefault(task_id, {}).get(gate["step_id"])
+            if stored is not None and stored["state"] in ("passed", "cancelled", "skipped"):
+                continue  # a closed gate stays as it closed
+            row = {"task_id": task_id, "first_reply_at": None, "reminders": 0, **(stored or {}), **dict(gate)}
+            if stored is not None:
+                if gate["state"] == "open" and stored["state"] == "discussing":
+                    row["state"] = "discussing"
+                row["delivered_through"] = max(stored["delivered_through"], gate["delivered_through"])
+                row["opened_at"] = stored["opened_at"] or gate["opened_at"]
+            self.gates[task_id][gate["step_id"]] = row
+        for message in gate_messages:
+            self.gate_messages.append({"id": next(self._ids), "task_id": task_id, "author": None, "via": "",
+                                       "agenda_item": None, "option": None, "created_at": None, **dict(message)})
+        for gate in gates:
+            row = self.gates[task_id][gate["step_id"]]
+            late = [m for m in self.gate_messages if m["step_id"] == row["step_id"] and m["role"] == "user"
+                    and m["id"] > row["delivered_through"]]
+            if row["state"] in ("passed", "cancelled", "skipped") and late:
+                # As ``user_gates._keep_late``: what reached the gate as it closed becomes a supplement.
+                from looper.db.user_gates import LATE_VIA, late_text
+
+                label = self.steps.get(task_id, {}).get(row["step_id"], {}).get("key", "")
+                texts = [text for m in late if (text := late_text(label, m))]
+                for text in texts:
+                    self.journal.setdefault(task_id, []).append({
+                        "id": next(self._ids), "step_id": row["step_id"], "kind": "supplement", "summary": text,
+                        "learnings": [], "via": LATE_VIA, "delivered": False})
+                if texts:
+                    self.gate_messages.append({
+                        "id": next(self._ids), "task_id": task_id, "step_id": row["step_id"], "role": "looper",
+                        "kind": "late", "text": f"{len(texts)} message(s) reached this gate as it closed",
+                        "author": None, "via": "", "agenda_item": None, "option": None, "created_at": None})
+                row["delivered_through"] = max(m["id"] for m in late)
+
+    def _gate_row(self, task_id: str, row: dict[str, Any]) -> dict[str, Any]:
+        step = self.steps.get(task_id, {}).get(row["step_id"], {})
+        undelivered = [m["id"] for m in self.gate_messages if m["step_id"] == row["step_id"] and m["role"] == "user"
+                       and m["id"] > row["delivered_through"]]
+        failed_through = row.get("failed_through") or 0
+        return {**row, "step_key": step.get("key", ""), "step_index": step.get("index", 0),
+                "depends_on": list(step.get("depends_on") or []),
+                "waiting_for_planner": any(i > failed_through for i in undelivered),
+                "not_delivered": sum(1 for i in undelivered if i <= failed_through)}
+
+    async def list_gates(self, task_id: str, **_: object) -> list[dict[str, Any]]:
+        rows = [self._gate_row(task_id, row) for row in self.gates.get(task_id, {}).values()]
+        return sorted(rows, key=lambda row: row["step_index"])
+
+    async def get_gate(self, task_id: str, label: str, **_: object) -> dict[str, Any] | None:
+        return next((row for row in await self.list_gates(task_id) if row["step_key"] == label), None)
+
+    async def pending_gate_messages(self, task_id: str, **_: object) -> list[dict[str, Any]]:
+        gates = self.gates.get(task_id, {})
+        return [dict(m) for m in self.gate_messages if m["role"] == "user" and m["step_id"] in gates
+                and gates[m["step_id"]]["state"] in ("open", "discussing")
+                and m["id"] > gates[m["step_id"]]["delivered_through"]]
+
+    async def gate_thread(self, step_id: str, **_: object) -> list[dict[str, Any]]:
+        return [dict(m) for m in self.gate_messages if m["step_id"] == step_id]
+
+    async def add_gate_message(self, task_id: str, label: str, message: Any, **_: object) -> tuple[Any, Any]:
+        """The user writes ``message`` in the task's gate ``label``, as ``user_gates.add_user_message`` adds it."""
+        gate = await self.get_gate(task_id, label)
+        if gate is None:
+            return None, None
+        row = self.gates[task_id][gate["step_id"]]
+        if row["state"] not in ("open", "discussing"):
+            return gate, None
+        row["state"] = "discussing"
+        row["first_reply_at"] = row.get("first_reply_at") or "2026-10-17T00:00:00+00:00"
+        added = {"id": next(self._ids), "step_id": gate["step_id"], "task_id": task_id, "role": "user",
+                 "kind": "message", "author": None, "via": "dashboard", "agenda_item": None, "option": None,
+                 "created_at": None, **dict(message)}
+        self.gate_messages.append(added)
+        return await self.get_gate(task_id, label), dict(added)
 
     async def load(self, task_id: str, **_: object) -> dict[str, Any] | None:
         if task_id not in self.plans:
@@ -145,7 +226,8 @@ class _PlanStore:
                 **{k: task.get(k, "") for k in ("requirement", "goal_id", "work_dir", "project_id")}}
         keys = {step["id"]: step["key"] for step in self.steps.get(task_id, {}).values()}
         journal = [{**entry, "step_key": keys.get(entry["step_id"], "")} for entry in self.journal.get(task_id, [])]
-        return {"plan": plan, "steps": rows, "journal": journal}
+        gates = {row["step_id"]: row for row in await self.list_gates(task_id)}
+        return {"plan": plan, "steps": rows, "journal": journal, "gates": gates}
 
     async def next_workspace_id(self, **_: object) -> int:
         self.workspace_ids += 1
@@ -404,6 +486,7 @@ def agent_db(monkeypatch: pytest.MonkeyPatch, stub_claude_on_path: Path) -> Simp
         monkeypatch.setattr(importlib.import_module(f"looper.db.{module_name}"), function, mock)
         setattr(db, function, mock)
     from looper.db import agent_sessions, journal as db_journal, plans, step_workspaces, task_changes, tasks
+    from looper.db import user_gates
 
     db.store = store = _PlanStore()
     for module, name, function, method in (
@@ -420,6 +503,11 @@ def agent_db(monkeypatch: pytest.MonkeyPatch, stub_claude_on_path: Path) -> Simp
         (task_changes, "pending_changes", "pending", store.pending),
         (task_changes, "mark_delivered", "mark_delivered", store.mark_delivered),
         (db_journal, "list_entries", "list_entries", store.list_entries),
+        (user_gates, "list_gates", "list_for_task", store.list_gates),
+        (user_gates, "get_gate", "get", store.get_gate),
+        (user_gates, "pending_gate_messages", "pending", store.pending_gate_messages),
+        (user_gates, "gate_thread", "thread", store.gate_thread),
+        (user_gates, "add_gate_message", "add_user_message", store.add_gate_message),
     ):
         mock = AsyncMock(side_effect=method)
         monkeypatch.setattr(module, function, mock)

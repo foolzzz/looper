@@ -302,10 +302,12 @@ def test_comparison_marks_what_changed_and_sums_the_run() -> None:
     lines = table.splitlines()
     assert lines[0] == "Prompt eval: real/haiku @ abcdef123 (1 rep) → real/haiku @ abcdef123+local changes (1 rep)"
     # A run from before tokens were read has none: only the new side shows them.
-    assert "| single_step | 1/1 | 1.0 | – | 0.0 | 0.0 | 0.0 | 0.0 | – → **32k / 2.5k** | 0.0200 → **0.0300** |" in lines
-    assert "| chat_correction | 1/1 → **0/1** | 1.0 | – | 0.0 | 0.0 | 0.0 → **2.0** | 0.0 | – | 0.0200 |" in lines
-    assert ("| **total** | 2/2 (100%, 34–100%) → **1/2 (50%, 9–91%)** | 2.0 | – | 0.0 | 0.0 | 0.0 → **2.0** | 0.0 "
-            "| – → **32k / 2.5k** | 0.0400 → **0.0500** |" in lines)
+    # A run from before gates were counted has none either.
+    assert ("| single_step | 1/1 | 1.0 | – | 0.0 | 0.0 | – | 0.0 | 0.0 | – → **32k / 2.5k** | 0.0200 → **0.0300** |"
+            in lines)
+    assert "| chat_correction | 1/1 → **0/1** | 1.0 | – | 0.0 | 0.0 | – | 0.0 → **2.0** | 0.0 | – | 0.0200 |" in lines
+    assert ("| **total** | 2/2 (100%, 34–100%) → **1/2 (50%, 9–91%)** | 2.0 | – | 0.0 | 0.0 | – | 0.0 → **2.0** "
+            "| 0.0 | – → **32k / 2.5k** | 0.0400 → **0.0500** |" in lines)
     assert "- pass rate changed: chat_correction 1/1 → 0/1" in lines
     assert "- the base and the new run ran each case once: a pass or fail per case is a single sample" in lines
     assert "- chat_correction: color.txt holds 'red', expected 'blue'" in lines
@@ -317,8 +319,8 @@ def test_comparison_without_a_base_and_with_skipped_tasks() -> None:
     lines = compare.markdown(new).splitlines()
     assert lines[0].endswith("(no earlier run to compare with)")
     assert ("| chat_correction | skipped | skipped | skipped | skipped | skipped | skipped | skipped | skipped "
-            "| skipped |" in lines)
-    assert "| **total** | 1/1 (100%, 21–100%) | 1.0 | – | 0.0 | 0.0 | 0.0 | 0.0 | – | 0.0200 |" in lines
+            "| skipped | skipped |" in lines)
+    assert "| **total** | 1/1 (100%, 21–100%) | 1.0 | – | 0.0 | 0.0 | – | 0.0 | 0.0 | – | 0.0200 |" in lines
     assert "- stopped at the spending cap (0.8 USD)" in lines
 
 
@@ -343,17 +345,17 @@ def test_comparison_of_repeated_runs_counts_the_scored_reps_and_keeps_errors_apa
                                        "error": "EvalError: GET /api/tasks/t answered 500"})]}
     lines = compare.markdown(new, base).splitlines()
     assert lines[0] == "Prompt eval: real/haiku @ abcdef123 (1 rep) → real/haiku @ abcdef123 (3 reps)"
-    assert "| single_step | 1/1 → **3/3** | 1.0 | – | 0.0 | 0.0 | 0.0 | 0.0 | – | 0.0200 |" in lines
+    assert "| single_step | 1/1 → **3/3** | 1.0 | – | 0.0 | 0.0 | – | 0.0 | 0.0 | – | 0.0200 |" in lines
     # The mean is over the scored reps: the pass and the fail, not the error.
     assert ("| dependent_steps | 0/0 · 1 err → **1/2 · 1 err** | – → **1.5** | – | – → **0.0** | – → **0.0** "
-            "| – → **0.0** | – → **0.0** | – | – → **0.0300** |" in lines)
-    assert "| interface_first | 1/1 · 1 err | 1.0 | – | 0.0 | 0.0 | 0.0 | 0.0 | – | 0.0200 |" in lines
+            "| – | – → **0.0** | – → **0.0** | – | – → **0.0300** |" in lines)
+    assert "| interface_first | 1/1 · 1 err | 1.0 | – | 0.0 | 0.0 | – | 0.0 | 0.0 | – | 0.0200 |" in lines
     # The total adds up the tasks' means (one pass through the set), over the tasks both runs have; the new run's
     # own total follows, as it has a task the base lacks.
     assert ("| **total (2 shared tasks)** | 1/1 (100%, 21–100%) · 1 timeout → **4/5 (80%, 38–96%) · 1 timeout** "
-            "| 1.0 → **2.5** | – | 0.0 | 0.0 | 0.0 | 0.0 | – | 0.0200 → **0.0500** |" in lines)
+            "| 1.0 → **2.5** | – | 0.0 | 0.0 | – | 0.0 | 0.0 | – | 0.0200 → **0.0500** |" in lines)
     assert ("| **total (all 3 tasks of the new run)** | 5/6 (83%, 44–97%) · 1 harness, 1 timeout | 3.5 | – | 0.0 "
-            "| 0.0 | 0.0 | 0.0 | – | 0.0700 |" in lines)
+            "| 0.0 | – | 0.0 | 0.0 | – | 0.0700 |" in lines)
     assert "- pass rate changed: dependent_steps 0/0 → 1/2" in lines
     assert "- the base ran each case once: a pass or fail per case is a single sample" in lines
     assert "- no baseline: interface_first" in lines
@@ -369,8 +371,8 @@ def test_against_a_base_of_more_tasks_the_total_is_over_the_shared_ones() -> Non
     base["tasks"][0]["id"] = "single_step"
     new = {**_run(), "tasks": _reps("single_step", _PASS, {**_PASS, "cost_usd": 0.04})}
     lines = compare.markdown(new, base).splitlines()
-    assert ("| **total (1 shared task)** | 1/1 (100%, 21–100%) → **2/2 (100%, 34–100%)** | 1.0 | – | 0.0 | 0.0 | 0.0 "
-            "| 0.0 | – | 0.0200 → **0.0300** |" in lines)
+    assert ("| **total (1 shared task)** | 1/1 (100%, 21–100%) → **2/2 (100%, 34–100%)** | 1.0 | – | 0.0 | 0.0 | – "
+            "| 0.0 | 0.0 | – | 0.0200 → **0.0300** |" in lines)
     assert not any(line.startswith("| **total (all") for line in lines)  # the new run has no task of its own
     assert "- in the base, not in the new run: task_1, task_2, task_3, task_4, task_5, task_6" in lines
 
@@ -450,6 +452,60 @@ def test_a_task_set_is_resolved_against_the_tasks_there_are(monkeypatch: pytest.
     monkeypatch.setitem(runner.TASK_SETS, "empty", ("no_such_task",))
     with pytest.raises(ValueError, match="none of its tasks"):
         runner.select_tasks(["empty"])
+
+
+class _Poster:
+    """The API as ``answer_gates`` uses it: what it posted."""
+
+    def __init__(self) -> None:
+        self.posted: list[tuple[str, Any]] = []
+
+    def post(self, path: str, body: Any) -> dict[str, Any]:
+        self.posted.append((path, body))
+        return {}
+
+
+def test_the_scripted_user_ends_a_gate_that_asks_again_after_its_script_ran_out() -> None:
+    task = next(t for t in TASKS if t.id == "gate_ambiguous")
+    api, answered = _Poster(), {}
+    waiting = {"gates": [{"step": "g1", "waiting_on": "user", "opened_at": None}]}
+    for _ in range(4):
+        runner.answer_gates(api, task, "t1", waiting, answered, now=0.0)
+    assert api.posted == [("/api/tasks/t1/gates/g1/messages", {"text": task.gate_script[0]}),
+                          ("/api/tasks/t1/gates/g1/end", {})]
+    # A script that ends the discussion itself gets no second end.
+    ends = next(t for t in TASKS if t.id == "gate_end_early")
+    api, answered = _Poster(), {}
+    for _ in range(3):
+        runner.answer_gates(api, ends, "t1", waiting, answered, now=0.0)
+    assert api.posted == [("/api/tasks/t1/gates/g1/end", {})]
+    # Nothing while the gate waits for the Planner.
+    api = _Poster()
+    runner.answer_gates(api, task, "t1", {"gates": [{"step": "g1", "waiting_on": "planner"}]}, {}, now=0.0)
+    assert api.posted == []
+
+
+def test_a_gate_that_asks_after_its_script_ran_out_fails_a_task_that_bounds_it(tmp_path: Path) -> None:
+    task = next(t for t in TASKS if t.id == "gate_ambiguous")
+    assert task.expect["max_gate_asks_beyond_script"] == 0
+
+    def result(asks: int) -> dict[str, Any]:
+        return metrics.task_metrics(detail={"status": "completed", "steps": []}, activity=[], records=[], events={},
+                                    changes={}, work_dir=tmp_path, check_problem=None,
+                                    expect={"max_gate_asks_beyond_script": 0}, gate_asks_beyond_script=asks, now=0.0)
+
+    assert result(0)["success"] and result(0)["gate_asks_beyond_script"] == 0
+    assert result(1)["problems"] == ["gate_asks_beyond_script 1 > 0"]
+
+
+@pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
+def test_a_gate_task_has_gates_on_whatever_user_gates_says(tmp_path: Path) -> None:
+    tasks = runner.select_tasks(["gate_ambiguous"])
+    assert {"gate_ambiguous", "gate_not_needed", "gate_parallel_branch", "gate_discoverable"} <= \
+        set(runner.TASK_SETS["planner"])
+    result, _ = runner.run(mode="fake", tasks=tasks, admin_url=str(DSN), out_dir=tmp_path, user_gates="off")
+    (row,) = result["tasks"]
+    assert row["outcome"] == "pass" and row["gates_opened"] == 1, row["problems"]
 
 
 def test_the_base_is_the_committed_baseline_unless_another_is_named(tmp_path: Path,
@@ -629,7 +685,10 @@ def test_fake_mode_runs_every_task_and_sees_misbehaviour(tmp_path: Path) -> None
                     # The security review role reviews its step after the built-in Reviewer.
                     "roles_tester_docs": (3, 0, 0, 0), "roles_security_review": (1, 0, 2, 0),
                     "roles_advisory_review": (1, 0, 2, 0), "roles_multi_platform": (6, 0, 0, 0),
-                    "roles_not_needed": (1, 0, 0, 0)}
+                    "roles_not_needed": (1, 0, 0, 0),
+                    # A gate is a step; the steps its closing turn added follow it.
+                    "gate_ambiguous": (2, 0, 0, 0), "gate_not_needed": (1, 0, 0, 0), "gate_end_early": (2, 0, 0, 0),
+                    "gate_parallel_branch": (3, 0, 0, 0), "gate_discoverable": (2, 0, 0, 0)}
     # Only the parts that need nothing of each other run side by side; interface_first's sit between its interface
     # step and its integration step.
     shape = {t: (by_id[t]["independent_pairs"], by_id[t]["bracketed_pairs"], by_id[t]["parallel_workers"])
@@ -644,7 +703,10 @@ def test_fake_mode_runs_every_task_and_sees_misbehaviour(tmp_path: Path) -> None
                      "roles_tester_docs": (1, 0, 2), "roles_security_review": (0, 0, 1),
                      "roles_advisory_review": (0, 0, 1), "roles_not_needed": (0, 0, 1),
                      # Its four platform steps run side by side between the interface step and the check.
-                     "roles_multi_platform": (6, 6, 4)}
+                     "roles_multi_platform": (6, 6, 4),
+                     "gate_ambiguous": (0, 0, 1), "gate_not_needed": (0, 0, 1), "gate_end_early": (0, 0, 1),
+                     # The clear part runs beside the gate and then beside the step the gate's answer planned.
+                     "gate_parallel_branch": (2, 0, 2), "gate_discoverable": (0, 0, 1)}
     assert by_id["chat_correction"]["planner_turns"]["chat"] == 1
     # Only the task whose project lets its Planner choose a profile runs a Worker on the one it chose.
     assert {t: by_id[t]["planner_profile_runs"] for t in by_id if by_id[t]["planner_profile_runs"]} == {
@@ -665,6 +727,18 @@ def test_fake_mode_runs_every_task_and_sees_misbehaviour(tmp_path: Path) -> None
         "roles_multi_platform": 4}
     assert {t: by_id[t]["interface_dependents"] for t in by_id if by_id[t]["interface_dependents"]} == {
         "roles_tester_docs": 2, "roles_multi_platform": 4}
+    # Only the gate tasks open gates. The scripted user answers (or ends the discussion), the gate passes on what was
+    # settled (or assumed), and the step it planned reads the conclusion; the step that finds the port cancels the
+    # gate that waits on it before it opens, so no gate asked.
+    gates = {t: tuple(by_id[t][k] for k in ("gates_opened", "gate_turns", "gates_passed", "gates_ended_by_user",
+                                             "gates_cancelled", "assumptions_stated", "gate_parallel_runs",
+                                             "conclusion_reads"))
+             for t in by_id if by_id[t]["gates_opened"]}
+    assert gates == {"gate_ambiguous": (1, 1, 1, 0, 0, 0, 0, 1), "gate_end_early": (1, 1, 1, 1, 0, 1, 0, 1),
+                     "gate_parallel_branch": (1, 1, 1, 0, 0, 0, 1, 1)}
+    assert by_id["gate_discoverable"]["gates_opened"] == 0
+    assert all(by_id[t]["gate_asks_beyond_script"] == 0 for t in by_id)
+    assert by_id["gate_ambiguous"]["planner_turns"]["gate"] == 1
     # Only the two changes that make the second step wrong change the plan.
     assert {t: by_id[t]["plan_changes"] for t in by_id if by_id[t]["plan_changes"]} == {
         "supplement_replan": 1, "requirement_edit": 1}

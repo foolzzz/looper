@@ -45,6 +45,9 @@ class MessageType(str, Enum):
     # Dashboard or Manager → a task's Planner: the task changed (a supplement, a requirement edit); stored first, so
     # this only wakes the Planner, which takes every change waiting.
     TASK_CHANGE = "task_change"
+    # Dashboard → a task's Planner: the user wrote in a user gate's discussion, or ended it; stored first, so this
+    # only wakes the Planner, which takes every message waiting.
+    GATE_MESSAGE = "gate_message"
     TASK_CANCEL = "task_cancel"
     TASK_STOP = "task_stop"
     # Dashboard or Manager → TaskRouter: run a stopped, failed or cancelled task again, as its ``RestartMode`` says.

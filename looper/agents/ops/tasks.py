@@ -353,7 +353,7 @@ async def _confirming(call: Call) -> str | None:
 
 async def _cancellable(task_id: str) -> dict[str, Any]:
     task = await _task(task_id)
-    if _group(task) is not db_tasks.TaskGroup.IN_PROGRESS:
+    if _group(task) not in (db_tasks.TaskGroup.IN_PROGRESS, db_tasks.TaskGroup.NEEDS_YOU):
         raise OpError(ErrorCode.CONFLICT, f"task {task_id} is {task['status']}: only a running task can be "
                                           "cancelled")
     return task

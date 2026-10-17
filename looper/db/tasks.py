@@ -22,6 +22,7 @@ READY = "init"
 class TaskGroup(str, Enum):
     """What a task's status means at a glance: the dashboard counts tasks by group, the Tasks page filters by one."""
 
+    NEEDS_YOU = "needs_you"  # its Planner runs, and a user gate of its plan waits for the user
     IN_PROGRESS = "in_progress"  # its Planner runs, or is starting
     READY = "ready"  # created, never started
     ATTENTION = "attention"  # failed or stopped: it needs a look, a restart or a continue
@@ -39,6 +40,8 @@ STATUS_GROUPS: Mapping[str, TaskGroup] = MappingProxyType({
     "executing": TaskGroup.IN_PROGRESS,
     "verifying": TaskGroup.IN_PROGRESS,
     "stopping": TaskGroup.IN_PROGRESS,
+    # What the Planner reports while a user gate of the plan waits for the user (other steps may run meanwhile).
+    "waiting_user": TaskGroup.NEEDS_YOU,
     # Started, its Planner starting (it used to wait here for room under its project's Planner limit).
     "pending": TaskGroup.IN_PROGRESS,
     READY: TaskGroup.READY,
@@ -54,7 +57,8 @@ PLANNER_END_STATUSES = frozenset({"completed", "failed"})
 
 # A task in one of these is running or starting: the sidebar's active count, the guard on deleting, and what a server
 # start resumes (with a live plan), starts (``pending``) or else marks stopped.
-ACTIVE_STATUSES = tuple(status for status, group in STATUS_GROUPS.items() if group is TaskGroup.IN_PROGRESS)
+ACTIVE_STATUSES = tuple(status for status, group in STATUS_GROUPS.items()
+                        if group in (TaskGroup.NEEDS_YOU, TaskGroup.IN_PROGRESS))
 
 # A task in one of these ended without completing (failed, stopped or cancelled): a restart runs it again, from its
 # saved plan or planned anew.

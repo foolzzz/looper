@@ -95,6 +95,11 @@ export interface ProjectExecution {
   planner_roles: "off" | "on" | null;
   /** How long such a role's prompt and its harness may each be, 500 to 20,000 characters; null = 8,000. */
   role_text_max_chars: number | null;
+  /** Whether the project's Planners may stop part of a plan at a user gate to ask the user; null = "off". Tasks a
+   * schedule starts never open one. */
+  user_gates: "off" | "on" | null;
+  /** Hours between the reminders of a gate that waits for the user, 0 to 168; 0 = none, null = 24. */
+  gate_reminder_hours: number | null;
 }
 
 /** A group of tasks with an optional default work directory and background. */
@@ -132,9 +137,11 @@ export async function fetchStatus(): Promise<SystemStatus> {
 }
 
 /** What a task's status means at a glance; the server maps each status to one (an unknown one to "other"). */
-export type TaskGroup = "in_progress" | "ready" | "attention" | "completed" | "cancelled" | "other";
+export type TaskGroup = "needs_you" | "in_progress" | "ready" | "attention" | "completed" | "cancelled" | "other";
 
 export const TASK_GROUPS: { id: TaskGroup; label: string }[] = [
+  // A user gate of its plan waits for the user (status "waiting_user"); other steps may still run.
+  { id: "needs_you", label: "Needs you" },
   { id: "in_progress", label: "In progress" },
   { id: "ready", label: "Ready" },
   { id: "attention", label: "Needs attention" },
@@ -147,9 +154,10 @@ export function isTaskGroup(value: string | null): value is TaskGroup {
   return TASK_GROUPS.some((g) => g.id === value);
 }
 
-/** A task whose Planner runs or is starting: it can be stopped, and must be before it is deleted. */
+/** A task whose Planner runs (also while a gate waits for the user) or is starting: it can be stopped, and must be
+ * before it is deleted. */
 export function isActiveTask(task: Pick<TaskInfo, "group">): boolean {
-  return task.group === "in_progress";
+  return task.group === "needs_you" || task.group === "in_progress";
 }
 
 /** A Planner running now: one per task in progress. */
@@ -1249,7 +1257,7 @@ export interface RequirementVersion {
 /** What the user added to a running task: a message sent to its Planner, or one the Manager passed on. */
 export interface Supplement {
   text: string;
-  /** "chat", "manager:<channel>". */
+  /** "chat", "manager:<channel>"; "gate" for the conclusion of a user gate. */
   via: string;
   created_at: string;
   /** When the task's Planner had it in a turn; null while it has not. */
@@ -1373,8 +1381,135 @@ export interface TaskDetail extends TaskInfo {
   roles: PlannerRole[];
   /** The built-in Worker's and Reviewer's numbers in the task, beside the roles'. */
   builtin_role_stats: { worker: RoleStats; reviewer: RoleStats };
+  /** The user gates of its plan, in plan order; their discussions are at `fetchGateThread`. */
+  gates: UserGate[];
   /** The role each Worker and Reviewer run that ran as one ran as, by agent id; absent in a task without such runs. */
   run_roles?: Record<string, RunRole>;
+}
+
+/** Where a user gate stands: "pending" until its dependencies are done, "open" (waiting for the user's first word),
+ * "discussing", then "passed" (closed with conclusions) or "cancelled"; "skipped" when a replan dropped it before
+ * it opened. */
+export type GateState = "pending" | "open" | "discussing" | "passed" | "cancelled" | "skipped";
+
+/** One question a gate asks the user; code numbers them q1, q2, ... */
+export interface GateAgendaItem {
+  id: string;
+  question: string;
+  /** Answers the user may pick with one click; [] for a free answer. */
+  options: string[];
+  status: "open" | "resolved" | "dropped";
+  answer: string;
+}
+
+/** What a gate that passed settled, what its Planner assumes without the user's word, and what is still open. */
+export interface GateSummary {
+  decisions: string[];
+  assumptions: string[];
+  open: string[];
+}
+
+/** A step of the plan that waits for the user: a topic and the questions only the user can answer. */
+export interface UserGate {
+  /** The step's label (TaskStep.step_key); the gate's routes take it. */
+  step: string;
+  step_id: string;
+  state: GateState;
+  topic: string;
+  agenda: GateAgendaItem[];
+  /** What the Planner found that the user should know; "" for nothing. */
+  findings: string;
+  /** Set once it passed. */
+  summary: GateSummary | null;
+  /** Why it was cancelled; "" otherwise. */
+  resolution: string;
+  /** It passed because the user ended the discussion. */
+  ended_by_user: boolean;
+  /** The steps the turn that closed it added, dropped and stopped. */
+  plan_change: { added: string[]; dropped: string[]; stopped: string[] } | null;
+  /** The ids of the steps it waits for before it opens. */
+  depends_on: string[];
+  /** While it waits: for the user's word, or for the Planner to take the user's messages; null otherwise. */
+  waiting_on: "user" | "planner" | null;
+  /** How many of the user's messages a failed Planner turn had and no later turn has taken. While no newer message
+   * waits for the Planner, `waiting_on` is then "user": an automatic retry may still deliver them, and the user's
+   * next message sends them again. */
+  not_delivered: number;
+  /** When the Planner tries those messages again on its own; null when no retry is left (or none failed). */
+  retry_at: string | null;
+  turns: number;
+  reminders: number;
+  opened_at: string | null;
+  first_reply_at: string | null;
+  closed_at: string | null;
+}
+
+/** One message of a gate's discussion: the user's, the Planner's, or Looper's own note. */
+export interface GateMessage {
+  id: number;
+  role: "user" | "planner" | "looper";
+  /** user: "message" or "end" (ended the discussion); planner: "reply"; looper: what happened to the gate,
+   * "error" when the Planner could not take the user's messages, "late" for a message the user wrote while the gate
+   * was closing (it became a supplement to the task). */
+  kind: "message" | "end" | "reply" | "opened" | "updated" | "reminder" | "cancelled" | "closed" | "resumed" | "error"
+    | "late";
+  text: string;
+  /** Who wrote it in a group chat; null otherwise. */
+  author: string | null;
+  /** Where the user wrote it: "dashboard", "lark", "telegram" or "manager:<channel>". */
+  via: string | null;
+  /** The agenda item and option the user picked with an option button. */
+  agenda_item: string | null;
+  option: string | null;
+  created_at: string;
+}
+
+/** The most characters one message in a gate may have. */
+export const GATE_MESSAGE_MAX_CHARS = 8000;
+
+/** A gate's discussion, oldest first. */
+export async function fetchGateThread(
+  taskId: string,
+  step: string,
+): Promise<{ task_id: string; gate: UserGate; messages: GateMessage[] }> {
+  const res = await fetch(`${API_BASE}/tasks/${encodeURIComponent(taskId)}/gates/${encodeURIComponent(step)}/messages`);
+  if (!res.ok) await failed(res, "gate discussion");
+  return res.json();
+}
+
+/** What the server did with a message in a gate: "queued" for the Planner's next turn, or "kept" because the task is
+ * not running (the Planner gets it when the task starts again). */
+export interface GatePosted {
+  task_id: string;
+  gate: UserGate;
+  message: GateMessage;
+  delivered: "queued" | "kept";
+}
+
+async function postGate(taskId: string, step: string, action: "messages" | "end", body: object): Promise<GatePosted> {
+  const res = await fetch(`${API_BASE}/tasks/${encodeURIComponent(taskId)}/gates/${encodeURIComponent(step)}/${action}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) await failed(res, action === "end" ? "end discussion" : "send");
+  return res.json();
+}
+
+/** The user's message in a gate that waits for them; an option button sends its option as the text, with the
+ * agenda item it answers. 409 once the gate no longer waits or the task completed. */
+export function postGateMessage(
+  taskId: string,
+  step: string,
+  message: { text: string } | { text: string; agenda_item: string; option: string },
+): Promise<GatePosted> {
+  return postGate(taskId, step, "messages", message);
+}
+
+/** End a gate's discussion: the Planner's next turn must close it with the conclusions so far, its open questions
+ * becoming assumptions. */
+export function endGateDiscussion(taskId: string, step: string, text = ""): Promise<GatePosted> {
+  return postGate(taskId, step, "end", text.trim() ? { text } : {});
 }
 
 /** One role's numbers in a task: its runs, the live steps it ran (a review role: reviewed), and the reviews of its
@@ -1436,7 +1571,11 @@ export type JournalKind =
   | "progress"
   | "profile_choice"
   | "concurrency_change"
-  | "role_defined";
+  | "role_defined"
+  | "gate_opened"
+  | "gate_updated"
+  | "gate_cancelled"
+  | "gate_closed";
 
 /** Where a task stood, as its Planner said with a decision or a periodic check. */
 export interface ProgressNote {
@@ -1469,11 +1608,14 @@ export interface TaskStep {
   step_index: number;
   /** The Planner's label for the step, unique within the task. */
   step_key: string;
+  /** "gate": a user gate (`TaskDetail.gates`), whose instruction is its topic. */
+  kind: "work" | "gate";
   instruction: string;
   target_files: string[];
   /** The ids of the steps it needs before it starts. */
   depends_on: string[];
-  /** pending, dispatched, deciding, completed (in review), verified, failed or skipped (dropped by a replan). */
+  /** pending, dispatched, deciding, completed (in review), verified, failed or skipped (dropped by a replan); a gate
+   * is waiting_user while it waits, verified once it passed or was cancelled. */
   status: string;
   /** Whether a Reviewer must pass it. */
   review: boolean;

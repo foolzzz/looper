@@ -13,6 +13,7 @@ import {
   RotateCcw,
   Settings2,
   Folder,
+  MessageCircleQuestionMark,
   X,
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
@@ -42,7 +43,9 @@ import { formatUsd } from "@/lib/usage";
 import { ProjectBackgroundField, backgroundTooLong } from "@/components/project-background-field";
 import { TaskDetailPage } from "./task-detail";
 
-const STATUS_FILTERS = ["all", "init", "running", "pending", "completed", "failed", "cancelled", "stopped"] as const;
+const STATUS_FILTERS = [
+  "all", "init", "running", "waiting_user", "pending", "completed", "failed", "cancelled", "stopped",
+] as const;
 type StatusFilter = (typeof STATUS_FILTERS)[number];
 
 function statusBadge(status: string) {
@@ -63,6 +66,8 @@ function statusBadge(status: string) {
       return <Badge variant="outline">{READY_LABEL}</Badge>;
     case "executing":
       return <Badge variant="default">Executing</Badge>;
+    case "waiting_user":
+      return <Badge variant="warning">Waiting for you</Badge>;
     default:
       return <Badge variant="outline">{status}</Badge>;
   }
@@ -82,6 +87,8 @@ function statusIcon(status: string) {
       return <AlertCircle className="h-4 w-4 text-destructive" />;
     case "stopped":
       return <Pause className="h-4 w-4 text-warning" />;
+    case "waiting_user":
+      return <MessageCircleQuestionMark className="h-4 w-4 text-warning" />;
     case READY_STATUS:
       return <Settings2 className="h-4 w-4 text-muted-foreground" />;
     default:
@@ -94,6 +101,7 @@ const RESTARTABLE_STATUSES = ["stopped", "failed", "cancelled", READY_STATUS];
 /** A status filter's name. */
 function filterLabel(filter: string): string {
   if (filter === READY_STATUS) return "Ready";
+  if (filter === "waiting_user") return "Waiting for you";
   return filter.charAt(0).toUpperCase() + filter.slice(1);
 }
 
@@ -524,6 +532,8 @@ export function TasksPage({ sub, query, onNavigate }: TasksPageProps) {
         <div className="flex items-center gap-1 flex-wrap">
           {STATUS_FILTERS.map((f) => {
             const count = f === "all" ? total : counts[f] || 0;
+            // Only a project with user gates has tasks that wait for the user.
+            if (f === "waiting_user" && count === 0 && filter !== f) return null;
             return (
               <button
                 key={f}

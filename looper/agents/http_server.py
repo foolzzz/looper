@@ -20,8 +20,8 @@ from typing import Any
 
 from ..db.tasks import TaskGroup, task_group
 from . import (
-    agent_settings, catalog, catalog_sources, config_imports, config_transfer, knowledge, library, mcp, overview,
-    profile_registry, project_skills, projects, request_guard, schedules, self_check,
+    agent_settings, catalog, catalog_sources, config_imports, config_transfer, gate_service, knowledge, library, mcp,
+    overview, profile_registry, project_skills, projects, request_guard, schedules, self_check,
 )
 from .broadcast import Broadcaster
 from .chat_targets import ChatTargetError, list_chat_targets, resolve_chat_target
@@ -308,6 +308,10 @@ class AgentHTTPServer:
     _RE_TASK_START = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)/start$")
     _RE_TASK_REQUIREMENT = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)/requirement$")
     _RE_TASK_AGENTS = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)/agents$")
+    # A user gate of the task, by its step's label (planner_protocol._STEP_ID).
+    _RE_TASK_GATE_MESSAGES = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)/gates/([A-Za-z0-9][A-Za-z0-9_.-]{0,31})"
+                                        r"/messages$")
+    _RE_TASK_GATE_END = re.compile(r"^/api/tasks/(task-[a-zA-Z0-9]+)/gates/([A-Za-z0-9][A-Za-z0-9_.-]{0,31})/end$")
     _RE_PROJECT = re.compile(r"^/api/projects/(proj-[a-zA-Z0-9]+)$")
     _RE_PROJECT_KNOWLEDGE = re.compile(r"^/api/projects/(proj-[a-zA-Z0-9]+)/knowledge$")
     _RE_PROJECT_DOCUMENT = re.compile(r"^/api/projects/(proj-[a-zA-Z0-9]+)/knowledge/(doc-[a-zA-Z0-9]+)$")
@@ -391,6 +395,12 @@ class AgentHTTPServer:
                 source=self._web_adapter._address, via=projects.VIA_TASK_PAGE))
         elif (m := self._RE_TASK_AGENTS.match(path)) and method == "PUT":
             await self._answer(writer, HTTP_200, lambda: self._set_task_agents(m.group(1), body))
+        elif (m := self._RE_TASK_GATE_MESSAGES.match(path)) and method == "GET":
+            await self._answer(writer, HTTP_200, lambda: gate_service.thread(m.group(1), m.group(2)))
+        elif (m := self._RE_TASK_GATE_MESSAGES.match(path)) and method == "POST":
+            await self._answer(writer, HTTP_200, lambda: self._gate_message(m.group(1), m.group(2), body, end=False))
+        elif (m := self._RE_TASK_GATE_END.match(path)) and method == "POST":
+            await self._answer(writer, HTTP_200, lambda: self._gate_message(m.group(1), m.group(2), body, end=True))
         elif (m := self._RE_TASK_START.match(path)) and method == "POST":
             await self._answer(writer, HTTP_200, lambda: projects.start_ready_task(
                 m.group(1), self._supervisor.bus, self._web_adapter._address))
@@ -643,6 +653,13 @@ class AgentHTTPServer:
         writer.write(_json_response(status, _serialize(result)))
         await writer.drain()
 
+    async def _gate_message(self, task_id: str, label: str, body: bytes, *, end: bool) -> dict[str, Any]:
+        """The user's message in a gate of the task, or their end of its discussion (``gate_service``)."""
+        return await gate_service.post_message(
+            task_id, label, projects.json_object(body) if body else {},
+            has_planner=self._task_router.has_planner(task_id), bus=self._supervisor.bus,
+            source=self._web_adapter._address, end=end)
+
     async def _preview_schedule(self, body: bytes) -> dict[str, Any]:
         return schedules.preview(projects.json_object(body))
 
@@ -681,10 +698,10 @@ class AgentHTTPServer:
         status = {
             "status": "running",
             "agents": agents,
-            # Every task counted; "running" is every task in progress.
+            # Every task counted; "running" is every task in progress (one waiting for the user too).
             "tasks": {
                 "total": counts["total"],
-                "running": counts["in_progress"],
+                "running": counts["in_progress"] + counts["needs_you"],
                 "completed": counts["completed"],
             },
             "channels": {"web": web_health},
@@ -1201,6 +1218,7 @@ class AgentHTTPServer:
             actions = await manager_actions(task_id) if raw else []
             agents = await projects.agents_view(raw) if raw else None
             roles = await roles_view(task_id, raw.get("steps", [])) if raw else None
+            gates = await gate_service.gates_view(task_id) if raw else []
         except Exception:
             logger.exception("DB unavailable for task_detail %s", task_id)
             writer.write(_json_response(HTTP_500, {"error": "database unavailable"}))
@@ -1244,6 +1262,9 @@ class AgentHTTPServer:
             # name each, its numbers), and the built-in Worker's and Reviewer's numbers (task_roles.roles_view).
             "roles": roles["roles"],
             "builtin_role_stats": roles["builtin"],
+            # The user gates of its plan, in plan order: state, agenda, findings, how each closed, and whom each
+            # waiting one waits for (gate_service.gate_view); their discussions are at .../gates/<step>/messages.
+            "gates": gates,
             # The role each Worker and Reviewer run that ran as one ran as, by agent id (task_roles.run_roles); only
             # in a task with such runs.
             **({"run_roles": ran_as} if ran_as else {}),

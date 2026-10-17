@@ -33,7 +33,12 @@ change it records (``db.plans.save``); the model never writes one. The kinds
   after, and why; for the task page only;
 - ``role_defined``: the Planner defined a role for its steps, or a new version
   of one, with its tool (``ops.planner``, ``task_roles``): its kind, version,
-  profile, harness and why; for the task page only.
+  profile, harness and why; for the task page only;
+- ``gate_opened``, ``gate_updated``, ``gate_cancelled``, ``gate_closed``: a user
+  gate of the plan opened, the Planner changed it, cancelled it or closed it
+  (``user_gates``): its topic, what changed, why, and how it closed; for the
+  task page only (the plan lines show the Planner its gates, and a gate that
+  passed leaves its conclusion as a supplement, ``via`` ``gate``).
 
 The entries come back as bounded sections:
 
@@ -96,6 +101,10 @@ class JournalKind(str, Enum):
     PROFILE_CHOICE = "profile_choice"
     CONCURRENCY_CHANGE = "concurrency_change"
     ROLE_DEFINED = "role_defined"
+    GATE_OPENED = "gate_opened"
+    GATE_UPDATED = "gate_updated"
+    GATE_CANCELLED = "gate_cancelled"
+    GATE_CLOSED = "gate_closed"
 
 
 # How a section heads each kind, in the order the Planner's section shows them: pitfalls first.
@@ -106,6 +115,9 @@ _HEADINGS: dict[JournalKind, str] = {
     JournalKind.STEP_ACCEPTED: "Accepted steps",
     JournalKind.SESSION_SWITCH: "Session changes",
     JournalKind.HANDOFF: "Handoffs from earlier sessions",
+    # Only the LESSONS turn's journal shows these: what the task had to ask the user, and what made a question moot.
+    JournalKind.GATE_CLOSED: "User gates closed",
+    JournalKind.GATE_CANCELLED: "User gates cancelled",
 }
 _PITFALLS = frozenset({JournalKind.STEP_FAILED, JournalKind.STEP_RETRY})
 _DETAILED = frozenset({JournalKind.STEP_FAILED, JournalKind.STEP_RETRY, JournalKind.DECISION})
@@ -142,11 +154,16 @@ class JournalEntry:
     learnings: tuple[str, ...] = ()
     kind: JournalKind = JournalKind.STEP_ACCEPTED
     id: int | None = None  # its row's id, once read back
+    # A supplement code writes delivered (a user gate's conclusion, which the Planner wrote): how it came.
+    via: str = ""
 
     def row(self) -> dict[str, Any]:
         """The entry as ``db.journal.insert`` writes it."""
-        return {"step_id": self.step_id, "kind": self.kind.value, "summary": self.summary,
-                "learnings": list(self.learnings)}
+        row: dict[str, Any] = {"step_id": self.step_id, "kind": self.kind.value, "summary": self.summary,
+                               "learnings": list(self.learnings)}
+        if self.via:
+            row.update(via=self.via, delivered=True)
+        return row
 
     @classmethod
     def from_row(cls, row: Mapping[str, Any]) -> JournalEntry:
