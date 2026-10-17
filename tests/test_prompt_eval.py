@@ -194,6 +194,18 @@ def test_the_multi_platform_check_reads_the_interface_the_parts_must_agree_on(tm
     interface = tmp_path / "api" / "tip_api.json"
     interface.write_text('{"path": "/api/tip", "query": "day", "fields": {"day": "int", "tip": "string"}}')
     assert task.check(tmp_path) is None  # the fields with their types
+    # A contract without its path, its query parameter or its fields fails, in either form of the fields.
+    lacking = "api/tip_api.json does not give a path, a query parameter and the response fields"
+    for fields in (["day", "tip"], {"day": "int", "tip": "string"}):
+        for drop in ("path", "query", "fields"):
+            contract = {key: value for key, value in {"path": "/api/tip", "query": "day", "fields": fields}.items()
+                        if key != drop}
+            interface.write_text(json.dumps(contract))
+            assert task.check(tmp_path) == lacking, (fields, drop)
+        for empty in ("path", "query", "fields"):
+            interface.write_text(json.dumps({"path": "/api/tip", "query": "day", "fields": fields,
+                                             empty: type({"path": "", "query": "", "fields": fields}[empty])()}))
+            assert task.check(tmp_path) == lacking, (fields, empty)
     interface.write_text('{"path": "/api/tip", "query": "day", "fields": ["day", "tip", "author"]}')
     assert task.check(tmp_path) == "handle(/api/tip?day=3) answered 200 with ['day', 'tip']"
     interface.write_text('{"path": "/api/tip", "query": "d", "fields": ["day", "tip"]}')
