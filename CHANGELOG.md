@@ -20,7 +20,7 @@ How the agent system works today is described in
 
 ## [2.7.0] - 2026-10-16
 
-Covers `v2.6.0` to `v2.7.0`: pull requests #72 to #163 in
+Covers `v2.6.0` to `v2.7.0`: pull requests #72 to #166 in
 [foolzzz/looper](https://github.com/foolzzz/looper/pulls).
 
 ### Added
@@ -625,8 +625,9 @@ Covers `v2.6.0` to `v2.7.0`: pull requests #72 to #163 in
   /api/channels/lark/status`; the new `channel_rejected_senders` table keeps
   who, how often, when and in which group, never what they wrote). Replies are
   Markdown posts. On upgrade, `app_id_env` and `app_secret_env` are dropped
-  from the row at startup (one log line) and from an imported file, and a row
-  still named "Lark (飞书) Bot" is renamed.
+  from the row at startup (one log line) and from an imported file, a row
+  without `profile` gets an empty one, so Settings → Channels shows the field,
+  and a row still named "Lark (飞书) Bot" is renamed.
 - **Telegram and Lark show one status message per message, and react when the
   bot sees it.** A message from a listed sender that goes to the Manager first
   gets the bot's reaction, in the background: Lark's 「Get」 (the app needs
