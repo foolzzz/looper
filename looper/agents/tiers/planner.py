@@ -751,25 +751,34 @@ class PlannerAgent:
             cancelled = True
             raise
         finally:
-            async def cleanup() -> None:
-                for task in (supervise_task, loop_task):
-                    if task is not None and not task.done():
-                        await cancel_and_wait(task)
-                # A turn the loop was in has already killed Claude; an idle one
-                # ends when its stdin closes. Never leave it running.
-                await self._claude.stop(kill=cancelled)
-                self._remove_token_files()  # and one a turn wrote meanwhile
+            async def cleanup(kill: bool) -> None:
+                try:
+                    for task in (supervise_task, loop_task):
+                        if task is not None and not task.done():
+                            await cancel_and_wait(task)
+                except asyncio.CancelledError:
+                    kill = True  # hurried: Claude is ended at once
+                    raise
+                finally:
+                    # A turn the loop was in has already killed Claude; an idle one
+                    # ends when its stdin closes. Never leave it running.
+                    await self._claude.stop(kill=kill)
+                    self._remove_token_files()  # and one a turn wrote meanwhile
 
-            cleaning = asyncio.create_task(cleanup())
-            interrupted = False
+            # Run to its end even when this stop is cancelled again: a second cancellation only hurries it (Claude
+            # ended at once rather than after its grace).
+            cleaning = asyncio.create_task(cleanup(cancelled))
+            hurried = False
             while not cleaning.done():
                 try:
                     await asyncio.shield(cleaning)
                 except asyncio.CancelledError:
-                    interrupted = True
-            cleaning.result()
-            if interrupted:
+                    if not hurried:
+                        hurried = True
+                        cleaning.cancel()
+            if hurried:
                 raise asyncio.CancelledError
+            cleaning.result()
 
     def _remove_token_files(self) -> None:
         """Delete the MCP configuration files that carry this Planner's token, which no longer works."""

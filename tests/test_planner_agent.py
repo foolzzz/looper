@@ -700,7 +700,7 @@ class TestResidentClaude:
 
         asyncio.run(_run())
 
-    def test_a_second_stop_cancellation_still_waits_for_claude_to_end(self) -> None:
+    def test_a_second_stop_cancellation_hurries_the_cleanup_but_does_not_cut_it_short(self) -> None:
         async def _run() -> None:
             with tempfile.TemporaryDirectory() as tmp:
                 planner = PlannerAgent(task_id="t1", runtime_root=Path(tmp))
@@ -716,8 +716,10 @@ class TestResidentClaude:
                     nonlocal finished
                     assert kill
                     stopping.set()
-                    await asyncio.sleep(0.3)
-                    finished = True
+                    try:
+                        await asyncio.sleep(0.3)
+                    finally:  # as ResidentClaude.stop ends the tree however its wait ends
+                        finished = True
 
                 planner._kill_running_workers = kill_workers_slowly  # type: ignore[method-assign]
                 planner._claude.stop = claude_exiting_slowly  # type: ignore[method-assign]
