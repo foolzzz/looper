@@ -1,54 +1,28 @@
 {
-  "schema": "loopx-prompt-eval/v1",
+  "schema": "looper-prompt-eval/v2",
   "mode": "real",
   "model": "opus",
-  "started_at": "20261014T073243Z",
+  "agent": "claude-code/opus",
+  "provider_preset": null,
+  "started_at": "20261017T120839Z",
   "git": {
-    "commit": "25a5aa9f36a765186624c8d91cc136ca7c8cbaf4",
+    "commit": "68d7b953cc0fc8c00c72e3b4138e7c03629a3557",
     "dirty": false
   },
   "caps": {
-    "max_budget_usd": 0.5,
-    "total_cap_usd": 2.5
+    "max_budget_usd": 3.0,
+    "total_cap_usd": 100.0
   },
+  "step_workspaces": null,
+  "user_gates": null,
+  "reps": 3,
   "stopped_by_cap": false,
-  "total_cost_usd": 1.30018,
+  "aborted": null,
+  "total_cost_usd": 18.735112,
   "tasks": [
     {
-      "id": "single_step",
-      "status": "completed",
-      "success": true,
-      "problems": [],
-      "steps": 1,
-      "reviews": 0,
-      "retries": 0,
-      "chat_turns": 0,
-      "planner_turns": {
-        "plan": 1,
-        "decision": 1
-      },
-      "cost_usd": 0.181397,
-      "cost_by_role": {
-        "planner": 0.112446,
-        "worker": 0.068952,
-        "reviewer": 0.0
-      },
-      "runs": 3,
-      "contract_violations": {
-        "planner": 0,
-        "worker": 0,
-        "reviewer": 0,
-        "total": 0
-      },
-      "planner_edit_tool_paths": [],
-      "planner_changed_files": [],
-      "planner_modified_files": 0,
-      "duration_s": 22.3,
-      "stopped_by_cap": false,
-      "timed_out": false
-    },
-    {
       "id": "dependent_steps",
+      "rep": 1,
       "status": "completed",
       "success": true,
       "problems": [],
@@ -56,17 +30,65 @@
       "reviews": 0,
       "retries": 0,
       "chat_turns": 0,
+      "plan_changes": 0,
+      "independent_pairs": 0,
+      "bracketed_pairs": 0,
+      "parallel_workers": 1,
+      "progress_notes": 2,
+      "final_summary": 1,
+      "planner_profile_runs": 0,
+      "roles_defined": 0,
+      "role_runs": 0,
+      "role_profile_runs": 0,
+      "role_reviews": 0,
+      "role_prompt_mismatches": 0,
+      "role_boundary_misses": 0,
+      "gate_breaches": 0,
+      "advisory_role_reviews": 0,
+      "advisory_role_fails": 0,
+      "discipline_roles": 0,
+      "interface_dependents": 0,
+      "gates_opened": 0,
+      "gate_turns": 0,
+      "gates_passed": 0,
+      "gates_ended_by_user": 0,
+      "gates_cancelled": 0,
+      "assumptions_stated": 0,
+      "gate_plan_changes": 0,
+      "gate_parallel_runs": 0,
+      "conclusion_reads": 0,
+      "gate_asks_beyond_script": 0,
       "planner_turns": {
         "plan": 1,
         "decision": 2
       },
-      "cost_usd": 0.281243,
+      "cost_usd": 0.309063,
       "cost_by_role": {
-        "planner": 0.138602,
-        "worker": 0.142641,
+        "planner": 0.166546,
+        "worker": 0.142517,
         "reviewer": 0.0
       },
       "runs": 5,
+      "run_errors": 0,
+      "models": {
+        "planner": [
+          "claude-opus-5-5"
+        ],
+        "worker": [
+          "claude-opus-5-5"
+        ]
+      },
+      "tokens": {
+        "input": 18,
+        "output": 2476,
+        "cache_read": 142917,
+        "cache_creation": 28861
+      },
+      "cost_basis": {
+        "equivalent": 5,
+        "provider_price": 0,
+        "unpriced": 0
+      },
       "contract_violations": {
         "planner": 0,
         "worker": 0,
@@ -76,30 +98,80 @@
       "planner_edit_tool_paths": [],
       "planner_changed_files": [],
       "planner_modified_files": 0,
-      "duration_s": 38.4,
+      "duration_s": 41.0,
       "stopped_by_cap": false,
-      "timed_out": false
+      "timed_out": false,
+      "outcome": "pass"
     },
     {
-      "id": "reviewed_step",
+      "id": "parallel_parts",
+      "rep": 1,
       "status": "completed",
       "success": true,
       "problems": [],
-      "steps": 1,
-      "reviews": 1,
+      "steps": 3,
+      "reviews": 0,
       "retries": 0,
       "chat_turns": 0,
+      "plan_changes": 0,
+      "independent_pairs": 1,
+      "bracketed_pairs": 0,
+      "parallel_workers": 2,
+      "progress_notes": 3,
+      "final_summary": 1,
+      "planner_profile_runs": 0,
+      "roles_defined": 0,
+      "role_runs": 0,
+      "role_profile_runs": 0,
+      "role_reviews": 0,
+      "role_prompt_mismatches": 0,
+      "role_boundary_misses": 0,
+      "gate_breaches": 0,
+      "advisory_role_reviews": 0,
+      "advisory_role_fails": 0,
+      "discipline_roles": 0,
+      "interface_dependents": 0,
+      "gates_opened": 0,
+      "gate_turns": 0,
+      "gates_passed": 0,
+      "gates_ended_by_user": 0,
+      "gates_cancelled": 0,
+      "assumptions_stated": 0,
+      "gate_plan_changes": 0,
+      "gate_parallel_runs": 0,
+      "conclusion_reads": 0,
+      "gate_asks_beyond_script": 0,
       "planner_turns": {
         "plan": 1,
-        "decision": 2
+        "decision": 3
       },
-      "cost_usd": 0.258669,
+      "cost_usd": 0.412393,
       "cost_by_role": {
-        "planner": 0.114758,
-        "worker": 0.071958,
-        "reviewer": 0.071952
+        "planner": 0.200141,
+        "worker": 0.212252,
+        "reviewer": 0.0
       },
-      "runs": 5,
+      "runs": 7,
+      "run_errors": 0,
+      "models": {
+        "planner": [
+          "claude-opus-5-5"
+        ],
+        "worker": [
+          "claude-opus-5-5"
+        ]
+      },
+      "tokens": {
+        "input": 26,
+        "output": 3516,
+        "cache_read": 215806,
+        "cache_creation": 37351
+      },
+      "cost_basis": {
+        "equivalent": 7,
+        "provider_price": 0,
+        "unpriced": 0
+      },
       "contract_violations": {
         "planner": 0,
         "worker": 0,
@@ -109,30 +181,80 @@
       "planner_edit_tool_paths": [],
       "planner_changed_files": [],
       "planner_modified_files": 0,
-      "duration_s": 26.3,
+      "duration_s": 57.1,
       "stopped_by_cap": false,
-      "timed_out": false
+      "timed_out": false,
+      "outcome": "pass"
     },
     {
-      "id": "retry_after_failure",
+      "id": "interface_first",
+      "rep": 1,
       "status": "completed",
       "success": true,
       "problems": [],
-      "steps": 1,
+      "steps": 4,
       "reviews": 0,
-      "retries": 1,
+      "retries": 0,
       "chat_turns": 0,
+      "plan_changes": 0,
+      "independent_pairs": 1,
+      "bracketed_pairs": 1,
+      "parallel_workers": 2,
+      "progress_notes": 4,
+      "final_summary": 1,
+      "planner_profile_runs": 0,
+      "roles_defined": 0,
+      "role_runs": 0,
+      "role_profile_runs": 0,
+      "role_reviews": 0,
+      "role_prompt_mismatches": 0,
+      "role_boundary_misses": 0,
+      "gate_breaches": 0,
+      "advisory_role_reviews": 0,
+      "advisory_role_fails": 0,
+      "discipline_roles": 0,
+      "interface_dependents": 0,
+      "gates_opened": 0,
+      "gate_turns": 0,
+      "gates_passed": 0,
+      "gates_ended_by_user": 0,
+      "gates_cancelled": 0,
+      "assumptions_stated": 0,
+      "gate_plan_changes": 0,
+      "gate_parallel_runs": 0,
+      "conclusion_reads": 0,
+      "gate_asks_beyond_script": 0,
       "planner_turns": {
         "plan": 1,
-        "decision": 2
+        "decision": 4
       },
-      "cost_usd": 0.303134,
+      "cost_usd": 0.80294,
       "cost_by_role": {
-        "planner": 0.132662,
-        "worker": 0.170472,
+        "planner": 0.270435,
+        "worker": 0.532505,
         "reviewer": 0.0
       },
-      "runs": 5,
+      "runs": 9,
+      "run_errors": 0,
+      "models": {
+        "planner": [
+          "claude-opus-5-5"
+        ],
+        "worker": [
+          "claude-opus-5-5"
+        ]
+      },
+      "tokens": {
+        "input": 48,
+        "output": 12711,
+        "cache_read": 452719,
+        "cache_creation": 57248
+      },
+      "cost_basis": {
+        "equivalent": 9,
+        "provider_price": 0,
+        "unpriced": 0
+      },
       "contract_violations": {
         "planner": 0,
         "worker": 0,
@@ -142,12 +264,182 @@
       "planner_edit_tool_paths": [],
       "planner_changed_files": [],
       "planner_modified_files": 0,
-      "duration_s": 54.6,
+      "duration_s": 114.6,
       "stopped_by_cap": false,
-      "timed_out": false
+      "timed_out": false,
+      "outcome": "pass"
     },
     {
-      "id": "chat_correction",
+      "id": "supplement_replan",
+      "rep": 1,
+      "status": "completed",
+      "success": true,
+      "problems": [],
+      "steps": 3,
+      "reviews": 0,
+      "retries": 0,
+      "chat_turns": 1,
+      "plan_changes": 1,
+      "independent_pairs": 1,
+      "bracketed_pairs": 0,
+      "parallel_workers": 1,
+      "progress_notes": 2,
+      "final_summary": 1,
+      "planner_profile_runs": 0,
+      "roles_defined": 0,
+      "role_runs": 0,
+      "role_profile_runs": 0,
+      "role_reviews": 0,
+      "role_prompt_mismatches": 0,
+      "role_boundary_misses": 0,
+      "gate_breaches": 0,
+      "advisory_role_reviews": 0,
+      "advisory_role_fails": 0,
+      "discipline_roles": 0,
+      "interface_dependents": 0,
+      "gates_opened": 0,
+      "gate_turns": 0,
+      "gates_passed": 0,
+      "gates_ended_by_user": 0,
+      "gates_cancelled": 0,
+      "assumptions_stated": 0,
+      "gate_plan_changes": 0,
+      "gate_parallel_runs": 0,
+      "conclusion_reads": 0,
+      "gate_asks_beyond_script": 0,
+      "planner_turns": {
+        "plan": 1,
+        "chat": 1,
+        "decision": 2
+      },
+      "cost_usd": 0.3221,
+      "cost_by_role": {
+        "planner": 0.182586,
+        "worker": 0.139514,
+        "reviewer": 0.0
+      },
+      "runs": 6,
+      "run_errors": 0,
+      "models": {
+        "planner": [
+          "claude-opus-5-5"
+        ],
+        "worker": [
+          "claude-opus-5-5"
+        ]
+      },
+      "tokens": {
+        "input": 20,
+        "output": 2585,
+        "cache_read": 165242,
+        "cache_creation": 29659
+      },
+      "cost_basis": {
+        "equivalent": 6,
+        "provider_price": 0,
+        "unpriced": 0
+      },
+      "contract_violations": {
+        "planner": 0,
+        "worker": 0,
+        "reviewer": 0,
+        "total": 0
+      },
+      "planner_edit_tool_paths": [],
+      "planner_changed_files": [],
+      "planner_modified_files": 0,
+      "duration_s": 57.3,
+      "stopped_by_cap": false,
+      "timed_out": false,
+      "outcome": "pass"
+    },
+    {
+      "id": "requirement_edit",
+      "rep": 1,
+      "status": "completed",
+      "success": true,
+      "problems": [],
+      "steps": 3,
+      "reviews": 0,
+      "retries": 0,
+      "chat_turns": 1,
+      "plan_changes": 1,
+      "independent_pairs": 1,
+      "bracketed_pairs": 0,
+      "parallel_workers": 1,
+      "progress_notes": 2,
+      "final_summary": 1,
+      "planner_profile_runs": 0,
+      "roles_defined": 0,
+      "role_runs": 0,
+      "role_profile_runs": 0,
+      "role_reviews": 0,
+      "role_prompt_mismatches": 0,
+      "role_boundary_misses": 0,
+      "gate_breaches": 0,
+      "advisory_role_reviews": 0,
+      "advisory_role_fails": 0,
+      "discipline_roles": 0,
+      "interface_dependents": 0,
+      "gates_opened": 0,
+      "gate_turns": 0,
+      "gates_passed": 0,
+      "gates_ended_by_user": 0,
+      "gates_cancelled": 0,
+      "assumptions_stated": 0,
+      "gate_plan_changes": 0,
+      "gate_parallel_runs": 0,
+      "conclusion_reads": 0,
+      "gate_asks_beyond_script": 0,
+      "planner_turns": {
+        "plan": 1,
+        "chat": 1,
+        "decision": 2
+      },
+      "cost_usd": 0.363885,
+      "cost_by_role": {
+        "planner": 0.226803,
+        "worker": 0.137081,
+        "reviewer": 0.0
+      },
+      "runs": 6,
+      "run_errors": 0,
+      "models": {
+        "planner": [
+          "claude-opus-5-5"
+        ],
+        "worker": [
+          "claude-opus-5-5"
+        ]
+      },
+      "tokens": {
+        "input": 20,
+        "output": 2594,
+        "cache_read": 159863,
+        "cache_creation": 34994
+      },
+      "cost_basis": {
+        "equivalent": 6,
+        "provider_price": 0,
+        "unpriced": 0
+      },
+      "contract_violations": {
+        "planner": 0,
+        "worker": 0,
+        "reviewer": 0,
+        "total": 0
+      },
+      "planner_edit_tool_paths": [],
+      "planner_changed_files": [],
+      "planner_modified_files": 0,
+      "duration_s": 59.3,
+      "stopped_by_cap": false,
+      "timed_out": false,
+      "outcome": "pass"
+    },
+    {
+      "id": "supplement_no_change",
+      "rep": 1,
       "status": "completed",
       "success": true,
       "problems": [],
@@ -155,18 +447,66 @@
       "reviews": 0,
       "retries": 0,
       "chat_turns": 1,
+      "plan_changes": 0,
+      "independent_pairs": 0,
+      "bracketed_pairs": 0,
+      "parallel_workers": 1,
+      "progress_notes": 2,
+      "final_summary": 1,
+      "planner_profile_runs": 0,
+      "roles_defined": 0,
+      "role_runs": 0,
+      "role_profile_runs": 0,
+      "role_reviews": 0,
+      "role_prompt_mismatches": 0,
+      "role_boundary_misses": 0,
+      "gate_breaches": 0,
+      "advisory_role_reviews": 0,
+      "advisory_role_fails": 0,
+      "discipline_roles": 0,
+      "interface_dependents": 0,
+      "gates_opened": 0,
+      "gate_turns": 0,
+      "gates_passed": 0,
+      "gates_ended_by_user": 0,
+      "gates_cancelled": 0,
+      "assumptions_stated": 0,
+      "gate_plan_changes": 0,
+      "gate_parallel_runs": 0,
+      "conclusion_reads": 0,
+      "gate_asks_beyond_script": 0,
       "planner_turns": {
         "plan": 1,
         "chat": 1,
         "decision": 2
       },
-      "cost_usd": 0.275737,
+      "cost_usd": 0.307117,
       "cost_by_role": {
-        "planner": 0.141989,
-        "worker": 0.133748,
+        "planner": 0.170747,
+        "worker": 0.13637,
         "reviewer": 0.0
       },
       "runs": 6,
+      "run_errors": 0,
+      "models": {
+        "planner": [
+          "claude-opus-5-5"
+        ],
+        "worker": [
+          "claude-opus-5-5"
+        ]
+      },
+      "tokens": {
+        "input": 20,
+        "output": 2154,
+        "cache_read": 163666,
+        "cache_creation": 28903
+      },
+      "cost_basis": {
+        "equivalent": 6,
+        "provider_price": 0,
+        "unpriced": 0
+      },
       "contract_violations": {
         "planner": 0,
         "worker": 0,
@@ -176,9 +516,2770 @@
       "planner_edit_tool_paths": [],
       "planner_changed_files": [],
       "planner_modified_files": 0,
-      "duration_s": 32.4,
+      "duration_s": 59.2,
       "stopped_by_cap": false,
-      "timed_out": false
+      "timed_out": false,
+      "outcome": "pass"
+    },
+    {
+      "id": "roles_tester_docs",
+      "rep": 1,
+      "status": "completed",
+      "success": true,
+      "problems": [],
+      "steps": 3,
+      "reviews": 0,
+      "retries": 0,
+      "chat_turns": 0,
+      "plan_changes": 0,
+      "independent_pairs": 1,
+      "bracketed_pairs": 0,
+      "parallel_workers": 2,
+      "progress_notes": 3,
+      "final_summary": 1,
+      "planner_profile_runs": 0,
+      "roles_defined": 2,
+      "role_runs": 2,
+      "role_profile_runs": 1,
+      "role_reviews": 0,
+      "role_prompt_mismatches": 0,
+      "role_boundary_misses": 0,
+      "gate_breaches": 0,
+      "advisory_role_reviews": 0,
+      "advisory_role_fails": 0,
+      "discipline_roles": 0,
+      "interface_dependents": 2,
+      "gates_opened": 0,
+      "gate_turns": 0,
+      "gates_passed": 0,
+      "gates_ended_by_user": 0,
+      "gates_cancelled": 0,
+      "assumptions_stated": 0,
+      "gate_plan_changes": 0,
+      "gate_parallel_runs": 0,
+      "conclusion_reads": 0,
+      "gate_asks_beyond_script": 0,
+      "planner_turns": {
+        "plan": 1,
+        "decision": 3
+      },
+      "cost_usd": 0.531308,
+      "cost_by_role": {
+        "planner": 0.247863,
+        "worker": 0.283445,
+        "reviewer": 0.0
+      },
+      "runs": 7,
+      "run_errors": 0,
+      "models": {
+        "planner": [
+          "claude-opus-5-5"
+        ],
+        "worker": [
+          "claude-opus-5-5"
+        ]
+      },
+      "tokens": {
+        "input": 38,
+        "output": 6609,
+        "cache_read": 358001,
+        "cache_creation": 40922
+      },
+      "cost_basis": {
+        "equivalent": 7,
+        "provider_price": 0,
+        "unpriced": 0
+      },
+      "contract_violations": {
+        "planner": 0,
+        "worker": 0,
+        "reviewer": 0,
+        "total": 0
+      },
+      "planner_edit_tool_paths": [],
+      "planner_changed_files": [],
+      "planner_modified_files": 0,
+      "duration_s": 59.4,
+      "stopped_by_cap": false,
+      "timed_out": false,
+      "outcome": "pass"
+    },
+    {
+      "id": "roles_multi_platform",
+      "rep": 1,
+      "status": "completed",
+      "success": true,
+      "problems": [],
+      "steps": 6,
+      "reviews": 1,
+      "retries": 0,
+      "chat_turns": 0,
+      "plan_changes": 0,
+      "independent_pairs": 6,
+      "bracketed_pairs": 6,
+      "parallel_workers": 4,
+      "progress_notes": 7,
+      "final_summary": 1,
+      "planner_profile_runs": 0,
+      "roles_defined": 4,
+      "role_runs": 5,
+      "role_profile_runs": 0,
+      "role_reviews": 0,
+      "role_prompt_mismatches": 0,
+      "role_boundary_misses": 0,
+      "gate_breaches": 0,
+      "advisory_role_reviews": 0,
+      "advisory_role_fails": 0,
+      "discipline_roles": 4,
+      "interface_dependents": 4,
+      "gates_opened": 0,
+      "gate_turns": 0,
+      "gates_passed": 0,
+      "gates_ended_by_user": 0,
+      "gates_cancelled": 0,
+      "assumptions_stated": 0,
+      "gate_plan_changes": 0,
+      "gate_parallel_runs": 0,
+      "conclusion_reads": 0,
+      "gate_asks_beyond_script": 0,
+      "planner_turns": {
+        "plan": 1,
+        "decision": 7
+      },
+      "cost_usd": 1.89379,
+      "cost_by_role": {
+        "planner": 0.584821,
+        "worker": 1.140766,
+        "reviewer": 0.168203
+      },
+      "runs": 15,
+      "run_errors": 0,
+      "models": {
+        "planner": [
+          "claude-opus-5-5"
+        ],
+        "worker": [
+          "claude-opus-5-5"
+        ],
+        "reviewer": [
+          "claude-opus-5-5"
+        ]
+      },
+      "tokens": {
+        "input": 98,
+        "output": 35100,
+        "cache_read": 1093232,
+        "cache_creation": 121594
+      },
+      "cost_basis": {
+        "equivalent": 15,
+        "provider_price": 0,
+        "unpriced": 0
+      },
+      "contract_violations": {
+        "planner": 0,
+        "worker": 0,
+        "reviewer": 0,
+        "total": 0
+      },
+      "planner_edit_tool_paths": [],
+      "planner_changed_files": [],
+      "planner_modified_files": 0,
+      "duration_s": 255.9,
+      "stopped_by_cap": false,
+      "timed_out": false,
+      "outcome": "pass"
+    },
+    {
+      "id": "roles_not_needed",
+      "rep": 1,
+      "status": "completed",
+      "success": true,
+      "problems": [],
+      "steps": 1,
+      "reviews": 0,
+      "retries": 0,
+      "chat_turns": 0,
+      "plan_changes": 0,
+      "independent_pairs": 0,
+      "bracketed_pairs": 0,
+      "parallel_workers": 1,
+      "progress_notes": 1,
+      "final_summary": 1,
+      "planner_profile_runs": 0,
+      "roles_defined": 0,
+      "role_runs": 0,
+      "role_profile_runs": 0,
+      "role_reviews": 0,
+      "role_prompt_mismatches": 0,
+      "role_boundary_misses": 0,
+      "gate_breaches": 0,
+      "advisory_role_reviews": 0,
+      "advisory_role_fails": 0,
+      "discipline_roles": 0,
+      "interface_dependents": 0,
+      "gates_opened": 0,
+      "gate_turns": 0,
+      "gates_passed": 0,
+      "gates_ended_by_user": 0,
+      "gates_cancelled": 0,
+      "assumptions_stated": 0,
+      "gate_plan_changes": 0,
+      "gate_parallel_runs": 0,
+      "conclusion_reads": 0,
+      "gate_asks_beyond_script": 0,
+      "planner_turns": {
+        "plan": 1,
+        "decision": 1
+      },
+      "cost_usd": 0.203936,
+      "cost_by_role": {
+        "planner": 0.135618,
+        "worker": 0.068319,
+        "reviewer": 0.0
+      },
+      "runs": 3,
+      "run_errors": 0,
+      "models": {
+        "planner": [
+          "claude-opus-5-5"
+        ],
+        "worker": [
+          "claude-opus-5-5"
+        ]
+      },
+      "tokens": {
+        "input": 10,
+        "output": 1083,
+        "cache_read": 74422,
+        "cache_creation": 20919
+      },
+      "cost_basis": {
+        "equivalent": 3,
+        "provider_price": 0,
+        "unpriced": 0
+      },
+      "contract_violations": {
+        "planner": 0,
+        "worker": 0,
+        "reviewer": 0,
+        "total": 0
+      },
+      "planner_edit_tool_paths": [],
+      "planner_changed_files": [],
+      "planner_modified_files": 0,
+      "duration_s": 24.6,
+      "stopped_by_cap": false,
+      "timed_out": false,
+      "outcome": "pass"
+    },
+    {
+      "id": "gate_ambiguous",
+      "rep": 1,
+      "status": "completed",
+      "success": true,
+      "problems": [],
+      "steps": 2,
+      "reviews": 0,
+      "retries": 0,
+      "chat_turns": 0,
+      "plan_changes": 0,
+      "independent_pairs": 1,
+      "bracketed_pairs": 0,
+      "parallel_workers": 1,
+      "progress_notes": 1,
+      "final_summary": 1,
+      "planner_profile_runs": 0,
+      "roles_defined": 0,
+      "role_runs": 0,
+      "role_profile_runs": 0,
+      "role_reviews": 0,
+      "role_prompt_mismatches": 0,
+      "role_boundary_misses": 0,
+      "gate_breaches": 0,
+      "advisory_role_reviews": 0,
+      "advisory_role_fails": 0,
+      "discipline_roles": 0,
+      "interface_dependents": 0,
+      "gates_opened": 1,
+      "gate_turns": 1,
+      "gates_passed": 1,
+      "gates_ended_by_user": 0,
+      "gates_cancelled": 0,
+      "assumptions_stated": 2,
+      "gate_plan_changes": 1,
+      "gate_parallel_runs": 0,
+      "conclusion_reads": 1,
+      "gate_asks_beyond_script": 0,
+      "planner_turns": {
+        "plan": 1,
+        "gate": 1,
+        "decision": 1
+      },
+      "cost_usd": 0.236404,
+      "cost_by_role": {
+        "planner": 0.161356,
+        "worker": 0.075048,
+        "reviewer": 0.0
+      },
+      "runs": 4,
+      "run_errors": 0,
+      "models": {
+        "planner": [
+          "claude-opus-5-5"
+        ],
+        "worker": [
+          "claude-opus-5-5"
+        ]
+      },
+      "tokens": {
+        "input": 14,
+        "output": 2506,
+        "cache_read": 122979,
+        "cache_creation": 20204
+      },
+      "cost_basis": {
+        "equivalent": 4,
+        "provider_price": 0,
+        "unpriced": 0
+      },
+      "contract_violations": {
+        "planner": 0,
+        "worker": 0,
+        "reviewer": 0,
+        "total": 0
+      },
+      "planner_edit_tool_paths": [],
+      "planner_changed_files": [],
+      "planner_modified_files": 0,
+      "duration_s": 53.2,
+      "stopped_by_cap": false,
+      "timed_out": false,
+      "outcome": "pass"
+    },
+    {
+      "id": "gate_not_needed",
+      "rep": 1,
+      "status": "completed",
+      "success": true,
+      "problems": [],
+      "steps": 1,
+      "reviews": 0,
+      "retries": 0,
+      "chat_turns": 0,
+      "plan_changes": 0,
+      "independent_pairs": 0,
+      "bracketed_pairs": 0,
+      "parallel_workers": 1,
+      "progress_notes": 1,
+      "final_summary": 1,
+      "planner_profile_runs": 0,
+      "roles_defined": 0,
+      "role_runs": 0,
+      "role_profile_runs": 0,
+      "role_reviews": 0,
+      "role_prompt_mismatches": 0,
+      "role_boundary_misses": 0,
+      "gate_breaches": 0,
+      "advisory_role_reviews": 0,
+      "advisory_role_fails": 0,
+      "discipline_roles": 0,
+      "interface_dependents": 0,
+      "gates_opened": 0,
+      "gate_turns": 0,
+      "gates_passed": 0,
+      "gates_ended_by_user": 0,
+      "gates_cancelled": 0,
+      "assumptions_stated": 0,
+      "gate_plan_changes": 0,
+      "gate_parallel_runs": 0,
+      "conclusion_reads": 0,
+      "gate_asks_beyond_script": 0,
+      "planner_turns": {
+        "plan": 1,
+        "decision": 1
+      },
+      "cost_usd": 0.208375,
+      "cost_by_role": {
+        "planner": 0.139237,
+        "worker": 0.069138,
+        "reviewer": 0.0
+      },
+      "runs": 3,
+      "run_errors": 0,
+      "models": {
+        "planner": [
+          "claude-opus-5-5"
+        ],
+        "worker": [
+          "claude-opus-5-5"
+        ]
+      },
+      "tokens": {
+        "input": 10,
+        "output": 1183,
+        "cache_read": 75175,
+        "cache_creation": 21205
+      },
+      "cost_basis": {
+        "equivalent": 3,
+        "provider_price": 0,
+        "unpriced": 0
+      },
+      "contract_violations": {
+        "planner": 0,
+        "worker": 0,
+        "reviewer": 0,
+        "total": 0
+      },
+      "planner_edit_tool_paths": [],
+      "planner_changed_files": [],
+      "planner_modified_files": 0,
+      "duration_s": 28.6,
+      "stopped_by_cap": false,
+      "timed_out": false,
+      "outcome": "pass"
+    },
+    {
+      "id": "gate_parallel_branch",
+      "rep": 1,
+      "status": "completed",
+      "success": true,
+      "problems": [],
+      "steps": 3,
+      "reviews": 0,
+      "retries": 0,
+      "chat_turns": 0,
+      "plan_changes": 0,
+      "independent_pairs": 2,
+      "bracketed_pairs": 0,
+      "parallel_workers": 2,
+      "progress_notes": 2,
+      "final_summary": 1,
+      "planner_profile_runs": 0,
+      "roles_defined": 0,
+      "role_runs": 0,
+      "role_profile_runs": 0,
+      "role_reviews": 0,
+      "role_prompt_mismatches": 0,
+      "role_boundary_misses": 0,
+      "gate_breaches": 0,
+      "advisory_role_reviews": 0,
+      "advisory_role_fails": 0,
+      "discipline_roles": 0,
+      "interface_dependents": 0,
+      "gates_opened": 1,
+      "gate_turns": 1,
+      "gates_passed": 1,
+      "gates_ended_by_user": 0,
+      "gates_cancelled": 0,
+      "assumptions_stated": 1,
+      "gate_plan_changes": 1,
+      "gate_parallel_runs": 1,
+      "conclusion_reads": 1,
+      "gate_asks_beyond_script": 0,
+      "planner_turns": {
+        "plan": 1,
+        "gate": 1,
+        "decision": 2
+      },
+      "cost_usd": 0.338585,
+      "cost_by_role": {
+        "planner": 0.195018,
+        "worker": 0.143567,
+        "reviewer": 0.0
+      },
+      "runs": 6,
+      "run_errors": 0,
+      "models": {
+        "planner": [
+          "claude-opus-5-5"
+        ],
+        "worker": [
+          "claude-opus-5-5"
+        ]
+      },
+      "tokens": {
+        "input": 22,
+        "output": 3346,
+        "cache_read": 199084,
+        "cache_creation": 28970
+      },
+      "cost_basis": {
+        "equivalent": 6,
+        "provider_price": 0,
+        "unpriced": 0
+      },
+      "contract_violations": {
+        "planner": 0,
+        "worker": 0,
+        "reviewer": 0,
+        "total": 0
+      },
+      "planner_edit_tool_paths": [],
+      "planner_changed_files": [],
+      "planner_modified_files": 0,
+      "duration_s": 51.0,
+      "stopped_by_cap": false,
+      "timed_out": false,
+      "outcome": "pass"
+    },
+    {
+      "id": "gate_discoverable",
+      "rep": 1,
+      "status": "completed",
+      "success": true,
+      "problems": [],
+      "steps": 1,
+      "reviews": 0,
+      "retries": 0,
+      "chat_turns": 0,
+      "plan_changes": 0,
+      "independent_pairs": 0,
+      "bracketed_pairs": 0,
+      "parallel_workers": 1,
+      "progress_notes": 1,
+      "final_summary": 1,
+      "planner_profile_runs": 0,
+      "roles_defined": 0,
+      "role_runs": 0,
+      "role_profile_runs": 0,
+      "role_reviews": 0,
+      "role_prompt_mismatches": 0,
+      "role_boundary_misses": 0,
+      "gate_breaches": 0,
+      "advisory_role_reviews": 0,
+      "advisory_role_fails": 0,
+      "discipline_roles": 0,
+      "interface_dependents": 0,
+      "gates_opened": 0,
+      "gate_turns": 0,
+      "gates_passed": 0,
+      "gates_ended_by_user": 0,
+      "gates_cancelled": 0,
+      "assumptions_stated": 0,
+      "gate_plan_changes": 0,
+      "gate_parallel_runs": 0,
+      "conclusion_reads": 0,
+      "gate_asks_beyond_script": 0,
+      "planner_turns": {
+        "plan": 1,
+        "decision": 1
+      },
+      "cost_usd": 0.220357,
+      "cost_by_role": {
+        "planner": 0.143679,
+        "worker": 0.076678,
+        "reviewer": 0.0
+      },
+      "runs": 3,
+      "run_errors": 0,
+      "models": {
+        "planner": [
+          "claude-opus-5-5"
+        ],
+        "worker": [
+          "claude-opus-5-5"
+        ]
+      },
+      "tokens": {
+        "input": 12,
+        "output": 1512,
+        "cache_read": 92586,
+        "cache_creation": 21444
+      },
+      "cost_basis": {
+        "equivalent": 3,
+        "provider_price": 0,
+        "unpriced": 0
+      },
+      "contract_violations": {
+        "planner": 0,
+        "worker": 0,
+        "reviewer": 0,
+        "total": 0
+      },
+      "planner_edit_tool_paths": [],
+      "planner_changed_files": [],
+      "planner_modified_files": 0,
+      "duration_s": 43.1,
+      "stopped_by_cap": false,
+      "timed_out": false,
+      "outcome": "pass"
+    },
+    {
+      "id": "dependent_steps",
+      "rep": 2,
+      "status": "completed",
+      "success": true,
+      "problems": [],
+      "steps": 2,
+      "reviews": 0,
+      "retries": 0,
+      "chat_turns": 0,
+      "plan_changes": 0,
+      "independent_pairs": 0,
+      "bracketed_pairs": 0,
+      "parallel_workers": 1,
+      "progress_notes": 2,
+      "final_summary": 1,
+      "planner_profile_runs": 0,
+      "roles_defined": 0,
+      "role_runs": 0,
+      "role_profile_runs": 0,
+      "role_reviews": 0,
+      "role_prompt_mismatches": 0,
+      "role_boundary_misses": 0,
+      "gate_breaches": 0,
+      "advisory_role_reviews": 0,
+      "advisory_role_fails": 0,
+      "discipline_roles": 0,
+      "interface_dependents": 0,
+      "gates_opened": 0,
+      "gate_turns": 0,
+      "gates_passed": 0,
+      "gates_ended_by_user": 0,
+      "gates_cancelled": 0,
+      "assumptions_stated": 0,
+      "gate_plan_changes": 0,
+      "gate_parallel_runs": 0,
+      "conclusion_reads": 0,
+      "gate_asks_beyond_script": 0,
+      "planner_turns": {
+        "plan": 1,
+        "decision": 2
+      },
+      "cost_usd": 0.306203,
+      "cost_by_role": {
+        "planner": 0.166782,
+        "worker": 0.139421,
+        "reviewer": 0.0
+      },
+      "runs": 5,
+      "run_errors": 0,
+      "models": {
+        "planner": [
+          "claude-opus-5-5"
+        ],
+        "worker": [
+          "claude-opus-5-5"
+        ]
+      },
+      "tokens": {
+        "input": 18,
+        "output": 2399,
+        "cache_read": 142673,
+        "cache_creation": 28702
+      },
+      "cost_basis": {
+        "equivalent": 5,
+        "provider_price": 0,
+        "unpriced": 0
+      },
+      "contract_violations": {
+        "planner": 0,
+        "worker": 0,
+        "reviewer": 0,
+        "total": 0
+      },
+      "planner_edit_tool_paths": [],
+      "planner_changed_files": [],
+      "planner_modified_files": 0,
+      "duration_s": 49.1,
+      "stopped_by_cap": false,
+      "timed_out": false,
+      "outcome": "pass"
+    },
+    {
+      "id": "parallel_parts",
+      "rep": 2,
+      "status": "completed",
+      "success": true,
+      "problems": [],
+      "steps": 3,
+      "reviews": 0,
+      "retries": 0,
+      "chat_turns": 0,
+      "plan_changes": 0,
+      "independent_pairs": 1,
+      "bracketed_pairs": 0,
+      "parallel_workers": 2,
+      "progress_notes": 3,
+      "final_summary": 1,
+      "planner_profile_runs": 0,
+      "roles_defined": 0,
+      "role_runs": 0,
+      "role_profile_runs": 0,
+      "role_reviews": 0,
+      "role_prompt_mismatches": 0,
+      "role_boundary_misses": 0,
+      "gate_breaches": 0,
+      "advisory_role_reviews": 0,
+      "advisory_role_fails": 0,
+      "discipline_roles": 0,
+      "interface_dependents": 0,
+      "gates_opened": 0,
+      "gate_turns": 0,
+      "gates_passed": 0,
+      "gates_ended_by_user": 0,
+      "gates_cancelled": 0,
+      "assumptions_stated": 0,
+      "gate_plan_changes": 0,
+      "gate_parallel_runs": 0,
+      "conclusion_reads": 0,
+      "gate_asks_beyond_script": 0,
+      "planner_turns": {
+        "plan": 1,
+        "decision": 3
+      },
+      "cost_usd": 0.417414,
+      "cost_by_role": {
+        "planner": 0.20535,
+        "worker": 0.212064,
+        "reviewer": 0.0
+      },
+      "runs": 7,
+      "run_errors": 0,
+      "models": {
+        "planner": [
+          "claude-opus-5-5"
+        ],
+        "worker": [
+          "claude-opus-5-5"
+        ]
+      },
+      "tokens": {
+        "input": 26,
+        "output": 3686,
+        "cache_read": 216228,
+        "cache_creation": 37543
+      },
+      "cost_basis": {
+        "equivalent": 7,
+        "provider_price": 0,
+        "unpriced": 0
+      },
+      "contract_violations": {
+        "planner": 0,
+        "worker": 0,
+        "reviewer": 0,
+        "total": 0
+      },
+      "planner_edit_tool_paths": [],
+      "planner_changed_files": [],
+      "planner_modified_files": 0,
+      "duration_s": 57.3,
+      "stopped_by_cap": false,
+      "timed_out": false,
+      "outcome": "pass"
+    },
+    {
+      "id": "interface_first",
+      "rep": 2,
+      "status": "completed",
+      "success": true,
+      "problems": [],
+      "steps": 4,
+      "reviews": 0,
+      "retries": 0,
+      "chat_turns": 0,
+      "plan_changes": 0,
+      "independent_pairs": 1,
+      "bracketed_pairs": 1,
+      "parallel_workers": 2,
+      "progress_notes": 4,
+      "final_summary": 1,
+      "planner_profile_runs": 0,
+      "roles_defined": 0,
+      "role_runs": 0,
+      "role_profile_runs": 0,
+      "role_reviews": 0,
+      "role_prompt_mismatches": 0,
+      "role_boundary_misses": 0,
+      "gate_breaches": 0,
+      "advisory_role_reviews": 0,
+      "advisory_role_fails": 0,
+      "discipline_roles": 0,
+      "interface_dependents": 0,
+      "gates_opened": 0,
+      "gate_turns": 0,
+      "gates_passed": 0,
+      "gates_ended_by_user": 0,
+      "gates_cancelled": 0,
+      "assumptions_stated": 0,
+      "gate_plan_changes": 0,
+      "gate_parallel_runs": 0,
+      "conclusion_reads": 0,
+      "gate_asks_beyond_script": 0,
+      "planner_turns": {
+        "plan": 1,
+        "decision": 4
+      },
+      "cost_usd": 0.895623,
+      "cost_by_role": {
+        "planner": 0.273353,
+        "worker": 0.62227,
+        "reviewer": 0.0
+      },
+      "runs": 9,
+      "run_errors": 0,
+      "models": {
+        "planner": [
+          "claude-opus-5-5"
+        ],
+        "worker": [
+          "claude-opus-5-5"
+        ]
+      },
+      "tokens": {
+        "input": 56,
+        "output": 14037,
+        "cache_read": 537336,
+        "cache_creation": 63399
+      },
+      "cost_basis": {
+        "equivalent": 9,
+        "provider_price": 0,
+        "unpriced": 0
+      },
+      "contract_violations": {
+        "planner": 0,
+        "worker": 0,
+        "reviewer": 0,
+        "total": 0
+      },
+      "planner_edit_tool_paths": [],
+      "planner_changed_files": [],
+      "planner_modified_files": 0,
+      "duration_s": 122.7,
+      "stopped_by_cap": false,
+      "timed_out": false,
+      "outcome": "pass"
+    },
+    {
+      "id": "supplement_replan",
+      "rep": 2,
+      "status": "completed",
+      "success": true,
+      "problems": [],
+      "steps": 3,
+      "reviews": 0,
+      "retries": 0,
+      "chat_turns": 1,
+      "plan_changes": 1,
+      "independent_pairs": 1,
+      "bracketed_pairs": 0,
+      "parallel_workers": 1,
+      "progress_notes": 2,
+      "final_summary": 1,
+      "planner_profile_runs": 0,
+      "roles_defined": 0,
+      "role_runs": 0,
+      "role_profile_runs": 0,
+      "role_reviews": 0,
+      "role_prompt_mismatches": 0,
+      "role_boundary_misses": 0,
+      "gate_breaches": 0,
+      "advisory_role_reviews": 0,
+      "advisory_role_fails": 0,
+      "discipline_roles": 0,
+      "interface_dependents": 0,
+      "gates_opened": 0,
+      "gate_turns": 0,
+      "gates_passed": 0,
+      "gates_ended_by_user": 0,
+      "gates_cancelled": 0,
+      "assumptions_stated": 0,
+      "gate_plan_changes": 0,
+      "gate_parallel_runs": 0,
+      "conclusion_reads": 0,
+      "gate_asks_beyond_script": 0,
+      "planner_turns": {
+        "plan": 1,
+        "chat": 1,
+        "decision": 2
+      },
+      "cost_usd": 0.319468,
+      "cost_by_role": {
+        "planner": 0.183004,
+        "worker": 0.136464,
+        "reviewer": 0.0
+      },
+      "runs": 6,
+      "run_errors": 0,
+      "models": {
+        "planner": [
+          "claude-opus-5-5"
+        ],
+        "worker": [
+          "claude-opus-5-5"
+        ]
+      },
+      "tokens": {
+        "input": 20,
+        "output": 2462,
+        "cache_read": 165341,
+        "cache_creation": 29635
+      },
+      "cost_basis": {
+        "equivalent": 6,
+        "provider_price": 0,
+        "unpriced": 0
+      },
+      "contract_violations": {
+        "planner": 0,
+        "worker": 0,
+        "reviewer": 0,
+        "total": 0
+      },
+      "planner_edit_tool_paths": [],
+      "planner_changed_files": [],
+      "planner_modified_files": 0,
+      "duration_s": 57.3,
+      "stopped_by_cap": false,
+      "timed_out": false,
+      "outcome": "pass"
+    },
+    {
+      "id": "requirement_edit",
+      "rep": 2,
+      "status": "completed",
+      "success": true,
+      "problems": [],
+      "steps": 3,
+      "reviews": 0,
+      "retries": 0,
+      "chat_turns": 1,
+      "plan_changes": 1,
+      "independent_pairs": 1,
+      "bracketed_pairs": 0,
+      "parallel_workers": 1,
+      "progress_notes": 2,
+      "final_summary": 1,
+      "planner_profile_runs": 0,
+      "roles_defined": 0,
+      "role_runs": 0,
+      "role_profile_runs": 0,
+      "role_reviews": 0,
+      "role_prompt_mismatches": 0,
+      "role_boundary_misses": 0,
+      "gate_breaches": 0,
+      "advisory_role_reviews": 0,
+      "advisory_role_fails": 0,
+      "discipline_roles": 0,
+      "interface_dependents": 0,
+      "gates_opened": 0,
+      "gate_turns": 0,
+      "gates_passed": 0,
+      "gates_ended_by_user": 0,
+      "gates_cancelled": 0,
+      "assumptions_stated": 0,
+      "gate_plan_changes": 0,
+      "gate_parallel_runs": 0,
+      "conclusion_reads": 0,
+      "gate_asks_beyond_script": 0,
+      "planner_turns": {
+        "plan": 1,
+        "chat": 1,
+        "decision": 2
+      },
+      "cost_usd": 0.359767,
+      "cost_by_role": {
+        "planner": 0.224128,
+        "worker": 0.135639,
+        "reviewer": 0.0
+      },
+      "runs": 6,
+      "run_errors": 0,
+      "models": {
+        "planner": [
+          "claude-opus-5-5"
+        ],
+        "worker": [
+          "claude-opus-5-5"
+        ]
+      },
+      "tokens": {
+        "input": 20,
+        "output": 2379,
+        "cache_read": 159775,
+        "cache_creation": 35019
+      },
+      "cost_basis": {
+        "equivalent": 6,
+        "provider_price": 0,
+        "unpriced": 0
+      },
+      "contract_violations": {
+        "planner": 0,
+        "worker": 0,
+        "reviewer": 0,
+        "total": 0
+      },
+      "planner_edit_tool_paths": [],
+      "planner_changed_files": [],
+      "planner_modified_files": 0,
+      "duration_s": 65.7,
+      "stopped_by_cap": false,
+      "timed_out": false,
+      "outcome": "pass"
+    },
+    {
+      "id": "supplement_no_change",
+      "rep": 2,
+      "status": "completed",
+      "success": true,
+      "problems": [],
+      "steps": 2,
+      "reviews": 0,
+      "retries": 0,
+      "chat_turns": 1,
+      "plan_changes": 0,
+      "independent_pairs": 0,
+      "bracketed_pairs": 0,
+      "parallel_workers": 1,
+      "progress_notes": 2,
+      "final_summary": 1,
+      "planner_profile_runs": 0,
+      "roles_defined": 0,
+      "role_runs": 0,
+      "role_profile_runs": 0,
+      "role_reviews": 0,
+      "role_prompt_mismatches": 0,
+      "role_boundary_misses": 0,
+      "gate_breaches": 0,
+      "advisory_role_reviews": 0,
+      "advisory_role_fails": 0,
+      "discipline_roles": 0,
+      "interface_dependents": 0,
+      "gates_opened": 0,
+      "gate_turns": 0,
+      "gates_passed": 0,
+      "gates_ended_by_user": 0,
+      "gates_cancelled": 0,
+      "assumptions_stated": 0,
+      "gate_plan_changes": 0,
+      "gate_parallel_runs": 0,
+      "conclusion_reads": 0,
+      "gate_asks_beyond_script": 0,
+      "planner_turns": {
+        "plan": 1,
+        "chat": 1,
+        "decision": 2
+      },
+      "cost_usd": 0.309323,
+      "cost_by_role": {
+        "planner": 0.172939,
+        "worker": 0.136385,
+        "reviewer": 0.0
+      },
+      "runs": 6,
+      "run_errors": 0,
+      "models": {
+        "planner": [
+          "claude-opus-5-5"
+        ],
+        "worker": [
+          "claude-opus-5-5"
+        ]
+      },
+      "tokens": {
+        "input": 20,
+        "output": 2246,
+        "cache_read": 163697,
+        "cache_creation": 28948
+      },
+      "cost_basis": {
+        "equivalent": 6,
+        "provider_price": 0,
+        "unpriced": 0
+      },
+      "contract_violations": {
+        "planner": 0,
+        "worker": 0,
+        "reviewer": 0,
+        "total": 0
+      },
+      "planner_edit_tool_paths": [],
+      "planner_changed_files": [],
+      "planner_modified_files": 0,
+      "duration_s": 55.3,
+      "stopped_by_cap": false,
+      "timed_out": false,
+      "outcome": "pass"
+    },
+    {
+      "id": "roles_tester_docs",
+      "rep": 2,
+      "status": "completed",
+      "success": true,
+      "problems": [],
+      "steps": 3,
+      "reviews": 0,
+      "retries": 0,
+      "chat_turns": 0,
+      "plan_changes": 0,
+      "independent_pairs": 1,
+      "bracketed_pairs": 0,
+      "parallel_workers": 2,
+      "progress_notes": 3,
+      "final_summary": 1,
+      "planner_profile_runs": 0,
+      "roles_defined": 2,
+      "role_runs": 2,
+      "role_profile_runs": 1,
+      "role_reviews": 0,
+      "role_prompt_mismatches": 0,
+      "role_boundary_misses": 0,
+      "gate_breaches": 0,
+      "advisory_role_reviews": 0,
+      "advisory_role_fails": 0,
+      "discipline_roles": 0,
+      "interface_dependents": 2,
+      "gates_opened": 0,
+      "gate_turns": 0,
+      "gates_passed": 0,
+      "gates_ended_by_user": 0,
+      "gates_cancelled": 0,
+      "assumptions_stated": 0,
+      "gate_plan_changes": 0,
+      "gate_parallel_runs": 0,
+      "conclusion_reads": 0,
+      "gate_asks_beyond_script": 0,
+      "planner_turns": {
+        "plan": 1,
+        "decision": 3
+      },
+      "cost_usd": 0.531235,
+      "cost_by_role": {
+        "planner": 0.250639,
+        "worker": 0.280595,
+        "reviewer": 0.0
+      },
+      "runs": 7,
+      "run_errors": 0,
+      "models": {
+        "planner": [
+          "claude-opus-5-5"
+        ],
+        "worker": [
+          "claude-opus-5-5"
+        ]
+      },
+      "tokens": {
+        "input": 38,
+        "output": 6674,
+        "cache_read": 357614,
+        "cache_creation": 40760
+      },
+      "cost_basis": {
+        "equivalent": 7,
+        "provider_price": 0,
+        "unpriced": 0
+      },
+      "contract_violations": {
+        "planner": 0,
+        "worker": 0,
+        "reviewer": 0,
+        "total": 0
+      },
+      "planner_edit_tool_paths": [],
+      "planner_changed_files": [],
+      "planner_modified_files": 0,
+      "duration_s": 100.4,
+      "stopped_by_cap": false,
+      "timed_out": false,
+      "outcome": "pass"
+    },
+    {
+      "id": "roles_multi_platform",
+      "rep": 2,
+      "status": "completed",
+      "success": true,
+      "problems": [],
+      "steps": 6,
+      "reviews": 1,
+      "retries": 0,
+      "chat_turns": 0,
+      "plan_changes": 0,
+      "independent_pairs": 6,
+      "bracketed_pairs": 6,
+      "parallel_workers": 4,
+      "progress_notes": 7,
+      "final_summary": 1,
+      "planner_profile_runs": 0,
+      "roles_defined": 4,
+      "role_runs": 5,
+      "role_profile_runs": 0,
+      "role_reviews": 0,
+      "role_prompt_mismatches": 0,
+      "role_boundary_misses": 0,
+      "gate_breaches": 0,
+      "advisory_role_reviews": 0,
+      "advisory_role_fails": 0,
+      "discipline_roles": 4,
+      "interface_dependents": 4,
+      "gates_opened": 0,
+      "gate_turns": 0,
+      "gates_passed": 0,
+      "gates_ended_by_user": 0,
+      "gates_cancelled": 0,
+      "assumptions_stated": 0,
+      "gate_plan_changes": 0,
+      "gate_parallel_runs": 0,
+      "conclusion_reads": 0,
+      "gate_asks_beyond_script": 0,
+      "planner_turns": {
+        "plan": 1,
+        "decision": 7
+      },
+      "cost_usd": 2.032284,
+      "cost_by_role": {
+        "planner": 0.575281,
+        "worker": 1.270906,
+        "reviewer": 0.186097
+      },
+      "runs": 15,
+      "run_errors": 0,
+      "models": {
+        "planner": [
+          "claude-opus-5-5"
+        ],
+        "worker": [
+          "claude-opus-5-5"
+        ],
+        "reviewer": [
+          "claude-opus-5-5"
+        ]
+      },
+      "tokens": {
+        "input": 98,
+        "output": 37774,
+        "cache_read": 1108900,
+        "cache_creation": 131829
+      },
+      "cost_basis": {
+        "equivalent": 15,
+        "provider_price": 0,
+        "unpriced": 0
+      },
+      "contract_violations": {
+        "planner": 0,
+        "worker": 0,
+        "reviewer": 0,
+        "total": 0
+      },
+      "planner_edit_tool_paths": [],
+      "planner_changed_files": [],
+      "planner_modified_files": 0,
+      "duration_s": 294.5,
+      "stopped_by_cap": false,
+      "timed_out": false,
+      "outcome": "pass"
+    },
+    {
+      "id": "roles_not_needed",
+      "rep": 2,
+      "status": "completed",
+      "success": true,
+      "problems": [],
+      "steps": 1,
+      "reviews": 0,
+      "retries": 0,
+      "chat_turns": 0,
+      "plan_changes": 0,
+      "independent_pairs": 0,
+      "bracketed_pairs": 0,
+      "parallel_workers": 1,
+      "progress_notes": 1,
+      "final_summary": 1,
+      "planner_profile_runs": 0,
+      "roles_defined": 0,
+      "role_runs": 0,
+      "role_profile_runs": 0,
+      "role_reviews": 0,
+      "role_prompt_mismatches": 0,
+      "role_boundary_misses": 0,
+      "gate_breaches": 0,
+      "advisory_role_reviews": 0,
+      "advisory_role_fails": 0,
+      "discipline_roles": 0,
+      "interface_dependents": 0,
+      "gates_opened": 0,
+      "gate_turns": 0,
+      "gates_passed": 0,
+      "gates_ended_by_user": 0,
+      "gates_cancelled": 0,
+      "assumptions_stated": 0,
+      "gate_plan_changes": 0,
+      "gate_parallel_runs": 0,
+      "conclusion_reads": 0,
+      "gate_asks_beyond_script": 0,
+      "planner_turns": {
+        "plan": 1,
+        "decision": 1
+      },
+      "cost_usd": 0.200482,
+      "cost_by_role": {
+        "planner": 0.134111,
+        "worker": 0.066371,
+        "reviewer": 0.0
+      },
+      "runs": 3,
+      "run_errors": 0,
+      "models": {
+        "planner": [
+          "claude-opus-5-5"
+        ],
+        "worker": [
+          "claude-opus-5-5"
+        ]
+      },
+      "tokens": {
+        "input": 10,
+        "output": 1022,
+        "cache_read": 74449,
+        "cache_creation": 20639
+      },
+      "cost_basis": {
+        "equivalent": 3,
+        "provider_price": 0,
+        "unpriced": 0
+      },
+      "contract_violations": {
+        "planner": 0,
+        "worker": 0,
+        "reviewer": 0,
+        "total": 0
+      },
+      "planner_edit_tool_paths": [],
+      "planner_changed_files": [],
+      "planner_modified_files": 0,
+      "duration_s": 32.7,
+      "stopped_by_cap": false,
+      "timed_out": false,
+      "outcome": "pass"
+    },
+    {
+      "id": "gate_ambiguous",
+      "rep": 2,
+      "status": "completed",
+      "success": true,
+      "problems": [],
+      "steps": 2,
+      "reviews": 0,
+      "retries": 0,
+      "chat_turns": 0,
+      "plan_changes": 0,
+      "independent_pairs": 1,
+      "bracketed_pairs": 0,
+      "parallel_workers": 1,
+      "progress_notes": 1,
+      "final_summary": 1,
+      "planner_profile_runs": 0,
+      "roles_defined": 0,
+      "role_runs": 0,
+      "role_profile_runs": 0,
+      "role_reviews": 0,
+      "role_prompt_mismatches": 0,
+      "role_boundary_misses": 0,
+      "gate_breaches": 0,
+      "advisory_role_reviews": 0,
+      "advisory_role_fails": 0,
+      "discipline_roles": 0,
+      "interface_dependents": 0,
+      "gates_opened": 1,
+      "gate_turns": 1,
+      "gates_passed": 1,
+      "gates_ended_by_user": 0,
+      "gates_cancelled": 0,
+      "assumptions_stated": 2,
+      "gate_plan_changes": 1,
+      "gate_parallel_runs": 0,
+      "conclusion_reads": 1,
+      "gate_asks_beyond_script": 0,
+      "planner_turns": {
+        "plan": 1,
+        "gate": 1,
+        "decision": 1
+      },
+      "cost_usd": 0.23702,
+      "cost_by_role": {
+        "planner": 0.163634,
+        "worker": 0.073385,
+        "reviewer": 0.0
+      },
+      "runs": 4,
+      "run_errors": 0,
+      "models": {
+        "planner": [
+          "claude-opus-5-5"
+        ],
+        "worker": [
+          "claude-opus-5-5"
+        ]
+      },
+      "tokens": {
+        "input": 14,
+        "output": 2461,
+        "cache_read": 123158,
+        "cache_creation": 20389
+      },
+      "cost_basis": {
+        "equivalent": 4,
+        "provider_price": 0,
+        "unpriced": 0
+      },
+      "contract_violations": {
+        "planner": 0,
+        "worker": 0,
+        "reviewer": 0,
+        "total": 0
+      },
+      "planner_edit_tool_paths": [],
+      "planner_changed_files": [],
+      "planner_modified_files": 0,
+      "duration_s": 38.8,
+      "stopped_by_cap": false,
+      "timed_out": false,
+      "outcome": "pass"
+    },
+    {
+      "id": "gate_not_needed",
+      "rep": 2,
+      "status": "completed",
+      "success": true,
+      "problems": [],
+      "steps": 1,
+      "reviews": 0,
+      "retries": 0,
+      "chat_turns": 0,
+      "plan_changes": 0,
+      "independent_pairs": 0,
+      "bracketed_pairs": 0,
+      "parallel_workers": 1,
+      "progress_notes": 1,
+      "final_summary": 1,
+      "planner_profile_runs": 0,
+      "roles_defined": 0,
+      "role_runs": 0,
+      "role_profile_runs": 0,
+      "role_reviews": 0,
+      "role_prompt_mismatches": 0,
+      "role_boundary_misses": 0,
+      "gate_breaches": 0,
+      "advisory_role_reviews": 0,
+      "advisory_role_fails": 0,
+      "discipline_roles": 0,
+      "interface_dependents": 0,
+      "gates_opened": 0,
+      "gate_turns": 0,
+      "gates_passed": 0,
+      "gates_ended_by_user": 0,
+      "gates_cancelled": 0,
+      "assumptions_stated": 0,
+      "gate_plan_changes": 0,
+      "gate_parallel_runs": 0,
+      "conclusion_reads": 0,
+      "gate_asks_beyond_script": 0,
+      "planner_turns": {
+        "plan": 1,
+        "decision": 1
+      },
+      "cost_usd": 0.203993,
+      "cost_by_role": {
+        "planner": 0.136787,
+        "worker": 0.067205,
+        "reviewer": 0.0
+      },
+      "runs": 3,
+      "run_errors": 0,
+      "models": {
+        "planner": [
+          "claude-opus-5-5"
+        ],
+        "worker": [
+          "claude-opus-5-5"
+        ]
+      },
+      "tokens": {
+        "input": 10,
+        "output": 1067,
+        "cache_read": 75023,
+        "cache_creation": 20951
+      },
+      "cost_basis": {
+        "equivalent": 3,
+        "provider_price": 0,
+        "unpriced": 0
+      },
+      "contract_violations": {
+        "planner": 0,
+        "worker": 0,
+        "reviewer": 0,
+        "total": 0
+      },
+      "planner_edit_tool_paths": [],
+      "planner_changed_files": [],
+      "planner_modified_files": 0,
+      "duration_s": 20.4,
+      "stopped_by_cap": false,
+      "timed_out": false,
+      "outcome": "pass"
+    },
+    {
+      "id": "gate_parallel_branch",
+      "rep": 2,
+      "status": "completed",
+      "success": true,
+      "problems": [],
+      "steps": 3,
+      "reviews": 0,
+      "retries": 0,
+      "chat_turns": 0,
+      "plan_changes": 0,
+      "independent_pairs": 2,
+      "bracketed_pairs": 0,
+      "parallel_workers": 2,
+      "progress_notes": 2,
+      "final_summary": 1,
+      "planner_profile_runs": 0,
+      "roles_defined": 0,
+      "role_runs": 0,
+      "role_profile_runs": 0,
+      "role_reviews": 0,
+      "role_prompt_mismatches": 0,
+      "role_boundary_misses": 0,
+      "gate_breaches": 0,
+      "advisory_role_reviews": 0,
+      "advisory_role_fails": 0,
+      "discipline_roles": 0,
+      "interface_dependents": 0,
+      "gates_opened": 1,
+      "gate_turns": 1,
+      "gates_passed": 1,
+      "gates_ended_by_user": 0,
+      "gates_cancelled": 0,
+      "assumptions_stated": 2,
+      "gate_plan_changes": 1,
+      "gate_parallel_runs": 1,
+      "conclusion_reads": 1,
+      "gate_asks_beyond_script": 0,
+      "planner_turns": {
+        "plan": 1,
+        "gate": 1,
+        "decision": 2
+      },
+      "cost_usd": 0.34608,
+      "cost_by_role": {
+        "planner": 0.203408,
+        "worker": 0.142672,
+        "reviewer": 0.0
+      },
+      "runs": 6,
+      "run_errors": 0,
+      "models": {
+        "planner": [
+          "claude-opus-5-5"
+        ],
+        "worker": [
+          "claude-opus-5-5"
+        ]
+      },
+      "tokens": {
+        "input": 22,
+        "output": 3623,
+        "cache_read": 200020,
+        "cache_creation": 29191
+      },
+      "cost_basis": {
+        "equivalent": 6,
+        "provider_price": 0,
+        "unpriced": 0
+      },
+      "contract_violations": {
+        "planner": 0,
+        "worker": 0,
+        "reviewer": 0,
+        "total": 0
+      },
+      "planner_edit_tool_paths": [],
+      "planner_changed_files": [],
+      "planner_modified_files": 0,
+      "duration_s": 57.2,
+      "stopped_by_cap": false,
+      "timed_out": false,
+      "outcome": "pass"
+    },
+    {
+      "id": "gate_discoverable",
+      "rep": 2,
+      "status": "completed",
+      "success": true,
+      "problems": [],
+      "steps": 1,
+      "reviews": 0,
+      "retries": 0,
+      "chat_turns": 0,
+      "plan_changes": 0,
+      "independent_pairs": 0,
+      "bracketed_pairs": 0,
+      "parallel_workers": 1,
+      "progress_notes": 1,
+      "final_summary": 1,
+      "planner_profile_runs": 0,
+      "roles_defined": 0,
+      "role_runs": 0,
+      "role_profile_runs": 0,
+      "role_reviews": 0,
+      "role_prompt_mismatches": 0,
+      "role_boundary_misses": 0,
+      "gate_breaches": 0,
+      "advisory_role_reviews": 0,
+      "advisory_role_fails": 0,
+      "discipline_roles": 0,
+      "interface_dependents": 0,
+      "gates_opened": 0,
+      "gate_turns": 0,
+      "gates_passed": 0,
+      "gates_ended_by_user": 0,
+      "gates_cancelled": 0,
+      "assumptions_stated": 0,
+      "gate_plan_changes": 0,
+      "gate_parallel_runs": 0,
+      "conclusion_reads": 0,
+      "gate_asks_beyond_script": 0,
+      "planner_turns": {
+        "plan": 1,
+        "decision": 1
+      },
+      "cost_usd": 0.21489,
+      "cost_by_role": {
+        "planner": 0.140548,
+        "worker": 0.074342,
+        "reviewer": 0.0
+      },
+      "runs": 3,
+      "run_errors": 0,
+      "models": {
+        "planner": [
+          "claude-opus-5-5"
+        ],
+        "worker": [
+          "claude-opus-5-5"
+        ]
+      },
+      "tokens": {
+        "input": 12,
+        "output": 1320,
+        "cache_read": 92529,
+        "cache_creation": 21242
+      },
+      "cost_basis": {
+        "equivalent": 3,
+        "provider_price": 0,
+        "unpriced": 0
+      },
+      "contract_violations": {
+        "planner": 0,
+        "worker": 0,
+        "reviewer": 0,
+        "total": 0
+      },
+      "planner_edit_tool_paths": [],
+      "planner_changed_files": [],
+      "planner_modified_files": 0,
+      "duration_s": 30.6,
+      "stopped_by_cap": false,
+      "timed_out": false,
+      "outcome": "pass"
+    },
+    {
+      "id": "dependent_steps",
+      "rep": 3,
+      "status": "completed",
+      "success": true,
+      "problems": [],
+      "steps": 2,
+      "reviews": 0,
+      "retries": 0,
+      "chat_turns": 0,
+      "plan_changes": 0,
+      "independent_pairs": 0,
+      "bracketed_pairs": 0,
+      "parallel_workers": 1,
+      "progress_notes": 2,
+      "final_summary": 1,
+      "planner_profile_runs": 0,
+      "roles_defined": 0,
+      "role_runs": 0,
+      "role_profile_runs": 0,
+      "role_reviews": 0,
+      "role_prompt_mismatches": 0,
+      "role_boundary_misses": 0,
+      "gate_breaches": 0,
+      "advisory_role_reviews": 0,
+      "advisory_role_fails": 0,
+      "discipline_roles": 0,
+      "interface_dependents": 0,
+      "gates_opened": 0,
+      "gate_turns": 0,
+      "gates_passed": 0,
+      "gates_ended_by_user": 0,
+      "gates_cancelled": 0,
+      "assumptions_stated": 0,
+      "gate_plan_changes": 0,
+      "gate_parallel_runs": 0,
+      "conclusion_reads": 0,
+      "gate_asks_beyond_script": 0,
+      "planner_turns": {
+        "plan": 1,
+        "decision": 2
+      },
+      "cost_usd": 0.302576,
+      "cost_by_role": {
+        "planner": 0.163632,
+        "worker": 0.138944,
+        "reviewer": 0.0
+      },
+      "runs": 5,
+      "run_errors": 0,
+      "models": {
+        "planner": [
+          "claude-opus-5-5"
+        ],
+        "worker": [
+          "claude-opus-5-5"
+        ]
+      },
+      "tokens": {
+        "input": 18,
+        "output": 2273,
+        "cache_read": 142502,
+        "cache_creation": 28568
+      },
+      "cost_basis": {
+        "equivalent": 5,
+        "provider_price": 0,
+        "unpriced": 0
+      },
+      "contract_violations": {
+        "planner": 0,
+        "worker": 0,
+        "reviewer": 0,
+        "total": 0
+      },
+      "planner_edit_tool_paths": [],
+      "planner_changed_files": [],
+      "planner_modified_files": 0,
+      "duration_s": 46.9,
+      "stopped_by_cap": false,
+      "timed_out": false,
+      "outcome": "pass"
+    },
+    {
+      "id": "parallel_parts",
+      "rep": 3,
+      "status": "completed",
+      "success": true,
+      "problems": [],
+      "steps": 3,
+      "reviews": 0,
+      "retries": 0,
+      "chat_turns": 0,
+      "plan_changes": 0,
+      "independent_pairs": 1,
+      "bracketed_pairs": 0,
+      "parallel_workers": 2,
+      "progress_notes": 3,
+      "final_summary": 1,
+      "planner_profile_runs": 0,
+      "roles_defined": 0,
+      "role_runs": 0,
+      "role_profile_runs": 0,
+      "role_reviews": 0,
+      "role_prompt_mismatches": 0,
+      "role_boundary_misses": 0,
+      "gate_breaches": 0,
+      "advisory_role_reviews": 0,
+      "advisory_role_fails": 0,
+      "discipline_roles": 0,
+      "interface_dependents": 0,
+      "gates_opened": 0,
+      "gate_turns": 0,
+      "gates_passed": 0,
+      "gates_ended_by_user": 0,
+      "gates_cancelled": 0,
+      "assumptions_stated": 0,
+      "gate_plan_changes": 0,
+      "gate_parallel_runs": 0,
+      "conclusion_reads": 0,
+      "gate_asks_beyond_script": 0,
+      "planner_turns": {
+        "plan": 1,
+        "decision": 3
+      },
+      "cost_usd": 0.413963,
+      "cost_by_role": {
+        "planner": 0.20237,
+        "worker": 0.211593,
+        "reviewer": 0.0
+      },
+      "runs": 7,
+      "run_errors": 0,
+      "models": {
+        "planner": [
+          "claude-opus-5-5"
+        ],
+        "worker": [
+          "claude-opus-5-5"
+        ]
+      },
+      "tokens": {
+        "input": 26,
+        "output": 3586,
+        "cache_read": 215735,
+        "cache_creation": 37374
+      },
+      "cost_basis": {
+        "equivalent": 7,
+        "provider_price": 0,
+        "unpriced": 0
+      },
+      "contract_violations": {
+        "planner": 0,
+        "worker": 0,
+        "reviewer": 0,
+        "total": 0
+      },
+      "planner_edit_tool_paths": [],
+      "planner_changed_files": [],
+      "planner_modified_files": 0,
+      "duration_s": 59.3,
+      "stopped_by_cap": false,
+      "timed_out": false,
+      "outcome": "pass"
+    },
+    {
+      "id": "interface_first",
+      "rep": 3,
+      "status": "completed",
+      "success": true,
+      "problems": [],
+      "steps": 4,
+      "reviews": 0,
+      "retries": 0,
+      "chat_turns": 0,
+      "plan_changes": 0,
+      "independent_pairs": 1,
+      "bracketed_pairs": 1,
+      "parallel_workers": 2,
+      "progress_notes": 4,
+      "final_summary": 1,
+      "planner_profile_runs": 0,
+      "roles_defined": 0,
+      "role_runs": 0,
+      "role_profile_runs": 0,
+      "role_reviews": 0,
+      "role_prompt_mismatches": 0,
+      "role_boundary_misses": 0,
+      "gate_breaches": 0,
+      "advisory_role_reviews": 0,
+      "advisory_role_fails": 0,
+      "discipline_roles": 0,
+      "interface_dependents": 0,
+      "gates_opened": 0,
+      "gate_turns": 0,
+      "gates_passed": 0,
+      "gates_ended_by_user": 0,
+      "gates_cancelled": 0,
+      "assumptions_stated": 0,
+      "gate_plan_changes": 0,
+      "gate_parallel_runs": 0,
+      "conclusion_reads": 0,
+      "gate_asks_beyond_script": 0,
+      "planner_turns": {
+        "plan": 1,
+        "decision": 4
+      },
+      "cost_usd": 0.880295,
+      "cost_by_role": {
+        "planner": 0.278336,
+        "worker": 0.60196,
+        "reviewer": 0.0
+      },
+      "runs": 9,
+      "run_errors": 0,
+      "models": {
+        "planner": [
+          "claude-opus-5-5"
+        ],
+        "worker": [
+          "claude-opus-5-5"
+        ]
+      },
+      "tokens": {
+        "input": 54,
+        "output": 13651,
+        "cache_read": 518256,
+        "cache_creation": 62926
+      },
+      "cost_basis": {
+        "equivalent": 9,
+        "provider_price": 0,
+        "unpriced": 0
+      },
+      "contract_violations": {
+        "planner": 0,
+        "worker": 0,
+        "reviewer": 0,
+        "total": 0
+      },
+      "planner_edit_tool_paths": [],
+      "planner_changed_files": [],
+      "planner_modified_files": 0,
+      "duration_s": 155.2,
+      "stopped_by_cap": false,
+      "timed_out": false,
+      "outcome": "pass"
+    },
+    {
+      "id": "supplement_replan",
+      "rep": 3,
+      "status": "completed",
+      "success": true,
+      "problems": [],
+      "steps": 3,
+      "reviews": 0,
+      "retries": 0,
+      "chat_turns": 1,
+      "plan_changes": 1,
+      "independent_pairs": 1,
+      "bracketed_pairs": 0,
+      "parallel_workers": 1,
+      "progress_notes": 2,
+      "final_summary": 1,
+      "planner_profile_runs": 0,
+      "roles_defined": 0,
+      "role_runs": 0,
+      "role_profile_runs": 0,
+      "role_reviews": 0,
+      "role_prompt_mismatches": 0,
+      "role_boundary_misses": 0,
+      "gate_breaches": 0,
+      "advisory_role_reviews": 0,
+      "advisory_role_fails": 0,
+      "discipline_roles": 0,
+      "interface_dependents": 0,
+      "gates_opened": 0,
+      "gate_turns": 0,
+      "gates_passed": 0,
+      "gates_ended_by_user": 0,
+      "gates_cancelled": 0,
+      "assumptions_stated": 0,
+      "gate_plan_changes": 0,
+      "gate_parallel_runs": 0,
+      "conclusion_reads": 0,
+      "gate_asks_beyond_script": 0,
+      "planner_turns": {
+        "plan": 1,
+        "chat": 1,
+        "decision": 2
+      },
+      "cost_usd": 0.316131,
+      "cost_by_role": {
+        "planner": 0.178414,
+        "worker": 0.137717,
+        "reviewer": 0.0
+      },
+      "runs": 6,
+      "run_errors": 0,
+      "models": {
+        "planner": [
+          "claude-opus-5-5"
+        ],
+        "worker": [
+          "claude-opus-5-5"
+        ]
+      },
+      "tokens": {
+        "input": 20,
+        "output": 2362,
+        "cache_read": 164656,
+        "cache_creation": 29485
+      },
+      "cost_basis": {
+        "equivalent": 6,
+        "provider_price": 0,
+        "unpriced": 0
+      },
+      "contract_violations": {
+        "planner": 0,
+        "worker": 0,
+        "reviewer": 0,
+        "total": 0
+      },
+      "planner_edit_tool_paths": [],
+      "planner_changed_files": [],
+      "planner_modified_files": 0,
+      "duration_s": 67.5,
+      "stopped_by_cap": false,
+      "timed_out": false,
+      "outcome": "pass"
+    },
+    {
+      "id": "requirement_edit",
+      "rep": 3,
+      "status": "completed",
+      "success": true,
+      "problems": [],
+      "steps": 3,
+      "reviews": 0,
+      "retries": 0,
+      "chat_turns": 1,
+      "plan_changes": 1,
+      "independent_pairs": 1,
+      "bracketed_pairs": 0,
+      "parallel_workers": 1,
+      "progress_notes": 2,
+      "final_summary": 1,
+      "planner_profile_runs": 0,
+      "roles_defined": 0,
+      "role_runs": 0,
+      "role_profile_runs": 0,
+      "role_reviews": 0,
+      "role_prompt_mismatches": 0,
+      "role_boundary_misses": 0,
+      "gate_breaches": 0,
+      "advisory_role_reviews": 0,
+      "advisory_role_fails": 0,
+      "discipline_roles": 0,
+      "interface_dependents": 0,
+      "gates_opened": 0,
+      "gate_turns": 0,
+      "gates_passed": 0,
+      "gates_ended_by_user": 0,
+      "gates_cancelled": 0,
+      "assumptions_stated": 0,
+      "gate_plan_changes": 0,
+      "gate_parallel_runs": 0,
+      "conclusion_reads": 0,
+      "gate_asks_beyond_script": 0,
+      "planner_turns": {
+        "plan": 1,
+        "chat": 1,
+        "decision": 2
+      },
+      "cost_usd": 0.374699,
+      "cost_by_role": {
+        "planner": 0.238291,
+        "worker": 0.136407,
+        "reviewer": 0.0
+      },
+      "runs": 6,
+      "run_errors": 0,
+      "models": {
+        "planner": [
+          "claude-opus-5-5"
+        ],
+        "worker": [
+          "claude-opus-5-5"
+        ]
+      },
+      "tokens": {
+        "input": 20,
+        "output": 2946,
+        "cache_read": 161093,
+        "cache_creation": 35435
+      },
+      "cost_basis": {
+        "equivalent": 6,
+        "provider_price": 0,
+        "unpriced": 0
+      },
+      "contract_violations": {
+        "planner": 0,
+        "worker": 0,
+        "reviewer": 0,
+        "total": 0
+      },
+      "planner_edit_tool_paths": [],
+      "planner_changed_files": [],
+      "planner_modified_files": 0,
+      "duration_s": 65.7,
+      "stopped_by_cap": false,
+      "timed_out": false,
+      "outcome": "pass"
+    },
+    {
+      "id": "supplement_no_change",
+      "rep": 3,
+      "status": "completed",
+      "success": true,
+      "problems": [],
+      "steps": 2,
+      "reviews": 0,
+      "retries": 0,
+      "chat_turns": 1,
+      "plan_changes": 0,
+      "independent_pairs": 0,
+      "bracketed_pairs": 0,
+      "parallel_workers": 1,
+      "progress_notes": 2,
+      "final_summary": 1,
+      "planner_profile_runs": 0,
+      "roles_defined": 0,
+      "role_runs": 0,
+      "role_profile_runs": 0,
+      "role_reviews": 0,
+      "role_prompt_mismatches": 0,
+      "role_boundary_misses": 0,
+      "gate_breaches": 0,
+      "advisory_role_reviews": 0,
+      "advisory_role_fails": 0,
+      "discipline_roles": 0,
+      "interface_dependents": 0,
+      "gates_opened": 0,
+      "gate_turns": 0,
+      "gates_passed": 0,
+      "gates_ended_by_user": 0,
+      "gates_cancelled": 0,
+      "assumptions_stated": 0,
+      "gate_plan_changes": 0,
+      "gate_parallel_runs": 0,
+      "conclusion_reads": 0,
+      "gate_asks_beyond_script": 0,
+      "planner_turns": {
+        "plan": 1,
+        "chat": 1,
+        "decision": 2
+      },
+      "cost_usd": 0.307441,
+      "cost_by_role": {
+        "planner": 0.172676,
+        "worker": 0.134765,
+        "reviewer": 0.0
+      },
+      "runs": 6,
+      "run_errors": 0,
+      "models": {
+        "planner": [
+          "claude-opus-5-5"
+        ],
+        "worker": [
+          "claude-opus-5-5"
+        ]
+      },
+      "tokens": {
+        "input": 20,
+        "output": 2177,
+        "cache_read": 163864,
+        "cache_creation": 28881
+      },
+      "cost_basis": {
+        "equivalent": 6,
+        "provider_price": 0,
+        "unpriced": 0
+      },
+      "contract_violations": {
+        "planner": 0,
+        "worker": 0,
+        "reviewer": 0,
+        "total": 0
+      },
+      "planner_edit_tool_paths": [],
+      "planner_changed_files": [],
+      "planner_modified_files": 0,
+      "duration_s": 57.3,
+      "stopped_by_cap": false,
+      "timed_out": false,
+      "outcome": "pass"
+    },
+    {
+      "id": "roles_tester_docs",
+      "rep": 3,
+      "status": "completed",
+      "success": true,
+      "problems": [],
+      "steps": 3,
+      "reviews": 0,
+      "retries": 0,
+      "chat_turns": 0,
+      "plan_changes": 0,
+      "independent_pairs": 1,
+      "bracketed_pairs": 0,
+      "parallel_workers": 2,
+      "progress_notes": 3,
+      "final_summary": 1,
+      "planner_profile_runs": 0,
+      "roles_defined": 2,
+      "role_runs": 2,
+      "role_profile_runs": 1,
+      "role_reviews": 0,
+      "role_prompt_mismatches": 0,
+      "role_boundary_misses": 0,
+      "gate_breaches": 0,
+      "advisory_role_reviews": 0,
+      "advisory_role_fails": 0,
+      "discipline_roles": 0,
+      "interface_dependents": 2,
+      "gates_opened": 0,
+      "gate_turns": 0,
+      "gates_passed": 0,
+      "gates_ended_by_user": 0,
+      "gates_cancelled": 0,
+      "assumptions_stated": 0,
+      "gate_plan_changes": 0,
+      "gate_parallel_runs": 0,
+      "conclusion_reads": 0,
+      "gate_asks_beyond_script": 0,
+      "planner_turns": {
+        "plan": 1,
+        "decision": 3
+      },
+      "cost_usd": 0.572997,
+      "cost_by_role": {
+        "planner": 0.259362,
+        "worker": 0.313635,
+        "reviewer": 0.0
+      },
+      "runs": 7,
+      "run_errors": 0,
+      "models": {
+        "planner": [
+          "claude-opus-5-5"
+        ],
+        "worker": [
+          "claude-opus-5-5"
+        ]
+      },
+      "tokens": {
+        "input": 42,
+        "output": 7767,
+        "cache_read": 395965,
+        "cache_creation": 42287
+      },
+      "cost_basis": {
+        "equivalent": 7,
+        "provider_price": 0,
+        "unpriced": 0
+      },
+      "contract_violations": {
+        "planner": 0,
+        "worker": 0,
+        "reviewer": 0,
+        "total": 0
+      },
+      "planner_edit_tool_paths": [],
+      "planner_changed_files": [],
+      "planner_modified_files": 0,
+      "duration_s": 67.6,
+      "stopped_by_cap": false,
+      "timed_out": false,
+      "outcome": "pass"
+    },
+    {
+      "id": "roles_multi_platform",
+      "rep": 3,
+      "status": "completed",
+      "success": true,
+      "problems": [],
+      "steps": 6,
+      "reviews": 1,
+      "retries": 0,
+      "chat_turns": 0,
+      "plan_changes": 0,
+      "independent_pairs": 6,
+      "bracketed_pairs": 6,
+      "parallel_workers": 4,
+      "progress_notes": 7,
+      "final_summary": 1,
+      "planner_profile_runs": 0,
+      "roles_defined": 4,
+      "role_runs": 5,
+      "role_profile_runs": 0,
+      "role_reviews": 0,
+      "role_prompt_mismatches": 0,
+      "role_boundary_misses": 0,
+      "gate_breaches": 0,
+      "advisory_role_reviews": 0,
+      "advisory_role_fails": 0,
+      "discipline_roles": 4,
+      "interface_dependents": 4,
+      "gates_opened": 0,
+      "gate_turns": 0,
+      "gates_passed": 0,
+      "gates_ended_by_user": 0,
+      "gates_cancelled": 0,
+      "assumptions_stated": 0,
+      "gate_plan_changes": 0,
+      "gate_parallel_runs": 0,
+      "conclusion_reads": 0,
+      "gate_asks_beyond_script": 0,
+      "planner_turns": {
+        "plan": 1,
+        "decision": 7
+      },
+      "cost_usd": 1.846074,
+      "cost_by_role": {
+        "planner": 0.606752,
+        "worker": 1.085408,
+        "reviewer": 0.153914
+      },
+      "runs": 15,
+      "run_errors": 0,
+      "models": {
+        "planner": [
+          "claude-opus-5-5"
+        ],
+        "worker": [
+          "claude-opus-5-5"
+        ],
+        "reviewer": [
+          "claude-opus-5-5"
+        ]
+      },
+      "tokens": {
+        "input": 98,
+        "output": 32463,
+        "cache_read": 1122109,
+        "cache_creation": 121500
+      },
+      "cost_basis": {
+        "equivalent": 15,
+        "provider_price": 0,
+        "unpriced": 0
+      },
+      "contract_violations": {
+        "planner": 0,
+        "worker": 0,
+        "reviewer": 0,
+        "total": 0
+      },
+      "planner_edit_tool_paths": [],
+      "planner_changed_files": [],
+      "planner_modified_files": 0,
+      "duration_s": 263.8,
+      "stopped_by_cap": false,
+      "timed_out": false,
+      "outcome": "pass"
+    },
+    {
+      "id": "roles_not_needed",
+      "rep": 3,
+      "status": "completed",
+      "success": true,
+      "problems": [],
+      "steps": 1,
+      "reviews": 0,
+      "retries": 0,
+      "chat_turns": 0,
+      "plan_changes": 0,
+      "independent_pairs": 0,
+      "bracketed_pairs": 0,
+      "parallel_workers": 1,
+      "progress_notes": 1,
+      "final_summary": 1,
+      "planner_profile_runs": 0,
+      "roles_defined": 0,
+      "role_runs": 0,
+      "role_profile_runs": 0,
+      "role_reviews": 0,
+      "role_prompt_mismatches": 0,
+      "role_boundary_misses": 0,
+      "gate_breaches": 0,
+      "advisory_role_reviews": 0,
+      "advisory_role_fails": 0,
+      "discipline_roles": 0,
+      "interface_dependents": 0,
+      "gates_opened": 0,
+      "gate_turns": 0,
+      "gates_passed": 0,
+      "gates_ended_by_user": 0,
+      "gates_cancelled": 0,
+      "assumptions_stated": 0,
+      "gate_plan_changes": 0,
+      "gate_parallel_runs": 0,
+      "conclusion_reads": 0,
+      "gate_asks_beyond_script": 0,
+      "planner_turns": {
+        "plan": 1,
+        "decision": 1
+      },
+      "cost_usd": 0.203727,
+      "cost_by_role": {
+        "planner": 0.135232,
+        "worker": 0.068495,
+        "reviewer": 0.0
+      },
+      "runs": 3,
+      "run_errors": 0,
+      "models": {
+        "planner": [
+          "claude-opus-5-5"
+        ],
+        "worker": [
+          "claude-opus-5-5"
+        ]
+      },
+      "tokens": {
+        "input": 10,
+        "output": 1103,
+        "cache_read": 74454,
+        "cache_creation": 20842
+      },
+      "cost_basis": {
+        "equivalent": 3,
+        "provider_price": 0,
+        "unpriced": 0
+      },
+      "contract_violations": {
+        "planner": 0,
+        "worker": 0,
+        "reviewer": 0,
+        "total": 0
+      },
+      "planner_edit_tool_paths": [],
+      "planner_changed_files": [],
+      "planner_modified_files": 0,
+      "duration_s": 28.5,
+      "stopped_by_cap": false,
+      "timed_out": false,
+      "outcome": "pass"
+    },
+    {
+      "id": "gate_ambiguous",
+      "rep": 3,
+      "status": "completed",
+      "success": true,
+      "problems": [],
+      "steps": 2,
+      "reviews": 0,
+      "retries": 0,
+      "chat_turns": 0,
+      "plan_changes": 0,
+      "independent_pairs": 0,
+      "bracketed_pairs": 0,
+      "parallel_workers": 1,
+      "progress_notes": 1,
+      "final_summary": 1,
+      "planner_profile_runs": 0,
+      "roles_defined": 0,
+      "role_runs": 0,
+      "role_profile_runs": 0,
+      "role_reviews": 0,
+      "role_prompt_mismatches": 0,
+      "role_boundary_misses": 0,
+      "gate_breaches": 0,
+      "advisory_role_reviews": 0,
+      "advisory_role_fails": 0,
+      "discipline_roles": 0,
+      "interface_dependents": 0,
+      "gates_opened": 1,
+      "gate_turns": 1,
+      "gates_passed": 1,
+      "gates_ended_by_user": 0,
+      "gates_cancelled": 0,
+      "assumptions_stated": 2,
+      "gate_plan_changes": 1,
+      "gate_parallel_runs": 0,
+      "conclusion_reads": 1,
+      "gate_asks_beyond_script": 0,
+      "planner_turns": {
+        "plan": 1,
+        "gate": 1,
+        "decision": 1
+      },
+      "cost_usd": 0.236579,
+      "cost_by_role": {
+        "planner": 0.161073,
+        "worker": 0.075506,
+        "reviewer": 0.0
+      },
+      "runs": 4,
+      "run_errors": 0,
+      "models": {
+        "planner": [
+          "claude-opus-5-5"
+        ],
+        "worker": [
+          "claude-opus-5-5"
+        ]
+      },
+      "tokens": {
+        "input": 14,
+        "output": 2449,
+        "cache_read": 123155,
+        "cache_creation": 20364
+      },
+      "cost_basis": {
+        "equivalent": 4,
+        "provider_price": 0,
+        "unpriced": 0
+      },
+      "contract_violations": {
+        "planner": 0,
+        "worker": 0,
+        "reviewer": 0,
+        "total": 0
+      },
+      "planner_edit_tool_paths": [],
+      "planner_changed_files": [],
+      "planner_modified_files": 0,
+      "duration_s": 43.0,
+      "stopped_by_cap": false,
+      "timed_out": false,
+      "outcome": "pass"
+    },
+    {
+      "id": "gate_not_needed",
+      "rep": 3,
+      "status": "completed",
+      "success": true,
+      "problems": [],
+      "steps": 1,
+      "reviews": 0,
+      "retries": 0,
+      "chat_turns": 0,
+      "plan_changes": 0,
+      "independent_pairs": 0,
+      "bracketed_pairs": 0,
+      "parallel_workers": 1,
+      "progress_notes": 1,
+      "final_summary": 1,
+      "planner_profile_runs": 0,
+      "roles_defined": 0,
+      "role_runs": 0,
+      "role_profile_runs": 0,
+      "role_reviews": 0,
+      "role_prompt_mismatches": 0,
+      "role_boundary_misses": 0,
+      "gate_breaches": 0,
+      "advisory_role_reviews": 0,
+      "advisory_role_fails": 0,
+      "discipline_roles": 0,
+      "interface_dependents": 0,
+      "gates_opened": 0,
+      "gate_turns": 0,
+      "gates_passed": 0,
+      "gates_ended_by_user": 0,
+      "gates_cancelled": 0,
+      "assumptions_stated": 0,
+      "gate_plan_changes": 0,
+      "gate_parallel_runs": 0,
+      "conclusion_reads": 0,
+      "gate_asks_beyond_script": 0,
+      "planner_turns": {
+        "plan": 1,
+        "decision": 1
+      },
+      "cost_usd": 0.204869,
+      "cost_by_role": {
+        "planner": 0.137353,
+        "worker": 0.067516,
+        "reviewer": 0.0
+      },
+      "runs": 3,
+      "run_errors": 0,
+      "models": {
+        "planner": [
+          "claude-opus-5-5"
+        ],
+        "worker": [
+          "claude-opus-5-5"
+        ]
+      },
+      "tokens": {
+        "input": 10,
+        "output": 1094,
+        "cache_read": 75063,
+        "cache_creation": 20992
+      },
+      "cost_basis": {
+        "equivalent": 3,
+        "provider_price": 0,
+        "unpriced": 0
+      },
+      "contract_violations": {
+        "planner": 0,
+        "worker": 0,
+        "reviewer": 0,
+        "total": 0
+      },
+      "planner_edit_tool_paths": [],
+      "planner_changed_files": [],
+      "planner_modified_files": 0,
+      "duration_s": 22.5,
+      "stopped_by_cap": false,
+      "timed_out": false,
+      "outcome": "pass"
+    },
+    {
+      "id": "gate_parallel_branch",
+      "rep": 3,
+      "status": "completed",
+      "success": true,
+      "problems": [],
+      "steps": 3,
+      "reviews": 0,
+      "retries": 0,
+      "chat_turns": 0,
+      "plan_changes": 0,
+      "independent_pairs": 3,
+      "bracketed_pairs": 0,
+      "parallel_workers": 2,
+      "progress_notes": 2,
+      "final_summary": 1,
+      "planner_profile_runs": 0,
+      "roles_defined": 0,
+      "role_runs": 0,
+      "role_profile_runs": 0,
+      "role_reviews": 0,
+      "role_prompt_mismatches": 0,
+      "role_boundary_misses": 0,
+      "gate_breaches": 0,
+      "advisory_role_reviews": 0,
+      "advisory_role_fails": 0,
+      "discipline_roles": 0,
+      "interface_dependents": 0,
+      "gates_opened": 1,
+      "gate_turns": 1,
+      "gates_passed": 1,
+      "gates_ended_by_user": 0,
+      "gates_cancelled": 0,
+      "assumptions_stated": 2,
+      "gate_plan_changes": 1,
+      "gate_parallel_runs": 1,
+      "conclusion_reads": 1,
+      "gate_asks_beyond_script": 0,
+      "planner_turns": {
+        "plan": 1,
+        "gate": 1,
+        "decision": 2
+      },
+      "cost_usd": 0.337008,
+      "cost_by_role": {
+        "planner": 0.193751,
+        "worker": 0.143257,
+        "reviewer": 0.0
+      },
+      "runs": 6,
+      "run_errors": 0,
+      "models": {
+        "planner": [
+          "claude-opus-5-5"
+        ],
+        "worker": [
+          "claude-opus-5-5"
+        ]
+      },
+      "tokens": {
+        "input": 22,
+        "output": 3348,
+        "cache_read": 199002,
+        "cache_creation": 28770
+      },
+      "cost_basis": {
+        "equivalent": 6,
+        "provider_price": 0,
+        "unpriced": 0
+      },
+      "contract_violations": {
+        "planner": 0,
+        "worker": 0,
+        "reviewer": 0,
+        "total": 0
+      },
+      "planner_edit_tool_paths": [],
+      "planner_changed_files": [],
+      "planner_modified_files": 0,
+      "duration_s": 53.1,
+      "stopped_by_cap": false,
+      "timed_out": false,
+      "outcome": "pass"
+    },
+    {
+      "id": "gate_discoverable",
+      "rep": 3,
+      "status": "completed",
+      "success": true,
+      "problems": [],
+      "steps": 1,
+      "reviews": 0,
+      "retries": 0,
+      "chat_turns": 0,
+      "plan_changes": 0,
+      "independent_pairs": 0,
+      "bracketed_pairs": 0,
+      "parallel_workers": 1,
+      "progress_notes": 1,
+      "final_summary": 1,
+      "planner_profile_runs": 0,
+      "roles_defined": 0,
+      "role_runs": 0,
+      "role_profile_runs": 0,
+      "role_reviews": 0,
+      "role_prompt_mismatches": 0,
+      "role_boundary_misses": 0,
+      "gate_breaches": 0,
+      "advisory_role_reviews": 0,
+      "advisory_role_fails": 0,
+      "discipline_roles": 0,
+      "interface_dependents": 0,
+      "gates_opened": 0,
+      "gate_turns": 0,
+      "gates_passed": 0,
+      "gates_ended_by_user": 0,
+      "gates_cancelled": 0,
+      "assumptions_stated": 0,
+      "gate_plan_changes": 0,
+      "gate_parallel_runs": 0,
+      "conclusion_reads": 0,
+      "gate_asks_beyond_script": 0,
+      "planner_turns": {
+        "plan": 1,
+        "decision": 1
+      },
+      "cost_usd": 0.214718,
+      "cost_by_role": {
+        "planner": 0.142036,
+        "worker": 0.072682,
+        "reviewer": 0.0
+      },
+      "runs": 3,
+      "run_errors": 0,
+      "models": {
+        "planner": [
+          "claude-opus-5-5"
+        ],
+        "worker": [
+          "claude-opus-5-5"
+        ]
+      },
+      "tokens": {
+        "input": 12,
+        "output": 1282,
+        "cache_read": 92592,
+        "cache_creation": 21314
+      },
+      "cost_basis": {
+        "equivalent": 3,
+        "provider_price": 0,
+        "unpriced": 0
+      },
+      "contract_violations": {
+        "planner": 0,
+        "worker": 0,
+        "reviewer": 0,
+        "total": 0
+      },
+      "planner_edit_tool_paths": [],
+      "planner_changed_files": [],
+      "planner_modified_files": 0,
+      "duration_s": 30.6,
+      "stopped_by_cap": false,
+      "timed_out": false,
+      "outcome": "pass"
     }
   ]
 }

@@ -1,23 +1,28 @@
 {
-  "schema": "looper-prompt-eval/v1",
+  "schema": "looper-prompt-eval/v2",
   "mode": "real",
   "model": "haiku",
   "agent": "claude-code/haiku",
   "provider_preset": null,
-  "started_at": "20261015T091550Z",
+  "started_at": "20261017T104505Z",
   "git": {
-    "commit": "bec7c029d137a7b2ca9f27d2b03a1fcabcc82c3a",
+    "commit": "68d7b953cc0fc8c00c72e3b4138e7c03629a3557",
     "dirty": false
   },
   "caps": {
-    "max_budget_usd": 0.25,
-    "total_cap_usd": 0.8
+    "max_budget_usd": 1.0,
+    "total_cap_usd": 100.0
   },
+  "step_workspaces": null,
+  "user_gates": null,
+  "reps": 3,
   "stopped_by_cap": false,
-  "total_cost_usd": 0.661849,
+  "aborted": null,
+  "total_cost_usd": 7.991243,
   "tasks": [
     {
       "id": "single_step",
+      "rep": 1,
       "status": "completed",
       "success": true,
       "problems": [],
@@ -25,27 +30,59 @@
       "reviews": 0,
       "retries": 0,
       "chat_turns": 0,
+      "plan_changes": 0,
       "independent_pairs": 0,
       "bracketed_pairs": 0,
       "parallel_workers": 1,
       "progress_notes": 1,
       "final_summary": 1,
+      "planner_profile_runs": 0,
+      "roles_defined": 0,
+      "role_runs": 0,
+      "role_profile_runs": 0,
+      "role_reviews": 0,
+      "role_prompt_mismatches": 0,
+      "role_boundary_misses": 0,
+      "gate_breaches": 0,
+      "advisory_role_reviews": 0,
+      "advisory_role_fails": 0,
+      "discipline_roles": 0,
+      "interface_dependents": 0,
+      "gates_opened": 0,
+      "gate_turns": 0,
+      "gates_passed": 0,
+      "gates_ended_by_user": 0,
+      "gates_cancelled": 0,
+      "assumptions_stated": 0,
+      "gate_plan_changes": 0,
+      "gate_parallel_runs": 0,
+      "conclusion_reads": 0,
+      "gate_asks_beyond_script": 0,
       "planner_turns": {
         "plan": 1,
         "decision": 1
       },
-      "cost_usd": 0.043519,
+      "cost_usd": 0.049693,
       "cost_by_role": {
-        "planner": 0.022287,
-        "worker": 0.021232,
+        "planner": 0.027836,
+        "worker": 0.021857,
         "reviewer": 0.0
       },
       "runs": 3,
+      "run_errors": 0,
+      "models": {
+        "planner": [
+          "claude-haiku-4-5-20251001"
+        ],
+        "worker": [
+          "claude-haiku-4-5-20251001"
+        ]
+      },
       "tokens": {
-        "input": 46,
-        "output": 1568,
-        "cache_read": 87453,
-        "cache_creation": 13444
+        "input": 54,
+        "output": 1834,
+        "cache_read": 110186,
+        "cache_creation": 14725
       },
       "cost_basis": {
         "equivalent": 3,
@@ -61,12 +98,14 @@
       "planner_edit_tool_paths": [],
       "planner_changed_files": [],
       "planner_modified_files": 0,
-      "duration_s": 22.2,
+      "duration_s": 30.7,
       "stopped_by_cap": false,
-      "timed_out": false
+      "timed_out": false,
+      "outcome": "pass"
     },
     {
       "id": "dependent_steps",
+      "rep": 1,
       "status": "completed",
       "success": true,
       "problems": [],
@@ -74,27 +113,59 @@
       "reviews": 0,
       "retries": 0,
       "chat_turns": 0,
+      "plan_changes": 0,
       "independent_pairs": 0,
       "bracketed_pairs": 0,
       "parallel_workers": 1,
       "progress_notes": 2,
       "final_summary": 1,
+      "planner_profile_runs": 0,
+      "roles_defined": 0,
+      "role_runs": 0,
+      "role_profile_runs": 0,
+      "role_reviews": 0,
+      "role_prompt_mismatches": 0,
+      "role_boundary_misses": 0,
+      "gate_breaches": 0,
+      "advisory_role_reviews": 0,
+      "advisory_role_fails": 0,
+      "discipline_roles": 0,
+      "interface_dependents": 0,
+      "gates_opened": 0,
+      "gate_turns": 0,
+      "gates_passed": 0,
+      "gates_ended_by_user": 0,
+      "gates_cancelled": 0,
+      "assumptions_stated": 0,
+      "gate_plan_changes": 0,
+      "gate_parallel_runs": 0,
+      "conclusion_reads": 0,
+      "gate_asks_beyond_script": 0,
       "planner_turns": {
         "plan": 1,
         "decision": 2
       },
-      "cost_usd": 0.082148,
+      "cost_usd": 0.0793,
       "cost_by_role": {
-        "planner": 0.032594,
-        "worker": 0.049554,
+        "planner": 0.034005,
+        "worker": 0.045296,
         "reviewer": 0.0
       },
       "runs": 5,
+      "run_errors": 0,
+      "models": {
+        "planner": [
+          "claude-haiku-4-5-20251001"
+        ],
+        "worker": [
+          "claude-haiku-4-5-20251001"
+        ]
+      },
       "tokens": {
-        "input": 98,
-        "output": 3594,
-        "cache_read": 204400,
-        "cache_creation": 21820
+        "input": 90,
+        "output": 3191,
+        "cache_read": 186452,
+        "cache_creation": 22305
       },
       "cost_basis": {
         "equivalent": 5,
@@ -110,12 +181,97 @@
       "planner_edit_tool_paths": [],
       "planner_changed_files": [],
       "planner_modified_files": 0,
-      "duration_s": 64.8,
+      "duration_s": 40.8,
       "stopped_by_cap": false,
-      "timed_out": false
+      "timed_out": false,
+      "outcome": "pass"
+    },
+    {
+      "id": "many_steps",
+      "rep": 1,
+      "status": "completed",
+      "success": true,
+      "problems": [],
+      "steps": 9,
+      "reviews": 0,
+      "retries": 0,
+      "chat_turns": 0,
+      "plan_changes": 0,
+      "independent_pairs": 0,
+      "bracketed_pairs": 0,
+      "parallel_workers": 1,
+      "progress_notes": 9,
+      "final_summary": 1,
+      "planner_profile_runs": 0,
+      "roles_defined": 0,
+      "role_runs": 0,
+      "role_profile_runs": 0,
+      "role_reviews": 0,
+      "role_prompt_mismatches": 0,
+      "role_boundary_misses": 0,
+      "gate_breaches": 0,
+      "advisory_role_reviews": 0,
+      "advisory_role_fails": 0,
+      "discipline_roles": 0,
+      "interface_dependents": 0,
+      "gates_opened": 0,
+      "gate_turns": 0,
+      "gates_passed": 0,
+      "gates_ended_by_user": 0,
+      "gates_cancelled": 0,
+      "assumptions_stated": 0,
+      "gate_plan_changes": 0,
+      "gate_parallel_runs": 0,
+      "conclusion_reads": 0,
+      "gate_asks_beyond_script": 0,
+      "planner_turns": {
+        "plan": 1,
+        "decision": 9
+      },
+      "cost_usd": 0.286157,
+      "cost_by_role": {
+        "planner": 0.085167,
+        "worker": 0.20099,
+        "reviewer": 0.0
+      },
+      "runs": 19,
+      "run_errors": 0,
+      "models": {
+        "planner": [
+          "claude-haiku-4-5-20251001"
+        ],
+        "worker": [
+          "claude-haiku-4-5-20251001"
+        ]
+      },
+      "tokens": {
+        "input": 342,
+        "output": 11086,
+        "cache_read": 759031,
+        "cache_creation": 77241
+      },
+      "cost_basis": {
+        "equivalent": 19,
+        "provider_price": 0,
+        "unpriced": 0
+      },
+      "contract_violations": {
+        "planner": 0,
+        "worker": 0,
+        "reviewer": 0,
+        "total": 0
+      },
+      "planner_edit_tool_paths": [],
+      "planner_changed_files": [],
+      "planner_modified_files": 0,
+      "duration_s": 135.0,
+      "stopped_by_cap": false,
+      "timed_out": false,
+      "outcome": "pass"
     },
     {
       "id": "parallel_parts",
+      "rep": 1,
       "status": "completed",
       "success": true,
       "problems": [],
@@ -123,27 +279,59 @@
       "reviews": 0,
       "retries": 0,
       "chat_turns": 0,
+      "plan_changes": 0,
       "independent_pairs": 1,
       "bracketed_pairs": 0,
       "parallel_workers": 2,
       "progress_notes": 3,
       "final_summary": 1,
+      "planner_profile_runs": 0,
+      "roles_defined": 0,
+      "role_runs": 0,
+      "role_profile_runs": 0,
+      "role_reviews": 0,
+      "role_prompt_mismatches": 0,
+      "role_boundary_misses": 0,
+      "gate_breaches": 0,
+      "advisory_role_reviews": 0,
+      "advisory_role_fails": 0,
+      "discipline_roles": 0,
+      "interface_dependents": 0,
+      "gates_opened": 0,
+      "gate_turns": 0,
+      "gates_passed": 0,
+      "gates_ended_by_user": 0,
+      "gates_cancelled": 0,
+      "assumptions_stated": 0,
+      "gate_plan_changes": 0,
+      "gate_parallel_runs": 0,
+      "conclusion_reads": 0,
+      "gate_asks_beyond_script": 0,
       "planner_turns": {
         "plan": 1,
         "decision": 3
       },
-      "cost_usd": 0.127791,
+      "cost_usd": 0.125286,
       "cost_by_role": {
-        "planner": 0.043626,
-        "worker": 0.084165,
+        "planner": 0.044403,
+        "worker": 0.080884,
         "reviewer": 0.0
       },
       "runs": 7,
+      "run_errors": 0,
+      "models": {
+        "planner": [
+          "claude-haiku-4-5-20251001"
+        ],
+        "worker": [
+          "claude-haiku-4-5-20251001"
+        ]
+      },
       "tokens": {
-        "input": 142,
-        "output": 6768,
-        "cache_read": 305671,
-        "cache_creation": 31621
+        "input": 134,
+        "output": 6383,
+        "cache_read": 285494,
+        "cache_creation": 32344
       },
       "cost_basis": {
         "equivalent": 7,
@@ -159,12 +347,14 @@
       "planner_edit_tool_paths": [],
       "planner_changed_files": [],
       "planner_modified_files": 0,
-      "duration_s": 81.2,
+      "duration_s": 55.3,
       "stopped_by_cap": false,
-      "timed_out": false
+      "timed_out": false,
+      "outcome": "pass"
     },
     {
       "id": "interface_first",
+      "rep": 1,
       "status": "completed",
       "success": false,
       "problems": [
@@ -175,27 +365,59 @@
       "reviews": 0,
       "retries": 0,
       "chat_turns": 0,
+      "plan_changes": 0,
       "independent_pairs": 0,
       "bracketed_pairs": 0,
       "parallel_workers": 1,
       "progress_notes": 3,
       "final_summary": 1,
+      "planner_profile_runs": 0,
+      "roles_defined": 0,
+      "role_runs": 0,
+      "role_profile_runs": 0,
+      "role_reviews": 0,
+      "role_prompt_mismatches": 0,
+      "role_boundary_misses": 0,
+      "gate_breaches": 0,
+      "advisory_role_reviews": 0,
+      "advisory_role_fails": 0,
+      "discipline_roles": 0,
+      "interface_dependents": 0,
+      "gates_opened": 0,
+      "gate_turns": 0,
+      "gates_passed": 0,
+      "gates_ended_by_user": 0,
+      "gates_cancelled": 0,
+      "assumptions_stated": 0,
+      "gate_plan_changes": 0,
+      "gate_parallel_runs": 0,
+      "conclusion_reads": 0,
+      "gate_asks_beyond_script": 0,
       "planner_turns": {
         "plan": 1,
         "decision": 3
       },
-      "cost_usd": 0.18072,
+      "cost_usd": 0.174957,
       "cost_by_role": {
-        "planner": 0.044115,
-        "worker": 0.136605,
+        "planner": 0.046928,
+        "worker": 0.128028,
         "reviewer": 0.0
       },
       "runs": 7,
+      "run_errors": 0,
+      "models": {
+        "planner": [
+          "claude-haiku-4-5-20251001"
+        ],
+        "worker": [
+          "claude-haiku-4-5-20251001"
+        ]
+      },
       "tokens": {
-        "input": 254,
-        "output": 9099,
-        "cache_read": 609110,
-        "cache_creation": 37030
+        "input": 238,
+        "output": 8698,
+        "cache_read": 570767,
+        "cache_creation": 37076
       },
       "cost_basis": {
         "equivalent": 7,
@@ -211,12 +433,14 @@
       "planner_edit_tool_paths": [],
       "planner_changed_files": [],
       "planner_modified_files": 0,
-      "duration_s": 120.3,
+      "duration_s": 95.9,
       "stopped_by_cap": false,
-      "timed_out": false
+      "timed_out": false,
+      "outcome": "fail"
     },
     {
       "id": "reviewed_step",
+      "rep": 1,
       "status": "completed",
       "success": true,
       "problems": [],
@@ -224,27 +448,62 @@
       "reviews": 1,
       "retries": 0,
       "chat_turns": 0,
+      "plan_changes": 0,
       "independent_pairs": 0,
       "bracketed_pairs": 0,
       "parallel_workers": 1,
       "progress_notes": 2,
       "final_summary": 1,
+      "planner_profile_runs": 0,
+      "roles_defined": 0,
+      "role_runs": 0,
+      "role_profile_runs": 0,
+      "role_reviews": 0,
+      "role_prompt_mismatches": 0,
+      "role_boundary_misses": 0,
+      "gate_breaches": 0,
+      "advisory_role_reviews": 0,
+      "advisory_role_fails": 0,
+      "discipline_roles": 0,
+      "interface_dependents": 0,
+      "gates_opened": 0,
+      "gate_turns": 0,
+      "gates_passed": 0,
+      "gates_ended_by_user": 0,
+      "gates_cancelled": 0,
+      "assumptions_stated": 0,
+      "gate_plan_changes": 0,
+      "gate_parallel_runs": 0,
+      "conclusion_reads": 0,
+      "gate_asks_beyond_script": 0,
       "planner_turns": {
         "plan": 1,
         "decision": 2
       },
-      "cost_usd": 0.080728,
+      "cost_usd": 0.071656,
       "cost_by_role": {
-        "planner": 0.037479,
-        "worker": 0.024288,
-        "reviewer": 0.018961
+        "planner": 0.030083,
+        "worker": 0.022622,
+        "reviewer": 0.018952
       },
       "runs": 5,
+      "run_errors": 0,
+      "models": {
+        "planner": [
+          "claude-haiku-4-5-20251001"
+        ],
+        "worker": [
+          "claude-haiku-4-5-20251001"
+        ],
+        "reviewer": [
+          "claude-haiku-4-5-20251001"
+        ]
+      },
       "tokens": {
-        "input": 90,
-        "output": 3871,
-        "cache_read": 185632,
-        "cache_creation": 21360
+        "input": 74,
+        "output": 2898,
+        "cache_read": 144243,
+        "cache_creation": 21334
       },
       "cost_basis": {
         "equivalent": 5,
@@ -260,12 +519,14 @@
       "planner_edit_tool_paths": [],
       "planner_changed_files": [],
       "planner_modified_files": 0,
-      "duration_s": 54.7,
+      "duration_s": 38.7,
       "stopped_by_cap": false,
-      "timed_out": false
+      "timed_out": false,
+      "outcome": "pass"
     },
     {
       "id": "retry_after_failure",
+      "rep": 1,
       "status": "completed",
       "success": true,
       "problems": [],
@@ -273,27 +534,59 @@
       "reviews": 0,
       "retries": 1,
       "chat_turns": 0,
+      "plan_changes": 0,
       "independent_pairs": 0,
       "bracketed_pairs": 0,
       "parallel_workers": 1,
       "progress_notes": 2,
       "final_summary": 1,
+      "planner_profile_runs": 0,
+      "roles_defined": 0,
+      "role_runs": 0,
+      "role_profile_runs": 0,
+      "role_reviews": 0,
+      "role_prompt_mismatches": 0,
+      "role_boundary_misses": 0,
+      "gate_breaches": 0,
+      "advisory_role_reviews": 0,
+      "advisory_role_fails": 0,
+      "discipline_roles": 0,
+      "interface_dependents": 0,
+      "gates_opened": 0,
+      "gate_turns": 0,
+      "gates_passed": 0,
+      "gates_ended_by_user": 0,
+      "gates_cancelled": 0,
+      "assumptions_stated": 0,
+      "gate_plan_changes": 0,
+      "gate_parallel_runs": 0,
+      "conclusion_reads": 0,
+      "gate_asks_beyond_script": 0,
       "planner_turns": {
         "plan": 1,
         "decision": 2
       },
-      "cost_usd": 0.089344,
+      "cost_usd": 0.088564,
       "cost_by_role": {
-        "planner": 0.043741,
-        "worker": 0.045603,
+        "planner": 0.041156,
+        "worker": 0.047408,
         "reviewer": 0.0
       },
       "runs": 5,
+      "run_errors": 1,
+      "models": {
+        "planner": [
+          "claude-haiku-4-5-20251001"
+        ],
+        "worker": [
+          "claude-haiku-4-5-20251001"
+        ]
+      },
       "tokens": {
         "input": 98,
-        "output": 4517,
-        "cache_read": 206750,
-        "cache_creation": 22993
+        "output": 4121,
+        "cache_read": 210168,
+        "cache_creation": 23422
       },
       "cost_basis": {
         "equivalent": 5,
@@ -309,12 +602,14 @@
       "planner_edit_tool_paths": [],
       "planner_changed_files": [],
       "planner_modified_files": 0,
-      "duration_s": 64.8,
+      "duration_s": 55.0,
       "stopped_by_cap": false,
-      "timed_out": false
+      "timed_out": false,
+      "outcome": "pass"
     },
     {
       "id": "chat_correction",
+      "rep": 1,
       "status": "completed",
       "success": true,
       "problems": [],
@@ -322,28 +617,60 @@
       "reviews": 0,
       "retries": 0,
       "chat_turns": 1,
+      "plan_changes": 0,
       "independent_pairs": 0,
       "bracketed_pairs": 0,
       "parallel_workers": 1,
       "progress_notes": 1,
       "final_summary": 1,
+      "planner_profile_runs": 0,
+      "roles_defined": 0,
+      "role_runs": 0,
+      "role_profile_runs": 0,
+      "role_reviews": 0,
+      "role_prompt_mismatches": 0,
+      "role_boundary_misses": 0,
+      "gate_breaches": 0,
+      "advisory_role_reviews": 0,
+      "advisory_role_fails": 0,
+      "discipline_roles": 0,
+      "interface_dependents": 0,
+      "gates_opened": 0,
+      "gate_turns": 0,
+      "gates_passed": 0,
+      "gates_ended_by_user": 0,
+      "gates_cancelled": 0,
+      "assumptions_stated": 0,
+      "gate_plan_changes": 0,
+      "gate_parallel_runs": 0,
+      "conclusion_reads": 0,
+      "gate_asks_beyond_script": 0,
       "planner_turns": {
         "plan": 1,
         "chat": 1,
         "decision": 1
       },
-      "cost_usd": 0.057599,
+      "cost_usd": 0.058591,
       "cost_by_role": {
-        "planner": 0.031592,
-        "worker": 0.026007,
+        "planner": 0.031391,
+        "worker": 0.0272,
         "reviewer": 0.0
       },
       "runs": 4,
+      "run_errors": 0,
+      "models": {
+        "planner": [
+          "claude-haiku-4-5-20251001"
+        ],
+        "worker": [
+          "claude-haiku-4-5-20251001"
+        ]
+      },
       "tokens": {
-        "input": 72,
-        "output": 2420,
-        "cache_read": 150755,
-        "cache_creation": 15176
+        "input": 64,
+        "output": 2707,
+        "cache_read": 131223,
+        "cache_creation": 15935
       },
       "cost_basis": {
         "equivalent": 4,
@@ -359,9 +686,4907 @@
       "planner_edit_tool_paths": [],
       "planner_changed_files": [],
       "planner_modified_files": 0,
-      "duration_s": 36.4,
+      "duration_s": 30.6,
       "stopped_by_cap": false,
-      "timed_out": false
+      "timed_out": false,
+      "outcome": "pass"
+    },
+    {
+      "id": "supplement_replan",
+      "rep": 1,
+      "status": "completed",
+      "success": true,
+      "problems": [],
+      "steps": 2,
+      "reviews": 0,
+      "retries": 0,
+      "chat_turns": 1,
+      "plan_changes": 1,
+      "independent_pairs": 0,
+      "bracketed_pairs": 0,
+      "parallel_workers": 1,
+      "progress_notes": 2,
+      "final_summary": 1,
+      "planner_profile_runs": 0,
+      "roles_defined": 0,
+      "role_runs": 0,
+      "role_profile_runs": 0,
+      "role_reviews": 0,
+      "role_prompt_mismatches": 0,
+      "role_boundary_misses": 0,
+      "gate_breaches": 0,
+      "advisory_role_reviews": 0,
+      "advisory_role_fails": 0,
+      "discipline_roles": 0,
+      "interface_dependents": 0,
+      "gates_opened": 0,
+      "gate_turns": 0,
+      "gates_passed": 0,
+      "gates_ended_by_user": 0,
+      "gates_cancelled": 0,
+      "assumptions_stated": 0,
+      "gate_plan_changes": 0,
+      "gate_parallel_runs": 0,
+      "conclusion_reads": 0,
+      "gate_asks_beyond_script": 0,
+      "planner_turns": {
+        "plan": 1,
+        "chat": 1,
+        "decision": 2
+      },
+      "cost_usd": 0.095029,
+      "cost_by_role": {
+        "planner": 0.042717,
+        "worker": 0.052313,
+        "reviewer": 0.0
+      },
+      "runs": 6,
+      "run_errors": 0,
+      "models": {
+        "planner": [
+          "claude-haiku-4-5-20251001"
+        ],
+        "worker": [
+          "claude-haiku-4-5-20251001"
+        ]
+      },
+      "tokens": {
+        "input": 108,
+        "output": 4667,
+        "cache_read": 229103,
+        "cache_creation": 24338
+      },
+      "cost_basis": {
+        "equivalent": 6,
+        "provider_price": 0,
+        "unpriced": 0
+      },
+      "contract_violations": {
+        "planner": 0,
+        "worker": 0,
+        "reviewer": 0,
+        "total": 0
+      },
+      "planner_edit_tool_paths": [],
+      "planner_changed_files": [],
+      "planner_modified_files": 0,
+      "duration_s": 69.2,
+      "stopped_by_cap": false,
+      "timed_out": false,
+      "outcome": "pass"
+    },
+    {
+      "id": "requirement_edit",
+      "rep": 1,
+      "status": "completed",
+      "success": true,
+      "problems": [],
+      "steps": 2,
+      "reviews": 0,
+      "retries": 0,
+      "chat_turns": 1,
+      "plan_changes": 1,
+      "independent_pairs": 0,
+      "bracketed_pairs": 0,
+      "parallel_workers": 1,
+      "progress_notes": 2,
+      "final_summary": 1,
+      "planner_profile_runs": 0,
+      "roles_defined": 0,
+      "role_runs": 0,
+      "role_profile_runs": 0,
+      "role_reviews": 0,
+      "role_prompt_mismatches": 0,
+      "role_boundary_misses": 0,
+      "gate_breaches": 0,
+      "advisory_role_reviews": 0,
+      "advisory_role_fails": 0,
+      "discipline_roles": 0,
+      "interface_dependents": 0,
+      "gates_opened": 0,
+      "gate_turns": 0,
+      "gates_passed": 0,
+      "gates_ended_by_user": 0,
+      "gates_cancelled": 0,
+      "assumptions_stated": 0,
+      "gate_plan_changes": 0,
+      "gate_parallel_runs": 0,
+      "conclusion_reads": 0,
+      "gate_asks_beyond_script": 0,
+      "planner_turns": {
+        "plan": 1,
+        "chat": 1,
+        "decision": 2
+      },
+      "cost_usd": 0.103704,
+      "cost_by_role": {
+        "planner": 0.054799,
+        "worker": 0.048905,
+        "reviewer": 0.0
+      },
+      "runs": 6,
+      "run_errors": 0,
+      "models": {
+        "planner": [
+          "claude-haiku-4-5-20251001"
+        ],
+        "worker": [
+          "claude-haiku-4-5-20251001"
+        ]
+      },
+      "tokens": {
+        "input": 100,
+        "output": 4283,
+        "cache_read": 200534,
+        "cache_creation": 31068
+      },
+      "cost_basis": {
+        "equivalent": 6,
+        "provider_price": 0,
+        "unpriced": 0
+      },
+      "contract_violations": {
+        "planner": 0,
+        "worker": 0,
+        "reviewer": 0,
+        "total": 0
+      },
+      "planner_edit_tool_paths": [],
+      "planner_changed_files": [],
+      "planner_modified_files": 0,
+      "duration_s": 65.3,
+      "stopped_by_cap": false,
+      "timed_out": false,
+      "outcome": "pass"
+    },
+    {
+      "id": "supplement_no_change",
+      "rep": 1,
+      "status": "completed",
+      "success": true,
+      "problems": [],
+      "steps": 2,
+      "reviews": 0,
+      "retries": 0,
+      "chat_turns": 1,
+      "plan_changes": 0,
+      "independent_pairs": 0,
+      "bracketed_pairs": 0,
+      "parallel_workers": 1,
+      "progress_notes": 2,
+      "final_summary": 1,
+      "planner_profile_runs": 0,
+      "roles_defined": 0,
+      "role_runs": 0,
+      "role_profile_runs": 0,
+      "role_reviews": 0,
+      "role_prompt_mismatches": 0,
+      "role_boundary_misses": 0,
+      "gate_breaches": 0,
+      "advisory_role_reviews": 0,
+      "advisory_role_fails": 0,
+      "discipline_roles": 0,
+      "interface_dependents": 0,
+      "gates_opened": 0,
+      "gate_turns": 0,
+      "gates_passed": 0,
+      "gates_ended_by_user": 0,
+      "gates_cancelled": 0,
+      "assumptions_stated": 0,
+      "gate_plan_changes": 0,
+      "gate_parallel_runs": 0,
+      "conclusion_reads": 0,
+      "gate_asks_beyond_script": 0,
+      "planner_turns": {
+        "plan": 1,
+        "chat": 1,
+        "decision": 2
+      },
+      "cost_usd": 0.091675,
+      "cost_by_role": {
+        "planner": 0.040094,
+        "worker": 0.051581,
+        "reviewer": 0.0
+      },
+      "runs": 6,
+      "run_errors": 0,
+      "models": {
+        "planner": [
+          "claude-haiku-4-5-20251001"
+        ],
+        "worker": [
+          "claude-haiku-4-5-20251001"
+        ]
+      },
+      "tokens": {
+        "input": 108,
+        "output": 4270,
+        "cache_read": 228625,
+        "cache_creation": 23677
+      },
+      "cost_basis": {
+        "equivalent": 6,
+        "provider_price": 0,
+        "unpriced": 0
+      },
+      "contract_violations": {
+        "planner": 0,
+        "worker": 0,
+        "reviewer": 0,
+        "total": 0
+      },
+      "planner_edit_tool_paths": [],
+      "planner_changed_files": [],
+      "planner_modified_files": 0,
+      "duration_s": 67.0,
+      "stopped_by_cap": false,
+      "timed_out": false,
+      "outcome": "pass"
+    },
+    {
+      "id": "profile_choice",
+      "rep": 1,
+      "status": "completed",
+      "success": true,
+      "problems": [],
+      "steps": 1,
+      "reviews": 0,
+      "retries": 0,
+      "chat_turns": 0,
+      "plan_changes": 0,
+      "independent_pairs": 0,
+      "bracketed_pairs": 0,
+      "parallel_workers": 1,
+      "progress_notes": 1,
+      "final_summary": 1,
+      "planner_profile_runs": 1,
+      "roles_defined": 0,
+      "role_runs": 0,
+      "role_profile_runs": 0,
+      "role_reviews": 0,
+      "role_prompt_mismatches": 0,
+      "role_boundary_misses": 0,
+      "gate_breaches": 0,
+      "advisory_role_reviews": 0,
+      "advisory_role_fails": 0,
+      "discipline_roles": 0,
+      "interface_dependents": 0,
+      "gates_opened": 0,
+      "gate_turns": 0,
+      "gates_passed": 0,
+      "gates_ended_by_user": 0,
+      "gates_cancelled": 0,
+      "assumptions_stated": 0,
+      "gate_plan_changes": 0,
+      "gate_parallel_runs": 0,
+      "conclusion_reads": 0,
+      "gate_asks_beyond_script": 0,
+      "planner_turns": {
+        "plan": 1,
+        "decision": 1
+      },
+      "cost_usd": 0.062868,
+      "cost_by_role": {
+        "planner": 0.041169,
+        "worker": 0.021699,
+        "reviewer": 0.0
+      },
+      "runs": 3,
+      "run_errors": 0,
+      "models": {
+        "planner": [
+          "claude-haiku-4-5-20251001"
+        ],
+        "worker": [
+          "claude-haiku-4-5-20251001"
+        ]
+      },
+      "tokens": {
+        "input": 82,
+        "output": 2415,
+        "cache_read": 179133,
+        "cache_creation": 16399
+      },
+      "cost_basis": {
+        "equivalent": 3,
+        "provider_price": 0,
+        "unpriced": 0
+      },
+      "contract_violations": {
+        "planner": 0,
+        "worker": 0,
+        "reviewer": 0,
+        "total": 0
+      },
+      "planner_edit_tool_paths": [],
+      "planner_changed_files": [],
+      "planner_modified_files": 0,
+      "duration_s": 32.5,
+      "stopped_by_cap": false,
+      "timed_out": false,
+      "outcome": "pass"
+    },
+    {
+      "id": "roles_tester_docs",
+      "rep": 1,
+      "status": "completed",
+      "success": true,
+      "problems": [],
+      "steps": 3,
+      "reviews": 0,
+      "retries": 0,
+      "chat_turns": 0,
+      "plan_changes": 0,
+      "independent_pairs": 1,
+      "bracketed_pairs": 0,
+      "parallel_workers": 2,
+      "progress_notes": 3,
+      "final_summary": 1,
+      "planner_profile_runs": 0,
+      "roles_defined": 2,
+      "role_runs": 2,
+      "role_profile_runs": 2,
+      "role_reviews": 0,
+      "role_prompt_mismatches": 0,
+      "role_boundary_misses": 0,
+      "gate_breaches": 0,
+      "advisory_role_reviews": 0,
+      "advisory_role_fails": 0,
+      "discipline_roles": 0,
+      "interface_dependents": 2,
+      "gates_opened": 0,
+      "gate_turns": 0,
+      "gates_passed": 0,
+      "gates_ended_by_user": 0,
+      "gates_cancelled": 0,
+      "assumptions_stated": 0,
+      "gate_plan_changes": 0,
+      "gate_parallel_runs": 0,
+      "conclusion_reads": 0,
+      "gate_asks_beyond_script": 0,
+      "planner_turns": {
+        "plan": 1,
+        "decision": 3
+      },
+      "cost_usd": 0.196212,
+      "cost_by_role": {
+        "planner": 0.089728,
+        "worker": 0.106484,
+        "reviewer": 0.0
+      },
+      "runs": 7,
+      "run_errors": 0,
+      "models": {
+        "planner": [
+          "claude-haiku-4-5-20251001"
+        ],
+        "worker": [
+          "claude-haiku-4-5-20251001"
+        ]
+      },
+      "tokens": {
+        "input": 220,
+        "output": 12111,
+        "cache_read": 535509,
+        "cache_creation": 40943
+      },
+      "cost_basis": {
+        "equivalent": 7,
+        "provider_price": 0,
+        "unpriced": 0
+      },
+      "contract_violations": {
+        "planner": 0,
+        "worker": 0,
+        "reviewer": 0,
+        "total": 0
+      },
+      "planner_edit_tool_paths": [],
+      "planner_changed_files": [],
+      "planner_modified_files": 0,
+      "duration_s": 99.5,
+      "stopped_by_cap": false,
+      "timed_out": false,
+      "outcome": "pass"
+    },
+    {
+      "id": "roles_security_review",
+      "rep": 1,
+      "status": "completed",
+      "success": true,
+      "problems": [],
+      "steps": 1,
+      "reviews": 2,
+      "retries": 0,
+      "chat_turns": 0,
+      "plan_changes": 0,
+      "independent_pairs": 0,
+      "bracketed_pairs": 0,
+      "parallel_workers": 1,
+      "progress_notes": 2,
+      "final_summary": 1,
+      "planner_profile_runs": 0,
+      "roles_defined": 1,
+      "role_runs": 1,
+      "role_profile_runs": 0,
+      "role_reviews": 1,
+      "role_prompt_mismatches": 0,
+      "role_boundary_misses": 0,
+      "gate_breaches": 0,
+      "advisory_role_reviews": 0,
+      "advisory_role_fails": 0,
+      "discipline_roles": 0,
+      "interface_dependents": 0,
+      "gates_opened": 0,
+      "gate_turns": 0,
+      "gates_passed": 0,
+      "gates_ended_by_user": 0,
+      "gates_cancelled": 0,
+      "assumptions_stated": 0,
+      "gate_plan_changes": 0,
+      "gate_parallel_runs": 0,
+      "conclusion_reads": 0,
+      "gate_asks_beyond_script": 0,
+      "planner_turns": {
+        "plan": 1,
+        "decision": 2
+      },
+      "cost_usd": 0.158419,
+      "cost_by_role": {
+        "planner": 0.056559,
+        "worker": 0.033151,
+        "reviewer": 0.068709
+      },
+      "runs": 6,
+      "run_errors": 0,
+      "models": {
+        "planner": [
+          "claude-haiku-4-5-20251001"
+        ],
+        "worker": [
+          "claude-haiku-4-5-20251001"
+        ],
+        "reviewer": [
+          "claude-haiku-4-5-20251001"
+        ]
+      },
+      "tokens": {
+        "input": 174,
+        "output": 9326,
+        "cache_read": 403194,
+        "cache_creation": 35648
+      },
+      "cost_basis": {
+        "equivalent": 6,
+        "provider_price": 0,
+        "unpriced": 0
+      },
+      "contract_violations": {
+        "planner": 0,
+        "worker": 0,
+        "reviewer": 0,
+        "total": 0
+      },
+      "planner_edit_tool_paths": [],
+      "planner_changed_files": [],
+      "planner_modified_files": 0,
+      "duration_s": 101.9,
+      "stopped_by_cap": false,
+      "timed_out": false,
+      "outcome": "pass"
+    },
+    {
+      "id": "roles_advisory_review",
+      "rep": 1,
+      "status": "completed",
+      "success": true,
+      "problems": [],
+      "steps": 1,
+      "reviews": 2,
+      "retries": 0,
+      "chat_turns": 0,
+      "plan_changes": 0,
+      "independent_pairs": 0,
+      "bracketed_pairs": 0,
+      "parallel_workers": 1,
+      "progress_notes": 1,
+      "final_summary": 1,
+      "planner_profile_runs": 0,
+      "roles_defined": 1,
+      "role_runs": 1,
+      "role_profile_runs": 0,
+      "role_reviews": 1,
+      "role_prompt_mismatches": 0,
+      "role_boundary_misses": 0,
+      "gate_breaches": 0,
+      "advisory_role_reviews": 1,
+      "advisory_role_fails": 1,
+      "discipline_roles": 0,
+      "interface_dependents": 0,
+      "gates_opened": 0,
+      "gate_turns": 0,
+      "gates_passed": 0,
+      "gates_ended_by_user": 0,
+      "gates_cancelled": 0,
+      "assumptions_stated": 0,
+      "gate_plan_changes": 0,
+      "gate_parallel_runs": 0,
+      "conclusion_reads": 0,
+      "gate_asks_beyond_script": 0,
+      "planner_turns": {
+        "plan": 1,
+        "decision": 2
+      },
+      "cost_usd": 0.143518,
+      "cost_by_role": {
+        "planner": 0.051982,
+        "worker": 0.035011,
+        "reviewer": 0.056525
+      },
+      "runs": 6,
+      "run_errors": 0,
+      "models": {
+        "planner": [
+          "claude-haiku-4-5-20251001"
+        ],
+        "worker": [
+          "claude-haiku-4-5-20251001"
+        ],
+        "reviewer": [
+          "claude-haiku-4-5-20251001"
+        ]
+      },
+      "tokens": {
+        "input": 182,
+        "output": 6869,
+        "cache_read": 420688,
+        "cache_creation": 33461
+      },
+      "cost_basis": {
+        "equivalent": 6,
+        "provider_price": 0,
+        "unpriced": 0
+      },
+      "contract_violations": {
+        "planner": 0,
+        "worker": 0,
+        "reviewer": 0,
+        "total": 0
+      },
+      "planner_edit_tool_paths": [],
+      "planner_changed_files": [],
+      "planner_modified_files": 0,
+      "duration_s": 93.6,
+      "stopped_by_cap": false,
+      "timed_out": false,
+      "outcome": "pass"
+    },
+    {
+      "id": "roles_multi_platform",
+      "rep": 1,
+      "status": "completed",
+      "success": false,
+      "problems": [
+        "handle(/api/tip?day=3) answered 200 with ['day', 'tip']",
+        "roles_defined 0 < 4",
+        "discipline_roles 0 < 4",
+        "interface_dependents 0 < 4"
+      ],
+      "steps": 6,
+      "reviews": 0,
+      "retries": 0,
+      "chat_turns": 0,
+      "plan_changes": 0,
+      "independent_pairs": 6,
+      "bracketed_pairs": 6,
+      "parallel_workers": 4,
+      "progress_notes": 6,
+      "final_summary": 1,
+      "planner_profile_runs": 0,
+      "roles_defined": 0,
+      "role_runs": 0,
+      "role_profile_runs": 0,
+      "role_reviews": 0,
+      "role_prompt_mismatches": 0,
+      "role_boundary_misses": 0,
+      "gate_breaches": 0,
+      "advisory_role_reviews": 0,
+      "advisory_role_fails": 0,
+      "discipline_roles": 0,
+      "interface_dependents": 0,
+      "gates_opened": 0,
+      "gate_turns": 0,
+      "gates_passed": 0,
+      "gates_ended_by_user": 0,
+      "gates_cancelled": 0,
+      "assumptions_stated": 0,
+      "gate_plan_changes": 0,
+      "gate_parallel_runs": 0,
+      "conclusion_reads": 0,
+      "gate_asks_beyond_script": 0,
+      "planner_turns": {
+        "plan": 1,
+        "decision": 6
+      },
+      "cost_usd": 0.460788,
+      "cost_by_role": {
+        "planner": 0.100615,
+        "worker": 0.360173,
+        "reviewer": 0.0
+      },
+      "runs": 13,
+      "run_errors": 0,
+      "models": {
+        "planner": [
+          "claude-haiku-4-5-20251001"
+        ],
+        "worker": [
+          "claude-haiku-4-5-20251001"
+        ]
+      },
+      "tokens": {
+        "input": 450,
+        "output": 30824,
+        "cache_read": 1201103,
+        "cache_creation": 93054
+      },
+      "cost_basis": {
+        "equivalent": 13,
+        "provider_price": 0,
+        "unpriced": 0
+      },
+      "contract_violations": {
+        "planner": 0,
+        "worker": 0,
+        "reviewer": 0,
+        "total": 0
+      },
+      "planner_edit_tool_paths": [],
+      "planner_changed_files": [],
+      "planner_modified_files": 0,
+      "duration_s": 200.0,
+      "stopped_by_cap": false,
+      "timed_out": false,
+      "outcome": "fail"
+    },
+    {
+      "id": "roles_not_needed",
+      "rep": 1,
+      "status": "completed",
+      "success": true,
+      "problems": [],
+      "steps": 1,
+      "reviews": 0,
+      "retries": 0,
+      "chat_turns": 0,
+      "plan_changes": 0,
+      "independent_pairs": 0,
+      "bracketed_pairs": 0,
+      "parallel_workers": 1,
+      "progress_notes": 1,
+      "final_summary": 1,
+      "planner_profile_runs": 0,
+      "roles_defined": 0,
+      "role_runs": 0,
+      "role_profile_runs": 0,
+      "role_reviews": 0,
+      "role_prompt_mismatches": 0,
+      "role_boundary_misses": 0,
+      "gate_breaches": 0,
+      "advisory_role_reviews": 0,
+      "advisory_role_fails": 0,
+      "discipline_roles": 0,
+      "interface_dependents": 0,
+      "gates_opened": 0,
+      "gate_turns": 0,
+      "gates_passed": 0,
+      "gates_ended_by_user": 0,
+      "gates_cancelled": 0,
+      "assumptions_stated": 0,
+      "gate_plan_changes": 0,
+      "gate_parallel_runs": 0,
+      "conclusion_reads": 0,
+      "gate_asks_beyond_script": 0,
+      "planner_turns": {
+        "plan": 1,
+        "decision": 1
+      },
+      "cost_usd": 0.046345,
+      "cost_by_role": {
+        "planner": 0.025344,
+        "worker": 0.021001,
+        "reviewer": 0.0
+      },
+      "runs": 3,
+      "run_errors": 0,
+      "models": {
+        "planner": [
+          "claude-haiku-4-5-20251001"
+        ],
+        "worker": [
+          "claude-haiku-4-5-20251001"
+        ]
+      },
+      "tokens": {
+        "input": 46,
+        "output": 1505,
+        "cache_read": 89004,
+        "cache_creation": 14937
+      },
+      "cost_basis": {
+        "equivalent": 3,
+        "provider_price": 0,
+        "unpriced": 0
+      },
+      "contract_violations": {
+        "planner": 0,
+        "worker": 0,
+        "reviewer": 0,
+        "total": 0
+      },
+      "planner_edit_tool_paths": [],
+      "planner_changed_files": [],
+      "planner_modified_files": 0,
+      "duration_s": 22.6,
+      "stopped_by_cap": false,
+      "timed_out": false,
+      "outcome": "pass"
+    },
+    {
+      "id": "gate_ambiguous",
+      "rep": 1,
+      "status": "completed",
+      "success": true,
+      "problems": [],
+      "steps": 2,
+      "reviews": 0,
+      "retries": 0,
+      "chat_turns": 0,
+      "plan_changes": 0,
+      "independent_pairs": 1,
+      "bracketed_pairs": 0,
+      "parallel_workers": 1,
+      "progress_notes": 1,
+      "final_summary": 1,
+      "planner_profile_runs": 0,
+      "roles_defined": 0,
+      "role_runs": 0,
+      "role_profile_runs": 0,
+      "role_reviews": 0,
+      "role_prompt_mismatches": 0,
+      "role_boundary_misses": 0,
+      "gate_breaches": 0,
+      "advisory_role_reviews": 0,
+      "advisory_role_fails": 0,
+      "discipline_roles": 0,
+      "interface_dependents": 0,
+      "gates_opened": 1,
+      "gate_turns": 1,
+      "gates_passed": 1,
+      "gates_ended_by_user": 0,
+      "gates_cancelled": 0,
+      "assumptions_stated": 0,
+      "gate_plan_changes": 1,
+      "gate_parallel_runs": 0,
+      "conclusion_reads": 1,
+      "gate_asks_beyond_script": 0,
+      "planner_turns": {
+        "plan": 1,
+        "gate": 1,
+        "repair": 1,
+        "decision": 1
+      },
+      "cost_usd": 0.076253,
+      "cost_by_role": {
+        "planner": 0.053638,
+        "worker": 0.022615,
+        "reviewer": 0.0
+      },
+      "runs": 5,
+      "run_errors": 0,
+      "models": {
+        "planner": [
+          "claude-haiku-4-5-20251001"
+        ],
+        "worker": [
+          "claude-haiku-4-5-20251001"
+        ]
+      },
+      "tokens": {
+        "input": 74,
+        "output": 4403,
+        "cache_read": 162080,
+        "cache_creation": 18978
+      },
+      "cost_basis": {
+        "equivalent": 5,
+        "provider_price": 0,
+        "unpriced": 0
+      },
+      "contract_violations": {
+        "planner": 1,
+        "worker": 0,
+        "reviewer": 0,
+        "total": 1
+      },
+      "planner_edit_tool_paths": [],
+      "planner_changed_files": [],
+      "planner_modified_files": 0,
+      "duration_s": 53.0,
+      "stopped_by_cap": false,
+      "timed_out": false,
+      "outcome": "pass"
+    },
+    {
+      "id": "gate_not_needed",
+      "rep": 1,
+      "status": "completed",
+      "success": true,
+      "problems": [],
+      "steps": 1,
+      "reviews": 0,
+      "retries": 0,
+      "chat_turns": 0,
+      "plan_changes": 0,
+      "independent_pairs": 0,
+      "bracketed_pairs": 0,
+      "parallel_workers": 1,
+      "progress_notes": 1,
+      "final_summary": 1,
+      "planner_profile_runs": 0,
+      "roles_defined": 0,
+      "role_runs": 0,
+      "role_profile_runs": 0,
+      "role_reviews": 0,
+      "role_prompt_mismatches": 0,
+      "role_boundary_misses": 0,
+      "gate_breaches": 0,
+      "advisory_role_reviews": 0,
+      "advisory_role_fails": 0,
+      "discipline_roles": 0,
+      "interface_dependents": 0,
+      "gates_opened": 0,
+      "gate_turns": 0,
+      "gates_passed": 0,
+      "gates_ended_by_user": 0,
+      "gates_cancelled": 0,
+      "assumptions_stated": 0,
+      "gate_plan_changes": 0,
+      "gate_parallel_runs": 0,
+      "conclusion_reads": 0,
+      "gate_asks_beyond_script": 0,
+      "planner_turns": {
+        "plan": 1,
+        "decision": 1
+      },
+      "cost_usd": 0.051086,
+      "cost_by_role": {
+        "planner": 0.029825,
+        "worker": 0.021261,
+        "reviewer": 0.0
+      },
+      "runs": 3,
+      "run_errors": 0,
+      "models": {
+        "planner": [
+          "claude-haiku-4-5-20251001"
+        ],
+        "worker": [
+          "claude-haiku-4-5-20251001"
+        ]
+      },
+      "tokens": {
+        "input": 54,
+        "output": 1758,
+        "cache_read": 111895,
+        "cache_creation": 15526
+      },
+      "cost_basis": {
+        "equivalent": 3,
+        "provider_price": 0,
+        "unpriced": 0
+      },
+      "contract_violations": {
+        "planner": 0,
+        "worker": 0,
+        "reviewer": 0,
+        "total": 0
+      },
+      "planner_edit_tool_paths": [],
+      "planner_changed_files": [],
+      "planner_modified_files": 0,
+      "duration_s": 24.5,
+      "stopped_by_cap": false,
+      "timed_out": false,
+      "outcome": "pass"
+    },
+    {
+      "id": "gate_end_early",
+      "rep": 1,
+      "status": "completed",
+      "success": true,
+      "problems": [],
+      "steps": 2,
+      "reviews": 0,
+      "retries": 0,
+      "chat_turns": 0,
+      "plan_changes": 0,
+      "independent_pairs": 1,
+      "bracketed_pairs": 0,
+      "parallel_workers": 1,
+      "progress_notes": 1,
+      "final_summary": 1,
+      "planner_profile_runs": 0,
+      "roles_defined": 0,
+      "role_runs": 0,
+      "role_profile_runs": 0,
+      "role_reviews": 0,
+      "role_prompt_mismatches": 0,
+      "role_boundary_misses": 0,
+      "gate_breaches": 0,
+      "advisory_role_reviews": 0,
+      "advisory_role_fails": 0,
+      "discipline_roles": 0,
+      "interface_dependents": 0,
+      "gates_opened": 1,
+      "gate_turns": 1,
+      "gates_passed": 1,
+      "gates_ended_by_user": 1,
+      "gates_cancelled": 0,
+      "assumptions_stated": 3,
+      "gate_plan_changes": 1,
+      "gate_parallel_runs": 0,
+      "conclusion_reads": 1,
+      "gate_asks_beyond_script": 0,
+      "planner_turns": {
+        "plan": 1,
+        "gate": 1,
+        "decision": 1
+      },
+      "cost_usd": 0.065599,
+      "cost_by_role": {
+        "planner": 0.041841,
+        "worker": 0.023758,
+        "reviewer": 0.0
+      },
+      "runs": 4,
+      "run_errors": 0,
+      "models": {
+        "planner": [
+          "claude-haiku-4-5-20251001"
+        ],
+        "worker": [
+          "claude-haiku-4-5-20251001"
+        ]
+      },
+      "tokens": {
+        "input": 64,
+        "output": 3269,
+        "cache_read": 135822,
+        "cache_creation": 17804
+      },
+      "cost_basis": {
+        "equivalent": 4,
+        "provider_price": 0,
+        "unpriced": 0
+      },
+      "contract_violations": {
+        "planner": 0,
+        "worker": 0,
+        "reviewer": 0,
+        "total": 0
+      },
+      "planner_edit_tool_paths": [],
+      "planner_changed_files": [],
+      "planner_modified_files": 0,
+      "duration_s": 38.6,
+      "stopped_by_cap": false,
+      "timed_out": false,
+      "outcome": "pass"
+    },
+    {
+      "id": "gate_parallel_branch",
+      "rep": 1,
+      "status": "completed",
+      "success": true,
+      "problems": [],
+      "steps": 3,
+      "reviews": 0,
+      "retries": 0,
+      "chat_turns": 0,
+      "plan_changes": 0,
+      "independent_pairs": 2,
+      "bracketed_pairs": 0,
+      "parallel_workers": 2,
+      "progress_notes": 2,
+      "final_summary": 1,
+      "planner_profile_runs": 0,
+      "roles_defined": 0,
+      "role_runs": 0,
+      "role_profile_runs": 0,
+      "role_reviews": 0,
+      "role_prompt_mismatches": 0,
+      "role_boundary_misses": 0,
+      "gate_breaches": 0,
+      "advisory_role_reviews": 0,
+      "advisory_role_fails": 0,
+      "discipline_roles": 0,
+      "interface_dependents": 0,
+      "gates_opened": 1,
+      "gate_turns": 1,
+      "gates_passed": 1,
+      "gates_ended_by_user": 0,
+      "gates_cancelled": 0,
+      "assumptions_stated": 0,
+      "gate_plan_changes": 0,
+      "gate_parallel_runs": 1,
+      "conclusion_reads": 1,
+      "gate_asks_beyond_script": 0,
+      "planner_turns": {
+        "plan": 1,
+        "gate": 1,
+        "decision": 2
+      },
+      "cost_usd": 0.10033,
+      "cost_by_role": {
+        "planner": 0.054958,
+        "worker": 0.045372,
+        "reviewer": 0.0
+      },
+      "runs": 6,
+      "run_errors": 0,
+      "models": {
+        "planner": [
+          "claude-haiku-4-5-20251001"
+        ],
+        "worker": [
+          "claude-haiku-4-5-20251001"
+        ]
+      },
+      "tokens": {
+        "input": 108,
+        "output": 4922,
+        "cache_read": 238839,
+        "cache_creation": 25864
+      },
+      "cost_basis": {
+        "equivalent": 6,
+        "provider_price": 0,
+        "unpriced": 0
+      },
+      "contract_violations": {
+        "planner": 0,
+        "worker": 0,
+        "reviewer": 0,
+        "total": 0
+      },
+      "planner_edit_tool_paths": [],
+      "planner_changed_files": [],
+      "planner_modified_files": 0,
+      "duration_s": 57.0,
+      "stopped_by_cap": false,
+      "timed_out": false,
+      "outcome": "pass"
+    },
+    {
+      "id": "gate_discoverable",
+      "rep": 1,
+      "status": "completed",
+      "success": true,
+      "problems": [],
+      "steps": 1,
+      "reviews": 0,
+      "retries": 0,
+      "chat_turns": 0,
+      "plan_changes": 0,
+      "independent_pairs": 0,
+      "bracketed_pairs": 0,
+      "parallel_workers": 1,
+      "progress_notes": 0,
+      "final_summary": 1,
+      "planner_profile_runs": 0,
+      "roles_defined": 0,
+      "role_runs": 0,
+      "role_profile_runs": 0,
+      "role_reviews": 0,
+      "role_prompt_mismatches": 0,
+      "role_boundary_misses": 0,
+      "gate_breaches": 0,
+      "advisory_role_reviews": 0,
+      "advisory_role_fails": 0,
+      "discipline_roles": 0,
+      "interface_dependents": 0,
+      "gates_opened": 0,
+      "gate_turns": 0,
+      "gates_passed": 0,
+      "gates_ended_by_user": 0,
+      "gates_cancelled": 0,
+      "assumptions_stated": 0,
+      "gate_plan_changes": 0,
+      "gate_parallel_runs": 0,
+      "conclusion_reads": 0,
+      "gate_asks_beyond_script": 0,
+      "planner_turns": {
+        "plan": 1,
+        "decision": 1
+      },
+      "cost_usd": 0.058973,
+      "cost_by_role": {
+        "planner": 0.033619,
+        "worker": 0.025354,
+        "reviewer": 0.0
+      },
+      "runs": 3,
+      "run_errors": 0,
+      "models": {
+        "planner": [
+          "claude-haiku-4-5-20251001"
+        ],
+        "worker": [
+          "claude-haiku-4-5-20251001"
+        ]
+      },
+      "tokens": {
+        "input": 70,
+        "output": 2130,
+        "cache_read": 155211,
+        "cache_creation": 16366
+      },
+      "cost_basis": {
+        "equivalent": 3,
+        "provider_price": 0,
+        "unpriced": 0
+      },
+      "contract_violations": {
+        "planner": 0,
+        "worker": 0,
+        "reviewer": 0,
+        "total": 0
+      },
+      "planner_edit_tool_paths": [],
+      "planner_changed_files": [],
+      "planner_modified_files": 0,
+      "duration_s": 30.5,
+      "stopped_by_cap": false,
+      "timed_out": false,
+      "outcome": "pass"
+    },
+    {
+      "id": "single_step",
+      "rep": 2,
+      "status": "completed",
+      "success": true,
+      "problems": [],
+      "steps": 1,
+      "reviews": 0,
+      "retries": 0,
+      "chat_turns": 0,
+      "plan_changes": 0,
+      "independent_pairs": 0,
+      "bracketed_pairs": 0,
+      "parallel_workers": 1,
+      "progress_notes": 1,
+      "final_summary": 1,
+      "planner_profile_runs": 0,
+      "roles_defined": 0,
+      "role_runs": 0,
+      "role_profile_runs": 0,
+      "role_reviews": 0,
+      "role_prompt_mismatches": 0,
+      "role_boundary_misses": 0,
+      "gate_breaches": 0,
+      "advisory_role_reviews": 0,
+      "advisory_role_fails": 0,
+      "discipline_roles": 0,
+      "interface_dependents": 0,
+      "gates_opened": 0,
+      "gate_turns": 0,
+      "gates_passed": 0,
+      "gates_ended_by_user": 0,
+      "gates_cancelled": 0,
+      "assumptions_stated": 0,
+      "gate_plan_changes": 0,
+      "gate_parallel_runs": 0,
+      "conclusion_reads": 0,
+      "gate_asks_beyond_script": 0,
+      "planner_turns": {
+        "plan": 1,
+        "decision": 1
+      },
+      "cost_usd": 0.045265,
+      "cost_by_role": {
+        "planner": 0.024388,
+        "worker": 0.020876,
+        "reviewer": 0.0
+      },
+      "runs": 3,
+      "run_errors": 0,
+      "models": {
+        "planner": [
+          "claude-haiku-4-5-20251001"
+        ],
+        "worker": [
+          "claude-haiku-4-5-20251001"
+        ]
+      },
+      "tokens": {
+        "input": 46,
+        "output": 1533,
+        "cache_read": 88358,
+        "cache_creation": 14359
+      },
+      "cost_basis": {
+        "equivalent": 3,
+        "provider_price": 0,
+        "unpriced": 0
+      },
+      "contract_violations": {
+        "planner": 0,
+        "worker": 0,
+        "reviewer": 0,
+        "total": 0
+      },
+      "planner_edit_tool_paths": [],
+      "planner_changed_files": [],
+      "planner_modified_files": 0,
+      "duration_s": 22.4,
+      "stopped_by_cap": false,
+      "timed_out": false,
+      "outcome": "pass"
+    },
+    {
+      "id": "dependent_steps",
+      "rep": 2,
+      "status": "completed",
+      "success": true,
+      "problems": [],
+      "steps": 2,
+      "reviews": 0,
+      "retries": 0,
+      "chat_turns": 0,
+      "plan_changes": 0,
+      "independent_pairs": 0,
+      "bracketed_pairs": 0,
+      "parallel_workers": 1,
+      "progress_notes": 2,
+      "final_summary": 1,
+      "planner_profile_runs": 0,
+      "roles_defined": 0,
+      "role_runs": 0,
+      "role_profile_runs": 0,
+      "role_reviews": 0,
+      "role_prompt_mismatches": 0,
+      "role_boundary_misses": 0,
+      "gate_breaches": 0,
+      "advisory_role_reviews": 0,
+      "advisory_role_fails": 0,
+      "discipline_roles": 0,
+      "interface_dependents": 0,
+      "gates_opened": 0,
+      "gate_turns": 0,
+      "gates_passed": 0,
+      "gates_ended_by_user": 0,
+      "gates_cancelled": 0,
+      "assumptions_stated": 0,
+      "gate_plan_changes": 0,
+      "gate_parallel_runs": 0,
+      "conclusion_reads": 0,
+      "gate_asks_beyond_script": 0,
+      "planner_turns": {
+        "plan": 1,
+        "decision": 2
+      },
+      "cost_usd": 0.081347,
+      "cost_by_role": {
+        "planner": 0.033051,
+        "worker": 0.048295,
+        "reviewer": 0.0
+      },
+      "runs": 5,
+      "run_errors": 0,
+      "models": {
+        "planner": [
+          "claude-haiku-4-5-20251001"
+        ],
+        "worker": [
+          "claude-haiku-4-5-20251001"
+        ]
+      },
+      "tokens": {
+        "input": 90,
+        "output": 3496,
+        "cache_read": 185289,
+        "cache_creation": 22624
+      },
+      "cost_basis": {
+        "equivalent": 5,
+        "provider_price": 0,
+        "unpriced": 0
+      },
+      "contract_violations": {
+        "planner": 0,
+        "worker": 0,
+        "reviewer": 0,
+        "total": 0
+      },
+      "planner_edit_tool_paths": [],
+      "planner_changed_files": [],
+      "planner_modified_files": 0,
+      "duration_s": 40.9,
+      "stopped_by_cap": false,
+      "timed_out": false,
+      "outcome": "pass"
+    },
+    {
+      "id": "many_steps",
+      "rep": 2,
+      "status": "completed",
+      "success": true,
+      "problems": [],
+      "steps": 9,
+      "reviews": 0,
+      "retries": 0,
+      "chat_turns": 0,
+      "plan_changes": 0,
+      "independent_pairs": 0,
+      "bracketed_pairs": 0,
+      "parallel_workers": 1,
+      "progress_notes": 9,
+      "final_summary": 1,
+      "planner_profile_runs": 0,
+      "roles_defined": 0,
+      "role_runs": 0,
+      "role_profile_runs": 0,
+      "role_reviews": 0,
+      "role_prompt_mismatches": 0,
+      "role_boundary_misses": 0,
+      "gate_breaches": 0,
+      "advisory_role_reviews": 0,
+      "advisory_role_fails": 0,
+      "discipline_roles": 0,
+      "interface_dependents": 0,
+      "gates_opened": 0,
+      "gate_turns": 0,
+      "gates_passed": 0,
+      "gates_ended_by_user": 0,
+      "gates_cancelled": 0,
+      "assumptions_stated": 0,
+      "gate_plan_changes": 0,
+      "gate_parallel_runs": 0,
+      "conclusion_reads": 0,
+      "gate_asks_beyond_script": 0,
+      "planner_turns": {
+        "plan": 1,
+        "decision": 9
+      },
+      "cost_usd": 0.277927,
+      "cost_by_role": {
+        "planner": 0.081228,
+        "worker": 0.196699,
+        "reviewer": 0.0
+      },
+      "runs": 19,
+      "run_errors": 0,
+      "models": {
+        "planner": [
+          "claude-haiku-4-5-20251001"
+        ],
+        "worker": [
+          "claude-haiku-4-5-20251001"
+        ]
+      },
+      "tokens": {
+        "input": 334,
+        "output": 10384,
+        "cache_read": 734448,
+        "cache_creation": 76114
+      },
+      "cost_basis": {
+        "equivalent": 19,
+        "provider_price": 0,
+        "unpriced": 0
+      },
+      "contract_violations": {
+        "planner": 0,
+        "worker": 0,
+        "reviewer": 0,
+        "total": 0
+      },
+      "planner_edit_tool_paths": [],
+      "planner_changed_files": [],
+      "planner_modified_files": 0,
+      "duration_s": 132.4,
+      "stopped_by_cap": false,
+      "timed_out": false,
+      "outcome": "pass"
+    },
+    {
+      "id": "parallel_parts",
+      "rep": 2,
+      "status": "completed",
+      "success": true,
+      "problems": [],
+      "steps": 3,
+      "reviews": 0,
+      "retries": 0,
+      "chat_turns": 0,
+      "plan_changes": 0,
+      "independent_pairs": 1,
+      "bracketed_pairs": 0,
+      "parallel_workers": 2,
+      "progress_notes": 3,
+      "final_summary": 1,
+      "planner_profile_runs": 0,
+      "roles_defined": 0,
+      "role_runs": 0,
+      "role_profile_runs": 0,
+      "role_reviews": 0,
+      "role_prompt_mismatches": 0,
+      "role_boundary_misses": 0,
+      "gate_breaches": 0,
+      "advisory_role_reviews": 0,
+      "advisory_role_fails": 0,
+      "discipline_roles": 0,
+      "interface_dependents": 0,
+      "gates_opened": 0,
+      "gate_turns": 0,
+      "gates_passed": 0,
+      "gates_ended_by_user": 0,
+      "gates_cancelled": 0,
+      "assumptions_stated": 0,
+      "gate_plan_changes": 0,
+      "gate_parallel_runs": 0,
+      "conclusion_reads": 0,
+      "gate_asks_beyond_script": 0,
+      "planner_turns": {
+        "plan": 1,
+        "decision": 3
+      },
+      "cost_usd": 0.131091,
+      "cost_by_role": {
+        "planner": 0.046366,
+        "worker": 0.084725,
+        "reviewer": 0.0
+      },
+      "runs": 7,
+      "run_errors": 0,
+      "models": {
+        "planner": [
+          "claude-haiku-4-5-20251001"
+        ],
+        "worker": [
+          "claude-haiku-4-5-20251001"
+        ]
+      },
+      "tokens": {
+        "input": 134,
+        "output": 7201,
+        "cache_read": 288537,
+        "cache_creation": 33049
+      },
+      "cost_basis": {
+        "equivalent": 7,
+        "provider_price": 0,
+        "unpriced": 0
+      },
+      "contract_violations": {
+        "planner": 0,
+        "worker": 0,
+        "reviewer": 0,
+        "total": 0
+      },
+      "planner_edit_tool_paths": [],
+      "planner_changed_files": [],
+      "planner_modified_files": 0,
+      "duration_s": 63.2,
+      "stopped_by_cap": false,
+      "timed_out": false,
+      "outcome": "pass"
+    },
+    {
+      "id": "interface_first",
+      "rep": 2,
+      "status": "completed",
+      "success": false,
+      "problems": [
+        "bracketed_pairs 0 < 1",
+        "parallel_workers 1 < 2"
+      ],
+      "steps": 3,
+      "reviews": 0,
+      "retries": 0,
+      "chat_turns": 0,
+      "plan_changes": 0,
+      "independent_pairs": 0,
+      "bracketed_pairs": 0,
+      "parallel_workers": 1,
+      "progress_notes": 3,
+      "final_summary": 1,
+      "planner_profile_runs": 0,
+      "roles_defined": 0,
+      "role_runs": 0,
+      "role_profile_runs": 0,
+      "role_reviews": 0,
+      "role_prompt_mismatches": 0,
+      "role_boundary_misses": 0,
+      "gate_breaches": 0,
+      "advisory_role_reviews": 0,
+      "advisory_role_fails": 0,
+      "discipline_roles": 0,
+      "interface_dependents": 0,
+      "gates_opened": 0,
+      "gate_turns": 0,
+      "gates_passed": 0,
+      "gates_ended_by_user": 0,
+      "gates_cancelled": 0,
+      "assumptions_stated": 0,
+      "gate_plan_changes": 0,
+      "gate_parallel_runs": 0,
+      "conclusion_reads": 0,
+      "gate_asks_beyond_script": 0,
+      "planner_turns": {
+        "plan": 1,
+        "repair": 1,
+        "decision": 3
+      },
+      "cost_usd": 0.16439,
+      "cost_by_role": {
+        "planner": 0.054346,
+        "worker": 0.110045,
+        "reviewer": 0.0
+      },
+      "runs": 8,
+      "run_errors": 0,
+      "models": {
+        "planner": [
+          "claude-haiku-4-5-20251001"
+        ],
+        "worker": [
+          "claude-haiku-4-5-20251001"
+        ]
+      },
+      "tokens": {
+        "input": 208,
+        "output": 8672,
+        "cache_read": 485841,
+        "cache_creation": 36119
+      },
+      "cost_basis": {
+        "equivalent": 8,
+        "provider_price": 0,
+        "unpriced": 0
+      },
+      "contract_violations": {
+        "planner": 1,
+        "worker": 0,
+        "reviewer": 0,
+        "total": 1
+      },
+      "planner_edit_tool_paths": [],
+      "planner_changed_files": [],
+      "planner_modified_files": 0,
+      "duration_s": 91.9,
+      "stopped_by_cap": false,
+      "timed_out": false,
+      "outcome": "fail"
+    },
+    {
+      "id": "reviewed_step",
+      "rep": 2,
+      "status": "completed",
+      "success": true,
+      "problems": [],
+      "steps": 1,
+      "reviews": 1,
+      "retries": 0,
+      "chat_turns": 0,
+      "plan_changes": 0,
+      "independent_pairs": 0,
+      "bracketed_pairs": 0,
+      "parallel_workers": 1,
+      "progress_notes": 2,
+      "final_summary": 1,
+      "planner_profile_runs": 0,
+      "roles_defined": 0,
+      "role_runs": 0,
+      "role_profile_runs": 0,
+      "role_reviews": 0,
+      "role_prompt_mismatches": 0,
+      "role_boundary_misses": 0,
+      "gate_breaches": 0,
+      "advisory_role_reviews": 0,
+      "advisory_role_fails": 0,
+      "discipline_roles": 0,
+      "interface_dependents": 0,
+      "gates_opened": 0,
+      "gate_turns": 0,
+      "gates_passed": 0,
+      "gates_ended_by_user": 0,
+      "gates_cancelled": 0,
+      "assumptions_stated": 0,
+      "gate_plan_changes": 0,
+      "gate_parallel_runs": 0,
+      "conclusion_reads": 0,
+      "gate_asks_beyond_script": 0,
+      "planner_turns": {
+        "plan": 1,
+        "decision": 2
+      },
+      "cost_usd": 0.076682,
+      "cost_by_role": {
+        "planner": 0.03144,
+        "worker": 0.026298,
+        "reviewer": 0.018944
+      },
+      "runs": 5,
+      "run_errors": 0,
+      "models": {
+        "planner": [
+          "claude-haiku-4-5-20251001"
+        ],
+        "worker": [
+          "claude-haiku-4-5-20251001"
+        ],
+        "reviewer": [
+          "claude-haiku-4-5-20251001"
+        ]
+      },
+      "tokens": {
+        "input": 82,
+        "output": 3387,
+        "cache_read": 164350,
+        "cache_creation": 21615
+      },
+      "cost_basis": {
+        "equivalent": 5,
+        "provider_price": 0,
+        "unpriced": 0
+      },
+      "contract_violations": {
+        "planner": 0,
+        "worker": 0,
+        "reviewer": 0,
+        "total": 0
+      },
+      "planner_edit_tool_paths": [],
+      "planner_changed_files": [],
+      "planner_modified_files": 0,
+      "duration_s": 42.9,
+      "stopped_by_cap": false,
+      "timed_out": false,
+      "outcome": "pass"
+    },
+    {
+      "id": "retry_after_failure",
+      "rep": 2,
+      "status": "completed",
+      "success": true,
+      "problems": [],
+      "steps": 1,
+      "reviews": 0,
+      "retries": 1,
+      "chat_turns": 0,
+      "plan_changes": 0,
+      "independent_pairs": 0,
+      "bracketed_pairs": 0,
+      "parallel_workers": 1,
+      "progress_notes": 2,
+      "final_summary": 1,
+      "planner_profile_runs": 0,
+      "roles_defined": 0,
+      "role_runs": 0,
+      "role_profile_runs": 0,
+      "role_reviews": 0,
+      "role_prompt_mismatches": 0,
+      "role_boundary_misses": 0,
+      "gate_breaches": 0,
+      "advisory_role_reviews": 0,
+      "advisory_role_fails": 0,
+      "discipline_roles": 0,
+      "interface_dependents": 0,
+      "gates_opened": 0,
+      "gate_turns": 0,
+      "gates_passed": 0,
+      "gates_ended_by_user": 0,
+      "gates_cancelled": 0,
+      "assumptions_stated": 0,
+      "gate_plan_changes": 0,
+      "gate_parallel_runs": 0,
+      "conclusion_reads": 0,
+      "gate_asks_beyond_script": 0,
+      "planner_turns": {
+        "plan": 1,
+        "decision": 2
+      },
+      "cost_usd": 0.088529,
+      "cost_by_role": {
+        "planner": 0.044007,
+        "worker": 0.044522,
+        "reviewer": 0.0
+      },
+      "runs": 5,
+      "run_errors": 1,
+      "models": {
+        "planner": [
+          "claude-haiku-4-5-20251001"
+        ],
+        "worker": [
+          "claude-haiku-4-5-20251001"
+        ]
+      },
+      "tokens": {
+        "input": 106,
+        "output": 3752,
+        "cache_read": 231971,
+        "cache_creation": 23233
+      },
+      "cost_basis": {
+        "equivalent": 5,
+        "provider_price": 0,
+        "unpriced": 0
+      },
+      "contract_violations": {
+        "planner": 0,
+        "worker": 0,
+        "reviewer": 0,
+        "total": 0
+      },
+      "planner_edit_tool_paths": [],
+      "planner_changed_files": [],
+      "planner_modified_files": 0,
+      "duration_s": 51.3,
+      "stopped_by_cap": false,
+      "timed_out": false,
+      "outcome": "pass"
+    },
+    {
+      "id": "chat_correction",
+      "rep": 2,
+      "status": "completed",
+      "success": true,
+      "problems": [],
+      "steps": 1,
+      "reviews": 0,
+      "retries": 0,
+      "chat_turns": 1,
+      "plan_changes": 0,
+      "independent_pairs": 0,
+      "bracketed_pairs": 0,
+      "parallel_workers": 1,
+      "progress_notes": 1,
+      "final_summary": 1,
+      "planner_profile_runs": 0,
+      "roles_defined": 0,
+      "role_runs": 0,
+      "role_profile_runs": 0,
+      "role_reviews": 0,
+      "role_prompt_mismatches": 0,
+      "role_boundary_misses": 0,
+      "gate_breaches": 0,
+      "advisory_role_reviews": 0,
+      "advisory_role_fails": 0,
+      "discipline_roles": 0,
+      "interface_dependents": 0,
+      "gates_opened": 0,
+      "gate_turns": 0,
+      "gates_passed": 0,
+      "gates_ended_by_user": 0,
+      "gates_cancelled": 0,
+      "assumptions_stated": 0,
+      "gate_plan_changes": 0,
+      "gate_parallel_runs": 0,
+      "conclusion_reads": 0,
+      "gate_asks_beyond_script": 0,
+      "planner_turns": {
+        "plan": 1,
+        "chat": 1,
+        "decision": 1
+      },
+      "cost_usd": 0.060754,
+      "cost_by_role": {
+        "planner": 0.032981,
+        "worker": 0.027774,
+        "reviewer": 0.0
+      },
+      "runs": 4,
+      "run_errors": 0,
+      "models": {
+        "planner": [
+          "claude-haiku-4-5-20251001"
+        ],
+        "worker": [
+          "claude-haiku-4-5-20251001"
+        ]
+      },
+      "tokens": {
+        "input": 72,
+        "output": 2640,
+        "cache_read": 152644,
+        "cache_creation": 16109
+      },
+      "cost_basis": {
+        "equivalent": 4,
+        "provider_price": 0,
+        "unpriced": 0
+      },
+      "contract_violations": {
+        "planner": 0,
+        "worker": 0,
+        "reviewer": 0,
+        "total": 0
+      },
+      "planner_edit_tool_paths": [],
+      "planner_changed_files": [],
+      "planner_modified_files": 0,
+      "duration_s": 28.7,
+      "stopped_by_cap": false,
+      "timed_out": false,
+      "outcome": "pass"
+    },
+    {
+      "id": "supplement_replan",
+      "rep": 2,
+      "status": "completed",
+      "success": true,
+      "problems": [],
+      "steps": 2,
+      "reviews": 0,
+      "retries": 0,
+      "chat_turns": 1,
+      "plan_changes": 1,
+      "independent_pairs": 0,
+      "bracketed_pairs": 0,
+      "parallel_workers": 1,
+      "progress_notes": 2,
+      "final_summary": 1,
+      "planner_profile_runs": 0,
+      "roles_defined": 0,
+      "role_runs": 0,
+      "role_profile_runs": 0,
+      "role_reviews": 0,
+      "role_prompt_mismatches": 0,
+      "role_boundary_misses": 0,
+      "gate_breaches": 0,
+      "advisory_role_reviews": 0,
+      "advisory_role_fails": 0,
+      "discipline_roles": 0,
+      "interface_dependents": 0,
+      "gates_opened": 0,
+      "gate_turns": 0,
+      "gates_passed": 0,
+      "gates_ended_by_user": 0,
+      "gates_cancelled": 0,
+      "assumptions_stated": 0,
+      "gate_plan_changes": 0,
+      "gate_parallel_runs": 0,
+      "conclusion_reads": 0,
+      "gate_asks_beyond_script": 0,
+      "planner_turns": {
+        "plan": 1,
+        "chat": 1,
+        "decision": 2
+      },
+      "cost_usd": 0.092185,
+      "cost_by_role": {
+        "planner": 0.040431,
+        "worker": 0.051754,
+        "reviewer": 0.0
+      },
+      "runs": 6,
+      "run_errors": 0,
+      "models": {
+        "planner": [
+          "claude-haiku-4-5-20251001"
+        ],
+        "worker": [
+          "claude-haiku-4-5-20251001"
+        ]
+      },
+      "tokens": {
+        "input": 108,
+        "output": 4248,
+        "cache_read": 228572,
+        "cache_creation": 23990
+      },
+      "cost_basis": {
+        "equivalent": 6,
+        "provider_price": 0,
+        "unpriced": 0
+      },
+      "contract_violations": {
+        "planner": 0,
+        "worker": 0,
+        "reviewer": 0,
+        "total": 0
+      },
+      "planner_edit_tool_paths": [],
+      "planner_changed_files": [],
+      "planner_modified_files": 0,
+      "duration_s": 65.6,
+      "stopped_by_cap": false,
+      "timed_out": false,
+      "outcome": "pass"
+    },
+    {
+      "id": "requirement_edit",
+      "rep": 2,
+      "status": "completed",
+      "success": true,
+      "problems": [],
+      "steps": 2,
+      "reviews": 0,
+      "retries": 0,
+      "chat_turns": 1,
+      "plan_changes": 1,
+      "independent_pairs": 0,
+      "bracketed_pairs": 0,
+      "parallel_workers": 1,
+      "progress_notes": 2,
+      "final_summary": 1,
+      "planner_profile_runs": 0,
+      "roles_defined": 0,
+      "role_runs": 0,
+      "role_profile_runs": 0,
+      "role_reviews": 0,
+      "role_prompt_mismatches": 0,
+      "role_boundary_misses": 0,
+      "gate_breaches": 0,
+      "advisory_role_reviews": 0,
+      "advisory_role_fails": 0,
+      "discipline_roles": 0,
+      "interface_dependents": 0,
+      "gates_opened": 0,
+      "gate_turns": 0,
+      "gates_passed": 0,
+      "gates_ended_by_user": 0,
+      "gates_cancelled": 0,
+      "assumptions_stated": 0,
+      "gate_plan_changes": 0,
+      "gate_parallel_runs": 0,
+      "conclusion_reads": 0,
+      "gate_asks_beyond_script": 0,
+      "planner_turns": {
+        "plan": 1,
+        "chat": 1,
+        "decision": 2
+      },
+      "cost_usd": 0.103904,
+      "cost_by_role": {
+        "planner": 0.055528,
+        "worker": 0.048376,
+        "reviewer": 0.0
+      },
+      "runs": 6,
+      "run_errors": 0,
+      "models": {
+        "planner": [
+          "claude-haiku-4-5-20251001"
+        ],
+        "worker": [
+          "claude-haiku-4-5-20251001"
+        ]
+      },
+      "tokens": {
+        "input": 100,
+        "output": 4299,
+        "cache_read": 200934,
+        "cache_creation": 31108
+      },
+      "cost_basis": {
+        "equivalent": 6,
+        "provider_price": 0,
+        "unpriced": 0
+      },
+      "contract_violations": {
+        "planner": 0,
+        "worker": 0,
+        "reviewer": 0,
+        "total": 0
+      },
+      "planner_edit_tool_paths": [],
+      "planner_changed_files": [],
+      "planner_modified_files": 0,
+      "duration_s": 63.5,
+      "stopped_by_cap": false,
+      "timed_out": false,
+      "outcome": "pass"
+    },
+    {
+      "id": "supplement_no_change",
+      "rep": 2,
+      "status": "completed",
+      "success": true,
+      "problems": [],
+      "steps": 2,
+      "reviews": 0,
+      "retries": 0,
+      "chat_turns": 1,
+      "plan_changes": 0,
+      "independent_pairs": 0,
+      "bracketed_pairs": 0,
+      "parallel_workers": 1,
+      "progress_notes": 2,
+      "final_summary": 1,
+      "planner_profile_runs": 0,
+      "roles_defined": 0,
+      "role_runs": 0,
+      "role_profile_runs": 0,
+      "role_reviews": 0,
+      "role_prompt_mismatches": 0,
+      "role_boundary_misses": 0,
+      "gate_breaches": 0,
+      "advisory_role_reviews": 0,
+      "advisory_role_fails": 0,
+      "discipline_roles": 0,
+      "interface_dependents": 0,
+      "gates_opened": 0,
+      "gate_turns": 0,
+      "gates_passed": 0,
+      "gates_ended_by_user": 0,
+      "gates_cancelled": 0,
+      "assumptions_stated": 0,
+      "gate_plan_changes": 0,
+      "gate_parallel_runs": 0,
+      "conclusion_reads": 0,
+      "gate_asks_beyond_script": 0,
+      "planner_turns": {
+        "plan": 1,
+        "chat": 1,
+        "decision": 2
+      },
+      "cost_usd": 0.091441,
+      "cost_by_role": {
+        "planner": 0.038592,
+        "worker": 0.052849,
+        "reviewer": 0.0
+      },
+      "runs": 6,
+      "run_errors": 0,
+      "models": {
+        "planner": [
+          "claude-haiku-4-5-20251001"
+        ],
+        "worker": [
+          "claude-haiku-4-5-20251001"
+        ]
+      },
+      "tokens": {
+        "input": 108,
+        "output": 4181,
+        "cache_read": 228802,
+        "cache_creation": 23774
+      },
+      "cost_basis": {
+        "equivalent": 6,
+        "provider_price": 0,
+        "unpriced": 0
+      },
+      "contract_violations": {
+        "planner": 0,
+        "worker": 0,
+        "reviewer": 0,
+        "total": 0
+      },
+      "planner_edit_tool_paths": [],
+      "planner_changed_files": [],
+      "planner_modified_files": 0,
+      "duration_s": 65.2,
+      "stopped_by_cap": false,
+      "timed_out": false,
+      "outcome": "pass"
+    },
+    {
+      "id": "profile_choice",
+      "rep": 2,
+      "status": "completed",
+      "success": false,
+      "problems": [
+        "planner_profile_runs 0 < 1"
+      ],
+      "steps": 1,
+      "reviews": 0,
+      "retries": 0,
+      "chat_turns": 0,
+      "plan_changes": 0,
+      "independent_pairs": 0,
+      "bracketed_pairs": 0,
+      "parallel_workers": 1,
+      "progress_notes": 1,
+      "final_summary": 1,
+      "planner_profile_runs": 0,
+      "roles_defined": 0,
+      "role_runs": 0,
+      "role_profile_runs": 0,
+      "role_reviews": 0,
+      "role_prompt_mismatches": 0,
+      "role_boundary_misses": 0,
+      "gate_breaches": 0,
+      "advisory_role_reviews": 0,
+      "advisory_role_fails": 0,
+      "discipline_roles": 0,
+      "interface_dependents": 0,
+      "gates_opened": 0,
+      "gate_turns": 0,
+      "gates_passed": 0,
+      "gates_ended_by_user": 0,
+      "gates_cancelled": 0,
+      "assumptions_stated": 0,
+      "gate_plan_changes": 0,
+      "gate_parallel_runs": 0,
+      "conclusion_reads": 0,
+      "gate_asks_beyond_script": 0,
+      "planner_turns": {
+        "plan": 1,
+        "decision": 1
+      },
+      "cost_usd": 0.060761,
+      "cost_by_role": {
+        "planner": 0.038645,
+        "worker": 0.022117,
+        "reviewer": 0.0
+      },
+      "runs": 3,
+      "run_errors": 0,
+      "models": {
+        "planner": [
+          "claude-haiku-4-5-20251001"
+        ],
+        "worker": [
+          "claude-haiku-4-5-20251001"
+        ]
+      },
+      "tokens": {
+        "input": 72,
+        "output": 2675,
+        "cache_read": 155343,
+        "cache_creation": 15890
+      },
+      "cost_basis": {
+        "equivalent": 3,
+        "provider_price": 0,
+        "unpriced": 0
+      },
+      "contract_violations": {
+        "planner": 0,
+        "worker": 0,
+        "reviewer": 0,
+        "total": 0
+      },
+      "planner_edit_tool_paths": [],
+      "planner_changed_files": [],
+      "planner_modified_files": 0,
+      "duration_s": 34.6,
+      "stopped_by_cap": false,
+      "timed_out": false,
+      "outcome": "fail"
+    },
+    {
+      "id": "roles_tester_docs",
+      "rep": 2,
+      "status": "completed",
+      "success": false,
+      "problems": [
+        "role_profile_runs 0 < 1"
+      ],
+      "steps": 3,
+      "reviews": 0,
+      "retries": 0,
+      "chat_turns": 0,
+      "plan_changes": 0,
+      "independent_pairs": 1,
+      "bracketed_pairs": 0,
+      "parallel_workers": 2,
+      "progress_notes": 3,
+      "final_summary": 1,
+      "planner_profile_runs": 3,
+      "roles_defined": 2,
+      "role_runs": 2,
+      "role_profile_runs": 0,
+      "role_reviews": 0,
+      "role_prompt_mismatches": 0,
+      "role_boundary_misses": 0,
+      "gate_breaches": 0,
+      "advisory_role_reviews": 0,
+      "advisory_role_fails": 0,
+      "discipline_roles": 0,
+      "interface_dependents": 2,
+      "gates_opened": 0,
+      "gate_turns": 0,
+      "gates_passed": 0,
+      "gates_ended_by_user": 0,
+      "gates_cancelled": 0,
+      "assumptions_stated": 0,
+      "gate_plan_changes": 0,
+      "gate_parallel_runs": 0,
+      "conclusion_reads": 0,
+      "gate_asks_beyond_script": 0,
+      "planner_turns": {
+        "plan": 1,
+        "decision": 3
+      },
+      "cost_usd": 0.165048,
+      "cost_by_role": {
+        "planner": 0.075216,
+        "worker": 0.089832,
+        "reviewer": 0.0
+      },
+      "runs": 7,
+      "run_errors": 0,
+      "models": {
+        "planner": [
+          "claude-haiku-4-5-20251001"
+        ],
+        "worker": [
+          "claude-haiku-4-5-20251001"
+        ]
+      },
+      "tokens": {
+        "input": 196,
+        "output": 8680,
+        "cache_read": 462415,
+        "cache_creation": 37605
+      },
+      "cost_basis": {
+        "equivalent": 7,
+        "provider_price": 0,
+        "unpriced": 0
+      },
+      "contract_violations": {
+        "planner": 0,
+        "worker": 0,
+        "reviewer": 0,
+        "total": 0
+      },
+      "planner_edit_tool_paths": [],
+      "planner_changed_files": [],
+      "planner_modified_files": 0,
+      "duration_s": 77.3,
+      "stopped_by_cap": false,
+      "timed_out": false,
+      "outcome": "fail"
+    },
+    {
+      "id": "roles_security_review",
+      "rep": 2,
+      "status": "failed",
+      "success": false,
+      "problems": [
+        "task failed: ## Why it ended Planning failed: invalid reply after a repair turn: step create_greet: review_role 'security_review' is not a role of this task (defined: none); define it with looper_task_role_set fir",
+        "greet.py is missing",
+        "steps 0 < 1",
+        "reviews 0 < 2",
+        "roles_defined 0 < 1",
+        "role_reviews 0 < 1"
+      ],
+      "steps": 0,
+      "reviews": 0,
+      "retries": 0,
+      "chat_turns": 0,
+      "plan_changes": 0,
+      "independent_pairs": 0,
+      "bracketed_pairs": 0,
+      "parallel_workers": 0,
+      "progress_notes": 0,
+      "final_summary": 0,
+      "planner_profile_runs": 0,
+      "roles_defined": 0,
+      "role_runs": 0,
+      "role_profile_runs": 0,
+      "role_reviews": 0,
+      "role_prompt_mismatches": 0,
+      "role_boundary_misses": 0,
+      "gate_breaches": 0,
+      "advisory_role_reviews": 0,
+      "advisory_role_fails": 0,
+      "discipline_roles": 0,
+      "interface_dependents": 0,
+      "gates_opened": 0,
+      "gate_turns": 0,
+      "gates_passed": 0,
+      "gates_ended_by_user": 0,
+      "gates_cancelled": 0,
+      "assumptions_stated": 0,
+      "gate_plan_changes": 0,
+      "gate_parallel_runs": 0,
+      "conclusion_reads": 0,
+      "gate_asks_beyond_script": 0,
+      "planner_turns": {
+        "plan": 1,
+        "repair": 1
+      },
+      "cost_usd": 0.077448,
+      "cost_by_role": {
+        "planner": 0.077448,
+        "worker": 0.0,
+        "reviewer": 0.0
+      },
+      "runs": 2,
+      "run_errors": 0,
+      "models": {
+        "planner": [
+          "claude-haiku-4-5-20251001"
+        ]
+      },
+      "tokens": {
+        "input": 118,
+        "output": 3298,
+        "cache_read": 313663,
+        "cache_creation": 14737
+      },
+      "cost_basis": {
+        "equivalent": 2,
+        "provider_price": 0,
+        "unpriced": 0
+      },
+      "contract_violations": {
+        "planner": 2,
+        "worker": 0,
+        "reviewer": 0,
+        "total": 2
+      },
+      "planner_edit_tool_paths": [],
+      "planner_changed_files": [],
+      "planner_modified_files": 0,
+      "duration_s": 42.6,
+      "stopped_by_cap": false,
+      "timed_out": false,
+      "outcome": "fail"
+    },
+    {
+      "id": "roles_advisory_review",
+      "rep": 2,
+      "status": "completed",
+      "success": true,
+      "problems": [],
+      "steps": 1,
+      "reviews": 2,
+      "retries": 0,
+      "chat_turns": 0,
+      "plan_changes": 0,
+      "independent_pairs": 0,
+      "bracketed_pairs": 0,
+      "parallel_workers": 1,
+      "progress_notes": 2,
+      "final_summary": 1,
+      "planner_profile_runs": 0,
+      "roles_defined": 1,
+      "role_runs": 1,
+      "role_profile_runs": 0,
+      "role_reviews": 1,
+      "role_prompt_mismatches": 0,
+      "role_boundary_misses": 0,
+      "gate_breaches": 0,
+      "advisory_role_reviews": 1,
+      "advisory_role_fails": 1,
+      "discipline_roles": 0,
+      "interface_dependents": 0,
+      "gates_opened": 0,
+      "gate_turns": 0,
+      "gates_passed": 0,
+      "gates_ended_by_user": 0,
+      "gates_cancelled": 0,
+      "assumptions_stated": 0,
+      "gate_plan_changes": 0,
+      "gate_parallel_runs": 0,
+      "conclusion_reads": 0,
+      "gate_asks_beyond_script": 0,
+      "planner_turns": {
+        "plan": 1,
+        "decision": 2
+      },
+      "cost_usd": 0.152176,
+      "cost_by_role": {
+        "planner": 0.057123,
+        "worker": 0.033296,
+        "reviewer": 0.061756
+      },
+      "runs": 6,
+      "run_errors": 0,
+      "models": {
+        "planner": [
+          "claude-haiku-4-5-20251001"
+        ],
+        "worker": [
+          "claude-haiku-4-5-20251001"
+        ],
+        "reviewer": [
+          "claude-haiku-4-5-20251001"
+        ]
+      },
+      "tokens": {
+        "input": 202,
+        "output": 7149,
+        "cache_read": 467287,
+        "cache_creation": 34750
+      },
+      "cost_basis": {
+        "equivalent": 6,
+        "provider_price": 0,
+        "unpriced": 0
+      },
+      "contract_violations": {
+        "planner": 0,
+        "worker": 0,
+        "reviewer": 0,
+        "total": 0
+      },
+      "planner_edit_tool_paths": [],
+      "planner_changed_files": [],
+      "planner_modified_files": 0,
+      "duration_s": 89.8,
+      "stopped_by_cap": false,
+      "timed_out": false,
+      "outcome": "pass"
+    },
+    {
+      "id": "roles_multi_platform",
+      "rep": 2,
+      "status": "completed",
+      "success": false,
+      "problems": [
+        "discipline_roles 1 < 4"
+      ],
+      "steps": 6,
+      "reviews": 0,
+      "retries": 0,
+      "chat_turns": 0,
+      "plan_changes": 0,
+      "independent_pairs": 6,
+      "bracketed_pairs": 6,
+      "parallel_workers": 4,
+      "progress_notes": 6,
+      "final_summary": 1,
+      "planner_profile_runs": 0,
+      "roles_defined": 4,
+      "role_runs": 4,
+      "role_profile_runs": 0,
+      "role_reviews": 0,
+      "role_prompt_mismatches": 0,
+      "role_boundary_misses": 0,
+      "gate_breaches": 0,
+      "advisory_role_reviews": 0,
+      "advisory_role_fails": 0,
+      "discipline_roles": 1,
+      "interface_dependents": 4,
+      "gates_opened": 0,
+      "gate_turns": 0,
+      "gates_passed": 0,
+      "gates_ended_by_user": 0,
+      "gates_cancelled": 0,
+      "assumptions_stated": 0,
+      "gate_plan_changes": 0,
+      "gate_parallel_runs": 0,
+      "conclusion_reads": 0,
+      "gate_asks_beyond_script": 0,
+      "planner_turns": {
+        "plan": 1,
+        "decision": 6
+      },
+      "cost_usd": 0.619195,
+      "cost_by_role": {
+        "planner": 0.188832,
+        "worker": 0.430363,
+        "reviewer": 0.0
+      },
+      "runs": 13,
+      "run_errors": 0,
+      "models": {
+        "planner": [
+          "claude-haiku-4-5-20251001"
+        ],
+        "worker": [
+          "claude-haiku-4-5-20251001"
+        ]
+      },
+      "tokens": {
+        "input": 700,
+        "output": 38665,
+        "cache_read": 2037164,
+        "cache_creation": 110727
+      },
+      "cost_basis": {
+        "equivalent": 13,
+        "provider_price": 0,
+        "unpriced": 0
+      },
+      "contract_violations": {
+        "planner": 0,
+        "worker": 0,
+        "reviewer": 0,
+        "total": 0
+      },
+      "planner_edit_tool_paths": [],
+      "planner_changed_files": [],
+      "planner_modified_files": 0,
+      "duration_s": 266.8,
+      "stopped_by_cap": false,
+      "timed_out": false,
+      "outcome": "fail"
+    },
+    {
+      "id": "roles_not_needed",
+      "rep": 2,
+      "status": "completed",
+      "success": true,
+      "problems": [],
+      "steps": 1,
+      "reviews": 0,
+      "retries": 0,
+      "chat_turns": 0,
+      "plan_changes": 0,
+      "independent_pairs": 0,
+      "bracketed_pairs": 0,
+      "parallel_workers": 1,
+      "progress_notes": 1,
+      "final_summary": 1,
+      "planner_profile_runs": 0,
+      "roles_defined": 0,
+      "role_runs": 0,
+      "role_profile_runs": 0,
+      "role_reviews": 0,
+      "role_prompt_mismatches": 0,
+      "role_boundary_misses": 0,
+      "gate_breaches": 0,
+      "advisory_role_reviews": 0,
+      "advisory_role_fails": 0,
+      "discipline_roles": 0,
+      "interface_dependents": 0,
+      "gates_opened": 0,
+      "gate_turns": 0,
+      "gates_passed": 0,
+      "gates_ended_by_user": 0,
+      "gates_cancelled": 0,
+      "assumptions_stated": 0,
+      "gate_plan_changes": 0,
+      "gate_parallel_runs": 0,
+      "conclusion_reads": 0,
+      "gate_asks_beyond_script": 0,
+      "planner_turns": {
+        "plan": 1,
+        "decision": 1
+      },
+      "cost_usd": 0.050925,
+      "cost_by_role": {
+        "planner": 0.029583,
+        "worker": 0.021341,
+        "reviewer": 0.0
+      },
+      "runs": 3,
+      "run_errors": 0,
+      "models": {
+        "planner": [
+          "claude-haiku-4-5-20251001"
+        ],
+        "worker": [
+          "claude-haiku-4-5-20251001"
+        ]
+      },
+      "tokens": {
+        "input": 54,
+        "output": 1842,
+        "cache_read": 111366,
+        "cache_creation": 15262
+      },
+      "cost_basis": {
+        "equivalent": 3,
+        "provider_price": 0,
+        "unpriced": 0
+      },
+      "contract_violations": {
+        "planner": 0,
+        "worker": 0,
+        "reviewer": 0,
+        "total": 0
+      },
+      "planner_edit_tool_paths": [],
+      "planner_changed_files": [],
+      "planner_modified_files": 0,
+      "duration_s": 24.6,
+      "stopped_by_cap": false,
+      "timed_out": false,
+      "outcome": "pass"
+    },
+    {
+      "id": "gate_ambiguous",
+      "rep": 2,
+      "status": "completed",
+      "success": true,
+      "problems": [],
+      "steps": 2,
+      "reviews": 0,
+      "retries": 0,
+      "chat_turns": 0,
+      "plan_changes": 0,
+      "independent_pairs": 0,
+      "bracketed_pairs": 0,
+      "parallel_workers": 1,
+      "progress_notes": 1,
+      "final_summary": 1,
+      "planner_profile_runs": 0,
+      "roles_defined": 0,
+      "role_runs": 0,
+      "role_profile_runs": 0,
+      "role_reviews": 0,
+      "role_prompt_mismatches": 0,
+      "role_boundary_misses": 0,
+      "gate_breaches": 0,
+      "advisory_role_reviews": 0,
+      "advisory_role_fails": 0,
+      "discipline_roles": 0,
+      "interface_dependents": 0,
+      "gates_opened": 1,
+      "gate_turns": 1,
+      "gates_passed": 1,
+      "gates_ended_by_user": 0,
+      "gates_cancelled": 0,
+      "assumptions_stated": 0,
+      "gate_plan_changes": 0,
+      "gate_parallel_runs": 0,
+      "conclusion_reads": 1,
+      "gate_asks_beyond_script": 0,
+      "planner_turns": {
+        "plan": 1,
+        "repair": 1,
+        "gate": 1,
+        "decision": 1
+      },
+      "cost_usd": 0.075743,
+      "cost_by_role": {
+        "planner": 0.050983,
+        "worker": 0.024761,
+        "reviewer": 0.0
+      },
+      "runs": 5,
+      "run_errors": 0,
+      "models": {
+        "planner": [
+          "claude-haiku-4-5-20251001"
+        ],
+        "worker": [
+          "claude-haiku-4-5-20251001"
+        ]
+      },
+      "tokens": {
+        "input": 82,
+        "output": 3938,
+        "cache_read": 184753,
+        "cache_creation": 18748
+      },
+      "cost_basis": {
+        "equivalent": 5,
+        "provider_price": 0,
+        "unpriced": 0
+      },
+      "contract_violations": {
+        "planner": 1,
+        "worker": 0,
+        "reviewer": 0,
+        "total": 1
+      },
+      "planner_edit_tool_paths": [],
+      "planner_changed_files": [],
+      "planner_modified_files": 0,
+      "duration_s": 45.3,
+      "stopped_by_cap": false,
+      "timed_out": false,
+      "outcome": "pass"
+    },
+    {
+      "id": "gate_not_needed",
+      "rep": 2,
+      "status": "completed",
+      "success": true,
+      "problems": [],
+      "steps": 1,
+      "reviews": 0,
+      "retries": 0,
+      "chat_turns": 0,
+      "plan_changes": 0,
+      "independent_pairs": 0,
+      "bracketed_pairs": 0,
+      "parallel_workers": 1,
+      "progress_notes": 1,
+      "final_summary": 1,
+      "planner_profile_runs": 0,
+      "roles_defined": 0,
+      "role_runs": 0,
+      "role_profile_runs": 0,
+      "role_reviews": 0,
+      "role_prompt_mismatches": 0,
+      "role_boundary_misses": 0,
+      "gate_breaches": 0,
+      "advisory_role_reviews": 0,
+      "advisory_role_fails": 0,
+      "discipline_roles": 0,
+      "interface_dependents": 0,
+      "gates_opened": 0,
+      "gate_turns": 0,
+      "gates_passed": 0,
+      "gates_ended_by_user": 0,
+      "gates_cancelled": 0,
+      "assumptions_stated": 0,
+      "gate_plan_changes": 0,
+      "gate_parallel_runs": 0,
+      "conclusion_reads": 0,
+      "gate_asks_beyond_script": 0,
+      "planner_turns": {
+        "plan": 1,
+        "decision": 1
+      },
+      "cost_usd": 0.050457,
+      "cost_by_role": {
+        "planner": 0.029455,
+        "worker": 0.021001,
+        "reviewer": 0.0
+      },
+      "runs": 3,
+      "run_errors": 0,
+      "models": {
+        "planner": [
+          "claude-haiku-4-5-20251001"
+        ],
+        "worker": [
+          "claude-haiku-4-5-20251001"
+        ]
+      },
+      "tokens": {
+        "input": 54,
+        "output": 1663,
+        "cache_read": 111819,
+        "cache_creation": 15453
+      },
+      "cost_basis": {
+        "equivalent": 3,
+        "provider_price": 0,
+        "unpriced": 0
+      },
+      "contract_violations": {
+        "planner": 0,
+        "worker": 0,
+        "reviewer": 0,
+        "total": 0
+      },
+      "planner_edit_tool_paths": [],
+      "planner_changed_files": [],
+      "planner_modified_files": 0,
+      "duration_s": 24.6,
+      "stopped_by_cap": false,
+      "timed_out": false,
+      "outcome": "pass"
+    },
+    {
+      "id": "gate_end_early",
+      "rep": 2,
+      "status": "completed",
+      "success": true,
+      "problems": [],
+      "steps": 2,
+      "reviews": 0,
+      "retries": 0,
+      "chat_turns": 0,
+      "plan_changes": 0,
+      "independent_pairs": 0,
+      "bracketed_pairs": 0,
+      "parallel_workers": 1,
+      "progress_notes": 1,
+      "final_summary": 1,
+      "planner_profile_runs": 0,
+      "roles_defined": 0,
+      "role_runs": 0,
+      "role_profile_runs": 0,
+      "role_reviews": 0,
+      "role_prompt_mismatches": 0,
+      "role_boundary_misses": 0,
+      "gate_breaches": 0,
+      "advisory_role_reviews": 0,
+      "advisory_role_fails": 0,
+      "discipline_roles": 0,
+      "interface_dependents": 0,
+      "gates_opened": 1,
+      "gate_turns": 1,
+      "gates_passed": 1,
+      "gates_ended_by_user": 1,
+      "gates_cancelled": 0,
+      "assumptions_stated": 3,
+      "gate_plan_changes": 0,
+      "gate_parallel_runs": 0,
+      "conclusion_reads": 1,
+      "gate_asks_beyond_script": 0,
+      "planner_turns": {
+        "plan": 1,
+        "repair": 2,
+        "gate": 1,
+        "decision": 1
+      },
+      "cost_usd": 0.082772,
+      "cost_by_role": {
+        "planner": 0.059011,
+        "worker": 0.023761,
+        "reviewer": 0.0
+      },
+      "runs": 6,
+      "run_errors": 0,
+      "models": {
+        "planner": [
+          "claude-haiku-4-5-20251001"
+        ],
+        "worker": [
+          "claude-haiku-4-5-20251001"
+        ]
+      },
+      "tokens": {
+        "input": 100,
+        "output": 4174,
+        "cache_read": 233923,
+        "cache_creation": 19205
+      },
+      "cost_basis": {
+        "equivalent": 6,
+        "provider_price": 0,
+        "unpriced": 0
+      },
+      "contract_violations": {
+        "planner": 2,
+        "worker": 0,
+        "reviewer": 0,
+        "total": 2
+      },
+      "planner_edit_tool_paths": [],
+      "planner_changed_files": [],
+      "planner_modified_files": 0,
+      "duration_s": 49.3,
+      "stopped_by_cap": false,
+      "timed_out": false,
+      "outcome": "pass"
+    },
+    {
+      "id": "gate_parallel_branch",
+      "rep": 2,
+      "status": "completed",
+      "success": true,
+      "problems": [],
+      "steps": 3,
+      "reviews": 0,
+      "retries": 0,
+      "chat_turns": 0,
+      "plan_changes": 0,
+      "independent_pairs": 2,
+      "bracketed_pairs": 0,
+      "parallel_workers": 2,
+      "progress_notes": 2,
+      "final_summary": 1,
+      "planner_profile_runs": 0,
+      "roles_defined": 0,
+      "role_runs": 0,
+      "role_profile_runs": 0,
+      "role_reviews": 0,
+      "role_prompt_mismatches": 0,
+      "role_boundary_misses": 0,
+      "gate_breaches": 0,
+      "advisory_role_reviews": 0,
+      "advisory_role_fails": 0,
+      "discipline_roles": 0,
+      "interface_dependents": 0,
+      "gates_opened": 1,
+      "gate_turns": 1,
+      "gates_passed": 1,
+      "gates_ended_by_user": 0,
+      "gates_cancelled": 0,
+      "assumptions_stated": 0,
+      "gate_plan_changes": 0,
+      "gate_parallel_runs": 1,
+      "conclusion_reads": 1,
+      "gate_asks_beyond_script": 0,
+      "planner_turns": {
+        "plan": 1,
+        "repair": 1,
+        "gate": 1,
+        "decision": 2
+      },
+      "cost_usd": 0.107118,
+      "cost_by_role": {
+        "planner": 0.057919,
+        "worker": 0.049198,
+        "reviewer": 0.0
+      },
+      "runs": 7,
+      "run_errors": 0,
+      "models": {
+        "planner": [
+          "claude-haiku-4-5-20251001"
+        ],
+        "worker": [
+          "claude-haiku-4-5-20251001"
+        ]
+      },
+      "tokens": {
+        "input": 110,
+        "output": 5927,
+        "cache_read": 238766,
+        "cache_creation": 26748
+      },
+      "cost_basis": {
+        "equivalent": 7,
+        "provider_price": 0,
+        "unpriced": 0
+      },
+      "contract_violations": {
+        "planner": 1,
+        "worker": 0,
+        "reviewer": 0,
+        "total": 1
+      },
+      "planner_edit_tool_paths": [],
+      "planner_changed_files": [],
+      "planner_modified_files": 0,
+      "duration_s": 63.7,
+      "stopped_by_cap": false,
+      "timed_out": false,
+      "outcome": "pass"
+    },
+    {
+      "id": "gate_discoverable",
+      "rep": 2,
+      "status": "completed",
+      "success": true,
+      "problems": [],
+      "steps": 1,
+      "reviews": 0,
+      "retries": 0,
+      "chat_turns": 0,
+      "plan_changes": 0,
+      "independent_pairs": 0,
+      "bracketed_pairs": 0,
+      "parallel_workers": 1,
+      "progress_notes": 1,
+      "final_summary": 1,
+      "planner_profile_runs": 0,
+      "roles_defined": 0,
+      "role_runs": 0,
+      "role_profile_runs": 0,
+      "role_reviews": 0,
+      "role_prompt_mismatches": 0,
+      "role_boundary_misses": 0,
+      "gate_breaches": 0,
+      "advisory_role_reviews": 0,
+      "advisory_role_fails": 0,
+      "discipline_roles": 0,
+      "interface_dependents": 0,
+      "gates_opened": 0,
+      "gate_turns": 0,
+      "gates_passed": 0,
+      "gates_ended_by_user": 0,
+      "gates_cancelled": 0,
+      "assumptions_stated": 0,
+      "gate_plan_changes": 0,
+      "gate_parallel_runs": 0,
+      "conclusion_reads": 0,
+      "gate_asks_beyond_script": 0,
+      "planner_turns": {
+        "plan": 1,
+        "decision": 1
+      },
+      "cost_usd": 0.062314,
+      "cost_by_role": {
+        "planner": 0.032581,
+        "worker": 0.029733,
+        "reviewer": 0.0
+      },
+      "runs": 3,
+      "run_errors": 0,
+      "models": {
+        "planner": [
+          "claude-haiku-4-5-20251001"
+        ],
+        "worker": [
+          "claude-haiku-4-5-20251001"
+        ]
+      },
+      "tokens": {
+        "input": 78,
+        "output": 2316,
+        "cache_read": 175422,
+        "cache_creation": 16557
+      },
+      "cost_basis": {
+        "equivalent": 3,
+        "provider_price": 0,
+        "unpriced": 0
+      },
+      "contract_violations": {
+        "planner": 0,
+        "worker": 0,
+        "reviewer": 0,
+        "total": 0
+      },
+      "planner_edit_tool_paths": [],
+      "planner_changed_files": [],
+      "planner_modified_files": 0,
+      "duration_s": 36.7,
+      "stopped_by_cap": false,
+      "timed_out": false,
+      "outcome": "pass"
+    },
+    {
+      "id": "single_step",
+      "rep": 3,
+      "status": "completed",
+      "success": true,
+      "problems": [],
+      "steps": 1,
+      "reviews": 0,
+      "retries": 0,
+      "chat_turns": 0,
+      "plan_changes": 0,
+      "independent_pairs": 0,
+      "bracketed_pairs": 0,
+      "parallel_workers": 1,
+      "progress_notes": 1,
+      "final_summary": 1,
+      "planner_profile_runs": 0,
+      "roles_defined": 0,
+      "role_runs": 0,
+      "role_profile_runs": 0,
+      "role_reviews": 0,
+      "role_prompt_mismatches": 0,
+      "role_boundary_misses": 0,
+      "gate_breaches": 0,
+      "advisory_role_reviews": 0,
+      "advisory_role_fails": 0,
+      "discipline_roles": 0,
+      "interface_dependents": 0,
+      "gates_opened": 0,
+      "gate_turns": 0,
+      "gates_passed": 0,
+      "gates_ended_by_user": 0,
+      "gates_cancelled": 0,
+      "assumptions_stated": 0,
+      "gate_plan_changes": 0,
+      "gate_parallel_runs": 0,
+      "conclusion_reads": 0,
+      "gate_asks_beyond_script": 0,
+      "planner_turns": {
+        "plan": 1,
+        "decision": 1
+      },
+      "cost_usd": 0.049274,
+      "cost_by_role": {
+        "planner": 0.027449,
+        "worker": 0.021825,
+        "reviewer": 0.0
+      },
+      "runs": 3,
+      "run_errors": 0,
+      "models": {
+        "planner": [
+          "claude-haiku-4-5-20251001"
+        ],
+        "worker": [
+          "claude-haiku-4-5-20251001"
+        ]
+      },
+      "tokens": {
+        "input": 54,
+        "output": 1755,
+        "cache_read": 110254,
+        "cache_creation": 14710
+      },
+      "cost_basis": {
+        "equivalent": 3,
+        "provider_price": 0,
+        "unpriced": 0
+      },
+      "contract_violations": {
+        "planner": 0,
+        "worker": 0,
+        "reviewer": 0,
+        "total": 0
+      },
+      "planner_edit_tool_paths": [],
+      "planner_changed_files": [],
+      "planner_modified_files": 0,
+      "duration_s": 26.5,
+      "stopped_by_cap": false,
+      "timed_out": false,
+      "outcome": "pass"
+    },
+    {
+      "id": "dependent_steps",
+      "rep": 3,
+      "status": "completed",
+      "success": true,
+      "problems": [],
+      "steps": 2,
+      "reviews": 0,
+      "retries": 0,
+      "chat_turns": 0,
+      "plan_changes": 0,
+      "independent_pairs": 0,
+      "bracketed_pairs": 0,
+      "parallel_workers": 1,
+      "progress_notes": 2,
+      "final_summary": 1,
+      "planner_profile_runs": 0,
+      "roles_defined": 0,
+      "role_runs": 0,
+      "role_profile_runs": 0,
+      "role_reviews": 0,
+      "role_prompt_mismatches": 0,
+      "role_boundary_misses": 0,
+      "gate_breaches": 0,
+      "advisory_role_reviews": 0,
+      "advisory_role_fails": 0,
+      "discipline_roles": 0,
+      "interface_dependents": 0,
+      "gates_opened": 0,
+      "gate_turns": 0,
+      "gates_passed": 0,
+      "gates_ended_by_user": 0,
+      "gates_cancelled": 0,
+      "assumptions_stated": 0,
+      "gate_plan_changes": 0,
+      "gate_parallel_runs": 0,
+      "conclusion_reads": 0,
+      "gate_asks_beyond_script": 0,
+      "planner_turns": {
+        "plan": 1,
+        "decision": 2
+      },
+      "cost_usd": 0.084657,
+      "cost_by_role": {
+        "planner": 0.034731,
+        "worker": 0.049926,
+        "reviewer": 0.0
+      },
+      "runs": 5,
+      "run_errors": 0,
+      "models": {
+        "planner": [
+          "claude-haiku-4-5-20251001"
+        ],
+        "worker": [
+          "claude-haiku-4-5-20251001"
+        ]
+      },
+      "tokens": {
+        "input": 98,
+        "output": 3706,
+        "cache_read": 207228,
+        "cache_creation": 22653
+      },
+      "cost_basis": {
+        "equivalent": 5,
+        "provider_price": 0,
+        "unpriced": 0
+      },
+      "contract_violations": {
+        "planner": 0,
+        "worker": 0,
+        "reviewer": 0,
+        "total": 0
+      },
+      "planner_edit_tool_paths": [],
+      "planner_changed_files": [],
+      "planner_modified_files": 0,
+      "duration_s": 43.0,
+      "stopped_by_cap": false,
+      "timed_out": false,
+      "outcome": "pass"
+    },
+    {
+      "id": "many_steps",
+      "rep": 3,
+      "status": "completed",
+      "success": true,
+      "problems": [],
+      "steps": 9,
+      "reviews": 0,
+      "retries": 0,
+      "chat_turns": 0,
+      "plan_changes": 0,
+      "independent_pairs": 0,
+      "bracketed_pairs": 0,
+      "parallel_workers": 1,
+      "progress_notes": 9,
+      "final_summary": 1,
+      "planner_profile_runs": 0,
+      "roles_defined": 0,
+      "role_runs": 0,
+      "role_profile_runs": 0,
+      "role_reviews": 0,
+      "role_prompt_mismatches": 0,
+      "role_boundary_misses": 0,
+      "gate_breaches": 0,
+      "advisory_role_reviews": 0,
+      "advisory_role_fails": 0,
+      "discipline_roles": 0,
+      "interface_dependents": 0,
+      "gates_opened": 0,
+      "gate_turns": 0,
+      "gates_passed": 0,
+      "gates_ended_by_user": 0,
+      "gates_cancelled": 0,
+      "assumptions_stated": 0,
+      "gate_plan_changes": 0,
+      "gate_parallel_runs": 0,
+      "conclusion_reads": 0,
+      "gate_asks_beyond_script": 0,
+      "planner_turns": {
+        "plan": 1,
+        "decision": 9
+      },
+      "cost_usd": 0.27876,
+      "cost_by_role": {
+        "planner": 0.084526,
+        "worker": 0.194234,
+        "reviewer": 0.0
+      },
+      "runs": 19,
+      "run_errors": 0,
+      "models": {
+        "planner": [
+          "claude-haiku-4-5-20251001"
+        ],
+        "worker": [
+          "claude-haiku-4-5-20251001"
+        ]
+      },
+      "tokens": {
+        "input": 326,
+        "output": 10724,
+        "cache_read": 717304,
+        "cache_creation": 76542
+      },
+      "cost_basis": {
+        "equivalent": 19,
+        "provider_price": 0,
+        "unpriced": 0
+      },
+      "contract_violations": {
+        "planner": 0,
+        "worker": 0,
+        "reviewer": 0,
+        "total": 0
+      },
+      "planner_edit_tool_paths": [],
+      "planner_changed_files": [],
+      "planner_modified_files": 0,
+      "duration_s": 135.0,
+      "stopped_by_cap": false,
+      "timed_out": false,
+      "outcome": "pass"
+    },
+    {
+      "id": "parallel_parts",
+      "rep": 3,
+      "status": "completed",
+      "success": true,
+      "problems": [],
+      "steps": 3,
+      "reviews": 0,
+      "retries": 0,
+      "chat_turns": 0,
+      "plan_changes": 0,
+      "independent_pairs": 1,
+      "bracketed_pairs": 0,
+      "parallel_workers": 2,
+      "progress_notes": 3,
+      "final_summary": 1,
+      "planner_profile_runs": 0,
+      "roles_defined": 0,
+      "role_runs": 0,
+      "role_profile_runs": 0,
+      "role_reviews": 0,
+      "role_prompt_mismatches": 0,
+      "role_boundary_misses": 0,
+      "gate_breaches": 0,
+      "advisory_role_reviews": 0,
+      "advisory_role_fails": 0,
+      "discipline_roles": 0,
+      "interface_dependents": 0,
+      "gates_opened": 0,
+      "gate_turns": 0,
+      "gates_passed": 0,
+      "gates_ended_by_user": 0,
+      "gates_cancelled": 0,
+      "assumptions_stated": 0,
+      "gate_plan_changes": 0,
+      "gate_parallel_runs": 0,
+      "conclusion_reads": 0,
+      "gate_asks_beyond_script": 0,
+      "planner_turns": {
+        "plan": 1,
+        "decision": 3
+      },
+      "cost_usd": 0.121648,
+      "cost_by_role": {
+        "planner": 0.039977,
+        "worker": 0.081671,
+        "reviewer": 0.0
+      },
+      "runs": 7,
+      "run_errors": 0,
+      "models": {
+        "planner": [
+          "claude-haiku-4-5-20251001"
+        ],
+        "worker": [
+          "claude-haiku-4-5-20251001"
+        ]
+      },
+      "tokens": {
+        "input": 134,
+        "output": 5946,
+        "cache_read": 285197,
+        "cache_creation": 31632
+      },
+      "cost_basis": {
+        "equivalent": 7,
+        "provider_price": 0,
+        "unpriced": 0
+      },
+      "contract_violations": {
+        "planner": 0,
+        "worker": 0,
+        "reviewer": 0,
+        "total": 0
+      },
+      "planner_edit_tool_paths": [],
+      "planner_changed_files": [],
+      "planner_modified_files": 0,
+      "duration_s": 53.2,
+      "stopped_by_cap": false,
+      "timed_out": false,
+      "outcome": "pass"
+    },
+    {
+      "id": "interface_first",
+      "rep": 3,
+      "status": "completed",
+      "success": false,
+      "problems": [
+        "bracketed_pairs 0 < 1"
+      ],
+      "steps": 3,
+      "reviews": 0,
+      "retries": 0,
+      "chat_turns": 0,
+      "plan_changes": 0,
+      "independent_pairs": 1,
+      "bracketed_pairs": 0,
+      "parallel_workers": 2,
+      "progress_notes": 3,
+      "final_summary": 1,
+      "planner_profile_runs": 0,
+      "roles_defined": 0,
+      "role_runs": 0,
+      "role_profile_runs": 0,
+      "role_reviews": 0,
+      "role_prompt_mismatches": 0,
+      "role_boundary_misses": 0,
+      "gate_breaches": 0,
+      "advisory_role_reviews": 0,
+      "advisory_role_fails": 0,
+      "discipline_roles": 0,
+      "interface_dependents": 0,
+      "gates_opened": 0,
+      "gate_turns": 0,
+      "gates_passed": 0,
+      "gates_ended_by_user": 0,
+      "gates_cancelled": 0,
+      "assumptions_stated": 0,
+      "gate_plan_changes": 0,
+      "gate_parallel_runs": 0,
+      "conclusion_reads": 0,
+      "gate_asks_beyond_script": 0,
+      "planner_turns": {
+        "plan": 1,
+        "decision": 3
+      },
+      "cost_usd": 0.181298,
+      "cost_by_role": {
+        "planner": 0.052904,
+        "worker": 0.128394,
+        "reviewer": 0.0
+      },
+      "runs": 7,
+      "run_errors": 0,
+      "models": {
+        "planner": [
+          "claude-haiku-4-5-20251001"
+        ],
+        "worker": [
+          "claude-haiku-4-5-20251001"
+        ]
+      },
+      "tokens": {
+        "input": 230,
+        "output": 9796,
+        "cache_read": 548523,
+        "cache_creation": 38618
+      },
+      "cost_basis": {
+        "equivalent": 7,
+        "provider_price": 0,
+        "unpriced": 0
+      },
+      "contract_violations": {
+        "planner": 0,
+        "worker": 0,
+        "reviewer": 0,
+        "total": 0
+      },
+      "planner_edit_tool_paths": [],
+      "planner_changed_files": [],
+      "planner_modified_files": 0,
+      "duration_s": 81.6,
+      "stopped_by_cap": false,
+      "timed_out": false,
+      "outcome": "fail"
+    },
+    {
+      "id": "reviewed_step",
+      "rep": 3,
+      "status": "completed",
+      "success": true,
+      "problems": [],
+      "steps": 1,
+      "reviews": 1,
+      "retries": 0,
+      "chat_turns": 0,
+      "plan_changes": 0,
+      "independent_pairs": 0,
+      "bracketed_pairs": 0,
+      "parallel_workers": 1,
+      "progress_notes": 2,
+      "final_summary": 1,
+      "planner_profile_runs": 0,
+      "roles_defined": 0,
+      "role_runs": 0,
+      "role_profile_runs": 0,
+      "role_reviews": 0,
+      "role_prompt_mismatches": 0,
+      "role_boundary_misses": 0,
+      "gate_breaches": 0,
+      "advisory_role_reviews": 0,
+      "advisory_role_fails": 0,
+      "discipline_roles": 0,
+      "interface_dependents": 0,
+      "gates_opened": 0,
+      "gate_turns": 0,
+      "gates_passed": 0,
+      "gates_ended_by_user": 0,
+      "gates_cancelled": 0,
+      "assumptions_stated": 0,
+      "gate_plan_changes": 0,
+      "gate_parallel_runs": 0,
+      "conclusion_reads": 0,
+      "gate_asks_beyond_script": 0,
+      "planner_turns": {
+        "plan": 1,
+        "decision": 2
+      },
+      "cost_usd": 0.071562,
+      "cost_by_role": {
+        "planner": 0.034161,
+        "worker": 0.018863,
+        "reviewer": 0.018537
+      },
+      "runs": 5,
+      "run_errors": 0,
+      "models": {
+        "planner": [
+          "claude-haiku-4-5-20251001"
+        ],
+        "worker": [
+          "claude-haiku-4-5-20251001"
+        ],
+        "reviewer": [
+          "claude-haiku-4-5-20251001"
+        ]
+      },
+      "tokens": {
+        "input": 74,
+        "output": 2877,
+        "cache_read": 146208,
+        "cache_creation": 21241
+      },
+      "cost_basis": {
+        "equivalent": 5,
+        "provider_price": 0,
+        "unpriced": 0
+      },
+      "contract_violations": {
+        "planner": 0,
+        "worker": 0,
+        "reviewer": 0,
+        "total": 0
+      },
+      "planner_edit_tool_paths": [],
+      "planner_changed_files": [],
+      "planner_modified_files": 0,
+      "duration_s": 38.7,
+      "stopped_by_cap": false,
+      "timed_out": false,
+      "outcome": "pass"
+    },
+    {
+      "id": "retry_after_failure",
+      "rep": 3,
+      "status": "completed",
+      "success": true,
+      "problems": [],
+      "steps": 1,
+      "reviews": 0,
+      "retries": 1,
+      "chat_turns": 0,
+      "plan_changes": 0,
+      "independent_pairs": 0,
+      "bracketed_pairs": 0,
+      "parallel_workers": 1,
+      "progress_notes": 2,
+      "final_summary": 1,
+      "planner_profile_runs": 0,
+      "roles_defined": 0,
+      "role_runs": 0,
+      "role_profile_runs": 0,
+      "role_reviews": 0,
+      "role_prompt_mismatches": 0,
+      "role_boundary_misses": 0,
+      "gate_breaches": 0,
+      "advisory_role_reviews": 0,
+      "advisory_role_fails": 0,
+      "discipline_roles": 0,
+      "interface_dependents": 0,
+      "gates_opened": 0,
+      "gate_turns": 0,
+      "gates_passed": 0,
+      "gates_ended_by_user": 0,
+      "gates_cancelled": 0,
+      "assumptions_stated": 0,
+      "gate_plan_changes": 0,
+      "gate_parallel_runs": 0,
+      "conclusion_reads": 0,
+      "gate_asks_beyond_script": 0,
+      "planner_turns": {
+        "plan": 1,
+        "decision": 2
+      },
+      "cost_usd": 0.090159,
+      "cost_by_role": {
+        "planner": 0.042867,
+        "worker": 0.047292,
+        "reviewer": 0.0
+      },
+      "runs": 5,
+      "run_errors": 1,
+      "models": {
+        "planner": [
+          "claude-haiku-4-5-20251001"
+        ],
+        "worker": [
+          "claude-haiku-4-5-20251001"
+        ]
+      },
+      "tokens": {
+        "input": 106,
+        "output": 4030,
+        "cache_read": 230186,
+        "cache_creation": 23442
+      },
+      "cost_basis": {
+        "equivalent": 5,
+        "provider_price": 0,
+        "unpriced": 0
+      },
+      "contract_violations": {
+        "planner": 0,
+        "worker": 0,
+        "reviewer": 0,
+        "total": 0
+      },
+      "planner_edit_tool_paths": [],
+      "planner_changed_files": [],
+      "planner_modified_files": 0,
+      "duration_s": 55.2,
+      "stopped_by_cap": false,
+      "timed_out": false,
+      "outcome": "pass"
+    },
+    {
+      "id": "chat_correction",
+      "rep": 3,
+      "status": "completed",
+      "success": true,
+      "problems": [],
+      "steps": 1,
+      "reviews": 0,
+      "retries": 0,
+      "chat_turns": 1,
+      "plan_changes": 0,
+      "independent_pairs": 0,
+      "bracketed_pairs": 0,
+      "parallel_workers": 1,
+      "progress_notes": 1,
+      "final_summary": 1,
+      "planner_profile_runs": 0,
+      "roles_defined": 0,
+      "role_runs": 0,
+      "role_profile_runs": 0,
+      "role_reviews": 0,
+      "role_prompt_mismatches": 0,
+      "role_boundary_misses": 0,
+      "gate_breaches": 0,
+      "advisory_role_reviews": 0,
+      "advisory_role_fails": 0,
+      "discipline_roles": 0,
+      "interface_dependents": 0,
+      "gates_opened": 0,
+      "gate_turns": 0,
+      "gates_passed": 0,
+      "gates_ended_by_user": 0,
+      "gates_cancelled": 0,
+      "assumptions_stated": 0,
+      "gate_plan_changes": 0,
+      "gate_parallel_runs": 0,
+      "conclusion_reads": 0,
+      "gate_asks_beyond_script": 0,
+      "planner_turns": {
+        "plan": 1,
+        "chat": 1,
+        "decision": 1
+      },
+      "cost_usd": 0.058582,
+      "cost_by_role": {
+        "planner": 0.033288,
+        "worker": 0.025293,
+        "reviewer": 0.0
+      },
+      "runs": 4,
+      "run_errors": 0,
+      "models": {
+        "planner": [
+          "claude-haiku-4-5-20251001"
+        ],
+        "worker": [
+          "claude-haiku-4-5-20251001"
+        ]
+      },
+      "tokens": {
+        "input": 72,
+        "output": 2318,
+        "cache_read": 152899,
+        "cache_creation": 15815
+      },
+      "cost_basis": {
+        "equivalent": 4,
+        "provider_price": 0,
+        "unpriced": 0
+      },
+      "contract_violations": {
+        "planner": 0,
+        "worker": 0,
+        "reviewer": 0,
+        "total": 0
+      },
+      "planner_edit_tool_paths": [],
+      "planner_changed_files": [],
+      "planner_modified_files": 0,
+      "duration_s": 28.7,
+      "stopped_by_cap": false,
+      "timed_out": false,
+      "outcome": "pass"
+    },
+    {
+      "id": "supplement_replan",
+      "rep": 3,
+      "status": "completed",
+      "success": true,
+      "problems": [],
+      "steps": 2,
+      "reviews": 0,
+      "retries": 0,
+      "chat_turns": 1,
+      "plan_changes": 1,
+      "independent_pairs": 0,
+      "bracketed_pairs": 0,
+      "parallel_workers": 1,
+      "progress_notes": 2,
+      "final_summary": 1,
+      "planner_profile_runs": 0,
+      "roles_defined": 0,
+      "role_runs": 0,
+      "role_profile_runs": 0,
+      "role_reviews": 0,
+      "role_prompt_mismatches": 0,
+      "role_boundary_misses": 0,
+      "gate_breaches": 0,
+      "advisory_role_reviews": 0,
+      "advisory_role_fails": 0,
+      "discipline_roles": 0,
+      "interface_dependents": 0,
+      "gates_opened": 0,
+      "gate_turns": 0,
+      "gates_passed": 0,
+      "gates_ended_by_user": 0,
+      "gates_cancelled": 0,
+      "assumptions_stated": 0,
+      "gate_plan_changes": 0,
+      "gate_parallel_runs": 0,
+      "conclusion_reads": 0,
+      "gate_asks_beyond_script": 0,
+      "planner_turns": {
+        "plan": 1,
+        "chat": 1,
+        "decision": 2
+      },
+      "cost_usd": 0.089621,
+      "cost_by_role": {
+        "planner": 0.038344,
+        "worker": 0.051278,
+        "reviewer": 0.0
+      },
+      "runs": 6,
+      "run_errors": 0,
+      "models": {
+        "planner": [
+          "claude-haiku-4-5-20251001"
+        ],
+        "worker": [
+          "claude-haiku-4-5-20251001"
+        ]
+      },
+      "tokens": {
+        "input": 108,
+        "output": 3874,
+        "cache_read": 228213,
+        "cache_creation": 23661
+      },
+      "cost_basis": {
+        "equivalent": 6,
+        "provider_price": 0,
+        "unpriced": 0
+      },
+      "contract_violations": {
+        "planner": 0,
+        "worker": 0,
+        "reviewer": 0,
+        "total": 0
+      },
+      "planner_edit_tool_paths": [],
+      "planner_changed_files": [],
+      "planner_modified_files": 0,
+      "duration_s": 67.6,
+      "stopped_by_cap": false,
+      "timed_out": false,
+      "outcome": "pass"
+    },
+    {
+      "id": "requirement_edit",
+      "rep": 3,
+      "status": "completed",
+      "success": true,
+      "problems": [],
+      "steps": 2,
+      "reviews": 0,
+      "retries": 0,
+      "chat_turns": 1,
+      "plan_changes": 1,
+      "independent_pairs": 0,
+      "bracketed_pairs": 0,
+      "parallel_workers": 1,
+      "progress_notes": 2,
+      "final_summary": 1,
+      "planner_profile_runs": 0,
+      "roles_defined": 0,
+      "role_runs": 0,
+      "role_profile_runs": 0,
+      "role_reviews": 0,
+      "role_prompt_mismatches": 0,
+      "role_boundary_misses": 0,
+      "gate_breaches": 0,
+      "advisory_role_reviews": 0,
+      "advisory_role_fails": 0,
+      "discipline_roles": 0,
+      "interface_dependents": 0,
+      "gates_opened": 0,
+      "gate_turns": 0,
+      "gates_passed": 0,
+      "gates_ended_by_user": 0,
+      "gates_cancelled": 0,
+      "assumptions_stated": 0,
+      "gate_plan_changes": 0,
+      "gate_parallel_runs": 0,
+      "conclusion_reads": 0,
+      "gate_asks_beyond_script": 0,
+      "planner_turns": {
+        "plan": 1,
+        "chat": 1,
+        "decision": 2
+      },
+      "cost_usd": 0.099735,
+      "cost_by_role": {
+        "planner": 0.051841,
+        "worker": 0.047894,
+        "reviewer": 0.0
+      },
+      "runs": 6,
+      "run_errors": 0,
+      "models": {
+        "planner": [
+          "claude-haiku-4-5-20251001"
+        ],
+        "worker": [
+          "claude-haiku-4-5-20251001"
+        ]
+      },
+      "tokens": {
+        "input": 100,
+        "output": 3697,
+        "cache_read": 200040,
+        "cache_creation": 30573
+      },
+      "cost_basis": {
+        "equivalent": 6,
+        "provider_price": 0,
+        "unpriced": 0
+      },
+      "contract_violations": {
+        "planner": 0,
+        "worker": 0,
+        "reviewer": 0,
+        "total": 0
+      },
+      "planner_edit_tool_paths": [],
+      "planner_changed_files": [],
+      "planner_modified_files": 0,
+      "duration_s": 59.2,
+      "stopped_by_cap": false,
+      "timed_out": false,
+      "outcome": "pass"
+    },
+    {
+      "id": "supplement_no_change",
+      "rep": 3,
+      "status": "completed",
+      "success": true,
+      "problems": [],
+      "steps": 2,
+      "reviews": 0,
+      "retries": 0,
+      "chat_turns": 1,
+      "plan_changes": 0,
+      "independent_pairs": 0,
+      "bracketed_pairs": 0,
+      "parallel_workers": 1,
+      "progress_notes": 2,
+      "final_summary": 1,
+      "planner_profile_runs": 0,
+      "roles_defined": 0,
+      "role_runs": 0,
+      "role_profile_runs": 0,
+      "role_reviews": 0,
+      "role_prompt_mismatches": 0,
+      "role_boundary_misses": 0,
+      "gate_breaches": 0,
+      "advisory_role_reviews": 0,
+      "advisory_role_fails": 0,
+      "discipline_roles": 0,
+      "interface_dependents": 0,
+      "gates_opened": 0,
+      "gate_turns": 0,
+      "gates_passed": 0,
+      "gates_ended_by_user": 0,
+      "gates_cancelled": 0,
+      "assumptions_stated": 0,
+      "gate_plan_changes": 0,
+      "gate_parallel_runs": 0,
+      "conclusion_reads": 0,
+      "gate_asks_beyond_script": 0,
+      "planner_turns": {
+        "plan": 1,
+        "chat": 1,
+        "decision": 2
+      },
+      "cost_usd": 0.087372,
+      "cost_by_role": {
+        "planner": 0.038748,
+        "worker": 0.048624,
+        "reviewer": 0.0
+      },
+      "runs": 6,
+      "run_errors": 0,
+      "models": {
+        "planner": [
+          "claude-haiku-4-5-20251001"
+        ],
+        "worker": [
+          "claude-haiku-4-5-20251001"
+        ]
+      },
+      "tokens": {
+        "input": 100,
+        "output": 4025,
+        "cache_read": 207913,
+        "cache_creation": 23178
+      },
+      "cost_basis": {
+        "equivalent": 6,
+        "provider_price": 0,
+        "unpriced": 0
+      },
+      "contract_violations": {
+        "planner": 0,
+        "worker": 0,
+        "reviewer": 0,
+        "total": 0
+      },
+      "planner_edit_tool_paths": [],
+      "planner_changed_files": [],
+      "planner_modified_files": 0,
+      "duration_s": 65.6,
+      "stopped_by_cap": false,
+      "timed_out": false,
+      "outcome": "pass"
+    },
+    {
+      "id": "profile_choice",
+      "rep": 3,
+      "status": "completed",
+      "success": false,
+      "problems": [
+        "planner_profile_runs 0 < 1"
+      ],
+      "steps": 1,
+      "reviews": 0,
+      "retries": 0,
+      "chat_turns": 0,
+      "plan_changes": 0,
+      "independent_pairs": 0,
+      "bracketed_pairs": 0,
+      "parallel_workers": 1,
+      "progress_notes": 1,
+      "final_summary": 1,
+      "planner_profile_runs": 0,
+      "roles_defined": 0,
+      "role_runs": 0,
+      "role_profile_runs": 0,
+      "role_reviews": 0,
+      "role_prompt_mismatches": 0,
+      "role_boundary_misses": 0,
+      "gate_breaches": 0,
+      "advisory_role_reviews": 0,
+      "advisory_role_fails": 0,
+      "discipline_roles": 0,
+      "interface_dependents": 0,
+      "gates_opened": 0,
+      "gate_turns": 0,
+      "gates_passed": 0,
+      "gates_ended_by_user": 0,
+      "gates_cancelled": 0,
+      "assumptions_stated": 0,
+      "gate_plan_changes": 0,
+      "gate_parallel_runs": 0,
+      "conclusion_reads": 0,
+      "gate_asks_beyond_script": 0,
+      "planner_turns": {
+        "plan": 1,
+        "decision": 1
+      },
+      "cost_usd": 0.055188,
+      "cost_by_role": {
+        "planner": 0.033613,
+        "worker": 0.021575,
+        "reviewer": 0.0
+      },
+      "runs": 3,
+      "run_errors": 0,
+      "models": {
+        "planner": [
+          "claude-haiku-4-5-20251001"
+        ],
+        "worker": [
+          "claude-haiku-4-5-20251001"
+        ]
+      },
+      "tokens": {
+        "input": 64,
+        "output": 2158,
+        "cache_read": 132997,
+        "cache_creation": 15517
+      },
+      "cost_basis": {
+        "equivalent": 3,
+        "provider_price": 0,
+        "unpriced": 0
+      },
+      "contract_violations": {
+        "planner": 0,
+        "worker": 0,
+        "reviewer": 0,
+        "total": 0
+      },
+      "planner_edit_tool_paths": [],
+      "planner_changed_files": [],
+      "planner_modified_files": 0,
+      "duration_s": 34.9,
+      "stopped_by_cap": false,
+      "timed_out": false,
+      "outcome": "fail"
+    },
+    {
+      "id": "roles_tester_docs",
+      "rep": 3,
+      "status": "completed",
+      "success": true,
+      "problems": [],
+      "steps": 3,
+      "reviews": 0,
+      "retries": 0,
+      "chat_turns": 0,
+      "plan_changes": 0,
+      "independent_pairs": 1,
+      "bracketed_pairs": 0,
+      "parallel_workers": 2,
+      "progress_notes": 3,
+      "final_summary": 1,
+      "planner_profile_runs": 0,
+      "roles_defined": 2,
+      "role_runs": 2,
+      "role_profile_runs": 2,
+      "role_reviews": 0,
+      "role_prompt_mismatches": 0,
+      "role_boundary_misses": 0,
+      "gate_breaches": 0,
+      "advisory_role_reviews": 0,
+      "advisory_role_fails": 0,
+      "discipline_roles": 0,
+      "interface_dependents": 2,
+      "gates_opened": 0,
+      "gate_turns": 0,
+      "gates_passed": 0,
+      "gates_ended_by_user": 0,
+      "gates_cancelled": 0,
+      "assumptions_stated": 0,
+      "gate_plan_changes": 0,
+      "gate_parallel_runs": 0,
+      "conclusion_reads": 0,
+      "gate_asks_beyond_script": 0,
+      "planner_turns": {
+        "plan": 1,
+        "decision": 3
+      },
+      "cost_usd": 0.165285,
+      "cost_by_role": {
+        "planner": 0.06789,
+        "worker": 0.097394,
+        "reviewer": 0.0
+      },
+      "runs": 7,
+      "run_errors": 0,
+      "models": {
+        "planner": [
+          "claude-haiku-4-5-20251001"
+        ],
+        "worker": [
+          "claude-haiku-4-5-20251001"
+        ]
+      },
+      "tokens": {
+        "input": 184,
+        "output": 9440,
+        "cache_read": 431546,
+        "cache_creation": 37373
+      },
+      "cost_basis": {
+        "equivalent": 7,
+        "provider_price": 0,
+        "unpriced": 0
+      },
+      "contract_violations": {
+        "planner": 0,
+        "worker": 0,
+        "reviewer": 0,
+        "total": 0
+      },
+      "planner_edit_tool_paths": [],
+      "planner_changed_files": [],
+      "planner_modified_files": 0,
+      "duration_s": 79.9,
+      "stopped_by_cap": false,
+      "timed_out": false,
+      "outcome": "pass"
+    },
+    {
+      "id": "roles_security_review",
+      "rep": 3,
+      "status": "completed",
+      "success": true,
+      "problems": [],
+      "steps": 1,
+      "reviews": 2,
+      "retries": 0,
+      "chat_turns": 0,
+      "plan_changes": 0,
+      "independent_pairs": 0,
+      "bracketed_pairs": 0,
+      "parallel_workers": 1,
+      "progress_notes": 1,
+      "final_summary": 1,
+      "planner_profile_runs": 0,
+      "roles_defined": 1,
+      "role_runs": 1,
+      "role_profile_runs": 0,
+      "role_reviews": 1,
+      "role_prompt_mismatches": 0,
+      "role_boundary_misses": 0,
+      "gate_breaches": 0,
+      "advisory_role_reviews": 0,
+      "advisory_role_fails": 0,
+      "discipline_roles": 0,
+      "interface_dependents": 0,
+      "gates_opened": 0,
+      "gate_turns": 0,
+      "gates_passed": 0,
+      "gates_ended_by_user": 0,
+      "gates_cancelled": 0,
+      "assumptions_stated": 0,
+      "gate_plan_changes": 0,
+      "gate_parallel_runs": 0,
+      "conclusion_reads": 0,
+      "gate_asks_beyond_script": 0,
+      "planner_turns": {
+        "plan": 1,
+        "decision": 2
+      },
+      "cost_usd": 0.2002,
+      "cost_by_role": {
+        "planner": 0.080709,
+        "worker": 0.039749,
+        "reviewer": 0.079742
+      },
+      "runs": 6,
+      "run_errors": 0,
+      "models": {
+        "planner": [
+          "claude-haiku-4-5-20251001"
+        ],
+        "worker": [
+          "claude-haiku-4-5-20251001"
+        ],
+        "reviewer": [
+          "claude-haiku-4-5-20251001"
+        ]
+      },
+      "tokens": {
+        "input": 282,
+        "output": 10139,
+        "cache_read": 693306,
+        "cache_creation": 39946
+      },
+      "cost_basis": {
+        "equivalent": 6,
+        "provider_price": 0,
+        "unpriced": 0
+      },
+      "contract_violations": {
+        "planner": 0,
+        "worker": 0,
+        "reviewer": 0,
+        "total": 0
+      },
+      "planner_edit_tool_paths": [],
+      "planner_changed_files": [],
+      "planner_modified_files": 0,
+      "duration_s": 127.1,
+      "stopped_by_cap": false,
+      "timed_out": false,
+      "outcome": "pass"
+    },
+    {
+      "id": "roles_advisory_review",
+      "rep": 3,
+      "status": "completed",
+      "success": false,
+      "problems": [
+        "advisory_role_fails 0 < 1"
+      ],
+      "steps": 1,
+      "reviews": 2,
+      "retries": 0,
+      "chat_turns": 0,
+      "plan_changes": 0,
+      "independent_pairs": 0,
+      "bracketed_pairs": 0,
+      "parallel_workers": 1,
+      "progress_notes": 1,
+      "final_summary": 1,
+      "planner_profile_runs": 0,
+      "roles_defined": 1,
+      "role_runs": 1,
+      "role_profile_runs": 0,
+      "role_reviews": 1,
+      "role_prompt_mismatches": 0,
+      "role_boundary_misses": 0,
+      "gate_breaches": 0,
+      "advisory_role_reviews": 1,
+      "advisory_role_fails": 0,
+      "discipline_roles": 0,
+      "interface_dependents": 0,
+      "gates_opened": 0,
+      "gate_turns": 0,
+      "gates_passed": 0,
+      "gates_ended_by_user": 0,
+      "gates_cancelled": 0,
+      "assumptions_stated": 0,
+      "gate_plan_changes": 0,
+      "gate_parallel_runs": 0,
+      "conclusion_reads": 0,
+      "gate_asks_beyond_script": 0,
+      "planner_turns": {
+        "plan": 1,
+        "decision": 2
+      },
+      "cost_usd": 0.146512,
+      "cost_by_role": {
+        "planner": 0.048414,
+        "worker": 0.030415,
+        "reviewer": 0.067683
+      },
+      "runs": 6,
+      "run_errors": 0,
+      "models": {
+        "planner": [
+          "claude-haiku-4-5-20251001"
+        ],
+        "worker": [
+          "claude-haiku-4-5-20251001"
+        ],
+        "reviewer": [
+          "claude-haiku-4-5-20251001"
+        ]
+      },
+      "tokens": {
+        "input": 174,
+        "output": 7851,
+        "cache_read": 397390,
+        "cache_creation": 33672
+      },
+      "cost_basis": {
+        "equivalent": 6,
+        "provider_price": 0,
+        "unpriced": 0
+      },
+      "contract_violations": {
+        "planner": 0,
+        "worker": 0,
+        "reviewer": 0,
+        "total": 0
+      },
+      "planner_edit_tool_paths": [],
+      "planner_changed_files": [],
+      "planner_modified_files": 0,
+      "duration_s": 96.1,
+      "stopped_by_cap": false,
+      "timed_out": false,
+      "outcome": "fail"
+    },
+    {
+      "id": "roles_multi_platform",
+      "rep": 3,
+      "status": "completed",
+      "success": false,
+      "problems": [
+        "roles_defined 0 < 4",
+        "discipline_roles 0 < 4",
+        "interface_dependents 0 < 4",
+        "contract_violations 1 > 0"
+      ],
+      "steps": 5,
+      "reviews": 0,
+      "retries": 0,
+      "chat_turns": 0,
+      "plan_changes": 0,
+      "independent_pairs": 6,
+      "bracketed_pairs": 0,
+      "parallel_workers": 4,
+      "progress_notes": 5,
+      "final_summary": 1,
+      "planner_profile_runs": 0,
+      "roles_defined": 0,
+      "role_runs": 0,
+      "role_profile_runs": 0,
+      "role_reviews": 0,
+      "role_prompt_mismatches": 0,
+      "role_boundary_misses": 0,
+      "gate_breaches": 0,
+      "advisory_role_reviews": 0,
+      "advisory_role_fails": 0,
+      "discipline_roles": 0,
+      "interface_dependents": 0,
+      "gates_opened": 0,
+      "gate_turns": 0,
+      "gates_passed": 0,
+      "gates_ended_by_user": 0,
+      "gates_cancelled": 0,
+      "assumptions_stated": 0,
+      "gate_plan_changes": 0,
+      "gate_parallel_runs": 0,
+      "conclusion_reads": 0,
+      "gate_asks_beyond_script": 0,
+      "planner_turns": {
+        "plan": 1,
+        "repair": 1,
+        "decision": 5
+      },
+      "cost_usd": 0.332004,
+      "cost_by_role": {
+        "planner": 0.100181,
+        "worker": 0.231823,
+        "reviewer": 0.0
+      },
+      "runs": 12,
+      "run_errors": 0,
+      "models": {
+        "planner": [
+          "claude-haiku-4-5-20251001"
+        ],
+        "worker": [
+          "claude-haiku-4-5-20251001"
+        ]
+      },
+      "tokens": {
+        "input": 368,
+        "output": 20822,
+        "cache_read": 924896,
+        "cache_creation": 67518
+      },
+      "cost_basis": {
+        "equivalent": 12,
+        "provider_price": 0,
+        "unpriced": 0
+      },
+      "contract_violations": {
+        "planner": 1,
+        "worker": 0,
+        "reviewer": 0,
+        "total": 1
+      },
+      "planner_edit_tool_paths": [],
+      "planner_changed_files": [],
+      "planner_modified_files": 0,
+      "duration_s": 116.5,
+      "stopped_by_cap": false,
+      "timed_out": false,
+      "outcome": "fail"
+    },
+    {
+      "id": "roles_not_needed",
+      "rep": 3,
+      "status": "completed",
+      "success": true,
+      "problems": [],
+      "steps": 1,
+      "reviews": 0,
+      "retries": 0,
+      "chat_turns": 0,
+      "plan_changes": 0,
+      "independent_pairs": 0,
+      "bracketed_pairs": 0,
+      "parallel_workers": 1,
+      "progress_notes": 1,
+      "final_summary": 1,
+      "planner_profile_runs": 0,
+      "roles_defined": 0,
+      "role_runs": 0,
+      "role_profile_runs": 0,
+      "role_reviews": 0,
+      "role_prompt_mismatches": 0,
+      "role_boundary_misses": 0,
+      "gate_breaches": 0,
+      "advisory_role_reviews": 0,
+      "advisory_role_fails": 0,
+      "discipline_roles": 0,
+      "interface_dependents": 0,
+      "gates_opened": 0,
+      "gate_turns": 0,
+      "gates_passed": 0,
+      "gates_ended_by_user": 0,
+      "gates_cancelled": 0,
+      "assumptions_stated": 0,
+      "gate_plan_changes": 0,
+      "gate_parallel_runs": 0,
+      "conclusion_reads": 0,
+      "gate_asks_beyond_script": 0,
+      "planner_turns": {
+        "plan": 1,
+        "repair": 1,
+        "decision": 1
+      },
+      "cost_usd": 0.054802,
+      "cost_by_role": {
+        "planner": 0.033286,
+        "worker": 0.021516,
+        "reviewer": 0.0
+      },
+      "runs": 4,
+      "run_errors": 0,
+      "models": {
+        "planner": [
+          "claude-haiku-4-5-20251001"
+        ],
+        "worker": [
+          "claude-haiku-4-5-20251001"
+        ]
+      },
+      "tokens": {
+        "input": 64,
+        "output": 2006,
+        "cache_read": 134140,
+        "cache_creation": 15647
+      },
+      "cost_basis": {
+        "equivalent": 4,
+        "provider_price": 0,
+        "unpriced": 0
+      },
+      "contract_violations": {
+        "planner": 1,
+        "worker": 0,
+        "reviewer": 0,
+        "total": 1
+      },
+      "planner_edit_tool_paths": [],
+      "planner_changed_files": [],
+      "planner_modified_files": 0,
+      "duration_s": 26.6,
+      "stopped_by_cap": false,
+      "timed_out": false,
+      "outcome": "pass"
+    },
+    {
+      "id": "gate_ambiguous",
+      "rep": 3,
+      "status": "completed",
+      "success": true,
+      "problems": [],
+      "steps": 2,
+      "reviews": 0,
+      "retries": 0,
+      "chat_turns": 0,
+      "plan_changes": 0,
+      "independent_pairs": 0,
+      "bracketed_pairs": 0,
+      "parallel_workers": 1,
+      "progress_notes": 1,
+      "final_summary": 1,
+      "planner_profile_runs": 0,
+      "roles_defined": 0,
+      "role_runs": 0,
+      "role_profile_runs": 0,
+      "role_reviews": 0,
+      "role_prompt_mismatches": 0,
+      "role_boundary_misses": 0,
+      "gate_breaches": 0,
+      "advisory_role_reviews": 0,
+      "advisory_role_fails": 0,
+      "discipline_roles": 0,
+      "interface_dependents": 0,
+      "gates_opened": 1,
+      "gate_turns": 1,
+      "gates_passed": 1,
+      "gates_ended_by_user": 0,
+      "gates_cancelled": 0,
+      "assumptions_stated": 0,
+      "gate_plan_changes": 0,
+      "gate_parallel_runs": 0,
+      "conclusion_reads": 1,
+      "gate_asks_beyond_script": 0,
+      "planner_turns": {
+        "plan": 1,
+        "gate": 1,
+        "decision": 1
+      },
+      "cost_usd": 0.077459,
+      "cost_by_role": {
+        "planner": 0.053818,
+        "worker": 0.02364,
+        "reviewer": 0.0
+      },
+      "runs": 4,
+      "run_errors": 0,
+      "models": {
+        "planner": [
+          "claude-haiku-4-5-20251001"
+        ],
+        "worker": [
+          "claude-haiku-4-5-20251001"
+        ]
+      },
+      "tokens": {
+        "input": 80,
+        "output": 3932,
+        "cache_read": 186228,
+        "cache_creation": 19548
+      },
+      "cost_basis": {
+        "equivalent": 4,
+        "provider_price": 0,
+        "unpriced": 0
+      },
+      "contract_violations": {
+        "planner": 0,
+        "worker": 0,
+        "reviewer": 0,
+        "total": 0
+      },
+      "planner_edit_tool_paths": [],
+      "planner_changed_files": [],
+      "planner_modified_files": 0,
+      "duration_s": 47.1,
+      "stopped_by_cap": false,
+      "timed_out": false,
+      "outcome": "pass"
+    },
+    {
+      "id": "gate_not_needed",
+      "rep": 3,
+      "status": "completed",
+      "success": true,
+      "problems": [],
+      "steps": 1,
+      "reviews": 0,
+      "retries": 0,
+      "chat_turns": 0,
+      "plan_changes": 0,
+      "independent_pairs": 0,
+      "bracketed_pairs": 0,
+      "parallel_workers": 1,
+      "progress_notes": 1,
+      "final_summary": 1,
+      "planner_profile_runs": 0,
+      "roles_defined": 0,
+      "role_runs": 0,
+      "role_profile_runs": 0,
+      "role_reviews": 0,
+      "role_prompt_mismatches": 0,
+      "role_boundary_misses": 0,
+      "gate_breaches": 0,
+      "advisory_role_reviews": 0,
+      "advisory_role_fails": 0,
+      "discipline_roles": 0,
+      "interface_dependents": 0,
+      "gates_opened": 0,
+      "gate_turns": 0,
+      "gates_passed": 0,
+      "gates_ended_by_user": 0,
+      "gates_cancelled": 0,
+      "assumptions_stated": 0,
+      "gate_plan_changes": 0,
+      "gate_parallel_runs": 0,
+      "conclusion_reads": 0,
+      "gate_asks_beyond_script": 0,
+      "planner_turns": {
+        "plan": 1,
+        "decision": 1
+      },
+      "cost_usd": 0.047087,
+      "cost_by_role": {
+        "planner": 0.025697,
+        "worker": 0.02139,
+        "reviewer": 0.0
+      },
+      "runs": 3,
+      "run_errors": 0,
+      "models": {
+        "planner": [
+          "claude-haiku-4-5-20251001"
+        ],
+        "worker": [
+          "claude-haiku-4-5-20251001"
+        ]
+      },
+      "tokens": {
+        "input": 46,
+        "output": 1547,
+        "cache_read": 89243,
+        "cache_creation": 15191
+      },
+      "cost_basis": {
+        "equivalent": 3,
+        "provider_price": 0,
+        "unpriced": 0
+      },
+      "contract_violations": {
+        "planner": 0,
+        "worker": 0,
+        "reviewer": 0,
+        "total": 0
+      },
+      "planner_edit_tool_paths": [],
+      "planner_changed_files": [],
+      "planner_modified_files": 0,
+      "duration_s": 20.5,
+      "stopped_by_cap": false,
+      "timed_out": false,
+      "outcome": "pass"
+    },
+    {
+      "id": "gate_end_early",
+      "rep": 3,
+      "status": "completed",
+      "success": false,
+      "problems": [
+        "gates_opened 0 < 1",
+        "gates_ended_by_user 0 < 1",
+        "assumptions_stated 0 < 1"
+      ],
+      "steps": 1,
+      "reviews": 0,
+      "retries": 0,
+      "chat_turns": 0,
+      "plan_changes": 0,
+      "independent_pairs": 0,
+      "bracketed_pairs": 0,
+      "parallel_workers": 1,
+      "progress_notes": 1,
+      "final_summary": 1,
+      "planner_profile_runs": 0,
+      "roles_defined": 0,
+      "role_runs": 0,
+      "role_profile_runs": 0,
+      "role_reviews": 0,
+      "role_prompt_mismatches": 0,
+      "role_boundary_misses": 0,
+      "gate_breaches": 0,
+      "advisory_role_reviews": 0,
+      "advisory_role_fails": 0,
+      "discipline_roles": 0,
+      "interface_dependents": 0,
+      "gates_opened": 0,
+      "gate_turns": 0,
+      "gates_passed": 0,
+      "gates_ended_by_user": 0,
+      "gates_cancelled": 0,
+      "assumptions_stated": 0,
+      "gate_plan_changes": 0,
+      "gate_parallel_runs": 0,
+      "conclusion_reads": 0,
+      "gate_asks_beyond_script": 0,
+      "planner_turns": {
+        "plan": 1,
+        "repair": 1,
+        "decision": 1
+      },
+      "cost_usd": 0.121731,
+      "cost_by_role": {
+        "planner": 0.098925,
+        "worker": 0.022806,
+        "reviewer": 0.0
+      },
+      "runs": 4,
+      "run_errors": 0,
+      "models": {
+        "planner": [
+          "claude-haiku-4-5-20251001"
+        ],
+        "worker": [
+          "claude-haiku-4-5-20251001"
+        ]
+      },
+      "tokens": {
+        "input": 80,
+        "output": 3255,
+        "cache_read": 231920,
+        "cache_creation": 41092
+      },
+      "cost_basis": {
+        "equivalent": 4,
+        "provider_price": 0,
+        "unpriced": 0
+      },
+      "contract_violations": {
+        "planner": 1,
+        "worker": 0,
+        "reviewer": 0,
+        "total": 1
+      },
+      "planner_edit_tool_paths": [],
+      "planner_changed_files": [],
+      "planner_modified_files": 0,
+      "duration_s": 38.8,
+      "stopped_by_cap": false,
+      "timed_out": false,
+      "outcome": "fail"
+    },
+    {
+      "id": "gate_parallel_branch",
+      "rep": 3,
+      "status": "completed",
+      "success": false,
+      "problems": [
+        "gates_opened 0 < 1",
+        "gate_parallel_runs 0 < 1"
+      ],
+      "steps": 2,
+      "reviews": 0,
+      "retries": 0,
+      "chat_turns": 0,
+      "plan_changes": 0,
+      "independent_pairs": 1,
+      "bracketed_pairs": 0,
+      "parallel_workers": 2,
+      "progress_notes": 2,
+      "final_summary": 1,
+      "planner_profile_runs": 0,
+      "roles_defined": 0,
+      "role_runs": 0,
+      "role_profile_runs": 0,
+      "role_reviews": 0,
+      "role_prompt_mismatches": 0,
+      "role_boundary_misses": 0,
+      "gate_breaches": 0,
+      "advisory_role_reviews": 0,
+      "advisory_role_fails": 0,
+      "discipline_roles": 0,
+      "interface_dependents": 0,
+      "gates_opened": 0,
+      "gate_turns": 0,
+      "gates_passed": 0,
+      "gates_ended_by_user": 0,
+      "gates_cancelled": 0,
+      "assumptions_stated": 0,
+      "gate_plan_changes": 0,
+      "gate_parallel_runs": 0,
+      "conclusion_reads": 0,
+      "gate_asks_beyond_script": 0,
+      "planner_turns": {
+        "plan": 1,
+        "decision": 2
+      },
+      "cost_usd": 0.151007,
+      "cost_by_role": {
+        "planner": 0.104018,
+        "worker": 0.046989,
+        "reviewer": 0.0
+      },
+      "runs": 5,
+      "run_errors": 0,
+      "models": {
+        "planner": [
+          "claude-haiku-4-5-20251001"
+        ],
+        "worker": [
+          "claude-haiku-4-5-20251001"
+        ]
+      },
+      "tokens": {
+        "input": 114,
+        "output": 4623,
+        "cache_read": 306760,
+        "cache_creation": 48551
+      },
+      "cost_basis": {
+        "equivalent": 5,
+        "provider_price": 0,
+        "unpriced": 0
+      },
+      "contract_violations": {
+        "planner": 0,
+        "worker": 0,
+        "reviewer": 0,
+        "total": 0
+      },
+      "planner_edit_tool_paths": [],
+      "planner_changed_files": [],
+      "planner_modified_files": 0,
+      "duration_s": 59.5,
+      "stopped_by_cap": false,
+      "timed_out": false,
+      "outcome": "fail"
+    },
+    {
+      "id": "gate_discoverable",
+      "rep": 3,
+      "status": "completed",
+      "success": true,
+      "problems": [],
+      "steps": 1,
+      "reviews": 0,
+      "retries": 0,
+      "chat_turns": 0,
+      "plan_changes": 0,
+      "independent_pairs": 0,
+      "bracketed_pairs": 0,
+      "parallel_workers": 1,
+      "progress_notes": 1,
+      "final_summary": 1,
+      "planner_profile_runs": 0,
+      "roles_defined": 0,
+      "role_runs": 0,
+      "role_profile_runs": 0,
+      "role_reviews": 0,
+      "role_prompt_mismatches": 0,
+      "role_boundary_misses": 0,
+      "gate_breaches": 0,
+      "advisory_role_reviews": 0,
+      "advisory_role_fails": 0,
+      "discipline_roles": 0,
+      "interface_dependents": 0,
+      "gates_opened": 0,
+      "gate_turns": 0,
+      "gates_passed": 0,
+      "gates_ended_by_user": 0,
+      "gates_cancelled": 0,
+      "assumptions_stated": 0,
+      "gate_plan_changes": 0,
+      "gate_parallel_runs": 0,
+      "conclusion_reads": 0,
+      "gate_asks_beyond_script": 0,
+      "planner_turns": {
+        "plan": 1,
+        "decision": 1
+      },
+      "cost_usd": 0.064825,
+      "cost_by_role": {
+        "planner": 0.034644,
+        "worker": 0.030181,
+        "reviewer": 0.0
+      },
+      "runs": 3,
+      "run_errors": 0,
+      "models": {
+        "planner": [
+          "claude-haiku-4-5-20251001"
+        ],
+        "worker": [
+          "claude-haiku-4-5-20251001"
+        ]
+      },
+      "tokens": {
+        "input": 78,
+        "output": 2684,
+        "cache_read": 175827,
+        "cache_creation": 16872
+      },
+      "cost_basis": {
+        "equivalent": 3,
+        "provider_price": 0,
+        "unpriced": 0
+      },
+      "contract_violations": {
+        "planner": 0,
+        "worker": 0,
+        "reviewer": 0,
+        "total": 0
+      },
+      "planner_edit_tool_paths": [],
+      "planner_changed_files": [],
+      "planner_modified_files": 0,
+      "duration_s": 34.8,
+      "stopped_by_cap": false,
+      "timed_out": false,
+      "outcome": "pass"
     }
   ]
 }

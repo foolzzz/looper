@@ -132,20 +132,25 @@ Runs real Claude Code (`haiku` by default) and costs money. Every Claude Code
 run gets `--max-budget-usd` (default 0.25), and the run stops once its tasks
 have spent `--total-cap-usd` (default 0.80); a task that reaches the cap is
 cancelled and the rest are skipped. `--model` sets the model in the system
-settings layer of the run's database, so every agent uses it. A full run costs
-about $0.61 with haiku (about 6 minutes) without `many_steps`, which adds about
-$0.25 (about $0.023 a step); before `parallel_parts` and
-`interface_first` were added, the other five cost $0.62 with sonnet and $1.30
-with opus (about 3 minutes each), so give sonnet and opus a higher
-`--total-cap-usd`, such as 1.50 and 3.00 (`interface_first` alone costs about
-$0.87 with opus). With haiku, `interface_first` fails on the plan's shape: its
-Planner chains the service, the client and the check. With opus it passes on
-the Planner prompt from before `interface_first` was added and on the current
-one alike (one run each): the Planner pins the protocol in a file first, builds
+settings layer of the run's database, so every agent uses it. Measured at
+`68d7b953c` with `--reps 3` (the committed baselines): all 22 tasks with haiku
+cost $7.99 in about 70 minutes, about $2.66 and 23 minutes a rep, the costliest
+being `roles_multi_platform` (about $0.47) and `many_steps` (about $0.28); the
+opus tier, `--model opus --tasks planner` (13 tasks), cost $18.74 in about 48
+minutes, about $6.25 and 16 minutes a rep, `roles_multi_platform` about $1.92
+and `interface_first` about $0.86 of it. The default caps stop either run early:
+give it a `--total-cap-usd` that covers all its reps, such as 10 for haiku and
+25 for opus at `--reps 3`, and a `--max-budget-usd` no single run reaches, such
+as 1.0 for haiku and 3.0 for opus (the costliest whole task, all its runs
+together, was $0.62 with haiku and $2.03 with opus). (`baselines/real-sonnet.json` is older: five tasks,
+one rep each.) With haiku, `interface_first` fails on the plan's shape in all
+three reps: its Planner chains the service, the client and the check. With opus
+it passes in all three: the Planner pins the protocol in a file first, builds
 the two parts side by side and checks them together last. Expect some noise
-between identical runs: cost
-moves by up to about 10%, and an occasional single contract violation that a
-repair turn fixes is not a regression by itself.
+between identical runs: a task's cost moved by a median of 8% between reps
+with haiku and 2% with opus (more where the reps took different paths, such as
+a pass and a fail), and an occasional single contract violation that a repair
+turn fixes is not a regression by itself.
 
 ```bash
 uv run --extra test python -m evals.prompt_regression run --mode real \
@@ -210,21 +215,23 @@ description; `--total-cap-usd` covers all the reps, so raise it with them:
 
 - any change to model-visible content (a recommended prompt, a contract, the
   injection order, the injected context) runs the haiku tier on all tasks:
-  `run --mode real --reps 3`;
+  `run --mode real --reps 3` (about $8 and 70 minutes);
 - a change to the Planner's prompt, its contracts, the plan contract or the
   context the Planner receives also runs the opus tier, `run --mode real
   --model opus --reps 3 --tasks planner`, compared with
-  `baselines/real-opus.json`;
+  `baselines/real-opus.json` (about $19 and 48 minutes);
 - a change to the Manager's prompt or its tools runs `dialogs --mode real
-  --reps 3`, and also `dialogs --mode real --manager-model opus
-  --manager-effort xhigh --reps 3`.
+  --reps 3` (about $1.50 and 14 minutes), and also `dialogs --mode real
+  --manager-model opus --manager-effort xhigh --reps 3` (about $3.50 and 16
+  minutes).
 
 Each compares with the committed baseline of its model, or with a run of the
 base branch via `--baseline`. Update the model's committed baseline
 (`baselines/real-haiku.json`, `real-sonnet.json` or `real-opus.json`; for the
 dialogs, `dialogs-real-<model>.json` by the Manager's model) when an intended
-change moves the numbers; it holds numbers only, never transcripts or local
-paths.
+change moves the numbers, from a run with `--reps 3`; it holds numbers only,
+never transcripts or local paths (a dialog keeps each turn's tool calls and
+problem, never the messages or the Manager's replies).
 
 ### The Manager's dialogs
 
@@ -256,8 +263,10 @@ no reply within `--timeout` (`timeout`) or the eval itself failed (`harness`,
 such as the slow task not getting under way); after an error its remaining
 turns are not sent and the run goes on with the next dialog. Fake mode plays
 the Manager with the stand-in, which makes each message's scripted calls over
-MCP; it takes about a minute. Real mode costs about $0.30 with haiku and stops at
-`--total-cap-usd` (default 0.50):
+MCP; it takes about a minute. Real mode with haiku cost $1.54 for all ten
+dialogs at `--reps 3` (about $0.51 and 5 minutes a rep, measured at
+`68d7b953c`), so the default `--total-cap-usd` (0.50) stops it after about one
+rep: give it one that covers all the reps, such as 3:
 
 ```bash
 uv run --extra test python -m evals.prompt_regression dialogs --mode real \
@@ -266,14 +275,17 @@ uv run --extra test python -m evals.prompt_regression dialogs --mode real \
 
 Options: `--dialogs status,ask_project`, `--model`, `--agent`,
 `--manager-model opus --manager-effort xhigh` (the Manager alone on that
-model, the other roles on `--model`; one `confirm_create_start` with opus at
-xhigh cost $0.12, so give it `--max-budget-usd 1.00`),
+model, the other roles on `--model`; all ten dialogs at `--reps 3` cost $3.49
+in about 16 minutes, about $1.16 a rep, the costliest single dialog
+`config_tools` at about $0.22; give it `--max-budget-usd 3.0` and a
+`--total-cap-usd` such as 6),
 `--register-agent SPEC.json` (as for `run`; `--dialogs status` with a Codex or
 OMP agent checks that runtime's tool calls), `--reps` (as for `run`),
 `--baseline <run.json>|previous` (the default is
-`baselines/dialogs-real-<model>.json` by the Manager's model, not committed
-yet), `--max-budget-usd`, `--total-cap-usd`, `--timeout` (seconds for each
-reply and each check), `--keep-work-dirs`. The run's JSON goes to
+`baselines/dialogs-real-<model>.json` by the Manager's model: `haiku`, and
+`opus` for the run with the Manager on opus at xhigh), `--max-budget-usd`,
+`--total-cap-usd`, `--timeout` (seconds for each reply and each check),
+`--keep-work-dirs`. The run's JSON goes to
 `evals/runs/`, with a server log per (dialog, rep) in
 `<stamp>-dialogs-<mode>.server-logs/`. It prints the comparison (success
 `k/n`, errors and cost, as for `run`), then a table of each (dialog, rep)'s

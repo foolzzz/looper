@@ -377,6 +377,17 @@ def test_against_a_base_of_more_tasks_the_total_is_over_the_shared_ones() -> Non
     assert "- in the base, not in the new run: task_1, task_2, task_3, task_4, task_5, task_6" in lines
 
 
+def test_against_a_base_of_other_tasks_there_is_no_shared_total() -> None:
+    base = _run(dependent_steps=_OK, chat_correction=_OK)
+    new = {**_run(), "tasks": _reps("single_step", _PASS, _PASS)}
+    lines = compare.markdown(new, base).splitlines()
+    assert not any(line.startswith("| **total (0 shared") for line in lines)
+    assert ("| **total (all 1 task of the new run)** | 2/2 (100%, 34–100%) | 1.0 | – | 0.0 | 0.0 | – | 0.0 | 0.0 | – "
+            "| 0.0200 |" in lines)
+    assert "- no baseline: single_step" in lines
+    assert "- in the base, not in the new run: dependent_steps, chat_correction" in lines
+
+
 def test_comparison_of_dialogs_shows_success_and_cost() -> None:
     run = {"mode": "fake", "agent": "claude-code/opus", "manager_agent": "claude-code/opus",
            "git": {"commit": "abcdef1234567", "dirty": False},
