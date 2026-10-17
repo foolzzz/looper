@@ -1096,11 +1096,13 @@ class TestWorkerKill:
         assert result["accepts_input"] is False
         assert result["published"] is False  # a killed worker publishes no WORK_RESULT
 
-    @pytest.mark.parametrize("killed", ["running", "reporting"])
-    def test_a_killed_runs_record_ends_interrupted_with_the_tokens_it_used(self, agent_db: Any, killed: str) -> None:
-        """A run killed while Claude works (its task stopped, or its Planner stopped the step), or once Claude has
-        answered while the Worker still reports the result, ends its record ``interrupted``, once, with the
-        tokens of the model requests it made."""
+    @pytest.mark.parametrize(("killed", "cost"), [("running", None), ("reporting", 0.42)])
+    def test_a_killed_runs_record_ends_interrupted_with_what_it_spent(
+        self, agent_db: Any, killed: str, cost: float | None,
+    ) -> None:
+        """A run killed while Claude works (its task stopped, or its Planner stopped the step) ends its record
+        ``interrupted``, once, with the tokens of the model requests it made; one killed once Claude has answered,
+        while the Worker still reports the result, keeps the cost its result reported too."""
         reporting = asyncio.Event()
 
         async def insert_activity(**row: Any) -> None:
@@ -1109,7 +1111,10 @@ class TestWorkerKill:
                 await asyncio.sleep(60)
 
         agent_db.insert_activity.side_effect = insert_activity
-        claude = _MODEL_REQUEST + (_SUCCESS if killed == "reporting" else "sys.stdin.readline()\ntime.sleep(60)")
+        answered = ("print(json.dumps({'type': 'result', 'subtype': 'success', 'is_error': False, 'total_cost_usd': 0.42, "
+                    "'usage': {'input_tokens': 900, 'output_tokens': 40, 'cache_read_input_tokens': 5000}, "
+                    "'result': json.dumps({'status': 'completed', 'summary': 'ok'})}))")
+        claude = _MODEL_REQUEST + (answered if killed == "reporting" else "sys.stdin.readline()\ntime.sleep(60)")
 
         async def _run() -> None:
             with tempfile.TemporaryDirectory() as tmp:
@@ -1132,6 +1137,7 @@ class TestWorkerKill:
         finish = call.kwargs
         assert finish["status"] == "interrupted"
         assert (finish["input_tokens"], finish["output_tokens"], finish["cache_read_tokens"]) == (900, 40, 5000)
+        assert finish["cost_usd"] == cost
 
 
 def _run_item(worker_id: str, task_id: str, work_dir: Path, *, review: bool = False,

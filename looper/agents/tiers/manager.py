@@ -742,21 +742,22 @@ class ManagerAgent:
             exited = result_event is None
             # A turn stopped at its spend cap is no reply either; the next message starts a new process (a new cap).
             over_cap = launch.runtime.budget_error(result_event)
-            if over_cap:
-                await self._claude.stop()
             replied = not exited and not over_cap and bool(final_text)
-            usage = turn.usage
-            if not exited:
-                self._session_totals = self._claude.totals
-                await self._save_session_state()
+            # The turn is over: recorded first, so a stop that comes while Claude stops or the session is saved
+            # keeps what it spent.
             await recorder.finish(
                 output_text=final_text or None,
                 result_event=result_event,
                 error=over_cap or (None if replied else (
                     f"no reply (exit code {turn.exit_code})" if exited else "no reply"
                 )),
-                usage=usage,
+                usage=turn.usage,
             )
+            if over_cap:
+                await self._claude.stop()
+            if not exited:
+                self._session_totals = self._claude.totals
+                await self._save_session_state()
 
         if task_id:
             try:
@@ -874,11 +875,11 @@ class ManagerAgent:
             result_event = turn.result_event
             handoff = kept_text(answer_text(result_event, parts), HANDOFF_MAX_CHARS)
             succeeded = result_event is not None and not result_event.get("is_error") and bool(handoff)
+            await recorder.finish(output_text=handoff or None, result_event=result_event,
+                                  error=None if succeeded else "no handoff", usage=turn.usage)
             if result_event is not None:
                 self._session_totals = self._claude.totals
                 await self._save_session_state()
-            await recorder.finish(output_text=handoff or None, result_event=result_event,
-                                  error=None if succeeded else "no handoff", usage=turn.usage)
             return handoff if succeeded else None
 
     async def _resume_brief(self, envelope: MessageEnvelope, message: str) -> str:
