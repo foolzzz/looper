@@ -150,6 +150,7 @@ database, a disposable `looper serve`, and fake or real mode.
 | `status` | a status question is answered by reading through the tools (run it alone to try a runtime) |
 | `config_tools` | the configuration tools: a project is created with the directory the user named (`looper_projects`); the Agent Profiles are listed; a Reviewer's profile in a project is set at once and the project's allowed list holds the one profile named (`looper_settings`); this week's spend is read (`looper_costs`); deleting the project waits for the user's word in the next message |
 | `provider_key` | a provider registered from a message that pastes its API key: it is registered without the key (`looper_providers`), and the key is in no reply, no stored provider and not in the Manager's trail |
+| `schedules` | on an enabled schedule made first: the schedules are listed by reading (`looper_schedules`); disabling it runs at once; deleting it waits for the user's word in the next message, and 「确认」 deletes it |
 
 The dialogs that need a running task start a slow one first (`sleep 300`)
 and stop whatever is still running at their end. Fake mode plays the Manager

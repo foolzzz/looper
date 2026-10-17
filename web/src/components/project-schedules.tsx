@@ -624,7 +624,6 @@ function ScheduleForm({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [saved, setSaved] = useState(false);
-  const [confirmDelete, setConfirmDelete] = useState(false);
 
   const set = <K extends keyof Draft>(key: K, value: Draft[K]) => {
     setDraft((d) => ({ ...d, [key]: value }));
@@ -686,19 +685,6 @@ function ScheduleForm({
     } catch (err) {
       setError(errorText(err));
     } finally {
-      setBusy(false);
-    }
-  };
-
-  const remove = async () => {
-    if (!schedule) return;
-    setBusy(true);
-    setError("");
-    try {
-      await deleteSchedule(schedule.schedule_id);
-      onDeleted?.();
-    } catch (err) {
-      setError(errorText(err));
       setBusy(false);
     }
   };
@@ -942,30 +928,7 @@ function ScheduleForm({
 
       {error && <p role="alert" className="text-xs text-destructive">{error}</p>}
       <div className="flex flex-wrap items-center justify-end gap-2">
-        {schedule &&
-          (confirmDelete ? (
-            <span className="mr-auto flex flex-wrap items-center gap-2">
-              <span className="text-xs text-muted-foreground">Delete {schedule.name}? Its tasks stay.</span>
-              <Button type="button" variant="destructive" size="sm" onClick={remove} disabled={busy}>
-                {busy && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
-                Delete
-              </Button>
-              <Button type="button" variant="ghost" size="sm" onClick={() => setConfirmDelete(false)} disabled={busy}>
-                Cancel
-              </Button>
-            </span>
-          ) : (
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              onClick={() => setConfirmDelete(true)}
-              className="mr-auto text-destructive hover:bg-destructive/10 hover:text-destructive"
-            >
-              <Trash2 className="h-3.5 w-3.5" />
-              Delete schedule
-            </Button>
-          ))}
+        {schedule && <DeleteSchedule schedule={schedule} onDeleted={() => onDeleted?.()} className="mr-auto" />}
         {saved && !dirty && (
           <span role="status" className="flex items-center gap-1 text-xs text-success">
             <CheckCircle2 className="h-3.5 w-3.5" aria-hidden="true" />
@@ -999,6 +962,85 @@ function ScheduleForm({
         </Button>
       </div>
     </form>
+  );
+}
+
+/**
+ * "Delete schedule", then the inline confirmation ("Delete <name>? Its tasks stay."): it deletes the schedule and its
+ * run history, the tasks it created staying; `onDeleted` runs once it is gone. A run in progress keeps its task
+ * running. The project's Schedules tab, the Schedules page and a schedule's own page share it.
+ */
+export function DeleteSchedule({
+  schedule,
+  onDeleted,
+  className,
+}: {
+  schedule: ScheduleInfo;
+  onDeleted: () => void;
+  className?: string;
+}) {
+  const [confirming, setConfirming] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+
+  const remove = async () => {
+    setBusy(true);
+    setError("");
+    try {
+      await deleteSchedule(schedule.schedule_id);
+      onDeleted();
+    } catch (err) {
+      setError(errorText(err));
+      setBusy(false);
+    }
+  };
+
+  if (!confirming)
+    return (
+      <Button
+        type="button"
+        variant="outline"
+        size="sm"
+        onClick={() => setConfirming(true)}
+        aria-label={`Delete schedule: ${schedule.name}`}
+        // A narrow screen shows the icon alone, a 44 px target, so a row's actions stay on one line.
+        className={cn(
+          "h-11 w-11 px-0 text-destructive hover:bg-destructive/10 hover:text-destructive sm:h-8 sm:w-auto sm:px-3",
+          className,
+        )}
+      >
+        <Trash2 className="h-3.5 w-3.5" aria-hidden="true" />
+        <span className="hidden sm:inline">Delete schedule</span>
+      </Button>
+    );
+  return (
+    <span className={cn("flex min-w-0 flex-wrap items-center gap-2", className)}>
+      <span className="min-w-0 break-words text-xs text-muted-foreground">Delete {schedule.name}? Its tasks stay.</span>
+      <span className="flex items-center gap-2">
+        <Button type="button" variant="destructive" size="sm" onClick={remove} disabled={busy} className="h-11 sm:h-8">
+          {busy && <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />}
+          Delete
+        </Button>
+        <Button
+          type="button"
+          variant="ghost"
+          size="sm"
+          onClick={() => {
+            setConfirming(false);
+            setError("");
+          }}
+          disabled={busy}
+          className="h-11 sm:h-8"
+        >
+          Cancel
+        </Button>
+      </span>
+      {error && (
+        <span role="alert" className="basis-full text-xs text-destructive">
+          Could not delete it: {error}
+        </span>
+      )}
+    </span>
   );
 }
 
