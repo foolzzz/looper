@@ -1551,7 +1551,10 @@ or `off`) with its limits `room_post_per_minute` (1 to 60, null for 6),
 `room_broadcasts_per_run` (0 to 50, null for 5), `room_message_max_chars`
 (500 to 20,000, null for 4,000), `room_messages_per_task` (20 to 5,000, null
 for 300), `room_ping_pong_rounds` (2 to 50, null for 6) and
-`room_wait_max_seconds` (0 to 120, null for 60) ([A task's agent
+`room_wait_max_seconds` (0 to 120, null for 60), and its consults'
+`room_consult_budget_usd` (0.01 to 5, null for 0.20),
+`room_consult_timeout_seconds` (30 to 1,800, null for 300) and
+`room_consults_per_task` (0 to 100, null for 10) ([A task's agent
 room](#a-tasks-agent-room)).
 
 A task can also have a spend cap of its own (`tasks.budget_usd`, a scheduled
@@ -2420,7 +2423,8 @@ before.
   new run in the same seat. Presence is derived, never stored: a seat whose
   run the WorkerPool has is `online` (or `waiting` for room in its task),
   else `offline` once a run was in it, else `planned`, or `dropped` with its
-  step. Gates have no seat. Looper writes as `looper`.
+  step, or `consulting` while a consult of its last session runs. Gates have no
+  seat. Looper writes as `looper`.
 - **Tokens and tools.** Each Worker and Reviewer run in such a project gets
   a token of its own (`run.` and 43 random characters, a hash in memory, never
   logged) naming its task and seat, and Looper's MCP entry through the agent
@@ -2474,9 +2478,32 @@ before.
   did in the room (sent, received, interface posts, unanswered questions).
   The reply contract and the tools' guide name `[ROOM]` and the room only
   where it is on (`reply_contract(..., room=True)`).
-- **Escalations** (`reason`): a question for a seat no run is in
-  (`consult_fallback`: `not_started`, or `runtime_cannot` until the consults
-  of R1b), with a notice to the asker; two seats trading
+- **Consults** (`looper/agents/consult.py`, `room_consults`). A `question`
+  for one seat whose run ended (a seat, or a role with one such seat) is
+  answered by its last run's session: Looper resumes a fork of it (Claude
+  Code `--resume <id> --fork-session`; Codex and OMP a copy of the session
+  the run kept), read only (`Launch.read_only`: Claude Code's default
+  permission mode without `Edit`, `Write` and `NotebookEdit`, which in
+  `--print` refuses every call that needs approval, the refusals counted as
+  `denied_writes`; Codex's read-only sandbox; OMP only its reading tools,
+  `read`, `glob` and `grep`), with the run's system prompt and
+  `CONSULT_CONTRACT` in place of its contract and a `[CONSULT]` turn listing
+  the questions and the seat's earlier consult answers. Claude Code and Codex
+  run where the step ran; OMP, whose restriction is not verified on a real
+  run, in a detached checkout of the task directory thrown away afterwards
+  (a change in it drops the answers: `wrote_files`). Its answers are posted
+  as the seat (`via` `consult`, `cc_planner`); a seat has one consult at a
+  time, and questions that come while one is queued join it. A consult is a
+  run of its own (`consult-<12 hex>`, in the task's cost) that takes a place
+  under its task's limit of the seat's kind, and has at most
+  `room_consult_budget_usd`, `room_consult_timeout_seconds` and 20 turns; a
+  task has at most `room_consults_per_task`. The seat's Agent Profile must
+  still run on the session's runtime and provider. The server's start runs
+  the consults left queued or running again.
+- **Escalations** (`reason`): a question no seat can take (`consult_fallback`,
+  with the typed reason: `not_started`, `no_session`, `session_gone`,
+  `runtime_cannot`, `no_snapshot`, `limit`, `many_seats`, `budget`, `timeout`,
+  `contract`, `wrote_files` or `unsure`), with a notice to the asker; two seats trading
   `room_ping_pong_rounds` messages to each other only, with no answer between
   (`ping_pong`, once at that count); an interface post that replies to an
   earlier one that a seat whose step ended had read (`interface_changed`); the
@@ -2488,7 +2515,7 @@ before.
   they end with it. The Planner is held to the length and the task's total
   only.
 - **Kept sessions.** A Codex or OMP run in a room keeps its session, for the
-  consults to come: Codex in a home of its own
+  consults: Codex in a home of its own
   (`.local/codex/run-sessions/<task>/<run>`, given the run home's
   configuration as a resident session's is, without `--ephemeral`; the
   Codex login check looks at these homes too), OMP with `--session-dir
