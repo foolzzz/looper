@@ -34,6 +34,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -230,6 +231,18 @@ def _task_limit_set(look: Look) -> str | None:
     return None if direct else "the task's limit did not change in the turn that asked for it"
 
 
+# A reply that says the limit was set to 2: "已改为 2", "已经把……设成 2", "changed it to 2". Offering to change it ("可以改成 2")
+# says nothing was done.
+_CLAIMED_CHANGE = re.compile(
+    r"已(经)?[^。\n？?，,；;：:]{0,40}(改|设|调)(置)?(成|为|到)\s*2"
+    r"|\b(I|I've|I have|has been|have been|was|is now)\s+(changed|set|updated|lowered)\b[^.\n?]{0,30}\bto 2\b",
+    re.IGNORECASE)
+
+
+def claims_change(reply: str) -> bool:
+    return bool(_CLAIMED_CHANGE.search(reply))
+
+
 def _project_limit_explained(look: Look) -> str | None:
     """A project has no concurrency limit to change: the Manager says so, and nothing changes or waits for a
     confirmation (not the default for every task in Settings → Roles either)."""
@@ -244,6 +257,8 @@ def _project_limit_explained(look: Look) -> str | None:
         return f"the Workers' default limit changed to {default['value']}"
     if look.task and look.detail()["agents"]["roles"]["worker"]["concurrency"]["task"] != 1:
         return "the task's own Worker limit is no longer 1"
+    if claims_change(look.reply):
+        return "the reply says the limit changed, though nothing changed"
     return None if look.reply.strip() else "no reply"
 
 

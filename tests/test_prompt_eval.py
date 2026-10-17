@@ -800,6 +800,25 @@ def test_a_task_past_its_timeout_is_an_error_not_a_fail(tmp_path: Path, monkeypa
     assert row["timed_out"] is True and row["status"] == "cancelled"
 
 
+@pytest.mark.parametrize(("reply", "claims"), [
+    # What real Managers answered when asked for a project's limit: explanations and offers.
+    ("项目 eval-calc 的并发改不了：Looper 里并发是按任务设置的，项目本身没有并发限制。\n\n1. **只改这个项目里的任务**：把 eval-calc "
+     "下各个任务的 Worker 并发分别设成 2。", False),
+    ("这个改不了。\n1. **把这个任务的 Worker 上限改成 2**：马上生效，只影响这一个任务。", False),
+    ("项目 eval-calc 的 Worker 并发没有改，因为 Looper 里项目本身没有并发限制。", False),
+    ("Projects have no concurrency limit, so I changed nothing. I can set this task's Worker limit to 2 instead.", False),
+    ("Projects have no concurrency limit, so nothing changed. Want this task's Worker limit at 2?", False),
+    # Claims that it was done.
+    ("已把项目 eval-calc 的 Worker 并发改为 2。", True),
+    ("好的，项目 eval-calc 的 Worker 并发已经设置为 2。", True),
+    ("Done: I changed the project's Worker limit to 2.", True),
+])
+def test_a_reply_claiming_a_change_is_told_from_an_explanation(reply: str, claims: bool) -> None:
+    from evals.prompt_regression import dialogs
+
+    assert dialogs.claims_change(reply) is claims
+
+
 @pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 def test_the_managers_dialogs_pass_in_fake_mode_and_a_wrong_call_fails(tmp_path: Path) -> None:
     from evals.prompt_regression import dialogs
