@@ -1071,10 +1071,11 @@ _GATE_RULES = """\
   requirement, the supplements, the project nor a look at the code answers
   it; and a wrong guess would waste the work after it. Otherwise decide
   yourself and write the assumption into the step's instruction. Ask all you
-  need in one gate. It opens when the steps it depends on are done, and the
-  steps that depend on it wait; the others run on, so keep exploring what
-  does not need the answer, and leave the steps the answer decides out of the
-  plan until the gate closes.
+  need in one gate. It opens when the steps it depends on are done, and only
+  the steps that depend on it wait: plan now, beside it, every step that does
+  not need the answer (a clear part of the task, exploring), so they run while
+  the gate waits; leave out only the steps the answer decides, and add them
+  when the gate closes.
 """
 _GATE_CHANGES = """\
 - gates (optional, also in [CHAT]): change gates not closed yet, when what you
@@ -1105,9 +1106,9 @@ close the gate once every agenda item is resolved or dropped.
   Reviewer reads. Every item must be resolved or dropped, unless the message
   says the user ended the discussion: then close, with an assumption for each
   item still open.
-- action: as in [CHAT]; when you close, add the steps the answers decide in
-  the same reply. "final" as in [DECISION], when the message says that closing
-  without new steps completes the task.
+- action: as in [CHAT]; when you close, add the steps the answers decide (the
+  PLAN step shape, every key) in the same reply. "final" as in [DECISION], when
+  the message says that closing without new steps completes the task.
 
 """
 
