@@ -10,18 +10,22 @@ the step workspaces RFC (``docs/architecture/rfcs/step-workdir-isolation-v0``):
   branch's tip, or a checkpoint commit of the task directory's pending changes
   (``checkpoint``);
 - a step's worktree is on a branch of its own, ``looper/<task>/<key>-<id>``,
-  under ``<runtime_root>/worktrees`` (``ensure_worktree``);
+  under ``<runtime_root>/worktrees`` (``ensure_worktree``), with the project's
+  links back to the task directory's ignored local state (``link``);
 - when the step is accepted, ``merge`` commits what its Worker left
   uncommitted, computes the merge with the branch in memory, writes a merge
   commit and fast-forwards the branch, its index and working tree to it. A
   merge that cannot be made leaves the task directory as it was and says why
-  (``MergeError``);
+  (``MergeError``). A link is never part of a step's result;
 - Looper's own commits have the ``Looper`` identity and ``Looper-Task`` and
   ``Looper-Step`` trailers, are not signed, and no git command Looper runs
   runs a hook.
 
-A workspace's state changes only along ``ALLOWED_TRANSITIONS``
-(``StepWorkspace.moved``); the rows are ``db.step_workspaces``'.
+A task directory whose checkout is larger than ``CHECKOUT_LIMIT_BYTES`` has
+none. A workspace's state changes only along ``ALLOWED_TRANSITIONS``
+(``StepWorkspace.moved``); the rows are ``db.step_workspaces``'. The task page
+shows them with the commands that undo what the task did (``undo_commands``),
+and the user may discard one a stopped task keeps (``discard``).
 """
 
 from __future__ import annotations
@@ -30,6 +34,7 @@ import asyncio
 import logging
 import os
 import re
+import shlex
 import shutil
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
@@ -55,6 +60,8 @@ _GIT = ("git", "-c", "core.hooksPath=/dev/null")
 _IN_PROGRESS = {"MERGE_HEAD": "a merge", "CHERRY_PICK_HEAD": "a cherry-pick", "REVERT_HEAD": "a revert",
                 "rebase-merge": "a rebase", "rebase-apply": "a rebase", "BISECT_LOG": "a bisect"}
 WORKTREES_DIR = "worktrees"
+# A checkout larger than this (its files at HEAD) gets no step worktrees: each would be a copy of it.
+CHECKOUT_LIMIT_BYTES = 1 << 30
 # Inherited variables that would point Looper's commands at another repository or index.
 _REDIRECTS = frozenset({"GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR"})
 
@@ -114,6 +121,9 @@ class StepWorkspace:
     merge_error: MergeError | None = None  # set when state is unmerged
     detail: str = ""  # the conflicting or blocking files, or git's error
     removed_at: datetime | None = None  # its directory and branch are gone
+    # The paths, relative to the task directory, linked back to the task directory's in it.
+    links: tuple[str, ...] = ()
+    merge_files: tuple[str, ...] = ()  # set when unmerged: the conflicting or blocking files
 
     @property
     def work_dir(self) -> str:
@@ -123,6 +133,16 @@ class StepWorkspace:
     @property
     def target(self) -> str:
         return short_branch(self.target_branch)
+
+    @property
+    def task_dir(self) -> str:
+        return str(Path(self.repo_dir) / self.subdir) if self.subdir else self.repo_dir
+
+    @property
+    def discardable(self) -> bool:
+        """Whether the user may discard it: its directory or branch is still there, and it is not being or was not
+        merged."""
+        return self.removed_at is None and self.state not in (StepWorkspaceState.MERGING, StepWorkspaceState.MERGED)
 
     def moved(self, state: StepWorkspaceState, **changes: Any) -> StepWorkspace:
         """This workspace in ``state``; raises ``IllegalTransition`` for a change the table does not allow."""
@@ -142,7 +162,16 @@ class StepWorkspace:
                 "branch": self.branch, "base_commit": self.base_commit, "checkpoint": self.checkpoint,
                 "result_commit": self.result_commit, "merge_commit": self.merge_commit, "state": self.state.value,
                 "merge_error": self.merge_error.value if self.merge_error else None, "detail": self.detail,
-                "removed_at": self.removed_at}
+                "removed_at": self.removed_at, "links": list(self.links), "merge_files": list(self.merge_files)}
+
+    def view(self) -> dict[str, Any]:
+        """As the task page shows it (``GET /api/tasks/:id``'s ``step_workspaces``)."""
+        return {"id": self.id, "step_id": self.step_id, "branch": self.branch, "target_branch": self.target,
+                "base_commit": self.base_commit, "checkpoint": self.checkpoint, "result_commit": self.result_commit,
+                "merge_commit": self.merge_commit, "state": self.state.value,
+                "merge_error": self.merge_error.value if self.merge_error else None,
+                "merge_files": list(self.merge_files), "detail": self.detail, "links": list(self.links),
+                "path": self.path, "removed_at": self.removed_at, "discardable": self.discardable}
 
     @classmethod
     def from_row(cls, row: Mapping[str, Any]) -> StepWorkspace:
@@ -155,6 +184,7 @@ class StepWorkspace:
             result_commit=row.get("result_commit"), merge_commit=row.get("merge_commit"),
             state=StepWorkspaceState(row["state"]), merge_error=MergeError(error) if error else None,
             detail=str(row.get("detail") or ""), removed_at=row.get("removed_at"),
+            links=tuple(row.get("links") or ()), merge_files=tuple(row.get("merge_files") or ()),
         )
 
 
@@ -313,9 +343,38 @@ async def inspect(work_dir: str) -> Repo | Unusable:
         for name, path in zip(names, paths.split("\n")):
             if (Path(toplevel) / path).exists():
                 return Unusable(f"{_IN_PROGRESS[name]} is in progress in the task directory", repository=True)
+        size = await checkout_size(toplevel)
+        if size > CHECKOUT_LIMIT_BYTES:
+            return Unusable(f"the checkout is {_size_text(size)}, over the {_size_text(CHECKOUT_LIMIT_BYTES)} limit "
+                            "for step worktrees", repository=True)
     except GitError as exc:
         return Unusable(str(exc), repository=True)
     return Repo(toplevel=toplevel, subdir=subdir, branch=branch.text, head=head.text)
+
+
+_sizes: dict[str, int] = {}  # checkout sizes by tree, as checkout_size read them
+
+
+async def checkout_size(toplevel: str) -> int:
+    """How many bytes the files at HEAD take: what a worktree of it checks out (by HEAD's tree, read once)."""
+    tree = await _rev_tree(toplevel)
+    if tree not in _sizes:
+        sizes = (await _git(toplevel, "ls-tree", "-r", "-z", "--format=%(objectsize)", tree)).fields
+        if len(_sizes) >= 64:
+            _sizes.clear()
+        _sizes[tree] = sum(int(size) for size in sizes if size.isdigit())  # a submodule's is "-"
+    return _sizes[tree]
+
+
+async def _rev_tree(cwd: str) -> str:
+    return (await _git(cwd, "rev-parse", "--verify", "-q", "HEAD^{tree}")).text
+
+
+def _size_text(size: int) -> str:
+    for unit, scale in (("GiB", 1 << 30), ("MiB", 1 << 20), ("KiB", 1 << 10)):
+        if size >= scale:
+            return f"{size / scale:.1f} {unit}".replace(".0 ", " ")
+    return f"{size} B"
 
 
 @dataclass(frozen=True)
@@ -397,7 +456,49 @@ async def ensure_worktree(workspace: StepWorkspace) -> None:
         else:
             await _git(workspace.repo_dir, "worktree", "add", "-q", "-b", workspace.branch, str(path),
                        workspace.base_commit)
+        for relative in workspace.links:
+            _link_one(workspace, relative)  # a lost worktree gets its links back
     Path(workspace.work_dir).mkdir(parents=True, exist_ok=True)
+
+
+def _in_worktree(workspace: StepWorkspace, relative: str) -> str:
+    """A path relative to the task directory, relative to the worktree's top level."""
+    return f"{workspace.subdir}/{relative}" if workspace.subdir else relative
+
+
+def _link_one(workspace: StepWorkspace, relative: str) -> str:
+    """Link ``relative`` in the worktree to the task directory's; '' when linked, else why not."""
+    source = Path(workspace.task_dir) / relative
+    target = Path(workspace.work_dir) / relative
+    if not os.path.lexists(source):
+        return "the task directory has none"
+    parent = target.parent
+    if not parent.resolve().is_relative_to(Path(workspace.path).resolve()):
+        return "its directory is outside the worktree"  # through a link the repository tracks
+    if os.path.lexists(target):
+        if target.is_symlink() and os.readlink(target) == str(source):
+            return ""
+        return "the repository tracks it"  # checked out: a link never replaces a file of the step's start
+    try:
+        parent.mkdir(parents=True, exist_ok=True)
+        target.symlink_to(source)
+    except OSError as exc:
+        return f"cannot link it: {exc}"
+    return ""
+
+
+def link(workspace: StepWorkspace, paths: Sequence[str]) -> tuple[StepWorkspace, list[str]]:
+    """Link the project's ``paths`` in a new worktree to the task directory's: the workspace with the ones linked,
+    and a note for each one not linked (missing in the task directory, or tracked in the repository)."""
+    linked: list[str] = []
+    skipped: list[str] = []
+    for relative in paths:
+        problem = _link_one(workspace, relative)
+        if problem:
+            skipped.append(f"{relative}: {problem}")
+        else:
+            linked.append(relative)
+    return replace(workspace, links=tuple(linked)), skipped
 
 
 # --- Merging an accepted step ---
@@ -442,7 +543,8 @@ async def merge(workspace: StepWorkspace, *, step_key: str, title: str,
         await save(workspace)
         workspace, files = await _merge_into_target(workspace, step_key, title, save)
     except _Unmerged as failure:
-        workspace = workspace.moved(StepWorkspaceState.UNMERGED, merge_error=failure.kind, detail=str(failure))
+        workspace = workspace.moved(StepWorkspaceState.UNMERGED, merge_error=failure.kind, detail=str(failure),
+                                    merge_files=failure.files[:50])
         await save(workspace)
         return MergeResult(workspace, failure.files, leftovers)
     except GitError as exc:
@@ -464,8 +566,16 @@ async def _close_step_branch(workspace: StepWorkspace, step_key: str) -> tuple[S
         if head.text != f"refs/heads/{workspace.branch}":
             raise _Unmerged(MergeError.STEP_BRANCH_CHANGED,
                             f"the step's checkout is no longer on its branch {workspace.branch}")
-        if await _pending(path):
-            await _git(path, "add", "-A")
+        await _git(path, "add", "-A")
+        if workspace.links:
+            # A link is the task directory's local state, never part of the step's result: not even one the Worker
+            # committed (a directory-only ignore rule, such as node_modules/, does not match a link).
+            await _git(path, "rm", "-r", "-q", "--cached", "--ignore-unmatch", "--",
+                       *(f":(literal){_in_worktree(workspace, p)}" for p in workspace.links))
+        staged = await _git(path, "diff", "--cached", "--quiet", check=False)
+        if staged.returncode not in (0, 1):
+            raise GitError(f"git diff --cached failed: {staged.stderr.decode('utf-8', 'replace').strip()[:500]}")
+        if staged.returncode == 1:
             await _git(path, "commit", "-q", "--no-verify", "--no-gpg-sign", "-m",
                        f"looper: commit what step {step_key} left uncommitted"
                        + _trailers(workspace.task_id, step_key), identity=True)
@@ -549,6 +659,64 @@ async def remove(workspace: StepWorkspace, *, keep_branch: bool = False) -> Step
         shutil.rmtree(path, ignore_errors=True)
     _remove_empty(path.parent)
     return workspace if keep_branch else replace(workspace, removed_at=now())
+
+
+async def discard(workspace: StepWorkspace) -> StepWorkspace:
+    """The user drops a workspace a task that is not running keeps: discarded, its directory and branch deleted.
+    Raises ``IllegalTransition`` for one that is being or was merged, or is gone."""
+    if not workspace.discardable:
+        why = "gone" if workspace.removed_at is not None else workspace.state.value
+        raise IllegalTransition(f"step workspace {workspace.id} is {why}; it cannot be discarded")
+    if StepWorkspaceState.DISCARDED in ALLOWED_TRANSITIONS[workspace.state]:
+        workspace = workspace.moved(StepWorkspaceState.DISCARDED)
+    return await remove(workspace)
+
+
+async def branch_exists(repo_dir: str, branch: str) -> bool:
+    """Whether the repository still has the branch (``looper/…``, without ``refs/heads/``)."""
+    try:
+        run = await _git(repo_dir, "rev-parse", "--verify", "-q", f"refs/heads/{branch}", check=False)
+    except GitError:
+        return False
+    return run.returncode == 0
+
+
+def undo_commands(task_id: str, *, start_branch: str, start_commit: str,
+                  merged: Sequence[tuple[str, str]]) -> list[dict[str, str]]:
+    """The commands, run in the task directory, that undo what the task did to its branch (the RFC's section 8):
+    ``merged`` is each merged step's label and merge commit, in order. Without the start, only the list and the
+    steps'."""
+    branch = short_branch(start_branch)
+    q = shlex.quote
+    commands = [{"what": f"List the task's commits on {branch or 'the branch'}",
+                 "command": f"git log --first-parent --grep={q(f'^Looper-Task: {task_id}$')}"
+                            + (f" {q(branch)}" if branch else "")}]
+    commands += [{"what": f"Undo step {key}", "command": f"git revert -m 1 {commit}"} for key, commit in merged]
+    if start_commit and branch:
+        commands += [
+            {"what": "Undo the whole task, keeping its changes as uncommitted changes",
+             "command": f"git reset {start_commit}"},
+            {"what": "Undo the whole task and drop its changes (and any other uncommitted change)",
+             "command": f"git reset --hard {start_commit}"},
+            {"what": f"Move the task's commits to a new branch and put {branch} back where the task started",
+             "command": f"git switch -c {q(f'{branch}-{task_id}')} && git branch -f {q(branch)} {start_commit}"},
+        ]
+    return commands
+
+
+def task_view(task_id: str, rows: Sequence[Mapping[str, Any]], *, start_branch: str, start_commit: str,
+              step_keys: Mapping[str, str]) -> dict[str, Any]:
+    """A task's workspaces as its page shows them: where its branch started (R), each workspace oldest first with
+    its step's label, and the commands that undo the task's commits (``undo_commands``)."""
+    found = [StepWorkspace.from_row(row) for row in rows]
+    merged = [(step_keys.get(w.step_id) or w.step_id, w.merge_commit) for w in found
+              if w.state is StepWorkspaceState.MERGED and w.merge_commit]
+    return {
+        "start": {"branch": short_branch(start_branch), "commit": start_commit} if start_commit else None,
+        "workspaces": [{**w.view(), "step_key": step_keys.get(w.step_id) or ""} for w in found],
+        "undo": undo_commands(task_id, start_branch=start_branch or (found[0].target_branch if found else ""),
+                              start_commit=start_commit, merged=merged),
+    }
 
 
 def _remove_empty(directory: Path) -> None:

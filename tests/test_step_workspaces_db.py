@@ -1,4 +1,5 @@
-"""Step workspaces in a real PostgreSQL: their rows, the rules the table keeps, and what is removed and when.
+"""Step workspaces in a real PostgreSQL: their rows, the rules the table keeps, what is removed and when, and the
+task page's view of them and its discard.
 
 Runs only when LOOPER_TEST_DATABASE_URL points at a disposable database. Each
 test works in a new schema of its own; the worktrees are of a real git
@@ -82,7 +83,8 @@ def test_a_workspace_row_is_written_as_it_changes_and_the_table_keeps_its_rules(
         first = await _workspace(str(repo), tmp_path / "rt", "task-a", "s1")
         merging = first.moved(StepWorkspaceState.MERGING)
         await db.save(merging.row())
-        unmerged = merging.moved(StepWorkspaceState.UNMERGED, merge_error=MergeError.CONFLICT, detail="a.txt")
+        unmerged = merging.moved(StepWorkspaceState.UNMERGED, merge_error=MergeError.CONFLICT, detail="a.txt",
+                                 merge_files=("a.txt",), links=(".venv",))
         await db.save(unmerged.row())
         rows = await db.list_for_task("task-a")
         assert [ws.StepWorkspace.from_row(row) for row in rows] == [unmerged]
@@ -169,5 +171,86 @@ def test_removing_and_sweeping_follow_what_each_task_keeps(tmp_path: Path, monke
                   for row in await pool.fetch("SELECT * FROM step_workspaces")}
         assert states == {"task-done": ("discarded", True), "task-stopped": ("active", False),
                           "task-anew": ("discarded", True)}
+
+    _run(test, monkeypatch)
+
+
+def test_the_task_page_shows_a_task_s_workspaces_and_discards_one_a_stopped_task_keeps(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from looper.db import activity, step_workspaces as db
+    from tests.test_continue_at_cap_db import _call, _setup
+
+    repo = tmp_path / "repo"
+    start = _repo(repo)
+    root = tmp_path / "rt"
+
+    async def test(pool: Any) -> None:
+        await _task(pool, "task-a", str(repo), steps=("s1", "s2", "s3"))
+        await pool.execute("UPDATE task_plans SET start_branch = 'refs/heads/main', start_commit = $1", start)
+        await _task(pool, "task-b", str(repo))
+        one, two, three = [await _workspace(str(repo), root, "task-a", key) for key in ("s1", "s2", "s3")]
+        (Path(one.path) / "a.txt").write_text("from s1\n")
+        (Path(two.path) / "a.txt").write_text("from s2\n")
+        merged = (await ws.merge(one, step_key="s1", title="do s1", save=lambda w: db.save(w.row()))).workspace
+        unmerged = (await ws.merge(two, step_key="s2", title="do s2", save=lambda w: db.save(w.row()))).workspace
+        assert unmerged.merge_error is MergeError.CONFLICT
+        server, router, _ = _setup()
+
+        status, detail = await _call(server, "GET", "/api/tasks/task-a")
+        assert status == 200
+        view = detail["step_workspaces"]
+        assert view["start"] == {"branch": "main", "commit": start}
+        assert [(w["step_key"], w["state"], w["merge_error"], w["merge_files"], w["discardable"])
+                for w in view["workspaces"]] == [
+            ("s1", "merged", None, [], False), ("s2", "unmerged", "conflict", ["a.txt"], True),
+            ("s3", "active", None, [], True)]
+        assert view["workspaces"][0]["merge_commit"] == merged.merge_commit
+        assert [c["command"] for c in view["undo"]][:2] == [
+            "git log --first-parent --grep='^Looper-Task: task-a$' main", f"git revert -m 1 {merged.merge_commit}"]
+        assert (await _call(server, "GET", "/api/tasks/task-b"))[1]["step_workspaces"] is None
+
+        discard = f"/api/tasks/task-a/workspaces/{unmerged.id}/discard"
+        assert await _call(server, "POST", discard) == (409, {"error": "stop the task before discarding its step "
+                                                                       "worktrees"})
+        await pool.execute("UPDATE tasks SET status = 'stopped' WHERE id = 'task-a'")
+        monkeypatch.setattr(router, "has_planner", lambda task_id: True)  # its Planner has not ended yet
+        assert (await _call(server, "POST", discard))[0] == 409
+        monkeypatch.setattr(router, "has_planner", lambda task_id: False)
+        assert Path(unmerged.path).exists() and ws.StepWorkspace.from_row(await db.get(unmerged.id)) == unmerged
+
+        status, body = await _call(server, "POST", discard)
+        assert status == 200 and (body["workspace"]["state"], body["workspace"]["discardable"]) == ("discarded", False)
+        row = await db.get(unmerged.id)
+        assert row is not None and (row["state"], row["removed_at"] is not None) == ("discarded", True)
+        assert not Path(unmerged.path).exists() and not await ws.branch_exists(str(repo), unmerged.branch)
+        notes = [r["summary"] for r in await activity.list_activity("task-a")]
+        assert f"Discarded a step worktree from the task page: branch {unmerged.branch} and its directory removed" \
+            in notes
+        assert (await _call(server, "POST", discard))[1] == {
+            "error": f"step workspace {unmerged.id} is gone; it cannot be discarded"}
+        assert (await _call(server, "POST", f"/api/tasks/task-a/workspaces/{merged.id}/discard"))[1] == {
+            "error": f"step workspace {merged.id} is merged; it cannot be discarded"}
+        assert (await _call(server, "POST", f"/api/tasks/task-b/workspaces/{three.id}/discard"))[0] == 404
+        assert (await _call(server, "POST", "/api/tasks/task-a/workspaces/999999/discard"))[0] == 404
+        assert Path(three.path).exists()  # only the one asked for
+        assert (await _call(server, "POST", f"/api/tasks/task-a/workspaces/{three.id}/discard"))[0] == 200
+        assert not Path(three.path).exists()
+
+    _run(test, monkeypatch)
+
+
+def test_doctor_reads_the_projects_whose_steps_work_in_worktrees(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+                                                                ) -> None:
+    from looper.db import projects
+
+    async def test(pool: Any) -> None:
+        await projects.create_project(name="beta", work_dir="/b", pool=pool,
+                                      execution={"step_workspaces": "worktree", "step_workspace_links": [".venv"]})
+        await projects.create_project(name="alpha", work_dir="/a", pool=pool, execution={"step_workspaces": "worktree"})
+        await projects.create_project(name="shared", work_dir="/s", pool=pool, execution={"step_workspaces": "shared"})
+        await projects.create_project(name="plain", work_dir="/p", pool=pool)
+        assert [(p["name"], p["work_dir"], p["step_workspace_links"]) for p in await projects.worktree_projects()] == [
+            ("alpha", "/a", None), ("beta", "/b", [".venv"])]
 
     _run(test, monkeypatch)
