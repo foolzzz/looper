@@ -110,6 +110,25 @@ class TestMessageBus:
 
         asyncio.run(_run())
 
+    def test_a_requester_stopped_as_its_reply_arrives_stays_stopped(self, tmp_path: Path) -> None:
+        """A stop that cancels a request just as its reply comes in is not lost (Python 3.11's asyncio.wait_for
+        returned the reply then, and a stop waiting for the requester waited for good)."""
+
+        async def _run() -> asyncio.Task[MessageEnvelope]:
+            bus = MessageBus(tmp_path)
+            await bus.start()
+            requester = asyncio.create_task(bus.request(_make_envelope(
+                source=MANAGER_ADDRESS, target=PLANNER_ADDRESS, message_type=MessageType.TASK_REQUEST), timeout=5))
+            asked = await bus.get_queue("planner").get()
+            await bus.publish(MessageEnvelope.create(
+                source=PLANNER_ADDRESS, target=MANAGER_ADDRESS, message_type=MessageType.TASK_ACCEPTED, payload={},
+                reply_to=asked.message_id))
+            requester.cancel()  # the stop, as the reply wakes the requester
+            await asyncio.wait([requester])
+            return requester
+
+        assert asyncio.run(_run()).cancelled()
+
     def test_request_timeout(self, tmp_path: Path) -> None:
         async def _run() -> None:
             bus = MessageBus(tmp_path)

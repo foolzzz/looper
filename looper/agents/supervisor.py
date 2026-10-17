@@ -39,6 +39,23 @@ RESTART_DELAY_MAX = 300.0
 STABLE_SECONDS = 300.0
 # Restarted this many times in a row (without staying up STABLE_SECONDS), an agent is crash-looping.
 CRASH_LOOP_RESTARTS = 3
+# How long a stop waits for a task it cancelled before it cancels it again: longer than a run's cancellation
+# takes to end its processes (proc_tree.TERM_GRACE_SEC).
+RECANCEL_SEC = 5.0
+
+
+async def cancel_and_wait(task: asyncio.Task[Any], *, again_after: float = RECANCEL_SEC) -> None:
+    """Cancel ``task`` and wait for it to end, cancelling it again every ``again_after`` seconds while it runs on.
+
+    A task can lose a cancellation: Python 3.11's ``asyncio.wait_for`` returns
+    what it waited for when that is done as the cancellation arrives, and a
+    message loop then waits for its next message for good. ``asyncio.wait``
+    does not take the task's cancellation for the caller's own: a cancelled
+    caller still propagates.
+    """
+    while not task.done():
+        task.cancel()
+        await asyncio.wait({task}, timeout=again_after)
 
 
 class ManagedAgent(Protocol):

@@ -679,6 +679,100 @@ class TestResidentClaude:
 
         assert asyncio.run(_run()).cancelled()
 
+    def test_a_stop_cancelled_while_killing_workers_still_ends_the_message_loop(self) -> None:
+        async def _run() -> None:
+            with tempfile.TemporaryDirectory() as tmp:
+                planner = PlannerAgent(task_id="t1", runtime_root=Path(tmp))
+                loop_task = planner._loop_task = asyncio.create_task(asyncio.sleep(60))
+                killing = asyncio.Event()
+
+                async def kill_workers_slowly() -> None:
+                    killing.set()
+                    await asyncio.sleep(60)
+
+                planner._kill_running_workers = kill_workers_slowly  # type: ignore[method-assign]
+                stopper = asyncio.create_task(planner.stop())
+                await killing.wait()
+                stopper.cancel()
+                await asyncio.wait([stopper])
+                assert stopper.cancelled()
+                assert loop_task.done() and loop_task.cancelled()
+
+        asyncio.run(_run())
+
+    def test_a_second_stop_cancellation_hurries_the_cleanup_but_does_not_cut_it_short(self) -> None:
+        async def _run() -> None:
+            with tempfile.TemporaryDirectory() as tmp:
+                planner = PlannerAgent(task_id="t1", runtime_root=Path(tmp))
+                loop_task = planner._loop_task = asyncio.create_task(asyncio.sleep(60))
+                killing, stopping = asyncio.Event(), asyncio.Event()
+                finished = False
+
+                async def kill_workers_slowly() -> None:
+                    killing.set()
+                    await asyncio.sleep(60)
+
+                async def claude_exiting_slowly(*, kill: bool = False) -> None:
+                    nonlocal finished
+                    assert kill
+                    stopping.set()
+                    try:
+                        await asyncio.sleep(0.3)
+                    finally:  # as ResidentClaude.stop ends the tree however its wait ends
+                        finished = True
+
+                planner._kill_running_workers = kill_workers_slowly  # type: ignore[method-assign]
+                planner._claude.stop = claude_exiting_slowly  # type: ignore[method-assign]
+                stopper = asyncio.create_task(planner.stop())
+                await killing.wait()
+                stopper.cancel()
+                await stopping.wait()
+                stopper.cancel()
+                await asyncio.wait([stopper])
+                assert stopper.cancelled()
+                assert loop_task.done() and loop_task.cancelled()
+                assert finished
+
+        asyncio.run(_run())
+
+    def test_a_hurried_cleanup_still_cancels_the_loop_it_had_not_reached(self) -> None:
+        """The supervise loop loses the stop's cancellation and the cleanup's, so the cleanup is still waiting on it
+        when a second cancellation of the stop hurries it: the message loop is cancelled all the same."""
+
+        async def _run() -> None:
+            with tempfile.TemporaryDirectory() as tmp:
+                planner = PlannerAgent(task_id="t1", runtime_root=Path(tmp))
+                lost: list[int] = []
+                lost_twice = asyncio.Event()
+
+                async def supervise_losing_cancels() -> None:
+                    while len(lost) < 2:
+                        try:
+                            await asyncio.sleep(60)
+                        except asyncio.CancelledError:
+                            lost.append(1)  # lost, as asyncio.wait_for can lose a cancellation
+                    lost_twice.set()
+                    await asyncio.sleep(60)
+
+                supervise_task = planner._supervise_task = asyncio.create_task(supervise_losing_cancels())
+                loop_task = planner._loop_task = asyncio.create_task(asyncio.sleep(60))
+                planner._kill_running_workers = AsyncMock()  # type: ignore[method-assign]
+                planner._claude.stop = AsyncMock()  # type: ignore[method-assign]
+                await asyncio.sleep(0)
+                stopper = asyncio.create_task(planner.stop())
+                while not lost:
+                    await asyncio.sleep(0.01)
+                stopper.cancel()  # the stop is cut short; its cleanup waits on the supervise loop in turn
+                await lost_twice.wait()
+                stopper.cancel()  # and hurried
+                await asyncio.wait([stopper])
+                assert stopper.cancelled()
+                assert loop_task.cancelled()
+                planner._claude.stop.assert_awaited_with(kill=True)
+                await asyncio.wait([supervise_task])
+
+        asyncio.run(_run())
+
     def test_a_stopping_planners_token_files_are_gone_once_its_token_no_longer_works(self) -> None:
         """The MCP configuration that carries the Planner's token is deleted with the token, before stop() waits for
         its Claude to end: a stop the server's shutdown cuts off then leaves no token on disk."""
@@ -1411,6 +1505,126 @@ class TestTaskEnd:
         h = drive(claude, outcome, scenario)
         s2 = next(item for item in h.work_items if item.payload["instruction"] == "do s2")
         assert {envelope.target for envelope in h.killed} == {s2.target, h.reviews[0].target}
+
+    @staticmethod
+    async def _running_steps(root: Path, claude: Any, tasks: int, *, worker: str, steps: int = 4,
+                             ) -> tuple[Any, Any, MessageBus]:
+        """A worker pool and a TaskRouter on one bus, with ``tasks`` tasks started whose ``steps`` steps each run a
+        Worker (``worker``, its Python body); returns once every Worker's process runs."""
+        from fake_claude import fake_claude
+
+        from looper.agents.tiers.worker import WorkerConfig, WorkerPool
+
+        bus = MessageBus(runtime_root=root)
+        pool = WorkerPool(config=WorkerConfig(claude_bin=str(fake_claude(root / "worker-claude", worker))),
+                          runtime_root=root)
+        router = TaskRouter(runtime_root=root, claude_bin=claude.bin)
+        await pool.start(bus)
+        await router.start(bus)
+        await asyncio.sleep(0)  # both subscribe
+        for n in range(tasks):
+            (root / f"work-{n}").mkdir()
+            for message_type, payload in (
+                (MessageType.TASK_REQUEST, {"task_id": f"task-{n}", "goal_id": f"g{n}", "requirement": "build",
+                                            "work_dir": str(root / f"work-{n}"), "project_id": "proj-1"}),
+                (MessageType.TASK_START, {"task_id": f"task-{n}"}),
+            ):
+                await bus.publish(MessageEnvelope.create(source=MANAGER_ADDRESS, target=TASK_ROUTER_ADDRESS,
+                                                         message_type=message_type, payload=payload))
+        deadline = asyncio.get_running_loop().time() + 30
+        while sum(1 for wp in pool._active.values() if wp.process and wp.process.returncode is None) < steps * tasks:
+            assert asyncio.get_running_loop().time() < deadline, "the Workers did not start"
+            await asyncio.sleep(0.05)
+        return pool, router, bus
+
+    def test_a_server_stop_with_many_running_steps_ends_in_seconds(self, planner_claude: Any, agent_db: Any) -> None:
+        """The server stops its worker pool, then the TaskRouter and its Planners (``AgentSupervisor.stop_all``):
+        with 12 steps running in 3 tasks, and Planners' Claudes that take their 5 s to exit, it is done well inside
+        launchd's 20 s grace, every run ``interrupted``."""
+        claude = planner_claude(plan(*(step(f"s{i}") for i in range(1, 5))), linger=True)
+        answers: list[MessageEnvelope] = []
+
+        async def _run() -> float:
+            with tempfile.TemporaryDirectory() as tmp:
+                pool, router, bus = await self._running_steps(
+                    Path(tmp), claude, 3, worker="import sys, time\nsys.stdin.readline()\ntime.sleep(60)\n")
+                bus.subscribe_topic(MessageType.KILL_WORK_RESULT, answers.append)
+                began = asyncio.get_running_loop().time()
+                await pool.stop()
+                await router.stop()
+                took = asyncio.get_running_loop().time() - began
+                await bus.shutdown()
+                return took
+
+        took = asyncio.run(_run())
+        # The stopped pool answered each Planner's stop of a step at once, none waiting out its reply.
+        assert [answer.payload["killed"] for answer in answers] == [False] * 12
+        assert took < 10
+        statuses = [call.kwargs["status"] for call in agent_db.finish_record.await_args_list]
+        assert statuses.count("interrupted") == 12
+
+    def test_a_stopped_task_ends_its_running_steps_at_once(self, planner_claude: Any, agent_db: Any) -> None:
+        """A task's stop ends its 4 running Workers together: each takes its 3 s SIGTERM grace, not one after the
+        other."""
+        claude = planner_claude(plan(*(step(f"s{i}") for i in range(1, 5))))
+        stubborn = ("import signal, sys, time\nsignal.signal(signal.SIGTERM, signal.SIG_IGN)\nsys.stdin.readline()\n"
+                    "time.sleep(60)\n")
+
+        async def _run() -> float:
+            with tempfile.TemporaryDirectory() as tmp:
+                pool, router, bus = await self._running_steps(Path(tmp), claude, 1, worker=stubborn)
+                processes = [wp.process for wp in pool._active.values()]
+                began = asyncio.get_running_loop().time()
+                await bus.publish(MessageEnvelope.create(source=MANAGER_ADDRESS, target=TASK_ROUTER_ADDRESS,
+                                                         message_type=MessageType.TASK_STOP,
+                                                         payload={"task_id": "task-0"}))
+                while router.has_planner("task-0") or any(p.returncode is None for p in processes):
+                    assert asyncio.get_running_loop().time() - began < 30, "the task did not stop"
+                    await asyncio.sleep(0.05)
+                took = asyncio.get_running_loop().time() - began
+                await router.stop()
+                await pool.stop()
+                await bus.shutdown()
+                return took
+
+        took = asyncio.run(_run())
+        assert took < 8  # one after the other: 4 x 3 s at least
+
+    def test_a_server_stop_that_cancels_a_task_stop_as_a_kill_is_answered_still_ends(
+        self, planner_claude: Any, agent_db: Any,
+    ) -> None:
+        """A task's stop is under way when the server stops: the TaskRouter's stop cancels it just as the pool
+        answers the kill of the task's step. The TaskRouter still stops (its message loop lost that cancellation,
+        and the server never exited)."""
+        claude = planner_claude(plan(step("s1")))
+
+        async def _run() -> bool:
+            with tempfile.TemporaryDirectory() as tmp:
+                pool, router, bus = await self._running_steps(
+                    Path(tmp), claude, 1, steps=1, worker="import sys, time\nsys.stdin.readline()\ntime.sleep(60)\n")
+                stopping: list[asyncio.Future[None]] = []
+
+                def server_stops(_answer: MessageEnvelope) -> None:
+                    if not stopping:
+                        stopping.append(asyncio.ensure_future(router.stop()))
+
+                bus.subscribe_topic(MessageType.KILL_WORK_RESULT, server_stops)
+                await bus.publish(MessageEnvelope.create(source=MANAGER_ADDRESS, target=TASK_ROUTER_ADDRESS,
+                                                         message_type=MessageType.TASK_STOP,
+                                                         payload={"task_id": "task-0"}))
+                deadline = asyncio.get_running_loop().time() + 15
+                while not stopping:
+                    assert asyncio.get_running_loop().time() < deadline, "the step was not killed"
+                    await asyncio.sleep(0.01)
+                stopped = bool((await asyncio.wait(stopping, timeout=10))[0])
+                if not stopped and router._loop_task is not None:
+                    router._loop_task.cancel()  # unstick it, so the test can end
+                    await asyncio.wait(stopping)
+                await pool.stop()
+                await bus.shutdown()
+                return stopped
+
+        assert asyncio.run(_run())
 
     def test_server_stop_during_a_teardown_still_reaps_claude(self, planner_claude: Any) -> None:
         """Stopping the router while it ends a Planner neither hangs nor leaves Claude running."""
