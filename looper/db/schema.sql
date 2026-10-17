@@ -253,6 +253,10 @@ CREATE INDEX IF NOT EXISTS idx_step_workspaces_task ON step_workspaces (task_id,
 -- A step has one workspace in use at a time.
 CREATE UNIQUE INDEX IF NOT EXISTS idx_step_workspaces_open ON step_workspaces (step_id)
     WHERE state IN ('active', 'merging');
+-- links: the paths linked back to the task directory in it; merge_files: the files that kept an unmerged one from
+-- merging (the conflicting or blocking ones).
+ALTER TABLE step_workspaces ADD COLUMN IF NOT EXISTS links TEXT[] NOT NULL DEFAULT '{}';
+ALTER TABLE step_workspaces ADD COLUMN IF NOT EXISTS merge_files TEXT[] NOT NULL DEFAULT '{}';
 -- Where the task's branch was when it dispatched its first step, in a project with step workspaces: going back
 -- there undoes the task's commits ('' when not recorded).
 ALTER TABLE task_plans ADD COLUMN IF NOT EXISTS start_branch TEXT NOT NULL DEFAULT '';
@@ -600,6 +604,9 @@ ALTER TABLE projects ADD COLUMN IF NOT EXISTS review_policy TEXT CHECK (review_p
 -- Where a step that runs alongside others works: the task directory ('shared', also when NULL) or, in a git
 -- checkout, a worktree of its own merged back when it is accepted ('worktree').
 ALTER TABLE projects ADD COLUMN IF NOT EXISTS step_workspaces TEXT CHECK (step_workspaces IN ('shared', 'worktree'));
+-- The paths, relative to the task directory, that such a worktree links back to the task directory's (NULL: none).
+ALTER TABLE projects ADD COLUMN IF NOT EXISTS step_workspace_links TEXT[]
+    CHECK (cardinality(step_workspace_links) <= 20);
 -- How many times the Planner may retry one step (NULL: 2).
 ALTER TABLE projects ADD COLUMN IF NOT EXISTS max_step_retries INTEGER
     CHECK (max_step_retries >= 0 AND max_step_retries <= 20);
