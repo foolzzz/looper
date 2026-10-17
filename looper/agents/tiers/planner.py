@@ -344,6 +344,9 @@ class PlanStep:
     review_stage: ReviewStage | None = None  # in review: which review it waits for
     # A gate step's gate (``user_gates``): its instruction is its topic, and no Worker runs it.
     gate: Gate | None = None
+    # When its run was first dispatched; kept through its retries and reviews, gone when it is sent back to not
+    # started (task_steps.started_at).
+    started_at: datetime | None = None
 
     @property
     def label(self) -> str:
@@ -503,6 +506,7 @@ def _step_row(step: PlanStep) -> dict[str, Any]:
         "review_role_version": step.review_role_version,
         "review_stage": step.review_stage.value if step.review_stage else None,
         "kind": "gate" if step.gate is not None else "work",
+        "started_at": step.started_at,
     }
 
 
@@ -1225,6 +1229,7 @@ class PlannerAgent:
         worker_id = f"worker-{uuid.uuid4().hex[:12]}"
         step.status = "dispatched"
         step.worker_id = worker_id
+        step.started_at = step.started_at or datetime.now(timezone.utc)
         previous = (step.result or {}) if (step.result or {}).get("status") == "unmerged" else {}
         if previous and step.workspace is not None and \
                 not await workspaces.branch_exists(step.workspace.repo_dir, str(previous.get("branch") or "")):
@@ -1992,6 +1997,7 @@ class PlannerAgent:
                  and (s.status != "pending" or s.started)]
         for step in again:
             step.status, step.worker_id, step.reviewer_id, step.review_stage = "pending", None, None, None
+            step.started_at = None  # its next dispatch starts it again: the time the task was stopped does not count
         waiting = plan.waiting_gates()
         for step in waiting:
             assert step.gate is not None
@@ -3346,7 +3352,7 @@ class PlannerAgent:
                     step.workspace.state is StepWorkspaceState.MERGING:
                 merging.append(step)  # accepted: only its merge was cut off
             elif step.status in ("dispatched", "deciding"):
-                step.status = "pending"
+                step.status, step.started_at = "pending", None  # started again when dispatched again
                 again.append(step)
             elif step.status == "completed":
                 review.append(step)
@@ -3549,6 +3555,7 @@ class PlannerAgent:
                 review_role_version=sd.get("review_role_version"),
                 review_stage=ReviewStage(sd["review_stage"]) if sd.get("review_stage") else None,
                 gate=self._stored_gate(sd, stored.get("gates") or {}),
+                started_at=sd.get("started_at"),
             ))
         plan.journal = [JournalEntry.from_row(row) for row in stored.get("journal") or []]
         try:
