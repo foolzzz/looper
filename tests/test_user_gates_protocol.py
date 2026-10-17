@@ -321,6 +321,9 @@ def test_the_contract_with_gates_says_how_to_open_discuss_change_and_close_them(
     assert "Open one only when all three hold" in text
     assert '- gates (optional, also in [CHAT]): change gates not closed yet' in text
     assert "[GATE]: the user wrote in a gate's discussion, or ended it." in text
+    # The answers it settles are a Worker's to carry out, as in every turn.
+    assert "run harmless commands to answer; do not modify files yourself: every\n  change to the project goes to a " \
+           "Worker as a step." in text
     assert "What the user writes in a gate's\n  discussion comes as [GATE], not as a supplement." in text
     assert 'A reply whose cancels\n  leave no step open completes the task: add the steps the answer decides, or\n  ' \
            'carry "final" as in [DECISION].' in text

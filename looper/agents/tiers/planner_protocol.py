@@ -1115,7 +1115,8 @@ close the gate once every agenda item is resolved or dropped.
 {"reply": "...", "gate": "continue", "agenda": [{"id": "q1", "question": "...", "status": "resolved", "answer": "..."}], "action": "none"}
 ```
 - reply: your answer to the user, in their language. You may read the project
-  and run harmless commands to answer.
+  and run harmless commands to answer; do not modify files yourself: every
+  change to the project goes to a Worker as a step.
 - agenda: every item of the gate's agenda by its id, each "open", "resolved"
   (with "answer") or "dropped"; a new item has no id.
 - gate "continue": wait for the user's next message.
