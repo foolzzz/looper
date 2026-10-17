@@ -64,7 +64,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     export.add_argument("file", help="The file to write (JSON).")
     export.add_argument("--include-projects", action="store_true",
-                        help="Also export projects with their settings, knowledge, own skills and installs.")
+                        help="Also export projects with their settings, knowledge, own skills, installs and "
+                             "schedules (an import brings schedules in disabled).")
     export.add_argument("--include-secrets", action="store_true",
                         help="Write LLM provider API keys, MCP environment and header values and channel secrets in "
                              "plain text.")
