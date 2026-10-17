@@ -36,7 +36,7 @@ import { NodeCards } from "@/components/pipeline-node-card";
 import { PipelineToolbar } from "@/components/pipeline-toolbar";
 import { GateBadge, TaskGates } from "@/components/task-gates";
 import { GATE_STATES, GATE_TURNS, gateAnchor, gateLook, gateTurn, stepAnchor } from "@/lib/gates";
-import { type NodeCard, nodeCardId, plannerCard, resultCard, stepCard } from "@/lib/node-cards";
+import { type NodeCard, gateCard, nodeCardId, plannerCard, resultCard, stepCard } from "@/lib/node-cards";
 import { FIT_PADDING, shownSteps, stepColumns, stepLevels, storeHideSkipped, storedHideSkipped } from "@/lib/pipeline-layout";
 import { useFullScreen } from "@/lib/full-screen";
 import { costBasis, costCaveats, formatUsd } from "@/lib/usage";
@@ -1574,7 +1574,6 @@ interface GateNodeData extends Record<string, unknown> {
   name: string;
   topic: string;
   look: NodeLook;
-  title: string;
   onOpen: () => void;
 }
 
@@ -1603,7 +1602,6 @@ function GateNode({ data }: NodeProps<Node<GateNodeData, "gate">>) {
       <button
         type="button"
         onClick={data.onOpen}
-        title={data.title}
         style={{ color: look.color, opacity: look.muted ? 0.8 : 1 }}
         className="nodrag nopan pointer-events-auto relative flex h-full w-full cursor-pointer flex-col items-center justify-center rounded-md px-6 leading-tight focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
       >
@@ -1666,6 +1664,13 @@ function PipelineTab({ task, onOpenGate }: { task: TaskDetail; onOpenGate: (step
     const byId = new Map(steps.map((s) => [s.id, s]));
     const allById = new Map(all.map((s) => [s.id, s]));
     const gates = new Map((task.gates ?? []).map((gate) => [gate.step_id, gate]));
+    // Each step's look as its node draws it: a gate's by its gate (whose turn it is while it is discussed).
+    const lookOf = (step: TaskStep): NodeLook => {
+      if (step.kind !== "gate") return stepLook(step.status);
+      const gate = gates.get(step.id);
+      const turn = gate && gateTurn(gate);
+      return turn ? GATE_TURN_LOOKS[turn] : GATE_LOOKS[gateState(step, gate)];
+    };
     const levels = stepLevels(steps);
     const why = droppedBecause(task.journal || [], all);
     const x = stepColumns(steps, levels, NODE_W + GAP_X);
@@ -1679,19 +1684,13 @@ function PipelineTab({ task, onOpenGate }: { task: TaskDetail; onOpenGate: (step
       const position = { x: (x.get(step.id) ?? 0) - NODE_W / 2, y: ROW_H * (1 + (levels.get(step.id) ?? 0)) };
       const live = step.status !== "skipped";
       if (step.kind === "gate") {
-        const gate = gates.get(step.id);
-        const turn = gate && gateTurn(gate);
-        const look = turn ? GATE_TURN_LOOKS[turn] : GATE_LOOKS[gateState(step, gate)];
-        const title = [
-          `Gate ${name} — ${look.label}`,
-          step.instruction,
-          `Depends on: ${deps.map((d) => byId.get(d)?.step_key || d).join(", ") || "nothing"}`,
-        ].join("\n");
+        const look = lookOf(step);
         ns.push({
           id: step.id, type: "gate", position, focusable: false,
-          data: { name, topic: step.instruction, look, title, onOpen: () => onOpenGate(step) },
+          data: { name, topic: step.instruction, look, onOpen: () => onOpenGate(step) },
           style: { width: NODE_W, height: NODE_H, padding: 0, background: "transparent", border: "none" },
         });
+        cards[step.id] = gateCard(step, gates.get(step.id), { look, lookOf, stepsById: allById });
       }
       for (const source of deps.length ? deps : ["planner"]) {
         const fromLive = source === "planner" || byId.get(source)?.status !== "skipped";
@@ -1708,7 +1707,7 @@ function PipelineTab({ task, onOpenGate }: { task: TaskDetail; onOpenGate: (step
                                   detail={step.instruction} note={step.retries ? `retry ${step.retries}` : undefined} /> },
         style: nodeStyle(look), sourcePosition: Position.Bottom, targetPosition: Position.Top,
       });
-      cards[step.id] = stepCard(step, { taskId: task.task_id, look, lookOf: (s) => stepLook(s.status), stepsById: allById,
+      cards[step.id] = stepCard(step, { taskId: task.task_id, look, lookOf, stepsById: allById,
                                         skippedBecause: why.get(step.id) });
     }
 

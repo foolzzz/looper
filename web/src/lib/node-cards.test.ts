@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { type CardLook, type CardSection, clipText, formatWhen, plannerCard, resultCard, stepCard } from "@/lib/node-cards";
-import type { TaskDetail, TaskStep } from "@/lib/api";
+import { type CardLook, type CardSection, clipText, formatWhen, gateCard, plannerCard, resultCard, stepCard } from "@/lib/node-cards";
+import type { TaskDetail, TaskStep, UserGate } from "@/lib/api";
 
 const look = (label: string): CardLook => ({ label, border: "b", borderStyle: "solid", background: "bg", color: "c" });
 const LOOKS: Record<string, CardLook> = { verified: look("Done"), failed: look("Failed"), pending: look("Not started") };
@@ -144,5 +144,53 @@ describe("plannerCard and resultCard", () => {
   it("clips a long summary", () => {
     const card = resultCard(task({ status: "completed", result_summary: LONG }), look("Completed"));
     expect(section(card.sections, "Summary")).toMatchObject({ text: LONG, preview: clipText(LONG), markdown: true });
+  });
+});
+
+function gate(extra: Partial<UserGate> = {}): UserGate {
+  return {
+    step: "g1", step_id: "g1", state: "discussing", topic: "Pick the database", agenda: [], findings: "", summary: null,
+    resolution: "", ended_by_user: false, plan_change: null, depends_on: ["s1"], waiting_on: null, not_delivered: 0,
+    retry_at: null, turns: 0, reminders: 0, opened_at: null, first_reply_at: null, closed_at: null, ...extra,
+  };
+}
+
+describe("gateCard", () => {
+  const s1 = step("s1", { status: "verified" });
+  const g1 = step("g1", { kind: "gate", status: "waiting_user", instruction: "Pick the database", depends_on: ["s1"] });
+  const cardOfGate = (g?: UserGate) =>
+    gateCard(g1, g, { look: look("Your turn"), lookOf: (d) => LOOKS[d.status], stepsById: new Map([[s1.id, s1], [g1.id, g1]]) });
+
+  it("shows the topic, the agenda with each question's state, whom it waits on and when it opened", () => {
+    const card = cardOfGate(gate({
+      agenda: [
+        { id: "q1", question: "Postgres or SQLite?", options: ["Postgres", "SQLite"], status: "resolved", answer: "Postgres" },
+        { id: "q2", question: "Keep the old table?", options: [], status: "open", answer: "" },
+        { id: "q3", question: "Shard it?", options: [], status: "dropped", answer: "" },
+      ],
+      waiting_on: "user", not_delivered: 2, turns: 3, findings: "The old table has 2M rows.", opened_at: "2026-10-17T08:00:00Z",
+    }));
+    expect(card).toMatchObject({ name: "g1", look: { label: "Your turn" }, roles: [] });
+    expect(titles(card.sections)).toEqual(["Topic", "Agenda", "Discussion", "Findings", "Depends on", "Timing"]);
+    expect(section(card.sections, "Agenda")).toMatchObject({ items: [
+      "Resolved: Postgres or SQLite? → Postgres", "Open: Keep the old table?", "Dropped: Shard it?"] });
+    expect(section(card.sections, "Discussion")).toMatchObject({ facts: [
+      { label: "Waiting on", value: "You" }, { label: "Not delivered", value: "2 messages" }, { label: "Turns", value: "3" }] });
+    expect(section(card.sections, "Depends on")).toMatchObject({ steps: [{ name: "s1", look: LOOKS.verified }] });
+  });
+
+  it("shows what a passed gate settled, and why a cancelled one was cancelled", () => {
+    const passed = cardOfGate(gate({ state: "passed", closed_at: "2026-10-17T09:00:00Z",
+                                     summary: { decisions: ["Use Postgres"], assumptions: [], open: ["Backups"] } }));
+    expect(titles(passed.sections)).toEqual(["Topic", "Decisions", "Still open", "Depends on", "Timing"]);
+    expect(section(passed.sections, "Timing")).toMatchObject({ facts: [{ label: "Closed" }] });
+    const cancelled = cardOfGate(gate({ state: "cancelled", resolution: "The user asked to stop." }));
+    expect(section(cancelled.sections, "Cancelled")).toMatchObject({ text: "The user asked to stop." });
+    expect(section(cardOfGate(gate({ waiting_on: "planner" })).sections, "Discussion"))
+      .toMatchObject({ facts: [{ label: "Waiting on", value: "The Planner" }] });
+  });
+
+  it("shows the step's topic before the gate has a row", () => {
+    expect(titles(cardOfGate(undefined).sections)).toEqual(["Topic", "Depends on"]);
   });
 });

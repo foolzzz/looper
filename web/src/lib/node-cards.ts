@@ -1,7 +1,7 @@
 /** The details card of each Pipeline node, as data: built from the task here, drawn by
  * `components/pipeline-node-card`. */
 import { historyHref } from "@/pages/agent-history";
-import type { TaskDetail, TaskStep } from "@/lib/api";
+import type { GateAgendaItem, TaskDetail, TaskStep, UserGate } from "@/lib/api";
 
 /** A node's status as the Pipeline draws it: a word and the node's colors. */
 export interface CardLook {
@@ -148,6 +148,43 @@ export function stepCard(step: TaskStep, { taskId, look, lookOf, stepsById, skip
       ...facts("Timing", [
         { label: "Planned", value: formatWhen(step.created_at) },
         finished && { label: finished, value: formatWhen(step.completed_at!) },
+      ]),
+    ],
+  };
+}
+
+const AGENDA_STATUS: Record<GateAgendaItem["status"], string> = { open: "Open", resolved: "Resolved", dropped: "Dropped" };
+
+/** A user gate's card: its topic, its questions with each one's state, whom it waits on, what the Planner found and
+ * what it settled or why it was cancelled, the steps it waits for, and when it opened and closed. `gate` is absent
+ * before the gate has a row. */
+export function gateCard(step: TaskStep, gate: UserGate | undefined, { look, lookOf, stepsById }: Omit<StepCardContext, "taskId" | "skippedBecause">): NodeCard {
+  const deps = (step.depends_on ?? []).map((id) => stepsById.get(id)).filter((s): s is TaskStep => !!s);
+  const notDelivered = gate?.not_delivered ?? 0;
+  return {
+    name: step.step_key || `step ${step.step_index + 1}`,
+    look,
+    roles: [],
+    sections: [
+      ...text("Topic", gate?.topic || step.instruction),
+      ...list("Agenda", gate?.agenda.map((item) =>
+        `${AGENDA_STATUS[item.status]}: ${item.question}${item.status === "resolved" && item.answer ? ` → ${item.answer}` : ""}`)),
+      ...facts("Discussion", [
+        gate?.waiting_on && { label: "Waiting on", value: gate.waiting_on === "user" ? "You" : "The Planner" },
+        notDelivered > 0 && { label: "Not delivered", value: `${notDelivered} message${notDelivered === 1 ? "" : "s"}` },
+        !!gate?.turns && { label: "Turns", value: String(gate.turns) },
+      ]),
+      ...text("Findings", gate?.findings, { clip: true }),
+      ...list("Decisions", gate?.summary?.decisions),
+      ...list("Assumptions", gate?.summary?.assumptions),
+      ...list("Still open", gate?.summary?.open),
+      ...(gate?.state === "cancelled" ? text("Cancelled", gate.resolution || "Cancelled by the Planner") : []),
+      ...(deps.length
+        ? [{ kind: "steps" as const, title: "Depends on", steps: deps.map((d) => ({ name: d.step_key || d.id, look: lookOf(d) })) }]
+        : []),
+      ...facts("Timing", [
+        gate?.opened_at && { label: "Opened", value: formatWhen(gate.opened_at) },
+        gate?.closed_at && { label: "Closed", value: formatWhen(gate.closed_at) },
       ]),
     ],
   };
