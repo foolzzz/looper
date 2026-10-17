@@ -331,6 +331,10 @@ class TestPlanner:
         agent_db.get_task_project.return_value = _project(task_budget_usd=0.4)
         _spend_from_records(monkeypatch, agent_db)
         claude = planner_claude(plan(step("s1"), step("s2")), decide("accept"), decide("accept", summary="done"))
+        starts: list[Any] = []
+
+        def s1() -> dict[str, Any]:
+            return next(row for row in agent_db.store.steps["t1"].values() if row["key"] == "s1")
 
         async def scenario(h: Harness) -> None:
             await h.start()
@@ -339,6 +343,7 @@ class TestPlanner:
             await h.release(WORK_OK)  # s1's result arrives over the cap: dropped, and the task fails
             assert (await h.finished()).payload["fail_kind"] == "task_budget"
             await h.planner.stop()
+            starts.append(s1()["started_at"])
 
             agent_db.get_task_project.return_value = _project(task_budget_usd=2)
             agent_db.store.tasks["t1"] = {"requirement": "build the calc package", "work_dir": str(h.work_dir)}
@@ -352,8 +357,11 @@ class TestPlanner:
             ))
             final = await h.finished()
             assert final.payload["status"] == "completed" and final.payload["summary"] == FINAL_RESULT
+            starts.append(s1()["started_at"])
 
         h = drive(claude, hold_first(), scenario)
+        # s1 ran again from not started: a new start, so the time the task stood failed does not count.
+        assert starts[0] is not None and starts[1] > starts[0]
         assert [w.payload["step_key"] for w in h.work_items] == ["s1", "s2", "s1"]
         assert h.work_items[0].payload["task_id"] == h.work_items[2].payload["task_id"]  # the same step
         turns = claude.turns()

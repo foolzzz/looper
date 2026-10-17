@@ -42,7 +42,7 @@ import { AGENT_PROFILE } from "@/lib/settings-pages";
 import { formatUsd } from "@/lib/usage";
 import { ProjectBackgroundField, backgroundTooLong } from "@/components/project-background-field";
 import { TaskWorkspaceField, type WorkspaceChoice } from "@/components/task-workspace-field";
-import { TaskDetailPage } from "./task-detail";
+import { TaskDetailRoute } from "./task-detail";
 
 const STATUS_FILTERS = [
   "all", "init", "running", "waiting_user", "pending", "completed", "failed", "cancelled", "stopped",
@@ -458,7 +458,7 @@ export function TasksPage({ sub, query, onNavigate }: TasksPageProps) {
 
   if (selectedTaskId) {
     return (
-      <TaskDetailPage
+      <TaskDetailRoute
         taskId={selectedTaskId}
         onBack={() => setSelectedTaskId(null)}
       />

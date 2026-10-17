@@ -298,6 +298,18 @@ def test_a_failed_task_restarts_from_its_plan_without_running_its_accepted_steps
     assert instruction == ("do c another way" if variant == "replan" else "do c")
 
 
+@pytest.mark.parametrize(("variant", "again"), [("none", "c"), ("stop", "b")])
+def test_a_step_run_again_starts_again_and_an_accepted_one_keeps_its_start(
+    restarted: dict[str, Any], variant: str, again: str,
+) -> None:
+    before = {s["step_key"]: s for s in restarted["before"][variant]["steps"]}
+    after = {s["step_key"]: s for s in restarted["after"][variant]["steps"]}
+    assert before["a"]["started_at"] and after["a"]["started_at"] == before["a"]["started_at"]
+    # The failed c, or the stopped b, was sent back to not started: it started again at the restart.
+    ended = before[again]["completed_at"] or before[again]["started_at"]
+    assert before[again]["started_at"] and after[again]["started_at"] > ended
+
+
 def test_a_failed_tasks_new_worker_profile_and_limit_run_its_restart(restarted: dict[str, Any]) -> None:
     before, after = restarted["before"]["agents"], restarted["after"]["agents"]
     assert (before["status"], before["agents"]["editable"]) == ("failed", True)

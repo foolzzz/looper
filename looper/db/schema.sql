@@ -147,6 +147,14 @@ ALTER TABLE task_steps ADD COLUMN IF NOT EXISTS feedback TEXT[] NOT NULL DEFAULT
 ALTER TABLE task_steps ADD COLUMN IF NOT EXISTS reviewer_id TEXT;
 ALTER TABLE task_steps ADD COLUMN IF NOT EXISTS missed_messages TEXT[] NOT NULL DEFAULT '{}';
 
+-- When the step's run was first dispatched (its first Worker started), kept through its retries and reviews, and
+-- through a server restart (its attempt runs again as the same attempt). A step sent back to not started (a
+-- restart of the task, or its continue at the spend cap) has none, and gets a new one when it is dispatched again,
+-- so the time the task was stopped does not count. Null until then, and for the steps of a server before this
+-- column: no start is guessed for them. With completed_at (the last time it went to review or ended) it gives how
+-- long the step took.
+ALTER TABLE task_steps ADD COLUMN IF NOT EXISTS started_at TIMESTAMPTZ;
+
 -- A task's plan beside its steps: one row per task, replaced when the task
 -- is planned again. The task's requirement, directory and project stay on
 -- tasks; the project itself is read again before every Planner turn.
