@@ -37,7 +37,7 @@ import { PipelineToolbar } from "@/components/pipeline-toolbar";
 import { GateBadge, TaskGates } from "@/components/task-gates";
 import { TaskWorkspaces, WorktreeMarker } from "@/components/task-workspaces";
 import { GATE_STATES, GATE_TURNS, gateAnchor, gateLook, gateTurn, stepAnchor } from "@/lib/gates";
-import { type NodeCard, gateCard, nodeCardId, plannerCard, resultCard, stepCard } from "@/lib/node-cards";
+import { type NodeCard, gateCard, nodeCardId, plannerCard, resultCard, stepCard, stepSpan } from "@/lib/node-cards";
 import { FIT_PADDING, shownSteps, stepColumns, stepLevels, storeHideSkipped, storedHideSkipped } from "@/lib/pipeline-layout";
 import { useFullScreen } from "@/lib/full-screen";
 import { workspacesByStep } from "@/lib/workspaces";
@@ -615,6 +615,12 @@ function showGate(step: TaskStep) {
   target?.focus({ preventScroll: true });
 }
 
+/** How long a step took, or has run while its task runs (`stepSpan`); nothing before it started. */
+function StepSpan({ step, active }: { step: TaskStep; active: boolean }) {
+  const span = stepSpan(step, active);
+  return span && <span className="text-xs tabular-nums text-muted-foreground">{span.label} {span.text}</span>;
+}
+
 function OverviewTab({
   task,
   onContinued,
@@ -755,6 +761,7 @@ function OverviewTab({
                         </a>
                       )}
                       {stepRoles(step) && <span className="font-mono text-xs text-muted-foreground">{stepRoles(step)}</span>}
+                      <StepSpan step={step} active={isActive} />
                       <WorktreeMarker workspaces={worktrees.get(step.id)} />
                       {step.status === "completed" && step.review_stage && (
                         <span className="text-xs text-muted-foreground">
@@ -1719,7 +1726,7 @@ function PipelineTab({ task, onOpenGate }: { task: TaskDetail; onOpenGate: (step
                                   detail={step.instruction} note={step.retries ? `retry ${step.retries}` : undefined} /> },
         style: nodeStyle(look), sourcePosition: Position.Bottom, targetPosition: Position.Top,
       });
-      cards[step.id] = stepCard(step, { taskId: task.task_id, look, lookOf, stepsById: allById,
+      cards[step.id] = stepCard(step, { taskId: task.task_id, active, look, lookOf, stepsById: allById,
                                         skippedBecause: why.get(step.id), workspaces: worktrees.get(step.id) });
     }
 
@@ -1878,7 +1885,13 @@ interface TaskDetailPageProps {
   onBack: () => void;
 }
 
-export function TaskDetailPage({ taskId, onBack }: TaskDetailPageProps) {
+/** A task's page, new for each task: when the hash moves to another task, its page opens as a fresh load opens it,
+ * on its Overview, without the previous task's data, tab, start error or open confirmation. */
+export function TaskDetailRoute(props: TaskDetailPageProps) {
+  return <TaskDetailPage key={props.taskId} {...props} />;
+}
+
+function TaskDetailPage({ taskId, onBack }: TaskDetailPageProps) {
   const [task, setTask] = useState<TaskDetail | null>(null);
   const [error, setError] = useState("");
   const [startError, setStartError] = useState("");
