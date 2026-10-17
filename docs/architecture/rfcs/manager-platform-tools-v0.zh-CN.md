@@ -175,7 +175,7 @@ T3 的剩余部分（looper #160 已做列出、查看、启用、停用、删�
 | 立即运行为 high | 用户已经点名，界面上同一个按钮不需确认；和开始任务同档 |
 | 启用改为 high | 改变 #160 已交付的行为；用户说「启用」本身就是批准，同一轮新建的不能启用已经保证用户先看到配置块 |
 
-**`looper_config_export`**：参数只有 `include_projects`（默认 `false`，同 `looper config export --include-projects`；为 `true` 时含每个项目的设置层、知识、技能和定时任务）。**从不含密钥**：没有对应参数，密钥一律是占位符（要带密钥，在本机用 `looper config export --include-secrets`）。文件写到 Looper 运行目录的 `exports/looper-config-<UTC 时间>.json`，读权限按 umask，答复给出路径、大小、各部分条数、留作占位符的密钥数、要重新指向的路径文档数，以及怎么导入（`looper config import <文件>`，或界面的 Settings → Import / Export）。风险档 read：它不改平台的任何状态，自主轮里也能用。不接受用户指定路径：从聊天里往任意路径写文件，等于让管家能覆盖本机任意文件；不只给一个下载链接：飞书、Telegram 里的用户不一定能打开控制台。
+**`looper_config_export`**：参数只有 `include_projects`（默认 `false`，同 `looper config export --include-projects`；为 `true` 时含每个项目的设置层、知识、技能和定时任务）。**从不含密钥**：没有对应参数，密钥一律是占位符（要带密钥，在本机用 `looper config export --include-secrets`）。文件写到 Looper 运行目录的 `exports/looper-config-<UTC 时间>-<短 id>.json`，读权限按 umask，答复给出路径、大小、各部分条数、留作占位符的密钥数、要重新指向的路径文档数，以及怎么导入（`looper config import <文件>`，或界面的 Settings → Import / Export）。风险档 read：它不改平台的任何状态，自主轮里也能用。不接受用户指定路径：从聊天里往任意路径写文件，等于让管家能覆盖本机任意文件；不只给一个下载链接：飞书、Telegram 里的用户不一定能打开控制台。
 
 **定时任务的导出与导入**（`looper config export --include-projects`、界面的导出、管家的导出都一样）：
 
@@ -289,7 +289,7 @@ CHAT（包括变更回合）的动作从 none、forward、add_steps 增加到四
 
 ## 11. 上下文开销
 
-T2 之后管家有 14 个工具，定义实测 12.6 KB（`tools/list` 的 JSON），用法一节（`TOOLS_CONTRACT`）2.7 KB；T1 时是 8 个工具 6.8 KB、用法 2.4 KB。T2 的六个工具共 5.8 KB，说明已经压短。T3 加上 `looper_schedules`（列出、查看、启用、停用、删除）后是 15 个工具 13.4 KB（这个工具 0.84 KB），用法 2.8 KB；它以后加新建、修改、立即运行，连同 `looper_config_export`，仍要在 15 KB 以内，超过就合并工具或精简说明。规划者（T2）只多四个工具和一节用法，实测约 5.5 KB。
+T2 之后管家有 14 个工具，定义实测 12.6 KB（`tools/list` 的 JSON），用法一节（`TOOLS_CONTRACT`）2.7 KB；T1 时是 8 个工具 6.8 KB、用法 2.4 KB。T2 的六个工具共 5.8 KB，说明已经压短。T3 的 `looper_schedules` 先有列出、查看、启用、停用、删除时是 15 个工具 13.4 KB（这个工具 0.84 KB），用法 2.8 KB。T3 完成后是 16 个工具 15.0 KB（14,988 字节；`looper_schedules` 2.0 KB，`looper_config_export` 0.35 KB），用法 3.1 KB，正好压在 15 KB 的线内：定时任务的设置放进一个 `fields` 对象，各字段只留必要的说明，导出工具的说明也压短了。以后再加工具或动作，先合并工具或精简已有的说明。规划者（T2）只多四个工具和一节用法，实测约 5.5 KB。
 
 ## 12. 评测与验收
 
@@ -337,6 +337,6 @@ T2 之后管家有 14 个工具，定义实测 12.6 KB（`tools/list` 的 JSON�
 |---|---|---|
 | T1 | 协议和核心：操作目录、风险分档、确认规则、管家专用接口和令牌、留痕、MCP 服务和三种运行时的注入；`read` 工具和任务类工具（第 7 节 T1 行）；任务变更（第 8.1 节）：补充说明（`supplement` 取代 `user_instruction`）、需求版本、送达保证，及其在规划者、执行者、评审者和任务页的出现；规划者 CHAT 的 `replan`（含 `stop`）；迁移现有 JSON 动作（第 9 节）；管家评测和「补充说明、需求修改触发重新规划」的规划者评测 | 定时任务 S2 |
 | T2 | 配置类工具（第 7 节 T2 行）；项目的可选 Agent Profile 列表（表、接口、项目设置页、`looper_settings`）；规划者范围的 MCP 条目、令牌、两个 Profile 工具和改并发的工具（第 8.3 节，D10）及其评测 | T1；步骤的目录隔离 I1（开发计划第 5.0 节第 11 项）先合入，两者都改规划者的派发 |
-| T3 | 定时任务工具（原定时任务 S3 的管家入口）和导出；定时任务的导出导入 | T2、定时任务 S2 |
+| T3 ✅ | 定时任务工具（原定时任务 S3 的管家入口）和导出；定时任务的导出导入（第 7.1 节） | T2、定时任务 S2 |
 
 T1 对规划者的改动只在 CHAT 回合、回复约定、补充说明和需求版本上，不碰派发和接受步骤的代码（另一条线在那里做目录隔离 I1）。
