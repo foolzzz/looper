@@ -13,7 +13,6 @@ import asyncpg
 
 from . import journal as db_journal
 from .connection import get_pool
-from .plans import step_row
 
 # A ready task: created (from the dashboard or by the Manager) and never started. Only a user starts it
 # (``start_ready_task``); a server start never resumes it.
@@ -252,6 +251,17 @@ async def get_task(task_id: str, *, pool: asyncpg.Pool | None = None) -> dict[st
     if row is None:
         return None
     return _task(row)
+
+
+def step_row(row: Mapping[str, Any]) -> dict[str, Any]:
+    """A ``task_steps`` row as the plan and the task page read it: ``result`` decoded, the array columns as lists."""
+    step = dict(row)
+    if isinstance(step.get("result"), str):
+        step["result"] = json.loads(step["result"])
+    for name in ("target_files", "validation_commands", "acceptance_criteria", "depends_on", "feedback",
+                 "missed_messages"):
+        step[name] = list(step.get(name) or [])
+    return step
 
 
 async def get_task_with_steps(task_id: str, *, pool: asyncpg.Pool | None = None) -> dict[str, Any] | None:

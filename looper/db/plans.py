@@ -17,6 +17,7 @@ import asyncpg
 
 from . import journal as db_journal
 from .connection import get_pool
+from .tasks import step_row
 
 # Every status a plan can have (task_plans.status).
 STATUSES = ("planning", "executing", "verifying", "stopping", "completed", "failed")
@@ -116,17 +117,6 @@ async def write(
         await conn.executemany(_SAVE_STEP, [_step_args(task_id, step) for step in steps])
     # After the steps: an entry belongs to a step saved with it.
     await db_journal.insert(conn, task_id, journal)
-
-
-def step_row(row: Mapping[str, Any]) -> dict[str, Any]:
-    """A ``task_steps`` row as the plan and the task page read it: ``result`` decoded, the array columns as lists."""
-    step = dict(row)
-    if isinstance(step.get("result"), str):
-        step["result"] = json.loads(step["result"])
-    for name in ("target_files", "validation_commands", "acceptance_criteria", "depends_on", "feedback",
-                 "missed_messages"):
-        step[name] = list(step.get(name) or [])
-    return step
 
 
 async def load(task_id: str, *, pool: asyncpg.Pool | None = None) -> dict[str, Any] | None:
