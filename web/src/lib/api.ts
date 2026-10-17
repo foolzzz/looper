@@ -1874,7 +1874,9 @@ export interface LlmRecord {
   agent_id: string;
   task_id: string | null;
   session_id: string | null;
-  status: "running" | "completed" | "failed";
+  /** `interrupted`: Looper stopped the run before it ended (a kill, its task or the server stopping), or the server
+   * running it died. */
+  status: "running" | "completed" | "failed" | "interrupted";
   input_summary: string | null;
   output_summary: string | null;
   input_text: string | null;

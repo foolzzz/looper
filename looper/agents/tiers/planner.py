@@ -2385,16 +2385,22 @@ class PlannerAgent:
         return bool(ack.payload.get("killed"))
 
     async def _kill_running_workers(self) -> None:
-        """Stop every Worker this task still runs (on task stop/cancel)."""
+        """Stop every Worker and Reviewer this task still runs (on task stop/cancel)."""
         plan = self._plan
         if plan is None or self._bus is None:
             return
         for step in plan.steps:
             if step.status == "dispatched" and step.worker_id:
-                try:
-                    await self._kill_worker(step)
-                except Exception:
-                    logger.debug("planner %s could not stop worker %s", self.agent_id, step.worker_id, exc_info=True)
+                run_id = None
+            elif step.status == "completed" and step.reviewer_id:
+                run_id = step.reviewer_id  # in review
+            else:
+                continue
+            try:
+                await self._kill_worker(step, run_id)
+            except Exception:
+                logger.debug("planner %s could not stop run %s", self.agent_id, run_id or step.worker_id,
+                             exc_info=True)
 
     # --- Turns on the Planner's Claude ---
 
@@ -2579,70 +2585,69 @@ class PlannerAgent:
         plan = self._plan
         assert plan is not None
         recorder = self._recorder(plan, text, process)
-        await recorder.start()
+        async with recorder:  # however the turn ends, its task's stop cutting it off too, its record ends
+            async def on_event(event: dict[str, Any]) -> None:
+                await recorder.record(event)
+                session_id = event.get("session_id")
+                if isinstance(session_id, str) and session_id and session_id != plan.session_id:
+                    plan.session_id = session_id
+                    await self._save_session(plan)
+                    # The new session has its resume brief.
+                    self._pending_switch = self._pending_handoff = None
 
-        async def on_event(event: dict[str, Any]) -> None:
-            await recorder.record(event)
-            session_id = event.get("session_id")
-            if isinstance(session_id, str) and session_id and session_id != plan.session_id:
-                plan.session_id = session_id
-                await self._save_session(plan)
-                # The new session has its resume brief.
-                self._pending_switch = self._pending_handoff = None
-
-        if self._ops is not None and self._token is not None:
-            self._ops.begin_turn(self._token)  # its tools may change things in this turn only
-        try:
-            turn = await asyncio.wait_for(self._claude.run_turn(text, on_event, stop=lambda: recorder.cap_stop),
-                                          limit if limit > 0 else None)
-        except TimeoutError:
-            # The turn was cancelled, which killed Claude; the next turn resumes the session.
-            error = f"the turn ran longer than the {limit} s limit (timeout_seconds)"
-            await recorder.finish(output_text=None, result_event=None, error=error)
-            raise PlannerTurnError(error) from None
-        except Exception as exc:
-            error = f"reading Claude failed: {type(exc).__name__}: {exc}"
-            await recorder.finish(output_text=None, result_event=None, error=error)
-            raise PlannerTurnError(error) from None
-        except BaseException as exc:
-            await recorder.finish(output_text=None, result_event=None,
-                                  error=f"Planner stopped reading Claude: {type(exc).__name__}")
-            raise
-        finally:
             if self._ops is not None and self._token is not None:
-                self._ops.end_turn(self._token)
+                self._ops.begin_turn(self._token)  # its tools may change things in this turn only
+            try:
+                turn = await asyncio.wait_for(self._claude.run_turn(text, on_event, stop=lambda: recorder.cap_stop),
+                                              limit if limit > 0 else None)
+            except TimeoutError:
+                # The turn was cancelled, which killed Claude; the next turn resumes the session.
+                error = f"the turn ran longer than the {limit} s limit (timeout_seconds)"
+                await recorder.finish(output_text=None, result_event=None, error=error)
+                raise PlannerTurnError(error) from None
+            except Exception as exc:
+                error = f"reading Claude failed: {type(exc).__name__}: {exc}"
+                await recorder.finish(output_text=None, result_event=None, error=error)
+                raise PlannerTurnError(error) from None
+            finally:
+                if self._ops is not None and self._token is not None:
+                    self._ops.end_turn(self._token)
 
-        if resuming and not turn.session_started:
-            error = f"session {resuming} could not be resumed{exit_note(turn.exit_code)}; retried in a new session"
-            await recorder.finish(output_text=None, result_event=None, error=error)
-            raise _SessionNotResumed(error)
+            if resuming and not turn.session_started:
+                error = f"session {resuming} could not be resumed{exit_note(turn.exit_code)}; retried in a new session"
+                await recorder.finish(output_text=None, result_event=None, error=error)
+                raise _SessionNotResumed(error)
 
-        result_event = turn.result_event
-        final_text = str((result_event or {}).get("result") or "")
-        error: str | None = None
-        if result_event is None:
-            error = f"Claude Code exited before finishing the turn (exit code {turn.exit_code})"
-        elif process.launch.runtime.budget_error(result_event):
-            # The process answers every later turn the same way at once: the next turn starts a new one,
-            # with a new cap, that resumes the session.
-            error = process.launch.runtime.budget_error(result_event)
-            await self._claude.stop()
-        elif result_event.get("is_error") or result_event.get("subtype") != "success":
-            error = f"Claude Code turn did not succeed ({result_event.get('subtype') or 'error'})"
-        elif not final_text.strip():
-            error = "Claude Code returned an empty reply"
-        if result_event is not None:
-            plan.session_totals = self._claude.totals
-            await self._save_session(plan)
-        await recorder.finish(
-            output_text=final_text or None,
-            result_event=result_event,
-            error=error,
-            usage=turn.usage,
-        )
-        if error:
-            raise PlannerTurnError(error)
-        return final_text
+            result_event = turn.result_event
+            final_text = str((result_event or {}).get("result") or "")
+            error: str | None = None
+            over_cap = process.launch.runtime.budget_error(result_event)
+            if result_event is None:
+                error = f"Claude Code exited before finishing the turn (exit code {turn.exit_code})"
+            elif over_cap:
+                error = over_cap
+            elif result_event.get("is_error") or result_event.get("subtype") != "success":
+                error = f"Claude Code turn did not succeed ({result_event.get('subtype') or 'error'})"
+            elif not final_text.strip():
+                error = "Claude Code returned an empty reply"
+            # The turn is over: recorded first, so a stop that comes while Claude stops or the session is saved
+            # keeps what it spent.
+            await recorder.finish(
+                output_text=final_text or None,
+                result_event=result_event,
+                error=error,
+                usage=turn.usage,
+            )
+            if over_cap:
+                # The process answers every later turn the same way at once: the next turn starts a new one,
+                # with a new cap, that resumes the session.
+                await self._claude.stop()
+            if result_event is not None:
+                plan.session_totals = self._claude.totals
+                await self._save_session(plan)
+            if error:
+                raise PlannerTurnError(error)
+            return final_text
 
     # --- A new session: the handoff before it and the resume brief that starts it ---
 
