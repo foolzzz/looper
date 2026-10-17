@@ -639,9 +639,9 @@ function OverviewTab({
   const gates = new Map((task.gates ?? []).map((gate) => [gate.step_id, gate]));
   const gateOf = (step: TaskStep) => (step.kind === "gate" ? gates.get(step.id) : undefined);
   const stepIcon = (step: TaskStep, gate = gateOf(step)) =>
-    gate ? <CirclePause className={cn("h-4 w-4", gateLook(gate).tone)} aria-hidden="true" /> : stepStatusIcon(step.status);
+    gate ? <CirclePause className={cn("h-4 w-4", gateLook(gate, isActive).tone)} aria-hidden="true" /> : stepStatusIcon(step.status);
   const stepBadge = (step: TaskStep, gate = gateOf(step)) =>
-    gate ? <GateBadge gate={gate} /> : stepStatusBadge(step.status);
+    gate ? <GateBadge gate={gate} active={isActive} /> : stepStatusBadge(step.status);
   // Done means accepted (verified); a step in review is not done yet. A dropped (skipped) step is not counted, nor is
   // a cancelled gate (its step is verified, but nothing was settled).
   const cancelledGate = (s: TaskStep) => gateOf(s)?.state === "cancelled";
@@ -1538,9 +1538,10 @@ function nodeStyle(look: NodeLook) {
   };
 }
 
-/** Nodes that name their card (`NodeCards`) for assistive technology. */
+/** Nodes that name their card (`NodeCards`) for assistive technology, where focus lands: on the node, or on a gate's
+ * button (`GateNode`). */
 const described = (nodes: Node[]): Node[] =>
-  nodes.map((node) => ({ ...node, domAttributes: { "aria-details": nodeCardId(node.id) } }));
+  nodes.map((node) => (node.type === "gate" ? node : { ...node, domAttributes: { "aria-details": nodeCardId(node.id) } }));
 
 function NodeLabel({
   name,
@@ -1585,7 +1586,7 @@ const HEXAGON = [
 
 /** A user gate in the pipeline: a hexagon with a pause icon, its label and its state in words; a button that takes
  * the user to the gate on the Overview tab. */
-function GateNode({ data }: NodeProps<Node<GateNodeData, "gate">>) {
+function GateNode({ id, data }: NodeProps<Node<GateNodeData, "gate">>) {
   const { look } = data;
   return (
     <>
@@ -1602,6 +1603,7 @@ function GateNode({ data }: NodeProps<Node<GateNodeData, "gate">>) {
       <button
         type="button"
         onClick={data.onOpen}
+        aria-details={nodeCardId(id)}
         style={{ color: look.color, opacity: look.muted ? 0.8 : 1 }}
         className="nodrag nopan pointer-events-auto relative flex h-full w-full cursor-pointer flex-col items-center justify-center rounded-md px-6 leading-tight focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
       >
@@ -1664,11 +1666,13 @@ function PipelineTab({ task, onOpenGate }: { task: TaskDetail; onOpenGate: (step
     const byId = new Map(steps.map((s) => [s.id, s]));
     const allById = new Map(all.map((s) => [s.id, s]));
     const gates = new Map((task.gates ?? []).map((gate) => [gate.step_id, gate]));
-    // Each step's look as its node draws it: a gate's by its gate (whose turn it is while it is discussed).
+    const active = isActiveTask(task);
+    // Each step's look as its node draws it: a gate's by its gate (whose turn it is while it is discussed, the
+    // Planner's only while the task runs, as the gate's panel says).
     const lookOf = (step: TaskStep): NodeLook => {
       if (step.kind !== "gate") return stepLook(step.status);
       const gate = gates.get(step.id);
-      const turn = gate && gateTurn(gate);
+      const turn = gate && gateTurn(gate, active);
       return turn ? GATE_TURN_LOOKS[turn] : GATE_LOOKS[gateState(step, gate)];
     };
     const levels = stepLevels(steps);
@@ -1690,7 +1694,7 @@ function PipelineTab({ task, onOpenGate }: { task: TaskDetail; onOpenGate: (step
           data: { name, topic: step.instruction, look, onOpen: () => onOpenGate(step) },
           style: { width: NODE_W, height: NODE_H, padding: 0, background: "transparent", border: "none" },
         });
-        cards[step.id] = gateCard(step, gates.get(step.id), { look, lookOf, stepsById: allById });
+        cards[step.id] = gateCard(step, gates.get(step.id), { look, lookOf, stepsById: allById, active });
       }
       for (const source of deps.length ? deps : ["planner"]) {
         const fromLive = source === "planner" || byId.get(source)?.status !== "skipped";

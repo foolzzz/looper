@@ -28,7 +28,7 @@ import {
   type TaskDetail,
   type UserGate,
 } from "@/lib/api";
-import { gateAnchor, gateLook, isGateShown, isGateWaiting, sinceText } from "@/lib/gates";
+import { gateAnchor, gateLook, gateWaitsOn, isGateShown, isGateWaiting, sinceText } from "@/lib/gates";
 import { errorText, useAction } from "@/lib/use-action";
 import { cn } from "@/lib/utils";
 
@@ -39,9 +39,10 @@ const THREAD_POLL_MS = 3000;
 // with a focus ring that shows.
 const TARGET = "h-auto min-h-11 max-w-full whitespace-normal [overflow-wrap:anywhere] py-2 text-left focus-visible:ring-2";
 
-/** A gate as a badge: its state's word and tone, or whose turn it is while it is discussed. */
-export function GateBadge({ gate }: { gate: Pick<UserGate, "state" | "waiting_on"> }) {
-  const look = gateLook(gate);
+/** A gate as a badge: its state's word and tone, or whose turn it is while it is discussed (the Planner's only while
+ * its task runs, `active`). */
+export function GateBadge({ gate, active }: { gate: Pick<UserGate, "state" | "waiting_on">; active: boolean }) {
+  const look = gateLook(gate, active);
   return <Badge variant={look.variant}>{look.label}</Badge>;
 }
 
@@ -281,7 +282,7 @@ function WaitingGate({
   const takes = task.group !== "completed";
   // The Planner answers: a message of the user's waits for it, or its automatic retry of a failed turn is due; only
   // while the task runs (a stopped one keeps the message for its restart).
-  const answering = active && gate.waiting_on === "planner";
+  const answering = gateWaitsOn(gate, active) === "planner";
   // Otherwise, the user's messages a failed Planner turn had.
   const notDelivered = answering ? 0 : gate.not_delivered;
   // While it is the user's turn, the thread changes only with the gate, which the task page reads again anyway.
@@ -533,7 +534,7 @@ function ClosedGate({
           <span className="min-w-0 flex-1 space-y-0.5">
             <span className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
               <span className="font-mono text-xs text-muted-foreground">gate {gate.step}</span>
-              <GateBadge gate={gate} />
+              <GateBadge gate={gate} active={false} />
               <span className="min-w-0 break-words text-sm font-medium">{gate.topic}</span>
             </span>
             <span className="block text-xs text-muted-foreground">

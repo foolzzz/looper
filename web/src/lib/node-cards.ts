@@ -1,6 +1,7 @@
 /** The details card of each Pipeline node, as data: built from the task here, drawn by
  * `components/pipeline-node-card`. */
 import { historyHref } from "@/pages/agent-history";
+import { gateWaitsOn } from "@/lib/gates";
 import type { GateAgendaItem, TaskDetail, TaskStep, UserGate } from "@/lib/api";
 
 /** A node's status as the Pipeline draws it: a word and the node's colors. */
@@ -155,10 +156,16 @@ export function stepCard(step: TaskStep, { taskId, look, lookOf, stepsById, skip
 
 const AGENDA_STATUS: Record<GateAgendaItem["status"], string> = { open: "Open", resolved: "Resolved", dropped: "Dropped" };
 
-/** A user gate's card: its topic, its questions with each one's state, whom it waits on, what the Planner found and
+/** A user gate's card: its topic, its questions with each one's state, whom it waits on (the Planner only while its
+ * task runs, `active`, as its panel says), what the Planner found and
  * what it settled or why it was cancelled, the steps it waits for, and when it opened and closed. `gate` is absent
  * before the gate has a row. */
-export function gateCard(step: TaskStep, gate: UserGate | undefined, { look, lookOf, stepsById }: Omit<StepCardContext, "taskId" | "skippedBecause">): NodeCard {
+export function gateCard(
+  step: TaskStep,
+  gate: UserGate | undefined,
+  { look, lookOf, stepsById, active }: Omit<StepCardContext, "taskId" | "skippedBecause"> & { active: boolean },
+): NodeCard {
+  const waitsOn = gate && gateWaitsOn(gate, active);
   const deps = (step.depends_on ?? []).map((id) => stepsById.get(id)).filter((s): s is TaskStep => !!s);
   const notDelivered = gate?.not_delivered ?? 0;
   return {
@@ -170,7 +177,7 @@ export function gateCard(step: TaskStep, gate: UserGate | undefined, { look, loo
       ...list("Agenda", gate?.agenda.map((item) =>
         `${AGENDA_STATUS[item.status]}: ${item.question}${item.status === "resolved" && item.answer ? ` → ${item.answer}` : ""}`)),
       ...facts("Discussion", [
-        gate?.waiting_on && { label: "Waiting on", value: gate.waiting_on === "user" ? "You" : "The Planner" },
+        waitsOn && { label: "Waiting on", value: waitsOn === "user" ? "You" : "The Planner" },
         notDelivered > 0 && { label: "Not delivered", value: `${notDelivered} message${notDelivered === 1 ? "" : "s"}` },
         !!gate?.turns && { label: "Turns", value: String(gate.turns) },
       ]),

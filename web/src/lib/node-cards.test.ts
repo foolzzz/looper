@@ -158,8 +158,9 @@ function gate(extra: Partial<UserGate> = {}): UserGate {
 describe("gateCard", () => {
   const s1 = step("s1", { status: "verified" });
   const g1 = step("g1", { kind: "gate", status: "waiting_user", instruction: "Pick the database", depends_on: ["s1"] });
-  const cardOfGate = (g?: UserGate) =>
-    gateCard(g1, g, { look: look("Your turn"), lookOf: (d) => LOOKS[d.status], stepsById: new Map([[s1.id, s1], [g1.id, g1]]) });
+  const cardOfGate = (g?: UserGate, active = true) =>
+    gateCard(g1, g, { look: look("Your turn"), lookOf: (d) => LOOKS[d.status], stepsById: new Map([[s1.id, s1], [g1.id, g1]]),
+                      active });
 
   it("shows the topic, the agenda with each question's state, whom it waits on and when it opened", () => {
     const card = cardOfGate(gate({
@@ -188,6 +189,9 @@ describe("gateCard", () => {
     expect(section(cancelled.sections, "Cancelled")).toMatchObject({ text: "The user asked to stop." });
     expect(section(cardOfGate(gate({ waiting_on: "planner" })).sections, "Discussion"))
       .toMatchObject({ facts: [{ label: "Waiting on", value: "The Planner" }] });
+    // A stopped task keeps the user's messages for its restart: it is the user's turn, as the gate's panel says.
+    expect(section(cardOfGate(gate({ waiting_on: "planner" }), false).sections, "Discussion"))
+      .toMatchObject({ facts: [{ label: "Waiting on", value: "You" }] });
   });
 
   it("shows the step's topic before the gate has a row", () => {

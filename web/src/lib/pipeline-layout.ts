@@ -4,23 +4,31 @@ import type { TaskStep } from "@/lib/api";
 
 type Padding = Exclude<NonNullable<FitViewOptions["padding"]>, number | string>;
 
-/** The room a fit leaves around the graph: 12% on the sides and at the top, and at the bottom the toolbar's room
- * (54 px on a touch screen, its 15 px margin and a gap), so the toolbar never covers the result. */
+/** The room a fit leaves around the graph: 12% at the top and on the right; on the left, the zoom controls' room
+ * (26 px wide, a 15 px margin and a gap); at the bottom, the toolbar's (54 px on a touch screen, its 15 px margin
+ * and a gap): so neither covers a node. */
+const CONTROLS_ROOM = 56;
 const TOOLBAR_ROOM = 80;
-export const FIT_PADDING: Padding = { x: 0.12, top: 0.12, bottom: `${TOOLBAR_ROOM}px` };
+export const FIT_PADDING: Padding = { top: 0.12, right: 0.12, left: `${CONTROLS_ROOM}px`, bottom: `${TOOLBAR_ROOM}px` };
 
-/** The room a fit leaves, with the graph's own panels measured (one frame, the window's coordinates): over a panel
- * in the lower half (the toolbar) and under one in the upper half (full screen's way out), with a gap, wherever
- * that is more than `FIT_PADDING`'s. */
-export function fitPadding(frame: { top: number; height: number }, panels: { top: number; height: number }[]): Padding {
+/** The room a fit leaves, with the graph's panels measured (one frame, the window's coordinates), wherever that is
+ * more than `FIT_PADDING`'s, with a gap: beside a panel taller than it is wide (the zoom controls, a column at a
+ * side), over one in the lower half (the toolbar), under one in the upper half (full screen's way out). */
+export function fitPadding(
+  frame: { left: number; top: number; width: number; height: number },
+  panels: { left: number; top: number; width: number; height: number }[],
+): Padding {
   const gap = 8;
-  let bottom = TOOLBAR_ROOM;
-  let top = 0;
+  let [top, right, bottom, left] = [0, 0, TOOLBAR_ROOM, CONTROLS_ROOM];
   for (const panel of panels) {
-    if (panel.top - frame.top > frame.height / 2) bottom = Math.max(bottom, frame.top + frame.height - panel.top + gap);
+    if (panel.height > panel.width) {
+      if (panel.left + panel.width / 2 < frame.left + frame.width / 2) left = Math.max(left, panel.left + panel.width - frame.left + gap);
+      else right = Math.max(right, frame.left + frame.width - panel.left + gap);
+    } else if (panel.top - frame.top > frame.height / 2) bottom = Math.max(bottom, frame.top + frame.height - panel.top + gap);
     else top = Math.max(top, panel.top + panel.height - frame.top + gap);
   }
-  return { ...FIT_PADDING, ...(top > 0 && { top: `${Math.ceil(top)}px` as const }), bottom: `${Math.ceil(bottom)}px` };
+  const px = (value: number) => `${Math.ceil(value)}px` as const;
+  return { top: top ? px(top) : FIT_PADDING.top, right: right ? px(right) : FIT_PADDING.right, bottom: px(bottom), left: px(left) };
 }
 
 /** The steps the Pipeline draws: every one, or all but the ones a replan dropped (skipped); `hidden` counts those
