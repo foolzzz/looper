@@ -207,7 +207,8 @@ def test_the_task_page_shows_a_task_s_workspaces_and_discards_one_a_stopped_task
             ("s3", "active", None, [], True)]
         assert view["workspaces"][0]["merge_commit"] == merged.merge_commit
         assert [c["command"] for c in view["undo"]][:2] == [
-            "git log --first-parent --grep='^Looper-Task: task-a$' main", f"git revert -m 1 {merged.merge_commit}"]
+            "git log --first-parent --grep='^Looper-Task: task-a$' main",
+            f"git switch main && git revert -m 1 {merged.merge_commit}"]
         assert (await _call(server, "GET", "/api/tasks/task-b"))[1]["step_workspaces"] is None
 
         discard = f"/api/tasks/task-a/workspaces/{unmerged.id}/discard"
@@ -234,8 +235,26 @@ def test_the_task_page_shows_a_task_s_workspaces_and_discards_one_a_stopped_task
         assert (await _call(server, "POST", f"/api/tasks/task-b/workspaces/{three.id}/discard"))[0] == 404
         assert (await _call(server, "POST", "/api/tasks/task-a/workspaces/999999/discard"))[0] == 404
         assert Path(three.path).exists()  # only the one asked for
+
+        # While it is discarded, the task's row is locked: a restart's status update waits for it.
+        blocked: list[str] = []
+        real = ws.discard
+
+        async def discard_while_restarted(workspace: ws.StepWorkspace) -> ws.StepWorkspace:
+            other = await asyncpg.connect(DSN, server_settings={
+                "search_path": await pool.fetchval("SELECT current_schema()"), "lock_timeout": "200ms"})
+            try:
+                await other.execute("UPDATE tasks SET status = 'pending' WHERE id = 'task-a'")
+            except asyncpg.LockNotAvailableError:
+                blocked.append("waited")
+            finally:
+                await other.close()
+            return await real(workspace)
+
+        monkeypatch.setattr(ws, "discard", discard_while_restarted)
         assert (await _call(server, "POST", f"/api/tasks/task-a/workspaces/{three.id}/discard"))[0] == 200
-        assert not Path(three.path).exists()
+        assert blocked == ["waited"] and not Path(three.path).exists()
+        assert await pool.fetchval("SELECT status FROM tasks WHERE id = 'task-a'") == "stopped"
 
     _run(test, monkeypatch)
 

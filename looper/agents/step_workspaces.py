@@ -447,7 +447,8 @@ async def ensure_worktree(workspace: StepWorkspace) -> None:
     """Make the workspace's worktree exist: from its start the first time, from its branch after it was lost."""
     path = Path(workspace.path)
     if not (path / ".git").exists():
-        await _git(workspace.repo_dir, "worktree", "prune")
+        # Only this worktree's stale record, if git still has one; the user's other worktrees are left alone.
+        await _git(workspace.repo_dir, "worktree", "remove", "--force", str(path), check=False)
         path.parent.mkdir(parents=True, exist_ok=True)
         branch = await _git(workspace.repo_dir, "rev-parse", "--verify", "-q", f"refs/heads/{workspace.branch}",
                             check=False)
@@ -509,6 +510,8 @@ class MergeResult:
     workspace: StepWorkspace  # merged or unmerged
     files: tuple[str, ...]  # merged: the files the merge changed; unmerged: the conflicting or blocking ones
     leftovers: str | None = None  # the commit of what the Worker left uncommitted, if it left anything
+    # The linked paths the Worker replaced with files of its own: they are committed like its other changes.
+    replaced_links: tuple[str, ...] = ()
 
 
 class _Unmerged(Exception):
@@ -538,27 +541,31 @@ async def merge(workspace: StepWorkspace, *, step_key: str, title: str,
     elif workspace.state is not StepWorkspaceState.MERGING:
         raise IllegalTransition(f"step workspace {workspace.id} is {workspace.state.value}; it cannot be merged")
     leftovers: str | None = None
+    still = tuple(p for p in workspace.links if (Path(workspace.work_dir) / p).is_symlink())
+    replaced = tuple(p for p in workspace.links if p not in still and os.path.lexists(Path(workspace.work_dir) / p))
     try:
-        workspace, leftovers = await _close_step_branch(workspace, step_key)
+        workspace, leftovers = await _close_step_branch(workspace, step_key, still)
         await save(workspace)
         workspace, files = await _merge_into_target(workspace, step_key, title, save)
     except _Unmerged as failure:
         workspace = workspace.moved(StepWorkspaceState.UNMERGED, merge_error=failure.kind, detail=str(failure),
                                     merge_files=failure.files[:50])
         await save(workspace)
-        return MergeResult(workspace, failure.files, leftovers)
+        return MergeResult(workspace, failure.files, leftovers, replaced)
     except GitError as exc:
         workspace = workspace.moved(StepWorkspaceState.UNMERGED, merge_error=MergeError.GIT_FAILED,
                                     detail=str(exc))
         await save(workspace)
-        return MergeResult(workspace, (), leftovers)
+        return MergeResult(workspace, (), leftovers, replaced)
     workspace = workspace.moved(StepWorkspaceState.MERGED)
     await save(workspace)
-    return MergeResult(workspace, files, leftovers)
+    return MergeResult(workspace, files, leftovers, replaced)
 
 
-async def _close_step_branch(workspace: StepWorkspace, step_key: str) -> tuple[StepWorkspace, str | None]:
-    """Commit what the step's Worker left uncommitted; the workspace with its result commit, and that commit."""
+async def _close_step_branch(workspace: StepWorkspace, step_key: str,
+                             links: Sequence[str]) -> tuple[StepWorkspace, str | None]:
+    """Commit what the step's Worker left uncommitted, without ``links`` (the linked paths that are still links); the
+    workspace with its result commit, and that commit."""
     path = Path(workspace.path)
     leftovers: str | None = None
     if (path / ".git").exists():
@@ -567,11 +574,12 @@ async def _close_step_branch(workspace: StepWorkspace, step_key: str) -> tuple[S
             raise _Unmerged(MergeError.STEP_BRANCH_CHANGED,
                             f"the step's checkout is no longer on its branch {workspace.branch}")
         await _git(path, "add", "-A")
-        if workspace.links:
+        if links:
             # A link is the task directory's local state, never part of the step's result: not even one the Worker
-            # committed (a directory-only ignore rule, such as node_modules/, does not match a link).
+            # committed (a directory-only ignore rule, such as node_modules/, does not match a link). One the Worker
+            # replaced with files of its own is its change.
             await _git(path, "rm", "-r", "-q", "--cached", "--ignore-unmatch", "--",
-                       *(f":(literal){_in_worktree(workspace, p)}" for p in workspace.links))
+                       *(f":(literal){_in_worktree(workspace, p)}" for p in links))
         staged = await _git(path, "diff", "--cached", "--quiet", check=False)
         if staged.returncode not in (0, 1):
             raise GitError(f"git diff --cached failed: {staged.stderr.decode('utf-8', 'replace').strip()[:500]}")
@@ -650,9 +658,7 @@ async def remove(workspace: StepWorkspace, *, keep_branch: bool = False) -> Step
     """
     path = Path(workspace.path)
     if Path(workspace.repo_dir).is_dir():
-        if path.exists():
-            await _git(workspace.repo_dir, "worktree", "remove", "--force", str(path), check=False)
-        await _git(workspace.repo_dir, "worktree", "prune", check=False)
+        await _forget_worktree(workspace.repo_dir, path)
         if not keep_branch:
             await _git(workspace.repo_dir, "branch", "-D", workspace.branch, check=False)
     if path.exists():
@@ -684,22 +690,25 @@ async def branch_exists(repo_dir: str, branch: str) -> bool:
 def undo_commands(task_id: str, *, start_branch: str, start_commit: str,
                   merged: Sequence[tuple[str, str]]) -> list[dict[str, str]]:
     """The commands, run in the task directory, that undo what the task did to its branch (the RFC's section 8):
-    ``merged`` is each merged step's label and merge commit, in order. Without the start, only the list and the
-    steps'."""
+    ``merged`` is each merged step's label and merge commit, in order. Each one that changes a branch switches to the
+    task's branch first, so it is right from whatever the task directory has checked out. Without the start, only
+    the list and the steps'."""
     branch = short_branch(start_branch)
     q = shlex.quote
+    on = f"git switch {q(branch)} && " if branch else ""
     commands = [{"what": f"List the task's commits on {branch or 'the branch'}",
                  "command": f"git log --first-parent --grep={q(f'^Looper-Task: {task_id}$')}"
                             + (f" {q(branch)}" if branch else "")}]
-    commands += [{"what": f"Undo step {key}", "command": f"git revert -m 1 {commit}"} for key, commit in merged]
+    commands += [{"what": f"Undo step {key}", "command": f"{on}git revert -m 1 {commit}"} for key, commit in merged]
     if start_commit and branch:
         commands += [
             {"what": "Undo the whole task, keeping its changes as uncommitted changes",
-             "command": f"git reset {start_commit}"},
+             "command": f"{on}git reset {start_commit}"},
             {"what": "Undo the whole task and drop its changes (and any other uncommitted change)",
-             "command": f"git reset --hard {start_commit}"},
+             "command": f"{on}git reset --hard {start_commit}"},
             {"what": f"Move the task's commits to a new branch and put {branch} back where the task started",
-             "command": f"git switch -c {q(f'{branch}-{task_id}')} && git branch -f {q(branch)} {start_commit}"},
+             "command": f"git switch -c {q(f'{branch}-{task_id}')} {q(branch)} && "
+                        f"git branch -f {q(branch)} {start_commit}"},
         ]
     return commands
 
@@ -719,6 +728,16 @@ def task_view(task_id: str, rows: Sequence[Mapping[str, Any]], *, start_branch: 
     }
 
 
+async def _forget_worktree(repo: str, path: Path) -> None:
+    """Remove the worktree at ``path`` and the repository's record of it, even when its directory is already gone;
+    not with ``git worktree prune``, which would also drop the records of the user's own worktrees whose
+    directories are missing."""
+    await _git(repo, "worktree", "remove", "--force", str(path), check=False)
+    if path.exists():  # git could not remove it: delete it, then the record it leaves
+        shutil.rmtree(path, ignore_errors=True)
+        await _git(repo, "worktree", "remove", "--force", str(path), check=False)
+
+
 def _remove_empty(directory: Path) -> None:
     try:
         directory.rmdir()
@@ -733,8 +752,7 @@ async def remove_orphan(path: Path) -> None:
         branch = await _git(path, "symbolic-ref", "-q", "HEAD", check=False)
         if common.returncode == 0:
             repo = str(Path(common.text).parent)
-            await _git(repo, "worktree", "remove", "--force", str(path), check=False)
-            await _git(repo, "worktree", "prune", check=False)
+            await _forget_worktree(repo, path)
             if branch.returncode == 0 and branch.text.startswith("refs/heads/looper/"):
                 await _git(repo, "branch", "-D", short_branch(branch.text), check=False)
     if path.exists():

@@ -167,7 +167,7 @@ step_workspaces                      一个隔离步骤的一个工作区
 - 重启：重新规划先删掉这个任务的全部工作区，再删步骤；从计划续跑则保留，没验收的步骤在原工作区里继续（同 `_resume`）。
 - 删除任务：全部删掉。
 - 服务启动时扫一遍 `<runtime_root>/worktrees/`：没有对应的行、行已是 `merged` 或 `discarded`、或任务已删除的目录删掉；主仓库
-  已不存在就只删目录、记日志；最后 `git worktree prune`。
+  已不存在就只删目录、记日志。每个目录用 `git worktree remove --force <目录>` 连同它在仓库里的记录一起删（目录已经没了也行），不用 `git worktree prune`：它会顺带删掉用户自己那些目录不在了的 worktree 的记录。
 
 ## 7. 与其他功能的关系
 
@@ -205,14 +205,14 @@ step_workspaces                      一个隔离步骤的一个工作区
 | 子模块、LFS | `worktree add` 不初始化子模块，写进文档作为已知差距。LFS 的内容由过滤器处理、不靠钩子，检查点、worktree 和合并预计照常（未实测，I1 补一个用例） |
 | 服务崩溃 | 运行中的步骤按 `_resume` 在同一个工作区里重跑；`merging` 中断的按第 6 节重做；孤儿目录由启动清扫回收 |
 
-**回滚（用户怎么撤销）：** 以下命令都在临时仓库里试过。
+**回滚（用户怎么撤销）：** 以下命令都在临时仓库里试过。改动 B 的那几条先 `git switch <B>`：任务目录这时检出的未必是 B，在别的分支上直接 `git reset <R>` 会移动那个分支。
 
 - 列出一个任务在 B 上的提交：`git log --first-parent --grep='^Looper-Task: <task_id>$' <B>`（检查点和合并提交；步骤里的
   提交在各合并提交的第二个父提交下面）。
-- 撤销一个步骤：`git revert -m 1 <这一步的合并提交>`。
-- 撤销整个任务、保留改动：`git reset <R>`。B 回到 R，任务的全部改动变回未提交的改动，和 `shared` 模式的结果一样；R 之后
-  用户自己在 B 上的提交也会一起变回未提交的改动。连改动一起丢掉：`git reset --hard <R>`（从没提交过的未跟踪文件不受影响）。
-- 提交落在了不该落的分支上（比如 `main`）：`git switch -c <新分支>`，再 `git branch -f <B> <R>`。工作区和未提交的改动不动。
+- 撤销一个步骤：`git switch <B> && git revert -m 1 <这一步的合并提交>`。
+- 撤销整个任务、保留改动：`git switch <B> && git reset <R>`。B 回到 R，任务的全部改动变回未提交的改动，和 `shared` 模式的结果一样；R 之后
+  用户自己在 B 上的提交也会一起变回未提交的改动。连改动一起丢掉：`git switch <B> && git reset --hard <R>`（从没提交过的未跟踪文件不受影响）。
+- 提交落在了不该落的分支上（比如 `main`）：`git switch -c <新分支> <B> && git branch -f <B> <R>`（新分支从 B 建，不从当前检出的分支建）。
 - 关掉这个功能：项目设回 `shared`。
 
 **观测：** activity 记录 R（「任务开始时 main 在 abc1234」）、每个检查点（短哈希、文件数）、每个工作区的建立（分支、S、
@@ -275,8 +275,8 @@ I1 之后的几处改动（#155、#161、#168、#173）对这一期的影响已�
   P 的上级目录在 worktree 里不存在就建出来；上级目录解析到 worktree 之外（经过一个被跟踪的符号链接）就不建。没建的写进
   activity（「没有链接 .venv：任务目录里没有」「没有链接 x：它在仓库里被跟踪」）。实际建了的记在工作区上
   （`step_workspaces.links`），worktree 丢失后重建时照这一份重新链接，之后改设置不影响已有的工作区。
-- **合回时：** 提交剩余改动照旧 `git add -A`，再 `git rm -r --cached --ignore-unmatch -- ':(literal)<P>'…`，然后只在暂存区
-  有改动时提交。所以链接（以及 Worker 在 P 下面加的任何东西）**永远不是步骤结果的一部分**：Worker 自己 `git add -A` 提交了
+- **合回时：** 提交剩余改动照旧 `git add -A`，再对**仍是链接的** P `git rm -r --cached --ignore-unmatch -- ':(literal)<P>'…`，
+  然后只在暂存区有改动时提交。Worker 把链接换成了自己的文件的，那是它的改动，照常提交，activity 记一条。所以链接（以及 Worker 在 P 下面加的任何东西）**永远不是步骤结果的一部分**：Worker 自己 `git add -A` 提交了
   链接（`.gitignore` 写的是 `node_modules/` 这种只匹配目录的规则时，链接不被忽略），剩余改动提交会把它删掉，W 的树里没有 P，
   合并就不会碰任务目录里的 P。不这样做，`git merge --ff-only` 会用一个指向自己的链接覆盖任务目录里被忽略的 `node_modules`
   目录，连同里面的内容（在 git 2.55 上试过）。不用 `git add -A -- . ':(exclude)<P>'`：P 被忽略时 git 会因为路径规格点名了
@@ -303,9 +303,10 @@ activity 写明「检出 1.3 GiB，超过步骤 worktree 的 1 GiB 上限」。�
 - **合不进去的文件：** 存进工作区的新列 `merge_files`（与 `merge_error` 一起写），不从 `detail` 里解析；一个步骤重试过几次，
   每个工作区各有各的。
 - **撤销命令** 由代码按任务生成（`step_workspaces.undo_commands`，第 8 节那几条，分支名按 shell 转义），任务页原样显示，测试
-  在临时仓库里逐条执行它们：列出任务的提交；每个合回了的步骤一条 `git revert -m 1 <X>`；`git reset <R>`（保留改动）和
-  `git reset --hard <R>`（丢掉改动）；把提交挪到新分支 `git switch -c <B>-<task_id> && git branch -f <B> <R>`（新分支不用
-  `looper/<task_id>`：它会和步骤分支 `looper/<task_id>/…` 的引用冲突）。没有 R 时只有前两类。
+  在临时仓库里逐条执行它们，也在检出了别的分支时执行：列出任务的提交；每个合回了的步骤一条
+  `git switch <B> && git revert -m 1 <X>`；`git switch <B> && git reset <R>`（保留改动）和 `… git reset --hard <R>`（丢掉
+  改动）；把提交挪到新分支 `git switch -c <B>-<task_id> <B> && git branch -f <B> <R>`（新分支不用 `looper/<task_id>`：它会
+  和步骤分支 `looper/<task_id>/…` 的引用冲突）。没有 R 时只有前两类。任务页写明改动 B 的命令会先切到 B。
 - **界面：** Overview 的 Steps 列表里，有工作区的步骤多一个标记（worktree：工作中、合并中、已合并、合不进去和类型、已丢弃）；
   Pipeline 节点卡片（#172）多一节 Workspace（分支、状态、合并提交或合不进去的类型和文件、之前的几个工作区）；Overview 另有
   一节 Step workspaces：R、每个工作区一行（步骤、分支、结果，合不进去的类型、文件和 git 的说明，还在的写出目录），以及可展开
@@ -324,8 +325,10 @@ activity 写明「检出 1.3 GiB，超过步骤 worktree 的 1 GiB 上限」。�
 - `POST /api/tasks/:id/workspaces/:wid/discard`：任务不在进行中（`failed`、`stopped`、`cancelled` 等，与删除任务相同的
   判断）时，把一个还在的工作区（`active`、`unmerged`，或重试时留下分支的 `discarded`）标为 `discarded`，删掉它的目录和分支，
   写一条 activity。任务在进行中 → 409（「先停止任务」）；`merging`、`merged` 或已删除的 → 409；不存在 → 404。
+- 丢弃期间锁住任务的行（`SELECT … FOR UPDATE`，直到目录和分支删完、行写完）：同时到来的重启要更新这一行，会等丢弃做完，
+  新的规划者读到的就是已丢弃的工作区；重启先到的，丢弃看到任务已在进行中，409。
 - 任务页 Step workspaces 一节里，每个可丢弃的工作区一个 Discard 按钮，行内确认（「丢弃 s2 的 worktree 和分支 looper/…？
-  里面没合回的提交和改动都会丢掉」）。
+  里面没合回的提交和改动都会丢掉」），焦点移到「取消」，取消后回到 Discard。
 - 之后重启任务（`continue`）：这个步骤没有在用的工作区，按 D2 重新判定；重试的 Worker 只在上一次尝试的分支还在时才被告知它
   （派出时用 git 查一次），分支被丢弃了就不提。
 

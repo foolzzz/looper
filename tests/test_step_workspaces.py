@@ -486,7 +486,7 @@ def test_the_undo_commands_undo_a_step_or_the_whole_task(repo: Path, tmp_path: P
         "Undo the whole task, keeping its changes as uncommitted changes",
         "Undo the whole task and drop its changes (and any other uncommitted change)",
         "Move the task's commits to a new branch and put main back where the task started"]
-    assert command["Undo step s2"] == f"git revert -m 1 {second.merge_commit}"
+    assert command["Undo step s2"] == f"git switch main && git revert -m 1 {second.merge_commit}"
 
     listed = shell(repo, command["List the task's commits on main"] + " --format=%s").splitlines()
     assert listed == ["looper: merge step s2: do s2", "looper: merge step s1: do s1",
@@ -532,7 +532,24 @@ def test_the_undo_commands_quote_a_branch_the_shell_would_split(tmp_path: Path) 
 def test_without_its_start_only_the_list_and_the_steps_can_be_undone() -> None:
     commands = ws.undo_commands("task-1", start_branch="refs/heads/main", start_commit="", merged=[("s1", "abc")])
     assert [c["command"] for c in commands] == ["git log --first-parent --grep='^Looper-Task: task-1$' main",
-                                                "git revert -m 1 abc"]
+                                                "git switch main && git revert -m 1 abc"]
+
+
+def test_the_undo_commands_change_the_task_s_branch_whatever_is_checked_out(repo: Path, tmp_path: Path) -> None:
+    start, (_, second), commands = _two_merged_steps(repo, tmp_path / "runtime")
+    command = {c["what"]: c["command"] for c in commands}
+    git(repo, "switch", "-q", "-c", "feature")
+    git(repo, "commit", "-q", "--allow-empty", "-m", "the user's own work")
+    feature = git(repo, "rev-parse", "feature")
+
+    shell(repo, command["Move the task's commits to a new branch and put main back where the task started"])
+    assert git(repo, "rev-parse", "main-task-1") == second.merge_commit  # from main, not from feature
+    assert git(repo, "rev-parse", "main") == start and git(repo, "rev-parse", "feature") == feature
+    git(repo, "branch", "-f", "main", str(second.merge_commit))
+    git(repo, "switch", "-q", "feature")
+    shell(repo, command["Undo the whole task, keeping its changes as uncommitted changes"])
+    assert git(repo, "symbolic-ref", "--short", "HEAD") == "main"
+    assert (git(repo, "rev-parse", "main"), git(repo, "rev-parse", "feature")) == (start, feature)
 
 
 # --- Worktrees lost and removed ---
@@ -751,3 +768,33 @@ def test_a_workspace_row_reads_back_as_it_was_written() -> None:
     assert view["start"] == {"branch": "main", "commit": "r0"}
     assert view["workspaces"] == [{**written.view(), "step_key": "s2"}]
     assert [c["command"] for c in view["undo"]][0] == "git log --first-parent --grep='^Looper-Task: t$' main"
+
+
+def test_a_link_the_worker_replaced_with_its_own_file_is_its_change(repo: Path, tmp_path: Path) -> None:
+    _local_state(repo)
+    step, _ = ws.link(workspace(inspected(repo), tmp_path / "runtime", 1, "s1", git(repo, "rev-parse", "HEAD")),
+                      (".env", "node_modules"))
+    (Path(step.path) / ".env").unlink()
+    (Path(step.path) / ".env").write_text("TOKEN=example\n")
+    git(step.path, "add", "-f", ".env")  # the step's own example file, deliberately committed
+    git(step.path, "commit", "-qm", "worker: .env example")
+    outcome = merge(step, "s1")
+    assert (outcome.workspace.state, outcome.replaced_links) == (StepWorkspaceState.MERGED, (".env",))
+    assert git(repo, "show", "HEAD:.env") == "TOKEN=example"
+    assert "node_modules" not in git(repo, "ls-tree", "--name-only", "HEAD").split()
+
+
+def test_looper_forgets_only_its_own_worktrees(repo: Path, tmp_path: Path) -> None:
+    """``git worktree prune`` would also drop the record of the user's worktree whose directory is gone."""
+    users = tmp_path / "users-worktree"
+    git(repo, "worktree", "add", "-q", "-b", "mine", str(users), "HEAD")
+    subprocess.run(["rm", "-rf", str(users)], check=True)  # an unmounted disk, say
+    root = tmp_path / "runtime"
+    lost = workspace(inspected(repo), root, 1, "s1", git(repo, "rev-parse", "HEAD"))
+    subprocess.run(["rm", "-rf", lost.path], check=True)
+    run(ws.ensure_worktree(lost))  # its own stale record goes, so it comes back
+    run(ws.remove(lost))
+    run(ws.remove_orphan(Path(workspace(inspected(repo), root, 2, "s2", git(repo, "rev-parse", "HEAD")).path)))
+    listed = git(repo, "worktree", "list", "--porcelain")
+    assert f"worktree {users.resolve()}" in listed or f"worktree {users}" in listed
+    assert "looper/" not in listed and str(root) not in listed

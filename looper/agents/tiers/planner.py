@@ -1417,6 +1417,10 @@ class PlannerAgent:
         if outcome.leftovers:
             await self._activity("phase", f"Step {step.label} left changes uncommitted: committed on its branch as "
                                           f"{outcome.leftovers[:12]}")
+        if outcome.replaced_links:
+            replaced = ", ".join(outcome.replaced_links)
+            await self._activity("phase", f"Step {step.label} replaced links to the task directory with files of its "
+                                          f"own, which are part of its result: {replaced}"[:500])
         if merged.state is not StepWorkspaceState.MERGED:
             await self._merge_failed(plan, step, outcome, decide=decide)
             return False

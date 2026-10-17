@@ -1590,10 +1590,11 @@ the [step workspaces RFC](rfcs/step-workdir-isolation-v0.zh-CN.md)):
   and the activity names the ones it could not link.
 - **Accepted.** Before an accepted step counts as verified (an `accept`, an
   acceptable `replan`, or its own verdict when the Planner cannot decide),
-  Looper commits what the Worker left uncommitted (never the links: they are
-  taken out of the index even when the Worker committed one, so the merge
-  cannot replace the task directory's own `node_modules` with a link to
-  itself), computes the merge with the
+  Looper commits what the Worker left uncommitted (never a link: the paths
+  that are still links are taken out of the index even when the Worker
+  committed one, so the merge cannot replace the task directory's own
+  `node_modules` with a link to itself; a link the Worker replaced with files
+  of its own is its change, noted in the activity), computes the merge with the
   branch in memory (`git merge-tree --write-tree`), writes a merge commit
   (`commit-tree`, recorded before the branch moves) and moves the branch, its
   index and working tree with `git merge --ff-only`; the steps that depend on
@@ -1637,13 +1638,16 @@ the [step workspaces RFC](rfcs/step-workdir-isolation-v0.zh-CN.md)):
   that undo the task's commits (`undo_commands`: list them by their
   `Looper-Task` trailer, `git revert -m 1` one step's merge, `git reset` to the
   start keeping or dropping the changes, or move them to a branch
-  `<branch>-<task_id>`; names quoted for the shell). The Overview's Steps list
+  `<branch>-<task_id>`; each that changes the branch switches to it first, and
+  names are quoted for the shell). The Overview's Steps list
   marks each step's latest worktree, the Pipeline's step card has a Worktree
   section, and a Step worktrees section lists them, with the undo commands,
   and a Discard for each one still there while the task is not running
   (`POST /api/tasks/:id/workspaces/:wid/discard`: its directory and branch
-  go; a restarted step's Worker is told of an earlier branch only while it
-  exists).
+  go, with the task's row locked so a restart waits for it; a restarted
+  step's Worker is told of an earlier branch only while it exists). Removing a
+  worktree drops only its own record in the repository (`git worktree remove
+  --force`, never `prune`, which would drop the user's stale ones too).
 - **`looper doctor`** warns when git is missing or older than 2.40 (`looper
   serve` too, in `/api/status`'s `checks`), and checks the default directory
   of each project set to `worktree` as the Planner would, with the paths it

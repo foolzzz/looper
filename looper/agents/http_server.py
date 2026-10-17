@@ -664,22 +664,24 @@ class AgentHTTPServer:
             source=self._web_adapter._address, end=end)
 
     async def _discard_workspace(self, task_id: str, workspace_id: int) -> dict[str, Any]:
-        """The user drops a step worktree a task that is not running keeps: its directory and branch go."""
-        from ..db import activity as db_activity, step_workspaces as db_step_workspaces
-        from ..db.tasks import ACTIVE_STATUSES, get_task
+        """The user drops a step worktree a task that is not running keeps: its directory and branch go. The task's
+        row is locked meanwhile, so a restart waits until the worktree is gone and its Planner reads it so."""
+        from ..db import activity as db_activity, connection as db_connection, step_workspaces as db_step_workspaces
+        from ..db.tasks import ACTIVE_STATUSES
         from . import step_workspaces
 
-        task = await get_task(task_id)
-        row = await db_step_workspaces.get(workspace_id)
-        if task is None or row is None or row["task_id"] != task_id:
-            raise projects.RequestError(HTTP_404, "no such step worktree in this task")
-        if task.get("status") in ACTIVE_STATUSES or self._task_router.has_planner(task_id):
-            raise projects.RequestError(HTTP_409, "stop the task before discarding its step worktrees")
-        try:
-            workspace = await step_workspaces.discard(step_workspaces.StepWorkspace.from_row(row))
-        except step_workspaces.IllegalTransition as exc:
-            raise projects.RequestError(HTTP_409, str(exc)) from None
-        await db_step_workspaces.save(workspace.row())
+        async with db_connection.transaction() as conn:
+            status = await db_step_workspaces.lock_task(conn, task_id)
+            row = await db_step_workspaces.get(workspace_id, pool=conn)
+            if status is None or row is None or row["task_id"] != task_id:
+                raise projects.RequestError(HTTP_404, "no such step worktree in this task")
+            if status in ACTIVE_STATUSES or self._task_router.has_planner(task_id):
+                raise projects.RequestError(HTTP_409, "stop the task before discarding its step worktrees")
+            try:
+                workspace = await step_workspaces.discard(step_workspaces.StepWorkspace.from_row(row))
+            except step_workspaces.IllegalTransition as exc:
+                raise projects.RequestError(HTTP_409, str(exc)) from None
+            await db_step_workspaces.save(workspace.row(), pool=conn)
         await db_activity.insert_activity(
             task_id=task_id, kind="phase",
             summary=f"Discarded a step worktree from the task page: branch {workspace.branch} and its directory "

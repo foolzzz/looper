@@ -35,13 +35,13 @@ async def next_id(*, pool: asyncpg.Pool | None = None) -> int:
     return int(await pool.fetchval("SELECT nextval(pg_get_serial_sequence('step_workspaces', 'id'))"))
 
 
-async def save(row: Mapping[str, Any], *, pool: asyncpg.Pool | None = None) -> None:
+async def save(row: Mapping[str, Any], *, pool: asyncpg.Pool | asyncpg.Connection | None = None) -> None:
     """Write a workspace (``StepWorkspace.row``): its row the first time, then what changes."""
     pool = pool or get_pool()
     await pool.execute(_SAVE, *(row.get(column) for column in _COLUMNS))
 
 
-async def get(workspace_id: int, *, pool: asyncpg.Pool | None = None) -> dict[str, Any] | None:
+async def get(workspace_id: int, *, pool: asyncpg.Pool | asyncpg.Connection | None = None) -> dict[str, Any] | None:
     pool = pool or get_pool()
     row = await pool.fetchrow("SELECT * FROM step_workspaces WHERE id = $1", workspace_id)
     return dict(row) if row else None
@@ -52,6 +52,12 @@ async def list_for_task(task_id: str, *, pool: asyncpg.Pool | None = None) -> li
     pool = pool or get_pool()
     rows = await pool.fetch("SELECT * FROM step_workspaces WHERE task_id = $1 ORDER BY id", task_id)
     return [dict(row) for row in rows]
+
+
+async def lock_task(conn: asyncpg.Connection, task_id: str) -> str | None:
+    """In the caller's transaction, lock the task's row until it ends (a restart, which updates the row, waits for
+    it); the task's status, or None when there is no such task."""
+    return await conn.fetchval("SELECT status FROM tasks WHERE id = $1 FOR UPDATE", task_id)
 
 
 async def task_start(task_id: str, *, pool: asyncpg.Pool | None = None) -> tuple[str, str]:

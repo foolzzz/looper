@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { AlertCircle, CheckCircle2, GitBranch, Loader2, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { ClampedText } from "@/components/clamped-text";
@@ -121,6 +121,15 @@ function DiscardWorkspace({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const name = workspace.step_key || workspace.step_id;
+  // Focus follows the question: to Cancel when it is asked, back to Discard when it is cancelled.
+  const ask = useRef<HTMLButtonElement>(null);
+  const cancel = useRef<HTMLButtonElement>(null);
+  const asked = useRef(false);
+  useEffect(() => {
+    if (confirming) cancel.current?.focus();
+    else if (asked.current) ask.current?.focus();
+    asked.current = confirming;
+  }, [confirming]);
 
   const discard = async () => {
     setBusy(true);
@@ -137,6 +146,7 @@ function DiscardWorkspace({
   if (!confirming)
     return (
       <Button
+        ref={ask}
         type="button"
         variant="outline"
         size="sm"
@@ -160,6 +170,7 @@ function DiscardWorkspace({
           Discard
         </Button>
         <Button
+          ref={cancel}
           type="button"
           variant="ghost"
           size="sm"
@@ -190,8 +201,9 @@ function UndoCommands({ branch, workDir, commands }: { branch: string; workDir: 
       </summary>
       <div className="space-y-3 border-t border-border px-4 py-3">
         <p className="text-xs text-muted-foreground">
-          Run these in the task directory, <code className="break-all font-mono">{workDir}</code>. Going back to where
-          the task started also undoes any commit made on {branch} after it, yours included.
+          Run these in the task directory, <code className="break-all font-mono">{workDir}</code>. Each one that
+          changes {branch} switches to it first, whatever the directory has checked out. Going back to where the task
+          started also undoes any commit made on {branch} after it, yours included.
         </p>
         {commands.map((c) => (
           <div key={c.command}>

@@ -37,6 +37,7 @@ describe("TaskWorkspaces", () => {
       "s2Not merged: conflictlooper/t1/s2-2", "Its changes conflict with the branch.", "a.pyb.py",
       "In /rt/worktrees/t1/s2-2, linking .venv",
       "Undo what the task did to main", "Run these in the task directory, /srv/calc.",
+      "Each one that changes main switches to it first, whatever the directory has checked out.",
       `Undo step s1git revert -m 1 ${"c".repeat(40)}`,
     ]) expect(shown).toContain(part);
     // Only the one still there, of a task that is not running, can be discarded; the merged one is gone.
