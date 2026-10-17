@@ -964,9 +964,10 @@ class WorkerPool:
         workspace = (payload.get("context") or {}).get("workspace")
         supplements = [str(text) for text in payload.get("supplements") or []]
         if is_verify:
+            task_role = TaskRole.from_payload(payload.get("task_role"))
             return review_task_section(requirement=requirement, step=step, instruction=instruction,
                                        acceptance_criteria=acceptance, work_dir=work_dir, supplements=supplements,
-                                       workspace=workspace)
+                                       workspace=workspace, review_role=task_role.key if task_role else "")
         return work_task_section(
             requirement=requirement, step=step, instruction=instruction, acceptance_criteria=acceptance,
             supplements=supplements,

@@ -224,9 +224,11 @@ def review_task_section(
     *, requirement: str, step: str, instruction: str, acceptance_criteria: Sequence[str], work_dir: str,
     supplements: Sequence[str] = (),
     workspace: Mapping[str, Any] | None = None,
+    review_role: str = "",
 ) -> str:
     """A Reviewer's task: the step under review, after the task it belongs to (as context) and its supplements,
-    and the step's own worktree when it ran in one."""
+    and the step's own worktree when it ran in one; for a review role's Reviewer (``review_role``), that what its
+    role asks decides its verdict too."""
     lines = ["## Task"]
     if requirement.strip():
         lines += ["The whole task, for context:", _requirement(requirement), *_supplements(supplements), ""]
@@ -234,6 +236,9 @@ def review_task_section(
     if work_dir:
         lines.append(f"Working directory: {work_dir}")
     lines += _items("Acceptance criteria to verify:", acceptance_criteria)
+    if review_role:
+        lines += [f"You review it as the role {review_role}: besides these criteria, what your role above asks you "
+                  "to check decides your verdict too, so passed is false when the work fails either."]
     if workspace:
         lines += ["", f"This step ran in its own git worktree, on branch {workspace.get('branch')}; your working "
                       "directory is that checkout. To see the step's changes, including the uncommitted ones: "
