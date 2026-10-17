@@ -85,8 +85,16 @@ def test_a_lark_row_from_before_loses_its_app_keys_and_old_name(monkeypatch: pyt
         row = await pool.fetchrow("SELECT display_name, enabled, config FROM channel_configs "
                                   "WHERE channel_id = 'channel-lark'")
         assert (row["display_name"], row["enabled"]) == ("Lark (lark-cli)", True)
-        assert json.loads(row["config"]) == {"allowed_open_ids": [OPEN_ID], "description": "mine"}
+        # It gets the empty profile a new row has, so Settings → Channels shows the field.
+        assert json.loads(row["config"]) == {"profile": "", "allowed_open_ids": [OPEN_ID], "description": "mine"}
         assert caplog.text.count("dropped app_id_env and app_secret_env") == 1
+
+        # A profile chosen since is kept at the next startup.
+        await pool.execute("UPDATE channel_configs SET config = config || '{\"profile\": \"work\"}'::jsonb "
+                           "WHERE channel_id = 'channel-lark'")
+        await seed_channel_configs(pool)
+        assert json.loads(await pool.fetchval("SELECT config FROM channel_configs WHERE channel_id = 'channel-lark'")
+                          )["profile"] == "work"
 
     _run(test, monkeypatch)
 
