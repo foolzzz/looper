@@ -40,9 +40,10 @@ _SAVE_STEP = f"""
 INSERT INTO task_steps (id, task_id, step_index, step_key, instruction, target_files, validation_commands,
                         acceptance_criteria, depends_on, review, status, result, worker_id, reviewer_id,
                         retries, feedback, missed_messages, role_key, review_role_key, role_version,
-                        review_role_version, review_stage, created_at, updated_at, completed_at)
+                        review_role_version, review_stage, review_role_required, created_at, updated_at,
+                        completed_at)
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22,
-        now(), now(), CASE WHEN $11::text IN {_DONE_STEP_STATUSES!r} THEN now() END)
+        $23, now(), now(), CASE WHEN $11::text IN {_DONE_STEP_STATUSES!r} THEN now() END)
 ON CONFLICT (id) DO UPDATE
 SET step_index = EXCLUDED.step_index, step_key = EXCLUDED.step_key, instruction = EXCLUDED.instruction,
     target_files = EXCLUDED.target_files, validation_commands = EXCLUDED.validation_commands,
@@ -51,7 +52,8 @@ SET step_index = EXCLUDED.step_index, step_key = EXCLUDED.step_key, instruction 
     worker_id = EXCLUDED.worker_id, reviewer_id = EXCLUDED.reviewer_id, retries = EXCLUDED.retries,
     feedback = EXCLUDED.feedback, missed_messages = EXCLUDED.missed_messages, role_key = EXCLUDED.role_key,
     review_role_key = EXCLUDED.review_role_key, role_version = EXCLUDED.role_version,
-    review_role_version = EXCLUDED.review_role_version, review_stage = EXCLUDED.review_stage, updated_at = now(),
+    review_role_version = EXCLUDED.review_role_version, review_stage = EXCLUDED.review_stage,
+    review_role_required = EXCLUDED.review_role_required, updated_at = now(),
     completed_at = COALESCE(EXCLUDED.completed_at, task_steps.completed_at)
 """
 
@@ -67,7 +69,7 @@ def _step_args(task_id: str, step: Mapping[str, Any]) -> tuple[Any, ...]:
         step.get("worker_id"), step.get("reviewer_id"), int(step.get("retries") or 0),
         list(step.get("feedback") or []), list(step.get("missed_messages") or []),
         step.get("role_key"), step.get("review_role_key"), step.get("role_version"), step.get("review_role_version"),
-        step.get("review_stage"),
+        step.get("review_stage"), bool(step.get("review_role_required", True)),
     )
 
 

@@ -922,10 +922,12 @@ CREATE TABLE IF NOT EXISTS task_roles (
     PRIMARY KEY (task_id, role_key, version)
 );
 -- A step's roles: the work role its Worker runs as (NULL: the built-in Worker) and the review role that reviews
--- it after the built-in Reviewer (NULL: none; only on a reviewed step), the versions its latest attempt and its
--- latest role review ran with, and which review a step in review waits for ('builtin' or 'role').
+-- it after the built-in Reviewer (NULL: none; only on a reviewed step) and whether that review blocks the step
+-- (review_role_required) or only advises the Planner, the versions its latest attempt and its latest role review
+-- ran with, and which review a step in review waits for ('builtin' or 'role').
 ALTER TABLE task_steps ADD COLUMN IF NOT EXISTS role_key TEXT;
 ALTER TABLE task_steps ADD COLUMN IF NOT EXISTS review_role_key TEXT;
+ALTER TABLE task_steps ADD COLUMN IF NOT EXISTS review_role_required BOOLEAN NOT NULL DEFAULT true;
 ALTER TABLE task_steps ADD COLUMN IF NOT EXISTS role_version INTEGER;
 ALTER TABLE task_steps ADD COLUMN IF NOT EXISTS review_role_version INTEGER;
 ALTER TABLE task_steps ADD COLUMN IF NOT EXISTS review_stage TEXT CHECK (review_stage IN ('builtin', 'role'));

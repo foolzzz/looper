@@ -293,6 +293,7 @@ class PlanStep:
     # built-in Reviewer (None: none), and the versions its latest attempt and its latest role review ran with.
     role: str | None = None
     review_role: str | None = None
+    review_role_required: bool = True  # False: the review role's verdict only advises the Planner
     role_version: int | None = None
     review_role_version: int | None = None
     review_stage: ReviewStage | None = None  # in review: which review it waits for
@@ -439,6 +440,7 @@ def _step_row(step: PlanStep) -> dict[str, Any]:
         "missed_messages": step.missed_messages,
         "role_key": step.role,
         "review_role_key": step.review_role,
+        "review_role_required": step.review_role_required,
         "role_version": step.role_version,
         "review_role_version": step.review_role_version,
         "review_stage": step.review_stage.value if step.review_stage else None,
@@ -455,16 +457,19 @@ def _sentence(text: str) -> str:
     return text if text.endswith((".", "!", "?", "…")) else text + "."
 
 
+def _verdict_reason(verdict: Mapping[str, Any], findings: str, summary: str) -> str:
+    """Why a review did not pass, in a line: its findings, else its summary."""
+    found = "; ".join(_clip(f, 200) for f in verdict.get(findings) or [] if str(f).strip())
+    return found or _clip(verdict.get(summary), 300) or "no reason given"
+
+
 def result_outcome(result: Mapping[str, Any]) -> str:
     """What a step's last result was, in a line: what a retry, a failure or an unfinished step is about."""
     role_review = result.get("role_review")
     if isinstance(role_review, Mapping) and role_review.get("passed") is not True:
-        findings = "; ".join(_clip(f, 200) for f in role_review.get("findings") or [] if str(f).strip())
-        return (f"review by role {role_review.get('role')} failed: "
-                f"{findings or _clip(role_review.get('summary'), 300) or 'no reason given'}")
+        return f"review by role {role_review.get('role')} failed: {_verdict_reason(role_review, 'findings', 'summary')}"
     if "verify_passed" in result and result.get("verify_passed") is not True:
-        findings = "; ".join(_clip(f, 200) for f in result.get("verify_findings") or [] if str(f).strip())
-        return f"review failed: {findings or _clip(result.get('verify_summary'), 300) or 'no reason given'}"
+        return f"review failed: {_verdict_reason(result, 'verify_findings', 'verify_summary')}"
     status = str(result.get("status") or "unknown")
     detail = result.get("summary") if status == "completed" else result.get("error") or result.get("summary")
     return f"{status}: {_clip(detail, 400) or 'no reason given'}"
@@ -779,6 +784,7 @@ class PlannerAgent:
             step.acceptance_criteria = list(spec.acceptance_criteria)
             step.review = spec.review or self._execution.review_all
             step.role, step.review_role = spec.role, spec.review_role
+            step.review_role_required = spec.review_role_required
             changed.append(step)
         for spec, step in zip(specs, changed):
             step.depends_on = [by_label[label].step_id for label in spec.depends_on]
@@ -792,7 +798,10 @@ class PlannerAgent:
             if step.depends_on:
                 notes.append("after " + "+".join(labels.get(d, d) for d in step.depends_on))
             if step.review:
-                notes.append("review" + (f" + {step.review_role}" if step.review_role else ""))
+                review = "review"
+                if step.review_role:
+                    review += f" + {step.review_role}" + ("" if step.review_role_required else " (advisory)")
+                notes.append(review)
             if step.role:
                 notes.append(f"as {step.role}")
             parts.append(step.label + (f" ({', '.join(notes)})" if notes else ""))
@@ -1201,7 +1210,7 @@ class PlannerAgent:
                 await self._spawn_reviewer(plan, step)
                 return
         context = DecisionContext(
-            step=step.label, result=ResultKind.REVIEW, succeeded=passed,
+            step=step.label, result=ResultKind.REVIEW, succeeded=passed or self._advisory(step),
             review_required=self._needs_review(step), retries=step.retries,
             max_retries=self._execution.step_retries,
         )
@@ -1214,10 +1223,16 @@ class PlannerAgent:
                                                               **verdict, "learnings": []}}
         await self._save(plan, step)
         await self._activity("error", problem[:500])
-        context = DecisionContext(step=step.label, result=ResultKind.REVIEW, succeeded=False,
+        context = DecisionContext(step=step.label, result=ResultKind.REVIEW, succeeded=self._advisory(step),
                                   review_required=self._needs_review(step), retries=step.retries,
                                   max_retries=self._execution.step_retries)
         await self._decide(plan, step, context, self._review_report(step, verdict))
+
+    @staticmethod
+    def _advisory(step: PlanStep) -> bool:
+        """Whether ``step``'s current review is its review role's and only advises: the built-in Reviewer passed
+        it, so a role verdict that does not pass leaves it acceptable."""
+        return step.review_stage is ReviewStage.ROLE and not step.review_role_required
 
     async def _decide(self, plan: TaskPlan, step: PlanStep, context: DecisionContext, report: list[str]) -> None:
         """Ask the Planner's Claude what to do with ``step``'s result, then do it.
@@ -1371,7 +1386,14 @@ class PlannerAgent:
         """The journal entry of ``step``, just accepted; None if it has one."""
         if any(entry.step_id == step.step_id and entry.kind is JournalKind.STEP_ACCEPTED for entry in plan.journal):
             return None
-        return cls._step_entry(JournalKind.STEP_ACCEPTED, step, (step.result or {}).get("summary"))
+        summary = str((step.result or {}).get("summary") or "")
+        advice = (step.result or {}).get("role_review")
+        if isinstance(advice, Mapping) and advice.get("passed") is not True:
+            # Accepted over its advisory review role's verdict: the entry says so.
+            note = f"Accepted although the advisory review by role {advice.get('role')} did not pass: " \
+                   f"{_verdict_reason(advice, 'findings', 'summary')}"
+            summary = f"{_sentence(summary)} {note}" if summary else note
+        return cls._step_entry(JournalKind.STEP_ACCEPTED, step, summary)
 
     @staticmethod
     def _step_entry(kind: JournalKind, step: PlanStep, summary: Any) -> JournalEntry:
@@ -1382,7 +1404,8 @@ class PlannerAgent:
             step_id=step.step_id, step=step.label, kind=kind,
             summary=journal.clip(summary, journal.SUMMARY_MAX_CHARS),
             learnings=journal.merged_learnings(journal.learnings(result.get("learnings")),
-                                               journal.learnings(result.get("verify_learnings"))),
+                                               journal.learnings(result.get("verify_learnings")),
+                                               journal.learnings((result.get("role_review") or {}).get("learnings"))),
         )
 
     @staticmethod
@@ -1479,7 +1502,7 @@ class PlannerAgent:
         result = step.result or {}
         role_review = result.get("role_review")
         if isinstance(role_review, Mapping):  # the review role's verdict, after the built-in Reviewer passed
-            passed = role_review.get("passed") is True
+            passed = role_review.get("passed") is True or self._advisory(step)
             kind = ResultKind.REVIEW
             report = self._review_report(step, role_review)
         elif "verify_passed" in result:  # a Reviewer's verdict, added to the Worker's result
@@ -2301,7 +2324,8 @@ class PlannerAgent:
         for step in plan.steps:
             deps = ", ".join(labels.get(d, d) for d in step.depends_on) or "none"
             roles = (f"; role: {step.role}" if step.role else "") + \
-                (f"; review role: {step.review_role}" if step.review_role else "")
+                (f"; review role: {step.review_role}{'' if step.review_role_required else ' (advisory)'}"
+                 if step.review_role else "")
             lines.append(
                 f"- {step.label} [{step.status}] {_clip(step.instruction, 200)} "
                 f"(depends on: {deps}; review: {'yes' if step.review else 'no'}; retries: {step.retries}{roles})"
@@ -2358,8 +2382,9 @@ class PlannerAgent:
             # The review role reviews only a step the built-in Reviewer passed.
             summary = _clip((step.result or {}).get("verify_summary"), 300)
             lines.append(f"The built-in Reviewer passed step {step.label}" + (f": {summary}" if summary else "."))
-            by = f"{step.reviewer_id} (review role {step.review_role} v{step.review_role_version}; both reviews must " \
-                 "pass)"
+            by = f"{step.reviewer_id} (review role {step.review_role} v{step.review_role_version}; " + (
+                "both reviews must pass)" if step.review_role_required else "advisory: its verdict does not block the "
+                "step; weigh its findings and accept, retry with feedback or replan)")
         lines += [
             f"Review of step {step.label} by {by}:",
             f"- passed: {'yes' if result.get('passed') is True else 'no'}",
@@ -2951,6 +2976,7 @@ class PlannerAgent:
                 missed_messages=list(sd.get("missed_messages") or []),
                 role=sd.get("role_key"),
                 review_role=sd.get("review_role_key"),
+                review_role_required=sd.get("review_role_required") is not False,
                 role_version=sd.get("role_version"),
                 review_role_version=sd.get("review_role_version"),
                 review_stage=ReviewStage(sd["review_stage"]) if sd.get("review_stage") else None,

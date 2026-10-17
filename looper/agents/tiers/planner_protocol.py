@@ -13,7 +13,8 @@ becomes the task's result.
 
 In a project that lets its Planners define roles (``planner_roles`` ``on``), a
 step may name the work role its Worker runs as (``role``) and the review role
-that reviews it after the built-in Reviewer (``review_role``); ``PlanView.roles``
+that reviews it after the built-in Reviewer (``review_role``; it blocks the step
+unless ``review_role_required`` is false, which makes it advisory); ``PlanView.roles``
 holds the task's roles, and the contract says so (``reply_contract(roles=True)``).
 Elsewhere both keys are refused, and the contract is as before.
 """
@@ -47,7 +48,7 @@ _OPENING = re.compile(r"^```json[ \t]*\n", re.MULTILINE)
 _CLOSING = re.compile(r"\s*```")
 _STEP_KEYS = frozenset({"id", "instruction", "acceptance_criteria", "depends_on", "review"})
 # A step's optional keys: the task roles it runs as and is reviewed by.
-_ROLE_KEYS = frozenset({"role", "review_role"})
+_ROLE_KEYS = frozenset({"role", "review_role", "review_role_required"})
 
 
 class TurnKind(str, Enum):
@@ -106,6 +107,8 @@ class StepSpec:
     review: bool
     role: str | None = None  # the work role its Worker runs as; None: the built-in Worker
     review_role: str | None = None  # the review role that reviews it after the built-in Reviewer
+    # Whether the review role's verdict blocks the step (True), or only advises the Planner (False).
+    review_role_required: bool = True
 
 
 @dataclass(frozen=True)
@@ -596,8 +599,13 @@ def _step(value: Any, index: int) -> StepSpec:
         if raw is not None and (not isinstance(raw, str) or not raw):
             raise ProtocolError(f"{where}.{key} must be a role's id")
         roles[key] = raw
+    required = value.get("review_role_required", True)
+    if "review_role_required" in value and roles["review_role"] is None:
+        raise ProtocolError(f"{where}.review_role_required is only for a step with a review_role")
+    if not isinstance(required, bool):
+        raise ProtocolError(f"{where}.review_role_required must be true or false")
     return StepSpec(step_id, instruction.strip(), tuple(c.strip() for c in criteria), tuple(depends_on), review,
-                    **roles)
+                    **roles, review_role_required=required)
 
 
 def _only_keys(data: Mapping[str, Any], allowed: Iterable[str], where: str) -> None:
@@ -725,8 +733,10 @@ _ROLE_RULES = """\
 - Roles: a step may also have "role", a work role you defined with
   looper_task_role_set that its Worker runs as, and, when "review" is true,
   "review_role", a review role you defined that reviews the step after the
-  built-in Reviewer (both must pass). Leave them out for the built-in Worker
-  and Reviewer. The five keys above are in every step.
+  built-in Reviewer (both must pass). "review_role_required": false makes the
+  review role's verdict advice to you; the built-in Reviewer still must pass.
+  Leave them out for the built-in Worker and Reviewer. The five keys above are
+  in every step.
 """
 
 
