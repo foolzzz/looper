@@ -14,6 +14,11 @@ call. The Codex login (``codex_login``) is checked only when an Agent Profile
 uses it, with ``codex login status`` in a probe home; the Grok login
 (``grok_login``) likewise, by whether its login file is there. A forked login
 that a run recorded is a failure until the operator clears it.
+
+The git checks matter for projects whose parallel steps work in worktrees of
+their own (``step_workspaces``): git 2.40 or later (serve checks it too), and,
+in doctor only, whether each such project's default directory can have them
+now (``step_workspaces.inspect``) and has the paths it links.
 """
 
 from __future__ import annotations
@@ -22,13 +27,15 @@ import asyncio
 import json
 import logging
 import re
+import os
 import shutil
 import subprocess
 import sys
 import urllib.parse
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass
-from typing import TYPE_CHECKING
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
 from . import db_backup
 
@@ -56,6 +63,9 @@ DATABASE_FIX = (
 LARK_CLI_FIX = "install lark-cli and sign in, or turn the Lark channel off on the Settings page"
 CODEX_LOGIN_FIX = "run `codex login` and sign in with ChatGPT, or give the Agent Profiles an API key provider"
 GROK_LOGIN_FIX = "run `grok login` on this machine, or give the Agent Profiles another runtime"
+GIT_FIX = "install git 2.40 or later: https://git-scm.com/downloads"
+STEP_WORKTREES_FIX = ("put the project's default directory on a branch of a git checkout with nothing in progress, "
+                      "or set its parallel steps to share the task directory")
 
 _COMMAND_TIMEOUT_SECONDS = 15.0
 _DATABASE_TIMEOUT_SECONDS = 5.0
@@ -250,6 +260,60 @@ def check_lark_cli(lark_enabled: bool | None) -> Check:
                  LARK_CLI_FIX)
 
 
+def check_git() -> Check:
+    """Is git there, and new enough for step worktrees? Without it, Looper still runs."""
+    from .step_workspaces import GIT_MIN_VERSION
+
+    needed = ".".join(map(str, GIT_MIN_VERSION))
+    consequence = "projects whose parallel steps work in worktrees run their steps one at a time"
+    path = shutil.which("git")
+    if path is None:
+        return Check("git", "git", WARN, f"`git` is not on PATH: {consequence}", GIT_FIX)
+    version = _run([path, "--version"])
+    match = re.search(r"(\d+)\.(\d+)", version.stdout) if version and version.returncode == 0 else None
+    if match is None:
+        return Check("git", "git", WARN, f"`git --version` gave no version: {consequence}", GIT_FIX)
+    if (int(match.group(1)), int(match.group(2))) < GIT_MIN_VERSION:
+        return Check("git", "git", WARN, f"{_first_line(version.stdout)} is older than {needed}: {consequence}",
+                     GIT_FIX)
+    return Check("git", "git", OK, _first_line(version.stdout))
+
+
+async def check_step_worktrees(projects: Sequence[Mapping[str, Any]] | None) -> Check:
+    """Can the projects whose parallel steps work in worktrees have them in their default directories now, and do
+    those have the paths they link? ``projects``: such projects' rows (``None``: unknown)."""
+    from . import step_workspaces as ws
+
+    label = "Step worktrees"
+    if projects is None:
+        return Check("step_workspaces", label, SKIP,
+                     "not checked: the projects are stored in PostgreSQL, which is unreachable")
+    if not projects:
+        return Check("step_workspaces", label, SKIP, "no project runs its parallel steps in worktrees")
+    problems: list[str] = []
+    fine: list[str] = []
+    for project in projects:
+        name, work_dir = project.get("name") or project.get("id"), str(project.get("work_dir") or "")
+        if not work_dir:
+            fine.append(f"{name}: no default directory, each task's is checked when it runs")
+            continue
+        found = await ws.inspect(work_dir)
+        if isinstance(found, ws.Unusable):
+            effect = "its steps run one at a time" if found.repository else "its steps share the task directory"
+            problems.append(f"{name}: {found.reason} ({effect})")
+            continue
+        size = ws._size_text(await ws.checkout_size(found.toplevel))
+        text = f"{name}: {ws.short_branch(found.branch)}, {size} checkout"
+        missing = [path for path in project.get("step_workspace_links") or ()
+                   if not os.path.lexists(Path(work_dir) / path)]
+        if missing:
+            problems.append(f"{text}, nothing to link at {', '.join(missing)}")
+        else:
+            fine.append(text)
+    return Check("step_workspaces", label, WARN if problems else OK, "; ".join(problems + fine),
+                 STEP_WORKTREES_FIX if problems else "")
+
+
 def pg_dump_fix(server_major: int | None) -> str:
     """How to give Looper a pg_dump for the server, or do without one."""
     version = f"{server_major} or newer" if server_major else "of at least the server's major version"
@@ -298,6 +362,7 @@ class _DatabaseFacts:
     codex_login_problem: dict[str, str] | None = None
     grok_login_profiles: int | None = None
     grok_login_problem: dict[str, str] | None = None
+    worktree_projects: list[dict[str, Any]] | None = None
 
 
 async def _database_facts(dsn: str) -> _DatabaseFacts:
@@ -307,6 +372,7 @@ async def _database_facts(dsn: str) -> _DatabaseFacts:
     from ..db.connection import schema_change_pending
     from ..db.profile_registry import login_profile_count
     from .runtimes import grok_login
+    from ..db.projects import worktree_projects
     from .runtimes.codex_login import recorded_problem
 
     try:
@@ -325,6 +391,12 @@ async def _database_facts(dsn: str) -> _DatabaseFacts:
             grok_problem = await grok_login.recorded_problem(pool=conn)
         except (asyncpg.UndefinedTableError, asyncpg.UndefinedColumnError):  # set up by an older `looper serve`
             profiles, problem, grok_profiles, grok_problem = 0, None, 0, None
+        try:
+            worktrees: list[dict[str, Any]] | None = await worktree_projects(pool=conn)
+        except asyncpg.UndefinedTableError:
+            worktrees = []
+        except asyncpg.UndefinedColumnError:  # set up by a `looper serve` from before step workspaces
+            worktrees = None
         return _DatabaseFacts(
             lark_enabled=bool(row and row.get("enabled")),
             server_version_num=int(await conn.fetchval("SELECT current_setting('server_version_num')")),
@@ -333,6 +405,7 @@ async def _database_facts(dsn: str) -> _DatabaseFacts:
             codex_login_problem=problem,
             grok_login_profiles=grok_profiles,
             grok_login_problem=grok_problem,
+            worktree_projects=worktrees,
         )
     finally:
         await conn.close()
@@ -350,7 +423,9 @@ async def run_checks(*, dsn: str, claude_bin: str = "claude") -> list[Check]:
                                     probe_login)
     grok = check_grok_login(facts.grok_login_profiles, facts.grok_login_problem, grok_login.probe_login)
     pg_dump, _ = await asyncio.to_thread(check_pg_dump, facts.server_version_num, facts.schema_change_pending)
-    return [database, *claude, codex, grok, check_lark_cli(facts.lark_enabled), pg_dump]
+    git = await asyncio.to_thread(check_git)
+    return [database, *claude, codex, grok, check_lark_cli(facts.lark_enabled), pg_dump, git,
+            await check_step_worktrees(facts.worktree_projects)]
 
 
 def format_checks(checks: list[Check]) -> str:

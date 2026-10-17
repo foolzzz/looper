@@ -48,6 +48,7 @@ from ..claude_cli import (
     ClaudeRunRecorder,
     ResidentTurn,
     answer_text,
+    ended_by,
     exit_note,
 )
 from ..library import load_installed
@@ -625,140 +626,138 @@ class ManagerAgent:
             system_prompt=system_prompt,
             launch=launch,
         )
-        await recorder.start()
+        async with recorder:  # however the turn ends, the Manager's stop cutting it off too, its record ends
+            # The session this turn's new process resumes, if it starts one (its command resumes the saved session).
+            resuming = self._session_id if not self._claude.started else None
+            if not self._claude.started:
+                self._session_runtime, self._session_profile = launch.runtime.type, launch.profile.id
+                self._session_provider = launch.profile.provider.id
+                try:
+                    await self._claude.start(
+                        command, cwd=str(self._config.work_dir), signature=signature, env=launch.environment(),
+                        totals=self._session_totals if resuming else None,
+                        autonomous=self._autonomous_turns(command, system_prompt, launch), price=launch.price,
+                    )
+                except OSError as exc:
+                    logger.error("failed to start Claude Code: %s", exc)
+                    await recorder.finish(output_text=None, result_event=None, error=f"Cannot start Claude Code: {exc}")
+                    return "无法启动 Claude Code，请检查安装。"
+                self._process = _Process(command, signature, system_prompt, launch)
 
-        # The session this turn's new process resumes, if it starts one (its command resumes the saved session).
-        resuming = self._session_id if not self._claude.started else None
-        if not self._claude.started:
-            self._session_runtime, self._session_profile = launch.runtime.type, launch.profile.id
-            self._session_provider = launch.profile.provider.id
+            text_parts: list[str] = []
+            streamed_partials = False
+
+            async def on_event(payload: dict[str, Any]) -> None:
+                nonlocal streamed_partials
+                await recorder.record(payload)
+
+                session_id = payload.get("session_id")
+                if isinstance(session_id, str) and session_id and session_id != self._session_id:
+                    self._session_id, self._clean_start = session_id, False
+                    await self._save_session_state()
+                    self._pending_switch = self._pending_handoff = None  # the new session has its resume brief
+
+                event_type = payload.get("type")
+                # Only the Manager's own turn is the reply; subagent output is internal.
+                top_level = payload.get("parent_tool_use_id") is None
+
+                if event_type == "system":
+                    subtype = payload.get("subtype", "")
+                    if subtype == "init":
+                        await self._send_status(context_envelope, "thinking", phase=True, activity="thinking")
+
+                elif event_type == "stream_event":
+                    event = payload.get("event")
+                    delta = event.get("delta") if isinstance(event, dict) else None
+                    if top_level and isinstance(delta, dict) and delta.get("type") == "text_delta":
+                        chunk = str(delta.get("text") or "")
+                        if chunk:
+                            streamed_partials = True
+                            await self._send_status(context_envelope, chunk, delta=True)
+
+                elif event_type == "assistant" and top_level:
+                    msg = payload.get("message")
+                    if isinstance(msg, dict):
+                        content_blocks = msg.get("content", [])
+                        for block in content_blocks:
+                            if not isinstance(block, dict):
+                                continue
+                            block_type = block.get("type", "")
+                            if block_type == "text":
+                                chunk = str(block.get("text") or "")
+                                if chunk:
+                                    text_parts.append(chunk)
+                                    if not streamed_partials:  # else already sent chunk by chunk
+                                        await self._send_status(context_envelope, chunk, delta=True)
+                            elif block_type == "tool_use":
+                                tool_name = block.get("name", "tool")
+                                await self._send_status(
+                                    context_envelope,
+                                    f"正在使用工具: {tool_name}",
+                                    phase=True,
+                                    activity="tool",
+                                    tool=str(tool_name),
+                                )
+                            elif block_type == "thinking":
+                                await self._send_status(context_envelope, "thinking", phase=True, activity="thinking")
+
             try:
-                await self._claude.start(
-                    command, cwd=str(self._config.work_dir), signature=signature, env=launch.environment(),
-                    totals=self._session_totals if resuming else None,
-                    autonomous=self._autonomous_turns(command, system_prompt, launch), price=launch.price,
+                turn_text = await self._build_user_message(message, note, channel=channel_line(context_envelope))
+                if brief:
+                    turn_text = f"{brief}\n\n{turn_text}"
+                # A turn cut off by Claude's exit ends without a result; that Claude
+                # is reaped and the next message starts a new process that resumes the session.
+                turn = await self._claude.run_turn(turn_text, on_event, tag=context_envelope,
+                                                   stop=lambda: recorder.cap_stop)
+            except BaseException as exc:
+                # Never leave Claude running once the Manager gives up on it.
+                await self._claude.stop(kill=True)
+                await recorder.finish(
+                    output_text="".join(text_parts) or None, result_event=None,
+                    error=f"Manager stopped reading Claude: {type(exc).__name__}: {exc}", status=ended_by(exc),
                 )
-            except OSError as exc:
-                logger.error("failed to start Claude Code: %s", exc)
-                await recorder.finish(output_text=None, result_event=None, error=f"Cannot start Claude Code: {exc}")
-                return "无法启动 Claude Code，请检查安装。"
-            self._process = _Process(command, signature, system_prompt, launch)
+                raise
 
-        text_parts: list[str] = []
-        streamed_partials = False
-
-        async def on_event(payload: dict[str, Any]) -> None:
-            nonlocal streamed_partials
-            await recorder.record(payload)
-
-            session_id = payload.get("session_id")
-            if isinstance(session_id, str) and session_id and session_id != self._session_id:
-                self._session_id, self._clean_start = session_id, False
+            if resuming and not turn.session_started and not retried:
+                # Claude never started the saved session: it no longer exists. Every
+                # turn would resume it again and never answer, so drop it and run
+                # this message in a new session; the context each turn carries does
+                # not depend on the old conversation.
+                logger.warning("manager: session %s could not be resumed; starting a new session", resuming)
+                await recorder.finish(output_text=None, result_event=None, error=(
+                    f"session {resuming} could not be resumed{exit_note(turn.exit_code)}; retried in a new session"))
+                await self._claude.stop()
+                self._session_id, self._session_totals = None, Usage()  # its totals went with it
                 await self._save_session_state()
-                self._pending_switch = self._pending_handoff = None  # the new session has its resume brief
+                self._pending_switch = session_switch.session_lost(
+                    f"its saved session {resuming} could not be resumed", runtime=launch.runtime.type,
+                    profile=launch.profile.id)
+                self._pending_handoff = None
+                return await self._run_turn(message, context_envelope, note=note, retried=True)
 
-            event_type = payload.get("type")
-            # Only the Manager's own turn is the reply; subagent output is internal.
-            top_level = payload.get("parent_tool_use_id") is None
-
-            if event_type == "system":
-                subtype = payload.get("subtype", "")
-                if subtype == "init":
-                    await self._send_status(context_envelope, "thinking", phase=True, activity="thinking")
-
-            elif event_type == "stream_event":
-                event = payload.get("event")
-                delta = event.get("delta") if isinstance(event, dict) else None
-                if top_level and isinstance(delta, dict) and delta.get("type") == "text_delta":
-                    chunk = str(delta.get("text") or "")
-                    if chunk:
-                        streamed_partials = True
-                        await self._send_status(context_envelope, chunk, delta=True)
-
-            elif event_type == "assistant" and top_level:
-                msg = payload.get("message")
-                if isinstance(msg, dict):
-                    content_blocks = msg.get("content", [])
-                    for block in content_blocks:
-                        if not isinstance(block, dict):
-                            continue
-                        block_type = block.get("type", "")
-                        if block_type == "text":
-                            chunk = str(block.get("text") or "")
-                            if chunk:
-                                text_parts.append(chunk)
-                                if not streamed_partials:  # else already sent chunk by chunk
-                                    await self._send_status(context_envelope, chunk, delta=True)
-                        elif block_type == "tool_use":
-                            tool_name = block.get("name", "tool")
-                            await self._send_status(
-                                context_envelope,
-                                f"正在使用工具: {tool_name}",
-                                phase=True,
-                                activity="tool",
-                                tool=str(tool_name),
-                            )
-                        elif block_type == "thinking":
-                            await self._send_status(context_envelope, "thinking", phase=True, activity="thinking")
-
-        try:
-            turn_text = await self._build_user_message(message, note, channel=channel_line(context_envelope))
-            if brief:
-                turn_text = f"{brief}\n\n{turn_text}"
-            # A turn cut off by Claude's exit ends without a result; that Claude
-            # is reaped and the next message starts a new process that resumes the session.
-            turn = await self._claude.run_turn(turn_text, on_event, tag=context_envelope,
-                                               stop=lambda: recorder.cap_stop)
-        except BaseException as exc:
-            # Never leave Claude running once the Manager gives up on it.
-            await self._claude.stop(kill=True)
+            result_event = turn.result_event
+            # The reply is the turn's final answer; what Claude wrote before its tool calls only streamed.
+            final_text = answer_text(result_event, text_parts)
+            # A turn cut off by Claude's exit is no reply, even after some text.
+            exited = result_event is None
+            # A turn stopped at its spend cap is no reply either; the next message starts a new process (a new cap).
+            over_cap = launch.runtime.budget_error(result_event)
+            replied = not exited and not over_cap and bool(final_text)
+            # The turn is over: recorded first, so a stop that comes while Claude stops or the session is saved
+            # keeps what it spent.
             await recorder.finish(
-                output_text="".join(text_parts) or None, result_event=None,
-                error=f"Manager stopped reading Claude: {type(exc).__name__}: {exc}",
+                output_text=final_text or None,
+                result_event=result_event,
+                error=over_cap or (None if replied else (
+                    f"no reply (exit code {turn.exit_code})" if exited else "no reply"
+                )),
+                usage=turn.usage,
             )
-            raise
-
-        if resuming and not turn.session_started and not retried:
-            # Claude never started the saved session: it no longer exists. Every
-            # turn would resume it again and never answer, so drop it and run
-            # this message in a new session; the context each turn carries does
-            # not depend on the old conversation.
-            logger.warning("manager: session %s could not be resumed; starting a new session", resuming)
-            await recorder.finish(
-                output_text=None, result_event=None,
-                error=f"session {resuming} could not be resumed{exit_note(turn.exit_code)}; retried in a new session",
-            )
-            await self._claude.stop()
-            self._session_id, self._session_totals = None, Usage()  # its totals went with it
-            await self._save_session_state()
-            self._pending_switch = session_switch.session_lost(
-                f"its saved session {resuming} could not be resumed", runtime=launch.runtime.type,
-                profile=launch.profile.id)
-            self._pending_handoff = None
-            return await self._run_turn(message, context_envelope, note=note, retried=True)
-
-        result_event = turn.result_event
-        # The reply is the turn's final answer; what Claude wrote before its tool calls only streamed.
-        final_text = answer_text(result_event, text_parts)
-        # A turn cut off by Claude's exit is no reply, even after some text.
-        exited = result_event is None
-        # A turn stopped at its spend cap is no reply either; the next message starts a new process (a new cap).
-        over_cap = launch.runtime.budget_error(result_event)
-        if over_cap:
-            await self._claude.stop()
-        replied = not exited and not over_cap and bool(final_text)
-        usage = turn.usage
-        if not exited:
-            self._session_totals = self._claude.totals
-            await self._save_session_state()
-        await recorder.finish(
-            output_text=final_text or None,
-            result_event=result_event,
-            error=over_cap or (None if replied else (
-                f"no reply (exit code {turn.exit_code})" if exited else "no reply"
-            )),
-            usage=usage,
-        )
+            if over_cap:
+                await self._claude.stop()
+            if not exited:
+                self._session_totals = self._claude.totals
+                await self._save_session_state()
 
         if task_id:
             try:
@@ -855,37 +854,33 @@ class ManagerAgent:
             input_text=text, session_id=self._session_id, system_prompt=process.system_prompt,
             launch=process.launch,
         )
-        await recorder.start()
-        parts: list[str] = []
+        async with recorder:
+            parts: list[str] = []
 
-        async def on_event(payload: dict[str, Any]) -> None:
-            await recorder.record(payload)
-            message = payload.get("message")
-            if payload.get("type") == "assistant" and payload.get("parent_tool_use_id") is None \
-                    and isinstance(message, dict):
-                parts.extend(str(block.get("text") or "") for block in message.get("content") or []
-                             if isinstance(block, dict) and block.get("type") == "text")
+            async def on_event(payload: dict[str, Any]) -> None:
+                await recorder.record(payload)
+                message = payload.get("message")
+                if payload.get("type") == "assistant" and payload.get("parent_tool_use_id") is None \
+                        and isinstance(message, dict):
+                    parts.extend(str(block.get("text") or "") for block in message.get("content") or []
+                                 if isinstance(block, dict) and block.get("type") == "text")
 
-        try:
-            turn = await asyncio.wait_for(self._claude.run_turn(text, on_event), HANDOFF_TIMEOUT_SEC)
-        except Exception as exc:  # the turn was given up, which stopped Claude
-            logger.warning("manager: its previous session wrote no handoff: %s", exc)
-            await recorder.finish(output_text=None, result_event=None,
-                                  error=f"no handoff: {type(exc).__name__}: {exc}")
-            return None
-        except BaseException as exc:
-            await recorder.finish(output_text=None, result_event=None,
-                                  error=f"Manager stopped reading Claude: {type(exc).__name__}")
-            raise
-        result_event = turn.result_event
-        handoff = kept_text(answer_text(result_event, parts), HANDOFF_MAX_CHARS)
-        succeeded = result_event is not None and not result_event.get("is_error") and bool(handoff)
-        if result_event is not None:
-            self._session_totals = self._claude.totals
-            await self._save_session_state()
-        await recorder.finish(output_text=handoff or None, result_event=result_event,
-                              error=None if succeeded else "no handoff", usage=turn.usage)
-        return handoff if succeeded else None
+            try:
+                turn = await asyncio.wait_for(self._claude.run_turn(text, on_event), HANDOFF_TIMEOUT_SEC)
+            except Exception as exc:  # the turn was given up, which stopped Claude
+                logger.warning("manager: its previous session wrote no handoff: %s", exc)
+                await recorder.finish(output_text=None, result_event=None,
+                                      error=f"no handoff: {type(exc).__name__}: {exc}")
+                return None
+            result_event = turn.result_event
+            handoff = kept_text(answer_text(result_event, parts), HANDOFF_MAX_CHARS)
+            succeeded = result_event is not None and not result_event.get("is_error") and bool(handoff)
+            await recorder.finish(output_text=handoff or None, result_event=result_event,
+                                  error=None if succeeded else "no handoff", usage=turn.usage)
+            if result_event is not None:
+                self._session_totals = self._claude.totals
+                await self._save_session_state()
+            return handoff if succeeded else None
 
     async def _resume_brief(self, envelope: MessageEnvelope, message: str) -> str:
         """What starts the first turn of a new session: why it is new, the handoff the old session wrote, and
