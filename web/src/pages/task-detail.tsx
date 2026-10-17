@@ -33,7 +33,7 @@ import { RoleProfile, TaskAgentsSummary, TaskAgentsTab } from "@/components/task
 import { NodeCards } from "@/components/pipeline-node-card";
 import { PipelineToolbar } from "@/components/pipeline-toolbar";
 import { type NodeCard, nodeCardId, plannerCard, resultCard, stepCard } from "@/lib/node-cards";
-import { shownSteps, stepColumns, stepLevels, storeHideSkipped, storedHideSkipped } from "@/lib/pipeline-layout";
+import { FIT_PADDING, shownSteps, stepColumns, stepLevels, storeHideSkipped, storedHideSkipped } from "@/lib/pipeline-layout";
 import { useFullScreen } from "@/lib/full-screen";
 import { costBasis, costCaveats, formatUsd } from "@/lib/usage";
 import { cn } from "@/lib/utils";
@@ -1588,7 +1588,7 @@ function PipelineTab({ task }: { task: TaskDetail }) {
         nodes={nodes}
         edges={edges}
         fitView
-        fitViewOptions={{ padding: 0.12 }}
+        fitViewOptions={{ padding: FIT_PADDING }}
         minZoom={0.15}
         colorMode="dark"
         proOptions={{ hideAttribution: true }}

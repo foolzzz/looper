@@ -1,6 +1,7 @@
 import { useEffect } from "react";
-import { Panel, useReactFlow } from "@xyflow/react";
+import { Panel, useReactFlow, useStore } from "@xyflow/react";
 import { Maximize2, Minimize2 } from "lucide-react";
+import { fitPadding } from "@/lib/pipeline-layout";
 
 /** The Pipeline graph's own controls (a child of `ReactFlow`), at its bottom right, clear of its zoom controls:
  * whether the steps a replan dropped are drawn, with how many are left out, and full screen; full screen, the way
@@ -21,17 +22,21 @@ export function PipelineToolbar({
   onToggleFull: () => void;
 }) {
   const { fitView } = useReactFlow();
+  const root = useStore((s) => s.domNode);
   useEffect(() => {
-    // After the new size or nodes are measured.
+    // After the new size, nodes and panels are measured; clear of the panels, so they cover no node.
     let next = 0;
     const first = requestAnimationFrame(() => {
-      next = requestAnimationFrame(() => void fitView({ padding: 0.12 }));
+      next = requestAnimationFrame(() => {
+        const panels = [...(root?.querySelectorAll("[data-card-avoid]") ?? [])].map((panel) => panel.getBoundingClientRect());
+        void fitView({ padding: root ? fitPadding(root.getBoundingClientRect(), panels) : undefined });
+      });
     });
     return () => {
       cancelAnimationFrame(first);
       cancelAnimationFrame(next);
     };
-  }, [full, hideSkipped, fitView]);
+  }, [full, hideSkipped, fitView, root]);
 
   const button =
     "flex h-9 items-center gap-1.5 rounded-md px-2 text-muted-foreground pointer-coarse:h-11 pointer-coarse:min-w-11 hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring";

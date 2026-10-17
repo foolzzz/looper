@@ -1,5 +1,27 @@
 /** Where the Pipeline tab draws a plan's steps: a row per depth in the dependency graph, and a place in it. */
+import type { FitViewOptions } from "@xyflow/react";
 import type { TaskStep } from "@/lib/api";
+
+type Padding = Exclude<NonNullable<FitViewOptions["padding"]>, number | string>;
+
+/** The room a fit leaves around the graph: 12% on the sides and at the top, and at the bottom the toolbar's room
+ * (54 px on a touch screen, its 15 px margin and a gap), so the toolbar never covers the result. */
+const TOOLBAR_ROOM = 80;
+export const FIT_PADDING: Padding = { x: 0.12, top: 0.12, bottom: `${TOOLBAR_ROOM}px` };
+
+/** The room a fit leaves, with the graph's own panels measured (one frame, the window's coordinates): over a panel
+ * in the lower half (the toolbar) and under one in the upper half (full screen's way out), with a gap, wherever
+ * that is more than `FIT_PADDING`'s. */
+export function fitPadding(frame: { top: number; height: number }, panels: { top: number; height: number }[]): Padding {
+  const gap = 8;
+  let bottom = TOOLBAR_ROOM;
+  let top = 0;
+  for (const panel of panels) {
+    if (panel.top - frame.top > frame.height / 2) bottom = Math.max(bottom, frame.top + frame.height - panel.top + gap);
+    else top = Math.max(top, panel.top + panel.height - frame.top + gap);
+  }
+  return { ...FIT_PADDING, ...(top > 0 && { top: `${Math.ceil(top)}px` as const }), bottom: `${Math.ceil(bottom)}px` };
+}
 
 /** The steps the Pipeline draws: every one, or all but the ones a replan dropped (skipped); `hidden` counts those
  * left out. */

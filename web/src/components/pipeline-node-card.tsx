@@ -3,12 +3,16 @@ import { useStore } from "@xyflow/react";
 import {
   type Box,
   CARD_GAP,
+  type Clipper,
   type HoverCard,
   type PointerAt,
   cardKey,
+  cardRoom,
+  fullHeight,
   hoverCard,
   hovers,
   intersect,
+  listenCardKeys,
   placeCard,
   tapOn,
 } from "@/lib/hover-card";
@@ -144,6 +148,12 @@ export function NodeCards({ cards }: { cards: Record<string, NodeCard> }) {
 
   useEffect(() => () => control.dispose(), [control]);
 
+  // The node of the card shown went away (its step was hidden, or the plan came): no card is shown any more, so
+  // the next Esc is not taken for it.
+  useEffect(() => {
+    if (shown !== null && !cards[shown]) control.dismiss();
+  }, [cards, shown, control]);
+
   useEffect(() => {
     if (!root) return;
     let press: PointerAt | null = null;
@@ -184,34 +194,38 @@ export function NodeCards({ cards }: { cards: Record<string, NodeCard> }) {
       control.blur();
     };
     // On the document, first: Esc closes a card wherever focus is, and goes no further (not to full screen).
-    const key = (event: KeyboardEvent) => {
-      const focused = nodeElement(event.target);
-      const action = cardKey(event.key, {
-        shown: control.shown(),
-        focusInCard: inCard(document.activeElement),
-        focusedNode: focused && focused === event.target ? (focused.dataset.id ?? null) : null,
-      });
-      if (!action) return;
-      event.preventDefault();
-      event.stopPropagation();
-      if (action === "into-card") {
-        if (cardRef.current && control.shown() === focused?.dataset.id) cardRef.current.focus();
-        else {
-          focusCard.current = true;
-          control.focus(focused!.dataset.id!);
+    const stopKeys = listenCardKeys(
+      document,
+      (event) => {
+        const focused = nodeElement(event.target);
+        return cardKey(event.key, {
+          shown: control.shown(),
+          focusInCard: inCard(document.activeElement),
+          focusedNode: focused && focused === event.target ? (focused.dataset.id ?? null) : null,
+        });
+      },
+      (action, event) => {
+        if (action === "into-card") {
+          const id = nodeOf(event.target)!;
+          if (cardRef.current && control.shown() === id) cardRef.current.focus();
+          else {
+            focusCard.current = true;
+            control.focus(id);
+          }
+          return;
         }
-        return;
-      }
-      const id = control.shown();
-      if (action === "close-to-node" && id) root.querySelector<HTMLElement>(`.react-flow__node[data-id="${CSS.escape(id)}"]`)?.focus();
-      control.dismiss();
-    };
+        const id = control.shown();
+        if (action === "close-to-node" && id) {
+          root.querySelector<HTMLElement>(`.react-flow__node[data-id="${CSS.escape(id)}"]`)?.focus();
+        }
+        control.dismiss();
+      },
+    );
     root.addEventListener("pointerover", over);
     root.addEventListener("pointerout", out);
     root.addEventListener("pointerup", up);
     root.addEventListener("focusin", focusIn);
     root.addEventListener("focusout", focusOut);
-    document.addEventListener("keydown", key, true);
     document.addEventListener("pointerdown", down, true);
     return () => {
       root.removeEventListener("pointerover", over);
@@ -219,7 +233,7 @@ export function NodeCards({ cards }: { cards: Record<string, NodeCard> }) {
       root.removeEventListener("pointerup", up);
       root.removeEventListener("focusin", focusIn);
       root.removeEventListener("focusout", focusOut);
-      document.removeEventListener("keydown", key, true);
+      stopKeys();
       document.removeEventListener("pointerdown", down, true);
     };
   }, [root, control]);
@@ -232,33 +246,25 @@ export function NodeCards({ cards }: { cards: Record<string, NodeCard> }) {
     const element = cardRef.current;
     const node = shown && root?.querySelector(`.react-flow__node[data-id="${CSS.escape(shown)}"]`);
     if (!root || !element || !node) return;
-    let sight: Box = { left: 0, top: 0, width: window.innerWidth, height: window.innerHeight };
+    const ancestors: Clipper[] = [];
     for (let ancestor = root.parentElement; ancestor; ancestor = ancestor.parentElement) {
       const style = getComputedStyle(ancestor);
-      if (style.overflowX !== "visible" || style.overflowY !== "visible") sight = intersect(sight, ancestor.getBoundingClientRect());
+      ancestors.push({ clips: style.overflowX !== "visible" || style.overflowY !== "visible",
+                       fixed: style.position === "fixed", box: ancestor.getBoundingClientRect() });
       if (style.position === "fixed") break;
     }
     const frame = root.getBoundingClientRect();
+    const area = cardRoom(frame, { left: 0, top: 0, width: window.innerWidth, height: window.innerHeight }, ancestors,
+                          [...root.querySelectorAll("[data-card-avoid]")].map((panel) => panel.getBoundingClientRect()));
     const local = (r: Box): Box => ({ left: r.left - frame.left, top: r.top - frame.top, width: r.width, height: r.height });
-    let area = local(intersect(frame, sight));
-    // Clear of the graph's own controls that ask for it (data-card-avoid): above one in its lower half, under one
-    // in its upper half.
-    for (const control of root.querySelectorAll("[data-card-avoid]")) {
-      const r = local(control.getBoundingClientRect());
-      const bottom = area.top + area.height;
-      if (r.top > area.top + area.height / 2) area = { ...area, height: Math.max(0, Math.min(bottom, r.top) - area.top) };
-      else area = { ...area, top: Math.max(area.top, r.top + r.height), height: Math.max(0, bottom - Math.max(area.top, r.top + r.height)) };
-    }
     const at = local(node.getBoundingClientRect());
     const seen = intersect(at, area);
     if (!seen.width || !seen.height) {
       element.style.visibility = "hidden";
       return;
     }
-    // Its whole height: what it scrolls, with its borders.
-    const natural = element.scrollHeight + element.offsetHeight - element.clientHeight;
     const room = Math.max(0, area.height - 2 * CARD_GAP);
-    const { left, top, height } = placeCard(at, { width: element.offsetWidth, height: Math.min(natural, room) }, area);
+    const { left, top, height } = placeCard(at, { width: element.offsetWidth, height: Math.min(fullHeight(element), room) }, area);
     Object.assign(element.style, { left: `${left}px`, top: `${top}px`, visibility: "visible", opacity: "1" });
     if (element.style.maxHeight !== `${height}px`) element.style.maxHeight = `${height}px`;
     if (focusCard.current) {

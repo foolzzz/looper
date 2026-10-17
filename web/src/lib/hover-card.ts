@@ -191,3 +191,57 @@ export function cardKey(
   if ((key === "Enter" || key === " ") && focusedNode && !focusInCard) return "into-card";
   return null;
 }
+
+/** An ancestor of the graph, as far as a card's room goes: whether it clips what overflows it, whether it is fixed
+ * (the ones above a fixed one do not clip it), and its box. */
+export interface Clipper {
+  clips: boolean;
+  fixed: boolean;
+  box: Box;
+}
+
+/** The room a card has, in the graph's frame; every box is in the window's coordinates. It is the graph in sight,
+ * inside the window and each ancestor that clips it (up to a fixed one, such as a full-screen overlay), clear of
+ * the graph's own panels that ask for it: above one in the lower half, under one in the upper half. */
+export function cardRoom(frame: Box, view: Box, ancestors: Clipper[], avoid: Box[]): Box {
+  let sight = view;
+  for (const ancestor of ancestors) {
+    if (ancestor.clips) sight = intersect(sight, ancestor.box);
+    if (ancestor.fixed) break;
+  }
+  const seen = intersect(frame, sight);
+  let room: Box = { left: seen.left - frame.left, top: seen.top - frame.top, width: seen.width, height: seen.height };
+  for (const panel of avoid) {
+    const top = panel.top - frame.top;
+    const bottom = room.top + room.height;
+    if (top > room.top + room.height / 2) room = { ...room, height: Math.max(0, Math.min(bottom, top) - room.top) };
+    else {
+      const under = Math.max(room.top, top + panel.height);
+      room = { ...room, top: under, height: Math.max(0, bottom - under) };
+    }
+  }
+  return room;
+}
+
+/** A card's whole height, measured without changing its max-height (which would reset its scroll): what it scrolls,
+ * with its borders. */
+export const fullHeight = (card: { scrollHeight: number; offsetHeight: number; clientHeight: number }) =>
+  card.scrollHeight + card.offsetHeight - card.clientHeight;
+
+/** Listens for the cards' keys on `doc` before anything else hears them (the capture phase): a key `route` gives an
+ * action is the cards' alone, `act` does it, and it goes no further (not to full screen, which listens after). */
+export function listenCardKeys(
+  doc: Pick<Document, "addEventListener" | "removeEventListener">,
+  route: (event: KeyboardEvent) => CardKey,
+  act: (action: NonNullable<CardKey>, event: KeyboardEvent) => void,
+): () => void {
+  const listener = (event: KeyboardEvent) => {
+    const action = route(event);
+    if (!action) return;
+    event.preventDefault();
+    event.stopPropagation();
+    act(action, event);
+  };
+  doc.addEventListener("keydown", listener, true);
+  return () => doc.removeEventListener("keydown", listener, true);
+}

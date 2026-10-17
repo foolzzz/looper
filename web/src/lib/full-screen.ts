@@ -84,6 +84,17 @@ export function fullScreen(
   };
 }
 
+/** Listens for full screen's Esc on `doc` after the rest of the page (the bubble phase), so a node's card, which
+ * listens first, takes an Esc before full screen does. */
+export function listenFullScreenKeys(
+  doc: Pick<Document, "addEventListener" | "removeEventListener">,
+  control: Pick<FullScreen, "key">,
+): () => void {
+  const listener = (event: KeyboardEvent) => control.key(event);
+  doc.addEventListener("keydown", listener);
+  return () => doc.removeEventListener("keydown", listener);
+}
+
 /** Full screen for the element `ref` holds: its mode, and a toggle. While it is on, Esc leaves it (after a node's
  * card, which takes it first) and reaches nothing else on the page, and the overlay keeps the page under it from
  * scrolling. */
@@ -104,13 +115,12 @@ export function useFullScreen(ref: RefObject<HTMLElement | null>): [FullScreenMo
 
   useEffect(() => {
     if (mode === "off") return;
-    const key = (event: KeyboardEvent) => control.current?.key(event);
-    document.addEventListener("keydown", key);
+    const stop = control.current ? listenFullScreenKeys(document, control.current) : () => {};
     const root = document.documentElement;
     const overflow = root.style.overflow;
     if (mode === "overlay") root.style.overflow = "hidden";
     return () => {
-      document.removeEventListener("keydown", key);
+      stop();
       root.style.overflow = overflow;
     };
   }, [mode]);
