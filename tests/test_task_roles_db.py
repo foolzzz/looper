@@ -296,3 +296,29 @@ def test_the_task_page_lists_each_roles_versions_steps_and_numbers(monkeypatch: 
         assert "roles" not in await _task_view("task-b")
 
     _run(test, monkeypatch)
+
+
+def test_a_steps_roles_and_whether_its_review_role_blocks_are_saved_and_read_back(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from looper.db import plans
+
+    async def test(pool: Any) -> None:
+        project = await _project(pool)
+        await _task(pool, "task-a", "running", project)
+        step = {"id": "step-s1", "index": 0, "key": "s1", "instruction": "do it", "review": True,
+                "role_key": "tester", "review_role_key": "style", "review_role_required": False, "role_version": 2,
+                "review_role_version": 1, "review_stage": "role"}
+        plain = {"id": "step-s2", "index": 1, "key": "s2", "instruction": "do it"}
+        await plans.save("task-a", plan={"plan_id": "p", "status": "executing"}, steps=[step, plain], pool=pool)
+        rows = {s["step_key"]: s for s in (await plans.load("task-a", pool=pool))["steps"]}
+        assert {k: rows["s1"][k] for k in ("role_key", "review_role_key", "review_role_required", "role_version",
+                                            "review_role_version", "review_stage")} == {
+            "role_key": "tester", "review_role_key": "style", "review_role_required": False, "role_version": 2,
+            "review_role_version": 1, "review_stage": "role"}
+        assert rows["s2"]["review_role_required"] is True and rows["s2"]["review_role_key"] is None
+        # A review role needs a reviewed step, in the table too.
+        with pytest.raises(Exception, match="task_steps_review_role_reviewed"):
+            await plans.save("task-a", steps=[{**step, "review": False}], pool=pool)
+
+    _run(test, monkeypatch)

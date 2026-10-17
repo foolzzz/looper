@@ -354,7 +354,7 @@ def test_fake_mode_runs_every_task_and_sees_misbehaviour(tmp_path: Path) -> None
                     "supplement_no_change": (2, 0, 0, 1), "profile_choice": (1, 0, 0, 0),
                     # The security review role reviews its step after the built-in Reviewer.
                     "roles_tester_docs": (3, 0, 0, 0), "roles_security_review": (1, 0, 2, 0),
-                    "roles_not_needed": (1, 0, 0, 0)}
+                    "roles_advisory_review": (1, 0, 2, 0), "roles_not_needed": (1, 0, 0, 0)}
     # Only the parts that need nothing of each other run side by side; interface_first's sit between its interface
     # step and its integration step.
     shape = {t: (by_id[t]["independent_pairs"], by_id[t]["bracketed_pairs"], by_id[t]["parallel_workers"])
@@ -366,17 +366,21 @@ def test_fake_mode_runs_every_task_and_sees_misbehaviour(tmp_path: Path) -> None
                      # The dropped second step and its replacement both depend on s1 alone.
                      "supplement_replan": (1, 0, 1), "requirement_edit": (1, 0, 1),
                      "supplement_no_change": (0, 0, 1), "profile_choice": (0, 0, 1),
-                     "roles_tester_docs": (1, 0, 2), "roles_security_review": (0, 0, 1), "roles_not_needed": (0, 0, 1)}
+                     "roles_tester_docs": (1, 0, 2), "roles_security_review": (0, 0, 1),
+                     "roles_advisory_review": (0, 0, 1), "roles_not_needed": (0, 0, 1)}
     assert by_id["chat_correction"]["planner_turns"]["chat"] == 1
     # Only the task whose project lets its Planner choose a profile runs a Worker on the one it chose.
     assert {t: by_id[t]["planner_profile_runs"] for t in by_id if by_id[t]["planner_profile_runs"]} == {
         "profile_choice": 1}
     # Only the tasks whose Planner defined roles run steps as them: each run on a version it defined, with the
     # boundaries before its contract, and the reviewed step accepted only after both reviews passed.
+    # An advisory review role's failing review does not keep its step from being accepted.
     roles = {t: tuple(by_id[t][k] for k in ("roles_defined", "role_runs", "role_profile_runs", "role_reviews",
-                                             "role_prompt_mismatches", "role_boundary_misses", "gate_breaches"))
+                                             "role_prompt_mismatches", "role_boundary_misses", "gate_breaches",
+                                             "advisory_role_fails"))
              for t in by_id if by_id[t]["roles_defined"] or by_id[t]["role_runs"]}
-    assert roles == {"roles_tester_docs": (2, 2, 1, 0, 0, 0, 0), "roles_security_review": (1, 1, 0, 1, 0, 0, 0)}
+    assert roles == {"roles_tester_docs": (2, 2, 1, 0, 0, 0, 0, 0), "roles_security_review": (1, 1, 0, 1, 0, 0, 0, 0),
+                     "roles_advisory_review": (1, 1, 0, 1, 0, 0, 0, 1)}
     # Only the two changes that make the second step wrong change the plan.
     assert {t: by_id[t]["plan_changes"] for t in by_id if by_id[t]["plan_changes"]} == {
         "supplement_replan": 1, "requirement_edit": 1}

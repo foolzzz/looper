@@ -104,7 +104,8 @@ def test_a_role_without_a_harness_takes_an_operators_harness_whole_and_the_share
 
 
 def test_the_boundaries_are_set_on_the_shared_defaults_only() -> None:
-    assert layer_update({"boundaries": "\n- Never touch prod.\n"}, Layer.SYSTEM) == {"boundaries": "- Never touch prod."}
+    assert layer_update({"boundaries": "\n- Never touch prod.\n"}, Layer.SYSTEM) == {
+        "boundaries": "- Never touch prod."}
     assert layer_update({"boundaries": HARNESS_BOUNDARIES}, Layer.SYSTEM) == {"boundaries": None}  # the built-in
     assert layer_update({"boundaries": None}, Layer.ROLE) == {"boundaries": None}
     for scope in (Layer.ROLE, Layer.PROJECT, Layer.ROLE_PROJECT):
@@ -160,6 +161,32 @@ def test_a_step_names_a_work_role_and_a_reviewed_step_a_review_role() -> None:
 def test_a_step_naming_a_role_it_may_not_is_refused(extra: dict[str, Any], roles: Any, error: str) -> None:
     with pytest.raises(ProtocolError, match=error.replace("(", r"\(").replace(")", r"\)")):
         _plan({**step("s1"), **extra}, roles=roles)
+
+
+@pytest.mark.parametrize(("extra", "required"), [
+    ({}, True), ({"review_role_required": True}, True), ({"review_role_required": False}, False),
+])
+def test_a_review_role_blocks_its_step_unless_the_step_makes_it_advisory(extra: dict[str, Any], required: bool) -> None:
+    (spec,) = _plan({**step("s1", review=True), "review_role": "security", **extra}).steps
+    assert (spec.review_role, spec.review_role_required) == ("security", required)
+
+
+@pytest.mark.parametrize(("extra", "error"), [
+    ({"review_role_required": False}, "review_role_required is only for a step with a review_role"),
+    ({"review_role_required": True}, "review_role_required is only for a step with a review_role"),
+    ({"review_role": "security", "review_role_required": "no"}, "review_role_required must be true or false"),
+    ({"review": False, "review_role": "security", "review_role_required": False}, 'review_role needs "review": true'),
+])
+def test_review_role_required_comes_only_with_a_review_role_on_a_reviewed_step(
+    extra: dict[str, Any], error: str,
+) -> None:
+    with pytest.raises(ProtocolError, match=error):
+        _plan({**step("s1", review=True), **extra})
+
+
+def test_the_contract_says_how_to_make_a_review_role_advisory_only_where_roles_are_on() -> None:
+    line = '"review_role_required": false makes the\n  review role\'s verdict advice to you'
+    assert line in reply_contract(roles=True) and "review_role_required" not in reply_contract(roles=False)
 
 
 def test_a_chat_replan_and_add_steps_check_the_roles_too() -> None:
