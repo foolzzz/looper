@@ -30,6 +30,8 @@ import { historyHref, runRoleLabel } from "@/pages/agent-history";
 import { TaskCostBreakdown } from "@/components/task-cost";
 import { ContinueAtCap, TaskSpendMeter } from "@/components/task-budget";
 import { RoleProfile, TaskAgentsSummary, TaskAgentsTab } from "@/components/task-agents-tab";
+import { NodeCards } from "@/components/pipeline-node-card";
+import { type NodeCard, plannerCard, resultCard, stepCard } from "@/lib/node-cards";
 import { costBasis, costCaveats, formatUsd } from "@/lib/usage";
 import { cn } from "@/lib/utils";
 import {
@@ -1461,27 +1463,34 @@ function nodeStyle(look: NodeLook) {
     background: look.background, color: look.color,
     border: `2px ${look.borderStyle} ${look.border}`,
     opacity: look.muted ? 0.8 : 1,
+    // React Flow leaves a node that is neither selectable nor draggable without pointer events; its card needs them.
+    pointerEvents: "all" as const,
   };
 }
 
 function NodeLabel({
-  title,
   name,
   look,
   note,
   role,
+  detail,
 }: {
-  title: string;
   name: string;
   look: NodeLook;
   note?: string;
   /** The roles a step runs and is reviewed as. */
   role?: string;
+  /** A line of what the step does, shown when there is no role line (the node fits one of the two). */
+  detail?: string;
 }) {
   return (
-    <div title={title} className="flex h-full w-full flex-col items-center justify-center overflow-hidden px-2 leading-tight">
+    <div className="flex h-full w-full flex-col items-center justify-center overflow-hidden px-2 leading-tight">
       <span className={cn("max-w-full truncate font-mono text-xs font-semibold", look.muted && "line-through")}>{name}</span>
-      {role && <span className="mt-0.5 max-w-full truncate font-mono text-[10px]">{role}</span>}
+      {role ? (
+        <span className="mt-0.5 max-w-full truncate font-mono text-[10px]">{role}</span>
+      ) : (
+        detail && <span className="mt-0.5 max-w-full truncate text-[10px] opacity-80">{detail}</span>
+      )}
       <span className="mt-1 max-w-full truncate text-[10px]">{look.label}{note ? ` · ${note}` : ""}</span>
     </div>
   );
@@ -1489,12 +1498,14 @@ function NodeLabel({
 
 /** The plan as its dependency graph: each step a node under the steps it depends on (steps without dependencies
  * under the Planner), the steps nothing live depends on leading to the result. Done steps keep their place and
- * edges when the plan changes; dropped ones stay, dashed and muted, as history. */
+ * edges when the plan changes; dropped ones stay, dashed and muted, as history. Each node has a card of its
+ * details (`NodeCards`). */
 function PipelineTab({ task }: { task: TaskDetail }) {
-  const { nodes, edges, rows } = useMemo(() => {
+  const { nodes, edges, rows, cards } = useMemo(() => {
     const steps = task.steps || [];
     const ns: Node[] = [];
     const es: Edge[] = [];
+    const cards: Record<string, NodeCard> = {};
     const edgeStyle = (live: boolean, running = false) => ({
       stroke: running ? "var(--color-primary)" : live ? "var(--color-muted-foreground)" : "var(--color-border)",
       strokeWidth: 2, strokeDasharray: live ? undefined : "6 4",
@@ -1502,19 +1513,22 @@ function PipelineTab({ task }: { task: TaskDetail }) {
     const plannerLook = taskLook(task.status, "Planning and deciding");
     ns.push({
       id: "planner", position: { x: -NODE_W / 2, y: 0 },
-      data: { label: <NodeLabel title={task.planner_id || "Planner"} name="Planner" look={plannerLook} /> },
+      data: { label: <NodeLabel name="Planner" look={plannerLook} /> },
       style: nodeStyle(plannerLook), sourcePosition: Position.Bottom, targetPosition: Position.Top,
     });
+    cards.planner = plannerCard(task, plannerLook);
 
     if (steps.length === 0) {
       const look = { ...STEP_LOOKS.pending, borderStyle: "dashed" as const, label: "Waiting for the plan" };
       ns.push({
         id: "waiting", position: { x: -NODE_W / 2, y: ROW_H },
-        data: { label: <NodeLabel title="The Planner has not planned the steps yet" name="Steps" look={look} /> },
+        data: { label: <NodeLabel name="Steps" look={look} /> },
         style: nodeStyle(look), sourcePosition: Position.Bottom, targetPosition: Position.Top,
       });
+      cards.waiting = { name: "Steps", look, roles: [],
+                        sections: [{ kind: "text", title: "Plan", text: "The Planner has not planned the steps yet." }] };
       es.push({ id: "e-planner-waiting", source: "planner", target: "waiting", animated: true, style: edgeStyle(true) });
-      return { nodes: ns, edges: es, rows: 2 };
+      return { nodes: ns, edges: es, rows: 2, cards };
     }
 
     const byId = new Map(steps.map((s) => [s.id, s]));
@@ -1547,27 +1561,15 @@ function PipelineTab({ task }: { task: TaskDetail }) {
       const look = stepLook(step.status);
       const name = step.step_key || `step ${step.step_index + 1}`;
       const deps = (step.depends_on ?? []).filter((d) => byId.has(d));
-      const title = [
-        `${name} — ${look.label}`,
-        step.instruction,
-        `Depends on: ${deps.map((d) => byId.get(d)?.step_key || d).join(", ") || "nothing"}`,
-        step.worker_id ? `Worker: ${step.worker_id}` : "",
-        step.reviewer_id ? `Reviewer: ${step.reviewer_id}` : "",
-        step.retries ? `Retries: ${step.retries}` : "",
-        step.review ? "Needs a passing review" : "",
-        stepRoles(step),
-        step.status === "completed" && step.review_stage
-          ? `Waiting for ${step.review_stage === "role" ? `review: ${step.review_role_key}` : "the built-in review"}`
-          : "",
-        step.status === "skipped" ? `Skipped: ${why.get(step.id) || "dropped from the plan by a replan"}` : "",
-      ].filter(Boolean).join("\n");
       ns.push({
         id: step.id,
         position: { x: (x.get(step.id) ?? 0) - NODE_W / 2, y: ROW_H * (1 + (levels.get(step.id) ?? 0)) },
-        data: { label: <NodeLabel title={title} name={name} look={look} role={stepRoles(step, false) || undefined}
-                                  note={step.retries ? `retry ${step.retries}` : undefined} /> },
+        data: { label: <NodeLabel name={name} look={look} role={stepRoles(step, false) || undefined}
+                                  detail={step.instruction} note={step.retries ? `retry ${step.retries}` : undefined} /> },
         style: nodeStyle(look), sourcePosition: Position.Bottom, targetPosition: Position.Top,
       });
+      cards[step.id] = stepCard(step, { taskId: task.task_id, look, lookOf: (s) => stepLook(s.status), stepsById: byId,
+                                        skippedBecause: why.get(step.id) });
       const live = step.status !== "skipped";
       const running = step.status === "dispatched";
       for (const source of deps.length ? deps : ["planner"]) {
@@ -1582,13 +1584,14 @@ function PipelineTab({ task }: { task: TaskDetail }) {
     const resultLook = taskLook(task.status, "In progress");
     ns.push({
       id: "result", position: { x: resultX - NODE_W / 2, y: ROW_H * (2 + depth) },
-      data: { label: <NodeLabel title={task.result_summary || task.error || "The task's result"} name="Result" look={resultLook} /> },
+      data: { label: <NodeLabel name="Result" look={resultLook} /> },
       style: nodeStyle(resultLook), targetPosition: Position.Top,
     });
+    cards.result = resultCard(task, resultLook);
     for (const step of ends) {
       es.push({ id: `end:${step.id}`, source: step.id, target: "result", style: edgeStyle(true) });
     }
-    return { nodes: ns, edges: es, rows: depth + 3 };
+    return { nodes: ns, edges: es, rows: depth + 3, cards };
   }, [task]);
 
   return (
@@ -1610,6 +1613,7 @@ function PipelineTab({ task }: { task: TaskDetail }) {
       >
         <Background color="var(--color-border)" gap={20} />
         <Controls showInteractive={false} />
+        <NodeCards cards={cards} />
       </ReactFlow>
     </div>
   );

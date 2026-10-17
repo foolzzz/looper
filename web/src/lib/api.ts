@@ -1461,6 +1461,8 @@ export interface TaskStep {
   /** The Planner's label for the step, unique within the task. */
   step_key: string;
   instruction: string;
+  /** How to tell the step is done, as the Planner wrote it; checked by its Worker and its Reviewer. */
+  acceptance_criteria: string[];
   target_files: string[];
   /** The ids of the steps it needs before it starts. */
   depends_on: string[];
@@ -1482,7 +1484,8 @@ export interface TaskStep {
   retries: number;
   worker_id: string | null;
   reviewer_id: string | null;
-  result: Record<string, unknown> | null;
+  /** Its latest attempt's result; `GET /api/tasks/<id>` sends the column's JSON text. */
+  result: Record<string, unknown> | string | null;
   created_at: string;
   updated_at: string;
   completed_at: string | null;

@@ -1,0 +1,206 @@
+/** The details card of each Pipeline node, as data: built from the task here, drawn by
+ * `components/pipeline-node-card`. */
+import { historyHref } from "@/pages/agent-history";
+import type { TaskDetail, TaskStep } from "@/lib/api";
+
+/** A node's status as the Pipeline draws it: a word and the node's colors. */
+export interface CardLook {
+  label: string;
+  border: string;
+  borderStyle: "solid" | "dashed";
+  background: string;
+  color: string;
+}
+
+export interface CardFact {
+  label: string;
+  value: string;
+  /** An agent's history. */
+  href?: string;
+}
+
+export type CardSection =
+  /** `preview` is the text clipped, when it is long: the card shows it with "Show more". `markdown`: drawn as
+   * Markdown, as the Overview draws it; `tone`: the title says something went wrong. */
+  | { kind: "text"; title: string; text: string; preview?: string; markdown?: boolean; tone?: "destructive" }
+  | { kind: "list"; title: string; items: string[]; mono?: boolean }
+  | { kind: "steps"; title: string; steps: { name: string; look: CardLook }[] }
+  | { kind: "facts"; title: string; facts: CardFact[] };
+
+/** What a Pipeline node's card shows: its name and status, the roles it runs as, then its sections in order. */
+export interface NodeCard {
+  name: string;
+  look: CardLook;
+  roles: string[];
+  sections: CardSection[];
+}
+
+/** `text` cut to its first `lines` lines and `chars` characters, with an ellipsis; undefined when it is short. */
+export function clipText(text: string, { lines = 4, chars = 320 } = {}): string | undefined {
+  const whole = text.trimEnd();
+  let cut = whole.split("\n").slice(0, lines).join("\n");
+  if (cut.length > chars) cut = cut.slice(0, chars);
+  return cut.length < whole.length ? `${cut.trimEnd()}…` : undefined;
+}
+
+export function formatWhen(iso: string) {
+  const date = new Date(iso);
+  return Number.isNaN(date.getTime()) ? iso : date.toLocaleString();
+}
+
+function formatSpan(start: string, end: string) {
+  const sec = Math.max(0, Math.floor((new Date(end).getTime() - new Date(start).getTime()) / 1000));
+  return sec < 60 ? `${sec}s` : `${Math.floor(sec / 60)}m ${sec % 60}s`;
+}
+
+interface TextOptions {
+  clip?: boolean;
+  markdown?: boolean;
+  tone?: "destructive";
+}
+const text = (title: string, value: string | null | undefined, { clip, markdown, tone }: TextOptions = {}): CardSection[] =>
+  value?.trim()
+    ? [{ kind: "text", title, text: value.trim(), ...(clip && { preview: clipText(value.trim()) }), ...(markdown && { markdown }),
+         ...(tone && { tone }) }]
+    : [];
+const list = (title: string, items: string[] | null | undefined, mono = false): CardSection[] =>
+  items?.length ? [{ kind: "list", title, items, mono }] : [];
+const facts = (title: string, items: (CardFact | false | "" | null | undefined)[]): CardSection[] => {
+  const kept = items.filter((item): item is CardFact => !!item);
+  return kept.length ? [{ kind: "facts", title, facts: kept }] : [];
+};
+const str = (value: unknown) => (typeof value === "string" ? value : "");
+
+/** The roles a step runs and is reviewed as, as runs name them: "fe_rd · work v2", "security · review (advisory)". */
+function stepRoleLines(step: TaskStep) {
+  const version = (v: number | null) => (v != null ? ` v${v}` : "");
+  return [
+    step.role_key && `${step.role_key} · work${version(step.role_version)}`,
+    step.review_role_key &&
+      `${step.review_role_key} · review${version(step.review_role_version)}${step.review_role_required === false ? " (advisory)" : ""}`,
+  ].filter((line): line is string => !!line);
+}
+
+/** The step's result as an object, from the JSON text the task detail sends (or an object). */
+function resultOf(step: TaskStep): Record<string, unknown> | null {
+  if (typeof step.result !== "string") return step.result;
+  try {
+    const value: unknown = JSON.parse(step.result);
+    return value && typeof value === "object" ? (value as Record<string, unknown>) : null;
+  } catch {
+    return null;
+  }
+}
+
+/** What the step's latest attempt reported, once that attempt ended: the Worker's summary, or why the attempt
+ * failed; and the review that did not pass it. A running step's result is its previous attempt's, so none. */
+function stepResult(step: TaskStep): CardSection[] {
+  const result = resultOf(step);
+  if (!result || !["completed", "deciding", "verified", "failed"].includes(step.status)) return [];
+  const worked = result.status === "completed";
+  const report = worked ? str(result.summary) : str(result.error) || str(result.summary);
+  const roleReview = result.role_review as Record<string, unknown> | undefined;
+  const reasons = (findings: unknown, summary: unknown) =>
+    (Array.isArray(findings) ? findings.map(String).join("\n") : "") || str(summary) || "no reason given";
+  const review =
+    roleReview && roleReview.passed !== true
+      ? `Review by role ${str(roleReview.role)} did not pass it:\n${reasons(roleReview.findings, roleReview.summary)}`
+      : result.verify_passed === false
+        ? `The review did not pass it:\n${reasons(result.verify_findings, result.verify_summary)}`
+        : "";
+  return [
+    ...text(worked ? "Result" : `Result: ${str(result.status) || "unknown"}`, report,
+            { clip: true, tone: worked ? undefined : "destructive" }),
+    ...text("Review", review, { clip: true, tone: "destructive" }),
+  ];
+}
+
+export interface StepCardContext {
+  taskId: string;
+  look: CardLook;
+  /** The look of each step it depends on, by id. */
+  lookOf: (step: TaskStep) => CardLook;
+  stepsById: Map<string, TaskStep>;
+  /** Why a dropped step was dropped. */
+  skippedBecause?: string;
+}
+
+/** A step's card: what it does, how it is checked, what it waits for, who ran it and what came of it. */
+export function stepCard(step: TaskStep, { taskId, look, lookOf, stepsById, skippedBecause }: StepCardContext): NodeCard {
+  const deps = (step.depends_on ?? []).map((id) => stepsById.get(id)).filter((s): s is TaskStep => !!s);
+  // completed_at is kept from the first time the step went to review or ended, so a retried step's may be earlier.
+  const finished = step.completed_at && (step.status === "skipped" ? "Dropped" : step.retries ? "First finished" : "Finished");
+  return {
+    name: step.step_key || `step ${step.step_index + 1}`,
+    look,
+    roles: stepRoleLines(step),
+    sections: [
+      ...text("Instruction", step.instruction),
+      ...list("Acceptance criteria", step.acceptance_criteria),
+      ...list("Files", step.target_files, true),
+      ...(deps.length
+        ? [{ kind: "steps" as const, title: "Depends on", steps: deps.map((d) => ({ name: d.step_key || d.id, look: lookOf(d) })) }]
+        : []),
+      ...facts("Runs", [
+        step.worker_id && { label: "Worker", value: step.worker_id, href: historyHref(step.worker_id, taskId) },
+        step.reviewer_id && { label: "Reviewer", value: step.reviewer_id, href: historyHref(step.reviewer_id, taskId) },
+        step.retries > 0 && { label: "Retries", value: String(step.retries) },
+        step.review && { label: "Review", value: "Needs a passing review" },
+        step.status === "completed" && step.review_stage && {
+          label: "Now",
+          value: `Waiting for ${step.review_stage === "role" ? `review: ${step.review_role_key}` : "the built-in review"}`,
+        },
+      ]),
+      ...stepResult(step),
+      ...(step.status === "skipped" ? text("Skipped", skippedBecause || "Dropped from the plan by a replan") : []),
+      ...facts("Timing", [
+        { label: "Planned", value: formatWhen(step.created_at) },
+        finished && { label: finished, value: formatWhen(step.completed_at!) },
+      ]),
+    ],
+  };
+}
+
+/** The Planner's card: its agent, the plan's size and its latest progress note. */
+export function plannerCard(task: TaskDetail, look: CardLook): NodeCard {
+  const note = task.progress?.[0];
+  const steps = task.steps ?? [];
+  const dropped = steps.filter((s) => s.status === "skipped").length;
+  const planned = steps.length - dropped;
+  return {
+    name: "Planner",
+    look,
+    roles: [],
+    sections: [
+      ...facts("Runs", [
+        task.planner_id && { label: "Planner", value: task.planner_id, href: historyHref(task.planner_id, task.task_id) },
+        steps.length > 0 && {
+          label: "Plan",
+          value: `${planned} step${planned === 1 ? "" : "s"}${dropped ? `, ${dropped} dropped` : ""}`,
+        },
+      ]),
+      ...(note
+        ? text(`Latest note · ${formatWhen(note.at)}`, [note.now && `Now: ${note.now}`, note.next && `Next: ${note.next}`]
+            .filter(Boolean).join("\n"), { clip: true })
+        : []),
+    ],
+  };
+}
+
+/** The result's card: the task's summary, or its error, and how long it ran. */
+export function resultCard(task: TaskDetail, look: CardLook): NodeCard {
+  return {
+    name: "Result",
+    look,
+    roles: [],
+    sections: [
+      ...text("Summary", task.result_summary, { clip: true, markdown: true }),
+      ...text("Error", task.error, { clip: true, markdown: true, tone: "destructive" }),
+      ...facts("Timing", [
+        { label: "Created", value: formatWhen(task.created_at) },
+        task.completed_at && { label: "Ended", value: formatWhen(task.completed_at) },
+        task.completed_at && { label: "Took", value: formatSpan(task.created_at, task.completed_at) },
+      ]),
+    ],
+  };
+}
