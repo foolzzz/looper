@@ -36,7 +36,7 @@ import signal
 import subprocess
 import time
 from collections import defaultdict
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -50,6 +50,8 @@ RECORDS_DIR = Path(".local") / "agent-processes"  # under the runtime root: one 
 # Set by ``sweep``: where this server records its agents, and the server (pid, start time) each record names.
 _records: Path | None = None
 _server: tuple[int, str] | None = None
+_recorded: dict[int, tuple[Path, str]] = {}
+_ending: set[int] = set()
 _forgetting: set[asyncio.Task[None]] = set()
 
 # pid -> (ppid, pgid) of every live process; a zombie has exited already and is left out.
@@ -175,17 +177,28 @@ async def end(process: asyncio.subprocess.Process, *, label: str, known: Tree | 
 
 
 async def _end(process: _Agent, *, label: str, known: Tree) -> None:
+    """End the tree, recording it so the next start can finish an end cut short by the server's exit."""
+    recorded = _recorded.get(process.pid)
+    if recorded is not None:
+        _ending.add(process.pid)
     seen = _tree(process, _snapshot(), known)
     alive = dict(seen)
-    if alive:
-        _signal(process, alive, signal.SIGTERM)
     try:
+        if recorded is not None:
+            path, started = recorded
+            assert _server is not None
+            _write_record(path.parent, process.pid, started, _server, tree=await asyncio.to_thread(_start_times, seen))
+        if alive:
+            _signal(process, alive, signal.SIGTERM)
         deadline = time.monotonic() + TERM_GRACE_SEC
         while alive and time.monotonic() < deadline:
             await asyncio.sleep(_POLL_SEC)
             alive = _tree(process, await asyncio.to_thread(_snapshot), seen)
             if fresh := {pid: pgid for pid, pgid in alive.items() if pid not in seen}:
                 seen.update(fresh)
+                if recorded is not None:
+                    _write_record(path.parent, process.pid, started, _server,
+                                  tree=await asyncio.to_thread(_start_times, seen))
                 _signal(process, fresh, signal.SIGTERM)
     except BaseException:
         alive = _tree(process, _snapshot(), seen)
@@ -195,6 +208,14 @@ async def _end(process: _Agent, *, label: str, known: Tree) -> None:
             _signal(process, alive, signal.SIGKILL)
         logger.info("%s: ended the process tree of pid %s: %d found, %d exited on SIGTERM, %d killed",
                     label, process.pid, len(seen), len(seen) - len(alive), len(alive))
+        _ending.discard(process.pid)
+        if recorded is not None and process.returncode is not None:
+            try:
+                if json.loads(path.read_text(encoding="utf-8")).get("started") == started:
+                    path.unlink()
+            except (OSError, ValueError):
+                pass
+            _recorded.pop(process.pid, None)
 
 
 # --- Recording agents for the next server's sweep ---
@@ -210,11 +231,37 @@ def _start_time(pid: int) -> str | None:
     return " ".join(listed.stdout.split()) or None
 
 
-def _write_record(directory: Path, pid: int, started: str, server: tuple[int, str]) -> Path:
+def _start_times(pids: Iterable[int]) -> dict[int, str]:
+    """The start times ``ps`` lists for ``pids``, in UTC."""
+    selected = ",".join(map(str, pids))
+    if not selected:
+        return {}
+    try:
+        listed = subprocess.run(["ps", "-o", "pid=,lstart=", "-p", selected], capture_output=True, text=True,
+                                timeout=_PS_TIMEOUT_SEC, check=False, env={**os.environ, "LC_ALL": "C", "TZ": "UTC"})
+    except (OSError, subprocess.SubprocessError):
+        return {}
+    started: dict[int, str] = {}
+    for line in listed.stdout.splitlines():
+        fields = line.split(maxsplit=1)
+        if len(fields) != 2:
+            continue
+        try:
+            started[int(fields[0])] = " ".join(fields[1].split())
+        except ValueError:
+            continue
+    return started
+
+
+def _write_record(
+    directory: Path, pid: int, started: str, server: tuple[int, str], tree: dict[int, str] | None = None,
+) -> Path:
     """Record agent ``pid``, started at ``started``, as started by ``server`` (its pid and start time)."""
     path = directory / f"{pid}.json"
-    path.write_text(json.dumps({"pid": pid, "started": started, "server_pid": server[0],
-                                "server_started": server[1]}) + "\n", encoding="utf-8")
+    record: dict[str, Any] = {"pid": pid, "started": started, "server_pid": server[0], "server_started": server[1]}
+    if tree is not None:
+        record["tree"] = [{"pid": p, "started": s} for p, s in tree.items()]
+    path.write_text(json.dumps(record) + "\n", encoding="utf-8")
     return path
 
 
@@ -232,6 +279,7 @@ async def spawn(*argv: str, **kwargs: Any) -> asyncio.subprocess.Process:
         except OSError as exc:
             logger.warning("cannot record agent pid %s for the next sweep: %s", process.pid, exc)
             return process
+        _recorded[process.pid] = (path, started)
         forget = asyncio.get_running_loop().create_task(_forget(process, path, started))
         _forgetting.add(forget)
         forget.add_done_callback(_forgetting.discard)
@@ -240,11 +288,14 @@ async def spawn(*argv: str, **kwargs: Any) -> asyncio.subprocess.Process:
 
 async def _forget(process: asyncio.subprocess.Process, path: Path, started: str) -> None:
     await process.wait()
+    if process.pid in _ending:
+        return
     try:
         if json.loads(path.read_text(encoding="utf-8")).get("started") == started:  # not a later agent's pid
             path.unlink()
     except (OSError, ValueError):
         pass
+    _recorded.pop(process.pid, None)
 
 
 async def sweep(runtime_root: Path) -> None:
@@ -255,8 +306,9 @@ async def sweep(runtime_root: Path) -> None:
     left alone. Otherwise the record is removed, and its agent's tree is
     ended when its pid still runs with the same start time: the same process,
     orphaned by a server that crashed or was killed. A pid that no longer
-    runs, or that now belongs to another process, is left alone. Children of an
-    agent that has already exited are not found: nothing links them to it.
+    runs, or that now belongs to another process, is left alone. A record also
+    lists the tree an end was ending, so a server that exited in the middle
+    of an end has the rest ended at the next start.
     """
     global _records, _server
     directory = runtime_root / RECORDS_DIR
@@ -267,6 +319,7 @@ async def sweep(runtime_root: Path) -> None:
         logger.warning("cannot read this server's start time; its agents are not recorded for the next sweep")
     servers: dict[tuple[int, str], bool] = {}  # whether each (pid, start time) still runs
     orphans: list[int] = []
+    trees: list[tuple[int, int]] = []
     for path in sorted(directory.glob("*.json")):
         try:
             record = json.loads(path.read_text(encoding="utf-8"))
@@ -283,8 +336,18 @@ async def sweep(runtime_root: Path) -> None:
                 continue  # its server runs: the agent is that server's to end
         if _start_time(pid) == started:
             orphans.append(pid)
+        try:
+            tree = {int(entry["pid"]): str(entry["started"]) for entry in record.get("tree", [])}
+        except (ValueError, KeyError, TypeError):
+            tree = {}
+        current = await asyncio.to_thread(_start_times, tree)
+        trees.extend((p, pid) for p, start in tree.items() if current.get(p) == start
+                     and not (p == pid and pid in orphans))
         path.unlink(missing_ok=True)
     if orphans:
         logger.warning("ending %d agent(s) a previous server left running: pid %s", len(orphans),
                        ", ".join(map(str, orphans)))
-        await asyncio.gather(*(_end(_Orphan(pid), label=f"orphaned agent {pid}", known={}) for pid in orphans))
+    await asyncio.gather(
+        *(_end(_Orphan(pid), label=f"orphaned agent {pid}", known={}) for pid in orphans),
+        *(_end(_Orphan(pid), label=f"orphaned process {pid} of agent {agent_pid}", known={})
+          for pid, agent_pid in trees))

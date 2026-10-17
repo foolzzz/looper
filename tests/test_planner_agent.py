@@ -679,6 +679,27 @@ class TestResidentClaude:
 
         assert asyncio.run(_run()).cancelled()
 
+    def test_a_stop_cancelled_while_killing_workers_still_ends_the_message_loop(self) -> None:
+        async def _run() -> None:
+            with tempfile.TemporaryDirectory() as tmp:
+                planner = PlannerAgent(task_id="t1", runtime_root=Path(tmp))
+                loop_task = planner._loop_task = asyncio.create_task(asyncio.sleep(60))
+                killing = asyncio.Event()
+
+                async def kill_workers_slowly() -> None:
+                    killing.set()
+                    await asyncio.sleep(60)
+
+                planner._kill_running_workers = kill_workers_slowly  # type: ignore[method-assign]
+                stopper = asyncio.create_task(planner.stop())
+                await killing.wait()
+                stopper.cancel()
+                await asyncio.wait([stopper])
+                assert stopper.cancelled()
+                assert loop_task.done() and loop_task.cancelled()
+
+        asyncio.run(_run())
+
     def test_a_stopping_planners_token_files_are_gone_once_its_token_no_longer_works(self) -> None:
         """The MCP configuration that carries the Planner's token is deleted with the token, before stop() waits for
         its Claude to end: a stop the server's shutdown cuts off then leaves no token on disk."""

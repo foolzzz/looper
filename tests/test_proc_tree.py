@@ -259,6 +259,8 @@ def runtime_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """A runtime root to sweep; recording, which a sweep turns on, is off again afterwards."""
     monkeypatch.setattr(proc_tree, "_records", None)
     monkeypatch.setattr(proc_tree, "_server", None)
+    monkeypatch.setattr(proc_tree, "_recorded", {})
+    monkeypatch.setattr(proc_tree, "_ending", set())
     return tmp_path / "runtime"
 
 
@@ -279,6 +281,7 @@ def _record(root: Path, pid: int, started: str, server: tuple[int, str]) -> Path
 
 def test_the_next_start_ends_the_tree_of_an_agent_whose_server_is_gone(
     tmp_path: Path, runtime_root: Path, trees: list[dict[str, int]], caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     script = tmp_path / "agent.py"
     script.write_text(_SPAWN_TREE + "sys.stdin.read()\n", encoding="utf-8")
@@ -292,6 +295,7 @@ def test_the_next_start_ends_the_tree_of_an_agent_whose_server_is_gone(
         saved = json.loads(record.read_text())
         assert (saved["pid"], saved["started"]) == (process.pid, proc_tree._start_time(process.pid))
         _record(runtime_root, process.pid, saved["started"], _exited())
+        monkeypatch.setattr(proc_tree, "_recorded", {})  # a new server has no in-memory records of the old one's agents
         await proc_tree.sweep(runtime_root)
         await asyncio.wait_for(process.wait(), 10)
         return tree, record
@@ -334,6 +338,74 @@ def test_the_sweep_drops_records_of_agents_that_exited(runtime_root: Path) -> No
     record = _record(runtime_root, pid, started, _exited())
     asyncio.run(proc_tree.sweep(runtime_root))
     assert not record.exists()
+
+
+def test_the_sweep_leaves_a_reused_pid_in_a_recorded_tree_alone(runtime_root: Path) -> None:
+    reused = subprocess.Popen(["/bin/sleep", "30"], start_new_session=True)
+    try:
+        pid, started = _exited()
+        record = _record(runtime_root, pid, started, _exited())
+        saved = json.loads(record.read_text())
+        saved["tree"] = [{"pid": reused.pid, "started": "Thu Jan 1 00:00:00 1970"}]
+        record.write_text(json.dumps(saved))
+        asyncio.run(proc_tree.sweep(runtime_root))
+        assert _running([reused.pid], settle=0) == [reused.pid]
+        assert not record.exists()
+    finally:
+        reused.kill()
+        reused.wait()
+
+
+def test_an_end_cut_short_leaves_the_rest_of_the_tree_for_the_next_start(
+    tmp_path: Path, runtime_root: Path, trees: list[dict[str, int]], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    script = tmp_path / "agent.py"
+    script.write_text(_SPAWN_TREE + "sys.stdin.read()\n", encoding="utf-8")
+
+    async def _run() -> None:
+        await proc_tree.sweep(runtime_root)
+        process = await proc_tree.spawn(
+            sys.executable, str(script), cwd=tmp_path, stdin=asyncio.subprocess.PIPE,
+            env={**os.environ, "TRAP_TERM": "1"})
+        tree = await _started(tmp_path, trees)
+        record = runtime_root / proc_tree.RECORDS_DIR / f"{process.pid}.json"
+        monkeypatch.setattr(proc_tree, "TERM_GRACE_SEC", 10)
+        ending = asyncio.create_task(proc_tree.end(process, label="agent"))
+        try:
+            await asyncio.wait_for(process.wait(), 3)
+            await asyncio.sleep(0.05)  # the reaper has had time to forget the agent
+            assert record.exists()
+            saved = json.loads(record.read_text())
+            assert tree["child"] in {entry["pid"] for entry in saved["tree"]}
+            saved["server_pid"], saved["server_started"] = _exited()
+            record.write_text(json.dumps(saved))
+            monkeypatch.setattr(proc_tree, "TERM_GRACE_SEC", 0.5)
+            await proc_tree.sweep(runtime_root)
+            assert _running([tree["child"]], settle=3) == []
+            assert not record.exists()
+        finally:
+            ending.cancel()
+            await asyncio.gather(ending, return_exceptions=True)
+
+    asyncio.run(_run())
+
+
+def test_a_record_lists_the_tree_only_while_an_end_is_ending_it(
+    tmp_path: Path, runtime_root: Path, trees: list[dict[str, int]],
+) -> None:
+    script = tmp_path / "agent.py"
+    script.write_text(_SPAWN_TREE + "sys.stdin.read()\n", encoding="utf-8")
+
+    async def _run() -> None:
+        await proc_tree.sweep(runtime_root)
+        process = await proc_tree.spawn(sys.executable, str(script), cwd=tmp_path, stdin=asyncio.subprocess.PIPE)
+        await _started(tmp_path, trees)
+        record = runtime_root / proc_tree.RECORDS_DIR / f"{process.pid}.json"
+        assert "tree" not in json.loads(record.read_text())
+        await proc_tree.end(process, label="agent")
+        assert not record.exists()
+
+    asyncio.run(_run())
 
 
 def test_a_reaped_agents_record_is_removed(tmp_path: Path, runtime_root: Path) -> None:

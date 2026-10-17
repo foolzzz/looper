@@ -747,6 +747,9 @@ class PlannerAgent:
             cancelled = True
             raise
         finally:
+            for task in (supervise_task, loop_task):
+                if task is not None and not task.done():
+                    await cancel_and_wait(task)
             # A turn the loop was in has already killed Claude; an idle one
             # ends when its stdin closes. Never leave it running.
             await self._claude.stop(kill=cancelled)
